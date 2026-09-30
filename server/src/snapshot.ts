@@ -394,6 +394,7 @@ export class SnapshotStore extends EventEmitter {
    * v1.186.2 — set `liveFlow` on each Core pack whose flow the MQTT stream delivered within
    * STREAM_FLOW_WINDOW_MS. A field the stream has not delivered in the window keeps the polled
    * value, so a Core whose stream is silent shows exactly what it showed before this release.
+   * v1.187.0 — and `streamInputW`, the stream's own inputWatts with no fallback (DpuPack).
    */
   private annotateStreamFlow(sn: string, cur: DeviceSnapshot) {
     const proj = cur.projection;
@@ -405,6 +406,11 @@ export class SnapshotStore extends EventEmitter {
       return r && now - r.atMs <= STREAM_FLOW_WINDOW_MS ? r : null;
     };
     for (const pk of proj.packs ?? []) {
+      // v1.187.0 — the ALARM copy (DpuPack.streamInputW): the stream's own last inputWatts at
+      // any age, never the polled value. alerts.vdiffKneeChargeW judges its freshness itself,
+      // so this display window (STREAM_FLOW_WINDOW_MS) can change without moving that mute.
+      const si = m.get(`hs_yj751_bms_slave_addr.${pk.num}.inputWatts`);
+      if (si) pk.streamInputW = { w: si.v, atMs: si.atMs };
       const fi = fresh(`hs_yj751_bms_slave_addr.${pk.num}.inputWatts`);
       const fo = fresh(`hs_yj751_bms_slave_addr.${pk.num}.outputWatts`);
       if (!fi && !fo) continue;
@@ -785,7 +791,7 @@ export class SnapshotStore extends EventEmitter {
     this.rawBySn.set(sn, raw);
     cur.projection = projectByProduct(cur.productName, raw);
     this.hidePhantomPacks(sn, cur);
-    this.annotateStreamFlow(sn, cur); // v1.186.2 — display-only; the raw fields stay as polled
+    this.annotateStreamFlow(sn, cur); // v1.186.2 — liveFlow is display-only and the raw fields stay as polled; v1.187.0 streamInputW is the stream's own value, read by the vdiff knee
     this.applyBackupPoolGraceHold(sn, cur.projection);
     this.trackDpuErrOnset(sn, cur.projection);
     this.trackShp2SrcErrOnsets(sn, cur.projection);

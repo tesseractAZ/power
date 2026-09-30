@@ -188,8 +188,16 @@ export interface DpuPack {
   /** v1.186.2 — this pack's in/out watts as the Core's MQTT stream last delivered them, when
    *  that reading is at most STREAM_FLOW_WINDOW_MS old (snapshot.ts). DISPLAY ONLY: the cloud
    *  REST poll replays the last NON-ZERO value of each field, so at a handover to the grid it
-   *  re-injects the pre-handover discharge once a minute. The alarm path keeps the raw fields. */
+   *  re-injects the pre-handover discharge once a minute. A field the stream did not deliver in
+   *  the window falls back to the POLLED value here, so no alarm may read it; the alarm path
+   *  keeps the raw fields, and its one stream-flow consumer reads streamInputW below. */
   liveFlow?: { inputWatts: number | null; outputWatts: number | null; atMs: number };
+  /** v1.187.0 — ALARM INPUT: this pack's inputWatts exactly as the MQTT stream ITSELF last
+   *  delivered it, with its arrival time, at any age (never the polled value, never a fallback).
+   *  Its one reader, alerts.vdiffKneeChargeW (end-of-charge knee evidence for vdiff-crit), judges
+   *  freshness itself (VDIFF_KNEE_STREAM_FRESH_MS) and must fail toward NO charge evidence —
+   *  absent or old ⇒ null ⇒ the cell-spread critical keeps only its balancing grace. */
+  streamInputW?: { w: number; atMs: number };
   temp: number | null;
   cycles: number | null;
   remainTimeMin: number | null;

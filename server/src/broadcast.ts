@@ -75,7 +75,7 @@ import { callHaService, isSupervised, probeService, getEntityState, getAllStates
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
 import { renderAnnouncement, pruneRenderCache, prewarmTerminatorCache, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, type AnnouncementLevel, type RenderOptions } from './audioRenderer.js';
 import { resolveChime } from './chimeConfig.js';
-import { buildAlertMessage, buildAlertMessageEs, priorityAnnouncementPrefixEs } from './ttsService.js';
+import { buildAlertMessage, buildAlertMessageEs, priorityAnnouncementPrefixEs, pickPrimaryAlert } from './ttsService.js';
 import { getBroadcastRuntimeConfig, onBroadcastRuntimeConfigChange } from './broadcastRuntimeConfig.js';
 import { setBroadcastHealth } from './broadcastHealth.js';
 
@@ -123,6 +123,7 @@ import {
   describeFingerprint,
   isLevelEscalation,
   isRecordableRedAnnounce,
+  LEVEL_RANK,
   voicedRedFingerprint,
 } from './redReplayGate.js';
 
@@ -333,7 +334,10 @@ export function parseBroadcastTestLevel(raw: unknown): ConditionLevel | null {
 
 export function conditionFromAlerts(
   alerts: Alert[],
-): { level: ConditionLevel; crit: number; warn: number; rung: AlarmRung; criticalIds: string[]; criticalFingerprints: string[] } {
+): {
+  level: ConditionLevel; crit: number; warn: number; rung: AlarmRung; criticalIds: string[]; criticalFingerprints: string[];
+  warningFingerprints: string[];
+} {
   // v0.12.0 — drop on-screen backup-SoC alerts (id starts with 'backup-soc')
   // before counting crit/warn. Their audible is the dedicated announce() path,
   // so excluding them here keeps the condition-transition broadcast from
@@ -355,6 +359,10 @@ export function conditionFromAlerts(
   const counted = alerts.filter(
     (a) =>
       a.annunciate !== false &&
+      // v1.187.0 — `audible:false` keeps the card and the push but never raises the condition
+      // (a peer cell-spread outlier at top of charge; see Alert.audible). The broadcast tick
+      // also drops it before messageFor, so it can never be the alert that is voiced.
+      a.audible !== false &&
       !a.id.startsWith('backup-soc') &&
       !a.id.startsWith('shp2-below-reserve') &&
       !a.id.startsWith('forecast-runtime') &&
@@ -380,7 +388,11 @@ export function conditionFromAlerts(
       // v1.173.0 — and the "Telemetry stale" warning, for the same rule. It spoke a yellow
       // ~20 s after every restart (2026-09-21 18:23:31, five deploys that day: a device reads
       // stale until its first fresh reading lands) and at stale episodes. Push + card kept.
-      !a.id.startsWith('stale-'),
+      !a.id.startsWith('stale-') &&
+      // v1.187.0 — the on-peak idle-pool notice (peakGridDraw.ts) reports spend, never
+      // danger: a [Low] push and a card, and no chime. A yellow for money would be spoken
+      // in the tier a grid loss uses. (annunciate:false would drop the push too.)
+      !a.id.startsWith('peak-idle-pool'),
   );
   const criticals = counted.filter((a) => a.severity === 'critical');
   const crit = criticals.length;
@@ -404,6 +416,12 @@ export function conditionFromAlerts(
   // defect this seam exists to prevent. See redReplayGate.alertFingerprint.
   const criticalIds = criticals.map((a) => a.id).sort();
   const criticalFingerprints = criticals.map((a) => alertFingerprint(a)).sort();
+  // v1.187.0 — the same identity for the counted WARNINGS. The de-escalation dwell holds a
+  // downward move only while nothing NEW to the audible has appeared (newWarn in the tick),
+  // and the repeat-warning gate (sameWarningRepeat) never swallows a warning that was not
+  // counted when the last yellow was spoken. Fingerprints, not detail text: a warning's detail
+  // carries its live reading, which would make every tick look new.
+  const warningFingerprints = counted.filter((a) => a.severity === 'warning').map((a) => alertFingerprint(a)).sort();
 
   // v1.59.0 — the RUNG: the most severe ISA priority among the same counted pool,
   // or `clear` when nothing is raised.
@@ -420,7 +438,7 @@ export function conditionFromAlerts(
       return priorityRank(p) < priorityRank(worst as AlarmPriority) ? p : worst;
     }, priorityOf(raised[0]));
   }
-  return { level, crit, warn, rung, criticalIds, criticalFingerprints };
+  return { level, crit, warn, rung, criticalIds, criticalFingerprints, warningFingerprints };
 }
 
 // v0.58.0 — how long after boot the restart-continuation gate stays armed. Learned/
@@ -607,6 +625,27 @@ export function heldForImbalanceConfirm(
   return nowMs - onsetMs < holdMs;
 }
 
+/**
+ * v1.187.0 — the broadcast tick's pre-filter: the ONE array that feeds both conditionFromAlerts
+ * (the level) and messageFor (the words), so nothing it drops can raise the condition or be the
+ * alert that is voiced when something else raises it. In order:
+ *  - a priority silenced on the Alert Settings page (v0.11.0);
+ *  - `audible:false` (v1.187.0 — a peer cell-spread outlier at top of charge, or while its pack's
+ *    vdiff-crit is held by a bounded cell-spread mute; card and push kept);
+ *  - a cell-imbalance warning still inside its speak hold (heldForImbalanceConfirm, v1.174.0).
+ * `onsetOf` is the restart-persistent onset lookup (alertOnset.getAlertOnset in production).
+ */
+export function speakableAlerts(
+  alerts: readonly Alert[],
+  nowMs: number,
+  onsetOf: (id: string) => number | undefined,
+): Alert[] {
+  return alerts
+    .filter((a) => isPriorityEnabled(priorityOf(a)))
+    .filter((a) => a.audible !== false)
+    .filter((a) => !heldForImbalanceConfirm(a, nowMs, onsetOf(a.id)));
+}
+
 export const BOOT_YELLOW_CONFIRM_MS = 2 * 60_000;
 export function holdBootYellow(
   wouldFireYellow: boolean,
@@ -626,6 +665,92 @@ export function holdBootRed(
   windowMs = BROADCAST_BOOT_WARMUP_MS,
 ): boolean {
   return wouldFireRed && msSinceBoot < windowMs && !alreadySeen;
+}
+
+/**
+ * v1.187.0 — CONDITION DE-ESCALATION DWELL. The audible condition had no hysteresis on the way
+ * DOWN: it is re-derived from the warning count on every tick, so a warning that flips
+ * warning↔info as sibling readings land flipped the condition yellow↔green, and a green is a
+ * spoken "All clear". On 2026-09-29 one peer-voldiff episode (Core 1 pack 1, a single tracked
+ * episode 15:06-15:44) went green-then-yellow three times in ten minutes, and "All clear. All
+ * stations report normal." was spoken at 15:20:51 while that pack's spread was 58 mV and
+ * rising and its push card was still open; it went critical 18 min later. The z-score dipped
+ * only because a sibling's staggered ~3-min reading moved the median and MAD — noise, not a
+ * recovery.
+ *
+ * A move to a LOWER level now commits only once the condition has stood at or below it for
+ * CONDITION_CLEAR_DWELL_MS — the same 3 minutes the push path holds a cell-imbalance
+ * "Resolved:" (VDIFF_RESOLVE_DWELL_MS). Until then the tick does not advance prevLevel, so a
+ * flicker back up is no transition and nothing is spoken either way:
+ *   • green commits once GREEN has held the dwell (from yellow or from red) — a yellow↔green
+ *     flicker below a cleared red never speaks an all-clear;
+ *   • yellow commits (from red) once the level has been below red for the dwell.
+ * Only good news waits. A rise never does, and neither does anything NEW to the audible: a
+ * critical or warning whose fingerprint was not counted when the standing level was committed
+ * commits and speaks at once (newCrit / newWarn in the tick) — so a DIFFERENT critical that
+ * replaces the cleared one at the same count is announced, which a count alone cannot see.
+ * Pure + exported for tests.
+ */
+export const CONDITION_CLEAR_DWELL_MS = 3 * 60_000;
+export function deescalationDue(
+  observed: ConditionLevel,
+  belowRedSinceMs: number | null,
+  greenSinceMs: number | null,
+  nowMs: number,
+  dwellMs = CONDITION_CLEAR_DWELL_MS,
+): boolean {
+  if (observed === 'green') return greenSinceMs != null && nowMs - greenSinceMs >= dwellMs;
+  if (observed === 'yellow') return belowRedSinceMs != null && nowMs - belowRedSinceMs >= dwellMs;
+  return true; // red is never a de-escalation
+}
+
+/** v1.187.0 — does `current` carry an alert identity (fingerprint) that `known` — recorded when
+ *  the standing level was committed — does not? Pure + exported for tests. */
+export function hasNewIdentity(current: readonly string[], known: ReadonlySet<string>): boolean {
+  return current.some((f) => !known.has(f));
+}
+
+/**
+ * v1.187.0 — the REPEAT-WARNING storm gate. The identical-message gate compares the whole
+ * spoken text, and a warning's text carries its live reading ("spread is 58 mV … peer z-score
+ * 7.9"), so it never matched a repeat of one alert: on 2026-09-29 the same Core 1 pack 1
+ * warning was freshly rendered and spoken at 15:16, 15:21 and 15:26, each time the 2-minute
+ * same-level gap had lapsed. A repeating yellow is now recognised by a STABLE identity: the
+ * fingerprint of the alert it names aloud (pickPrimaryAlert — id + title + fault, as
+ * redReplayGate uses), its rung, and the set of counted warnings.
+ *
+ * Suppressed only when ALL hold: the last condition yellow that reached the speakers named the
+ * same alert at the same rung; every warning counted now was counted then (a warning nobody has
+ * heard about is never swallowed behind one they have); it was less than
+ * SAME_WARNING_REPEAT_GAP_MS ago; and no condition green or red has been put on the speakers
+ * since (the memory is dropped at that dispatch, in runBroadcastAttempt). Once an all-clear has
+ * been spoken the warning is news again — suppressing it would leave "All clear" as the last
+ * word while the warning stands. Pure + exported for tests.
+ */
+export const SAME_WARNING_REPEAT_GAP_MS = 30 * 60_000;
+export interface VoicedWarning { voicedFp: string; rung: AlarmRung; warnFps: readonly string[]; atMs: number }
+export function sameWarningRepeat(
+  current: { voicedFp: string | null; rung: AlarmRung; warnFps: readonly string[] },
+  last: VoicedWarning | null,
+  nowMs: number,
+  gapMs = SAME_WARNING_REPEAT_GAP_MS,
+): boolean {
+  if (last == null || current.voicedFp == null) return false;
+  if (nowMs < last.atMs || nowMs - last.atMs >= gapMs) return false;
+  if (current.voicedFp !== last.voicedFp || current.rung !== last.rung) return false;
+  return current.warnFps.every((f) => last.warnFps.includes(f));
+}
+
+/**
+ * v1.187.0 — a storm-gate suppression is not a broadcast. runBroadcastAttempt answers one with
+ * ok:false and a lone `suppressed: …` error before anything is rendered or dispatched, and the
+ * callers stamped that as the last broadcast with outcome 'partial': on 2026-09-29
+ * /api/broadcast/status reported a 15:41:10 green 'partial' while the last words actually
+ * spoken were the 15:38 red. A suppression is now recorded apart (lastSuppressed*). Pure +
+ * exported for tests.
+ */
+export function isStormSuppression(result: { errors: readonly string[] }): boolean {
+  return result.errors.length > 0 && result.errors.every((e) => e.startsWith('suppressed:'));
 }
 
 /* ─── monitor ─────────────────────────────────────────────────────── */
@@ -703,6 +828,13 @@ export interface BroadcastStatus {
    *  /api/broadcast/status. Escalations always bypass the gate, so a genuinely new
    *  critical is never counted here. */
   stormSuppressedCount: number;
+  /** v1.187.0 — the last storm-gate suppression, recorded APART from the last broadcast: a
+   *  suppression renders and dispatches nothing, so it no longer becomes lastBroadcastAt /
+   *  lastLevel / lastOutcome ('partial' there means a delivery that partly failed). */
+  lastSuppressedAt: number | null;
+  lastSuppressedLevel: ConditionLevel | null;
+  lastSuppressedKind: BroadcastKind | null;
+  lastSuppressedReason: string | null;
   /** v0.84.0 — audible-delivery health. `reachable`: true / false(confirmed) /
    *  null(unprobed or N/A). `usableTargets`: configured speakers currently not
    *  `unavailable`. `reason`: why it's unreachable. Feeds the operator self-alert
@@ -898,6 +1030,11 @@ export function startBroadcastMonitor(
   const offRuntimeConfig = onBroadcastRuntimeConfigChange(() => { cfg = loadBroadcastConfig(); });
   let prevLevel: ConditionLevel | null = null;
   let prevCrit = 0;
+  // v1.187.0 — WHICH criticals and warnings were counted when the standing level was committed
+  // (adoptLevel). newCrit / newWarn compare against these: the count alone could not see a
+  // different critical replacing a cleared one at the same count.
+  let prevCritFps: ReadonlySet<string> = new Set();
+  let prevWarnFps: ReadonlySet<string> = new Set();
   let firstTick = true;
   let stopped = false;
   let lastBroadcastAt: number | null = null;
@@ -920,6 +1057,11 @@ export function startBroadcastMonitor(
   let conditionLevel: ConditionLevel | null = null;
   let conditionSpoken = false;
   let conditionAt: number | null = null;
+  // v1.187.0 — the last storm-gate suppression (see BroadcastStatus.lastSuppressedAt).
+  let lastSuppressedAt: number | null = null;
+  let lastSuppressedLevel: ConditionLevel | null = null;
+  let lastSuppressedKind: BroadcastKind | null = null;
+  let lastSuppressedReason: string | null = null;
 
   // v0.15.18 — the last-broadcast summary survives restarts. Before this,
   // every deploy blanked lastBroadcastAt/lastOutcome/lastSpokenMessage, so
@@ -933,6 +1075,7 @@ export function startBroadcastMonitor(
         JSON.stringify({
           lastBroadcastAt, lastLevel, lastOutcome, lastErrors, lastSpokenMessage, lastRender,
           lastBroadcastKind, conditionLevel, conditionSpoken, conditionAt, // v1.186.0
+          lastSuppressedAt, lastSuppressedLevel, lastSuppressedKind, lastSuppressedReason, // v1.187.0
         }),
       );
     } catch { /* best-effort */ }
@@ -944,6 +1087,7 @@ export function startBroadcastMonitor(
       lastErrors: string[]; lastSpokenMessage: string; lastRender: BroadcastStatus['lastRender'];
       lastBroadcastKind: BroadcastStatus['lastBroadcastKind'];
       conditionLevel: unknown; conditionSpoken: unknown; conditionAt: unknown;
+      lastSuppressedAt: unknown; lastSuppressedLevel: unknown; lastSuppressedKind: unknown; lastSuppressedReason: unknown;
     }>;
     lastBroadcastAt = s.lastBroadcastAt ?? null;
     lastLevel = s.lastLevel ?? null;
@@ -957,6 +1101,13 @@ export function startBroadcastMonitor(
     conditionLevel = cl === 'green' || cl === 'yellow' || cl === 'red' ? cl : null;
     conditionSpoken = s.conditionSpoken === true;
     conditionAt = typeof s.conditionAt === 'number' ? s.conditionAt : null;
+    // v1.187.0 — the suppression record (additive; absent in files written before v1.187.0).
+    lastSuppressedAt = typeof s.lastSuppressedAt === 'number' ? s.lastSuppressedAt : null;
+    const sl = s.lastSuppressedLevel;
+    lastSuppressedLevel = sl === 'green' || sl === 'yellow' || sl === 'red' ? sl : null;
+    const sk = s.lastSuppressedKind;
+    lastSuppressedKind = sk === 'condition' || sk === 'dedicated' || sk === 'test' ? sk : null;
+    lastSuppressedReason = typeof s.lastSuppressedReason === 'string' ? s.lastSuppressedReason : null;
   } catch { /* first boot / no prior state */ }
   // v0.58.0 — restart-continuation baseline (used only to suppress a re-spoken
   // YELLOW/GREEN advisory; criticals are never suppressed — see isRestartContinuation).
@@ -980,15 +1131,40 @@ export function startBroadcastMonitor(
    * announced before it, and a red that cleared and re-raised inside the 30-min
    * gap must klaxon. Every path that adopts a level goes through here so no
    * future branch can adopt green and leave stale evidence behind.
+   * v1.187.0 (review) — the de-escalation dwell delays a green COMMIT by up to 3 min, so the
+   * tick also destroys the evidence when green is first OBSERVED under a held de-escalation
+   * (see the hold branch): a restart inside the dwell must not keep evidence that a committed
+   * green would have destroyed.
    *
    * ★★★ `firstTick` deliberately does NOT use this. The very first observation
    * after a restart usually sees an EMPTY alert store (green) purely because
    * telemetry has not populated yet — that is not an all-clear, and wiping the
    * state on it would turn this whole gate into a no-op on every boot.
    */
-  const adoptLevel = (l: ConditionLevel, c: number, heard = false): void => {
+  const adoptLevel = (
+    l: ConditionLevel,
+    c: number,
+    // v1.187.0 — REQUIRED: the fingerprints counted at this commit. A caller that omitted them
+    // would commit an empty set, and every standing critical would read as new next tick.
+    ids: { crit: readonly string[]; warn: readonly string[] },
+    heard = false,
+  ): void => {
+    // v1.187.0 (review) — while the committed level STAYS red, the committed criticals ACCUMULATE
+    // instead of being replaced. Replaced, a standing critical whose fingerprint alternates (one
+    // dpu-err / shp2-src-err id whose fault code flips between two values) read as "new" on every
+    // flip and re-sounded the klaxon each time the 2-min same-level gap lapsed; the identical-
+    // message gate could not see it, because the two texts alternate. Accumulated, each distinct
+    // critical is announced once per red episode, and a fingerprint never counted in it (the
+    // replacement-at-the-same-count case) still reads as new. Any commit of a lower level ends the
+    // episode and starts the set afresh. Computed before prevLevel is overwritten.
+    prevCritFps = l === 'red' && prevLevel === 'red' ? new Set([...prevCritFps, ...ids.crit]) : new Set(ids.crit);
     prevLevel = l;
     prevCrit = c;
+    prevWarnFps = new Set(ids.warn);
+    // v1.187.0 — a commit ends any held de-escalation, and supersedes a storm-gated condition that
+    // was waiting to be re-presented: whatever the condition is now, it is decided afresh.
+    deescalationHold = null;
+    deferredCondition = null;
     if (clearsRedReplayEvidence(l)) redReplayGate.noteConditionGreen();
     // v1.186.0 — every adoption refreshes the condition record, SILENT ones included (quiet
     // hours, the all-clear speech gate, a storm-gated or disabled transition): the next boot's
@@ -1142,6 +1318,18 @@ export function startBroadcastMonitor(
   let lastConditionPlayedAt = 0;
   let lastConditionPlayedLevel: ConditionLevel | null = null;
   let stormSuppressedCount = 0;
+  // v1.187.0 — the last condition yellow that reached the speakers (sameWarningRepeat). Set by
+  // the tick on a delivered yellow; dropped the moment a condition green or red passes the
+  // storm gates on its way to the speakers.
+  let lastVoicedWarning: VoicedWarning | null = null;
+  /** v1.187.0 — record a storm-gate suppression apart from the last broadcast. */
+  const noteSuppression = (level: ConditionLevel, kind: BroadcastKind, reason: string): void => {
+    lastSuppressedAt = Date.now();
+    lastSuppressedLevel = level;
+    lastSuppressedKind = kind;
+    lastSuppressedReason = reason;
+    persistStatus();
+  };
 
   const supervised = isSupervised();
   if (!supervised) {
@@ -1563,6 +1751,7 @@ export function startBroadcastMonitor(
       if (!escalation) {
         if (message != null && message === lastPlayedMessage && since < SAME_MESSAGE_GAP_MS) {
           stormSuppressedCount += 1;
+          noteSuppression(level, kind, 'identical message within gap'); // v1.187.0
           log(`broadcast: ${level} suppressed — identical message played ${Math.round(since / 1000)}s ago (storm gate)`);
           return { ok: false, errors: ['suppressed: identical message within gap'] };
         }
@@ -1572,11 +1761,19 @@ export function startBroadcastMonitor(
         const sinceCondition = Date.now() - lastConditionPlayedAt;
         if (lastConditionPlayedAt > 0 && sinceCondition < SAME_LEVEL_GAP_MS && !isLevelEscalation(lastConditionPlayedLevel, level)) {
           stormSuppressedCount += 1;
+          noteSuppression(level, kind, 'same-or-lower level within gap'); // v1.187.0
           log(`broadcast: ${level} suppressed — last ${lastConditionPlayedLevel} condition broadcast played ${Math.round(sinceCondition / 1000)}s ago (storm gate)`);
           return { ok: false, errors: ['suppressed: same-or-lower level within gap'] };
         }
       }
     }
+
+    // v1.187.0 — past the storm gates a condition green or red is on its way to the speakers
+    // (the SIP side-channel is dispatched before the Music Assistant pre-flight, so it can be
+    // heard even when MA defers). From here the house may have heard something newer than the
+    // last yellow, so the repeat-warning gate forgets it: the next yellow is spoken. Dropped on
+    // the attempt, not on verified delivery — an unknown outcome errs toward speaking.
+    if (kind === 'condition' && level !== 'yellow') lastVoicedWarning = null;
 
     const errors: string[] = [];
     /** v1.122.0 — a dispatch whose delivery is UNKNOWN (MA timeout). */
@@ -2038,6 +2235,156 @@ export function startBroadcastMonitor(
   let warmupYellowLogged = false;
   /** v1.186.0 — the post-warm-up condition-record reconciliation has run (once per boot). */
   let conditionReconciled = false;
+  /** v1.187.0 — the de-escalation dwell's clocks (deescalationDue): since when the observed
+   *  condition has been continuously below red, and continuously green. They run every tick. */
+  let belowRedSinceMs: number | null = null;
+  let greenSinceMs: number | null = null;
+  /** v1.187.0 — a downward move being held, for the once-per-episode log lines. `heard` is the
+   *  condition record's heard flag when the hold began (see the hold branch in the tick). */
+  let deescalationHold: { from: ConditionLevel; sinceMs: number; heard: boolean } | null = null;
+  /**
+   * v1.187.0 — a condition transition the same-level storm gate refused, waiting to be
+   * re-presented. Nothing ever retried one: the tick had already committed the level, so the
+   * gate's refusal was final. On 2026-09-29 15:41:10 the green that followed the 15:38 red was
+   * refused 67 s after the red ended, and nothing was spoken again — the last words in the house
+   * were a critical that had cleared. It is now re-presented ONCE, when the gap expires, through
+   * the tick's own gates (still the same level, broadcasts enabled, the all-clear speech gate,
+   * minimum severity, quiet hours). Any newer commit supersedes it (adoptLevel), and a
+   * re-present never arms another. Two kinds are deferred:
+   *   • a DE-ESCALATION (a level below lastConditionPlayedLevel) — `fresh` is null: the level
+   *     itself is the news (the last words must not stay a condition that has cleared);
+   *   • v1.187.0 (review) — a SAME-level transition that carried something NEW to the audible
+   *     (a new warning inside a held yellow→green, a different critical while red): `fresh` lists
+   *     the identities that were new at that commit, and the re-present is spoken only while one
+   *     of them is still counted. Before, such a warning was refused and — being recorded in
+   *     prevWarnFps — every later flicker of it was absorbed by the dwell, so it was never voiced.
+   * `waitLogged`: the one "waits" log line while a lower level stands its dwell.
+   */
+  let deferredCondition: {
+    level: ConditionLevel; dueAtMs: number; fresh: readonly string[] | null; waitLogged: boolean;
+  } | null = null;
+
+  /**
+   * v1.187.0 — end a held de-escalation that did NOT commit: the level is back up. When it is back
+   * at the committed level with nothing new (`restoreHeard`), the heard flag the hold demoted is
+   * restored — the household heard this level and nothing else has been committed since, so a
+   * flicker the dwell absorbed does not cost the v0.58.0 restart continuation its baseline.
+   */
+  const endDeescalationHold = (level: ConditionLevel, how: string, restoreHeard: boolean): void => {
+    const h = deescalationHold;
+    if (h == null) return;
+    deescalationHold = null;
+    log(`broadcast: held de-escalation from ${h.from} abandoned after ${Math.round((Date.now() - h.sinceMs) / 1000)} s — the condition is ${level}${how}`);
+    if (restoreHeard && h.heard && conditionLevel === h.from && !conditionSpoken) {
+      conditionSpoken = true;
+      persistStatus();
+    }
+  };
+
+  /**
+   * v1.187.0 — speak a condition the tick has committed: the transition itself, or the one
+   * re-present of a storm-gated condition. Both take the repeat-warning gate, the same status
+   * record and the same red-replay bookkeeping. `mayDefer` is false on the re-present, so a
+   * re-present that is refused again is not re-armed (bounded: one). `ids.fresh`: the counted
+   * identities at this level that were NOT counted at the previous commit (empty on a re-present).
+   */
+  const speakCondition = async (
+    level: ConditionLevel,
+    rung: AlarmRung,
+    alerts: Alert[],
+    ids: {
+      voicedFingerprint: string | null; criticalFingerprints: string[]; warningFingerprints: string[];
+      fresh: readonly string[];
+    },
+    mayDefer: boolean,
+  ): Promise<void> => {
+    const { voicedFingerprint, criticalFingerprints } = ids;
+    // v1.187.0 — the repeat-warning gate (sameWarningRepeat), on the identity of what would be
+    // SAID: pickPrimaryAlert is the one alert buildAlertMessage names.
+    const named = level === 'yellow' ? pickPrimaryAlert(alerts, 'yellow') : null;
+    const warning = level === 'yellow'
+      ? { voicedFp: named == null ? null : alertFingerprint(named), rung, warnFps: ids.warningFingerprints }
+      : null;
+    if (warning != null && sameWarningRepeat(warning, lastVoicedWarning, Date.now())) {
+      stormSuppressedCount += 1;
+      noteSuppression(level, 'condition', 'same warning already voiced');
+      log(`broadcast: yellow suppressed — the same warning (${describeFingerprint(warning.voicedFp ?? '')}) was voiced ${Math.round((Date.now() - (lastVoicedWarning?.atMs ?? 0)) / 1000)}s ago and no green or red has been voiced since (storm gate)`);
+      return;
+    }
+    const message = messageFor(level, alerts);
+    const messageEs = messageEsFor(level, alerts); // v0.62.0 — Spanish second pass
+    const result = await runBroadcast(level, rung, message, false, messageEs, false, 'condition');
+    const doneAt = Date.now();
+    // v1.187.0 — a storm-gate suppression rendered and dispatched nothing: it is recorded apart
+    // (noteSuppression, in the gate) and does not become the last broadcast.
+    if (!isStormSuppression(result)) {
+      lastBroadcastAt = doneAt;
+      lastLevel = level; lastBroadcastKind = 'condition';
+      lastOutcome = result.ok ? 'success' : 'partial';
+      lastErrors = result.errors;
+    }
+    // v1.64.0 — record WHICH critical was actually SPOKEN and WHEN, so the next
+    // boot's replay gate has evidence. Only on a VERIFIED-successful dispatch,
+    // mirroring the bootBaselineLevel rule: a partial/failed broadcast means the
+    // operator may not have heard it, and un-heard is indistinguishable from
+    // never-said — it must not buy 30 minutes of silence. Every other red path
+    // (deferred retry, spoken retry, the dedicated SoC/runway announcers)
+    // deliberately does NOT record: not recording only ever costs one extra
+    // klaxon, which is the safe direction.
+    //
+    // ★★★ `voicedFingerprint` and NOT the whole critical set: this broadcast
+    // named exactly ONE alert aloud (pickPrimaryAlert's choice). Filing the
+    // others as "announced" would let a critical nobody ever heard be muted on
+    // the next boot. criticalFingerprints rides along as context only — the gate
+    // uses it solely to REQUIRE more announcements (something new appeared),
+    // never to justify one less.
+    // v1.122.0 — VERIFIED, not merely ok. A timed-out dispatch returns ok:true
+    // (so it is not retried) but verified:false, because "delivery UNKNOWN" is
+    // exactly the state in which nobody may have heard it. Granting it
+    // verification credit would let one unlucky timeout suppress a standing
+    // critical's klaxon replay — and on this plant standing faults keep the same
+    // fingerprint for weeks. The intent is stated verbatim a few lines above:
+    // "a partial/failed broadcast means the operator may not have heard it, and
+    // un-heard is indistinguishable from never-said".
+    const deliveryVerified = result.ok && result.verified !== false;
+    if (isRecordableRedAnnounce(level, deliveryVerified) && voicedFingerprint != null) {
+      redReplayGate.noteRedAnnounced({ voicedFingerprint, activeFingerprints: criticalFingerprints, nowMs: doneAt });
+    } else if (deliveryVerified && level !== 'red') {
+      // A verified yellow/green played AFTER a recorded red: the next red is an
+      // ESCALATION over it and must never be suppressed. Demote the recorded
+      // level so the carve-out sees it (green additionally wipes the state when
+      // adoptLevel commits it — this covers the yellow case).
+      redReplayGate.notePlayedBelowRed(level);
+    }
+    // v1.187.0 — a yellow that reached the speakers (verified or delivery-unknown) is what the
+    // repeat-warning gate remembers. A failed or chime-only yellow is not: it was not heard.
+    if (warning != null && warning.voicedFp != null && result.ok) {
+      lastVoicedWarning = { voicedFp: warning.voicedFp, rung, warnFps: [...warning.warnFps], atMs: doneAt };
+    }
+    // v1.45.0 — a render failure (chime-only fallback or full skip) earns ONE
+    // spoken retry after the stall window.
+    noteSpokenRenderFailure(level, rung, result);
+    // v1.187.0 — a transition refused by the same-level gap is re-presented once when the gap
+    // expires (see deferredCondition): a DE-ESCALATION always, and — v1.187.0 (review) — a
+    // same-level one that carried something new (`ids.fresh`). A same-level refusal with nothing
+    // new is left as it was (the household heard this level moments ago); so is the identical-
+    // message gate's (the last words were these words).
+    if (
+      mayDefer
+      && result.errors[0] === 'suppressed: same-or-lower level within gap'
+      && lastConditionPlayedLevel != null
+    ) {
+      const lower = LEVEL_RANK[level] < LEVEL_RANK[lastConditionPlayedLevel];
+      if (lower || ids.fresh.length > 0) {
+        deferredCondition = {
+          level, dueAtMs: lastConditionPlayedAt + SAME_LEVEL_GAP_MS, fresh: lower ? null : [...ids.fresh], waitLogged: false,
+        };
+        const what = lower ? '' : ` and what was new to it (${ids.fresh.map(describeFingerprint).join('; ')}) is still counted`;
+        log(`broadcast: ${level} will be re-presented once the storm gate's ${Math.round(SAME_LEVEL_GAP_MS / 1000)} s gap expires (in ${Math.max(0, Math.round((deferredCondition.dueAtMs - doneAt) / 1000))} s), if the condition is still ${level}${what}`);
+      }
+    }
+  };
+
   const tick = async () => {
     if (stopped) return;
     cfg = loadBroadcastConfig();
@@ -2051,16 +2398,24 @@ export function startBroadcastMonitor(
     // conditionFromAlerts and messageFor, is what keeps a 6-minute excursion from both
     // raising the condition and being voiced; it stays on the card and in the push.
     const tickNow = Date.now();
-    const alerts = ((store.get().alerts ?? []) as Alert[])
-      .filter((a) => isPriorityEnabled(priorityOf(a)))
-      .filter((a) => !heldForImbalanceConfirm(a, tickNow, getAlertOnset(a.id)));
-    const { level, crit, rung, criticalIds, criticalFingerprints } = conditionFromAlerts(alerts);
+    // v1.187.0 — and an audible:false alert, for the same reason. The chain is speakableAlerts,
+    // pure and exported so the array both consumers see is pinned by behavioural tests.
+    const alerts = speakableAlerts((store.get().alerts ?? []) as Alert[], tickNow, getAlertOnset);
+    const { level, crit, rung, criticalIds, criticalFingerprints, warningFingerprints } = conditionFromAlerts(alerts);
     // v1.64.0 — the fingerprint of the ONE critical this tick would actually SAY
     // OUT LOUD. buildAlertMessage voices pickPrimaryAlert's choice and nothing
     // else, so that choice — computed from the SAME `alerts` array messageFor()
     // will be handed — is what the replay gate must compare. Null when nothing
     // would be named, which the gate treats as "cannot prove sameness" ⇒ announce.
     const voicedFingerprint = voicedRedFingerprint(level, alerts);
+    // v1.187.0 — what a commit on this tick records (adoptLevel → newCrit / newWarn).
+    const ids = { crit: criticalFingerprints, warn: warningFingerprints };
+    // v1.187.0 — the de-escalation dwell's clocks run on EVERY tick, whatever else the tick
+    // does, so "has stood for 3 minutes" means 3 minutes of observations, not of commits.
+    if (level === 'red') belowRedSinceMs = null;
+    else if (belowRedSinceMs == null) belowRedSinceMs = tickNow;
+    if (level !== 'green') greenSinceMs = null;
+    else if (greenSinceMs == null) greenSinceMs = tickNow;
     if (firstTick) {
       firstTick = false;
       // ★ NOT adoptLevel(): a boot-time green is almost always "the alert store
@@ -2132,13 +2487,116 @@ export function startBroadcastMonitor(
       }
       log(`broadcast: spoken retry dropped — level moved ${want} → ${level} or gated`);
     }
-    const transitioned = level !== prevLevel;
-    const newCrit = level === 'red' && crit > prevCrit;
+    // v1.187.0 — the ONE re-present of a transition the same-level storm gate refused (see
+    // deferredCondition). Due once the gap has expired; spoken only if the condition is still
+    // that level, what was new to it (a same-level deferral's `fresh`) is still counted, and the
+    // tick's own gates for it still pass — the all-clear speech gate, the minimum severity, quiet
+    // hours (a red breaks through them only as the tick's own red does). A HIGHER level drops it:
+    // that is a transition the code below announces.
+    // v1.187.0 (review) — a LOWER level does NOT drop it. A lower level is either being held by
+    // the de-escalation dwell or committing on this very tick; dropping the deferral there lost a
+    // warning nobody had heard whenever the lower level failed to stand the full dwell — the
+    // level returned to the deferred one, a flicker the dwell absorbs, so no transition spoke it,
+    // and the last words stayed a critical that had cleared. It waits: the lower level's commit
+    // supersedes it (adoptLevel), and a return to the deferred level re-presents it on that tick.
+    if (deferredCondition != null && !tickInFlight && Date.now() >= deferredCondition.dueAtMs) {
+      const held = deferredCondition;
+      if (LEVEL_RANK[level] < LEVEL_RANK[held.level]) {
+        if (!held.waitLogged) {
+          held.waitLogged = true;
+          log(`broadcast: the storm-gated ${held.level} waits — the condition is ${level} now, standing its de-escalation dwell; re-presented if it returns to ${held.level}, superseded if ${level} commits`);
+        }
+      } else {
+        deferredCondition = null;
+        const counted = held.level === 'red' ? criticalFingerprints : warningFingerprints;
+        const notNow =
+          level !== held.level ? `the condition is ${level} now`
+          : held.fresh != null && !held.fresh.some((f) => counted.includes(f)) ? 'what was new to it is no longer counted'
+          : !cfg.enabled ? 'broadcasts are disabled'
+          : held.level === 'green' && allClearSpeechBlocked(alerts) ? 'a critical alert is still active'
+          : held.level === 'yellow' && cfg.minSeverity === 'critical' ? 'yellow is below the minimum severity'
+          : inQuiet() && !(held.level === 'red' && cfg.criticalBreakThrough) ? 'quiet hours' : null;
+        if (notNow != null) {
+          log(`broadcast: the storm-gated ${held.level} is not re-presented — ${notNow}`);
+        } else {
+          // The condition is back at the committed level: a held de-escalation below it (a lower
+          // level that did not stand its dwell) is over.
+          endDeescalationHold(level, ' again — the storm-gated condition is re-presented', true);
+          tickInFlight = true;
+          try {
+            log(`broadcast: re-presenting the ${held.level} the storm gate refused — the gap has expired and the condition is still ${held.level}`);
+            await speakCondition(held.level, rung, alerts, { voicedFingerprint, criticalFingerprints, warningFingerprints, fresh: [] }, false);
+          } finally {
+            tickInFlight = false;
+          }
+          return;
+        }
+      }
+    }
+    // v1.187.0 — prevLevel is set by the first tick above, so it is never null here.
+    const committed: ConditionLevel = prevLevel ?? 'green';
+    const downward = LEVEL_RANK[level] < LEVEL_RANK[committed];
+    // v1.187.0 — NEW criticals by IDENTITY as well as by count. The count alone missed a
+    // different critical replacing a cleared one at the same count — and with the de-escalation
+    // dwell holding prevLevel at red while a cleared critical is confirmed, that is exactly the
+    // case a count-keyed newCrit would silence. The count term stays: it can only add alarms.
+    const newCrit = level === 'red' && (crit > prevCrit || hasNewIdentity(criticalFingerprints, prevCritFps));
+    // v1.187.0 — and a NEW warning while a de-escalation is held (a yellow below a held red, or a
+    // yellow returning within a held yellow→green) is a new condition, spoken at once exactly as
+    // it was before the dwell existed. A warning that was counted at the last commit is the
+    // flicker the dwell absorbs.
+    const newWarn = level === 'yellow' && (downward || deescalationHold != null)
+      && hasNewIdentity(warningFingerprints, prevWarnFps);
+    // v1.187.0 (review) — the identities at this level that were NOT counted at the last commit,
+    // read before adoptLevel records the new set. A same-level storm-gate refusal of a transition
+    // carrying any of them is re-presented when the gap expires (see deferredCondition).
+    const fresh = level === 'red' ? criticalFingerprints.filter((f) => !prevCritFps.has(f))
+      : level === 'yellow' ? warningFingerprints.filter((f) => !prevWarnFps.has(f))
+      : [];
+    const transitioned = level !== prevLevel || newWarn;
     // v0.87.0 — clear the boot phantom-red latch whenever the level is not red
     // (phantom cleared or genuine de-escalation), so a later red in the warm-up
     // window is re-confirmed across a tick rather than fast-tracked.
     if (level !== 'red') warmupRedSeen = false;
     if (level !== 'yellow') { warmupYellowSinceMs = null; warmupYellowLogged = false; }
+    // v1.187.0 — the de-escalation dwell (deescalationDue). A downward move is held — prevLevel
+    // NOT advanced, nothing adopted or spoken — until the lower level has stood for
+    // CONDITION_CLEAR_DWELL_MS. A flicker back up inside it is then no transition at all.
+    if (downward && !newWarn && !deescalationDue(level, belowRedSinceMs, greenSinceMs, Date.now())) {
+      if (deescalationHold == null) {
+        deescalationHold = { from: committed, sinceMs: Date.now(), heard: conditionSpoken };
+        // v1.187.0 (review) — the condition record (the next boot's restart baseline) follows
+        // the COMMITTED level, and the committed level is no longer what the house observes. A
+        // restart inside the dwell would otherwise boot on "red, heard" and swallow a standing
+        // yellow as a continuation of it. Demoted to unheard for the hold — which only ever
+        // makes a restart speak more — and restored if the level comes back (endDeescalationHold).
+        if (conditionSpoken) {
+          conditionSpoken = false;
+          persistStatus();
+        }
+        log(`broadcast: ${committed} → ${level} held — a lower condition is committed only after it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s (flicker guard); nothing is spoken meanwhile`);
+      }
+      // v1.187.0 (review) — GREEN observed under a held level destroys the red-replay evidence
+      // NOW, not when the green commits. The evidence is read only at boot: kept through the hold,
+      // a restart inside it booted on it (the boot green is joined silently and never wipes), and
+      // the same critical re-raising inside the warm-up was muted as an "already announced
+      // standing fault" where a committed green would have made it a new event. Clearing early
+      // costs at most one extra klaxon after a restart — the direction redReplayGate names safe.
+      // In-session flicker absorption runs on prevLevel / prevCritFps and is unaffected.
+      if (level === 'green' && redReplayGate.state() != null) {
+        redReplayGate.noteConditionGreen();
+        log(`broadcast: green observed under a held ${committed} — the red-replay evidence is cleared now (a restart inside the dwell must treat the next red as new)`);
+      }
+      return;
+    }
+    // A hold that ends with the level back up is over. With a NEW warning it is not cleared here:
+    // that transition may itself wait (the boot yellow hold, a broadcast in flight), and it must
+    // still read as new on the next tick — adoptLevel clears the hold when it commits.
+    if (!downward && !newWarn && deescalationHold != null) {
+      const back = level === deescalationHold.from && !newCrit;
+      const how = newCrit ? ' with a new critical' : back ? ' again (flicker absorbed, nothing spoken)' : '';
+      endDeescalationHold(level, how, back);
+    }
     // v0.58.0 — within the post-restart warm-up window, a condition that was
     // already active (and successfully broadcast) before the restart re-appears as
     // a "rise" once the analytics/learned alerts re-warm. Don't re-speak it aloud;
@@ -2146,7 +2604,7 @@ export function startBroadcastMonitor(
     // (e.g. yellow→red across the restart) still passes through and broadcasts.
     if (transitioned && isRestartContinuation(bootBaselineLevel, level, Date.now() - bootMs)) {
       log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)`);
-      adoptLevel(level, crit, true); // v1.186.0 — heard before the restart (the baseline says so)
+      adoptLevel(level, crit, ids, true); // v1.186.0 — heard before the restart (the baseline says so)
       return;
     }
     if (!transitioned && !newCrit) return;
@@ -2190,7 +2648,7 @@ export function startBroadcastMonitor(
     // immediately at any age. See redReplayGate.ts.
     if (redReplayGate.shouldSuppress({ observed: level, voicedFingerprint, activeFingerprints: criticalFingerprints, msSinceBoot: Date.now() - bootMs, nowMs: Date.now() })) {
       log(`broadcast: red suppressed — this standing fault was already announced, and nothing about it has changed (${voicedFingerprint ? describeFingerprint(voicedFingerprint) : '?'}; active: ${criticalIds.join(', ')})`);
-      adoptLevel(level, crit, true); // v1.186.0 — a verified announcement of it is on record
+      adoptLevel(level, crit, ids, true); // v1.186.0 — a verified announcement of it is on record
       return;
     }
     // v0.97.0 (re-audit #2) — check in-flight BEFORE committing prevLevel/prevCrit.
@@ -2212,7 +2670,7 @@ export function startBroadcastMonitor(
     // evidence whether or not the all-clear is ultimately SPOKEN (disabled,
     // quiet hours, or the critical-still-active gate below all return after this
     // point — and in every one of them the condition genuinely reached green).
-    adoptLevel(level, crit);
+    adoptLevel(level, crit, ids);
     if (!cfg.enabled) return;
     // v1.17.0 (engine-review F14 follow-up) — never SPEAK an all-clear while a
     // critical-severity alert is active, even one excluded from the ambient
@@ -2239,51 +2697,11 @@ export function startBroadcastMonitor(
     }
     tickInFlight = true;
     try {
-      log(`broadcast: condition transition → ${level}${newCrit ? ' (new crit)' : ''}, ${cfg.targets.length} target(s)`);
+      log(`broadcast: condition transition → ${level}${newCrit ? ' (new crit)' : newWarn ? ' (new warning)' : ''}, ${cfg.targets.length} target(s)`);
       pendingSpokenRetry = null; // a fresh transition supersedes any queued retry
-      const message = messageFor(level, alerts);
-      const messageEs = messageEsFor(level, alerts); // v0.62.0 — Spanish second pass
-      const result = await runBroadcast(level, rung, message, false, messageEs, false, 'condition');
-      lastBroadcastAt = Date.now();
-      lastLevel = level; lastBroadcastKind = 'condition';
-      lastOutcome = result.ok ? 'success' : 'partial';
-      lastErrors = result.errors;
-      // v1.64.0 — record WHICH critical was actually SPOKEN and WHEN, so the next
-      // boot's replay gate has evidence. Only on a VERIFIED-successful dispatch,
-      // mirroring the bootBaselineLevel rule: a partial/failed broadcast means the
-      // operator may not have heard it, and un-heard is indistinguishable from
-      // never-said — it must not buy 30 minutes of silence. Every other red path
-      // (deferred retry, spoken retry, the dedicated SoC/runway announcers)
-      // deliberately does NOT record: not recording only ever costs one extra
-      // klaxon, which is the safe direction.
-      //
-      // ★★★ `voicedFingerprint` and NOT the whole critical set: this broadcast
-      // named exactly ONE alert aloud (pickPrimaryAlert's choice). Filing the
-      // others as "announced" would let a critical nobody ever heard be muted on
-      // the next boot. criticalFingerprints rides along as context only — the gate
-      // uses it solely to REQUIRE more announcements (something new appeared),
-      // never to justify one less.
-      // v1.122.0 — VERIFIED, not merely ok. A timed-out dispatch returns ok:true
-      // (so it is not retried) but verified:false, because "delivery UNKNOWN" is
-      // exactly the state in which nobody may have heard it. Granting it
-      // verification credit would let one unlucky timeout suppress a standing
-      // critical's klaxon replay — and on this plant standing faults keep the same
-      // fingerprint for weeks. The intent is stated verbatim a few lines above:
-      // "a partial/failed broadcast means the operator may not have heard it, and
-      // un-heard is indistinguishable from never-said".
-      const deliveryVerified = result.ok && result.verified !== false;
-      if (isRecordableRedAnnounce(level, deliveryVerified) && voicedFingerprint != null) {
-        redReplayGate.noteRedAnnounced({ voicedFingerprint, activeFingerprints: criticalFingerprints, nowMs: lastBroadcastAt });
-      } else if (deliveryVerified && level !== 'red') {
-        // A verified yellow/green played AFTER a recorded red: the next red is an
-        // ESCALATION over it and must never be suppressed. Demote the recorded
-        // level so the carve-out sees it (green additionally wipes the state via
-        // adoptLevel above — this covers the yellow case).
-        redReplayGate.notePlayedBelowRed(level);
-      }
-      // v1.45.0 — a render failure (chime-only fallback or full skip) earns ONE
-      // spoken retry after the stall window.
-      noteSpokenRenderFailure(level, rung, result);
+      // v1.187.0 — the message, the storm gates, the status record and the red-replay
+      // bookkeeping live in speakCondition, shared with the storm-gated re-present.
+      await speakCondition(level, rung, alerts, { voicedFingerprint, criticalFingerprints, warningFingerprints, fresh }, true);
     } finally {
       tickInFlight = false;
     }
@@ -2504,10 +2922,14 @@ export function startBroadcastMonitor(
         }
         const level = klaxonLevelForPriority(priority);
         const r = await runBroadcast(level, priority, message, opts?.consentNotice === true, messageEs);
-        lastBroadcastAt = Date.now();
-        lastLevel = level; lastBroadcastKind = 'dedicated';
-        lastOutcome = r.ok ? 'success' : 'partial';
-        lastErrors = r.errors;
+        // v1.187.0 — a storm-gated announcement is recorded apart (noteSuppression, in the gate):
+        // nothing was rendered or played, so it is not the last broadcast.
+        if (!isStormSuppression(r)) {
+          lastBroadcastAt = Date.now();
+          lastLevel = level; lastBroadcastKind = 'dedicated';
+          lastOutcome = r.ok ? 'success' : 'partial';
+          lastErrors = r.errors;
+        }
         // v1.48.0 — dedicated-path alarms (SoC ladder / runway) earn the same
         // one-shot spoken retry as condition broadcasts, replaying THIS message.
         noteSpokenRenderFailure(level, priority, r, message, messageEs);
@@ -2545,6 +2967,11 @@ export function startBroadcastMonitor(
       testCooldownRemainingMs: Math.max(0, lastTestAt + TEST_COOLDOWN_MS - Date.now()),
       lastSpokenMessage,
       stormSuppressedCount,
+      // v1.187.0 — the last storm-gate suppression, apart from the last broadcast.
+      lastSuppressedAt,
+      lastSuppressedLevel,
+      lastSuppressedKind,
+      lastSuppressedReason,
       // v0.84.0 — audible-delivery health (feeds the operator self-alert + sensor).
       audibleReachable,
       audibleUsableTargets,

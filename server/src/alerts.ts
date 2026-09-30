@@ -33,7 +33,9 @@ export function resetOnScreenSocBandForTesting(): void {
 const heldVdiffWarnKeys = new Map<string, string | null>();
 export function resetVdiffWarnHoldForTesting(): void {
   heldVdiffWarnKeys.clear();
+  vdiffKneeByKey.clear(); // v1.187.0 — the end-of-charge knee state is per-pack vdiff state too
 }
+import { VOL_DIFF_CRIT_MV, VOL_DIFF_PLATEAU_SOC_PCT, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, vdiffCritMvFor, topOfChargeQuietSpread } from './cellSpread.js';
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, housePoolFallbackSoc, shp2Panels, findShp2, secondaryPanels, panelMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import { mpptProducing } from './mppt.js';
@@ -135,6 +137,7 @@ export interface PackLatchSignature {
  * (alertMonitor.ts) so the two can never drift apart.
  *
  *  - a CRITICAL Thermal alert: an overheating pack must page from anywhere.
+ *  - `cell-ovp-*` (v1.187.0): a cell at the overvoltage line, likewise.
  *  - `pack-defective-*`: a confirmed BMS protection latch with an identified
  *    deviant cell. Muting this is how the defective warranty pack went silent
  *    while its healthy replacement pushed [High] to the operator's phone.
@@ -161,6 +164,9 @@ export function isNeverMutedAlert(
   // unsound. Anything that could mute it is, by construction, one of the
   // mechanisms it is warning about.
   if (a.id === 'shp2-multi-panel') return true;
+  // v1.187.0 — a cell at the overvoltage line pages from anywhere, like an overheating pack:
+  // a bench chassis on a charger is exactly where nothing else is watching it.
+  if (a.id.startsWith('cell-ovp-')) return true;
   return a.id.startsWith('pack-defective-');
 }
 
@@ -289,7 +295,38 @@ export interface Alert {
    * alertMonitor's rising-edge router (push, above the quiet-hours digest queue).
    */
   annunciate?: boolean;
+  /**
+   * v1.187.0 — audible-only gate. `false` = the alert stays on the card AND still pushes, but
+   * never raises or voices the broadcast condition (broadcast.conditionFromAlerts and the
+   * broadcast tick's speech filter). Narrower than `annunciate:false`, which drops the push too.
+   * Used for a peer cell-spread outlier at top of charge (analytics.computeLearnedAlerts), and
+   * for one whose pack's vdiff-crit is held by a bounded cell-spread mute
+   * (alertMonitor.quietPeerSpreadUnderHeldCritical).
+   */
+  audible?: boolean;
+  /**
+   * v1.187.0 — which bounded cell-spread mute holds a `vdiff-crit-*` non-annunciating this tick.
+   * alertMonitor names it in the "held non-annunciating" log line, which blamed every silent
+   * critical on a bench spare or off-panel Core (2026-09-29: all three were the balancing mute
+   * on home Cores), and quiets the same pack's peer cell-spread outlier while it is set.
+   */
+  mutedBy?: VdiffCritMuteReason;
+  /**
+   * v1.187.0 — WHY `annunciate` is false, in words, stamped at the site that muted it
+   * (MUTE_REASON_* below, the self-baseline's own reasons, the monitor's spare/off-panel gate).
+   * DIAGNOSTIC ONLY: it names the policy in the silent-critical log line. Nothing may read it to
+   * decide a mute — `annunciate` alone is the gate (test/muteReasonLog pins that).
+   */
+  muteReason?: string;
 }
+
+/** v1.187.0 — muteReason wordings shared by the alert producers and the monitor. */
+export const MUTE_REASON_BALANCING = 'the BMS is balancing the cells';
+export const MUTE_REASON_PLATEAU = 'expected top-of-charge cell spread';
+export const MUTE_REASON_BENCH_SPARE = 'bench spare';
+export const MUTE_REASON_OFF_PANEL = 'off-panel Core — not on the panel roster';
+/** v1.187.0 review — the telemetry-blind alert held while its remediation runs (blindRemediation.ts). */
+export const MUTE_REASON_REMEDIATION = 'held for remediation (remediate-first)';
 
 const cToF = (c: number) => c * 1.8 + 32;
 
@@ -351,19 +388,204 @@ const VOL_DIFF_WARN_MV = 20;
 // (90 mV on-plateau) spread is instantaneous by design (v0.29 handles its
 // transients via the balancing/plateau annunciate gates).
 const VOL_DIFF_WARN_RISE_MV = 24;
-const VOL_DIFF_CRIT_MV = 50;
-// v0.58.0 — on the LFP top-of-charge plateau (high SoC) cell spread transiently
-// balloons even with the BMS idle (balanceState=0), so the static 50 mV crit
-// chimed an audible klaxon repeatedly at the top of charge (live: 14 red
-// broadcasts in two top-of-charge bursts while the resting spread was a healthy
-// 2-5 mV). Above the plateau SoC, relax the critical threshold and keep a benign
-// excursion VISIBLE-but-silent (a debounced, auto-silenceable warning) — exactly
-// as the balancing gate does. A genuinely large spread (>= the relaxed ceiling)
-// still goes critical + audible. Env-tunable.
-const VOL_DIFF_PLATEAU_SOC_PCT = Number(process.env.VOL_DIFF_PLATEAU_SOC_PCT ?? 85);
-// v1.45.0 — above this SoC, WARN-band spread (24-49 mV) is annunciate:false.
-const VOL_DIFF_PLATEAU_QUIET_SOC_PCT = Number(process.env.VOL_DIFF_PLATEAU_QUIET_SOC_PCT ?? 95);
-const VOL_DIFF_PLATEAU_CRIT_MV = Number(process.env.VOL_DIFF_PLATEAU_CRIT_MV ?? 90);
+// VOL_DIFF_CRIT_MV and the v0.58.0 / v1.45.0 plateau lines (VOL_DIFF_PLATEAU_*) live in
+// cellSpread.ts since v1.187.0, so the peer-outlier rule reads the same definitions.
+
+/*
+ * v1.187.0 — THE END-OF-CHARGE KNEE. On 2026-09-29 two healthy packs at 100% sounded the
+ * 72-second critical klaxon and pushed [Critical] (Core 5 pack 3 at 104 mV, Core 1 pack 1 at
+ * 93 mV). At or above the plateau critical line the only mute was the INSTANTANEOUS balancing
+ * flag, and the BMS stops balancing about a minute after the pack stops charging — while the
+ * spread is still at its peak. It then fell below 90 mV within 2-3 minutes (104 → 67, 93 → 67)
+ * and to 3-4 mV at rest. The v0.29.0 premise, "a genuine sustained imbalance persists past
+ * balancing", fails at the end of charge: balancing stops BECAUSE charging stopped.
+ *
+ * The grace below is bounded on every side, because the same shape with a slow relaxation is
+ * a real fault class (2026-08-22/23, Core 3 packs 1, 2 and 4: 110-138 mV that fell only 3-9%
+ * in the first 3 minutes after charge and stood at or above 90 mV for 9-51 minutes):
+ *  - evidence: it opens only on top-of-charge ACTIVITY seen on a pack at
+ *    >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT whose spread had reached VOL_DIFF_WARN_MV — never on
+ *    the max cell alone (a runaway-high cell on a mid-SoC pack is the signature of a
+ *    low-capacity cell, and stays immediate). The two kinds of activity are NOT equal:
+ *      · BALANCING is the observed benign mechanism (every benign reading at or above 90 mV
+ *        in the recorder — 07-28 and 09-29 ×3 — had balancing on), so the relaxation window
+ *        runs VDIFF_KNEE_RELAX_MS from the last balancing tick;
+ *      · CHARGE INPUT alone has no benign precedent at the line (charge-only peaks: 84 mV on
+ *        09-25 at 551 W, 77 mV on 07-23; the one charge-only reading at or above 90 mV in
+ *        history is the 08-22/23 Core 3 pack 4 fault). It holds a critical for at most
+ *        VDIFF_KNEE_RELAX_MS measured from the FIRST crossing (critSinceMs), never from the
+ *        last charge tick — a steady trickle must not keep refreshing its own mute — and it
+ *        counts only as the stream delivered it (vdiffKneeChargeW), never the REST replay;
+ *  - fail-to-relax: VDIFF_KNEE_RELAX_MS after the last balancing tick, a spread still at or
+ *    above the critical line annunciates;
+ *  - duration: VDIFF_KNEE_MAX_MUTE_MS after the spread first reached the critical line, it
+ *    annunciates even while the BMS is still balancing (the balancing mute was unbounded);
+ *  - ceiling: VOL_DIFF_KNEE_HARD_MV annunciates at once, at any SoC, balancing or not;
+ *  - and the direct hazard — a cell running toward overvoltage — has its own never-muted
+ *    critical (CELL_OVP_CRIT_MV).
+ * Deliberately NOT env-tunable: these bound a mute, and a mistyped bound would widen it.
+ */
+/** Unconditional ceiling for every cell-spread mute (balancing, plateau, end-of-charge).
+ *  Benign top-of-charge peaks in the recorder (every pack, 2026-07-02 → 09-29): 86-90 mV on
+ *  07-23, 07-28, 09-18 and 09-25; 104 mV on 09-29. A leading cell at the highest observed max
+ *  (3.533 V) over the lowest top-of-charge min (~3.38 V) bounds a benign spread near 150. */
+export const VOL_DIFF_KNEE_HARD_MV = 150;
+/** How long a plateau-critical spread may stay silent after the last BALANCING tick, and the
+ *  longest charge input alone may hold it from its first crossing. The BMS publishes cell
+ *  voltages every ~180 s, so this window always holds a reading taken at least 2 minutes after
+ *  balancing stopped. Every benign spread at or above 90 mV (07-28, 09-29 ×3) was back under
+ *  it within 2.7 minutes of the last balancing (104 → 67, 93 → 67, 101 → 86 → 60, 90 → 30);
+ *  the slow Core 3 packs of 08-22/23 still read 110-134 mV then. */
+export const VDIFF_KNEE_RELAX_MS = 5 * 60_000;
+/** The longest a plateau-critical spread may stay silent at all, measured from the tick it
+ *  first reached the critical line. Longest benign run at or above 90 mV: 9 minutes (Core 1
+ *  pack 1, 2026-09-29 15:31:57 → 15:40:58); twice that. */
+export const VDIFF_KNEE_MAX_MUTE_MS = 20 * 60_000;
+/** Pack charge input that counts as top-of-charge activity. Observed knee charging: 101-1301 W. */
+export const VDIFF_KNEE_CHARGE_W = 50;
+/** How old a stream-delivered charge reading may be and still count as knee evidence. Its own
+ *  constant, deliberately NOT snapshot.ts's STREAM_FLOW_WINDOW_MS: that one is a DISPLAY window
+ *  (liveFlow), and widening it for the card must not widen this mute. 150 s spans two missed
+ *  ~60 s full pack bursts; a stopped pack's 0 W arrives as a per-change delta well inside it. */
+export const VDIFF_KNEE_STREAM_FRESH_MS = 150_000;
+/** How long a pack's critical-line clock (critSinceMs) is carried across a reading gap (the
+ *  device offline, a missed poll). Carrying it is the fail-LOUD direction — the duration bound
+ *  keeps counting — so the cap only keeps a long-gone episode from greeting a returning pack.
+ *  The activity evidence is never carried (see computeAlerts' prune). */
+export const VDIFF_KNEE_GAP_CARRY_MS = 60 * 60_000;
+
+/** v1.187.0 — one pack's end-of-charge knee bookkeeping (see advanceVdiffKnee). */
+export interface VdiffKneeState {
+  /** The pack serial that earned this state (null when unknown). */
+  packSn: string | null;
+  /** Last top-of-charge tick with the BMS balancing, on a spread that had reached VOL_DIFF_WARN_MV. */
+  lastBalancingMs: number | null;
+  /** Last top-of-charge tick with stream-delivered charge input above VDIFF_KNEE_CHARGE_W, on a
+   *  spread that had reached VOL_DIFF_WARN_MV. Never refreshes the balancing window. */
+  lastChargeMs: number | null;
+  /** Tick the spread first reached the plateau critical line. Cleared when it falls under
+   *  VOL_DIFF_CRIT_MV or the pack leaves the plateau, or once it has stayed below the plateau
+   *  critical line for VDIFF_KNEE_RELAX_MS without a break (belowCritSinceMs) — so a spread
+   *  hovering on the line cannot restart the clock, and a relaxed one does not carry it. */
+  critSinceMs: number | null;
+  /** First tick of the current unbroken run under the plateau critical line (still at or above
+   *  VOL_DIFF_CRIT_MV) while critSinceMs stands. */
+  belowCritSinceMs: number | null;
+  /** Last tick this pack produced a reading (the VDIFF_KNEE_GAP_CARRY_MS cap). */
+  lastSeenMs: number | null;
+}
+export interface VdiffKneeObservation {
+  packSn: string | null;
+  packSoc: number | null;
+  spreadMv: number;
+  balancing: boolean;
+  /** Pack charge input, W, as the MQTT stream itself delivered it, or null (see vdiffKneeChargeW). */
+  chargeW: number | null;
+}
+/** Which bounded cell-spread mute holds a vdiff-crit (also Alert.mutedBy). */
+export type VdiffCritMuteReason = 'balancing' | 'end-of-charge' | 'charging';
+/** v1.187.0 — the operator-facing name of each bounded cell-spread mute, stamped on the muted
+ *  vdiff-crit as its muteReason (balancing shares the vdiff-warn wording). On 2026-09-29 all
+ *  three "held non-annunciating" lines were this mute on home Cores, and the line blamed a bench
+ *  spare or an off-panel Core. */
+export const CELL_SPREAD_MUTE_TEXT: Record<VdiffCritMuteReason, string> = {
+  'balancing': MUTE_REASON_BALANCING,
+  'end-of-charge': 'end-of-charge cell-spread relaxation window',
+  'charging': `top-of-charge cell spread while charging, at most ${Math.round(VDIFF_KNEE_RELAX_MS / 60_000)} minutes`,
+};
+
+/** v1.187.0 — the charge input the knee reads: the pack's inputWatts as the MQTT stream ITSELF
+ *  delivered it (DpuPack.streamInputW), at most VDIFF_KNEE_STREAM_FRESH_MS old — else null, no
+ *  charge evidence, and the critical keeps only the balancing evidence (fail loud). NEVER the
+ *  polled value: the cloud REST poll returns each pack's last NON-ZERO inputWatts (v1.186.2,
+ *  snapshot.ts), and on 2026-07-28 (Core 2 pack 2) the recorded input alternated 0 / 564 W for
+ *  two minutes after the stream said the pack had stopped charging. Nor liveFlow, which falls
+ *  back per field to that polled value when only the output was stream-fresh. */
+export function vdiffKneeChargeW(pk: Pick<DpuProjection['packs'][number], 'streamInputW'>, nowMs: number): number | null {
+  const s = pk.streamInputW;
+  if (s == null || !Number.isFinite(s.w) || !Number.isFinite(s.atMs)) return null;
+  return nowMs - s.atMs <= VDIFF_KNEE_STREAM_FRESH_MS ? s.w : null;
+}
+
+/** v1.187.0 — advance one pack's knee state by one tick. Pure; the caller owns the map. */
+export function advanceVdiffKnee(
+  prev: VdiffKneeState | undefined,
+  obs: VdiffKneeObservation,
+  nowMs: number,
+): VdiffKneeState {
+  // A state earned by a DIFFERENT pack (swap / renumber) is dropped, as for the warn hold. A
+  // missing serial is never evidence of a change.
+  const sameHw = prev != null && !(prev.packSn != null && obs.packSn != null && prev.packSn !== obs.packSn);
+  const s: VdiffKneeState = sameHw
+    ? { ...prev, packSn: obs.packSn ?? prev.packSn, lastSeenMs: nowMs }
+    : { packSn: obs.packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: null, belowCritSinceMs: null, lastSeenMs: nowMs };
+  const topOfCharge = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT;
+  const onPlateau = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_SOC_PCT;
+  const kneeSpread = obs.spreadMv >= VOL_DIFF_WARN_MV;
+  if (!topOfCharge) {
+    s.lastBalancingMs = null;
+    s.lastChargeMs = null;
+  } else if (kneeSpread) {
+    if (obs.balancing) s.lastBalancingMs = nowMs;
+    if ((obs.chargeW ?? 0) > VDIFF_KNEE_CHARGE_W) s.lastChargeMs = nowMs;
+  }
+  if (!onPlateau || obs.spreadMv < VOL_DIFF_CRIT_MV) {
+    s.critSinceMs = null;
+    s.belowCritSinceMs = null;
+  } else if (obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) {
+    s.critSinceMs ??= nowMs;
+    s.belowCritSinceMs = null;
+  } else if (s.critSinceMs != null) {
+    // Under the plateau line but still at or above VOL_DIFF_CRIT_MV: the episode ends only
+    // after an unbroken VDIFF_KNEE_RELAX_MS here, so one sub-line reading cannot reset it.
+    s.belowCritSinceMs ??= nowMs;
+    if (nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {
+      s.critSinceMs = null;
+      s.belowCritSinceMs = null;
+    }
+  }
+  return s;
+}
+
+/**
+ * v1.187.0 — why a vdiff-crit is held non-annunciating this tick, or null when it must
+ * annunciate. Order matters: the ceiling and the duration bound come FIRST, so neither the
+ * balancing mute nor the end-of-charge grace can outlast them. Off the plateau only the
+ * balancing mute (v0.29.0) applies, now under the ceiling.
+ */
+export function vdiffCritMute(
+  s: VdiffKneeState,
+  obs: VdiffKneeObservation,
+  nowMs: number,
+): VdiffCritMuteReason | null {
+  if (obs.spreadMv >= VOL_DIFF_KNEE_HARD_MV) return null;
+  if (s.critSinceMs != null && nowMs - s.critSinceMs >= VDIFF_KNEE_MAX_MUTE_MS) return null;
+  if (obs.balancing) return 'balancing';
+  const topOfCharge = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT;
+  if (!topOfCharge) return null;
+  if (s.lastBalancingMs != null && nowMs - s.lastBalancingMs < VDIFF_KNEE_RELAX_MS) return 'end-of-charge';
+  // Charge input alone: recent, AND inside VDIFF_KNEE_RELAX_MS of the first crossing.
+  if (s.lastChargeMs != null && nowMs - s.lastChargeMs < VDIFF_KNEE_RELAX_MS
+    && s.critSinceMs != null && nowMs - s.critSinceMs < VDIFF_KNEE_RELAX_MS) return 'charging';
+  return null;
+}
+
+/* v1.187.0 — knee state per `${sn}-${packNum}`: the same single-call-site module singleton as
+ * heldVdiffWarnKeys. A pack with no reading this cycle loses its activity evidence (re-earned
+ * from fresh readings) but keeps its critical-line clock for VDIFF_KNEE_GAP_CARRY_MS. */
+const vdiffKneeByKey = new Map<string, VdiffKneeState>();
+
+/*
+ * v1.187.0 — CELL OVERVOLTAGE. Nothing alarmed on the one top-of-charge hazard that matters:
+ * a cell running toward its overvoltage limit (no alert read maxCellVoltageMv). LFP cells are
+ * rated to ~3.65 V; the highest cell this fleet has reported is 3.533 V (Core 2 pack 5,
+ * 2026-09-18), and 3.532 V before that (2026-07-23), across every pack since 2026-07-02.
+ * 3.600 V sits 67 mV above the observed maximum and 50 mV below the rated limit. A reading at
+ * or above CELL_OVP_IMPLAUSIBLE_MV is not a measurement (65535 is the BMS's uint16 "unknown"
+ * sentinel; none was ever recorded) and raises nothing — null over fabrication.
+ */
+export const CELL_OVP_CRIT_MV = 3600;
+export const CELL_OVP_IMPLAUSIBLE_MV = 5000;
 const SOH_WARN_PCT = 85;
 const SOH_CRIT_PCT = 75;
 const PACK_SOC_LOW_PCT = 10;
@@ -862,7 +1084,7 @@ export function computeAlerts(
           : `${d.deviceName} is flagged offline by EcoFlow's /device/list. ${conn?.mqttCount && conn.mqttCount > 0 ? `We previously received ${conn.mqttCount} MQTT message(s) this session; last data ${fmtAge(now - lastDataAt)} ago via ${lastSource.toUpperCase()}.` : 'No telemetry received this session.'}${hint}`,
         coreNum,
         facts,
-        ...(spare ? { annunciate: false } : {}),
+        ...(spare ? { annunciate: false, muteReason: MUTE_REASON_BENCH_SPARE } : {}),
       });
     } else if (d.projection && d.lastUpdated && now - d.lastUpdated > STALE_MS) {
       const conn = connectivity?.perDevice.get(d.sn);
@@ -884,7 +1106,7 @@ export function computeAlerts(
           { label: 'Last source', value: conn?.lastSource?.toUpperCase() ?? 'unknown' },
           { label: 'MQTT msg count', value: conn?.mqttCount != null ? String(conn.mqttCount) : '—' },
         ],
-        ...(spare ? { annunciate: false } : {}),
+        ...(spare ? { annunciate: false, muteReason: MUTE_REASON_BENCH_SPARE } : {}),
       });
     }
   }
@@ -1031,7 +1253,7 @@ export function computeAlerts(
         // back to the device-projection SoC (pack soc is often null in DPU telemetry).
         const packSoc = pk.soc ?? p.soc;
         const onPlateau = packSoc != null && packSoc >= VOL_DIFF_PLATEAU_SOC_PCT;
-        const critMv = onPlateau ? VOL_DIFF_PLATEAU_CRIT_MV : VOL_DIFF_CRIT_MV;
+        const critMv = vdiffCritMvFor(packSoc);
         // A benign top-of-charge plateau excursion — a spread that WOULD have been
         // critical off-plateau (>= VOL_DIFF_CRIT_MV) but sits under the relaxed
         // plateau ceiling, with the BMS idle — stays VISIBLE but never chimes/pushes
@@ -1052,9 +1274,13 @@ export function computeAlerts(
         // diverging pack rides its spread DOWN off the plateau (the 50 mV crit
         // re-arms below 85%) and the peer/SoH engines track it independently.
         // Warn-band spread on a >= 95% pack stays VISIBLE but does not push.
-        const plateauQuietWarn = packSoc != null && packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT && pk.maxVolDiffMv < critMv;
+        // v1.187.0 — the same predicate (cellSpread.ts) now gates the peer outlier's audible.
+        const plateauQuietWarn = topOfChargeQuietSpread(packSoc, pk.maxVolDiffMv);
         const plateauNote = (plateauBenign || plateauQuietWarn) ? ' Expected top-of-charge cell spread.' : '';
-        const annun = (balancing || plateauBenign || plateauQuietWarn) ? { annunciate: false } : {};
+        // v1.187.0 — the mute carries its reason; balancing names first (the only one a critical can have).
+        const annun = (balancing || plateauBenign || plateauQuietWarn)
+          ? { annunciate: false, muteReason: balancing ? MUTE_REASON_BALANCING : MUTE_REASON_PLATEAU }
+          : {};
         // v1.21.0 (engine-review F28) — rise-side hysteresis: fire the warning
         // only at >= VOL_DIFF_WARN_RISE_MV; once fired, hold it while the spread
         // is still >= VOL_DIFF_WARN_MV. A spread descending OUT of critical
@@ -1073,6 +1299,19 @@ export function computeAlerts(
           (heldVdiffWarnKeys.has(vdiffKey) && pk.maxVolDiffMv >= VOL_DIFF_WARN_MV);
         if (warnActive) heldVdiffWarnKeys.set(vdiffKey, pk.packSn ?? heldVdiffWarnKeys.get(vdiffKey) ?? null);
         else heldVdiffWarnKeys.delete(vdiffKey);
+        // v1.187.0 — the end-of-charge knee (VDIFF_KNEE_* above). Advanced on EVERY reading, not
+        // only critical ones: the activity evidence is usually earned while the spread is still
+        // in the warn band (the BMS reports cell voltages every ~180 s, so the reading that first
+        // crosses the critical line can land after charging has already stopped).
+        const kneeObs: VdiffKneeObservation = {
+          packSn: pk.packSn ?? null,
+          packSoc: packSoc ?? null,
+          spreadMv: pk.maxVolDiffMv,
+          balancing,
+          chargeW: vdiffKneeChargeW(pk, now),
+        };
+        const knee = advanceVdiffKnee(vdiffKneeByKey.get(vdiffKey), kneeObs, now);
+        vdiffKneeByKey.set(vdiffKey, knee);
         // v1.41.0 — cell forensics: the alert carries WHICH cell deviates and by
         // how much vs the pack median and sibling packs (facts), and the critical's
         // spoken detail names the isolated cell — detection → isolation → root
@@ -1083,10 +1322,58 @@ export function computeAlerts(
         const factRows = cellFaultFacts(fx, latch);
         const facts = factRows.length ? { facts: factRows } : {};
         if (pk.maxVolDiffMv >= critMv) {
-          out.push({ id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${critMv} mV).${cellNote}${balanceNote}`, ...facts, ...annun });
+          // v1.187.0 — the critical's mute is vdiffCritMute's alone: the v0.29.0 balancing mute
+          // now sits under the VOL_DIFF_KNEE_HARD_MV ceiling and (on the plateau) the
+          // VDIFF_KNEE_MAX_MUTE_MS bound, and the end-of-charge grace joins it. The notes say
+          // which bound let it speak, so the operator hears why a top-of-charge spread matters.
+          const critMute = vdiffCritMute(knee, kneeObs, now);
+          const underCeiling = pk.maxVolDiffMv < VOL_DIFF_KNEE_HARD_MV;
+          const critAgeMs = knee.critSinceMs != null ? now - knee.critSinceMs : null;
+          const sustained = underCeiling && critAgeMs != null && critAgeMs >= VDIFF_KNEE_MAX_MUTE_MS;
+          // The evidence is non-null only at top of charge, and inside its window it mutes — so
+          // with no mute, not balancing, under both bounds and with top-of-charge activity inside
+          // the duration bound, the end-of-charge grace has lapsed.
+          const lastKneeActivityMs = Math.max(knee.lastBalancingMs ?? -Infinity, knee.lastChargeMs ?? -Infinity);
+          const failedToRelax = critMute == null && underCeiling && !sustained && !balancing
+            && now - lastKneeActivityMs < VDIFF_KNEE_MAX_MUTE_MS;
+          // "first reached", not "sustained": the clock survives dips under the line shorter than
+          // VDIFF_KNEE_RELAX_MS, so the minutes are the age of the episode, not time on the line.
+          const kneeNote = critMute === 'end-of-charge' ? ' End-of-charge cell spread, relaxing.'
+            : critMute === 'charging' ? ' Top-of-charge cell spread while charging.'
+            : sustained ? ` First reached the critical line ${Math.round(critAgeMs! / 60_000)} minutes ago.`
+            : failedToRelax ? ' Did not relax at the top of charge.'
+            : '';
+          out.push({
+            id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance',
+            detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${critMv} mV).${cellNote}${kneeNote}${balanceNote}`,
+            ...facts,
+            ...(critMute ? { annunciate: false, mutedBy: critMute, muteReason: CELL_SPREAD_MUTE_TEXT[critMute] } : {}),
+          });
         } else if (warnActive) {
           out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning fires ≥ ${VOL_DIFF_WARN_RISE_MV} mV, holds ≥ ${VOL_DIFF_WARN_MV} mV).${cellNote}${balanceNote}${plateauNote}`, ...facts, ...annun });
         }
+      }
+      // v1.187.0 — CELL OVERVOLTAGE (CELL_OVP_CRIT_MV). Computed independently of the spread
+      // rule and read by none of its gates: a cell at the overvoltage line is a hazard whether
+      // or not the BMS is balancing, the pack is at top of charge, or the Core is on the panel.
+      // isNeverMutedAlert exempts it from the bench-spare stamp below and the off-panel
+      // demotion, as it does a critical Thermal alert.
+      const maxCellMv = pk.maxCellVoltageMv;
+      if (maxCellMv != null && Number.isFinite(maxCellMv) && maxCellMv >= CELL_OVP_CRIT_MV && maxCellMv < CELL_OVP_IMPLAUSIBLE_MV) {
+        const ovpFx = packCellForensics(p.packs, pk.num);
+        const ovpSoc = pk.soc ?? p.soc;
+        out.push({
+          id: `cell-ovp-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName,
+          title: 'Cell overvoltage',
+          detail: `${tag} highest cell at ${(maxCellMv / 1000).toFixed(3)} V (critical ≥ ${(CELL_OVP_CRIT_MV / 1000).toFixed(2)} V; LFP cells are rated to about 3.65 V).`,
+          facts: [
+            { label: 'Highest cell', value: `${(maxCellMv / 1000).toFixed(3)} V` },
+            ...(pk.minCellVoltageMv != null ? [{ label: 'Lowest cell', value: `${(pk.minCellVoltageMv / 1000).toFixed(3)} V` }] : []),
+            { label: 'Critical line', value: `${(CELL_OVP_CRIT_MV / 1000).toFixed(3)} V` },
+            ...(ovpSoc != null ? [{ label: 'Pack SoC', value: `${ovpSoc}%` }] : []),
+            ...cellFaultFacts(ovpFx, null),
+          ],
+        });
       }
       // v1.101.0 — STANDING "confirmed defective pack" alert.
       //
@@ -1235,7 +1522,10 @@ export function computeAlerts(
         // broken" is true wherever the hardware happens to be wired, and muting
         // it is exactly how the 2026-08-20 severity inversion arose.
         if (isNeverMutedAlert(out[i])) continue;
-        if (out[i].annunciate !== false) out[i].annunciate = false;
+        // v1.187.0 — the spare stamp names itself, over a balancing/plateau reason: those mutes
+        // end with the condition, the spare's does not, and the log names an episode once.
+        out[i].annunciate = false;
+        out[i].muteReason = MUTE_REASON_BENCH_SPARE;
       }
     }
   }
@@ -1246,6 +1536,17 @@ export function computeAlerts(
   // peer-hit prune philosophy (a lapsed condition re-earns its gate).
   for (const k of [...heldVdiffWarnKeys.keys()]) {
     if (!seenVdiffKeys.has(k)) heldVdiffWarnKeys.delete(k);
+  }
+  // v1.187.0 — and its knee state. The activity EVIDENCE must be re-earned from fresh readings
+  // after a gap (a mute is never carried across blindness). The critical-line CLOCK is carried,
+  // bound to the pack serial by advanceVdiffKnee, for VDIFF_KNEE_GAP_CARRY_MS from the last
+  // reading: dropping it would restart the duration bound, so an offline blip or a restart
+  // every few minutes could keep a balancing-muted fault under VDIFF_KNEE_MAX_MUTE_MS forever.
+  // (A process restart still loses it: in-memory only.)
+  for (const [k, st] of [...vdiffKneeByKey]) {
+    if (seenVdiffKeys.has(k)) continue;
+    if (st.critSinceMs == null || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);
+    else vdiffKneeByKey.set(k, { ...st, lastBalancingMs: null, lastChargeMs: null, belowCritSinceMs: null });
   }
   // v1.108.0 — retire defective-pack confirmations whose pack has left the fleet.
   // v1.140.0 — but only where its absence is EVIDENCE. The evaluable set is

@@ -96,7 +96,9 @@ export function pickPrimaryAlert(alerts: Alert[], level: 'red' | 'yellow'): Aler
   // v0.16.4 — never feature a non-annunciating alert (annunciate === false, e.g.
   // an expected-offline bench spare) in the spoken message: it must not be heard
   // even when a genuine alert triggers the broadcast it would otherwise share.
-  const candidates = alerts.filter((a) => a.severity === targetSeverity && a.annunciate !== false);
+  // v1.187.0 — nor an `audible:false` one (card and push only). The broadcast tick already drops
+  // it (broadcast.speakableAlerts); this keeps any other caller from voicing it.
+  const candidates = alerts.filter((a) => a.severity === targetSeverity && a.annunciate !== false && a.audible !== false);
   if (candidates.length === 0) return null;
   const catRank: Record<string, number> = {
     Battery: 1, SHP2: 2, Solar: 3, Grid: 4, Thermal: 5, Connectivity: 6,
@@ -341,6 +343,7 @@ const ES_TITLE_BY_ID_PREFIX: ReadonlyArray<readonly [string, string]> = [
   ['soh-warn', 'Salud de batería degradada'],
   ['vdiff-crit', 'Desequilibrio de celdas'],
   ['vdiff-warn', 'Desequilibrio de celdas'],
+  ['cell-ovp', 'Sobrevoltaje de celda'], // v1.187.0
   ['soc-low', 'Batería casi vacía'],
   ['ems-volt', 'Voltaje de batería fuera del rango permitido'],
   ['dpu-imbalance', 'Baterías desequilibradas'],

@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot, type FleetSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, packSnTail } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION } from './alerts.js';
 import { broadcastHealthAlert, broadcastDegradedAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds, rateFloorIdleHeldSns } from './messageRateFloorAlert.js';
@@ -17,7 +17,7 @@ import { benchSpareSns, isOutsideHomePool, shp2ConnectedDpuSns, isExpectedOfflin
 // index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
 // on-peak starts, and the SAME fleet flow aggregation the dashboard shows.
 import { apsREvModelFromEnv } from './tariff.js';
-import { evaluatePeakDraw, peakGridDrawAlerts, setLastPeakDrawObservation } from './peakGridDraw.js';
+import { evaluatePeakDraw, peakGridDrawAlerts, setLastPeakDrawObservation, evaluateIdlePool, peakIdlePoolAlerts, type IdlePoolInputs } from './peakGridDraw.js';
 import {
   computeLearnedAlerts,
   computeBaselineAlerts,
@@ -43,7 +43,7 @@ import { familyOf } from './alertOutcomes.js';
 // v0.9.59 — persist telemetry events so rise/short-clear/long-active
 // counts survive restarts. Without this the auto-silencing rules can
 // effectively never fire on a panel that gets occasional restarts.
-import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, TELEMETRY_SCOPE_ANNUNCIATING, type FamilyMeta, type TelemetryEntry } from './alertTelemetry.js';
+import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, TELEMETRY_SCOPE_ANNUNCIATING, telemetryBasisFor, type FamilyMeta, type TelemetryEntry } from './alertTelemetry.js';
 import type { Recorder } from './recorder.js';
 import { getAnalytics, type AnalyticsClient } from './analyticsClient.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate. The internal severity
@@ -132,24 +132,105 @@ export function advanceOffPanelStreaks(
  * episode. The telemetry-blind hold is excluded: it logs its own phases
  * (blindRemediation.ts). PURE — prunes `logged` to the current set, so an alert that
  * leaves and returns is announced again.
+ *
+ * v1.187.0 — "by policy" is not always a spare or an off-panel Core. On 09-29 15:29-15:34
+ * the three lines were HOME-pool packs (Core 5 pack 3, Core 1 pack 1, Core 5 pack 1) muted
+ * by the BMS-balancing gate (alerts.ts), and the line blamed "bench spare or off-panel Core"
+ * with no device or pack. silentCriticalLine names the subject and the reason the muting
+ * site stamped (Alert.muteReason).
+ * v1.187.0 review — keyed on the id AND that reason, so a critical whose mute changes policy
+ * mid-episode (balancing → off-panel roster, or a Core re-armed on the roster while its pack
+ * still balances) is announced again with the reason now in force; a line logged once per id
+ * would go on naming the first one. Diagnostic only: the key decides a log line, nothing else.
  */
-export function silentCriticalEdges<T extends { id: string; severity: string; annunciate?: boolean }>(
+export function silentCriticalEdges<T extends { id: string; severity: string; annunciate?: boolean; muteReason?: string }>(
   logged: Set<string>,
   alerts: readonly T[],
 ): T[] {
   const current = alerts.filter((a) =>
     a.severity === 'critical' && a.annunciate === false && a.id !== TELEMETRY_BLIND_ALERT_ID);
-  const ids = new Set(current.map((a) => a.id));
-  for (const id of [...logged]) if (!ids.has(id)) logged.delete(id);
+  const keyOf = (a: T): string => `${a.id}|${a.muteReason ?? ''}`;
+  const keys = new Set(current.map(keyOf));
+  for (const k of [...logged]) if (!keys.has(k)) logged.delete(k);
   const fresh: T[] = [];
   for (const a of current) {
-    if (logged.has(a.id)) continue;
-    logged.add(a.id);
+    const k = keyOf(a);
+    if (logged.has(k)) continue;
+    logged.add(k);
     fresh.push(a);
   }
   return fresh;
 }
 const silentCriticalLogged = new Set<string>();
+
+
+/**
+ * v1.187.0 — ONE AUDIBLE OWNER PER PHYSICAL EVENT at the top of charge. The peer cell-spread
+ * outlier (`peer-voldiff-<sn>-<pk>`) speaks again once its pack's spread reaches the critical
+ * line (analytics.computeLearnedAlerts: topOfChargeQuietSpread is false there), on the premise
+ * that vdiff-crit speaks too. But vdiff-crit is exactly what the bounded cell-spread mutes
+ * (balancing, the end-of-charge grace) hold at that point, so during the knee the outlier voiced
+ * a yellow and then an all-clear in place of the suppressed red (2026-09-29 Core 1 replay:
+ * yellow 15:32:00, all-clear 15:36:20, yellow 15:37:00, all-clear 15:38:40, pack 1 at 93-101 mV
+ * against siblings at 31-46).
+ *
+ * While the same pack's `vdiff-crit-<sn>-<pk>` is held non-annunciating by one of those mutes
+ * (`mutedBy` set, `annunciate:false`), the outlier is stamped `audible:false`: the bounded
+ * critical owns the audible for the event, and both speak the moment its bounds lapse (at most
+ * VDIFF_KNEE_MAX_MUTE_MS; VOL_DIFF_KNEE_HARD_MV at once). The card and the PUSH are untouched
+ * (annunciate is never written here): v1.45.0 relies on this engine as the independent tracker.
+ * A critical muted for any OTHER reason (bench spare, off-panel) quiets nothing here. Runs on the
+ * main thread over the same tick's computeAlerts + computeLearnedAlerts output. Mutates and
+ * returns `alerts`; pure otherwise. Exported for tests.
+ */
+export function quietPeerSpreadUnderHeldCritical<T extends Alert>(alerts: T[]): T[] {
+  const held = new Map<string, VdiffCritMuteReason>();
+  for (const a of alerts) {
+    if (a.id.startsWith('vdiff-crit-') && a.mutedBy != null && a.annunciate === false) {
+      held.set(a.id.slice('vdiff-crit-'.length), a.mutedBy);
+    }
+  }
+  if (held.size === 0) return alerts;
+  for (const a of alerts) {
+    if (!a.id.startsWith('peer-voldiff-') || a.audible === false) continue;
+    const why = held.get(a.id.slice('peer-voldiff-'.length));
+    if (why == null) continue;
+    a.audible = false;
+    a.detail = `${a.detail} Not announced on the speakers while this pack's cell-imbalance critical is held (${CELL_SPREAD_MUTE_TEXT[why]}).`;
+  }
+  return alerts;
+}
+
+/**
+ * v1.187.0 — the rising-edge PUSH gate, as a predicate so its inputs are pinned by test: a push
+ * is owed unless the alert is `annunciate:false`. `Alert.audible` is deliberately NOT read — an
+ * `audible:false` alert (a peer cell-spread outlier at top of charge, or under a held
+ * vdiff-crit) stays off the speakers but still reaches the phone.
+ */
+export function risingEdgePushes(a: Pick<Alert, 'annunciate'>): boolean {
+  return a.annunciate !== false;
+}
+
+/**
+ * v1.187.0 — the reason the monitor's own gate (shouldDemoteAnnunciation over the spare +
+ * off-panel list) muted an alert: a bench spare when its id carries a muted spare's serial,
+ * otherwise the off-panel demotion. Diagnostic only. Pure + exported for tests.
+ */
+export function monitorMuteReason(alert: Pick<Alert, 'id'>, mutedSpareSns: readonly string[]): string {
+  return mutedSpareSns.some((sn) => alert.id.includes(sn)) ? MUTE_REASON_BENCH_SPARE : MUTE_REASON_OFF_PANEL;
+}
+
+/**
+ * v1.187.0 — the silent-critical log line: the title, the subject (device and pack, as the push
+ * title names them) and the reason stamped where the mute was applied. An alert muted by a
+ * site that stamps no reason says so rather than guessing one. Pure + exported for tests.
+ */
+export function silentCriticalLine(a: Pick<Alert, 'title' | 'device' | 'coreNum' | 'packNum' | 'sourcePackSn' | 'muteReason' | 'mutedBy'>): string {
+  const subject = notifyLocator(a);
+  // A bounded cell-spread mute carries its typed reason (mutedBy) when no site stamped words.
+  const reason = a.muteReason ?? (a.mutedBy != null ? CELL_SPREAD_MUTE_TEXT[a.mutedBy] : 'by policy — reason not recorded');
+  return `alerts: "${a.title}"${subject ? ` — ${subject}` : ''} is CRITICAL but held non-annunciating (${reason}) — on-screen only, never spoken or pushed`;
+}
 
 export function shouldDemoteAnnunciation(
   alert: Pick<Alert, 'id' | 'severity' | 'category' | 'annunciate'>,
@@ -160,6 +241,25 @@ export function shouldDemoteAnnunciation(
   // can never disagree about what must always be heard.
   if (isNeverMutedAlert(alert)) return false;
   return mutedSns.some((sn) => alert.id.includes(sn));
+}
+
+/**
+ * v1.187.0 review — the monitor's roster mute (bench spares + off-panel Cores), applied to one
+ * alert: demote it (shouldDemoteAnnunciation) and stamp WHICH roster policy muted it. An alert a
+ * CONDITION gate already muted (balancing, the plateau, a quiet self-baseline verdict) whose
+ * subject is on the list takes the roster reason too: those mutes end with the condition, the
+ * roster's does not — the precedence alerts.ts gives its own spare stamp. Without it an off-panel
+ * Core's pack critical raised while balancing was logged as "the BMS is balancing the cells", and
+ * nothing re-logged it once balancing stopped and the roster was the only mute left. Never-muted
+ * alerts are untouched; `annunciate` changes exactly as shouldDemoteAnnunciation says. MUTATES.
+ */
+export function applyRosterMute(a: Alert, mutedSns: readonly string[], mutedSpareSns: readonly string[]): void {
+  if (shouldDemoteAnnunciation(a, mutedSns)) {
+    a.annunciate = false;
+    a.muteReason = monitorMuteReason(a, mutedSpareSns);
+  } else if (a.annunciate === false && !isNeverMutedAlert(a) && mutedSns.some((sn) => a.id.includes(sn))) {
+    a.muteReason = monitorMuteReason(a, mutedSpareSns);
+  }
 }
 
 export const SETTLE_PUSH_DEBOUNCE_MS = 5 * 60_000;
@@ -818,6 +918,21 @@ export function autoTuneBasis(t: Pick<AlertActionStats, 'riseCount' | 'shortClea
  * evidence its info-tier counterpart needs (Rule 2 ⊂ Rule 1; Rules 3 and 4 do not read
  * the tier), so no push is ever suppressed or demoted that the old read let through.
  * Critical is never gated. Pure + exported for tests.
+ *
+ * v1.187.0 — A RESOLVE IS NEVER GATED HERE. The rules decide whether a RISE is worth a push;
+ * whether a resolve is owed was already decided by shouldSendResolve (a real delivered push, at
+ * the tier the operator saw), and the resolve is what dismisses that card — the HA drawer entry
+ * and the same-tag phone notification. On 09-29 05:00:10 three LV-MPPT clears landed in one
+ * tick: Core 1 and Core 2 were resolved, and retiring them took the family's long-active count
+ * from 3/10 to 5/10, so Rule 3 latched mid-tick and dropped Core 5's owed resolve. Its pushed
+ * "[Medium]" card was never dismissed, purely by iteration order. A family that latches after a
+ * push must not strand the card that push left; rises stay gated exactly as before. The boot
+ * orphan sweep, which sends its resolves directly, never consulted the rules.
+ * v1.187.0 review — nor, now, does either path read `annunciate` (shouldSendResolve). One
+ * difference remains, deliberately: a falling-edge resolve goes through dispatch, which honours
+ * an ISA priority the operator has turned OFF in Alert Settings since the push (the resolve is
+ * suppressed and logged, and that card stands); the orphan sweep sends from a notify-state record,
+ * which carries no priority to consult. An explicit operator setting outranks the dismissal.
  */
 export interface AutoTuneVerdict {
   action: 'pass' | 'suppress' | 'demote';
@@ -834,6 +949,7 @@ export function autoTuneDispatchVerdict(
   kind: 'new' | 'resolved',
 ): AutoTuneVerdict {
   const pass: AutoTuneVerdict = { action: 'pass', rule: null, basis: null, ratedAt: null };
+  if (kind === 'resolved') return pass; // v1.187.0 — an owed resolve carries the card's dismissal
   if (!t || alert.severity === 'critical') return pass;
   const ratedAt = moreSevere(alert.severity, t.severity);
   const probe: AlertActionStats = { ...t, severity: ratedAt };
@@ -911,6 +1027,9 @@ export interface TelemetryReplay {
   /** Pre-v1.186.0 lines not replayed, and the families they belonged to. */
   legacySkipped: number;
   legacyFamilies: Set<string>;
+  /** v1.187.0 — scoped lines of a TELEMETRY_FAMILY_BASIS family written under an earlier emitter rule. */
+  rebasedSkipped: number;
+  rebasedFamilies: Set<string>;
 }
 export function replayTelemetryEvents(
   events: readonly TelemetryEntry[],
@@ -922,14 +1041,24 @@ export function replayTelemetryEvents(
   // the id that matches the sidecar title. Everything else tracks the last event.
   const exemplarFromSidecar = new Set<string>();
   const legacyFamilies = new Set<string>();
+  const rebasedFamilies = new Set<string>();
   let replayed = 0;
   let legacySkipped = 0;
+  let rebasedSkipped = 0;
   for (const e of events) {
     // Defensive shape check — guards against schema drift.
     if (!e.familyKey || !e.alertId || !e.event) continue;
     if (e.scope !== TELEMETRY_SCOPE_ANNUNCIATING && opts.includeLegacy !== true) {
       legacySkipped++;
       legacyFamilies.add(e.familyKey);
+      continue;
+    }
+    // v1.187.0 — a family whose emitter changed what annunciates replays only the events
+    // counted under its current rule (alertTelemetry.TELEMETRY_FAMILY_BASIS).
+    const basis = telemetryBasisFor(e.familyKey);
+    if (basis != null && e.basis !== basis && opts.includeLegacy !== true) {
+      rebasedSkipped++;
+      rebasedFamilies.add(e.familyKey);
       continue;
     }
     let t = rollups.get(e.familyKey);
@@ -981,7 +1110,7 @@ export function replayTelemetryEvents(
   // Re-evaluate silencing on every family after replay finishes —
   // single pass is fine since each evaluate is O(1).
   for (const t of rollups.values()) applySilencingRules(t);
-  return { rollups, replayed, legacySkipped, legacyFamilies };
+  return { rollups, replayed, legacySkipped, legacyFamilies, rebasedSkipped, rebasedFamilies };
 }
 
 /**
@@ -1068,8 +1197,11 @@ export const DEVICE_MAP_ALERT_FEEDS: ReadonlySet<string> = new Set(['forecast', 
  */
 export const DEVICE_ALERT_ID_PREFIXES: readonly string[] = [
   'offline-', 'stale-', 'dpu-', 'mppt-', 'ems-volt-', 'soh-', 'vdiff-', 'pack-defective-', 'balancing-', 'temp-', 'soc-low-',
+  'cell-ovp-', // v1.187.0 — the pack's highest cell voltage, from the same per-pack block
   'shp2-', 'circuit-overload-', 'reserve-alarm-blind', 'backup-soc-',
   'peer-', 'peak-grid-draw', 'msg-rate-floor-',
+  // v1.187.0 — the idle-pool on-peak notice reads the house panel's projection.
+  'peak-idle-pool',
 ];
 
 /**
@@ -1131,8 +1263,31 @@ export interface LastGoodFeed<T> {
   peek(): T | null;
   /** Has this feed ever delivered a value computed on a hydrated store (v1.186.3)? */
   warm(): boolean;
-  status(): { name: string; warm: boolean; ageMs: number | null; carrying: boolean; lastError: string | null };
+  status(): { name: string; warm: boolean; ageMs: number | null; carrying: boolean; lastError: string | null; carryEpisodes: number };
 }
+
+/**
+ * v1.187.0 — WHEN A CARRY IS WORTH A LOG LINE.
+ *
+ * The 09-28/29 log (41.9 h) held 1260 alert-feed lines out of 2011 — 630 carry/fresh pairs,
+ * every one "(22 s old)" and "fresh again after 1 pass(es)". forecastAlerts, baselineAlerts,
+ * curtailmentAlerts and forecast each take longer than ALERT_FEED_BUDGET_MS whenever the worker
+ * recomputes them (every TTL), so the value is carried for exactly one tick and lands for the
+ * next: the carry path is the normal path, and a line meant for transitions read as routine.
+ * (LOG_LEVEL=debug is standing on this install, so demoting it to debug would save nothing.)
+ *
+ * A one-pass budget carry is therefore not logged. What still is:
+ *   - a FAILED read, at once (an error is never routine);
+ *   - a budget carry reaching its second consecutive pass (the worker missed a whole tick);
+ *   - a carry reaching ALERT_FEED_STUCK_WARN_PASSES, as a WARNING, once per episode (a stuck
+ *     worker: the carried alerts are that old and are not being recomputed);
+ *   - "fresh again", only for an episode whose carry was logged.
+ * The live state stays in /api/notify/status alertFeeds (`carrying`, `carryEpisodes`), so the
+ * routine carries remain countable without a line each.
+ */
+export const ALERT_FEED_CARRY_LOG_PASSES = 2;
+/** v1.187.0 — about five minutes at the 20 s tick; see ALERT_FEED_CARRY_LOG_PASSES. */
+export const ALERT_FEED_STUCK_WARN_PASSES = 15;
 
 /**
  * v1.186.0 — a worker-served alert input that never blocks the tick and never reads a
@@ -1143,7 +1298,8 @@ export interface LastGoodFeed<T> {
  * - Every returned value is a structured clone. alertMonitor stamps `annunciate` on the
  *   alert objects it receives (spare / off-panel / blind hold); a carried value must come
  *   back unstamped, or a Core re-armed on the roster would stay muted.
- * - Logs only on transitions: cold, first value, carrying, fresh again.
+ * - Logs only on transitions: cold, first value, carrying, fresh again. v1.187.0 — "carrying"
+ *   means a carry worth reporting (ALERT_FEED_CARRY_LOG_PASSES), not every one-tick budget miss.
  * - v1.186.3 — `hydrated` says whether the store is hydrated. A value whose fetch STARTED
  *   before that is carried and returned like any other (it is what exists), but it is not the
  *   feed's first delivery and does not make the feed warm: after a boot past the hydration
@@ -1156,6 +1312,8 @@ export function createLastGoodFeed<T>(
   log: (m: string) => void = () => {},
   now: () => number = Date.now,
   hydrated: () => boolean = () => true,
+  /** v1.187.0 — the stuck-feed line (ALERT_FEED_STUCK_WARN_PASSES). */
+  warn: (m: string) => void = log,
 ): LastGoodFeed<T> {
   let last: { value: T; atMs: number } | null = null;
   let inflight: Promise<boolean> | null = null;
@@ -1166,6 +1324,10 @@ export function createLastGoodFeed<T>(
   let unhydratedLogged = false;
   let carrying = false;
   let carriedPasses = 0;
+  /** v1.187.0 — this carry episode has been logged / warned about; episodes since boot. */
+  let carryLogged = false;
+  let carryWarned = false;
+  let carryEpisodes = 0;
   let coldLogged = false;
   let lastError: string | null = null;
   const clone = (v: T): T => {
@@ -1229,12 +1391,24 @@ export function createLastGoodFeed<T>(
         if (!carrying) {
           carrying = true;
           carriedPasses = 0;
-          log(`alert-feed: ${name} ${error} — carrying its last good value (${Math.round((ageMs ?? 0) / 1000)} s old); its alerts are held, not cleared`);
+          carryLogged = false;
+          carryWarned = false;
+          carryEpisodes++;
         }
         carriedPasses++;
+        const ageS = Math.round((ageMs ?? 0) / 1000);
+        // v1.187.0 — a failure at once; a budget miss from its second pass (see ALERT_FEED_CARRY_LOG_PASSES).
+        if (!carryLogged && (outcome === 'failed' || carriedPasses >= ALERT_FEED_CARRY_LOG_PASSES)) {
+          carryLogged = true;
+          log(`alert-feed: ${name} ${error} — carrying its last good value (${ageS} s old, ${carriedPasses} pass(es)); its alerts are held, not cleared`);
+        }
+        if (!carryWarned && carriedPasses >= ALERT_FEED_STUCK_WARN_PASSES) {
+          carryWarned = true;
+          warn(`alert-feed: WARNING — ${name} has carried its last good value for ${carriedPasses} passes (${ageS} s old; ${error}) — its alerts are held at that age and are not being recomputed`);
+        }
       } else if (fresh && carrying) {
         carrying = false;
-        log(`alert-feed: ${name} fresh again after ${carriedPasses} pass(es) on its last good value`);
+        if (carryLogged) log(`alert-feed: ${name} fresh again after ${carriedPasses} pass(es) on its last good value`);
       }
       return { value: last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error };
     },
@@ -1246,6 +1420,7 @@ export function createLastGoodFeed<T>(
       ageMs: last != null ? now() - last.atMs : null,
       carrying,
       lastError,
+      carryEpisodes, // v1.187.0 — every carry, logged or not
     }),
   };
 }
@@ -1485,8 +1660,22 @@ export function orphanedNotifiedIds(p: {
   return { resolve, drop, hold };
 }
 
+/**
+ * v1.187.0 review — A MUTE AFTER THE PUSH DOES NOT CANCEL THE DISMISSAL THE PUSH IS OWED.
+ * The v0.16.4 `annunciate !== false` term guarded a boot-seeded `notified` flag on a bench spare
+ * that had never pushed; since v0.80.0 the gate is `pushSent` (a delivered push, or a record that
+ * says one was delivered), which already excludes every never-pushed alert. What the term still
+ * did was strand a card the operator HAD been sent, whenever its alert was muted before it
+ * cleared: a pushed "[Medium] LV MPPT temperature unusual" re-tracked across the v1.187.0 deploy
+ * as a cooler (annunciate:false) MPPT, a pushed hot-MPPT warning that became load-explained when
+ * a night charge started, a vdiff critical pushed after balancing stopped and muted when it
+ * resumed, an on-panel push followed by an off-panel demotion. Each lost its "Resolved:" — the HA
+ * drawer entry and the same-tag phone notification stood as if active — which is the general-2
+ * harm through a different gate. The resolve is good news about a card the operator saw; it is
+ * owed on `pushSent` alone, exactly as the boot orphan sweep has always sent it.
+ */
 export function shouldSendResolve(
-  t: { pushSent?: boolean; notifiedSeverity?: Severity; notifiedEffectiveSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity' | 'annunciate'> },
+  t: { pushSent?: boolean; notifiedSeverity?: Severity; notifiedEffectiveSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity'> },
   notifyResolved: boolean,
   minSeverity: Severity,
 ): boolean {
@@ -1496,7 +1685,6 @@ export function shouldSendResolve(
   if (isOutageEventFamily(t.alert)) return false;
   return (
     t.pushSent === true &&
-    t.alert.annunciate !== false &&
     notifyResolved &&
     // v1.88.0 — the tier the operator SAW decides whether a resolve is owed:
     // a fire auto-tuned down to info ("[Low]") owes no "Resolved:" push.
@@ -1585,6 +1773,35 @@ export function deviceEvidencePositive(
 ): boolean {
   if (dev?.online === false) return false;
   return deviceEvidenceFresh(dev, nowMs, staleMs);
+}
+
+/**
+ * v1.187.0 — the on-peak idle-pool detector's inputs, read from the HOUSE panel
+ * (findShp2) of one snapshot. PURE. Extracted from the monitor tick (review) so the
+ * wiring is tested, not pinned: `fresh` is POSITIVE device evidence (fresh telemetry and
+ * not flagged offline), because setDeviceList keeps a cloud-dark panel's projection
+ * verbatim and its last channel watts would read "idle" for as long as it stays dark.
+ * No house panel ⇒ every reading null and `fresh` false (the detector's
+ * insufficient-data suppression).
+ */
+export function idlePoolInputsFrom(
+  devices: Record<string, DeviceSnapshot>,
+  gridPresent: boolean,
+  nowMs: number,
+): IdlePoolInputs {
+  const shp2 = findShp2(devices);
+  const p = shp2?.projection;
+  return {
+    nowMs,
+    gridPresent,
+    gridImportW: p?.gridWatt ?? null,
+    socPct: p?.backupBatPercent ?? null,
+    reserveSocPct: p?.strategy?.backupReserveSoc ?? null,
+    sourceWatts: p?.sourceWatts ?? null,
+    fresh: shp2 != null && deviceEvidencePositive(devices[shp2.sn], nowMs),
+    poolFullWh: p?.backupFullCapWh ?? null,
+    smartBackupMode: p?.strategy?.smartBackupMode ?? null,
+  };
 }
 
 /** The whole falling-edge freeze decision, pure. True = the alert is UNEVALUABLE
@@ -1815,7 +2032,7 @@ export interface AlertMonitor {
     /** v1.186.0 — completed evaluate passes since start. */
     evalPasses: number;
     /** v1.186.0 — each worker/NWS alert feed: warm, value age, carrying its last good value. */
-    alertFeeds: Array<{ name: string; warm: boolean; ageMs: number | null; carrying: boolean; lastError: string | null }>;
+    alertFeeds: Array<{ name: string; warm: boolean; ageMs: number | null; carrying: boolean; lastError: string | null; carryEpisodes: number }>;
   };
   /** v1.90.0 (B5) — the CURRENT live alert ids, read-only. The reconnect audit
    *  measures "offline alert resolved" against the real tracked set. */
@@ -2251,13 +2468,30 @@ export function startAlertMonitor(
     const r = replayTelemetryEvents(events, familyMeta);
     for (const [k, t] of r.rollups) telemetry.set(k, t);
     log(`alert-telemetry: replayed ${r.replayed} events across ${telemetry.size} families`);
+    // Say what the resets changed, so it can be verified from the log alone.
+    const everything = r.legacySkipped > 0 || r.rebasedSkipped > 0
+      ? replayTelemetryEvents(events, familyMeta, { includeLegacy: true }).rollups
+      : null;
+    const liftedIn = (fams: ReadonlySet<string>): string[] => everything == null ? [] : liftedAutoTuneVerdicts(
+      new Map([...everything].filter(([k]) => fams.has(k))),
+      new Map([...r.rollups].filter(([k]) => fams.has(k))),
+    );
     if (r.legacySkipped > 0) {
-      // Say what the reset changed, so it can be verified from the log alone.
-      const lifted = liftedAutoTuneVerdicts(replayTelemetryEvents(events, familyMeta, { includeLegacy: true }).rollups, r.rollups);
+      const lifted = liftedIn(r.legacyFamilies);
       log(
         `alert-telemetry: ${r.legacySkipped} pre-v1.186.0 event(s) across ${r.legacyFamilies.size} famil${r.legacyFamilies.size === 1 ? 'y' : 'ies'} not replayed — ` +
         'they pooled non-annunciating alerts (bench spares, off-panel Cores, muted packs) with the ones that push and cannot be told apart; ' +
         'auto-tune verdicts are re-earned from annunciating evidence only' +
+        (lifted.length > 0 ? `. Lifted: ${lifted.join('; ')}` : ''),
+      );
+    }
+    if (r.rebasedSkipped > 0) {
+      // v1.187.0 — the MPPT self-baseline rule change (TELEMETRY_FAMILY_BASIS).
+      const lifted = liftedIn(r.rebasedFamilies);
+      log(
+        `alert-telemetry: ${r.rebasedSkipped} event(s) of ${[...r.rebasedFamilies].sort().join(', ')} counted under an earlier emitter rule not replayed — ` +
+        'they include cooler-than-typical and load-explained MPPT episodes, which no longer annunciate; ' +
+        'auto-tune verdicts are re-earned from the current rule' +
         (lifted.length > 0 ? `. Lifted: ${lifted.join('; ')}` : ''),
       );
     }
@@ -2599,11 +2833,11 @@ export function startAlertMonitor(
       return typeof c.snapshotHydrated === 'function' ? c.snapshotHydrated() : true;
     } catch { return false; } // no client yet: its report fails anyway
   };
-  const feedForecast = createLastGoodFeed<DayForecast>('forecast', log, undefined, workerHydrated);
+  const feedForecast = createLastGoodFeed<DayForecast>('forecast', log, undefined, workerHydrated, warn);
   const feedStormPrep = createLastGoodFeed<Alert[]>('storm-prep', log);
-  const feedCurtailment = createLastGoodFeed<Alert[]>('curtailmentAlerts', log, undefined, workerHydrated);
-  const feedBaseline = createLastGoodFeed<Alert[]>('baselineAlerts', log, undefined, workerHydrated);
-  const feedForecastAlerts = createLastGoodFeed<Alert[]>('forecastAlerts', log, undefined, workerHydrated);
+  const feedCurtailment = createLastGoodFeed<Alert[]>('curtailmentAlerts', log, undefined, workerHydrated, warn);
+  const feedBaseline = createLastGoodFeed<Alert[]>('baselineAlerts', log, undefined, workerHydrated, warn);
+  const feedForecastAlerts = createLastGoodFeed<Alert[]>('forecastAlerts', log, undefined, workerHydrated, warn);
   /** v1.186.3 — every alert id seen since boot (bootRetrackDecision's first appearance). */
   const seenSinceBoot = new Set<string>();
   const alertFeeds: ReadonlyArray<LastGoodFeed<unknown>> = [feedForecast, feedStormPrep, feedCurtailment, feedBaseline, feedForecastAlerts];
@@ -2827,17 +3061,27 @@ export function startAlertMonitor(
     // messageRateFloorAlert.
     setLastPeakDrawObservation({ verdict: peakDraw, forceChargeSlots: fcSlots, atMs: Date.now() });
 
+    // v1.187.0 — on-peak grid while the house pool sits IDLE above its reserve (the panel's
+    // re-entry band after a hold; 2026-09-28: 4.27 kWh at 44.2¢ with the pool at 26% over a
+    // 16% reserve). The house panel's own readings, and only while they are live: a frozen
+    // projection reads its last channel watts forever. Advisory: warning/low, never audible.
+    const idleNowMs = Date.now();
+    const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs), apsREvModelFromEnv());
+
     // v1.186.0 — the LIVE-SNAPSHOT alarms: everything computed from the snapshot and
     // main-thread state, none of it from the worker. These publish before any wait. Split
     // in two only so the assembled list keeps its pre-v1.186.0 order (worker-served alerts
     // sat between them), which a stable sort then preserves among equal-rank alerts.
-    const liveHead: Alert[] = [
+    // v1.187.0 — quietPeerSpreadUnderHeldCritical: a pack's peer cell-spread outlier stays off
+    // the speakers while its own vdiff-crit is held by a bounded cell-spread mute (same tick).
+    const liveHead: Alert[] = quietPeerSpreadUnderHeldCritical([
       // v1.185.0 — each pool's own verdict, on a multi-panel plant only (one panel: `grid`, unchanged).
       ...computeAlerts(snap.devices, connectivity, grid,
         shp2Panels(snap.devices).sns.length > 1 ? (sn: string) => livePoolGridBackstop(snap.devices, sn) : undefined),
       ...computeLearnedAlerts(snap.devices),
       ...peakGridDrawAlerts(peakDraw, Date.now()),
-    ];
+      ...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0
+    ]);
     const liveTail: Alert[] = [
       // v0.83.0 — recorded telemetry blackouts (host power loss / add-on stop /
       // MQTT stall) surfaced as operator push alerts. Reads the recorder's durable
@@ -2887,6 +3131,9 @@ export function startAlertMonitor(
           blindNowMs, blindAlerts.some((a) => a.id === TELEMETRY_BLIND_ALERT_ID), log,
         );
         if (remediation.hold) for (const a of blindAlerts) a.annunciate = false;
+        // v1.187.0 review — the hold names itself like every other mute (diagnostic only; the
+        // silent-critical line skips this id — the hold logs its own phases).
+        if (remediation.hold) for (const a of blindAlerts) a.muteReason = MUTE_REASON_REMEDIATION;
         return blindAlerts;
       })(),
     ];
@@ -2934,6 +3181,8 @@ export function startAlertMonitor(
     // spare is wired into an SHP2 (shp2ConnectedDpuSns then includes it).
     // v1.186.0 — the mute list is computed ONCE per tick (advanceOffPanelStreaks advances
     // its streaks) and stamped on both publishes below.
+    // v1.187.0 — the spares are kept apart too, so the stamp can say WHICH policy muted it.
+    let mutedSpareSns: string[] = [];
     const muted: string[] = (() => {
       const connectedSns = shp2ConnectedDpuSns(snap.devices);
       const mutedSpares = benchSpareSns().filter((sn) => isExpectedOfflineSpare(sn, connectedSns));
@@ -2970,12 +3219,15 @@ export function startAlertMonitor(
       // genuinely off-panel, and the second panel's Cores re-arm on first sighting. One panel:
       // never disarmed, as before.
       const multiPanel = multiPanelRosterUnsound(snap.devices);
+      mutedSpareSns = multiPanel ? [] : mutedSpares;
       return multiPanel ? [] : [...new Set([...mutedSpares, ...offPanel])];
     })();
     const assemble = (workerAlerts: Alert[]): Alert[] => {
       const all = [...liveHead, ...workerAlerts, ...liveTail]
         .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
-      for (const a of all) if (shouldDemoteAnnunciation(a, muted)) a.annunciate = false;
+      // v1.187.0 — the roster mute, with its reason (diagnostic only) taking precedence over a
+      // condition gate's (applyRosterMute).
+      for (const a of all) applyRosterMute(a, muted, mutedSpareSns);
       return all;
     };
     const publish = (set: Alert[]): void => {
@@ -3009,9 +3261,8 @@ export function startAlertMonitor(
       firstRun || !rStormPrep.firstDelivery ? [] : (rStormPrep.value ?? []).map((a) => a.id),
     );
     // v1.166.0 — a CRITICAL held silent by policy must say so, or it reads as broken.
-    for (const a of silentCriticalEdges(silentCriticalLogged, alerts)) {
-      log(`alerts: "${a.title}" is CRITICAL but held non-annunciating by policy (bench spare or off-panel Core) — on-screen only, never spoken or pushed`);
-    }
+    // v1.187.0 — naming the device, the pack and the stamped reason (silentCriticalLine).
+    for (const a of silentCriticalEdges(silentCriticalLogged, alerts)) log(silentCriticalLine(a));
     publish(alerts);
     // v1.186.0 — the counts publish once this set is COMPLETE: a hydrated store with every feed
     // delivered, or the bound (publishReadiness 'alerts'). A latch: a later cold read carries.
@@ -3245,8 +3496,10 @@ export function startAlertMonitor(
       // quiet-hours split, so the morning digest queue can't leak them either.
       // The falling-edge "Resolved" path is gated separately below (a boot can
       // seed `notified:true` for an already-present alert, so the rising-edge
-      // gate alone isn't sufficient there).
-      if (a.annunciate === false) continue;
+      // gate alone isn't sufficient there). v1.187.0 review — that gate is pushSent: a
+      // resolve is owed for a push that went out, whether or not the alert is muted since.
+      // v1.187.0 — as the pure risingEdgePushes (annunciate only; `audible` is not a push gate).
+      if (!risingEdgePushes(a)) continue;
       // v0.9.58 — critical alerts bypass debounce on the notify path. A brief
       // critical condition that fires and clears in <60s would otherwise be
       // silently swallowed. Warning/info still debounce to avoid noisy
@@ -3473,6 +3726,9 @@ export function startAlertMonitor(
       // either, even if a boot seeded its `notified` flag true. The current
       // spare is info-severity (so qualifies() already returns false), but this
       // keeps the mute correct for any future warning/critical annunciate:false.
+      // v1.187.0 review — that case is now covered by pushSent alone (a boot seed never sets
+      // it), so shouldSendResolve no longer reads `annunciate`: an alert muted AFTER its push
+      // still owes the card its dismissal (see shouldSendResolve).
       // v0.80.0 — delivery-integrity: the gate is the pure shouldSendResolve()
       // (pushSent + notified-at severity; see its doc), and a FAILED resolve send
       // keeps the tracked entry (continue) so the next tick retries —
@@ -3615,6 +3871,9 @@ export function startAlertMonitor(
       }
       for (const id of resolve) {
         const rec = persistedNotified.get(id)!;
+        // v1.187.0 — no auto-tune or annunciate read here, and none on the falling edge either now
+        // (autoTuneDispatchVerdict passes every resolve; shouldSendResolve gates on pushSent). The
+        // falling edge alone still honours an operator-disabled priority (see autoTuneDispatchVerdict).
         // Forget the record FIRST, mirroring the v0.80.0 ordering: a failed resolve must
         // not leave a record behind that would eat a genuine re-fire within the 24 h TTL.
         persistedNotified.delete(id);

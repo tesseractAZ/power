@@ -116,7 +116,7 @@ test('armFromPlan: replaces a resolved (reverted) prior night', () => {
 
 // ── Apply guards (every one fail-closed) ────────────────────────────────────
 
-test('apply fires inside [windowStart − 5 min, windowStart + 30 min]', () => {
+test('apply fires inside [windowStart − APPLY_LEAD_MS, windowStart + 30 min]', () => {
   const s = armed();
   assert.equal(decideActuation(s, WINDOW.startMs - APPLY_LEAD_MS - 1, opts()).kind, 'none');
   assert.deepEqual(decideActuation(s, WINDOW.startMs - APPLY_LEAD_MS, opts()), { kind: 'apply', targetPct: 43 });
@@ -161,7 +161,7 @@ function appliedState(): NightActuationState {
   return { ...armed(), appliedAtMs: WINDOW.startMs, applyVerifiedAtMs: WINDOW.startMs + 1, priorReservePct: 10 };
 }
 
-test('revert fires at window close + 5 min with the prior value', () => {
+test('revert fires at window close + REVERT_LAG_MS with the prior value', () => {
   const s = appliedState();
   assert.equal(decideActuation(s, WINDOW.endMs + REVERT_LAG_MS - 1, opts()).kind, 'none');
   assert.deepEqual(decideActuation(s, WINDOW.endMs + REVERT_LAG_MS, opts()), { kind: 'revert', restorePct: 10 });

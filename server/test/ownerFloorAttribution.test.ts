@@ -2,9 +2,10 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ownerReserveFloorPct, setOwnerReserveFloorPct, getOwnerReserveFloorPct,
-  resetOwnerReserveFloorPct, REVERT_LAG_MS,
+  resetOwnerReserveFloorPct, LEGACY_REVERT_LAG_MS,
 } from '../src/nightChargeActuator.js';
 import { classifyChange } from '../src/settingsDrift.js';
+import { deliveredHoldSpan, ACTUATOR_TICK_MS, HOLD_DEVICE_SETTLE_MS } from '../src/nightLedgerScoring.js';
 
 /**
  * v1.115.0 — three defects the 2026-08-29 analysis found, all one theme: a
@@ -80,23 +81,36 @@ test('a non-reserve key is never own-write', () => {
 // ── the delivered-energy span ───────────────────────────────────────────────
 
 test('delivered span covers the real hold, which straddles the nominal window', () => {
-  // The 08-28 night: nominal window 23:00->00:00, actual hold 22:55:55->00:05:55.
+  // The 08-28 night: nominal window 23:00->00:00, actual hold 22:55:55->00:05:55 — the
+  // pre-v1.187.0 schedule (5 min lead, 5 min lag), which the scorer still honours for an
+  // unstamped row applied before its window (LEGACY_REVERT_LAG_MS). v1.187.0 (review): read
+  // through deliveredHoldSpan, the scorer's own function, not re-derived here.
   const windowStart = Date.UTC(2026, 7, 29, 6, 0);   // 23:00 MST
   const windowEnd = Date.UTC(2026, 7, 29, 7, 0);     // 00:00 MST
   const appliedAt = windowStart - 4 * 60_000 - 5_000; // 22:55:55
-  const holdStart = Math.min(appliedAt, windowStart);
-  const holdEnd = windowEnd + REVERT_LAG_MS;
-  assert.ok(holdStart < windowStart, 'the apply fires before the window opens');
-  assert.ok(holdEnd > windowEnd, 'the revert lands after it closes');
+  const { startMs: holdStart, endMs: holdEnd } = deliveredHoldSpan({ windowStartMs: windowStart, windowEndMs: windowEnd, appliedAtMs: appliedAt, revertedAtMs: null });
+  assert.ok(holdStart < windowStart, 'the legacy apply fired before the window opened');
+  assert.ok(holdEnd > windowEnd, 'and its revert landed after it closed');
   // The straddle is the energy the old nominal integration dropped.
-  assert.equal(holdEnd - windowEnd, REVERT_LAG_MS);
+  assert.equal(holdEnd - windowEnd, LEGACY_REVERT_LAG_MS);
   assert.ok((windowStart - holdStart) > 0);
+});
+
+test('v1.187.0 — on the current schedule the hold starts at the window and ends at the restore, plus the settle', () => {
+  const windowStart = Date.UTC(2026, 8, 29, 6, 0);
+  const windowEnd = Date.UTC(2026, 8, 29, 12, 0);
+  const appliedAt = windowStart + 28_000; // the first tick after the open
+  const unstamped = deliveredHoldSpan({ windowStartMs: windowStart, windowEndMs: windowEnd, appliedAtMs: appliedAt, revertedAtMs: null });
+  assert.equal(unstamped.startMs, windowStart);
+  assert.equal(unstamped.endMs, windowEnd + ACTUATOR_TICK_MS + HOLD_DEVICE_SETTLE_MS, 'the restore tick after the close, and the stop');
+  const stamped = deliveredHoldSpan({ windowStartMs: windowStart, windowEndMs: windowEnd, appliedAtMs: appliedAt, revertedAtMs: windowEnd + 28_000 });
+  assert.equal(stamped.endMs, windowEnd + 28_000 + HOLD_DEVICE_SETTLE_MS);
 });
 
 test('delivered span never starts LATER than the window (a late apply cannot shrink it)', () => {
   const windowStart = 1_000_000;
   const lateApply = windowStart + 60_000;
-  assert.equal(Math.min(lateApply, windowStart), windowStart);
+  assert.equal(deliveredHoldSpan({ windowStartMs: windowStart, windowEndMs: windowStart + 3_600_000, appliedAtMs: lateApply, revertedAtMs: null }).startMs, windowStart);
 });
 
 // ── v1.116.0: the planner is the THIRD sibling reading the device ───────────

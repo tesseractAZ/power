@@ -2108,8 +2108,9 @@ export const DEFAULT_COST_MAX_SOC_PCT = 90;
 
 /** v1.174.0 — minute-of-day (America/Phoenix) until which the evening job DEFERS a plan
  *  while the panel reading is stale. 22:30: an hour past the 21:30 fire (the longest
- *  stale latch measured was 22 min, 2026-09-14), and 25 min before a 23:00 window's
- *  22:55 write, so the owner keeps a cancel window. After it the plan is sized on the
+ *  stale latch measured was 22 min, 2026-09-14), and 30 min before a 23:00 window's
+ *  write (v1.187.0: at the window open; it was 22:55), so the owner keeps a cancel
+ *  window. After it the plan is sized on the
  *  last reading and says so — staleness alone never costs the night. */
 export const NIGHT_PLAN_STALE_DEFER_UNTIL_MIN = 22 * 60 + 30;
 
@@ -2385,10 +2386,14 @@ export function createNightChargeAdvisor(deps: {
  * only at/after D+1 21:00. Scoring earlier permanently freezes truncated
  * actuals into the never-pruned ledger (the pre-v1.39.0 midnight-capture
  * defect). PURE — returns null on a malformed date string.
+ *
+ * v1.187.0 — no on-peak span here any more. It was D 16:00-19:00: the afternoon
+ * BEFORE the plan, which is issued at ~D 21:30, and on every day of the week. The
+ * on-peak a plan governs follows its window and depends on the tariff calendar
+ * (weekends and holidays have none), so it is resolved from the tariff model by
+ * nightLedgerScoring.governedOnPeakSpan, not from the clock.
  */
 export function nightWindowBounds(planDate: string): {
-  onpeakStartMs: number;
-  onpeakEndMs: number;
   windowStartMs: number;
   windowEndMs: number;
   scoreSpanEndMs: number;
@@ -2400,8 +2405,6 @@ export function nightWindowBounds(planDate: string): {
   const dayStartUtc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) + 7 * HOUR_MS; // Phoenix midnight
   const scoreSpanEndMs = dayStartUtc + 45 * HOUR_MS; // D+1 21:00
   return {
-    onpeakStartMs: dayStartUtc + 16 * HOUR_MS, // D 16:00
-    onpeakEndMs: dayStartUtc + 19 * HOUR_MS,   // D 19:00
     windowStartMs: dayStartUtc + 23 * HOUR_MS, // D 23:00
     windowEndMs: dayStartUtc + 29 * HOUR_MS,   // D+1 05:00
     scoreSpanEndMs,

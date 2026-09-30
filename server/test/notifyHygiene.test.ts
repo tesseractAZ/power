@@ -138,9 +138,13 @@ test('v0.80.0 — shouldSendResolve: legacy entry without notifiedSeverity falls
   assert.equal(shouldSendResolve(legacyBelow, true, 'warning'), false);
 });
 
-test('v0.80.0 — shouldSendResolve: policy gates still hold (annunciate=false, notifyResolved=false)', () => {
+test('v0.80.0 — shouldSendResolve: policy gates still hold (notifyResolved=false); v1.187.0 — a mute after the push does not', () => {
+  // v1.187.0 review — `annunciate` is no longer read: pushSent already excludes every alert that
+  // never pushed (the v0.16.4 boot-seeded spare), and an alert muted AFTER its push still owes the
+  // card its dismissal. owedResolveAfterMute.test.ts has the cases.
   const t = { pushSent: true, notifiedSeverity: 'warning' as const, alert: a({ id: 'x-3', severity: 'warning', annunciate: false }) };
-  assert.equal(shouldSendResolve(t, true, 'warning'), false, 'annunciate=false mutes the resolve');
+  assert.equal(shouldSendResolve(t, true, 'warning'), true, 'a pushed card is dismissed even though the alert is muted now');
+  assert.equal(shouldSendResolve({ ...t, pushSent: false }, true, 'warning'), false, 'never pushed: nothing to dismiss');
   const t2 = { pushSent: true, notifiedSeverity: 'warning' as const, alert: a({ id: 'x-4', severity: 'warning' }) };
   assert.equal(shouldSendResolve(t2, false, 'warning'), false, 'notifyResolved=false mutes the resolve');
 });
