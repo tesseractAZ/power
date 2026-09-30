@@ -23,9 +23,10 @@
   second full-charge spread in one long stay at the top gets its wait too.
 - **A restart does not reset the limits.** After a restart (for example an automatic update) a
   pack whose critical alarm was already standing keeps counting from when it began, and a
-  critical that was held quiet before the restart still goes to the phone when it sounds. After
-  an outage of more than an hour, a start time from before it no longer takes the wait away from
-  the next full charge.
+  critical that was held quiet before the restart still goes to the phone when it sounds. Known
+  limit: the top-of-charge session itself is carried over a restart only when the standing
+  critical began within the last hour, so a spread that keeps crossing the critical line can be
+  held quiet for one more wait (at most 20 minutes) after a restart that lands later than that.
 - **Hard limits on every wait.** A spread of 150 mV or more sounds at once, balancing or not. A
   spread that stays at the critical line for 20 minutes at the top of charge sounds even while
   the pack is still balancing; before this release balancing could keep it quiet with no limit.
