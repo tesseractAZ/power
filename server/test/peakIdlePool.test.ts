@@ -243,9 +243,9 @@ test('★★ the monitor evaluates it on the house panel\'s readings (idlePoolIn
   assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs), apsREvModelFromEnv());'));
   assert.ok(m.includes('...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0'));
   assert.ok(m.includes("  'peak-idle-pool',\n];"), 'a device-derived family (hydration rules)');
-  // v1.187.0 (log review) — the fired day is restored at start-up and persisted on every tick.
-  assert.ok(m.includes('  restoreIdlePoolFiredDay(loadIdlePoolFiredDay(idlePoolStatePath));\n'));
-  assert.ok(m.includes('    idlePoolFiredDayOnDisk = persistIdlePoolFiredDay(idlePoolStatePath, idlePoolFiredDayOnDisk);\n'));
+  // v1.187.0 (log review) — the fired day's restore at start-up and persist on every tick are
+  // pinned behaviourally, the real monitor run twice on the same state files
+  // (peakIdlePoolRestart.test.ts).
 });
 
 /* ══ the monitor's input assembly (v1.187.0 review) ══ */

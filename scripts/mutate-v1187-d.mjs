@@ -8,7 +8,9 @@
  *
  * Log review 09-29 (lii-lx): the idle-pool notice carries audible:false (never the alert a
  * yellow names aloud), its orphan is dropped without a "Resolved:" after a restart, and the day it
- * fired is persisted so the once-per-day promise survives one.
+ * fired is persisted so the once-per-day promise survives one. Verifier round (lxi): the
+ * monitor's restore and persist are killed behaviourally — the real monitor run twice on the same
+ * state files (peakIdlePoolRestart.test.ts) — not by source-text pins.
  *
  * Review pass (v1.187.0): the scorer's assembly (on-peak query, supersede skip, cost span and
  * coverage gate, delivered-energy span, PV set-aside) and the idle-pool input assembly moved
@@ -47,6 +49,7 @@ const SUBSET = [
   'test/nightChargeWriteHoldsTheWindow.test.ts',
   'test/readinessPvSetAside.test.ts',
   'test/peakIdlePool.test.ts',
+  'test/peakIdlePoolRestart.test.ts',
   'test/ledgerScorerAssembly.test.ts',
   'test/nightChargeCloseOffFirst.test.ts',
   'test/ledgerRevertStamp.test.ts',
@@ -484,6 +487,13 @@ const MUTANTS = [
     find: '  if (day === persisted) return persisted;',
     to: '  /* MUTANT */',
     why: 'A sidecar write every 20 s for a value that changes once a day.',
+  },
+  {
+    id: 'lxi. ★★ the fired day is written where the next process does not read it',
+    file: AM,
+    find: '    idlePoolFiredDayOnDisk = persistIdlePoolFiredDay(idlePoolStatePath, idlePoolFiredDayOnDisk);\n',
+    to: "    idlePoolFiredDayOnDisk = persistIdlePoolFiredDay(`${idlePoolStatePath}.w`, idlePoolFiredDayOnDisk); /* MUTANT */\n",
+    why: 'The write and the read point at different files: the day is persisted, and a restart still pushes the notice again.',
   },
 ];
 
