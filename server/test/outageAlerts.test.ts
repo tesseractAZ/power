@@ -130,20 +130,20 @@ test('v1.4.1 — outageTracking splits the total into power outages vs cloud/tel
 test('bootSeedNotified — a restart-spanning outage present on firstRun is NOT seeded → it dispatches', () => {
   // The exact failure: the Pi lost power, the gap was recorded pre-monitor-start, so
   // it is present on tick 1 with firstRun=true and no persisted record yet.
-  assert.equal(bootSeedNotified({ alert: { id: outageAlertId(123) }, firstRun: true, alreadyNotified: false }), false);
+  assert.equal(bootSeedNotified({ alert: { id: outageAlertId(123), severity: 'warning' }, firstRun: true, alreadyNotified: false }), false);
 });
 
 test('bootSeedNotified — an outage already in the notify-state record STAYS suppressed (dedup across reboots)', () => {
-  assert.equal(bootSeedNotified({ alert: { id: outageAlertId(123) }, firstRun: true, alreadyNotified: true }), true);
+  assert.equal(bootSeedNotified({ alert: { id: outageAlertId(123), severity: 'warning' }, firstRun: true, alreadyNotified: true }), true);
 });
 
 test('bootSeedNotified — a NORMAL alert present on firstRun IS still boot-seeded (unchanged behaviour)', () => {
   // A sustained condition (a still-low battery) must NOT re-announce on every restart.
-  assert.equal(bootSeedNotified({ alert: { id: 'backup-soc-20' }, firstRun: true, alreadyNotified: false }), true);
+  assert.equal(bootSeedNotified({ alert: { id: 'backup-soc-20', severity: 'warning' }, firstRun: true, alreadyNotified: false }), true);
   // Off first-run, a brand-new normal alert is not seeded (normal rising-edge dispatch).
-  assert.equal(bootSeedNotified({ alert: { id: 'backup-soc-20' }, firstRun: false, alreadyNotified: false }), false);
+  assert.equal(bootSeedNotified({ alert: { id: 'backup-soc-20', severity: 'warning' }, firstRun: false, alreadyNotified: false }), false);
   // An outage mid-run (not firstRun) also dispatches — same as a normal alert there.
-  assert.equal(bootSeedNotified({ alert: { id: outageAlertId(9) }, firstRun: false, alreadyNotified: false }), false);
+  assert.equal(bootSeedNotified({ alert: { id: outageAlertId(9), severity: 'warning' }, firstRun: false, alreadyNotified: false }), false);
 });
 
 test('conditionFromAlerts — a system-outage does NOT raise the audible condition (event, not standing)', () => {

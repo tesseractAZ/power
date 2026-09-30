@@ -565,8 +565,19 @@ export interface NightLedgerRow {
   actual_load_kwh: number | null;
   actual_window_import_kwh: number | null; // grid_home_w 23:00–05:00
   actual_grid_to_battery_kwh: number | null; // exact night-charge attribution
-  actual_onpeak_import_kwh: number | null; // grid_home_w 16:00–19:00 M-F
+  // v1.187.0 — grid_home_w over the on-peak period the plan GOVERNS (the first on-peak
+  // run after its window closes, before the next window opens; nightLedgerScoring.ts).
+  // Rows captured earlier measured the plan day's own 16:00–19:00 with no weekday gate
+  // (onpeak_basis NULL marks them).
+  actual_onpeak_import_kwh: number | null;
   onpeak_import_occurred: number | null; // 0/1
+  /** v1.187.0 — the span actual_onpeak_import_kwh measured (NULL when none was governed). */
+  onpeak_start_ms: number | null;
+  onpeak_end_ms: number | null;
+  /** v1.187.0 — 'governed' | 'none' | 'superseded' (OnPeakBasis); NULL = not measured on
+   *  the governed basis: captured before v1.187.0 (plan-day 16:00–19:00 anchor), or a
+   *  pre-v1.39.0 row with no recorded window. A plan with no window by design is 'none'. */
+  onpeak_basis: string | null;
   actual_min_soc_pct: number | null;
   actual_min_soc_ts_ms: number | null;
   plan_traj_floor_breached: number | null; // 0/1 — scored on the SIMULATED trajectory (§3.3)
@@ -577,6 +588,10 @@ export interface NightLedgerRow {
   // minus the concurrent house pass-through), filled by the scorer.
   actuated: number | null; // 0/1
   actuation_applied_at_ms: number | null;
+  /** v1.187.0 — when the reserve restore was accepted (the actuator's revert), so the
+   *  delivered-energy span ends where the hold did (nightLedgerScoring.deliveredHoldSpan).
+   *  NULL before v1.187.0, and on a night whose restore never landed. */
+  actuation_reverted_at_ms: number | null;
   delivered_kwh: number | null;
   grid_home_coverage_frac: number | null;
   outage_during_day: number | null; // 0/1
@@ -615,11 +630,25 @@ export interface NightLedgerRow {
   load_in_band: number | null; // 0/1
   buy_err_kwh: number | null; // signed, + over-bought
   soc_min_err_pct: number | null;
+  // v1.187.0 — WRITTEN: metered grid_home_w import × the tariff's rate for each
+  // interval, over [window open, window close + 16 h) — the night's scored span. NULL
+  // on unconfirmed rates, a period with no rate, < 90% coverage, or a row superseded for
+  // its window; score_notes' "Cost:" clause says which. Rows do not tile time (weekday
+  // 21:00–23:00 and Sat 16:00 → Mon 00:00 fall in none), so a sum is not a bill.
   realized_cost_cents: number | null; // measured
+  // Still never written (DOCS §6): each needs the no-buy trajectory, which the panel's
+  // re-entry hysteresis makes unmeasurable from the recorded one.
   counterfactual_cost_cents: number | null; // flagged ESTIMATE
   realized_savings_cents: number | null; // flagged UNVALIDATED pre-write
   demand_charge_savings_cents: number | null; // nullable
   would_have_peak_imported: number | null; // 0/1
+  /** v1.187.0 — the Cores (sorted SNs, comma-joined) the plan's PV forecast fitted its
+   *  solar model on (ProbabilisticForecast.solarModelSns). NULL before v1.187.0. */
+  pv_model_sns: string | null;
+  /** v1.187.0 — why this row's PV verdict is not forecast-skill evidence (a band built
+   *  for other Cores than the actuals); the readiness gate leaves such rows out of its
+   *  PV statistics and counts them. NULL = the verdict stands. */
+  pv_verdict_set_aside: string | null;
 }
 
 /**
@@ -679,6 +708,10 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   // v1.186.0 — the trough and line the plan-trajectory verdict is graded on.
   'cushion_trough_soc_pct', 'cushion_line_soc_pct',
   'arm_disposition', 'cost_ceiling_basis',
+  // v1.187.0 — the on-peak span actually measured, and the PV verdict's fleet check.
+  'onpeak_start_ms', 'onpeak_end_ms', 'onpeak_basis', 'pv_model_sns', 'pv_verdict_set_aside',
+  // v1.187.0 — when the reserve restore landed: the end of the delivered-energy span.
+  'actuation_reverted_at_ms',
 ];
 const NIGHT_LEDGER_COLUMN_SET = new Set<string>(NIGHT_LEDGER_COLUMNS as readonly string[]);
 
@@ -902,6 +935,11 @@ export function createRecorder(
     'cost_surplus_basis TEXT', 'cost_long_gap INTEGER', 'cost_ceiling_soc_pct REAL', 'panel_sample_age_s REAL',
     // v1.186.0 — see NightLedgerRow.cushion_trough_soc_pct.
     'cushion_trough_soc_pct REAL', 'cushion_line_soc_pct REAL',
+    // v1.187.0 — see NightLedgerRow.onpeak_basis / pv_verdict_set_aside.
+    'onpeak_start_ms INTEGER', 'onpeak_end_ms INTEGER', 'onpeak_basis TEXT',
+    'pv_model_sns TEXT', 'pv_verdict_set_aside TEXT',
+    // v1.187.0 — see NightLedgerRow.actuation_reverted_at_ms.
+    'actuation_reverted_at_ms INTEGER',
   ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);

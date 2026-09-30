@@ -94,8 +94,9 @@ const MUTANTS = [
   },
   {
     id: 'x. severity escalated to critical',
-    find: "    severity: 'warning' as const,",
-    to: "    severity: 'critical' as const, /* MUTANT */",
+    // v1.187.0 — re-pointed: the idle-pool notice's alert is also a warning.
+    find: "    id: PEAK_GRID_DRAW_ALERT_ID,\n    severity: 'warning' as const,",
+    to: "    id: PEAK_GRID_DRAW_ALERT_ID,\n    severity: 'critical' as const, /* MUTANT */",
     why: 'Money would ring the same audible tier as a grid loss, devaluing the tier that must never be ignored.',
   },
   {

@@ -75,10 +75,35 @@ export interface TelemetryEntry {
    * (alertMonitor.replayTelemetryEvents).
    */
   scope?: typeof TELEMETRY_SCOPE_ANNUNCIATING;
+  /**
+   * v1.187.0 — for a family in TELEMETRY_FAMILY_BASIS, the emitter rule the event was counted
+   * under. A line of such a family without its current basis was counted under an earlier
+   * rule and is not replayed (alertMonitor.replayTelemetryEvents).
+   */
+  basis?: string;
 }
 
 /** v1.186.0 — the only scope written; see TelemetryEntry.scope. */
 export const TELEMETRY_SCOPE_ANNUNCIATING = 'annunciating' as const;
+
+/**
+ * v1.187.0 — families whose emitter changed WHAT it lets annunciate, keyed to the basis every
+ * new event of that family carries. The MPPT self-baseline stopped annunciating cooler-than-
+ * typical and load-explained readings (analytics.mpptBaselineVerdict); the events written
+ * before that counted those idle-Core episodes — 09-29: 10 rises, 6 long-active, Rule 3 latched
+ * on baseline-mppt_lv_temp — and would keep a hot-side LV warning's push silenced for the rest
+ * of the 30-day window. The same reset reasoning as the v1.186.0 scope: an old line cannot say
+ * which side of the baseline it was on, so it is not trusted, and the verdict is re-earned. It
+ * can only LIFT a silence or a demotion; criticals were never gated.
+ */
+export const TELEMETRY_FAMILY_BASIS: Readonly<Record<string, string>> = {
+  'baseline-mppt_hv_temp': 'mppt-load-comparable',
+  'baseline-mppt_lv_temp': 'mppt-load-comparable',
+};
+/** v1.187.0 — the basis a new event of `familyKey` is written with, or undefined. */
+export function telemetryBasisFor(familyKey: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(TELEMETRY_FAMILY_BASIS, familyKey) ? TELEMETRY_FAMILY_BASIS[familyKey] : undefined;
+}
 
 const PATH = process.env.ALERT_TELEMETRY_PATH
   ?? resolve(process.cwd(), config.dbPath, '..', 'alert-telemetry.jsonl');
@@ -149,7 +174,9 @@ export function rotateTelemetryIfOversized(path: string = PATH): boolean {
 export function appendTelemetryEvent(entry: TelemetryEntry): void {
   try {
     ensureDir();
-    appendFileSync(PATH, JSON.stringify(entry) + '\n');
+    // v1.187.0 — stamped at the one write chokepoint, so no writer can omit its family's basis.
+    const basis = telemetryBasisFor(entry.familyKey);
+    appendFileSync(PATH, JSON.stringify(basis != null ? { ...entry, basis } : entry) + '\n');
     if (++appendsSinceCheck >= ROTATE_CHECK_EVERY) {
       appendsSinceCheck = 0;
       rotateTelemetryIfOversized();

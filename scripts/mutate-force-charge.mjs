@@ -119,8 +119,9 @@ const MUTANTS = [
   {
     id: 'xiii. ★★★ the force-charge step is never called',
     file: IDX,
-    find: '    await runForceChargeTick();',
-    to: '    /* MUTANT */',
+    // v1.187.0 — re-pointed: the tick runs its steps through runActuationSteps.
+    find: '      forceCharge: () => runForceChargeTick(),',
+    to: '      forceCharge: async () => { /* MUTANT */ },',
     why: 'Nothing ever switches force-charge off — every guard above is dead code.',
   },
   {

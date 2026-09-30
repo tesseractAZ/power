@@ -1,5 +1,7 @@
+import { existsSync, readFileSync } from 'node:fs';
 import type { Alert } from './alerts.js';
-import { rateAt, type TariffModel } from './tariff.js';
+import { rateAt, localParts, type TariffModel } from './tariff.js';
+import { atomicWriteFileSync } from './atomicWrite.js';
 
 /**
  * v1.70.0 — ON-PEAK GRID-TO-BATTERY detection.
@@ -292,6 +294,302 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
       { label: 'Grid → battery', value: `${kw} kW` },
       { label: 'Drawing', value: v.coreAttribution ?? 'no single Core dominant' },
       { label: 'Charge Now (force charge)', value: v.forceChargeOn == null ? 'not reported' : (v.forceChargeOn.length ? `ON: ${v.forceChargeOn.join(', ')}` : 'off on all channels') },
+      { label: 'Period', value: v.periodLabel },
+      { label: 'Cost rate', value: v.centsPerHour == null ? 'rates unconfirmed' : `$${(v.centsPerHour / 100).toFixed(2)}/h` },
+      { label: 'Ongoing for', value: `${mins} min` },
+      { label: 'Since', value: new Date(nowMs - v.heldForMs).toISOString() },
+    ],
+  }];
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * v1.187.0 — ON-PEAK GRID WHILE THE POOL SITS IDLE ABOVE ITS RESERVE.
+ *
+ * Mon 2026-09-28: the house bought 4.27 kWh at the on-peak rate (16:00-19:00, 44.2¢,
+ * about $1.89) while the house pool sat at 26% against a 16% reserve — ~9 kWh above it —
+ * and every SHP2 channel read 0 W from 09-27 22:15 until the night-charge write at
+ * 22:55. Nothing reported it: the detector above watches grid flowing INTO the pack, and
+ * here the grid fed the house directly while the pack did nothing.
+ *
+ * Why the pool was idle (measured, 2026-09-13/14/27/28): after the pool stops at its
+ * reserve, the panel resumes discharging only once it has climbed back roughly 20 points
+ * above the reserve (36-38% against 16). Between the two it holds, and the grid carries
+ * the house. 09-28 was a rainy day (9.5 kWh of solar against 37.8 the day before): the
+ * pool refilled to 26-28% and never crossed back. An app/cloud mode change the night
+ * before (smartBackupMode 2→0→2, 22:12-22:15) and the lost weekend arm (fixed in
+ * v1.186.5) put it there. Not recurring on its own — one weekday in 16 — but when it
+ * lands on an on-peak afternoon it costs money every hour, silently.
+ *
+ * What this is NOT:
+ *  - Not an alarm. It reports spend, never danger: severity warning (so it can push) at
+ *    priority LOW, and `audible: false` — never counted in the audible condition and never
+ *    the alert a yellow names aloud (broadcast.speakableAlerts; v1.187.0 log review). Money
+ *    must never chime in the tier a grid loss uses, nor be spoken in place of the warning
+ *    that raised it. conditionFromAlerts also drops the id, as a second guard.
+ *  - Not a device write. The add-on changes no setting; the notice says what is
+ *    happening and where the setting lives.
+ *  - Not a second opinion near the reserve. At or within IDLE_HEADROOM_PCT of the
+ *    reserve the panel holding the pool IS the panel defending the owner's floor, and
+ *    advising otherwise would be advising to spend outage margin (the same guard, for
+ *    the same reason, as the grid-to-battery detector's below-reserve band).
+ *  - Not a stream. It rises after a 10-min dwell, rides out a brief clear (10 min) so a
+ *    load dip does not flap it, and fires at most ONCE per on-peak day — across a restart
+ *    too (the day is persisted; see persistIdlePoolFiredDay).
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+export const PEAK_IDLE_POOL_ALERT_ID = 'peak-idle-pool';
+
+/** Grid import (W) at the panel main that counts as "the house is buying". */
+export const IDLE_MIN_IMPORT_W = 300;
+/** Total |channel watts| at or under which the pool counts as idle: measured 0 W on every
+ *  channel through the 09-28 hold; a discharging pool reads kilowatts. */
+export const IDLE_MAX_POOL_FLOW_W = 150;
+/** Points above the reserve before an idle pool is a cost question at all. */
+export const IDLE_HEADROOM_PCT = 5;
+export const IDLE_DWELL_MS = 10 * 60_000;
+export const IDLE_CLEAR_MS = 10 * 60_000;
+
+export interface IdlePoolConfig {
+  minImportW: number;
+  maxPoolFlowW: number;
+  headroomPct: number;
+  dwellMs: number;
+  clearMs: number;
+}
+export const DEFAULT_IDLE_POOL_CONFIG: IdlePoolConfig = {
+  minImportW: IDLE_MIN_IMPORT_W,
+  maxPoolFlowW: IDLE_MAX_POOL_FLOW_W,
+  headroomPct: IDLE_HEADROOM_PCT,
+  dwellMs: IDLE_DWELL_MS,
+  clearMs: IDLE_CLEAR_MS,
+};
+
+export interface IdlePoolInputs {
+  nowMs: number;
+  /** False during an outage — nothing to buy. */
+  gridPresent: boolean;
+  /** Grid import at the panel main (SHP2 gridWatt), W. */
+  gridImportW: number | null;
+  /** House pool SoC and the reserve it is held to, %. */
+  socPct: number | null;
+  reserveSocPct: number | null;
+  /** Per-channel watts between the panel and each Core (backupInfo.chWatt): negative =
+   *  the Core discharging into the house, positive = charging from the panel. */
+  sourceWatts: readonly number[] | null;
+  /** The panel's reading is live (fresh device evidence). A frozen projection is not. */
+  fresh: boolean;
+  /** Pool capacity (Wh), for the kWh the pool is holding above its reserve. */
+  poolFullWh?: number | null;
+  /** The panel's smartBackupMode code, reported as found (2 = self-powered on this plant). */
+  smartBackupMode?: number | null;
+}
+
+export type IdlePoolSuppression =
+  | 'outage' | 'off-peak' | 'insufficient-data' | 'near-reserve' | 'pool-active' | 'low-import' | 'fired-today';
+
+export interface IdlePoolVerdict {
+  active: boolean;
+  onPeak: boolean;
+  periodLabel: string;
+  gridImportW: number;
+  poolFlowW: number;
+  socPct: number | null;
+  reserveSocPct: number | null;
+  /** kWh the pool holds above its reserve; null when the capacity is unknown. */
+  aboveReserveKwh: number | null;
+  /** The on-peak import's cost for an hour, cents; null on unconfirmed rates. */
+  centsPerHour: number | null;
+  heldForMs: number;
+  /** Why the condition does not hold this tick (null = it holds). */
+  suppressed: IdlePoolSuppression | null;
+  smartBackupMode: number | null;
+}
+
+/** The condition, one tick, no memory. PURE. */
+export function classifyIdlePool(
+  i: IdlePoolInputs,
+  tariff: TariffModel,
+  cfg: IdlePoolConfig = DEFAULT_IDLE_POOL_CONFIG,
+): { suppressed: IdlePoolSuppression | null; onPeak: boolean; periodLabel: string; centsPerKwh: number | null; poolFlowW: number } {
+  const slice = rateAt(tariff, i.nowMs);
+  const flows = (i.sourceWatts ?? []).filter((w) => typeof w === 'number' && Number.isFinite(w));
+  const poolFlowW = flows.reduce((s, w) => s + Math.abs(w), 0);
+  const base = { onPeak: slice.isOnPeak, periodLabel: slice.periodLabel, centsPerKwh: slice.centsPerKwh, poolFlowW };
+  if (!i.gridPresent) return { ...base, suppressed: 'outage' };
+  if (!slice.isOnPeak) return { ...base, suppressed: 'off-peak' };
+  if (!i.fresh || i.gridImportW == null || i.socPct == null || i.reserveSocPct == null || flows.length === 0) {
+    return { ...base, suppressed: 'insufficient-data' };
+  }
+  // ★ The safety guard: near the reserve, a held pool is the panel defending the floor.
+  if (i.socPct <= i.reserveSocPct + cfg.headroomPct) return { ...base, suppressed: 'near-reserve' };
+  if (poolFlowW > cfg.maxPoolFlowW) return { ...base, suppressed: 'pool-active' };
+  if (i.gridImportW < cfg.minImportW) return { ...base, suppressed: 'low-import' };
+  return { ...base, suppressed: null };
+}
+
+export interface IdlePoolState {
+  /** When the condition was first seen holding continuously (pre-dwell). */
+  onsetMs: number | null;
+  /** When the current episode became active, or null. */
+  activeSinceMs: number | null;
+  /** When the condition stopped holding during an active episode (the clear dwell). */
+  clearSinceMs: number | null;
+  /** The local date an episode last rose — at most one per on-peak day. */
+  firedDay: string | null;
+}
+export const emptyIdlePoolState = (): IdlePoolState => ({ onsetMs: null, activeSinceMs: null, clearSinceMs: null, firedDay: null });
+
+/**
+ * One tick of the episode machine. PURE: returns the next state and whether the episode
+ * is active. An active episode ends at once when on-peak ends or the grid goes, and
+ * otherwise only after the condition has stayed away for `clearMs` (a load dip is not a
+ * resolution). A new episode needs `dwellMs` of continuous holding and a day with none yet.
+ */
+export function stepIdlePool(
+  st: IdlePoolState,
+  holds: boolean,
+  ctx: { nowMs: number; onPeak: boolean; gridPresent: boolean; day: string },
+  cfg: IdlePoolConfig = DEFAULT_IDLE_POOL_CONFIG,
+): { state: IdlePoolState; active: boolean } {
+  if (st.activeSinceMs != null) {
+    if (!ctx.onPeak || !ctx.gridPresent) {
+      return { state: { ...st, onsetMs: null, activeSinceMs: null, clearSinceMs: null }, active: false };
+    }
+    if (holds) return { state: { ...st, clearSinceMs: null }, active: true };
+    const clearSince = st.clearSinceMs ?? ctx.nowMs;
+    if (ctx.nowMs - clearSince >= cfg.clearMs) {
+      return { state: { ...st, onsetMs: null, activeSinceMs: null, clearSinceMs: null }, active: false };
+    }
+    return { state: { ...st, clearSinceMs: clearSince }, active: true };
+  }
+  if (!holds) return { state: { ...st, onsetMs: null, clearSinceMs: null }, active: false };
+  const onset = st.onsetMs ?? ctx.nowMs;
+  // Once per on-peak day: a second rise the same day stays on the card's history, not the phone.
+  if (st.firedDay === ctx.day) return { state: { ...st, onsetMs: onset }, active: false };
+  if (ctx.nowMs - onset >= cfg.dwellMs) {
+    return { state: { onsetMs: onset, activeSinceMs: ctx.nowMs, clearSinceMs: null, firedDay: ctx.day }, active: true };
+  }
+  return { state: { ...st, onsetMs: onset }, active: false };
+}
+
+let idlePoolState: IdlePoolState = emptyIdlePoolState();
+/** Test seam. */
+export function resetIdlePoolState(): void { idlePoolState = emptyIdlePoolState(); }
+
+/*
+ * v1.187.0 (log review) — THE ONCE-PER-DAY PROMISE ACROSS A RESTART. The episode machine lives
+ * in memory, so an auto-update restart during an on-peak episode forgot that the day's notice had
+ * gone out: after boot the detector re-earned its dwell and pushed the same notice a second time
+ * that afternoon, although its text says "Sent at most once per on-peak day". Only `firedDay` is
+ * persisted (the monitor's `idle-pool-state.json`, written when it changes): the episode itself is
+ * NOT carried — a fresh process re-earns the dwell from fresh panel readings — so the boot orphan
+ * sweep drops a pushed `peak-idle-pool` record without a "Resolved:" (orphanedNotifiedIds), as it
+ * does msg-rate-floor-: there is no evidence at boot that the condition ended.
+ */
+const IDLE_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** The local date an idle-pool episode last rose, or null. */
+export function idlePoolFiredDay(): string | null { return idlePoolState.firedDay; }
+/** Restore a persisted `firedDay` (at boot). A null or malformed day restores nothing. */
+export function restoreIdlePoolFiredDay(day: string | null): void {
+  if (day == null || !IDLE_DAY_RE.test(day)) return;
+  idlePoolState = { ...idlePoolState, firedDay: day };
+}
+/** Read the persisted `firedDay`. Missing / corrupt file → null (the pre-v1.187.0 behaviour). */
+export function loadIdlePoolFiredDay(path: string): string | null {
+  try {
+    if (!existsSync(path)) return null;
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as { firedDay?: unknown };
+    return typeof raw?.firedDay === 'string' && IDLE_DAY_RE.test(raw.firedDay) ? raw.firedDay : null;
+  } catch {
+    return null;
+  }
+}
+/**
+ * Persist the current `firedDay` when it differs from `persisted` (the value last written). Returns
+ * the value now on disk: `persisted` again when nothing changed or the write failed (retried on the
+ * next tick). Best-effort — never throws into the alarm loop.
+ */
+export function persistIdlePoolFiredDay(path: string, persisted: string | null): string | null {
+  const day = idlePoolState.firedDay;
+  if (day === persisted) return persisted;
+  try {
+    atomicWriteFileSync(path, JSON.stringify({ firedDay: day }));
+    return day;
+  } catch {
+    return persisted;
+  }
+}
+
+/** The whole evaluation for one tick — the ONLY entry point callers should use. */
+export function evaluateIdlePool(
+  i: IdlePoolInputs,
+  tariff: TariffModel,
+  cfg: IdlePoolConfig = DEFAULT_IDLE_POOL_CONFIG,
+): IdlePoolVerdict {
+  const c = classifyIdlePool(i, tariff, cfg);
+  const day = localParts(i.nowMs, tariff.timezone).ymd;
+  const step = stepIdlePool(idlePoolState, c.suppressed === null, {
+    nowMs: i.nowMs, onPeak: c.onPeak, gridPresent: i.gridPresent, day,
+  }, cfg);
+  idlePoolState = step.state;
+  const importW = i.gridImportW ?? 0;
+  const above = i.socPct != null && i.reserveSocPct != null && i.poolFullWh != null && i.poolFullWh > 0
+    ? Math.max(0, ((i.socPct - i.reserveSocPct) / 100) * (i.poolFullWh / 1000)) : null;
+  const firedToday = c.suppressed === null && !step.active && step.state.firedDay === day;
+  return {
+    active: step.active,
+    onPeak: c.onPeak,
+    periodLabel: c.periodLabel,
+    gridImportW: importW,
+    poolFlowW: c.poolFlowW,
+    socPct: i.socPct,
+    reserveSocPct: i.reserveSocPct,
+    aboveReserveKwh: above,
+    centsPerHour: c.centsPerKwh == null ? null : (importW / 1000) * c.centsPerKwh,
+    heldForMs: step.state.onsetMs == null ? 0 : i.nowMs - step.state.onsetMs,
+    suppressed: firedToday ? 'fired-today' : c.suppressed,
+    smartBackupMode: i.smartBackupMode ?? null,
+  };
+}
+
+export function peakIdlePoolAlerts(v: IdlePoolVerdict, nowMs: number): Alert[] {
+  if (!v.active) return [];
+  const kw = (v.gridImportW / 1000).toFixed(1);
+  const mins = Math.max(1, Math.round(v.heldForMs / 60_000));
+  const aboveText = v.aboveReserveKwh == null ? '' : ` (about ${v.aboveReserveKwh.toFixed(1)} kWh above it)`;
+  const costText = v.centsPerHour == null
+    ? ' The tariff rates are not confirmed in config, so the cost is not estimated here.'
+    : ` At the ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour.`;
+  return [{
+    id: PEAK_IDLE_POOL_ALERT_ID,
+    severity: 'warning' as const,
+    category: 'Grid' as const,
+    device: 'Smart Home Panel 2',
+    // Money, not danger: the floor of the priority union, and never audible.
+    priority: 'low' as const,
+    // v1.187.0 (log review) — `audible: false` is what keeps it off the speakers: speakableAlerts
+    // drops it from the array both the condition count and the spoken message are built from,
+    // and pickPrimaryAlert refuses it. The id exclusion in conditionFromAlerts kept it out of the
+    // COUNT only, so when another warning raised the yellow (the alarm host running hot on an
+    // on-peak afternoon) this unlocated Grid notice outranked it and was the alert voiced. The
+    // [Low] push and the card are unchanged (risingEdgePushes reads annunciate only).
+    audible: false,
+    title: 'Buying grid power on-peak while the battery pool sits idle',
+    detail:
+      `The house has drawn about ${kw} kW from the grid for ${mins} minutes during ${v.periodLabel} while the `
+      + `battery pool, at ${v.socPct}% against a ${v.reserveSocPct}% reserve${aboveText}, has not discharged.${costText} `
+      + 'After the pool stops at its reserve, the Smart Home Panel 2 has been seen to resume discharging only once '
+      + 'the pool climbs back roughly 20 points above the reserve; a pool that refilled only part of the way sits '
+      + 'idle in that band while the house buys at the on-peak rate. A backup mode that holds the pool does the same. '
+      + 'The add-on changes no setting — if the pool should be carrying the house, check the panel\'s backup '
+      + 'settings in the EcoFlow app. Sent at most once per on-peak day.',
+    facts: [
+      { label: 'Grid import', value: `${kw} kW` },
+      { label: 'Pool', value: `${v.socPct}%` },
+      { label: 'Reserve', value: `${v.reserveSocPct}%` },
+      { label: 'Above reserve', value: v.aboveReserveKwh == null ? 'capacity unknown' : `${v.aboveReserveKwh.toFixed(1)} kWh` },
+      { label: 'Pool flow', value: `${Math.round(v.poolFlowW)} W` },
+      { label: 'Smart backup mode', value: v.smartBackupMode == null ? 'not reported' : String(v.smartBackupMode) },
       { label: 'Period', value: v.periodLabel },
       { label: 'Cost rate', value: v.centsPerHour == null ? 'rates unconfirmed' : `$${(v.centsPerHour / 100).toFixed(2)}/h` },
       { label: 'Ongoing for', value: `${mins} min` },

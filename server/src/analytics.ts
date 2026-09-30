@@ -1,5 +1,5 @@
 import type { DeviceSnapshot } from './snapshot.js';
-import { rateAt, apsREvModelFromEnv } from './tariff.js';
+import { rateAt, apsREvModelFromEnv, localParts, seasonOf, onPeakWindowStrings, type TariffModel } from './tariff.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
@@ -14,6 +14,7 @@ import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, roun
 import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
 import { singleFlight } from './singleFlight.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
+import { topOfChargeQuietSpread } from './cellSpread.js';
 import {
   curtailmentDaySettled, frozenCurtailmentDay, freezeCurtailmentDay, pruneFrozenCurtailmentDays, persistFrozenCurtailmentDays,
   curtailmentMembershipSound, curtailmentMembershipHistory,
@@ -216,6 +217,22 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
         const isThermal = metric.category === 'Thermal';
         const warnEligible = isThermal ? v > med : true;
         const severity = z >= Z_WARN && warnEligible ? 'warning' : 'info';
+        // v1.187.0 — TOP-OF-CHARGE GATE for the cell-spread outlier. On 2026-09-29 (15:06-15:27)
+        // this was the only alert family that spoke during a top-of-charge knee: packs enter the
+        // knee one at a time, so whichever arrives first is an "outlier" at a 14 mV deviation
+        // (Core 5 pack 1 at 28 mV vs 12-16; Core 1 pack 1 at 39 mV vs 12-19; both at 99% and
+        // charging). It spoke four yellows and an all-clear while the same pack's own vdiff-warn
+        // was quiet under v1.45.0's plateauQuietWarn. The gate is that predicate, on the OUTLIER
+        // pack's own SoC and spread (never a sibling's). It removes the AUDIBLE only: the card
+        // and the push stay, because v1.45.0 quieted vdiff-warn on the premise that this engine
+        // still tracks a diverging pack — annunciate:false would drop the push and leave a
+        // sub-critical top-of-charge spread neither spoken nor pushed. This gate lifts below the
+        // quiet line or at the critical line. At the line vdiff-crit owns the event, and its
+        // bounded mutes (balancing, the end-of-charge grace) can hold it silent for a while — so
+        // alertMonitor.quietPeerSpreadUnderHeldCritical keeps this outlier off the speakers
+        // exactly while that pack's vdiff-crit is held (main thread, same tick; this function
+        // cannot see alerts.ts state). Both speak once the critical's bounds lapse.
+        const topOfChargeSpread = metric.key === 'voldiff' && topOfChargeQuietSpread(pk.soc ?? d.projection.soc, v);
         out.push({
           id: `peer-${metric.key}-${d.sn}-${pk.num}`,
           severity,
@@ -226,7 +243,8 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
           packNum: pk.num,
           ...(pk.packSn ? { sourcePackSn: pk.packSn } : {}), // v1.173.0 — lets the residency check see a new pack under this id
           title: `${cap(metric.label)} — peer outlier`,
-          detail: `${d.deviceName} Pack ${pk.num} ${metric.label} is ${metric.fmt(v)}, ${metric.fmt(absDev)} ${dir} the sibling-pack median of ${metric.fmt(med)} (peer z-score ${z.toFixed(1)}).`,
+          detail: `${d.deviceName} Pack ${pk.num} ${metric.label} is ${metric.fmt(v)}, ${metric.fmt(absDev)} ${dir} the sibling-pack median of ${metric.fmt(med)} (peer z-score ${z.toFixed(1)}).${topOfChargeSpread ? ' At top of charge: not announced on the speakers.' : ''}`,
+          ...(topOfChargeSpread ? { audible: false } : {}),
           facts: [
             { label: 'This pack', value: metric.fmt(v) },
             { label: 'Sibling median', value: metric.fmt(med) },
@@ -289,6 +307,199 @@ interface BaselineTarget {
   // real-time window (BASELINE_SUSTAINED_MS) before flagging. Set on bursty
   // duty-cycled SHP2 load circuits so AC compressor cycling doesn't re-fire.
   sustained?: boolean;
+  /** v1.187.0 — the reading follows the Core's electrical load (an MPPT heatsink); see mpptBaselineVerdict. */
+  loadCoupled?: boolean;
+  /** v1.187.0 — the Core's live |in| + |out| watts (loadCoupled targets), or null when either reads null. */
+  liveActivityW?: number | null;
+}
+
+/* v1.187.0 — THE MPPT SELF-BASELINE IS A LOAD-COUPLED READING.
+ *
+ * Measured on the house Cores over 16 days (10-minute buckets): an MPPT sits near 90 °F while
+ * the Core is idle (|in| + |out| < 30 W) and near 120 °F whenever it carries 300 W or more,
+ * whatever the load above that (300 W-1 kW, 1-3 kW and > 3 kW all have medians of 117-122 °F).
+ * The temperature is a step function of the Core's OPERATING STATE, and the hour-of-day bucket
+ * mixes both states. So the two-sided test raised a warning whenever the Core's state differed
+ * from the bucket's majority: a Core idle at the reserve read "32 °F below its typical 118 °F"
+ * (09-28: 14 of the 16 pushes before 15:00, the condition held yellow from 04:03, and the
+ * rollup latched Rule 3 on the whole family), and a Core carrying a night charge against idle
+ * nights read "36 °F above its typical 81 °F". Replaying the rule over those 16 days: 57
+ * warning episodes on five Cores, every one of them cooler-than-typical or hotter under more
+ * load than the hour usually sees.
+ *
+ * The test is kept only where it means something — an MPPT HOTTER than its typical beyond what
+ * the Core's load can explain (a cooling or component fault):
+ *   - cooler than typical: never a hazard (less heat than usual, almost always a lighter load).
+ *     The peer path has demoted cold thermal outliers since v0.93.0 (audit #14); the
+ *     self-baseline was never given the same rule.
+ *   - hotter, with the load to explain it: the hour's typical load sits below the loaded
+ *     plateau (MPPT_LOAD_PLATEAU_W), the Core stepped up by at least MPPT_LOAD_EXPLAINS_MIN_W
+ *     within MPPT_LOAD_RECENT_MS, AND the reading is no hotter than that load can make it:
+ *     at or below mpptLoadCeiling — the MPPT's OWN loaded temperature (the upper quartile of its
+ *     14-day buckets settled at MPPT_LOAD_PLATEAU_W or more; MPPT_LOADED_REF_FALLBACK_F on thin
+ *     history) plus the floor while the load runs, decaying back toward the hour's typical with
+ *     the heatsink's cool-down (MPPT_COOL_TAU_MS) once it stops.
+ *     v1.187.0 review — the first cut had NO temperature bound: any hot reading on an idle-typical
+ *     hour with 300 W of recent load was quieted, so a failed MPPT fan at 144 °F during an
+ *     outage-night 5 kW charge — the life-safety case — would have been info and silent. Nor was
+ *     "the typical is already on the plateau" a sound proxy: `med` is a median over RAW
+ *     change-detected samples, which over-weights a fluctuating loaded MPPT, so the temperature
+ *     typical can sit on the plateau while the (time-weighted) load typical still reads idle.
+ *     The ceiling judges the reading in the quantity that matters: a typical already at the
+ *     loaded reference leaves no room above the floor at all. And a fixed 2 h load window was
+ *     shorter than the cool-down it stood for (measured: 120 °F falls to ~105 °F one hour after
+ *     the load stops, ~97 °F after two, with τ ≈ 1.5-2 h toward an idle ~88 °F): the envelope
+ *     follows the decay instead of switching off at a cliff.
+ * Both stay VISIBLE at info with the reason in the detail, and are annunciate:false: not pushed,
+ * not spoken, not counted toward the broadcast condition, and — through autoTuneCounts — not
+ * fed to the auto-tune rollups, so benign episodes cannot latch a silence on the hot side.
+ * No activity evidence (no history, a null reading) leaves the hot side as it was: annunciating.
+ * The absolute MPPT_TEMP band (alerts.ts) is untouched and covers heat under any load.
+ * Pack cell and BMS-board targets are deliberately NOT load-gated: a pack warming while
+ * electrically idle is exactly the internal-fault signature their baseline exists to catch. */
+/** v1.187.0 — the load above the hour's typical that explains a hotter MPPT (the idle→active step). */
+export const MPPT_LOAD_EXPLAINS_MIN_W = 300;
+/** v1.187.0 — the loaded plateau: at or above this typical load, more load explains no extra heat;
+ *  also the load at which a bucket counts toward the MPPT's own loaded reference. */
+export const MPPT_LOAD_PLATEAU_W = 300;
+/** v1.187.0 — the heatsink's cool-down time constant once the load stops (measured τ ≈ 1.5-2 h;
+ *  the slower end, so a normal cool-down tail never reads as a fault). */
+export const MPPT_COOL_TAU_MS = 2 * 60 * 60 * 1000;
+/** v1.187.0 — how far back a load step still explains MPPT heat: 3 τ, where the cool-down
+ *  allowance has fallen under 5 % of the loaded-to-typical span. */
+export const MPPT_LOAD_RECENT_MS = 3 * MPPT_COOL_TAU_MS;
+/** v1.187.0 — the loaded reference when the MPPT has fewer than BASELINE_MIN_SAMPLES settled loaded
+ *  buckets in 14 days: the house Cores' measured settled upper quartile (121-123 °F), rounded down. */
+export const MPPT_LOADED_REF_FALLBACK_F = 122;
+/** v1.187.0 — consecutive plateau-load buckets (this one included) before an MPPT reading counts
+ *  toward its loaded reference: 20-30 min under load, past the heat-up. */
+export const MPPT_LOADED_SETTLE_BUCKETS = 3;
+/** v1.187.0 — the MPPT metrics the one per-Core read fetches alongside the load. */
+const MPPT_BASELINE_METRICS = ['mppt_hv_temp', 'mppt_lv_temp'] as const;
+/** v1.187.0 — activity history bucket (the recorder writes each metric at least every 5 min). */
+const MPPT_ACTIVITY_BUCKET_SEC = 600;
+
+export type MpptBaselineVerdict = 'anomalous' | 'cooler' | 'load-explained';
+/**
+ * v1.187.0 — the hottest reading a load step explains, in display units: the MPPT's own loaded
+ * reference plus the floor while the load runs (`loadAgoMs` 0), decaying toward `typical` + the
+ * floor with MPPT_COOL_TAU_MS once it stops. A reference at or below the typical explains
+ * nothing above the floor. Pure.
+ */
+export function mpptLoadCeiling(p: { typical: number; floor: number; loadedRef: number; loadAgoMs: number }): number {
+  const span = Math.max(0, p.loadedRef - p.typical);
+  return p.typical + span * Math.exp(-Math.max(0, p.loadAgoMs) / MPPT_COOL_TAU_MS) + p.floor;
+}
+/**
+ * v1.187.0 — what a past-floor MPPT self-baseline deviation means. `anomalous` keeps the
+ * normal severity rule and annunciates; the other two are on-screen only. Null activity is
+ * never read as "explained": missing evidence must not quiet the hot side. `live`, `typical`,
+ * `floor` and `loadedRef` are in display units (°F). Pure.
+ */
+export function mpptBaselineVerdict(p: {
+  dirSign: number;
+  typicalActivityW: number | null;
+  /** ms since the Core last carried its typical + MPPT_LOAD_EXPLAINS_MIN_W (0 = it does now); null = no such step. */
+  loadAgoMs: number | null;
+  live: number;
+  typical: number;
+  floor: number;
+  loadedRef: number;
+}): MpptBaselineVerdict {
+  if (p.dirSign < 0) return 'cooler';
+  if (p.typicalActivityW == null || p.loadAgoMs == null) return 'anomalous';
+  if (p.typicalActivityW >= MPPT_LOAD_PLATEAU_W) return 'anomalous';
+  if (p.loadAgoMs > MPPT_LOAD_RECENT_MS) return 'anomalous';
+  const ceiling = mpptLoadCeiling({ typical: p.typical, floor: p.floor, loadedRef: p.loadedRef, loadAgoMs: p.loadAgoMs });
+  return p.live <= ceiling ? 'load-explained' : 'anomalous';
+}
+
+/** v1.187.0 — a Core's load context for its MPPT verdicts (coreActivityContext). */
+export interface CoreActivityContext {
+  /** Median |in| + |out| over the hour window's buckets; null below BASELINE_MIN_SAMPLES. */
+  typicalW: number | null;
+  /** Peak |in| + |out| over the last MPPT_LOAD_RECENT_MS, the live reading included. */
+  recentMaxW: number | null;
+  /** ms since the Core last carried typicalW + MPPT_LOAD_EXPLAINS_MIN_W or more: 0 when the live
+   *  reading does, else from the END of the latest such bucket; null with no typical or no step. */
+  loadAgoMs: number | null;
+  /** Per MPPT metric (raw units): the upper quartile of its buckets where the Core had carried
+   *  MPPT_LOAD_PLATEAU_W or more for MPPT_LOADED_SETTLE_BUCKETS buckets; null below
+   *  BASELINE_MIN_SAMPLES such buckets. */
+  loadedRaw: ReadonlyMap<string, number | null>;
+}
+
+/**
+ * v1.187.0 — a Core's load context from one bucketed read of `total_in` / `total_out` (|in| +
+ * |out|, the v1.108.0 idle measure) and its MPPT temperatures: the typical load for the current
+ * hour window, the peak load over the last MPPT_LOAD_RECENT_MS, how long ago the last load step
+ * was, and each MPPT's own loaded reference. A bucket counts only where both load metrics have
+ * a value. The typical needs BASELINE_MIN_SAMPLES buckets, like the temperature bucket it is
+ * compared with; the live reading joins the recent window. Pure.
+ */
+export function coreActivityContext(
+  rows: ReadonlyMap<string, ReadonlyArray<{ ts: number; value: number }>>,
+  windowHours: ReadonlySet<number>,
+  nowMs: number,
+  liveW: number | null,
+  bucketMs: number,
+): CoreActivityContext {
+  const inByTs = new Map<number, number>();
+  for (const p of rows.get('total_in') ?? []) if (Number.isFinite(p.value)) inByTs.set(p.ts, p.value);
+  const activityByTs = new Map<number, number>();
+  const hourly: number[] = [];
+  const live = liveW != null && Number.isFinite(liveW) ? liveW : null;
+  let recentMaxW: number | null = live;
+  for (const p of rows.get('total_out') ?? []) {
+    const vin = inByTs.get(p.ts);
+    if (vin == null || !Number.isFinite(p.value)) continue;
+    const w = Math.abs(vin) + Math.abs(p.value);
+    activityByTs.set(p.ts, w);
+    if (windowHours.has(new Date(p.ts).getHours())) hourly.push(w);
+    if (p.ts + bucketMs > nowMs - MPPT_LOAD_RECENT_MS) recentMaxW = recentMaxW == null ? w : Math.max(recentMaxW, w);
+  }
+  const typicalW = hourly.length >= BASELINE_MIN_SAMPLES ? median(hourly) : null;
+  let loadAgoMs: number | null = null;
+  if (typicalW != null) {
+    const step = typicalW + MPPT_LOAD_EXPLAINS_MIN_W;
+    if (live != null && live >= step) loadAgoMs = 0;
+    else {
+      let lastTs: number | null = null;
+      for (const [ts, w] of activityByTs) if (w >= step && (lastTs == null || ts > lastTs)) lastTs = ts;
+      if (lastTs != null) loadAgoMs = Math.max(0, nowMs - (lastTs + bucketMs));
+    }
+  }
+  // The loaded reference is the UPPER QUARTILE of the SETTLED buckets: the bucket and the
+  // MPPT_LOADED_SETTLE_BUCKETS - 1 before it all carried the plateau load, so the heat-up of a
+  // short load does not drag it down, and the top of the normal loaded range rather than its
+  // middle. Replayed over 14 days (5 min steps, raw samples): the median of ALL loaded buckets
+  // (101 °F on a Core cycling short 600 W loads, 118 °F once settled) left 18 warning episodes on
+  // two Cores; the settled median 7 (one Core whose top-of-cycle 126-127 °F sat 1 °F over); the
+  // settled upper quartile none. On the house Cores it is 121-123 °F, 0-2 °F above the median.
+  const settled = (ts: number): boolean => {
+    for (let k = 0; k < MPPT_LOADED_SETTLE_BUCKETS; k++) {
+      if ((activityByTs.get(ts - k * bucketMs) ?? 0) < MPPT_LOAD_PLATEAU_W) return false;
+    }
+    return true;
+  };
+  const loadedRaw = new Map<string, number | null>();
+  for (const metric of MPPT_BASELINE_METRICS) {
+    const loaded: number[] = [];
+    for (const p of rows.get(metric) ?? []) if (Number.isFinite(p.value) && settled(p.ts)) loaded.push(p.value);
+    loadedRaw.set(metric, loaded.length >= BASELINE_MIN_SAMPLES ? upperQuartile(loaded) : null);
+  }
+  return { typicalW, recentMaxW, loadAgoMs, loadedRaw };
+}
+
+/** v1.187.0 — the upper quartile (nearest rank below) of a non-empty list. Pure. */
+function upperQuartile(xs: readonly number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.floor(0.75 * (s.length - 1))];
+}
+
+/** v1.187.0 — the Core's live load for the MPPT gate, or null when either side is unknown. */
+function liveCoreActivityW(inW: number | null, outW: number | null): number | null {
+  return inW == null || outW == null ? null : Math.abs(inW) + Math.abs(outW);
 }
 
 const tempFmt = (v: number) => `${Math.round(v)}°F`;
@@ -301,8 +512,9 @@ function buildBaselineTargets(devices: Record<string, DeviceSnapshot>): Baseline
     if (d.projection.kind === 'dpu') {
       const p = d.projection;
       const core = dpuNum(d.deviceName);
+      // v1.187.0 — load-coupled: see mpptBaselineVerdict.
       const mppt = (metric: string, label: string, c: number | null) =>
-        targets.push({ sn: d.sn, metric, device: d.deviceName, label, category: 'Thermal', coreNum: core, packNum: null, live: c == null ? null : cToF(c), floor: 9, transform: cToF, fmt: tempFmt });
+        targets.push({ sn: d.sn, metric, device: d.deviceName, label, category: 'Thermal', coreNum: core, packNum: null, live: c == null ? null : cToF(c), floor: 9, transform: cToF, fmt: tempFmt, loadCoupled: true, liveActivityW: liveCoreActivityW(p.totalInWatts, p.totalOutWatts) });
       mppt('mppt_hv_temp', 'HV MPPT temperature', p.mpptHvTemp);
       mppt('mppt_lv_temp', 'LV MPPT temperature', p.mpptLvTemp);
       for (const pk of p.packs) {
@@ -417,6 +629,24 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
   // hold (9h30m on 2026-09-13/14). Filtering it to the quorum's active set would resume raises
   // on a pack whose feed really is low-cadence; that needs evidence the raises are meaningful
   // there, not a same-day change to a life-safety alert path.
+  // v1.187.0 — each Core's activity context, fetched only for a HOT MPPT excursion (the one case
+  // the verdict reads it) and at most once per Core per pass: one bucketed read of the load and
+  // both MPPT temperatures (the loaded reference behind mpptLoadCeiling).
+  const activityBySn = new Map<string, CoreActivityContext>();
+  const activityFor = (sn: string, liveW: number | null) => {
+    let a = activityBySn.get(sn);
+    if (!a) {
+      try {
+        const rows = recorder.queryMulti(sn, ['total_in', 'total_out', ...MPPT_BASELINE_METRICS], now - BASELINE_HISTORY_MS, now, MPPT_ACTIVITY_BUCKET_SEC);
+        a = coreActivityContext(rows, windowHours, now, liveW, MPPT_ACTIVITY_BUCKET_SEC * 1000);
+      } catch {
+        // no evidence: the hot side stays annunciating
+        a = { typicalW: null, recentMaxW: null, loadAgoMs: null, loadedRaw: new Map() };
+      }
+      activityBySn.set(sn, a);
+    }
+    return a;
+  };
   for (const t of buildBaselineTargets(devices)) {
     if (t.live == null || !Number.isFinite(t.live)) continue;
     const pts = recorder.query(t.sn, t.metric, now - BASELINE_HISTORY_MS, now);
@@ -486,7 +716,25 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
     // stops competing for warning-severity attention. Thermal/SoC
     // self-baseline targets (t.sustained unset) are unaffected and keep the
     // normal z >= Z_WARN rule.
-    const severity = t.sustained ? 'info' : (z >= Z_WARN ? 'warning' : 'info');
+    // v1.187.0 — MPPT targets: cooler-than-typical and load-explained heat are info and
+    // on-screen only (mpptBaselineVerdict); only an unexplained hot excursion keeps the rule.
+    const activity = t.loadCoupled && t.live > med ? activityFor(t.sn, t.liveActivityW ?? null) : null;
+    // v1.187.0 review — the MPPT's own loaded temperature bounds what its load can explain.
+    // loadCoupled targets are the MPPTs, so the fallback is in their display unit (°F).
+    const loadedRaw = activity?.loadedRaw.get(t.metric) ?? null;
+    const loadedFromHistory = loadedRaw != null && Number.isFinite(t.transform(loadedRaw));
+    const loadedRef = loadedFromHistory ? t.transform(loadedRaw!) : MPPT_LOADED_REF_FALLBACK_F;
+    const mpptVerdict: MpptBaselineVerdict | null = t.loadCoupled
+      ? mpptBaselineVerdict({
+        dirSign: Math.sign(t.live - med), typicalActivityW: activity?.typicalW ?? null, loadAgoMs: activity?.loadAgoMs ?? null,
+        live: t.live, typical: med, floor: t.floor, loadedRef,
+      })
+      : null;
+    const loadCeiling = activity?.loadAgoMs != null && activity.loadAgoMs <= MPPT_LOAD_RECENT_MS
+      ? mpptLoadCeiling({ typical: med, floor: t.floor, loadedRef, loadAgoMs: activity.loadAgoMs })
+      : null; // shown only while a load step is within the lookback
+    const mpptQuiet = mpptVerdict === 'cooler' || mpptVerdict === 'load-explained';
+    const severity = t.sustained || mpptQuiet ? 'info' : (z >= Z_WARN ? 'warning' : 'info');
     // Finding #31 — the printed deviation must reconcile with the printed live/
     // typical figures. absDev is full-precision, but t.fmt() (tempFmt/wattFmt)
     // rounds live and med INDEPENDENTLY for display, so |round(live)-round(med)|
@@ -514,11 +762,23 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
     const regimeNote = regime
       ? ` This deviation has persisted ${shiftDays} consecutive days — reading as a new normal pattern the rolling baseline is absorbing (~${Math.max(1, 8 - shiftDays)} day(s) to full absorption); silenced meanwhile.`
       : '';
+    // v1.187.0 — say WHY an MPPT deviation is on-screen only, in the detail and in muteReason
+    // (diagnostic only — the log line names it; nothing reads it to decide a mute).
+    const loadAgoMin = activity?.loadAgoMs != null ? Math.round(activity.loadAgoMs / 60_000) : null;
+    const mpptNote = mpptVerdict === 'cooler'
+      ? ' A cooler MPPT is not a hazard: it is producing less heat than usual for this hour, almost always because the Core is carrying less load. Shown for reference; not pushed or announced.'
+      : mpptVerdict === 'load-explained' && activity?.recentMaxW != null && activity.typicalW != null && loadCeiling != null
+        ? ` The Core has carried up to ${Math.round(activity.recentMaxW)} W in the last ${MPPT_LOAD_RECENT_MS / 3_600_000} h against a typical ${Math.round(activity.typicalW)} W for this hour${loadAgoMin ? ` (the load stepped down ${loadAgoMin} min ago)` : ''}, and the reading is within what that load explains: up to ${t.fmt(loadCeiling)} (this MPPT runs ${t.fmt(loadedRef)} under load${loadedFromHistory ? '' : ', a measured default — too little loaded history'}, cooling toward ${t.fmt(med)} once the load stops). Shown for reference; not pushed or announced. The absolute MPPT temperature alarm still applies.`
+        : '';
+    const muteReason = mpptVerdict === 'cooler' ? 'cooler than typical, not a hazard'
+      : mpptVerdict === 'load-explained' ? "heat explained by the Core's load"
+      : regime ? 'a new normal the baseline is absorbing' : null;
     out.push({
       id: `baseline-${t.metric}-${t.sn}`,
       sourceSn: t.sn, // v1.184.0 — for the main-thread starved-feed filter
       severity,
-      ...(regime ? { annunciate: false } : {}),
+      ...(regime || mpptQuiet ? { annunciate: false } : {}),
+      ...(muteReason != null ? { muteReason } : {}),
       category: t.category,
       source: 'learned',
       device: t.device,
@@ -526,13 +786,19 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
       packNum: t.packNum,
       ...(t.packSn ? { sourcePackSn: t.packSn } : {}),
       title: `${cap(t.label)} unusual for the hour`,
-      detail: `${subj} ${t.label} is ${t.fmt(t.live)} — ${t.fmt(dispAbsDev)} ${dir} its typical ${t.fmt(med)} for this hour (baseline: ${spanDays} days of history, ${bucket.length} samples; z ${z.toFixed(1)}).${regimeNote}`,
+      detail: `${subj} ${t.label} is ${t.fmt(t.live)} — ${t.fmt(dispAbsDev)} ${dir} its typical ${t.fmt(med)} for this hour (baseline: ${spanDays} days of history, ${bucket.length} samples; z ${z.toFixed(1)}).${mpptNote}${regimeNote}`,
       facts: [
         { label: 'Current reading', value: t.fmt(t.live) },
         { label: 'Typical (this hour)', value: t.fmt(med) },
         { label: 'Deviation', value: `${dispLive >= dispMed ? '+' : '-'}${t.fmt(dispAbsDev)}` },
         { label: 'Baseline window', value: `${spanDays} d, ${bucket.length} samples` },
         { label: 'z-score', value: z.toFixed(1) },
+        // v1.187.0 — the load evidence a hot MPPT verdict read.
+        ...(activity?.recentMaxW != null ? [{ label: `Core load (peak, last ${MPPT_LOAD_RECENT_MS / 3_600_000} h)`, value: wattFmt(activity.recentMaxW) }] : []),
+        ...(activity?.typicalW != null ? [{ label: 'Core load (typical, this hour)', value: wattFmt(activity.typicalW) }] : []),
+        // v1.187.0 review — and the temperature bound it was judged against.
+        ...(activity != null ? [{ label: `MPPT under load${loadedFromHistory ? '' : ' (default)'}`, value: t.fmt(loadedRef) }] : []),
+        ...(loadCeiling != null ? [{ label: 'Load-explained ceiling', value: t.fmt(loadCeiling) }] : []),
       ],
     });
   }
@@ -8004,6 +8270,64 @@ export function resolveTariffCents(nowMs: number): { onPeak: number; offPeak: nu
 const TARIFF_ON_PEAK_HOURS_ENV = process.env.TARIFF_ON_PEAK_HOURS ?? '15-20';
 const TARIFF_ON_PEAK_DAYS_ENV = process.env.TARIFF_ON_PEAK_DAYS ?? '1-5';
 
+/** v1.187.0 — the rates and window /api/tariff reports: the ones that PRICE the kWh. */
+export interface TariffPricingView {
+  onPeakCents: number;
+  offPeakCents: number;
+  /** The overnight (23:00-05:00 Mon-Fri) rate; null = no such period in the table
+   *  (its hours then price at the off-peak fallback). */
+  overnightCents: number | null;
+  /** The winter super-off-peak rate while that period is in season; null otherwise. */
+  superOffPeakCents: number | null;
+  onPeakHours: string;
+  onPeakDays: string;
+  /** 'rate-table' — a confirmed period table prices each hour (hourlyRateCents);
+   *  'two-tier' — the legacy on/off pair over TARIFF_ON_PEAK_HOURS / _DAYS. */
+  pricingBasis: 'rate-table' | 'two-tier';
+}
+
+/**
+ * v1.187.0 — what the tariff report states, from the table that actually prices. PURE.
+ *
+ * The report printed the two-tier pair and the TARIFF_ON_PEAK_HOURS default ("15-20",
+ * which the add-on offers no option to set) while every priced and gated path —
+ * `hourlyRateCents`, `isOnPeakHour`, the HA rate-now sensor — used the confirmed R-EV
+ * table: on-peak 16:00-19:00 Mon-Fri, and overnight kWh at 12.59¢, a rate the report did
+ * not mention at all (live 2026-09-29: "15-20", offPeakCents 16.91, overnight absent).
+ * This mirrors those two functions: a confirmed table reports its own period window and
+ * its season's rates, each falling back to the two-tier figure exactly where
+ * `hourlyRateCents` would (a period with no rate this season); an unconfirmed install
+ * reports the two-tier pair and the legacy window it is priced with, unchanged.
+ */
+export function tariffPricingView(
+  model: TariffModel,
+  nowMs: number,
+  fallback: { onPeak: number; offPeak: number },
+  legacy: { hours: string; days: string },
+): TariffPricingView {
+  if (!model.ratesConfirmed) {
+    return {
+      onPeakCents: fallback.onPeak, offPeakCents: fallback.offPeak,
+      overnightCents: null, superOffPeakCents: null,
+      onPeakHours: legacy.hours, onPeakDays: legacy.days, pricingBasis: 'two-tier',
+    };
+  }
+  const season = seasonOf(localParts(nowMs, model.timezone).month, model.summerMonths);
+  const inSeason = (id: string) => model.periods.find((p) => p.id === id && (!p.seasons || p.seasons.includes(season)));
+  const onPeakPeriod = model.periods.find((p) => p.onPeak === true && (!p.seasons || p.seasons.includes(season)));
+  const win = onPeakWindowStrings(model);
+  return {
+    onPeakCents: onPeakPeriod?.centsBySeason[season] ?? fallback.onPeak,
+    offPeakCents: model.offPeak.centsBySeason[season] ?? fallback.offPeak,
+    overnightCents: inSeason('overnight')?.centsBySeason[season] ?? null,
+    superOffPeakCents: inSeason('super_off_peak')?.centsBySeason[season] ?? null,
+    // isOnPeakHour answers from the table's on-peak period on a confirmed install.
+    onPeakHours: win?.hours ?? legacy.hours,
+    onPeakDays: win?.days ?? legacy.days,
+    pricingBasis: 'rate-table',
+  };
+}
+
 /** Exported for tests. */
 export function parseRange(s: string): [number, number] | null {
   const m = s.match(/^(\d{1,2})-(\d{1,2})$/);
@@ -8035,6 +8359,11 @@ export interface TariffReport {
   tariffBasis?: string;
   onPeakHours: string;
   onPeakDays: string;
+  /** v1.187.0 — see TariffPricingView: the overnight / winter super-off-peak rates the
+   *  table prices with, and which table prices ('rate-table' | 'two-tier'). */
+  overnightCents?: number | null;
+  superOffPeakCents?: number | null;
+  pricingBasis?: 'rate-table' | 'two-tier';
   // Last 7 days
   windowDays: number;
   gridImportCostDollars: number;
@@ -8137,13 +8466,22 @@ export function computeTariffReport(
 
   const windowTally = tally(since);
   const todayTally = tally(todayStart);
+  // v1.187.0 — report the window and rates that PRICE the tally above, not the legacy
+  // two-tier strings (tariffPricingView). `tariffBasis` keeps naming the two-tier tier.
+  const pricing = tariffPricingView(
+    apsREvModelFromEnv(), now, tariffCents,
+    { hours: TARIFF_ON_PEAK_HOURS_ENV, days: TARIFF_ON_PEAK_DAYS_ENV },
+  );
   const value: TariffReport = {
     generatedAt: now,
-    onPeakCents: tariffCents.onPeak,
-    offPeakCents: tariffCents.offPeak,
+    onPeakCents: pricing.onPeakCents,
+    offPeakCents: pricing.offPeakCents,
     tariffBasis: tariffCents.basis,
-    onPeakHours: TARIFF_ON_PEAK_HOURS_ENV,
-    onPeakDays: TARIFF_ON_PEAK_DAYS_ENV,
+    onPeakHours: pricing.onPeakHours,
+    onPeakDays: pricing.onPeakDays,
+    overnightCents: pricing.overnightCents,
+    superOffPeakCents: pricing.superOffPeakCents,
+    pricingBasis: pricing.pricingBasis,
     windowDays,
     gridImportCostDollars: round2(windowTally.gridCost),
     solarLoadValueDollars: round2(windowTally.loadValue),
@@ -8235,6 +8573,11 @@ export interface ProbabilisticForecast {
   // to revisit the floor, a reading below it is a regression.
   calScoredDays?: number;
   bandRealizedCoveragePct?: number | null;
+  /** v1.187.0 — the Cores the band's day forecast fitted its solar model on
+   *  (DayForecast.solarModelSns); null/absent = unknown. The night-charge ledger records
+   *  it beside the band so the scorer can tell a band graded against another fleet's
+   *  actual PV from a forecast miss. */
+  solarModelSns?: string[] | null;
 }
 /* INVARIANT (verified by exhaustive consumer census, v1.30.0 audit): the
  * ProbabilisticForecast is display + recommend-only-MPC — it feeds NO alarm.
@@ -8678,6 +9021,8 @@ export async function computeProbabilisticForecast(
     pAboveReservePct,
     pFullCharge,
     uncertaintyKwhStdev: Math.round(stdevAccum * 100) / 100, // already kWh (Σ per-hour sigmaNetKwh)
+    // v1.187.0 — which Cores this band describes (the forecast it was built on).
+    solarModelSns: forecast.solarModelSns ?? null,
     bandSigmaCal: Math.round(bandCal * 100) / 100,
     bandSigmaCalBasis: bandCalBasis,
     realizedDailyErrHalfFrac: realizedHalfFrac != null ? Math.round(realizedHalfFrac * 1000) / 1000 : null,

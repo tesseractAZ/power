@@ -320,6 +320,59 @@ export function forceChargeInFlight(s: NightActuationState): boolean {
   return s.forceChargeOnAtMs != null && s.forceChargeOffVerifiedAtMs == null;
 }
 
+/**
+ * v1.187.0 (review) — a force-charge OFF of ours is due on the night's own record or the
+ * clock alone: ON issued, no OFF yet, and the night cancelled, the reserve already
+ * reverted, no window, or the window closed (offReason's first three reasons — none needs
+ * a readback). PURE.
+ */
+export function forceChargeOffDueNow(s: NightActuationState, nowMs: number): boolean {
+  if (s.forceChargeOnAtMs == null || s.forceChargeOffAtMs != null) return false;
+  return s.cancelled || s.revertedAtMs != null || s.windowEndMs == null || nowMs >= s.windowEndMs;
+}
+
+/** The two steps of one actuation tick (index.ts `runNightActuationTick`). */
+export type ActuationStep = 'reserve' | 'forceCharge';
+
+/**
+ * v1.187.0 (review) — the order of one tick's steps. PURE.
+ *
+ * Normally the reserve step runs first and force-charge reads the state it just wrote:
+ * the START needs the verified reserve (apply → readback → ceiling → ON). But when a
+ * force-charge OFF is due (forceChargeOffDueNow) the OFF goes FIRST. With REVERT_LAG_MS
+ * at 0 the reserve restore falls due on the same close tick, and the reserve step awaits
+ * its PUT (writes carry no timeout of their own — undici's 300 s default applies) and
+ * used to await the morning-summary push after it; meanwhile the Cores kept grid-charging
+ * at 16-19 kW at the off-peak rate, and `nightActuationInFlight` held every later tick.
+ * Both are OFF-direction writes, so neither order can raise a charge. And a force-charge
+ * still ON at the close has normally carried the pool past the 50% reserve ceiling (every
+ * force-charge target is above it), where the raised reserve drives no charge of its own:
+ * there the OFF is the write that stops the spend. Grid-loss OFFs keep the reserve-first
+ * order — they need the live reading, and the reserve step aborts the buy first.
+ */
+export function actuationStepOrder(s: NightActuationState, nowMs: number): readonly ActuationStep[] {
+  return forceChargeOffDueNow(s, nowMs) ? ['forceCharge', 'reserve'] : ['reserve', 'forceCharge'];
+}
+
+/**
+ * v1.187.0 (review) — run the tick's steps in `order`, each in its own try: a failure of
+ * one must never skip the other (a reserve-step throw must not skip the force-charge OFF,
+ * nor the reverse — the v1.165.0 rule, now independent of the order).
+ */
+export async function runActuationSteps(
+  order: readonly ActuationStep[],
+  steps: Readonly<Record<ActuationStep, () => Promise<void>>>,
+  onError: (step: ActuationStep, e: unknown) => void,
+): Promise<void> {
+  for (const step of order) {
+    try {
+      await steps[step]();
+    } catch (e) {
+      onError(step, e);
+    }
+  }
+}
+
 /** v1.170.0 — where the software stop ends it: the target, or the panel's own (whole-
  *  number) ceiling when that is lower — an 85.3 target syncs an 85 ceiling, and a whole-
  *  number pool reading never reaches 85.3, so it stops at 85. Below 80 the ceiling is 80

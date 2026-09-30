@@ -85,8 +85,9 @@ const MUTANTS = [
   {
     id: 'viii. ★★★ the hold is not wired into the broadcast tick',
     file: BC,
-    find: '      .filter((a) => !heldForImbalanceConfirm(a, tickNow, getAlertOnset(a.id)));',
-    to: '      ; /* MUTANT */',
+    // v1.187.0 — the tick's chain moved into the pure speakableAlerts (same filters, same order).
+    find: '    .filter((a) => !heldForImbalanceConfirm(a, nowMs, onsetOf(a.id)));',
+    to: '    ; /* MUTANT */',
     why: 'The helper is exported, unit-tested and dead. A six-minute cell-spread excursion speaks over the house exactly as it did at 21:14 on 2026-09-21.',
   },
   {

@@ -49,8 +49,9 @@ const MUTANTS = [
   {
     id: 'v1.173.0 ★★ the Telemetry stale warning speaks again',
     file: BC,
-    find: "      !a.id.startsWith('stale-'),",
-    to: '      true, /* MUTANT */',
+    // v1.187.0 — re-pointed: the peak-idle-pool exclusion now follows this line.
+    find: "      !a.id.startsWith('stale-') &&",
+    to: '      true && /* MUTANT */',
     why: 'A yellow is spoken ~20 s after every restart, and at every stale episode — before the remediation runs.',
   },
   {

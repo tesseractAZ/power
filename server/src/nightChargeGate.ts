@@ -261,7 +261,19 @@ export function computeNightChargeReadiness(
   const forecastBasisPct =
     withOutcome.length > 0 ? (forecastPool.length / withOutcome.length) * 100 : null;
 
-  const pvErrs = forecastPool.map((r) => asNum(r.pv_err_frac)).filter((v): v is number => v != null);
+  // v1.187.0 — the PV statistics read only rows whose PV verdict is forecast-skill
+  // evidence. `pv_verdict_set_aside` marks a band built for OTHER Cores than the actual
+  // PV it was graded against (the 2026-09-27 plan: a one-Core restart forecast graded
+  // against three Cores, counted "in band"). ★ Narrow on purpose: an incomplete-basis
+  // night is NOT set aside for that alone — a plan refused for a lasting forecast failure
+  // (2026-09-11, "PV band coverage 72% < 78%") is exactly what this gate must see, and
+  // dropping such nights would bias PV coverage upward. The load verdicts are untouched
+  // (the load band is the panel's own history, not the Core map). Counted, never silent.
+  const pvEvidence = (r: NightLedgerRow): boolean => r.pv_verdict_set_aside == null;
+  const pvPool = forecastPool.filter(pvEvidence);
+  const pvVerdictsSetAside = forecastPool.length - pvPool.length;
+
+  const pvErrs = pvPool.map((r) => asNum(r.pv_err_frac)).filter((v): v is number => v != null);
   const loadErrs = forecastPool.map((r) => asNum(r.load_err_frac)).filter((v): v is number => v != null);
   const pvMae = mean(pvErrs.map(Math.abs));
   const pvBias = mean(pvErrs);
@@ -282,16 +294,17 @@ export function computeNightChargeReadiness(
   // nothing to do with whether the load band is. Conflating them hid WHICH input
   // was broken — the live joint read 9.5% while the marginals were PV 57% and
   // load 14%, and only the second is badly wrong.
-  const pvFlags = forecastPool.filter((r) => r.pv_in_band != null).map((r) => truthy(r.pv_in_band));
+  const pvFlags = pvPool.filter((r) => r.pv_in_band != null).map((r) => truthy(r.pv_in_band));
   const loadFlags = forecastPool.filter((r) => r.load_in_band != null).map((r) => truthy(r.load_in_band));
   const frac = (f: boolean[]): number | null => (f.length > 0 ? f.filter(Boolean).length / f.length : null);
   const pvBandCoverage = frac(pvFlags);
   const loadBandCoverage = frac(loadFlags);
   // Nights with BOTH verdicts still define the sample size, and the joint is kept
-  // as an informational figure — it is no longer graded.
-  const coverageNights = forecastPool.filter((r) => r.pv_in_band != null && r.load_in_band != null).length;
+  // as an informational figure — it is no longer graded. v1.187.0: a set-aside PV verdict
+  // is not a verdict, so such a night counts toward neither.
+  const coverageNights = pvPool.filter((r) => r.pv_in_band != null && r.load_in_band != null).length;
   const bandCoverage = coverageNights > 0
-    ? forecastPool.filter((r) => truthy(r.pv_in_band) && truthy(r.load_in_band)).length / coverageNights
+    ? pvPool.filter((r) => truthy(r.pv_in_band) && truthy(r.load_in_band)).length / coverageNights
     : null;
 
   // ── ACTUATED pool (chronological; YYYY-MM-DD sorts lexically = by date). ──
@@ -441,6 +454,7 @@ export function computeNightChargeReadiness(
     loadBandCoverage: loadBandCoverage != null ? round(loadBandCoverage) : null,
     bandCoveragePct: bandCoverage != null ? round(bandCoverage * 100, 1) : null,
     coverageNights,
+    pvVerdictsSetAside, // v1.187.0 — forecast-pool rows whose PV verdict describes another fleet
     forecastBasisPct: forecastBasisPct != null ? round(forecastBasisPct, 1) : null,
     exclusionFrac: exclusionFrac != null ? round(exclusionFrac) : null,
     minActuatedNights: MIN_ACTUATED_NIGHTS,

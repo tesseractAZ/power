@@ -1,3 +1,119 @@
+## 1.187.0
+
+### Alarms stay trustworthy at the top of a charge; the night-charge record adds up
+
+**Cell-voltage alarms at full charge**
+
+- **No critical alarm at the end of a full charge.** When a pack reaches 100%, its cell voltages
+  spread apart for a few minutes while it finishes balancing, then settle. On 2026-09-29 at
+  15:34 and 15:39 that moment set off the critical alarm on the speakers and a [Critical] phone
+  notification for two healthy packs (104 and 93 mV, back to 67 mV three minutes later). A pack
+  now gets up to 5 minutes after balancing stops to settle; meanwhile its card reads
+  "End-of-charge cell spread, relaxing." If the spread has not come down, the alarm sounds as
+  before and says "Did not relax at the top of charge."
+- **Charging alone gets a shorter grace.** A full pack whose spread reaches the critical line
+  while charging but not balancing gets at most 5 minutes from that moment; a long trickle charge
+  cannot extend it. Only the Core's live feed counts as charging, never the cloud's repeated
+  old reading.
+- **One grace per full charge.** Both waits are counted from the first time the spread reached
+  the critical line since the pack reached 95%: at most 5 minutes while charging, at most 20
+  minutes after balancing. A spread that dips and comes back on alternate readings no longer
+  starts a new wait each time. A pack that drops below 95% and charges again starts afresh, and
+  so does a pack that has rested at 95% or more with its spread under 50 mV for 20 minutes, so a
+  second full-charge spread in one long stay at the top gets its wait too.
+- **A restart does not reset the limits.** After a restart (for example an automatic update) a
+  pack whose critical alarm was already standing keeps counting from when it began, and a
+  critical that was held quiet before the restart still goes to the phone when it sounds. Known
+  limit: the top-of-charge session itself is carried over a restart only when the standing
+  critical began within the last hour, so a spread that keeps crossing the critical line can be
+  held quiet for one more wait (at most 20 minutes) after a restart that lands later than that.
+- **Hard limits on every wait.** A spread of 150 mV or more sounds at once, balancing or not. A
+  spread that stays at the critical line for 20 minutes at the top of charge sounds even while
+  the pack is still balancing; before this release balancing could keep it quiet with no limit.
+  At 95% or more the 20 minutes count from the first time the spread reached the line in that
+  full charge, even when it dips between readings; between 85% and 95% they start again when the
+  spread falls under 50 mV.
+- **New critical alarm: "Cell overvoltage".** It sounds when any cell reaches 3.60 V (the highest
+  cell seen on these packs since July is 3.53 V), from any Core, with no mute.
+- **The peer cell-spread warning no longer speaks at the top of charge.** "Cell-voltage spread —
+  peer outlier" stays off the speakers while its pack is at 95% or more below the critical line,
+  and while that pack's own critical is being held as above. It still shows on the Alerts page
+  and still goes to the phone. On 09-29 it caused four spoken warnings and a spoken all-clear.
+
+**Announcements**
+
+- **No false "All clear" while a warning flickers.** The house now has to stay clear for 3
+  minutes before the all-clear is spoken. Anything getting worse, and any new warning or
+  critical, is still announced at once, and a different critical replacing one that just
+  cleared is announced.
+- **No "All clear" while a critical that sounded is only held.** If a cell-imbalance critical
+  has sounded and is then held quiet again (the pack started balancing), or is missing between
+  two of its readings (the pack reports every 3 minutes), the all-clear waits until that
+  critical has been gone for 7 minutes, then follows 3 minutes later. If it sounds again in the
+  meantime it is not repeated. A new warning in the meantime is announced at once, and the
+  critical sounding again after it is still not repeated.
+- **The same warning is not repeated with new numbers.** A returning warning with slightly
+  different figures and nothing said in between is not spoken again for 30 minutes; after a
+  spoken all-clear it is always spoken.
+- **A blocked announcement is spoken later.** An all-clear (or a new warning) held back by the
+  repeat guard is spoken once, a couple of minutes later, if it still applies and outside quiet
+  hours, so the last thing heard is never a critical that has already cleared.
+- **Broadcast status is accurate.** A blocked announcement is listed as the last suppressed
+  announcement, no longer as the last broadcast with a "partial" result.
+
+**Notifications and the log**
+
+- **MPPT temperature alerts no longer fire because a Core is idle.** An idle Core's MPPTs run
+  cooler than under load, and that produced "MPPT temperature unusual for the hour" warnings
+  (14 of the 16 pushes before 15:00 on 09-29), held the spoken status at yellow and taught the
+  auto-tune to silence the whole alert type. A cooler MPPT, or a hotter one explained by the
+  load the Core is carrying, now shows as information and is not pushed or spoken. An MPPT
+  hotter than its own normal under-load temperature, or hot with no load to explain it, still
+  warns. Replayed over two weeks: 52 warnings under the old rule, none under the new one. The
+  auto-tune silence those alerts built up is lifted on first start.
+- **"Resolved" notices are no longer lost.** An alert that was pushed now gets its "Resolved"
+  even when several clear at once or the alert went quiet before clearing. Exceptions, as
+  before: no "Resolved" when "Resolved" notices are turned off, for a push sent at a tier below
+  the minimum severity (such as one the auto-tune lowered), for a past outage, or when the
+  alert's priority has since been turned off in Alert Settings (that card stays).
+- **A quieter log.** The routine "still running … carrying its last good value" / "fresh again"
+  pair, over half of the log, is no longer written; a failing or stuck analytics feed is still
+  logged (a stuck one as a warning).
+- **Clearer lines for critical alerts shown but not announced.** The line names the Core, the
+  pack and the actual reason (balancing, end-of-charge window, bench spare, off-panel Core)
+  instead of always blaming a bench spare or an off-panel Core.
+
+**Night charge and cost**
+
+- **The overnight charge now starts at 11 PM and stops at 5 AM.** The reserve used to be raised
+  at 10:55 PM and put back at 5:05 AM; on a low night those minutes were bought at the off-peak
+  price (09-28: 1.1 kWh). The cancel deadline in the evening notice moves to 11 PM. At the window
+  close, "Charge Now" is switched off before the reserve is put back.
+- **Each night is checked against the right 4–7 PM peak.** The record used to look at the
+  afternoon before the plan, and counted weekend afternoons as peak. Each night is now checked
+  against the next weekday 4–7 PM it covers; Friday nights and holidays have none and say so.
+  Rows recorded before this release keep their old values and are marked as the old kind.
+- **Each night's record includes what the grid cost,** priced with the confirmed APS rates. These
+  per-night figures do not add up to the bill (some evening and weekend hours fall between
+  nights); Home Assistant's "Grid Cost Today" is the daily total. A missing rate (the winter
+  super-off-peak option is blank by default) is named in the start-up log.
+- **New low-priority notice, never spoken:** "Buying grid power on-peak while the battery pool
+  sits idle" — on a weekday 4–7 PM with the pool at least 5 points above its reserve and not
+  discharging (09-28: about $1.89). It never raises the chime and is never the alert read out
+  when another warning is announced. At most once per weekday afternoon, also across a restart
+  (a restart does not send a false "Resolved" for it either; a restart within about a minute of
+  the notice can lose that day's notice); no setting is changed.
+- **The tariff report shows the real peak hours** (4–7 PM Monday–Friday, not 3–8 PM) and the
+  12.59¢ overnight rate.
+- **Auto-mode readiness** no longer counts the 09-27 solar score, which came from a forecast
+  built on one Core after a restart.
+
+**Security**
+
+- Three indirect server dependencies flagged by the npm advisory database are updated to their
+  patched releases (brace-expansion 5.0.12; fast-uri 3.1.8 and 4.2.1). Lockfile only; no
+  direct dependency changes.
+
 ## 1.186.5
 
 ### Night charge: a restart before 21:30 no longer costs the night
