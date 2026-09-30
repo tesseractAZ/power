@@ -18,13 +18,20 @@
 - **One grace per full charge.** Both waits are counted from the first time the spread reached
   the critical line since the pack reached 95%: at most 5 minutes while charging, at most 20
   minutes after balancing. A spread that dips and comes back on alternate readings no longer
-  starts a new wait each time; a pack that drops below 95% and charges again starts afresh.
+  starts a new wait each time. A pack that drops below 95% and charges again starts afresh, and
+  so does a pack that has rested at 95% or more with its spread under 50 mV for 20 minutes, so a
+  second full-charge spread in one long stay at the top gets its wait too.
 - **A restart does not reset the limits.** After a restart (for example an automatic update) a
   pack whose critical alarm was already standing keeps counting from when it began, and a
-  critical that was held quiet before the restart still goes to the phone when it sounds.
+  critical that was held quiet before the restart still goes to the phone when it sounds. After
+  an outage of more than an hour, a start time from before it no longer takes the wait away from
+  the next full charge.
 - **Hard limits on every wait.** A spread of 150 mV or more sounds at once, balancing or not. A
   spread that stays at the critical line for 20 minutes at the top of charge sounds even while
   the pack is still balancing; before this release balancing could keep it quiet with no limit.
+  At 95% or more the 20 minutes count from the first time the spread reached the line in that
+  full charge, even when it dips between readings; between 85% and 95% they start again when the
+  spread falls under 50 mV.
 - **New critical alarm: "Cell overvoltage".** It sounds when any cell reaches 3.60 V (the highest
   cell seen on these packs since July is 3.53 V), from any Core, with no mute.
 - **The peer cell-spread warning no longer speaks at the top of charge.** "Cell-voltage spread —
@@ -39,9 +46,11 @@
   critical, is still announced at once, and a different critical replacing one that just
   cleared is announced.
 - **No "All clear" while a critical that sounded is only held.** If a cell-imbalance critical
-  has sounded and is then held quiet again (the pack started balancing), the all-clear waits
-  until that critical has actually cleared, then follows 3 minutes later. If it sounds again
-  in the meantime it is not repeated.
+  has sounded and is then held quiet again (the pack started balancing), or is missing between
+  two of its readings (the pack reports every 3 minutes), the all-clear waits until that
+  critical has been gone for 7 minutes, then follows 3 minutes later. If it sounds again in the
+  meantime it is not repeated. A new warning in the meantime is announced at once, and the
+  critical sounding again after it is still not repeated.
 - **The same warning is not repeated with new numbers.** A returning warning with slightly
   different figures and nothing said in between is not spoken again for 30 minutes; after a
   spoken all-clear it is always spoken.
@@ -91,7 +100,8 @@
   sits idle" — on a weekday 4–7 PM with the pool at least 5 points above its reserve and not
   discharging (09-28: about $1.89). It never raises the chime and is never the alert read out
   when another warning is announced. At most once per weekday afternoon, also across a restart
-  (a restart does not send a false "Resolved" for it either); no setting is changed.
+  (a restart does not send a false "Resolved" for it either; a restart within about a minute of
+  the notice can lose that day's notice); no setting is changed.
 - **The tariff report shows the real peak hours** (4–7 PM Monday–Friday, not 3–8 PM) and the
   12.59¢ overnight rate.
 - **Auto-mode readiness** no longer counts the 09-27 solar score, which came from a forecast
