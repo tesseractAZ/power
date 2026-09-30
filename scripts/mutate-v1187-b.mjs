@@ -11,6 +11,10 @@
  * demoted for the hold (restored when the level comes back); the committed criticals accumulate
  * through a red episode.
  *
+ * Log review 09-29 (xxxviii-xliv): a critical that sounded and is then held by a bounded
+ * cell-spread mute is held, not cleared (soundedCriticalHeld): no move below red, nor to green,
+ * commits until it clears or annunciates again.
+ *
  *   node scripts/mutate-v1187-b.mjs
  *
  * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
@@ -77,14 +81,14 @@ const MUTANTS = [
   {
     id: 'vii. ★★ the green clock survives a return to yellow',
     file: BC,
-    find: "    if (level !== 'green') greenSinceMs = null;",
+    find: "    if (level !== 'green' || critHeld) greenSinceMs = null;",
     to: "    if (false) greenSinceMs = null; /* MUTANT */",
     why: 'Short greens accumulate across flickers until one of them speaks the all-clear.',
   },
   {
     id: 'viii. ★★ the below-red clock survives a red',
     file: BC,
-    find: "    if (level === 'red') belowRedSinceMs = null;",
+    find: "    if (level === 'red' || critHeld) belowRedSinceMs = null;",
     to: "    if (false) belowRedSinceMs = null; /* MUTANT */",
     why: 'Time before the red counts toward its clearing: red → yellow commits at once.',
   },
@@ -290,6 +294,56 @@ const MUTANTS = [
     find: "    prevCritFps = l === 'red' && prevLevel === 'red' ? new Set([...prevCritFps, ...ids.crit]) : new Set(ids.crit);",
     to: '    prevCritFps = new Set(ids.crit); /* MUTANT */',
     why: 'A critical whose fault code alternates re-sounds the klaxon on every flip once the 2-min gap lapses.',
+  },
+  /* ── log review 09-29: a critical that sounded and is then held by a bounded mute ── */
+  {
+    id: 'xxxviii. ★★★ the tick ignores a sounded critical held by a bounded cell-spread mute',
+    file: BC,
+    find: '    const critHeld = soundedCriticalHeld(alerts, soundedCritFps);',
+    to: '    const critHeld = false as boolean; /* MUTANT */',
+    why: '"All clear" is spoken between two critical klaxons for the same pack while its card is open.',
+  },
+  {
+    id: 'xxxix. ★★★ the green clock runs under a held sounded critical',
+    file: BC,
+    find: "    if (level !== 'green' || critHeld) greenSinceMs = null;",
+    to: "    if (level !== 'green') greenSinceMs = null; /* MUTANT */",
+    why: 'As xxxviii: the green commits after the dwell and the all-clear is spoken.',
+  },
+  {
+    id: 'xl. ★★ the below-red clock runs under a held sounded critical',
+    file: BC,
+    find: "    if (level === 'red' || critHeld) belowRedSinceMs = null;",
+    to: "    if (level === 'red') belowRedSinceMs = null; /* MUTANT */",
+    why: 'A warning that stood with the critical is committed as the condition below a red that is only held.',
+  },
+  {
+    id: 'xli. ★★★ a red commit does not record what sounded',
+    file: BC,
+    find: "    if (l === 'red') for (const f of ids.crit) soundedCritFps.add(f);",
+    to: '    /* MUTANT */',
+    why: 'As xxxviii: nothing is ever held.',
+  },
+  {
+    id: 'xlii. ★★ what sounded is never forgotten',
+    file: BC,
+    find: '  for (const f of [...sounded]) if (!present.has(f)) sounded.delete(f);',
+    to: '  /* MUTANT */',
+    why: 'A critical that cleared and returns muted, never heard in its new episode, withholds every later all-clear.',
+  },
+  {
+    id: 'xliii. ★★ any bounded-muted critical holds, sounded or not',
+    file: BC,
+    find: "  return alerts.some((a) => a.severity === 'critical' && a.mutedBy != null && sounded.has(alertFingerprint(a)));",
+    to: "  return alerts.some((a) => a.severity === 'critical' && a.mutedBy != null); /* MUTANT */",
+    why: 'Every top-of-charge knee (muted from its first reading, never heard) withholds the all-clear after an unrelated warning.',
+  },
+  {
+    id: 'xliv. ★ a policy mute holds like a bounded one',
+    file: BC,
+    find: "  return alerts.some((a) => a.severity === 'critical' && a.mutedBy != null && sounded.has(alertFingerprint(a)));",
+    to: "  return alerts.some((a) => a.severity === 'critical' && (a as { annunciate?: boolean }).annunciate === false && sounded.has(alertFingerprint(a))); /* MUTANT */",
+    why: 'A Core moved off the panel roster after its critical sounded withholds the all-clear for as long as its card stands.',
   },
 ];
 

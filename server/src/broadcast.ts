@@ -715,6 +715,35 @@ export function hasNewIdentity(current: readonly string[], known: ReadonlySet<st
 }
 
 /**
+ * v1.187.0 (log review) — A CRITICAL THAT SOUNDED AND IS THEN HELD BY A BOUNDED CELL-SPREAD MUTE IS
+ * HELD, NOT CLEARED. A vdiff-crit that annunciated (the red klaxon, a [Critical] push) can be muted
+ * again on a later reading — the BMS resumes balancing below 95% SoC, where the balancing mute
+ * applies for up to 20 minutes from the first crossing — and then it no longer counts: the level
+ * reads green (its peer outlier is quieted with it), the de-escalation dwell committed that green
+ * after 3 minutes, and allClearSpeechBlocked, which reads `annunciate`, let "All clear. All
+ * stations report normal." be spoken with the critical's card open — between two klaxons for the
+ * same pack when the mute lapsed. While this returns true the tick treats the observation as red
+ * for the dwell clocks, so no move below red (nor yellow → green) commits: the hold lasts until
+ * that critical clears — then the lower level stands its own full dwell and the all-clear is
+ * spoken — or annunciates again, a flicker the hold absorbs (nothing is re-spoken).
+ *
+ * `sounded` holds the fingerprints of the criticals counted at a committed red (adoptLevel). It is
+ * PRUNED here to the criticals still present, so a critical that clears and later returns muted,
+ * never having sounded in its new episode, holds nothing (as before: a muted critical that never
+ * sounded does not block the all-clear). Only the typed bounded mute (`mutedBy`) holds — never a
+ * policy mute (a bench spare, an off-panel Core), which does not end with the condition. MUTATES
+ * `sounded`; pure otherwise. Exported for tests.
+ */
+export function soundedCriticalHeld(
+  alerts: ReadonlyArray<Pick<Alert, 'id' | 'title' | 'fault' | 'severity' | 'mutedBy'>>,
+  sounded: Set<string>,
+): boolean {
+  const present = new Set(alerts.filter((a) => a.severity === 'critical').map((a) => alertFingerprint(a)));
+  for (const f of [...sounded]) if (!present.has(f)) sounded.delete(f);
+  return alerts.some((a) => a.severity === 'critical' && a.mutedBy != null && sounded.has(alertFingerprint(a)));
+}
+
+/**
  * v1.187.0 — the REPEAT-WARNING storm gate. The identical-message gate compares the whole
  * spoken text, and a warning's text carries its live reading ("spread is 58 mV … peer z-score
  * 7.9"), so it never matched a repeat of one alert: on 2026-09-29 the same Core 1 pack 1
@@ -1039,6 +1068,9 @@ export function startBroadcastMonitor(
   // different critical replacing a cleared one at the same count.
   let prevCritFps: ReadonlySet<string> = new Set();
   let prevWarnFps: ReadonlySet<string> = new Set();
+  // v1.187.0 (log review) — the criticals counted at a committed red and still present
+  // (soundedCriticalHeld prunes it every tick). Unlike prevCritFps it outlives a lower commit.
+  const soundedCritFps = new Set<string>();
   let firstTick = true;
   let stopped = false;
   let lastBroadcastAt: number | null = null;
@@ -1162,6 +1194,8 @@ export function startBroadcastMonitor(
     // replacement-at-the-same-count case) still reads as new. Any commit of a lower level ends the
     // episode and starts the set afresh. Computed before prevLevel is overwritten.
     prevCritFps = l === 'red' && prevLevel === 'red' ? new Set([...prevCritFps, ...ids.crit]) : new Set(ids.crit);
+    // v1.187.0 (log review) — a red commit records what sounded (soundedCriticalHeld).
+    if (l === 'red') for (const f of ids.crit) soundedCritFps.add(f);
     prevLevel = l;
     prevCrit = c;
     prevWarnFps = new Set(ids.warn);
@@ -2416,9 +2450,14 @@ export function startBroadcastMonitor(
     const ids = { crit: criticalFingerprints, warn: warningFingerprints };
     // v1.187.0 — the de-escalation dwell's clocks run on EVERY tick, whatever else the tick
     // does, so "has stood for 3 minutes" means 3 minutes of observations, not of commits.
-    if (level === 'red') belowRedSinceMs = null;
+    // v1.187.0 (log review) — a critical that sounded and is now held by a bounded cell-spread
+    // mute reads as red to these clocks (soundedCriticalHeld): held, not cleared. No move below
+    // red, nor to green, commits until it clears (then the lower level stands its full dwell) or
+    // annunciates again.
+    const critHeld = soundedCriticalHeld(alerts, soundedCritFps);
+    if (level === 'red' || critHeld) belowRedSinceMs = null;
     else if (belowRedSinceMs == null) belowRedSinceMs = tickNow;
-    if (level !== 'green') greenSinceMs = null;
+    if (level !== 'green' || critHeld) greenSinceMs = null;
     else if (greenSinceMs == null) greenSinceMs = tickNow;
     if (firstTick) {
       firstTick = false;
@@ -2578,7 +2617,7 @@ export function startBroadcastMonitor(
           conditionSpoken = false;
           persistStatus();
         }
-        log(`broadcast: ${committed} → ${level} held — a lower condition is committed only after it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s (flicker guard); nothing is spoken meanwhile`);
+        log(`broadcast: ${committed} → ${level} held — a lower condition is committed only after it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s (flicker guard); nothing is spoken meanwhile${critHeld ? '. A critical that sounded is held by a bounded cell-spread mute, not cleared: the hold lasts until it clears or annunciates again' : ''}`);
       }
       // v1.187.0 (review) — GREEN observed under a held level destroys the red-replay evidence
       // NOW, not when the green commits. The evidence is read only at boot: kept through the hold,
