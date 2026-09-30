@@ -105,7 +105,10 @@ const peer = (mv: number): Alert => ({
 const WARN_T: Alert = { id: 'pack-temp-warn-DPU-A', severity: 'warning', category: 'Thermal', device: 'Core 1', coreNum: 1, title: 'Pack temperature high', detail: 'x' } as Alert;
 /** A different warning that would be named aloud on its own. */
 const WARN_S: Alert = { id: 'soc-low-DPU-C-3', severity: 'warning', category: 'Battery', device: 'Core 3', coreNum: 3, packNum: 3, title: 'Pack state of charge low', detail: 'x' } as Alert;
-const CRIT: Alert = { id: 'vdiff-crit-COREXXX00XXX0001-1', severity: 'critical', category: 'Battery', device: 'Core 1', coreNum: 1, packNum: 1, title: 'Cell imbalance', detail: 'cell spread 93 mV' } as Alert;
+/** A critical released the tick it clears. Not a cell-spread critical: one of those that sounded is
+ *  held for SOUNDED_VDIFF_ABSENT_HOLD_MS after it clears (it may be between two BMS readings —
+ *  conditionDeescalationDwell.test.ts), so its all-clear never falls inside the storm gap. */
+const CRIT: Alert = { id: 'cell-ovp-COREXXX00XXX0001-1', severity: 'critical', category: 'Battery', device: 'Core 1', coreNum: 1, packNum: 1, title: 'Cell overvoltage', detail: 'highest cell at 3.612 V' } as Alert;
 /** A DIFFERENT critical, on another device. */
 const CRIT_2: Alert = { id: 'dpu-err-DPU-B', severity: 'critical', category: 'Battery', device: 'Core 2', coreNum: 2, title: 'Inverter error code', detail: 'x', fault: 'err7' } as Alert;
 /** Excluded from the condition count (the runway alarm owns it) but a critical, so a green
@@ -471,7 +474,7 @@ test('★★ review: …but not once what was new has gone (the critical still s
   await until(r, () => played(r, 'red') === 1, 'the red');
   alerts = [CRIT_2];
   await until(r, () => r.has('red will be re-presented'), 'the replacement refused by the gap');
-  alerts = [{ ...CRIT, detail: 'cell spread 95 mV' } as Alert]; // the first returns (new text), the replacement gone
+  alerts = [{ ...CRIT, detail: 'highest cell at 3.618 V' } as Alert]; // the first returns (new text), the replacement gone
   offset += 2 * MIN;
   await until(r, () => r.has('storm-gated red is not re-presented — what was new to it is no longer counted'), 'the drop');
   await sleep(60);

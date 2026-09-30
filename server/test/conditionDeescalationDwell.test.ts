@@ -83,7 +83,14 @@ const KLAXON = mkdtempSync(resolve(tmpdir(), 'ef-dwell-klaxon-'));
 await generateAudioAssets(KLAXON, () => {});
 const renderTts = async () => ({ ok: true as const, wav: pcmToWav(Buffer.alloc(2 * 1100), 22050, 2, 1), durationMs: 1 });
 let alerts: Alert[] = [];
-const store = { get: () => ({ alerts }) } as any;
+/** When set, the NEXT tick alone reads it (the tick reads the store exactly once), then `alerts`. */
+let oneTick: Alert[] | null = null;
+const store = {
+  get: () => {
+    if (oneTick != null) { const a = oneTick; oneTick = null; return { alerts: a }; }
+    return { alerts };
+  },
+} as any;
 
 /** The 09-29 peer outlier: ONE alert id whose severity flips warning↔info with the sibling MAD,
  *  and whose detail carries the live reading. */
@@ -146,6 +153,7 @@ beforeEach(() => {
   rmSync(process.env.BROADCAST_RED_REPLAY_STATE_PATH!, { force: true });
   announces = 0;
   alerts = [];
+  oneTick = null;
   // The peer alert has stood past the v1.174.0 imbalance speak hold.
   restampAlertOnset(PEER_ID, Date.now() - 11 * MIN);
 });
@@ -452,6 +460,24 @@ const HELD_B: Alert = {
   detail: 'spread 95 mV BMS is actively balancing the cells.',
 } as Alert;
 
+const ABSENT_HOLD = B.SOUNDED_VDIFF_ABSENT_HOLD_MS;
+const HOLD_LINE = 'A cell-spread critical that sounded is held, not cleared';
+
+/** A sounded cell-spread critical has CLEARED at the current tick: it is held for the absent hold
+ *  (it may only be between two readings), then the lower level stands its own full dwell. */
+async function clearAndWaitOutTheHolds(r: Rig, level: 'green' | 'yellow'): Promise<void> {
+  await sleep(60); // the clear is observed: both holds are measured from here, not from the first green reading
+  offset += ABSENT_HOLD - 5 * SEC;
+  await sleep(60);
+  assert.equal(played(r, level), 0, 'held between readings: not before it has been gone the absent hold');
+  offset += 6 * SEC; // released
+  await sleep(60); // the lower level's dwell starts now
+  offset += DWELL - 5 * SEC;
+  await sleep(60);
+  assert.equal(played(r, level), 0, 'not before the clear has also stood the dwell');
+  offset += 6 * SEC;
+}
+
 test('★★★ log review: a critical that SOUNDED and is then held by a bounded cell-spread mute is held, not cleared — no all-clear between two klaxons', async () => {
   const r = await started();
   alerts = [CRIT_B];
@@ -460,7 +486,7 @@ test('★★★ log review: a critical that SOUNDED and is then held by a bounde
   // counts. Merged v1.187.0 committed green after the dwell and spoke the all-clear.
   alerts = [HELD_B];
   await until(r, () => r.has('red → green held'), 'the hold');
-  assert.ok(r.has('held by a bounded cell-spread mute, not cleared'));
+  assert.ok(r.has(HOLD_LINE));
   offset += DWELL + 30 * SEC;
   await sleep(60);
   offset += 10 * MIN; // well past the dwell, the mute still holding
@@ -474,17 +500,14 @@ test('★★★ log review: a critical that SOUNDED and is then held by a bounde
   await sleep(60);
   assert.equal(played(r, 'red'), 1, 'not a second klaxon for the same critical');
   assert.equal(announces, 1);
-  // Held once more, then the critical genuinely CLEARS: the all-clear follows its own full dwell.
+  // Held once more, then the critical genuinely CLEARS: the all-clear follows the absent hold and
+  // its own full dwell.
   alerts = [HELD_B];
   await until(r, () => r.count('red → green held') === 2, 'the second hold');
   offset += 5 * MIN;
   await sleep(60);
   alerts = [];
-  await sleep(60); // the clear is observed: the dwell starts now, not at the first green reading
-  offset += DWELL - 5 * SEC;
-  await sleep(60);
-  assert.equal(played(r, 'green'), 0, 'not before the clear itself has stood the dwell');
-  offset += 6 * SEC;
+  await clearAndWaitOutTheHolds(r, 'green');
   await until(r, () => played(r, 'green') === 1, 'the all-clear once the critical has cleared');
   assert.equal(r.mon.status().lastSpokenMessage, ALL_CLEAR_MESSAGE);
   assert.equal(announces, 2);
@@ -501,9 +524,8 @@ test('★★ log review: …and a warning that stood with it is not committed be
   assert.equal(played(r, 'yellow'), 0, 'no de-escalation below a critical that sounded and is held');
   assert.equal(r.mon.status().conditionLevel, 'red');
   alerts = [WARN_K]; // the critical clears
-  await sleep(60);
-  offset += DWELL + SEC;
-  await until(r, () => played(r, 'yellow') === 1, 'the yellow once the clear has stood the dwell');
+  await clearAndWaitOutTheHolds(r, 'yellow');
+  await until(r, () => played(r, 'yellow') === 1, 'the yellow once the clear has stood the holds');
 });
 
 test('★★ log review: a muted critical that never SOUNDED holds nothing (the all-clear after a cleared warning is spoken, as before)', async () => {
@@ -514,29 +536,203 @@ test('★★ log review: a muted critical that never SOUNDED holds nothing (the 
   await until(r, () => r.has('yellow → green held'), 'the hold');
   offset += DWELL + SEC;
   await until(r, () => played(r, 'green') === 1, 'the all-clear');
-  assert.ok(!r.has('held by a bounded cell-spread mute'));
+  assert.ok(!r.has(HOLD_LINE));
+});
+
+test('★★ log review: a critical that annunciated on ONE reading — the tick that commits the red — and is muted from the next is held too', async () => {
+  // Nothing but the commit can record it: the tick-time recording needs the committed level to be
+  // red already, and every tick after the commit reads it muted.
+  const r = await started();
+  alerts = [HELD_B]; // every later reading
+  oneTick = [CRIT_B]; // the one reading at which it annunciated
+  await until(r, () => played(r, 'red') === 1, 'the red');
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += DWELL + 10 * MIN;
+  await sleep(60);
+  assert.equal(played(r, 'green'), 0, 'no all-clear while the critical that sounded is held');
+  assert.equal(r.mon.status().conditionLevel, 'red');
+});
+
+test('★★★ log review (verifier probe 1): sounded → gone 60 s → loud again inside the hold → muted: still held, no all-clear', async () => {
+  // The return inside the hold is a flicker the hold absorbs, so nothing is committed; the sounded
+  // record must survive both the absence and that uncommitted return.
+  const r = await started();
+  alerts = [CRIT_B];
+  await until(r, () => played(r, 'red') === 1, 'red');
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 60 * SEC;
+  await sleep(40);
+  alerts = [CRIT_B];
+  await until(r, () => r.has('flicker absorbed'), 'loud again: absorbed');
+  offset += 30 * SEC;
+  await sleep(40);
+  alerts = [HELD_B];
+  await until(r, () => r.count('red → green held') === 2, 'held again');
+  for (let i = 0; i < 4; i++) { offset += 5 * MIN; await sleep(40); }
+  assert.equal(played(r, 'green'), 0, '"All clear" is not spoken with the critical\'s card open');
+  assert.ok(!r.has('condition transition → green'));
+  assert.equal(r.mon.status().conditionLevel, 'red');
+  assert.equal(played(r, 'red'), 1);
+});
+
+test('★★★ log review (verifier probe 1b): a critical counted under a committed red is recorded even when nothing commits', async () => {
+  // Gone longer than the absent hold (released, the green dwell running), then loud again inside
+  // that dwell: absorbed, nothing committed. Only the tick's own recording keeps it "sounded".
+  const r = await started();
+  alerts = [CRIT_B];
+  await until(r, () => played(r, 'red') === 1, 'red');
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += ABSENT_HOLD + 10 * SEC; // released: the green dwell starts
+  await sleep(40);
+  offset += 60 * SEC; // inside the dwell
+  await sleep(40);
+  alerts = [CRIT_B];
+  await until(r, () => r.has('flicker absorbed'), 'loud again: absorbed');
+  alerts = [HELD_B];
+  await until(r, () => r.count('red → green held') === 2, 'held again');
+  for (let i = 0; i < 4; i++) { offset += 5 * MIN; await sleep(40); }
+  assert.equal(played(r, 'green'), 0, 'no all-clear between two klaxons');
+  assert.equal(r.mon.status().conditionLevel, 'red');
+});
+
+test('★★★ log review (verifier probe 2): a spread that follows the charge current — loud on alternate readings, gone 200 s between — sounds ONE red and no all-clear', async () => {
+  // 95 / 45 mV on alternate BMS readings: the critical stands ~180 s, then is absent ~200 s (the
+  // monitor publishes on a 20 s grid) — longer than the dwell. Before, green committed between
+  // readings: 8 red klaxons and 7 all-clears over 8 cycles.
+  const r = await started();
+  alerts = [CRIT_B];
+  await until(r, () => played(r, 'red') === 1, 'the first loud reading');
+  for (let i = 0; i < 8; i++) {
+    offset += 150 * SEC; // the loud reading stands (the clip took 30 s of it the first time)
+    await sleep(30);
+    alerts = [];
+    await sleep(30);
+    offset += 200 * SEC;
+    await sleep(30);
+    alerts = [CRIT_B];
+    await sleep(30);
+  }
+  // One missed BMS reading: gone for two periods.
+  alerts = [];
+  await sleep(30);
+  offset += 380 * SEC;
+  await sleep(30);
+  alerts = [CRIT_B];
+  await sleep(40);
+  assert.equal(played(r, 'red'), 1, 'one klaxon for the fault');
+  assert.equal(played(r, 'green'), 0, 'no all-clear between its readings');
+  assert.equal(announces, 1);
+  assert.equal(r.mon.status().conditionLevel, 'red');
+  // …and when it genuinely clears, exactly one all-clear.
+  alerts = [];
+  await clearAndWaitOutTheHolds(r, 'green');
+  await until(r, () => played(r, 'green') === 1, 'the all-clear');
+  offset += 20 * MIN;
+  await sleep(60);
+  assert.equal(played(r, 'green'), 1, 'once');
+  assert.equal(announces, 2);
+});
+
+test('★★ log review: a genuine clear of a sounded cell-spread critical speaks exactly one all-clear, after the absent hold and the dwell', async () => {
+  const r = await started();
+  alerts = [CRIT_B];
+  await until(r, () => played(r, 'red') === 1, 'red');
+  offset += 3 * MIN;
+  alerts = [];
+  await clearAndWaitOutTheHolds(r, 'green');
+  await until(r, () => played(r, 'green') === 1, 'the all-clear');
+  assert.equal(r.mon.status().lastSpokenMessage, ALL_CLEAR_MESSAGE);
+  offset += 30 * MIN;
+  await sleep(60);
+  assert.equal(announces, 2, 'one red, one all-clear');
+});
+
+test('★★★ log review (verifier probe 3): a NEW warning below a held sounded critical is spoken once; the committed red stands, and the critical sounding again is not a second klaxon', async () => {
+  const r = await started();
+  alerts = [CRIT_B];
+  await until(r, () => played(r, 'red') === 1, 'red');
+  alerts = [HELD_B];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 3 * MIN; // past the 2-min same-level gap: the new warning is not refused
+  alerts = [HELD_B, WARN_N];
+  await until(r, () => played(r, 'yellow') === 1, 'the new warning, spoken at once');
+  assert.ok(r.has('condition transition → yellow (new warning) spoken; the committed condition stays red'));
+  assert.equal(r.mon.status().conditionLevel, 'red', 'the committed condition stays red');
+  offset += 3 * MIN;
+  alerts = [CRIT_B, WARN_N]; // the held critical annunciates again
+  await sleep(80);
+  offset += 3 * MIN;
+  await sleep(60);
+  assert.equal(played(r, 'red'), 1, 'not a second klaxon: the red episode was never ended');
+  alerts = [HELD_B, WARN_N];
+  await sleep(40);
+  offset += DWELL + 10 * MIN;
+  await sleep(60);
+  assert.equal(played(r, 'yellow'), 1, 'the warning was spoken once');
+  assert.equal(r.mon.status().conditionLevel, 'red');
+  assert.equal(announces, 2);
+});
+
+test('★★ log review: …and inside the boot warm-up, a new warning adopted as a restart continuation keeps the held red committed too', async () => {
+  const a = await started();
+  alerts = [WARN_K];
+  await until(a, () => a.mon.status().conditionSpoken === true && a.mon.status().conditionLevel === 'yellow', 'a heard yellow');
+  a.stop();
+
+  alerts = [];
+  const b = rig();
+  await sleep(80); // the boot green is joined silently
+  assert.equal(b.mon.status().bootBaselineLevel, 'yellow');
+  alerts = [CRIT_B];
+  await until(b, () => played(b, 'red') === 1, 'the red: an escalation over the heard yellow');
+  alerts = [HELD_B];
+  await until(b, () => b.has('red → green held'), 'the hold');
+  alerts = [HELD_B, WARN_K]; // new to this red episode, and the level heard before the restart
+  await until(b, () => b.has('matches pre-restart advisory'), 'adopted silently as a restart continuation');
+  assert.equal(b.mon.status().conditionLevel, 'red', 'the held red stays committed');
+  alerts = [CRIT_B, WARN_K];
+  await sleep(80);
+  assert.equal(played(b, 'red'), 1);
 });
 
 /* ── pure pieces ─────────────────────────────────────────────────────────────────────────── */
 
-test('soundedCriticalHeld — only a critical counted at a committed red, still present, and held by a bounded mute', () => {
+test('soundedCriticalHeld — a critical counted at a committed red, held by a bounded mute or (a cell-spread critical) between its readings', () => {
   const fpB = alertFingerprint(CRIT_B);
+  const fpA = alertFingerprint(CRIT_A);
+  const t = 50_000_000;
   // Held: sounded, present, mutedBy set.
-  assert.equal(B.soundedCriticalHeld([HELD_B], new Set([fpB])), true);
+  assert.equal(B.soundedCriticalHeld([HELD_B], new Map([[fpB, t]]), t), true);
   // Never sounded in this episode: nothing is held.
-  assert.equal(B.soundedCriticalHeld([HELD_B], new Set()), false);
+  assert.equal(B.soundedCriticalHeld([HELD_B], new Map(), t), false);
   // Muted by POLICY (a bench spare / off-panel Core: no mutedBy): not a bounded mute.
   const policy = { ...CRIT_B, annunciate: false, muteReason: 'bench spare' } as Alert;
-  assert.equal(B.soundedCriticalHeld([policy], new Set([fpB])), false);
+  assert.equal(B.soundedCriticalHeld([policy], new Map([[fpB, t]]), t), false);
   // Still annunciating: it is counted, and the level is red anyway.
-  assert.equal(B.soundedCriticalHeld([CRIT_B], new Set([fpB])), false);
-  // Pruned once it clears: a later muted return that never sounded holds nothing.
-  const sounded = new Set([fpB, alertFingerprint(CRIT_A)]);
-  assert.equal(B.soundedCriticalHeld([CRIT_A], sounded), false);
-  assert.deepEqual([...sounded], [alertFingerprint(CRIT_A)], 'the cleared critical is forgotten');
-  assert.equal(B.soundedCriticalHeld([HELD_B], sounded), false);
+  assert.equal(B.soundedCriticalHeld([CRIT_B], new Map([[fpB, t]]), t), false);
+  // Present: its last-present tick is refreshed.
+  const seen = new Map([[fpB, t - 10 * MIN]]);
+  B.soundedCriticalHeld([HELD_B], seen, t);
+  assert.equal(seen.get(fpB), t);
+  // ABSENT, a cell-spread critical: held until it has been gone the absent hold, then released.
+  assert.equal(B.SOUNDED_VDIFF_ABSENT_HOLD_MS, 7 * MIN, 'two ~180 s BMS reading periods plus a 20 s monitor tick, rounded up');
+  const gone = new Map([[fpB, t]]);
+  assert.equal(B.soundedCriticalHeld([], gone, t + ABSENT_HOLD - 1), true, 'between readings');
+  assert.equal(gone.get(fpB), t, 'the last-present tick is not refreshed while it is absent');
+  assert.equal(B.soundedCriticalHeld([], gone, t + ABSENT_HOLD), false, 'released');
+  assert.deepEqual([...gone.keys()], [], 'and forgotten');
+  // ABSENT, any other critical: released and forgotten the tick it clears, as before.
+  const sounded = new Map([[fpB, t], [fpA, t]]);
+  assert.equal(B.soundedCriticalHeld([CRIT_B], sounded, t + 1), false);
+  assert.deepEqual([...sounded.keys()], [fpB], 'the cleared non-cell-spread critical is forgotten');
+  // A cleared cell-spread critical, once released, that returns muted never sounded in its new
+  // episode: nothing is held.
+  const released = new Map([[fpB, t]]);
+  assert.equal(B.soundedCriticalHeld([], released, t + ABSENT_HOLD), false);
+  assert.equal(B.soundedCriticalHeld([HELD_B], released, t + ABSENT_HOLD + 1), false);
 });
-
 
 test('deescalationDue — green needs GREEN to have stood; yellow (from red) needs below-red to have stood', () => {
   const t = 10_000_000;

@@ -15,6 +15,11 @@
  * cell-spread mute is held, not cleared (soundedCriticalHeld): no move below red, nor to green,
  * commits until it clears or annunciates again.
  *
+ * Verifier round (xlv-lii): a sounded cell-spread critical is also held between two of its
+ * readings (SOUNDED_VDIFF_ABSENT_HOLD_MS from when it was last present); a critical counted under
+ * a committed red is recorded on every such tick, not only at a red commit; and a new warning
+ * below a held sounded critical is spoken while the red stays committed (keepRed).
+ *
  *   node scripts/mutate-v1187-b.mjs
  *
  * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
@@ -299,7 +304,7 @@ const MUTANTS = [
   {
     id: 'xxxviii. ★★★ the tick ignores a sounded critical held by a bounded cell-spread mute',
     file: BC,
-    find: '    const critHeld = soundedCriticalHeld(alerts, soundedCritFps);',
+    find: '    const critHeld = soundedCriticalHeld(alerts, soundedCritFps, tickNow);',
     to: '    const critHeld = false as boolean; /* MUTANT */',
     why: '"All clear" is spoken between two critical klaxons for the same pack while its card is open.',
   },
@@ -320,30 +325,87 @@ const MUTANTS = [
   {
     id: 'xli. ★★★ a red commit does not record what sounded',
     file: BC,
-    find: "    if (l === 'red') for (const f of ids.crit) soundedCritFps.add(f);",
+    find: "    if (l === 'red') for (const f of ids.crit) soundedCritFps.set(f, Date.now());",
     to: '    /* MUTANT */',
     why: 'As xxxviii: nothing is ever held.',
   },
   {
     id: 'xlii. ★★ what sounded is never forgotten',
     file: BC,
-    find: '  for (const f of [...sounded]) if (!present.has(f)) sounded.delete(f);',
-    to: '  /* MUTANT */',
+    find: '    else sounded.delete(f);',
+    to: '    else { /* MUTANT */ }',
     why: 'A critical that cleared and returns muted, never heard in its new episode, withholds every later all-clear.',
   },
   {
     id: 'xliii. ★★ any bounded-muted critical holds, sounded or not',
     file: BC,
-    find: "  return alerts.some((a) => a.severity === 'critical' && a.mutedBy != null && sounded.has(alertFingerprint(a)));",
-    to: "  return alerts.some((a) => a.severity === 'critical' && a.mutedBy != null); /* MUTANT */",
+    find: "  return betweenReadings || alerts.some((a) => a.severity === 'critical' && a.mutedBy != null && sounded.has(alertFingerprint(a)));",
+    to: "  return betweenReadings || alerts.some((a) => a.severity === 'critical' && a.mutedBy != null); /* MUTANT */",
     why: 'Every top-of-charge knee (muted from its first reading, never heard) withholds the all-clear after an unrelated warning.',
   },
   {
     id: 'xliv. ★ a policy mute holds like a bounded one',
     file: BC,
-    find: "  return alerts.some((a) => a.severity === 'critical' && a.mutedBy != null && sounded.has(alertFingerprint(a)));",
-    to: "  return alerts.some((a) => a.severity === 'critical' && (a as { annunciate?: boolean }).annunciate === false && sounded.has(alertFingerprint(a))); /* MUTANT */",
+    find: "  return betweenReadings || alerts.some((a) => a.severity === 'critical' && a.mutedBy != null && sounded.has(alertFingerprint(a)));",
+    to: "  return betweenReadings || alerts.some((a) => a.severity === 'critical' && (a as { annunciate?: boolean }).annunciate === false && sounded.has(alertFingerprint(a))); /* MUTANT */",
     why: 'A Core moved off the panel roster after its critical sounded withholds the all-clear for as long as its card stands.',
+  },
+  /* ── verifier round: between readings, an uncommitted return, a new warning below the hold ── */
+  {
+    id: 'xlv. ★★★ a sounded cell-spread critical is released the tick it is absent (no absent hold)',
+    file: BC,
+    find: "    else if (f.startsWith('vdiff-crit-') && nowMs - lastPresentMs < absentHoldMs) betweenReadings = true;",
+    to: '    else if (false /* MUTANT */) betweenReadings = true;',
+    why: 'A spread loud on alternate BMS readings commits green between them: 8 klaxons and 7 all-clears in 8 cycles.',
+  },
+  {
+    id: 'xlvi. ★★ the absent hold covers every critical, not only a cell-spread one',
+    file: BC,
+    find: "f.startsWith('vdiff-crit-') && nowMs - lastPresentMs < absentHoldMs",
+    to: '/* MUTANT */ nowMs - lastPresentMs < absentHoldMs',
+    why: 'Every cleared critical (an inverter fault, an overvoltage) waits 7 extra minutes for its all-clear; a storm-gated one is never re-presented.',
+  },
+  {
+    id: 'xlvii. ★★ the last-present tick is not refreshed while a sounded critical is present',
+    file: BC,
+    find: '    if (present.has(f)) sounded.set(f, nowMs);',
+    to: '    if (present.has(f)) { /* MUTANT */ }',
+    why: 'A critical held muted for longer than the absent hold is released the moment it is next absent — the all-clear comes between its readings.',
+  },
+  {
+    id: 'xlviii. ★★ the absent hold is shorter than one missed BMS reading',
+    file: BC,
+    find: 'export const SOUNDED_VDIFF_ABSENT_HOLD_MS = 7 * 60_000;',
+    to: 'export const SOUNDED_VDIFF_ABSENT_HOLD_MS = 3 * 60_000; /* MUTANT */',
+    why: 'A single missed reading (360 s absent) lets green commit and the all-clear be spoken between two klaxons.',
+  },
+  {
+    id: 'xlix. ★★★ a critical counted under a committed red is recorded only at a red commit',
+    file: BC,
+    find: "    if (level === 'red' && prevLevel === 'red') for (const f of criticalFingerprints) soundedCritFps.set(f, tickNow);",
+    to: '    /* MUTANT */',
+    why: 'A critical that clears, is released, and comes back loud inside the green dwell (absorbed — nothing commits) is never recorded: its next mute speaks the all-clear.',
+  },
+  {
+    id: 'l. ★★★ a new warning below a held sounded critical commits yellow',
+    file: BC,
+    find: "    const keepRed = critHeld && level !== 'red' && prevLevel === 'red';",
+    to: '    const keepRed = false as boolean; /* MUTANT */',
+    why: 'The red episode ends under a critical that is only held; its next loud reading is a new red and sounds the klaxon again.',
+  },
+  {
+    id: 'li. ★★ a kept red commits the yellow tick\'s critical count',
+    file: BC,
+    find: "    adoptLevel(keepRed ? 'red' : level, keepRed ? prevCrit : crit, ids);",
+    to: "    adoptLevel(keepRed ? 'red' : level, crit, ids); /* MUTANT */",
+    why: 'The kept red records 0 criticals, so the held critical annunciating again is a count increase — a second klaxon.',
+  },
+  {
+    id: 'lii. ★ the restart continuation commits the yellow below a held sounded critical',
+    file: BC,
+    find: "      adoptLevel(keepRed ? 'red' : level, keepRed ? prevCrit : crit, ids, !keepRed);",
+    to: '      adoptLevel(level, crit, ids, true); /* MUTANT */',
+    why: 'Inside the boot warm-up a new warning that continues the heard baseline ends the red episode under a critical that is only held.',
   },
 ];
 
