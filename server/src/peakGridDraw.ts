@@ -1,5 +1,7 @@
+import { existsSync, readFileSync } from 'node:fs';
 import type { Alert } from './alerts.js';
 import { rateAt, localParts, type TariffModel } from './tariff.js';
+import { atomicWriteFileSync } from './atomicWrite.js';
 
 /**
  * v1.70.0 — ON-PEAK GRID-TO-BATTERY detection.
@@ -320,8 +322,10 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
  *
  * What this is NOT:
  *  - Not an alarm. It reports spend, never danger: severity warning (so it can push) at
- *    priority LOW, and EXCLUDED from the audible condition (broadcast.ts
- *    conditionFromAlerts) — money must never chime in the tier a grid loss uses.
+ *    priority LOW, and `audible: false` — never counted in the audible condition and never
+ *    the alert a yellow names aloud (broadcast.speakableAlerts; v1.187.0 log review). Money
+ *    must never chime in the tier a grid loss uses, nor be spoken in place of the warning
+ *    that raised it. conditionFromAlerts also drops the id, as a second guard.
  *  - Not a device write. The add-on changes no setting; the notice says what is
  *    happening and where the setting lives.
  *  - Not a second opinion near the reserve. At or within IDLE_HEADROOM_PCT of the
@@ -329,7 +333,8 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
  *    advising otherwise would be advising to spend outage margin (the same guard, for
  *    the same reason, as the grid-to-battery detector's below-reserve band).
  *  - Not a stream. It rises after a 10-min dwell, rides out a brief clear (10 min) so a
- *    load dip does not flap it, and fires at most ONCE per on-peak day.
+ *    load dip does not flap it, and fires at most ONCE per on-peak day — across a restart
+ *    too (the day is persisted; see persistIdlePoolFiredDay).
  * ═════════════════════════════════════════════════════════════════════════ */
 
 export const PEAK_IDLE_POOL_ALERT_ID = 'peak-idle-pool';
@@ -471,6 +476,50 @@ let idlePoolState: IdlePoolState = emptyIdlePoolState();
 /** Test seam. */
 export function resetIdlePoolState(): void { idlePoolState = emptyIdlePoolState(); }
 
+/*
+ * v1.187.0 (log review) — THE ONCE-PER-DAY PROMISE ACROSS A RESTART. The episode machine lives
+ * in memory, so an auto-update restart during an on-peak episode forgot that the day's notice had
+ * gone out: after boot the detector re-earned its dwell and pushed the same notice a second time
+ * that afternoon, although its text says "Sent at most once per on-peak day". Only `firedDay` is
+ * persisted (the monitor's `idle-pool-state.json`, written when it changes): the episode itself is
+ * NOT carried — a fresh process re-earns the dwell from fresh panel readings — so the boot orphan
+ * sweep drops a pushed `peak-idle-pool` record without a "Resolved:" (orphanedNotifiedIds), as it
+ * does msg-rate-floor-: there is no evidence at boot that the condition ended.
+ */
+const IDLE_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** The local date an idle-pool episode last rose, or null. */
+export function idlePoolFiredDay(): string | null { return idlePoolState.firedDay; }
+/** Restore a persisted `firedDay` (at boot). A null or malformed day restores nothing. */
+export function restoreIdlePoolFiredDay(day: string | null): void {
+  if (day == null || !IDLE_DAY_RE.test(day)) return;
+  idlePoolState = { ...idlePoolState, firedDay: day };
+}
+/** Read the persisted `firedDay`. Missing / corrupt file → null (the pre-v1.187.0 behaviour). */
+export function loadIdlePoolFiredDay(path: string): string | null {
+  try {
+    if (!existsSync(path)) return null;
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as { firedDay?: unknown };
+    return typeof raw?.firedDay === 'string' && IDLE_DAY_RE.test(raw.firedDay) ? raw.firedDay : null;
+  } catch {
+    return null;
+  }
+}
+/**
+ * Persist the current `firedDay` when it differs from `persisted` (the value last written). Returns
+ * the value now on disk: `persisted` again when nothing changed or the write failed (retried on the
+ * next tick). Best-effort — never throws into the alarm loop.
+ */
+export function persistIdlePoolFiredDay(path: string, persisted: string | null): string | null {
+  const day = idlePoolState.firedDay;
+  if (day === persisted) return persisted;
+  try {
+    atomicWriteFileSync(path, JSON.stringify({ firedDay: day }));
+    return day;
+  } catch {
+    return persisted;
+  }
+}
+
 /** The whole evaluation for one tick — the ONLY entry point callers should use. */
 export function evaluateIdlePool(
   i: IdlePoolInputs,
@@ -516,9 +565,15 @@ export function peakIdlePoolAlerts(v: IdlePoolVerdict, nowMs: number): Alert[] {
     severity: 'warning' as const,
     category: 'Grid' as const,
     device: 'Smart Home Panel 2',
-    // Money, not danger: the floor of the priority union, and never audible
-    // (broadcast.ts conditionFromAlerts drops this id).
+    // Money, not danger: the floor of the priority union, and never audible.
     priority: 'low' as const,
+    // v1.187.0 (log review) — `audible: false` is what keeps it off the speakers: speakableAlerts
+    // drops it from the array both the condition count and the spoken message are built from,
+    // and pickPrimaryAlert refuses it. The id exclusion in conditionFromAlerts kept it out of the
+    // COUNT only, so when another warning raised the yellow (the alarm host running hot on an
+    // on-peak afternoon) this unlocated Grid notice outranked it and was the alert voiced. The
+    // [Low] push and the card are unchanged (risingEdgePushes reads annunciate only).
+    audible: false,
     title: 'Buying grid power on-peak while the battery pool sits idle',
     detail:
       `The house has drawn about ${kw} kW from the grid for ${mins} minutes during ${v.periodLabel} while the `

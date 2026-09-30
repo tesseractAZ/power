@@ -6,6 +6,10 @@
  * (narrowly, and counted), the reserve write holds exactly the cheap window, /api/tariff
  * reports the table that prices, and the on-peak idle-pool notice (advisory, never audible).
  *
+ * Log review 09-29 (lii-lx): the idle-pool notice carries audible:false (never the alert a
+ * yellow names aloud), its orphan is dropped without a "Resolved:" after a restart, and the day it
+ * fired is persisted so the once-per-day promise survives one.
+ *
  * Review pass (v1.187.0): the scorer's assembly (on-peak query, supersede skip, cost span and
  * coverage gate, delivered-energy span, PV set-aside) and the idle-pool input assembly moved
  * into pure functions, so the mutants that were killed only by source pins (xii, xv-xviii,
@@ -416,6 +420,70 @@ const MUTANTS = [
     find: '      onpeak_basis: wl.onpeakBasis,',
     to: '      /* MUTANT */',
     why: 'A windowless row reads as a legacy plan-day-anchored row.',
+  },
+  // ── log review 09-29: the idle-pool notice is never voiced, and survives a restart ──
+  {
+    id: 'lii. ★★★ the idle-pool notice is audible again (the id exclusion alone)',
+    file: PGD,
+    find: '    // [Low] push and the card are unchanged (risingEdgePushes reads annunciate only).\n    audible: false,\n',
+    to: '    // [Low] push and the card are unchanged (risingEdgePushes reads annunciate only).\n    /* MUTANT */\n',
+    why: 'When the alarm host running hot raises the yellow, the words spoken are the money notice, not the warning.',
+  },
+  {
+    id: 'liii. ★★★ a pushed idle-pool orphan is resolved after a restart',
+    file: AM,
+    find: '    if (id.startsWith(PEAK_IDLE_POOL_ALERT_ID)) { drop.push(id); continue; }',
+    to: '    /* MUTANT */',
+    why: '"Resolved: Buying grid power on-peak…" is pushed 10 minutes after an auto-update while the house is still buying.',
+  },
+  {
+    id: 'liv. ★★ the fired day is not restored at start-up',
+    file: AM,
+    find: '  restoreIdlePoolFiredDay(loadIdlePoolFiredDay(idlePoolStatePath));\n',
+    to: '  /* MUTANT */\n',
+    why: 'An auto-update inside an on-peak afternoon pushes the same notice a second time that day.',
+  },
+  {
+    id: 'lv. ★★ the fired day is never written',
+    file: AM,
+    find: '    idlePoolFiredDayOnDisk = persistIdlePoolFiredDay(idlePoolStatePath, idlePoolFiredDayOnDisk);\n',
+    to: '    /* MUTANT */\n',
+    why: 'Nothing is on disk to restore: the once-per-day promise ends at the next restart.',
+  },
+  {
+    id: 'lvi. ★★ the restore does nothing',
+    file: PGD,
+    find: '  idlePoolState = { ...idlePoolState, firedDay: day };\n}',
+    to: '  /* MUTANT */\n}',
+    why: 'As liv, behind a wired call.',
+  },
+  {
+    id: 'lvii. ★★ the persist never writes',
+    file: PGD,
+    find: "    atomicWriteFileSync(path, JSON.stringify({ firedDay: day }));\n    return day;",
+    to: '    return day; /* MUTANT */',
+    why: 'As lv, behind a wired call.',
+  },
+  {
+    id: 'lviii. ★ a malformed persisted day is restored',
+    file: PGD,
+    find: "    return typeof raw?.firedDay === 'string' && IDLE_DAY_RE.test(raw.firedDay) ? raw.firedDay : null;",
+    to: "    return typeof raw?.firedDay === 'string' ? raw.firedDay : null; /* MUTANT */",
+    why: 'A hand-edited or truncated sidecar is taken as a date.',
+  },
+  {
+    id: 'lix. ★ the restore accepts any string',
+    file: PGD,
+    find: '  if (day == null || !IDLE_DAY_RE.test(day)) return;',
+    to: '  if (day == null) return; /* MUTANT */',
+    why: 'A day in another format never equals the tariff date: the promise silently lapses.',
+  },
+  {
+    id: 'lx. ★ the persist writes on every tick',
+    file: PGD,
+    find: '  if (day === persisted) return persisted;',
+    to: '  /* MUTANT */',
+    why: 'A sidecar write every 20 s for a value that changes once a day.',
   },
 ];
 

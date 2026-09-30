@@ -392,6 +392,10 @@ export function conditionFromAlerts(
       // v1.187.0 — the on-peak idle-pool notice (peakGridDraw.ts) reports spend, never
       // danger: a [Low] push and a card, and no chime. A yellow for money would be spoken
       // in the tier a grid loss uses. (annunciate:false would drop the push too.)
+      // v1.187.0 (log review) — a SECOND guard. What keeps the notice off the speakers is its
+      // `audible: false` (above, and speakableAlerts): this id exclusion alone kept it out of
+      // the count but not out of the spoken message, where it outranked the warning that
+      // raised the yellow.
       !a.id.startsWith('peak-idle-pool'),
   );
   const criticals = counted.filter((a) => a.severity === 'critical');

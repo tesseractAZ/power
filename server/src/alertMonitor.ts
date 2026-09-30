@@ -17,7 +17,7 @@ import { benchSpareSns, isOutsideHomePool, shp2ConnectedDpuSns, isExpectedOfflin
 // index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
 // on-peak starts, and the SAME fleet flow aggregation the dashboard shows.
 import { apsREvModelFromEnv } from './tariff.js';
-import { evaluatePeakDraw, peakGridDrawAlerts, setLastPeakDrawObservation, evaluateIdlePool, peakIdlePoolAlerts, type IdlePoolInputs } from './peakGridDraw.js';
+import { evaluatePeakDraw, peakGridDrawAlerts, setLastPeakDrawObservation, evaluateIdlePool, peakIdlePoolAlerts, type IdlePoolInputs, PEAK_IDLE_POOL_ALERT_ID, loadIdlePoolFiredDay, restoreIdlePoolFiredDay, idlePoolFiredDay, persistIdlePoolFiredDay } from './peakGridDraw.js';
 import {
   computeLearnedAlerts,
   computeBaselineAlerts,
@@ -1641,6 +1641,12 @@ export function orphanedNotifiedIds(p: {
     // within its dwell and replaces the stale card; a real recovery costs only
     // that one card lingering until then.
     if (id.startsWith('msg-rate-floor-')) { drop.push(id); continue; }
+    // v1.187.0 (log review) — the on-peak idle-pool notice, for the same reason: its episode is
+    // not carried across a restart (only the day it fired is — persistIdlePoolFiredDay), so
+    // after an auto-update inside an on-peak afternoon its id is absent at the sweep while the
+    // house is still buying, and "Resolved: Buying grid power on-peak…" went out mid-episode.
+    // Dropped without a resolve; a pushed card stands until the next day's notice replaces it.
+    if (id.startsWith(PEAK_IDLE_POOL_ALERT_ID)) { drop.push(id); continue; }
     const owed = shouldSendResolve(
       { pushSent: rec.sent, notifiedSeverity: rec.sev, alert: { id, severity: rec.sev ?? 'warning' } },
       p.notifyResolved,
@@ -2244,6 +2250,12 @@ export function startAlertMonitor(
     log(`notify: rehydrated ${persistedNotified.size} already-notified alert(s) from ${notifyStatePath}`);
   }
   const persistNotified = () => saveNotifiedState(notifyStatePath, persistedNotified);
+  // v1.187.0 (log review) — the on-peak idle-pool notice's once-per-day promise survives a restart:
+  // the day it last fired is restored here and written on each change (peakGridDraw.ts).
+  const idlePoolStatePath =
+    process.env.IDLE_POOL_STATE_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'idle-pool-state.json');
+  restoreIdlePoolFiredDay(loadIdlePoolFiredDay(idlePoolStatePath));
+  let idlePoolFiredDayOnDisk = idlePoolFiredDay();
   // v1.86.0 — the digest's MATERIAL survives restarts. On 2026-08-17 the
   // 04:30/04:52 deploys destroyed the in-memory quietQueue + overnightResolved,
   // three overnight fires left zero trace, and the empty-queue digest returned
@@ -3067,6 +3079,7 @@ export function startAlertMonitor(
     // projection reads its last channel watts forever. Advisory: warning/low, never audible.
     const idleNowMs = Date.now();
     const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs), apsREvModelFromEnv());
+    idlePoolFiredDayOnDisk = persistIdlePoolFiredDay(idlePoolStatePath, idlePoolFiredDayOnDisk);
 
     // v1.186.0 — the LIVE-SNAPSHOT alarms: everything computed from the snapshot and
     // main-thread state, none of it from the worker. These publish before any wait. Split

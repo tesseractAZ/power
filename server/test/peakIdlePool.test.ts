@@ -9,17 +9,21 @@
  */
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   evaluateIdlePool, classifyIdlePool, stepIdlePool, emptyIdlePoolState, resetIdlePoolState,
   peakIdlePoolAlerts, peakGridDrawAlerts, PEAK_IDLE_POOL_ALERT_ID, DEFAULT_IDLE_POOL_CONFIG,
   IDLE_DWELL_MS, IDLE_CLEAR_MS, type IdlePoolInputs,
+  idlePoolFiredDay, restoreIdlePoolFiredDay, loadIdlePoolFiredDay, persistIdlePoolFiredDay,
 } from '../src/peakGridDraw.js';
-import { conditionFromAlerts } from '../src/broadcast.js';
-import { idlePoolInputsFrom } from '../src/alertMonitor.js';
+import { conditionFromAlerts, speakableAlerts } from '../src/broadcast.js';
+import { buildAlertMessage, pickPrimaryAlert } from '../src/ttsService.js';
+import { idlePoolInputsFrom, orphanedNotifiedIds, type NotifyRecord } from '../src/alertMonitor.js';
 import { buildApsREvModel } from '../src/tariff.js';
+import type { Alert } from '../src/alerts.js';
 
 const MIN = 60_000;
 const phx = (y: number, mo: number, d: number, h: number, mi = 0) => Date.UTC(y, mo - 1, d, h + 7, mi);
@@ -136,14 +140,97 @@ test('classifyIdlePool reads the tariff\'s own on-peak (holidays included)', () 
 test('★★★ NOT AUDIBLE: the notice never raises the chime, while peak-grid-draw still does', () => {
   const v = run(MON_1600, 12);
   const [idle] = peakIdlePoolAlerts(v, MON_1600 + 12 * MIN);
+  assert.equal(idle.audible, false, 'audible:false is what keeps it off the speakers');
+  assert.notEqual(idle.annunciate, false, 'the [Low] push is kept');
   const c = conditionFromAlerts([idle]);
   assert.equal(c.level, 'green');
   assert.equal(c.warn, 0);
+  // The id exclusion in conditionFromAlerts stays as a second guard.
+  assert.equal(conditionFromAlerts([{ ...idle, audible: undefined }]).level, 'green', 'the id is excluded from the count too');
   const draw = peakGridDrawAlerts({
     active: true, gridToBatteryW: 6400, onPeak: true, periodLabel: 'On-Peak', centsPerHour: 280,
     heldForMs: 15 * MIN, suppressed: null, coreAttribution: null, forceChargeOn: null,
   }, MON_1600);
   assert.equal(conditionFromAlerts([idle, ...draw]).level, 'yellow', 'the exclusion is this id only');
+});
+
+/* ══ v1.187.0 log review: never the alert a yellow names aloud ══ */
+
+/** The alarm host running hot — a warning with no Core location, category Connectivity (ranked
+ *  below Grid by pickPrimaryAlert), the shape alerts.ts emits. */
+const HOST_TEMP_WARN: Alert = {
+  id: 'host-temp-warn', severity: 'warning', category: 'Connectivity', device: 'System',
+  title: 'Alarm host running hot',
+  detail: 'The host running this monitor reads 78°C at the SoC — above the 75°C action threshold. Improve airflow around the host or relocate it somewhere cooler.',
+};
+
+test('★★★ SPOKEN MESSAGE: when another warning raises the yellow, the words name THAT warning, never the idle-pool notice', () => {
+  const v = run(MON_1600, 12);
+  const [idle] = peakIdlePoolAlerts(v, MON_1600 + 12 * MIN);
+  // The broadcast tick's own chain: speakableAlerts → conditionFromAlerts + buildAlertMessage.
+  const spoken = speakableAlerts([idle, HOST_TEMP_WARN], MON_1600 + 12 * MIN, () => undefined);
+  assert.deepEqual(spoken.map((a) => a.id), ['host-temp-warn'], 'the notice is not in the array the message is built from');
+  assert.equal(conditionFromAlerts(spoken).level, 'yellow');
+  const msg = buildAlertMessage('yellow', spoken);
+  assert.match(msg, /Alarm host running hot/, 'the warning that raised the yellow is named');
+  assert.doesNotMatch(msg, /on-peak|battery pool|Grid status/i, 'the money notice is never voiced');
+  // …and any other caller that builds a message without the tick's filter cannot voice it either.
+  assert.equal(pickPrimaryAlert([idle, HOST_TEMP_WARN], 'yellow')?.id, 'host-temp-warn');
+  assert.equal(pickPrimaryAlert([idle], 'yellow'), null);
+});
+
+/* ══ v1.187.0 log review: across a restart ══ */
+
+test('★★★ RESTART: the fired day is persisted and restored — a re-rise the same afternoon does not push again', () => {
+  const dir = mkdtempSync(resolve(tmpdir(), 'ef-idle-'));
+  const path = resolve(dir, 'idle-pool-state.json');
+  try {
+    assert.equal(loadIdlePoolFiredDay(path), null, 'no file: nothing to restore');
+    assert.equal(run(MON_1600, 12).active, true);
+    assert.equal(idlePoolFiredDay(), '2026-09-28');
+    // The monitor writes the day on its change, and only then.
+    assert.equal(persistIdlePoolFiredDay(path, null), '2026-09-28');
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { firedDay: '2026-09-28' });
+    rmSync(path);
+    assert.equal(persistIdlePoolFiredDay(path, '2026-09-28'), '2026-09-28', 'unchanged: no write');
+    assert.equal(existsSync(path), false);
+    persistIdlePoolFiredDay(path, null);
+    // An auto-update restart at 16:20 while the house is still buying on-peak.
+    resetIdlePoolState();
+    restoreIdlePoolFiredDay(loadIdlePoolFiredDay(path));
+    const after = run(MON_1600 + 20 * MIN, 30);
+    assert.equal(after.active, false, 'the notice already went out today');
+    assert.equal(after.suppressed, 'fired-today');
+    // Without the restore the same afternoon pushes a second time (the defect).
+    resetIdlePoolState();
+    assert.equal(run(MON_1600 + 20 * MIN, 12).active, true);
+    // The next weekday rises again after a restore of the previous day.
+    resetIdlePoolState();
+    restoreIdlePoolFiredDay('2026-09-28');
+    assert.equal(run(phx(2026, 9, 29, 16), 12).active, true);
+    // A corrupt or malformed file restores nothing.
+    writeFileSync(path, '{not json');
+    assert.equal(loadIdlePoolFiredDay(path), null);
+    writeFileSync(path, JSON.stringify({ firedDay: 'yesterday' }));
+    assert.equal(loadIdlePoolFiredDay(path), null);
+    resetIdlePoolState();
+    restoreIdlePoolFiredDay('yesterday');
+    assert.equal(idlePoolFiredDay(), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★★★ RESTART: a pushed idle-pool record orphaned by a restart is DROPPED, never resolved (like msg-rate-floor-)', () => {
+  const rec: NotifyRecord = { ts: MON_1600 + 10 * MIN, sent: true, sev: 'warning', title: 'Buying grid power on-peak while the battery pool sits idle' };
+  const out = orphanedNotifiedIds({
+    persisted: new Map<string, NotifyRecord>([[PEAK_IDLE_POOL_ALERT_ID, rec], ['peak-grid-draw', rec]]),
+    currentIds: new Set(), trackedIds: new Set(), notifyResolved: true, minSeverity: 'warning',
+    nowMs: MON_1600 + 30 * MIN, holdUntilMs: MON_1600 + 400 * MIN, unevaluable: () => false,
+  });
+  assert.ok(out.drop.includes(PEAK_IDLE_POOL_ALERT_ID), 'dropped: its episode is not carried across the restart');
+  assert.ok(!out.resolve.includes(PEAK_IDLE_POOL_ALERT_ID), 'no "Resolved:" while the house may still be buying on-peak');
+  assert.ok(out.resolve.includes('peak-grid-draw'), 'the rule is this family only');
 });
 
 /* ══ integration pins ══ */
@@ -156,6 +243,9 @@ test('★★ the monitor evaluates it on the house panel\'s readings (idlePoolIn
   assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs), apsREvModelFromEnv());'));
   assert.ok(m.includes('...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0'));
   assert.ok(m.includes("  'peak-idle-pool',\n];"), 'a device-derived family (hydration rules)');
+  // v1.187.0 (log review) — the fired day is restored at start-up and persisted on every tick.
+  assert.ok(m.includes('  restoreIdlePoolFiredDay(loadIdlePoolFiredDay(idlePoolStatePath));\n'));
+  assert.ok(m.includes('    idlePoolFiredDayOnDisk = persistIdlePoolFiredDay(idlePoolStatePath, idlePoolFiredDayOnDisk);\n'));
 });
 
 /* ══ the monitor's input assembly (v1.187.0 review) ══ */
