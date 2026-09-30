@@ -15,6 +15,13 @@
   while charging but not balancing gets at most 5 minutes from that moment; a long trickle charge
   cannot extend it. Only the Core's live feed counts as charging, never the cloud's repeated
   old reading.
+- **One grace per full charge.** Both waits are counted from the first time the spread reached
+  the critical line since the pack reached 95%: at most 5 minutes while charging, at most 20
+  minutes after balancing. A spread that dips and comes back on alternate readings no longer
+  starts a new wait each time; a pack that drops below 95% and charges again starts afresh.
+- **A restart does not reset the limits.** After a restart (for example an automatic update) a
+  pack whose critical alarm was already standing keeps counting from when it began, and a
+  critical that was held quiet before the restart still goes to the phone when it sounds.
 - **Hard limits on every wait.** A spread of 150 mV or more sounds at once, balancing or not. A
   spread that stays at the critical line for 20 minutes at the top of charge sounds even while
   the pack is still balancing; before this release balancing could keep it quiet with no limit.
@@ -31,6 +38,10 @@
   minutes before the all-clear is spoken. Anything getting worse, and any new warning or
   critical, is still announced at once, and a different critical replacing one that just
   cleared is announced.
+- **No "All clear" while a critical that sounded is only held.** If a cell-imbalance critical
+  has sounded and is then held quiet again (the pack started balancing), the all-clear waits
+  until that critical has actually cleared, then follows 3 minutes later. If it sounds again
+  in the meantime it is not repeated.
 - **The same warning is not repeated with new numbers.** A returning warning with slightly
   different figures and nothing said in between is not spoken again for 30 minutes; after a
   spoken all-clear it is always spoken.
@@ -50,8 +61,11 @@
   hotter than its own normal under-load temperature, or hot with no load to explain it, still
   warns. Replayed over two weeks: 52 warnings under the old rule, none under the new one. The
   auto-tune silence those alerts built up is lifted on first start.
-- **A "Resolved" notice is never swallowed.** Every alert that was pushed now gets its
-  "Resolved", including when several clear at once or when the alert went quiet before clearing.
+- **"Resolved" notices are no longer lost.** An alert that was pushed now gets its "Resolved"
+  even when several clear at once or the alert went quiet before clearing. Exceptions, as
+  before: no "Resolved" when "Resolved" notices are turned off, for a push sent at a tier below
+  the minimum severity (such as one the auto-tune lowered), for a past outage, or when the
+  alert's priority has since been turned off in Alert Settings (that card stays).
 - **A quieter log.** The routine "still running … carrying its last good value" / "fresh again"
   pair, over half of the log, is no longer written; a failing or stuck analytics feed is still
   logged (a stuck one as a warning).
@@ -73,9 +87,11 @@
   per-night figures do not add up to the bill (some evening and weekend hours fall between
   nights); Home Assistant's "Grid Cost Today" is the daily total. A missing rate (the winter
   super-off-peak option is blank by default) is named in the start-up log.
-- **New low-priority notice, no chime:** "Buying grid power on-peak while the battery pool sits
-  idle" — on a weekday 4–7 PM with the pool at least 5 points above its reserve and not
-  discharging (09-28: about $1.89). At most once per weekday afternoon; no setting is changed.
+- **New low-priority notice, never spoken:** "Buying grid power on-peak while the battery pool
+  sits idle" — on a weekday 4–7 PM with the pool at least 5 points above its reserve and not
+  discharging (09-28: about $1.89). It never raises the chime and is never the alert read out
+  when another warning is announced. At most once per weekday afternoon, also across a restart
+  (a restart does not send a false "Resolved" for it either); no setting is changed.
 - **The tariff report shows the real peak hours** (4–7 PM Monday–Friday, not 3–8 PM) and the
   12.59¢ overnight rate.
 - **Auto-mode readiness** no longer counts the 09-27 solar score, which came from a forecast
