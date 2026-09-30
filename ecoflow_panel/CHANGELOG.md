@@ -81,6 +81,12 @@
 - **Auto-mode readiness** no longer counts the 09-27 solar score, which came from a forecast
   built on one Core after a restart.
 
+**Security**
+
+- Three indirect server dependencies flagged by the npm advisory database are updated to their
+  patched releases (brace-expansion 5.0.12; fast-uri 3.1.8 and 4.2.1). Lockfile only; no
+  direct dependency changes.
+
 ## 1.186.5
 
 ### Night charge: a restart before 21:30 no longer costs the night
