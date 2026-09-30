@@ -29,6 +29,7 @@ process.env.DB_PATH = resolve(ROOT, 'ecoflow.db');
 
 const {
   computeAlerts, resetVdiffWarnHoldForTesting, vdiffKneeSeed, VDIFF_KNEE_MAX_MUTE_MS, VDIFF_KNEE_RELAX_MS,
+  VDIFF_KNEE_GAP_CARRY_MS,
 } = await import('../src/alerts.js');
 const { syncAlertOnsets, resetAlertOnsetCacheForTests, getAlertOnset } = await import('../src/alertOnset.js');
 const { bootSeedNotified, bootRetrackDecision, decideAlertDispatch } = await import('../src/alertMonitor.js');
@@ -152,11 +153,46 @@ test('vdiffKneeSeed — both clocks from the onset, no evidence; nothing without
   assert.equal(vdiffKneeSeed(Number.NaN, 'P', T0), undefined);
   assert.deepEqual(vdiffKneeSeed(T0 - 5 * MIN, 'P', T0), {
     packSn: 'P', lastBalancingMs: null, lastChargeMs: null, critSinceMs: T0 - 5 * MIN,
-    belowCritSinceMs: null, graceFromMs: T0 - 5 * MIN, lastSeenMs: null,
+    belowCritSinceMs: null, graceFromMs: T0 - 5 * MIN, quietSinceMs: null, lastSeenMs: null,
   });
   const ahead = vdiffKneeSeed(T0 + 5 * MIN, 'P', T0)!;
   assert.equal(ahead.critSinceMs, T0, 'an onset ahead of the clock (a clock step) is clamped to now');
   assert.equal(ahead.graceFromMs, T0);
+  // The SESSION clock only from an onset no older than the in-process gap carry; the critical-line
+  // clock from any onset (a critical still standing fails loud).
+  assert.equal(vdiffKneeSeed(T0 - VDIFF_KNEE_GAP_CARRY_MS, 'P', T0)!.graceFromMs, T0 - VDIFF_KNEE_GAP_CARRY_MS);
+  const stale = vdiffKneeSeed(T0 - VDIFF_KNEE_GAP_CARRY_MS - 1, 'P', T0)!;
+  assert.equal(stale.graceFromMs, null, 'an onset from before a long outage is not the current session');
+  assert.equal(stale.critSinceMs, T0 - VDIFF_KNEE_GAP_CARRY_MS - 1);
+});
+
+test('★★ a long outage that began inside a knee does not cost the next day\'s knee its grace', () => {
+  // The add-on stops 1000 s into a benign knee, its critical standing and muted (the onset is
+  // persisted). The pack discharges and recharges unseen; the add-on returns the next afternoon
+  // with the pack at 99% and a 10 mV spread, a few minutes before the day's knee. Seeded from
+  // yesterday's onset, the session was never ended (no reading below 95%) and the knee had no grace.
+  for (let t = 0; t < 1000_000; t += TICK_MS) assert.equal(tick(T0 + t, { vd: 95, soc: 100, bal: 1, in: 0 })!.annunciate, false);
+  assert.equal(getAlertOnset(CRIT_ID), T0, 'the standing critical\'s onset is persisted');
+  restart();
+  const back = T0 + 24 * 60 * MIN - 10 * MIN; // 14:50 the next day
+  for (let t = 0; t < 5 * MIN; t += TICK_MS) assert.equal(tick(back + t, { vd: 10, soc: 99, bal: 0, in: 0 }), undefined);
+  // The knee: balancing at the line, balancing stops, relaxed under the line 2 minutes later.
+  for (let t = 5 * MIN; t < 9 * MIN; t += TICK_MS) {
+    const a = tick(back + t, { vd: 95, soc: 100, bal: 1, in: 0 })!;
+    assert.equal(a.mutedBy, 'balancing', `+${t / 1000}s: balancing`);
+  }
+  for (let t = 9 * MIN; t < 11 * MIN; t += TICK_MS) {
+    const a = tick(back + t, { vd: 93, soc: 100, bal: 0, in: 0 })!;
+    assert.equal(a.mutedBy, 'end-of-charge', `+${t / 1000}s: the end-of-charge grace, earned again`);
+  }
+  assert.equal(tick(back + 11 * MIN, { vd: 67, soc: 100, bal: 0, in: 0 }), undefined);
+});
+
+test('★★ …while a critical STILL standing when the add-on returns fails loud from its old onset', () => {
+  for (let t = 0; t < 1000_000; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 100, bal: 1, in: 0 });
+  restart();
+  const a = tick(T0 + 3 * 60 * MIN, { vd: 110, soc: 100, bal: 1, in: 0 })!;
+  assert.notEqual(a.annunciate, false, 'at the line on the first reading back: the episode is 3 hours old');
 });
 
 /* ── the push side: a critical is never boot-seeded without a delivery record ─────────────── */

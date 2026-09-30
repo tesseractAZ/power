@@ -12,6 +12,10 @@
  * standing critical's persisted onset; and a critical is never boot-seeded without a delivery
  * record.
  *
+ * Verifier round (lviii-lxvi): a pack that has rested at the top of charge (20 minutes under
+ * 50 mV, seen unbroken) ends its session; the restart seed restores the session only from a
+ * recent onset; and the balancing mute is bounded by the session too.
+ *
  *   node scripts/mutate-v1187-a.mjs
  *
  * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
@@ -205,7 +209,7 @@ const MUTANTS = [
   {
     id: 'xxiii. ★★★ the activity evidence is carried across a reading gap',
     file: AL,
-    find: '    else vdiffKneeByKey.set(k, { ...st, lastBalancingMs: null, lastChargeMs: null, belowCritSinceMs: null });',
+    find: '    else vdiffKneeByKey.set(k, { ...st, lastBalancingMs: null, lastChargeMs: null, belowCritSinceMs: null, quietSinceMs: null });',
     to: '    else vdiffKneeByKey.set(k, { ...st }); /* MUTANT */',
     why: 'A mute is carried across blindness instead of being re-earned from fresh readings.',
   },
@@ -406,15 +410,15 @@ const MUTANTS = [
   {
     id: 'li. ★★ the session starts when the pack reaches the top, not at the episode\'s first crossing',
     file: AL,
-    find: '    s.graceFromMs ??= s.critSinceMs ?? nowMs;',
-    to: '    s.graceFromMs ??= nowMs; /* MUTANT */',
+    find: 'vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= s.critSinceMs ?? nowMs;',
+    to: 'vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= nowMs; /* MUTANT */',
     why: 'A crossing at 93% that reaches 95% three minutes later is muted for 8 minutes of charging, not 5.',
   },
   {
     id: 'lii. ★★★ the session never starts',
     file: AL,
-    find: '    s.graceFromMs ??= s.critSinceMs ?? nowMs;',
-    to: '    /* MUTANT */',
+    find: 'vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= s.critSinceMs ?? nowMs;',
+    to: 'vdiffCritMvFor(obs.packSoc)) { /* MUTANT */ }',
     why: 'No grace at all: the 09-29 end-of-charge knees sound the critical klaxon again.',
   },
   {
@@ -435,8 +439,8 @@ const MUTANTS = [
   {
     id: 'lv. ★★ the seed restores the episode clock but not the session',
     file: AL,
-    find: '  return { packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: at, belowCritSinceMs: null, graceFromMs: at, lastSeenMs: null };',
-    to: '  return { packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: at, belowCritSinceMs: null, graceFromMs: null, lastSeenMs: null }; /* MUTANT */',
+    find: '    graceFromMs: nowMs - at <= VDIFF_KNEE_GAP_CARRY_MS ? at : null, quietSinceMs: null, lastSeenMs: null,',
+    to: '    graceFromMs: null, quietSinceMs: null, lastSeenMs: null, /* MUTANT */',
     why: 'A restart during a sub-line reading of the charge-following fault re-grants its grace.',
   },
   {
@@ -452,6 +456,70 @@ const MUTANTS = [
     find: "  if (p.alert.severity === 'critical') return p.alreadyNotified;",
     to: '  /* MUTANT */',
     why: 'A vdiff-crit held by a grace across an auto-update is spoken when the grace lapses but never pushed.',
+  },
+  /* ── verifier round: a rest ends the session; a stale seed; the balancing mute in a session ── */
+  {
+    id: 'lviii. ★★★ a rest at the top of charge never ends the session',
+    file: AL,
+    find: '    if (s.quietSinceMs != null && nowMs - s.quietSinceMs >= VDIFF_KNEE_MAX_MUTE_MS) s.graceFromMs = null;',
+    to: '    /* MUTANT */',
+    why: 'A second benign knee in one long stay at the top (two 09-29 knees 30 minutes apart) sounds the false red klaxon again.',
+  },
+  {
+    id: 'lix. ★★★ a reading at the critical line does not break the rest',
+    file: AL,
+    find: '    if (obs.spreadMv >= VOL_DIFF_CRIT_MV) s.quietSinceMs = null;\n    else if (topOfCharge) s.quietSinceMs ??= nowMs;',
+    to: '    if (obs.spreadMv < VOL_DIFF_CRIT_MV && topOfCharge) s.quietSinceMs ??= nowMs; /* MUTANT */',
+    why: 'The 95 / 45 mV charge-following fault ends its own session 20 minutes after its first dip, and every later crossing earns a fresh grace.',
+  },
+  {
+    id: 'lx. ★★ the rest restarts on every quiet reading',
+    file: AL,
+    find: '    else if (topOfCharge) s.quietSinceMs ??= nowMs;',
+    to: '    else if (topOfCharge) s.quietSinceMs = nowMs; /* MUTANT */',
+    why: 'As lviii: no rest ever reaches 20 minutes.',
+  },
+  {
+    id: 'lxi. ★★ an unknown SoC starts the rest',
+    file: AL,
+    find: '    else if (topOfCharge) s.quietSinceMs ??= nowMs;',
+    to: '    else s.quietSinceMs ??= nowMs; /* MUTANT */',
+    why: 'Readings with no SoC — no evidence the pack is at the top — end a session and re-grant its graces.',
+  },
+  {
+    id: 'lxii. ★★ the rest is carried across a reading gap',
+    file: AL,
+    find: 'belowCritSinceMs: null, quietSinceMs: null });',
+    to: 'belowCritSinceMs: null }); /* MUTANT */',
+    why: 'Ten minutes offline count as rest: a session ends without 20 minutes of quiet readings, and the next knee earns a grace.',
+  },
+  {
+    id: 'lxiii. ★★★ the restart seed restores a stale session',
+    file: AL,
+    find: '    graceFromMs: nowMs - at <= VDIFF_KNEE_GAP_CARRY_MS ? at : null, quietSinceMs: null, lastSeenMs: null,',
+    to: '    graceFromMs: at, quietSinceMs: null, lastSeenMs: null, /* MUTANT */',
+    why: 'After an outage that began inside a knee, the next benign knee has no grace: a false red klaxon.',
+  },
+  {
+    id: 'lxiv. ★★ the stale-onset cap drops the critical-line clock too',
+    file: AL,
+    find: '    packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: at, belowCritSinceMs: null,',
+    to: '    packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: nowMs - at <= VDIFF_KNEE_GAP_CARRY_MS ? at : null, belowCritSinceMs: null, /* MUTANT */',
+    why: 'A critical still standing when the add-on returns from a long outage gets a fresh 20 minutes of balancing silence.',
+  },
+  {
+    id: 'lxv. ★★★ the balancing mute is not bounded by the session',
+    file: AL,
+    find: "    return s.graceFromMs != null && nowMs - s.graceFromMs >= VDIFF_KNEE_MAX_MUTE_MS ? null : 'balancing';",
+    to: "    return 'balancing'; /* MUTANT */",
+    why: 'A balancing spread on alternate readings (95 / 45 mV) at the top of charge is held for hours: 0 of 271 critical ticks announced.',
+  },
+  {
+    id: 'lxvi. ★ the session-bound critical carries no reason',
+    file: AL,
+    find: '            : sessionSustained ? ` First reached the critical line at this top of charge ${Math.round(sessionAgeMs! / 60_000)} minutes ago.`\n',
+    to: '            /* MUTANT */\n',
+    why: 'A cell-imbalance critical sounds while the BMS is balancing with nothing on the card to say why.',
   },
 ];
 
