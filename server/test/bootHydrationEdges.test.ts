@@ -362,12 +362,12 @@ test('★★ isDeviceDerivedAlertId: every id stem the live producers emit is on
     assert.equal(isDeviceDerivedAlertId(`${stem}X`), !system.has(stem), `computeAlerts emits "${stem}…"`);
   }
   for (const s of system) assert.ok(stems.has(s), `${s} still emitted by computeAlerts`);
-  const { PEAK_GRID_DRAW_ALERT_ID } = await import('../src/peakGridDraw.js');
+  const { PEAK_GRID_DRAW_ALERT_ID, PEAK_IDLE_POOL_ALERT_ID } = await import('../src/peakGridDraw.js');
   const { rateFloorAlertId } = await import('../src/messageRateFloorAlert.js');
   const { TELEMETRY_BLIND_ALERT_ID } = await import('../src/telemetryBlind.js');
   const { AUDIBLE_DEGRADED_ALERT_ID, AUDIBLE_UNREACHABLE_ALERT_ID } = await import('../src/broadcastHealth.js');
   const { deviceGapAlertId } = await import('../src/alerts.js');
-  for (const id of ['peer-cellV-COREXXX00XXX0027-1', PEAK_GRID_DRAW_ALERT_ID, rateFloorAlertId('COREXXX00XXX0027')]) {
+  for (const id of ['peer-cellV-COREXXX00XXX0027-1', PEAK_GRID_DRAW_ALERT_ID, PEAK_IDLE_POOL_ALERT_ID, rateFloorAlertId('COREXXX00XXX0027')]) {
     assert.equal(isDeviceDerivedAlertId(id), true, id);
   }
   for (const id of [TELEMETRY_BLIND_ALERT_ID, AUDIBLE_DEGRADED_ALERT_ID, AUDIBLE_UNREACHABLE_ALERT_ID, 'system-outage-1700000000000',

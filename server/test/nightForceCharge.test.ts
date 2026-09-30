@@ -579,16 +579,18 @@ import { fileURLToPath } from 'node:url';
 const INDEX = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8')
   .split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
-test('★★★ the force-charge step actually RUNS, after the reserve step, in its own try', () => {
+test('★★★ the force-charge step actually RUNS, in the order actuationStepOrder decides, each step in its own try', () => {
+  // v1.187.0 (review) — the order and the per-step try moved into runActuationSteps /
+  // actuationStepOrder (nightForceCharge.ts), tested behaviourally in
+  // nightChargeCloseOffFirst.test.ts; this pins only that the tick wires both steps to them.
   const tick = INDEX.indexOf('async function runNightActuationTick(): Promise<void> {');
   assert.ok(tick > 0);
   const body = INDEX.slice(tick, INDEX.indexOf('async function runForceChargeTick(', tick));
-  const reserve = body.indexOf('await runNightActuationTickInner();');
-  const force = body.indexOf('await runForceChargeTick();');
-  assert.ok(reserve > 0 && force > 0, 'both steps are called');
-  assert.ok(force > reserve, 'force-charge reads the state the reserve step just wrote');
-  assert.ok(body.slice(reserve, force).includes('} catch'),
-    'a reserve-step failure must not skip the force-charge OFF, nor the reverse');
+  assert.ok(body.includes('await runActuationSteps(actuationStepOrder(nightActuationMem, Date.now()), {'));
+  assert.ok(body.includes('      reserve: () => runNightActuationTickInner(),'), 'the reserve step is called');
+  assert.ok(body.includes('      forceCharge: () => runForceChargeTick(),'), 'the force-charge step is called');
+  assert.ok(body.indexOf('nightActuationInFlight = false;') > body.indexOf('await runActuationSteps('),
+    'the in-flight latch is released after both steps');
 });
 
 test('★★★ WRITE-AHEAD: the ON intent is persisted before any ON write is issued', () => {

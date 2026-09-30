@@ -134,7 +134,7 @@ test('a per-device gap alert keeps the outage EVENT lifecycle: no resolve push, 
   assert.equal(isOutageEventFamily(a), true);
   const tracked = { pushSent: true, notifiedSeverity: 'warning' as const, alert: { id: a.id, severity: 'warning' as const, annunciate: undefined } };
   assert.equal(shouldSendResolve(tracked, true, 'info'), false);
-  assert.equal(bootSeedNotified({ alert: { id: a.id }, firstRun: true, alreadyNotified: false }), false);
+  assert.equal(bootSeedNotified({ alert: { id: a.id, severity: a.severity }, firstRun: true, alreadyNotified: false }), false);
   assert.equal(conditionFromAlerts([a]).level, 'green');
   // Its own family, so the tuner's statistics for fleet outages are not mixed with it.
   assert.equal(familyOf(a.id), 'system-outage-device');

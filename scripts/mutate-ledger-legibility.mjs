@@ -85,8 +85,9 @@ const MUTANTS = [
   {
     id: 'vii. ★ arm_disposition drops out of the write allowlist (SILENT)',
     file: RECORDER,
-    find: "  'arm_disposition', 'cost_ceiling_basis',\n];",
-    to: '];  /* MUTANT */',
+    // v1.187.0 — re-pointed: the v1.187.0 columns now follow this line in the allowlist.
+    find: "  'arm_disposition', 'cost_ceiling_basis',\n  // v1.187.0",
+    to: '  /* MUTANT */\n  // v1.187.0',
     why: 'recordNightOutcome ignores unknown columns rather than throwing — the write vanishes with no error.',
   },
   {

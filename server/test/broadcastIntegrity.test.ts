@@ -373,6 +373,9 @@ test('★★ a green adopted SILENTLY (all-clear speech gated) replaces the spok
   pastWarmup();
   await speakConditionYellow(a);
   alerts = [RESERVE];
+  // v1.187.0 — a green commits only after it has stood CONDITION_CLEAR_DWELL_MS.
+  await until(a, () => a.has('yellow → green held'), 'the de-escalation dwell');
+  offset += B.CONDITION_CLEAR_DWELL_MS + 1_000;
   await until(a, () => a.has('green adopted silently'), 'the silent green');
   assert.equal(a.mon.status().conditionLevel, 'green');
   a.stop();

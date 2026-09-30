@@ -31,6 +31,7 @@ import { getLastPeakDrawObservation } from './peakGridDraw.js';
 import { setChannelForceCharge, setForceChargeCeiling } from './ecoflow/commands.js';
 import {
   decideForceCharge, forceChargeEnabled, desiredForceChargeCeilingPct, forceChargeInFlight,
+  actuationStepOrder, runActuationSteps,
   FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
   FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, type ForceChargeAction,
   forceChargeRateKw, FORCE_CHARGE_PLAN_RATE_KW, shp2HouseLoadKw, FORCE_CHARGE_MIN_RATE_KW, planChargeCapKw,
@@ -177,7 +178,6 @@ import {
   scoreNightOutcome,
   nightWindowBounds,
   medianFilter3,
-  actuatedDeliveredKwh,
   plannerSizingNeedBuyKwh,
   calibratedLoadBandFactor, calibratedBuyDebiasFactor,
   type NightChargePlan,
@@ -212,7 +212,6 @@ import {
   isRevertSettling,
   nightChargeSpokenNotice,
   setOwnerReserveFloorPct,
-  REVERT_LAG_MS,
   APPLY_LEAD_MS,
   REVERT_ESCALATE_AFTER,
   REVERT_MAX_RETRIES,
@@ -221,6 +220,12 @@ import {
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
 import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
+// v1.187.0 — the scorer's span, cost and PV-evidence decisions, pure (nightLedgerScoring.ts).
+import {
+  supersedingPlanDate, knownFleetMismatchReason, type TimeSpan,
+  integrateWh, coverageFrac, ledgerSpansForWindow, assembleNightLedgerColumns, windowlessLedgerColumns,
+  unpricedTariffPeriods,
+} from './nightLedgerScoring.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
 import type { NightLedgerRow } from './recorder.js';
@@ -3432,6 +3437,9 @@ interface NightPlanExtras {
   tariffSnapshot: string;
   /** v1.174.0 — how old the panel reading the plan was sized on, seconds (null = unknown). */
   panelSampleAgeS: number | null;
+  /** v1.187.0 — the Cores the PV band's solar model was fitted on (sorted, comma-joined);
+   *  null = unknown. Optional: a plan snapshot persisted before v1.187.0 has none. */
+  pvModelSns?: string | null;
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
@@ -3813,6 +3821,10 @@ async function recomputeNightChargePlan(
     weatherCovered: dayAhead?.hasWeather ? 1 : 0,
     tariffSnapshot,
     panelSampleAgeS: panel.ageMs != null ? Math.round(panel.ageMs / 1000) : null,
+    // v1.187.0 — the fleet the PV band describes, so the scorer can tell a band graded
+    // against other Cores' actuals (the 2026-09-27 partial-map restart) from a forecast miss.
+    pvModelSns: Array.isArray(prob?.solarModelSns) && prob!.solarModelSns.length > 0
+      ? [...prob!.solarModelSns].sort().join(',') : null,
   };
 
   // v1.40.0: persist the freshest PRE-WINDOW plan to disk. The evening job's
@@ -3868,6 +3880,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     cost_ceiling_soc_pct: plan.costCeilingSocPct ?? null,
     // v1.174.0 — `?? null`: a plan snapshot persisted before the upgrade has no such field.
     panel_sample_age_s: extras.panelSampleAgeS ?? null,
+    // v1.187.0 — written unconditionally (null when unknown) so a re-issued plan can never
+    // leave an earlier plan's Core set beside its own band.
+    pv_model_sns: extras.pvModelSns ?? null,
     pv_p10_kwh: extras.pvP10Kwh,
     pv_p50_kwh: extras.pvP50Kwh,
     pv_p90_kwh: extras.pvP90Kwh,
@@ -3914,21 +3929,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
   recorder.recordNightPlan(row);
 }
 
-/** Trapezoidal integral of a watts series (Wh) over [startMs, endMs], skipping
- *  gaps > 1 h. `positiveOnly` clamps each sample ≥ 0 (grid IMPORT accounting). */
-function integrateWh(pts: Array<{ ts: number; value: number }>, positiveOnly: boolean): number {
-  let wh = 0;
-  for (let i = 1; i < pts.length; i++) {
-    const dtH = (pts[i].ts - pts[i - 1].ts) / HOUR_MS;
-    if (dtH <= 0 || dtH > 1) continue; // gap — don't integrate across it
-    const a = positiveOnly ? Math.max(0, pts[i - 1].value) : pts[i - 1].value;
-    const b = positiveOnly ? Math.max(0, pts[i].value) : pts[i].value;
-    wh += ((a + b) / 2) * dtH;
-  }
-  return wh;
-}
+// v1.187.0 (review) — integrateWh / coverageFrac (the trapezoid and the 5-min-bucket
+// coverage the ledger columns share) moved, unchanged, to nightLedgerScoring.ts.
 
-/** Fraction of [startMs, endMs) covered by samples, by 5-min buckets present. */
 /** v1.150.0 — minimum PER-CORE PV coverage required before a fleet PV sum may be
  *  written to the DURABLE night-charge ledger. Mirrors the long-standing
  *  `GRID_HOME_MIN_COVERAGE = 0.9` precedent (analytics.ts) rather than inventing
@@ -3936,20 +3939,6 @@ function integrateWh(pts: Array<{ ts: number; value: number }>, positiveOnly: bo
  *  window to publish a total?", and 0.9 is the value this codebase already
  *  decided that question with. Applied to the WORST core, never the mean. */
 export const PV_LEDGER_MIN_CORE_COVERAGE = 0.9;
-
-function coverageFrac(pts: Array<{ ts: number; value: number }>, startMs: number, endMs: number): number {
-  const span = endMs - startMs;
-  if (span <= 0) return 0;
-  const bucketMs = 5 * 60_000;
-  const total = Math.ceil(span / bucketMs);
-  if (total <= 0) return 0;
-  const seen = new Set<number>();
-  for (const p of pts) {
-    if (p.ts < startMs || p.ts >= endMs) continue;
-    seen.add(Math.floor((p.ts - startMs) / bucketMs));
-  }
-  return Math.min(1, seen.size / total);
-}
 
 /**
  * Score YESTERDAY's plan now that its charge window + 4–7pm have both closed
@@ -3968,13 +3957,18 @@ function coverageFrac(pts: Array<{ ts: number; value: number }>, startMs: number
  *  row's OWN stored window when present — weekend plans resolve windows
  *  disjoint from the canonical 23:00–05:00 night (Saturday → Monday
  *  00:00–05:00), and pairing actuals to the wrong night was the very defect
- *  class this release repairs. On-peak spans stay plan-date-anchored (the
- *  4–7 pm of the plan day is well-defined regardless of the charge window). */
+ *  class this release repairs.
+ *  v1.187.0 — the on-peak span is no longer plan-date-anchored. "The 4–7 pm of
+ *  the plan day" closed ~2.5 h before the ~21:30 plan existed and counted Saturday
+ *  and Sunday afternoons (off-peak) as on-peak: the column graded each plan on the
+ *  PREVIOUS night's outcome. It is now the on-peak period the plan GOVERNS — the
+ *  first on-peak run after its own window closes, before the next window opens —
+ *  resolved from the tariff model (governedOnPeakSpan); null when there is none. */
 interface NightScoringSpans {
   windowStart: number;
   windowEnd: number;
-  onpeakStart: number;
-  onpeakEnd: number;
+  /** v1.187.0 — the governed on-peak period, or null (Friday, a holiday). */
+  onpeak: TimeSpan | null;
   scoreSpanEnd: number;
   completeMs: number;
   /** false ⇒ pre-v1.39.0 row with no stored window — actuals CANNOT be paired
@@ -3987,18 +3981,23 @@ function nightSpansForRow(y: NightLedgerRow): NightScoringSpans | null {
   const ws = typeof y.window_start_ms === 'number' ? y.window_start_ms : null;
   const we = typeof y.window_end_ms === 'number' ? y.window_end_ms : null;
   if (ws != null && we != null && we > ws) {
-    // The plan-trajectory score span runs 16 h past the REAL window close
-    // (mirrors the canonical 05:00→21:00 trough span).
-    const scoreSpanEnd = we + 16 * HOUR_MS;
+    // The plan-trajectory score span runs 16 h past the REAL window close (mirrors the
+    // canonical 05:00→21:00 trough span). v1.187.0 — and the night completes only once its
+    // governed on-peak has closed too (ledgerSpansForWindow). Structural only: period ids
+    // and on-peak flags need no confirmed rate.
+    const tariff = apsREvModelFromEnv();
+    const spans = ledgerSpansForWindow(
+      we,
+      (t) => rateAt(tariff, t).isOnPeak,
+      (t) => rateAt(tariff, t).periodId === NIGHT_CHEAP_PERIOD_ID,
+    );
     return {
-      windowStart: ws, windowEnd: we,
-      onpeakStart: b.onpeakStartMs, onpeakEnd: b.onpeakEndMs,
-      scoreSpanEnd, completeMs: scoreSpanEnd, windowKnown: true,
+      windowStart: ws, windowEnd: we, onpeak: spans.onpeak,
+      scoreSpanEnd: spans.scoreSpanEndMs, completeMs: spans.completeMs, windowKnown: true,
     };
   }
   return {
-    windowStart: b.windowStartMs, windowEnd: b.windowEndMs,
-    onpeakStart: b.onpeakStartMs, onpeakEnd: b.onpeakEndMs,
+    windowStart: b.windowStartMs, windowEnd: b.windowEndMs, onpeak: null,
     scoreSpanEnd: b.scoreSpanEndMs, completeMs: b.completeMs, windowKnown: false,
   };
 }
@@ -4028,7 +4027,9 @@ function scoreCompletedNights(nowMs: number): void {
     // write-readiness gate could never accumulate a single scored night.
     if (nowMs < s.completeMs) continue; // night still in flight — do NOT capture
     try {
-      scoreNightRow(y, s, shp2Sn, nowMs);
+      // v1.187.0 — a later plan for the SAME window (Sunday's for Saturday's shared
+      // Monday window) is the plan of record: it carries the on-peak and the cost.
+      scoreNightRow(y, s, shp2Sn, nowMs, supersedingPlanDate(y, rows));
     } catch (e: any) {
       app.log.debug(`night-charge: scoring ${y.plan_date} skipped (${e?.message ?? e})`);
     }
@@ -4044,6 +4045,8 @@ function scoreNightRow(
   s: NightScoringSpans,
   shp2Sn: string,
   nowMs: number,
+  /** v1.187.0 — the later plan_date that owns this row's window, or null. */
+  supersededBy: string | null = null,
 ): void {
   const yDate = String(y.plan_date);
   // Pre-v1.39.0 rows never recorded their resolved window — the actuals cannot
@@ -4060,17 +4063,20 @@ function scoreNightRow(
     const noWindowByDesign = typeof y.window_start_ms !== 'number'
       && typeof y.window_end_ms !== 'number'
       && String(y.algo_version) === String(CURRENT_ALGO_VERSION);
+    // v1.187.0 (review) — a plan with no window by design governs no on-peak: basis 'none',
+    // so a NULL basis keeps meaning "not measured on the governed basis".
+    const wl = windowlessLedgerColumns(noWindowByDesign);
     recorder.recordNightOutcome(yDate, {
       outcome_captured_at_ms: nowMs,
       scored: 0,
-      score_notes: noWindowByDesign
+      onpeak_basis: wl.onpeakBasis,
+      score_notes: (noWindowByDesign
         ? 'not scored — no cheap charge window was resolved for this night, so there is no window to pair actuals to. Expected on a tariff day that offers none; not a defect.'
-        : "not scored — the plan's resolved charge window was not recorded (pre-v1.39.0 row); actuals cannot be paired to the real window.",
+        : "not scored — the plan's resolved charge window was not recorded (pre-v1.39.0 row); actuals cannot be paired to the real window.")
+        + ` ${wl.notes}`,
     });
     return;
   }
-  const onpeakStart = s.onpeakStart;               // plan-day 16:00
-  const onpeakEnd = s.onpeakEnd;                   // plan-day 19:00
   const windowStart = s.windowStart;               // the plan's REAL window open
   const windowEnd = s.windowEnd;                   // the plan's REAL window close
   const scoreFrom = windowEnd;                     // plan trajectory scores post-close
@@ -4082,15 +4088,18 @@ function scoreNightRow(
   const fcSpanEnd = Math.min(nowMs, y.issued_at_ms + 24 * HOUR_MS);
 
   const gridWin = recorder.query(shp2Sn, 'grid_home_w', windowStart, windowEnd);
-  const gridPeak = recorder.query(shp2Sn, 'grid_home_w', onpeakStart, onpeakEnd);
   const socPts = recorder.query(shp2Sn, 'backup_pct', scoreFrom, spanEnd);
   const loadPts = recorder.query(shp2Sn, 'panel_load', fcSpanStart, fcSpanEnd);
 
   // v1.39.0 2nd-pass: null-over-fabrication — zero samples must record NULL,
-  // not a "measured" 0 kWh import (matching the on-peak guard one line down).
+  // not a "measured" 0 kWh import (matching the on-peak guard below).
   const windowImportKwh = gridWin.length ? round2(integrateWh(gridWin, true) / 1000) : null;
-  const onpeakImportKwh = gridPeak.length ? round2(integrateWh(gridPeak, true) / 1000) : null;
   const winCoverage = round2(coverageFrac(gridWin, windowStart, windowEnd));
+
+  // v1.187.0 — the ON-PEAK outcome (the on-peak period this plan GOVERNS, not the plan
+  // day's own 16:00-19:00, which closed before the plan existed), the REALIZED COST and
+  // the delivered-energy span are assembled below by assembleNightLedgerColumns
+  // (nightLedgerScoring.ts), once the home Cores and the actuation stamp are known.
 
   // Actual PV = summed pv_total over the SHP2-connected home DPUs (the same
   // basis the forecast PV is built from); actual load = SHP2 panel_load. Both
@@ -4160,23 +4169,33 @@ function scoreNightRow(
   // clean-baseline requirement does not apply. `actuated` was stamped by the
   // actuator at write time, never inferred here.
   const wasActuated = y.actuated === 1 || (y.actuated as unknown) === true;
-  let deliveredKwh: number | null = null;
-  if (wasActuated) {
-    // v1.115.0 — integrate the span the write was actually HELD, not the plan's
-    // nominal window. The apply fires up to APPLY_LEAD before the window opens
-    // and the revert lands REVERT_LAG after it closes, so on the 08-28 night
-    // (hold 22:55:55-00:05:55 vs nominal 23:00-00:00) ~16% of the purchased
-    // energy fell outside the nominal bounds and was silently dropped. This
-    // column feeds the v1.112.0 buy de-bias calibrator, so a biased delivered
-    // figure trains a biased correction.
-    const holdStart = Math.min(y.actuation_applied_at_ms ?? windowStart, windowStart);
-    const holdEnd = windowEnd + REVERT_LAG_MS;
-    const holdImportPts = recorder.query(shp2Sn, 'grid_home_w', holdStart, holdEnd);
-    const holdImportKwh = holdImportPts.length ? round2(integrateWh(holdImportPts, true) / 1000) : null;
-    const holdLoadPts = recorder.query(shp2Sn, 'panel_load', holdStart, holdEnd);
-    const holdLoadKwh = holdLoadPts.length ? round2(integrateWh(holdLoadPts, false) / 1000) : null;
-    deliveredKwh = actuatedDeliveredKwh(holdImportKwh, holdLoadKwh);
-  }
+  // v1.187.0 — the on-peak, realized-cost, delivered-energy and PV-evidence columns, pure
+  // (nightLedgerScoring.assembleNightLedgerColumns) behind a query seam on the house panel:
+  //  - on-peak over the governed span (2026-09-28's 4.27 kWh on-peak buy belongs to the
+  //    cancelled weekend arm behind it, not the clean 09-28 night); none on a superseded
+  //    row (the later plan carries it) and null — never 0 — when none is governed;
+  //  - realized cost: metered import × the tariff's own rate per interval (rateAt — the
+  //    table the Grid Cost sensor and the planner use) over [window open, close + 16 h),
+  //    null with the reason in score_notes;
+  //  - delivered energy (v1.115.0: integrate the span the write was actually HELD, since
+  //    it feeds the v1.112.0 buy de-bias calibrator) to the restore's own stamp + the
+  //    device settle (deliveredHoldSpan);
+  //  - the PV set-aside: a band built for other Cores than the actuals'.
+  const tariffNow = apsREvModelFromEnv();
+  const cols = assembleNightLedgerColumns({
+    row: y,
+    actuated: wasActuated,
+    windowStartMs: windowStart,
+    windowEndMs: windowEnd,
+    scoreSpanEndMs: s.scoreSpanEnd,
+    onpeak: s.onpeak,
+    supersededBy,
+    query: (metric, a, b) => recorder.query(shp2Sn, metric, a, b),
+    rateAt: (t) => rateAt(tariffNow, t),
+    homeSns: [...homeSns],
+  });
+  const deliveredKwh = cols.deliveredKwh;
+  const onpeak = cols.onpeak;
 
   // v1.105.0 (algo v3) — realized need on the PLANNER-SIZING basis.
   //
@@ -4283,8 +4302,14 @@ function scoreNightRow(
     actual_pv_kwh: actualPvKwh,
     actual_load_kwh: actualLoadKwh,
     actual_window_import_kwh: windowImportKwh,
-    actual_onpeak_import_kwh: onpeakImportKwh,
-    onpeak_import_occurred: onpeakImportKwh == null ? null : (onpeakImportKwh > 0.05 ? 1 : 0),
+    actual_onpeak_import_kwh: onpeak.importKwh,
+    onpeak_import_occurred: onpeak.occurred,
+    onpeak_start_ms: onpeak.span?.startMs ?? null,
+    onpeak_end_ms: onpeak.span?.endMs ?? null,
+    onpeak_basis: onpeak.basis,
+    realized_cost_cents: cols.cost.cents,
+    // The verdict is still written; the gate reads this reason and counts it.
+    pv_verdict_set_aside: cols.pvSetAside,
     actual_min_soc_pct: actualMinSocPct,
     actual_min_soc_ts_ms: actualMinSocTsMs,
     plan_traj_floor_breached: score.planTrajFloorBreached == null ? null : (score.planTrajFloorBreached ? 1 : 0),
@@ -4292,7 +4317,9 @@ function scoreNightRow(
     delivered_kwh: deliveredKwh,
     grid_home_coverage_frac: winCoverage,
     scored,
-    score_notes: scoreNotes,
+    // v1.187.0 — the on-peak and cost clauses always say what was measured (or why
+    // nothing was), and the PV set-aside when there is one.
+    score_notes: `${scoreNotes} ${cols.notes}`,
     pv_err_frac: score.pvErrFrac,
     pv_in_band: inBand(actualPvKwh, y.pv_p10_kwh, y.pv_p90_kwh),
     load_err_frac: score.loadErrFrac,
@@ -4638,6 +4665,12 @@ function repairPrematureNightOutcomes(): void {
         actual_window_import_kwh: null,
         actual_onpeak_import_kwh: null,
         onpeak_import_occurred: null,
+        // v1.187.0 — the on-peak span, its basis and the realized cost are outcome
+        // columns too: a re-capture must not inherit them from the premature one.
+        onpeak_start_ms: null,
+        onpeak_end_ms: null,
+        onpeak_basis: null,
+        realized_cost_cents: null,
         actual_min_soc_pct: null,
         actual_min_soc_ts_ms: null,
         plan_traj_floor_breached: null,
@@ -4648,6 +4681,7 @@ function repairPrematureNightOutcomes(): void {
           'reset — outcome had been captured before the night completed (pre-v1.39.0 mid-window scoring defect); re-captured by the backfill sweep — scored where telemetry still exists, else honestly unscored.',
         pv_err_frac: null,
         pv_in_band: null,
+        pv_verdict_set_aside: null, // v1.187.0 — re-derived with the verdict it qualifies
         load_err_frac: null,
         load_in_band: null,
         buy_err_kwh: null,
@@ -4657,6 +4691,27 @@ function repairPrematureNightOutcomes(): void {
     }
   } catch (e: any) {
     app.log.debug(`night-charge: premature-outcome repair skipped (${e?.message ?? e})`);
+  }
+}
+
+/**
+ * v1.187.0 — once per boot, idempotent: tag the rows in KNOWN_FLEET_MISMATCH_PV_ROWS
+ * (nightLedgerScoring.ts) whose PV band predates `pv_model_sns` but is established to
+ * have been built for other Cores than the actuals. A TAG, not a rewrite: only
+ * `pv_verdict_set_aside` is written, the captured `pv_in_band` / `pv_err_frac` stay, and
+ * each tag is logged. Matched on plan_date AND issued_at_ms, so no other ledger matches.
+ */
+function tagKnownFleetMismatchPvRows(): void {
+  try {
+    for (const y of recorder.readNightLedger(400)) {
+      if (y.outcome_captured_at_ms == null || y.pv_verdict_set_aside != null) continue;
+      const reason = knownFleetMismatchReason(y);
+      if (reason == null) continue;
+      recorder.recordNightOutcome(String(y.plan_date), { pv_verdict_set_aside: reason });
+      app.log.info(`night-charge: ledger ${y.plan_date} — ${reason} (pv_in_band was ${y.pv_in_band ?? 'null'}, pv_err_frac ${y.pv_err_frac ?? 'null'}).`);
+    }
+  } catch (e: any) {
+    app.log.debug(`night-charge: known fleet-mismatch tagging skipped (${e?.message ?? e})`);
   }
 }
 
@@ -5113,17 +5168,20 @@ async function runNightActuationTick(): Promise<void> {
   if (nightActuationInFlight) return;
   nightActuationInFlight = true;
   try {
-    await runNightActuationTickInner();
-  } catch (e: any) {
-    app.log.warn(`night-charge: actuation tick failed (${e?.message ?? e})`);
-  }
-  // v1.165.0 — the force-charge step runs AFTER the reserve step (whose tick returns
-  // early on 'none' for most of the window) and re-reads state fresh. Its own
-  // try/catch: a force-charge failure must never break the reserve path.
-  try {
-    await runForceChargeTick();
-  } catch (e: any) {
-    app.log.warn(`night-charge: force-charge tick failed (${e?.message ?? e})`);
+    // v1.165.0 — the force-charge step runs AFTER the reserve step (whose tick returns
+    // early on 'none' for most of the window) and re-reads state fresh, so the START rides
+    // the reserve the step just verified. Each step in its own try (runActuationSteps): a
+    // failure of one must never break the other.
+    // v1.187.0 (review) — except when a force-charge OFF is already due (window closed,
+    // cancelled, reverted): then the OFF goes first (actuationStepOrder). With the restore
+    // now due at the close itself, the OFF otherwise waited behind the revert PUT on the
+    // same tick while the Cores kept grid-charging at the off-peak rate.
+    await runActuationSteps(actuationStepOrder(nightActuationMem, Date.now()), {
+      reserve: () => runNightActuationTickInner(),
+      forceCharge: () => runForceChargeTick(),
+    }, (step, e: any) => {
+      app.log.warn(`night-charge: ${step === 'reserve' ? 'actuation' : 'force-charge'} tick failed (${e?.message ?? e})`);
+    });
   } finally {
     nightActuationInFlight = false;
   }
@@ -5738,22 +5796,27 @@ async function runNightActuationTickInner(): Promise<void> {
   });
   if (r.outcome === 'success') {
     persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null });
+    // v1.187.0 (review) — where the hold ended, for the delivered-energy span
+    // (nightLedgerScoring.deliveredHoldSpan): the restore lands on the first tick after
+    // the close, and the pack charges until it does.
+    try { recorder.recordNightOutcome(state.day, { actuation_reverted_at_ms: nowMs }); }
+    catch (e: any) { app.log.warn(`night-charge: revert stamp failed (${e?.message ?? e})`); }
     app.log.info(
       `night-charge: reserve REVERTED to ${action.restorePct}% for ${state.day}${state.cancelled ? ' (owner cancel)' : ''}.`,
     );
-    try {
-      await sendNotification(loadNotifyConfig(), {
-        severity: 'info',
-        dedupId: 'night_charge_actuation',
-        title: `Night-charge: reserve restored to ${action.restorePct}%`,
-        body:
-          `Supervised night charge for ${state.day} completed: reserve raised to ${state.targetPct}% `
-          + `(planned buy ~${state.buyKwh ?? '—'} kWh) and restored to ${action.restorePct}%. `
-          + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
-      });
-    } catch (e: any) {
+    // v1.187.0 (review) — NOT awaited: an info push (5 s headers + 10 s body per target)
+    // must never hold the tick, and with it any force-charge step still to run.
+    void sendNotification(loadNotifyConfig(), {
+      severity: 'info',
+      dedupId: 'night_charge_actuation',
+      title: `Night-charge: reserve restored to ${action.restorePct}%`,
+      body:
+        `Supervised night charge for ${state.day} completed: reserve raised to ${state.targetPct}% `
+        + `(planned buy ~${state.buyKwh ?? '—'} kWh) and restored to ${action.restorePct}%. `
+        + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
+    }).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
-    }
+    });
     return;
   }
   if (!r.rateLimited) {
@@ -5875,6 +5938,15 @@ if (nightChargeEnabled) {
   // add-on restart (update/maintenance), flapping the HA gate fields to null.
   const nightWarm = setTimeout(() => {
     repairPrematureNightOutcomes();
+    tagKnownFleetMismatchPvRows(); // v1.187.0 — before readiness reads the ledger below
+    // v1.187.0 (review) — once per boot: a confirmed table that cannot price every period
+    // leaves realized_cost_cents NULL on every night crossing it (each row's note says so).
+    try {
+      const unpriced = unpricedTariffPeriods(apsREvModelFromEnv());
+      if (unpriced.length > 0) {
+        app.log.warn(`night-charge: the confirmed tariff has no rate for ${unpriced.join(', ')} — realized_cost_cents stays NULL for any night whose scored span crosses one (score_notes names it). Set the matching TARIFF_APS_*_CENTS option to price it.`);
+      }
+    } catch (e: any) { app.log.debug(`night-charge: tariff coverage check skipped (${e?.message ?? e})`); }
     void recomputeNightChargePlan().catch((e: any) => app.log.debug(`night-charge: warm recompute skipped (${e?.message ?? e})`));
     try { scoreCompletedNights(Date.now()); } catch (e: any) { app.log.debug(`night-charge: warm scoring skipped (${e?.message ?? e})`); }
     try {
@@ -5886,8 +5958,8 @@ if (nightChargeEnabled) {
   // Evening job — minute-granular gate + day-keyed restart-persistent latch.
   const nightEveningTick = setInterval(() => { void runNightChargeEveningJob(); }, 60 * 1000);
   nightEveningTick.unref();
-  // v1.50.0 — supervised-write actuator (apply at window open − 5 min, revert
-  // at window close + 5 min; both fail-closed, both audited).
+  // v1.50.0 — supervised-write actuator (v1.187.0: apply at window open, revert at
+  // window close — APPLY_LEAD_MS / REVERT_LAG_MS are 0; both fail-closed, both audited).
   const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 60 * 1000);
   nightActuationTick.unref();
 }
@@ -6451,7 +6523,7 @@ app.put<{ Body: { assignments?: Partial<Record<AnnouncementLevel, ChimeAssignmen
  * ★ REFUSED WHILE A NIGHT-CHARGE WRITE IS IN FLIGHT. The actuator captured
  * `priorReservePct` at apply time and restores exactly that at window close;
  * changing the floor underneath it would make the revert restore the OLD floor
- * hours later, silently undoing the owner's change. Wait for the revert (~05:05)
+ * hours later, silently undoing the owner's change. Wait for the revert (~05:00; v1.187.0)
  * or cancel the night via /api/night-charge/cancel.
  */
 app.post<{ Querystring: { pct?: string } }>(

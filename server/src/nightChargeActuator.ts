@@ -20,7 +20,7 @@
  *  - The write path stays fail-closed: no announced plan, a cancelled night,
  *    an incoherent SoC read, a stale/out-of-range current reserve, a missed
  *    apply window, or advisory mode ⇒ no write.
- *  - The reserve ALWAYS reverts: at window close + 5 min (or immediately on
+ *  - The reserve ALWAYS reverts: at window close (v1.187.0; +5 min before) (or immediately on
  *    a post-apply cancel) the prior value is restored. Repeated revert
  *    failure escalates to a critical annunciation while retries continue.
  *    The floor/runway/SoC alarm spine is fully independent of this module
@@ -265,10 +265,22 @@ export function deviceCeilingPct(
   return liveReservePct;
 }
 
-/** Apply window: the write may fire from 5 min before the plan's charge
- *  window opens until 30 min after (a late boot inside the window still
- *  buys most of the night; later than that the announced sizing is stale). */
-export const APPLY_LEAD_MS = 5 * 60_000;
+/** Apply window: the write may fire from the moment the plan's charge window
+ *  opens until 30 min after (a late boot inside the window still buys most of
+ *  the night; later than that the announced sizing is stale).
+ *
+ *  ★ v1.187.0 — THE LEAD IS 0 (it was 5 min since v1.50.0). The reserve raise IS a
+ *  grid charge the moment it exceeds the pool: on 2026-09-28 the write landed at
+ *  22:55:28 and the Cores were taking ~5.2 kW each 14 s later, 1.12 kWh by 23:00 at
+ *  the 16.91¢ off-peak rate instead of the 12.59¢ overnight one (09-22: ~0.85 kWh).
+ *  The lead bought nothing the window would not: the panel takes the write within
+ *  seconds, not minutes. Force-charge already refused to start before the window
+ *  (nightForceCharge.ts: "the overnight window has not opened yet"), and its ceiling
+ *  sync waits for the window too, so it now follows the verified reserve by one tick
+ *  (~1 min) — the order (apply → readback → ceiling → ON) is unchanged. The cancel
+ *  deadline, which is the write moment, moves to the window open: the owner gains
+ *  5 min. The constant stays so every reader of the write moment keeps one name. */
+export const APPLY_LEAD_MS = 0;
 export const APPLY_LATE_MS = 30 * 60_000;
 /** v1.79.0 - how long after an apply (or retry) the device readback must show
  *  the target before we treat the write as not-taken. The strategy quota
@@ -280,8 +292,24 @@ export const APPLY_VERIFY_AFTER_MS = 5 * 60_000;
  *  forfeited. Two retries span ~15 min of the window. */
 export const APPLY_MAX_RETRIES = 2;
 
-/** Revert fires 5 min after the plan's charge window closes. */
-export const REVERT_LAG_MS = 5 * 60_000;
+/** Revert fires when the plan's charge window closes.
+ *
+ *  ★ v1.187.0 — THE LAG IS 0 (it was 5 min since v1.50.0), for the same reason as
+ *  APPLY_LEAD_MS: while the raised reserve stands above the pool the panel keeps
+ *  grid-charging, so 05:00-05:05 (Mon-Fri; Saturday 00:00-00:05 after a Friday
+ *  window) bought at the off-peak rate on any night still under its target at the
+ *  close. The revert's readback verification (REVERT_VERIFY_AFTER_MS) and the
+ *  revert-settling grace (REVERT_READBACK_GRACE_MS) are measured from the revert
+ *  itself, not from this lag, so neither moves. Force-charge's own window-end OFF
+ *  fires on the same tick, AHEAD of the restore (nightForceCharge.ts
+ *  actuationStepOrder: a slow revert PUT must not hold the OFF); both are
+ *  OFF-direction writes. The delivered-energy span ends at the restore's own stamp
+ *  (nightLedgerScoring.ts deliveredHoldSpan), not at this constant. */
+export const REVERT_LAG_MS = 0;
+/** v1.187.0 — the lag every night actuated before v1.187.0 ran with (and its lead): the
+ *  scorer's delivered-energy span still uses it for a night applied before its window with
+ *  no restore stamp — one actuated wholly on the old schedule (deliveredHoldSpan). */
+export const LEGACY_REVERT_LAG_MS = 5 * 60_000;
 /** Consecutive revert failures before the critical escalation annunciates.
  *  This counts CLOUD-REJECTED writes; a write the cloud ACCEPTS but the device
  *  ignores is the readback path below. */

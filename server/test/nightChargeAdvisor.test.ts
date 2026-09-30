@@ -751,8 +751,10 @@ test('v1.39.0 — nightWindowBounds resolves the Phoenix night clock exactly', (
   const day = Date.UTC(2026, 6, 18) + 7 * HOUR; // Phoenix midnight
   assert.equal(b.windowStartMs, day + 23 * HOUR);
   assert.equal(b.windowEndMs, day + 29 * HOUR);
-  assert.equal(b.onpeakStartMs, day + 16 * HOUR);
-  assert.equal(b.onpeakEndMs, day + 19 * HOUR);
+  // v1.187.0 — the clock no longer names an on-peak span (it was D 16:00-19:00, the
+  // afternoon BEFORE the plan); the tariff resolves the governed one after the window
+  // (nightLedgerScoring.governedOnPeakSpan, test/ledgerOnPeakGoverned.test.ts).
+  assert.equal('onpeakStartMs' in b, false);
   assert.equal(b.completeMs, day + 45 * HOUR, 'a night completes at D+1 21:00 Phoenix');
   assert.equal(nightWindowBounds('garbage'), null);
   assert.equal(nightWindowBounds('2026-7-8'), null, 'strict YYYY-MM-DD only');

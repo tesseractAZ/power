@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import {
   heldForImbalanceConfirm,
   conditionFromAlerts,
+  speakableAlerts,
   IMBALANCE_SPEAK_HOLD_MS,
   IMBALANCE_SPEAK_HOLD_PREFIXES,
 } from '../src/broadcast.js';
@@ -107,9 +108,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 const src = (f: string) => readFileSync(resolve(here, '../src/', f), 'utf8');
 
 test('the hold is applied in the broadcast tick, against the persistent onset sidecar', () => {
+  // v1.187.0 — the tick's pre-filter is the pure speakableAlerts; its behaviour is pinned here and
+  // the tick is pinned to call it with the sidecar lookup.
+  const onsets: Record<string, number> = { 'vdiff-warn-SN-1': now - 6 * MIN, 'peer-voldiff-SN-2': now - 11 * MIN };
+  const spoken = speakableAlerts([warn('vdiff-warn-SN-1'), warn('peer-voldiff-SN-2'), crit('vdiff-crit-SN-3')], now, (id) => onsets[id]);
+  assert.deepEqual(spoken.map((a) => a.id), ['peer-voldiff-SN-2', 'vdiff-crit-SN-3'],
+    'the array that feeds BOTH conditionFromAlerts and messageFor drops the warning still inside its hold');
   const B = src('broadcast.ts');
-  assert.ok(B.includes('.filter((a) => !heldForImbalanceConfirm(a, tickNow, getAlertOnset(a.id)))'),
-    'the tick filters the array that feeds BOTH conditionFromAlerts and messageFor');
+  assert.ok(B.includes('const alerts = speakableAlerts((store.get().alerts ?? []) as Alert[], tickNow, getAlertOnset);'),
+    'the tick builds its one array with speakableAlerts');
   assert.ok(B.includes("import { getAlertOnset } from './alertOnset.js';"),
     'age comes from the restart-persistent sidecar, not an in-process map that a daily restart would reset');
 });

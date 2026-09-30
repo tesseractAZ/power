@@ -319,6 +319,29 @@ export function apsREvModelFromEnv(): TariffModel {
   return buildApsREvModel(apsREvRatesFromEnv());
 }
 
+/**
+ * v1.187.0 — a model's on-peak period in the legacy report notation: hours as
+ * "start-end" (end-exclusive, local) and days as "first-last" on the 1=Mon…7=Sun scale
+ * `onPeakAt` uses. PURE. Null when the model has no on-peak period.
+ *
+ * /api/tariff printed the TARIFF_ON_PEAK_HOURS default ("15-20") verbatim while every
+ * priced and gated path used this model's 16:00-19:00 — two hours of "on-peak" that
+ * nothing charged. The model's `weekdays` run 0=Sun…6=Sat; a set that is not one
+ * contiguous run on the Mon-first scale is listed ("1,3,5") rather than bent into a range.
+ * Observed holidays are all-day off-peak in the model and have no place in this string.
+ */
+export function onPeakWindowStrings(model: TariffModel): { hours: string; days: string } | null {
+  const p = model.periods.find((x) => x.onPeak === true);
+  if (!p) return null;
+  const hours = `${p.startHour}-${p.endHour}`;
+  if (p.weekdays == null) return { hours, days: '1-7' };
+  const monFirst = [...new Set(p.weekdays.map((d) => (d === 0 ? 7 : d)))].sort((a, b) => a - b);
+  if (monFirst.length === 0) return { hours, days: '' };
+  const contiguous = monFirst.every((d, i) => i === 0 || d === monFirst[i - 1] + 1);
+  const days = contiguous ? `${monFirst[0]}-${monFirst[monFirst.length - 1]}` : monFirst.join(',');
+  return { hours, days };
+}
+
 /** A single-rate flat model — the legacy default (17¢ both bins) as a TariffModel,
  *  so the eventual consumer rewire is a behavior-preserving swap under flat rates. */
 export function flatTariffModel(centsPerKwh: number | null, timezone = 'America/Phoenix'): TariffModel {

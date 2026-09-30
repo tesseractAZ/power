@@ -252,12 +252,15 @@ test('★★★ after a delivery, a timed-out or failed fetch CARRIES the last g
   assert.equal(r2.fresh, false);
   assert.equal(r2.firstDelivery, false, 'first delivery is reported exactly once');
   assert.deepEqual(r2.value?.map((a) => a.id), ['curtail-carry'], 'the timed-out read carries the alert');
-  assert.match(logs.join('\n'), /carrying its last good value .* its alerts are held, not cleared/);
+  // v1.187.0 — a one-pass budget carry is the worker's normal recompute time: no line
+  // (test/alertFeedCarryLogging covers the rule).
+  assert.doesNotMatch(logs.join('\n'), /carrying its last good value/);
 
   const r3 = await f.read(() => Promise.reject(new Error('analytics worker exited')), 30);
   // The hung fetch from r2 is still in flight, so r3 JOINS it (one request at a time);
   // either way the answer is the carried value.
   assert.deepEqual(r3.value?.map((a) => a.id), ['curtail-carry']);
+  assert.match(logs.join('\n'), /carrying its last good value .* its alerts are held, not cleared/, 'the second consecutive carry is logged');
 });
 
 test('a failed fetch carries too, and a sync throw does not wedge the feed', { timeout: FEED_TEST_TIMEOUT_MS }, async () => {
