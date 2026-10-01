@@ -10,8 +10,8 @@
  * bound on every crossing and was never announced. advanceVdiffKnee now runs the session across the
  * plateau: it starts on the first crossing there, ends on a reading below it or after a seen
  * VDIFF_KNEE_MAX_MUTE_MS rest under 50 mV on it; the spoken note names the plateau line below the
- * top of charge. Mutants i-viii and xxii-xxiii (the plateau-side kills of the rest's scope and of an unknown SoC
- * starting a rest live in mutate-v1187-a.mjs lix-lxi, re-pointed).
+ * top of charge. Mutants i-viii and xxii-xxiii here; the rest's scope on the plateau and an unknown SoC
+ * starting a rest are covered by mutate-v1187-a.mjs lix-lxi (re-pointed).
  *
  * (2) The seeded-clock reset (v1.187.1) applied only to the first reading after a restart
  * (prev.lastSeenMs null): a first reading at 50-89 mV on the plateau carried a day-old onset through
@@ -147,11 +147,13 @@ const MUTANTS = [
     why: 'A second quick restart finds neither the clock nor the onset (pruned on the first tick back): the fault the onset named opens a fresh 20-minute mute.',
   },
   {
-    id: 'xiv. ★★ a change of mark alone is not written',
+    id: 'xiv. ★ a change of mark alone is not written (the file states what the process holds)',
     file: AL,
     find: '    if ((d?.critSeeded === true) !== st.critSeeded) changed = true;',
     to: '    /* MUTANT */',
-    why: 'A seed confirmed at the line stays marked on file until another value changes: a restart in that window ends the confirmed episode on its next dip under 50 mV.',
+    // The mark alone changes only when graceFromMs == critSinceMs (both from the seed), so the
+    // session bound covers the same mutes and no alarm reads the stale mark: file hygiene.
+    why: 'A seed confirmed at the line (its session seeded with it) stays marked on file until another value changes.',
   },
   {
     id: 'xv. ★★★ the restore drops the mark',

@@ -337,6 +337,17 @@ test('★★ (i) the mark on file: a confirmed seed is rewritten without it; a m
   tick(day + 2 * TICK_MS, PLAT_HI);
   assert.equal(onFile()[KEY].critSinceMs, T0, 'confirmed at the line');
   assert.equal('critSeeded' in onFile()[KEY], false, 'the mark is cleared on file on the tick it is confirmed');
+  // A seed whose session was seeded with it (an onset inside the carry, the file lost): on the
+  // confirming tick the mark is the only value that changes, and it is still written.
+  fresh();
+  for (let t = 0; t <= VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
+  rmSync(KNEE_PATH, { force: true });
+  restart(T0 + 25 * MIN);
+  tick(T0 + 25 * MIN, PLAT_MID);
+  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0 + 5 * G, critSeeded: true });
+  tick(T0 + 25 * MIN + TICK_MS, PLAT_HI);
+  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0 + 5 * G },
+    'only the mark changed, and the file says so');
   // A mark with no clock restores no mark: the entry written back after one tick carries none.
   fresh();
   writeFileSync(KNEE_PATH, JSON.stringify({ sessions: {
