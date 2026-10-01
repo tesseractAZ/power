@@ -290,6 +290,45 @@ test('★★ (i) …a seeded SESSION is written without the unconfirmed critical
   assert.match(back.detail, /First reached the critical line above 85% charge 27 minutes ago\./);
 });
 
+/* ── (j) upgrading from v1.187.1 mid-fault (v1.187.2) ──────────────────────────────────────── */
+
+test('★★★ (j) upgrading from v1.187.1 mid-fault: a 90% entry holding only the episode clock starts its session from that clock, not from the next crossing', () => {
+  // v1.187.1 ran no session below 95%, so its file holds a 90% fault's episode clock alone (the
+  // fault crossing on alternate readings for its first 10 minutes). The upgrade restarts the add-on
+  // and the fault continues as hi / lo / lo: its pairs of 45 mV readings end the episode after the
+  // restart. Started from the next crossing, the session would grant up to 20 more minutes of
+  // silence; started from the restored episode clock, the crossing 20 minutes after the fault's
+  // first is loud.
+  writeFileSync(KNEE_PATH, JSON.stringify({ sessions: {
+    [KEY]: { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: null, quietSinceMs: null, lastSeenMs: T0 + 2 * G },
+  } }));
+  const R = T0 + 11 * MIN;
+  restart(R);
+  assert.match(logs.join('\n'), /restored 1 knee session/);
+  const at = (t: number) => (Math.floor(t / READING_MS) % 3 === 0 ? PLAT_HI : PLAT_LO);
+  assert.equal(tick(R, at(0))!.mutedBy, 'balancing', 'the episode is 11 minutes old');
+  assert.equal(onFile()[KEY].graceFromMs, T0, 'the session starts from the restored episode clock');
+  for (let t = TICK_MS; t < 9 * MIN; t += TICK_MS) tick(R + t, at(t));
+  const late = tick(R + 9 * MIN, at(9 * MIN))!;
+  assert.notEqual(late.annunciate, false, 'the crossing 20 minutes after the fault\'s first crossing');
+  assert.match(late.detail, /First reached the critical line above 85% charge 20 minutes ago\./);
+});
+
+/* ── (k) a corrupt session clock (v1.187.2) ─────────────────────────────────────────────────── */
+
+test('★★ (k) a session clock on file LATER than its episode\'s first crossing cannot quiet the episode\'s own 20-minute bound', () => {
+  // Every state the process writes has graceFromMs <= critSinceMs, so the session bound comes due
+  // first and backs the episode bound up. A hand-edited or corrupt file can invert them; the
+  // episode's own bound then still speaks.
+  writeFileSync(KNEE_PATH, JSON.stringify({ sessions: {
+    [KEY]: { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0 + 15 * MIN, quietSinceMs: null, lastSeenMs: T0 + 4 * G },
+  } }));
+  restart(T0 + 25 * MIN);
+  const a = tick(T0 + 25 * MIN, PLAT_HI)!;
+  assert.notEqual(a.annunciate, false, 'balancing, but the episode is 25 minutes old');
+  assert.match(a.detail, /First reached the critical line 25 minutes ago\./);
+});
+
 /* ── (c) the outage, never the onset's age, decides ───────────────────────────────────────── */
 
 /** A session whose critical has cleared: a 3-minute crossing, then 5 minutes of 45 mV readings

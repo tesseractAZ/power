@@ -44,6 +44,7 @@ const SUBSET = [
   'test/alertVdiffBalancing.test.ts',
   'test/bootHydrationEdges.test.ts',
   'test/cellSpreadKneeRestart.test.ts',
+  'test/cellSpreadKneeSessionRestart.test.ts', // v1.187.2 — iv and li are killed there (the restart file)
 ];
 
 const MUTANTS = [
@@ -74,7 +75,10 @@ const MUTANTS = [
     file: AL,
     find: '  if (s.critSinceMs != null && nowMs - s.critSinceMs >= VDIFF_KNEE_MAX_MUTE_MS) return null;',
     to: '  /* MUTANT */',
-    why: 'A spread the BMS keeps balancing at top of charge is silent indefinitely.',
+    // v1.187.2 — the session now runs across the plateau, and every state the process writes has
+    // graceFromMs <= critSinceMs, so the session bound backs this one up; alone it holds against a
+    // knee-session file whose session clock is later than its episode (cellSpreadKneeSessionRestart (k)).
+    why: 'A spread the BMS keeps balancing is held by a corrupt session clock instead of its episode\'s 20-minute bound.',
   },
   {
     id: 'v. ★★ balancing is checked before the duration bound',
@@ -414,7 +418,10 @@ const MUTANTS = [
     file: AL,
     find: 'vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= s.critSinceMs ?? nowMs;',
     to: 'vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= nowMs; /* MUTANT */',
-    why: 'A crossing at 93% that reaches 95% three minutes later is muted for 8 minutes of charging, not 5.',
+    // v1.187.2 — the session starts on the plateau, on the episode's own first tick, so the two differ
+    // only for an episode clock older than its session: a v1.187.1 entry at 85-95% (no session there),
+    // or a seeded onset confirmed at the line (cellSpreadKneeSessionRestart (j)).
+    why: 'Upgraded mid-fault, a 90% hi / lo / lo fault starts its session at the next crossing: up to 20 more minutes of silence.',
   },
   {
     id: 'lii. ★★★ the session never starts',

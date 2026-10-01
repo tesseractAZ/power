@@ -423,24 +423,27 @@ const VOL_DIFF_WARN_RISE_MV = 24;
  *        mute — and it counts only as the stream delivered it (vdiffKneeChargeW), never the
  *        REST replay;
  *  - session (v1.187.0 log review): both graces are measured from the first critical-line
- *    crossing of the TOP-OF-CHARGE SESSION (graceFromMs) — the charge grace for at most
- *    VDIFF_KNEE_RELAX_MS, the end-of-charge grace for at most VDIFF_KNEE_MAX_MUTE_MS — not of
- *    the current crossing. The critical-line clock (critSinceMs) restarted whenever the spread
+ *    crossing of the SESSION (graceFromMs; v1.187.2 — on the plateau, at the top of charge until
+ *    then) — the charge grace for at most VDIFF_KNEE_RELAX_MS, the end-of-charge grace for at most
+ *    VDIFF_KNEE_MAX_MUTE_MS — not of the current crossing. The critical-line clock (critSinceMs) restarted whenever the spread
  *    fell under 50 mV (until v1.187.1: it now ends only after an unbroken VDIFF_KNEE_RELAX_MS
  *    under the line), so a spread that follows the charge current on isolated BMS readings
  *    (95 / 45 mV every ~180 s) earned a fresh grace on every crossing and was never announced
- *    for the whole afternoon; the session still bounds one whose dips are long enough to end it. The session ends when the pack reads below the top of charge, or
- *    once it has RESTED there — an unbroken VDIFF_KNEE_MAX_MUTE_MS under 50 mV — so a benign
- *    pack's next knee earns the graces again, while a second knee in the same session without a
- *    rest annunciates (fail loud);
+ *    for the whole afternoon; the session still bounds one whose dips are long enough to end it.
+ *    The session ends when the pack reads below the plateau (v1.187.2; below the top of charge
+ *    until then), or once it has RESTED there — an unbroken VDIFF_KNEE_MAX_MUTE_MS under 50 mV —
+ *    so a benign pack's next knee earns the graces again, while a second knee in the same session
+ *    without a rest annunciates (fail loud);
  *  - fail-to-relax: VDIFF_KNEE_RELAX_MS after the last balancing tick, a spread still at or
  *    above the critical line annunciates;
  *  - duration: VDIFF_KNEE_MAX_MUTE_MS after the spread first reached the critical line, it
- *    annunciates even while the BMS is still balancing (the balancing mute was unbounded); at
- *    the top of charge that bound is also counted from the session's first crossing, so dips
- *    under the line long enough to end the episode do not restart it; below the top of charge
- *    (v1.187.1 log review) the episode clock alone bounds it, and a dip under 50 mV no longer
- *    ends that clock at once;
+ *    annunciates even while the BMS is still balancing (the balancing mute was unbounded); on
+ *    the plateau that bound is also counted from the session's first crossing, so dips under the
+ *    line long enough to end the episode do not restart it (v1.187.2 — at the top of charge only
+ *    until then: between 85% and 95% the episode clock alone bounded it, and 95 / 45 / 45 mV
+ *    restarted it on every crossing). Every state the process writes has graceFromMs <=
+ *    critSinceMs, so the session bound comes due first; the episode's own bound still holds a
+ *    knee-session file that inverts them;
  *  - ceiling: VOL_DIFF_KNEE_HARD_MV annunciates at once, at any SoC, balancing or not;
  *  - and the direct hazard — a cell running toward overvoltage — has its own never-muted
  *    critical (CELL_OVP_CRIT_MV).
@@ -459,9 +462,9 @@ export const VOL_DIFF_KNEE_HARD_MV = 150;
  *  the slow Core 3 packs of 08-22/23 still read 110-134 mV then. */
 export const VDIFF_KNEE_RELAX_MS = 5 * 60_000;
 /** The longest a plateau-critical spread may stay silent at all, measured from the tick it
- *  first reached the critical line — and the longest the end-of-charge grace and (at the top of
- *  charge) the balancing mute last in one top-of-charge session (graceFromMs). Also the rest
- *  under 50 mV that ends a session (quietSinceMs). Longest benign run at or above 90 mV:
+ *  first reached the critical line — and the longest the end-of-charge grace and (on the
+ *  plateau, v1.187.2) the balancing mute last in one session (graceFromMs). Also the rest under
+ *  50 mV that ends a session (quietSinceMs). Longest benign run at or above 90 mV:
  *  9 minutes (Core 1 pack 1, 2026-09-29 15:31:57 → 15:40:58); twice that. */
 export const VDIFF_KNEE_MAX_MUTE_MS = 20 * 60_000;
 /** Pack charge input that counts as top-of-charge activity. Observed knee charging: 101-1301 W. */
@@ -798,7 +801,7 @@ function parseVdiffKneeSession(v: unknown): VdiffKneeSession | null {
 
 /**
  * v1.187.1 (log review) — whether a persisted rest is one the process could have been in: an
- * UNFINISHED rest inside a running top-of-charge session. A crossing breaks a rest, so it began after
+ * UNFINISHED rest inside a running session. A crossing breaks a rest, so it began after
  * the session's first crossing (graceFromMs) and, when an episode still stands, after that episode's
  * first crossing (critSinceMs: the episode outlives the first VDIFF_KNEE_RELAX_MS of a rest); and it
  * began less than VDIFF_KNEE_MAX_MUTE_MS before the last reading (a rest that long had already ended
