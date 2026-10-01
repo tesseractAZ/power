@@ -141,6 +141,30 @@ test('★★ a benign knee across a restart stays silent (the seed restores cloc
   assert.equal(tick(T0 + 6 * MIN, { vd: 67, soc: 100, bal: 0, in: 0 }), undefined, 'relaxed under the line');
 });
 
+test('★★ (v1.187.1) a SEEDED critical-line clock ends at once on a first reading under 50 mV, and survives one in the 50-89 mV band', () => {
+  // At 90% no session runs, so the seeded critical-line clock alone bounds the balancing mute. In
+  // the process an episode now survives readings under 50 mV until an unbroken VDIFF_KNEE_RELAX_MS
+  // (log review); a clock seeded from a persisted onset — perhaps a day old, never seen in this
+  // process — still ends on the first reading under 50 mV, as in v1.187.0.
+  const hi: Reading = { vd: 110, soc: 90, bal: 1, in: 0 };
+  for (const [label, firstBack, loud] of [['50-89 mV', 70, true], ['under 50 mV', 30, false]] as const) {
+    restart();
+    rmSync(process.env.ALERT_ONSET_PATH!, { force: true });
+    resetAlertOnsetCacheForTests();
+    for (let t = 0; t < VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) assert.equal(tick(T0 + t, hi)!.mutedBy, 'balancing', label);
+    assert.notEqual(tick(T0 + VDIFF_KNEE_MAX_MUTE_MS, hi)!.annunciate, false, `${label}: the 20-minute bound speaks in-process`);
+    restart();
+    assert.equal(tick(T0 + 21 * MIN, { vd: firstBack, soc: 90, bal: 1, in: 0 }), undefined, `${label}: under the plateau line`);
+    const back = tick(T0 + 22 * MIN, hi)!;
+    if (loud) {
+      assert.notEqual(back.annunciate, false, `${label}: the seeded episode stands`);
+      assert.match(back.detail, /First reached the critical line 22 minutes ago\./);
+    } else {
+      assert.equal(back.mutedBy, 'balancing', `${label}: the seeded episode ended — a new one, muted while balancing`);
+    }
+  }
+});
+
 test('★★ the seed carries no evidence: an idle pack at the line after a restart speaks at once', () => {
   tick(T0, { vd: 95, soc: 100, bal: 1, in: 0 });
   restart();

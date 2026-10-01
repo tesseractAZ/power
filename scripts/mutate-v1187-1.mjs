@@ -20,6 +20,13 @@
  * grain (one write per grain however many packs). The serial is a persisted change. Mutants
  * xxvii-xxxvi.
  *
+ * (1, log review) Between 85% and 95% (no session runs there) the critical-line clock was the
+ * balancing mute's only bound, and a reading under 50 mV ended it at once: a balancing spread
+ * alternating 95 / 45 mV was muted with no limit, and the file held the latest crossing or nothing.
+ * On the plateau the episode now ends only after an unbroken VDIFF_KNEE_RELAX_MS under the line; a
+ * clock SEEDED from an onset still ends on a first reading under 50 mV. A rest on file is restored
+ * only when it is coherent (vdiffKneeRestCoherent). Mutants xxxvii-xlix.
+ *
  * (2) The bench-spare stamp (alerts.ts) and the roster stamp (applyRosterMute) overwrote
  * annunciate / muteReason but left mutedBy set, so a sounded vdiff-crit muted by policy that also
  * carried a knee mute held the committed red (soundedCriticalHeld) and delayed the all-clear. Both
@@ -242,7 +249,7 @@ const MUTANTS = [
   {
     id: 'xxvii. ★★★ the rest is not restored',
     file: AL,
-    find: '      quietSinceMs: restCarried ? Math.min(s.quietSinceMs!, nowMs) : null,',
+    find: '      quietSinceMs: restCarried && restCoherent ? Math.min(s.quietSinceMs!, nowMs) : null,',
     to: '      quietSinceMs: null, /* MUTANT */',
     why: 'A restart during the rest after a benign knee keeps the session open 20 more minutes: a second benign knee sounds the red klaxon.',
   },
@@ -309,6 +316,99 @@ const MUTANTS = [
     find: '    const lastSeenMs = Math.floor(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS;',
     to: '    const lastSeenMs = Math.ceil(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS; /* MUTANT */',
     why: 'The file places the last reading after the true one: a session is carried past the carry, and restarts walk it forward.',
+  },
+  /* ── (1, log review) the critical-line clock on the plateau ───────────── */
+  {
+    id: 'xxxvii. ★★★ a reading under 50 mV on the plateau ends the episode at once again',
+    file: AL,
+    find: '  if (!onPlateau) {\n    s.critSinceMs = null;',
+    to: '  if (!onPlateau || obs.spreadMv < VOL_DIFF_CRIT_MV) { /* MUTANT */\n    s.critSinceMs = null;',
+    why: 'At 90% a balancing spread alternating 95 / 45 mV is muted with no limit, and a restart on either reading finds no first crossing on file.',
+  },
+  {
+    id: 'xxxviii. ★★★ a seen (restored or in-process) clock ends at once under 50 mV',
+    file: AL,
+    find: '    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;',
+    to: '    const seededAndUnder = obs.spreadMv < VOL_DIFF_CRIT_MV; /* MUTANT */',
+    why: 'As xxxvii: every 45 mV reading restarts the 20-minute bound.',
+  },
+  {
+    id: 'xxxix. ★★ a seeded clock outlives a first reading under 50 mV',
+    file: AL,
+    find: '    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;',
+    to: '    const seededAndUnder = false; /* MUTANT */',
+    why: 'A day-old onset survives the restart\'s first quiet readings: the next day\'s benign knee inside five minutes sounds the red klaxon.',
+  },
+  {
+    id: 'xl. ★★ a seeded clock ends on any reading under the plateau line',
+    file: AL,
+    find: '    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;',
+    to: '    const seededAndUnder = prev?.lastSeenMs == null; /* MUTANT */',
+    why: 'A standing critical restarted on a 70 mV reading loses its onset: 20 more minutes of balancing silence below 95%.',
+  },
+  /* ── (3, log review) only a coherent rest is restored ─────────────────── */
+  {
+    id: 'xli. ★★★ the rest is restored without its coherence check',
+    file: AL,
+    find: '    const restCoherent = vdiffKneeRestCoherent(s);',
+    to: '    const restCoherent = true; /* MUTANT */',
+    why: 'A corrupt rest (0, negative) ends a running session on the first reading under 50 mV: fresh graces for the next crossing.',
+  },
+  {
+    id: 'xlii. ★★ a rest from before the session is coherent',
+    file: AL,
+    find: '  return q != null && s.graceFromMs != null && q > s.graceFromMs',
+    to: '  return q != null && s.graceFromMs != null /* MUTANT */',
+    why: 'A rest no crossing could have left standing is restored.',
+  },
+  {
+    id: 'xliii. ★★ a rest from the session\'s first crossing is coherent',
+    file: AL,
+    find: '  return q != null && s.graceFromMs != null && q > s.graceFromMs',
+    to: '  return q != null && s.graceFromMs != null && q >= s.graceFromMs /* MUTANT */',
+    why: 'The bound is off by one.',
+  },
+  {
+    id: 'xliv. ★★ a rest with no session is coherent',
+    file: AL,
+    find: '  return q != null && s.graceFromMs != null && q > s.graceFromMs',
+    to: '  return q != null && (s.graceFromMs == null || q > s.graceFromMs) /* MUTANT */',
+    why: 'A rest that bounds nothing is carried.',
+  },
+  {
+    id: 'xlv. ★★★ a rest during a standing episode is not restored (the clock it ran beside)',
+    file: AL,
+    find: '    && (s.critSinceMs == null || q > s.critSinceMs)',
+    to: '    && s.critSinceMs == null /* MUTANT */',
+    why: 'A restart in the first five minutes of the rest after a benign knee keeps the session 20 more minutes: a second benign knee sounds the red klaxon.',
+  },
+  {
+    id: 'xlvi. ★★ a rest older than the standing episode is coherent',
+    file: AL,
+    find: '    && (s.critSinceMs == null || q > s.critSinceMs)',
+    to: '    /* MUTANT */',
+    why: 'A rest a crossing would have broken is restored.',
+  },
+  {
+    id: 'xlvii. ★★ a rest from the episode\'s first crossing is coherent',
+    file: AL,
+    find: '    && (s.critSinceMs == null || q > s.critSinceMs)',
+    to: '    && (s.critSinceMs == null || q >= s.critSinceMs) /* MUTANT */',
+    why: 'The bound is off by one.',
+  },
+  {
+    id: 'xlviii. ★★★ a rest as long as the session bound is coherent',
+    file: AL,
+    find: '    && s.lastSeenMs - q < VDIFF_KNEE_MAX_MUTE_MS;',
+    to: '    ; /* MUTANT */',
+    why: 'A rest that had already ended the session is restored: the next crossing earns fresh graces.',
+  },
+  {
+    id: 'xlix. ★★ the rest\'s age bound is inclusive',
+    file: AL,
+    find: '    && s.lastSeenMs - q < VDIFF_KNEE_MAX_MUTE_MS;',
+    to: '    && s.lastSeenMs - q <= VDIFF_KNEE_MAX_MUTE_MS; /* MUTANT */',
+    why: 'The bound is off by one.',
   },
 ];
 

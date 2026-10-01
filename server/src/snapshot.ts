@@ -163,6 +163,11 @@ export const STREAM_FLOW_WINDOW_MS = 150_000;
 export const PANEL_ABSENT_LISTS = 3;
 /** v1.185.0 — consecutive device lists a lone panel must stand alone before the FIRST pin. */
 export const FIRST_PIN_LISTS = 2;
+/** v1.187.1 (log review) — how often a pack-ghosts.json save that is pending only from an earlier
+ *  FAILURE is retried. The store projects on every MQTT delta (~1 Hz per Core), and a full or
+ *  read-only /data made every projection a synchronous temp-file write and rename on the event loop
+ *  that also evaluates the alarms — exactly while the host was already in trouble. */
+export const PACK_GHOSTS_RETRY_MS = 60_000;
 
 /**
  * v1.181.0 — a Core's content fingerprint: the fields that move with every real reading (power
@@ -202,6 +207,8 @@ export class SnapshotStore extends EventEmitter {
   private packGhostsOnDisk = new Map<string, Map<number, PackGhost>>();
   private packGhostsDirty = false;
   private packGhostsWriteWarned = false;
+  /** v1.187.1 (log review) — the last save attempt (PACK_GHOSTS_RETRY_MS). */
+  private packGhostsLastAttemptMs = -Infinity;
   // MQTT message cache. Different schema from REST (cmdId-routed, bpInfo[].* etc.)
   // Keyed by sn, then by cmdId, value is the flattened param. Plus a "last" alias
   // mapping recent cmdId data into a flat lookup.
@@ -289,7 +296,11 @@ export class SnapshotStore extends EventEmitter {
     // hidden on this very projection (packPresence.ts).
     if (!hist) { hist = freshPackSlotHistory(this.packGhostsOnDisk.get(sn)); this.packHist.set(sn, hist); }
     const r = prunePhantomPacks(proj.packs, proj.packCount ?? null, hist, this.now());
-    if (r.ghostsChanged || this.packGhostsDirty) this.writePackGhosts();
+    // v1.187.1 (log review) — a genuine ghost change saves at once; a save pending only from an
+    // earlier failure is retried at most once per PACK_GHOSTS_RETRY_MS (and at once after a clock
+    // step backward, which would otherwise hold it off until the clock caught up).
+    const sinceAttemptMs = this.now() - this.packGhostsLastAttemptMs;
+    if (r.ghostsChanged || (this.packGhostsDirty && (sinceAttemptMs >= PACK_GHOSTS_RETRY_MS || sinceAttemptMs < 0))) this.writePackGhosts();
     const hiddenNow = new Set(r.dropped.map((d) => `${sn}:${d.num}`));
     for (const d of r.dropped) {
       const k = `${sn}:${d.num}`;
@@ -324,11 +335,12 @@ export class SnapshotStore extends EventEmitter {
   }
 
   /** v1.187.1 — atomic (temp + rename). Every Core's current ghosts, plus the file's for a Core not
-   *  projected yet in this process (kept, not dropped). A failure is logged once and retried on the
-   *  next projection. */
+   *  projected yet in this process (kept, not dropped). A failure is logged once and retried —
+   *  (log review) at most once per PACK_GHOSTS_RETRY_MS while no ghost changes. */
   private writePackGhosts(): void {
     const path = this.packGhostsPath;
     if (!path) return;
+    this.packGhostsLastAttemptMs = this.now();
     const out: Record<string, Record<number, PackGhost>> = {};
     for (const [sn, ghosts] of this.packGhostsOnDisk) if (!this.packHist.has(sn)) out[sn] = Object.fromEntries(ghosts);
     for (const [sn, hist] of this.packHist) if (hist.ghosts.size > 0) out[sn] = Object.fromEntries(hist.ghosts);
@@ -341,7 +353,7 @@ export class SnapshotStore extends EventEmitter {
       this.packGhostsDirty = true;
       if (!this.packGhostsWriteWarned) {
         this.packGhostsWriteWarned = true;
-        this.logger(`packs: could not save the hidden pack slots (${(e as Error)?.message ?? e}) — retrying on each projection`);
+        this.logger(`packs: could not save the hidden pack slots (${(e as Error)?.message ?? e}) — retrying at most once a minute`);
       }
     }
   }

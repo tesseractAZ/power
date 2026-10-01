@@ -166,3 +166,28 @@ test('the v1.14.0 order is unchanged otherwise: info first, then warnings, criti
   assert.deepEqual(evictOnce(log), ['b']);
   assert.deepEqual(evictOnce(log), ['a']);
 });
+
+test('★★★ (log review) a row with no string id cannot throw into the tick: it leaves with the ordinary warnings, and is no one\'s warranty evidence', () => {
+  // loadClearedLog drops such rows (clearedLog.test.ts); this is the in-memory guard behind it. On
+  // f6ce55f the never-muted tier read `a.id.startsWith` and threw on every clear at the cap.
+  const corrupt = (id: unknown, ageDays: number): ClearedAlert => {
+    const clearedAt = NOW - ageDays * DAY;
+    return { alert: { severity: 'warning', ...(id === undefined ? {} : { id }) } as unknown as Alert, raisedAt: clearedAt - 3_600_000, clearedAt, durationMs: 3_600_000 };
+  };
+  for (const id of [undefined, 42, null, { not: 'an id' }]) {
+    const bad = corrupt(id, 80);
+    const pd = row(`pack-defective-${CORE4}-1`, 90, { pushed: true });
+    const ordinary = row('vdiff-warn-HOME-1', 5);
+    const log = ledger(ordinary, bad, pd);
+    assert.doesNotThrow(() => pruneOldestNonSignificant(log, undefined, NOW), `id ${JSON.stringify(id)}`);
+    assert.equal(log.includes(bad), false, `id ${JSON.stringify(id)}: the corrupt row leaves first (it is not never-muted)`);
+    assert.ok(log.includes(ordinary) && log.includes(pd));
+    // warranty evidence: no throw on either side, and the row matches nothing by id.
+    const isEvidence = warrantyEvidence([pd, bad]);
+    assert.equal(isEvidence(bad), false, `id ${JSON.stringify(id)}`);
+    assert.equal(isEvidence(pd), true, 'the pack-defective row is still its own evidence');
+  }
+  // A corrupt row in the SCAN for pack-defective rows (a critical, so no eviction tier reads it first).
+  const critBad = { ...corrupt(7, 10), alert: { id: 7, severity: 'critical' } as unknown as Alert };
+  assert.doesNotThrow(() => warrantyEvidence([critBad])(row(`ems-volt-${CORE4}`, 5)));
+});

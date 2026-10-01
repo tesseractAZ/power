@@ -25,6 +25,10 @@
  *     has not settled do not mark an episode annunciated (lxxvii-lxxxii); (4) pack-defective rows
  *     leave after the other never-muted warnings (lxxxiii-lxxxiv); (5) a corrupt confirmation time
  *     cannot throw into the tick (lxxxv-lxxxix).
+ * Log review 09-30: (2) a cleared row whose alert id or severity is not a string is dropped on load,
+ *     and the never-muted tier and warranty evidence read a non-string id as no id (xc-xcvi); (4) a
+ *     pack-ghosts save pending only from an earlier failure is retried at most once per
+ *     PACK_GHOSTS_RETRY_MS, a genuine ghost change still at once (xcvii-ci).
  *
  *   node scripts/mutate-v1187-1g.mjs
  *
@@ -51,6 +55,7 @@ const SUBSET = [
   'test/packGhostRestart.test.ts',
   'test/packPresence.test.ts',
   'test/clearedLedgerRetention.test.ts',
+  'test/clearedLog.test.ts',
   'test/lifetimeHeadAndClearedRetention.test.ts',
   'test/defectivePackRetireLog.test.ts',
   'test/defectivePackLatch.test.ts',
@@ -220,7 +225,7 @@ const MUTANTS = [
   {
     id: 'xxiii. ★★ a failed save is not retried',
     file: SNAP,
-    find: '    if (r.ghostsChanged || this.packGhostsDirty) this.writePackGhosts();',
+    find: '    if (r.ghostsChanged || (this.packGhostsDirty && (sinceAttemptMs >= PACK_GHOSTS_RETRY_MS || sinceAttemptMs < 0))) this.writePackGhosts();',
     to: '    if (r.ghostsChanged) this.writePackGhosts(); /* MUTANT */',
     why: 'One failed write (a full disk at the hide) loses the ghost until it next changes.',
   },
@@ -319,7 +324,7 @@ const MUTANTS = [
   {
     id: 'xxxv. ★★★ pack-defective rows leave with the other warnings',
     file: AM,
-    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && !isNeverMutedAlert(e.alert))) return;',
+    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert)))) return;',
     to: '  if (evictOldest((e, i) => sev(i) === \'warning\')) return; /* MUTANT */',
     why: 'The RMA\'d pack\'s seven pack-defective rows were 738 warnings from the front of the queue.',
   },
@@ -684,7 +689,7 @@ const MUTANTS = [
   {
     id: 'lxxxiv. ★★ the never-muted tier is removed',
     file: AM,
-    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && !isNeverMutedAlert(e.alert))) return;',
+    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert)))) return;',
     to: '  /* MUTANT */',
     why: 'An older shp2-multi-panel row leaves before a newer ordinary warning.',
   },
@@ -723,6 +728,92 @@ const MUTANTS = [
     find: '${isoOrRaw(dConfirmed.confirmedAtMs - 7 * 3_600_000).slice(0, 10)}',
     to: '${new Date(dConfirmed.confirmedAtMs - 7 * 3_600_000).toISOString().slice(0, 10)} /* MUTANT */',
     why: 'While the pack is present, every tick throws and no alert set is published.',
+  },
+  /* (log review 09-30, 2) a corrupt cleared row cannot throw into the tick */
+  {
+    id: 'xc. ★★★ a row with no string id loads',
+    file: AM,
+    find: '        typeof rec.alert.id === \'string\' && typeof rec.alert.severity === \'string\' &&',
+    to: '        typeof rec.alert.severity === \'string\' && /* MUTANT */',
+    why: 'A hand-edited row with no id throws in the never-muted tier on every clear at the cap: the tick aborts before its pushes.',
+  },
+  {
+    id: 'xci. ★★ a row with no string severity loads',
+    file: AM,
+    find: '        typeof rec.alert.id === \'string\' && typeof rec.alert.severity === \'string\' &&',
+    to: '        typeof rec.alert.id === \'string\' && /* MUTANT */',
+    why: 'A row whose severity is a number is read as neither info nor warning: it can only leave as a critical would.',
+  },
+  {
+    id: 'xcii. ★★★ the never-muted tier reads a non-string id',
+    file: AM,
+    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert)))) return;',
+    to: '  if (evictOldest((e, i) => sev(i) === \'warning\' && !isNeverMutedAlert(e.alert))) return; /* MUTANT */',
+    why: 'An in-memory row with no string id throws in the tick on every clear at the cap.',
+  },
+  {
+    id: 'xciii. ★★ a row with no string id is kept like a never-muted one',
+    file: AM,
+    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert)))) return;',
+    to: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id === \'string\' && !isNeverMutedAlert(e.alert)))) return; /* MUTANT */',
+    why: 'Garbage outlives the ordinary warnings: real history leaves first.',
+  },
+  {
+    id: 'xciv. ★★★ warranty evidence reads a non-string id',
+    file: AM,
+    find: '  const idOf = (e: ClearedAlert): string => (typeof e.alert?.id === \'string\' ? e.alert.id : \'\');',
+    to: '  const idOf = (e: ClearedAlert): string => (e.alert?.id ?? \'\'); /* MUTANT */',
+    why: 'A row whose id is a number throws in the eviction\'s evidence scan on every clear at the cap.',
+  },
+  {
+    id: 'xcv. ★★ the pack-defective scan reads the raw id',
+    file: AM,
+    find: '    const id = idOf(e);\n    if (!id.startsWith(\'pack-defective-\')) continue;',
+    to: '    const id = (e.alert?.id ?? \'\') as string; /* MUTANT */\n    if (!id.startsWith(\'pack-defective-\')) continue;',
+    why: 'As xciv, on the scan side.',
+  },
+  {
+    id: 'xcvi. ★★ the evidence predicate reads the raw id',
+    file: AM,
+    find: '    const id = idOf(e);\n    return windows.some(',
+    to: '    const id = (e.alert?.id ?? \'\') as string; /* MUTANT */\n    return windows.some(',
+    why: 'As xciv, on the predicate side.',
+  },
+  /* (log review 09-30, 4) a failed pack-ghosts save is backed off */
+  {
+    id: 'xcvii. ★★★ a failed save is retried on every projection',
+    file: SNAP,
+    find: '    if (r.ghostsChanged || (this.packGhostsDirty && (sinceAttemptMs >= PACK_GHOSTS_RETRY_MS || sinceAttemptMs < 0))) this.writePackGhosts();',
+    to: '    if (r.ghostsChanged || this.packGhostsDirty) this.writePackGhosts(); /* MUTANT */',
+    why: 'A full or read-only /data: a synchronous temp write and rename on every MQTT delta from every Core, on the alarm loop.',
+  },
+  {
+    id: 'xcviii. ★★★ a ghost change waits for the retry backoff',
+    file: SNAP,
+    find: '    if (r.ghostsChanged || (this.packGhostsDirty && (sinceAttemptMs >= PACK_GHOSTS_RETRY_MS || sinceAttemptMs < 0))) this.writePackGhosts();',
+    to: '    if ((r.ghostsChanged || this.packGhostsDirty) && (sinceAttemptMs >= PACK_GHOSTS_RETRY_MS || sinceAttemptMs < 0)) this.writePackGhosts(); /* MUTANT */',
+    why: 'A hide or a retirement right after a failed save is not saved for a minute: a restart inside it loses it.',
+  },
+  {
+    id: 'xcix. ★★ the retry backoff is exclusive at its bound',
+    file: SNAP,
+    find: '    if (r.ghostsChanged || (this.packGhostsDirty && (sinceAttemptMs >= PACK_GHOSTS_RETRY_MS || sinceAttemptMs < 0))) this.writePackGhosts();',
+    to: '    if (r.ghostsChanged || (this.packGhostsDirty && (sinceAttemptMs > PACK_GHOSTS_RETRY_MS || sinceAttemptMs < 0))) this.writePackGhosts(); /* MUTANT */',
+    why: 'The bound is off by one: projections a minute apart never retry.',
+  },
+  {
+    id: 'c. ★★ a backward clock step holds the retry off',
+    file: SNAP,
+    find: '    if (r.ghostsChanged || (this.packGhostsDirty && (sinceAttemptMs >= PACK_GHOSTS_RETRY_MS || sinceAttemptMs < 0))) this.writePackGhosts();',
+    to: '    if (r.ghostsChanged || (this.packGhostsDirty && sinceAttemptMs >= PACK_GHOSTS_RETRY_MS)) this.writePackGhosts(); /* MUTANT */',
+    why: 'After the clock steps back an hour, a pending save waits an hour.',
+  },
+  {
+    id: 'ci. ★★★ the attempt time is not recorded',
+    file: SNAP,
+    find: '    this.packGhostsLastAttemptMs = this.now();',
+    to: '    /* MUTANT */',
+    why: 'As xcvii: the backoff never engages.',
   },
 ];
 

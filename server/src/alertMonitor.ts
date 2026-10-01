@@ -706,8 +706,11 @@ export const CLEARED_ROSTER_MUTED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 export function warrantyEvidence(logArr: readonly ClearedAlert[]): (e: ClearedAlert) => boolean {
   const windows: Array<{ coreSn: string; raisedAt: number; clearedAt: number }> = [];
   const packSns = new Set<string>();
+  // v1.187.1 (log review) — a row whose id is not a string (a hand-edited or corrupt file) is no
+  // one's evidence; read as '' it cannot throw into the alert tick (loadClearedLog drops such rows).
+  const idOf = (e: ClearedAlert): string => (typeof e.alert?.id === 'string' ? e.alert.id : '');
   for (const e of logArr) {
-    const id = e.alert?.id ?? '';
+    const id = idOf(e);
     if (!id.startsWith('pack-defective-')) continue;
     const rest = id.slice('pack-defective-'.length);
     windows.push({ coreSn: rest.slice(0, rest.lastIndexOf('-')), raisedAt: e.raisedAt, clearedAt: e.clearedAt });
@@ -715,7 +718,7 @@ export function warrantyEvidence(logArr: readonly ClearedAlert[]): (e: ClearedAl
   }
   return (e) => {
     if (e.alert?.sourcePackSn != null && packSns.has(e.alert.sourcePackSn)) return true;
-    const id = e.alert?.id ?? '';
+    const id = idOf(e);
     return windows.some((w) => (id.includes(w.coreSn) || e.alert?.sourceSn === w.coreSn)
       && e.raisedAt <= w.clearedAt && e.clearedAt >= w.raisedAt);
   };
@@ -770,7 +773,9 @@ export function pruneOldestNonSignificant(
     if (evictOldest((e, i) => sev(i) === 'warning' && isNoise(e) && e.pushed === false && !evidence(e))) return;
     if (evictOldest((e, i) => sev(i) === 'warning' && isNoise(e) && !evidence(e))) return;
   }
-  if (evictOldest((e, i) => sev(i) === 'warning' && !isNeverMutedAlert(e.alert))) return;
+  // v1.187.1 (log review) — a row with no string id is not never-muted (isNeverMutedAlert reads the
+  // id and would throw on it, every tick at the cap): it leaves with the ordinary warnings.
+  if (evictOldest((e, i) => sev(i) === 'warning' && (typeof e.alert?.id !== 'string' || !isNeverMutedAlert(e.alert)))) return;
   if (evictOldest((e, i) => sev(i) === 'warning' && !String(e.alert?.id ?? '').startsWith('pack-defective-'))) return;
   if (evictOldest((_e, i) => sev(i) === 'warning')) return;
   logArr.pop();
@@ -2271,7 +2276,8 @@ export function saveNotifiedState(path: string, state: Map<string, NotifyRecord>
  *  mirroring loadNotifiedState/saveNotifiedState). A bounded, newest-first array
  *  in a JSON sidecar; survives restarts so the operator can reconstruct what
  *  fired and cleared even across the daily Pi power cut. `load` validates each
- *  record (drops garbage / non-arrays / a corrupt file) and caps to `max`;
+ *  record (drops garbage / non-arrays / a corrupt file; v1.187.1: a row whose
+ *  alert id or severity is not a string) and caps to `max`;
  *  `save` is atomic and best-effort (history is observability, never gates a
  *  live alarm). */
 export function loadClearedLog(path: string, max: number): ClearedAlert[] {
@@ -2282,9 +2288,13 @@ export function loadClearedLog(path: string, max: number): ClearedAlert[] {
     if (!Array.isArray(raw)) return out;
     for (const c of raw) {
       const rec = c as Partial<ClearedAlert>;
+      // v1.187.1 (log review) — the alert's id and severity must be strings: the ledger's eviction
+      // and warranty-evidence tiers read them on every clear at the cap, and a row without them (a
+      // hand-edited or corrupt file; the monitor never writes one) threw there, every tick.
       if (
         rec && typeof rec === 'object' &&
         rec.alert && typeof rec.alert === 'object' &&
+        typeof rec.alert.id === 'string' && typeof rec.alert.severity === 'string' &&
         Number.isFinite(rec.raisedAt) && Number.isFinite(rec.clearedAt)
       ) {
         out.push(rec as ClearedAlert);

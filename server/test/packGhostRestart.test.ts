@@ -34,7 +34,7 @@ after(() => rmSync(tmp, { recursive: true, force: true }));
 const {
   prunePhantomPacks, freshPackSlotHistory, packFingerprint, parsePackGhosts, packFrozenPhrase, PACK_STALE_MS,
 } = await import('../src/packPresence.js');
-const { SnapshotStore } = await import('../src/snapshot.js');
+const { SnapshotStore, PACK_GHOSTS_RETRY_MS } = await import('../src/snapshot.js');
 
 const M = 60_000;
 const DAY = 24 * 60 * M;
@@ -273,7 +273,7 @@ test('★★ a corrupt file is ignored (the v1.172.0 behaviour: shown until the 
   }
 });
 
-test('★★ a failed save is logged once and retried on the next projection', () => {
+test('★★ a failed save is logged once and retried (projections a minute apart: on each)', () => {
   const dir = join(tmp, 'not-yet');
   const path = join(dir, 'ghosts.json');
   process.env.PACK_GHOSTS_PATH = path;
@@ -287,6 +287,55 @@ test('★★ a failed save is logged once and retried on the next projection', (
     a.s.setDeviceQuota(CORE, raw(16));
     assert.ok(existsSync(path), 'saved once the directory exists, though no ghost changed since');
     assert.ok(JSON.parse(readFileSync(path, 'utf8'))[CORE]['5']);
+  } finally {
+    delete process.env.PACK_GHOSTS_PATH;
+  }
+});
+
+test('★★ (log review) a failed save is retried at most once per PACK_GHOSTS_RETRY_MS while no ghost changes — not on every ~1 Hz projection', () => {
+  assert.equal(PACK_GHOSTS_RETRY_MS, 60_000);
+  // A failing writer: the path is a directory, so each attempt writes the temp file and its rename
+  // fails. The temp file is removed after every projection, so its reappearance counts an attempt.
+  const path = join(tmp, 'ghosts-is-a-directory');
+  mkdirSync(path);
+  writeFileSync(join(path, 'occupied'), 'x');
+  const tmpFile = `${path}.tmp`;
+  process.env.PACK_GHOSTS_PATH = path;
+  try {
+    const a = store(0);
+    const attempts: number[] = [];
+    const project = (ms: number, slot5: 'ghost' | 'reinserted' = 'ghost', m = Math.floor(ms / M)) => {
+      a.at(ms);
+      a.s.setDeviceQuota(CORE, raw(m, slot5));
+      if (existsSync(tmpFile)) { attempts.push(ms); rmSync(tmpFile); }
+    };
+    // The MQTT stream projects about once a second.
+    let ms = 0;
+    for (; attempts.length === 0 && ms <= 15 * M; ms += 1000) project(ms);
+    const h = attempts[0];
+    assert.ok(h != null, 'the hide saves the ghost — and the save fails');
+    assert.deepEqual(shown(a.s), [1, 2, 3, 4]);
+    for (; ms <= h + 5 * M; ms += 1000) project(ms);
+    assert.deepEqual(attempts, [h, h + M, h + 2 * M, h + 3 * M, h + 4 * M, h + 5 * M],
+      'one retry per minute, on the minute — not one per projection (300)');
+    assert.equal(a.logs.filter((l) => l.startsWith('packs: could not save the hidden pack slots')).length, 1);
+    assert.ok(a.logs.some((l) => l.endsWith('— retrying at most once a minute')), a.logs.join('\n'));
+    // A genuine ghost change saves at once, ten seconds after the last attempt.
+    const changeAt = h + 5 * M + 10_000;
+    project(changeAt, 'reinserted');
+    assert.deepEqual(shown(a.s), [1, 2, 3, 4, 5]);
+    assert.equal(attempts.at(-1), changeAt, 'the retired ghost is saved at once');
+    // A clock step backward does not hold the pending save off until the clock catches up (the
+    // same readings: no ghost changes).
+    const stepped = h - 10 * M;
+    project(stepped, 'reinserted', Math.floor(changeAt / M));
+    assert.equal(attempts.at(-1), stepped, 'retried at once after a backward clock step');
+    // The writer recovers: the pending save lands on the next retry, not before.
+    rmSync(path, { recursive: true });
+    project(stepped + 30_000, 'reinserted', Math.floor(changeAt / M));
+    assert.equal(existsSync(path), false, 'not before PACK_GHOSTS_RETRY_MS');
+    project(stepped + M, 'reinserted', Math.floor(changeAt / M));
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), {}, 'saved on the next retry (the ghost was retired)');
   } finally {
     delete process.env.PACK_GHOSTS_PATH;
   }

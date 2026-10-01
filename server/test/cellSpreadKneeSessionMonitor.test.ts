@@ -41,7 +41,7 @@ delete process.env.NOTIFY_RESOLVED;
 
 const { startAlertMonitor } = await import('../src/alertMonitor.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
-const { resetVdiffWarnHoldForTesting } = await import('../src/alerts.js');
+const { resetVdiffWarnHoldForTesting, VDIFF_KNEE_RELAX_MS } = await import('../src/alerts.js');
 const { getAlertOnset, resetAlertOnsetCacheForTests } = await import('../src/alertOnset.js');
 type Alert = import('../src/alerts.js').Alert;
 
@@ -127,17 +127,23 @@ test('★★★ the monitor writes the knee session where the next process resto
     offset += 65 * MIN;
     await passes(a, 2);
     assert.notEqual(crit(a)?.annunciate, false, 'past the bound: loud');
-    // The reading drops to 45 mV: the critical-line clock ends, the session stands.
+    // The reading drops to 45 mV and stays there: the critical-line clock ends after an unbroken
+    // VDIFF_KNEE_RELAX_MS under the line (v1.187.1), the session stands.
     spreadMv = 45;
     await passes(a, 2);
     assert.equal(crit(a), undefined);
+    assert.notEqual(onFile()?.critSinceMs, null, 'one reading under 50 mV does not end the episode');
+    offset += VDIFF_KNEE_RELAX_MS;
+    await passes(a, 2);
     await until(() => onFile()?.critSinceMs === null, 5_000, 'the cleared critical-line clock written', a.logs);
     assert.equal(onFile().graceFromMs, sessionStart);
   } finally {
     a.mon.stop();
     await sleep(100);
   }
-  assert.ok(getAlertOnset(CRIT_ID)! < Date.now() - 60 * MIN, 'the onset on record is older than the carry: the seed alone opens a new session');
+  const onset = getAlertOnset(CRIT_ID);
+  assert.ok(onset === undefined || onset < Date.now() - 60 * MIN,
+    'the onset is retired, or older than the carry: the seed alone opens a new session');
 
   // ── the restart, on the 45 mV reading ──
   resetVdiffWarnHoldForTesting();

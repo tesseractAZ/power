@@ -173,15 +173,15 @@ const MUTANTS = [
   {
     id: 'xviii. ★★ a dip below the critical line restarts the duration clock',
     file: AL,
-    find: '    if (nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    find: '    if (seededAndUnder || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
     to: '    if (true) { /* MUTANT */',
     why: 'A spread hovering on the line evades the duration bound indefinitely.',
   },
   {
     id: 'xix. ★★ a relaxed spread never ends its episode',
     file: AL,
-    find: '    if (nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
-    to: '    if (false) { /* MUTANT */',
+    find: '    if (seededAndUnder || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    to: '    if (seededAndUnder) { /* MUTANT */',
     why: 'A second top-of-charge crossing 25 minutes later is a false red, voiced as "20 minutes at the line".',
   },
   {
@@ -389,9 +389,11 @@ const MUTANTS = [
   {
     id: 'xlviii. ★★★ the session ends with the critical-line episode',
     file: AL,
-    find: '    s.critSinceMs = null;\n    s.belowCritSinceMs = null;\n  } else if (obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) {',
-    to: '    s.critSinceMs = null;\n    s.belowCritSinceMs = null;\n    s.graceFromMs = null; /* MUTANT */\n  } else if (obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) {',
-    why: 'As xlvii: a dip under 50 mV re-grants both graces.',
+    // v1.187.1 (log review) — the episode now ends only after an unbroken VDIFF_KNEE_RELAX_MS
+    // under the line (a dip under 50 mV included): re-pointed at that reset.
+    find: '      s.critSinceMs = null;\n      s.belowCritSinceMs = null;\n    }',
+    to: '      s.critSinceMs = null;\n      s.belowCritSinceMs = null;\n      s.graceFromMs = null; /* MUTANT */\n    }',
+    why: 'As xlvii: a spread that relaxes under the line for 5 minutes between crossings re-earns both graces on every crossing.',
   },
   {
     id: 'xlix. ★★ an unknown SoC ends the session',
