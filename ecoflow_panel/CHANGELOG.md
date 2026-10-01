@@ -19,6 +19,22 @@
   across a restart when the add-on was down for less than about 10 minutes, so a second healthy
   peak stays quiet as it would without the restart. After a longer outage the rest has to be seen
   again for 20 minutes, and a peak inside that time still sounds.
+- **A balancing spread between 85% and 95% charge now sounds after 20 minutes.** Below the top
+  of charge, a critical cell-spread alarm held quiet while the battery balances its cells was
+  limited only by how long the spread had been at the critical line, and any reading under 50 mV
+  restarted that count. A spread that rises and falls with the charge current on alternate
+  readings (95 / 45 mV) was therefore held quiet with no time limit, and the saved timing did not
+  catch it across a restart either. The count now restarts only after the spread has stayed under
+  the critical line for 5 minutes in a row, so such a spread sounds 20 minutes after it first
+  reached the line, before or after a restart. A count recovered only from when the critical
+  alarm began (no saved timing) still ends on a first reading under 50 mV, so a pack that was out
+  of contact overnight does not sound on the next healthy peak. Recorded charges from 23 and 28
+  July and 18, 25 and 29 September give the same alarms as before.
+- **A damaged saved quiet spell is not trusted.** The saved quiet spell after a peak is read back
+  only when it fits the charge it belongs to: it began after the charge's first critical reading,
+  and less than 20 minutes before the last reading. A damaged value (zero, negative, or earlier
+  than the charge) is ignored and the quiet spell starts over, so it cannot end a charge's limits
+  early.
 - **Fewer writes for the saved timing.** The last-reading time is saved on a 5-minute step that
   every pack shares, so the file is written about once every 5 minutes at most, however many
   packs are at the top of charge.
@@ -96,7 +112,9 @@
   after a restart. A slot hidden only because the Core counts fewer packs is not remembered: that
   is also what a pack that has stopped reporting looks like, so it is shown again after a restart,
   as before. A pack put back in a slot shows at once, as before. The log now says how long the
-  slot's readings have been unchanged, marking a first sighting as "or earlier".
+  slot's readings have been unchanged, marking a first sighting as "or earlier". If that file
+  cannot be written (a full or read-only disk), the save is retried at most once a minute instead
+  of on every reading from every Core; a change to a hidden slot is still saved at once.
 - **A full alert history drops the right records first.** The cleared-alert history holds 1,500
   records and drops one for each new one. It now records whether each alert reached the phone and
   whether it was on screen only because its Core is a bench spare or off the panel. When full, it
@@ -105,7 +123,9 @@
   as having alarmed during the first ticks after a restart, before its off-panel mute takes effect.
   Records of a confirmed-defective pack, and the records of its Core while it carried that pack,
   are kept for warranty claims and are dropped after every other warning. Alerts muted while a pack balances or at the top of a charge are kept like any
-  other, so a muted fault can still be found afterwards.
+  other, so a muted fault can still be found afterwards. A record in the history file with no
+  alert name or severity (a hand-edited or damaged file) is dropped when the file is read; such a
+  record could make alert checking fail on every new record once the history was full.
 - **Removing a warranty pack's record is logged properly.** When a confirmed-defective pack has
   left the fleet and its record is retired, the log line now has a time and a warning level, and
   names the pack, its Core and slot, and when it was confirmed. A damaged record file can no
