@@ -9742,8 +9742,12 @@ The planner sizes a buy against one of two objectives, selected by `ARB_OBJECTIV
   plus the outage cushion. The buy is a *requirement*; anything beyond it is waste.
 - **`cost`** — the resilience answer is a **floor**, not a target. `costModeTargetKwh`
   (`nightChargeAdvisor.ts`) raises the target toward `min(ARB_COST_MAX_SOC_PCT % of pool,
-  pool − morning-PV-surplus P90)` and records which of the two bound it in the ledger's
-  `cost_ceiling_basis` column (`'max-soc'` | `'pv-headroom'`). It is bounded below by the
+  pool − morning-PV surplus)` and records which of the two bound it in the ledger's
+  `cost_ceiling_basis` column (`'max-soc'` | `'pv-headroom'`). The morning surplus is the
+  P50 (the P90 stands in when the P50 is unknown; a long-gap night uses the pre-peak P10),
+  computed on a **de-biased load** where the ledger shows the load forecast running high
+  (§15.x "Cost-ceiling load de-bias"); `costCeilingSurplusKwh` is the figure used and
+  `costCeilingSurplusRawKwh` the one on the forecast load as is. It is bounded below by the
   resilience target, so **the safety margin can never shrink when the objective changes**;
   the only direction cost mode moves a buy is up. Every physical cap downstream — charge
   power, pool headroom, EV contention — is re-applied unchanged.
@@ -9851,6 +9855,47 @@ figure so learned data can never flip the decision, only the disclosure. New
 plan fields `buyKwhDebiased` / `buyDebiasFactor`; the rationale and the ARM
 announcement disclose the calibration when active. This is the first live
 producer/consumer for the design §3.4 "buy de-bias" lane.
+
+### 15.x Cost-ceiling load de-bias (`costSurplusLoadFactor`, v1.187.1)
+
+The cost ceiling leaves room for the morning surplus, Σ max(0, P50 PV − load) over window
+close → +14 h. The load forecast is the panel's hour-of-day history curve, and on every
+ledger night of 2026-09-22..28 it ran above the measured load (`load_err_frac` −0.26 to
+−0.43, the actual under the load P10 each time). Every kW of over-forecast load is a kW of
+sun the ceiling leaves no room for: the 09-29 ceiling of 77.7% bought ~18.9 kWh, the pool was
+full by 13:00 on 09-30 and ~9-12 kWh of PV was curtailed until ~16:00.
+
+The surplus the cost ceiling uses is computed on a de-biased load (`index.ts`, pure pieces in
+`nightChargeAdvisor.ts`):
+
+- **Factor** (`costSurplusLoadFactor`): the median of `1 + load_err_frac` over the ledger rows
+  of the last `COST_SURPLUS_LOAD_LOOKBACK_DAYS` (14) days (rows with no finite error, or an
+  actual of 0 or less, are not samples). Capped at **1** — the load is only ever lowered, so
+  the ceiling can only fall. Under `COST_SURPLUS_LOAD_MIN_SAMPLES` (5) nights it is 1; from
+  there the correction ramps in linearly (`n / COST_SURPLUS_LOAD_FULL_SAMPLES`, whole at 10).
+  Bounded below at `COST_SURPLUS_LOAD_FACTOR_MIN` (0.6): `actual_load_kwh` skips telemetry
+  gaps, so a broken night under-counts the actual. A change is logged once
+  (`night-charge: cost-ceiling surplus counts the house load at ×…`).
+- **Physical floor** (`measuredHourlyLoadFloorW`): per local clock hour, the least hourly-mean
+  panel load over the trailing `COST_SURPLUS_FLOOR_DAYS` (7) days, read in hourly buckets; an
+  hour seen on fewer than `COST_SURPLUS_FLOOR_MIN_DAYS` (4) days has no floor.
+- **Per hour** (`costSurplusLoadW`): the expected-value EV block (`predictedEvLoadW`) is kept
+  whole; the rest is `max(rest × factor, min(floor, rest))` — never below the floor, never above
+  the forecast. An hour with no floor (or a failed history read) keeps its forecast.
+- **Use** (`debiasedCostSurplusKwh`): the de-biased P50 (or P90 stand-in) replaces the raw one
+  only where it is **larger**, and never so large that the ceiling falls below the pack the
+  resilience buy lifts to (the force-charge stops at the ceiling) — unless the raw ceiling
+  already sat below it. Raw unknown ⇒ raw.
+
+Scope: cost mode only, and only the `p50` / `p90` bases — a long-gap night keeps its
+pessimistic P10 pre-peak surplus. The P90 over-buy flag, the resilience sizing, the setpoint
+requirement, the islanded cushion, the solar model, the runway and every alarm read the
+forecast load as before. The PV side of the surplus is unchanged: the solar fit and
+`pvBiasFactor` still include hours when the pool was full (curtailed output), and those feed
+the alarm-facing forecast. Plan fields `costCeilingSurplusRawKwh`, `costSurplusLoadFactor`,
+`costSurplusLoadSamples` (cost mode); when the de-bias widened the headroom the rationale
+gives both figures. Measured on the 2026-09-29 inputs (seven ledger nights, ×0.762): ceiling
+77.7% → 72.1%. Harness: `scripts/mutate-v1187-1f.mjs` (37).
 
 ## Appendix A — Feature Inventory (evidence linkage)
 
