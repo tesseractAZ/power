@@ -13,6 +13,13 @@
  * persisted or restored; a missing, unreadable or malformed file falls back to the onset seed.
  * Mutants i-xxiv.
  *
+ * (1, review) The rest (quietSinceMs) was not persisted, so a restart during the rest after a benign
+ * knee restarted it and a second benign knee inside the next 20 minutes sounded the red klaxon. It
+ * is now persisted and restored when the file's last reading is at most
+ * VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS old. The last reading is persisted floored to its
+ * grain (one write per grain however many packs). The serial is a persisted change. Mutants
+ * xxvii-xxxvi.
+ *
  * (2) The bench-spare stamp (alerts.ts) and the roster stamp (applyRosterMute) overwrote
  * annunciate / muteReason but left mutedBy set, so a sounded vdiff-crit muted by policy that also
  * carried a knee mute held the committed red (soundedCriticalHeld) and delayed the all-clear. Both
@@ -77,7 +84,7 @@ const MUTANTS = [
   {
     id: 'v. ★★ the file\'s last reading is read without its grain',
     file: AL,
-    find: '    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS);',
+    find: '    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS - 1);',
     to: '    const seenMs = Math.min(nowMs, s.lastSeenMs); /* MUTANT */',
     why: 'A session the process would still carry is dropped up to 5 minutes early, and the next crossing earns a fresh grace.',
   },
@@ -91,8 +98,8 @@ const MUTANTS = [
   {
     id: 'vii. ★★ the restored last reading is not capped at the restart',
     file: AL,
-    find: '    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS);',
-    to: '    const seenMs = s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS; /* MUTANT */',
+    find: '    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS - 1);',
+    to: '    const seenMs = s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS - 1; /* MUTANT */',
     why: 'After a quick restart the last reading is placed after the restart itself, and an unseen pack is carried past the carry.',
   },
   {
@@ -112,8 +119,8 @@ const MUTANTS = [
   {
     id: 'x. ★★ a session clock ahead of now is trusted',
     file: AL,
-    find: '      graceFromMs: s.graceFromMs == null ? null : Math.min(s.graceFromMs, nowMs), quietSinceMs: null,',
-    to: '      graceFromMs: s.graceFromMs, quietSinceMs: null, /* MUTANT */',
+    find: '      graceFromMs: s.graceFromMs == null ? null : Math.min(s.graceFromMs, nowMs),\n',
+    to: '      graceFromMs: s.graceFromMs, /* MUTANT */\n',
     why: 'After a clock step the session bound counts from the future: a fault on alternate readings stays silent.',
   },
   {
@@ -191,15 +198,15 @@ const MUTANTS = [
   {
     id: 'xxi. ★★★ the last reading is written on every reading',
     file: AL,
-    find: '    const lastSeenMs = d != null && st.lastSeenMs - d.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS ? d.lastSeenMs : st.lastSeenMs;',
+    find: '    const lastSeenMs = Math.floor(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS;',
     to: '    const lastSeenMs = st.lastSeenMs; /* MUTANT */',
     why: 'Every reading changes the file: a write per tick.',
   },
   {
-    id: 'xxii. ★★ the restore\'s bound is written back as a reading',
+    id: 'xxii. ★★ the restore\'s bound reaches the next grain (written back as a reading)',
     file: AL,
-    find: '    const lastSeenMs = d != null && st.lastSeenMs - d.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS ? d.lastSeenMs : st.lastSeenMs;',
-    to: '    const lastSeenMs = d != null && st.lastSeenMs - d.lastSeenMs < VDIFF_KNEE_SEEN_PERSIST_MS ? d.lastSeenMs : st.lastSeenMs; /* MUTANT */',
+    find: '    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS - 1);',
+    to: '    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS); /* MUTANT */',
     why: 'Each restart walks a dark pack\'s last reading forward by the grain: its session is never dropped.',
   },
   {
@@ -230,6 +237,78 @@ const MUTANTS = [
     find: '    delete a.mutedBy;',
     to: '    /* MUTANT */',
     why: 'An off-panel Core\'s sounded vdiff-crit under a knee mute holds the red and delays the all-clear.',
+  },
+  /* ── (1, review) the rest across a restart ────────────────────────────── */
+  {
+    id: 'xxvii. ★★★ the rest is not restored',
+    file: AL,
+    find: '      quietSinceMs: restCarried ? Math.min(s.quietSinceMs!, nowMs) : null,',
+    to: '      quietSinceMs: null, /* MUTANT */',
+    why: 'A restart during the rest after a benign knee keeps the session open 20 more minutes: a second benign knee sounds the red klaxon.',
+  },
+  {
+    id: 'xxviii. ★★★ the rest is not written',
+    file: AL,
+    find: 'graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs };',
+    to: 'graceFromMs: st.graceFromMs, quietSinceMs: null, lastSeenMs }; /* MUTANT */',
+    why: 'As xxvii: the next process finds no rest on file.',
+  },
+  {
+    id: 'xxix. ★★★ the rest is restored across any outage inside the carry',
+    file: AL,
+    find: '    const restCarried = s.quietSinceMs != null && nowMs - s.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS;',
+    to: '    const restCarried = s.quietSinceMs != null; /* MUTANT */',
+    why: 'An outage of up to an hour counts as rest: crossings hidden inside it end a fault\'s session, and its next crossing earns new graces.',
+  },
+  {
+    id: 'xxx. ★★ the rest\'s outage bound is exclusive',
+    file: AL,
+    find: '    const restCarried = s.quietSinceMs != null && nowMs - s.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS;',
+    to: '    const restCarried = s.quietSinceMs != null && nowMs - s.lastSeenMs < VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS; /* MUTANT */',
+    why: 'A rest at exactly the bound is dropped.',
+  },
+  {
+    id: 'xxxi. ★★ the rest\'s outage bound is read from the restore\'s widened last reading',
+    file: AL,
+    find: '    const restCarried = s.quietSinceMs != null && nowMs - s.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS;',
+    to: '    const restCarried = s.quietSinceMs != null && nowMs - seenMs <= VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS; /* MUTANT */',
+    why: 'The bound no longer bounds the outage from above: a 15-minute outage counts as rest.',
+  },
+  {
+    id: 'xxxii. ★★ a non-numeric rest is restored',
+    file: AL,
+    find: '  if (!isClock(quietSinceMs)) return null;',
+    to: '  /* MUTANT */',
+    why: 'A malformed entry is restored instead of falling back to the onset seed.',
+  },
+  {
+    id: 'xxxiii. ★★★ a change of the rest alone is not written',
+    file: AL,
+    find: '      || d.quietSinceMs !== st.quietSinceMs || d.lastSeenMs !== lastSeenMs) changed = true;',
+    to: '      || d.lastSeenMs !== lastSeenMs) changed = true; /* MUTANT */',
+    why: 'A rest that broke stays on file as unbroken: the next process ends a fault\'s session on a rest that never was.',
+  },
+  /* ── (1, review) the serial, and the grain ───────────────────────────── */
+  {
+    id: 'xxxiv. ★★ a serial that arrives later is not written',
+    file: AL,
+    find: '    if (d == null || d.packSn !== st.packSn || d.critSinceMs !== st.critSinceMs',
+    to: '    if (d == null || d.critSinceMs !== st.critSinceMs /* MUTANT */',
+    why: 'The file keeps a null serial: after a restart a different battery in the slot inherits the session.',
+  },
+  {
+    id: 'xxxv. ★★ the last reading drifts per pack (moved past the grain since its own last write)',
+    file: AL,
+    find: '    const lastSeenMs = Math.floor(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS;',
+    to: '    const lastSeenMs = d != null && st.lastSeenMs - d.lastSeenMs < VDIFF_KNEE_SEEN_PERSIST_MS ? d.lastSeenMs : st.lastSeenMs; /* MUTANT */',
+    why: 'N packs out of phase: up to N writes per grain.',
+  },
+  {
+    id: 'xxxvi. ★★ the last reading is rounded UP to its grain',
+    file: AL,
+    find: '    const lastSeenMs = Math.floor(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS;',
+    to: '    const lastSeenMs = Math.ceil(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS; /* MUTANT */',
+    why: 'The file places the last reading after the true one: a session is carried past the carry, and restarts walk it forward.',
   },
 ];
 

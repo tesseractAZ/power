@@ -503,7 +503,8 @@ export interface VdiffKneeState {
   /** v1.187.0 (log review) — first tick of the current unbroken run of readings under
    *  VOL_DIFF_CRIT_MV at the top of charge. A pack that has RESTED this long — VDIFF_KNEE_MAX_MUTE_MS
    *  — ends its session (graceFromMs), so its next knee earns the graces again. Not carried across
-   *  a reading gap (a rest must be seen). */
+   *  a reading gap (a rest must be seen). v1.187.1 (review) — persisted, and restored across a
+   *  restart only when the outage is short (restoreVdiffKneeSessions). */
   quietSinceMs: number | null;
   /** Last tick this pack produced a reading (the VDIFF_KNEE_GAP_CARRY_MS cap). */
   lastSeenMs: number | null;
@@ -688,42 +689,72 @@ const vdiffKneeByKey = new Map<string, VdiffKneeState>();
  * database (the monitor writes it each tick a persisted value changed; VDIFF_KNEE_STATE_PATH
  * overrides) and restored at start-up by the IN-PROCESS gap rule (computeAlerts' prune): carried
  * while the pack's last reading is at most VDIFF_KNEE_GAP_CARRY_MS old — the outage, never the
- * onset's age — and dropped after it. Persisted: the pack serial, critSinceMs, graceFromMs and the
- * last reading time. Deliberately NOT persisted, exactly as they are not carried across a reading
- * gap in the process: the activity evidence (lastBalancingMs, lastChargeMs — a mute is re-earned
- * from fresh readings), the rest (quietSinceMs — a rest must be seen unbroken) and the under-the-line
- * run (belowCritSinceMs). Each restarts from fresh readings, which can only keep a bound counting
- * (fail loud). Only a pack the file holds no entry for falls back to the onset seed.
+ * onset's age — and dropped after it. Persisted: the pack serial, critSinceMs, graceFromMs, the rest
+ * (quietSinceMs) and the last reading time. Deliberately NOT persisted, exactly as they are not
+ * carried across a reading gap in the process: the activity evidence (lastBalancingMs, lastChargeMs
+ * — a mute is re-earned from fresh readings) and the under-the-line run (belowCritSinceMs). Each
+ * restarts from fresh readings, which can only keep a bound counting (fail loud). Only a pack the
+ * file holds no entry for falls back to the onset seed.
+ *
+ * v1.187.1 (review) — THE REST is persisted too, and restored only across a SHORT outage. Not
+ * restored at all, a restart during the rest after a benign knee restarted the rest at the restart,
+ * so the restored session stood up to 20 minutes longer than the process would have kept it, and a
+ * second benign knee inside that window — two knees of the 09-29 Core 1 pack 1 shape 30 minutes
+ * apart, the add-on restarted 12-25 minutes after the first — had no grace and sounded the red
+ * klaxon (v1.187.0, whose onset was retired by then, started that pack fresh and stayed silent).
+ * The in-process rule ("a rest must be seen unbroken") ends a rest on any unseen tick, but a
+ * restart is never seen, so that rule ended EVERY rest across a restart. The rest is restored when
+ * the file's last reading — at or before the true one, so its age bounds the outage from above — is
+ * at most VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS old (10 min: at most three ~180 s BMS
+ * readings fall inside it, and the last of them is still current at the restart), and cleared
+ * otherwise. A fault keeps its bounds: a spread that follows the charge current (95 / 45 mV,
+ * hi / lo / lo) breaks its rest on every crossing and never builds 20 minutes under 50 mV, before
+ * the restart or after it — even with a crossing hidden inside the outage (the rest then spans at
+ * most the low run before it and the low run after it: 2 × 6 + 3 = 15 minutes for hi / lo / lo).
+ * The residual: a spread crossing the line on one reading in four or fewer (about every 12 minutes
+ * or longer) can have its session ended by a crossing hidden inside a restart's outage — which
+ * takes the add-on down for at least one whole ~180 s reading — and its next crossing earns one
+ * more session's graces (probe: with 0-120 s down no restart offset left any critical tick quieter
+ * than the process; with 4-9 minutes down some offsets left 3-6 minutes of that sparse spread's
+ * critical ticks silent). A spread with 20 minutes under 50 mV between crossings ends its session
+ * in the process alike.
  */
 /** v1.187.1 — the part of a pack's knee state that survives a restart (the clocks, never the evidence). */
 export interface VdiffKneeSession {
   packSn: string | null;
   critSinceMs: number | null;
   graceFromMs: number | null;
-  /** The pack's last reading — at most VDIFF_KNEE_SEEN_PERSIST_MS older than the true one. */
+  /** v1.187.1 (review) — the rest at the top of charge (restored only across a short outage). */
+  quietSinceMs: number | null;
+  /** The pack's last reading, floored to VDIFF_KNEE_SEEN_PERSIST_MS: the true one lies in
+   *  [this, this + VDIFF_KNEE_SEEN_PERSIST_MS). */
   lastSeenMs: number;
 }
 /** v1.187.1 — the persisted sessions, keyed `${sn}-${pk}`, as they stand on disk. */
 export type VdiffKneeSessions = Record<string, VdiffKneeSession>;
 /** v1.187.1 — the grain of the persisted last-reading time. It moves on every reading, and a write
- *  per reading would be a write per tick, so it is re-written only once the in-memory reading has
- *  moved MORE than this past the value on disk (a clock change writes it with the rest, under the
- *  same rule). The value on disk is therefore never more than this older than the true last
- *  reading, and the restore reads it as the latest that reading can have been (onDisk + this,
- *  capped at now): an entry the process would still have carried is never dropped early. That
- *  bound is never written back — it is not a reading — so restarts cannot walk it forward. */
+ *  per reading would be a write per tick, so it is persisted FLOORED to this grain: it changes once
+ *  per grain, and (v1.187.1 review) on the same tick for every pack seen — one write per grain
+ *  however many packs hold a session, where a per-pack "moved more than the grain" rule let the
+ *  packs drift out of phase (N packs, up to N writes per grain). The restore reads it as the latest
+ *  the true reading can have been (onDisk + this − 1 ms, capped at now): an entry the process would
+ *  still have carried is never dropped early, and that bound floors back to the same value, so
+ *  restarts that see no reading cannot walk it forward. */
 export const VDIFF_KNEE_SEEN_PERSIST_MS = 5 * 60_000;
 
 const isClock = (v: unknown): v is number | null => v === null || (typeof v === 'number' && Number.isFinite(v));
-/** One persisted entry, or null when it is not a session (wrong types, or no clock to carry). */
+/** One persisted entry, or null when it is not a session (wrong types, or no clock to carry). A
+ *  missing rest reads as none (it is restored only when present: fail loud). */
 function parseVdiffKneeSession(v: unknown): VdiffKneeSession | null {
   if (v == null || typeof v !== 'object' || Array.isArray(v)) return null;
   const o = v as Record<string, unknown>;
   if (!(o.packSn === null || typeof o.packSn === 'string')) return null;
   if (!isClock(o.critSinceMs) || !isClock(o.graceFromMs)) return null;
+  const quietSinceMs = o.quietSinceMs === undefined ? null : o.quietSinceMs;
+  if (!isClock(quietSinceMs)) return null;
   if (typeof o.lastSeenMs !== 'number' || !Number.isFinite(o.lastSeenMs)) return null;
   if (o.critSinceMs == null && o.graceFromMs == null) return null;
-  return { packSn: o.packSn, critSinceMs: o.critSinceMs, graceFromMs: o.graceFromMs, lastSeenMs: o.lastSeenMs };
+  return { packSn: o.packSn, critSinceMs: o.critSinceMs, graceFromMs: o.graceFromMs, quietSinceMs, lastSeenMs: o.lastSeenMs };
 }
 
 /**
@@ -731,10 +762,12 @@ function parseVdiffKneeSession(v: unknown): VdiffKneeSession | null {
  * computeAlerts). Logs exactly one line. A missing, unreadable or malformed file restores nothing:
  * every pack then starts from vdiffKneeSeed, as in v1.187.0 (fail loud for a standing critical); a
  * malformed ENTRY is skipped and counted. An entry whose pack's last reading is more than
- * VDIFF_KNEE_GAP_CARRY_MS old (read with the VDIFF_KNEE_SEEN_PERSIST_MS allowance) is dropped — the
- * outage outlasted the carry, as for a pack unseen that long in the process. A clock ahead of now
- * (a clock step) is clamped to now. A key already in memory is left alone. Returns the sessions as
- * they stand on disk: the baseline persistVdiffKneeSessions compares against.
+ * VDIFF_KNEE_GAP_CARRY_MS old (read as the latest it can have been, within the grain) is dropped —
+ * the outage outlasted the carry, as for a pack unseen that long in the process. The rest is
+ * restored only when the file's last reading is at most VDIFF_KNEE_SEEN_PERSIST_MS +
+ * VDIFF_KNEE_RELAX_MS old (see above). A clock ahead of now (a clock step) is clamped to now. A key
+ * already in memory is left alone. Returns the sessions as they stand on disk: the baseline
+ * persistVdiffKneeSessions compares against.
  */
 export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: string) => void): VdiffKneeSessions {
   const fallback = 'each pack starts from its standing critical\'s persisted onset';
@@ -761,12 +794,16 @@ export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: s
     if (s == null) { malformed++; continue; }
     onDisk[key] = s;
     if (vdiffKneeByKey.has(key)) continue;
-    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS);
+    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS - 1);
     if (nowMs - seenMs > VDIFF_KNEE_GAP_CARRY_MS) { outlasted++; continue; }
+    // v1.187.1 (review) — the rest survives only an outage too short to have hidden more than a
+    // reading or two; judged by the file's own last reading (an upper bound on the outage).
+    const restCarried = s.quietSinceMs != null && nowMs - s.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS;
     vdiffKneeByKey.set(key, {
       packSn: s.packSn, lastBalancingMs: null, lastChargeMs: null,
       critSinceMs: s.critSinceMs == null ? null : Math.min(s.critSinceMs, nowMs), belowCritSinceMs: null,
-      graceFromMs: s.graceFromMs == null ? null : Math.min(s.graceFromMs, nowMs), quietSinceMs: null,
+      graceFromMs: s.graceFromMs == null ? null : Math.min(s.graceFromMs, nowMs),
+      quietSinceMs: restCarried ? Math.min(s.quietSinceMs!, nowMs) : null,
       lastSeenMs: seenMs,
     });
     restored++;
@@ -779,8 +816,8 @@ export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: s
 
 /**
  * v1.187.1 — write the knee sessions to `path` when a persisted value differs from `onDisk` (the
- * value last written): a pack serial or a clock, an entry gained or lost, or a last reading more
- * than VDIFF_KNEE_SEEN_PERSIST_MS past the one on disk. Nothing changed → no write. Only packs
+ * value last written): a pack serial, a clock or the rest, an entry gained or lost, or the last
+ * reading entering a new VDIFF_KNEE_SEEN_PERSIST_MS grain. Nothing changed → no write. Only packs
  * holding a clock are written (the rest carry nothing — computeAlerts' prune drops them too).
  * Returns what is now on disk: `onDisk` again when nothing changed or the write failed (retried on
  * the next tick). Best-effort — never throws into the alarm loop. Main thread only, like the map.
@@ -791,10 +828,10 @@ export function persistVdiffKneeSessions(path: string, onDisk: VdiffKneeSessions
   for (const [key, st] of vdiffKneeByKey) {
     if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;
     const d = onDisk[key];
-    const lastSeenMs = d != null && st.lastSeenMs - d.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS ? d.lastSeenMs : st.lastSeenMs;
-    next[key] = { packSn: st.packSn, critSinceMs: st.critSinceMs, graceFromMs: st.graceFromMs, lastSeenMs };
+    const lastSeenMs = Math.floor(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS;
+    next[key] = { packSn: st.packSn, critSinceMs: st.critSinceMs, graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs };
     if (d == null || d.packSn !== st.packSn || d.critSinceMs !== st.critSinceMs || d.graceFromMs !== st.graceFromMs
-      || d.lastSeenMs !== lastSeenMs) changed = true;
+      || d.quietSinceMs !== st.quietSinceMs || d.lastSeenMs !== lastSeenMs) changed = true;
   }
   if (!changed && Object.keys(onDisk).every((key) => key in next)) return onDisk;
   try {
@@ -1797,8 +1834,13 @@ export function computeAlerts(
   // from the standing critical's persisted onset.
   // v1.187.1 — a restart is now one more reading gap under this same rule: the clocks are persisted
   // (persistVdiffKneeSessions) and restored at start-up while the pack's last reading is at most
-  // VDIFF_KNEE_GAP_CARRY_MS old (restoreVdiffKneeSessions), with everything this prune clears left
-  // cleared. vdiffKneeSeed is only the fallback for a pack with no persisted entry.
+  // VDIFF_KNEE_GAP_CARRY_MS old (restoreVdiffKneeSessions), with the evidence and the under-the-line
+  // run left cleared. vdiffKneeSeed is only the fallback for a pack with no persisted entry.
+  // v1.187.1 (review) — the one exception is the rest: a restart is never seen, so clearing it as
+  // this prune does ended every rest across a restart and a benign second knee sounded. It is
+  // restored across an outage of at most VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS by the
+  // file's own last reading (restoreVdiffKneeSessions), and cleared after a longer one; a pack
+  // unseen on a tick after the restart still loses it here.
   for (const [k, st] of [...vdiffKneeByKey]) {
     if (seenVdiffKeys.has(k)) continue;
     if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);

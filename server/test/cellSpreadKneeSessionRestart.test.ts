@@ -9,6 +9,9 @@
  * session seeded) or none (hi / lo / lo: retired), and the next crossing opened a new session —
  * up to VDIFF_KNEE_MAX_MUTE_MS more silence. The clocks are now persisted per pack and restored by
  * the in-process gap rule (carried while the last reading is at most VDIFF_KNEE_GAP_CARRY_MS old).
+ * v1.187.1 (review) — the rest (quietSinceMs) is persisted too and restored across a short outage,
+ * so a restart during the rest after a benign knee does not make the next benign knee sound; the
+ * last reading is persisted floored to its grain, one write per grain however many packs.
  *
  * Each tick here is the monitor's sequence: computeAlerts, the onset sync over the TRACKED ids (a
  * cell-imbalance alert stays tracked VDIFF_RESOLVE_DWELL_MS after it leaves the set, as the
@@ -30,7 +33,7 @@ const KNEE_PATH = resolve(ROOT, 'vdiff-knee-state.json');
 
 const {
   computeAlerts, resetVdiffWarnHoldForTesting, restoreVdiffKneeSessions, persistVdiffKneeSessions,
-  VDIFF_KNEE_MAX_MUTE_MS, VDIFF_KNEE_GAP_CARRY_MS, VDIFF_KNEE_SEEN_PERSIST_MS,
+  VDIFF_KNEE_MAX_MUTE_MS, VDIFF_KNEE_GAP_CARRY_MS, VDIFF_KNEE_SEEN_PERSIST_MS, VDIFF_KNEE_RELAX_MS,
 } = await import('../src/alerts.js');
 const { syncAlertOnsets, resetAlertOnsetCacheForTests, getAlertOnset } = await import('../src/alertOnset.js');
 type Alert = import('../src/alerts.js').Alert;
@@ -54,14 +57,15 @@ const G = VDIFF_KNEE_SEEN_PERSIST_MS;
 const CARRY = VDIFF_KNEE_GAP_CARRY_MS;
 let clock = 0;
 
-interface Reading { vd: number; soc: number; bal: 0 | 1; in: number; packSn?: string }
+/** packSn: undefined = the default serial, null = the BMS has not reported one. */
+interface Reading { vd: number; soc: number; bal: 0 | 1; in: number; packSn?: string | null }
 /** A reading per device; null = the device is offline (its packs produce no reading). */
 type Readings = Record<string, Reading | null>;
 function devices(rs: Readings): Record<string, DeviceSnapshot> {
   const out: Record<string, DeviceSnapshot> = {};
   for (const [sn, r] of Object.entries(rs)) {
     const pack = r && {
-      num: 1, soc: r.soc, packSn: r.packSn ?? `PACK-${sn}`, inputWatts: r.in, outputWatts: 0,
+      num: 1, soc: r.soc, packSn: r.packSn === undefined ? `PACK-${sn}` : r.packSn, inputWatts: r.in, outputWatts: 0,
       streamInputW: { w: r.in, atMs: clock },
       maxVolDiffMv: r.vd, maxCellVoltageMv: 3400 + r.vd, minCellVoltageMv: 3400,
       balanceState: r.bal, cellVoltagesMv: [],
@@ -84,6 +88,8 @@ function devices(rs: Readings): Record<string, DeviceSnapshot> {
 /* ── the monitor, as far as the knee needs it ─────────────────────────────────────────────── */
 const tracked = new Map<string, number | null>(); // id → clearedSince
 let onDisk: VdiffKneeSessions = {};
+/** persistVdiffKneeSessions returns a NEW record exactly when it wrote the file. */
+let writes = 0;
 const logs: string[] = [];
 /** One monitor tick: computeAlerts, the resolve dwell + onset sync over the tracked ids, the persist. */
 function tickAll(atMs: number, rs: Readings): Alert[] {
@@ -97,7 +103,9 @@ function tickAll(atMs: number, rs: Readings): Alert[] {
     else if (atMs - since >= DWELL_MS) tracked.delete(id);
   }
   syncAlertOnsets(tracked.keys(), atMs);
+  const before = onDisk;
   onDisk = persistVdiffKneeSessions(KNEE_PATH, onDisk);
+  if (onDisk !== before) writes++;
   return alerts;
 }
 function tick(atMs: number, r: Reading | null): Alert | undefined {
@@ -122,6 +130,7 @@ function fresh(): void {
   rmSync(KNEE_PATH, { force: true });
   tracked.clear();
   onDisk = {};
+  writes = 0;
   logs.length = 0;
 }
 beforeEach(() => {
@@ -219,17 +228,18 @@ test('★★★ (c) an outage inside the carry keeps the session, though the ons
 
 test('★★ (c) the carry boundary is read from the file\'s last reading plus its grain: kept at it, dropped past it', () => {
   const p = sessionThenSubLine();
-  assert.ok(p < T0 + 8 * MIN - TICK_MS, 'the file\'s last reading lags the true one (the grain)');
-  restart(p + G + CARRY);
+  assert.equal(p, T0 + 5 * MIN, 'the file holds the last reading (7:40) floored to its 5-minute grain');
+  // The true last reading lies in [p, p + G): the latest it can have been is p + G - 1 ms.
+  restart(p + G - 1 + CARRY);
   assert.match(logs[0], /restored 1 knee session/);
-  assert.notEqual(tick(p + G + CARRY, BAL_HI)!.annunciate, false, 'kept: the old session bounds the balancing mute');
+  assert.notEqual(tick(p + G - 1 + CARRY, BAL_HI)!.annunciate, false, 'kept: the old session bounds the balancing mute');
 
   fresh();
   const q = sessionThenSubLine();
   assert.equal(q, p);
-  restart(q + G + CARRY + 1);
+  restart(q + G + CARRY);
   assert.match(logs[0], /restored 0 knee session\(s\).*1 dropped/);
-  assert.equal(tick(q + G + CARRY + 1, BAL_HI)!.mutedBy, 'balancing', 'dropped: a fresh session, as for a pack unseen that long in the process');
+  assert.equal(tick(q + G + CARRY, BAL_HI)!.mutedBy, 'balancing', 'dropped: a fresh session, as for a pack unseen that long in the process');
 });
 
 test('★★ (c) a quick restart bounds the last reading by the restart itself: an unseen pack is dropped one carry later', () => {
@@ -316,6 +326,78 @@ test('★★★ the activity evidence is never restored: the mute is re-earned f
   assert.notEqual(stopped.annunciate, false, 'the charge seen before the restart opens no charging grace');
 });
 
+/* ── (f) the rest across a restart (v1.187.1 review) ─────────────────────────────────────── */
+
+/** A benign end-of-charge knee at 100%, `u` ms after its first crossing: balancing at 104 mV,
+ *  stopped at +2 min while still at the peak, then 93 and 67 mV on the next readings, and resting
+ *  at 10 mV from +9 min (the 09-29 Core 1 pack 1 shape). */
+function benignKnee(u: number): Reading {
+  if (u < 2 * MIN) return { vd: 104, soc: 100, bal: 1, in: 0 };
+  if (u < 3 * MIN) return { vd: 104, soc: 100, bal: 0, in: 0 };
+  if (u < 6 * MIN) return { vd: 93, soc: 100, bal: 0, in: 0 };
+  if (u < 9 * MIN) return { vd: 67, soc: 100, bal: 0, in: 0 };
+  return { vd: 10, soc: 100, bal: 0, in: 0 };
+}
+/** Two benign knees `gapMs` apart at T0, the add-on restarted at `restartMs` (null: never), as
+ *  the ticks of each knee's critical. */
+function twoKnees(gapMs: number, restartMs: number | null): { first: Alert[]; second: Alert[] } {
+  const first: Alert[] = [], second: Alert[] = [];
+  for (let t = 0; t < gapMs + 12 * MIN; t += TICK_MS) {
+    if (t === restartMs) restart(T0 + t);
+    const a = tick(T0 + t, t < gapMs ? benignKnee(t) : benignKnee(t - gapMs));
+    if (a) (t < gapMs ? first : second).push(a);
+  }
+  return { first, second };
+}
+
+for (const [gap, restarts] of [[30, [null, 12, 20, 25]], [35, [null, 20, 25]]] as const) {
+  for (const r of restarts) {
+    test(`★★★ (f) two benign knees ${gap} minutes apart stay silent — ${r == null ? 'no restart' : `the add-on restarted ${r} minutes after the first, during its rest`}`, () => {
+      const { first, second } = twoKnees(gap * MIN, r == null ? null : r * MIN);
+      if (r != null) assert.match(logs.join('\n'), /restored 1 knee session/);
+      for (const [name, crits] of [['first', first], ['second', second]] as const) {
+        assert.ok(crits.length > 0, `${name}: the knee reaches the critical line`);
+        for (const a of crits) assert.equal(a.annunciate, false, `${name} knee: ${a.detail}`);
+      }
+      assert.ok(second.some((a) => a.mutedBy === 'end-of-charge'), 'the second knee earned its end-of-charge grace again');
+    });
+  }
+}
+
+test('★★★ (f) after an outage longer than 10 minutes the rest must be seen again: a second knee inside it annunciates (fail loud)', () => {
+  for (let t = 0; t < 12 * MIN; t += TICK_MS) tick(T0 + t, benignKnee(t));
+  assert.equal(onFile()[KEY].quietSinceMs, T0 + 9 * MIN, 'the rest is on file');
+  restart(T0 + 27 * MIN); // down from +12 to +27 minutes: the file's last reading (+10) is 17 minutes old
+  assert.match(logs[0], /restored 1 knee session/, 'the session itself is carried (inside the hour)');
+  for (let t = 27 * MIN; t < 30 * MIN; t += TICK_MS) assert.equal(tick(T0 + t, benignKnee(t)), undefined);
+  const knee2 = tick(T0 + 30 * MIN, benignKnee(0))!;
+  assert.notEqual(knee2.annunciate, false, 'the rest restarted at the restart: the session from +0 still stands');
+  assert.match(knee2.detail, /First reached the critical line at this top of charge 30 minutes ago\./);
+});
+
+test('★★ (f) the rest\'s outage bound is read from the file\'s own last reading: restored at 10 minutes, not a millisecond later', () => {
+  for (const [label, pastMs] of [['at the bound', 0], ['1 ms past it', 1]] as const) {
+    fresh();
+    for (let t = 0; t <= 20 * MIN; t += TICK_MS) tick(T0 + t, benignKnee(t)); // the last reading at exactly +20
+    assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: null, graceFromMs: T0, quietSinceMs: T0 + 9 * MIN, lastSeenMs: T0 + 20 * MIN }, label);
+    const r = T0 + 20 * MIN + G + VDIFF_KNEE_RELAX_MS + pastMs;
+    restart(r);
+    assert.equal(tick(r, benignKnee(15 * MIN)), undefined, label);
+    const knee2 = tick(r + TICK_MS, benignKnee(0))!;
+    if (pastMs === 0) assert.equal(knee2.mutedBy, 'balancing', `${label}: rested 21 minutes, the session is over and the knee starts a new one`);
+    else assert.notEqual(knee2.annunciate, false, `${label}: the rest starts over at the restart, and the 30-minute session bounds the knee`);
+  }
+});
+
+test('★ (f) a restored rest is still lost to a tick with no reading after the restart (a rest must be seen)', () => {
+  for (let t = 0; t < 12 * MIN; t += TICK_MS) tick(T0 + t, benignKnee(t));
+  restart(T0 + 12 * MIN);
+  tick(T0 + 12 * MIN, null); // the Core is dark for one tick
+  assert.equal(onFile()[KEY].quietSinceMs, null, 'the cleared rest is written');
+  for (let t = 12 * MIN + TICK_MS; t < 30 * MIN; t += TICK_MS) tick(T0 + t, benignKnee(t));
+  assert.notEqual(tick(T0 + 30 * MIN, benignKnee(0))!.annunciate, false);
+});
+
 /* ── (d) a missing, unreadable or malformed file ─────────────────────────────────────────── */
 
 /** The 08-22/23 fault class: a 110 mV spread the BMS keeps balancing at 99%, past the 20-minute
@@ -358,6 +440,7 @@ test('★★★ (d) a malformed ENTRY is skipped and counted in the one line; th
     ['no clock to carry', { packSn: `PACK-${SN}`, critSinceMs: null, graceFromMs: null, lastSeenMs: T0 + 20 * MIN }],
     ['serial not a string', { packSn: 7, critSinceMs: T0, graceFromMs: T0, lastSeenMs: T0 + 20 * MIN }],
     ['no last reading', { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, lastSeenMs: 'now' }],
+    ['rest not a number', { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, quietSinceMs: 'soon', lastSeenMs: T0 + 20 * MIN }],
     ['not an object', 42],
   ];
   for (const [label, entry] of bad) {
@@ -375,25 +458,26 @@ test('★★★ (d) a malformed ENTRY is skipped and counted in the one line; th
 
 test('★★★ (e) the file is written only when a persisted value changes — never on a tick that changed nothing', () => {
   const SENTINEL = 'untouched';
+  assert.equal(T0 % G, 0, 'T0 starts a grain');
   tickAll(T0, { [SN]: BAL_HI, [OTHER]: { vd: 10, soc: 100, bal: 0, in: 0 } });
-  assert.deepEqual(onFile(), { [KEY]: { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, lastSeenMs: T0 } },
+  assert.deepEqual(onFile(), { [KEY]: { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0 } },
     'the session is written on the tick it starts; a pack holding no clock is not written');
   writeFileSync(KNEE_PATH, SENTINEL);
-  // The reading clock moves, nothing else: no write while it is within the grain of the file.
-  for (let t = TICK_MS; t <= G; t += TICK_MS) tick(T0 + t, BAL_HI);
+  // The reading clock moves, nothing else: no write while it stays inside the file's grain.
+  for (let t = TICK_MS; t < G; t += TICK_MS) tick(T0 + t, BAL_HI);
   assert.equal(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'no write per tick');
-  // Past the grain: the last reading is re-written.
+  // The first reading in the next grain: the last reading is re-written, floored to the grain.
+  tick(T0 + G, BAL_HI);
+  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0 + G });
+  writeFileSync(KNEE_PATH, SENTINEL);
   tick(T0 + G + TICK_MS, BAL_HI);
-  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, lastSeenMs: T0 + G + TICK_MS });
-  writeFileSync(KNEE_PATH, SENTINEL);
-  tick(T0 + G + 2 * TICK_MS, BAL_HI);
   assert.equal(readFileSync(KNEE_PATH, 'utf8'), SENTINEL);
-  // A clock changes (the spread falls under 50 mV: the critical-line clock ends): written.
-  tick(T0 + G + 3 * TICK_MS, BAL_LO);
-  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: null, graceFromMs: T0, lastSeenMs: T0 + G + TICK_MS },
-    'the clock change is written; the last reading keeps its grain');
+  // Clocks change (the spread falls under 50 mV: the critical-line clock ends, the rest starts): written.
+  tick(T0 + G + 2 * TICK_MS, BAL_LO);
+  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: null, graceFromMs: T0, quietSinceMs: T0 + G + 2 * TICK_MS, lastSeenMs: T0 + G },
+    'the clock changes are written; the last reading keeps its grain');
   writeFileSync(KNEE_PATH, SENTINEL);
-  for (let t = G + 4 * TICK_MS; t < G + 10 * TICK_MS; t += TICK_MS) tick(T0 + t, BAL_LO);
+  for (let t = G + 3 * TICK_MS; t < G + 10 * TICK_MS; t += TICK_MS) tick(T0 + t, BAL_LO);
   assert.equal(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'nothing changed: no write');
   // The session ends (the pack read below the top of charge): the entry is removed.
   tick(T0 + G + 10 * TICK_MS, { vd: 10, soc: 90, bal: 0, in: 0 });
@@ -403,11 +487,59 @@ test('★★★ (e) the file is written only when a persisted value changes — 
   assert.equal(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'no session, nothing to write');
 });
 
+test('★★★ (e) the rest alone is a persisted change: its start and its break are each written on their tick', () => {
+  // Inside one grain, so the last reading never changes the file here.
+  tick(T0, BAL_HI);
+  tick(T0 + TICK_MS, BAL_LO); // the critical-line clock ends and the rest starts
+  assert.equal(onFile()[KEY].quietSinceMs, T0 + TICK_MS);
+  const SENTINEL = 'untouched';
+  writeFileSync(KNEE_PATH, SENTINEL);
+  // 60 mV breaks the rest; nothing else changes (no critical-line clock runs under the plateau line).
+  tick(T0 + 2 * TICK_MS, { vd: 60, soc: 100, bal: 0, in: 0 });
+  assert.notEqual(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'the broken rest is written');
+  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: null, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0 });
+  writeFileSync(KNEE_PATH, SENTINEL);
+  // Back under 50 mV: a new rest starts; nothing else changes.
+  tick(T0 + 3 * TICK_MS, BAL_LO);
+  assert.notEqual(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'the new rest is written');
+  assert.equal(onFile()[KEY].quietSinceMs, T0 + 3 * TICK_MS);
+});
+
+test('★★ (e) a serial that arrives after the session started is written on that tick, and binds the session across a restart', () => {
+  tick(T0, { ...BAL_HI, packSn: null }); // the BMS has not reported the pack serial yet
+  assert.equal(onFile()[KEY].packSn, null);
+  const SENTINEL = 'untouched';
+  writeFileSync(KNEE_PATH, SENTINEL);
+  tick(T0 + TICK_MS, BAL_HI); // the serial arrives; no clock changes, same grain
+  assert.notEqual(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'the serial alone is a persisted change');
+  assert.equal(onFile()[KEY].packSn, `PACK-${SN}`);
+  for (let t = 2 * TICK_MS; t < 3 * MIN; t += TICK_MS) tick(T0 + t, BAL_LO);
+  // A different battery in the slot after the restart: the written serial tells it apart.
+  restart(T0 + 30 * MIN);
+  assert.equal(tick(T0 + 30 * MIN, { ...BAL_HI, packSn: 'PACK-OTHER' })!.mutedBy, 'balancing', 'a fresh session for the new pack');
+});
+
+test('★★ (e) one write per grain however many packs hold a session: the grains of every pack turn on the same tick', () => {
+  // Four Cores, each crossing the line a minute after the last, then holding 60 mV at 100%: a
+  // session each, no rest. A per-pack "moved past the grain" rule let them drift out of phase.
+  const CORES = ['DPU-A', 'DPU-B', 'DPU-C', 'DPU-D'];
+  const at = (t: number): Readings => Object.fromEntries(CORES.map((sn, i) => [sn,
+    t < i * MIN ? { vd: 10, soc: 100, bal: 0 as const, in: 0 }
+      : t < i * MIN + 2 * MIN ? BAL_HI
+      : { vd: 60, soc: 100, bal: 0 as const, in: 0 }]));
+  for (let t = 0; t < 15 * MIN; t += TICK_MS) tickAll(T0 + t, at(t));
+  assert.equal(Object.keys(onFile()).length, 4, 'four sessions on file');
+  writes = 0;
+  for (let t = 15 * MIN; t < 75 * MIN; t += TICK_MS) tickAll(T0 + t, at(t));
+  assert.equal(writes, 60 * MIN / G, `one write per ${G / MIN}-minute grain over the hour, for four packs (got ${writes})`);
+  for (const sn of CORES) assert.equal(onFile()[`${sn}-1`].lastSeenMs, T0 + 70 * MIN);
+});
+
 test('★ (e) a restart that changes nothing writes nothing; a failed write is retried on the next tick', () => {
   sessionThenSubLine();
   const before = readFileSync(KNEE_PATH, 'utf8');
   restart(T0 + 8 * MIN);
-  tick(T0 + 8 * MIN, null); // the Core is dark: nothing it holds changes
+  tick(T0 + 8 * MIN, BAL_LO); // the same reading, in the same grain: nothing it holds changes
   assert.equal(readFileSync(KNEE_PATH, 'utf8'), before);
   // An unwritable path: the write fails, nothing throws, and the change is still owed.
   writeFileSync(resolve(ROOT, 'a-file'), 'x');
