@@ -19,7 +19,8 @@
   across a restart when the add-on was down for less than about 10 minutes, so a second healthy
   peak stays quiet as it would without the restart. After a longer outage the rest has to be seen
   again for 20 minutes, and a peak inside that time still sounds.
-- **A balancing spread between 85% and 95% charge now sounds after 20 minutes.** Below the top
+- **A balancing spread between 85% and 95% charge that dips only briefly now sounds after 20
+  minutes.** Below the top
   of charge, a critical cell-spread alarm held quiet while the battery balances its cells was
   limited only by how long the spread had been at the critical line, and any reading under 50 mV
   restarted that count. A spread that rises and falls with the charge current on alternate
@@ -30,6 +31,9 @@
   alarm began (no saved timing) still ends on a first reading under 50 mV, so a pack that was out
   of contact overnight does not sound on the next healthy peak. Recorded charges from 23 and 28
   July and 18, 25 and 29 September give the same alarms as before.
+  Known limit: a spread that stays under the line for 5 minutes or more between crossings (two
+  low readings in a row, or a missed reading) still restarts the count between 85% and 95%, as in
+  1.187.0; this is the next fix.
 - **A damaged saved quiet spell is not trusted.** The saved quiet spell after a peak is read back
   only when it fits the charge it belongs to: it began after the charge's first critical reading,
   and less than 20 minutes before the last reading. A damaged value (zero, negative, or earlier
