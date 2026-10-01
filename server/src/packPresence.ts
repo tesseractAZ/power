@@ -29,6 +29,19 @@
  *    "first seen" at the same moment, nothing is hidden until the live ones move.
  *  - A hidden pack that starts changing again (re-inserted) is shown again on the next
  *    projection.
+ *
+ * v1.187.1 — THE HIDE SURVIVES A RESTART. The restart rail above held for every slot, the ghost
+ * included: after each restart Core 4's slot 5 (pulled 2026-09-20) was first seen "now" like the
+ * live packs, so for ~10 minutes it was projected again — muted alerts raised on a pack that does
+ * not exist (dpu-imbalance "Lowest: Pack 5 at 55%", peer-soc, peer-soh), HA's warning count one
+ * higher, three stale pack5_* samples written to the 5-year store and ~3 rows added to the full
+ * cleared-alert ledger, on ~23 restarts since v1.172.0. A hidden slot is now remembered as a
+ * GHOST — its exact fingerprint and how long it has stood unchanged — and persisted by the store
+ * (pack-ghosts.json). A slot whose FIRST reading in a new process is byte-identical to its ghost
+ * is the same frozen slot: it keeps the ghost's time instead of "now", so the rules above hide it
+ * on the first projection. Neither rule is loosened (Rule 1 still needs a positive count below the
+ * slot count, Rule 2 a repeated serial), and any other reading — a re-inserted pack, anything that
+ * moved — is first seen "now" as before and retires the ghost.
  */
 
 import type { DpuPack } from './ecoflow/project.js';
@@ -36,15 +49,30 @@ import type { DpuPack } from './ecoflow/project.js';
 /** How long a slot must be frozen, and how far behind every kept pack, before it hides. */
 export const PACK_STALE_MS = 10 * 60_000;
 
+/**
+ * v1.187.1 — a hidden slot's frozen readings, kept across a restart (see the header).
+ * `frozenSinceMs` is when its readings were last SEEN to change (`changeSeen`), or else when they
+ * were first seen — a lower bound: the freeze may be older.
+ */
+export interface PackGhost {
+  fp: string;
+  frozenSinceMs: number;
+  changeSeen: boolean;
+}
+
 export interface PackSlotHistory {
   /** Last fingerprint seen per slot. */
   fp: Map<number, string>;
   /** When each slot's fingerprint last CHANGED (or was first seen). */
   changedMs: Map<number, number>;
+  /** v1.187.1 — slots whose changedMs is an observed change, not a first sighting. */
+  changeSeen: Set<number>;
+  /** v1.187.1 — this Core's ghosts, by slot: restored from disk, then kept current here. */
+  ghosts: Map<number, PackGhost>;
 }
 
-export function freshPackSlotHistory(): PackSlotHistory {
-  return { fp: new Map(), changedMs: new Map() };
+export function freshPackSlotHistory(ghosts?: ReadonlyMap<number, PackGhost>): PackSlotHistory {
+  return { fp: new Map(), changedMs: new Map(), changeSeen: new Set(), ghosts: new Map(ghosts ?? []) };
 }
 
 /** PURE. The readings that move on a live pack — any change means it is still there. */
@@ -60,19 +88,39 @@ export function packFingerprint(p: DpuPack): string {
  * Update the per-slot change history with this projection's packs, then hide the excess
  * frozen slots when the Core's own count says there are fewer packs than slots. Mutates
  * `hist`; returns the packs to show and the slots hidden.
+ * v1.187.1 — also keeps `hist.ghosts` current (a hidden slot is recorded; a slot whose readings
+ * move again is forgotten) and says whether it changed, so the caller persists only on change.
  */
 export function prunePhantomPacks(
   packs: DpuPack[],
   packCount: number | null,
   hist: PackSlotHistory,
   nowMs: number,
-): { packs: DpuPack[]; dropped: Array<{ num: number; frozenSinceMs: number }> } {
+): {
+  packs: DpuPack[];
+  dropped: Array<{ num: number; frozenSinceMs: number; changeSeen: boolean }>;
+  ghostsChanged: boolean;
+} {
+  let ghostsChanged = false;
   for (const p of packs) {
     const fp = packFingerprint(p);
-    if (hist.fp.get(p.num) !== fp) {
-      hist.fp.set(p.num, fp);
-      hist.changedMs.set(p.num, nowMs);
+    const prev = hist.fp.get(p.num);
+    if (prev === fp) continue;
+    hist.fp.set(p.num, fp);
+    const ghost = hist.ghosts.get(p.num);
+    // v1.187.1 — a reading byte-identical to the slot's ghost: the same frozen readings, so the same
+    // freeze. In practice this is the slot's first reading in a new process (any other reading
+    // retires the ghost below). Any other reading is "now", as before.
+    if (ghost != null && ghost.fp === fp) {
+      hist.changedMs.set(p.num, Math.min(ghost.frozenSinceMs, nowMs));
+      if (ghost.changeSeen) hist.changeSeen.add(p.num);
+      continue;
     }
+    hist.changedMs.set(p.num, nowMs);
+    if (prev != null) hist.changeSeen.add(p.num);
+    // A slot that reads anything but its ghost is not that ghost any more: a re-inserted pack, or
+    // readings that moved. It re-earns a hide by the rules below, from now.
+    if (hist.ghosts.delete(p.num)) ghostsChanged = true;
   }
   const since = (p: DpuPack) => hist.changedMs.get(p.num) ?? nowMs;
   // "Frozen for PACK_STALE_MS" is implied by each rule's "behind a slot that changed at
@@ -105,10 +153,51 @@ export function prunePhantomPacks(
     }
   }
   const dropped = [...hideSet.values()].sort((a, b) => a.num - b.num);
-  if (dropped.length === 0) return { packs, dropped: [] };
+  // v1.187.1 — every hidden slot is (still) a ghost: record it as it stands. A ghost only ever holds
+  // its slot's current reading (any other reading retires it above), so its time is the one thing
+  // that can differ — a ghost from before a backward clock step is clamped to now.
+  for (const d of dropped) {
+    const frozenSinceMs = since(d);
+    if (hist.ghosts.get(d.num)?.frozenSinceMs === frozenSinceMs) continue;
+    hist.ghosts.set(d.num, { fp: hist.fp.get(d.num)!, frozenSinceMs, changeSeen: hist.changeSeen.has(d.num) });
+    ghostsChanged = true;
+  }
+  if (dropped.length === 0) return { packs, dropped: [], ghostsChanged };
   const hide = new Set(dropped.map((d) => d.num));
   return {
     packs: packs.filter((p) => !hide.has(p.num)),
-    dropped: dropped.map((d) => ({ num: d.num, frozenSinceMs: since(d) })),
+    dropped: dropped.map((d) => ({ num: d.num, frozenSinceMs: since(d), changeSeen: hist.changeSeen.has(d.num) })),
+    ghostsChanged,
   };
+}
+
+/**
+ * v1.187.1 — PURE. The persisted ghosts (pack-ghosts.json: `{ [coreSn]: { [slot]: PackGhost } }`),
+ * validated: anything malformed is skipped, never guessed at.
+ */
+export function parsePackGhosts(raw: unknown): Map<string, Map<number, PackGhost>> {
+  const out = new Map<string, Map<number, PackGhost>>();
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [sn, slots] of Object.entries(raw as Record<string, unknown>)) {
+    if (slots == null || typeof slots !== 'object' || Array.isArray(slots)) continue;
+    const m = new Map<number, PackGhost>();
+    for (const [k, v] of Object.entries(slots as Record<string, unknown>)) {
+      const slot = Number(k);
+      const g = v as Partial<PackGhost> | null;
+      if (!Number.isInteger(slot) || slot < 1 || g == null || typeof g !== 'object') continue;
+      if (typeof g.fp !== 'string' || g.fp.length === 0) continue;
+      if (typeof g.frozenSinceMs !== 'number' || !Number.isFinite(g.frozenSinceMs)) continue;
+      if (typeof g.changeSeen !== 'boolean') continue;
+      m.set(slot, { fp: g.fp, frozenSinceMs: g.frozenSinceMs, changeSeen: g.changeSeen });
+    }
+    if (m.size > 0) out.set(sn, m);
+  }
+  return out;
+}
+
+/** v1.187.1 — PURE. The hide line's time phrase. An observed change is a date; a first sighting
+ *  is only a lower bound — the readings may have stopped long before this or an earlier process
+ *  first saw them (v1.172.0 printed the boot instant as "frozen since"). */
+export function packFrozenPhrase(d: { frozenSinceMs: number; changeSeen: boolean }): string {
+  return `readings unchanged since ${new Date(d.frozenSinceMs).toISOString()}${d.changeSeen ? '' : ' or earlier'}`;
 }

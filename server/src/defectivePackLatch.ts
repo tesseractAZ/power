@@ -77,6 +77,29 @@ const lastSeenDeviceSn = new Map<string, string>();
 /** v1.140.0 — packSn -> when its host first became unevaluable. Backstop clock. */
 const frozenSinceMs = new Map<string, number>();
 
+/**
+ * v1.187.1 — where an automatic retirement is logged. It went to a bare console.warn: no time, no
+ * level, outside the structured log, so a JSON-line parser or a level >= 40 triage could not see
+ * that a warranty diagnosis had been deleted (Core 4 pack 1, 2026-09-29 ~23:05, datable only from
+ * the neighbouring lines). The alert monitor wires its warn sink here (startAlertMonitor:
+ * app.log.warn, a timestamped pino line at level 40). Unwired — a test, a tool — it falls back to
+ * console.warn, so the breadcrumb is never lost.
+ */
+let retireWarn: (m: string) => void = (m) => console.warn(m);
+export function setDefectivePackRetireLog(fn: (m: string) => void): void { retireWarn = fn; }
+
+/**
+ * v1.187.1 — the retirement line: the record's identity in words (pack serial, Core, slot, chassis
+ * serial, when it was confirmed), why it is retired now, then the full evidence snapshot.
+ * PURE; exported for tests.
+ */
+export function defectivePackRetiredLine(rec: DefectivePackRecord, hostEvaluable: boolean): string {
+  const why = hostEvaluable
+    ? `absent for over ${DEFECTIVE_PACK_ABSENT_RETIRE_MS / 3_600_000} h from the pack list of a chassis that was online and reporting`
+    : `its chassis has not been evaluable for over ${DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS / 86_400_000} days (the backstop)`;
+  return `defective-pack: RETIRING the confirmed-defective record for pack ${rec.packSn} (${rec.deviceName} pack ${rec.packNum}, chassis ${rec.deviceSn}, confirmed ${new Date(rec.confirmedAtMs).toISOString()}) — ${why}. Evidence at confirmation: ${JSON.stringify(rec)}`;
+}
+
 function ensureLoaded(): Map<string, DefectivePackRecord> {
   if (records) return records;
   statePath = defaultPath();
@@ -178,7 +201,8 @@ export function retireAbsentPacks(p: {
     if (seen == null) { lastPresentMs.set(sn, p.nowMs); continue; } // first pass this process: arm the clock
 
     const host = lastSeenDeviceSn.get(sn) ?? rec.deviceSn;
-    if (!p.evaluableDeviceSns.has(host)) {
+    const hostEvaluable = p.evaluableDeviceSns.has(host);
+    if (!hostEvaluable) {
       let frozen = frozenSinceMs.get(sn);
       if (frozen == null) { frozen = p.nowMs; frozenSinceMs.set(sn, frozen); }
       if (p.nowMs - frozen <= DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS) {
@@ -193,7 +217,8 @@ export function retireAbsentPacks(p: {
     if (p.nowMs - seen > DEFECTIVE_PACK_ABSENT_RETIRE_MS) {
       // Log BEFORE deleting: this is a warranty diagnosis and the record is the
       // only place the original evidence snapshot lives.
-      console.warn(`defective-pack: RETIRING confirmed record ${JSON.stringify(rec)}`);
+      // v1.187.1 — through the wired warn sink, with the record's identity in words.
+      retireWarn(defectivePackRetiredLine(rec, hostEvaluable));
       m.delete(sn);
       lastPresentMs.delete(sn);
       lastSeenDeviceSn.delete(sn);

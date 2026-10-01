@@ -132,7 +132,7 @@ const MUTANTS = [
   {
     id: 'xiii. ★★★ R4: retirement stops requiring an evaluable chassis',
     file: LATCH,
-    find: '    if (!p.evaluableDeviceSns.has(host)) {',
+    find: '    if (!hostEvaluable) {',
     to: '    if (false) { /* MUTANT */',
     why: 'THE DEFECT: a Core powered down and boxed FOR RMA is exactly the Core that stays dark, so the warranty diagnosis it was pulled for is what gets deleted.',
   },
@@ -167,7 +167,7 @@ const MUTANTS = [
   {
     id: 'xviii. R4: the retirement log line is dropped',
     file: LATCH,
-    find: '      console.warn(`defective-pack: RETIRING confirmed record ${JSON.stringify(rec)}`);',
+    find: '      retireWarn(defectivePackRetiredLine(rec, hostEvaluable));',
     to: '      /* MUTANT */',
     why: 'A warranty diagnosis destroyed with zero breadcrumb — which is why this had to be settled by code reading rather than by looking.',
   },
