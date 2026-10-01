@@ -20,6 +20,11 @@
  *     lii-lxi.
  * (6) general-5 — a device with no data this session: no ">30 min", no cloud cause (alerts.ts).
  *     Mutants lxii-lxvii.
+ * Review round: (1) a bare /status flip is not data (lxviii-lxxi); (2) only a ghost the repeated
+ *     serial hid is carried across a restart (lxxii-lxxvi); (3) ticks on which a Core's roster mute
+ *     has not settled do not mark an episode annunciated (lxxvii-lxxxii); (4) pack-defective rows
+ *     leave after the other never-muted warnings (lxxxiii-lxxxiv); (5) a corrupt confirmation time
+ *     cannot throw into the tick (lxxxv-lxxxix).
  *
  *   node scripts/mutate-v1187-1g.mjs
  *
@@ -52,6 +57,7 @@ const SUBSET = [
   'test/broadcastBootHoldLog.test.ts',
   'test/offlineNoDataWording.test.ts',
   'test/v1187_1gWiring.test.ts',
+  'test/v1187_1gRosterWarmup.test.ts',
 ];
 
 const MUTANTS = [
@@ -95,15 +101,15 @@ const MUTANTS = [
   {
     id: 'vi. ★★★ an identical first reading does not carry the ghost\'s time',
     file: PP,
-    find: '    if (ghost != null && ghost.fp === fp) {',
+    find: '    if (sameAsGhost && (snCount.get((p as any).packSn) ?? 0) >= 2) {',
     to: '    if (false) { /* MUTANT */',
     why: 'The 09-30 ghost: ~10 minutes of alerts and recorder samples for a pack that does not exist, after every restart.',
   },
   {
     id: 'vii. ★★★ any reading in the slot carries the ghost\'s time',
     file: PP,
-    find: '    if (ghost != null && ghost.fp === fp) {',
-    to: '    if (ghost != null) { /* MUTANT */',
+    find: '    const sameAsGhost = ghost != null && ghost.fp === fp;',
+    to: '    const sameAsGhost = ghost != null; /* MUTANT */',
     why: 'A pack put back in the slot is hidden at once under a stale count — from every alarm.',
   },
   {
@@ -137,15 +143,15 @@ const MUTANTS = [
   {
     id: 'xii. ★★ a ghost whose slot moves is not retired',
     file: PP,
-    find: '    if (hist.ghosts.delete(p.num)) ghostsChanged = true;',
+    find: '    if (!sameAsGhost && hist.ghosts.delete(p.num)) ghostsChanged = true;',
     to: '    /* MUTANT */',
     why: 'A re-inserted pack\'s old ghost stays on file for good.',
   },
   {
     id: 'xiii. ★★ a retired ghost is not saved',
     file: PP,
-    find: '    if (hist.ghosts.delete(p.num)) ghostsChanged = true;',
-    to: '    hist.ghosts.delete(p.num); /* MUTANT */',
+    find: '    if (!sameAsGhost && hist.ghosts.delete(p.num)) ghostsChanged = true;',
+    to: '    if (!sameAsGhost) hist.ghosts.delete(p.num); /* MUTANT */',
     why: 'The file keeps a ghost the process has retired.',
   },
   {
@@ -397,7 +403,7 @@ const MUTANTS = [
   {
     id: 'xlvi. ★★★ the monitor never records that an episode annunciated',
     file: AM,
-    find: '      if (t != null && a.annunciate !== false) t.annunciated = true;',
+    find: '      if (t != null && a.annunciate !== false && !rosterUnsettledSns.some((sn) => a.id.includes(sn))) t.annunciated = true;',
     to: '      /* MUTANT */',
     why: 'Every muted-at-clear row on an off-panel Core leaves early, though it was spoken.',
   },
@@ -419,8 +425,8 @@ const MUTANTS = [
   {
     id: 'xlix. ★★★ the latch logs to bare stderr again',
     file: LATCH,
-    find: '      retireWarn(defectivePackRetiredLine(rec, hostEvaluable));',
-    to: '      console.warn(`defective-pack: RETIRING confirmed record ${JSON.stringify(rec)}`); /* MUTANT */',
+    find: '        retireWarn(defectivePackRetiredLine(rec, hostEvaluable));',
+    to: '        console.warn(`defective-pack: RETIRING confirmed record ${JSON.stringify(rec)}`); /* MUTANT */',
     why: 'As xlvii.',
   },
   {
@@ -433,7 +439,7 @@ const MUTANTS = [
   {
     id: 'li. ★★ the line drops the record\'s identity in words',
     file: LATCH,
-    find: ' (${rec.deviceName} pack ${rec.packNum}, chassis ${rec.deviceSn}, confirmed ${new Date(rec.confirmedAtMs).toISOString()})',
+    find: ' (${rec.deviceName} pack ${rec.packNum}, chassis ${rec.deviceSn}, confirmed ${isoOrRaw(rec.confirmedAtMs)})',
     to: ' /* MUTANT */',
     why: 'Which pack, in which Core, confirmed when, only inside a JSON blob.',
   },
@@ -557,6 +563,166 @@ const MUTANTS = [
     find: '        firstListedAtMs: store.firstListedAt(d.sn),',
     to: '        /* MUTANT */',
     why: 'As lxiv, in production.',
+  },
+  /* ── review round ─────────────────────────────────────────────────── */
+  /* (review-1) a /status flip is not data */
+  {
+    id: 'lxviii. ★★★ a bare /status flip counts as data again',
+    file: AL,
+    find: '      const lastDataAt = hasData ? (conn?.lastMqttAt ?? d.lastUpdated ?? 0) : 0;',
+    to: '      const lastDataAt = conn?.lastMqttAt ?? d.lastUpdated ?? 0; /* MUTANT */',
+    why: 'A device that sent nothing but one online/offline flip reads "Last data 0s ago via REST. Just dropped", then ">30 min … power-cycle".',
+  },
+  {
+    id: 'lxix. ★★ the device\'s own telemetry clocks are not read',
+    file: AL,
+    find: '        || (d.lastTelemetryAtMs ?? 0) > 0 || (d.lastQuotaAtMs ?? 0) > 0;',
+    to: '        ; /* MUTANT */',
+    why: 'Without a connectivity context a device with REST data reads "has not reported".',
+  },
+  {
+    id: 'lxx. ★★ a REST source this session is not data',
+    file: AL,
+    find: '      const hasData = conn?.lastSource != null || conn?.lastMqttAt != null',
+    to: '      const hasData = conn?.lastMqttAt != null /* MUTANT */',
+    why: 'A Core polled over REST 40 minutes ago reads "has not reported since the add-on started".',
+  },
+  {
+    id: 'lxxi. ★★ an MQTT message this session is not data',
+    file: AL,
+    find: '      const hasData = conn?.lastSource != null || conn?.lastMqttAt != null',
+    to: '      const hasData = conn?.lastSource != null /* MUTANT */',
+    why: 'A device heard on MQTT a minute ago loses its measured-gap hint.',
+  },
+  /* (review-2) only a repeated serial is carried across a restart */
+  {
+    id: 'lxxii. ★★★ a ghost is carried without its repeated serial',
+    file: PP,
+    find: '    if (sameAsGhost && (snCount.get((p as any).packSn) ?? 0) >= 2) {',
+    to: '    if (sameAsGhost) { /* MUTANT */',
+    why: 'A slot the count alone hid stays hidden from the first projection of every process: a pack that stopped reporting is gone for good, silently.',
+  },
+  {
+    id: 'lxxiii. ★★ a ghost with the same readings but no repeated serial is retired',
+    file: PP,
+    find: '    if (!sameAsGhost && hist.ghosts.delete(p.num)) ghostsChanged = true;',
+    to: '    if (hist.ghosts.delete(p.num)) ghostsChanged = true; /* MUTANT */',
+    why: 'Readings that have not moved discard a recorded freeze.',
+  },
+  {
+    id: 'lxxiv. ★★★ a count-only hide is recorded as a ghost',
+    file: PP,
+    find: '    if (!byRule2.has(d.num)) continue;',
+    to: '    /* MUTANT */',
+    why: 'As lxxii: the count rule\'s hide is written to disk.',
+  },
+  {
+    id: 'lxxv. ★★ the serial rule does not mark its hides',
+    file: PP,
+    find: '      if (newest - since(g) >= PACK_STALE_MS) { hideSet.set(g.num, g); byRule2.add(g.num); }',
+    to: '      if (newest - since(g) >= PACK_STALE_MS) { hideSet.set(g.num, g); } /* MUTANT */',
+    why: 'Nothing is recorded: the renumbered ghost returns after every restart.',
+  },
+  {
+    id: 'lxxvi. ★★ the projection\'s serials are not counted',
+    file: PP,
+    find: '    if (typeof sn === \'string\' && sn.length > 0) snCount.set(sn, (snCount.get(sn) ?? 0) + 1);',
+    to: '    /* MUTANT */',
+    why: 'As vi: the ghost is never carried.',
+  },
+  /* (review-3) the roster mute's warm-up does not count as annunciating */
+  {
+    id: 'lxxvii. ★★★ the stamp counts the roster mute\'s warm-up',
+    file: AM,
+    find: '      if (t != null && a.annunciate !== false && !rosterUnsettledSns.some((sn) => a.id.includes(sn))) t.annunciated = true;',
+    to: '      if (t != null && a.annunciate !== false) t.annunciated = true; /* MUTANT */',
+    why: 'An off-panel Core\'s standing alerts annunciate on the first ticks after every restart, so its rows never read as roster-muted.',
+  },
+  {
+    id: 'lxxviii. ★★ an unread roster settles every Core',
+    file: AM,
+    find: '    if (!rosterSeen || (n > 0 && n < ticks)) out.push(d.sn);',
+    to: '    if (n > 0 && n < ticks) out.push(d.sn); /* MUTANT */',
+    why: 'Ticks before the panel roster is read mark an off-panel Core\'s alerts as annunciated.',
+  },
+  {
+    id: 'lxxix. ★★ the off-panel streak is not read',
+    file: AM,
+    find: '    if (!rosterSeen || (n > 0 && n < ticks)) out.push(d.sn);',
+    to: '    if (!rosterSeen) out.push(d.sn); /* MUTANT */',
+    why: 'As lxxvii, for the streak.',
+  },
+  {
+    id: 'lxxx. ★★ a muted Core is still unsettled',
+    file: AM,
+    find: '    if (!rosterSeen || (n > 0 && n < ticks)) out.push(d.sn);',
+    to: '    if (!rosterSeen || (n > 0 && n <= ticks)) out.push(d.sn); /* MUTANT */',
+    why: 'The bound is off by one.',
+  },
+  {
+    id: 'lxxxi. ★★★ the monitor never records that the roster was read',
+    file: AM,
+    find: '      if (connectedSns.size > 0) panelRosterSeen = true;',
+    to: '      /* MUTANT */',
+    why: 'Nothing ever counts as annunciated: a home-roster episode that was spoken leaves early as roster-muted.',
+  },
+  {
+    id: 'lxxxii. ★★ the monitor does not compute the unsettled Cores',
+    file: AM,
+    find: '      rosterUnsettledSns = rosterMuteUnsettledSns(snap.devices, offPanelStreak, panelRosterSeen);',
+    to: '      /* MUTANT */',
+    why: 'As lxxvii.',
+  },
+  /* (review-4) pack-defective rows leave after every other warning */
+  {
+    id: 'lxxxiii. ★★★ a pack-defective row leaves before a newer never-muted warning',
+    file: AM,
+    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && !String(e.alert?.id ?? \'\').startsWith(\'pack-defective-\'))) return;',
+    to: '  /* MUTANT */',
+    why: 'Warranty evidence leaves ahead of a shp2-multi-panel row.',
+  },
+  {
+    id: 'lxxxiv. ★★ the never-muted tier is removed',
+    file: AM,
+    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && !isNeverMutedAlert(e.alert))) return;',
+    to: '  /* MUTANT */',
+    why: 'An older shp2-multi-panel row leaves before a newer ordinary warning.',
+  },
+  /* (review-5) a corrupt confirmation time cannot stop the tick */
+  {
+    id: 'lxxxv. ★★★ isoOrRaw throws on an out-of-range time',
+    file: LATCH,
+    find: '  return Number.isFinite(t.getTime()) ? t.toISOString() : String(ms);',
+    to: '  return t.toISOString(); /* MUTANT */',
+    why: 'A corrupt confirmedAtMs throws a RangeError into computeAlerts on every tick: no alert set is published.',
+  },
+  {
+    id: 'lxxxvi. ★★ the retirement line formats the time unguarded',
+    file: LATCH,
+    find: 'confirmed ${isoOrRaw(rec.confirmedAtMs)}) — ${why}.',
+    to: 'confirmed ${new Date(rec.confirmedAtMs).toISOString()}) — ${why}. /* MUTANT */',
+    why: 'The structured line is lost for a corrupt record.',
+  },
+  {
+    id: 'lxxxvii. ★★★ a throwing log line escapes into the tick',
+    file: LATCH,
+    find: '      } catch {\n        try { console.warn(`defective-pack: RETIRING confirmed record ${JSON.stringify(rec)}`); } catch { /* never block */ }\n      }',
+    to: '      } finally { /* MUTANT */ }',
+    why: 'The record is never deleted, so the same throw repeats on every tick.',
+  },
+  {
+    id: 'lxxxviii. ★★ a failed line leaves no breadcrumb',
+    file: LATCH,
+    find: '        try { console.warn(`defective-pack: RETIRING confirmed record ${JSON.stringify(rec)}`); } catch { /* never block */ }',
+    to: '        /* MUTANT */',
+    why: 'A warranty diagnosis is deleted without a trace.',
+  },
+  {
+    id: 'lxxxix. ★★★ the quiescent emission formats the confirmation unguarded',
+    file: AL,
+    find: '${isoOrRaw(dConfirmed.confirmedAtMs - 7 * 3_600_000).slice(0, 10)}',
+    to: '${new Date(dConfirmed.confirmedAtMs - 7 * 3_600_000).toISOString().slice(0, 10)} /* MUTANT */',
+    why: 'While the pack is present, every tick throws and no alert set is published.',
   },
 ];
 

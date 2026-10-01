@@ -89,6 +89,17 @@ let retireWarn: (m: string) => void = (m) => console.warn(m);
 export function setDefectivePackRetireLog(fn: (m: string) => void): void { retireWarn = fn; }
 
 /**
+ * v1.187.1 (review) — an ISO time that cannot throw. ensureLoaded checks only that confirmedAtMs is
+ * a number, so a corrupt or hand-edited latch file can hold any (1e20; 1e400 parses as Infinity),
+ * and toISOString() throws a RangeError outside ±8.64e15 ms. The number itself is printed then.
+ * PURE; exported for tests.
+ */
+export function isoOrRaw(ms: number): string {
+  const t = new Date(ms);
+  return Number.isFinite(t.getTime()) ? t.toISOString() : String(ms);
+}
+
+/**
  * v1.187.1 — the retirement line: the record's identity in words (pack serial, Core, slot, chassis
  * serial, when it was confirmed), why it is retired now, then the full evidence snapshot.
  * PURE; exported for tests.
@@ -97,7 +108,7 @@ export function defectivePackRetiredLine(rec: DefectivePackRecord, hostEvaluable
   const why = hostEvaluable
     ? `absent for over ${DEFECTIVE_PACK_ABSENT_RETIRE_MS / 3_600_000} h from the pack list of a chassis that was online and reporting`
     : `its chassis has not been evaluable for over ${DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS / 86_400_000} days (the backstop)`;
-  return `defective-pack: RETIRING the confirmed-defective record for pack ${rec.packSn} (${rec.deviceName} pack ${rec.packNum}, chassis ${rec.deviceSn}, confirmed ${new Date(rec.confirmedAtMs).toISOString()}) — ${why}. Evidence at confirmation: ${JSON.stringify(rec)}`;
+  return `defective-pack: RETIRING the confirmed-defective record for pack ${rec.packSn} (${rec.deviceName} pack ${rec.packNum}, chassis ${rec.deviceSn}, confirmed ${isoOrRaw(rec.confirmedAtMs)}) — ${why}. Evidence at confirmation: ${JSON.stringify(rec)}`;
 }
 
 function ensureLoaded(): Map<string, DefectivePackRecord> {
@@ -218,7 +229,14 @@ export function retireAbsentPacks(p: {
       // Log BEFORE deleting: this is a warranty diagnosis and the record is the
       // only place the original evidence snapshot lives.
       // v1.187.1 — through the wired warn sink, with the record's identity in words.
-      retireWarn(defectivePackRetiredLine(rec, hostEvaluable));
+      // (review) A throw here escaped into computeAlerts on every tick (the record was never deleted,
+      // so it threw again) and stopped the alert sets being published. Logging never blocks the
+      // delete or the tick: a failed line falls back to v1.140.0's bare console.warn of the record.
+      try {
+        retireWarn(defectivePackRetiredLine(rec, hostEvaluable));
+      } catch {
+        try { console.warn(`defective-pack: RETIRING confirmed record ${JSON.stringify(rec)}`); } catch { /* never block */ }
+      }
       m.delete(sn);
       lastPresentMs.delete(sn);
       lastSeenDeviceSn.delete(sn);

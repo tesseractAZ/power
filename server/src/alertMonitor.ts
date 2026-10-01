@@ -120,6 +120,33 @@ export function advanceOffPanelStreaks(
 }
 
 /**
+ * v1.187.1 (review) — the Cores whose ROSTER MUTE has not settled on this tick: the panel roster
+ * has not been read yet in this process (`rosterSeen` false: every Core), or the Core is part-way
+ * through its off-panel streak (0 < n < `ticks`). An alert carrying one of these serials is not
+ * yet muted although its Core may be off the panel, so its annunciating on such a tick does not
+ * mark the episode as annunciated (clearedRetention). The streak starts at 0 in every process, so
+ * an off-panel Core's standing alerts annunciated on the first ticks after each restart and their
+ * cleared rows never read as roster-muted — with restarts several a day, few did. Retention only:
+ * the mute itself, the push and the speech are unchanged. A roster that empties mid-process clears
+ * every streak and mutes nobody, so those ticks count (the alerts do annunciate). PURE; reads
+ * `streak` after advanceOffPanelStreaks has advanced it.
+ */
+export function rosterMuteUnsettledSns(
+  devices: Record<string, DeviceSnapshot>,
+  streak: ReadonlyMap<string, number>,
+  rosterSeen: boolean,
+  ticks: number = OFF_PANEL_DEMOTE_TICKS,
+): string[] {
+  const out: string[] = [];
+  for (const d of Object.values(devices)) {
+    if (d.projection?.kind !== 'dpu') continue;
+    const n = streak.get(d.sn) ?? 0;
+    if (!rosterSeen || (n > 0 && n < ticks)) out.push(d.sn);
+  }
+  return out;
+}
+
+/**
  * v1.95.0 — should this alert stop annunciating because its hardware is not
  * wired into the home pool? A critical Thermal alert is NEVER demoted: a bench
  * pack that is overheating must page regardless of where it is wired.
@@ -715,8 +742,11 @@ export function warrantyEvidence(logArr: readonly ClearedAlert[]): (e: ClearedAl
  *      CLEARED_ROSTER_MUTED_KEEP_MS — not one that is warranty evidence;
  *   2. a noise-flagged row recorded as NOT pushed, then 3. any noise-flagged row — neither one
  *      that is warranty evidence;
- *   4. the oldest warning that is not never-muted (isNeverMutedAlert: pack-defective);
- *   5. the oldest warning.
+ *   4. the oldest warning that is not never-muted (isNeverMutedAlert: pack-defective, cell-ovp,
+ *      shp2-multi-panel, critical Thermal);
+ *   5. (review) the oldest warning that is not pack-defective, so a pack-defective row leaves after
+ *      every other warning, the other never-muted ones included;
+ *   6. the oldest warning.
  *  A row muted by a CONDITION (balancing, top of charge) stays in the plain FIFO tier: it is the
  *  record that shows afterwards whether a mute hid a real fault. Rows written before v1.187.1
  *  carry neither flag and stay there too. `nowMs` dates tier 1. */
@@ -741,6 +771,7 @@ export function pruneOldestNonSignificant(
     if (evictOldest((e, i) => sev(i) === 'warning' && isNoise(e) && !evidence(e))) return;
   }
   if (evictOldest((e, i) => sev(i) === 'warning' && !isNeverMutedAlert(e.alert))) return;
+  if (evictOldest((e, i) => sev(i) === 'warning' && !String(e.alert?.id ?? '').startsWith('pack-defective-'))) return;
   if (evictOldest((_e, i) => sev(i) === 'warning')) return;
   logArr.pop();
 }
@@ -2345,6 +2376,8 @@ export function startAlertMonitor(
   let lastDigestHour = -1;
   /** v1.95.0 — consecutive ticks a DPU has been absent from a non-empty SHP2 roster. */
   const offPanelStreak = new Map<string, number>();
+  /** v1.187.1 (review) — a non-empty panel roster has been read in this process (rosterMuteUnsettledSns). */
+  let panelRosterSeen = false;
   const monitorStartMs = Date.now();
 
   // v0.15.21 — notified-state persistence (see loadNotifiedState above).
@@ -3311,6 +3344,7 @@ export function startAlertMonitor(
     // its streaks) and stamped on both publishes below.
     // v1.187.0 — the spares are kept apart too, so the stamp can say WHICH policy muted it.
     let mutedSpareSns: string[] = [];
+    let rosterUnsettledSns: string[] = []; // v1.187.1 (review) — see rosterMuteUnsettledSns
     const muted: string[] = (() => {
       const connectedSns = shp2ConnectedDpuSns(snap.devices);
       const mutedSpares = benchSpareSns().filter((sn) => isExpectedOfflineSpare(sn, connectedSns));
@@ -3331,6 +3365,8 @@ export function startAlertMonitor(
       // is overheating is exactly the case where the operator must be paged
       // regardless of where the hardware is wired.
       const offPanel = advanceOffPanelStreaks(snap.devices, connectedSns, offPanelStreak);
+      if (connectedSns.size > 0) panelRosterSeen = true;
+      rosterUnsettledSns = rosterMuteUnsettledSns(snap.devices, offPanelStreak, panelRosterSeen);
       // v1.129.0 — MULTI-PANEL DISARM. Both mute lists are derived from the
       // membership model, and with a second panel present that model is known
       // unsound: a Core wired to panel #2 is absent from the roster for a WIRING
@@ -3754,9 +3790,10 @@ export function startAlertMonitor(
 
     // v1.187.1 — whether each episode ever annunciated, for its cleared row (clearedRetention). One
     // pass over this tick's set, new and standing alerts alike, after the roster mute is applied.
+    // (review) Not on a tick on which its Core's roster mute has not settled (rosterMuteUnsettledSns).
     for (const a of alerts) {
       const t = tracked.get(a.id);
-      if (t != null && a.annunciate !== false) t.annunciated = true;
+      if (t != null && a.annunciate !== false && !rosterUnsettledSns.some((sn) => a.id.includes(sn))) t.annunciated = true;
     }
 
     // Morning digest — fires once when the local hour rolls over to DIGEST_HOUR

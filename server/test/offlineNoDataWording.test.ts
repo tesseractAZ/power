@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeAlerts, type ConnectivityContext } from '../src/alerts.js';
-import type { DeviceSnapshot } from '../src/snapshot.js';
+import { SnapshotStore, type DeviceSnapshot } from '../src/snapshot.js';
 
 const WAVE = 'WAVEXXX00XXX0001';
 const CORE = 'COREXXX00XXX0001';
@@ -74,4 +74,57 @@ test('★★★ a device that DID report this session keeps the measured-gap hin
   // REST data this session, no MQTT: the last data is stated, not "no telemetry".
   const rest = offline([dev(CORE, 'Delta Pro Ultra', { lastUpdated: now - 40 * 60_000 })], conn(CORE, { lastSource: 'rest' }));
   assert.match(rest.detail, /is flagged offline by EcoFlow's \/device\/list\. Last data 40 min ago via REST\. No telemetry for over 30 minutes/, rest.detail);
+});
+
+/** The monitor's connectivity context, built the way alertMonitor builds it from the store. */
+function fromStore(store: SnapshotStore): ConnectivityContext {
+  const perDevice: ConnectivityContext['perDevice'] = new Map();
+  for (const d of Object.values(store.get().devices)) {
+    perDevice.set(d.sn, {
+      lastMqttAt: store.lastMqttAtBySn.get(d.sn),
+      lastSource: store.lastSourceBySn.get(d.sn),
+      mqttCount: store.mqttMsgCountBySn.get(d.sn) ?? 0,
+      firstListedAtMs: store.firstListedAt(d.sn),
+    });
+  }
+  return { lastDeviceListAttemptAt: store.lastDeviceListAttemptAt, lastDeviceListSuccessAt: store.lastDeviceListSuccessAt, perDevice };
+}
+
+test('★★★ (review) a /status flip is not data: listed offline, then online, then offline via /status, no quota — still "has not reported"', () => {
+  // setDeviceOnline bumps lastUpdated on a bare /status flip (for the stale alarm), and that was
+  // read as data: "Last data 0s ago via REST. Just dropped", then "over 30 minutes … power-cycle".
+  const store = new SnapshotStore();
+  store.setLogger(() => {});
+  store.setDeviceList([{ sn: WAVE, deviceName: 'WAVE 2', productName: 'WAVE 2', online: 0 } as never]);
+  store.setDeviceOnline(WAVE, true);
+  store.setDeviceOnline(WAVE, false);
+  const devices = store.get().devices;
+  assert.ok(devices[WAVE].lastUpdated > 0, 'the flip did bump lastUpdated (the premise)');
+  const a = offline([devices[WAVE]], fromStore(store));
+  assert.match(a.detail, /It has not reported since the add-on started\. EcoFlow has reported it offline for the last \d+s; why is not known here\./, a.detail);
+  assert.doesNotMatch(a.detail, /via REST|Last data|Just dropped|30 minutes/);
+  assert.deepEqual(a.facts?.find((f) => f.label === 'Last data'), { label: 'Last data', value: 'no data this session' });
+  // Thirty-five minutes on (the flip's clocks moved back), the same: no measured-gap hint.
+  const later = { ...devices[WAVE], lastUpdated: Date.now() - 35 * 60_000, onlineChangedAtMs: Date.now() - 35 * 60_000 };
+  const b = offline([later], fromStore(store));
+  assert.match(b.detail, /It has not reported since the add-on started\. EcoFlow has reported it offline for the last 35 min;/, b.detail);
+  assert.doesNotMatch(b.detail, /30 minutes|lost its EcoFlow cloud|power-cycle|via REST/);
+});
+
+test('★★ (review) a REST quota this session IS data: the last data is stated, from the store, with no connectivity context', () => {
+  const store = new SnapshotStore();
+  store.setLogger(() => {});
+  store.setDeviceList([{ sn: CORE, deviceName: 'Core 1', productName: 'Delta Pro Ultra', online: 1 } as never]);
+  store.setDeviceQuota(CORE, { 'hs_yj751_pd_appshow_addr.soc': 70 });
+  store.setDeviceOnline(CORE, false);
+  const viaStore = offline([store.get().devices[CORE]], fromStore(store));
+  assert.match(viaStore.detail, /Last data \d+s ago via REST\. Just dropped/, viaStore.detail);
+  // computeAlerts called without a connectivity context still sees the device's own telemetry clock.
+  const bare = offline([store.get().devices[CORE]]);
+  assert.match(bare.detail, /Last data \d+s ago via REST\./, bare.detail);
+  assert.doesNotMatch(bare.detail, /has not reported/);
+  // …and an MQTT message this session (translated or not) is data too.
+  const mq = offline([dev(CORE, 'Delta Pro Ultra')], conn(CORE, { lastMqttAt: Date.now() - 60_000, mqttCount: 1 }));
+  assert.doesNotMatch(mq.detail, /has not reported|first device list/);
+  assert.match(mq.detail, /last data \d+s ago via \w+\. Just dropped — likely a brief blip\./, mq.detail);
 });

@@ -42,6 +42,12 @@
  * on the first projection. Neither rule is loosened (Rule 1 still needs a positive count below the
  * slot count, Rule 2 a repeated serial), and any other reading — a re-inserted pack, anything that
  * moved — is first seen "now" as before and retires the ghost.
+ * ONLY A REPEATED SERIAL IS CARRIED. A ghost is recorded only when Rule 2 hid it, and its time is
+ * carried only while another slot in the projection still carries its serial. A slot hidden by the
+ * count alone (Rule 1) is what a pack that has stopped reporting looks like — a loose cable, a BMS
+ * that shut down — and nothing alarms on a hidden slot, so carrying it would make that disappearance
+ * permanent and silent across every restart; it keeps v1.172.0's restart behaviour (shown until the
+ * live packs move past it). The renumbered slot is different: its serial is on the live pack.
  */
 
 import type { DpuPack } from './ecoflow/project.js';
@@ -50,7 +56,8 @@ import type { DpuPack } from './ecoflow/project.js';
 export const PACK_STALE_MS = 10 * 60_000;
 
 /**
- * v1.187.1 — a hidden slot's frozen readings, kept across a restart (see the header).
+ * v1.187.1 — the frozen readings of a slot hidden by its repeated serial, kept across a restart (see
+ * the header).
  * `frozenSinceMs` is when its readings were last SEEN to change (`changeSeen`), or else when they
  * were first seen — a lower bound: the freeze may be older.
  */
@@ -102,6 +109,12 @@ export function prunePhantomPacks(
   ghostsChanged: boolean;
 } {
   let ghostsChanged = false;
+  // v1.187.1 — the serials two or more slots carry in THIS projection (Rule 2's evidence).
+  const snCount = new Map<string, number>();
+  for (const p of packs) {
+    const sn = (p as any).packSn;
+    if (typeof sn === 'string' && sn.length > 0) snCount.set(sn, (snCount.get(sn) ?? 0) + 1);
+  }
   for (const p of packs) {
     const fp = packFingerprint(p);
     const prev = hist.fp.get(p.num);
@@ -110,8 +123,10 @@ export function prunePhantomPacks(
     const ghost = hist.ghosts.get(p.num);
     // v1.187.1 — a reading byte-identical to the slot's ghost: the same frozen readings, so the same
     // freeze. In practice this is the slot's first reading in a new process (any other reading
-    // retires the ghost below). Any other reading is "now", as before.
-    if (ghost != null && ghost.fp === fp) {
+    // retires the ghost below). Its time is carried only while another slot carries its serial (the
+    // header: a count-only hide is not carried). Any other reading is "now", as before.
+    const sameAsGhost = ghost != null && ghost.fp === fp;
+    if (sameAsGhost && (snCount.get((p as any).packSn) ?? 0) >= 2) {
       hist.changedMs.set(p.num, Math.min(ghost.frozenSinceMs, nowMs));
       if (ghost.changeSeen) hist.changeSeen.add(p.num);
       continue;
@@ -119,8 +134,9 @@ export function prunePhantomPacks(
     hist.changedMs.set(p.num, nowMs);
     if (prev != null) hist.changeSeen.add(p.num);
     // A slot that reads anything but its ghost is not that ghost any more: a re-inserted pack, or
-    // readings that moved. It re-earns a hide by the rules below, from now.
-    if (hist.ghosts.delete(p.num)) ghostsChanged = true;
+    // readings that moved. It re-earns a hide by the rules below, from now. The same readings with
+    // no repeated serial are first seen now and the ghost is kept: nothing has moved.
+    if (!sameAsGhost && hist.ghosts.delete(p.num)) ghostsChanged = true;
   }
   const since = (p: DpuPack) => hist.changedMs.get(p.num) ?? nowMs;
   // "Frozen for PACK_STALE_MS" is implied by each rule's "behind a slot that changed at
@@ -144,19 +160,22 @@ export function prunePhantomPacks(
     const sn = (p as any).packSn;
     if (typeof sn === 'string' && sn.length > 0) bySn.set(sn, [...(bySn.get(sn) ?? []), p]);
   }
+  const byRule2 = new Set<number>();
   for (const group of bySn.values()) {
     if (group.length < 2) continue;
     const sorted = [...group].sort((a, b) => since(b) - since(a)); // newest first
     const newest = since(sorted[0]);
     for (const g of sorted.slice(1)) {
-      if (newest - since(g) >= PACK_STALE_MS) hideSet.set(g.num, g);
+      if (newest - since(g) >= PACK_STALE_MS) { hideSet.set(g.num, g); byRule2.add(g.num); }
     }
   }
   const dropped = [...hideSet.values()].sort((a, b) => a.num - b.num);
-  // v1.187.1 — every hidden slot is (still) a ghost: record it as it stands. A ghost only ever holds
-  // its slot's current reading (any other reading retires it above), so its time is the one thing
-  // that can differ — a ghost from before a backward clock step is clamped to now.
+  // v1.187.1 — every slot the repeated serial hides is (still) a ghost: record it as it stands. A
+  // count-only hide is not recorded (the header). A ghost only ever holds its slot's current reading
+  // (any other reading retires it above), so its time is the one thing that can differ — a ghost
+  // from before a backward clock step is clamped to now.
   for (const d of dropped) {
+    if (!byRule2.has(d.num)) continue;
     const frozenSinceMs = since(d);
     if (hist.ghosts.get(d.num)?.frozenSinceMs === frozenSinceMs) continue;
     hist.ghosts.set(d.num, { fp: hist.fp.get(d.num)!, frozenSinceMs, changeSeen: hist.changeSeen.has(d.num) });

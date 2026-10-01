@@ -11,9 +11,10 @@
  *
  * Now, among warnings: a roster-muted row (never annunciated; bench spare or off-panel Core) older
  * than CLEARED_ROSTER_MUTED_KEEP_MS → a noise-flagged row recorded as NOT pushed → any noise-flagged
- * row → the oldest warning that is not never-muted → the oldest warning. Warranty evidence (the
- * pack-defective rows, their Core's rows while they stood, the pack's own rows) never leaves in an
- * early tier, and pack-defective rows leave after every other warning. A row muted by a CONDITION
+ * row → the oldest warning that is not never-muted → the oldest warning that is not pack-defective →
+ * the oldest warning. Warranty evidence (the pack-defective rows, their Core's rows while they stood,
+ * the pack's own rows) never leaves in an early tier, and pack-defective rows leave after every other
+ * warning. A row muted by a CONDITION
  * (balancing, top of charge) stays in the plain FIFO tier: it is how a mute that hid a real fault
  * is found afterwards (the verifier's binding correction).
  */
@@ -97,6 +98,21 @@ test('★★★ pack-defective rows leave after EVERY other warning — even wit
   // …and still before a critical.
   const crit = ledger(row(`pack-defective-${CORE4}-1`, 5), row('dpu-err-HOME', 90, {}, { severity: 'critical' }));
   assert.deepEqual(evictOnce(crit), [`pack-defective-${CORE4}-1`]);
+});
+
+test('★★★ (review) …the other never-muted warnings included: a newer shp2-multi-panel row leaves before an older pack-defective row', () => {
+  const log = ledger(
+    row(`pack-defective-${CORE4}-1`, 60, { pushed: true }),
+    row('shp2-multi-panel', 2, { pushed: true }),
+  );
+  assert.deepEqual(evictOnce(log), ['shp2-multi-panel']);
+  assert.deepEqual(evictOnce(log), [`pack-defective-${CORE4}-1`]);
+});
+
+test('★★ a never-muted warning (shp2-multi-panel) leaves after a NEWER ordinary warning', () => {
+  const log = ledger(row('shp2-multi-panel', 60, { pushed: true }), row('vdiff-warn-HOME-1', 2, { pushed: true }));
+  assert.deepEqual(evictOnce(log), ['vdiff-warn-HOME-1']);
+  assert.deepEqual(evictOnce(log), ['shp2-multi-panel']);
 });
 
 test('★★★ a noise-flagged pack-defective row is still not evicted early', () => {

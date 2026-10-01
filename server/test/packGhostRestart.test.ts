@@ -13,6 +13,9 @@
  * The hidden slot is now a persisted GHOST (fingerprint + how long it has stood unchanged). A slot
  * whose first reading in a new process is identical to its ghost keeps the ghost's time, so it is
  * hidden on the first projection; anything else is first seen "now", as before, and retires it.
+ * Only a slot the REPEATED SERIAL hid is carried (review): a slot hidden by the Core's count alone is
+ * what a pack that stopped reporting looks like, and nothing alarms on a hidden slot, so carrying it
+ * would make that disappearance permanent and silent; it keeps v1.172.0's restart behaviour.
  * Pure rules here, then the store's file (PACK_GHOSTS_PATH) through two SnapshotStore instances.
  */
 import { test, after } from 'node:test';
@@ -35,10 +38,13 @@ const { SnapshotStore } = await import('../src/snapshot.js');
 
 const M = 60_000;
 const DAY = 24 * 60 * M;
-const pk = (num: number, soc: number, mv: number) =>
-  ({ num, soc, packVoltageMv: mv, maxCellVoltageMv: mv, minCellVoltageMv: mv - 5, temp: 30, cellVoltagesMv: [mv], cellTemps: [30] } as any);
-/** Slots 1-4 live (moving every minute); slot 5 frozen at 55% / 3328 mV unless `slot5` says otherwise. */
-const packsAt = (m: number, slot5 = pk(5, 55, 3328)) => [1, 2, 3, 4].map((n) => pk(n, 70, 3330 + (m % 7))).concat([slot5]);
+const pk = (num: number, soc: number, mv: number, packSn = `PACK-${num}`) =>
+  ({ num, soc, packVoltageMv: mv, maxCellVoltageMv: mv, minCellVoltageMv: mv - 5, temp: 30, cellVoltagesMv: [mv], cellTemps: [30], packSn } as any);
+/** Core 4's slot 5: the old address of the pack now at slot 4 (it repeats slot 4's serial). */
+const ghost5 = (soc = 55, mv = 3328) => pk(5, soc, mv, 'PACK-4');
+/** Slots 1-4 live (moving every minute); slot 5 frozen at 55% / 3328 mV, repeating slot 4's serial,
+ *  unless `slot5` says otherwise. */
+const packsAt = (m: number, slot5 = ghost5()) => [1, 2, 3, 4].map((n) => pk(n, 70, 3330 + (m % 7))).concat([slot5]);
 
 /** The first process: slot 5 is hidden once the live four have moved PACK_STALE_MS past it. */
 function firstProcess() {
@@ -54,7 +60,7 @@ function firstProcess() {
 test('★★★ the 09-30 restart: the ghost is hidden on the FIRST projection of the next process, with its real time', () => {
   const a = firstProcess();
   const ghost = a.ghosts.get(5)!;
-  assert.deepEqual(ghost, { fp: packFingerprint(pk(5, 55, 3328)), frozenSinceMs: 0, changeSeen: false });
+  assert.deepEqual(ghost, { fp: packFingerprint(ghost5()), frozenSinceMs: 0, changeSeen: false });
   // The next process, two days later: every slot is first seen now; the ghost's slot keeps its time.
   const b = freshPackSlotHistory(a.ghosts);
   const r = prunePhantomPacks(packsAt(0), 4, b, 2 * DAY);
@@ -66,19 +72,47 @@ test('★★★ the 09-30 restart: the ghost is hidden on the FIRST projection o
 });
 
 test('★★★ without a pack count, the repeated serial hides the carried ghost at once too', () => {
-  const ser = (packs: any[]) => packs.map((p) => ({ ...p, packSn: p.num === 5 ? 'PACK-4' : `PACK-${p.num}` }));
   const a = freshPackSlotHistory();
-  for (let m = 0; m <= 30; m++) prunePhantomPacks(ser(packsAt(m)), null, a, m * M);
+  for (let m = 0; m <= 30; m++) prunePhantomPacks(packsAt(m), null, a, m * M);
   assert.ok(a.ghosts.has(5));
-  const r = prunePhantomPacks(ser(packsAt(0)), null, freshPackSlotHistory(a.ghosts), 2 * DAY);
+  const r = prunePhantomPacks(packsAt(0), null, freshPackSlotHistory(a.ghosts), 2 * DAY);
   assert.deepEqual(r.dropped.map((d) => d.num), [5]);
+});
+
+test('★★★ a slot hidden by the COUNT alone is not carried: after a restart it is shown until the live packs move (v1.172.0)', () => {
+  // A pack that stopped reporting (loose cable, a BMS that shut down): the Core counts 4, slot 3's
+  // readings freeze, and no other slot carries its serial. Nothing alarms on a hidden slot, so a
+  // restart is the only time it comes back into view — that must not be taken away.
+  const quiet = (m: number) => [1, 2, 4, 5].map((n) => pk(n, 70, 3330 + (m % 7))).concat([pk(3, 41, 3290)]).sort((x, y) => x.num - y.num);
+  const a = freshPackSlotHistory();
+  let r: ReturnType<typeof prunePhantomPacks> | null = null;
+  const saved: boolean[] = [];
+  for (let m = 0; m <= 30; m++) { r = prunePhantomPacks(quiet(m), 4, a, m * M); saved.push(r.ghostsChanged); }
+  assert.deepEqual(r!.dropped.map((d) => d.num), [3], 'hidden in-process, as in v1.172.0');
+  assert.equal(a.ghosts.size, 0, 'but not recorded as a ghost');
+  assert.equal(saved.some(Boolean), false, 'so nothing is written');
+  const b = freshPackSlotHistory(a.ghosts);
+  assert.deepEqual(prunePhantomPacks(quiet(0), 4, b, 2 * DAY).packs.map((p) => p.num), [1, 2, 3, 4, 5], 'shown again after the restart');
+});
+
+test('★★★ a ghost whose serial no other slot carries any more is not carried (and is kept: its readings have not moved)', () => {
+  const a = firstProcess();
+  const b = freshPackSlotHistory(a.ghosts);
+  // The next process: the pack at slot 4 has gone too (a different serial there); slot 5 still reads
+  // its ghost. Carrying the ghost's time would let the count rule hide it on the first projection.
+  const live = [1, 2, 3].map((n) => pk(n, 70, 3330)).concat([pk(4, 70, 3330, 'PACK-9'), ghost5()]);
+  const r = prunePhantomPacks(live, 4, b, 2 * DAY);
+  assert.deepEqual(r.packs.map((p) => p.num), [1, 2, 3, 4, 5], 'first seen now, like every slot');
+  assert.equal(b.changedMs.get(5), 2 * DAY);
+  assert.equal(b.ghosts.has(5), true, 'kept');
+  assert.equal(r.ghostsChanged, false);
 });
 
 test('★★★ a re-inserted pack (any other reading in the slot) is first seen NOW: shown, and its ghost retired', () => {
   const a = firstProcess();
   const b = freshPackSlotHistory(a.ghosts);
   // A stale count of 4 from the cloud would let Rule 1 hide the slot if it carried the ghost's time.
-  const r = prunePhantomPacks(packsAt(0, pk(5, 61, 3340)), 4, b, 2 * DAY);
+  const r = prunePhantomPacks(packsAt(0, pk(5, 61, 3340, 'PACK-9')), 4, b, 2 * DAY);
   assert.deepEqual(r.packs.map((p) => p.num), [1, 2, 3, 4, 5], 'all first seen at once: nothing is hidden');
   assert.equal(b.changedMs.get(5), 2 * DAY);
   assert.equal(b.ghosts.has(5), false, 'the ghost is retired');
@@ -88,7 +122,7 @@ test('★★★ a re-inserted pack (any other reading in the slot) is first seen
 test('★★ a ghost kept but not hidden (no count, no repeated serial) is retired the moment its slot moves', () => {
   const a = firstProcess();
   const b = freshPackSlotHistory(a.ghosts);
-  const still = prunePhantomPacks(packsAt(0), null, b, 2 * DAY);
+  const still = prunePhantomPacks(packsAt(0, pk(5, 55, 3328)), null, b, 2 * DAY);
   assert.equal(still.packs.length, 5, 'no rule applies without a count or a repeated serial');
   assert.equal(still.ghostsChanged, false);
   assert.ok(b.ghosts.has(5), 'still the same frozen readings: kept');
@@ -116,12 +150,12 @@ test('★★ a hidden slot that stays as it is is not re-saved on every projecti
   const changes: boolean[] = [];
   // Slot 5 moves for its first 3 minutes, then freezes at minute 3.
   for (let m = 0; m <= 30; m++) {
-    const s5 = pk(5, 55, m < 3 ? 3300 + m : 3328);
+    const s5 = ghost5(55, m < 3 ? 3300 + m : 3328);
     changes.push(prunePhantomPacks(packsAt(m, s5), 4, hist, m * M).ghostsChanged);
   }
   assert.equal(changes.filter(Boolean).length, 1, 'saved once, when it was first hidden');
-  assert.deepEqual(hist.ghosts.get(5), { fp: packFingerprint(pk(5, 55, 3328)), frozenSinceMs: 3 * M, changeSeen: true });
-  const r = prunePhantomPacks(packsAt(0, pk(5, 55, 3328)), 4, freshPackSlotHistory(hist.ghosts), 2 * DAY);
+  assert.deepEqual(hist.ghosts.get(5), { fp: packFingerprint(ghost5()), frozenSinceMs: 3 * M, changeSeen: true });
+  const r = prunePhantomPacks(packsAt(0), 4, freshPackSlotHistory(hist.ghosts), 2 * DAY);
   assert.deepEqual(r.dropped, [{ num: 5, frozenSinceMs: 3 * M, changeSeen: true }], 'carried with its observed change');
 });
 

@@ -42,7 +42,7 @@ import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareSh
 import { liveHostPower } from './hostPower.js';
 import { mpptProducing } from './mppt.js';
 import { getReserveArbitrageRaised } from './nightChargeActuator.js';
-import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks } from './defectivePackLatch.js';
+import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks, isoOrRaw } from './defectivePackLatch.js';
 import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
 import { getAlertOnset } from './alertOnset.js';
 import { currentAssessment } from './selfVitals.js';
@@ -1274,7 +1274,15 @@ export function computeAlerts(
       // from the device and via which channel. A 47-min gap with last data
       // via MQTT looks very different from "never connected since boot".
       const conn = connectivity?.perDevice.get(d.sn);
-      const lastDataAt = conn?.lastMqttAt ?? d.lastUpdated ?? 0;
+      // v1.187.1 (review) — "reported this session" is decided from DATA, not from `lastUpdated`:
+      // setDeviceOnline bumps that on a bare /status flip (deliberately, for the stale alarm), so a
+      // device that had sent nothing but one online→offline flip read "Last data 0s ago via REST.
+      // Just dropped" — and 30 minutes on, the "lost its cloud connection … power-cycle" hint. The
+      // data setters (setDeviceQuota, mergeDeviceQuota, setMqttMessage) are the only writers of a
+      // last source, an MQTT time or the telemetry clocks.
+      const hasData = conn?.lastSource != null || conn?.lastMqttAt != null
+        || (d.lastTelemetryAtMs ?? 0) > 0 || (d.lastQuotaAtMs ?? 0) > 0;
+      const lastDataAt = hasData ? (conn?.lastMqttAt ?? d.lastUpdated ?? 0) : 0;
       const lastSource = conn?.lastSource ?? 'rest';
       const facts: Array<{ label: string; value: string }> = [
         { label: 'Reported by', value: 'EcoFlow Cloud /device/list' },
@@ -1750,6 +1758,8 @@ export function computeAlerts(
         // Date below is Phoenix-local (fixed UTC−7, AZ has no DST — and never
         // Intl on the Pi): the 08-24 23:01 MST confirmation rendered as "08-25"
         // with a bare toISOString.
+        // v1.187.1 (review) — through isoOrRaw: a corrupt confirmedAtMs threw a RangeError here on
+        // every tick the pack was present, and computeAlerts has no catch.
         out.push({
           id: `pack-defective-${d.sn}-${pk.num}`,
           severity: 'warning',
@@ -1757,7 +1767,7 @@ export function computeAlerts(
           device: d.deviceName,
           title: 'Pack confirmed defective — service required',
           detail:
-            `${tag} was confirmed defective on ${new Date(dConfirmed.confirmedAtMs - 7 * 3_600_000).toISOString().slice(0, 10)}: `
+            `${tag} was confirmed defective on ${isoOrRaw(dConfirmed.confirmedAtMs - 7 * 3_600_000).slice(0, 10)}: `
             + `${dConfirmed.socPct}% SoC against a sibling median of ${dConfirmed.siblingMedianSocPct}%, exchanging `
             + `${dConfirmed.packAbsW} W while its siblings moved ${dConfirmed.siblingMedianAbsW} W; deviant cell `
             + `#${dConfirmed.deviantCell} at ${dConfirmed.deltaMv > 0 ? '+' : ''}${dConfirmed.deltaMv} mV from the pack median. `

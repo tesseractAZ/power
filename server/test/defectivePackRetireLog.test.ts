@@ -11,13 +11,16 @@
  */
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks, _resetDefectivePackLatchForTests,
   setDefectivePackRetireLog, defectivePackRetiredLine, DEFECTIVE_PACK_ABSENT_RETIRE_MS, DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS,
+  isoOrRaw,
 } from '../src/defectivePackLatch.js';
+import { computeAlerts } from '../src/alerts.js';
+import type { DeviceSnapshot } from '../src/snapshot.js';
 
 const PACK = 'PACKXXX00XXX0037';
 const CORE = 'COREXXX00XXX0004';
@@ -82,4 +85,60 @@ test('★ unwired (a test, a tool), the line still reaches console.warn', () => 
   retireAbsentPacks({ nowMs: CONFIRMED + 1_000 + DEFECTIVE_PACK_ABSENT_RETIRE_MS + 1, evaluableDeviceSns: new Set([CORE]) });
   assert.equal(consoleLines.length, 1);
   assert.ok(consoleLines[0].includes(`RETIRING the confirmed-defective record for pack ${PACK}`));
+});
+
+/* ══ (review) a corrupt confirmation time cannot stop the tick ══════════════ */
+
+/** A latch file holding one record whose confirmedAtMs is out of Date's range (a corrupt or
+ *  hand-edited file: ensureLoaded checks only that it is a number). */
+function corruptLatch(confirmedAtMs: number): void {
+  const path = join(mkdtempSync(join(tmpdir(), 'dp-retire-corrupt-')), 'latch.json');
+  writeFileSync(path, JSON.stringify([{ ...rec(), confirmedAtMs }]));
+  _resetDefectivePackLatchForTests(path);
+}
+
+test('★★ isoOrRaw: an ISO time, or the number itself when Date cannot render it', () => {
+  assert.equal(isoOrRaw(CONFIRMED), '2026-08-24T16:01:42.000Z');
+  assert.equal(isoOrRaw(1e20), '100000000000000000000');
+  assert.equal(isoOrRaw(Infinity), 'Infinity');
+  assert.equal(isoOrRaw(-1e20), '-100000000000000000000');
+});
+
+test('★★★ a corrupt confirmedAtMs (1e20) is retired and logged — no RangeError escapes into the tick', () => {
+  corruptLatch(1e20);
+  markPackPresent(PACK, CONFIRMED, CORE);
+  assert.doesNotThrow(() => retireAbsentPacks({ nowMs: CONFIRMED + DEFECTIVE_PACK_ABSENT_RETIRE_MS + 1, evaluableDeviceSns: new Set([CORE]) }));
+  assert.equal(getConfirmedRecord(PACK), null, 'deleted, so the next tick does not meet it again');
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes(`for pack ${PACK} (Core 4 pack 1, chassis ${CORE}, confirmed 100000000000000000000) — `), lines[0]);
+});
+
+test('★★★ a sink that throws does not block the delete or the tick: the record falls back to console.warn', () => {
+  setDefectivePackRetireLog(() => { throw new Error('sink down (test)'); });
+  confirmDefectivePack(rec(), CONFIRMED);
+  markPackPresent(PACK, CONFIRMED + 1_000, CORE);
+  assert.doesNotThrow(() => retireAbsentPacks({ nowMs: CONFIRMED + 1_000 + DEFECTIVE_PACK_ABSENT_RETIRE_MS + 1, evaluableDeviceSns: new Set([CORE]) }));
+  assert.equal(getConfirmedRecord(PACK), null, 'deleted');
+  assert.equal(consoleLines.length, 1);
+  assert.equal(consoleLines[0], `defective-pack: RETIRING confirmed record ${JSON.stringify({ ...rec(), confirmedAtMs: CONFIRMED })}`);
+});
+
+test('★★★ the quiescent pack-defective alert with a corrupt confirmedAtMs: computeAlerts does not throw, the alert stands', () => {
+  corruptLatch(1e20);
+  const cells = (v: number) => new Array(32).fill(v);
+  const pack = (num: number, soc: number, packSn: string) => ({
+    num, soc, soh: 100, actSoh: 100, inputWatts: 0, outputWatts: 0, cycles: 100, temp: 30, maxCellTemp: 30, minCellTemp: 30,
+    cellVoltagesMv: cells(3330), maxVolDiffMv: 0, packSn,
+  });
+  const devices = {
+    [CORE]: {
+      sn: CORE, deviceName: 'Core 4', productName: 'DELTA Pro Ultra', online: true, lastUpdated: Date.now(),
+      projection: { kind: 'dpu', soc: 50, packs: [pack(1, 48, PACK), pack(2, 49, 'PACKXXX00XXX0002'), pack(3, 47, 'PACKXXX00XXX0003')] },
+    },
+  } as unknown as Record<string, DeviceSnapshot>;
+  let alerts: ReturnType<typeof computeAlerts> = [];
+  assert.doesNotThrow(() => { alerts = computeAlerts(devices, undefined, { present: true, backstopping: true } as never); });
+  const a = alerts.find((x) => x.id === `pack-defective-${CORE}-1`);
+  assert.ok(a, 'the latched diagnosis still stands');
+  assert.match(a!.detail, /was confirmed defective on 9999999999: /, a!.detail);
 });
