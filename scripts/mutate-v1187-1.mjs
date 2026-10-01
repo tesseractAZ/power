@@ -1,0 +1,313 @@
+#!/usr/bin/env node
+/**
+ * mutate-v1187-1.mjs — committed harness for v1.187.1: the end-of-charge knee SESSION across a
+ * restart, and the policy mute's precedence over the bounded cell-spread mute.
+ *
+ * (1) vdiffKneeSeed restored a pack's session clock from its standing critical's persisted onset,
+ * judged by the ONSET's age, and the onset is retired with the tracked alert after the resolve
+ * dwell: a restart during a fault that crosses the line on isolated readings (95 / 45 mV, or
+ * hi / lo / lo) opened a new top-of-charge session — up to 20 more minutes of silence. The clocks
+ * are now persisted per pack (vdiff-knee-state.json; persistVdiffKneeSessions, written on change)
+ * and restored at start-up by the in-process gap rule (restoreVdiffKneeSessions: carried while
+ * the last reading is at most VDIFF_KNEE_GAP_CARRY_MS old). The activity evidence is never
+ * persisted or restored; a missing, unreadable or malformed file falls back to the onset seed.
+ * Mutants i-xxiv.
+ *
+ * (2) The bench-spare stamp (alerts.ts) and the roster stamp (applyRosterMute) overwrote
+ * annunciate / muteReason but left mutedBy set, so a sounded vdiff-crit muted by policy that also
+ * carried a knee mute held the committed red (soundedCriticalHeld) and delayed the all-clear. Both
+ * stamps now clear mutedBy. Mutants xxv-xxvi.
+ *
+ *   node scripts/mutate-v1187-1.mjs
+ *
+ * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
+ *   SIGINT/SIGTERM/SIGHUP; refuses to start over a leftover mutant marker.
+ */
+import { readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SERVER = resolve(REPO, 'server');
+const AL = resolve(SERVER, 'src/alerts.ts');
+const AM = resolve(SERVER, 'src/alertMonitor.ts');
+
+const SUBSET = [
+  'test/cellSpreadKneeSessionRestart.test.ts',
+  'test/cellSpreadKneeSessionMonitor.test.ts',
+  'test/cellSpreadPolicyMuteHold.test.ts',
+  'test/cellSpreadKneeRestart.test.ts',
+  'test/cellSpreadEndOfChargeKnee.test.ts',
+  'test/peerSpreadYieldsToHeldCritical.test.ts',
+  'test/muteReasonWiring.test.ts',
+];
+
+const MUTANTS = [
+  /* ── the monitor's wiring ─────────────────────────────────────────────── */
+  {
+    id: 'i. ★★★ the monitor restores nothing at start-up',
+    file: AM,
+    find: '  let vdiffKneeOnDisk = restoreVdiffKneeSessions(vdiffKneeStatePath, Date.now(), log);',
+    to: '  let vdiffKneeOnDisk = {} as ReturnType<typeof restoreVdiffKneeSessions>; /* MUTANT */',
+    why: 'A restart on a 45 mV reading of an hour-old 95 / 45 mV balancing fault opens a new session: 20 more minutes of silence.',
+  },
+  {
+    id: 'ii. ★★★ the monitor never writes the sessions',
+    file: AM,
+    find: '    vdiffKneeOnDisk = persistVdiffKneeSessions(vdiffKneeStatePath, vdiffKneeOnDisk);',
+    to: '    /* MUTANT */',
+    why: 'As i: the next process finds no file, and the onset seed alone opens a new session.',
+  },
+  /* ── the restore: the in-process gap rule ─────────────────────────────── */
+  {
+    id: 'iii. ★★★ the restore restores nothing',
+    file: AL,
+    find: '    vdiffKneeByKey.set(key, {\n      packSn: s.packSn, lastBalancingMs: null, lastChargeMs: null,',
+    to: '    void ({ /* MUTANT */\n      packSn: s.packSn, lastBalancingMs: null, lastChargeMs: null,',
+    why: 'The v1.187.0 limitation: a charge-following fault restarted between crossings gets a fresh grace.',
+  },
+  {
+    id: 'iv. ★★★ the restore applies no outage cap',
+    file: AL,
+    find: '    if (nowMs - seenMs > VDIFF_KNEE_GAP_CARRY_MS) { outlasted++; continue; }',
+    to: '    /* MUTANT */',
+    why: 'After an outage that began inside a knee, the next day\'s benign knee has no grace: a false red klaxon.',
+  },
+  {
+    id: 'v. ★★ the file\'s last reading is read without its grain',
+    file: AL,
+    find: '    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS);',
+    to: '    const seenMs = Math.min(nowMs, s.lastSeenMs); /* MUTANT */',
+    why: 'A session the process would still carry is dropped up to 5 minutes early, and the next crossing earns a fresh grace.',
+  },
+  {
+    id: 'vi. ★★ the carry boundary is inclusive',
+    file: AL,
+    find: '    if (nowMs - seenMs > VDIFF_KNEE_GAP_CARRY_MS) { outlasted++; continue; }',
+    to: '    if (nowMs - seenMs >= VDIFF_KNEE_GAP_CARRY_MS) { outlasted++; continue; } /* MUTANT */',
+    why: 'A session at exactly the carry is dropped, which the process keeps.',
+  },
+  {
+    id: 'vii. ★★ the restored last reading is not capped at the restart',
+    file: AL,
+    find: '    const seenMs = Math.min(nowMs, s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS);',
+    to: '    const seenMs = s.lastSeenMs + VDIFF_KNEE_SEEN_PERSIST_MS; /* MUTANT */',
+    why: 'After a quick restart the last reading is placed after the restart itself, and an unseen pack is carried past the carry.',
+  },
+  {
+    id: 'viii. ★★★ the activity evidence is restored',
+    file: AL,
+    find: '      packSn: s.packSn, lastBalancingMs: null, lastChargeMs: null,',
+    to: '      packSn: s.packSn, lastBalancingMs: s.lastSeenMs, lastChargeMs: s.lastSeenMs, /* MUTANT */',
+    why: 'A mute is carried across the restart: an idle pack at the line is held as "end-of-charge" or "charging".',
+  },
+  {
+    id: 'ix. ★★ a critical-line clock ahead of now is trusted',
+    file: AL,
+    find: '      critSinceMs: s.critSinceMs == null ? null : Math.min(s.critSinceMs, nowMs), belowCritSinceMs: null,',
+    to: '      critSinceMs: s.critSinceMs, belowCritSinceMs: null, /* MUTANT */',
+    why: 'After a clock step the duration bound counts from the future: a balancing-held fault stays silent past 20 minutes.',
+  },
+  {
+    id: 'x. ★★ a session clock ahead of now is trusted',
+    file: AL,
+    find: '      graceFromMs: s.graceFromMs == null ? null : Math.min(s.graceFromMs, nowMs), quietSinceMs: null,',
+    to: '      graceFromMs: s.graceFromMs, quietSinceMs: null, /* MUTANT */',
+    why: 'After a clock step the session bound counts from the future: a fault on alternate readings stays silent.',
+  },
+  {
+    id: 'xi. ★ the restore overwrites a pack the process holds',
+    file: AL,
+    find: '    if (vdiffKneeByKey.has(key)) continue;',
+    to: '    /* MUTANT */',
+    why: 'A second start in one process replaces live clocks with older ones from the file.',
+  },
+  {
+    id: 'xii. ★★ the restored session forgets its pack serial',
+    file: AL,
+    find: '      packSn: s.packSn, lastBalancingMs: null, lastChargeMs: null,',
+    to: '      packSn: null, lastBalancingMs: null, lastChargeMs: null, /* MUTANT */',
+    why: 'A different battery in the slot after the restart inherits the old session.',
+  },
+  /* ── a missing, unreadable or malformed file ─────────────────────────── */
+  {
+    id: 'xiii. ★★★ an entry with no clock is restored (the onset seed is lost)',
+    file: AL,
+    find: '  if (o.critSinceMs == null && o.graceFromMs == null) return null;',
+    to: '  /* MUTANT */',
+    why: 'A restart at minute 21 of a balancing-held fault is silenced again: the empty entry displaces the seed.',
+  },
+  {
+    id: 'xiv. ★★★ non-numeric clocks are restored',
+    file: AL,
+    find: '  if (!isClock(o.critSinceMs) || !isClock(o.graceFromMs)) return null;',
+    to: '  /* MUTANT */',
+    why: 'NaN clocks never come due: both bounds are silently disarmed for that pack.',
+  },
+  {
+    id: 'xv. ★★ the pack serial is not validated',
+    file: AL,
+    find: "  if (!(o.packSn === null || typeof o.packSn === 'string')) return null;",
+    to: '  /* MUTANT */',
+    why: 'A garbage serial reads as a different pack: the clocks are dropped instead of the onset seed applying.',
+  },
+  {
+    id: 'xvi. ★ the last reading is not validated',
+    file: AL,
+    find: "  if (typeof o.lastSeenMs !== 'number' || !Number.isFinite(o.lastSeenMs)) return null;",
+    to: '  /* MUTANT */',
+    why: 'A NaN last reading is never older than the carry: the entry is never dropped.',
+  },
+  {
+    id: 'xvii. ★★★ an unreadable file throws into the monitor\'s start-up',
+    file: AL,
+    find: '    log(`cell spread: knee-session state at ${path} is unreadable (',
+    to: '    throw e; /* MUTANT */ log(`cell spread: knee-session state at ${path} is unreadable (',
+    why: 'A torn or corrupt file stops the alert monitor from starting at all.',
+  },
+  {
+    id: 'xviii. ★★ a sessions record that is not a map is read entry by entry',
+    file: AL,
+    find: "  if (body == null || typeof body !== 'object' || Array.isArray(body)) {",
+    to: '  if (body == null) { /* MUTANT */',
+    why: 'An array or scalar is reported as malformed entries rather than an ignored file.',
+  },
+  /* ── the write: only on change ────────────────────────────────────────── */
+  {
+    id: 'xix. ★★★ the file is written on every tick',
+    file: AL,
+    find: '  if (!changed && Object.keys(onDisk).every((key) => key in next)) return onDisk;',
+    to: '  if (false) return onDisk; /* MUTANT */',
+    why: 'A disk write every 20 s for as long as any pack holds a session.',
+  },
+  {
+    id: 'xx. ★★★ a session that ended stays on file',
+    file: AL,
+    find: '  if (!changed && Object.keys(onDisk).every((key) => key in next)) return onDisk;',
+    to: '  if (!changed) return onDisk; /* MUTANT */',
+    why: 'A session that ended (below 95%, a rest, an outage) is restored by the next process: the next benign knee has no grace.',
+  },
+  {
+    id: 'xxi. ★★★ the last reading is written on every reading',
+    file: AL,
+    find: '    const lastSeenMs = d != null && st.lastSeenMs - d.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS ? d.lastSeenMs : st.lastSeenMs;',
+    to: '    const lastSeenMs = st.lastSeenMs; /* MUTANT */',
+    why: 'Every reading changes the file: a write per tick.',
+  },
+  {
+    id: 'xxii. ★★ the restore\'s bound is written back as a reading',
+    file: AL,
+    find: '    const lastSeenMs = d != null && st.lastSeenMs - d.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS ? d.lastSeenMs : st.lastSeenMs;',
+    to: '    const lastSeenMs = d != null && st.lastSeenMs - d.lastSeenMs < VDIFF_KNEE_SEEN_PERSIST_MS ? d.lastSeenMs : st.lastSeenMs; /* MUTANT */',
+    why: 'Each restart walks a dark pack\'s last reading forward by the grain: its session is never dropped.',
+  },
+  {
+    id: 'xxiii. ★★ packs holding no clock are written',
+    file: AL,
+    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;\n    const d = onDisk[key];',
+    to: '    if (st.lastSeenMs == null) continue; /* MUTANT */\n    const d = onDisk[key];',
+    why: 'Every pack is written, and its reading clock rewrites the file.',
+  },
+  {
+    id: 'xxiv. ★ a failed write is treated as written',
+    file: AL,
+    find: '  } catch {\n    return onDisk;\n  }',
+    to: '  } catch {\n    return next; /* MUTANT */\n  }',
+    why: 'A change lost to a failed write is never retried.',
+  },
+  /* ── (2) a policy mute holds nothing ──────────────────────────────────── */
+  {
+    id: 'xxv. ★★★ the bench-spare stamp leaves mutedBy',
+    file: AL,
+    find: '        delete out[i].mutedBy;',
+    to: '        /* MUTANT */',
+    why: 'A sounded vdiff-crit on a bench spare that also carries a knee mute holds the red and delays the all-clear.',
+  },
+  {
+    id: 'xxvi. ★★★ the roster stamp leaves mutedBy',
+    file: AM,
+    find: '    delete a.mutedBy;',
+    to: '    /* MUTANT */',
+    why: 'An off-panel Core\'s sounded vdiff-crit under a knee mute holds the red and delays the all-clear.',
+  },
+];
+
+/** true = the tests passed; false = they ran and failed. Throws if they could not run. */
+function passes(cmd, args) {
+  try {
+    execFileSync(cmd, args, { cwd: SERVER, stdio: 'ignore' });
+    return true;
+  } catch (e) {
+    if (typeof e?.status === 'number' && e?.signal == null) return false;
+    throw e;
+  }
+}
+const subsetPasses = () => passes('node', ['--import', 'tsx', '--test', ...SUBSET]);
+const fullPasses = () => passes('npm', ['test', '--silent']);
+
+const originals = new Map();
+for (const m of MUTANTS) if (!originals.has(m.file)) originals.set(m.file, readFileSync(m.file, 'utf8'));
+const restoreAll = () => { for (const [f, s] of originals) writeFileSync(f, s); };
+
+for (const [f, s] of originals) {
+  if (s.includes('/* MUTANT')) {
+    console.error(`\nABORT: ${f} already contains a mutant marker — restore it first.`);
+    process.exit(2);
+  }
+}
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { restoreAll(); console.error(`\ninterrupted (${sig}) — tree restored`); process.exit(130); });
+}
+for (const m of MUTANTS) {
+  const hits = originals.get(m.file).split(m.find).length - 1;
+  if (hits !== 1) {
+    console.error(`\nABORT: anchor for "${m.id}" matched ${hits} times, expected exactly 1.`);
+    process.exit(2);
+  }
+}
+if (!subsetPasses()) {
+  console.error('\nABORT: the subset fails on the UNMUTATED tree. Fix the baseline first.');
+  process.exit(2);
+}
+
+let fullBaselineChecked = false;
+let killed = 0;
+const survivors = [];
+console.log(`mutate-v1187-1: ${MUTANTS.length} mutants against ${SUBSET.join(' + ')}\n`);
+
+try {
+  for (const m of MUTANTS) {
+    const original = originals.get(m.file);
+    const mutated = original.replace(m.find, m.to);
+    writeFileSync(m.file, mutated);
+    let died = !subsetPasses();
+    if (!died) {
+      if (!fullBaselineChecked) {
+        writeFileSync(m.file, original);
+        const ok = fullPasses();
+        writeFileSync(m.file, mutated);
+        fullBaselineChecked = true;
+        if (!ok) {
+          console.error('\nABORT: the full suite fails on the UNMUTATED tree, so it cannot count a kill.');
+          restoreAll();
+          process.exit(2);
+        }
+      }
+      died = !fullPasses();
+    }
+    writeFileSync(m.file, original);
+    if (died) { killed++; console.log(`  KILLED   ${m.id}`); }
+    else { survivors.push(m); console.log(`  SURVIVED ${m.id}\n           ↳ ${m.why}`); }
+  }
+} finally {
+  restoreAll();
+}
+
+console.log(`\n${killed}/${MUTANTS.length} mutants killed`);
+if (survivors.length) {
+  console.log('\nSURVIVORS — the suite does not constrain these behaviours:');
+  for (const s of survivors) console.log(`  - ${s.id}\n      ${s.why}`);
+  process.exit(1);
+}
+console.log('post-run: tree restored');

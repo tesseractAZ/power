@@ -751,6 +751,11 @@ export const SOUNDED_VDIFF_ABSENT_HOLD_MS = 7 * 60_000;
  * all-clear). Only the typed bounded mute (`mutedBy`) holds a PRESENT critical — never a policy
  * mute (a bench spare, an off-panel Core), which does not end with the condition. MUTATES
  * `sounded`; pure otherwise. Exported for tests.
+ * v1.187.1 — a policy stamp that takes precedence over a bounded mute now CLEARS `mutedBy` (the
+ * bench-spare stamp in alerts.ts, applyRosterMute in alertMonitor.ts): both used to overwrite
+ * `annunciate` / `muteReason` and leave it set, so a sounded vdiff-crit muted by policy that also
+ * carried a knee mute held the level red and delayed the all-clear. `muteReason` stays diagnostic
+ * only (test/muteReasonLog): this reads `mutedBy`, which names the mute in force.
  */
 export function soundedCriticalHeld(
   alerts: ReadonlyArray<Pick<Alert, 'id' | 'title' | 'fault' | 'severity' | 'mutedBy'>>,

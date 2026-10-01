@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot, type FleetSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions } from './alerts.js';
 import { broadcastHealthAlert, broadcastDegradedAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds, rateFloorIdleHeldSns } from './messageRateFloorAlert.js';
@@ -182,6 +182,10 @@ const silentCriticalLogged = new Set<string>();
  * A critical muted for any OTHER reason (bench spare, off-panel) quiets nothing here. Runs on the
  * main thread over the same tick's computeAlerts + computeLearnedAlerts output. Mutates and
  * returns `alerts`; pure otherwise. Exported for tests.
+ * v1.187.1 — a policy stamp that takes precedence clears `mutedBy`, so a bench spare's critical
+ * (alerts.ts stamps it before this runs) quiets nothing here even while a knee mute also applies.
+ * The roster stamp (applyRosterMute) runs after this, on the assembled list, and mutes the
+ * outlier itself in the same pass: its id carries the same serial.
  */
 export function quietPeerSpreadUnderHeldCritical<T extends Alert>(alerts: T[]): T[] {
   const held = new Map<string, VdiffCritMuteReason>();
@@ -252,6 +256,7 @@ export function shouldDemoteAnnunciation(
  * Core's pack critical raised while balancing was logged as "the BMS is balancing the cells", and
  * nothing re-logged it once balancing stopped and the roster was the only mute left. Never-muted
  * alerts are untouched; `annunciate` changes exactly as shouldDemoteAnnunciation says. MUTATES.
+ * v1.187.1 — the precedence covers `mutedBy` too: a roster-muted critical carries none.
  */
 export function applyRosterMute(a: Alert, mutedSns: readonly string[], mutedSpareSns: readonly string[]): void {
   if (shouldDemoteAnnunciation(a, mutedSns)) {
@@ -259,6 +264,11 @@ export function applyRosterMute(a: Alert, mutedSns: readonly string[], mutedSpar
     a.muteReason = monitorMuteReason(a, mutedSpareSns);
   } else if (a.annunciate === false && !isNeverMutedAlert(a) && mutedSns.some((sn) => a.id.includes(sn))) {
     a.muteReason = monitorMuteReason(a, mutedSpareSns);
+    // v1.187.1 — the roster now holds it, not the bounded cell-spread mute: mutedBy names the mute
+    // in force, and soundedCriticalHeld holds a sounded critical red on it. Left set, an off-panel
+    // Core's knee-muted vdiff-crit held the level red and delayed the all-clear (a policy mute holds
+    // nothing). The branch above never meets one: alerts.ts sets mutedBy only with annunciate:false.
+    delete a.mutedBy;
   }
 }
 
@@ -2267,6 +2277,12 @@ export function startAlertMonitor(
     process.env.IDLE_POOL_STATE_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'idle-pool-state.json');
   restoreIdlePoolFiredDay(loadIdlePoolFiredDay(idlePoolStatePath));
   let idlePoolFiredDayOnDisk = idlePoolFiredDay();
+  // v1.187.1 — the end-of-charge knee sessions survive a restart: each pack's clocks are restored
+  // here, before the first computeAlerts, by the in-process gap rule (alerts.ts
+  // restoreVdiffKneeSessions), and written on each change after it. Main thread, like the knee map.
+  const vdiffKneeStatePath =
+    process.env.VDIFF_KNEE_STATE_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'vdiff-knee-state.json');
+  let vdiffKneeOnDisk = restoreVdiffKneeSessions(vdiffKneeStatePath, Date.now(), log);
   // v1.86.0 — the digest's MATERIAL survives restarts. On 2026-08-17 the
   // 04:30/04:52 deploys destroyed the in-memory quietQueue + overnightResolved,
   // three overnight fires left zero trace, and the empty-queue digest returned
@@ -3106,6 +3122,8 @@ export function startAlertMonitor(
       ...peakGridDrawAlerts(peakDraw, Date.now()),
       ...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0
     ]);
+    // v1.187.1 — the knee sessions computeAlerts just advanced, written only when one changed.
+    vdiffKneeOnDisk = persistVdiffKneeSessions(vdiffKneeStatePath, vdiffKneeOnDisk);
     const liveTail: Alert[] = [
       // v0.83.0 — recorded telemetry blackouts (host power loss / add-on stop /
       // MQTT stall) surfaced as operator push alerts. Reads the recorder's durable
