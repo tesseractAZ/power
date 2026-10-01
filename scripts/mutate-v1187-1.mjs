@@ -219,7 +219,8 @@ const MUTANTS = [
   {
     id: 'xxiii. ★★ packs holding no clock are written',
     file: AL,
-    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;\n    const d = onDisk[key];',
+    // v1.187.2 — the persisted critical-line clock is a local (a seeded, unconfirmed clock is written as none).
+    find: '    if ((critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;\n    const d = onDisk[key];',
     to: '    if (st.lastSeenMs == null) continue; /* MUTANT */\n    const d = onDisk[key];',
     why: 'Every pack is written, and its reading clock rewrites the file.',
   },
@@ -299,8 +300,8 @@ const MUTANTS = [
   {
     id: 'xxxiv. ★★ a serial that arrives later is not written',
     file: AL,
-    find: '    if (d == null || d.packSn !== st.packSn || d.critSinceMs !== st.critSinceMs',
-    to: '    if (d == null || d.critSinceMs !== st.critSinceMs /* MUTANT */',
+    find: '    if (d == null || d.packSn !== st.packSn || d.critSinceMs !== critSinceMs',
+    to: '    if (d == null || d.critSinceMs !== critSinceMs /* MUTANT */',
     why: 'The file keeps a null serial: after a restart a different battery in the slot inherits the session.',
   },
   {
@@ -328,22 +329,23 @@ const MUTANTS = [
   {
     id: 'xxxviii. ★★★ a seen (restored or in-process) clock ends at once under 50 mV',
     file: AL,
-    find: '    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;',
-    to: '    const seededAndUnder = obs.spreadMv < VOL_DIFF_CRIT_MV; /* MUTANT */',
+    // v1.187.2 — re-pointed: the seeded reset is now marked by critSeeded, not by the first reading.
+    find: '    if ((s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    to: '    if ((obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) { /* MUTANT */',
     why: 'As xxxvii: every 45 mV reading restarts the 20-minute bound.',
   },
   {
     id: 'xxxix. ★★ a seeded clock outlives a first reading under 50 mV',
     file: AL,
-    find: '    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;',
-    to: '    const seededAndUnder = false; /* MUTANT */',
+    find: '    if ((s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    to: '    if (((false as boolean) && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) { /* MUTANT */',
     why: 'A day-old onset survives the restart\'s first quiet readings: the next day\'s benign knee inside five minutes sounds the red klaxon.',
   },
   {
     id: 'xl. ★★ a seeded clock ends on any reading under the plateau line',
     file: AL,
-    find: '    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;',
-    to: '    const seededAndUnder = prev?.lastSeenMs == null; /* MUTANT */',
+    find: '    if ((s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    to: '    if (s.critSeeded || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) { /* MUTANT */',
     why: 'A standing critical restarted on a 70 mV reading loses its onset: 20 more minutes of balancing silence below 95%.',
   },
   /* ── (3, log review) only a coherent rest is restored ─────────────────── */

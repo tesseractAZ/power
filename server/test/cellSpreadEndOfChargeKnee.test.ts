@@ -566,18 +566,21 @@ test('★ a gap longer than VDIFF_KNEE_GAP_CARRY_MS drops the old episode (a ret
   assert.equal(back!.mutedBy, 'balancing');
 });
 
-test('★★ a spread that RELAXED under the line for VDIFF_KNEE_RELAX_MS starts a new episode', () => {
+test('★★ a spread that RELAXED under the line for VDIFF_KNEE_RELAX_MS starts a new episode — and (v1.187.2) between 85% and 95% the session still bounds it', () => {
   // On the plateau below the top of charge (93%): a crossing while balancing, then 55-80 mV for
   // 25 minutes (intermittent PV), then a new burst to 92 mV while balancing — a new episode, not
-  // "sustained for 20 minutes"; the balancing mute there is bounded by the episode alone.
+  // "sustained for 20 minutes". Until v1.187.2 the balancing mute there was bounded by the episode
+  // alone, and this burst was muted; the session now runs across the plateau, and the 55-80 mV
+  // readings never rested under 50 mV, so it is 25 minutes old and the burst annunciates — as the
+  // same shape at the top of charge does (next test).
   tickAt(T0, { vd: 95, vmax: 3490, soc: 93, bal: 1, in: 0 });
   for (let t = T0 + TICK_MS; t < T0 + 25 * 60_000; t += TICK_MS) {
     tickAt(t, { vd: 55 + Math.round(25 * Math.abs(Math.sin(t / 97_000))), vmax: 3460, soc: 93, bal: 0, in: 0 });
   }
   const a = tickAt(T0 + 25 * 60_000, { vd: 92, vmax: 3490, soc: 93, bal: 1, in: 0 });
-  assert.equal(a!.annunciate, false, 'a fresh crossing while balancing');
-  assert.equal(a!.mutedBy, 'balancing');
-  assert.doesNotMatch(a!.detail, /First reached the critical line/);
+  assert.notEqual(a!.annunciate, false, 'balancing, but 25 minutes into the session');
+  assert.match(a!.detail, /First reached the critical line above 85% charge 25 minutes ago\./,
+    'the session bound spoke, not the episode clock (the episode restarted)');
 });
 
 test('★★ …at the TOP of charge the same shape annunciates: the balancing mute is bounded by the session, which the 55-80 mV readings never ended', () => {
@@ -751,15 +754,25 @@ test('★★★ a reading gap during a sub-line reading does not re-grant the se
   assert.equal(first.t, 2 * PERIOD, 'the next crossing speaks, gap or not');
 });
 
-test('★★ a NEW top-of-charge session re-earns its graces (the session ends when the pack reads below 95%)', () => {
-  tickAt(T0, { vd: 95, vmax: 3490, soc: 100, bal: 1, in: 0 });
-  tickAt(T0 + TICK_MS, { vd: 60, vmax: 3450, soc: 90, bal: 0, in: 0 }); // discharged below the top
-  for (let t = T0 + 2 * TICK_MS; t < T0 + 30 * 60_000; t += 60_000) tickAt(t, { vd: 30, vmax: 3440, soc: 92, bal: 0, in: 0 });
-  // Charged back up 30 minutes later: a fresh knee in a fresh session.
-  tickAt(T0 + 30 * 60_000, { vd: 95, vmax: 3490, soc: 99, bal: 1, in: 200 });
-  const a = tickAt(T0 + 31 * 60_000, { vd: 95, vmax: 3485, soc: 100, bal: 0, in: 0 });
-  assert.equal(a!.annunciate, false);
-  assert.equal(a!.mutedBy, 'end-of-charge');
+test('★★ a NEW session re-earns its graces (v1.187.2: the session ends when the pack reads below the plateau, 85%, not below 95%)', () => {
+  // A knee at 100%, then the pack on the plateau at 92% with a 60 mV spread for half an hour (under
+  // the plateau line, never a rest under 50 mV), then charged back up to a fresh knee. Read below
+  // 85% in between, it is a new session with its graces; read only at 90-92%, the first session
+  // stands and its bound has lapsed (fail loud, as for a second knee without a rest).
+  for (const [dipSoc, fresh] of [[80, true], [90, false]] as const) {
+    resetVdiffWarnHoldForTesting();
+    tickAt(T0, { vd: 95, vmax: 3490, soc: 100, bal: 1, in: 0 });
+    tickAt(T0 + TICK_MS, { vd: 30, vmax: 3440, soc: dipSoc, bal: 0, in: 0 });
+    for (let t = T0 + 2 * TICK_MS; t < T0 + 30 * 60_000; t += 60_000) tickAt(t, { vd: 60, vmax: 3450, soc: 92, bal: 0, in: 0 });
+    tickAt(T0 + 30 * 60_000, { vd: 95, vmax: 3490, soc: 99, bal: 1, in: 200 });
+    const a = tickAt(T0 + 31 * 60_000, { vd: 95, vmax: 3485, soc: 100, bal: 0, in: 0 })!;
+    if (fresh) {
+      assert.equal(a.annunciate, false, `read at ${dipSoc}%: a new session`);
+      assert.equal(a.mutedBy, 'end-of-charge');
+    } else {
+      assert.notEqual(a.annunciate, false, `read at ${dipSoc}%: still the first session, 31 minutes old`);
+    }
+  }
 });
 
 test('★★ …while a SECOND knee in the same session, without a rest, annunciates past the session bound — balancing or not (fail loud)', () => {
@@ -835,14 +848,25 @@ for (const [phase, hiFirst] of [['the high reading first', true], ['the low read
   });
 }
 
-test('★★ …while at 90% a spread that RELAXED under 50 mV for VDIFF_KNEE_RELAX_MS starts a new episode', () => {
-  // A crossing while balancing, then 30 mV for 18 minutes, then a new crossing 21 minutes after the
-  // first: a new episode (the clock ended 5 minutes into the run), not "first reached 21 minutes ago".
-  for (let t = T0; t < T0 + 3 * 60_000; t += TICK_MS) tickAt(t, { vd: 95, vmax: 3490, soc: 90, bal: 1, in: 0 });
-  for (let t = T0 + 3 * 60_000; t < T0 + 21 * 60_000; t += TICK_MS) tickAt(t, { vd: 30, vmax: 3430, soc: 90, bal: 1, in: 0 });
-  const a = tickAt(T0 + 21 * 60_000, { vd: 95, vmax: 3490, soc: 90, bal: 1, in: 0 });
-  assert.equal(a!.mutedBy, 'balancing', 'a fresh episode after a relaxed run');
-  assert.doesNotMatch(a!.detail, /First reached the critical line/);
+test('★★ …while at 90% a spread that RESTED under 50 mV for VDIFF_KNEE_MAX_MUTE_MS starts a new session; a shorter rest ends only the episode (v1.187.2)', () => {
+  // A crossing while balancing, then 30 mV, then a new crossing while balancing. After 5 minutes
+  // under the line the episode clock ends either way; the session ends only once a rest under
+  // 50 mV has been SEEN for VDIFF_KNEE_MAX_MUTE_MS (the crossing itself breaks it first), on the
+  // plateau as at the top of charge.
+  for (const [rest, loud] of [[18, true], [21, false]] as const) {
+    resetVdiffWarnHoldForTesting();
+    for (let t = T0; t < T0 + 3 * 60_000; t += TICK_MS) tickAt(t, { vd: 95, vmax: 3490, soc: 90, bal: 1, in: 0 });
+    const back = T0 + (3 + rest) * 60_000;
+    for (let t = T0 + 3 * 60_000; t < back; t += TICK_MS) tickAt(t, { vd: 30, vmax: 3430, soc: 90, bal: 1, in: 0 });
+    const a = tickAt(back, { vd: 95, vmax: 3490, soc: 90, bal: 1, in: 0 })!;
+    if (loud) {
+      assert.notEqual(a.annunciate, false, `${rest}-minute rest: a second crossing in the same session, past its bound (fail loud)`);
+      assert.match(a.detail, new RegExp(`First reached the critical line above 85% charge ${3 + rest} minutes ago\\.`));
+    } else {
+      assert.equal(a.mutedBy, 'balancing', `${rest}-minute rest: a new session, muted while balancing`);
+      assert.doesNotMatch(a.detail, /First reached the critical line/);
+    }
+  }
 });
 
 test('advanceVdiffKnee: the session clock (graceFromMs) — start, carry, end', () => {
@@ -862,19 +886,23 @@ test('advanceVdiffKnee: the session clock (graceFromMs) — start, carry, end', 
   assert.equal(s.critSinceMs, 540_000);
   assert.equal(s.graceFromMs, 0, 'the session keeps its first crossing');
   assert.equal(vdiffCritMute(s, obs({}), 540_000), null, 'charging: past the session bound');
-  // An unknown SoC is not evidence the pack left the top (fail loud)…
+  // An unknown SoC is not evidence the pack left the plateau (fail loud)…
   s = advanceVdiffKnee(s, obs({ packSoc: null, spreadMv: 45 }), 580_000);
   assert.equal(s.graceFromMs, 0);
-  // …a reading below the top of charge is.
-  s = advanceVdiffKnee(s, obs({ packSoc: 94, spreadMv: 45 }), 600_000);
+  // …v1.187.2 — nor is a reading below the top of charge but on the plateau…
+  s = advanceVdiffKnee(s, obs({ packSoc: 85, spreadMv: 45 }), 590_000);
+  assert.equal(s.graceFromMs, 0, 'the session runs across the plateau');
+  // …a reading below the plateau is.
+  s = advanceVdiffKnee(s, obs({ packSoc: 84, spreadMv: 45 }), 600_000);
   assert.equal(s.graceFromMs, null);
-  // A crossing that BEGAN lower on the plateau (93%) starts the session from that crossing.
+  // A crossing lower on the plateau (93%) starts the session (v1.187.2; until then the session
+  // started when the pack reached 95%, from that episode's first crossing).
   let p = advanceVdiffKnee(undefined, obs({ packSoc: 93 }), 0);
   assert.equal(p.critSinceMs, 0);
-  assert.equal(p.graceFromMs, null, 'not yet at the top of charge');
+  assert.equal(p.graceFromMs, 0, 'the session starts on the plateau');
   assert.equal(vdiffCritMute(p, obs({ packSoc: 93 }), 0), null, 'below the top: no grace at all');
   p = advanceVdiffKnee(p, obs({ packSoc: 96 }), 180_000);
-  assert.equal(p.graceFromMs, 0, "from the episode's own first crossing, not the tick it reached 95%");
+  assert.equal(p.graceFromMs, 0, 'from the first crossing on the plateau, not the tick it reached 95%');
   assert.equal(vdiffCritMute(p, obs({ packSoc: 96 }), 180_000), 'charging');
   p = advanceVdiffKnee(p, obs({ packSoc: 96 }), VDIFF_KNEE_RELAX_MS);
   assert.equal(vdiffCritMute(p, obs({ packSoc: 96 }), VDIFF_KNEE_RELAX_MS), null, '5 minutes from the first crossing');
@@ -913,21 +941,31 @@ test('advanceVdiffKnee: a REST at the top of charge (quietSinceMs) ends the sess
   assert.equal(s.graceFromMs, t2);
   assert.equal(s.quietSinceMs, null);
   assert.equal(vdiffCritMute(s, obs({}), t2), 'balancing');
-  // A reading below the top of charge clears the rest with the session.
+  // v1.187.2 — the rest runs on the plateau below the top of charge too (85%: kept); a reading
+  // below the plateau clears it with the session.
   fresh = advanceVdiffKnee(undefined, obs({ spreadMv: 10, balancing: false }), 0);
   assert.equal(fresh.quietSinceMs, 0);
-  assert.equal(advanceVdiffKnee(fresh, obs({ packSoc: 90, spreadMv: 10, balancing: false }), 60_000).quietSinceMs, null);
-  // The balancing mute in a top-of-charge session lasts VDIFF_KNEE_MAX_MUTE_MS from the session's
-  // first crossing, whatever the episode clock says (it restarted 10 minutes in, on a dip)…
+  assert.equal(advanceVdiffKnee(fresh, obs({ packSoc: 85, spreadMv: 10, balancing: false }), 60_000).quietSinceMs, 0);
+  assert.equal(advanceVdiffKnee(fresh, obs({ packSoc: 84, spreadMv: 10, balancing: false }), 60_000).quietSinceMs, null);
+  assert.equal(advanceVdiffKnee(undefined, obs({ packSoc: 85, spreadMv: 10, balancing: false }), 0).quietSinceMs, 0, 'started on the plateau');
+  assert.equal(advanceVdiffKnee(undefined, obs({ packSoc: 84, spreadMv: 10, balancing: false }), 0).quietSinceMs, null, 'not below it');
+  // The balancing mute in a session lasts VDIFF_KNEE_MAX_MUTE_MS from the session's first
+  // crossing, whatever the episode clock says (it restarted 10 minutes in, on a dip)…
   const late = { ...s, critSinceMs: t2 + 10 * 60_000 };
   assert.equal(vdiffCritMute(late, obs({}), t2 + VDIFF_KNEE_MAX_MUTE_MS - 1), 'balancing');
   assert.equal(vdiffCritMute(late, obs({}), t2 + VDIFF_KNEE_MAX_MUTE_MS), null, 'session-bound');
   assert.equal(vdiffCritMute(late, obs({ packSoc: null }), t2 + VDIFF_KNEE_MAX_MUTE_MS), null, 'an unknown SoC does not end the session (fail loud)');
-  // …while below the top of charge (the reading ends the session) the episode clock alone bounds it.
-  const below = advanceVdiffKnee(late, obs({ packSoc: 94 }), t2 + VDIFF_KNEE_MAX_MUTE_MS);
+  // …v1.187.2 — below the top of charge on the plateau as well (the reading does not end the
+  // session there)…
+  const plateau = advanceVdiffKnee(late, obs({ packSoc: 94 }), t2 + VDIFF_KNEE_MAX_MUTE_MS);
+  assert.equal(plateau.graceFromMs, t2);
+  assert.equal(vdiffCritMute(plateau, obs({ packSoc: 94 }), t2 + VDIFF_KNEE_MAX_MUTE_MS), null, 'session-bound at 94%');
+  // …while below the plateau the reading ends the session and the episode: only the v0.29.0
+  // balancing mute applies there (under the ceiling).
+  const below = advanceVdiffKnee(late, obs({ packSoc: 84 }), t2 + VDIFF_KNEE_MAX_MUTE_MS);
   assert.equal(below.graceFromMs, null);
-  assert.equal(vdiffCritMute(below, obs({ packSoc: 94 }), t2 + VDIFF_KNEE_MAX_MUTE_MS), 'balancing', 'below the top: the episode bound only');
-  assert.equal(vdiffCritMute(below, obs({ packSoc: 94 }), t2 + 10 * 60_000 + VDIFF_KNEE_MAX_MUTE_MS), null, 'which still applies');
+  assert.equal(below.critSinceMs, null);
+  assert.equal(vdiffCritMute(below, obs({ packSoc: 84 }), t2 + VDIFF_KNEE_MAX_MUTE_MS), 'balancing', 'below the plateau');
 });
 
 test('★★ a rest must be SEEN unbroken: a reading gap during it restarts it (the session, and its bounds, stand)', () => {

@@ -492,27 +492,35 @@ export interface VdiffKneeState {
    *  plateau, or once the spread has stayed below the plateau critical line — under
    *  VOL_DIFF_CRIT_MV included (v1.187.1 log review) — for VDIFF_KNEE_RELAX_MS without a break
    *  (belowCritSinceMs), so a spread hovering on the line or alternating across 50 mV cannot
-   *  restart the clock, and a relaxed one does not carry it. A clock seeded from an onset (never
-   *  seen in this process) is still cleared by a first reading under VOL_DIFF_CRIT_MV. */
+   *  restart the clock, and a relaxed one does not carry it. A clock seeded from an onset and not
+   *  yet confirmed (critSeeded) is still cleared by a reading under VOL_DIFF_CRIT_MV. */
   critSinceMs: number | null;
   /** First tick of the current unbroken run under the plateau critical line (v1.187.1: under
    *  VOL_DIFF_CRIT_MV too) while critSinceMs stands on the plateau. */
   belowCritSinceMs: number | null;
-  /** v1.187.0 (log review) — the TOP-OF-CHARGE SESSION's grace clock: the first critical-line
-   *  crossing (the critSinceMs of the episode then running) seen while the pack is at or above
-   *  VOL_DIFF_PLATEAU_QUIET_SOC_PCT. Unlike critSinceMs it survives the spread falling under
-   *  the line, and is cleared only by a reading below the top of charge (a missing SoC does not
-   *  clear it) or once the pack has rested at the top (quietSinceMs). Carried across a reading gap
-   *  like critSinceMs. Bounds both graces, and at the top of charge the balancing mute. */
+  /** v1.187.0 (log review) — the SESSION's grace clock: the first critical-line crossing (the
+   *  critSinceMs of the episode then running) seen while the pack is on the plateau (v1.187.2:
+   *  at or above VOL_DIFF_PLATEAU_SOC_PCT; until then VOL_DIFF_PLATEAU_QUIET_SOC_PCT). Unlike
+   *  critSinceMs it survives the spread falling under the line, and is cleared only by a reading
+   *  below the plateau (a missing SoC does not clear it) or once the pack has rested there
+   *  (quietSinceMs). Carried across a reading gap like critSinceMs. Bounds the balancing mute at
+   *  any SoC it stands at, and at the top of charge both graces. */
   graceFromMs: number | null;
   /** v1.187.0 (log review) — first tick of the current unbroken run of readings under
-   *  VOL_DIFF_CRIT_MV at the top of charge. A pack that has RESTED this long — VDIFF_KNEE_MAX_MUTE_MS
-   *  — ends its session (graceFromMs), so its next knee earns the graces again. Not carried across
-   *  a reading gap (a rest must be seen). v1.187.1 (review) — persisted, and restored across a
-   *  restart only when the outage is short (restoreVdiffKneeSessions). */
+   *  VOL_DIFF_CRIT_MV on the plateau (v1.187.2; until then at the top of charge only). A pack that
+   *  has RESTED this long — VDIFF_KNEE_MAX_MUTE_MS — ends its session (graceFromMs), so its next
+   *  knee earns the graces again. Not carried across a reading gap (a rest must be seen).
+   *  v1.187.1 (review) — persisted, and restored across a restart only when the outage is short
+   *  (restoreVdiffKneeSessions). */
   quietSinceMs: number | null;
   /** Last tick this pack produced a reading (the VDIFF_KNEE_GAP_CARRY_MS cap). */
   lastSeenMs: number | null;
+  /** v1.187.2 — critSinceMs came from vdiffKneeSeed (a persisted onset, perhaps a day old, never
+   *  seen in this process) and no reading at the critical line has confirmed it yet. While set, a
+   *  reading under VOL_DIFF_CRIT_MV ends the episode at once. Cleared by a reading at or above
+   *  vdiffCritMvFor(packSoc) and whenever critSinceMs is cleared. Never persisted, and a seeded
+   *  clock is not written to the knee-session file while it is set (persistVdiffKneeSessions). */
+  critSeeded: boolean;
 }
 export interface VdiffKneeObservation {
   packSn: string | null;
@@ -558,7 +566,7 @@ export function advanceVdiffKnee(
   const sameHw = prev != null && !(prev.packSn != null && obs.packSn != null && prev.packSn !== obs.packSn);
   const s: VdiffKneeState = sameHw
     ? { ...prev, packSn: obs.packSn ?? prev.packSn, lastSeenMs: nowMs }
-    : { packSn: obs.packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: null, belowCritSinceMs: null, graceFromMs: null, quietSinceMs: null, lastSeenMs: nowMs };
+    : { packSn: obs.packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: null, belowCritSinceMs: null, graceFromMs: null, quietSinceMs: null, lastSeenMs: nowMs, critSeeded: false };
   const topOfCharge = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT;
   const onPlateau = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_SOC_PCT;
   const kneeSpread = obs.spreadMv >= VOL_DIFF_WARN_MV;
@@ -572,43 +580,51 @@ export function advanceVdiffKnee(
   if (!onPlateau) {
     s.critSinceMs = null;
     s.belowCritSinceMs = null;
+    s.critSeeded = false;
   } else if (obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) {
     s.critSinceMs ??= nowMs;
     s.belowCritSinceMs = null;
+    s.critSeeded = false;
   } else if (s.critSinceMs != null) {
     // Under the plateau line: the episode ends only after an unbroken VDIFF_KNEE_RELAX_MS here, so
     // one sub-line reading cannot reset it. v1.187.1 (log review) — under 50 mV too: a reading
-    // under VOL_DIFF_CRIT_MV used to end the episode at once, so between 85% and 95% (no session
-    // runs there) a balancing spread alternating 95 / 45 mV restarted the duration bound on every
-    // low reading and was muted with no limit. A clock SEEDED from a persisted onset (vdiffKneeSeed:
-    // never seen in this process, lastSeenMs null) still ends at once on a reading under 50 mV, as
-    // in v1.187.0 — the onset says only that a critical stood before the restart, perhaps a day
-    // earlier, and kept for five more minutes it made the next day's benign knee annunciate.
+    // under VOL_DIFF_CRIT_MV used to end the episode at once, so a balancing spread alternating
+    // 95 / 45 mV restarted the duration bound on every low reading. A clock SEEDED from a persisted
+    // onset still ends at once on a reading under 50 mV, as in v1.187.0 — the onset says only that
+    // a critical stood before the restart, perhaps a day earlier, and kept for five more minutes it
+    // made the next day's benign knee annunciate. v1.187.2 — on ANY reading under 50 mV until a
+    // reading at the line confirms it (critSeeded), not only on the first after the restart: a
+    // first reading at 50-89 mV kept a day-old onset through the readings under 50 mV after it.
     s.belowCritSinceMs ??= nowMs;
-    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;
-    if (seededAndUnder || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {
+    if ((s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {
       s.critSinceMs = null;
       s.belowCritSinceMs = null;
+      s.critSeeded = false;
     }
   }
   // v1.187.0 (log review) — the session's grace clock (graceFromMs). Started by the first crossing
-  // at the top of charge — from the episode's own first crossing when that began lower on the
-  // plateau — and untouched by the critSinceMs resets above. A pack READ below the top of charge
+  // on the plateau and untouched by the critSinceMs resets above. A pack READ below the plateau
   // ends the session: an unknown SoC is not evidence it left (fail loud).
-  // …and so does a pack that has RESTED at the top of charge: an unbroken VDIFF_KNEE_MAX_MUTE_MS of
+  // …and so does a pack that has RESTED on the plateau: an unbroken VDIFF_KNEE_MAX_MUTE_MS of
   // readings under VOL_DIFF_CRIT_MV (quietSinceMs). A benign pack relaxes to 3-30 mV and can then
   // sit at the top for hours; without the rest, a second benign knee in that stay had no grace
   // and sounded the 09-29 klaxon again. A spread that follows the charge current (95 / 45 mV, or
   // 100 / 45 mV while balancing) is never under 50 mV for 20 minutes, so it keeps its session and
   // its bounds. An unknown SoC neither starts the rest nor ends one it did not break.
-  if (obs.packSoc != null && obs.packSoc < VOL_DIFF_PLATEAU_QUIET_SOC_PCT) {
+  // v1.187.2 — the session runs across the whole plateau (VOL_DIFF_PLATEAU_SOC_PCT), no longer from
+  // the top of charge (VOL_DIFF_PLATEAU_QUIET_SOC_PCT) only. Between 85% and 95% the episode clock
+  // was the balancing mute's only bound, and dips under the line of VDIFF_KNEE_RELAX_MS or more
+  // restart it: a balancing spread at 95 / 45 / 45 mV (a ~180 s BMS cadence), 95 / 45 mV with one
+  // reading missed, or 95 / 70 / 70 mV restarted the 20-minute bound on every crossing and was never
+  // announced. The session bounds them there as at the top of charge, from the first crossing.
+  if (obs.packSoc != null && obs.packSoc < VOL_DIFF_PLATEAU_SOC_PCT) {
     s.graceFromMs = null;
     s.quietSinceMs = null;
   } else {
     if (obs.spreadMv >= VOL_DIFF_CRIT_MV) s.quietSinceMs = null;
-    else if (topOfCharge) s.quietSinceMs ??= nowMs;
+    else if (onPlateau) s.quietSinceMs ??= nowMs;
     if (s.quietSinceMs != null && nowMs - s.quietSinceMs >= VDIFF_KNEE_MAX_MUTE_MS) s.graceFromMs = null;
-    if (topOfCharge && obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= s.critSinceMs ?? nowMs;
+    if (onPlateau && obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= s.critSinceMs ?? nowMs;
   }
   return s;
 }
@@ -636,6 +652,13 @@ export function advanceVdiffKnee(
  * (restoreVdiffKneeSessions — judged by the outage, not by the onset's age, which let a
  * charge-following fault open a new session across a restart). This seed applies to a pack with
  * no persisted entry: a missing, unreadable or malformed file, or an outage longer than the carry.
+ *
+ * v1.187.2 — the seeded critical-line clock is marked (critSeeded) until a reading at the critical
+ * line confirms it, and every reading under 50 mV before that ends it (advanceVdiffKnee). The mark
+ * was the first reading after the restart (lastSeenMs null), so a first reading at 50-89 mV on the
+ * plateau carried a day-old onset through the readings under 50 mV after it for VDIFF_KNEE_RELAX_MS,
+ * and a benign crossing in that window annunciated at once. The seeded SESSION clock is unchanged:
+ * like any session it ends below the plateau or after a rest.
  */
 export function vdiffKneeSeed(onsetMs: number | undefined, packSn: string | null, nowMs: number): VdiffKneeState | undefined {
   if (onsetMs == null || !Number.isFinite(onsetMs)) return undefined;
@@ -643,6 +666,7 @@ export function vdiffKneeSeed(onsetMs: number | undefined, packSn: string | null
   return {
     packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: at, belowCritSinceMs: null,
     graceFromMs: nowMs - at <= VDIFF_KNEE_GAP_CARRY_MS ? at : null, quietSinceMs: null, lastSeenMs: null,
+    critSeeded: true,
   };
 }
 
@@ -659,20 +683,22 @@ export function vdiffCritMute(
 ): VdiffCritMuteReason | null {
   if (obs.spreadMv >= VOL_DIFF_KNEE_HARD_MV) return null;
   if (s.critSinceMs != null && nowMs - s.critSinceMs >= VDIFF_KNEE_MAX_MUTE_MS) return null;
-  // v1.187.0 (log review) — while a top-of-charge SESSION runs (graceFromMs) the BALANCING mute is
-  // bounded by it as well: critSinceMs restarted whenever a reading dipped under 50 mV, so a
-  // balancing spread that alternates 95 / 45 mV was held for hours (v1.187.1: critSinceMs now
-  // survives such dips, and the session still bounds dips long enough to end the episode). A
-  // reading below the top of charge ends the session, so there only critSinceMs bounds it (on the
-  // plateau), as before; a reading with no SoC does not end it (fail loud).
+  // v1.187.0 (log review) — while a SESSION runs (graceFromMs) the BALANCING mute is bounded by it
+  // as well: critSinceMs restarted whenever a reading dipped under 50 mV, so a balancing spread that
+  // alternates 95 / 45 mV was held for hours (v1.187.1: critSinceMs now survives such dips, and the
+  // session still bounds dips long enough to end the episode). v1.187.2 — the session runs across
+  // the whole plateau, so this bound holds between 85% and 95% too, where the episode clock alone
+  // let 95 / 45 / 45 mV go unannounced. A reading below the plateau ends the session; a reading
+  // with no SoC does not (fail loud).
   if (obs.balancing) {
     return s.graceFromMs != null && nowMs - s.graceFromMs >= VDIFF_KNEE_MAX_MUTE_MS ? null : 'balancing';
   }
   const topOfCharge = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT;
   if (!topOfCharge) return null;
-  // v1.187.0 (log review) — both graces are bounded by the top-of-charge SESSION (graceFromMs),
-  // not by the current crossing: a spread whose dips between readings end the episode restarts
-  // critSinceMs, and each crossing used to earn a fresh grace.
+  // v1.187.0 (log review) — both graces are bounded by the SESSION (graceFromMs), not by the
+  // current crossing: a spread whose dips between readings end the episode restarts critSinceMs,
+  // and each crossing used to earn a fresh grace. v1.187.2 — a session that began lower on the
+  // plateau bounds them from that first crossing (fail loud).
   if (s.graceFromMs == null) return null;
   if (s.lastBalancingMs != null && nowMs - s.lastBalancingMs < VDIFF_KNEE_RELAX_MS
     && nowMs - s.graceFromMs < VDIFF_KNEE_MAX_MUTE_MS) return 'end-of-charge';
@@ -839,6 +865,7 @@ export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: s
       graceFromMs: s.graceFromMs == null ? null : Math.min(s.graceFromMs, nowMs),
       quietSinceMs: restCarried && restCoherent ? Math.min(s.quietSinceMs!, nowMs) : null,
       lastSeenMs: seenMs,
+      critSeeded: false,
     });
     restored++;
   }
@@ -855,16 +882,23 @@ export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: s
  * holding a clock are written (the rest carry nothing — computeAlerts' prune drops them too).
  * Returns what is now on disk: `onDisk` again when nothing changed or the write failed (retried on
  * the next tick). Best-effort — never throws into the alarm loop. Main thread only, like the map.
+ *
+ * v1.187.2 — a critical-line clock still SEEDED (critSeeded: from an onset, not yet confirmed by a
+ * reading at the line) is written as none. The restore treats every clock on file as one the process
+ * saw, so a seeded day-old onset written there and restored by a second restart lost its mark, and a
+ * reading under 50 mV no longer ended it. Not written, the next restart seeds it again from the onset
+ * (no entry) or carries only the session clock (graceFromMs <= critSinceMs bounds the same mutes).
  */
 export function persistVdiffKneeSessions(path: string, onDisk: VdiffKneeSessions): VdiffKneeSessions {
   const next: VdiffKneeSessions = {};
   let changed = false;
   for (const [key, st] of vdiffKneeByKey) {
-    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;
+    const critSinceMs = st.critSeeded ? null : st.critSinceMs;
+    if ((critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;
     const d = onDisk[key];
     const lastSeenMs = Math.floor(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS;
-    next[key] = { packSn: st.packSn, critSinceMs: st.critSinceMs, graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs };
-    if (d == null || d.packSn !== st.packSn || d.critSinceMs !== st.critSinceMs || d.graceFromMs !== st.graceFromMs
+    next[key] = { packSn: st.packSn, critSinceMs, graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs };
+    if (d == null || d.packSn !== st.packSn || d.critSinceMs !== critSinceMs || d.graceFromMs !== st.graceFromMs
       || d.quietSinceMs !== st.quietSinceMs || d.lastSeenMs !== lastSeenMs) changed = true;
   }
   if (!changed && Object.keys(onDisk).every((key) => key in next)) return onDisk;
@@ -1672,16 +1706,19 @@ export function computeAlerts(
           const failedToRelax = critMute == null && underCeiling && !sustained && !balancing
             && now - lastKneeActivityMs < VDIFF_KNEE_MAX_MUTE_MS;
           // v1.187.0 (log review) — balancing, under both bounds and still annunciating: only the
-          // top-of-charge SESSION bound speaks there (vdiffCritMute), measured from the session's
-          // first crossing — the episode clock may have restarted after a dip under the line.
+          // SESSION bound speaks there (vdiffCritMute), measured from the session's first crossing —
+          // the episode clock may have restarted after a dip under the line. v1.187.2 — the session
+          // runs across the plateau, so below the top of charge the note names the plateau line.
           const sessionAgeMs = knee.graceFromMs != null ? now - knee.graceFromMs : null;
           const sessionSustained = critMute == null && underCeiling && !sustained && balancing && sessionAgeMs != null;
+          const sessionWhere = packSoc != null && packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT
+            ? 'at this top of charge' : `above ${VOL_DIFF_PLATEAU_SOC_PCT}% charge`;
           // "first reached", not "sustained": the clock survives dips under the line shorter than
           // VDIFF_KNEE_RELAX_MS, so the minutes are the age of the episode, not time on the line.
           const kneeNote = critMute === 'end-of-charge' ? ' End-of-charge cell spread, relaxing.'
             : critMute === 'charging' ? ' Top-of-charge cell spread while charging.'
             : sustained ? ` First reached the critical line ${Math.round(critAgeMs! / 60_000)} minutes ago.`
-            : sessionSustained ? ` First reached the critical line at this top of charge ${Math.round(sessionAgeMs! / 60_000)} minutes ago.`
+            : sessionSustained ? ` First reached the critical line ${sessionWhere} ${Math.round(sessionAgeMs! / 60_000)} minutes ago.`
             : failedToRelax ? ' Did not relax at the top of charge.'
             : '';
           out.push({

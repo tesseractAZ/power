@@ -192,18 +192,21 @@ for (const [label, hi, lo] of FAULTS) {
 
 const PLAT_HI: Reading = { vd: 95, soc: 90, bal: 1, in: 0 };
 const PLAT_LO: Reading = { vd: 45, soc: 90, bal: 1, in: 0 };
+/** Under the plateau line (90 mV) but not under 50 mV. */
+const PLAT_MID: Reading = { vd: 70, soc: 90, bal: 1, in: 0 };
 for (const [label, restartMin] of [['on a 45 mV reading', 33], ['on a 95 mV reading', 36]] as const) {
   test(`★★★ (g) at 90% a balancing 95 / 45 mV fault restarted ${label} stays loud: the file holds its FIRST crossing`, () => {
-    // No session runs below 95%, so the critical-line clock is the balancing mute's only bound. It
-    // used to end on every 45 mV reading, so the file held the latest crossing (a restart on a 95 mV
-    // reading) or nothing (on a 45 mV one) — and the process itself never annunciated.
+    // Until v1.187.2 no session ran below 95%, so the critical-line clock was the balancing mute's
+    // only bound. It used to end on every 45 mV reading, so the file held the latest crossing (a
+    // restart on a 95 mV reading) or nothing (on a 45 mV one) — and the process itself never
+    // annunciated. v1.187.2 — the session runs across the plateau, and the file holds it too.
     const at = (t: number) => (Math.floor(t / READING_MS) % 2 === 0 ? PLAT_HI : PLAT_LO);
     for (let t = 0; t < restartMin * MIN; t += TICK_MS) {
       const a = tick(T0 + t, at(t));
       if (a) assert.equal(a.annunciate !== false, t >= VDIFF_KNEE_MAX_MUTE_MS, `+${t / SEC}s in-process: loud exactly from 20 minutes`);
       if (t >= READING_MS) assert.equal(onFile()[KEY].critSinceMs, T0, `+${t / SEC}s: the clock on file is the first crossing`);
     }
-    assert.equal(onFile()[KEY].graceFromMs, null, 'no top-of-charge session below 95%');
+    assert.equal(onFile()[KEY].graceFromMs, T0, 'v1.187.2: the session runs across the plateau, from the first crossing');
     restart(T0 + restartMin * MIN);
     assert.match(logs.join('\n'), /restored 1 knee session/);
     let loud = 0;
@@ -217,6 +220,75 @@ for (const [label, restartMin] of [['on a 45 mV reading', 33], ['on a 95 mV read
     assert.ok(loud >= 9, 'a whole 95 mV reading after the restart');
   });
 }
+
+/* ── (h) between 85% and 95%, dips long enough to end the episode (v1.187.2) ─────────────────── */
+
+for (const [label, restartMin] of [['on a 45 mV reading', 21], ['on a 95 mV reading', 27]] as const) {
+  test(`★★★ (h) at 90% a balancing hi / lo / lo fault (95 / 45 / 45 mV) restarted ${label} stays loud: the file holds the session's first crossing`, () => {
+    // Each pair of 45 mV readings ends the episode clock, so v1.187.1 restarted the 20-minute bound
+    // on every crossing and the file held the latest one (or nothing): never announced, in-process or
+    // across a restart. The session now runs across the plateau, is written, and bounds it.
+    const at = (t: number) => (Math.floor(t / READING_MS) % 3 === 0 ? PLAT_HI : PLAT_LO);
+    let firstLoud: number | null = null;
+    for (let t = 0; t < restartMin * MIN; t += TICK_MS) {
+      const a = tick(T0 + t, at(t));
+      if (a && a.annunciate !== false && firstLoud == null) firstLoud = t;
+      if (a && firstLoud != null) assert.notEqual(a.annunciate, false, `+${t / SEC}s in-process: muted again`);
+    }
+    assert.equal(firstLoud, VDIFF_KNEE_MAX_MUTE_MS, 'in-process: loud on the reading that spans 20 minutes from the first crossing');
+    assert.equal(onFile()[KEY].graceFromMs, T0, 'the session clock on file is the first crossing');
+    restart(T0 + restartMin * MIN);
+    assert.match(logs.join('\n'), /restored 1 knee session/);
+    let loud = 0;
+    for (let t = restartMin * MIN; t < (restartMin + 10) * MIN; t += TICK_MS) {
+      const a = tick(T0 + t, at(t));
+      if (!a) continue;
+      assert.notEqual(a.annunciate, false, `+${(t - restartMin * MIN) / SEC}s after the restart: muted again`);
+      assert.match(a.detail, /First reached the critical line (above 85% charge )?\d+ minutes ago\./);
+      loud++;
+    }
+    assert.ok(loud >= 9, 'a whole 95 mV reading after the restart');
+  });
+}
+
+/* ── (i) a seeded clock is not written while unconfirmed (v1.187.2) ───────────────────────── */
+
+test('★★★ (i) a day-old seeded clock, not yet confirmed at the line, is not written: a second restart cannot pass it off as one the process saw', () => {
+  // The add-on returns the next day (the knee-session entry dropped: the outage outlasted the carry)
+  // to a day-old onset. Its first reading is 70 mV at 90% — under the plateau line, not under
+  // 50 mV — so the seeded clock stands, unconfirmed. Written to the file, the next restart restored
+  // it as a clock the process had seen: a reading under 50 mV no longer ended it, and a benign
+  // crossing within VDIFF_KNEE_RELAX_MS annunciated at once ("First reached the critical line
+  // 1443 minutes ago."). Unwritten, the second restart starts the pack fresh.
+  for (let t = 0; t <= VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
+  assert.equal(getAlertOnset(CRIT_ID), T0);
+  const day = T0 + 24 * 60 * MIN;
+  restart(day);
+  assert.match(logs.join('\n'), /restored 0 knee session\(s\).*1 dropped/);
+  assert.equal(tick(day, PLAT_MID), undefined, 'under the plateau line');
+  assert.equal(onFile()[KEY], undefined, 'the unconfirmed seed is not on file');
+  restart(day + MIN);
+  for (let t = MIN; t < 3 * MIN; t += TICK_MS) assert.equal(tick(day + t, { vd: 30, soc: 90, bal: 1, in: 0 }), undefined);
+  const knee = tick(day + 3 * MIN, PLAT_HI)!;
+  assert.equal(knee.mutedBy, 'balancing', 'a benign crossing: a new episode, muted while balancing');
+  assert.doesNotMatch(knee.detail, /First reached the critical line/);
+});
+
+test('★★ (i) …a seeded SESSION is written without the unconfirmed critical-line clock, and still bounds the mute after a second restart', () => {
+  // The knee-session file is lost (the fallback): the onset, 25 minutes old, seeds both clocks.
+  for (let t = 0; t <= VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
+  rmSync(KNEE_PATH, { force: true });
+  restart(T0 + 25 * MIN);
+  assert.equal(tick(T0 + 25 * MIN, PLAT_MID), undefined);
+  const s = onFile()[KEY];
+  assert.equal(s.critSinceMs, null, 'the seeded critical-line clock is not written while unconfirmed');
+  assert.equal(s.graceFromMs, T0, 'the seeded session is');
+  restart(T0 + 26 * MIN);
+  assert.equal(tick(T0 + 26 * MIN, { vd: 30, soc: 90, bal: 1, in: 0 }), undefined);
+  const back = tick(T0 + 27 * MIN, PLAT_HI)!;
+  assert.notEqual(back.annunciate, false, 'the session, 27 minutes old, bounds the balancing mute');
+  assert.match(back.detail, /First reached the critical line above 85% charge 27 minutes ago\./);
+});
 
 /* ── (c) the outage, never the onset's age, decides ───────────────────────────────────────── */
 
@@ -562,17 +634,21 @@ test('★★★ (e) the file is written only when a persisted value changes — 
   writeFileSync(KNEE_PATH, SENTINEL);
   for (let t = G + 3 * TICK_MS; t < G + 10 * TICK_MS; t += TICK_MS) tick(T0 + t, BAL_LO);
   assert.equal(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'nothing changed: no write');
-  // The session ends (the pack read below the top of charge): the session clock and the rest are
-  // cleared and written; the critical-line clock still stands (under the line for 160 s)…
+  // The pack reads 90%, on the plateau below the top of charge: v1.187.2 — the session and the
+  // rest run across the plateau, so nothing persisted changes and nothing is written…
   tick(T0 + G + 10 * TICK_MS, { vd: 10, soc: 90, bal: 0, in: 0 });
-  assert.deepEqual(onFile(), { [KEY]: { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: null, quietSinceMs: null, lastSeenMs: T0 + G } });
+  assert.equal(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'the session stands at 90%: no write');
   for (let t = G + 11 * TICK_MS; t < G + 17 * TICK_MS; t += TICK_MS) tick(T0 + t, { vd: 10, soc: 90, bal: 0, in: 0 });
-  assert.equal(onFile()[KEY].critSinceMs, T0);
-  // …until VDIFF_KNEE_RELAX_MS under the line: no clock left, and the entry is removed.
+  assert.equal(onFile()[KEY].critSinceMs, T0, 'the next grain was written (T0 + 2G); the critical-line clock stands');
+  // …until VDIFF_KNEE_RELAX_MS under the line: the critical-line clock ends and is written.
   tick(T0 + G + 17 * TICK_MS, { vd: 10, soc: 90, bal: 0, in: 0 });
+  assert.deepEqual(onFile(), { [KEY]: { packSn: `PACK-${SN}`, critSinceMs: null, graceFromMs: T0, quietSinceMs: T0 + G + 2 * TICK_MS, lastSeenMs: T0 + 2 * G } });
+  // The pack reads below the plateau: the session and the rest end, no clock is left, and the
+  // entry is removed.
+  tick(T0 + G + 18 * TICK_MS, { vd: 10, soc: 84, bal: 0, in: 0 });
   assert.deepEqual(onFile(), {});
   writeFileSync(KNEE_PATH, SENTINEL);
-  for (let t = G + 18 * TICK_MS; t < G + 27 * TICK_MS; t += TICK_MS) tick(T0 + t, { vd: 10, soc: 90, bal: 0, in: 0 });
+  for (let t = G + 19 * TICK_MS; t < G + 27 * TICK_MS; t += TICK_MS) tick(T0 + t, { vd: 10, soc: 84, bal: 0, in: 0 });
   assert.equal(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'no session, nothing to write');
 });
 
