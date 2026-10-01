@@ -5,7 +5,7 @@ import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold, type DpuProjection } from './ecoflow/project.js';
 import { shp2Panels, resolveHousePanel } from './shp2Membership.js';
-import { prunePhantomPacks, freshPackSlotHistory, type PackSlotHistory } from './packPresence.js';
+import { prunePhantomPacks, freshPackSlotHistory, parsePackGhosts, packFrozenPhrase, type PackSlotHistory, type PackGhost } from './packPresence.js';
 import { mpptProducing } from './mppt.js';
 import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceShadowLatch, SHP2_SHADOW_CLEAR_DISTINCT } from './shp2Shadow.js';
 import type { Alert } from './alerts.js';
@@ -163,6 +163,11 @@ export const STREAM_FLOW_WINDOW_MS = 150_000;
 export const PANEL_ABSENT_LISTS = 3;
 /** v1.185.0 — consecutive device lists a lone panel must stand alone before the FIRST pin. */
 export const FIRST_PIN_LISTS = 2;
+/** v1.187.1 (log review) — how often a pack-ghosts.json save that is pending only from an earlier
+ *  FAILURE is retried. The store projects on every MQTT delta (~1 Hz per Core), and a full or
+ *  read-only /data made every projection a synchronous temp-file write and rename on the event loop
+ *  that also evaluates the alarms — exactly while the host was already in trouble. */
+export const PACK_GHOSTS_RETRY_MS = 60_000;
 
 /**
  * v1.181.0 — a Core's content fingerprint: the fields that move with every real reading (power
@@ -191,6 +196,19 @@ export class SnapshotStore extends EventEmitter {
   private packHist: Map<string, PackSlotHistory> = new Map();
   /** v1.172.0 — slots already reported hidden, so the log line fires once per removal. */
   private packHiddenLogged: Set<string> = new Set();
+  /**
+   * v1.187.1 — the ghost slots (packPresence.ts) persisted across restarts, so a removed pack's
+   * frozen slot is hidden on the first projection after a restart instead of ~10 minutes later.
+   * Next to the DB in production (pack-ghosts.json), nowhere elsewhere; PACK_GHOSTS_PATH overrides
+   * ('' disables). Loaded at the first projection; written atomically only when a ghost changes.
+   */
+  private packGhostsPath: string | null = null;
+  /** v1.187.1 — the file's ghosts per Core, until that Core's history is built from them. */
+  private packGhostsOnDisk = new Map<string, Map<number, PackGhost>>();
+  private packGhostsDirty = false;
+  private packGhostsWriteWarned = false;
+  /** v1.187.1 (log review) — the last save attempt (PACK_GHOSTS_RETRY_MS). */
+  private packGhostsLastAttemptMs = -Infinity;
   // MQTT message cache. Different schema from REST (cmdId-routed, bpInfo[].* etc.)
   // Keyed by sn, then by cmdId, value is the flattened param. Plus a "last" alias
   // mapping recent cmdId data into a flat lookup.
@@ -272,15 +290,25 @@ export class SnapshotStore extends EventEmitter {
   private hidePhantomPacks(sn: string, cur: any): void {
     const proj = cur?.projection;
     if (!proj || proj.kind !== 'dpu' || !Array.isArray(proj.packs)) return;
+    if (this.packGhostsPath == null) this.loadPackGhosts();
     let hist = this.packHist.get(sn);
-    if (!hist) { hist = freshPackSlotHistory(); this.packHist.set(sn, hist); }
+    // v1.187.1 — built from the ghosts an earlier process hid on this Core, so an unchanged one is
+    // hidden on this very projection (packPresence.ts).
+    if (!hist) { hist = freshPackSlotHistory(this.packGhostsOnDisk.get(sn)); this.packHist.set(sn, hist); }
     const r = prunePhantomPacks(proj.packs, proj.packCount ?? null, hist, this.now());
+    // v1.187.1 (log review) — a genuine ghost change saves at once; a save pending only from an
+    // earlier failure is retried at most once per PACK_GHOSTS_RETRY_MS (and at once after a clock
+    // step backward, which would otherwise hold it off until the clock caught up).
+    const sinceAttemptMs = this.now() - this.packGhostsLastAttemptMs;
+    if (r.ghostsChanged || (this.packGhostsDirty && (sinceAttemptMs >= PACK_GHOSTS_RETRY_MS || sinceAttemptMs < 0))) this.writePackGhosts();
     const hiddenNow = new Set(r.dropped.map((d) => `${sn}:${d.num}`));
     for (const d of r.dropped) {
       const k = `${sn}:${d.num}`;
       if (this.packHiddenLogged.has(k)) continue;
       this.packHiddenLogged.add(k);
-      this.logger(`packs: ${cur.deviceName ?? sn} reports ${proj.packCount ?? '?'} pack(s); slot ${d.num} has readings frozen since ${new Date(d.frozenSinceMs).toISOString()} (a removed or renumbered pack's old slot) — hiding it`);
+      // v1.187.1 — the time is said as what it is: a first sighting is only a lower bound (v1.172.0
+      // printed the boot instant as "frozen since" for a pack pulled ten days earlier).
+      this.logger(`packs: ${cur.deviceName ?? sn} reports ${proj.packCount ?? '?'} pack(s); slot ${d.num} has ${packFrozenPhrase(d)} (a removed or renumbered pack's old slot) — hiding it`);
     }
     for (const k of [...this.packHiddenLogged]) {
       if (k.startsWith(`${sn}:`) && !hiddenNow.has(k)) {
@@ -293,6 +321,41 @@ export class SnapshotStore extends EventEmitter {
 
   setLogger(log: (msg: string) => void) {
     this.logger = log;
+  }
+
+  /** v1.187.1 — load the persisted ghost slots (absent or corrupt: start without, the v1.172.0
+   *  behaviour; a malformed entry is skipped). */
+  private loadPackGhosts(): void {
+    this.packGhostsPath = process.env.PACK_GHOSTS_PATH
+      ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'pack-ghosts.json') : '');
+    if (!this.packGhostsPath) return;
+    try {
+      this.packGhostsOnDisk = parsePackGhosts(JSON.parse(readFileSync(this.packGhostsPath, 'utf8')));
+    } catch { /* absent or corrupt → no ghosts carried */ }
+  }
+
+  /** v1.187.1 — atomic (temp + rename). Every Core's current ghosts, plus the file's for a Core not
+   *  projected yet in this process (kept, not dropped). A failure is logged once and retried —
+   *  (log review) at most once per PACK_GHOSTS_RETRY_MS while no ghost changes. */
+  private writePackGhosts(): void {
+    const path = this.packGhostsPath;
+    if (!path) return;
+    this.packGhostsLastAttemptMs = this.now();
+    const out: Record<string, Record<number, PackGhost>> = {};
+    for (const [sn, ghosts] of this.packGhostsOnDisk) if (!this.packHist.has(sn)) out[sn] = Object.fromEntries(ghosts);
+    for (const [sn, hist] of this.packHist) if (hist.ghosts.size > 0) out[sn] = Object.fromEntries(hist.ghosts);
+    try {
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, JSON.stringify(out));
+      renameSync(tmp, path);
+      this.packGhostsDirty = false;
+    } catch (e) {
+      this.packGhostsDirty = true;
+      if (!this.packGhostsWriteWarned) {
+        this.packGhostsWriteWarned = true;
+        this.logger(`packs: could not save the hidden pack slots (${(e as Error)?.message ?? e}) — retrying at most once a minute`);
+      }
+    }
   }
 
   get(): FleetSnapshot {

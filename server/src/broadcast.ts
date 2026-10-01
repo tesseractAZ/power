@@ -389,6 +389,12 @@ export function conditionFromAlerts(
       // ~20 s after every restart (2026-09-21 18:23:31, five deploys that day: a device reads
       // stale until its first fresh reading lands) and at stale episodes. Push + card kept.
       !a.id.startsWith('stale-') &&
+      // v1.187.1 — the panel-soiling estimate is maintenance that moves over weeks, never danger:
+      // a push and a card, no chime. What keeps it off the speakers is its `audible: false`
+      // (above, and speakableAlerts); this id exclusion is the second guard, as for
+      // peak-idle-pool below. 2026-09-30 17:03 it was the only counted warning and spoke a
+      // yellow ("Medium priority alarm. Solar system. …") on a curtailment artifact.
+      !a.id.startsWith('soiling-pv') &&
       // v1.187.0 — the on-peak idle-pool notice (peakGridDraw.ts) reports spend, never
       // danger: a [Low] push and a card, and no chime. A yellow for money would be spoken
       // in the tier a grid loss uses. (annunciate:false would drop the push too.)
@@ -751,6 +757,11 @@ export const SOUNDED_VDIFF_ABSENT_HOLD_MS = 7 * 60_000;
  * all-clear). Only the typed bounded mute (`mutedBy`) holds a PRESENT critical — never a policy
  * mute (a bench spare, an off-panel Core), which does not end with the condition. MUTATES
  * `sounded`; pure otherwise. Exported for tests.
+ * v1.187.1 — a policy stamp that takes precedence over a bounded mute now CLEARS `mutedBy` (the
+ * bench-spare stamp in alerts.ts, applyRosterMute in alertMonitor.ts): both used to overwrite
+ * `annunciate` / `muteReason` and leave it set, so a sounded vdiff-crit muted by policy that also
+ * carried a knee mute held the level red and delayed the all-clear. `muteReason` stays diagnostic
+ * only (test/muteReasonLog): this reads `mutedBy`, which names the mute in force.
  */
 export function soundedCriticalHeld(
   alerts: ReadonlyArray<Pick<Alert, 'id' | 'title' | 'fault' | 'severity' | 'mutedBy'>>,
@@ -1229,6 +1240,9 @@ export function startBroadcastMonitor(
     // was waiting to be re-presented: whatever the condition is now, it is decided afresh.
     deescalationHold = null;
     deferredCondition = null;
+    // v1.187.1 — and a pending boot hold: the held condition was adopted, not dropped.
+    bootYellowHold = null;
+    bootRedHold = null;
     if (clearsRedReplayEvidence(l)) redReplayGate.noteConditionGreen();
     // v1.186.0 — every adoption refreshes the condition record, SILENT ones included (quiet
     // hours, the all-clear speech gate, a storm-gated or disabled transition): the next boot's
@@ -2297,6 +2311,16 @@ export function startBroadcastMonitor(
   let warmupYellowSinceMs: number | null = null;
   /** v1.173.2 — the held-yellow log line has been written for this episode. */
   let warmupYellowLogged = false;
+  /**
+   * v1.187.1 — the boot holds' OUTCOME. The hold lines named nothing, and a held condition that
+   * cleared inside its hold was dropped without a line (2026-09-30 06:32:58: a boot yellow was held,
+   * the level went back to green, and only missing lines showed it was never spoken). Each hold now
+   * names what it holds, and a hold that ends below its level says so once, with what it held. A
+   * commit (adoptLevel) ends a pending hold silently: the condition was adopted — spoken, or
+   * silenced by a gate that logs its own line — not dropped.
+   */
+  let bootYellowHold: { sinceMs: number; fps: Set<string> } | null = null;
+  let bootRedHold: { fps: string[] } | null = null;
   /** v1.186.0 — the post-warm-up condition-record reconciliation has run (once per boot). */
   let conditionReconciled = false;
   /** v1.187.0 — the de-escalation dwell's clocks (deescalationDue): since when the observed
@@ -2640,6 +2664,17 @@ export function startBroadcastMonitor(
     // window is re-confirmed across a tick rather than fast-tracked.
     if (level !== 'red') warmupRedSeen = false;
     if (level !== 'yellow') { warmupYellowSinceMs = null; warmupYellowLogged = false; }
+    // v1.187.1 — a red held for its boot confirmation and gone on the next tick: never spoken.
+    if (level !== 'red' && bootRedHold != null) {
+      log(`broadcast: boot red dropped — the level fell to ${level} inside its one-tick confirmation; not spoken (${bootRedHold.fps.map(describeFingerprint).join('; ')})`);
+      bootRedHold = null;
+    }
+    // v1.187.1 — a boot yellow that cleared inside its hold: never spoken. A rise to red is not a
+    // drop (red logs its own hold and transition), so only a fall to green is said.
+    if (level !== 'yellow' && bootYellowHold != null) {
+      if (level === 'green') log(`broadcast: boot yellow dropped after ${Math.round((Date.now() - bootYellowHold.sinceMs) / 1000)} s — cleared inside the hold, not spoken (${[...bootYellowHold.fps].map(describeFingerprint).join('; ')})`);
+      bootYellowHold = null;
+    }
     // v1.187.0 — the de-escalation dwell (deescalationDue). A downward move is held — prevLevel
     // NOT advanced, nothing adopted or spoken — until the lower level has stood for
     // CONDITION_CLEAR_DWELL_MS. A flicker back up inside it is then no transition at all.
@@ -2705,16 +2740,20 @@ export function startBroadcastMonitor(
       warmupYellowSinceMs = Date.now();
     }
     if (holdBootYellow(level === 'yellow' && transitioned, Date.now() - bootMs, warmupYellowSinceMs, Date.now())) {
+      // v1.187.1 — every warning the hold sees, for its outcome line.
+      if (bootYellowHold == null) bootYellowHold = { sinceMs: warmupYellowSinceMs ?? Date.now(), fps: new Set() };
+      for (const f of warningFingerprints) bootYellowHold.fps.add(f);
       // v1.173.2 — one line per held episode, not one per 10 s tick.
       if (!warmupYellowLogged) {
         warmupYellowLogged = true;
-        log(`broadcast: yellow held for boot confirmation (up to ${Math.round(BOOT_YELLOW_CONFIRM_MS / 1000)} s) — startup transients clear on their own`);
+        log(`broadcast: yellow held for boot confirmation (up to ${Math.round(BOOT_YELLOW_CONFIRM_MS / 1000)} s) — startup transients clear on their own (${warningFingerprints.map(describeFingerprint).join('; ')})`);
       }
       return;
     }
     if (holdBootRed(level === 'red' && (transitioned || newCrit), Date.now() - bootMs, warmupRedSeen)) {
       warmupRedSeen = true;
-      log(`broadcast: red held one tick for boot confirmation (warm-up phantom guard)`);
+      bootRedHold = { fps: [...criticalFingerprints] };
+      log(`broadcast: red held one tick for boot confirmation (warm-up phantom guard) (${criticalFingerprints.map(describeFingerprint).join('; ')})`);
       return;
     }
     // v1.64.0 — post-restart RED replay gate. Placed AFTER holdBootRed so only a

@@ -180,6 +180,7 @@ import {
   medianFilter3,
   plannerSizingNeedBuyKwh,
   calibratedLoadBandFactor, calibratedBuyDebiasFactor,
+  buildCostSurplusLoad, costSurplusLedgerColumns,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -2934,6 +2935,8 @@ const surfacedCollapses = new Set<string>();
 // v1.108.0 — night-charge load-band calibration: last logged value (log on change only).
 let lastLoggedLoadBandKey: string | null = null;
 let lastLoggedBuyDebiasKey: string | null = null;
+// v1.187.1 — the cost ceiling's load de-bias: last logged value (log on change only).
+let lastLoggedCostLoadKey: string | null = null;
 /**
  * v1.125.0 — the ISLANDED load, kW: the SHP2's own circuit sum.
  *
@@ -3673,6 +3676,37 @@ async function recomputeNightChargePlan(
   }
   const morningPvSurplusP90Kwh = morningHasData ? round2(morningSurplusKwh) : null;
   const morningPvSurplusP50Kwh = morningHasData && morningP50Complete ? round2(morningSurplusP50Kwh) : null;
+  // v1.187.1 — the cost ceiling's surplus on a DE-BIASED load (buildCostSurplusLoad): the
+  // forecast load ran above the measured load on every readable ledger night of 2026-09-23..29
+  // (load_err_frac −0.29 to −0.43), so the surplus above left too little room and the pool
+  // filled by 13:00 on 09-30 with ~9-12 kWh of PV curtailed. Cost mode only, the same hours as
+  // above, and only where it widens the headroom (the planner's debiasedCostSurplusKwh); the
+  // raw P90 above stays the over-buy flag.
+  const costLoadBuilt = await buildCostSurplusLoad({
+    objectiveMode,
+    nowMs,
+    probHours: window ? (prob?.hours ?? []) : [],
+    loadAt: (ts) => dayAheadByEpoch.get(Math.floor(ts / HOUR_MS)),
+    fromMs: windowEndMs,
+    toMs: morningEndMs,
+    readLedger: (days) => recorder.readNightLedger(days),
+    fetchHourlyLoad: (fromMs, toMs, bucketS) => analytics.query(shp2.sn, 'panel_load', fromMs, toMs, bucketS),
+    hourOf: (ts) => localParts(ts, tariffModel.timezone).hour,
+  });
+  const costSurplusLoad: NightChargeInputDeps['costSurplusLoad'] = costLoadBuilt?.load ?? null;
+  if (costLoadBuilt) {
+    const { load: cl, medianRatio, floored } = costLoadBuilt;
+    const key = `${cl.factor.toFixed(3)}:${cl.samples}:${floored ? 'floor' : 'nofloor'}`;
+    if (key !== lastLoggedCostLoadKey) {
+      lastLoggedCostLoadKey = key;
+      app.log.info(
+        `night-charge: cost-ceiling surplus counts the house load at ×${cl.factor.toFixed(2)} of its forecast `
+        + `(median realized/forecast ${medianRatio?.toFixed(2) ?? '—'} over ${cl.samples} ledger night(s)`
+        + `${floored ? '' : '; no measured hourly floor, so every hour keeps its forecast'}) — cost ceiling only, `
+        + `never past the resilience target nor on a cushion-shortfall night; P50 surplus ${morningPvSurplusP50Kwh ?? '—'} → ${cl.p50Kwh ?? '—'} kWh`,
+      );
+    }
+  }
   // v1.168.0 — the Thursday rule, from the tariff calendar: tonight is a full window and
   // the next full one is more than a day after it (short windows stepped over).
   const nightLongGapAhead = longGapAhead(
@@ -3747,6 +3781,7 @@ async function recomputeNightChargePlan(
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh,
     morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead, prePeakPvSurplusP10Kwh,
+    costSurplusLoad,
     buyDebiasFactor: buyDebiasCal.factor,
     buyDebiasBasis: buyDebiasCal.basis,
     buyDebiasSamples: buyDebiasCal.samples,
@@ -3878,6 +3913,12 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     cost_surplus_basis: plan.costCeilingSurplusBasis ?? null,
     cost_long_gap: plan.longGapAhead == null ? null : (plan.longGapAhead ? 1 : 0),
     cost_ceiling_soc_pct: plan.costCeilingSocPct ?? null,
+    // v1.187.1 (review) — the surplus the ceiling used, the one the forecast load alone gave,
+    // and the load factor and ledger nights between them: cost_ceiling_soc_pct alone cannot
+    // say whether a 72% ceiling was de-biased, nor what the raw one would have been. Written
+    // unconditionally (null in resilience mode), so a re-issued plan never leaves an earlier
+    // plan's figures beside its own.
+    ...costSurplusLedgerColumns(plan),
     // v1.174.0 — `?? null`: a plan snapshot persisted before the upgrade has no such field.
     panel_sample_age_s: extras.panelSampleAgeS ?? null,
     // v1.187.0 — written unconditionally (null when unknown) so a re-issued plan can never

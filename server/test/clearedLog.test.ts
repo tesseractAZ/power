@@ -64,6 +64,26 @@ test('garbage records are dropped; well-formed ones survive', () => {
   assert.deepEqual(back.map((c) => c.alert.id), ['good1', 'good2']);
 });
 
+test('★★★ (v1.187.1 log review) a row whose alert id or severity is not a string is dropped on load', () => {
+  // The full ledger's eviction and warranty-evidence tiers read both on every clear at the cap; a
+  // hand-edited or corrupt row without them threw there on every tick.
+  const mixed = [
+    mkCleared('good1'),
+    { alert: { severity: 'warning' }, raisedAt: 1, clearedAt: 2, durationMs: 1 },               // no id
+    { alert: { id: 42, severity: 'warning' }, raisedAt: 1, clearedAt: 2, durationMs: 1 },       // id not a string
+    { alert: { id: null, severity: 'warning' }, raisedAt: 1, clearedAt: 2, durationMs: 1 },     // id null
+    { alert: { id: 'no-severity' }, raisedAt: 1, clearedAt: 2, durationMs: 1 },                // no severity
+    { alert: { id: 'bad-severity', severity: 3 }, raisedAt: 1, clearedAt: 2, durationMs: 1 },  // severity not a string
+    mkCleared('good2'),
+  ];
+  writeFileSync(p, JSON.stringify(mixed));
+  const back = loadClearedLog(p, 500);
+  assert.deepEqual(back.map((c) => c.alert.id), ['good1', 'good2']);
+  // …and the cap counts only the rows kept.
+  writeFileSync(p, JSON.stringify([mixed[1], mixed[2], mkCleared('k1'), mkCleared('k2')]));
+  assert.deepEqual(loadClearedLog(p, 2).map((c) => c.alert.id), ['k1', 'k2']);
+});
+
 test('a non-array JSON file loads as empty (not a crash)', () => {
   writeFileSync(p, JSON.stringify({ not: 'an array' }));
   assert.deepEqual(loadClearedLog(p, 500), []);

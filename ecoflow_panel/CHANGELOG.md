@@ -1,3 +1,148 @@
+## 1.187.1
+
+### Restart-proof cell alarms, an honest soiling estimate, and a night charge that leaves room for the sun
+
+**Cell-spread alarms across a restart**
+
+- **A restart does not hand a cell-spread fault a new grace.** A pack whose spread follows the
+  charge current crosses the critical line on some readings and not others. After a restart that
+  landed on one of the low readings, the next crossing was treated as the start of a new full
+  charge and could be held quiet for up to 20 more minutes. Each pack's top-of-charge timing is
+  now saved to a small file next to the database and read back at start-up, so after a restart
+  the alarm sounds as it would have without one. A pack that was out of contact for more than an
+  hour starts afresh, as it does without a restart. What counts as balancing or charging is never
+  carried over: it is re-measured from fresh readings. A missing or damaged file is ignored with
+  one line in the log, and the earlier safeguard (counting from when the critical alarm began)
+  still applies. This closes the known limit noted for 1.187.0.
+- **A restart during the quiet spell after a full charge no longer makes the next one sound.** A
+  healthy pack that rests after its end-of-charge peak may peak again later. The rest now carries
+  across a restart when the add-on was down for less than about 10 minutes, so a second healthy
+  peak stays quiet as it would without the restart. After a longer outage the rest has to be seen
+  again for 20 minutes, and a peak inside that time still sounds.
+- **A balancing spread between 85% and 95% charge that dips only briefly now sounds after 20
+  minutes.** Below the top
+  of charge, a critical cell-spread alarm held quiet while the battery balances its cells was
+  limited only by how long the spread had been at the critical line, and any reading under 50 mV
+  restarted that count. A spread that rises and falls with the charge current on alternate
+  readings (95 / 45 mV) was therefore held quiet with no time limit, and the saved timing did not
+  catch it across a restart either. The count now restarts only after the spread has stayed under
+  the critical line for 5 minutes in a row, so such a spread sounds 20 minutes after it first
+  reached the line, before or after a restart. A count recovered only from when the critical
+  alarm began (no saved timing) still ends on a first reading under 50 mV, so a pack that was out
+  of contact overnight does not sound on the next healthy peak. Recorded charges from 23 and 28
+  July and 18, 25 and 29 September give the same alarms as before.
+  Known limit: a spread that stays under the line for 5 minutes or more between crossings (two
+  low readings in a row, or a missed reading) still restarts the count between 85% and 95%, as in
+  1.187.0; this is the next fix.
+- **A damaged saved quiet spell is not trusted.** The saved quiet spell after a peak is read back
+  only when it fits the charge it belongs to: it began after the charge's first critical reading,
+  and less than 20 minutes before the last reading. A damaged value (zero, negative, or earlier
+  than the charge) is ignored and the quiet spell starts over, so it cannot end a charge's limits
+  early.
+- **Fewer writes for the saved timing.** The last-reading time is saved on a 5-minute step that
+  every pack shares, so the file is written about once every 5 minutes at most, however many
+  packs are at the top of charge.
+- **A bench spare or off-panel Core no longer delays the all-clear.** A critical cell-spread alarm
+  that had sounded and was later muted because its Core is a bench spare or not on the panel
+  roster could still hold the speakers at red while the end-of-charge wait ran, delaying the
+  all-clear. The spare and roster mutes now take precedence, as described in the documentation.
+
+**Panel-soiling estimate**
+
+- **Full batteries are not dirty panels.** When a Core's batteries are nearly full it turns its
+  solar input down to what the house is using. The soiling estimate counted those hours as if the
+  panels were producing less, so a run of sunny afternoons with full batteries read as heavy
+  soiling: on 30 September it reported the panels about 48% dirty while they were clean, and the
+  alarm speakers announced it. Hours in which a Core's batteries are within 10 points of their
+  charge limit are now left out of the estimate, Core by Core, and a day that loses most of its
+  sunny hours this way is not used at all. The per-Core breakdown follows the same rule.
+- **Old days no longer decide the verdict.** With those days left out, the "recent" days the
+  estimate compared could be weeks old, from before a rain had washed the panels, and a "wash the
+  panels" suggestion appeared for one Core whose panels were already clean. The estimate now gives
+  a verdict only when at least three of its recent days fall within the last ten days; otherwise
+  the figure is still shown but no alert or wash suggestion is raised. The wash suggestion now
+  follows the same rule as the alert.
+- **Each hour is compared with the sunlight that fell during it.** The weather service reports
+  each hour's sunlight at the end of that hour, and the estimate was reading the previous hour's
+  value, which flattered mornings and penalised afternoons. It now reads the matching value,
+  treats an hour as clear only when the sky was clear at both its start and its end, and waits
+  until the weather data for the hour has been fetched after the hour ended.
+- **The soiling notice is no longer spoken.** It still appears as a card and a phone
+  notification, but it no longer raises the spoken alarm level or appears in an announcement.
+  Cleaning panels is maintenance that can wait.
+
+**Night charge**
+
+- **The house load estimate behind the cost ceiling is corrected.** The night charge leaves room
+  in the battery for the next morning's spare solar. That room was judged against a house-load
+  forecast that ran about a third above the real load on every recent night, so too little room
+  was left.
+  - On 2026-09-29 the plan filled to 77.7%. The battery was full by 1 pm the next day, and about
+    10 kWh of free solar was thrown away that afternoon.
+  - The estimate is now scaled by how far the forecast overshot on recent nights. It is only ever
+    lowered, never raised.
+  - No hour goes below the least the house drew at that hour in the past week.
+  - With fewer than five nights of history, nothing changes.
+  - Rebuilt for the 09-29 night, the ceiling would have been about 73% and about 4.5 kWh less
+    would have been bought. For the 09-30 night it falls from 76.1% to about 71%. The live
+    correction uses up to two weeks of nights, so the first nights after the update may differ
+    a little.
+- **Safety is unchanged.** The correction can only lower the overnight purchase made for cost.
+  - It never lowers the ceiling below the charge the outage reserve needs.
+  - It never applies on a night when the charge cannot fully reach the outage reserve, for
+    example when an expected car charge shares the grid supply. If the car does not come, the
+    battery charges at full rate and stops at the uncorrected ceiling.
+  - The reserve floor, the outage cushion, the runway and all alarms still use the full load
+    forecast.
+  - Nights before a long gap with no cheap window (Thursday) are unchanged.
+- **The correction is visible and recorded.** The night-charge status reports the room left on
+  the uncorrected forecast, the load factor used and the number of nights behind it. The nightly
+  record stores the room used, the uncorrected room, the factor and the night count. When the
+  correction moved the ceiling, the evening plan says so.
+
+**Smaller fixes**
+
+- **A pack with a lower cell spread than its siblings no longer raises a warning.** When packs
+  come off a full charge, the first to settle shows a much smaller spread than the others for a
+  few minutes. That was treated as an outlier and shown as a warning, although it was the
+  best-balanced pack. It is now shown as information only: not pushed, not spoken, and not
+  counted when the system learns which alerts are noisy. A pack with a higher spread than its
+  siblings still warns, as do the fixed cell-spread limits.
+- **A removed pack no longer reappears after every restart.** The empty slot left by a pulled
+  pack was hidden only about ten minutes after each restart, so in the meantime it raised muted
+  alerts, added a line to the warning count in Home Assistant, and wrote stale readings to the
+  history. When the slot repeats the serial of a pack in another slot (the pack was renumbered),
+  it is now remembered in a small file next to the database and hidden from the first reading
+  after a restart. A slot hidden only because the Core counts fewer packs is not remembered: that
+  is also what a pack that has stopped reporting looks like, so it is shown again after a restart,
+  as before. A pack put back in a slot shows at once, as before. The log now says how long the
+  slot's readings have been unchanged, marking a first sighting as "or earlier". If that file
+  cannot be written (a full or read-only disk), the save is retried at most once a minute instead
+  of on every reading from every Core; a change to a hidden slot is still saved at once.
+- **A full alert history drops the right records first.** The cleared-alert history holds 1,500
+  records and drops one for each new one. It now records whether each alert reached the phone and
+  whether it was on screen only because its Core is a bench spare or off the panel. When full, it
+  drops bench-spare and off-panel records older than 30 days first, then noisy alerts that never
+  reached the phone, before alerts that actually alarmed. An off-panel Core's alerts are not taken
+  as having alarmed during the first ticks after a restart, before its off-panel mute takes effect.
+  Records of a confirmed-defective pack, and the records of its Core while it carried that pack,
+  are kept for warranty claims and are dropped after every other warning. Alerts muted while a pack balances or at the top of a charge are kept like any
+  other, so a muted fault can still be found afterwards. A record in the history file with no
+  alert name or severity (a hand-edited or damaged file) is dropped when the file is read; such a
+  record could make alert checking fail on every new record once the history was full.
+- **Removing a warranty pack's record is logged properly.** When a confirmed-defective pack has
+  left the fleet and its record is retired, the log line now has a time and a warning level, and
+  names the pack, its Core and slot, and when it was confirmed. A damaged record file can no
+  longer stop alert checking when that line is written, or while the pack's alert is shown.
+- **The start-up hold says what it held.** After a restart a new yellow or red is held briefly to
+  rule out start-up glitches. The log now names the alerts held and, when the condition clears
+  inside the hold, says it was dropped and not spoken.
+- **No made-up duration for a device that has not reported.** A device that has sent nothing since
+  the add-on started was described as "offline for over 30 minutes, lost its cloud connection,
+  usually recovers", even seconds after start-up. It now says the device has not reported since
+  the add-on started, how long it has been listed offline, and that the cause is not known. A
+  device whose only traffic was an online or offline status message is treated the same way.
+
 ## 1.187.0
 
 ### Alarms stay trustworthy at the top of a charge; the night-charge record adds up
