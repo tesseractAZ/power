@@ -345,6 +345,37 @@ test('★★ a cost-mode HOLD reports the same headroom fields', () => {
   assert.equal(p.costSurplusLoadFactor, 0.762);
 });
 
+test('★★★ SWEEP: the de-bias never raises a ceiling, a target or a buy, and never moves the resilience side', () => {
+  let lowered = 0;
+  for (const socNowPct of [20, 40, 60, 74, 90]) {
+    for (const islandedLoadKw of [1.5, 4, 10]) {
+      for (const errs of [[-0.4], [-0.3, -0.35, -0.3, -0.32, -0.4], [-0.2, -0.3, -0.25, -0.3, -0.35, -0.3, -0.28, -0.31, -0.3, -0.33], [0.1, 0.2, 0.05, 0.15, 0.1]]) {
+        for (const floor of [FLOOR_W, LOAD_W, P50_W.map(() => null)]) {
+          for (const p50 of [true, false]) {
+            const base = { socNowPct, islandedLoadKw, ...(p50 ? {} : { morningPvSurplusP50Kwh: null }) };
+            const a = plan(base);
+            const b = plan({ ...base, costSurplusLoad: surplusLoad(errs.map((e) => ({ load_err_frac: e })), hours0929(floor)) });
+            const tag = `soc ${socNowPct} island ${islandedLoadKw} n ${errs.length} p50 ${p50}`;
+            assert.ok(b.costCeilingSocPct <= a.costCeilingSocPct + 1e-9, `ceiling ${tag}`);
+            assert.ok(b.targetSocPct <= a.targetSocPct + 1e-9, `target ${tag}`);
+            assert.ok(b.buyKwh <= a.buyKwh + 1e-9, `buy ${tag}`);
+            assert.equal(b.requiredExtraKwh, a.requiredExtraKwh, `requirement ${tag}`);
+            assert.equal(b.cushionKwh, a.cushionKwh, `cushion ${tag}`);
+            assert.equal(b.cushionShortfall, a.cushionShortfall, `shortfall ${tag}`);
+            assert.equal(b.minProjSocPct, a.minProjSocPct, `trough ${tag}`);
+            // The setpoint is max(cost target, resilience requirement): where the requirement set
+            // it, it is unchanged; elsewhere it follows the (lower) cost target.
+            if (a.setpointSocPct > a.targetSocPct + 0.05) assert.equal(b.setpointSocPct, a.setpointSocPct, `setpoint ${tag}`);
+            assert.ok(b.setpointSocPct >= b.targetSocPct && b.setpointSocPct <= a.setpointSocPct + 1e-9, `setpoint ${tag}`);
+            if (b.costCeilingSocPct < a.costCeilingSocPct) lowered++;
+          }
+        }
+      }
+    }
+  }
+  assert.ok(lowered > 20, `the sweep exercises the change (${lowered} lowered ceilings)`);
+});
+
 /* ══ integration pins (index.ts has no seam a unit test can drive) ════════ */
 
 const INDEX = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8')

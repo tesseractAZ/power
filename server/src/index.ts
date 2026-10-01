@@ -3703,13 +3703,14 @@ async function recomputeNightChargePlan(
       costLoadCal.factor,
     );
     costSurplusLoad = { factor: costLoadCal.factor, basis: costLoadCal.basis, samples: costLoadCal.samples, ...deb };
-    const key = `${costLoadCal.factor.toFixed(3)}:${costLoadCal.samples}:${floorByHour ? 'floor' : 'nofloor'}`;
+    const floored = floorByHour?.some((v) => v != null) === true;
+    const key = `${costLoadCal.factor.toFixed(3)}:${costLoadCal.samples}:${floored ? 'floor' : 'nofloor'}`;
     if (key !== lastLoggedCostLoadKey) {
       lastLoggedCostLoadKey = key;
       app.log.info(
         `night-charge: cost-ceiling surplus counts the house load at ×${costLoadCal.factor.toFixed(2)} of its forecast `
         + `(median realized/forecast ${costLoadCal.medianRatio?.toFixed(2) ?? '—'} over ${costLoadCal.samples} ledger night(s)`
-        + `${floorByHour ? '' : '; no measured hourly floor, so every hour keeps its forecast'}) — cost ceiling only, `
+        + `${floored ? '' : '; no measured hourly floor, so every hour keeps its forecast'}) — cost ceiling only, `
         + `never past the resilience target; P50 surplus ${morningPvSurplusP50Kwh ?? '—'} → ${deb.p50Kwh ?? '—'} kWh`,
       );
     }
