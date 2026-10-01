@@ -622,6 +622,17 @@ export interface NightLedgerRow {
   cost_ceiling_soc_pct: number | null;
   /** v1.174.0 — age of the panel reading the plan was sized on, seconds. */
   panel_sample_age_s: number | null;
+  /** v1.187.1 — the morning surplus the cost ceiling left room for (plan
+   *  costCeilingSurplusKwh), and the one the forecast load alone gave
+   *  (costCeilingSurplusRawKwh). Equal when the load de-bias did not widen the headroom.
+   *  NULL in resilience mode and on rows written before v1.187.1. */
+  cost_surplus_kwh: number | null;
+  cost_surplus_raw_kwh: number | null;
+  /** v1.187.1 — the ledger load factor the de-biased surplus was computed on, and the
+   *  ledger nights behind it. NULL when none was supplied (resilience mode, a long-gap
+   *  night, under five nights, a load at/above forecast) and before v1.187.1. */
+  cost_surplus_load_factor: number | null;
+  cost_surplus_load_samples: number | null;
 
   // ── SCORE (NULL until scored) ──
   pv_err_frac: number | null;
@@ -710,6 +721,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'arm_disposition', 'cost_ceiling_basis',
   // v1.187.0 — the on-peak span actually measured, and the PV verdict's fleet check.
   'onpeak_start_ms', 'onpeak_end_ms', 'onpeak_basis', 'pv_model_sns', 'pv_verdict_set_aside',
+  // v1.187.1 — the cost ceiling's surplus, raw and used, and the load de-bias between them.
+  'cost_surplus_kwh', 'cost_surplus_raw_kwh', 'cost_surplus_load_factor', 'cost_surplus_load_samples',
   // v1.187.0 — when the reserve restore landed: the end of the delivered-energy span.
   'actuation_reverted_at_ms',
 ];
@@ -940,6 +953,9 @@ export function createRecorder(
     'pv_model_sns TEXT', 'pv_verdict_set_aside TEXT',
     // v1.187.0 — see NightLedgerRow.actuation_reverted_at_ms.
     'actuation_reverted_at_ms INTEGER',
+    // v1.187.1 — see NightLedgerRow.cost_surplus_kwh.
+    'cost_surplus_kwh REAL', 'cost_surplus_raw_kwh REAL', 'cost_surplus_load_factor REAL',
+    'cost_surplus_load_samples INTEGER',
   ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);

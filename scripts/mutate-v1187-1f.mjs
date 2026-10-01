@@ -4,16 +4,19 @@
  * the cost ceiling's morning surplus on a DE-BIASED load.
  *
  * The cost ceiling leaves room for Σ max(0, P50 PV − forecast load) over window close → +14 h.
- * The forecast load ran above the measured load on every ledger night of 2026-09-22..28
- * (load_err_frac −0.26 to −0.43), so the 09-29 ceiling of 77.7% bought ~18.9 kWh that the next
+ * The forecast load ran above the measured load on every readable ledger night of 2026-09-23..29
+ * (load_err_frac −0.29 to −0.43), so the 09-29 ceiling of 77.7% bought ~18.9 kWh that the next
  * day's sun would have supplied: the pool was full by 13:00 on 09-30 and ~9-12 kWh of PV was
  * curtailed. The surplus the ceiling uses is now computed on the load scaled by the ledger's
  * median realized/forecast ratio (costSurplusLoadFactor: shrink-only, 1 under five nights,
  * ramped in to ten, bounded at 0.6), each hour floored at the least the house drew in that
  * clock hour over the trailing week (measuredHourlyLoadFloorW, costSurplusLoadW; the EV block
- * kept whole), and used only where it is wider than the raw surplus and never past the
- * resilience lift (debiasedCostSurplusKwh). Cost mode only; long-gap nights untouched.
- * Mutants i-xxxvii.
+ * kept whole), and used only where it is wider than the raw surplus, never past the resilience
+ * lift, and never on a cushion-shortfall night (debiasedCostSurplusKwh and its caller). Cost
+ * mode only; long-gap nights untouched. Review: index.ts's inline block is now
+ * buildCostSurplusLoad (its gates and fallbacks driven by tests, one call-site pin left), and the
+ * ledger records the surplus used and raw with the factor (costSurplusLedgerColumns).
+ * Mutants i-liii.
  *
  *   node scripts/mutate-v1187-1f.mjs
  *
@@ -29,9 +32,11 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const NCA = resolve(SERVER, 'src/nightChargeAdvisor.ts');
 const IDX = resolve(SERVER, 'src/index.ts');
+const REC = resolve(SERVER, 'src/recorder.ts');
 
 const SUBSET = [
   'test/costCeilingLoadDebias.test.ts',
+  'test/ledgerCostSurplus.test.ts',
   'test/longGapCeiling.test.ts',
   'test/thursdayHeadroom.test.ts',
   'test/costObjective.test.ts',
@@ -194,15 +199,15 @@ const MUTANTS = [
   {
     id: 'xxii. ★★★ the P50 basis reads the de-biased P90',
     file: NCA,
-    find: "    debiasedKwh: costSurplusBasis === 'p50' ? costLoad?.p50Kwh : costSurplusBasis === 'p90' ? costLoad?.p90Kwh : null,",
-    to: "    debiasedKwh: costSurplusBasis === 'p50' ? costLoad?.p90Kwh : costSurplusBasis === 'p90' ? costLoad?.p90Kwh : null, /* MUTANT */",
+    find: "      : costSurplusBasis === 'p50' ? costLoad?.p50Kwh : costSurplusBasis === 'p90' ? costLoad?.p90Kwh : null,",
+    to: "      : costSurplusBasis === 'p50' ? costLoad?.p90Kwh : costSurplusBasis === 'p90' ? costLoad?.p90Kwh : null, /* MUTANT */",
     why: 'The median ceiling leaves room for the best-case sun.',
   },
   {
     id: 'xxiii. ★★★ the P90 stand-in is not de-biased',
     file: NCA,
-    find: "    debiasedKwh: costSurplusBasis === 'p50' ? costLoad?.p50Kwh : costSurplusBasis === 'p90' ? costLoad?.p90Kwh : null,",
-    to: "    debiasedKwh: costSurplusBasis === 'p50' ? costLoad?.p50Kwh : null, /* MUTANT */",
+    find: "      : costSurplusBasis === 'p50' ? costLoad?.p50Kwh : costSurplusBasis === 'p90' ? costLoad?.p90Kwh : null,",
+    to: "      : costSurplusBasis === 'p50' ? costLoad?.p50Kwh : null, /* MUTANT */",
     why: 'A night whose P50 is unknown keeps the biased stand-in.',
   },
   {
@@ -268,41 +273,154 @@ const MUTANTS = [
     to: '    /* MUTANT */\n',
     why: 'Every cost night reads "×1 of its forecast": a few-sample night is no longer today\'s night.',
   },
-  /* ── index.ts (no seam a unit test can drive: source pins) ────────────── */
+  /* ── index.ts's builder, buildCostSurplusLoad (review: behaviour, not pins) ── */
   {
     id: 'xxxiii. ★★★ index.ts never passes the de-biased surplus',
     file: IDX,
     find: '    morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead, prePeakPvSurplusP10Kwh,\n    costSurplusLoad,\n',
     to: '    morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead, prePeakPvSurplusP10Kwh, /* MUTANT */\n',
-    why: 'The live planner keeps the biased ceiling while every unit test passes.',
+    why: 'The live planner keeps the biased ceiling while every unit test passes (the one call-site pin).',
   },
   {
-    id: 'xxxiv. ★★★ index.ts drops the EV block from the hours',
-    file: IDX,
-    find: '      morningHours.push({ ts: pb.ts, p50W: pb.p50W, p90W: pb.p90W, loadW: fh.forecastLoadW, evW: fh.predictedEvLoadW ?? 0 });',
-    to: '      morningHours.push({ ts: pb.ts, p50W: pb.p50W, p90W: pb.p90W, loadW: fh.forecastLoadW, evW: 0 }); /* MUTANT */',
+    id: 'xxxiv. ★★★ the builder drops the EV block from the hours',
+    file: NCA,
+    find: '    hours.push({ ts: pb.ts, p50W: pb.p50W, p90W: pb.p90W, loadW: fh.forecastLoadW, evW: fh.predictedEvLoadW ?? 0 });',
+    to: '    hours.push({ ts: pb.ts, p50W: pb.p50W, p90W: pb.p90W, loadW: fh.forecastLoadW, evW: 0 }); /* MUTANT */',
     why: 'A predicted morning session is de-biased with the house.',
   },
   {
-    id: 'xxxv. ★★★ index.ts attaches no floor',
-    file: IDX,
-    find: '      morningHours.map((h) => ({ ...h, floorW: floorByHour ? floorByHour[localParts(h.ts, tz).hour] : null })),',
-    to: '      morningHours.map((h) => ({ ...h, floorW: null })), /* MUTANT */',
+    id: 'xxxv. ★★★ the builder attaches no floor',
+    file: NCA,
+    find: '    hours.map((h) => ({ ...h, floorW: floorByHour ? floorByHour[o.hourOf(h.ts)] : null })),',
+    to: '    hours.map((h) => ({ ...h, floorW: null })), /* MUTANT */',
     why: 'The de-bias never applies live (every hour lacks a floor).',
   },
   {
-    id: 'xxxvi. ★★ index.ts reads the floor from the wrong span',
-    file: IDX,
-    find: "      .query(shp2.sn, 'panel_load', nowMs - COST_SURPLUS_FLOOR_DAYS * 24 * HOUR_MS, nowMs, 3600)",
-    to: "      .query(shp2.sn, 'panel_load', nowMs - 24 * HOUR_MS, nowMs, 3600) /* MUTANT */",
+    id: 'xxxvi. ★★ the builder reads the floor from the wrong span',
+    file: NCA,
+    find: '    pts = await o.fetchHourlyLoad(o.nowMs - COST_SURPLUS_FLOOR_DAYS * 24 * 3_600_000, o.nowMs, 3600);',
+    to: '    pts = await o.fetchHourlyLoad(o.nowMs - 24 * 3_600_000, o.nowMs, 3600); /* MUTANT */',
     why: 'One day of history: no hour reaches four days, so no floor and no de-bias.',
   },
   {
-    id: 'xxxvii. ★★ index.ts reads the ledger over its whole life',
-    file: IDX,
-    find: '    (() => { try { return recorder.readNightLedger(COST_SURPLUS_LOAD_LOOKBACK_DAYS); } catch { return []; } })(),',
-    to: '    (() => { try { return recorder.readNightLedger(120); } catch { return []; } })(), /* MUTANT */',
+    id: 'xxxvii. ★★ the builder reads the ledger over its whole life',
+    file: NCA,
+    find: '  try { rows = o.readLedger(COST_SURPLUS_LOAD_LOOKBACK_DAYS); } catch { rows = []; }',
+    to: '  try { rows = o.readLedger(120); } catch { rows = []; } /* MUTANT */',
     why: 'Summer nights set the autumn factor: the bias the load curve has lost is still corrected.',
+  },
+  {
+    id: 'xxxviii. ★★★ (review) a cushion-shortfall night is de-biased',
+    file: NCA,
+    find: '    debiasedKwh: cushionShortfall ? null\n',
+    to: '    debiasedKwh: false /* MUTANT */ ? null\n',
+    why: 'Bounded only by the derated arrival, the force-charge stop falls under the cushion line the raw stop cleared (77.7% → 72.8% against a 73.71% line).',
+  },
+  {
+    id: 'xxxix. ★★★ the builder runs in resilience mode',
+    file: NCA,
+    find: "  if (o.objectiveMode !== 'cost') return null;",
+    to: '  /* MUTANT */',
+    why: 'A resilience night reads the ledger and the week of load, and reports a de-bias it never uses.',
+  },
+  {
+    id: 'xl. ★★★ the builder hands over a factor-1 surplus',
+    file: NCA,
+    find: '  if (!(cal.factor < 1)) return null;',
+    to: '  /* MUTANT */',
+    why: 'A few-sample or high-load night queries the analytics worker and reports a factor of 1: not today\'s night.',
+  },
+  {
+    id: 'xli. ★★★ a ledger read that throws breaks the evening plan',
+    file: NCA,
+    find: '  try { rows = o.readLedger(COST_SURPLUS_LOAD_LOOKBACK_DAYS); } catch { rows = []; }',
+    to: '  rows = o.readLedger(COST_SURPLUS_LOAD_LOOKBACK_DAYS); /* MUTANT */',
+    why: 'A busy database rejects the whole recompute: no plan at all for a cost refinement.',
+  },
+  {
+    id: 'xlii. ★★★ a failed load query breaks the evening plan',
+    file: NCA,
+    find: '  } catch { pts = null; }',
+    to: '  } finally { /* MUTANT */ }',
+    why: 'An analytics-worker timeout rejects the whole recompute instead of leaving every hour on its forecast.',
+  },
+  {
+    id: 'xliii. ★★★ the floor is read on the UTC hour',
+    file: NCA,
+    find: '    hours.map((h) => ({ ...h, floorW: floorByHour ? floorByHour[o.hourOf(h.ts)] : null })),',
+    to: '    hours.map((h) => ({ ...h, floorW: floorByHour ? floorByHour[new Date(h.ts).getUTCHours()] : null })), /* MUTANT */',
+    why: 'Each morning hour takes the floor of a clock hour seven hours away.',
+  },
+  {
+    id: 'xliv. ★★ the builder sums hours past the morning',
+    file: NCA,
+    find: '    if (pb.ts < o.fromMs || pb.ts >= o.toMs) continue;',
+    to: '    if (pb.ts < o.fromMs) continue; /* MUTANT */',
+    why: 'The de-biased surplus covers more hours than the raw one: a wider headroom from the afternoon.',
+  },
+  {
+    id: 'xlv. ★★ an hour with no day-ahead load crashes the builder',
+    file: NCA,
+    find: '    const fh = o.loadAt(pb.ts);\n    if (!fh) continue;\n',
+    to: '    const fh = o.loadAt(pb.ts);\n    /* MUTANT */\n',
+    why: 'An hour the day-ahead forecast does not cover rejects the recompute.',
+  },
+  {
+    id: 'xlvi. ★★ no morning hour still builds',
+    file: NCA,
+    find: '  if (hours.length === 0) return null;',
+    to: '  /* MUTANT */',
+    why: 'A night with no band over the morning queries the worker and hands over null sums.',
+  },
+  {
+    id: 'xlvii. ★ the log says floored when no hour has a floor',
+    file: NCA,
+    find: '    floored: floorByHour?.some((v) => v != null) === true,',
+    to: '    floored: floorByHour != null, /* MUTANT */',
+    why: 'The log line hides that every hour kept its forecast.',
+  },
+  /* ── the ledger's record (review) ─────────────────────────────────────── */
+  {
+    id: 'xlviii. ★★★ the columns drop out of the ledger allowlist (SILENT)',
+    file: REC,
+    find: "  // v1.187.1 — the cost ceiling's surplus, raw and used, and the load de-bias between them.\n  'cost_surplus_kwh', 'cost_surplus_raw_kwh', 'cost_surplus_load_factor', 'cost_surplus_load_samples',\n",
+    to: '  /* MUTANT */\n',
+    why: 'The upsert ignores unknown columns: the record vanishes with no error.',
+  },
+  {
+    id: 'xlix. ★★ the columns are never migrated',
+    file: REC,
+    find: "    // v1.187.1 — see NightLedgerRow.cost_surplus_kwh.\n    'cost_surplus_kwh REAL', 'cost_surplus_raw_kwh REAL', 'cost_surplus_load_factor REAL',\n    'cost_surplus_load_samples INTEGER',\n",
+    to: '    /* MUTANT */\n',
+    why: 'Every existing database lacks the columns and the plan row write fails.',
+  },
+  {
+    id: 'l. ★★ the ledger records the used surplus as the raw one',
+    file: NCA,
+    find: '    cost_surplus_raw_kwh: plan.costCeilingSurplusRawKwh ?? null,',
+    to: '    cost_surplus_raw_kwh: plan.costCeilingSurplusKwh ?? null, /* MUTANT */',
+    why: 'A de-biased row reads as raw: what the old ceiling would have been is lost.',
+  },
+  {
+    id: 'li. ★★ the ledger records the raw surplus as the one used',
+    file: NCA,
+    find: '    cost_surplus_kwh: plan.costCeilingSurplusKwh ?? null,',
+    to: '    cost_surplus_kwh: plan.costCeilingSurplusRawKwh ?? null, /* MUTANT */',
+    why: 'The headroom the ceiling actually left is never recorded.',
+  },
+  {
+    id: 'lii. ★★ the ledger drops the factor',
+    file: NCA,
+    find: '    cost_surplus_load_factor: plan.costSurplusLoadFactor ?? null,',
+    to: '    cost_surplus_load_factor: null, /* MUTANT */',
+    why: 'A row cannot say which load factor moved its ceiling.',
+  },
+  {
+    id: 'liii. ★★ recordNightPlanRow never writes them',
+    file: IDX,
+    find: '    ...costSurplusLedgerColumns(plan),\n',
+    to: '    /* MUTANT */\n',
+    why: 'The columns exist and stay NULL on every row (the one call-site pin).',
   },
 ];
 
