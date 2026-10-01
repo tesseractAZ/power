@@ -167,8 +167,8 @@ const MUTANTS = [
   {
     id: 'xviii. R4: the retirement log line is dropped',
     file: LATCH,
-    find: '      retireWarn(defectivePackRetiredLine(rec, hostEvaluable));',
-    to: '      /* MUTANT */',
+    find: '        retireWarn(defectivePackRetiredLine(rec, hostEvaluable));',
+    to: '        /* MUTANT */',
     why: 'A warranty diagnosis destroyed with zero breadcrumb — which is why this had to be settled by code reading rather than by looking.',
   },
 ];
