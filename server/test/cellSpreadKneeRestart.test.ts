@@ -199,6 +199,27 @@ test('★★ (v1.187.2) …while a seeded clock CONFIRMED by a reading at the li
   assert.match(again.detail, /First reached the critical line 183 minutes ago\./);
 });
 
+test('★★★ (v1.187.2) a critical STILL standing after an outage longer than the carry starts its session from its onset: hi / lo / lo at 90% stays loud', () => {
+  // (The review of this release.) The seed carries the critical-line clock only (the onset is three
+  // hours old); the first reading back is at the line, which confirms it and starts the session from
+  // it (graceFromMs ??= critSinceMs). The fault then dips under the line for 6 minutes between
+  // crossings, which ends the episode each time: started from the confirming tick instead, the
+  // session muted the next crossings for about 5 minutes.
+  for (let t = 0; t <= 21 * MIN; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
+  assert.equal(getAlertOnset(CRIT_ID), T0);
+  restart();
+  const back = T0 + 3 * 60 * MIN;
+  let crit = 0;
+  for (let t = 0; t < 60 * MIN; t += TICK_MS) {
+    const hi = Math.floor(t / (3 * MIN)) % 3 === 0;
+    const a = tick(back + t, { vd: hi ? 110 : 45, soc: 90, bal: 1, in: 0 });
+    if (!a) continue;
+    crit++;
+    assert.notEqual(a.annunciate, false, `+${t / 1000}s after the restart: muted (${a.mutedBy})`);
+  }
+  assert.ok(crit > 20);
+});
+
 test('★★ (v1.187.2) a session seeded from an onset inside the carry is a SESSION: a reading under 50 mV ends its critical-line clock, not the session', () => {
   // A restart one minute after the in-process bound spoke, the knee-session file absent (the
   // fallback): both clocks are seeded from the 21-minute-old onset. The first reading is 30 mV —

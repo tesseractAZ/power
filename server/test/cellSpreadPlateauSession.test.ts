@@ -33,7 +33,7 @@ const READING_MS = 180_000;
 const T0 = Date.parse('2026-09-30T13:00:00-07:00');
 let clock = 0;
 
-interface Reading { vd: number; soc: number; bal: 0 | 1; in: number }
+interface Reading { vd: number; soc: number | null; bal: 0 | 1; in: number }
 function device(r: Reading): Record<string, DeviceSnapshot> {
   const pack = {
     num: 1, soc: r.soc, packSn: 'COREXXX00XXX0001', inputWatts: r.in, outputWatts: 0,
@@ -128,7 +128,9 @@ test('★★★ REAL FAULT — hi / 70 / 70 at 90% (95 mV balancing, 70 mV betwe
   // under the line on every cycle, and no rest ever starts, so the session stands.
   const HI: Reading = { vd: 95, soc: 90, bal: 1, in: 300 };
   const MID: Reading = { vd: 70, soc: 90, bal: 1, in: 300 };
-  assertSessionBound(replayReadings([HI, MID, MID], 3 * 60 * MIN), 'hi / 70 / 70');
+  const first = assertSessionBound(replayReadings([HI, MID, MID], 3 * 60 * MIN), 'hi / 70 / 70');
+  assert.equal(first.t, 20 * MIN, 'the bound is 20 minutes (a literal: the helper reads the constant)');
+  assert.match(first.crit!.detail, /First reached the critical line above 85% charge 20 minutes ago\./);
 });
 
 test('★★ …the same hi / lo / lo at 97% is bounded alike (the top-of-charge session, unchanged)', () => {
@@ -149,6 +151,20 @@ test('★★ a session that rises from the plateau to the top of charge keeps it
   const first = assertSessionBound(ticks, '90% → 97%');
   assert.equal(first.t, VDIFF_KNEE_MAX_MUTE_MS);
   assert.match(first.crit!.detail, /First reached the critical line at this top of charge 20 minutes ago\./);
+});
+
+test('★ the note follows the reading: "at this top of charge" from exactly 95%, "above 85% charge" below it and with no SoC', () => {
+  // A crossing at 90%, then 60 mV for 10 minutes (the episode ends; no rest), then the spread back
+  // at the line while balancing 25 minutes after the first crossing, read at 95%, at 94% and with no
+  // SoC (pack and Core): the session bound speaks each time.
+  for (const [soc, where] of [[95, 'at this top of charge'], [94, 'above 85% charge'], [null, 'above 85% charge']] as const) {
+    resetVdiffWarnHoldForTesting();
+    tick(T0, { vd: 95, soc: 90, bal: 1, in: 300 });
+    for (let t = TICK_MS; t < 25 * MIN; t += TICK_MS) tick(T0 + t, { vd: 60, soc: 90, bal: 0, in: 300 });
+    const a = tick(T0 + 25 * MIN, { vd: 95, soc, bal: 1, in: 300 })!;
+    assert.notEqual(a.annunciate, false, `SoC ${soc}`);
+    assert.match(a.detail, new RegExp(`First reached the critical line ${where} 25 minutes ago\\.`), `SoC ${soc}`);
+  }
 });
 
 /* ── what still ends a session on the plateau ────────────────────────────────────────────── */

@@ -10,7 +10,7 @@
  * bound on every crossing and was never announced. advanceVdiffKnee now runs the session across the
  * plateau: it starts on the first crossing there, ends on a reading below it or after a seen
  * VDIFF_KNEE_MAX_MUTE_MS rest under 50 mV on it; the spoken note names the plateau line below the
- * top of charge. Mutants i-viii (the plateau-side kills of the rest's scope and of an unknown SoC
+ * top of charge. Mutants i-viii and xxii-xxiii (the plateau-side kills of the rest's scope and of an unknown SoC
  * starting a rest live in mutate-v1187-a.mjs lix-lxi, re-pointed).
  *
  * (2) The seeded-clock reset (v1.187.1) applied only to the first reading after a restart
@@ -201,6 +201,21 @@ const MUTANTS = [
     find: 'lastSeenMs: nowMs, critSeeded: false };',
     to: 'lastSeenMs: nowMs, critSeeded: true }; /* MUTANT */',
     why: 'As xix: a state with no clock carries the mark.',
+  },
+  /* ── (1, review) the note's boundaries ──────────────────────────────────────────────────── */
+  {
+    id: 'xxii. ★ the top-of-charge wording starts above 95%',
+    file: AL,
+    find: '          const sessionWhere = packSoc != null && packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT',
+    to: '          const sessionWhere = packSoc != null && packSoc > VOL_DIFF_PLATEAU_QUIET_SOC_PCT /* MUTANT */',
+    why: 'A pack at exactly 95% — the top of charge, where both graces apply — is announced "above 85% charge".',
+  },
+  {
+    id: 'xxiii. ★ a reading with no SoC takes the top-of-charge wording',
+    file: AL,
+    find: '          const sessionWhere = packSoc != null && packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT',
+    to: '          const sessionWhere = (packSoc == null || packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT) /* MUTANT */',
+    why: 'With no SoC nothing says the pack is at the top of charge; the session only says it began on the plateau.',
   },
 ];
 

@@ -244,7 +244,7 @@ for (const [label, restartMin] of [['on a 45 mV reading', 21], ['on a 95 mV read
       const a = tick(T0 + t, at(t));
       if (!a) continue;
       assert.notEqual(a.annunciate, false, `+${(t - restartMin * MIN) / SEC}s after the restart: muted again`);
-      assert.match(a.detail, /First reached the critical line (above 85% charge )?\d+ minutes ago\./);
+      assert.match(a.detail, /First reached the critical line above 85% charge \d+ minutes ago\./, 'the session bound (the episode restarted)');
       loud++;
     }
     assert.ok(loud >= 9, 'a whole 95 mV reading after the restart');
