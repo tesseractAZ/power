@@ -1184,7 +1184,7 @@ export interface SoilingEstimate {
   baselineCoeff: number;  // best clear-sky W per W/m² observed (≈ clean panels)
   recentCoeff: number;    // recent clear-sky W per W/m²
   cleanDays: number;      // number of clear-sky days the estimate used
-  recentCovered?: boolean; // v0.54.0 — recent window has clear-hour coverage ~ the cleanest days. When false, recentCoeff is built from a data-gap-thinned window and the soiling alert is suppressed (estimate still shown).
+  recentCovered?: boolean; // v0.54.0 — recent window has clear-hour coverage ~ the cleanest days. When false, recentCoeff is built from a data-gap-thinned window and the soiling alert is suppressed (estimate still shown). v1.187.1 — also false when fewer than 3 of the recent pool's days began in the last 10 days (a stale pool).
   // v0.54.1 — read-only diagnostics (surfaced by /api/debug/soiling, NOT on the
   // MQTT/ha-state path). Lets the operator see WHY dropPct is what it is: the
   // full per-day clear-sky coeff distribution + matching clear-hour counts and
@@ -1527,6 +1527,25 @@ export function buildSolarResponse( // exported v1.20.0 for the F21 gate tests
 const SOILING_MAX_CLOUD_PCT = 25;
 /** v1.187.1 — a home Core's forecast query: the PV metrics plus what its taper hours read. */
 const SOILING_CORE_METRICS = ['pv_total', 'pv_high', 'pv_low', 'soc', 'chg_max_soc'];
+/**
+ * v1.187.1 — the recent pool must be recent: at least SOILING_RECENT_MIN_DAYS of its days began
+ * within the last SOILING_RECENT_WINDOW_DAYS, else `recentCovered` is false (computeSoiling).
+ * Three distinct days inside ten calendar days also put the newest within seven.
+ */
+const SOILING_RECENT_WINDOW_DAYS = 10;
+const SOILING_RECENT_MIN_DAYS = 3;
+
+/**
+ * v1.187.1 — the instant up to which a soiling hour may pair with radiation. The live weather
+ * cache overlays the recorder rows (the forecast and the decomposition both let it win), and it
+ * is refetched every 2 h: its row at a label after its own fetch was a forecast when fetched, and
+ * no realized row exists for that label yet either (the capture runs at a fetch). So an hour pairs
+ * only once its covering label is at or before the last fetch; with no cache, the wall clock.
+ * The soiling callers only — the alarm-facing solar model and its GHI map are unchanged.
+ */
+export function soilingPairedUntil(nowMs: number, weather: { fetchedAt: number } | null): number {
+  return weather ? Math.min(nowMs, weather.fetchedAt) : nowMs;
+}
 
 /**
  * v1.187.1 — the weather row whose radiation covers the recorder hour starting at hour-epoch
@@ -1541,14 +1560,17 @@ const SOILING_CORE_METRICS = ['pv_total', 'pv_high', 'pv_low', 'soc', 'chg_max_s
  * 09:00 to 14:00 on every home Core).
  * Cloud cover is an instant reading at its label, so the hour is clear only when the readings at
  * both of its ends (labels he and he + 1) are at most SOILING_MAX_CLOUD_PCT; a missing end is not
- * clear. Only a completed hour pairs: the label covering the hour in progress is still a forecast.
+ * clear. The hour pairs only once its covering label is at or before `pairedUntilMs`
+ * (soilingPairedUntil: the wall clock, or the last weather fetch when earlier): the label
+ * covering the hour in progress, or one the live cache fetched before it had passed, is still a
+ * forecast.
  */
 export function soilingClearSkyHour(
   wxByHour: ReadonlyMap<number, WeatherHour>,
   he: number,
-  nowMs: number,
+  pairedUntilMs: number,
 ): WeatherHour | null {
-  if ((he + 1) * 3_600_000 > nowMs) return null;
+  if ((he + 1) * 3_600_000 > pairedUntilMs) return null;
   const start = wxByHour.get(he);
   const covering = wxByHour.get(coveringRadiationEpoch(he));
   if (!start || !covering) return null;
@@ -1608,19 +1630,21 @@ export function chargeTaperHoursFromPts(
  * measurement day (in the baseline or the recent pool) only when the hours left still reach the
  * coverage bar: a morning sliver is not a day. When too few days remain the estimate is null or
  * `recentCovered` false, and the alert stays quiet — acceptable for a maintenance estimate, never
- * for a safety alarm. Pairing is soilingClearSkyHour's (completed hours, the covering label).
+ * for a safety alarm. Pairing is soilingClearSkyHour's (completed hours, the covering label), up to
+ * `pairedUntilMs` (soilingPairedUntil); the recent pool's age is judged against `nowMs`.
  */
 export function computeSoiling(
   pvByEpoch: Map<number, number>,
   wxByHour: Map<number, WeatherHour>,
   taperHours: ReadonlySet<number> = new Set<number>(),
   nowMs: number = Date.now(),
+  pairedUntilMs: number = nowMs,
 ): SoilingEstimate | null {
   const byDay = new Map<string, number[]>();
   const taperDays = new Set<string>();
   let taperCount = 0;
   for (const [he, pv] of pvByEpoch) {
-    const wx = soilingClearSkyHour(wxByHour, he, nowMs);
+    const wx = soilingClearSkyHour(wxByHour, he, pairedUntilMs);
     if (!wx || wx.radiationWm2 < 250) continue; // clear daytime only
     const day = new Date(he * 3_600_000).toDateString();
     if (taperHours.has(he)) { taperDays.add(day); taperCount++; continue; }
@@ -1654,8 +1678,19 @@ export function computeSoiling(
   // drop (most recent days all low) still lowers the median and fires.
   // (covBar is computed above, v1.187.1: the taper rule reads it too.)
   const wellCovered = days.filter((d) => d.hours >= covBar);
-  const recentCovered = wellCovered.length >= 3;
-  const recentPool = (recentCovered ? wellCovered : days).slice(-5);
+  const coveredEnough = wellCovered.length >= 3;
+  const recentPool = (coveredEnough ? wellCovered : days).slice(-5);
+  // v1.187.1 — and recent. With full-pack days left out, "the last five well-covered days" can
+  // reach weeks back: 2026-09-30 Core 1's were 09-03, 09-08, 09-13, 09-19 and 09-26, mostly from
+  // before the 09-15..17 rain, so the 60-day decomposition read a 13.9% drop and raised a wash
+  // card for panels the rain had already washed; a stale pool equally reads a newly dimmed array
+  // as clean. Fewer than SOILING_RECENT_MIN_DAYS of the pool in the last
+  // SOILING_RECENT_WINDOW_DAYS → not covered: the alert and the wash card stay quiet, and dropPct
+  // is still reported for display. With three of up to five days inside the window the median
+  // lies within the range of those three.
+  const recentSince = nowMs - SOILING_RECENT_WINDOW_DAYS * 86_400_000;
+  const inWindow = recentPool.filter((d) => d.t >= recentSince).length;
+  const recentCovered = coveredEnough && inWindow >= SOILING_RECENT_MIN_DAYS;
   const recentCoeff = median(recentPool.map((d) => d.coeff));
   const dropPct = baselineCoeff > 0 ? Math.round(((baselineCoeff - recentCoeff) / baselineCoeff) * 1000) / 10 : 0;
   return {
@@ -1687,16 +1722,18 @@ export function computeSoiling(
  * can't represent the fleet) — otherwise null (no alert). Pure + exported for tests.
  *
  * v1.187.1 — `taperHoursByCore[i]` is the charge-taper hour set of `homeCorePvMaps[i]`
- * (chargeTaperHoursFromPts); each Core is judged on its own pack's hours.
+ * (chargeTaperHoursFromPts); each Core is judged on its own pack's hours. `pairedUntilMs` is
+ * soilingPairedUntil's bound, passed through to computeSoiling.
  */
 export function fleetSoilingFromDevices(
   homeCorePvMaps: ReadonlyArray<Map<number, number>>,
   wxByHour: Map<number, WeatherHour>,
   taperHoursByCore: ReadonlyArray<ReadonlySet<number>> = [],
   nowMs: number = Date.now(),
+  pairedUntilMs: number = nowMs,
 ): SoilingEstimate | null {
   const ests = homeCorePvMaps
-    .map((m, i) => computeSoiling(m, wxByHour, taperHoursByCore[i], nowMs))
+    .map((m, i) => computeSoiling(m, wxByHour, taperHoursByCore[i], nowMs, pairedUntilMs))
     .filter((e): e is SoilingEstimate => e != null);
   if (ests.length === 0) return null;
   // Prefer the well-covered estimates; fall back to all valid ones only if fewer
@@ -2366,7 +2403,8 @@ async function computeDayForecastUncached(
     solarModel,
     solarModelSns: homeModelSns(devices),
     deviceModels,
-    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now) : null,
+    // v1.187.1 — an hour pairs only once its covering label predates the cache's fetch.
+    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,
     homeDpusConnected: forecastCoverage.homeDpusConnected,
     homeDpusReporting: forecastCoverage.homeDpusReporting,
     homeDpusCoveragePartial: forecastCoverage.coveragePartial,
@@ -4228,6 +4266,9 @@ export interface SoilingPerDevice {
   cleanDays: number;
   recentCoeff: number | null;
   baselineCoeff: number | null;
+  // v1.187.1 — computeSoiling's recentCovered for this DPU (false when there is no estimate, or
+  // its recent pool is thin or stale). The wash card requires it, as the soiling-pv alert does.
+  recentCovered: boolean;
 }
 
 export interface SoilingDecomposition {
@@ -4276,6 +4317,9 @@ export async function computeSoilingDecomposition(
   // With the recorder backfill the decomposition can run even when the live
   // cache is cold; only bail when NEITHER source produced any weather.
   if (wxByHour.size === 0) return empty();
+  // v1.187.1 — the per-Core rows and the per-hour shape pair an hour only once its covering label
+  // predates the cache's fetch (soilingPairedUntil), as the forecast's estimate does.
+  const pairedUntil = soilingPairedUntil(now, weather);
 
   const dpus = allDpus(devices);
 
@@ -4296,7 +4340,7 @@ export async function computeSoilingDecomposition(
   const perDevice: SoilingPerDevice[] = [];
   for (const d of dpus) {
     const { pvE, taper } = series.get(d.sn)!;
-    const est = computeSoiling(pvE, wxByHour, taper, now);
+    const est = computeSoiling(pvE, wxByHour, taper, now, pairedUntil);
     perDevice.push({
       sn: d.sn,
       device: d.deviceName,
@@ -4305,6 +4349,7 @@ export async function computeSoilingDecomposition(
       cleanDays: est?.cleanDays ?? 0,
       recentCoeff: est?.recentCoeff != null ? round2(est.recentCoeff) : null,
       baselineCoeff: est?.baselineCoeff != null ? round2(est.baselineCoeff) : null,
+      recentCovered: est?.recentCovered === true,
     });
   }
 
@@ -4339,7 +4384,7 @@ export async function computeSoilingDecomposition(
     if (fleetTaper.has(he)) continue;
     // v1.187.1 — paired as computeSoiling pairs (soilingClearSkyHour: the covering label, clear at
     // both ends, completed hours only); the label he read the previous hour's sun.
-    const wx = soilingClearSkyHour(wxByHour, he, now);
+    const wx = soilingClearSkyHour(wxByHour, he, pairedUntil);
     if (!wx || wx.radiationWm2 < PERHOUR_MIN_GHI_WM2) continue;
     const coeff = pv / wx.radiationWm2;
     if (!Number.isFinite(coeff) || coeff <= 0) continue;

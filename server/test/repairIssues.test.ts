@@ -75,7 +75,7 @@ function ctxWithDevices(devices: DeviceSnapshot[]): RepairContext {
   };
 }
 
-function perDevice(dropPct: number | null, cleanDays = 6): SoilingPerDevice {
+function perDevice(dropPct: number | null, cleanDays = 6, recentCovered = true): SoilingPerDevice {
   return {
     sn: 'CORE_1',
     device: 'Core 1',
@@ -84,6 +84,7 @@ function perDevice(dropPct: number | null, cleanDays = 6): SoilingPerDevice {
     cleanDays,
     recentCoeff: 0.8,
     baselineCoeff: 1.0,
+    recentCovered,
   };
 }
 
@@ -199,6 +200,22 @@ test('soiling — fewer than 6 clean days suppresses the card even above thresho
     computeRepairIssues(ctx).issues.filter((i) => i.id === 'wash-panels').length,
     0,
   );
+});
+
+test('soiling — v1.187.1: a row whose recent window is not covered (thin or stale) gets no wash card', () => {
+  // 2026-09-30: a Core's last well-covered days were mostly from before a rain; it read 13.9%.
+  assert.equal(
+    computeRepairIssues(ctxWithSoiling([perDevice(30, 18, false)])).issues.filter((i) => i.id === 'wash-panels').length,
+    0,
+    'the alert requires recentCovered; so does the card',
+  );
+  // Control: the same row on a covered window carries the card.
+  assert.ok(computeRepairIssues(ctxWithSoiling([perDevice(30, 18, true)])).issues.find((i) => i.id === 'wash-panels'));
+  // A covered row elsewhere still carries it, naming that Core, not the uncovered one.
+  const stale = { ...perDevice(40, 18, false), sn: 'CORE_5', device: 'Core 5', coreNum: 5 };
+  const card = computeRepairIssues(ctxWithSoiling([stale, perDevice(14)])).issues.find((i) => i.id === 'wash-panels');
+  assert.ok(card);
+  assert.match(card!.title, /~14% output drop on Core 1/);
 });
 
 /* ─── (4) firstSeenAt persistence across two calls ─────────────── */

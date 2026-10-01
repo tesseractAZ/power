@@ -15,14 +15,17 @@
  * (2) The PV of [H, H+1) pairs with the radiation labelled H+1 (coveringRadiationEpoch), clear only
  *     when the cloud reading at BOTH labels is ≤ 25%, and only for completed hours.
  * (3) soiling-pv is `audible: false` (card and push kept), and conditionFromAlerts excludes the id.
+ * (review) The recent pool must be recent (three of its days in the last ten, else not covered),
+ *     and the wash card requires the same; an hour pairs only once its covering label predates
+ *     the live cache's fetch (soilingPairedUntil); each Core keeps its own taper set in any order.
  *
  * The fixtures mirror the September pattern: clean clear days, cloudy days, and clear days on
  * which the packs fill by noon (09-18, 09-21, 09-25, 09-30).
  */
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  computeSoiling, fleetSoilingFromDevices, chargeTaperHoursFromPts, soilingClearSkyHour,
+  computeSoiling, fleetSoilingFromDevices, chargeTaperHoursFromPts, soilingClearSkyHour, soilingPairedUntil,
   forecastDayAlerts, getDayForecast, computeSoilingDecomposition, resetForecastCachesForTesting,
   resetRunwayCache, type DayForecast, type SoilingEstimate,
 } from '../src/analytics.js';
@@ -135,8 +138,9 @@ test('★★★ 09-30: three full-pack days in the last five read as ~48% "soili
   const after = fleetSoilingFromDevices(maps, fx.wx, fx.cores.map((c) => c.taper), SEPT_30_1730);
   assert.ok(after, 'still an estimate: the clean days carry it');
   assert.ok(after!.dropPct < 12, `below the 12% alert floor (got ${after!.dropPct})`);
-  assert.equal(after!.recentCovered, true);
   assert.equal(forecastDayAlerts(forecastWith(after)).find((a) => a.id === 'soiling-pv'), undefined, 'no soiling-pv alert');
+  // The number alone keeps it quiet, not only the recency gate below.
+  assert.equal(forecastDayAlerts(forecastWith({ ...after!, recentCovered: true })).find((a) => a.id === 'soiling-pv'), undefined);
   // Per Core: the two that filled by noon lose those days; the clean baseline is not inflated.
   for (const [i, c] of fx.cores.entries()) {
     const e = computeSoiling(c.pv, fx.wx, c.taper, SEPT_30_1730)!;
@@ -144,6 +148,10 @@ test('★★★ 09-30: three full-pack days in the last five read as ~48% "soili
     assert.ok(e.dropPct < 12, `Core ${i}: ${e.dropPct}`);
     assert.ok((e.taperHours ?? 0) > 0, 'the diagnostic counts the hours left out');
   }
+  // And the recency gate: the noon-filling Cores have only 09-22 and 09-26 well covered in the last
+  // ten days, so their verdict is not covered; the Core that fills at 14:00 keeps five such days.
+  assert.deepEqual(fx.cores.map((c) => computeSoiling(c.pv, fx.wx, c.taper, SEPT_30_1730)!.recentCovered), [false, true, false]);
+  assert.equal(after!.recentCovered, false, 'fewer than two covered Cores: the fleet is not covered');
 });
 
 test('★★★ a genuinely soiled array still alerts — on full-pack days too (a dimmer array fills later)', () => {
@@ -186,6 +194,80 @@ test('★★ the coverage bar is inclusive for a full-pack day: exactly covBar u
   assert.equal(e.cleanDays, 13, 'the four full-pack days are measurement days');
   assert.equal(e.dayHours!.filter((n) => n === 5).length, 4);
   assert.ok(e.dropPct < 1, `and they read clean (got ${e.dropPct})`);
+});
+
+/* ══ (1b) the recent pool must be recent ══ */
+
+/** September with clean clear days to 09-19, then cloud except on the `clear` days. */
+const lateClear = (clear: number[]): Array<{ day: Date; kind: Kind }> =>
+  Array.from({ length: 30 }, (_, k) => {
+    const d = k + 1;
+    return { day: new Date(2026, 8, d), kind: d <= 19 || clear.includes(d) ? 'clean' : 'cloudy' };
+  });
+
+test('★★★ the recent pool must be recent: three of its days in the last ten, else not covered (dropPct still reported)', () => {
+  const est = (clear: number[], pairedUntil = SEPT_30_1730) => {
+    const fx = buildFixture(lateClear(clear), [{ taperFrom: 99 }]);
+    const [c] = fx.cores;
+    return computeSoiling(c.pv, fx.wx, c.taper, SEPT_30_1730, pairedUntil)!;
+  };
+  // 09-30 17:30: the window holds the days that began after 09-20 17:30, i.e. 09-21..09-30.
+  assert.equal(est([21, 22, 23]).recentCovered, true, 'three recent well-covered days');
+  const two = est([21, 22]);
+  assert.equal(two.recentCovered, false, 'two recent days and three from 09-14..19: a stale median');
+  assert.equal(two.dropPct, 0, 'the figure is still reported, for display');
+  assert.equal(two.cleanDays, 21);
+  assert.equal(est([20, 21, 22]).recentCovered, false, '09-20 began before the window: the newest covered day is 8 days old');
+  assert.equal(est([]).recentCovered, false, 'nothing since 09-19');
+  // The age is judged on the clock, not on the pairing bound: a fetch three days old does not
+  // carry the window back with it.
+  assert.equal(est([21, 22], SEPT_30_1730 - 72 * H).recentCovered, false);
+});
+
+test('★★★ 09-30 Core 1: a dusty spell washed by rain, then clear days full by 11:00 — the stale pool reads ≥12%, and the alert and the wash card stay quiet', async () => {
+  // Relative to today: 17 clean clear days (the last seven of them 20% low: dust), three days of
+  // rain, then ten clear days on which every pack is full by 11:00 (3 unshed hours: no measurement
+  // day). The last five well-covered days are the dusty ones, 11-17 days old.
+  const today = new Date();
+  const days = Array.from({ length: 30 }, (_, i) => ({
+    day: new Date(today.getFullYear(), today.getMonth(), today.getDate() - (30 - i)),
+    kind: (i < 17 ? 'clean' : i < 20 ? 'cloudy' : 'taper') as Kind,
+  }));
+  const spec: CoreSpec = { taperFrom: 11, factor: (i) => (i >= 10 && i < 17 ? 0.8 : 1) };
+  const fx = buildFixture(days, [spec, spec, spec]);
+  futureWeatherCache();
+  resetForecastCachesForTesting();
+  resetRunwayCache();
+  try {
+    const fc = await getDayForecast(devices() as any, recorderFor(fx));
+    assert.ok(fc.soiling && fc.soiling.dropPct >= 12, `the stale pool reads the washed-off dust (got ${fc.soiling?.dropPct})`);
+    assert.equal(fc.soiling!.recentCovered, false, 'none of its days is in the last ten');
+    assert.equal(forecastDayAlerts(fc).find((a) => a.id === 'soiling-pv'), undefined, 'no soiling-pv');
+    setWeatherCacheForTesting(null);
+    resetForecastCachesForTesting();
+    const r = await computeSoilingDecomposition(devices() as any, recorderFor(fx));
+    assert.equal(r.perDevice.length, 3);
+    for (const d of r.perDevice) {
+      assert.ok(d.dropPct != null && d.dropPct >= 12, `${d.device}: the figure is still shown (${d.dropPct})`);
+      assert.equal(d.recentCovered, false, d.device);
+    }
+    const card = computeRepairIssues({ devices: {}, alerts: [], degradation: null, soiling: r, equipmentHealth: null, forecastSkill: null })
+      .issues.find((i) => i.id === 'wash-panels');
+    assert.equal(card, undefined, 'no "Wash solar panels" for panels the rain washed');
+  } finally {
+    clearWeatherTestOverride();
+    resetForecastCachesForTesting();
+  }
+});
+
+test('★★ a stale pool no longer calls a newly dimmed array clean: 25% dimmer from 09-22, every clear day full by 11:00 → not covered', () => {
+  const kinds = septDays().map((d, i) => (i >= 21 && d.kind !== 'cloudy' ? { ...d, kind: 'taper' as const } : d));
+  const dim: CoreSpec = { taperFrom: 11, factor: (i) => (i >= 21 ? 0.75 : 1) };
+  const fx = buildFixture(kinds, [dim, dim, dim]);
+  const est = fleetSoilingFromDevices(fx.cores.map((c) => c.pv), fx.wx, fx.cores.map((c) => c.taper), SEPT_30_1730)!;
+  assert.ok(est.dropPct < 12, `the pool is all pre-dimming days (got ${est.dropPct})`);
+  assert.equal(est.recentCovered, false, 'and the estimate says it cannot tell, rather than "clean"');
+  assert.equal(forecastDayAlerts(forecastWith(est)).find((a) => a.id === 'soiling-pv'), undefined);
 });
 
 /* ══ (2) pairing: the covering label, clear at both ends, completed hours ══ */
@@ -233,6 +315,32 @@ test('★★ only completed hours pair: the label covering the hour in progress 
   assert.equal(e.dayHours![e.dayHours!.length - 1], 6);
 });
 
+/** 09-30 made a clean clear day (it was a full-pack day). */
+const sept30Clean = () => septDays().map((d) => (d.day.getDate() === 30 ? { ...d, kind: 'clean' as const } : d));
+const SEPT_30_NOON = new Date(2026, 8, 30, 12).getTime();
+
+test('★★★ soilingPairedUntil: the live cache\'s fetch when earlier than the clock, else the clock', () => {
+  assert.equal(soilingPairedUntil(SEPT_30_NOON, null), SEPT_30_NOON, 'no cache: the clock');
+  assert.equal(soilingPairedUntil(SEPT_30_NOON, { fetchedAt: SEPT_30_NOON - 1.5 * H }), SEPT_30_NOON - 1.5 * H);
+  assert.equal(soilingPairedUntil(SEPT_30_NOON, { fetchedAt: SEPT_30_NOON + H }), SEPT_30_NOON, 'a fetch stamped ahead of the clock does not open the hour in progress');
+});
+
+test('★★★ an hour pairs only once its covering label predates the weather fetch: fetched 1.5 h ago, the hour that ended 1 h ago does not pair', () => {
+  const fx = buildFixture(sept30Clean(), [{ taperFrom: 99 }]);
+  const [c] = fx.cores;
+  const fetched = SEPT_30_NOON - 1.5 * H; // 10:30
+  const he10 = Math.floor(at(new Date(2026, 8, 30), 10) / H); // [10:00, 11:00), ended at 11:00
+  assert.equal(soilingClearSkyHour(fx.wx, he10, SEPT_30_NOON), fx.wx.get(he10 + 1), 'complete by the clock');
+  assert.equal(soilingClearSkyHour(fx.wx, he10, fetched), null, 'its covering label (11:00) came after the 10:30 fetch');
+  // 09-30 at noon: 08:00-12:00 holds four complete hours; with the fetch at 10:30 only 08-10
+  // pair, and two hours are no day.
+  const clock = computeSoiling(c.pv, fx.wx, c.taper, SEPT_30_NOON, SEPT_30_NOON)!;
+  const bound = computeSoiling(c.pv, fx.wx, c.taper, SEPT_30_NOON, fetched)!;
+  assert.equal(clock.dayHours![clock.dayHours!.length - 1], 4);
+  assert.equal(clock.cleanDays - bound.cleanDays, 1, '09-30 is not a measurement day yet');
+  assert.equal(computeSoiling(c.pv, fx.wx, c.taper, SEPT_30_NOON)!.cleanDays, clock.cleanDays, 'the bound defaults to the clock');
+});
+
 /* ══ the taper hours ══ */
 
 test('★★★ chargeTaperHoursFromPts: the pack\'s HIGHEST SoC in the hour, at or above ceiling − 10; unknown SoC is excluded', () => {
@@ -256,6 +364,23 @@ test('★★ chargeTaperHoursFromPts: the hour\'s recorded ceiling, else the liv
   assert.ok(chargeTaperHoursFromPts(pv, soc, [], 80).has(he), 'none recorded, live 80 → band from 70');
   assert.ok(chargeTaperHoursFromPts(pv, soc, ceil(0), 80).has(he), 'a recorded 0 is no ceiling: the live 80 applies');
   assert.ok(!chargeTaperHoursFromPts(pv, soc, [], null).has(he), 'neither → 100, band from 90');
+});
+
+test('★★★ each Core is judged on ITS OWN taper hours, in any order: a late filler listed first lends its set to no one', () => {
+  // Core A fills at 14:00, Core B at 11:00, A first: a set taken by position 0, or in reverse
+  // order, gives B A's later set, and B's shed 11:00-14:00 hours count.
+  const fx = buildFixture(septDays(), [{ taperFrom: 14 }, { taperFrom: 11 }]);
+  const [A, B] = fx.cores;
+  assert.ok(computeSoiling(A.pv, fx.wx, A.taper, SEPT_30_1730)!.dropPct < 12);
+  assert.ok(computeSoiling(B.pv, fx.wx, B.taper, SEPT_30_1730)!.dropPct < 12);
+  const crossed = computeSoiling(B.pv, fx.wx, A.taper, SEPT_30_1730)!;
+  assert.ok(crossed.dropPct >= 12, `positive control: B on A's set reads its shed hours as soiling (got ${crossed.dropPct})`);
+  const fleet = fleetSoilingFromDevices([A.pv, B.pv], fx.wx, [A.taper, B.taper], SEPT_30_1730)!;
+  assert.ok(fleet.dropPct < 12, `the fleet (got ${fleet.dropPct})`);
+  // Three Cores filling at 14:00, 12:00 and 11:00, latest first.
+  const fx3 = buildFixture(septDays(), [{ taperFrom: 14 }, { taperFrom: 12 }, { taperFrom: 11 }]);
+  for (const [i, c] of fx3.cores.entries()) assert.ok(computeSoiling(c.pv, fx3.wx, c.taper, SEPT_30_1730)!.dropPct < 12, `Core ${i}`);
+  assert.ok(fleetSoilingFromDevices(fx3.cores.map((c) => c.pv), fx3.wx, fx3.cores.map((c) => c.taper), SEPT_30_1730)!.dropPct < 12);
 });
 
 /* ══ (3) never on the speakers ══ */
@@ -389,6 +514,54 @@ test('★★★ the decomposition agrees: no per-Core drop, no afternoon per-hou
       .issues.find((i) => i.id === 'wash-panels');
     assert.equal(card, undefined, 'no "Wash solar panels" card for full packs');
   } finally {
+    clearWeatherTestOverride();
+    resetForecastCachesForTesting();
+  }
+});
+
+test('★★★ the forecast gives each home Core its own taper set: the first home Core fills last', async () => {
+  const fx = relativeFixture([{ taperFrom: 14 }, { taperFrom: 11 }, { taperFrom: 11 }]);
+  futureWeatherCache();
+  resetForecastCachesForTesting();
+  resetRunwayCache();
+  try {
+    const fc = await getDayForecast(devices() as any, recorderFor(fx));
+    assert.ok(fc.soiling, 'an estimate');
+    assert.ok(fc.soiling!.dropPct < 12, `no phantom soiling from a borrowed set (got ${fc.soiling!.dropPct})`);
+    assert.equal(forecastDayAlerts(fc).find((a) => a.id === 'soiling-pv'), undefined);
+  } finally {
+    clearWeatherTestOverride();
+    resetForecastCachesForTesting();
+  }
+});
+
+test('★★★ wired: the forecast and the decomposition pair an hour only once its covering label predates the cache\'s fetch', async () => {
+  // 09-30 at noon (a fixed clock); 09-30 is a clean clear day. Fetched at noon, its hours 08:00-12:00
+  // pair (4: a measurement day); fetched at 10:30, the hours that ended at 11:00 and 12:00 do not
+  // (2: no day).
+  const fx = buildFixture(sept30Clean(), [{ taperFrom: 99 }, { taperFrom: 99 }, { taperFrom: 99 }]);
+  const cacheHours = [...fx.wx.values()].filter((w) => w.ts >= new Date(2026, 8, 30).getTime());
+  mock.timers.enable({ apis: ['Date'], now: SEPT_30_NOON });
+  const run = async (fetchedAt: number) => {
+    setWeatherCacheForTesting({ fetchedAt, lat: 33.4, lon: -112, hours: cacheHours } as any);
+    resetForecastCachesForTesting();
+    resetRunwayCache();
+    const fc = await getDayForecast(devices() as any, recorderFor(fx));
+    resetForecastCachesForTesting();
+    const r = await computeSoilingDecomposition(devices() as any, recorderFor(fx));
+    return { soiling: fc.soiling!, r };
+  };
+  try {
+    const clock = await run(SEPT_30_NOON);
+    const bound = await run(SEPT_30_NOON - 1.5 * H);
+    assert.ok(clock.soiling && bound.soiling);
+    assert.equal(clock.soiling.cleanDays - bound.soiling.cleanDays, 1, 'the forecast: 09-30 is not a day yet');
+    assert.deepEqual(clock.r.perDevice.map((d) => d.cleanDays - bound.r.perDevice.find((b) => b.sn === d.sn)!.cleanDays), [1, 1, 1], 'the per-Core rows');
+    const samples = (x: typeof clock, h: number) => x.r.perHour.find((p) => p.hour === h)?.samples ?? 0;
+    assert.equal(samples(clock, 10) - samples(bound, 10), 1, 'the per-hour shape: hour 10 loses 09-30');
+    assert.equal(samples(clock, 9), samples(bound, 9), 'hour 9 (label 10:00, before the fetch) keeps it');
+  } finally {
+    mock.timers.reset();
     clearWeatherTestOverride();
     resetForecastCachesForTesting();
   }
