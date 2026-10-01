@@ -42,7 +42,7 @@ import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareSh
 import { liveHostPower } from './hostPower.js';
 import { mpptProducing } from './mppt.js';
 import { getReserveArbitrageRaised } from './nightChargeActuator.js';
-import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks } from './defectivePackLatch.js';
+import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks, isoOrRaw } from './defectivePackLatch.js';
 import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
 import { getAlertOnset } from './alertOnset.js';
 import { currentAssessment } from './selfVitals.js';
@@ -909,7 +909,11 @@ function dpuNum(name: string): number | null {
 export interface ConnectivityContext {
   lastDeviceListAttemptAt: number;   // 0 = never attempted
   lastDeviceListSuccessAt: number;   // 0 = never succeeded
-  perDevice: Map<string, { lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number }>;
+  perDevice: Map<string, {
+    lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number;
+    /** v1.187.1 — when this process first saw the device in /device/list (SnapshotStore.firstListedAt). */
+    firstListedAtMs?: number | null;
+  }>;
   /** v1.8.0 (review F3) — ms epoch when the SHP2's published backup-pool % went
    *  null (post-grace-hold; SnapshotStore.backupPoolUnknownSince), or null while
    *  readable. Drives the reserve-alarm-blind compensating alert. */
@@ -1270,7 +1274,15 @@ export function computeAlerts(
       // from the device and via which channel. A 47-min gap with last data
       // via MQTT looks very different from "never connected since boot".
       const conn = connectivity?.perDevice.get(d.sn);
-      const lastDataAt = conn?.lastMqttAt ?? d.lastUpdated ?? 0;
+      // v1.187.1 (review) — "reported this session" is decided from DATA, not from `lastUpdated`:
+      // setDeviceOnline bumps that on a bare /status flip (deliberately, for the stale alarm), so a
+      // device that had sent nothing but one online→offline flip read "Last data 0s ago via REST.
+      // Just dropped" — and 30 minutes on, the "lost its cloud connection … power-cycle" hint. The
+      // data setters (setDeviceQuota, mergeDeviceQuota, setMqttMessage) are the only writers of a
+      // last source, an MQTT time or the telemetry clocks.
+      const hasData = conn?.lastSource != null || conn?.lastMqttAt != null
+        || (d.lastTelemetryAtMs ?? 0) > 0 || (d.lastQuotaAtMs ?? 0) > 0;
+      const lastDataAt = hasData ? (conn?.lastMqttAt ?? d.lastUpdated ?? 0) : 0;
       const lastSource = conn?.lastSource ?? 'rest';
       const facts: Array<{ label: string; value: string }> = [
         { label: 'Reported by', value: 'EcoFlow Cloud /device/list' },
@@ -1291,9 +1303,22 @@ export function computeAlerts(
         { label: 'MQTT msg count', value: conn?.mqttCount != null ? String(conn.mqttCount) : '—' },
       ];
       // Append a one-line action hint matched to the most likely cause.
-      const ageMin = lastDataAt > 0 ? (now - lastDataAt) / 60_000 : Infinity;
-      let hint =
-        ageMin > 30
+      // v1.187.1 — NO DATA THIS SESSION IS NOT A MEASURED GAP. lastDataAt = 0 means nothing has
+      // arrived since the add-on started, so neither a duration nor a cause is known here. It read as
+      // Infinity and took the "over 30 minutes — lost its EcoFlow cloud connection … usually recovers
+      // … power-cycle" branch three seconds after start-up (2026-09-30: three peripherals offline since
+      // before the 82-day ledger began), and would say the same on a pushed warning for a
+      // home Core that dropped a minute before a restart. What is known is said instead: for how long
+      // EcoFlow has reported it offline in this session (a transition seen here), or that it has been
+      // listed offline since the first device list; the cause is left open.
+      const listedAt = conn?.firstListedAtMs ?? null;
+      const ageMin = (now - lastDataAt) / 60_000;
+      let hint = !(lastDataAt > 0)
+        ? (d.onlineChangedAtMs
+          ? ` EcoFlow has reported it offline for the last ${fmtAge(now - d.onlineChangedAtMs)}; why is not known here.`
+          : ` EcoFlow Cloud has listed it offline since the add-on's first device list${listedAt != null ? ` (${fmtAge(now - listedAt)} ago)` : ''}; how long before that, and why, is not known here.`)
+          + ' If the device is meant to be on, check its power and its Wi-Fi.'
+        : ageMin > 30
           ? ' No telemetry for over 30 minutes — the device has lost its EcoFlow cloud (enhanced) connection. It usually recovers once the cloud session re-establishes; if it stays offline, a power-cycle forces a clean reconnect.'
           : ageMin > 5
             ? ' Data is stale but recent — the cloud session may catch up on its own. Wait a few minutes; if it persists, power-cycle.'
@@ -1348,7 +1373,10 @@ export function computeAlerts(
         title: spare ? 'Bench spare offline (expected)' : 'Device offline (per EcoFlow Cloud)',
         detail: spare
           ? `${d.deviceName} is a designated bench spare — kept powered down and not wired into the SHP2 — so EcoFlow Cloud reporting it offline is expected and not actionable. It will alarm normally once it's connected to an SHP2.`
-          : `${d.deviceName} is flagged offline by EcoFlow's /device/list. ${conn?.mqttCount && conn.mqttCount > 0 ? `We previously received ${conn.mqttCount} MQTT message(s) this session; last data ${fmtAge(now - lastDataAt)} ago via ${lastSource.toUpperCase()}.` : 'No telemetry received this session.'}${hint}`,
+          : `${d.deviceName} is flagged offline by EcoFlow's /device/list. ${conn?.mqttCount && conn.mqttCount > 0
+            ? `We previously received ${conn.mqttCount} MQTT message(s) this session; last data ${fmtAge(now - lastDataAt)} ago via ${lastSource.toUpperCase()}.`
+            // v1.187.1 — REST data this session is not "no telemetry"; none at all is said plainly.
+            : lastDataAt > 0 ? `Last data ${fmtAge(now - lastDataAt)} ago via ${lastSource.toUpperCase()}.` : 'It has not reported since the add-on started.'}${hint}`,
         coreNum,
         facts,
         ...(spare ? { annunciate: false, muteReason: MUTE_REASON_BENCH_SPARE } : {}),
@@ -1730,6 +1758,8 @@ export function computeAlerts(
         // Date below is Phoenix-local (fixed UTC−7, AZ has no DST — and never
         // Intl on the Pi): the 08-24 23:01 MST confirmation rendered as "08-25"
         // with a bare toISOString.
+        // v1.187.1 (review) — through isoOrRaw: a corrupt confirmedAtMs threw a RangeError here on
+        // every tick the pack was present, and computeAlerts has no catch.
         out.push({
           id: `pack-defective-${d.sn}-${pk.num}`,
           severity: 'warning',
@@ -1737,7 +1767,7 @@ export function computeAlerts(
           device: d.deviceName,
           title: 'Pack confirmed defective — service required',
           detail:
-            `${tag} was confirmed defective on ${new Date(dConfirmed.confirmedAtMs - 7 * 3_600_000).toISOString().slice(0, 10)}: `
+            `${tag} was confirmed defective on ${isoOrRaw(dConfirmed.confirmedAtMs - 7 * 3_600_000).slice(0, 10)}: `
             + `${dConfirmed.socPct}% SoC against a sibling median of ${dConfirmed.siblingMedianSocPct}%, exchanging `
             + `${dConfirmed.packAbsW} W while its siblings moved ${dConfirmed.siblingMedianAbsW} W; deviant cell `
             + `#${dConfirmed.deviantCell} at ${dConfirmed.deltaMv > 0 ? '+' : ''}${dConfirmed.deltaMv} mV from the pack median. `
@@ -1855,7 +1885,7 @@ export function computeAlerts(
     nowMs: now,
     evaluableDeviceSns: new Set(dpus.filter(isDpuEvaluable).map((d) => d.sn)),
   })) {
-    void rec; // already logged with its full evidence snapshot by the latch
+    void rec; // already logged with its full evidence snapshot by the latch (v1.187.1: the monitor's warn sink)
   }
 
   // v1.185.0 (review) — the HOUSE pool's alarms read the house panel's own grid verdict when a

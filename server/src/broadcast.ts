@@ -1240,6 +1240,9 @@ export function startBroadcastMonitor(
     // was waiting to be re-presented: whatever the condition is now, it is decided afresh.
     deescalationHold = null;
     deferredCondition = null;
+    // v1.187.1 — and a pending boot hold: the held condition was adopted, not dropped.
+    bootYellowHold = null;
+    bootRedHold = null;
     if (clearsRedReplayEvidence(l)) redReplayGate.noteConditionGreen();
     // v1.186.0 — every adoption refreshes the condition record, SILENT ones included (quiet
     // hours, the all-clear speech gate, a storm-gated or disabled transition): the next boot's
@@ -2308,6 +2311,16 @@ export function startBroadcastMonitor(
   let warmupYellowSinceMs: number | null = null;
   /** v1.173.2 — the held-yellow log line has been written for this episode. */
   let warmupYellowLogged = false;
+  /**
+   * v1.187.1 — the boot holds' OUTCOME. The hold lines named nothing, and a held condition that
+   * cleared inside its hold was dropped without a line (2026-09-30 06:32:58: a boot yellow was held,
+   * the level went back to green, and only missing lines showed it was never spoken). Each hold now
+   * names what it holds, and a hold that ends below its level says so once, with what it held. A
+   * commit (adoptLevel) ends a pending hold silently: the condition was adopted — spoken, or
+   * silenced by a gate that logs its own line — not dropped.
+   */
+  let bootYellowHold: { sinceMs: number; fps: Set<string> } | null = null;
+  let bootRedHold: { fps: string[] } | null = null;
   /** v1.186.0 — the post-warm-up condition-record reconciliation has run (once per boot). */
   let conditionReconciled = false;
   /** v1.187.0 — the de-escalation dwell's clocks (deescalationDue): since when the observed
@@ -2651,6 +2664,17 @@ export function startBroadcastMonitor(
     // window is re-confirmed across a tick rather than fast-tracked.
     if (level !== 'red') warmupRedSeen = false;
     if (level !== 'yellow') { warmupYellowSinceMs = null; warmupYellowLogged = false; }
+    // v1.187.1 — a red held for its boot confirmation and gone on the next tick: never spoken.
+    if (level !== 'red' && bootRedHold != null) {
+      log(`broadcast: boot red dropped — the level fell to ${level} inside its one-tick confirmation; not spoken (${bootRedHold.fps.map(describeFingerprint).join('; ')})`);
+      bootRedHold = null;
+    }
+    // v1.187.1 — a boot yellow that cleared inside its hold: never spoken. A rise to red is not a
+    // drop (red logs its own hold and transition), so only a fall to green is said.
+    if (level !== 'yellow' && bootYellowHold != null) {
+      if (level === 'green') log(`broadcast: boot yellow dropped after ${Math.round((Date.now() - bootYellowHold.sinceMs) / 1000)} s — cleared inside the hold, not spoken (${[...bootYellowHold.fps].map(describeFingerprint).join('; ')})`);
+      bootYellowHold = null;
+    }
     // v1.187.0 — the de-escalation dwell (deescalationDue). A downward move is held — prevLevel
     // NOT advanced, nothing adopted or spoken — until the lower level has stood for
     // CONDITION_CLEAR_DWELL_MS. A flicker back up inside it is then no transition at all.
@@ -2716,16 +2740,20 @@ export function startBroadcastMonitor(
       warmupYellowSinceMs = Date.now();
     }
     if (holdBootYellow(level === 'yellow' && transitioned, Date.now() - bootMs, warmupYellowSinceMs, Date.now())) {
+      // v1.187.1 — every warning the hold sees, for its outcome line.
+      if (bootYellowHold == null) bootYellowHold = { sinceMs: warmupYellowSinceMs ?? Date.now(), fps: new Set() };
+      for (const f of warningFingerprints) bootYellowHold.fps.add(f);
       // v1.173.2 — one line per held episode, not one per 10 s tick.
       if (!warmupYellowLogged) {
         warmupYellowLogged = true;
-        log(`broadcast: yellow held for boot confirmation (up to ${Math.round(BOOT_YELLOW_CONFIRM_MS / 1000)} s) — startup transients clear on their own`);
+        log(`broadcast: yellow held for boot confirmation (up to ${Math.round(BOOT_YELLOW_CONFIRM_MS / 1000)} s) — startup transients clear on their own (${warningFingerprints.map(describeFingerprint).join('; ')})`);
       }
       return;
     }
     if (holdBootRed(level === 'red' && (transitioned || newCrit), Date.now() - bootMs, warmupRedSeen)) {
       warmupRedSeen = true;
-      log(`broadcast: red held one tick for boot confirmation (warm-up phantom guard)`);
+      bootRedHold = { fps: [...criticalFingerprints] };
+      log(`broadcast: red held one tick for boot confirmation (warm-up phantom guard) (${criticalFingerprints.map(describeFingerprint).join('; ')})`);
       return;
     }
     // v1.64.0 — post-restart RED replay gate. Placed AFTER holdBootRed so only a

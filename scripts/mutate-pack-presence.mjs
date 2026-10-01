@@ -43,8 +43,8 @@ const MUTANTS = [
   {
     id: 'iii. ★★ a repeated serial hides a slot that is still MOVING',
     file: PP,
-    find: '      if (newest - since(g) >= PACK_STALE_MS) hideSet.set(g.num, g);',
-    to: '      if (true) hideSet.set(g.num, g); /* MUTANT */',
+    find: '      if (newest - since(g) >= PACK_STALE_MS) { hideSet.set(g.num, g); byRule2.add(g.num); }',
+    to: '      if (true) { hideSet.set(g.num, g); byRule2.add(g.num); } /* MUTANT */',
     why: 'Two live slots that report one serial (a vendor glitch) lose one of them from every alarm.',
   },
   {

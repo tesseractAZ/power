@@ -113,6 +113,9 @@ const PEER_METRICS: PeerMetric[] = [
   },
 ];
 
+/** v1.187.1 — the muteReason of a cell-spread outlier on the LOW side (diagnostic only). */
+export const PEER_SPREAD_LOW_MUTE_REASON = 'a lower cell spread than its siblings, not a fault';
+
 /**
  * v0.13.2 — hysteresis for the learned peer-outlier path.
  *
@@ -215,7 +218,17 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
         // outliers to INFO (still surfaced); non-thermal metrics keep the
         // symmetric |z| rule. Diagnostic path only — no alarm/safety consumer.
         const isThermal = metric.category === 'Thermal';
-        const warnEligible = isThermal ? v > med : true;
+        // v1.187.1 — the cell-spread outlier is one-sided too. A spread LOWER than the siblings' is
+        // the healthy direction: a better-balanced pack, or simply the first pack to report after
+        // the knee relaxes. On 2026-09-30 14:00 Core 2 pack 3 had relaxed to 23 mV against a median
+        // of 51 mV built from staler knee readings and was carded a WARNING at z 9.4; it ended the
+        // charge as the best-balanced pack of five. The low side stays visible at info with
+        // annunciate:false — not pushed, not spoken, not counted toward the condition, and through
+        // autoTuneCounts not fed to the auto-tune rollups, so its benign short clears cannot help
+        // demote the high side. The high side is unchanged, and vdiff-warn / vdiff-crit judge every
+        // pack against fixed limits whatever its siblings read. SoC and SoH keep the symmetric rule.
+        const lowSpread = metric.key === 'voldiff' && v < med;
+        const warnEligible = isThermal ? v > med : !lowSpread;
         const severity = z >= Z_WARN && warnEligible ? 'warning' : 'info';
         // v1.187.0 — TOP-OF-CHARGE GATE for the cell-spread outlier. On 2026-09-29 (15:06-15:27)
         // this was the only alert family that spoke during a top-of-charge knee: packs enter the
@@ -243,8 +256,10 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
           packNum: pk.num,
           ...(pk.packSn ? { sourcePackSn: pk.packSn } : {}), // v1.173.0 — lets the residency check see a new pack under this id
           title: `${cap(metric.label)} — peer outlier`,
-          detail: `${d.deviceName} Pack ${pk.num} ${metric.label} is ${metric.fmt(v)}, ${metric.fmt(absDev)} ${dir} the sibling-pack median of ${metric.fmt(med)} (peer z-score ${z.toFixed(1)}).${topOfChargeSpread ? ' At top of charge: not announced on the speakers.' : ''}`,
+          detail: `${d.deviceName} Pack ${pk.num} ${metric.label} is ${metric.fmt(v)}, ${metric.fmt(absDev)} ${dir} the sibling-pack median of ${metric.fmt(med)} (peer z-score ${z.toFixed(1)}).${topOfChargeSpread ? ' At top of charge: not announced on the speakers.' : ''}${lowSpread ? ' A lower spread than its siblings is not a fault: shown for reference; not pushed or announced.' : ''}`,
           ...(topOfChargeSpread ? { audible: false } : {}),
+          // v1.187.1 — see lowSpread above.
+          ...(lowSpread ? { annunciate: false, muteReason: PEER_SPREAD_LOW_MUTE_REASON } : {}),
           facts: [
             { label: 'This pack', value: metric.fmt(v) },
             { label: 'Sibling median', value: metric.fmt(med) },
