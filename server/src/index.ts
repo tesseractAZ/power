@@ -180,6 +180,9 @@ import {
   medianFilter3,
   plannerSizingNeedBuyKwh,
   calibratedLoadBandFactor, calibratedBuyDebiasFactor,
+  costSurplusLoadFactor, measuredHourlyLoadFloorW, costMorningSurplusKwh,
+  COST_SURPLUS_LOAD_LOOKBACK_DAYS, COST_SURPLUS_FLOOR_DAYS,
+  type MorningSurplusHour,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -2934,6 +2937,8 @@ const surfacedCollapses = new Set<string>();
 // v1.108.0 — night-charge load-band calibration: last logged value (log on change only).
 let lastLoggedLoadBandKey: string | null = null;
 let lastLoggedBuyDebiasKey: string | null = null;
+// v1.187.1 — the cost ceiling's load de-bias: last logged value (log on change only).
+let lastLoggedCostLoadKey: string | null = null;
 /**
  * v1.125.0 — the ISLANDED load, kW: the SHP2's own circuit sum.
  *
@@ -3656,6 +3661,8 @@ async function recomputeNightChargePlan(
   let morningSurplusP50Kwh = 0;
   let morningP50Complete = true;
   let morningHasData = false;
+  // v1.187.1 — the same hours, kept for the cost ceiling's de-biased surplus below.
+  const morningHours: Array<MorningSurplusHour & { ts: number }> = [];
   const morningEndMs = windowEndMs + 14 * HOUR_MS;
   if (window) {
     for (const pb of prob?.hours ?? []) {
@@ -3663,6 +3670,7 @@ async function recomputeNightChargePlan(
       const fh = dayAheadByEpoch.get(Math.floor(pb.ts / HOUR_MS));
       if (!fh) continue;
       morningHasData = true;
+      morningHours.push({ ts: pb.ts, p50W: pb.p50W, p90W: pb.p90W, loadW: fh.forecastLoadW, evW: fh.predictedEvLoadW ?? 0 });
       morningSurplusKwh += Math.max(0, pb.p90W - fh.forecastLoadW) / 1000;
       if (typeof pb.p50W === 'number' && Number.isFinite(pb.p50W)) {
         morningSurplusP50Kwh += Math.max(0, pb.p50W - fh.forecastLoadW) / 1000;
@@ -3673,6 +3681,39 @@ async function recomputeNightChargePlan(
   }
   const morningPvSurplusP90Kwh = morningHasData ? round2(morningSurplusKwh) : null;
   const morningPvSurplusP50Kwh = morningHasData && morningP50Complete ? round2(morningSurplusP50Kwh) : null;
+  // v1.187.1 — the cost ceiling's surplus on a DE-BIASED load: the forecast load ran above the
+  // measured load on every ledger night of 2026-09-22..28 (load_err_frac −0.26 to −0.43), so the
+  // surplus above left too little room and the pool filled by 13:00 on 09-30 with ~9-12 kWh of PV
+  // curtailed. The factor is the ledger's median realized/forecast load (shrink-only, ramped in
+  // from COST_SURPLUS_LOAD_MIN_SAMPLES nights); each hour is floored at the least the house drew
+  // in that clock hour over the trailing week. Cost mode only, and only where it widens the
+  // headroom (the planner's debiasedCostSurplusKwh); the raw P90 above stays the over-buy flag.
+  const costLoadCal = costSurplusLoadFactor(
+    (() => { try { return recorder.readNightLedger(COST_SURPLUS_LOAD_LOOKBACK_DAYS); } catch { return []; } })(),
+  );
+  let costSurplusLoad: NightChargeInputDeps['costSurplusLoad'] = null;
+  if (objectiveMode === 'cost' && costLoadCal.factor < 1 && morningHours.length > 0) {
+    const tz = tariffModel.timezone;
+    const loadPts = await analytics
+      .query(shp2.sn, 'panel_load', nowMs - COST_SURPLUS_FLOOR_DAYS * 24 * HOUR_MS, nowMs, 3600)
+      .catch(() => null);
+    const floorByHour = loadPts ? measuredHourlyLoadFloorW(loadPts, (ts) => localParts(ts, tz).hour) : null;
+    const deb = costMorningSurplusKwh(
+      morningHours.map((h) => ({ ...h, floorW: floorByHour ? floorByHour[localParts(h.ts, tz).hour] : null })),
+      costLoadCal.factor,
+    );
+    costSurplusLoad = { factor: costLoadCal.factor, basis: costLoadCal.basis, samples: costLoadCal.samples, ...deb };
+    const key = `${costLoadCal.factor.toFixed(3)}:${costLoadCal.samples}:${floorByHour ? 'floor' : 'nofloor'}`;
+    if (key !== lastLoggedCostLoadKey) {
+      lastLoggedCostLoadKey = key;
+      app.log.info(
+        `night-charge: cost-ceiling surplus counts the house load at ×${costLoadCal.factor.toFixed(2)} of its forecast `
+        + `(median realized/forecast ${costLoadCal.medianRatio?.toFixed(2) ?? '—'} over ${costLoadCal.samples} ledger night(s)`
+        + `${floorByHour ? '' : '; no measured hourly floor, so every hour keeps its forecast'}) — cost ceiling only, `
+        + `never past the resilience target; P50 surplus ${morningPvSurplusP50Kwh ?? '—'} → ${deb.p50Kwh ?? '—'} kWh`,
+      );
+    }
+  }
   // v1.168.0 — the Thursday rule, from the tariff calendar: tonight is a full window and
   // the next full one is more than a day after it (short windows stepped over).
   const nightLongGapAhead = longGapAhead(
@@ -3747,6 +3788,7 @@ async function recomputeNightChargePlan(
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh,
     morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead, prePeakPvSurplusP10Kwh,
+    costSurplusLoad,
     buyDebiasFactor: buyDebiasCal.factor,
     buyDebiasBasis: buyDebiasCal.basis,
     buyDebiasSamples: buyDebiasCal.samples,
