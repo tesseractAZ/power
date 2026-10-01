@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot, type FleetSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext } from './alerts.js';
 import { broadcastHealthAlert, broadcastDegradedAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds, rateFloorIdleHeldSns } from './messageRateFloorAlert.js';
@@ -40,6 +40,7 @@ import { captureSnapshot, extractFeatures, captureLrFeatures } from './featureSn
 // v0.9.59 — rollups use family keys (so a condition spread across 5 packs
 // aggregates as one family for threshold purposes).
 import { familyOf } from './alertOutcomes.js';
+import { setDefectivePackRetireLog } from './defectivePackLatch.js';
 // v0.9.59 — persist telemetry events so rise/short-clear/long-active
 // counts survive restarts. Without this the auto-silencing rules can
 // effectively never fire on a panel that gets occasional restarts.
@@ -119,6 +120,33 @@ export function advanceOffPanelStreaks(
 }
 
 /**
+ * v1.187.1 (review) — the Cores whose ROSTER MUTE has not settled on this tick: the panel roster
+ * has not been read yet in this process (`rosterSeen` false: every Core), or the Core is part-way
+ * through its off-panel streak (0 < n < `ticks`). An alert carrying one of these serials is not
+ * yet muted although its Core may be off the panel, so its annunciating on such a tick does not
+ * mark the episode as annunciated (clearedRetention). The streak starts at 0 in every process, so
+ * an off-panel Core's standing alerts annunciated on the first ticks after each restart and their
+ * cleared rows never read as roster-muted — with restarts several a day, few did. Retention only:
+ * the mute itself, the push and the speech are unchanged. A roster that empties mid-process clears
+ * every streak and mutes nobody, so those ticks count (the alerts do annunciate). PURE; reads
+ * `streak` after advanceOffPanelStreaks has advanced it.
+ */
+export function rosterMuteUnsettledSns(
+  devices: Record<string, DeviceSnapshot>,
+  streak: ReadonlyMap<string, number>,
+  rosterSeen: boolean,
+  ticks: number = OFF_PANEL_DEMOTE_TICKS,
+): string[] {
+  const out: string[] = [];
+  for (const d of Object.values(devices)) {
+    if (d.projection?.kind !== 'dpu') continue;
+    const n = streak.get(d.sn) ?? 0;
+    if (!rosterSeen || (n > 0 && n < ticks)) out.push(d.sn);
+  }
+  return out;
+}
+
+/**
  * v1.95.0 — should this alert stop annunciating because its hardware is not
  * wired into the home pool? A critical Thermal alert is NEVER demoted: a bench
  * pack that is overheating must page regardless of where it is wired.
@@ -182,6 +210,10 @@ const silentCriticalLogged = new Set<string>();
  * A critical muted for any OTHER reason (bench spare, off-panel) quiets nothing here. Runs on the
  * main thread over the same tick's computeAlerts + computeLearnedAlerts output. Mutates and
  * returns `alerts`; pure otherwise. Exported for tests.
+ * v1.187.1 — a policy stamp that takes precedence clears `mutedBy`, so a bench spare's critical
+ * (alerts.ts stamps it before this runs) quiets nothing here even while a knee mute also applies.
+ * The roster stamp (applyRosterMute) runs after this, on the assembled list, and mutes the
+ * outlier itself in the same pass: its id carries the same serial.
  */
 export function quietPeerSpreadUnderHeldCritical<T extends Alert>(alerts: T[]): T[] {
   const held = new Map<string, VdiffCritMuteReason>();
@@ -252,6 +284,7 @@ export function shouldDemoteAnnunciation(
  * Core's pack critical raised while balancing was logged as "the BMS is balancing the cells", and
  * nothing re-logged it once balancing stopped and the roster was the only mute left. Never-muted
  * alerts are untouched; `annunciate` changes exactly as shouldDemoteAnnunciation says. MUTATES.
+ * v1.187.1 — the precedence covers `mutedBy` too: a roster-muted critical carries none.
  */
 export function applyRosterMute(a: Alert, mutedSns: readonly string[], mutedSpareSns: readonly string[]): void {
   if (shouldDemoteAnnunciation(a, mutedSns)) {
@@ -259,6 +292,11 @@ export function applyRosterMute(a: Alert, mutedSns: readonly string[], mutedSpar
     a.muteReason = monitorMuteReason(a, mutedSpareSns);
   } else if (a.annunciate === false && !isNeverMutedAlert(a) && mutedSns.some((sn) => a.id.includes(sn))) {
     a.muteReason = monitorMuteReason(a, mutedSpareSns);
+    // v1.187.1 — the roster now holds it, not the bounded cell-spread mute: mutedBy names the mute
+    // in force, and soundedCriticalHeld holds a sounded critical red on it. Left set, an off-panel
+    // Core's knee-muted vdiff-crit held the level red and delayed the all-clear (a policy mute holds
+    // nothing). The branch above never meets one: alerts.ts sets mutedBy only with annunciate:false.
+    delete a.mutedBy;
   }
 }
 
@@ -598,6 +636,9 @@ interface TrackedAlert {
    *  in-memory quietQueue does not survive a restart). Cleared once the alert is
    *  actually dispatched or the digest sends. */
   queued?: boolean;
+  /** v1.187.1 — the alert annunciated (annunciate !== false) on at least one tick of this episode
+   *  (clearedRetention). */
+  annunciated?: boolean;
   /** v0.80.0 — true only when a fire push for this alert was ACTUALLY delivered
    *  (dispatch succeeded, digest sent, or rehydrated from a persisted notify-state
    *  record — i.e. a real prior push). Distinct from `notified`, which boot-seeding
@@ -637,6 +678,50 @@ export interface ClearedAlert {
   raisedAt: number;
   clearedAt: number;
   durationMs: number;
+  /** v1.187.1 — whether the episode's push reached the phone (`pushSent` at the clear). Absent on
+   *  records written before v1.187.1: unknown, and treated as possibly pushed. */
+  pushed?: boolean;
+  /** v1.187.1 — the episode never annunciated (never pushed, never spoken: on screen only) and its
+   *  subject was muted by the ROSTER — a bench spare or an off-panel Core — when it cleared
+   *  (clearedRetention). Such rows leave a full ledger early (pruneOldestNonSignificant). */
+  rosterMuted?: true;
+}
+
+/**
+ * v1.187.1 — how long a roster-muted row (ClearedAlert.rosterMuted) keeps its place in a full
+ * ledger before it leaves ahead of annunciated history: the bench-spare record of the last month
+ * stays whole — where a pack that is going bad on a bench chassis builds its record before any
+ * confirmation — and older ones no longer push out what actually alarmed.
+ */
+export const CLEARED_ROSTER_MUTED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * v1.187.1 — WARRANTY EVIDENCE in the cleared ledger: the rows /api/warranty-export would put in
+ * a claim for a confirmed-defective pack. For every `pack-defective-<core>-<pk>` row, the rows of
+ * that Core (id or sourceSn, as the export matches them) whose episode overlaps the pack-defective
+ * episode — the record that stood while the Core carried the pack, muted or not — and every row
+ * carrying that pack's serial (sourcePackSn, the export's ?packSn= filter), wherever it lived.
+ * The pack-defective rows are their own evidence. PURE; returns a predicate over the rows.
+ */
+export function warrantyEvidence(logArr: readonly ClearedAlert[]): (e: ClearedAlert) => boolean {
+  const windows: Array<{ coreSn: string; raisedAt: number; clearedAt: number }> = [];
+  const packSns = new Set<string>();
+  // v1.187.1 (log review) — a row whose id is not a string (a hand-edited or corrupt file) is no
+  // one's evidence; read as '' it cannot throw into the alert tick (loadClearedLog drops such rows).
+  const idOf = (e: ClearedAlert): string => (typeof e.alert?.id === 'string' ? e.alert.id : '');
+  for (const e of logArr) {
+    const id = idOf(e);
+    if (!id.startsWith('pack-defective-')) continue;
+    const rest = id.slice('pack-defective-'.length);
+    windows.push({ coreSn: rest.slice(0, rest.lastIndexOf('-')), raisedAt: e.raisedAt, clearedAt: e.clearedAt });
+    if (e.alert.sourcePackSn) packSns.add(e.alert.sourcePackSn);
+  }
+  return (e) => {
+    if (e.alert?.sourcePackSn != null && packSns.has(e.alert.sourcePackSn)) return true;
+    const id = idOf(e);
+    return windows.some((w) => (id.includes(w.coreSn) || e.alert?.sourceSn === w.coreSn)
+      && e.raisedAt <= w.clearedAt && e.clearedAt >= w.raisedAt);
+  };
 }
 
 /** v1.12.0 (review F19) — evict ONE entry from a newest-first cleared-alert log.
@@ -649,24 +734,66 @@ export interface ClearedAlert {
  *  oldest noise-flagged warning (via the optional `isNoise` predicate, wired to
  *  the auto-tune family flags) → oldest warning → oldest overall. A CRITICAL can
  *  only be evicted when the entire log is criticals. Mutates in place; pure +
- *  exported for tests. */
+ *  exported for tests.
+ *
+ *  v1.187.1 — the ledger sat at its cap (1500 rows, 82 days) dropping 82-day-old rows that had
+ *  pushed while recent on-screen-only bench-spare rows stayed; and since v1.186.0 learns the
+ *  auto-tune flags from annunciating alerts only, the noise tier was one family (peer-voldiff),
+ *  so its PUSHED episodes went first. The pack-defective rows for a warranty pack were 738
+ *  warnings from the front of the queue. Order now, among warnings, after info:
+ *   1. a roster-muted row (never annunciated; a bench spare or off-panel Core) older than
+ *      CLEARED_ROSTER_MUTED_KEEP_MS — not one that is warranty evidence;
+ *   2. a noise-flagged row recorded as NOT pushed, then 3. any noise-flagged row — neither one
+ *      that is warranty evidence;
+ *   4. the oldest warning that is not never-muted (isNeverMutedAlert: pack-defective, cell-ovp,
+ *      shp2-multi-panel, critical Thermal);
+ *   5. (review) the oldest warning that is not pack-defective, so a pack-defective row leaves after
+ *      every other warning, the other never-muted ones included;
+ *   6. the oldest warning.
+ *  A row muted by a CONDITION (balancing, top of charge) stays in the plain FIFO tier: it is the
+ *  record that shows afterwards whether a mute hid a real fault. Rows written before v1.187.1
+ *  carry neither flag and stay there too. `nowMs` dates tier 1. */
 export function pruneOldestNonSignificant(
   logArr: ClearedAlert[],
   isNoise?: (e: ClearedAlert) => boolean,
+  nowMs: number = Date.now(),
 ): void {
   const sev = (i: number) => logArr[i].alert?.severity ?? 'info';
-  for (let i = logArr.length - 1; i >= 0; i--) {
-    if (sev(i) === 'info') { logArr.splice(i, 1); return; }
-  }
-  if (isNoise) {
+  const evictOldest = (pick: (e: ClearedAlert, i: number) => boolean): boolean => {
     for (let i = logArr.length - 1; i >= 0; i--) {
-      if (sev(i) === 'warning' && isNoise(logArr[i])) { logArr.splice(i, 1); return; }
+      if (pick(logArr[i], i)) { logArr.splice(i, 1); return true; }
     }
+    return false;
+  };
+  if (evictOldest((_e, i) => sev(i) === 'info')) return;
+  const evidence = warrantyEvidence(logArr);
+  if (evictOldest((e, i) => sev(i) === 'warning' && e.rosterMuted === true
+    && nowMs - e.clearedAt > CLEARED_ROSTER_MUTED_KEEP_MS && !evidence(e))) return;
+  if (isNoise) {
+    if (evictOldest((e, i) => sev(i) === 'warning' && isNoise(e) && e.pushed === false && !evidence(e))) return;
+    if (evictOldest((e, i) => sev(i) === 'warning' && isNoise(e) && !evidence(e))) return;
   }
-  for (let i = logArr.length - 1; i >= 0; i--) {
-    if (sev(i) === 'warning') { logArr.splice(i, 1); return; }
-  }
+  // v1.187.1 (log review) — a row with no string id is not never-muted (isNeverMutedAlert reads the
+  // id and would throw on it, every tick at the cap): it leaves with the ordinary warnings.
+  if (evictOldest((e, i) => sev(i) === 'warning' && (typeof e.alert?.id !== 'string' || !isNeverMutedAlert(e.alert)))) return;
+  if (evictOldest((e, i) => sev(i) === 'warning' && !String(e.alert?.id ?? '').startsWith('pack-defective-'))) return;
+  if (evictOldest((_e, i) => sev(i) === 'warning')) return;
   logArr.pop();
+}
+
+/**
+ * v1.187.1 — the retention facts stamped on a cleared row (ClearedAlert.pushed / rosterMuted): did
+ * its push go out, and was it on screen only because the roster mutes its subject (`mutedSns`,
+ * the tick's bench-spare + off-panel list, as applyRosterMute reads it). `annunciated` is whether
+ * the alert annunciated on ANY tick of the episode. PURE; exported for tests.
+ */
+export function clearedRetention(
+  t: { alert: Pick<Alert, 'id'>; pushSent?: boolean; annunciated?: boolean },
+  mutedSns: readonly string[],
+): { pushed: boolean; rosterMuted?: true } {
+  const pushed = t.pushSent === true;
+  const rosterMuted = !pushed && t.annunciated !== true && mutedSns.some((sn) => t.alert.id.includes(sn));
+  return rosterMuted ? { pushed, rosterMuted: true } : { pushed };
 }
 
 /**
@@ -2149,7 +2276,8 @@ export function saveNotifiedState(path: string, state: Map<string, NotifyRecord>
  *  mirroring loadNotifiedState/saveNotifiedState). A bounded, newest-first array
  *  in a JSON sidecar; survives restarts so the operator can reconstruct what
  *  fired and cleared even across the daily Pi power cut. `load` validates each
- *  record (drops garbage / non-arrays / a corrupt file) and caps to `max`;
+ *  record (drops garbage / non-arrays / a corrupt file; v1.187.1: a row whose
+ *  alert id or severity is not a string) and caps to `max`;
  *  `save` is atomic and best-effort (history is observability, never gates a
  *  live alarm). */
 export function loadClearedLog(path: string, max: number): ClearedAlert[] {
@@ -2160,9 +2288,13 @@ export function loadClearedLog(path: string, max: number): ClearedAlert[] {
     if (!Array.isArray(raw)) return out;
     for (const c of raw) {
       const rec = c as Partial<ClearedAlert>;
+      // v1.187.1 (log review) — the alert's id and severity must be strings: the ledger's eviction
+      // and warranty-evidence tiers read them on every clear at the cap, and a row without them (a
+      // hand-edited or corrupt file; the monitor never writes one) threw there, every tick.
       if (
         rec && typeof rec === 'object' &&
         rec.alert && typeof rec.alert === 'object' &&
+        typeof rec.alert.id === 'string' && typeof rec.alert.severity === 'string' &&
         Number.isFinite(rec.raisedAt) && Number.isFinite(rec.clearedAt)
       ) {
         out.push(rec as ClearedAlert);
@@ -2219,6 +2351,9 @@ export function startAlertMonitor(
   warn: (m: string) => void = log,
   deps: AlertMonitorDeps = {},
 ): AlertMonitor {
+  // v1.187.1 — a defective-pack record retired by computeAlerts is logged through the warn sink: a
+  // timestamped line at level 40 in the structured log (defectivePackLatch.retireWarn).
+  setDefectivePackRetireLog(warn);
   let cfg = loadNotifyConfig();
   const send = deps.send ?? sendNotification;
   const channelConfigured = (): boolean => deps.send != null || isConfigured(cfg);
@@ -2251,6 +2386,8 @@ export function startAlertMonitor(
   let lastDigestHour = -1;
   /** v1.95.0 — consecutive ticks a DPU has been absent from a non-empty SHP2 roster. */
   const offPanelStreak = new Map<string, number>();
+  /** v1.187.1 (review) — a non-empty panel roster has been read in this process (rosterMuteUnsettledSns). */
+  let panelRosterSeen = false;
   const monitorStartMs = Date.now();
 
   // v0.15.21 — notified-state persistence (see loadNotifiedState above).
@@ -2267,6 +2404,12 @@ export function startAlertMonitor(
     process.env.IDLE_POOL_STATE_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'idle-pool-state.json');
   restoreIdlePoolFiredDay(loadIdlePoolFiredDay(idlePoolStatePath));
   let idlePoolFiredDayOnDisk = idlePoolFiredDay();
+  // v1.187.1 — the end-of-charge knee sessions survive a restart: each pack's clocks are restored
+  // here, before the first computeAlerts, by the in-process gap rule (alerts.ts
+  // restoreVdiffKneeSessions), and written on each change after it. Main thread, like the knee map.
+  const vdiffKneeStatePath =
+    process.env.VDIFF_KNEE_STATE_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'vdiff-knee-state.json');
+  let vdiffKneeOnDisk = restoreVdiffKneeSessions(vdiffKneeStatePath, Date.now(), log);
   // v1.86.0 — the digest's MATERIAL survives restarts. On 2026-08-17 the
   // 04:30/04:52 deploys destroyed the in-memory quietQueue + overnightResolved,
   // three overnight fires left zero trace, and the empty-queue digest returned
@@ -2991,12 +3134,14 @@ export function startAlertMonitor(
     ]);
     // v0.7.7 — build the connectivity context the alerts engine uses to
     // enrich offline/stale alerts with last-data timestamps + source.
-    const perDevice = new Map<string, { lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number }>();
+    const perDevice: ConnectivityContext['perDevice'] = new Map();
     for (const d of Object.values(snap.devices)) {
       perDevice.set(d.sn, {
         lastMqttAt: store.lastMqttAtBySn.get(d.sn),
         lastSource: store.lastSourceBySn.get(d.sn),
         mqttCount: store.mqttMsgCountBySn.get(d.sn) ?? 0,
+        // v1.187.1 — a device with no data this session is described from its first listing.
+        firstListedAtMs: store.firstListedAt(d.sn),
       });
     }
     // v1.8.0 (review F3) — the SHP2's pool-unknown onset (post-grace-hold), for
@@ -3106,6 +3251,8 @@ export function startAlertMonitor(
       ...peakGridDrawAlerts(peakDraw, Date.now()),
       ...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0
     ]);
+    // v1.187.1 — the knee sessions computeAlerts just advanced, written only when one changed.
+    vdiffKneeOnDisk = persistVdiffKneeSessions(vdiffKneeStatePath, vdiffKneeOnDisk);
     const liveTail: Alert[] = [
       // v0.83.0 — recorded telemetry blackouts (host power loss / add-on stop /
       // MQTT stall) surfaced as operator push alerts. Reads the recorder's durable
@@ -3207,6 +3354,7 @@ export function startAlertMonitor(
     // its streaks) and stamped on both publishes below.
     // v1.187.0 — the spares are kept apart too, so the stamp can say WHICH policy muted it.
     let mutedSpareSns: string[] = [];
+    let rosterUnsettledSns: string[] = []; // v1.187.1 (review) — see rosterMuteUnsettledSns
     const muted: string[] = (() => {
       const connectedSns = shp2ConnectedDpuSns(snap.devices);
       const mutedSpares = benchSpareSns().filter((sn) => isExpectedOfflineSpare(sn, connectedSns));
@@ -3227,6 +3375,8 @@ export function startAlertMonitor(
       // is overheating is exactly the case where the operator must be paged
       // regardless of where the hardware is wired.
       const offPanel = advanceOffPanelStreaks(snap.devices, connectedSns, offPanelStreak);
+      if (connectedSns.size > 0) panelRosterSeen = true;
+      rosterUnsettledSns = rosterMuteUnsettledSns(snap.devices, offPanelStreak, panelRosterSeen);
       // v1.129.0 — MULTI-PANEL DISARM. Both mute lists are derived from the
       // membership model, and with a second panel present that model is known
       // unsound: a Core wired to panel #2 is absent from the roster for a WIRING
@@ -3350,6 +3500,8 @@ export function startAlertMonitor(
           raisedAt: trueFirstSeen,
           clearedAt: nowMs,
           durationMs: duration,
+          // v1.187.1 — pushed, and on screen only by the roster: what a full ledger drops first.
+          ...clearedRetention(t, muted),
         });
         if (clearedLog.length > CLEARED_LOG_MAX) evictOldestCleared(); // v1.12.0 (F19) — noise-first eviction
         persistClearedLog(); // v0.85.0 — survive restarts (the daily Pi power cut)
@@ -3645,6 +3797,14 @@ export function startAlertMonitor(
     // v1.186.0 — the tick's dispatches are decided; the new alerts' feature snapshots run
     // detached from here (captureFeaturesDetached) and nothing below waits on them.
     for (const a of featureCaptures) void captureFeaturesDetached(a, snap, now);
+
+    // v1.187.1 — whether each episode ever annunciated, for its cleared row (clearedRetention). One
+    // pass over this tick's set, new and standing alerts alike, after the roster mute is applied.
+    // (review) Not on a tick on which its Core's roster mute has not settled (rosterMuteUnsettledSns).
+    for (const a of alerts) {
+      const t = tracked.get(a.id);
+      if (t != null && a.annunciate !== false && !rosterUnsettledSns.some((sn) => a.id.includes(sn))) t.annunciated = true;
+    }
 
     // Morning digest — fires once when the local hour rolls over to DIGEST_HOUR
     if (Number.isInteger(DIGEST_HOUR) && DIGEST_HOUR >= 0 && DIGEST_HOUR <= 23) {

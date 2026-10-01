@@ -160,8 +160,11 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
     // `dropPct >= 12` (with cleanDays >= 6). Was 15 here — too high — leaving the
     // 12–15% band alerted-but-uncardable. Keep the `>= 6` clean-days gate aligned too.
     const SOILING_CARD_DROP_PCT = 12; // mirror analytics.ts soiling alert threshold
+    // v1.187.1 — and only on a covered recent window, as the alert requires (`recentCovered`):
+    // 2026-09-30 a Core whose last well-covered days were mostly from before a rain read 13.9% and
+    // raised "Wash solar panels" for panels the rain had already washed.
     const perDpu = ctx.soiling.perDevice.filter(
-      (d) => d.dropPct != null && d.dropPct >= SOILING_CARD_DROP_PCT && d.cleanDays >= 6,
+      (d) => d.dropPct != null && d.dropPct >= SOILING_CARD_DROP_PCT && d.cleanDays >= 6 && d.recentCovered,
     );
     if (perDpu.length > 0) {
       const id = 'wash-panels';
