@@ -205,15 +205,18 @@ function buildSoilingInputs(dayCoeffs: number[], hoursPerDay = 11) {
       wx.set(he, { ts: he * 3_600_000, cloudCoverPct: 10, radiationWm2: RAD, tempC: 25 } as WeatherHour);
     }
   });
-  return { pv, wx };
+  return { pv, wx, nowMs: soilingNowAfter(dayCoeffs.length) };
 }
+/** v1.187.1 — the evaluation instant just after an n-day fixture (computeSoiling judges the recent
+ *  pool's age against it; the fixture's days are in 1970). */
+const soilingNowAfter = (nDays: number) => nDays * 24 * 3_600_000;
 
 test('computeSoiling — robust to a freak-high baseline + 2 low recent outliers (no false soiling)', () => {
   // 6 normal clean days (~10) + one freak-high day (13) + two transient-low recent
   // days (6.5), all FULL clear-hour coverage. Pre-v0.54.2 (max baseline + last-3
   // median) → ~50% drop (false alarm); robust p90 + last-5 median → ~0%.
-  const { pv, wx } = buildSoilingInputs([10, 10, 10, 10, 10, 13, 10, 6.5, 6.5]);
-  const s = computeSoiling(pv, wx);
+  const { pv, wx, nowMs } = buildSoilingInputs([10, 10, 10, 10, 10, 13, 10, 6.5, 6.5]);
+  const s = computeSoiling(pv, wx, undefined, nowMs);
   assert.ok(s, 'expected a soiling estimate');
   assert.ok(s!.recentCovered, 'all days are fully covered here');
   assert.ok(s!.dropPct < 12, `robust dropPct must stay below the 12% alert threshold, got ${s!.dropPct}`);
@@ -221,10 +224,11 @@ test('computeSoiling — robust to a freak-high baseline + 2 low recent outliers
 
 test('computeSoiling — a SUSTAINED real drop still fires', () => {
   // baseline clean ~10, then the last 5 days all genuinely low (~8 ⇒ ~20% soiling)
-  const { pv, wx } = buildSoilingInputs([10, 10, 10, 10, 10, 8, 8, 8, 8, 8]);
-  const s = computeSoiling(pv, wx);
+  const { pv, wx, nowMs } = buildSoilingInputs([10, 10, 10, 10, 10, 8, 8, 8, 8, 8]);
+  const s = computeSoiling(pv, wx, undefined, nowMs);
   assert.ok(s, 'expected a soiling estimate');
   assert.ok(s!.dropPct >= 12, `a sustained real drop must still fire, got ${s!.dropPct}`);
+  assert.equal(s!.recentCovered, true, 'v1.187.1 — a recent pool of the last five days is recent');
 });
 
 /* v0.63.0 — fleet soiling is derived from the PER-CORE estimates, not the summed
@@ -246,11 +250,11 @@ test('fleetSoilingFromDevices — immune to the fleet-sum coverage-deflation art
 
   // OLD path (fleet sum): C's missing recent hours leave the sum ~1/3 short on
   // those days → a phantom ~33% "soiling" even though every array is clean.
-  const bug = computeSoiling(fleetSum([A, B, C]), wx);
+  const bug = computeSoiling(fleetSum([A, B, C]), wx, undefined, soilingNowAfter(9));
   assert.ok(bug && bug.dropPct >= 25, `the fleet-sum artifact should inflate, got ${bug?.dropPct}`);
 
   // FIX (per-Core median): every array is really clean → ~0%, below the 12% alert.
-  const fixed = fleetSoilingFromDevices([A, B, C], wx);
+  const fixed = fleetSoilingFromDevices([A, B, C], wx, [], soilingNowAfter(9));
   assert.ok(fixed, 'expected a fleet estimate');
   assert.ok(fixed!.dropPct < 12, `per-Core median must stay below the alert threshold, got ${fixed!.dropPct}`);
 });
@@ -258,15 +262,16 @@ test('fleetSoilingFromDevices — immune to the fleet-sum coverage-deflation art
 test('fleetSoilingFromDevices — a SUSTAINED real fleet-wide drop still fires (every array soiled)', () => {
   const wx = buildSoilingInputs([10, 10, 10, 10, 10, 10, 10, 10, 10, 10]).wx;
   const soiled = () => coreMap([10, 10, 10, 10, 10, 8, 8, 8, 8, 8]); // ~20% per array
-  const s = fleetSoilingFromDevices([soiled(), soiled(), soiled()], wx);
+  const s = fleetSoilingFromDevices([soiled(), soiled(), soiled()], wx, [], soilingNowAfter(10));
   assert.ok(s && s.dropPct >= 12, `real uniform soiling must still fire, got ${s?.dropPct}`);
+  assert.equal(s!.recentCovered, true, 'v1.187.1 — and the alert may fire on it');
 });
 
 test('fleetSoilingFromDevices — needs ≥2 home Cores with an estimate, else null', () => {
   const wx = buildSoilingInputs([10, 10, 10, 10, 10, 10]).wx;
   const one = coreMap([10, 10, 10, 10, 10, 10]);
-  assert.equal(fleetSoilingFromDevices([one], wx), null, 'a single Core cannot represent the fleet');
-  assert.equal(fleetSoilingFromDevices([], wx), null, 'no Cores → null');
+  assert.equal(fleetSoilingFromDevices([one], wx, [], soilingNowAfter(6)), null, 'a single Core cannot represent the fleet');
+  assert.equal(fleetSoilingFromDevices([], wx, [], soilingNowAfter(6)), null, 'no Cores → null');
 });
 
 /* ─── cache-warmer reset (v0.9.11 bug fix) ───────────────────────────────
