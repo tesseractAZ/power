@@ -269,15 +269,22 @@ function soilRecorder(sn: string, withRealized: boolean): Recorder {
   const firstWrite: Row[] = [];
   const realized: Row[] = [];
   const pv: Row[] = [];
+  const soc: Row[] = [];
   const RAD = [820, 900, 810];
   for (let d = 20; d >= 1; d--) {
     const tooDark = d >= 13 && d <= 15;
+    // v1.187.1 — PV hour [H, H+1) pairs with the label H+1 and the cloud gate reads both ends:
+    // labels 10-13 carry the weather for PV hours 10-12.
+    const label10 = new Date(now - d * DAY); label10.setHours(10, 0, 0, 0);
+    realized.push({ ts: label10.getTime(), value: 600 });
+    firstWrite.push({ ts: label10.getTime(), value: 600 });
     for (let k = 0; k < 3; k++) {
       const at = new Date(now - d * DAY); at.setHours(10 + k, 0, 0, 0);
       const ts = at.getTime();
-      realized.push({ ts, value: RAD[k] });
-      firstWrite.push({ ts, value: tooDark ? 0.6 * RAD[k] : RAD[k] });
+      realized.push({ ts: ts + 3_600_000, value: RAD[k] });
+      firstWrite.push({ ts: ts + 3_600_000, value: tooDark ? 0.6 * RAD[k] : RAD[k] });
       pv.push({ ts, value: 9 * RAD[k] });
+      soc.push({ ts, value: 60 }); // v1.187.1 — packs well below the charge taper
     }
   }
   return makeRecorderStub({
@@ -286,6 +293,7 @@ function soilRecorder(sn: string, withRealized: boolean): Recorder {
       if (qsn === 'weather' && metric === 'ghi_wm2_realized') return withRealized ? realized : [];
       if (qsn === 'weather' && metric === 'cloud_pct') return firstWrite.map((g) => ({ ts: g.ts, value: 0 }));
       if (qsn === sn && metric === 'pv_total') return pv;
+      if (qsn === sn && metric === 'soc') return soc;
       return [];
     },
   });

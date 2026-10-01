@@ -389,6 +389,12 @@ export function conditionFromAlerts(
       // ~20 s after every restart (2026-09-21 18:23:31, five deploys that day: a device reads
       // stale until its first fresh reading lands) and at stale episodes. Push + card kept.
       !a.id.startsWith('stale-') &&
+      // v1.187.1 — the panel-soiling estimate is maintenance that moves over weeks, never danger:
+      // a push and a card, no chime. What keeps it off the speakers is its `audible: false`
+      // (above, and speakableAlerts); this id exclusion is the second guard, as for
+      // peak-idle-pool below. 2026-09-30 17:03 it was the only counted warning and spoke a
+      // yellow ("Medium priority alarm. Solar system. …") on a curtailment artifact.
+      !a.id.startsWith('soiling-pv') &&
       // v1.187.0 — the on-peak idle-pool notice (peakGridDraw.ts) reports spend, never
       // danger: a [Low] push and a card, and no chime. A yellow for money would be spoken
       // in the tier a grid loss uses. (annunciate:false would drop the push too.)

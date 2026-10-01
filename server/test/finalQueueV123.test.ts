@@ -194,18 +194,24 @@ function backfillRecorder(sn: string): Recorder {
   const now = Date.now();
   const ghi: Array<{ ts: number; value: number }> = [];
   const pv: Array<{ ts: number; value: number }> = [];
+  const soc: Array<{ ts: number; value: number }> = [];
   const RAD = [820, 900, 810]; // hours 10/11/12 — all clear (≥250, cloud 0)
   for (let d = 60; d >= 1; d--) {
     const dayStart = now - d * DAY;
     const recent = d <= 7;
     const coeff = recent ? 8.0 : 9.0; // ~11% drop in the last week
+    // v1.187.1 — the PV hour [H, H+1) pairs with the radiation labelled H+1 (coveringRadiationEpoch),
+    // and the clear-sky gate reads the cloud at both ends: labels 10-13 for PV hours 10-12.
+    const label10 = new Date(dayStart); label10.setHours(10, 0, 0, 0);
+    ghi.push({ ts: label10.getTime(), value: 600 });
     for (let k = 0; k < 3; k++) {
       // Anchor each sample to local hour 10/11/12 so computeSoiling's clear-hour
       // grouping (≥3 clear hours/day) is satisfied deterministically.
       const anchor = new Date(dayStart); anchor.setHours(10 + k, 0, 0, 0);
       const ts = anchor.getTime();
-      ghi.push({ ts, value: RAD[k] });
+      ghi.push({ ts: ts + 3_600_000, value: RAD[k] });
       pv.push({ ts, value: coeff * RAD[k] });
+      soc.push({ ts, value: 60 }); // v1.187.1 — packs well below the charge taper
     }
   }
   return makeRecorderStub({
@@ -213,6 +219,7 @@ function backfillRecorder(sn: string): Recorder {
       if (qsn === 'weather' && metric === 'ghi_wm2') return ghi;
       if (qsn === 'weather' && metric === 'cloud_pct') return ghi.map((g) => ({ ts: g.ts, value: 0 }));
       if (qsn === sn && metric === 'pv_total') return pv;
+      if (qsn === sn && metric === 'soc') return soc;
       return [];
     },
   });

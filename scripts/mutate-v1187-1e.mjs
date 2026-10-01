@@ -1,0 +1,328 @@
+#!/usr/bin/env node
+/**
+ * mutate-v1187-1e.mjs — committed harness for v1.187.1 (soiling estimate): the estimate measures
+ * the array, not the packs, and it is never spoken.
+ *
+ * (1) computeSoiling counted the hours a home Core's pack was full as dirty panels: the DPU backs
+ * its MPPTs off to the load near its ceiling (2026-09-30 13:00, Core 1 2766 → 643 W under a clear
+ * 786 W/m²). Three such days in the last five read as a 47.9% drop. Each Core's charge-taper hours
+ * (chargeTaperHoursFromPts: the hour's highest SoC at or above saturationThresholdPct of the
+ * recorded, else live, ceiling, or no SoC recorded) are now left out, and a day that lost any
+ * counts only when the hours left reach the coverage bar. The forecast and the decomposition (per
+ * Core and per hour, and so the wash card) read the same hours. Mutants i-iv, x-xxv.
+ *
+ * (2) The soiling fits paired PV hour he with the radiation labelled he (the previous hour's sun).
+ * soilingClearSkyHour pairs it with coveringRadiationEpoch(he), clear only when the cloud reading
+ * at both labels is ≤ 25%, a missing label not clear, and only for completed hours. Mutants v-ix,
+ * xxvi.
+ *
+ * (3) soiling-pv raised and voiced a yellow ("Medium priority alarm …"). It carries
+ * `audible: false` (card and push kept), and conditionFromAlerts excludes the id as a second
+ * guard. Mutants xxvii-xxviii.
+ *
+ *   node scripts/mutate-v1187-1e.mjs
+ *
+ * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
+ *   SIGINT/SIGTERM/SIGHUP; refuses to start over a leftover mutant marker.
+ */
+import { readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SERVER = resolve(REPO, 'server');
+const AN = resolve(SERVER, 'src/analytics.ts');
+const BC = resolve(SERVER, 'src/broadcast.ts');
+
+const SUBSET = [
+  'test/soilingChargeTaper.test.ts',
+  'test/analytics.test.ts',
+  'test/finalQueueV123.test.ts',
+  'test/realizedGhiStage2.test.ts',
+  'test/repairIssues.test.ts',
+];
+
+const MUTANTS = [
+  /* ── (1) the taper hours in computeSoiling ────────────────────────────── */
+  {
+    id: 'i. ★★★ computeSoiling counts the taper hours',
+    file: AN,
+    find: '    if (taperHours.has(he)) { taperDays.add(day); taperCount++; continue; }',
+    to: '    /* MUTANT */',
+    why: 'The 09-30 incident: three full-pack days in the last five read as a ~48% drop, a spoken warning.',
+  },
+  {
+    id: 'ii. ★★★ a full-pack day is not remembered as one (its morning sliver is admitted)',
+    file: AN,
+    find: '    if (taperHours.has(he)) { taperDays.add(day); taperCount++; continue; }',
+    to: '    if (taperHours.has(he)) { taperCount++; continue; } /* MUTANT */',
+    why: 'Morning slivers enter the p90 baseline: where the clean coefficient is higher in the morning, a clean array reads ~15% soiled.',
+  },
+  {
+    id: 'iii. ★★★ the coverage rule for a full-pack day is gone',
+    file: AN,
+    find: '  const days = candidates.filter((d) => d.hours >= covBar || !taperDays.has(d.day));',
+    to: '  const days = candidates; /* MUTANT */',
+    why: 'As ii.',
+  },
+  {
+    id: 'iv. ★★ the coverage bar is exclusive for a full-pack day',
+    file: AN,
+    find: '  const days = candidates.filter((d) => d.hours >= covBar || !taperDays.has(d.day));',
+    to: '  const days = candidates.filter((d) => d.hours > covBar || !taperDays.has(d.day)); /* MUTANT */',
+    why: 'A full-pack day with exactly the bar\'s hours — which the recent pool itself accepts — is thrown away.',
+  },
+  /* ── (2) pairing ──────────────────────────────────────────────────────── */
+  {
+    id: 'v. ★★★ PV hour he pairs with the label he again',
+    file: AN,
+    find: '  const covering = wxByHour.get(coveringRadiationEpoch(he));',
+    to: '  const covering = wxByHour.get(he); /* MUTANT */',
+    why: 'The previous hour\'s sun: morning coefficients ×1.2-1.4, afternoon ×0.6-0.9; a morning-heavy day inflates the baseline.',
+  },
+  {
+    id: 'vi. ★★ the cloud reading at the START of the hour is not checked',
+    file: AN,
+    find: '  if (start.cloudCoverPct > SOILING_MAX_CLOUD_PCT) return null;',
+    to: '  /* MUTANT */',
+    why: 'An hour that began under cloud is a clear-sky sample.',
+  },
+  {
+    id: 'vii. ★★ the cloud reading at the END of the hour is not checked',
+    file: AN,
+    find: '  if (covering.cloudCoverPct > SOILING_MAX_CLOUD_PCT) return null;',
+    to: '  /* MUTANT */',
+    why: 'An hour that ended under cloud is a clear-sky sample.',
+  },
+  {
+    id: 'viii. ★★ a missing start reading counts as clear',
+    file: AN,
+    find: '  if (!start || !covering) return null;',
+    to: '  if (!covering) return null; if (start == null) return covering; /* MUTANT */',
+    why: 'An hour whose cloud cannot be checked at one end is a clear-sky sample.',
+  },
+  {
+    id: 'ix. ★★ the hour in progress pairs with a forecast',
+    file: AN,
+    find: '  if ((he + 1) * 3_600_000 > nowMs) return null;',
+    to: '  /* MUTANT */',
+    why: 'A partial hour\'s PV against the forecast radiation of the whole hour enters the newest day.',
+  },
+  {
+    id: 'x. ★ a just-completed hour is still treated as in progress',
+    file: AN,
+    find: '  if ((he + 1) * 3_600_000 > nowMs) return null;',
+    to: '  if ((he + 1) * 3_600_000 >= nowMs) return null; /* MUTANT */',
+    why: 'Off by one at the hour boundary.',
+  },
+  /* ── the taper hours themselves ───────────────────────────────────────── */
+  {
+    id: 'xi. ★★★ an hour with no SoC recorded is treated as headroom',
+    file: AN,
+    find: '    if (soc == null || soc >= saturationThresholdPct(ceiling)) out.add(he);',
+    to: '    if (soc != null && soc >= saturationThresholdPct(ceiling)) out.add(he); /* MUTANT */',
+    why: 'Unknown is counted as unshed: a full pack whose SoC went unrecorded reads as soiling.',
+  },
+  {
+    id: 'xii. ★★ the band\'s lower edge is exclusive',
+    file: AN,
+    find: '    if (soc == null || soc >= saturationThresholdPct(ceiling)) out.add(he);',
+    to: '    if (soc == null || soc > saturationThresholdPct(ceiling)) out.add(he); /* MUTANT */',
+    why: 'Disagrees with the curtailment engine\'s predicate (socAvg < threshold is the only unsaturated case).',
+  },
+  {
+    id: 'xiii. ★★★ the hour\'s MEAN SoC, not its highest',
+    file: AN,
+    find: '  const socPeak = new Map<number, number>();\n  for (const p of socPts) {\n    const he = Math.floor(p.ts / 3_600_000);\n    const prev = socPeak.get(he);\n    if (prev == null || p.value > prev) socPeak.set(he, p.value);\n  }\n',
+    to: '  const socPeak = pvHourlyFromPts([...socPts]); /* MUTANT */\n',
+    why: 'An hour that entered the band in its last minutes (86, 88, 91) is counted although its PV was already shed.',
+  },
+  {
+    id: 'xiv. ★★ the hour\'s FIRST SoC, not its highest',
+    file: AN,
+    find: '    if (prev == null || p.value > prev) socPeak.set(he, p.value);',
+    to: '    if (prev == null) socPeak.set(he, p.value); /* MUTANT */',
+    why: 'As xiii.',
+  },
+  {
+    id: 'xv. ★★ the recorded ceiling is ignored',
+    file: AN,
+    find: '    const ceiling = recorded != null && recorded > 0 ? recorded : liveCeilingPct;',
+    to: '    const ceiling = liveCeilingPct; /* MUTANT */',
+    why: 'An hour charged to a lower ceiling (80: band from 70) is read against today\'s.',
+  },
+  {
+    id: 'xvi. ★ a recorded 0 is taken as the ceiling',
+    file: AN,
+    find: '    const ceiling = recorded != null && recorded > 0 ? recorded : liveCeilingPct;',
+    to: '    const ceiling = recorded != null ? recorded : liveCeilingPct; /* MUTANT */',
+    why: 'A zero reading displaces the live ceiling (the default 100 applies instead).',
+  },
+  {
+    id: 'xvii. ★★ the live ceiling is ignored',
+    file: AN,
+    find: '    const ceiling = recorded != null && recorded > 0 ? recorded : liveCeilingPct;',
+    to: '    const ceiling = recorded != null && recorded > 0 ? recorded : null; /* MUTANT */',
+    why: 'A Core set below 100 with no ceiling history is read against 100.',
+  },
+  /* ── wiring: the forecast ─────────────────────────────────────────────── */
+  {
+    id: 'xviii. ★★★ the forecast passes no taper hours',
+    file: AN,
+    find: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now) : null,',
+    to: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, [], now) : null, /* MUTANT */',
+    why: 'The published estimate (alert, HA sensor) is the v1.187.0 one.',
+  },
+  {
+    id: 'xix. ★★★ the home Cores\' query carries no SoC',
+    file: AN,
+    find: "const SOILING_CORE_METRICS = ['pv_total', 'pv_high', 'pv_low', 'soc', 'chg_max_soc'];",
+    to: "const SOILING_CORE_METRICS = ['pv_total', 'pv_high', 'pv_low']; /* MUTANT */",
+    why: 'Every hour is unknown and left out: the estimate is gone.',
+  },
+  {
+    id: 'xx. ★★ the forecast ignores a Core\'s live ceiling',
+    file: AN,
+    find: "      homeCoreTaperHours.push(chargeTaperHoursFromPts(pvE, pvM.get('soc') ?? [], pvM.get('chg_max_soc') ?? [], d.projection.chgMaxSoc ?? null));",
+    to: "      homeCoreTaperHours.push(chargeTaperHoursFromPts(pvE, pvM.get('soc') ?? [], pvM.get('chg_max_soc') ?? [], null)); /* MUTANT */",
+    why: 'A Core at a 95 ceiling with no history: its taper from 85 is read as from 90.',
+  },
+  {
+    id: 'xxi. ★★★ the fleet estimate drops each Core\'s taper hours',
+    file: AN,
+    find: '    .map((m, i) => computeSoiling(m, wxByHour, taperHoursByCore[i], nowMs))',
+    to: '    .map((m) => computeSoiling(m, wxByHour, undefined, nowMs)) /* MUTANT */',
+    why: 'As xviii.',
+  },
+  /* ── wiring: the decomposition (and the wash card) ─────────────────────── */
+  {
+    id: 'xxii. ★★★ the per-Core rows count the taper hours',
+    file: AN,
+    find: '    const est = computeSoiling(pvE, wxByHour, taper, now);',
+    to: '    const est = computeSoiling(pvE, wxByHour, undefined, now); /* MUTANT */',
+    why: 'The 09-30 "Wash solar panels (~48.6% output drop on Core 5)" card.',
+  },
+  {
+    id: 'xxiii. ★★ the decomposition ignores a Core\'s live ceiling',
+    file: AN,
+    find: '      d.projection.chgMaxSoc ?? null,\n    );\n    series.set(d.sn, { pvE, taper });',
+    to: '      null, /* MUTANT */\n    );\n    series.set(d.sn, { pvE, taper });',
+    why: 'As xx, for the wash card.',
+  },
+  {
+    id: 'xxiv. ★★ the per-hour shape counts hours a home Core was in its taper',
+    file: AN,
+    find: '    if (fleetTaper.has(he)) continue;',
+    to: '    /* MUTANT */',
+    why: 'The 09-30 shape: hours 13-16 read 26-44% while hours 9-12 read about 0.',
+  },
+  {
+    id: 'xxv. ★★ the fleet taper set is never filled',
+    file: AN,
+    find: '    for (const he of taper) fleetTaper.add(he);',
+    to: '    /* MUTANT */',
+    why: 'As xxiv.',
+  },
+  {
+    id: 'xxvi. ★★ the per-hour shape pairs by label again',
+    file: AN,
+    find: '    const wx = soilingClearSkyHour(wxByHour, he, now);\n    if (!wx || wx.radiationWm2 < PERHOUR_MIN_GHI_WM2) continue;',
+    to: '    const wx = wxByHour.get(he); /* MUTANT */\n    if (!wx || wx.cloudCoverPct > 25 || wx.radiationWm2 < PERHOUR_MIN_GHI_WM2) continue;',
+    why: 'As the days shorten the morning ratios drift: the shape reports a drop on a clean array.',
+  },
+  /* ── (3) never on the speakers ────────────────────────────────────────── */
+  {
+    id: 'xxvii. ★★★ soiling-pv is audible',
+    file: AN,
+    find: "      audible: false,\n      category: 'Solar',",
+    to: "      category: 'Solar', /* MUTANT */",
+    why: 'When another warning raises a yellow, the soiling estimate can be the alert voiced.',
+  },
+  {
+    id: 'xxviii. ★★★ the condition counts soiling-pv',
+    file: BC,
+    find: "      !a.id.startsWith('soiling-pv') &&",
+    to: '      true /* MUTANT */ &&',
+    why: 'A soiling-pv without its flag raises a yellow: the 09-30 spoken "Medium priority alarm".',
+  },
+];
+
+/** true = the tests passed; false = they ran and failed. Throws if they could not run. */
+function passes(cmd, args) {
+  try {
+    execFileSync(cmd, args, { cwd: SERVER, stdio: 'ignore' });
+    return true;
+  } catch (e) {
+    if (typeof e?.status === 'number' && e?.signal == null) return false;
+    throw e;
+  }
+}
+const subsetPasses = () => passes('node', ['--import', 'tsx', '--test', ...SUBSET]);
+const fullPasses = () => passes('npm', ['test', '--silent']);
+
+const originals = new Map();
+for (const m of MUTANTS) if (!originals.has(m.file)) originals.set(m.file, readFileSync(m.file, 'utf8'));
+const restoreAll = () => { for (const [f, s] of originals) writeFileSync(f, s); };
+
+for (const [f, s] of originals) {
+  if (s.includes('/* MUTANT')) {
+    console.error(`\nABORT: ${f} already contains a mutant marker — restore it first.`);
+    process.exit(2);
+  }
+}
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { restoreAll(); console.error(`\ninterrupted (${sig}) — tree restored`); process.exit(130); });
+}
+for (const m of MUTANTS) {
+  const hits = originals.get(m.file).split(m.find).length - 1;
+  if (hits !== 1) {
+    console.error(`\nABORT: anchor for "${m.id}" matched ${hits} times, expected exactly 1.`);
+    process.exit(2);
+  }
+}
+if (!subsetPasses()) {
+  console.error('\nABORT: the subset fails on the UNMUTATED tree. Fix the baseline first.');
+  process.exit(2);
+}
+
+let fullBaselineChecked = false;
+let killed = 0;
+const survivors = [];
+console.log(`mutate-v1187-1e: ${MUTANTS.length} mutants against ${SUBSET.join(' + ')}\n`);
+
+try {
+  for (const m of MUTANTS) {
+    const original = originals.get(m.file);
+    const mutated = original.replace(m.find, m.to);
+    writeFileSync(m.file, mutated);
+    let died = !subsetPasses();
+    if (!died) {
+      if (!fullBaselineChecked) {
+        writeFileSync(m.file, original);
+        const ok = fullPasses();
+        writeFileSync(m.file, mutated);
+        fullBaselineChecked = true;
+        if (!ok) {
+          console.error('\nABORT: the full suite fails on the UNMUTATED tree, so it cannot count a kill.');
+          restoreAll();
+          process.exit(2);
+        }
+      }
+      died = !fullPasses();
+    }
+    writeFileSync(m.file, original);
+    if (died) { killed++; console.log(`  KILLED   ${m.id}`); }
+    else { survivors.push(m); console.log(`  SURVIVED ${m.id}\n           ↳ ${m.why}`); }
+  }
+} finally {
+  restoreAll();
+}
+
+console.log(`\n${killed}/${MUTANTS.length} mutants killed`);
+if (survivors.length) {
+  console.log('\nSURVIVORS — the suite does not constrain these behaviours:');
+  for (const s of survivors) console.log(`  - ${s.id}\n      ${s.why}`);
+  process.exit(1);
+}
+console.log('post-run: tree restored');
