@@ -251,43 +251,107 @@ for (const [label, restartMin] of [['on a 45 mV reading', 21], ['on a 95 mV read
   });
 }
 
-/* ── (i) a seeded clock is not written while unconfirmed (v1.187.2) ───────────────────────── */
+/* ── (i) an unconfirmed seed keeps its mark across a restart (v1.187.2) ─────────────────────── */
 
-test('★★★ (i) a day-old seeded clock, not yet confirmed at the line, is not written: a second restart cannot pass it off as one the process saw', () => {
+test('★★★ (i) a day-old seeded clock, not yet confirmed at the line, is written WITH its mark: a second restart cannot pass it off as one the process saw', () => {
   // The add-on returns the next day (the knee-session entry dropped: the outage outlasted the carry)
   // to a day-old onset. Its first reading is 70 mV at 90% — under the plateau line, not under
-  // 50 mV — so the seeded clock stands, unconfirmed. Written to the file, the next restart restored
-  // it as a clock the process had seen: a reading under 50 mV no longer ended it, and a benign
-  // crossing within VDIFF_KNEE_RELAX_MS annunciated at once ("First reached the critical line
-  // 1443 minutes ago."). Unwritten, the second restart starts the pack fresh.
+  // 50 mV — so the seeded clock stands, unconfirmed. Written without its mark, the next restart
+  // restored it as a clock a process had seen: a reading under 50 mV no longer ended it, and a
+  // benign crossing within VDIFF_KNEE_RELAX_MS annunciated at once ("First reached the critical
+  // line 1443 minutes ago."). With the mark, the 30 mV reading after the second restart ends it.
   for (let t = 0; t <= VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
   assert.equal(getAlertOnset(CRIT_ID), T0);
   const day = T0 + 24 * 60 * MIN;
   restart(day);
   assert.match(logs.join('\n'), /restored 0 knee session\(s\).*1 dropped/);
   assert.equal(tick(day, PLAT_MID), undefined, 'under the plateau line');
-  assert.equal(onFile()[KEY], undefined, 'the unconfirmed seed is not on file');
+  assert.equal(getAlertOnset(CRIT_ID), undefined, 'the onset is pruned on the first tick back (the critical is absent)');
+  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: null, quietSinceMs: null, lastSeenMs: day, critSeeded: true },
+    'the unconfirmed seed is on file with its mark');
   restart(day + MIN);
   for (let t = MIN; t < 3 * MIN; t += TICK_MS) assert.equal(tick(day + t, { vd: 30, soc: 90, bal: 1, in: 0 }), undefined);
+  assert.equal(onFile()[KEY], undefined, 'ended by the first reading under 50 mV: no clock left');
   const knee = tick(day + 3 * MIN, PLAT_HI)!;
   assert.equal(knee.mutedBy, 'balancing', 'a benign crossing: a new episode, muted while balancing');
   assert.doesNotMatch(knee.detail, /First reached the critical line/);
 });
 
-test('★★ (i) …a seeded SESSION is written without the unconfirmed critical-line clock, and still bounds the mute after a second restart', () => {
+test('★★★ (i) …and a second restart keeps a seeded clock its next crossing confirms: the fault stays loud from its onset (the review of this release)', () => {
+  // 95 / 70 mV alternating at 90%, balancing. The add-on goes down 10 minutes into the fault (not
+  // yet announced) and returns 71 minutes later on a 70 mV reading: no knee-session entry (the
+  // outage outlasted the carry), so the clock is seeded from the 81-minute-old onset, which the
+  // first tick back prunes (the critical is absent). A second restart one tick later found neither
+  // an onset nor — had the unconfirmed clock been written as none — an entry, and the next crossing
+  // opened a fresh 20-minute mute (v1.187.1 and a single restart are loud there).
+  const HI: Reading = { vd: 95, soc: 90, bal: 1, in: 0 };
+  const at = (t: number) => (Math.floor(t / READING_MS) % 2 === 0 ? HI : PLAT_MID);
+  for (let t = 0; t < 10 * MIN; t += TICK_MS) tick(T0 + t, at(t));
+  const up1 = 81 * MIN;
+  restart(T0 + up1);
+  assert.equal(at(up1), PLAT_MID);
+  tick(T0 + up1, at(up1));
+  assert.equal(getAlertOnset(CRIT_ID), undefined, 'the onset is pruned on the first tick back');
+  const up2 = up1 + 2 * TICK_MS;
+  restart(T0 + up2);
+  assert.match(logs.join('\n'), /restored 1 knee session/);
+  let loud = 0;
+  for (let t = up2; t < up2 + 10 * MIN; t += TICK_MS) {
+    const a = tick(T0 + t, at(t));
+    if (!a) continue;
+    assert.notEqual(a.annunciate, false, `+${(t - up2) / SEC}s after the second restart: muted (${a.mutedBy})`);
+    assert.match(a.detail, /First reached the critical line \d+ minutes ago\./);
+    loud++;
+  }
+  assert.ok(loud >= 9, 'a whole 95 mV reading after the second restart');
+});
+
+test('★★ (i) a seeded SESSION is written with the seeded clock, and still bounds the mute after a second restart', () => {
   // The knee-session file is lost (the fallback): the onset, 25 minutes old, seeds both clocks.
   for (let t = 0; t <= VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
   rmSync(KNEE_PATH, { force: true });
   restart(T0 + 25 * MIN);
   assert.equal(tick(T0 + 25 * MIN, PLAT_MID), undefined);
   const s = onFile()[KEY];
-  assert.equal(s.critSinceMs, null, 'the seeded critical-line clock is not written while unconfirmed');
-  assert.equal(s.graceFromMs, T0, 'the seeded session is');
+  assert.equal(s.critSinceMs, T0);
+  assert.equal(s.critSeeded, true);
+  assert.equal(s.graceFromMs, T0, 'the seeded session is written');
   restart(T0 + 26 * MIN);
   assert.equal(tick(T0 + 26 * MIN, { vd: 30, soc: 90, bal: 1, in: 0 }), undefined);
+  assert.equal(onFile()[KEY].critSinceMs, null, 'the seed ended on the first reading under 50 mV');
   const back = tick(T0 + 27 * MIN, PLAT_HI)!;
   assert.notEqual(back.annunciate, false, 'the session, 27 minutes old, bounds the balancing mute');
   assert.match(back.detail, /First reached the critical line above 85% charge 27 minutes ago\./);
+});
+
+test('★★ (i) the mark on file: a confirmed seed is rewritten without it; a mark with no clock, or not a boolean, is not trusted', () => {
+  for (let t = 0; t <= VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
+  const day = T0 + 24 * 60 * MIN;
+  restart(day);
+  tick(day, PLAT_MID);
+  assert.equal(onFile()[KEY].critSeeded, true);
+  const SENTINEL = 'untouched';
+  writeFileSync(KNEE_PATH, SENTINEL);
+  tick(day + TICK_MS, PLAT_MID);
+  assert.equal(readFileSync(KNEE_PATH, 'utf8'), SENTINEL, 'nothing changed: no write');
+  tick(day + 2 * TICK_MS, PLAT_HI);
+  assert.equal(onFile()[KEY].critSinceMs, T0, 'confirmed at the line');
+  assert.equal('critSeeded' in onFile()[KEY], false, 'the mark is cleared on file on the tick it is confirmed');
+  // A mark with no clock restores no mark: the entry written back after one tick carries none.
+  fresh();
+  writeFileSync(KNEE_PATH, JSON.stringify({ sessions: {
+    [KEY]: { packSn: `PACK-${SN}`, critSinceMs: null, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0, critSeeded: true },
+  } }));
+  restart(T0 + MIN);
+  tick(T0 + MIN, PLAT_MID);
+  assert.equal('critSeeded' in onFile()[KEY], false, 'a mark with no clock is dropped');
+  // A mark that is not a boolean makes the entry malformed (skipped and counted).
+  fresh();
+  writeFileSync(KNEE_PATH, JSON.stringify({ sessions: {
+    [KEY]: { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: null, quietSinceMs: null, lastSeenMs: T0, critSeeded: 'yes' },
+  } }));
+  restart(T0 + MIN);
+  assert.match(logs[0], /restored 0 knee session\(s\) from .*; 1 malformed entry ignored$/);
 });
 
 /* ── (j) upgrading from v1.187.1 mid-fault (v1.187.2) ──────────────────────────────────────── */

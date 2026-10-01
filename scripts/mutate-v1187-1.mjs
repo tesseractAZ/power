@@ -219,8 +219,7 @@ const MUTANTS = [
   {
     id: 'xxiii. ★★ packs holding no clock are written',
     file: AL,
-    // v1.187.2 — the persisted critical-line clock is a local (a seeded, unconfirmed clock is written as none).
-    find: '    if ((critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;\n    const d = onDisk[key];',
+    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;\n    const d = onDisk[key];',
     to: '    if (st.lastSeenMs == null) continue; /* MUTANT */\n    const d = onDisk[key];',
     why: 'Every pack is written, and its reading clock rewrites the file.',
   },
@@ -257,8 +256,9 @@ const MUTANTS = [
   {
     id: 'xxviii. ★★★ the rest is not written',
     file: AL,
-    find: 'graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs };',
-    to: 'graceFromMs: st.graceFromMs, quietSinceMs: null, lastSeenMs }; /* MUTANT */',
+    // v1.187.2 — re-pointed: the written entry is a multi-line object (the seed mark follows).
+    find: 'graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs,\n',
+    to: 'graceFromMs: st.graceFromMs, quietSinceMs: null, lastSeenMs, /* MUTANT */\n',
     why: 'As xxvii: the next process finds no rest on file.',
   },
   {
@@ -300,8 +300,8 @@ const MUTANTS = [
   {
     id: 'xxxiv. ★★ a serial that arrives later is not written',
     file: AL,
-    find: '    if (d == null || d.packSn !== st.packSn || d.critSinceMs !== critSinceMs',
-    to: '    if (d == null || d.critSinceMs !== critSinceMs /* MUTANT */',
+    find: '    if (d == null || d.packSn !== st.packSn || d.critSinceMs !== st.critSinceMs',
+    to: '    if (d == null || d.critSinceMs !== st.critSinceMs /* MUTANT */',
     why: 'The file keeps a null serial: after a restart a different battery in the slot inherits the session.',
   },
   {

@@ -16,12 +16,14 @@
  * (2) The seeded-clock reset (v1.187.1) applied only to the first reading after a restart
  * (prev.lastSeenMs null): a first reading at 50-89 mV on the plateau carried a day-old onset through
  * the readings under 50 mV after it for VDIFF_KNEE_RELAX_MS, and a benign crossing in that window
- * annunciated at once. A non-persisted critSeeded mark (set by vdiffKneeSeed, cleared by a reading at
- * the line and whenever critSinceMs is cleared) now gates the reset; a seeded clock still marked is
- * not written to the knee-session file, which a second restart would have restored as a clock the
- * process saw. Mutants ix-xvi; xiv-xvi pin the invariant critSeeded ⇒ critSinceMs, which no alarm
- * reads today (killed by the state-machine tests only). The reset dropped outright, and a reset on
- * any reading under the plateau line, are mutate-v1187-1.mjs xxxix-xl (re-pointed).
+ * annunciated at once. A critSeeded mark (set by vdiffKneeSeed, cleared by a reading at the line and
+ * whenever critSinceMs is cleared) now gates the reset, and is written to the knee-session file with
+ * the clock and restored with it: written without it, a second restart restored the day-old onset as
+ * a clock a process saw; written as none (this release's first draft, caught in review), a second
+ * quick restart lost the clock outright — the onset is pruned on the first tick back. Mutants ix-xxi;
+ * xix-xxi pin the invariant critSeeded ⇒ critSinceMs, which no alarm reads (killed by the
+ * state-machine tests only). The reset dropped outright, and a reset on any reading under the
+ * plateau line, are mutate-v1187-1.mjs xxxix-xl (re-pointed).
  *
  *   node scripts/mutate-v1187-2.mjs
  *
@@ -131,39 +133,74 @@ const MUTANTS = [
     why: 'A critical still standing when the add-on returns loses its old onset on its first dip under 50 mV: its episode clock restarts.',
   },
   {
-    id: 'xii. ★★★ an unconfirmed seed is written to the knee-session file',
+    id: 'xii. ★★★ the seed\'s mark is not written to the knee-session file',
     file: AL,
-    find: '    const critSinceMs = st.critSeeded ? null : st.critSinceMs;',
-    to: '    const critSinceMs = st.critSinceMs; /* MUTANT */',
-    why: 'A second restart restores the day-old onset as a clock the process saw: a reading under 50 mV no longer ends it, and a benign crossing sounds.',
+    find: '      ...(st.critSeeded ? { critSeeded: true as const } : {}),\n    };',
+    to: '      /* MUTANT */\n    };',
+    why: 'A second restart restores a day-old onset as a clock a process saw: a reading under 50 mV no longer ends it, and a benign crossing sounds the red klaxon.',
   },
   {
-    id: 'xiii. ★★ a restored session is marked seeded',
+    id: 'xiii. ★★★ an unconfirmed seed is written as none (the first draft of this release)',
     file: AL,
-    find: '      critSeeded: false,',
-    to: '      critSeeded: true, /* MUTANT */',
+    find: '      packSn: st.packSn, critSinceMs: st.critSinceMs, graceFromMs: st.graceFromMs,',
+    to: '      packSn: st.packSn, critSinceMs: st.critSeeded ? null : st.critSinceMs, graceFromMs: st.graceFromMs, /* MUTANT */',
+    why: 'A second quick restart finds neither the clock nor the onset (pruned on the first tick back): the fault the onset named opens a fresh 20-minute mute.',
+  },
+  {
+    id: 'xiv. ★★ a change of mark alone is not written',
+    file: AL,
+    find: '    if ((d?.critSeeded === true) !== st.critSeeded) changed = true;',
+    to: '    /* MUTANT */',
+    why: 'A seed confirmed at the line stays marked on file until another value changes: a restart in that window ends the confirmed episode on its next dip under 50 mV.',
+  },
+  {
+    id: 'xv. ★★★ the restore drops the mark',
+    file: AL,
+    find: '      critSeeded: s.critSinceMs != null && s.critSeeded === true,',
+    to: '      critSeeded: false, /* MUTANT */',
+    why: 'As xii, on the restore side.',
+  },
+  {
+    id: 'xvi. ★★ the restore marks every restored clock as a seed',
+    file: AL,
+    find: '      critSeeded: s.critSinceMs != null && s.critSeeded === true,',
+    to: '      critSeeded: s.critSinceMs != null, /* MUTANT */',
     why: 'A restart on a 45 mV reading of the 90% balancing fault ends the episode the file carried.',
   },
   {
-    id: 'xiv. ★ invariant — leaving the plateau keeps the mark',
+    id: 'xvii. ★ the restore keeps a mark with no clock',
+    file: AL,
+    find: '      critSeeded: s.critSinceMs != null && s.critSeeded === true,',
+    to: '      critSeeded: s.critSeeded === true, /* MUTANT */',
+    why: 'A corrupt entry plants a mark the invariant critSeeded ⇒ critSinceMs forbids (written back to the file).',
+  },
+  {
+    id: 'xviii. ★ a mark that is not a boolean is trusted',
+    file: AL,
+    find: "  if (!(o.critSeeded === undefined || typeof o.critSeeded === 'boolean')) return null;",
+    to: '  /* MUTANT */',
+    why: 'A corrupt entry is restored as a confirmed clock instead of being skipped and counted.',
+  },
+  {
+    id: 'xix. ★ invariant — leaving the plateau keeps the mark',
     file: AL,
     find: '    s.critSinceMs = null;\n    s.belowCritSinceMs = null;\n    s.critSeeded = false;\n  } else if',
     to: '    s.critSinceMs = null;\n    s.belowCritSinceMs = null; /* MUTANT */\n  } else if',
     why: 'critSeeded outlives its clock (no alarm reads it then; a later reader of the mark would).',
   },
   {
-    id: 'xv. ★ invariant — the reset keeps the mark',
+    id: 'xx. ★ invariant — the reset keeps the mark',
     file: AL,
     find: '      s.belowCritSinceMs = null;\n      s.critSeeded = false;\n    }',
     to: '      s.belowCritSinceMs = null; /* MUTANT */\n    }',
-    why: 'As xiv.',
+    why: 'As xix.',
   },
   {
-    id: 'xvi. ★ invariant — a fresh state is marked',
+    id: 'xxi. ★ invariant — a fresh state is marked',
     file: AL,
     find: 'lastSeenMs: nowMs, critSeeded: false };',
     to: 'lastSeenMs: nowMs, critSeeded: true }; /* MUTANT */',
-    why: 'As xiv: a state with no clock carries the mark.',
+    why: 'As xix: a state with no clock carries the mark.',
   },
 ];
 

@@ -519,10 +519,10 @@ export interface VdiffKneeState {
   /** Last tick this pack produced a reading (the VDIFF_KNEE_GAP_CARRY_MS cap). */
   lastSeenMs: number | null;
   /** v1.187.2 — critSinceMs came from vdiffKneeSeed (a persisted onset, perhaps a day old, never
-   *  seen in this process) and no reading at the critical line has confirmed it yet. While set, a
+   *  seen in a process) and no reading at the critical line has confirmed it yet. While set, a
    *  reading under VOL_DIFF_CRIT_MV ends the episode at once. Cleared by a reading at or above
-   *  vdiffCritMvFor(packSoc) and whenever critSinceMs is cleared. Never persisted, and a seeded
-   *  clock is not written to the knee-session file while it is set (persistVdiffKneeSessions). */
+   *  vdiffCritMvFor(packSoc) and whenever critSinceMs is cleared. Written to the knee-session file
+   *  with the clock and restored with it (persistVdiffKneeSessions / restoreVdiffKneeSessions). */
   critSeeded: boolean;
 }
 export interface VdiffKneeObservation {
@@ -732,7 +732,8 @@ const vdiffKneeByKey = new Map<string, VdiffKneeState>();
  * overrides) and restored at start-up by the IN-PROCESS gap rule (computeAlerts' prune): carried
  * while the pack's last reading is at most VDIFF_KNEE_GAP_CARRY_MS old — the outage, never the
  * onset's age — and dropped after it. Persisted: the pack serial, critSinceMs, graceFromMs, the rest
- * (quietSinceMs) and the last reading time. Deliberately NOT persisted, exactly as they are not
+ * (quietSinceMs), the last reading time and (v1.187.2) whether critSinceMs is an unconfirmed seed
+ * (critSeeded). Deliberately NOT persisted, exactly as they are not
  * carried across a reading gap in the process: the activity evidence (lastBalancingMs, lastChargeMs
  * — a mute is re-earned from fresh readings) and the under-the-line run (belowCritSinceMs). Each
  * restarts from fresh readings, which can only keep a bound counting (fail loud). Only a pack the
@@ -768,6 +769,8 @@ export interface VdiffKneeSession {
   graceFromMs: number | null;
   /** v1.187.1 (review) — the rest at the top of charge (restored only across a short outage). */
   quietSinceMs: number | null;
+  /** v1.187.2 — present (true) only while critSinceMs is an unconfirmed seed (VdiffKneeState.critSeeded). */
+  critSeeded?: true;
   /** The pack's last reading, floored to VDIFF_KNEE_SEEN_PERSIST_MS: the true one lies in
    *  [this, this + VDIFF_KNEE_SEEN_PERSIST_MS). */
   lastSeenMs: number;
@@ -796,7 +799,11 @@ function parseVdiffKneeSession(v: unknown): VdiffKneeSession | null {
   if (!isClock(quietSinceMs)) return null;
   if (typeof o.lastSeenMs !== 'number' || !Number.isFinite(o.lastSeenMs)) return null;
   if (o.critSinceMs == null && o.graceFromMs == null) return null;
-  return { packSn: o.packSn, critSinceMs: o.critSinceMs, graceFromMs: o.graceFromMs, quietSinceMs, lastSeenMs: o.lastSeenMs };
+  if (!(o.critSeeded === undefined || typeof o.critSeeded === 'boolean')) return null;
+  return {
+    packSn: o.packSn, critSinceMs: o.critSinceMs, graceFromMs: o.graceFromMs, quietSinceMs, lastSeenMs: o.lastSeenMs,
+    ...(o.critSeeded === true ? { critSeeded: true as const } : {}),
+  };
 }
 
 /**
@@ -868,7 +875,8 @@ export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: s
       graceFromMs: s.graceFromMs == null ? null : Math.min(s.graceFromMs, nowMs),
       quietSinceMs: restCarried && restCoherent ? Math.min(s.quietSinceMs!, nowMs) : null,
       lastSeenMs: seenMs,
-      critSeeded: false,
+      // v1.187.2 (review) — an unconfirmed seed stays one across a restart (see persistVdiffKneeSessions).
+      critSeeded: s.critSinceMs != null && s.critSeeded === true,
     });
     restored++;
   }
@@ -887,21 +895,26 @@ export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: s
  * the next tick). Best-effort — never throws into the alarm loop. Main thread only, like the map.
  *
  * v1.187.2 — a critical-line clock still SEEDED (critSeeded: from an onset, not yet confirmed by a
- * reading at the line) is written as none. The restore treats every clock on file as one the process
- * saw, so a seeded day-old onset written there and restored by a second restart lost its mark, and a
- * reading under 50 mV no longer ended it. Not written, the next restart seeds it again from the onset
- * (no entry) or carries only the session clock (graceFromMs <= critSinceMs bounds the same mutes).
+ * reading at the line) is written with its mark, and the restore keeps the mark. Without it the
+ * restore read every clock on file as one a process had seen: a day-old onset written there and
+ * restored by a second restart was no longer ended by a reading under 50 mV, and a benign crossing
+ * annunciated at once. Written as none instead (the review of this release), the second restart lost
+ * the clock: the onset is pruned on the first post-restart tick (the critical is absent while the
+ * seed is unconfirmed), so a fault the onset still named started a fresh 20-minute mute.
  */
 export function persistVdiffKneeSessions(path: string, onDisk: VdiffKneeSessions): VdiffKneeSessions {
   const next: VdiffKneeSessions = {};
   let changed = false;
   for (const [key, st] of vdiffKneeByKey) {
-    const critSinceMs = st.critSeeded ? null : st.critSinceMs;
-    if ((critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;
+    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;
     const d = onDisk[key];
     const lastSeenMs = Math.floor(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS;
-    next[key] = { packSn: st.packSn, critSinceMs, graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs };
-    if (d == null || d.packSn !== st.packSn || d.critSinceMs !== critSinceMs || d.graceFromMs !== st.graceFromMs
+    next[key] = {
+      packSn: st.packSn, critSinceMs: st.critSinceMs, graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs,
+      ...(st.critSeeded ? { critSeeded: true as const } : {}),
+    };
+    if ((d?.critSeeded === true) !== st.critSeeded) changed = true;
+    if (d == null || d.packSn !== st.packSn || d.critSinceMs !== st.critSinceMs || d.graceFromMs !== st.graceFromMs
       || d.quietSinceMs !== st.quietSinceMs || d.lastSeenMs !== lastSeenMs) changed = true;
   }
   if (!changed && Object.keys(onDisk).every((key) => key in next)) return onDisk;

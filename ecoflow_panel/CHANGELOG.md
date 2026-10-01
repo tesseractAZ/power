@@ -25,11 +25,14 @@
   count, but a first reading between 50 and 89 mV kept it, and the readings under 50 mV that
   followed did not end it for another 5 minutes, so a healthy peak in that window sounded at once.
   Any reading under 50 mV now ends a restored count until a reading at the critical line shows the
-  alarm is still there. A restored count that has not been confirmed is no longer saved to the
-  timing file, so a second restart cannot treat it as confirmed.
+  alarm is still there. The saved timing now records that a restored count has not been confirmed
+  yet, so a second restart soon after the first keeps it as it was — neither treated as confirmed
+  nor lost.
 
 Recorded charges from 25 June to 30 September, every pack, give the same alarms as before; no pack
-reached the critical line between 85% and 95% in that time.
+reached the critical line between 85% and 95% in that time. Because the count between 85% and 95%
+now carries over like the one at the top, a second peak in the same charge without a 20-minute
+quiet spell sounds, including when the first peak was read below 95%.
 
 ## 1.187.1
 
