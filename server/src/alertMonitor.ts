@@ -44,7 +44,7 @@ import { setDefectivePackRetireLog } from './defectivePackLatch.js';
 // v0.9.59 — persist telemetry events so rise/short-clear/long-active
 // counts survive restarts. Without this the auto-silencing rules can
 // effectively never fire on a panel that gets occasional restarts.
-import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, TELEMETRY_SCOPE_ANNUNCIATING, telemetryBasisFor, type FamilyMeta, type TelemetryEntry } from './alertTelemetry.js';
+import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, TELEMETRY_SCOPE_ANNUNCIATING, TELEMETRY_BASIS_DROPPED, telemetryBasisFor, type FamilyMeta, type TelemetryEntry } from './alertTelemetry.js';
 import type { Recorder } from './recorder.js';
 import { getAnalytics, type AnalyticsClient } from './analyticsClient.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate. The internal severity
@@ -1173,6 +1173,23 @@ export interface TelemetryReplay {
   /** v1.187.0 — scoped lines of a TELEMETRY_FAMILY_BASIS family written under an earlier emitter rule. */
   rebasedSkipped: number;
   rebasedFamilies: Set<string>;
+}
+/**
+ * v1.187.3 — the boot line for the families TELEMETRY_FAMILY_BASIS rebased: how many events were
+ * not replayed, of which families, what their earlier rule counted that no longer annunciates
+ * (TELEMETRY_BASIS_DROPPED, one phrase per basis), and the verdicts that lifted. Until v1.187.3
+ * the reason was the MPPT one for every family. Pure + exported for tests.
+ */
+export function rebasedReplayLine(
+  r: Pick<TelemetryReplay, 'rebasedSkipped' | 'rebasedFamilies'>,
+  lifted: readonly string[],
+): string {
+  const families = [...r.rebasedFamilies].sort();
+  const dropped = [...new Set(families.map((f) => TELEMETRY_BASIS_DROPPED[telemetryBasisFor(f) ?? ''] ?? 'episodes an earlier rule counted'))];
+  return `alert-telemetry: ${r.rebasedSkipped} event(s) of ${families.join(', ')} counted under an earlier emitter rule not replayed — ` +
+    `they include ${dropped.join(' and ')}, which no longer annunciate; ` +
+    'auto-tune verdicts are re-earned from the current rule' +
+    (lifted.length > 0 ? `. Lifted: ${lifted.join('; ')}` : '');
 }
 export function replayTelemetryEvents(
   events: readonly TelemetryEntry[],
@@ -2668,14 +2685,9 @@ export function startAlertMonitor(
       );
     }
     if (r.rebasedSkipped > 0) {
-      // v1.187.0 — the MPPT self-baseline rule change (TELEMETRY_FAMILY_BASIS).
-      const lifted = liftedIn(r.rebasedFamilies);
-      log(
-        `alert-telemetry: ${r.rebasedSkipped} event(s) of ${[...r.rebasedFamilies].sort().join(', ')} counted under an earlier emitter rule not replayed — ` +
-        'they include cooler-than-typical and load-explained MPPT episodes, which no longer annunciate; ' +
-        'auto-tune verdicts are re-earned from the current rule' +
-        (lifted.length > 0 ? `. Lifted: ${lifted.join('; ')}` : ''),
-      );
+      // v1.187.0 — the MPPT self-baseline rule change (TELEMETRY_FAMILY_BASIS); v1.187.3 — and the
+      // peer cell-spread low side, each named by what its earlier rule counted (rebasedReplayLine).
+      log(rebasedReplayLine(r, liftedIn(r.rebasedFamilies)));
     }
   };
 
