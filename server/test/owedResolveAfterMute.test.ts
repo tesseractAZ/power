@@ -61,12 +61,12 @@ test('★★★ shouldSendResolve: a pushed MPPT warning muted before it clears 
   // (a) re-tracked at boot from a sent:true record, now a cooler (on-screen only) reading.
   assert.equal(shouldSendResolve({ pushSent: true, notifiedSeverity: 'warning', alert: lv({}) }, true, 'warning'), true);
   // (b) pushed as anomalous, then load-explained.
-  assert.equal(shouldSendResolve({ pushSent: true, notifiedSeverity: 'warning', notifiedEffectiveSeverity: 'warning', alert: lv({ muteReason: EXPLAINED }) }, true, 'warning'), true);
+  assert.equal(shouldSendResolve({ pushSent: true, notifiedSeverity: 'warning', alert: lv({ muteReason: EXPLAINED }) }, true, 'warning'), true);
   // Never pushed (a bench spare's, a cooler reading from its first tick): nothing to dismiss.
   assert.equal(shouldSendResolve({ pushSent: false, notifiedSeverity: 'warning', alert: lv({}) }, true, 'warning'), false);
   assert.equal(shouldSendResolve({ notifiedSeverity: 'warning', alert: lv({}) }, true, 'warning'), false);
-  // The other gates are unchanged: a push auto-tuned to [Low] owes nothing; resolves can be off.
-  assert.equal(shouldSendResolve({ pushSent: true, notifiedSeverity: 'warning', notifiedEffectiveSeverity: 'info', alert: lv({}) }, true, 'warning'), false);
+  // The other gates are unchanged: resolves can be off. (v1.187.3 — a push auto-tuned to [Low]
+  // owes its resolve too: demotedPushResolve.test.ts.)
   assert.equal(shouldSendResolve({ pushSent: true, notifiedSeverity: 'warning', alert: lv({}) }, false, 'warning'), false);
 });
 

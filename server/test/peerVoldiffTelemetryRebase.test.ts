@@ -28,16 +28,15 @@ const META: Record<string, FamilyMeta> = {
   [FAM]: { title: 'Cell-voltage spread — peer outlier', severity: 'warning', category: 'Battery', alertId: `${FAM}-COREXXX00XXX0005-1` },
 };
 
-/** `rises` rise/clear pairs, the first `short` of them short-clears (≤ 10 min), the rest long. */
+/** `rises` rises, the first `short` of them followed by a short-clear (≤ 10 min); a longer clear
+ *  writes no event (only rise / shortClear / longActive are recorded). */
 function pairs(rises: number, short: number, basis?: string, core = 'COREXXX00XXX0005'): TelemetryEntry[] {
   const out: TelemetryEntry[] = [];
   for (let i = 0; i < rises; i++) {
     const id = `${FAM}-${core}-${(i % 5) + 1}`;
     const b = basis ? { basis } : {};
     out.push({ familyKey: FAM, alertId: id, event: 'rise', ts: T + i * 10, scope: 'annunciating', ...b });
-    out.push(i < short
-      ? { familyKey: FAM, alertId: id, event: 'shortClear', ts: T + i * 10 + 5, durationMs: 4 * 60_000, scope: 'annunciating', ...b }
-      : { familyKey: FAM, alertId: id, event: 'clear', ts: T + i * 10 + 5, durationMs: 40 * 60_000, scope: 'annunciating', ...b });
+    if (i < short) out.push({ familyKey: FAM, alertId: id, event: 'shortClear', ts: T + i * 10 + 5, durationMs: 4 * 60_000, scope: 'annunciating', ...b });
   }
   return out;
 }
@@ -51,7 +50,7 @@ test('★★★ the 10-01 rollup (35 rises / 28 short-clears, written before v1.
   assert.equal(was.warningDemotedToInfo, true, 'precondition: exactly 80% demotes a warning push to [Low]');
   const r = replayTelemetryEvents(events, META);
   assert.equal(r.rollups.has(FAM), false, 'no pre-v1.187.3 event of the family is counted');
-  assert.equal(r.rebasedSkipped, 70);
+  assert.equal(r.rebasedSkipped, 63);
   assert.deepEqual([...r.rebasedFamilies], [FAM]);
   const lifted = liftedAutoTuneVerdicts(before.rollups, r.rollups);
   assert.deepEqual(lifted, ['peer-voldiff (warning→info demotion; was 35 rises, 28 short-clears (80%), 0 long-active (0%); scoped no events yet)']);
@@ -88,9 +87,9 @@ test('★★★ the write chokepoint stamps the basis on a new peer-voldiff line
 });
 
 test('★★ the boot line names what the earlier rule of each rebased family counted — not the MPPT reason for every family', () => {
-  const peerOnly = rebasedReplayLine({ rebasedSkipped: 70, rebasedFamilies: new Set([FAM]) }, ['peer-voldiff (x)']);
+  const peerOnly = rebasedReplayLine({ rebasedSkipped: 63, rebasedFamilies: new Set([FAM]) }, ['peer-voldiff (x)']);
   assert.equal(peerOnly,
-    'alert-telemetry: 70 event(s) of peer-voldiff counted under an earlier emitter rule not replayed — they include '
+    'alert-telemetry: 63 event(s) of peer-voldiff counted under an earlier emitter rule not replayed — they include '
     + 'lower-than-sibling cell-spread episodes (the best-balanced pack), which no longer annunciate; '
     + 'auto-tune verdicts are re-earned from the current rule. Lifted: peer-voldiff (x)');
   assert.doesNotMatch(peerOnly, /MPPT/);

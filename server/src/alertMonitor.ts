@@ -606,9 +606,6 @@ interface TrackedAlert {
    *  critical when the grid drops out at the reserve floor) re-notifies instead
    *  of being silently swallowed by an already-true `notified`. */
   notifiedSeverity?: Severity;
-  /** v1.88.0 — the auto-tuned tier actually delivered ("[Low] … via auto-tune"
-   *  records 'info' here). Gates ONLY shouldSendResolve; never escalation. */
-  notifiedEffectiveSeverity?: Severity;
   /** v1.130.0 — this hold was restored from disk, not queued by this process. */
   queuedRehydrated?: boolean;
   /** v1.186.0 — how this episode sits in the auto-tune rollup (autoTuneClearCounts):
@@ -1852,7 +1849,7 @@ export function orphanedNotifiedIds(p: {
  * owed on `pushSent` alone, exactly as the boot orphan sweep has always sent it.
  */
 export function shouldSendResolve(
-  t: { pushSent?: boolean; notifiedSeverity?: Severity; notifiedEffectiveSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity'> },
+  t: { pushSent?: boolean; notifiedSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity'> },
   notifyResolved: boolean,
   minSeverity: Severity,
 ): boolean {
@@ -1863,9 +1860,15 @@ export function shouldSendResolve(
   return (
     t.pushSent === true &&
     notifyResolved &&
-    // v1.88.0 — the tier the operator SAW decides whether a resolve is owed:
-    // a fire auto-tuned down to info ("[Low]") owes no "Resolved:" push.
-    qualifies(t.notifiedEffectiveSeverity ?? t.notifiedSeverity ?? t.alert.severity, minSeverity)
+    // v1.187.3 — the SOURCE severity the push was dispatched at, never the tier auto-tune
+    // demoted it to. v1.88.0 read the delivered tier, so a fire sent as "[Low]" owed no
+    // "Resolved:" — and the resolve is the only thing that dismisses the HA drawer card and
+    // replaces the same-tag phone notification. On 10-01 a "[Low] Cell-voltage spread — peer
+    // outlier" pushed at 13:16 cleared at 13:26 and its drawer card was still standing at 19:11.
+    // The boot orphan sweep always resolved such a fire (its record keeps the source severity);
+    // the falling edge now agrees with it. An ISA priority turned off since the push still
+    // suppresses the resolve in dispatch, as before.
+    qualifies(t.notifiedSeverity ?? t.alert.severity, minSeverity)
   );
 }
 
@@ -2701,12 +2704,6 @@ export function startAlertMonitor(
    *  durably persisted before the send, and the failure logged at info with no
    *  identity. At-least-once now: a crash between send and persist duplicates
    *  one push after restart — the right direction for the sole alarm channel. */
-  /** v1.88.0 — the auto-tuned tier of the most recent 'sent' dispatch. Read by
-   *  the rising edge IMMEDIATELY after the await (single-flight tick, no
-   *  interleaving) so the tracked entry can remember what tier the operator
-   *  actually saw — a fire delivered as "[Low] … via auto-tune" owes no
-   *  "Resolved:" push (the resolve of a demoted-to-info event is pure noise). */
-  let lastDispatchEffectiveSeverity: Severity | null = null;
   /** v1.186.0 — the no-channel suppression is logged once per process, not per alert. */
   let noChannelLogged = false;
   const dispatch = async (alert: Alert, kind: 'new' | 'resolved'): Promise<'sent' | 'suppressed' | 'failed'> => {
@@ -2782,7 +2779,6 @@ export function startAlertMonitor(
         dedupId: notifyDedupId(alert),
       });
       sentSinceStart++;
-      lastDispatchEffectiveSeverity = effectiveSeverity; // v1.88.0
       // v1.186.0 — a demoted push names the rule and the counts that demoted it.
       log(`notify: sent "${title}" via ${cfg.channel}${effectiveSeverity !== alert.severity ? ` (severity ${alert.severity}→${effectiveSeverity} via auto-tune — ${verdict.rule} on family "${t?.familyKey}": ${verdict.basis})` : ''}`);
       return 'sent';
@@ -3808,10 +3804,8 @@ export function startAlertMonitor(
           existing.notifiedSeverity = a.severity;
           if (outcome === 'sent') {
             existing.pushSent = true;
-            // v1.88.0 — remember the TIER THE OPERATOR SAW (auto-tune applied).
-            // notifiedSeverity must stay at source severity for the escalation
-            // contract; this separate field only gates the resolve push.
-            existing.notifiedEffectiveSeverity = lastDispatchEffectiveSeverity ?? a.severity;
+            // v1.187.3 — the auto-tuned tier is no longer recorded: it gated only the resolve, and
+            // a pushed card is owed its dismissal at whatever tier it was shown (shouldSendResolve).
           }
           // v0.15.21 — record the push durably so a restart can't repeat it.
           // v0.80.0 — the record carries delivered-vs-suppressed + the severity,
