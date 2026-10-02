@@ -39,6 +39,17 @@
  * failed with nothing cached, so the storm-prep feed stays cold and the set is not settled; a
  * successful empty fetch is still []. Mutants N-i..N-iii.
  *
+ * (8) seam fixes (five LOW findings on (6) and (7)):
+ *   - a green held inside the warm-up by a sounded critical has its recovery decided once, even
+ *     when its dwell ends past the warm-up (deescalationHold.soundedHeldInWarmup). Mutants Q-i..Q-v.
+ *   - the pre-v1.187.3 fallback seed keys on the COMMITTED red on record, not a heard one. Mutants
+ *     P-viii, P-ix (re-pointed), P-xv.
+ *   - the disk keeps a restored entry's own last-present time until it is present again
+ *     (soundedCritRestoredAt), never later than the boot. Mutants D-i..D-iv.
+ *   - only cell-spread criticals are written, drive a write, refresh, restore or seed
+ *     (soundedCritPersists). Mutants K-i..K-vi. K-vi (the seed's filter) is observable only in the
+ *     boot line: a seeded critical of another family holds nothing (pinned by K-i's tests).
+ *
  *   node scripts/mutate-v1187-3h.mjs
  *
  * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
@@ -281,8 +292,8 @@ const MUTANTS = [
   {
     id: 'B-xi. ★★ the recovery is decided outside the warm-up',
     file: BR,
-    find: "    const recoveryCandidate = level === 'green' && continuationBaseline != null && inWarmup;",
-    to: "    const recoveryCandidate = level === 'green' && continuationBaseline != null; /* MUTANT */",
+    find: '      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true && recoveryHoldSinceMs == null));',
+    to: '      ; /* MUTANT */',
     why: 'A routine green long after boot is logged as a restart recovery, or held for one forever.',
   },
   {
@@ -459,7 +470,7 @@ const MUTANTS = [
   {
     id: 'P-ii. ★★★ the record is not written to the status file',
     file: BR,
-    find: '          soundedCrit: Object.fromEntries(soundedCritFps), // v1.187.3 (restoreSoundedCriticals)',
+    find: '          soundedCrit: Object.fromEntries(soundedCritKept().map(([f, at]) => [f, soundedCritRestoredAt.get(f) ?? at])), // v1.187.3 (restoreSoundedCriticals)',
     to: '          /* MUTANT */',
     why: 'Only the red-replay fallback is left, and it is empty once a green was observed under the hold.',
   },
@@ -473,7 +484,7 @@ const MUTANTS = [
   {
     id: 'P-iv. ★★ the record on disk is not refreshed while the critical stands',
     file: BR,
-    find: '      || (soundedCritFps.size > 0 && tickNow - soundedCritWritten.atMs >= SOUNDED_CRIT_PERSIST_EVERY_MS)) persistStatus();',
+    find: '      || (soundedCritKept().length > 0 && tickNow - soundedCritWritten.atMs >= SOUNDED_CRIT_PERSIST_EVERY_MS)) persistStatus();',
     to: '      ) persistStatus(); /* MUTANT */',
     why: 'A critical loud for more than an hour carries its commit time on disk: too old to restore.',
   },
@@ -501,15 +512,15 @@ const MUTANTS = [
   {
     id: 'P-viii. ★★ no seed from the red announcement for a status file written before v1.187.3',
     file: BR,
-    find: "      bootBaselineLevel === 'red' ? (redReplayGate.state()?.activeFingerprints ?? []).map((f) => [f, bootMs]) : [],",
-    to: '      [], /* MUTANT */',
+    find: "      persistedCondition?.conditionLevel === 'red'",
+    to: '      false /* MUTANT */',
     why: 'The upgrade restart itself re-opens the defect.',
   },
   {
-    id: 'P-ix. ★★ the seed without a heard red',
+    id: 'P-ix. ★★ the seed without a committed red',
     file: BR,
-    find: "      bootBaselineLevel === 'red' ? (redReplayGate.state()?.activeFingerprints ?? []).map((f) => [f, bootMs]) : [],",
-    to: '      (redReplayGate.state()?.activeFingerprints ?? []).map((f) => [f, bootMs]), /* MUTANT */',
+    find: "      persistedCondition?.conditionLevel === 'red'",
+    to: '      true /* MUTANT */',
     why: 'A critical released before a yellow was committed is held again after the restart.',
   },
   {
@@ -546,6 +557,126 @@ const MUTANTS = [
     find: 'export const SOUNDED_CRIT_PERSIST_EVERY_MS = 60_000;',
     to: 'export const SOUNDED_CRIT_PERSIST_EVERY_MS = 3_600_000; /* MUTANT */',
     why: 'The last-present time on disk can be as old as the restore bound.',
+  },
+
+  /* ── (8) seam fixes: the fallback seed on the committed red ─────────────── */
+  {
+    id: 'P-xv. ★★ the seed keyed on a heard red again',
+    file: BR,
+    find: "      persistedCondition?.conditionLevel === 'red'",
+    to: "      bootBaselineLevel === 'red' /* MUTANT */",
+    why: 'The upgrade restart landing inside a hold (the heard flag demoted while the critical is muted) seeds nothing: "All clear" with the card open.',
+  },
+
+  /* ── (8) seam fixes: a green held by a sounded critical inside the warm-up ── */
+  {
+    id: 'Q-i. ★★★ the hold is never marked as held by a sounded critical inside the warm-up',
+    file: BR,
+    find: '      if (critHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
+    to: '      /* MUTANT */',
+    why: 'The restored absent critical holds the green 7 min, its dwell ends as the warm-up does, and it is spoken with the set never settled.',
+  },
+  {
+    id: 'Q-ii. ★★★ the recovery is decided inside the warm-up only',
+    file: BR,
+    find: '      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true && recoveryHoldSinceMs == null));',
+    to: '      && inWarmup; /* MUTANT */',
+    why: 'As Q-i.',
+  },
+  {
+    id: 'Q-iii. ★★ the recovery is decided on every tick, not once',
+    file: BR,
+    find: '      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true && recoveryHoldSinceMs == null));',
+    to: '      && (inWarmup || deescalationHold?.soundedHeldInWarmup === true); /* MUTANT */',
+    why: 'Held for its recovery past the warm-up, the green is never adopted: it waits for a settled set that may never come.',
+  },
+  {
+    id: 'Q-iv. ★★ a sounded hold that begins after the warm-up is marked too',
+    file: BR,
+    find: '      if (critHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
+    to: '      if (critHeld) deescalationHold.soundedHeldInWarmup = true; /* MUTANT */',
+    why: 'A green after a red spoken past the warm-up, on an unsettled set, is adopted in silence: the cleared critical stays the last words.',
+  },
+  {
+    id: 'Q-v. ★★ any hold inside the warm-up is marked',
+    file: BR,
+    find: '      if (critHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
+    to: '      if (inWarmup) deescalationHold.soundedHeldInWarmup = true; /* MUTANT */',
+    why: 'A green that begins late in the warm-up and stands its plain dwell past it is silenced instead of spoken.',
+  },
+
+  /* ── (8) seam fixes: the disk keeps when a restored critical was last present ── */
+  {
+    id: 'D-i. ★★★ the boot stamp is written back to disk',
+    file: BR,
+    find: '          soundedCrit: Object.fromEntries(soundedCritKept().map(([f, at]) => [f, soundedCritRestoredAt.get(f) ?? at])), // v1.187.3 (restoreSoundedCriticals)',
+    to: '          soundedCrit: Object.fromEntries(soundedCritKept()), /* MUTANT */',
+    why: 'Restarts less than 7 min apart keep an absent critical restorable for ever.',
+  },
+  {
+    id: 'D-ii. ★★★ the on-disk last-present times are not kept at the restore',
+    file: BR,
+    find: '    if (restored != null) for (const f of restored.keys()) soundedCritRestoredAt.set(f, Math.min((persistedSoundedCrit as Record<string, number>)[f], bootMs));',
+    to: '    /* MUTANT */',
+    why: 'As D-i.',
+  },
+  {
+    id: 'D-iii. ★★ a restored critical present again keeps its old time on disk',
+    file: BR,
+    find: '      for (const f of [...soundedCritRestoredAt.keys()]) if (presentCrit.has(f)) soundedCritRestoredAt.delete(f);',
+    to: '      for (const f of [...soundedCritRestoredAt.keys()]) if (presentCrit.has(f) && false) soundedCritRestoredAt.delete(f); /* MUTANT */',
+    why: 'A critical that stands on after a restart ages out of the record and is lost at the next restart.',
+  },
+  {
+    id: 'D-iv. ★ a last-present time from the future is written back as it was',
+    file: BR,
+    find: '    if (restored != null) for (const f of restored.keys()) soundedCritRestoredAt.set(f, Math.min((persistedSoundedCrit as Record<string, number>)[f], bootMs));',
+    to: '    if (restored != null) for (const f of restored.keys()) soundedCritRestoredAt.set(f, (persistedSoundedCrit as Record<string, number>)[f]); /* MUTANT */',
+    why: 'After the clock steps back, the entry stays restorable until the clock catches up, plus the bound.',
+  },
+
+  /* ── (8) seam fixes: only cell-spread criticals are persisted ──────────── */
+  {
+    id: 'K-i. ★★★ every critical is persisted',
+    file: BR,
+    find: "  return fingerprint.startsWith('vdiff-crit-');",
+    to: '  return fingerprint.length > 0; /* MUTANT */',
+    why: 'A standing critical whose fault code flips rewrites the status file on every flip and every minute; restored, it holds nothing.',
+  },
+  {
+    id: 'K-ii. ★★ the write keeps every critical',
+    file: BR,
+    find: '          soundedCrit: Object.fromEntries(soundedCritKept().map(([f, at]) => [f, soundedCritRestoredAt.get(f) ?? at])), // v1.187.3 (restoreSoundedCriticals)',
+    to: '          soundedCrit: Object.fromEntries([...soundedCritFps].map(([f, at]) => [f, soundedCritRestoredAt.get(f) ?? at])), /* MUTANT */',
+    why: 'An inverter error that sounded is written, though it can hold nothing after a restart.',
+  },
+  {
+    id: 'K-iii. ★★ every critical\'s set drives a write',
+    file: BR,
+    find: '  const soundedCritKeys = (): string => JSON.stringify(soundedCritKept().map(([f]) => f).sort());',
+    to: '  const soundedCritKeys = (): string => JSON.stringify([...soundedCritFps.keys()].sort()); /* MUTANT */',
+    why: 'A fault code alternating between two values writes the status file on every flip.',
+  },
+  {
+    id: 'K-iv. ★★ the minute refresh runs while any critical stands',
+    file: BR,
+    find: '      || (soundedCritKept().length > 0 && tickNow - soundedCritWritten.atMs >= SOUNDED_CRIT_PERSIST_EVERY_MS)) persistStatus();',
+    to: '      || (soundedCritFps.size > 0 && tickNow - soundedCritWritten.atMs >= SOUNDED_CRIT_PERSIST_EVERY_MS)) persistStatus(); /* MUTANT */',
+    why: 'A standing critical of another family writes the status file every minute for as long as it stands.',
+  },
+  {
+    id: 'K-v. ★ the restore keeps every critical',
+    file: BR,
+    find: '    if (!soundedCritPersists(f)) continue;',
+    to: '    /* MUTANT */',
+    why: 'A record holding another family\'s critical restores an entry that holds nothing.',
+  },
+  {
+    id: 'K-vi. ★ the fallback seeds every critical of the red announcement',
+    file: BR,
+    find: '        ? (redReplayGate.state()?.activeFingerprints ?? []).filter((f) => soundedCritPersists(f)).map((f) => [f, bootMs])',
+    to: '        ? (redReplayGate.state()?.activeFingerprints ?? []).map((f) => [f, bootMs]) /* MUTANT */',
+    why: 'The boot line says an inverter error is held, though nothing holds it.',
   },
 
   /* ── (7) log review 10-01: an unknown NWS feed is not "no storms" ─────── */

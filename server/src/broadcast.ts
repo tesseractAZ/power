@@ -844,6 +844,20 @@ export const SOUNDED_CRIT_RESTORE_MAX_AGE_MS = VDIFF_KNEE_GAP_CARRY_MS;
 export const SOUNDED_CRIT_PERSIST_EVERY_MS = 60_000;
 
 /**
+ * v1.187.3 (log review, LOW) — the sounded criticals the status file keeps and restores: the
+ * cell-spread criticals (`vdiff-crit-`), the only ones that can hold anything after a restart.
+ * soundedCriticalHeld holds a PRESENT critical only while its bounded mute is in force (`mutedBy`,
+ * which only a vdiff-crit carries: Alert.mutedBy is a VdiffCritMuteReason) and an ABSENT one only
+ * when it is a `vdiff-crit-`; any other critical never holds while present and is released the
+ * tick it clears. Persisted, the others only rewrote the status file on every fault-code flip of a
+ * standing critical (the absent code pruned, the present one recorded) and every minute while one
+ * stood. In memory the record still keeps every critical that sounded. Pure + exported for tests.
+ */
+export function soundedCritPersists(fingerprint: string): boolean {
+  return fingerprint.startsWith('vdiff-crit-');
+}
+
+/**
  * v1.187.3 (log review) — THE SOUNDED RECORD SURVIVES A RESTART. soundedCriticalHeld reads
  * `soundedCritFps`, which lived only in memory: after a restart a cell-spread critical that had
  * sounded read as one that never had. A vdiff-crit muted again by its knee mute after the restart,
@@ -861,7 +875,10 @@ export const SOUNDED_CRIT_PERSIST_EVERY_MS = 60_000;
  * only a committed red writes an entry and the record prunes itself, and the hold demotes the
  * record's heard flag exactly while a sounded critical is muted. Returns null when `raw` is not a
  * record (a status file written before v1.187.3, or a malformed field); the caller then seeds the
- * criticals of the red announcement on record. Pure + exported for tests.
+ * criticals of the red announcement on record. Only cell-spread criticals (soundedCritPersists).
+ * The caller keeps each entry's last-present time from disk for the next write (the boot stamp is
+ * for the hold only), so the age bound counts from when the critical was last present, however
+ * many restarts follow. Pure + exported for tests.
  */
 export function restoreSoundedCriticals(
   raw: unknown,
@@ -872,6 +889,7 @@ export function restoreSoundedCriticals(
   const out = new Map<string, number>();
   for (const [f, at] of Object.entries(raw as Record<string, unknown>)) {
     if (!isFingerprint(f) || typeof at !== 'number' || !Number.isFinite(at)) continue;
+    if (!soundedCritPersists(f)) continue;
     if (bootMs - at > maxAgeMs) continue;
     out.set(f, bootMs);
   }
@@ -1215,6 +1233,15 @@ export function startBroadcastMonitor(
   // present (soundedCriticalHeld refreshes and prunes it every tick). Unlike prevCritFps it
   // outlives a lower commit.
   const soundedCritFps = new Map<string, number>();
+  // v1.187.3 (log review, LOW) — for a sounded critical restored at boot and not present since,
+  // its last-present time as read from disk (restoreSoundedCriticals). In memory the entry is
+  // stamped at the boot, so the outage is not counted as absence; written back that way, every
+  // boot renewed it, and restarts less than SOUNDED_VDIFF_ABSENT_HOLD_MS apart kept an absent
+  // critical restorable for ever, past both the absent hold and the restore bound. The disk keeps
+  // this time instead until the critical is present again (dropped then, in the tick). An entry
+  // released meanwhile is never written (persistStatus writes the record's entries only) and is
+  // dropped if the critical comes back, before it can be recorded again.
+  const soundedCritRestoredAt = new Map<string, number>();
   let firstTick = true;
   let stopped = false;
   let lastBroadcastAt: number | null = null;
@@ -1250,7 +1277,10 @@ export function startBroadcastMonitor(
   const STATUS_PATH = resolve(process.cwd(), config.dbPath, '..', 'broadcast-last.json');
   // v1.187.3 (log review) — the sounded record's last write (restoreSoundedCriticals): the set it
   // wrote, and when. A failed write counts too, so a broken disk is retried on the same cadence.
-  const soundedCritKeys = (): string => JSON.stringify([...soundedCritFps.keys()].sort());
+  // v1.187.3 (log review, LOW) — only the entries that can hold after a restart are written, and
+  // only their set drives a write (soundedCritPersists).
+  const soundedCritKept = (): Array<[string, number]> => [...soundedCritFps].filter(([f]) => soundedCritPersists(f));
+  const soundedCritKeys = (): string => JSON.stringify(soundedCritKept().map(([f]) => f).sort());
   let soundedCritWritten = { keys: '[]', atMs: 0 };
   const persistStatus = () => {
     try {
@@ -1260,7 +1290,7 @@ export function startBroadcastMonitor(
           lastBroadcastAt, lastLevel, lastOutcome, lastErrors, lastSpokenMessage, lastRender,
           lastBroadcastKind, conditionLevel, conditionSpoken, conditionAt, // v1.186.0
           lastSuppressedAt, lastSuppressedLevel, lastSuppressedKind, lastSuppressedReason, // v1.187.0
-          soundedCrit: Object.fromEntries(soundedCritFps), // v1.187.3 (restoreSoundedCriticals)
+          soundedCrit: Object.fromEntries(soundedCritKept().map(([f, at]) => [f, soundedCritRestoredAt.get(f) ?? at])), // v1.187.3 (restoreSoundedCriticals)
         }),
       );
     } catch { /* best-effort */ }
@@ -1330,13 +1360,22 @@ export function startBroadcastMonitor(
   // tick (restoreSoundedCriticals): soundedCriticalHeld then holds a sounded vdiff-crit that is
   // muted again, or absent between two readings, exactly as in one process — the green clock never
   // starts, so there is no recovery and no all-clear with its card open. A status file written
-  // before v1.187.3 has no record: under a heard red the criticals of the red announcement on record
-  // are seeded instead (that evidence is cleared at the first green observed under a hold, so it is
-  // read here, at boot, before any tick).
+  // before v1.187.3 has no record: under a committed red the criticals of the red announcement on
+  // record are seeded instead (that evidence is cleared at the first green observed under a hold, so
+  // it is read here, at boot, before any tick).
   {
     const restored = restoreSoundedCriticals(persistedSoundedCrit, bootMs);
+    // v1.187.3 (log review, LOW) — the disk keeps each restored entry's own last-present time (never
+    // later than the boot: a clock stepped back must not keep it fresh) until it is present again.
+    if (restored != null) for (const f of restored.keys()) soundedCritRestoredAt.set(f, Math.min((persistedSoundedCrit as Record<string, number>)[f], bootMs));
+    // v1.187.3 (log review, LOW) — the fallback keys on the COMMITTED red on record, not on a heard
+    // one: the hold demotes the heard flag exactly while a sounded critical is muted, so the upgrade
+    // restart itself, landing inside such a hold, seeded nothing (and a committed yellow, the red's
+    // criticals released, still seeds nothing).
     const seeded = restored ?? new Map<string, number>(
-      bootBaselineLevel === 'red' ? (redReplayGate.state()?.activeFingerprints ?? []).map((f) => [f, bootMs]) : [],
+      persistedCondition?.conditionLevel === 'red'
+        ? (redReplayGate.state()?.activeFingerprints ?? []).filter((f) => soundedCritPersists(f)).map((f) => [f, bootMs])
+        : [],
     );
     for (const [f, at] of seeded) soundedCritFps.set(f, at);
     if (seeded.size > 0) {
@@ -2475,8 +2514,11 @@ export function startBroadcastMonitor(
   let belowRedSinceMs: number | null = null;
   let greenSinceMs: number | null = null;
   /** v1.187.0 — a downward move being held, for the once-per-episode log lines. `heard` is the
-   *  condition record's heard flag when the hold began (see the hold branch in the tick). */
-  let deescalationHold: { from: ConditionLevel; sinceMs: number; heard: boolean } | null = null;
+   *  condition record's heard flag when the hold began (see the hold branch in the tick).
+   *  v1.187.3 (log review) — `soundedHeldInWarmup`: a sounded critical held this hold inside the
+   *  warm-up (soundedCriticalHeld), so its green's recovery is decided once, even past the warm-up
+   *  (see recoveryCandidate in the tick). */
+  let deescalationHold: { from: ConditionLevel; sinceMs: number; heard: boolean; soundedHeldInWarmup: boolean } | null = null;
   /** v1.187.3 (review) — a continuous green under a heard restart baseline that has stood its dwell
    *  inside the warm-up but not on a settled alert set (isRestartRecovery): held for its recovery,
    *  since this time. Cleared whenever the green clock is (the green ended, or a sounded critical
@@ -2663,10 +2705,17 @@ export function startBroadcastMonitor(
     // such tick, not only at a red commit: one that cleared and came back loud inside a hold is a
     // flicker the hold absorbs, which commits nothing.
     if (level === 'red' && prevLevel === 'red') for (const f of criticalFingerprints) soundedCritFps.set(f, tickNow);
+    // v1.187.3 (log review, LOW) — a restored critical present again (muted or loud) has a new
+    // last-present time: the disk takes it from the record from now on (soundedCritRestoredAt).
+    if (soundedCritRestoredAt.size > 0) {
+      const presentCrit = new Set(alerts.filter((a) => a.severity === 'critical').map((a) => alertFingerprint(a)));
+      for (const f of [...soundedCritRestoredAt.keys()]) if (presentCrit.has(f)) soundedCritRestoredAt.delete(f);
+    }
     // v1.187.3 (log review) — and the record survives a restart (restoreSoundedCriticals): written
     // when its set changes, and while it holds anything at most every SOUNDED_CRIT_PERSIST_EVERY_MS.
+    // Only the entries that can hold after a restart count (soundedCritKept).
     if (soundedCritKeys() !== soundedCritWritten.keys
-      || (soundedCritFps.size > 0 && tickNow - soundedCritWritten.atMs >= SOUNDED_CRIT_PERSIST_EVERY_MS)) persistStatus();
+      || (soundedCritKept().length > 0 && tickNow - soundedCritWritten.atMs >= SOUNDED_CRIT_PERSIST_EVERY_MS)) persistStatus();
     if (level === 'red' || critHeld) belowRedSinceMs = null;
     else if (belowRedSinceMs == null) belowRedSinceMs = tickNow;
     if (level !== 'green' || critHeld) greenSinceMs = null;
@@ -2840,7 +2889,17 @@ export function startBroadcastMonitor(
     // stood only the plain dwell, it could never be spoken; spoken then, a critical still inside its
     // restarted debounce re-published seconds later ("All clear", then the klaxon).
     const inWarmup = Date.now() - bootMs < BROADCAST_BOOT_WARMUP_MS;
-    const recoveryCandidate = level === 'green' && continuationBaseline != null && inWarmup;
+    // v1.187.3 (log review) — a green held inside the warm-up by a sounded critical
+    // (soundedCriticalHeld: muted, or a cell-spread critical between readings; marked on the hold
+    // below) has its recovery decided ONCE, even when its dwell ends after the warm-up. The green
+    // clock starts only when the critical releases it: a restored absent cell-spread critical holds
+    // 7 min from the boot, so its green stood the 3-min dwell exactly as the 10-min warm-up ended,
+    // always took the late-green path (an ordinary transition) and was spoken with the alert set
+    // never settled, where the same restart without the record adopted it silently. On its first
+    // due tick it is a recovery (settled for the dwell: spoken) or held, and adopted silently on
+    // the next tick (recoveryHoldSinceMs is then set).
+    const recoveryCandidate = level === 'green' && continuationBaseline != null
+      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true && recoveryHoldSinceMs == null));
     const settledSinceMs = recoveryCandidate ? alertSetSettledSince() : null;
     const recovery = recoveryCandidate
       && isRestartRecovery(continuationBaseline, level, greenSinceMs, Date.now(), settledSinceMs);
@@ -2850,7 +2909,7 @@ export function startBroadcastMonitor(
     // CONDITION_CLEAR_DWELL_MS. A flicker back up inside it is then no transition at all.
     if (downward && !newWarn && (!lowerDue || (recoveryCandidate && !recovery))) {
       if (deescalationHold == null) {
-        deescalationHold = { from: committed, sinceMs: Date.now(), heard: conditionSpoken };
+        deescalationHold = { from: committed, sinceMs: Date.now(), heard: conditionSpoken, soundedHeldInWarmup: false };
         // v1.187.0 (review) — the condition record (the next boot's restart baseline) follows
         // the COMMITTED level, and the committed level is no longer what the house observes. A
         // restart inside the dwell would otherwise boot on "red, heard" and swallow a standing
@@ -2862,13 +2921,19 @@ export function startBroadcastMonitor(
         }
         log(`broadcast: ${committed} → ${level} held — a lower condition is committed only after it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s (flicker guard); nothing is spoken meanwhile${critHeld ? `. A cell-spread critical that sounded is held, not cleared (muted by a bounded cell-spread mute, or between two of its readings): the hold lasts until it annunciates again, or clears and stays gone ${Math.round(SOUNDED_VDIFF_ABSENT_HOLD_MS / 60_000)} minutes` : ''}`);
       }
+      // v1.187.3 (log review) — a sounded critical holds this hold inside the warm-up: its green's
+      // recovery is decided once, even past the warm-up (recoveryCandidate above). Set on every such
+      // tick, the hold's first included; a hold that ends (the level back up, or a commit) forgets it.
+      if (critHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;
       // v1.187.3 (review) — past its own dwell, a green is held only for its recovery: said once.
       if (lowerDue && recoveryHoldSinceMs == null) {
         recoveryHoldSinceMs = Date.now();
         const why = settledSinceMs == null
           ? 'the alert set is not settled (the store not hydrated, a feed\'s alerts not yet in the set, the boot onset debounces still running, or an onset clock withholding a fault)'
           : `the alert set has been settled only ${Math.round((Date.now() - settledSinceMs) / 1000)} s`;
-        log(`broadcast: green has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s but is held, not adopted — ${why}. It is announced as a recovery from the pre-restart ${continuationBaseline} once it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set, or adopted silently as a continuation if the warm-up ends first`);
+        log(`broadcast: green has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s but is held, not adopted — ${why}. ${inWarmup
+          ? `It is announced as a recovery from the pre-restart ${continuationBaseline} once it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set, or adopted silently as a continuation if the warm-up ends first`
+          : `A sounded critical held it inside the warm-up, which has ended: it is adopted silently as a continuation of the pre-restart ${continuationBaseline}`}`);
       }
       // v1.187.0 (review) — GREEN observed under a held level destroys the red-replay evidence
       // NOW, not when the green commits. The evidence is read only at boot: kept through the hold,

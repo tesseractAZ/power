@@ -557,6 +557,73 @@ test('★★★ …and one ABSENT between two readings after the restart is held
   assert.equal(announces, 2);
 });
 
+test('★★★ log review (LOW): a green held by a restored sounded critical until past the warm-up, on a set that never settled, is adopted silently — not spoken as a late green', async () => {
+  // The restored absent cell-spread critical holds the green SOUNDED_VDIFF_ABSENT_HOLD_MS (7 min)
+  // from the boot, so the green's 3-min dwell ends exactly as the 10-min warm-up does. It took the
+  // late-green path, an ordinary transition, and was spoken with the alert set never settled (a
+  // backup pool unknown, NWS enabled and failing); the same restart without the record adopts it
+  // silently. Its recovery is now decided once: held on its first due tick, adopted on the next.
+  await heardRed(CRIT_B);
+  alerts = [WARN_K];
+  settledSince = null;
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the warning adopted below the heard red');
+  assert.ok(b.has(RESTORED));
+  alerts = [];
+  await until(b, () => b.has('yellow → green held'), 'the hold');
+  assert.ok(b.has(HOLD_LINE), 'held by the restored critical, between readings');
+  offset += ABSENT_HOLD + 5 * SEC; // released ~7 min after the boot: the green clock starts
+  await sleep(60);
+  assert.ok(!b.has(HELD_FOR_RECOVERY));
+  offset += DWELL + 5 * SEC; // the dwell has passed — and the warm-up has ended
+  await until(b, () => b.has(WARMUP_ENDED), 'adopted silently as a continuation');
+  assert.ok(b.has('A sounded critical held it inside the warm-up, which has ended'), 'the held line says why it is not waited for');
+  await sleep(80);
+  assert.equal(played(b, 'green'), 0, 'not spoken: the set never settled');
+  assert.ok(!b.has('condition transition → green'));
+  assert.equal(announces, 1);
+  assert.equal(b.mon.status().conditionLevel, 'green');
+  assert.equal(b.mon.status().conditionSpoken, true, 'as the continuation path records it');
+  assert.equal(b.count(HELD_FOR_RECOVERY), 1);
+});
+
+test('★★ …and on a settled set that green is a recovery, decided once past the warm-up: spoken, and the continuation baseline ends', async () => {
+  await heardRed(CRIT_B);
+  alerts = [WARN_K];
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the continuation');
+  alerts = [];
+  await until(b, () => b.has('yellow → green held'), 'the hold');
+  offset += ABSENT_HOLD + 5 * SEC;
+  await sleep(60);
+  offset += DWELL + 5 * SEC;
+  await until(b, () => played(b, 'green') === 1, 'the all-clear');
+  assert.ok(b.has(`${RECOVERY} red`), 'a recovery, not a late ordinary transition');
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(announces, 2);
+});
+
+test('★★ …but a sounded critical that holds a green only after the warm-up is no restart decision: the green is an ordinary transition, on an unsettled set too', async () => {
+  await heard('yellow');
+  alerts = [WARN_K];
+  settledSince = null;
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the continuation');
+  offset += 11 * MIN; // past the warm-up
+  alerts = [WARN_K, CRIT_B];
+  await until(b, () => played(b, 'red') === 1, 'the red');
+  alerts = [];
+  await until(b, () => b.has('red → green held'), 'the hold');
+  assert.ok(b.has(HOLD_LINE), 'held between readings');
+  offset += ABSENT_HOLD + 5 * SEC;
+  await sleep(60);
+  offset += DWELL + 5 * SEC;
+  await until(b, () => played(b, 'green') === 1, 'the all-clear');
+  assert.ok(!b.has(HELD_FOR_RECOVERY));
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(announces, 3);
+});
+
 test('★★★ a sounded critical already muted at the restart is restored too — the hold had demoted the heard flag and cleared the red-replay evidence', async () => {
   const a = rig();
   await sleep(80);
@@ -644,7 +711,7 @@ test('★★ a sounded critical RELEASED before the restart is not restored: its
   assert.ok(!b.has(HOLD_LINE));
 });
 
-test('★★ a status file written before v1.187.3 (no sounded record) under a heard red: the criticals of the red announcement on record are seeded', async () => {
+test('★★ a status file written before v1.187.3 (no sounded record) under a committed red: the criticals of the red announcement on record are seeded', async () => {
   await heardRed(CRIT_B);
   const s = statusFile();
   delete s.soundedCrit;
@@ -661,7 +728,7 @@ test('★★ a status file written before v1.187.3 (no sounded record) under a h
   assert.ok(!b.has('condition transition → green'));
 });
 
-test('★★ …but not without a heard red: a red announcement on record below a heard yellow seeds nothing', async () => {
+test('★★ …but not below a committed yellow: a red announcement on record below a heard yellow seeds nothing', async () => {
   // The red's critical cleared and the yellow below it was committed and spoken: in one process
   // that critical had been released. The red-replay evidence outlives it (only a green clears it).
   const a = rig();
@@ -694,17 +761,156 @@ test('★★ …but not without a heard red: a red announcement on record below 
   await until(b, () => played(b, 'green') === 1, 'the recovery');
 });
 
-test('restoreSoundedCriticals — a record object only; well-formed fingerprints with a finite last-present time at most the bound old, each stamped at the boot', () => {
+test('★★ log review (LOW): the upgrade restart inside a hold — a status file written before v1.187.3 under a committed red the hold had made unheard still seeds the red announcement\'s criticals', async () => {
+  // The hold demotes the heard flag exactly while a sounded critical is muted, so a fallback keyed on
+  // a HEARD red seeded nothing when the upgrade restart landed inside such a hold: the warning
+  // standing beside the muted critical was spoken, it cleared, and "All clear" followed with the
+  // knee-muted critical's card open.
+  const a = rig();
+  await sleep(80);
+  offset += 11 * MIN;
+  alerts = [CRIT_B, WARN_K];
+  await until(a, () => played(a, 'red') === 1 && a.mon.status().conditionSpoken === true, 'a heard red');
+  alerts = [HELD_B, WARN_K]; // the knee mute is back; the warning was counted at the red
+  await until(a, () => a.has('red → yellow held'), 'the hold');
+  assert.ok(a.has(HOLD_LINE));
+  assert.equal(a.mon.status().conditionLevel, 'red');
+  assert.equal(a.mon.status().conditionSpoken, false, 'the hold demoted the heard flag');
+  a.stop();
+  offset += 2 * MIN;
+  const evidence = JSON.parse(readFileSync(process.env.BROADCAST_RED_REPLAY_STATE_PATH!, 'utf8'));
+  assert.deepEqual(evidence.activeFingerprints, [alertFingerprint(CRIT_B)], 'no green observed: the red announcement is still on record');
+  const s = statusFile();
+  delete s.soundedCrit; // as v1.187.2 wrote it
+  writeFileSync(STATUS_PATH, JSON.stringify(s));
+
+  alerts = [WARN_K, HELD_B];
+  const b = rig();
+  await until(b, () => b.has('yellow held for boot confirmation'), 'the boot yellow hold');
+  assert.equal(b.mon.status().bootBaselineLevel, null, 'no heard baseline');
+  assert.ok(b.has(`${RESTORED} from the red announcement on record`));
+  offset += B.BOOT_YELLOW_CONFIRM_MS + 5 * SEC;
+  await until(b, () => played(b, 'yellow') === 1, 'the warning');
+  alerts = [HELD_B];
+  await until(b, () => b.has('yellow → green held'), 'the hold');
+  assert.ok(b.has(HOLD_LINE), 'held as in one process');
+  offset += DWELL + 10 * MIN;
+  await sleep(60);
+  assert.equal(played(b, 'green'), 0, 'no all-clear with the muted critical\'s card open');
+  assert.equal(announces, 2);
+});
+
+test('★★ log review (LOW): a status file written before v1.187.3 under a committed red seeds only cell-spread criticals (no other critical can hold after a restart)', async () => {
+  await heard('red'); // CRIT_A, an inverter error code
+  const s = statusFile();
+  delete s.soundedCrit;
+  writeFileSync(STATUS_PATH, JSON.stringify(s));
+  const evidence = JSON.parse(readFileSync(process.env.BROADCAST_RED_REPLAY_STATE_PATH!, 'utf8'));
+  assert.deepEqual(evidence.activeFingerprints, [alertFingerprint(CRIT_A)]);
+  const b = rig();
+  await sleep(80);
+  assert.equal(b.mon.status().bootBaselineLevel, 'red');
+  assert.ok(!b.has(RESTORED), 'nothing seeded: the boot line would name a critical that holds nothing');
+});
+
+test('★★ log review (LOW): restarts less than the absent hold apart do not renew an absent critical\'s record — the restore bound counts from when it was last present', async () => {
+  // Each boot stamps a restored entry at the boot (the outage is not absence), and that stamp was
+  // written back at the first tick: restarted every 5 minutes, an absent cell-spread critical stayed
+  // restorable for ever and held each green behind it.
+  await heardRed(CRIT_B);
+  const fp = alertFingerprint(CRIT_B);
+  const lastPresent = (statusFile().soundedCrit as Record<string, number>)[fp];
+  alerts = []; // gone for good
+  let restarts = 0;
+  while (Date.now() + 5 * MIN - lastPresent <= B.SOUNDED_CRIT_RESTORE_MAX_AGE_MS) {
+    const r = rig();
+    await until(r, () => r.has(RESTORED), `restore ${restarts + 1}`);
+    await sleep(60); // the first ticks (and their write) have run
+    assert.equal((statusFile().soundedCrit as Record<string, number>)[fp], lastPresent, `restart ${restarts + 1}: the disk keeps when it was last present, not the boot`);
+    r.stop();
+    restarts += 1;
+    offset += 5 * MIN;
+  }
+  assert.ok(restarts >= 11, `${restarts} restarts`);
+  offset += 5 * MIN; // past the bound from when it was last present
+  const z = rig();
+  await sleep(80);
+  assert.ok(!z.has(RESTORED), 'not restored: last present more than the bound ago');
+});
+
+test('★★ …a restored critical present again carries its new last-present time to disk', async () => {
+  await heardRed(CRIT_B);
+  const fp = alertFingerprint(CRIT_B);
+  const before = (statusFile().soundedCrit as Record<string, number>)[fp];
+  alerts = [WARN_K, HELD_B]; // present again, muted by its knee mute
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the continuation');
+  offset += 2 * MIN; // past the refresh cadence
+  await sleep(80);
+  const after = (statusFile().soundedCrit as Record<string, number>)[fp];
+  assert.ok(after >= before + 4 * MIN, `refreshed by the observation after the restart (${Math.round((after - before) / 1000)} s later)`);
+});
+
+test('★ …and a last-present time from the future (the clock stepped back) is written back no later than the boot', async () => {
+  await heardRed(CRIT_B);
+  const fp = alertFingerprint(CRIT_B);
+  const s = statusFile();
+  s.soundedCrit = { [fp]: Date.now() + 30 * MIN };
+  writeFileSync(STATUS_PATH, JSON.stringify(s));
+  alerts = []; // not observed since (an observation would write its own time)
+  const boot = Date.now();
+  const b = rig();
+  await until(b, () => b.has(RESTORED), 'restored');
+  await sleep(60);
+  const onDisk = (statusFile().soundedCrit as Record<string, number>)[fp];
+  assert.ok(onDisk >= boot && onDisk <= Date.now(), 'the boot, not 30 minutes ahead');
+});
+
+test('★★ log review (LOW): only cell-spread criticals are written — a standing critical whose fault code flips no longer rewrites the status file on every flip, nor every minute', async () => {
+  const CRIT_A8: Alert = { ...CRIT_A, fault: 'err8' } as Alert;
+  const a = rig();
+  await sleep(80);
+  offset += 11 * MIN;
+  alerts = [CRIT_A];
+  await until(a, () => played(a, 'red') === 1, 'red (err7)');
+  assert.deepEqual(statusFile().soundedCrit, {}, 'a sounded inverter error is not written');
+  offset += 11 * MIN; // past the identical-message gap (the spoken text does not carry the code)
+  alerts = [CRIT_A8];
+  await until(a, () => played(a, 'red') === 2, 'the other fault code, announced once');
+  offset += 3 * MIN;
+  alerts = [CRIT_A];
+  await sleep(60);
+  assert.equal(played(a, 'red'), 2, 'each code announced once per episode');
+  const s = statusFile();
+  s.sentinel = 'untouched';
+  writeFileSync(STATUS_PATH, JSON.stringify(s));
+  for (let i = 0; i < 4; i += 1) {
+    alerts = [CRIT_A8];
+    await sleep(40);
+    alerts = [CRIT_A];
+    await sleep(40);
+  }
+  assert.equal(statusFile().sentinel, 'untouched', 'no write on a flip');
+  offset += 2 * MIN; // past the refresh cadence, the critical standing
+  await sleep(60);
+  assert.equal(statusFile().sentinel, 'untouched', 'no minute refresh for a critical that cannot hold after a restart');
+  assert.equal(played(a, 'red'), 2);
+});
+
+test('restoreSoundedCriticals — a record object only; well-formed cell-spread fingerprints with a finite last-present time at most the bound old, each stamped at the boot', () => {
   const boot = 90_000_000;
   const fp = alertFingerprint(CRIT_B);
   const fpA = alertFingerprint(CRIT_A);
+  const fpB3 = alertFingerprint({ ...CRIT_B, id: 'vdiff-crit-DPU-B-3' });
   const max = B.SOUNDED_CRIT_RESTORE_MAX_AGE_MS;
   assert.equal(B.restoreSoundedCriticals(undefined, boot), null, 'a status file written before v1.187.3');
   assert.equal(B.restoreSoundedCriticals(null, boot), null);
   assert.equal(B.restoreSoundedCriticals('x', boot), null);
   assert.equal(B.restoreSoundedCriticals([[fp, boot]], boot), null, 'an array is not the record');
   assert.deepEqual([...B.restoreSoundedCriticals({}, boot)!], [], 'a v1.187.3 record with nothing sounded');
-  assert.deepEqual([...B.restoreSoundedCriticals({ [fp]: boot - max, [fpA]: boot - 5 * MIN }, boot)!], [[fp, boot], [fpA, boot]], 'inclusive bound; stamped at the boot');
+  assert.deepEqual([...B.restoreSoundedCriticals({ [fp]: boot - max, [fpB3]: boot - 5 * MIN }, boot)!], [[fp, boot], [fpB3, boot]], 'inclusive bound; stamped at the boot');
+  // log review (LOW): only a cell-spread critical can hold after a restart (soundedCritPersists).
+  assert.deepEqual([...B.restoreSoundedCriticals({ [fpA]: boot - 5 * MIN, [fp]: boot }, boot)!], [[fp, boot]], 'a critical that is not a cell-spread critical is not restored');
   assert.deepEqual([...B.restoreSoundedCriticals({ [fp]: boot - max - 1 }, boot)!], [], 'one ms past the bound');
   assert.deepEqual([...B.restoreSoundedCriticals({ [fp]: boot + 5 * MIN }, boot)!], [[fp, boot]], 'a future stamp (the clock stepped back) is restored at the boot, not in the future');
   assert.deepEqual([...B.restoreSoundedCriticals({ 'vdiff-crit-DPU-B-2': boot }, boot)!], [], 'a bare id is not a fingerprint');
@@ -713,6 +919,13 @@ test('restoreSoundedCriticals — a record object only; well-formed fingerprints
   assert.deepEqual([...B.restoreSoundedCriticals({ [fp]: -Infinity }, boot)!], [], 'not finite');
   assert.equal(B.SOUNDED_CRIT_RESTORE_MAX_AGE_MS, 60 * MIN, 'VDIFF_KNEE_GAP_CARRY_MS: the longest outage a knee session survives');
   assert.equal(B.SOUNDED_CRIT_PERSIST_EVERY_MS, MIN);
+});
+
+test('soundedCritPersists — the cell-spread criticals only (the only ones that can hold after a restart)', () => {
+  assert.equal(B.soundedCritPersists(alertFingerprint(CRIT_B)), true);
+  assert.equal(B.soundedCritPersists(alertFingerprint(CRIT_A)), false, 'an inverter error code');
+  assert.equal(B.soundedCritPersists(alertFingerprint({ id: 'vdiff-warn-DPU-B-2', title: 'Cell imbalance' })), false, 'the warning of the same family');
+  assert.equal(B.soundedCritPersists(alertFingerprint({ id: 'shp2-src-err-X-1', title: 'Source error', fault: 'e3' })), false);
 });
 
 /* ── the pure predicate ──────────────────────────────────────────────────────────────────── */
