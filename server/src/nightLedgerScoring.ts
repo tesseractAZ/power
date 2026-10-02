@@ -500,7 +500,7 @@ export interface DeliveredOutcome {
  * hold; when the SHP2 carries the house from the pack (above its reserve, before a
  * just-in-time force-charge and after its OFF) the house load it subtracts was never
  * imported. 2026-09-30: import 23.38 − load 18.67 = 4.71 kWh recorded; the source channels
- * read 20.33 kWh into the Cores (the Cores' own AC input 20.25, the pool 55→76%). A channel
+ * read 20.34 kWh into the Cores (the Cores' own AC input 20.25, the pool 55→76%). A channel
  * carrying the house reads negative and adds nothing, so the hours on the pack cost nothing
  * here and the hours on the grid count only what reached the Cores.
  *

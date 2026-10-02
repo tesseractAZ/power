@@ -1883,7 +1883,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
  * 2026-09-30: pool 74% at 23:00 against the 50% reserve, the house on the pack until the
  * force-charge at 03:18 and again after its 04:32 OFF, 15.5 kWh of load with zero import —
  * the subtraction removes load the grid never carried: 4.71 kWh recorded against ~20.3 kWh
- * into the Cores (source channels 20.33, the Cores' own AC input 20.25, pool 55→76%).
+ * into the Cores (source channels 20.34, the Cores' own AC input 20.25, pool 55→76%).
  * Always toward under-delivery, in the column the buy de-bias below trains on.
  *
  * Rows captured before v1.187.3 carry `delivered_basis` NULL and are KEPT as recorded; the
