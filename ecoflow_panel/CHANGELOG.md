@@ -1,3 +1,31 @@
+## 1.187.3
+
+### An honest battery-voltage notice, the all-clear after a restart, cards that clear, and a night-charge record that measures delivery
+
+**Alerts and announcements**
+
+- **"Pack voltage outside EMS window" is no longer an alarm.** EcoFlow reports a voltage band for each Core. The band follows that Core's own battery voltage and is refreshed about every five minutes. The battery leaves it whenever charging or the house load changes quickly, or when the packs reach full charge — not at any voltage limit.
+  - It was treated as a high-priority alarm: it raised the alarm level, was announced on the speakers and sent a phone notification.
+  - On 1 October it was the only alarm announced during a normal full charge, with the highest cell well below its limit. None of its 33 occurrences since late August came near a limit.
+  - It now appears only as a low-priority card, renamed "Pack voltage swing outside EMS band". Its text says the band is not a voltage limit.
+  - A real cell overvoltage is still a critical alarm that sounds at once.
+- **The band is now recorded** next to the battery voltage, so each occurrence can be checked afterwards. Its entries stay in the alert history as long as before.
+- **The all-clear after a restart is spoken.** If a warning announced before a restart cleared within the first ten minutes after it, no all-clear was spoken. The last words on the speakers then described a warning that had gone. On 1 October this happened four minutes after an update.
+  - The all-clear is now announced once, when the condition has stayed clear for three minutes after the add-on has a complete and trustworthy picture.
+  - A complete picture means every reading source has reported, and no fault the equipment is reporting is still inside its confirmation delay. Some faults, such as an inverter error, are confirmed only after three minutes, and that wait starts again at every restart. Without this, an all-clear could be spoken just before the same fault sounded again.
+  - If that picture is not ready within the first ten minutes, the all-clear is not announced, as before.
+  - A warning still standing after a restart is still not repeated.
+  - A condition that is already clear at start-up is still not announced.
+- **A low-priority phone notification now clears when its condition does.** When the add-on had learned that an alert type is noisy, it sent that alert as low priority but never sent the matching "Resolved" message. The card stayed in Home Assistant's notification list and on the phone, showing a condition that had already cleared. On 1 October a cell-spread card stayed for almost six hours. It now gets its "Resolved" message like any other. A priority switched off in the alert settings still sends none.
+- **The noise estimate for the cell-spread outlier alert is rebuilt.** Since 1.187.1, a pack whose cell spread is lower than its siblings' no longer counts as an outlier. Older records of such cases still counted toward deciding whether the alert is noisy, and they were enough to push it over the line. Those older records are set aside, and the decision is learned again from new ones, which takes about five days. Until then the alert is sent at its normal priority.
+
+**Night-charge record and release tooling**
+
+- The night-charge ledger now measures delivered energy as the energy that went into the home Cores, read from the panel's channel for each Core over the hours the charge was held. It used to be grid import minus the house load over the night, which badly under-counted any night the panel ran the house from the battery before or after the charge: on 09-30 it would have recorded 4.7 kWh against about 20 kWh delivered. Every channel that recorded data during the night is counted, so a Core unplugged before the night is scored the next evening still counts. When a channel is missing data, or a reading is impossible (more energy into the Cores than came from the grid), the value is left empty and the notes say why.
+- A new ledger column records which method measured each night's delivered energy. Earlier nights keep their recorded values. The announced-buy calibration uses only nights measured the new way, so it starts over and needs seven new nights before it applies a correction. The calibration only changes the announced figure, never the charge itself.
+- The night-charge plan now reports the calibration's real basis and sample count. It always said "default" and 0.
+- A stalled package download can no longer hold up a release. The documentation steps in the release workflow, the package installs inside them and the document tools all have time limits, and the release job's limit is longer than all of them together, so the GitHub Release is still created when the documents fail. A document is attached to the Release only when its build finished successfully, so a build cut off by a time limit cannot leave a damaged file in a Release that can never be changed. On the v1.187.1 release a stalled mirror ran the job for six hours and it was cancelled before the Release was created. The pull-request documentation check has the same limits.
+
 ## 1.187.2
 
 ### Cell-spread alarms between 85% and 95% charge are time-limited as they are at full charge
