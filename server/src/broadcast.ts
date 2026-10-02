@@ -3216,11 +3216,12 @@ export function startBroadcastMonitor(
         return;
       }
     }
-    // v1.187.4 — not a continuation when a level above it has been audible since the boot: the last
-    // words in the house are then that level, and a red heard after the restart that cleared back
-    // to the heard yellow was filed as "the pre-restart advisory" — the cleared red stayed the last
-    // words.
-    const higherAudible = conditionAudibleSinceBootLevel != null && LEVEL_RANK[conditionAudibleSinceBootLevel] > LEVEL_RANK[level];
+    // v1.187.4 — not a continuation when a level above it has been audible since the boot and has
+    // CLEARED: the last words in the house are then that level, and a red heard after the restart
+    // that cleared back to the heard yellow was filed as "the pre-restart advisory" — the cleared red
+    // stayed the last words. A red only held (keepRed) stays committed: the warning beside it is the
+    // continuation it was.
+    const higherAudible = !keepRed && conditionAudibleSinceBootLevel != null && LEVEL_RANK[conditionAudibleSinceBootLevel] > LEVEL_RANK[level];
     if (transitioned && !higherAudible && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) {
       // v1.187.3 (review) — never a green: inside the warm-up a green under the baseline is held
       // until it is a recovery (above), and past it this predicate is false.

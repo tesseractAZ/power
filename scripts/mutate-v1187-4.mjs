@@ -10,7 +10,7 @@
  * held, the decision waits for a broadcast in flight or a SIP outcome pending. Mutants W-i..W-xii.
  * (review) A return to the held level is a flicker only when that level was audible in its episode
  * (committedAudible), and a level above the observed one audible since the boot ends the
- * continuation. Mutants H-i..H-v.
+ * continuation when that level has cleared (not while it is only held: keepRed). Mutants H-i..H-vi.
  *
  * (2) The restart-recovery decisions read conditionAudibleSinceBootLevel — the most severe
  * condition this process made audible on any channel (Music Assistant played it, the tone-only
@@ -58,6 +58,7 @@ const SUBSET = [
   'test/staleConditionRetry.test.ts',
   'test/broadcastRetryBudget.test.ts',
   'test/reserveBlindFailover.test.ts',
+  'test/conditionDeescalationDwell.test.ts',
 ];
 
 const NOTE_SIP = "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode);";
@@ -183,6 +184,13 @@ const MUTANTS = [
     find: '    if (transitioned && !higherAudible && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) {',
     to: '    if (transitioned && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) { /* MUTANT */',
     why: 'A red heard after the restart that clears back to the heard yellow is filed as the pre-restart advisory: the cleared red stays the last words.',
+  },
+  {
+    id: 'H-vi. ★ a held (not cleared) red after the restart also ends the continuation',
+    file: BR,
+    find: '    const higherAudible = !keepRed && conditionAudibleSinceBootLevel != null && LEVEL_RANK[conditionAudibleSinceBootLevel] > LEVEL_RANK[level];',
+    to: '    const higherAudible = conditionAudibleSinceBootLevel != null && LEVEL_RANK[conditionAudibleSinceBootLevel] > LEVEL_RANK[level]; /* MUTANT */',
+    why: 'The warning heard before the restart is spoken again beside a red that is still committed.',
   },
 
   /* ── (2) "audible since the boot" ─────────────────────────────────────────────────────── */
