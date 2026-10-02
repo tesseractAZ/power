@@ -2,27 +2,37 @@
 /**
  * mutate-v1187-4.mjs — committed harness for v1.187.4: the restart-recovery follow-ups.
  *
- * (1) The warm-up-end decision on a green held for its recovery waits for a settled alert set, or
- * at the latest LONGEST_RESTARTED_ONSET_MS + RESTARTED_ONSET_HOLD_MARGIN_MS after the boot
- * (broadcast.warmupEndDecisionDue): the backup-pool-unknown clock (15 min) restarts at the boot, so
- * a green announced at the end of the warm-up could precede the reserve-blind warning it hid.
- * Both outcomes wait — the announcement and the silent adoption. Mutants W-i..W-vii.
+ * (1) The restart question on a green under a heard baseline stays open past the warm-up until
+ * LONGEST_RESTARTED_ONSET_MS + RESTARTED_ONSET_HOLD_MARGIN_MS (16 min) after the boot, and one more
+ * dwell on a set settled by then (broadcast.restartQuestionOpen): the backup-pool-unknown clock
+ * (15 min) restarts at the boot, so a green decided at the end of the warm-up, or one whose dwell
+ * ended after it, could precede the reserve-blind warning it hid. When it closes with the green
+ * held, the decision waits for a broadcast in flight or a SIP outcome pending. Mutants W-i..W-xii.
+ * (review) A return to the held level is a flicker only when that level was audible in its episode
+ * (committedAudible), and a level above the observed one audible since the boot ends the
+ * continuation. Mutants H-i..H-v.
  *
  * (2) The restart-recovery decisions read conditionAudibleSinceBootLevel — the most severe
  * condition this process made audible on any channel (Music Assistant played it, the tone-only
  * fallback and a delivery-unknown timeout included, a sub-2 s "ok" not; the SIP cordless took it,
- * or a timed-out SIP dispatch the entity state confirms) — not lastConditionPlayedLevel (a
- * verified, error-free play: the storm gates' evidence). Tests and dedicated announcements never
- * count. Mutants U-i..U-viii.
+ * or a timed-out SIP dispatch the entity state confirms) — not lastConditionPlayedLevel. Tests and
+ * dedicated announcements never count. Mutants U-i..U-viii.
  *
- * (3) The backup pool's unknown onset survives a restart (SnapshotStore, pool-unknown.json): a
- * panel whose first projection after the restart reads unknown carries it when the add-on was down
- * at most POOL_UNKNOWN_CARRY_MAX_GAP_MS, so an off-grid reserve-blind critical is critical at once,
- * not absent 15 min and a warning until boot + 60. Mutants C-i..C-xi.
+ * (3) The backup pool's unknown onset survives a restart (SnapshotStore, pool-unknown.json): carried
+ * by a panel whose first projection reads unknown when the add-on was down at most
+ * POOL_UNKNOWN_CARRY_MAX_GAP_MS; refreshed by projections and by the poll loop; an unconsumed,
+ * carriable entry of a listed panel is pending for the settled set; a failed save removes the file;
+ * an episode over POOL_UNKNOWN_MAX_EPISODE_MS is not believed. Mutants C-i..C-xix.
  *
- * (4) A deferred retry of a CONDITION broadcast replays its level only while the condition is still
- * committed there (broadcast.conditionRetryStale), checked when it runs; a stale one never keeps a
- * newer deferral from arming. Dedicated announcements are unchanged. Mutants R-i..R-vi.
+ * (4) A deferred retry of a CONDITION broadcast replays only while the condition episode it was
+ * requested in is current (broadcast.conditionRetryStale), checked when it runs; a stale one never
+ * keeps a newer deferral from arming. Dedicated announcements are unchanged. Mutants R-i..R-vii.
+ *
+ * Not mutated: the episode a deferred retry passes to its own re-run (the run-time check reads the
+ * armed episode from its closure first, so a re-run in a later episode is always dropped before it
+ * could re-arm); the `else if (heard)` keeping a same-level heard adoption audible (no test reaches a
+ * same-level heard adoption whose audibility changes an outcome); `!inWarmup` on the decision branch
+ * (the question is always open through the warm-up).
  *
  *   node scripts/mutate-v1187-4.mjs
  *
@@ -37,6 +47,7 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const AL = resolve(SERVER, 'src/alerts.ts');
+const AM = resolve(SERVER, 'src/alertMonitor.ts');
 const BR = resolve(SERVER, 'src/broadcast.ts');
 const SN = resolve(SERVER, 'src/snapshot.ts');
 
@@ -49,31 +60,34 @@ const SUBSET = [
   'test/reserveBlindFailover.test.ts',
 ];
 
+const NOTE_SIP = "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode);";
+const RUN_CHECK = "        () => (conditionRetryStale(kind, episode, conditionEpisode) ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since` : null),";
+
 const MUTANTS = [
-  /* ── (1) the warm-up-end decision waits for a settled set ─────────────────────────────── */
+  /* ── (1) the restart question ─────────────────────────────────────────────────────────── */
   {
-    id: 'W-i. ★★★ no wait: decided at the end of the warm-up on an unsettled set (v1.187.3)',
+    id: 'W-i. ★★★ the question closes at the end of the warm-up (v1.187.3)',
     file: BR,
-    find: '      if (!warmupEndDecisionDue(alertSetSettledSince(), Date.now() - bootMs)) {',
-    to: '      if (false) { /* MUTANT */',
+    find: '  if (msSinceBoot < Math.max(warmupMs, holdMs)) return true;',
+    to: '  if (msSinceBoot < warmupMs) return true; /* MUTANT */',
     why: '"All clear" at boot + 11, then the reserve-blind warning the restarted clock hid at boot + 15.',
   },
   {
-    id: 'W-ii. ★★ a settled set does not decide it: only the bound does',
+    id: 'W-ii. ★★ no patience on a settled set at the bound',
     file: BR,
-    find: '  return alertSetSettledSinceMs != null || msSinceBoot >= holdMs;',
-    to: '  return msSinceBoot >= holdMs; /* MUTANT */',
-    why: 'A red heard after the restart keeps the last words until boot + 16 though the set settled at boot + 11.',
+    find: '  return alertSetSettledSinceMs != null && msSinceBoot < holdMs + dwellMs;',
+    to: '  return false; /* MUTANT */',
+    why: 'A set that settles at boot + 15 has its green decided at boot + 16 with one minute on it.',
   },
   {
-    id: 'W-iii. ★★★ no bound: a set that never settles holds the green for good',
+    id: 'W-iii. ★★★ an unsettled set holds the question open for good',
     file: BR,
-    find: '  return alertSetSettledSinceMs != null || msSinceBoot >= holdMs;',
-    to: '  return alertSetSettledSinceMs != null; /* MUTANT */',
+    find: '  if (msSinceBoot < Math.max(warmupMs, holdMs)) return true;',
+    to: '  if (alertSetSettledSinceMs == null || msSinceBoot < Math.max(warmupMs, holdMs)) return true; /* MUTANT */',
     why: 'A feed that never delivers keeps the cleared condition the last words for the life of the process.',
   },
   {
-    id: 'W-iv. ★★ no margin: released at the restarted window itself',
+    id: 'W-iv. ★★ no margin: closed at the restarted window itself',
     file: BR,
     find: 'export const RESTARTED_ONSET_HOLD_MARGIN_MS = 60_000;',
     to: 'export const RESTARTED_ONSET_HOLD_MARGIN_MS = 0; /* MUTANT */',
@@ -84,21 +98,91 @@ const MUTANTS = [
     file: AL,
     find: 'export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS, RESERVE_BLIND_AFTER_MS);',
     to: 'export const LONGEST_RESTARTED_ONSET_MS = BOOT_RESET_ONSET_DEBOUNCE_MS; /* MUTANT */',
-    why: 'The bound has passed before the warm-up ends: the 10-02 shape returns.',
+    why: 'The question closes with the warm-up: the 10-02 shape returns.',
   },
   {
-    id: 'W-vi. ★★ only the announcement waits; the silent adoption is taken at the end of the warm-up',
+    id: 'W-vi. ★★★ the tick keeps the warm-up as the question\'s window',
     file: BR,
-    find: '      if (!warmupEndDecisionDue(alertSetSettledSince(), Date.now() - bootMs)) {',
-    to: "      if (conditionAudibleSinceBootLevel != null && conditionAudibleSinceBootLevel !== 'green' && !warmupEndDecisionDue(alertSetSettledSince(), Date.now() - bootMs)) { /* MUTANT */",
-    why: 'The warning heard before the restart, published again at boot + 15, is spoken a second time.',
+    find: '    const questionOpen = restartQuestionOpen(Date.now() - bootMs, settledSinceMs);',
+    to: '    const questionOpen = Date.now() - bootMs < BROADCAST_BOOT_WARMUP_MS; /* MUTANT */',
+    why: 'As W-i, and the late-green path speaks an all-clear on an unsettled set at boot + 10:30.',
   },
   {
-    id: 'W-vii. ★ the wait is logged on every tick',
+    id: 'W-vii. ★ the patience runs two dwells',
+    file: BR,
+    find: '  return alertSetSettledSinceMs != null && msSinceBoot < holdMs + dwellMs;',
+    to: '  return alertSetSettledSinceMs != null && msSinceBoot < holdMs + 2 * dwellMs; /* MUTANT */',
+    why: 'The question stays open three minutes longer than documented.',
+  },
+  {
+    id: 'W-viii. ★★ the decision does not wait for a broadcast in flight',
+    file: BR,
+    find: '      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) {',
+    to: '      if (false) { /* MUTANT */',
+    why: 'A red retry playing when the question closes is not audible yet: its green is adopted silently and the red ends the last words.',
+  },
+  {
+    id: 'W-ix. ★★ the decision does not wait for a SIP outcome',
+    file: BR,
+    find: '      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) {',
+    to: '      if (realAudibleInFlight > 0) { /* MUTANT */',
+    why: 'A red reaching only the cordless, its outcome pending, is followed by a silent green.',
+  },
+  {
+    id: 'W-x. ★ a SIP outcome is never settled on the plain path',
+    file: BR,
+    find: '          if (!probing) sipOutcomeKnown();',
+    to: '          /* MUTANT */',
+    why: 'After any cordless dispatch the restart decision waits for good.',
+  },
+  {
+    id: 'W-xi. ★ the timeout probe never settles its outcome',
+    file: BR,
+    find: '                  .finally(sipOutcomeKnown);',
+    to: '                  ; /* MUTANT */',
+    why: 'After a timed-out cordless dispatch the restart decision waits for good.',
+  },
+  {
+    id: 'W-xii. ★ the wait is logged on every tick',
     file: BR,
     find: '        if (warmupEndWaitLoggedFor !== recoveryHoldSinceMs) {',
     to: '        if (true) { /* MUTANT */',
-    why: 'One line every 10 s for up to six minutes.',
+    why: 'One line every 10 s while a clip plays.',
+  },
+  {
+    id: 'H-i. ★★★ a return to the held level is always a flicker (v1.187.3)',
+    file: BR,
+    find: '    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit && !committedAudible;',
+    to: '    const unheardReturn = false; /* MUTANT */',
+    why: 'A red nobody heard that returns while its clearing stands the dwell is never spoken — for up to 16 min after a restart.',
+  },
+  {
+    id: 'H-ii. ★★ a return is spoken even when the held level was heard',
+    file: BR,
+    find: '    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit && !committedAudible;',
+    to: '    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit; /* MUTANT */',
+    why: 'Every flicker of a heard condition sounds again: the dwell no longer absorbs anything.',
+  },
+  {
+    id: 'H-iii. ★★ an audible broadcast does not mark the committed level',
+    file: BR,
+    find: '    if (episode === conditionEpisode && level === prevLevel) committedAudible = true;',
+    to: '    /* MUTANT */',
+    why: 'As H-ii for every level that was heard in this process.',
+  },
+  {
+    id: 'H-iv. ★★ a level change keeps the old level\'s audibility',
+    file: BR,
+    find: '      conditionEpisode += 1;\n      committedAudible = heard;',
+    to: '      conditionEpisode += 1; /* MUTANT */',
+    why: 'A red nobody heard after a heard yellow is absorbed as a flicker when it returns.',
+  },
+  {
+    id: 'H-v. ★★★ the continuation ignores a higher level audible since the boot',
+    file: BR,
+    find: '    if (transitioned && !higherAudible && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) {',
+    to: '    if (transitioned && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) { /* MUTANT */',
+    why: 'A red heard after the restart that clears back to the heard yellow is filed as the pre-restart advisory: the cleared red stays the last words.',
   },
 
   /* ── (2) "audible since the boot" ─────────────────────────────────────────────────────── */
@@ -119,22 +203,22 @@ const MUTANTS = [
   {
     id: 'U-iii. ★★★ the cordless is not noted',
     file: BR,
-    find: "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level);",
+    find: NOTE_SIP,
     to: '          /* MUTANT */',
     why: 'A red that reached only the SIP cordless (every speaker away) is followed by a silent green.',
   },
   {
     id: 'U-iv. ★★ a refused SIP dispatch counts',
     file: BR,
-    find: "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level);",
-    to: "          if (kind === 'condition') noteConditionAudible(level); /* MUTANT */",
+    find: NOTE_SIP,
+    to: "          if (kind === 'condition') noteConditionAudible(level, episode); /* MUTANT */",
     why: 'A red heard nowhere makes the clear of a warning heard only before the restart spoken from an unsettled set.',
   },
   {
     id: 'U-v. ★★ a sub-2 s "ok" counts',
     file: BR,
     find: '    if (call.ok && dt < 2000) {',
-    to: "    if (call.ok && kind === 'condition') noteConditionAudible(level); /* MUTANT */\n    if (call.ok && dt < 2000) {",
+    to: "    if (call.ok && kind === 'condition') noteConditionAudible(level, episode); /* MUTANT */\n    if (call.ok && dt < 2000) {",
     why: 'HA answered without playing; the red was heard by no one, yet its green is announced as if it had been.',
   },
   {
@@ -147,14 +231,14 @@ const MUTANTS = [
   {
     id: 'U-vii. ★★ an operator TEST counts (the cordless)',
     file: BR,
-    find: "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level);",
-    to: '          if (r.ok > 0) noteConditionAudible(level); /* MUTANT */',
+    find: NOTE_SIP,
+    to: '          if (r.ok > 0) noteConditionAudible(level, episode); /* MUTANT */',
     why: 'As U-vi, through the SIP side-channel.',
   },
   {
     id: 'U-viii. ★★ a timed-out SIP dispatch the entity confirms is not noted',
     file: BR,
-    find: "                      if (kind === 'condition') noteConditionAudible(level); // v1.187.4",
+    find: "                      if (kind === 'condition') noteConditionAudible(level, episode); // v1.187.4",
     to: '                      /* MUTANT */',
     why: 'The cordless played the red (its HTTP response was lost) and the green is adopted silently.',
   },
@@ -170,16 +254,16 @@ const MUTANTS = [
   {
     id: 'C-ii. ★★★ never written',
     file: SN,
-    find: '    if (changed || (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty))) this.writePoolUnknown();',
+    find: '    if (changed) this.writePoolUnknown();\n    else this.refreshPoolUnknown();',
     to: '    /* MUTANT */',
     why: 'As C-i: the next process finds nothing to carry.',
   },
   {
-    id: 'C-iii. ★★ the last-seen time is not refreshed while the pool stays unknown',
+    id: 'C-iii. ★★ projections do not refresh the last-seen time',
     file: SN,
-    find: '    if (changed || (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty))) this.writePoolUnknown();',
-    to: '    if (changed) this.writePoolUnknown(); /* MUTANT */',
-    why: 'A restart an hour into a wedge reads as a long outage: the critical is dropped to absent, then a warning.',
+    find: '    else this.refreshPoolUnknown();',
+    to: '    /* MUTANT */',
+    why: 'A restart an hour into a wedge reads as a long outage: the critical drops to absent, then a warning.',
   },
   {
     id: 'C-iv. ★★ rewritten on every projection',
@@ -237,49 +321,112 @@ const MUTANTS = [
     to: '    /* MUTANT */',
     why: 'A corrupt file can carry an onset the store never wrote.',
   },
+  {
+    id: 'C-xii. ★★★ the poll loop does not refresh the file (a dark panel)',
+    file: SN,
+    find: '    // last-seen time keeps saying this process holds the onset (refreshPoolUnknown).\n    this.refreshPoolUnknown();',
+    to: '    /* MUTANT */',
+    why: 'A panel gone dark for an hour with its pool unknown loses its critical at the next restart, though the process held it.',
+  },
+  {
+    id: 'C-xiii. ★★ an unconsumed entry is never pending',
+    file: SN,
+    find: '      if (this.snap.devices[sn] != null && carriedPoolUnknownSince(e, nowMs) != null) out.push(sn);',
+    to: '      /* MUTANT */',
+    why: 'The set settles before the panel\'s first projection; the carried critical returns after an all-clear.',
+  },
+  {
+    id: 'C-xiv. ★ an unlisted panel is pending',
+    file: SN,
+    find: '      if (this.snap.devices[sn] != null && carriedPoolUnknownSince(e, nowMs) != null) out.push(sn);',
+    to: '      if (carriedPoolUnknownSince(e, nowMs) != null) out.push(sn); /* MUTANT */',
+    why: 'A panel off the account keeps the set unsettled for an hour after every restart.',
+  },
+  {
+    id: 'C-xv. ★★ the alert monitor is not told what is pending',
+    file: AM,
+    find: '      poolUnknownCarryPending: store.poolUnknownCarryPending(),',
+    to: '      /* MUTANT */',
+    why: 'As C-xiii, through the production wiring.',
+  },
+  {
+    id: 'C-xvi. ★★ the settled set ignores a pending carried onset',
+    file: AL,
+    find: "  for (const sn of connectivity.poolUnknownCarryPending ?? []) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);",
+    to: '  /* MUTANT */',
+    why: 'As C-xiii.',
+  },
+  {
+    id: 'C-xvii. ★★ a failed save leaves the old file',
+    file: SN,
+    find: '      try { unlinkSync(path); } catch { /* absent, or not removable either */ }',
+    to: '      /* MUTANT */',
+    why: 'A pool that reads again stays "unknown since" on file; after a restart a false critical with an inflated age.',
+  },
+  {
+    id: 'C-xviii. ★ any episode length is believed',
+    file: SN,
+    find: '    if (lastSeenMs - sinceMs > POOL_UNKNOWN_MAX_EPISODE_MS) continue;',
+    to: '    /* MUTANT */',
+    why: 'A hand-edited or corrupt onset raises "unreadable for 20,000 days", critical, at the first projection.',
+  },
+  {
+    id: 'C-xix. ★★★ the file is not read at construction',
+    file: SN,
+    find: '    // (poolUnknownCarryPending).\n    this.loadPoolUnknown();',
+    to: '    // (poolUnknownCarryPending). /* MUTANT */',
+    why: 'Nothing is ever carried or pending: as C-i.',
+  },
 
   /* ── (4) a stale condition retry ──────────────────────────────────────────────────────── */
   {
     id: 'R-i. ★★★ no run-time check: the armed level is replayed whatever the condition',
     file: BR,
-    find: "        () => (conditionRetryStale(kind, level, prevLevel) ? `the condition is ${prevLevel ?? 'unknown'} now` : null));",
-    to: '        undefined); /* MUTANT */',
+    find: RUN_CHECK,
+    to: '        undefined, /* MUTANT */',
     why: 'A cleared red is spoken after its all-clear: the last words in the house a critical that has cleared.',
   },
   {
     id: 'R-ii. ★★★ a stale pending retry still holds the slot',
     file: BR,
-    find: '    const stalePending = retryLevel != null && conditionRetryStale(retryKind, retryLevel, prevLevel);',
+    find: '    const stalePending = retryLevel != null && conditionRetryStale(retryKind, retryEpisode, conditionEpisode);',
     to: '    const stalePending = false; /* MUTANT */',
     why: 'The green that replaced the red is "kept pending" behind the red retry, which is then dropped: never retried.',
   },
   {
     id: 'R-iii. ★★ checked when the timer fires, not when the retry runs',
     file: BR,
-    find: "        () => (conditionRetryStale(kind, level, prevLevel) ? `the condition is ${prevLevel ?? 'unknown'} now` : null));",
-    to: "        ((s) => () => s)(conditionRetryStale(kind, level, prevLevel) ? `the condition is ${prevLevel ?? 'unknown'} now` : null)); /* MUTANT */",
+    find: RUN_CHECK,
+    to: "        ((s) => () => s)(conditionRetryStale(kind, episode, conditionEpisode) ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since` : null), /* MUTANT */",
     why: 'A retry queued behind a broadcast in flight is played after the green committed meanwhile.',
   },
   {
     id: 'R-iv. ★★ a dedicated retry is judged against the condition too',
     file: BR,
-    find: "  return kind === 'condition' && committed !== armedLevel;",
-    to: '  return committed !== armedLevel; /* MUTANT */',
-    why: 'A deferred SoC-ladder or runway alarm is dropped because the condition (which excludes it) is green.',
+    find: "  return kind === 'condition' && armedEpisode !== currentEpisode;",
+    to: '  return armedEpisode !== currentEpisode; /* MUTANT */',
+    why: 'A deferred SoC-ladder or runway alarm is dropped because the condition (which excludes it) moved.',
   },
   {
     id: 'R-v. ★★ every condition retry is stale',
     file: BR,
-    find: "  return kind === 'condition' && committed !== armedLevel;",
+    find: "  return kind === 'condition' && armedEpisode !== currentEpisode;",
     to: "  return kind === 'condition'; /* MUTANT */",
     why: 'A red nobody heard is never retried, even while it is still the committed condition.',
   },
   {
-    id: 'R-vi. ★★ the retry\'s kind is not recorded',
+    id: 'R-vi. ★★ the retry\'s episode is not recorded',
     file: BR,
-    find: '    retryKind = kind;',
+    find: '    retryEpisode = episode;',
     to: '    /* MUTANT */',
-    why: 'A condition retry reads as dedicated: as R-ii.',
+    why: 'Every pending condition retry reads as stale once any commit has happened: a red keeps no slot against a yellow.',
+  },
+  {
+    id: 'R-vii. ★★★ every commit starts a new episode (a same-level one too)',
+    file: BR,
+    find: '    if (l !== prevLevel) {\n      conditionEpisode += 1;',
+    to: '    if (true) { /* MUTANT */\n      conditionEpisode += 1;',
+    why: 'A red nobody heard is dropped when a warning is spoken under it (keepRed), and its audibility is lost.',
   },
 ];
 

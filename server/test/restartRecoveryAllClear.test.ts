@@ -1120,6 +1120,7 @@ test('★★ review (A3): the restart decision waits for a red retry in flight �
   slowPlay = false;
   await until(b, () => b.has(CLOSED_AUDIBLE), 'announced: the red was audible by the time it was decided');
   assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(b.count('waits for the broadcast in flight'), 1, 'said once');
   offset += 2 * MIN + SEC; // the storm gate's gap after the red: the green is re-presented
   await until(b, () => played(b, 'green') === 1, 'the all-clear after the red the house just heard');
 });

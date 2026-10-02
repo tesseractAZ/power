@@ -288,6 +288,35 @@ test('★★ …while a red the house HEARD that returns inside the dwell is sti
   assert.equal(played(r, 'red'), 1);
 });
 
+test('★★ a heard yellow, then a red nobody heard: the red\'s audibility is its own — when it clears and returns inside the dwell it is spoken', async () => {
+  const r = await started(20);
+  alerts = [WARN_N];
+  await until(r, () => played(r, 'yellow') === 1, 'the heard yellow');
+  speakerState = 'unavailable';
+  alerts = [CRIT, WARN_N];
+  await until(r, () => r.has('giving up after 3 deferred red retries'), 'the red, never delivered');
+  alerts = [WARN_N]; // the red clears to the yellow the house heard
+  await until(r, () => r.has('red → yellow held'), 'the hold');
+  speakerState = 'idle';
+  alerts = [CRIT]; // the red is back inside the dwell
+  await until(r, () => played(r, 'red') === 1, '★ the red, never heard, spoken now');
+});
+
+test('★★ a red retry survives a warning spoken while the committed level stays red — the same episode (a level change starts a new one, a same-level commit does not)', async () => {
+  const r = await started(1200);
+  speakerState = 'unavailable';
+  alerts = [CRIT_B];
+  await until(r, () => r.has('broadcast: red deferred') && r.has('deferred retry 1/3'), 'the cell-spread red deferring');
+  alerts = [HELD_B]; // held by the balancing mute
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 3 * MIN;
+  alerts = [HELD_B, WARN_N];
+  await until(r, () => r.has('condition transition → yellow (new warning) spoken; the committed condition stays red'), 'the warning under the kept red');
+  speakerState = 'idle';
+  await until(r, () => played(r, 'red') === 1, '★ the red nobody heard, retried: still the committed condition');
+  assert.ok(!r.has('red retry dropped'));
+});
+
 test('conditionRetryStale — a condition retry of an episode that is no longer current; never a dedicated or test broadcast', () => {
   assert.equal(B.conditionRetryStale('condition', 3, 4), true);
   assert.equal(B.conditionRetryStale('condition', 3, 3), false);
