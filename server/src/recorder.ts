@@ -1542,6 +1542,14 @@ export function createRecorder(
         push('total_out', dpu.totalOutWatts);
         push('bat_vol', dpu.batVol);
         push('bat_amp', dpu.batAmp);
+        // v1.187.3 — EcoFlow's EMS parallel band, beside the bat_vol it is compared with (the
+        // ems-volt notice). It had no series on any release, so an episode could only be rebuilt
+        // from the ledger's detail text at its edges, never checked against batVol in between.
+        // In mV as projected (the pack-cell idiom), so a band move is recorded when it happens
+        // rather than at the 5-minute heartbeat. Both come from the ~5-minute backend block:
+        // about one row per Core per report.
+        push('ems_para_vol_min_mv', dpu.emsParaVolMinMv);
+        push('ems_para_vol_max_mv', dpu.emsParaVolMaxMv);
         push('mppt_hv_temp', dpu.mpptHvTemp);
         push('mppt_lv_temp', dpu.mpptLvTemp);
         // v0.9.78 — record the configured charge ceiling so the

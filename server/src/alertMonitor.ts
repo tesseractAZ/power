@@ -696,6 +696,16 @@ export interface ClearedAlert {
 export const CLEARED_ROSTER_MUTED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
+ * v1.187.3 — info families whose cleared rows keep the WARNING tier in a full ledger
+ * (pruneOldestNonSignificant). `ems-volt-` was a warning until v1.187.3 and is now an info notice
+ * (the EMS band is relative, not a limit). Its rows are the record of the band episodes, and
+ * warranty evidence for a Core while it carried a defective pack (warrantyEvidence). As info they
+ * would be the first rows out of a ledger at its cap, where the info tier is nearly empty, so each
+ * would leave on the next clear. About one episode a day: no pressure on the ledger.
+ */
+export const CLEARED_INFO_KEPT_AS_WARNING_PREFIXES: readonly string[] = ['ems-volt-'];
+
+/**
  * v1.187.1 — WARRANTY EVIDENCE in the cleared ledger: the rows /api/warranty-export would put in
  * a claim for a confirmed-defective pack. For every `pack-defective-<core>-<pk>` row, the rows of
  * that Core (id or sourceSn, as the export matches them) whose episode overlaps the pack-defective
@@ -758,7 +768,13 @@ export function pruneOldestNonSignificant(
   isNoise?: (e: ClearedAlert) => boolean,
   nowMs: number = Date.now(),
 ): void {
-  const sev = (i: number) => logArr[i].alert?.severity ?? 'info';
+  // v1.187.3 — a CLEARED_INFO_KEPT_AS_WARNING_PREFIXES row is evicted as the warning it was.
+  const sev = (i: number) => {
+    const e = logArr[i];
+    const s = e.alert?.severity ?? 'info';
+    const id = e.alert?.id;
+    return s === 'info' && typeof id === 'string' && CLEARED_INFO_KEPT_AS_WARNING_PREFIXES.some((p) => id.startsWith(p)) ? 'warning' : s;
+  };
   const evictOldest = (pick: (e: ClearedAlert, i: number) => boolean): boolean => {
     for (let i = logArr.length - 1; i >= 0; i--) {
       if (pick(logArr[i], i)) { logArr.splice(i, 1); return true; }
