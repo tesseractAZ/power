@@ -44,7 +44,7 @@ const MUTANTS = [
   {
     id: 'i. ★★★ the de-escalation dwell is removed',
     file: BC,
-    find: '    if (downward && !newWarn && !deescalationDue(level, belowRedSinceMs, greenSinceMs, Date.now())) {',
+    find: '    if (downward && !newWarn && (!lowerDue || (recoveryCandidate && !recovery))) {',
     to: '    if (false /* MUTANT */) {',
     why: 'A warning flickering warning↔info speaks "All clear" while it stands (2026-09-29 15:20:51).',
   },

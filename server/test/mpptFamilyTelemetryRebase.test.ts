@@ -54,8 +54,8 @@ test('★★ events written under the current rule ARE replayed (a genuinely chr
   assert.equal(r.rollups.get(LV)?.chronicNoiseSilenced, true, 'the rule still applies to its own evidence');
 });
 
-test('both MPPT families are rebased, and only they', () => {
-  assert.deepEqual(Object.keys(TELEMETRY_FAMILY_BASIS).sort(), ['baseline-mppt_hv_temp', 'baseline-mppt_lv_temp']);
+test('both MPPT families are rebased (v1.187.3: and the peer cell spread, peerVoldiffTelemetryRebase.test.ts)', () => {
+  assert.deepEqual(Object.keys(TELEMETRY_FAMILY_BASIS).sort(), ['baseline-mppt_hv_temp', 'baseline-mppt_lv_temp', 'peer-voldiff']);
   assert.equal(telemetryBasisFor('baseline-pack1_temp'), undefined, 'pack thermal baselines keep their history');
   assert.equal(telemetryBasisFor('toString'), undefined, 'no prototype key reads as a family');
 });
