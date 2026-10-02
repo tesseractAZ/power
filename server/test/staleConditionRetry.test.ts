@@ -13,11 +13,14 @@
  *   • a green committed while the speakers were still away deferred too, and was "kept pending" in
  *     favour of the red retry (retrySlotDecision: a lower level never supersedes a higher one): the
  *     green was never retried.
- * Now (broadcast.conditionRetryStale) a condition retry runs only while the committed level is the
- * one it was armed for — checked when it RUNS, since it can wait in the single-flight chain — and a
- * stale one never holds the slot against a newer deferral. A held de-escalation does not move the
- * committed level, so a red retried while its clearing stands the dwell still plays (fail-loud). A
- * dedicated announcement (SoC ladder, runway, notices) is not the condition and is unchanged.
+ * Now (broadcast.conditionRetryStale) a condition retry runs only while the CONDITION EPISODE it was
+ * requested in is current — advanced by every commit that changes the level — checked when it RUNS,
+ * since it can wait in the single-flight chain; a stale one never holds the slot against a newer
+ * deferral. Not the level (review): a warning spoken while the committed level stays red (a held
+ * sounded cell-spread critical, keepRed) belongs to the red's episode and is retried, and a red →
+ * green → red sequence makes the first red's retry stale. A held de-escalation commits nothing, so a
+ * red retried while its clearing stands the dwell still plays (fail-loud). A dedicated announcement
+ * (SoC ladder, runway, notices) is not the condition and is unchanged.
  */
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -91,6 +94,14 @@ const store = { get: () => ({ alerts }) } as any;
 
 /** A critical released the tick it clears (not a cell-spread critical, which is held after it clears). */
 const CRIT: Alert = { id: 'cell-ovp-COREXXX00XXX0001-1', severity: 'critical', category: 'Battery', device: 'Core 1', coreNum: 1, packNum: 1, title: 'Cell overvoltage', detail: 'highest cell at 3.612 V' } as Alert;
+/** A different critical, on another Core. */
+const CRIT_C: Alert = { id: 'dpu-err-DPU-C', severity: 'critical', category: 'Battery', device: 'Core 3', title: 'Inverter error code', detail: 'x', fault: 'err3' } as Alert;
+/** A cell-spread critical, loud, and on a later reading held by the balancing mute (as alerts.ts stamps it). */
+const CRIT_B: Alert = { id: 'vdiff-crit-DPU-B-2', severity: 'critical', category: 'Battery', device: 'Core 2', title: 'Cell imbalance', detail: 'spread 101 mV' } as Alert;
+const HELD_B: Alert = { ...CRIT_B, annunciate: false, mutedBy: 'balancing', muteReason: 'the BMS is balancing the cells', detail: 'spread 95 mV BMS is actively balancing the cells.' } as Alert;
+const WARN_N: Alert = { id: 'soc-low-DPU-C-3', severity: 'warning', category: 'Battery', device: 'Core 3', title: 'Pack state of charge low', detail: 'x' } as Alert;
+/** Excluded from the condition count but a critical: a green commits while the all-clear speech gate holds it (silent). */
+const RESERVE: Alert = { id: 'shp2-below-reserve-SHP2-P', severity: 'critical', category: 'SHP2', device: 'SHP2', title: 'At reserve', detail: 'x' } as Alert;
 
 interface Rig {
   mon: ReturnType<typeof B.startBroadcastMonitor>;
@@ -129,7 +140,7 @@ async function until(r: Rig, pred: () => boolean, what: string, ms = 8000): Prom
 }
 /** A completed broadcast of `level` (a condition, or a dedicated announcement at that level). */
 const played = (r: Rig, level: string) => r.count(`broadcast: ${level} → ok in`);
-const DROPPED = 'deferred red retry dropped — the condition is green now';
+const DROPPED = 'deferred red retry dropped — a newer condition (green) has been committed since';
 
 /** A red that finds every speaker unavailable (its retry armed), then clears: the green held. */
 async function deferredRedThenCleared(r: Rig): Promise<void> {
@@ -172,7 +183,7 @@ test('★★★ a green that defers while a stale red retry is pending takes the
   const r = await started(1000);
   await deferredRedThenCleared(r);
   offset += DWELL + SEC; // the green commits; the speakers are still away, so it defers too
-  await until(r, () => r.has('superseding the pending red retry with green (stale: the condition is green now)'), 'the green superseding the stale red');
+  await until(r, () => r.has('superseding the pending red retry with green (stale: a newer condition, green, has been committed since)'), 'the green superseding the stale red');
   assert.ok(!r.has('keeping the pending red retry'), 'never kept in favour of a red that has cleared');
   speakerState = 'idle';
   await until(r, () => played(r, 'green') === 1, 'the green retry reaching the speakers');
@@ -217,12 +228,69 @@ test('★★ a DEDICATED announcement\'s retry is not a condition retry: it play
   assert.ok(!r.has('retry dropped'));
 });
 
-test('conditionRetryStale — a condition retry whose level is not the committed one; never a dedicated or test broadcast', () => {
-  assert.equal(B.conditionRetryStale('condition', 'red', 'green'), true);
-  assert.equal(B.conditionRetryStale('condition', 'red', 'yellow'), true);
-  assert.equal(B.conditionRetryStale('condition', 'yellow', 'red'), true, 'a rise is spoken by its own transition');
-  assert.equal(B.conditionRetryStale('condition', 'red', 'red'), false);
-  assert.equal(B.conditionRetryStale('condition', 'green', null), true, 'nothing committed');
-  assert.equal(B.conditionRetryStale('dedicated', 'red', 'green'), false);
-  assert.equal(B.conditionRetryStale('test', 'red', 'green'), false);
+test('★★★ review: a NEW warning spoken while the committed level stays red (a held sounded critical) is retried — it belongs to the red\'s episode', async () => {
+  const r = await started(300);
+  alerts = [CRIT_B];
+  await until(r, () => played(r, 'red') === 1, 'the cell-spread red');
+  alerts = [HELD_B]; // held by the balancing mute: held, not cleared
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 3 * MIN;
+  speakerState = 'unavailable';
+  alerts = [HELD_B, WARN_N];
+  await until(r, () => r.has('condition transition → yellow (new warning) spoken; the committed condition stays red'), 'the new warning (keepRed)');
+  await until(r, () => r.has('broadcast: yellow deferred') && r.has('deferred retry 1/3'), 'it defers');
+  speakerState = 'idle';
+  await until(r, () => played(r, 'yellow') === 1, '★ the warning, still standing, reaches the speakers');
+  assert.ok(!r.has('retry dropped'));
+});
+
+test('★★★ review: red → green (committed in silence) → a different red: the first red\'s retry is stale — the second gets its own retries, and the first\'s text is never replayed', async () => {
+  const r = await started(150);
+  speakerState = 'unavailable';
+  alerts = [CRIT];
+  await until(r, () => r.has('deferred retry 2/3'), 'the first red retrying');
+  alerts = [RESERVE];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += DWELL + SEC;
+  await until(r, () => r.has('green adopted silently — a critical alert is still active'), 'the green committed in silence');
+  alerts = [RESERVE, CRIT_C];
+  await until(r, () => r.has('condition transition → red'), 'the second red, a new episode');
+  speakerState = 'idle';
+  await until(r, () => played(r, 'red') === 1, 'a red reaching the speakers');
+  await sleep(500);
+  assert.ok(!r.has('giving up after 3 deferred red retries'), 'never "given up" with no attempt of its own');
+  assert.equal(played(r, 'red'), 1);
+  assert.match(String(r.mon.status().lastSpokenMessage), /Inverter/, '★ the standing critical is what was spoken, not the cleared one');
+});
+
+test('★★★ review (A1): a red never audible that returns while its clearing stands the dwell is spoken — not absorbed as a flicker', async () => {
+  const r = await started(20);
+  speakerState = 'unavailable';
+  alerts = [CRIT];
+  await until(r, () => r.has('giving up after 3 deferred red retries'), 'the red, never delivered');
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  speakerState = 'idle';
+  alerts = [CRIT]; // back inside the dwell
+  await until(r, () => played(r, 'red') === 1, '★ the red, never heard, spoken now');
+  assert.ok(r.has('again, never audible — spoken, not absorbed'));
+});
+
+test('★★ …while a red the house HEARD that returns inside the dwell is still a flicker — nothing re-spoken', async () => {
+  const r = await started(300);
+  alerts = [CRIT];
+  await until(r, () => played(r, 'red') === 1, 'the red');
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  alerts = [CRIT];
+  await until(r, () => r.has('again (flicker absorbed, nothing spoken)'), 'absorbed');
+  await sleep(100);
+  assert.equal(played(r, 'red'), 1);
+});
+
+test('conditionRetryStale — a condition retry of an episode that is no longer current; never a dedicated or test broadcast', () => {
+  assert.equal(B.conditionRetryStale('condition', 3, 4), true);
+  assert.equal(B.conditionRetryStale('condition', 3, 3), false);
+  assert.equal(B.conditionRetryStale('dedicated', 3, 4), false);
+  assert.equal(B.conditionRetryStale('test', 3, 4), false);
 });

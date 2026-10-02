@@ -432,6 +432,37 @@ test('★★★ v1.187.4: a pool unknown across the restart carries its onset �
   }
 });
 
+test('★★ v1.187.4 (review): a listed panel not projected yet with an onset on file keeps the set unsettled until its first projection — then the carried critical is in the set', { timeout: 60_000 }, async () => {
+  const path = join(ROOT, 'pool-unknown-pending.json');
+  process.env.POOL_UNKNOWN_PATH = path;
+  try {
+    const before = bootStore();
+    before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 });
+    const since = before.backupPoolUnknownSince(PANEL);
+    for (let i = 0; i < 7; i++) { offset += 10 * MIN; before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); }
+    offset += 2 * MIN; // the deploy
+
+    const store = bootStore(); // the panel listed, its file entry not consumed (no projection through the store yet)
+    assert.deepEqual(store.poolUnknownCarryPending(), [PANEL]);
+    const p = plant(store);
+    await until(() => p.mon.stats().evalPasses >= 2, 'two passes', p.logs);
+    offset += BOOT_RESET_ONSET_DEBOUNCE_MS + SEC;
+    fresh(store);
+    const at = p.mon.stats().evalPasses;
+    await until(() => p.mon.stats().evalPasses >= at + 3, 'three passes past the boot debounces', p.logs);
+    assert.equal(p.mon.alertSetSettledSince(), null, '★ not settled: the panel\'s first projection may raise the carried alarm');
+    store.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); // its first projection: still unreadable
+    assert.equal(store.backupPoolUnknownSince(PANEL), since, 'carried');
+    (store.get().devices as Record<string, DeviceSnapshot>)[PANEL] = { ...panel(), projection: { ...(panel().projection as any), backupBatPercent: null } } as DeviceSnapshot;
+    fresh(store);
+    await until(() => p.ids().includes('reserve-alarm-blind'), 'the carried alarm in the set', p.logs);
+    assert.equal(((store.get().alerts ?? []) as Alert[]).find((x) => x.id === 'reserve-alarm-blind')?.severity, 'critical');
+    await until(() => p.mon.alertSetSettledSince() != null, 'settled once nothing is withheld', p.logs);
+  } finally {
+    delete process.env.POOL_UNKNOWN_PATH;
+  }
+});
+
 /* ══ the pure parts ══════════════════════════════════════════════════════════════════════ */
 
 test('alertSetTrusted — hydrated, every feed in the set, the boot debounces run, nothing pending (each alone is not enough)', () => {

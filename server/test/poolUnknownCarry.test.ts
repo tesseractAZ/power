@@ -28,8 +28,9 @@ after(() => rmSync(tmp, { recursive: true, force: true }));
 
 const {
   SnapshotStore, parsePoolUnknownOnsets, carriedPoolUnknownSince, POOL_UNKNOWN_CARRY_MAX_GAP_MS, POOL_UNKNOWN_PERSIST_EVERY_MS,
+  POOL_UNKNOWN_MAX_EPISODE_MS,
 } = await import('../src/snapshot.js');
-const { computeAlerts } = await import('../src/alerts.js');
+const { computeAlerts, debouncedOnsetsPending } = await import('../src/alerts.js');
 
 const SEC = 1_000;
 const MIN = 60_000;
@@ -225,6 +226,55 @@ test('★ no file in development (no SUPERVISOR_TOKEN, no POOL_UNKNOWN_PATH); a 
   });
 });
 
+test('★★★ review: a panel gone dark keeps its onset across a restart — the poll loop refreshes the file whatever the panel reports', () => {
+  withPath('dark.json', (path) => {
+    const a = proc(T0);
+    a.read(T0, UNKNOWN);
+    a.read(T0 + 10 * MIN, UNKNOWN); // its last projection: the panel then goes dark
+    for (let t = T0 + 11 * MIN; t <= T0 + 80 * MIN; t += MIN) { a.at(t); a.s.markDeviceListAttempt(); }
+    assert.equal(JSON.parse(readFileSync(path, 'utf8'))[PANEL].lastSeenMs, T0 + 80 * MIN, 'last seen when this process last held the onset');
+    assert.equal(blind(a.s, T0 + 80 * MIN)?.severity, 'critical', 'in the process the alarm stood');
+    const b = proc(T0 + 82 * MIN);
+    b.read(T0 + 82 * MIN, UNKNOWN);
+    assert.equal(b.s.backupPoolUnknownSince(PANEL), T0, '★ carried: the restart behaves as the process did');
+    assert.equal(blind(b.s, T0 + 82 * MIN)?.severity, 'critical');
+  });
+});
+
+test('★★ review: a listed panel not projected yet with a carriable onset on file is PENDING — the alert set is not settled before its first projection', () => {
+  withPath('pending.json', (path) => {
+    blindUntil(T0 + 70 * MIN);
+    writeFileSync(path, JSON.stringify({
+      ...JSON.parse(readFileSync(path, 'utf8')),
+      PANEXXX00XXX0009: { sinceMs: T0, lastSeenMs: T0 + 70 * MIN }, // not on this account's list
+    }));
+    const b = proc(T0 + 72 * MIN);
+    assert.deepEqual(b.s.poolUnknownCarryPending(), [PANEL], 'listed, unprojected, carriable — the unlisted one is not');
+    assert.deepEqual(debouncedOnsetsPending({ poolUnknownCarryPending: b.s.poolUnknownCarryPending() }, T0 + 72 * MIN),
+      [`reserve-alarm-blind ${PANEL} (carried onset; the panel not projected yet)`]);
+    b.read(T0 + 72 * MIN, UNKNOWN);
+    assert.deepEqual(b.s.poolUnknownCarryPending(), [], 'consumed by its first projection');
+    assert.equal(blind(b.s, T0 + 72 * MIN)?.severity, 'critical');
+    const c = proc(T0 + 70 * MIN + POOL_UNKNOWN_CARRY_MAX_GAP_MS + 2 * MIN + SEC);
+    assert.deepEqual(c.s.poolUnknownCarryPending(), [], 'no longer carriable: not pending');
+  });
+});
+
+test('★★ review: a failed save removes the file — a pool that reads again is never carried as unknown after a restart', () => {
+  withPath('fail.json', (path) => {
+    blindUntil(T0 + 70 * MIN);
+    mkdirSync(`${path}.tmp`); // the save's temporary file cannot be written: the save fails
+    const b = proc(T0 + 72 * MIN);
+    b.read(T0 + 72 * MIN, READABLE); // the entry is retired, but the save fails
+    assert.ok(!existsSync(path), '★ the stale entry is removed with the file');
+    assert.ok(b.has('could not save the pool-unknown onset'));
+    rmSync(`${path}.tmp`, { recursive: true, force: true });
+    const c = proc(T0 + 73 * MIN);
+    c.read(T0 + 73 * MIN, UNKNOWN);
+    assert.equal(c.s.backupPoolUnknownSince(PANEL), T0 + 73 * MIN, 'a new episode: nothing stale carried');
+  });
+});
+
 /* ══ the pure rules ════════════════════════════════════════════════════════════════════════ */
 
 test('parsePoolUnknownOnsets — finite since ≤ last seen, per serial; anything else skipped', () => {
@@ -241,6 +291,9 @@ test('parsePoolUnknownOnsets — finite since ≤ last seen, per serial; anythin
     num: 5,
   });
   assert.deepEqual([...m.keys()], ['ok']);
+  assert.equal(parsePoolUnknownOnsets({ A: { sinceMs: 0, lastSeenMs: POOL_UNKNOWN_MAX_EPISODE_MS } }).size, 1, 'an episode of exactly the bound');
+  assert.equal(parsePoolUnknownOnsets({ A: { sinceMs: 0, lastSeenMs: POOL_UNKNOWN_MAX_EPISODE_MS + 1 } }).size, 0, '★ review: a longer one is not believed (corrupt or hand-edited)');
+  assert.equal(POOL_UNKNOWN_MAX_EPISODE_MS, 7 * 24 * 60 * MIN);
 });
 
 test('carriedPoolUnknownSince — the onset when last seen at most the bound ago (inclusive), never later than now; else null', () => {
