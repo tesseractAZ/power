@@ -6,19 +6,25 @@
  * house ran on the grid all window. On 2026-09-30 the SHP2 carried the house from the pack
  * before the just-in-time force-charge and after its OFF, and the row would have recorded 4.71
  * kWh against ~20.3 kWh into the Cores. It is now the charging part of the house panel's
- * connected source channels over the hold (nightLedgerScoring.deliveredIntoCores): a per-channel
- * coverage gate (the worst channel), an import bound with slack, `delivered_basis` written
- * exactly when the value is, and the buy de-bias learner reading only that basis
- * (calibratedBuyDebiasFactor; earlier rows are set aside and counted). Mutants i-xxvii.
+ * source channels over the hold (nightLedgerScoring.deliveredIntoCores): the channels the hold
+ * recorded plus any slot connected at capture (review: capture runs ~16 h after the close, so
+ * its membership is not the night's), a per-channel coverage gate (the worst channel), an
+ * import bound with slack, `delivered_basis` written exactly when the value is
+ * (deliveredLedgerFields), the house panel's slots by its own serial (houseConnectedSlots), and
+ * the buy de-bias learner reading only that basis (calibratedBuyDebiasFactor; earlier rows are
+ * set aside, counted and named by buyDebiasUnmeasuredLogLine). Mutants i-xxx, xxxii-xxxiii.
+ * The two call sites left in index.ts (`houseConnectedSlots(store.get().devices, shp2Sn)` and
+ * `...deliveredLedgerFields(cols)`) are glue beside the query seam, which no test drives.
  *
  * (2) buildNightChargeInputs dropped buyDebiasBasis / buyDebiasSamples, so every plan reported
- * 'default' / 0 whatever the learner said. Mutant xx.
+ * 'default' / 0 whatever the learner said. Mutant xxxi.
  *
  * (3) images.yml's best-effort docs steps had no bound: a stalled apt mirror ran the release
  * job into the 6 h platform limit, the job was cancelled and no GitHub Release was created.
  * The job, each docs step, apt itself and the docs tools are now bounded, the job above the sum
- * of its steps; ci.yml's docs gate likewise. Mutants xxviii-xxxvii (killed by the structural
- * workflow test).
+ * of its steps; ci.yml's docs gate likewise. A bounded step can be killed mid-write, so the
+ * Release attaches a document only on its build step's own success (review). Mutants
+ * xxxiv-xlviii (the Release step's script is RUN against a stub gh; the rest structural).
  *
  *   node scripts/mutate-v1187-3i.mjs
  *
@@ -53,7 +59,7 @@ const MUTANTS = [
   {
     id: 'i. ★★★ an actuated night measures nothing',
     file: NLS,
-    find: '    delivered = deliveredIntoCores({ hold, channels: i.sourceChannels, query: i.query });',
+    find: '    delivered = deliveredIntoCores({ hold, connectedSlots: i.houseConnectedSlots, query: i.query });',
     to: '    delivered = null; /* MUTANT */',
     why: 'Every actuated night records NULL: the learner never measures again.',
   },
@@ -86,11 +92,11 @@ const MUTANTS = [
     why: 'A span covered exactly at the line is withheld, unlike every other ledger gate.',
   },
   {
-    id: 'vi. ★★★ no connected Core reads as 0 kWh delivered',
+    id: 'vi. ★★★ no channel and no connected Core reads as 0 kWh delivered',
     file: NLS,
-    find: "    return { kwh: null, basis: null, note: 'Delivered: unmeasured (no connected Core known on the house panel)' };",
-    to: "    return { kwh: 0, basis: DELIVERED_BASIS, note: 'Delivered: unmeasured (no connected Core known on the house panel)' }; /* MUTANT */",
-    why: 'A panel whose slots were not hydrated at scoring writes a measured zero: a 0.0 ratio into the learner.',
+    find: "      kwh: null, basis: null,\n      note: 'Delivered: unmeasured (no source channel recorded",
+    to: "      kwh: 0, basis: DELIVERED_BASIS, /* MUTANT */\n      note: 'Delivered: unmeasured (no source channel recorded",
+    why: 'A night whose channels recorded nothing writes a measured zero: a 0.0 ratio into the learner.',
   },
   {
     id: 'vii. ★★★ no import bound',
@@ -127,117 +133,161 @@ const MUTANTS = [
     to: '    kwh, basis: null, /* MUTANT */',
     why: 'Every new night reads as legacy: the learner sets all of them aside and never measures again.',
   },
+  /* ── (1, review) the channels come from the hold ──────────────────────── */
   {
-    id: 'xii. ★★ the assembly reads fixed channels, not the house panel\'s',
+    id: 'xii. ★★★ a channel the hold recorded is dropped when its slot is not connected at capture',
     file: NLS,
-    find: '    delivered = deliveredIntoCores({ hold, channels: i.sourceChannels, query: i.query });',
-    to: '    delivered = deliveredIntoCores({ hold, channels: [1, 2, 3], query: i.query }); /* MUTANT */',
-    why: 'A two-Core house gates on an empty third slot; a changed slot layout is read wrong.',
+    find: '    if (pts.length > 0 || connected.has(ch)) read.push({ ch, pts });',
+    to: '    if (connected.has(ch)) read.push({ ch, pts }); /* MUTANT */',
+    why: 'A Core unplugged by the next evening, or a quota with no sources subtree, takes its night out of the column: a two-thirds sample, or NULL latched.',
   },
   {
-    id: 'xiii. ★★ the channels are integrated over the window, not the hold',
+    id: 'xiii. ★★★ a connected Core whose channel recorded nothing is not gated',
     file: NLS,
-    find: '    delivered = deliveredIntoCores({ hold, channels: i.sourceChannels, query: i.query });',
-    to: '    delivered = deliveredIntoCores({ hold: { startMs: i.windowStartMs, endMs: i.windowEndMs }, channels: i.sourceChannels, query: i.query }); /* MUTANT */',
+    find: '    if (pts.length > 0 || connected.has(ch)) read.push({ ch, pts });',
+    to: '    if (pts.length > 0) read.push({ ch, pts }); /* MUTANT */',
+    why: 'A dark channel beside two healthy ones is summed past: a two-thirds total on the trusted basis.',
+  },
+  {
+    id: 'xiv. ★★ a slot neither recorded nor connected is gated',
+    file: NLS,
+    find: '    if (pts.length > 0 || connected.has(ch)) read.push({ ch, pts });',
+    to: '    read.push({ ch, pts }); /* MUTANT */',
+    why: 'A panel whose payload carries fewer channels than slots nulls every night on an empty slot.',
+  },
+  {
+    id: 'xv. ★★★ only the slots connected at capture are scanned',
+    file: NLS,
+    find: '  for (const ch of [...new Set([...SOURCE_CHANNEL_SLOTS, ...i.connectedSlots])].sort((a, b) => a - b)) {',
+    to: '  for (const ch of [...i.connectedSlots]) { /* MUTANT */',
+    why: 'Capture-time membership decides the night again (the review finding).',
+  },
+  {
+    id: 'xvi. ★★ the assembly drops the capture-time slots',
+    file: NLS,
+    find: '    delivered = deliveredIntoCores({ hold, connectedSlots: i.houseConnectedSlots, query: i.query });',
+    to: '    delivered = deliveredIntoCores({ hold, connectedSlots: [], query: i.query }); /* MUTANT */',
+    why: 'A connected Core whose channel recorded nothing no longer withholds the night.',
+  },
+  {
+    id: 'xvii. ★★ the channels are integrated over the window, not the hold',
+    file: NLS,
+    find: '    delivered = deliveredIntoCores({ hold, connectedSlots: i.houseConnectedSlots, query: i.query });',
+    to: '    delivered = deliveredIntoCores({ hold: { startMs: i.windowStartMs, endMs: i.windowEndMs }, connectedSlots: i.houseConnectedSlots, query: i.query }); /* MUTANT */',
     why: 'A night still charging at the close loses the restore tick and the device stop again (the v1.187.0 tail).',
   },
   {
-    id: 'xiv. ★★ the delivered clause is dropped from score_notes',
+    id: 'xviii. ★★ the delivered clause is dropped from score_notes',
     file: NLS,
     find: "${delivered ? ` ${delivered.note}.` : ''}",
     to: '/* MUTANT */',
-    why: 'A NULL delivered_kwh no longer says why (dark channel, implausible, no Cores).',
+    why: 'A NULL delivered_kwh no longer says why (dark channel, implausible, nothing recorded).',
   },
+  /* ── (1) the house panel's slots ──────────────────────────────────────── */
   {
-    id: 'xv. ★★ a disconnected slot is read as a Core',
+    id: 'xix. ★★ a disconnected slot is read as a Core',
     file: NLS,
     find: '    if (s.isConnected && s.sn && Number.isInteger(s.slot) && s.slot >= 1) out.add(s.slot);',
     to: '    if (s.sn && Number.isInteger(s.slot) && s.slot >= 1) out.add(s.slot); /* MUTANT */',
     why: 'A slot whose Core was unplugged is gated on: its silent channel nulls every night.',
   },
   {
-    id: 'xvi. ★★ a slot with no serial is read as a Core',
+    id: 'xx. ★★ a slot with no serial is read as a Core',
     file: NLS,
     find: '    if (s.isConnected && s.sn && Number.isInteger(s.slot) && s.slot >= 1) out.add(s.slot);',
     to: '    if (s.isConnected && Number.isInteger(s.slot) && s.slot >= 1) out.add(s.slot); /* MUTANT */',
     why: 'Membership drifts from panelRoster: a slot the rest of the app does not count is gated on.',
   },
   {
-    id: 'xvii. ★ the slots are not sorted',
+    id: 'xxi. ★ the slots are not sorted',
     file: NLS,
-    find: '  return [...out].sort((a, b) => a - b);\n}\n\n/** v1.187.3 — measured energy',
-    to: '  return [...out]; /* MUTANT */\n}\n\n/** v1.187.3 — measured energy',
-    why: 'The note and the query order follow the vendor payload order.',
+    find: '  return [...out].sort((a, b) => a - b);\n}\n\n/** v1.187.3 (review) — the HOUSE panel',
+    to: '  return [...out]; /* MUTANT */\n}\n\n/** v1.187.3 (review) — the HOUSE panel',
+    why: 'The slots follow the vendor payload order.',
+  },
+  {
+    id: 'xxii. ★★★ the slots are read from the first panel in the map, not the house panel',
+    file: NLS,
+    find: '  const p = devices[shp2Sn]?.projection;',
+    to: '  const p = Object.values(devices)[0]?.projection; /* MUTANT */',
+    why: 'In a two-panel plant the garage panel (the lower serial) supplies the house night\'s slots.',
+  },
+  {
+    id: 'xxiii. ★ any projection with a sources field is read as a panel',
+    file: NLS,
+    find: "  return p?.kind === 'shp2' ? connectedSourceSlots((p as Shp2Projection).sources) : [];",
+    to: '  return connectedSourceSlots((p as Shp2Projection | undefined)?.sources); /* MUTANT */',
+    why: 'Only an SHP2 projection has source slots.',
+  },
+  /* ── (1, review) the ledger fields, written together ──────────────────── */
+  {
+    id: 'xxiv. ★★★ the scorer never writes the basis',
+    file: NLS,
+    find: '    delivered_basis: cols.deliveredKwh == null ? null : cols.deliveredBasis,',
+    to: '    delivered_basis: null, /* MUTANT */',
+    why: 'Every new night reads as legacy: the learner never measures again.',
+  },
+  {
+    id: 'xxv. ★★ a NULL value carries the basis',
+    file: NLS,
+    find: '    delivered_basis: cols.deliveredKwh == null ? null : cols.deliveredBasis,',
+    to: '    delivered_basis: cols.deliveredBasis, /* MUTANT */',
+    why: 'The column pair stops meaning "measured on this basis" exactly when a value is there.',
+  },
+  {
+    id: 'xxvi. ★★★ the scorer never writes the value',
+    file: NLS,
+    find: '    delivered_kwh: cols.deliveredKwh,',
+    to: '    delivered_kwh: null, /* MUTANT */',
+    why: 'The learner has no samples, whatever the measurement said.',
   },
   /* ── (1) the learner: one basis ───────────────────────────────────────── */
   {
-    id: 'xviii. ★★★ the learner admits every basis',
+    id: 'xxvii. ★★★ the learner admits every basis',
     file: ADV,
     find: '  const onBasis = eligible.filter((r) => r.delivered_basis === DELIVERED_BASIS);',
     to: '  const onBasis = eligible; /* MUTANT */',
     why: 'The 09-30 0.26 ratio and its kind own the median again: a real upward correction stays hidden at the floor.',
   },
   {
-    id: 'xix. ★★ set-aside counts ineligible rows',
+    id: 'xxviii. ★★ set-aside counts ineligible rows',
     file: ADV,
     find: '  const setAside = eligible.length - onBasis.length;',
     to: '  const setAside = rows.length - onBasis.length; /* MUTANT */',
     why: 'The log overstates what the basis rule removed (advisory and shortfall nights counted as set aside).',
   },
+  {
+    id: 'xxix. ★ the UNMEASURED line ignores a change in the set-aside count',
+    file: ADV,
+    find: '    key: `unmeasured:${cal.samples}:${cal.setAside}`,',
+    to: '    key: `unmeasured:${cal.samples}`, /* MUTANT */',
+    why: 'A legacy row scored after the upgrade changes the count with no line saying so.',
+  },
+  {
+    id: 'xxx. ★★ the UNMEASURED line does not name the set-aside rows',
+    file: ADV,
+    find: '      + `${cal.setAside} set aside for a pre-v1.187.3 delivered_kwh) — the announcement carries no `',
+    to: '      + `) — the announcement carries no ` /* MUTANT */',
+    why: 'After the upgrade the learner reads unmeasured with no reason given.',
+  },
   /* ── (2) the plan reports the learner ─────────────────────────────────── */
   {
-    id: 'xx. ★★★ the inputs drop the learner\'s basis and samples',
+    id: 'xxxi. ★★★ the inputs drop the learner\'s basis and samples',
     file: ADV,
     find: '    // v1.187.3 — forwarded verbatim; see the destructure note above.\n    buyDebiasBasis,\n    buyDebiasSamples,\n',
     to: '    /* MUTANT */\n',
     why: 'Every plan reports default / 0 whatever the learner said: the surface the log points to is wrong.',
   },
-  /* ── (1) the wiring ───────────────────────────────────────────────────── */
-  {
-    id: 'xxi. ★★ the scorer passes no channels',
-    file: IDX,
-    find: '    sourceChannels,\n  });',
-    to: '    sourceChannels: [] as number[], /* MUTANT */\n  });',
-    why: 'Every actuated night records NULL with "no connected Core known".',
-  },
-  {
-    id: 'xxii. ★★★ the scorer never writes the basis',
-    file: IDX,
-    find: '    delivered_basis: cols.deliveredBasis,',
-    to: '    delivered_basis: null, /* MUTANT */',
-    why: 'Every new night reads as legacy: the learner never measures again.',
-  },
-  {
-    id: 'xxiii. ★★ the channels come from no panel',
-    file: IDX,
-    find: "    housePanel?.projection?.kind === 'shp2' ? (housePanel.projection as Shp2Projection).sources : null,",
-    to: '    null, /* MUTANT */',
-    why: 'As xxi.',
-  },
-  {
-    id: 'xxiv. ★ the UNMEASURED line ignores a change in the set-aside count',
-    file: IDX,
-    find: '    const key = `unmeasured:${buyDebiasCal.samples}:${buyDebiasCal.setAside}`;',
-    to: '    const key = `unmeasured:${buyDebiasCal.samples}`; /* MUTANT */',
-    why: 'A legacy row scored after the upgrade changes the count with no line saying so.',
-  },
-  {
-    id: 'xxv. ★★ the UNMEASURED line does not name the set-aside rows',
-    file: IDX,
-    find: '        + `${buyDebiasCal.setAside} set aside for a pre-v1.187.3 delivered_kwh) — the announcement carries no `',
-    to: '        + `) — the announcement carries no ` /* MUTANT */',
-    why: 'After the upgrade the learner reads unmeasured with no reason given.',
-  },
   /* ── (1) the ledger column ────────────────────────────────────────────── */
   {
-    id: 'xxvi. ★★★ the basis drops out of the ledger allowlist (SILENT)',
+    id: 'xxxii. ★★★ the basis drops out of the ledger allowlist (SILENT)',
     file: REC,
     find: "  // v1.187.3 — the method behind delivered_kwh.\n  'delivered_basis',\n",
     to: '  /* MUTANT */\n',
     why: 'recordNightOutcome ignores unknown columns: the basis vanishes with no error and every new night reads as legacy.',
   },
   {
-    id: 'xxvii. ★★★ the basis column is never migrated',
+    id: 'xxxiii. ★★★ the basis column is never migrated',
     file: REC,
     find: "    'delivered_basis TEXT',\n",
     to: '    /* MUTANT */\n',
@@ -245,70 +295,106 @@ const MUTANTS = [
   },
   /* ── (3) the release workflow ─────────────────────────────────────────── */
   {
-    id: 'xxviii. ★★★ the release job is unbounded',
+    id: 'xxxiv. ★★★ the release job is unbounded',
     file: IMG,
     find: '    timeout-minutes: 45\n',
     to: '    # MUTANT\n',
     why: 'A stall anywhere runs the job to the 6 h limit and cancels the Release (v1.187.1).',
   },
   {
-    id: 'xxix. ★★★ the best-effort pandoc step is unbounded',
+    id: 'xxxv. ★★★ the best-effort pandoc step is unbounded',
     file: IMG,
     find: '        continue-on-error: true\n        timeout-minutes: 6\n',
     to: '        continue-on-error: true # MUTANT\n',
     why: 'continue-on-error covers a failure, not a hang: the job dies at its own bound before the Release.',
   },
   {
-    id: 'xxx. ★★ a docs step\'s bound exceeds what the job can absorb',
+    id: 'xxxvi. ★★ a docs step\'s bound exceeds what the job can absorb',
     file: IMG,
     find: '        continue-on-error: true\n        timeout-minutes: 10\n',
     to: '        continue-on-error: true\n        timeout-minutes: 60 # MUTANT\n',
     why: 'LibreOffice running to its limit takes the job, and the Release, with it.',
   },
   {
-    id: 'xxxi. ★★★ apt runs unbounded in the release job',
+    id: 'xxxvii. ★★★ apt runs unbounded in the release job',
     file: IMG,
     find: '        continue-on-error: true\n        timeout-minutes: 6\n        env:\n          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20\n        run: |\n          command -v pandoc >/dev/null || {\n            sudo timeout -k 10 120 apt-get $APT_OPTS update &&',
     to: '        continue-on-error: true\n        timeout-minutes: 6\n        env:\n          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20\n        run: |\n          command -v pandoc >/dev/null || {\n            sudo apt-get update && # MUTANT',
     why: 'The 17:46:07Z stall again, ended only by the step bound.',
   },
   {
-    id: 'xxxii. ★★ apt has no network timeouts in the release job',
+    id: 'xxxviii. ★★ apt has no network timeouts in the release job',
     file: IMG,
     find: '        continue-on-error: true\n        timeout-minutes: 10\n        env:\n          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20\n',
     to: "        continue-on-error: true\n        timeout-minutes: 10\n        env:\n          APT_OPTS: '' # MUTANT\n",
     why: 'A stalled connection is held until the outer timeout instead of retried.',
   },
   {
-    id: 'xxxiii. ★★ the pdf render is unbounded in the release job',
+    id: 'xxxix. ★★ the pdf render is unbounded in the release job',
     file: IMG,
     find: '          timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \\\n            --convert-to pdf --outdir . "EcoFlow-Panel-Documentation-v${V}.docx"',
     to: '          libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \\\n            --convert-to pdf --outdir . "EcoFlow-Panel-Documentation-v${V}.docx" # MUTANT',
     why: 'A wedged headless LibreOffice holds the step to its bound on every release.',
   },
   {
-    id: 'xxxiv. ★★★ the Release step becomes best-effort',
+    id: 'xl. ★★★ the Release step becomes best-effort',
     file: IMG,
     find: "        if: steps.gate.outputs.skip != 'true'\n        timeout-minutes: 10\n",
     to: "        if: steps.gate.outputs.skip != 'true'\n        continue-on-error: true # MUTANT\n        timeout-minutes: 10\n",
     why: 'A release with no GitHub Release reads green.',
   },
   {
-    id: 'xxxv. ★★ the Release step is unbounded',
+    id: 'xli. ★★ the Release step is unbounded',
     file: IMG,
     find: "        if: steps.gate.outputs.skip != 'true'\n        timeout-minutes: 10\n",
     to: "        if: steps.gate.outputs.skip != 'true' # MUTANT\n",
     why: 'A stalled API call holds the job to its bound.',
   },
+  /* ── (3, review) a bounded docs step must not seal a truncated asset ───── */
   {
-    id: 'xxxvi. ★★ the PR docs gate is unbounded',
+    id: 'xlii. ★★★ the .docx is attached on its file alone',
+    file: IMG,
+    find: '          if [ "$DOCX_OUTCOME" = success ] && [ -s "$doc" ]; then assets+=("$doc"); fi',
+    to: '          if [ -s "$doc" ]; then assets+=("$doc"); fi # MUTANT',
+    why: 'A .docx build killed mid-write by its bound leaves a truncated file, and an immutable Release seals it forever.',
+  },
+  {
+    id: 'xliii. ★★★ the .pdf is attached on its file alone',
+    file: IMG,
+    find: '          if [ "$PDF_OUTCOME" = success ] && [ -s "$pdf" ]; then assets+=("$pdf"); fi',
+    to: '          if [ -s "$pdf" ]; then assets+=("$pdf"); fi # MUTANT',
+    why: 'As xlii, for a LibreOffice conversion stalled after writing part of the PDF.',
+  },
+  {
+    id: 'xliv. ★★ the Release reads the step conclusion, which continue-on-error turns green',
+    file: IMG,
+    find: '          DOCX_OUTCOME: ${{ steps.docx.outcome }}',
+    to: '          DOCX_OUTCOME: ${{ steps.docx.conclusion }} # MUTANT',
+    why: 'A failed best-effort step concludes success: the outcome check passes everything.',
+  },
+  {
+    id: 'xlv. ★★ the PDF renders from a .docx whose build failed',
+    file: IMG,
+    find: "steps.gate.outputs.skip != 'true' && steps.docx.outcome == 'success' && hashFiles",
+    to: "steps.gate.outputs.skip != 'true' && hashFiles /* MUTANT */",
+    why: 'A truncated .docx renders a truncated PDF, attached on the PDF step\'s own success.',
+  },
+  {
+    id: 'xlvi. ★ a missing PDF is a green step',
+    file: IMG,
+    find: '          test -s "EcoFlow-Panel-Documentation-v${V}.pdf"\n',
+    to: '          # MUTANT\n',
+    why: 'LibreOffice exits 0 without writing a PDF and the step reports success.',
+  },
+  {
+    id: 'xlvii. ★★ the PR docs gate is unbounded',
     file: CI,
     find: '    timeout-minutes: 30\n',
     to: '    # MUTANT\n',
     why: 'A mirror stall holds a pull request\'s check for six hours.',
   },
   {
-    id: 'xxxvii. ★★ the PR docs build is unbounded',
+    id: 'xlviii. ★★ the PR docs build is unbounded',
     file: CI,
     find: '          timeout -k 10 240 python3 scripts/build-docs-docx.py \\\n            --ref',
     to: '          python3 scripts/build-docs-docx.py \\\n            --ref # MUTANT',

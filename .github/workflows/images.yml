@@ -290,6 +290,7 @@ jobs:
           pandoc --version | head -1
 
       - name: Build documentation .docx
+        id: docx
         if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
         timeout-minutes: 5
@@ -306,6 +307,8 @@ jobs:
       # carries both formats. Best-effort like the .docx: gated + continue-on-error
       # so a transient LibreOffice/apt hiccup can't turn a good release RED — the
       # PR's docs check is the hard gate that the PDF toolchain works.
+      # v1.187.3 (review) — rendered only from a .docx whose build SUCCEEDED: a .docx
+      # left by a killed build may be truncated, and so would be its PDF.
       - name: Ensure LibreOffice (docx → pdf)
         if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
@@ -320,7 +323,8 @@ jobs:
           libreoffice --version | head -1
 
       - name: Build documentation .pdf
-        if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
+        id: pdf
+        if: ${{ steps.gate.outputs.skip != 'true' && steps.docx.outcome == 'success' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
         timeout-minutes: 5
         env:
@@ -328,7 +332,8 @@ jobs:
         run: |
           timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
             --convert-to pdf --outdir . "EcoFlow-Panel-Documentation-v${V}.docx"
-          ls -la "EcoFlow-Panel-Documentation-v${V}.pdf" || true
+          test -s "EcoFlow-Panel-Documentation-v${V}.pdf"
+          ls -la "EcoFlow-Panel-Documentation-v${V}.pdf"
 
       # Not best-effort: a Release that cannot be created is a red run. Bounded so a stalled
       # API call fails in minutes instead of holding the job (v1.187.3). Its `if` reads only
@@ -340,17 +345,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ needs.resolve.outputs.version }}
+          # v1.187.3 (review) — each build step's own result, before continue-on-error
+          # turns it green ('success', 'failure', 'cancelled' or 'skipped').
+          DOCX_OUTCOME: ${{ steps.docx.outcome }}
+          PDF_OUTCOME: ${{ steps.pdf.outcome }}
         run: |
           set -eo pipefail
           # Immutable Releases seal assets at creation — attach the docs here, not
-          # in a later step. Include each format only if its build produced a
-          # NON-EMPTY file (-s, not -f): an interrupted LibreOffice conversion
-          # can leave a zero-byte pdf that would otherwise be sealed forever.
+          # in a later step. Include each format only if its build step SUCCEEDED
+          # and left a NON-EMPTY file (-s, not -f). v1.187.3 (review) — the step's
+          # outcome, not the file alone: since the docs steps are bounded, a
+          # conversion killed by `timeout` or by its step bound can leave a
+          # truncated .docx or .pdf behind, and a Release would seal it forever.
           assets=()
           doc="EcoFlow-Panel-Documentation-v${V}.docx"
           pdf="EcoFlow-Panel-Documentation-v${V}.pdf"
-          if [ -s "$doc" ]; then assets+=("$doc"); fi
-          if [ -s "$pdf" ]; then assets+=("$pdf"); fi
+          if [ "$DOCX_OUTCOME" = success ] && [ -s "$doc" ]; then assets+=("$doc"); fi
+          if [ "$PDF_OUTCOME" = success ] && [ -s "$pdf" ]; then assets+=("$pdf"); fi
           gh release create "${{ needs.resolve.outputs.tag }}" \
             --title "${{ needs.resolve.outputs.tag }}" \
             --notes-file /tmp/notes.md \

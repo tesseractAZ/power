@@ -11,12 +11,17 @@
  * The workflows are read with a deliberately small, indentation-based reader (no YAML
  * dependency in the server): jobs at two spaces, job keys at four, steps at `      - `. A
  * reformat that it cannot follow fails loudly (a job or step not found), never silently.
+ * (review) The Release step's own script is also RUN, against a stub `gh`, for each docs
+ * outcome: a bounded docs step can be killed mid-write, and an immutable Release must not
+ * seal what it left.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const wf = (name: string) => readFileSync(resolve(ROOT, '.github/workflows', name), 'utf8');
@@ -137,4 +142,82 @@ test('★★ the PR docs gate is bounded too: a stall is a red check in minutes,
   }
   // A hard gate stays a hard gate.
   assert.ok(!DOCS_CI.steps.some((s) => key(s, 'continue-on-error') === 'true'));
+});
+
+/* ── v1.187.3 (review): a bounded docs step must not seal a truncated asset ── */
+
+/** A step's `run: |` block, de-indented, exactly as the runner would write it to disk. */
+function runBlock(s: Step): string {
+  const lines = s.text.split('\n');
+  const at = lines.findIndex((l) => /^ {8}run: \|$/.test(l));
+  assert.ok(at >= 0, `${s.name}: no run block`);
+  const body: string[] = [];
+  for (const l of lines.slice(at + 1)) {
+    if (l.trim() === '') { body.push(''); continue; }
+    if (!l.startsWith('          ')) break;
+    body.push(l.slice(10));
+  }
+  return body.join('\n');
+}
+
+const RELEASE_STEP = stepNamed(RELEASE, 'Create GitHub Release (with docs asset)');
+const TAG = 'v0.0.0-test';
+const V = '0.0.0-test';
+const DOCX = `EcoFlow-Panel-Documentation-v${V}.docx`;
+const PDF = `EcoFlow-Panel-Documentation-v${V}.pdf`;
+
+/** Runs the Release step's own script against a stub `gh` and returns the assets it attached. */
+function releaseAssets(o: { docx: string; pdf: string; files: Partial<Record<'docx' | 'pdf', string>> }): string[] {
+  const script = runBlock(RELEASE_STEP).replace(/\$\{\{ needs\.resolve\.outputs\.tag \}\}/g, TAG);
+  assert.ok(!script.includes('${{'), `an expression the test does not substitute: ${script}`);
+  const dir = mkdtempSync(join(tmpdir(), 'ef-release-step-'));
+  try {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$GH_ARGS"\n');
+    chmodSync(join(bin, 'gh'), 0o755);
+    if (o.files.docx != null) writeFileSync(join(dir, DOCX), o.files.docx);
+    if (o.files.pdf != null) writeFileSync(join(dir, PDF), o.files.pdf);
+    writeFileSync(join(dir, 'step.sh'), script);
+    const r = spawnSync('bash', ['-e', join(dir, 'step.sh')], {
+      cwd: dir,
+      env: {
+        PATH: `${bin}:${process.env.PATH}`, GH_ARGS: join(dir, 'gh.args'), GH_TOKEN: 'none', V,
+        DOCX_OUTCOME: o.docx, PDF_OUTCOME: o.pdf,
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `the step failed: ${r.stderr}`);
+    const args = readFileSync(join(dir, 'gh.args'), 'utf8').split('\n').filter(Boolean);
+    assert.deepEqual(args.slice(0, 3), ['release', 'create', TAG], 'the Release is created whatever the docs did');
+    return args.filter((a) => a === DOCX || a === PDF);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('★★★ the Release attaches a document only when its build step succeeded and left a non-empty file', () => {
+  const both = { docx: 'PK-docx', pdf: '%PDF-1.7' };
+  assert.deepEqual(releaseAssets({ docx: 'success', pdf: 'success', files: both }), [DOCX, PDF]);
+  // A .docx build killed mid-write (`timeout` or its step bound): the file is there, truncated.
+  assert.deepEqual(releaseAssets({ docx: 'failure', pdf: 'skipped', files: { docx: 'PK-trunc' } }), []);
+  assert.deepEqual(releaseAssets({ docx: 'cancelled', pdf: 'skipped', files: { docx: 'PK-trunc' } }), []);
+  // LibreOffice stalled after writing part of the PDF.
+  assert.deepEqual(releaseAssets({ docx: 'success', pdf: 'failure', files: both }), [DOCX]);
+  // A step that reported success but left a zero-byte file.
+  assert.deepEqual(releaseAssets({ docx: 'success', pdf: 'success', files: { docx: 'PK-docx', pdf: '' } }), [DOCX]);
+  // No docs at all: the Release is still created, with no asset.
+  assert.deepEqual(releaseAssets({ docx: 'skipped', pdf: 'skipped', files: {} }), []);
+});
+
+test('★★ the Release reads each build step\'s OUTCOME, and the PDF renders only from a .docx that built', () => {
+  const docx = stepNamed(RELEASE, 'Build documentation .docx');
+  const pdf = stepNamed(RELEASE, 'Build documentation .pdf');
+  assert.equal(key(docx, 'id'), 'docx');
+  assert.equal(key(pdf, 'id'), 'pdf');
+  // `outcome` is the result before continue-on-error; `conclusion` is always success there.
+  assert.match(RELEASE_STEP.text, /^ {10}DOCX_OUTCOME: \$\{\{ steps\.docx\.outcome \}\}$/m);
+  assert.match(RELEASE_STEP.text, /^ {10}PDF_OUTCOME: \$\{\{ steps\.pdf\.outcome \}\}$/m);
+  assert.match(key(pdf, 'if') ?? '', /steps\.docx\.outcome == 'success'/, 'a truncated .docx renders a truncated PDF');
+  assert.match(runBlock(pdf), /^test -s "EcoFlow-Panel-Documentation-v\$\{V\}\.pdf"$/m, 'no PDF is a failed step, not a green one');
 });
