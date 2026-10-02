@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
@@ -189,11 +189,18 @@ export interface PoolUnknownOnset { sinceMs: number; lastSeenMs: number }
  *  escalation window itself is a new observation. The knee sessions' bound (VDIFF_KNEE_GAP_CARRY_MS). */
 export const POOL_UNKNOWN_CARRY_MAX_GAP_MS = 60 * 60_000;
 /** v1.187.4 — how often the file's last-seen time is refreshed while a pool stays unknown (and a
- *  failed save retried): a restart is judged against it, so it is at most this stale. */
+ *  failed save retried): a restart is judged against it, so it is at most this stale. Refreshed by
+ *  the panel's projections and by every device-list attempt of the poll loop, so a panel gone dark
+ *  keeps its onset across a restart as it does in the process. */
 export const POOL_UNKNOWN_PERSIST_EVERY_MS = 60_000;
+/** v1.187.4 — the longest unknown episode the file is believed for: a cloud wedge lasts hours (the
+ *  longest seen, 42.2 h). An entry claiming more is corrupt or hand-edited, and would raise a
+ *  critical "unreadable for weeks" at the first projection. */
+export const POOL_UNKNOWN_MAX_EPISODE_MS = 7 * 24 * 60 * 60_000;
 
 /** v1.187.4 — the file's entries: an object of serial → { sinceMs, lastSeenMs }, both finite,
- *  sinceMs ≤ lastSeenMs. Anything else (absent, corrupt, a malformed entry) is skipped. */
+ *  sinceMs ≤ lastSeenMs, at most POOL_UNKNOWN_MAX_EPISODE_MS apart. Anything else (absent, corrupt,
+ *  a malformed entry) is skipped. */
 export function parsePoolUnknownOnsets(raw: unknown): Map<string, PoolUnknownOnset> {
   const out = new Map<string, PoolUnknownOnset>();
   if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return out;
@@ -203,6 +210,7 @@ export function parsePoolUnknownOnsets(raw: unknown): Map<string, PoolUnknownOns
     if (typeof sinceMs !== 'number' || !Number.isFinite(sinceMs)) continue;
     if (typeof lastSeenMs !== 'number' || !Number.isFinite(lastSeenMs)) continue;
     if (sinceMs > lastSeenMs) continue;
+    if (lastSeenMs - sinceMs > POOL_UNKNOWN_MAX_EPISODE_MS) continue;
     out.set(sn, { sinceMs, lastSeenMs });
   }
   return out;
@@ -240,6 +248,9 @@ export class SnapshotStore extends EventEmitter {
     // v1.180.0 — at construction, not first sight: a restart with the cloud unreachable never
     // reaches setDeviceList (refreshAll throws at listDevices), and that is the outage case.
     this.loadGridReadings();
+    // v1.187.4 — and the pool-unknown onsets: a panel not projected yet still has its entry pending
+    // (poolUnknownCarryPending).
+    this.loadPoolUnknown();
   }
 
   private snap: FleetSnapshot = { generatedAt: 0, devices: {} };
@@ -314,10 +325,8 @@ export class SnapshotStore extends EventEmitter {
   // the grace hold already absorbed reconnect blips). Feeds the reserve-blind
   // compensating alert so it keys off a SUSTAINED blind window, not a flicker.
   private backupPoolUnknownSinceBySn: Map<string, number> = new Map();
-  /** v1.187.4 — when each pool was last projected unknown (the file's lastSeenMs). */
-  private backupPoolUnknownSeenBySn: Map<string, number> = new Map();
   /** v1.187.4 — pool-unknown.json (POOL_UNKNOWN_PATH overrides; '' disables): next to the DB in
-   *  production, nowhere elsewhere. Resolved and read at the first SHP2 projection. */
+   *  production, nowhere elsewhere. Resolved and read at construction. */
   private poolUnknownPath: string | null = null;
   /** v1.187.4 — the file's onsets per panel, until that panel's first projection consumes its entry. */
   private poolUnknownOnDisk = new Map<string, PoolUnknownOnset>();
@@ -795,6 +804,9 @@ export class SnapshotStore extends EventEmitter {
   /** Mark that a /device/list poll attempt happened, regardless of outcome. */
   markDeviceListAttempt() {
     this.lastDeviceListAttemptAt = Date.now();
+    // v1.187.4 — the poll loop runs whether or not a panel reports: the pool-unknown file's
+    // last-seen time keeps saying this process holds the onset (refreshPoolUnknown).
+    this.refreshPoolUnknown();
   }
 
   /** v0.56.0 — smooth the SHP2 backup-pool gauge across brief cloud-reconnect blips: substitute
@@ -817,7 +829,6 @@ export class SnapshotStore extends EventEmitter {
     // v1.187.4 — the first projection of a panel in this process consumes its entry in
     // pool-unknown.json: unknown again, it carries the onset of before the restart
     // (carriedPoolUnknownSince); readable, the entry is retired.
-    if (this.poolUnknownPath == null) this.loadPoolUnknown();
     const nowMs = this.now();
     const onDisk = this.poolUnknownOnDisk.get(sn);
     this.poolUnknownOnDisk.delete(sn);
@@ -831,14 +842,31 @@ export class SnapshotStore extends EventEmitter {
           this.logger(`backup-pool: unknown since ${Math.round((nowMs - carried) / 60_000)} min ago, before the restart (last seen unknown ${Math.round((nowMs - onDisk!.lastSeenMs) / 1000)} s ago) — the reserve-blind clock carries it, not restarted (sn=${sn})`);
         }
       }
-      this.backupPoolUnknownSeenBySn.set(sn, nowMs);
     } else {
       if (this.backupPoolUnknownSinceBySn.delete(sn)) changed = true;
-      this.backupPoolUnknownSeenBySn.delete(sn);
     }
-    const sinceAttemptMs = nowMs - this.poolUnknownLastAttemptMs;
+    if (changed) this.writePoolUnknown();
+    else this.refreshPoolUnknown();
+  }
+
+  /** v1.187.4 — while any pool's onset stands (or a save is owed), rewrite the file at most once per
+   *  POOL_UNKNOWN_PERSIST_EVERY_MS: its last-seen time says this process still held the onset. */
+  private refreshPoolUnknown(): void {
+    const sinceAttemptMs = this.now() - this.poolUnknownLastAttemptMs;
     const due = sinceAttemptMs >= POOL_UNKNOWN_PERSIST_EVERY_MS || sinceAttemptMs < 0;
-    if (changed || (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty))) this.writePoolUnknown();
+    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty)) this.writePoolUnknown();
+  }
+
+  /** v1.187.4 — listed panels whose file entry has not been consumed (not projected in this process)
+   *  and is still carriable: their first projection may raise reserve-alarm-blind at once, so the
+   *  alert set is not settled before it (alerts.debouncedOnsetsPending). Sorted by serial. */
+  poolUnknownCarryPending(): string[] {
+    const nowMs = this.now();
+    const out: string[] = [];
+    for (const [sn, e] of this.poolUnknownOnDisk) {
+      if (this.snap.devices[sn] != null && carriedPoolUnknownSince(e, nowMs) != null) out.push(sn);
+    }
+    return out.sort();
   }
 
   /** v1.187.4 — load pool-unknown.json (absent or corrupt: nothing carried, the pre-v1.187.4 clock). */
@@ -853,7 +881,8 @@ export class SnapshotStore extends EventEmitter {
 
   /** v1.187.4 — atomic (temp + rename): every pool unknown now, with when it was last seen so, plus
    *  the file's entry for a panel not projected yet in this process while it is still carriable. A
-   *  failure is logged once and retried at most once per POOL_UNKNOWN_PERSIST_EVERY_MS. */
+   *  failure removes the file, is logged once and retried at most once per
+   *  POOL_UNKNOWN_PERSIST_EVERY_MS. */
   private writePoolUnknown(): void {
     const path = this.poolUnknownPath;
     if (!path) return;
@@ -861,9 +890,8 @@ export class SnapshotStore extends EventEmitter {
     this.poolUnknownLastAttemptMs = nowMs;
     const out: Record<string, PoolUnknownOnset> = {};
     for (const [sn, e] of this.poolUnknownOnDisk) if (carriedPoolUnknownSince(e, nowMs) != null) out[sn] = e;
-    for (const [sn, sinceMs] of this.backupPoolUnknownSinceBySn) {
-      out[sn] = { sinceMs, lastSeenMs: Math.max(sinceMs, this.backupPoolUnknownSeenBySn.get(sn) ?? sinceMs) };
-    }
+    // Held in this process now: last seen now (never before its own onset).
+    for (const [sn, sinceMs] of this.backupPoolUnknownSinceBySn) out[sn] = { sinceMs, lastSeenMs: Math.max(sinceMs, nowMs) };
     try {
       const tmp = `${path}.tmp`;
       writeFileSync(tmp, JSON.stringify(out));
@@ -871,9 +899,13 @@ export class SnapshotStore extends EventEmitter {
       this.poolUnknownDirty = false;
     } catch (e) {
       this.poolUnknownDirty = true;
+      // A file the save could not replace may say a pool is unknown that reads now: carried after a
+      // restart, it would raise a reserve-blind alarm that is not true. Remove it (a full disk still
+      // allows that); nothing on file is the pre-v1.187.4 behaviour.
+      try { unlinkSync(path); } catch { /* absent, or not removable either */ }
       if (!this.poolUnknownWriteWarned) {
         this.poolUnknownWriteWarned = true;
-        this.logger(`backup-pool: could not save the pool-unknown onset (${(e as Error)?.message ?? e}) — a restart would start the reserve-blind clock again; retrying at most once a minute`);
+        this.logger(`backup-pool: could not save the pool-unknown onset (${(e as Error)?.message ?? e}) — the file is removed, so a restart starts the reserve-blind clock again; retrying at most once a minute`);
       }
     }
   }

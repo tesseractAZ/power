@@ -530,9 +530,9 @@ export function isRestartContinuation(
  * not adopted as a continuation before the set has had the chance to settle. If the warm-up ends
  * first, it is adopted silently as before v1.187.3 (fail-quiet) — v1.187.3 (seam review) unless a
  * condition above green has been audible since the boot: it is then announced as an ordinary
- * transition, so a red heard after the restart is not left as the last words. v1.187.4 — either
- * way only once the set has settled or the longest restarted onset window has run
- * (warmupEndDecisionDue). A yellow under any baseline is
+ * transition, so a red heard after the restart is not left as the last words. v1.187.4 — the
+ * question stays open past the warm-up until the longest restarted onset window has run
+ * (restartQuestionOpen). A yellow under any baseline is
  * unchanged (yellow → yellow stays a continuation), and RED never reaches here as a continuation
  * (isRestartContinuation). Pure + exported for tests.
  */
@@ -551,8 +551,8 @@ export function isRestartRecovery(
 }
 
 /**
- * v1.187.4 — the margin past LONGEST_RESTARTED_ONSET_MS before warmupEndDecisionDue gives up on a
- * settled set. The longest restarted clock (the backup pool's unknown onset) starts at the store's
+ * v1.187.4 — the margin past LONGEST_RESTARTED_ONSET_MS before a restart question closes on a set that is
+ * not settled (restartQuestionOpen). The longest restarted clock (the backup pool's unknown onset) starts at the store's
  * first projection of the panel, seconds after this monitor's boot, and the alert it withheld reaches
  * the published set only at the alert monitor's next pass (every 20 s): released exactly at the
  * window, the green could still be spoken just before the warning it hid.
@@ -560,26 +560,36 @@ export function isRestartRecovery(
 export const RESTARTED_ONSET_HOLD_MARGIN_MS = 60_000;
 
 /**
- * v1.187.4 — IS THE WARM-UP-END DECISION ON A HELD GREEN DUE?
+ * v1.187.4 — HOW LONG IS A GREEN UNDER A HEARD RESTART BASELINE STILL A RESTART QUESTION?
  *
- * A green held for its recovery (isRestartRecovery) that has not earned it when the warm-up ends is
- * decided then: announced as a transition when a condition above green has been audible since the
- * boot, otherwise adopted silently. Decided on a set that is still not settled, the announcement
- * could be false: the backup-pool-unknown clock (RESERVE_BLIND_AFTER_MS, 15 min) restarts in every
- * process, so a reserve-blind warning that stood before the restart is withheld until boot + 15 min,
- * and the house heard "All clear" at the end of the warm-up and the same warning minutes later. The
- * decision now waits for a settled set (the alert monitor's stamp) or, bounded, until
- * LONGEST_RESTARTED_ONSET_MS + RESTARTED_ONSET_HOLD_MARGIN_MS after the boot — a set that never
- * settles (a feed that never delivers) cannot hold the green for good. Meanwhile the green stays
- * held, as inside the warm-up: a NEW warning below the held level is spoken, a return to the held
- * level is a flicker the hold absorbs. Pure + exported for tests.
+ * v1.187.3 held such a green for its recovery (isRestartRecovery: it has stood the dwell on a
+ * settled alert set) for the 10-minute warm-up only. The warm-up is shorter than the longest onset
+ * clock a restart resets: the backup pool's unknown onset (RESERVE_BLIND_AFTER_MS, 15 min) starts
+ * again at the panel's first projection unless the store carries it (pool-unknown.json), so a
+ * reserve-blind warning that stood before the restart can be withheld until boot + 15. A green
+ * decided at the end of the warm-up, or one whose dwell ended after it (the late-green path, an
+ * ordinary transition), was then spoken on an unsettled set minutes before the warning it hid. The
+ * question now stays open:
+ *   • until LONGEST_RESTARTED_ONSET_MS + RESTARTED_ONSET_HOLD_MARGIN_MS (16 min) after the boot
+ *     (and at least the warm-up);
+ *   • past that, while the set is settled, for one more CONDITION_CLEAR_DWELL_MS: a green that
+ *     began to stand on a set that settled late still becomes a recovery.
+ * While it is open the green is held until it is a recovery (announced). When it closes with the
+ * green still held, it is announced as a transition if a condition above green has been audible
+ * since the boot, otherwise adopted silently (fail-quiet: read from an unsettled set it may be a
+ * fault still withheld) — so a set that never settles cannot hold the green for good. Meanwhile the
+ * green is held as any de-escalation is: a new warning below the held level is spoken; a return to
+ * the held level is a flicker only when that level was audible. Pure + exported for tests.
  */
-export function warmupEndDecisionDue(
-  alertSetSettledSinceMs: number | null,
+export function restartQuestionOpen(
   msSinceBoot: number,
+  alertSetSettledSinceMs: number | null,
+  warmupMs = BROADCAST_BOOT_WARMUP_MS,
   holdMs = LONGEST_RESTARTED_ONSET_MS + RESTARTED_ONSET_HOLD_MARGIN_MS,
+  dwellMs = CONDITION_CLEAR_DWELL_MS,
 ): boolean {
-  return alertSetSettledSinceMs != null || msSinceBoot >= holdMs;
+  if (msSinceBoot < Math.max(warmupMs, holdMs)) return true;
+  return alertSetSettledSinceMs != null && msSinceBoot < holdMs + dwellMs;
 }
 
 /**
@@ -1181,15 +1191,19 @@ export function retrySlotDecision(
  *
  * A retry armed for an unreachable Music Assistant (scheduleBroadcastRetry) replays the level and
  * text it was armed with, up to 30 + 90 + 180 s later. A condition retry is the tick's commit spoken
- * late; once the tick has committed another level (`committed`, the tick's prevLevel) it describes a
- * condition that is no longer the house's. Replayed then, a red that had cleared was spoken after its
- * green had committed — the last words in the house a critical that had cleared — and, held in the
- * single slot, it kept that green's own deferral from arming (retrySlotDecision: a lower level never
- * supersedes a pending higher one). A dedicated announcement (SoC ladder, runway, notices) is not
+ * late, so it belongs to the CONDITION EPISODE it was requested in — advanced by every commit that
+ * changes the level. Once the tick has moved the level, the retry describes a condition that is no
+ * longer the house's: replayed, a red that had cleared was spoken after its green had committed (the
+ * last words a critical that had cleared), and, held in the single slot, it kept that green's own
+ * deferral from arming (retrySlotDecision: a lower level never supersedes a pending higher one). A
+ * red → green → red sequence replayed the first red's text. Not the LEVEL: a warning spoken while
+ * the committed level stays red (a sounded cell-spread critical held: keepRed) belongs to the red's
+ * episode and is retried, and a red retried while its clearing stands the de-escalation dwell still
+ * plays (nothing has been committed). A dedicated announcement (SoC ladder, runway, notices) is not
  * the condition and is never stale here. Pure + exported for tests.
  */
-export function conditionRetryStale(kind: BroadcastKind, armedLevel: ConditionLevel, committed: ConditionLevel | null): boolean {
-  return kind === 'condition' && committed !== armedLevel;
+export function conditionRetryStale(kind: BroadcastKind, armedEpisode: number, currentEpisode: number): boolean {
+  return kind === 'condition' && armedEpisode !== currentEpisode;
 }
 
 
@@ -1279,6 +1293,16 @@ export function startBroadcastMonitor(
   const offRuntimeConfig = onBroadcastRuntimeConfigChange(() => { cfg = loadBroadcastConfig(); });
   let prevLevel: ConditionLevel | null = null;
   let prevCrit = 0;
+  /**
+   * v1.187.4 — the CONDITION EPISODE: advanced by every commit that changes the level (adoptLevel).
+   * A deferred condition retry replays the episode it was requested in (conditionRetryStale), and
+   * `committedAudible` says whether the committed level has been made audible in this episode — a
+   * continuation of a level the house heard before the restart, or a broadcast of it that reached
+   * the speakers or the cordless (noteConditionAudible). A return to a held level that was never
+   * audible is spoken, not absorbed as a flicker.
+   */
+  let conditionEpisode = 0;
+  let committedAudible = false;
   // v1.187.0 — WHICH criticals and warnings were counted when the standing level was committed
   // (adoptLevel). newCrit / newWarn compare against these: the count alone could not see a
   // different critical replacing a cleared one at the same count.
@@ -1482,6 +1506,16 @@ export function startBroadcastMonitor(
     prevCritFps = l === 'red' && prevLevel === 'red' ? new Set([...prevCritFps, ...ids.crit]) : new Set(ids.crit);
     // v1.187.0 (log review) — a red commit records what sounded (soundedCriticalHeld).
     if (l === 'red') for (const f of ids.crit) soundedCritFps.set(f, Date.now());
+    // v1.187.4 — a commit that changes the level starts a new condition episode (a deferred
+    // condition retry of an earlier one is stale: conditionRetryStale), and its audibility is that
+    // of the new level: heard only for a continuation of a level the house heard. A same-level
+    // commit (a new critical while red, a warning spoken under a kept red) keeps both.
+    if (l !== prevLevel) {
+      conditionEpisode += 1;
+      committedAudible = heard;
+    } else if (heard) {
+      committedAudible = true;
+    }
     prevLevel = l;
     prevCrit = c;
     prevWarnFps = new Set(ids.warn);
@@ -1524,8 +1558,10 @@ export function startBroadcastMonitor(
   // yellow deferrals exhausted the budget, so the next red got
   // "giving up after 3 deferred retries" without a single attempt.
   let retryLevel: ConditionLevel | null = null;
-  /** v1.187.4 — the kind the pending retry was armed for; read only while retryLevel is set. */
+  /** v1.187.4 — the kind and condition episode the pending retry was armed for; read only while
+   *  retryLevel is set. */
   let retryKind: BroadcastKind = 'dedicated';
+  let retryEpisode = 0;
   // v1.32.0 (cross-model review) — track whether the LAST SIP dispatch actually
   // DELIVERED (ok > 0), not merely that it was attempted. v1.25.0's skipSip
   // conflated "dispatched" with "delivered": a failed first SIP dispatch was
@@ -1537,6 +1573,8 @@ export function startBroadcastMonitor(
   // first retry delay); if the outcome is somehow still unknown at retry time,
   // we re-fire SIP — for an ALARM channel a rare duplicate beats silence.
   let lastSipDispatchOk = true;
+  /** v1.187.4 — SIP dispatches whose outcome (incl. the timeout probe) has not landed yet. */
+  let sipOutcomesPending = 0;
   const RETRY_DELAYS_MS: readonly number[] = opts.retryDelaysMs ?? [30_000, 90_000, 180_000];
   /**
    * v1.159.0 — release the deferred-retry slot when no retry is armed.
@@ -1555,7 +1593,7 @@ export function startBroadcastMonitor(
   const releaseRetrySlotIfIdle = () => {
     if (retryTimer == null) { retryAttempt = 0; retryLevel = null; }
   };
-  const scheduleBroadcastRetry = (level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string, kind: BroadcastKind) => {
+  const scheduleBroadcastRetry = (level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string, kind: BroadcastKind, episode: number) => {
     // v1.186.0 — a TEST never takes the single deferred-retry slot. A failed test that armed a
     // retry superseded any milder real alarm's pending retry (yellow lost to "This is only a
     // test"), and its replay ran as an ordinary broadcast. The operator who asked for the test
@@ -1568,7 +1606,7 @@ export function startBroadcastMonitor(
     // stale (conditionRetryStale): it is never replayed, so it holds nothing pending — a newer
     // deferral supersedes it whatever the levels. Kept, a stale red retry "kept pending" over the
     // green that had replaced it, and was then dropped: the green was never retried.
-    const stalePending = retryLevel != null && conditionRetryStale(retryKind, retryLevel, prevLevel);
+    const stalePending = retryLevel != null && conditionRetryStale(retryKind, retryEpisode, conditionEpisode);
     const pending = stalePending ? null : retryTimer != null && retryLevel != null
       ? { level: retryLevel, attempt: retryAttempt }
       : retryLevel != null ? { level: retryLevel, attempt: retryAttempt } : null;
@@ -1587,11 +1625,12 @@ export function startBroadcastMonitor(
     retryAttempt = decision.attempt;
     if (retryTimer) {
       // v1.122.0 — say so. This used to discard a pending retry in silence.
-      log(`broadcast: superseding the pending ${retryLevel ?? '?'} retry with ${level}${stalePending ? ` (stale: the condition is ${prevLevel} now)` : ''}`);
+      log(`broadcast: superseding the pending ${retryLevel ?? '?'} retry with ${level}${stalePending ? ` (stale: a newer condition, ${prevLevel}, has been committed since)` : ''}`);
       clearTimeout(retryTimer);
     }
     retryLevel = level;
     retryKind = kind;
+    retryEpisode = episode;
     log(`broadcast: ${reason} — deferred retry ${retryAttempt}/${RETRY_DELAYS_MS.length} in ${Math.round(delay / 1000)}s`);
     retryTimer = setTimeout(() => {
       retryTimer = null;
@@ -1629,7 +1668,8 @@ export function startBroadcastMonitor(
       // words in the house. A held de-escalation does not move the committed level, so a red
       // retried while its clearing stands the dwell still plays (fail-loud): its green follows.
       void runBroadcast(level, rung, message, false, messageEs, lastSipDispatchOk, kind,
-        () => (conditionRetryStale(kind, level, prevLevel) ? `the condition is ${prevLevel ?? 'unknown'} now` : null));
+        () => (conditionRetryStale(kind, episode, conditionEpisode) ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since` : null),
+        episode);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
   };
@@ -1673,10 +1713,14 @@ export function startBroadcastMonitor(
    * restart is a recovery, which ends the restart decisions, so it never needs to lower it).
    */
   let conditionAudibleSinceBootLevel: ConditionLevel | null = null;
-  const noteConditionAudible = (level: ConditionLevel): void => {
+  /** v1.187.4 — the attempt of `episode` (the condition episode it was requested in) made `level`
+   *  audible: since the boot, and — when it is the committed level of the current episode — the
+   *  committed level itself (committedAudible). */
+  const noteConditionAudible = (level: ConditionLevel, episode: number): void => {
     if (conditionAudibleSinceBootLevel == null || LEVEL_RANK[level] > LEVEL_RANK[conditionAudibleSinceBootLevel]) {
       conditionAudibleSinceBootLevel = level;
     }
+    if (episode === conditionEpisode && level === prevLevel) committedAudible = true;
   };
   let stormSuppressedCount = 0;
   // v1.187.0 — the last condition yellow that reached the speakers (sameWarningRepeat). Set by
@@ -2075,6 +2119,8 @@ export function startBroadcastMonitor(
 
   // v1.186.0 — the BroadcastKind of the attempt about to run (set by runBroadcastInner).
   let attemptKind: BroadcastKind = 'dedicated';
+  /** v1.187.4 — the condition episode the attempt about to run was requested in (runBroadcast). */
+  let attemptEpisode = 0;
 
   /**
    * Single broadcast: render → one MA call. No staggering, no settles.
@@ -2093,6 +2139,7 @@ export function startBroadcastMonitor(
     // v1.186.0 — captured at entry: runBroadcastInner sets it immediately before this call, and
     // the single-flight chain lets no other attempt start until this one settles.
     const kind = attemptKind;
+    const episode = attemptEpisode; // v1.187.4 — the condition episode the broadcast was requested in
     const tag = kind === 'test' ? 'TEST ' : '';
     if (!supervised) return { ok: false, errors: ['not supervised'] };
     // v1.25.0 — at least one Music Assistant target is required (SIP targets are an
@@ -2272,11 +2319,21 @@ export function startBroadcastMonitor(
     // resolves, Promise.all can't reject); the .catch is belt-and-suspenders.
     if (cfg.sipTargets.length > 0 && !skipSip) {
       lastSipDispatchOk = false; // pessimistic until the async outcome lands (v1.32.0)
+      // v1.187.4 — an outcome still to come (sipOutcomesPending; the restart decision waits for it):
+      // known once the dispatch resolves, or once the timeout probe below has read the entity.
+      sipOutcomesPending += 1;
+      let sipOutcomeSettled = false;
+      const sipOutcomeKnown = (): void => {
+        if (sipOutcomeSettled) return;
+        sipOutcomeSettled = true;
+        sipOutcomesPending -= 1;
+      };
       void playSipAnnounce(url)
         .then((r) => {
+          let probing = false;
           lastSipDispatchOk = r.ok > 0;
           // v1.187.4 — the cordless took it: audible, whatever Music Assistant does.
-          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level);
+          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode);
           if (r.ok === 0) {
             // v1.48.3 — a TIMEOUT-classed failure means the HTTP RESPONSE was
             // lost, not that the service didn't run: under HA load the
@@ -2290,26 +2347,29 @@ export function startBroadcastMonitor(
             // real call) before letting the retry re-fire SIP. A non-timeout
             // failure (4xx/5xx/refused) stays a definite miss and retries.
             if (sipTimeoutLike(r.errors)) {
+              probing = true;
               const probe = setTimeout(() => {
                 void Promise.all(cfg.sipTargets.map((t) => getEntityState(t).catch(() => null)))
                   .then((states) => {
                     const active = states.some((s) => s != null && (s.state === 'playing' || s.state === 'on'));
                     if (active) {
                       lastSipDispatchOk = true;
-                      if (kind === 'condition') noteConditionAudible(level); // v1.187.4
+                      if (kind === 'condition') noteConditionAudible(level, episode); // v1.187.4
                       log('broadcast: SIP delivery confirmed via entity state after an HTTP timeout — duplicate re-fire suppressed');
                     } else {
                       log(`broadcast: SIP dispatch timed out and the target is not playing — a deferred retry will re-fire SIP`);
                     }
-                  });
+                  })
+                  .finally(sipOutcomeKnown);
               }, 8_000);
               probe.unref?.();
             } else {
               log(`broadcast: SIP dispatch reached 0/${r.attempted} targets — a deferred retry will re-fire SIP`);
             }
           }
+          if (!probing) sipOutcomeKnown();
         })
-        .catch((e) => { lastSipDispatchOk = false; log(`broadcast: SIP dispatch failed — ${e?.message ?? e}`); });
+        .catch((e) => { lastSipDispatchOk = false; sipOutcomeKnown(); log(`broadcast: SIP dispatch failed — ${e?.message ?? e}`); });
     }
 
     // 2. v0.15.18 — pre-flight: during HA/MA restart windows the media_player
@@ -2325,7 +2385,7 @@ export function startBroadcastMonitor(
     const usable = preflight.usable.length;
     if (usable === 0) {
       errors.push('all broadcast targets unavailable (HA/MA restarting?)');
-      scheduleBroadcastRetry(level, rung, message, messageEs, 'all broadcast targets unavailable', kind);
+      scheduleBroadcastRetry(level, rung, message, messageEs, 'all broadcast targets unavailable', kind, episode);
       lastBroadcastAt = Date.now(); lastLevel = level; lastOutcome = 'failure'; lastErrors = errors;
       lastBroadcastKind = kind;
       persistStatus();
@@ -2345,7 +2405,7 @@ export function startBroadcastMonitor(
     const call = await playAnnounce(url, rr.sizeBytes);
     if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
-      scheduleBroadcastRetry(level, rung, message, messageEs, 'play_announcement failed after in-call retries', kind);
+      scheduleBroadcastRetry(level, rung, message, messageEs, 'play_announcement failed after in-call retries', kind, episode);
     } else if (!call.verified) {
       // Dispatched, outcome unknown. No retry (v1.118.1) and no verification credit.
       deliveryUnverified = true;
@@ -2360,10 +2420,10 @@ export function startBroadcastMonitor(
     // and re-dispatch rather than report a success no one heard.
     if (call.ok && dt < 2000) {
       errors.push(`unverified: completed in ${dt}ms — too fast for real playback`);
-      scheduleBroadcastRetry(level, rung, message, messageEs, `suspiciously fast completion (${dt}ms)`, kind);
+      scheduleBroadcastRetry(level, rung, message, messageEs, `suspiciously fast completion (${dt}ms)`, kind, episode);
     } else if (call.ok && kind === 'condition') {
       // v1.187.4 — played: the tone-only fallback and a delivery-unknown timeout included.
-      noteConditionAudible(level);
+      noteConditionAudible(level, episode);
     }
     if (call.ok && errors.length === 0) {
       // v1.186.0 — a TEST feeds none of the real-alarm bookkeeping below. It bypassed the storm
@@ -2458,8 +2518,10 @@ export function startBroadcastMonitor(
     skipSip = false,
     kind: BroadcastKind = 'dedicated',
     staleReason?: () => string | null, // v1.187.4 — a deferred retry's run-time check
+    episode = conditionEpisode, // v1.187.4 — the condition episode the broadcast was requested in
   ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
     attemptKind = kind; // v1.186.0 — read once, at entry, by the attempt below
+    attemptEpisode = episode;
     try {
       // v1.187.4 — a deferred retry that is stale by the time it reaches the head of the chain is
       // dropped, not played (scheduleBroadcastRetry). The slot is released below.
@@ -2537,9 +2599,12 @@ export function startBroadcastMonitor(
     // able to arm the condition gates or mark the condition record heard.
     kind: BroadcastKind = 'dedicated',
     staleReason?: () => string | null, // v1.187.4 — forwarded; set by deferred retries
+    // v1.187.4 — read when the broadcast is REQUESTED: one that waits in the chain while a newer
+    // commit lands belongs to the episode it was requested for. A deferred retry passes its own.
+    episode = conditionEpisode,
   ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
     realAudibleInFlight++;
-    const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip, kind, staleReason);
+    const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip, kind, staleReason, episode);
     const p = broadcastChain.then(run, run);
     broadcastChain = p.catch(() => undefined);
     void p.then(() => { realAudibleInFlight--; }, () => { realAudibleInFlight--; });
@@ -2639,8 +2704,8 @@ export function startBroadcastMonitor(
    *  is held), so it describes the green standing now; once that green commits, no green
    *  transition follows it. */
   let recoveryHoldSinceMs: number | null = null;
-  /** v1.187.4 — the held green (its recoveryHoldSinceMs) whose wait past the warm-up for a settled
-   *  set (warmupEndDecisionDue) has been logged: said once per held green. */
+  /** v1.187.4 — the held green (its recoveryHoldSinceMs) whose wait for a broadcast in flight, at the
+   *  close of its restart question, has been logged: said once per held green. */
   let warmupEndWaitLoggedFor: number | null = null;
   /**
    * v1.187.0 — a condition transition the same-level storm gate refused, waiting to be
@@ -2981,7 +3046,13 @@ export function startBroadcastMonitor(
     const fresh = level === 'red' ? criticalFingerprints.filter((f) => !prevCritFps.has(f))
       : level === 'yellow' ? warningFingerprints.filter((f) => !prevWarnFps.has(f))
       : [];
-    const transitioned = level !== prevLevel || newWarn;
+    // v1.187.4 — a return to the held level is a flicker the dwell absorbs only when that level was
+    // AUDIBLE (committedAudible). A red that never reached the house (every speaker away and its
+    // retries spent, or a commit nobody could hear) returning while its clearing stood the dwell was
+    // absorbed "again", and the critical stood unspoken — for the whole post-restart window, which
+    // v1.187.4 extends to boot + 16 min. It is spoken as a transition.
+    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit && !committedAudible;
+    const transitioned = level !== prevLevel || newWarn || unheardReturn;
     // v1.187.0 (log review) — a NEW warning below a sounded cell-spread critical that is only HELD
     // (soundedCriticalHeld) is spoken at once, like any new warning, but the committed level STAYS
     // red: committing yellow there reset the red episode (prevCritFps), so the held critical's next
@@ -3024,10 +3095,15 @@ export function startBroadcastMonitor(
     // settled set, for at most one more CONDITION_CLEAR_DWELL_MS; then adopted silently. Decided on
     // the due tick alone, a settled stamp reset by one transient onset 30 s before it silenced the
     // all-clear the warm-up path would have waited for.
+    // v1.187.4 — and the question is open past the warm-up until the longest onset clock a restart
+    // resets has run (restartQuestionOpen: boot + 16 min, one more dwell on a set settled by then).
+    // Open only for the warm-up, a green whose dwell ended after it took the late-green path and was
+    // spoken on an unsettled set minutes before the reserve-blind warning the restarted clock hid.
+    const settledSinceMs = level === 'green' && continuationBaseline != null ? alertSetSettledSince() : null;
+    const questionOpen = restartQuestionOpen(Date.now() - bootMs, settledSinceMs);
     const recoveryCandidate = level === 'green' && continuationBaseline != null
-      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true
+      && (questionOpen || (deescalationHold?.soundedHeldInWarmup === true
         && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < CONDITION_CLEAR_DWELL_MS)));
-    const settledSinceMs = recoveryCandidate ? alertSetSettledSince() : null;
     const recovery = recoveryCandidate
       && isRestartRecovery(continuationBaseline, level, greenSinceMs, Date.now(), settledSinceMs);
     const lowerDue = deescalationDue(level, belowRedSinceMs, greenSinceMs, Date.now());
@@ -3069,10 +3145,10 @@ export function startBroadcastMonitor(
         const otherwise = conditionAudibleSinceBootLevel != null && conditionAudibleSinceBootLevel !== 'green'
           ? `announced as a transition (a ${conditionAudibleSinceBootLevel} condition was audible after the restart)`
           : 'adopted silently as a continuation';
-        const decided = `once the set has settled, or at the latest ${Math.round((LONGEST_RESTARTED_ONSET_MS + RESTARTED_ONSET_HOLD_MARGIN_MS) / 60_000)} min after the boot`;
-        log(`broadcast: green has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s but is held, not adopted — ${why}. ${inWarmup
-          ? `It is announced as a recovery from the pre-restart ${continuationBaseline} once it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set; if the warm-up ends first it is ${otherwise} ${decided}`
-          : `A sounded critical held it inside the warm-up, which has ended: it is announced as a recovery from the pre-restart ${continuationBaseline} if it stands ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set within the next ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s, otherwise ${otherwise} ${decided}`}`);
+        const holdMin = Math.round((LONGEST_RESTARTED_ONSET_MS + RESTARTED_ONSET_HOLD_MARGIN_MS) / 60_000);
+        log(`broadcast: green has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s but is held, not adopted — ${why}. ${questionOpen
+          ? `It is announced as a recovery from the pre-restart ${continuationBaseline} once it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set; if it has not by ${holdMin} min after the boot (${holdMin + Math.round(CONDITION_CLEAR_DWELL_MS / 60_000)} if the set has settled by then), it is ${otherwise}`
+          : `A sounded critical held it inside the warm-up: it is announced as a recovery from the pre-restart ${continuationBaseline} if it stands ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set within the next ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s, otherwise ${otherwise}`}`);
       }
       // v1.187.0 (review) — GREEN observed under a held level destroys the red-replay evidence
       // NOW, not when the green commits. The evidence is read only at boot: kept through the hold,
@@ -3091,8 +3167,8 @@ export function startBroadcastMonitor(
     // that transition may itself wait (the boot yellow hold, a broadcast in flight), and it must
     // still read as new on the next tick — adoptLevel clears the hold when it commits.
     if (!downward && !newWarn && deescalationHold != null) {
-      const back = level === deescalationHold.from && !newCrit;
-      const how = newCrit ? ' with a new critical' : back ? ' again (flicker absorbed, nothing spoken)' : '';
+      const back = level === deescalationHold.from && !newCrit && !unheardReturn;
+      const how = newCrit ? ' with a new critical' : unheardReturn ? ' again, never audible — spoken, not absorbed' : back ? ' again (flicker absorbed, nothing spoken)' : '';
       endDeescalationHold(level, how, back);
     }
     // v0.58.0 — within the post-restart warm-up window, a condition that was
@@ -3110,7 +3186,8 @@ export function startBroadcastMonitor(
     } else if (transitioned && level === 'green' && recoveryHoldSinceMs != null && !inWarmup) {
       // v1.187.3 (review) — the warm-up ended with the green still held for a recovery it did not
       // earn: adopted as the continuation it was before v1.187.3, in silence (fail-quiet — a green
-      // read from an unsettled set may be a fault still withheld).
+      // read from an unsettled set may be a fault still withheld). v1.187.4 — the restart question
+      // now closes at boot + 16 min (restartQuestionOpen), not at the end of the warm-up.
       // v1.187.3 (seam review, LOW) — unless a condition above green has been spoken since the
       // boot (in memory: what this process played; v1.187.4 — what it made audible). The last words
       // in the house are then that condition, not the pre-restart level, so the green is news: it
@@ -3118,29 +3195,33 @@ export function startBroadcastMonitor(
       // storm gates still apply), as any green after the warm-up does. The settled-set gate held it
       // for as long as the warm-up lasted; adopted in silence, a red heard after the restart that
       // had cleared stayed the last words.
-      // v1.187.4 — decided only on a settled set, or once the longest restarted onset window has
-      // run (warmupEndDecisionDue): the backup-pool-unknown clock restarts at the boot, so a
-      // reserve-blind warning that stood before the restart is withheld until boot + 15 min, and a
-      // green announced here at the end of the warm-up was followed minutes later by that warning.
-      // Until then the green stays held (recoveryHoldSinceMs stays set; prevLevel is not advanced).
-      if (!warmupEndDecisionDue(alertSetSettledSince(), Date.now() - bootMs)) {
+      // v1.187.4 — reached once the restart question has closed (restartQuestionOpen). Decided only
+      // with no broadcast in flight or queued and no SIP outcome pending: a red being retried (or
+      // reaching the cordless) is made audible only when its play returns, and a silent adoption
+      // decided meanwhile left that red as the last words. Bounded by the announce timeouts.
+      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) {
         if (warmupEndWaitLoggedFor !== recoveryHoldSinceMs) {
           warmupEndWaitLoggedFor = recoveryHoldSinceMs;
-          log(`broadcast: the warm-up has ended with the green still held for a recovery, on an alert set that is not settled — still held, until the set settles or at the latest ${Math.round((LONGEST_RESTARTED_ONSET_MS + RESTARTED_ONSET_HOLD_MARGIN_MS) / 60_000)} min after the boot (an onset clock restarted by the boot, the backup pool's ${Math.round(LONGEST_RESTARTED_ONSET_MS / 60_000)} min among them, may still be withholding a fault that stood before the restart)`);
+          log('broadcast: the restart decision on the held green waits for the broadcast in flight — what it makes audible decides between an announcement and a silent adoption');
         }
         return;
       }
       // v1.187.4 — "audible", not "played": a red heard as the klaxon alone (the spoken render
       // failed) or only on the SIP cordless counts (conditionAudibleSinceBootLevel).
       if (conditionAudibleSinceBootLevel != null && conditionAudibleSinceBootLevel !== 'green') {
-        log(`broadcast: the warm-up has ended with the green still held for a recovery, but a ${conditionAudibleSinceBootLevel} condition was audible after the restart — announced as a transition, not adopted silently (the last words must not stay a condition that has cleared)`);
+        log(`broadcast: the restart question closed with the green still held for a recovery, but a ${conditionAudibleSinceBootLevel} condition was audible after the restart — announced as a transition, not adopted silently (the last words must not stay a condition that has cleared)`);
       } else {
-        log(`broadcast: the warm-up ended before the green had stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled alert set — adopted silently as a continuation of the pre-restart ${continuationBaseline}, not announced`);
+        log(`broadcast: the restart question closed before the green had stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled alert set — adopted silently as a continuation of the pre-restart ${continuationBaseline}, not announced`);
         adoptLevel(level, crit, ids, true);
         return;
       }
     }
-    if (transitioned && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) {
+    // v1.187.4 — not a continuation when a level above it has been audible since the boot: the last
+    // words in the house are then that level, and a red heard after the restart that cleared back
+    // to the heard yellow was filed as "the pre-restart advisory" — the cleared red stayed the last
+    // words.
+    const higherAudible = conditionAudibleSinceBootLevel != null && LEVEL_RANK[conditionAudibleSinceBootLevel] > LEVEL_RANK[level];
+    if (transitioned && !higherAudible && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) {
       // v1.187.3 (review) — never a green: inside the warm-up a green under the baseline is held
       // until it is a recovery (above), and past it this predicate is false.
       log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)`);

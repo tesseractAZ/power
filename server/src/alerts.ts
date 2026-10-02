@@ -1006,6 +1006,9 @@ export interface ConnectivityContext {
   /** v1.185.0 — the same onset for EVERY panel, keyed by serial (a secondary panel's own
    *  reserve-alarm-blind alert reads its entry). */
   backupPoolUnknownSinceBySn?: Map<string, number | null>;
+  /** v1.187.4 — listed panels whose pool-unknown onset of before the restart is still carriable but
+   *  not consumed yet: not projected in this process (SnapshotStore.poolUnknownCarryPending). */
+  poolUnknownCarryPending?: readonly string[];
   /** v1.185.0 — when each panel was first listed in this process (SnapshotStore.firstListedAt): a
    *  panel with no projection since then has had an unreadable pool at least that long. */
   panelFirstListedBySn?: Map<string, number | null>;
@@ -1100,7 +1103,7 @@ export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS,
  * beside the windows it reads so the two cannot drift. Pure; the descriptions are for the log.
  */
 export function debouncedOnsetsPending(
-  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn'> | undefined,
+  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn' | 'poolUnknownCarryPending'> | undefined,
   nowMs: number,
 ): string[] {
   if (connectivity == null) return [];
@@ -1115,6 +1118,10 @@ export function debouncedOnsetsPending(
   const pools: Iterable<[string, number | null]> = connectivity.backupPoolUnknownSinceBySn
     ?? [['house panel', connectivity.backupPoolUnknownSinceMs ?? null]];
   for (const [sn, since] of pools) if (within(since, RESERVE_BLIND_AFTER_MS)) out.push(`reserve-alarm-blind ${sn}`);
+  // v1.187.4 — a listed panel not projected yet whose onset of before the restart is still on file:
+  // its first projection may raise reserve-alarm-blind at once (carried), so a green read before it
+  // is not an all-clear. Bounded by the carry window (SnapshotStore.poolUnknownCarryPending).
+  for (const sn of connectivity.poolUnknownCarryPending ?? []) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);
   return out;
 }
 

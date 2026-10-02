@@ -240,8 +240,9 @@ const MUTANTS = [
   {
     id: 'B-ii. ★★★ the tick reads the alert set as settled since forever',
     file: BR,
-    find: '    const settledSinceMs = recoveryCandidate ? alertSetSettledSince() : null;',
-    to: '    const settledSinceMs = recoveryCandidate ? 0 : null; /* MUTANT */',
+    // v1.187.4 — re-pointed: the stamp is read before recoveryCandidate (restartQuestionOpen needs it).
+    find: "    const settledSinceMs = level === 'green' && continuationBaseline != null ? alertSetSettledSince() : null;",
+    to: "    const settledSinceMs = level === 'green' && continuationBaseline != null ? 0 : null; /* MUTANT */",
     why: 'A green read before the set settled is spoken as an all-clear (the boot false-green).',
   },
   {
@@ -296,14 +297,15 @@ const MUTANTS = [
   {
     id: 'B-x. ★★★ the continuation still reads the boot baseline',
     file: BR,
-    find: '    if (transitioned && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) {',
-    to: '    if (transitioned && isRestartContinuation(bootBaselineLevel, level, Date.now() - bootMs)) { /* MUTANT */',
+    find: '    if (transitioned && !higherAudible && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) {', // v1.187.4 — re-pointed
+    to: '    if (transitioned && !higherAudible && isRestartContinuation(bootBaselineLevel, level, Date.now() - bootMs)) { /* MUTANT */',
     why: 'A warning after the spoken all-clear is filed as a continuation of the boot baseline.',
   },
   {
     id: 'B-xi. ★★ the recovery is decided outside the warm-up',
     file: BR,
-    find: '      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true\n        && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < CONDITION_CLEAR_DWELL_MS)));',
+    // v1.187.4 — re-pointed: the window is restartQuestionOpen (the warm-up, then to boot + 16 min).
+    find: '      && (questionOpen || (deescalationHold?.soundedHeldInWarmup === true\n        && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < CONDITION_CLEAR_DWELL_MS)));',
     to: '      ; /* MUTANT */',
     why: 'A routine green long after boot is logged as a restart recovery, or held for one forever.',
   },
@@ -590,8 +592,8 @@ const MUTANTS = [
   {
     id: 'Q-ii. ★★★ the recovery is decided inside the warm-up only',
     file: BR,
-    find: "      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true",
-    to: "      && (inWarmup || (false /* MUTANT */",
+    find: "      && (questionOpen || (deescalationHold?.soundedHeldInWarmup === true", // v1.187.4 — re-pointed
+    to: "      && (questionOpen || (false /* MUTANT */",
     why: 'As Q-i.',
   },
   {
