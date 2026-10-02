@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot, type FleetSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext, debouncedOnsetsPending, BOOT_RESET_ONSET_DEBOUNCE_MS } from './alerts.js';
 import { broadcastHealthAlert, broadcastDegradedAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds, rateFloorIdleHeldSns } from './messageRateFloorAlert.js';
@@ -1400,6 +1400,38 @@ export const BOOT_HYDRATION_MAX_MS = envNum(process.env.ALERT_BOOT_HYDRATION_MAX
  */
 export const ALERT_COUNTS_READY_MAX_MS = 90_000;
 
+/**
+ * v1.187.3 (review) — CAN A GREEN BE TRUSTED FROM THE ALERT SET THIS PASS PUBLISHED?
+ *
+ * The broadcast's post-restart recovery (broadcast.isRestartRecovery) speaks an all-clear for a
+ * green under a level the house heard before the restart. A green read from a set that is still
+ * missing an alert for a boot-only reason is not one. Every condition must hold:
+ *   • the store hydrated (SnapshotStore.firstPollSettledAt > 0): an empty device map reads green;
+ *   • every worker/NWS feed's value IN THIS SET is a delivery computed on a hydrated store
+ *     (AlertFeedRead.warm, read with the value). Not LastGoodFeed.warm() read later: that turns
+ *     true when a fetch lands, and the fetch's alerts reach the set only at the next publish. An
+ *     empty list is not settled: production has five feeds, and none is a wiring fault;
+ *   • the live alarms were computed at least BOOT_RESET_ONSET_DEBOUNCE_MS after the first poll:
+ *     the dpu-err / shp2-src-err (critical) and MPPT-error onset clocks restart at zero in every
+ *     process, so a fault that stood before the restart is withheld for one window after it;
+ *   • no in-memory onset clock is inside its debounce (alerts.debouncedOnsetsPending): a fault the
+ *     device reports now that is withheld only because it has not stood its window — a quota that
+ *     landed after the first poll, or a backup pool unknown for less than 15 min.
+ * Pure + exported for tests; the monitor stamps alertSetSettledSince from it.
+ */
+export function alertSetTrusted(p: {
+  firstPollSettledAt: number;
+  feedsInSet: readonly boolean[];
+  liveAtMs: number;
+  pendingOnsets: readonly string[];
+  bootDebounceMs?: number;
+}): boolean {
+  if (!(p.firstPollSettledAt > 0)) return false;
+  if (p.feedsInSet.length === 0 || !p.feedsInSet.every((w) => w === true)) return false;
+  if (p.liveAtMs - p.firstPollSettledAt < (p.bootDebounceMs ?? BOOT_RESET_ONSET_DEBOUNCE_MS)) return false;
+  return p.pendingOnsets.length === 0;
+}
+
 export interface AlertFeedRead<T> {
   /** A private copy of the freshest value this feed has (null: never delivered). */
   value: T | null;
@@ -1411,6 +1443,11 @@ export interface AlertFeedRead<T> {
   ageMs: number | null;
   /** Why the value is carried rather than fresh (budget or failure), else null. */
   error: string | null;
+  /** v1.187.3 (review) — the feed was warm (LastGoodFeed.warm) when THIS read returned, so `value`
+   *  is a delivery computed on a hydrated store. Read with the value, not later: warm() turns true
+   *  the moment a fetch lands, and a fetch that lands after its read has returned (past the budget,
+   *  while the pass waits on another feed) is not in the set that pass publishes. */
+  warm: boolean;
 }
 export interface LastGoodFeed<T> {
   readonly name: string;
@@ -1567,7 +1604,7 @@ export function createLastGoodFeed<T>(
         carrying = false;
         if (carryLogged) log(`alert-feed: ${name} fresh again after ${carriedPasses} pass(es) on its last good value`);
       }
-      return { value: last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error };
+      return { value: last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error, warm: hydratedLanded };
     },
     peek: () => (last != null ? clone(last.value) : null),
     warm: () => hydratedLanded,
@@ -2217,6 +2254,10 @@ export interface AlertMonitor {
   /** v1.90.0 (B5) — the CURRENT live alert ids, read-only. The reconnect audit
    *  measures "offline alert resolved" against the real tracked set. */
   activeAlertIds: () => string[];
+  /** v1.187.3 (review) — since when every pass has published a set a green can be trusted from
+   *  (alertSetTrusted), stamped at the publish; null while the latest pass's set is not one. The
+   *  broadcast measures a post-restart recovery's dwell from it (broadcast.isRestartRecovery). */
+  alertSetSettledSince: () => number | null;
   history: () => ClearedAlert[];
   incidents: () => Incident[];
   telemetry: () => AlertActionStats[];
@@ -3125,6 +3166,11 @@ export function startAlertMonitor(
   };
   /** v1.186.0 — the alarm-count readiness latch (FleetSnapshot.alertsComplete). */
   let alertsCompleteMarked = false;
+  /** v1.187.3 (review) — AlertMonitor.alertSetSettledSince: stamped at the first publish of a run
+   *  of trusted sets (alertSetTrusted), cleared by any pass whose set is not one. */
+  let alertSetSettledSinceMs: number | null = null;
+  /** v1.187.3 (review) — the first settled set since boot is logged once. */
+  let alertSetSettledLogged = false;
 
   const evaluate = async () => {
     if (evaluating) return;
@@ -3267,6 +3313,15 @@ export function startAlertMonitor(
     // sat between them), which a stable sort then preserves among equal-rank alerts.
     // v1.187.0 — quietPeerSpreadUnderHeldCritical: a pack's peer cell-spread outlier stays off
     // the speakers while its own vdiff-crit is held by a bounded cell-spread mute (same tick).
+    // v1.187.3 (review) — when the live alarms were computed, and which in-memory onset clocks are
+    // withholding a fault at that moment (alertSetTrusted). A pass whose first publish (below: these
+    // live alarms and each feed's last value) is not a trusted set clears the settled stamp BEFORE
+    // it publishes, so the broadcast never reads a stale stamp beside a set with a withheld fault.
+    const liveAtMs = Date.now();
+    const pendingOnsets = debouncedOnsetsPending(connectivity, liveAtMs);
+    if (!alertSetTrusted({ firstPollSettledAt: store.firstPollSettledAt, feedsInSet: alertFeeds.map((f) => f.warm()), liveAtMs, pendingOnsets })) {
+      alertSetSettledSinceMs = null;
+    }
     const liveHead: Alert[] = quietPeerSpreadUnderHeldCritical([
       // v1.185.0 — each pool's own verdict, on a multi-panel plant only (one panel: `grid`, unchanged).
       ...computeAlerts(snap.devices, connectivity, grid,
@@ -3462,6 +3517,17 @@ export function startAlertMonitor(
     // v1.187.0 — naming the device, the pack and the stamped reason (silentCriticalLine).
     for (const a of silentCriticalEdges(silentCriticalLogged, alerts)) log(silentCriticalLine(a));
     publish(alerts);
+    // v1.187.3 (review) — the settled stamp, judged on the set just published: its live part (above)
+    // and each feed's value as this pass read it. Stamped at the first such publish and kept while
+    // every pass's set is one; a pass whose set is not cleared it before its first publish (above).
+    const feedsInSet = [rForecast, rStormPrep, rCurtailment, rBaseline, rForecastAlerts].map((r) => r.warm);
+    if (alertSetTrusted({ firstPollSettledAt: store.firstPollSettledAt, feedsInSet, liveAtMs, pendingOnsets })) {
+      if (alertSetSettledSinceMs == null) alertSetSettledSinceMs = Date.now();
+      if (!alertSetSettledLogged) {
+        alertSetSettledLogged = true;
+        log(`alert-monitor: the alert set is settled ${Math.round((liveAtMs - store.firstPollSettledAt) / 1000)} s after the first poll — every feed delivered on a hydrated store, the boot onset debounces have run, and no onset clock is withholding a fault`);
+      }
+    }
     // v1.186.0 — the counts publish once this set is COMPLETE: a hydrated store with every feed
     // delivered, or the bound (publishReadiness 'alerts'). A latch: a later cold read carries.
     if (!alertsCompleteMarked && ((storeHydrated() && alertFeedsWarm()) || Date.now() - monitorStartMs >= ALERT_COUNTS_READY_MAX_MS)) {
@@ -4160,6 +4226,7 @@ export function startAlertMonitor(
       alertFeeds: alertFeeds.map((f) => f.status()),
     }),
     activeAlertIds: () => [...tracked.keys()],
+    alertSetSettledSince: () => alertSetSettledSinceMs,
     history: () => [...clearedLog],
     incidents: () => [...currentIncidents],
     telemetry: () => [...telemetry.values()],

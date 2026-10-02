@@ -2431,10 +2431,11 @@ const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m), {
   klaxonDir: audioDir,
   cacheDir: audioRenderDir,
   cacheUrlPath: '/audio-render',
-  // v1.187.3 — a green transition inside the post-restart warm-up is announced as a recovery only
-  // on a SETTLED alert set: the store hydrated and every worker/NWS alert feed delivered since boot
-  // (broadcast.isRestartRecovery). Before that a green may be an unpopulated store or a cold feed.
-  alertSetSettled: () => store.firstPollSettledAt > 0 && monitor.stats().alertFeeds.every((f) => f.warm),
+  // v1.187.3 — a green inside the post-restart warm-up is announced as a recovery only once it has
+  // stood its dwell on a SETTLED alert set (broadcast.isRestartRecovery), measured from the alert
+  // monitor's stamp (alertMonitor.alertSetTrusted): the store hydrated, every feed's delivery in the
+  // published set, the boot onset debounces run, no onset clock withholding a fault.
+  alertSetSettledSince: () => monitor.alertSetSettledSince(),
 });
 
 // v0.12.0 — backup-pool SoC audible alarm (50/40/30/20/15/10/8/4/2%, escalating priority).

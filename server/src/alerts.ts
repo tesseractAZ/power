@@ -1064,6 +1064,47 @@ const DPU_ERR_DEBOUNCE_MS = 3 * 60 * 1000;
  *  one debounce period for device-reported error codes, not a second tunable. */
 const MPPT_ERR_DEBOUNCE_MS = DPU_ERR_DEBOUNCE_MS;
 
+/**
+ * v1.187.3 (review) — the longest of the 3-minute onset debounces above whose clocks live only in
+ * this process's memory (SnapshotStore: dpu-err, shp2-src-err, dpu-pvh/pvl-err). They restart at
+ * zero on every boot, so for this long after the first poll a fault that stood before the restart
+ * may be missing from the alert set for that reason alone. alertMonitor's settled alert set waits
+ * it out from SnapshotStore.firstPollSettledAt (alertSetTrusted).
+ */
+export const BOOT_RESET_ONSET_DEBOUNCE_MS = Math.max(DPU_ERR_DEBOUNCE_MS, MPPT_ERR_DEBOUNCE_MS);
+
+/**
+ * v1.187.3 (review) — WHICH IN-MEMORY ONSET CLOCKS ARE STILL INSIDE THEIR DEBOUNCE at `nowMs`?
+ *
+ * Each names a condition the device is reporting NOW that computeAlerts withholds only because it
+ * has not stood its window yet: an inverter error (DPU_ERR_DEBOUNCE_MS), an SHP2 source error (the
+ * same window), an MPPT string error while producing (MPPT_ERR_DEBOUNCE_MS) and a backup pool
+ * reading unknown (RESERVE_BLIND_AFTER_MS, 15 min). These clocks restart at zero on every boot, so
+ * a critical or warning that stood before a restart is absent after it for one window. While any
+ * is pending, a green read from the set may be that absence, not an all-clear: the broadcast's
+ * post-restart recovery (broadcast.isRestartRecovery) is not taken on it. Same comparison as the
+ * rules above (`now - sinceMs < window` withholds), so a withheld alert is always listed. Kept
+ * beside the windows it reads so the two cannot drift. Pure; the descriptions are for the log.
+ */
+export function debouncedOnsetsPending(
+  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn'> | undefined,
+  nowMs: number,
+): string[] {
+  if (connectivity == null) return [];
+  const out: string[] = [];
+  const within = (sinceMs: number | null | undefined, windowMs: number): boolean =>
+    sinceMs != null && Number.isFinite(sinceMs) && nowMs - sinceMs < windowMs;
+  for (const [sn, o] of connectivity.dpuErrOnsetBySn ?? []) if (within(o.sinceMs, DPU_ERR_DEBOUNCE_MS)) out.push(`dpu-err ${sn}`);
+  for (const [key, o] of connectivity.shp2SrcErrOnsetBySlot ?? []) if (within(o.sinceMs, DPU_ERR_DEBOUNCE_MS)) out.push(`shp2-src-err ${key}`);
+  for (const [key, o] of connectivity.mpptErrOnsetByKey ?? []) if (within(o.sinceMs, MPPT_ERR_DEBOUNCE_MS)) out.push(`mppt-err ${key}`);
+  // Every panel's pool (v1.185.0), the house panel's among them; a caller with only the house
+  // panel's onset passes backupPoolUnknownSinceMs.
+  const pools: Iterable<[string, number | null]> = connectivity.backupPoolUnknownSinceBySn
+    ?? [['house panel', connectivity.backupPoolUnknownSinceMs ?? null]];
+  for (const [sn, since] of pools) if (within(since, RESERVE_BLIND_AFTER_MS)) out.push(`reserve-alarm-blind ${sn}`);
+  return out;
+}
+
 /* v1.45.0 — host-pressure crit dwell. The vitals assessment escalates
  * instantly (correct for QoS), but the RED ANNUNCIATION requires the crit to
  * sustain: 1-3-minute load spikes from the nightly backup / boot / store

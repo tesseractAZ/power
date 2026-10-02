@@ -514,26 +514,34 @@ export function isRestartContinuation(
  * all-clear speech gate, quiet hours and the storm gates still apply), when all three hold:
  *   • a heard baseline exists (conditionBootBaseline returns a level only when it was heard; with
  *     none, isRestartContinuation suppresses nothing anyway);
- *   • the green has stood the de-escalation dwell (CONDITION_CLEAR_DWELL_MS), measured on every
- *     tick (greenSinceMs);
- *   • the alert set is SETTLED: the store hydrated and every worker/NWS alert feed has delivered
- *     since boot. A green read from an unpopulated store, or before a feed that owns the warning
- *     has computed once, is not an all-clear (the boot false-green): it stays a continuation.
- * A yellow under any baseline is unchanged (yellow → yellow stays a continuation), and RED never
- * reaches here as a continuation (isRestartContinuation). Pure + exported for tests.
+ *   • the alert set is SETTLED, and has been since `alertSetSettledSinceMs` (the alert monitor's
+ *     stamp, alertMonitor.alertSetTrusted): the store hydrated, every worker/NWS feed's delivery
+ *     in the published set, the boot onset debounces run, no in-memory onset clock withholding a
+ *     fault. A green read from an unpopulated store, before a feed's alerts are in the set, or
+ *     while a critical that stood before the restart is still inside its restarted debounce
+ *     (dpu-err, shp2-src-err: 3 min) is not an all-clear — the boot false-green;
+ *   • v1.187.3 (review) — the green has stood the de-escalation dwell (CONDITION_CLEAR_DWELL_MS)
+ *     ON that settled set: measured from the later of greenSinceMs and alertSetSettledSinceMs.
+ *     Checking "settled" only at the commit let a green that began on an unsettled set be spoken
+ *     seconds before the withheld critical re-published — "All clear", then the klaxon.
+ * Until then the tick HOLDS the green (it is not committed; see the de-escalation hold), so it is
+ * not adopted as a continuation before the set has had the chance to settle. If the warm-up ends
+ * first, it is adopted silently as before v1.187.3 (fail-quiet). A yellow under any baseline is
+ * unchanged (yellow → yellow stays a continuation), and RED never reaches here as a continuation
+ * (isRestartContinuation). Pure + exported for tests.
  */
 export function isRestartRecovery(
   baseline: ConditionLevel | null,
   observed: ConditionLevel,
   greenSinceMs: number | null,
   nowMs: number,
-  alertSetSettled: boolean,
+  alertSetSettledSinceMs: number | null,
   dwellMs = CONDITION_CLEAR_DWELL_MS,
 ): boolean {
   if (observed !== 'green') return false;
   if (baseline == null) return false;
-  if (!alertSetSettled) return false;
-  return greenSinceMs != null && nowMs - greenSinceMs >= dwellMs;
+  if (greenSinceMs == null || alertSetSettledSinceMs == null) return false;
+  return nowMs - Math.max(greenSinceMs, alertSetSettledSinceMs) >= dwellMs;
 }
 
 /**
@@ -1000,12 +1008,13 @@ export interface BroadcastMonitorOpts {
   renderTts?: RenderOptions['renderTts'];
   tickMs?: number;
   /**
-   * v1.187.3 — is the alert set the condition is read from SETTLED: the store hydrated and every
-   * worker/NWS alert feed delivered since boot (index.ts reads both). Only isRestartRecovery reads
-   * it. Absent ⇒ never settled: a green transition inside the post-restart warm-up stays a silent
-   * continuation, the pre-v1.187.3 behaviour.
+   * v1.187.3 — since when the alert set the condition is read from has been SETTLED (the alert
+   * monitor's AlertMonitor.alertSetSettledSince, wired in index.ts), or null while it is not. Only
+   * isRestartRecovery reads it. Absent, throwing or not a finite number ⇒ never settled: a green
+   * inside the post-restart warm-up is held and then adopted as a silent continuation, the
+   * pre-v1.187.3 outcome.
    */
-  alertSetSettled?: () => boolean;
+  alertSetSettledSince?: () => number | null;
 }
 
 /** v1.48.3 — true when EVERY per-target SIP dispatch failure is timeout-classed.
@@ -1245,9 +1254,13 @@ export function startBroadcastMonitor(
    * warm-up is news, not the continuation of a level the house heard before the restart.
    */
   let continuationBaseline: ConditionLevel | null = bootBaselineLevel;
-  /** v1.187.3 — BroadcastMonitorOpts.alertSetSettled, read defensively: absent or throwing ⇒ not settled. */
-  const alertSetSettled = (): boolean => {
-    try { return opts.alertSetSettled?.() === true; } catch { return false; }
+  /** v1.187.3 — BroadcastMonitorOpts.alertSetSettledSince, read defensively: absent, throwing or
+   *  not a finite number ⇒ not settled. */
+  const alertSetSettledSince = (): number | null => {
+    try {
+      const v = opts.alertSetSettledSince?.();
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    } catch { return null; }
   };
   // v1.64.0 — identity-aware RED replay gate (see redReplayGate.ts). Constructed
   // here so the state read happens once, at boot: that read IS the restart
@@ -2389,6 +2402,12 @@ export function startBroadcastMonitor(
   /** v1.187.0 — a downward move being held, for the once-per-episode log lines. `heard` is the
    *  condition record's heard flag when the hold began (see the hold branch in the tick). */
   let deescalationHold: { from: ConditionLevel; sinceMs: number; heard: boolean } | null = null;
+  /** v1.187.3 (review) — a continuous green under a heard restart baseline that has stood its dwell
+   *  inside the warm-up but not on a settled alert set (isRestartRecovery): held for its recovery,
+   *  since this time. Cleared whenever the green clock is (the green ended, or a sounded critical
+   *  is held), so it describes the green standing now; once that green commits, no green
+   *  transition follows it. */
+  let recoveryHoldSinceMs: number | null = null;
   /**
    * v1.187.0 — a condition transition the same-level storm gate refused, waiting to be
    * re-presented. Nothing ever retried one: the tick had already committed the level, so the
@@ -2573,6 +2592,7 @@ export function startBroadcastMonitor(
     else if (belowRedSinceMs == null) belowRedSinceMs = tickNow;
     if (level !== 'green' || critHeld) greenSinceMs = null;
     else if (greenSinceMs == null) greenSinceMs = tickNow;
+    if (greenSinceMs == null) recoveryHoldSinceMs = null;
     if (firstTick) {
       firstTick = false;
       // ★ NOT adoptLevel(): a boot-time green is almost always "the alert store
@@ -2734,10 +2754,22 @@ export function startBroadcastMonitor(
       if (level === 'green') log(`broadcast: boot yellow dropped after ${Math.round((Date.now() - bootYellowHold.sinceMs) / 1000)} s — cleared inside the hold, not spoken (${[...bootYellowHold.fps].map(describeFingerprint).join('; ')})`);
       bootYellowHold = null;
     }
+    // v1.187.3 (review) — a green below a heard restart baseline, inside the warm-up, commits only
+    // as a RECOVERY (isRestartRecovery): once it has stood the dwell on a SETTLED alert set, measured
+    // from the later of the green and the alert monitor's settled stamp. Until then it is held like
+    // any de-escalation below, past its own dwell if need be. Adopted as a continuation when it had
+    // stood only the plain dwell, it could never be spoken; spoken then, a critical still inside its
+    // restarted debounce re-published seconds later ("All clear", then the klaxon).
+    const inWarmup = Date.now() - bootMs < BROADCAST_BOOT_WARMUP_MS;
+    const recoveryCandidate = level === 'green' && continuationBaseline != null && inWarmup;
+    const settledSinceMs = recoveryCandidate ? alertSetSettledSince() : null;
+    const recovery = recoveryCandidate
+      && isRestartRecovery(continuationBaseline, level, greenSinceMs, Date.now(), settledSinceMs);
+    const lowerDue = deescalationDue(level, belowRedSinceMs, greenSinceMs, Date.now());
     // v1.187.0 — the de-escalation dwell (deescalationDue). A downward move is held — prevLevel
     // NOT advanced, nothing adopted or spoken — until the lower level has stood for
     // CONDITION_CLEAR_DWELL_MS. A flicker back up inside it is then no transition at all.
-    if (downward && !newWarn && !deescalationDue(level, belowRedSinceMs, greenSinceMs, Date.now())) {
+    if (downward && !newWarn && (!lowerDue || (recoveryCandidate && !recovery))) {
       if (deescalationHold == null) {
         deescalationHold = { from: committed, sinceMs: Date.now(), heard: conditionSpoken };
         // v1.187.0 (review) — the condition record (the next boot's restart baseline) follows
@@ -2750,6 +2782,14 @@ export function startBroadcastMonitor(
           persistStatus();
         }
         log(`broadcast: ${committed} → ${level} held — a lower condition is committed only after it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s (flicker guard); nothing is spoken meanwhile${critHeld ? `. A cell-spread critical that sounded is held, not cleared (muted by a bounded cell-spread mute, or between two of its readings): the hold lasts until it annunciates again, or clears and stays gone ${Math.round(SOUNDED_VDIFF_ABSENT_HOLD_MS / 60_000)} minutes` : ''}`);
+      }
+      // v1.187.3 (review) — past its own dwell, a green is held only for its recovery: said once.
+      if (lowerDue && recoveryHoldSinceMs == null) {
+        recoveryHoldSinceMs = Date.now();
+        const why = settledSinceMs == null
+          ? 'the alert set is not settled (the store not hydrated, a feed\'s alerts not yet in the set, the boot onset debounces still running, or an onset clock withholding a fault)'
+          : `the alert set has been settled only ${Math.round((Date.now() - settledSinceMs) / 1000)} s`;
+        log(`broadcast: green has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s but is held, not adopted — ${why}. It is announced as a recovery from the pre-restart ${continuationBaseline} once it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set, or adopted silently as a continuation if the warm-up ends first`);
       }
       // v1.187.0 (review) — GREEN observed under a held level destroys the red-replay evidence
       // NOW, not when the green commits. The evidence is read only at boot: kept through the hold,
@@ -2777,23 +2817,25 @@ export function startBroadcastMonitor(
     // a "rise" once the analytics/learned alerts re-warm. Don't re-speak it aloud;
     // adopt the level silently. A genuine escalation above the pre-restart baseline
     // (e.g. yellow→red across the restart) still passes through and broadcasts.
-    // v1.187.3 — …unless it is a RECOVERY (isRestartRecovery): a green transition that has stood
-    // the de-escalation dwell on a settled alert set. It goes on as an ordinary transition below
-    // (the all-clear speech gate, quiet hours and the storm gates still apply), and the baseline
-    // ends with it, so it is announced once and a later warning in the warm-up is news.
-    if (
-      transitioned && continuationBaseline != null && Date.now() - bootMs < BROADCAST_BOOT_WARMUP_MS
-      && isRestartRecovery(continuationBaseline, level, greenSinceMs, Date.now(), alertSetSettled())
-    ) {
-      log(`broadcast: green has stood ${Math.round((Date.now() - (greenSinceMs ?? Date.now())) / 1000)} s on a settled alert set — a recovery, not a continuation of the pre-restart ${continuationBaseline}; announced as a transition`);
+    // v1.187.3 — …unless it is a RECOVERY (isRestartRecovery, decided above): a green that has
+    // stood the de-escalation dwell on a settled alert set. It goes on as an ordinary transition
+    // below (the all-clear speech gate, quiet hours and the storm gates still apply), and the
+    // baseline ends with it, so it is announced once and a later warning in the warm-up is news.
+    if (transitioned && recovery) {
+      log(`broadcast: green has stood ${Math.round((Date.now() - Math.max(greenSinceMs ?? 0, settledSinceMs ?? 0)) / 1000)} s on a settled alert set — a recovery, not a continuation of the pre-restart ${continuationBaseline}; announced as a transition`);
       continuationBaseline = null;
+    } else if (transitioned && level === 'green' && recoveryHoldSinceMs != null && !inWarmup) {
+      // v1.187.3 (review) — the warm-up ended with the green still held for a recovery it did not
+      // earn: adopted as the continuation it was before v1.187.3, in silence (fail-quiet — a green
+      // read from an unsettled set may be a fault still withheld).
+      log(`broadcast: the warm-up ended before the green had stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled alert set — adopted silently as a continuation of the pre-restart ${continuationBaseline}, not announced`);
+      adoptLevel(level, crit, ids, true);
+      return;
     }
     if (transitioned && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) {
-      // v1.187.3 — a green transition reaches here only on an unsettled alert set.
-      const why = level === 'green'
-        ? ' — not taken as a recovery: the alert set is not settled (the store has not hydrated, or an alert feed has not delivered since boot)'
-        : '';
-      log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)${why}`);
+      // v1.187.3 (review) — never a green: inside the warm-up a green under the baseline is held
+      // until it is a recovery (above), and past it this predicate is false.
+      log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)`);
       // v1.186.0 — heard before the restart (the baseline says so); a kept red is not.
       adoptLevel(keepRed ? 'red' : level, keepRed ? prevCrit : crit, ids, !keepRed);
       return;
