@@ -309,8 +309,8 @@ const MUTANTS = [
   {
     id: 'B-xvii. ★★ a throwing settled reader reads as settled',
     file: BR,
-    find: '    } catch { return null; }',
-    to: '    } catch { return 0; } /* MUTANT */',
+    find: "      return typeof v === 'number' && Number.isFinite(v) ? v : null;\n    } catch { return null; }",
+    to: "      return typeof v === 'number' && Number.isFinite(v) ? v : null;\n    } catch { return 0; } /* MUTANT */",
     why: 'An unreadable stamp is taken as settled.',
   },
   {
