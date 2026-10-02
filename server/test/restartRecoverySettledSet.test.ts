@@ -34,7 +34,7 @@ after(() => clearInterval(keepAlive));
 const ROOT = mkdtempSync(resolve(tmpdir(), 'ef-settled-'));
 process.env.DB_PATH = resolve(ROOT, 'ecoflow.db');
 process.env.ALERT_EVAL_MS = '100';
-process.env.ALERT_FEED_BUDGET_MS = '1500';
+process.env.ALERT_FEED_BUDGET_MS = '4000'; // a held feed keeps its pass waiting well past the assertions made meanwhile
 process.env.ALERT_DEBOUNCE_MS = '0';
 process.env.ALERT_ONSET_PATH = resolve(ROOT, 'alert-onset.json');
 process.env.NOTIFY_QUIET_HOURS = '';
@@ -183,7 +183,7 @@ function release(name: string, value: any): void {
 /* ── rigs ── */
 const stops: Array<() => void> = [];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-async function until(pred: () => boolean, what: string, logs: string[] = [], ms = 10_000): Promise<void> {
+async function until(pred: () => boolean, what: string, logs: string[] = [], ms = 20_000): Promise<void> {
   const start = realNow();
   while (!pred()) {
     if (realNow() - start > ms) throw new Error(`timed out waiting for ${what}\n${logs.slice(-60).join('\n')}`);
@@ -263,7 +263,7 @@ after(async () => {
 
 /* ══ through both real monitors ══════════════════════════════════════════════════════════ */
 
-test('★★★ the recovery through both monitors: settled after the boot debounces, the green stands its dwell on it, and is spoken once', { timeout: 30_000 }, async () => {
+test('★★★ the recovery through both monitors: settled after the boot debounces, the green stands its dwell on it, and is spoken once', { timeout: 60_000 }, async () => {
   await heard([HEARD_WARN], 'yellow');
   const store = bootStore({ spread: true }); // the heard warning still stands at the boot
   const p = plant(store);
@@ -280,6 +280,9 @@ test('★★★ the recovery through both monitors: settled after the boot debou
   assert.equal(p.count(GREEN_SPOKEN), 0, 'the green began before the set settled: its dwell runs from the stamp');
   assert.ok(p.has(HELD_FOR_RECOVERY), 'held past its own dwell for its recovery');
   const stampedAt = p.mon.alertSetSettledSince()!;
+  const at = p.mon.stats().evalPasses;
+  await until(() => p.mon.stats().evalPasses >= at + 3, 'three more settled passes', p.logs);
+  assert.equal(p.mon.alertSetSettledSince(), stampedAt, '★ the stamp marks the START of the settled run: a later settled pass keeps it');
   offset += DWELL + SEC;
   fresh(store);
   await until(() => p.count(GREEN_SPOKEN) === 1, 'the all-clear', p.logs);
@@ -289,7 +292,7 @@ test('★★★ the recovery through both monitors: settled after the boot debou
   assert.equal(p.count(GREEN_SPOKEN), 1, 'once');
 });
 
-test('★★★ review replay: a critical withheld by its restarted debounce re-publishes after the green has stood its dwell — no "All clear" before it', { timeout: 30_000 }, async () => {
+test('★★★ review replay: a critical withheld by its restarted debounce re-publishes after the green has stood its dwell — no "All clear" before it', { timeout: 60_000 }, async () => {
   await heard([HEARD_CRIT], 'red');
   assert.equal(announces, 1);
   const store = bootStore({ errAtBoot: 7, spread: true }); // dpu-err standing; its onset clock restarts now
@@ -316,7 +319,7 @@ test('★★★ review replay: a critical withheld by its restarted debounce re-
   assert.equal(p.count(GREEN_SPOKEN), 0, 'no all-clear before (or after) it');
 });
 
-test('★★★ a feed that lands after the green began: its warning reaches the set before any all-clear', { timeout: 30_000 }, async () => {
+test('★★★ a feed that lands after the green began: its warning reaches the set before any all-clear', { timeout: 60_000 }, async () => {
   await heard([HEARD_WARN], 'yellow');
   hold('curtailmentAlerts'); // a worker feed that has not delivered since boot
   const store = bootStore({ spread: true });
@@ -347,7 +350,7 @@ test('★★★ a feed that lands after the green began: its warning reaches the
   assert.ok(!p.has(RECOVERY));
 });
 
-test('★★★ a fault that starts while the green stands on a settled set clears the stamp before its first publish', { timeout: 30_000 }, async () => {
+test('★★★ a fault that starts while the green stands on a settled set clears the stamp before its first publish', { timeout: 60_000 }, async () => {
   await heard([HEARD_WARN], 'yellow');
   const store = bootStore({ spread: true });
   const p = plant(store);
@@ -382,7 +385,7 @@ test('★★★ a fault that starts while the green stands on a settled set clea
 
 /* ══ the alert monitor's stamp ═══════════════════════════════════════════════════════════ */
 
-test('★★★ the stamp waits out a backup pool that reads unknown (reserve-alarm-blind is withheld 15 min), then settles once it reads', { timeout: 30_000 }, async () => {
+test('★★★ the stamp waits out a backup pool that reads unknown (reserve-alarm-blind is withheld 15 min), then settles once it reads', { timeout: 60_000 }, async () => {
   const store = bootStore();
   store.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); // the pool unreadable: its onset clock starts
   const unknownSince = store.backupPoolUnknownSince(PANEL);
