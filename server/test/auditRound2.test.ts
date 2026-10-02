@@ -7,7 +7,7 @@ import { SnapshotStore } from '../src/snapshot.js';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pollHealthVerdict, pollLogLines, POLL_SUMMARY_EVERY } from '../src/snapshot.js';
-import { BASIS_MIN_BAND_COVERAGE } from '../src/nightChargeAdvisor.js';
+import { BASIS_MIN_BAND_COVERAGE, buyDebiasUnmeasuredLogLine } from '../src/nightChargeAdvisor.js';
 
 /**
  * v1.148.0 — the second log audit's top findings.
@@ -208,7 +208,8 @@ test('the coverage floor is a named constant, and unchanged at 0.78', () => {
 
 // ── batched ──────────────────────────────────────────────────────────────────
 test('the UNMEASURED line points at a route that exists', () => {
-  const s = src('index.ts');
+  // v1.187.3 (review) — the line is built by buyDebiasUnmeasuredLogLine; read what it says.
+  const s = buyDebiasUnmeasuredLogLine({ basis: 'default', samples: 0, setAside: 0 })!.text;
   assert.match(s, /see \/api\/night-charge\/status → plan\.buyDebiasBasis/);
   assert.ok(!/see \/api\/night-charge buyDebiasBasis/.test(s), 'the bare path 404s');
 });

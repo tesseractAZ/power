@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { pollLogLines } from '../src/snapshot.js';
 import { computeAlerts } from '../src/alerts.js';
 import { setReserveArbitrageRaised } from '../src/nightChargeActuator.js';
+import { buyDebiasUnmeasuredLogLine } from '../src/nightChargeAdvisor.js';
 
 /**
  * v1.144.0 — F7 through F12 of the 2026-09-09 log audit.
@@ -108,10 +109,15 @@ test('★ F11: the buy de-bias reports its BASIS, not just a bare 1.000', () => 
   const idx = src('index.ts');
   assert.match(idx, /buyDebiasBasis: buyDebiasCal\.basis/,
     'the real learner result must reach the plan, not a hardcoded default');
-  // Pin the CONDITION, not the message: a mutant that makes the branch dead
+  // Drive the CONDITION, not the message: a mutant that makes the branch dead
   // leaves the string literal in place and a bare text scan still passes.
-  assert.match(idx, /if \(buyDebiasCal\.basis !== 'measured'\) \{[\s\S]{0,400}announced-buy calibration UNMEASURED/,
+  // v1.187.3 (review) — the condition and the text are nightChargeAdvisor's
+  // buyDebiasUnmeasuredLogLine now, so they are driven rather than pinned.
+  const line = buyDebiasUnmeasuredLogLine({ basis: 'default', samples: 0, setAside: 0 });
+  assert.ok(line && /announced-buy calibration UNMEASURED/.test(line.text),
     'the silent case must say so once, with the reason, from a live branch');
+  assert.equal(buyDebiasUnmeasuredLogLine({ basis: 'measured', samples: 7, setAside: 0 }), null);
+  assert.match(idx, /app\.log\.info\(buyDebiasUnmeasured\.text\);/, 'and index.ts logs it');
 });
 
 // ── F12: the housekeeping that makes state observable ────────────────────────

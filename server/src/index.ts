@@ -179,7 +179,7 @@ import {
   nightWindowBounds,
   medianFilter3,
   plannerSizingNeedBuyKwh,
-  calibratedLoadBandFactor, calibratedBuyDebiasFactor, DELIVERED_BASIS,
+  calibratedLoadBandFactor, calibratedBuyDebiasFactor, buyDebiasUnmeasuredLogLine,
   buildCostSurplusLoad, costSurplusLedgerColumns,
   type NightChargePlan,
   type NightChargeInputDeps,
@@ -225,7 +225,7 @@ import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
 import {
   supersedingPlanDate, knownFleetMismatchReason, type TimeSpan,
   integrateWh, coverageFrac, ledgerSpansForWindow, assembleNightLedgerColumns, windowlessLedgerColumns,
-  unpricedTariffPeriods, connectedSourceSlots,
+  unpricedTariffPeriods, houseConnectedSlots, deliveredLedgerFields,
 } from './nightLedgerScoring.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -3553,18 +3553,11 @@ async function recomputeNightChargePlan(
   // every actuated-and-scored night while this reported no bias.
   // v1.187.3 — and says how many rows were set aside for their delivered_kwh basis (the
   // pre-v1.187.3 import − house-load estimate is never a sample), so a reset to 'default'
-  // after the upgrade reads as what it is.
-  if (buyDebiasCal.basis !== 'measured') {
-    const key = `unmeasured:${buyDebiasCal.samples}:${buyDebiasCal.setAside}`;
-    if (key !== lastLoggedBuyDebiasKey) {
-      lastLoggedBuyDebiasKey = key;
-      app.log.info(
-        `night-charge: announced-buy calibration UNMEASURED (${buyDebiasCal.samples} eligible night(s), `
-        + `${buyDebiasCal.setAside} set aside for a pre-v1.187.3 delivered_kwh) — the announcement carries no `
-        + `learned correction. Eligibility excludes rows with cushion_shortfall=1 and rows whose delivered_basis `
-        + `is not '${DELIVERED_BASIS}'; see /api/night-charge/status → plan.buyDebiasBasis.`,
-      );
-    }
+  // after the upgrade reads as what it is. The key and text are buyDebiasUnmeasuredLogLine's.
+  const buyDebiasUnmeasured = buyDebiasUnmeasuredLogLine(buyDebiasCal);
+  if (buyDebiasUnmeasured && buyDebiasUnmeasured.key !== lastLoggedBuyDebiasKey) {
+    lastLoggedBuyDebiasKey = buyDebiasUnmeasured.key;
+    app.log.info(buyDebiasUnmeasured.text);
   }
   if (loadBandCal.basis === 'measured' && loadBandCal.factor > loadBandFloor) {
     // v1.108.0 — this evaluation runs every 30 min; the calibration only moves
@@ -4208,11 +4201,12 @@ function scoreNightRow(
   const cleanBaseline = windowImportKwh != null && windowImportKwh <= Number(process.env.ARB_MIN_BUY_KWH ?? 1);
   const covOk = winCoverage >= 0.9;
 
-  // v1.50.0 — actuated night: the supervised write DELIVERED the buy, so the
-  // realized-need counterfactual is measured by subtracting the delivered
-  // charge (v1.187.3: measured into the Cores, deliveredIntoCores); the
-  // clean-baseline requirement does not apply. `actuated` was stamped by the
-  // actuator at write time, never inferred here.
+  // v1.50.0 — actuated night: `actuated` was stamped by the actuator at write time, never
+  // inferred here. Since v1.105.0 an actuated night is scored on the SAME planner-sizing
+  // basis as an advisory one (below), and the clean-baseline requirement does not apply to
+  // it. Its delivered energy (`delivered_kwh`; v1.187.3: measured into the Cores,
+  // deliveredIntoCores) is recorded for the buy de-bias learner only and is NOT part of
+  // buy_err_kwh.
   const wasActuated = y.actuated === 1 || (y.actuated as unknown) === true;
   // v1.187.0 — the on-peak, realized-cost, delivered-energy and PV-evidence columns, pure
   // (nightLedgerScoring.assembleNightLedgerColumns) behind a query seam on the house panel:
@@ -4225,14 +4219,11 @@ function scoreNightRow(
   //  - delivered energy (v1.115.0: integrate the span the write was actually HELD, since
   //    it feeds the v1.112.0 buy de-bias calibrator) to the restore's own stamp + the
   //    device settle (deliveredHoldSpan); v1.187.3 — measured INTO the Cores on the house
-  //    panel's connected source channels (deliveredIntoCores), not import − house load,
-  //    which under-counted every night the SHP2 ran the house from the pack;
+  //    panel's source channels the hold recorded, plus any slot connected now
+  //    (deliveredIntoCores), not import − house load, which under-counted every night the
+  //    SHP2 ran the house from the pack;
   //  - the PV set-aside: a band built for other Cores than the actuals'.
   const tariffNow = apsREvModelFromEnv();
-  const housePanel = store.get().devices[shp2Sn];
-  const sourceChannels = connectedSourceSlots(
-    housePanel?.projection?.kind === 'shp2' ? (housePanel.projection as Shp2Projection).sources : null,
-  );
   const cols = assembleNightLedgerColumns({
     row: y,
     actuated: wasActuated,
@@ -4244,7 +4235,7 @@ function scoreNightRow(
     query: (metric, a, b) => recorder.query(shp2Sn, metric, a, b),
     rateAt: (t) => rateAt(tariffNow, t),
     homeSns: [...homeSns],
-    sourceChannels,
+    houseConnectedSlots: houseConnectedSlots(store.get().devices, shp2Sn),
   });
   const deliveredKwh = cols.deliveredKwh;
   const onpeak = cols.onpeak;
@@ -4366,9 +4357,9 @@ function scoreNightRow(
     actual_min_soc_ts_ms: actualMinSocTsMs,
     plan_traj_floor_breached: score.planTrajFloorBreached == null ? null : (score.planTrajFloorBreached ? 1 : 0),
     cushion_breached: cushionBreached,
-    delivered_kwh: deliveredKwh,
-    // v1.187.3 — set exactly when delivered_kwh is; the learner reads only this basis.
-    delivered_basis: cols.deliveredBasis,
+    // v1.187.3 — delivered_kwh with delivered_basis, set together (deliveredLedgerFields);
+    // the learner reads only the current basis.
+    ...deliveredLedgerFields(cols),
     grid_home_coverage_frac: winCoverage,
     scored,
     // v1.187.0 — the on-peak and cost clauses always say what was measured (or why

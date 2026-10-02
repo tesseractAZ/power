@@ -6,12 +6,14 @@
  * from the pack from 23:00 until the just-in-time force-charge at 03:18 and again after its
  * 04:32 OFF. Import − load over the hold subtracted 15.5 kWh of load the grid never carried:
  * 4.71 kWh recorded against ~20.3 kWh into the Cores. These tests drive that shape, the
- * bypass shape the old estimate got right, and every reason the column is withheld.
+ * bypass shape the old estimate got right, every reason the column is withheld, and (review)
+ * the channel set: what the hold recorded, plus any slot connected at capture.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  deliveredIntoCores, connectedSourceSlots, assembleNightLedgerColumns, integrateWh,
+  deliveredIntoCores, connectedSourceSlots, houseConnectedSlots, deliveredLedgerFields,
+  assembleNightLedgerColumns, integrateWh,
   LEDGER_SPAN_MIN_COVERAGE, DELIVERED_IMPORT_SLACK_FRAC, DELIVERED_IMPORT_SLACK_KWH,
   type LedgerMetric, type NightLedgerColumnsInput, type TimeSpan,
 } from '../src/nightLedgerScoring.js';
@@ -76,8 +78,8 @@ function stub(data: Data) {
 }
 const kwh = (pts: Pt[] | undefined, positive: boolean) =>
   integrateWh((pts ?? []).filter((p) => p.ts >= HOLD.startMs && p.ts <= HOLD.endMs), positive) / 1000;
-const deliver = (data: Data, channels: readonly number[] = [1, 2, 3], hold: TimeSpan = HOLD) =>
-  deliveredIntoCores({ hold, channels, query: stub(data).query });
+const deliver = (data: Data, connectedSlots: readonly number[] = [1, 2, 3], hold: TimeSpan = HOLD) =>
+  deliveredIntoCores({ hold, connectedSlots, query: stub(data).query });
 
 /* ── the 09-30 shape ─────────────────────────────────────────────────────── */
 
@@ -123,12 +125,52 @@ test('★★ the bypass shape (house on the grid all window): the measurement ag
   assert.ok(Math.abs(out.kwh! - 72) < 0.2, '3 × 4 kW × 6 h');
 });
 
-test('★★ the channels are read over the hold span, one query each, for the channels given', () => {
+test('★★ every source channel is read over the hold span, once each', () => {
   const s = stub(night0930());
-  deliveredIntoCores({ hold: HOLD, channels: [1, 3], query: s.query });
+  deliveredIntoCores({ hold: HOLD, connectedSlots: [1, 3], query: s.query });
   const src = s.calls.filter((c) => c.metric.startsWith('src'));
-  assert.deepEqual(src.map((c) => c.metric), ['src1_w', 'src3_w'], 'a slot with no connected Core is not read');
+  assert.deepEqual(src.map((c) => c.metric), ['src1_w', 'src2_w', 'src3_w'], 'the hold decides, not the slots connected at capture');
   for (const c of s.calls) assert.deepEqual([c.a, c.b], [HOLD.startMs, HOLD.endMs]);
+});
+
+/* ── the channels come from the hold, not from membership at capture (review) ── */
+
+test('★★★ three channels charged during the hold, two connected at capture ⇒ the three-channel sum', () => {
+  // Capture runs ~16 h after the close. A Core unplugged or in service by then must not take
+  // a night it charged through out of a column that is written once.
+  const d = night0930();
+  const all = deliver(d, [1, 2, 3]);
+  const two = deliver(d, [1, 3]);
+  assert.ok(all.kwh != null && all.kwh > 20);
+  assert.equal(two.kwh, all.kwh, 'not two-thirds of it');
+  assert.equal(two.basis, DELIVERED_BASIS);
+  assert.match(two.note, /source channels 1\/2\/3 over the hold/);
+});
+
+test('★★★ a partial quota at capture (no sources subtree) still measures what the hold recorded', () => {
+  // /quota/all can come back without pd303_mc's sources: no slot reads connected that minute.
+  const d = night0930();
+  const out = deliver(d, []);
+  assert.equal(out.kwh, deliver(d).kwh, 'not NULL latched for good');
+  assert.equal(out.basis, DELIVERED_BASIS);
+});
+
+test('★★ a slot neither connected nor recorded over the hold is not gated; a connected one is', () => {
+  // A panel payload whose chWatt carried two entries: src3_w has no row in the hold.
+  const d = { ...night0930(), src3_w: [] as Pt[] };
+  const unconnected = deliver(d, [1, 2]);
+  assert.ok(unconnected.kwh != null, `an empty, unreported slot is not a dark Core: ${unconnected.note}`);
+  assert.match(unconnected.note, /source channels 1\/2 over the hold/);
+  const connected = deliver(d, [1, 2, 3]);
+  assert.equal(connected.kwh, null, 'a Core connected at capture whose channel recorded nothing is a dark channel');
+  assert.match(connected.note, /source channel 3 coverage 0% < 90%/);
+});
+
+test('★★ an empty slot recorded as zeros adds nothing and passes the gate', () => {
+  const d = { ...night0930(), src3_w: series(FROM, TO, () => 0) };
+  const out = deliver(d, [1, 2]);
+  const expected = 2 * ((19_100 - 2_500) / 3 / 1000) * ((OFF - ON) / HOUR);
+  assert.ok(out.kwh != null && Math.abs(out.kwh - expected) < 0.3, `${out.kwh} vs ~${expected.toFixed(2)}`);
 });
 
 /* ── withheld, with the reason ───────────────────────────────────────────── */
@@ -164,11 +206,15 @@ test('★★ coverage at the line: 90% passes, just under fails', () => {
   assert.ok(exact.kwh != null, `coverage exactly 90% passes: ${exact.note}`);
 });
 
-test('★★★ no connected Core known on the house panel ⇒ NULL, not 0, and no channel is read', () => {
-  const s = stub(night0930());
-  const out = deliveredIntoCores({ hold: HOLD, channels: [], query: s.query });
-  assert.deepEqual(out, { kwh: null, basis: null, note: 'Delivered: unmeasured (no connected Core known on the house panel)' });
-  assert.equal(s.calls.length, 0);
+test('★★★ no channel recorded over the hold and no connected Core known ⇒ NULL, not 0', () => {
+  const { src1_w: _1, src2_w: _2, src3_w: _3, ...rest } = night0930();
+  const s = stub(rest);
+  const out = deliveredIntoCores({ hold: HOLD, connectedSlots: [], query: s.query });
+  assert.deepEqual(out, {
+    kwh: null, basis: null,
+    note: 'Delivered: unmeasured (no source channel recorded over the hold and no connected Core known on the house panel)',
+  });
+  assert.ok(!s.calls.some((c) => c.metric === 'grid_home_w'), 'nothing to bound');
 });
 
 test('★★★ more into the Cores than the meter imported ⇒ withheld (a discharge read as charge)', () => {
@@ -219,7 +265,7 @@ test('★★ the import bound applies only when the meter itself is covered', ()
   assert.equal(out.basis, DELIVERED_BASIS);
 });
 
-/* ── the house panel's channels ──────────────────────────────────────────── */
+/* ── the house panel's slots and the ledger fields ───────────────────────── */
 
 test('★★ connectedSourceSlots: connected slots with a serial, sorted, once each', () => {
   const sn = (n: number) => `COREXXX00XXX000${n}`;
@@ -233,6 +279,34 @@ test('★★ connectedSourceSlots: connected slots with a serial, sorted, once e
   assert.deepEqual(connectedSourceSlots([{ slot: 0, sn: sn(1), isConnected: true }, { slot: 1.5, sn: sn(2), isConnected: true }]), []);
   assert.deepEqual(connectedSourceSlots(null), []);
   assert.deepEqual(connectedSourceSlots(undefined), []);
+});
+
+test('★★ houseConnectedSlots reads the panel keyed by the house serial, never another panel', () => {
+  const src = (slots: number[]) => [1, 2, 3].map((slot) => ({
+    slot, sn: `COREXXX00XXX000${slot}`, isConnected: slots.includes(slot),
+  }));
+  const devices = {
+    PANEXXX00XXX0001: { projection: { kind: 'shp2', sources: src([1]) } },
+    PANEXXX00XXX0002: { projection: { kind: 'shp2', sources: src([2, 3]) } },
+    'DPU-A': { projection: { kind: 'dpu' } },
+  } as any;
+  assert.deepEqual(houseConnectedSlots(devices, 'PANEXXX00XXX0002'), [2, 3]);
+  assert.deepEqual(houseConnectedSlots(devices, 'PANEXXX00XXX0001'), [1]);
+  assert.deepEqual(houseConnectedSlots(devices, 'PANEXXX00XXX0009'), [], 'absent: no slots, not the other panel\'s');
+  assert.deepEqual(houseConnectedSlots({ PANEXXX00XXX0001: {} } as any, 'PANEXXX00XXX0001'), [], 'not projected yet');
+  assert.deepEqual(houseConnectedSlots({ PANEXXX00XXX0001: { projection: { kind: 'dpu', sources: src([1]) } } } as any, 'PANEXXX00XXX0001'), [],
+    'only an SHP2 projection has source slots');
+});
+
+test('★★★ deliveredLedgerFields writes the value and its basis together', () => {
+  assert.deepEqual(deliveredLedgerFields({ deliveredKwh: 20.34, deliveredBasis: DELIVERED_BASIS }),
+    { delivered_kwh: 20.34, delivered_basis: DELIVERED_BASIS });
+  assert.deepEqual(deliveredLedgerFields({ deliveredKwh: 0, deliveredBasis: DELIVERED_BASIS }),
+    { delivered_kwh: 0, delivered_basis: DELIVERED_BASIS }, 'a measured zero keeps its basis');
+  assert.deepEqual(deliveredLedgerFields({ deliveredKwh: null, deliveredBasis: null }),
+    { delivered_kwh: null, delivered_basis: null });
+  assert.deepEqual(deliveredLedgerFields({ deliveredKwh: null, deliveredBasis: DELIVERED_BASIS }),
+    { delivered_kwh: null, delivered_basis: null }, 'a NULL value never carries the basis');
 });
 
 /* ── through the scorer's assembly ───────────────────────────────────────── */
@@ -253,7 +327,7 @@ function assemble(o: Partial<NightLedgerColumnsInput> & { data?: Data } = {}) {
     query: s.query,
     rateAt: (t) => rateAt(REV, t),
     homeSns: ['COREXXX00XXX0001', 'COREXXX00XXX0002', 'COREXXX00XXX0003'],
-    sourceChannels: [1, 2, 3],
+    houseConnectedSlots: [1, 2, 3],
     ...o,
   };
   return { cols: assembleNightLedgerColumns(i), calls: s.calls };
@@ -277,13 +351,18 @@ test('★★★ a withheld delivery leaves delivered_basis NULL beside it, and t
   assert.match(cols.notes, /Delivered: unmeasured \(source channel 1 coverage 0% < 90%\)\./);
 });
 
-test('★★ the house panel\'s channels are the ones read', () => {
-  const { calls, cols } = assemble({ sourceChannels: [2] });
-  assert.deepEqual([...new Set(calls.filter((c) => c.metric.startsWith('src')).map((c) => c.metric))], ['src2_w']);
-  assert.ok(cols.deliveredKwh != null && cols.deliveredKwh > 6.5 && cols.deliveredKwh < 7.2, 'one Core\'s third');
-  const none = assemble({ sourceChannels: [] }).cols;
+test('★★ the assembly passes the capture-time slots through: they add a dark channel, never drop a recorded one', () => {
+  const full = assemble().cols.deliveredKwh;
+  const { calls, cols } = assemble({ houseConnectedSlots: [2] });
+  assert.deepEqual([...new Set(calls.filter((c) => c.metric.startsWith('src')).map((c) => c.metric))], ['src1_w', 'src2_w', 'src3_w']);
+  assert.equal(cols.deliveredKwh, full, 'one slot connected at capture: still all three channels the hold recorded');
+  const d = night0930();
+  const dark = assemble({ data: { ...d, src3_w: [] }, houseConnectedSlots: [1, 2, 3] }).cols;
+  assert.equal(dark.deliveredKwh, null, 'the slots reach the measurement: a connected Core\'s dark channel withholds');
+  const { src1_w: _1, src2_w: _2, src3_w: _3, ...rest } = d;
+  const none = assemble({ data: rest, houseConnectedSlots: [] }).cols;
   assert.equal(none.deliveredKwh, null);
-  assert.match(none.notes, /Delivered: unmeasured \(no connected Core known on the house panel\)\./);
+  assert.match(none.notes, /Delivered: unmeasured \(no source channel recorded over the hold and no connected Core known on the house panel\)\./);
 });
 
 test('★ a PV set-aside still closes the notes, after the delivered clause', () => {

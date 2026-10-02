@@ -23,6 +23,8 @@
 
 import type { NightLedgerRow } from './recorder.js';
 import type { Season, TariffModel } from './tariff.js';
+import type { DeviceSnapshot } from './snapshot.js';
+import type { Shp2Projection } from './ecoflow/project.js';
 import { DELIVERED_BASIS } from './nightChargeAdvisor.js';
 import { LEGACY_REVERT_LAG_MS } from './nightChargeActuator.js';
 
@@ -463,9 +465,13 @@ export type SourceChannelMetric = `src${number}_w`;
 export type LedgerMetric = 'grid_home_w' | 'panel_load' | SourceChannelMetric;
 export type LedgerQuery = (metric: LedgerMetric, startMs: number, endMs: number) => ReadonlyArray<Sample>;
 
-/** v1.187.3 — the source channels of a panel's connected Cores (Energy{n}Info slot n, whose
- *  watts the recorder writes as `src{n}_w`), sorted. The same membership rule as
- *  shp2Membership.panelRoster: connected AND carrying a serial. PURE. */
+/** v1.187.3 (review) — the SHP2's source slots (Energy1Info..Energy3Info; project.ts), and
+ *  so the `src{n}_w` channels deliveredIntoCores reads over every hold. */
+export const SOURCE_CHANNEL_SLOTS: readonly number[] = [1, 2, 3];
+
+/** v1.187.3 — a panel's connected source slots (Energy{n}Info slot n), sorted: connected AND
+ *  carrying a serial, the live rule of shp2Membership.panelRoster WITHOUT its persisted
+ *  lastRoster fallback (a roster is serials, not slots). PURE. */
 export function connectedSourceSlots(
   sources: ReadonlyArray<{ slot: number; sn: string | null; isConnected: boolean }> | null | undefined,
 ): number[] {
@@ -474,6 +480,17 @@ export function connectedSourceSlots(
     if (s.isConnected && s.sn && Number.isInteger(s.slot) && s.slot >= 1) out.add(s.slot);
   }
   return [...out].sort((a, b) => a - b);
+}
+
+/** v1.187.3 (review) — the HOUSE panel's connected source slots in a live device map, keyed
+ *  by the house panel's own serial (the scorer's shp2Sn), never another panel's; [] while it
+ *  has no SHP2 projection. PURE. */
+export function houseConnectedSlots(
+  devices: Readonly<Record<string, Pick<DeviceSnapshot, 'projection'> | undefined>>,
+  shp2Sn: string,
+): number[] {
+  const p = devices[shp2Sn]?.projection;
+  return p?.kind === 'shp2' ? connectedSourceSlots((p as Shp2Projection).sources) : [];
 }
 
 /** v1.187.3 — measured energy into the Cores may exceed the metered grid import over the
@@ -493,8 +510,8 @@ export interface DeliveredOutcome {
 
 /**
  * v1.187.3 — `delivered_kwh` on an actuated night: the energy INTO the home Cores over the
- * hold span, the charging part of the house panel's source channel for each connected Core
- * (`src{n}_w` > 0), summed. PURE (all I/O is `query`).
+ * hold span, the charging part of the house panel's source channels (`src{n}_w` > 0),
+ * summed. PURE (all I/O is `query`).
  *
  * WHY NOT IMPORT − LOAD. That estimate assumed the house ran on the grid for the whole
  * hold; when the SHP2 carries the house from the pack (above its reserve, before a
@@ -504,8 +521,19 @@ export interface DeliveredOutcome {
  * carrying the house reads negative and adds nothing, so the hours on the pack cost nothing
  * here and the hours on the grid count only what reached the Cores.
  *
+ * WHICH CHANNELS (v1.187.3 review). Every SOURCE_CHANNEL_SLOTS channel the recorder wrote
+ * at least one sample for inside the hold, plus every slot `connectedSlots` names. The
+ * hold's own samples decide, not the panel's membership at capture, which runs ~16 h after
+ * the close: a Core unplugged by then, or a /quota/all that came back without the pd303_mc
+ * sources subtree that minute, would otherwise drop a channel that charged all night (or
+ * all of them) from a column that is written once. The recorder writes `src{n}_w` for every
+ * `chWatt` entry whether or not the slot is connected, so an empty slot reads zeros and adds
+ * nothing, and the slot ↔ chWatt index mapping does not matter. A slot connected at capture
+ * whose channel recorded nothing in the hold is still read: it is a dark channel, and the
+ * coverage gate below withholds the night rather than summing the others.
+ *
  * NULL, with the reason in the note, when:
- *  - no connected Core is known on the house panel;
+ *  - no channel recorded anything over the hold and no connected Core is known;
  *  - any channel's coverage of the span is under LEDGER_SPAN_MIN_COVERAGE — the MINIMUM over
  *    channels, as actual_pv_kwh's per-core gate: one dark channel in three averages to a
  *    healthy 0.67 while the total is a third short, and this column is durable;
@@ -515,17 +543,25 @@ export interface DeliveredOutcome {
  */
 export function deliveredIntoCores(i: {
   hold: TimeSpan;
-  /** connectedSourceSlots of the house panel. */
-  channels: readonly number[];
+  /** houseConnectedSlots at capture: added to the channels the hold recorded. */
+  connectedSlots: readonly number[];
   query: LedgerQuery;
 }): DeliveredOutcome {
-  if (i.channels.length === 0) {
-    return { kwh: null, basis: null, note: 'Delivered: unmeasured (no connected Core known on the house panel)' };
+  const connected = new Set(i.connectedSlots);
+  const read: Array<{ ch: number; pts: ReadonlyArray<Sample> }> = [];
+  for (const ch of [...new Set([...SOURCE_CHANNEL_SLOTS, ...i.connectedSlots])].sort((a, b) => a - b)) {
+    const pts = i.query(`src${ch}_w`, i.hold.startMs, i.hold.endMs);
+    if (pts.length > 0 || connected.has(ch)) read.push({ ch, pts });
+  }
+  if (read.length === 0) {
+    return {
+      kwh: null, basis: null,
+      note: 'Delivered: unmeasured (no source channel recorded over the hold and no connected Core known on the house panel)',
+    };
   }
   let wh = 0;
   let worst: { ch: number; cov: number } | null = null;
-  for (const ch of i.channels) {
-    const pts = i.query(`src${ch}_w`, i.hold.startMs, i.hold.endMs);
+  for (const { ch, pts } of read) {
     const cov = coverageFrac(pts, i.hold.startMs, i.hold.endMs);
     if (worst == null || cov < worst.cov) worst = { ch, cov };
     wh += integrateWh(pts, true);
@@ -549,7 +585,20 @@ export function deliveredIntoCores(i: {
   }
   return {
     kwh, basis: DELIVERED_BASIS,
-    note: `Delivered: ${kwh} kWh into the Cores (charging part of source channel${i.channels.length > 1 ? 's' : ''} ${i.channels.join('/')} over the hold)`,
+    note: `Delivered: ${kwh} kWh into the Cores (charging part of source channel${read.length > 1 ? 's' : ''} ${read.map((r) => r.ch).join('/')} over the hold)`,
+  };
+}
+
+/** v1.187.3 (review) — the ledger fields the scorer writes for delivered energy, as ONE
+ *  patch: `delivered_basis` is written exactly when `delivered_kwh` is a number, so a NULL
+ *  value can never carry the current basis and a value can never be written without it
+ *  (the learner would set it aside as captured before v1.187.3). PURE. */
+export function deliveredLedgerFields(
+  cols: Pick<NightLedgerColumns, 'deliveredKwh' | 'deliveredBasis'>,
+): Pick<NightLedgerRow, 'delivered_kwh' | 'delivered_basis'> {
+  return {
+    delivered_kwh: cols.deliveredKwh,
+    delivered_basis: cols.deliveredKwh == null ? null : cols.deliveredBasis,
   };
 }
 
@@ -571,9 +620,9 @@ export interface NightLedgerColumnsInput {
   rateAt: (tsMs: number) => RateLike;
   /** The Cores whose actual PV the verdict sums. */
   homeSns: readonly string[];
-  /** v1.187.3 — the house panel's connected source channels (connectedSourceSlots): what
-   *  delivered_kwh integrates. */
-  sourceChannels: readonly number[];
+  /** v1.187.3 — the house panel's connected source slots at capture (houseConnectedSlots):
+   *  added to the channels the hold recorded (deliveredIntoCores). */
+  houseConnectedSlots: readonly number[];
 }
 
 export interface NightLedgerColumns {
@@ -638,7 +687,7 @@ export function assembleNightLedgerColumns(i: NightLedgerColumnsInput): NightLed
       revertedAtMs: i.row.actuation_reverted_at_ms,
     });
     // v1.187.3 — measured into the Cores, not import − house load (deliveredIntoCores).
-    delivered = deliveredIntoCores({ hold, channels: i.sourceChannels, query: i.query });
+    delivered = deliveredIntoCores({ hold, connectedSlots: i.houseConnectedSlots, query: i.query });
   }
 
   // Is the PV verdict forecast-skill evidence at all? Only when the band was built for

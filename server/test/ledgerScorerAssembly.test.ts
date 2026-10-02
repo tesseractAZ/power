@@ -81,7 +81,7 @@ function input(o: Partial<NightLedgerColumnsInput> & { data?: Partial<Record<Led
     query: stub.query,
     rateAt: (t) => rateAt(REV, t),
     homeSns: SNS,
-    sourceChannels: [1, 2, 3],
+    houseConnectedSlots: [1, 2, 3],
     ...o,
   };
   return { cols: assembleNightLedgerColumns(i), calls: stub.calls, i };

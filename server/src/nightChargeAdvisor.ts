@@ -2057,6 +2057,26 @@ export function calibratedBuyDebiasFactor(
 }
 
 /**
+ * v1.187.3 (review) — the UNMEASURED log line for the buy de-bias learner (v1.144.0: the
+ * silent case, said once on change), as a key and its text; null on a measured result,
+ * which has its own "calibrated ×N" line. PURE so a test drives it: the key carries the
+ * set-aside count, so a pre-v1.187.3 row scored after the upgrade logs a new line, and the
+ * text names that count, so a reset to 'default' after the upgrade reads as what it is.
+ */
+export function buyDebiasUnmeasuredLogLine(
+  cal: Pick<ReturnType<typeof calibratedBuyDebiasFactor>, 'basis' | 'samples' | 'setAside'>,
+): { key: string; text: string } | null {
+  if (cal.basis === 'measured') return null;
+  return {
+    key: `unmeasured:${cal.samples}:${cal.setAside}`,
+    text: `night-charge: announced-buy calibration UNMEASURED (${cal.samples} eligible night(s), `
+      + `${cal.setAside} set aside for a pre-v1.187.3 delivered_kwh) — the announcement carries no `
+      + `learned correction. Eligibility excludes rows with cushion_shortfall=1 and rows whose delivered_basis `
+      + `is not '${DELIVERED_BASIS}'; see /api/night-charge/status → plan.buyDebiasBasis.`,
+  };
+}
+
+/**
  * v1.125.0 — THE OUTAGE CUSHION, RE-SCOPED TO SOMETHING THAT CAN BE MET.
  *
  * WHAT WAS WRONG. `ARB_OUTAGE_CUSHION_PCT` was a flat 15 % of pool, and the test
