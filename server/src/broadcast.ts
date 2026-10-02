@@ -576,8 +576,9 @@ export const RESTARTED_ONSET_HOLD_MARGIN_MS = 60_000;
  *     began to stand on a set that settled late still becomes a recovery.
  * While it is open the green is held until it is a recovery (announced). When it closes with the
  * green still held, it is announced as a transition if a condition above green has been audible
- * since the boot, otherwise adopted silently (fail-quiet: read from an unsettled set it may be a
- * fault still withheld) — so a set that never settles cannot hold the green for good. Meanwhile the
+ * since the boot or the set is settled at that moment, otherwise adopted silently (fail-quiet: read
+ * from an unsettled set it may be a fault still withheld) — so a set that never settles cannot hold
+ * the green for good. Meanwhile the
  * green is held as any de-escalation is: a new warning below the held level is spoken; a return to
  * the held level is a flicker only when that level was audible. Pure + exported for tests.
  */
