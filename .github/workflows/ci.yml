@@ -248,17 +248,28 @@ jobs:
     # GitHub Release in images.yml, so this job keeps that path exercised.
     name: Build documentation (.docx + .pdf)
     runs-on: ubuntu-latest
+    # v1.187.3 — bounded, as images.yml's release job: the same unbounded apt-get stalled a
+    # release run for the 6 h platform limit. On the PR this job is a hard gate, so a stall
+    # now ends as a red check in minutes rather than a check held for six hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Ensure pandoc
+        timeout-minutes: 6
+        env:
+          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
         run: |
-          command -v pandoc >/dev/null || { sudo apt-get update && sudo apt-get install -y pandoc; }
+          command -v pandoc >/dev/null || {
+            sudo timeout -k 10 120 apt-get $APT_OPTS update &&
+            sudo timeout -k 10 180 apt-get $APT_OPTS install -y pandoc
+          }
           pandoc --version | head -1
 
       - name: Build .docx
+        timeout-minutes: 5
         run: |
-          python3 scripts/build-docs-docx.py \
+          timeout -k 10 240 python3 scripts/build-docs-docx.py \
             --ref "${GITHUB_SHA:0:7}" \
             --output "EcoFlow-Panel-Documentation.docx"
 
@@ -268,13 +279,20 @@ jobs:
       # toolchain change that can't produce a PDF fails the check rather than
       # silently shipping a release without one.
       - name: Ensure LibreOffice (docx → pdf)
+        timeout-minutes: 10
+        env:
+          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
         run: |
-          command -v libreoffice >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-writer; }
+          command -v libreoffice >/dev/null || {
+            sudo timeout -k 10 120 apt-get $APT_OPTS update &&
+            sudo timeout -k 10 420 apt-get $APT_OPTS install -y --no-install-recommends libreoffice-writer
+          }
           libreoffice --version | head -1
 
       - name: Build .pdf (render the .docx)
+        timeout-minutes: 5
         run: |
-          libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
+          timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
             --convert-to pdf --outdir . "EcoFlow-Panel-Documentation.docx"
           test -s EcoFlow-Panel-Documentation.pdf
           ls -la EcoFlow-Panel-Documentation.pdf

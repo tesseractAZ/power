@@ -156,6 +156,12 @@ test('★★ coverage at the line: 90% passes, just under fails', () => {
   assert.ok(deliver(drop(7)).kwh != null);
   assert.equal(deliver(drop(8)).kwh, null);
   assert.equal(LEDGER_SPAN_MIN_COVERAGE, 0.9);
+  // Exactly at the line: a 50-minute hold (10 buckets) with one bucket empty is 0.9 — measured.
+  const at = WS + 4 * HOUR + 30 * MIN; // inside the force-charge
+  const short: TimeSpan = { startMs: at, endMs: at + 50 * MIN };
+  const nine = series(at, at + 50 * MIN, () => 5_000).filter((p) => !(p.ts >= at + 10 * MIN && p.ts < at + 15 * MIN));
+  const exact = deliver({ src1_w: nine }, [1], short);
+  assert.ok(exact.kwh != null, `coverage exactly 90% passes: ${exact.note}`);
 });
 
 test('★★★ no connected Core known on the house panel ⇒ NULL, not 0, and no channel is read', () => {
@@ -201,9 +207,13 @@ test('★★ the import bound has slack for two clocks: inside it the value stan
 });
 
 test('★★ the import bound applies only when the meter itself is covered', () => {
-  // grid_home_w missing for half the hold: its total is deflated, so it cannot bound anything.
+  // grid_home_w missing across the force-charge (03:00-04:40, 27% of the hold): its total
+  // is deflated to ~0, so it cannot bound anything — the covered channels stand.
   const d = night0930();
-  const holedGrid = { ...d, grid_home_w: d.grid_home_w!.filter((p) => !(p.ts >= WS && p.ts < WS + 3 * HOUR + 30 * MIN)) };
+  const holedGrid = {
+    ...d, grid_home_w: d.grid_home_w!.filter((p) => !(p.ts >= phx(2026, 10, 1, 3) && p.ts < phx(2026, 10, 1, 4, 40))),
+  };
+  assert.ok(kwh(holedGrid.grid_home_w, true) < 1, 'the meter total is deflated');
   const out = deliver(holedGrid);
   assert.ok(out.kwh != null && out.kwh > 19, `the channels are covered: ${out.note}`);
   assert.equal(out.basis, DELIVERED_BASIS);

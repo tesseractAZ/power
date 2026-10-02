@@ -66,9 +66,11 @@ for (const h of harnesses) {
     // `.filter` because every harness also writes `const SERVER = resolve(REPO,
     // 'server')` — a BASE definition, not a target. Require a path separator and
     // a source extension so a base can never be mistaken for a file.
+    // v1.187.3 — `.yml` / `.yaml` too: mutate-v1187-3i.mjs mutates the release workflow's
+    // timeouts, and an anchor in a file this list cannot see would read as 0 matches.
     ...[...src.matchAll(/resolve\((?:REPO|ROOT),\s*'([^']+)'\)/g)]
       .map((m) => m[1])
-      .filter((rel) => rel.includes('/') && /\.(ts|tsx|mjs|js)$/.test(rel))
+      .filter((rel) => rel.includes('/') && /\.(ts|tsx|mjs|js|ya?ml)$/.test(rel))
       .map((rel) => join(ROOT, rel)),
   ];
   if (targets.length === 0) { console.log(`  skip   ${h} (no resolvable target)`); continue; }
