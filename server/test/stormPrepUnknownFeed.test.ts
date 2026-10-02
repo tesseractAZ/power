@@ -9,6 +9,12 @@
  * effect. It now throws and caches nothing, so the feed stays cold until a fetch succeeds. A
  * successful fetch with no alerts is still [].
  *
+ * (seam fix, LOW) Nothing bounded the retries: until NWS first answered, every 20 s alert-monitor
+ * pass (and every /api/nws-alerts or calendar request) sent a request. getNwsAlerts now backs off a
+ * failed fetch (NWS_ALERTS_FAILURE_BACKOFF_MS, 2 min), answering inside it as the failure did — the
+ * last good feed, or null: still unknown, never "no storms" — and concurrent callers share one
+ * request.
+ *
  * api.weather.gov is mocked at the HTTP layer (undici MockAgent); the clock is controllable so the
  * module caches can be expired. The tests share the module caches and run in order.
  */
@@ -44,8 +50,10 @@ agent.get('https://api.weather.gov')
   })
   .persist();
 
-const { stormPrepAlerts } = await import('../src/analytics.js');
+const { stormPrepAlerts, getActiveNwsAlerts } = await import('../src/analytics.js');
 const { createLastGoodFeed, alertSetTrusted } = await import('../src/alertMonitor.js');
+const { NWS_ALERTS_FAILURE_BACKOFF_MS, nwsAlertsBackingOff } = await import('../src/nws.js');
+const BACKOFF = NWS_ALERTS_FAILURE_BACKOFF_MS;
 
 after(async () => {
   setGlobalDispatcher(prevDispatcher);
@@ -79,15 +87,45 @@ test('★★★ the first fetch after a restart fails: the storm-prep feed stays
   assert.equal(alertSetTrusted({ firstPollSettledAt: 1, feedsInSet: [true, true, true, true, true], liveAtMs: 10 * MIN, pendingOnsets: [] }), true, 'control: the same set with the feed delivered');
 });
 
-test('★★★ a failed fetch is not cached: the next pass asks again, and fails again while NWS is down', async () => {
+test('★★★ a failed fetch is not cached as "no storms", and NWS is asked again only after the backoff (seam fix): still unknown inside it, at a bounded rate', async () => {
   const before = fetches;
   await assert.rejects(() => stormPrepAlerts({}), /NWS alerts unknown/);
-  assert.equal(fetches, before + 1, 'fetched again: the failure was not cached as "no storms"');
+  assert.equal(fetches, before, 'inside the backoff: no request — and still unknown, not "no storms"');
+  assert.deepEqual(await getActiveNwsAlerts(), [], 'the alerts route answers as the failure did, without a request');
+  assert.equal(fetches, before);
+  offset += BACKOFF - 5_000;
   await assert.rejects(() => stormPrepAlerts({}), /NWS alerts unknown/);
-  assert.equal(fetches, before + 2);
+  assert.equal(fetches, before, '5 s short of the backoff');
+  offset += 6_000;
+  await assert.rejects(() => stormPrepAlerts({}), /NWS alerts unknown/);
+  assert.equal(fetches, before + 1, 'asked again after the backoff: the failure was not cached as "no storms"');
+  await assert.rejects(() => stormPrepAlerts({}), /NWS alerts unknown/);
+  assert.equal(fetches, before + 1, 'and backing off again after the new failure');
+});
+
+test('★★ concurrent callers share one request (the monitor, the alerts route), and all read the failure as unknown', async () => {
+  offset += BACKOFF;
+  const before = fetches;
+  const [a, b, c] = await Promise.allSettled([stormPrepAlerts({}), stormPrepAlerts({}), getActiveNwsAlerts()]);
+  assert.equal(fetches, before + 1, 'one request');
+  assert.equal(a.status, 'rejected');
+  assert.equal(b.status, 'rejected');
+  assert.deepEqual(c.status === 'fulfilled' ? c.value : null, []);
+});
+
+test('nwsAlertsBackingOff — inside the backoff after a failure only; no failure, the backoff elapsed, or a failure "in the future" (the clock stepped back) asks', () => {
+  const t = 1_000_000_000;
+  assert.equal(nwsAlertsBackingOff(null, t), false, 'no failure yet');
+  assert.equal(nwsAlertsBackingOff(t, t), true);
+  assert.equal(nwsAlertsBackingOff(t, t + BACKOFF - 1), true);
+  assert.equal(nwsAlertsBackingOff(t, t + BACKOFF), false, 'the backoff elapsed');
+  assert.equal(nwsAlertsBackingOff(t, t - 1), false, 'the clock stepped back: asked, not held until it catches up');
+  assert.equal(nwsAlertsBackingOff(t, t + 10, 10), false, 'the backoff is a parameter');
+  assert.ok(BACKOFF >= 60_000 && BACKOFF <= 5 * 60_000, 'at least a minute between failed attempts, and a recovered NWS is read within minutes');
 });
 
 test('★★ a successful fetch with no alerts is still an empty list (a warm delivery), cached', async () => {
+  offset += BACKOFF; // past the last failure's backoff
   reply = { status: 200, body: JSON.stringify({ features: [] }) };
   const feed = createLastGoodFeed<unknown[]>('storm-prep');
   const read = await feed.read(() => stormPrepAlerts({}), 2_000);
@@ -110,4 +148,6 @@ test('★★ once a fetch has succeeded, a later failure serves the last good fe
   const again = await stormPrepAlerts({});
   assert.equal(fetches, n + 1, 'it asked');
   assert.deepEqual(again.map((a) => a.id), ['storm-Severe_Thunderstorm_Warning'], 'the last good feed, not unknown and not empty');
+  assert.deepEqual((await getActiveNwsAlerts()).map((a) => a.event), ['Severe Thunderstorm Warning'], 'inside the backoff the last good feed is served');
+  assert.equal(fetches, n + 1, 'without a request');
 });

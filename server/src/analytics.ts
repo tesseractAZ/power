@@ -8180,7 +8180,8 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
   // as a warm delivery for the whole broadcast warm-up after a restart, so the alert set counted as
   // settled (alertSetTrusted) and a green could be announced as a recovery over a storm warning
   // still in effect. Thrown, the feed records a failure and stays cold until a fetch succeeds; not
-  // cached, so the next pass fetches again. A successful fetch with no alerts is still [] (cached).
+  // cached, so a later pass asks again — after NWS_ALERTS_FAILURE_BACKOFF_MS (getNwsAlerts backs
+  // off a failed fetch, answering null inside it). A successful fetch with no alerts is still [].
   if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');
   if (feed.alerts.length === 0) {
     stormPrepCache = { ts: Date.now(), value: [] };

@@ -49,6 +49,9 @@
  *   - only cell-spread criticals are written, drive a write, refresh, restore or seed
  *     (soundedCritPersists). Mutants K-i..K-vi. K-vi (the seed's filter) is observable only in the
  *     boot line: a seeded critical of another family holds nothing (pinned by K-i's tests).
+ *   - getNwsAlerts backs off a failed fetch (NWS_ALERTS_FAILURE_BACKOFF_MS), answering inside it as
+ *     the failure did (the feed stays cold), and concurrent callers share one request. Mutants
+ *     N-iv..N-ix.
  *
  *   node scripts/mutate-v1187-3h.mjs
  *
@@ -68,6 +71,7 @@ const AT = resolve(SERVER, 'src/alertTelemetry.ts');
 const AN = resolve(SERVER, 'src/analytics.ts');
 const BR = resolve(SERVER, 'src/broadcast.ts');
 const IX = resolve(SERVER, 'src/index.ts');
+const NW = resolve(SERVER, 'src/nws.ts');
 const RC = resolve(SERVER, 'src/recorder.ts');
 const TT = resolve(SERVER, 'src/ttsService.ts');
 
@@ -700,6 +704,50 @@ const MUTANTS = [
     find: "  if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');",
     to: "  if (feed == null || feed.alerts.length === 0) throw new Error('NWS alerts unknown'); /* MUTANT */",
     why: 'A quiet sky keeps the feed cold for good: no recovery is ever spoken.',
+  },
+
+  /* ── (8) seam fixes: a failed NWS fetch is backed off, not retried every pass ── */
+  {
+    id: 'N-iv. ★★★ no backoff after a failed fetch',
+    file: NW,
+    find: '  if (nwsAlertsBackingOff(alertsFailedAt, Date.now())) return cache;',
+    to: '  /* MUTANT */',
+    why: 'Until NWS first answers, every 20 s monitor pass sends a request: ~180 an hour for as long as it fails.',
+  },
+  {
+    id: 'N-v. ★★★ a failed fetch is not recorded',
+    file: NW,
+    find: '    alertsFailedAt = Date.now();',
+    to: '    /* MUTANT */',
+    why: 'As N-iv.',
+  },
+  {
+    id: 'N-vi. ★★★ the backoff answers "no alerts"',
+    file: NW,
+    find: '  if (nwsAlertsBackingOff(alertsFailedAt, Date.now())) return cache;',
+    to: '  if (nwsAlertsBackingOff(alertsFailedAt, Date.now())) return cache ?? { fetchedAt: Date.now(), lat: config.forecastLat, lon: config.forecastLon, alerts: [] }; /* MUTANT */',
+    why: 'The storm-prep feed reads as a warm delivery of "no storms" inside the backoff, and the set as settled.',
+  },
+  {
+    id: 'N-vii. ★★ concurrent callers each send a request',
+    file: NW,
+    find: '  return alertsFlight.run(() => fetchNwsAlerts(log));',
+    to: '  return fetchNwsAlerts(log); /* MUTANT */',
+    why: 'The monitor, the alerts route and the calendar each ask api.weather.gov at once.',
+  },
+  {
+    id: 'N-viii. ★ a failure "in the future" holds the backoff',
+    file: NW,
+    find: '  return failedAtMs != null && nowMs >= failedAtMs && nowMs - failedAtMs < backoffMs;',
+    to: '  return failedAtMs != null && nowMs - failedAtMs < backoffMs; /* MUTANT */',
+    why: 'After the clock steps back, NWS is not asked until the clock catches up: the storm alerts stay unknown.',
+  },
+  {
+    id: 'N-ix. ★ the backoff is zero',
+    file: NW,
+    find: 'export const NWS_ALERTS_FAILURE_BACKOFF_MS = 2 * 60_000;',
+    to: 'export const NWS_ALERTS_FAILURE_BACKOFF_MS = 0; /* MUTANT */',
+    why: 'As N-iv.',
   },
 ];
 
