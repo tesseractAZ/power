@@ -303,6 +303,7 @@ test('★★★ the warm-up ends with the green still held: adopted silently as 
   await until(b, () => b.has('yellow → green held'), 'the dwell');
   offset += DWELL + SEC;
   await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery');
+  assert.ok(b.has('or adopted silently as a continuation if the warm-up ends first'), 'the held line says what follows');
   offset += 8 * MIN; // past the 10-minute warm-up
   await until(b, () => b.has(WARMUP_ENDED), 'adopted at the end of the warm-up');
   await sleep(80);
@@ -562,7 +563,8 @@ test('★★★ log review (LOW): a green held by a restored sounded critical un
   // from the boot, so the green's 3-min dwell ends exactly as the 10-min warm-up does. It took the
   // late-green path, an ordinary transition, and was spoken with the alert set never settled (a
   // backup pool unknown, NWS enabled and failing); the same restart without the record adopts it
-  // silently. Its recovery is now decided once: held on its first due tick, adopted on the next.
+  // silently. Its recovery is now decided past the warm-up: held from its first due tick for at
+  // most one more dwell (the patience the warm-up gives), then adopted silently.
   await heardRed(CRIT_B);
   alerts = [WARN_K];
   settledSince = null;
@@ -576,8 +578,13 @@ test('★★★ log review (LOW): a green held by a restored sounded critical un
   await sleep(60);
   assert.ok(!b.has(HELD_FOR_RECOVERY));
   offset += DWELL + 5 * SEC; // the dwell has passed — and the warm-up has ended
+  await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery past the warm-up');
+  assert.ok(b.has('A sounded critical held it inside the warm-up, which has ended'), 'the held line says how long it is waited for');
+  await sleep(60);
+  assert.ok(!b.has(WARMUP_ENDED), 'not adopted on the due tick: it has one more dwell to settle');
+  assert.equal(played(b, 'green'), 0);
+  offset += DWELL + 5 * SEC; // that dwell has passed too, and the set never settled
   await until(b, () => b.has(WARMUP_ENDED), 'adopted silently as a continuation');
-  assert.ok(b.has('A sounded critical held it inside the warm-up, which has ended'), 'the held line says why it is not waited for');
   await sleep(80);
   assert.equal(played(b, 'green'), 0, 'not spoken: the set never settled');
   assert.ok(!b.has('condition transition → green'));
@@ -621,6 +628,194 @@ test('★★ …but a sounded critical that holds a green only after the warm-up
   await until(b, () => played(b, 'green') === 1, 'the all-clear');
   assert.ok(!b.has(HELD_FOR_RECOVERY));
   assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(announces, 3);
+});
+
+/* ── seam review: only a critical of BEFORE the restart makes a green a restart question ── */
+
+test('★★★ seam review (MEDIUM): a cell-spread red the house heard AFTER the restart, cleared inside the warm-up, gets its all-clear on its due tick past it, on an unsettled set too', async () => {
+  // The hold was marked for ANY sounded critical holding it inside the warm-up, so this green was
+  // decided on one tick past the warm-up and, the set unsettled, adopted in silence: the red heard
+  // after the restart stayed the last words. A critical that first sounded after the boot is the
+  // house's own news; its green is an ordinary transition.
+  await heard('yellow');
+  alerts = [];
+  settledSince = null;
+  const b = rig();
+  await sleep(80); // the boot green
+  alerts = [CRIT_B];
+  await until(b, () => played(b, 'red') === 1, 'the red, an escalation over the heard yellow');
+  assert.ok(!b.has(RESTORED), 'nothing of before the restart');
+  alerts = [];
+  await until(b, () => b.has('red → green held'), 'the hold');
+  assert.ok(b.has(HOLD_LINE), 'held between readings, inside the warm-up');
+  offset += ABSENT_HOLD + 5 * SEC; // released: the green clock starts
+  await sleep(60);
+  offset += DWELL + 5 * SEC; // its dwell ends past the warm-up
+  await until(b, () => played(b, 'green') === 1, 'the all-clear on its due tick');
+  assert.ok(!b.has(HELD_FOR_RECOVERY), 'never held for a recovery');
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(b.mon.status().lastLevel, 'green', 'the last words are not the cleared red');
+  assert.equal(announces, 3);
+});
+
+test('★★ seam review (MEDIUM): …and one knee-muted across the end of the warm-up, then cleared, gets its all-clear on its due tick too', async () => {
+  // The verifier's Probe A: the hold is by a muted critical (mutedBy), not one between readings.
+  // It begins inside the warm-up and is first released long after it.
+  await heard('yellow');
+  alerts = [];
+  settledSince = null;
+  const b = rig();
+  await sleep(80);
+  alerts = [CRIT_B];
+  await until(b, () => played(b, 'red') === 1, 'the red');
+  alerts = [HELD_B]; // the knee mute, inside the warm-up
+  await until(b, () => b.has('red → green held'), 'the hold');
+  assert.ok(b.has(HOLD_LINE), 'held by the muted critical');
+  offset += 11 * MIN; // still muted past the warm-up
+  await sleep(60);
+  alerts = []; // cleared for good
+  await sleep(60);
+  offset += ABSENT_HOLD + 5 * SEC; // released: the green clock starts
+  await sleep(60);
+  offset += DWELL + 5 * SEC;
+  await until(b, () => played(b, 'green') === 1, 'the all-clear on its due tick');
+  assert.ok(!b.has(HELD_FOR_RECOVERY), 'never held for a recovery');
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(b.mon.status().lastLevel, 'green');
+  assert.equal(announces, 3);
+});
+
+test('★★ seam review: a restored critical released and back loud after the restart is a new episode — its replayed red, cleared, gets its all-clear past the warm-up', async () => {
+  // The red-replay gate mutes the re-raised critical (the same standing fault, announced before
+  // the restart), so nothing has been spoken since the boot. Released at boot+7 min, the critical
+  // is no longer one of the boot's: the hold its return opens inside the warm-up is not a restart
+  // question, and its green is an ordinary transition.
+  await heardRed(CRIT_B);
+  alerts = [WARN_K]; // the critical is between two readings at the first tick
+  settledSince = null;
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the warning adopted below the heard red');
+  assert.ok(b.has(RESTORED));
+  offset += ABSENT_HOLD + 5 * SEC; // gone the absent hold since the boot: released
+  await sleep(60);
+  alerts = [WARN_K, CRIT_B]; // back, loud
+  await until(b, () => b.has('red suppressed — this standing fault was already announced'), 'the replay muted');
+  assert.equal(played(b, 'red'), 0);
+  alerts = [];
+  await until(b, () => b.has('red → green held'), 'the hold, inside the warm-up');
+  assert.ok(b.has(HOLD_LINE), 'held between readings');
+  offset += ABSENT_HOLD + 5 * SEC;
+  await sleep(60);
+  offset += DWELL + 5 * SEC;
+  await until(b, () => played(b, 'green') === 1, 'the all-clear on its due tick');
+  assert.ok(!b.has(HELD_FOR_RECOVERY), 'never held for a recovery');
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(announces, 2);
+});
+
+test('★ seam review: a restored critical still on record that holds nothing (a policy mute) does not make a hold another critical holds a restart question', async () => {
+  const CRIT_B3: Alert = { ...CRIT_B, id: 'vdiff-crit-DPU-B-3' } as Alert;
+  const BENCH_B: Alert = { ...CRIT_B, annunciate: false, muteReason: 'an expected-offline bench spare' } as Alert; // no mutedBy
+  const a = rig();
+  await sleep(80);
+  offset += 11 * MIN;
+  alerts = [CRIT_B3, CRIT_B]; // B3 is the one named aloud
+  await until(a, () => a.mon.status().conditionSpoken === true && a.mon.status().conditionLevel === 'red', 'a heard red');
+  a.stop();
+  offset += 2 * MIN;
+
+  alerts = [WARN_K, BENCH_B]; // B stands on under a policy mute (on record, holding nothing); B3 is between readings
+  settledSince = null;
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the continuation');
+  assert.ok(b.has(`2 ${RESTORED}`));
+  offset += ABSENT_HOLD + 5 * SEC; // B3 released; B still on record
+  await sleep(60);
+  alerts = [WARN_K, BENCH_B, CRIT_B3]; // B3 back, loud: the replay is muted
+  await until(b, () => b.has('red suppressed — this standing fault was already announced'), 'the replay muted');
+  alerts = [BENCH_B];
+  await until(b, () => b.has('red → green held'), 'the hold, inside the warm-up');
+  assert.ok(b.has(HOLD_LINE), 'held by B3, between readings');
+  offset += ABSENT_HOLD + 5 * SEC;
+  await sleep(60);
+  offset += DWELL + 5 * SEC;
+  await until(b, () => played(b, 'green') === 1, 'the all-clear on its due tick');
+  assert.ok(!b.has(HELD_FOR_RECOVERY));
+  assert.ok(!b.has(WARMUP_ENDED));
+});
+
+test('★★ seam review: a restored critical that holds a green only after the warm-up is no restart decision either: the green is an ordinary transition', async () => {
+  await heardRed(CRIT_B);
+  alerts = [CRIT_B]; // still loud at the boot: the replay gate mutes it
+  settledSince = null;
+  const b = rig();
+  await until(b, () => b.has('red suppressed — this standing fault was already announced'), 'the replay muted');
+  assert.ok(b.has(RESTORED));
+  offset += 11 * MIN; // past the warm-up, still loud
+  await sleep(60);
+  alerts = [HELD_B]; // the knee mute: the hold begins after the warm-up
+  await until(b, () => b.has('red → green held'), 'the hold');
+  assert.ok(b.has(HOLD_LINE));
+  alerts = [];
+  await sleep(60);
+  offset += ABSENT_HOLD + 5 * SEC;
+  await sleep(60);
+  offset += DWELL + 5 * SEC;
+  await until(b, () => played(b, 'green') === 1, 'the all-clear on its due tick');
+  assert.ok(!b.has(HELD_FOR_RECOVERY));
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(announces, 2);
+});
+
+test('★★ seam review: past the warm-up that green has the patience the warm-up gives — a settled stamp reset just before its due tick is waited for, up to one more dwell', async () => {
+  await heardRed(CRIT_B);
+  alerts = [WARN_K];
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the continuation');
+  alerts = [];
+  await until(b, () => b.has('yellow → green held'), 'the hold');
+  offset += ABSENT_HOLD + 5 * SEC; // released ~7 min after the boot: the green clock starts
+  await sleep(60);
+  offset += DWELL - 30 * SEC;
+  await sleep(60);
+  settledSince = Date.now(); // a transient onset (dpu-err, mppt-err, reserve-alarm-blind) resets the stamp
+  offset += 35 * SEC; // the due tick, past the warm-up: settled only 35 s
+  await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery');
+  assert.ok(b.has('the alert set has been settled only'));
+  await sleep(60);
+  assert.ok(!b.has(WARMUP_ENDED), 'not adopted on the due tick');
+  assert.equal(played(b, 'green'), 0);
+  offset += DWELL - 30 * SEC; // it has now stood the dwell on the settled set
+  await until(b, () => played(b, 'green') === 1, 'the all-clear, a recovery');
+  assert.ok(b.has(`${RECOVERY} red`));
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(announces, 2);
+});
+
+test('★★ seam review (LOW): a red spoken after the restart whose green is still held for a recovery when the warm-up ends is announced then, not adopted silently', async () => {
+  // An inverter-error critical holds nothing once cleared, so its green stood the dwell inside the
+  // warm-up and was held there for a recovery on a set that never settled. Adopted silently when
+  // the warm-up ended, the red the house heard after the restart stayed the last words.
+  await heard('yellow');
+  alerts = [];
+  settledSince = null;
+  const b = rig();
+  await sleep(80);
+  alerts = [CRIT_A];
+  await until(b, () => played(b, 'red') === 1, 'the red');
+  alerts = [];
+  await until(b, () => b.has('red → green held'), 'the hold');
+  offset += DWELL + SEC;
+  await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery: the set is not settled');
+  assert.ok(b.has('or announced as a transition (a red condition was spoken after the restart) if the warm-up ends first'), 'the held line says what follows');
+  await sleep(60);
+  assert.equal(played(b, 'green'), 0, 'not inside the warm-up');
+  offset += 8 * MIN; // past the warm-up
+  await until(b, () => played(b, 'green') === 1, 'the all-clear once the warm-up has ended');
+  assert.ok(b.has('condition was spoken after the restart'));
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(b.mon.status().lastLevel, 'green', 'the last words are not the cleared red');
   assert.equal(announces, 3);
 });
 

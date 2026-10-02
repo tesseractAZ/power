@@ -40,8 +40,15 @@
  * successful empty fetch is still []. Mutants N-i..N-iii.
  *
  * (8) seam fixes (five LOW findings on (6) and (7)):
- *   - a green held inside the warm-up by a sounded critical has its recovery decided once, even
- *     when its dwell ends past the warm-up (deescalationHold.soundedHeldInWarmup). Mutants Q-i..Q-v.
+ *   - a green held inside the warm-up by a sounded critical has its recovery decided even when its
+ *     dwell ends past the warm-up (deescalationHold.soundedHeldInWarmup). Mutants Q-i..Q-v.
+ *     (seam review, MEDIUM) Only a critical restored or seeded at the boot, and not released since,
+ *     marks the hold (bootSoundedFps): a red heard after the restart gets its all-clear. Mutants
+ *     Q-vi..Q-ix. The decision past the warm-up waits up to one more dwell for a settled set, the
+ *     patience the warm-up gives. Mutants Q-x, Q-xi.
+ *   - (seam review, LOW) a green still held for its recovery when the warm-up ends is spoken, not
+ *     adopted silently, when a condition above green has been spoken since the boot
+ *     (lastConditionPlayedLevel). Mutants L-i, L-ii.
  *   - the pre-v1.187.3 fallback seed keys on the COMMITTED red on record, not a heard one. Mutants
  *     P-viii, P-ix (re-pointed), P-xv.
  *   - the disk keeps a restored entry's own last-present time until it is present again
@@ -296,7 +303,7 @@ const MUTANTS = [
   {
     id: 'B-xi. ★★ the recovery is decided outside the warm-up',
     file: BR,
-    find: '      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true && recoveryHoldSinceMs == null));',
+    find: '      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true\n        && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < CONDITION_CLEAR_DWELL_MS)));',
     to: '      ; /* MUTANT */',
     why: 'A routine green long after boot is logged as a restart recovery, or held for one forever.',
   },
@@ -576,37 +583,99 @@ const MUTANTS = [
   {
     id: 'Q-i. ★★★ the hold is never marked as held by a sounded critical inside the warm-up',
     file: BR,
-    find: '      if (critHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
+    find: '      if (bootCritHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
     to: '      /* MUTANT */',
     why: 'The restored absent critical holds the green 7 min, its dwell ends as the warm-up does, and it is spoken with the set never settled.',
   },
   {
     id: 'Q-ii. ★★★ the recovery is decided inside the warm-up only',
     file: BR,
-    find: '      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true && recoveryHoldSinceMs == null));',
-    to: '      && inWarmup; /* MUTANT */',
+    find: "      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true",
+    to: "      && (inWarmup || (false /* MUTANT */",
     why: 'As Q-i.',
   },
   {
-    id: 'Q-iii. ★★ the recovery is decided on every tick, not once',
+    id: 'Q-iii. ★★ past the warm-up the recovery is waited for without bound',
     file: BR,
-    find: '      && (inWarmup || (deescalationHold?.soundedHeldInWarmup === true && recoveryHoldSinceMs == null));',
-    to: '      && (inWarmup || deescalationHold?.soundedHeldInWarmup === true); /* MUTANT */',
+    find: '        && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < CONDITION_CLEAR_DWELL_MS)));',
+    to: '        || true)); /* MUTANT */',
     why: 'Held for its recovery past the warm-up, the green is never adopted: it waits for a settled set that may never come.',
   },
   {
     id: 'Q-iv. ★★ a sounded hold that begins after the warm-up is marked too',
     file: BR,
-    find: '      if (critHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
-    to: '      if (critHeld) deescalationHold.soundedHeldInWarmup = true; /* MUTANT */',
-    why: 'A green after a red spoken past the warm-up, on an unsettled set, is adopted in silence: the cleared critical stays the last words.',
+    find: '      if (bootCritHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
+    to: '      if (bootCritHeld) deescalationHold.soundedHeldInWarmup = true; /* MUTANT */',
+    why: 'A green held by a restored critical only after the warm-up, on an unsettled set, is adopted in silence where any green after the warm-up is spoken.',
   },
   {
     id: 'Q-v. ★★ any hold inside the warm-up is marked',
     file: BR,
-    find: '      if (critHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
+    find: '      if (bootCritHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
     to: '      if (inWarmup) deescalationHold.soundedHeldInWarmup = true; /* MUTANT */',
     why: 'A green that begins late in the warm-up and stands its plain dwell past it is silenced instead of spoken.',
+  },
+
+  /* ── seam review: only a critical of BEFORE the restart marks the hold ─────── */
+  {
+    id: 'Q-vi. ★★★ a critical that sounded after the boot marks the hold (the 0682137 rule)',
+    file: BR,
+    find: '      if (bootCritHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
+    to: '      if (critHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true; /* MUTANT */',
+    why: 'A cell-spread red heard after the restart that clears inside the warm-up is decided on one tick past it and, the set unsettled, its all-clear is adopted in silence: the cleared critical stays the last words.',
+  },
+  {
+    id: 'Q-vii. ★★★ the restored criticals are not recorded as the boot\'s',
+    file: BR,
+    find: '      bootSoundedFps.add(f);',
+    to: '      /* MUTANT */',
+    why: 'As Q-i: no hold is ever marked.',
+  },
+  {
+    id: 'Q-viii. ★★ a boot critical released since is still of the boot',
+    file: BR,
+    find: '    for (const f of [...bootSoundedFps]) if (!soundedCritFps.has(f)) bootSoundedFps.delete(f);',
+    to: '    /* MUTANT */',
+    why: 'Released and back loud after the restart (the replay muted), its green past the warm-up is adopted in silence on an unsettled set.',
+  },
+  {
+    id: 'Q-ix. ★★ the boot hold is read off the whole record',
+    file: BR,
+    find: '      && soundedCriticalHeld(alerts, new Map([...soundedCritFps].filter(([f]) => bootSoundedFps.has(f))), tickNow);',
+    to: '      && true; /* MUTANT */',
+    why: 'A restored critical still in the record marks a hold that a critical of after the boot holds.',
+  },
+
+  /* ── seam review: past the warm-up the decision has the warm-up's patience ── */
+  {
+    id: 'Q-x. ★★ past the warm-up the recovery is decided on the due tick alone',
+    file: BR,
+    find: '        && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < CONDITION_CLEAR_DWELL_MS)));',
+    to: '        && recoveryHoldSinceMs == null)); /* MUTANT */',
+    why: 'A settled stamp reset by one transient onset 30 s before the due tick silences the all-clear the warm-up path would have waited for.',
+  },
+  {
+    id: 'Q-xi. ★ the patience is two dwells',
+    file: BR,
+    find: '        && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < CONDITION_CLEAR_DWELL_MS)));',
+    to: '        && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < 2 * CONDITION_CLEAR_DWELL_MS))); /* MUTANT */',
+    why: 'The green read from an unsettled set is held twice as long as the warm-up path would hold it.',
+  },
+
+  /* ── seam review (LOW): a condition heard after the restart is not left as the last words ── */
+  {
+    id: 'L-i. ★★★ the held green is adopted silently at the end of the warm-up whatever was spoken since the boot',
+    file: BR,
+    find: "      if (lastConditionPlayedLevel != null && lastConditionPlayedLevel !== 'green') {",
+    to: '      if (false) { /* MUTANT */',
+    why: 'A red heard after the restart that clears on a set that never settles keeps its green unspoken: the cleared critical stays the last words.',
+  },
+  {
+    id: 'L-ii. ★★ the held green is always spoken at the end of the warm-up',
+    file: BR,
+    find: "      if (lastConditionPlayedLevel != null && lastConditionPlayedLevel !== 'green') {",
+    to: '      if (true) { /* MUTANT */',
+    why: 'The clear of a warning heard only before the restart is spoken from a set that never settled (the fail-quiet rule).',
   },
 
   /* ── (8) seam fixes: the disk keeps when a restored critical was last present ── */
