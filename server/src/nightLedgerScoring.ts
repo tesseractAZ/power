@@ -23,7 +23,7 @@
 
 import type { NightLedgerRow } from './recorder.js';
 import type { Season, TariffModel } from './tariff.js';
-import { actuatedDeliveredKwh } from './nightChargeAdvisor.js';
+import { DELIVERED_BASIS } from './nightChargeAdvisor.js';
 import { LEGACY_REVERT_LAG_MS } from './nightChargeActuator.js';
 
 const HOUR_MS = 3_600_000;
@@ -364,7 +364,10 @@ export const HOLD_DEVICE_SETTLE_MS = 60_000;
 /** The furthest past the close a LATE restore (cloud rejections, retries) extends the
  *  span. The hold is real while the reserve stays raised, but after the close the span
  *  also integrates the morning, where solar carries the load and import − load turns
- *  negative; past half an hour that bias outweighs the charging tail it recovers. */
+ *  negative; past half an hour that bias outweighs the charging tail it recovers.
+ *  v1.187.3 — delivered energy is now measured into the Cores (deliveredIntoCores), which
+ *  a solar morning does not drive negative; the bound is kept unchanged as the limit on
+ *  how much of a late restore's charging is credited to the night. */
 export const HOLD_TAIL_MAX_MS = 30 * 60_000;
 
 /** Which evidence ended the delivered-energy span. */
@@ -452,9 +455,103 @@ export function realizedCostOutcome(i: {
   };
 }
 
+/** v1.187.3 — the house panel's per-Core source channel (recorder.ts `src{n}_w`, from
+ *  `backupInfo.chWatt`): positive = the panel charging that Core, negative = the Core
+ *  carrying the house. */
+export type SourceChannelMetric = `src${number}_w`;
 /** The recorder series the assembly reads. */
-export type LedgerMetric = 'grid_home_w' | 'panel_load';
+export type LedgerMetric = 'grid_home_w' | 'panel_load' | SourceChannelMetric;
 export type LedgerQuery = (metric: LedgerMetric, startMs: number, endMs: number) => ReadonlyArray<Sample>;
+
+/** v1.187.3 — the source channels of a panel's connected Cores (Energy{n}Info slot n, whose
+ *  watts the recorder writes as `src{n}_w`), sorted. The same membership rule as
+ *  shp2Membership.panelRoster: connected AND carrying a serial. PURE. */
+export function connectedSourceSlots(
+  sources: ReadonlyArray<{ slot: number; sn: string | null; isConnected: boolean }> | null | undefined,
+): number[] {
+  const out = new Set<number>();
+  for (const s of sources ?? []) {
+    if (s.isConnected && s.sn && Number.isInteger(s.slot) && s.slot >= 1) out.add(s.slot);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/** v1.187.3 — measured energy into the Cores may exceed the metered grid import over the
+ *  same span by this much (5% + 0.5 kWh: two series sampled on different clocks) before
+ *  it is withheld as implausible. Overnight the grid is the only source that can charge
+ *  them, so more than that is a channel read with the wrong sign or meaning. */
+export const DELIVERED_IMPORT_SLACK_FRAC = 0.05;
+export const DELIVERED_IMPORT_SLACK_KWH = 0.5;
+
+export interface DeliveredOutcome {
+  kwh: number | null;
+  /** DELIVERED_BASIS exactly when `kwh` is a number; null otherwise. */
+  basis: string | null;
+  /** A clause for score_notes, always present so a null says WHY. */
+  note: string;
+}
+
+/**
+ * v1.187.3 — `delivered_kwh` on an actuated night: the energy INTO the home Cores over the
+ * hold span, the charging part of the house panel's source channel for each connected Core
+ * (`src{n}_w` > 0), summed. PURE (all I/O is `query`).
+ *
+ * WHY NOT IMPORT − LOAD. That estimate assumed the house ran on the grid for the whole
+ * hold; when the SHP2 carries the house from the pack (above its reserve, before a
+ * just-in-time force-charge and after its OFF) the house load it subtracts was never
+ * imported. 2026-09-30: import 23.38 − load 18.67 = 4.71 kWh recorded; the source channels
+ * read 20.33 kWh into the Cores (the Cores' own AC input 20.25, the pool 55→76%). A channel
+ * carrying the house reads negative and adds nothing, so the hours on the pack cost nothing
+ * here and the hours on the grid count only what reached the Cores.
+ *
+ * NULL, with the reason in the note, when:
+ *  - no connected Core is known on the house panel;
+ *  - any channel's coverage of the span is under LEDGER_SPAN_MIN_COVERAGE — the MINIMUM over
+ *    channels, as actual_pv_kwh's per-core gate: one dark channel in three averages to a
+ *    healthy 0.67 while the total is a third short, and this column is durable;
+ *  - the total exceeds the metered import over the span (grid_home_w, when that is itself
+ *    covered) by more than DELIVERED_IMPORT_SLACK_*: impossible overnight, so a channel
+ *    read wrong — a discharge counted as charge would otherwise inflate the learner.
+ */
+export function deliveredIntoCores(i: {
+  hold: TimeSpan;
+  /** connectedSourceSlots of the house panel. */
+  channels: readonly number[];
+  query: LedgerQuery;
+}): DeliveredOutcome {
+  if (i.channels.length === 0) {
+    return { kwh: null, basis: null, note: 'Delivered: unmeasured (no connected Core known on the house panel)' };
+  }
+  let wh = 0;
+  let worst: { ch: number; cov: number } | null = null;
+  for (const ch of i.channels) {
+    const pts = i.query(`src${ch}_w`, i.hold.startMs, i.hold.endMs);
+    const cov = coverageFrac(pts, i.hold.startMs, i.hold.endMs);
+    if (worst == null || cov < worst.cov) worst = { ch, cov };
+    wh += integrateWh(pts, true);
+  }
+  if (worst == null || !(worst.cov >= LEDGER_SPAN_MIN_COVERAGE)) {
+    return {
+      kwh: null, basis: null,
+      note: `Delivered: unmeasured (source channel ${worst?.ch ?? '?'} coverage ${Math.round((worst?.cov ?? 0) * 100)}% < ${LEDGER_SPAN_MIN_COVERAGE * 100}%)`,
+    };
+  }
+  const kwh = round2(wh / 1000);
+  const imp = i.query('grid_home_w', i.hold.startMs, i.hold.endMs);
+  if (coverageFrac(imp, i.hold.startMs, i.hold.endMs) >= LEDGER_SPAN_MIN_COVERAGE) {
+    const impKwh = round2(integrateWh(imp, true) / 1000);
+    if (kwh > impKwh * (1 + DELIVERED_IMPORT_SLACK_FRAC) + DELIVERED_IMPORT_SLACK_KWH) {
+      return {
+        kwh: null, basis: null,
+        note: `Delivered: withheld (${kwh} kWh into the Cores exceeds the ${impKwh} kWh metered import over the hold; overnight the grid is their only source)`,
+      };
+    }
+  }
+  return {
+    kwh, basis: DELIVERED_BASIS,
+    note: `Delivered: ${kwh} kWh into the Cores (charging part of source channel${i.channels.length > 1 ? 's' : ''} ${i.channels.join('/')} over the hold)`,
+  };
+}
 
 export interface NightLedgerColumnsInput {
   row: Pick<NightLedgerRow,
@@ -474,6 +571,9 @@ export interface NightLedgerColumnsInput {
   rateAt: (tsMs: number) => RateLike;
   /** The Cores whose actual PV the verdict sums. */
   homeSns: readonly string[];
+  /** v1.187.3 — the house panel's connected source channels (connectedSourceSlots): what
+   *  delivered_kwh integrates. */
+  sourceChannels: readonly number[];
 }
 
 export interface NightLedgerColumns {
@@ -484,8 +584,11 @@ export interface NightLedgerColumns {
   /** Actuated nights only: the span delivered_kwh integrates. */
   hold: (TimeSpan & { basis: HoldSpanBasis }) | null;
   deliveredKwh: number | null;
+  /** v1.187.3 — `delivered_basis`: DELIVERED_BASIS exactly when deliveredKwh is a number. */
+  deliveredBasis: string | null;
   pvSetAside: string | null;
-  /** The clauses appended to score_notes: on-peak, cost, and the set-aside when present. */
+  /** The clauses appended to score_notes: on-peak, cost, delivered (actuated nights), and
+   *  the set-aside when present. */
   notes: string;
 }
 
@@ -495,7 +598,8 @@ export interface NightLedgerColumns {
  *  - On-peak: queried over the governed span only when this row is the plan of record.
  *  - Cost: [min(write, window open), close + 16 h), only for the plan of record, only at
  *    ≥ LEDGER_SPAN_MIN_COVERAGE, only when every interval has a rate.
- *  - Delivered: actuated nights only, over deliveredHoldSpan.
+ *  - Delivered: actuated nights only, over deliveredHoldSpan, into the Cores
+ *    (deliveredIntoCores, v1.187.3).
  *  - PV set-aside: the band's Cores against the actuals' Cores, else the known-row list.
  */
 export function assembleNightLedgerColumns(i: NightLedgerColumnsInput): NightLedgerColumns {
@@ -525,7 +629,7 @@ export function assembleNightLedgerColumns(i: NightLedgerColumnsInput): NightLed
   });
 
   let hold: (TimeSpan & { basis: HoldSpanBasis }) | null = null;
-  let deliveredKwh: number | null = null;
+  let delivered: DeliveredOutcome | null = null;
   if (i.actuated) {
     hold = deliveredHoldSpan({
       windowStartMs: i.windowStartMs,
@@ -533,12 +637,8 @@ export function assembleNightLedgerColumns(i: NightLedgerColumnsInput): NightLed
       appliedAtMs: i.row.actuation_applied_at_ms,
       revertedAtMs: i.row.actuation_reverted_at_ms,
     });
-    const imp = i.query('grid_home_w', hold.startMs, hold.endMs);
-    const load = i.query('panel_load', hold.startMs, hold.endMs);
-    deliveredKwh = actuatedDeliveredKwh(
-      imp.length ? round2(integrateWh(imp, true) / 1000) : null,
-      load.length ? round2(integrateWh(load, false) / 1000) : null,
-    );
+    // v1.187.3 — measured into the Cores, not import − house load (deliveredIntoCores).
+    delivered = deliveredIntoCores({ hold, channels: i.sourceChannels, query: i.query });
   }
 
   // Is the PV verdict forecast-skill evidence at all? Only when the band was built for
@@ -546,8 +646,11 @@ export function assembleNightLedgerColumns(i: NightLedgerColumnsInput): NightLed
   const pvSetAside = pvVerdictSetAside(i.row.pv_model_sns, i.homeSns) ?? knownFleetMismatchReason(i.row);
 
   return {
-    onpeak, cost, costSpan, hold, deliveredKwh, pvSetAside,
-    notes: `${onpeak.note}. ${cost.note}.${pvSetAside ? ` ${pvSetAside}.` : ''}`,
+    onpeak, cost, costSpan, hold,
+    deliveredKwh: delivered?.kwh ?? null,
+    deliveredBasis: delivered?.basis ?? null,
+    pvSetAside,
+    notes: `${onpeak.note}. ${cost.note}.${delivered ? ` ${delivered.note}.` : ''}${pvSetAside ? ` ${pvSetAside}.` : ''}`,
   };
 }
 

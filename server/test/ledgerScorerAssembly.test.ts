@@ -59,6 +59,10 @@ function recorderStub(data: Partial<Record<LedgerMetric, Pt[]>>) {
 /** The house: 15 kW through the window, 1.3 kW on grid after it, until the next evening. */
 const houseGrid = (from = WS, to = WE + 17 * HOUR) => series(from, to, (t) => (t < WE ? 15_000 : 1_300));
 const houseLoad = (from = WS, to = WE + 17 * HOUR) => series(from, to, () => 1_300);
+/** v1.187.3 — the three source channels, each `w(t)` watts (+ = the panel charging that Core). */
+const channels = (from: number, to: number, w: (t: number) => number) => ({
+  src1_w: series(from, to, w), src2_w: series(from, to, w), src3_w: series(from, to, w),
+});
 
 function input(o: Partial<NightLedgerColumnsInput> & { data?: Partial<Record<LedgerMetric, Pt[]>> } = {}) {
   const stub = recorderStub(o.data ?? { grid_home_w: houseGrid(), panel_load: houseLoad() });
@@ -77,6 +81,7 @@ function input(o: Partial<NightLedgerColumnsInput> & { data?: Partial<Record<Led
     query: stub.query,
     rateAt: (t) => rateAt(REV, t),
     homeSns: SNS,
+    sourceChannels: [1, 2, 3],
     ...o,
   };
   return { cols: assembleNightLedgerColumns(i), calls: stub.calls, i };
@@ -118,6 +123,8 @@ test('★★ the plan of record: on-peak measured over the governed span, cost o
   assert.match(cols.cost.note, /not a bill/);
   assert.equal(cols.hold, null, 'not actuated: no delivered span');
   assert.equal(cols.deliveredKwh, null);
+  assert.equal(cols.deliveredBasis, null);
+  assert.ok(!calls.some((c) => c.metric.startsWith('src')), 'an advisory night reads no source channel');
   assert.equal(cols.pvSetAside, null);
   assert.equal(cols.notes, `${cols.onpeak.note}. ${cols.cost.note}.`);
 });
@@ -188,35 +195,45 @@ test('★★★ a LEGACY row applied at 22:55 (no revert stamp): cost from 22:55
   const { cols, calls } = input({
     actuated: true,
     row: { plan_date: '2026-09-28', issued_at_ms: phx(2026, 9, 28, 21, 30), actuation_applied_at_ms: applied, actuation_reverted_at_ms: null, pv_model_sns: null },
-    data: { grid_home_w: houseGrid(applied), panel_load: houseLoad(applied) },
+    data: {
+      grid_home_w: houseGrid(applied), panel_load: houseLoad(applied),
+      ...channels(applied, WE + 17 * HOUR, (t) => (t < WE ? 4_500 : -400)),
+    },
   });
   assert.equal(cols.costSpan.startMs, applied, 'the early write is priced (at its off-peak rate)');
   assert.deepEqual(cols.hold, { startMs: applied, endMs: WE + LEGACY_REVERT_LAG_MS, basis: 'legacy-schedule' });
-  assert.ok(calls.some((c) => c.metric === 'panel_load' && c.a === applied && c.b === WE + 5 * MIN));
+  for (const ch of ['src1_w', 'src2_w', 'src3_w']) {
+    assert.ok(calls.some((c) => c.metric === ch && c.a === applied && c.b === WE + 5 * MIN), `${ch} over the hold`);
+  }
   assert.ok(cols.deliveredKwh != null && cols.deliveredKwh > 0);
 });
 
 test('★★★ THE TAIL: a night still charging at the close counts what it bought until the restore landed', () => {
   // Applied at the open (the current schedule); the restore lands at 05:00:28 and the Cores
-  // stop ~30 s later. 15 kW import vs a 1.3 kW house through the 05:01 sample, then the
-  // house alone.
+  // stop ~30 s later. 15 kW import vs a 1.3 kW house, 4.5 kW into each of three Cores,
+  // through the 05:01 sample; then the house alone, partly from the pack.
   const reverted = WE + 28_000;
   const grid = series(WS, WE + 17 * HOUR, (t) => (t <= WE + MIN ? 15_000 : 1_300));
+  const into = channels(WS, WE + 17 * HOUR, (t) => (t <= WE + MIN ? 4_500 : -150));
   const run = (revertedAt: number | null) => input({
     actuated: true,
     row: { plan_date: '2026-09-28', issued_at_ms: phx(2026, 9, 28, 21, 30), actuation_applied_at_ms: WS + 28_000, actuation_reverted_at_ms: revertedAt, pv_model_sns: null },
-    data: { grid_home_w: grid, panel_load: houseLoad() },
+    data: { grid_home_w: grid, panel_load: houseLoad(), ...into },
   }).cols;
   const stamped = run(reverted);
   assert.deepEqual(stamped.hold, { startMs: WS, endMs: reverted + 60_000, basis: 'revert-stamp' });
   // What the first cut of v1.187.0 integrated: exactly the window.
+  const upToClose = (pts: Pt[]) => pts.filter((p) => p.ts <= WE);
   const windowOnly = input({
     actuated: true, windowEndMs: WE,
     row: { plan_date: '2026-09-28', issued_at_ms: 0, actuation_applied_at_ms: WS, actuation_reverted_at_ms: WE - 1 * HOUR, pv_model_sns: null },
-    data: { grid_home_w: grid.filter((p) => p.ts <= WE), panel_load: houseLoad().filter((p) => p.ts <= WE) },
+    data: {
+      grid_home_w: upToClose(grid), panel_load: upToClose(houseLoad()),
+      src1_w: upToClose(into.src1_w), src2_w: upToClose(into.src2_w), src3_w: upToClose(into.src3_w),
+    },
   }).cols.deliveredKwh!;
   assert.ok(stamped.deliveredKwh! > windowOnly + 0.2,
-    `the ~1 min at 13.7 kW net past the close is delivered energy (${stamped.deliveredKwh} vs ${windowOnly})`);
+    `the ~1 min at 13.5 kW into the Cores past the close is delivered energy (${stamped.deliveredKwh} vs ${windowOnly})`);
   // No stamp on the current schedule: close + one actuator tick + the device settle.
   assert.deepEqual(run(null).hold, { startMs: WS, endMs: WE + 2 * MIN, basis: 'close-plus-tick' });
 });
