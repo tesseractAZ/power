@@ -69,6 +69,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { SnapshotStore } from './snapshot.js';
 import type { Alert } from './alerts.js';
+import { VDIFF_KNEE_GAP_CARRY_MS } from './alerts.js';
 import { TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
 import { config } from './config.js';
 import { callHaService, isSupervised, probeService, getEntityState, getAllStates } from './haService.js';
@@ -121,6 +122,7 @@ import {
   clearsRedReplayEvidence,
   createRedReplayGate,
   describeFingerprint,
+  isFingerprint,
   isLevelEscalation,
   isRecordableRedAnnounce,
   LEVEL_RANK,
@@ -830,6 +832,53 @@ export function soundedCriticalHeld(
 }
 
 /**
+ * v1.187.3 (log review) — the oldest last-present time of a sounded critical that is restored at
+ * boot (restoreSoundedCriticals): VDIFF_KNEE_GAP_CARRY_MS, the longest outage a persisted knee
+ * session survives (restoreVdiffKneeSessions). After a longer outage the knee mute starts a new
+ * session, and its critical is a new episode that has not sounded.
+ */
+export const SOUNDED_CRIT_RESTORE_MAX_AGE_MS = VDIFF_KNEE_GAP_CARRY_MS;
+
+/** v1.187.3 (log review) — while the sounded record holds anything it is rewritten at most this
+ *  often, so a last-present time on disk is at most this stale when the age bound reads it. */
+export const SOUNDED_CRIT_PERSIST_EVERY_MS = 60_000;
+
+/**
+ * v1.187.3 (log review) — THE SOUNDED RECORD SURVIVES A RESTART. soundedCriticalHeld reads
+ * `soundedCritFps`, which lived only in memory: after a restart a cell-spread critical that had
+ * sounded read as one that never had. A vdiff-crit muted again by its knee mute after the restart,
+ * or absent between two BMS readings, then held nothing; a warning standing at the first tick was
+ * adopted as a continuation of the heard red, it cleared, and the green that followed was announced
+ * as a recovery (isRestartRecovery): "All clear" with the critical's card open, then the klaxon
+ * when the mute lapsed. allClearSpeechBlocked reads `annunciate`, so it let the speech through.
+ *
+ * The record is written to the broadcast status file (`soundedCrit`: fingerprint → last-present
+ * ms) whenever its set changes, and at most every SOUNDED_CRIT_PERSIST_EVERY_MS while it holds
+ * anything. At boot this restores each entry whose fingerprint is well formed and whose
+ * last-present time is finite and at most `maxAgeMs` before `bootMs`, stamped `bootMs`: nothing
+ * was observed during the outage, so it is not counted as absence (an absent cell-spread critical
+ * is then held SOUNDED_VDIFF_ABSENT_HOLD_MS from the boot). Whatever the condition record says:
+ * only a committed red writes an entry and the record prunes itself, and the hold demotes the
+ * record's heard flag exactly while a sounded critical is muted. Returns null when `raw` is not a
+ * record (a status file written before v1.187.3, or a malformed field); the caller then seeds the
+ * criticals of the red announcement on record. Pure + exported for tests.
+ */
+export function restoreSoundedCriticals(
+  raw: unknown,
+  bootMs: number,
+  maxAgeMs = SOUNDED_CRIT_RESTORE_MAX_AGE_MS,
+): Map<string, number> | null {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = new Map<string, number>();
+  for (const [f, at] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isFingerprint(f) || typeof at !== 'number' || !Number.isFinite(at)) continue;
+    if (bootMs - at > maxAgeMs) continue;
+    out.set(f, bootMs);
+  }
+  return out;
+}
+
+/**
  * v1.187.0 — the REPEAT-WARNING storm gate. The identical-message gate compares the whole
  * spoken text, and a warning's text carries its live reading ("spread is 58 mV … peer z-score
  * 7.9"), so it never matched a repeat of one alert: on 2026-09-29 the same Core 1 pack 1
@@ -1199,6 +1248,10 @@ export function startBroadcastMonitor(
   // "what played last and did it work" was unanswerable right after the
   // restarts that most need auditing.
   const STATUS_PATH = resolve(process.cwd(), config.dbPath, '..', 'broadcast-last.json');
+  // v1.187.3 (log review) — the sounded record's last write (restoreSoundedCriticals): the set it
+  // wrote, and when. A failed write counts too, so a broken disk is retried on the same cadence.
+  const soundedCritKeys = (): string => JSON.stringify([...soundedCritFps.keys()].sort());
+  let soundedCritWritten = { keys: '[]', atMs: 0 };
   const persistStatus = () => {
     try {
       writeFileSync(
@@ -1207,11 +1260,14 @@ export function startBroadcastMonitor(
           lastBroadcastAt, lastLevel, lastOutcome, lastErrors, lastSpokenMessage, lastRender,
           lastBroadcastKind, conditionLevel, conditionSpoken, conditionAt, // v1.186.0
           lastSuppressedAt, lastSuppressedLevel, lastSuppressedKind, lastSuppressedReason, // v1.187.0
+          soundedCrit: Object.fromEntries(soundedCritFps), // v1.187.3 (restoreSoundedCriticals)
         }),
       );
     } catch { /* best-effort */ }
+    soundedCritWritten = { keys: soundedCritKeys(), atMs: Date.now() };
   };
   let persistedCondition: { conditionLevel?: unknown; conditionSpoken?: unknown } | null = null;
+  let persistedSoundedCrit: unknown = undefined; // v1.187.3 (restoreSoundedCriticals)
   try {
     const s = JSON.parse(readFileSync(STATUS_PATH, 'utf8')) as Partial<{
       lastBroadcastAt: number; lastLevel: ConditionLevel; lastOutcome: BroadcastStatus['lastOutcome'];
@@ -1219,6 +1275,7 @@ export function startBroadcastMonitor(
       lastBroadcastKind: BroadcastStatus['lastBroadcastKind'];
       conditionLevel: unknown; conditionSpoken: unknown; conditionAt: unknown;
       lastSuppressedAt: unknown; lastSuppressedLevel: unknown; lastSuppressedKind: unknown; lastSuppressedReason: unknown;
+      soundedCrit: unknown;
     }>;
     lastBroadcastAt = s.lastBroadcastAt ?? null;
     lastLevel = s.lastLevel ?? null;
@@ -1239,6 +1296,7 @@ export function startBroadcastMonitor(
     const sk = s.lastSuppressedKind;
     lastSuppressedKind = sk === 'condition' || sk === 'dedicated' || sk === 'test' ? sk : null;
     lastSuppressedReason = typeof s.lastSuppressedReason === 'string' ? s.lastSuppressedReason : null;
+    persistedSoundedCrit = s.soundedCrit;
   } catch { /* first boot / no prior state */ }
   // v0.58.0 — restart-continuation baseline (used only to suppress a re-spoken
   // YELLOW/GREEN advisory; criticals are never suppressed — see isRestartContinuation).
@@ -1268,6 +1326,23 @@ export function startBroadcastMonitor(
   // above — it carries its own evidence (WHICH criticals were spoken, and WHEN),
   // because a level alone cannot answer "is this the same fault?".
   const redReplayGate = createRedReplayGate({ windowMs: BROADCAST_BOOT_WARMUP_MS });
+  // v1.187.3 (log review) — the sounded criticals of before the restart, restored BEFORE the first
+  // tick (restoreSoundedCriticals): soundedCriticalHeld then holds a sounded vdiff-crit that is
+  // muted again, or absent between two readings, exactly as in one process — the green clock never
+  // starts, so there is no recovery and no all-clear with its card open. A status file written
+  // before v1.187.3 has no record: under a heard red the criticals of the red announcement on record
+  // are seeded instead (that evidence is cleared at the first green observed under a hold, so it is
+  // read here, at boot, before any tick).
+  {
+    const restored = restoreSoundedCriticals(persistedSoundedCrit, bootMs);
+    const seeded = restored ?? new Map<string, number>(
+      bootBaselineLevel === 'red' ? (redReplayGate.state()?.activeFingerprints ?? []).map((f) => [f, bootMs]) : [],
+    );
+    for (const [f, at] of seeded) soundedCritFps.set(f, at);
+    if (seeded.size > 0) {
+      log(`broadcast: ${seeded.size} sounded critical(s) of before the restart restored${restored == null ? ' from the red announcement on record' : ''} (${[...seeded.keys()].map(describeFingerprint).join('; ')}) — held, not cleared, while muted by a bounded cell-spread mute or (a cell-spread critical) gone under ${Math.round(SOUNDED_VDIFF_ABSENT_HOLD_MS / 60_000)} minutes`);
+    }
+  }
   /**
    * v1.64.0 — the ONE place a condition level is committed as `prevLevel`.
    *
@@ -2588,6 +2663,10 @@ export function startBroadcastMonitor(
     // such tick, not only at a red commit: one that cleared and came back loud inside a hold is a
     // flicker the hold absorbs, which commits nothing.
     if (level === 'red' && prevLevel === 'red') for (const f of criticalFingerprints) soundedCritFps.set(f, tickNow);
+    // v1.187.3 (log review) — and the record survives a restart (restoreSoundedCriticals): written
+    // when its set changes, and while it holds anything at most every SOUNDED_CRIT_PERSIST_EVERY_MS.
+    if (soundedCritKeys() !== soundedCritWritten.keys
+      || (soundedCritFps.size > 0 && tickNow - soundedCritWritten.atMs >= SOUNDED_CRIT_PERSIST_EVERY_MS)) persistStatus();
     if (level === 'red' || critHeld) belowRedSinceMs = null;
     else if (belowRedSinceMs == null) belowRedSinceMs = tickNow;
     if (level !== 'green' || critHeld) greenSinceMs = null;

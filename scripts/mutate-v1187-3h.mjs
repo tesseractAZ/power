@@ -27,6 +27,18 @@
  * from warm() after Promise.all — the two differ only for a fetch landing in the milliseconds
  * between two equal budget timers; A-ix pins the read field itself.
  *
+ * (6) log review 10-01 (MEDIUM): the sounded-critical record (soundedCriticalHeld) survives a
+ * restart — written to the broadcast status file when its set changes and at most every minute
+ * while it holds anything, restored before the first tick whatever the condition record says
+ * (entries at most SOUNDED_CRIT_RESTORE_MAX_AGE_MS old, stamped at the boot); a status file written
+ * before v1.187.3 seeds the red announcement's criticals under a heard red. Mutants P-i..P-xiv.
+ * Not mutated: the restore running before the first tick (it runs in the monitor's constructor,
+ * the tick on a later timer; no single-line edit moves it).
+ *
+ * (7) log review 10-01 (LOW): stormPrepAlerts throws, uncached, when NWS is enabled and the fetch
+ * failed with nothing cached, so the storm-prep feed stays cold and the set is not settled; a
+ * successful empty fetch is still []. Mutants N-i..N-iii.
+ *
  *   node scripts/mutate-v1187-3h.mjs
  *
  * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
@@ -42,6 +54,7 @@ const SERVER = resolve(REPO, 'server');
 const AL = resolve(SERVER, 'src/alerts.ts');
 const AM = resolve(SERVER, 'src/alertMonitor.ts');
 const AT = resolve(SERVER, 'src/alertTelemetry.ts');
+const AN = resolve(SERVER, 'src/analytics.ts');
 const BR = resolve(SERVER, 'src/broadcast.ts');
 const IX = resolve(SERVER, 'src/index.ts');
 const RC = resolve(SERVER, 'src/recorder.ts');
@@ -60,6 +73,7 @@ const SUBSET = [
   'test/alertResolveEvidence.test.ts',
   'test/owedResolveAfterMute.test.ts',
   'test/peerSpreadTopOfChargeAudible.test.ts',
+  'test/stormPrepUnknownFeed.test.ts',
 ];
 
 const MUTANTS = [
@@ -432,6 +446,129 @@ const MUTANTS = [
     find: 'export const BOOT_RESET_ONSET_DEBOUNCE_MS = Math.max(DPU_ERR_DEBOUNCE_MS, MPPT_ERR_DEBOUNCE_MS);',
     to: 'export const BOOT_RESET_ONSET_DEBOUNCE_MS = 0; /* MUTANT */',
     why: 'As A-ii.',
+  },
+
+  /* ── (6) log review 10-01: the sounded record survives a restart ──────── */
+  {
+    id: 'P-i. ★★★ nothing is restored at boot',
+    file: BR,
+    find: '    const restored = restoreSoundedCriticals(persistedSoundedCrit, bootMs);',
+    to: '    const restored = new Map<string, number>(); /* MUTANT */',
+    why: 'A vdiff-crit that sounded before the restart and is knee-muted after it reads as never sounded: "All clear" with its card open.',
+  },
+  {
+    id: 'P-ii. ★★★ the record is not written to the status file',
+    file: BR,
+    find: '          soundedCrit: Object.fromEntries(soundedCritFps), // v1.187.3 (restoreSoundedCriticals)',
+    to: '          /* MUTANT */',
+    why: 'Only the red-replay fallback is left, and it is empty once a green was observed under the hold.',
+  },
+  {
+    id: 'P-iii. ★★★ restored only under a heard red',
+    file: BR,
+    find: '    const restored = restoreSoundedCriticals(persistedSoundedCrit, bootMs);',
+    to: "    const restored = bootBaselineLevel === 'red' ? restoreSoundedCriticals(persistedSoundedCrit, bootMs) : new Map<string, number>(); /* MUTANT */",
+    why: 'The hold demotes the heard flag exactly while a sounded critical is muted: a restart then loses it.',
+  },
+  {
+    id: 'P-iv. ★★ the record on disk is not refreshed while the critical stands',
+    file: BR,
+    find: '      || (soundedCritFps.size > 0 && tickNow - soundedCritWritten.atMs >= SOUNDED_CRIT_PERSIST_EVERY_MS)) persistStatus();',
+    to: '      ) persistStatus(); /* MUTANT */',
+    why: 'A critical loud for more than an hour carries its commit time on disk: too old to restore.',
+  },
+  {
+    id: 'P-v. ★★ a change of the set is not written',
+    file: BR,
+    find: '    if (soundedCritKeys() !== soundedCritWritten.keys',
+    to: '    if (false /* MUTANT */',
+    why: 'A critical released before the restart is restored after it, and its muted return holds the all-clear.',
+  },
+  {
+    id: 'P-vi. ★★ no age bound on the restore',
+    file: BR,
+    find: '    if (bootMs - at > maxAgeMs) continue;',
+    to: '    /* MUTANT */',
+    why: 'A record from before a long outage holds a critical whose knee session started afresh.',
+  },
+  {
+    id: 'P-vii. ★★ restored at its own last-present time: the outage counts as absence',
+    file: BR,
+    find: '    out.set(f, bootMs);',
+    to: '    out.set(f, at); /* MUTANT */',
+    why: 'A vdiff-crit between readings is released minutes early after a deploy.',
+  },
+  {
+    id: 'P-viii. ★★ no seed from the red announcement for a status file written before v1.187.3',
+    file: BR,
+    find: "      bootBaselineLevel === 'red' ? (redReplayGate.state()?.activeFingerprints ?? []).map((f) => [f, bootMs]) : [],",
+    to: '      [], /* MUTANT */',
+    why: 'The upgrade restart itself re-opens the defect.',
+  },
+  {
+    id: 'P-ix. ★★ the seed without a heard red',
+    file: BR,
+    find: "      bootBaselineLevel === 'red' ? (redReplayGate.state()?.activeFingerprints ?? []).map((f) => [f, bootMs]) : [],",
+    to: '      (redReplayGate.state()?.activeFingerprints ?? []).map((f) => [f, bootMs]), /* MUTANT */',
+    why: 'A critical released before a yellow was committed is held again after the restart.',
+  },
+  {
+    id: 'P-x. ★ a malformed fingerprint is restored',
+    file: BR,
+    find: "    if (!isFingerprint(f) || typeof at !== 'number' || !Number.isFinite(at)) continue;",
+    to: "    if (typeof at !== 'number' || !Number.isFinite(at)) continue; /* MUTANT */",
+    why: 'A bare id never matches a fingerprint; it is junk in the record.',
+  },
+  {
+    id: 'P-xi. ★ a non-finite last-present time is restored',
+    file: BR,
+    find: "    if (!isFingerprint(f) || typeof at !== 'number' || !Number.isFinite(at)) continue;",
+    to: "    if (!isFingerprint(f) || typeof at !== 'number') continue; /* MUTANT */",
+    why: '-Infinity passes the age bound.',
+  },
+  {
+    id: 'P-xii. ★ an array is read as the record',
+    file: BR,
+    find: "  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return null;",
+    to: "  if (raw == null || typeof raw !== 'object') return null; /* MUTANT */",
+    why: 'A malformed field reads as a v1.187.3 record with nothing sounded, so the fallback is skipped.',
+  },
+  {
+    id: 'P-xiii. ★ the restore bound is the absent hold',
+    file: BR,
+    find: 'export const SOUNDED_CRIT_RESTORE_MAX_AGE_MS = VDIFF_KNEE_GAP_CARRY_MS;',
+    to: 'export const SOUNDED_CRIT_RESTORE_MAX_AGE_MS = SOUNDED_VDIFF_ABSENT_HOLD_MS; /* MUTANT */',
+    why: 'An outage longer than 7 minutes (a host reboot) loses the record while the knee session survives it.',
+  },
+  {
+    id: 'P-xiv. ★ the refresh cadence is an hour',
+    file: BR,
+    find: 'export const SOUNDED_CRIT_PERSIST_EVERY_MS = 60_000;',
+    to: 'export const SOUNDED_CRIT_PERSIST_EVERY_MS = 3_600_000; /* MUTANT */',
+    why: 'The last-present time on disk can be as old as the restore bound.',
+  },
+
+  /* ── (7) log review 10-01: an unknown NWS feed is not "no storms" ─────── */
+  {
+    id: 'N-i. ★★★ a failed NWS fetch with nothing cached is "no storms" again',
+    file: AN,
+    find: "  if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');",
+    to: '  if (feed == null) return []; /* MUTANT */',
+    why: 'The storm-prep feed reads as a warm delivery and the set as settled while a warning may be in effect.',
+  },
+  {
+    id: 'N-ii. ★★★ the failure is cached',
+    file: AN,
+    find: "  if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');",
+    to: "  if (feed == null) { stormPrepCache = { ts: Date.now(), value: [] }; throw new Error('NWS alerts unknown'); } /* MUTANT */",
+    why: 'The next pass inside the 10-minute cache delivers [] without asking NWS.',
+  },
+  {
+    id: 'N-iii. ★★ a successful empty fetch is unknown too',
+    file: AN,
+    find: "  if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');",
+    to: "  if (feed == null || feed.alerts.length === 0) throw new Error('NWS alerts unknown'); /* MUTANT */",
+    why: 'A quiet sky keeps the feed cold for good: no recovery is ever spoken.',
   },
 ];
 
