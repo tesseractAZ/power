@@ -1110,6 +1110,9 @@ export interface BroadcastMonitorOpts {
    *  the condition-tick period. Production passes neither. */
   renderTts?: RenderOptions['renderTts'];
   tickMs?: number;
+  /** v1.187.4 — test seam: the deferred-retry delays (RETRY_DELAYS_MS, 30/90/180 s). Production
+   *  passes none. */
+  retryDelaysMs?: readonly number[];
   /**
    * v1.187.3 — since when the alert set the condition is read from has been SETTLED (the alert
    * monitor's AlertMonitor.alertSetSettledSince, wired in index.ts), or null while it is not. Only
@@ -1534,7 +1537,7 @@ export function startBroadcastMonitor(
   // first retry delay); if the outcome is somehow still unknown at retry time,
   // we re-fire SIP — for an ALARM channel a rare duplicate beats silence.
   let lastSipDispatchOk = true;
-  const RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
+  const RETRY_DELAYS_MS: readonly number[] = opts.retryDelaysMs ?? [30_000, 90_000, 180_000];
   /**
    * v1.159.0 — release the deferred-retry slot when no retry is armed.
    *

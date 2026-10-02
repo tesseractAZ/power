@@ -405,6 +405,33 @@ test('★★★ the stamp waits out a backup pool that reads unknown (reserve-al
   await until(() => p.mon.alertSetSettledSince() != null, 'settled once nothing is withheld', p.logs);
 });
 
+test('★★★ v1.187.4: a pool unknown across the restart carries its onset — reserve-alarm-blind is in the first sets, critical off-grid, and nothing is withheld (the set settles)', { timeout: 60_000 }, async () => {
+  const path = join(ROOT, 'pool-unknown-carried.json');
+  process.env.POOL_UNKNOWN_PATH = path;
+  try {
+    const before = bootStore();
+    before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); // unreadable from now
+    const since = before.backupPoolUnknownSince(PANEL);
+    assert.ok(since != null);
+    for (let i = 0; i < 7; i++) { offset += 10 * MIN; before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); }
+    offset += 2 * MIN; // the deploy, 72 min into the blind episode
+
+    const store = bootStore();
+    store.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); // still unreadable
+    assert.equal(store.backupPoolUnknownSince(PANEL), since, 'carried across the restart');
+    (store.get().devices as Record<string, DeviceSnapshot>)[PANEL] = { ...panel(), projection: { ...(panel().projection as any), backupBatPercent: null } } as DeviceSnapshot;
+    const p = plant(store);
+    await until(() => p.ids().includes('reserve-alarm-blind'), 'the alert in the first sets', p.logs);
+    const a = ((store.get().alerts ?? []) as Alert[]).find((x) => x.id === 'reserve-alarm-blind');
+    assert.equal(a?.severity, 'critical', '★ critical, not a warning until boot + 60');
+    offset += BOOT_RESET_ONSET_DEBOUNCE_MS + SEC;
+    fresh(store);
+    await until(() => p.mon.alertSetSettledSince() != null, '★ settled: no onset clock withholds a fault', p.logs);
+  } finally {
+    delete process.env.POOL_UNKNOWN_PATH;
+  }
+});
+
 /* ══ the pure parts ══════════════════════════════════════════════════════════════════════ */
 
 test('alertSetTrusted — hydrated, every feed in the set, the boot debounces run, nothing pending (each alone is not enough)', () => {

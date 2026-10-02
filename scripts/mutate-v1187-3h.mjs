@@ -666,14 +666,14 @@ const MUTANTS = [
   {
     id: 'L-i. ★★★ the held green is adopted silently at the end of the warm-up whatever was spoken since the boot',
     file: BR,
-    find: "      if (lastConditionPlayedLevel != null && lastConditionPlayedLevel !== 'green') {",
+    find: "      if (conditionAudibleSinceBootLevel != null && conditionAudibleSinceBootLevel !== 'green') {", // v1.187.4 — re-pointed
     to: '      if (false) { /* MUTANT */',
     why: 'A red heard after the restart that clears on a set that never settles keeps its green unspoken: the cleared critical stays the last words.',
   },
   {
     id: 'L-ii. ★★ the held green is always spoken at the end of the warm-up',
     file: BR,
-    find: "      if (lastConditionPlayedLevel != null && lastConditionPlayedLevel !== 'green') {",
+    find: "      if (conditionAudibleSinceBootLevel != null && conditionAudibleSinceBootLevel !== 'green') {", // v1.187.4 — re-pointed
     to: '      if (true) { /* MUTANT */',
     why: 'The clear of a warning heard only before the restart is spoken from a set that never settled (the fail-quiet rule).',
   },

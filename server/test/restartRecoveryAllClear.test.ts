@@ -75,19 +75,35 @@ const ha = agent.get('http://supervisor');
 ha.intercept({ path: '/core/api/services', method: 'GET' })
   .reply(200, JSON.stringify([{ domain: 'music_assistant', services: { play_announcement: {} } }])).persist();
 ha.intercept({ path: '/core/api/states', method: 'GET' }).reply(200, '[]').persist();
+/** v1.187.4 — the Music Assistant speakers' state ('unavailable': the pre-flight defers). */
+let maState = 'idle';
 ha.intercept({ path: (p: string) => p.startsWith('/core/api/states/'), method: 'GET' })
-  .reply(200, JSON.stringify({ state: 'idle', attributes: {} })).persist();
+  .reply(() => ({ statusCode: 200, data: JSON.stringify({ state: maState, attributes: {} }) })).persist();
+/** v1.187.4 — play_announcement "ok" in under 2 s: HA returned without playing. */
+let tooFast = false;
 ha.intercept({ path: '/core/api/services/music_assistant/play_announcement', method: 'POST' })
   .reply(() => {
     announces += 1;
-    offset += 30_000; // play_announcement returns when playback ENDS — a real clip plays ~30 s
+    if (!tooFast) offset += 30_000; // play_announcement returns when playback ENDS — a real clip plays ~30 s
     return { statusCode: 200, data: '[]' };
   }).delay(80).persist();
+/** v1.187.4 — the SIP cordless (BROADCAST_SIP_TARGETS), answering `sipStatus`. */
+let sipPlays = 0;
+let sipStatus = 200;
+ha.intercept({ path: '/core/api/services/media_player/play_media', method: 'POST' })
+  .reply(() => {
+    sipPlays += 1;
+    return { statusCode: sipStatus, data: sipStatus === 200 ? '[]' : 'error' };
+  }).persist();
 
 /* ── the monitor's other inputs ── */
 const KLAXON = mkdtempSync(resolve(tmpdir(), 'ef-recovery-klaxon-'));
 await generateAudioAssets(KLAXON, () => {});
-const renderTts = async () => ({ ok: true as const, wav: pcmToWav(Buffer.alloc(2 * 1100), 22050, 2, 1), durationMs: 1 });
+/** v1.187.4 — the spoken render fails (Piper down): the broadcast falls back to the tone alone. */
+let ttsFails = false;
+const renderTts = async () => (ttsFails
+  ? { ok: false as const, error: 'wyoming socket: refused (test)' }
+  : { ok: true as const, wav: pcmToWav(Buffer.alloc(2 * 1100), 22050, 2, 1), durationMs: 1 });
 let alerts: Alert[] = [];
 const store = { get: () => ({ alerts }) } as any;
 /** BroadcastMonitorOpts.alertSetSettledSince — 0: settled since long before the restart's green. */
@@ -95,6 +111,8 @@ let settledSince: number | null = 0;
 
 const WARN_K: Alert = { id: 'pack-temp-warn-DPU-A', severity: 'warning', category: 'Thermal', device: 'Core 1', title: 'Pack temperature high', detail: 'x' } as Alert;
 const WARN_N: Alert = { id: 'soc-low-DPU-C-3', severity: 'warning', category: 'Battery', device: 'Core 3', title: 'Pack state of charge low', detail: 'x' } as Alert;
+/** v1.187.4 — the backup pool unreadable 15 min: withheld for 15 min after every boot before v1.187.4. */
+const WARN_RB: Alert = { id: 'reserve-alarm-blind', severity: 'warning', category: 'Connectivity', device: 'Smart Home Panel 2', title: 'Reserve alarm blind', detail: 'x' } as Alert;
 const CRIT_A: Alert = { id: 'dpu-err-DPU-A', severity: 'critical', category: 'Battery', device: 'Core 1', title: 'Inverter error code', detail: 'x', fault: 'err7' } as Alert;
 /** A cell-spread critical, loud, and on a later reading held by the balancing mute (as alerts.ts stamps it). */
 const CRIT_B: Alert = { id: 'vdiff-crit-DPU-B-2', severity: 'critical', category: 'Battery', device: 'Core 2', title: 'Cell imbalance', detail: 'spread 101 mV' } as Alert;
@@ -146,6 +164,7 @@ const WAITS_PAST_WARMUP = 'on an alert set that is not settled — still held, u
 /** …due this long after the boot when the set never settles (boot + 16 min). */
 const DECISION_DUE = LONGEST_RESTARTED_ONSET_MS + B.RESTARTED_ONSET_HOLD_MARGIN_MS;
 const RESTORED = 'sounded critical(s) of before the restart restored';
+const GREEN_SPOKEN = 'condition transition → green';
 const HOLD_LINE = 'A cell-spread critical that sounded is held, not cleared';
 const ABSENT_HOLD = B.SOUNDED_VDIFF_ABSENT_HOLD_MS;
 
@@ -184,6 +203,12 @@ beforeEach(() => {
   announces = 0;
   alerts = [];
   settledSince = 0;
+  maState = 'idle';
+  tooFast = false;
+  ttsFails = false;
+  sipPlays = 0;
+  sipStatus = 200;
+  process.env.BROADCAST_SIP_TARGETS = '';
 });
 after(async () => {
   for (const r of live.splice(0)) r.stop();
@@ -839,6 +864,184 @@ test('★★ seam review (LOW): a red spoken after the restart whose green is st
   assert.ok(!b.has(WARMUP_ENDED));
   assert.equal(b.mon.status().lastLevel, 'green', 'the last words are not the cleared red');
   assert.equal(announces, 3);
+});
+
+/* ══ v1.187.4: the warm-up-end decision waits for a settled set (or the restarted onset windows) ══ */
+
+/** v1.187.4 — after the boot a red reaches the house by `deliver`, clears, and its green stands the
+ *  dwell on a set that is not settled: held for a recovery inside the warm-up. */
+async function heldGreenAfterRed(b: Rig, deliver: () => Promise<void>): Promise<void> {
+  await sleep(80); // the boot green
+  alerts = [CRIT_A];
+  await deliver();
+  alerts = [];
+  await until(b, () => b.has('red → green held'), 'the hold');
+  offset += DWELL + SEC;
+  await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery: the set is not settled');
+}
+const redPlayed = (b: Rig) => () => until(b, () => played(b, 'red') === 1, 'the red');
+
+test('★★★ 10-02 lead: a green held past the warm-up is not announced before the restarted reserve-blind clock has run — the warning it hid returns with no "All clear" before it', async () => {
+  // The heard yellow is the reserve-blind warning; after the restart the pool still reads unknown,
+  // and its 15-min onset clock restarted at the boot, so the warning is withheld until boot + 15 and
+  // the set is not settled. Before v1.187.4 the green was announced at the end of the warm-up
+  // ("All clear", boot + ~11) because a red had been heard after the restart, and the warning the
+  // house had heard before it was spoken again at boot + 15.
+  await heard('yellow');
+  settledSince = null;
+  const b = rig();
+  await heldGreenAfterRed(b, redPlayed(b));
+  offset += 8 * MIN; // the warm-up has ended
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'still held past the warm-up');
+  await sleep(80);
+  assert.equal(played(b, 'green'), 0, '★ no "All clear" at the end of the warm-up');
+  assert.equal(b.mon.status().conditionLevel, 'red', 'nothing committed');
+  offset += 3 * MIN + 30 * SEC; // boot + 15: the clock has run and the warning is published again
+  alerts = [WARN_RB];
+  await until(b, () => played(b, 'yellow') === 1, 'the warning, new below the cleared red');
+  await sleep(80);
+  assert.equal(b.count(GREEN_SPOKEN), 0, 'no all-clear before it, nor after it');
+  assert.equal(announces, 3, 'the pre-restart yellow, the red, the warning');
+  assert.equal(b.mon.status().lastLevel, 'yellow', 'the last words are the warning that stands');
+});
+
+test('★★ …a set that settles past the warm-up decides the held green then: the red heard after the restart gets its all-clear at once, not at the bound', async () => {
+  await heard('yellow');
+  settledSince = null;
+  const boot = Date.now();
+  const b = rig();
+  await heldGreenAfterRed(b, redPlayed(b));
+  offset += 8 * MIN;
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'still held past the warm-up');
+  settledSince = Date.now(); // the pool reads again: nothing is withheld
+  await until(b, () => played(b, 'green') === 1, 'the all-clear on the settled set');
+  assert.ok(Date.now() - boot < DECISION_DUE, 'before the bound');
+  assert.ok(b.has('a red condition was audible after the restart — announced as a transition'));
+  assert.equal(b.mon.status().lastLevel, 'green');
+});
+
+test('★★ the bound is the restarted onset window plus a margin: still held 30 s past boot + 15 min (the warning reaches the set only at the next alert pass), decided at boot + 16', async () => {
+  await heard('yellow');
+  settledSince = null;
+  const boot = Date.now();
+  const b = rig();
+  await heldGreenAfterRed(b, redPlayed(b));
+  offset += boot + LONGEST_RESTARTED_ONSET_MS + 30 * SEC - Date.now();
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'held');
+  await sleep(100);
+  assert.equal(played(b, 'green'), 0, '★ not at the window itself');
+  offset += boot + DECISION_DUE + SEC - Date.now();
+  await until(b, () => played(b, 'green') === 1, 'decided at the bound: a set that never settles cannot hold the green for good');
+  assert.equal(B.RESTARTED_ONSET_HOLD_MARGIN_MS, MIN);
+  assert.equal(LONGEST_RESTARTED_ONSET_MS, 15 * MIN, 'the backup pool\'s reserve-blind window');
+});
+
+test('★★ nothing audible since the boot: the held green waits too, and the heard warning that returns at boot + 15 is a flicker the hold absorbs — not said again', async () => {
+  await heard('yellow');
+  alerts = [WARN_RB];
+  settledSince = null;
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the continuation');
+  alerts = [];
+  await until(b, () => b.has('yellow → green held'), 'the dwell');
+  offset += DWELL + SEC;
+  await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery');
+  offset += 8 * MIN;
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'still held past the warm-up');
+  offset += 3 * MIN + 30 * SEC;
+  alerts = [WARN_RB]; // published again once the restarted clock has run
+  await until(b, () => b.has('again (flicker absorbed, nothing spoken)'), 'absorbed by the hold');
+  await sleep(80);
+  assert.equal(announces, 1, 'the warning heard before the restart is not repeated');
+  assert.equal(b.mon.status().conditionLevel, 'yellow');
+  assert.equal(b.mon.status().conditionSpoken, true, 'heard: the hold had only demoted it');
+  assert.ok(!b.has(WARMUP_ENDED));
+});
+
+/* ══ v1.187.4: "audible since the boot", not "played without an error" ═══════════════════ */
+
+test('★★★ a red heard as the tone alone (its spoken render failed) was audible after the restart: its held green is announced, not adopted silently', async () => {
+  await heard('yellow');
+  settledSince = null;
+  const b = rig();
+  ttsFails = true;
+  await heldGreenAfterRed(b, () => until(b, () => b.has('falling back to chime-only so the red condition still sounds') && b.has('broadcast: red → 2 error(s)'), 'the red, the tone alone'));
+  ttsFails = false;
+  assert.ok(b.has('announced as a transition (a red condition was audible after the restart)'), 'the held line says so');
+  offset += 8 * MIN;
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'held past the warm-up');
+  settledSince = Date.now();
+  await until(b, () => played(b, 'green') === 1, 'the all-clear');
+  assert.ok(!b.has(WARMUP_ENDED), 'not adopted in silence after the klaxon');
+});
+
+test('★★★ a red that reached only the SIP cordless (every speaker unavailable) was audible after the restart: its held green is announced', async () => {
+  await heard('yellow');
+  process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
+  settledSince = null;
+  const b = rig();
+  maState = 'unavailable';
+  await heldGreenAfterRed(b, () => until(b, () => b.has('broadcast: red deferred') && b.has('SIP announce → 1 target(s)'), 'the red, on the cordless only'));
+  maState = 'idle';
+  assert.ok(b.has('announced as a transition (a red condition was audible after the restart)'));
+  offset += 8 * MIN;
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'held past the warm-up');
+  settledSince = Date.now();
+  await until(b, () => played(b, 'green') === 1, 'the all-clear');
+  assert.ok(!b.has(WARMUP_ENDED));
+});
+
+test('★★ …but a red the cordless refused while every speaker was unavailable was not audible: adopted silently', async () => {
+  await heard('yellow');
+  process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
+  sipStatus = 500;
+  settledSince = null;
+  const b = rig();
+  maState = 'unavailable';
+  await heldGreenAfterRed(b, () => until(b, () => b.has('broadcast: red deferred') && b.has('SIP play_media failed for 1/1'), 'the red, heard nowhere'));
+  maState = 'idle';
+  assert.ok(b.has('adopted silently as a continuation once the set has settled'));
+  offset += 8 * MIN;
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'held past the warm-up');
+  settledSince = Date.now();
+  await until(b, () => b.has(WARMUP_ENDED), 'adopted silently');
+  assert.equal(played(b, 'green'), 0);
+});
+
+test('★★ a red Music Assistant returned in under 2 s was not audible (HA answered without playing): adopted silently', async () => {
+  await heard('yellow');
+  settledSince = null;
+  const b = rig();
+  tooFast = true;
+  await heldGreenAfterRed(b, () => until(b, () => b.has('too fast for real playback'), 'the red, unverified'));
+  tooFast = false;
+  offset += 8 * MIN;
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'held past the warm-up');
+  settledSince = Date.now();
+  await until(b, () => b.has(WARMUP_ENDED), 'adopted silently');
+  assert.equal(played(b, 'green'), 0);
+});
+
+test('★★ an operator TEST red after the restart, on the speakers and the cordless, is no condition heard: the held green is adopted silently', async () => {
+  await heard('yellow');
+  process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
+  alerts = [WARN_K];
+  settledSince = null;
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the continuation');
+  const t = await b.mon.test('red');
+  assert.ok(t.ok, 'the test played');
+  await until(b, () => sipPlays >= 1, 'and reached the cordless');
+  alerts = [];
+  await until(b, () => b.has('yellow → green held'), 'the dwell');
+  offset += DWELL + SEC;
+  await until(b, () => b.has(HELD_FOR_RECOVERY), 'held');
+  assert.ok(b.has('adopted silently as a continuation once the set has settled'));
+  offset += 8 * MIN;
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'held past the warm-up');
+  settledSince = Date.now();
+  await until(b, () => b.has(WARMUP_ENDED), 'adopted silently');
+  assert.equal(played(b, 'green'), 0);
 });
 
 test('★★★ a sounded critical already muted at the restart is restored too — the hold had demoted the heard flag and cleared the red-replay evidence', async () => {
