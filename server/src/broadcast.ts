@@ -1241,8 +1241,8 @@ export function startBroadcastMonitor(
   const bootBaselineLevel: ConditionLevel | null = conditionBootBaseline(persistedCondition);
   /**
    * v1.187.3 — the baseline the continuation gate still reads. A recovery (isRestartRecovery)
-   * ends it: once the all-clear below it is spoken, a warning inside the rest of the warm-up is
-   * news to the house, not the continuation of a level it has been told is over.
+   * ends it: once the house has been told the condition cleared, a warning inside the rest of the
+   * warm-up is news, not the continuation of a level the house heard before the restart.
    */
   let continuationBaseline: ConditionLevel | null = bootBaselineLevel;
   /** v1.187.3 — BroadcastMonitorOpts.alertSetSettled, read defensively: absent or throwing ⇒ not settled. */
