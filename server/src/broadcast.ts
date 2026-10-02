@@ -495,6 +495,48 @@ export function isRestartContinuation(
 }
 
 /**
+ * v1.187.3 — A GREEN THAT HAS STOOD ITS DWELL ON A SETTLED ALERT SET IS A RECOVERY, NOT A
+ * RESTART CONTINUATION.
+ *
+ * isRestartContinuation files any green at or below the pre-restart baseline as a continuation for
+ * the whole warm-up window, so a yellow the household heard before a restart, that then cleared
+ * inside the window, was never followed by an all-clear. 2026-10-01 after the 19:20 deploy: the
+ * yellow standing at the first tick was adopted as a continuation (19:20:27), the level fell to
+ * green (held by the de-escalation dwell from 19:20:47), and when it had stood the dwell
+ * (19:23:47) the green "matched the pre-restart advisory" and was adopted in silence. The last
+ * words in the house stayed a warning that had cleared.
+ *
+ * The continuation exists for a level the house already heard, re-presented as a rise by the
+ * post-boot warm-up (v0.58.0). A green TRANSITION is never that: the first tick joins a green
+ * silently, so a green transition always follows a yellow or red committed since boot — a
+ * continuation of the heard yellow/red baseline, or (under a heard green baseline) one committed
+ * as a new condition. Its clearing is news. It is a recovery, announced like any transition (the
+ * all-clear speech gate, quiet hours and the storm gates still apply), when all three hold:
+ *   • a heard baseline exists (conditionBootBaseline returns a level only when it was heard; with
+ *     none, isRestartContinuation suppresses nothing anyway);
+ *   • the green has stood the de-escalation dwell (CONDITION_CLEAR_DWELL_MS), measured on every
+ *     tick (greenSinceMs);
+ *   • the alert set is SETTLED: the store hydrated and every worker/NWS alert feed has delivered
+ *     since boot. A green read from an unpopulated store, or before a feed that owns the warning
+ *     has computed once, is not an all-clear (the boot false-green): it stays a continuation.
+ * A yellow under any baseline is unchanged (yellow → yellow stays a continuation), and RED never
+ * reaches here as a continuation (isRestartContinuation). Pure + exported for tests.
+ */
+export function isRestartRecovery(
+  baseline: ConditionLevel | null,
+  observed: ConditionLevel,
+  greenSinceMs: number | null,
+  nowMs: number,
+  alertSetSettled: boolean,
+  dwellMs = CONDITION_CLEAR_DWELL_MS,
+): boolean {
+  if (observed !== 'green') return false;
+  if (baseline == null) return false;
+  if (!alertSetSettled) return false;
+  return greenSinceMs != null && nowMs - greenSinceMs >= dwellMs;
+}
+
+/**
  * v1.186.0 — WHO asked for a broadcast. One single-flight pipeline carries three kinds, and
  * only one of them describes the house:
  *   condition — a condition transition from the tick (and its deferred/spoken retries);
@@ -957,6 +999,13 @@ export interface BroadcastMonitorOpts {
    *  the condition-tick period. Production passes neither. */
   renderTts?: RenderOptions['renderTts'];
   tickMs?: number;
+  /**
+   * v1.187.3 — is the alert set the condition is read from SETTLED: the store hydrated and every
+   * worker/NWS alert feed delivered since boot (index.ts reads both). Only isRestartRecovery reads
+   * it. Absent ⇒ never settled: a green transition inside the post-restart warm-up stays a silent
+   * continuation, the pre-v1.187.3 behaviour.
+   */
+  alertSetSettled?: () => boolean;
 }
 
 /** v1.48.3 — true when EVERY per-target SIP dispatch failure is timeout-classed.
@@ -1190,6 +1239,16 @@ export function startBroadcastMonitor(
   // carry tests and dedicated announcements (see conditionBootBaseline).
   const bootMs = Date.now();
   const bootBaselineLevel: ConditionLevel | null = conditionBootBaseline(persistedCondition);
+  /**
+   * v1.187.3 — the baseline the continuation gate still reads. A recovery (isRestartRecovery)
+   * ends it: once the all-clear below it is spoken, a warning inside the rest of the warm-up is
+   * news to the house, not the continuation of a level it has been told is over.
+   */
+  let continuationBaseline: ConditionLevel | null = bootBaselineLevel;
+  /** v1.187.3 — BroadcastMonitorOpts.alertSetSettled, read defensively: absent or throwing ⇒ not settled. */
+  const alertSetSettled = (): boolean => {
+    try { return opts.alertSetSettled?.() === true; } catch { return false; }
+  };
   // v1.64.0 — identity-aware RED replay gate (see redReplayGate.ts). Constructed
   // here so the state read happens once, at boot: that read IS the restart
   // boundary. Note it is deliberately NOT keyed off bootBaselineLevel/lastOutcome
@@ -2718,8 +2777,23 @@ export function startBroadcastMonitor(
     // a "rise" once the analytics/learned alerts re-warm. Don't re-speak it aloud;
     // adopt the level silently. A genuine escalation above the pre-restart baseline
     // (e.g. yellow→red across the restart) still passes through and broadcasts.
-    if (transitioned && isRestartContinuation(bootBaselineLevel, level, Date.now() - bootMs)) {
-      log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)`);
+    // v1.187.3 — …unless it is a RECOVERY (isRestartRecovery): a green transition that has stood
+    // the de-escalation dwell on a settled alert set. It goes on as an ordinary transition below
+    // (the all-clear speech gate, quiet hours and the storm gates still apply), and the baseline
+    // ends with it, so it is announced once and a later warning in the warm-up is news.
+    if (
+      transitioned && continuationBaseline != null && Date.now() - bootMs < BROADCAST_BOOT_WARMUP_MS
+      && isRestartRecovery(continuationBaseline, level, greenSinceMs, Date.now(), alertSetSettled())
+    ) {
+      log(`broadcast: green has stood ${Math.round((Date.now() - (greenSinceMs ?? Date.now())) / 1000)} s on a settled alert set — a recovery, not a continuation of the pre-restart ${continuationBaseline}; announced as a transition`);
+      continuationBaseline = null;
+    }
+    if (transitioned && isRestartContinuation(continuationBaseline, level, Date.now() - bootMs)) {
+      // v1.187.3 — a green transition reaches here only on an unsettled alert set.
+      const why = level === 'green'
+        ? ' — not taken as a recovery: the alert set is not settled (the store has not hydrated, or an alert feed has not delivered since boot)'
+        : '';
+      log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)${why}`);
       // v1.186.0 — heard before the restart (the baseline says so); a kept red is not.
       adoptLevel(keepRed ? 'red' : level, keepRed ? prevCrit : crit, ids, !keepRed);
       return;
