@@ -75,10 +75,12 @@ const ha = agent.get('http://supervisor');
 ha.intercept({ path: '/core/api/services', method: 'GET' })
   .reply(200, JSON.stringify([{ domain: 'music_assistant', services: { play_announcement: {} } }])).persist();
 ha.intercept({ path: '/core/api/states', method: 'GET' }).reply(200, '[]').persist();
-/** v1.187.4 — the Music Assistant speakers' state ('unavailable': the pre-flight defers). */
+/** v1.187.4 — the Music Assistant speakers' state ('unavailable': the pre-flight defers), and the
+ *  SIP cordless entity's (read by the probe after a timed-out SIP dispatch). */
 let maState = 'idle';
+let cordlessState = 'idle';
 ha.intercept({ path: (p: string) => p.startsWith('/core/api/states/'), method: 'GET' })
-  .reply(() => ({ statusCode: 200, data: JSON.stringify({ state: maState, attributes: {} }) })).persist();
+  .reply((o) => ({ statusCode: 200, data: JSON.stringify({ state: String(o.path).endsWith('media_player.cordless') ? cordlessState : maState, attributes: {} }) })).persist();
 /** v1.187.4 — play_announcement "ok" in under 2 s: HA returned without playing. */
 let tooFast = false;
 ha.intercept({ path: '/core/api/services/music_assistant/play_announcement', method: 'POST' })
@@ -87,10 +89,15 @@ ha.intercept({ path: '/core/api/services/music_assistant/play_announcement', met
     if (!tooFast) offset += 30_000; // play_announcement returns when playback ENDS — a real clip plays ~30 s
     return { statusCode: 200, data: '[]' };
   }).delay(80).persist();
-/** v1.187.4 — the SIP cordless (BROADCAST_SIP_TARGETS), answering `sipStatus`. */
+/** v1.187.4 — the SIP cordless (BROADCAST_SIP_TARGETS), answering `sipStatus`, or losing the HTTP
+ *  response (`sipTimeout`: the call may still have run — the entity state says). */
 let sipPlays = 0;
 let sipStatus = 200;
-ha.intercept({ path: '/core/api/services/media_player/play_media', method: 'POST' })
+let sipTimeout = false;
+const SIP_PLAY = '/core/api/services/media_player/play_media';
+ha.intercept({ path: (p: string) => p === SIP_PLAY && sipTimeout, method: 'POST' })
+  .replyWithError(new Error('Headers Timeout Error (test)')).persist();
+ha.intercept({ path: (p: string) => p === SIP_PLAY && !sipTimeout, method: 'POST' })
   .reply(() => {
     sipPlays += 1;
     return { statusCode: sipStatus, data: sipStatus === 200 ? '[]' : 'error' };
@@ -208,6 +215,8 @@ beforeEach(() => {
   ttsFails = false;
   sipPlays = 0;
   sipStatus = 200;
+  sipTimeout = false;
+  cordlessState = 'idle';
   process.env.BROADCAST_SIP_TARGETS = '';
 });
 after(async () => {
@@ -1006,6 +1015,23 @@ test('★★ …but a red the cordless refused while every speaker was unavailab
   settledSince = Date.now();
   await until(b, () => b.has(WARMUP_ENDED), 'adopted silently');
   assert.equal(played(b, 'green'), 0);
+});
+
+test('★★ a red the cordless played though its HTTP response was lost (the entity state confirms it, 8 s on) was audible: announced', { timeout: 60_000 }, async () => {
+  await heard('yellow');
+  process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
+  sipTimeout = true;
+  cordlessState = 'playing'; // the announce call is ringing through
+  settledSince = null;
+  const b = rig();
+  maState = 'unavailable';
+  await heldGreenAfterRed(b, () => until(b, () => b.has('SIP delivery confirmed via entity state after an HTTP timeout'), 'the probe confirming the cordless played', 20_000));
+  maState = 'idle';
+  assert.ok(b.has('announced as a transition (a red condition was audible after the restart)'));
+  offset += 8 * MIN;
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'held past the warm-up');
+  settledSince = Date.now();
+  await until(b, () => played(b, 'green') === 1, 'the all-clear');
 });
 
 test('★★ a red Music Assistant returned in under 2 s was not audible (HA answered without playing): adopted silently', async () => {

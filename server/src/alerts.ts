@@ -1092,7 +1092,8 @@ export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS,
  * has not stood its window yet: an inverter error (DPU_ERR_DEBOUNCE_MS), an SHP2 source error (the
  * same window), an MPPT string error while producing (MPPT_ERR_DEBOUNCE_MS) and a backup pool
  * reading unknown (RESERVE_BLIND_AFTER_MS, 15 min). These clocks restart at zero on every boot, so
- * a critical or warning that stood before a restart is absent after it for one window. While any
+ * a critical or warning that stood before a restart is absent after it for one window (v1.187.4 —
+ * the pool's is carried across a restart of at most an hour: SnapshotStore, pool-unknown.json). While any
  * is pending, a green read from the set may be that absence, not an all-clear: the broadcast's
  * post-restart recovery (broadcast.isRestartRecovery) is not taken on it. Same comparison as the
  * rules above (`now - sinceMs < window` withholds), so a withheld alert is always listed. Kept
