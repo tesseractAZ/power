@@ -6,7 +6,7 @@
 
 - **An all-clear after a restart no longer comes just before a warning it hid.** Confirming that the backup pool's charge can be read takes 15 minutes, and that wait starts again at every restart. The add-on held back the all-clear after a restart only for the first ten minutes. An all-clear decided at the end of those ten minutes, or for an alarm that cleared late in them, could therefore be announced a few minutes before a "Reserve alarm blind" warning that had stood before the restart came back.
   - The all-clear after a restart is now held for up to 16 minutes after the start. It is announced once the condition has stayed clear for three minutes after the add-on's picture is complete. When the picture becomes complete late, it gets three more minutes.
-  - If the picture never becomes complete, the all-clear is announced after 16 minutes when an alarm was announced after the restart. Otherwise it is not announced, as before.
+  - If it has not been announced by then, it is announced when the picture is complete or an alarm was announced after the restart. Only when neither is true is it not announced, as before.
   - Meanwhile the alarm level is held: a new warning is announced at once, and a warning that comes back after being heard is not announced again.
   - The decision also waits for an announcement that is still playing, so an alarm heard at that moment counts.
   - A condition that is already clear at start-up is still not announced.
@@ -20,9 +20,10 @@
 
 **Announcements**
 
-- **An alarm nobody heard is announced when it comes back.** When an alarm clears, the add-on waits three minutes before confirming the all-clear, and an alarm that returns within that time is treated as the same alarm continuing, so it is not announced again. That was also true for an alarm that had never been heard, for example while every speaker was unavailable. It was then never announced, though it was still standing. It is now announced when it returns.
+- **An alarm nobody heard is announced when it comes back.** When an alarm clears, the add-on waits three minutes before confirming the all-clear, and an alarm that returns within that time is treated as the same alarm continuing, so it is not announced again. That was also true for an alarm that had never been heard, for example while every speaker was unavailable. It was then never announced, though it was still standing. It is now announced when it returns, including in the first minutes after a restart.
 - **A late retry no longer repeats an alarm that has cleared.** When the speakers are unavailable (for example while Music Assistant restarts), an announcement is retried after 30 seconds, 90 seconds and 3 minutes. A retry repeated the alarm it was made for even when that alarm had cleared and its all-clear had already been announced, so a cleared alarm became the last words. When the all-clear itself could not be played, it was never retried, because the waiting retry of the alarm took precedence.
   - A retry is now played only while the alarm level it was made for has not changed since. Otherwise it is dropped, and the newer announcement takes its place in the retry queue.
+  - When a different critical alarm replaces the one being retried, the new alarm takes the retry's place with retries of its own, and once it has been heard the older retry is cancelled. Before, the new alarm could be given up without a single retry, and the cleared alarm was announced in its place.
   - A warning announced while a critical alarm stays current is still retried. So is an alarm whose all-clear is still waiting out its three-minute confirmation.
   - Battery-level, runway and other dedicated announcements are retried as before.
 
