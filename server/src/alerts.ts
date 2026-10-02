@@ -1074,6 +1074,18 @@ const MPPT_ERR_DEBOUNCE_MS = DPU_ERR_DEBOUNCE_MS;
 export const BOOT_RESET_ONSET_DEBOUNCE_MS = Math.max(DPU_ERR_DEBOUNCE_MS, MPPT_ERR_DEBOUNCE_MS);
 
 /**
+ * v1.187.4 — the LONGEST of the onset windows whose clocks restart in a new process: the backup
+ * pool's RESERVE_BLIND_AFTER_MS (15 min), beside the 3-minute device-error debounces above. Until it
+ * has run, an alert that stood before the restart can still be withheld for that reason alone
+ * (debouncedOnsetsPending) — past the broadcast's 10-minute warm-up. The store carries a pool-unknown
+ * onset across a short restart (SnapshotStore, pool-unknown.json), but not across a long outage, an
+ * unreadable file or the first boot of a release that writes it. The broadcast holds the warm-up-end
+ * decision on a green held for its recovery until the alert set is settled or this long (plus
+ * RESTARTED_ONSET_HOLD_MARGIN_MS) after its boot.
+ */
+export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS, RESERVE_BLIND_AFTER_MS);
+
+/**
  * v1.187.3 (review) — WHICH IN-MEMORY ONSET CLOCKS ARE STILL INSIDE THEIR DEBOUNCE at `nowMs`?
  *
  * Each names a condition the device is reporting NOW that computeAlerts withholds only because it

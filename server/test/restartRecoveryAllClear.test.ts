@@ -53,6 +53,7 @@ const B = await import('../src/broadcast.js');
 const { generateAudioAssets } = await import('../src/audioAssets.js');
 const { pcmToWav } = await import('../src/wyomingTts.js');
 const { alertFingerprint } = await import('../src/redReplayGate.js');
+const { LONGEST_RESTARTED_ONSET_MS } = await import('../src/alerts.js');
 
 const STATUS_PATH = resolve(ROOT, 'broadcast-last.json');
 const MIN = 60_000;
@@ -140,6 +141,10 @@ const RECOVERY = 'a recovery, not a continuation of the pre-restart';
 const CONTINUATION = 'matches pre-restart advisory';
 const HELD_FOR_RECOVERY = 'but is held, not adopted';
 const WARMUP_ENDED = 'the warm-up ended before the green had stood';
+/** v1.187.4 — the warm-up-end decision waits for a settled set or the restarted onset windows. */
+const WAITS_PAST_WARMUP = 'on an alert set that is not settled — still held, until the set settles or at the latest 16 min after the boot';
+/** …due this long after the boot when the set never settles (boot + 16 min). */
+const DECISION_DUE = LONGEST_RESTARTED_ONSET_MS + B.RESTARTED_ONSET_HOLD_MARGIN_MS;
 const RESTORED = 'sounded critical(s) of before the restart restored';
 const HOLD_LINE = 'A cell-spread critical that sounded is held, not cleared';
 const ABSENT_HOLD = B.SOUNDED_VDIFF_ABSENT_HOLD_MS;
@@ -293,7 +298,7 @@ test('★★★ review replay: a heard red, a boot-transient yellow, a green on 
   assert.equal(announces, 2, 'the pre-restart red and the critical — no all-clear between them');
 });
 
-test('★★★ the warm-up ends with the green still held: adopted silently as a continuation, as before v1.187.3 (fail-quiet)', async () => {
+test('★★★ the warm-up ends with the green still held on a set that never settles: adopted silently as a continuation once the restarted onset windows have run (fail-quiet)', async () => {
   await heard('yellow');
   alerts = [WARN_K];
   settledSince = null;
@@ -303,9 +308,16 @@ test('★★★ the warm-up ends with the green still held: adopted silently as 
   await until(b, () => b.has('yellow → green held'), 'the dwell');
   offset += DWELL + SEC;
   await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery');
-  assert.ok(b.has('or adopted silently as a continuation if the warm-up ends first'), 'the held line says what follows');
-  offset += 8 * MIN; // past the 10-minute warm-up
-  await until(b, () => b.has(WARMUP_ENDED), 'adopted at the end of the warm-up');
+  assert.ok(b.has('if the warm-up ends first it is adopted silently as a continuation once the set has settled, or at the latest 16 min after the boot'), 'the held line says what follows');
+  offset += 8 * MIN; // past the 10-minute warm-up (boot + 11 min)
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'v1.187.4: still held past the warm-up');
+  await sleep(80);
+  assert.ok(!b.has(WARMUP_ENDED), 'not decided on an unsettled set before the restarted onset windows have run');
+  assert.equal(b.mon.status().conditionLevel, 'yellow', 'nothing committed');
+  assert.equal(b.count(WAITS_PAST_WARMUP), 1, 'said once');
+  offset += 5 * MIN; // boot + 16 min: the bound
+  await until(b, () => b.has(WARMUP_ENDED), 'adopted at the bound');
+  assert.equal(b.count(WAITS_PAST_WARMUP), 1, 'said once for the whole wait');
   await sleep(80);
   assert.equal(announces, 1, 'not announced: the set never settled');
   assert.ok(!b.has('condition transition → green'));
@@ -393,7 +405,9 @@ test('★★ a monitor not told the alert set is settled (the option absent, thr
     offset += DWELL + SEC;
     await until(c, () => c.has(HELD_FOR_RECOVERY), `held (${what})`);
     offset += 8 * MIN;
-    await until(c, () => c.has(WARMUP_ENDED), `adopted silently at the end of the warm-up (${what})`);
+    await until(c, () => c.has(WAITS_PAST_WARMUP), `v1.187.4: still held past the warm-up (${what})`);
+    offset += 5 * MIN; // boot + 16 min
+    await until(c, () => c.has(WARMUP_ENDED), `adopted silently once the restarted onset windows have run (${what})`);
     assert.equal(announces, spoken, `${what}: only the pre-restart yellows were spoken`);
     assert.ok(!c.has(RECOVERY), what);
     c.stop();
@@ -583,7 +597,11 @@ test('★★★ log review (LOW): a green held by a restored sounded critical un
   await sleep(60);
   assert.ok(!b.has(WARMUP_ENDED), 'not adopted on the due tick: it has one more dwell to settle');
   assert.equal(played(b, 'green'), 0);
-  offset += DWELL + 5 * SEC; // that dwell has passed too, and the set never settled
+  offset += DWELL + 5 * SEC; // that dwell has passed too, and the set never settled (boot + 13 min)
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'v1.187.4: still held until the restarted onset windows have run');
+  await sleep(60);
+  assert.ok(!b.has(WARMUP_ENDED));
+  offset += 3 * MIN; // boot + 16 min
   await until(b, () => b.has(WARMUP_ENDED), 'adopted silently as a continuation');
   await sleep(80);
   assert.equal(played(b, 'green'), 0, 'not spoken: the set never settled');
@@ -808,12 +826,16 @@ test('★★ seam review (LOW): a red spoken after the restart whose green is st
   await until(b, () => b.has('red → green held'), 'the hold');
   offset += DWELL + SEC;
   await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery: the set is not settled');
-  assert.ok(b.has('or announced as a transition (a red condition was spoken after the restart) if the warm-up ends first'), 'the held line says what follows');
+  assert.ok(b.has('if the warm-up ends first it is announced as a transition (a red condition was audible after the restart) once the set has settled, or at the latest 16 min after the boot'), 'the held line says what follows');
   await sleep(60);
   assert.equal(played(b, 'green'), 0, 'not inside the warm-up');
   offset += 8 * MIN; // past the warm-up
-  await until(b, () => played(b, 'green') === 1, 'the all-clear once the warm-up has ended');
-  assert.ok(b.has('condition was spoken after the restart'));
+  await until(b, () => b.has(WAITS_PAST_WARMUP), 'v1.187.4: held while the set is not settled');
+  await sleep(60);
+  assert.equal(played(b, 'green'), 0, 'not on an unsettled set before the restarted onset windows have run');
+  offset += 5 * MIN; // boot + 16 min
+  await until(b, () => played(b, 'green') === 1, 'the all-clear once the restarted onset windows have run');
+  assert.ok(b.has('condition was audible after the restart'));
   assert.ok(!b.has(WARMUP_ENDED));
   assert.equal(b.mon.status().lastLevel, 'green', 'the last words are not the cleared red');
   assert.equal(announces, 3);

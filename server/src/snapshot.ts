@@ -170,6 +170,59 @@ export const FIRST_PIN_LISTS = 2;
 export const PACK_GHOSTS_RETRY_MS = 60_000;
 
 /**
+ * v1.187.4 — THE BACKUP POOL'S UNKNOWN ONSET SURVIVES A RESTART (pool-unknown.json).
+ *
+ * reserve-alarm-blind keys on how long the published pool % has read unknown
+ * (backupPoolUnknownSince): a warning after 15 minutes, a CRITICAL after 60 off-grid. The onset
+ * lived only in this process, so a restart during a cloud wedge started the clock again at the
+ * first projection: the alarm the house had heard was ABSENT for 15 minutes and came back as a
+ * WARNING until boot + 60 even when it had been critical — through a deploy, on the one alarm whose
+ * subject is that every reserve alarm is dark. The onset and the last time this process saw the
+ * pool unknown are now written beside the DB and carried by a panel whose first projection after
+ * the restart reads unknown again, when the add-on was down at most POOL_UNKNOWN_CARRY_MAX_GAP_MS.
+ * Carrying counts the outage as blind time, the fail-LOUD direction: nothing watched the pool then
+ * either. A first projection that reads the pool retires the entry.
+ */
+export interface PoolUnknownOnset { sinceMs: number; lastSeenMs: number }
+/** v1.187.4 — the longest outage a pool-unknown onset is carried across. A cloud wedge lasts hours
+ *  (the two in the 30-day engine review: 25.8 h, 42.2 h); an outage longer than the critical
+ *  escalation window itself is a new observation. The knee sessions' bound (VDIFF_KNEE_GAP_CARRY_MS). */
+export const POOL_UNKNOWN_CARRY_MAX_GAP_MS = 60 * 60_000;
+/** v1.187.4 — how often the file's last-seen time is refreshed while a pool stays unknown (and a
+ *  failed save retried): a restart is judged against it, so it is at most this stale. */
+export const POOL_UNKNOWN_PERSIST_EVERY_MS = 60_000;
+
+/** v1.187.4 — the file's entries: an object of serial → { sinceMs, lastSeenMs }, both finite,
+ *  sinceMs ≤ lastSeenMs. Anything else (absent, corrupt, a malformed entry) is skipped. */
+export function parsePoolUnknownOnsets(raw: unknown): Map<string, PoolUnknownOnset> {
+  const out = new Map<string, PoolUnknownOnset>();
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [sn, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (v == null || typeof v !== 'object') continue;
+    const { sinceMs, lastSeenMs } = v as Record<string, unknown>;
+    if (typeof sinceMs !== 'number' || !Number.isFinite(sinceMs)) continue;
+    if (typeof lastSeenMs !== 'number' || !Number.isFinite(lastSeenMs)) continue;
+    if (sinceMs > lastSeenMs) continue;
+    out.set(sn, { sinceMs, lastSeenMs });
+  }
+  return out;
+}
+
+/** v1.187.4 — the onset a panel whose first projection after a restart reads the pool unknown
+ *  carries: the file's, when the pool was last seen unknown at most `maxGapMs` before now (never
+ *  later than now: a clock stepped back does not move it into the future); else null — the clock
+ *  starts now. Pure. */
+export function carriedPoolUnknownSince(
+  entry: PoolUnknownOnset | undefined,
+  nowMs: number,
+  maxGapMs = POOL_UNKNOWN_CARRY_MAX_GAP_MS,
+): number | null {
+  if (entry == null) return null;
+  if (nowMs - entry.lastSeenMs > maxGapMs) return null;
+  return Math.min(entry.sinceMs, nowMs);
+}
+
+/**
  * v1.181.0 — a Core's content fingerprint: the fields that move with every real reading (power
  * flows, pack flows and SoC, battery volts/amps). Identical across polls = the same body again.
  * Null for anything that is not a projected Core.
@@ -261,6 +314,16 @@ export class SnapshotStore extends EventEmitter {
   // the grace hold already absorbed reconnect blips). Feeds the reserve-blind
   // compensating alert so it keys off a SUSTAINED blind window, not a flicker.
   private backupPoolUnknownSinceBySn: Map<string, number> = new Map();
+  /** v1.187.4 — when each pool was last projected unknown (the file's lastSeenMs). */
+  private backupPoolUnknownSeenBySn: Map<string, number> = new Map();
+  /** v1.187.4 — pool-unknown.json (POOL_UNKNOWN_PATH overrides; '' disables): next to the DB in
+   *  production, nowhere elsewhere. Resolved and read at the first SHP2 projection. */
+  private poolUnknownPath: string | null = null;
+  /** v1.187.4 — the file's onsets per panel, until that panel's first projection consumes its entry. */
+  private poolUnknownOnDisk = new Map<string, PoolUnknownOnset>();
+  private poolUnknownLastAttemptMs = -Infinity;
+  private poolUnknownDirty = false;
+  private poolUnknownWriteWarned = false;
   // Injectable clock — prod uses Date.now; tests call setClock() for deterministic grace-hold timing.
   private now: () => number = Date.now;
   /** test-only — drive the grace-hold window deterministically. */
@@ -751,10 +814,67 @@ export class SnapshotStore extends EventEmitter {
     else if (source === 'none' && live.pct == null) this.logger(`backup-pool: grace window expired → unknown (sn=${sn})`);
     // v1.8.0 (review F3) — record the onset of a published-null pool; clear the
     // instant a real read returns. Consumed by backupPoolUnknownSince().
+    // v1.187.4 — the first projection of a panel in this process consumes its entry in
+    // pool-unknown.json: unknown again, it carries the onset of before the restart
+    // (carriedPoolUnknownSince); readable, the entry is retired.
+    if (this.poolUnknownPath == null) this.loadPoolUnknown();
+    const nowMs = this.now();
+    const onDisk = this.poolUnknownOnDisk.get(sn);
+    this.poolUnknownOnDisk.delete(sn);
+    let changed = onDisk !== undefined;
     if (out.pct == null) {
-      if (!this.backupPoolUnknownSinceBySn.has(sn)) this.backupPoolUnknownSinceBySn.set(sn, this.now());
+      if (!this.backupPoolUnknownSinceBySn.has(sn)) {
+        const carried = carriedPoolUnknownSince(onDisk, nowMs);
+        this.backupPoolUnknownSinceBySn.set(sn, carried ?? nowMs);
+        changed = true;
+        if (carried != null) {
+          this.logger(`backup-pool: unknown since ${Math.round((nowMs - carried) / 60_000)} min ago, before the restart (last seen unknown ${Math.round((nowMs - onDisk!.lastSeenMs) / 1000)} s ago) — the reserve-blind clock carries it, not restarted (sn=${sn})`);
+        }
+      }
+      this.backupPoolUnknownSeenBySn.set(sn, nowMs);
     } else {
-      this.backupPoolUnknownSinceBySn.delete(sn);
+      if (this.backupPoolUnknownSinceBySn.delete(sn)) changed = true;
+      this.backupPoolUnknownSeenBySn.delete(sn);
+    }
+    const sinceAttemptMs = nowMs - this.poolUnknownLastAttemptMs;
+    const due = sinceAttemptMs >= POOL_UNKNOWN_PERSIST_EVERY_MS || sinceAttemptMs < 0;
+    if (changed || (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty))) this.writePoolUnknown();
+  }
+
+  /** v1.187.4 — load pool-unknown.json (absent or corrupt: nothing carried, the pre-v1.187.4 clock). */
+  private loadPoolUnknown(): void {
+    this.poolUnknownPath = process.env.POOL_UNKNOWN_PATH
+      ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'pool-unknown.json') : '');
+    if (!this.poolUnknownPath) return;
+    try {
+      this.poolUnknownOnDisk = parsePoolUnknownOnsets(JSON.parse(readFileSync(this.poolUnknownPath, 'utf8')));
+    } catch { /* absent or corrupt → nothing carried */ }
+  }
+
+  /** v1.187.4 — atomic (temp + rename): every pool unknown now, with when it was last seen so, plus
+   *  the file's entry for a panel not projected yet in this process while it is still carriable. A
+   *  failure is logged once and retried at most once per POOL_UNKNOWN_PERSIST_EVERY_MS. */
+  private writePoolUnknown(): void {
+    const path = this.poolUnknownPath;
+    if (!path) return;
+    const nowMs = this.now();
+    this.poolUnknownLastAttemptMs = nowMs;
+    const out: Record<string, PoolUnknownOnset> = {};
+    for (const [sn, e] of this.poolUnknownOnDisk) if (carriedPoolUnknownSince(e, nowMs) != null) out[sn] = e;
+    for (const [sn, sinceMs] of this.backupPoolUnknownSinceBySn) {
+      out[sn] = { sinceMs, lastSeenMs: Math.max(sinceMs, this.backupPoolUnknownSeenBySn.get(sn) ?? sinceMs) };
+    }
+    try {
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, JSON.stringify(out));
+      renameSync(tmp, path);
+      this.poolUnknownDirty = false;
+    } catch (e) {
+      this.poolUnknownDirty = true;
+      if (!this.poolUnknownWriteWarned) {
+        this.poolUnknownWriteWarned = true;
+        this.logger(`backup-pool: could not save the pool-unknown onset (${(e as Error)?.message ?? e}) — a restart would start the reserve-blind clock again; retrying at most once a minute`);
+      }
     }
   }
 
