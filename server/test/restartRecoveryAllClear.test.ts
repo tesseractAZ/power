@@ -97,12 +97,12 @@ interface Rig {
   stop: () => void;
 }
 const live: Rig[] = [];
-function rig(): Rig {
+function rig(wired = true): Rig {
   const logs: string[] = [];
   const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-recovery-cache-'));
   const mon = B.startBroadcastMonitor(store, (m) => logs.push(m), {
     klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', renderTts, tickMs: 10,
-    alertSetSettled: () => settled,
+    ...(wired ? { alertSetSettled: () => settled } : {}),
   });
   const r: Rig = {
     mon, logs,
@@ -226,6 +226,37 @@ test('★★★ the recovery waits for the de-escalation dwell: nothing is spoke
   assert.ok(!b.has(RECOVERY));
   offset += 21 * SEC;
   await until(b, () => played(b, 'green') === 1, 'the all-clear once the dwell has passed');
+});
+
+test('★★ a monitor not told the alert set is settled (the option absent, or throwing) never takes a recovery', async () => {
+  await heard('yellow');
+  alerts = [WARN_K];
+  const b = rig(false);
+  await until(b, () => b.has(CONTINUATION), 'the continuation');
+  alerts = [];
+  await until(b, () => b.has('yellow → green held'), 'the dwell');
+  offset += DWELL + SEC;
+  await until(b, () => b.has('not taken as a recovery'), 'the green kept as a continuation');
+  await sleep(60);
+  assert.equal(announces, 1);
+  b.stop();
+  // A throwing reader is read as not settled, never as settled.
+  await heard('yellow');
+  alerts = [WARN_K];
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-recovery-cache-'));
+  const logs: string[] = [];
+  const mon = B.startBroadcastMonitor(store, (m) => logs.push(m), {
+    klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', renderTts, tickMs: 10,
+    alertSetSettled: () => { throw new Error('feeds unreadable (test)'); },
+  });
+  const c: Rig = { mon, logs, has: (x) => logs.some((l) => l.includes(x)), count: (x) => logs.filter((l) => l.includes(x)).length, stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true }); } };
+  live.push(c);
+  await until(c, () => c.has(CONTINUATION), 'the continuation');
+  alerts = [];
+  await until(c, () => c.has('yellow → green held'), 'the dwell');
+  offset += DWELL + SEC;
+  await until(c, () => c.has('not taken as a recovery'), 'the green kept as a continuation');
+  assert.equal(announces, 2, 'only the two pre-restart yellows were spoken');
 });
 
 test('★★ the boot green is still joined silently: a condition that cleared while the add-on was down gets no all-clear', async () => {
