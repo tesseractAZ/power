@@ -1040,6 +1040,25 @@ test('★★ …settled at boot + 15: the question stays open to boot + 19 and t
   assert.ok(b.has(`${RECOVERY} yellow`));
 });
 
+test('★★ review (N1): a set that settles just past boot + 16 reopens the question for its dwell — when it closes first on that settled set, the green is announced, not adopted silently', async () => {
+  await heard('yellow');
+  alerts = [WARN_K];
+  settledSince = null;
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the continuation');
+  await stepTo(b, 14 * MIN);
+  alerts = []; // the heard warning clears at boot + 14: its green stands the dwell at boot + 17
+  await until(b, () => b.has('yellow → green held'), 'the dwell');
+  await stepTo(b, 16 * MIN + 30 * SEC);
+  settledSince = Date.now(); // settled just past boot + 16: the question reopens until boot + 19
+  await stepTo(b, 17 * MIN + 10 * SEC);
+  await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery on the settled set');
+  await stepTo(b, DECISION_DUE_SETTLED + 10 * SEC); // closes at boot + 19, 2.5 min on the settled set
+  await until(b, () => played(b, 'green') === 1, '★ announced at the close on a settled set');
+  assert.ok(b.has('on a settled alert set — announced as a transition'));
+  assert.ok(!b.has(WARMUP_ENDED));
+});
+
 test('★★ nothing audible since the boot: the held green waits too, and the heard warning that returns at boot + 15 is a flicker the hold absorbs — not said again', async () => {
   await heard('yellow');
   alerts = [WARN_RB];
@@ -1076,7 +1095,7 @@ test('★★★ review (A1): a red never audible after the restart that returns 
   await stepTo(b, 10 * MIN + 30 * SEC);
   alerts = [CRIT_A]; // the same critical stands again
   await until(b, () => played(b, 'red') === 1, '★ the standing red, spoken at last');
-  assert.ok(b.has('again, never audible — spoken, not absorbed'));
+  assert.ok(b.has('never audible in this episode — presented again as a transition'));
   assert.ok(!b.has('flicker absorbed'));
 });
 
@@ -1096,6 +1115,30 @@ test('★★★ review (P4): a red heard after the restart that clears back to t
   await until(b, () => played(b, 'yellow') === 1, '★ the yellow, the last words no longer the cleared red');
   assert.equal(b.count(CONTINUATION), 0);
   assert.equal(b.mon.status().lastLevel, 'yellow');
+});
+
+test('★★ review (P7): the restart continuation waits for a red retry in flight — the red it makes audible ends the continuation, and the yellow is spoken', async () => {
+  await heard('yellow');
+  alerts = [];
+  settledSince = 0;
+  const b = rig(true, [1500, 1500, 1500]);
+  await sleep(80);
+  maState = 'unavailable';
+  alerts = [CRIT_A, WARN_K];
+  await until(b, () => b.has('broadcast: red deferred') && b.has('deferred retry 1/3'), 'the red deferring');
+  alerts = [WARN_K];
+  await until(b, () => b.has('red → yellow held'), 'the hold');
+  maState = 'idle';
+  slowPlay = true;
+  const before = announces;
+  await until(b, () => announces > before, 'the red retry playing');
+  offset += DWELL + SEC; // the yellow has stood its dwell while the red plays
+  await until(b, () => played(b, 'red') === 1, 'the red retry completing');
+  slowPlay = false;
+  await until(b, () => b.has('yellow held for boot confirmation'), 'the yellow, not a continuation');
+  offset += B.BOOT_YELLOW_CONFIRM_MS + 5 * SEC;
+  await until(b, () => played(b, 'yellow') === 1, '★ the yellow: the red the house just heard has cleared');
+  assert.equal(b.count(CONTINUATION), 0);
 });
 
 test('★★ review (A3): the restart decision waits for a red retry in flight — what it makes audible decides the announcement', async () => {

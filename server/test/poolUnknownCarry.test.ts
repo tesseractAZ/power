@@ -75,6 +75,23 @@ function blind(s: InstanceType<typeof SnapshotStore>, nowMs: number) {
     Date.now = realNow;
   }
 }
+/** v1.187.4 (review) — the alarm of a panel with no projection (dark since the restart): as the
+ *  alert monitor wires it, first listed in this process or the onset the store would carry. */
+function blindDark(s: InstanceType<typeof SnapshotStore>, nowMs: number, firstListedMs: number) {
+  const realNow = Date.now;
+  Date.now = () => nowMs;
+  try {
+    const conn = {
+      lastDeviceListAttemptAt: nowMs, lastDeviceListSuccessAt: nowMs, perDevice: new Map(),
+      backupPoolUnknownSinceBySn: new Map(), panelFirstListedBySn: new Map([[PANEL, firstListedMs]]),
+      poolUnknownCarriedSinceBySn: s.poolUnknownCarried(),
+    };
+    return computeAlerts(s.get().devices as any, conn as any, { present: false, backstopping: false })
+      .find((a) => a.id.startsWith('reserve-alarm-blind'));
+  } finally {
+    Date.now = realNow;
+  }
+}
 /** The first process: the pool reads unknown from T0, a projection every 10 min until `untilMs`. */
 function blindUntil(untilMs: number) {
   const a = proc(T0);
@@ -268,10 +285,36 @@ test('★★ review: a failed save removes the file — a pool that reads again 
     b.read(T0 + 72 * MIN, READABLE); // the entry is retired, but the save fails
     assert.ok(!existsSync(path), '★ the stale entry is removed with the file');
     assert.ok(b.has('could not save the pool-unknown onset'));
+    assert.ok(b.has('the file is removed, so a restart starts the reserve-blind clock again'), 'the line says what was done');
     rmSync(`${path}.tmp`, { recursive: true, force: true });
     const c = proc(T0 + 73 * MIN);
     c.read(T0 + 73 * MIN, UNKNOWN);
     assert.equal(c.s.backupPoolUnknownSince(PANEL), T0 + 73 * MIN, 'a new episode: nothing stale carried');
+  });
+});
+
+test('★★ review (N6): a panel still dark after the restart is blind since the onset it would carry — critical at once off-grid, not a warning from its first listing', () => {
+  withPath('dark-after.json', () => {
+    blindUntil(T0 + 70 * MIN);
+    const boot = T0 + 72 * MIN;
+    const b = proc(boot); // listed, never projected
+    const a = blindDark(b.s, boot + 3 * MIN, boot);
+    assert.equal(a?.severity, 'critical', '★ blind since the carried onset (75 min)');
+    assert.match(a!.detail, /unreadable for 75 min/);
+    assert.deepEqual(b.s.poolUnknownCarryPending(), [PANEL]);
+  });
+});
+
+test('★★ review (N1): a listed panel dark across the restart and for over an hour after it keeps its onset — the new process refreshes the entry it holds', () => {
+  withPath('dark-long.json', (path) => {
+    blindUntil(T0 + 30 * MIN);
+    const boot = T0 + 32 * MIN;
+    const b = proc(boot);
+    for (let t = boot; t <= boot + 90 * MIN; t += MIN) { b.at(t); b.s.markDeviceListAttempt(); }
+    assert.equal(JSON.parse(readFileSync(path, 'utf8'))[PANEL].lastSeenMs, boot + 90 * MIN, 'held by this process: last seen now');
+    assert.deepEqual(b.s.poolUnknownCarryPending(), [PANEL], 'still pending: the panel has not reported');
+    b.read(boot + 91 * MIN, UNKNOWN);
+    assert.equal(b.s.backupPoolUnknownSince(PANEL), T0, '★ carried at its first projection, two hours on');
   });
 });
 

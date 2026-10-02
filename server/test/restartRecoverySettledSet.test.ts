@@ -45,6 +45,7 @@ delete process.env.NOTIFY_CHANNEL;
 delete process.env.GRID_PRESENCE_ENTITY;
 process.env.BROADCAST_RED_REPLAY_STATE_PATH = resolve(ROOT, 'red-replay.json');
 process.env.SUPERVISOR_TOKEN = 'test-token';
+process.env.POOL_UNKNOWN_PATH = ''; // v1.187.4 — several stores share this ROOT: the tests that carry an onset name their own file
 process.env.BROADCAST_ENABLED = 'true';
 process.env.BROADCAST_TARGETS = 'media_player.alpha';
 process.env.BROADCAST_SIP_TARGETS = '';
@@ -428,7 +429,7 @@ test('★★★ v1.187.4: a pool unknown across the restart carries its onset �
     fresh(store);
     await until(() => p.mon.alertSetSettledSince() != null, '★ settled: no onset clock withholds a fault', p.logs);
   } finally {
-    delete process.env.POOL_UNKNOWN_PATH;
+    process.env.POOL_UNKNOWN_PATH = '';
   }
 });
 
@@ -459,7 +460,27 @@ test('★★ v1.187.4 (review): a listed panel not projected yet with an onset o
     assert.equal(((store.get().alerts ?? []) as Alert[]).find((x) => x.id === 'reserve-alarm-blind')?.severity, 'critical');
     await until(() => p.mon.alertSetSettledSince() != null, 'settled once nothing is withheld', p.logs);
   } finally {
-    delete process.env.POOL_UNKNOWN_PATH;
+    process.env.POOL_UNKNOWN_PATH = '';
+  }
+});
+
+test('★★ v1.187.4 (review): a panel still dark after the restart is blind since the onset it would carry — through the alert monitor, critical at once', { timeout: 60_000 }, async () => {
+  const path = join(ROOT, 'pool-unknown-dark.json');
+  process.env.POOL_UNKNOWN_PATH = path;
+  try {
+    const before = bootStore();
+    before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 });
+    for (let i = 0; i < 7; i++) { offset += 10 * MIN; before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); }
+    offset += 2 * MIN; // the deploy
+
+    const store = bootStore();
+    (store.get().devices as Record<string, DeviceSnapshot>)[PANEL] = { ...panel(), online: false, projection: undefined } as unknown as DeviceSnapshot; // dark: no projection
+    const p = plant(store);
+    const id = `reserve-alarm-blind-${PANEL}`;
+    await until(() => p.ids().includes(id), 'the dark panel\'s alarm in the first sets', p.logs);
+    assert.equal(((store.get().alerts ?? []) as Alert[]).find((x) => x.id === id)?.severity, 'critical', '★ blind since the carried onset, not since it was listed');
+  } finally {
+    process.env.POOL_UNKNOWN_PATH = '';
   }
 });
 

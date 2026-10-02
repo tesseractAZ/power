@@ -854,19 +854,27 @@ export class SnapshotStore extends EventEmitter {
   private refreshPoolUnknown(): void {
     const sinceAttemptMs = this.now() - this.poolUnknownLastAttemptMs;
     const due = sinceAttemptMs >= POOL_UNKNOWN_PERSIST_EVERY_MS || sinceAttemptMs < 0;
-    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty)) this.writePoolUnknown();
+    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty || this.poolUnknownCarried().size > 0)) this.writePoolUnknown();
   }
 
   /** v1.187.4 — listed panels whose file entry has not been consumed (not projected in this process)
    *  and is still carriable: their first projection may raise reserve-alarm-blind at once, so the
    *  alert set is not settled before it (alerts.debouncedOnsetsPending). Sorted by serial. */
   poolUnknownCarryPending(): string[] {
+    return [...this.poolUnknownCarried().keys()].sort();
+  }
+
+  /** v1.187.4 (review) — the same panels with the onset each would carry: a panel still dark after the
+   *  restart (no projection) is blind since then, not since it was first listed in this process
+   *  (alerts.secondaryPanelAlerts). */
+  poolUnknownCarried(): Map<string, number> {
     const nowMs = this.now();
-    const out: string[] = [];
+    const out = new Map<string, number>();
     for (const [sn, e] of this.poolUnknownOnDisk) {
-      if (this.snap.devices[sn] != null && carriedPoolUnknownSince(e, nowMs) != null) out.push(sn);
+      const since = carriedPoolUnknownSince(e, nowMs);
+      if (this.snap.devices[sn] != null && since != null) out.set(sn, since);
     }
-    return out.sort();
+    return out;
   }
 
   /** v1.187.4 — load pool-unknown.json (absent or corrupt: nothing carried, the pre-v1.187.4 clock). */
@@ -889,7 +897,19 @@ export class SnapshotStore extends EventEmitter {
     const nowMs = this.now();
     this.poolUnknownLastAttemptMs = nowMs;
     const out: Record<string, PoolUnknownOnset> = {};
-    for (const [sn, e] of this.poolUnknownOnDisk) if (carriedPoolUnknownSince(e, nowMs) != null) out[sn] = e;
+    for (const [sn, e] of this.poolUnknownOnDisk) {
+      if (carriedPoolUnknownSince(e, nowMs) == null) continue;
+      // v1.187.4 (review) — a LISTED panel not projected yet is still held by this process (pending,
+      // and blind since its onset): last seen now, so a panel dark across the restart and for an hour
+      // after it keeps its onset. One no longer listed is written back as it was, and expires.
+      if (this.snap.devices[sn] != null) {
+        const held = { sinceMs: e.sinceMs, lastSeenMs: Math.max(e.lastSeenMs, nowMs) };
+        this.poolUnknownOnDisk.set(sn, held);
+        out[sn] = held;
+      } else {
+        out[sn] = e;
+      }
+    }
     // Held in this process now: last seen now (never before its own onset).
     for (const [sn, sinceMs] of this.backupPoolUnknownSinceBySn) out[sn] = { sinceMs, lastSeenMs: Math.max(sinceMs, nowMs) };
     try {
@@ -902,10 +922,18 @@ export class SnapshotStore extends EventEmitter {
       // A file the save could not replace may say a pool is unknown that reads now: carried after a
       // restart, it would raise a reserve-blind alarm that is not true. Remove it (a full disk still
       // allows that); nothing on file is the pre-v1.187.4 behaviour.
-      try { unlinkSync(path); } catch { /* absent, or not removable either */ }
+      let removed: string;
+      try {
+        unlinkSync(path);
+        removed = 'the file is removed, so a restart starts the reserve-blind clock again';
+      } catch (u) {
+        removed = (u as NodeJS.ErrnoException)?.code === 'ENOENT'
+          ? 'there is no file, so a restart starts the reserve-blind clock again'
+          : `the file could not be removed either (${(u as Error)?.message ?? u}) — a restart may carry what it holds`;
+      }
       if (!this.poolUnknownWriteWarned) {
         this.poolUnknownWriteWarned = true;
-        this.logger(`backup-pool: could not save the pool-unknown onset (${(e as Error)?.message ?? e}) — the file is removed, so a restart starts the reserve-blind clock again; retrying at most once a minute`);
+        this.logger(`backup-pool: could not save the pool-unknown onset (${(e as Error)?.message ?? e}) — ${removed}; retrying at most once a minute`);
       }
     }
   }

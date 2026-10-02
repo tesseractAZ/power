@@ -112,12 +112,12 @@ interface Rig {
 }
 const live: Rig[] = [];
 /** A monitor past its boot warm-up, its deferred retries `retryMs` apart (real time). */
-async function started(retryMs: number): Promise<Rig> {
+async function started(retryMs: number | number[], pastWarmup = true): Promise<Rig> {
   const logs: string[] = [];
   const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-stale-retry-cache-'));
   const mon = B.startBroadcastMonitor(store, (m) => logs.push(m), {
     klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', renderTts, tickMs: 10,
-    retryDelaysMs: [retryMs, retryMs, retryMs],
+    retryDelaysMs: Array.isArray(retryMs) ? retryMs : [retryMs, retryMs, retryMs],
   });
   const r: Rig = {
     mon, logs,
@@ -127,7 +127,7 @@ async function started(retryMs: number): Promise<Rig> {
   };
   live.push(r);
   await sleep(80); // the first tick joins green
-  offset += 11 * MIN; // past the boot warm-up window
+  if (pastWarmup) offset += 20 * MIN; // past the boot warm-up window (and any restart question)
   return r;
 }
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
@@ -273,7 +273,7 @@ test('★★★ review (A1): a red never audible that returns while its clearing
   speakerState = 'idle';
   alerts = [CRIT]; // back inside the dwell
   await until(r, () => played(r, 'red') === 1, '★ the red, never heard, spoken now');
-  assert.ok(r.has('again, never audible — spoken, not absorbed'));
+  assert.ok(r.has('never audible in this episode — presented again as a transition'));
 });
 
 test('★★ …while a red the house HEARD that returns inside the dwell is still a flicker — nothing re-spoken', async () => {
@@ -315,6 +315,51 @@ test('★★ a red retry survives a warning spoken while the committed level sta
   speakerState = 'idle';
   await until(r, () => played(r, 'red') === 1, '★ the red nobody heard, retried: still the committed condition');
   assert.ok(!r.has('red retry dropped'));
+});
+
+test('★★★ review: red A → red C on one tick (one episode): C takes the slot with its own retries — no "giving up" with no attempt, and A\'s cleared text is never spoken', async () => {
+  const r = await started(150);
+  speakerState = 'unavailable';
+  alerts = [CRIT];
+  await until(r, () => r.has('deferred retry 3/3'), 'red A at its third retry');
+  alerts = [CRIT_C]; // A clears and C appears on the same tick: red stays red
+  await until(r, () => r.count('condition transition → red') >= 2, 'red C, a new critical');
+  await until(r, () => r.has('superseding the pending red retry with red (a newer announcement of the condition)'), '★ C takes the slot');
+  speakerState = 'idle';
+  await until(r, () => played(r, 'red') === 1, 'a red reaching the speakers');
+  await sleep(300);
+  assert.ok(!r.has('giving up after 3 deferred red retries'));
+  assert.equal(played(r, 'red'), 1);
+  assert.match(String(r.mon.status().lastSpokenMessage), /Inverter/, 'the standing critical C');
+});
+
+test('★★★ review: …and when C reaches the speakers, A\'s retry still armed is cancelled — it does not replay the cleared critical once the same-level gap has passed', async () => {
+  const r = await started([150, 150, 2500]);
+  speakerState = 'unavailable';
+  alerts = [CRIT];
+  await until(r, () => r.has('deferred retry 3/3'), 'red A, its third retry 2.5 s away');
+  speakerState = 'idle';
+  alerts = [CRIT_C];
+  await until(r, () => played(r, 'red') === 1, 'red C played');
+  assert.ok(r.has('the pending red retry is cancelled — this red announcement of the condition reached the speakers'), '★ the old retry is cancelled');
+  offset += 2 * MIN + 30 * SEC; // past the same-level storm gap
+  await sleep(3000); // A's third retry would have fired by now
+  assert.equal(played(r, 'red'), 1);
+  assert.match(String(r.mon.status().lastSpokenMessage), /Inverter/, '★ the last words name the standing critical, not the cleared one');
+});
+
+test('★★★ review (P8): an unheard red that returns inside the warm-up is held one tick for its boot confirmation — and then spoken, not lost', async () => {
+  const r = await started(100, false);
+  speakerState = 'unavailable';
+  alerts = [CRIT];
+  await until(r, () => r.has('giving up after 3 deferred red retries'), 'the red unheard, its retries spent');
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  speakerState = 'idle';
+  alerts = [CRIT];
+  await until(r, () => r.has('never audible in this episode — presented again'), 'the unheard return');
+  await until(r, () => played(r, 'red') === 1, '★ spoken after its boot confirmation');
+  assert.equal(r.count('never audible in this episode'), 1, 'said once');
 });
 
 test('conditionRetryStale — a condition retry of an episode that is no longer current; never a dedicated or test broadcast', () => {

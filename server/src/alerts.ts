@@ -1009,6 +1009,9 @@ export interface ConnectivityContext {
   /** v1.187.4 — listed panels whose pool-unknown onset of before the restart is still carriable but
    *  not consumed yet: not projected in this process (SnapshotStore.poolUnknownCarryPending). */
   poolUnknownCarryPending?: readonly string[];
+  /** v1.187.4 (review) — the onset each of those panels would carry (SnapshotStore.poolUnknownCarried):
+   *  one still dark after the restart is blind since then. */
+  poolUnknownCarriedSinceBySn?: ReadonlyMap<string, number>;
   /** v1.185.0 — when each panel was first listed in this process (SnapshotStore.firstListedAt): a
    *  panel with no projection since then has had an unreadable pool at least that long. */
   panelFirstListedBySn?: Map<string, number | null>;
@@ -2335,7 +2338,12 @@ function secondaryPanelAlerts(
   // v1.185.0 (review) — a panel with NO projection (dark since a restart) still has a pool: its
   // reserve alarm is blind from the moment it was first listed, and says so.
   if (panel.projection?.kind !== 'shp2') {
-    const since = connectivity?.panelFirstListedBySn?.get(panel.sn) ?? null;
+    // v1.187.4 (review) — or since the onset of before the restart, when the store carries one: a
+    // panel blind across a restart and still dark after it was absent 15 min, then a warning until
+    // boot + 60, even when it had been critical.
+    const listed = connectivity?.panelFirstListedBySn?.get(panel.sn) ?? null;
+    const carried = connectivity?.poolUnknownCarriedSinceBySn?.get(panel.sn) ?? null;
+    const since = carried != null && (listed == null || carried < listed) ? carried : listed;
     pushReserveBlind(out, panel, devices, grid, since, now, sfx);
     return;
   }
