@@ -63,7 +63,8 @@ const SUBSET = [
 ];
 
 const NOTE_SIP = "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode);";
-const RUN_CHECK = "        () => (conditionRetryStale(kind, episode, conditionEpisode) ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since` : null),";
+// v1.187.5 — re-pointed: the run-time check is two thunks (the episode, then a newer announcement).
+const RUN_CHECK = '        () => staleAtRun() ?? supersededAtRun(), episode, generation);';
 
 const MUTANTS = [
   /* ── (1) the restart question ─────────────────────────────────────────────────────────── */
@@ -445,10 +446,10 @@ const MUTANTS = [
 
   /* ── (4) a stale condition retry ──────────────────────────────────────────────────────── */
   {
-    id: 'R-i. ★★★ no run-time check: the armed level is replayed whatever the condition',
+    id: 'R-i. ★★★ no run-time episode check: the armed level is replayed whatever the condition',
     file: BR,
     find: RUN_CHECK,
-    to: '        undefined, /* MUTANT */',
+    to: '        () => supersededAtRun(), episode, generation); /* MUTANT */',
     why: 'A cleared red is spoken after its all-clear: the last words in the house a critical that has cleared.',
   },
   {
@@ -462,7 +463,7 @@ const MUTANTS = [
     id: 'R-iii. ★★ checked when the timer fires, not when the retry runs',
     file: BR,
     find: RUN_CHECK,
-    to: "        ((s) => () => s)(conditionRetryStale(kind, episode, conditionEpisode) ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since` : null), /* MUTANT */",
+    to: '        ((s) => () => s ?? supersededAtRun())(staleAtRun()), episode, generation); /* MUTANT */',
     why: 'A retry queued behind a broadcast in flight is played after the green committed meanwhile.',
   },
   {
@@ -503,15 +504,17 @@ const MUTANTS = [
   {
     id: 'R-ix. ★★ a retry\'s own re-run takes a fresh budget',
     file: BR,
-    find: '      && retryEpisode === episode && message !== retryMessage && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel];',
+    // v1.187.5 — re-pointed: a newer announcement is a higher generation, not a different text.
+    find: '      && retryEpisode === episode && generation > retryGeneration && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel];',
     to: '      && retryEpisode === episode && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel]; /* MUTANT */',
     why: 'A failing announcement is retried forever: the v1.159.0 defect.',
   },
   {
     id: 'R-x. ★★ a lower announcement takes the slot from a pending higher one',
     file: BR,
-    find: '      && retryEpisode === episode && message !== retryMessage && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel];',
-    to: '      && retryEpisode === episode && message !== retryMessage; /* MUTANT */',
+    // v1.187.5 — re-pointed (as R-ix).
+    find: '      && retryEpisode === episode && generation > retryGeneration && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel];',
+    to: '      && retryEpisode === episode && generation > retryGeneration; /* MUTANT */',
     why: 'A warning spoken under a kept red supersedes the red nobody heard: the red is never retried.',
   },
   {
