@@ -256,8 +256,9 @@ const MUTANTS = [
   {
     id: 'xxviii. ★★★ the rest is not written',
     file: AL,
-    find: 'graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs };',
-    to: 'graceFromMs: st.graceFromMs, quietSinceMs: null, lastSeenMs }; /* MUTANT */',
+    // v1.187.2 — re-pointed: the written entry is a multi-line object (the seed mark follows).
+    find: 'graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs,\n',
+    to: 'graceFromMs: st.graceFromMs, quietSinceMs: null, lastSeenMs, /* MUTANT */\n',
     why: 'As xxvii: the next process finds no rest on file.',
   },
   {
@@ -328,22 +329,23 @@ const MUTANTS = [
   {
     id: 'xxxviii. ★★★ a seen (restored or in-process) clock ends at once under 50 mV',
     file: AL,
-    find: '    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;',
-    to: '    const seededAndUnder = obs.spreadMv < VOL_DIFF_CRIT_MV; /* MUTANT */',
+    // v1.187.2 — re-pointed: the seeded reset is now marked by critSeeded, not by the first reading.
+    find: '    if ((s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    to: '    if ((obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) { /* MUTANT */',
     why: 'As xxxvii: every 45 mV reading restarts the 20-minute bound.',
   },
   {
     id: 'xxxix. ★★ a seeded clock outlives a first reading under 50 mV',
     file: AL,
-    find: '    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;',
-    to: '    const seededAndUnder = false; /* MUTANT */',
+    find: '    if ((s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    to: '    if (((false as boolean) && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) { /* MUTANT */',
     why: 'A day-old onset survives the restart\'s first quiet readings: the next day\'s benign knee inside five minutes sounds the red klaxon.',
   },
   {
     id: 'xl. ★★ a seeded clock ends on any reading under the plateau line',
     file: AL,
-    find: '    const seededAndUnder = prev?.lastSeenMs == null && obs.spreadMv < VOL_DIFF_CRIT_MV;',
-    to: '    const seededAndUnder = prev?.lastSeenMs == null; /* MUTANT */',
+    find: '    if ((s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    to: '    if (s.critSeeded || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) { /* MUTANT */',
     why: 'A standing critical restarted on a 70 mV reading loses its onset: 20 more minutes of balancing silence below 95%.',
   },
   /* ── (3, log review) only a coherent rest is restored ─────────────────── */
