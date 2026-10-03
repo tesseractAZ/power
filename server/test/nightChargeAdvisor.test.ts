@@ -12,7 +12,6 @@ import {
   nightWindowBounds,
   fmtPhoenixDayHm,
   medianFilter3,
-  actuatedDeliveredKwh,
   actuatedRealizedNeedBuyKwh,
   type NightChargeInputs,
   type NightChargeHour,
@@ -840,13 +839,9 @@ test('v1.39.0/2 — in-progress hour is simulated (conservative), not dropped', 
 
 /* ── v1.50.0 actuated-night measurement helpers (PURE) ─────────────────────── */
 
-test('actuatedDeliveredKwh: window import minus house pass-through, clamped ≥ 0', () => {
-  assert.equal(actuatedDeliveredKwh(20, 12), 8);
-  assert.equal(actuatedDeliveredKwh(10, 12), 0); // load exceeded import — never negative
-  assert.equal(actuatedDeliveredKwh(null, 12), null);
-  assert.equal(actuatedDeliveredKwh(20, null), null);
-  assert.equal(actuatedDeliveredKwh(Number.NaN, 12), null);
-});
+// v1.187.3 — actuatedDeliveredKwh (window import minus house load) is gone: the delivered
+// energy is measured into the Cores (nightLedgerScoring.deliveredIntoCores), tested in
+// ledgerDeliveredIntoCores.test.ts.
 
 test('actuatedRealizedNeedBuyKwh: measured counterfactual — subtract the delivered charge', () => {
   // floor+cushion 27 kWh; realized trough 30 kWh WITH a 10 kWh meter buy

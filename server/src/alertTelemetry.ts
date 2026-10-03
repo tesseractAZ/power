@@ -99,6 +99,24 @@ export const TELEMETRY_SCOPE_ANNUNCIATING = 'annunciating' as const;
 export const TELEMETRY_FAMILY_BASIS: Readonly<Record<string, string>> = {
   'baseline-mppt_hv_temp': 'mppt-load-comparable',
   'baseline-mppt_lv_temp': 'mppt-load-comparable',
+  // v1.187.3 — v1.187.1 made a LOWER cell spread than the siblings' (the best-balanced pack, or
+  // the first to settle after the knee) info + annunciate:false, so it no longer feeds the
+  // rollups, but its events written before then still replayed. On 10-01 the family read
+  // 35 rises / 28 short-clears = 80.0%, exactly Rule 2's cutoff; three low-side pairs (Core 2
+  // pack 3, 09-30 14:00 and 10-01 13:53 / 14:03, all short) were the margin (32/25 = 78.1%
+  // without them), and they would bias it until they aged out at the end of October. An old
+  // line cannot say which side it was on, so none is trusted: Rule 2 re-latches from the
+  // current rule's events after 10 rises (about five days at the daily knee flags).
+  'peer-voldiff': 'peer-voldiff-high-side',
+};
+
+/**
+ * v1.187.3 — what each basis left behind, for the boot line that reports the rebased families
+ * (alertMonitor): the episodes the earlier rule counted that no longer annunciate.
+ */
+export const TELEMETRY_BASIS_DROPPED: Readonly<Record<string, string>> = {
+  'mppt-load-comparable': 'cooler-than-typical and load-explained MPPT episodes',
+  'peer-voldiff-high-side': 'lower-than-sibling cell-spread episodes (the best-balanced pack)',
 };
 /** v1.187.0 — the basis a new event of `familyKey` is written with, or undefined. */
 export function telemetryBasisFor(familyKey: string): string | undefined {

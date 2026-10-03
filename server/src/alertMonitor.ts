@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot, type FleetSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext, debouncedOnsetsPending, BOOT_RESET_ONSET_DEBOUNCE_MS } from './alerts.js';
 import { broadcastHealthAlert, broadcastDegradedAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds, rateFloorIdleHeldSns } from './messageRateFloorAlert.js';
@@ -44,7 +44,7 @@ import { setDefectivePackRetireLog } from './defectivePackLatch.js';
 // v0.9.59 — persist telemetry events so rise/short-clear/long-active
 // counts survive restarts. Without this the auto-silencing rules can
 // effectively never fire on a panel that gets occasional restarts.
-import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, TELEMETRY_SCOPE_ANNUNCIATING, telemetryBasisFor, type FamilyMeta, type TelemetryEntry } from './alertTelemetry.js';
+import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, TELEMETRY_SCOPE_ANNUNCIATING, TELEMETRY_BASIS_DROPPED, telemetryBasisFor, type FamilyMeta, type TelemetryEntry } from './alertTelemetry.js';
 import type { Recorder } from './recorder.js';
 import { getAnalytics, type AnalyticsClient } from './analyticsClient.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate. The internal severity
@@ -606,9 +606,6 @@ interface TrackedAlert {
    *  critical when the grid drops out at the reserve floor) re-notifies instead
    *  of being silently swallowed by an already-true `notified`. */
   notifiedSeverity?: Severity;
-  /** v1.88.0 — the auto-tuned tier actually delivered ("[Low] … via auto-tune"
-   *  records 'info' here). Gates ONLY shouldSendResolve; never escalation. */
-  notifiedEffectiveSeverity?: Severity;
   /** v1.130.0 — this hold was restored from disk, not queued by this process. */
   queuedRehydrated?: boolean;
   /** v1.186.0 — how this episode sits in the auto-tune rollup (autoTuneClearCounts):
@@ -696,6 +693,16 @@ export interface ClearedAlert {
 export const CLEARED_ROSTER_MUTED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
+ * v1.187.3 — info families whose cleared rows keep the WARNING tier in a full ledger
+ * (pruneOldestNonSignificant). `ems-volt-` was a warning until v1.187.3 and is now an info notice
+ * (the EMS band is relative, not a limit). Its rows are the record of the band episodes, and
+ * warranty evidence for a Core while it carried a defective pack (warrantyEvidence). As info they
+ * would be the first rows out of a ledger at its cap, where the info tier is nearly empty, so each
+ * would leave on the next clear. About one episode a day: no pressure on the ledger.
+ */
+export const CLEARED_INFO_KEPT_AS_WARNING_PREFIXES: readonly string[] = ['ems-volt-'];
+
+/**
  * v1.187.1 — WARRANTY EVIDENCE in the cleared ledger: the rows /api/warranty-export would put in
  * a claim for a confirmed-defective pack. For every `pack-defective-<core>-<pk>` row, the rows of
  * that Core (id or sourceSn, as the export matches them) whose episode overlaps the pack-defective
@@ -758,7 +765,13 @@ export function pruneOldestNonSignificant(
   isNoise?: (e: ClearedAlert) => boolean,
   nowMs: number = Date.now(),
 ): void {
-  const sev = (i: number) => logArr[i].alert?.severity ?? 'info';
+  // v1.187.3 — a CLEARED_INFO_KEPT_AS_WARNING_PREFIXES row is evicted as the warning it was.
+  const sev = (i: number) => {
+    const e = logArr[i];
+    const s = e.alert?.severity ?? 'info';
+    const id = e.alert?.id;
+    return s === 'info' && typeof id === 'string' && CLEARED_INFO_KEPT_AS_WARNING_PREFIXES.some((p) => id.startsWith(p)) ? 'warning' : s;
+  };
   const evictOldest = (pick: (e: ClearedAlert, i: number) => boolean): boolean => {
     for (let i = logArr.length - 1; i >= 0; i--) {
       if (pick(logArr[i], i)) { logArr.splice(i, 1); return true; }
@@ -1158,6 +1171,23 @@ export interface TelemetryReplay {
   rebasedSkipped: number;
   rebasedFamilies: Set<string>;
 }
+/**
+ * v1.187.3 — the boot line for the families TELEMETRY_FAMILY_BASIS rebased: how many events were
+ * not replayed, of which families, what their earlier rule counted that no longer annunciates
+ * (TELEMETRY_BASIS_DROPPED, one phrase per basis), and the verdicts that lifted. Until v1.187.3
+ * the reason was the MPPT one for every family. Pure + exported for tests.
+ */
+export function rebasedReplayLine(
+  r: Pick<TelemetryReplay, 'rebasedSkipped' | 'rebasedFamilies'>,
+  lifted: readonly string[],
+): string {
+  const families = [...r.rebasedFamilies].sort();
+  const dropped = [...new Set(families.map((f) => TELEMETRY_BASIS_DROPPED[telemetryBasisFor(f) ?? ''] ?? 'episodes an earlier rule counted'))];
+  return `alert-telemetry: ${r.rebasedSkipped} event(s) of ${families.join(', ')} counted under an earlier emitter rule not replayed — ` +
+    `they include ${dropped.join(' and ')}, which no longer annunciate; ` +
+    'auto-tune verdicts are re-earned from the current rule' +
+    (lifted.length > 0 ? `. Lifted: ${lifted.join('; ')}` : '');
+}
 export function replayTelemetryEvents(
   events: readonly TelemetryEntry[],
   familyMeta: Record<string, FamilyMeta>,
@@ -1370,6 +1400,38 @@ export const BOOT_HYDRATION_MAX_MS = envNum(process.env.ALERT_BOOT_HYDRATION_MAX
  */
 export const ALERT_COUNTS_READY_MAX_MS = 90_000;
 
+/**
+ * v1.187.3 (review) — CAN A GREEN BE TRUSTED FROM THE ALERT SET THIS PASS PUBLISHED?
+ *
+ * The broadcast's post-restart recovery (broadcast.isRestartRecovery) speaks an all-clear for a
+ * green under a level the house heard before the restart. A green read from a set that is still
+ * missing an alert for a boot-only reason is not one. Every condition must hold:
+ *   • the store hydrated (SnapshotStore.firstPollSettledAt > 0): an empty device map reads green;
+ *   • every worker/NWS feed's value IN THIS SET is a delivery computed on a hydrated store
+ *     (AlertFeedRead.warm, read with the value). Not LastGoodFeed.warm() read later: that turns
+ *     true when a fetch lands, and the fetch's alerts reach the set only at the next publish. An
+ *     empty list is not settled: production has five feeds, and none is a wiring fault;
+ *   • the live alarms were computed at least BOOT_RESET_ONSET_DEBOUNCE_MS after the first poll:
+ *     the dpu-err / shp2-src-err (critical) and MPPT-error onset clocks restart at zero in every
+ *     process, so a fault that stood before the restart is withheld for one window after it;
+ *   • no in-memory onset clock is inside its debounce (alerts.debouncedOnsetsPending): a fault the
+ *     device reports now that is withheld only because it has not stood its window — a quota that
+ *     landed after the first poll, or a backup pool unknown for less than 15 min.
+ * Pure + exported for tests; the monitor stamps alertSetSettledSince from it.
+ */
+export function alertSetTrusted(p: {
+  firstPollSettledAt: number;
+  feedsInSet: readonly boolean[];
+  liveAtMs: number;
+  pendingOnsets: readonly string[];
+  bootDebounceMs?: number;
+}): boolean {
+  if (!(p.firstPollSettledAt > 0)) return false;
+  if (p.feedsInSet.length === 0 || !p.feedsInSet.every((w) => w === true)) return false;
+  if (p.liveAtMs - p.firstPollSettledAt < (p.bootDebounceMs ?? BOOT_RESET_ONSET_DEBOUNCE_MS)) return false;
+  return p.pendingOnsets.length === 0;
+}
+
 export interface AlertFeedRead<T> {
   /** A private copy of the freshest value this feed has (null: never delivered). */
   value: T | null;
@@ -1381,6 +1443,11 @@ export interface AlertFeedRead<T> {
   ageMs: number | null;
   /** Why the value is carried rather than fresh (budget or failure), else null. */
   error: string | null;
+  /** v1.187.3 (review) — the feed was warm (LastGoodFeed.warm) when THIS read returned, so `value`
+   *  is a delivery computed on a hydrated store. Read with the value, not later: warm() turns true
+   *  the moment a fetch lands, and a fetch that lands after its read has returned (past the budget,
+   *  while the pass waits on another feed) is not in the set that pass publishes. */
+  warm: boolean;
 }
 export interface LastGoodFeed<T> {
   readonly name: string;
@@ -1537,7 +1604,7 @@ export function createLastGoodFeed<T>(
         carrying = false;
         if (carryLogged) log(`alert-feed: ${name} fresh again after ${carriedPasses} pass(es) on its last good value`);
       }
-      return { value: last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error };
+      return { value: last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error, warm: hydratedLanded };
     },
     peek: () => (last != null ? clone(last.value) : null),
     warm: () => hydratedLanded,
@@ -1819,7 +1886,7 @@ export function orphanedNotifiedIds(p: {
  * owed on `pushSent` alone, exactly as the boot orphan sweep has always sent it.
  */
 export function shouldSendResolve(
-  t: { pushSent?: boolean; notifiedSeverity?: Severity; notifiedEffectiveSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity'> },
+  t: { pushSent?: boolean; notifiedSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity'> },
   notifyResolved: boolean,
   minSeverity: Severity,
 ): boolean {
@@ -1830,9 +1897,15 @@ export function shouldSendResolve(
   return (
     t.pushSent === true &&
     notifyResolved &&
-    // v1.88.0 — the tier the operator SAW decides whether a resolve is owed:
-    // a fire auto-tuned down to info ("[Low]") owes no "Resolved:" push.
-    qualifies(t.notifiedEffectiveSeverity ?? t.notifiedSeverity ?? t.alert.severity, minSeverity)
+    // v1.187.3 — the SOURCE severity the push was dispatched at, never the tier auto-tune
+    // demoted it to. v1.88.0 read the delivered tier, so a fire sent as "[Low]" owed no
+    // "Resolved:" — and the resolve is the only thing that dismisses the HA drawer card and
+    // replaces the same-tag phone notification. On 10-01 a "[Low] Cell-voltage spread — peer
+    // outlier" pushed at 13:16 cleared at 13:26 and its drawer card was still standing at 19:11.
+    // The boot orphan sweep always resolved such a fire (its record keeps the source severity);
+    // the falling edge now agrees with it. An ISA priority turned off since the push still
+    // suppresses the resolve in dispatch, as before.
+    qualifies(t.notifiedSeverity ?? t.alert.severity, minSeverity)
   );
 }
 
@@ -2181,6 +2254,10 @@ export interface AlertMonitor {
   /** v1.90.0 (B5) — the CURRENT live alert ids, read-only. The reconnect audit
    *  measures "offline alert resolved" against the real tracked set. */
   activeAlertIds: () => string[];
+  /** v1.187.3 (review) — since when every pass has published a set a green can be trusted from
+   *  (alertSetTrusted), stamped at the publish; null while the latest pass's set is not one. The
+   *  broadcast measures a post-restart recovery's dwell from it (broadcast.isRestartRecovery). */
+  alertSetSettledSince: () => number | null;
   history: () => ClearedAlert[];
   incidents: () => Incident[];
   telemetry: () => AlertActionStats[];
@@ -2652,14 +2729,9 @@ export function startAlertMonitor(
       );
     }
     if (r.rebasedSkipped > 0) {
-      // v1.187.0 — the MPPT self-baseline rule change (TELEMETRY_FAMILY_BASIS).
-      const lifted = liftedIn(r.rebasedFamilies);
-      log(
-        `alert-telemetry: ${r.rebasedSkipped} event(s) of ${[...r.rebasedFamilies].sort().join(', ')} counted under an earlier emitter rule not replayed — ` +
-        'they include cooler-than-typical and load-explained MPPT episodes, which no longer annunciate; ' +
-        'auto-tune verdicts are re-earned from the current rule' +
-        (lifted.length > 0 ? `. Lifted: ${lifted.join('; ')}` : ''),
-      );
+      // v1.187.0 — the MPPT self-baseline rule change (TELEMETRY_FAMILY_BASIS); v1.187.3 — and the
+      // peer cell-spread low side, each named by what its earlier rule counted (rebasedReplayLine).
+      log(rebasedReplayLine(r, liftedIn(r.rebasedFamilies)));
     }
   };
 
@@ -2673,12 +2745,6 @@ export function startAlertMonitor(
    *  durably persisted before the send, and the failure logged at info with no
    *  identity. At-least-once now: a crash between send and persist duplicates
    *  one push after restart — the right direction for the sole alarm channel. */
-  /** v1.88.0 — the auto-tuned tier of the most recent 'sent' dispatch. Read by
-   *  the rising edge IMMEDIATELY after the await (single-flight tick, no
-   *  interleaving) so the tracked entry can remember what tier the operator
-   *  actually saw — a fire delivered as "[Low] … via auto-tune" owes no
-   *  "Resolved:" push (the resolve of a demoted-to-info event is pure noise). */
-  let lastDispatchEffectiveSeverity: Severity | null = null;
   /** v1.186.0 — the no-channel suppression is logged once per process, not per alert. */
   let noChannelLogged = false;
   const dispatch = async (alert: Alert, kind: 'new' | 'resolved'): Promise<'sent' | 'suppressed' | 'failed'> => {
@@ -2754,7 +2820,6 @@ export function startAlertMonitor(
         dedupId: notifyDedupId(alert),
       });
       sentSinceStart++;
-      lastDispatchEffectiveSeverity = effectiveSeverity; // v1.88.0
       // v1.186.0 — a demoted push names the rule and the counts that demoted it.
       log(`notify: sent "${title}" via ${cfg.channel}${effectiveSeverity !== alert.severity ? ` (severity ${alert.severity}→${effectiveSeverity} via auto-tune — ${verdict.rule} on family "${t?.familyKey}": ${verdict.basis})` : ''}`);
       return 'sent';
@@ -3101,6 +3166,11 @@ export function startAlertMonitor(
   };
   /** v1.186.0 — the alarm-count readiness latch (FleetSnapshot.alertsComplete). */
   let alertsCompleteMarked = false;
+  /** v1.187.3 (review) — AlertMonitor.alertSetSettledSince: stamped at the first publish of a run
+   *  of trusted sets (alertSetTrusted), cleared by any pass whose set is not one. */
+  let alertSetSettledSinceMs: number | null = null;
+  /** v1.187.3 (review) — the first settled set since boot is logged once. */
+  let alertSetSettledLogged = false;
 
   const evaluate = async () => {
     if (evaluating) return;
@@ -3243,6 +3313,15 @@ export function startAlertMonitor(
     // sat between them), which a stable sort then preserves among equal-rank alerts.
     // v1.187.0 — quietPeerSpreadUnderHeldCritical: a pack's peer cell-spread outlier stays off
     // the speakers while its own vdiff-crit is held by a bounded cell-spread mute (same tick).
+    // v1.187.3 (review) — when the live alarms were computed, and which in-memory onset clocks are
+    // withholding a fault at that moment (alertSetTrusted). A pass whose first publish (below: these
+    // live alarms and each feed's last value) is not a trusted set clears the settled stamp BEFORE
+    // it publishes, so the broadcast never reads a stale stamp beside a set with a withheld fault.
+    const liveAtMs = Date.now();
+    const pendingOnsets = debouncedOnsetsPending(connectivity, liveAtMs);
+    if (!alertSetTrusted({ firstPollSettledAt: store.firstPollSettledAt, feedsInSet: alertFeeds.map((f) => f.warm()), liveAtMs, pendingOnsets })) {
+      alertSetSettledSinceMs = null;
+    }
     const liveHead: Alert[] = quietPeerSpreadUnderHeldCritical([
       // v1.185.0 — each pool's own verdict, on a multi-panel plant only (one panel: `grid`, unchanged).
       ...computeAlerts(snap.devices, connectivity, grid,
@@ -3438,6 +3517,17 @@ export function startAlertMonitor(
     // v1.187.0 — naming the device, the pack and the stamped reason (silentCriticalLine).
     for (const a of silentCriticalEdges(silentCriticalLogged, alerts)) log(silentCriticalLine(a));
     publish(alerts);
+    // v1.187.3 (review) — the settled stamp, judged on the set just published: its live part (above)
+    // and each feed's value as this pass read it. Stamped at the first such publish and kept while
+    // every pass's set is one; a pass whose set is not cleared it before its first publish (above).
+    const feedsInSet = [rForecast, rStormPrep, rCurtailment, rBaseline, rForecastAlerts].map((r) => r.warm);
+    if (alertSetTrusted({ firstPollSettledAt: store.firstPollSettledAt, feedsInSet, liveAtMs, pendingOnsets })) {
+      if (alertSetSettledSinceMs == null) alertSetSettledSinceMs = Date.now();
+      if (!alertSetSettledLogged) {
+        alertSetSettledLogged = true;
+        log(`alert-monitor: the alert set is settled ${Math.round((liveAtMs - store.firstPollSettledAt) / 1000)} s after the first poll — every feed delivered on a hydrated store, the boot onset debounces have run, and no onset clock is withholding a fault`);
+      }
+    }
     // v1.186.0 — the counts publish once this set is COMPLETE: a hydrated store with every feed
     // delivered, or the bound (publishReadiness 'alerts'). A latch: a later cold read carries.
     if (!alertsCompleteMarked && ((storeHydrated() && alertFeedsWarm()) || Date.now() - monitorStartMs >= ALERT_COUNTS_READY_MAX_MS)) {
@@ -3780,10 +3870,8 @@ export function startAlertMonitor(
           existing.notifiedSeverity = a.severity;
           if (outcome === 'sent') {
             existing.pushSent = true;
-            // v1.88.0 — remember the TIER THE OPERATOR SAW (auto-tune applied).
-            // notifiedSeverity must stay at source severity for the escalation
-            // contract; this separate field only gates the resolve push.
-            existing.notifiedEffectiveSeverity = lastDispatchEffectiveSeverity ?? a.severity;
+            // v1.187.3 — the auto-tuned tier is no longer recorded: it gated only the resolve, and
+            // a pushed card is owed its dismissal at whatever tier it was shown (shouldSendResolve).
           }
           // v0.15.21 — record the push durably so a restart can't repeat it.
           // v0.80.0 — the record carries delivered-vs-suppressed + the severity,
@@ -4138,6 +4226,7 @@ export function startAlertMonitor(
       alertFeeds: alertFeeds.map((f) => f.status()),
     }),
     activeAlertIds: () => [...tracked.keys()],
+    alertSetSettledSince: () => alertSetSettledSinceMs,
     history: () => [...clearedLog],
     incidents: () => [...currentIncidents],
     telemetry: () => [...telemetry.values()],

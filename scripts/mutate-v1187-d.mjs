@@ -321,8 +321,9 @@ const MUTANTS = [
   {
     id: 'xxxvii. ★★ the stamp drops out of the ledger allowlist (SILENT)',
     file: REC,
-    find: "  // v1.187.0 — when the reserve restore landed: the end of the delivered-energy span.\n  'actuation_reverted_at_ms',\n];",
-    to: '  /* MUTANT */\n];',
+    // v1.187.3 — re-pointed: delivered_basis now follows the stamp in the allowlist.
+    find: "  // v1.187.0 — when the reserve restore landed: the end of the delivered-energy span.\n  'actuation_reverted_at_ms',\n",
+    to: '  /* MUTANT */\n',
     why: 'recordNightOutcome ignores unknown columns rather than throwing — the stamp vanishes with no error.',
   },
   {

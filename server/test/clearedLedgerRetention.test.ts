@@ -21,7 +21,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  pruneOldestNonSignificant, warrantyEvidence, clearedRetention, CLEARED_ROSTER_MUTED_KEEP_MS, type ClearedAlert,
+  pruneOldestNonSignificant, warrantyEvidence, clearedRetention, CLEARED_ROSTER_MUTED_KEEP_MS,
+  CLEARED_INFO_KEPT_AS_WARNING_PREFIXES, type ClearedAlert,
 } from '../src/alertMonitor.js';
 import type { Alert } from '../src/alerts.js';
 
@@ -190,4 +191,30 @@ test('★★★ (log review) a row with no string id cannot throw into the tick:
   // A corrupt row in the SCAN for pack-defective rows (a critical, so no eviction tier reads it first).
   const critBad = { ...corrupt(7, 10), alert: { id: 7, severity: 'critical' } as unknown as Alert };
   assert.doesNotThrow(() => warrantyEvidence([critBad])(row(`ems-volt-${CORE4}`, 5)));
+});
+
+test('★★★ v1.187.3: an ems-volt row, info since v1.187.3, keeps the warning tier — not the first row out of a full ledger', () => {
+  // At the cap the info tier is nearly empty, so as plain info each new band episode would leave on
+  // the next clear: its record (and the warranty evidence of a Core that carried a defective pack)
+  // gone within one tick.
+  assert.deepEqual([...CLEARED_INFO_KEPT_AS_WARNING_PREFIXES], ['ems-volt-']);
+  const ems = row(`ems-volt-${CORE1}`, 2, { pushed: false }, { severity: 'info' });
+  const log = ledger(ems, row('vdiff-warn-HOME-1', 30));
+  assert.deepEqual(evictOnce(log), ['vdiff-warn-HOME-1'], 'the OLDER warning leaves first');
+  assert.deepEqual(evictOnce(log), [`ems-volt-${CORE1}`]);
+  // Any other info row still leaves first, before an older ems-volt row.
+  const other = ledger(row(`ems-volt-${CORE1}`, 40, {}, { severity: 'info' }), row(`balancing-${CORE1}-1`, 1, {}, { severity: 'info' }));
+  assert.deepEqual(evictOnce(other), [`balancing-${CORE1}-1`]);
+  // A critical still outlives it.
+  const crit = ledger(row('dpu-err-HOME', 90, {}, { severity: 'critical' }), row(`ems-volt-${CORE1}`, 1, {}, { severity: 'info' }));
+  assert.deepEqual(evictOnce(crit), [`ems-volt-${CORE1}`]);
+});
+
+test('★★ v1.187.3: an ems-volt info row inside a pack-defective episode is warranty evidence the noise tier does not take', () => {
+  const pd = row(`pack-defective-${CORE4}-1`, 35, { raisedAt: NOW - 60 * DAY, pushed: true }, { sourcePackSn: 'PACKXXX00XXX0037' });
+  const during = row(`ems-volt-${CORE4}`, 50, { pushed: false }, { severity: 'info' });
+  const older = row('vdiff-warn-HOME-1', 80);
+  const log = ledger(pd, during, older);
+  assert.deepEqual(evictOnce(log, (e) => e.alert.id.startsWith('ems-volt-')), ['vdiff-warn-HOME-1'], 'FIFO first: the evidence row is not taken early');
+  assert.deepEqual(evictOnce(log), [`ems-volt-${CORE4}`], 'then with the warnings, before the pack-defective row');
 });

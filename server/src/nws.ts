@@ -82,10 +82,48 @@ export function isNwsEnabled(): boolean {
   return process.env.NWS_ENABLED === '1' || process.env.NWS_ENABLED?.toLowerCase() === 'true';
 }
 
+/**
+ * v1.187.3 (log review, LOW) — after a FAILED alerts fetch, no new request for this long.
+ *
+ * A failed fetch is not cached as "no alerts": before the first success getNwsAlerts returns null,
+ * and stormPrepAlerts reads that as UNKNOWN and keeps the storm-prep feed cold (alertSetTrusted).
+ * Nothing else bounded the retries, so until NWS first answered after a boot every 20 s
+ * alert-monitor pass sent a new request to api.weather.gov — about 180 an hour from the monitor
+ * alone, for as long as the failure lasted (an outage, a User-Agent block), against 6 an hour while
+ * the failure was cached — and so did every /api/nws-alerts and calendar request. A call inside the
+ * backoff answers exactly as the failed fetch did — the last good feed, or null before any success —
+ * without a request, so the feed stays cold (unknown) at a bounded request rate.
+ */
+export const NWS_ALERTS_FAILURE_BACKOFF_MS = 2 * 60_000;
+
+/**
+ * v1.187.3 (log review) — is a failed alerts fetch at `failedAtMs` still backing off at `nowMs`?
+ * A failure "in the future" (the clock stepped back) does not hold the backoff: the next call asks.
+ * Pure + exported for tests.
+ */
+export function nwsAlertsBackingOff(
+  failedAtMs: number | null,
+  nowMs: number,
+  backoffMs = NWS_ALERTS_FAILURE_BACKOFF_MS,
+): boolean {
+  return failedAtMs != null && nowMs >= failedAtMs && nowMs - failedAtMs < backoffMs;
+}
+
+/** v1.187.3 (log review) — when the last alerts fetch failed (null: none has). */
+let alertsFailedAt: number | null = null;
+/** v1.187.3 (log review) — concurrent callers (the alert monitor's storm-prep feed, /api/nws-alerts,
+ *  the calendar) share one request. */
+const alertsFlight = singleFlight<NwsAlertFeed | null>();
+
 export async function getNwsAlerts(log: (m: string) => void = () => {}): Promise<NwsAlertFeed | null> {
   if (!isNwsEnabled()) return null;
   if (cache && Date.now() - cache.fetchedAt < TTL_MS) return cache;
+  // v1.187.3 (log review) — inside the backoff after a failed fetch: the failure's answer, no request.
+  if (nwsAlertsBackingOff(alertsFailedAt, Date.now())) return cache;
+  return alertsFlight.run(() => fetchNwsAlerts(log));
+}
 
+async function fetchNwsAlerts(log: (m: string) => void): Promise<NwsAlertFeed | null> {
   const { forecastLat: lat, forecastLon: lon } = config;
   // v1.40.0: message_type MUST include `update` — NWS delivers upgrades
   // (Watch → Warning) and routine continuations as message_type=Update, and an
@@ -122,7 +160,8 @@ export async function getNwsAlerts(log: (m: string) => void = () => {}): Promise
     log(`nws: fetched ${alerts.length} active alert(s) for ${lat},${lon}`);
     return cache;
   } catch (e: any) {
-    log(`nws: fetch failed (${e?.message ?? e}) — storm-prep will be quiet`);
+    alertsFailedAt = Date.now();
+    log(`nws: fetch failed (${e?.message ?? e}) — the last good feed is served${cache == null ? ' (none yet: storm alerts unknown)' : ''}; asked again in ${Math.round(NWS_ALERTS_FAILURE_BACKOFF_MS / 1000)} s at the earliest`);
     return cache;
   }
 }

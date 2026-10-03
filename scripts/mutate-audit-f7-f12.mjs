@@ -26,6 +26,7 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const SNAP = resolve(SERVER, 'src/snapshot.ts');
 const IDX = resolve(SERVER, 'src/index.ts');
+const ADV = resolve(SERVER, 'src/nightChargeAdvisor.ts');
 const MON = resolve(SERVER, 'src/alertMonitor.ts');
 const ALERTS = resolve(SERVER, 'src/alerts.ts');
 const MQTT = resolve(SERVER, 'src/ecoflow/mqtt.ts');
@@ -85,10 +86,11 @@ const MUTANTS = [
     why: 'A factor of 1.000 would keep reading as "measured, no bias" when the learner selected zero eligible rows — the exact silence this release closes.',
   },
   {
+    // v1.187.3 (review) — the branch is nightChargeAdvisor.buyDebiasUnmeasuredLogLine now.
     id: 'vii. the unmeasured-calibration line is removed',
-    file: IDX,
-    find: '  if (buyDebiasCal.basis !== \'measured\') {',
-    to: '  if (false) { /* MUTANT */',
+    file: ADV,
+    find: '  if (cal.basis === \'measured\') return null;',
+    to: '  return null; /* MUTANT */',
     why: 'The "calibrated ×N" line only fires on a measured result, so a learner that can never measure says nothing at all.',
   },
   // ── F12 ────────────────────────────────────────────────────────────────────

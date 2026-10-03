@@ -1673,6 +1673,11 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     morningPvSurplusP90Kwh, minBuyKwh, buyDebiasFactor,
     morningPvSurplusP50Kwh, longGapAhead, prePeakPvSurplusP10Kwh,
     costSurplusLoad,
+    // v1.187.3 — the learner's basis and sample count, carried beside its factor: until
+    // v1.187.2 only the factor was copied, so every plan reported 'default' / 0 samples
+    // whatever the learner said (the 09-30 log: "UNMEASURED (6 eligible night(s))" while
+    // the plan the log points to said 0) — the hazard the note below describes.
+    buyDebiasBasis, buyDebiasSamples,
     // v1.125.0 — the islanded-outage cushion inputs. Destructuring here is not
     // decoration: NightChargeInputs is built field-by-field below, so a field
     // added to the deps interface and to the inputs interface but NOT copied
@@ -1854,6 +1859,9 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     longGapAhead,
     prePeakPvSurplusP10Kwh,
     buyDebiasFactor,
+    // v1.187.3 — forwarded verbatim; see the destructure note above.
+    buyDebiasBasis,
+    buyDebiasSamples,
     confidenceTier,
     basisComplete,
     minBuyKwh,
@@ -1865,20 +1873,24 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
 // --- v1.50.0 actuated-night measurement helpers (PURE) -----------------------
 
 /**
- * Charge-attributable meter energy on an ACTUATED night: the window grid
- * import minus the concurrent house pass-through. Under the bypass model the
- * home runs on grid during charge hours, so window import = house load +
- * battery charge; subtracting the measured window load isolates the delivered
- * buy. Null when either side is unmeasured — never a fabricated delivery.
+ * v1.187.3 — the basis an actuated night's `delivered_kwh` is measured on, recorded beside
+ * it in the ledger's `delivered_basis` column: the energy INTO the home Cores, from the
+ * house panel's per-Core source channels (nightLedgerScoring.deliveredIntoCores).
+ *
+ * WHY A BASIS. From v1.50.0 to v1.187.2 the column was window grid import minus the
+ * concurrent house load (`actuatedDeliveredKwh`, removed), which assumed the house ran on
+ * the grid for the whole hold. When the SHP2 carries the house from the pack instead —
+ * 2026-09-30: pool 74% at 23:00 against the 50% reserve, the house on the pack until the
+ * force-charge at 03:18 and again after its 04:32 OFF, 15.5 kWh of load with zero import —
+ * the subtraction removes load the grid never carried: 4.71 kWh recorded against ~20.3 kWh
+ * into the Cores (source channels 20.34, the Cores' own AC input 20.25, pool 55→76%).
+ * Always toward under-delivery, in the column the buy de-bias below trains on.
+ *
+ * Rows captured before v1.187.3 carry `delivered_basis` NULL and are KEPT as recorded; the
+ * learner admits only rows on this basis (calibratedBuyDebiasFactor), so the old estimate
+ * is never mixed with the measurement. A change of method gets a new value here.
  */
-export function actuatedDeliveredKwh(
-  windowImportKwh: number | null,
-  windowLoadKwh: number | null,
-): number | null {
-  if (windowImportKwh == null || windowLoadKwh == null) return null;
-  if (!Number.isFinite(windowImportKwh) || !Number.isFinite(windowLoadKwh)) return null;
-  return round2(Math.max(0, windowImportKwh - windowLoadKwh));
-}
+export const DELIVERED_BASIS = 'source-charge';
 
 /**
  * Realized-need buy on an ACTUATED night (§5 as amended 2026-07-31): the home
@@ -2003,34 +2015,65 @@ export function calibratedLoadBandFactor(
  * Feeding the DEBIASED figure back into the ledger would make each night's
  * ratio ≈1 and decay the factor toward nothing — the learner eating its own
  * output. The debiased figure exists ONLY on the announcement surfaces.
+ *
+ * v1.187.3 — ONE BASIS. Only rows whose `delivered_basis` is DELIVERED_BASIS are samples.
+ * A row captured before v1.187.3 holds the import-minus-house-load estimate, which
+ * under-counts every night the SHP2 ran the house from the pack inside the hold (09-30:
+ * 4.71 against ~20.3 kWh, a 0.26 ratio for a true ~1.1) — it is counted in `setAside`,
+ * never a sample, and never rewritten. Until DELIVERED_BASIS rows reach minSamples the
+ * factor is the floor with basis 'default', which the log says with the set-aside count.
  */
 export function calibratedBuyDebiasFactor(
   rows: ReadonlyArray<{
     buy_kwh?: number | null;
     delivered_kwh?: number | null;
+    delivered_basis?: string | null;
     actuated?: number | null;
     scored?: number | null;
     cushion_shortfall?: number | null;
   }>,
   opts: { floor?: number; cap?: number; minSamples?: number; minPlanKwh?: number } = {},
-): { factor: number; basis: 'measured' | 'default'; samples: number } {
+): { factor: number; basis: 'measured' | 'default'; samples: number; setAside: number } {
   const floor = opts.floor ?? 1.0;
   const cap = opts.cap ?? 1.75;
   const minSamples = opts.minSamples ?? 7;
   const minPlanKwh = opts.minPlanKwh ?? 3;
-  const ratios = rows
+  const eligible = rows
     .filter((r) =>
       r.actuated === 1 &&
       r.scored === 1 &&
       !(r.cushion_shortfall === 1) &&
       typeof r.buy_kwh === 'number' && Number.isFinite(r.buy_kwh) && r.buy_kwh >= minPlanKwh &&
-      typeof r.delivered_kwh === 'number' && Number.isFinite(r.delivered_kwh) && r.delivered_kwh >= 0)
+      typeof r.delivered_kwh === 'number' && Number.isFinite(r.delivered_kwh) && r.delivered_kwh >= 0);
+  const onBasis = eligible.filter((r) => r.delivered_basis === DELIVERED_BASIS);
+  const setAside = eligible.length - onBasis.length;
+  const ratios = onBasis
     .map((r) => (r.delivered_kwh as number) / (r.buy_kwh as number))
     .sort((a, b) => a - b);
-  if (ratios.length < minSamples) return { factor: floor, basis: 'default', samples: ratios.length };
+  if (ratios.length < minSamples) return { factor: floor, basis: 'default', samples: ratios.length, setAside };
   const median = ratios[Math.floor(ratios.length / 2)];
   const factor = Math.min(cap, Math.max(floor, median));
-  return { factor: Math.round(factor * 1000) / 1000, basis: 'measured', samples: ratios.length };
+  return { factor: Math.round(factor * 1000) / 1000, basis: 'measured', samples: ratios.length, setAside };
+}
+
+/**
+ * v1.187.3 (review) — the UNMEASURED log line for the buy de-bias learner (v1.144.0: the
+ * silent case, said once on change), as a key and its text; null on a measured result,
+ * which has its own "calibrated ×N" line. PURE so a test drives it: the key carries the
+ * set-aside count, so a pre-v1.187.3 row scored after the upgrade logs a new line, and the
+ * text names that count, so a reset to 'default' after the upgrade reads as what it is.
+ */
+export function buyDebiasUnmeasuredLogLine(
+  cal: Pick<ReturnType<typeof calibratedBuyDebiasFactor>, 'basis' | 'samples' | 'setAside'>,
+): { key: string; text: string } | null {
+  if (cal.basis === 'measured') return null;
+  return {
+    key: `unmeasured:${cal.samples}:${cal.setAside}`,
+    text: `night-charge: announced-buy calibration UNMEASURED (${cal.samples} eligible night(s), `
+      + `${cal.setAside} set aside for a pre-v1.187.3 delivered_kwh) — the announcement carries no `
+      + `learned correction. Eligibility excludes rows with cushion_shortfall=1 and rows whose delivered_basis `
+      + `is not '${DELIVERED_BASIS}'; see /api/night-charge/status → plan.buyDebiasBasis.`,
+  };
 }
 
 /**

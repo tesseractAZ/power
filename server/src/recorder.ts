@@ -583,9 +583,12 @@ export interface NightLedgerRow {
   plan_traj_floor_breached: number | null; // 0/1 — scored on the SIMULATED trajectory (§3.3)
   cushion_breached: number | null; // 0/1
   // v1.50.0 — supervised-write actuation record. `actuated` is set the moment
-  // the bounded reserve write succeeds (NOT at scoring); `delivered_kwh` is the
-  // measured charge-attributable window import (meter kWh: window grid import
-  // minus the concurrent house pass-through), filled by the scorer.
+  // the bounded reserve write succeeds (NOT at scoring); `delivered_kwh` is
+  // filled by the scorer. v1.187.3 — it is the energy into the home Cores over
+  // the hold (the charging part of the house panel's source channels,
+  // nightLedgerScoring.deliveredIntoCores), recorded with `delivered_basis`.
+  // Rows captured earlier hold window grid import minus the concurrent house
+  // load, which under-counts any night the house ran from the pack.
   actuated: number | null; // 0/1
   actuation_applied_at_ms: number | null;
   /** v1.187.0 — when the reserve restore was accepted (the actuator's revert), so the
@@ -593,6 +596,11 @@ export interface NightLedgerRow {
    *  NULL before v1.187.0, and on a night whose restore never landed. */
   actuation_reverted_at_ms: number | null;
   delivered_kwh: number | null;
+  /** v1.187.3 — how `delivered_kwh` was measured: DELIVERED_BASIS ('source-charge'),
+   *  written exactly when `delivered_kwh` is. NULL beside a number = captured before
+   *  v1.187.3 (the import − house-load estimate), kept as recorded; the buy de-bias
+   *  learner admits only the current basis (calibratedBuyDebiasFactor). */
+  delivered_basis: string | null;
   grid_home_coverage_frac: number | null;
   outage_during_day: number | null; // 0/1
   scored: number | null; // 0/1 (0 when coverage<0.9 or excluded)
@@ -725,6 +733,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'cost_surplus_kwh', 'cost_surplus_raw_kwh', 'cost_surplus_load_factor', 'cost_surplus_load_samples',
   // v1.187.0 — when the reserve restore landed: the end of the delivered-energy span.
   'actuation_reverted_at_ms',
+  // v1.187.3 — the method behind delivered_kwh.
+  'delivered_basis',
 ];
 const NIGHT_LEDGER_COLUMN_SET = new Set<string>(NIGHT_LEDGER_COLUMNS as readonly string[]);
 
@@ -956,6 +966,8 @@ export function createRecorder(
     // v1.187.1 — see NightLedgerRow.cost_surplus_kwh.
     'cost_surplus_kwh REAL', 'cost_surplus_raw_kwh REAL', 'cost_surplus_load_factor REAL',
     'cost_surplus_load_samples INTEGER',
+    // v1.187.3 — see NightLedgerRow.delivered_basis.
+    'delivered_basis TEXT',
   ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);
@@ -1542,6 +1554,14 @@ export function createRecorder(
         push('total_out', dpu.totalOutWatts);
         push('bat_vol', dpu.batVol);
         push('bat_amp', dpu.batAmp);
+        // v1.187.3 — EcoFlow's EMS parallel band, beside the bat_vol it is compared with (the
+        // ems-volt notice). It had no series on any release, so an episode could only be rebuilt
+        // from the ledger's detail text at its edges, never checked against batVol in between.
+        // In mV as projected (the pack-cell idiom), so a band move is recorded when it happens
+        // rather than at the 5-minute heartbeat. Both come from the ~5-minute backend block:
+        // about one row per Core per report.
+        push('ems_para_vol_min_mv', dpu.emsParaVolMinMv);
+        push('ems_para_vol_max_mv', dpu.emsParaVolMaxMv);
         push('mppt_hv_temp', dpu.mpptHvTemp);
         push('mppt_lv_temp', dpu.mpptLvTemp);
         // v0.9.78 — record the configured charge ceiling so the

@@ -345,7 +345,7 @@ const ES_TITLE_BY_ID_PREFIX: ReadonlyArray<readonly [string, string]> = [
   ['vdiff-warn', 'Desequilibrio de celdas'],
   ['cell-ovp', 'Sobrevoltaje de celda'], // v1.187.0
   ['soc-low', 'Batería casi vacía'],
-  ['ems-volt', 'Voltaje de batería fuera del rango permitido'],
+  ['ems-volt', 'Oscilación de voltaje fuera de la banda del EMS'], // v1.187.3 — a relative band, not a limit (info, never voiced)
   ['dpu-imbalance', 'Baterías desequilibradas'],
   ['dpu-pvh-err', 'Código de error del MPPT de alto voltaje'],
   ['dpu-pvl-err', 'Código de error del MPPT de bajo voltaje'],

@@ -97,8 +97,8 @@ const MUTANTS = [
   {
     id: 'ix. ★★★ a timed-out worker report reads as "no alerts" again',
     file: AM,
-    find: '      return { value: last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error };',
-    to: '      return { value: fresh && last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error }; /* MUTANT */',
+    find: '      return { value: last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error, warm: hydratedLanded };',
+    to: '      return { value: fresh && last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error, warm: hydratedLanded }; /* MUTANT */',
     why: 'A worker stall resolves every worker-served alert: false "Resolved:" pushes, then a re-raise.',
   },
   {

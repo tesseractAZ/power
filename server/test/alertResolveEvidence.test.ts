@@ -204,12 +204,13 @@ test('settle families hold their PUSH 5 minutes; everything else keeps the defau
   assert.equal(pushDebounceMsFor('vdiff-crit-SN-1', 10 * 60_000), 10 * 60_000);
 });
 
-test('a fire the operator saw as auto-tuned "[Low]" owes no "Resolved:" push', () => {
+test('v1.187.3: the severity a fire was DISPATCHED at decides whether its resolve is owed (v1.88.0 read the auto-tuned tier and stranded "[Low]" cards)', () => {
   const base = { pushSent: true, notifiedSeverity: 'warning' as const, alert: { id: 'peer-soc-SN-1', severity: 'warning' as const } };
-  // delivered at source tier → resolve owed
-  assert.equal(shouldSendResolve({ ...base, notifiedEffectiveSeverity: 'warning' }, true, 'warning'), true);
-  // auto-tuned down to info at delivery → the resolve of a demoted event is noise
-  assert.equal(shouldSendResolve({ ...base, notifiedEffectiveSeverity: 'info' }, true, 'warning'), false);
-  // legacy entries without the field keep the old behavior (notifiedSeverity decides)
   assert.equal(shouldSendResolve(base, true, 'warning'), true);
+  // The alert reads info on its last tick (a peer outlier flickering warning↔info): the push went
+  // out as a warning, so its card is still owed the dismissal.
+  assert.equal(shouldSendResolve({ ...base, alert: { ...base.alert, severity: 'info' } }, true, 'warning'), true);
+  // A record without notifiedSeverity falls back to the alert's own severity.
+  assert.equal(shouldSendResolve({ pushSent: true, alert: { id: 'peer-soc-SN-1', severity: 'info' } }, true, 'warning'), false);
+  assert.equal(shouldSendResolve({ pushSent: true, alert: { id: 'peer-soc-SN-1', severity: 'warning' } }, true, 'warning'), true);
 });
