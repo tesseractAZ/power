@@ -24,6 +24,14 @@
  * newer announcement outranks (a retry's own re-arm keeps its budget); and only a delivery at least
  * as new as the pending retry cancels it. A lower announcement never supersedes a higher retry, and
  * dedicated announcements are unchanged.
+ *
+ * (review) The checks compare announcements, not alerts. A retry still current when it runs now
+ * speaks the condition as it stands then (conditionRetryWords): the red naming A, with C standing
+ * too, no longer replays the cleared A when A clears and C keeps the red, and a retry already
+ * waiting in the chain ahead of C's own announcement names C. Below its level (a held
+ * de-escalation, a kept red) it replays the words it was armed with. And under production timing a
+ * newer warning's retry that runs just after the kept red's retry has played is refused by the
+ * same-level gap that delivery armed; the warning is spoken when the condition commits down to it.
  */
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -122,6 +130,10 @@ const CRIT_C: Alert = { id: 'dpu-err-DPU-C', severity: 'critical', category: 'Ba
 const CRIT_B: Alert = { id: 'vdiff-crit-DPU-B-2', severity: 'critical', category: 'Battery', device: 'Core 2', title: 'Cell imbalance', detail: 'spread 101 mV' } as Alert;
 const HELD_B: Alert = { ...CRIT_B, annunciate: false, mutedBy: 'balancing', muteReason: 'the BMS is balancing the cells', detail: 'spread 95 mV BMS is actively balancing the cells.' } as Alert;
 const WARN_N: Alert = { id: 'soc-low-DPU-C-3', severity: 'warning', category: 'Battery', device: 'Core 3', title: 'Pack state of charge low', detail: 'x' } as Alert;
+/** A cell-imbalance warning inside its speak hold (no onset recorded): counted on the card and the
+ *  push, never voiced until it has stood its hold (heldForImbalanceConfirm). Located, so it would
+ *  be the warning named if it were voiced. */
+const HELD_IMBALANCE: Alert = { id: 'vdiff-warn-DPU-D-1', severity: 'warning', category: 'Battery', device: 'Core 4', coreNum: 4, packNum: 1, title: 'Cell imbalance', detail: 'spread 60 mV' } as Alert;
 const NOTICE = 'A dedicated notice is playing.';
 const RESERVE = 'Backup reserve at ten percent.';
 
@@ -254,7 +266,7 @@ test('★★★ a NEWER announcement that reached the speakers drops an older re
   assert.equal(heard(plays[0].url), 0, '★★★ the cleared A is not spoken after C');
 });
 
-test('★★★ a red retry waiting behind a NEWER warning spoken under the kept red still plays (a lower announcement takes no red\'s place) — and its delivery does not cancel the newer warning\'s retry', async () => {
+test('★★★ a red retry waiting behind a NEWER warning spoken under the kept red still plays (a lower announcement takes no red\'s place) — and its delivery does not cancel the newer warning\'s retry, which the same-level gap the red armed then refuses; the warning is spoken when the condition commits down to it', async () => {
   const r = await started(2 * RETRY_MS);
   plan.push({ status: 500 }); // red B
   alerts = [CRIT_B];
@@ -278,10 +290,21 @@ test('★★★ a red retry waiting behind a NEWER warning spoken under the kept
   const urlWarn = plays[2].url;
   await until(r, () => r.count('broadcast: red → ok in') === 1, '★ the red retry, older but higher, plays');
   assert.equal(heard(urlB), 1);
-  offset += 3 * MIN; // past the same-level storm gap before the warning's retry fires
-  await until(r, () => heard(urlWarn) === 1, '★★ the newer warning\'s retry plays: the older red\'s delivery did not cancel it');
+  // Production timing: the warning's retry fires inside the 120 s same-level gap the red's delivery
+  // armed. It runs (nothing cancelled it) and the gap refuses it; a refused retry is not re-armed.
+  await until(r, () => r.has('yellow suppressed — last red condition broadcast played'), '★★ the newer warning\'s retry runs — the older red\'s delivery did not cancel it — and the gap refuses it');
+  await sleep(300);
+  assert.equal(heard(urlWarn), 0, 'refused, not played');
   assert.ok(!r.has('the pending yellow retry is cancelled'));
   assert.ok(!r.has('retry dropped'));
+  assert.ok(!r.has('deferred retry 2/3'), 'a refused retry is not re-armed');
+  // The red clears (a sounded cell-spread critical holds the level until it has been absent
+  // SOUNDED_VDIFF_ABSENT_HOLD_MS); the condition then commits down to the warning after its dwell,
+  // and that transition names it.
+  alerts = [WARN_N];
+  for (let i = 0; i < 14 && heard(urlWarn) === 0; i++) { offset += MIN; await sleep(150); }
+  await until(r, () => heard(urlWarn) === 1, '★ the warning, spoken when the condition commits down to it');
+  assert.equal(r.count('condition transition → yellow'), 2, 'the warning under the kept red, then the commit down to it');
 });
 
 test('★★ a NEWER warning that fails while the red\'s retry is armed waits behind it — newer is not enough to take a higher retry\'s slot', async () => {
@@ -332,6 +355,91 @@ test('★★ a still-standing red\'s own retry plays behind a DEDICATED announce
   await until(r, () => heard(plays[0].url) === 1, '★ A, still standing, retried');
   assert.equal(plays[2].url, plays[0].url, 'the retry replays the same rendered announcement');
   assert.ok(!r.has('retry dropped'));
+});
+
+test('★★★ (review) the alarm a retry names clears while another critical keeps the red: the retry names the critical that stands, not the one that cleared', async () => {
+  const r = await started(RETRY_MS);
+  plan.push({ status: 500 }); // the red, naming A (located, so A is the one spoken)
+  alerts = [CRIT_A, CRIT_C];
+  await until(r, () => r.has(ARMED), 'the red naming A failing, its retry armed');
+  const urlA = plays[0].url;
+  alerts = [CRIT_C]; // A clears; C, counted with A, keeps the red: nothing new to announce
+  await until(r, () => plays.length === 2 && plays[1].done, 'the retry playing');
+  await sleep(300);
+  assert.equal(r.count('condition transition → red'), 1, 'nothing new was announced: C was counted with A');
+  assert.equal(heard(urlA), 0, '★★★ the cleared A is never spoken');
+  assert.equal(heard(plays[1].url), 1, 'the retry reached the speakers');
+  assert.match(String(r.mon.status().lastSpokenMessage), /Inverter/, '★★ it names the standing critical C');
+  assert.ok(r.has('deferred red retry names the condition as it stands now'));
+});
+
+test('★★★ (review) a retry already waiting behind a slow announcement when its alarm clears and another critical appears names the new one — and the new one\'s own announcement, queued behind it, is not a second telling', async () => {
+  const r = await started(RETRY_MS);
+  plan.push({ status: 500 }); // A
+  alerts = [CRIT_A];
+  await until(r, () => r.has(ARMED), 'red A failing');
+  const urlA = plays[0].url;
+  const d = gate();
+  plan.push({ status: 200, gate: d.promise }); // a dedicated alarm: slow, heard
+  const reserve = r.mon.announce('critical', RESERVE, null);
+  await until(r, () => plays.length === 2, 'the dedicated alarm playing');
+  await sleep(RETRY_MS + 300); // A's retry fires and queues behind it
+  alerts = [CRIT_C]; // then A clears and C appears: C's announcement queues behind A's retry
+  await until(r, () => r.count('condition transition → red') === 2, 'C requested');
+  d.open();
+  await reserve;
+  await until(r, () => plays.length === 3 && plays[2].done, 'A\'s retry playing');
+  await until(r, () => r.has('red suppressed — identical message played'), 'C\'s own announcement, just told by the retry');
+  await sleep(300);
+  assert.equal(heard(urlA), 0, '★★★ the cleared A is never spoken');
+  assert.equal(plays.length, 3, 'C is told once');
+  assert.match(String(r.mon.status().lastSpokenMessage), /Inverter/, '★★ the retry named C');
+});
+
+test('★★ (review) a newer red that reaches the speakers while the older red\'s timer is armed frees the slot: a warning failing under the kept red arms its own retry, and is heard', async () => {
+  const r = await started(3000);
+  plan.push({ status: 500 }); // red A
+  alerts = [CRIT_A];
+  await until(r, () => r.has(ARMED), 'red A failing, its retry armed 3 s out');
+  alerts = [CRIT_B]; // A clears and the cell-spread critical B appears: announced, and heard
+  await until(r, () => heard(plays[1]?.url) === 1, 'B reaching the speakers');
+  alerts = [HELD_B]; // held by the balancing mute: the red stays committed
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 3 * MIN; // past the same-level storm gap
+  plan.push({ status: 500 }); // the warning fails
+  alerts = [HELD_B, WARN_N];
+  await until(r, () => r.has('condition transition → yellow (new warning) spoken; the committed condition stays red'), 'the warning under the kept red');
+  await until(r, () => r.count(ARMED) === 2, '★ the slot is free: the warning arms its own retry');
+  const urlWarn = plays[2].url;
+  assert.ok(!r.has('keeping the pending red retry'), '★ A\'s moot timer holds nothing');
+  await until(r, () => heard(urlWarn) === 1, '★★ the warning\'s retry reaches the speakers');
+  assert.equal(heard(plays[0].url), 0, 'the cleared A is never spoken');
+});
+
+test('★★ (review) a retry speaks only what the tick would voice: a cell-imbalance warning still inside its speak hold is never named by the retry of the warning that stands', async () => {
+  const r = await started(RETRY_MS);
+  plan.push({ status: 500 }); // the warning
+  alerts = [WARN_N];
+  await until(r, () => r.has(ARMED), 'the warning failing, its retry armed');
+  const urlWarn = plays[0].url;
+  alerts = [WARN_N, HELD_IMBALANCE]; // located, so it would be named — but not yet voiced
+  await until(r, () => heard(urlWarn) === 1, '★ the retry names the warning the tick voices');
+  await sleep(300);
+  assert.equal(plays.length, 2);
+  assert.doesNotMatch(String(r.mon.status().lastSpokenMessage), /imbalance/i, '★★ the held imbalance warning is not voiced through the retry');
+});
+
+test('conditionRetryWords — the condition as it stands at the retry\'s level; null below it or above it (the armed words are replayed)', () => {
+  const C = B.conditionRetryWords('red', [CRIT_C]);
+  assert.ok(C != null);
+  assert.match(C.message, /Inverter/, 'the standing critical');
+  assert.ok(C.messageEs.length > 0, 'the Spanish words beside the English');
+  assert.match(String(B.conditionRetryWords('red', [CRIT_A, CRIT_C])?.message), /overvoltage/i, 'the critical the tick names (located first)');
+  assert.equal(B.conditionRetryWords('red', [HELD_B, WARN_N]), null, 'a kept red: below the level now');
+  assert.equal(B.conditionRetryWords('red', []), null, 'a held de-escalation');
+  assert.equal(B.conditionRetryWords('yellow', [CRIT_C, WARN_N]), null, 'above the level: a transition is in hand');
+  assert.match(String(B.conditionRetryWords('yellow', [WARN_N])?.message), /state of charge/i);
+  assert.match(String(B.conditionRetryWords('green', [])?.message), /all clear/i);
 });
 
 test('conditionRetrySuperseded — a newer condition announcement at the same or a higher level; never a lower one, never the retry\'s own, never a dedicated retry', () => {

@@ -67,8 +67,9 @@ const SUBSET = [
 ];
 
 const NOTE_SIP = "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode);";
-// v1.187.5 — re-pointed: the run-time check is two thunks (the episode, then a newer announcement).
-const RUN_CHECK = '        () => staleAtRun() ?? supersededAtRun(), episode, generation);';
+// v1.187.5 — re-pointed: the run-time check is two thunks (the episode, then a newer announcement);
+// (review) the words of the condition as it stands ride after them.
+const RUN_CHECK = '        () => staleAtRun() ?? supersededAtRun(), episode, generation, wordsAtRun);';
 
 const MUTANTS = [
   /* ── (1) the restart question ─────────────────────────────────────────────────────────── */
@@ -453,7 +454,7 @@ const MUTANTS = [
     id: 'R-i. ★★★ no run-time episode check: the armed level is replayed whatever the condition',
     file: BR,
     find: RUN_CHECK,
-    to: '        () => supersededAtRun(), episode, generation); /* MUTANT */',
+    to: '        () => supersededAtRun(), episode, generation, wordsAtRun); /* MUTANT */',
     why: 'A cleared red is spoken after its all-clear: the last words in the house a critical that has cleared.',
   },
   {
@@ -467,7 +468,7 @@ const MUTANTS = [
     id: 'R-iii. ★★ checked when the timer fires, not when the retry runs',
     file: BR,
     find: RUN_CHECK,
-    to: '        ((s) => () => s ?? supersededAtRun())(staleAtRun()), episode, generation); /* MUTANT */',
+    to: '        ((s) => () => s ?? supersededAtRun())(staleAtRun()), episode, generation, wordsAtRun); /* MUTANT */',
     why: 'A retry queued behind a broadcast in flight is played after the green committed meanwhile.',
   },
   {
@@ -526,7 +527,10 @@ const MUTANTS = [
     file: BR,
     find: "      if (retryTimer != null && retryLevel != null && retryKind === 'condition' && retryEpisode === episode",
     to: "      if (false && retryTimer != null && retryLevel != null && retryKind === 'condition' && retryEpisode === episode /* MUTANT */",
-    why: 'Red C is heard, then A\'s retry replays the cleared critical as the last words once the same-level gap has passed.',
+    // v1.187.5 (review) — A's retry, once C is heard, is dropped when it runs (conditionRetrySuperseded)
+    // and would name the standing critical anyway (conditionRetryWords): the cancel's remaining
+    // effect is the slot it frees.
+    why: 'C reaches the speakers while A\'s timer is armed: A\'s moot retry keeps the slot, a warning failing under the kept red is kept pending behind it instead of arming, and when A\'s retry is dropped the warning is never retried.',
   },
 ];
 

@@ -1237,6 +1237,34 @@ export function conditionRetrySuperseded(
     .some((l) => RETRY_LEVEL_RANK[l] >= RETRY_LEVEL_RANK[level] && newest[l] > generation);
 }
 
+/**
+ * v1.187.5 (review) — THE WORDS A DEFERRED CONDITION RETRY SPEAKS WHEN IT RUNS.
+ *
+ * A retry that passes the episode and newest-announcement checks still replayed the text it was
+ * armed with, and the checks compare announcements, not alerts: neither says whether the alert that
+ * text names still stands. Red naming A (with C standing too) failed and armed; A cleared while C
+ * kept the red (C was counted, so nothing new was announced); the retry spoke the cleared A and C
+ * was never named. And a retry already waiting in the single-flight chain when A cleared and C
+ * appeared ran AHEAD of C's own announcement (a generation is taken when a broadcast runs, so C had
+ * none yet): it spoke the cleared A, and C was refused by the same-level gap for two minutes.
+ *
+ * `speakable` is the tick's array (speakableAlerts over the store) read when the retry runs. While
+ * it still raises the retry's level, the retry speaks that level as the tick would now — the alert
+ * buildAlertMessage names (pickPrimaryAlert), in both languages. Below the level (a de-escalation
+ * standing its dwell, a sounded cell-spread critical held by its mute: keepRed) it returns null and
+ * the armed words are replayed: the committed condition is still that level (the episode check),
+ * and fail-loud — its green or its warning follows. Above it, a transition is in hand; the armed
+ * words are replayed and that transition is announced next. The tone (the rung) rides along, as in
+ * the v1.45.0 spoken retry. Dedicated announcements never come here. Pure + exported for tests.
+ */
+export function conditionRetryWords(
+  level: ConditionLevel,
+  speakable: Alert[],
+): { message: string; messageEs: string } | null {
+  if (conditionFromAlerts(speakable).level !== level) return null;
+  return { message: buildAlertMessage(level, speakable), messageEs: buildAlertMessageEs(level, speakable) };
+}
+
 
 /**
  * v1.119.0 — the announce HTTP budget, DERIVED from the clip instead of guessed.
@@ -1740,8 +1768,14 @@ export function startBroadcastMonitor(
         ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since; the retry replays only the level it was armed for while that level is still committed` : null);
       const supersededAtRun = (): string | null => (conditionRetrySuperseded(kind, level, generation, conditionNewestGeneration)
         ? 'a newer announcement of the condition has taken its place since; a retry replays only the newest announcement of the condition at its level' : null);
+      // v1.187.5 (review) — and a CONDITION retry speaks the condition as it stands when it RUNS
+      // (conditionRetryWords), not the alert it was armed with: that alert may have cleared while
+      // another kept the level. A dedicated retry replays its own text.
+      const wordsAtRun = kind === 'condition'
+        ? () => conditionRetryWords(level, speakableAlerts((store.get().alerts ?? []) as Alert[], Date.now(), getAlertOnset))
+        : undefined;
       void runBroadcast(level, rung, message, false, messageEs, lastSipDispatchOk, kind,
-        () => staleAtRun() ?? supersededAtRun(), episode, generation);
+        () => staleAtRun() ?? supersededAtRun(), episode, generation, wordsAtRun);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
   };
@@ -2613,6 +2647,9 @@ export function startBroadcastMonitor(
     staleReason?: () => string | null, // v1.187.4 — a deferred retry's run-time check
     episode = conditionEpisode, // v1.187.4 — the condition episode the broadcast was requested in
     retryOf?: number, // v1.187.5 — a deferred retry: the generation of the announcement it replays
+    // v1.187.5 (review) — a deferred condition retry: the words of the condition as it stands, read
+    // at the head of the chain (null: replay the armed words)
+    wordsAtRun?: () => { message: string; messageEs: string } | null,
   ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
     attemptKind = kind; // v1.186.0 — read once, at entry, by the attempt below
     attemptEpisode = episode;
@@ -2627,7 +2664,15 @@ export function startBroadcastMonitor(
         log(`broadcast: deferred ${level} retry dropped — ${stale}`);
         return { ok: false, errors: [`dropped: stale retry (${stale})`] };
       }
-      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);
+      // v1.187.5 (review) — a retry that is still current speaks the condition as it stands now
+      // (conditionRetryWords), read here, at the head of the chain, as the run-time checks are: it
+      // may have waited behind a slow broadcast while the alert it was armed with cleared. Its
+      // re-arm, if it fails again, carries these words.
+      const words = wordsAtRun?.() ?? { message, messageEs };
+      if (words.message !== message) {
+        log(`broadcast: deferred ${level} retry names the condition as it stands now — the alert it was armed with is no longer the one the ${level} names`);
+      }
+      return await runBroadcastAttempt(level, rung, words.message, words.messageEs, bypassStormGate, skipSip);
     } finally {
       releaseRetrySlotIfIdle();
     }
@@ -2700,9 +2745,10 @@ export function startBroadcastMonitor(
     // commit lands belongs to the episode it was requested for. A deferred retry passes its own.
     episode = conditionEpisode,
     retryOf?: number, // v1.187.5 — forwarded; set by deferred retries (their announcement's generation)
+    wordsAtRun?: () => { message: string; messageEs: string } | null, // v1.187.5 (review) — forwarded; set by deferred condition retries
   ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
     realAudibleInFlight++;
-    const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip, kind, staleReason, episode, retryOf);
+    const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip, kind, staleReason, episode, retryOf, wordsAtRun);
     const p = broadcastChain.then(run, run);
     broadcastChain = p.catch(() => undefined);
     void p.then(() => { realAudibleInFlight--; }, () => { realAudibleInFlight--; });
