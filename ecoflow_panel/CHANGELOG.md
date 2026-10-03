@@ -1,3 +1,18 @@
+## 1.187.5
+
+### A late retry names the alarm that is current, not one that cleared
+
+**Announcements**
+
+- **A late retry no longer replaces a newer alarm with one that has cleared.** When Music Assistant cannot play an announcement, it is retried after 30 seconds, 90 seconds and 3 minutes. When one critical alarm cleared and a different one appeared at the same moment, the first alarm's retry could still play after the second alarm had been announced, if the second alarm's announcement was slow and then failed:
+  - when the first alarm's retry played, it cancelled the second alarm's retry, so the house heard the alarm that had cleared and the second alarm was never named;
+  - when the first alarm's retry failed again, it took the second alarm's place in the retry queue with a fresh set of three retries, and later played the alarm that had cleared.
+  - The alarm level was right in both cases; the alarm named was the wrong one.
+- Announcements are now numbered in the order they are made. A retry plays only while no newer announcement at the same or a more serious level has taken its place in the retry queue or reached the speakers. Otherwise it is dropped when its turn comes, including when it is already waiting behind another announcement.
+- A retry that fails again keeps counting its own three retries. Only a newer announcement takes the place of a waiting retry, whatever its wording.
+- An older announcement reaching the speakers no longer cancels the retry of a newer one. For example, a critical alarm's retry that plays late no longer cancels the retry of a newer warning announced while that critical alarm stays current.
+- A warning still never takes the place of a critical alarm's retry, and battery-level, runway and other dedicated announcements are retried as before.
+
 ## 1.187.4
 
 ### The all-clear after a restart waits for a complete picture, "Reserve alarm blind" keeps its age across a restart, and a late retry never repeats a cleared alarm
