@@ -17,17 +17,7 @@
  * A lower announcement never supersedes a higher retry; dedicated announcements are unchanged.
  * Mutants S-i..S-xiii.
  *
- * (review) The checks compare announcements, not alerts: a retry that passes them still replayed the
- * words it was armed with, so a red naming A, with C standing too, spoke the cleared A when A cleared
- * and C kept the red, and a retry waiting in the chain ahead of C's own announcement spoke the
- * cleared A. A condition retry now speaks the condition as it stands when it runs
- * (broadcast.conditionRetryWords over the tick's speakable alerts, read at the head of the chain),
- * and replays its armed words when the condition is no longer at its level (a held de-escalation, a
- * kept red). Dedicated retries replay their own text. Mutants S-xiv..S-xviii.
- *
- * Not mutated: the Spanish words beside the English (buildAlertMessageEs, as speakCondition builds
- * them; the bilingual pass is off in the rig and the pure test pins that they are built); the log
- * line naming a change of words (asserted, but a line, not a behaviour); Math.max in noteConditionNewest (a retry is recorded only after passing the run-time
+ * Not mutated: Math.max in noteConditionNewest (a retry is recorded only after passing the run-time
  * check, so its generation is never below the record of its level — a plain assignment is the same);
  * `>` against `!==` in the outrank test (an older generation reaching the arm is one nothing newer at
  * its level or above has superseded, so the pending retry it meets is lower, and the level rank
@@ -57,25 +47,22 @@ const MUTANTS = [
   {
     id: 'S-i. ★★★ no run-time check for a newer announcement',
     file: BR,
-    // (review) re-pointed: the words of the condition as it stands ride after the run-time checks.
-    find: '        () => staleAtRun() ?? supersededAtRun(), episode, generation, wordsAtRun);',
-    to: '        () => staleAtRun(), episode, generation, wordsAtRun); /* MUTANT */',
+    find: '        () => staleAtRun() ?? supersededAtRun(), episode, generation);',
+    to: '        () => staleAtRun(), episode, generation); /* MUTANT */',
     why: 'THE DEFECT: A\'s retry queued behind C plays the cleared A, and C (its retry storm-gated or cancelled) is never named.',
   },
   {
     id: 'S-ii. ★★ superseded judged when the timer fires, not when the retry runs',
     file: BR,
-    // (review) re-pointed: the words of the condition as it stands ride after the run-time checks.
-    find: '        () => staleAtRun() ?? supersededAtRun(), episode, generation, wordsAtRun);',
-    to: '        ((s) => () => staleAtRun() ?? s)(supersededAtRun()), episode, generation, wordsAtRun); /* MUTANT */',
+    find: '        () => staleAtRun() ?? supersededAtRun(), episode, generation);',
+    to: '        ((s) => () => staleAtRun() ?? s)(supersededAtRun()), episode, generation); /* MUTANT */',
     why: 'A\'s retry fires while C is still playing (nothing newer yet) and plays after C has failed and armed.',
   },
   {
     id: 'S-iii. ★★ the timer does not pass the announcement\'s generation',
     file: BR,
-    // (review) re-pointed: the words of the condition as it stands ride after the run-time checks.
-    find: '        () => staleAtRun() ?? supersededAtRun(), episode, generation, wordsAtRun);',
-    to: '        () => staleAtRun() ?? supersededAtRun(), episode, undefined, wordsAtRun); /* MUTANT */',
+    find: '        () => staleAtRun() ?? supersededAtRun(), episode, generation);',
+    to: '        () => staleAtRun() ?? supersededAtRun(), episode); /* MUTANT */',
     why: 'Every re-run is a new announcement: its own re-arm outranks the slot with a fresh budget, and a failing announcement is retried forever.',
   },
   {
@@ -147,43 +134,6 @@ const MUTANTS = [
     find: "  if (kind !== 'condition') return false;\n  return (Object.keys(RETRY_LEVEL_RANK) as ConditionLevel[])",
     to: "  /* MUTANT */\n  return (Object.keys(RETRY_LEVEL_RANK) as ConditionLevel[])",
     why: 'A SoC-ladder alarm\'s retry queued behind a newer condition announcement is dropped: the dedicated alarm is never heard.',
-  },
-
-  /* ── (review) the words a condition retry speaks when it runs ─────────────────────────── */
-  {
-    id: 'S-xiv. ★★★ a condition retry replays the words it was armed with (pre-review)',
-    file: BR,
-    find: '      const words = wordsAtRun?.() ?? { message, messageEs };',
-    to: '      const words = { message, messageEs }; /* MUTANT */',
-    why: 'The red named A, with C standing too; A cleared and C kept the red: the retry speaks the cleared A and C is never named.',
-  },
-  {
-    id: 'S-xv. ★★ the words are read when the timer fires, not when the retry runs',
-    file: BR,
-    find: '        () => staleAtRun() ?? supersededAtRun(), episode, generation, wordsAtRun);',
-    to: '        () => staleAtRun() ?? supersededAtRun(), episode, generation, ((w) => () => w)(wordsAtRun?.() ?? null)); /* MUTANT */',
-    why: 'A\'s retry fires behind a slow announcement, then A clears and C appears: it speaks the cleared A ahead of C, and C is refused by the same-level gap.',
-  },
-  {
-    id: 'S-xvi. ★★★ the words are re-derived whatever level the condition stands at',
-    file: BR,
-    find: '  if (conditionFromAlerts(speakable).level !== level) return null;',
-    to: '  /* MUTANT */',
-    why: 'The red nobody heard, retried under the kept red (its critical held by the balancing mute), says "Critical condition detected" instead of naming the critical.',
-  },
-  {
-    id: 'S-xvii. ★★ a dedicated retry speaks the condition',
-    file: BR,
-    find: "      const wordsAtRun = kind === 'condition'",
-    to: "      const wordsAtRun = true /* MUTANT */",
-    why: 'A deferred backup-reserve alarm is replaced by the standing critical\'s words: the reserve alarm is never heard.',
-  },
-  {
-    id: 'S-xviii. ★★ the words come from the raw store, not the tick\'s speakable alerts',
-    file: BR,
-    find: '        ? () => conditionRetryWords(level, speakableAlerts((store.get().alerts ?? []) as Alert[], Date.now(), getAlertOnset))',
-    to: '        ? () => conditionRetryWords(level, (store.get().alerts ?? []) as Alert[]) /* MUTANT */',
-    why: 'A cell-imbalance warning still inside its speak hold is named by the retry of the warning that stands: the hold the tick keeps is bypassed.',
   },
 ];
 

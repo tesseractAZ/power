@@ -131,23 +131,15 @@ test('★★★ every exit of the broadcast routine releases an idle retry slot'
     + '      const stale = staleReason?.() ?? null;\n'
     + '      if (stale != null) {\n'),
     'the stale-retry drop is inside the try');
-  // v1.187.5 (review) — between the drop and the attempt, a condition retry reads the words of the
-  // condition as it stands (wordsAtRun): straight-line code, no exit of its own, in the same try.
-  const dropAt = code.indexOf(
+  assert.ok(code.includes(
     "        return { ok: false, errors: [`dropped: stale retry (${stale})`] };\n"
     + '      }\n'
-    + '      const words = wordsAtRun?.() ?? { message, messageEs };\n');
-  const tailAt = code.indexOf(
-    '      return await runBroadcastAttempt(level, rung, words.message, words.messageEs, bypassStormGate, skipSip);\n'
+    + '      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);\n'
     + '    } finally {\n'
     + '      releaseRetrySlotIfIdle();\n'
     + '    }\n'
-    + '  };');
-  assert.ok(dropAt > 0 && tailAt > dropAt,
+    + '  };'),
     'the wrapper releases an idle slot on EVERY exit, including a throw and a dropped stale retry — not only at the tail');
-  const between = code.slice(dropAt, tailAt).split('\n').slice(2).join('\n');
-  assert.ok(!/\breturn\b|\btry\b|\bfinally\b|\bcatch\b/.test(between),
-    'nothing between the drop and the attempt leaves the try another way');
 
   // Releasing on the way IN would wipe the budget of the retry that is re-running,
   // which is the v1.159.0 defect restored.
