@@ -1207,6 +1207,36 @@ export function conditionRetryStale(kind: BroadcastKind, armedEpisode: number, c
   return kind === 'condition' && armedEpisode !== currentEpisode;
 }
 
+/**
+ * v1.187.5 — HAS A NEWER ANNOUNCEMENT OF THE CONDITION TAKEN A DEFERRED RETRY'S PLACE?
+ *
+ * Every broadcast takes a GENERATION when it runs (a deferred retry keeps the one of the
+ * announcement it replays), so a higher generation is a newer announcement. `newest` holds, per
+ * level, the newest generation of a condition announcement that took the deferred-retry slot (an
+ * arm) or reached the speakers. A condition retry is superseded when a newer announcement at the
+ * same or a higher level has done either: a retry replays the newest announcement of the condition,
+ * never an older one. The v1.187.4 test was the episode alone, and inside one episode the text:
+ * red A failed and was armed; A cleared and critical C was announced on one tick; A's retry fired
+ * while C was still playing and queued behind it; C failed and armed its own retry; then A's retry
+ * ran — played, it cancelled C's retry (the house heard the cleared A and C was never named);
+ * failed, its re-arm read as a different announcement, took the slot from C with a fresh budget and
+ * later played the cleared A. A LOWER newer announcement never supersedes (a warning spoken under a
+ * kept red does not take the place of the red's retry: retrySlotDecision). Generations only grow
+ * and the run-time check reads the episode first, so an older episode's record can never supersede a
+ * retry of the current one. A dedicated announcement (SoC ladder, runway, notices) is not the
+ * condition: never superseded here. Pure + exported for tests.
+ */
+export function conditionRetrySuperseded(
+  kind: BroadcastKind,
+  level: ConditionLevel,
+  generation: number,
+  newest: Readonly<Record<ConditionLevel, number>>,
+): boolean {
+  if (kind !== 'condition') return false;
+  return (Object.keys(RETRY_LEVEL_RANK) as ConditionLevel[])
+    .some((l) => RETRY_LEVEL_RANK[l] >= RETRY_LEVEL_RANK[level] && newest[l] > generation);
+}
+
 
 /**
  * v1.119.0 — the announce HTTP budget, DERIVED from the clip instead of guessed.
@@ -1563,8 +1593,22 @@ export function startBroadcastMonitor(
    *  retryLevel is set. */
   let retryKind: BroadcastKind = 'dedicated';
   let retryEpisode = 0;
-  /** v1.187.4 (review) — the text the pending retry replays. */
-  let retryMessage: string | null = null;
+  /**
+   * v1.187.5 — the GENERATION of the announcement the pending retry replays (read only while
+   * retryLevel is set). Every broadcast takes the next generation when it runs (attemptGeneration,
+   * set by runBroadcastInner); a deferred retry keeps the one of the announcement it replays, so a
+   * retry's own re-arm carries the slot's generation and only a NEW announcement carries a higher
+   * one. v1.187.4 told the two apart by the text, so an OLDER announcement's retry with a different
+   * text read as new: it took the slot from the newer one with a fresh budget.
+   */
+  let retryGeneration = 0;
+  let broadcastGeneration = 0;
+  /** v1.187.5 — per level, the newest generation of a CONDITION announcement that took the slot
+   *  (scheduleBroadcastRetry) or reached the speakers (runBroadcastAttempt): conditionRetrySuperseded. */
+  const conditionNewestGeneration: Record<ConditionLevel, number> = { green: 0, yellow: 0, red: 0 };
+  const noteConditionNewest = (level: ConditionLevel, generation: number): void => {
+    conditionNewestGeneration[level] = Math.max(conditionNewestGeneration[level], generation);
+  };
   // v1.32.0 (cross-model review) — track whether the LAST SIP dispatch actually
   // DELIVERED (ok > 0), not merely that it was attempted. v1.25.0's skipSip
   // conflated "dispatched" with "delivered": a failed first SIP dispatch was
@@ -1596,7 +1640,7 @@ export function startBroadcastMonitor(
   const releaseRetrySlotIfIdle = () => {
     if (retryTimer == null) { retryAttempt = 0; retryLevel = null; }
   };
-  const scheduleBroadcastRetry = (level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string, kind: BroadcastKind, episode: number) => {
+  const scheduleBroadcastRetry = (level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string, kind: BroadcastKind, episode: number, generation: number) => {
     // v1.186.0 — a TEST never takes the single deferred-retry slot. A failed test that armed a
     // retry superseded any milder real alarm's pending retry (yellow lost to "This is only a
     // test"), and its replay ran as an ordinary broadcast. The operator who asked for the test
@@ -1614,8 +1658,14 @@ export function startBroadcastMonitor(
     // same episode (a new critical while red) is the condition now: it takes the slot with a budget of
     // its own. Counted against the old one, it "gave up after 3" with no attempt, and the old retry
     // then played a critical that had cleared. A lower one (a warning under a kept red) still waits.
+    // v1.187.5 — "different" is a NEWER announcement (a higher generation), not a different text: a
+    // retry's own re-arm keeps the slot's generation and its budget, and an older announcement's
+    // retry gets here only when nothing newer at its level or above has taken the slot or been heard
+    // (otherwise it is dropped when it runs: conditionRetrySuperseded). By the text, the older red
+    // A's retry, failing again behind the newer critical C, took C's slot with a fresh 1/3 budget and
+    // later played the cleared A.
     const outranked = !stalePending && retryLevel != null && retryKind === 'condition' && kind === 'condition'
-      && retryEpisode === episode && message !== retryMessage && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel];
+      && retryEpisode === episode && generation > retryGeneration && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel];
     const pending = stalePending || outranked ? null : retryTimer != null && retryLevel != null
       ? { level: retryLevel, attempt: retryAttempt }
       : retryLevel != null ? { level: retryLevel, attempt: retryAttempt } : null;
@@ -1640,7 +1690,11 @@ export function startBroadcastMonitor(
     retryLevel = level;
     retryKind = kind;
     retryEpisode = episode;
-    retryMessage = message;
+    retryGeneration = generation;
+    // v1.187.5 — a condition announcement that takes the slot is the newest of its level: an older
+    // one's retry still waiting in the chain is dropped when it runs (conditionRetrySuperseded). A
+    // dedicated one is not the condition and takes no condition retry's place.
+    if (kind === 'condition') noteConditionNewest(level, generation);
     log(`broadcast: ${reason} — deferred retry ${retryAttempt}/${RETRY_DELAYS_MS.length} in ${Math.round(delay / 1000)}s`);
     retryTimer = setTimeout(() => {
       retryTimer = null;
@@ -1677,9 +1731,17 @@ export function startBroadcastMonitor(
       // cleared — its green committed and spoken, or committed and itself deferred — became the last
       // words in the house. A held de-escalation does not move the committed level, so a red
       // retried while its clearing stands the dwell still plays (fail-loud): its green follows.
+      // v1.187.5 — and only while no NEWER announcement of the condition at its level or above has
+      // taken the slot or reached the speakers (conditionRetrySuperseded, by the generation this
+      // closure captured), checked when it RUNS too. Red A's retry, queued behind critical C's slow
+      // play, ran after C had failed and armed: it played the cleared A and its delivery cancelled
+      // C's retry, so C was never named.
+      const staleAtRun = (): string | null => (conditionRetryStale(kind, episode, conditionEpisode)
+        ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since; the retry replays only the level it was armed for while that level is still committed` : null);
+      const supersededAtRun = (): string | null => (conditionRetrySuperseded(kind, level, generation, conditionNewestGeneration)
+        ? 'a newer announcement of the condition has taken its place since; a retry replays only the newest announcement of the condition at its level' : null);
       void runBroadcast(level, rung, message, false, messageEs, lastSipDispatchOk, kind,
-        () => (conditionRetryStale(kind, episode, conditionEpisode) ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since` : null),
-        episode);
+        () => staleAtRun() ?? supersededAtRun(), episode, generation);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
   };
@@ -2131,6 +2193,9 @@ export function startBroadcastMonitor(
   let attemptKind: BroadcastKind = 'dedicated';
   /** v1.187.4 — the condition episode the attempt about to run was requested in (runBroadcast). */
   let attemptEpisode = 0;
+  /** v1.187.5 — the generation of the attempt about to run (runBroadcastInner): the next one for a
+   *  new announcement, the replayed announcement's own for a deferred retry. */
+  let attemptGeneration = 0;
 
   /**
    * Single broadcast: render → one MA call. No staggering, no settles.
@@ -2150,6 +2215,7 @@ export function startBroadcastMonitor(
     // the single-flight chain lets no other attempt start until this one settles.
     const kind = attemptKind;
     const episode = attemptEpisode; // v1.187.4 — the condition episode the broadcast was requested in
+    const generation = attemptGeneration; // v1.187.5 — which announcement this is (conditionRetrySuperseded)
     const tag = kind === 'test' ? 'TEST ' : '';
     if (!supervised) return { ok: false, errors: ['not supervised'] };
     // v1.25.0 — at least one Music Assistant target is required (SIP targets are an
@@ -2396,7 +2462,7 @@ export function startBroadcastMonitor(
     const usable = preflight.usable.length;
     if (usable === 0) {
       errors.push('all broadcast targets unavailable (HA/MA restarting?)');
-      scheduleBroadcastRetry(level, rung, message, messageEs, 'all broadcast targets unavailable', kind, episode);
+      scheduleBroadcastRetry(level, rung, message, messageEs, 'all broadcast targets unavailable', kind, episode, generation);
       lastBroadcastAt = Date.now(); lastLevel = level; lastOutcome = 'failure'; lastErrors = errors;
       lastBroadcastKind = kind;
       persistStatus();
@@ -2416,7 +2482,7 @@ export function startBroadcastMonitor(
     const call = await playAnnounce(url, rr.sizeBytes);
     if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
-      scheduleBroadcastRetry(level, rung, message, messageEs, 'play_announcement failed after in-call retries', kind, episode);
+      scheduleBroadcastRetry(level, rung, message, messageEs, 'play_announcement failed after in-call retries', kind, episode, generation);
     } else if (!call.verified) {
       // Dispatched, outcome unknown. No retry (v1.118.1) and no verification credit.
       deliveryUnverified = true;
@@ -2431,15 +2497,22 @@ export function startBroadcastMonitor(
     // and re-dispatch rather than report a success no one heard.
     if (call.ok && dt < 2000) {
       errors.push(`unverified: completed in ${dt}ms — too fast for real playback`);
-      scheduleBroadcastRetry(level, rung, message, messageEs, `suspiciously fast completion (${dt}ms)`, kind, episode);
+      scheduleBroadcastRetry(level, rung, message, messageEs, `suspiciously fast completion (${dt}ms)`, kind, episode, generation);
     } else if (call.ok && kind === 'condition') {
       // v1.187.4 — played: the tone-only fallback and a delivery-unknown timeout included.
       noteConditionAudible(level, episode);
       // v1.187.4 (review) — the speakers took this episode's condition at the same or a higher
       // level: a condition retry still armed for it is moot. Kept, it replayed its older text after
       // this one — a critical that had cleared — once the same-level gap had passed.
+      // v1.187.5 — only a delivery at least as new as the pending retry (its generation): the
+      // speakers taking an OLDER announcement say nothing of the newer one's. A red retry's delivery
+      // cancelled the retry of a newer warning spoken under the kept red, which was then never heard.
+      // And a delivery is the newest of its level: an older retry still waiting in the chain is
+      // dropped when it runs (conditionRetrySuperseded) — the timer above is not the only place an
+      // older retry waits.
+      noteConditionNewest(level, generation);
       if (retryTimer != null && retryLevel != null && retryKind === 'condition' && retryEpisode === episode
-        && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel]) {
+        && generation >= retryGeneration && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel]) {
         clearTimeout(retryTimer);
         retryTimer = null;
         log(`broadcast: the pending ${retryLevel} retry is cancelled — this ${level} announcement of the condition reached the speakers`);
@@ -2539,15 +2612,19 @@ export function startBroadcastMonitor(
     kind: BroadcastKind = 'dedicated',
     staleReason?: () => string | null, // v1.187.4 — a deferred retry's run-time check
     episode = conditionEpisode, // v1.187.4 — the condition episode the broadcast was requested in
+    retryOf?: number, // v1.187.5 — a deferred retry: the generation of the announcement it replays
   ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
     attemptKind = kind; // v1.186.0 — read once, at entry, by the attempt below
     attemptEpisode = episode;
+    // v1.187.5 — a new announcement takes the next generation; a retry keeps its announcement's, so
+    // its own re-arm is never "a newer announcement" (scheduleBroadcastRetry: outranked).
+    attemptGeneration = retryOf ?? ++broadcastGeneration;
     try {
       // v1.187.4 — a deferred retry that is stale by the time it reaches the head of the chain is
       // dropped, not played (scheduleBroadcastRetry). The slot is released below.
       const stale = staleReason?.() ?? null;
       if (stale != null) {
-        log(`broadcast: deferred ${level} retry dropped — ${stale}; the retry replays only the level it was armed for while that level is still committed`);
+        log(`broadcast: deferred ${level} retry dropped — ${stale}`);
         return { ok: false, errors: [`dropped: stale retry (${stale})`] };
       }
       return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);
@@ -2622,9 +2699,10 @@ export function startBroadcastMonitor(
     // v1.187.4 — read when the broadcast is REQUESTED: one that waits in the chain while a newer
     // commit lands belongs to the episode it was requested for. A deferred retry passes its own.
     episode = conditionEpisode,
+    retryOf?: number, // v1.187.5 — forwarded; set by deferred retries (their announcement's generation)
   ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
     realAudibleInFlight++;
-    const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip, kind, staleReason, episode);
+    const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip, kind, staleReason, episode, retryOf);
     const p = broadcastChain.then(run, run);
     broadcastChain = p.catch(() => undefined);
     void p.then(() => { realAudibleInFlight--; }, () => { realAudibleInFlight--; });
@@ -3119,6 +3197,10 @@ export function startBroadcastMonitor(
     // resets has run (restartQuestionOpen: boot + 16 min, one more dwell on a set settled by then).
     // Open only for the warm-up, a green whose dwell ended after it took the late-green path and was
     // spoken on an unsettled set minutes before the reserve-blind warning the restarted clock hid.
+    // v1.187.5 — the open question now decides the restored absent critical's green above (due near
+    // boot + 10). The mark is still reached: it decides a green whose dwell ends after the question
+    // closes — a restored critical held past boot + 6 min (9 on a set settled by then) and then gone,
+    // e.g. its knee mute back after the restart, bounded 20 min from the crossing BEFORE the restart.
     const settledSinceMs = level === 'green' && continuationBaseline != null ? alertSetSettledSince() : null;
     const questionOpen = restartQuestionOpen(Date.now() - bootMs, settledSinceMs);
     const recoveryCandidate = level === 'green' && continuationBaseline != null
