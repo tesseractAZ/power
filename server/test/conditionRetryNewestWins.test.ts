@@ -25,7 +25,9 @@
  * as new as the pending retry cancels it. A lower announcement never supersedes a higher retry, and
  * dedicated announcements are unchanged. Under production timing a newer warning's retry that
  * runs just after the kept red's retry has played is refused by the same-level gap that delivery
- * armed; the warning is spoken when the condition commits down to it.
+ * armed; v1.187.6 — it is re-presented once when the gap expires (before, the warning was spoken
+ * only when the condition committed down to it). What a retry SAYS when it runs is pinned in
+ * conditionRetryWords.test.ts.
  */
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -262,7 +264,7 @@ test('★★★ a NEWER announcement that reached the speakers drops an older re
   assert.equal(heard(plays[0].url), 0, '★★★ the cleared A is not spoken after C');
 });
 
-test('★★★ a red retry waiting behind a NEWER warning spoken under the kept red still plays (a lower announcement takes no red\'s place) — and its delivery does not cancel the newer warning\'s retry, which the same-level gap the red armed then refuses; the warning is spoken when the condition commits down to it', async () => {
+test('★★★ a red retry waiting behind a NEWER warning spoken under the kept red still plays (a lower announcement takes no red\'s place) — and its delivery does not cancel the newer warning\'s retry, which the same-level gap the red armed then refuses; the warning is re-presented once when the gap expires', async () => {
   const r = await started(2 * RETRY_MS);
   plan.push({ status: 500 }); // red B
   alerts = [CRIT_B];
@@ -294,13 +296,14 @@ test('★★★ a red retry waiting behind a NEWER warning spoken under the kept
   assert.ok(!r.has('the pending yellow retry is cancelled'));
   assert.ok(!r.has('retry dropped'));
   assert.ok(!r.has('deferred retry 2/3'), 'a refused retry is not re-armed');
-  // The red clears (a sounded cell-spread critical holds the level until it has been absent
-  // SOUNDED_VDIFF_ABSENT_HOLD_MS); the condition then commits down to the warning after its dwell,
-  // and that transition names it.
-  alerts = [WARN_N];
-  for (let i = 0; i < 14 && heard(urlWarn) === 0; i++) { offset += MIN; await sleep(150); }
-  await until(r, () => heard(urlWarn) === 1, '★ the warning, spoken when the condition commits down to it');
-  assert.equal(r.count('condition transition → yellow'), 2, 'the warning under the kept red, then the commit down to it');
+  // v1.187.6 — it is re-presented once when the gap expires (deferredCondition), under the kept red.
+  // Before, it waited for the condition to commit down to it, once the held critical had cleared
+  // (SOUNDED_VDIFF_ABSENT_HOLD_MS) and the lower level had stood its dwell.
+  assert.ok(r.has('the refused yellow retry will be re-presented'));
+  offset += 2 * MIN;
+  await until(r, () => heard(urlWarn) === 1, '★ the warning, re-presented when the gap expires');
+  assert.ok(r.has('re-presenting the yellow the storm gate refused'));
+  assert.equal(r.count('condition transition → yellow'), 1, 'a re-present, not a transition: the red stays committed');
 });
 
 test('★★★ a red retry that reaches the speakers TONE-ONLY (speech stalled) arms no same-level gap — and its delivery does not cancel the newer warning\'s retry, which then plays', async () => {

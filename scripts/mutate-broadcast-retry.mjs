@@ -77,8 +77,9 @@ const MUTANTS = [
     id: 'vi. ★★★ only the completion tail releases the slot again (the v1.159.0 leak)',
     file: BC,
     // v1.187.4 — re-pointed: the try now also holds the stale-retry drop; the finally is removed.
-    find: '      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);\n    } finally {\n      releaseRetrySlotIfIdle();\n    }',
-    to: '      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);\n    } finally {\n      /* MUTANT */\n    }',
+    // v1.187.6 — re-pointed: the try ends with the attempt's result (after the run-time words).
+    find: '      return result;\n    } finally {\n      releaseRetrySlotIfIdle();\n    }',
+    to: '      return result;\n    } finally {\n      /* MUTANT */\n    }',
     why: 'A deferred retry absorbed by the same-level storm gate leaves the slot held with no timer: every later milder deferral keeps-pending against a retry that does not exist, and the next same-level failure gives up having made zero attempts.',
   },
   {
