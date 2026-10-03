@@ -648,6 +648,8 @@ test('★★★ log review (LOW): a green held by a restored sounded critical un
   // backup pool unknown, NWS enabled and failing); the same restart without the record adopts it
   // silently. Its recovery is now decided past the warm-up: held from its first due tick for at
   // most one more dwell (the patience the warm-up gives), then adopted silently.
+  // v1.187.5 — since v1.187.4 this green is decided by the open restart question (boot + 16); the
+  // restored critical's mark is pinned past the question by the knee-mute tests (v1.187.5 section).
   await heardRed(CRIT_B);
   alerts = [WARN_K];
   settledSince = null;
@@ -859,6 +861,8 @@ test('★★ seam review: a restored critical that holds a green only after the 
 });
 
 test('★★ seam review: past the warm-up that green has the patience the warm-up gives — a settled stamp reset just before its due tick is waited for, up to one more dwell', async () => {
+  // v1.187.5 — since v1.187.4 the due tick (near boot + 10) falls inside the open restart question;
+  // the same stamp reset past the question is the v1.187.5 settled-set knee-mute test.
   await heardRed(CRIT_B);
   alerts = [WARN_K];
   const b = rig();
@@ -910,6 +914,105 @@ test('★★ seam review (LOW): a red spoken after the restart whose green is st
   assert.ok(!b.has(WARMUP_ENDED));
   assert.equal(b.mon.status().lastLevel, 'green', 'the last words are not the cleared red');
   assert.equal(announces, 3);
+});
+
+/* ══ v1.187.5: the restored critical's mark decides a green whose dwell ends after the question ══
+ *
+ * Since v1.187.4 the restart question is open to boot + 16 min (19 on a set settled by then), so the
+ * restored ABSENT critical of the log-review (LOW) tests above (held 7 min from the boot, plus the
+ * dwell: due near boot + 10) is decided inside it. The mark (deescalationHold.soundedHeldInWarmup)
+ * still decides a green whose dwell ends after the question has closed: the 10-01 knee mute back on
+ * a restored cell-spread critical after the restart (its bound is 20 minutes from the crossing BEFORE
+ * the restart, carried by the knee-session file) for more than 6 minutes after the boot (9 on a set
+ * settled by then), and then gone — the absent hold (7 min) and the dwell (3 min) follow. Unmarked,
+ * that green takes the late-green path, an ordinary transition, whatever the set. */
+
+/** v1.187.5 — a red heard before the restart for the cell-spread critical, a boot-transient warning
+ *  standing with the critical knee-muted at the first tick (the log-review test above), the mute
+ *  standing until boot + `mutedUntil`, then the critical gone. Returns 30 s before the green's due
+ *  tick (boot + `mutedUntil` + the absent hold + the dwell). */
+async function kneeMutedUntil(mutedUntil: number): Promise<Rig> {
+  await heardRed(CRIT_B);
+  alerts = [WARN_K, HELD_B];
+  const b = rig();
+  await until(b, () => b.has(CONTINUATION), 'the warning adopted below the heard red');
+  assert.ok(b.has(RESTORED), 'the sounded critical restored before the first tick');
+  alerts = [HELD_B];
+  await until(b, () => b.has('yellow → green held'), 'the hold');
+  assert.ok(b.has(HOLD_LINE), 'held by the restored critical under its knee mute, inside the warm-up');
+  await stepTo(b, mutedUntil); // the knee mute stands, inside its session bound
+  await sleep(60); // its last-present time is boot + mutedUntil
+  alerts = []; // the spread falls under the line: the critical clears
+  await stepTo(b, mutedUntil + ABSENT_HOLD + DWELL - 30 * SEC);
+  assert.ok(!b.has(HELD_FOR_RECOVERY), 'the green clock starts only when the absent hold releases the critical');
+  assert.equal(played(b, 'green'), 0);
+  return b;
+}
+/** v1.187.5 — step the clock 10 s at a time to the green's due tick (it logs that it is held for its
+ *  recovery); no further jump once it has, so the steps after it count from the due tick. */
+async function toDueTick(b: Rig, mutedUntil: number): Promise<void> {
+  const limit = mutedUntil + ABSENT_HOLD + DWELL + MIN;
+  while (!b.has(HELD_FOR_RECOVERY)) {
+    if (Date.now() - b.boot > limit) throw new Error(`no due tick by boot + ${limit / MIN} min\n${b.logs.join('\n')}`);
+    offset += 10 * SEC;
+    await sleep(15);
+  }
+}
+const MARK_PATIENCE = 'A sounded critical held it inside the warm-up';
+const CLOSED_SETTLED = 'on a settled alert set — announced as a transition';
+
+test('★★★ v1.187.5: a restored critical knee-muted to boot + 8 min holds its green past the restart question — on a set that never settled it is still a restart decision: held one more dwell, then adopted silently, not spoken as a late green', async () => {
+  settledSince = null; // a feed that has never delivered (NWS enabled and failing)
+  const b = await kneeMutedUntil(8 * MIN);
+  await toDueTick(b, 8 * MIN); // boot + 18: the question closed at boot + 16 — ★ held for its recovery past it
+  assert.ok(b.has(MARK_PATIENCE), 'the restored critical\'s patience, not the open question');
+  await sleep(60);
+  assert.equal(played(b, 'green'), 0, '★ not spoken as a late green on a set that never settled');
+  assert.ok(!b.has(WARMUP_ENDED), 'not adopted on the due tick: it has one more dwell to settle');
+  offset += DWELL; // the patience has run, the set still not settled
+  await until(b, () => b.has(WARMUP_ENDED), 'adopted silently as a continuation once one more dwell has passed');
+  await sleep(80);
+  assert.equal(played(b, 'green'), 0, 'not spoken: the set never settled');
+  assert.ok(!b.has(GREEN_SPOKEN));
+  assert.equal(b.count(' → ok in'), 0, 'nothing played after the restart');
+  assert.equal(b.mon.status().conditionLevel, 'green');
+  assert.equal(b.count(HELD_FOR_RECOVERY), 1);
+});
+
+test('★★ v1.187.5: …a set not settled on its due tick past the question (an onset clock withholding) that settles 30 s later is waited for: the green is announced, not adopted in silence on the next tick', async () => {
+  settledSince = null;
+  const b = await kneeMutedUntil(10 * MIN);
+  await toDueTick(b, 10 * MIN); // boot + 20, the set not settled: held for its recovery past the question
+  assert.ok(b.has(MARK_PATIENCE));
+  await sleep(60);
+  assert.ok(!b.has(WARMUP_ENDED), '★ not adopted in silence on the tick after the due tick');
+  offset += 30 * SEC;
+  settledSince = Date.now(); // the onset clock released: the set settles
+  await sleep(60);
+  assert.equal(played(b, 'green'), 0, 'settled only now: no recovery yet');
+  offset += DWELL - 10 * SEC; // one dwell past the due tick: the patience has run, the set settled 2:50
+  await until(b, () => played(b, 'green') === 1, '★ the all-clear: decided at the end of the patience, on a settled set');
+  assert.ok(b.has(CLOSED_SETTLED));
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(b.mon.status().lastLevel, 'green', 'the last words are not the cleared red');
+  assert.equal(b.count(' → ok in'), 1, 'the all-clear alone after the restart');
+});
+
+test('★★ v1.187.5: …on a settled set, a stamp reset by a transient onset 30 s before its due tick past the question: the green stands its dwell on the settled set and is announced as a recovery, not on the next tick', async () => {
+  const b = await kneeMutedUntil(10 * MIN); // the set settled long before
+  settledSince = Date.now(); // boot + 19:30 — a transient onset resets the stamp (the question closed at boot + 19)
+  await toDueTick(b, 10 * MIN); // boot + 20: settled 30 s — held for its recovery
+  assert.ok(b.has('the alert set has been settled only'));
+  assert.ok(b.has(MARK_PATIENCE));
+  await sleep(60);
+  assert.equal(played(b, 'green'), 0, '★ not announced on the tick after the due tick, 30 s after the stamp reset');
+  assert.ok(!b.has(CLOSED_SETTLED));
+  offset += DWELL - 30 * SEC; // it has now stood the dwell on the settled set, inside its patience
+  await until(b, () => played(b, 'green') === 1, 'the all-clear, a recovery');
+  assert.ok(b.has(`${RECOVERY} red`));
+  assert.ok(!b.has(CLOSED_SETTLED));
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(b.count(' → ok in'), 1, 'the all-clear alone after the restart');
 });
 
 /* ══ v1.187.4: the restart question stays open until boot + 16 min (restartQuestionOpen) ══════ */

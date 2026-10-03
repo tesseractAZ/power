@@ -85,8 +85,9 @@ const MUTANTS = [
     id: 'vii. ★★ the slot is released on the way IN instead of on the way out',
     file: BC,
     // v1.187.4 — re-pointed: released at entry, and not in the finally.
-    find: '    attemptEpisode = episode;\n    try {',
-    to: '    attemptEpisode = episode;\n    releaseRetrySlotIfIdle(); /* MUTANT */\n    try {',
+    // v1.187.5 — re-pointed: the attempt's generation is now set last, before the try.
+    find: '    attemptGeneration = retryOf ?? ++broadcastGeneration;\n    try {',
+    to: '    attemptGeneration = retryOf ?? ++broadcastGeneration;\n    releaseRetrySlotIfIdle(); /* MUTANT */\n    try {',
     why: 'The fired retry loses its own budget before it re-runs — attempt restarts at 1 forever, which is exactly the v1.159.0 defect.',
   },
 ];
