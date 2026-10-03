@@ -284,6 +284,22 @@ test('★★★ a red retry waiting behind a NEWER warning spoken under the kept
   assert.ok(!r.has('retry dropped'));
 });
 
+test('★★ a NEWER warning that fails while the red\'s retry is armed waits behind it — newer is not enough to take a higher retry\'s slot', async () => {
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 }); // red B
+  alerts = [CRIT_B];
+  await until(r, () => r.has(ARMED), 'the cell-spread red failing, its retry armed');
+  alerts = [HELD_B];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 3 * MIN;
+  plan.push({ status: 500 }); // the warning fails while the red's timer is still armed
+  alerts = [HELD_B, WARN_N];
+  await until(r, () => r.has('keeping the pending red retry — a yellow deferral does not supersede it'), '★ the newer warning kept pending');
+  await until(r, () => r.count('broadcast: red → ok in') === 1, '★ the red retry plays');
+  assert.equal(heard(plays[0].url), 1, 'the red nobody heard is the retry that played');
+  assert.ok(!r.has('superseding the pending red retry'), 'the lower announcement took nothing');
+});
+
 test('★★ dedicated retries are unchanged: one waiting behind a newer CONDITION announcement that took the slot still plays', async () => {
   const r = await started(RETRY_MS);
   plan.push({ status: 500 });

@@ -60,6 +60,10 @@ const SUBSET = [
   'test/broadcastRetryBudget.test.ts',
   'test/reserveBlindFailover.test.ts',
   'test/conditionDeescalationDwell.test.ts',
+  // v1.187.5 — the newest-wins retry tests: R-x (a lower announcement taking a higher retry's slot)
+  // is killed deterministically there; the keepRed test above reaches it only when the warning's
+  // pre-flight wins a race with the speakers coming back.
+  'test/conditionRetryNewestWins.test.ts',
 ];
 
 const NOTE_SIP = "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode);";
