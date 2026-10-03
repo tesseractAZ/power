@@ -45,6 +45,7 @@ delete process.env.NOTIFY_CHANNEL;
 delete process.env.GRID_PRESENCE_ENTITY;
 process.env.BROADCAST_RED_REPLAY_STATE_PATH = resolve(ROOT, 'red-replay.json');
 process.env.SUPERVISOR_TOKEN = 'test-token';
+process.env.POOL_UNKNOWN_PATH = ''; // v1.187.4 — several stores share this ROOT: the tests that carry an onset name their own file
 process.env.BROADCAST_ENABLED = 'true';
 process.env.BROADCAST_TARGETS = 'media_player.alpha';
 process.env.BROADCAST_SIP_TARGETS = '';
@@ -403,6 +404,84 @@ test('★★★ the stamp waits out a backup pool that reads unknown (reserve-al
   (store.get().devices as Record<string, DeviceSnapshot>)[PANEL] = panel();
   assert.equal(store.backupPoolUnknownSince(PANEL), null, 'the pool reads again');
   await until(() => p.mon.alertSetSettledSince() != null, 'settled once nothing is withheld', p.logs);
+});
+
+test('★★★ v1.187.4: a pool unknown across the restart carries its onset — reserve-alarm-blind is in the first sets, critical off-grid, and nothing is withheld (the set settles)', { timeout: 60_000 }, async () => {
+  const path = join(ROOT, 'pool-unknown-carried.json');
+  process.env.POOL_UNKNOWN_PATH = path;
+  try {
+    const before = bootStore();
+    before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); // unreadable from now
+    const since = before.backupPoolUnknownSince(PANEL);
+    assert.ok(since != null);
+    for (let i = 0; i < 7; i++) { offset += 10 * MIN; before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); }
+    offset += 2 * MIN; // the deploy, 72 min into the blind episode
+
+    const store = bootStore();
+    store.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); // still unreadable
+    assert.equal(store.backupPoolUnknownSince(PANEL), since, 'carried across the restart');
+    (store.get().devices as Record<string, DeviceSnapshot>)[PANEL] = { ...panel(), projection: { ...(panel().projection as any), backupBatPercent: null } } as DeviceSnapshot;
+    const p = plant(store);
+    await until(() => p.ids().includes('reserve-alarm-blind'), 'the alert in the first sets', p.logs);
+    const a = ((store.get().alerts ?? []) as Alert[]).find((x) => x.id === 'reserve-alarm-blind');
+    assert.equal(a?.severity, 'critical', '★ critical, not a warning until boot + 60');
+    offset += BOOT_RESET_ONSET_DEBOUNCE_MS + SEC;
+    fresh(store);
+    await until(() => p.mon.alertSetSettledSince() != null, '★ settled: no onset clock withholds a fault', p.logs);
+  } finally {
+    process.env.POOL_UNKNOWN_PATH = '';
+  }
+});
+
+test('★★ v1.187.4 (review): a listed panel not projected yet with an onset on file keeps the set unsettled until its first projection — then the carried critical is in the set', { timeout: 60_000 }, async () => {
+  const path = join(ROOT, 'pool-unknown-pending.json');
+  process.env.POOL_UNKNOWN_PATH = path;
+  try {
+    const before = bootStore();
+    before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 });
+    const since = before.backupPoolUnknownSince(PANEL);
+    for (let i = 0; i < 7; i++) { offset += 10 * MIN; before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); }
+    offset += 2 * MIN; // the deploy
+
+    const store = bootStore(); // the panel listed, its file entry not consumed (no projection through the store yet)
+    assert.deepEqual(store.poolUnknownCarryPending(), [PANEL]);
+    const p = plant(store);
+    await until(() => p.mon.stats().evalPasses >= 2, 'two passes', p.logs);
+    offset += BOOT_RESET_ONSET_DEBOUNCE_MS + SEC;
+    fresh(store);
+    const at = p.mon.stats().evalPasses;
+    await until(() => p.mon.stats().evalPasses >= at + 3, 'three passes past the boot debounces', p.logs);
+    assert.equal(p.mon.alertSetSettledSince(), null, '★ not settled: the panel\'s first projection may raise the carried alarm');
+    store.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); // its first projection: still unreadable
+    assert.equal(store.backupPoolUnknownSince(PANEL), since, 'carried');
+    (store.get().devices as Record<string, DeviceSnapshot>)[PANEL] = { ...panel(), projection: { ...(panel().projection as any), backupBatPercent: null } } as DeviceSnapshot;
+    fresh(store);
+    await until(() => p.ids().includes('reserve-alarm-blind'), 'the carried alarm in the set', p.logs);
+    assert.equal(((store.get().alerts ?? []) as Alert[]).find((x) => x.id === 'reserve-alarm-blind')?.severity, 'critical');
+    await until(() => p.mon.alertSetSettledSince() != null, 'settled once nothing is withheld', p.logs);
+  } finally {
+    process.env.POOL_UNKNOWN_PATH = '';
+  }
+});
+
+test('★★ v1.187.4 (review): a panel still dark after the restart is blind since the onset it would carry — through the alert monitor, critical at once', { timeout: 60_000 }, async () => {
+  const path = join(ROOT, 'pool-unknown-dark.json');
+  process.env.POOL_UNKNOWN_PATH = path;
+  try {
+    const before = bootStore();
+    before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 });
+    for (let i = 0; i < 7; i++) { offset += 10 * MIN; before.setDeviceQuota(PANEL, { 'backupIncreInfo.backupFullCap': 61_440 }); }
+    offset += 2 * MIN; // the deploy
+
+    const store = bootStore();
+    (store.get().devices as Record<string, DeviceSnapshot>)[PANEL] = { ...panel(), online: false, projection: undefined } as unknown as DeviceSnapshot; // dark: no projection
+    const p = plant(store);
+    const id = `reserve-alarm-blind-${PANEL}`;
+    await until(() => p.ids().includes(id), 'the dark panel\'s alarm in the first sets', p.logs);
+    assert.equal(((store.get().alerts ?? []) as Alert[]).find((x) => x.id === id)?.severity, 'critical', '★ blind since the carried onset, not since it was listed');
+  } finally {
+    process.env.POOL_UNKNOWN_PATH = '';
+  }
 });
 
 /* ══ the pure parts ══════════════════════════════════════════════════════════════════════ */

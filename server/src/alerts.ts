@@ -1006,6 +1006,12 @@ export interface ConnectivityContext {
   /** v1.185.0 — the same onset for EVERY panel, keyed by serial (a secondary panel's own
    *  reserve-alarm-blind alert reads its entry). */
   backupPoolUnknownSinceBySn?: Map<string, number | null>;
+  /** v1.187.4 — listed panels whose pool-unknown onset of before the restart is still carriable but
+   *  not consumed yet: not projected in this process (SnapshotStore.poolUnknownCarryPending). */
+  poolUnknownCarryPending?: readonly string[];
+  /** v1.187.4 (review) — the onset each of those panels would carry (SnapshotStore.poolUnknownCarried):
+   *  one still dark after the restart is blind since then. */
+  poolUnknownCarriedSinceBySn?: ReadonlyMap<string, number>;
   /** v1.185.0 — when each panel was first listed in this process (SnapshotStore.firstListedAt): a
    *  panel with no projection since then has had an unreadable pool at least that long. */
   panelFirstListedBySn?: Map<string, number | null>;
@@ -1074,20 +1080,33 @@ const MPPT_ERR_DEBOUNCE_MS = DPU_ERR_DEBOUNCE_MS;
 export const BOOT_RESET_ONSET_DEBOUNCE_MS = Math.max(DPU_ERR_DEBOUNCE_MS, MPPT_ERR_DEBOUNCE_MS);
 
 /**
+ * v1.187.4 — the LONGEST of the onset windows whose clocks restart in a new process: the backup
+ * pool's RESERVE_BLIND_AFTER_MS (15 min), beside the 3-minute device-error debounces above. Until it
+ * has run, an alert that stood before the restart can still be withheld for that reason alone
+ * (debouncedOnsetsPending) — past the broadcast's 10-minute warm-up. The store carries a pool-unknown
+ * onset across a short restart (SnapshotStore, pool-unknown.json), but not across a long outage, an
+ * unreadable file or the first boot of a release that writes it. The broadcast holds the warm-up-end
+ * decision on a green held for its recovery until the alert set is settled or this long (plus
+ * RESTARTED_ONSET_HOLD_MARGIN_MS) after its boot.
+ */
+export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS, RESERVE_BLIND_AFTER_MS);
+
+/**
  * v1.187.3 (review) — WHICH IN-MEMORY ONSET CLOCKS ARE STILL INSIDE THEIR DEBOUNCE at `nowMs`?
  *
  * Each names a condition the device is reporting NOW that computeAlerts withholds only because it
  * has not stood its window yet: an inverter error (DPU_ERR_DEBOUNCE_MS), an SHP2 source error (the
  * same window), an MPPT string error while producing (MPPT_ERR_DEBOUNCE_MS) and a backup pool
  * reading unknown (RESERVE_BLIND_AFTER_MS, 15 min). These clocks restart at zero on every boot, so
- * a critical or warning that stood before a restart is absent after it for one window. While any
+ * a critical or warning that stood before a restart is absent after it for one window (v1.187.4 —
+ * the pool's is carried across a restart of at most an hour: SnapshotStore, pool-unknown.json). While any
  * is pending, a green read from the set may be that absence, not an all-clear: the broadcast's
  * post-restart recovery (broadcast.isRestartRecovery) is not taken on it. Same comparison as the
  * rules above (`now - sinceMs < window` withholds), so a withheld alert is always listed. Kept
  * beside the windows it reads so the two cannot drift. Pure; the descriptions are for the log.
  */
 export function debouncedOnsetsPending(
-  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn'> | undefined,
+  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn' | 'poolUnknownCarryPending'> | undefined,
   nowMs: number,
 ): string[] {
   if (connectivity == null) return [];
@@ -1102,6 +1121,10 @@ export function debouncedOnsetsPending(
   const pools: Iterable<[string, number | null]> = connectivity.backupPoolUnknownSinceBySn
     ?? [['house panel', connectivity.backupPoolUnknownSinceMs ?? null]];
   for (const [sn, since] of pools) if (within(since, RESERVE_BLIND_AFTER_MS)) out.push(`reserve-alarm-blind ${sn}`);
+  // v1.187.4 — a listed panel not projected yet whose onset of before the restart is still on file:
+  // its first projection may raise reserve-alarm-blind at once (carried), so a green read before it
+  // is not an all-clear. Bounded by the carry window (SnapshotStore.poolUnknownCarryPending).
+  for (const sn of connectivity.poolUnknownCarryPending ?? []) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);
   return out;
 }
 
@@ -2315,7 +2338,12 @@ function secondaryPanelAlerts(
   // v1.185.0 (review) — a panel with NO projection (dark since a restart) still has a pool: its
   // reserve alarm is blind from the moment it was first listed, and says so.
   if (panel.projection?.kind !== 'shp2') {
-    const since = connectivity?.panelFirstListedBySn?.get(panel.sn) ?? null;
+    // v1.187.4 (review) — or since the onset of before the restart, when the store carries one: a
+    // panel blind across a restart and still dark after it was absent 15 min, then a warning until
+    // boot + 60, even when it had been critical.
+    const listed = connectivity?.panelFirstListedBySn?.get(panel.sn) ?? null;
+    const carried = connectivity?.poolUnknownCarriedSinceBySn?.get(panel.sn) ?? null;
+    const since = carried != null && (listed == null || carried < listed) ? carried : listed;
     pushReserveBlind(out, panel, devices, grid, since, now, sfx);
     return;
   }
