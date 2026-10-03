@@ -124,14 +124,22 @@ test('★★★ every exit of the broadcast routine releases an idle retry slot'
   assert.ok(stormExit < code.indexOf('scheduleBroadcastRetry(', attempt),
     'and it exits before anything can arm a retry — so only a finally can release the slot');
 
+  // v1.187.4 — the try also holds the deferred retry's run-time staleness drop (an early return
+  // before the attempt): it leaves through the same finally.
   assert.ok(code.includes(
     '    try {\n'
+    + '      const stale = staleReason?.() ?? null;\n'
+    + '      if (stale != null) {\n'),
+    'the stale-retry drop is inside the try');
+  assert.ok(code.includes(
+    "        return { ok: false, errors: [`dropped: stale retry (${stale})`] };\n"
+    + '      }\n'
     + '      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);\n'
     + '    } finally {\n'
     + '      releaseRetrySlotIfIdle();\n'
     + '    }\n'
     + '  };'),
-    'the wrapper releases an idle slot on EVERY exit, including a throw — not only at the tail');
+    'the wrapper releases an idle slot on EVERY exit, including a throw and a dropped stale retry — not only at the tail');
 
   // Releasing on the way IN would wipe the budget of the retry that is re-running,
   // which is the v1.159.0 defect restored.

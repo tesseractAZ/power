@@ -150,7 +150,9 @@ const played = (r: Rig, level: string) => r.count(`broadcast: ${level} → ok in
 async function started(): Promise<Rig> {
   const r = rig();
   await sleep(80); // the first tick joins green
-  offset += 11 * MIN; // past the boot warm-up window
+  // Past the boot warm-up window — v1.187.4: and past the restart question (boot + 16, or 19 on a
+  // settled set): a second monitor boots on the first one's heard level.
+  offset += 20 * MIN;
   return r;
 }
 /** Speak the peer warning, then commit a green SILENTLY (the all-clear speech gate holds it). */

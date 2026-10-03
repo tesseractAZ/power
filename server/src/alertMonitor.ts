@@ -3234,6 +3234,9 @@ export function startAlertMonitor(
       perDevice,
       backupPoolUnknownSinceMs: shp2Sn ? store.backupPoolUnknownSince(shp2Sn) : null,
       backupPoolUnknownSinceBySn,
+      // v1.187.4 — a panel's onset of before the restart not consumed yet (debouncedOnsetsPending).
+      poolUnknownCarryPending: store.poolUnknownCarryPending(),
+      poolUnknownCarriedSinceBySn: store.poolUnknownCarried(),
       panelFirstListedBySn: new Map(shp2Panels(snap.devices).sns.map((sn) => [sn, store.firstListedAt(sn)] as const)),
       dpuErrOnsetBySn,
       // v1.14.0 — per-slot SHP2 source-error onsets for the shp2-src-err debounce.

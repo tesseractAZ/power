@@ -35,6 +35,7 @@ delete process.env.NOTIFY_CHANNEL;
 delete process.env.GRID_PRESENCE_ENTITY;
 process.env.BROADCAST_RED_REPLAY_STATE_PATH = resolve(ROOT, 'red-replay.json');
 process.env.SUPERVISOR_TOKEN = 'test-token';
+process.env.POOL_UNKNOWN_PATH = ''; // v1.187.4 — several stores share this ROOT: no pool-unknown file between them
 process.env.BROADCAST_ENABLED = 'true';
 process.env.BROADCAST_TARGETS = 'media_player.alpha';
 process.env.BROADCAST_SIP_TARGETS = '';

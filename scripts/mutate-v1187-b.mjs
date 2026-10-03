@@ -100,8 +100,8 @@ const MUTANTS = [
   {
     id: 'ix. ★★ the hold is cleared before a new warning commits',
     file: BC,
-    find: '    if (!downward && !newWarn && deescalationHold != null) {',
-    to: '    if (!downward && deescalationHold != null) { /* MUTANT */',
+    find: '    if (!downward && !newWarn && deescalationHold != null && !unheardReturn) {', // v1.187.4 — re-pointed
+    to: '    if (!downward && deescalationHold != null && !unheardReturn) { /* MUTANT */',
     why: 'A new warning held by the boot yellow confirmation reads as "no transition" next tick and is never spoken.',
   },
   {
