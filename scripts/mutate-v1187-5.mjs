@@ -112,7 +112,9 @@ const MUTANTS = [
     file: BR,
     find: '        && generation >= retryGeneration && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel]) {',
     to: '        && RETRY_LEVEL_RANK[level] >= RETRY_LEVEL_RANK[retryLevel]) { /* MUTANT */',
-    why: 'An older red retry reaching the speakers cancels the retry of a newer warning spoken under the kept red: the warning is never heard.',
+    // A verified red delivery arms the same-level gap, which refuses the warning's retry anyway; the
+    // guard decides what is heard when the red plays tone-only (speech stalled), which arms no gap.
+    why: 'An older red retry reaching the speakers tone-only cancels the retry of a newer warning spoken under the kept red: the warning is not heard until the condition commits down to it.',
   },
   {
     id: 'S-xi. ★★★ a newer LOWER announcement supersedes a higher retry',

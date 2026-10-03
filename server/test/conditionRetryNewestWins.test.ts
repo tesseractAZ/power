@@ -112,7 +112,12 @@ const heard = (url: string | undefined) => plays.filter((p) => p.url === url && 
 /* ── the monitor's other inputs ── */
 const KLAXON = mkdtempSync(resolve(tmpdir(), 'ef-newest-retry-klaxon-'));
 await generateAudioAssets(KLAXON, () => {});
-const renderTts = async () => ({ ok: true as const, wav: pcmToWav(Buffer.alloc(2 * 1100), 22050, 2, 1), durationMs: 1 });
+/** Speech stalled (a Wyoming timeout): every spoken render fails and the broadcast falls back to the
+ *  chime-only render — played, but with errors, so it arms no storm gate. */
+let ttsFails = false;
+const renderTts = async () => (ttsFails
+  ? { ok: false as const, error: 'wyoming render timeout (test)' }
+  : { ok: true as const, wav: pcmToWav(Buffer.alloc(2 * 1100), 22050, 2, 1), durationMs: 1 });
 let alerts: Alert[] = [];
 const store = { get: () => ({ alerts }) } as any;
 
@@ -195,6 +200,7 @@ beforeEach(() => {
   alerts = [];
   plan = [];
   plays = [];
+  ttsFails = false;
 });
 after(async () => {
   for (const r of live.splice(0)) r.stop();
@@ -295,6 +301,37 @@ test('★★★ a red retry waiting behind a NEWER warning spoken under the kept
   for (let i = 0; i < 14 && heard(urlWarn) === 0; i++) { offset += MIN; await sleep(150); }
   await until(r, () => heard(urlWarn) === 1, '★ the warning, spoken when the condition commits down to it');
   assert.equal(r.count('condition transition → yellow'), 2, 'the warning under the kept red, then the commit down to it');
+});
+
+test('★★★ a red retry that reaches the speakers TONE-ONLY (speech stalled) arms no same-level gap — and its delivery does not cancel the newer warning\'s retry, which then plays', async () => {
+  ttsFails = true; // every play is the chime-only fallback: played, with errors
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 }); // red B
+  alerts = [CRIT_B];
+  await until(r, () => r.has(ARMED), 'the cell-spread red failing, its retry armed');
+  const armedAt = realNow();
+  alerts = [HELD_B]; // held by the balancing mute: the red stays committed
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 3 * MIN;
+  const x = gate();
+  plan.push({ status: 200, gate: x.promise });
+  const notice = r.mon.announce('medium', NOTICE, null);
+  await until(r, () => plays.length === 2, 'a dedicated notice playing');
+  plan.push({ status: 500 }); // the warning fails
+  alerts = [HELD_B, WARN_N];
+  await until(r, () => r.has('condition transition → yellow (new warning) spoken; the committed condition stays red'), 'the new warning, queued behind the notice');
+  await sleep(Math.max(0, armedAt + 2 * RETRY_MS + 300 - realNow())); // the red retry fires and queues behind the warning
+  x.open();
+  await notice;
+  await until(r, () => r.count(ARMED) === 2, 'the warning failing; the slot was free, so it arms its own retry');
+  const urlB = plays[0].url;
+  const urlWarn = plays[2].url;
+  await until(r, () => heard(urlB) === 1, '★ the red retry, older but higher, plays tone-only');
+  // The tone-only delivery is audible but unverified: no same-level gap, so only the generation
+  // keeps the older red from cancelling the newer warning's retry.
+  await until(r, () => heard(urlWarn) === 1, '★★★ the newer warning\'s retry plays — the older red\'s delivery did not cancel it');
+  assert.ok(!r.has('the pending yellow retry is cancelled'));
+  assert.ok(!r.has('deferred red retry dropped') && !r.has('deferred yellow retry dropped'), 'no deferred retry is dropped');
 });
 
 test('★★ a newer red that reaches the speakers while the older red\'s timer is armed frees the slot: a warning failing under the kept red arms its own retry, and is heard', async () => {
