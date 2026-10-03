@@ -6,7 +6,7 @@
 
 - **An all-clear after a restart no longer comes just before a warning it hid.** Confirming that the backup pool's charge can be read takes 15 minutes, and that wait starts again at every restart. The add-on held back the all-clear after a restart only for the first ten minutes. An all-clear decided at the end of those ten minutes, or for an alarm that cleared late in them, could therefore be announced a few minutes before a "Reserve alarm blind" warning that had stood before the restart came back.
   - The all-clear after a restart is now held for up to 16 minutes after the start. It is announced once the condition has stayed clear for three minutes after the add-on's picture is complete. When the picture becomes complete late, it gets three more minutes.
-  - If it has not been announced by then, it is announced when the picture is complete or an alarm was announced after the restart. Only when neither is true is it not announced, as before.
+  - If it has not been announced by then, it is announced when the picture is complete or an alarm was announced after the restart. Only when neither is true is it not announced. One difference from 1.187.3: a warning heard before the restart that clears late in the first ten minutes, while the picture never completes, now has its all-clear adopted silently at about 16 minutes after the restart instead of announced at about 12.
   - Meanwhile the alarm level is held: a new warning is announced at once, and a warning that comes back after being heard is not announced again.
   - The decision also waits for an announcement that is still playing, so an alarm heard at that moment counts.
   - A condition that is already clear at start-up is still not announced.
