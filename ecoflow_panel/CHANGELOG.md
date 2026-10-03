@@ -1,3 +1,41 @@
+## 1.187.2
+
+### Cell-spread alarms between 85% and 95% charge are time-limited as they are at full charge
+
+- **A cell spread that comes and goes between 85% and 95% charge now sounds within about 20
+  minutes.** At the top of charge (95% and above), a critical cell-spread alarm held quiet while
+  the battery balances its cells is limited to 20 minutes from the first time the spread reached
+  the critical line, however often it dips below in between. Between 85% and 95% that limit was
+  counted from when the spread first reached the line, but a dip of 5 minutes or more under it
+  started the count again. A spread that rises and falls with the charge current — two low readings for every
+  high one, one reading missed, or a spread that settles near 70 mV between peaks — therefore
+  restarted the count every few minutes and never sounded. The 20-minute limit now runs from 85%
+  up. It ends when the pack reads below 85%, or once the spread has stayed under 50 mV for 20
+  minutes in a row, so a healthy pack's next peak gets its full quiet period again. When such dips
+  have restarted the shorter count, the alarm below 95% says the spread "first reached the critical
+  line above 85% charge" so many minutes ago. The limit holds across a restart, as at the top of
+  charge. A reading below 85% still ends it, and below 85% a balancing alarm has no time limit, as
+  before.
+- **A peak that began below 95% is counted from where it began.** A spread that first reached the
+  critical line at 90% and reaches it again once the pack is above 95% belongs to the same charge:
+  its quiet periods at the top are counted from the first time, unless the spread rested under
+  50 mV for 20 minutes in between. Such a second peak sounds once 20 minutes have passed since the
+  first, as a second peak at the top already did.
+- **An alarm restored from an old record after a restart no longer outlasts the first quiet
+  readings.** When no saved timing is found at start-up, a pack's alarm count is restored from when
+  its critical alarm began, which can be a day old. A first reading back under 50 mV ended that
+  count, but a first reading between 50 and 89 mV kept it, and the readings under 50 mV that
+  followed did not end it for another 5 minutes, so a healthy peak in that window sounded at once.
+  Any reading under 50 mV now ends a restored count until a reading at the critical line shows the
+  alarm is still there. The saved timing now records that a restored count has not been confirmed
+  yet, so a second restart soon after the first keeps it as it was — neither treated as confirmed
+  nor lost.
+
+Recorded charges from 25 June to 30 September, every pack, give the same alarms as before; no pack
+reached the critical line between 85% and 95% in that time. Because the count between 85% and 95%
+now carries over like the one at the top, a second peak in the same charge without a 20-minute
+quiet spell sounds, including when the first peak was read below 95%.
+
 ## 1.187.1
 
 ### Restart-proof cell alarms, an honest soiling estimate, and a night charge that leaves room for the sun
@@ -31,9 +69,6 @@
   alarm began (no saved timing) still ends on a first reading under 50 mV, so a pack that was out
   of contact overnight does not sound on the next healthy peak. Recorded charges from 23 and 28
   July and 18, 25 and 29 September give the same alarms as before.
-  Known limit: a spread that stays under the line for 5 minutes or more between crossings (two
-  low readings in a row, or a missed reading) still restarts the count between 85% and 95%, as in
-  1.187.0; this is the next fix.
 - **A damaged saved quiet spell is not trusted.** The saved quiet spell after a peak is read back
   only when it fits the charge it belongs to: it began after the charge's first critical reading,
   and less than 20 minutes before the last reading. A damaged value (zero, negative, or earlier

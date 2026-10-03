@@ -44,6 +44,7 @@ const SUBSET = [
   'test/alertVdiffBalancing.test.ts',
   'test/bootHydrationEdges.test.ts',
   'test/cellSpreadKneeRestart.test.ts',
+  'test/cellSpreadKneeSessionRestart.test.ts', // v1.187.2 — iv and li are killed there (the restart file)
 ];
 
 const MUTANTS = [
@@ -74,7 +75,10 @@ const MUTANTS = [
     file: AL,
     find: '  if (s.critSinceMs != null && nowMs - s.critSinceMs >= VDIFF_KNEE_MAX_MUTE_MS) return null;',
     to: '  /* MUTANT */',
-    why: 'A spread the BMS keeps balancing at top of charge is silent indefinitely.',
+    // v1.187.2 — the session now runs across the plateau, and every state the process writes has
+    // graceFromMs <= critSinceMs, so the session bound backs this one up; alone it holds against a
+    // knee-session file whose session clock is later than its episode (cellSpreadKneeSessionRestart (k)).
+    why: 'A spread the BMS keeps balancing is held by a corrupt session clock instead of its episode\'s 20-minute bound.',
   },
   {
     id: 'v. ★★ balancing is checked before the duration bound',
@@ -173,15 +177,15 @@ const MUTANTS = [
   {
     id: 'xviii. ★★ a dip below the critical line restarts the duration clock',
     file: AL,
-    find: '    if (seededAndUnder || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    find: '    if ((s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
     to: '    if (true) { /* MUTANT */',
     why: 'A spread hovering on the line evades the duration bound indefinitely.',
   },
   {
     id: 'xix. ★★ a relaxed spread never ends its episode',
     file: AL,
-    find: '    if (seededAndUnder || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
-    to: '    if (seededAndUnder) { /* MUTANT */',
+    find: '    if ((s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) || nowMs - s.belowCritSinceMs >= VDIFF_KNEE_RELAX_MS) {',
+    to: '    if (s.critSeeded && obs.spreadMv < VOL_DIFF_CRIT_MV) { /* MUTANT */',
     why: 'A second top-of-charge crossing 25 minutes later is a false red, voiced as "20 minutes at the line".',
   },
   {
@@ -391,21 +395,21 @@ const MUTANTS = [
     file: AL,
     // v1.187.1 (log review) — the episode now ends only after an unbroken VDIFF_KNEE_RELAX_MS
     // under the line (a dip under 50 mV included): re-pointed at that reset.
-    find: '      s.critSinceMs = null;\n      s.belowCritSinceMs = null;\n    }',
-    to: '      s.critSinceMs = null;\n      s.belowCritSinceMs = null;\n      s.graceFromMs = null; /* MUTANT */\n    }',
+    find: '      s.critSinceMs = null;\n      s.belowCritSinceMs = null;\n      s.critSeeded = false;\n    }',
+    to: '      s.critSinceMs = null;\n      s.belowCritSinceMs = null;\n      s.critSeeded = false;\n      s.graceFromMs = null; /* MUTANT */\n    }',
     why: 'As xlvii: a spread that relaxes under the line for 5 minutes between crossings re-earns both graces on every crossing.',
   },
   {
     id: 'xlix. ★★ an unknown SoC ends the session',
     file: AL,
-    find: '  if (obs.packSoc != null && obs.packSoc < VOL_DIFF_PLATEAU_QUIET_SOC_PCT) {\n    s.graceFromMs = null;',
-    to: '  if (obs.packSoc == null || obs.packSoc < VOL_DIFF_PLATEAU_QUIET_SOC_PCT) { /* MUTANT */\n    s.graceFromMs = null;',
+    find: '  if (obs.packSoc != null && obs.packSoc < VOL_DIFF_PLATEAU_SOC_PCT) {\n    s.graceFromMs = null;',
+    to: '  if (obs.packSoc == null || obs.packSoc < VOL_DIFF_PLATEAU_SOC_PCT) { /* MUTANT */\n    s.graceFromMs = null;',
     why: 'A reading with no SoC re-grants the graces: missing data opens a mute.',
   },
   {
-    id: 'l. ★★ leaving the top of charge does not end the session',
+    id: 'l. ★★ leaving the plateau (v1.187.2; until then the top of charge) does not end the session',
     file: AL,
-    find: '  if (obs.packSoc != null && obs.packSoc < VOL_DIFF_PLATEAU_QUIET_SOC_PCT) {\n    s.graceFromMs = null;',
+    find: '  if (obs.packSoc != null && obs.packSoc < VOL_DIFF_PLATEAU_SOC_PCT) {\n    s.graceFromMs = null;',
     to: '  if (false) { /* MUTANT */\n    s.graceFromMs = null;',
     why: 'The next day\'s benign knee (or one after a discharge) is a false red on a session that ended hours ago.',
   },
@@ -414,7 +418,10 @@ const MUTANTS = [
     file: AL,
     find: 'vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= s.critSinceMs ?? nowMs;',
     to: 'vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= nowMs; /* MUTANT */',
-    why: 'A crossing at 93% that reaches 95% three minutes later is muted for 8 minutes of charging, not 5.',
+    // v1.187.2 — the session starts on the plateau, on the episode's own first tick, so the two differ
+    // only for an episode clock older than its session: a v1.187.1 entry at 85-95% (no session there),
+    // or a seeded onset confirmed at the line (cellSpreadKneeSessionRestart (j)).
+    why: 'Upgraded mid-fault, a 90% hi / lo / lo fault starts its session at the next crossing: up to 20 more minutes of silence.',
   },
   {
     id: 'lii. ★★★ the session never starts',
@@ -470,21 +477,21 @@ const MUTANTS = [
   {
     id: 'lix. ★★★ a reading at the critical line does not break the rest',
     file: AL,
-    find: '    if (obs.spreadMv >= VOL_DIFF_CRIT_MV) s.quietSinceMs = null;\n    else if (topOfCharge) s.quietSinceMs ??= nowMs;',
-    to: '    if (obs.spreadMv < VOL_DIFF_CRIT_MV && topOfCharge) s.quietSinceMs ??= nowMs; /* MUTANT */',
+    find: '    if (obs.spreadMv >= VOL_DIFF_CRIT_MV) s.quietSinceMs = null;\n    else if (onPlateau) s.quietSinceMs ??= nowMs;',
+    to: '    if (obs.spreadMv < VOL_DIFF_CRIT_MV && onPlateau) s.quietSinceMs ??= nowMs; /* MUTANT */',
     why: 'The 95 / 45 mV charge-following fault ends its own session 20 minutes after its first dip, and every later crossing earns a fresh grace.',
   },
   {
     id: 'lx. ★★ the rest restarts on every quiet reading',
     file: AL,
-    find: '    else if (topOfCharge) s.quietSinceMs ??= nowMs;',
-    to: '    else if (topOfCharge) s.quietSinceMs = nowMs; /* MUTANT */',
+    find: '    else if (onPlateau) s.quietSinceMs ??= nowMs;',
+    to: '    else if (onPlateau) s.quietSinceMs = nowMs; /* MUTANT */',
     why: 'As lviii: no rest ever reaches 20 minutes.',
   },
   {
     id: 'lxi. ★★ an unknown SoC starts the rest',
     file: AL,
-    find: '    else if (topOfCharge) s.quietSinceMs ??= nowMs;',
+    find: '    else if (onPlateau) s.quietSinceMs ??= nowMs;',
     to: '    else s.quietSinceMs ??= nowMs; /* MUTANT */',
     why: 'Readings with no SoC — no evidence the pack is at the top — end a session and re-grant its graces.',
   },
@@ -519,7 +526,7 @@ const MUTANTS = [
   {
     id: 'lxvi. ★ the session-bound critical carries no reason',
     file: AL,
-    find: '            : sessionSustained ? ` First reached the critical line at this top of charge ${Math.round(sessionAgeMs! / 60_000)} minutes ago.`\n',
+    find: '            : sessionSustained ? ` First reached the critical line ${sessionWhere} ${Math.round(sessionAgeMs! / 60_000)} minutes ago.`\n',
     to: '            /* MUTANT */\n',
     why: 'A cell-imbalance critical sounds while the BMS is balancing with nothing on the card to say why.',
   },

@@ -28,7 +28,7 @@ process.env.ALERT_ONSET_PATH = resolve(ROOT, 'alert-onset.json');
 process.env.DB_PATH = resolve(ROOT, 'ecoflow.db');
 
 const {
-  computeAlerts, resetVdiffWarnHoldForTesting, vdiffKneeSeed, VDIFF_KNEE_MAX_MUTE_MS, VDIFF_KNEE_RELAX_MS,
+  computeAlerts, resetVdiffWarnHoldForTesting, vdiffKneeSeed, advanceVdiffKnee, VDIFF_KNEE_MAX_MUTE_MS, VDIFF_KNEE_RELAX_MS,
   VDIFF_KNEE_GAP_CARRY_MS,
 } = await import('../src/alerts.js');
 const { syncAlertOnsets, resetAlertOnsetCacheForTests, getAlertOnset } = await import('../src/alertOnset.js');
@@ -142,11 +142,13 @@ test('★★ a benign knee across a restart stays silent (the seed restores cloc
 });
 
 test('★★ (v1.187.1) a SEEDED critical-line clock ends at once on a first reading under 50 mV, and survives one in the 50-89 mV band', () => {
-  // At 90% no session runs, so the seeded critical-line clock alone bounds the balancing mute. In
-  // the process an episode now survives readings under 50 mV until an unbroken VDIFF_KNEE_RELAX_MS
+  // In the process an episode survives readings under 50 mV until an unbroken VDIFF_KNEE_RELAX_MS
   // (log review); a clock seeded from a persisted onset — perhaps a day old, never seen in this
-  // process — still ends on the first reading under 50 mV, as in v1.187.0.
+  // process — still ends on a reading under 50 mV, as in v1.187.0. The add-on is down for 70
+  // minutes here (no knee-session file in this suite), longer than VDIFF_KNEE_GAP_CARRY_MS, so the
+  // seed carries the critical-line clock only, never the session.
   const hi: Reading = { vd: 110, soc: 90, bal: 1, in: 0 };
+  const backMin = 20 + 70;
   for (const [label, firstBack, loud] of [['50-89 mV', 70, true], ['under 50 mV', 30, false]] as const) {
     restart();
     rmSync(process.env.ALERT_ONSET_PATH!, { force: true });
@@ -154,15 +156,83 @@ test('★★ (v1.187.1) a SEEDED critical-line clock ends at once on a first rea
     for (let t = 0; t < VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) assert.equal(tick(T0 + t, hi)!.mutedBy, 'balancing', label);
     assert.notEqual(tick(T0 + VDIFF_KNEE_MAX_MUTE_MS, hi)!.annunciate, false, `${label}: the 20-minute bound speaks in-process`);
     restart();
-    assert.equal(tick(T0 + 21 * MIN, { vd: firstBack, soc: 90, bal: 1, in: 0 }), undefined, `${label}: under the plateau line`);
-    const back = tick(T0 + 22 * MIN, hi)!;
+    assert.equal(vdiffKneeSeed(getAlertOnset(CRIT_ID), 'PACK-A', T0 + backMin * MIN)!.graceFromMs, null, 'no session seeded');
+    assert.equal(tick(T0 + backMin * MIN, { vd: firstBack, soc: 90, bal: 1, in: 0 }), undefined, `${label}: under the plateau line`);
+    const back = tick(T0 + (backMin + 1) * MIN, hi)!;
     if (loud) {
       assert.notEqual(back.annunciate, false, `${label}: the seeded episode stands`);
-      assert.match(back.detail, /First reached the critical line 22 minutes ago\./);
+      assert.match(back.detail, new RegExp(`First reached the critical line ${backMin + 1} minutes ago\\.`));
     } else {
       assert.equal(back.mutedBy, 'balancing', `${label}: the seeded episode ended — a new one, muted while balancing`);
     }
   }
+});
+
+test('★★★ (v1.187.2) a seeded clock not yet confirmed at the line ends on ANY reading under 50 mV — not only the first after the restart', () => {
+  // The add-on returns the next day to a day-old onset (the critical stood when it went down). The
+  // first reading is 70 mV on the plateau — under the plateau line, not under 50 mV — then the pack
+  // reads 30 mV, then a benign balancing crossing two minutes later. v1.187.1 cleared the seed only
+  // on the FIRST reading after the restart, so the day-old onset was carried through the 30 mV
+  // readings for VDIFF_KNEE_RELAX_MS and the crossing annunciated at once ("First reached the
+  // critical line 1443 minutes ago."). Now the seed ends on the first reading under 50 mV.
+  for (let t = 0; t <= VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
+  assert.equal(getAlertOnset(CRIT_ID), T0);
+  restart();
+  const back = T0 + 24 * 60 * MIN;
+  assert.equal(tick(back, { vd: 70, soc: 90, bal: 1, in: 0 }), undefined, 'under the plateau line');
+  for (let t = MIN; t < 3 * MIN; t += TICK_MS) assert.equal(tick(back + t, { vd: 30, soc: 90, bal: 1, in: 0 }), undefined);
+  const knee = tick(back + 3 * MIN, { vd: 95, soc: 90, bal: 1, in: 0 })!;
+  assert.equal(knee.mutedBy, 'balancing', 'a new episode, muted while balancing');
+  assert.doesNotMatch(knee.detail, /First reached the critical line/);
+});
+
+test('★★ (v1.187.2) …while a seeded clock CONFIRMED by a reading at the line follows the in-process rule: a dip under 50 mV does not end it', () => {
+  // The critical still standing when the add-on returns: the first reading is at the line, so the
+  // episode is the one the onset names, and a single 45 mV reading after it is a dip, not a reset.
+  for (let t = 0; t <= VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
+  restart();
+  const back = T0 + 3 * 60 * MIN;
+  assert.notEqual(tick(back, { vd: 110, soc: 90, bal: 1, in: 0 })!.annunciate, false, 'loud from its old onset');
+  for (let t = TICK_MS; t < 3 * MIN; t += TICK_MS) assert.equal(tick(back + t, { vd: 45, soc: 90, bal: 1, in: 0 }), undefined);
+  const again = tick(back + 3 * MIN, { vd: 110, soc: 90, bal: 1, in: 0 })!;
+  assert.notEqual(again.annunciate, false, 'the confirmed episode stands through the dip');
+  assert.match(again.detail, /First reached the critical line 183 minutes ago\./);
+});
+
+test('★★★ (v1.187.2) a critical STILL standing after an outage longer than the carry starts its session from its onset: hi / lo / lo at 90% stays loud', () => {
+  // (The review of this release.) The seed carries the critical-line clock only (the onset is three
+  // hours old); the first reading back is at the line, which confirms it and starts the session from
+  // it (graceFromMs ??= critSinceMs). The fault then dips under the line for 6 minutes between
+  // crossings, which ends the episode each time: started from the confirming tick instead, the
+  // session muted the next crossings for about 5 minutes.
+  for (let t = 0; t <= 21 * MIN; t += TICK_MS) tick(T0 + t, { vd: 110, soc: 90, bal: 1, in: 0 });
+  assert.equal(getAlertOnset(CRIT_ID), T0);
+  restart();
+  const back = T0 + 3 * 60 * MIN;
+  let crit = 0;
+  for (let t = 0; t < 60 * MIN; t += TICK_MS) {
+    const hi = Math.floor(t / (3 * MIN)) % 3 === 0;
+    const a = tick(back + t, { vd: hi ? 110 : 45, soc: 90, bal: 1, in: 0 });
+    if (!a) continue;
+    crit++;
+    assert.notEqual(a.annunciate, false, `+${t / 1000}s after the restart: muted (${a.mutedBy})`);
+  }
+  assert.ok(crit > 20);
+});
+
+test('★★ (v1.187.2) a session seeded from an onset inside the carry is a SESSION: a reading under 50 mV ends its critical-line clock, not the session', () => {
+  // A restart one minute after the in-process bound spoke, the knee-session file absent (the
+  // fallback): both clocks are seeded from the 21-minute-old onset. The first reading is 30 mV —
+  // the seeded critical-line clock ends — but the session, like any session, ends only below the
+  // plateau or after a 20-minute rest, and it bounds the balancing mute on the next crossing.
+  const hi: Reading = { vd: 110, soc: 90, bal: 1, in: 0 };
+  for (let t = 0; t <= VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) tick(T0 + t, hi);
+  restart();
+  assert.equal(tick(T0 + 21 * MIN, { vd: 30, soc: 90, bal: 1, in: 0 }), undefined);
+  const back = tick(T0 + 22 * MIN, hi)!;
+  assert.notEqual(back.annunciate, false, 'the seeded session is 22 minutes old');
+  assert.match(back.detail, /First reached the critical line above 85% charge 22 minutes ago\./,
+    'the session bound, not the (ended) episode clock');
 });
 
 test('★★ the seed carries no evidence: an idle pack at the line after a restart speaks at once', () => {
@@ -178,6 +248,7 @@ test('vdiffKneeSeed — both clocks from the onset, no evidence; nothing without
   assert.deepEqual(vdiffKneeSeed(T0 - 5 * MIN, 'P', T0), {
     packSn: 'P', lastBalancingMs: null, lastChargeMs: null, critSinceMs: T0 - 5 * MIN,
     belowCritSinceMs: null, graceFromMs: T0 - 5 * MIN, quietSinceMs: null, lastSeenMs: null,
+    critSeeded: true,
   });
   const ahead = vdiffKneeSeed(T0 + 5 * MIN, 'P', T0)!;
   assert.equal(ahead.critSinceMs, T0, 'an onset ahead of the clock (a clock step) is clamped to now');
@@ -188,6 +259,39 @@ test('vdiffKneeSeed — both clocks from the onset, no evidence; nothing without
   const stale = vdiffKneeSeed(T0 - VDIFF_KNEE_GAP_CARRY_MS - 1, 'P', T0)!;
   assert.equal(stale.graceFromMs, null, 'an onset from before a long outage is not the current session');
   assert.equal(stale.critSinceMs, T0 - VDIFF_KNEE_GAP_CARRY_MS - 1);
+});
+
+test('advanceVdiffKnee — critSeeded (v1.187.2): set by the seed only; cleared by a reading at the line, by the reset it allows, and off the plateau', () => {
+  const obs = (spreadMv: number, packSoc: number | null = 90) => ({ packSn: 'P', packSoc, spreadMv, balancing: true, chargeW: null });
+  const day = T0 - 24 * 60 * MIN;
+  assert.equal(advanceVdiffKnee(undefined, obs(95), T0).critSeeded, false, 'a crossing seen in the process is not seeded');
+  assert.equal(advanceVdiffKnee(undefined, obs(30), T0).critSeeded, false, 'nor a fresh state with no clock');
+  // 50-89 mV on the plateau: under the line, not under 50 mV — the seed stands, still unconfirmed…
+  let s = advanceVdiffKnee(vdiffKneeSeed(day, 'P', T0), obs(70), T0);
+  assert.equal(s.critSinceMs, day);
+  assert.equal(s.critSeeded, true);
+  s = advanceVdiffKnee(s, obs(70), T0 + MIN);
+  assert.equal(s.critSeeded, true, 'still unconfirmed on the second reading');
+  // …and any later reading under 50 mV ends it, with its mark.
+  const ended = advanceVdiffKnee(s, obs(49), T0 + 2 * MIN);
+  assert.equal(ended.critSinceMs, null);
+  assert.equal(ended.critSeeded, false);
+  assert.equal(advanceVdiffKnee(s, obs(50), T0 + 2 * MIN).critSinceMs, day, 'the line is exclusive: 50 mV is not under it');
+  // A reading at the line confirms it: the in-process rule from then on.
+  const confirmed = advanceVdiffKnee(s, obs(90), T0 + 2 * MIN);
+  assert.equal(confirmed.critSeeded, false);
+  assert.equal(confirmed.critSinceMs, day);
+  assert.equal(advanceVdiffKnee(confirmed, obs(45), T0 + 3 * MIN).critSinceMs, day, 'a dip under 50 mV no longer ends it');
+  // VDIFF_KNEE_RELAX_MS under the line ends a seeded clock too, with its mark.
+  const run = advanceVdiffKnee(s, obs(70), T0 + VDIFF_KNEE_RELAX_MS);
+  assert.equal(run.critSinceMs, null);
+  assert.equal(run.critSeeded, false);
+  // Off the plateau the clock and its mark are cleared; an unknown SoC is off the plateau.
+  for (const soc of [84, null]) {
+    const off = advanceVdiffKnee(vdiffKneeSeed(day, 'P', T0), obs(60, soc), T0);
+    assert.equal(off.critSinceMs, null, `SoC ${soc}`);
+    assert.equal(off.critSeeded, false, `SoC ${soc}`);
+  }
 });
 
 test('★★ a long outage that began inside a knee does not cost the next day\'s knee its grace', () => {
