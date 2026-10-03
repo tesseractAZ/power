@@ -304,7 +304,8 @@ export interface Alert {
    * broadcast tick's speech filter). Narrower than `annunciate:false`, which drops the push too.
    * Used for a peer cell-spread outlier at top of charge (analytics.computeLearnedAlerts), and
    * for one whose pack's vdiff-crit is held by a bounded cell-spread mute
-   * (alertMonitor.quietPeerSpreadUnderHeldCritical).
+   * (alertMonitor.quietPeerSpreadUnderHeldCritical). v1.187.3 — also on the info-tier EMS band
+   * notice (`ems-volt-`), where it backs up the severity: an info alert neither pushes nor counts.
    */
   audible?: boolean;
   /**
@@ -1063,6 +1064,47 @@ const DPU_ERR_DEBOUNCE_MS = 3 * 60 * 1000;
  *  one debounce period for device-reported error codes, not a second tunable. */
 const MPPT_ERR_DEBOUNCE_MS = DPU_ERR_DEBOUNCE_MS;
 
+/**
+ * v1.187.3 (review) — the longest of the 3-minute onset debounces above whose clocks live only in
+ * this process's memory (SnapshotStore: dpu-err, shp2-src-err, dpu-pvh/pvl-err). They restart at
+ * zero on every boot, so for this long after the first poll a fault that stood before the restart
+ * may be missing from the alert set for that reason alone. alertMonitor's settled alert set waits
+ * it out from SnapshotStore.firstPollSettledAt (alertSetTrusted).
+ */
+export const BOOT_RESET_ONSET_DEBOUNCE_MS = Math.max(DPU_ERR_DEBOUNCE_MS, MPPT_ERR_DEBOUNCE_MS);
+
+/**
+ * v1.187.3 (review) — WHICH IN-MEMORY ONSET CLOCKS ARE STILL INSIDE THEIR DEBOUNCE at `nowMs`?
+ *
+ * Each names a condition the device is reporting NOW that computeAlerts withholds only because it
+ * has not stood its window yet: an inverter error (DPU_ERR_DEBOUNCE_MS), an SHP2 source error (the
+ * same window), an MPPT string error while producing (MPPT_ERR_DEBOUNCE_MS) and a backup pool
+ * reading unknown (RESERVE_BLIND_AFTER_MS, 15 min). These clocks restart at zero on every boot, so
+ * a critical or warning that stood before a restart is absent after it for one window. While any
+ * is pending, a green read from the set may be that absence, not an all-clear: the broadcast's
+ * post-restart recovery (broadcast.isRestartRecovery) is not taken on it. Same comparison as the
+ * rules above (`now - sinceMs < window` withholds), so a withheld alert is always listed. Kept
+ * beside the windows it reads so the two cannot drift. Pure; the descriptions are for the log.
+ */
+export function debouncedOnsetsPending(
+  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn'> | undefined,
+  nowMs: number,
+): string[] {
+  if (connectivity == null) return [];
+  const out: string[] = [];
+  const within = (sinceMs: number | null | undefined, windowMs: number): boolean =>
+    sinceMs != null && Number.isFinite(sinceMs) && nowMs - sinceMs < windowMs;
+  for (const [sn, o] of connectivity.dpuErrOnsetBySn ?? []) if (within(o.sinceMs, DPU_ERR_DEBOUNCE_MS)) out.push(`dpu-err ${sn}`);
+  for (const [key, o] of connectivity.shp2SrcErrOnsetBySlot ?? []) if (within(o.sinceMs, DPU_ERR_DEBOUNCE_MS)) out.push(`shp2-src-err ${key}`);
+  for (const [key, o] of connectivity.mpptErrOnsetByKey ?? []) if (within(o.sinceMs, MPPT_ERR_DEBOUNCE_MS)) out.push(`mppt-err ${key}`);
+  // Every panel's pool (v1.185.0), the house panel's among them; a caller with only the house
+  // panel's onset passes backupPoolUnknownSinceMs.
+  const pools: Iterable<[string, number | null]> = connectivity.backupPoolUnknownSinceBySn
+    ?? [['house panel', connectivity.backupPoolUnknownSinceMs ?? null]];
+  for (const [sn, since] of pools) if (within(since, RESERVE_BLIND_AFTER_MS)) out.push(`reserve-alarm-blind ${sn}`);
+  return out;
+}
+
 /* v1.45.0 — host-pressure crit dwell. The vitals assessment escalates
  * instantly (correct for QoS), but the RED ANNUNCIATION requires the crit to
  * sustain: 1-3-minute load spikes from the nightly backup / boot / store
@@ -1580,10 +1622,31 @@ export function computeAlerts(
       if (a) out.push(a);
     }
 
+    // v1.187.3 — the EMS parallel band is NOT a voltage limit, so leaving it is information.
+    // EcoFlow's emsParaVolMin/Max is a band 2.3-3.0 V wide around a reference voltage the Core
+    // reports alongside batVol in the same ~5-minute backend block; at rest the reference sits
+    // within about 40 mV of the Core's own batVol, and across the cleared ledger the band ranges
+    // from 81.6 to 112.4 V. batVol leaves it on a fast current change (night grid-charge onset,
+    // an evening load step) or at the top of charge, never at a limit: 33 home-Core episodes from
+    // 08-25 to 10-01 had batVol 102.3-109.3 V and a highest cell of at most 3.512 V. Raised as a
+    // warning it took ISA High ("a protective hardware limit has been crossed"), raised the
+    // yellow, was spoken in both languages and pushed after 60 s: on 10-01 13:25 it was the one
+    // audible alarm of Core 5's top of charge (108.9 V, 0.45 V BELOW a 109.4-112.4 V band, highest
+    // cell 3.494 V). It stays on the card as info / Low, audible:false: below the push minimum and
+    // never counted toward, or voiced in, the broadcast condition. A real overvoltage is
+    // cell-ovp-* (critical at 3.600 V, never muted) and a BMS/inverter fault is dpu-err-*; neither
+    // reads this band. The band is recorded (ems_para_vol_min_mv / ems_para_vol_max_mv) so an
+    // episode can be checked against batVol afterwards.
     if (p.batVol != null && p.emsParaVolMinMv != null && p.emsParaVolMaxMv != null) {
       const batMv = p.batVol * 1000;
       if (batMv < p.emsParaVolMinMv || batMv > p.emsParaVolMaxMv) {
-        out.push({ id: `ems-volt-${d.sn}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Pack voltage outside EMS window', detail: `${d.deviceName} at ${p.batVol.toFixed(1)} V — outside EcoFlow's ${(p.emsParaVolMinMv / 1000).toFixed(1)}–${(p.emsParaVolMaxMv / 1000).toFixed(1)} V parallel-operation window.` });
+        const lo = (p.emsParaVolMinMv / 1000).toFixed(1);
+        const hi = (p.emsParaVolMaxMv / 1000).toFixed(1);
+        out.push({
+          id: `ems-volt-${d.sn}`, severity: 'info', priority: 'low', audible: false, category: 'Battery', device: d.deviceName,
+          title: 'Pack voltage swing outside EMS band',
+          detail: `${d.deviceName} at ${p.batVol.toFixed(1)} V — ${batMv < p.emsParaVolMinMv ? 'below' : 'above'} EcoFlow's ${lo}–${hi} V parallel band. That band follows this Core's own voltage and is refreshed about every 5 minutes, so leaving it marks a fast charge or load change or the top of charge, not a voltage limit. Cell voltages are watched separately (cell overvoltage at ${(CELL_OVP_CRIT_MV / 1000).toFixed(2)} V).`,
+        });
       }
     }
 

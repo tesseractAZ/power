@@ -185,6 +185,18 @@ jobs:
     name: Cut GitHub Release
     needs: [resolve, build]
     runs-on: ubuntu-latest
+    # v1.187.3 — BOUNDED. With no timeout anywhere, one stalled apt mirror in the best-effort
+    # 'Ensure pandoc' step ran this job into the platform's 6 h limit; the job was CANCELLED,
+    # so the steps after it — including 'Create GitHub Release' — never ran (v1.187.1, run
+    # 36901417471: apt-get update silent from 17:46:07Z to the 23:46:59Z cancel).
+    # `continue-on-error` covers a step that FAILS, not one that hangs until the job dies.
+    # Every step that can wait on the network now has its own bound, apt and the docs tools
+    # are wrapped in `timeout` so a stall ends as an ordinary failure, and this job's bound
+    # sits above the sum of its steps' bounds (6 + 5 + 10 + 5 + 10 = 36 min), so a docs step
+    # that runs to its limit can never take the Release down with it. The images are already
+    # pushed by `build` before this job starts; nothing here can hold them back. A normal run
+    # takes ~2 min.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
@@ -259,21 +271,34 @@ jobs:
       # so a transient apt/pandoc hiccup can't turn a successful release RED. If the
       # build is skipped or fails, the Release is still created — just without the
       # document.
+      # v1.187.3 — and BOUNDED, because continue-on-error does nothing for a step that
+      # never ends: apt runs under `timeout` with its own connect/read timeouts and
+      # retries (a stalled mirror becomes a failed step, which continue-on-error covers),
+      # and every docs step carries timeout-minutes as the backstop (v1.187.0 timings:
+      # pandoc 23 s, LibreOffice ~82 s).
       - name: Ensure pandoc
         if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
+        timeout-minutes: 6
+        env:
+          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
         run: |
-          command -v pandoc >/dev/null || { sudo apt-get update && sudo apt-get install -y pandoc; }
+          command -v pandoc >/dev/null || {
+            sudo timeout -k 10 120 apt-get $APT_OPTS update &&
+            sudo timeout -k 10 180 apt-get $APT_OPTS install -y pandoc
+          }
           pandoc --version | head -1
 
       - name: Build documentation .docx
+        id: docx
         if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
+        timeout-minutes: 5
         env:
           V: ${{ needs.resolve.outputs.version }}
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
-          python3 scripts/build-docs-docx.py \
+          timeout -k 10 240 python3 scripts/build-docs-docx.py \
             --version "$V" \
             --ref "$TAG" \
             --output "EcoFlow-Panel-Documentation-v${V}.docx"
@@ -282,39 +307,61 @@ jobs:
       # carries both formats. Best-effort like the .docx: gated + continue-on-error
       # so a transient LibreOffice/apt hiccup can't turn a good release RED — the
       # PR's docs check is the hard gate that the PDF toolchain works.
+      # v1.187.3 (review) — rendered only from a .docx whose build SUCCEEDED: a .docx
+      # left by a killed build may be truncated, and so would be its PDF.
       - name: Ensure LibreOffice (docx → pdf)
         if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
+        timeout-minutes: 10
+        env:
+          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
         run: |
-          command -v libreoffice >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-writer; }
+          command -v libreoffice >/dev/null || {
+            sudo timeout -k 10 120 apt-get $APT_OPTS update &&
+            sudo timeout -k 10 420 apt-get $APT_OPTS install -y --no-install-recommends libreoffice-writer
+          }
           libreoffice --version | head -1
 
       - name: Build documentation .pdf
-        if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
+        id: pdf
+        if: ${{ steps.gate.outputs.skip != 'true' && steps.docx.outcome == 'success' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
+        timeout-minutes: 5
         env:
           V: ${{ needs.resolve.outputs.version }}
         run: |
-          libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
+          timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
             --convert-to pdf --outdir . "EcoFlow-Panel-Documentation-v${V}.docx"
-          ls -la "EcoFlow-Panel-Documentation-v${V}.pdf" || true
+          test -s "EcoFlow-Panel-Documentation-v${V}.pdf"
+          ls -la "EcoFlow-Panel-Documentation-v${V}.pdf"
 
+      # Not best-effort: a Release that cannot be created is a red run. Bounded so a stalled
+      # API call fails in minutes instead of holding the job (v1.187.3). Its `if` reads only
+      # the gate, never a docs step's outcome, so a failed or timed-out docs step leaves it
+      # running.
       - name: Create GitHub Release (with docs asset)
         if: steps.gate.outputs.skip != 'true'
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ needs.resolve.outputs.version }}
+          # v1.187.3 (review) — each build step's own result, before continue-on-error
+          # turns it green ('success', 'failure', 'cancelled' or 'skipped').
+          DOCX_OUTCOME: ${{ steps.docx.outcome }}
+          PDF_OUTCOME: ${{ steps.pdf.outcome }}
         run: |
           set -eo pipefail
           # Immutable Releases seal assets at creation — attach the docs here, not
-          # in a later step. Include each format only if its build produced a
-          # NON-EMPTY file (-s, not -f): an interrupted LibreOffice conversion
-          # can leave a zero-byte pdf that would otherwise be sealed forever.
+          # in a later step. Include each format only if its build step SUCCEEDED
+          # and left a NON-EMPTY file (-s, not -f). v1.187.3 (review) — the step's
+          # outcome, not the file alone: since the docs steps are bounded, a
+          # conversion killed by `timeout` or by its step bound can leave a
+          # truncated .docx or .pdf behind, and a Release would seal it forever.
           assets=()
           doc="EcoFlow-Panel-Documentation-v${V}.docx"
           pdf="EcoFlow-Panel-Documentation-v${V}.pdf"
-          if [ -s "$doc" ]; then assets+=("$doc"); fi
-          if [ -s "$pdf" ]; then assets+=("$pdf"); fi
+          if [ "$DOCX_OUTCOME" = success ] && [ -s "$doc" ]; then assets+=("$doc"); fi
+          if [ "$PDF_OUTCOME" = success ] && [ -s "$pdf" ]; then assets+=("$pdf"); fi
           gh release create "${{ needs.resolve.outputs.tag }}" \
             --title "${{ needs.resolve.outputs.tag }}" \
             --notes-file /tmp/notes.md \

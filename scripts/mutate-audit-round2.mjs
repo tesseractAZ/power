@@ -28,7 +28,6 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const SNAP = resolve(SERVER, 'src/snapshot.ts');
 const ADV = resolve(SERVER, 'src/nightChargeAdvisor.ts');
-const IDX = resolve(SERVER, 'src/index.ts');
 const DISC = resolve(SERVER, 'src/mqttDiscovery.ts');
 
 const SUBSET = ['test/auditRound2.test.ts', 'test/unreachableDetectors.test.ts', 'test/auditF7toF12.test.ts'];
@@ -113,7 +112,8 @@ const MUTANTS = [
   },
   {
     id: 'xii. the UNMEASURED line points back at the 404',
-    file: IDX,
+    // v1.187.3 (review) — built by nightChargeAdvisor.buyDebiasUnmeasuredLogLine now.
+    file: ADV,
     find: 'see /api/night-charge/status → plan.buyDebiasBasis.`,',
     to: 'see /api/night-charge buyDebiasBasis.`, /* MUTANT */',
     why: 'A diagnostic that tells the operator to look somewhere that returns 404.',

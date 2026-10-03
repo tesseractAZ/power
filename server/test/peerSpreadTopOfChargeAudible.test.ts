@@ -78,9 +78,10 @@ test('★★★ the broadcast tick drops audible:false before the condition AND 
   const quiet = peerSpread(KNEE_0929)!;
   // Another warning raises yellow at the same time. It carries no location, so if the quiet
   // outlier (Core 1 Pack 1, Battery) reached the spoken array it would be the one voiced.
+  // v1.187.3 — a Core-level warning family: ems-volt, used here before, is info and never voiced.
   const other: Alert = {
-    id: 'ems-volt-DPU-OTHER', severity: 'warning', category: 'Battery', device: 'Core 2',
-    title: 'Battery voltage out of range', detail: 'Core 2 battery voltage outside the allowed range.',
+    id: 'dpu-imbalance-DPU-OTHER', severity: 'warning', category: 'Battery', device: 'Core 2',
+    title: 'Packs out of balance', detail: '18% state-of-charge difference across Core 2 packs.',
   };
   const now = Date.parse('2026-09-29T15:20:00-07:00');
   const onsetOf = () => now - IMBALANCE_SPEAK_HOLD_MS - 60_000; // both past any speak hold
@@ -88,7 +89,7 @@ test('★★★ the broadcast tick drops audible:false before the condition AND 
   assert.deepEqual(spoken.map((a) => a.id), [other.id], 'the array that feeds both consumers excludes it');
   assert.equal(conditionFromAlerts(spoken).level, 'yellow', 'the other warning still raises yellow');
   const said = buildAlertMessage('yellow', spoken);
-  assert.match(said, /voltage/i, 'the other warning is the one voiced');
+  assert.match(said, /out of balance/i, 'the other warning is the one voiced');
   assert.doesNotMatch(said, /pack one|spread/i, 'the quiet outlier is never named');
   // And the voiced-primary choice refuses it on its own, for any caller that skips the tick.
   assert.doesNotMatch(buildAlertMessage('yellow', [other, quiet]), /pack one|spread/i);
