@@ -159,6 +159,9 @@ async function until(r: Rig, pred: () => boolean, what: string, ms = 8000): Prom
     await sleep(5);
   }
 }
+/** The retry delay: wide enough that every step a test takes before a retry fires (a tick, a play
+ *  starting, an announcement queued) lands first, even on a loaded machine. */
+const RETRY_MS = 800;
 const SUPERSEDED = 'deferred red retry dropped — a newer announcement of the condition has taken its place since';
 const ARMED = 'deferred retry 1/3';
 
@@ -175,7 +178,7 @@ async function scenario(r: Rig, next: PlayStep[]): Promise<{ urlA: string; urlC:
   plan.push({ status: 500, gate: c.promise }); // C: slow, then fails
   alerts = [CRIT_C]; // A clears and C appears on the same tick: red stays red (one episode)
   await until(r, () => plays.length === 2, 'C playing');
-  await sleep(600); // A's retry (400 ms) fires meanwhile and queues behind C
+  await sleep(RETRY_MS + 300); // A's retry fires meanwhile and queues behind C
   plan.push(...next);
   c.open();
   await until(r, () => r.count(ARMED) === 2, 'C failing, its own retry armed');
@@ -201,7 +204,7 @@ after(async () => {
 });
 
 test('★★★ THE DEFECT, Music Assistant back by A\'s turn: A\'s queued retry is dropped — never played, never cancelling C\'s retry, which names C', async () => {
-  const r = await started(400);
+  const r = await started(RETRY_MS);
   const { urlA, urlC } = await scenario(r, []); // every later play succeeds
   assert.notEqual(urlA, urlC, 'two texts, two rendered files');
   await until(r, () => r.has(SUPERSEDED), 'A\'s retry dropped at its turn');
@@ -214,7 +217,7 @@ test('★★★ THE DEFECT, Music Assistant back by A\'s turn: A\'s queued retry
 });
 
 test('★★★ THE DEFECT, Music Assistant still failing at A\'s turn: A takes nothing — C keeps the slot and counts its own budget (1/3, 2/3), then names C', async () => {
-  const r = await started(400);
+  const r = await started(RETRY_MS);
   const { urlA, urlC } = await scenario(r, [{ status: 500 }]); // one more failure, then success
   await until(r, () => r.has(SUPERSEDED), 'A\'s retry dropped at its turn');
   await until(r, () => r.has('deferred retry 2/3'), 'C\'s own retry failing too, counted on C\'s budget');
@@ -227,7 +230,7 @@ test('★★★ THE DEFECT, Music Assistant still failing at A\'s turn: A takes 
 });
 
 test('★★★ a NEWER announcement that reached the speakers drops an older retry still waiting in the chain — the armed timer is not the only place it waits', async () => {
-  const r = await started(400);
+  const r = await started(RETRY_MS);
   plan.push({ status: 500 }); // A
   alerts = [CRIT_A];
   await until(r, () => r.has(ARMED), 'red A failing');
@@ -239,7 +242,7 @@ test('★★★ a NEWER announcement that reached the speakers drops an older re
   plan.push({ status: 200, gate: n.promise });
   // queued behind C, ahead of A's retry; past the storm gates (a consent notice) so it holds the chain
   const notice = r.mon.announce('medium', NOTICE, null, { consentNotice: true });
-  await sleep(600); // A's retry fires and queues behind the notice
+  await sleep(RETRY_MS + 300); // A's retry fires and queues behind the notice
   c.open();
   await until(r, () => plays.length === 3, 'C heard, the notice playing');
   assert.equal(heard(plays[1].url), 1, 'C reached the speakers');
@@ -252,7 +255,7 @@ test('★★★ a NEWER announcement that reached the speakers drops an older re
 });
 
 test('★★★ a red retry waiting behind a NEWER warning spoken under the kept red still plays (a lower announcement takes no red\'s place) — and its delivery does not cancel the newer warning\'s retry', async () => {
-  const r = await started(800);
+  const r = await started(2 * RETRY_MS);
   plan.push({ status: 500 }); // red B
   alerts = [CRIT_B];
   await until(r, () => r.has(ARMED), 'the cell-spread red failing, its retry armed');
@@ -267,7 +270,7 @@ test('★★★ a red retry waiting behind a NEWER warning spoken under the kept
   plan.push({ status: 500 }); // the warning fails
   alerts = [HELD_B, WARN_N];
   await until(r, () => r.has('condition transition → yellow (new warning) spoken; the committed condition stays red'), 'the new warning, queued behind the notice');
-  await sleep(Math.max(0, armedAt + 1000 - realNow())); // the red retry fires and queues behind the warning
+  await sleep(Math.max(0, armedAt + 2 * RETRY_MS + 300 - realNow())); // the red retry fires and queues behind the warning
   x.open();
   await notice;
   await until(r, () => r.count(ARMED) === 2, 'the warning failing; the slot was free, so it arms its own retry');
@@ -282,7 +285,7 @@ test('★★★ a red retry waiting behind a NEWER warning spoken under the kept
 });
 
 test('★★ dedicated retries are unchanged: one waiting behind a newer CONDITION announcement that took the slot still plays', async () => {
-  const r = await started(400);
+  const r = await started(RETRY_MS);
   plan.push({ status: 500 });
   const first = await r.mon.announce('critical', RESERVE, null);
   assert.equal(first.ok, false, 'the dedicated alarm failed; its retry is armed');
@@ -290,7 +293,7 @@ test('★★ dedicated retries are unchanged: one waiting behind a newer CONDITI
   plan.push({ status: 500, gate: c.promise }); // condition C: slow, fails, takes the slot
   alerts = [CRIT_C];
   await until(r, () => plays.length === 2, 'C playing');
-  await sleep(600); // the dedicated retry fires and queues behind C
+  await sleep(RETRY_MS + 300); // the dedicated retry fires and queues behind C
   c.open();
   await until(r, () => r.count('deferred retry 2/3') === 1, 'C taking the shared slot');
   await until(r, () => heard(plays[0].url) === 1, '★ the dedicated alarm\'s retry plays');
@@ -299,7 +302,7 @@ test('★★ dedicated retries are unchanged: one waiting behind a newer CONDITI
 });
 
 test('★★ a still-standing red\'s own retry plays behind a DEDICATED announcement that deferred and took the slot — a dedicated arm takes no condition retry\'s place', async () => {
-  const r = await started(400);
+  const r = await started(RETRY_MS);
   plan.push({ status: 500 }); // A, still standing throughout
   alerts = [CRIT_A];
   await until(r, () => r.has(ARMED), 'red A failing');
@@ -307,7 +310,7 @@ test('★★ a still-standing red\'s own retry plays behind a DEDICATED announce
   plan.push({ status: 500, gate: d.promise }); // a dedicated alarm: slow, fails
   const reserve = r.mon.announce('critical', RESERVE, null);
   await until(r, () => plays.length === 2, 'the dedicated alarm playing');
-  await sleep(600); // A's retry fires and queues behind it
+  await sleep(RETRY_MS + 300); // A's retry fires and queues behind it
   d.open();
   await reserve;
   await until(r, () => heard(plays[0].url) === 1, '★ A, still standing, retried');
