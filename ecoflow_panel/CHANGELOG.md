@@ -1,19 +1,17 @@
 ## 1.187.5
 
-### A late retry no longer names an alarm that cleared while another alarm stands
+### A late retry no longer displaces a newer alarm's retry
 
 **Announcements**
 
-- **A late retry no longer names an alarm that has cleared while another one stands.** When Music Assistant cannot play an announcement, it is retried after 30 seconds, 90 seconds and 3 minutes. A retry repeated the words it was made with, even when the alarm they named had cleared in the meantime and a different critical alarm kept the alarm level:
+- **A late retry no longer displaces a newer alarm's retry.** When Music Assistant cannot play an announcement, it is retried after 30 seconds, 90 seconds and 3 minutes.
   - When one critical alarm cleared and a different one appeared at the same moment, the first alarm's retry could still play after the second alarm had been announced, if the second alarm's announcement was slow and then failed. When the retry played, it cancelled the second alarm's retry, so the house heard the alarm that had cleared and the second alarm was never named. When it failed again, it took the second alarm's place in the retry queue with a fresh set of three retries, and later played the alarm that had cleared.
-  - When an announcement named one of two critical alarms and that one cleared while the other stayed, the retry still named the one that had cleared, and the other was never named.
-  - When a retry was already waiting behind another announcement as the alarm it named cleared and a different one appeared, the retry played first and named the alarm that had cleared, and the new alarm was held back for two minutes.
-  - The alarm level was right in each case; the alarm named was the wrong one.
-- A retry now names the alarm that would be announced at the moment it plays, at the level it was made for. While the condition is below that level at that moment (an alarm clearing and waiting out its three minutes, or a critical alarm held while the batteries balance), the retry repeats the alarm it was made for, and the all-clear or the warning follows.
+  - The alarm level was right; the alarm named was the wrong one.
 - Announcements are now numbered in the order they are made. A retry plays only while no newer announcement at the same or a more serious level has taken its place in the retry queue or reached the speakers. Otherwise it is dropped when its turn comes, including when it is already waiting behind another announcement.
 - A retry that fails again keeps counting its own three retries. Only a newer announcement takes the place of a waiting retry, whatever its wording.
 - An older announcement reaching the speakers no longer cancels the retry of a newer one. For example, a critical alarm's retry that plays late no longer cancels the retry of a newer warning announced while that critical alarm stays current. That warning's retry then comes within two minutes of the critical alarm, and a less serious announcement is not made that soon after one, so the warning is announced when the critical alarm clears and the condition settles on the warning.
 - A warning still never takes the place of a critical alarm's retry, and battery-level, runway and other dedicated announcements are retried as before.
+- Known limit, unchanged from 1.187.4: a retry still repeats the words it was made with. When an announcement named one of two critical alarms and that one cleared while the other stayed, its retry can still name the one that cleared; and a retry already waiting behind another announcement when its alarm cleared can play first and name it, while the new alarm waits two minutes. A fix that rebuilt the words when the retry plays was tried and withdrawn after review, because it could turn a spoken retry into a bare tone when speech was slow and could keep the cordless phone from hearing the new alarm; a narrower version is planned.
 
 ## 1.187.4
 

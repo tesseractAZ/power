@@ -526,7 +526,9 @@ const MUTANTS = [
     file: BR,
     find: "      if (retryTimer != null && retryLevel != null && retryKind === 'condition' && retryEpisode === episode",
     to: "      if (false && retryTimer != null && retryLevel != null && retryKind === 'condition' && retryEpisode === episode /* MUTANT */",
-    why: 'Red C is heard, then A\'s retry replays the cleared critical as the last words once the same-level gap has passed.',
+    // v1.187.5 — A's retry, once C is heard, is dropped when it runs (conditionRetrySuperseded): the
+    // cancel's remaining effect is the slot it frees.
+    why: 'C reaches the speakers while A\'s timer is armed: A\'s moot retry keeps the slot, a warning failing under the kept red is kept pending behind it instead of arming, and when A\'s retry is dropped the warning is never retried.',
   },
 ];
 
