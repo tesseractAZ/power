@@ -46,6 +46,12 @@
  *     marks the hold (bootSoundedFps): a red heard after the restart gets its all-clear. Mutants
  *     Q-vi..Q-ix. The decision past the warm-up waits up to one more dwell for a settled set, the
  *     patience the warm-up gives. Mutants Q-x, Q-xi.
+ *     (v1.187.5) Since v1.187.4 the restart question is open to boot + 16 (19 on a set settled by
+ *     then) and decides the restored absent critical's green (due near boot + 10). The mark still
+ *     decides a green whose dwell ends after the question closes: a restored critical held past
+ *     boot + 6 min (9 settled), e.g. knee-muted (20 min from the crossing before the restart), then
+ *     gone. Q-i and Q-x re-pointed to that; Q-i, Q-ii, Q-vii, Q-x and Q-xi are killed by the
+ *     v1.187.5 knee-mute tests in restartRecoveryAllClear.test.ts.
  *   - (seam review, LOW) a green still held for its recovery when the warm-up ends is spoken, not
  *     adopted silently, when a condition above green has been spoken since the boot
  *     (lastConditionPlayedLevel). Mutants L-i, L-ii.
@@ -587,10 +593,10 @@ const MUTANTS = [
     file: BR,
     find: '      if (bootCritHeld && inWarmup) deescalationHold.soundedHeldInWarmup = true;',
     to: '      /* MUTANT */',
-    why: 'The restored absent critical holds the green 7 min, its dwell ends as the warm-up does, and it is spoken with the set never settled.',
+    why: 'A restored critical knee-muted to boot + 8 min, then gone the absent hold, has its green due after the restart question closed (boot + 16): spoken as a late green with the set never settled. (v1.187.5 — re-pointed: the absent hold alone, due near boot + 10, is decided inside the question since v1.187.4.)',
   },
   {
-    id: 'Q-ii. ★★★ the recovery is decided inside the warm-up only',
+    id: 'Q-ii. ★★★ the recovery is decided only while the restart question is open (inside the warm-up only, before v1.187.4)',
     file: BR,
     find: "      && (questionOpen || (deescalationHold?.soundedHeldInWarmup === true", // v1.187.4 — re-pointed
     to: "      && (questionOpen || (false /* MUTANT */",
@@ -650,11 +656,11 @@ const MUTANTS = [
 
   /* ── seam review: past the warm-up the decision has the warm-up's patience ── */
   {
-    id: 'Q-x. ★★ past the warm-up the recovery is decided on the due tick alone',
+    id: 'Q-x. ★★ past the restart question the recovery is decided on the due tick alone',
     file: BR,
     find: '        && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < CONDITION_CLEAR_DWELL_MS)));',
     to: '        && recoveryHoldSinceMs == null)); /* MUTANT */',
-    why: 'A settled stamp reset by one transient onset 30 s before the due tick silences the all-clear the warm-up path would have waited for.',
+    why: 'Past the question, a set not settled on the due tick that settles 30 s later: the green is adopted in silence on the next tick, where the patience waits and announces it; a stamp reset 30 s before the due tick has it announced on the next tick, before it has stood its dwell on the settled set. (v1.187.5 — re-pointed: since v1.187.4 a set settled at the decision is announced, not silenced.)',
   },
   {
     id: 'Q-xi. ★ the patience is two dwells',

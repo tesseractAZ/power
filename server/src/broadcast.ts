@@ -3243,6 +3243,10 @@ export function startBroadcastMonitor(
     // resets has run (restartQuestionOpen: boot + 16 min, one more dwell on a set settled by then).
     // Open only for the warm-up, a green whose dwell ended after it took the late-green path and was
     // spoken on an unsettled set minutes before the reserve-blind warning the restarted clock hid.
+    // v1.187.5 — the open question now decides the restored absent critical's green above (due near
+    // boot + 10). The mark is still reached: it decides a green whose dwell ends after the question
+    // closes — a restored critical held past boot + 6 min (9 on a set settled by then) and then gone,
+    // e.g. its knee mute back after the restart, bounded 20 min from the crossing BEFORE the restart.
     const settledSinceMs = level === 'green' && continuationBaseline != null ? alertSetSettledSince() : null;
     const questionOpen = restartQuestionOpen(Date.now() - bootMs, settledSinceMs);
     const recoveryCandidate = level === 'green' && continuationBaseline != null
