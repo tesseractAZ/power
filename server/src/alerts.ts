@@ -998,6 +998,9 @@ export interface ConnectivityContext {
     lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number;
     /** v1.187.1 — when this process first saw the device in /device/list (SnapshotStore.firstListedAt). */
     firstListedAtMs?: number | null;
+    /** v1.187.10 — when the add-on first saw it listed OFFLINE, persisted across restarts and cleared
+     *  only by an online listing (repairIssues.cloudOfflineFirstSeenAt). */
+    offlineSinceMs?: number | null;
   }>;
   /** v1.8.0 (review F3) — ms epoch when the SHP2's published backup-pool % went
    *  null (post-grace-hold; SnapshotStore.backupPoolUnknownSince), or null while
@@ -1461,11 +1464,17 @@ export function computeAlerts(
       // EcoFlow has reported it offline in this session (a transition seen here), or that it has been
       // listed offline since the first device list; the cause is left open.
       const listedAt = conn?.firstListedAtMs ?? null;
+      // v1.187.10 — the persisted stamp, when it predates this process's first listing: the outage
+      // began before the restart, and the add-on has a record of how long before.
+      const offlineSince = conn?.offlineSinceMs ?? null;
+      const carriedSince = offlineSince != null && (listedAt == null || offlineSince < listedAt) ? offlineSince : null;
       const ageMin = (now - lastDataAt) / 60_000;
       let hint = !(lastDataAt > 0)
         ? (d.onlineChangedAtMs
           ? ` EcoFlow has reported it offline for the last ${fmtAge(now - d.onlineChangedAtMs)}; why is not known here.`
-          : ` EcoFlow Cloud has listed it offline since the add-on's first device list${listedAt != null ? ` (${fmtAge(now - listedAt)} ago)` : ''}; how long before that, and why, is not known here.`)
+          : carriedSince != null
+            ? ` EcoFlow Cloud has listed it offline since at least ${fmtAge(now - carriedSince)} ago (first seen offline before the add-on's last restart, and not seen online since); why is not known here.`
+            : ` EcoFlow Cloud has listed it offline since the add-on's first device list${listedAt != null ? ` (${fmtAge(now - listedAt)} ago)` : ''}; how long before that, and why, is not known here.`)
           + ' If the device is meant to be on, check its power and its Wi-Fi.'
         : ageMin > 30
           ? ' No telemetry for over 30 minutes — the device has lost its EcoFlow cloud (enhanced) connection. It usually recovers once the cloud session re-establishes; if it stays offline, a power-cycle forces a clean reconnect.'

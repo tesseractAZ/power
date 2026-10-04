@@ -26,6 +26,7 @@ const bootInputs = (): ReadinessInputs => ({
   alerts: undefined,
   speakerLastProbeAt: null,
   forecast: { pvForecastUnavailable: true },
+  runway: null,
   clipping: { arrayPeakW: 0 },
   curtailment: { basisComplete: false },
   carbon: { basisComplete: false },
@@ -34,13 +35,15 @@ const bootInputs = (): ReadinessInputs => ({
 
 const warmInputs = (): ReadinessInputs => ({
   devices: {
-    SHP2: { online: true, projection: { kind: 'shp2', circuits: [{ watts: 400 }, { watts: null }] } },
+    // v1.187.10 — a fresh reading (panel / panelLive need shp2ReadbackFresh).
+    SHP2: { online: true, lastQuotaAtMs: Date.now(), projection: { kind: 'shp2', circuits: [{ watts: 400 }, { watts: null }] } },
     C1: { online: true, projection: { kind: 'dpu' } },
   },
   alerts: [],
   alertsComplete: true,
   speakerLastProbeAt: Date.now(),
   forecast: { pvForecastUnavailable: false },
+  runway: {},
   clipping: { arrayPeakW: 9707 },
   curtailment: { basisComplete: true },
   carbon: { basisComplete: true },

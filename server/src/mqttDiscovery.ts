@@ -8,7 +8,7 @@ import type { Recorder } from './recorder.js';
 import { getAnalytics } from './analyticsClient.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { aggregateFleetFlow, findShp2 } from './shp2Membership.js';
-import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
+import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
 import { rateAt, apsREvModelFromEnv } from './tariff.js';
 import {
   getDayForecast,
@@ -39,7 +39,7 @@ import { belowReserveFloor } from './runwayAlarm.js';
 import { liveGridBackstop } from './gridState.js';
 import { countCloudWedges } from './deviceLink.js';
 import { systemOutageFields } from './alerts.js';
-import { getBroadcastHealth } from './broadcastHealth.js';
+import { getBroadcastHealth, audibleStatus } from './broadcastHealth.js';
 import { publishReadiness, withholdUnready } from './publishReadiness.js';
 import { pollHealth } from './telemetryBlind.js';
 
@@ -227,6 +227,9 @@ export interface SensorConfig {
   // NIGHT_CHARGE_EXPIRE_AFTER_S). When unset, publishDiscovery falls back to the
   // legacy rule (EXPIRE_AFTER_S for non-total_increasing sensors, none otherwise).
   expire_after?: number;
+  // v1.187.10 — with state_class 'total': the template HA reads the cycle start from (the
+  // state topic's JSON), so a re-estimated daily figure is a revisable total, not a meter.
+  last_reset_value_template?: string;
 }
 
 export const SENSORS: SensorConfig[] = [
@@ -263,11 +266,17 @@ export const SENSORS: SensorConfig[] = [
   // RTE
   { unique_id: 'ecoflow_round_trip_efficiency', name: 'Round-Trip Efficiency', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-sync-outline', value_template: '{{ value_json.round_trip_efficiency_percent }}' },
   // Clipping
-  { unique_id: 'ecoflow_pv_clipped_kwh_today', name: 'PV Clipped Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_clipped_kwh_today }}' },
+  // v1.187.10 — 'total' + last_reset, not 'total_increasing': both daily figures are RE-ESTIMATED
+  // through the day (each hour re-walked on the current posterior and weather cache, the partial
+  // hour included), so they go down as well as up. On a total_increasing sensor Home Assistant
+  // reads a drop of 10 % or more as a meter reset and counts the day again (PV Curtailed Today,
+  // 2026-09-29 0.11 → 0 and 0.35 → 0, 09-30 1.61 → 1.39, 10-01 1.85 → 1.58). As 'total' with the
+  // day's local midnight as last_reset, a revision is a correction and only a new day is a reset.
+  { unique_id: 'ecoflow_pv_clipped_kwh_today', name: 'PV Clipped Today', device_class: 'energy', state_class: 'total', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_clipped_kwh_today }}', last_reset_value_template: '{{ value_json.pv_clipped_kwh_today_since }}' },
   { unique_id: 'ecoflow_pv_array_peak_watts', name: 'PV Array Peak', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.pv_array_peak_watts }}', entity_category: 'diagnostic' },
   // v0.9.77 — SoC-saturation curtailment ("batteries full, panels throttled")
   { unique_id: 'ecoflow_pv_curtailment_surplus_watts', name: 'PV Curtailment Surplus', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:solar-power-variant', value_template: '{{ value_json.pv_curtailment_surplus_watts }}' },
-  { unique_id: 'ecoflow_pv_curtailment_kwh_today', name: 'PV Curtailed Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_today }}' },
+  { unique_id: 'ecoflow_pv_curtailment_kwh_today', name: 'PV Curtailed Today', device_class: 'energy', state_class: 'total', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_today }}', last_reset_value_template: '{{ value_json.pv_curtailment_kwh_today_since }}' },
   // v0.15.3 — measurement (rolling 7-day window goes up and down) → no device_class energy.
   { unique_id: 'ecoflow_pv_curtailment_kwh_7d', name: 'PV Curtailed 7d', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_7d }}' },
   { unique_id: 'ecoflow_charge_ceiling', name: 'Charge Ceiling', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-100', value_template: '{{ value_json.pv_curtailment_charge_ceiling_pct }}', entity_category: 'diagnostic' },
@@ -567,6 +576,8 @@ const DISCOVERY_WAIVERS: Record<string, { rule: string; reason: string }> = {
  */
 export interface ConnectLatch {
   legacyCleared: boolean;
+  /** v1.187.10 — a connect has already run in this process: the next one is a RECONNECT. */
+  connectedBefore?: boolean;
 }
 
 export interface ConnectEffects {
@@ -580,10 +591,19 @@ export interface ConnectEffects {
 }
 
 export function runBrokerConnect(latch: ConnectLatch, fx: ConnectEffects): void {
-  // v1.14.1 — availability FIRST and unconditionally. The broker's LWT retains
-  // 'offline' when it times the session out (live: a ~95 s event-loop stall at
-  // 05:41 on 2026-07-12); leaving that in place holds every entity unavailable.
-  fx.publishAvailability();
+  // v1.14.1 — on a RECONNECT, availability FIRST. The broker's LWT retains 'offline' when it
+  // times the session out (live: a ~95 s event-loop stall at 05:41 on 2026-07-12); leaving that
+  // in place holds every entity unavailable.
+  // v1.187.10 — on the process's FIRST connect (every restart) it is left to publishState, which
+  // asserts it right after the first fresh state payload (publishStateCycle). 'online' first made
+  // Home Assistant re-show every entity's pre-restart value until that payload landed — a stale
+  // replay a state trigger reads as a real transition: an automation keyed on Lighting Posture
+  // "to normal" fired twice per deploy (2026-10-02 17:53 and 19:23, 2026-10-03 12:08). The
+  // retained 'offline' standing then is the add-on's own (stop() or its LWT); it stands ~5 s
+  // longer, and every later state cycle re-asserts 'online' as before.
+  const reconnect = latch.connectedBefore === true;
+  latch.connectedBefore = true;
+  if (reconnect) fx.publishAvailability();
   if (!latch.legacyCleared) {
     // Retired unique_ids go out BEFORE the canonical configs so HA processes
     // the removal and the (re)publish in the same session.
@@ -596,6 +616,61 @@ export function runBrokerConnect(latch: ConnectLatch, fx: ConnectEffects): void 
   fx.subscribeSwitchCommands();
   fx.publishState();
   fx.publishSwitchStates();
+}
+
+/**
+ * v1.187.10 — one state cycle, in the order Home Assistant must see it: the per-circuit configs,
+ * the state payload, THEN availability 'online' (re-asserted every cycle since v1.14.1). On the
+ * first connect after a restart the retained 'offline' stands until the fresh payload is in HA's
+ * hands, so entities go unavailable → fresh value, never through the pre-restart value. 'online'
+ * is asserted even when the build or the publish fails: the add-on is alive, and a standing
+ * 'offline' holds every entity unavailable (v1.14.1).
+ */
+export interface StateCycleEffects {
+  connected: () => boolean;
+  publishCircuitDiscovery: () => void;
+  buildState: () => Promise<Record<string, unknown>>;
+  publishStatePayload: (state: Record<string, unknown>) => void;
+  publishAvailability: () => void;
+  onError: (e: unknown) => void;
+}
+
+export async function publishStateCycle(fx: StateCycleEffects): Promise<void> {
+  if (!fx.connected()) return;
+  try {
+    // Assert/refresh the dynamic per-circuit discovery configs before the state
+    // payload, so HA has the entity definitions in hand when the values land.
+    fx.publishCircuitDiscovery();
+    fx.publishStatePayload(await fx.buildState());
+  } catch (e) {
+    fx.onError(e);
+  } finally {
+    fx.publishAvailability();
+  }
+}
+
+/**
+ * One sensor's retained discovery config. v1.187.10 — extracted verbatim from publishDiscovery (the
+ * key order, and so the payload bytes, are unchanged) so the expire_after rule is testable.
+ */
+export function sensorDiscoveryConfig(s: SensorConfig): Record<string, unknown> {
+  return {
+    ...s,
+    state_topic: STATE_TOPIC,
+    ...AVAILABILITY_BASE,
+    // v0.13.7 — expire live measurements, but never the total_increasing
+    // energy sources (would gap HA Energy history).
+    // v1.38.0 — a per-sensor `expire_after` (the night-charge advisory
+    // sensors, ~25 h) wins over the 120 s default; otherwise unchanged.
+    // v1.187.10 — nor a 'total' (the daily re-estimated energy figures): an accumulating
+    // statistics source, like total_increasing.
+    ...(s.expire_after != null
+      ? { expire_after: s.expire_after }
+      : s.state_class !== 'total_increasing' && s.state_class !== 'total'
+        ? { expire_after: EXPIRE_AFTER_S }
+        : {}),
+    device: DEVICE_INFO,
+  };
 }
 
 export function auditDiscoveryTables(
@@ -650,6 +725,17 @@ export function auditDiscoveryTables(
     // mis-labels.
     if (sc === 'total_increasing' && !unit) {
       add(unique_id, 'total-increasing-without-unit', 'state_class total_increasing requires a unit');
+    }
+
+    // v1.187.10 — a DAILY figure (its value key ends `_today`) that accumulates statistics must be
+    // 'total' with a last_reset. total_increasing reads any revision of 10 % or more as a meter
+    // reset and counts the day again (the re-estimated curtailment and clipping figures); 'total'
+    // without last_reset is a total that never resets, so the midnight drop would book a negative
+    // day. A genuinely monotonic daily counter waives this with its reason.
+    const valueKey = /value_json\.(\w+)/.exec(s.value_template)?.[1] ?? '';
+    if (/_today$/.test(valueKey) && (sc === 'total' || sc === 'total_increasing')
+      && !(sc === 'total' && (s.last_reset_value_template ?? '').trim())) {
+      add(unique_id, 'daily-figure-needs-total-with-reset', `a daily figure (${valueKey}) needs state_class 'total' with a last_reset_value_template, got '${sc}'${sc === 'total' ? ' without last_reset' : ''}`);
     }
 
     if (unit && CURRENCY_UNITS.includes(unit) && !(dc === 'monetary' && sc === 'total')) {
@@ -1105,22 +1191,7 @@ export async function startMqttDiscovery(
   const publishDiscovery = () => {
     for (const s of SENSORS) {
       const topic = `${prefix}/sensor/${s.unique_id}/config`;
-      const cfg = {
-        ...s,
-        state_topic: STATE_TOPIC,
-        ...AVAILABILITY_BASE,
-        // v0.13.7 — expire live measurements, but never the total_increasing
-        // energy sources (would gap HA Energy history).
-        // v1.38.0 — a per-sensor `expire_after` (the night-charge advisory
-        // sensors, ~25 h) wins over the 120 s default; otherwise unchanged.
-        ...(s.expire_after != null
-          ? { expire_after: s.expire_after }
-          : s.state_class !== 'total_increasing'
-            ? { expire_after: EXPIRE_AFTER_S }
-            : {}),
-        device: DEVICE_INFO,
-      };
-      client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
+      client.publish(topic, JSON.stringify(sensorDiscoveryConfig(s)), { retain: true, qos: 0 });
     }
     for (const s of BINARY_SENSORS) {
       const topic = `${prefix}/binary_sensor/${s.unique_id}/config`;
@@ -1256,7 +1327,12 @@ export async function startMqttDiscovery(
     // v1.186.0 — only from the reports it reads. Without runway, forecast and curtailment the
     // tracker is not advanced and the posture publishes null: a posture computed from missing
     // reports would read "no crossing, no dip, no surplus" — a calm posture nothing measured.
-    const posture = runway && fc && curtailment
+    // v1.187.10 — nor from a forecast or runway built while a home Core's first reading was pending
+    // (homeBasisPending): escalation is immediate and de-escalation holds 15 min, so a boot-time
+    // projection with that Core's PV missing could hold a posture nothing measured.
+    const basisPending = (fc as { homeBasisPending?: boolean } | null)?.homeBasisPending === true
+      || (runway as { basisPending?: boolean } | null)?.basisPending === true;
+    const posture = runway && fc && curtailment && !basisPending
       ? lightingPostureTracker.update({
         belowReserveFloor: belowReserveFloor(runway as Parameters<typeof belowReserveFloor>[0]),
         hoursToReserve: (runway as { hoursToReserve: number | null }).hoursToReserve,
@@ -1323,11 +1399,14 @@ export async function startMqttDiscovery(
       projected_low_soc_islanded_only: liveGridBackstop(snap.devices).backstopping,
       round_trip_efficiency_percent: rte ? rte.efficiencyPct : null,
       pv_clipped_kwh_today: clipping ? clipping.todayKwh : null,
+      // v1.187.10 — the last_reset of the 'total' daily figure: its own report's day.
+      pv_clipped_kwh_today_since: dailyFigureResetIso(clipping?.generatedAt),
       pv_array_peak_watts: clipping ? clipping.arrayPeakW : null,
       // v0.15.3 — curtailment (batteries full → PV throttled). Previously absent.
       pv_curtailment_active: curtailment ? !!curtailment.active : null,
       pv_curtailment_surplus_watts: curtailment ? Math.round(curtailment.currentSurplusW ?? 0) : null,
       pv_curtailment_kwh_today: curtailment?.todayKwh ?? null,
+      pv_curtailment_kwh_today_since: dailyFigureResetIso(curtailment?.generatedAt),
       pv_curtailment_kwh_7d: curtailment?.recent7dKwh ?? null,
       pv_curtailment_charge_ceiling_pct: curtailment?.current?.chargeCeilingPct ?? null,
       solar_fraction_of_load_percent: sc ? sc.solarFractionOfLoadPct : null,
@@ -1392,17 +1471,11 @@ export async function startMqttDiscovery(
       ...systemOutageFields(recorder.telemetryGaps(), Date.now()),
       // v0.84.0 — audible-delivery health mirror (see broadcastHealth.ts). Status
       // is 4-state so `disabled`/`unknown` never read as a false "unreachable".
+      // v1.187.10 — and "unknown", not "disabled", before the first probe (audibleStatus).
       ...(() => {
         const h = getBroadcastHealth();
-        const status = !h.enabled
-          ? 'disabled'
-          : h.reachable === true
-            ? 'reachable'
-            : h.reachable === false
-              ? 'UNREACHABLE'
-              : 'unknown';
         return {
-          audible_status: status,
+          audible_status: audibleStatus(h),
           audible_usable_speakers: h.usableTargets,
         };
       })(),
@@ -1446,6 +1519,7 @@ export async function startMqttDiscovery(
       alertsComplete: snap.alertsComplete, // v1.186.0
       speakerLastProbeAt: getBroadcastHealth().lastProbeAt,
       forecast: fc,
+      runway, // v1.187.10
       clipping,
       curtailment,
       carbon,
@@ -1480,20 +1554,18 @@ export async function startMqttDiscovery(
   };
 
   const publishState = async () => {
-    if (!client.connected) return;
     // v1.14.1 belt-and-braces — re-assert availability every state cycle while
     // connected, so no future path can leave a retained 'offline' standing while
     // we are demonstrably alive and publishing (tiny retained payload, idempotent).
-    client.publish(AVAILABILITY_TOPIC, 'online', { retain: true, qos: 0 });
-    // Assert/refresh the dynamic per-circuit discovery configs before the state
-    // payload, so HA has the entity definitions in hand when the values land.
-    publishCircuitDiscovery();
-    try {
-      const state = await buildState(store.get());
-      client.publish(STATE_TOPIC, JSON.stringify(state), { retain: true, qos: 0 });
-    } catch (e: any) {
-      log(`mqtt-discovery: state publish failed — ${e?.message ?? e}`);
-    }
+    // v1.187.10 — AFTER the state payload (publishStateCycle): see runBrokerConnect.
+    await publishStateCycle({
+      connected: () => client.connected,
+      publishCircuitDiscovery,
+      buildState: () => buildState(store.get()),
+      publishStatePayload: (state) => client.publish(STATE_TOPIC, JSON.stringify(state), { retain: true, qos: 0 }),
+      publishAvailability: () => client.publish(AVAILABILITY_TOPIC, 'online', { retain: true, qos: 0 }),
+      onError: (e) => log(`mqtt-discovery: state publish failed — ${(e as { message?: string } | null)?.message ?? e}`),
+    });
   };
 
   // v0.11.0 — HA toggled a switch: apply it to alertSettings (source 'mqtt'),

@@ -1913,7 +1913,9 @@ export function startBroadcastMonitor(
         degraded: audibleDegraded, // v1.186.0
         unusableTargets: [...audibleUnusable],
       });
-      // Audible not applicable (disabled or unsupervised) → unknown, never alarms.
+      // Audible not applicable (disabled or unsupervised) → reachability unknown (null), never
+      // alarms. The HA status reads "disabled" when the operator turned audible off, "unknown"
+      // when unsupervised (audibleStatus, broadcastHealth.ts).
       if (!supervised || !cfg.enabled) {
         unreachableStreak = 0; audibleReachable = null; audibleUsableTargets = 0; audibleReason = null;
         degradedStreak = 0; audibleDegraded = false; audibleUnusable = [];
