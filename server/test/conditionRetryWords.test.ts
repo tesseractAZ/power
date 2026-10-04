@@ -1,5 +1,5 @@
 /**
- * v1.187.6 — a deferred retry of a CONDITION broadcast decides what it says when it RUNS, by the
+ * v1.187.9 — a deferred retry of a CONDITION broadcast decides what it says when it RUNS, by the
  * IDENTITY of the alert its words name (broadcast.conditionRetryWords), not by their text. Driven
  * through the REAL broadcast monitor (startBroadcastMonitor) with Home Assistant mocked at the HTTP
  * layer, as in conditionRetryNewestWins.test.ts, plus the SIP cordless (every play_media is recorded

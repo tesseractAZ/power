@@ -1238,7 +1238,7 @@ export function conditionRetrySuperseded(
 }
 
 /**
- * v1.187.6 — the IDENTITY of the alert a condition announcement names aloud: the fingerprint of
+ * v1.187.9 — the IDENTITY of the alert a condition announcement names aloud: the fingerprint of
  * pickPrimaryAlert's choice over the array the words are built from (buildAlertMessage voices that
  * alert and no other), or null when nothing is named (green, or no candidate). The tick takes it
  * from the array it hands messageFor, and a deferred retry from the same chain (speakableAlerts)
@@ -1251,7 +1251,7 @@ export function conditionNamedFingerprint(level: ConditionLevel, alerts: Alert[]
 }
 
 /**
- * v1.187.6 — WHAT A DEFERRED CONDITION RETRY SAYS WHEN IT RUNS.
+ * v1.187.9 — WHAT A DEFERRED CONDITION RETRY SAYS WHEN IT RUNS.
  *
  * Every check before this one compares announcements, not alerts (conditionRetryStale,
  * conditionRetrySuperseded), so a retry that passed them replayed the words it was armed with
@@ -1312,7 +1312,7 @@ export function conditionRetryWords(
 }
 
 /**
- * v1.187.6 — THE ONE RE-PRESENT OF A CONDITION RETRY THE SAME-LEVEL GAP REFUSED, as the tick arms one
+ * v1.187.9 — THE ONE RE-PRESENT OF A CONDITION RETRY THE SAME-LEVEL GAP REFUSED, as the tick arms one
  * for its own transitions (deferredCondition). A retry's refusal was final: a warning under a kept
  * red, retried just after the red's own retry reached the speakers, was refused by the gap that
  * delivery armed and then waited for the condition to commit down to it — once the held critical
@@ -1741,7 +1741,7 @@ export function startBroadcastMonitor(
   };
   const scheduleBroadcastRetry = (
     level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string, kind: BroadcastKind, episode: number, generation: number,
-    named: string | null, // v1.187.6 — the alert the words name (conditionNamedFingerprint); null for dedicated
+    named: string | null, // v1.187.9 — the alert the words name (conditionNamedFingerprint); null for dedicated
   ) => {
     // v1.186.0 — a TEST never takes the single deferred-retry slot. A failed test that armed a
     // retry superseded any milder real alarm's pending retry (yellow lost to "This is only a
@@ -1826,7 +1826,7 @@ export function startBroadcastMonitor(
       // dispatch, so re-firing it would replay the identical alarm on the cordless.
       // v1.32.0 — but ONLY skip when the first SIP dispatch actually DELIVERED
       // (lastSipDispatchOk); a failed SIP dispatch is retried alongside MA.
-      // v1.187.6 — and only while the retry names the alert that dispatch named: a condition retry
+      // v1.187.9 — and only while the retry names the alert that dispatch named: a condition retry
       // whose words name a different alert when it runs re-fires SIP (conditionRetryAtRun).
       // v1.186.0 — the retry keeps the kind it was armed for (condition or dedicated).
       // v1.187.4 — a CONDITION retry replays the level it was armed with only while the condition
@@ -1844,7 +1844,7 @@ export function startBroadcastMonitor(
         ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since; the retry replays only the level it was armed for while that level is still committed` : null);
       const supersededAtRun = (): string | null => (conditionRetrySuperseded(kind, level, generation, conditionNewestGeneration)
         ? 'a newer announcement of the condition has taken its place since; a retry replays only the newest announcement of the condition at its level' : null);
-      // v1.187.6 — and what a condition retry SAYS is decided when it runs, by the identity of the
+      // v1.187.9 — and what a condition retry SAYS is decided when it runs, by the identity of the
       // alert its words name (`named`; conditionRetryAtRun in runBroadcastInner).
       void runBroadcast(level, rung, message, false, messageEs, lastSipDispatchOk, kind, named,
         () => staleAtRun() ?? supersededAtRun(), episode, generation);
@@ -2302,7 +2302,7 @@ export function startBroadcastMonitor(
   /** v1.187.5 — the generation of the attempt about to run (runBroadcastInner): the next one for a
    *  new announcement, the replayed announcement's own for a deferred retry. */
   let attemptGeneration = 0;
-  /** v1.187.6 — the alert the words of the attempt about to run name (runBroadcastInner): what a
+  /** v1.187.9 — the alert the words of the attempt about to run name (runBroadcastInner): what a
    *  retry armed by it compares when it runs (conditionRetryWords). */
   let attemptNamed: string | null = null;
 
@@ -2325,7 +2325,7 @@ export function startBroadcastMonitor(
     const kind = attemptKind;
     const episode = attemptEpisode; // v1.187.4 — the condition episode the broadcast was requested in
     const generation = attemptGeneration; // v1.187.5 — which announcement this is (conditionRetrySuperseded)
-    const named = attemptNamed; // v1.187.6 — the alert the words name (a retry's re-arm carries it)
+    const named = attemptNamed; // v1.187.9 — the alert the words name (a retry's re-arm carries it)
     const tag = kind === 'test' ? 'TEST ' : '';
     if (!supervised) return { ok: false, errors: ['not supervised'] };
     // v1.25.0 — at least one Music Assistant target is required (SIP targets are an
@@ -2713,7 +2713,7 @@ export function startBroadcastMonitor(
    * broadcast is always already armed by the time either call runs.
    */
   /**
-   * v1.187.6 — a deferred CONDITION retry at the head of the chain: what it says, or why it says
+   * v1.187.9 — a deferred CONDITION retry at the head of the chain: what it says, or why it says
    * nothing (conditionRetryWords, over the tick's chain as it stands now). The SAME alert replays the
    * armed words, rendered already, and skips the cordless as armed (it took those words on the first
    * dispatch). A DIFFERENT alert is first put to the gates the tick applies to the alert it names: a
@@ -2755,7 +2755,7 @@ export function startBroadcastMonitor(
   };
 
   /**
-   * v1.187.6 — what a deferred CONDITION retry leaves to the tick. Its result was discarded, so two
+   * v1.187.9 — what a deferred CONDITION retry leaves to the tick. Its result was discarded, so two
    * outcomes the tick recovers for its own announcements were final for a retry:
    *  - a failed spoken render (the tone alone, or nothing): it now earns the one spoken retry
    *    (noteSpokenRenderFailure), with the tone the retry played;
@@ -2786,7 +2786,7 @@ export function startBroadcastMonitor(
     bypassStormGate: boolean,
     skipSip = false,
     kind: BroadcastKind = 'dedicated',
-    named: string | null = null, // v1.187.6 — the alert the words name (conditionNamedFingerprint)
+    named: string | null = null, // v1.187.9 — the alert the words name (conditionNamedFingerprint)
     staleReason?: () => string | null, // v1.187.4 — a deferred retry's run-time check
     episode = conditionEpisode, // v1.187.4 — the condition episode the broadcast was requested in
     retryOf?: number, // v1.187.5 — a deferred retry: the generation of the announcement it replays
@@ -2804,7 +2804,7 @@ export function startBroadcastMonitor(
         log(`broadcast: deferred ${level} retry dropped — ${stale}`);
         return { ok: false, errors: [`dropped: stale retry (${stale})`] };
       }
-      // v1.187.6 — a deferred CONDITION retry says what the identity of its alert decides when it runs
+      // v1.187.9 — a deferred CONDITION retry says what the identity of its alert decides when it runs
       // (conditionRetryAtRun), read here, at the head of the chain, as the checks above are. Every
       // other broadcast plays as requested.
       const retried = retryOf != null && kind === 'condition';
@@ -2874,7 +2874,7 @@ export function startBroadcastMonitor(
   // waits behind more than ONE short pre-warm render.
   let realAudibleInFlight = 0;
   /**
-   * v1.187.6 — NEW condition announcements waiting in the chain, by level and the alert their words
+   * v1.187.9 — NEW condition announcements waiting in the chain, by level and the alert their words
    * name (queuedConditionKey → how many): counted in when requested, out when they start to run. A
    * deferred retry about to name such an alert yields to its announcement (conditionRetryAtRun).
    */
@@ -2896,7 +2896,7 @@ export function startBroadcastMonitor(
     // announcement) passes nothing, and a caller that forgets to say what it is must not be
     // able to arm the condition gates or mark the condition record heard.
     kind: BroadcastKind = 'dedicated',
-    named: string | null = null, // v1.187.6 — forwarded; the alert a condition announcement's words name
+    named: string | null = null, // v1.187.9 — forwarded; the alert a condition announcement's words name
     staleReason?: () => string | null, // v1.187.4 — forwarded; set by deferred retries
     // v1.187.4 — read when the broadcast is REQUESTED: one that waits in the chain while a newer
     // commit lands belongs to the episode it was requested for. A deferred retry passes its own.
@@ -3083,7 +3083,7 @@ export function startBroadcastMonitor(
     }
     const message = messageFor(level, alerts);
     const messageEs = messageEsFor(level, alerts); // v0.62.0 — Spanish second pass
-    // v1.187.6 — with the alert those words name: a retry armed by this broadcast compares it when it
+    // v1.187.9 — with the alert those words name: a retry armed by this broadcast compares it when it
     // runs (conditionRetryWords), and a retry waiting ahead of it yields to it (conditionRetryAtRun).
     const result = await runBroadcast(level, rung, message, false, messageEs, false, 'condition', conditionNamedFingerprint(level, alerts));
     const doneAt = Date.now();
@@ -3275,7 +3275,7 @@ export function startBroadcastMonitor(
           const message = stored ? stored.message : messageFor(level, alerts);
           const messageEs = stored ? stored.messageEs : messageEsFor(level, alerts);
           // v1.186.0 — a dedicated-path replay stays dedicated; a condition retry is condition.
-          // v1.187.6 — a condition retry's words are the tick's now, so its tone is too (`rung`, from
+          // v1.187.9 — a condition retry's words are the tick's now, so its tone is too (`rung`, from
           // the same array): the stored rung named the set the failed render saw, and the two could
           // disagree once that set had changed. And the alert the words name rides along, as for a
           // transition (speakCondition).

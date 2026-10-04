@@ -1,4 +1,4 @@
-## 1.187.6
+## 1.187.9
 
 ### A late retry names the alarm that is standing, and is spoken even when speech is slow
 

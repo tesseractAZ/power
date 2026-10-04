@@ -17,7 +17,7 @@
  * A lower announcement never supersedes a higher retry; dedicated announcements are unchanged.
  * Mutants S-i..S-xiii.
  *
- * v1.187.6 — what a condition retry SAYS when it runs is decided by the IDENTITY of the alert its
+ * v1.187.9 — what a condition retry SAYS when it runs is decided by the IDENTITY of the alert its
  * words name (broadcast.conditionRetryWords): the same alert replays the armed words (rendered
  * already; the cordless skipped as armed), a different one gets the tick's words and tone now and
  * re-fires the cordless after the tick's identity gates (repeat warning, red replay); a retry ahead
@@ -26,7 +26,7 @@
  * refusal by the same-level gap one re-present, never over a waiting one (refusedRetryRepresent).
  * Mutants W-i..W-xxx, against conditionRetryWords.test.ts with the subset above.
  *
- * Not mutated (v1.187.6): `retryOf == null` and `kind === 'condition'` in the queued count (a retry
+ * Not mutated (v1.187.9): `retryOf == null` and `kind === 'condition'` in the queued count (a retry
  * counted in while it waits is counted out when it runs, before it reads the count, and a dedicated
  * announcement names no alert); the dedicated retry path (it never reaches conditionRetryAtRun); the
  * all-clear speech gate's own predicate (allClearSpeechBlocked, pinned by its v1.166.0 tests).
@@ -55,7 +55,7 @@ const SUBSET = [
   'test/conditionRetryNewestWins.test.ts',
   'test/staleConditionRetry.test.ts',
   'test/broadcastRetryBudget.test.ts',
-  'test/conditionRetryWords.test.ts', // v1.187.6
+  'test/conditionRetryWords.test.ts', // v1.187.9
 ];
 
 const MUTANTS = [
@@ -152,7 +152,7 @@ const MUTANTS = [
     to: "  /* MUTANT */\n  return (Object.keys(RETRY_LEVEL_RANK) as ConditionLevel[])",
     why: 'A SoC-ladder alarm\'s retry queued behind a newer condition announcement is dropped: the dedicated alarm is never heard.',
   },
-  /* ── v1.187.6 — what a condition retry SAYS when it runs (conditionRetryWords) ────────────────── */
+  /* ── v1.187.9 — what a condition retry SAYS when it runs (conditionRetryWords) ────────────────── */
   {
     id: 'W-i. ★★★ the words are rebuilt for the same alert (a reading that moved)',
     file: BR,
@@ -307,7 +307,7 @@ const MUTANTS = [
     to: '          const result = await runBroadcast(want, wantRung, message, true, messageEs, false, /* MUTANT */',
     why: 'C (High) is spoken with the Critical tone of the cleared A.',
   },
-  /* ── v1.187.6 — what a condition retry leaves to the tick (afterConditionRetry) ──────────────── */
+  /* ── v1.187.9 — what a condition retry leaves to the tick (afterConditionRetry) ──────────────── */
   {
     id: 'W-xxiii. ★★★ a condition retry\'s result is discarded',
     file: BR,
