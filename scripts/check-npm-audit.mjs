@@ -2,16 +2,15 @@
 /**
  * check-npm-audit.mjs — dependency vulnerability gate.
  *
- * WHY THIS EXISTS. GitHub is not alerting on this repository. `/dependabot/alerts`
- * and `/code-scanning/alerts` both return empty, consistent with GHAS being
- * unavailable on a private personal repo — the same limitation that made CodeQL a
- * self-contained CI job here rather than an alerting integration. So the only
- * security signal arriving today is a Dependabot *version* PR that happens to
- * carry a fix: that is how fastify 5.12.1 -> 5.12.3 (four GHSA advisories,
- * v1.133.2) reached this system. A vulnerable dependency that does NOT receive a
- * routine version bump would not surface at all.
+ * WHY THIS EXISTS. When this gate was written (v1.133.2) `/dependabot/alerts` and
+ * `/code-scanning/alerts` both returned empty on this repository, so the only
+ * security signal was a Dependabot *version* PR that happened to carry a fix: that
+ * is how fastify 5.12.1 -> 5.12.3 (four GHSA advisories) reached this system.
+ * Dependabot alerts do arrive now (2026-10: a fastify advisory, and a braces one
+ * with no fixed version), but an alert blocks nothing, and an advisory without a
+ * fixed version never gets a version PR at all.
  *
- * This closes that gap with a signal that does not depend on GHAS.
+ * This makes the signal a CI result that does not depend on either.
  *
  * POLICY, deliberately asymmetric:
  *   - PRODUCTION dependencies, high or critical  -> FAIL. Fastify serves the alarm
