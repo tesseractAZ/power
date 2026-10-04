@@ -22,7 +22,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   pruneOldestNonSignificant, warrantyEvidence, clearedRetention, CLEARED_ROSTER_MUTED_KEEP_MS,
-  CLEARED_INFO_KEPT_AS_WARNING_PREFIXES, type ClearedAlert,
+  CLEARED_INFO_KEPT_AS_WARNING_PREFIXES, CLEARED_INFO_RESERVE_DIVISOR, clearedLedgerCapNote, type ClearedAlert,
 } from '../src/alertMonitor.js';
 import type { Alert } from '../src/alerts.js';
 
@@ -85,9 +85,70 @@ test('★★★ the noise tier takes an UNPUSHED noise row before a pushed one; 
     row('vdiff-warn-HOME-1', 80),                        // ordinary, oldest
   );
   assert.deepEqual(evictOnce(log, noise), ['peer-voldiff-HOME-3']);
-  assert.deepEqual(evictOnce(log, noise), ['peer-voldiff-HOME-1'], 'then the oldest noise row, pushed or not');
-  assert.deepEqual(evictOnce(log, noise), ['peer-voldiff-HOME-2']);
-  assert.deepEqual(evictOnce(log, noise), ['vdiff-warn-HOME-1']);
+  // v1.187.10 — a row recorded as PUSHED never leaves in the noise tiers: the legacy row goes next,
+  // then the pushed one ages out with the ordinary warnings (oldest first).
+  assert.deepEqual(evictOnce(log, noise), ['peer-voldiff-HOME-2'], 'then the oldest noise row not recorded as pushed');
+  assert.deepEqual(evictOnce(log, noise), ['vdiff-warn-HOME-1'], 'the pushed noise row is FIFO with the warnings: the older ordinary row first');
+  assert.deepEqual(evictOnce(log, noise), ['peer-voldiff-HOME-1']);
+});
+
+/* ══ v1.187.10 (log review) ══════════════════════════════════════════════════════════════════
+ * The live ledger at its 1500 cap held 1417 warnings, 83 criticals and 0 info rows over 85 days:
+ * with no info row left, the oldest info row was the one just added, so every info clear left on
+ * arrival. And the window's only push (a [Low] peer-voldiff row, noise-flagged) left on its own
+ * arrival through the noise tier while 85-day-old rows whose push is unknown stayed. */
+
+test('★★★ v1.187.10: at the cap with no info rows, a new info row is KEPT (its reserve): an old warning leaves instead', () => {
+  // 30 rows → a reserve of floor(30 / 15) = 2 info rows.
+  const rows: ClearedAlert[] = [];
+  for (let d = 2; d <= 30; d++) rows.push(row(`vdiff-warn-HOME-${d}`, d));
+  const log = ledger(row('forecast-soc-dip', 0.01, { pushed: false }, { severity: 'info' }), ...rows);
+  assert.equal(log.length, 30);
+  assert.deepEqual(evictOnce(log), ['vdiff-warn-HOME-30'], 'the oldest warning leaves; the info row just added stays');
+  assert.equal(CLEARED_INFO_RESERVE_DIVISOR, 15);
+});
+
+test('★★★ v1.187.10: beyond the reserve the oldest info row leaves first, as before', () => {
+  const rows: ClearedAlert[] = [];
+  for (let d = 4; d <= 30; d++) rows.push(row(`vdiff-warn-HOME-${d}`, d));
+  // 3 info rows in 30 > the reserve of 2.
+  const log = ledger(
+    row('info-new', 0.01, {}, { severity: 'info' }), row('info-mid', 1, {}, { severity: 'info' }), row('info-old', 3, {}, { severity: 'info' }),
+    ...rows,
+  );
+  assert.equal(log.length, 30);
+  assert.deepEqual(evictOnce(log), ['info-old']);
+  // A new warning arrives (the ledger is back at 30): 2 info rows = the reserve, so a warning leaves.
+  log.unshift(row('vdiff-warn-HOME-new', 0.001));
+  assert.deepEqual(evictOnce(log), ['vdiff-warn-HOME-30'], 'at the reserve the info rows stay');
+  assert.ok(log.some((e) => e.alert.id === 'info-new') && log.some((e) => e.alert.id === 'info-mid'));
+});
+
+test('★★★ v1.187.10: reserved info rows leave after every warning, and still before any critical', () => {
+  // 15 rows → a reserve of 1.
+  const log = ledger(row('info-a', 1, {}, { severity: 'info' }), row('warn-b', 2), row('crit-c', 3, {}, { severity: 'critical' }));
+  for (let i = 0; i < 12; i++) log.push(row(`crit-x${i}`, 10 + i, {}, { severity: 'critical' }));
+  assert.equal(log.length, 15);
+  assert.deepEqual(evictOnce(log), ['warn-b'], 'the info row is within its reserve: the warning leaves');
+  assert.deepEqual(evictOnce(log), ['info-a'], 'no warning left: the reserved info row leaves before a critical');
+  assert.ok(log.every((e) => e.alert.severity === 'critical'));
+});
+
+test('★★★ v1.187.10: a noise row recorded as PUSHED is not taken by the noise tiers — even when it is the only noise row (the 10-02 [Low] push)', () => {
+  const noise = (e: ClearedAlert) => e.alert.id.startsWith('peer-voldiff-');
+  const rows: ClearedAlert[] = [];
+  for (let d = 2; d <= 85; d++) rows.push(row(`vdiff-warn-HOME-${d}`, d)); // legacy rows, push unknown
+  const pushed = row('peer-voldiff-HOME-1', 0.01, { pushed: true });
+  const log = ledger(pushed, ...rows);
+  assert.deepEqual(evictOnce(log, noise), ['vdiff-warn-HOME-85'], 'the oldest row leaves, not the push just recorded');
+  assert.ok(log.includes(pushed));
+});
+
+test('★★ v1.187.10: clearedLedgerCapNote says what the ledger holds and what each new clear evicts', () => {
+  const log = ledger(row('w-1', 85), row('w-2', 3), row('c-1', 10, {}, { severity: 'critical' }));
+  assert.equal(clearedLedgerCapNote(log, 1500, NOW),
+    ' [AT CAP 1500 — 2 warning (oldest 85d), 1 critical, 0 info; each new clear evicts one row: info beyond the newest 100 first, then old roster-muted and noise warnings not recorded as pushed, then the oldest warning; criticals last]');
+  assert.ok(clearedLedgerCapNote([], 50, NOW).includes('0 warning, 0 critical, 0 info; each new clear evicts one row: info beyond the newest 3 first'));
 });
 
 test('★★★ pack-defective rows leave after EVERY other warning — even with 738 newer ones ahead of them', () => {
