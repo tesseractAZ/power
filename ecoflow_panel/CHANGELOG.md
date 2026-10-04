@@ -1,3 +1,28 @@
+## 1.187.6
+
+### A late retry names the alarm that is standing, and is spoken even when speech is slow
+
+**Announcements**
+
+- **A late retry names the alarm that is standing, not one that has cleared.** When Music Assistant cannot play an announcement, it is retried after 30 seconds, 90 seconds and 3 minutes. A retry repeated the words it was made with, even when the alarm those words named had cleared and another alarm kept the same level:
+  - An announcement named one of two critical alarms. That one cleared while the other stayed, so nothing new was announced, and the retry named the alarm that had cleared. The other was never named.
+  - A retry already waiting behind another announcement when its alarm cleared and a new one appeared played first and named the alarm that had cleared. The new alarm then waited two minutes.
+- When its turn comes, a retry now checks which alarm the announcement would name:
+  - **The same alarm:** the retry plays the words it was made with, even when a reading in them has changed since (for example a cell spread from 101 to 104 mV). Those words are already prepared, so the retry is spoken even while the speech service is slow. The cordless phone, which already heard them, is not called again.
+  - **A different alarm:** the retry names it with that alarm's own tone, as a new announcement would, and the cordless phone is called again.
+  - **Its own announcement is already waiting to play:** the retry gives way to it, so the alarm is announced once.
+- A retry is not played when a new announcement would not be. That covers a warning announced in the last 30 minutes, a critical alarm announced before a restart that has not changed, and a cell-imbalance warning that has not yet lasted long enough to be announced. It also covers a priority turned off on the Alert Settings page, an alert shown only on the card and the phone notification, and "All clear" while a critical alarm is active.
+- When the condition has moved below or above the retry's level, the retry plays the words it was made with, as before. The announcement of the new level follows.
+- 1.187.5 tried a first version of this that rebuilt the words whenever their text changed. It was withdrawn because a changed reading could turn a spoken retry into a bare tone, and the cordless phone never heard the new alarm.
+- **A retry whose speech fails is spoken 90 seconds later.** When the speech for a retry could not be prepared, only the tone played and the words never followed. A retry now gets the same spoken repeat as a new announcement. The repeat's tone now matches its words when the alarms standing have changed in between.
+- **A warning retry refused just after a critical alarm is announced two minutes later.** A warning announced while a critical alarm is held (for example a cell-spread alarm silenced while the cells balance) could have its retry refused, because the critical alarm's own retry had just played and a less serious announcement is not made within two minutes of one. The warning then waited until the critical alarm had cleared for good. It is now announced once the two minutes have passed, if it is still current. It never takes the place of an alarm already waiting for those two minutes to pass.
+- Battery-level, runway and other dedicated announcements are retried as before.
+
+**Dependencies**
+
+- fastify 5.12.4 → 5.12.5 fixes a denial of service through an unhandled exception on HTTP/2 trailer responses (GHSA-4mh8-r7rc-xpvc). The add-on serves HTTP/1.1 only, so it was not exposed, but the fixed version now ships in the image.
+- Server: @fastify/static 10.1.5, @fastify/websocket 11.3.1, mqtt 5.16.0, undici 6.29.0, ws 8.22.0; tooling @types/node 22.20.4, tsx 4.23.15. Web tooling: vite 8.3.1, autoprefixer 10.6.1. CI: codeql-action 4.38.2, setup-qemu-action 4.4.0.
+
 ## 1.187.5
 
 ### A late retry no longer displaces a newer alarm's retry
