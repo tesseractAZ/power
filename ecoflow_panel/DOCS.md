@@ -6813,9 +6813,9 @@ calls (which wedged MA into 500s).
 completion). A retry:
 
 - re-checks `cfg.enabled` (an operator who disabled broadcasts must not hear an armed retry);
-- passes `skipSip = true` — the SIP target already got the audio on the first dispatch, so it isn't replayed on the cordless at +30/+90/+180 s;
+- skips the SIP cordless while the last SIP dispatch delivered (`lastSipDispatchOk`, v1.32.0) — it already took the audio, so it isn't replayed at +30/+90/+180 s — and, for a condition retry, only while the retry names the alert that dispatch named (v1.187.6);
 - resets `retryAttempt` to 0 on any verified success;
-- replays the words it was armed with (condition and dedicated retries alike; v1.187.5 drops a superseded condition retry but does not re-derive its words — see below).
+- replays the words it was armed with — a dedicated retry always; a condition retry while the alert they name is the one the condition names when it runs (v1.187.6 — see below).
 
 **v1.159.0 — the budget now COUNTS.** The timer callback used to clear `retryLevel` before
 re-running the broadcast, and `scheduleBroadcastRetry` only sees a pending slot while that
@@ -6846,8 +6846,32 @@ or reached the speakers, and a condition retry superseded by a newer one at its 
 dropped when it runs (`conditionRetrySuperseded`, after the episode check). Only a higher generation
 outranks the pending retry (a retry's re-arm keeps its budget), and only a delivery at least as new
 as the pending retry cancels it. A lower announcement never supersedes a higher retry; dedicated
-retries neither supersede nor are superseded. Those checks compare announcements, not alerts: a retry that passes them replays its armed words, so a red naming A that clears while C keeps the red can still speak A at its retry, and a retry already queued ahead of C's announcement when A clears can speak A while C waits out the same-level gap (known limit, unchanged from v1.187.4). A retry that
-runs inside the same-level gap is refused like any broadcast and is neither re-armed nor re-presented.
+retries neither supersede nor are superseded. Those checks compare announcements, not alerts: in v1.187.5 a retry that passed them replayed its armed words, so a red naming A that cleared while C kept the red could still speak A at its retry, and a retry already queued ahead of C's announcement when A cleared could speak A while C waited out the same-level gap (known limit until v1.187.6, below). A retry that
+runs inside the same-level gap is refused like any broadcast and is not re-armed (v1.187.6: it is re-presented once).
+
+**v1.187.6 — a condition retry says what the identity of its alert decides when it runs.** Every
+condition announcement carries the fingerprint of the alert its words name (`conditionNamedFingerprint`:
+`pickPrimaryAlert` over the array the words are built from); a retry keeps it, and so does its re-arm.
+At the head of the chain, after the episode and newest checks, `conditionRetryWords` reads the tick's
+chain as it stands (`speakableAlerts` over the store) and decides: the condition at the retry's level
+naming the SAME alert → the armed words, rendered already (a reading that moved, 101 → 104 mV, is not a
+different alarm), with the cordless skipped as armed; a DIFFERENT alert → the words and the rung
+(tone) as the tick would build them now, from one array, with the cordless dispatched again; the
+condition not at the retry's level → the armed words (below: a de-escalation standing its dwell or a
+sounded critical held by its mute, fail-loud; above: that transition is in hand), unless the armed
+alert is still raised but `speakableAlerts` now drops it (a silenced priority, `audible:false`, a
+cell-imbalance warning inside its speak hold) → dropped; a green retry → dropped while
+`allClearSpeechBlocked`. New words then pass the identity gates the tick applies to the alert it
+names (`sameWarningRepeat`, the red replay gate), and a retry yields — is dropped — when a new
+announcement naming that alert is waiting behind it in the chain (`queuedConditionNames`, counted
+in at the request and out at the run): spoken by both, the alert was told twice, since its reading
+could move in between (the identical-message gate does not see it) and the same-level gap then
+refused and re-presented it. A failure to read the condition replays the armed words and logs it
+(`conditionRetryAtRun`). A failed spoken render of a condition retry now earns the one spoken retry
+(`noteSpokenRenderFailure`), whose tone is the tick's current rung, as its words are; and a
+refusal by the same-level gap one re-present when the gap expires (`refusedRetryRepresent` into
+`deferredCondition`; only that refusal, never over a re-present already waiting). Dedicated retries
+are unchanged.
 
 **v1.173.1 — calibrator on realized GHI; boot yellow confirmation.** reports.ts passes
 `ghiBasis = 'realized'` to the band calibrator's skill (a policy decision); `holdBootYellow` holds a
