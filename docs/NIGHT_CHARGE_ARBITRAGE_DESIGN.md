@@ -84,7 +84,7 @@ The original design **banned** `backupReserveSoc` as the charge lever (Invariant
 | On-peak winter (Mon–Fri 16:00–19:00) | **39.5 ¢** |
 | Super-off-peak winter (10:00–15:00, weekdays) | **8.2 ¢** |
 
-Season: summer May–Oct, winter Nov–Apr. Plan = APS **R-EV**, **no demand charge** — the ~40% of conditional machinery §0.3 of the original hinged on collapsed when that was confirmed. Tariff source is **manual**; the EcoFlow API exposes no rates, and there is **no expiry check** — a rate change would be silently stale.
+Season (APS billing cycles): summer bills May–Oct, winter bills Nov–Apr — by usage month (each bill covers the usage since the early-month meter read) summer = Apr–Sep and winter = Oct–Mar (v1.187.10; the boundary is the 1st of the month, ± the meter-read day). Plan = APS **R-EV**, **no demand charge** — the ~40% of conditional machinery §0.3 of the original hinged on collapsed when that was confirmed. Tariff source is **manual**; the EcoFlow API exposes no rates, and there is **no expiry check** — a rate change would be silently stale.
 
 `rateAt(model, ts)` resolves month/dow/hour explicitly in America/Phoenix (no DST). At `DISPATCH_ROUND_TRIP_EFFICIENCY = 0.86` — charge leg `√0.86 = 0.9274`, discharge leg `0.94`, product **0.872** — **stored overnight energy delivers at 15.02 ¢/kWh.** Note this is *not* a flat 0.86: code that assumes it will be wrong by ~1.4%.
 

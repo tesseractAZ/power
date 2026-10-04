@@ -1,5 +1,5 @@
 import type { DeviceSnapshot } from './snapshot.js';
-import { rateAt, apsREvModelFromEnv, localParts, seasonOf, onPeakWindowStrings, type TariffModel } from './tariff.js';
+import { rateAt, apsREvModelFromEnv, seasonAt, onPeakWindowStrings, type TariffModel } from './tariff.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
@@ -8390,13 +8390,11 @@ const TARIFF_FLAT_CENTS = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
  * Unconfirmed APS rates never feed the KPIs — the same null-over-fabrication
  * discipline the tariff module itself applies to its dollar outputs.
  */
-function apsSeasonIsSummer(nowMs: number): boolean {
-  const m = Number(
-    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Phoenix', month: 'numeric' })
-      .formatToParts(new Date(nowMs))
-      .find((p) => p.type === 'month')?.value ?? '1',
-  );
-  return m >= 5 && m <= 10; // APS summer season: May–October
+export function apsSeasonIsSummer(nowMs: number): boolean {
+  // v1.187.10 — the tariff model's own season (seasonAt): the APS billing-cycle seasons by
+  // usage month. This was a separate calendar May–October test, so October was "summer"
+  // here while APS bills it at winter rates.
+  return seasonAt(apsREvModelFromEnv(), nowMs) === 'summer';
 }
 function apsCent(name: string): number | null {
   const raw = process.env[name];
@@ -8513,7 +8511,7 @@ export function tariffPricingView(
       onPeakHours: legacy.hours, onPeakDays: legacy.days, pricingBasis: 'two-tier',
     };
   }
-  const season = seasonOf(localParts(nowMs, model.timezone).month, model.summerMonths);
+  const season = seasonAt(model, nowMs); // v1.187.10 — the one season source
   const inSeason = (id: string) => model.periods.find((p) => p.id === id && (!p.seasons || p.seasons.includes(season)));
   const onPeakPeriod = model.periods.find((p) => p.onPeak === true && (!p.seasons || p.seasons.includes(season)));
   const win = onPeakWindowStrings(model);

@@ -220,7 +220,7 @@ import {
 } from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
 import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
-import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
+import { apsREvModelFromEnv, rateAt, localParts, seasonAt } from './tariff.js';
 // v1.187.0 — the scorer's span, cost and PV-evidence decisions, pure (nightLedgerScoring.ts).
 import {
   supersedingPlanDate, knownFleetMismatchReason, type TimeSpan,
@@ -3813,7 +3813,7 @@ async function recomputeNightChargePlan(
     pvP90 += pb.p90W / 1000;
     loadP50 += fh.forecastLoadW / 1000;
   }
-  const season = seasonOf(localParts(nowMs, tariffModel.timezone).month, tariffModel.summerMonths);
+  const season = seasonAt(tariffModel, nowMs); // v1.187.10 — the one season source
   const tariffSnapshot = JSON.stringify({
     planId: tariffModel.planId,
     season,

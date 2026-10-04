@@ -4994,15 +4994,18 @@ and picks the first tier that applies:
 | # | Tier | `basis` | Condition |
 |---|---|---|---|
 | 1 | Explicit override | `'explicit-override'` | `TARIFF_ON_PEAK_CENTS` / `TARIFF_OFF_PEAK_CENTS` set |
-| 2 | Confirmed seasonal utility table | `'aps_r_ev-summer'` / `'aps_r_ev-winter'` | `TARIFF_APS_RATES_CONFIRMED` true; season by month |
+| 2 | Confirmed seasonal utility table | `'aps_r_ev-summer'` / `'aps_r_ev-winter'` | `TARIFF_APS_RATES_CONFIRMED` true; season from `seasonAt` (tariff.ts §3) |
 | 3 | Flat default | `'flat-default'` | neither of the above |
 
 The resolved basis is published as `tariffBasis` on `/api/tariff` (§4.4) and is
 shared by the dispatch planner (§4.5), so the two engines can no longer disagree
 about what a kWh costs.
 
-**Seasonality** is a month test, not a date range — the summer table applies May
-through October inclusive. A plan generated in one season for a window that opens
+**Seasonality** is a usage-month test from the tariff model's own season
+(`apsSeasonIsSummer` → `seasonAt(apsREvModelFromEnv(), nowMs)`, tariff.ts §3): the
+summer table applies to usage in April through September, the winter table to
+October through March — the APS billing-cycle seasons (v1.187.10; it was a separate
+calendar May–October test). A plan generated in one season for a window that opens
 in the next resolves at *generation* time.
 
 ★ **Edge worth knowing:** tier 1 is evaluated **per side**, as
@@ -9679,7 +9682,7 @@ A declarative, pure TOU model — periods, seasons, holidays, timezone — plus 
 | `overnight` | 23:00–05:00 (wraps) | Mon–Fri | year-round | **the cheap charge window the advisor sizes against** |
 | `off_peak` | catch-all | — | — | all remaining hours, all weekends, observed holidays |
 
-Seasons: `APS_SUMMER_MONTHS = [5,6,7,8,9,10]` (May–Oct); the rest is winter. This is a documented approximation — APS defines seasons by *billing cycle*, not calendar month, so a handful of boundary days each year may be seasoned one cycle early/late (bounded to ≤ a few days/yr; inert while rates are unconfirmed). `holidays` (local `YYYY-MM-DD` strings, all-day off-peak, checked *before* every specific period) defaults to `[]` — the APS observed-holiday list is documented as "confirm from a bill", not guessed.
+Seasons (v1.187.10 — billing cycles, by usage month): `APS_SUMMER_MONTHS = [4,5,6,7,8,9]` (April–September usage); the rest is winter. APS bills May–October at summer rates and November–April at winter rates, and each bill covers the usage since the previous meter read, early in the month — so summer usage runs from the early-April read to the early-October read (the 2026-10-02 APS notice: winter rates from the November billing period, the winter 10:00–15:00 super-off-peak in effect). Until v1.187.10 the months were read as if they were bills (`[5..10]`), so October usage priced as summer — summer on-peak, no super-off-peak tier — and April as winter; `analytics.ts` also carried its own calendar May–October test for the two-tier basis. **One season source:** `seasonAt(model, tsMs)` = `seasonOf(localParts(tsMs, model.timezone).month, model.summerMonths)`, read by `rateAt` (same function on the same local month), `resolveTariffCents` (`apsSeasonIsSummer`), the `/api/tariff` view (`tariffPricingView`) and the nightly plan's tariff snapshot (tests: `tariffBillingSeason.test.ts`). **Approximation:** the boundary is the 1st of the local month; the real one is the meter-read day, which falls in the first days of the month and varies by billing cycle, so the first few days of April and of October can be seasoned one cycle off (± the read day; inert while rates are unconfirmed). Ledger rows captured before v1.187.10 keep the cost they were priced with. `holidays` (local `YYYY-MM-DD` strings, all-day off-peak, checked *before* every specific period) defaults to `[]` — the APS observed-holiday list is documented as "confirm from a bill", not guessed.
 
 **Resolution algorithm** (`rateAt`): resolve the instant into local parts via a memoized `Intl.DateTimeFormat('en-US', { timeZone, hourCycle:'h23' })` `formatToParts` (one formatter per timezone; never the host clock, so a non-Phoenix container cannot bleed a rate boundary); derive day-of-week from the *resolved calendar date* via `Date.UTC(y,m-1,d).getUTCDay()` rather than an ICU `weekday` part — a degraded/small-ICU runtime that dropped the part would otherwise collapse every weekday to Sunday and silently misprice every on-peak/overnight hour as weekend off-peak (fail-safe by construction). Then: holiday check → first matching period in priority order (season gate, weekday gate, `inHourWindow` with wrap-around: `start>end` wraps past midnight, `start===end` means all 24 h) → the `off_peak` catch-all.
 
@@ -9802,7 +9805,7 @@ One durable row per `plan_date` (`YYYY-MM-DD`, America/Phoenix; primary key), in
 
 > **The column is not summable to a bill.** Row spans do not tile time: on a weekday 21:00–23:00 falls in no row (one row ends at close + 16 h = 21:00, the next opens at 23:00), and a Friday row (window Fri 23:00 → Sat 00:00) ends Saturday 16:00, so Saturday 16:00 → Monday 00:00 falls in none. Spans also differ in length (17 h on a Friday row, 21 h on a Monday-window row). A month's sum misses ~2 h every weekday and ~32 h every weekend; the daily grid cost is the HA **Grid Cost Today** sensor.
 >
-> **A missing season rate nulls whole rows.** `pricedImport` never half-prices a span, and `TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS` defaults to `""`: on a confirmed table without it, every row whose span holds a winter weekday 10:00–15:00 records NULL from November (the note names the period). The boot logs such gaps once (`unpricedTariffPeriods`: every period, per season it applies in, with no rate on a confirmed table).
+> **A missing season rate nulls whole rows.** `pricedImport` never half-prices a span, and `TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS` defaults to `""`: on a confirmed table without it, every row whose span holds a winter weekday 10:00–15:00 records NULL from October — the first winter usage month, v1.187.10 (the note names the period). The boot logs such gaps once (`unpricedTariffPeriods`: every period, per season it applies in, with no rate on a confirmed table).
 
 Several declared columns are *never written* and read NULL by design: `actual_grid_to_battery_kwh`, `outage_during_day`, `demand_charge_savings_cents` (APS R-EV has no demand charge), and the counterfactual columns `counterfactual_cost_cents`, `realized_savings_cents` and `would_have_peak_imported`. The reasons first given for the counterfactuals (no actuated nights, rates unconfirmed) no longer hold; the one that remains is that each needs the no-buy trajectory, and the recorded one does not supply it: shifting the measured trajectory down by the delivered energy assumes the panel would have discharged the same way from a lower pool, and the SHP2 does not — after it stops at its reserve it resumes discharging only ~20 points above it (2026-09-13/14/27/28), so a lower pool can sit idle and buy grid through hours the measured night discharged. A modelled no-buy day would be an estimate in columns the gate and the owner read as measurements. The grid cost of every day, in dollars, is the HA **Grid Cost Today** sensor (chapter 7 §4, `computeTariffReport`).
 

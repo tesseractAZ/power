@@ -22,6 +22,11 @@
  * (C17) settings-drift calls a force-charge movement inside our window our write only at a value
  * this add-on commanded; otherwise 'panel-side'. Mutants C17-i..ix.
  *
+ * (TARIFF) The APS season follows the billing cycle, by usage month: Apr–Sep summer, Oct–Mar
+ * winter (the May–October bills cover usage from the early-April read to the early-October one),
+ * from ONE source (tariff.ts seasonAt) for the rate table, the two-tier basis, the /api/tariff
+ * view and the nightly plan's tariff snapshot. Mutants S-i..vi.
+ *
  * Not mutated: the DOCS §9 entity rows (C35 — a documentation fix; nightChargeMqtt.test.ts reads
  * DOCS.md, and check-mutant-anchors.mjs does not resolve .md targets); the one-line log texts.
  *
@@ -51,12 +56,15 @@ const AN = resolve(SERVER, 'src/analytics.ts');
 const GATE = resolve(SERVER, 'src/nightChargeGate.ts');
 const DRIFT = resolve(SERVER, 'src/settingsDrift.ts');
 const FC = resolve(SERVER, 'src/nightForceCharge.ts');
+const TAR = resolve(SERVER, 'src/tariff.ts');
 
 const T_SPAN = 'test/ledgerForecastSpan.test.ts';
 const T_FLOOR = 'test/ownerFloorAttribution.test.ts';
 const T_DISPATCH = 'test/dispatchTopOff.test.ts';
 const T_GATE = 'test/nightChargeGate.test.ts';
 const T_FC = 'test/nightForceCharge.test.ts';
+const T_SEASON = 'test/tariffBillingSeason.test.ts';
+const T_TARIFF = 'test/tariff.test.ts';
 
 const MUTANTS = [
   /* ── C3: the forecast span ── */
@@ -270,6 +278,50 @@ const MUTANTS = [
     find: '        forceChargeCommands: forceChargeCommandsOf(act),',
     to: '        forceChargeCommands: null, /* MUTANT */',
     why: 'Every force-charge movement, ours included, is logged as panel-side.',
+  },
+
+  /* ── TARIFF: the season by billing cycle, from one source ── */
+  {
+    id: 'S-i. ★★★ the APS summer is the calendar May–October again (the defect)',
+    file: TAR, tests: [T_SEASON, T_TARIFF],
+    find: 'export const APS_SUMMER_MONTHS = [4, 5, 6, 7, 8, 9];',
+    to: 'export const APS_SUMMER_MONTHS = [5, 6, 7, 8, 9, 10]; /* MUTANT */',
+    why: 'October usage, billed at winter rates, prices as summer: on-peak at the summer rate, no super-off-peak tier.',
+  },
+  {
+    id: 'S-ii. ★★★ the two-tier basis keeps its own calendar May–October test',
+    file: AN, tests: [T_SEASON],
+    find: "  return seasonAt(apsREvModelFromEnv(), nowMs) === 'summer';",
+    to: '  return [5, 6, 7, 8, 9, 10].includes(new Date(nowMs - 7 * 3_600_000).getUTCMonth() + 1); /* MUTANT */',
+    why: '/api/tariff reads aps_r_ev-summer and the KPIs price October at the summer two-tier pair.',
+  },
+  {
+    id: 'S-iii. ★★ the report view seasons by the calendar months',
+    file: AN, tests: [T_SEASON],
+    find: '  const season = seasonAt(model, nowMs); // v1.187.10 — the one season source',
+    to: '  const season = seasonAt({ ...model, summerMonths: [5, 6, 7, 8, 9, 10] }, nowMs); /* MUTANT */',
+    why: 'October reports superOffPeakCents null and the summer on-peak.',
+  },
+  {
+    id: "S-iv. ★★ the nightly plan's tariff snapshot seasons by the calendar months",
+    file: IDX, tests: [T_SEASON],
+    find: '  const season = seasonAt(tariffModel, nowMs); // v1.187.10 — the one season source',
+    to: '  const season = seasonAt({ ...tariffModel, summerMonths: [5, 6, 7, 8, 9, 10] }, nowMs); /* MUTANT */',
+    why: 'An October plan records summer cents and no super-off-peak in its tariff snapshot.',
+  },
+  {
+    id: 'S-v. ★★ the season reads the UTC month, not the local one',
+    file: TAR, tests: [T_SEASON],
+    find: '  return seasonOf(localParts(tsMs, model.timezone).month, model.summerMonths);',
+    to: '  return seasonOf(new Date(tsMs).getUTCMonth() + 1, model.summerMonths); /* MUTANT */',
+    why: 'The last seven hours of September (Phoenix) season as October.',
+  },
+  {
+    id: 'S-vi. ★★ the rate resolution seasons apart from seasonAt',
+    file: TAR, tests: [T_SEASON],
+    find: '  const season = seasonOf(lp.month, model.summerMonths); // ≡ seasonAt(model, tsMs), one local resolve',
+    to: '  const season = seasonOf(lp.month, [5, 6, 7, 8, 9, 10]); /* MUTANT */',
+    why: 'rateAt prices October weekdays 10:00–15:00 as summer off-peak while the report says winter.',
   },
 ];
 
