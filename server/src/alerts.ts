@@ -1530,9 +1530,13 @@ export function computeAlerts(
           facts.push({ label: 'LAN reachability', value: 'Unknown (ping sensor unavailable)' });
         }
       }
-      // v1.187.10 — a home Core or panel whose MQTT data is still arriving: held for the onset hold
+      // v1.187.10 — a home Core whose MQTT data is still arriving: held for the onset hold
       // (cloudOfflineOnsetHeld). A peripheral is info and never annunciates; a spare is muted below.
-      const onsetHeld = !spare && (isCore || isPanel) && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);
+      // The panel is NOT held: its MQTT messages stamp lastMqttAt but are never translated into its
+      // projection (only Core quotas are), and its REST quota is fetched only while listed online —
+      // so while it is listed offline its backup pool, reserve and grid status are frozen. Arriving
+      // panel MQTT is not evidence the alarm inputs are live; the panel's flag alarms at once.
+      const onsetHeld = !spare && isCore && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);
       if (onsetHeld) {
         facts.push({ label: 'Onset hold', value: `MQTT data still arriving (last ${fmtAge(now - (conn?.lastMqttAt ?? now))} ago) — held up to ${Math.round(CLOUD_OFFLINE_ONSET_HOLD_MS / 60_000)} min from the transition before it is spoken or pushed` });
       }

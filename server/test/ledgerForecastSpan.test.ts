@@ -21,7 +21,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ledgerSpansForWindow, ledgerCaptureDueMs, ledgerRowsDueForCapture, forecastActualsSpan,
-  forecastSpanRepair, forecastSpanRecaptureHorizonMs, forecastSpanResetColumns, forecastSpanTagNote,
+  forecastSpanRepair, forecastSpanRecapturable, forecastSpanRecaptureHorizonMs, forecastSpanResetColumns, forecastSpanTagNote,
   integrateWh, FORECAST_SPAN_MS, FORECAST_SPAN_REPAIR_MIN_SHORT_MS, FORECAST_SPAN_TAG_MARKER,
   FORECAST_SPAN_RECAPTURE_MARGIN_DAYS,
 } from '../src/nightLedgerScoring.js';
@@ -52,6 +52,10 @@ const FRI = {
   window_end_ms: phx(2026, 10, 3, 0),
   outcome_captured_at_ms: null as number | null,
   score_notes: null as string | null,
+  // As live: planned on v1.187.0+ (the model's Core set recorded) and captured on v1.187.3+.
+  pv_model_sns: 'COREXXX00XXX0001,COREXXX00XXX0002,COREXXX00XXX0005' as string | null,
+  delivered_kwh: 10.08 as number | null,
+  delivered_basis: 'source-charge' as string | null,
 };
 /** The live 2026-10-01 (Thursday) row: issued 21:30:17, window Thu 23:00 → Fri 05:00. */
 const THU = {
@@ -61,6 +65,10 @@ const THU = {
   window_end_ms: phx(2026, 10, 2, 5),
   outcome_captured_at_ms: null as number | null,
   score_notes: null as string | null,
+  // As live: planned on v1.187.0+ (the model's Core set recorded) and captured on v1.187.3+.
+  pv_model_sns: 'COREXXX00XXX0001,COREXXX00XXX0002,COREXXX00XXX0005' as string | null,
+  delivered_kwh: 10.08 as number | null,
+  delivered_basis: 'source-charge' as string | null,
 };
 
 /* ══ the capture gate ═══════════════════════════════════════════════════════ */
@@ -240,4 +248,30 @@ test('★★ SOURCE PIN: the boot repair runs before the warm sweep and applies 
   const iRepair = warm.indexOf('repairShortForecastSpanOutcomes();');
   const iScore = warm.indexOf('scoreCompletedNights(Date.now());');
   assert.ok(iRepair > 0 && iScore > iRepair, 'repair first, then the sweep re-captures');
+});
+
+test('★★★ (review) inside the horizon, a row today\'s devices cannot re-score faithfully is TAGGED, not re-captured', () => {
+  const horizon = forecastSpanRecaptureHorizonMs(1825, 60); // 58 days
+  // The 08-07 Friday shape: planned before v1.187.0 (no pv_model_sns) and before the 08-20
+  // roster change; re-captured, its actual PV would be summed over today's Cores.
+  const aug = {
+    ...FRI_CAPTURED,
+    issued_at_ms: FRI.issued_at_ms - 56 * DAY,
+    outcome_captured_at_ms: FRI_CAPTURED.outcome_captured_at_ms - 56 * DAY,
+    pv_model_sns: null,
+    delivered_kwh: null,
+    delivered_basis: null,
+  };
+  assert.ok(NOW - aug.issued_at_ms <= horizon, 'precondition: inside the re-capture horizon');
+  assert.equal(forecastSpanRepair(aug, NOW, horizon)?.action, 'tag', '★★★ no roster check possible: tagged');
+  assert.equal(forecastSpanRepair({ ...aug, pv_model_sns: '  ' }, NOW, horizon)?.action, 'tag', 'a blank model set is none');
+  // A v1.187.0+ row with a delivered figure from before v1.187.3 (no basis): never rewritten.
+  const legacyDelivered = { ...FRI_CAPTURED, delivered_kwh: 4.71, delivered_basis: null };
+  assert.equal(forecastSpanRepair(legacyDelivered, NOW, horizon)?.action, 'tag', '★★ a legacy-basis delivered figure is not rewritten');
+  // No delivered figure at all is no legacy basis: still re-captured.
+  assert.equal(forecastSpanRepair({ ...FRI_CAPTURED, delivered_kwh: null, delivered_basis: null }, NOW, horizon)?.action, 'recapture');
+  assert.equal(forecastSpanRecapturable(FRI_CAPTURED), true, 'the live 10-02 row is re-captured');
+  // Tagged once: the marker makes it idempotent.
+  const note = forecastSpanTagNote(forecastSpanRepair(aug, NOW, horizon)!.shortMs);
+  assert.equal(forecastSpanRepair({ ...aug, score_notes: `x ${note}` }, NOW, horizon), null);
 });

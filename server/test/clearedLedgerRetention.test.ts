@@ -283,3 +283,19 @@ test('★★ v1.187.3: an ems-volt info row inside a pack-defective episode is w
   assert.deepEqual(evictOnce(log, (e) => e.alert.id.startsWith('ems-volt-')), ['vdiff-warn-HOME-1'], 'FIFO first: the evidence row is not taken early');
   assert.deepEqual(evictOnce(log), [`ems-volt-${CORE4}`], 'then with the warnings, before the pack-defective row');
 });
+
+test('★★★ (v1.187.10 review) a pushed noise row, kept out of the noise tiers, still leaves before warranty evidence', () => {
+  // The review's log: five newer PUSHED noise rows, a pack-defective critical, and an older warning
+  // on that Core overlapping the defective episode. Since pushed noise skips the noise tiers it
+  // reaches the ordinary-warning tier; the evidence row must not be the one that goes.
+  const pd = row(`pack-defective-${CORE4}-1`, 30, { raisedAt: NOW - 60 * DAY, pushed: true }, { severity: 'critical' });
+  const evidenceRow = row(`ems-volt-${CORE4}`, 50, { pushed: true });
+  const noise = [1, 2, 3, 4, 5].map((d) => row(`vdiff-warn-${CORE1}-${d}`, 10 + d, { pushed: true }));
+  const log = ledger(pd, evidenceRow, ...noise);
+  const isNoise = (e: ClearedAlert) => e.alert.id.startsWith('vdiff-warn-');
+  assert.equal(warrantyEvidence(log)(evidenceRow), true, 'precondition: the older warning is evidence');
+  assert.deepEqual(evictOnce(log, isNoise), [`vdiff-warn-${CORE1}-5`], '★★★ the oldest pushed noise row, not the evidence row');
+  for (let k = 0; k < 4; k++) evictOnce(log, isNoise);
+  assert.deepEqual(evictOnce(log, isNoise), [`ems-volt-${CORE4}`], 'the evidence row leaves only after every non-evidence warning');
+  assert.ok(log.includes(pd), 'the critical stays');
+});

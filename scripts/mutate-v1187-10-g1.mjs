@@ -132,6 +132,34 @@ const MUTANTS = [
     why: 'A windowless row (no actuals by design) is reset and re-captured for nothing.',
   },
   {
+    id: 'C3-xii. ★★★ (review) a row with no recorded model set is re-captured on today\'s Cores',
+    file: NLS, tests: [T_SPAN],
+    find: "  if (typeof row.pv_model_sns !== 'string' || row.pv_model_sns.trim() === '') return false;",
+    to: '  /* MUTANT */',
+    why: 'The 08-07 row (before the 08-20 roster change, no pv_model_sns) is graded against another fleet\'s PV, and no set-aside can catch it.',
+  },
+  {
+    id: 'C3-xiii. ★★ (review) a blank model set counts as one',
+    file: NLS, tests: [T_SPAN],
+    find: "  if (typeof row.pv_model_sns !== 'string' || row.pv_model_sns.trim() === '') return false;",
+    to: "  if (typeof row.pv_model_sns !== 'string') return false; /* MUTANT */",
+    why: 'An empty Core set is no roster check either.',
+  },
+  {
+    id: 'C3-xiv. ★★ (review) a pre-v1.187.3 delivered figure is rewritten',
+    file: NLS, tests: [T_SPAN],
+    find: "  if (typeof row.delivered_kwh === 'number' && row.delivered_basis == null) return false;",
+    to: '  /* MUTANT */',
+    why: 'A legacy-basis delivered_kwh the buy de-bias learner never rewrites is re-captured on the source-charge basis.',
+  },
+  {
+    id: 'C3-xv. ★ (review) a row with no delivered figure is not re-captured',
+    file: NLS, tests: [T_SPAN],
+    find: "  if (typeof row.delivered_kwh === 'number' && row.delivered_basis == null) return false;",
+    to: "  if (row.delivered_basis == null) return false; /* MUTANT */",
+    why: 'A short row with no delivered figure (nothing charged) is only tagged, though nothing legacy would be rewritten.',
+  },
+  {
     id: 'C3-x. ★★ the tag is not idempotent',
     file: NLS, tests: [T_SPAN],
     find: '  if (String(row.score_notes ?? \'\').includes(FORECAST_SPAN_TAG_MARKER)) return null; // already tagged',
@@ -141,8 +169,8 @@ const MUTANTS = [
   {
     id: 'C3-xi. ★★★ a row past the horizon is reset instead of tagged',
     file: NLS, tests: [T_SPAN],
-    find: '  if (nowMs - issued <= recaptureHorizonMs) return { action: \'recapture\', shortMs };',
-    to: '  if (nowMs - issued <= recaptureHorizonMs * 1000) return { action: \'recapture\', shortMs }; /* MUTANT */',
+    find: '  if (nowMs - issued <= recaptureHorizonMs && forecastSpanRecapturable(row)) return { action: \'recapture\', shortMs };',
+    to: '  if (nowMs - issued <= recaptureHorizonMs * 1000 && forecastSpanRecapturable(row)) return { action: \'recapture\', shortMs }; /* MUTANT */',
     why: 'A row whose telemetry is gone is re-captured as unscored with null actuals.',
   },
   {

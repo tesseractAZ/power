@@ -2,9 +2,10 @@
 /**
  * mutate-v1187-10-g3.mjs — committed harness for v1.187.10, group 3 (alarms, 10-03 log review).
  *
- *  H.  A home Core or panel listed OFFLINE by the cloud while its own MQTT data still arrives is held
+ *  H.  A home Core listed OFFLINE by the cloud while its own MQTT data still arrives is held
  *      non-annunciating for its onset (alerts.cloudOfflineOnsetHeld: 3 min from the transition, and
  *      only while a data message landed within 90 s). Silent on MQTT, or past the hold, it alarms.
+ *      The panel is never held (its MQTT never reaches its projection, so its alarm inputs are frozen).
  *  V.  The spoken text reads no API path ("/device/list"), no "message s" and no "31s".
  *  C1. A timed-out cordless dispatch to an entity that reports no playback is delivery UNKNOWN —
  *      never counted as audible; the restart decisions wait for an armed condition retry.
@@ -56,7 +57,7 @@ const BLIND = ['test/blindRemediation.test.ts', 'test/shadowLatchWarn.test.ts'];
 const MUTANTS = [
   // ── H: the onset hold ──
   { id: 'H-i. ★★★ no onset hold', file: AL, tests: HOLD,
-    find: '  const onsetHeld = !spare && (isCore || isPanel) && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);',
+    find: '  const onsetHeld = !spare && isCore && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);',
     to: '  const onsetHeld = false; /* MUTANT */',
     why: 'THE DEFECT: a cloud blip while the data still flows is spoken on every speaker and pushed (10-03 19:31).' },
   { id: 'H-ii. ★★★ MQTT liveness not read', file: AL, tests: HOLD,
@@ -75,17 +76,17 @@ const MUTANTS = [
     find: '  return offlineForMs >= 0 && offlineForMs < CLOUD_OFFLINE_ONSET_HOLD_MS && nowMs - lastMqttAt < CLOUD_OFFLINE_MQTT_LIVE_MS;',
     to: '  return offlineForMs < CLOUD_OFFLINE_ONSET_HOLD_MS && nowMs - lastMqttAt < CLOUD_OFFLINE_MQTT_LIVE_MS; /* MUTANT */',
     why: 'A clock step that puts the transition ahead of now holds the alert for the step plus 3 minutes.' },
-  { id: 'H-vi. ★★ the panel is not held', file: AL, tests: HOLD,
-    find: '  const onsetHeld = !spare && (isCore || isPanel) && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);',
-    to: '  const onsetHeld = !spare && isCore && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now); /* MUTANT */',
-    why: 'The panel\'s own flag in the same poll raises the yellow and is spoken (10-03 19:31: listed offline for 23 s).' },
+  { id: 'H-vi. ★★★ the panel is held', file: AL, tests: HOLD,
+    find: '  const onsetHeld = !spare && isCore && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);',
+    to: '  const onsetHeld = !spare && (isCore || isPanel) && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now); /* MUTANT */',
+    why: 'FAIL-QUIET: the alarm data source is silent up to 3 minutes while its pool, reserve and grid status are frozen (panel MQTT never reaches its projection).' },
   { id: 'H-vii. ★ a peripheral is stamped', file: AL, tests: HOLD,
-    find: '  const onsetHeld = !spare && (isCore || isPanel) && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);',
+    find: '  const onsetHeld = !spare && isCore && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);',
     to: '  const onsetHeld = !spare && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now); /* MUTANT */',
-    why: 'An info card carries a mute reason it never needed (and reads as muted on screen).' },
+    why: 'The panel is held, and an info card carries a mute reason it never needed (and reads as muted on screen).' },
   { id: 'H-viii. ★★ the hold overrides a bench spare\'s reason', file: AL, tests: HOLD,
-    find: '  const onsetHeld = !spare && (isCore || isPanel) && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);',
-    to: '  const onsetHeld = (isCore || isPanel) && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now); /* MUTANT */',
+    find: '  const onsetHeld = !spare && isCore && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);',
+    to: '  const onsetHeld = isCore && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now); /* MUTANT */',
     why: 'A bench spare reads "onset hold" for three minutes, then "bench spare" — the reason flips under the operator.' },
   { id: 'H-ix. ★★★ held, but still annunciating', file: AL, tests: HOLD,
     find: '        ...(onsetHeld ? { annunciate: false, muteReason: MUTE_REASON_CLOUD_OFFLINE_MQTT_LIVE } : {}),',
@@ -159,6 +160,14 @@ const MUTANTS = [
     find: "    const saturated = clearedLog.length >= CLEARED_LOG_MAX ? clearedLedgerCapNote(clearedLog, CLEARED_LOG_MAX, Date.now()) : '';",
     to: "    const saturated = clearedLog.length >= CLEARED_LOG_MAX ? ` [AT CAP ${CLEARED_LOG_MAX} — older records are being dropped]` : ''; /* MUTANT */",
     why: 'The boot line misdescribes what a full ledger drops.' },
+  { id: 'C26-v. ★★★ pushed noise reaches the ordinary tier ahead of nothing: evidence goes first', file: AM, tests: LEDGER,
+    find: "  if (evictOldest((e, i) => sev(i) === 'warning' && ordinary(e) && !evidence(e))) return;\n",
+    to: '  /* MUTANT */\n',
+    why: 'The review\'s log: an older warranty-evidence warning is evicted while five pushed noise rows stay.' },
+  { id: 'C26-vi. ★★ the evidence-sparing tier ignores never-muted', file: AM, tests: LEDGER,
+    find: "  if (evictOldest((e, i) => sev(i) === 'warning' && ordinary(e) && !evidence(e))) return;\n",
+    to: "  if (evictOldest((e, i) => sev(i) === 'warning' && !evidence(e))) return; /* MUTANT */\n",
+    why: 'A never-muted warning (cell-ovp, critical Thermal) leaves ahead of ordinary evidence-bearing warnings.' },
   // ── C28: the rate-floor card and line ──
   { id: 'C28-i. ★★ the tick does not publish its roster mute', file: AM, tests: RATE,
     find: '    lastRosterMute = { muted, spares: mutedSpareSns }; // v1.187.10 — rosterMuteReasonForSn',

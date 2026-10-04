@@ -4,11 +4,13 @@
  * 2026-10-03 19:31 MST, right after a WAN drop: EcoFlow's /device/list listed the panel and every Core
  * offline in one poll. The condition went yellow in the same second and was spoken on every speaker
  * for 92 s; three "[Medium] Device offline (per EcoFlow Cloud)" pushes went out; every flag cleared
- * within about 2 minutes. A home Core or panel listed offline while its own MQTT data still arrives
+ * within about 2 minutes. A home Core listed offline while its own MQTT data still arrives
  * (a data message within 90 s) is now on screen at once but non-annunciating — not spoken, not pushed
  * — for 3 minutes from the transition. The moment its data stops, or the hold runs out, it
  * annunciates as before. A flag with no transition seen here, or a device with no MQTT data, is never
- * held. The spoken text no longer reads the API path or "message s" either (verbalizeForTts).
+ * held. The panel is never held: its MQTT messages are not translated into its projection and its
+ * REST quota is fetched only while listed online, so its alarm inputs are frozen while it is listed
+ * offline. The spoken text no longer reads the API path or "message s" either (verbalizeForTts).
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -120,15 +122,16 @@ test('★★ never held: offline since the first device list, or no MQTT data th
   assert.equal(coreOffline(30 * SEC, undefined).annunciate, undefined, 'no MQTT data this session');
 });
 
-test('★★ the panel is held the same way (its own flag raised the same yellow in the 19:31 event); a peripheral and a bench spare are unchanged', () => {
+test('★★★ the panel is never held — its MQTT never reaches its projection, so its alarm inputs are frozen while listed offline; a peripheral and a bench spare are unchanged', () => {
   const now = Date.now();
   const flagged = { online: false, onlineChangedAtMs: now - 20 * SEC, onlineChangedVia: 'device-list' as const };
   const panel = computeAlerts({ [PANEL]: dev(PANEL, 'Smart Home Panel 2', 'Smart Home Panel 2', flagged) }, conn([[PANEL, now - 5 * SEC]]))
     .find((a) => a.id === `offline-${PANEL}`)!;
   assert.equal(panel.severity, 'warning');
   assert.equal(panel.priority, 'high', 'unchanged');
-  assert.equal(panel.annunciate, false, '★ held');
-  assert.equal(panel.muteReason, MUTE_REASON_CLOUD_OFFLINE_MQTT_LIVE);
+  assert.equal(panel.annunciate, undefined, '★★★ not held: the alarm data source alarms at once even with MQTT messages arriving');
+  assert.equal(panel.muteReason, undefined);
+  assert.equal(panel.facts?.some((f) => f.label === 'Onset hold'), false, 'no "MQTT data still arriving" fact on the panel');
   const silentPanel = computeAlerts({ [PANEL]: dev(PANEL, 'Smart Home Panel 2', 'Smart Home Panel 2', flagged) }, conn([[PANEL, now - 100 * SEC]]))
     .find((a) => a.id === `offline-${PANEL}`)!;
   assert.equal(silentPanel.annunciate, undefined, 'a silent panel alarms at once');

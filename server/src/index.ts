@@ -4775,7 +4775,10 @@ function repairPrematureNightOutcomes(): void {
  *    2-day margin) the outcome is reset exactly as repairPrematureNightOutcomes resets it,
  *    and the sweep re-captures it over the full span — re-scored on the current scorer;
  *  - past it, the telemetry is gone or the sweep would never return to the row, so only
- *    `score_notes` gains a clause saying the errors under-count — a TAG, not a rewrite.
+ *    `score_notes` gains a clause saying the errors under-count — a TAG, not a rewrite;
+ *  - (review) a row inside the horizon that today's devices cannot re-score faithfully — no
+ *    `pv_model_sns` (no roster check) or a pre-v1.187.3 delivered figure — is tagged too
+ *    (forecastSpanRecapturable).
  * Rows are corrected in place — never deleted.
  */
 function repairShortForecastSpanOutcomes(): void {

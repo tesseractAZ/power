@@ -793,7 +793,9 @@ export const CLEARED_INFO_RESERVE_DIVISOR = 15;
  *  1500); an info row leaves first only beyond that, and the reserved ones leave after every
  *  warning, still before any critical. (b) Tier 3 took a PUSHED noise row (one that reached the
  *  phone) on its own arrival, ahead of 85-day-old rows whose push is unknown: a row recorded as
- *  pushed now never leaves in the noise tiers — it ages out with the ordinary warnings. */
+ *  pushed now never leaves in the noise tiers — it ages out with the ordinary warnings. Tier 4 is
+ *  split so that move cannot cost warranty evidence: 4a. the oldest ordinary warning that is not
+ *  warranty evidence (pushed noise included), then 4b. the oldest ordinary warning. */
 export function pruneOldestNonSignificant(
   logArr: ClearedAlert[],
   isNoise?: (e: ClearedAlert) => boolean,
@@ -825,7 +827,11 @@ export function pruneOldestNonSignificant(
   }
   // v1.187.1 (log review) — a row with no string id is not never-muted (isNeverMutedAlert reads the
   // id and would throw on it, every tick at the cap): it leaves with the ordinary warnings.
-  if (evictOldest((e, i) => sev(i) === 'warning' && (typeof e.alert?.id !== 'string' || !isNeverMutedAlert(e.alert)))) return;
+  const ordinary = (e: ClearedAlert): boolean => typeof e.alert?.id !== 'string' || !isNeverMutedAlert(e.alert);
+  // v1.187.10 (review) — a pushed noise row no longer leaves in the noise tiers, so it reaches this
+  // tier: every ordinary warning that is not warranty evidence leaves before one that is.
+  if (evictOldest((e, i) => sev(i) === 'warning' && ordinary(e) && !evidence(e))) return;
+  if (evictOldest((e, i) => sev(i) === 'warning' && ordinary(e))) return;
   if (evictOldest((e, i) => sev(i) === 'warning' && !String(e.alert?.id ?? '').startsWith('pack-defective-'))) return;
   if (evictOldest((_e, i) => sev(i) === 'warning')) return;
   // v1.187.10 — the reserved info rows, before any critical.

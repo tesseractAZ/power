@@ -440,6 +440,25 @@ export interface ForecastSpanRepair {
 }
 
 /**
+ * v1.187.10 (review) — whether a short row inside the horizon may be RE-CAPTURED rather than
+ * tagged. A re-capture scores the row on today's devices: actual PV is summed over today's
+ * panel-connected Cores, and delivered_kwh is recomputed on the v1.187.3 source-charge basis.
+ *  - No `pv_model_sns` (rows planned before v1.187.0, or with no recorded model set):
+ *    pvVerdictSetAside cannot see a roster change, so a row from before one (2026-08-20)
+ *    would be graded against another fleet's PV with nothing to set the verdict aside.
+ *  - A `delivered_kwh` with no `delivered_basis` (rows captured before v1.187.3): the
+ *    buy de-bias learner reads those as legacy and never rewrites them.
+ * Either one: the row is tagged instead. PURE.
+ */
+export function forecastSpanRecapturable(
+  row: Partial<Pick<NightLedgerRow, 'pv_model_sns' | 'delivered_kwh' | 'delivered_basis'>>,
+): boolean {
+  if (typeof row.pv_model_sns !== 'string' || row.pv_model_sns.trim() === '') return false;
+  if (typeof row.delivered_kwh === 'number' && row.delivered_basis == null) return false;
+  return true;
+}
+
+/**
  * v1.187.10 — the one-time repair a captured row owes, or null. PURE.
  * Only rows with a stored window (the rows the scorer measures actuals for) whose capture
  * preceded issued_at + 24 h by at least FORECAST_SPAN_REPAIR_MIN_SHORT_MS. Idempotent: a
@@ -447,7 +466,8 @@ export interface ForecastSpanRepair {
  * capture, and a tagged row carries FORECAST_SPAN_TAG_MARKER.
  */
 export function forecastSpanRepair(
-  row: Pick<NightLedgerRow, 'outcome_captured_at_ms' | 'issued_at_ms' | 'window_start_ms' | 'window_end_ms' | 'score_notes'>,
+  row: Pick<NightLedgerRow, 'outcome_captured_at_ms' | 'issued_at_ms' | 'window_start_ms' | 'window_end_ms' | 'score_notes'>
+    & Partial<Pick<NightLedgerRow, 'pv_model_sns' | 'delivered_kwh' | 'delivered_basis'>>,
   nowMs: number,
   recaptureHorizonMs: number,
 ): ForecastSpanRepair | null {
@@ -459,7 +479,7 @@ export function forecastSpanRepair(
   if (typeof ws !== 'number' || typeof we !== 'number' || !(we > ws)) return null; // no actuals measured
   const shortMs = issued + FORECAST_SPAN_MS - cap;
   if (shortMs < FORECAST_SPAN_REPAIR_MIN_SHORT_MS) return null;
-  if (nowMs - issued <= recaptureHorizonMs) return { action: 'recapture', shortMs };
+  if (nowMs - issued <= recaptureHorizonMs && forecastSpanRecapturable(row)) return { action: 'recapture', shortMs };
   if (String(row.score_notes ?? '').includes(FORECAST_SPAN_TAG_MARKER)) return null; // already tagged
   return { action: 'tag', shortMs };
 }
