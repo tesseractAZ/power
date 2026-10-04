@@ -7933,6 +7933,16 @@ The full set of REST endpoints consumed by the front ends:
 
 The web app is a Vite/React SPA served from the add-on's `:8787` root. Source lives in `web/src/`. The entry `App.tsx` renders a thin `NormalApp` that owns the WebSocket subscription and all derived views.
 
+**Styling — Tailwind CSS 4 (v1.187.7).** Utilities come from Tailwind CSS 4 through the `@tailwindcss/vite` plugin; there is no `tailwind.config.js`, PostCSS config or Autoprefixer (Lightning CSS adds vendor prefixes in the build). `web/src/index.css` is the whole configuration:
+
+- `@import 'tailwindcss' source(none)` with explicit `@source` globs (`../index.html`, `./**/*.{ts,tsx}`), the v3 `content` list, so only the app's own markup is scanned.
+- `@theme inline reference` maps each colour token to the runtime theme's `R G B` triple (`bg-panel` → `rgb(var(--color-panel))`; §1.10). `inline` embeds the value in the utility and `reference` emits no Tailwind variable, because the `--color-*` names are already the triples. An opacity modifier (`bg-panel/40`) compiles to `color-mix(in oklab, rgb(var(--color-panel)) 40%, transparent)`, the same colour at that alpha. `--font-sans` / `--font-mono` likewise wrap the theme's font variables, and `amber-700`, the one default-palette colour in use, is pinned to v3's `#b45309`.
+- Tailwind 4 behaviour that would have changed the rendering is set back to v3's: text-size line heights are absolute (`text-xs` → `1rem`; v4's ratios are inherited as ratios, so a `text-[10px]` badge in a `text-xs` row would lose 2.7px of line); `hover:` matches on every device (`@custom-variant hover (&:hover)`; v4 limits it to `(hover: hover)`); preflight keeps v3's default border colour (`#e5e7eb`), the pointer cursor on buttons, and the browser's padding on `td`, `th` and `option` (v4 zeroes every element's padding).
+- The hand-written classes (`.card`, `.card-title`, `.takeaway`, `.kv*`, `.badge*`, `.bar`) and the High Contrast chrome sit in `@layer utilities` after the generated utilities, the cascade they had under v3: they win against a utility of equal specificity (`badge text-[9px]` stays 10px; `card border-bad/45` keeps the card's border) and lose to a `hover:` or `disabled:` one. v3 also emitted responsive variants after them; no element combines the two.
+- `space-y-*` puts the gap on the earlier sibling at zero specificity in v4 (v3: on the later one, overriding its own margins). The overview digest, whose `SectionHeader` carries `mb-3`, uses `*:not-first:mt-4` to keep its 16px gap; no other `space-y` container has a child with its own vertical margin.
+
+Browser floor: Safari 16.4, Chrome 111, Firefox 128 (cascade layers, `@property`, `color-mix()`). Without `color-mix()` every opacity-modified colour is invalid at computed-value time (fills vanish, borders fall back to the text colour); without cascade layers (before Safari 15.4 / Chrome 99) no Tailwind rule applies.
+
 #### 1.1 Connection & rendering model
 
 - **`useSnapshot()`** (`web/src/useSnapshot.ts`) opens a single WebSocket to `wsUrl()` and stores the latest `FleetSnapshot`. On close it reconnects with exponential backoff: `Math.min(15000, 500 * 2 ** retry)` ms, resetting on open. It exposes `conn` as `'connecting' | 'open' | 'closed'`, and (since **v1.176.0**) `clockOffsetMs`, the browser-minus-server clock offset: every frame carries `serverNowMs`, stamped by the server at SEND time, and the offset is the minimum sample since the socket opened (`nextClockOffset`), so a transport backlog shows as age rather than being absorbed as skew.
@@ -8023,6 +8033,8 @@ Tone choices per rung are the rung klaxon (`KLAXON_FILE` in `web/src/alarmLevels
 
 **Error placement.** Page-level failures (upload, delete, broadcast master, library preview) render in the header. A failure that belongs to one category — a failed enable-toggle PUT, a failed tone assignment, a missing tone file — renders on that category's card, next to the control that raised it.
 
+**Category colours (v1.187.8).** Each category card is framed in its rung's colour (critical red, high orange, medium amber, low blue, all-clear green — `ACCENT_BY_TOKEN.ring`), the Critical-silenced banner is framed and tinted red, and the Critical-silence dialog is framed red. Until v1.187.8 none of these rendered: `index.css` emits its hand-written `.card` class (`bg-panel border-line p-4 …`) after Tailwind's generated utilities, so at equal specificity `.card`'s seam colour and panel face overrode a `border-bad/45` or `bg-bad/10` on the same element, and every one of these cards drew the neutral seam on the panel face in both themes. The colour utilities on a `.card` now carry Tailwind's `!` (important) modifier, which wins regardless of order; `.card` itself is unchanged, and so is every card without one. The same rule holds for any utility that sets something `.card` sets — border colour, background, padding, radius, shadow, position: on a `.card` it needs `!`.
+
 #### 1.9 Glossary tooltips
 
 `web/src/glossary.ts` defines a `GLOSSARY` map (`def('soc|state of charge', '…')`, ~150 terms across battery/power-flow/MPPT/forecast domains) and `installGlossaryTooltips()`, mounted once in `App.tsx`. Rather than hand-adding `title=` to every label, a `MutationObserver` walks the DOM, finds **text-only leaf elements** (non-SVG) whose normalized text matches a glossary key, and sets their `title`. New pages/components are covered automatically. Rescans are throttled to at most one per `RESCAN_THROTTLE_MS = 1000` (trailing-guaranteed), so the ~30 childList mutations/sec from the live re-render don't thrash it. `normalize()` drops a trailing `· …` or `( …)` and lowercases before lookup.
@@ -8034,7 +8046,7 @@ Tone choices per rung are the rung klaxon (`KLAXON_FILE` in `web/src/alarmLevels
 - **Default** — "Light industrial HMI / control-room palette".
 - **High Contrast** — "High-contrast dark palette — deep navy + cyan + amber accents" (lazy-loads its Google Fonts on first selection).
 
-The palette itself lives in CSS variables under `[data-theme="..."]` selectors in `index.css`; `applyTheme` sets the attribute. recharts needs literal color strings (Tailwind classes can't reach it), so `UI`/`CHART`/`HUES`/`SERIES_PALETTE` are **Proxies** that resolve the current theme's CSS variable (a space-separated `R G B` triple → hex) on every access, so charts re-color on theme toggle through React's normal re-render.
+The palette itself lives in CSS variables under `[data-theme="..."]` selectors in `index.css`; `applyTheme` sets the attribute. Tailwind's colour utilities read the same triples (`@theme inline reference`, §1 intro). recharts needs literal color strings (Tailwind classes can't reach it), so `UI`/`CHART`/`HUES`/`SERIES_PALETTE` are **Proxies** that resolve the current theme's CSS variable (a space-separated `R G B` triple → hex) on every access, so charts re-color on theme toggle through React's normal re-render.
 
 #### 1.11 PWA + Ingress
 
@@ -8551,7 +8563,7 @@ works in parallel.
 ### Container build (Dockerfile)
 
 3-stage build:
-1. **webbuilder** (`node:22-alpine`) — `npm ci` + `npm run build` the React web UI.
+1. **webbuilder** (`node:22-alpine`) — `npm ci` + `npm run build` the React web UI. Tailwind CSS 4's scanner (`@tailwindcss/oxide`), Lightning CSS and Vite's bundler (rolldown) are native packages; the lockfile carries their `linux-x64-musl` and `linux-arm64-musl` builds, one per image arch (v1.187.7).
 2. **serverdeps** (`node:22-alpine`) — `npm ci` the server deps (`tsx` is a runtime dep, not
    just dev — the server runs TS directly).
 3. **runtime** (`FROM ${BUILD_FROM}` — the HA Alpine+s6+bashio base) — `apk add nodejs npm

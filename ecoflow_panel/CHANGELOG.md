@@ -20,8 +20,32 @@
 
 **Dependencies**
 
-- fastify 5.12.4 → 5.12.5 fixes a denial of service through an unhandled exception on HTTP/2 trailer responses (GHSA-4mh8-r7rc-xpvc). The add-on serves HTTP/1.1 only, so it was not exposed, but the fixed version now ships in the image.
-- Server: @fastify/static 10.1.5, @fastify/websocket 11.3.1, mqtt 5.16.0, undici 6.29.0, ws 8.22.0; tooling @types/node 22.20.4, tsx 4.23.15. Web tooling: vite 8.3.1, autoprefixer 10.6.1. CI: codeql-action 4.38.2, setup-qemu-action 4.4.0.
+- Dependency updates merged before 1.187.7 shipped in its image and were not listed there. fastify 5.12.4 → 5.12.5 fixes a denial of service through an unhandled exception on HTTP/2 trailer responses (GHSA-4mh8-r7rc-xpvc). The add-on serves HTTP/1.1 only, so it was not exposed.
+- Server: @fastify/static 10.1.5, @fastify/websocket 11.3.1, mqtt 5.16.0, undici 6.29.0, ws 8.22.0; tooling @types/node 22.20.4, tsx 4.23.15. Web tooling: vite 8.3.1. CI: codeql-action 4.38.2, setup-qemu-action 4.4.0.
+
+## 1.187.8
+
+### Alert Settings shows each category's colour
+
+**Dashboard**
+
+- **Each category card on Alerts → Alert Settings is framed in its category's colour:** red for Critical (P1), orange for High (P2), amber for Medium (P3), blue for Low (P4) and green for All-clear / Recovery. The colours were specified when the page was organised by category in 1.60.0 but never appeared: the card's own grey border took precedence, so all five cards had the same grey frame in both themes.
+- **The "Critical (P1) annunciation is silenced" banner is framed and tinted red**, and the dialog that confirms silencing Critical is framed red. Both had the same grey frame and panel face as every other card, so the banner did not stand out as a warning.
+- Every other card is unchanged. Checked in the Default and High Contrast themes.
+
+## 1.187.7
+
+### The web dashboard is built with Tailwind CSS 4
+
+**Web dashboard**
+
+- **The dashboard's styles are now built with Tailwind CSS 4 instead of Tailwind CSS 3.** Every page renders as before in both themes. The data, alarms and announcements are unchanged.
+  - Tailwind CSS 3 pulled in the `braces` package (GHSA-vfj7-8cjw-p6xm, high: a deeply nested pattern exhausts the stack) through its file watcher and file matching. No fixed `braces` exists, and Tailwind CSS 4 does not use it. `npm audit` in `web/` now reports no advisories.
+  - The advisory was reachable only while the bundle is built, from the repository's own file patterns, and none of that code runs in the add-on.
+  - Where Tailwind CSS 4 changed what a class does, the Tailwind CSS 3 result is kept: the line height of each text size, the order in which the dashboard's own classes (cards, badges, bars) override other classes, hover effects on touch screens, the default border colour, the pointer cursor on buttons, the padding of table cells, the gap under the overview digest's heading, and the amber used for borderline values.
+  - Each tab, the circuit details and every Alerts view were compared before and after in both themes and at desktop and phone widths, element by element.
+- **Browser requirement.** Tailwind CSS 4 needs Safari 16.4, Chrome 111, Firefox 128 or later. Older browsers lose the semi-transparent colours (badge fills, tinted borders and rows), and browsers before Safari 15.4 or Chrome 99 lose the styling entirely.
+- The build no longer uses PostCSS or Autoprefixer directly; Tailwind CSS 4 runs as a Vite plugin.
 
 ## 1.187.5
 

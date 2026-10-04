@@ -100,17 +100,23 @@ interface BroadcastConfigResponse {
  * out as LITERALS rather than interpolated: `badge-*` are hand-authored in
  * index.css and survive interpolation, but `bg-ok` / `border-ok/45` are real
  * Tailwind utilities that only get emitted if the JIT scanner sees them here.
+ *
+ * `ring` carries the `!` (important) modifier because it lands on a `.card`:
+ * index.css emits `.card` (which sets `border-line`) AFTER the generated
+ * utilities, so at equal specificity a plain `border-bad/45` loses and every
+ * category card drew the neutral seam colour. The same applies to any colour,
+ * background or padding utility put directly on a `.card`.
  */
 interface Accent { dot: string; ring: string; badge: string }
 const ACCENT_BY_TOKEN: Record<string, Accent> = {
-  bad: { dot: 'bg-bad', ring: 'border-bad/45', badge: 'badge-bad' },
-  high: { dot: 'bg-high', ring: 'border-high/45', badge: 'badge-high' },
-  warn: { dot: 'bg-warn', ring: 'border-warn/45', badge: 'badge-warn' },
-  info: { dot: 'bg-info', ring: 'border-info/40', badge: 'badge-info' },
-  ok: { dot: 'bg-ok', ring: 'border-ok/45', badge: 'badge-ok' },
+  bad: { dot: 'bg-bad', ring: '!border-bad/45', badge: 'badge-bad' },
+  high: { dot: 'bg-high', ring: '!border-high/45', badge: 'badge-high' },
+  warn: { dot: 'bg-warn', ring: '!border-warn/45', badge: 'badge-warn' },
+  info: { dot: 'bg-info', ring: '!border-info/40', badge: 'badge-info' },
+  ok: { dot: 'bg-ok', ring: '!border-ok/45', badge: 'badge-ok' },
 };
 /** A rung this build doesn't know renders neutral rather than un-styled. */
-const UNKNOWN_ACCENT: Accent = { dot: 'bg-muted', ring: 'border-line', badge: 'badge-muted' };
+const UNKNOWN_ACCENT: Accent = { dot: 'bg-muted', ring: '!border-line', badge: 'badge-muted' };
 function accentFor(level: Level): Accent {
   return ACCENT_BY_TOKEN[LEVEL_TOKEN[level]] ?? UNKNOWN_ACCENT;
 }
@@ -189,7 +195,7 @@ function CategoryCard(p: CategoryCardProps) {
       <div className="mt-3 pt-3 border-t border-line flex flex-wrap items-center gap-3">
         <span className="text-[10px] uppercase tracking-widest text-muted shrink-0">Tone</span>
         <select
-          className="bg-panel border border-line rounded px-2 py-1 text-sm text-ink min-w-[12rem]"
+          className="bg-panel border border-line rounded-sm px-2 py-1 text-sm text-ink min-w-48"
           value={sel}
           disabled={p.toneBusy}
           aria-label={`Tone for ${p.label}`}
@@ -600,7 +606,7 @@ export function AlertConsolePanel() {
 
       {/* ─── critical-silenced banner ───────────────────────────────── */}
       {criticalOff && (
-        <div className="card border border-bad/55 bg-bad/10">
+        <div className="card border !border-bad/55 !bg-bad/10">
           <div className="flex items-start gap-2 text-sm">
             <span className="mt-1 h-2 w-2 rounded-full bg-bad inline-block shrink-0 animate-pulse" />
             <span>
@@ -671,7 +677,7 @@ export function AlertConsolePanel() {
             const usedBy = data.levels.filter((l) => data.assignments[l].kind === 'custom' && (data.assignments[l] as { id: string }).id === c.id);
             return (
               <div key={c.id} className="bg-panel2/60 border border-line rounded-lg p-3 flex flex-wrap items-center gap-3">
-                <span className="text-sm text-ink font-medium grow min-w-[8rem] truncate">{c.originalName}</span>
+                <span className="text-sm text-ink font-medium grow min-w-32 truncate">{c.originalName}</span>
                 <span className="text-[11px] text-muted shrink-0">{fmtDur(c.durationMs)} · {fmtKb(c.sizeBytes)}</span>
                 {c.srcRate > 0 && (
                   <span className="text-[10px] uppercase tracking-widest text-muted shrink-0" title="Source format before normalization">
@@ -695,7 +701,7 @@ export function AlertConsolePanel() {
       {confirmDisableCritical && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
           role="dialog" aria-modal="true" aria-label="Confirm silencing Critical annunciation">
-          <div className="card max-w-md border border-bad/55">
+          <div className="card max-w-md border !border-bad/55">
             <div className="card-title text-bad normal-case tracking-normal text-sm">Silence Critical (P1) annunciation?</div>
             <div className="text-sm text-muted leading-relaxed mt-2">
               Critical alarms will <span className="text-ink font-medium">stay visible on the Alerts page</span>, but they
