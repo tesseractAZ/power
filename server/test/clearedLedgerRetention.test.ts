@@ -130,8 +130,12 @@ test('★★★ v1.187.10: reserved info rows leave after every warning, and sti
   for (let i = 0; i < 12; i++) log.push(row(`crit-x${i}`, 10 + i, {}, { severity: 'critical' }));
   assert.equal(log.length, 15);
   assert.deepEqual(evictOnce(log), ['warn-b'], 'the info row is within its reserve: the warning leaves');
+  // A new critical clears (the ledger is back at 15, the reserve back at 1): the info row is still
+  // inside its reserve, so only the last tier can take it — before any critical.
+  log.unshift(row('crit-new', 0.001, {}, { severity: 'critical' }));
   assert.deepEqual(evictOnce(log), ['info-a'], 'no warning left: the reserved info row leaves before a critical');
   assert.ok(log.every((e) => e.alert.severity === 'critical'));
+  assert.equal(log.length, 14);
 });
 
 test('★★★ v1.187.10: a noise row recorded as PUSHED is not taken by the noise tiers — even when it is the only noise row (the 10-02 [Low] push)', () => {
