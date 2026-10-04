@@ -1,3 +1,13 @@
+## 1.187.8
+
+### Alert Settings shows each category's colour
+
+**Dashboard**
+
+- **Each category card on Alerts → Alert Settings is framed in its category's colour:** red for Critical (P1), orange for High (P2), amber for Medium (P3), blue for Low (P4) and green for All-clear / Recovery. The colours were specified when the page was organised by category in 1.60.0 but never appeared: the card's own grey border took precedence, so all five cards had the same grey frame in both themes.
+- **The "Critical (P1) annunciation is silenced" banner is framed and tinted red**, and the dialog that confirms silencing Critical is framed red. Both had the same grey frame and panel face as every other card, so the banner did not stand out as a warning.
+- Every other card is unchanged. Checked in the Default and High Contrast themes.
+
 ## 1.187.5
 
 ### A late retry no longer displaces a newer alarm's retry
