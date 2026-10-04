@@ -1,3 +1,72 @@
+## 1.187.10
+
+### October priced at winter rates, a cloud "offline" blip held while the data still flows, a frozen panel reading published as unknown, and pack end-of-life dated again
+
+**Alerts and announcements**
+
+- **A cloud "offline" flag is held while the device's own data is still arriving.** A Core or the panel that EcoFlow Cloud lists offline while its own MQTT data still arrives is shown on screen at once, but it is spoken and pushed only if the flag persists for 3 minutes, or as soon as the data stops for 90 seconds.
+  - On 2026-10-03, right after an internet drop, one device-list poll flagged the panel and every Core offline. It was announced on every speaker for 92 seconds and pushed three times, and every flag cleared within about two minutes.
+  - The hold is fail-loud: it never lasts past 3 minutes, ends as soon as the data has been silent for 90 seconds, and never applies at start-up, to a device with no data this session, to a peripheral or to a bench spare. When it ends, the push goes out at once.
+- **Spoken announcements no longer read API paths, split plurals or glued ages.** "/device/list" is read as "device list", "message(s)" as "messages" (not "message s"), and "31s" as "31 seconds". The on-screen text is unchanged.
+- **The offline alert for a device says how long the add-on has had it on record as offline**, when that started before the last restart: "listed it offline since at least 104 d ago (first seen offline before the add-on's last restart, and not seen online since)". Before, after every restart it said only that the device had been offline since the add-on's first device list, a few hours earlier. The record is cleared when the device is listed online.
+- **A timed-out cordless call is logged as delivery unknown.** Before, the log said the call did not ring. The Switchboard announce entity never reports playback, so the 8-second check cannot confirm a call on it. An unknown call is never counted as heard, and a deferred retry still re-fires the cordless. A restart all-clear decision now waits for a condition retry that could still deliver the alarm.
+- **NWS storm alerts are logged, and a stale feed is unknown.** No fetch, failure or recovery of the storm-alert feed ever reached the log; the client now logs its transitions (first answer, changed event set, first failure of an outage, recovery). After a first success, a failed fetch served the last good feed with no age limit, so an outage that began after a start-up read as a fresh answer indefinitely. Past 60 minutes the alarm path now reads the feed as unknown, the storm-prep feed holds its last alerts and its stuck-feed warning engages, and a warning is logged once. The dashboard keeps showing the last good feed.
+- **Phone pushes no longer carry full device serials.** A serial in the title or message shows its last six characters, and the push tag uses a short digest. The notification drawer card, the logs and the API keep full serials.
+- **The "device barely reporting" card keeps the rate it collapsed to** and says "recovering" once the rate is back above the floor. A collapse on a bench spare or off-panel Core is logged at info, with the reason.
+- **The cleared-alert history keeps its newest information rows at its cap** (up to 1 in 15) and never evicts a row whose push reached the phone ahead of older rows. The start-up line says what a full history holds and what each new clear evicts.
+- At start-up, a held yellow that falls to green now names each held warning that is still active but no longer counts, with the reason, instead of logging it as "cleared".
+- The end of a held telemetry-blind episode states the time since the MQTT rebuild and no longer claims the rebuild restored telemetry. The stale-shadow condition (grid presence unknown) is logged as a warning.
+- Every broadcast outcome log line names its kind (condition, dedicated, test) and its announcement number, so a retry can be matched to its announcement.
+
+**Money**
+
+- **October is priced at winter rates.** APS seasons follow billing cycles: the May–October bills are summer and the November–April bills winter, and each bill covers the usage since the early-month meter read. The add-on read the calendar month as if it were the bill, so October usage was priced as summer (summer on-peak, and no 10:00–15:00 winter super-off-peak tier) and April as winter.
+  - Seasons now go by usage month — April–September summer, October–March winter — from one season source shared by the rate table, the cost report, `/api/tariff` and the nightly plan's tariff record.
+  - The boundary is the 1st of the month; the real meter-read day is a few days later, so the first days of April and October can be seasoned one cycle off.
+  - Configured rates are unchanged; ledger rows captured before this release keep the cost they were priced with.
+- **The greedy dispatch plan no longer buys grid power with no peak ahead.** `/api/dispatch-plan` imported in every off-peak hour while the pack sat below 80% — on 2026-10-03, 12 hours of weekend import at 16.91¢ that Sunday's solar made unnecessary. It now tops off only ahead of an on-peak hour in its horizon, and only at the cheapest rate before it. The documented default round-trip efficiency is corrected to 0.86.
+
+**Night charge**
+
+- **The nightly ledger grades the PV/load forecast over its full 24 hours.** A Friday plan's row was captured on Saturday afternoon, about 5.4 h before its 24 h forecast span ended, so its load looked 52% over-forecast and its buy error +51 kWh, skewing the readiness gate's bias figures. A row is now captured only once both its night and its forecast span have ended. Once per start-up, rows that were captured at least an hour short are reset and re-captured while their telemetry is still kept; older ones are marked as under-counting.
+- **The runway no longer measures against the night-charge reserve after it is reverted.** For about a minute after the 50% reserve was put back, the owner floor read the device's not-yet-updated 50%, and the runway showed "reserve in 5.6 h" (6 of 10 revert nights in two weeks). The floor now holds its prior value until the panel reads back, or for at most 5 minutes — the same rule the alert posture already used.
+- **The readiness blocker names the right metric.** "delivery bias" is now "sizing bias": the mean buy error is the planner's forecast miss, and delivered energy is not part of it.
+- **Settings-drift no longer claims the panel's own force-charge stop as the add-on's write.** A force-charge slot that the panel's ceiling turns off before the add-on's own OFF is logged as a panel-side change. It is still not announced.
+
+**Home Assistant**
+
+- **A frozen Smart Home Panel 2 reading is published as unknown, not as live values.** While the panel is cloud-offline, has sent no reading for five minutes, or the cloud is replaying a stale copy of its last reading, Panel Load, Grid Power, the grid status, Backup Pool, Backup Remaining, the backup timers and every per-circuit power sensor now read unknown in Home Assistant. Before, they kept showing the frozen numbers: on 2026-10-02 Panel Load stayed at 1611 W for about ten minutes while the batteries' discharge rose by about 2 kW. The dashboard already showed the panel as stale. Lifetime energy counters are unchanged.
+- **Projected Low SoC and the runway sensors read unknown while a Core's first reading is still pending after a restart**, instead of a 0 % projected low and a finite runway to reserve and to empty computed without that Core's solar. Forecast Basis Incomplete reads on during that window. A Core the cloud lists as offline is not waited for. The wait ends after ten minutes at most. Alarms are unchanged.
+- **Entities no longer flash their pre-restart values at a restart.** After a restart the add-on now sends fresh values before marking its entities available, so a state-change automation no longer fires on the old value and again on the new one. A broker reconnect still marks entities available first. A version upgrade still makes each entity unavailable for about 5 seconds while Home Assistant re-reads its configuration.
+- **PV Curtailed Today and PV Clipped Today are recorded as daily totals that can be revised.** Both are estimates that change during the day, so they can go down as well as up. Home Assistant treated them as meters that only increase, so a downward revision of 10 % or more was counted as a reset and the day's energy was counted again. They now reset only at local midnight. Long-term statistics recorded before this release are unchanged.
+- **The Audible Alarm Channel sensor reads unknown, not disabled, for the first 30 seconds after a restart**, until the first speaker check. A channel that is turned off reads disabled from the first check on.
+
+**Battery health**
+
+- **Dated pack end-of-life can project again.** The degradation report regressed SoH over a fixed 30 days. Over 30 days no linear fade could pass both the 1.5-point observed-drop floor (it needs about 24 %/yr) and the 10 %/yr plausibility ceiling, so the "Soonest Pack EOL" sensor was unknown for every pack whatever its fade, while the SoH forecast alert (120 days) reported two packs declining about 9–10 %/yr. The window is now the configured samples retention clamped to 120–365 days (the 120-day floor matches the forecast alert), reported as `windowDays` on `/api/degradation`.
+- **The MPPT drift card is reworded.** It presented a W ÷ V·A register-consistency ratio as lost conversion efficiency and sent the reader to MC4 connectors and a warranty inquiry. It is now "MPPT reading drift", with a meter check of the string's voltage and current at the MPPT input.
+
+**Logging and diagnostics**
+
+- **Poll failures are logged as a delta, with causes.** The warn line names only devices newly failing outside the standing product-class 1006 set, with their error code, and marks the alarm-path panel (never treated as standing); recoveries, the standing set at start-up and devices no longer asked are info. Each device's quota-failure cause is logged once per failure episode and code, with a recovery line; only 1006 says "presence only", and an alarm-path panel's cause is logged at warn.
+- **Unchanged fleet-status ticks emit a compact line.** Demoting the unchanged 10-minute dump to debug saved nothing at the standing debug log level (44.7 % of the reviewed log's bytes); an unchanged tick now lists only the devices on MQTT with a count for the static entries. Changes and the hourly anchor keep the full line.
+- The 45-minute GHI tick no longer logs a byte-identical "periodic GHI persistence" line every tick; it logs "nothing new" at most every 6 h and when no forecast is available.
+- `/api/health` `pollErrorKind` is null while healthy (it read "other").
+- The device-list first-sight line uses the resolved display name; the terminator pre-warm summaries name their language.
+- Request logging is turned off through Fastify's log controller, which removes the FSTDEP023 deprecation warning at every start-up.
+
+**Documentation**
+
+- The night-charge entity table describes `night_charge_target_soc` as the reserve setpoint written (not a predicted SoC), and lists `night_charge_expected_soc`, the predicted SoC at window close.
+- The alert-count sensors are documented as counting every alert on screen, including silenced ones, the same set the dashboard's badges count.
+
+**Upgrade notes**
+
+- From this release October usage is priced from the winter rate options. If APS On-Peak / Off-Peak ¢/kWh (Winter) are blank, October falls back to the flat default rate; if APS Super Off-Peak ¢/kWh (Winter) is blank, a ledger row whose span holds a winter weekday 10:00–15:00 records no realized cost. Fill them in from an APS bill or rate sheet. After the update, `/api/tariff` reads `tariffBasis: aps_r_ev-winter`.
+- PV Curtailed Today and PV Clipped Today change state class, so Home Assistant may show a one-off statistics notice for them.
+- A push sent before the update keeps its old tag, so its resolve arrives once as a separate notification.
+- After a restart, the panel's live figures read unknown until its first reading arrives.
+
 ## 1.187.8
 
 ### Alert Settings shows each category's colour
