@@ -41,6 +41,7 @@ import { captureSnapshot, extractFeatures, captureLrFeatures } from './featureSn
 // aggregates as one family for threshold purposes).
 import { familyOf } from './alertOutcomes.js';
 import { setDefectivePackRetireLog } from './defectivePackLatch.js';
+import { setNwsLog } from './nws.js';
 // v0.9.59 — persist telemetry events so rise/short-clear/long-active
 // counts survive restarts. Without this the auto-silencing rules can
 // effectively never fire on a panel that gets occasional restarts.
@@ -2493,6 +2494,10 @@ export function startAlertMonitor(
   // v1.187.1 — a defective-pack record retired by computeAlerts is logged through the warn sink: a
   // timestamped line at level 40 in the structured log (defectivePackLatch.retireWarn).
   setDefectivePackRetireLog(warn);
+  // v1.187.10 (log review 10-03) — the NWS storm-alert client logs its transitions (first answer,
+  // event-set change, outage, carry limit at warn, recovery) through the monitor's sinks; every
+  // caller used to pass no logger, so no storm-alert fetch ever reached the journal.
+  setNwsLog(log, warn);
   let cfg = loadNotifyConfig();
   const send = deps.send ?? sendNotification;
   const channelConfigured = (): boolean => deps.send != null || isConfigured(cfg);

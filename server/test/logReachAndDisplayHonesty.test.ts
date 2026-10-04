@@ -53,7 +53,8 @@ test('the standing-failure heartbeat is DAILY, not hourly', () => {
 test('★ the signature excludes the counters that move every tick', () => {
   // Including them would make every dump a "change" — the trap this replaces.
   const s = src('src/snapshot.ts');
-  const i = s.indexOf('const signature = parts.map');
+  // v1.187.10 — built in fleetStatusDump now (pinned behaviourally in fleetStatusCompact.test.ts).
+  const i = s.indexOf('const signature = full.map');
   assert.ok(i > 0, 'the signature is built at the dump site');
   assert.match(s.slice(i, i + 200), /replace\(\/ON\\\/\\d\+msg/,
     'per-device message counters and ages must be normalised out of the signature');

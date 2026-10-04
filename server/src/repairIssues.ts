@@ -262,7 +262,14 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
     }
   }
 
-  // MPPT efficiency drift — actionable if drift > 3 pp.
+  // MPPT register-consistency drift — raised if the ratio falls > 3 pp below its baseline.
+  // v1.187.10 (log review 10-03, C20) — the card called this "lost conversion efficiency" and sent
+  // the operator to MC4 connectors, panels and a warranty inquiry. The ratio is reported W ÷
+  // (reported V × reported A), all three MPPT-INPUT registers (computeEquipmentHealth: "NOT a real
+  // conversion efficiency"): cabling, connector and panel losses lower W and V·A together and cannot
+  // move it, and live readings show W above V·A at moments (the registers are sampled apart). Only
+  // a divergence between the power register and the V/A registers, or an MPPT-internal change,
+  // moves it — so the steps are a meter check of V and A at the MPPT input, not hardware work.
   if (ctx.equipmentHealth) {
     for (const s of ctx.equipmentHealth.mpptStrings) {
       if (s.driftPctPts != null && s.driftPctPts < -3) {
@@ -270,13 +277,12 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
         out.push({
           id,
           severity: 'info',
-          title: `MPPT efficiency drift: Core ${s.coreNum} ${s.string} string`,
-          summary: `This MPPT string has lost ${Math.abs(s.driftPctPts)} percentage points of conversion efficiency vs its baseline (recent ${s.recentEffPct}% vs baseline ${s.baselineEffPct}%). Could be cabling resistance creep, MPPT heat damage, or panel-side degradation.`,
+          title: `MPPT reading drift: Core ${s.coreNum} ${s.string} string`,
+          summary: `The ratio of this string's reported input power to its reported voltage × current (W ÷ V·A) is ${Math.abs(s.driftPctPts)} points below its baseline (recent ${s.recentEffPct}% vs baseline ${s.baselineEffPct}%). All three are the MPPT's own input readings, so this is a reading-consistency ratio, not a measured conversion efficiency: cabling, connector or panel losses lower power and voltage × current together and do not move it. A sustained fall means the power reading and the voltage/current readings have drifted apart (a sensor or calibration effect) or something inside the MPPT changed.`,
           fixSteps: [
-            `Inspect MC4 connectors on the ${s.string} string for corrosion or loose seating.`,
-            'Check the DPU MPPT temperature — if elevated, improve ventilation around the unit.',
-            'Compare per-panel watts with a clamp meter; one underperforming panel can drag the string.',
-            'If drift continues, file an EcoFlow warranty inquiry on the MPPT.',
+            `Measure the ${s.string} string's voltage and current at the DPU's MPPT input (a DC clamp meter and a multimeter) while it is producing, and compare them with the reported volts and amps.`,
+            'If the measured V × A matches the reported watts, the drift is in the V/A readings, not lost energy — no hardware action is needed.',
+            'If the measured V × A is clearly above the reported watts for weeks, note the readings and raise them with EcoFlow support.',
           ],
           category: 'Hardware',
           estimatedTimeMinutes: 20,

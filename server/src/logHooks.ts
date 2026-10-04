@@ -1,3 +1,5 @@
+import { LogController } from 'fastify';
+
 /**
  * v1.184.0 — the Fastify logger's pino `logMethod` hook, extracted so it can be tested.
  *
@@ -33,4 +35,26 @@ export function logMethodHook(this: { debug: LogFn }, args: unknown[], method: L
     return;
   }
   method.apply(this, args as never);
+}
+
+/**
+ * v1.187.10 (log review 10-03, C32) — the panel's Fastify server options, extracted so a test
+ * builds the server exactly as index.ts does.
+ *
+ * Per-request logging stays OFF (v0.15.18: 'incoming request' + 'request completed' were 78 % of
+ * journald volume). Fastify 5.12 deprecates the top-level `disableRequestLogging` option
+ * (FSTDEP023, one non-JSON warning line per boot) and fastify@6 removes it; the supported form is a
+ * LogController constructed with it. The onResponse hook in index.ts still logs 5xx at warn, 4xx
+ * at debug and slow requests at info.
+ */
+export function panelFastifyOptions(level: string, stream?: { write(msg: string): void }) {
+  return {
+    logController: new LogController({ disableRequestLogging: true }),
+    logger: {
+      level,
+      // v1.184.0 — also demotes a client hang-up ("premature close") to debug.
+      hooks: { logMethod: logMethodHook as never },
+      ...(stream ? { stream } : {}),
+    },
+  };
 }

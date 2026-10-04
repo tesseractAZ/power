@@ -313,7 +313,10 @@ export async function prewarmTerminatorCache(opts: {
     await persistTerminatorWav(opts.cacheDir, file, r.wav);
     rendered++;
   }
-  opts.log(`audioRenderer: terminator pre-warm — ${rendered} rendered, ${cached} already cached${failed > 0 ? `, ${failed} failed` : ''}`);
+  // v1.187.10 (log review 10-03, C31) — name the language(s): the bilingual pre-warm runs one job
+  // per language, and its two summaries were byte-identical.
+  const langs = [...new Set(opts.entries.map((e) => e.lang))].join('+') || 'none';
+  opts.log(`audioRenderer: terminator pre-warm (${langs}) — ${rendered} rendered, ${cached} already cached${failed > 0 ? `, ${failed} failed` : ''}`);
   return { rendered, cached, failed };
 }
 

@@ -577,22 +577,25 @@ export class SnapshotStore extends EventEmitter {
       // Log transitions so the next "why is X offline" investigation isn't blind.
       // First-sight (existing == null) doesn't count as a transition since we
       // don't know what the prior state was — just record the inaugural state.
-      if (existing != null && existing.online !== newOnline) {
-        const name = existing.deviceName;
-        this.logger(`device-list: ${name} (${d.sn}) → ${newOnline ? 'ONLINE' : 'OFFLINE'} per EcoFlow Cloud`);
-      } else if (existing == null) {
-        this.logger(`device-list: ${deviceAliases[d.sn] ?? d.deviceName ?? d.sn} (${d.sn}) first sight, ${newOnline ? 'online' : 'offline'}`);
-      }
-      seenThisList.add(d.sn);
       // Local alias wins; else resolve a real display name from the cloud
       // deviceName, falling back to the product type when the cloud name is just
       // the bare serial (v0.75.0 — resolveDeviceName), then the raw serial.
       const name = deviceAliases[d.sn] ?? resolveDeviceName(d.deviceName, d.productName, d.sn);
+      // v1.7.0 (security #2) — strip terminal control/ESC bytes from the
+      // cloud/alias-sourced display name before it can reach the telnet render.
+      const displayName = sanitizeDisplayName(name, 48, d.sn);
+      if (existing != null && existing.online !== newOnline) {
+        this.logger(`device-list: ${existing.deviceName} (${d.sn}) → ${newOnline ? 'ONLINE' : 'OFFLINE'} per EcoFlow Cloud`);
+      } else if (existing == null) {
+        // v1.187.10 (log review 10-03, C31) — the name the store keeps, not the raw cloud name: a
+        // device the cloud lists under its bare serial printed the serial twice, and a name with a
+        // leading space kept it, while every later line used the resolved name.
+        this.logger(`device-list: ${displayName} (${d.sn}) first sight, ${newOnline ? 'online' : 'offline'}`);
+      }
+      seenThisList.add(d.sn);
       this.snap.devices[d.sn] = {
         sn: d.sn,
-        // v1.7.0 (security #2) — strip terminal control/ESC bytes from the
-        // cloud/alias-sourced display name before it can reach the telnet render.
-        deviceName: sanitizeDisplayName(name, 48, d.sn),
+        deviceName: displayName,
         productName: d.productName ?? guessProductFromName(name),
         online: newOnline,
         lastUpdated: existing?.lastUpdated ?? 0,
@@ -1407,9 +1410,36 @@ function guessProductFromName(name: string): string {
   return 'Unknown';
 }
 
-// v1.40.0: once-per-session memory for per-device quota-fetch failures so the
-// debug breadcrumb below cannot become poll-cadence log spam.
-const quotaErrLogged = new Set<string>();
+/**
+ * v1.187.10 (log review 10-03) — the open quota-failure EPISODE per device: the error code its
+ * breadcrumb was logged with. Deleted (with a recovery line) when the device's quota fetch succeeds.
+ *
+ * v1.40.0 kept a once-per-PROCESS set keyed by serial, and every failure line carried the wording
+ * written for the permanent product-class 1006 case. On 10-02 the vendor answered 1020 ("Request
+ * frequency too fast") to Cores 3, 5 and 1 for one poll, then to Core 2 and the alarm-path panel
+ * 16 minutes later: the lines said "serves from device/list presence only (logged once per
+ * session)" — false for a Core that recovered within 60 s — and Cores 5 and 1, failing again, got
+ * no line at all; a third Core 2 failure at 15:13 left no cause anywhere in the journal. Keyed on
+ * serial + code and reset on success, each episode logs its code once and its recovery once, and a
+ * standing 1006 device still logs once per process.
+ */
+const quotaErrOpen = new Map<string, string>();
+
+/** v1.187.10 — the class of a quota-fetch error, for the episode key and the poll summary. Pure. */
+export function quotaErrorCode(msg: string): string {
+  const api = /EcoFlow API error (\d+)/.exec(msg);
+  if (api) return api[1];
+  const http = /\bHTTP (\d{3})\b/.exec(msg);
+  if (http) return `HTTP ${http[1]}`;
+  if (/time(d)? ?out|ETIMEDOUT|UND_ERR_[A-Z_]*TIMEOUT/i.test(msg)) return 'timeout';
+  return 'error';
+}
+
+/** v1.187.10 — "Core 2 (<sn>)", or the bare serial when the store has no other name for it. */
+function snLabel(store: SnapshotStore, sn: string, listName?: string): string {
+  const name = store.get().devices[sn]?.deviceName ?? listName;
+  return name != null && name !== '' && name !== sn ? `${name} (${sn})` : sn;
+}
 
 /**
  * v1.138.0 — what one poll ATTEMPTED, not just what failed.
@@ -1433,9 +1463,19 @@ export interface RefreshResult {
   /** v1.173.0 — of those, the ones that failed with the settled product-class API error 1006
    *  (the standing accessory set). Anything else in failedSns is a NEW failure. */
   standingFailedSns?: string[];
+  /** v1.187.10 — the error class of each failed SN (quotaErrorCode: '1006', '1020', 'timeout', …). */
+  failureCodes?: Record<string, string>;
 }
 
-export async function refreshAll(store: SnapshotStore, log: (m: string) => void = () => {}): Promise<RefreshResult> {
+/**
+ * `warn` (v1.187.10): a quota failure of an alarm-path panel (alarmPathShp2Sns) logs its cause at
+ * warn; every other device's at `log`.
+ */
+export async function refreshAll(
+  store: SnapshotStore,
+  log: (m: string) => void = () => {},
+  warn: (m: string) => void = log,
+): Promise<RefreshResult> {
   store.markDeviceListAttempt();
   const list = await ecoflow.listDevices();
   store.setDeviceList(list);
@@ -1446,31 +1486,43 @@ export async function refreshAll(store: SnapshotStore, log: (m: string) => void 
   const attemptedSns = online.map((d) => d.sn);
   const failedSns: string[] = [];
   const standingFailedSns: string[] = [];
+  const failureCodes: Record<string, string> = {};
+  const alarmPath = new Set(alarmPathShp2Sns(store.get().devices));
   await Promise.all(
     online
       .map(async (d) => {
         try {
           const quota = await ecoflow.getQuotaAll(d.sn);
           store.setDeviceQuota(d.sn, quota);
+          // v1.187.10 — a success closes the device's failure episode, with one line.
+          const was = quotaErrOpen.get(d.sn);
+          if (was != null) {
+            quotaErrOpen.delete(d.sn);
+            log(`snapshot: quota fetch for ${snLabel(store, d.sn, d.deviceName)} recovered (was failing: ${was})`);
+          }
         } catch (e: any) {
           const msg = String(e?.message ?? e);
           store.setDeviceError(d.sn, msg);
           failedSns.push(d.sn);
-          if (/EcoFlow API error 1006\b/.test(msg)) standingFailedSns.push(d.sn);
-          // v1.40.0: debug-log once per device per session — persistent quota
-          // failures (e.g. API code 1006, a PRODUCT-CLASS limitation on
-          // some device classes) previously surfaced ONLY in the snapshot,
-          // leaving no log breadcrumb at all (silent-catch rule).
-          if (!quotaErrLogged.has(d.sn)) {
-            quotaErrLogged.add(d.sn);
-            log(`snapshot: quota fetch failed for ${d.sn} (${msg}) — device serves from device/list presence only (logged once per session)`);
+          const code = quotaErrorCode(msg);
+          failureCodes[d.sn] = code;
+          if (code === '1006') standingFailedSns.push(d.sn);
+          // v1.40.0: a breadcrumb — persistent quota failures previously surfaced ONLY in the
+          // snapshot (silent-catch rule). v1.187.10: once per failure EPISODE and code, not once
+          // per process; only the product-class 1006 says "presence only".
+          if (quotaErrOpen.get(d.sn) !== code) {
+            quotaErrOpen.set(d.sn, code);
+            const line = `snapshot: quota fetch failed for ${snLabel(store, d.sn, d.deviceName)} (${msg}) — ` + (code === '1006'
+              ? 'device serves from device/list presence only (product-class limit; logged once per process)'
+              : 'serving its cached quota and MQTT this poll; logged once per failure episode, with a recovery line');
+            (alarmPath.has(d.sn) ? warn : log)(line);
           }
         }
       }),
   );
   // v1.186.0 — every listed-online device has now been asked (answered or failed): hydrated.
   store.markFirstPollSettled();
-  return { attemptedSns, failedSns, standingFailedSns };
+  return { attemptedSns, failedSns, standingFailedSns, failureCodes };
 }
 
 /** Flatten nested object/array into a flat key map using dot/bracket notation. */
@@ -1706,6 +1758,59 @@ export function statusDumpLevel(o: {
   return o.nowMs - o.lastInfoMs >= (o.anchorMs ?? STATUS_ANCHOR_MS) ? 'info' : 'debug';
 }
 
+/**
+ * v1.187.10 (log review 10-03, C9) — one fleet-status emission: its level and its LINE.
+ *
+ * v1.145.0 demoted the unchanged 10-minute dump to DEBUG and called that a byte saving. It was
+ * not: LOG_LEVEL=debug is the standing option on the reviewed install, pino writes every level to
+ * stdout, and the journal keeps stdout — "level is not emission" (v1.148.0). 203 of the window's
+ * 245 fleet-status lines were these DEBUG lines, 44.7 % of the journal's bytes, every one carrying
+ * the same state vector. They are not pure redundancy: the per-device MQTT message counters and
+ * ages are the only lasting 10-minute message-rate series (they settled an SHP2 resume-time
+ * question in the 09-09 audit). So an unchanged tick now emits a COMPACT line: only the devices
+ * that report over MQTT (counter and age), and a count standing in for the OFF and
+ * API-online/no-MQTT entries, which the signature proves are as the last full line stated. A
+ * change, the first dump and the hourly anchor still emit the full line at INFO.
+ * Pure + exported for tests.
+ */
+export function fleetStatusDump(o: {
+  entries: ReadonlyArray<{ name: string; online: boolean; msgCount: number; lastMqttAtMs: number | null | undefined }>;
+  nowMs: number;
+  deviceListSuccessAtMs: number;
+  prevSignature: string | null;
+  lastInfoMs: number;
+  anchorMs?: number;
+}): { level: 'info' | 'debug'; line: string; signature: string } {
+  const full: string[] = [];
+  const compact: string[] = [];
+  let quiet = 0;
+  for (const e of o.entries) {
+    const ageS = e.lastMqttAtMs ? Math.round((o.nowMs - e.lastMqttAtMs) / 1000) : -1;
+    // v0.9.75 — a device EcoFlow Cloud reports ON that has NEVER produced an MQTT message is
+    // `API-online/no-MQTT` (EVSE / Smart Generator / spare-Core accessories), not `ON/0msg/∞`.
+    let status: string;
+    if (!e.online) status = 'OFF';
+    else if (e.msgCount === 0 && ageS < 0) status = 'API-online/no-MQTT';
+    else status = `ON/${e.msgCount}msg/${ageS < 0 ? '∞' : ageS + 's'}`;
+    full.push(`${e.name}=${status}`);
+    if (status.startsWith('ON/')) compact.push(`${e.name}=${status.slice(3)}`);
+    else quiet++;
+  }
+  const sinceList = o.deviceListSuccessAtMs > 0
+    ? `${Math.round((o.nowMs - o.deviceListSuccessAtMs) / 1000)}s ago`
+    : 'never';
+  // The signature is the STATE vector only — no counters, no list age. Those move every tick and
+  // would make every dump a "change" (memory: the trap when deduping a cadence line).
+  const signature = full.map((x) => x.replace(/ON\/\d+msg\/(\d+s|∞)/, 'ON')).join('|');
+  const level = statusDumpLevel({
+    signature, prevSignature: o.prevSignature, nowMs: o.nowMs, lastInfoMs: o.lastInfoMs, anchorMs: o.anchorMs,
+  });
+  const line = level === 'info'
+    ? `fleet-status [device-list last success ${sinceList}]: ${full.join(' · ')}`
+    : `fleet-status (unchanged) [list ${sinceList}]: ${compact.join(' · ')}${quiet > 0 ? ` · +${quiet} OFF or API-online/no-MQTT as last stated` : ''}`;
+  return { level, line, signature };
+}
+
 export function pollLogLines(o: {
   tookMs: number;
   failedCount: number;
@@ -1770,6 +1875,102 @@ export function pollLogLines(o: {
   return lines;
 }
 
+/**
+ * v1.187.10 (log review 10-03, C19) — what one poll's failure SET says, as a DELTA.
+ *
+ * v1.86.0 logged the whole set at warn whenever its sorted key changed, so a shrink read exactly
+ * like a growth ("poll completed … with 4 device fetch failure(s): <four serials>" when three Cores
+ * RECOVERED), and the first poll of every process restated the standing product-class 1006 set at
+ * warn. The window's 13 WARN lines held 3 real growths, 3 recoveries and 3 boot restatements, with
+ * serials only and no error codes. Now:
+ *   - warn: devices NEWLY failing with anything but the standing 1006 — named, with their code, the
+ *     alarm-path panel marked; an alarm-path panel is never treated as standing, whatever its code;
+ *   - info: devices newly failing with 1006 (the standing accessory set, expected: at every boot);
+ *   - info: devices that left the set because they ANSWERED (attempted and not failed);
+ *   - info: devices that left the set because they were not asked (listed offline) — not a recovery;
+ *   - info: the daily heartbeat while the set is unchanged (PERSISTING_FAILURE_HEARTBEAT_MS).
+ * Pure + exported for tests.
+ */
+export function pollFailureLines(o: {
+  /** The previous poll's failed SNs ([] at boot). */
+  prevFailedSns: readonly string[];
+  attemptedSns: readonly string[];
+  failedSns: readonly string[];
+  failureCodes: Readonly<Record<string, string>>;
+  /** "Core 2 (<sn>)" for an SN. */
+  label: (sn: string) => string;
+  alarmPathSns: ReadonlySet<string>;
+  tookMs: number;
+  nowMs: number;
+  /** When the failure set was last stated (any line of this function). */
+  lastStatedMs: number;
+  heartbeatMs?: number;
+}): { warn: string[]; info: string[] } {
+  const prev = new Set(o.prevFailedSns);
+  const failed = new Set(o.failedSns);
+  const attempted = new Set(o.attemptedSns);
+  const tag = (sn: string) => `${o.label(sn)}: ${o.failureCodes[sn] ?? 'error'}${o.alarmPathSns.has(sn) ? ' [alarm-path panel]' : ''}`;
+  const isStanding = (sn: string) => o.failureCodes[sn] === '1006' && !o.alarmPathSns.has(sn);
+  const newly = o.failedSns.filter((sn) => !prev.has(sn));
+  const newOther = newly.filter((sn) => !isStanding(sn));
+  const newStanding = newly.filter(isStanding);
+  const gone = o.prevFailedSns.filter((sn) => !failed.has(sn));
+  const recovered = gone.filter((sn) => attempted.has(sn));
+  const unasked = gone.filter((sn) => !attempted.has(sn));
+  const warn: string[] = [];
+  const info: string[] = [];
+  const total = `${o.failedSns.length} failing in total`;
+  if (newOther.length > 0) {
+    warn.push(`poll completed in ${o.tookMs}ms with ${newOther.length} NEW device fetch failure(s): ${newOther.map(tag).join(', ')} — serving from cache/presence; ${total}`);
+  }
+  if (newStanding.length > 0) {
+    info.push(`poll: ${newStanding.length} device(s) failing with product-class error 1006 (the standing accessory set, expected — served from device/list presence only): ${newStanding.map(o.label).join(', ')}`);
+  }
+  if (recovered.length > 0) {
+    info.push(`poll: device fetch recovered — ${recovered.map(o.label).join(', ')}; ${total}`);
+  }
+  if (unasked.length > 0) {
+    info.push(`poll: ${unasked.map(o.label).join(', ')} no longer asked (listed offline) — not a recovery; ${total}`);
+  }
+  if (warn.length === 0 && info.length === 0 && o.failedSns.length > 0
+    && o.nowMs - o.lastStatedMs >= (o.heartbeatMs ?? PERSISTING_FAILURE_HEARTBEAT_MS)) {
+    info.push(`poll: ${o.failedSns.length} device fetch failure(s) persisting (${o.failedSns.map(tag).join(', ')}) — daily heartbeat, set unchanged`);
+  }
+  return { warn, info };
+}
+
+/**
+ * v1.187.10 — the 10-minute fleet-status dump, as the poll loop runs it (fleetStatusDump over the
+ * store, with the last INFO signature and time). Exported so a test drives the real emission.
+ */
+export function createFleetStatusDumper(
+  store: SnapshotStore,
+  log: (msg: string) => void,
+  debug: (msg: string) => void = log,
+): (nowMs: number) => void {
+  /** v1.145.0 — the last fleet state vector emitted, and when INFO last went out. */
+  let lastStatusSignature: string | null = null;
+  let lastStatusInfoMs = 0;
+  return (nowMs) => {
+    try {
+      const out = fleetStatusDump({
+        entries: Object.values(store.get().devices).map((d) => ({
+          name: d.deviceName, online: d.online, msgCount: store.mqttMsgCountBySn.get(d.sn) ?? 0,
+          lastMqttAtMs: store.lastMqttAtBySn.get(d.sn),
+        })),
+        nowMs,
+        deviceListSuccessAtMs: store.lastDeviceListSuccessAt,
+        prevSignature: lastStatusSignature,
+        lastInfoMs: lastStatusInfoMs,
+      });
+      if (out.level === 'info') { lastStatusInfoMs = nowMs; log(out.line); } else { debug(out.line); }
+      lastStatusSignature = out.signature;
+    } catch (e: any) {
+      log(`fleet-status dump failed: ${e?.message ?? e}`);
+    }
+  };
+}
+
 const SLOW_POLL_MS = 5_000;
 
 /**
@@ -1798,7 +1999,8 @@ export function startPollLoop(
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
   let lastPollFailed = false; // track failure→ok recovery for the one INFO line that matters
-  let lastFailedSetKey = ''; // v1.86.0 — poll-failure set-change dedupe
+  // v1.86.0 — poll-failure set-change dedupe; v1.187.10 — the previous SET, for the delta lines.
+  let lastFailedSns: string[] = [];
   let lastFailedSetLoggedMs = 0;
   // Wire the per-SN state-transition logger into the store on first poll.
   store.setLogger(log);
@@ -1807,32 +2009,25 @@ export function startPollLoop(
     if (stopped) return;
     const t0 = Date.now();
     try {
-      const { attemptedSns, failedSns, standingFailedSns } = await refreshAll(store, log);
+      const { attemptedSns, failedSns, standingFailedSns, failureCodes } = await refreshAll(store, log, warn);
       const tookMs = Date.now() - t0;
-      // v1.79.0 — a poll with per-device fetch failures is not a bare "ok":
-      // name the devices at warn so the 10 s connect-timeout ceiling stops
-      // hiding inside "poll ok in 10486ms (slow)".
-      if (failedSns.length > 0) {
-        // v1.86.0 — log on failure-SET CHANGE only. The four accessory devices
-        // that reject /quota/all fail EVERY poll; the v1.79.0 per-poll warn ran
-        // 2,336 lines in 40h and buried the one real SHP2 failure among them.
-        // A stable set logs once at warn (and once per hour at info as a
-        // heartbeat); a CHANGED set — a new device failing, or one recovering —
-        // always logs at warn immediately.
-        const setKey = [...failedSns].sort().join(',');
-        if (setKey !== lastFailedSetKey) {
-          lastFailedSetKey = setKey;
-          lastFailedSetLoggedMs = Date.now();
-          warn(`poll completed in ${tookMs}ms with ${failedSns.length} device fetch failure(s): ${failedSns.join(', ')} — serving from cache/presence`);
-        } else if (Date.now() - lastFailedSetLoggedMs >= PERSISTING_FAILURE_HEARTBEAT_MS) {
-          lastFailedSetLoggedMs = Date.now();
-          log(`poll: ${failedSns.length} device fetch failure(s) persisting (${failedSns.join(', ')}) — daily heartbeat, set unchanged`);
-        }
-      } else {
-        if (lastFailedSetKey !== '') {
-          lastFailedSetKey = '';
-          log(`poll: all device fetches recovered`);
-        }
+      // v1.79.0 — a poll with per-device fetch failures is not a bare "ok": name the devices so
+      // the 10 s connect-timeout ceiling stops hiding inside "poll ok in 10486ms (slow)".
+      // v1.86.0 — on failure-SET CHANGE only (the four 1006 accessories fail EVERY poll; a per-poll
+      // warn ran 2,336 lines in 40 h). v1.187.10 — as a DELTA (pollFailureLines): warn names the
+      // devices NEWLY failing outside the standing 1006 set, with their codes; recoveries, the
+      // standing set at boot and the daily heartbeat are info.
+      {
+        const nowMs = Date.now();
+        const out = pollFailureLines({
+          prevFailedSns: lastFailedSns, attemptedSns, failedSns, failureCodes: failureCodes ?? {},
+          label: (sn) => snLabel(store, sn), alarmPathSns: new Set(alarmPathShp2Sns(store.get().devices)),
+          tookMs, nowMs, lastStatedMs: lastFailedSetLoggedMs,
+        });
+        for (const line of out.warn) warn(line);
+        for (const line of out.info) log(line);
+        if (out.warn.length > 0 || out.info.length > 0) lastFailedSetLoggedMs = nowMs;
+        lastFailedSns = [...failedSns];
       }
       // v1.148.0 — accumulate durations; report once per window.
       pollDurations.push(tookMs);
@@ -1909,52 +2104,12 @@ export function startPollLoop(
   // "which device stopped reporting and when" question is one log-grep
   // away. Runs every 10 min; bounded output (one log line covers the fleet).
   const STATUS_DUMP_INTERVAL_MS = 10 * 60 * 1000;
-  /** v1.145.0 — the last fleet state vector emitted at INFO, and when. */
   /** v1.148.0 — poll durations awaiting their periodic summary. */
   const pollDurations: number[] = [];
-  let lastStatusSignature: string | null = null;
-  let lastStatusInfoMs = 0;
+  const dumpFleetStatus = createFleetStatusDumper(store, log, debug);
   const dumpTimer = setInterval(() => {
     if (stopped) return;
-    try {
-      const now = Date.now();
-      const parts: string[] = [];
-      const devs = Object.values(store.get().devices);
-      for (const d of devs) {
-        const lastAt = store.lastMqttAtBySn.get(d.sn);
-        const count = store.mqttMsgCountBySn.get(d.sn) ?? 0;
-        const ageS = lastAt ? Math.round((now - lastAt) / 1000) : -1;
-        // v0.9.75 — devices that EcoFlow Cloud reports as ON but that have
-        // NEVER produced an MQTT message (count=0, lastAt=null, ageS=-1)
-        // are unrepresented on the MQTT bus — typically EVSE / Smart
-        // Generator / spare-Core accessories where the OpenAPI doesn't
-        // push `_quota`. Rendering them as `ON/0msg/∞` looked like a
-        // delivery bug. `API-online/no-MQTT` makes the state explicit.
-        let status: string;
-        if (!d.online) {
-          status = 'OFF';
-        } else if (count === 0 && ageS < 0) {
-          status = 'API-online/no-MQTT';
-        } else {
-          status = `ON/${count}msg/${ageS < 0 ? '∞' : ageS + 's'}`;
-        }
-        parts.push(`${d.deviceName}=${status}`);
-      }
-      const sinceList = store.lastDeviceListSuccessAt > 0
-        ? `${Math.round((now - store.lastDeviceListSuccessAt) / 1000)}s ago`
-        : 'never';
-      // The signature is the STATE vector only — no counters, no list age. Those
-      // move every tick and would make every dump a "change".
-      const signature = parts.map((x) => x.replace(/ON\/\d+msg\/(\d+s|∞)/, 'ON')).join('|');
-      const level = statusDumpLevel({
-        signature, prevSignature: lastStatusSignature, nowMs: now, lastInfoMs: lastStatusInfoMs,
-      });
-      const line = `fleet-status [device-list last success ${sinceList}]: ${parts.join(' · ')}`;
-      if (level === 'info') { lastStatusInfoMs = now; log(line); } else { debug(line); }
-      lastStatusSignature = signature;
-    } catch (e: any) {
-      log(`fleet-status dump failed: ${e?.message ?? e}`);
-    }
+    dumpFleetStatus(Date.now());
   }, STATUS_DUMP_INTERVAL_MS);
   dumpTimer.unref();
 

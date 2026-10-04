@@ -4,11 +4,12 @@ import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
+import { resolveRetentionDays } from './retention.js';
 import { getWeather, coveringRadiationEpoch, RADIATION_LABEL_LAG_HOURS, type WeatherHour, type WeatherForecast } from './weather.js';
 import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2, secondaryShp2s } from './shp2Membership.js';
 import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
-import { getNwsAlerts, isNwsEnabled, nwsEventWindow, type NwsAlert } from './nws.js';
+import { getNwsAlerts, isNwsEnabled, nwsEventWindow, TTL_MS as NWS_ALERTS_TTL_MS, type NwsAlert } from './nws.js';
 import { PHOENIX_SITE } from './physics/clearSky.js';
 import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
 import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
@@ -2667,15 +2668,36 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
 
 const EOL_SOH = 80;                                          // % — conventional LFP end-of-life
 const DEGRADE_REPORT_TTL_MS = 30 * 60 * 1000;
-// v0.9.80 — cap at the recorder's 30-day retention (recorder.ts RETAIN_MS).
-// The samples table is pruned to 30 days, so any window beyond that is pure
-// dead index-scan range — the SoH regression has no rows older than 30 days
-// to fit. The previous 400-day lower bound made degradation scan ~370 days of
-// empty range per pack, every cache cycle; on a synchronous SQLite store this
-// serialized the cache-warmer's "parallel" cohort (runway + RTE + degradation
-// all blocked on it), producing the 4-5.6 s slow cycles in the 42h log. Output
-// is byte-for-byte identical (no rows beyond 30 days exist to regress).
-const DEGRADE_REPORT_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;   // = recorder RETAIN_MS
+/**
+ * v1.187.10 (log review 10-03, MEDIUM) — the regression window comes from the configured samples
+ * retention, clamped to [DEGRADE_WINDOW_MIN_DAYS, DEGRADE_WINDOW_MAX_DAYS].
+ *
+ * v0.9.80 fixed it at 30 days "= recorder RETAIN_MS", a premise v1.51.0 retired when retention
+ * became configurable (1825 days on the reviewed install). Over 30 days the gate chain could not be
+ * satisfied: sohSignalBelowFloor needs a first-quartile minus last-quartile SoH drop of
+ * SOH_MIN_OBSERVED_DROP_PTS (1.5 pt), and the quartile centres of a W-day window are 0.75·W apart,
+ * so a linear fade must reach 1.5 / (0.75·30/365.25) ≈ 24 %/yr — while fadeExceedsPlausibleCeiling
+ * rejects anything above EOL_MAX_FADE_PCT_PER_YEAR (10 %/yr). No linear fade could reach
+ * 'projecting': the dated EOL (HA ..._soonest_pack_eol), the peer-fade pool, the peer-outlier
+ * count and the "Pack wearing fast" repair issue were all permanently dead, while forecast-soh
+ * (120 days) reported two packs declining ~9-10 %/yr.
+ *
+ * Both gates pass for a linear fade f when 0.75·W·f/365.25 ≥ 1.5, i.e. W ≥ 730/f days:
+ *   - the 120-day floor (= SOH_FORECAST_HISTORY_MS, so the dated EOL and forecast-soh read the
+ *     same window) dates fades of about 6-10 %/yr;
+ *   - the 365-day cap dates fades down to about 2 %/yr once a year of history exists, and bounds
+ *     the scan (6-hour buckets: 1,460 per pack metric) on a multi-year retention.
+ * A retention below 120 days leaves the window at 120: there are simply fewer rows. Retention
+ * below ~75 days can never date an EOL (the floor needs 73 days at the 10 %/yr ceiling).
+ * Computed in the analytics worker, whose process.env is a copy of the main thread's at spawn,
+ * so RECORDER_RETENTION_DAYS reaches it (pinned end to end in degradationWindow.test.ts).
+ */
+export const DEGRADE_WINDOW_MIN_DAYS = 120;
+export const DEGRADE_WINDOW_MAX_DAYS = 365;
+/** v1.187.10 — the degradation window (days) for a configured retention (days). Pure. */
+export function degradationWindowDays(retentionDays: number): number {
+  return Math.min(DEGRADE_WINDOW_MAX_DAYS, Math.max(DEGRADE_WINDOW_MIN_DAYS, Math.round(retentionDays)));
+}
 const DEGRADE_BUCKET_SEC = 6 * 3600;                          // 6-hour buckets — de-noise SoH jitter
 // v0.14.2 — require ≥3 weeks of trend before DATING a multi-year EOL. A 17-day
 // window produced a false-precise "0.9 yr / EOL 2027" projection from a steep
@@ -2691,7 +2713,7 @@ const EOL_MIN_R2 = 0.3;                                       // trend must expl
 // recalibration/quantization, which OLS happily fits as a confident multi-%/yr
 // fade. You cannot extrapolate an ~18-pt decline-to-EOL from a ~1-pt signal; this
 // floor (~3 quantization steps) holds such packs at "learning". See sohSignalBelowFloor.
-const SOH_MIN_OBSERVED_DROP_PTS = 1.5;
+export const SOH_MIN_OBSERVED_DROP_PTS = 1.5;
 // v0.64.0 — implausible-fade ceiling for the DATED-EOL projection. Mirrors the
 // forecast-soh ALERT path's MAX_SOH_FADE_PCT_PER_YEAR: real LFP fades ~2-3 %/yr, so an
 // OLS slope implying a faster annual fade is early-life BMS fullCap recalibration
@@ -2701,7 +2723,7 @@ const SOH_MIN_OBSERVED_DROP_PTS = 1.5;
 // (live: Core 3 packs 4 & 5, 95 % SoH, fit 39-43 %/yr). A genuine fast failure is caught
 // by the absolute SoH threshold alarm separately. ALIASED from the alert-path constant
 // so the two paths can never silently drift apart.
-const EOL_MAX_FADE_PCT_PER_YEAR = MAX_SOH_FADE_PCT_PER_YEAR;  // = 10 %/yr
+export const EOL_MAX_FADE_PCT_PER_YEAR = MAX_SOH_FADE_PCT_PER_YEAR;  // = 10 %/yr
 const EOL_MAX_YEARS = 40;                                     // beyond this, "EOL not in sight"
 // v0.42.0 — pack mAh → kWh conversion. Each DPU pack is 32S1P (~104 V nominal;
 //   32 series cells whose mV sum to packVoltageMv). fullCap is single-string mAh.
@@ -2775,6 +2797,8 @@ export interface PackDegradation {
 export interface FleetDegradation {
   generatedAt: number;
   eolSoh: number;
+  /** v1.187.10 — the regression window in days (degradationWindowDays of the configured retention). */
+  windowDays?: number;
   packs: PackDegradation[];
 }
 
@@ -3294,9 +3318,11 @@ function analysePack(
   // ALERT path already rejected fades > MAX_SOH_FADE_PCT_PER_YEAR; this mirrors it so the
   // DATED EOL can't outrun the alert. Route to 'learning' with NULL fade/EOL (does NOT
   // seed the peer-fade pool, the confidence median-r², or degradation_soonest_eol_years
-  // → HA sensor stays 'unknown'). Re-arms automatically once a real, plausibly-paced
-  // multi-year trend accumulates. fadePctPerYear is already non-null here (the 'stable'
-  // branch returned on null), so the summary's .toFixed is safe.
+  // → HA sensor stays 'unknown'). Re-arms automatically once a plausibly-paced trend clears the
+  // floor inside the window (v1.187.10: the window is 120-365 days, degradationWindowDays — over the
+  // former fixed 30 days no linear fade could clear both this ceiling and the 1.5-pt floor).
+  // fadePctPerYear is already non-null here (the 'stable' branch returned on null), so the
+  // summary's .toFixed is safe.
   if (fadeExceedsPlausibleCeiling(fadePctPerYear)) {
     return mk({
       status: 'learning',
@@ -3429,7 +3455,9 @@ export async function computeDegradation(
     return degradationCache.value;
   }
   const now = Date.now();
-  const since = now - DEGRADE_REPORT_HISTORY_MS;
+  // v1.187.10 — from the configured retention (see DEGRADE_WINDOW_MIN_DAYS), not a fixed 30 days.
+  const windowDays = degradationWindowDays(resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS));
+  const since = now - windowDays * 86_400_000;
   const dpus = allDpus(devices);
 
   // Pass 1 — regress and project every pack independently. Yield to the
@@ -3506,7 +3534,7 @@ export async function computeDegradation(
     return (a.coreNum ?? 999) - (b.coreNum ?? 999) || a.packNum - b.packNum;
   });
 
-  const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, packs: tagHomePacks(packs, devices) };
+  const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, windowDays, packs: tagHomePacks(packs, devices) };
   if (dpus.length > 0) degradationCache = { ts: now, value };
   return value;
 }
@@ -6840,12 +6868,10 @@ export function computeSelfConsumption(
  * =================================================================== */
 
 const THERMAL_EVENT_TTL_MS = 30 * 60 * 1000;
-// v0.14.2 — cap at the recorder's 30-day retention (recorder.ts RETAIN_MS), like
-// DEGRADE_REPORT_HISTORY_MS. The samples table is pruned to 30 days, so the old
-// 400-day window scanned ~370 days of empty index range per pack every cache
-// cycle on the synchronous SQLite store — the same dead-range scan the
-// degradation path was fixed for in v0.9.80. Output is identical (no rows older
-// than 30 days exist to count).
+// v0.14.2 — capped at 30 days (then the recorder's fixed retention). v1.187.10: retention has been
+// configurable since v1.51.0, so this is now simply the event-count window ("in the last 30 days"),
+// not the extent of the data; the degradation report derives its own window from the retention
+// (degradationWindowDays).
 const THERMAL_EVENT_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
 const THERMAL_THRESHOLD_C_INFO = (96 - 32) / 1.8;   // ≈ 35.6 °C
 const THERMAL_THRESHOLD_C_WARN = (113 - 32) / 1.8;  // 45 °C
@@ -8226,6 +8252,8 @@ let stormPrepCache: { ts: number; value: Alert[] } | null = null;
 export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>): Promise<Alert[]> {
   if (!isNwsEnabled()) return [];
   if (stormPrepCache && Date.now() - stormPrepCache.ts < STORM_PREP_TTL_MS) return stormPrepCache.value;
+  // v1.187.10 (log review 10-03) — the alarm path's read: null also when the last good feed is past
+  // NWS_ALERTS_MAX_CARRY_MS (an outage that began after a boot), so a stale feed is UNKNOWN here.
   const feed = await getNwsAlerts();
   // v1.187.3 (log review) — no feed is a FAILED fetch with nothing cached (getNwsAlerts returns its
   // last good feed when a fetch fails, and null until one has succeeded): the storm alerts are
@@ -8235,9 +8263,12 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
   // still in effect. Thrown, the feed records a failure and stays cold until a fetch succeeds; not
   // cached, so a later pass asks again — after NWS_ALERTS_FAILURE_BACKOFF_MS (getNwsAlerts backs
   // off a failed fetch, answering null inside it). A successful fetch with no alerts is still [].
-  if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');
+  if (feed == null) throw new Error('NWS alerts unknown — no successful fetch within the carry limit (the fetch failed and no current feed is cached)');
+  // v1.187.10 — an answer built from a CARRIED feed (older than the alerts TTL: the latest fetch
+  // failed) is not cached for STORM_PREP_TTL_MS, so the pass that crosses the carry limit sees it.
+  const carried = Date.now() - feed.fetchedAt >= NWS_ALERTS_TTL_MS;
   if (feed.alerts.length === 0) {
-    stormPrepCache = { ts: Date.now(), value: [] };
+    if (!carried) stormPrepCache = { ts: Date.now(), value: [] };
     return [];
   }
   const out: Alert[] = [];
@@ -8289,13 +8320,15 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
       ],
     });
   }
-  stormPrepCache = { ts: Date.now(), value: out };
+  if (!carried) stormPrepCache = { ts: Date.now(), value: out };
   return out;
 }
 
+/** The display read (/api/nws-alerts, the calendar): the last good feed at any age (v1.187.10 —
+ *  the carry limit applies to the storm-prep alarm path only). */
 export async function getActiveNwsAlerts(): Promise<NwsAlert[]> {
   if (!isNwsEnabled()) return [];
-  const feed = await getNwsAlerts();
+  const feed = await getNwsAlerts({ maxCarryMs: Infinity });
   return feed?.alerts ?? [];
 }
 

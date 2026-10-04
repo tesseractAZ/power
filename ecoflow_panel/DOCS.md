@@ -946,6 +946,18 @@ alarm keys on this (`STALE_MS = 3 min` in `alerts.ts`), so several guards protec
 logs at **warn**. Every 10 min a bounded **fleet-status** line dumps per-SN
 `ON/<count>msg/<age>s` (or `OFF` / `API-online/no-MQTT`).
 
+**v1.187.10 — failures as a delta, causes per episode.** The poll's failure set is logged as a
+change against the previous poll (`pollFailureLines`): **warn** names only the devices newly
+failing outside the standing product-class 1006 set, with their error class (`quotaErrorCode`:
+`1020`, `HTTP 502`, `timeout`, …) and the alarm-path panel marked (it is never treated as
+standing, whatever its code); devices newly failing with 1006 (the standing accessory set, at every
+boot), devices that answered again (`recovered`), devices no longer asked (listed offline — not a
+recovery) and the daily heartbeat are **info**. Each device's cause is logged once per failure
+**episode and code**, with a recovery line when its quota fetch succeeds again; only 1006 says
+"serves from device/list presence only", and an alarm-path panel's cause is logged at warn. (It was
+once per process and serial, with the 1006 wording for every code: a one-poll 1020 rate limit read
+as permanent, and a device failing again later left no cause in the journal.)
+
 ##### Per-circuit POWER sensors (v1.141.0)
 
 `planCircuitDiscovery` publishes **two** configs per channel: the existing
@@ -1061,10 +1073,14 @@ window had already rolled past it.
 
 | line | was | now |
 |---|---|---|
-| `fleet-status` 10-min dump | 314 lines / 53 h carrying **one distinct body** | INFO on state **change** + one hourly anchor; the cadence stays at DEBUG |
+| `fleet-status` 10-min dump | 314 lines / 53 h carrying **one distinct body** | INFO on state **change** + one hourly anchor (full line); **v1.187.10** an unchanged tick emits a **compact** line — only the devices on MQTT (counter and age) plus a count for the OFF / API-online/no-MQTT entries. v1.145.0 only demoted the unchanged line to DEBUG, which saves nothing at the standing `LOG_LEVEL=debug`: those lines were 44.7 % of the reviewed journal's bytes |
 | `recorder: N samples in last …` | debug-*gated*, info-*emitted* (v1.143.0) | a real debug channel |
 | `solar-model: fitted on N/M` | 109 lines, 54 exact consecutive repeats | emitted on change |
 | `poll: N device fetch failure(s) persisting` | hourly | daily — it reports a permanent, settled limit |
+| `weather: periodic GHI persistence (264 hours)` | every 45-min tick, byte-identical, whether or not anything was written (54 lines / 40.8 h, 35 on ticks that wrote nothing) | **v1.187.10** removed: the recorder logs every real write; the tick logs "nothing new to store" at most every 6 h, and "no forecast available" / "available again" on the transitions (`createGhiTickLogger`) |
+| `device-list: … first sight` | the raw cloud name (a device listed under its serial printed it twice; a leading space was kept) | **v1.187.10** the resolved, sanitized name the store keeps |
+| `audioRenderer: terminator pre-warm` | two byte-identical summaries (one per language) | **v1.187.10** names its language (`(es)`, `(en)`) |
+| Fastify `FSTDEP023` deprecation | one non-JSON warning per boot (`disableRequestLogging` top-level option, removed in fastify@6) | **v1.187.10** request logging is turned off through `logController: new LogController({ disableRequestLogging: true })` (`panelFastifyOptions`, logHooks.ts) |
 
 `statusDumpLevel`'s signature deliberately **excludes** the per-device message
 counters and the device-list age. Those move every tick, so including them would
@@ -2019,6 +2035,9 @@ hardware, clock skew, not credentials) from `network` from `other`; sustained
 auth-shaped failure recommends a client rebuild, cooldown-limited.
 `/api/health` returns `ok:false` **and HTTP 503** while blind, so the HA
 watchdog and any uptime probe see it.
+`/api/health`'s `pollErrorKind` is that class only while a failure is current (blind, or a failed
+poll not yet followed by a success) and `null` otherwise (`healthPollErrorKind`, v1.187.10 — it
+read `"other"` on a healthy add-on, the classifier's fallback for no error).
 
 **Panel verdicts (v1.154.0).** A failed, never-asked or replayed alarm-path SHP2
 poll also routes here: `notePollFailed` carries `{cause, sns}`, bound to that
@@ -4171,7 +4190,7 @@ Regresses each pack's BMS-reported SoH history into a calendar-fade rate (%/yr),
 | `pack${n}_lifetime_chg_mah`, `pack${n}_lifetime_dsg_mah` | coulombic efficiency (see §2) |
 | Device fields `pk.actSoh ?? pk.soh`, `pk.fullCapMah`, `pk.designCapMah`, `pk.accuDsgMah`/`accuChgMah`, `pk.cycles` | current-state snapshot |
 
-`DEGRADE_REPORT_HISTORY_MS = 30 d` (the report window is fixed; it coincides with the retention default, not the configured retention), `DEGRADE_BUCKET_SEC = 6*3600` (6-hour buckets to de-noise SoH jitter), `DEGRADE_REPORT_TTL_MS = 30 min`.
+`degradationWindowDays(retention)` — **v1.187.10** the report window is the configured samples retention (`RECORDER_RETENTION_DAYS`) clamped to `[DEGRADE_WINDOW_MIN_DAYS = 120, DEGRADE_WINDOW_MAX_DAYS = 365]` days (it was a fixed 30 days, under which no linear fade could pass both the 1.5-pt observed-drop floor and the 10 %/yr ceiling: the quartile means of a W-day window sit 0.75·W apart, so the floor needs a fade of 1.5 / (0.75·W/365.25) %/yr — about 24 %/yr at 30 days, 6 %/yr at 120 days, 2 %/yr at 365 days). The 120-day floor equals the forecast-soh alert's window, so the dated EOL and the alert read the same history; the 365-day cap bounds the scan on a multi-year retention. The window is computed in the analytics worker, whose environment is the main thread's at spawn. Reported as `windowDays` on the report, `DEGRADE_BUCKET_SEC = 6*3600` (6-hour buckets to de-noise SoH jitter), `DEGRADE_REPORT_TTL_MS = 30 min`.
 
 #### Calculation — step by step
 
@@ -4193,7 +4212,7 @@ The function returns one of `no-data | learning | stable | projecting` via `mk(.
 3. **`learning` (signal-below-floor)** — `sohSignalBelowFloor(sohPts)`: `mean(first quartile) − mean(last quartile) < SOH_MIN_OBSERVED_DROP_PTS (1.5)`. Catches a shallow multi-step decline smaller than BMS quantization noise.
 4. **`learning` (immature)** — `!fit || spanMs < EOL_MIN_SPAN_MS (21 d) || fit.r2 < EOL_MIN_R2 (0.3)`. Preliminary fade shown; dated EOL withheld; Kalman dated EOL also nulled.
 5. **`stable`** — `fade == null || fade < 0.1 || currentSoh ≤ EOL_SOH || yearsToEol > EOL_MAX_YEARS (40)`. Flat / improving / already-at-EOL / effectively-never.
-6. **`learning` (implausible-fast-fade)** — `fadeExceedsPlausibleCeiling(fade)` i.e. `fade > EOL_MAX_FADE_PCT_PER_YEAR (10 %/yr, = MAX_SOH_FADE_PCT_PER_YEAR)`. Real LFP fades ~2–3 %/yr; anything faster is early-life fullCap settling. **This mirrors the forecast-soh alert ceiling so the dated EOL can never outrun the alert.** Fade/EOL nulled → HA `..._soonest_pack_eol` stays `unknown` (documented expected-unknown on a near-new fleet).
+6. **`learning` (implausible-fast-fade)** — `fadeExceedsPlausibleCeiling(fade)` i.e. `fade > EOL_MAX_FADE_PCT_PER_YEAR (10 %/yr, = MAX_SOH_FADE_PCT_PER_YEAR)`. Real LFP fades ~2–3 %/yr; anything faster is early-life fullCap settling. **This mirrors the forecast-soh alert ceiling so the dated EOL can never outrun the alert.** Fade/EOL nulled → HA `..._soonest_pack_eol` stays `unknown`. Until v1.187.10 the 30-day window made `projecting` unreachable for any linear fade (see the window above), so the sensor read `unknown` for every pack whatever its fade; with the retention-derived window a fade of roughly 6–10 %/yr is dated once 120 days of history exist, and slower fades as the history grows toward a year.
 7. **`projecting`** — the real dated projection with confidence band + Arrhenius note.
 
 #### Peer comparison (Pass 2 of `computeDegradation`)
@@ -4202,7 +4221,7 @@ Baseline pool = packs with `status==='projecting'` **and** SHP2-connected. Needs
 Packs are sorted worst-first (`projecting` → `learning` → `stable` → `no-data`; within projecting by soonest `yearsToEol`).
 
 #### Outputs
-`GET /api/degradation` → `FleetDegradation { generatedAt, eolSoh, packs: PackDegradation[] }`. Each `PackDegradation` carries ~40 fields: current SoH/capacity, `fadePctPerYear`+`fadeUncertaintyPct`, `r2`, `yearsToEol`/`Low`/`High`, `eolDate`, `peerFadeRatio`/`peerOutlier`, all Arrhenius fields, `coulombicEffPct`, all five `kalman*` fields, and a plain-language `summary`. Feeds HA sensor `..._soonest_pack_eol`, the pack-risk scorers (both v1 & v2), `computeConfidenceSnapshot` (median r²), and `/api/repair-issues`.
+`GET /api/degradation` → `FleetDegradation { generatedAt, eolSoh, windowDays, packs: PackDegradation[] }`. Each `PackDegradation` carries ~40 fields: current SoH/capacity, `fadePctPerYear`+`fadeUncertaintyPct`, `r2`, `yearsToEol`/`Low`/`High`, `eolDate`, `peerFadeRatio`/`peerOutlier`, all Arrhenius fields, `coulombicEffPct`, all five `kalman*` fields, and a plain-language `summary`. Feeds HA sensor `..._soonest_pack_eol`, the pack-risk scorers (both v1 & v2), `computeConfidenceSnapshot` (median r²), and `/api/repair-issues`.
 
 #### Config knobs
 `RUNWAY_DISCHARGE_EFFICIENCY` etc. belong to runway (separate cluster). Degradation itself is constant-driven (no env knobs); the salient constants are `EOL_SOH=80`, `EOL_MIN_SPAN_DAYS=21`, `EOL_MIN_R2=0.3`, `EOL_MAX_YEARS=40`, `EOL_MAX_FADE_PCT_PER_YEAR=10`, `SOH_MIN_OBSERVED_DROP_PTS=1.5`.
@@ -4218,7 +4237,7 @@ Empty roster short-circuits (cache not stored when `dpus.length === 0`). Every "
 Discharge-mAh ÷ charge-mAh over a recent window from the BMS lifetime counters. Healthy LFP stays ≥ ~99.5%; a downward drift means side reactions consuming charge — an early cell-aging signal SoH-by-itself misses. **On this specific fleet the BMS counters are demonstrably unphysical, so the self-validating estimator publishes `null` for all 15 home packs by design** (v1.19.0 engine-review F17).
 
 #### Inputs & the F17 self-validation
-Reads only the **edge points** (first/last) of two windows for both `pack${n}_lifetime_chg_mah` and `_dsg_mah`: the full ~30-day degradation window and the 7-day tail (`CE_WINDOW_MS = 7 d`). `mergeCounterEdges` dedups the two edge pairs by ts — provably equivalent input to reading the raw window, at four LIMIT-1 index seeks instead of ~28k rows.
+Reads only the **edge points** (first/last) of two windows for both `pack${n}_lifetime_chg_mah` and `_dsg_mah`: the full degradation window (120–365 days since v1.187.10) and the 7-day tail (`CE_WINDOW_MS = 7 d`). `mergeCounterEdges` dedups the two edge pairs by ts — provably equivalent input to reading the raw window, at four LIMIT-1 index seeks instead of ~28k rows.
 
 Publishes the 7-day CE **only when all three gates pass**:
 1. Span guard: both counters span ≥ `CE_MIN_SPAN_MS = 2 × 7 d` (a shorter history makes tail == full and the checks tautological).
@@ -4492,7 +4511,7 @@ Uses the **restored display basis** (`forecast.restoredSolarModel ?? forecast.so
 ### 14. Equipment health — MPPT + inverter standby (`computeEquipmentHealth` via `ratioSeries` / `cappedMedianEffPct`)
 
 #### What + why
-Two DPU-electronics KPIs: **MPPT conversion efficiency** (DC-side V·A vs AC-side W — really a register-consistency ratio, capped 100%; a sustained drop is earliest electronics aging) per HV/LV string, and **inverter standby loss** (residual `ac_out` while that DPU's PV is dark — the inverter's own idle draw), trended week-over-week.
+Two DPU-electronics KPIs: **MPPT conversion efficiency** (reported W ÷ reported V·A, all three MPPT-**input** registers — a register-consistency ratio, not a measured conversion efficiency, capped 100%; cabling, connector and panel losses move W and V·A together and cannot move it) per HV/LV string, and **inverter standby loss** (residual `ac_out` while that DPU's PV is dark — the inverter's own idle draw), trended week-over-week.
 
 #### Inputs / constants
 `ratioSeries` pulls `{watts, volts, amps}` per string via `queryMulti` at `EQ_HEALTH_BUCKET_SEC = 300 s` over the equipment-health history window; snaps V/A to nearest W ts within the bucket size. Per-sample ratios >100.5% are dropped; `cappedMedianEffPct(effs) = effs.length ? min(100, median(effs)) : null`. `MPPT_EFF_TTL_MS = 10 min`.
@@ -4563,7 +4582,7 @@ exactly like a healthy one, which is how this detector hid for its entire life.
 - **Pack-risk v1/v2** consume degradation, thermalEvents, internalResistance, chargeCurve (see §9–10).
 
 ### Global honest-null / anti-footgun summary
-Every engine here caches only when `dpus.length > 0`; prefers `null`/`learning`/`no-data`/`insufficient-cadence` to a fabricated number; excludes spare Cores from baselines while still scoring them; floors MAD in every robust-z test to avoid unbounded scores at zero scatter; and clamps published physical quantities (SoH ≤100, CE ≤100, RTE ≤100). The following HA sensors read `unknown` **by design** on the current near-new fleet, not because anything is broken: `..._soonest_pack_eol` (degradation), all `coulombicEffPct` (F17), predictive-SoH, and the immature IR trend.
+Every engine here caches only when `dpus.length > 0`; prefers `null`/`learning`/`no-data`/`insufficient-cadence` to a fabricated number; excludes spare Cores from baselines while still scoring them; floors MAD in every robust-z test to avoid unbounded scores at zero scatter; and clamps published physical quantities (SoH ≤100, CE ≤100, RTE ≤100). The following HA sensors can read `unknown` **by design**, not because anything is broken: `..._soonest_pack_eol` (degradation — no pack has a plausible, clear-enough fade inside the window; before v1.187.10 it could never read otherwise, see §6.1), all `coulombicEffPct` (F17), predictive-SoH, and the immature IR trend.
 
 
 ---
@@ -5874,7 +5893,7 @@ The typical load, the load step and the loaded references come from `coreActivit
 
 #### Other learned/situational sources threaded into the monitor's eval
 
-- **`stormPrepAlerts(devices)`** — NWS storm → `storm-*` (also converted to repair issues). **v1.187.3** — with NWS enabled, a failed fetch with no earlier feed cached (`getNwsAlerts` returns null) throws and caches nothing: the storm alerts are unknown, not none, so the storm-prep feed stays cold until a fetch succeeds and the alert set is not settled (`alertSetTrusted`). It returned `[]` cached for `STORM_PREP_TTL_MS` (10 min, the whole broadcast warm-up), a warm delivery, so after a restart whose first api.weather.gov call failed the set counted as settled with its storm alerts unknown. After a first success `getNwsAlerts` serves its last good feed on a failure; a successful fetch with no alerts is still `[]`, cached. **v1.187.3 (seam fix)** — `getNwsAlerts` backs off a failed fetch: no new request for `NWS_ALERTS_FAILURE_BACKOFF_MS` (2 min) after one fails (`nwsAlertsBackingOff`; a failure stamped later than the clock, which stepped back, does not hold it), and a call inside the backoff answers exactly as the failure did, the last good feed or null, so the storm-prep feed stays cold (unknown) rather than reading "no storms". Concurrent callers (the storm-prep feed, `/api/nws-alerts`, the calendar) share one request (`singleFlight`). Nothing was cached on a failure before the first success, so every 20 s alert-monitor pass, and every alerts or calendar request, sent a request to api.weather.gov: about 180 an hour from the monitor alone for as long as NWS failed (an outage, a User-Agent block), against 6 an hour while the failure was cached as `[]`.
+- **`stormPrepAlerts(devices)`** — NWS storm → `storm-*` (also converted to repair issues). **v1.187.3** — with NWS enabled, a failed fetch with no earlier feed cached (`getNwsAlerts` returns null) throws and caches nothing: the storm alerts are unknown, not none, so the storm-prep feed stays cold until a fetch succeeds and the alert set is not settled (`alertSetTrusted`). It returned `[]` cached for `STORM_PREP_TTL_MS` (10 min, the whole broadcast warm-up), a warm delivery, so after a restart whose first api.weather.gov call failed the set counted as settled with its storm alerts unknown. After a first success `getNwsAlerts` serves its last good feed on a failure; a successful fetch with no alerts is still `[]`, cached. **v1.187.10** — for at most `NWS_ALERTS_MAX_CARRY_MS` (60 min): past it the alarm path's `getNwsAlerts()` answers null (`nwsAlertsCarryExpired`), so `stormPrepAlerts` throws and the storm-prep feed carries its last alerts (held, not cleared) with its carry log, stuck-feed warning and `/api/notify/status` engaged; nothing bounded the carried feed's age, so an outage that began after a boot was served as a fresh answer indefinitely. An answer built from a carried feed (older than the alerts TTL) is not cached for `STORM_PREP_TTL_MS`. The display route (`/api/nws-alerts`, the calendar) keeps the last good feed at any age (`maxCarryMs: Infinity`). The client logs through sinks the alert monitor installs (`setNwsLog`) — every caller passed no logger, so no storm-alert fetch ever reached the journal — and logs transitions only: the first answer, a change in the set of active events, the first failure of an outage, the carry limit passing (warn) and the recovery. **v1.187.3 (seam fix)** — `getNwsAlerts` backs off a failed fetch: no new request for `NWS_ALERTS_FAILURE_BACKOFF_MS` (2 min) after one fails (`nwsAlertsBackingOff`; a failure stamped later than the clock, which stepped back, does not hold it), and a call inside the backoff answers exactly as the failure did, the last good feed or null, so the storm-prep feed stays cold (unknown) rather than reading "no storms". Concurrent callers (the storm-prep feed, `/api/nws-alerts`, the calendar) share one request (`singleFlight`). Nothing was cached on a failure before the first success, so every 20 s alert-monitor pass, and every alerts or calendar request, sent a request to api.weather.gov: about 180 an hour from the monitor alone for as long as NWS failed (an outage, a User-Agent block), against 6 an hour while the failure was cached as `[]`.
 - **`curtailmentAlerts`** (analytics report) — SoC-saturation headroom advisory (info).
 - **`broadcastHealthAlert(getBroadcastHealth(), now)`** — the audible-delivery self-alert: when audible broadcasting is enabled but the broadcast monitor CONFIRMED no reachable speaker, one WARNING push rides the notify path (the audible channel can't announce its own outage). Null health ⇒ no alert. Its id is excluded from `conditionFromAlerts` so it never tries to chime.
 - **`rateFloorAlerts(getRateFloorCollapses())`** — devices whose incoming message RATE collapsed below their learned baseline while `lastUpdated` stays fresh (the SHP2 ~13 h crawl that defeats staleness/gap detectors). WARNING push.
@@ -6081,7 +6100,7 @@ Issues emitted:
 - `cloud-offline-<SN>` (Connectivity) — offline device (skips `SPARE_DPU_SNS`); severity mirrors the alert engine via `isCoreOrShp2()` (Core/SHP2 = warning, peripheral = info). 5-step reconnect/power-cycle guide.
 - `wash-panels` (Cleaning) — per-DPU soiling ≥ `SOILING_CARD_DROP_PCT` (12%, aligned to the soiling alert) with `cleanDays ≥ 6` and, since v1.187.1, the row's `recentCovered` (as the alert requires it: a thin or stale recent window gives no card); warning if worst ≥ 22%.
 - `peer-outlier-<SN>-<pk>` (Battery, warning) — a `degradation.peerOutlier` pack fading fastest.
-- `mppt-drift-<SN>-<string>` (Hardware, info) — MPPT efficiency drift `< -3` pp.
+- `mppt-drift-<SN>-<string>` (Hardware, info) — MPPT reading drift `< -3` pp. **v1.187.10** — titled "MPPT reading drift" and worded as a W ÷ V·A reading-consistency ratio; the steps are a meter check of the string's V and A at the MPPT input (it sent the operator to MC4 connectors, panel clamp checks and a warranty inquiry, none of which the ratio can indicate).
 - `forecast-bias` (Configuration, info) — `|biasFactor − 1| > 0.25`.
 - `storm-*` — active NWS storm alerts converted to a storm-prep checklist.
 
@@ -11030,6 +11049,15 @@ is on by default and can be switched off.
 Phone notifications reuse the drawer card's id as their `tag`, so a notification for the
 same subject replaces its predecessor rather than stacking, and a resolve supersedes the
 alert it closes.
+
+**v1.187.10 — no device serials in a phone push.** The companion-app push travels through
+Apple's or Google's push service, so a serial-shaped token (16 upper-case letters and digits, at
+least two of each) in the push title or message is shown as its last six characters
+(`maskDeviceSerials`, the pack-tail convention), and in the `tag` it becomes a short stable digest
+(`maskSerialsInId`): a resolve still replaces its own alert, and two devices sharing a tail never
+share a tag. The drawer card, the logs and the API keep full serials. A push already on a phone
+from before the upgrade keeps its old tag, so its resolve after the upgrade arrives as a separate
+notification.
 
 **`reachesAPhone` is now a distinct question from `isConfigured`.** The old
 `configured: true` was satisfied by a supervisor token alone, while delivering only a
