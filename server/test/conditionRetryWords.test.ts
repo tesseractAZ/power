@@ -116,9 +116,11 @@ const heard = (url: string | undefined) => plays.filter((p) => p.url === url && 
 /* ── the monitor's other inputs ── */
 const KLAXON = mkdtempSync(resolve(tmpdir(), 'ef-retry-words-klaxon-'));
 await generateAudioAssets(KLAXON, () => {});
-/** The speech service: stalled while `ttsDown` (every render fails, as Wyoming does under load). */
+/** The speech service: stalled while `ttsDown` (every render fails, as Wyoming does under load), or
+ *  for the texts `ttsDownFor` picks. */
 let ttsDown = false;
-const renderTts = async () => (ttsDown
+let ttsDownFor: ((text: string) => boolean) | null = null;
+const renderTts = async (o: { text: string }) => (ttsDown || ttsDownFor?.(o.text) === true
   ? { ok: false as const, error: 'wyoming render timeout' }
   : { ok: true as const, wav: pcmToWav(Buffer.alloc(2 * 1100), 22050, 2, 1), durationMs: 1 });
 let alerts: Alert[] = [];
@@ -199,6 +201,7 @@ beforeEach(() => {
   plays = [];
   sips = [];
   ttsDown = false;
+  ttsDownFor = null;
   storeThrows = false;
 });
 after(async () => {
@@ -618,25 +621,52 @@ test('★★ (review) the spoken retry of an all-clear is not spoken while a cri
   assert.doesNotMatch(lastWords(r), /all clear/i, 'never "All clear" while a critical is active');
 });
 
-test('★★ (review) a retry\'s failed spoken render replaces a CONDITION spoken retry pending at another level, which would be dropped at its fire', async () => {
-  const r = await started(RETRY_MS);
-  ttsDown = true;
-  alerts = [CRIT_B]; // the red: the tone alone, its spoken retry pending (the condition's, at red)
-  await until(r, () => r.has('one retry scheduled in 90s'), 'the red\'s spoken retry pending');
-  ttsDown = false;
+test('★★★ (review) the spoken-retry slot goes to the one that would speak: a warning\'s, pending under a kept red, is kept over the red retry\'s, which its fire would drop', async () => {
+  ttsDownFor = (t) => /imbalance|Grid voltage/i.test(t); // the red's words and the warning's never render
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 });
+  alerts = [CRIT_B]; // the red: the tone alone and Music Assistant failing — its retry armed
+  await until(r, () => r.has(ARMED), 'the red failing, its retry armed');
   alerts = [HELD_B]; // held by its mute: the red stays committed
   await until(r, () => r.has('red → green held'), 'the hold');
-  plan.push({ status: 500 });
-  alerts = [HELD_B, WARN_L, WARN_N]; // a warning under the kept red, naming WARN_L: it fails
-  await until(r, () => r.has(ARMED), 'the warning failing, its retry armed');
-  alerts = [HELD_B, WARN_N]; // WARN_L clears: the retry names WARN_N, never rendered
-  ttsDown = true;
-  await until(r, () => r.count('one retry scheduled in 90s') === 2, '★ the warning\'s spoken retry takes the slot');
-  assert.ok(!r.has('spoken retry already pending is kept'));
-  ttsDown = false;
+  alerts = [HELD_B, WARN_GRID]; // a warning under the kept red: the tone alone, its spoken retry pending
+  await until(r, () => r.has('condition transition → yellow (new warning) spoken; the committed condition stays red'), 'the warning');
+  await until(r, () => r.count('one retry scheduled in 90s') === 2, 'the warning\'s spoken retry pending');
+  await until(r, () => r.has('spoken render of the deferred red retry failed — the yellow spoken retry already pending is kept'), '★★ the red retry (dropped at its fire: the level reads yellow) takes nothing');
+  ttsDownFor = null;
   offset += 2 * MIN;
-  await until(r, () => r.has('spoken retry after render failure → yellow'), '★★ the warning\'s speech, delivered');
-  await until(r, () => lastWords(r) === buildAlertMessage('yellow', [WARN_N]), 'WARN_N, spoken');
+  await until(r, () => r.has('spoken retry after render failure → yellow'), '★★★ the warning\'s speech');
+  await until(r, () => lastWords(r) === buildAlertMessage('yellow', [WARN_GRID]), 'spoken');
+});
+
+test('★★★ (review) …and the other way round: a red retry\'s spoken retry pending under the kept red gives way to the warning retry\'s, which would speak', async () => {
+  ttsDownFor = (t) => /imbalance|Grid voltage/i.test(t); // the red's words and the rebuilt warning's never render
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 });
+  alerts = [CRIT_B];
+  await until(r, () => r.has(ARMED), 'the red failing, its retry armed');
+  const armedAt = realNow();
+  alerts = [HELD_B];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  const x = gate();
+  plan.push({ status: 200, gate: x.promise });
+  const notice = r.mon.announce('medium', NOTICE, null);
+  await until(r, () => plays.length === 2, 'a dedicated notice playing');
+  plan.push({ status: 500 }); // the warning (named WARN_L; its words render) fails
+  alerts = [HELD_B, WARN_L, WARN_GRID];
+  await until(r, () => r.has('condition transition → yellow (new warning) spoken; the committed condition stays red'), 'the warning, queued behind the notice');
+  await sleep(Math.max(0, armedAt + 2 * RETRY_MS + 300 - realNow())); // the red retry fires and queues behind it
+  alerts = [HELD_B, WARN_GRID]; // WARN_L clears: the warning\'s retry will name WARN_GRID (never rendered)
+  x.open();
+  await notice;
+  await until(r, () => r.count(ARMED) === 2, 'the warning failing, its own retry armed');
+  await until(r, () => r.count('one retry scheduled in 90s') === 2, 'the red retry\'s spoken retry pending (it would be dropped: the level reads yellow)');
+  await until(r, () => r.count('one retry scheduled in 90s') === 3, '★★ the warning retry\'s takes the slot');
+  assert.ok(!r.has('spoken retry already pending is kept'));
+  ttsDownFor = null;
+  offset += 2 * MIN;
+  await until(r, () => r.has('spoken retry after render failure → yellow'), '★★★ the warning\'s speech');
+  await until(r, () => lastWords(r) === buildAlertMessage('yellow', [WARN_GRID]), 'spoken');
 });
 
 test('★★ (review) a warning the 90 s spoken retry put on the speakers is remembered by the repeat-warning gate', async () => {

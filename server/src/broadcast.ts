@@ -2749,6 +2749,8 @@ export function startBroadcastMonitor(
   type RetryRunWords = {
     rung: AlarmRung; message: string | null; messageEs: string | null; skipSip: boolean; named: string | null;
     warnFps: readonly string[] | null;
+    /** the level the condition was observed at when the retry ran (null: not read) */
+    observed: ConditionLevel | null;
   };
   /**
    * v1.187.9 — a deferred CONDITION retry at the head of the chain: what it says, or why it says
@@ -2772,8 +2774,10 @@ export function startBroadcastMonitor(
       const nowMs = Date.now();
       const speakable = speakableAlerts(raw, nowMs, getAlertOnset);
       const w = conditionRetryWords(level, armed.named, raw, speakable);
-      // v1.187.9 (review) — the warnings counted as it plays, for the repeat-warning gate (afterConditionRetry)
-      if (w.action === 'replay') return { ...armed, warnFps: conditionFromAlerts(speakable).warningFingerprints };
+      // v1.187.9 (review) — the warnings counted as it plays (the repeat-warning gate) and the level
+      // observed (the spoken-retry slot), for afterConditionRetry
+      const now = conditionFromAlerts(speakable);
+      if (w.action === 'replay') return { ...armed, warnFps: now.warningFingerprints, observed: now.level };
       if (w.action === 'drop') return { drop: w.reason };
       const names = w.namedFp == null ? 'no alert' : describeFingerprint(w.namedFp);
       if (w.namedFp != null && (queuedConditionNames.get(queuedConditionKey(level, w.namedFp)) ?? 0) > 0) {
@@ -2786,7 +2790,7 @@ export function startBroadcastMonitor(
         return { drop: `the critical the red names now (${names}) was announced before the restart and nothing about it has changed (red replay gate)` };
       }
       log(`broadcast: deferred ${level} retry names ${names} — the alert it was armed with (${armed.named == null ? 'none' : describeFingerprint(armed.named)}) is no longer the one the ${level} names; the cordless is dispatched again`);
-      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints };
+      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints, observed: now.level };
     } catch (e) {
       log(`broadcast: deferred ${level} retry could not read the condition as it stands (${e instanceof Error ? e.message : String(e)}) — the words it was armed with are replayed`);
       return armed;
@@ -2805,7 +2809,7 @@ export function startBroadcastMonitor(
    */
   const afterConditionRetry = (
     level: ConditionLevel, rung: AlarmRung, named: string | null, warnFps: readonly string[] | null,
-    result: { ok: boolean; errors: string[] },
+    observed: ConditionLevel | null, result: { ok: boolean; errors: string[] },
   ): void => {
     // v1.187.9 (review) — a yellow retry that reached the speakers is what the repeat-warning gate
     // remembers, as the tick's own yellow is (speakCondition). Unrecorded, a warning named only through
@@ -2813,16 +2817,17 @@ export function startBroadcastMonitor(
     if (level === 'yellow' && result.ok && named != null && warnFps != null) {
       lastVoicedWarning = { voicedFp: named, rung, warnFps: [...warnFps], atMs: Date.now() };
     }
-    // v1.187.9 (review) — never in place of a spoken retry already pending at the same or a higher
-    // level: a dedicated alarm's own speech (the SoC ladder, the runway alarm) was replaced and never
-    // delivered, and the tick's own was pushed back by a retry of the same condition.
-    // A dedicated one replays its own words whatever the level (kept at the same or a higher level); a
-    // condition one is dropped at its fire unless the condition is at its level, so it is kept only at
-    // this retry's level — kept above it, the kept red's would be dropped and this one lost with it.
+    // v1.187.9 (review) — the one spoken-retry slot goes to the spoken retry that would SPEAK. A dedicated
+    // one replays its own words whatever the level; a condition one is dropped at its fire unless the
+    // condition is then at its level, judged by the level observed now (unknown: assumed to speak).
+    // Replaced unconditionally, a dedicated alarm's speech (the SoC ladder, the runway alarm) was never
+    // delivered, and under a kept red a red retry's — dropped at its fire, the level reading yellow —
+    // took the slot from the warning's, which was then never spoken either. A pending one that would
+    // speak is kept unless this one would too, for a more serious level.
     const pending = pendingSpokenRetry;
-    const kept = pending != null && (pending.message !== undefined
-      ? RETRY_LEVEL_RANK[pending.level] >= RETRY_LEVEL_RANK[level]
-      : pending.level === level);
+    const speaks = (lv: ConditionLevel, dedicated: boolean): boolean => dedicated || observed == null || lv === observed;
+    const kept = pending != null && speaks(pending.level, pending.message !== undefined)
+      && (!speaks(level, false) || RETRY_LEVEL_RANK[pending.level] >= RETRY_LEVEL_RANK[level]);
     if (!kept) noteSpokenRenderFailure(level, rung, result);
     else if (!result.ok && result.errors.some((e) => e.startsWith('render:'))) {
       log(`broadcast: spoken render of the deferred ${level} retry failed — the ${pending?.level} spoken retry already pending is kept`);
@@ -2868,15 +2873,15 @@ export function startBroadcastMonitor(
       // other broadcast plays as requested.
       const retried = retryOf != null && kind === 'condition';
       const w: RetryRunWords | { drop: string } = retried
-        ? conditionRetryAtRun(level, { rung, message, messageEs, skipSip, named, warnFps: null })
-        : { rung, message, messageEs, skipSip, named, warnFps: null };
+        ? conditionRetryAtRun(level, { rung, message, messageEs, skipSip, named, warnFps: null, observed: null })
+        : { rung, message, messageEs, skipSip, named, warnFps: null, observed: null };
       if ('drop' in w) {
         log(`broadcast: deferred ${level} retry dropped — ${w.drop}`);
         return { ok: false, errors: [`dropped: ${w.drop}`] };
       }
       attemptNamed = w.named;
       const result = await runBroadcastAttempt(level, w.rung, w.message, w.messageEs, bypassStormGate, w.skipSip);
-      if (retried) afterConditionRetry(level, w.rung, w.named, w.warnFps, result);
+      if (retried) afterConditionRetry(level, w.rung, w.named, w.warnFps, w.observed, result);
       return result;
     } finally {
       releaseRetrySlotIfIdle();
