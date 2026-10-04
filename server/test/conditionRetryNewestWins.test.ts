@@ -304,6 +304,10 @@ test('★★★ a red retry waiting behind a NEWER warning spoken under the kept
   await until(r, () => heard(urlWarn) === 1, '★ the warning, re-presented when the gap expires');
   assert.ok(r.has('re-presenting the yellow the storm gate refused'));
   assert.equal(r.count('condition transition → yellow'), 1, 'a re-present, not a transition: the red stays committed');
+  // v1.187.9 (review) — the red's hold stands: a re-present below the committed level does not end it.
+  await sleep(200);
+  assert.ok(!r.has('again — the storm-gated condition is re-presented'), '★ the hold is not ended by a re-present below the committed red');
+  assert.equal(r.count('red → yellow held'), 1, 'and is not begun again');
 });
 
 test('★★★ a red retry that reaches the speakers TONE-ONLY (speech stalled) arms no same-level gap — and its delivery does not cancel the newer warning\'s retry, which then plays', async () => {

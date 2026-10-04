@@ -24,7 +24,9 @@
  * of the announcement naming that alert yields to it; an armed alert the speech gates now drop is not
  * replayed; a throw replays the armed words. A failed spoken render earns the spoken retry, and a
  * refusal by the same-level gap one re-present, never over a waiting one (refusedRetryRepresent).
- * Mutants W-i..W-xxx, against conditionRetryWords.test.ts with the subset above.
+ * Mutants W-i..W-xxx, against conditionRetryWords.test.ts with the subset above. v1.187.9 (review): the
+ * naming pool (conditionNamePool), the repeat-warning record of a retry, the green and policy-mute
+ * gates, the kept spoken retry and the kept red's re-present — W-xxxi..W-xliii.
  *
  * Not mutated (v1.187.9): `retryOf == null` and `kind === 'condition'` in the queued count (a retry
  * counted in while it waits is counted out when it runs, before it reads the count, and a dedicated
@@ -177,22 +179,22 @@ const MUTANTS = [
   {
     id: 'W-iv. ★★ the tone of the set the retry was armed with rides the new words',
     file: BR,
-    find: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp };',
-    to: '      return { rung: armed.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp }; /* MUTANT */',
+    find: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints };', // v1.187.9 (review) — re-pointed
+    to: '      return { rung: armed.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints }; /* MUTANT */',
     why: 'C (High) is announced with the Critical tone of the cleared A: tone and words disagree.',
   },
   {
     id: 'W-v. ★★★ the cordless is skipped for words that name a different alert',
     file: BR,
-    find: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp };',
-    to: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: armed.skipSip, named: w.namedFp }; /* MUTANT */',
+    find: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints };', // v1.187.9 (review) — re-pointed
+    to: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: armed.skipSip, named: w.namedFp, warnFps: w.warningFingerprints }; /* MUTANT */',
     why: 'THE WITHDRAWN FIX: the cordless heard A on the first dispatch and never hears C.',
   },
   {
     id: 'W-vi. ★★ the cordless is dispatched again for the same alert',
     file: BR,
-    find: "      if (w.action === 'replay') return armed;",
-    to: "      if (w.action === 'replay') return { ...armed, skipSip: false }; /* MUTANT */",
+    find: "      if (w.action === 'replay') return { ...armed, warnFps: conditionFromAlerts(speakable).warningFingerprints };", // v1.187.9 (review) — re-pointed
+    to: "      if (w.action === 'replay') return { ...armed, skipSip: false, warnFps: conditionFromAlerts(speakable).warningFingerprints }; /* MUTANT */",
     why: 'The cordless, which took these words on the first dispatch, plays them again at +30 s.',
   },
   {
@@ -205,15 +207,15 @@ const MUTANTS = [
   {
     id: 'W-viii. ★★★ an armed alert the speech gates now drop is replayed',
     file: BR,
-    find: '  if (armedFp != null && raw.some((a) => alertFingerprint(a) === armedFp) && !speakable.some((a) => alertFingerprint(a) === armedFp)) {',
-    to: '  if ((false as boolean) && armedFp != null && raw.some((a) => alertFingerprint(a) === armedFp) && !speakable.some((a) => alertFingerprint(a) === armedFp)) { /* MUTANT */',
+    find: '  if (armedFp != null && raw.some((a) => alertFingerprint(a) === armedFp) && (voiced == null || policyMuted)) {', // v1.187.9 (review) — re-pointed
+    to: '  if ((false as boolean) && armedFp != null && raw.some((a) => alertFingerprint(a) === armedFp) && (voiced == null || policyMuted)) { /* MUTANT */',
     why: 'A cell-imbalance warning back inside its speak hold (or silenced, or card-and-push only) is spoken by its retry.',
   },
   {
     id: 'W-ix. ★★ a green retry ignores the all-clear speech gate',
     file: BR,
-    find: "    return now.level === 'green' && allClearSpeechBlocked(speakable)",
-    to: "    return (false as boolean) && now.level === 'green' && allClearSpeechBlocked(speakable) /* MUTANT */",
+    find: '    return allClearSpeechBlocked(speakable)', // v1.187.9 (review) — re-pointed
+    to: '    return (false as boolean) && allClearSpeechBlocked(speakable) /* MUTANT */',
     why: '"All clear" is retried while a critical is active (the reserve floor, a held telemetry-blind alarm).',
   },
   {
@@ -311,15 +313,15 @@ const MUTANTS = [
   {
     id: 'W-xxiii. ★★★ a condition retry\'s result is discarded',
     file: BR,
-    find: '      if (retried) afterConditionRetry(level, w.rung, w.named, result);',
+    find: '      if (retried) afterConditionRetry(level, w.rung, w.named, w.warnFps, result);', // v1.187.9 (review) — re-pointed
     to: '      /* MUTANT */',
     why: 'A retry whose new words cannot be rendered sounds the tone alone and the speech never follows; a refused warning waits for the commit down to it.',
   },
   {
     id: 'W-xxiv. ★★★ a retry\'s failed spoken render earns no spoken retry',
     file: BR,
-    find: '    noteSpokenRenderFailure(level, rung, result);\n    const represent = refusedRetryRepresent(',
-    to: '    /* MUTANT */\n    const represent = refusedRetryRepresent(',
+    find: '    if (!kept) noteSpokenRenderFailure(level, rung, result);', // v1.187.9 (review) — re-pointed
+    to: '    if (!kept && (false as boolean)) noteSpokenRenderFailure(level, rung, result); /* MUTANT */',
     why: 'Speech stalled: the retry naming C plays the tone, and C is never spoken.',
   },
   {
@@ -363,6 +365,98 @@ const MUTANTS = [
     find: '  return { level, dueAtMs: lastPlayed.atMs + gapMs, fresh: lower || named == null ? null : [named] };',
     to: '  return { level, dueAtMs: lastPlayed.atMs, fresh: lower || named == null ? null : [named] }; /* MUTANT */',
     why: 'Re-presented on the next tick, the gap refuses it again, and a re-present is never re-armed: the warning is lost.',
+  },
+  /* ── v1.187.9 (review) — the naming pool, the repeat-warning record, the gates, the kept spoken retry, the kept red ── */
+  {
+    id: 'W-xxxi. ★★★ the tick\'s words name from every speakable alert, not the counted ones',
+    file: BR,
+    find: '    return buildAlertMessage(level, conditionNamePool(alerts));',
+    to: '    return buildAlertMessage(level, alerts); /* MUTANT */',
+    why: 'A yellow raised by a Grid warning is announced as "Backup pool low — 28%": an alarm the SoC ladder owns, its title a live reading.',
+  },
+  {
+    id: 'W-xxxii. ★★★ the named identity ranks every speakable alert',
+    file: BR,
+    find: '  const primary = pickPrimaryAlert(conditionNamePool(alerts), level); // v1.187.9 — only an alert it counts',
+    to: '  const primary = pickPrimaryAlert(alerts, level); /* MUTANT */',
+    why: 'THE REVIEW\'S M1: the band\'s reading moves, the retry reads a different alert, calls the cordless again (and, with speech stalled, plays the tone alone).',
+  },
+  {
+    id: 'W-xxxiii. ★★ rebuilt words name from every speakable alert',
+    file: BR,
+    find: 'buildAlertMessage(level, now.counted), messageEs: buildAlertMessageEs(level, now.counted)',
+    to: 'buildAlertMessage(level, speakable), messageEs: buildAlertMessageEs(level, now.counted) /* MUTANT */',
+    why: 'A rebuilt retry names a backup band in place of the warning that raised the level.',
+  },
+  {
+    id: 'W-xxxiv. ★★ the repeat-warning gate ranks every speakable alert',
+    file: BR,
+    find: "pickPrimaryAlert(conditionNamePool(alerts), 'yellow') : null;",
+    to: "pickPrimaryAlert(alerts, 'yellow') : null; /* MUTANT */",
+    why: 'A band beside the warning voiced moments ago reads as a different warning: it is told again.',
+  },
+  {
+    id: 'W-xxxv. ★★ the red replay fingerprint ranks every speakable alert',
+    file: BR,
+    find: '    const voicedFingerprint = voicedRedFingerprint(level, namePool);',
+    to: '    const voicedFingerprint = voicedRedFingerprint(level, alerts); /* MUTANT */',
+    why: 'After a restart a backup band beside the critical announced before it makes that critical "new": the klaxon again.',
+  },
+  {
+    id: 'W-xxxvi. ★★★ a yellow retry that reached the speakers is not remembered',
+    file: BR,
+    find: '      lastVoicedWarning = { voicedFp: named, rung, warnFps: [...warnFps], atMs: Date.now() };',
+    to: '      /* MUTANT */',
+    why: 'THE REVIEW\'S M2: a warning named only through a rebuilt retry is told again at its flicker back.',
+  },
+  {
+    id: 'W-xxxvii. ★★ a replayed yellow retry carries no counted warnings',
+    file: BR,
+    find: "      if (w.action === 'replay') return { ...armed, warnFps: conditionFromAlerts(speakable).warningFingerprints };",
+    to: "      if (w.action === 'replay') return armed; /* MUTANT */",
+    why: 'A warning heard through its replayed retry is told again when it returns after a silent all-clear.',
+  },
+  {
+    id: 'W-xxxviii. ★★ a green retry checks the all-clear gate only when the condition is green',
+    file: BR,
+    find: '    return allClearSpeechBlocked(speakable)',
+    to: "    return now.level === 'green' && allClearSpeechBlocked(speakable) /* MUTANT */",
+    why: '"All clear" is retried while a counted critical has raised the level and the tick has not committed it yet.',
+  },
+  {
+    id: 'W-xxxix. ★★ a policy mute is replayed',
+    file: BR,
+    find: "  const policyMuted = voiced != null && voiced.annunciate === false && !(voiced.severity === 'critical' && voiced.mutedBy != null);",
+    to: '  const policyMuted = (false as boolean); /* MUTANT */',
+    why: 'A bench spare marked non-annunciating after the retry was armed is spoken by it.',
+  },
+  {
+    id: 'W-xl. ★★★ a critical held by a bounded mute is dropped as a policy mute',
+    file: BR,
+    find: "  const policyMuted = voiced != null && voiced.annunciate === false && !(voiced.severity === 'critical' && voiced.mutedBy != null);",
+    to: '  const policyMuted = voiced != null && voiced.annunciate === false; /* MUTANT */',
+    why: 'The cell-spread red nobody heard, held by the balancing mute, is never retried.',
+  },
+  {
+    id: 'W-xli. ★★ a retry\'s render failure replaces the spoken retry already pending',
+    file: BR,
+    find: '    const kept = pendingSpokenRetry != null && RETRY_LEVEL_RANK[pendingSpokenRetry.level] >= RETRY_LEVEL_RANK[level];',
+    to: '    const kept = (false as boolean) && pendingSpokenRetry != null; /* MUTANT */',
+    why: 'The SoC ladder\'s or runway alarm\'s speech is replaced by the condition\'s and never delivered.',
+  },
+  {
+    id: 'W-xlii. ★★ a deferral under a kept red is dropped while the critical reads loud',
+    file: BR,
+    find: '      const heldUnder = level === prevLevel && LEVEL_RANK[held.level] < LEVEL_RANK[level];',
+    to: '      const heldUnder = (false as boolean) && level === prevLevel; /* MUTANT */',
+    why: 'The warning refused under the kept red is lost until the condition commits down to it.',
+  },
+  {
+    id: 'W-xliii. ★★ a re-present below the committed level ends the red\'s hold',
+    file: BR,
+    find: '          if (held.level === prevLevel) endDeescalationHold(',
+    to: '          if ((true as boolean) || held.level === prevLevel) endDeescalationHold( /* MUTANT */',
+    why: 'An abandoned de-escalation is logged under a red that still holds, the heard flag flips twice, and the hold restarts.',
   },
 ];
 

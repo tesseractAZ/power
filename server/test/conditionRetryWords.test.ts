@@ -492,6 +492,114 @@ test('★★ a refused retry never displaces a re-present already waiting: a new
   await until(r, () => /Battery protection fault/.test(lastWords(r)), '★★ the new critical, re-presented');
 });
 
+/* ── v1.187.9 (review) ─────────────────────────────────────────────────────────────────────────── */
+
+/** A yellow raised by an unlocated Grid warning. */
+const WARN_GRID: Alert = { id: 'grid-voltage-SHP2-1', severity: 'warning', category: 'Grid', device: 'Smart panel', title: 'Grid voltage high', detail: 'x' } as Alert;
+/** A backup-SoC band: its title carries the live reading; the SoC ladder announces it, the condition does not count it. */
+const backupSoc = (soc: number): Alert => ({ id: 'backup-soc-30', severity: 'warning', priority: 'medium', category: 'Battery', device: 'SHP2 backup pool', title: `Backup pool low — ${soc}%`, detail: `Backup reserve at ${soc}%.` } as Alert);
+
+test('★★★ (review) a condition announcement names only an alert it counts: never a backup-SoC band (its own announcer\'s, its title a live reading) — so a retry of it is the same alarm when that reading moves', async () => {
+  const r = await started(RETRY_MS);
+  plan.push({ status: 500 });
+  alerts = [WARN_GRID, backupSoc(28)]; // the band ranks first (Battery) but raises nothing
+  await until(r, () => r.has(ARMED), 'the yellow failing, its retry armed');
+  const urlY = plays[0].url;
+  await until(r, () => sips.length === 1, 'the cordless taking the first dispatch');
+  alerts = [WARN_GRID, backupSoc(27)]; // the band's reading moves
+  ttsDown = true;
+  await until(r, () => heard(urlY) === 1, '★ the retry: the armed words, from the rendered file');
+  await sleep(300);
+  assert.equal(lastWords(r), buildAlertMessage('yellow', [WARN_GRID]), '★★★ the words name the warning that raised the yellow');
+  assert.doesNotMatch(lastWords(r), /backup pool/i);
+  assert.ok(!r.has('falling back to chime-only'), 'spoken, not the tone alone');
+  assert.ok(!r.has('deferred yellow retry names'));
+  assert.equal(sips.length, 1, 'the cordless is not called again');
+});
+
+test('★★★ (review) a warning named through a rebuilt retry is remembered by the repeat-warning gate: its flicker back is not told again', async () => {
+  const r = await started(RETRY_MS);
+  plan.push({ status: 500 });
+  alerts = [WARN_L]; // the yellow names WARN_L and fails
+  await until(r, () => r.has(ARMED), 'the yellow failing, its retry armed');
+  alerts = [WARN_L, WARN_N]; // WARN_N joins the yellow (no transition)
+  await sleep(50);
+  alerts = [WARN_N]; // WARN_L clears: the retry names WARN_N
+  await until(r, () => heard(plays[1]?.url) === 1, 'the retry naming WARN_N');
+  assert.ok(r.has('deferred yellow retry names soc-low-DPU-C-3 / Pack state of charge low'));
+  offset += 3 * MIN; // past the same-level gap
+  alerts = []; // a flicker: green, held for its dwell
+  await until(r, () => r.has('yellow → green held'), 'the hold');
+  alerts = [backupSoc(28), WARN_N]; // back inside the hold (new to the last commit: a transition), a band beside it
+  await until(r, () => r.has('condition transition → yellow (new warning)'), 'the flicker back');
+  await until(r, () => r.has('yellow suppressed — the same warning (soc-low-DPU-C-3 / Pack state of charge low) was voiced'), '★★★ the repeat-warning gate');
+  offset += 3 * MIN;
+  await sleep(300);
+  assert.equal(plays.length, 2, '★★ WARN_N is told once');
+});
+
+test('★★ (review) a retry\'s failed spoken render never replaces a dedicated alarm\'s spoken retry already pending', async () => {
+  const r = await started(RETRY_MS);
+  plan.push({ status: 500 });
+  alerts = [CRIT_A, CRIT_C];
+  await until(r, () => r.has(ARMED), 'the red naming A failing');
+  ttsDown = true;
+  assert.equal((await r.mon.announce('critical', RESERVE, null)).ok, false, 'the dedicated alarm: the tone alone');
+  await until(r, () => r.count('one retry scheduled in 90s') === 1, 'its spoken retry pending');
+  alerts = [CRIT_C]; // the retry names C: words never rendered, speech still stalled
+  await until(r, () => r.has('spoken render of the deferred red retry failed — the red spoken retry already pending is kept'), '★ kept');
+  ttsDown = false;
+  offset += 2 * MIN;
+  await until(r, () => r.has('spoken retry after render failure → red (dedicated-path message replay)'), '★★ the dedicated alarm\'s speech, delivered');
+  await until(r, () => lastWords(r) === RESERVE, 'its words');
+});
+
+test('★★ (review) a warning deferred under a kept red waits while the held critical reads loud again — not dropped — and is re-presented when it is muted again', async () => {
+  const r = await started(2 * RETRY_MS);
+  const { urlWarn } = await keptRedWithWarningRetry(r);
+  await until(r, () => r.has('the refused yellow retry will be re-presented'), 'the refused warning retry, deferred');
+  alerts = [CRIT_B, WARN_N]; // the held critical reads loud again: red, the committed level
+  offset += 2 * MIN; // the re-present is due
+  await until(r, () => r.has('the storm-gated yellow waits — the committed red reads loud again'), '★★ it waits');
+  assert.ok(!r.has('the storm-gated yellow is not re-presented'), 'not dropped');
+  alerts = [HELD_B, WARN_N]; // muted again: the warning stands under the kept red
+  await until(r, () => heard(urlWarn) === 1, '★ the warning, re-presented');
+  await sleep(200);
+  assert.equal(r.count('re-presenting the yellow the storm gate refused'), 1, 'once');
+});
+
+test('★★ (review) the red replay gate compares the critical the words name: a backup band beside a critical announced before the restart does not make it new', async () => {
+  writeFileSync(REPLAY_PATH!, JSON.stringify({
+    lastRedAnnouncedAtMs: Date.now() - 5 * MIN,
+    voicedFingerprint: alertFingerprint(CRIT_C),
+    activeFingerprints: [alertFingerprint(CRIT_C)],
+    lastPlayedLevel: 'red',
+  }));
+  const band = { ...backupSoc(9), severity: 'critical', priority: 'critical' } as Alert;
+  const r = await started(RETRY_MS, false);
+  alerts = [band, CRIT_C]; // the band ranks first (Battery, first in the list) but is not counted
+  await until(r, () => r.has('red suppressed — this standing fault was already announced'), '★★ C, unchanged since the restart');
+  await sleep(200);
+  assert.equal(plays.length, 0, 'nothing is announced');
+});
+
+test('★★ (review) a REPLAYED yellow retry is remembered too: the same warning back after an all-clear the speech gate kept silent is not told again', async () => {
+  const blind = { id: 'shp2-below-reserve-X', severity: 'critical', category: 'SHP2', title: 'Below reserve', detail: 'x' } as Alert;
+  const r = await started(RETRY_MS);
+  plan.push({ status: 500 });
+  alerts = [WARN_N, blind]; // the critical is not counted, but it gates any all-clear
+  await until(r, () => r.has(ARMED), 'the warning failing, its retry armed');
+  await until(r, () => heard(plays[1]?.url) === 1, 'the retry: the same warning, replayed and heard');
+  alerts = [blind];
+  await until(r, () => r.has('yellow → green held'), 'the hold');
+  offset += 4 * MIN;
+  await until(r, () => r.has('green adopted silently — a critical alert is still active'), 'green committed, not spoken');
+  alerts = [WARN_N, blind];
+  await until(r, () => r.has('yellow suppressed — the same warning (soc-low-DPU-C-3 / Pack state of charge low) was voiced'), '★★ the repeat-warning gate');
+  await sleep(200);
+  assert.equal(plays.length, 2, 'told once by the retry');
+});
+
 test('refusedRetryRepresent — only a refusal by the same-level gap; below the played level the level is the news; at it, only what the retry named', () => {
   const GAP = 120_000;
   const GATED = ['suppressed: same-or-lower level within gap'];
@@ -540,4 +648,23 @@ test('conditionRetryWords — replay the same alert (a reading that moved too); 
   assert.deepEqual(B.conditionRetryWords('green', null, [], []), { action: 'replay' });
   const blind = { id: 'shp2-below-reserve-X', severity: 'critical', category: 'SHP2', title: 'Below reserve', detail: 'x' } as Alert;
   assert.equal(B.conditionRetryWords('green', null, [blind], [blind]).action, 'drop', 'never "All clear" while a critical is active');
+  // v1.187.9 (review)
+  assert.equal(B.conditionRetryWords('green', null, [CRIT_C], [CRIT_C]).action, 'drop', 'nor while a counted critical has raised the level, before the tick commits it');
+  const spare = { ...WARN_N, annunciate: false } as Alert;
+  assert.equal(B.conditionRetryWords('yellow', fpN, [spare], [spare]).action, 'drop', 'a policy mute (no bounded mute behind it): the tick never names it');
+  const knee = { ...CRIT_C, annunciate: false, mutedBy: 'balancing' } as Alert;
+  assert.equal(B.conditionRetryWords('red', alertFingerprint(CRIT_C), [knee], [knee]).action, 'replay', 'a critical held by a bounded mute: held, not cleared');
+  const rebuilt = B.conditionRetryWords('yellow', alertFingerprint(WARN_L), [backupSoc(28), WARN_GRID], [backupSoc(28), WARN_GRID]);
+  assert.equal(rebuilt.action === 'rederive' ? rebuilt.message : null, buildAlertMessage('yellow', [WARN_GRID]), 'rebuilt words name the warning that raised the yellow, not the band');
+  const band27 = backupSoc(27);
+  const y = B.conditionRetryWords('yellow', alertFingerprint(WARN_GRID), [WARN_GRID, band27], [WARN_GRID, band27]);
+  assert.deepEqual(y, { action: 'replay' }, 'a band\'s reading moving is no different alert: the band is never the one named');
+});
+
+test('conditionNamePool — what the condition counts: never an alert another announcer owns or that is push-only', () => {
+  const runway = { id: 'forecast-runtime-SHP2-1', severity: 'critical', category: 'SHP2', title: 'Projected runtime ≈ 1h 5m to reserve', detail: 'x' } as Alert;
+  const gap = { id: 'system-outage-device-X-1', severity: 'warning', category: 'Connectivity', coreNum: 2, title: 'Device telemetry gap — no data for 7 min', detail: 'x' } as Alert;
+  assert.deepEqual(B.conditionNamePool([backupSoc(28), runway, gap, WARN_GRID, CRIT_C]).map((a) => a.id), [WARN_GRID.id, CRIT_C.id]);
+  assert.equal(B.conditionNamedFingerprint('yellow', [backupSoc(28), gap, WARN_GRID]), alertFingerprint(WARN_GRID), 'not the band (Battery) nor the located gap');
+  assert.equal(B.conditionNamedFingerprint('red', [runway, CRIT_C]), alertFingerprint(CRIT_C));
 });
