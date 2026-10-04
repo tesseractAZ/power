@@ -249,7 +249,7 @@ All surfaces read one holder. One HA namespace `night_charge_*`, one status endp
 
 ## 7. Write-readiness gate (v2)
 
-Evidence is scored **actuated** nights. Graduation to `auto` requires: ≥ 21 scored actuated nights, under-buy ≤ 10%, delivery bias in [0, 5] kWh, band coverage in [78, 92]% over ≥ 14 verdict nights, zero engine-fault strikes. A strike requires the plan to have *claimed hold* (`cushionShortfall` falsy — a disclosed shortfall is physics, not fault) **and** a trajectory or realized breach; strikes live in a rolling 45-day window and clear after 14 consecutive strike-free nights.
+Evidence is scored **actuated** nights. Graduation to `auto` requires: ≥ 21 scored actuated nights, under-buy ≤ 10%, delivery bias in [0, 5] kWh *(Amendment, v1.187.10: named "sizing bias" — since algo v3, v1.105.0, the criterion is the mean `buy_err_kwh`, the planner's P50 PV/load forecast miss in kWh; delivered energy is not part of it)*, band coverage in [78, 92]% over ≥ 14 verdict nights, zero engine-fault strikes. A strike requires the plan to have *claimed hold* (`cushionShortfall` falsy — a disclosed shortfall is physics, not fault) **and** a trajectory or realized breach; strikes live in a rolling 45-day window and clear after 14 consecutive strike-free nights.
 
 ★★ **The gate cannot open on current inputs, and says so itself:**
 

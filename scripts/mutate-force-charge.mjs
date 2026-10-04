@@ -127,8 +127,10 @@ const MUTANTS = [
   {
     id: 'xiv. ★★ settings-drift launders an operator\'s Charge Now',
     file: DRIFT,
-    find: '    return act.forceChargeActive === true ? \'own-write\' : \'external\';',
-    to: '    return \'own-write\'; /* MUTANT */',
+    // v1.187.10 — re-pointed: inside the window the commanded value now decides own-write vs
+    // panel-side; this guard is what keeps an operator's Charge Now outside it external.
+    find: '    if (act.forceChargeActive !== true) return \'external\';',
+    to: '    /* MUTANT */',
     why: 'The watchdog built after 2026-08-04 stops reporting the exact change it exists to catch.',
   },
   {

@@ -9536,6 +9536,8 @@ export async function computeMultiDayForecast(
  *   - If PV > load:  charge battery with the surplus (up to full).
  *   - If PV < load AND we're on-peak: discharge battery (down to reserve).
  *   - If PV < load AND we're off-peak AND SoC < target_pre_peak: import grid.
+ *     (v1.187.10: only ahead of an on-peak hour in the horizon, at the cheapest
+ *     rate before it — dispatchTopOffHours.)
  *   - Otherwise: discharge battery.
  *
  * Output is a recommended schedule — DO NOT auto-apply. Surfacing
@@ -9599,6 +9601,36 @@ export const DISPATCH_ROUND_TRIP_EFFICIENCY = Math.min(
   Math.max(0.8, Number(process.env.DISPATCH_ROUND_TRIP_EFFICIENCY ?? 0.86) || 0.86),
 );
 
+/**
+ * v1.187.10 — which hours of a dispatch horizon may top the pack off from the grid. PURE.
+ *
+ * The top-off branch ("off-peak charge from grid to top off before peak") fired in EVERY
+ * off-peak deficit hour while the pool sat below the 80% pre-peak target, whether or not a
+ * peak lay ahead and whatever the rate. On a weekend — no on-peak and no overnight tier on
+ * APS R-EV — the 2026-10-03 plan imported for 12 h at the 16.91 c off-peak rate with the pack
+ * at 76-79% ($6.55, "savings" $6.20), while Sunday's PV later filled it to 100% and the
+ * night-charge engine bought nothing; on a weekday evening it imported 19:00-23:00 at 16.91 c
+ * ahead of the 12.59 c overnight tier.
+ *
+ * An off-peak hour now qualifies only when an on-peak hour lies LATER in the horizon, and
+ * only at the cheapest rate of the off-peak run that precedes that on-peak hour (from the
+ * previous on-peak hour, or the horizon start). Any other deficit hour falls through to the
+ * reserve-guarded discharge (or the forced import when the pack is at its reserve).
+ */
+export function dispatchTopOffHours(hours: ReadonlyArray<{ onPeak: boolean; rateCents: number }>): boolean[] {
+  const out = hours.map(() => false);
+  let runStart = 0;
+  for (let i = 0; i < hours.length; i++) {
+    if (!hours[i].onPeak) continue;
+    // [runStart, i) is the off-peak run this on-peak hour closes.
+    let cheapest = Infinity;
+    for (let k = runStart; k < i; k++) cheapest = Math.min(cheapest, hours[k].rateCents);
+    for (let k = runStart; k < i; k++) if (hours[k].rateCents <= cheapest + 1e-9) out[k] = true;
+    runStart = i + 1;
+  }
+  return out; // an off-peak run with no on-peak after it inside the horizon never tops off
+}
+
 export function computeDispatchPlan(
   devices: Record<string, DeviceSnapshot>,
   forecast: DayForecast | null,
@@ -9627,15 +9659,18 @@ export function computeDispatchPlan(
   // v1.52.0 — same confirmed-tariff basis the cost report uses; the dispatch
   // planner must not price its plan off a different table than the KPIs.
   const dispatchCents = resolveTariffCents(Date.now());
-  for (const h of forecast.hours) {
+  // v1.136.0 — the discharge trigger now comes from the SAME table that prices
+  // the hour. It was `onPeakAt`, default window `15-20`, against an R-EV
+  // on-peak of 16:00-19:00 — so the plan discharged across two hours that earn
+  // the off-peak rate, spending cycle life for no arbitrage.
+  const tou = forecast.hours.map((h) => ({ onPeak: isOnPeakHour(h.ts), rateCents: hourlyRateCents(h.ts, dispatchCents) }));
+  // v1.187.10 — the grid top-off only ahead of an on-peak hour, at the cheapest rate before it.
+  const topOff = dispatchTopOffHours(tou);
+  for (const [i, h] of forecast.hours.entries()) {
     const pvKwh = h.forecastPvW / 1000;
     const loadKwh = h.forecastLoadW / 1000;
-    // v1.136.0 — the discharge trigger now comes from the SAME table that prices
-    // the hour. It was `onPeakAt`, default window `15-20`, against an R-EV
-    // on-peak of 16:00-19:00 — so the plan discharged across two hours that earn
-    // the off-peak rate, spending cycle life for no arbitrage.
-    const onPeak = isOnPeakHour(h.ts);
-    const rate = hourlyRateCents(h.ts, dispatchCents) / 100;
+    const onPeak = tou[i].onPeak;
+    const rate = tou[i].rateCents / 100;
     const socStartPct = (socKwh / fullKwh) * 100;
 
     let action: DispatchHour['action'] = 'hold';
@@ -9663,8 +9698,9 @@ export function computeDispatchPlan(
         socKwh -= drawn;
         flowKwh = deficit;                     // delivered to load
         action = 'discharge_to_load';
-      } else if (!onPeak && socKwh < targetPrePeakKwh) {
-        // Off-peak charge from grid to top off before peak. `need` is grid energy
+      } else if (topOff[i] && socKwh < targetPrePeakKwh) {
+        // Off-peak charge from grid to top off before peak (v1.187.10: a peak lies ahead
+        // in the horizon and this is the cheapest rate before it — dispatchTopOffHours). `need` is grid energy
         // DRAWN (billed at `rate`); only (need − deficit) reaches the charger and
         // only legEff of THAT is stored — so the pack fills slower than a lossless
         // model, naturally pulling more off-peak import over the window (conservative).

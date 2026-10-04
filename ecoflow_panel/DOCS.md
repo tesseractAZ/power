@@ -5084,13 +5084,15 @@ Unlike the discharge-only runway sims (which use `RUNWAY_DISCHARGE_EFFICIENCY`
 applies, split **symmetrically** across the two legs:
 
 ```
-DISPATCH_ROUND_TRIP_EFFICIENCY = clamp[0.80, 1.0]( env DISPATCH_ROUND_TRIP_EFFICIENCY ?? 0.945 )
-legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.972       // η_chg = η_dis; net round-trip = RTE
+DISPATCH_ROUND_TRIP_EFFICIENCY = clamp[0.80, 1.0]( env DISPATCH_ROUND_TRIP_EFFICIENCY ?? 0.86 )
+legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927       // η_chg = η_dis; net round-trip = RTE
 ```
 
-> Reusing 0.94 on the discharge leg would imply `η_chg = RTE/0.94 > 1`
-> (unphysical). This choice never under-states the grid import a real round trip
-> needs (conservative).
+> The default is 0.86 since v1.32.0 (it was 0.945, a pack-terminal reading that
+> excludes both conversion legs; the full PV/grid-in → pack → AC-out path composes
+> ~0.97 × ~0.91 × 0.945 ≈ 0.83–0.86). Invariant (pinned by test): `legEff ≤
+> RUNWAY_DISCHARGE_EFFICIENCY` — a round trip's per-leg efficiency never exceeds the
+> measured single discharge leg.
 
 #### 5.3 Inputs & state
 
@@ -5110,7 +5112,7 @@ if pvKwh > loadKwh:                              // surplus PV → charge
 else:                                            // deficit
     deficit = loadKwh − pvKwh;  drawn = deficit/legEff   // pack DRAWS deficit/legEff
     if onPeak && socKwh − drawn ≥ reserveKwh:    action = discharge_to_load (saves most $)
-    elif !onPeak && socKwh < targetPrePeakKwh:   // off-peak top-off before peak
+    elif topOff[i] && socKwh < targetPrePeakKwh: // off-peak top-off before peak (v1.187.10)
         need = min(deficit + (targetPrePeakKwh − socKwh)·0.1, deficit + 1)
         hourlyCost = need·rate;  action = grid_import
         socKwh = min(fullKwh, socKwh + (need − deficit)·legEff)
@@ -5121,6 +5123,20 @@ allGridCost += loadKwh·rate;  plannedCost += hourlyCost
 
 The **reserve guard** always tests the *drawn* amount (`socKwh − drawn ≥
 reserveKwh`) so a discharge can never dip the pack below reserve.
+
+**The top-off hours** (v1.187.10, `dispatchTopOffHours`): an off-peak hour may top
+off only when an on-peak hour lies later in the horizon, and only at the cheapest
+rate of the off-peak run before that on-peak hour (from the previous on-peak hour or
+the horizon start); a run with no on-peak after it inside the horizon never tops off.
+Before v1.187.10 every off-peak deficit hour below the 80% target imported. On a
+weekend — APS R-EV has no on-peak and no overnight tier — the 2026-10-03 plan
+imported for 12 h at 16.91¢ with the pack at 76–79% ($6.55, "savings" $6.20) while
+Sunday PV later filled it to 100% and the night-charge engine bought nothing; a
+weekday evening imported 19:00–23:00 at 16.91¢ ahead of the 12.59¢ overnight tier.
+On an unconfirmed table every off-peak hour carries the same fallback rate, so every
+off-peak hour ahead of an on-peak hour qualifies. The 80% target and the
+`min(deficit + 10% of the gap, deficit + 1 kWh)` top-off size are unchanged. Tests:
+`dispatchTopOff.test.ts`.
 
 #### 5.5 Outputs — `GET /api/dispatch-plan` (cached 60 s at the route; 30 min engine)
 
@@ -7894,7 +7910,7 @@ The full set of REST endpoints consumed by the front ends:
 | `/api/round-trip-efficiency` | web DegradationCard, battery-card | RTE |
 | `/api/curtailment`, `/api/clipping` | web CurtailmentCard, solar-card | clipping/curtailment diagnostics |
 | `/api/history`, `/api/circuit/history` | Sparkline/TrendChart, CircuitModal, circuit-card | recorder time-series |
-| `/api/dispatch-plan` | strategy-card | dispatch plan |
+| `/api/dispatch-plan` | none — the strategy-card was removed with the Lovelace cards in v1.47.0 (Appendix A.7) | dispatch plan |
 | `/api/alerts/history`, `/api/alerts/outcome` | web AlertsPanel/AlertOutcomeButtons, alerts-card | cleared-alert log, outcome tagging |
 | `/api/notify/status`, `/api/notify/test` | alerts-card | notify channel status/test |
 | `/api/alert-settings`, `/api/chimes`, `/api/chime-config`, `/api/broadcast/config`, `/api/alert-preview` | web Alert Console | alarm-audio administration |
@@ -9804,6 +9820,8 @@ The single source of truth for a plan date's spans, in fixed America/Phoenix ari
 
 **★ The completion gate** (v1.39.0): a night may be captured only once `nowMs ≥ completeMs`. The pre-fix midnight tick captured yesterday's row while its charge window was still *open* — window coverage ~25% ⇒ `scored=0`, inverted SoC query ⇒ null actuals — and the idempotence latch then froze those truncated actuals into the never-pruned ledger forever, so the readiness gate could never accumulate a single scored night.
 
+**★ …and the forecast span** (v1.187.10): the sweep captures a row only once `nowMs ≥ ledgerCaptureDueMs(completeMs, issued_at_ms)` = `max(completeMs, issued_at_ms + FORECAST_SPAN_MS)` (24 h; `ledgerRowsDueForCapture`, nightLedgerScoring.ts). The PV/load actuals are integrated over `[issued_at_ms, +24 h]` clipped to the capture instant (`forecastActualsSpan`), so a capture before issue + 24 h froze a short actual against a 24 h forecast. On a weekday the gap was 0.1–0.5 h (completion ~21:00, issue ~21:30); a Friday 1 h window closes Saturday 00:00 and completes Saturday 16:00, ~5.4 h short. The 2026-10-02 row was captured at 16:08:08 on 18.6 h of load: 39.62 kWh against an 81.8 kWh forecast, `load_err_frac` −0.52, `buy_err_kwh` +51.09 kWh — a positive skew of ~10–12 kWh on every such Friday row, the direction that masks a real under-buy from the HARD criterion, and an inflated \|`load_err_frac`\| in the load-band calibration. `completeMs` itself is unchanged (the premature-capture repair below resets any row captured before it, across a 60-day sweep that can reach past the samples retention). Consequences: a weekday row now captures at the first sweep after issue + 24 h (~21:30–22:00), usually the 30-min tick after that evening's job, so the evening plan's ledger-derived calibrations and the evening notification's readiness see the previous night one sweep later; the tick that captures it also recomputes the readiness the apply moment reads (the window opens at 23:00 or later). A Friday row captures Saturday ~21:30–22:00. Known limit: the P50 sums the forecast's 24 hourly slots from the next whole hour after issue, so the actual span leads the forecast span by up to 1 h; the lengths are equal.
+
 #### The backfill sweep (`scoreCompletedNights`, `index.ts:2804`)
 
 Runs on the 30-min tick, the evening job, and the boot warm-up. Sweeps the last **60 days** of ledger rows (not exactly-yesterday — the old scorer orphaned any night left uncaptured across SHP2-wedge/downtime days forever, an uncounted MNAR exclusion), skipping rows already captured (`outcome_captured_at_ms != null` — idempotent) and rows still in flight. A night whose raw telemetry has aged past the configured samples retention (default 30 days) captures honestly as `scored=0` with null actuals — it does not stay uncaptured forever.
@@ -9815,7 +9833,7 @@ Runs on the 30-min tick, the evening job, and the boot warm-up. Sweeps the last 
 - **Realized cost** (v1.187.0): `realized_cost_cents` — §6 "Cost columns". **Delivered energy** on an actuated night integrates the span the write was actually held (`deliveredHoldSpan`), from the write (or the window open, whichever is earlier) to: the restore's own time, `actuation_reverted_at_ms` (stamped by the actuator from v1.187.0), clamped to `[close, close + HOLD_TAIL_MAX_MS]` (30 min — past that the span would integrate the solar morning, where import − load turns negative), plus `HOLD_DEVICE_SETTLE_MS` (1 min); with no stamp and a write before the window (the pre-v1.187.0 schedule), close + `LEGACY_REVERT_LAG_MS` (5 min) as before; with no stamp on the current schedule, close + `ACTUATOR_TICK_MS` + `HOLD_DEVICE_SETTLE_MS`. A span ending exactly at the close dropped the restore's own tick (up to ~60 s) plus the device's stop — 0.1–0.5 kWh at 16–19 kW on a night still charging at the close, always toward under-delivery, in the column the buy de-bias calibrator trains on (the v1.115.0 defect class). A cancel or grid-loss abort keeps the window, as before.
 - **What delivered energy measures** (v1.187.3, `deliveredIntoCores`): the energy into the home Cores — the charging part (> 0) of the house panel's source channels (`src{n}_w`, from `backupInfo.chWatt`; positive = the panel charging that Core, negative = the Core carrying the house), integrated over the hold span and summed. **The channels come from the hold:** every source channel (`SOURCE_CHANNEL_SLOTS`, slots 1–3) with at least one recorded sample inside the hold, plus every slot the house panel reports connected at capture (`houseConnectedSlots` → `connectedSourceSlots`: connected and carrying a serial — the live rule of `panelRoster`, without its persisted `lastRoster` fallback). Capture runs ~16 h after the close, so membership at that moment is not the night's: a Core unplugged or in service by then, or a `/quota/all` that came back without the `pd303_mc` sources subtree that minute, would otherwise drop a channel that charged all night (or every channel) from a column written once. The recorder writes `src{n}_w` for every `chWatt` entry whether or not the slot is connected, so an empty slot reads zeros and adds nothing, and the slot ↔ `chWatt` index mapping does not affect the total. A slot connected at capture whose channel recorded nothing over the hold is still read, as a dark channel, so the coverage gate below withholds the night. Until v1.187.3 the column was window grid import minus the concurrent house load (`actuatedDeliveredKwh`, removed), which assumed the house ran on the grid for the whole hold; when the SHP2 carries the house from the pack — above its reserve before a just-in-time force-charge, and after the force-charge's OFF — the subtraction removed load the grid never carried. 2026-09-30: import 23.38 − load 18.67 = 4.71 kWh, against 20.34 kWh on the source channels (the Cores' own AC input 20.25, the pool 55→76%). On nights the house rode the grid all window the two agree to within ~3% on 09-24 (23.64 vs 24.26 kWh) and 09-28 (46.26 vs 47.41) and ~10% on the small 09-29 night (7.23 vs 7.93). A channel carrying the house reads negative and adds nothing, so hours on the pack cost nothing and hours on the grid count only what reached the Cores. NULL, with a `Delivered:` clause in `score_notes`, when no channel recorded anything over the hold and no connected Core is known; when any channel covers less than `LEDGER_SPAN_MIN_COVERAGE` (0.9) of the hold — the minimum over channels, as `actual_pv_kwh`'s per-core gate, since one dark channel in three averages to a healthy 0.67 while the total is a third short; or when the total exceeds the metered `grid_home_w` import over the hold (when that is itself ≥ 0.9 covered) by more than `DELIVERED_IMPORT_SLACK_FRAC` (5%) + `DELIVERED_IMPORT_SLACK_KWH` (0.5 kWh) — overnight the grid is the only source that can charge the Cores, so more than that is a channel read with the wrong sign or meaning. `HOLD_TAIL_MAX_MS` is unchanged; the morning bias it was sized against was import − load's.
 - **Coverage**: fraction of 5-min buckets in the window with ≥ 1 sample; `< 0.9` ⇒ `scored=0` ("MNAR-excluded").
-- **PV/load actuals** are integrated over `[issued_at_ms, +24 h]` — the same horizon the frozen P50 forecast covered, so `pv_err_frac`/`load_err_frac` are like-for-like. Actual PV = Σ `pv_total` over the SHP2-connected home DPUs (the same basis the forecast is built from); actual load = SHP2 `panel_load`.
+- **PV/load actuals** are integrated over `[issued_at_ms, +24 h]` — the same horizon the frozen P50 forecast covered, so `pv_err_frac`/`load_err_frac` are like-for-like. Actual PV = Σ `pv_total` over the SHP2-connected home DPUs (the same basis the forecast is built from); actual load = SHP2 `panel_load`. v1.187.10: the span is whole at capture (the forecast-span gate above); before it a row captured earlier integrated only to the capture instant.
 - **Minimum SoC** over the score span passes through `medianFilter3` (3-sample median; endpoints pass through) *before* the min-scan: the documented SHP2 cloud-reconnect artifact emits a single transient `backupBatPercent=0` sample, and an unfiltered min-scan latches it — fabricating a realized need equal to the full floor+cushion and a false HARD under-buy in the gate's evidence. A genuine sustained low has agreeing neighbors and passes.
 - **Realized-need buy** — the hindsight counterfactual `buy_err_kwh` is scored against — is defensible **only on a clean night**: in advisory phase the home runs *without* the buy, and on a grid-tied home its own overnight import props the SoC. `scored=1` requires: plan had a trajectory (`min_proj_soc_pct` non-null) ∧ coverage ≥ 0.9 ∧ a min-SoC read exists ∧ window import ≤ `ARB_MIN_BUY_KWH` (near-zero — "clean islanded baseline"). Then `realizedNeedBuyKwh = max(0, targetFloorKwh − actualMinPackKwh)/legEff`. Every other case records `scored=0` with an explicit `score_notes` reason.
 - **The floor verdict is the plan trajectory, never baseline telemetry** (design §3.3): `plan_traj_floor_breached` = the plan's own sized trough below its own line — v1.186.0: `cushionTroughSocPct < cushionLineSocPct` (the trough that set `cushionShortfall`, and reserve floor + the cushion applied; `legacy-pct` keeps the whole-house `minProjSocPct` against floor + `cushionPct`; no recorded trough ⇒ null). Before v1.186.0 it compared the whole-house disclosure trough, which reads 0% on every cost-mode night, so the gate counted every such night as a strike; a pre-v1.186 row with `cushion_shortfall` 0 and no trough is set aside by `nightChargeGate`. In advisory phase raw min-SoC telemetry measures the un-actuated baseline, not the plan's line. Raw telemetry feeds only `soc_min_err_pct` (plan minus actual) and the separate `cushion_breached` observation. `pv_in_band`/`load_in_band` check the actual against the frozen `[P10, P90]`; `onpeak_import_occurred` uses a 0.05 kWh threshold.
@@ -9823,6 +9841,13 @@ Runs on the 30-min tick, the evening job, and the boot warm-up. Sweeps the last 
 #### Premature-capture repair (`repairPrematureNightOutcomes`, `index.ts:3096`)
 
 Once per boot, idempotent: any row whose `outcome_captured_at_ms` **precedes its own night's `completeMs`** (the pre-v1.39.0 mid-window defect) has its outcome/score columns reset to NULL (`scored=0`, explanatory `score_notes`) so the now-completion-gated sweep re-captures it with full-span actuals. Rows are corrected in place — never deleted.
+
+#### Forecast-span repair (`repairShortForecastSpanOutcomes`, v1.187.10)
+
+Once per boot, idempotent, before the warm sweep: `forecastSpanRepair` (nightLedgerScoring.ts) selects captured rows with a stored window whose capture preceded `issued_at_ms + 24 h` by at least `FORECAST_SPAN_REPAIR_MIN_SHORT_MS` (1 h) — Friday 1 h windows (~5.4 h short) and evening jobs delayed past ~22:00.
+- **Inside the re-capture horizon** — `issued_at_ms` within `min(RECORDER_RETENTION_DAYS, 60) − 2` days (`forecastSpanRecaptureHorizonMs`; 28 days at the default 30-day retention, 58 days with multi-year retention, so the row keeps its raw samples and stays inside the 60-day sweep) — the outcome columns are reset as the premature-capture repair resets them (`forecastSpanResetColumns`: capture stamp NULL, `scored=0`, a `reset —` note) and the sweep re-captures the row over the full span. A re-capture re-scores every outcome column on the current scorer — the delivered-energy basis, the governed on-peak, the PV coverage gate and the Cores connected at capture — like any late capture. One info line per row names the shortfall and the captured load and `buy_err_kwh`.
+- **Past it** the row is kept as captured and `score_notes` gains a `Forecast span:` clause stating the hours covered and that the PV/load errors under-count (`forecastSpanTagNote`; the marker makes it idempotent). One summary line lists the tagged rows. The tag is not read by the readiness gate or the load-band calibration; such rows age out of the 120-day band window.
+- **Not repaired:** weekday rows captured before v1.187.10, 0.1–0.5 h short, are kept as captured (a re-capture is spent only where the PV/load/buy columns are materially wrong).
 
 ---
 
@@ -9834,7 +9859,7 @@ A pure reduction over the ledger (no I/O, `nowMs` injected) into one of three st
 
 **The v2 evidence base is ACTUATED nights** (v1.50.0). The v1 gate scored a night only on a "clean islanded baseline" (near-zero window import) — on a grid-tied home the SHP2 carries the house on grid at the floor and imports every night, so `scoredDays` was structurally 0 and the gate could never open. v2 splits the evidence into two pools:
 
-- **Actuated pool** — current-algo rows with `actuated=1` ∧ `scored=1` (a bounded reserve write was applied and its delivery measured, §10). Feeds the under-buy rate, the delivery bias, and the graduation night count.
+- **Actuated pool** — current-algo rows with `actuated=1` ∧ `scored=1` (a bounded reserve write was applied and its delivery measured, §10). Feeds the under-buy rate, the sizing bias, and the graduation night count.
 - **Forecast pool** — current-algo, outcome-captured, `confidence_tier='forecast'` rows. Feeds PV/load accuracy and band coverage (those columns are recorded on every captured night regardless of the realized-need `scored` flag). v1.187.0: the PV figures (`pvMae`, `pvBias`, `pvBandCoverage`, the effective-N residual series) and the verdict-bearing sample (`coverageNights`, the informational joint) read only rows whose `pv_verdict_set_aside` is NULL — a band built for other Cores than the actuals is not forecast-skill evidence (§6 "PV EVIDENCE"). Such rows are counted in `pvVerdictsSetAside`; the load figures are unaffected. **An incomplete-basis night is not set aside for that alone**: a plan refused for a lasting forecast failure (2026-09-11: "PV band coverage 72% < 78%") is exactly the evidence this gate grades, and dropping those nights would raise PV coverage by survivorship. On the 2026-09-29 ledger the one set-aside row moves PV coverage 33/36 (0.917) to 32/35 (0.914) and `coverageNights` 36 to 35; no verdict changes.
 
 **HARD failures ⇒ `BLOCKED`** (evaluated first):
@@ -9843,7 +9868,7 @@ A pure reduction over the ledger (no I/O, `nowMs` injected) into one of three st
 |---|---|
 | Engine-fault strikes | A strike requires the plan to have **claimed hold** (`cushion_shortfall` falsy — a NULL/legacy row still counts as claimed, fail-closed) AND either the plan's own simulated trajectory breached floor+cushion (forecast-tier rows, §3.3) or an actuated night's **realized** outcome breached (`cushion_breached`, any tier — a delivered buy that still breached is fault evidence regardless of forecast basis). A plan that honestly disclosed `cushionShortfall` is physics, not fault — exempt. Strikes count within a rolling `STRIKE_WINDOW_DAYS = 45` window and clear after `STRIKE_CLEAR_STREAK = 14` consecutive strike-free actuated nights — escapable by demonstrated performance, never by waiting alone. |
 | `buy_err_kwh` basis | **v1.105.0 (algo v3)** — the PLANNER-SIZING basis: `buy_err = planBuy − (planBuy + netMiss/legEff) = −netMiss/legEff`, where `netMiss = (forecastPv − actualPv) + (actualLoad − forecastLoad)`. It answers exactly one question — *did the planner size the buy correctly?* — and contains no delivered term, no trough and no reserve setpoint. The prior definition was `planBuy − (delivered + troughDeficit)`, the difference of two questions: it counted the actuator's by-design over-delivery (29-41 kWh against 21-22 kWh plans) as under-buy, and anchored on a 16 h post-window trough that is really the reverted `backupReserveSoc` (a fixed −14.9 kWh at a 10 % trough). Across four live nights that was −62.13 kWh of residual, 52 % over-delivery / 48 % trough, producing a 56 % under-buy rate no forecast change could move. Actuated and advisory nights share the basis — one column, one meaning. Delivery quality is a separate question. |
-| Under-buy rate | With ≥ `MIN_NIGHTS_TO_JUDGE_UNDERBUY = 5` actuated nights: fraction of `buy_err_kwh < −UNDERBUY_DEADBAND_KWH` (0.5, **v1.105.0** — an untoleranced `< 0` scored a −0.01 kWh rounding residual as a life-safety miss) must be ≤ `MAX_UNDERBUY_RATE = 0.10` (under-buy is the asymmetric safety miss). Below 5 nights this is still LEARNING, not BLOCKED. **v1.104.0** — the pool EXCLUDES nights whose plan disclosed a cushion shortfall (`cushion_shortfall`), matching the exemption the strike rule already applies ("disclosed — physics, not fault"): a plan that declared up front it could not meet the cushion, because charge and pool caps prevent it, is not evidence that the engine under-bought. `underBuyExcluded` reports how many were dropped. Removing bad evidence leaves NO evidence, so the rate becomes null and the state falls to LEARNING — fail-closed, never READY. ★Known limitation, NOT fixed: `buy_err_kwh` is a hybrid residual that adds the actuator's own delivered energy back into "realized need" and anchors its counterfactual on a trough that is really the reverted reserve setpoint, so actuator over-delivery is indistinguishable from planner under-sizing. Redefining it requires choosing which question it answers and bumping `CURRENT_ALGO_VERSION`, invalidating every existing row. |
+| Under-buy rate | With ≥ `MIN_NIGHTS_TO_JUDGE_UNDERBUY = 5` actuated nights: fraction of `buy_err_kwh < −UNDERBUY_DEADBAND_KWH` (0.5, **v1.105.0** — an untoleranced `< 0` scored a −0.01 kWh rounding residual as a life-safety miss) must be ≤ `MAX_UNDERBUY_RATE = 0.10` (under-buy is the asymmetric safety miss). Below 5 nights this is still LEARNING, not BLOCKED. **v1.104.0** — the pool EXCLUDES nights whose plan disclosed a cushion shortfall (`cushion_shortfall`), matching the exemption the strike rule already applies ("disclosed — physics, not fault"): a plan that declared up front it could not meet the cushion, because charge and pool caps prevent it, is not evidence that the engine under-bought. `underBuyExcluded` reports how many were dropped. Removing bad evidence leaves NO evidence, so the rate becomes null and the state falls to LEARNING — fail-closed, never READY. (The hybrid-residual limitation recorded here before algo v3 — delivered energy added back into realized need, a trough anchored on the reverted setpoint — was removed by v1.105.0; see the basis row above.) |
 
 **Graduation criteria** (adopted 2026-07-31) — *any* unmet or uncomputable metric ⇒ fail-closed `LEARNING` (design I13; missing/thin/young data is never null-as-ready):
 
@@ -9851,7 +9876,7 @@ A pure reduction over the ledger (no I/O, `nowMs` injected) into one of three st
 |---|---|---|
 | Scored actuated nights | ≥ 21 | `MIN_ACTUATED_NIGHTS = 21` |
 | Under-buy rate (actuated pool) | ≤ 0.10 | `MAX_UNDERBUY_RATE` |
-| Signed delivery bias (mean `buy_err_kwh`, actuated pool) | in `[0, 5]` kWh | `BUY_BIAS_MIN_KWH = 0`, `BUY_BIAS_MAX_KWH = 5` — never net under, never gross over |
+| Signed sizing bias (mean `buy_err_kwh`, actuated pool — the P50 PV/load forecast miss in kWh; delivered energy is not part of it) | in `[0, 5]` kWh | `BUY_BIAS_MIN_KWH = 0`, `BUY_BIAS_MAX_KWH = 5` — never net under, never gross over. v1.187.10: the blocker reads "sizing bias … (mean buy_err_kwh: the P50 PV/load forecast miss in kWh; delivered energy is not part of it)"; it read "delivery bias", which pointed at the actuator when the live 22.27 kWh was load over-forecast |
 | Realized band coverage — **v1.106.0: PER MARGINAL** (`pvBandCoverage`, `loadBandCoverage`), each in `[P10,P90]`, forecast pool | each in `[0.78, 0.92]` over ≥ 14 verdict-bearing nights | `BAND_COVERAGE_MIN/MAX`, `MIN_COVERAGE_NIGHTS = 14` — too high means the band is uselessly wide, too low means unsafe. Previously the **AND** of the two was graded against this marginal target: for two independent 80 %-calibrated marginals the joint is 0.64 and the Fréchet bounds put it in `[0.60, 0.80]`, so the upper half of the target was UNREACHABLE by construction and a perfectly calibrated pair could never pass. It also hid WHICH input was broken — the live joint read 9.5 % while the marginals were PV 57 % / load 14 %. The joint is retained as an informational figure only, and the blocking line names both marginals. |
 | Load band construction — **v1.106.0** | `calibratedLoadBandFactor`: nearest-rank 80th percentile of realized \|`load_err_frac`\|, FLOORED at the historical hand-set 1.15 and capped (default 2.0) | The band was `P50 ÷ 1.15` / `P50 × 1.15` — a fixed ±15 % sizing multiplier that nothing estimated from data, yet named P10/P90 and graded as a calibrated 80 % interval; it contained the actual **14 %** of the time. The floor makes the change monotone: it can only WIDEN. Only `loadP90W` feeds sizing (the projected drain), so a wider band buys more — the safe direction for an asymmetric under-buy miss. Below 10 samples it returns the floor with `basis: 'default'` rather than calibrating on noise. |
 | Zero engine-fault strikes | active (uncleared, in-window) strikes = 0 | `STRIKE_WINDOW_DAYS`, `STRIKE_CLEAR_STREAK` |
@@ -9986,11 +10011,14 @@ Three properties an operator needs before setting these:
 | Entity | Type | Content |
 |---|---|---|
 | `ecoflow_night_charge_recommended` | binary_sensor | `charge_tonight` — the single flag an owner automation gates on |
-| `ecoflow_night_charge_target_soc` | sensor (%) | Target pool SoC by window close |
-| `ecoflow_night_charge_buy_kwh` | sensor (kWh) | Recommended meter-side buy |
+| `ecoflow_night_charge_target_soc` | sensor (%) | The reserve SETPOINT for the advisory automation to write — `plan.setpointSocPct` clamped to the actuator's `[10, 50]` envelope (`clampReserveTarget`); not a predicted SoC (v1.62.0 ask/forecast split) |
+| `ecoflow_night_charge_expected_soc` | sensor (%) | The predicted, contention-derated pool SoC at window close (`plan.targetSocPct`) |
+| `ecoflow_night_charge_buy_kwh` | sensor (kWh) | Recommended meter-side buy (`plan.buyKwh`) |
 | `ecoflow_night_charge_window_start` / `_end` | sensor (string) | Day-qualified Phoenix `HH:MM` window bounds |
 | `ecoflow_night_charge_readiness` | sensor (diagnostic) | `LEARNING` / `READY_TO_CONSIDER_WRITES` / `BLOCKED` |
 | `ecoflow_night_charge_write_ready` | binary_sensor (diagnostic) | Fail-closed gate boolean |
+
+Buy, expected SoC and the window come from the latest plan, recomputed every 30 min: before the window they can differ from the announced and armed figures (`GET /api/night-charge/status` → `actuation`), and inside it the buy is what is still needed and reaches 0 once the target is met. The armed buy is not an actuation input — force-charge stops on the frozen SoC target.
 
 The remaining gate diagnostics (`night_charge_under_buy_rate`, `night_charge_band_coverage_pct`, `night_charge_plan_nights_scored`, `night_charge_effective_n`, `night_charge_forecast_basis_pct`, `night_charge_exclusion_fraction`) ride the same payloads without dedicated discovery entities.
 
@@ -10295,7 +10323,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Night-charge plan | `computeNightChargePlan`: deep-shortfall buy sized by **bisection against a clamp-exact with-buy re-sim trough** (never additive offset); `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927` | Day forecast, probabilistic band, SoC/pool, tariff windows, EV commitments | Evening notify (bypasses quiet hours as a plan advisory), HA `charge_tonight` sensors, `/api/night-charge/status`, `NightChargeCard` | measured-and-active (write posture per `NIGHT_CHARGE_MODE`: advisory default; supervised = one announced, cancellable, bounded, auto-reverting `backupReserveSoc` write per charge night — §8b) |
 | Plan staleness fail-safe | `nightChargeStateFields`: `charge_tonight` strictly `false` unless plan < 12 h old (`PLAN_STALENESS_MS`) | Latest plan timestamp | HA sensors, `/api/ha-state` | measured-and-active |
 | Night ledger + outcome scorer | Never-pruned `night_charge_ledger`/`_calibration`; `scoreNightOutcome` against the ledger's **stored per-plan window** (weekend windows are disjoint from weekday 23:00–05:00); premature-capture repair; grid-import-propped baselines refused a score | Recorder actuals over the plan window | Readiness gate, status endpoint, card | measured-and-active |
-| Write-readiness gate (v2) | `computeNightChargeReadiness`: ≥21 scored **actuated** nights, under-buy ≤ 10 %, delivery bias 0–5 kWh, band coverage 0.78–0.92 (≥14 verdict nights), zero uncleared engine-fault strikes (45-day window, 14-night clean-streak clearing, `cushionShortfall`-disclosed breaches exempt) | Ledger rows | HA `write_ready` flag (strictly false on failure), status endpoint | data-gated (`writeReady` unlocks AUTO only; supervised mode is an explicit owner action — §8b) |
+| Write-readiness gate (v2) | `computeNightChargeReadiness`: ≥21 scored **actuated** nights, under-buy ≤ 10 %, sizing bias 0–5 kWh, band coverage 0.78–0.92 (≥14 verdict nights), zero uncleared engine-fault strikes (45-day window, 14-night clean-streak clearing, `cushionShortfall`-disclosed breaches exempt) | Ledger rows | HA `write_ready` flag (strictly false on failure), status endpoint | data-gated (`writeReady` unlocks AUTO only; supervised mode is an explicit owner action — §8b) |
 
 ### A.11 Safety & operational plumbing (§13)
 
@@ -10422,8 +10450,19 @@ Read-only 60 s tick over the raw quota of the SHP2 + every DPU. Pure core:
 missing on either side is availability, never drift), `evaluateDrift`
 (2-observation debounce; confirmed baseline advances and persists),
 `classifyChange` (own-write = SHP2 `backupReserveSoc` moving to the actuator's
-target/restore while a night is in flight — logged, not pushed; everything
-else external). External changes batch into ONE [Medium] push (dedupId
+target/restore while a night is in flight, or to the owner's pending
+`/api/reserve-floor` value — logged, not pushed; v1.165.0 adds the force-charge
+keys `ch{n}ForceCharge` / `foceChargeHight` inside our force-charge window and its
+15-min tails; everything else external). v1.187.10 — inside that window a
+force-charge key is own-write only at a value this add-on COMMANDED
+(`forceChargeCommandsOf`, nightForceCharge.ts: ON to the slots it switched on while
+no OFF has been issued, OFF to those slots once it has, the ceiling at the synced
+backstop or, once the restore is issued, the panel's own value). Any other movement
+in the window is `panel-side` — logged at info as changed on the panel, not by the
+add-on (the panel's own ceiling stop, or a manual Charge Now), and not pushed, as
+before. On 2026-10-02 the panel's 87% ceiling stopped slots 2 and 1 at ~04:24–04:25,
+~4 min before the add-on's OFF, and both were logged as the add-on's write. Known
+limit: a manual Charge Now inside the window or its tails is still not pushed. External changes batch into ONE [Medium] push (dedupId
 `settings_drift`) held through `NOTIFY_QUIET_HOURS`. First boot adopts
 silently. Sidecar `/data/settings-surface.json` (atomic; corrupt = silent
 re-adoption). Harness: `scripts/mutate-settings-drift.mjs` (5 mutants).
@@ -10476,11 +10515,25 @@ device field is therefore asking "what is the reserve right now", when almost
 every consumer means "what floor did the OWNER set". Four separate defects came
 from that conflation; they are fixed by one shared fact.
 
-**`ownerReserveFloorPct(actuationState, liveReservePct)`** (`nightChargeActuator.ts`)
+**`ownerReserveFloorPct(actuationState, liveReservePct, nowMs)`** (`nightChargeActuator.ts`)
 returns `priorReservePct` while our own write is holding the reserve up
-(`isReserveArbitrageRaised` = applied && !reverted, persisted across restarts),
-and the live value otherwise. Out-of-envelope or missing restore values fall
-back to the live reading rather than inventing a floor.
+(`isReserveArbitrageRaised` = applied && !reverted, persisted across restarts)
+or — v1.187.10 — while the revert is still settling (`isRevertSettling`: the live
+value still exactly our target, within `REVERT_READBACK_GRACE_MS` = 5 min of the
+revert; the predicate the alert posture has used since v1.120.0), and the live
+value otherwise. The revert stamps `revertedAtMs` on the cloud ACK, and the SHP2
+reports our 50% for another ~20–60 s; the floor fell to that 50 until the readback,
+and the runway (60 s cache) measured against it for ~90 s — 2026-10-03 00:01:25
+"reserve in 5.6 h" from a 67 kWh pool with ~52 kWh above the real 16% floor, on 6 of
+10 revert nights in 14 days. On grid the runway alarm is backstopped; a revert on a
+grid loss (`decideActuation`'s grid-loss abort) would have run the full ladder
+against 50, and a pool below 50 reads "at the reserve floor". Every call site passes
+the clock: the boot seed, the per-snapshot push (which ends the hold on the
+readback), `persistNightActuation`, the planner and the owner-floor route. Known
+limit, shared with the posture: an owner or Storm Guard change to exactly the
+night-charge target within 5 min of a revert reads as our echo until the grace
+ends. Out-of-envelope or missing restore values fall back to the live reading
+rather than inventing a floor.
 
 Consumers, each of which had the bug independently:
 

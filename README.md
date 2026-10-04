@@ -107,7 +107,7 @@ exactly what the app renders.
   after the window, audit-logged). It **learns from night one**: a durable
   ledger records each plan, its measured delivery, and its outcome, and a
   fail-closed write-readiness gate graduates **auto** mode only on real
-  actuated-night evidence (≥21 scored nights, under-buy ≤10%, delivery bias in
+  actuated-night evidence (≥21 scored nights, under-buy ≤10%, sizing bias in
   [0, 5] kWh, band coverage 78–92%, zero engine-fault strikes).
   `ARB_OBJECTIVE` selects the sizing objective: **`resilience`** buys exactly the
   requirement, **`cost`** treats that requirement as a floor and fills further
