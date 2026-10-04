@@ -330,8 +330,11 @@ function NormalApp() {
             (model-fit R²), where did the kWh go (7-day self-consumption), and
             what's clustered (active incidents). The deep predictive detail lives
             on each home page; this is the overview digest. Each block is
-            empty-by-design on a healthy fleet and simply doesn't render then. */}
-        <div className="mt-6 space-y-4">
+            empty-by-design on a healthy fleet and simply doesn't render then.
+            v1.187.7 — `*:not-first:mt-4`, not `space-y-4`: Tailwind 4's space-y
+            puts the gap on the EARLIER sibling at zero specificity, so
+            SectionHeader's own `mb-3` would win and the gap would shrink to 12px. */}
+        <div className="mt-6 *:not-first:mt-4">
           <SectionHeader
             accent="neutral"
             title="Overview digest"
