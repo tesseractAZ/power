@@ -52,7 +52,7 @@ agent.get('https://api.weather.gov')
 
 const { stormPrepAlerts, getActiveNwsAlerts } = await import('../src/analytics.js');
 const { createLastGoodFeed, alertSetTrusted } = await import('../src/alertMonitor.js');
-const { NWS_ALERTS_FAILURE_BACKOFF_MS, nwsAlertsBackingOff } = await import('../src/nws.js');
+const { NWS_ALERTS_FAILURE_BACKOFF_MS, nwsAlertsBackingOff, NWS_ALERTS_MAX_CARRY_MS, nwsAlertsCarryExpired, setNwsLog } = await import('../src/nws.js');
 const BACKOFF = NWS_ALERTS_FAILURE_BACKOFF_MS;
 
 after(async () => {
@@ -150,4 +150,55 @@ test('★★ once a fetch has succeeded, a later failure serves the last good fe
   assert.deepEqual(again.map((a) => a.id), ['storm-Severe_Thunderstorm_Warning'], 'the last good feed, not unknown and not empty');
   assert.deepEqual((await getActiveNwsAlerts()).map((a) => a.event), ['Severe Thunderstorm Warning'], 'inside the backoff the last good feed is served');
   assert.equal(fetches, n + 1, 'without a request');
+});
+
+/* ── v1.187.10 (log review 10-03) — the carried feed has an age limit on the alarm path ── */
+
+test('nwsAlertsCarryExpired — past the limit only; no feed, a feed at the limit, or a feed "from the future" (the clock stepped back) is not expired', () => {
+  const t = 1_000_000_000;
+  assert.equal(NWS_ALERTS_MAX_CARRY_MS, 60 * MIN, 'one hour: four alerts TTLs, about one NWS re-issue cycle');
+  assert.equal(nwsAlertsCarryExpired(null, t), false);
+  assert.equal(nwsAlertsCarryExpired(t, t + 60 * MIN), false, 'at the limit');
+  assert.equal(nwsAlertsCarryExpired(t, t + 60 * MIN + 1), true);
+  assert.equal(nwsAlertsCarryExpired(t, t - 1), false, 'the clock stepped back');
+  assert.equal(nwsAlertsCarryExpired(t, t + 11, 10), true, 'the limit is a parameter');
+});
+
+test('★★★ an outage that began after a success: inside the carry limit the warning is carried; past it the alarm path reads UNKNOWN (the feed carries and says so) while the display keeps the last good feed', async () => {
+  // State from the previous test: the last success 20 min before its 503, which was just now.
+  const info: string[] = [];
+  const warns: string[] = [];
+  setNwsLog((m) => info.push(m), (m) => warns.push(m));
+  const feed = createLastGoodFeed<Array<{ id: string }>>('storm-prep');
+  offset += 35 * MIN; // the last good feed is 55 min old; the backoff has elapsed
+  let n = fetches;
+  const near = await feed.read(() => stormPrepAlerts({}), 2_000);
+  assert.equal(fetches, n + 1, 'it asked, and NWS failed again');
+  assert.deepEqual(near.value?.map((a) => a.id), ['storm-Severe_Thunderstorm_Warning'], '55 min old: still carried as current');
+  assert.equal(near.fresh, true);
+  assert.equal(near.error, null);
+  assert.deepEqual(warns, [], 'inside the limit: no warning');
+
+  offset += 6 * MIN; // 61 min old — past the limit, and past the backoff of the last failure
+  n = fetches;
+  const past = await feed.read(() => stormPrepAlerts({}), 2_000);
+  assert.equal(fetches, n + 1, 'it asked again (the answer 6 min ago was built from a carried feed and was not cached)');
+  assert.equal(past.fresh, false, 'not a fresh delivery: the carry path engages');
+  assert.match(past.error ?? '', /failed — NWS alerts unknown/);
+  assert.deepEqual(past.value?.map((a) => a.id), ['storm-Severe_Thunderstorm_Warning'], 'the monitor holds the last alerts — held, not cleared');
+  assert.equal(warns.length, 1, 'one WARNING when the limit passes');
+  assert.match(warns[0], /^nws: WARNING — no successful storm-alert fetch for 61 min \(last error: HTTP 503\); the last good feed is past its 60-min carry limit, so storm alerts are UNKNOWN/);
+  await assert.rejects(() => stormPrepAlerts({}), /NWS alerts unknown/);
+  assert.equal(warns.length, 1, 'once per outage');
+  assert.deepEqual((await getActiveNwsAlerts()).map((a) => a.event), ['Severe Thunderstorm Warning'], 'the display route keeps the last good feed at any age');
+
+  // NWS answers again: the feed is current, the recovery is logged, and the next outage may warn again.
+  offset += BACKOFF;
+  reply = { status: 200, body: JSON.stringify({ features: [] }) };
+  assert.deepEqual(await stormPrepAlerts({}), []);
+  assert.ok(info.some((l) => /^nws: storm-alert feed recovered after \d+ failed attempt\(s\) over \d+ min — 0 active alert\(s\)$/.test(l)), info.join('\n'));
+  const back = await feed.read(() => stormPrepAlerts({}), 2_000);
+  assert.equal(back.fresh, true);
+  assert.deepEqual(back.value, []);
+  setNwsLog(() => {});
 });

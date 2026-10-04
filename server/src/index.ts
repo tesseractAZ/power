@@ -102,7 +102,7 @@ import { registerWsConsole } from './telnet/wsConsole.js';
 import { startMqttDiscovery } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
-import { getWeather } from './weather.js';
+import { getWeather, createGhiTickLogger } from './weather.js';
 import type { WeatherForecast } from './weather.js';
 import { computePackRiskV2 } from './ml.js';
 import { initAnalyticsClient } from './analyticsClient.js';
@@ -156,7 +156,7 @@ import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, rateFloo
 import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
 import { evaluateSelfHeal, selfHealQuorum, idleExclusionEdges, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG, canRemediateNow, recordRemediationHeal, HEAL_BUDGET_WINDOW_MS } from './sessionSelfHeal.js';
 import { setBlindRemediationHooks } from './blindRemediation.js';
-import { assessBlind, pollState, pollHealth } from './telemetryBlind.js';
+import { assessBlind, pollState, pollHealth, healthPollErrorKind } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
 // them into real push alerts (mirrors broadcastHealth's set/get + pure-builder split).
@@ -230,7 +230,7 @@ import {
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
 import type { NightLedgerRow } from './recorder.js';
-import { logMethodHook } from './logHooks.js';
+import { panelFastifyOptions } from './logHooks.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -244,14 +244,9 @@ const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 60_000);
 // 4xx at debug, slow >1s at info. The pino logMethod hook drops fastify's INFO 'stream closed
 // prematurely' (media players aborting WAV range-requests — 3-4 per
 // successful broadcast, fastify/lib/reply.js, benign by definition).
-const app = Fastify({
-  disableRequestLogging: true,
-  logger: {
-    level: config.logLevel,
-    // v1.184.0 — logHooks.ts: also demotes a client hang-up ("premature close") to debug.
-    hooks: { logMethod: logMethodHook as never },
-  },
-});
+// v1.187.10 — the options live in logHooks.ts (panelFastifyOptions): request logging is turned off
+// through a LogController, not the top-level option Fastify 5.12 deprecates (FSTDEP023).
+const app = Fastify(panelFastifyOptions(config.logLevel));
 app.addHook('onResponse', (req, reply, done) => {
   const ms = Math.round((reply as { elapsedTime?: number }).elapsedTime ?? 0);
   if (reply.statusCode >= 500) {
@@ -681,7 +676,8 @@ app.get('/api/health', async (_req, reply) => {
     blind: blind.blind,
     blindReason: blind.reason,
     blindForMs: blind.blindForMs,
-    pollErrorKind: blind.errorKind,
+    // v1.187.10 — null while no failure is current (it read 'other' on a healthy add-on).
+    pollErrorKind: healthPollErrorKind(blind, pollState()),
     // v1.144.0 — `telemetryBlind`'s own docstring frames the whole feature around
     // /api/health having reported healthy while the add-on held zero telemetry,
     // and says guard 1 "makes /api/health honest". v1.140.0 computed the poll
@@ -2273,14 +2269,22 @@ restTrackerTick.unref?.();
 // 2h in-memory cache, so most ticks are a cheap cache hit; recordWeatherGhi is
 // change-detected + idempotent, so re-persisting the same rows never dupes.
 const GHI_PERSIST_INTERVAL_MS = 45 * 60_000;
+// v1.187.10 — the tick's own line says only "ran, nothing new" (6-hourly) and "no forecast"
+// (createGhiTickLogger); the recorder logs every real write.
+const logGhiTick = createGhiTickLogger((m) => app.log.debug(m));
 const ghiPersistTick = setInterval(() => {
   if (degradedMode()) { app.log.debug('vitals: skipping GHI-persist tick (host pressure critical)'); return; }
   void (async () => {
     try {
       const w = await getWeather((m) => app.log.debug(m));
       if (recorder && w && w.hours.length > 0) {
-        recorder.recordWeatherGhi(weatherGhiRows(w), { fetchedAtMs: w.fetchedAt });
-        app.log.debug(`weather: periodic GHI persistence (${w.hours.length} hours)`);
+        const r = recorder.recordWeatherGhi(weatherGhiRows(w), { fetchedAtMs: w.fetchedAt });
+        logGhiTick({
+          kind: 'ran', hours: w.hours.length,
+          written: r?.written ?? 0, realized: (r?.realizedInserted ?? 0) + (r?.realizedRevised ?? 0),
+        }, Date.now());
+      } else if (recorder) {
+        logGhiTick({ kind: 'no-weather' }, Date.now());
       }
       // v1.31.0 — archive the ISSUED next-24h PV forecast alongside the GHI
       // rows (same cadence; hour-snapped + change-detected in the recorder, so

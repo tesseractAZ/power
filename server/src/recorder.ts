@@ -11,6 +11,7 @@ import { loadMembershipHistory, saveMembershipHistory, recordMembership } from '
 // read cutoff. tariff.ts is a pure, import-free module (no circular dependency);
 // `.ymd` is the same America/Phoenix YYYY-MM-DD key the ledger stores plan_date as.
 import { localParts } from './tariff.js';
+import { resolveRetentionDays } from './retention.js';
 
 interface MetricSample {
   sn: string;
@@ -358,6 +359,15 @@ export function packDeltaWh(
   };
 }
 
+/** v1.187.10 — what one recordWeatherGhi call wrote. */
+export interface WeatherGhiWriteResult {
+  /** New forecast GHI / cloud rows. */
+  written: number;
+  /** Realized-GHI hours captured for the first time / revised. */
+  realizedInserted: number;
+  realizedRevised: number;
+}
+
 export interface Recorder {
   insertSnapshot: (snap: FleetSnapshot) => void;
   query: (sn: string, metric: string, sinceMs: number, untilMs: number, bucketSec?: number) => Array<{ ts: number; value: number }>;
@@ -402,7 +412,8 @@ export interface Recorder {
     /** v1.156.0 — when the fetch time is known, every hour that ENDED by then is also
      *  captured as realized irradiance (`ghi_wm2_realized`, the latest value wins). */
     opts?: { fetchedAtMs?: number },
-  ) => void;
+    /** v1.187.10 — what was written (the read-only worker and test stubs write nothing). */
+  ) => WeatherGhiWriteResult | void;
   /** v1.31.0 — archive the issued next-24h PV forecast (Wh) for out-of-sample scoring. */
   recordForecastArchive: (pvNext24Wh: number, issuedAtMs: number) => void;
   /** v1.38.0 (WS2, night-charge learning ledger — design §3.1). Upsert the
@@ -746,21 +757,9 @@ const NIGHT_CALIBRATION_COLUMNS: readonly (keyof NightCalibration)[] = [
 ];
 const NIGHT_CALIBRATION_COLUMN_SET = new Set<string>(NIGHT_CALIBRATION_COLUMNS as readonly string[]);
 
-/**
- * v1.51.0 — samples retention from the RECORDER_RETENTION_DAYS option. PURE.
- * Default 30 (the historical value; a fresh install behaves identically).
- * Clamped to [7, 730]: below a week the chart windows and the 7-day load
- * curves lose their inputs; above two years the cap bounds worst-case table
- * size on small hosts. Malformed values fall back to the default — a config
- * typo must never silently turn into a 0-day (delete-everything) retention.
- */
-export function resolveRetentionDays(raw: string | undefined): number {
-  const n = Number(raw);
-  if (raw == null || raw === '' || !Number.isFinite(n)) return 30;
-  // v1.108.0 — cap raised 730 → 3650: the operator runs multi-year retention
-  // (currently 5 y) for the long-horizon SoH/energy analytics; disk is NVMe.
-  return Math.min(3650, Math.max(7, Math.round(n)));
-}
+// v1.187.10 — resolveRetentionDays moved to retention.ts (pure, no imports) so the analytics
+// worker can derive the degradation window from it without loading the recorder's module graph.
+export { resolveRetentionDays };
 
 /**
  * v1.143.0 — `log` is the INFO logger, so `RECORDER_DEBUG` decided only WHETHER
@@ -2833,8 +2832,8 @@ export function createRecorder(
   const recordWeatherGhi = (
     hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null; radiationMissing?: boolean }>,
     opts?: { fetchedAtMs?: number },
-  ) => {
-    if (!hours || hours.length === 0) return;
+  ): WeatherGhiWriteResult => {
+    if (!hours || hours.length === 0) return { written: 0, realizedInserted: 0, realizedRevised: 0 };
     const fetchedAtMs = opts?.fetchedAtMs != null && Number.isFinite(opts.fetchedAtMs) ? opts.fetchedAtMs : null;
     let realizedInserted = 0;
     let realizedRevised = 0;
@@ -2890,6 +2889,7 @@ export function createRecorder(
     if (realizedInserted > 0 || realizedRevised > 0) {
       debug(`recorder: realized GHI captured — ${realizedInserted} new, ${realizedRevised} revised hour(s)`);
     }
+    return { written, realizedInserted, realizedRevised };
   };
 
   // ─── Day-ahead forecast archive (v1.31.0) ────────────────────────────────
