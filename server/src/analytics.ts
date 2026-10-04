@@ -1239,6 +1239,12 @@ export interface DayForecast {
    *  set by a cold load curve or a missing SoC basis while the PV forecast is perfectly
    *  good. */
   pvForecastUnavailable?: boolean;
+  /** v1.187.10 — built while a home Core's first reading was pending (homeBasisPending): the
+   *  panel lists it as a connected source and the device list reports it ONLINE, but no quota of
+   *  it has landed yet, so its PV is missing from the alarm-facing series. Sets
+   *  structurallyIncomplete; the publishers send the PV pair and Projected Low SoC as null while
+   *  it is set. */
+  homeBasisPending?: boolean;
   reserveSoc: number;
   hours: ForecastHour[];
   forecastPvWhNext24: number;
@@ -1959,6 +1965,36 @@ export function homeModelSns(devices: Record<string, DeviceSnapshot>): string[] 
     .sort();
 }
 
+/**
+ * v1.187.10 — the panel lists a home Core that the device list reports ONLINE but that has no
+ * projection yet: its first quota has not landed. That is the boot race, not a cloud wedge (a
+ * wedged Core is listed offline, and keeps its conservative figures). The analytics worker is
+ * released on the first snapshot with ANY projection, at a restart often the panel's alone, so the
+ * first forecast and runway were built with every Core's PV missing; published as definite values
+ * they read Projected Low SoC 0 % and a finite runway to reserve and to empty (2026-10-02 19:24,
+ * 2026-10-03 12:08), forecast_basis_incomplete reading OFF. A forecast built on such a map is
+ * structurally incomplete, a runway computed on it neither arms the to-empty hysteresis nor is
+ * cached, and the publishers withhold both. The alarm path still reads the conservative figures.
+ *
+ * Bounded by HOME_BASIS_PENDING_MAX_MS from this module's load (the worker's spawn): a Core whose
+ * quota keeps failing while it stays listed online stops counting as pending, so the figures are
+ * published again rather than reading unknown indefinitely.
+ */
+export const HOME_BASIS_PENDING_MAX_MS = 10 * 60_000;
+const ANALYTICS_MODULE_LOADED_AT_MS = Date.now();
+export function homeBasisPending(
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number = Date.now(),
+  sinceMs: number = ANALYTICS_MODULE_LOADED_AT_MS,
+): boolean {
+  if (nowMs - sinceMs > HOME_BASIS_PENDING_MAX_MS) return false;
+  for (const sn of shp2ConnectedDpuSns(devices)) {
+    const d = devices[sn];
+    if (d?.online === true && d.projection?.kind !== 'dpu') return true;
+  }
+  return false;
+}
+
 /** v1.186.5 — the cached forecast is usable only while its model covers the Cores the
  *  current map has: a forecast built on a boot-time map that had not yet seen every Core
  *  is not structurally incomplete while the SHP2 is present, and would otherwise stand
@@ -2457,15 +2493,20 @@ async function computeDayForecastUncached(
   const loadCold = loadRes.spanMs === 0;              // no panel_load history (also true when the SHP2 is absent → zero-span fallback)
   const pvCold = homeDpus.length > 0 && pvSpan === 0; // home DPUs present but their PV recorder is cold
   const socBasisMissing = fullWh == null;             // no SHP2, or an incoherent backup pool → no SoC/runway projection
-  const structurallyIncomplete = loadCold || pvCold || socBasisMissing || historyDays <= 0;
+  // v1.187.10 — a connected home Core listed online whose first quota has not landed (the boot
+  // race): pvCold cannot see it (homeDpus is empty or partial, not cold) while the panel keeps
+  // loadCold and socBasisMissing false.
+  const basisPending = homeBasisPending(devices, now);
+  const structurallyIncomplete = loadCold || pvCold || socBasisMissing || basisPending || historyDays <= 0;
   if (structurallyIncomplete && now - lastForecastIncompleteLogMs >= FORECAST_INCOMPLETE_LOG_THROTTLE_MS) {
     lastForecastIncompleteLogMs = now;
-    log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} historyDays=${historyDays.toFixed(2)}) — negative-caching for ${incompleteForecastTtlMs() / 1000}s then rebuilding (throttled ${FORECAST_INCOMPLETE_LOG_THROTTLE_MS / 60000}m)`);
+    log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} basisPending=${basisPending} historyDays=${historyDays.toFixed(2)}) — negative-caching for ${incompleteForecastTtlMs() / 1000}s then rebuilding (throttled ${FORECAST_INCOMPLETE_LOG_THROTTLE_MS / 60000}m)`);
   }
   // v0.77.0 — surface the same flag on the value so ha-state / MQTT can publish a
   // diagnostic "forecast basis incomplete" sensor (the flag drove only the cache
   // TTL before). Set before caching so the cached value carries it too.
   value.structurallyIncomplete = structurallyIncomplete;
+  value.homeBasisPending = basisPending;
   // On the PUBLISHED basis: the display figures are built on the restored curve, which
   // re-adds each connected-but-unprojected Core's own recorded PV — real figures even when
   // no home Core is projected (all wedged cloud-offline at a restart).
@@ -3545,6 +3586,11 @@ export interface RunwayProjection {
    *  recorded row, or the previous compute's value carried forward. The card captioned
    *  every one of them "1-hour average". */
   recentLoadBasis: 'hour-mean' | 'live' | 'single-sample' | 'carried' | null;
+  /** v1.187.10 — computed while a home Core's first reading was pending (homeBasisPending, on
+   *  the map or on the forecast it read). The figures stand for the alarm path (conservative:
+   *  the pending Cores' PV is missing) but are not cached, do not touch the to-empty hysteresis,
+   *  and the publishers send them as null. Absent: not pending. */
+  basisPending?: boolean;
 }
 
 let runwayCache: { ts: number; value: RunwayProjection } | null = null;
@@ -3819,7 +3865,11 @@ export function computeRunway(
   // compute; the unavailable cases early-return via emptyRunway before here, so a
   // real outage publishes null immediately and never latches). A briefly-held stale
   // finite is pessimistic (over-warns), never optimistic.
-  const pubHoursToEmpty = applyEmptyHysteresis(hoursToEmpty, runwayEmptyState);
+  // v1.187.10 — not on a pending home basis: a to-empty crossing computed with the pending Cores'
+  // PV missing armed the latch, and coherentRunwayPair then clamped the next complete compute's
+  // reserve crossing to it (2026-10-03 12:09:38: both read 15.9 h). Neither read nor written.
+  const basisPending = homeBasisPending(devices, now) || forecast?.homeBasisPending === true;
+  const pubHoursToEmpty = basisPending ? hoursToEmpty : applyEmptyHysteresis(hoursToEmpty, runwayEmptyState);
 
   // v1.129.0 — enforce the ordering invariant before publishing. The pool drains
   // THROUGH the reserve floor on its way to empty, so "empty 1 h / reserve 20.5 h"
@@ -3854,8 +3904,11 @@ export function computeRunway(
     troughAtMs: Math.round(now + troughH * 3_600_000),
     endKwh: round2(stateKwh),
     recentLoadBasis,
+    ...(basisPending ? { basisPending: true } : {}),
   };
-  runwayCache = { ts: now, value };
+  // v1.187.10 — a pending-basis runway is not cached: the next request recomputes on the map
+  // its Cores have since joined, instead of serving these figures for RUNWAY_TTL_MS.
+  if (!basisPending) runwayCache = { ts: now, value };
   return value;
 }
 

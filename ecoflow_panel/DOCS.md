@@ -1558,12 +1558,24 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
 
 #### Availability + expiry
 
-- `AVAILABILITY_TOPIC` is republished `online` on **every** `connect` and on **every**
-  state cycle (v1.14.1) — a broker-side LWT `offline` must be overwritten on reconnect or
-  HA holds all ~87 entities unavailable until an add-on restart.
+- `AVAILABILITY_TOPIC` is republished `online` on **every** state cycle and first on
+  every broker **reconnect** (v1.14.1) — a broker-side LWT `offline` must be overwritten on
+  reconnect or HA holds all ~87 entities unavailable until an add-on restart.
+- **v1.187.10 — the process's first connect** (every restart) does not publish `online`
+  ahead of the state: the state cycle (`publishStateCycle`) publishes the per-circuit
+  configs, then the fresh state payload, then `online`, and asserts `online` also when the
+  build or the publish throws. Publishing `online` first made HA re-show every entity's
+  pre-restart value until the first fresh payload landed, a stale replay that a state trigger
+  reads as a transition (an automation keyed on Lighting Posture "to normal" fired twice per
+  deploy). The add-on's own retained `offline` (from `stop()` or its LWT) now stands about
+  5 s longer at a restart. Not changed: a release still changes every discovery payload
+  (`sw_version`), so HA re-sets up each entity and an `expire_after` entity reads unavailable
+  until its next state message; the per-circuit power sensors do so one cycle later, when
+  their configs are first published.
 - `EXPIRE_AFTER_S = 120` (≈4× publish interval) is applied to **live-measurement**
-  sensors only — **never** to `total_increasing` lifetime/energy sensors (an expiring
-  long-term-statistics source would gap the HA Energy dashboard).
+  sensors only — **never** to `total_increasing` lifetime/energy sensors, nor (v1.187.10)
+  to the `total` daily energy figures (an expiring long-term-statistics source would gap
+  the HA Energy dashboard).
 
 #### Entity categories
 
@@ -1576,7 +1588,12 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
 - **Forecast/degradation/runway/RTE/clipping/curtailment/self-consumption** — one sensor
   each, mostly `measurement` (no `device_class energy` on rolling kWh that can go down).
 - **Alert counts** — `alert_critical_count`, `alert_warning_count`,
-  `learned_warning_count`, plus per-ISA-priority `alert_{high,medium,low}_count`.
+  `learned_warning_count`, plus per-ISA-priority `alert_{high,medium,low}_count`. They
+  count every alert on screen, including alerts with `annunciate: false` (roster-muted
+  bench spares and off-panel Cores, the top-of-charge cell-spread mutes, a remediate-first
+  hold), the same set the web dashboard's badges count. A non-zero count is therefore not
+  a statement that anything was spoken or pushed; an automation that should follow the
+  audible condition cannot key on these counts alone.
 - **Diagnostics** (`entity_category: 'diagnostic'`): `ecoflow_cloud_wedge_count`,
   `system_outage_24h` + count/minutes + `system_power_outage_count_24h` /
   `system_telemetry_gap_count_24h`, `system_device_gap_count_24h` (per-device gaps, not
@@ -1910,9 +1927,47 @@ are cached (~30 min) on the worker.
   leaves membership unknown.
   The first state publish runs on broker connect, ~0.8 s before the first poll, and the
   next one ~75 s later, so each of these used to publish X → 0 → X at every restart; on
-  the `total_increasing` `pv_curtailment_kwh_today` the dip reads as a meter reset and Home
-  Assistant counts the day's curtailment again. Lifetime counters come from the recorder's
-  persisted accumulators and are not governed.
+  the then-`total_increasing` `pv_curtailment_kwh_today` the dip read as a meter reset and
+  Home Assistant counted the day's curtailment again. Lifetime counters come from the
+  recorder's persisted accumulators and are not governed.
+  **v1.187.10 — a reading, not a replay; a complete home basis.** (1) While a Smart Home
+  Panel 2 fails `shp2ReadbackFresh` (cloud-offline, no quota within
+  `SHP2_READBACK_STALE_MS`, or replaying a cloud shadow — the same rule that already makes
+  `shp2_grid_connected` unknown and the dashboard show the panel STALE), its projection is
+  frozen. `panel_load_watts` (it sums every panel's channels) now needs every projected panel
+  fresh, and a new `panelLive` group needs the house panel fresh: `grid_home_watts`,
+  `shp2_grid_status`, `backup_pool_percent`, `backup_remaining_kwh`,
+  `backup_charge_minutes` / `backup_discharge_minutes` and every `circuit_<ch>_watts`
+  (matched by pattern, `READINESS_PATTERNS`, since the channel keys are dynamic). Before,
+  Panel Load sat at its last value through a stale shadow while the Cores' battery net rose
+  by ~2 kW; MQTT `expire_after` cannot catch a freeze, because each 30 s republish resets the
+  timer. The lifetime counters (per-circuit too), the battery net, the capacity, the reserve
+  settings and the frozen-for diagnostic are not governed. Freshness is first proven by a
+  quota (`lastQuotaAtMs`, REST or MQTT), so these fields are also null after a restart
+  until the panel's first quota lands. (2) `projected_low_soc_percent` / `_at` join the forecast PV group, and a new
+  `runwayBasis` group governs `runway_to_reserve_hours`, `runway_to_empty_hours`,
+  `runway_recent_load_watts` and `runway_forecast_pv_used_kwh`: both are null while the
+  forecast or runway was built on a pending home basis (`homeBasisPending`, below), and the
+  runway fields while the runway report is missing. The audible status is not a readiness
+  field; it reads `unknown` before the first probe by its own rule (`audibleStatus`).
+- **Pending home basis (v1.187.10, `analytics.homeBasisPending`):** the analytics worker is
+  released on the first snapshot with any projection, at a restart often the panel's alone.
+  The first forecast then had every Core's PV missing; published as definite values it read
+  Projected Low SoC 0 % and a finite runway to reserve and to empty, with
+  `forecast_basis_incomplete` OFF (the PV-cold test needs a home Core in the map). A home
+  Core the panel lists as a connected source, that the device list reports ONLINE, and that
+  has no projection yet is pending: its first quota has not landed. A Core listed offline is
+  a cloud wedge, not pending, and keeps the conservative figures. While pending, the
+  forecast is structurally incomplete (`homeBasisPending` on the value, negative-cached and
+  rebuilt), and the runway is marked `basisPending`, is not cached, and neither reads nor
+  arms the to-empty hysteresis (a boot crossing had latched and clamped the next complete
+  reserve crossing to it). The lighting posture is not advanced on either. The bound is
+  `HOME_BASIS_PENDING_MAX_MS` (10 min) from the analytics module's load: a Core whose quota
+  keeps failing while it stays listed online stops counting, so the figures publish again
+  rather than reading unknown indefinitely. The alarm path is unchanged: it reads the same
+  conservative figures as before. Not changed: `night_charge_recommended` still reads OFF
+  until the first plan (fail-safe by design), and `self_consumption_coverage_partial` and
+  the daily PV peak restart from in-process state.
 - **Write surface is intentionally tiny**, rate-limited, allow-listed, sanity-bounded,
   and fully audit-logged.
 
@@ -5264,8 +5319,8 @@ forecast / no DPUs / `arrayPeakW ≤ 0` / no weather.
 `ClippingEstimate`: `todayKwh`, `perHour[] ({hour, observedW, modelW, clippedW})`,
 `arrayPeakW`, `hoursAtPeak`. → `/api/ha-state`: `pv_clipped_kwh_today`
 (=`todayKwh`). MQTT: `ecoflow_pv_clipped_kwh_today`
-(`device_class: energy, total_increasing`), `ecoflow_pv_array_peak_watts`
-(diagnostic).
+(`device_class: energy`, `state_class: total` with `last_reset` — v1.187.10, see the
+curtailment figure below), `ecoflow_pv_array_peak_watts` (diagnostic).
 
 ---
 
@@ -5336,8 +5391,21 @@ Phoenix-home suggestions — pool pump 1800 W, dehumidifier 700 W, AC pre-cool
 → `/api/ha-state`: `pv_curtailment_active`, `pv_curtailment_kwh_today`
 (=`todayKwh`). MQTT: `ecoflow_pv_curtailment_active` (binary — ON means "we are
 curtailing", not power-present), `ecoflow_pv_curtailment_surplus_watts`,
-`ecoflow_pv_curtailment_kwh_today` (`total_increasing`),
-`ecoflow_pv_curtailment_kwh_7d`, `ecoflow_charge_ceiling` (diagnostic).
+`ecoflow_pv_curtailment_kwh_today` (`device_class: energy`, `state_class: total` with
+`last_reset`), `ecoflow_pv_curtailment_kwh_7d`, `ecoflow_charge_ceiling` (diagnostic).
+**v1.187.10:** today's curtailed and clipped kWh are re-estimated on every walk (each hour
+of today re-walked on the current posterior and weather cache, the partial hour included),
+so they go down as well as up; on 2026-10-02 PV Curtailed Today read 3.54 → 3.03 kWh after
+curtailment had ended, then 3.79. As `total_increasing`, Home Assistant reads a drop of
+10 % or more as a meter reset and counts the day again, and a smaller one as a negative
+delta. Both are now `state_class: total` with `last_reset_value_template` on
+`pv_curtailment_kwh_today_since` / `pv_clipped_kwh_today_since` (also on `/api/ha-state`):
+the local midnight that starts the day the report covers, ISO 8601, taken from the report's
+`generatedAt` (`dailyFigureResetIso`), never the publish clock, so a report from before
+midnight republished after it keeps its own day. A revision is then a correction, and only
+a new day is a reset. Neither carries `expire_after`. The table audit
+(`auditDiscoveryTables`, rule `daily-figure-needs-total-with-reset`) refuses a `_today`
+figure declared `total_increasing`, or `total` without a `last_reset_value_template`.
 
 ---
 
@@ -5682,7 +5750,7 @@ Battery/voltage/health thresholds:
 - `cloud-session-stale` (warning, Connectivity) — no successful `/device/list` in `CLOUD_SESSION_STALE_MS`; per-device online flags are last-known, not current.
 - `host-power-undervoltage` (warning) — `HOST_POWER_ENTITY` (HA RPi Power Supply Checker) tripped; early warning the Pi is browning out.
 - `grid-offgrid` (info, Grid) — off-grid. Decision uses `grid.present` when supplied (the same resolver behind `binary_sensor.off_grid`); falls back to `acIn < 5` W over SHP2-bound cores only. Wall-charging spares never register as grid.
-- `offline-<SN>` / `offline-spare-<SN>` (warning for Core/Panel, info otherwise; spare=info+`annunciate:false`) — device offline per `/device/list`. Enriched with last-data age/source, MQTT count, and a cause-matched hint (**v1.187.1:** only for a measured gap — a device with no data since the add-on started is said to have "not reported since the add-on started", with how long EcoFlow has reported it offline when this session saw it go offline (`onlineChangedAtMs`), or else that it has been listed offline since the add-on's first device list and for how long (`ConnectivityContext.perDevice.firstListedAtMs`, from `SnapshotStore.firstListedAt`), and that the cause is not known; no ">30 min", no cloud-session cause, no power-cycle advice. A device with REST data but no MQTT this session states its last data instead of "no telemetry". Whether the device has reported is decided from data — a last source or MQTT time in the store, or the device's `lastTelemetryAtMs` / `lastQuotaAtMs` — never from `lastUpdated`, which a bare MQTT `/status` online/offline flip also bumps (`setDeviceOnline`); a device whose only traffic this session was such a flip is still "not reported since the add-on started"); when `ECOFLOW_DEVICE_REACHABILITY` is configured, `classifyDeviceLink()` adds a `cloud_wedge` vs `real_outage` fact and hint. Explicit priority: Panel=high (alarm data source), Core=medium, peripheral=low, spare=low.
+- `offline-<SN>` / `offline-spare-<SN>` (warning for Core/Panel, info otherwise; spare=info+`annunciate:false`) — device offline per `/device/list`. Enriched with last-data age/source, MQTT count, and a cause-matched hint (**v1.187.1:** only for a measured gap — a device with no data since the add-on started is said to have "not reported since the add-on started", with how long EcoFlow has reported it offline when this session saw it go offline (`onlineChangedAtMs`), or else that it has been listed offline since the add-on's first device list and for how long (`ConnectivityContext.perDevice.firstListedAtMs`, from `SnapshotStore.firstListedAt`), and that the cause is not known; no ">30 min", no cloud-session cause, no power-cycle advice. A device with REST data but no MQTT this session states its last data instead of "no telemetry". Whether the device has reported is decided from data — a last source or MQTT time in the store, or the device's `lastTelemetryAtMs` / `lastQuotaAtMs` — never from `lastUpdated`, which a bare MQTT `/status` online/offline flip also bumps (`setDeviceOnline`); a device whose only traffic this session was such a flip is still "not reported since the add-on started"); when `ECOFLOW_DEVICE_REACHABILITY` is configured, `classifyDeviceLink()` adds a `cloud_wedge` vs `real_outage` fact and hint. **v1.187.10:** the listing time is per process, so after every restart the hint said "listed offline since the add-on's first device list (5 h ago); how long before that … is not known here" of peripherals the repair card had on record as offline for 89–104 days. The alert monitor now keeps a restart-persistent "first seen listed offline" stamp every evaluation (`repairIssues.syncCloudOfflineFirstSeen`, the `cloud-offline-<SN>` entries of `repair-first-seen.json`): set when a device that is not a bench spare is first seen listed offline, cleared only when it is listed ONLINE (an MQTT `/status` online flip counts), and persisted on either change; absence from a list, or a `/api/repair-issues` fetch on a map without the device, clears nothing. When the stamp predates this process's first listing (`ConnectivityContext.perDevice.offlineSinceMs`), the hint reads "listed it offline since at least <age> ago (first seen offline before the add-on's last restart, and not seen online since)"; a stamp taken in this process leaves the v1.187.1 wording. The repair card's `firstSeenAt` for the same device is the same stamp. Explicit priority: Panel=high (alarm data source), Core=medium, peripheral=low, spare=low.
 - `stale-<SN>` / `stale-spare-<SN>` (warning; spare=info) — online per EcoFlow but no fresh telemetry for > `STALE_MS`.
 
 **Per-DPU (Core), for online DPUs:**
@@ -7813,6 +7881,15 @@ so it can never circularly try to chime over the channel it reports broken.
 Severity is medium so it never wakes the household through quiet hours — an
 unreachable speaker is not itself an emergency (the real emergencies push on
 their own alerts). It also mirrors to HA diagnostic sensors via `mqttDiscovery`.
+The status sensor (`audible_status`, "Audible Alarm Channel") has four values, from
+`audibleStatus(h)`: `unknown` before the first probe (`lastProbeAt` null), then `disabled`
+when broadcast is off, `reachable` / `UNREACHABLE` by the debounced `reachable`, and
+`unknown` while that is null. **v1.187.10:** the pre-probe default carries
+`enabled: false` only because nothing has been read yet, and the publisher tested `enabled`
+first, so every restart published `disabled` for one 30 s cycle on a channel configured on
+(the first state publish lands ~5 s after broker connect, the first probe ~15 s after
+broadcast init, and the probe does not trigger a republish). The probe runs when broadcast
+is disabled too, so a disabled channel reads `disabled` from the first probe on.
 
 ---
 
@@ -9492,7 +9569,7 @@ curtailment fields are also folded into the big `/api/ha-state` payload
 |---|---|---|
 | `ecoflow_pv_curtailment_active` | `pv_curtailment_active` | binary ON/OFF; the `surplus`-posture trigger. |
 | `ecoflow_pv_curtailment_surplus_watts` | `pv_curtailment_surplus_watts` | power (W). |
-| `ecoflow_pv_curtailment_kwh_today` | `pv_curtailment_kwh_today` | energy, `total_increasing`. |
+| `ecoflow_pv_curtailment_kwh_today` | `pv_curtailment_kwh_today` | energy, `total` with `last_reset` from `pv_curtailment_kwh_today_since` (v1.187.10). |
 | `ecoflow_pv_curtailment_kwh_7d` | `pv_curtailment_kwh_7d` | 7-day kWh. |
 | `ecoflow_charge_ceiling` | `pv_curtailment_charge_ceiling_pct` | diagnostic, %. |
 

@@ -20,7 +20,7 @@ import {
 } from './reconnectAudit.js';
 import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder, resolveRetentionDays } from './recorder.js';
-import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
+import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import { setClockRejectLogger, ecoflow,
 } from './ecoflow/rest.js';
@@ -1681,6 +1681,8 @@ app.get('/api/ha-state', async (req, reply) => {
     // Inverter clipping — kWh lost today because the arrays produced more
     // DC than the hardware could pass through (v0.6.0).
     pv_clipped_kwh_today: clipping.todayKwh,
+    // v1.187.10 — the day this re-estimated figure covers (its last_reset; see mqttDiscovery.ts).
+    pv_clipped_kwh_today_since: dailyFigureResetIso(clipping?.generatedAt),
     pv_array_peak_watts: clipping.arrayPeakW,
     pv_hours_at_peak_today: clipping.hoursAtPeak,
 
@@ -1691,6 +1693,7 @@ app.get('/api/ha-state', async (req, reply) => {
     pv_curtailment_active: curtailment.active,
     pv_curtailment_surplus_watts: curtailment.currentSurplusW,
     pv_curtailment_kwh_today: curtailment.todayKwh,
+    pv_curtailment_kwh_today_since: dailyFigureResetIso(curtailment?.generatedAt),
     pv_curtailment_kwh_7d: curtailment.recent7dKwh,
     pv_curtailment_inactive_reason: curtailment.inactiveReason,
     // The configured charge ceiling (chgMaxSoc) — the SoC the pool fills
@@ -1808,6 +1811,7 @@ app.get('/api/ha-state', async (req, reply) => {
     alertsComplete: snap.alertsComplete, // v1.186.0
     speakerLastProbeAt: getBroadcastHealth().lastProbeAt,
     forecast: fc,
+    runway, // v1.187.10
     clipping,
     curtailment,
     carbon,

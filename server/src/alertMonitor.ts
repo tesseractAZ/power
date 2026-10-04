@@ -58,6 +58,8 @@ import { liveGridBackstop, livePoolGridBackstop, gridPresenceEntityId } from './
 // v1.x — restart-persistent per-alert onset (first-seen) timestamps for the
 // ALM screen; see alertOnset.ts.
 import { syncAlertOnsets, getAlertOnset, restampAlertOnset } from './alertOnset.js';
+// v1.187.10 — the restart-persistent "first seen listed offline" stamps (repair-first-seen.json).
+import { syncCloudOfflineFirstSeen, cloudOfflineFirstSeenAt } from './repairIssues.js';
 
 /**
  * Watches the fleet, attaches computed alerts to the snapshot, and pushes a
@@ -3204,6 +3206,10 @@ export function startAlertMonitor(
     ]);
     // v0.7.7 — build the connectivity context the alerts engine uses to
     // enrich offline/stale alerts with last-data timestamps + source.
+    // v1.187.10 — keep the persisted cloud-offline stamps first (stamped on the first offline
+    // listing, cleared only by an ONLINE listing), so the offline hint can say how long before
+    // this process the device was already listed offline (repairIssues.ts).
+    syncCloudOfflineFirstSeen(snap.devices);
     const perDevice: ConnectivityContext['perDevice'] = new Map();
     for (const d of Object.values(snap.devices)) {
       perDevice.set(d.sn, {
@@ -3212,6 +3218,8 @@ export function startAlertMonitor(
         mqttCount: store.mqttMsgCountBySn.get(d.sn) ?? 0,
         // v1.187.1 — a device with no data this session is described from its first listing.
         firstListedAtMs: store.firstListedAt(d.sn),
+        // v1.187.10 — and, when that predates this process, from its persisted offline stamp.
+        offlineSinceMs: cloudOfflineFirstSeenAt(d.sn),
       });
     }
     // v1.8.0 (review F3) — the SHP2's pool-unknown onset (post-grace-hold), for
