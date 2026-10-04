@@ -2816,10 +2816,16 @@ export function startBroadcastMonitor(
     // v1.187.9 (review) — never in place of a spoken retry already pending at the same or a higher
     // level: a dedicated alarm's own speech (the SoC ladder, the runway alarm) was replaced and never
     // delivered, and the tick's own was pushed back by a retry of the same condition.
-    const kept = pendingSpokenRetry != null && RETRY_LEVEL_RANK[pendingSpokenRetry.level] >= RETRY_LEVEL_RANK[level];
+    // A dedicated one replays its own words whatever the level (kept at the same or a higher level); a
+    // condition one is dropped at its fire unless the condition is at its level, so it is kept only at
+    // this retry's level — kept above it, the kept red's would be dropped and this one lost with it.
+    const pending = pendingSpokenRetry;
+    const kept = pending != null && (pending.message !== undefined
+      ? RETRY_LEVEL_RANK[pending.level] >= RETRY_LEVEL_RANK[level]
+      : pending.level === level);
     if (!kept) noteSpokenRenderFailure(level, rung, result);
     else if (!result.ok && result.errors.some((e) => e.startsWith('render:'))) {
-      log(`broadcast: spoken render of the deferred ${level} retry failed — the ${pendingSpokenRetry?.level} spoken retry already pending is kept`);
+      log(`broadcast: spoken render of the deferred ${level} retry failed — the ${pending?.level} spoken retry already pending is kept`);
     }
     const represent = refusedRetryRepresent(level, named, result.errors, { level: lastConditionPlayedLevel, atMs: lastConditionPlayedAt }, SAME_LEVEL_GAP_MS);
     if (represent == null) return;
@@ -3325,7 +3331,11 @@ export function startBroadcastMonitor(
         : null;
       pendingSpokenRetry = null;
       const levelOk = stored != null || level === want;
-      if (levelOk && cfg.enabled && !(inQuiet() && !(want === 'red' && cfg.criticalBreakThrough))) {
+      // v1.187.9 (review) — and never "All clear" while a critical is active (allClearSpeechBlocked), as
+      // the tick's own green: a critical the condition does not count (the reserve floor, a held
+      // telemetry-blind alarm) appearing inside the 90 s left the all-clear's spoken retry ungated.
+      const allClearGated = stored == null && want === 'green' && allClearSpeechBlocked(alerts);
+      if (levelOk && !allClearGated && cfg.enabled && !(inQuiet() && !(want === 'red' && cfg.criticalBreakThrough))) {
         tickInFlight = true;
         try {
           log(`broadcast: spoken retry after render failure → ${want}${stored ? ' (dedicated-path message replay)' : ''}`);
@@ -3342,6 +3352,10 @@ export function startBroadcastMonitor(
           lastLevel = level; lastBroadcastKind = stored ? 'dedicated' : 'condition';
           lastOutcome = result.ok ? 'success' : 'partial';
           lastErrors = result.errors;
+          // v1.187.9 (review) — a condition yellow it put on the speakers is what the repeat-warning gate
+          // remembers, as the tick's own (speakCondition) and a deferred retry's (afterConditionRetry).
+          const spokenNamed = stored == null && want === 'yellow' && result.ok ? conditionNamedFingerprint(level, alerts) : null;
+          if (spokenNamed != null) lastVoicedWarning = { voicedFp: spokenNamed, rung, warnFps: [...warningFingerprints], atMs: Date.now() };
         } finally {
           tickInFlight = false;
         }

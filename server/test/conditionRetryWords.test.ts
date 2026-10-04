@@ -52,7 +52,7 @@ const B = await import('../src/broadcast.js');
 const { generateAudioAssets } = await import('../src/audioAssets.js');
 const { pcmToWav } = await import('../src/wyomingTts.js');
 const { restampAlertOnset, resetAlertOnsetCacheForTests } = await import('../src/alertOnset.js');
-const { buildAlertMessage } = await import('../src/ttsService.js');
+const { buildAlertMessage, buildAlertMessageEs } = await import('../src/ttsService.js');
 const { alertFingerprint } = await import('../src/redReplayGate.js');
 
 const STATUS_PATH = resolve(ROOT, 'broadcast-last.json');
@@ -575,9 +575,9 @@ test('★★ (review) the red replay gate compares the critical the words name: 
     activeFingerprints: [alertFingerprint(CRIT_C)],
     lastPlayedLevel: 'red',
   }));
-  const band = { ...backupSoc(9), severity: 'critical', priority: 'critical' } as Alert;
+  const band = { ...backupSoc(9), severity: 'critical', priority: 'critical', coreNum: 1 } as Alert; // located: ranked first
   const r = await started(RETRY_MS, false);
-  alerts = [band, CRIT_C]; // the band ranks first (Battery, first in the list) but is not counted
+  alerts = [CRIT_C, band]; // the band would be named (located) but is not counted
   await until(r, () => r.has('red suppressed — this standing fault was already announced'), '★★ C, unchanged since the restart');
   await sleep(200);
   assert.equal(plays.length, 0, 'nothing is announced');
@@ -598,6 +598,95 @@ test('★★ (review) a REPLAYED yellow retry is remembered too: the same warnin
   await until(r, () => r.has('yellow suppressed — the same warning (soc-low-DPU-C-3 / Pack state of charge low) was voiced'), '★★ the repeat-warning gate');
   await sleep(200);
   assert.equal(plays.length, 2, 'told once by the retry');
+});
+
+test('★★ (review) the spoken retry of an all-clear is not spoken while a critical the condition does not count is active', async () => {
+  const blind = { id: 'shp2-below-reserve-X', severity: 'critical', category: 'SHP2', title: 'Below reserve', detail: 'x' } as Alert;
+  const r = await started(RETRY_MS);
+  alerts = [CRIT_C];
+  await until(r, () => heard(plays[0]?.url) === 1, 'the red heard');
+  ttsDown = true;
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 4 * MIN; // the green commits; its speech stalls: the tone alone, and the one spoken retry
+  await until(r, () => r.has('one retry scheduled in 90s'), 'the all-clear\'s spoken retry scheduled');
+  ttsDown = false;
+  alerts = [blind]; // the reserve-floor critical: not counted (the level stays green), but active
+  offset += 2 * MIN;
+  await until(r, () => r.has('spoken retry dropped — level moved green → green or gated'), '★★ gated');
+  await sleep(200);
+  assert.doesNotMatch(lastWords(r), /all clear/i, 'never "All clear" while a critical is active');
+});
+
+test('★★ (review) a retry\'s failed spoken render replaces a CONDITION spoken retry pending at another level, which would be dropped at its fire', async () => {
+  const r = await started(RETRY_MS);
+  ttsDown = true;
+  alerts = [CRIT_B]; // the red: the tone alone, its spoken retry pending (the condition's, at red)
+  await until(r, () => r.has('one retry scheduled in 90s'), 'the red\'s spoken retry pending');
+  ttsDown = false;
+  alerts = [HELD_B]; // held by its mute: the red stays committed
+  await until(r, () => r.has('red → green held'), 'the hold');
+  plan.push({ status: 500 });
+  alerts = [HELD_B, WARN_L, WARN_N]; // a warning under the kept red, naming WARN_L: it fails
+  await until(r, () => r.has(ARMED), 'the warning failing, its retry armed');
+  alerts = [HELD_B, WARN_N]; // WARN_L clears: the retry names WARN_N, never rendered
+  ttsDown = true;
+  await until(r, () => r.count('one retry scheduled in 90s') === 2, '★ the warning\'s spoken retry takes the slot');
+  assert.ok(!r.has('spoken retry already pending is kept'));
+  ttsDown = false;
+  offset += 2 * MIN;
+  await until(r, () => r.has('spoken retry after render failure → yellow'), '★★ the warning\'s speech, delivered');
+  await until(r, () => lastWords(r) === buildAlertMessage('yellow', [WARN_N]), 'WARN_N, spoken');
+});
+
+test('★★ (review) a warning the 90 s spoken retry put on the speakers is remembered by the repeat-warning gate', async () => {
+  const r = await started(RETRY_MS);
+  ttsDown = true;
+  alerts = [WARN_N]; // the yellow: the tone alone, its spoken retry pending
+  await until(r, () => r.has('one retry scheduled in 90s'), 'the spoken retry scheduled');
+  ttsDown = false;
+  alerts = [WARN_N, WARN_L]; // WARN_L joins (no transition): the spoken retry will name it
+  offset += 2 * MIN;
+  await until(r, () => r.has('spoken retry after render failure → yellow'), 'the spoken retry');
+  await until(r, () => lastWords(r) === buildAlertMessage('yellow', [WARN_L]), 'WARN_L, spoken');
+  const told = plays.length;
+  offset += 3 * MIN;
+  alerts = [];
+  await until(r, () => r.has('yellow → green held'), 'the hold');
+  alerts = [WARN_N, WARN_L]; // back: WARN_L is new to the last commit, so a transition
+  await until(r, () => r.has('yellow suppressed — the same warning (soc-low-DPU-D-2 / Pack state of charge low) was voiced'), '★★ the repeat-warning gate');
+  await sleep(200);
+  assert.equal(plays.length, told, 'WARN_L is not told again');
+});
+
+test('★★ (review) the Spanish words name from the same pool as the English', async () => {
+  const texts: Array<{ text: string; voice?: string }> = [];
+  const prev = { bi: process.env.BROADCAST_BILINGUAL, es: process.env.BROADCAST_WYOMING_VOICE_ES };
+  process.env.BROADCAST_BILINGUAL = 'true';
+  process.env.BROADCAST_WYOMING_VOICE_ES = 'es_MX-test';
+  try {
+    const logs: string[] = [];
+    const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-retry-words-cache-es-'));
+    const mon = B.startBroadcastMonitor(store, (m) => logs.push(m), {
+      klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', tickMs: 10, retryDelaysMs: [RETRY_MS, RETRY_MS, RETRY_MS],
+      renderTts: async (o: { text: string; voice?: string }) => {
+        texts.push({ text: o.text, voice: o.voice });
+        return { ok: true as const, wav: pcmToWav(Buffer.alloc(2 * 1100), 22050, 2, 1), durationMs: 1 };
+      },
+    } as any);
+    live.push({ mon, logs, has: (x) => logs.some((l) => l.includes(x)), count: () => 0, stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true }); } });
+    await sleep(80);
+    offset += 20 * MIN;
+    alerts = [WARN_GRID, backupSoc(28)];
+    const start = realNow();
+    while (!texts.some((t) => t.voice === 'es_MX-test') && realNow() - start < 8000) await sleep(5);
+    const es = texts.find((t) => t.voice === 'es_MX-test');
+    assert.ok(es != null, 'a Spanish pass was rendered');
+    assert.equal(es.text, buildAlertMessageEs('yellow', [WARN_GRID]), '★★ the Spanish names the warning that raised the yellow, not the band');
+  } finally {
+    process.env.BROADCAST_BILINGUAL = prev.bi;
+    process.env.BROADCAST_WYOMING_VOICE_ES = prev.es;
+  }
 });
 
 test('refusedRetryRepresent — only a refusal by the same-level gap; below the played level the level is the news; at it, only what the retry named', () => {
@@ -666,5 +755,6 @@ test('conditionNamePool — what the condition counts: never an alert another an
   const gap = { id: 'system-outage-device-X-1', severity: 'warning', category: 'Connectivity', coreNum: 2, title: 'Device telemetry gap — no data for 7 min', detail: 'x' } as Alert;
   assert.deepEqual(B.conditionNamePool([backupSoc(28), runway, gap, WARN_GRID, CRIT_C]).map((a) => a.id), [WARN_GRID.id, CRIT_C.id]);
   assert.equal(B.conditionNamedFingerprint('yellow', [backupSoc(28), gap, WARN_GRID]), alertFingerprint(WARN_GRID), 'not the band (Battery) nor the located gap');
-  assert.equal(B.conditionNamedFingerprint('red', [runway, CRIT_C]), alertFingerprint(CRIT_C));
+  const runwayLocated = { ...runway, coreNum: 1 } as Alert; // located: ranked first by pickPrimaryAlert alone
+  assert.equal(B.conditionNamedFingerprint('red', [CRIT_C, runwayLocated]), alertFingerprint(CRIT_C), 'not the runway projection');
 });

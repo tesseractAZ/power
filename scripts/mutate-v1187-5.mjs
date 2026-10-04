@@ -26,7 +26,8 @@
  * refusal by the same-level gap one re-present, never over a waiting one (refusedRetryRepresent).
  * Mutants W-i..W-xxx, against conditionRetryWords.test.ts with the subset above. v1.187.9 (review): the
  * naming pool (conditionNamePool), the repeat-warning record of a retry, the green and policy-mute
- * gates, the kept spoken retry and the kept red's re-present — W-xxxi..W-xliii.
+ * gates, the kept spoken retry and the kept red's re-present — W-xxxi..W-xliii; round 2: the 90 s
+ * spoken retry's all-clear gate and repeat record, the kept-pending rule, the Spanish pool — W-xliv..W-xlvii.
  *
  * Not mutated (v1.187.9): `retryOf == null` and `kind === 'condition'` in the queued count (a retry
  * counted in while it waits is counted out when it runs, before it reads the count, and a dedicated
@@ -440,8 +441,8 @@ const MUTANTS = [
   {
     id: 'W-xli. ★★ a retry\'s render failure replaces the spoken retry already pending',
     file: BR,
-    find: '    const kept = pendingSpokenRetry != null && RETRY_LEVEL_RANK[pendingSpokenRetry.level] >= RETRY_LEVEL_RANK[level];',
-    to: '    const kept = (false as boolean) && pendingSpokenRetry != null; /* MUTANT */',
+    find: '    const kept = pending != null && (pending.message !== undefined', // v1.187.9 (review, round 2) — re-pointed
+    to: '    const kept = (false as boolean) && pending != null && (pending.message !== undefined /* MUTANT */',
     why: 'The SoC ladder\'s or runway alarm\'s speech is replaced by the condition\'s and never delivered.',
   },
   {
@@ -457,6 +458,35 @@ const MUTANTS = [
     find: '          if (held.level === prevLevel) endDeescalationHold(',
     to: '          if ((true as boolean) || held.level === prevLevel) endDeescalationHold( /* MUTANT */',
     why: 'An abandoned de-escalation is logged under a red that still holds, the heard flag flips twice, and the hold restarts.',
+  },
+  /* ── v1.187.9 (review, round 2) — the 90 s spoken retry, the kept-pending rule, the Spanish pool ── */
+  {
+    id: 'W-xliv. ★★★ the spoken retry of an all-clear ignores the all-clear speech gate',
+    file: BR,
+    find: "      const allClearGated = stored == null && want === 'green' && allClearSpeechBlocked(alerts);",
+    to: '      const allClearGated = (false as boolean); /* MUTANT */',
+    why: '"All clear. All stations report normal." 90 s after a stalled render, while the reserve-floor critical is active.',
+  },
+  {
+    id: 'W-xlv. ★★ a condition spoken retry pending at another level is kept over a retry\'s',
+    file: BR,
+    find: '      : pending.level === level);',
+    to: '      : RETRY_LEVEL_RANK[pending.level] >= RETRY_LEVEL_RANK[level]); /* MUTANT */',
+    why: 'The kept red\'s spoken retry is dropped at its fire (the level reads yellow), and the warning\'s speech was discarded for it: neither is spoken.',
+  },
+  {
+    id: 'W-xlvi. ★★ the 90 s spoken retry\'s yellow is not remembered',
+    file: BR,
+    find: '          if (spokenNamed != null) lastVoicedWarning = { voicedFp: spokenNamed, rung, warnFps: [...warningFingerprints], atMs: Date.now() };',
+    to: '          /* MUTANT */',
+    why: 'A warning named by the spoken retry is told again at its flicker back.',
+  },
+  {
+    id: 'W-xlvii. ★★ the Spanish words name from every speakable alert',
+    file: BR,
+    find: '    return buildAlertMessageEs(level, conditionNamePool(alerts));',
+    to: '    return buildAlertMessageEs(level, alerts); /* MUTANT */',
+    why: 'The bilingual pass names the backup band in Spanish while the English names the Grid warning.',
   },
 ];
 
