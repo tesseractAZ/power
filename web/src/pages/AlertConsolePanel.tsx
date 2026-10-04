@@ -189,7 +189,7 @@ function CategoryCard(p: CategoryCardProps) {
       <div className="mt-3 pt-3 border-t border-line flex flex-wrap items-center gap-3">
         <span className="text-[10px] uppercase tracking-widest text-muted shrink-0">Tone</span>
         <select
-          className="bg-panel border border-line rounded px-2 py-1 text-sm text-ink min-w-[12rem]"
+          className="bg-panel border border-line rounded-sm px-2 py-1 text-sm text-ink min-w-48"
           value={sel}
           disabled={p.toneBusy}
           aria-label={`Tone for ${p.label}`}
@@ -671,7 +671,7 @@ export function AlertConsolePanel() {
             const usedBy = data.levels.filter((l) => data.assignments[l].kind === 'custom' && (data.assignments[l] as { id: string }).id === c.id);
             return (
               <div key={c.id} className="bg-panel2/60 border border-line rounded-lg p-3 flex flex-wrap items-center gap-3">
-                <span className="text-sm text-ink font-medium grow min-w-[8rem] truncate">{c.originalName}</span>
+                <span className="text-sm text-ink font-medium grow min-w-32 truncate">{c.originalName}</span>
                 <span className="text-[11px] text-muted shrink-0">{fmtDur(c.durationMs)} · {fmtKb(c.sizeBytes)}</span>
                 {c.srcRate > 0 && (
                   <span className="text-[10px] uppercase tracking-widest text-muted shrink-0" title="Source format before normalization">
