@@ -24,7 +24,7 @@ export function AccuracyChip({ accuracy, title }: { accuracy?: string | null; ti
   const text = accuracy && accuracy.trim() ? accuracy : 'calibrating';
   return (
     <span
-      className="text-[10px] font-mono tabular-nums normal-case tracking-normal text-accent/90 bg-accent/10 border border-accent/25 rounded px-1 py-px"
+      className="text-[10px] font-mono tabular-nums normal-case tracking-normal text-accent/90 bg-accent/10 border border-accent/25 rounded-sm px-1 py-px"
       title={title}
     >
       {text}
