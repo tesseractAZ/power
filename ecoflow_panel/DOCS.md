@@ -7915,7 +7915,7 @@ The web app is a Vite/React SPA served from the add-on's `:8787` root. Source li
 - The hand-written classes (`.card`, `.card-title`, `.takeaway`, `.kv*`, `.badge*`, `.bar`) and the High Contrast chrome sit in `@layer utilities` after the generated utilities, the cascade they had under v3: they win against a utility of equal specificity (`badge text-[9px]` stays 10px; `card border-bad/45` keeps the card's border) and lose to a `hover:` or `disabled:` one. v3 also emitted responsive variants after them; no element combines the two.
 - `space-y-*` puts the gap on the earlier sibling at zero specificity in v4 (v3: on the later one, overriding its own margins). The overview digest, whose `SectionHeader` carries `mb-3`, uses `*:not-first:mt-4` to keep its 16px gap; no other `space-y` container has a child with its own vertical margin.
 
-Browser floor: Safari 16.4, Chrome 111, Firefox 128 (cascade layers, `@property`, `color-mix()`). Older engines render the layout but drop the alpha-tinted fills and borders.
+Browser floor: Safari 16.4, Chrome 111, Firefox 128 (cascade layers, `@property`, `color-mix()`). Without `color-mix()` every opacity-modified colour is invalid at computed-value time (fills vanish, borders fall back to the text colour); without cascade layers (before Safari 15.4 / Chrome 99) no Tailwind rule applies.
 
 #### 1.1 Connection & rendering model
 

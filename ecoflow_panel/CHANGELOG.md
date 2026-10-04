@@ -7,9 +7,9 @@
 - **The dashboard's styles are now built with Tailwind CSS 4 instead of Tailwind CSS 3.** Every page renders as before in both themes. The data, alarms and announcements are unchanged.
   - Tailwind CSS 3 pulled in the `braces` package (GHSA-vfj7-8cjw-p6xm, high: a deeply nested pattern exhausts the stack) through its file watcher and file matching. No fixed `braces` exists, and Tailwind CSS 4 does not use it. `npm audit` in `web/` now reports no advisories.
   - The advisory was reachable only while the bundle is built, from the repository's own file patterns, and none of that code runs in the add-on.
-  - Where Tailwind CSS 4 changed what a class does, the Tailwind CSS 3 result is kept: the line height of each text size, the order in which the dashboard's own classes (cards, badges, bars) override other classes, hover effects on touch screens, the default border colour, the pointer cursor on buttons, the padding of table cells, and the amber used for borderline values.
+  - Where Tailwind CSS 4 changed what a class does, the Tailwind CSS 3 result is kept: the line height of each text size, the order in which the dashboard's own classes (cards, badges, bars) override other classes, hover effects on touch screens, the default border colour, the pointer cursor on buttons, the padding of table cells, the gap under the overview digest's heading, and the amber used for borderline values.
   - Each tab, the circuit details and every Alerts view were compared before and after in both themes and at desktop and phone widths, element by element.
-- **Browser requirement.** Tailwind CSS 4 needs Safari 16.4, Chrome 111, Firefox 128 or later. On older browsers the tinted fills and borders, such as badge backgrounds, are not shown.
+- **Browser requirement.** Tailwind CSS 4 needs Safari 16.4, Chrome 111, Firefox 128 or later. Older browsers lose the semi-transparent colours (badge fills, tinted borders and rows), and browsers before Safari 15.4 or Chrome 99 lose the styling entirely.
 - The build no longer uses PostCSS or Autoprefixer directly; Tailwind CSS 4 runs as a Vite plugin.
 
 ## 1.187.5
