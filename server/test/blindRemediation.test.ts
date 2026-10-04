@@ -5,7 +5,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   decideBlindRemediation, blindRemediationStep, setBlindRemediationHooks, resetBlindRemediation,
-  freshBlindRemediationState, BLIND_REMEDIATION_VERIFY_MS, type BlindRemediationState,
+  freshBlindRemediationState, BLIND_REMEDIATION_VERIFY_MS, blindRestoredLine, type BlindRemediationState,
 } from '../src/blindRemediation.js';
 import {
   canRemediateNow, recordRemediationHeal, BLIND_REMEDIATION_MIN_GAP_MS, HEAL_BUDGET_WINDOW_MS,
@@ -110,7 +110,9 @@ test('★★ every phase is logged — "held" and "never sounded" must be visibl
   blindRemediationStep(T0 + M, true, (m) => logs.push(m));
   blindRemediationStep(T0 + 2 * M, false, (m) => logs.push(m));
   assert.ok(logs.some((l) => l.includes('remediating FIRST')));
-  assert.ok(logs.some((l) => l.includes('RESTORED by the remediation — the alarm never sounded')));
+  // v1.187.10 — the elapsed time since the rebuild, and no claimed cause (blindRestoredLine).
+  assert.ok(logs.includes('telemetry-blind: the blind condition cleared 120 s after the MQTT rebuild (inside the 5-min hold) — the alarm never sounded; the timing suggests the rebuild, it does not prove it'), logs.join('\n'));
+  assert.ok(!logs.some((l) => l.includes('RESTORED by the remediation')), 'cause is not claimed from timing alone');
   assert.equal(logs.length, 2, 'one line per phase change, not per tick');
 
   logs.length = 0;
@@ -239,4 +241,13 @@ test('★★★ the "Telemetry stale" warning does not speak either — it pushe
   assert.equal(stale.annunciate, undefined, 'push and card still go');
   const other = { id: 'soc-low-X-1', severity: 'warning', title: 'x', category: 'Battery' } as any;
   assert.equal(conditionFromAlerts([stale, other]).level, 'yellow');
+});
+
+test('★★ v1.187.10 (log review): the end of a held episode states the elapsed time, not a cause — whatever ended it', () => {
+  // The phase goes idle whenever the blind verdict clears: telemetry back after the rebuild, back on
+  // its own, or the stale-shadow latch released because the panel's payload became unmeasurable (no
+  // telemetry back at all). The line cannot tell them apart, so it no longer says "RESTORED by".
+  assert.equal(blindRestoredLine(T0, T0 + 62_400), 'telemetry-blind: the blind condition cleared 62 s after the MQTT rebuild (inside the 5-min hold) — the alarm never sounded; the timing suggests the rebuild, it does not prove it');
+  assert.equal(blindRestoredLine(null, T0), 'telemetry-blind: the blind condition cleared (inside the 5-min hold) — the alarm never sounded; the timing suggests the rebuild, it does not prove it');
+  assert.ok(blindRestoredLine(T0, T0 - 5).includes('cleared 0 s after'), 'never a negative time');
 });

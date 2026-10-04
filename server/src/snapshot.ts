@@ -300,6 +300,9 @@ export class SnapshotStore extends EventEmitter {
   // Wired by `startPollLoop` so tests / call sites that build a store directly
   // get silent no-op behavior by default. (The MQTT entry point also wires it.)
   private logger: (msg: string) => void = () => {};
+  /** v1.187.10 — the level-40 sink for a state transition that is itself a failure (the stale-shadow
+   *  latch setting: grid presence goes UNKNOWN). Unset, it is the info logger. */
+  private warnLogger: ((msg: string) => void) | null = null;
 
   // v0.56.0 — last-coherent backup-pool trio per SHP2 SN, for the grace-hold that smooths the
   // ~10-15/day reconnect blips that would otherwise flap the gauge to "unknown".
@@ -393,6 +396,11 @@ export class SnapshotStore extends EventEmitter {
 
   setLogger(log: (msg: string) => void) {
     this.logger = log;
+  }
+
+  /** v1.187.10 — wired by `startPollLoop` to its `warn` sink. */
+  setWarnLogger(warn: (msg: string) => void) {
+    this.warnLogger = warn;
   }
 
   /** v1.187.1 — load the persisted ghost slots (absent or corrupt: start without, the v1.172.0
@@ -1085,7 +1093,10 @@ export class SnapshotStore extends EventEmitter {
     const latched = latch != null;
     cur.contentStaleSinceMs = latch ? latch.sinceMs : null;
     if (latched !== wasStale) {
-      this.logger(
+      // v1.187.10 (log review) — the latch SETTING is the root condition (grid presence UNKNOWN, the
+      // telemetry-blind verdict) and goes to the warn sink; its parallel symptoms (msg-rate-floor,
+      // self-heal) already logged at WARN while it sat at INFO. The release lines stay INFO.
+      (latched ? (this.warnLogger ?? this.logger) : this.logger)(
         latched
           ? `shp2-shadow: ${cur.deviceName} (${sn}) payload has not moved across ${fresh?.repeats} polls (${Math.round((nowQ - (fresh?.firstSeenMs ?? nowQ)) / 1000)}s) — the cloud is serving a STALE SHADOW; grid readings are being treated as UNKNOWN`
           : witness == null
@@ -1791,6 +1802,7 @@ export function startPollLoop(
   let lastFailedSetLoggedMs = 0;
   // Wire the per-SN state-transition logger into the store on first poll.
   store.setLogger(log);
+  store.setWarnLogger(warn); // v1.187.10 — the stale-shadow latch setting
   const tick = async () => {
     if (stopped) return;
     const t0 = Date.now();

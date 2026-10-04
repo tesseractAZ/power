@@ -48,7 +48,7 @@ import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } f
 import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, isIncompleteDay, computeEmpiricalRte, computeLocalPackRte, type VendorDayRecord } from './energyHistory.js';
 import { exportVendorStatistics } from './haStatistics.js';
 import { buildWarrantyBundle, renderWarrantyMarkdown, renderWarrantyCsv, loadClearedRecords } from './warrantyExport.js';
-import { startAlertMonitor } from './alertMonitor.js';
+import { startAlertMonitor, rosterMuteReasonForSn } from './alertMonitor.js';
 import { systemOutageFields, telemetryGapLedgerSummary } from './alerts.js';
 import { isConfigured, reachesAPhone, getLastPushFailures } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
@@ -160,7 +160,7 @@ import { assessBlind, pollState, pollHealth } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
 // them into real push alerts (mirrors broadcastHealth's set/get + pure-builder split).
-import { setRateFloorCollapses, setRateFloorIdleHeld, type RateFloorCollapse } from './messageRateFloorAlert.js';
+import { setRateFloorCollapses, setRateFloorIdleHeld, surfacedCollapseEntry, rateFloorCollapseLine, type RateFloorCollapse, type RateFloorOnsets } from './messageRateFloorAlert.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
 import * as haStateCache from './haStateCache.js';
 // v1.38.0 (night-charge WS4 integration) — wire the ADVISORY TOU-arbitrage
@@ -2944,6 +2944,8 @@ let rateFloorTicks = 0;
 // v1.111.0 — devices whose CURRENT collapse episode has surfaced (see
 // decideCollapseSurfacing): idleness gates entry, never eviction.
 const surfacedCollapses = new Set<string>();
+// v1.187.10 — each surfaced episode's onset rate and baseline (surfacedCollapseEntry).
+const collapseOnsets: RateFloorOnsets = new Map();
 // v1.108.0 — night-charge load-band calibration: last logged value (log on change only).
 let lastLoggedLoadBandKey: string | null = null;
 let lastLoggedBuyDebiasKey: string | null = null;
@@ -3070,22 +3072,20 @@ const rateFloorTick = setInterval(() => {
         || r.rate < DEFAULT_RATE_FLOOR_CONFIG.floorFraction * r.baseline;
       const wasSurfaced = surfacedCollapses.has(sn);
       const dec = decideCollapseSurfacing(r.collapsing, online, idle, wasSurfaced, starvedNow);
-      if (!online) { surfacedCollapses.delete(sn); continue; }
+      if (!online) { surfacedCollapses.delete(sn); collapseOnsets.delete(sn); continue; }
       if (dec.surfaced) {
         surfacedCollapses.add(sn);
-        collapses.push({ sn, deviceName: name, rate: r.rate, baseline: r.baseline });
+        // v1.187.10 — the onset frozen, the live rate beside it, and whether it is back above the floor.
+        collapses.push(surfacedCollapseEntry(collapseOnsets, sn, name, r.rate, r.baseline, starvedNow));
         if (idle) idleSurfacedSns.add(sn);
       } else if (!r.collapsing) {
         surfacedCollapses.delete(sn);
+        collapseOnsets.delete(sn);
       }
       if (dec.logCollapse) {
-        app.log.warn(
-          `msg-rate-floor: ${name} message rate collapsed to ` +
-          `${r.rate?.toFixed(2) ?? '?'} msg/min (baseline ~${r.baseline.toFixed(0)}` +
-          `${r.usedHourBucket ? ' for this hour' : ', global'}) — device is barely reporting ` +
-          `while still appearing "fresh"; check the EcoFlow cloud session / power for ${sn} ` +
-          `[eligibility mark ~${r.eligibilityPeak.toFixed(0)}]`,
-        );
+        // v1.187.10 — a roster-muted device (bench spare, off-panel Core) logs at INFO with the mute.
+        const line = rateFloorCollapseLine({ name, sn, rate: r.rate, baseline: r.baseline, usedHourBucket: r.usedHourBucket, eligibilityPeak: r.eligibilityPeak }, rosterMuteReasonForSn(sn));
+        if (line.level === 'warn') app.log.warn(line.text); else app.log.info(line.text);
       } else if (r.recovered && wasSurfaced) {
         // v1.116.0 — a recovery is only newsworthy for an episode the operator
         // was actually told about. The 08-28/29 night logged SIX "message rate

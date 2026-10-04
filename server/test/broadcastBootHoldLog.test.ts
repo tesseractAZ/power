@@ -37,6 +37,7 @@ process.env.BROADCAST_ANNOUNCE_RETRIES = '0';
 process.env.BROADCAST_HEALTH_PROBE_MS = '3600000';
 
 const B = await import('../src/broadcast.js');
+const R = await import('../src/redReplayGate.js');
 const H = await import('../src/broadcastHealth.js');
 const { generateAudioAssets } = await import('../src/audioAssets.js');
 const { pcmToWav } = await import('../src/wyomingTts.js');
@@ -64,8 +65,12 @@ ha.intercept({ path: '/core/api/services', method: 'GET' })
 ha.intercept({ path: '/core/api/states', method: 'GET' }).reply(200, '[]').persist();
 ha.intercept({ path: (p: string) => p.startsWith('/core/api/states/'), method: 'GET' })
   .reply(200, JSON.stringify({ state: 'idle', attributes: {} })).persist();
+/** v1.187.10 — the status play_announcement answers (500: a failed play that arms a retry). */
+let maStatus = 200;
+/** v1.187.10 — how long (clock offset, ms) a play "takes": a real play returns when playback ends. */
+let playTakesMs = 0;
 ha.intercept({ path: '/core/api/services/music_assistant/play_announcement', method: 'POST' })
-  .reply(() => { announces++; return { statusCode: 200, data: '[]' }; }).delay(20).persist();
+  .reply(() => { announces++; offset += playTakesMs; return { statusCode: maStatus, data: maStatus === 200 ? '[]' : 'error' }; }).delay(20).persist();
 
 const KLAXON = mkdtempSync(resolve(tmpdir(), 'ef-boothold-klaxon-'));
 await generateAudioAssets(KLAXON, () => {});
@@ -83,11 +88,12 @@ const WARN2: Alert = { id: 'pack-temp-warn-CORE1', severity: 'warning', category
 
 interface Rig { mon: ReturnType<typeof B.startBroadcastMonitor>; logs: string[]; has: (s: string) => boolean; count: (s: string) => number; stop: () => void }
 const live: Rig[] = [];
-function rig(): Rig {
+function rig(retryDelaysMs?: number[]): Rig {
   const logs: string[] = [];
   const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-boothold-cache-'));
   const mon = B.startBroadcastMonitor(store, (m) => logs.push(m), {
     klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', renderTts, tickMs: 10,
+    ...(retryDelaysMs ? { retryDelaysMs } : {}),
   });
   const r: Rig = {
     mon, logs,
@@ -115,6 +121,8 @@ beforeEach(() => {
   script = [];
   last = [];
   announces = 0;
+  maStatus = 200;
+  playTakesMs = 0;
   H.resetBroadcastHealth();
 });
 after(async () => {
@@ -185,4 +193,86 @@ test('★★ a boot yellow confirmed and spoken is not reported as dropped when 
   await until(r, () => r.has('condition transition → green'), 'the green');
   await sleep(50);
   assert.ok(!r.has('boot yellow dropped'), 'spoken, then cleared: not a drop');
+});
+
+/* ══ v1.187.10 (log review) ══════════════════════════════════════════════════════════════════
+ * 10-02 17:53:40, 19:24:24 and 10-03 12:08:38: "boot yellow dropped after 20 s — cleared inside the
+ * hold, not spoken (dpu-imbalance-<SN> / Packs out of balance)". The imbalance never cleared: an
+ * off-panel Core's standing warning is muted only once its roster streak rebuilds (three alert
+ * evaluations after every restart), so the level fell to green because the warning stopped
+ * COUNTING. The drop line now tells the two apart. */
+
+const MUTED_WARN: Alert = { ...WARN, annunciate: false, muteReason: 'off-panel Core — not on the panel roster' };
+
+test('★★★ v1.187.10: a held boot yellow that stops counting (muted by the off-panel roster) is named as still active, not "cleared"', async () => {
+  serve([], [WARN], [WARN], [MUTED_WARN]);
+  const r = rig();
+  await until(r, () => r.has('boot yellow dropped'), 'the drop line');
+  await sleep(60);
+  assert.equal(r.count('boot yellow dropped'), 1);
+  const dropped = line(r, 'boot yellow dropped');
+  assert.match(dropped, /^broadcast: boot yellow dropped after \d+ s — not spoken; still active but no longer counted toward the condition \(dpu-imbalance-CORE3 \/ Packs out of balance — off-panel Core — not on the panel roster\)$/, dropped);
+  assert.ok(!dropped.includes('cleared'), 'it did not clear');
+  assert.equal(announces, 0, 'never spoken');
+});
+
+test('★★ v1.187.10: a hold with one warning muted and one gone names both', async () => {
+  serve([], [WARN, WARN2], [WARN, WARN2], [MUTED_WARN]);
+  const r = rig();
+  await until(r, () => r.has('boot yellow dropped'), 'the drop line');
+  const dropped = line(r, 'boot yellow dropped');
+  assert.ok(dropped.includes('still active but no longer counted toward the condition (dpu-imbalance-CORE3 / Packs out of balance — off-panel Core — not on the panel roster)'), dropped);
+  assert.ok(dropped.endsWith('; cleared inside the hold (pack-temp-warn-CORE1 / Pack temperature high)'), dropped);
+});
+
+test('★★ v1.187.10: bootYellowDropLine names why a present warning no longer counts', () => {
+  const fp = B.bootYellowDropLine;
+  const { alertFingerprint } = R;
+  const fpW = alertFingerprint(WARN);
+  assert.equal(fp(20, [fpW], []), 'broadcast: boot yellow dropped after 20 s — cleared inside the hold, not spoken (dpu-imbalance-CORE3 / Packs out of balance)');
+  assert.ok(fp(20, [fpW], [{ ...WARN, audible: false }]).endsWith('(dpu-imbalance-CORE3 / Packs out of balance — not audible)'));
+  assert.ok(fp(20, [fpW], [{ ...WARN, severity: 'info' }]).endsWith('(dpu-imbalance-CORE3 / Packs out of balance — now info)'));
+  assert.ok(fp(20, [fpW], [{ ...WARN, annunciate: false }]).endsWith('(dpu-imbalance-CORE3 / Packs out of balance — held non-annunciating)'));
+  assert.ok(fp(20, [fpW], [WARN]).endsWith('(dpu-imbalance-CORE3 / Packs out of balance — no longer counted)'));
+  // A different fault on the same id (another title) is not the held one: it cleared.
+  assert.ok(fp(20, [fpW], [{ ...WARN, title: 'Something else' }]).includes('cleared inside the hold'));
+});
+
+/* ══ v1.187.10 (log review): the outcome line names the broadcast's kind and generation ═══════════
+ * 10-02 21:31:55 "broadcast: yellow → ok in 58918ms (…)" was the night-charge consent notice (a
+ * dedicated yellow), logged exactly as a condition yellow; and a retry could be matched to its
+ * announcement only by timing. */
+
+test('★★ v1.187.10: every outcome line names its kind and generation; a deferred retry carries its announcement\'s', async () => {
+  const r = rig([20, 20, 20]);
+  await sleep(40); // the first tick joins green
+  offset += 11 * MIN; // past the boot warm-up
+  await sleep(40);
+  playTakesMs = 30_000; // a verified play
+  const a = await r.mon.announce('medium', 'Night charge notice test.', null, { consentNotice: true });
+  assert.ok(a.ok, a.error);
+  const ded = line(r, 'broadcast: yellow → ok in');
+  const g1 = Number(/ \[dedicated #(\d+)\]$/.exec(ded)?.[1]);
+  assert.ok(g1 > 0, ded);
+  maStatus = 500; // the condition yellow fails once and arms its retry
+  serve([WARN]);
+  await until(r, () => r.logs.some((l) => /^broadcast: yellow → \d+ error\(s\)/.test(l)), 'the failed condition yellow');
+  const failed = r.logs.find((l) => /^broadcast: yellow → \d+ error\(s\)/.test(l))!;
+  const g2 = Number(/ \[condition #(\d+)\]$/.exec(failed)?.[1]);
+  assert.ok(g2 > g1, failed);
+  maStatus = 200;
+  await until(r, () => r.count('broadcast: yellow → ok in') === 2, 'the retry played');
+  const retried = r.logs.filter((l) => l.includes('broadcast: yellow → ok in'))[1];
+  assert.ok(retried.endsWith(` [condition #${g2}]`), `the retry carries its announcement's generation: ${retried}`);
+});
+
+test('outcomeTag', () => {
+  assert.equal(B.outcomeTag('test', 3), ' [test #3]');
+  assert.equal(B.outcomeTag('condition', 12), ' [condition #12]');
+});
+
+test('★ v1.187.10: sipProbeUnknownLine names what each target read, an unreadable one included, and claims nothing about the call', () => {
+  const l = B.sipProbeUnknownLine(['media_player.cordless', 'media_player.den'], [{ state: 'idle' }, null]);
+  assert.equal(l, 'broadcast: SIP dispatch timed out — delivery UNKNOWN (media_player.cordless reads idle, media_player.den reads nothing (unreadable); the probe confirms only a target that reports playback, and an announce entity that never changes state cannot) — not counted as heard or delivered; a deferred retry re-fires SIP');
+  assert.ok(!l.includes('not playing'));
 });

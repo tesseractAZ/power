@@ -317,8 +317,8 @@ const MUTANTS = [
   {
     id: 'xxxiv. ★★★ the noise tier takes warranty evidence',
     file: AM,
-    find: '    if (evictOldest((e, i) => sev(i) === \'warning\' && isNoise(e) && !evidence(e))) return;',
-    to: '    if (evictOldest((e, i) => sev(i) === \'warning\' && isNoise(e))) return; /* MUTANT */',
+    find: '    if (evictOldest((e, i) => sev(i) === \'warning\' && isNoise(e) && e.pushed !== true && !evidence(e))) return; // v1.187.10',
+    to: '    if (evictOldest((e, i) => sev(i) === \'warning\' && isNoise(e) && e.pushed !== true)) return; /* MUTANT */',
     why: 'As xxxiii.',
   },
   {
@@ -473,8 +473,8 @@ const MUTANTS = [
   {
     id: 'lv. ★★ a rise to red is reported as a dropped yellow',
     file: BC,
-    find: '      if (level === \'green\') log(`broadcast: boot yellow dropped',
-    to: '      if (true /* MUTANT */) log(`broadcast: boot yellow dropped',
+    find: '      if (level === \'green\') log(bootYellowDropLine(',
+    to: '      if (true /* MUTANT */) log(bootYellowDropLine(',
     why: 'A yellow that became a spoken red reads as never spoken.',
   },
   {
