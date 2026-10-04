@@ -269,9 +269,10 @@ export const SENSORS: SensorConfig[] = [
   // v1.187.10 — 'total' + last_reset, not 'total_increasing': both daily figures are RE-ESTIMATED
   // through the day (each hour re-walked on the current posterior and weather cache, the partial
   // hour included), so they go down as well as up. On a total_increasing sensor Home Assistant
-  // reads a drop of 10 % or more as a meter reset and counts the day again (PV Curtailed Today,
-  // 2026-09-29 0.11 → 0 and 0.35 → 0, 09-30 1.61 → 1.39, 10-01 1.85 → 1.58). As 'total' with the
-  // day's local midnight as last_reset, a revision is a correction and only a new day is a reset.
+  // reads a drop of 10 % or more as a meter reset and counts the day again, and a smaller one as a
+  // negative delta (PV Curtailed Today 2026-10-02: 3.54 → 3.03 kWh after curtailment had ended,
+  // one step 9.4 %, then 3.79). As 'total' with the day's local midnight as last_reset, a revision
+  // is a correction and only a new day is a reset.
   { unique_id: 'ecoflow_pv_clipped_kwh_today', name: 'PV Clipped Today', device_class: 'energy', state_class: 'total', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_clipped_kwh_today }}', last_reset_value_template: '{{ value_json.pv_clipped_kwh_today_since }}' },
   { unique_id: 'ecoflow_pv_array_peak_watts', name: 'PV Array Peak', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.pv_array_peak_watts }}', entity_category: 'diagnostic' },
   // v0.9.77 — SoC-saturation curtailment ("batteries full, panels throttled")

@@ -21,7 +21,7 @@
  * or at its bound (ALERT_COUNTS_READY_MAX_MS) when a feed never delivers.
  *
  * v1.187.10 — "the data behind it exists" also means the data is a READING, not a replay. While a
- * Smart Home Panel 2 fails shp2ReadbackFresh (cloud-offline, no REST quota for
+ * Smart Home Panel 2 fails shp2ReadbackFresh (cloud-offline, no quota, REST or MQTT, for
  * SHP2_READBACK_STALE_MS, or replaying a cloud shadow) its projection is frozen, and the server
  * already treats it so: shp2_grid_connected reads unknown and the dashboard shows the panel's
  * figures as stale. The panel's live figures (load, grid power, grid status, backup pool and the
@@ -48,7 +48,7 @@ export interface PublishReadiness {
    *  projected panel's reading is fresh (shp2ReadbackFresh): the load sums every panel's
    *  channels, and a sum that is half live, half frozen is neither (the dashboard's rule). */
   panel: boolean;
-  /** v1.187.10 — the house panel's reading is fresh (shp2ReadbackFresh: online, a REST quota
+  /** v1.187.10 — the house panel's reading is fresh (shp2ReadbackFresh: online, a quota (REST or MQTT)
    *  within SHP2_READBACK_STALE_MS, not replaying a cloud shadow). Its grid power, grid status,
    *  backup pool and per-circuit watts are a reading only then; otherwise they are the last
    *  projection, frozen. The lifetime counters and the reserve/strategy settings are not governed. */

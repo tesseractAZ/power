@@ -7,7 +7,7 @@
  * Curtailed Today moves down as well as up with no curtailment in progress: 2026-10-02 3.54 →
  * 3.03 kWh after curtailment ended, then 3.79 at 17:43. Home Assistant's recorder reads a drop to
  * below 0.9× the previous value on a total_increasing sensor as a meter RESET and counts the
- * day again: 09-29 0.11 → 0 and 0.35 → 0, 09-30 1.61 → 1.39, 10-01 1.85 → 1.58. computeClipping
+ * day again, and a smaller drop as a negative delta (the 10-02 3.42 → 3.1 step was 9.4 %). computeClipping
  * re-walks today the same way (PV Clipped Today, latent). As 'total' with last_reset, a revision
  * books as a correction and only a new day — a new last_reset — starts a new cycle.
  */
@@ -88,7 +88,10 @@ test('★★ the reset is the local midnight of the REPORT\'s day, not the publi
 });
 
 test('★★★ buildState emits each figure with its day: the reset keys follow their own report', async () => {
-  const curtGen = Date.now() - 60_000;
+  // Two different days, neither today: a reset taken from the publish clock, or from the other
+  // report, reads a different midnight for each.
+  const twoDaysAgo = new Date(); twoDaysAgo.setDate(twoDaysAgo.getDate() - 2); twoDaysAgo.setHours(23, 50, 0, 0);
+  const curtGen = twoDaysAgo.getTime();
   const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1); yesterday.setHours(23, 58, 0, 0);
   const reports: Record<string, unknown> = {
     curtailment: { active: false, currentSurplusW: 0, todayKwh: 3.03, recent7dKwh: 6.9, current: null, basisComplete: true, generatedAt: curtGen },
