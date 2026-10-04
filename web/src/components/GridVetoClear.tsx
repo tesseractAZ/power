@@ -34,7 +34,7 @@ export function GridVetoClear({ grid }: { grid: GridBackstop | undefined }) {
       <span style={{ color: UI.muted }}>
         Off-grid from the panel's last reading, which it is not refreshing{grid?.reason ? ` (${grid.reason})` : ''}.
       </span>
-      <button onClick={clear} disabled={state === 'busy'} className="ml-auto shrink-0 px-2 py-1 rounded border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50">
+      <button onClick={clear} disabled={state === 'busy'} className="ml-auto shrink-0 px-2 py-1 rounded-sm border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50">
         Grid is back — clear
       </button>
       {state !== 'idle' && state !== 'busy' && state !== 'done' ? <span className="text-xs" style={{ color: UI.bad }}>{state}</span> : null}

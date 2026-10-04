@@ -37,7 +37,7 @@ export function HousePanelPin({ state }: { state: FleetSnapshot['housePanel'] })
           : 'Two smart panels and none pinned as the house panel — night-charge writes are paused until one is chosen.'}
       </span>
       {state.panels.map((p) => (
-        <button key={p.sn} onClick={() => pin(p.sn, p.name)} disabled={busy} className="shrink-0 px-2 py-1 rounded border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50">
+        <button key={p.sn} onClick={() => pin(p.sn, p.name)} disabled={busy} className="shrink-0 px-2 py-1 rounded-sm border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50">
           {p.name} is the house panel
         </button>
       ))}

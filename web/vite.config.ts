@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
   // v0.9.5 — relative base URL so the built bundle works under any mount
@@ -8,7 +9,7 @@ export default defineConfig({
   // reference each other relatively (./assets/index-XYZ.js) so both work
   // without per-deployment configuration.
   base: './',
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     port: 5173,
     host: true, // bind to 0.0.0.0 so phones / other devices on the LAN can connect

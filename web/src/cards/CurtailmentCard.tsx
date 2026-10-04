@@ -154,7 +154,7 @@ function inactiveReasonText(
 
 function Stat({ label, value, subtitle }: { label: string; value: string; subtitle?: string }) {
   return (
-    <div className="border rounded px-2 py-1" style={{ backgroundColor: UI.elev }}>
+    <div className="border rounded-sm px-2 py-1" style={{ backgroundColor: UI.elev }}>
       <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
       <div className="text-sm font-mono">{value}</div>
       {subtitle && <div className="text-[10px] text-muted">{subtitle}</div>}
@@ -176,7 +176,7 @@ function Histogram({ histogram }: { histogram: CurtailmentReport['hourlyHistogra
           return (
             <div
               key={b.hour}
-              className="flex-1 rounded-t"
+              className="flex-1 rounded-t-sm"
               style={{
                 height: `${h}px`,
                 backgroundColor: b.samples === 0 ? UI.panel2 : isMidday ? HUES.solar : '#f59e0b',

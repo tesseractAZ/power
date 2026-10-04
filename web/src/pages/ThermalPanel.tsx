@@ -314,7 +314,7 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
           <span className="text-muted uppercase tracking-widest mr-1">{def.label}</span>
           {def.legend.map((l) => (
-            <span key={l.label} className={`border rounded px-2 py-1 ${l.cls}`}>{l.label}</span>
+            <span key={l.label} className={`border rounded-sm px-2 py-1 ${l.cls}`}>{l.label}</span>
           ))}
         </div>
       </div>
@@ -378,7 +378,7 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
                   <div className="text-2xl font-semibold tabular-nums mt-1">{fmtF(s.emsBatTemp)}</div>
                   {s.dpuStale && (
                     <span
-                      className="absolute top-1.5 right-1.5 text-[10px] uppercase tracking-wide bg-warn/30 text-ink border border-warn/60 rounded px-1.5 py-0.5"
+                      className="absolute top-1.5 right-1.5 text-[10px] uppercase tracking-wide bg-warn/30 text-ink border border-warn/60 rounded-sm px-1.5 py-0.5"
                       title="Core is cloud-offline; its battery is still wired and counted in the pool capacity above."
                     >
                       stale

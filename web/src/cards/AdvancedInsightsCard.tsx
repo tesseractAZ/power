@@ -351,7 +351,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
               <div className="text-[11px] uppercase tracking-wider text-muted mb-1">Per hour</div>
               <div className="grid grid-cols-3 sm:grid-cols-6 lg:grid-cols-12 gap-1">
                 {soil.perHour.map((h) => (
-                  <div key={h.hour} className="bg-panel2/50 border border-line rounded px-1 py-0.5 text-center">
+                  <div key={h.hour} className="bg-panel2/50 border border-line rounded-sm px-1 py-0.5 text-center">
                     <div className="text-[9px] text-muted">{h.hour}</div>
                     <div className={`text-[10px] font-mono ${h.dropPct >= 15 ? 'text-warn' : ''}`}>{h.dropPct}%</div>
                   </div>
@@ -455,7 +455,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
                 </div>
                 <div className="grid grid-cols-4 gap-1 mt-1">
                   {p.checkpoints.map((c) => (
-                    <div key={c.soc} className="bg-panel rounded px-1 py-0.5 text-center">
+                    <div key={c.soc} className="bg-panel rounded-sm px-1 py-0.5 text-center">
                       <div className="text-[9px] text-muted">{c.soc}%</div>
                       <div className="font-mono text-[10px]">{c.driftMv != null ? `${c.driftMv >= 0 ? '+' : ''}${c.driftMv}` : '—'}</div>
                     </div>

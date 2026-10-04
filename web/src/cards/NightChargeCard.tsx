@@ -358,7 +358,7 @@ function ActuationBanner({ mode, actuation }: { mode: NightChargeStatus['mode'];
         {cancelErr && <span className="text-crit">{cancelErr}</span>}
         {showCancel && (
           <button
-            className="px-2 py-1 rounded border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50"
+            className="px-2 py-1 rounded-sm border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50"
             disabled={busy}
             onClick={doCancel}
           >
