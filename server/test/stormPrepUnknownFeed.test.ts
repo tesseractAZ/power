@@ -202,3 +202,17 @@ test('★★★ an outage that began after a success: inside the carry limit the
   assert.deepEqual(back.value, []);
   setNwsLog(() => {});
 });
+
+test('★★ a carried feed with NO alerts is not cached either: the pass that crosses the carry limit asks, and reads unknown', async () => {
+  // State from the previous test: a successful empty answer, just now.
+  setNwsLog(() => {});
+  reply = { status: 503, body: 'Service Unavailable' };
+  offset += 55 * MIN; // past the alerts TTL and the storm-prep cache, inside the carry limit
+  let n = fetches;
+  assert.deepEqual(await stormPrepAlerts({}), [], '55 min old and empty: still a current "no storms"');
+  assert.equal(fetches, n + 1);
+  offset += 6 * MIN; // 61 min old: past the limit and the backoff
+  n = fetches;
+  await assert.rejects(() => stormPrepAlerts({}), /NWS alerts unknown/, 'the empty answer 6 min ago was built from a carried feed and was not cached');
+  assert.equal(fetches, n + 1);
+});

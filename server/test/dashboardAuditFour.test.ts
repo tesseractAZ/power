@@ -37,7 +37,7 @@ test('★★ tagHomePacks marks packs by panel membership; homePacks scopes to t
 
 test('all three pack reports are tagged, and the Battery page scopes its fleet figures and lists', () => {
   const an = src('analytics.ts');
-  for (const r of ['FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, packs: tagHomePacks(', 'ChargeCurveReport = { generatedAt: now, packs: tagHomePacks(', 'FleetThermalEvents = { generatedAt: now, packs: tagHomePacks(']) {
+  for (const r of ['FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, windowDays, packs: tagHomePacks(', 'ChargeCurveReport = { generatedAt: now, packs: tagHomePacks(', 'FleetThermalEvents = { generatedAt: now, packs: tagHomePacks(']) {
     assert.ok(an.includes(r), r);
   }
   const deg = readFileSync(new URL('../../web/src/cards/DegradationCard.tsx', import.meta.url), 'utf8');

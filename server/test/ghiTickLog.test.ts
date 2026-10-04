@@ -10,7 +10,7 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -60,4 +60,11 @@ test('★★★ the real recorder reports what each call wrote, and the tick lin
   } finally {
     rec.close();
   }
+});
+
+test('★ the 45-minute tick reports through createGhiTickLogger, with the recorder\'s result and the no-forecast case (source pin: index.ts is not importable in a test)', () => {
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(idx, /weather: periodic GHI persistence \(/, 'the unconditional line is gone');
+  assert.match(idx, /const r = recorder\.recordWeatherGhi\(weatherGhiRows\(w\), \{ fetchedAtMs: w\.fetchedAt \}\);\s*logGhiTick\(\{\s*kind: 'ran', hours: w\.hours\.length,\s*written: r\?\.written \?\? 0, realized: \(r\?\.realizedInserted \?\? 0\) \+ \(r\?\.realizedRevised \?\? 0\),/);
+  assert.match(idx, /\} else if \(recorder\) \{\s*logGhiTick\(\{ kind: 'no-weather' \}, Date\.now\(\)\);/);
 });

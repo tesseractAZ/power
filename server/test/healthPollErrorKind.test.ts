@@ -7,6 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { assessBlind, classifyPollError, healthPollErrorKind, notePollFailed, notePollOk, pollState } from '../src/telemetryBlind.js';
 
 const health = (nowMs: number, projectedDeviceCount = 3) => {
@@ -35,4 +36,10 @@ test('healthPollErrorKind — any one of blind, a last error or a failure count 
   assert.equal(healthPollErrorKind({ blind: false, errorKind: 'network' }, { lastError: 'x', consecutiveFailures: 0 }), 'network');
   assert.equal(healthPollErrorKind({ blind: false, errorKind: 'auth' }, { lastError: null, consecutiveFailures: 2 }), 'auth');
   assert.equal(healthPollErrorKind({ blind: false, errorKind: 'other' }, { lastError: null, consecutiveFailures: 0 }), null);
+});
+
+test('★ the /api/health route publishes the gated class (source pin: index.ts is not importable in a test)', () => {
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.match(idx, /pollErrorKind: healthPollErrorKind\(blind, pollState\(\)\),/);
+  assert.doesNotMatch(idx, /pollErrorKind: blind\.errorKind/);
 });
