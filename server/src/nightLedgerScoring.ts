@@ -356,6 +356,158 @@ export function ledgerSpansForWindow(
   return { onpeak, scoreSpanEndMs, completeMs: Math.max(scoreSpanEndMs, onpeak?.endMs ?? 0) };
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * v1.187.10 — THE FORECAST SPAN.
+ *
+ * `pv_err_frac`, `load_err_frac` and (through the planner-sizing basis) `buy_err_kwh`
+ * compare the realized PV/load with the plan's P50, which sums the 24 hourly slots of the
+ * day-ahead forecast issued with the plan. The actuals are integrated over
+ * [issued_at, issued_at + 24 h] — clipped to the capture instant. The capture itself was
+ * gated only on `completeMs` (window close + 16 h): on a weekday that is ~21:00, within
+ * half an hour of issue + 24 h, but a Friday 1 h window closes Saturday 00:00 and completes
+ * Saturday 16:00, ~5.4 h before issue + 24 h. The 2026-10-02 row was captured at
+ * 16:08:08 on 18.6 h of load (39.62 kWh) against an 81.8 kWh 24 h forecast: load_err
+ * −0.52 and buy_err +51.09 kWh frozen into the never-pruned ledger, where buy_err is the
+ * readiness gate's HARD under-buy evidence (a positive skew masks a real under-buy).
+ *
+ * `completeMs` is left as it is — repairPrematureNightOutcomes resets any row captured
+ * before it, across a 60-day sweep that can reach past the raw-telemetry retention — and
+ * the scorer gates on ledgerCaptureDueMs instead.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** The span of the plan's P50 PV/load forecast, from its issue. */
+export const FORECAST_SPAN_MS = 24 * HOUR_MS;
+
+/** v1.187.10 — the span the PV/load actuals are integrated over: [issued_at,
+ *  issued_at + 24 h], clipped to `nowMs`. PURE. */
+export function forecastActualsSpan(issuedAtMs: number, nowMs: number): TimeSpan {
+  return { startMs: issuedAtMs, endMs: Math.min(nowMs, issuedAtMs + FORECAST_SPAN_MS) };
+}
+
+/** v1.187.10 — the instant a row may be outcome-captured: its night complete AND its
+ *  forecast span elapsed, so the actuals cover the same 24 h the forecast did. A row
+ *  with no usable issue time keeps the night's own boundary. PURE. */
+export function ledgerCaptureDueMs(completeMs: number, issuedAtMs: number | null | undefined): number {
+  if (typeof issuedAtMs !== 'number' || !Number.isFinite(issuedAtMs)) return completeMs;
+  return Math.max(completeMs, issuedAtMs + FORECAST_SPAN_MS);
+}
+
+/** v1.187.10 — the uncaptured rows the backfill sweep captures now, each with its spans
+ *  (index.ts `scoreCompletedNights`). A row is skipped while already captured
+ *  (idempotent), when its spans cannot be derived (malformed plan_date), and until
+ *  ledgerCaptureDueMs. PURE. */
+export function ledgerRowsDueForCapture<
+  R extends Pick<NightLedgerRow, 'outcome_captured_at_ms' | 'issued_at_ms'>,
+  S extends { completeMs: number },
+>(rows: readonly R[], nowMs: number, spansFor: (row: R) => S | null): Array<{ row: R; spans: S }> {
+  const due: Array<{ row: R; spans: S }> = [];
+  for (const row of rows) {
+    if (row.outcome_captured_at_ms != null) continue; // already captured — idempotent
+    const spans = spansFor(row);
+    if (!spans) continue; // malformed plan_date — leave for manual inspection
+    if (nowMs < ledgerCaptureDueMs(spans.completeMs, row.issued_at_ms)) continue; // still in flight
+    due.push({ row, spans });
+  }
+  return due;
+}
+
+/** How far short of the forecast span a captured row's actuals must fall before the
+ *  one-time repair acts on it. Weekday rows captured before v1.187.10 stop 0.1–0.5 h
+ *  short (completion ~21:00 against issue ~21:30) and are left as captured: a re-capture
+ *  re-scores EVERY outcome column on the current scorer (delivered-energy basis, governed
+ *  on-peak, PV coverage gate, the connected Cores at capture), so it is spent only where
+ *  the PV/load/buy columns are materially wrong — a Friday 1 h window (~5.4 h) or an
+ *  evening job delayed past ~22:00. */
+export const FORECAST_SPAN_REPAIR_MIN_SHORT_MS = HOUR_MS;
+/** Kept inside both the raw-sample retention and the backfill sweep's 60 days, so a reset
+ *  row still has its telemetry and is still swept when the sweep re-captures it. */
+export const FORECAST_SPAN_RECAPTURE_MARGIN_DAYS = 2;
+/** The marker of the tag on a row past the re-capture horizon; its presence makes the tag
+ *  idempotent. */
+export const FORECAST_SPAN_TAG_MARKER = 'Forecast span:';
+
+/** v1.187.10 — how far back a short row can still be re-captured. PURE. */
+export function forecastSpanRecaptureHorizonMs(retentionDays: number, sweepDays: number): number {
+  return Math.max(0, Math.min(retentionDays, sweepDays) - FORECAST_SPAN_RECAPTURE_MARGIN_DAYS) * 24 * HOUR_MS;
+}
+
+export interface ForecastSpanRepair {
+  /** 'recapture' — reset for the sweep to re-capture over the full span; 'tag' — past the
+   *  horizon, so only `score_notes` gains a clause saying the errors under-count. */
+  action: 'recapture' | 'tag';
+  /** How far the captured actuals fell short of issued_at + 24 h. */
+  shortMs: number;
+}
+
+/**
+ * v1.187.10 — the one-time repair a captured row owes, or null. PURE.
+ * Only rows with a stored window (the rows the scorer measures actuals for) whose capture
+ * preceded issued_at + 24 h by at least FORECAST_SPAN_REPAIR_MIN_SHORT_MS. Idempotent: a
+ * re-captured row is captured after issue + 24 h (the scorer's gate), a reset row has no
+ * capture, and a tagged row carries FORECAST_SPAN_TAG_MARKER.
+ */
+export function forecastSpanRepair(
+  row: Pick<NightLedgerRow, 'outcome_captured_at_ms' | 'issued_at_ms' | 'window_start_ms' | 'window_end_ms' | 'score_notes'>,
+  nowMs: number,
+  recaptureHorizonMs: number,
+): ForecastSpanRepair | null {
+  const cap = row.outcome_captured_at_ms;
+  const issued = row.issued_at_ms;
+  if (typeof cap !== 'number' || typeof issued !== 'number' || !Number.isFinite(issued)) return null;
+  const ws = row.window_start_ms;
+  const we = row.window_end_ms;
+  if (typeof ws !== 'number' || typeof we !== 'number' || !(we > ws)) return null; // no actuals measured
+  const shortMs = issued + FORECAST_SPAN_MS - cap;
+  if (shortMs < FORECAST_SPAN_REPAIR_MIN_SHORT_MS) return null;
+  if (nowMs - issued <= recaptureHorizonMs) return { action: 'recapture', shortMs };
+  if (String(row.score_notes ?? '').includes(FORECAST_SPAN_TAG_MARKER)) return null; // already tagged
+  return { action: 'tag', shortMs };
+}
+
+/** v1.187.10 — the columns a forecast-span re-capture resets: the outcome columns
+ *  repairPrematureNightOutcomes resets (the capture stamp first — it is what lets the sweep
+ *  capture the row again), `scored` 0 and a note saying why. The re-capture rewrites all
+ *  of them. PURE. */
+export function forecastSpanResetColumns(shortMs: number): Partial<NightLedgerRow> {
+  const shortH = (shortMs / HOUR_MS).toFixed(1);
+  return {
+    outcome_captured_at_ms: null,
+    actual_pv_kwh: null,
+    actual_load_kwh: null,
+    actual_window_import_kwh: null,
+    actual_onpeak_import_kwh: null,
+    onpeak_import_occurred: null,
+    onpeak_start_ms: null,
+    onpeak_end_ms: null,
+    onpeak_basis: null,
+    realized_cost_cents: null,
+    actual_min_soc_pct: null,
+    actual_min_soc_ts_ms: null,
+    plan_traj_floor_breached: null,
+    cushion_breached: null,
+    grid_home_coverage_frac: null,
+    scored: 0,
+    score_notes:
+      `reset — the PV/load actuals had been captured ${shortH} h before issue + 24 h (before v1.187.10 a Friday `
+      + 'or late-issued row completed before its forecast span ended); re-captured by the backfill sweep over the full 24 h.',
+    pv_err_frac: null,
+    pv_in_band: null,
+    pv_verdict_set_aside: null,
+    load_err_frac: null,
+    load_in_band: null,
+    buy_err_kwh: null,
+    soc_min_err_pct: null,
+  };
+}
+
+/** v1.187.10 — the clause the tag appends to `score_notes`. PURE. */
+export function forecastSpanTagNote(shortMs: number): string {
+  const covered = Math.round((FORECAST_SPAN_MS - shortMs) / HOUR_MS * 10) / 10;
+  return `${FORECAST_SPAN_TAG_MARKER} the PV/load actuals cover ${covered} h of the 24 h the P50 forecast covered `
+    + '(captured before issue + 24 h, before v1.187.10), so actual_load_kwh/actual_pv_kwh under-count and '
+    + 'load_err_frac reads low and buy_err_kwh high; the raw telemetry is past the re-capture horizon, so the row is kept as captured.';
+}
+
 /** The actuator's tick (index.ts `nightActuationTick`): a restore due at the close lands
  *  on the first tick after it. */
 export const ACTUATOR_TICK_MS = 60_000;

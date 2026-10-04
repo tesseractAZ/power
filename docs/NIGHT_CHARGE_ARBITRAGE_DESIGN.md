@@ -84,7 +84,7 @@ The original design **banned** `backupReserveSoc` as the charge lever (Invariant
 | On-peak winter (Mon–Fri 16:00–19:00) | **39.5 ¢** |
 | Super-off-peak winter (10:00–15:00, weekdays) | **8.2 ¢** |
 
-Season: summer May–Oct, winter Nov–Apr. Plan = APS **R-EV**, **no demand charge** — the ~40% of conditional machinery §0.3 of the original hinged on collapsed when that was confirmed. Tariff source is **manual**; the EcoFlow API exposes no rates, and there is **no expiry check** — a rate change would be silently stale.
+Season (APS billing cycles): summer bills May–Oct, winter bills Nov–Apr — by usage month (each bill covers the usage since the early-month meter read) summer = Apr–Sep and winter = Oct–Mar (v1.187.10; the boundary is the 1st of the month, ± the meter-read day). Plan = APS **R-EV**, **no demand charge** — the ~40% of conditional machinery §0.3 of the original hinged on collapsed when that was confirmed. Tariff source is **manual**; the EcoFlow API exposes no rates, and there is **no expiry check** — a rate change would be silently stale.
 
 `rateAt(model, ts)` resolves month/dow/hour explicitly in America/Phoenix (no DST). At `DISPATCH_ROUND_TRIP_EFFICIENCY = 0.86` — charge leg `√0.86 = 0.9274`, discharge leg `0.94`, product **0.872** — **stored overnight energy delivers at 15.02 ¢/kWh.** Note this is *not* a flat 0.86: code that assumes it will be wrong by ~1.4%.
 
@@ -249,7 +249,7 @@ All surfaces read one holder. One HA namespace `night_charge_*`, one status endp
 
 ## 7. Write-readiness gate (v2)
 
-Evidence is scored **actuated** nights. Graduation to `auto` requires: ≥ 21 scored actuated nights, under-buy ≤ 10%, delivery bias in [0, 5] kWh, band coverage in [78, 92]% over ≥ 14 verdict nights, zero engine-fault strikes. A strike requires the plan to have *claimed hold* (`cushionShortfall` falsy — a disclosed shortfall is physics, not fault) **and** a trajectory or realized breach; strikes live in a rolling 45-day window and clear after 14 consecutive strike-free nights.
+Evidence is scored **actuated** nights. Graduation to `auto` requires: ≥ 21 scored actuated nights, under-buy ≤ 10%, delivery bias in [0, 5] kWh *(Amendment, v1.187.10: named "sizing bias" — since algo v3, v1.105.0, the criterion is the mean `buy_err_kwh`, the planner's P50 PV/load forecast miss in kWh; delivered energy is not part of it)*, band coverage in [78, 92]% over ≥ 14 verdict nights, zero engine-fault strikes. A strike requires the plan to have *claimed hold* (`cushionShortfall` falsy — a disclosed shortfall is physics, not fault) **and** a trajectory or realized breach; strikes live in a rolling 45-day window and clear after 14 consecutive strike-free nights.
 
 ★★ **The gate cannot open on current inputs, and says so itself:**
 
