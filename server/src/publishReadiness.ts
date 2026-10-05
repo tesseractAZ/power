@@ -19,10 +19,22 @@
  * while its own data is missing, so nothing is held back that is real. v1.186.0 — alarm counts
  * publish once the monitor's set is complete (a hydrated store, every alert feed delivered),
  * or at its bound (ALERT_COUNTS_READY_MAX_MS) when a feed never delivers.
+ *
+ * v1.187.10 — "the data behind it exists" also means the data is a READING, not a replay. While a
+ * Smart Home Panel 2 fails shp2ReadbackFresh (cloud-offline, no quota, REST or MQTT, for
+ * SHP2_READBACK_STALE_MS, or replaying a cloud shadow) its projection is frozen, and the server
+ * already treats it so: shp2_grid_connected reads unknown and the dashboard shows the panel's
+ * figures as stale. The panel's live figures (load, grid power, grid status, backup pool and the
+ * per-circuit watts) kept publishing as values: 2026-10-02 00:05–00:14 MST Panel Load sat at
+ * 1611 W while the Cores' battery net rose to ~4.1 kW, and the first fresh reading was 3626 W.
+ * MQTT expire_after cannot catch it: each 30 s republish resets the timer. They now publish null
+ * (`panel`, `panelLive`). And a forecast or runway the analytics worker built while a home Core's
+ * first reading was still pending (homeBasisPending) is withheld: at boot they published
+ * Projected Low SoC 0 % and a finite runway computed with that Core's PV missing.
  */
 
 import type { DeviceSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2 } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2, allShp2s, shp2ReadbackFresh } from './shp2Membership.js';
 
 export interface PublishReadiness {
   /** An online home Core — one the panel lists as a source, or any Core on a DPU-only
@@ -32,8 +44,15 @@ export interface PublishReadiness {
    *  not a DPU-only install: membership is unknown, so the flows wait for it (the same line
    *  the tariff report's basisComplete draws). */
   flow: boolean;
-  /** The panel has a projection with at least one reported channel. */
+  /** The panel has a projection with at least one reported channel. v1.187.10 — and EVERY
+   *  projected panel's reading is fresh (shp2ReadbackFresh): the load sums every panel's
+   *  channels, and a sum that is half live, half frozen is neither (the dashboard's rule). */
   panel: boolean;
+  /** v1.187.10 — the house panel's reading is fresh (shp2ReadbackFresh: online, a quota (REST or MQTT)
+   *  within SHP2_READBACK_STALE_MS, not replaying a cloud shadow). Its grid power, grid status,
+   *  backup pool and per-circuit watts are a reading only then; otherwise they are the last
+   *  projection, frozen. The lifetime counters and the reserve/strategy settings are not governed. */
+  panelLive: boolean;
   /** v1.186.0 — the alarm monitor's set is COMPLETE (snapshot.alertsComplete): a pass on a
    *  hydrated store with every worker/NWS feed delivered, or its bound passed. `alerts` merely
    *  set is not enough: the first publish carries only the live alarms, and counts taken from
@@ -41,8 +60,13 @@ export interface PublishReadiness {
   alerts: boolean;
   /** The audible-health probe has run at least once. */
   speakers: boolean;
-  /** The forecast had PV history to project from. */
+  /** The forecast had PV history to project from. v1.187.10 — and was not built while a home
+   *  Core's first reading was pending (DayForecast.homeBasisPending): the boot forecast the
+   *  worker builds on a map holding the panel and none of its Cores projected a 0 % low. */
   forecastPv: boolean;
+  /** v1.187.10 — the runway was not computed on a home basis still pending
+   *  (RunwayProjection.basisPending). */
+  runwayBasis: boolean;
   /** The clipping report ran on a real solar model (array peak > 0). */
   clipping: boolean;
   /** The curtailment report ran with home Cores, the panel, weather and a solar posterior. */
@@ -59,13 +83,21 @@ export interface PublishReadiness {
 export const READINESS_FIELDS: { readonly [K in keyof PublishReadiness]: readonly string[] } = {
   flow: ['fleet_pv_watts', 'fleet_total_in_watts', 'fleet_total_out_watts', 'fleet_battery_net_watts', 'ac_import_watts'],
   panel: ['panel_load_watts'],
+  // v1.187.10 — the house panel's live figures. `circuit_<ch>_watts` keys are dynamic: see
+  // READINESS_PATTERNS. Not backup_full_capacity_kwh / backup_reserve_percent (settings, not
+  // readings) and never the lifetime counters.
+  panelLive: [
+    'grid_home_watts', 'shp2_grid_status', 'backup_pool_percent', 'backup_remaining_kwh',
+    'backup_charge_minutes', 'backup_discharge_minutes',
+  ],
   alerts: [
     'alert_critical_count', 'alert_warning_count', 'alert_info_count',
     'learned_critical_count', 'learned_warning_count', 'learned_info_count',
     'alert_high_count', 'alert_medium_count', 'alert_low_count',
   ],
   speakers: ['audible_usable_speakers'],
-  forecastPv: ['forecast_pv_next_24h_kwh', 'typical_pv_per_day_kwh'],
+  forecastPv: ['forecast_pv_next_24h_kwh', 'typical_pv_per_day_kwh', 'projected_low_soc_percent', 'projected_low_soc_at'],
+  runwayBasis: ['runway_to_reserve_hours', 'runway_to_empty_hours', 'runway_recent_load_watts', 'runway_forecast_pv_used_kwh'],
   clipping: ['pv_clipped_kwh_today', 'pv_array_peak_watts', 'pv_hours_at_peak_today'],
   curtailment: [
     'pv_curtailment_active', 'pv_curtailment_surplus_watts', 'pv_curtailment_kwh_today',
@@ -77,7 +109,17 @@ export const READINESS_FIELDS: { readonly [K in keyof PublishReadiness]: readonl
   tariff: ['tariff_today_grid_cost_dollars', 'tariff_today_solar_value_dollars', 'tariff_net_savings_7d_dollars'],
 };
 
-type Projected = { sn?: string; online?: boolean; projection?: { kind?: string; circuits?: Array<{ watts?: number | null }> } };
+/** v1.187.10 — dynamic keys a flag governs, matched against every key of the payload. The
+ *  per-circuit watts are enumerated from the live circuits plus the persisted accumulators
+ *  (circuitChannels), so they cannot be listed. `circuit_<ch>_lifetime_kwh` is not matched. */
+export const READINESS_PATTERNS: { readonly [K in keyof PublishReadiness]?: readonly RegExp[] } = {
+  panelLive: [/^circuit_\d+_watts$/],
+};
+
+type Projected = {
+  sn?: string; online?: boolean; lastQuotaAtMs?: number; contentStaleSinceMs?: number | null;
+  projection?: { kind?: string; circuits?: Array<{ watts?: number | null }> };
+};
 
 export interface ReadinessInputs {
   devices: Record<string, Projected>;
@@ -85,11 +127,15 @@ export interface ReadinessInputs {
   /** v1.186.0 — FleetSnapshot.alertsComplete; absent reads as not complete. */
   alertsComplete?: boolean;
   speakerLastProbeAt: number | null | undefined;
-  forecast: { pvForecastUnavailable?: boolean } | null | undefined;
+  forecast: { pvForecastUnavailable?: boolean; homeBasisPending?: boolean } | null | undefined;
+  /** v1.187.10 — the runway report; absent or null reads as not ready (its fields are null). */
+  runway: { basisPending?: boolean } | null | undefined;
   clipping: { arrayPeakW?: number | null } | null | undefined;
   curtailment: { basisComplete?: boolean } | null | undefined;
   carbon: { basisComplete?: boolean } | null | undefined;
   tariff: { basisComplete?: boolean } | null | undefined;
+  /** v1.187.10 — the clock the panel's freshness is judged on (default: now). */
+  nowMs?: number;
 }
 
 export function publishReadiness(i: ReadinessInputs): PublishReadiness {
@@ -100,12 +146,16 @@ export function publishReadiness(i: ReadinessInputs): PublishReadiness {
   const panel = findShp2(asSnapshots);
   const connected = shp2ConnectedDpuSns(asSnapshots);
   const membershipKnown = shp2Panels(asSnapshots).sns.every((sn) => asSnapshots[sn]?.projection?.kind === 'shp2');
+  const nowMs = i.nowMs ?? Date.now();
   return {
     flow: membershipKnown && Object.entries(i.devices).some(([sn, d]) => d.online && d.projection?.kind === 'dpu' && isShp2Connected(d.sn ?? sn, connected)),
-    panel: !!panel && (panel.projection?.circuits ?? []).some((c) => c.watts != null),
+    panel: !!panel && (panel.projection?.circuits ?? []).some((c) => c.watts != null)
+      && allShp2s(asSnapshots).every((p) => shp2ReadbackFresh(p, nowMs)),
+    panelLive: !!panel && shp2ReadbackFresh(panel, nowMs),
     alerts: i.alerts !== undefined && i.alertsComplete === true,
     speakers: i.speakerLastProbeAt != null,
-    forecastPv: !!i.forecast && i.forecast.pvForecastUnavailable !== true,
+    forecastPv: !!i.forecast && i.forecast.pvForecastUnavailable !== true && i.forecast.homeBasisPending !== true,
+    runwayBasis: !!i.runway && i.runway.basisPending !== true,
     clipping: (i.clipping?.arrayPeakW ?? 0) > 0,
     curtailment: !!i.curtailment && i.curtailment.basisComplete === true,
     carbon: !!i.carbon && i.carbon.basisComplete !== false,
@@ -119,6 +169,12 @@ export function withholdUnready<T extends Record<string, unknown>>(state: T, r: 
     if (r[flag]) continue;
     for (const key of READINESS_FIELDS[flag]) {
       if (key in state) (state as Record<string, unknown>)[key] = null;
+    }
+    const patterns = READINESS_PATTERNS[flag];
+    if (patterns) {
+      for (const key of Object.keys(state)) {
+        if (patterns.some((p) => p.test(key))) (state as Record<string, unknown>)[key] = null;
+      }
     }
   }
   return state;

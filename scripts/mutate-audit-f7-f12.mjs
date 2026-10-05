@@ -97,7 +97,8 @@ const MUTANTS = [
   {
     id: 'viii. the cleared-alert ledger stops announcing saturation',
     file: MON,
-    find: '    const saturated = clearedLog.length >= CLEARED_LOG_MAX ? ` [AT CAP ${CLEARED_LOG_MAX} — older records are being dropped]` : \'\';',
+    // v1.187.10 — the note is clearedLedgerCapNote's (what a full ledger holds and evicts).
+    find: '    const saturated = clearedLog.length >= CLEARED_LOG_MAX ? clearedLedgerCapNote(clearedLog, CLEARED_LOG_MAX, Date.now()) : \'\';',
     to: "    const saturated = ''; /* MUTANT */",
     why: 'It rehydrated at exactly 1500 on all ten boots — recognisable as saturation only if you already know the cap.',
   },

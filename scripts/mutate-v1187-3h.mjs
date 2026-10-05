@@ -764,21 +764,24 @@ const MUTANTS = [
   {
     id: 'N-i. ★★★ a failed NWS fetch with nothing cached is "no storms" again',
     file: AN,
-    find: "  if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');",
+    // v1.187.10 — re-pointed: the message names the carry limit (nws.ts NWS_ALERTS_MAX_CARRY_MS).
+    find: "  if (feed == null) throw new Error('NWS alerts unknown — no successful fetch within the carry limit (the fetch failed and no current feed is cached)');",
     to: '  if (feed == null) return []; /* MUTANT */',
     why: 'The storm-prep feed reads as a warm delivery and the set as settled while a warning may be in effect.',
   },
   {
     id: 'N-ii. ★★★ the failure is cached',
     file: AN,
-    find: "  if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');",
+    // v1.187.10 — re-pointed: the message names the carry limit (nws.ts NWS_ALERTS_MAX_CARRY_MS).
+    find: "  if (feed == null) throw new Error('NWS alerts unknown — no successful fetch within the carry limit (the fetch failed and no current feed is cached)');",
     to: "  if (feed == null) { stormPrepCache = { ts: Date.now(), value: [] }; throw new Error('NWS alerts unknown'); } /* MUTANT */",
     why: 'The next pass inside the 10-minute cache delivers [] without asking NWS.',
   },
   {
     id: 'N-iii. ★★ a successful empty fetch is unknown too',
     file: AN,
-    find: "  if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');",
+    // v1.187.10 — re-pointed: the message names the carry limit (nws.ts NWS_ALERTS_MAX_CARRY_MS).
+    find: "  if (feed == null) throw new Error('NWS alerts unknown — no successful fetch within the carry limit (the fetch failed and no current feed is cached)');",
     to: "  if (feed == null || feed.alerts.length === 0) throw new Error('NWS alerts unknown'); /* MUTANT */",
     why: 'A quiet sky keeps the feed cold for good: no recovery is ever spoken.',
   },
@@ -787,8 +790,9 @@ const MUTANTS = [
   {
     id: 'N-iv. ★★★ no backoff after a failed fetch',
     file: NW,
-    find: '  if (nwsAlertsBackingOff(alertsFailedAt, Date.now())) return cache;',
-    to: '  /* MUTANT */',
+    // v1.187.10 — re-pointed: getNwsAlerts applies the carry limit to the backoff's answer too.
+    find: '  const feed = nwsAlertsBackingOff(alertsFailedAt, Date.now())',
+    to: '  const feed = (false as boolean) /* MUTANT */',
     why: 'Until NWS first answers, every 20 s monitor pass sends a request: ~180 an hour for as long as it fails.',
   },
   {
@@ -801,15 +805,15 @@ const MUTANTS = [
   {
     id: 'N-vi. ★★★ the backoff answers "no alerts"',
     file: NW,
-    find: '  if (nwsAlertsBackingOff(alertsFailedAt, Date.now())) return cache;',
-    to: '  if (nwsAlertsBackingOff(alertsFailedAt, Date.now())) return cache ?? { fetchedAt: Date.now(), lat: config.forecastLat, lon: config.forecastLon, alerts: [] }; /* MUTANT */',
+    find: '    ? cache\n    : await alertsFlight.run(() => fetchNwsAlerts(nwsInfo));',
+    to: '    ? cache ?? { fetchedAt: Date.now(), lat: config.forecastLat, lon: config.forecastLon, alerts: [] }\n    : await alertsFlight.run(() => fetchNwsAlerts(nwsInfo)); /* MUTANT */',
     why: 'The storm-prep feed reads as a warm delivery of "no storms" inside the backoff, and the set as settled.',
   },
   {
     id: 'N-vii. ★★ concurrent callers each send a request',
     file: NW,
-    find: '  return alertsFlight.run(() => fetchNwsAlerts(log));',
-    to: '  return fetchNwsAlerts(log); /* MUTANT */',
+    find: '    : await alertsFlight.run(() => fetchNwsAlerts(nwsInfo));',
+    to: '    : await fetchNwsAlerts(nwsInfo); /* MUTANT */',
     why: 'The monitor, the alerts route and the calendar each ask api.weather.gov at once.',
   },
   {

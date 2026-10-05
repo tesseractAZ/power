@@ -317,15 +317,15 @@ const MUTANTS = [
   {
     id: 'xxxiv. ★★★ the noise tier takes warranty evidence',
     file: AM,
-    find: '    if (evictOldest((e, i) => sev(i) === \'warning\' && isNoise(e) && !evidence(e))) return;',
-    to: '    if (evictOldest((e, i) => sev(i) === \'warning\' && isNoise(e))) return; /* MUTANT */',
+    find: '    if (evictOldest((e, i) => sev(i) === \'warning\' && isNoise(e) && e.pushed !== true && !evidence(e))) return; // v1.187.10',
+    to: '    if (evictOldest((e, i) => sev(i) === \'warning\' && isNoise(e) && e.pushed !== true)) return; /* MUTANT */',
     why: 'As xxxiii.',
   },
   {
     id: 'xxxv. ★★★ pack-defective rows leave with the other warnings',
     file: AM,
-    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert)))) return;',
-    to: '  if (evictOldest((e, i) => sev(i) === \'warning\')) return; /* MUTANT */',
+    find: '  const ordinary = (e: ClearedAlert): boolean => typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert);',
+    to: '  const ordinary = (_e: ClearedAlert): boolean => true; /* MUTANT */',
     why: 'The RMA\'d pack\'s seven pack-defective rows were 738 warnings from the front of the queue.',
   },
   {
@@ -473,8 +473,8 @@ const MUTANTS = [
   {
     id: 'lv. ★★ a rise to red is reported as a dropped yellow',
     file: BC,
-    find: '      if (level === \'green\') log(`broadcast: boot yellow dropped',
-    to: '      if (true /* MUTANT */) log(`broadcast: boot yellow dropped',
+    find: '      if (level === \'green\') log(bootYellowDropLine(',
+    to: '      if (true /* MUTANT */) log(bootYellowDropLine(',
     why: 'A yellow that became a spoken red reads as never spoken.',
   },
   {
@@ -689,8 +689,8 @@ const MUTANTS = [
   {
     id: 'lxxxiv. ★★ the never-muted tier is removed',
     file: AM,
-    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert)))) return;',
-    to: '  /* MUTANT */',
+    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && ordinary(e) && !evidence(e))) return;\n  if (evictOldest((e, i) => sev(i) === \'warning\' && ordinary(e))) return;\n',
+    to: '  /* MUTANT */\n',
     why: 'An older shp2-multi-panel row leaves before a newer ordinary warning.',
   },
   /* (review-5) a corrupt confirmation time cannot stop the tick */
@@ -747,15 +747,15 @@ const MUTANTS = [
   {
     id: 'xcii. ★★★ the never-muted tier reads a non-string id',
     file: AM,
-    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert)))) return;',
-    to: '  if (evictOldest((e, i) => sev(i) === \'warning\' && !isNeverMutedAlert(e.alert))) return; /* MUTANT */',
+    find: '  const ordinary = (e: ClearedAlert): boolean => typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert);',
+    to: '  const ordinary = (e: ClearedAlert): boolean => !isNeverMutedAlert(e.alert); /* MUTANT */',
     why: 'An in-memory row with no string id throws in the tick on every clear at the cap.',
   },
   {
     id: 'xciii. ★★ a row with no string id is kept like a never-muted one',
     file: AM,
-    find: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert)))) return;',
-    to: '  if (evictOldest((e, i) => sev(i) === \'warning\' && (typeof e.alert?.id === \'string\' && !isNeverMutedAlert(e.alert)))) return; /* MUTANT */',
+    find: '  const ordinary = (e: ClearedAlert): boolean => typeof e.alert?.id !== \'string\' || !isNeverMutedAlert(e.alert);',
+    to: '  const ordinary = (e: ClearedAlert): boolean => typeof e.alert?.id === \'string\' && !isNeverMutedAlert(e.alert); /* MUTANT */',
     why: 'Garbage outlives the ordinary warnings: real history leaves first.',
   },
   {

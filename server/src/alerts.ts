@@ -331,6 +331,8 @@ export const MUTE_REASON_BALANCING = 'the BMS is balancing the cells';
 export const MUTE_REASON_PLATEAU = 'expected top-of-charge cell spread';
 export const MUTE_REASON_BENCH_SPARE = 'bench spare';
 export const MUTE_REASON_OFF_PANEL = 'off-panel Core — not on the panel roster';
+/** v1.187.10 — cloudOfflineOnsetHeld: the cloud's offline flag while the device's MQTT data still arrives. */
+export const MUTE_REASON_CLOUD_OFFLINE_MQTT_LIVE = 'onset hold — listed offline by the cloud while its MQTT data is still arriving';
 /** v1.187.0 review — the telemetry-blind alert held while its remediation runs (blindRemediation.ts). */
 export const MUTE_REASON_REMEDIATION = 'held for remediation (remediate-first)';
 
@@ -998,6 +1000,9 @@ export interface ConnectivityContext {
     lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number;
     /** v1.187.1 — when this process first saw the device in /device/list (SnapshotStore.firstListedAt). */
     firstListedAtMs?: number | null;
+    /** v1.187.10 — when the add-on first saw it listed OFFLINE, persisted across restarts and cleared
+     *  only by an online listing (repairIssues.cloudOfflineFirstSeenAt). */
+    offlineSinceMs?: number | null;
   }>;
   /** v1.8.0 (review F3) — ms epoch when the SHP2's published backup-pool % went
    *  null (post-grace-hold; SnapshotStore.backupPoolUnknownSince), or null while
@@ -1069,6 +1074,29 @@ const DPU_ERR_DEBOUNCE_MS = 3 * 60 * 1000;
  *  later, so the warning is delayed, never lost. Shares the DPU window deliberately —
  *  one debounce period for device-reported error codes, not a second tunable. */
 const MPPT_ERR_DEBOUNCE_MS = DPU_ERR_DEBOUNCE_MS;
+
+/**
+ * v1.187.10 (log review) — the onset hold for an OFFLINE flag that live MQTT data contradicts.
+ * 2026-10-03 19:31 MST: right after a WAN drop, EcoFlow's /device/list listed the panel and every
+ * Core offline in one poll. The condition went yellow in the same second, was spoken on every
+ * speaker for 92 s, and three "[Medium] Device offline (per EcoFlow Cloud)" pushes went out; every
+ * flag cleared within about 2 minutes. The alert's own hint said "Just dropped — likely a brief blip".
+ * A home Core or a panel listed offline while its own MQTT data is still arriving (a data message
+ * within CLOUD_OFFLINE_MQTT_LIVE_MS) is now on screen at once but held non-annunciating — not
+ * spoken, not pushed — for CLOUD_OFFLINE_ONSET_HOLD_MS from the transition (the 3-minute window of
+ * the other onset debounces). Re-judged on every evaluation: the moment the data stops (no message
+ * for CLOUD_OFFLINE_MQTT_LIVE_MS) or the hold runs out, it annunciates as before, and its push dwell
+ * has already run (it counts from the first sighting). A flag with no transition seen in this process
+ * (offline at the first device list) or a device with no MQTT data is never held. PURE; exported for
+ * tests.
+ */
+export const CLOUD_OFFLINE_ONSET_HOLD_MS = DPU_ERR_DEBOUNCE_MS;
+export const CLOUD_OFFLINE_MQTT_LIVE_MS = 90_000;
+export function cloudOfflineOnsetHeld(onlineChangedAtMs: number | undefined, lastMqttAt: number | undefined, nowMs: number): boolean {
+  if (onlineChangedAtMs == null || lastMqttAt == null) return false;
+  const offlineForMs = nowMs - onlineChangedAtMs;
+  return offlineForMs >= 0 && offlineForMs < CLOUD_OFFLINE_ONSET_HOLD_MS && nowMs - lastMqttAt < CLOUD_OFFLINE_MQTT_LIVE_MS;
+}
 
 /**
  * v1.187.3 (review) — the longest of the 3-minute onset debounces above whose clocks live only in
@@ -1461,11 +1489,17 @@ export function computeAlerts(
       // EcoFlow has reported it offline in this session (a transition seen here), or that it has been
       // listed offline since the first device list; the cause is left open.
       const listedAt = conn?.firstListedAtMs ?? null;
+      // v1.187.10 — the persisted stamp, when it predates this process's first listing: the outage
+      // began before the restart, and the add-on has a record of how long before.
+      const offlineSince = conn?.offlineSinceMs ?? null;
+      const carriedSince = offlineSince != null && (listedAt == null || offlineSince < listedAt) ? offlineSince : null;
       const ageMin = (now - lastDataAt) / 60_000;
       let hint = !(lastDataAt > 0)
         ? (d.onlineChangedAtMs
           ? ` EcoFlow has reported it offline for the last ${fmtAge(now - d.onlineChangedAtMs)}; why is not known here.`
-          : ` EcoFlow Cloud has listed it offline since the add-on's first device list${listedAt != null ? ` (${fmtAge(now - listedAt)} ago)` : ''}; how long before that, and why, is not known here.`)
+          : carriedSince != null
+            ? ` EcoFlow Cloud has listed it offline since at least ${fmtAge(now - carriedSince)} ago (first seen offline before the add-on's last restart, and not seen online since); why is not known here.`
+            : ` EcoFlow Cloud has listed it offline since the add-on's first device list${listedAt != null ? ` (${fmtAge(now - listedAt)} ago)` : ''}; how long before that, and why, is not known here.`)
           + ' If the device is meant to be on, check its power and its Wi-Fi.'
         : ageMin > 30
           ? ' No telemetry for over 30 minutes — the device has lost its EcoFlow cloud (enhanced) connection. It usually recovers once the cloud session re-establishes; if it stays offline, a power-cycle forces a clean reconnect.'
@@ -1495,6 +1529,16 @@ export function computeAlerts(
           // ambiguity as a fact but leave the existing age-based hint unchanged.
           facts.push({ label: 'LAN reachability', value: 'Unknown (ping sensor unavailable)' });
         }
+      }
+      // v1.187.10 — a home Core whose MQTT data is still arriving: held for the onset hold
+      // (cloudOfflineOnsetHeld). A peripheral is info and never annunciates; a spare is muted below.
+      // The panel is NOT held: its MQTT messages stamp lastMqttAt but are never translated into its
+      // projection (only Core quotas are), and its REST quota is fetched only while listed online —
+      // so while it is listed offline its backup pool, reserve and grid status are frozen. Arriving
+      // panel MQTT is not evidence the alarm inputs are live; the panel's flag alarms at once.
+      const onsetHeld = !spare && isCore && cloudOfflineOnsetHeld(d.onlineChangedAtMs, conn?.lastMqttAt, now);
+      if (onsetHeld) {
+        facts.push({ label: 'Onset hold', value: `MQTT data still arriving (last ${fmtAge(now - (conn?.lastMqttAt ?? now))} ago) — held up to ${Math.round(CLOUD_OFFLINE_ONSET_HOLD_MS / 60_000)} min from the transition before it is spoken or pushed` });
       }
       out.push({
         // v1.8.0 (review F2) — spares get their OWN alert family. familyOf()
@@ -1529,6 +1573,7 @@ export function computeAlerts(
         coreNum,
         facts,
         ...(spare ? { annunciate: false, muteReason: MUTE_REASON_BENCH_SPARE } : {}),
+        ...(onsetHeld ? { annunciate: false, muteReason: MUTE_REASON_CLOUD_OFFLINE_MQTT_LIVE } : {}),
       });
     } else if (d.projection && d.lastUpdated && now - d.lastUpdated > STALE_MS) {
       const conn = connectivity?.perDevice.get(d.sn);

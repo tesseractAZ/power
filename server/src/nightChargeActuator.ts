@@ -77,11 +77,25 @@ export function isReserveArbitrageRaised(
  * v1.113.0 fixed this in `shp2-below-reserve`; this is the same fact, shared
  * so the sibling consumers cannot drift apart from it again.
  */
+/*
+ * v1.187.10 — AND through the revert readback lag. The revert stamps `revertedAtMs` on the
+ * cloud ACK, so `isReserveArbitrageRaised` turns false while the SHP2 still reports our 50%
+ * for ~20-60 s; this returned that 50 as the owner's floor until the readback, and the
+ * runway (60 s cache) measured against it for ~90 s. 2026-10-03 00:01:25: "reserve in
+ * 5.6 h" from a pool of 67 kWh, against ~52 kWh of margin above the real 16% floor — on 6 of
+ * 10 revert nights in 14 days. On grid the runway alarm is backstopped; a revert on GRID
+ * LOSS (decideActuation's gridLossAbort) would have run the full ladder against 50, and a
+ * pool below 50 reads "at the reserve floor — shed load or start the generator". The floor
+ * now holds the prior while `isRevertSettling` does — the predicate the alert posture has
+ * used since v1.120.0 (effectiveArbitragePosture): the live value still exactly our target,
+ * within REVERT_READBACK_GRACE_MS of the revert.
+ */
 export function ownerReserveFloorPct(
-  state: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs' | 'priorReservePct'>,
+  state: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs' | 'priorReservePct' | 'targetPct'>,
   liveReservePct: number | null,
+  nowMs: number,
 ): number | null {
-  if (isReserveArbitrageRaised(state)) {
+  if (isReserveArbitrageRaised(state) || isRevertSettling(state, liveReservePct, nowMs)) {
     const prior = state.priorReservePct;
     if (prior != null && Number.isInteger(prior) && prior >= 10 && prior <= 50) return prior;
   }

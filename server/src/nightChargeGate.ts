@@ -110,8 +110,11 @@ const MAX_UNDERBUY_RATE = 0.10;
  *  residual is rounding noise, not a safety miss. */
 const UNDERBUY_DEADBAND_KWH = 0.5;
 
-/** Signed delivery bias must sit in a SLIGHT over-buy band (§5.1): never net
- *  under, never a gross over-buy. kWh at the meter. */
+/** Signed SIZING bias — the mean `buy_err_kwh` — must sit in a SLIGHT over-buy band
+ *  (§5.1): never net under, never a gross over-buy. kWh at the meter. v1.187.10 — named
+ *  for what it measures: since algo v3 (v1.105.0) `buy_err_kwh` is the planner-sizing
+ *  error, −netMiss/legEff from the P50 PV/load forecast miss; delivered energy is not
+ *  part of it. It was labelled "delivery bias", which pointed a reader at the actuator. */
 const BUY_BIAS_MIN_KWH = 0;
 const BUY_BIAS_MAX_KWH = 5;
 
@@ -194,9 +197,10 @@ function round(n: number, dp = 3): number {
  * EXCLUDED, §5.2):
  *  - ACTUATED pool: rows with `actuated` AND `scored` truthy — a bounded
  *    reserve write was applied and its delivery measured. Feeds the under-buy
- *    rate, the delivery bias, and the graduation night count. No clean-
- *    baseline requirement: the actuated counterfactual is measured by
- *    subtracting the delivered charge from the realized trough.
+ *    rate, the sizing bias, and the graduation night count. No clean-
+ *    baseline requirement: since algo v3 (v1.105.0) `buy_err_kwh` is the
+ *    planner-sizing error (the P50 PV/load forecast miss over one leg's
+ *    efficiency), with no delivered-energy or trough term.
  *  - FORECAST pool: outcome-captured forecast-tier rows — feeds PV/load
  *    accuracy and band coverage (those columns are recorded on every captured
  *    night regardless of the realized-need `scored` flag).
@@ -506,7 +510,8 @@ export function computeNightChargeReadiness(
   }
   if (buyBiasKwh == null || buyBiasKwh < BUY_BIAS_MIN_KWH || buyBiasKwh > BUY_BIAS_MAX_KWH) {
     blocking.push(
-      `delivery bias ${buyBiasKwh != null ? buyBiasKwh.toFixed(2) : 'n/a'} kWh outside the slight-over-buy band [${BUY_BIAS_MIN_KWH}, ${BUY_BIAS_MAX_KWH}].`,
+      `sizing bias ${buyBiasKwh != null ? buyBiasKwh.toFixed(2) : 'n/a'} kWh outside the slight-over-buy band [${BUY_BIAS_MIN_KWH}, ${BUY_BIAS_MAX_KWH}] `
+      + '(mean buy_err_kwh: the P50 PV/load forecast miss in kWh; delivered energy is not part of it).',
     );
   }
   if (coverageNights < MIN_COVERAGE_NIGHTS) {

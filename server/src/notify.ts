@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { request } from 'undici';
 import { callHaService } from './haService.js';
-import type { Severity } from './alerts.js';
+import { packSnTail, type Severity } from './alerts.js';
 import type { NightChargePlan } from './nightChargeAdvisor.js';
 
 /**
@@ -205,11 +206,39 @@ export function haNotificationId(dedupId: string | undefined, severity: NotifyMe
  *
  * Pure + exported for tests.
  */
+/**
+ * v1.187.10 (log review 10-03, C33) — device serials do not leave the host in a phone push.
+ *
+ * The companion-app push (title, message and data.tag) goes through Apple's or Google's push
+ * service to the phone; the drawer card and the logs stay on the host and keep full serials. Full
+ * serials reached the push: the per-device telemetry-gap alert's text names "<name> (<serial>)"
+ * (and a device with no display name by its serial alone), and every per-device alert id (the push
+ * tag) embeds one. A serial-shaped token — 16 letters and digits, at least two of each —
+ * is shown as its last PACK_SN_TAIL_CHARS characters (the pack-tail convention, packSnTail), and in
+ * the tag it becomes a short stable digest, so a resolve still replaces its own alert and two
+ * devices that share a tail never share a tag. Masking never drops or delays a push. Pure +
+ * exported for tests.
+ */
+const SERIAL_TOKEN = /(?<![A-Za-z0-9])[A-Za-z0-9]{16}(?![A-Za-z0-9])/g;
+function serialShaped(tok: string): boolean {
+  const digits = tok.replace(/[^0-9]/g, '').length;
+  return digits >= 2 && tok.length - digits >= 2;
+}
+export function maskDeviceSerials(text: string): string {
+  return text.replace(SERIAL_TOKEN, (tok) => (tok === tok.toUpperCase() && serialShaped(tok) ? packSnTail(tok) : tok));
+}
+export function maskSerialsInId(id: string): string {
+  return id.replace(SERIAL_TOKEN, (tok) => (serialShaped(tok)
+    ? `sn${createHash('sha256').update(tok.toUpperCase()).digest('hex').slice(0, 10)}`
+    : tok));
+}
+
 export function buildMobilePushPayload(
   msg: NotifyMessage,
   opts: { criticalBypassDnd: boolean },
 ): Record<string, unknown> {
-  const tag = haNotificationId(msg.dedupId, msg.severity);
+  // v1.187.10 — the tag is derived from the serial-masked id (fire and resolve mask identically).
+  const tag = haNotificationId(msg.dedupId != null ? maskSerialsInId(msg.dedupId) : undefined, msg.severity);
   const data: Record<string, unknown> = { tag, group: 'ecoflow-panel' };
 
   if (msg.severity === 'critical' && opts.criticalBypassDnd) {
@@ -226,7 +255,7 @@ export function buildMobilePushPayload(
     data.priority = 'high';
   }
 
-  return { title: msg.title, message: msg.body, data };
+  return { title: maskDeviceSerials(msg.title), message: maskDeviceSerials(msg.body), data };
 }
 
 export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): Promise<void> {

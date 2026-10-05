@@ -79,7 +79,9 @@ const MUTANTS = [
   {
     id: 'vi. the dispatch planner prices off a different table than the KPIs',
     file: A,
-    find: '    const rate = hourlyRateCents(h.ts, dispatchCents) / 100;',
+    // v1.187.10 — re-pointed: the hour's rate is resolved once per horizon (the top-off rule
+    // needs every hour's), and the loop prices from it.
+    find: '    const rate = tou[i].rateCents / 100;',
     to: '    const rate = (onPeak ? dispatchCents.onPeak : dispatchCents.offPeak) / 100; /* MUTANT */',
     why: "The planner's own comment says it must not price its plan off a different table than the KPIs.",
   },

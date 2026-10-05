@@ -197,6 +197,20 @@ export function pollState(): { lastPollOkMs: number | null; consecutiveFailures:
   return { lastPollOkMs, consecutiveFailures, lastError, lastFailure };
 }
 
+/**
+ * v1.187.10 (log review 10-03, C21) — the error class /api/health publishes: the verdict's class
+ * while a failure is current (blind, or a failed poll not yet followed by a success), else null.
+ * classifyPollError(null) is 'other' on purpose — the blind alert renders it as cause "unknown" —
+ * but /api/health published that fallback unconditionally, so a healthy add-on read
+ * `"pollErrorKind": "other"`: an error class with no error. Pure.
+ */
+export function healthPollErrorKind(
+  v: Pick<BlindVerdict, 'blind' | 'errorKind'>,
+  s: { lastError: string | null; consecutiveFailures: number },
+): PollErrorKind | null {
+  return v.blind || s.lastError != null || s.consecutiveFailures > 0 ? v.errorKind : null;
+}
+
 /* ─── the alert ───────────────────────────────────────────────────────────── */
 
 export const TELEMETRY_BLIND_ALERT_ID = 'telemetry-blind';

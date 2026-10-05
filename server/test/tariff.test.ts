@@ -62,12 +62,14 @@ test('tariff — inHourWindow wrap [23,5) spans midnight', () => {
 
 /* ── season mapping ───────────────────────────────────────────────────── */
 
-test('tariff — APS seasons: May–Oct summer, Nov–Apr winter (boundaries)', () => {
-  assert.deepEqual(APS_SUMMER_MONTHS, [5, 6, 7, 8, 9, 10]);
-  assert.equal(seasonOf(4, APS_SUMMER_MONTHS), 'winter'); // Apr
-  assert.equal(seasonOf(5, APS_SUMMER_MONTHS), 'summer'); // May
-  assert.equal(seasonOf(10, APS_SUMMER_MONTHS), 'summer'); // Oct
-  assert.equal(seasonOf(11, APS_SUMMER_MONTHS), 'winter'); // Nov
+test('tariff — APS seasons by usage month: Apr–Sep summer, Oct–Mar winter (billing cycles May–Oct / Nov–Apr)', () => {
+  // v1.187.10 — a bill covers the usage since the early-month meter read, so the May–October
+  // summer bills cover usage from early April to early October (tariffBillingSeason.test.ts).
+  assert.deepEqual(APS_SUMMER_MONTHS, [4, 5, 6, 7, 8, 9]);
+  assert.equal(seasonOf(3, APS_SUMMER_MONTHS), 'winter'); // Mar
+  assert.equal(seasonOf(4, APS_SUMMER_MONTHS), 'summer'); // Apr
+  assert.equal(seasonOf(9, APS_SUMMER_MONTHS), 'summer'); // Sep
+  assert.equal(seasonOf(10, APS_SUMMER_MONTHS), 'winter'); // Oct
 });
 
 /* ── weekday period boundaries (winter Monday) ────────────────────────── */

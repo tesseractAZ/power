@@ -175,8 +175,34 @@ export interface ActuatorContext {
   ownerFloorPct?: number | null;
   /** v1.165.0 — true while a night-charge force-charge of ours is on or its OFF
    *  is unverified (plus the caller's grace after it resolves). Its ch{n}ForceCharge
-   *  and foceChargeHight movements are this add-on's own writes. */
+   *  and foceChargeHight movements are not announced. */
   forceChargeActive?: boolean;
+  /** v1.187.10 — what this add-on actually COMMANDED during that force-charge
+   *  (nightForceCharge.forceChargeCommandsOf). Only a movement to a commanded value is
+   *  'own-write'; any other inside the window is 'panel-side'. Absent ⇒ nothing is
+   *  known to be ours. */
+  forceChargeCommands?: ForceChargeCommands | null;
+}
+
+/** v1.187.10 — the force-charge writes this add-on issued for the night. */
+export interface ForceChargeCommands {
+  /** The slots switched ON (the OFF goes to the same slots); null when no ON was issued. */
+  onSlots: number[] | null;
+  /** True once the OFF was issued. */
+  offIssued: boolean;
+  /** The force-charge ceiling values written: the synced backstop, and the panel's own
+   *  value once its restore was issued. */
+  ceilingPcts: number[];
+}
+
+/** v1.187.10 — did this add-on command this force-charge movement? PURE. */
+function forceChargeCommanded(c: SettingChange, slot: number | null, cmd: ForceChargeCommands | null | undefined): boolean {
+  if (!cmd) return false;
+  if (slot == null) return typeof c.to === 'number' && cmd.ceilingPcts.includes(c.to); // foceChargeHight
+  if (cmd.onSlots == null || !cmd.onSlots.includes(slot)) return false;
+  if (c.to === 'FORCE_CHARGE_ON') return !cmd.offIssued;
+  if (c.to === 'FORCE_CHARGE_OFF') return cmd.offIssued;
+  return false;
 }
 
 /**
@@ -184,15 +210,22 @@ export interface ActuatorContext {
  * restore value while its night is in flight. Logged, never pushed. Anything
  * else — including a reserve change with NO night active (the phantom-write
  * investigation's other side) — is 'external'.
+ * v1.187.10 — 'panel-side' = a force-charge key moving, inside our force-charge, to a
+ * value this add-on did not command: the panel's own ceiling stop turning a slot OFF
+ * before the software stop (10-02 04:24-04:25, slots 2 and 1, ~4 min before the add-on's
+ * OFF), or an operator. Logged as such and not announced, as before; it was logged as
+ * "this add-on's night-charge write", which hid that the panel's backstop fired first.
  */
-export function classifyChange(c: SettingChange, act: ActuatorContext): 'own-write' | 'external' {
+export function classifyChange(c: SettingChange, act: ActuatorContext): 'own-write' | 'panel-side' | 'external' {
   // v1.165.0 — the night force-charge moves ch{n}ForceCharge twice a night and may
   // sync foceChargeHight once. Without this each night would push two false
   // "changed externally" alerts — the class of false push that 2026-09-16 produced
   // for the reserve. Outside a force-charge they stay EXTERNAL: an operator's
   // Charge Now is exactly what this watchdog exists to report.
-  if (/ · (ch[123]ForceCharge|foceChargeHight)$/.test(c.key)) {
-    return act.forceChargeActive === true ? 'own-write' : 'external';
+  const fc = / · (?:ch([123])ForceCharge|foceChargeHight)$/.exec(c.key);
+  if (fc) {
+    if (act.forceChargeActive !== true) return 'external';
+    return forceChargeCommanded(c, fc[1] != null ? Number(fc[1]) : null, act.forceChargeCommands) ? 'own-write' : 'panel-side';
   }
   if (!c.key.endsWith(' · backupReserveSoc')) return 'external';
   // v1.115.0 — the owner's own reserve-floor write echoes back through the

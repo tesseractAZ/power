@@ -8,7 +8,7 @@ import {
   forceChargeStartAtMs, type ForceChargeOpts, forceChargeRateKw, FORCE_CHARGE_MIN_RATE_KW, shp2HouseLoadKw,
   FORCE_CHARGE_PROVEN_KW_PER_SLOT,
   forceChargeStopPct, forceChargeOffDeadlineMs, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
-  FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, FORCE_CHARGE_CEILING_MIN_PCT,
+  FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, FORCE_CHARGE_CEILING_MIN_PCT, forceChargeCommandsOf,
 } from '../src/nightForceCharge.js';
 import {
   emptyActuationState, coerceActuationState, armFromPlan, RESERVE_WRITE_MAX_PCT,
@@ -412,14 +412,95 @@ test('★★ settings-drift: our force-charge is own-write; an operator\'s is st
   const ch = { key: 'Smart Home Panel 2 · ch2ForceCharge', from: 'FORCE_CHARGE_OFF', to: 'FORCE_CHARGE_ON' } as never;
   const ceil = { key: 'Smart Home Panel 2 · foceChargeHight', from: 100, to: 90 } as never;
   const base = { targetPct: null, priorReservePct: null, nightActive: false };
-  assert.equal(classifyChange(ch, { ...base, forceChargeActive: true }), 'own-write');
-  assert.equal(classifyChange(ceil, { ...base, forceChargeActive: true }), 'own-write');
+  // v1.187.10 — own-write needs what was COMMANDED: ON to slot 2, and the 90% ceiling synced.
+  const commands = forceChargeCommandsOf(forcedNight({ forceChargeCeilingAttemptedAtMs: WIN_START - 4 * 60_000 }));
+  assert.equal(classifyChange(ch, { ...base, forceChargeActive: true, forceChargeCommands: commands }), 'own-write');
+  assert.equal(classifyChange(ceil, { ...base, forceChargeActive: true, forceChargeCommands: commands }), 'own-write');
+  assert.equal(classifyChange(ch, { ...base, forceChargeActive: true }), 'panel-side',
+    'with nothing known to be commanded, a movement is never claimed as ours');
   assert.equal(classifyChange(ch, { ...base, forceChargeActive: false }), 'external',
     'an operator\'s Charge Now is exactly what the watchdog exists to report');
   assert.equal(classifyChange(ch, base), 'external');
   const reserve = { key: 'Smart Home Panel 2 · backupReserveSoc', from: 16, to: 50 } as never;
   assert.equal(classifyChange(reserve, { ...base, forceChargeActive: true }), 'external',
     'force-charge context never launders a reserve change');
+});
+
+/* ══ v1.187.10 — own-write means COMMANDED, not merely "inside the window" ═══════
+ * 10-02 04:25:17 and 04:26:17: "ch2ForceCharge / ch1ForceCharge FORCE_CHARGE_ON →
+ * FORCE_CHARGE_OFF (this add-on's night-charge write — not announced)" — 3-4 min BEFORE the
+ * add-on's first OFF (04:29:18, "reached the 86.6% target"). The panel's own 87% ceiling had
+ * stopped those slots; the context-only rule labelled every force-charge key inside the
+ * window as ours, hiding that the backstop fired first. */
+
+const slot = (n: number, from: string, to: string) =>
+  ({ key: `Smart Home Panel 2 · ch${n}ForceCharge`, from, to }) as never;
+const fcCtx = (night: NightActuationState) => ({
+  targetPct: night.targetPct, priorReservePct: night.priorReservePct, nightActive: true,
+  forceChargeActive: true, forceChargeCommands: forceChargeCommandsOf(night),
+});
+// The 10-01 night: ON to slots 1-3 at 03:04, ceiling synced to round(86.6) = 87.
+const tenOne = (over: Partial<NightActuationState> = {}) => forcedNight({
+  forceChargeCeilingPct: 86.6, forceChargeCeilingAttemptedAtMs: WIN_START - 4 * 60_000,
+  forceChargeCeilingPriorPct: 100, ...over,
+});
+
+test('★★★ a slot turning OFF before our OFF was issued is PANEL-SIDE, not our write (the 10-02 04:25 lines)', () => {
+  const n = tenOne(); // ON in flight, no OFF issued yet
+  assert.equal(n.forceChargeOffAtMs, null);
+  assert.equal(classifyChange(slot(2, 'FORCE_CHARGE_ON', 'FORCE_CHARGE_OFF'), fcCtx(n)), 'panel-side');
+  assert.equal(classifyChange(slot(1, 'FORCE_CHARGE_ON', 'FORCE_CHARGE_OFF'), fcCtx(n)), 'panel-side');
+});
+
+test('★★★ …and once our OFF is issued, the same movement IS our write (the 04:31 ch3 line)', () => {
+  const n = tenOne({ forceChargeOffAtMs: WIN_START + 5 * H, forceChargeOffReason: 'target' });
+  assert.equal(classifyChange(slot(3, 'FORCE_CHARGE_ON', 'FORCE_CHARGE_OFF'), fcCtx(n)), 'own-write');
+  // Our ON readback is ours while no OFF has been issued — and not after.
+  assert.equal(classifyChange(slot(3, 'FORCE_CHARGE_OFF', 'FORCE_CHARGE_ON'), fcCtx(tenOne())), 'own-write');
+  assert.equal(classifyChange(slot(3, 'FORCE_CHARGE_OFF', 'FORCE_CHARGE_ON'), fcCtx(n)), 'panel-side',
+    'a slot back ON after our OFF is a manual Charge Now, not us');
+});
+
+test('★★ a slot this add-on never switched on is never its write', () => {
+  const n = tenOne({ forceChargeSlots: [1, 2] });
+  assert.equal(classifyChange(slot(3, 'FORCE_CHARGE_OFF', 'FORCE_CHARGE_ON'), fcCtx(n)), 'panel-side');
+  assert.deepEqual(forceChargeCommandsOf(n).onSlots, [1, 2]);
+  // No ON issued at all (a ceiling-only night): no slot movement is ours.
+  const ceilingOnly = verifiedNight({ forceChargeCeilingPct: 86.6, forceChargeCeilingAttemptedAtMs: WIN_START });
+  assert.equal(forceChargeCommandsOf(ceilingOnly).onSlots, null);
+  assert.equal(classifyChange(slot(1, 'FORCE_CHARGE_OFF', 'FORCE_CHARGE_ON'), fcCtx(ceilingOnly)), 'panel-side');
+  // A record with ON stamped but no slots kept: the OFF step's own fallback, slots 1-3.
+  assert.deepEqual(forceChargeCommandsOf(tenOne({ forceChargeSlots: null })).onSlots, [1, 2, 3]);
+});
+
+test('★★ the ceiling is ours only at the value synced (round of the target) or restored', () => {
+  const ceil = (from: number, to: number) => ({ key: 'Smart Home Panel 2 · foceChargeHight', from, to }) as never;
+  const synced = tenOne();
+  assert.deepEqual(forceChargeCommandsOf(synced).ceilingPcts, [87]);
+  assert.equal(classifyChange(ceil(100, 87), fcCtx(synced)), 'own-write');
+  assert.equal(classifyChange(ceil(100, 80), fcCtx(synced)), 'panel-side', 'a value we never wrote');
+  assert.equal(classifyChange(ceil(87, 100), fcCtx(synced)), 'panel-side', 'the restore value before the restore was issued');
+  const restoring = tenOne({ forceChargeCeilingRestoreLastAttemptMs: WIN_END + 3 * 60_000 });
+  assert.deepEqual(forceChargeCommandsOf(restoring).ceilingPcts, [87, 100]);
+  assert.equal(classifyChange(ceil(87, 100), fcCtx(restoring)), 'own-write', 'the 04:33 restore line');
+  // No sync attempted: nothing written.
+  assert.deepEqual(forceChargeCommandsOf(verifiedNight({ forceChargeCeilingPct: 86.6 })).ceilingPcts, []);
+});
+
+test('★★ outside a force-charge every force-charge key stays EXTERNAL, whatever was commanded', () => {
+  const n = tenOne({ forceChargeOffAtMs: WIN_START + 5 * H });
+  const ctx = { ...fcCtx(n), forceChargeActive: false };
+  assert.equal(classifyChange(slot(2, 'FORCE_CHARGE_ON', 'FORCE_CHARGE_OFF'), ctx), 'external');
+  assert.equal(classifyChange(slot(2, 'FORCE_CHARGE_OFF', 'FORCE_CHARGE_ON'), ctx), 'external');
+});
+
+/* ══ wiring pin (index.ts has no seam a unit test can drive) — a SOURCE PIN, labelled ══ */
+test('★★ SOURCE PIN: the drift tick classifies with the commanded writes and logs panel-side as such', () => {
+  const idx = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8');
+  const body = idx.slice(idx.indexOf('function runSettingsDriftTick('), idx.indexOf('\n}\n', idx.indexOf('function runSettingsDriftTick(')));
+  assert.ok(body.includes('        forceChargeCommands: forceChargeCommandsOf(act),'));
+  assert.ok(body.includes("} else if (kind === 'panel-side') {"));
+  assert.ok(body.includes("not by it — the panel's own ceiling stop or a manual Charge Now; not announced"));
 });
 
 /* ══ the announcement says what the panel will be told ════════════════════ */

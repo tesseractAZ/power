@@ -8,6 +8,7 @@
 import type { LifetimeTotals } from './recorder.js';
 import type { Alert } from './alerts.js';
 import type { FleetDegradation } from './analytics.js';
+import { startOfLocalDayMs } from './aggregator.js';
 
 /** Round Wh → kWh to one decimal, null-safe (the SHP2 backup-pool fields). */
 export const kwh1 = (wh: number | null | undefined): number | null =>
@@ -54,4 +55,16 @@ export function soonestProjecting(packs: FleetDegradation['packs']): {
     null,
   );
   return { projecting, soonest };
+}
+
+/**
+ * v1.187.10 — the `last_reset` of a daily figure the analytics worker RE-ESTIMATES during the day
+ * (`pv_curtailment_kwh_today`, `pv_clipped_kwh_today`): the local midnight that starts the day the
+ * report's own figure covers, as ISO 8601. Taken from the report's `generatedAt`, never the
+ * publish clock, so a report from before midnight (a last-good value republished just after it)
+ * carries its own day's reset. No report this cycle: today's.
+ */
+export function dailyFigureResetIso(reportGeneratedAtMs: number | null | undefined, nowMs: number = Date.now()): string {
+  const at = typeof reportGeneratedAtMs === 'number' && Number.isFinite(reportGeneratedAtMs) ? reportGeneratedAtMs : nowMs;
+  return new Date(startOfLocalDayMs(new Date(at))).toISOString();
 }

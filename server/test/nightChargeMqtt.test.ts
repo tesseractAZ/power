@@ -7,6 +7,9 @@ import { nightChargeStateFields } from '../src/nightChargeAdvisor.js';
 import type { NightChargePlan } from '../src/nightChargeAdvisor.js';
 import { nightChargeGateFields } from '../src/nightChargeGate.js';
 import { buildNightChargeMessage } from '../src/notify.js';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * WS5 (MQTT + notify) tests for the night-charge advisory surfaces.
@@ -192,4 +195,32 @@ test('night-charge message: cushion-shortfall and over-buy caveats surface in th
 
   const overBuy = buildNightChargeMessage(fakePlan({ bindingCap: 'overBuy' }), 'charge');
   assert.match(overBuy.body, /clip is accepted/i);
+});
+
+/* ── v1.187.10 — DOCS §9 names every night-charge entity for what it carries ──────────
+ * A doc-claim check (it reads DOCS.md, not the code): the §9 table described
+ * `ecoflow_night_charge_target_soc` as "Target pool SoC by window close" — it carries the
+ * reserve SETPOINT (clampReserveTarget(plan.setpointSocPct)) since the v1.62.0 ask/forecast
+ * split — and did not list `ecoflow_night_charge_expected_soc`, the prediction. On 10-02
+ * target_soc read 50 all night while the pack aimed at 73.1%. */
+test('★ DOCS §9: every night-charge discovery entity has a row; target_soc is the setpoint, expected_soc the prediction', () => {
+  const docs = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../ecoflow_panel/DOCS.md'), 'utf8');
+  const start = docs.indexOf('### 9. Delivery surfaces');
+  assert.ok(start > 0, 'the section exists');
+  const sec = docs.slice(start, docs.indexOf('\n### ', start + 10));
+  for (const { unique_id: id } of [...NIGHT_CHARGE_SENSORS, ...NIGHT_CHARGE_BINARY]) {
+    const listed = sec.includes(`| \`${id}\``)
+      || (id.endsWith('_end') && sec.includes(`| \`${id.replace(/_end$/, '_start')}\` / \`_end\``));
+    assert.ok(listed, `${id} has a §9 row`);
+  }
+  const row = (id: string) => sec.split('\n').find((l) => l.startsWith(`| \`${id}\``)) ?? '';
+  assert.match(row('ecoflow_night_charge_target_soc'), /SETPOINT/);
+  assert.doesNotMatch(row('ecoflow_night_charge_target_soc'), /by window close/);
+  assert.match(row('ecoflow_night_charge_expected_soc'), /predicted/);
+  // And the code still splits them that way (the row is only true while this holds).
+  const plan = { generatedAt: Date.now(), basisComplete: true, setpointSocPct: 64, targetSocPct: 73.1, buyKwh: 9.13,
+    chargeTonight: true, window: null } as unknown as NightChargePlan;
+  const f = nightChargeStateFields(plan);
+  assert.equal(f.night_charge_target_soc_percent, 50, 'the setpoint, clamped to the [10, 50] envelope');
+  assert.equal(f.night_charge_expected_soc_percent, 73.1, 'the prediction');
 });

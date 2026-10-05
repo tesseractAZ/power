@@ -96,6 +96,56 @@ function isCoreOrShp2(productName: string): boolean {
   return p.includes('delta pro ultra') || p.includes('smart home panel');
 }
 
+/**
+ * v1.187.10 — the cloud-offline stamps are the add-on's restart-persistent record of WHEN a device
+ * was first seen listed offline (repair-first-seen.json, not age-pruned). The offline alert's hint
+ * reads it (cloudOfflineFirstSeenAt): its own clock, SnapshotStore.firstListedAt, is per process,
+ * so after every restart it said "listed offline since the add-on's first device list (5 h ago);
+ * how long before that … is not known here" of three peripherals this file had on record as
+ * offline for 89–104 days. For the hint to say "since at least <then>" the stamp must not outlive
+ * an online period, and it must exist without anyone fetching /api/repair-issues (the only caller
+ * of computeRepairIssues). So the alert monitor keeps it every evaluation (syncCloudOfflineFirstSeen):
+ * stamped when a non-spare device is first seen listed offline, cleared only on positive evidence
+ * — the device listed ONLINE — and persisted on either change. Absence from a list clears nothing.
+ */
+export const CLOUD_OFFLINE_REPAIR_PREFIX = 'cloud-offline-';
+
+export function syncCloudOfflineFirstSeen(
+  devices: Record<string, { sn: string; online?: boolean }>,
+  nowMs: number = Date.now(),
+): void {
+  try {
+    let changed = false;
+    for (const d of Object.values(devices)) {
+      const id = `${CLOUD_OFFLINE_REPAIR_PREFIX}${d.sn}`;
+      if (d.online === true) {
+        if (firstSeenById.delete(id)) changed = true;
+      } else if (d.online === false && !isBenchSpareSn(d.sn) && !firstSeenById.has(id)) {
+        firstSeenById.set(id, nowMs);
+        changed = true;
+      }
+    }
+    if (changed) persistFirstSeen();
+  } catch { /* best effort — never into the alarm loop */ }
+}
+
+/** v1.187.10 — when this device was first seen listed offline (persisted across restarts), or null. */
+export function cloudOfflineFirstSeenAt(sn: string): number | null {
+  return firstSeenById.get(`${CLOUD_OFFLINE_REPAIR_PREFIX}${sn}`) ?? null;
+}
+
+/** Test seam: forget every stamp (in memory only). */
+export function resetRepairFirstSeenForTesting(entries: Array<[string, number]> = []): void {
+  firstSeenById.clear();
+  for (const [k, v] of entries) firstSeenById.set(k, v);
+}
+
+/** Test seam: re-read the sidecar, as a restart would. */
+export function reloadRepairFirstSeenForTesting(): void {
+  firstSeenById.clear();
+  for (const [k, v] of loadFirstSeen()) firstSeenById.set(k, v);
+}
+
 function track(id: string, now: number): number {
   let ts = firstSeenById.get(id);
   if (ts == null) {
@@ -126,7 +176,7 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
       // v1.121.0 — roster-aware: the literal has been inverted since the 08-20
       // swap, so a live pool member (Core 5) was having its repair card skipped.
       if (isBenchSpareSn(d.sn)) continue;
-      const id = `cloud-offline-${d.sn}`;
+      const id = `${CLOUD_OFFLINE_REPAIR_PREFIX}${d.sn}`;
       // v0.76.0 — severity must match the alert engine for the SAME offline event:
       // Cores + the SHP2 are 'warning'; peripherals (Smart Generator, WAVE 2, EVSE)
       // are 'info'. Previously this was hard-coded 'warning' for every device, so a
@@ -212,7 +262,14 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
     }
   }
 
-  // MPPT efficiency drift — actionable if drift > 3 pp.
+  // MPPT register-consistency drift — raised if the ratio falls > 3 pp below its baseline.
+  // v1.187.10 (log review 10-03, C20) — the card called this "lost conversion efficiency" and sent
+  // the operator to MC4 connectors, panels and a warranty inquiry. The ratio is reported W ÷
+  // (reported V × reported A), all three MPPT-INPUT registers (computeEquipmentHealth: "NOT a real
+  // conversion efficiency"): cabling, connector and panel losses lower W and V·A together and cannot
+  // move it, and live readings show W above V·A at moments (the registers are sampled apart). Only
+  // a divergence between the power register and the V/A registers, or an MPPT-internal change,
+  // moves it — so the steps are a meter check of V and A at the MPPT input, not hardware work.
   if (ctx.equipmentHealth) {
     for (const s of ctx.equipmentHealth.mpptStrings) {
       if (s.driftPctPts != null && s.driftPctPts < -3) {
@@ -220,13 +277,12 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
         out.push({
           id,
           severity: 'info',
-          title: `MPPT efficiency drift: Core ${s.coreNum} ${s.string} string`,
-          summary: `This MPPT string has lost ${Math.abs(s.driftPctPts)} percentage points of conversion efficiency vs its baseline (recent ${s.recentEffPct}% vs baseline ${s.baselineEffPct}%). Could be cabling resistance creep, MPPT heat damage, or panel-side degradation.`,
+          title: `MPPT reading drift: Core ${s.coreNum} ${s.string} string`,
+          summary: `The ratio of this string's reported input power to its reported voltage × current (W ÷ V·A) is ${Math.abs(s.driftPctPts)} points below its baseline (recent ${s.recentEffPct}% vs baseline ${s.baselineEffPct}%). All three are the MPPT's own input readings, so this is a reading-consistency ratio, not a measured conversion efficiency: cabling, connector or panel losses lower power and voltage × current together and do not move it. A sustained fall means the power reading and the voltage/current readings have drifted apart (a sensor or calibration effect) or something inside the MPPT changed.`,
           fixSteps: [
-            `Inspect MC4 connectors on the ${s.string} string for corrosion or loose seating.`,
-            'Check the DPU MPPT temperature — if elevated, improve ventilation around the unit.',
-            'Compare per-panel watts with a clamp meter; one underperforming panel can drag the string.',
-            'If drift continues, file an EcoFlow warranty inquiry on the MPPT.',
+            `Measure the ${s.string} string's voltage and current at the DPU's MPPT input (a DC clamp meter and a multimeter) while it is producing, and compare them with the reported volts and amps.`,
+            'If the measured V × A matches the reported watts, the drift is in the V/A readings, not lost energy — no hardware action is needed.',
+            'If the measured V × A is clearly above the reported watts for weeks, note the readings and raise them with EcoFlow support.',
           ],
           category: 'Hardware',
           estimatedTimeMinutes: 20,
@@ -279,10 +335,23 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
   }
 
   // Clean up firstSeenById entries for issues no longer active.
+  // v1.187.10 — except a cloud-offline stamp, which is cleared only by its device being listed
+  // ONLINE (syncCloudOfflineFirstSeen's rule): a fetch on a map not yet listed, or one where the
+  // device has become a bench spare, is no evidence the outage ended. That clear is persisted.
   const currentIds = new Set(out.map((i) => i.id));
+  let clearedOffline = false;
   for (const id of [...firstSeenById.keys()]) {
-    if (!currentIds.has(id)) firstSeenById.delete(id);
+    if (currentIds.has(id)) continue;
+    if (id.startsWith(CLOUD_OFFLINE_REPAIR_PREFIX)) {
+      if (ctx.devices[id.slice(CLOUD_OFFLINE_REPAIR_PREFIX.length)]?.online === true) {
+        firstSeenById.delete(id);
+        clearedOffline = true;
+      }
+      continue;
+    }
+    firstSeenById.delete(id);
   }
+  if (clearedOffline) persistFirstSeen();
 
   return { generatedAt: now, issues: out };
 }

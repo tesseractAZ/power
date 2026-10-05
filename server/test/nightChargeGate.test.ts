@@ -138,11 +138,24 @@ test('20 actuated nights (one short of 21) → LEARNING', () => {
   assert.ok(r.blocking.some((b) => b.includes('need ≥ 21')));
 });
 
-test('delivery bias above 5 kWh (gross over-buy) → LEARNING', () => {
+test('sizing bias above 5 kWh (gross over-buy) → LEARNING', () => {
   const rows = actuatedLedger(25, (r) => { r.buy_err_kwh = 7; });
   const r = computeNightChargeReadiness(rows, NOW);
   assert.equal(r.state, 'LEARNING');
-  assert.ok(r.blocking.some((b) => b.includes('delivery bias')));
+  assert.ok(r.blocking.some((b) => b.includes('sizing bias 7.00 kWh')));
+});
+
+test('★ v1.187.10 — the bias blocker names the SIZING (forecast) error, never "delivery"', () => {
+  // Since algo v3 (v1.105.0) buy_err_kwh = −netMiss/legEff: the P50 PV/load forecast miss.
+  // The live 22.27 kWh was load over-forecast, with delivery close to or below the buy; the
+  // old "delivery bias" label pointed remediation at the actuator.
+  const rows = actuatedLedger(25, (r) => { r.buy_err_kwh = 22.27; });
+  const line = computeNightChargeReadiness(rows, NOW).blocking.find((b) => b.includes('outside the slight-over-buy band'));
+  assert.ok(line, 'the bias criterion blocks');
+  assert.match(line, /^sizing bias 22\.27 kWh /);
+  assert.match(line, /forecast miss/);
+  assert.match(line, /delivered energy is not part of it/);
+  assert.doesNotMatch(line, /delivery bias/);
 });
 
 test('100% band coverage over-covers the [78, 92] band → LEARNING', () => {

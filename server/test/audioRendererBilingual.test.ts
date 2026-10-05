@@ -233,6 +233,27 @@ test('v1.48.0 — boot pre-warm renders terminators once; alarms then render zer
   });
 });
 
+/* v1.187.10 (log review 10-03, C31) — the bilingual pre-warm runs one job per language
+ * (broadcast.ts), and its two "0 rendered, 1 already cached" summaries were byte-identical. */
+test('v1.187.10 — the per-language pre-warm summaries say which language they are', async () => {
+  await withDirs(async (_klaxonDir, cacheDir) => {
+    _resetResidentVoiceForTest();
+    _resetTerminatorCacheForTest();
+    const renderTts = async () => ({ ok: true as const, wav: fakeWav(200), durationMs: 5 });
+    const lines: string[] = [];
+    for (const entry of [
+      { lang: 'es' as const, voice: 'es_MX-claude-high', phrase: 'Fin del mensaje' },
+      { lang: 'en' as const, voice: 'en_US-lessac-medium', phrase: 'End of message' },
+    ]) {
+      await prewarmTerminatorCache({ cacheDir, host: 'x', port: 1, entries: [entry], log: (m) => lines.push(m), renderTts: renderTts as any });
+    }
+    assert.deepEqual(lines, [
+      'audioRenderer: terminator pre-warm (es) — 1 rendered, 0 already cached',
+      'audioRenderer: terminator pre-warm (en) — 1 rendered, 0 already cached',
+    ]);
+  });
+});
+
 /* v1.48.0 review fixes — three defects the adversarial review confirmed. */
 
 test('v1.48.0 — cached terminators do NOT corrupt resident-voice tracking (steady state stays ≤1 switch)', async () => {

@@ -138,8 +138,9 @@ const MUTANTS = [
   {
     id: 'xi. ★ the 45-min persistence tick stops passing the fetch time',
     file: INDEX,
-    find: '      if (recorder && w && w.hours.length > 0) {\n        recorder.recordWeatherGhi(weatherGhiRows(w), { fetchedAtMs: w.fetchedAt });',
-    to: '      if (recorder && w && w.hours.length > 0) {\n        recorder.recordWeatherGhi(weatherGhiRows(w)); /* MUTANT */',
+    // v1.187.10 — re-pointed: the tick keeps the recorder's result for its log line (createGhiTickLogger).
+    find: '      if (recorder && w && w.hours.length > 0) {\n        const r = recorder.recordWeatherGhi(weatherGhiRows(w), { fetchedAtMs: w.fetchedAt });',
+    to: '      if (recorder && w && w.hours.length > 0) {\n        const r = recorder.recordWeatherGhi(weatherGhiRows(w)); /* MUTANT */',
     why: 'Headless, the tick is the only writer — without the fetch time nothing is ever captured, while every recorder test stays green.',
   },
   {

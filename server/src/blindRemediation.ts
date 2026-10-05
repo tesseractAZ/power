@@ -91,6 +91,18 @@ export function decideBlindRemediation(
   return { phase: s.remediatedAtMs != null ? 'failed' : 'unavailable', hold: false, triggerHeal: false, next: s };
 }
 
+/**
+ * v1.187.10 (log review) — the line for a blind episode that ends inside the hold. It said
+ * "telemetry RESTORED by the remediation", a cause read from timing alone: the phase goes idle
+ * whenever the blind verdict clears — telemetry returning on its own, or the stale-shadow latch
+ * released because the panel's payload became unmeasurable, with no telemetry back at all. It now
+ * states the elapsed time since the rebuild and that the cause is inferred. PURE; exported for tests.
+ */
+export function blindRestoredLine(remediatedAtMs: number | null, nowMs: number): string {
+  const after = remediatedAtMs != null ? ` ${Math.max(0, Math.round((nowMs - remediatedAtMs) / 1000))} s after the MQTT rebuild` : '';
+  return `telemetry-blind: the blind condition cleared${after} (inside the ${Math.round(BLIND_REMEDIATION_VERIFY_MS / 60_000)}-min hold) — the alarm never sounded; the timing suggests the rebuild, it does not prove it`;
+}
+
 /* ─── integration (module state + hooks, like messageRateFloorAlert's set/get) ─── */
 
 export interface BlindRemediationHooks {
@@ -148,7 +160,7 @@ export function blindRemediationStep(
     } else if (d.phase === 'unavailable') {
       log('telemetry-blind: no remediation available (heal budget spent, or the last heal was too recent to have held) — alarming now');
     } else if (d.phase === 'idle' && lastPhase === 'remediating') {
-      log('telemetry-blind: telemetry RESTORED by the remediation — the alarm never sounded');
+      log(blindRestoredLine(state.remediatedAtMs, nowMs));
     }
   }
   state = d.next;

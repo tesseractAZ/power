@@ -286,8 +286,8 @@ const MUTANTS = [
   {
     id: 'xxxiv. ★★ the offline bench-spare stamp names no reason',
     file: AL,
-    find: '        ...(spare ? { annunciate: false, muteReason: MUTE_REASON_BENCH_SPARE } : {}),\n      });\n    } else if (d.projection && d.lastUpdated && now - d.lastUpdated > STALE_MS) {',
-    to: '        ...(spare ? { annunciate: false } : {}), /* MUTANT */\n      });\n    } else if (d.projection && d.lastUpdated && now - d.lastUpdated > STALE_MS) {',
+    find: '        ...(spare ? { annunciate: false, muteReason: MUTE_REASON_BENCH_SPARE } : {}),\n        ...(onsetHeld ? {',
+    to: '        ...(spare ? { annunciate: false } : {}), /* MUTANT */\n        ...(onsetHeld ? {',
     why: 'An offline spare\'s mute is unnamed.',
   },
   {

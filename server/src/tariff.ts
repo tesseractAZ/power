@@ -15,7 +15,9 @@
  *   - SUPER-OFF-PEAK 10:00–15:00 (10am–3pm) Mon–Fri, WINTER only (overlaps solar)
  *   - OVERNIGHT      23:00–05:00 (11pm–5am) Mon–Fri, year-round (the EV window)
  *   - OFF-PEAK       everything else, incl. ALL weekends + observed holidays
- * Seasons (APS billing cycles): SUMMER = May–Oct, WINTER = Nov–Apr.
+ * Seasons (APS billing cycles): bills May–Oct are SUMMER, Nov–Apr WINTER. A bill
+ * covers the usage since the previous meter read (early in the month), so by USAGE
+ * month SUMMER = Apr–Sep and WINTER = Oct–Mar (v1.187.10 — see APS_SUMMER_MONTHS).
  * R-EV carries NO demand charge (confirmed) — `demand` stays inert here.
  *
  * ★ DOW SEMANTICS (load-bearing, and a bill-confirmable edge): a period's
@@ -72,7 +74,8 @@ export interface TariffModel {
   periods: TariffPeriod[];
   /** The catch-all when no specific period matches. */
   offPeak: { id: string; label: string; centsBySeason: SeasonalCents };
-  /** Local calendar months (1–12) that count as SUMMER; the rest are WINTER. */
+  /** Local calendar months (1–12) of USAGE that count as SUMMER; the rest are WINTER.
+   *  Read only through `seasonAt` / `seasonOf` — the one season source. */
   summerMonths: number[];
   /** Local 'YYYY-MM-DD' dates treated as all-day off-peak (observed holidays).
    *  ★ Confirm the exact APS observed-holiday list from a bill before relying
@@ -171,10 +174,21 @@ export function seasonOf(month: number, summerMonths: number[]): Season {
   return summerMonths.includes(month) ? 'summer' : 'winter';
 }
 
+/**
+ * v1.187.10 — THE season of an instant under a model: its local usage month against the
+ * model's `summerMonths`. PURE. Every season consumer reads this (or `rateAt`, which applies
+ * the same `seasonOf` to the same local month): the period/rate resolution, the two-tier
+ * `resolveTariffCents` basis, the /api/tariff view and the nightly plan's tariff snapshot.
+ * Until v1.187.10 analytics.ts carried its own May–October test beside this one.
+ */
+export function seasonAt(model: Pick<TariffModel, 'timezone' | 'summerMonths'>, tsMs: number): Season {
+  return seasonOf(localParts(tsMs, model.timezone).month, model.summerMonths);
+}
+
 /** Resolve the tariff period + rate in effect at a timestamp. */
 export function rateAt(model: TariffModel, tsMs: number): RateSlice {
   const lp = localParts(tsMs, model.timezone);
-  const season = seasonOf(lp.month, model.summerMonths);
+  const season = seasonOf(lp.month, model.summerMonths); // ≡ seasonAt(model, tsMs), one local resolve
 
   const pickCents = (c: SeasonalCents): number | null =>
     model.ratesConfirmed ? c[season] : null;
@@ -216,13 +230,19 @@ export function rateAt(model: TariffModel, tsMs: number): RateSlice {
 }
 
 const MON_FRI = [1, 2, 3, 4, 5];
-/** APS seasons: SUMMER = May–Oct, WINTER = Nov–Apr.
- *  ★ NOTE (documented approximation): APS defines seasons by BILLING CYCLE, not
- *  calendar month, so a handful of boundary days in early May / early Nov that
- *  still fall in the prior month's billing cycle are seasoned by calendar month
- *  here. Exact billing-cycle handling needs the meter read date (not modeled;
- *  deferred). Bounded to ≤ a few days/yr and rates are null until confirmed. */
-export const APS_SUMMER_MONTHS = [5, 6, 7, 8, 9, 10];
+/** APS seasons, by USAGE month: SUMMER = Apr–Sep, WINTER = Oct–Mar.
+ *
+ *  v1.187.10 — APS seasons follow BILLING CYCLES: the May–October bills are summer and
+ *  the November–April bills winter. Each bill covers the usage since the previous meter
+ *  read, early in the month, so summer usage runs from the early-April read to the
+ *  early-October read. This was [5..10] — calendar months read as if they were bills — so
+ *  October usage, which APS bills at winter rates ("You're now on winter rates", sent
+ *  2026-10-02: winter from the November billing period), was priced as summer: on-peak at
+ *  the summer rate and no 10:00–15:00 super-off-peak tier, and April as winter.
+ *  ★ Approximation: the boundary is the 1st of the month; the real one is the meter-read
+ *  day (early in the month, varies by cycle), so the first few days of April and October
+ *  can be seasoned one cycle off. Rates stay null until confirmed. */
+export const APS_SUMMER_MONTHS = [4, 5, 6, 7, 8, 9];
 
 export interface ApsREvRates {
   onPeak?: SeasonalCents;

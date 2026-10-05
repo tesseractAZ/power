@@ -19,8 +19,8 @@ import {
   renderReconnectReport, ARM_OFFLINE_MS as RECONNECT_ARM_MS, type DeviceObs as ReconnectDeviceObs,
 } from './reconnectAudit.js';
 import { startMqtt } from './ecoflow/mqtt.js';
-import { createRecorder } from './recorder.js';
-import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
+import { createRecorder, resolveRetentionDays } from './recorder.js';
+import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import { setClockRejectLogger, ecoflow,
 } from './ecoflow/rest.js';
@@ -30,7 +30,7 @@ import {
 import { getLastPeakDrawObservation } from './peakGridDraw.js';
 import { setChannelForceCharge, setForceChargeCeiling } from './ecoflow/commands.js';
 import {
-  decideForceCharge, forceChargeEnabled, desiredForceChargeCeilingPct, forceChargeInFlight,
+  decideForceCharge, forceChargeEnabled, desiredForceChargeCeilingPct, forceChargeInFlight, forceChargeCommandsOf,
   actuationStepOrder, runActuationSteps,
   FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
   FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, type ForceChargeAction,
@@ -48,7 +48,7 @@ import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } f
 import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, isIncompleteDay, computeEmpiricalRte, computeLocalPackRte, type VendorDayRecord } from './energyHistory.js';
 import { exportVendorStatistics } from './haStatistics.js';
 import { buildWarrantyBundle, renderWarrantyMarkdown, renderWarrantyCsv, loadClearedRecords } from './warrantyExport.js';
-import { startAlertMonitor } from './alertMonitor.js';
+import { startAlertMonitor, rosterMuteReasonForSn } from './alertMonitor.js';
 import { systemOutageFields, telemetryGapLedgerSummary } from './alerts.js';
 import { isConfigured, reachesAPhone, getLastPushFailures } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
@@ -102,7 +102,7 @@ import { registerWsConsole } from './telnet/wsConsole.js';
 import { startMqttDiscovery } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
-import { getWeather } from './weather.js';
+import { getWeather, createGhiTickLogger } from './weather.js';
 import type { WeatherForecast } from './weather.js';
 import { computePackRiskV2 } from './ml.js';
 import { initAnalyticsClient } from './analyticsClient.js';
@@ -156,11 +156,11 @@ import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, rateFloo
 import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
 import { evaluateSelfHeal, selfHealQuorum, idleExclusionEdges, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG, canRemediateNow, recordRemediationHeal, HEAL_BUDGET_WINDOW_MS } from './sessionSelfHeal.js';
 import { setBlindRemediationHooks } from './blindRemediation.js';
-import { assessBlind, pollState, pollHealth } from './telemetryBlind.js';
+import { assessBlind, pollState, pollHealth, healthPollErrorKind } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
 // them into real push alerts (mirrors broadcastHealth's set/get + pure-builder split).
-import { setRateFloorCollapses, setRateFloorIdleHeld, type RateFloorCollapse } from './messageRateFloorAlert.js';
+import { setRateFloorCollapses, setRateFloorIdleHeld, surfacedCollapseEntry, rateFloorCollapseLine, type RateFloorCollapse, type RateFloorOnsets } from './messageRateFloorAlert.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
 import * as haStateCache from './haStateCache.js';
 // v1.38.0 (night-charge WS4 integration) — wire the ADVISORY TOU-arbitrage
@@ -220,17 +220,20 @@ import {
 } from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
 import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
-import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
+import { apsREvModelFromEnv, rateAt, localParts, seasonAt } from './tariff.js';
 // v1.187.0 — the scorer's span, cost and PV-evidence decisions, pure (nightLedgerScoring.ts).
 import {
   supersedingPlanDate, knownFleetMismatchReason, type TimeSpan,
   integrateWh, coverageFrac, ledgerSpansForWindow, assembleNightLedgerColumns, windowlessLedgerColumns,
   unpricedTariffPeriods, houseConnectedSlots, deliveredLedgerFields,
+  // v1.187.10 — the forecast span: capture waits for issue + 24 h; the one-time repair.
+  ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
+  forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
 } from './nightLedgerScoring.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
 import type { NightLedgerRow } from './recorder.js';
-import { logMethodHook } from './logHooks.js';
+import { panelFastifyOptions } from './logHooks.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -244,14 +247,9 @@ const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 60_000);
 // 4xx at debug, slow >1s at info. The pino logMethod hook drops fastify's INFO 'stream closed
 // prematurely' (media players aborting WAV range-requests — 3-4 per
 // successful broadcast, fastify/lib/reply.js, benign by definition).
-const app = Fastify({
-  disableRequestLogging: true,
-  logger: {
-    level: config.logLevel,
-    // v1.184.0 — logHooks.ts: also demotes a client hang-up ("premature close") to debug.
-    hooks: { logMethod: logMethodHook as never },
-  },
-});
+// v1.187.10 — the options live in logHooks.ts (panelFastifyOptions): request logging is turned off
+// through a LogController, not the top-level option Fastify 5.12 deprecates (FSTDEP023).
+const app = Fastify(panelFastifyOptions(config.logLevel));
 app.addHook('onResponse', (req, reply, done) => {
   const ms = Math.round((reply as { elapsedTime?: number }).elapsedTime ?? 0);
   if (reply.statusCode >= 500) {
@@ -681,7 +679,8 @@ app.get('/api/health', async (_req, reply) => {
     blind: blind.blind,
     blindReason: blind.reason,
     blindForMs: blind.blindForMs,
-    pollErrorKind: blind.errorKind,
+    // v1.187.10 — null while no failure is current (it read 'other' on a healthy add-on).
+    pollErrorKind: healthPollErrorKind(blind, pollState()),
     // v1.144.0 — `telemetryBlind`'s own docstring frames the whole feature around
     // /api/health having reported healthy while the add-on held zero telemetry,
     // and says guard 1 "makes /api/health honest". v1.140.0 computed the poll
@@ -1678,6 +1677,8 @@ app.get('/api/ha-state', async (req, reply) => {
     // Inverter clipping — kWh lost today because the arrays produced more
     // DC than the hardware could pass through (v0.6.0).
     pv_clipped_kwh_today: clipping.todayKwh,
+    // v1.187.10 — the day this re-estimated figure covers (its last_reset; see mqttDiscovery.ts).
+    pv_clipped_kwh_today_since: dailyFigureResetIso(clipping?.generatedAt),
     pv_array_peak_watts: clipping.arrayPeakW,
     pv_hours_at_peak_today: clipping.hoursAtPeak,
 
@@ -1688,6 +1689,7 @@ app.get('/api/ha-state', async (req, reply) => {
     pv_curtailment_active: curtailment.active,
     pv_curtailment_surplus_watts: curtailment.currentSurplusW,
     pv_curtailment_kwh_today: curtailment.todayKwh,
+    pv_curtailment_kwh_today_since: dailyFigureResetIso(curtailment?.generatedAt),
     pv_curtailment_kwh_7d: curtailment.recent7dKwh,
     pv_curtailment_inactive_reason: curtailment.inactiveReason,
     // The configured charge ceiling (chgMaxSoc) — the SoC the pool fills
@@ -1805,6 +1807,7 @@ app.get('/api/ha-state', async (req, reply) => {
     alertsComplete: snap.alertsComplete, // v1.186.0
     speakerLastProbeAt: getBroadcastHealth().lastProbeAt,
     forecast: fc,
+    runway, // v1.187.10
     clipping,
     curtailment,
     carbon,
@@ -2273,14 +2276,22 @@ restTrackerTick.unref?.();
 // 2h in-memory cache, so most ticks are a cheap cache hit; recordWeatherGhi is
 // change-detected + idempotent, so re-persisting the same rows never dupes.
 const GHI_PERSIST_INTERVAL_MS = 45 * 60_000;
+// v1.187.10 — the tick's own line says only "ran, nothing new" (6-hourly) and "no forecast"
+// (createGhiTickLogger); the recorder logs every real write.
+const logGhiTick = createGhiTickLogger((m) => app.log.debug(m));
 const ghiPersistTick = setInterval(() => {
   if (degradedMode()) { app.log.debug('vitals: skipping GHI-persist tick (host pressure critical)'); return; }
   void (async () => {
     try {
       const w = await getWeather((m) => app.log.debug(m));
       if (recorder && w && w.hours.length > 0) {
-        recorder.recordWeatherGhi(weatherGhiRows(w), { fetchedAtMs: w.fetchedAt });
-        app.log.debug(`weather: periodic GHI persistence (${w.hours.length} hours)`);
+        const r = recorder.recordWeatherGhi(weatherGhiRows(w), { fetchedAtMs: w.fetchedAt });
+        logGhiTick({
+          kind: 'ran', hours: w.hours.length,
+          written: r?.written ?? 0, realized: (r?.realizedInserted ?? 0) + (r?.realizedRevised ?? 0),
+        }, Date.now());
+      } else if (recorder) {
+        logGhiTick({ kind: 'no-weather' }, Date.now());
       }
       // v1.31.0 — archive the ISSUED next-24h PV forecast alongside the GHI
       // rows (same cadence; hour-snapped + change-detected in the recorder, so
@@ -2937,6 +2948,8 @@ let rateFloorTicks = 0;
 // v1.111.0 — devices whose CURRENT collapse episode has surfaced (see
 // decideCollapseSurfacing): idleness gates entry, never eviction.
 const surfacedCollapses = new Set<string>();
+// v1.187.10 — each surfaced episode's onset rate and baseline (surfacedCollapseEntry).
+const collapseOnsets: RateFloorOnsets = new Map();
 // v1.108.0 — night-charge load-band calibration: last logged value (log on change only).
 let lastLoggedLoadBandKey: string | null = null;
 let lastLoggedBuyDebiasKey: string | null = null;
@@ -3063,22 +3076,20 @@ const rateFloorTick = setInterval(() => {
         || r.rate < DEFAULT_RATE_FLOOR_CONFIG.floorFraction * r.baseline;
       const wasSurfaced = surfacedCollapses.has(sn);
       const dec = decideCollapseSurfacing(r.collapsing, online, idle, wasSurfaced, starvedNow);
-      if (!online) { surfacedCollapses.delete(sn); continue; }
+      if (!online) { surfacedCollapses.delete(sn); collapseOnsets.delete(sn); continue; }
       if (dec.surfaced) {
         surfacedCollapses.add(sn);
-        collapses.push({ sn, deviceName: name, rate: r.rate, baseline: r.baseline });
+        // v1.187.10 — the onset frozen, the live rate beside it, and whether it is back above the floor.
+        collapses.push(surfacedCollapseEntry(collapseOnsets, sn, name, r.rate, r.baseline, starvedNow));
         if (idle) idleSurfacedSns.add(sn);
       } else if (!r.collapsing) {
         surfacedCollapses.delete(sn);
+        collapseOnsets.delete(sn);
       }
       if (dec.logCollapse) {
-        app.log.warn(
-          `msg-rate-floor: ${name} message rate collapsed to ` +
-          `${r.rate?.toFixed(2) ?? '?'} msg/min (baseline ~${r.baseline.toFixed(0)}` +
-          `${r.usedHourBucket ? ' for this hour' : ', global'}) — device is barely reporting ` +
-          `while still appearing "fresh"; check the EcoFlow cloud session / power for ${sn} ` +
-          `[eligibility mark ~${r.eligibilityPeak.toFixed(0)}]`,
-        );
+        // v1.187.10 — a roster-muted device (bench spare, off-panel Core) logs at INFO with the mute.
+        const line = rateFloorCollapseLine({ name, sn, rate: r.rate, baseline: r.baseline, usedHourBucket: r.usedHourBucket, eligibilityPeak: r.eligibilityPeak }, rosterMuteReasonForSn(sn));
+        if (line.level === 'warn') app.log.warn(line.text); else app.log.info(line.text);
       } else if (r.recovered && wasSurfaced) {
         // v1.116.0 — a recovery is only newsworthy for an episode the operator
         // was actually told about. The 08-28/29 night logged SIX "message rate
@@ -3292,8 +3303,8 @@ let nightActuationMem: NightActuationState = (() => {
 // v1.113.0 — seed the posture from persisted state so a restart mid-window
 // does not momentarily present an arbitrage-raised reserve as a genuine floor.
 setReserveArbitrageRaised(effectiveArbitragePosture(nightActuationMem, liveReserveSocPct(), Date.now()));
-setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct()));
-analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct()));
+setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct(), Date.now()));
+analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct(), Date.now()));
 
 // v1.119.2 — republish the OWNER floor on every snapshot, not only on an
 // actuation-state write: the floor has three possible authors — the owner, our
@@ -3324,7 +3335,9 @@ function effectiveArbitragePosture(
 store.on('change', (snap: FleetSnapshot) => {
   const sp = findShp2(snap.devices);
   const live = sp?.projection?.kind === 'shp2' ? (sp.projection.backupReserveSoc ?? null) : null;
-  analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, live));
+  // v1.187.10 — the floor, like the posture below, holds through the revert readback lag
+  // (isRevertSettling): this per-snapshot push is what ends the hold on the readback.
+  analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, live, Date.now()));
   // Re-evaluate the posture per snapshot: the settling window ENDS on a device
   // readback, which is a snapshot event, not an actuation-state write.
   setReserveArbitrageRaised(effectiveArbitragePosture(nightActuationMem, live, Date.now()));
@@ -3337,7 +3350,7 @@ function persistNightActuation(s: NightActuationState): void {
   // v1.115.0 — and the owner floor the runway alarm measures against.
   // v1.119.0 — ALSO push it across the worker boundary: the runway report runs
   // in the analytics worker, where a main-thread module publisher is invisible.
-  const ownerFloor = ownerReserveFloorPct(s, liveReserveSocPct());
+  const ownerFloor = ownerReserveFloorPct(s, liveReserveSocPct(), Date.now());
   setOwnerReserveFloorPct(ownerFloor);
   analytics.pushOwnerFloor(ownerFloor);
   try {
@@ -3484,7 +3497,7 @@ async function recomputeNightChargePlan(
   // requirement. Third sibling of the same defect: v1.113.0 fixed the
   // below-reserve alert, v1.115.0 the runway alarm, this is the planner.
   const reserveFloorPct: number | null =
-    ownerReserveFloorPct(nightActuationMem, sp.backupReserveSoc ?? null);
+    ownerReserveFloorPct(nightActuationMem, sp.backupReserveSoc ?? null, nowMs);
   if (fullWh == null || fullWh <= 0 || socNowPct == null || reserveFloorPct == null) return null; // I5
   const fullKwh = fullWh / 1000;
 
@@ -3808,7 +3821,7 @@ async function recomputeNightChargePlan(
     pvP90 += pb.p90W / 1000;
     loadP50 += fh.forecastLoadW / 1000;
   }
-  const season = seasonOf(localParts(nowMs, tariffModel.timezone).month, tariffModel.summerMonths);
+  const season = seasonAt(tariffModel, nowMs); // v1.187.10 — the one season source
   const tariffSnapshot = JSON.stringify({
     planId: tariffModel.planId,
     season,
@@ -4045,6 +4058,10 @@ function nightSpansForRow(y: NightLedgerRow): NightScoringSpans | null {
   };
 }
 
+/** The backfill sweep's reach, in plan days (v1.39.0). v1.187.10 — named: the one-time
+ *  forecast-span repair keeps its re-captures inside it. */
+const LEDGER_BACKFILL_SWEEP_DAYS = 60;
+
 function scoreCompletedNights(nowMs: number): void {
   const shp2 = findShp2(store.get().devices);
   if (!shp2 || shp2.projection?.kind !== 'shp2') return; // can't source actuals
@@ -4056,19 +4073,19 @@ function scoreCompletedNights(nowMs: number): void {
   // a night whose raw telemetry (~30 d retention) has aged out captures
   // HONESTLY as scored=0 with null actuals via the guards in scoreNightRow —
   // it does not stay uncaptured forever.
-  const rows = recorder.readNightLedger(60);
-  for (const y of rows) {
-    if (y.outcome_captured_at_ms != null) continue; // already captured — idempotent
-    const s = nightSpansForRow(y);
-    if (!s) continue; // malformed plan_date — leave for manual inspection
-    // ★ THE v1.39.0 COMPLETION GATE (review HIGH ×2): a night may be captured
-    // only once its FULL scored span has elapsed — 16 h past its REAL window
-    // close. The pre-fix midnight tick captured yesterday's row while its
-    // charge window was still OPEN — window coverage ~25% ⇒ scored=0, inverted
-    // SoC query ⇒ actuals null — and the idempotence latch then froze those
-    // truncated actuals into the never-pruned ledger forever, so the
-    // write-readiness gate could never accumulate a single scored night.
-    if (nowMs < s.completeMs) continue; // night still in flight — do NOT capture
+  const rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
+  // ★ THE v1.39.0 COMPLETION GATE (review HIGH ×2): a night may be captured
+  // only once its FULL scored span has elapsed — 16 h past its REAL window
+  // close. The pre-fix midnight tick captured yesterday's row while its
+  // charge window was still OPEN — window coverage ~25% ⇒ scored=0, inverted
+  // SoC query ⇒ actuals null — and the idempotence latch then froze those
+  // truncated actuals into the never-pruned ledger forever, so the
+  // write-readiness gate could never accumulate a single scored night.
+  // v1.187.10 — AND only once issue + 24 h has elapsed (ledgerCaptureDueMs): the PV/load
+  // actuals cover [issue, +24 h], the span of the P50 they are graded against. A Friday
+  // 1 h window completes Saturday 16:00, ~5.4 h before that, and its truncated actuals
+  // were frozen in. Already-captured, malformed and in-flight rows are skipped there.
+  for (const { row: y, spans: s } of ledgerRowsDueForCapture(rows, nowMs, nightSpansForRow)) {
     try {
       // v1.187.0 — a later plan for the SAME window (Sunday's for Saturday's shared
       // Monday window) is the plan of record: it carries the on-peak and the cost.
@@ -4127,8 +4144,10 @@ function scoreNightRow(
   // PV/load TOTALS are compared against the plan's forecast P50, which covered
   // the ~24 h from issue (~21:30). Integrate actuals over the SAME [issue, +24 h]
   // horizon so pv_err_frac / load_err_frac are like-for-like, not the charge-window span.
-  const fcSpanStart = y.issued_at_ms;
-  const fcSpanEnd = Math.min(nowMs, y.issued_at_ms + 24 * HOUR_MS);
+  // v1.187.10 — the sweep captures only once that span has elapsed (ledgerCaptureDueMs).
+  const fcSpan = forecastActualsSpan(y.issued_at_ms, nowMs);
+  const fcSpanStart = fcSpan.startMs;
+  const fcSpanEnd = fcSpan.endMs;
 
   const gridWin = recorder.query(shp2Sn, 'grid_home_w', windowStart, windowEnd);
   const socPts = recorder.query(shp2Sn, 'backup_pct', scoreFrom, spanEnd);
@@ -4745,6 +4764,53 @@ function repairPrematureNightOutcomes(): void {
 }
 
 /**
+ * v1.187.10 — once per boot, idempotent: the rows captured before issue + 24 h.
+ *
+ * Until v1.187.10 the sweep captured a row at its night's completion (window close + 16 h)
+ * and integrated the PV/load actuals only up to that instant, while the P50 they are graded
+ * against spans 24 h from issue. A Friday 1 h window completes Saturday 16:00, ~5.4 h short
+ * (2026-10-02: load 39.62 kWh on 18.6 h against an 81.8 kWh forecast, buy_err +51.09 kWh).
+ * forecastSpanRepair (nightLedgerScoring.ts) picks the rows at least an hour short:
+ *  - within the re-capture horizon (the raw-sample retention and the 60-day sweep, less a
+ *    2-day margin) the outcome is reset exactly as repairPrematureNightOutcomes resets it,
+ *    and the sweep re-captures it over the full span — re-scored on the current scorer;
+ *  - past it, the telemetry is gone or the sweep would never return to the row, so only
+ *    `score_notes` gains a clause saying the errors under-count — a TAG, not a rewrite;
+ *  - (review) a row inside the horizon that today's devices cannot re-score faithfully — no
+ *    `pv_model_sns` (no roster check) or a pre-v1.187.3 delivered figure — is tagged too
+ *    (forecastSpanRecapturable).
+ * Rows are corrected in place — never deleted.
+ */
+function repairShortForecastSpanOutcomes(): void {
+  try {
+    const nowMs = Date.now();
+    const horizonMs = forecastSpanRecaptureHorizonMs(
+      resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS), LEDGER_BACKFILL_SWEEP_DAYS,
+    );
+    const tagged: string[] = [];
+    for (const y of recorder.readNightLedger(400)) {
+      const r = forecastSpanRepair(y, nowMs, horizonMs);
+      if (!r) continue;
+      const shortH = (r.shortMs / HOUR_MS).toFixed(1);
+      if (r.action === 'tag') {
+        recorder.recordNightOutcome(String(y.plan_date), {
+          score_notes: `${y.score_notes ?? ''} ${forecastSpanTagNote(r.shortMs)}`.trim(),
+        });
+        tagged.push(`${y.plan_date} (${shortH} h short)`);
+        continue;
+      }
+      recorder.recordNightOutcome(String(y.plan_date), forecastSpanResetColumns(r.shortMs));
+      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — its PV/load actuals stopped ${shortH} h short of issue + 24 h (load ${y.actual_load_kwh ?? 'null'} kWh, buy_err ${y.buy_err_kwh ?? 'null'} kWh as captured).`);
+    }
+    if (tagged.length > 0) {
+      app.log.info(`night-charge: tagged ${tagged.length} ledger row(s) whose PV/load actuals stopped short of issue + 24 h and are past the re-capture horizon — kept as captured: ${tagged.join(', ')}.`);
+    }
+  } catch (e: any) {
+    app.log.debug(`night-charge: forecast-span repair skipped (${e?.message ?? e})`);
+  }
+}
+
+/**
  * v1.187.0 — once per boot, idempotent: tag the rows in KNOWN_FLEET_MISMATCH_PV_ROWS
  * (nightLedgerScoring.ts) whose PV band predates `pv_model_sns` but is established to
  * have been built for other Cores than the actuals. A TAG, not a rewrite: only
@@ -4957,10 +5023,18 @@ function runSettingsDriftTick(): void {
         // v1.173.0 — and the RESTORE: on a night whose force-charge never started, the 05:00
         // restore of the panel's own ceiling was pushed as an external "Setting changed".
         (act.forceChargeCeilingRestoreLastAttemptMs != null && nowMs - act.forceChargeCeilingRestoreLastAttemptMs < 15 * 60_000);
-      const ctx = { targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct, forceChargeActive };
+      // v1.187.10 — and only what it COMMANDED is its own write (forceChargeCommandsOf):
+      // inside that window the panel's own ceiling stop turns slots OFF before ours.
+      const ctx = {
+        targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct, forceChargeActive,
+        forceChargeCommands: forceChargeCommandsOf(act),
+      };
       for (const c of evaln.confirmedChanges) {
-        if (classifyChange(c, ctx) === 'own-write') {
+        const kind = classifyChange(c, ctx);
+        if (kind === 'own-write') {
           app.log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (this add-on's night-charge write — not announced)`);
+        } else if (kind === 'panel-side') {
+          app.log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (changed on the panel during this add-on's night force-charge, not by it — the panel's own ceiling stop or a manual Charge Now; not announced)`);
         } else {
           app.log.warn(`settings-drift: EXTERNAL change — ${c.key} ${c.from} → ${c.to}`);
           driftPendingPush.push(c);
@@ -5988,6 +6062,7 @@ if (nightChargeEnabled) {
   // add-on restart (update/maintenance), flapping the HA gate fields to null.
   const nightWarm = setTimeout(() => {
     repairPrematureNightOutcomes();
+    repairShortForecastSpanOutcomes(); // v1.187.10 — before the sweep below re-captures them
     tagKnownFleetMismatchPvRows(); // v1.187.0 — before readiness reads the ledger below
     // v1.187.0 (review) — once per boot: a confirmed table that cannot price every period
     // leaves realized_cost_cents NULL on every night crossing it (each row's note says so).
@@ -6612,8 +6687,8 @@ app.post<{ Querystring: { pct?: string } }>(
       return { ok: false, error: r.message ?? r.code ?? 'write failed', rateLimited: r.rateLimited === true };
     }
     ownerFloorWrite = { pct: targetPct, atMs: Date.now() };
-    setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, targetPct));
-    analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, targetPct));
+    setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, targetPct, Date.now()));
+    analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, targetPct, Date.now()));
     app.log.warn(
       `reserve-floor: OWNER set backupReserveSoc ${before ?? '?'}% → ${targetPct}% (this is the floor the reserve alarm defends `
       + `and the night-charge planner sizes against; the nightly write will now restore ${targetPct}% at window close).`,

@@ -63,8 +63,9 @@ const MUTANTS = [
   {
     id: 'iv. ★ the signature includes the per-tick counters',
     file: SNAP,
-    find: "      const signature = parts.map((x) => x.replace(/ON\\/\\d+msg\\/(\\d+s|∞)/, 'ON')).join('|');",
-    to: "      const signature = parts.join('|'); /* MUTANT */",
+    // v1.187.10 — re-pointed: the signature is built in fleetStatusDump (snapshot.ts).
+    find: "  const signature = full.map((x) => x.replace(/ON\\/\\d+msg\\/(\\d+s|∞)/, 'ON')).join('|');",
+    to: "  const signature = full.join('|'); /* MUTANT */",
     why: 'The message counters move every tick, so EVERY dump becomes a change and the fix silently reverts to every-tick INFO while still looking correct.',
   },
   {

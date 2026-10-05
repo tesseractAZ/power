@@ -596,12 +596,16 @@ test("mqtt availability: 'online' is single-sourced, re-asserted each cycle, and
     "publishDiscovery must NOT own the 'online' publish — availability is the connect sequence's job",
   );
 
-  // (2) publishState re-asserts availability each cycle.
+  // (2) publishState re-asserts availability each cycle. v1.187.10 — through publishStateCycle,
+  // which asserts it AFTER the state payload (and when the build fails): pinned behaviourally in
+  // stateCycleOrder.test.ts; here, that the closure hands it the real 'online' publish.
   const psStart = src.indexOf('const publishState = ');
   const psEnd = src.indexOf('\n  };', psStart);
   assert.ok(psStart > 0 && psEnd > psStart, 'publishState located');
+  const ps = src.slice(psStart, psEnd);
+  assert.ok(ps.includes('await publishStateCycle({'), 'publishState runs the state cycle');
   assert.ok(
-    src.slice(psStart, psEnd).includes(onlinePublish),
+    ps.includes(`publishAvailability: () => ${onlinePublish.replace(/;$/, '')},`),
     "publishState must re-assert availability 'online' while connected (belt-and-braces against any future retained 'offline')",
   );
 

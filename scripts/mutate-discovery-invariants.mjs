@@ -171,7 +171,9 @@ const MUTANTS = [
   {
     id: 'xiv. availability moves after discovery',
     file: DISC,
-    find: '  fx.publishAvailability();\n  if (!latch.legacyCleared) {',
+    // v1.187.10 — re-pointed: availability goes first on a RECONNECT (the first connect leaves it
+    // to the state cycle, mutate-v1187-10-g2.mjs).
+    find: '  if (reconnect) fx.publishAvailability();\n  if (!latch.legacyCleared) {',
     to: '  if (!latch.legacyCleared) { /* MUTANT */',
     why: 'A retained LWT "offline" holds every entity unavailable no matter which configs follow it — 9+ hours of dark entities in the live incident.',
   },

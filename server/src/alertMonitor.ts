@@ -41,6 +41,7 @@ import { captureSnapshot, extractFeatures, captureLrFeatures } from './featureSn
 // aggregates as one family for threshold purposes).
 import { familyOf } from './alertOutcomes.js';
 import { setDefectivePackRetireLog } from './defectivePackLatch.js';
+import { setNwsLog } from './nws.js';
 // v0.9.59 — persist telemetry events so rise/short-clear/long-active
 // counts survive restarts. Without this the auto-silencing rules can
 // effectively never fire on a panel that gets occasional restarts.
@@ -58,6 +59,8 @@ import { liveGridBackstop, livePoolGridBackstop, gridPresenceEntityId } from './
 // v1.x — restart-persistent per-alert onset (first-seen) timestamps for the
 // ALM screen; see alertOnset.ts.
 import { syncAlertOnsets, getAlertOnset, restampAlertOnset } from './alertOnset.js';
+// v1.187.10 — the restart-persistent "first seen listed offline" stamps (repair-first-seen.json).
+import { syncCloudOfflineFirstSeen, cloudOfflineFirstSeenAt } from './repairIssues.js';
 
 /**
  * Watches the fleet, attaches computed alerts to the snapshot, and pushes a
@@ -250,6 +253,19 @@ export function risingEdgePushes(a: Pick<Alert, 'annunciate'>): boolean {
  */
 export function monitorMuteReason(alert: Pick<Alert, 'id'>, mutedSpareSns: readonly string[]): string {
   return mutedSpareSns.some((sn) => alert.id.includes(sn)) ? MUTE_REASON_BENCH_SPARE : MUTE_REASON_OFF_PANEL;
+}
+
+/**
+ * v1.187.10 — the roster mute the alert tick last computed (the muted serials — bench spares and
+ * off-panel Cores — and which of them are spares), for a log line outside the tick: the rate-floor
+ * collapse line logs a muted device at INFO (messageRateFloorAlert.rateFloorCollapseLine). Empty
+ * until the first tick, so a collapse logged before it is a WARN (the loud direction).
+ */
+let lastRosterMute: { muted: readonly string[]; spares: readonly string[] } = { muted: [], spares: [] };
+/** v1.187.10 — the reason the roster mutes `sn` as of the last alert tick, or null. */
+export function rosterMuteReasonForSn(sn: string): string | null {
+  if (!lastRosterMute.muted.includes(sn)) return null;
+  return lastRosterMute.spares.includes(sn) ? MUTE_REASON_BENCH_SPARE : MUTE_REASON_OFF_PANEL;
 }
 
 /**
@@ -731,6 +747,15 @@ export function warrantyEvidence(logArr: readonly ClearedAlert[]): (e: ClearedAl
   };
 }
 
+/**
+ * v1.187.10 — the share of a cleared ledger kept for its newest INFO rows: one row in this many
+ * (100 of the 1500-row default cap, scaling with CLEARED_LOG_MAX). Beyond it the oldest info row
+ * leaves first, as before; inside it info rows leave after every warning and before any critical
+ * (pruneOldestNonSignificant). At the cap with no info row left, each info clear used to be the
+ * row it evicted. About 7 % of the warnings' reach.
+ */
+export const CLEARED_INFO_RESERVE_DIVISOR = 15;
+
 /** v1.12.0 (review F19) — evict ONE entry from a newest-first cleared-alert log.
  *
  *  v1.14.0 (review of F19) — TIERED eviction. The v1.12.0 version only protected
@@ -759,7 +784,18 @@ export function warrantyEvidence(logArr: readonly ClearedAlert[]): (e: ClearedAl
  *   6. the oldest warning.
  *  A row muted by a CONDITION (balancing, top of charge) stays in the plain FIFO tier: it is the
  *  record that shows afterwards whether a mute hid a real fault. Rows written before v1.187.1
- *  carry neither flag and stay there too. `nowMs` dates tier 1. */
+ *  carry neither flag and stay there too. `nowMs` dates tier 1.
+ *
+ *  v1.187.10 (log review) — two orders were wrong for a forensic record at the cap. (a) With no
+ *  info row left, the oldest info row was the one just added: every info clear left on arrival,
+ *  so an 85-day ledger held 0 info rows (v1.187.3 had patched this for `ems-volt-` alone). The
+ *  newest info rows now keep up to one row in CLEARED_INFO_RESERVE_DIVISOR of the ledger (100 of
+ *  1500); an info row leaves first only beyond that, and the reserved ones leave after every
+ *  warning, still before any critical. (b) Tier 3 took a PUSHED noise row (one that reached the
+ *  phone) on its own arrival, ahead of 85-day-old rows whose push is unknown: a row recorded as
+ *  pushed now never leaves in the noise tiers — it ages out with the ordinary warnings. Tier 4 is
+ *  split so that move cannot cost warranty evidence: 4a. the oldest ordinary warning that is not
+ *  warranty evidence (pushed noise included), then 4b. the oldest ordinary warning. */
 export function pruneOldestNonSignificant(
   logArr: ClearedAlert[],
   isNoise?: (e: ClearedAlert) => boolean,
@@ -778,20 +814,53 @@ export function pruneOldestNonSignificant(
     }
     return false;
   };
-  if (evictOldest((_e, i) => sev(i) === 'info')) return;
+  // v1.187.10 — the newest info rows keep their reserve (CLEARED_INFO_RESERVE_DIVISOR).
+  let infoRows = 0;
+  for (let i = 0; i < logArr.length; i++) if (sev(i) === 'info') infoRows++;
+  if (infoRows > Math.floor(logArr.length / CLEARED_INFO_RESERVE_DIVISOR) && evictOldest((_e, i) => sev(i) === 'info')) return;
   const evidence = warrantyEvidence(logArr);
   if (evictOldest((e, i) => sev(i) === 'warning' && e.rosterMuted === true
     && nowMs - e.clearedAt > CLEARED_ROSTER_MUTED_KEEP_MS && !evidence(e))) return;
   if (isNoise) {
     if (evictOldest((e, i) => sev(i) === 'warning' && isNoise(e) && e.pushed === false && !evidence(e))) return;
-    if (evictOldest((e, i) => sev(i) === 'warning' && isNoise(e) && !evidence(e))) return;
+    if (evictOldest((e, i) => sev(i) === 'warning' && isNoise(e) && e.pushed !== true && !evidence(e))) return; // v1.187.10
   }
   // v1.187.1 (log review) — a row with no string id is not never-muted (isNeverMutedAlert reads the
   // id and would throw on it, every tick at the cap): it leaves with the ordinary warnings.
-  if (evictOldest((e, i) => sev(i) === 'warning' && (typeof e.alert?.id !== 'string' || !isNeverMutedAlert(e.alert)))) return;
+  const ordinary = (e: ClearedAlert): boolean => typeof e.alert?.id !== 'string' || !isNeverMutedAlert(e.alert);
+  // v1.187.10 (review) — a pushed noise row no longer leaves in the noise tiers, so it reaches this
+  // tier: every ordinary warning that is not warranty evidence leaves before one that is.
+  if (evictOldest((e, i) => sev(i) === 'warning' && ordinary(e) && !evidence(e))) return;
+  if (evictOldest((e, i) => sev(i) === 'warning' && ordinary(e))) return;
   if (evictOldest((e, i) => sev(i) === 'warning' && !String(e.alert?.id ?? '').startsWith('pack-defective-'))) return;
   if (evictOldest((_e, i) => sev(i) === 'warning')) return;
+  // v1.187.10 — the reserved info rows, before any critical.
+  if (evictOldest((_e, i) => sev(i) === 'info')) return;
   logArr.pop();
+}
+
+/**
+ * v1.187.10 — the rehydrate line's note for a ledger at its cap: what it holds, and what each new
+ * clear evicts. "older records are being dropped" was true only when an ordinary warning arrived;
+ * an arriving info row (none left to evict) or unpushed noise row was itself the row dropped. The
+ * tier order is pruneOldestNonSignificant's. PURE; exported for tests.
+ */
+export function clearedLedgerCapNote(logArr: readonly ClearedAlert[], cap: number, nowMs: number): string {
+  let warn = 0;
+  let crit = 0;
+  let info = 0;
+  let oldestWarnMs: number | null = null;
+  for (const e of logArr) {
+    const sv = e.alert?.severity;
+    if (sv === 'critical') crit++;
+    else if (sv === 'warning') {
+      warn++;
+      if (Number.isFinite(e.clearedAt) && (oldestWarnMs == null || e.clearedAt < oldestWarnMs)) oldestWarnMs = e.clearedAt;
+    } else info++;
+  }
+  const age = oldestWarnMs != null ? ` (oldest ${Math.round((nowMs - oldestWarnMs) / 86_400_000)}d)` : '';
+  const reserve = Math.floor((cap + 1) / CLEARED_INFO_RESERVE_DIVISOR);
+  return ` [AT CAP ${cap} — ${warn} warning${age}, ${crit} critical, ${info} info; each new clear evicts one row: info beyond the newest ${reserve} first, then old roster-muted and noise warnings not recorded as pushed, then the oldest warning; criticals last]`;
 }
 
 /**
@@ -2431,6 +2500,10 @@ export function startAlertMonitor(
   // v1.187.1 — a defective-pack record retired by computeAlerts is logged through the warn sink: a
   // timestamped line at level 40 in the structured log (defectivePackLatch.retireWarn).
   setDefectivePackRetireLog(warn);
+  // v1.187.10 (log review 10-03) — the NWS storm-alert client logs its transitions (first answer,
+  // event-set change, outage, carry limit at warn, recovery) through the monitor's sinks; every
+  // caller used to pass no logger, so no storm-alert fetch ever reached the journal.
+  setNwsLog(log, warn);
   let cfg = loadNotifyConfig();
   const send = deps.send ?? sendNotification;
   const channelConfigured = (): boolean => deps.send != null || isConfigured(cfg);
@@ -2569,7 +2642,8 @@ export function startAlertMonitor(
       null,
     );
     const reach = oldest != null ? ` — oldest retained ${(Date.now() - oldest) / 86_400_000 < 1 ? '<1' : Math.round((Date.now() - oldest) / 86_400_000)}d old` : '';
-    const saturated = clearedLog.length >= CLEARED_LOG_MAX ? ` [AT CAP ${CLEARED_LOG_MAX} — older records are being dropped]` : '';
+    // v1.187.10 — and say what a new clear evicts (clearedLedgerCapNote), not only that rows go.
+    const saturated = clearedLog.length >= CLEARED_LOG_MAX ? clearedLedgerCapNote(clearedLog, CLEARED_LOG_MAX, Date.now()) : '';
     log(`alerts: rehydrated ${clearedLog.length} cleared-alert record(s) from ${clearedLogPath}${reach}${saturated}`);
   }
   const persistClearedLog = () => saveClearedLog(clearedLogPath, clearedLog, CLEARED_LOG_MAX);
@@ -3204,6 +3278,10 @@ export function startAlertMonitor(
     ]);
     // v0.7.7 — build the connectivity context the alerts engine uses to
     // enrich offline/stale alerts with last-data timestamps + source.
+    // v1.187.10 — keep the persisted cloud-offline stamps first (stamped on the first offline
+    // listing, cleared only by an ONLINE listing), so the offline hint can say how long before
+    // this process the device was already listed offline (repairIssues.ts).
+    syncCloudOfflineFirstSeen(snap.devices);
     const perDevice: ConnectivityContext['perDevice'] = new Map();
     for (const d of Object.values(snap.devices)) {
       perDevice.set(d.sn, {
@@ -3212,6 +3290,8 @@ export function startAlertMonitor(
         mqttCount: store.mqttMsgCountBySn.get(d.sn) ?? 0,
         // v1.187.1 — a device with no data this session is described from its first listing.
         firstListedAtMs: store.firstListedAt(d.sn),
+        // v1.187.10 — and, when that predates this process, from its persisted offline stamp.
+        offlineSinceMs: cloudOfflineFirstSeenAt(d.sn),
       });
     }
     // v1.8.0 (review F3) — the SHP2's pool-unknown onset (post-grace-hold), for
@@ -3478,6 +3558,7 @@ export function startAlertMonitor(
       mutedSpareSns = multiPanel ? [] : mutedSpares;
       return multiPanel ? [] : [...new Set([...mutedSpares, ...offPanel])];
     })();
+    lastRosterMute = { muted, spares: mutedSpareSns }; // v1.187.10 — rosterMuteReasonForSn
     const assemble = (workerAlerts: Alert[]): Alert[] => {
       const all = [...liveHead, ...workerAlerts, ...liveTail]
         .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
