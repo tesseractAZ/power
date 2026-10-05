@@ -183,8 +183,9 @@ const MUTANTS = [
   {
     id: 'viii. \u2605\u2605 a silent panel publishes 0 W house load',
     file: READY,
-    find: '    panel: !!panel && (panel.projection?.circuits ?? []).some((c) => c.watts != null),',
-    to: '    panel: !!panel, /* MUTANT */',
+    // v1.187.10 — re-pointed: the flag now also requires every panel's reading fresh (next line).
+    find: '    panel: !!panel && (panel.projection?.circuits ?? []).some((c) => c.watts != null)\n      && allShp2s',
+    to: '    panel: !!panel /* MUTANT */\n      && allShp2s',
     why: 'A panel that reported no channel reads as a house drawing nothing.',
   },
   {

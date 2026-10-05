@@ -189,7 +189,7 @@ test('★★★ the live ledger: the four phantom strikes stop counting, and the
   assert.equal(r.state, 'LEARNING', 'fail-closed: the other criteria still fail');
   assert.equal(r.writeReady, false);
   assert.ok(!r.blocking.some((b) => b.includes('engine-fault')), r.blocking.join(' | '));
-  assert.ok(r.blocking.some((b) => b.includes('delivery bias')), 'the 22.7 kWh bias the false block used to hide');
+  assert.ok(r.blocking.some((b) => b.includes('sizing bias')), 'the 22.7 kWh bias the false block used to hide');
   assert.ok(r.blocking.some((b) => b.includes('band coverage')));
 });
 

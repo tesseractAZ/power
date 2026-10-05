@@ -176,9 +176,15 @@ export function verbalizeForTts(s: string): string {
   return s
     // plural "(s)" → plain plural BEFORE parens are stripped: "month(s)" → "months"
     .replace(/\b(hour|minute|second|day|week|month|year|pack|cell|core|unit|panel)\(s\)/gi, '$1s')
+    // v1.187.10 — any other "(s)" plural too: "MQTT message(s)" was read as "message s" (2026-10-03).
+    .replace(/\b([A-Za-z]+)\(s\)/g, '$1s')
     // rate slashes → "per <unit>" (BEFORE the bare-% / unit rules consume the head)
     .replace(/\/\s*h\b/g, ' per hour')                       // %/h, kWh/h
     .replace(/\/\s*(day|week|month|year)\b/g, ' per $1')      // kWh/day, mV/week, %/month
+    // v1.187.10 — an API path is read as its words, without the slashes: "EcoFlow's /device/list"
+    // → "EcoFlow's device list" (2026-10-03, spoken on every speaker). Only a slash that starts a
+    // word; the rate slashes above are already consumed.
+    .replace(/(^|\s)\/([A-Za-z][\w-]*(?:\/[\w-]+)*)/g, (_m, pre: string, path: string) => `${pre}${path.split('/').join(' ')}`)
     // relational / approximation / math symbols
     .replace(/\s*≥\s*/g, ' at or above ')
     .replace(/\s*≤\s*/g, ' at or below ')
@@ -211,6 +217,7 @@ export function verbalizeForTts(s: string): string {
     // time units — number-anchored
     .replace(/(\d+(?:\.\d+)?)\s*h(?:rs?|ours?)?\b/g, '$1 hours') // 6h, 6 h, 6hr, 6 hrs, 6 hours
     .replace(/(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b/g, '$1 minutes')
+    .replace(/\b(\d+)s\b/g, '$1 seconds') // v1.187.10 — an alert age ("last data 31s ago"), glued only
     .replace(/(\d+(?:\.\d+)?)\s*mo\b/g, '$1 months')
     // temperature & percent
     .replace(/°F/g, ' degrees Fahrenheit')
@@ -233,7 +240,7 @@ export function verbalizeForTts(s: string): string {
     .replace(/\bSHP2\b/g, 'smart panel')
     .replace(/\bDPU\b/g, 'D P U')
     // singularize the realistic "1 <time>s" cases ("reserve in 1 hours" → "1 hour")
-    .replace(/\b1 (hour|minute|month|day|week|year)s\b/g, '1 $1')
+    .replace(/\b1 (hour|minute|second|month|day|week|year)s\b/g, '1 $1')
     // tidy: no space before punctuation introduced above, then collapse runs
     .replace(/\s+([,.;:!?])/g, '$1')
     .replace(/\s{2,}/g, ' ')

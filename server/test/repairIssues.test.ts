@@ -235,3 +235,28 @@ test('firstSeenAt — same active id keeps its timestamp across two calls', () =
   // And it is a real start-of-condition timestamp, not zero.
   assert.ok(firstSeen > 0);
 });
+
+/* ─── (5) v1.187.10 (log review 10-03, C20) — the MPPT drift card states what it measures ── */
+
+test('★★ MPPT drift — a W ÷ V·A register ratio is not presented as lost conversion efficiency, and sends no one to MC4 connectors or a warranty claim', () => {
+  const ctx: RepairContext = {
+    ...ctxWithDevices([]),
+    equipmentHealth: {
+      generatedAt: Date.now(),
+      inverterStandby: [],
+      mpptStrings: [
+        { sn: 'COREXXX00XXX0002', device: 'Core 2', coreNum: 2, string: 'LV', recentEffPct: 94.64, baselineEffPct: 97.75, driftPctPts: -3.11 } as any,
+        { sn: 'COREXXX00XXX0002', device: 'Core 2', coreNum: 2, string: 'HV', recentEffPct: 97.0, baselineEffPct: 97.41, driftPctPts: -0.41 } as any,
+      ],
+    },
+  };
+  const cards = computeRepairIssues(ctx).issues.filter((i) => i.id.startsWith('mppt-drift-'));
+  assert.deepEqual(cards.map((c) => c.id), ['mppt-drift-COREXXX00XXX0002-LV'], 'the id (and its first-seen record) is unchanged; HV under 3 points raises nothing');
+  const c = cards[0];
+  assert.equal(c.title, 'MPPT reading drift: Core 2 LV string');
+  const text = [c.summary, ...c.fixSteps].join(' ');
+  assert.match(c.summary, /W ÷ V·A\) is 3\.11 points below its baseline \(recent 94\.64% vs baseline 97\.75%\)/);
+  assert.match(c.summary, /not a measured conversion efficiency/);
+  for (const banned of [/lost .*conversion efficiency/i, /MC4/i, /warranty/i, /per-panel/i]) assert.doesNotMatch(text, banned);
+  assert.match(text, /MPPT input/, 'the check is a meter reading at the MPPT input');
+});

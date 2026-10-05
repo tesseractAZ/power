@@ -120,6 +120,7 @@
  */
 
 import { RESERVE_WRITE_MAX_PCT, type NightActuationState } from './nightChargeActuator.js';
+import type { ForceChargeCommands } from './settingsDrift.js';
 
 /** The panel's documented force-charge ceiling range (`foceChargeHight`). */
 export const FORCE_CHARGE_CEILING_MIN_PCT = 80;
@@ -318,6 +319,28 @@ export function desiredForceChargeCeilingPct(costMaxSocPct: number): number {
 /** True while a force-charge of ours is on, or its OFF has not yet verified. */
 export function forceChargeInFlight(s: NightActuationState): boolean {
   return s.forceChargeOnAtMs != null && s.forceChargeOffVerifiedAtMs == null;
+}
+
+/**
+ * v1.187.10 — the force-charge writes this add-on issued for the night, from its own
+ * record, for settings-drift's own-write test (classifyChange). PURE.
+ *  - ON to the slots it switched on — the OFF covers the same slots (the OFF step's own
+ *    rule: the recorded slots, or 1-3 when none were recorded);
+ *  - the OFF, once issued;
+ *  - the ceiling: the synced backstop once a sync was attempted, and the panel's own
+ *    value once its restore was attempted.
+ */
+export function forceChargeCommandsOf(s: NightActuationState): ForceChargeCommands {
+  const onSlots = s.forceChargeOnAtMs == null ? null
+    : (s.forceChargeSlots != null && s.forceChargeSlots.length > 0 ? [...s.forceChargeSlots] : [1, 2, 3]);
+  const ceilingPcts: number[] = [];
+  if (s.forceChargeCeilingAttemptedAtMs != null && s.forceChargeCeilingPct != null && Number.isFinite(s.forceChargeCeilingPct)) {
+    ceilingPcts.push(desiredForceChargeCeilingPct(s.forceChargeCeilingPct));
+  }
+  if (s.forceChargeCeilingRestoreLastAttemptMs != null && s.forceChargeCeilingPriorPct != null) {
+    ceilingPcts.push(s.forceChargeCeilingPriorPct);
+  }
+  return { onSlots, offIssued: s.forceChargeOffAtMs != null, ceilingPcts };
 }
 
 /**

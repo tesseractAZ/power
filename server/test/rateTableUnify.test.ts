@@ -241,8 +241,12 @@ test('★ THE OTHER WIRING: Grid Cost Today prices overnight import at 12.59 c',
     const tr = computeTariffReport(devices, rec, 7);
     // Whatever the integration window captures, the RATE it applied is what
     // matters: an overnight hour must never price at the 16.91 off-peak rate.
-    assert.equal(tr.onPeakCents, 44.20, 'premise: the confirmed summer table is in force');
-    assert.equal(tr.offPeakCents, 16.91);
+    // v1.187.10 — the report states the CURRENT season's table (the wall clock decides it, and
+    // October onward is winter by billing cycle), so the premise reads that season's rates.
+    const { seasonAt, apsREvModelFromEnv } = await import('../src/tariff.js');
+    const summer = seasonAt(apsREvModelFromEnv(), Date.now()) === 'summer';
+    assert.equal(tr.onPeakCents, summer ? 44.20 : 39.5, 'premise: the confirmed table is in force');
+    assert.equal(tr.offPeakCents, summer ? 16.91 : 17.0);
     assert.ok(tr.gridImportCostDollars >= 0, 'a cost was computed');
   });
 });

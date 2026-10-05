@@ -205,3 +205,45 @@ async function fetchWeatherUncached(log: (m: string) => void): Promise<WeatherFo
     return cache; // stale cache is better than nothing
   }
 }
+
+/**
+ * v1.187.10 (log review 10-03, C30) — the 45-minute GHI persistence tick's log line.
+ *
+ * It logged "weather: periodic GHI persistence (264 hours)" after EVERY tick — 54 byte-identical
+ * lines in 40.8 h, 35 of them on ticks that wrote nothing — and the 264 was the size of the
+ * forecast series, not a row count. The recorder already logs every real write (its "persisted N
+ * weather GHI/cloud rows" and "realized GHI captured" lines), so the tick now says only what the
+ * recorder cannot: that it ran and found nothing new (at most once per `heartbeatMs`), and that no
+ * forecast was available (on entering that state) and available again. A silent tick that wrote
+ * rows is visible through the recorder's own lines; a dead tick is a gap longer than the heartbeat.
+ * Exported so a test drives the real line sequence.
+ */
+export const GHI_TICK_QUIET_HEARTBEAT_MS = 6 * 60 * 60_000;
+export type GhiTickOutcome =
+  | { kind: 'no-weather' }
+  | { kind: 'ran'; hours: number; written: number; realized: number };
+export function createGhiTickLogger(
+  log: (m: string) => void,
+  heartbeatMs = GHI_TICK_QUIET_HEARTBEAT_MS,
+): (o: GhiTickOutcome, nowMs: number) => void {
+  let lastQuietLineMs: number | null = null;
+  let noWeather = false;
+  return (o, nowMs) => {
+    if (o.kind === 'no-weather') {
+      if (!noWeather) log('weather: GHI persistence tick — no forecast available (the fetch failed or has not run); nothing stored');
+      noWeather = true;
+      return;
+    }
+    if (noWeather) {
+      noWeather = false;
+      log(`weather: GHI persistence tick — forecast available again (${o.written} new row(s), ${o.realized} realized hour(s))`);
+      lastQuietLineMs = nowMs;
+      return;
+    }
+    if (o.written + o.realized > 0) return; // the recorder logged the write itself
+    if (lastQuietLineMs == null || nowMs - lastQuietLineMs >= heartbeatMs) {
+      lastQuietLineMs = nowMs;
+      log(`weather: GHI persistence tick — nothing new to store (the ${o.hours}-hour series is already recorded); repeated at most every ${Math.round(heartbeatMs / 3_600_000)} h while nothing changes`);
+    }
+  };
+}

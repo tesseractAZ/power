@@ -124,15 +124,15 @@ const MUTANTS = [
   {
     id: 'W-viii. ★★ the decision does not wait for a broadcast in flight',
     file: BR,
-    find: '      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) {',
+    find: '      if (realAudibleInFlight > 0 || sipOutcomesPending > 0 || conditionRetryCouldRaise(\'green\')) {',
     to: '      if (false) { /* MUTANT */',
     why: 'A red retry playing when the question closes is not audible yet: its green is adopted silently and the red ends the last words.',
   },
   {
     id: 'W-ix. ★★ the decision does not wait for a SIP outcome',
     file: BR,
-    find: '      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) {',
-    to: '      if (realAudibleInFlight > 0) { /* MUTANT */',
+    find: '      if (realAudibleInFlight > 0 || sipOutcomesPending > 0 || conditionRetryCouldRaise(\'green\')) {',
+    to: '      if (realAudibleInFlight > 0 || conditionRetryCouldRaise(\'green\')) { /* MUTANT */',
     why: 'A red reaching only the cordless, its outcome pending, is followed by a silent green.',
   },
   {
@@ -159,7 +159,7 @@ const MUTANTS = [
   {
     id: 'W-xiii. ★★ the continuation does not wait for a broadcast in flight',
     file: BR,
-    find: '      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) return;',
+    find: '      if (realAudibleInFlight > 0 || sipOutcomesPending > 0 || conditionRetryCouldRaise(level)) return; // v1.187.10 — an armed retry too',
     to: '      /* MUTANT */',
     why: 'A red retry playing when the yellow below it stands its dwell: the yellow is filed as a continuation, the red ends the last words.',
   },

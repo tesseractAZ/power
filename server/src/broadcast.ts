@@ -1298,6 +1298,52 @@ export function previewSpeakerOutcome(
   return errors.length ? { ok: false, delivered, error: errors.join('; '), note } : { ok: true, delivered, note };
 }
 
+/**
+ * v1.187.10 — the suffix of a broadcast outcome line: which kind of broadcast it was and the
+ * generation of the announcement (a deferred retry keeps its announcement's). Appended, so a
+ * `broadcast: <level> → ok in` prefix still matches. Exported for tests.
+ */
+export function outcomeTag(kind: BroadcastKind, generation: number): string {
+  return ` [${kind} #${generation}]`;
+}
+
+/**
+ * v1.187.10 — the timeout probe's line when no SIP target reads 'playing' or 'on'. Delivery is
+ * UNKNOWN, not missed: the Switchboard announce entity writes no state during an announce call
+ * (it read 'idle' through every announcement for months), so an idle reading neither confirms nor
+ * refutes the call. Names what each target read. Exported for tests.
+ */
+export function sipProbeUnknownLine(targets: readonly string[], states: ReadonlyArray<{ state: string } | null>): string {
+  const read = targets.map((t, i) => `${t} reads ${states[i]?.state ?? 'nothing (unreadable)'}`).join(', ');
+  return `broadcast: SIP dispatch timed out — delivery UNKNOWN (${read}; the probe confirms only a target that reports playback, and an announce entity that never changes state cannot) — not counted as heard or delivered; a deferred retry re-fires SIP`;
+}
+
+/**
+ * v1.187.10 — the line for a boot yellow that fell to green inside its hold. A held warning
+ * still in the alert set is not "cleared": the level fell because it stopped COUNTING (an
+ * off-panel Core's standing imbalance is muted only once its roster streak rebuilds, a few ticks
+ * after every restart). Each held fingerprint is split against the alerts of the dropping tick:
+ * absent → cleared; present → still active, named with why it no longer counts (its muteReason,
+ * or the field that took it out). "cleared inside the hold" is kept for a hold whose warnings are
+ * all gone. Pure + exported for tests.
+ */
+export function bootYellowDropLine(heldForS: number, heldFps: Iterable<string>, alerts: readonly Alert[]): string {
+  const cleared: string[] = [];
+  const stillActive: string[] = [];
+  for (const fp of heldFps) {
+    const a = alerts.find((x) => alertFingerprint(x) === fp);
+    if (a == null) { cleared.push(describeFingerprint(fp)); continue; }
+    const why = a.muteReason
+      ?? (a.annunciate === false ? 'held non-annunciating'
+        : a.audible === false ? 'not audible'
+          : a.severity !== 'warning' ? `now ${a.severity}` : 'no longer counted');
+    stillActive.push(`${describeFingerprint(fp)} — ${why}`);
+  }
+  if (stillActive.length === 0) return `broadcast: boot yellow dropped after ${heldForS} s — cleared inside the hold, not spoken (${cleared.join('; ')})`;
+  return `broadcast: boot yellow dropped after ${heldForS} s — not spoken; still active but no longer counted toward the condition (${stillActive.join('; ')})`
+    + (cleared.length ? `; cleared inside the hold (${cleared.join('; ')})` : '');
+}
+
 export function sipTimeoutLike(errors: string[]): boolean {
   return errors.length > 0 && errors.every((e) => TIMEOUT_LIKE.test(e));
 }
@@ -1776,7 +1822,9 @@ export function startBroadcastMonitor(
    * the channel and however partial: Music Assistant played it (call.ok — the tone-only fallback
    * after a failed spoken render and a timed-out, delivery-unknown play included; a sub-2 s "ok" is
    * not), or the SIP cordless took it (the dispatch resolved with a target reached, or a timed-out
-   * dispatch the entity state confirms). lastConditionPlayedLevel is only a verified, error-free
+   * dispatch the entity state confirms — v1.187.10: only a target that reports playback can; the
+   * Switchboard announce entity never does, so a timed-out cordless dispatch is UNKNOWN and is not
+   * counted). lastConditionPlayedLevel is only a verified, error-free
    * play — the storm gates' evidence — so a red heard as the klaxon alone, or only on the cordless,
    * was not "spoken since the boot" and its green was adopted silently at the end of the warm-up.
    * Read by the restart-recovery decisions only; in memory (this process's broadcasts). The most
@@ -1794,6 +1842,22 @@ export function startBroadcastMonitor(
     }
     if (episode === conditionEpisode && level === prevLevel) committedAudible = true;
   };
+  /**
+   * v1.187.10 — a CONDITION retry armed on its timer for the current episode that could still make
+   * a level above `above` audible (nothing above `above` is audible since the boot yet). The restart
+   * decisions wait for it as they wait for a broadcast in flight: realAudibleInFlight counts a retry
+   * only once its timer has fired. A timed-out cordless dispatch is delivery UNKNOWN (the Switchboard
+   * announce entity reports no playback, so the timeout probe cannot confirm it) and is not counted
+   * as audible; the retry re-fires the cordless, and its outcome — or Music Assistant's — is the
+   * evidence. Decided in the gap between the probe and the retry, a red that reached only the
+   * cordless was not yet audible and its green was adopted silently. A retry that cannot change the
+   * decision (its level not above `above`, or a level above it already audible) is not waited for.
+   * Bounded by the retry budget (RETRY_DELAYS_MS: 30 + 90 + 180 s).
+   */
+  const conditionRetryCouldRaise = (above: ConditionLevel): boolean => retryTimer != null && retryLevel != null
+    && retryKind === 'condition' && !conditionRetryStale(retryKind, retryEpisode, conditionEpisode)
+    && LEVEL_RANK[retryLevel] > LEVEL_RANK[above]
+    && (conditionAudibleSinceBootLevel == null || LEVEL_RANK[conditionAudibleSinceBootLevel] <= LEVEL_RANK[above]);
   let stormSuppressedCount = 0;
   // v1.187.0 — the last condition yellow that reached the speakers (sameWarningRepeat). Set by
   // the tick on a delivered yellow; dropped the moment a condition green or red passes the
@@ -1913,7 +1977,9 @@ export function startBroadcastMonitor(
         degraded: audibleDegraded, // v1.186.0
         unusableTargets: [...audibleUnusable],
       });
-      // Audible not applicable (disabled or unsupervised) → unknown, never alarms.
+      // Audible not applicable (disabled or unsupervised) → reachability unknown (null), never
+      // alarms. The HA status reads "disabled" when the operator turned audible off, "unknown"
+      // when unsupervised (audibleStatus, broadcastHealth.ts).
       if (!supervised || !cfg.enabled) {
         unreachableStreak = 0; audibleReachable = null; audibleUsableTargets = 0; audibleReason = null;
         degradedStreak = 0; audibleDegraded = false; audibleUnusable = [];
@@ -2422,6 +2488,14 @@ export function startBroadcastMonitor(
             // against the entity's real state (~8 s in, mid-announce for any
             // real call) before letting the retry re-fire SIP. A non-timeout
             // failure (4xx/5xx/refused) stays a definite miss and retries.
+            // v1.187.10 — the probe can confirm only a target that REPORTS playback. The
+            // Switchboard announce entity writes no state during an announce call (HA history:
+            // 'idle' through every announcement), so on that target the probe never confirms and
+            // its idle reading is no evidence either way: delivery stays UNKNOWN — not counted as
+            // audible (noteConditionAudible) or as delivered (lastSipDispatchOk), and any deferred
+            // retry re-fires the cordless (Switchboard drops an identical clip that is still in
+            // flight or was just heard). The restart decisions wait for that retry
+            // (conditionRetryCouldRaise). Evidence of a placed call has to come from Switchboard itself.
             if (sipTimeoutLike(r.errors)) {
               probing = true;
               const probe = setTimeout(() => {
@@ -2434,7 +2508,7 @@ export function startBroadcastMonitor(
                       if (kind === 'condition') noteConditionAudible(level, episode); // v1.187.4
                       log('broadcast: SIP delivery confirmed via entity state after an HTTP timeout — duplicate re-fire suppressed');
                     } else {
-                      log(`broadcast: SIP dispatch timed out and the target is not playing — a deferred retry will re-fire SIP`);
+                      log(sipProbeUnknownLine(cfg.sipTargets, states));
                     }
                   })
                   .finally(sipOutcomeKnown);
@@ -2568,10 +2642,14 @@ export function startBroadcastMonitor(
     const renderTag = rr.fromCache ? 'cached' : `rendered+${rr.ttsRenderMs ?? 0}ms`;
     // v1.186.0 — the MA tally is what was USABLE at dispatch, not the configured count.
     const maTally = `${usable}/${cfg.targets.length} MA usable${preflight.unusable.length ? ` (not reached: ${preflight.unusable.join(', ')})` : ''}`;
+    // v1.187.10 — the kind and the announcement's generation, appended (outcomeTag): the night-charge
+    // notice (a dedicated yellow) logged exactly as a condition yellow, and a retry could be matched to
+    // its announcement only by timing. A deferred retry carries its announcement's generation.
+    const kindTag = outcomeTag(kind, generation);
     if (errors.length === 0) {
-      log(`broadcast: ${tag}${level} → ok in ${dt}ms (${maTally}${cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP` : ''} target(s), ${renderTag}, ${rr.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
+      log(`broadcast: ${tag}${level} → ok in ${dt}ms (${maTally}${cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP` : ''} target(s), ${renderTag}, ${rr.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})${kindTag}`);
     } else {
-      log(`broadcast: ${tag}${level} → ${errors.length} error(s) in ${dt}ms (${maTally}): ${errors.join('; ')}`);
+      log(`broadcast: ${tag}${level} → ${errors.length} error(s) in ${dt}ms (${maTally}): ${errors.join('; ')}${kindTag}`);
     }
     lastBroadcastAt = Date.now(); lastLevel = level; lastBroadcastKind = kind;
     lastOutcome = errors.length === 0 ? 'success' : 'partial';
@@ -3171,7 +3249,10 @@ export function startBroadcastMonitor(
     // v1.187.1 — a boot yellow that cleared inside its hold: never spoken. A rise to red is not a
     // drop (red logs its own hold and transition), so only a fall to green is said.
     if (level !== 'yellow' && bootYellowHold != null) {
-      if (level === 'green') log(`broadcast: boot yellow dropped after ${Math.round((Date.now() - bootYellowHold.sinceMs) / 1000)} s — cleared inside the hold, not spoken (${[...bootYellowHold.fps].map(describeFingerprint).join('; ')})`);
+      // v1.187.10 — split into cleared and still active (bootYellowDropLine): a warning muted on the
+      // dropping tick (the off-panel roster streak rebuilt) did not clear. Judged against the whole
+      // published set, not the speakable one (an alert made inaudible is still there).
+      if (level === 'green') log(bootYellowDropLine(Math.round((Date.now() - bootYellowHold.sinceMs) / 1000), bootYellowHold.fps, (store.get().alerts ?? []) as Alert[]));
       bootYellowHold = null;
     }
     // v1.187.3 (review) — a green below a heard restart baseline, inside the warm-up, commits only
@@ -3309,10 +3390,13 @@ export function startBroadcastMonitor(
       // with no broadcast in flight or queued and no SIP outcome pending: a red being retried (or
       // reaching the cordless) is made audible only when its play returns, and a silent adoption
       // decided meanwhile left that red as the last words. Bounded by the announce timeouts.
-      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) {
+      // v1.187.10 — and while a condition retry armed on its timer could still make a level above
+      // green audible (conditionRetryCouldRaise): its re-fire of a cordless whose first outcome is
+      // unknown, or its play, is the evidence.
+      if (realAudibleInFlight > 0 || sipOutcomesPending > 0 || conditionRetryCouldRaise('green')) {
         if (warmupEndWaitLoggedFor !== recoveryHoldSinceMs) {
           warmupEndWaitLoggedFor = recoveryHoldSinceMs;
-          log('broadcast: the restart decision on the held green waits for the broadcast in flight — what it makes audible decides between an announcement and a silent adoption');
+          log('broadcast: the restart decision on the held green waits for the broadcast in flight (or a condition retry still armed) — what it makes audible decides between an announcement and a silent adoption');
         }
         return;
       }
@@ -3342,7 +3426,7 @@ export function startBroadcastMonitor(
       // v1.187.4 (review) — decided with no broadcast in flight or SIP outcome pending, like the
       // restart decision above: a red retry playing at this moment is made audible only when its
       // play returns, and a silent continuation decided meanwhile left that red as the last words.
-      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) return;
+      if (realAudibleInFlight > 0 || sipOutcomesPending > 0 || conditionRetryCouldRaise(level)) return; // v1.187.10 — an armed retry too
       // v1.187.3 (review) — never a green: inside the warm-up a green under the baseline is held
       // until it is a recovery (above), and past it this predicate is false.
       log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)`);

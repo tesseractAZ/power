@@ -75,6 +75,23 @@ export function resetBroadcastHealth(): void {
   current = { ...UNKNOWN };
 }
 
+/**
+ * v1.187.10 — the HA `audible_status` value (sensor "Audible Alarm Channel"): reachable /
+ * UNREACHABLE / disabled / unknown. Four states so a disabled or unknown channel never reads as a
+ * false "unreachable" — and, before the first probe, never as "disabled". The pre-probe default
+ * above has `enabled: false` only because nothing has been read yet, and the status tested
+ * `enabled` first: every restart published "disabled" for one 30 s publish cycle (the first state
+ * publish lands ~5 s after broker connect, the first probe ~15 s after broadcast init, and the
+ * probe does not trigger a republish) on a channel configured on (2026-10-02 17:53 and 19:24,
+ * 2026-10-03 12:08). An automation keyed on "disabled" would have fired at every deploy.
+ */
+export type AudibleStatus = 'reachable' | 'UNREACHABLE' | 'disabled' | 'unknown';
+export function audibleStatus(h: BroadcastHealth): AudibleStatus {
+  if (h.lastProbeAt == null) return 'unknown';
+  if (!h.enabled) return 'disabled';
+  return h.reachable === true ? 'reachable' : h.reachable === false ? 'UNREACHABLE' : 'unknown';
+}
+
 /** Stable id — one alert, dedup + resolve keyed on it. */
 export const AUDIBLE_UNREACHABLE_ALERT_ID = 'system-audible-unreachable';
 
