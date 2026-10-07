@@ -67,6 +67,39 @@ const realNow = Date.now.bind(Date);
 let offset = 0;
 Date.now = () => realNow() + offset;
 
+/* ── timers the test runs by hand ──
+ * A setTimeout armed with a delay in `holdMs` is captured instead of scheduled, and runs when the
+ * test calls fire(). Passed through the monitor's seams (BroadcastMonitorOpts.retryDelaysMs and
+ * .sipTimeoutProbeDelayMs), so the order of a timeout probe, a deferred retry and the restart
+ * question closing is the scenario's: with real delays it was a race against the clock steps,
+ * which take real time too (more on a loaded runner), and each case waited out the 8 s probe. */
+const HELD_RETRY_MS = 86_400_001;
+const HELD_PROBE_MS = 86_400_002;
+const holdMs = new Set<number>([HELD_RETRY_MS, HELD_PROBE_MS]);
+interface HeldTimer { ms: number; run: () => void; handle: ReturnType<typeof setTimeout>; done: boolean }
+const held: HeldTimer[] = [];
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+  if (ms == null || !holdMs.has(ms)) return realSetTimeout(fn, ms, ...args);
+  const handle = realSetTimeout(() => {}, 2 ** 31 - 1); // a real handle (clearTimeout, unref), never due
+  handle.unref();
+  held.push({ ms, run: () => fn(...args), handle, done: false });
+  return handle;
+}) as unknown as typeof setTimeout;
+globalThis.clearTimeout = ((h?: Parameters<typeof clearTimeout>[0]) => {
+  for (const t of held) if (t.handle === h) t.done = true;
+  realClearTimeout(h);
+}) as typeof clearTimeout;
+/** Held timers of `ms` still armed (not run, not cleared). */
+const armed = (ms: number) => held.filter((t) => t.ms === ms && !t.done).length;
+/** Run every held timer of `ms` still armed, as its due time would; how many ran. */
+function fire(ms: number): number {
+  const due = held.filter((t) => t.ms === ms && !t.done);
+  for (const t of due) { t.done = true; realClearTimeout(t.handle); t.run(); }
+  return due.length;
+}
+
 /* ── Home Assistant, mocked at the HTTP layer ── */
 let announces = 0;
 const agent = new MockAgent();
@@ -146,20 +179,31 @@ interface Rig {
   count: (s: string) => number;
   stop: () => void;
 }
+interface RecordingRig extends Rig {
+  /** The cordless plays answered when the first line containing `s` was logged. */
+  sipPlaysAt: (s: string) => number;
+}
 const live: Rig[] = [];
-function rig(wired = true, retryDelaysMs?: number[]): Rig {
+function rig(wired = true, retryDelaysMs?: number[], sipTimeoutProbeDelayMs?: number): RecordingRig {
   const logs: string[] = [];
+  const sipAt: number[] = [];
   const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-recovery-cache-'));
   const boot = Date.now();
-  const mon = B.startBroadcastMonitor(store, (m) => logs.push(m), {
+  const mon = B.startBroadcastMonitor(store, (m) => { logs.push(m); sipAt.push(sipPlays); }, {
     klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', renderTts, tickMs: 10,
     ...(wired ? { alertSetSettledSince: () => settledSince } : {}),
     ...(retryDelaysMs ? { retryDelaysMs } : {}),
+    ...(sipTimeoutProbeDelayMs != null ? { sipTimeoutProbeDelayMs } : {}),
   });
-  const r: Rig = {
+  const r: RecordingRig = {
     mon, boot, logs,
     has: (s) => logs.some((l) => l.includes(s)),
     count: (s) => logs.filter((l) => l.includes(s)).length,
+    sipPlaysAt: (s) => {
+      const i = logs.findIndex((l) => l.includes(s));
+      if (i < 0) throw new Error(`never logged: ${s}`);
+      return sipAt[i];
+    },
     stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true }); },
   };
   live.push(r);
@@ -179,6 +223,11 @@ async function until(r: Rig, pred: () => boolean, what: string, ms = 8000): Prom
     if (realNow() - start > ms) throw new Error(`timed out waiting for ${what}\n${r.logs.join('\n')}`);
     await sleep(5);
   }
+}
+/** Wait until `n` timers of `ms` are held, then run them (exactly `n`). */
+async function fireWhenArmed(r: Rig, ms: number, n: number, what: string): Promise<void> {
+  await until(r, () => armed(ms) >= n, what);
+  assert.equal(fire(ms), n, what);
 }
 /** A completed condition broadcast of `level`. */
 const played = (r: Rig, level: string) => r.count(`broadcast: ${level} → ok in`);
@@ -229,6 +278,7 @@ const statusFile = (): Record<string, unknown> => JSON.parse(readFileSync(STATUS
 
 beforeEach(() => {
   for (const r of live.splice(0)) r.stop();
+  for (const t of held.splice(0)) realClearTimeout(t.handle); // a stopped monitor's probes are never run
   rmSync(STATUS_PATH, { force: true });
   rmSync(process.env.BROADCAST_RED_REPLAY_STATE_PATH!, { force: true });
   announces = 0;
@@ -247,6 +297,9 @@ beforeEach(() => {
 });
 after(async () => {
   for (const r of live.splice(0)) r.stop();
+  for (const t of held.splice(0)) realClearTimeout(t.handle);
+  globalThis.setTimeout = realSetTimeout;
+  globalThis.clearTimeout = realClearTimeout;
   setGlobalDispatcher(prevDispatcher);
   await agent.close();
   rmSync(ROOT, { recursive: true, force: true });
@@ -1345,15 +1398,18 @@ test('★★ …but a red the cordless refused while every speaker was unavailab
 
 // v1.187.10 — a target that REPORTS playback ('playing' 8 s on). The Switchboard announce entity does
 // not (it stays 'idle' through every call): see the v1.187.10 tests below.
-test('★★ a red the cordless played though its HTTP response was lost (a target that reports playback: the entity state confirms it, 8 s on) was audible: announced', { timeout: 60_000 }, async () => {
+test('★★ a red the cordless played though its HTTP response was lost (a target that reports playback: the entity state confirms it, 8 s on) was audible: announced', async () => {
   await heard('yellow');
   process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
   sipTimeout = true;
   cordlessState = 'playing'; // the announce call is ringing through
   settledSince = null;
-  const b = rig();
+  const b = rig(true, undefined, HELD_PROBE_MS);
   maState = 'unavailable';
-  await heldGreenAfterRed(b, () => until(b, () => b.has('SIP delivery confirmed via entity state after an HTTP timeout'), 'the probe confirming the cordless played', 20_000));
+  await heldGreenAfterRed(b, async () => {
+    await fireWhenArmed(b, HELD_PROBE_MS, 1, 'the probe, armed by the timed-out dispatch');
+    await until(b, () => b.has('SIP delivery confirmed via entity state after an HTTP timeout'), 'the probe confirming the cordless played');
+  });
   maState = 'idle';
   assert.ok(b.has(WHAT_FOLLOWS('announced as a transition (a red condition was audible after the restart)')));
   await stepTo(b, DECISION_DUE + SEC);
@@ -1370,17 +1426,18 @@ test('★★ a red the cordless played though its HTTP response was lost (a targ
 const PROBE_UNKNOWN = 'SIP dispatch timed out — delivery UNKNOWN (media_player.cordless reads idle;';
 const WAITS = 'waits for the broadcast in flight (or a condition retry still armed)';
 
-test('★★★ v1.187.10: an idle-entity timeout is UNKNOWN, not audible — the restart decision waits for the armed retry, and the retry\'s re-fire reaching the cordless makes the red audible: announced', { timeout: 90_000 }, async () => {
+test('★★★ v1.187.10: an idle-entity timeout is UNKNOWN, not audible — the restart decision waits for the armed retry, and the retry\'s re-fire reaching the cordless makes the red audible: announced', async () => {
   await heard('yellow');
   process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
   sipTimeout = true;
   cordlessState = 'idle'; // as the live entity reads, call or no call
   settledSince = null;
-  const b = rig(true, [12_000, 12_000, 12_000]); // the retry fires after the probe and the close
+  const b = rig(true, [HELD_RETRY_MS, HELD_RETRY_MS, HELD_RETRY_MS], HELD_PROBE_MS); // the probe, the close, then the retry
   maState = 'unavailable';
   await heldGreenAfterRed(b, () => until(b, () => b.has('broadcast: red deferred') && b.has('SIP play_media failed for 1/1'), 'the red: the cordless response lost, every speaker away'));
   assert.ok(b.has(WHAT_FOLLOWS('adopted silently as a continuation')), 'nothing audible: the timed-out call is unknown');
-  await until(b, () => b.has(PROBE_UNKNOWN), 'the probe: delivery unknown', 12_000);
+  await fireWhenArmed(b, HELD_PROBE_MS, 1, 'the probe, armed by the timed-out dispatch');
+  await until(b, () => b.has(PROBE_UNKNOWN), 'the probe: delivery unknown');
   const probe = b.logs.find((l) => l.includes(PROBE_UNKNOWN))!;
   assert.ok(probe.includes('not counted as heard or delivered'), probe);
   assert.ok(!b.has('target is not playing'), 'the probe no longer claims the call did not ring');
@@ -1391,24 +1448,31 @@ test('★★★ v1.187.10: an idle-entity timeout is UNKNOWN, not audible — th
   assert.ok(!b.has(WARMUP_ENDED), 'not adopted silently while the retry can still make the red audible');
   assert.ok(!b.has(CLOSED_AUDIBLE));
   sipTimeout = false; // the retry's re-fire is answered
-  await until(b, () => b.has(CLOSED_AUDIBLE), 'announced: the retry\'s re-fire reached the cordless', 20_000);
-  assert.equal(sipPlays, 1, 'the retry re-fired the cordless (the timed-out first dispatch never reached the reply counter)');
+  assert.equal(fire(HELD_RETRY_MS), 1, 'the red\'s retry, still armed when the question closed');
+  await until(b, () => b.has(CLOSED_AUDIBLE), 'announced: the retry\'s re-fire reached the cordless');
+  // Counted when the decision is logged: the all-clear it announces dispatches the cordless next, and a
+  // poll that lands after that dispatch read 2 (CI, 2026-10-05).
+  assert.equal(b.sipPlaysAt(CLOSED_AUDIBLE), 1, 'the retry re-fired the cordless (the timed-out first dispatch never reached the reply counter)');
   assert.ok(b.count('SIP announce → 1 target(s)') >= 1);
   assert.ok(!b.has(WARMUP_ENDED));
   assert.equal(b.count(WAITS), 1, 'said once');
 });
 
-test('★★★ v1.187.10: …and when every re-fire times out too, the red is never counted as heard: re-fired by every retry, then adopted silently (the documented residual)', { timeout: 60_000 }, async () => {
+test('★★★ v1.187.10: …and when every re-fire times out too, the red is never counted as heard: re-fired by every retry, then adopted silently (the documented residual)', async () => {
   await heard('yellow');
   process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
   sipTimeout = true;
   cordlessState = 'idle';
   settledSince = null;
-  const b = rig(true, [200, 200, 200]);
+  const b = rig(true, [200, 200, 200], HELD_PROBE_MS);
   maState = 'unavailable';
   await heldGreenAfterRed(b, () => until(b, () => b.has('giving up after 3 deferred red retries'), 'the red: every speaker away, its retries spent'));
-  await stepTo(b, DECISION_DUE + SEC);
-  await until(b, () => b.has(WARMUP_ENDED), 'adopted silently once the probes have landed', 20_000);
+  await stepTo(b, DECISION_DUE + SEC); // the question closes with the four probes pending
+  await until(b, () => b.has(WAITS), 'the decision waits for the pending probes');
+  await sleep(60);
+  assert.ok(!b.has(WARMUP_ENDED), 'not adopted before the probes have landed');
+  await fireWhenArmed(b, HELD_PROBE_MS, 4, 'the four probes, one per dispatch');
+  await until(b, () => b.has(WARMUP_ENDED), 'adopted silently once the probes have landed');
   assert.equal(b.count(PROBE_UNKNOWN), 4, 'the first dispatch and each of the three retries re-fired the cordless, each unknown');
   assert.equal(b.count('SIP play_media failed for 1/1'), 4);
   assert.ok(!b.has('SIP delivery confirmed'));
@@ -1416,30 +1480,31 @@ test('★★★ v1.187.10: …and when every re-fire times out too, the red is n
   assert.equal(played(b, 'green'), 0);
 });
 
-test('★★ v1.187.10: the restart decision waits for a timeout probe still pending after the last retry has given up (a target that reports playback confirms it): announced', { timeout: 60_000 }, async () => {
+test('★★ v1.187.10: the restart decision waits for a timeout probe still pending after the last retry has given up (a target that reports playback confirms it): announced', async () => {
   await heard('yellow');
   process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
   sipTimeout = true;
   cordlessState = 'playing'; // a target that reports playback
   settledSince = null;
-  const b = rig(true, [200, 200, 200]);
+  const b = rig(true, [200, 200, 200], HELD_PROBE_MS);
   maState = 'unavailable';
   await heldGreenAfterRed(b, () => until(b, () => b.has('giving up after 3 deferred red retries'), 'the red: its retries spent, its probes pending'));
   assert.ok(!b.has('SIP delivery confirmed'), 'the probes run 8 s after each dispatch');
   await stepTo(b, DECISION_DUE + SEC); // no retry armed: only the pending probes hold the decision
   await until(b, () => b.has(WAITS), '★ the decision waits for the pending probes');
-  await until(b, () => b.has(CLOSED_AUDIBLE), 'announced once a probe confirmed the call', 20_000);
+  await fireWhenArmed(b, HELD_PROBE_MS, 4, 'the four probes, one per dispatch');
+  await until(b, () => b.has(CLOSED_AUDIBLE), 'announced once a probe confirmed the call');
   assert.ok(!b.has(WARMUP_ENDED));
 });
 
-test('★★ v1.187.10: the restart CONTINUATION waits for an armed red retry too — its re-fire reaching the cordless ends the continuation, and the yellow is spoken', { timeout: 90_000 }, async () => {
+test('★★ v1.187.10: the restart CONTINUATION waits for an armed red retry too — its re-fire reaching the cordless ends the continuation, and the yellow is spoken', async () => {
   await heard('yellow');
   alerts = []; // the boot green
   settledSince = 0;
   process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
   sipTimeout = true;
   cordlessState = 'idle';
-  const b = rig(true, [12_000, 12_000, 12_000]);
+  const b = rig(true, [HELD_RETRY_MS, HELD_RETRY_MS, HELD_RETRY_MS], HELD_PROBE_MS);
   await sleep(80);
   maState = 'unavailable';
   alerts = [CRIT_A, WARN_K];
@@ -1449,12 +1514,39 @@ test('★★ v1.187.10: the restart CONTINUATION waits for an armed red retry to
   offset += DWELL + SEC; // the yellow has stood its dwell while the red's retry is armed
   await sleep(120);
   assert.equal(b.count(CONTINUATION), 0, '★ not filed as a continuation while the retry can still make the red audible');
+  await fireWhenArmed(b, HELD_PROBE_MS, 1, 'the probe, armed by the timed-out dispatch');
+  await until(b, () => b.has(PROBE_UNKNOWN), 'the probe: delivery unknown');
+  await sleep(60);
+  assert.equal(b.count(CONTINUATION), 0, '★ nor once the probe has landed: the armed retry alone holds it');
   sipTimeout = false; // the retry's re-fire is answered
-  await until(b, () => b.has('yellow held for boot confirmation'), 'the yellow, a transition once the red was audible', 20_000);
+  assert.equal(fire(HELD_RETRY_MS), 1, 'the red\'s retry');
+  await until(b, () => b.has('yellow held for boot confirmation'), 'the yellow, a transition once the red was audible');
   assert.equal(b.count(CONTINUATION), 0);
   maState = 'idle';
   offset += B.BOOT_YELLOW_CONFIRM_MS + 5 * SEC;
   await until(b, () => played(b, 'yellow') === 1, 'the yellow: the red the cordless took has cleared');
+});
+
+test('★★ the timeout probe reads the cordless 8 s after a timed-out dispatch (SIP_TIMEOUT_PROBE_DELAY_MS) when no seam is passed: production\'s delay', async () => {
+  process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
+  sipTimeout = true;
+  cordlessState = 'idle';
+  holdMs.add(8_000); // the production delay, held: the probe runs when the test fires it
+  try {
+    const b = rig(); // no sipTimeoutProbeDelayMs, as production
+    await sleep(80);
+    maState = 'unavailable'; // nothing plays: the red is the cordless dispatch alone
+    alerts = [CRIT_A];
+    await until(b, () => b.has('SIP play_media failed for 1/1'), 'the timed-out dispatch');
+    await until(b, () => armed(8_000) === 1, 'the probe, armed for 8 s');
+    await sleep(60);
+    assert.ok(!b.has(PROBE_UNKNOWN), 'not read before its 8 s');
+    assert.equal(fire(8_000), 1);
+    await until(b, () => b.has(PROBE_UNKNOWN), 'the probe, run when its 8 s are up');
+    assert.equal(B.SIP_TIMEOUT_PROBE_DELAY_MS, 8_000);
+  } finally {
+    holdMs.delete(8_000);
+  }
 });
 
 test('★★ a red Music Assistant returned in under 2 s was not audible (HA answered without playing): adopted silently', async () => {

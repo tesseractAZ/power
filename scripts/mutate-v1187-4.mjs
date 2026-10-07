@@ -28,12 +28,16 @@
  * requested in is current (broadcast.conditionRetryStale), checked when it runs; a stale one never
  * keeps a newer deferral from arming. Dedicated announcements are unchanged. Mutants R-i..R-xi.
  *
+ * (5) v1.187.12 — the timeout probe's delay is a test seam (BroadcastMonitorOpts.sipTimeoutProbeDelayMs):
+ * without it the probe waits SIP_TIMEOUT_PROBE_DELAY_MS (8 s), pinned through the real monitor; the
+ * probe tests pass the seam and run the probe when the scenario says. Mutants S-i..S-iii.
+ *
  * Not mutated: the episode a deferred retry passes to its own re-run (the run-time check reads the
  * armed episode from its closure first, so a re-run in a later episode is always dropped before it
  * could re-arm); the `else if (heard)` keeping a same-level heard adoption audible (no test reaches a
  * same-level heard adoption whose audibility changes an outcome); `!inWarmup` on the decision branch
- * (the question is always open through the warm-up); the SIP probe's short read caps (an 8 s real-time
- * probe against a hung Home Assistant).
+ * (the question is always open through the warm-up); the SIP probe's short read caps (undici's
+ * headersTimeout/bodyTimeout are not applied under MockAgent, so no rig can hang a read against them).
  *
  *   node scripts/mutate-v1187-4.mjs
  *
@@ -529,6 +533,29 @@ const MUTANTS = [
     // v1.187.5 — A's retry, once C is heard, is dropped when it runs (conditionRetrySuperseded): the
     // cancel's remaining effect is the slot it frees.
     why: 'C reaches the speakers while A\'s timer is armed: A\'s moot retry keeps the slot, a warning failing under the kept red is kept pending behind it instead of arming, and when A\'s retry is dropped the warning is never retried.',
+  },
+
+  /* ── (5) the probe-delay seam ─────────────────────────────────────────────────────────── */
+  {
+    id: 'S-i. ★★★ without the seam the probe runs at once',
+    file: BR,
+    find: '  const SIP_PROBE_DELAY_MS: number = opts.sipTimeoutProbeDelayMs ?? SIP_TIMEOUT_PROBE_DELAY_MS;',
+    to: '  const SIP_PROBE_DELAY_MS: number = opts.sipTimeoutProbeDelayMs ?? 0; /* MUTANT */',
+    why: 'Production reads the cordless entity before an announce call is under way: a target that reports playback reads idle, and the duplicate re-fire v1.48.3 suppresses rings the phone again.',
+  },
+  {
+    id: 'S-ii. ★★ the production delay is not 8 s',
+    file: BR,
+    find: 'export const SIP_TIMEOUT_PROBE_DELAY_MS = 8_000;',
+    to: 'export const SIP_TIMEOUT_PROBE_DELAY_MS = 2_000; /* MUTANT */',
+    why: 'The probe reads the entity 2 s in, before a real call is mid-announce.',
+  },
+  {
+    id: 'S-iii. ★ the seam never reaches the probe',
+    file: BR,
+    find: '              }, SIP_PROBE_DELAY_MS);',
+    to: '              }, SIP_TIMEOUT_PROBE_DELAY_MS); /* MUTANT */',
+    why: 'Every probe test waits out the real 8 s again, its order a race against the clock steps (the 2026-10-05 CI flake class).',
   },
 ];
 
