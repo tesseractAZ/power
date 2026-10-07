@@ -318,7 +318,7 @@ test('★★ a red retry survives a warning spoken while the committed level sta
 });
 
 test('★★★ review: red A → red C on one tick (one episode): C takes the slot with its own retries — no "giving up" with no attempt, and A\'s cleared text is never spoken', async () => {
-  // v1.187.9 — 800 ms between retries (was 150): C's announcement must run while A's third retry is
+  // v1.187.11 — 800 ms between retries (was 150): C's announcement must run while A's third retry is
   // still on its timer. On a loaded machine 150 ms let that retry fire first; it then yielded to C's
   // announcement queued behind it (conditionRetryAtRun), so C armed a fresh budget of its own instead
   // of taking the slot — the same outcome, by a path this test does not pin.

@@ -109,18 +109,105 @@ export function nwsAlertsBackingOff(
   return failedAtMs != null && nowMs >= failedAtMs && nowMs - failedAtMs < backoffMs;
 }
 
+/**
+ * v1.187.10 (log review 10-03) — the oldest last-good alerts feed the storm-prep (alarm) path still
+ * reads as current.
+ *
+ * After the first successful fetch, a failed fetch answers with the last good feed (a warning stays a
+ * warning), and nothing bounded its age: through an api.weather.gov outage that began after a boot,
+ * stormPrepAlerts kept building storm alerts from a feed hours old and returned them as a normal
+ * answer, so the alert monitor's storm-prep feed read fresh (carrying: false, no error) and its carry
+ * log and stuck-feed WARNING never engaged. A new warning issued during the outage was silently
+ * missed while every surface read healthy. Past this age getNwsAlerts answers null — UNKNOWN — on the
+ * alarm path: stormPrepAlerts throws, the feed carries its last good value (the storm alerts stay
+ * held, not cleared), and the carry log, the stuck-feed WARNING and /api/notify/status show it. The
+ * display route (/api/nws-alerts, the calendar) keeps the last good feed (maxCarryMs = Infinity).
+ */
+export const NWS_ALERTS_MAX_CARRY_MS = 60 * 60_000;
+
+/**
+ * v1.187.10 — is a feed fetched at `fetchedAtMs` past the carry limit at `nowMs`? A feed "from the
+ * future" (the clock stepped back) is not. Pure + exported for tests.
+ */
+export function nwsAlertsCarryExpired(
+  fetchedAtMs: number | null,
+  nowMs: number,
+  maxCarryMs = NWS_ALERTS_MAX_CARRY_MS,
+): boolean {
+  return fetchedAtMs != null && nowMs - fetchedAtMs > maxCarryMs;
+}
+
 /** v1.187.3 (log review) — when the last alerts fetch failed (null: none has). */
 let alertsFailedAt: number | null = null;
 /** v1.187.3 (log review) — concurrent callers (the alert monitor's storm-prep feed, /api/nws-alerts,
  *  the calendar) share one request. */
 const alertsFlight = singleFlight<NwsAlertFeed | null>();
 
-export async function getNwsAlerts(log: (m: string) => void = () => {}): Promise<NwsAlertFeed | null> {
+/**
+ * v1.187.10 (log review 10-03) — the alerts client's log sinks, installed once per process
+ * (setNwsLog; startAlertMonitor installs the monitor's info and warn sinks).
+ *
+ * Every caller used to call getNwsAlerts() with no logger, so the success line and the v1.187.3
+ * failure line could never reach the journal: 40.8 h of log held no trace of a storm-alert fetch
+ * while nws-cloud logged 20. The client logs state TRANSITIONS, not every success: the first
+ * answer, a change in the set of active events, the first failure of an outage, the carry limit
+ * passing (warn), and the recovery.
+ */
+let nwsInfo: (m: string) => void = () => {};
+let nwsWarn: (m: string) => void = (m) => nwsInfo(m);
+export function setNwsLog(info: (m: string) => void, warn: (m: string) => void = info): void {
+  nwsInfo = info;
+  nwsWarn = warn;
+}
+
+/** v1.187.10 — the current failure episode (since the last success). */
+let alertsFailingSinceMs: number | null = null;
+let alertsFailedAttempts = 0;
+let alertsLastError: string | null = null;
+/** v1.187.10 — the carry limit has been warned about in this episode. */
+let alertsCarryWarned = false;
+/** v1.187.10 — the sorted active-event list of the last successful answer (null: none yet). */
+let alertsEventsKey: string | null = null;
+
+/** v1.187.10 — test seam: forget the transition state (not the cache). */
+export function resetNwsAlertsLogStateForTesting(): void {
+  alertsFailingSinceMs = null;
+  alertsFailedAttempts = 0;
+  alertsLastError = null;
+  alertsCarryWarned = false;
+  alertsEventsKey = null;
+}
+
+/**
+ * The NWS active-alerts feed, or null when it is UNKNOWN: NWS off, no fetch has succeeded yet, or —
+ * v1.187.10 — the last good feed is older than `maxCarryMs` (default NWS_ALERTS_MAX_CARRY_MS, the
+ * alarm path's limit; the display route passes Infinity).
+ */
+export async function getNwsAlerts(opts: { maxCarryMs?: number } = {}): Promise<NwsAlertFeed | null> {
   if (!isNwsEnabled()) return null;
   if (cache && Date.now() - cache.fetchedAt < TTL_MS) return cache;
   // v1.187.3 (log review) — inside the backoff after a failed fetch: the failure's answer, no request.
-  if (nwsAlertsBackingOff(alertsFailedAt, Date.now())) return cache;
-  return alertsFlight.run(() => fetchNwsAlerts(log));
+  const feed = nwsAlertsBackingOff(alertsFailedAt, Date.now())
+    ? cache
+    : await alertsFlight.run(() => fetchNwsAlerts(nwsInfo));
+  const maxCarryMs = opts.maxCarryMs ?? NWS_ALERTS_MAX_CARRY_MS;
+  if (feed != null && nwsAlertsCarryExpired(feed.fetchedAt, Date.now(), maxCarryMs)) {
+    if (!alertsCarryWarned) {
+      alertsCarryWarned = true;
+      nwsWarn(
+        `nws: WARNING — no successful storm-alert fetch for ${Math.round((Date.now() - feed.fetchedAt) / 60_000)} min`
+        + ` (last error: ${alertsLastError ?? 'unknown'}); the last good feed is past its`
+        + ` ${Math.round(maxCarryMs / 60_000)}-min carry limit, so storm alerts are UNKNOWN until api.weather.gov answers`
+        + ' (the storm-prep feed holds its last alerts)',
+      );
+    }
+    return null;
+  }
+  return feed;
+}
+
+function eventsList(alerts: NwsAlert[]): string {
+  return alerts.length > 0 ? `: ${alerts.map((a) => a.event).join(', ')}` : '';
 }
 
 async function fetchNwsAlerts(log: (m: string) => void): Promise<NwsAlertFeed | null> {
@@ -157,11 +244,33 @@ async function fetchNwsAlerts(log: (m: string) => void): Promise<NwsAlertFeed | 
       };
     });
     cache = { fetchedAt: Date.now(), lat, lon, alerts };
-    log(`nws: fetched ${alerts.length} active alert(s) for ${lat},${lon}`);
+    // v1.187.10 — state transitions only: the first answer, a recovery, a changed event set.
+    const key = alerts.map((a) => a.event).sort().join(' | ');
+    if (alertsFailingSinceMs != null) {
+      log(`nws: storm-alert feed recovered after ${alertsFailedAttempts} failed attempt(s) over ${Math.max(1, Math.round((Date.now() - alertsFailingSinceMs) / 60_000))} min — ${alerts.length} active alert(s)${eventsList(alerts)}`);
+    } else if (alertsEventsKey == null) {
+      log(`nws: storm-alert feed live — ${alerts.length} active alert(s) for ${lat},${lon}${eventsList(alerts)}`);
+    } else if (key !== alertsEventsKey) {
+      log(`nws: active alerts changed — ${alerts.length} now${eventsList(alerts)}`);
+    }
+    alertsEventsKey = key;
+    alertsFailingSinceMs = null;
+    alertsFailedAttempts = 0;
+    alertsLastError = null;
+    alertsCarryWarned = false;
     return cache;
   } catch (e: any) {
     alertsFailedAt = Date.now();
-    log(`nws: fetch failed (${e?.message ?? e}) — the last good feed is served${cache == null ? ' (none yet: storm alerts unknown)' : ''}; asked again in ${Math.round(NWS_ALERTS_FAILURE_BACKOFF_MS / 1000)} s at the earliest`);
+    alertsFailedAttempts++;
+    alertsLastError = String(e?.message ?? e);
+    // v1.187.10 — the FIRST failure of an outage; the recovery line closes it.
+    if (alertsFailingSinceMs == null) {
+      alertsFailingSinceMs = alertsFailedAt;
+      log(`nws: storm-alert fetch failed (${alertsLastError}) — ${cache == null
+        ? 'no feed yet: storm alerts are UNKNOWN'
+        : `the last good feed (${Math.round((Date.now() - cache.fetchedAt) / 60_000)} min old) is carried for at most ${Math.round(NWS_ALERTS_MAX_CARRY_MS / 60_000)} min`
+      }; asked again every ${Math.round(NWS_ALERTS_FAILURE_BACKOFF_MS / 1000)} s; logged once per outage, with a recovery line`);
+    }
     return cache;
   }
 }

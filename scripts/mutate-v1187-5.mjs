@@ -17,20 +17,20 @@
  * A lower announcement never supersedes a higher retry; dedicated announcements are unchanged.
  * Mutants S-i..S-xiii.
  *
- * v1.187.9 — what a condition retry SAYS when it runs is decided by the IDENTITY of the alert its
+ * v1.187.11 — what a condition retry SAYS when it runs is decided by the IDENTITY of the alert its
  * words name (broadcast.conditionRetryWords): the same alert replays the armed words (rendered
  * already; the cordless skipped as armed), a different one gets the tick's words and tone now and
  * re-fires the cordless after the tick's identity gates (repeat warning, red replay); a retry ahead
  * of the announcement naming that alert yields to it; an armed alert the speech gates now drop is not
  * replayed; a throw replays the armed words. A failed spoken render earns the spoken retry, and a
  * refusal by the same-level gap one re-present, never over a waiting one (refusedRetryRepresent).
- * Mutants W-i..W-xxx, against conditionRetryWords.test.ts with the subset above. v1.187.9 (review): the
+ * Mutants W-i..W-xxx, against conditionRetryWords.test.ts with the subset above. v1.187.11 (review): the
  * naming pool (conditionNamePool), the repeat-warning record of a retry, the green and policy-mute
  * gates, the kept spoken retry and the kept red's re-present — W-xxxi..W-xliii; round 2: the 90 s
  * spoken retry's all-clear gate and repeat record, the kept-pending rule, the Spanish pool — W-xliv..W-xlvii;
  * round 3: the spoken-retry slot judged by the level observed — W-xlviii, W-xlix.
  *
- * Not mutated (v1.187.9): `retryOf == null` and `kind === 'condition'` in the queued count (a retry
+ * Not mutated (v1.187.11): `retryOf == null` and `kind === 'condition'` in the queued count (a retry
  * counted in while it waits is counted out when it runs, before it reads the count, and a dedicated
  * announcement names no alert); the dedicated retry path (it never reaches conditionRetryAtRun); the
  * all-clear speech gate's own predicate (allClearSpeechBlocked, pinned by its v1.166.0 tests).
@@ -59,7 +59,7 @@ const SUBSET = [
   'test/conditionRetryNewestWins.test.ts',
   'test/staleConditionRetry.test.ts',
   'test/broadcastRetryBudget.test.ts',
-  'test/conditionRetryWords.test.ts', // v1.187.9
+  'test/conditionRetryWords.test.ts', // v1.187.11
 ];
 
 const MUTANTS = [
@@ -156,7 +156,7 @@ const MUTANTS = [
     to: "  /* MUTANT */\n  return (Object.keys(RETRY_LEVEL_RANK) as ConditionLevel[])",
     why: 'A SoC-ladder alarm\'s retry queued behind a newer condition announcement is dropped: the dedicated alarm is never heard.',
   },
-  /* ── v1.187.9 — what a condition retry SAYS when it runs (conditionRetryWords) ────────────────── */
+  /* ── v1.187.11 — what a condition retry SAYS when it runs (conditionRetryWords) ────────────────── */
   {
     id: 'W-i. ★★★ the words are rebuilt for the same alert (a reading that moved)',
     file: BR,
@@ -181,21 +181,21 @@ const MUTANTS = [
   {
     id: 'W-iv. ★★ the tone of the set the retry was armed with rides the new words',
     file: BR,
-    find: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints, observed: now.level };', // v1.187.9 (review) — re-pointed
+    find: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints, observed: now.level };', // v1.187.11 (review) — re-pointed
     to: '      return { rung: armed.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints, observed: now.level }; /* MUTANT */',
     why: 'C (High) is announced with the Critical tone of the cleared A: tone and words disagree.',
   },
   {
     id: 'W-v. ★★★ the cordless is skipped for words that name a different alert',
     file: BR,
-    find: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints, observed: now.level };', // v1.187.9 (review) — re-pointed
+    find: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: false, named: w.namedFp, warnFps: w.warningFingerprints, observed: now.level };', // v1.187.11 (review) — re-pointed
     to: '      return { rung: w.rung, message: w.message, messageEs: w.messageEs, skipSip: armed.skipSip, named: w.namedFp, warnFps: w.warningFingerprints, observed: now.level }; /* MUTANT */',
     why: 'THE WITHDRAWN FIX: the cordless heard A on the first dispatch and never hears C.',
   },
   {
     id: 'W-vi. ★★ the cordless is dispatched again for the same alert',
     file: BR,
-    find: "      if (w.action === 'replay') return { ...armed, warnFps: now.warningFingerprints, observed: now.level };", // v1.187.9 (review) — re-pointed
+    find: "      if (w.action === 'replay') return { ...armed, warnFps: now.warningFingerprints, observed: now.level };", // v1.187.11 (review) — re-pointed
     to: "      if (w.action === 'replay') return { ...armed, skipSip: false, warnFps: now.warningFingerprints, observed: now.level }; /* MUTANT */",
     why: 'The cordless, which took these words on the first dispatch, plays them again at +30 s.',
   },
@@ -209,14 +209,14 @@ const MUTANTS = [
   {
     id: 'W-viii. ★★★ an armed alert the speech gates now drop is replayed',
     file: BR,
-    find: '  if (armedFp != null && raw.some((a) => alertFingerprint(a) === armedFp) && (voiced == null || policyMuted)) {', // v1.187.9 (review) — re-pointed
+    find: '  if (armedFp != null && raw.some((a) => alertFingerprint(a) === armedFp) && (voiced == null || policyMuted)) {', // v1.187.11 (review) — re-pointed
     to: '  if ((false as boolean) && armedFp != null && raw.some((a) => alertFingerprint(a) === armedFp) && (voiced == null || policyMuted)) { /* MUTANT */',
     why: 'A cell-imbalance warning back inside its speak hold (or silenced, or card-and-push only) is spoken by its retry.',
   },
   {
     id: 'W-ix. ★★ a green retry ignores the all-clear speech gate',
     file: BR,
-    find: '    return allClearSpeechBlocked(speakable)', // v1.187.9 (review) — re-pointed
+    find: '    return allClearSpeechBlocked(speakable)', // v1.187.11 (review) — re-pointed
     to: '    return (false as boolean) && allClearSpeechBlocked(speakable) /* MUTANT */',
     why: '"All clear" is retried while a critical is active (the reserve floor, a held telemetry-blind alarm).',
   },
@@ -311,18 +311,18 @@ const MUTANTS = [
     to: '          const result = await runBroadcast(want, wantRung, message, true, messageEs, false, /* MUTANT */',
     why: 'C (High) is spoken with the Critical tone of the cleared A.',
   },
-  /* ── v1.187.9 — what a condition retry leaves to the tick (afterConditionRetry) ──────────────── */
+  /* ── v1.187.11 — what a condition retry leaves to the tick (afterConditionRetry) ──────────────── */
   {
     id: 'W-xxiii. ★★★ a condition retry\'s result is discarded',
     file: BR,
-    find: '      if (retried) afterConditionRetry(level, w.rung, w.named, w.warnFps, w.observed, result);', // v1.187.9 (review) — re-pointed
+    find: '      if (retried) afterConditionRetry(level, w.rung, w.named, w.warnFps, w.observed, result);', // v1.187.11 (review) — re-pointed
     to: '      /* MUTANT */',
     why: 'A retry whose new words cannot be rendered sounds the tone alone and the speech never follows; a refused warning waits for the commit down to it.',
   },
   {
     id: 'W-xxiv. ★★★ a retry\'s failed spoken render earns no spoken retry',
     file: BR,
-    find: '    if (!kept) noteSpokenRenderFailure(level, rung, result);', // v1.187.9 (review) — re-pointed
+    find: '    if (!kept) noteSpokenRenderFailure(level, rung, result);', // v1.187.11 (review) — re-pointed
     to: '    if (!kept && (false as boolean)) noteSpokenRenderFailure(level, rung, result); /* MUTANT */',
     why: 'Speech stalled: the retry naming C plays the tone, and C is never spoken.',
   },
@@ -368,7 +368,7 @@ const MUTANTS = [
     to: '  return { level, dueAtMs: lastPlayed.atMs, fresh: lower || named == null ? null : [named] }; /* MUTANT */',
     why: 'Re-presented on the next tick, the gap refuses it again, and a re-present is never re-armed: the warning is lost.',
   },
-  /* ── v1.187.9 (review) — the naming pool, the repeat-warning record, the gates, the kept spoken retry, the kept red ── */
+  /* ── v1.187.11 (review) — the naming pool, the repeat-warning record, the gates, the kept spoken retry, the kept red ── */
   {
     id: 'W-xxxi. ★★★ the tick\'s words name from every speakable alert, not the counted ones',
     file: BR,
@@ -379,7 +379,7 @@ const MUTANTS = [
   {
     id: 'W-xxxii. ★★★ the named identity ranks every speakable alert',
     file: BR,
-    find: '  const primary = pickPrimaryAlert(conditionNamePool(alerts), level); // v1.187.9 — only an alert it counts',
+    find: '  const primary = pickPrimaryAlert(conditionNamePool(alerts), level); // v1.187.11 — only an alert it counts',
     to: '  const primary = pickPrimaryAlert(alerts, level); /* MUTANT */',
     why: 'THE REVIEW\'S M1: the band\'s reading moves, the retry reads a different alert, calls the cordless again (and, with speech stalled, plays the tone alone).',
   },
@@ -442,7 +442,7 @@ const MUTANTS = [
   {
     id: 'W-xli. ★★ a retry\'s render failure replaces the spoken retry already pending',
     file: BR,
-    find: '    const kept = pending != null && speaks(pending.level, pending.message !== undefined)', // v1.187.9 (review, round 3) — re-pointed
+    find: '    const kept = pending != null && speaks(pending.level, pending.message !== undefined)', // v1.187.11 (review, round 3) — re-pointed
     to: '    const kept = (false as boolean) && pending != null && speaks(pending.level, pending.message !== undefined) /* MUTANT */',
     why: 'The SoC ladder\'s or runway alarm\'s speech is replaced by the condition\'s and never delivered.',
   },
@@ -460,7 +460,7 @@ const MUTANTS = [
     to: '          if ((true as boolean) || held.level === prevLevel) endDeescalationHold( /* MUTANT */',
     why: 'An abandoned de-escalation is logged under a red that still holds, the heard flag flips twice, and the hold restarts.',
   },
-  /* ── v1.187.9 (review, round 2) — the 90 s spoken retry, the kept-pending rule, the Spanish pool ── */
+  /* ── v1.187.11 (review, round 2) — the 90 s spoken retry, the kept-pending rule, the Spanish pool ── */
   {
     id: 'W-xliv. ★★★ the spoken retry of an all-clear ignores the all-clear speech gate',
     file: BR,

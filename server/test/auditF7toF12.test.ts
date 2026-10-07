@@ -7,6 +7,7 @@ import { pollLogLines } from '../src/snapshot.js';
 import { computeAlerts } from '../src/alerts.js';
 import { setReserveArbitrageRaised } from '../src/nightChargeActuator.js';
 import { buyDebiasUnmeasuredLogLine } from '../src/nightChargeAdvisor.js';
+import { clearedLedgerCapNote } from '../src/alertMonitor.js';
 
 /**
  * v1.144.0 — F7 through F12 of the 2026-09-09 log audit.
@@ -124,8 +125,12 @@ test('★ F11: the buy de-bias reports its BASIS, not just a bare 1.000', () => 
 test('F12.1: a saturated cleared-alert ledger announces that it is dropping rows', () => {
   // It rehydrated at exactly 1500 on all ten boots — which is CLEARED_LOG_MAX,
   // recognisable as saturation only if you know the cap.
+  // v1.187.10 — the note also says what each new clear evicts (clearedLedgerCapNote, driven here and
+  // in clearedLedgerRetention); the rehydrate line reaching the log is pinned through the real
+  // alert monitor in v1187_10Wiring.test.ts. The call site, last resort (labelled source pin):
   const s = src('alertMonitor.ts');
-  assert.match(s, /AT CAP \$\{CLEARED_LOG_MAX\} — older records are being dropped/);
+  assert.match(s, /const saturated = clearedLog\.length >= CLEARED_LOG_MAX \? clearedLedgerCapNote\(clearedLog, CLEARED_LOG_MAX, Date\.now\(\)\) : '';/);
+  assert.match(clearedLedgerCapNote([], 1500, 0), /^ \[AT CAP 1500 — /);
   assert.match(s, /oldest retained/, 'and states how far back it actually reaches');
 });
 

@@ -18,7 +18,7 @@ Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each =
 92 kWh usable), a **42-panel / ~16.8 kW** array, and an EVSE — on the APS R-EV
 time-of-use rate.
 
-> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~10,822
+> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~11,154
 > lines) documents **every** feature and engine — what each does, the exact
 > algorithm and math it computes, how data traces through the pipeline, its
 > endpoints/sensors, config knobs, and edge-case guards. This README is the tour;
@@ -107,7 +107,7 @@ exactly what the app renders.
   after the window, audit-logged). It **learns from night one**: a durable
   ledger records each plan, its measured delivery, and its outcome, and a
   fail-closed write-readiness gate graduates **auto** mode only on real
-  actuated-night evidence (≥21 scored nights, under-buy ≤10%, delivery bias in
+  actuated-night evidence (≥21 scored nights, under-buy ≤10%, sizing bias in
   [0, 5] kWh, band coverage 78–92%, zero engine-fault strikes).
   `ARB_OBJECTIVE` selects the sizing objective: **`resilience`** buys exactly the
   requirement, **`cost`** treats that requirement as a floor and fills further
@@ -215,7 +215,7 @@ Every configuration option is documented in
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 3,952 tests
+cd server && npm install && npm test     # 4,073 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -261,7 +261,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **82 harnesses** (`scripts/mutate-*.mjs`) holding **1692
+regression. There are **86 harnesses** (`scripts/mutate-*.mjs`) holding **1802
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that

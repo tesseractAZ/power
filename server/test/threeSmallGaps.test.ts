@@ -167,5 +167,7 @@ test('★★ "premature close" (a client hang-up) is demoted to debug through a 
   assert.equal(lines[0].msg, 'premature close', 'kept, not dropped');
   assert.equal(lines[1].level, 50, 'a real error stays an error');
   assert.equal(isClientHangup(['something else']), false);
-  assert.match(src('index.ts'), /hooks: \{ logMethod: logMethodHook as never \}/);
+  // v1.187.10 — the options moved to logHooks.ts (panelFastifyOptions), which index.ts builds the server from.
+  assert.match(src('logHooks.ts'), /hooks: \{ logMethod: logMethodHook as never \}/);
+  assert.match(src('index.ts'), /const app = Fastify\(panelFastifyOptions\(config\.logLevel\)\);/);
 });

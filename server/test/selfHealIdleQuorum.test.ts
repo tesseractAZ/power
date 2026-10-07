@@ -242,7 +242,8 @@ test('★★★ index.ts feeds the quorum count to evaluateSelfHeal and leaves t
   assert.ok(open > 0 && close > open, 'the surfacing branch is located, its condition unchanged');
   const branch = code.slice(open, close);
   assert.ok(branch.includes('surfacedCollapses.add(sn);'));
-  assert.ok(branch.includes('collapses.push({ sn, deviceName: name, rate: r.rate, baseline: r.baseline });'));
+  // v1.187.10 — the entry carries the episode's frozen onset (messageRateFloorAlert.surfacedCollapseEntry).
+  assert.ok(branch.includes('collapses.push(surfacedCollapseEntry(collapseOnsets, sn, name, r.rate, r.baseline, starvedNow));'));
   assert.ok(branch.includes('        if (idle) idleSurfacedSns.add(sn);'));
   assert.equal(code.split('idleSurfacedSns.add(').length - 1, 1);
 

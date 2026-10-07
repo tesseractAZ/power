@@ -136,7 +136,7 @@ test('★★★ every exit of the broadcast routine releases an idle retry slot'
     + '      }\n'
     + "      const retried = retryOf != null && kind === 'condition';\n"),
     'the stale-retry drop is followed, inside the same try, by the run-time words');
-  // v1.187.9 — the run-time words' own drop (a condition retry the tick would not voice now) and the
+  // v1.187.11 — the run-time words' own drop (a condition retry the tick would not voice now) and the
   // attempt leave through the same finally.
   assert.ok(code.includes(
     "        return { ok: false, errors: [`dropped: ${w.drop}`] };\n"

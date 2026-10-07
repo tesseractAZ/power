@@ -191,12 +191,24 @@ test('B5: the circuit signature is invalidated on every connect', () => {
   assert.equal(calls.filter((c) => c === 'invalidateCircuits').length, 3);
 });
 
-test('B5: availability goes out first, and before discovery', () => {
+test('B5: on a RECONNECT availability goes out first, and before discovery', () => {
   // A retained LWT 'offline' holds every entity unavailable no matter what
   // configs follow it.
+  const first = recordConnects(1).length;
+  const reconnect = recordConnects(2).slice(first);
+  assert.equal(reconnect[0], 'availability', JSON.stringify(reconnect));
+  assert.ok(reconnect.indexOf('availability') < reconnect.indexOf('discovery'));
+});
+
+test('★★★ v1.187.10 — the FIRST connect leaves availability to the state cycle (no pre-restart replay)', () => {
+  // 'online' before any fresh state made HA re-show every entity's pre-restart value: a stale
+  // replay a state trigger reads as a transition (two "to normal" firings per deploy).
   const calls = recordConnects(1);
-  assert.equal(calls[0], 'availability');
-  assert.ok(calls.indexOf('availability') < calls.indexOf('discovery'));
+  assert.ok(!calls.includes('availability'), JSON.stringify(calls));
+  assert.ok(calls.includes('state'), 'the state cycle runs, and asserts it after the payload');
+  // Every later connect is a reconnect: availability first, once per connect.
+  const three = recordConnects(3);
+  assert.equal(three.filter((c) => c === 'availability').length, 2);
 });
 
 test('B5: the legacy clear precedes the republish in the same session', () => {

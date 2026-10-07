@@ -98,9 +98,20 @@ test('★★★ muteReason is diagnostic only: no mute, audible or auto-tune dec
     assert.ok(fnStart > 0 && fnEnd > fnStart, sig);
     return [lineOf(fnStart), lineOf(fnEnd)] as const;
   });
+  // v1.187.10 — and the boot-yellow drop line (broadcast.bootYellowDropLine), which names why a held
+  // warning still present no longer counts. A log line too: it decides nothing.
+  const bcast = readFileSync(join(src, 'broadcast.ts'), 'utf8');
+  const dropStart = bcast.indexOf('export function bootYellowDropLine(');
+  const dropEnd = bcast.indexOf('\n}\n', dropStart);
+  assert.ok(dropStart > 0 && dropEnd > dropStart, 'bootYellowDropLine');
+  const dropSpan = [bcast.slice(0, dropStart).split('\n').length, bcast.slice(0, dropEnd).split('\n').length] as const;
   assert.deepEqual(
-    reads.filter((r) => { const [f, l] = r.split(':'); return !(f === 'alertMonitor.ts' && spans.some(([a, b]) => +l >= a && +l <= b)); }),
+    reads.filter((r) => {
+      const [f, l] = r.split(':');
+      if (f === 'broadcast.ts' && +l >= dropSpan[0] && +l <= dropSpan[1]) return false;
+      return !(f === 'alertMonitor.ts' && spans.some(([a, b]) => +l >= a && +l <= b));
+    }),
     [],
-    'muteReason is read only by the silent-critical log line and its edge detector',
+    'muteReason is read only by the silent-critical log line, its edge detector and the boot-yellow drop line',
   );
 });

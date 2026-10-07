@@ -1,14 +1,15 @@
 import type { DeviceSnapshot } from './snapshot.js';
-import { rateAt, apsREvModelFromEnv, localParts, seasonOf, onPeakWindowStrings, type TariffModel } from './tariff.js';
+import { rateAt, apsREvModelFromEnv, seasonAt, onPeakWindowStrings, type TariffModel } from './tariff.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
+import { resolveRetentionDays } from './retention.js';
 import { getWeather, coveringRadiationEpoch, RADIATION_LABEL_LAG_HOURS, type WeatherHour, type WeatherForecast } from './weather.js';
 import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2, secondaryShp2s } from './shp2Membership.js';
 import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
-import { getNwsAlerts, isNwsEnabled, nwsEventWindow, type NwsAlert } from './nws.js';
+import { getNwsAlerts, isNwsEnabled, nwsEventWindow, TTL_MS as NWS_ALERTS_TTL_MS, type NwsAlert } from './nws.js';
 import { PHOENIX_SITE } from './physics/clearSky.js';
 import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
 import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
@@ -1239,6 +1240,12 @@ export interface DayForecast {
    *  set by a cold load curve or a missing SoC basis while the PV forecast is perfectly
    *  good. */
   pvForecastUnavailable?: boolean;
+  /** v1.187.10 — built while a home Core's first reading was pending (homeBasisPending): the
+   *  panel lists it as a connected source and the device list reports it ONLINE, but no quota of
+   *  it has landed yet, so its PV is missing from the alarm-facing series. Sets
+   *  structurallyIncomplete; the publishers send the PV pair and Projected Low SoC as null while
+   *  it is set. */
+  homeBasisPending?: boolean;
   reserveSoc: number;
   hours: ForecastHour[];
   forecastPvWhNext24: number;
@@ -1959,6 +1966,36 @@ export function homeModelSns(devices: Record<string, DeviceSnapshot>): string[] 
     .sort();
 }
 
+/**
+ * v1.187.10 — the panel lists a home Core that the device list reports ONLINE but that has no
+ * projection yet: its first quota has not landed. That is the boot race, not a cloud wedge (a
+ * wedged Core is listed offline, and keeps its conservative figures). The analytics worker is
+ * released on the first snapshot with ANY projection, at a restart often the panel's alone, so the
+ * first forecast and runway were built with every Core's PV missing; published as definite values
+ * they read Projected Low SoC 0 % and a finite runway to reserve and to empty (2026-10-02 19:24,
+ * 2026-10-03 12:08), forecast_basis_incomplete reading OFF. A forecast built on such a map is
+ * structurally incomplete, a runway computed on it neither arms the to-empty hysteresis nor is
+ * cached, and the publishers withhold both. The alarm path still reads the conservative figures.
+ *
+ * Bounded by HOME_BASIS_PENDING_MAX_MS from this module's load (the worker's spawn): a Core whose
+ * quota keeps failing while it stays listed online stops counting as pending, so the figures are
+ * published again rather than reading unknown indefinitely.
+ */
+export const HOME_BASIS_PENDING_MAX_MS = 10 * 60_000;
+const ANALYTICS_MODULE_LOADED_AT_MS = Date.now();
+export function homeBasisPending(
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number = Date.now(),
+  sinceMs: number = ANALYTICS_MODULE_LOADED_AT_MS,
+): boolean {
+  if (nowMs - sinceMs > HOME_BASIS_PENDING_MAX_MS) return false;
+  for (const sn of shp2ConnectedDpuSns(devices)) {
+    const d = devices[sn];
+    if (d?.online === true && d.projection?.kind !== 'dpu') return true;
+  }
+  return false;
+}
+
 /** v1.186.5 — the cached forecast is usable only while its model covers the Cores the
  *  current map has: a forecast built on a boot-time map that had not yet seen every Core
  *  is not structurally incomplete while the SHP2 is present, and would otherwise stand
@@ -2457,15 +2494,20 @@ async function computeDayForecastUncached(
   const loadCold = loadRes.spanMs === 0;              // no panel_load history (also true when the SHP2 is absent → zero-span fallback)
   const pvCold = homeDpus.length > 0 && pvSpan === 0; // home DPUs present but their PV recorder is cold
   const socBasisMissing = fullWh == null;             // no SHP2, or an incoherent backup pool → no SoC/runway projection
-  const structurallyIncomplete = loadCold || pvCold || socBasisMissing || historyDays <= 0;
+  // v1.187.10 — a connected home Core listed online whose first quota has not landed (the boot
+  // race): pvCold cannot see it (homeDpus is empty or partial, not cold) while the panel keeps
+  // loadCold and socBasisMissing false.
+  const basisPending = homeBasisPending(devices, now);
+  const structurallyIncomplete = loadCold || pvCold || socBasisMissing || basisPending || historyDays <= 0;
   if (structurallyIncomplete && now - lastForecastIncompleteLogMs >= FORECAST_INCOMPLETE_LOG_THROTTLE_MS) {
     lastForecastIncompleteLogMs = now;
-    log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} historyDays=${historyDays.toFixed(2)}) — negative-caching for ${incompleteForecastTtlMs() / 1000}s then rebuilding (throttled ${FORECAST_INCOMPLETE_LOG_THROTTLE_MS / 60000}m)`);
+    log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} basisPending=${basisPending} historyDays=${historyDays.toFixed(2)}) — negative-caching for ${incompleteForecastTtlMs() / 1000}s then rebuilding (throttled ${FORECAST_INCOMPLETE_LOG_THROTTLE_MS / 60000}m)`);
   }
   // v0.77.0 — surface the same flag on the value so ha-state / MQTT can publish a
   // diagnostic "forecast basis incomplete" sensor (the flag drove only the cache
   // TTL before). Set before caching so the cached value carries it too.
   value.structurallyIncomplete = structurallyIncomplete;
+  value.homeBasisPending = basisPending;
   // On the PUBLISHED basis: the display figures are built on the restored curve, which
   // re-adds each connected-but-unprojected Core's own recorded PV — real figures even when
   // no home Core is projected (all wedged cloud-offline at a restart).
@@ -2626,15 +2668,36 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
 
 const EOL_SOH = 80;                                          // % — conventional LFP end-of-life
 const DEGRADE_REPORT_TTL_MS = 30 * 60 * 1000;
-// v0.9.80 — cap at the recorder's 30-day retention (recorder.ts RETAIN_MS).
-// The samples table is pruned to 30 days, so any window beyond that is pure
-// dead index-scan range — the SoH regression has no rows older than 30 days
-// to fit. The previous 400-day lower bound made degradation scan ~370 days of
-// empty range per pack, every cache cycle; on a synchronous SQLite store this
-// serialized the cache-warmer's "parallel" cohort (runway + RTE + degradation
-// all blocked on it), producing the 4-5.6 s slow cycles in the 42h log. Output
-// is byte-for-byte identical (no rows beyond 30 days exist to regress).
-const DEGRADE_REPORT_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;   // = recorder RETAIN_MS
+/**
+ * v1.187.10 (log review 10-03, MEDIUM) — the regression window comes from the configured samples
+ * retention, clamped to [DEGRADE_WINDOW_MIN_DAYS, DEGRADE_WINDOW_MAX_DAYS].
+ *
+ * v0.9.80 fixed it at 30 days "= recorder RETAIN_MS", a premise v1.51.0 retired when retention
+ * became configurable (1825 days on the reviewed install). Over 30 days the gate chain could not be
+ * satisfied: sohSignalBelowFloor needs a first-quartile minus last-quartile SoH drop of
+ * SOH_MIN_OBSERVED_DROP_PTS (1.5 pt), and the quartile centres of a W-day window are 0.75·W apart,
+ * so a linear fade must reach 1.5 / (0.75·30/365.25) ≈ 24 %/yr — while fadeExceedsPlausibleCeiling
+ * rejects anything above EOL_MAX_FADE_PCT_PER_YEAR (10 %/yr). No linear fade could reach
+ * 'projecting': the dated EOL (HA ..._soonest_pack_eol), the peer-fade pool, the peer-outlier
+ * count and the "Pack wearing fast" repair issue were all permanently dead, while forecast-soh
+ * (120 days) reported two packs declining ~9-10 %/yr.
+ *
+ * Both gates pass for a linear fade f when 0.75·W·f/365.25 ≥ 1.5, i.e. W ≥ 730/f days:
+ *   - the 120-day floor (= SOH_FORECAST_HISTORY_MS, so the dated EOL and forecast-soh read the
+ *     same window) dates fades of about 6-10 %/yr;
+ *   - the 365-day cap dates fades down to about 2 %/yr once a year of history exists, and bounds
+ *     the scan (6-hour buckets: 1,460 per pack metric) on a multi-year retention.
+ * A retention below 120 days leaves the window at 120: there are simply fewer rows. Retention
+ * below ~75 days can never date an EOL (the floor needs 73 days at the 10 %/yr ceiling).
+ * Computed in the analytics worker, whose process.env is a copy of the main thread's at spawn,
+ * so RECORDER_RETENTION_DAYS reaches it (pinned end to end in degradationWindow.test.ts).
+ */
+export const DEGRADE_WINDOW_MIN_DAYS = 120;
+export const DEGRADE_WINDOW_MAX_DAYS = 365;
+/** v1.187.10 — the degradation window (days) for a configured retention (days). Pure. */
+export function degradationWindowDays(retentionDays: number): number {
+  return Math.min(DEGRADE_WINDOW_MAX_DAYS, Math.max(DEGRADE_WINDOW_MIN_DAYS, Math.round(retentionDays)));
+}
 const DEGRADE_BUCKET_SEC = 6 * 3600;                          // 6-hour buckets — de-noise SoH jitter
 // v0.14.2 — require ≥3 weeks of trend before DATING a multi-year EOL. A 17-day
 // window produced a false-precise "0.9 yr / EOL 2027" projection from a steep
@@ -2650,7 +2713,7 @@ const EOL_MIN_R2 = 0.3;                                       // trend must expl
 // recalibration/quantization, which OLS happily fits as a confident multi-%/yr
 // fade. You cannot extrapolate an ~18-pt decline-to-EOL from a ~1-pt signal; this
 // floor (~3 quantization steps) holds such packs at "learning". See sohSignalBelowFloor.
-const SOH_MIN_OBSERVED_DROP_PTS = 1.5;
+export const SOH_MIN_OBSERVED_DROP_PTS = 1.5;
 // v0.64.0 — implausible-fade ceiling for the DATED-EOL projection. Mirrors the
 // forecast-soh ALERT path's MAX_SOH_FADE_PCT_PER_YEAR: real LFP fades ~2-3 %/yr, so an
 // OLS slope implying a faster annual fade is early-life BMS fullCap recalibration
@@ -2660,7 +2723,7 @@ const SOH_MIN_OBSERVED_DROP_PTS = 1.5;
 // (live: Core 3 packs 4 & 5, 95 % SoH, fit 39-43 %/yr). A genuine fast failure is caught
 // by the absolute SoH threshold alarm separately. ALIASED from the alert-path constant
 // so the two paths can never silently drift apart.
-const EOL_MAX_FADE_PCT_PER_YEAR = MAX_SOH_FADE_PCT_PER_YEAR;  // = 10 %/yr
+export const EOL_MAX_FADE_PCT_PER_YEAR = MAX_SOH_FADE_PCT_PER_YEAR;  // = 10 %/yr
 const EOL_MAX_YEARS = 40;                                     // beyond this, "EOL not in sight"
 // v0.42.0 — pack mAh → kWh conversion. Each DPU pack is 32S1P (~104 V nominal;
 //   32 series cells whose mV sum to packVoltageMv). fullCap is single-string mAh.
@@ -2734,6 +2797,8 @@ export interface PackDegradation {
 export interface FleetDegradation {
   generatedAt: number;
   eolSoh: number;
+  /** v1.187.10 — the regression window in days (degradationWindowDays of the configured retention). */
+  windowDays?: number;
   packs: PackDegradation[];
 }
 
@@ -3253,9 +3318,11 @@ function analysePack(
   // ALERT path already rejected fades > MAX_SOH_FADE_PCT_PER_YEAR; this mirrors it so the
   // DATED EOL can't outrun the alert. Route to 'learning' with NULL fade/EOL (does NOT
   // seed the peer-fade pool, the confidence median-r², or degradation_soonest_eol_years
-  // → HA sensor stays 'unknown'). Re-arms automatically once a real, plausibly-paced
-  // multi-year trend accumulates. fadePctPerYear is already non-null here (the 'stable'
-  // branch returned on null), so the summary's .toFixed is safe.
+  // → HA sensor stays 'unknown'). Re-arms automatically once a plausibly-paced trend clears the
+  // floor inside the window (v1.187.10: the window is 120-365 days, degradationWindowDays — over the
+  // former fixed 30 days no linear fade could clear both this ceiling and the 1.5-pt floor).
+  // fadePctPerYear is already non-null here (the 'stable' branch returned on null), so the
+  // summary's .toFixed is safe.
   if (fadeExceedsPlausibleCeiling(fadePctPerYear)) {
     return mk({
       status: 'learning',
@@ -3388,7 +3455,9 @@ export async function computeDegradation(
     return degradationCache.value;
   }
   const now = Date.now();
-  const since = now - DEGRADE_REPORT_HISTORY_MS;
+  // v1.187.10 — from the configured retention (see DEGRADE_WINDOW_MIN_DAYS), not a fixed 30 days.
+  const windowDays = degradationWindowDays(resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS));
+  const since = now - windowDays * 86_400_000;
   const dpus = allDpus(devices);
 
   // Pass 1 — regress and project every pack independently. Yield to the
@@ -3465,7 +3534,7 @@ export async function computeDegradation(
     return (a.coreNum ?? 999) - (b.coreNum ?? 999) || a.packNum - b.packNum;
   });
 
-  const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, packs: tagHomePacks(packs, devices) };
+  const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, windowDays, packs: tagHomePacks(packs, devices) };
   if (dpus.length > 0) degradationCache = { ts: now, value };
   return value;
 }
@@ -3545,6 +3614,11 @@ export interface RunwayProjection {
    *  recorded row, or the previous compute's value carried forward. The card captioned
    *  every one of them "1-hour average". */
   recentLoadBasis: 'hour-mean' | 'live' | 'single-sample' | 'carried' | null;
+  /** v1.187.10 — computed while a home Core's first reading was pending (homeBasisPending, on
+   *  the map or on the forecast it read). The figures stand for the alarm path (conservative:
+   *  the pending Cores' PV is missing) but are not cached, do not touch the to-empty hysteresis,
+   *  and the publishers send them as null. Absent: not pending. */
+  basisPending?: boolean;
 }
 
 let runwayCache: { ts: number; value: RunwayProjection } | null = null;
@@ -3819,7 +3893,11 @@ export function computeRunway(
   // compute; the unavailable cases early-return via emptyRunway before here, so a
   // real outage publishes null immediately and never latches). A briefly-held stale
   // finite is pessimistic (over-warns), never optimistic.
-  const pubHoursToEmpty = applyEmptyHysteresis(hoursToEmpty, runwayEmptyState);
+  // v1.187.10 — not on a pending home basis: a to-empty crossing computed with the pending Cores'
+  // PV missing armed the latch, and coherentRunwayPair then clamped the next complete compute's
+  // reserve crossing to it (2026-10-03 12:09:38: both read 15.9 h). Neither read nor written.
+  const basisPending = homeBasisPending(devices, now) || forecast?.homeBasisPending === true;
+  const pubHoursToEmpty = basisPending ? hoursToEmpty : applyEmptyHysteresis(hoursToEmpty, runwayEmptyState);
 
   // v1.129.0 — enforce the ordering invariant before publishing. The pool drains
   // THROUGH the reserve floor on its way to empty, so "empty 1 h / reserve 20.5 h"
@@ -3854,8 +3932,11 @@ export function computeRunway(
     troughAtMs: Math.round(now + troughH * 3_600_000),
     endKwh: round2(stateKwh),
     recentLoadBasis,
+    ...(basisPending ? { basisPending: true } : {}),
   };
-  runwayCache = { ts: now, value };
+  // v1.187.10 — a pending-basis runway is not cached: the next request recomputes on the map
+  // its Cores have since joined, instead of serving these figures for RUNWAY_TTL_MS.
+  if (!basisPending) runwayCache = { ts: now, value };
   return value;
 }
 
@@ -6787,12 +6868,10 @@ export function computeSelfConsumption(
  * =================================================================== */
 
 const THERMAL_EVENT_TTL_MS = 30 * 60 * 1000;
-// v0.14.2 — cap at the recorder's 30-day retention (recorder.ts RETAIN_MS), like
-// DEGRADE_REPORT_HISTORY_MS. The samples table is pruned to 30 days, so the old
-// 400-day window scanned ~370 days of empty index range per pack every cache
-// cycle on the synchronous SQLite store — the same dead-range scan the
-// degradation path was fixed for in v0.9.80. Output is identical (no rows older
-// than 30 days exist to count).
+// v0.14.2 — capped at 30 days (then the recorder's fixed retention). v1.187.10: retention has been
+// configurable since v1.51.0, so this is now simply the event-count window ("in the last 30 days"),
+// not the extent of the data; the degradation report derives its own window from the retention
+// (degradationWindowDays).
 const THERMAL_EVENT_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
 const THERMAL_THRESHOLD_C_INFO = (96 - 32) / 1.8;   // ≈ 35.6 °C
 const THERMAL_THRESHOLD_C_WARN = (113 - 32) / 1.8;  // 45 °C
@@ -8173,6 +8252,8 @@ let stormPrepCache: { ts: number; value: Alert[] } | null = null;
 export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>): Promise<Alert[]> {
   if (!isNwsEnabled()) return [];
   if (stormPrepCache && Date.now() - stormPrepCache.ts < STORM_PREP_TTL_MS) return stormPrepCache.value;
+  // v1.187.10 (log review 10-03) — the alarm path's read: null also when the last good feed is past
+  // NWS_ALERTS_MAX_CARRY_MS (an outage that began after a boot), so a stale feed is UNKNOWN here.
   const feed = await getNwsAlerts();
   // v1.187.3 (log review) — no feed is a FAILED fetch with nothing cached (getNwsAlerts returns its
   // last good feed when a fetch fails, and null until one has succeeded): the storm alerts are
@@ -8182,9 +8263,12 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
   // still in effect. Thrown, the feed records a failure and stays cold until a fetch succeeds; not
   // cached, so a later pass asks again — after NWS_ALERTS_FAILURE_BACKOFF_MS (getNwsAlerts backs
   // off a failed fetch, answering null inside it). A successful fetch with no alerts is still [].
-  if (feed == null) throw new Error('NWS alerts unknown — the fetch failed and no earlier feed is cached');
+  if (feed == null) throw new Error('NWS alerts unknown — no successful fetch within the carry limit (the fetch failed and no current feed is cached)');
+  // v1.187.10 — an answer built from a CARRIED feed (older than the alerts TTL: the latest fetch
+  // failed) is not cached for STORM_PREP_TTL_MS, so the pass that crosses the carry limit sees it.
+  const carried = Date.now() - feed.fetchedAt >= NWS_ALERTS_TTL_MS;
   if (feed.alerts.length === 0) {
-    stormPrepCache = { ts: Date.now(), value: [] };
+    if (!carried) stormPrepCache = { ts: Date.now(), value: [] };
     return [];
   }
   const out: Alert[] = [];
@@ -8236,13 +8320,15 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
       ],
     });
   }
-  stormPrepCache = { ts: Date.now(), value: out };
+  if (!carried) stormPrepCache = { ts: Date.now(), value: out };
   return out;
 }
 
+/** The display read (/api/nws-alerts, the calendar): the last good feed at any age (v1.187.10 —
+ *  the carry limit applies to the storm-prep alarm path only). */
 export async function getActiveNwsAlerts(): Promise<NwsAlert[]> {
   if (!isNwsEnabled()) return [];
-  const feed = await getNwsAlerts();
+  const feed = await getNwsAlerts({ maxCarryMs: Infinity });
   return feed?.alerts ?? [];
 }
 
@@ -8390,13 +8476,11 @@ const TARIFF_FLAT_CENTS = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
  * Unconfirmed APS rates never feed the KPIs — the same null-over-fabrication
  * discipline the tariff module itself applies to its dollar outputs.
  */
-function apsSeasonIsSummer(nowMs: number): boolean {
-  const m = Number(
-    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Phoenix', month: 'numeric' })
-      .formatToParts(new Date(nowMs))
-      .find((p) => p.type === 'month')?.value ?? '1',
-  );
-  return m >= 5 && m <= 10; // APS summer season: May–October
+export function apsSeasonIsSummer(nowMs: number): boolean {
+  // v1.187.10 — the tariff model's own season (seasonAt): the APS billing-cycle seasons by
+  // usage month. This was a separate calendar May–October test, so October was "summer"
+  // here while APS bills it at winter rates.
+  return seasonAt(apsREvModelFromEnv(), nowMs) === 'summer';
 }
 function apsCent(name: string): number | null {
   const raw = process.env[name];
@@ -8513,7 +8597,7 @@ export function tariffPricingView(
       onPeakHours: legacy.hours, onPeakDays: legacy.days, pricingBasis: 'two-tier',
     };
   }
-  const season = seasonOf(localParts(nowMs, model.timezone).month, model.summerMonths);
+  const season = seasonAt(model, nowMs); // v1.187.10 — the one season source
   const inSeason = (id: string) => model.periods.find((p) => p.id === id && (!p.seasons || p.seasons.includes(season)));
   const onPeakPeriod = model.periods.find((p) => p.onPeak === true && (!p.seasons || p.seasons.includes(season)));
   const win = onPeakWindowStrings(model);
@@ -9536,6 +9620,8 @@ export async function computeMultiDayForecast(
  *   - If PV > load:  charge battery with the surplus (up to full).
  *   - If PV < load AND we're on-peak: discharge battery (down to reserve).
  *   - If PV < load AND we're off-peak AND SoC < target_pre_peak: import grid.
+ *     (v1.187.10: only ahead of an on-peak hour in the horizon, at the cheapest
+ *     rate before it — dispatchTopOffHours.)
  *   - Otherwise: discharge battery.
  *
  * Output is a recommended schedule — DO NOT auto-apply. Surfacing
@@ -9599,6 +9685,36 @@ export const DISPATCH_ROUND_TRIP_EFFICIENCY = Math.min(
   Math.max(0.8, Number(process.env.DISPATCH_ROUND_TRIP_EFFICIENCY ?? 0.86) || 0.86),
 );
 
+/**
+ * v1.187.10 — which hours of a dispatch horizon may top the pack off from the grid. PURE.
+ *
+ * The top-off branch ("off-peak charge from grid to top off before peak") fired in EVERY
+ * off-peak deficit hour while the pool sat below the 80% pre-peak target, whether or not a
+ * peak lay ahead and whatever the rate. On a weekend — no on-peak and no overnight tier on
+ * APS R-EV — the 2026-10-03 plan imported for 12 h at the 16.91 c off-peak rate with the pack
+ * at 76-79% ($6.55, "savings" $6.20), while Sunday's PV later filled it to 100% and the
+ * night-charge engine bought nothing; on a weekday evening it imported 19:00-23:00 at 16.91 c
+ * ahead of the 12.59 c overnight tier.
+ *
+ * An off-peak hour now qualifies only when an on-peak hour lies LATER in the horizon, and
+ * only at the cheapest rate of the off-peak run that precedes that on-peak hour (from the
+ * previous on-peak hour, or the horizon start). Any other deficit hour falls through to the
+ * reserve-guarded discharge (or the forced import when the pack is at its reserve).
+ */
+export function dispatchTopOffHours(hours: ReadonlyArray<{ onPeak: boolean; rateCents: number }>): boolean[] {
+  const out = hours.map(() => false);
+  let runStart = 0;
+  for (let i = 0; i < hours.length; i++) {
+    if (!hours[i].onPeak) continue;
+    // [runStart, i) is the off-peak run this on-peak hour closes.
+    let cheapest = Infinity;
+    for (let k = runStart; k < i; k++) cheapest = Math.min(cheapest, hours[k].rateCents);
+    for (let k = runStart; k < i; k++) if (hours[k].rateCents <= cheapest + 1e-9) out[k] = true;
+    runStart = i + 1;
+  }
+  return out; // an off-peak run with no on-peak after it inside the horizon never tops off
+}
+
 export function computeDispatchPlan(
   devices: Record<string, DeviceSnapshot>,
   forecast: DayForecast | null,
@@ -9627,15 +9743,18 @@ export function computeDispatchPlan(
   // v1.52.0 — same confirmed-tariff basis the cost report uses; the dispatch
   // planner must not price its plan off a different table than the KPIs.
   const dispatchCents = resolveTariffCents(Date.now());
-  for (const h of forecast.hours) {
+  // v1.136.0 — the discharge trigger now comes from the SAME table that prices
+  // the hour. It was `onPeakAt`, default window `15-20`, against an R-EV
+  // on-peak of 16:00-19:00 — so the plan discharged across two hours that earn
+  // the off-peak rate, spending cycle life for no arbitrage.
+  const tou = forecast.hours.map((h) => ({ onPeak: isOnPeakHour(h.ts), rateCents: hourlyRateCents(h.ts, dispatchCents) }));
+  // v1.187.10 — the grid top-off only ahead of an on-peak hour, at the cheapest rate before it.
+  const topOff = dispatchTopOffHours(tou);
+  for (const [i, h] of forecast.hours.entries()) {
     const pvKwh = h.forecastPvW / 1000;
     const loadKwh = h.forecastLoadW / 1000;
-    // v1.136.0 — the discharge trigger now comes from the SAME table that prices
-    // the hour. It was `onPeakAt`, default window `15-20`, against an R-EV
-    // on-peak of 16:00-19:00 — so the plan discharged across two hours that earn
-    // the off-peak rate, spending cycle life for no arbitrage.
-    const onPeak = isOnPeakHour(h.ts);
-    const rate = hourlyRateCents(h.ts, dispatchCents) / 100;
+    const onPeak = tou[i].onPeak;
+    const rate = tou[i].rateCents / 100;
     const socStartPct = (socKwh / fullKwh) * 100;
 
     let action: DispatchHour['action'] = 'hold';
@@ -9663,8 +9782,9 @@ export function computeDispatchPlan(
         socKwh -= drawn;
         flowKwh = deficit;                     // delivered to load
         action = 'discharge_to_load';
-      } else if (!onPeak && socKwh < targetPrePeakKwh) {
-        // Off-peak charge from grid to top off before peak. `need` is grid energy
+      } else if (topOff[i] && socKwh < targetPrePeakKwh) {
+        // Off-peak charge from grid to top off before peak (v1.187.10: a peak lies ahead
+        // in the horizon and this is the cheapest rate before it — dispatchTopOffHours). `need` is grid energy
         // DRAWN (billed at `rate`); only (need − deficit) reaches the charger and
         // only legEff of THAT is stored — so the pack fills slower than a lossless
         // model, naturally pulling more off-peak import over the window (conservative).

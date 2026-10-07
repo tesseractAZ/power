@@ -69,7 +69,8 @@ const MUTANTS = [
   {
     id: 'vii. \u2605 runway alarm reads the DEVICE reserve again (nightly phantom AT-RESERVE-FLOOR)',
     file: ACT,
-    find: '  if (isReserveArbitrageRaised(state)) {',
+    // v1.187.10 — re-pointed: the condition also holds through the revert readback lag.
+    find: '  if (isReserveArbitrageRaised(state) || isRevertSettling(state, liveReservePct, nowMs)) {',
     to: '  if (false) { /* MUTANT */',
     why: 'ownerReserveFloorPct returns the actuator\u2019s own 50% instruction, so the runway alarm reports AT RESERVE FLOOR for the whole charge window every night.',
   },

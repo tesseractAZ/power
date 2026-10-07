@@ -1331,16 +1331,21 @@ test('★★ …but a red the cordless refused while every speaker was unavailab
   process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
   sipStatus = 500;
   settledSince = null;
-  const b = rig();
+  // v1.187.10 — the decision waits for the red's armed retries (each re-fires the refused cordless):
+  // short delays, so they are spent before the question closes.
+  const b = rig(true, [20, 20, 20]);
   maState = 'unavailable';
-  await heldGreenAfterRed(b, () => until(b, () => b.has('broadcast: red deferred') && b.has('SIP play_media failed for 1/1'), 'the red, heard nowhere'));
+  await heldGreenAfterRed(b, () => until(b, () => b.has('giving up after 3 deferred red retries') && b.has('SIP play_media failed for 1/1'), 'the red, heard nowhere, its retries spent'));
   assert.ok(b.has(WHAT_FOLLOWS('adopted silently as a continuation')));
   await stepTo(b, DECISION_DUE + SEC);
   await until(b, () => b.has(WARMUP_ENDED), 'adopted silently');
   assert.equal(played(b, 'green'), 0);
+  assert.equal(sipPlays, 4, 'the refused cordless was re-fired by every retry');
 });
 
-test('★★ a red the cordless played though its HTTP response was lost (the entity state confirms it, 8 s on) was audible: announced', { timeout: 60_000 }, async () => {
+// v1.187.10 — a target that REPORTS playback ('playing' 8 s on). The Switchboard announce entity does
+// not (it stays 'idle' through every call): see the v1.187.10 tests below.
+test('★★ a red the cordless played though its HTTP response was lost (a target that reports playback: the entity state confirms it, 8 s on) was audible: announced', { timeout: 60_000 }, async () => {
   await heard('yellow');
   process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
   sipTimeout = true;
@@ -1355,14 +1360,112 @@ test('★★ a red the cordless played though its HTTP response was lost (the en
   await until(b, () => played(b, 'green') === 1, 'the all-clear');
 });
 
+/* ══ v1.187.10: a timed-out cordless dispatch to an entity that never reports playback ═══════════
+ * The live SIP target (the Switchboard announce entity) writes no state during an announce call: HA
+ * history reads 'idle' through every announcement. So the v1.48.3 timeout probe can never confirm a
+ * call on it, and its idle reading is no evidence either way. Delivery stays UNKNOWN: never counted
+ * as audible (or as delivered — a deferred retry re-fires the cordless), and the restart decision
+ * waits for an armed retry that could still make the red audible. */
+
+const PROBE_UNKNOWN = 'SIP dispatch timed out — delivery UNKNOWN (media_player.cordless reads idle;';
+const WAITS = 'waits for the broadcast in flight (or a condition retry still armed)';
+
+test('★★★ v1.187.10: an idle-entity timeout is UNKNOWN, not audible — the restart decision waits for the armed retry, and the retry\'s re-fire reaching the cordless makes the red audible: announced', { timeout: 90_000 }, async () => {
+  await heard('yellow');
+  process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
+  sipTimeout = true;
+  cordlessState = 'idle'; // as the live entity reads, call or no call
+  settledSince = null;
+  const b = rig(true, [12_000, 12_000, 12_000]); // the retry fires after the probe and the close
+  maState = 'unavailable';
+  await heldGreenAfterRed(b, () => until(b, () => b.has('broadcast: red deferred') && b.has('SIP play_media failed for 1/1'), 'the red: the cordless response lost, every speaker away'));
+  assert.ok(b.has(WHAT_FOLLOWS('adopted silently as a continuation')), 'nothing audible: the timed-out call is unknown');
+  await until(b, () => b.has(PROBE_UNKNOWN), 'the probe: delivery unknown', 12_000);
+  const probe = b.logs.find((l) => l.includes(PROBE_UNKNOWN))!;
+  assert.ok(probe.includes('not counted as heard or delivered'), probe);
+  assert.ok(!b.has('target is not playing'), 'the probe no longer claims the call did not ring');
+  assert.ok(!b.has('SIP delivery confirmed'));
+  await stepTo(b, DECISION_DUE + SEC); // the question closes between the probe and the retry
+  await until(b, () => b.has(WAITS), '★ the decision waits for the armed retry');
+  await sleep(60);
+  assert.ok(!b.has(WARMUP_ENDED), 'not adopted silently while the retry can still make the red audible');
+  assert.ok(!b.has(CLOSED_AUDIBLE));
+  sipTimeout = false; // the retry's re-fire is answered
+  await until(b, () => b.has(CLOSED_AUDIBLE), 'announced: the retry\'s re-fire reached the cordless', 20_000);
+  assert.equal(sipPlays, 1, 'the retry re-fired the cordless (the timed-out first dispatch never reached the reply counter)');
+  assert.ok(b.count('SIP announce → 1 target(s)') >= 1);
+  assert.ok(!b.has(WARMUP_ENDED));
+  assert.equal(b.count(WAITS), 1, 'said once');
+});
+
+test('★★★ v1.187.10: …and when every re-fire times out too, the red is never counted as heard: re-fired by every retry, then adopted silently (the documented residual)', { timeout: 60_000 }, async () => {
+  await heard('yellow');
+  process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
+  sipTimeout = true;
+  cordlessState = 'idle';
+  settledSince = null;
+  const b = rig(true, [200, 200, 200]);
+  maState = 'unavailable';
+  await heldGreenAfterRed(b, () => until(b, () => b.has('giving up after 3 deferred red retries'), 'the red: every speaker away, its retries spent'));
+  await stepTo(b, DECISION_DUE + SEC);
+  await until(b, () => b.has(WARMUP_ENDED), 'adopted silently once the probes have landed', 20_000);
+  assert.equal(b.count(PROBE_UNKNOWN), 4, 'the first dispatch and each of the three retries re-fired the cordless, each unknown');
+  assert.equal(b.count('SIP play_media failed for 1/1'), 4);
+  assert.ok(!b.has('SIP delivery confirmed'));
+  assert.ok(!b.has(CLOSED_AUDIBLE), 'unknown delivery is not counted as heard');
+  assert.equal(played(b, 'green'), 0);
+});
+
+test('★★ v1.187.10: the restart decision waits for a timeout probe still pending after the last retry has given up (a target that reports playback confirms it): announced', { timeout: 60_000 }, async () => {
+  await heard('yellow');
+  process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
+  sipTimeout = true;
+  cordlessState = 'playing'; // a target that reports playback
+  settledSince = null;
+  const b = rig(true, [200, 200, 200]);
+  maState = 'unavailable';
+  await heldGreenAfterRed(b, () => until(b, () => b.has('giving up after 3 deferred red retries'), 'the red: its retries spent, its probes pending'));
+  assert.ok(!b.has('SIP delivery confirmed'), 'the probes run 8 s after each dispatch');
+  await stepTo(b, DECISION_DUE + SEC); // no retry armed: only the pending probes hold the decision
+  await until(b, () => b.has(WAITS), '★ the decision waits for the pending probes');
+  await until(b, () => b.has(CLOSED_AUDIBLE), 'announced once a probe confirmed the call', 20_000);
+  assert.ok(!b.has(WARMUP_ENDED));
+});
+
+test('★★ v1.187.10: the restart CONTINUATION waits for an armed red retry too — its re-fire reaching the cordless ends the continuation, and the yellow is spoken', { timeout: 90_000 }, async () => {
+  await heard('yellow');
+  alerts = []; // the boot green
+  settledSince = 0;
+  process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless';
+  sipTimeout = true;
+  cordlessState = 'idle';
+  const b = rig(true, [12_000, 12_000, 12_000]);
+  await sleep(80);
+  maState = 'unavailable';
+  alerts = [CRIT_A, WARN_K];
+  await until(b, () => b.has('broadcast: red deferred') && b.has('SIP play_media failed for 1/1'), 'the red: the cordless response lost, every speaker away');
+  alerts = [WARN_K];
+  await until(b, () => b.has('red → yellow held'), 'the hold');
+  offset += DWELL + SEC; // the yellow has stood its dwell while the red's retry is armed
+  await sleep(120);
+  assert.equal(b.count(CONTINUATION), 0, '★ not filed as a continuation while the retry can still make the red audible');
+  sipTimeout = false; // the retry's re-fire is answered
+  await until(b, () => b.has('yellow held for boot confirmation'), 'the yellow, a transition once the red was audible', 20_000);
+  assert.equal(b.count(CONTINUATION), 0);
+  maState = 'idle';
+  offset += B.BOOT_YELLOW_CONFIRM_MS + 5 * SEC;
+  await until(b, () => played(b, 'yellow') === 1, 'the yellow: the red the cordless took has cleared');
+});
+
 test('★★ a red Music Assistant returned in under 2 s was not audible (HA answered without playing): adopted silently', async () => {
   await heard('yellow');
   settledSince = null;
-  const b = rig();
+  // v1.187.10 — the decision waits for the red's armed retries: short delays, every one unverified.
+  const b = rig(true, [20, 20, 20]);
   tooFast = true;
-  await heldGreenAfterRed(b, () => until(b, () => b.has('too fast for real playback'), 'the red, unverified'));
+  await heldGreenAfterRed(b, () => until(b, () => b.has('too fast for real playback') && b.has('giving up after 3 deferred red retries'), 'the red, unverified, its retries spent'));
   tooFast = false;
-  maState = 'unavailable'; // its retry finds no speaker: nothing becomes audible
+  maState = 'unavailable';
   await stepTo(b, DECISION_DUE + SEC);
   await until(b, () => b.has(WARMUP_ENDED), 'adopted silently');
   assert.equal(played(b, 'green'), 0);

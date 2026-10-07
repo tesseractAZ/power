@@ -524,6 +524,7 @@ test('★★★ buildState: degradation and runway failing — the alarm and liv
     devices: {
       'SHP2-P': {
         sn: 'SHP2-P', deviceName: 'Panel', productName: 'Smart Home Panel 2', online: true, lastUpdated: Date.now(),
+        lastQuotaAtMs: Date.now(), // v1.187.10 — a fresh reading: the panel's live fields publish
         projection: { kind: 'shp2', backupBatPercent: 55, backupReserveSoc: 20, circuits: [{ ch: 1, watts: 100 }] },
       } as never,
     },

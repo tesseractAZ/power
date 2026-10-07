@@ -25,7 +25,7 @@
  * as new as the pending retry cancels it. A lower announcement never supersedes a higher retry, and
  * dedicated announcements are unchanged. Under production timing a newer warning's retry that
  * runs just after the kept red's retry has played is refused by the same-level gap that delivery
- * armed; v1.187.9 — it is re-presented once when the gap expires (before, the warning was spoken
+ * armed; v1.187.11 — it is re-presented once when the gap expires (before, the warning was spoken
  * only when the condition committed down to it). What a retry SAYS when it runs is pinned in
  * conditionRetryWords.test.ts.
  */
@@ -296,7 +296,7 @@ test('★★★ a red retry waiting behind a NEWER warning spoken under the kept
   assert.ok(!r.has('the pending yellow retry is cancelled'));
   assert.ok(!r.has('retry dropped'));
   assert.ok(!r.has('deferred retry 2/3'), 'a refused retry is not re-armed');
-  // v1.187.9 — it is re-presented once when the gap expires (deferredCondition), under the kept red.
+  // v1.187.11 — it is re-presented once when the gap expires (deferredCondition), under the kept red.
   // Before, it waited for the condition to commit down to it, once the held critical had cleared
   // (SOUNDED_VDIFF_ABSENT_HOLD_MS) and the lower level had stood its dwell.
   assert.ok(r.has('the refused yellow retry will be re-presented'));
@@ -304,7 +304,7 @@ test('★★★ a red retry waiting behind a NEWER warning spoken under the kept
   await until(r, () => heard(urlWarn) === 1, '★ the warning, re-presented when the gap expires');
   assert.ok(r.has('re-presenting the yellow the storm gate refused'));
   assert.equal(r.count('condition transition → yellow'), 1, 'a re-present, not a transition: the red stays committed');
-  // v1.187.9 (review) — the red's hold stands: a re-present below the committed level does not end it.
+  // v1.187.11 (review) — the red's hold stands: a re-present below the committed level does not end it.
   await sleep(200);
   assert.ok(!r.has('again — the storm-gated condition is re-presented'), '★ the hold is not ended by a re-present below the committed red');
   assert.equal(r.count('red → yellow held'), 1, 'and is not begun again');

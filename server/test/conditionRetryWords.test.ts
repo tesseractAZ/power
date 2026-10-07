@@ -1,5 +1,5 @@
 /**
- * v1.187.9 — a deferred retry of a CONDITION broadcast decides what it says when it RUNS, by the
+ * v1.187.11 — a deferred retry of a CONDITION broadcast decides what it says when it RUNS, by the
  * IDENTITY of the alert its words name (broadcast.conditionRetryWords), not by their text. Driven
  * through the REAL broadcast monitor (startBroadcastMonitor) with Home Assistant mocked at the HTTP
  * layer, as in conditionRetryNewestWins.test.ts, plus the SIP cordless (every play_media is recorded
@@ -495,7 +495,7 @@ test('★★ a refused retry never displaces a re-present already waiting: a new
   await until(r, () => /Battery protection fault/.test(lastWords(r)), '★★ the new critical, re-presented');
 });
 
-/* ── v1.187.9 (review) ─────────────────────────────────────────────────────────────────────────── */
+/* ── v1.187.11 (review) ─────────────────────────────────────────────────────────────────────────── */
 
 /** A yellow raised by an unlocated Grid warning. */
 const WARN_GRID: Alert = { id: 'grid-voltage-SHP2-1', severity: 'warning', category: 'Grid', device: 'Smart panel', title: 'Grid voltage high', detail: 'x' } as Alert;
@@ -767,7 +767,7 @@ test('conditionRetryWords — replay the same alert (a reading that moved too); 
   assert.deepEqual(B.conditionRetryWords('green', null, [], []), { action: 'replay' });
   const blind = { id: 'shp2-below-reserve-X', severity: 'critical', category: 'SHP2', title: 'Below reserve', detail: 'x' } as Alert;
   assert.equal(B.conditionRetryWords('green', null, [blind], [blind]).action, 'drop', 'never "All clear" while a critical is active');
-  // v1.187.9 (review)
+  // v1.187.11 (review)
   assert.equal(B.conditionRetryWords('green', null, [CRIT_C], [CRIT_C]).action, 'drop', 'nor while a counted critical has raised the level, before the tick commits it');
   const spare = { ...WARN_N, annunciate: false } as Alert;
   assert.equal(B.conditionRetryWords('yellow', fpN, [spare], [spare]).action, 'drop', 'a policy mute (no bounded mute behind it): the tick never names it');

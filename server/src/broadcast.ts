@@ -339,7 +339,7 @@ export function conditionFromAlerts(
 ): {
   level: ConditionLevel; crit: number; warn: number; rung: AlarmRung; criticalIds: string[]; criticalFingerprints: string[];
   warningFingerprints: string[];
-  /** v1.187.9 — the alerts the condition COUNTS (the filter below): the only ones its words may name
+  /** v1.187.11 — the alerts the condition COUNTS (the filter below): the only ones its words may name
    *  (conditionNamePool). */
   counted: Alert[];
 } {
@@ -457,7 +457,7 @@ export function conditionFromAlerts(
 }
 
 /**
- * v1.187.9 — THE ALERTS A CONDITION ANNOUNCEMENT MAY NAME: the ones it counts (conditionFromAlerts).
+ * v1.187.11 — THE ALERTS A CONDITION ANNOUNCEMENT MAY NAME: the ones it counts (conditionFromAlerts).
  * The words name pickPrimaryAlert's choice, and pickPrimaryAlert excluded only non-annunciating and
  * `audible:false` alerts, not the ids the count drops: a backup-SoC band, the runway projection, a
  * device telemetry gap (system-outage-device), a stale-telemetry or message-rate warning, the
@@ -1260,7 +1260,7 @@ export function conditionRetrySuperseded(
 }
 
 /**
- * v1.187.9 — the IDENTITY of the alert a condition announcement names aloud: the fingerprint of
+ * v1.187.11 — the IDENTITY of the alert a condition announcement names aloud: the fingerprint of
  * pickPrimaryAlert's choice over the array the words are built from (buildAlertMessage voices that
  * alert and no other), or null when nothing is named (green, or no candidate). The tick takes it
  * from the array it hands messageFor, and a deferred retry from the same chain (speakableAlerts)
@@ -1268,12 +1268,12 @@ export function conditionRetrySuperseded(
  */
 export function conditionNamedFingerprint(level: ConditionLevel, alerts: Alert[]): string | null {
   if (level === 'green') return null;
-  const primary = pickPrimaryAlert(conditionNamePool(alerts), level); // v1.187.9 — only an alert it counts
+  const primary = pickPrimaryAlert(conditionNamePool(alerts), level); // v1.187.11 — only an alert it counts
   return primary == null ? null : alertFingerprint(primary);
 }
 
 /**
- * v1.187.9 — WHAT A DEFERRED CONDITION RETRY SAYS WHEN IT RUNS.
+ * v1.187.11 — WHAT A DEFERRED CONDITION RETRY SAYS WHEN IT RUNS.
  *
  * Every check before this one compares announcements, not alerts (conditionRetryStale,
  * conditionRetrySuperseded), so a retry that passed them replayed the words it was armed with
@@ -1288,17 +1288,17 @@ export function conditionNamedFingerprint(level: ConditionLevel, alerts: Alert[]
  *  - the condition is still at the retry's level and names the SAME alert → 'replay': the armed
  *    words, rendered already (a reading that moved is not a different alarm);
  *  - it names a DIFFERENT alert → 'rederive': the words and the rung (the tone) as the tick would
- *    build them now, from one array, so the tone and the words agree (v1.187.9 (review) — named from
+ *    build them now, from one array, so the tone and the words agree (v1.187.11 (review) — named from
  *    the alerts the condition counts, conditionNamePool, as the tick's words are);
  *  - it is not at the retry's level → 'replay' (below: a de-escalation standing its dwell, or a
  *    sounded critical held by its mute — the committed level is still the retry's, fail-loud, and the
  *    lower level's transition follows; above: that transition is in hand), unless the armed alert is
  *    still raised but the tick's speech gates now drop it (speakableAlerts: a silenced priority,
- *    `audible:false`, a cell-imbalance warning inside its speak hold; v1.187.9 (review) — or a policy
+ *    `audible:false`, a cell-imbalance warning inside its speak hold; v1.187.11 (review) — or a policy
  *    mute, `annunciate:false` with no bounded mute behind it) → 'drop': the tick would not voice it,
  *    so neither does the retry;
  *  - a green retry → 'replay', or 'drop' while the all-clear speech gate holds (allClearSpeechBlocked),
- *    whatever the level observed (v1.187.9 (review)).
+ *    whatever the level observed (v1.187.11 (review)).
  * The identity gates the tick applies to a named alert (the repeat-warning gate, the red replay gate)
  * read monitor state and are applied by the caller. Pure + exported for tests.
  */
@@ -1317,7 +1317,7 @@ export function conditionRetryWords(
 ): ConditionRetryWords {
   const now = conditionFromAlerts(speakable);
   if (level === 'green') {
-    // v1.187.9 (review) — whatever the level observed now: a critical counted before the tick has
+    // v1.187.11 (review) — whatever the level observed now: a critical counted before the tick has
     // committed its red (one tick, or longer behind the boot hold or a broadcast in flight) blocks it too.
     return allClearSpeechBlocked(speakable)
       ? { action: 'drop', reason: 'a critical alert is still active (all-clear speech gated)' }
@@ -1332,7 +1332,7 @@ export function conditionRetryWords(
       criticalFingerprints: now.criticalFingerprints, warningFingerprints: now.warningFingerprints,
     };
   }
-  // v1.187.9 (review) — and not a policy mute (`annunciate:false` with no bounded mute behind it, e.g. a
+  // v1.187.11 (review) — and not a policy mute (`annunciate:false` with no bounded mute behind it, e.g. a
   // bench spare): the tick never names one. A critical held by a bounded cell-spread mute (`mutedBy`)
   // is held, not cleared (soundedCriticalHeld), and its retry plays.
   const voiced = speakable.find((a) => alertFingerprint(a) === armedFp);
@@ -1344,7 +1344,7 @@ export function conditionRetryWords(
 }
 
 /**
- * v1.187.9 — THE ONE RE-PRESENT OF A CONDITION RETRY THE SAME-LEVEL GAP REFUSED, as the tick arms one
+ * v1.187.11 — THE ONE RE-PRESENT OF A CONDITION RETRY THE SAME-LEVEL GAP REFUSED, as the tick arms one
  * for its own transitions (deferredCondition). A retry's refusal was final: a warning under a kept
  * red, retried just after the red's own retry reached the speakers, was refused by the gap that
  * delivery armed and then waited for the condition to commit down to it — once the held critical
@@ -1427,6 +1427,52 @@ export function previewSpeakerOutcome(
   if (sip.attempted > 0) notes.push('the cordless skips the same announcement repeated within a few minutes');
   const note = notes.length ? notes.join('; ') : undefined;
   return errors.length ? { ok: false, delivered, error: errors.join('; '), note } : { ok: true, delivered, note };
+}
+
+/**
+ * v1.187.10 — the suffix of a broadcast outcome line: which kind of broadcast it was and the
+ * generation of the announcement (a deferred retry keeps its announcement's). Appended, so a
+ * `broadcast: <level> → ok in` prefix still matches. Exported for tests.
+ */
+export function outcomeTag(kind: BroadcastKind, generation: number): string {
+  return ` [${kind} #${generation}]`;
+}
+
+/**
+ * v1.187.10 — the timeout probe's line when no SIP target reads 'playing' or 'on'. Delivery is
+ * UNKNOWN, not missed: the Switchboard announce entity writes no state during an announce call
+ * (it read 'idle' through every announcement for months), so an idle reading neither confirms nor
+ * refutes the call. Names what each target read. Exported for tests.
+ */
+export function sipProbeUnknownLine(targets: readonly string[], states: ReadonlyArray<{ state: string } | null>): string {
+  const read = targets.map((t, i) => `${t} reads ${states[i]?.state ?? 'nothing (unreadable)'}`).join(', ');
+  return `broadcast: SIP dispatch timed out — delivery UNKNOWN (${read}; the probe confirms only a target that reports playback, and an announce entity that never changes state cannot) — not counted as heard or delivered; a deferred retry re-fires SIP`;
+}
+
+/**
+ * v1.187.10 — the line for a boot yellow that fell to green inside its hold. A held warning
+ * still in the alert set is not "cleared": the level fell because it stopped COUNTING (an
+ * off-panel Core's standing imbalance is muted only once its roster streak rebuilds, a few ticks
+ * after every restart). Each held fingerprint is split against the alerts of the dropping tick:
+ * absent → cleared; present → still active, named with why it no longer counts (its muteReason,
+ * or the field that took it out). "cleared inside the hold" is kept for a hold whose warnings are
+ * all gone. Pure + exported for tests.
+ */
+export function bootYellowDropLine(heldForS: number, heldFps: Iterable<string>, alerts: readonly Alert[]): string {
+  const cleared: string[] = [];
+  const stillActive: string[] = [];
+  for (const fp of heldFps) {
+    const a = alerts.find((x) => alertFingerprint(x) === fp);
+    if (a == null) { cleared.push(describeFingerprint(fp)); continue; }
+    const why = a.muteReason
+      ?? (a.annunciate === false ? 'held non-annunciating'
+        : a.audible === false ? 'not audible'
+          : a.severity !== 'warning' ? `now ${a.severity}` : 'no longer counted');
+    stillActive.push(`${describeFingerprint(fp)} — ${why}`);
+  }
+  if (stillActive.length === 0) return `broadcast: boot yellow dropped after ${heldForS} s — cleared inside the hold, not spoken (${cleared.join('; ')})`;
+  return `broadcast: boot yellow dropped after ${heldForS} s — not spoken; still active but no longer counted toward the condition (${stillActive.join('; ')})`
+    + (cleared.length ? `; cleared inside the hold (${cleared.join('; ')})` : '');
 }
 
 export function sipTimeoutLike(errors: string[]): boolean {
@@ -1773,7 +1819,7 @@ export function startBroadcastMonitor(
   };
   const scheduleBroadcastRetry = (
     level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string, kind: BroadcastKind, episode: number, generation: number,
-    named: string | null, // v1.187.9 — the alert the words name (conditionNamedFingerprint); null for dedicated
+    named: string | null, // v1.187.11 — the alert the words name (conditionNamedFingerprint); null for dedicated
   ) => {
     // v1.186.0 — a TEST never takes the single deferred-retry slot. A failed test that armed a
     // retry superseded any milder real alarm's pending retry (yellow lost to "This is only a
@@ -1858,7 +1904,7 @@ export function startBroadcastMonitor(
       // dispatch, so re-firing it would replay the identical alarm on the cordless.
       // v1.32.0 — but ONLY skip when the first SIP dispatch actually DELIVERED
       // (lastSipDispatchOk); a failed SIP dispatch is retried alongside MA.
-      // v1.187.9 — and only while the retry names the alert that dispatch named: a condition retry
+      // v1.187.11 — and only while the retry names the alert that dispatch named: a condition retry
       // whose words name a different alert when it runs re-fires SIP (conditionRetryAtRun).
       // v1.186.0 — the retry keeps the kind it was armed for (condition or dedicated).
       // v1.187.4 — a CONDITION retry replays the level it was armed with only while the condition
@@ -1876,7 +1922,7 @@ export function startBroadcastMonitor(
         ? `a newer condition (${prevLevel ?? 'unknown'}) has been committed since; the retry replays only the level it was armed for while that level is still committed` : null);
       const supersededAtRun = (): string | null => (conditionRetrySuperseded(kind, level, generation, conditionNewestGeneration)
         ? 'a newer announcement of the condition has taken its place since; a retry replays only the newest announcement of the condition at its level' : null);
-      // v1.187.9 — and what a condition retry SAYS is decided when it runs, by the identity of the
+      // v1.187.11 — and what a condition retry SAYS is decided when it runs, by the identity of the
       // alert its words name (`named`; conditionRetryAtRun in runBroadcastInner).
       void runBroadcast(level, rung, message, false, messageEs, lastSipDispatchOk, kind, named,
         () => staleAtRun() ?? supersededAtRun(), episode, generation);
@@ -1914,7 +1960,9 @@ export function startBroadcastMonitor(
    * the channel and however partial: Music Assistant played it (call.ok — the tone-only fallback
    * after a failed spoken render and a timed-out, delivery-unknown play included; a sub-2 s "ok" is
    * not), or the SIP cordless took it (the dispatch resolved with a target reached, or a timed-out
-   * dispatch the entity state confirms). lastConditionPlayedLevel is only a verified, error-free
+   * dispatch the entity state confirms — v1.187.10: only a target that reports playback can; the
+   * Switchboard announce entity never does, so a timed-out cordless dispatch is UNKNOWN and is not
+   * counted). lastConditionPlayedLevel is only a verified, error-free
    * play — the storm gates' evidence — so a red heard as the klaxon alone, or only on the cordless,
    * was not "spoken since the boot" and its green was adopted silently at the end of the warm-up.
    * Read by the restart-recovery decisions only; in memory (this process's broadcasts). The most
@@ -1932,6 +1980,22 @@ export function startBroadcastMonitor(
     }
     if (episode === conditionEpisode && level === prevLevel) committedAudible = true;
   };
+  /**
+   * v1.187.10 — a CONDITION retry armed on its timer for the current episode that could still make
+   * a level above `above` audible (nothing above `above` is audible since the boot yet). The restart
+   * decisions wait for it as they wait for a broadcast in flight: realAudibleInFlight counts a retry
+   * only once its timer has fired. A timed-out cordless dispatch is delivery UNKNOWN (the Switchboard
+   * announce entity reports no playback, so the timeout probe cannot confirm it) and is not counted
+   * as audible; the retry re-fires the cordless, and its outcome — or Music Assistant's — is the
+   * evidence. Decided in the gap between the probe and the retry, a red that reached only the
+   * cordless was not yet audible and its green was adopted silently. A retry that cannot change the
+   * decision (its level not above `above`, or a level above it already audible) is not waited for.
+   * Bounded by the retry budget (RETRY_DELAYS_MS: 30 + 90 + 180 s).
+   */
+  const conditionRetryCouldRaise = (above: ConditionLevel): boolean => retryTimer != null && retryLevel != null
+    && retryKind === 'condition' && !conditionRetryStale(retryKind, retryEpisode, conditionEpisode)
+    && LEVEL_RANK[retryLevel] > LEVEL_RANK[above]
+    && (conditionAudibleSinceBootLevel == null || LEVEL_RANK[conditionAudibleSinceBootLevel] <= LEVEL_RANK[above]);
   let stormSuppressedCount = 0;
   // v1.187.0 — the last condition yellow that reached the speakers (sameWarningRepeat). Set by
   // the tick on a delivered yellow; dropped the moment a condition green or red passes the
@@ -2051,7 +2115,9 @@ export function startBroadcastMonitor(
         degraded: audibleDegraded, // v1.186.0
         unusableTargets: [...audibleUnusable],
       });
-      // Audible not applicable (disabled or unsupervised) → unknown, never alarms.
+      // Audible not applicable (disabled or unsupervised) → reachability unknown (null), never
+      // alarms. The HA status reads "disabled" when the operator turned audible off, "unknown"
+      // when unsupervised (audibleStatus, broadcastHealth.ts).
       if (!supervised || !cfg.enabled) {
         unreachableStreak = 0; audibleReachable = null; audibleUsableTargets = 0; audibleReason = null;
         degradedStreak = 0; audibleDegraded = false; audibleUnusable = [];
@@ -2334,7 +2400,7 @@ export function startBroadcastMonitor(
   /** v1.187.5 — the generation of the attempt about to run (runBroadcastInner): the next one for a
    *  new announcement, the replayed announcement's own for a deferred retry. */
   let attemptGeneration = 0;
-  /** v1.187.9 — the alert the words of the attempt about to run name (runBroadcastInner): what a
+  /** v1.187.11 — the alert the words of the attempt about to run name (runBroadcastInner): what a
    *  retry armed by it compares when it runs (conditionRetryWords). */
   let attemptNamed: string | null = null;
 
@@ -2357,7 +2423,7 @@ export function startBroadcastMonitor(
     const kind = attemptKind;
     const episode = attemptEpisode; // v1.187.4 — the condition episode the broadcast was requested in
     const generation = attemptGeneration; // v1.187.5 — which announcement this is (conditionRetrySuperseded)
-    const named = attemptNamed; // v1.187.9 — the alert the words name (a retry's re-arm carries it)
+    const named = attemptNamed; // v1.187.11 — the alert the words name (a retry's re-arm carries it)
     const tag = kind === 'test' ? 'TEST ' : '';
     if (!supervised) return { ok: false, errors: ['not supervised'] };
     // v1.25.0 — at least one Music Assistant target is required (SIP targets are an
@@ -2564,6 +2630,14 @@ export function startBroadcastMonitor(
             // against the entity's real state (~8 s in, mid-announce for any
             // real call) before letting the retry re-fire SIP. A non-timeout
             // failure (4xx/5xx/refused) stays a definite miss and retries.
+            // v1.187.10 — the probe can confirm only a target that REPORTS playback. The
+            // Switchboard announce entity writes no state during an announce call (HA history:
+            // 'idle' through every announcement), so on that target the probe never confirms and
+            // its idle reading is no evidence either way: delivery stays UNKNOWN — not counted as
+            // audible (noteConditionAudible) or as delivered (lastSipDispatchOk), and any deferred
+            // retry re-fires the cordless (Switchboard drops an identical clip that is still in
+            // flight or was just heard). The restart decisions wait for that retry
+            // (conditionRetryCouldRaise). Evidence of a placed call has to come from Switchboard itself.
             if (sipTimeoutLike(r.errors)) {
               probing = true;
               const probe = setTimeout(() => {
@@ -2576,7 +2650,7 @@ export function startBroadcastMonitor(
                       if (kind === 'condition') noteConditionAudible(level, episode); // v1.187.4
                       log('broadcast: SIP delivery confirmed via entity state after an HTTP timeout — duplicate re-fire suppressed');
                     } else {
-                      log(`broadcast: SIP dispatch timed out and the target is not playing — a deferred retry will re-fire SIP`);
+                      log(sipProbeUnknownLine(cfg.sipTargets, states));
                     }
                   })
                   .finally(sipOutcomeKnown);
@@ -2710,10 +2784,14 @@ export function startBroadcastMonitor(
     const renderTag = rr.fromCache ? 'cached' : `rendered+${rr.ttsRenderMs ?? 0}ms`;
     // v1.186.0 — the MA tally is what was USABLE at dispatch, not the configured count.
     const maTally = `${usable}/${cfg.targets.length} MA usable${preflight.unusable.length ? ` (not reached: ${preflight.unusable.join(', ')})` : ''}`;
+    // v1.187.10 — the kind and the announcement's generation, appended (outcomeTag): the night-charge
+    // notice (a dedicated yellow) logged exactly as a condition yellow, and a retry could be matched to
+    // its announcement only by timing. A deferred retry carries its announcement's generation.
+    const kindTag = outcomeTag(kind, generation);
     if (errors.length === 0) {
-      log(`broadcast: ${tag}${level} → ok in ${dt}ms (${maTally}${cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP` : ''} target(s), ${renderTag}, ${rr.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
+      log(`broadcast: ${tag}${level} → ok in ${dt}ms (${maTally}${cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP` : ''} target(s), ${renderTag}, ${rr.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})${kindTag}`);
     } else {
-      log(`broadcast: ${tag}${level} → ${errors.length} error(s) in ${dt}ms (${maTally}): ${errors.join('; ')}`);
+      log(`broadcast: ${tag}${level} → ${errors.length} error(s) in ${dt}ms (${maTally}): ${errors.join('; ')}${kindTag}`);
     }
     lastBroadcastAt = Date.now(); lastLevel = level; lastBroadcastKind = kind;
     lastOutcome = errors.length === 0 ? 'success' : 'partial';
@@ -2744,7 +2822,7 @@ export function startBroadcastMonitor(
    * scheduleBroadcastRetry() runs INSIDE the attempt, so a retry armed by this
    * broadcast is always already armed by the time either call runs.
    */
-  /** v1.187.9 — what a broadcast plays: the words, their tone, the cordless rule, the alert the words
+  /** v1.187.11 — what a broadcast plays: the words, their tone, the cordless rule, the alert the words
    *  name, and (a deferred condition retry) the warnings counted as it plays. */
   type RetryRunWords = {
     rung: AlarmRung; message: string | null; messageEs: string | null; skipSip: boolean; named: string | null;
@@ -2753,7 +2831,7 @@ export function startBroadcastMonitor(
     observed: ConditionLevel | null;
   };
   /**
-   * v1.187.9 — a deferred CONDITION retry at the head of the chain: what it says, or why it says
+   * v1.187.11 — a deferred CONDITION retry at the head of the chain: what it says, or why it says
    * nothing (conditionRetryWords, over the tick's chain as it stands now). The SAME alert replays the
    * armed words, rendered already, and skips the cordless as armed (it took those words on the first
    * dispatch). A DIFFERENT alert is first put to the gates the tick applies to the alert it names: a
@@ -2774,7 +2852,7 @@ export function startBroadcastMonitor(
       const nowMs = Date.now();
       const speakable = speakableAlerts(raw, nowMs, getAlertOnset);
       const w = conditionRetryWords(level, armed.named, raw, speakable);
-      // v1.187.9 (review) — the warnings counted as it plays (the repeat-warning gate) and the level
+      // v1.187.11 (review) — the warnings counted as it plays (the repeat-warning gate) and the level
       // observed (the spoken-retry slot), for afterConditionRetry
       const now = conditionFromAlerts(speakable);
       if (w.action === 'replay') return { ...armed, warnFps: now.warningFingerprints, observed: now.level };
@@ -2798,7 +2876,7 @@ export function startBroadcastMonitor(
   };
 
   /**
-   * v1.187.9 — what a deferred CONDITION retry leaves to the tick. Its result was discarded, so two
+   * v1.187.11 — what a deferred CONDITION retry leaves to the tick. Its result was discarded, so two
    * outcomes the tick recovers for its own announcements were final for a retry:
    *  - a failed spoken render (the tone alone, or nothing): it now earns the one spoken retry
    *    (noteSpokenRenderFailure), with the tone the retry played;
@@ -2811,13 +2889,13 @@ export function startBroadcastMonitor(
     level: ConditionLevel, rung: AlarmRung, named: string | null, warnFps: readonly string[] | null,
     observed: ConditionLevel | null, result: { ok: boolean; errors: string[] },
   ): void => {
-    // v1.187.9 (review) — a yellow retry that reached the speakers is what the repeat-warning gate
+    // v1.187.11 (review) — a yellow retry that reached the speakers is what the repeat-warning gate
     // remembers, as the tick's own yellow is (speakCondition). Unrecorded, a warning named only through
     // a rebuilt retry was new to the gate: a flicker of it back into a held yellow was told again.
     if (level === 'yellow' && result.ok && named != null && warnFps != null) {
       lastVoicedWarning = { voicedFp: named, rung, warnFps: [...warnFps], atMs: Date.now() };
     }
-    // v1.187.9 (review) — the one spoken-retry slot goes to the spoken retry that would SPEAK. A dedicated
+    // v1.187.11 (review) — the one spoken-retry slot goes to the spoken retry that would SPEAK. A dedicated
     // one replays its own words whatever the level; a condition one is dropped at its fire unless the
     // condition is then at its level, judged by the level observed now (unknown: assumed to speak).
     // Replaced unconditionally, a dedicated alarm's speech (the SoC ladder, the runway alarm) was never
@@ -2850,7 +2928,7 @@ export function startBroadcastMonitor(
     bypassStormGate: boolean,
     skipSip = false,
     kind: BroadcastKind = 'dedicated',
-    named: string | null = null, // v1.187.9 — the alert the words name (conditionNamedFingerprint)
+    named: string | null = null, // v1.187.11 — the alert the words name (conditionNamedFingerprint)
     staleReason?: () => string | null, // v1.187.4 — a deferred retry's run-time check
     episode = conditionEpisode, // v1.187.4 — the condition episode the broadcast was requested in
     retryOf?: number, // v1.187.5 — a deferred retry: the generation of the announcement it replays
@@ -2868,7 +2946,7 @@ export function startBroadcastMonitor(
         log(`broadcast: deferred ${level} retry dropped — ${stale}`);
         return { ok: false, errors: [`dropped: stale retry (${stale})`] };
       }
-      // v1.187.9 — a deferred CONDITION retry says what the identity of its alert decides when it runs
+      // v1.187.11 — a deferred CONDITION retry says what the identity of its alert decides when it runs
       // (conditionRetryAtRun), read here, at the head of the chain, as the checks above are. Every
       // other broadcast plays as requested.
       const retried = retryOf != null && kind === 'condition';
@@ -2940,7 +3018,7 @@ export function startBroadcastMonitor(
   // waits behind more than ONE short pre-warm render.
   let realAudibleInFlight = 0;
   /**
-   * v1.187.9 — NEW condition announcements waiting in the chain, by level and the alert their words
+   * v1.187.11 — NEW condition announcements waiting in the chain, by level and the alert their words
    * name (queuedConditionKey → how many): counted in when requested, out when they start to run. A
    * deferred retry about to name such an alert yields to its announcement (conditionRetryAtRun).
    */
@@ -2962,7 +3040,7 @@ export function startBroadcastMonitor(
     // announcement) passes nothing, and a caller that forgets to say what it is must not be
     // able to arm the condition gates or mark the condition record heard.
     kind: BroadcastKind = 'dedicated',
-    named: string | null = null, // v1.187.9 — forwarded; the alert a condition announcement's words name
+    named: string | null = null, // v1.187.11 — forwarded; the alert a condition announcement's words name
     staleReason?: () => string | null, // v1.187.4 — forwarded; set by deferred retries
     // v1.187.4 — read when the broadcast is REQUESTED: one that waits in the chain while a newer
     // commit lands belongs to the episode it was requested for. A deferred retry passes its own.
@@ -3026,7 +3104,7 @@ export function startBroadcastMonitor(
     // No engine detection — Wyoming is always our TTS path. Return the
     // formatted message; the renderer hits Wyoming directly. If Wyoming
     // is offline the render fails cleanly and the broadcast logs an error.
-    // v1.187.9 — naming only an alert the condition counts (conditionNamePool).
+    // v1.187.11 — naming only an alert the condition counts (conditionNamePool).
     return buildAlertMessage(level, conditionNamePool(alerts));
   };
 
@@ -3138,7 +3216,7 @@ export function startBroadcastMonitor(
     const { voicedFingerprint, criticalFingerprints } = ids;
     // v1.187.0 — the repeat-warning gate (sameWarningRepeat), on the identity of what would be
     // SAID: pickPrimaryAlert is the one alert buildAlertMessage names.
-    const named = level === 'yellow' ? pickPrimaryAlert(conditionNamePool(alerts), 'yellow') : null; // v1.187.9 — the pool the words name from
+    const named = level === 'yellow' ? pickPrimaryAlert(conditionNamePool(alerts), 'yellow') : null; // v1.187.11 — the pool the words name from
     const warning = level === 'yellow'
       ? { voicedFp: named == null ? null : alertFingerprint(named), rung, warnFps: ids.warningFingerprints }
       : null;
@@ -3150,7 +3228,7 @@ export function startBroadcastMonitor(
     }
     const message = messageFor(level, alerts);
     const messageEs = messageEsFor(level, alerts); // v0.62.0 — Spanish second pass
-    // v1.187.9 — with the alert those words name: a retry armed by this broadcast compares it when it
+    // v1.187.11 — with the alert those words name: a retry armed by this broadcast compares it when it
     // runs (conditionRetryWords), and a retry waiting ahead of it yields to it (conditionRetryAtRun).
     const result = await runBroadcast(level, rung, message, false, messageEs, false, 'condition', conditionNamedFingerprint(level, alerts));
     const doneAt = Date.now();
@@ -3246,7 +3324,7 @@ export function startBroadcastMonitor(
     // else, so that choice — computed from the SAME `alerts` array messageFor()
     // will be handed — is what the replay gate must compare. Null when nothing
     // would be named, which the gate treats as "cannot prove sameness" ⇒ announce.
-    // v1.187.9 — from the pool the words name from (conditionNamePool): messageFor names from it too.
+    // v1.187.11 — from the pool the words name from (conditionNamePool): messageFor names from it too.
     const voicedFingerprint = voicedRedFingerprint(level, namePool);
     // v1.187.0 — what a commit on this tick records (adoptLevel → newCrit / newWarn).
     const ids = { crit: criticalFingerprints, warn: warningFingerprints };
@@ -3336,7 +3414,7 @@ export function startBroadcastMonitor(
         : null;
       pendingSpokenRetry = null;
       const levelOk = stored != null || level === want;
-      // v1.187.9 (review) — and never "All clear" while a critical is active (allClearSpeechBlocked), as
+      // v1.187.11 (review) — and never "All clear" while a critical is active (allClearSpeechBlocked), as
       // the tick's own green: a critical the condition does not count (the reserve floor, a held
       // telemetry-blind alarm) appearing inside the 90 s left the all-clear's spoken retry ungated.
       const allClearGated = stored == null && want === 'green' && allClearSpeechBlocked(alerts);
@@ -3347,7 +3425,7 @@ export function startBroadcastMonitor(
           const message = stored ? stored.message : messageFor(level, alerts);
           const messageEs = stored ? stored.messageEs : messageEsFor(level, alerts);
           // v1.186.0 — a dedicated-path replay stays dedicated; a condition retry is condition.
-          // v1.187.9 — a condition retry's words are the tick's now, so its tone is too (`rung`, from
+          // v1.187.11 — a condition retry's words are the tick's now, so its tone is too (`rung`, from
           // the same array): the stored rung named the set the failed render saw, and the two could
           // disagree once that set had changed. And the alert the words name rides along, as for a
           // transition (speakCondition).
@@ -3357,7 +3435,7 @@ export function startBroadcastMonitor(
           lastLevel = level; lastBroadcastKind = stored ? 'dedicated' : 'condition';
           lastOutcome = result.ok ? 'success' : 'partial';
           lastErrors = result.errors;
-          // v1.187.9 (review) — a condition yellow it put on the speakers is what the repeat-warning gate
+          // v1.187.11 (review) — a condition yellow it put on the speakers is what the repeat-warning gate
           // remembers, as the tick's own (speakCondition) and a deferred retry's (afterConditionRetry).
           const spokenNamed = stored == null && want === 'yellow' && result.ok ? conditionNamedFingerprint(level, alerts) : null;
           if (spokenNamed != null) lastVoicedWarning = { voicedFp: spokenNamed, rung, warnFps: [...warningFingerprints], atMs: Date.now() };
@@ -3382,7 +3460,7 @@ export function startBroadcastMonitor(
     // supersedes it (adoptLevel), and a return to the deferred level re-presents it on that tick.
     if (deferredCondition != null && !tickInFlight && Date.now() >= deferredCondition.dueAtMs) {
       const held = deferredCondition;
-      // v1.187.9 (review) — a deferral BELOW the committed level (a warning under a kept red, its critical
+      // v1.187.11 (review) — a deferral BELOW the committed level (a warning under a kept red, its critical
       // held by its mute) waits while that critical reads loud again. Dropped as "a higher level", it was
       // lost: no transition follows under the committed red, so the warning waited for the commit down.
       const heldUnder = level === prevLevel && LEVEL_RANK[held.level] < LEVEL_RANK[level];
@@ -3410,7 +3488,7 @@ export function startBroadcastMonitor(
         } else {
           // The condition is back at the committed level: a held de-escalation below it (a lower
           // level that did not stand its dwell) is over.
-          // v1.187.9 (review) — only then. A deferral below the committed level (a warning under a kept
+          // v1.187.11 (review) — only then. A deferral below the committed level (a warning under a kept
           // red) is spoken while the red's hold stands: ending it there logged an abandoned de-escalation,
           // flipped the record's heard flag twice, and lost the hold's restart mark.
           if (held.level === prevLevel) endDeescalationHold(level, ' again — the storm-gated condition is re-presented', true);
@@ -3472,7 +3550,10 @@ export function startBroadcastMonitor(
     // v1.187.1 — a boot yellow that cleared inside its hold: never spoken. A rise to red is not a
     // drop (red logs its own hold and transition), so only a fall to green is said.
     if (level !== 'yellow' && bootYellowHold != null) {
-      if (level === 'green') log(`broadcast: boot yellow dropped after ${Math.round((Date.now() - bootYellowHold.sinceMs) / 1000)} s — cleared inside the hold, not spoken (${[...bootYellowHold.fps].map(describeFingerprint).join('; ')})`);
+      // v1.187.10 — split into cleared and still active (bootYellowDropLine): a warning muted on the
+      // dropping tick (the off-panel roster streak rebuilt) did not clear. Judged against the whole
+      // published set, not the speakable one (an alert made inaudible is still there).
+      if (level === 'green') log(bootYellowDropLine(Math.round((Date.now() - bootYellowHold.sinceMs) / 1000), bootYellowHold.fps, (store.get().alerts ?? []) as Alert[]));
       bootYellowHold = null;
     }
     // v1.187.3 (review) — a green below a heard restart baseline, inside the warm-up, commits only
@@ -3610,10 +3691,13 @@ export function startBroadcastMonitor(
       // with no broadcast in flight or queued and no SIP outcome pending: a red being retried (or
       // reaching the cordless) is made audible only when its play returns, and a silent adoption
       // decided meanwhile left that red as the last words. Bounded by the announce timeouts.
-      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) {
+      // v1.187.10 — and while a condition retry armed on its timer could still make a level above
+      // green audible (conditionRetryCouldRaise): its re-fire of a cordless whose first outcome is
+      // unknown, or its play, is the evidence.
+      if (realAudibleInFlight > 0 || sipOutcomesPending > 0 || conditionRetryCouldRaise('green')) {
         if (warmupEndWaitLoggedFor !== recoveryHoldSinceMs) {
           warmupEndWaitLoggedFor = recoveryHoldSinceMs;
-          log('broadcast: the restart decision on the held green waits for the broadcast in flight — what it makes audible decides between an announcement and a silent adoption');
+          log('broadcast: the restart decision on the held green waits for the broadcast in flight (or a condition retry still armed) — what it makes audible decides between an announcement and a silent adoption');
         }
         return;
       }
@@ -3643,7 +3727,7 @@ export function startBroadcastMonitor(
       // v1.187.4 (review) — decided with no broadcast in flight or SIP outcome pending, like the
       // restart decision above: a red retry playing at this moment is made audible only when its
       // play returns, and a silent continuation decided meanwhile left that red as the last words.
-      if (realAudibleInFlight > 0 || sipOutcomesPending > 0) return;
+      if (realAudibleInFlight > 0 || sipOutcomesPending > 0 || conditionRetryCouldRaise(level)) return; // v1.187.10 — an armed retry too
       // v1.187.3 (review) — never a green: inside the warm-up a green under the baseline is held
       // until it is a recovery (above), and past it this predicate is false.
       log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)`);
