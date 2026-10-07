@@ -7001,7 +7001,7 @@ is then at its level, judged by the level observed when the retry ran) — and t
 gap expires (`refusedRetryRepresent` into `deferredCondition`; only that refusal, never over a
 re-present already waiting). A re-present below the committed level (a warning under a kept red)
 waits while the observed level is the committed one, and does not end the red's held de-escalation.
-Dedicated retries are unchanged.
+Dedicated retries are unchanged. Residual: a cordless dispatch that timed out is re-fired only by a retry that runs; a condition retry dropped when it runs (a speech gate, the repeat-warning check, the restart replay check, or giving way to a waiting announcement) neither re-fires the cordless nor gives the restart decision its evidence. Harness: `scripts/mutate-v1187-5.mjs` (W-i to W-xlix).
 
 **v1.173.1 — calibrator on realized GHI; boot yellow confirmation.** reports.ts passes
 `ghiBasis = 'realized'` to the band calibrator's skill (a policy decision); `holdBootYellow` holds a
