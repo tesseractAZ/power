@@ -134,12 +134,22 @@ test('★★★ every exit of the broadcast routine releases an idle retry slot'
   assert.ok(code.includes(
     "        return { ok: false, errors: [`dropped: stale retry (${stale})`] };\n"
     + '      }\n'
-    + '      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);\n'
+    + "      const retried = retryOf != null && kind === 'condition';\n"),
+    'the stale-retry drop is followed, inside the same try, by the run-time words');
+  // v1.187.11 — the run-time words' own drop (a condition retry the tick would not voice now) and the
+  // attempt leave through the same finally.
+  assert.ok(code.includes(
+    "        return { ok: false, errors: [`dropped: ${w.drop}`] };\n"
+    + '      }\n'
+    + '      attemptNamed = w.named;\n'
+    + '      const result = await runBroadcastAttempt(level, w.rung, w.message, w.messageEs, bypassStormGate, w.skipSip);\n'
+    + '      if (retried) afterConditionRetry(level, w.rung, w.named, w.warnFps, w.observed, result);\n'
+    + '      return result;\n'
     + '    } finally {\n'
     + '      releaseRetrySlotIfIdle();\n'
     + '    }\n'
     + '  };'),
-    'the wrapper releases an idle slot on EVERY exit, including a throw and a dropped stale retry — not only at the tail');
+    'the wrapper releases an idle slot on EVERY exit, including a throw and a dropped retry — not only at the tail');
 
   // Releasing on the way IN would wipe the budget of the retry that is re-running,
   // which is the v1.159.0 defect restored.

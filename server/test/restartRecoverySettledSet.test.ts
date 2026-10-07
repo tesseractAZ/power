@@ -287,6 +287,9 @@ test('★★★ the recovery through both monitors: settled after the boot debou
   offset += DWELL + SEC;
   fresh(store);
   await until(() => p.count(GREEN_SPOKEN) === 1, 'the all-clear', p.logs);
+  // v1.187.11 — and its play returned: stop() does not cancel a broadcast in flight, so a play still
+  // running when this test ends landed in the next test's heard() (announces 2 !== 1 on a loaded run).
+  await until(() => p.has('broadcast: green → ok in'), 'the all-clear played', p.logs);
   assert.ok(p.has(`${RECOVERY} yellow`));
   assert.equal(p.mon.alertSetSettledSince(), stampedAt, 'the stamp is kept while every set is settled');
   await sleep(80);
