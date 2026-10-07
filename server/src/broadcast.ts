@@ -1131,6 +1131,9 @@ const PREVIEW_COOLDOWN_MS = 2_000;
  *  comfortably covers repeated identical alerts within a week without
  *  letting cruft pile up indefinitely. */
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** v1.48.3 — how long after a timed-out SIP dispatch the timeout probe reads the SIP targets'
+ *  entity state: ~8 s in, mid-announce for any real call. Exported for tests. */
+export const SIP_TIMEOUT_PROBE_DELAY_MS = 8_000;
 
 export interface BroadcastMonitorOpts {
   /** Directory containing the pre-generated klaxon WAVs (e.g. /data/audio). */
@@ -1146,6 +1149,9 @@ export interface BroadcastMonitorOpts {
   /** v1.187.4 — test seam: the deferred-retry delays (RETRY_DELAYS_MS, 30/90/180 s). Production
    *  passes none. */
   retryDelaysMs?: readonly number[];
+  /** v1.187.12 — test seam: the timeout probe's delay after a timed-out SIP dispatch
+   *  (SIP_TIMEOUT_PROBE_DELAY_MS, 8 s). Production passes none. */
+  sipTimeoutProbeDelayMs?: number;
   /**
    * v1.187.3 — since when the alert set the condition is read from has been SETTLED (the alert
    * monitor's AlertMonitor.alertSetSettledSince, wired in index.ts), or null while it is not. Only
@@ -1800,6 +1806,7 @@ export function startBroadcastMonitor(
   /** v1.187.4 — SIP dispatches whose outcome (incl. the timeout probe) has not landed yet. */
   let sipOutcomesPending = 0;
   const RETRY_DELAYS_MS: readonly number[] = opts.retryDelaysMs ?? [30_000, 90_000, 180_000];
+  const SIP_PROBE_DELAY_MS: number = opts.sipTimeoutProbeDelayMs ?? SIP_TIMEOUT_PROBE_DELAY_MS;
   /**
    * v1.159.0 — release the deferred-retry slot when no retry is armed.
    *
@@ -2654,7 +2661,7 @@ export function startBroadcastMonitor(
                     }
                   })
                   .finally(sipOutcomeKnown);
-              }, 8_000);
+              }, SIP_PROBE_DELAY_MS);
               probe.unref?.();
             } else {
               log(`broadcast: SIP dispatch reached 0/${r.attempted} targets — a deferred retry will re-fire SIP`);
