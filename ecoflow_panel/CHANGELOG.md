@@ -1,3 +1,15 @@
+## 1.187.12
+
+### Night charge waits longer for a slot to confirm; cell-imbalance warnings push without speaking
+
+**Night charge**
+
+- A battery slot now gets 15 minutes (was 6) to confirm it has started charging before the request is sent again, and 30 minutes before the night reports that slot's charge as lost. On two recent nights a slot was reported lost while it was in fact charging; its confirmation was simply slow.
+
+**Alarms**
+
+- A cell-imbalance **warning** still shows on the dashboard and still sends a phone notification, but is no longer announced on the speakers. It had been recurring on the same two battery packs for 40 minutes to 2 hours as the morning charge began, each time with a spoken warning and a spoken all-clear. A **critical** cell imbalance is still announced.
+
 ## 1.187.11
 
 ### A late retry names the alarm that is standing, and is spoken even when speech is slow

@@ -134,3 +134,18 @@ test('off-plateau (soc 50, idle): a 60 mV spread is unchanged — annunciating C
   assert.equal(a!.severity, 'critical');
   assert.notEqual(a!.annunciate, false);
 });
+
+/* v1.187.12 — a warning-level spread pushes and stays on screen but is never voiced; the
+ * critical line still raises the audible condition. */
+test('v1.187.12 — vdiff-warn at mid SoC pushes (annunciates) but is audible:false and raises no spoken condition; vdiff-crit still does', async () => {
+  const { conditionFromAlerts } = await import('../src/broadcast.js');
+  const warn = vdiffWarn(dpuWithPack({ maxVolDiffMv: 30, balanceState: 0 }, 64));
+  assert.ok(warn);
+  assert.notEqual(warn!.annunciate, false, 'still a card and a push');
+  assert.equal(warn!.audible, false, 'never voiced');
+  assert.equal(conditionFromAlerts([warn!]).level, 'green', 'a warning spread alone raises no spoken condition');
+  const crit = vdiffCrit(dpuWithPack({ maxVolDiffMv: 60, balanceState: 0 }, 50));
+  assert.ok(crit);
+  assert.notEqual(crit!.audible, false);
+  assert.equal(conditionFromAlerts([crit!]).level, 'red', 'the critical line still sounds');
+});

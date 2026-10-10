@@ -1875,7 +1875,11 @@ export function computeAlerts(
             ...(critMute ? { annunciate: false, mutedBy: critMute, muteReason: CELL_SPREAD_MUTE_TEXT[critMute] } : {}),
           });
         } else if (warnActive) {
-          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning fires ≥ ${VOL_DIFF_WARN_RISE_MV} mV, holds ≥ ${VOL_DIFF_WARN_MV} mV).${cellNote}${balanceNote}${plateauNote}`, ...facts, ...annun });
+          // v1.187.12 — a warning-level spread keeps its card and its push but is never voiced
+          // (`audible:false`, as the top-of-charge peer outlier): it recurs on the same packs for
+          // 40 min to 2 h as the morning charge begins (10 rises, median 40 min, longest 111 min by
+          // 10-08), a pack-health trend rather than an event to announce. The critical line stays audible.
+          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', audible: false, category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning fires ≥ ${VOL_DIFF_WARN_RISE_MV} mV, holds ≥ ${VOL_DIFF_WARN_MV} mV).${cellNote}${balanceNote}${plateauNote}`, ...facts, ...annun });
         }
       }
       // v1.187.0 — CELL OVERVOLTAGE (CELL_OVP_CRIT_MV). Computed independently of the spread
