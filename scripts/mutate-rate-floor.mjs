@@ -155,44 +155,7 @@ const MUTANTS = [
   },
 ];
 
-function run(files) {
-  execFileSync('npm', ['test', '--silent', '--', ...files], { cwd: SERVER, stdio: 'pipe' });
-}
-
-let killed = 0;
-const survivors = [];
-const original = readFileSync(FLOOR, 'utf8');
-
-console.log(`mutate-rate-floor: ${MUTANTS.length} mutants against ${SUBSET.join(' + ')}\n`);
-
-for (const m of MUTANTS) {
-  // ANCHOR ASSERTION — a mutant that does not apply must abort the run, never pass.
-  const hits = original.split(m.find).length - 1;
-  if (hits !== 1) {
-    console.error(`\nABORT: anchor for "${m.id}" matched ${hits} times, expected exactly 1.`);
-    console.error('The source moved. Fix the anchor — do NOT report this run as green.');
-    writeFileSync(FLOOR, original);
-    process.exit(2);
-  }
-  try {
-    writeFileSync(FLOOR, original.replace(m.find, m.to));
-    let died = false;
-    try { run(SUBSET); } catch { died = true; }
-    if (!died) {
-      // Survived the subset — confirm against the FULL suite before reporting it.
-      try { run([]); } catch { died = true; }
-    }
-    if (died) { killed++; console.log(`  KILLED   ${m.id}`); }
-    else { survivors.push(m); console.log(`  SURVIVED ${m.id}\n           ↳ ${m.why}`); }
-  } finally {
-    writeFileSync(FLOOR, original);
-  }
-}
-
-console.log(`\n${killed}/${MUTANTS.length} mutants killed`);
-if (survivors.length) {
-  console.log('\nSURVIVORS — the suite does not constrain these behaviours:');
-  for (const s of survivors) console.log(`  - ${s.id}\n      ${s.why}`);
-  process.exit(1);
-}
-console.log('post-run: tree restored');
+// Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs);
+// the verdict procedure per mutant is unchanged.
+import { runMutantsParallel } from './lib/mutateParallel.mjs';
+await runMutantsParallel({ name: 'mutate-rate-floor', mutants: MUTANTS.map((m) => ({ file: FLOOR, ...m })), subset: SUBSET, root: REPO });

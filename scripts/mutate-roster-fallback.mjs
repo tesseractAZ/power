@@ -52,25 +52,7 @@ const MUTANTS = [
   },
 ];
 
-function run(files) { execFileSync('npm', ['test', '--silent', '--', ...files], { cwd: SERVER, stdio: 'pipe' }); }
-const original = readFileSync(MOD, 'utf8');
-let killed = 0; const survivors = [];
-console.log(`mutate-roster-fallback: ${MUTANTS.length} mutants against ${SUBSET.join(' + ')}\n`);
-try {
-  for (const m of MUTANTS) {
-    const hits = original.split(m.find).length - 1;
-    if (hits !== 1) {
-      console.error(`\nABORT: anchor for "${m.id}" matched ${hits} times, expected exactly 1.`);
-      writeFileSync(MOD, original); process.exit(2);
-    }
-    writeFileSync(MOD, original.replace(m.find, m.to));
-    let died = false;
-    try { run(SUBSET); } catch { died = true; }
-    if (died) { killed++; console.log(`  KILLED   ${m.id}`); }
-    else { survivors.push(m); console.log(`  SURVIVED ${m.id}\n           -> ${m.why}`); }
-    writeFileSync(MOD, original);
-  }
-} finally { writeFileSync(MOD, original); }
-
-console.log(`\nmutate-roster-fallback: ${killed}/${MUTANTS.length} killed`);
-if (survivors.length) { console.log('\nSURVIVORS:'); for (const s of survivors) console.log(`  - ${s.id}`); process.exit(1); }
+// Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs);
+// the verdict procedure per mutant is unchanged.
+import { runMutantsParallel } from './lib/mutateParallel.mjs';
+await runMutantsParallel({ name: 'mutate-roster-fallback', mutants: MUTANTS.map((m) => ({ file: MOD, ...m })), subset: SUBSET, root: REPO, fullSuite: false });
