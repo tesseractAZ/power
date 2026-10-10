@@ -78,8 +78,8 @@ export interface TariffModel {
    *  Read only through `seasonAt` / `seasonOf` — the one season source. */
   summerMonths: number[];
   /** Local 'YYYY-MM-DD' dates treated as all-day off-peak (observed holidays).
-   *  ★ Confirm the exact APS observed-holiday list from a bill before relying
-   *  on the $ output — defaults to [] (documented, not guessed). */
+   *  v1.187.13 — the APS model defaults to the R-EV tariff's holiday rule
+   *  (`apsOffPeakHolidays`); the flat model has none. */
   holidays: string[];
   /** INERT for R-EV (no demand charge). Present so a demand-charge plan can be
    *  modeled later without a schema change; consumed by nothing today. */
@@ -244,6 +244,53 @@ const MON_FRI = [1, 2, 3, 4, 5];
  *  can be seasoned one cycle off. Rates stay null until confirmed. */
 export const APS_SUMMER_MONTHS = [4, 5, 6, 7, 8, 9];
 
+/**
+ * v1.187.13 — APS off-peak holidays for a calendar year, as Rate Schedule R-EV states them
+ * (A.C.C. No. 6152, effective 2024-03-08, Decision No. 79293): all-day off-peak, so no
+ * on-peak, overnight or super off-peak hours on these dates.
+ *  - Fixed dates, observed: New Year's Day (Jan 1), Cesar Chavez Day (Mar 31), Juneteenth
+ *    (Jun 19), Independence Day (Jul 4), Veterans Day (Nov 11), Christmas Day (Dec 25). On a
+ *    Saturday the preceding Friday is off-peak; on a Sunday, the following Monday.
+ *  - Nth weekday: Martin Luther King Day (3rd Mon Jan), Presidents Day (3rd Mon Feb),
+ *    Memorial Day (last Mon May), Labor Day (1st Mon Sep), Indigenous Peoples' / Columbus
+ *    Day (2nd Mon Oct), Thanksgiving (4th Thu Nov).
+ *  - On the day itself: Christmas Eve (Dec 24), New Year's Eve (Dec 31).
+ * Local calendar dates 'YYYY-MM-DD'; an observed New Year's Day can fall in the year before.
+ * PURE.
+ */
+export function apsOffPeakHolidays(year: number): string[] {
+  const iso = (t: number): string => new Date(t).toISOString().slice(0, 10);
+  const day = (m: number, d: number): number => Date.UTC(year, m - 1, d);
+  const DAY = 86_400_000;
+  const observed = (t: number): number => {
+    const dow = new Date(t).getUTCDay();
+    return dow === 6 ? t - DAY : dow === 0 ? t + DAY : t;
+  };
+  const nthWeekday = (m: number, weekday: number, n: number): number => {
+    const first = day(m, 1);
+    const offset = (weekday - new Date(first).getUTCDay() + 7) % 7;
+    return first + (offset + (n - 1) * 7) * DAY;
+  };
+  const lastWeekday = (m: number, weekday: number): number => {
+    const last = Date.UTC(year, m, 0); // day 0 of the next month = the last day of m
+    return last - ((new Date(last).getUTCDay() - weekday + 7) % 7) * DAY;
+  };
+  const out = [
+    observed(day(1, 1)), observed(day(3, 31)), observed(day(6, 19)), observed(day(7, 4)),
+    observed(day(11, 11)), observed(day(12, 25)),
+    nthWeekday(1, 1, 3), nthWeekday(2, 1, 3), lastWeekday(5, 1), nthWeekday(9, 1, 1),
+    nthWeekday(10, 1, 2), nthWeekday(11, 4, 4),
+    day(12, 24), day(12, 31),
+  ].map(iso);
+  return [...new Set(out)].sort();
+}
+
+/** v1.187.13 — the R-EV holiday rule over a span of years wide enough for any date the
+ *  add-on prices (history and forecast horizons alike). */
+export const APS_OFF_PEAK_HOLIDAYS: readonly string[] = Object.freeze(
+  Array.from({ length: 2045 - 2015 + 1 }, (_, i) => apsOffPeakHolidays(2015 + i)).flat().sort(),
+);
+
 export interface ApsREvRates {
   onPeak?: SeasonalCents;
   superOffPeak?: SeasonalCents; // winter only
@@ -301,7 +348,8 @@ export function buildApsREvModel(rates: ApsREvRates = {}): TariffModel {
       centsBySeason: rates.offPeak ?? NULL_SEASON,
     },
     summerMonths: APS_SUMMER_MONTHS,
-    holidays: rates.holidays ?? [],
+    // v1.187.13 — the R-EV holiday rule (APS_OFF_PEAK_HOLIDAYS) unless the rates name their own list.
+    holidays: rates.holidays ?? [...APS_OFF_PEAK_HOLIDAYS],
     demand: null, // R-EV has no demand charge
     // Null-over-fabrication (review-hardening): a money value is surfaced only
     // once rates are confirmed, so an unconfirmed model can never leak a
