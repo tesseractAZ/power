@@ -288,3 +288,18 @@ test('★★ index.ts: /api/night-charge/status serves the verdict beside forceC
   assert.ok(route.includes('...nightActuationMem,'), 'forceChargeOnVerifiedAtMs / forceChargeOnFailedAtMs are spread');
   assert.ok(route.includes('forceChargeOnVerify: forceChargeOnReadbackStatus(nightActuationMem),'));
 });
+
+test('★★★ v1.187.12: a slot still reading OFF at +7 and +14 min is NOT re-issued or failed — its readback can lag (10-05, 10-06)', () => {
+  // On 2026-10-06 slot 3 was re-issued at +7 min and given up at +14 min, yet the pool reached the
+  // night's target 19 min ahead of a plan sized for all three slots: slot 3 was charging and only
+  // its readback lagged. The grace is 15 min from the ON, and again from the re-issue.
+  assert.equal(FORCE_CHARGE_ON_VERIFY_AFTER_MS, 15 * MIN);
+  const lagging = opts({ slotsOn: [1, 2] });
+  assert.deepEqual(decideForceCharge(onNight(), ON_AT + 7 * MIN, lagging), { kind: 'none' }, 'no re-issue at +7 min');
+  assert.deepEqual(decideForceCharge(onNight(), ON_AT + 14 * MIN, lagging), { kind: 'none' }, 'no re-issue at +14 min');
+  assert.deepEqual(decideForceCharge(onNight(), ON_AT + 15 * MIN, lagging), { kind: 'onRetry', slots: [3] }, 're-issued at +15 min');
+  const retried = onNight({ forceChargeOnRetries: 1, forceChargeOnLastAttemptMs: ON_AT + 15 * MIN });
+  assert.deepEqual(decideForceCharge(retried, ON_AT + 29 * MIN, lagging), { kind: 'none' }, 'not failed before +30 min');
+  assert.deepEqual(decideForceCharge(retried, ON_AT + 30 * MIN, lagging), { kind: 'onFailed', slots: [3] }, 'failed at +30 min');
+  assert.deepEqual(decideForceCharge(retried, ON_AT + 20 * MIN, opts()), { kind: 'onVerified', atCeiling: [] }, 'a late ON still verifies');
+});
