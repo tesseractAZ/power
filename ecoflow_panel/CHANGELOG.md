@@ -1,3 +1,12 @@
+## 1.187.13
+
+### APS holidays are priced off-peak all day
+
+**Tariff and night charge**
+
+- APS off-peak holidays are now priced as off-peak all day, as the EV Overnight Charging (R-EV) rate schedule states: no on-peak hours, no overnight hours and no super off-peak hours on those dates. Before, the add-on priced them as ordinary weekdays, so a night charge could be planned for overnight hours that are billed at the off-peak rate on a holiday, and cost reports counted on-peak hours that do not exist that day.
+- The holidays follow the schedule's rules, including the Friday or Monday that is observed when a holiday falls on a weekend, and Christmas Eve and New Year's Eve. The next ones are Monday, October 12 (Indigenous Peoples' Day), Wednesday, November 11 (Veterans Day) and Thursday, November 26 (Thanksgiving).
+
 ## 1.187.12
 
 ### Night charge waits longer for a slot to confirm; cell-imbalance warnings push without speaking

@@ -75,7 +75,10 @@ test('★★★ October prices at winter rates, with the 10:00–15:00 super-off
       ['Thu Oct 1 20:00', '2026-10-01T20:00:00', 'off_peak', 'winter', 17.0],
       ['Wed Sep 30 12:00', '2026-09-30T12:00:00', 'off_peak', 'summer', 16.91],
       ['Wed Sep 30 17:00', '2026-09-30T17:00:00', 'on_peak', 'summer', 44.2],
-      ['Tue Mar 31 12:00', '2026-03-31T12:00:00', 'super_off_peak', 'winter', 8.2],
+      // v1.187.13 — Mar 31 is Cesar Chavez Day, an R-EV off-peak holiday: the last winter weekday
+      // with a super off-peak tier is Mon Mar 30; the holiday itself is off-peak at the winter rate.
+      ['Mon Mar 30 12:00', '2026-03-30T12:00:00', 'super_off_peak', 'winter', 8.2],
+      ['Tue Mar 31 12:00 (holiday)', '2026-03-31T12:00:00', 'off_peak', 'winter', 17.0],
       ['Wed Apr 1 12:00', '2026-04-01T12:00:00', 'off_peak', 'summer', 16.91],
       ['Wed Apr 1 17:00', '2026-04-01T17:00:00', 'on_peak', 'summer', 44.2],
     ];
