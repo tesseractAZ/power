@@ -182,10 +182,16 @@ export const FORCE_CHARGE_MAX_RUN_MS = 7 * 3_600_000;
 export const FORCE_CHARGE_OFF_VERIFY_AFTER_MS = 6 * 60_000;
 export const FORCE_CHARGE_OFF_MAX_RETRIES = 2;
 /** v1.186.0 — readback grace after an ON write before a slot still reading OFF counts as
- *  not-taken. Same 6 min as the OFF grace, for the same reason: it MUST exceed the 5-min
- *  per-slot cooldown, or the one re-issue comes back rate-limited and is spent on a write
- *  that never reached the panel. (2026-09-23: the drift watch saw OFF→ON ~3 min after the ON.) */
-export const FORCE_CHARGE_ON_VERIFY_AFTER_MS = 6 * 60_000;
+ *  not-taken. It MUST exceed the 5-min per-slot cooldown, or the one re-issue comes back
+ *  rate-limited and is spent on a write that never reached the panel. (2026-09-23: the drift
+ *  watch saw OFF→ON ~3 min after the ON.)
+ *  v1.187.12 — 15 min (was 6). A slot's ON can take longer than 6 min to read back: on
+ *  2026-10-05 and 10-06 a slot was re-issued at +7 min and given up at +14 min, yet on 10-06
+ *  the pool reached the night's target 19 min AHEAD of a plan sized for all three slots, so
+ *  that slot was charging and only its readback lagged. The give-up comes at +30 min now. It
+ *  is the longest grace the window-end cutoff allows (FORCE_CHARGE_ON_RETRY_CUTOFF_MS ≥
+ *  cooldown + this, pinned in edges.test.ts). */
+export const FORCE_CHARGE_ON_VERIFY_AFTER_MS = 15 * 60_000;
 /** v1.186.0 — ON is re-issued ONCE; still not applied after that ⇒ the warning. */
 export const FORCE_CHARGE_ON_MAX_RETRIES = 1;
 /** v1.186.0 — no ON re-issue this close to the window end: the warning instead. It is the
