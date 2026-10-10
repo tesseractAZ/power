@@ -11,7 +11,8 @@
  * subset, and on a subset pass the full suite (whose unmutated baseline is checked once). Only
  * the scheduling changes. A harness keeps its anchors, subset and summary semantics.
  *
- * Concurrency: MUTATE_CONCURRENCY, else min(8, cores - 2), at least 1.
+ * Concurrency: MUTATE_CONCURRENCY, else one worker per core (most cases wait on timers, so a full
+ * machine adds throughput; the all-workers baseline above guards against load flakes), at least 1.
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync, existsSync } from 'node:fs';
@@ -59,7 +60,7 @@ export async function runMutantsParallel({ name, mutants, subset, root }) {
   }
 
   const want = Number(process.env.MUTATE_CONCURRENCY);
-  const n = Math.max(1, Math.min(mutants.length, Number.isFinite(want) && want > 0 ? want : Math.min(8, availableParallelism() - 2)));
+  const n = Math.max(1, Math.min(mutants.length, Number.isFinite(want) && want > 0 ? want : availableParallelism()));
   const workers = Array.from({ length: n }, () => makeWorkerTree(root));
   const cleanup = () => { for (const w of workers) rmSync(w, { recursive: true, force: true }); };
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { cleanup(); console.error(`\ninterrupted (${sig}) — worker copies removed; the real tree was never written`); process.exit(130); });
