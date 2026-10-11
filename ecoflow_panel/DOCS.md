@@ -3146,7 +3146,8 @@ persists GHI/cloud rows to the recorder.
 |---|---|---|
 | `PEAK_RESPONSE_MIN_GHI_WM2` | 300 | brightness floor for `peakCoeff` headline |
 | `RUNWAY_DISCHARGE_EFFICIENCY` | 0.94 (clamp 0.80–1.0) | η in DC-bus SoC balance `load/η` |
-| `RUNWAY_CORE_OVERHEAD_W` | 90 (clamp 0–500) | v1.187.19 — fixed drain per connected Core added to `load/η` (§5.1.3a) |
+| `RUNWAY_POOL_OVERHEAD_FLOOR_W` | 270 (clamp 0–1500) | v1.187.19 — the pool overhead added to `load/η` never falls below this while the panel reports a pool (§5.1.3a) |
+| `RUNWAY_CORE_OVERHEAD_W` | 90 (clamp 0–500) | v1.187.19 — × connected Cores; raises the overhead above the floor for a pool of more than three Cores (§5.1.3a) |
 | `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m`; the `max()` keeps the drain ≥ `load/η` |
 | `INCOMPLETE_FORECAST_TTL_MS` | 150000 | negative-cache TTL for incomplete forecast |
 | `FORECAST_RECENT_LOAD_WINDOW_MS` | 3 h | recent-load trailing window |
@@ -4030,12 +4031,21 @@ main thread) has its own tracker and file and applies the scale only — its dra
 the packs and already contains the Cores' overhead.
 
 **Drain.** `runwayDrainW(load, overheadW) = max(load/η, overheadW + load/η_m)`, with
-`overheadW = RUNWAY_CORE_OVERHEAD_W` (90 W) × connected Cores and `η_m =
-RUNWAY_DRAIN_MARGINAL_EFFICIENCY` (0.94). Fitted on the same 30 spans: on the measured capacity
-the pool's DC drain is ≈ 267 W + load/0.94 for three Cores (residual sd 40 W; a two-term fit,
-245 W + 1.070 × load, is indistinguishable over 2–8 kW). The overhead is a constant, not a live
-measurement: a live figure would difference the Cores' 10 s pack stream against the panel's 60 s
-load frame and is observable only with PV and grid both absent. It applies in every hour —
+`overheadW = max(RUNWAY_POOL_OVERHEAD_FLOOR_W (270 W) while the panel reports a pool,
+RUNWAY_CORE_OVERHEAD_W (90 W) × connected Cores)` and `η_m = RUNWAY_DRAIN_MARGINAL_EFFICIENCY`
+(0.94). Fitted on the same 30 spans: on the measured capacity the pool's DC drain is ≈ 267 W +
+load/0.94 (residual sd 40 W; a two-term fit, 245 W + 1.070 × load, is indistinguishable over
+2–8 kW). Every one of those spans had the same three Cores connected, so the fit is a POOL figure
+and cannot say how it splits. Each Core's own stream can: `Σ pack_out − ac_out/0.94` over the same
+spans is 17–75 W on SHP2 slot 1, 21–82 W on slot 2 and 128–200 W on slot 3 (means 41 / 52 /
+175 W, summing to 269 W). The overhead is therefore not even per Core, and the 270 W is a FLOOR
+while the pool is reported: a Core leaving the panel, or a partial reading that lists no
+connected source, keeps it (conservative by up to ~230 W when only a slot-1/2 Core remains), and
+90 W × Cores only raises it for a pool of more than three. The overhead is a constant, not a live
+measurement: the panel-side figure (pack drain − `panel_load`) mixes the Cores' 10 s stream with
+the panel's 60 s frame, and the single-stream per-Core figure works only while islanded —
+grid-tied, `ac_out` reads 0 because the Cores feed the house through the panel link. It applies
+in every hour —
 in PV-surplus hours of the same history the pool charged 8–19 % less than `pv − load/η` predicts
 on the measured capacity (2–7 % less with the overhead), so the overhead is present by day too
 and the charge leg remains a little optimistic. The `max()` holds the drain at or above the
@@ -4066,7 +4076,8 @@ basis and requires the planner's inputs and its plan to be identical.
 | `RUNWAY_BLEND_HOURS` | 4 | Observed-load anchor decay length |
 | `LOAD_CURVE_MIN_PLAUSIBLE_KW` | 0.05 kW | Degenerate-curve threshold |
 | `RUNWAY_DISCHARGE_EFFICIENCY` | 0.94 (default) | DC→AC discharge efficiency η; `min(1, max(0.8, env ?? 0.94))`, env `RUNWAY_DISCHARGE_EFFICIENCY` |
-| `RUNWAY_CORE_OVERHEAD_W` | 90 (default, clamp 0–500) | v1.187.19 — the pool overhead is this × connected Cores (§1.3a) |
+| `RUNWAY_POOL_OVERHEAD_FLOOR_W` | 270 (default, clamp 0–1500) | v1.187.19 — the pool overhead's floor while the panel reports a pool (§1.3a) |
+| `RUNWAY_CORE_OVERHEAD_W` | 90 (default, clamp 0–500) | v1.187.19 — the overhead is `max(floor, this × connected Cores)` (§1.3a) |
 | `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (default, clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m` |
 | `CAPACITY_SCALE_MIN` / `CAPACITY_SCALE_MAX` | 0.80 / 1.00 | v1.187.19 — the capacity-scale clamp |
 | `CAPACITY_INCREASE_HOLD_MS` / `HELD_RATIO_MAX_AGE_MS` | 24 h / 30 d | v1.187.19 — increase hold; validity of a held per-Core ratio |

@@ -1,8 +1,10 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   PoolEnergyBasisTracker,
   candidatePoolScale,
@@ -20,6 +22,7 @@ import {
   setPoolBasisOverrideForTesting,
   runwayDrainW,
   runwayPoolOverheadW,
+  RUNWAY_POOL_OVERHEAD_FLOOR_W,
   RUNWAY_DISCHARGE_EFFICIENCY,
   RUNWAY_CORE_OVERHEAD_W,
   type DayForecast,
@@ -37,6 +40,7 @@ import type { Shp2Projection } from '../src/ecoflow/project.js';
  * ═════════════════════════════════════════════════════════════════════════ */
 
 const HOUR = 3_600_000;
+const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 9, 11, 3, 0, 0);
 const SLOT_WH = 30_720;
 
@@ -143,6 +147,31 @@ test('★★★ a held ratio past 30 days, or a Core never measured, takes the L
   assert.ok(near(b.scale, 0.93, 1e-9));
 });
 
+test('★★★ the 24 h hold and the 30-day held-ratio validity are the documented values (literal offsets)', () => {
+  assert.equal(CAPACITY_INCREASE_HOLD_MS, 86_400_000);
+  assert.equal(HELD_RATIO_MAX_AGE_MS, 30 * 86_400_000);
+  const p = panel(['C1', 'C2', 'C3']);
+  const fleet = fleetOf(p, core('C1', 0.95), core('C3', 0.97)); // C2 not reporting
+  const at = (ageDays: number) => candidatePoolScale(p, fleet, new Map([['C2', { ratio: 0.99, atMs: NOW - ageDays * DAY }]]), NOW);
+  assert.equal(at(29).basis, 'held', '29 days old: still the held ratio');
+  assert.ok(near(at(29).scale, (0.95 + 0.99 + 0.97) / 3, 1e-9));
+  assert.equal(at(30).basis, 'held', 'exactly 30 days: still valid');
+  const old = at(31);
+  assert.equal(old.basis, 'min-known', '31 days old: falls to the lowest known');
+  assert.ok(near(old.scale, (0.95 + 0.95 + 0.97) / 3, 1e-9), `${old.scale}`);
+});
+
+test('★★★ no connected source at all (a partial /quota/all) — the lowest known ratio, never nameplate, and the overhead floor holds', () => {
+  const p = panel(['C1', 'C2', 'C3']);
+  for (const s of p.projection.sources) (s as { isConnected: boolean }).isConnected = false;
+  const held = new Map<string, HeldRatio>([['C1', { ratio: 0.9404, atMs: NOW - DAY }], ['C2', { ratio: 0.9188, atMs: NOW - DAY }]]);
+  const c = candidatePoolScale(p, fleetOf(p, core('C1', 0.95), core('C2', 0.95)), held, NOW);
+  assert.equal(c.connected, 0);
+  assert.equal(c.basis, 'min-known');
+  assert.ok(near(c.scale, 0.9188, 1e-12), `${c.scale}`);
+  assert.equal(runwayPoolOverheadW(c.connected, true), RUNWAY_POOL_OVERHEAD_FLOOR_W);
+});
+
 test('★★ never measured anywhere — plain nameplate (1.0), basis "nameplate"', () => {
   const p = panel(['C1', 'C2', 'C3']);
   const c = candidatePoolScale(p, fleetOf(p, core('C1', [{ full: null }]), core('C2', 0.95, { online: false })), new Map(), NOW);
@@ -171,8 +200,8 @@ test('★★★ asymmetric — a decrease applies at once; an increase waits 24 
   assert.equal(up1.increaseHeldSinceMs, NOW + 2 * HOUR);
   assert.ok(near(up1.candidateScale, 0.96, 1e-9));
   assert.ok(near(t.evaluate(at(0.955), p, NOW + 10 * HOUR).capacityScale, 0.944, 1e-9));
-  assert.ok(near(t.evaluate(at(0.96), p, NOW + 2 * HOUR + CAPACITY_INCREASE_HOLD_MS - 1).capacityScale, 0.944, 1e-9), 'one ms short of 24 h');
-  const done = t.evaluate(at(0.96), p, NOW + 2 * HOUR + CAPACITY_INCREASE_HOLD_MS);
+  assert.ok(near(t.evaluate(at(0.96), p, NOW + 2 * HOUR + 24 * HOUR - 1).capacityScale, 0.944, 1e-9), 'one ms short of 24 h');
+  const done = t.evaluate(at(0.96), p, NOW + 2 * HOUR + 24 * HOUR);
   assert.ok(near(done.capacityScale, 0.955, 1e-9), `after 24 h: the lowest figure seen during the hold; got ${done.capacityScale}`);
   assert.equal(done.increaseHeldSinceMs, null);
 });
@@ -186,7 +215,7 @@ test('asymmetric — a dip back to the applied figure restarts the increase hold
   t.evaluate(at(0.94), p, NOW + 12 * HOUR); // back: hold cleared
   const again = t.evaluate(at(0.96), p, NOW + 13 * HOUR);
   assert.equal(again.increaseHeldSinceMs, NOW + 13 * HOUR);
-  assert.ok(near(t.evaluate(at(0.96), p, NOW + HOUR + CAPACITY_INCREASE_HOLD_MS).capacityScale, 0.94, 1e-9), 'the first hold does not count');
+  assert.ok(near(t.evaluate(at(0.96), p, NOW + HOUR + 24 * HOUR).capacityScale, 0.94, 1e-9), 'the first hold does not count');
 });
 
 test('★★★ persistence — a restart with the Cores not yet reported runs on the held ratios, not nameplate', () => {
@@ -212,6 +241,38 @@ test('★★★ persistence — a restart with the Cores not yet reported runs o
   }
 });
 
+test('★★★ persistence — a restart DURING an increase hold keeps the applied figure and the hold\'s start', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pool-basis-hold-'));
+  try {
+    const path = join(dir, 'pool-energy-basis.json');
+    const p = panel(['C1', 'C2', 'C3']);
+    const at = (r: number) => fleetOf(p, core('C1', r), core('C2', r), core('C3', r));
+    const a = new PoolEnergyBasisTracker({ path });
+    a.evaluate(at(0.944), p, NOW);
+    const rising = a.evaluate(at(0.97), p, NOW + HOUR); // a BMS recalibration upward
+    assert.equal(rising.increaseHeldSinceMs, NOW + HOUR);
+    const b = new PoolEnergyBasisTracker({ path }); // the add-on restarts two hours later
+    const boot = b.evaluate(at(0.97), p, NOW + 3 * HOUR);
+    assert.ok(near(boot.capacityScale, 0.944, 1e-9), `the restart must not apply the increase early; got ${boot.capacityScale}`);
+    assert.equal(boot.increaseHeldSinceMs, NOW + HOUR, 'the hold keeps its original start');
+    assert.ok(near(b.evaluate(at(0.97), p, NOW + HOUR + 24 * HOUR).capacityScale, 0.97, 1e-9), 'and lands 24 h after it began');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('★★ persistence path — under the Supervisor (DB_PATH unset) the file sits beside the database: /data/pool-energy-basis.json', () => {
+  const serverDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const env: NodeJS.ProcessEnv = { ...process.env, SUPERVISOR_TOKEN: 'test-token' };
+  delete env.DB_PATH;
+  delete env.POOL_ENERGY_BASIS_DIR;
+  const out = execFileSync(process.execPath, [
+    '--import', 'tsx', '--input-type=module', '--eval',
+    "const m = await import('./src/poolEnergyBasis.ts'); process.stdout.write(JSON.stringify([m.defaultPoolEnergyBasisPath('pool-energy-basis'), m.defaultPoolEnergyBasisPath('pool-energy-basis-panels')]));",
+  ], { cwd: serverDir, env, encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(out), ['/data/pool-energy-basis.json', '/data/pool-energy-basis-panels.json']);
+});
+
 test('persistence path — POOL_ENERGY_BASIS_DIR, one file per tracker name; empty disables', () => {
   const prev = process.env.POOL_ENERGY_BASIS_DIR;
   try {
@@ -227,7 +288,7 @@ test('persistence path — POOL_ENERGY_BASIS_DIR, one file per tracker name; emp
 
 /* ─── the drain ──────────────────────────────────────────────────────── */
 
-test('★★★ runwayDrainW — never below load/η, for any overhead; the default adds 90 W per connected Core', () => {
+test('★★★ runwayDrainW — never below load/η, for any overhead; the overhead is max(270 W floor, 90 W × connected Cores)', () => {
   for (const load of [0, 300, 2_000, 5_000, 12_000]) {
     for (const ovh of [0, 90, 270, 1_000]) {
       assert.ok(runwayDrainW(load, ovh) >= load / RUNWAY_DISCHARGE_EFFICIENCY - 1e-9, `${load} W / ${ovh} W`);
@@ -242,8 +303,16 @@ test('★★★ runwayDrainW — never below load/η, for any overhead; the defa
     assert.ok(runwayDrainW(load, 270, 0.9) > 270 + load / RUNWAY_DISCHARGE_EFFICIENCY, 'a lower marginal η drains more');
   }
   assert.equal(RUNWAY_CORE_OVERHEAD_W, 90);
-  assert.equal(runwayPoolOverheadW(3), 270);
-  assert.equal(runwayPoolOverheadW(0), 0);
+  assert.equal(RUNWAY_POOL_OVERHEAD_FLOOR_W, 270);
+  assert.equal(runwayPoolOverheadW(3, true), 270);
+  // The 270 W is a three-Core POOL fit, and most of it sits on one slot: a Core leaving, or a
+  // reading that lists no connected source, keeps the floor while the pool is reported.
+  assert.equal(runwayPoolOverheadW(2, true), 270);
+  assert.equal(runwayPoolOverheadW(1, true), 270);
+  assert.equal(runwayPoolOverheadW(0, true), 270);
+  assert.equal(runwayPoolOverheadW(4, true), 360, 'a larger pool scales above the floor');
+  assert.equal(runwayPoolOverheadW(3, false), 270, 'per-Core figure alone');
+  assert.equal(runwayPoolOverheadW(0, false), 0, 'no pool reported: nothing to drain');
   assert.ok(near(runwayDrainW(3_000, 270), 270 + 3_000 / 0.94, 1e-9));
 });
 
@@ -272,6 +341,26 @@ test('★★ computeRunway publishes the basis, scales every kWh figure, and kee
   const none = runway(fleetOf(core('C1', 0.944)), 3_000);
   assert.equal(none.capacityScale, null);
   assert.equal(none.overheadW, null);
+});
+
+test('★★★ computeRunway — a reading with no connected source keeps the measured scale (min-known) and the 270 W floor; so does a Core leaving', () => {
+  const plate = { backupBatPercent: 60, backupRemainWh: 0.6 * 92_160, backupFullCapWh: 92_160, backupReserveSoc: 16 };
+  const cores = [core('C1', 0.944), core('C2', 0.944), core('C3', 0.944)];
+  const full = panel(['C1', 'C2', 'C3'], plate);
+  const first = runway(fleetOf(full, ...cores), 2_000);
+  assert.equal(first.capacityBasis, 'measured');
+  // The next panel reading lists no connected source (the pd303_mc sources missing from a partial quota).
+  const blank = panel(['C1', 'C2', 'C3'], plate);
+  for (const s of blank.projection.sources) (s as { isConnected: boolean }).isConnected = false;
+  const r = runway(fleetOf(blank, ...cores), 2_000);
+  assert.equal(r.capacityBasis, 'min-known');
+  assert.equal(r.capacityScale, 0.944);
+  assert.equal(r.overheadW, 270, 'the pool still reports energy: the overhead must not fall to 0');
+  const expected = ((0.6 - 0.16) * 92_160 * 0.944) / (270 + 2_000 / 0.94);
+  assert.ok(Math.abs((r.reserveAtMs! - r.generatedAt) / HOUR - expected) < 1e-5, `${r.hoursToReserve} vs ${expected}`);
+  // One Core leaves the panel: the two left still carry the floor.
+  const two = runway(fleetOf(panel(['C1', 'C2'], { ...plate, backupFullCapWh: 61_440, backupRemainWh: 0.6 * 61_440 }), ...cores), 2_000);
+  assert.equal(two.overheadW, 270);
 });
 
 /** A tiny deterministic PRNG (mulberry32) so the property test is reproducible. */

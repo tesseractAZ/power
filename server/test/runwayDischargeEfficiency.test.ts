@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeRunway, RUNWAY_DISCHARGE_EFFICIENCY, resetRunwayCache } from '../src/analytics.js';
+import { computeRunway, RUNWAY_DISCHARGE_EFFICIENCY, RUNWAY_POOL_OVERHEAD_FLOOR_W, resetRunwayCache } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
@@ -22,9 +22,14 @@ import type { DayForecast } from '../src/analytics.js';
  * (PV≈0) deficit reaches reserve/empty FASTER by exactly the η factor vs a naive
  * pool/load; (3) the adjustment only ever SHORTENS the countdown — a strict safety
  * improvement, never optimistic.
+ *
+ * v1.187.19 — the drain also carries the Cores' own overhead (≥ the 270 W floor while the panel
+ * reports a pool; these fixtures list no sources, so exactly the floor). OVH_KW below adds it to
+ * every expected drain; the η assertions are unchanged in form.
  * ═════════════════════════════════════════════════════════════════════════ */
 
 const HOUR = 3_600_000;
+const OVH_KW = RUNWAY_POOL_OVERHEAD_FLOOR_W / 1000;
 
 function shp2(remainingKwh: number, reserveKwh: number, fullKwh: number): Record<string, DeviceSnapshot> {
   const reservePct = Math.round((reserveKwh / fullKwh) * 100);
@@ -74,9 +79,10 @@ test('v1.26.0 — an overnight deficit reaches reserve by the η factor sooner t
   const r = computeRunway(shp2(remaining, reserve, full), loadRecorder(loadKw * 1000), overnight(loadKw * 1000));
   assert.ok(r.hoursToReserve != null, 'reserve crossing must be found within the horizon');
   const naive = (remaining - reserve) / loadKw;           // 10.0 h at 100% efficiency
-  const expected = naive * RUNWAY_DISCHARGE_EFFICIENCY;    // 10 · η
+  const expected = (remaining - reserve) / (loadKw / RUNWAY_DISCHARGE_EFFICIENCY + OVH_KW); // ≈ 8.8 h
   assert.ok(Math.abs(r.hoursToReserve! - expected) < 0.15,
-    `hoursToReserve should be ~${expected.toFixed(2)}h (naive ${naive}h × η); got ${r.hoursToReserve}`);
+    `hoursToReserve should be ~${expected.toFixed(2)}h (40 kWh / (load/η + overhead)); got ${r.hoursToReserve}`);
+  assert.ok(r.hoursToReserve! < naive * RUNWAY_DISCHARGE_EFFICIENCY, 'at least as short as the η leg alone');
   assert.ok(r.hoursToReserve! < naive,
     `corrected runway must be SHORTER than the naive optimistic ${naive}h (got ${r.hoursToReserve})`);
 });
@@ -90,8 +96,9 @@ test('v1.26.0 — time-to-empty is also shortened by the discharge loss (never o
   const naive = remaining / loadKw;                        // 6.0 h at 100% efficiency
   assert.ok(r.hoursToEmpty! < naive + 1e-6,
     `time-to-empty must not exceed the naive ${naive}h (got ${r.hoursToEmpty})`);
-  assert.ok(Math.abs(r.hoursToEmpty! - naive * RUNWAY_DISCHARGE_EFFICIENCY) < 0.15,
-    `time-to-empty should be ~${(naive * RUNWAY_DISCHARGE_EFFICIENCY).toFixed(2)}h; got ${r.hoursToEmpty}`);
+  const expected = remaining / (loadKw / RUNWAY_DISCHARGE_EFFICIENCY + OVH_KW);
+  assert.ok(Math.abs(r.hoursToEmpty! - expected) < 0.15,
+    `time-to-empty should be ~${expected.toFixed(2)}h; got ${r.hoursToEmpty}`);
 });
 
 /* ── PV>0 deficit: the pool drains on the DC-bus balance pv − load/η, NOT the
@@ -107,8 +114,8 @@ test('v1.26.0 — pv==load still DRAINS (the pack pays the inverter tax); (pv−
   const kw = 10;
   const r = computeRunway(shp2(remaining, reserve, full), loadRecorder(kw * 1000), islanded(kw * 1000, kw * 1000));
   assert.ok(r.hoursToEmpty != null, 'pv==load MUST still project depletion — not null (that is the suppressed-crossing bug)');
-  const drainKw = kw / RUNWAY_DISCHARGE_EFFICIENCY - kw;    // load/η − pv
-  const expected = remaining / drainKw;                    // ≈ 15.7 h
+  const drainKw = kw / RUNWAY_DISCHARGE_EFFICIENCY + OVH_KW - kw;    // load/η + overhead − pv
+  const expected = remaining / drainKw;                    // ≈ 11 h (15.7 h on the η leg alone)
   assert.ok(Math.abs(r.hoursToEmpty! - expected) < 0.3,
     `hoursToEmpty should be ~${expected.toFixed(1)}h (drain = load/η − pv); got ${r.hoursToEmpty}`);
 });
@@ -119,8 +126,8 @@ test('v1.26.0 — daytime partial-cloud deficit uses pv − load/η, not (pv−l
   const full = 92.16, reserve = 23.04, remaining = 53.04;  // 30 kWh usable
   const r = computeRunway(shp2(remaining, reserve, full), loadRecorder(5000), islanded(2000, 5000));
   assert.ok(r.hoursToReserve != null, 'a daytime deficit still crosses reserve');
-  const correctDrainKw = 5 / RUNWAY_DISCHARGE_EFFICIENCY - 2;   // load/η − pv ≈ 3.319
-  const correct = 30 / correctDrainKw;                          // ≈ 9.0 h
+  const correctDrainKw = 5 / RUNWAY_DISCHARGE_EFFICIENCY + OVH_KW - 2;   // load/η + overhead − pv ≈ 3.589
+  const correct = 30 / correctDrainKw;                          // ≈ 8.4 h
   const buggyDrainKw = (5 - 2) / RUNWAY_DISCHARGE_EFFICIENCY;    // (load−pv)/η ≈ 3.191
   const buggy = 30 / buggyDrainKw;                              // ≈ 9.4 h (optimistic)
   assert.ok(Math.abs(r.hoursToReserve! - correct) < 0.3,

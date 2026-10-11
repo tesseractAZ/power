@@ -22,6 +22,18 @@
  *   V-xviii  an implausible pack (> 1.1 × design) is accepted
  *   V-xix    an offline Core's frozen packs count as a live measurement
  *   V-xx     a restart forgets the held ratios
+ *   V-xxi    the 270 W pool floor is dropped (90 W × connected Cores only)
+ *   V-xxii   the floor is never applied (the pool is never "reported")
+ *   V-xxiii  a reading with no connected source falls to nameplate
+ *   V-xxiv   the production (Supervisor) persistence path persists nothing
+ *   V-xxv    a restart forgets the panels' applied scale and increase hold (load)
+ *   V-xxvi   the panels' applied scale and hold are never written (save)
+ *   V-xxvii  the increase hold is 9 h instead of 24 h
+ *   V-xxviii a held ratio stays valid a year instead of 30 days
+ *   V-xxix   the JIT force-charge sizes on the runway's measured capacity
+ *   V-xxx    the reserve actuator reads the runway's measured capacity
+ *   V-xxxi   the night-charge planner sizes on the runway's measured capacity
+ *   V-xxxii  a secondary panel's runway is computed without its measured basis
  *
  *   node scripts/mutate-v1187-19.mjs
  */
@@ -32,11 +44,13 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ANALYTICS = resolve(REPO, 'server/src/analytics.ts');
 const POOL = resolve(REPO, 'server/src/poolEnergyBasis.ts');
 const PANEL = resolve(REPO, 'server/src/panelRunway.ts');
+const IDX = resolve(REPO, 'server/src/index.ts');
 const SUBSET = [
   'test/poolEnergyBasis.test.ts',
   'test/runwayReplayBacktest.test.ts',
   'test/runwayBasisContracts.test.ts',
   'test/runwayPvBasisGuard.test.ts',
+  'test/runwayDischargeEfficiency.test.ts',
 ];
 
 const MUTANTS = [
@@ -57,7 +71,7 @@ const MUTANTS = [
   {
     id: 'V-iii. ★★★ the Cores\' fixed overhead is removed',
     file: ANALYTICS,
-    find: '  return RUNWAY_CORE_OVERHEAD_W * Math.max(0, Math.floor(connectedCores));',
+    find: '  return Math.max(poolReported ? RUNWAY_POOL_OVERHEAD_FLOOR_W : 0, RUNWAY_CORE_OVERHEAD_W * Math.max(0, Math.floor(connectedCores)));',
     to: '  return 0; /* MUTANT */',
     why: 'The ~270 W the Cores draw themselves never leaves the pool: the low-load nights read 10 % long.',
   },
@@ -180,8 +194,94 @@ const MUTANTS = [
     to: '      if (!existsSync(this.path) || this.path.length > 0) return; /* MUTANT */',
     why: 'The first minutes after every restart run on nameplate while the Cores report in.',
   },
+  {
+    id: 'V-xxi. ★★★ the 270 W pool floor is dropped (90 W × connected Cores only)',
+    file: ANALYTICS,
+    find: '  return Math.max(poolReported ? RUNWAY_POOL_OVERHEAD_FLOOR_W : 0, RUNWAY_CORE_OVERHEAD_W * Math.max(0, Math.floor(connectedCores)));',
+    to: '  return RUNWAY_CORE_OVERHEAD_W * Math.max(0, Math.floor(connectedCores)) + (poolReported ? 0 : 0); /* MUTANT */',
+    why: 'A Core leaving sheds 90 W the remaining Cores still burn (most of the overhead sits on slot 3).',
+  },
+  {
+    id: 'V-xxii. ★★★ the floor is never applied (the pool is never "reported")',
+    file: ANALYTICS,
+    find: '  const poolReported = panel != null && (panel.projection.backupFullCapWh ?? 0) > 0;',
+    to: '  const poolReported = false; /* MUTANT */',
+    why: 'A reading with no connected source drains at load/η alone while it reports min-known.',
+  },
+  {
+    id: 'V-xxiii. ★★★ a reading with no connected source falls to nameplate',
+    file: POOL,
+    find: "      ? { scale: clampScale(minKnown), basis: 'min-known', connected: 0, live }",
+    to: "      ? { scale: 1, basis: 'nameplate', connected: 0, live } /* MUTANT */",
+    why: 'A partial /quota/all (no pd303_mc sources) returns the runway to nameplate kWh.',
+  },
+  {
+    id: 'V-xxiv. ★★★ the production (Supervisor) persistence path persists nothing',
+    file: POOL,
+    find: "  return process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', `${name}.json`) : null;",
+    to: '  return null; /* MUTANT */',
+    why: 'After a restart with a Core cloud-offline that Core has no held ratio: nameplate, ~6 % long.',
+  },
+  {
+    id: 'V-xxv. ★★ a restart forgets the panels\' applied scale and increase hold (load)',
+    file: POOL,
+    find: '      for (const [sn, p] of Object.entries(raw?.panels ?? {})) {',
+    to: '      for (const [sn, p] of Object.entries({} as Record<string, PanelHold>)) { /* MUTANT */',
+    why: 'An increase waiting out its 24 h is applied at the first evaluation after a restart.',
+  },
+  {
+    id: 'V-xxvi. ★★ the panels\' applied scale and hold are never written (save)',
+    file: POOL,
+    find: '    const out: PersistShape = { v: 1, cores: Object.fromEntries(this.cores), panels: Object.fromEntries(this.panels) };',
+    to: '    const out: PersistShape = { v: 1, cores: Object.fromEntries(this.cores), panels: {} }; /* MUTANT */',
+    why: 'Same as V-xxv, from the writing side.',
+  },
+  {
+    id: 'V-xxvii. ★★ the increase hold is 9 h instead of 24 h',
+    file: POOL,
+    find: 'export const CAPACITY_INCREASE_HOLD_MS = 24 * 60 * 60 * 1000;',
+    to: 'export const CAPACITY_INCREASE_HOLD_MS = 9 * 60 * 60 * 1000; /* MUTANT */',
+    why: 'A brief upward BMS reading lengthens the runway after nine hours.',
+  },
+  {
+    id: 'V-xxviii. ★★ a held ratio stays valid a year instead of 30 days',
+    file: POOL,
+    find: 'export const HELD_RATIO_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;',
+    to: 'export const HELD_RATIO_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000; /* MUTANT */',
+    why: 'A Core offline since an earlier, higher capacity regime keeps its old ratio.',
+  },
+  {
+    id: 'V-xxix. ★★★ the JIT force-charge sizes on the runway\'s measured capacity',
+    file: IDX,
+    find: 'c.batteryPercentage : null]));\n  const fullWh: number | null = sp?.backupFullCapWh ?? null;',
+    to: "c.batteryPercentage : null]));\n  const fullWh: number | null = sp?.backupFullCapWh != null ? sp.backupFullCapWh * (((await analytics.report('runway')) as { capacityScale?: number } | null)?.capacityScale ?? 1) : null; /* MUTANT */",
+    why: 'Owner decision: the force-charge keeps the panel\'s own capacity.',
+  },
+  {
+    id: 'V-xxx. ★★★ the reserve actuator reads the runway\'s measured capacity',
+    file: IDX,
+    find: '      ? shp2.projection\n      : null;\n  const fullWh: number | null = sp?.backupFullCapWh ?? null;',
+    to: "      ? shp2.projection\n      : null;\n  const fullWh: number | null = sp?.backupFullCapWh != null ? sp.backupFullCapWh * (((await analytics.report('runway')) as { capacityScale?: number } | null)?.capacityScale ?? 1) : null; /* MUTANT */",
+    why: 'Owner decision: the actuator keeps the panel\'s own capacity.',
+  },
+  {
+    id: 'V-xxxi. ★★★ the night-charge planner sizes on the runway\'s measured capacity',
+    file: IDX,
+    find: '  const fullWh: number | null = sp.backupFullCapWh ?? null;',
+    to: "  const fullWh: number | null = sp.backupFullCapWh != null ? sp.backupFullCapWh * (((await analytics.report('runway')) as { capacityScale?: number } | null)?.capacityScale ?? 1) : null; /* MUTANT */",
+    why: 'Owner decision: the planner and its cushion keep the panel\'s own capacity.',
+  },
+  {
+    id: 'V-xxxii. ★★ a secondary panel\'s runway is computed without its measured basis',
+    file: IDX,
+    find: '            const pr = panelDrainRunway(p, samples, nowMs, panelPoolBasisTracker.evaluate(devs, p, nowMs));',
+    to: '            const pr = panelDrainRunway(p, samples, nowMs, panelPoolBasisTracker ? undefined : undefined); /* MUTANT */',
+    why: 'A second panel\'s runway and alarm count nameplate kWh again.',
+  },
 ];
 
 // Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs).
 import { runMutantsParallel } from './lib/mutateParallel.mjs';
-await runMutantsParallel({ name: 'mutate-v1187-19', mutants: MUTANTS, subset: SUBSET, root: REPO, typecheck: true });
+// fullSuite: false — the subset holds every test that guards these mutants; a kill must come from
+// it, not from an unrelated full-suite failure under parallel load (a false kill).
+await runMutantsParallel({ name: 'mutate-v1187-19', mutants: MUTANTS, subset: SUBSET, root: REPO, typecheck: true, fullSuite: false });

@@ -3691,7 +3691,7 @@ const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
 // env-overridable, clamped to [0.80,1.0] so a bad env can never lengthen runway
 // beyond the true (unity) reading or collapse it to an untrusted extreme.
 // v1.187.19 — this leg alone UNDER-states the pool drain: the Cores' own fixed
-// consumption (≈ 90 W per Core, measured below) never appears in panel_load. The
+// consumption (≈ 270 W for the three home Cores, see below) never appears in panel_load. The
 // runway, the day/multi-day SoC trajectories and the probabilistic band now drain
 // the pool through runwayDrainW below; this constant is unchanged and stays the
 // night-charge planner's and the load-shed advisor's discharge leg.
@@ -3708,19 +3708,32 @@ function envClamped(raw: string | undefined, dflt: number, lo: number, hi: numbe
 // v1.187.19 — the measured pool drain. Fitted on 30 clean pack-only discharge spans
 // (2026-09-02..10-11, loads 2.1-7.7 kW, FCC ratios 0.981/0.970/0.959/0.944; the
 // aggregated spans are test/fixtures/runwayReplaySpans.json): on the measured
-// capacity basis (poolEnergyBasis.ts) the DC drain is ≈ 267 W + load/0.94 for the
-// three home Cores (residual sd 40 W; an OLS fit of both terms, 245 W + 1.070 ×
-// load, is indistinguishable over 2-8 kW). So: the same 0.94 leg, plus a fixed
-// per-Core overhead of 90 W × the panel's connected Cores. A constant, not a live
-// measurement: a live overhead would difference the Cores' 10 s pack stream against
-// the panel's 60 s load frame (the two-cadence trap) and is only observable with PV
-// and grid both absent. Clamps: overhead [0, 500] W per Core, marginal η [0.80, 1.0].
+// capacity basis (poolEnergyBasis.ts) the DC drain is ≈ 267 W + load/0.94 (residual
+// sd 40 W; an OLS fit of both terms, 245 W + 1.070 × load, is indistinguishable over
+// 2-8 kW). That 267 W is a POOL figure fitted on spans that all had the same three
+// Cores connected; the fit cannot split it per Core. Each Core's own stream can:
+// Σ pack_out − ac_out/0.94 over the same spans is 17-75 W on SHP2 slot 1, 21-82 W
+// on slot 2 and 128-200 W on slot 3 (means 41 / 52 / 175 W, summing to 269 W), so
+// the overhead is NOT even per Core and most of it sits on one slot. Hence a FLOOR:
+// while the panel reports a pool, the overhead never drops below the fitted
+// three-Core figure (RUNWAY_POOL_OVERHEAD_FLOOR_W, 270 W), even when a Core leaves
+// (conservative, by up to ~230 W if only a slot-1/2 Core remains); 90 W × connected
+// Cores only lifts it for a pool with more than three. Constants, not a live
+// measurement: the panel-side figure (pack drain − panel_load) mixes the Cores' 10 s
+// stream with the panel's 60 s frame (the two-cadence trap), and the single-stream
+// per-Core figure above works only while islanded — grid-tied, ac_out reads 0 (the
+// Cores feed the house through the panel link). Clamps: floor [0, 1500] W, per-Core
+// [0, 500] W, marginal η [0.80, 1.0].
+export const RUNWAY_POOL_OVERHEAD_FLOOR_W = envClamped(process.env.RUNWAY_POOL_OVERHEAD_FLOOR_W, 270, 0, 1500);
 export const RUNWAY_CORE_OVERHEAD_W = envClamped(process.env.RUNWAY_CORE_OVERHEAD_W, 90, 0, 500);
 export const RUNWAY_DRAIN_MARGINAL_EFFICIENCY = envClamped(process.env.RUNWAY_DRAIN_MARGINAL_EFFICIENCY, 0.94, 0.8, 1);
 
-/** v1.187.19 — the pool overhead for `connectedCores` Cores (W). */
-export function runwayPoolOverheadW(connectedCores: number): number {
-  return RUNWAY_CORE_OVERHEAD_W * Math.max(0, Math.floor(connectedCores));
+/** v1.187.19 — the pool overhead (W): never below the fitted three-Core floor while the panel
+ *  reports a pool (`poolReported`), whatever the connected count says — a Core leaving, or a
+ *  partial reading that lists no connected source, must not shed overhead the remaining Cores
+ *  still burn. */
+export function runwayPoolOverheadW(connectedCores: number, poolReported: boolean): number {
+  return Math.max(poolReported ? RUNWAY_POOL_OVERHEAD_FLOOR_W : 0, RUNWAY_CORE_OVERHEAD_W * Math.max(0, Math.floor(connectedCores)));
 }
 
 /** v1.187.19 — the DC power the pool gives up to deliver `loadW` at the panel. The max()
@@ -3760,7 +3773,8 @@ export function runwayEnergyBasis(
     return { ...NAMEPLATE_BASIS, capacityScale: poolBasisOverrideForTesting.capacityScale, candidateScale: poolBasisOverrideForTesting.capacityScale, overheadW: poolBasisOverrideForTesting.overheadW };
   }
   const b = panel ? poolBasisTracker.evaluate(devices, panel, nowMs) : NAMEPLATE_BASIS;
-  return { ...b, overheadW: runwayPoolOverheadW(b.connectedCores) };
+  const poolReported = panel != null && (panel.projection.backupFullCapWh ?? 0) > 0;
+  return { ...b, overheadW: runwayPoolOverheadW(b.connectedCores, poolReported) };
 }
 
 export interface RunwayProjection {
@@ -9303,7 +9317,8 @@ export async function computeProbabilisticForecast(
   // Pick the hour with the largest |deltaSocPct| that isn't clamped — that
   // maximises numerical conditioning.
   // v1.187.18 — a production forecast carries that capacity itself (poolFullWh, the
-  // SHP2's backupFullCapWh the trajectory was integrated against), so it is read
+  // SHP2's backupFullCapWh — v1.187.19: × the measured capacity scale — the trajectory
+  // was integrated against), so it is read
   // directly; the inversion remains for forecasts without it (hand-built ones). The
   // last resort, reached when there is no pool value and no hour pair yields a usable
   // inversion (all null, clamped at 0/100, too small, or outside the 5–1000 kWh guard),

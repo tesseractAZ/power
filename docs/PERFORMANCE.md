@@ -305,10 +305,14 @@ crossing is the prediction of how long the measured drop took.
 **Result.** The old runway (nameplate kWh, drain `load/0.94`) overstated the hours in **all 30
 spans, +7.0 % to +18.7 %** (mean +12 %), worst at low load and in the lowest capacity regime. The
 measured basis (`poolEnergyBasis.ts` capacity scale × the panel's nameplate, drain `max(load/0.94,
-270 W + load/0.94)` for three Cores) predicts **all 30 within −2.6 % to +1.5 %** (mean −0.1 %).
+270 W + load/0.94)`) predicts **all 30 within −2.6 % to +1.5 %** (mean −0.1 %).
 The 270 W overhead was fitted on these spans (267 W; residual sd 40 W); a leave-one-out fit
 stays within −2.6 % to +1.6 %, and an overhead fitted on the 18 September spans alone (≈ 278 W)
-predicts the 12 October spans within −2.8 % to +0.3 %. The test gate is ±3 % on every span
+predicts the 12 October spans within −2.8 % to +0.3 %. The 270 W is a pool figure — every span
+had the same three Cores — and each Core's own stream (`Σ pack_out − ac_out/0.94`, single cadence,
+readable only while islanded) puts it at 41 / 52 / 175 W on slots 1 / 2 / 3 (means; 269 W in
+all). Because most of it sits on one slot, the runway keeps 270 W as a floor when a Core leaves
+rather than dropping 90 W per Core. The test gate is ±3 % on every span
 for the new basis and a > 5 % miss for the old one.
 
 **What it means for the alarms (perfect-foresight islanded replay, not the live forecast).**

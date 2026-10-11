@@ -216,12 +216,23 @@ test('★★★ OWNER DECISION — the planner and MPC inputs are byte-identical
 test('★★★ OWNER DECISION — source pins: the planner, JIT force-charge and MPC never read the measured basis', () => {
   const src = (p: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src', p), 'utf8');
   const index = src('index.ts');
-  const start = index.indexOf('async function recomputeNightChargePlan(');
-  const end = index.indexOf('\nasync function ', start + 10);
-  assert.ok(start > 0 && end > start);
-  const planner = index.slice(start, end);
-  const forbidden = /\b(projectedSocPct|minProjectedSoc|minProjectedSocTs|p10SocPct|p50SocPct|p90SocPct|pAboveReservePct|pFullCharge|socPct|poolFullWh|poolCapacityScale|poolCapacityBasis|poolOverheadW|runwayDrainW|runwayEnergyBasis|capacityScale|computeRunway)\b|report\('runway'\)/;
-  assert.ok(!forbidden.test(planner), `recomputeNightChargePlan reads ${planner.match(forbidden)?.[0]}`);
+  /** A top-level function's text: from its declaration to the next top-level function. */
+  const fnBody = (name: string): string => {
+    const start = index.indexOf(`async function ${name}(`);
+    assert.ok(start > 0, `${name} not found in index.ts`);
+    const ends = [index.indexOf('\nasync function ', start + 10), index.indexOf('\nfunction ', start + 10)].filter((i) => i > start);
+    const body = index.slice(start, Math.min(...ends));
+    assert.ok(body.length > 2_000, `${name}: the slice is too short to be the function (${body.length} chars)`);
+    return body;
+  };
+  const forbidden = /\b(projectedSocPct|minProjectedSoc|minProjectedSocTs|p10SocPct|p50SocPct|p90SocPct|pAboveReservePct|pFullCharge|socPct|poolFullWh|poolCapacityScale|poolCapacityBasis|poolOverheadW|runwayDrainW|runwayEnergyBasis|capacityScale|computeRunway|panelPoolBasisTracker|PoolEnergyBasisTracker)\b|report\('runway'\)|report<[^>]*>\('runway'\)/;
+  // The planner's inputs, the JIT force-charge tick's (fullWh / poolSocPct / chargeRateKw) and the
+  // reserve actuator's (fullWh / socCoherent): all from the panel's own figures.
+  for (const name of ['recomputeNightChargePlan', 'runForceChargeTick', 'runNightActuationTickInner']) {
+    const body = fnBody(name);
+    assert.ok(body.includes('backupFullCapWh'), `${name} must read the panel's own pool capacity`);
+    assert.ok(!forbidden.test(body), `${name} reads ${body.match(forbidden)?.[0]}`);
+  }
   const recommend = index.slice(index.indexOf("app.get('/api/dispatch/recommend'"), index.indexOf("app.get('/api/backtest/forecast'"));
   assert.ok(recommend.length > 100 && !forbidden.test(recommend), `MPC reads ${recommend.match(forbidden)?.[0]}`);
   for (const f of ['nightChargeAdvisor.ts', 'nightForceCharge.ts', 'nightChargeActuator.ts', 'dispatch/mpc.ts']) {
@@ -229,6 +240,19 @@ test('★★★ OWNER DECISION — source pins: the planner, JIT force-charge an
     assert.ok(!/poolEnergyBasis|runwayDrainW|runwayEnergyBasis|RUNWAY_CORE_OVERHEAD_W/.test(s), `${f} must not read the runway basis`);
   }
   assert.equal(RUNWAY_DISCHARGE_EFFICIENCY, 0.94, "the planner's discharge leg is unchanged");
+});
+
+test('★★ wiring — a secondary panel\'s drain runway gets the main thread\'s own measured basis', () => {
+  const index = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8');
+  assert.ok(
+    index.includes("const panelPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-panels') });"),
+    'the main thread owns its own tracker and file',
+  );
+  const loop = index.slice(index.indexOf('for (const p of secondaryShp2s(devs)) {'), index.indexOf("runway-alarm: secondary panels skipped"));
+  assert.ok(loop.length > 100, 'the secondary-panel loop is where it was');
+  assert.ok(loop.includes('const pr = panelDrainRunway(p, samples, nowMs, panelPoolBasisTracker.evaluate(devs, p, nowMs));'),
+    'each secondary panel\'s runway is computed on its own measured basis, from the same device map and instant');
+  assert.equal(index.split('panelDrainRunway(').length - 1, 1, 'one production call site');
 });
 
 test('★★★ one basis — the day trajectory, the multi-day trajectory and the band all integrate runwayDrainW on poolFullWh', async () => {
