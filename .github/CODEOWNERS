@@ -1,20 +1,26 @@
-# Every change auto-requests review from the owner — including Dependabot PRs,
-# which respect CODEOWNERS so the weekly batch lands in your review queue.
+# Every change requests review from the owner, including Dependabot pull requests.
 # Syntax reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners
 
 *                           @tesseractAZ
 
-# Surface scope-specific ownership in PR descriptions so a future contributor
-# (or future-you, six months from now) can see at a glance which subsystem a
-# change touches. With a single owner today these are functionally the same
-# as the catch-all above; they're here to grow gracefully.
+# Subsystem entries. With one owner they match the catch-all above; they name the
+# areas whose changes need the closest review, and give a future co-owner a place
+# to be added.
 
 /server/                    @tesseractAZ
 /web/                       @tesseractAZ
 /server/src/analytics.ts    @tesseractAZ
 /server/src/telnet/         @tesseractAZ
 /.github/                   @tesseractAZ
-/ecoflow_panel/config.yaml                @tesseractAZ
+/ecoflow_panel/config.yaml  @tesseractAZ
 /Dockerfile                 @tesseractAZ
 /build.yaml                 @tesseractAZ
 /rootfs/                    @tesseractAZ
+/ecoflow_panel/apparmor.txt @tesseractAZ
+/scripts/                   @tesseractAZ
+/SECURITY.md                @tesseractAZ
+/repository.yaml            @tesseractAZ
+/server/src/auth.ts         @tesseractAZ
+/server/src/ecoflow/commands.ts     @tesseractAZ
+/server/src/nightChargeActuator.ts  @tesseractAZ
+/server/src/nightForceCharge.ts     @tesseractAZ

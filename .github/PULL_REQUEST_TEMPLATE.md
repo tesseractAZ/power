@@ -9,14 +9,15 @@
 
 CI runs all of the following; the boxes are for what you checked *before* pushing.
 
-- [ ] `cd server && npm test` — the full suite (2,300+ tests)
+- [ ] `cd server && npm test` — the full suite, 0 failures (CI checks the README's test count against the run)
 - [ ] `server/` type-checks, **both projects**: `./node_modules/.bin/tsc --noEmit -p tsconfig.json` and `-p tsconfig.test.json`
 - [ ] `web/` type-checks: `cd web && ./node_modules/.bin/tsc --noEmit -p tsconfig.json`
 - [ ] `python3 scripts/check-no-secrets.py` — no home IPs, DIDs, VoIP credentials, personal email or device serials in tracked files
 - [ ] If `config.yaml` options/schema changed: `python3 scripts/validate-addon-config.py` — **every option needs `en` AND `es`** entries and a `config.yaml` default
 - [ ] `node scripts/check-mutant-anchors.mjs` — all mutation-harness anchors still resolve
 - [ ] `node scripts/check-npm-audit.mjs` — no high/critical advisories in the production dependency tree, no expired waivers
-- [ ] CI green: typecheck matrix · server tests · mutant anchors · no-secrets · add-on config · Docker smoke build · docs build · CodeQL
+- [ ] If this adds or removes tests, harnesses or workflows, or changes DOCS.md length by more than 3%: the README sentence is updated and `node scripts/check-doc-claims.mjs --tests <N>` passes
+- [ ] CI green: type-check matrix · server-test type-check · server tests + README claims · mutant anchors · no personal data · dependency advisories · add-on config · release-PR version (release PRs only) · Docker smoke build · docs build · CodeQL
 - [ ] Tested against live EcoFlow data, or N/A (docs / CI-only change)
 - [ ] If UI changed: screenshot or short clip attached below
 
@@ -25,6 +26,13 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 - [ ] An exemplar reproducing the **motivating defect verbatim** is in the harness, not just the general case.
 - [ ] If a mutant survived and you could not kill it, say so here and say why — a known survivor documented in the harness beats a silent gap.
 - [ ] `DOCS.md` updated in the same PR if this adds or changes an engine, option or API surface.
+- [ ] The harness runs on `scripts/lib/mutateParallel.mjs` and its baseline passes in every worker. A baseline ABORT is not a result: lower `MUTATE_CONCURRENCY` or fix the flaky case.
+- [ ] If this moves an existing guard, the harnesses that pin it were re-run — a moved guard can leave its mutant equivalent (2026-10-10: `mutate-analytics-worker` xi after v1.187.10).
+
+### If this touches the security surface
+- [ ] A new POST/PUT/DELETE route has `requireWriteAuth` (and a rate limit if it does work on demand); `server/test/writeRoutesGated.test.ts` fails the build otherwise.
+- [ ] `ecoflow_panel/apparmor.txt` changes compile fresh (`apparmor_parser -T -Q -K`) and `server/test/apparmorProfile.test.ts` passes; no rule combines `a` with `w`; the blanket `file,` stays.
+- [ ] New workflow steps pin actions to a full commit SHA with a version comment.
 
 ### If this is a release PR
 - [ ] `ecoflow_panel/config.yaml` **version bumped** to exactly the version in the PR title

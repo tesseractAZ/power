@@ -6316,7 +6316,7 @@ The operator's response is the ground-truth label. `AlertOutcome ∈ {ack, dismi
 
 - `ack` → true positive; `dismiss` → false positive; `failed` → strong TP (preceded actual failure); `resolved` → ambiguous (excluded from precision).
 
-`POST /api/alerts/outcome` (`{alertId, outcome, notes?}`) looks up the live alert (for category/severity) and the captured snapshot, appends an `AlertOutcomeEntry` (sanitized: verdict allow-listed, numbers coerced finite, strings control-stripped/length-bounded; IP+UA recorded for audit) to `ALERT_OUTCOMES_PATH` (append-only JSONL, kept forever), fires an online-LR weight update (`updateFromOutcome` — only when labelable and features exist; writes a shadow model, never overwrites the baseline), then drops the in-memory snapshot. Returns `{ ok, onlineLrUpdated }`.
+`POST /api/alerts/outcome` (`{alertId, outcome, notes?}`; `requireWriteAuth` since v1.187.16) looks up the live alert (for category/severity) and the captured snapshot, appends an `AlertOutcomeEntry` (sanitized: verdict allow-listed, numbers coerced finite, strings control-stripped/length-bounded; IP+UA recorded for audit) to `ALERT_OUTCOMES_PATH` (append-only JSONL, kept forever), fires an online-LR weight update (`updateFromOutcome` — only when labelable and features exist; writes a shadow model, never overwrites the baseline), then drops the in-memory snapshot. Returns `{ ok, onlineLrUpdated }`.
 
 `GET /api/alerts/outcomes?limit=` → `{ entries }` (tail, newest-first). `GET /api/alerts/outcomes/stats` → `{ families }`: `computeFamilyStats()` groups by `familyOf`, precision = `(ack+failed)/(ack+failed+dismiss)` — `null` unless the family has at least one dismissal and `FAMILY_MIN_DECIDED_OUTCOMES` (3) decided outcomes (`familyPrecision`, v1.123.0), plus median time-to-action — **null** for `PERSISTENT_FAMILIES` (`offline`, `grid-offgrid`) where `ts−alertFiredAt` is condition-age, not response latency.
 
@@ -6412,7 +6412,7 @@ Served at **`GET /api/alert-settings`** (`alertSettingsResponse()`, cached in-pr
 | `/api/incidents` | GET | `{ incidents: Incident[] }` (cached 15 s) |
 | `/api/alerts/history` | GET | `{ cleared: ClearedAlert[] }` (cached 30 s) |
 | `/api/alert-telemetry` | GET | `{ telemetry: AlertActionStats[] }` (cached 30 s) |
-| `/api/alerts/outcome` | POST | `{alertId, outcome, notes?}` → `{ok, onlineLrUpdated}` (auth-open) |
+| `/api/alerts/outcome` | POST | `{alertId, outcome, notes?}` → `{ok, onlineLrUpdated}` (write-auth since v1.187.16) |
 | `/api/alerts/outcomes` | GET | `{ entries }` (tail, `?limit=`) |
 | `/api/alerts/outcomes/stats` | GET | `{ families: AlertFamilyStats[] }` |
 | `/api/root-cause` | GET | `?alertId=` → `{ causes: [{id, description}] }` |
@@ -6664,7 +6664,7 @@ The operator's response is the ground-truth label (`AlertOutcome`):
 
 #### The record and its endpoint
 
-`POST /api/alerts/outcome` (index.ts ~1861) validates the verdict against
+`POST /api/alerts/outcome` (index.ts; write-auth since v1.187.16) validates the verdict against
 `['ack','dismiss','failed','resolved']`, then assembles an `AlertOutcomeEntry`
 (alertOutcomes.ts:33) by joining the request to the frozen snapshot:
 
@@ -7458,6 +7458,8 @@ Harness: `scripts/mutate-v1187-3h.mjs` (99 mutants, 99 killed after the seam rev
 **v1.187.14 — a warning-level cell spread stops pushing on the plateau.** `plateauQuietWarnSpread` (cellSpread.ts) quiets the `vdiff-warn` push from `VOL_DIFF_PLATEAU_SOC_PCT` (85%), where `topOfChargeQuietSpread` quieted it only from 95%. On 2026-10-10 a manual top-up pushed nine warn-band spreads across three Cores within 30 min as the packs climbed through 85-95%. The warning stays visible (and has not been voiced since v1.187.12); below 85% it still pushes (the morning reversal on the same two packs). Unchanged: the 95% line for the peer outlier and the critical mutes, and `vdiff-crit` (the 90 mV plateau line) still pushes and sounds. Tests: `alertVdiffBalancing.test.ts` (94% and 85% visible without a push; 84% and 64% push; a plateau critical still annunciates). Harness: `scripts/mutate-v1187-14.mjs` (Q-i).
 
 **v1.187.15 — the AppArmor profile is narrowed to what the add-on uses.** Capabilities `chown` and `dac_override` only (eight unused ones removed), network restricted to TCP/UDP over IPv4/IPv6, unix and netlink (no raw or packet sockets), and `/etc`, `/package`, `/command` and the persistent `/var` subtrees write-locked alongside the code directories. Profiled in complain mode on the running add-on and on an isolated boot of the released image before shipping (see the AppArmor section). The blanket `file,` rule and the `wl` masks stay (the v1.7.0 and v1.9.0 outages). Tests: `apparmorProfile.test.ts`; harness `scripts/mutate-v1187-15.mjs` (A-i–A-iv).
+
+**v1.187.16 — every write route is behind the write gate; the last three actions are pinned; the documentation is reviewed against the code.** `POST /api/alerts/outcome` and `POST /api/energy-history/backfill` were the only POST/PUT/DELETE routes without `requireWriteAuth`: a bare LAN request could append to the alert-outcome ledger (and update the online pack-risk model) or start a vendor-history fetch of up to 30 days. Both now carry it; the dashboard's outcome buttons pass through Ingress or same-origin. `writeRoutesGated.test.ts` scans every write-route registration in `index.ts` and fails on one without the gate (harness `scripts/mutate-v1187-16.mjs`, W-i–W-ii). `actions/setup-node@v4` (`ci.yml`) and `actions/checkout@v5` (`release.yml`, `tag-release.yml`) are pinned to the full commit SHAs used by the other workflows, so every `uses:` line is SHA-pinned. `check-mutant-anchors.mjs` resolves `.txt` targets, so the four anchors of `mutate-v1187-15.mjs` in `apparmor.txt` are checked in CI (they were reported as "no resolvable target"). Documentation: chapter 12's addenda (12a–12o, the vendor API notes and two supplements, now 12p and 12q) moved from after Appendix A into chapter 12, headings renumbered and the table of contents extended; about 375 statements in DOCS.md, README.md, SECURITY.md and `docs/` corrected against the code; SECURITY.md rewritten to the current posture; `docs/PERFORMANCE.md` adds runtime latency (§4c) and test/harness cost (§7); the `apparmor.txt` comments describe the v1.187.15 profile (no rule changed).
 
 **v1.186.2 — no phantom battery discharge at the grid handover; curtailment hour pairing, cloudy hours and freeze membership.** (1) Measured 2026-09-27 01:34–01:40 at a handover to the grid (pool at its 16% floor, grid 4.45–4.54 kW = house load, panel `sourceWatts` [0,0,0]): `fleet_battery_net_watts` alternated 88, 2671, 21, 1436, 11, 125, 9, 92, 0 W. The recorder's per-pack rows show the cause: every Core's REST `/quota/all` (60 s, :22) returns each pack's last NON-ZERO `inputWatts`/`outputWatts` (a zero is never cached), while the MQTT stream (per-change deltas plus a full pack burst ~:42) carries the zeros; `setDeviceQuota` replaces the raw map, so the :22 publish summed the replay and the :52 publish the stream. The store now records each MQTT-delivered pack flow field with its arrival time and sets a display-only `pack.liveFlow` when one is at most `STREAM_FLOW_WINDOW_MS` (150 s) old; `aggregateFleetFlow` returns `fleetBatteryNetDisplay` beside the unchanged raw `fleetBatteryNet`, and the Battery Net sensor (`/api/ha-state`, MQTT discovery) and the Energy-flow card read the display sum. While the stream is alive the REST value cannot be fresher (the cloud caches what the device published); a silent stream hands back to the poll after the window. `gridState`'s at-floor `poolDischargingObserved` still reads the raw sum. (2) Open-Meteo's hourly `shortwave_radiation` is the average of the preceding hour, so the value labelled H covers [H−1, H). `coveringRadiationEpoch` (weather.ts) pairs the recorder hour [H, H+1) with the label H+1 in `sampleCurtailmentHour`, the live `currentHourGhi`, the Bayesian solar fit (and its OLS comparison) whose posterior curtailment applies, and `curtailmentDaySettled`'s coverage (a day needs the labels 01:00 through the next midnight). Other consumers of the same hours still pair by label: the per-hour and clear-sky PV coefficient fits, forecast skill scoring and the realized-GHI capture in the recorder (insert-once rows keyed by label); they are unchanged here. (3) A measured hour (present, not `radiationMissing`) below `CURTAIL_MIN_GHI_WM2` returns no sample, and a measured hour the posterior cannot predict returns none; the μ × 900 W/m² heuristic runs only for an hour with no weather value. (4) `curtailmentMembershipSound` gates the freeze: the live roster is non-empty, `membership-history.json` is `stable` across the day and `membershipAt(dayStart)` equals the roster's fingerprint, and every roster Core was walked and reported `soc` in at least one hour of the day; an unsound day stays live. The sidecar schema is now `v: 2` (`CURTAIL_FREEZE_SCHEMA`): a v1 file is dropped on load and rewritten, so the ≤ 7 days frozen under the old pairing and heuristic are re-walked from the recorder. Harness: `scripts/mutate-v1186-2.mjs` (15 mutants).
 
@@ -8321,7 +8323,7 @@ The server that backs both is a single Fastify instance (`server/src/index.ts`) 
 ```yaml
 ports:
   8787/tcp: 8787         # Web dashboard + REST API + WebSocket
-  2323/tcp: 2323         # Telnet "control-room" TUI (no auth — keep on a trusted LAN)
+  2323/tcp: 2323         # Telnet "control-room" TUI (off by default; optional login — keep on a trusted LAN)
 ingress: true
 ingress_port: 8787
 panel_icon: mdi:home-battery
@@ -8861,9 +8863,13 @@ AppArmor profile.
 #### Write-auth gate (`requireWriteAuth`, `server/src/auth.ts`)
 
 Built by `createAuth({ host, port, log })` at boot. Applied as a Fastify `preHandler` on
-every POST/PUT/DELETE route except two:
-- `POST /api/alerts/outcome`: the alert-feedback log, which also updates the online pack-risk model.
-- `POST /api/energy-history/backfill`: a bounded background vendor-history fetch.
+every POST/PUT/DELETE route, without exception since v1.187.16. Until then two routes were
+open: `POST /api/alerts/outcome` (the alert-feedback log, which also updates the online
+pack-risk model) and `POST /api/energy-history/backfill` (a bounded background vendor-history
+fetch that writes the vendor ledger). `server/test/writeRoutesGated.test.ts` scans every
+`app.post`/`put`/`patch`/`delete` registration in `index.ts` and fails if one lacks the gate
+(harness `scripts/mutate-v1187-16.mjs`). The dashboard's outcome buttons reach the route
+through Ingress or same-origin, like every other dashboard write.
 
 It is also applied on the admin GETs `/api/writes/log`, `/api/admin/addons` and `/api/broadcast/discover`. A request is accepted if **any** of three conditions hold:
 
@@ -9057,6 +9063,11 @@ promoted from ARG to ENV (v0.14.0) so `/api/version` reports the real release in
 `build.yaml`, `.github/workflows/ci.yml`, `.github/workflows/images.yml` — all reference
 `ghcr.io/home-assistant/{arch}-base:3.21@sha256:…`. Update the digest deliberately on a base bump.
 
+**Every GitHub Action is pinned to a full commit SHA** with its version in a comment. v1.187.16
+pinned the last three floating tags: `actions/setup-node` in `ci.yml`'s advisory job and
+`actions/checkout` in `release.yml` and `tag-release.yml`, the two workflows with write
+permissions.
+
 ---
 
 ### Release & publish pipeline
@@ -9093,6 +9104,10 @@ since the previous tag if empty). It:
 - `Dockerfile smoke build (amd64)`.
 - `Build documentation (.docx + .pdf)`.
 - On a pull request only: `Release PR declares the version it names` (`scripts/check-release-pr.py`).
+
+Required before a merge: branch protection on `main` requires `Type-check server`, `Type-check web`,
+`Dockerfile smoke build (amd64)`, `Build documentation (.docx + .pdf)` and `CodeQL`; the `BranchAuth`
+ruleset requires `CodeQL`. The other jobs run on every pull request but are not required status checks.
 
 `codeql.yml` analyses `actions`, `javascript-typescript` and `python` on every push/PR and weekly.
 It fails on an `error`-level result or a `security-severity` ≥ 7.0 (`.github/scripts/check-sarif.mjs`).
@@ -9265,7 +9280,7 @@ State: `/data/vendor-energy-daily.json` (atomic writes, 120-day cap, corrupt
 file = start fresh). API: `GET /api/energy-history[?day=]` (includes the
 advisory `empiricalRte` summary since v1.85.0),
 `GET /api/debug/vendor-history?day=` (live, unstored),
-`POST /api/energy-history/backfill?days=N` (bounded manual backfill).
+`POST /api/energy-history/backfill?days=N` (bounded manual backfill; write-auth since v1.187.16).
 **v1.85.0**: the morning job also backfills up to 10 older missing days
 (60-day horizon, per-day persistence) and reports empirical RTE
 (`computeEmpiricalRte`: qualifying days need ≥ 1 kWh vendor battery-in;
@@ -11188,7 +11203,7 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    (`scripts/mutate-detector-honesty.mjs`, mutants ix–xii).
 4. **Score.** The scorer's actuated branch (§7) measures the delivered buy as the energy into the home Cores on the house panel's source channels (`deliveredIntoCores`, v1.187.3; window grid import minus the concurrent house load before it) and records `delivered_kwh` with `delivered_basis`, read by the buy de-bias learner (§15.12). v1.187.0: over the span the write was held (`deliveredHoldSpan`), which ends at the restore the actuator stamps on the row (`actuation_reverted_at_ms`, a ledger column since v1.187.0, NULL before it) plus the device settle — §7 "Realized cost" / "Delivered energy". *(Corrected v1.132.0: this previously also described deriving the realized-need counterfactual via `actuatedRealizedNeedBuyKwh`. That helper still exists in `nightChargeAdvisor.ts` but is **no longer on the scoring path** — it is exercised only by tests. Do not reason about live scoring from it.)*
 
-**Deadline phrasing (v1.51.2).** The announced cancel deadline is **day-qualified beyond 24 h** ("on Sunday at 11:55 PM") in both the notification and the spoken broadcast: weekend tariff semantics routinely resolve a Saturday-evening plan's window to Monday 00:00, putting the write moment ~28 h out, where a bare clock time would read as tonight. The spoken text also carries the `cushionShortfall` disclosure whenever the plan discloses one — the audible channel is never quieter about residual risk than the text channel.
+**Deadline phrasing (v1.51.2).** The announced cancel deadline is **day-qualified beyond 24 h** (e.g. "on Monday at 12:00 AM"; since v1.187.0 the deadline is the window open, `APPLY_LEAD_MS = 0`) in both the notification and the spoken broadcast: weekend tariff semantics routinely resolve a Saturday-evening plan's window to Monday 00:00, putting the write moment ~28 h out, where a bare clock time would read as tonight. The spoken text also carries the `cushionShortfall` disclosure whenever the plan discloses one — the audible channel is never quieter about residual risk than the text channel.
 
 **Disabling the outage cushion (`ARB_OUTAGE_CUSHION_HOURS: 0`) — v1.133.0.**
 
@@ -11477,7 +11492,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | SHP2 membership + spare roster | Core↔SHP2 from `backupIncreInfo.Energy{1,2,3}Info`, not positional; explicit spare-SN allowlist (§2, §8.8) | SHP2 energy-info slots; `SPARE_DPU_SNS` env | Zombie gate, selfConsumption scope, degradation peer baselines | measured-and-active |
 | Cloud-wedge vs outage classifier | `deviceLink.ts` pure classifier: LAN-reachable + cloud-silent = wedge, both-dark = outage (§2) | LAN ICMP ping, MQTT/REST freshness | Offline alerts, HA `ecoflow_cloud_wedge_count` | measured-and-active |
 | HA service layer | `haService.ts` `callHaService` — total, never throws (§2, §10.10) | HA supervisor API | Broadcast, shed registry, hostPower, haStateCache | measured-and-active |
-| MQTT discovery entity set | 78 sensors + 10 binary sensors in the static tables, plus per-circuit energy sensors and per-priority alarm switches, availability + expiry, honest-null templating (§2) | `buildState()` composition | Home Assistant | measured-and-active |
+| MQTT discovery entity set | 78 sensors + 10 binary sensors in the static tables, plus two per-circuit sensors (energy and power) and the four per-priority alarm switches, availability + expiry, honest-null templating (§2) | `buildState()` composition | Home Assistant | measured-and-active |
 | Energy Dashboard counters | `total_increasing` lifetime kWh set incl. dynamic per-circuit discovery (§2) | Lifetime accumulators | HA Energy | measured-and-active |
 | Alarm-priority switches | Bidirectional `switch` per ISA priority; `parseAlertSwitchCommand` no-op on unknown payload (§2) | HA command topic | `alertSettings`, alarm gating | measured-and-active |
 | `refreshShp2CloudPresence` write | One of the audited device writes. The others are the night-charge reserve write, force-charge and its `foceChargeHight` ceiling (§15.8b), the Charge Now responder's OFF, and the owner `/api/reserve-floor` write; audited (`writeLog.ts`), rate-limited, `requireWriteAuth` (§2, §12) | Operator action | Web `RefreshCloudButton`, cooldown endpoint | measured-and-active |
@@ -11625,7 +11640,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 
 | Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
 |---|---|---|---|---|
-| `/ws` snapshot spine | Throttled full-snapshot frames (§11, "The shared data spine") | SnapshotStore | Web dashboard, wsConsole | measured-and-active |
+| `/ws` snapshot spine | Full-snapshot frame on connect and on every store change (body serialized once per change) (§11, "The shared data spine") | SnapshotStore | Web dashboard, wsConsole | measured-and-active |
 | Web dashboard (React PWA) | Tabs: Dashboard/Solar/Battery/Strategy/Alerts/Console (§11.1) | `/ws` + 30+ `/api/*` | Operator | measured-and-active |
 | Telnet TUI | Plant Operator + Summary consoles, DoS-hardened, port 2323 (§11.2) | dataProvider (`totals`/`forecast`/`degradation`) + snapshot | Operator | measured-and-active |
 | HACS Lovelace cards | REMOVED in v1.47.0 (duplicated the web dashboard; consumer had pinned a stale CDN snapshot) | — | — | removed |

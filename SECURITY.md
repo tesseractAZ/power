@@ -1,6 +1,6 @@
 # Security Policy
 
-`ecoflow-panel` is a Home Assistant add-on that monitors an off-grid EcoFlow
+Power (`ecoflow_panel`) is a Home Assistant add-on that monitors an off-grid EcoFlow
 solar/battery system and drives a **life-safety depletion alarm**. It runs on the
 operator's own Home Assistant OS host (typically a Raspberry Pi) on a private LAN,
 authenticated to the local Home Assistant Supervisor. It is not a multi-tenant or
@@ -36,35 +36,185 @@ You'll get an acknowledgement, and a fix or mitigation will be shipped as a norm
 versioned release (tests + adversarial review + deploy) with credit in the
 changelog if you'd like it.
 
-## Security posture (what the add-on already does)
+## Security posture
 
-- **AppArmor profile** (`ecoflow_panel/apparmor.txt`) confines the container's
-  filesystem and capabilities.
-- **Device writes default to off.** Every automatic write is opt-in. The night-charge
-  reserve write and its revert (v1.50.0), and the v1.165.0 per-channel force-charge with
-  its ceiling sync (cost objective with `ARB_COST_MAX_SOC_PCT` above 50, only on a night
-  whose reserve write applied and verified), run only when `NIGHT_CHARGE_MODE` is
-  `supervised` or `auto` (default `advisory` — never writes). The Charge Now responder
-  writes force-charge OFF only when `CHARGE_NOW_RESPONSE` is `supervised` (default
-  `advisory`). When enabled, the night write is announced each evening, cancellable,
-  validated into the device's [10, 50] reserve range, and auto-reverted at the close of
-  the charge window. Owner-initiated writes (`POST /api/reserve-floor`,
-  `POST /api/device/refresh-cloud/:sn`) require write authorization. The arbitrary send-command debug path additionally
-  requires a `WRITE_DEBUG_TOKEN`. Every write is recorded to an append-only
-  audit log.
-- **Write/administrative endpoints are auth-gated** (CSRF/CORS controls, the
-  send-command lockdown, and audit-log read auth).
-- **Secrets** (EcoFlow `ECOFLOW_ACCESS_KEY` / `ECOFLOW_SECRET_KEY`, `MQTT_DISCOVERY_PASS`,
-  `TUI_PASSWORD`, `WRITE_DEBUG_TOKEN`; the Supervisor injects `SUPERVISOR_TOKEN`) are supplied through the add-on options and are never logged; the panel
-  reports credential **presence**, never values.
-- The trusted-LAN data API (`:8787`) and telnet TUI (`:2323`) are intended for the
-  local network only; do not expose them to the internet. Use Home Assistant's
-  Ingress for authenticated remote access.
+### Trust boundary and network exposure
+
+The add-on trusts its own host, the other add-ons on the Home Assistant Supervisor
+network, and the local network it is installed on. It is designed so that nothing
+outside that boundary needs to reach it.
+
+| Port | Serves | Access control |
+|------|--------|----------------|
+| `8787/tcp` | Web dashboard, REST API, WebSocket, the browser console (`/console`), audio files for the speakers. Also the Ingress port. | Reads are open. Writes need write authorization (below). |
+| `2323/tcp` | Telnet control-room TUI | **Off by default** (`TELNET_ENABLED: false`). Optional operator login (`TUI_USERNAME` / `TUI_PASSWORD`). |
+
+- **Reads are unauthenticated by design.** Home Assistant media players, Music
+  Assistant and the SIP intercom fetch the alarm chime and speech files from the
+  add-on at alarm time; a credential check there would turn an alarm into silence.
+  Telemetry, history and forecasts are therefore readable by anything that can
+  reach port 8787.
+- **Write authorization** accepts a request that meets any one of three conditions:
+  it arrives through **HA Ingress** (the `X-Ingress-Path` header *and* a TCP peer on
+  the Supervisor network, with proxy headers ignored); it carries an **`Origin`** in
+  the add-on's same-origin list (plus any `TUI_TRUSTED_ORIGINS`); or it carries the
+  **`X-Panel-Write-Token`**, a random token stored at `/data/panel-write-token.txt`
+  with mode 0600 and compared in constant time (delete the file and restart to
+  rotate it). The `Origin` condition stops a web page on another site from writing
+  through a browser; it is not an identity check, and a program on the LAN can send
+  any header. Port 8787 is a **trusted-LAN interface**. For remote access, use
+  Home Assistant Ingress, which carries Home Assistant's own authentication.
+- **The console is display-only.** The telnet TUI and the browser console at
+  `/console` show the same screens and issue no commands. The browser console
+  rejects cross-origin WebSocket upgrades, caps concurrent sessions at 16 and
+  closes idle sessions after 5 minutes. With a password set, both transports
+  require a login: 3 attempts per connection and at most 10 failures in 10 minutes
+  across all sessions. Telnet carries that password in cleartext; on a shared LAN
+  prefer `/console` through Ingress.
+- **CORS** lets the add-on's own origins, Home Assistant's and private-network
+  (`10.x`, `127.x`, `172.16–31.x`, `192.168.x`, `*.local`) origins read API
+  responses; other origins get no `Access-Control-Allow-Origin`.
+- **Every POST, PUT and DELETE route requires write authorization**, and so do the
+  three administrative reads (the write log, the add-on list and speaker
+  discovery). Since v1.187.16 there is no exception: the alert-outcome and
+  vendor-history backfill routes, the last two without the gate, now carry it, and
+  `server/test/writeRoutesGated.test.ts` fails the build if any write route is
+  registered without it. The chime, broadcast-configuration, database-export,
+  statistics-export, reserve-floor and defective-pack routes are also
+  rate-limited.
+
+Do not forward ports 8787 or 2323 to the internet.
+
+### Device writes are off by default, bounded, and audited
+
+With the shipped defaults (`NIGHT_CHARGE_MODE: advisory`,
+`CHARGE_NOW_RESPONSE: advisory`, `WRITE_DEBUG_TOKEN` empty) the add-on never changes
+a device setting. The write paths, and what enables each:
+
+| Write | Enabled by | Bounds |
+|-------|-----------|--------|
+| Night-charge **reserve raise** (`backupReserveSoc`) | `NIGHT_CHARGE_MODE: supervised` or `auto` (`auto` behaves as `supervised` until the readiness gate graduates) | One write per charge night, validated into the panel's [10, 50] % range before any network call. Armed only after an announcement channel confirms delivery; cancellable until the window opens; readback-verified on apply and on revert; restored at the window close, or at once on a cancel or a grid loss. |
+| Night **force-charge** (per-channel force-charge and its ceiling, `foceChargeHight`) | The above, plus `ARB_OBJECTIVE: cost` and `ARB_COST_MAX_SOC_PCT` above 50 (set it to 50 to disable) | Starts only after the reserve raise has read back, and only for the last stretch of the window; ceiling validated into [80, 100]. Switching it off is unconditional (target reached, window end, cancel, revert, grid loss, a 7-hour backstop), readback-verified, re-issued while it still reads on, and escalated aloud. |
+| **Charge Now responder** | `CHARGE_NOW_RESPONSE: supervised` | Only ever switches the app's force-charge **off**, during on-peak grid buying. |
+| **Reserve floor** set by the owner | `POST /api/reserve-floor` with write authorization | [10, 50] %; refused while a night-charge write holds the reserve up. |
+| Cloud-presence refresh | `POST /api/device/refresh-cloud/:sn` with write authorization | Re-sends the reserve value the panel already holds; 30 s per-device cooldown. |
+| Raw command (debug) | `WRITE_DEBUG_TOKEN` set, plus write authorization, plus that token on the request | Command-set allow-list, parameter shape limits, 30 s per-device cooldown. |
+
+Every device write goes through one audited helper and is appended to
+`/data/writes.log` with its source, outcome and duration; the log is readable only
+with write authorization. Writes carry per-device cooldowns. With two Smart Home
+Panels on the account, writes go only to the recorded house panel, and new
+night-charge writes wait while that panel is missing or unconfirmed (a restore is
+never blocked).
+
+### Container confinement
+
+- **AppArmor** (`ecoflow_panel/apparmor.txt`, narrowed in v1.187.15 after
+  complain-mode profiling of a running instance and of an isolated boot):
+  - capabilities **`chown` and `dac_override` only**; `sys_admin`, `sys_module`,
+    `sys_rawio`, `sys_ptrace`, `sys_boot`, `sys_time`, `mac_admin` and
+    `mac_override` explicitly denied;
+  - network limited to `inet`/`inet6` `stream` and `dgram` (TCP; UDP for DNS),
+    `unix` (s6 IPC) and `netlink raw` (interface listing) — no raw or packet
+    sockets;
+  - **write-locked** (`deny … wl`): `/app`, `/usr`, `/bin`, `/sbin`, `/lib`,
+    `/lib64`, `/init`, `/etc`, `/package`, `/command`, and
+    `/var/{cache,lib,log,spool,opt,mail,local}`; reads of `/etc/shadow`,
+    `/etc/gshadow`, `/root`, `/home` and `/etc/ssh` denied; writes to `/proc/sys`,
+    `/sys` and `/proc/sysrq-trigger` denied; mount, umount, pivot_root, remount and
+    ptrace denied;
+  - the blanket `file,` read rule is **kept on purpose** (a per-path list once
+    denied s6 re-reading `/init` and crash-looped the add-on), and no write mask
+    combines `a` with `w` (the HAOS parser rejects it and the profile then fails
+    to load).
+
+  These invariants are pinned by `server/test/apparmorProfile.test.ts`, which runs
+  in CI, and by the mutation harness `scripts/mutate-v1187-15.mjs`, whose anchors
+  the CI anchor check resolves. The procedure and its evidence are in
+  [`ecoflow_panel/DOCS.md`, “AppArmor profile”](ecoflow_panel/DOCS.md#apparmor-profile-ecoflow_panelapparmortxt).
+- **Least-privilege Home Assistant access.** `hassio_role: homeassistant` (not
+  `manager`): the only Supervisor call is a read-only add-on listing.
+  `homeassistant_api` is used for notifications and announcements, entity state,
+  the statistics export and, on request, setting up the Piper (Wyoming)
+  integration.
+- Storage: `/data` (private to the add-on) and `/share`, which is written only for
+  the optional database snapshot.
+
+### Secrets and personal data
+
+- EcoFlow keys, the MQTT broker password, the TUI password and the debug token
+  are add-on options of type `password`. They are never logged or echoed; the
+  panel reports only whether a credential is present. The heartbeat URL is treated
+  as a credential and is never logged.
+- Phone pushes shorten device serial numbers to their last six characters.
+- CI runs `scripts/check-no-secrets.py` on every push and pull request. It fails
+  on the home network ranges, personal email addresses, VoIP identifiers and any
+  token shaped like an EcoFlow serial number that is not a placeholder. The
+  serial rule is shape-based and lists no real serial; three runtime files that
+  still hold one are pinned to an exact count, so a new serial — or a fix that
+  forgets its exemption — fails the build.
+- A maintainer-side pre-push check compares outgoing commits against the real
+  serial numbers, which are kept outside the repository so that the detector does
+  not publish what it guards.
+
+### Supply chain
+
+- **GitHub Actions are pinned to full commit SHAs**, each with its version in a
+  comment — every `uses:` line in every workflow (the last three floating tags
+  were pinned in v1.187.16).
+- **The runtime base image is digest-pinned** (`ghcr.io/home-assistant/{arch}-base`)
+  identically in `build.yaml`, `.github/workflows/ci.yml` and
+  `.github/workflows/images.yml`; a base update is a deliberate edit to all three.
+- **Dependabot** (`.github/dependabot.yml`) proposes weekly updates for the
+  server and web npm trees, GitHub Actions, and the Dockerfile's build stages,
+  grouped production/development. Major versions are not proposed; they are
+  migrated by hand.
+- **Dependency-advisory gate.** `scripts/check-npm-audit.mjs` runs on every push
+  and pull request. It fails on a **high or critical advisory in the production
+  dependency tree** of `server/` or `web/` and reports everything else. A waiver
+  in `scripts/npm-audit-allowlist.json` needs a reason and an expiry date, an
+  expired waiver fails the build, and a waiver whose advisory is gone is reported
+  as stale. The gate fails closed when `npm audit` cannot run, and it tests its
+  own policy before auditing. The allowlist is empty at v1.187.16.
+- **CodeQL** (`.github/workflows/codeql.yml`) analyses the workflows, the
+  JavaScript/TypeScript and the Python scripts with the `security-extended`
+  queries on every push and pull request and weekly. Results go to the Security
+  tab, and `.github/scripts/check-sarif.mjs` fails the build on any error-level
+  result or any rule with security severity 7.0 or higher. Accepted findings are
+  listed in `.github/codeql-baseline.json` by rule **and** exact path, so the same
+  rule in another file still fails.
+- CI runs on every push and pull request: the three type-checks, the test suite
+  (and the README-claim check), the mutation-anchor check, the secrets scan, the
+  advisory gate, the add-on config validator, the release-PR version check, the
+  Docker smoke build, the documentation build and CodeQL. `main` is
+  branch-protected; its required status checks are the server and web
+  type-checks, the Docker smoke build, the documentation build and CodeQL.
+
+### Release integrity
+
+- A release is a pull request titled `Release vX.Y.Z`. CI fails it unless
+  `ecoflow_panel/config.yaml` carries exactly that version and the CHANGELOG has
+  its section (`scripts/check-release-pr.py`).
+- On merge, `tag-release.yml` creates the tag and dispatches `images.yml`, which
+  runs the test suite and type-check at the tag, builds each architecture on a
+  native runner from the digest-pinned base, and pushes
+  `ghcr.io/tesseractaz/{arch}-ecoflow-panel` as `:X.Y.Z` and `:latest`. Home
+  Assistant installs the version named in `config.yaml`.
+- The image-build setup steps get one retry after a pause, so a transient registry
+  failure does not leave a version without a release. The GitHub Release takes its
+  notes from the CHANGELOG and fails if the section is missing; it attaches the
+  documentation only when that build succeeded and left a non-empty file, because
+  Releases are immutable once created; and only the **highest** version is marked
+  Latest, so re-running an older release cannot demote a newer one.
+- Images are not signed and carry no provenance attestation; the integrity anchor
+  is the version tag built by this repository's workflow.
 
 ## Scope
 
-In scope: the add-on server (`server/`), the web UI (`web/`), the MQTT/EcoFlow ingest, the broadcast/TTS pipeline, the
-telnet TUI, and the configuration/deploy surface. Out of scope: vulnerabilities in
-Home Assistant itself, the EcoFlow cloud/IoT platform, third-party dependencies
-(report those upstream; we track them via Dependabot), and issues that require
-already-privileged access to the host.
+In scope: the add-on server (`server/`), the web UI (`web/`), the MQTT/EcoFlow
+ingest, the broadcast/TTS pipeline, the telnet TUI and browser console, the
+night-charge write path, the AppArmor profile, and the configuration, build and
+release surface. Out of scope: vulnerabilities in Home Assistant itself, the
+EcoFlow cloud/IoT platform, third-party dependencies (report those upstream; they
+are tracked here through Dependabot and the advisory gate), and issues that
+require already-privileged access to the host or to another add-on on it.

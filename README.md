@@ -1,24 +1,35 @@
 # Power — EcoFlow off-grid monitoring, forecasting & life-safety alarm
 
 **Power** (Home Assistant add-on, slug `ecoflow_panel`) turns a cloud-only
-EcoFlow off-grid system into a fully-instrumented, self-learning **control room**
-— with a **battery-depletion life-safety alarm** at its center.
+EcoFlow off-grid system — a Smart Home Panel 2 and its Delta Pro Ultra Cores —
+into a fully-instrumented, self-learning **control room**, with a
+**battery-depletion life-safety alarm** at its center.
 
-It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST + live MQTT),
-persists a per-metric SQLite time-series, runs **~40 analytics engines** in a
-worker thread, and serves the results three ways: a **React dashboard**, a
-**telnet "control-room" TUI**, **~90 Home Assistant MQTT-discovery entities**
-(sensors, binary sensors, and alarm-priority switches — plus dynamic
-per-circuit sensors and the Energy Dashboard). When the pack is
-projected to reach its reserve floor, it raises an **audible alarm** — chimes +
-text-to-speech over Home Assistant media players and a SIP intercom.
+It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST polled every
+60 s, plus live MQTT), persists a per-metric SQLite time-series, runs
+**~40 analytics engines** in a worker thread, and serves the results four ways:
+a **web dashboard** (React + Tailwind CSS 4, also in the Home Assistant sidebar
+through Ingress), a **control-room TUI** (telnet, and the same console in the
+browser), **Home Assistant MQTT-discovery entities** (about 90 sensors, binary
+sensors and alarm-priority switches, plus a power and an energy sensor for every
+Smart Home Panel 2 circuit; the energy counters feed the Energy Dashboard), and
+opt-in **Home Assistant notifications** with companion-app push.
+When the pack is projected to reach its reserve floor — or a battery, cell, grid
+or telemetry condition turns critical — it raises an **audible alarm** on the
+speakers the owner configures: a chime and a spoken description (English, with an
+optional Spanish second pass) over Music Assistant and a SIP intercom, retried
+when delivery cannot be confirmed.
+
+A **night-charge engine** sizes an overnight grid buy on the APS R-EV
+time-of-use rate. By default it only advises; when the owner opts in it performs
+one announced, cancellable, bounded and auto-reverting charge per night.
 
 The reference deployment is a Phoenix, AZ off-grid home: an EcoFlow **Smart Home
 Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each =
 92 kWh usable), a **42-panel / ~16.8 kW** array, and an EVSE — on the APS R-EV
 time-of-use rate.
 
-> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~11,650
+> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~11,670
 > lines) documents **every** feature and engine — what each does, the exact
 > algorithm and math it computes, how data traces through the pipeline, its
 > endpoints/sensors, config knobs, and edge-case guards. This README is the tour;
@@ -59,30 +70,44 @@ exactly what the app renders.
 
 **Telemetry & history**
 - Reverse-engineered EcoFlow cloud MQTT ingest (per-SN raw merge across `cmdId`
-  1/2/4/21/28) → a unified snapshot for every DPU Core, the SHP2, and the EVSE —
-  including **SHP2-attributed data for Cores whose Wi-Fi is down**.
-- SQLite time-series (adaptive interval + value-epsilon dedup; retention
-  configurable via `RECORDER_RETENTION_DAYS`, default 30 days, up to 10 years)
-  and monotonic lifetime-energy accumulators wired into the HA Energy Dashboard.
+  1/2/4/21/28) merged with a 60-second signed REST poll → a unified snapshot for
+  every DPU Core, the Smart Home Panel 2 and the EVSE — including
+  **SHP2-attributed data for Cores whose Wi-Fi is down**.
+- **One or two Smart Home Panels.** The panel on the account at first start is
+  recorded as the house panel; a panel added later never takes over, and the role
+  never moves by itself. Every alarm, sensor and night-charge write resolves to the
+  house panel.
+- **The cloud is not taken at its word.** A 200 OK that replays a stale copy of the
+  last reading is detected and published as stale, a frozen panel reading reads
+  `unknown` in Home Assistant rather than as live values, and a cloud "offline" flag
+  on a Core whose own data is still arriving is held for at most 3 minutes before it
+  is announced.
+- SQLite time-series (adaptive interval + value-epsilon dedup; retention set by
+  `RECORDER_RETENTION_DAYS`, default 30 days, 7–3,650 accepted) and monotonic
+  lifetime-energy accumulators wired into the HA Energy Dashboard. The night-charge
+  ledger and lifetime totals are never pruned.
 
 **Forecasting**
 - Per-hour-of-day **GHI→PV response model** (OLS, brightness/sample-gated) fed by
-  an Open-Meteo + NWS weather ensemble, plus a **recursive Bayesian** variant.
+  Open-Meteo, with an opt-in NWS cloud ensemble, plus a **recursive Bayesian** variant.
 - Day-ahead PV + load + **projected state-of-charge** curve, a self-calibrating
-  **P10/P90 probability band**, a **4-day** horizon, and a **forecast-skill**
-  backtest (predicted-vs-actual daily kWh: MAE, bias, r²).
+  **P10/P90 probability band**, a multi-day horizon (3 days by default, up to 7),
+  and a **forecast-skill** backtest (predicted-vs-actual daily kWh: MAE, bias, r²).
 - A **first-principles clear-sky** PV ceiling that cross-checks the learned model.
 
 **Battery & PV health engines**
 - Per-pack **State-of-Health** (Kalman filter vs raw BMS), **end-of-life**
-  projection (fade-rate-ceilinged to kill false-EOL), a **hierarchical-Bayesian**
-  SoH cross-check with 2σ outlier detection, and an **LFP open-circuit-voltage →
-  SoC** estimate gated on pack rest.
+  projection (fade-rate-ceilinged to kill false-EOL, regressed over the configured
+  retention clamped to 120–365 days), a
+  **hierarchical-Bayesian** SoH cross-check with 2σ outlier detection, and an
+  **LFP open-circuit-voltage → SoC** estimate gated on pack rest.
 - **Pack-risk** classifier (heuristic + an ML logistic-regression / isolation-
   forest v2), **internal-resistance** trend, **round-trip** and **coulombic**
   efficiency, **charge-curve** fingerprinting, ambient-coupled **thermal
   forecast** + event counter, **string-mismatch**, and per-Core weather-
   normalized **PV soiling** decomposition.
+- A **confirmed-defective-pack** latch that follows the pack's serial, not its
+  slot, and a **warranty evidence export**.
 
 **Energy, economics & dispatch**
 - Self-consumption decomposition (solar fraction, PV→load/battery), carbon
@@ -91,69 +116,96 @@ exactly what the app renders.
   override, else a **confirmed** seasonal utility table, else a flat default.
   An unconfirmed table is refused rather than assumed, and the basis in force is
   published alongside the numbers.
+- **APS R-EV modelled as the bill states it:** on-peak 16:00–19:00 and overnight
+  23:00–05:00 Mon–Fri year-round, a 10:00–15:00 super-off-peak in winter, off-peak
+  otherwise. Seasons follow **billing cycles** (by usage month, April–September
+  summer and October–March winter), and the schedule's **off-peak holidays** are
+  off-peak all day. Rates are owner-entered from a bill and stay null until
+  confirmed.
 - A **night-charge TOU-arbitrage engine** with an owner-selected write posture
-  (`NIGHT_CHARGE_MODE: advisory | supervised | auto`, default advisory — never
-  writes): on a night a shortfall is anticipated, it sizes "buy N kWh → charge
-  to X% in the cheap overnight window" so the pack holds `reserve + outage
-  cushion` — worst-case sized (P10 solar / P90 load), with the charge cap modeled
-  as charge-only (the home rides grid bypass while the charger runs). The **outage
-  cushion is the energy to carry the *islanded* load** — the Smart Home Panel's own
-  backup circuits, which are what actually run when the grid drops — for a bounded
-  outage (`ARB_OUTAGE_CUSHION_HOURS`, default 4). Sizing it against whole-house
-  consumption instead described an island the hardware cannot create, and made the
-  requirement permanently unsatisfiable. **Supervised mode** performs one announced, cancellable,
-  bounded reserve write per charge night (clamped to the device's 10–50% range,
-  armed only after an announcement channel confirms delivery, auto-reverted
-  after the window, audit-logged). It **learns from night one**: a durable
-  ledger records each plan, its measured delivery, and its outcome, and a
-  fail-closed write-readiness gate graduates **auto** mode only on real
-  actuated-night evidence (≥21 scored nights, under-buy ≤10%, sizing bias in
-  [0, 5] kWh, band coverage 78–92%, zero engine-fault strikes).
-  `ARB_OBJECTIVE` selects the sizing objective: **`resilience`** buys exactly the
-  requirement, **`cost`** treats that requirement as a floor and fills further
-  toward a solar-headroom or state-of-charge ceiling — bounded below by the
-  resilience answer, so the safety margin can never shrink when the objective
-  changes. Two honest caveats, both documented in
-  [`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`](docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md):
-  cost mode **fills further, it does not price** — it reads no tariff — and the
-  reserve write itself is capped by the device at 50%. Since v1.165.0 a cost-mode
-  ceiling (`ARB_COST_MAX_SOC_PCT`) above 50% is delivered in supervised/auto mode by
-  the panel's per-channel force-charge. It switches on just in time, in the last
-  stretch of a night whose reserve write applied and verified, and off at the target
-  or the window close.
+  (`NIGHT_CHARGE_MODE`):
+  - **`advisory`** (default) — never writes. Tonight's plan is published as HA
+    entities, an API, a 21:30 notification and dashboard/TUI panels.
+  - **`supervised`** — one announced, cancellable, bounded reserve write per charge
+    night: armed only after an announcement channel confirms delivery, clamped to
+    the panel's 10–50% reserve range, readback-verified on both the apply and the
+    revert, restored at the window close or at once on a grid loss, and
+    audit-logged. With the `cost` objective and `ARB_COST_MAX_SOC_PCT` above 50,
+    the panel's own per-channel force-charge then carries the pack past the reserve
+    ceiling toward the night's target: it switches on just in time, in the last
+    stretch of a night whose reserve write has read back, and off — verified off —
+    at the target or the window close.
+  - **`auto`** — behaves exactly as `supervised` until a fail-closed readiness gate
+    graduates on actuated-night evidence (≥21 scored nights, under-buy ≤10%,
+    sizing bias in [0, 5] kWh, band coverage 78–92%, zero engine-fault strikes).
+
+  Each night is sized worst-case (P10 solar / P90 load) so the pack holds
+  `reserve + outage cushion`, where the **outage cushion is the energy to carry
+  the *islanded* load** — the Smart Home Panel's backup circuits — for a bounded
+  outage (`ARB_OUTAGE_CUSHION_HOURS`, default 4; 0 disables it, and the plan says
+  so). A durable ledger freezes every plan, scores it against measured reality
+  and records what it cost. `ARB_OBJECTIVE` selects the sizing objective:
+  **`resilience`** buys exactly the requirement; **`cost`** treats it as a floor
+  and fills further toward a solar-headroom or state-of-charge ceiling, so the
+  safety margin can never shrink when the objective changes. Cost mode **fills
+  further, it does not price** — it reads no tariff; see
+  [`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`](docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md).
+- A **Charge Now responder** notices the app's force-charge buying grid power
+  on-peak and advises (default) or, when set to `supervised`, switches it off.
 - Two advisory round-trip-aware dispatch planners (greedy + a model-predictive
-  DP), compute-only, never auto-applied.
+  DP) and a load-shed advisor — compute-only, never applied.
 
 **Alarms & learning**
+- The **safety-critical runway engine**: an hour-by-hour DC-bus depletion sim
+  (accounting for the DC→AC discharge loss), grid-aware severity, and a battery-
+  SoC floor ladder. Below the reserve floor it says so rather than printing a
+  countdown to a crossing already behind it, and while the grid stands by it states
+  that every time shown is an **outage** projection, not a live countdown.
+- **Cell-spread alarms** per pack: a warning from 24 mV (held down to 20 mV), and a
+  critical at 50 mV — 90 mV on the top-of-charge plateau, where LFP cells spread
+  naturally — with a 150 mV ceiling that sounds at any charge level. Mutes for an
+  actively balancing pack or a top-of-charge knee are bounded in time and fail
+  loud. A warning is never spoken and pushes only below 85% charge; a critical is
+  pushed and announced at any level.
+- **The add-on watches its own sight.** When telemetry stops, it first rebuilds its
+  EcoFlow cloud session and only alarms if that remedy fails within a hard
+  deadline; a budgeted self-heal also rebuilds a session whose message rate has
+  collapsed. Host thermal and vitals self-monitoring, and an optional out-of-band
+  dead-man heartbeat, cover the case where the host itself fails.
 - Threshold + four families of **learned** alerts (peer-comparison, self-baseline,
   degradation/runtime forecast, solar/load forecast), an alert **monitor**
   (transition debounce, incident clustering, churn auto-silence, quiet hours),
-  a **repair-issues** feed, and an **online learning loop** (feature snapshots →
-  realized outcomes → shadow models).
-- **Notifications are Home-Assistant-native** and opt-in: with `NOTIFY_CHANNEL: ha` (the
-  shipped default, `none`, sends nothing) every alert becomes a card in the HA
+  a **repair-issues** feed, opt-in NWS storm alerts, and an **online learning
+  loop** (feature snapshots → realized outcomes → shadow models).
+- **Notifications are Home-Assistant-native** and opt-in: with `NOTIFY_CHANNEL: ha`
+  (the shipped default, `none`, sends nothing) every alert becomes a card in the HA
   notification drawer (dedupe + morning digest, dismissed when the condition clears)
   and, for each service named in `NOTIFY_HA_PUSH_TARGETS`, a real push to the
-  companion app. **Critical alerts — and only critical ones — carry the companion
-  app's documented critical payload**, so a genuine battery, reserve-floor or
-  grid-loss emergency sounds through Do Not Disturb and the silent switch; warnings
-  arrive as ordinary pushes that respect the phone's settings. There is no second
-  delivery stack to configure or keep alive.
-- The **safety-critical runway engine**: an hour-by-hour DC-bus depletion sim
-  (accounting for the DC→AC discharge loss), grid-aware severity, and a battery-
-  SoC floor ladder — driving the audible broadcast. Below the reserve floor it
-  says so rather than printing a countdown to a crossing already behind it, and
-  while the grid stands by as backup it states plainly that every time shown is
-  an **outage** projection (if the grid goes down), not a live countdown.
+  companion app, with device serials shortened to their last six characters.
+  **Critical alerts — and only critical ones — carry the companion app's
+  documented critical payload**, so a genuine battery, reserve-floor or grid-loss
+  emergency sounds through Do Not Disturb and the silent switch; warnings arrive as
+  ordinary pushes that respect the phone's settings.
 
 **Delivery surfaces**
-- Audible **broadcast** pipeline: per-target volume pinning, a built-in tone
-  library (+ uploads, per-level assignment), TTS (local Piper/Wyoming with a Cloud
-  fallback), Music Assistant / `media_player`, and a **SIP** side-channel to an
-  antique-phone intercom.
+- Audible **broadcast** pipeline: a chime followed by speech rendered locally by
+  Piper over Wyoming (no cloud TTS) — English, then Spanish once a Spanish voice is
+  set — played as
+  Music Assistant announcements with per-target volume pinning, plus a **SIP**
+  side-channel to an antique-phone intercom. A built-in tone library (+ uploads,
+  per-level assignment). An announcement whose delivery cannot be verified is
+  retried at 30 s, 90 s and 3 min, and a retry re-checks which alarm it names
+  before it plays; a failed speech render still plays the chime, and the words
+  follow 90 s later.
 - **Web dashboard** (Dashboard · Solar · Battery · Strategy · Alerts — the
   predictive sections live on their home pages, and the Alert Console is a
-  sub-view of Alerts) and **telnet TUI** (Plant-Operator console).
+  sub-view of Alerts), built with React and Tailwind CSS 4, served on the LAN and
+  through HA Ingress.
+- **Control-room TUI** (Plant-Operator console, display-only) over telnet — off by
+  default, with an optional operator login — and in the browser at `/console`.
+- **Data out:** a consistent SQLite snapshot published to `/share` for external
+  viewers, the vendor's own daily energy ledger exported to HA long-term
+  statistics, and a pack warranty evidence bundle.
 
 See the [DOCS.md table of contents](ecoflow_panel/DOCS.md#table-of-contents) for
 the full, math-level treatment of each of the above.
@@ -225,7 +277,7 @@ Every configuration option is documented in
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 4,114 tests
+cd server && npm install && npm test     # 4,115 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -233,11 +285,11 @@ cd web    && npm install && npm run build
 
 **Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` →
 open a PR whose squash subject starts `Release vX.Y.Z …`. `main` is branch-
-protected: the CI checks (the three type-checks — server, web, server tests — the test suite, the mutation-harness
-anchor check, the secrets scan, the dependency-advisory gate, the add-on
-config/translation validator, the Dockerfile smoke build, the docs `.docx`+`.pdf`
-build, and CodeQL) must pass, and
-every engine change also clears an **adversarial multi-agent review** before it
+protected. CI runs the three type-checks (server, web, server tests), the test suite, the
+mutation-harness anchor check, the secrets scan, the dependency-advisory gate, the add-on
+config/translation validator, the Dockerfile smoke build, the docs `.docx`+`.pdf` build and
+CodeQL on every pull request; the server and web type-checks, the smoke build, the docs build
+and CodeQL are required status checks. Every engine change also clears an **adversarial multi-agent review** before it
 can reach the alarm path. Merging
 a `Release …` subject fires `tag-release.yml`, which creates the `vX.Y.Z` tag and
 dispatches `images.yml` — that workflow runs the test suite, builds the multi-arch GHCR
@@ -271,7 +323,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **90 harnesses** (`scripts/mutate-*.mjs`) holding **1865
+regression. There are **91 harnesses** (`scripts/mutate-*.mjs`) holding **1867
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that
@@ -307,9 +359,14 @@ inert or unreachable, so a quiet reading is not mistaken for a healthy one.
 ## Security
 
 See [`SECURITY.md`](SECURITY.md) for the vulnerability-reporting policy and the
-security posture: AppArmor confinement, device writes defaulting to off
-(`NIGHT_CHARGE_MODE: advisory`) behind an audit log and auth-gated endpoints, the telnet TUI transport off by default (the same read-only console is always served at `/console` on the web port, behind the `TUI_PASSWORD` operator login when one is set), and
-secrets handled presence-only (never logged or echoed).
+security posture: an AppArmor profile narrowed to two capabilities and the socket
+types in use; device writes off by default (`NIGHT_CHARGE_MODE: advisory`) and,
+when enabled, bounded, announced and audit-logged; every write endpoint behind
+Ingress, same-origin or token authorization; the telnet TUI off by default (the
+same read-only console is served at `/console`, behind the `TUI_PASSWORD` login
+when one is set); secrets handled presence-only (never logged or echoed); and a
+supply chain held by SHA-pinned actions, a digest-pinned base image, a
+dependency-advisory gate and a CodeQL gate.
 
 ## License
 

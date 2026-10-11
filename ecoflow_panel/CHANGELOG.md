@@ -1,3 +1,17 @@
+## 1.187.16
+
+### Every change now needs permission; documentation reviewed
+
+**Security**
+
+- Two actions that worked without permission now require the same authorization as every other change: the Real / False / Failed buttons on a cleared alert, which also teach the add-on which alerts to trust, and asking the add-on to fetch past energy history from EcoFlow. Before, any device on the home network could do either. The buttons keep working when the dashboard is opened through Home Assistant.
+- The last three steps of the build and release workflows that referred to a tool by a version name that can move now refer to one exact, unchangeable version, like every other step.
+
+**Documentation**
+
+- The documentation was checked against the code: about 375 statements corrected, and the reference manual's configuration chapter, whose later sections had ended up after the appendix, put back in order.
+- Refreshed project overview, security policy and performance record. The security policy now describes the protections in detail: what can change a device setting and how each change is bounded, how the add-on is confined, and how releases are built.
+
 ## 1.187.15
 
 ### Tighter security confinement
