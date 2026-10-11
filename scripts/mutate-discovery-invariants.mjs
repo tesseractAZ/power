@@ -200,56 +200,7 @@ const MUTANTS = [
   },
 ];
 
-function run(files) {
-  execFileSync('npm', ['test', '--silent', '--', ...files], { cwd: SERVER, stdio: 'pipe' });
-}
-
-const originals = new Map();
-for (const m of MUTANTS) if (!originals.has(m.file)) originals.set(m.file, readFileSync(m.file, 'utf8'));
-
-let killed = 0;
-const survivors = [];
-console.log(`mutate-discovery-invariants: ${MUTANTS.length} mutants against ${SUBSET.join(' + ')}\n`);
-
-for (const m of MUTANTS) {
-  const original = originals.get(m.file);
-  const hits = original.split(m.find).length - 1;
-  if (hits !== 1) {
-    console.error(`\nABORT: anchor for "${m.id}" matched ${hits} times, expected exactly 1.`);
-    console.error('The source moved. Fix the anchor — do NOT report this run as green.');
-    for (const [f, s] of originals) writeFileSync(f, s);
-    process.exit(2);
-  }
-  try {
-    writeFileSync(m.file, original.replace(m.find, m.to));
-    let died = false;
-    try { run(SUBSET); } catch { died = true; }
-    if (!died) { try { run([]); } catch { died = true; } }
-    if (died) { killed++; console.log(`  KILLED   ${m.id}`); }
-    else { survivors.push(m); console.log(`  SURVIVED ${m.id}\n           ↳ ${m.why}`); }
-  } finally {
-    writeFileSync(m.file, original);
-  }
-}
-
-const unexpected = survivors.filter((s) => !s.expectSurvivor);
-const declared = MUTANTS.filter((m) => m.expectSurvivor);
-const declaredThatDied = declared.filter((m) => !survivors.includes(m));
-
-console.log(`\n${killed}/${MUTANTS.length} mutants killed (${declared.length} declared survivor(s))`);
-
-if (declaredThatDied.length) {
-  // A declared survivor that dies means the suite grew a constraint we did not
-  // know it had. That is good news, but the declaration is now a lie.
-  console.log('\nDECLARED SURVIVORS THAT WERE KILLED — remove the declaration:');
-  for (const m of declaredThatDied) console.log(`  - ${m.id}`);
-  process.exit(1);
-}
-
-if (unexpected.length) {
-  console.log('\nSURVIVORS — the suite does not constrain these behaviours:');
-  for (const s of unexpected) console.log(`  - ${s.id}\n      ${s.why}`);
-  process.exit(1);
-}
-
-console.log('\npost-run: tree restored');
+// Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs);
+// the verdict procedure per mutant (subset, then the full suite on a subset pass) is unchanged.
+import { runMutantsParallel } from './lib/mutateParallel.mjs';
+await runMutantsParallel({ name: 'mutate-discovery-invariants', mutants: MUTANTS, subset: SUBSET, root: REPO });

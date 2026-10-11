@@ -97,9 +97,12 @@ const MUTANTS = [
   },
   {
     id: 'xi. ★★★ a missing runway publishes the 999 "no depletion" sentinel',
-    file: MQTT,
-    find: '      runway_to_reserve_hours: runway ? runwayHoursForPublish(runway.hoursToReserve, runway.unavailable) : null,',
-    to: '      runway_to_reserve_hours: runwayHoursForPublish(runway?.hoursToReserve ?? null, runway?.unavailable ?? null), /* MUTANT */',
+    // v1.187.13 (harness) — re-pointed: since v1.187.10 a missing runway report is NOT READY in
+    // publishReadiness (its fields publish null), which made the old buildState anchor an equivalent
+    // mutant. The guard that now keeps a missing runway from reading as "plenty" is this rule.
+    file: resolve(REPO, 'server/src/publishReadiness.ts'),
+    find: '    runwayBasis: !!i.runway && i.runway.basisPending !== true,',
+    to: '    runwayBasis: i.runway?.basisPending !== true, /* MUTANT */',
     why: 'Data loss reads as "plenty of runway" to every HA automation comparing runway < threshold.',
   },
   {

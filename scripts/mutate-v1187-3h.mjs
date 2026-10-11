@@ -835,4 +835,5 @@ const MUTANTS = [
 // Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs);
 // the verdict procedure per mutant (subset, then the full suite on a subset pass) is unchanged.
 import { runMutantsParallel } from './lib/mutateParallel.mjs';
-await runMutantsParallel({ name: 'mutate-v1187-3h', mutants: MUTANTS, subset: SUBSET, root: REPO });
+// 6 workers: at 8 its restart cases intermittently fail the all-workers baseline (2026-10-10).
+await runMutantsParallel({ name: 'mutate-v1187-3h', mutants: MUTANTS, subset: SUBSET, root: REPO, concurrency: 6 });
