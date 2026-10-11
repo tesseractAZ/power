@@ -71,9 +71,10 @@ outside that boundary needs to reach it.
   require a login: 3 attempts per connection and at most 10 failures in 10 minutes
   across all sessions. Telnet carries that password in cleartext; on a shared LAN
   prefer `/console` through Ingress.
-- **CORS** lets the add-on's own origins, Home Assistant's and private-network
-  (`10.x`, `127.x`, `172.16–31.x`, `192.168.x`, `*.local`) origins read API
-  responses; other origins get no `Access-Control-Allow-Origin`.
+- **CORS** lets the add-on's own origins, Home Assistant's, and private-network or
+  loopback origins (`10.x`, `127.x`, `172.16–31.x`, `192.168.x`, single-label
+  `<name>.local`; any port or none) read API responses; other origins get no
+  `Access-Control-Allow-Origin`.
 - **Every POST, PUT and DELETE route requires write authorization**, and so do the
   three administrative reads (the write log, the add-on list and speaker
   discovery). Since v1.187.16 there is no exception: the alert-outcome and
@@ -187,8 +188,8 @@ never blocked).
   (and the README-claim check), the mutation-anchor check, the secrets scan, the
   advisory gate, the add-on config validator, the release-PR version check, the
   Docker smoke build, the documentation build and CodeQL. `main` is
-  branch-protected; its required status checks are the server and web
-  type-checks, the Docker smoke build, the documentation build and CodeQL.
+  branch-protected, and every one of those checks is a required status check
+  (fifteen in all, since 2026-10-11).
 
 ### Release integrity
 

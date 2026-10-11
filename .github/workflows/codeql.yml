@@ -13,9 +13,10 @@
 # `actions` is not filler: it scans the workflow files themselves, which matter
 # more now that three of them can tag, build and publish.
 #
-# ORDER OF OPERATIONS: land this, confirm it runs green, and only then turn off
-# default setup. Running both is merely duplicative, but a gap with neither is a
-# window where nothing is scanned.
+# Default setup has since been turned off (the code-scanning/default-setup API
+# reports "not-configured" as of v1.187.16), so this workflow is the only
+# CodeQL analysis: removing it without re-enabling default setup leaves the
+# repository unscanned.
 #
 # The repo is PUBLIC, so code scanning is available at no cost and results are
 # UPLOADED to the Security tab alongside the Dependabot alerts.
@@ -60,7 +61,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           languages: ${{ matrix.language }}
           queries: security-extended   # broader than default: more CodeQL-class rules
@@ -73,10 +74,10 @@ jobs:
               - server/test/**
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/autobuild@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
 
       - name: Perform CodeQL Analysis (uploads to the Security tab)
-        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           # `always` also writes the SARIF locally, so the artifact + the CI
           # gate below keep working.

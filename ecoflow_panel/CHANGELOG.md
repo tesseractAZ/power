@@ -1,3 +1,20 @@
+## 1.187.17
+
+### One version of each build tool; documentation corrections
+
+**Build and release**
+
+- Every build and release workflow now uses the same version of each GitHub Action. The checkout and file-upload steps had drifted two major versions apart between workflows, and the Docker test build still used versions that run on a retired Node.js runtime. A new check fails the build if a workflow drifts again, or if a step names a tool by a version label that can move.
+- The Docker test build no longer hands two comment lines to Docker as build settings.
+- The update instructions in each GitHub Release name the add-on as the store shows it (**Power**) and cover store installs.
+- CodeQL analysis 4.38.3. Also in this version: the server's WebSocket library 11.3.3 and the dashboard's build tools (Vite 8.3.4).
+
+**Documentation**
+
+- The project overview gives the home battery bank as nameplate capacity — three Cores of five packs, 92.16 kWh — rather than "usable", and notes the two bench Cores are not part of it.
+- The security policy, project overview and reference manual state that every CI check is required before a change can merge.
+- Comments in the build workflows, and the description of which browser origins the add-on accepts (private-network hosts on any port), corrected to match what they describe.
+
 ## 1.187.16
 
 ### Every change now needs permission; documentation reviewed
