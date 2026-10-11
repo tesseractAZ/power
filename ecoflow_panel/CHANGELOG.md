@@ -1,3 +1,11 @@
+## 1.187.15
+
+### Tighter security confinement
+
+**Security**
+
+- The add-on's AppArmor security profile now grants only what the add-on actually uses: two system capabilities instead of ten, network access limited to the ordinary connection types it needs, and more system folders protected from being changed. Nothing the add-on does is affected; the narrowed profile was tested on the running system and on an isolated copy before release.
+
 ## 1.187.14
 
 ### Fewer cell-imbalance notifications while the batteries fill
