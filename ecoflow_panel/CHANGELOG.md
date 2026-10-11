@@ -1,3 +1,29 @@
+## 1.187.18
+
+### Real pack counts and pool size; reports rebuilt after a half-loaded start; a stricter release pipeline
+
+**Dashboard and engines**
+
+- A Core's card shows one tile per pack it actually holds. A Core with no direct readings (for example after a restart while it is offline) no longer shows five made-up pack tiles; it shows one line saying pack detail needs the Core's WiFi.
+- After a restart, reports such as battery wear, charging curves and pack risk are no longer built from whichever Core reported first and then reused for up to an hour. They are rebuilt as the rest of the system arrives, and Home Assistant's battery-wear sensors read "unknown" for those first moments instead of wrong numbers (after the 1.187.17 restart they showed 4 packs of 24 for half an hour).
+- The forecast's uncertainty band uses the real size of the home battery bank instead of a guess that also counted the bench Cores.
+- The battery-dispatch suggestion answers "not available" when the panel's battery readings cannot be trusted, instead of planning for a made-up 60 kWh battery at half charge.
+- The alert help text no longer says every pack has four siblings (one Core has four packs).
+
+**Build and release**
+
+- Every change to the main branch is checked against the published releases. A new version is published whatever the merge is titled, and a step back to an older version, a reused version number or a malformed version shows up as a failed run instead of being offered quietly to Home Assistant.
+- The release pull-request check looks at what actually changes when the pull request merges, and runs again when its title is edited.
+- The build machines are pinned to Ubuntu 24.04, so GitHub's switch to Ubuntu 26.04 from 19 October happens only when chosen (a trial run on 26.04 passed every check). The image build no longer downloads an emulator it never used.
+
+**Documentation**
+
+- The project overview no longer says the packs' measured capacity matches their rating: they measure 94.4 % of nameplate today, recorded with its date in the performance record.
+
+**Dependencies**
+
+- CI: setup-buildx-action 4.4.1, build-push-action 7.4.0, upload-artifact 7.0.2.
+
 ## 1.187.17
 
 ### One version of each build tool; documentation corrections
