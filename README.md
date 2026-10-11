@@ -274,35 +274,42 @@ Every configuration option is documented in
 | `Dockerfile`, `build.yaml`, `repository.yaml` | Container build, digest-pinned per-arch base images, add-on repository manifest |
 | `scripts/` | Docs builder (`build-docs-docx.py`); CI gates (`check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the mutation harnesses (`mutate-*.mjs`); device probes |
 | `docs/` | `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
-| `.github/workflows/` | `ci.yml` (type-checks ×3, server tests + README-claim check, mutant-anchor check, personal-data scan, dependency advisories, release-PR version check, add-on config/translation validation, Dockerfile smoke, docs `.docx`+`.pdf`) · `tag-release.yml` (tags a `Release …` merge) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch) · `codeql.yml` (CodeQL analysis). |
+| `.github/workflows/` | `ci.yml` (type-checks ×3, server tests + README-claim check, mutant-anchor check, personal-data scan, dependency advisories, add-on config/translation validation, Dockerfile smoke, docs `.docx`+`.pdf`) · `release-pr.yml` (release-PR version check, re-run on a title edit) · `tag-release.yml` (on every push to `main`: tags the version the add-on manifest declares, or fails when it cannot be published) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch) · `codeql.yml` (CodeQL analysis). Every job runs on a pinned runner image (`ubuntu-24.04`, `ubuntu-24.04-arm`). |
 
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 4,119 tests
+cd server && npm install && npm test     # 4,162 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
 ```
 
 **Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` →
-open a PR whose squash subject starts `Release vX.Y.Z …`. `main` is branch-
+open a PR titled `Release vX.Y.Z …` (for a one-commit PR, its commit subject too: GitHub's
+squash merge lands a one-commit PR with the commit's subject, not the title). `main` is branch-
 protected. CI runs the three type-checks (server, web, server tests), the test suite, the
 mutation-harness anchor check, the secrets scan, the dependency-advisory gate, the add-on
 config/translation validator, the Dockerfile smoke build, the docs `.docx`+`.pdf` build and
 CodeQL on every pull request, and every one of them (with the release-PR version check below) is a
 required status check on `main`. Every engine change also clears an **adversarial multi-agent review** before it
-can reach the alarm path. Merging
-a `Release …` subject fires `tag-release.yml`, which creates the `vX.Y.Z` tag and
-dispatches `images.yml` — that workflow runs the test suite, builds the multi-arch GHCR
-image and cuts a GitHub Release (with the docs attached); the add-on then updates
-in place. Full runbook in DOCS.md ch.12.
+can reach the alarm path. Home Assistant offers whatever version `config.yaml` declares on
+`main` (a lower one too, as a downgrade), so `tag-release.yml` runs on **every** push to `main`:
+when that version is new and above every `vX.Y.Z` tag it creates the tag and dispatches
+`images.yml` — that workflow runs the test suite, builds the multi-arch GHCR image and cuts a
+GitHub Release (with the docs attached); the add-on then updates in place. Full runbook in DOCS.md
+ch.12.
 
-⚠️ **`tag-release.yml` is paths-filtered on `ecoflow_panel/config.yaml`.** A release PR that
-forgets the version bump does not fail — the workflow is never evaluated, so there is no tag, no
-image and no Release, while every check on `main` stays green. `scripts/check-release-pr.py`
-(CI job *"Release PR declares the version it names"*) now fails any `Release vX.Y.Z` PR whose
-`config.yaml` version or CHANGELOG section does not match the title.
+The release-PR check (`release-pr.yml`, `scripts/check-release-pr.py`, the required check *"Release
+PR declares the version it names"*) compares the version before and after GitHub's test merge. It
+fails a version change under any title but `Release v<new>`, a `Release vX` title (or one-commit
+subject) that changes no version or names another one (v1.130.0 merged that way and released nothing), a downgrade, a reused or lower version
+than the highest tag, a version that is not `X.Y.Z`, and a missing CHANGELOG section. An admin
+merge can bypass required checks, so after the merge `tag-release.yml` fails the cases it can see
+from `main` as a red run: a `Release vX` merge that changed no version, a reused number, and a
+version it cannot tag. While `main` declares an older release than the newest one (a revert), every
+push and dispatch is red until `main` moves above it. A bump merged under another subject is still
+tagged, with a warning.
 
 ## Quality & accuracy
 
@@ -328,7 +335,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **92 harnesses** (`scripts/mutate-*.mjs`) holding **1874
+regression. There are **93 harnesses** (`scripts/mutate-*.mjs`) holding **1930
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that

@@ -8638,7 +8638,7 @@ Sources of truth cited throughout:
 - `server/src/auth.ts` — write-auth gate, CORS allow-list, token bootstrap
 - `server/src/ecoflow/commands.ts`, `server/src/writeLog.ts` — write-debug lockdown + audit log
 - `ecoflow_panel/apparmor.txt` — the LSM confinement profile
-- `.github/workflows/{ci,codeql,release,tag-release,images}.yml` — CI, the CodeQL gate and the release/publish pipeline
+- `.github/workflows/{ci,codeql,release-pr,release,tag-release,images}.yml` — CI, the CodeQL gate, the release-PR check and the release/publish pipeline
 - `Dockerfile`, `build.yaml`, `repository.yaml` — image build + add-on repository manifest
 
 ---
@@ -9087,6 +9087,14 @@ pinned the last three floating tags: `actions/setup-node` in `ci.yml`'s advisory
 `actions/checkout` in `release.yml` and `tag-release.yml`, the two workflows with write
 permissions.
 
+**Every job runs on a pinned runner image** (`ubuntu-24.04`, and `ubuntu-24.04-arm` for the
+aarch64 image build), never `ubuntu-latest`. GitHub moves `ubuntu-latest` to Ubuntu 26.04 in a
+rollout from 2026-10-19 to 2026-11-19 (actions/runner-images#14748); that one move would change
+python3, Docker, the docs jobs' pandoc and LibreOffice, possibly coreutils, and CodeQL's platform
+(its supported list names only Ubuntu 22.04 and 24.04), under every job at once. Moving to a newer
+image is a one-commit label change, made deliberately. `server/test/workflowRunners.test.ts` fails
+on a `-latest` label, a quoted or matrix `-latest` runner, and a job without `runs-on`.
+
 ---
 
 ### Release & publish pipeline
@@ -9101,14 +9109,17 @@ squash-commit is GitHub-web-flow-signed.
 Trigger from **Actions → Release → Run workflow**. Inputs: `bump` (patch/minor/major, default
 patch), `version` (explicit override), `notes` (markdown; auto-generated from the commit log
 since the previous tag if empty). It:
-1. Parses the current `version:` from `config.yaml`; computes the next semver (refuses if
-   `vX.Y.Z` tag already exists — idempotent).
+1. Parses the current `version:` from `config.yaml` and computes the next version from the
+   higher of that and the highest strict `vX.Y.Z` tag (a tag can sit above `main`'s version).
+   It refuses a version that is not strict `X.Y.Z`, is already tagged, or is not above both, so
+   re-runs are idempotent.
 2. Builds release notes.
 3. `sed`-bumps `version:` in `ecoflow_panel/config.yaml` and prepends a
    `## <version> — <date>` section to `ecoflow_panel/CHANGELOG.md`.
-4. Opens PR `release/vX.Y.Z` → `main` with commit subject **`Release vX.Y.Z`** and enables
-   `--squash --auto --delete-branch`. (The branch commit is unsigned; only the signed squash
-   commit lands on main.)
+4. Commits, runs `scripts/check-release-pr.py` with `BASE_REV=origin/main` (CI does not run on a
+   PR opened with `GITHUB_TOKEN`), then opens PR `release/vX.Y.Z` → `main` with commit subject
+   **`Release vX.Y.Z`** and enables `--squash --auto --delete-branch`. (The branch commit is
+   unsigned; only the signed squash commit lands on main.)
 
 #### Step 2 — CI checks gate the PR
 
@@ -9122,10 +9133,23 @@ since the previous tag if empty). It:
 - `Validate add-on config + translations`.
 - `Dockerfile smoke build (amd64)`.
 - `Build documentation (.docx + .pdf)`.
-- On a pull request only: `Release PR declares the version it names` (`scripts/check-release-pr.py`).
+
+`release-pr.yml` runs on every pull request to `main` (`opened`, `synchronize`, `reopened` and
+`edited`, so a title edit re-runs it): `Release PR declares the version it names`
+(`scripts/check-release-pr.py`). It checks out with `fetch-depth: 0` and compares the version in
+`config.yaml` before and after GitHub's test merge (`HEAD^1` against `HEAD`), so a branch cut
+before the last release is not read as a downgrade. It fails: a version change under a title other
+than `Release v<new>`; a `Release vX` title that changes no version (v1.130.0, or a second release
+PR racing one that already merged); for a one-commit PR, a commit subject starting `Release v` that
+names another version or changes none (the repository's squash default lands a one-commit PR with
+its commit's subject, not the title, and `tag-release.yml` judges that subject); a version that is not strict `X.Y.Z` or is declared twice; a
+downgrade; a version already tagged or below the highest strict tag; and a missing CHANGELOG
+section, matched with `images.yml`'s exact `^## v?X\b`. It fails closed when `HEAD` is not a merge
+commit, unless `BASE_REV` names the revision to compare against (as `release.yml` does). The job
+ran in `ci.yml` until v1.187.17; its name, the required check's context, is unchanged.
 
 Required before a merge: since 2026-10-11 branch protection on `main` requires every check above — the
-eleven `ci.yml` checks (the type-check job runs for server and web), `codeql.yml`'s three `Analyze (…)` jobs and the `CodeQL` result, fifteen in all
+ten `ci.yml` checks (the type-check job runs for server and web), `release-pr.yml`'s release-PR check, `codeql.yml`'s three `Analyze (…)` jobs and the `CodeQL` result, fifteen in all
 (branch protection's `strict` is off). The `BranchAuth` ruleset also requires `CodeQL`, and its status-check
 rule requires the branch to be up to date with `main`; repository admins may bypass the ruleset. A job
 that is renamed or removed must have its old name replaced or removed in that list, or every pull
@@ -9135,35 +9159,78 @@ request waits on a check that never reports; a new job is not required until it 
 It fails on an `error`-level result or a `security-severity` ≥ 7.0 (`.github/scripts/check-sarif.mjs`).
 `images.yml`'s `test` job re-runs the suite on the tag.
 
-#### Step 3 — `tag-release.yml` (post-merge)
+#### Step 3 — `tag-release.yml` (post-merge reconciler)
 
-Triggers on `push` to `main` touching `ecoflow_panel/config.yaml`, **gated by
-`if: startsWith(github.event.head_commit.message, 'Release v')`**. So the squash-merge subject
-**must start with `Release v`** — this is why `release.yml` titles the PR/commit `Release vX.Y.Z`.
-It parses the version, creates an annotated tag `vX.Y.Z` (idempotent — skips if the tag exists),
-pushes it, then **`gh workflow run images.yml -f version=X.Y.Z`**. (A tag pushed with the default
-`GITHUB_TOKEN` won't trigger other workflows due to GitHub's recursion guard, so it dispatches
-`images.yml` explicitly.) Permissions: `contents: write`, `actions: write`.
+Home Assistant offers whatever `version:` `config.yaml` declares on `main`, and a lower version is
+offered too: Supervisor's `need_update` is `version != latest_version`, and auto-update installs it.
+`tag-release.yml` therefore runs on **every** push to `main` (no paths filter, no subject gate) and
+on `workflow_dispatch`, one run at a time (`concurrency: tag-release`, `cancel-in-progress: false`,
+`queue: max`). Event data reaches its script only through `env` (`BEFORE`, `HEAD_MSG`,
+`EVENT_NAME`). The script first re-fetches `main` and every tag, because `actions/checkout` forces
+`origin/main` to the run's own commit and runs can execute out of order. It then decides, in order:
+
+1. The commit is not on `main` (a dispatch from another branch), or `config.yaml` declares a
+   version that is not strict `X.Y.Z` or declares it twice → red run.
+2. The subject starts `Release vX` but the push did not change the version → red run (the run
+   continues, and still tags or re-dispatches what it should).
+3. `main` has since moved to another version → notice, exit 0 (that push's run reconciles it).
+4. `vV` is already tagged: at this commit or a later commit on `main` → fine; off `main` → red run.
+   At an earlier commit it is judged on the state: while a higher strict tag exists (`main` was
+   reverted to an older release, which HA offers as a downgrade) every push and dispatch is red until
+   `main` moves above it; and a push from another released version to it (a reused number) is red.
+   Leaving a version that was never tagged (a pre-release spelling, or a release whose run was
+   superseded) for the released one is not. If it has no GitHub Release, a re-run
+   (`GITHUB_RUN_ATTEMPT` > 1) or a manual dispatch re-dispatches `images.yml`; a first attempt only
+   warns, since `images.yml` may still be running. Only a 404 from the Release lookup
+   (`gh api repos/…/releases/tags/vV`) counts as no Release; any other lookup failure is a red run,
+   never a re-dispatch that would rebuild a sealed version's images.
+5. `vV` is untagged and not above the highest strict tag → red run, nothing tagged.
+6. Otherwise it creates the annotated tag and pushes it, then
+   **`gh workflow run images.yml -f version=X.Y.Z`**. It tags this commit when the push changed the
+   version; otherwise (a lost run, or a dispatch) it tags the commit that brought the version to
+   `main`, found by a first-parent walk. A bump under a subject other than `Release vX` is tagged
+   with a warning; a subject naming another version is a red run after tagging.
+
+An ordinary push (version unchanged, tagged and released) is a no-op. A tag pushed with the default
+`GITHUB_TOKEN` won't trigger other workflows (GitHub's recursion guard), so it dispatches
+`images.yml` explicitly, after the tag push. Permissions: `contents: write`, `actions: write`;
+`timeout-minutes: 10`. Before this, the workflow ran only for a push that touched `config.yaml`
+with a subject starting `Release v`: a bump merged under another subject (v0.54.1) was never
+tagged (its Release was made by hand), and a `Release v` merge without the bump (v1.130.0) was
+never evaluated.
+`server/test/tagRelease.test.ts` and `tagReleaseEdges.test.ts` run the script in temporary
+repositories against a stub `gh`; `releasePrCheck.test.ts` runs `check-release-pr.py` against real
+test merges (harness `scripts/mutate-v1187-18r.mjs`).
 
 #### Step 4 — `images.yml` (build + publish + release)
 
 Triggers on `v[0-9]+.[0-9]+.[0-9]+` tag push, or manual `workflow_dispatch` with a `version`
-input. Jobs:
-1. **resolve** — validate/normalize the version.
+input. Its run name carries the version, and one run per version executes at a time
+(`concurrency: images-vX.Y.Z`, `cancel-in-progress: false`), so a re-dispatch cannot race a running
+build to `gh release create`. Jobs:
+1. **resolve** — validate/normalize the version: strict `X.Y.Z`, as `tag-release.yml` tags.
 2. **test** — checkout the tag, `npm ci`, `npm test`, `tsc --noEmit` on the server.
 3. **build** (matrix aarch64 + amd64, each on its **native** runner: `ubuntu-24.04-arm` /
    `ubuntu-24.04` — no QEMU emulation, ~3 min vs 30–60 min) — buildx build + push to
    `ghcr.io/<owner>/{arch}-ecoflow-panel` as both `:{version}` and `:latest`. Base images
    digest-pinned. GHA cache uses `ignore-error=true` so a flaky cache backend can't fail a release.
-   The QEMU and Buildx setup steps each get one retry after a 30 s pause, and a second failure fails
-   the job (v1.187.12). Before that, a failed Docker Hub token fetch failed the amd64 job before it
-   built, so the release job was skipped.
+   There is no QEMU step: nothing runs a foreign-arch binary, and it only pulled `tonistiigi/binfmt`
+   from Docker Hub on every job (`server/test/workflowNativeBuild.test.ts` fails if a matrix entry
+   pairs a platform with the other arch's runner, or if the step returns). The Buildx setup step
+   gets one retry after a 30 s pause, and a second failure fails the job: on the v1.187.12 release
+   run (2026-10-10) a Docker Hub token timeout failed the amd64 job before it built, so the release
+   job was skipped. On that run the `binfmt` pull recovered on its own retry; `setup-buildx-action`
+   v4.1.0 pulled `moby/buildkit` once and failed. From v4.4.0 (now pinned) that action
+   pre-pulls the BuildKit image itself, up to five attempts on a transient registry error, inside
+   the outer retry. The build step still resolves its Dockerfile frontend and `node:22-alpine` from
+   Docker Hub without a retry.
 4. **release** — extract the version's `CHANGELOG.md` section and `gh release create` the
    GitHub Release (skipped if it already exists). The section header may be `## X.Y.Z` or
    `## vX.Y.Z`; if there is no section, the job fails instead of publishing a placeholder. The
-   Release is marked Latest only when its tag is the highest `v*` tag (`--latest=false` otherwise;
-   GitHub decides if the lookup fails), so re-running an older version's release cannot demote a
-   newer one. **The Release appearing = "go ahead and update the Pi."**
+   Release is marked Latest only when its tag is the highest strict `vX.Y.Z` tag, compared as
+   numbers (`--latest=false` otherwise; GitHub decides if the lookup fails), so re-running an older
+   version's release cannot demote a newer one, and a stray `v1.2.3-rc1` (which `sort -V` ranked
+   above `v1.2.3`) does not count. **The Release appearing = "go ahead and update the Pi."**
    Permissions: `contents: write`, `packages: write`. The printable documentation (.docx and
    .pdf) is built first and attached at creation; those steps are best-effort
    (`continue-on-error`) and **bounded** (v1.187.3): each has `timeout-minutes` (pandoc 6,
@@ -9190,12 +9257,13 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
 **Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, open **Power**, click **Update**
 (HA reads the bumped `version:` from `config.yaml` on `main` and drives the update-entity).
 
-> Merge the release PR with a subject that **starts `Release vX.Y.Z`** (the `tag-release.yml`
-> gate). A `Release v` subject whose version does not parse tags nothing. CI's `Release PR
-> declares the version it names` check (`scripts/check-release-pr.py`) fails a release PR that
-> lacks the `config.yaml` bump or the CHANGELOG section. Without that check, a merge missing the
-> bump would pass silently, because `tag-release.yml` is path-filtered on `config.yaml` and would
-> never run.
+> Title the release PR `Release vX.Y.Z …` with the version above every `vX.Y.Z` tag (and, for a
+> one-commit PR, give the commit the same subject: its squash merge lands with it);
+> `release-pr.yml` fails it otherwise, or when the CHANGELOG section is missing. Whatever lands,
+> `tag-release.yml` runs on the push and tags what `config.yaml` declares, or fails the run when
+> that version cannot be published: HA already offers it, so a red `tag-release` run on `main` is
+> a production event, not a cosmetic one. A bump merged under another subject is still tagged (with
+> a warning). To recover a lost dispatch, re-run the `tag-release` job or dispatch it by hand.
 
 ---
 

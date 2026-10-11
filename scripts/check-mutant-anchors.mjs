@@ -69,9 +69,10 @@ for (const h of harnesses) {
     // v1.187.3 — `.yml` / `.yaml` too: mutate-v1187-3i.mjs mutates the release workflow's
     // timeouts, and an anchor in a file this list cannot see would read as 0 matches.
     // v1.187.16 — `.txt` too: mutate-v1187-15.mjs mutates ecoflow_panel/apparmor.txt.
+    // `.py` too: mutate-v1187-18r.mjs mutates scripts/check-release-pr.py.
     ...[...src.matchAll(/resolve\((?:REPO|ROOT),\s*'([^']+)'\)/g)]
       .map((m) => m[1])
-      .filter((rel) => rel.includes('/') && /\.(ts|tsx|mjs|js|ya?ml|txt)$/.test(rel))
+      .filter((rel) => rel.includes('/') && /\.(ts|tsx|mjs|js|ya?ml|txt|py)$/.test(rel))
       .map((rel) => join(ROOT, rel)),
   ];
   if (targets.length === 0) { console.log(`  skip   ${h} (no resolvable target)`); continue; }
