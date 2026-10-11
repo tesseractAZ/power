@@ -37,7 +37,7 @@ export function resetVdiffWarnHoldForTesting(): void {
   heldVdiffWarnKeys.clear();
   vdiffKneeByKey.clear(); // v1.187.0 — the end-of-charge knee state is per-pack vdiff state too
 }
-import { VOL_DIFF_CRIT_MV, VOL_DIFF_PLATEAU_SOC_PCT, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, vdiffCritMvFor, topOfChargeQuietSpread } from './cellSpread.js';
+import { VOL_DIFF_CRIT_MV, VOL_DIFF_PLATEAU_SOC_PCT, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, vdiffCritMvFor, topOfChargeQuietSpread, plateauQuietWarnSpread } from './cellSpread.js';
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, housePoolFallbackSoc, shp2Panels, findShp2, secondaryPanels, panelMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import { mpptProducing } from './mppt.js';
@@ -1785,7 +1785,8 @@ export function computeAlerts(
         // re-arms below 85%) and the peer/SoH engines track it independently.
         // Warn-band spread on a >= 95% pack stays VISIBLE but does not push.
         // v1.187.0 — the same predicate (cellSpread.ts) now gates the peer outlier's audible.
-        const plateauQuietWarn = topOfChargeQuietSpread(packSoc, pk.maxVolDiffMv);
+        // v1.187.14 — the warning's push quiets from the plateau (85%), not only from 95%.
+        const plateauQuietWarn = plateauQuietWarnSpread(packSoc, pk.maxVolDiffMv);
         const plateauNote = (plateauBenign || plateauQuietWarn) ? ' Expected top-of-charge cell spread.' : '';
         // v1.187.0 — the mute carries its reason; balancing names first (the only one a critical can have).
         const annun = (balancing || plateauBenign || plateauQuietWarn)

@@ -1,3 +1,11 @@
+## 1.187.14
+
+### Fewer cell-imbalance notifications while the batteries fill
+
+**Alarms**
+
+- A cell-imbalance **warning** no longer sends a phone notification while a pack is above 85% charge. Charging toward full takes every pack through a range where cell voltages naturally spread; on October 10 a top-up sent nine of these notifications in half an hour. The warning still shows on the dashboard, and below 85% it still notifies you. A **critical** cell imbalance still notifies and is announced at any charge level.
+
 ## 1.187.13
 
 ### APS holidays are priced off-peak all day

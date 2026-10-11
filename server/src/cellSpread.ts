@@ -42,3 +42,13 @@ export function vdiffCritMvFor(packSoc: number | null | undefined): number {
 export function topOfChargeQuietSpread(packSoc: number | null | undefined, spreadMv: number): boolean {
   return packSoc != null && packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT && spreadMv < vdiffCritMvFor(packSoc);
 }
+
+/** v1.187.14 — the WARNING-level spread's push quiets on the plateau (>= VOL_DIFF_PLATEAU_SOC_PCT,
+ *  85%), not only at the top of charge (95%). A charge toward full puts every pack through the LFP
+ *  plateau, and on 2026-10-10 a manual top-up pushed nine warn-band spreads across three Cores
+ *  within 30 min while the packs climbed through 85-95%. The warning stays visible (and has not
+ *  been voiced since v1.187.12); the critical line is untouched and still pushes and sounds.
+ *  Below the plateau (the morning reversal on the same two packs) the warning still pushes. */
+export function plateauQuietWarnSpread(packSoc: number | null | undefined, spreadMv: number): boolean {
+  return packSoc != null && packSoc >= VOL_DIFF_PLATEAU_SOC_PCT && spreadMv < vdiffCritMvFor(packSoc);
+}
