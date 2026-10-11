@@ -1,47 +1,54 @@
 #include <tunables/global>
 
-# v0.9.44 — AppArmor profile for the EcoFlow Panel add-on.
+# AppArmor profile for the Power add-on (slug ecoflow_panel). First added in
+# v0.9.44; narrowed in v1.187.15 to what the add-on was seen to use.
 #
 # Home Assistant Supervisor loads this file as the LSM profile for the
-# container. Beyond bumping the security rating, it provides
-# defense-in-depth: even if a Fastify endpoint is exploited (e.g., the
-# v0.9.6 write-command framework or the v0.9.32 TTS debug endpoints),
-# the attacker is confined to the file/network/capability set granted
-# here.
+# container (renamed to the installed slug, <repository-hash>_ecoflow_panel).
+# Beyond bumping the security rating, it provides defense-in-depth: even if a
+# Fastify endpoint is exploited (e.g., the v0.9.6 write-command framework or
+# the v0.9.32 TTS debug endpoints), the attacker is confined to the
+# file/network/capability set granted here.
 #
-# Permissive enough for our runtime:
-#   - Node 22 + npm + s6-overlay init system
-#   - Fastify HTTP + WebSocket + telnet (ports 8787, 2323)
-#   - SQLite recorder.db + JSONL writes under /data
-#   - Outbound HTTPS to api-a.ecoflow.com + Open-Meteo + NWS
-#   - Inbound HTTP from HA Core + LAN (HomePods/Sonos fetching audio)
-#   - Outbound to http://supervisor/* for HA Core + Supervisor APIs
-#   - MA TTS proxy URL fetches from /api/tts_proxy/*
+# Permissive enough for the runtime:
+#   - Node 22 + s6-overlay init system; every process runs as root and no
+#     service switches user
+#   - Fastify HTTP + WebSocket on 8787, telnet on 2323 when enabled
+#   - SQLite database + JSONL writes under /data, the optional snapshot to /share
+#   - Outbound EcoFlow MQTT (8883), HA's MQTT broker (1883), HA/Supervisor
+#     (http://supervisor, 80), HTTPS (EcoFlow, Open-Meteo, NWS) and Wyoming TCP
+#   - Inbound HTTP from HA Core + LAN (speakers fetching alarm audio)
 #
 # Restrictive enough to deny:
-#   - kernel module loading, mount, ptrace, raw IO, sysrq
-#   - reading /etc/shadow, /root/**, /etc/ssh/**
+#   - every capability except chown and dac_override; kernel module loading,
+#     mount, ptrace, raw IO, sysrq
+#   - raw and packet sockets (only the socket families in use are allowed)
+#   - reading /etc/shadow, /etc/gshadow, /root/**, /home/**, /etc/ssh/**
 #   - writing to /proc/sys/* or /sys/** (host kernel tunables)
+#   - writing to the code, system and config directories (write-locks below)
 #
-# If the add-on misbehaves after this profile lands, the first thing to
-# check is /var/log/audit/audit.log on the host (Pi) — denied operations
-# log there with "type=AVC". Add corresponding rules below and rebuild.
+# If the add-on misbehaves after a profile change, check the host's audit
+# journal (`journalctl _TRANSPORT=audit` on the HAOS host — not
+# /var/log/audit/audit.log, not dmesg). An explicit `deny` rule is silent;
+# only an `audit deny` rule, or an operation no allow rule covers, is logged.
+# Profile a change in complain mode first, and compile it fresh
+# (`apparmor_parser -T -Q -K`) before shipping.
 
 profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
 
   # ─── Capabilities ──────────────────────────────────────────────────
-  # Allow binding to privileged ports (8787 and 2323 are unprivileged
-  # but s6-overlay needs net_bind_service for some pre-start tasks),
-  # plus setuid/setgid for the s6 user-switching dance.
   # v1.187.15 — the capability ALLOW LIST from the 2026-10-11 review (complain-mode profiling of
-  # a running instance and an isolated boot): only what the add-on was seen to use.
+  # a running instance and an isolated boot): only what the add-on was seen to use. The
+  # earlier list (net_bind_service, setuid, setgid, dac_read_search, fowner, fsetid, kill,
+  # sys_chroot) granted capabilities nothing used: both ports are unprivileged, and no
+  # service switches user.
   capability chown,
   capability dac_override,
 
-  # Explicitly DENY the dangerous capabilities. AppArmor's default is
-  # "allow if not denied" — but these are worth calling out so any
-  # future change to the profile doesn't silently enable them.
+  # Explicitly DENY the dangerous capabilities. Anything not allowed above is
+  # already refused; an explicit deny also wins over any allow rule added later,
+  # so a future change to the profile cannot silently enable them.
   deny capability sys_admin,
   deny capability sys_module,
   deny capability sys_rawio,
@@ -68,10 +75,11 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # deny rules on the code/binary/library dirs in the deny section below (see the
   # `deny /app|/usr|/bin|/sbin|/lib|/lib64|/init … wl,` block). That closes the
   # dominant CWE-732 vector (persisting/tampering via WRITE) with zero read-denial
-  # risk. STILL DEFERRED (needs a host audit.log boot-test, never inspection):
-  # full READ-confinement (dropping `file,`) and write-locking the s6 init trees
-  # (/command, /package) + /etc — their failure mode is an invisible init
-  # crash-loop, so they can't be verified by the add-on-log EACCES method.
+  # risk. v1.187.15 write-locked the s6 init trees (/command, /package) and /etc
+  # as well, after a complain-mode boot test showed nothing writes them (see the
+  # deny section). STILL DEFERRED: full READ-confinement (dropping `file,`) —
+  # its failure mode is an invisible init crash-loop, which the add-on log
+  # cannot show.
   file,
   signal,
   # v1.187.15 — the socket families in use: TCP and UDP (DNS) over IPv4/IPv6, unix (s6's
@@ -83,7 +91,8 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   network unix,
   network netlink raw,
 
-  # s6-overlay init system (HA base image uses s6).
+  # s6-overlay init system (HA base image uses s6). The `w` in the rwix grants
+  # on /etc/* and /command below is subtracted by the v1.187.15 write-locks.
   /init ix,
   /bin/** ix,
   /usr/bin/** ix,
@@ -188,9 +197,9 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # rename-into and unlink; `l` blocks planting a hardlink under a code dir.
   # m/r/i/x/k are untouched, so .so/.node executable-mmap load + exec still work.
   # This shuts the dominant CWE-732 vector: a compromised Fastify/telnet/TTS
-  # process persisting a restart-surviving backdoor. chmod/chown/utimes are
-  # capability-mediated (chown/fowner/fsetid, granted above), NOT `w`-mediated, so
-  # s6 fix-attrs is unaffected.
+  # process persisting a restart-surviving backdoor. chown is capability-mediated
+  # (granted above), NOT `w`-mediated, so s6 fix-attrs is unaffected; fowner and
+  # fsetid were dropped in v1.187.15 after profiling showed no use.
   #
   # ★★v1.9.1 — the mask is `wl`, NOT `wal`. The append bit `a` and write bit `w`
   # are MUTUALLY EXCLUSIVE in a single apparmor rule on the stricter parser HAOS
@@ -202,11 +211,11 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # DOWN until hot-patched). NEVER combine `a` with `w`; validate any mask change
   # with `apparmor_parser -T -Q` (fresh, cache-skipping) before shipping.
   #
-  # NOTE: /command + /package (s6 init trees, currently `rwix`) are intentionally
-  # NOT denied here — a mistaken denial in those PID1 trees is an INVISIBLE init
-  # crash-loop (the v1.7.0 symptom) that the add-on-log verification can't catch;
-  # tightening them requires a host audit.log boot-test, deferred. /etc stays
-  # writable (s6 needs /etc/{cont-init,services,cont-finish}.d) — also audit-driven.
+  # /command, /package (the s6 PID1 trees) and /etc were left writable until
+  # v1.187.15: a mistaken denial there is an INVISIBLE init crash-loop (the v1.7.0
+  # symptom) that the add-on log cannot show. The 2026-10-11 review loaded these
+  # locks as `audit deny` in complain mode on the running add-on and on an isolated
+  # boot; no write was recorded, so they are write-locked below.
   deny /app/{,**} wl,
   deny /usr/{,**} wl,
   deny /bin/{,**} wl,
