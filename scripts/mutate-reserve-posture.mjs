@@ -83,28 +83,7 @@ const MUTANTS = [
   },
 ];
 
-function run(files) { execFileSync('npm', ['test', '--silent', '--', ...files], { cwd: SERVER, stdio: 'pipe' }); }
-const originals = new Map([[ALERTS, readFileSync(ALERTS, 'utf8')], [ACT, readFileSync(ACT, 'utf8')]]);
-const restore = () => { for (const [f, s] of originals) writeFileSync(f, s); };
-
-let killed = 0; const survivors = [];
-console.log(`mutate-reserve-posture: ${MUTANTS.length} mutants against ${SUBSET.join(' + ')}\n`);
-try {
-  for (const m of MUTANTS) {
-    const original = originals.get(m.file);
-    const hits = original.split(m.find).length - 1;
-    if (hits !== 1) {
-      console.error(`\nABORT: anchor for "${m.id}" matched ${hits} times, expected exactly 1.`);
-      restore(); process.exit(2);
-    }
-    writeFileSync(m.file, original.replace(m.find, m.to));
-    let died = false;
-    try { run(SUBSET); } catch { died = true; }
-    if (died) { killed++; console.log(`  KILLED   ${m.id}`); }
-    else { survivors.push(m); console.log(`  SURVIVED ${m.id}\n           -> ${m.why}`); }
-    restore();
-  }
-} finally { restore(); }
-
-console.log(`\nmutate-reserve-posture: ${killed}/${MUTANTS.length} killed`);
-if (survivors.length) { console.log('\nSURVIVORS:'); for (const s of survivors) console.log(`  - ${s.id}`); process.exit(1); }
+// Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs);
+// the verdict procedure per mutant is unchanged.
+import { runMutantsParallel } from './lib/mutateParallel.mjs';
+await runMutantsParallel({ name: 'mutate-reserve-posture', mutants: MUTANTS, subset: SUBSET, root: REPO, fullSuite: false });

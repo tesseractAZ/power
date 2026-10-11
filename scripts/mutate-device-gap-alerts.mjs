@@ -192,54 +192,7 @@ const MUTANTS = [
 // `npm test -- <files>` APPENDS the files to the package's own test/**/*.test.ts glob,
 // so it runs the whole suite. The subset is run directly; the full suite only for a
 // mutant the subset did not kill.
-function runSubset() {
-  execFileSync('node', ['--import', 'tsx', '--test', ...SUBSET], { cwd: SERVER, stdio: 'pipe' });
-}
-function runAll() {
-  execFileSync('npm', ['test', '--silent'], { cwd: SERVER, stdio: 'pipe' });
-}
-
-const originals = new Map();
-for (const m of MUTANTS) if (!originals.has(m.file)) originals.set(m.file, readFileSync(m.file, 'utf8'));
-
-// Pre-flight every anchor before any test runs: anchor rot costs a second, not a run.
-for (const m of MUTANTS) {
-  const hits = originals.get(m.file).split(m.find).length - 1;
-  if (hits !== 1) {
-    console.error(`\nABORT: anchor for "${m.id}" matched ${hits} times, expected exactly 1.`);
-    console.error('The source moved. Fix the anchor — do NOT report this run as green.');
-    process.exit(2);
-  }
-}
-
-// A red baseline kills every mutant for free.
-try { runSubset(); } catch {
-  console.error('\nABORT: the subset fails on the UNMUTATED tree. Fix the baseline first.');
-  process.exit(2);
-}
-
-let killed = 0;
-const survivors = [];
-console.log(`mutate-device-gap-alerts: ${MUTANTS.length} mutants against ${SUBSET.join(' + ')}\n`);
-
-for (const m of MUTANTS) {
-  const original = originals.get(m.file);
-  try {
-    writeFileSync(m.file, original.replace(m.find, m.to));
-    let died = false;
-    try { runSubset(); } catch { died = true; }
-    if (!died) { try { runAll(); } catch { died = true; } }
-    if (died) { killed++; console.log(`  KILLED   ${m.id}`); }
-    else { survivors.push(m); console.log(`  SURVIVED ${m.id}\n           ↳ ${m.why}`); }
-  } finally {
-    writeFileSync(m.file, original);
-  }
-}
-
-console.log(`\n${killed}/${MUTANTS.length} mutants killed`);
-if (survivors.length) {
-  console.log('\nSURVIVORS — the suite does not constrain these behaviours:');
-  for (const s of survivors) console.log(`  - ${s.id}\n      ${s.why}`);
-  process.exit(1);
-}
-console.log('post-run: tree restored');
+// Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs);
+// the verdict procedure per mutant is unchanged.
+import { runMutantsParallel } from './lib/mutateParallel.mjs';
+await runMutantsParallel({ name: 'mutate-device-gap-alerts', mutants: MUTANTS, subset: SUBSET, root: REPO });

@@ -216,60 +216,7 @@ const MUTANTS = [
   },
 ];
 
-function runTests(files) {
-  try {
-    execFileSync('node', ['--import', 'tsx', '--test', ...files], {
-      cwd: SERVER, stdio: 'pipe', encoding: 'utf8',
-    });
-    return { pass: true };
-  } catch (e) {
-    const out = `${e.stdout ?? ''}${e.stderr ?? ''}`;
-    const m = out.match(/^# fail (\d+)$/m) ?? out.match(/^ℹ fail (\d+)$/m);
-    return { pass: false, failures: m ? Number(m[1]) : 'n/a' };
-  }
-}
-
-console.log('baseline: running the subset unmutated...');
-const baseline = runTests(SUBSET);
-if (!baseline.pass) {
-  console.error('ABORT — the baseline subset is not green. Fix that before mutating.');
-  process.exit(2);
-}
-console.log('baseline OK\n');
-
-const rows = [];
-for (const m of MUTANTS) {
-  const original = readFileSync(m.file, 'utf8');
-  const hits = original.split(m.find).length - 1;
-  if (hits !== 1) {
-    rows.push({ id: m.id, verdict: 'NOT APPLIED', detail: `anchor matched ${hits}x (expected 1) — the harness has drifted from the source` });
-    console.log(`✗ ${m.id}: ANCHOR MISS (${hits} matches)`);
-    continue;
-  }
-  try {
-    writeFileSync(m.file, original.replace(m.find, m.to));
-    let r = runTests(SUBSET);
-    let scope = 'subset';
-    if (r.pass) { r = runTests(['test/**/*.test.ts']); scope = 'FULL suite'; }
-    rows.push({
-      id: m.id,
-      verdict: r.pass ? 'SURVIVED' : 'KILLED',
-      detail: r.pass ? `no test failed (${scope})` : `${r.failures} test(s) failed`,
-      why: m.why,
-    });
-    console.log(`${r.pass ? '✗ SURVIVED' : '✓ KILLED  '}  ${m.id}  (${r.pass ? scope : `${r.failures} failures`})`);
-  } finally {
-    writeFileSync(m.file, original);
-  }
-}
-
-const killed = rows.filter((r) => r.verdict === 'KILLED').length;
-console.log(`\n| # | mutant | verdict | evidence |`);
-console.log(`|---|--------|---------|----------|`);
-for (const r of rows) console.log(`| ${r.id.split('.')[0]} | ${r.id.replace(/^[ivx]+(-[a-z])?\. /, '')} | ${r.verdict} | ${r.detail} |`);
-console.log(`\n${killed}/${rows.length} mutants killed`);
-
-// Restoration check — the tree must be exactly as we found it.
-const post = runTests(SUBSET);
-console.log(post.pass ? 'post-run: tree restored, subset green' : 'post-run: SUBSET FAILING — tree may not be restored!');
-process.exit(killed === rows.length && post.pass ? 0 : 1);
+// Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs);
+// the verdict procedure per mutant is unchanged.
+import { runMutantsParallel } from './lib/mutateParallel.mjs';
+await runMutantsParallel({ name: 'mutate-red-replay', mutants: MUTANTS, subset: SUBSET, root: REPO });

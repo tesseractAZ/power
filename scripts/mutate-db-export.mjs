@@ -90,35 +90,7 @@ const MUTANTS = [
   },
 ];
 
-function run(files) { execFileSync('npm', ['test', '--silent', '--', ...files], { cwd: SERVER, stdio: 'pipe' }); }
-
-const originals = new Map([[MOD, readFileSync(MOD, 'utf8')], [WORKER, readFileSync(WORKER, 'utf8')]]);
-const restore = () => { for (const [f, s] of originals) writeFileSync(f, s); };
-
-let killed = 0; const survivors = [];
-console.log(`mutate-db-export: ${MUTANTS.length} mutants against ${SUBSET.join(' + ')}\n`);
-try {
-  for (const m of MUTANTS) {
-    const original = originals.get(m.file);
-    const hits = original.split(m.find).length - 1;
-    if (hits !== 1) {
-      console.error(`\nABORT: anchor for "${m.id}" matched ${hits} times, expected exactly 1.`);
-      restore(); process.exit(2);
-    }
-    let mutated = original.replace(m.find, m.to);
-    if (m.extra) mutated = m.extra(mutated);
-    writeFileSync(m.file, mutated);
-    let died = false;
-    try { run(SUBSET); } catch { died = true; }
-    if (died) { killed++; console.log(`  KILLED   ${m.id}`); }
-    else { survivors.push(m); console.log(`  SURVIVED ${m.id}\n           -> ${m.why}`); }
-    restore();
-  }
-} finally { restore(); }
-
-console.log(`\nmutate-db-export: ${killed}/${MUTANTS.length} killed`);
-if (survivors.length) {
-  console.log('\nSURVIVORS — the tests do NOT pin these:');
-  for (const s of survivors) console.log(`  - ${s.id}\n    ${s.why}`);
-  process.exit(1);
-}
+// Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs);
+// the verdict procedure per mutant is unchanged.
+import { runMutantsParallel } from './lib/mutateParallel.mjs';
+await runMutantsParallel({ name: 'mutate-db-export', mutants: MUTANTS, subset: SUBSET, root: REPO, fullSuite: false });
