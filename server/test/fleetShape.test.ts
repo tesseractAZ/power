@@ -37,6 +37,12 @@ test('★★ dpuPackSlots: one tile per pack the Core reports', () => {
   assert.deepEqual(dpuPackSlots({ packCount: 1, packs: packs(1) }), [1]);
 });
 
+test('★★ dpuPackSlots: the count itself is used at both ends of its range (1 and 5)', () => {
+  assert.deepEqual(dpuPackSlots({ packCount: 5, packs: packs(1, 2, 3, 4) }), [1, 2, 3, 4, 5], 'five-pack Core, one reading missing');
+  assert.deepEqual(dpuPackSlots({ packCount: 5, packs: [] }), [1, 2, 3, 4, 5]);
+  assert.deepEqual(dpuPackSlots({ packCount: 1, packs: [] }), [1]);
+});
+
 test('★★ dpuPackSlots: the Core\'s own count fills placeholders by NUMBER', () => {
   assert.deepEqual(dpuPackSlots({ packCount: 4, packs: [] }), [1, 2, 3, 4], 'count known, readings not yet in');
   assert.deepEqual(dpuPackSlots({ packCount: 4, packs: packs(1, 2, 4) }), [1, 2, 3, 4], 'pack 3 missing keeps its place');
@@ -57,14 +63,21 @@ test('★★ the DPU card renders dpuPackSlots, with no fallback count and no pe
   const card = src('web/src/cards/DpuCard.tsx');
   assert.doesNotMatch(card, /\?\?\s*5\b/, 'no `?? 5` anywhere in the card');
   assert.match(card, /const packSlots = dpuPackSlots\(p\);/);
-  assert.match(card, /packSlots == null \? \(\s*<div className="text-xs text-muted">Pack detail needs DPU WiFi<\/div>/);
+  assert.match(card, /packSlots == null \? \(\s*<div className="text-xs text-muted">\{p \? 'Pack readings not yet received' : 'Pack detail needs DPU WiFi'\}<\/div>/);
+  assert.match(card, /\{packSlots\.map\(\(num\) =>/, 'tiles are drawn from packSlots');
+  assert.match(card, /\{packSlots\.length\} battery pack\{packSlots\.length === 1 \? '' : 's'\}/, 'the label counts packSlots');
+  assert.doesNotMatch(card, /\[1, 2, 3, 4, 5\]|length: 5\b/, 'no fixed five anywhere');
   assert.match(card, /p\?\.packs\.find\(\(x\) => x\.num === num\)/, 'tiles match packs by number, not array index');
-  assert.equal(card.split('headlineSoc ?? 0').length - 1, 1, 'the Core SoC fills only the headline bar, not placeholders');
+  const ph = card.slice(card.indexOf('// No reading for this pack'));
+  const placeholder = ph.slice(0, ph.indexOf(');'));
+  assert.match(placeholder, /<div className="bar mt-1" \/>/, 'the placeholder bar is empty');
+  assert.doesNotMatch(placeholder, /style=|headlineSoc/, 'no fill, and nothing from the Core SoC, on a pack with no reading');
 });
 
 test('★★★ mpcPoolBasis: the optimizer gets the SHP2\'s pool or nothing', () => {
   assert.deepEqual(mpcPoolBasis({ backupFullCapWh: 92_160, backupBatPercent: 96 }), { capacityKwh: 92.16, currentSocPct: 96 });
   assert.deepEqual(mpcPoolBasis({ backupFullCapWh: 92_160, backupBatPercent: 0 }), { capacityKwh: 92.16, currentSocPct: 0 });
+  assert.deepEqual(mpcPoolBasis({ backupFullCapWh: 92_160, backupBatPercent: 100 }), { capacityKwh: 92.16, currentSocPct: 100 });
   assert.equal(mpcPoolBasis({ backupFullCapWh: null, backupBatPercent: null }), null, 'untrusted trio → no plan');
   assert.equal(mpcPoolBasis({ backupFullCapWh: 92_160, backupBatPercent: null }), null);
   assert.equal(mpcPoolBasis({ backupFullCapWh: null, backupBatPercent: 96 }), null);

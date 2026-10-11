@@ -18,7 +18,8 @@ export interface DpuViaShp2 {
  *  - Headline: best-available SoC (direct → SHP2 fallback), remaining time, 2 sparklines
  *  - Direct telemetry grid: filled when DPU WiFi is up; "—" otherwise
  *  - Per-pack tiles: one per pack the Core reports (dpuPackSlots); a pack missing from the direct
- *    data is a "no data" placeholder; with no direct data, one "needs DPU WiFi" line instead
+ *    data is a "no data" placeholder; with no pack count at all, one line instead of tiles
+ *    ("needs DPU WiFi" with no direct data, "not yet received" when direct data has no packs)
  *  - SHP2 view section: always shown for SHP2-bound DPUs (cross-reference + history fallback)
  */
 // v0.22.0 — memo skips re-renders when the parent (App) re-renders without a
@@ -86,7 +87,7 @@ export const DpuCard = memo(function DpuCard({
 
       {/* Per-pack tiles — one per reported pack; a "no data" placeholder for a pack the direct data lacks */}
       {packSlots == null ? (
-        <div className="text-xs text-muted">Pack detail needs DPU WiFi</div>
+        <div className="text-xs text-muted">{p ? 'Pack readings not yet received' : 'Pack detail needs DPU WiFi'}</div>
       ) : (
         <>
           <div className="text-xs text-muted mb-1">

@@ -9094,8 +9094,9 @@ export async function computeProbabilisticForecast(
   // v1.187.18 — a production forecast carries that capacity itself (poolFullWh, the
   // SHP2's backupFullCapWh the trajectory was integrated against), so it is read
   // directly; the inversion remains for forecasts without it (hand-built ones). The
-  // last resort, reached only when every hour pair is clamped at 0/100 with no pool
-  // value, estimates HOME Cores × 5 packs × 6.144 kWh: it used to count every DPU in
+  // last resort, reached when there is no pool value and no hour pair yields a usable
+  // inversion (all null, clamped at 0/100, too small, or outside the 5–1000 kWh guard),
+  // estimates HOME Cores × 5 packs × 6.144 kWh: it used to count every DPU in
   // deviceModels, bench Cores included (5 × 5 × 6.144 = 153.6 kWh against a 92.16 kWh
   // pool at 2026-10), which shrank the P10/P90 SoC offsets to ~0.6 of their size.
   // When projectedSocPct is null throughout, fullKwh is never read.

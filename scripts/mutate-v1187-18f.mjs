@@ -13,6 +13,12 @@
  *   F-ix    an out-of-range pack count is trusted
  *   F-x     the DPU card falls back to five tiles
  *   F-xi    pack tiles match packs by array index, not number
+ *   F-xii   the card draws a fixed five tiles instead of packSlots
+ *   F-xiii  the card's label shows a fixed count
+ *   F-xiv   a full pool (100 %) is rejected by the optimizer's basis
+ *   F-xv    a five-pack count is no longer trusted
+ *   F-xvi   a one-pack count is no longer trusted
+ *   F-xvii  a placeholder tile fills its bar from the Core SoC again
  *
  *   node scripts/mutate-v1187-18f.mjs
  */
@@ -105,8 +111,52 @@ const MUTANTS = [
     to: '              const pk = p?.packs[num - 1];',
     why: 'With a pack missing mid-list, readings shift onto the wrong tile.',
   },
+  {
+    id: 'F-xii. ★★★ the card draws a fixed five tiles instead of packSlots',
+    file: DPU_CARD,
+    find: '            {packSlots.map((num) => {',
+    to: '            {[1, 2, 3, 4, 5].map((num) => {',
+    why: 'The phantom fifth tile returns on a four-pack Core.',
+  },
+  {
+    id: 'F-xiii. ★★ the card\'s label shows a fixed count',
+    file: DPU_CARD,
+    find: "            {packSlots.length} battery pack{packSlots.length === 1 ? '' : 's'}",
+    to: '            5 battery packs',
+    why: 'A four-pack Core is labelled with five.',
+  },
+  {
+    id: 'F-xiv. ★★ a full pool (100 %) is rejected by the optimizer\'s basis',
+    file: MPC,
+    find: '  if (soc == null || !Number.isFinite(soc) || soc < 0 || soc > 100) return null;',
+    to: '  if (soc == null || !Number.isFinite(soc) || soc < 0 || soc >= 100) return null;',
+    why: 'A full battery answers 503 instead of a plan.',
+  },
+  {
+    id: 'F-xv. ★ a five-pack count is no longer trusted',
+    file: CARD_TEXT,
+    find: '  if (bp != null && Number.isInteger(bp) && bp >= 1 && bp <= DPU_MAX_PACKS) {',
+    to: '  if (bp != null && Number.isInteger(bp) && bp >= 1 && bp < DPU_MAX_PACKS) {',
+    why: 'The commonest Core (five packs) loses a missing pack\'s tile.',
+  },
+  {
+    id: 'F-xvi. ★ a one-pack count is no longer trusted',
+    file: CARD_TEXT,
+    find: '  if (bp != null && Number.isInteger(bp) && bp >= 1 && bp <= DPU_MAX_PACKS) {',
+    to: '  if (bp != null && Number.isInteger(bp) && bp > 1 && bp <= DPU_MAX_PACKS) {',
+    why: 'A one-pack Core with no readings yet shows no tile.',
+  },
+  {
+    id: 'F-xvii. ★ a placeholder tile fills its bar from the Core SoC again',
+    file: DPU_CARD,
+    find: '                  <div className="bar mt-1" />',
+    to: '                  <div className="bar mt-1"><div className="bg-muted" style={{ width: `${headlineSoc || 0}%`, opacity: 0.3 }} /></div>',
+    why: 'A pack with no reading implies a per-pack value.',
+  },
 ];
 
 // Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs).
 import { runMutantsParallel } from './lib/mutateParallel.mjs';
-await runMutantsParallel({ name: 'mutate-v1187-18f', mutants: MUTANTS, subset: SUBSET, root: REPO });
+// fullSuite: false — the subset holds every test that guards these mutants; a kill must come from
+// it, not from an unrelated full-suite failure under parallel load (a false kill).
+await runMutantsParallel({ name: 'mutate-v1187-18f', mutants: MUTANTS, subset: SUBSET, root: REPO, fullSuite: false });

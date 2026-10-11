@@ -2633,6 +2633,7 @@ negative-cache TTL.
 | `homeBasisPending` | v1.187.10: built while a connected home Core's first reading was pending; publishers send the PV pair and Projected Low SoC as null while it is set |
 | `pvForecastUnavailable` | v1.178.0: the display basis has no PV history at all (`restoredPvSpan === 0`); publishers send null (HA "unknown") instead of a model-less 0 |
 | `solarModelSns` | v1.186.5: sorted SNs of the home Cores the solar model was fitted on; gates cache reuse and forecast-skill scoring |
+| `poolFullWh` | v1.187.18: the backup pool's full capacity (Wh) the SoC trajectory was integrated against (`backupFullCapWh`, the packs' nameplate sum); null with no SHP2 or an untrusted pool; read by the probabilistic band |
 
 #### Endpoint
 
@@ -2924,9 +2925,11 @@ member draws ONE z and holds it for the whole window (forecast errors are
 correlated across hours — a cloudy day is cloudy all day), so the trajectory is
 monotone in z and the z=∓1.282 paths are exact P10/P90 trajectories.
 
-**Back-out of full capacity** (`fullKwh`) — the forecast was generated against
-`backupFullCapWh` via `socWh += (pv − load/η)`, so it is inverted from the
-forecast's own SoC trajectory:
+**Full capacity** (`fullKwh`) — v1.187.18: a production forecast carries the capacity its
+trajectory was integrated against (`DayForecast.poolFullWh`, the SHP2's `backupFullCapWh`), and
+that value is used directly. The trajectory back-out below applies only to a forecast without it
+(hand-built ones): the forecast was generated against `backupFullCapWh` via
+`socWh += (pv − load/η)`, so it is inverted from the forecast's own SoC trajectory:
 
 ```
 fullKwh = (cur.forecastPvW − cur.forecastLoadW/η)/1000  /  (dSocPct/100)
@@ -2934,8 +2937,11 @@ fullKwh = (cur.forecastPvW − cur.forecastLoadW/η)/1000  /  (dSocPct/100)
 
 picking the hour with the largest unclamped `|dSocPct|` (best conditioning;
 skips deltas <0.05 pt, SoC within 0.5 of 0/100, kwhDelta <0.05, candidate outside
-[5,1000] kWh). Fallback when no SoC trajectory: `dpuCount · PACKS_PER_DPU(5) ·
-PACK_KWH_NAMEPLATE(6.144)`.
+[5,1000] kWh). Last resort, when there is no pool value and no hour pair yields a usable
+inversion: `homeCores · PACKS_PER_DPU(5) · PACK_KWH_NAMEPLATE(6.144)`, with `homeCores =
+max(1, solarModelSns.length ?? deviceModels.length)` (before v1.187.18 it counted every DPU in
+`deviceModels`, bench Cores included: 153.6 kWh against the 92.16 kWh pool). With no pool value
+`projectedSocPct` is null throughout and `fullKwh` is never read.
 
 **Integration** — each path (and the low/mid/high band paths) steps per hour:
 
@@ -5510,9 +5516,12 @@ want the shape) but `expectedSavingsUsd` is zeroed.
 
 #### 6.5 Endpoint — `GET /api/dispatch/recommend` (cached 300 s)
 
-Returns `503 {error:'SHP2 not online'}` if no SHP2. Inputs assembled in
-`index.ts`: `currentSocPct = backupBatPercent??50`, `reserveFloorPct =
-backupReserveSoc??20`, `capacityKwh = (backupFullCapWh??60000)/1000`, per-hour
+Returns `503 {error:'SHP2 not online'}` if no SHP2, and (v1.187.18) `503 {error:'backup pool
+unknown'}` when `mpcPoolBasis` (`dispatch/mpc.ts`) returns null: `backupFullCapWh` missing, not
+finite or ≤ 0, or `backupBatPercent` missing, not finite or outside 0–100 (0 % is valid). Before
+v1.187.18 the route substituted a 60 kWh pool at 50 % and served that plan with a 200. Inputs
+assembled in `index.ts`: `currentSocPct` and `capacityKwh` from `mpcPoolBasis` (no substitute
+values), `reserveFloorPct = backupReserveSoc??20`, per-hour
 `pvP50`/`pvP10` (from forecast + probabilistic bands), `loadForecast`,
 `tariffByHour` (`hourlyRateCents` for each hour of the local America/Phoenix day, falling back to the two-tier pair `TARIFF_ON_PEAK_CENTS_PER_KWH` / `TARIFF_OFF_PEAK_CENTS_PER_KWH`, default the flat rate, when the rate table is unconfirmed; v1.136.0), and **`gridAvailable = process.env.GRID_AVAILABLE
 === 'true'`** (default **false** — v0.15.2 off-grid honesty: a hardcoded `true`
