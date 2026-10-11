@@ -71,3 +71,25 @@ test('the inventory as of v1.187.18: 24 reset, 5 exempt', () => {
   assert.equal(caches.filter((c) => resetsIt(body, c)).length, 24);
   assert.equal(caches.filter((c) => c in NOT_RESET).length, 5);
 });
+
+test('★★★ every write to a reset cache is gated on cacheWritable (a superseded flight writes none of them)', () => {
+  // A flight still running on the old basis after the reset must not leave its result behind:
+  // flights on two bases can resume from one shared promise (the weather fetch), so a write and
+  // a read on the other basis fall in the same microtask drain (analytics/flightBasis.ts).
+  const body = resetBody();
+  const reset = moduleCaches().filter((c) => resetsIt(body, c));
+  const lines = SRC.split('\n');
+  const writes: string[] = [];
+  const ungated: string[] = [];
+  const pats = reset.map((c) => ({ c, re: new RegExp(`\\b${c}\\s*=\\s*\\{|\\b${c}\\.set\\(`) }));
+  lines.forEach((line, i) => {
+    for (const { c, re } of pats) {
+      if (re.test(line)) {
+        writes.push(`${i + 1}: ${c}`);
+        if (!line.includes('cacheWritable()')) ungated.push(`${i + 1}: ${line.trim()}`);
+      }
+    }
+  });
+  assert.ok(writes.length >= 24, `the scan found the writes (${writes.length})`);
+  assert.deepEqual(ungated, [], 'gate each write on cacheWritable()');
+});

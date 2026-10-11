@@ -13,6 +13,7 @@ import { getNwsAlerts, isNwsEnabled, nwsEventWindow, TTL_MS as NWS_ALERTS_TTL_MS
 import { PHOENIX_SITE } from './physics/clearSky.js';
 import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
 import { allDpus, homeConnectedDpus, reportBasisKey } from './analytics/fleet.js';
+import { cacheWritable } from './analytics/flightBasis.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
 import { topOfChargeQuietSpread } from './cellSpread.js';
 import {
@@ -819,7 +820,7 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
   }
 
   // Don't cache a result computed before any device projections exist.
-  if (Object.values(devices).some((d) => d.projection)) baselineCache = { ts: now, alerts: out };
+  if (Object.values(devices).some((d) => d.projection) && cacheWritable()) baselineCache = { ts: now, alerts: out };
   return out;
 }
 
@@ -1127,7 +1128,7 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
     }
   }
 
-  if (Object.values(devices).some((d) => d.projection)) forecastCache = { ts: now, alerts: out, depletionGate: diurnalConfirmsDepletion };
+  if (Object.values(devices).some((d) => d.projection) && cacheWritable()) forecastCache = { ts: now, alerts: out, depletionGate: diurnalConfirmsDepletion };
   return out;
 }
 
@@ -2524,7 +2525,7 @@ async function computeDayForecastUncached(
   // Cache whenever ≥1 DPU is present (so a totally-empty fleet still doesn't latch),
   // tagging the entry incomplete so the TTL fast-path uses the short negative-cache
   // window. A complete forecast overwrites it with incomplete:false + full TTL.
-  if (dpus.length > 0) dayForecastCache = { ts: now, value, incomplete: structurallyIncomplete };
+  if (dpus.length > 0 && cacheWritable()) dayForecastCache = { ts: now, value, incomplete: structurallyIncomplete };
   return value;
 }
 
@@ -3612,7 +3613,7 @@ export async function computeDegradation(
 
   const basisPending = degradationBasisPending(devices, now);
   const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, windowDays, packs: tagHomePacks(packs, devices), basisPending };
-  if (dpus.length > 0) degradationCache = { ts: now, value, basis };
+  if (dpus.length > 0 && cacheWritable()) degradationCache = { ts: now, value, basis };
   return value;
 }
 
@@ -3707,6 +3708,12 @@ let runwayCache: { ts: number; value: RunwayProjection } | null = null;
  *  reachable: a load captured just before the silence (an EV charging at 14 kW, say) would
  *  keep shortening the projected runway long after the EV stopped. */
 let runwayLoadMeasuredAtMs: number | null = null;
+/** v1.187.18 — the recent load the last-resort fallback carries forward: the previous compute's
+ *  recentLoadWatts, kept here and not read back from runwayCache. The worker's basis reset nulls
+ *  the result cache; carried from there, a reset during a panel-load gap turned a 'carried'
+ *  runway into 'panel-load history insufficient', and an active runway alarm read that as
+ *  recovered. Cleared only by resetRunwayCache. */
+let runwayCarriedLoadW: number | null = null;
 /** How long a carried-forward recent load stays usable after the last real reading. */
 const RUNWAY_LOAD_CARRY_MAX_MS = 2 * 60 * 60 * 1000;
 
@@ -3745,7 +3752,7 @@ export function applyEmptyHysteresis(
  *  production computeRunway runs in the analytics WORKER thread, which holds its own
  *  module copy of runwayEmptyState/runwayCache; this main-thread reset does not touch
  *  it (a worker respawn would reset the worker's copy, harmlessly releasing any hold). */
-export function resetRunwayCache(): void { runwayCache = null; runwayLoadMeasuredAtMs = null; runwayEmptyState.streak = 0; runwayEmptyState.lastFinite = null; }
+export function resetRunwayCache(): void { runwayCache = null; runwayLoadMeasuredAtMs = null; runwayCarriedLoadW = null; runwayEmptyState.streak = 0; runwayEmptyState.lastFinite = null; }
 
 const emptyRunway = (now: number, reason: string, extra: Partial<RunwayProjection> = {}): RunwayProjection => ({
   generatedAt: now,
@@ -3835,7 +3842,7 @@ export function computeRunway(
     const fallback =
       liveLoadWatts > 0 ? liveLoadWatts
         : loadPts.length === 1 ? loadPts[0].value
-          : carryOk && (runwayCache?.value.recentLoadWatts ?? 0) > 0 ? runwayCache!.value.recentLoadWatts
+          : carryOk && (runwayCarriedLoadW ?? 0) > 0 ? runwayCarriedLoadW!
             : null;
     if (fallback == null || !Number.isFinite(fallback) || fallback <= 0) {
       return emptyRunway(now, 'panel-load history insufficient — wait a few minutes', {
@@ -4011,9 +4018,12 @@ export function computeRunway(
     recentLoadBasis,
     ...(basisPending ? { basisPending: true } : {}),
   };
+  // v1.187.18 — the load to carry, from every compute (a pending one too: the panel's load does
+  // not depend on which Cores have projected). Never cleared by a basis reset.
+  runwayCarriedLoadW = value.recentLoadWatts;
   // v1.187.10 — a pending-basis runway is not cached: the next request recomputes on the map
   // its Cores have since joined, instead of serving these figures for RUNWAY_TTL_MS.
-  if (!basisPending) runwayCache = { ts: now, value };
+  if (!basisPending && cacheWritable()) runwayCache = { ts: now, value };
   return value;
 }
 
@@ -4225,7 +4235,7 @@ export function computeRoundTripEfficiency(
     const extended = computeRoundTripEfficiency(devices, recorder, RTE_EXTENDED_WINDOW_DAYS);
     if (extended.efficiencyPct != null) out = extended;
   }
-  if (dpus.length > 0) rteCache = { ts: now, key, value: out };
+  if (dpus.length > 0 && cacheWritable()) rteCache = { ts: now, key, value: out };
   return out;
 }
 
@@ -4418,7 +4428,7 @@ export async function computeShadeReport(
     hours,
     estTotalKwhPerYear,
   };
-  shadeCache = { ts: now, value };
+  if (cacheWritable()) shadeCache = { ts: now, value };
   return value;
 }
 
@@ -4582,7 +4592,7 @@ export async function computeSoilingDecomposition(
   }
 
   const value: SoilingDecomposition = { generatedAt: now, perDevice, perHour };
-  if (dpus.length > 0) soilingDecompCache = { ts: now, value };
+  if (dpus.length > 0 && cacheWritable()) soilingDecompCache = { ts: now, value };
   return value;
 }
 
@@ -4731,7 +4741,7 @@ export function computeStringMismatch(
     }
   }
   const value: StringMismatchReport = { generatedAt: now, windowDays: STRING_MISMATCH_WINDOW_DAYS, devices: ratios };
-  if (dpus.length > 0) stringMismatchCache = { ts: now, value };
+  if (dpus.length > 0 && cacheWritable()) stringMismatchCache = { ts: now, value };
   return value;
 }
 
@@ -5142,7 +5152,7 @@ function computeMinedEvWindowPrediction(
   // PERMANENT state, and never caching it re-mined 30 days x every paired circuit on every
   // call. Empty results now cache with a SHORT TTL: boot-cold recovers within minutes,
   // an EV-free site stops thrashing.
-  evWindowCache = { ts: now, ttlMs: value.sessionsObserved > 0 ? EV_WINDOW_TTL_MS : EV_WINDOW_EMPTY_TTL_MS, value };
+  if (cacheWritable()) evWindowCache = { ts: now, ttlMs: value.sessionsObserved > 0 ? EV_WINDOW_TTL_MS : EV_WINDOW_EMPTY_TTL_MS, value };
   return value;
 }
 
@@ -5475,7 +5485,7 @@ export async function computeChargeCurveFingerprint(
     }
   }
   const value: ChargeCurveReport = { generatedAt: now, packs: tagHomePacks(packs, devices) };
-  if (dpus.length > 0) chargeCurveCache = { ts: now, value };
+  if (dpus.length > 0 && cacheWritable()) chargeCurveCache = { ts: now, value };
   return value;
 }
 
@@ -5719,7 +5729,7 @@ export function computeInternalResistance(
     });
   }
   const value: InternalResistanceReport = { generatedAt: now, devices: out };
-  if (dpus.length > 0) irCache = { ts: now, value };
+  if (dpus.length > 0 && cacheWritable()) irCache = { ts: now, value };
   return value;
 }
 
@@ -6332,7 +6342,7 @@ export async function computeForecastSkill(
     windowDays,
     ghiBasis,
   };
-  if (dpus.length > 0) forecastSkillCache.set(cacheKey, { ts: now, forecastTs: forecast.generatedAt, value });
+  if (dpus.length > 0 && cacheWritable()) forecastSkillCache.set(cacheKey, { ts: now, forecastTs: forecast.generatedAt, value });
   return value;
 }
 
@@ -6502,7 +6512,7 @@ export async function computeAmbientThermalForecast(
     }
   }
   const value: AmbientThermalReport = { generatedAt: now, packs };
-  if (dpus.length > 0) ambientThermalCache = { ts: now, value };
+  if (dpus.length > 0 && cacheWritable()) ambientThermalCache = { ts: now, value };
   return value;
 }
 
@@ -6929,7 +6939,7 @@ export function computeSelfConsumption(
   // loadKwh=0 / partial pvKwh and served it for the full TTL (observed live
   // after the v0.15.12 update: loadKwh=0, pvKwh=184 of 527). An incomplete
   // snapshot may be returned, but never latched.
-  if (dpus.length > 0 && shp2 != null) selfConsumptionCache = { ts: now, key, value };
+  if (dpus.length > 0 && shp2 != null && cacheWritable()) selfConsumptionCache = { ts: now, key, value };
   return value;
 }
 
@@ -7058,7 +7068,7 @@ export function computeThermalEvents(
     }
   }
   const value: FleetThermalEvents = { generatedAt: now, packs: tagHomePacks(packs, devices) };
-  if (dpus.length > 0) thermalEventsCache = { ts: now, value };
+  if (dpus.length > 0 && cacheWritable()) thermalEventsCache = { ts: now, value };
   return value;
 }
 
@@ -7458,7 +7468,7 @@ export function computeEquipmentHealth(
   }
 
   const value: EquipmentHealth = { generatedAt: now, mpptStrings, inverterStandby };
-  if (dpus.length > 0) equipmentHealthCache = { ts: now, value };
+  if (dpus.length > 0 && cacheWritable()) equipmentHealthCache = { ts: now, value };
   return value;
 }
 
@@ -7632,7 +7642,7 @@ export async function computeClipping(
   // v0.99.0 — cache freshness is REAL wall-clock (decoupled from the injectable compute
   // clock `now`), so an injected mid-day `nowMs` in tests can't poison a later real call's
   // TTL. In production `nowMs === Date.now()` so this is a no-op change.
-  clippingCache = { ts: Date.now(), value };
+  if (cacheWritable()) clippingCache = { ts: Date.now(), value };
   return value;
 }
 
@@ -7926,8 +7936,9 @@ export async function computeCurtailment(
   if (homeDpus.length === 0) return empty;
   const shp2 = findShp2(devices);
   if (!shp2) {
-    curtailmentCache = { ts: Date.now(), value: { ...empty, inactiveReason: 'no-shp2' } };
-    return curtailmentCache.value;
+    const noPanel: CurtailmentReport = { ...empty, inactiveReason: 'no-shp2' };
+    if (cacheWritable()) curtailmentCache = { ts: Date.now(), value: noPanel };
+    return noPanel;
   }
 
   // 1) Live state. The expensive cached calls (weather, Bayesian) run in
@@ -8093,7 +8104,7 @@ export async function computeCurtailment(
   };
   // An incomplete report is cached for the same TTL: its figures publish as null, and a
   // shorter TTL would only retry a failing weather fetch more often.
-  curtailmentCache = { ts: Date.now(), value: report };
+  if (cacheWritable()) curtailmentCache = { ts: Date.now(), value: report };
   return report;
 }
 
@@ -8507,7 +8518,7 @@ export function computeCarbonReport(
     deviceList.some((d) => d.projection?.kind === 'dpu') &&
     deviceList.some((d) => d.projection?.kind === 'shp2');
   value.basisComplete = fleetComplete;
-  if (fleetComplete) carbonCache = { ts: Date.now(), value };
+  if (fleetComplete && cacheWritable()) carbonCache = { ts: Date.now(), value };
   return value;
 }
 
@@ -8861,7 +8872,7 @@ export function computeTariffReport(
   // A DPU-only install (no panel listed at all, by projection or product name) prices ac_in
   // and is complete without one; a panel listed but not yet projected is the boot race.
   value.basisComplete = dpus.length > 0 && (shp2 != null || shp2Panels(devices).sns.length === 0);
-  if (dpus.length > 0 && shp2 != null) tariffCache = { ts: now, value };
+  if (dpus.length > 0 && shp2 != null && cacheWritable()) tariffCache = { ts: now, value };
   return value;
 }
 
@@ -9408,7 +9419,7 @@ export async function computeProbabilisticForecast(
   // v1.186.5 — a band built on a structurally incomplete forecast is served but never
   // cached: its skill was empty (calScoredDays 0), and caching it for PROB_TTL_MS would
   // fail the night-charge basis gate for 15 minutes after the forecast became complete.
-  if (!forecast.structurallyIncomplete) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value };
+  if (!forecast.structurallyIncomplete && cacheWritable()) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value };
   return value;
 }
 
@@ -9688,7 +9699,7 @@ export async function computeMultiDayForecast(
   }
   const value: MultiDayForecast = { generatedAt: now, days };
   // v1.187.18 — a rollup built on a structurally incomplete forecast is served but never cached.
-  if (!forecast.structurallyIncomplete) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value };
+  if (!forecast.structurallyIncomplete && cacheWritable()) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value };
   return value;
 }
 
@@ -10075,7 +10086,7 @@ export async function computeBayesianSolarModel(
     medianStdev: stdevs.length ? round2(median(stdevs)) : 0,
     agreementWithOls: agreementDenom > 0 ? round2(agreement / agreementDenom) : 0,
   };
-  bayesCache = { ts: now, value };
+  if (cacheWritable()) bayesCache = { ts: now, value };
   return value;
 }
 
@@ -10554,7 +10565,9 @@ export function setBayesianModelForTesting(value: BayesianSolarModel | null): vo
 /**
  * v1.187.18 — null every RESULT cache a worker report reads, so nothing built on an earlier device
  * basis is served on a new one. Called by the report chokepoint (reports.ts buildReport) when the
- * basis gains an element, and again when a flight that straddled that change settles.
+ * basis gains an element; a flight still running on the old basis writes none of them afterwards
+ * (each write is gated on cacheWritable, analytics/flightBasis.ts). State that is not a result
+ * — the runway's carried load and to-empty hysteresis — is deliberately left alone.
  *
  * Deliberately NOT reset (test/workerCacheInventory.test.ts fails on a cache in neither list):
  *   stormPrepCache     — the NWS feed only, read on the main thread (alertMonitor);

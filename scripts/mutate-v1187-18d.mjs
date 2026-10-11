@@ -5,16 +5,24 @@
  *  The worker's report chokepoint (reports.ts)
  *   B-i     no cache reset when an element arrives in the basis (the boot fill)
  *   B-ii    the basis is missing from the flight key (a full-map request joins a partial-map flight)
- *   B-iii   no reset when a flight that straddled the basis change settles
+ *   B-iii   a superseded flight's cache writes are not dropped (the shared-weather-fetch race)
+ *   B-iii-b a flight's generation is taken when it runs, not when it is asked
+ *   B-iii-c every flight's cache writes are dropped (a current-basis flight loses its result)
  *   B-iv    a LEAVING element resets too (a flapping source thrashes every cache)
  *   B-v     no rate limit on a re-arrival
  *   B-vi    a deferred re-arrival reset is dropped when the key does not change again
  *   B-vii   a first sighting is rate-limited like a re-arrival (the boot fill's second step deferred)
  *   B-viii  the inner day-forecast flight is not keyed on the basis
  *   B-ix    reportBasisKey loses the panel-listed Cores
+ *   B-x     a basis reset leaves the pending flag set (a reset every window, forever)
  *  The reset list (analytics.ts)
  *   C-i     the charge-curve cache is dropped from resetWorkerReportCaches
  *   C-ii    the forecast-skill memo is dropped from resetWorkerReportCaches
+ *   C-iii   the runway cache write is not gated on the flight's generation
+ *   C-iv    the forecast-alert cache write is not gated on the flight's generation
+ *  The runway's carried load (analytics.ts)
+ *   L-i     the carried load is read back from the result cache a basis reset nulls
+ *   L-ii    the carried load is never recorded
  *  The degradation report's own basis (analytics.ts)
  *   D-i     the covers check is ignored
  *   D-ii    membership becoming known is ignored
@@ -30,6 +38,7 @@
  *   R-iii   the MQTT publisher does not hand the report to the gate
  *  Main-thread and forecast-derived caches (analytics.ts)
  *   M-i     the pack-risk cache is keyed on time alone
+ *   M-vi    the pack-risk cache key drops the degradation report
  *   M-ii    the multi-day rollup is cached from an incomplete forecast
  *   M-iii   the multi-day rollup is not bound to its forecast
  *   M-iv    the dispatch plan is cached from an incomplete forecast
@@ -50,6 +59,7 @@ const PR = resolve(REPO, 'server/src/publishReadiness.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const MQ = resolve(REPO, 'server/src/mqttDiscovery.ts');
 const WK = resolve(REPO, 'server/src/analyticsWorker.ts');
+const FB = resolve(REPO, 'server/src/analytics/flightBasis.ts');
 const SUBSET = [
   'test/bootPartialBasis.test.ts',
   'test/degradationBootBasis.test.ts',
@@ -74,11 +84,25 @@ const MUTANTS = [
     why: 'A request on the full map joins a flight that started on the partial one (4/4/4 packs).',
   },
   {
-    id: 'B-iii. ★★★ no reset when a straddling flight settles',
+    id: 'B-iii. ★★★ a superseded flight\'s cache writes are not dropped',
+    file: FB,
+    find: '  return g === undefined || g === generation;',
+    to: '  return true; /* MUTANT */',
+    why: 'Flights on two bases resume from one weather fetch: the full-map runway is answered with the dip map\'s.',
+  },
+  {
+    id: 'B-iii-b. ★★ a flight\'s generation is taken when it runs, not when it is asked',
     file: REP,
-    find: 'const check = () => { if (epoch !== basis.epoch) resetBasisCaches(); };',
-    to: 'const check = () => { /* MUTANT */ };',
-    why: 'A flight that started on the partial map writes its result after the reset, and it is served.',
+    find: '() => runInBasisGeneration(gen, () => b(ctx, args))',
+    to: '() => runInBasisGeneration(basisGeneration(), () => b(ctx, args)) /* MUTANT */',
+    why: 'A flight asked on the partial map but started after the reset writes its partial result as current.',
+  },
+  {
+    id: 'B-iii-c. ★★ every flight\'s cache writes are dropped',
+    file: FB,
+    find: '  return g === undefined || g === generation;',
+    to: '  return g === undefined; /* MUTANT */',
+    why: 'Every report recomputes on every request: a cold pass per HA publish.',
   },
   {
     id: 'B-iv. ★★ a leaving element resets too',
@@ -97,8 +121,8 @@ const MUTANTS = [
   {
     id: 'B-vi. ★★ a deferred re-arrival reset is dropped',
     file: REP,
-    find: '  if (key === basis.key && !basis.pending) return basis.epoch;',
-    to: '  if (key === basis.key) return basis.epoch; /* MUTANT */',
+    find: '  if (key === basis.key && !basis.pending) return basisGeneration();',
+    to: '  if (key === basis.key) return basisGeneration(); /* MUTANT */',
     why: 'What was built during a dip is served for the full TTL once the source settles back.',
   },
   {
@@ -122,6 +146,13 @@ const MUTANTS = [
     to: "  return `${dpus.join(',')}|${panels.join(',')}|`; /* MUTANT */",
     why: 'A Core joining the panel\'s source list would not reset the home-scoped reports.',
   },
+  {
+    id: 'B-x. ★★ a basis reset leaves the pending flag set',
+    file: REP,
+    find: '  basis.pending = false;\n  resetWorkerReportCaches();',
+    to: '  resetWorkerReportCaches(); /* MUTANT */',
+    why: 'After one double flicker every worker cache is nulled every 5 min for the life of the process.',
+  },
   // ── the reset list ─────────────────────────────────────────────────────────────────────────
   {
     id: 'C-i. ★★★ the charge-curve cache is dropped from resetWorkerReportCaches',
@@ -136,6 +167,35 @@ const MUTANTS = [
     find: '  forecastSkillCache.clear();\n  ambientThermalCache = null;',
     to: '  ambientThermalCache = null; /* MUTANT */',
     why: 'A cache in neither list: the inventory guard must name it.',
+  },
+  {
+    id: 'C-iii. ★★★ the runway cache write is not gated on the flight\'s generation',
+    file: AN,
+    find: '  if (!basisPending && cacheWritable()) runwayCache = { ts: now, value };',
+    to: '  if (!basisPending) runwayCache = { ts: now, value }; /* MUTANT */',
+    why: 'A dip-map runway written after the reset answers the full-map request (one alarm pass on another basis).',
+  },
+  {
+    id: 'C-iv. ★★ the forecast-alert cache write is not gated on the flight\'s generation',
+    file: AN,
+    find: '  if (Object.values(devices).some((d) => d.projection) && cacheWritable()) forecastCache = {',
+    to: '  if (Object.values(devices).some((d) => d.projection)) /* MUTANT */ forecastCache = {',
+    why: 'The forecast alerts computed on the old basis answer the new one.',
+  },
+  // ── the runway's carried load ──────────────────────────────────────────────────────────────
+  {
+    id: 'L-i. ★★★ the carried load is read back from the result cache',
+    file: AN,
+    find: ': carryOk && (runwayCarriedLoadW ?? 0) > 0 ? runwayCarriedLoadW!',
+    to: ': carryOk && (runwayCache?.value.recentLoadWatts ?? 0) > 0 ? runwayCache!.value.recentLoadWatts /* MUTANT */',
+    why: 'A basis reset during a panel-load gap makes the runway unavailable and an active runway alarm re-arms.',
+  },
+  {
+    id: 'L-ii. ★★ the carried load is never recorded',
+    file: AN,
+    find: '  runwayCarriedLoadW = value.recentLoadWatts;',
+    to: '  /* MUTANT */',
+    why: 'A silent panel makes the runway unavailable at once instead of carrying the last load for 2 h.',
   },
   // ── degradation ────────────────────────────────────────────────────────────────────────────
   {
@@ -225,10 +285,17 @@ const MUTANTS = [
     why: 'The boot pack-risk scores stand 30 min after the degradation report is rebuilt (12:57:43).',
   },
   {
+    id: 'M-vi. ★★ the pack-risk cache key drops the degradation report',
+    file: AN,
+    find: 'const inputs = `${degradation.generatedAt}|${thermalEvents.generatedAt}|',
+    to: 'const inputs = `|${thermalEvents.generatedAt}|',
+    why: 'A degradation report rebuilt alone (pending expiry, a pack arriving) is not rescored for 30 min.',
+  },
+  {
     id: 'M-ii. ★★ the multi-day rollup is cached from an incomplete forecast',
     file: AN,
-    find: '  if (!forecast.structurallyIncomplete) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value };',
-    to: '  multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value }; /* MUTANT */',
+    find: '  if (!forecast.structurallyIncomplete && cacheWritable()) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value };',
+    to: '  if (cacheWritable()) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value }; /* MUTANT */',
     why: 'A rollup on the boot forecast is served for 30 min.',
   },
   {
@@ -263,5 +330,7 @@ const MUTANTS = [
 ];
 
 // Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs).
+// fullSuite: false — the subset holds every test that guards these mutants, so a kill is never a
+// load flake elsewhere in the suite.
 import { runMutantsParallel } from './lib/mutateParallel.mjs';
-await runMutantsParallel({ name: 'mutate-v1187-18d', mutants: MUTANTS, subset: SUBSET, root: REPO });
+await runMutantsParallel({ name: 'mutate-v1187-18d', mutants: MUTANTS, subset: SUBSET, root: REPO, fullSuite: false });

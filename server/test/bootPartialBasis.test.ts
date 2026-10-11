@@ -37,6 +37,7 @@ const weatherMod = await import('../src/weather.js');
 const analytics = await import('../src/analytics.js');
 const reports = await import('../src/reports.js');
 const fleet = await import('../src/analytics/fleet.js');
+const flightBasis = await import('../src/analytics/flightBasis.js');
 
 type Any = any;
 const H = 3_600_000;
@@ -58,6 +59,8 @@ for (let t = Math.floor((NOW0 - 8 * 24 * H) / H) * H; t < NOW0 + 3 * 24 * H; t +
 weatherMod.setWeatherCacheForTesting({ fetchedAt: NOW0, hours: wxHours } as Any);
 
 // ── synthetic recorder: every (sn, metric) a deterministic series ─────────────────────────────
+/** The panel writes no panel_load row (a panel whose channels report no watts). */
+let panelSilent = false;
 const peakPv = (sn: string) => (HOME.includes(sn) ? 3000 + 300 * HOME.indexOf(sn) : sn === SN.S4 ? 400 : 0);
 function val(sn: string, metric: string, ts: number): number | null {
   const s = sunFrac(ts);
@@ -68,7 +71,7 @@ function val(sn: string, metric: string, ts: number): number | null {
     return null;
   }
   if (sn === SN.P) {
-    if (metric === 'panel_load') return 1500 + 500 * s;
+    if (metric === 'panel_load') return panelSilent ? null : 1500 + 500 * s;
     if (metric === 'backup_pct') return 70;
     if (metric === 'grid_home_w') return 300;
     if (/^pair\d+_w$/.test(metric)) return 0;
@@ -262,7 +265,7 @@ test('★★★ race: a full-map forecast request does not join the partial map\
   assert.deepEqual(r, [], 'the runway on the full map was computed on the full map\'s forecast');
 });
 
-test('★★★ a flight that straddles the basis change cannot leave its partial result behind (post-flight reset)', { timeout: 60_000 }, async () => {
+test('★★★ a flight that straddles the basis change cannot leave its partial result behind (its writes are dropped)', { timeout: 60_000 }, async () => {
   coldWorker();
   // chargeCurve starts on the partial map; the full map arrives with ANOTHER report's request
   // (its reset runs before chargeCurve has written anything) …
@@ -275,6 +278,21 @@ test('★★★ a flight that straddles the basis change cannot leave its partia
   const d: string[] = [];
   diff(c, truth.chargeCurve, 'chargeCurve', d);
   assert.deepEqual(d, []);
+});
+
+test('★★★ a flight on the CURRENT basis that overlaps a superseded one keeps what it cached (no chained resets)', { timeout: 60_000 }, async () => {
+  coldWorker();
+  // A starts on the 12:23 map; one turn later the hydrated map arrives with B, C and D.
+  const pA = reports.buildReport('degradation', ctx(PARTIAL.spareFirst()));
+  await new Promise<void>((r) => setImmediate(r));
+  const rest = ['chargeCurve', 'thermalEvents', 'internalResistance'].map((n) => reports.buildReport(n, ctx(FULL())));
+  const gen = flightBasis.basisGeneration();
+  await Promise.all([pA, ...rest]);
+  assert.equal(flightBasis.basisGeneration(), gen, 'A settling on the superseded basis resets nothing');
+  const before = scans;
+  await reports.buildReport('chargeCurve', ctx(FULL()));
+  await reports.buildReport('internalResistance', ctx(FULL()));
+  assert.equal(scans, before, 'B and D are served from cache: no rescan');
 });
 
 test('★★ the flight key carries the basis: same basis joins, a different basis does not', async () => {
@@ -342,6 +360,11 @@ test('★★★ a source that flickers resets at most once per window; a deferre
   const e2 = reports.noteReportBasis(K(FULL()), clock + 1_000 + reports.BASIS_REARRIVAL_RESET_MIN_MS);
   assert.equal(e2, e1 + 1, 'what was built during a dip is served for at most one window');
   assert.equal(reports.noteReportBasis(K(FULL()), clock + 2_000 + reports.BASIS_REARRIVAL_RESET_MIN_MS), e2, 'and only once');
+  // … and the pending flag is cleared by it: the same key, windows later, never resets again
+  for (const w of [2, 3, 4]) {
+    assert.equal(reports.noteReportBasis(K(FULL()), clock + 1_000 + w * reports.BASIS_REARRIVAL_RESET_MIN_MS), e2,
+      `${w} windows later: still no reset (a stuck pending flag would reset every window for the life of the worker)`);
+  }
 });
 
 test('★★ a FIRST sighting resets at once even inside a re-arrival window (a Core new to the account)', () => {
@@ -372,4 +395,101 @@ test('the worker warms only on a snapshot with a projection, not on the bare dev
   assert.match(w, /const hasProjections = \(\) => Object\.values\(snapshot\.devices\)\.some\(\(d\) => d\?\.projection != null\);/);
   assert.match(w, /if \(warming \|\| !hasProjections\(\)\) return;/, 'every warm pass, not only the first');
   assert.match(w, /if \(hasProjections\(\)\) \{ clearInterval\(firstWarm\); void warm\(\); \}/);
+});
+
+/* ── the runway's carried load survives a basis reset ───────────────────────────────────────── */
+
+test('★★★ a basis reset during a panel-load gap keeps the runway on its carried load (the alarm does not go quiet)', { timeout: 60_000 }, async () => {
+  coldWorker();
+  const silentPanel = (m: Record<string, Any>) => { for (const c of m[SN.P].projection.circuits) c.watts = null; return m; };
+  try {
+    const r0 = await reports.buildReport('runway', ctx(FULL())) as Any;
+    assert.equal(r0.recentLoadBasis, 'hour-mean');
+    // the panel goes silent: no panel_load row, no channel watts
+    panelSilent = true;
+    clock += 65 * 60_000;
+    const r1 = await reports.buildReport('runway', ctx(silentPanel(FULL()))) as Any;
+    assert.equal(r1.recentLoadBasis, 'carried');
+    assert.equal(r1.recentLoadWatts, r0.recentLoadWatts);
+    // a Core seen for the first time (cloud-dark at the restart, back now): a basis reset
+    const gen = flightBasis.basisGeneration();
+    const plus = silentPanel(FULL());
+    plus.COREXXX00XXX0006 = dpu('COREXXX00XXX0006', 'Core 6', 5, true);
+    clock += 60_000;
+    const r2 = await reports.buildReport('runway', ctx(plus)) as Any;
+    assert.equal(flightBasis.basisGeneration(), gen + 1, 'the arrival reset the caches');
+    assert.equal(r2.unavailable, null, 'not "panel-load history insufficient"');
+    assert.equal(r2.recentLoadBasis, 'carried');
+    assert.equal(r2.recentLoadWatts, r0.recentLoadWatts, 'the same carried watts');
+    assert.ok(r2.hoursToReserve != null || r2.hoursToEmpty != null || r2.endKwh != null, 'a numeric runway');
+  } finally {
+    panelSilent = false;
+    clock = NOW0;
+  }
+});
+
+/* ── the race through ONE shared weather fetch ──────────────────────────────────────────────── */
+
+/** Open-Meteo's hourly JSON for the synthetic sky (UTC labels, past 7 d + 4 d ahead). */
+function openMeteoJson(): unknown {
+  const time: string[] = [];
+  const cc: number[] = [];
+  const sw: number[] = [];
+  const tp: number[] = [];
+  const day0 = Math.floor(NOW0 / 86_400_000) * 86_400_000;
+  for (let t = day0 - 7 * 86_400_000; t < day0 + 4 * 86_400_000; t += H) {
+    time.push(new Date(t).toISOString().slice(0, 16));
+    cc.push(10);
+    sw.push(Math.round(850 * sunFrac(t)));
+    tp.push(25 + 8 * sunFrac(t));
+  }
+  return { utc_offset_seconds: 0, hourly: { time, cloud_cover: cc, shortwave_radiation: sw, temperature_2m: tp } };
+}
+
+/**
+ * Build `names` on `first`, then one turn later on the full map, with a COLD weather cache: every
+ * flight waits on the one in-flight Open-Meteo fetch (an undici MockAgent, 300 ms), so the flights
+ * on both bases resume from the same promise in one microtask drain. Returns, per name, how the
+ * full-map answer differs from a cold full-map build on the same weather.
+ */
+async function raceThroughSharedWeather(first: Record<string, Any>, names: readonly string[]): Promise<string[]> {
+  const { MockAgent, setGlobalDispatcher, getGlobalDispatcher } = await import('undici');
+  const prev = getGlobalDispatcher();
+  const agent = new MockAgent();
+  agent.disableNetConnect();
+  agent.get('https://api.open-meteo.com')
+    .intercept({ path: (p: string) => p.startsWith('/v1/forecast'), method: 'GET' })
+    .reply(200, openMeteoJson() as Any).delay(300).persist();
+  setGlobalDispatcher(agent);
+  try {
+    weatherMod.clearWeatherTestOverride();
+    coldWorker();
+    const pFirst = Promise.all(names.map((n) => reports.buildReport(n, ctx(first))));
+    await new Promise<void>((r) => setImmediate(r));
+    const pFull = Promise.all(names.map((n) => reports.buildReport(n, ctx(FULL())))); // an arrival: a reset
+    const [, full] = await Promise.all([pFirst, pFull]);
+    coldWorker();
+    const served: string[] = [];
+    for (let i = 0; i < names.length; i++) {
+      const ref = await reports.buildReport(names[i], ctx(FULL()));
+      const d: string[] = [];
+      diff(full[i], ref, names[i], d);
+      if (d.length) served.push(`${names[i]} ← ${d.slice(0, 3).join(' | ')}`);
+    }
+    return served;
+  } finally {
+    setGlobalDispatcher(prev);
+    await agent.close();
+    weatherMod.setWeatherCacheForTesting({ fetchedAt: NOW0, hours: wxHours } as Any);
+  }
+}
+
+test('★★★ race through one shared weather fetch: a full-map runway is not answered with the dip map\'s (a source returning)', { timeout: 120_000 }, async () => {
+  // The panel's source list without one home Core, then with it: the dip flight's runway and
+  // forecast alerts resume from the fetch one microtask ahead of the full map's.
+  assert.deepEqual(await raceThroughSharedWeather(withoutSource(), ['runway', 'forecastAlerts', 'clipping']), []);
+});
+
+test('★★ race through one shared weather fetch: every warm report at once', { timeout: 120_000 }, async () => {
+  assert.deepEqual(await raceThroughSharedWeather(withoutSource(), NAMES), []);
 });

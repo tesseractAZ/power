@@ -35,6 +35,7 @@ import {
   resetWorkerReportCaches,
 } from './analytics.js';
 import { reportBasisKey } from './analytics/fleet.js';
+import { advanceBasisGeneration, basisGeneration, runInBasisGeneration, resetBasisGenerationForTesting } from './analytics/flightBasis.js';
 import { computeTotals, circuitHistoryByDay } from './aggregator.js';
 import { backtestPvForecast } from './backtest.js';
 
@@ -321,13 +322,13 @@ const reportFlights = keyedSingleFlight();
  * Now every request computes the basis (reportBasisKey: projected Cores | projected panels |
  * panel-listed Cores) from the snapshot it runs on:
  *  - when an element ARRIVES, the worker's result caches are reset (resetWorkerReportCaches) and
- *    the basis epoch moves on;
+ *    the basis generation moves on (analytics/flightBasis.ts);
  *  - the basis is part of the flight key, so a request on a new basis never joins a flight that
  *    started on an old one;
- *  - a flight that settles in a later epoch than it started resets the caches again: it wrote
- *    them after the reset, on the basis it started on (the readiness-vs-value-across-an-await
- *    pattern). The check is chained directly on the builder, so it runs before a request in a
- *    later turn can read what the flight wrote.
+ *  - each flight runs in the generation it was asked in, and a flight whose generation has been
+ *    superseded writes no cache (cacheWritable): what it computes after the reset reaches only
+ *    its own caller (the readiness-vs-value-across-an-await pattern). A flight on the current
+ *    basis keeps everything it caches.
  *
  * An element that LEAVES does not reset (what is cached was built on more than the map now
  * holds; the TTLs and the forecast's own model check bound it). Only the panel's source list can
@@ -343,12 +344,11 @@ interface BasisState {
   key: string | null;
   parts: Set<string>;
   seen: Set<string>;
-  epoch: number;
   lastRearrivalResetMs: number;
   pending: boolean;
 }
 const freshBasis = (): BasisState => ({
-  key: null, parts: new Set(), seen: new Set(), epoch: 0, lastRearrivalResetMs: -Infinity, pending: false,
+  key: null, parts: new Set(), seen: new Set(), lastRearrivalResetMs: -Infinity, pending: false,
 });
 let basis = freshBasis();
 
@@ -363,15 +363,15 @@ const countsOf = (key: string | null): string => {
 };
 
 function resetBasisCaches(): void {
-  basis.epoch++;
+  advanceBasisGeneration();
   basis.pending = false;
   resetWorkerReportCaches();
 }
 
 /** v1.187.18 — note the basis a request runs on, resetting the worker's result caches when an
- *  element arrives (see above). Returns the epoch the request runs in. Exported for tests. */
+ *  element arrives (see above). Returns the generation the request runs in. Exported for tests. */
 export function noteReportBasis(key: string, nowMs: number = Date.now(), log: (m: string) => void = () => {}): number {
-  if (key === basis.key && !basis.pending) return basis.epoch;
+  if (key === basis.key && !basis.pending) return basisGeneration();
   const parts = basisParts(key);
   const arrived = parts.filter((e) => !basis.parts.has(e));
   const firstSight = arrived.some((e) => !basis.seen.has(e));
@@ -381,38 +381,31 @@ export function noteReportBasis(key: string, nowMs: number = Date.now(), log: (m
   basis.parts = new Set(parts);
   if (firstSight) {
     resetBasisCaches();
-    log(`analytics-worker: report basis ${countsOf(prev)} → ${countsOf(key)}: report caches reset (epoch ${basis.epoch})`);
+    log(`analytics-worker: report basis ${countsOf(prev)} → ${countsOf(key)}: report caches reset (generation ${basisGeneration()})`);
   } else if (arrived.length > 0 || basis.pending) {
     if (nowMs - basis.lastRearrivalResetMs >= BASIS_REARRIVAL_RESET_MIN_MS) {
       basis.lastRearrivalResetMs = nowMs;
       resetBasisCaches();
-      log(`analytics-worker: report basis ${countsOf(prev)} → ${countsOf(key)} (a source returned): report caches reset (epoch ${basis.epoch})`);
+      log(`analytics-worker: report basis ${countsOf(prev)} → ${countsOf(key)} (a source returned): report caches reset (generation ${basisGeneration()})`);
     } else if (!basis.pending) {
       basis.pending = true;
       log(`analytics-worker: report basis ${countsOf(prev)} → ${countsOf(key)} (a source returned within ${BASIS_REARRIVAL_RESET_MIN_MS / 60_000} min of the last): reset deferred`);
     }
   }
-  return basis.epoch;
+  return basisGeneration();
 }
 
 /** Test seam: forget the basis (a fresh worker's state). */
-export function resetReportBasisForTesting(): void { basis = freshBasis(); }
-
-/** The flight's own straddle check, chained on the builder itself: a synchronous builder is
- *  checked before it returns, an asynchronous one the moment its promise settles. */
-function settleOnBasis(r: unknown, epoch: number): unknown {
-  const check = () => { if (epoch !== basis.epoch) resetBasisCaches(); };
-  if (r instanceof Promise) return r.finally(check);
-  check();
-  return r;
-}
+export function resetReportBasisForTesting(): void { basis = freshBasis(); resetBasisGenerationForTesting(); }
 
 export async function buildReport(name: string, ctx: ReportCtx, args: ReportArgs = {}): Promise<unknown> {
   const b = BUILDERS[name];
   if (!b) throw new Error(`unknown report '${name}'`);
   const key = reportBasisKey(devicesOf(ctx));
-  const epoch = noteReportBasis(key, Date.now(), ctx.log);
-  return reportFlights.run(`${buildFlightKey(name, args)} @${key}`, () => settleOnBasis(b(ctx, args), epoch));
+  // The generation is fixed when the report is ASKED: a flight scheduled before a reset in the
+  // same turn still belongs to the basis it was asked on.
+  const gen = noteReportBasis(key, Date.now(), ctx.log);
+  return reportFlights.run(`${buildFlightKey(name, args)} @${key}`, () => runInBasisGeneration(gen, () => b(ctx, args)));
 }
 
 /** v1.186.0 — give queued macrotasks (the worker's 'message' events) a turn. Awaiting a

@@ -56,13 +56,16 @@ test('★★★ pack risk: a rebuilt degradation report is scored at once, not a
   assert.ok(pack1(r2).score0to100 > pack1(r1).score0to100, 'and on its figures');
 });
 
-test('★★ pack risk: each of the four input reports keys the cache', () => {
-  resetRiskCache();
+test('★★★ pack risk: each of the four input reports keys the cache — the degradation report rebuilt ALONE included', () => {
+  // The degradation report is often rebuilt on its own (a pending boot report expiring after
+  // DEGRADE_PENDING_TTL_MS, a pack or membership arriving) while the other three stay cached.
   const base = reportsAt(5_000, 1.0);
-  const r1 = risk(base);
-  for (const k of ['thermalEvents', 'internalR', 'chargeCurve']) {
+  for (const k of ['degradation', 'thermalEvents', 'internalR', 'chargeCurve']) {
+    resetRiskCache();
+    const r1 = risk(base);
+    assert.equal(risk(base), r1, `${k}: the same four reports, cached`);
     const next = { ...base, [k]: { ...base[k], generatedAt: 6_000 } };
-    assert.notEqual(risk(next), r1, `${k}`);
+    assert.notEqual(risk(next), r1, `${k} rebuilt alone: rescored`);
   }
 });
 

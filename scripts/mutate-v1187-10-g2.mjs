@@ -159,8 +159,8 @@ const MUTANTS = [
   {
     id: 'B-vi. ★★ a pending runway is cached',
     file: AN,
-    find: '  if (!basisPending) runwayCache = { ts: now, value };',
-    to: '  runwayCache = { ts: now, value }; /* MUTANT */',
+    find: '  if (!basisPending && cacheWritable()) runwayCache = { ts: now, value };',
+    to: '  if (cacheWritable()) runwayCache = { ts: now, value }; /* MUTANT */',
     why: 'The boot figures are served for RUNWAY_TTL_MS after the Cores have joined.',
   },
   {
