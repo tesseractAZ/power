@@ -25,9 +25,11 @@ time-of-use rate. By default it only advises; when the owner opts in it performs
 one announced, cancellable, bounded and auto-reverting charge per night.
 
 The reference deployment is a Phoenix, AZ off-grid home: an EcoFlow **Smart Home
-Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each =
-92 kWh usable), a **42-panel / ~16.8 kW** array, and an EVSE — on the APS R-EV
-time-of-use rate.
+Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each:
+15 × 6.144 kWh = **92.16 kWh nameplate**, the pool the panel itself reports — the
+inverter units add no capacity), a **42-panel / ~16.8 kW** array, and an EVSE —
+on the APS R-EV time-of-use rate. Two further Cores sit off the panel as bench
+spares: they are monitored, but are not part of the backup pool.
 
 > 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~11,670
 > lines) documents **every** feature and engine — what each does, the exact
@@ -277,7 +279,7 @@ Every configuration option is documented in
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 4,115 tests
+cd server && npm install && npm test     # 4,119 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -288,8 +290,8 @@ open a PR whose squash subject starts `Release vX.Y.Z …`. `main` is branch-
 protected. CI runs the three type-checks (server, web, server tests), the test suite, the
 mutation-harness anchor check, the secrets scan, the dependency-advisory gate, the add-on
 config/translation validator, the Dockerfile smoke build, the docs `.docx`+`.pdf` build and
-CodeQL on every pull request; the server and web type-checks, the smoke build, the docs build
-and CodeQL are required status checks. Every engine change also clears an **adversarial multi-agent review** before it
+CodeQL on every pull request, and every one of them (with the release-PR version check below) is a
+required status check on `main`. Every engine change also clears an **adversarial multi-agent review** before it
 can reach the alarm path. Merging
 a `Release …` subject fires `tag-release.yml`, which creates the `vX.Y.Z` tag and
 dispatches `images.yml` — that workflow runs the test suite, builds the multi-arch GHCR
@@ -323,7 +325,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **91 harnesses** (`scripts/mutate-*.mjs`) holding **1867
+regression. There are **92 harnesses** (`scripts/mutate-*.mjs`) holding **1874
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that

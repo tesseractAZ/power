@@ -1,6 +1,11 @@
 name: Release
 
-# One-click release pipeline (ruleset-compatible).
+# One-click release pipeline (ruleset-compatible), but NOT the path releases
+# take: README's release pipeline is a hand-made "Release vX.Y.Z …" PR, and this
+# workflow last ran for v0.15.3 (PR #20, 2026-06-09). A PR opened here with
+# GITHUB_TOKEN does not trigger ci.yml or codeql.yml (PR #20 carried only the
+# default-setup CodeQL checks), so main's required status checks would never
+# report on it and auto-merge could not fire; it would need an admin merge.
 #
 # Trigger from GitHub: Actions → Release → "Run workflow". The workflow:
 #   1. Computes the next version (semver bump or explicit override)
@@ -46,7 +51,7 @@ jobs:
     name: Cut release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -217,7 +222,7 @@ jobs:
             echo
             echo "**The Release appearing on GitHub is the \"go ahead and update\" signal.** Then in Home Assistant:"
             echo
-            echo "**Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, open **EcoFlow Panel**, and click **Update**."
+            echo "**Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, open **Power**, and click **Update**."
             echo
             echo "> If auto-merge is disabled on the repo, just click **Merge** on the PR above — steps 2–3 still run automatically."
           } >> "$GITHUB_STEP_SUMMARY"

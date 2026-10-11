@@ -1,11 +1,15 @@
 name: Publish images
 
-# Build + push multi-arch Docker images to GHCR on tag push, then cut the
+# Build + push multi-arch Docker images to GHCR for a release tag, then cut the
 # GitHub Release that announces the version is fully installable.
 #
 # Flow:
-#   1. On `v*.*.*` tag push (or manual workflow_dispatch for a re-run), build
-#      amd64 + aarch64 in parallel via buildx + QEMU.
+#   1. tag-release.yml dispatches this workflow right after it pushes the
+#      vX.Y.Z tag: a tag pushed with GITHUB_TOKEN does not fire the
+#      `push: tags` trigger below (only a tag pushed by hand would). A manual
+#      workflow_dispatch re-runs a version. The server suite runs first, then
+#      amd64 and aarch64 build in parallel, each on its own native runner
+#      (ubuntu-24.04, ubuntu-24.04-arm) with no emulation.
 #   2. Each image is pushed to ghcr.io/<owner>/{arch}-ecoflow-panel as both
 #      :{version} and :latest. HA Supervisor pulls these instead of building
 #      on the Pi.
@@ -61,7 +65,7 @@ jobs:
     needs: resolve
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.tag }}
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
@@ -96,7 +100,8 @@ jobs:
           # QEMU emulation path entirely. Previously aarch64 ran on amd64
           # hosts via QEMU, which routinely stretched the build to 30–60 min
           # when GitHub's runner pool was busy (50+ min on v0.7.6 + v0.7.7).
-          # Native runners hold steady around 3 min and match amd64.
+          # Native runners take about a minute per arch with the GHA layer
+          # cache (31–76 s per build job across v1.187.8–v1.187.16).
           - arch: aarch64
             platform: linux/arm64
             # v1.7.0 (security #6, CWE-1357) — digest-pin the base image so a
@@ -109,19 +114,24 @@ jobs:
             base: ghcr.io/home-assistant/amd64-base:3.21@sha256:995fc8a44059b3bac015603f63b56b1bf935c2227c5176823d9bb76b45fc2249
             runner: ubuntu-24.04
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.tag }}
 
-      # QEMU stays so the workflow degrades gracefully if a native runner is
-      # unavailable (buildx falls back to emulation). On a matched native
-      # runner, this is effectively a sub-second no-op.
+      # QEMU is not a fallback, and no build here uses it: runs-on pins each arch
+      # to its native runner (an unavailable arm64 runner leaves the job queued;
+      # it never moves to an amd64 host), and each build targets only its host's
+      # platform. The step still registers every binfmt emulator and pulls
+      # tonistiigi/binfmt from Docker Hub (~9 s per job in v1.187.16), a Docker
+      # Hub dependency whose pull already errored once (v1.187.12, below).
       # v0.9.77 — bumped docker/* actions to Node-24 majors (v4 / v7). GitHub
       # is forcing Node 24 as the default runtime on June 2 2026 and removing
       # Node 20 entirely on Sep 16 2026; the previous @v3 / @v5 pins all ran
       # on Node 20 and were emitting deprecation warnings on every build.
-      # No input-API changes for our usage — these majors are pure runtime
-      # upgrades plus internal ESM refactors.
+      # No input-API changes for our usage — these majors are runtime upgrades
+      # plus internal ESM refactors; build-push-action v6+ also writes a build
+      # summary and uploads a build-record artifact by default (a failure there
+      # is only a warning).
       # 2026-10-10 (v1.187.12) — the runner could not get a Docker Hub token to pull
       # tonistiigi/binfmt and moby/buildkit; the amd64 job failed before building, the
       # release job was skipped, and the version had no GitHub Release until a manual
@@ -194,8 +204,8 @@ jobs:
       # v0.9.48 — CodeNotary signing steps REMOVED. See build.yaml for
       # the postmortem. tl;dr: vcn OSS project is dead, HA Supervisor
       # rating ceiling for us is now ~7 (with v0.9.44 AppArmor profile).
-      # CN_USER + CN_PASSWORD secrets are harmless if left in the repo;
-      # nothing references them.
+      # The CN_USER + CN_PASSWORD secrets have since been deleted (the
+      # repository has no Actions secrets as of v1.187.16).
 
   release:
     name: Cut GitHub Release
@@ -214,7 +224,7 @@ jobs:
     # takes ~2 min.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.tag }}
 
@@ -408,11 +418,7 @@ jobs:
             echo "- \`ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/aarch64-ecoflow-panel:${V}\`"
             echo "- \`ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/amd64-ecoflow-panel:${V}\`"
             echo
-            echo "On your Pi:"
-            echo
-            echo '```bash'
-            echo "cd /addons/ecoflow-panel && git pull"
-            echo '```'
-            echo
-            echo "Home Assistant detects the new version and surfaces an **Update** button."
+            echo "In Home Assistant: **Settings → Add-ons → Add-on Store → ⋮ → Check for updates**,"
+            echo "open **Power**, and click **Update**. A local-folder install (README steps 2–3)"
+            echo "first needs \`git pull\` in \`/addons/ecoflow-panel\` to see the new version."
           } >> "$GITHUB_STEP_SUMMARY"

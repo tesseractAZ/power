@@ -1,3 +1,23 @@
+## 1.187.17
+
+### One version of each build tool; documentation corrections
+
+**Build and release**
+
+- Every build and release workflow now uses the same version of each GitHub Action. The checkout and file-upload steps had drifted two and three major versions apart between workflows, and the Docker test build still used versions written for Node.js 20, a runtime GitHub has deprecated. A new check fails the build if a workflow drifts again, or if a step names a tool by a version label that can move.
+- The Docker test build no longer hands two comment lines to Docker as build settings.
+- The update instructions on the release workflows' run summaries name the add-on as the store shows it (**Power**) and cover store installs.
+
+**Documentation**
+
+- The project overview gives the home battery bank as nameplate capacity — three Cores of five packs, 92.16 kWh — rather than "usable", and notes the two bench Cores are not part of it.
+- The security policy, project overview and reference manual state that every CI check is required before a change can merge.
+- Comments in the build workflows, and the description of which browser origins the add-on accepts (private-network hosts on any port), corrected to match what they describe.
+
+**Dependencies**
+
+- Server: @fastify/websocket 11.3.3. Web tooling: vite 8.3.4, @vitejs/plugin-react 6.1.2. CI: codeql-action 4.38.3.
+
 ## 1.187.16
 
 ### Every change now needs permission; documentation reviewed
