@@ -221,3 +221,33 @@ test('★★ the Release reads each build step\'s OUTCOME, and the PDF renders o
   assert.match(key(pdf, 'if') ?? '', /steps\.docx\.outcome == 'success'/, 'a truncated .docx renders a truncated PDF');
   assert.match(runBlock(pdf), /^test -s "EcoFlow-Panel-Documentation-v\$\{V\}\.pdf"$/m, 'no PDF is a failed step, not a green one');
 });
+
+/** Runs the Release step against a stub `gh` and a stub `git` listing `tags` (null = the lookup fails). */
+function releaseArgs(tags: string[] | null): string[] {
+  const script = runBlock(RELEASE_STEP).replace(/\$\{\{ needs\.resolve\.outputs\.tag \}\}/g, TAG);
+  const dir = mkdtempSync(join(tmpdir(), 'ef-release-latest-'));
+  try {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$GH_ARGS"\n');
+    const lines = (tags ?? []).map((t) => `0000000000000000000000000000000000000000\trefs/tags/${t}`).join('\n');
+    writeFileSync(join(bin, 'git'), tags == null ? '#!/bin/sh\necho "remote: Not Found" >&2\nexit 128\n' : `#!/bin/sh\nprintf '%s\\n' '${lines.replace(/\t/g, '\\t')}' | sed 's/\\\\t/\t/'\n`);
+    for (const f of ['gh', 'git']) chmodSync(join(bin, f), 0o755);
+    writeFileSync(join(dir, 'step.sh'), script);
+    const r = spawnSync('bash', ['-e', join(dir, 'step.sh')], {
+      cwd: dir,
+      env: { PATH: `${bin}:${process.env.PATH}`, GH_ARGS: join(dir, 'gh.args'), GH_TOKEN: 'none', V, GITHUB_REPOSITORY: 'owner/repo', DOCX_OUTCOME: 'failure', PDF_OUTCOME: 'failure' },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `the step failed: ${r.stderr}`);
+    return readFileSync(join(dir, 'gh.args'), 'utf8').split('\n').filter(Boolean);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('★★ only the highest version is marked Latest; a re-run older release is not; a failed lookup leaves it to GitHub', () => {
+  assert.ok(releaseArgs(['v0.0.0-alpha', TAG]).includes('--latest=true'), 'the highest tag is Latest');
+  assert.ok(releaseArgs([TAG, 'v99.0.0']).includes('--latest=false'), 'an older version re-run after a newer one is not Latest');
+  assert.ok(!releaseArgs(null).some((a) => a.startsWith('--latest')), 'a failed lookup passes no flag (GitHub decides)');
+});
