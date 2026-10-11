@@ -34,16 +34,10 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # Allow binding to privileged ports (8787 and 2323 are unprivileged
   # but s6-overlay needs net_bind_service for some pre-start tasks),
   # plus setuid/setgid for the s6 user-switching dance.
-  capability net_bind_service,
-  capability setuid,
-  capability setgid,
+  # v1.187.15 — the capability ALLOW LIST from the 2026-10-11 review (complain-mode profiling of
+  # a running instance and an isolated boot): only what the add-on was seen to use.
   capability chown,
   capability dac_override,
-  capability dac_read_search,
-  capability fowner,
-  capability fsetid,
-  capability kill,
-  capability sys_chroot,
 
   # Explicitly DENY the dangerous capabilities. AppArmor's default is
   # "allow if not denied" — but these are worth calling out so any
@@ -80,7 +74,14 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # crash-loop, so they can't be verified by the add-on-log EACCES method.
   file,
   signal,
-  network,
+  # v1.187.15 — the socket families in use: TCP and UDP (DNS) over IPv4/IPv6, unix (s6's
+  # IPC), netlink (Node's interface listing). No raw or packet sockets.
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+  network unix,
+  network netlink raw,
 
   # s6-overlay init system (HA base image uses s6).
   /init ix,
@@ -213,6 +214,12 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   deny /lib/{,**} wl,
   deny /lib64/{,**} wl,
   deny /init wl,
+  # v1.187.15 — nothing writes these after the image build (2026-10-11: no file on the
+  # container's root filesystem changed after start); write-lock them like the code dirs.
+  deny /etc/{,**} wl,
+  deny /package/{,**} wl,
+  deny /command/{,**} wl,
+  deny /var/{cache,lib,log,spool,opt,mail,local}/{,**} wl,
 
   # Deny mount / umount / pivot_root (no container escape attempts).
   deny mount,
