@@ -83,10 +83,22 @@ test('v1.45.0 — warn-band spread on a >= 95% pack is visible but annunciate:fa
   assert.match(a!.detail, /top-of-charge/i);
 });
 
-test('v1.45.0 — the same spread at 94% annunciates normally (quiet line is 95)', () => {
-  const a = vdiffWarn(dpuWithPack({ maxVolDiffMv: 30, balanceState: 0 }, 94));
-  assert.ok(a);
-  assert.notEqual(a!.annunciate, false);
+test('v1.187.14 — the warning push quiets from the plateau (85%): 94% and 85% are visible but do not push; 84% and the 64% morning case still push', () => {
+  // 2026-10-10: a top-up pushed nine warn-band spreads while the packs climbed through 85-95%.
+  for (const soc of [94, 85]) {
+    const a = vdiffWarn(dpuWithPack({ maxVolDiffMv: 30, balanceState: 0 }, soc));
+    assert.ok(a, `visible at ${soc}%`);
+    assert.equal(a!.annunciate, false, `no push at ${soc}%`);
+  }
+  for (const soc of [84, 64]) {
+    const a = vdiffWarn(dpuWithPack({ maxVolDiffMv: 30, balanceState: 0 }, soc));
+    assert.ok(a);
+    assert.notEqual(a!.annunciate, false, `still pushes at ${soc}%`);
+  }
+  // The critical line on the plateau is untouched: 90 mV at 90% still annunciates.
+  const crit = vdiffCrit(dpuWithPack({ maxVolDiffMv: 92, balanceState: 0 }, 90));
+  assert.ok(crit);
+  assert.notEqual(crit!.annunciate, false);
 });
 
 test('v1.45.0 — a plateau-critical spread (>= 90 mV) at 96% still annunciates as critical', () => {
