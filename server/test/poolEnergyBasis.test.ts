@@ -19,6 +19,7 @@ import {
   computeRunway,
   resetRunwayCache,
   resetPoolEnergyBasisForTesting,
+  resetWorkerReportCaches,
   setPoolBasisOverrideForTesting,
   runwayDrainW,
   runwayPoolOverheadW,
@@ -361,6 +362,71 @@ test('★★★ computeRunway — a reading with no connected source keeps the m
   // One Core leaves the panel: the two left still carry the floor.
   const two = runway(fleetOf(panel(['C1', 'C2'], { ...plate, backupFullCapWh: 61_440, backupRemainWh: 0.6 * 61_440 }), ...cores), 2_000);
   assert.equal(two.overheadW, 270);
+});
+
+test('★★★ only a COMPLETE measurement moves the applied scale: a partial map answers min(applied, substitute) and records nothing', () => {
+  const t = new PoolEnergyBasisTracker({ path: null });
+  const p = panel(['C1', 'C2', 'C3']);
+  const c1 = core('C1', 0.9404), c2 = core('C2', 0.9188), c5 = core('C3', 0.9726);
+  const full = (0.9404 + 0.9188 + 0.9726) / 3;
+  // Fresh tracker, boot: only Core 2 has projected — the others take the lowest known (0.9188).
+  const boot = t.evaluate(fleetOf(p, c2), p, NOW);
+  assert.equal(boot.capacityBasis, 'min-known');
+  assert.ok(near(boot.capacityScale, 0.9188, 1e-9), 'conservative while the map is partial');
+  // The full map: the measured figure applies AT ONCE — the partial figure was never recorded.
+  const all = t.evaluate(fleetOf(p, c1, c2, c5), p, NOW + 60_000);
+  assert.equal(all.capacityBasis, 'measured');
+  assert.ok(near(all.capacityScale, full, 1e-9), `got ${all.capacityScale}`);
+  assert.equal(all.increaseHeldSinceMs, null);
+  // A Core recalibrates upward (an increase now on hold), then goes cloud-offline: its held ratio
+  // is the HIGHER reading, and the answer must still not exceed the applied figure.
+  const t2 = new PoolEnergyBasisTracker({ path: null });
+  const applied = t2.evaluate(fleetOf(p, core('C1', 0.94), core('C2', 0.94), core('C3', 0.94)), p, NOW).capacityScale;
+  assert.ok(near(t2.evaluate(fleetOf(p, core('C1', 0.94), core('C2', 0.94), core('C3', 0.99)), p, NOW + HOUR).capacityScale, applied, 1e-12), 'held');
+  const offline = t2.evaluate(fleetOf(p, core('C1', 0.94), core('C2', 0.94)), p, NOW + 2 * HOUR); // C3 held at 0.99
+  assert.equal(offline.capacityBasis, 'held');
+  assert.ok(near(offline.candidateScale, (0.94 + 0.94 + 0.99) / 3, 1e-12));
+  assert.ok(near(offline.capacityScale, applied, 1e-12), `the answer stays at the applied ${applied}; got ${offline.capacityScale}`);
+  assert.equal(offline.increaseHeldSinceMs, NOW + HOUR, 'a partial map neither advances nor clears the hold');
+  // …and a lower substitute answers lower at once, without planting it: back to complete → applied again.
+  const lowSub = t2.evaluate(fleetOf(p, core('C1', 0.88)), p, NOW + 3 * HOUR);
+  assert.ok(near(lowSub.capacityScale, (0.88 + 0.94 + 0.99) / 3, 1e-12) && lowSub.capacityScale < applied,
+    `a lower substitute answers at once; got ${lowSub.capacityScale}`);
+  const back = t2.evaluate(fleetOf(p, core('C1', 0.94), core('C2', 0.94), core('C3', 0.94)), p, NOW + 4 * HOUR);
+  assert.ok(near(back.capacityScale, applied, 1e-12), 'no 24 h wait after the Cores rejoin at the applied reading');
+  assert.equal(back.increaseHeldSinceMs, null);
+});
+
+test('★★★ boot basis — partial maps, the worker\'s basis reset, then the first full map: the measured scale, and the reset leaves the basis alone', () => {
+  const plate = { backupBatPercent: 60, backupRemainWh: 0.6 * 92_160, backupFullCapWh: 92_160, backupReserveSoc: 16 };
+  const p = panel(['C1', 'C2', 'C3'], plate);
+  const c1 = core('C1', 0.9404), c2 = core('C2', 0.9188), c5 = core('C3', 0.9726);
+  const full = Math.round(((0.9404 + 0.9188 + 0.9726) / 3) * 10_000) / 10_000;
+  const at = (devs: Record<string, DeviceSnapshot>) => {
+    resetWorkerReportCaches(); // what the report chokepoint does as the boot basis grows
+    const now = Date.now();
+    const rec = makeRecorderStub({ query: (_sn, m) => (m === 'panel_load' ? [{ ts: now - 1_800_000, value: 2_000 }, { ts: now - 300_000, value: 2_000 }] : []) });
+    return computeRunway(devs, rec, null);
+  };
+  // 1. One Core projected, the panel not yet: no pool, no runway, no basis evaluated.
+  const first = at(fleetOf(c1));
+  assert.notEqual(first.unavailable, null);
+  assert.equal(first.capacityScale, null);
+  assert.equal(first.overheadW, null);
+  // 2. The panel and Core 2: Cores 1 and 5 take the lowest known (Core 1's ratio was never stored —
+  //    step 1 evaluated nothing), the floor overhead applies.
+  const partial = at(fleetOf(p, c2));
+  assert.equal(partial.capacityBasis, 'min-known');
+  assert.equal(partial.capacityScale, 0.9188);
+  assert.equal(partial.overheadW, 270);
+  // 3. The first full map after the reset: the measured scale at once, not held at 0.9188.
+  const complete = at(fleetOf(p, c1, c2, c5));
+  assert.equal(complete.capacityBasis, 'measured');
+  assert.equal(complete.capacityScale, full);
+  // 4. The reset does not wipe the measured basis: Core 5 drops off the map, its held ratio stands.
+  const again = at(fleetOf(p, c1, c2));
+  assert.equal(again.capacityBasis, 'held');
+  assert.equal(again.capacityScale, full);
 });
 
 /** A tiny deterministic PRNG (mulberry32) so the property test is reproducible. */

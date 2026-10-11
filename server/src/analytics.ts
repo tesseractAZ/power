@@ -10729,7 +10729,10 @@ export function setBayesianModelForTesting(value: BayesianSolarModel | null): vo
  * basis is served on a new one. Called by the report chokepoint (reports.ts buildReport) when the
  * basis gains an element; a flight still running on the old basis writes none of them afterwards
  * (each write is gated on cacheWritable, analytics/flightBasis.ts). State that is not a result
- * — the runway's carried load and to-empty hysteresis — is deliberately left alone.
+ * — the runway's carried load and to-empty hysteresis, and (v1.187.19) the pool's measured
+ * capacity basis (poolBasisTracker: persisted per-Core ratios and the applied scale with its
+ * increase hold) — is deliberately left alone. A partial map cannot corrupt that basis: only a
+ * complete measurement moves the applied scale (poolEnergyBasis.ts).
  *
  * Deliberately NOT reset (test/workerCacheInventory.test.ts fails on a cache in neither list):
  *   stormPrepCache     — the NWS feed only, read on the main thread (alertMonitor);

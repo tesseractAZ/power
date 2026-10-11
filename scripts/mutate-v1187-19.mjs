@@ -34,6 +34,9 @@
  *   V-xxx    the reserve actuator reads the runway's measured capacity
  *   V-xxxi   the night-charge planner sizes on the runway's measured capacity
  *   V-xxxii  a secondary panel's runway is computed without its measured basis
+ *   V-xxxiii a figure built on substitutes (a partial map) is recorded as the applied scale
+ *   V-xxxiv  a figure built on substitutes may exceed the applied scale
+ *   V-xxxv   the worker's basis reset wipes the measured basis
  *
  *   node scripts/mutate-v1187-19.mjs
  */
@@ -277,6 +280,27 @@ const MUTANTS = [
     find: '            const pr = panelDrainRunway(p, samples, nowMs, panelPoolBasisTracker.evaluate(devs, p, nowMs));',
     to: '            const pr = panelDrainRunway(p, samples, nowMs, panelPoolBasisTracker ? undefined : undefined); /* MUTANT */',
     why: 'A second panel\'s runway and alarm count nameplate kWh again.',
+  },
+  {
+    id: 'V-xxxiii. ★★★ a figure built on substitutes (a partial map) is recorded as the applied scale',
+    file: POOL,
+    find: "    if (cand.basis !== 'measured') {",
+    to: "    if (cand.basis !== 'measured' && cand.connected < 0) { /* MUTANT */",
+    why: 'A boot map with one Core projected plants the lowest known ratio; the full map waits 24 h.',
+  },
+  {
+    id: 'V-xxxiv. ★★★ a figure built on substitutes may exceed the applied scale',
+    file: POOL,
+    find: '        capacityScale: prev ? Math.min(prev.scale, cand.scale) : cand.scale,',
+    to: '        capacityScale: cand.scale, /* MUTANT */',
+    why: 'A cloud-offline Core\'s older, higher held ratio lengthens the runway past the measured one.',
+  },
+  {
+    id: 'V-xxxv. ★★★ the worker\'s basis reset wipes the measured basis',
+    file: ANALYTICS,
+    find: '  multiDayCache = null;\n  bayesCache = null;\n}\n',
+    to: '  multiDayCache = null;\n  bayesCache = null;\n  poolBasisTracker.reset(); /* MUTANT */\n}\n',
+    why: 'Every boot-basis step forgets the held ratios: a Core still reporting in runs on the lowest known.',
   },
 ];
 

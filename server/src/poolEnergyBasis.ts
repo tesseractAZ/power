@@ -30,7 +30,12 @@
  *   nameplate.
  * - Asymmetric: a lower figure applies at once; a higher one only after it has held for
  *   CAPACITY_INCREASE_HOLD_MS (a BMS recalibration upward, or a better Core swapped into a slot,
- *   waits a day; the figure applied is the lowest seen during the hold).
+ *   waits a day; the figure applied is the lowest seen during the hold). Only a COMPLETE
+ *   measurement (every connected Core reporting) moves the applied figure or its hold; a figure
+ *   built on substitutes is answered as min(applied, it) and not recorded, so a partial map at a
+ *   restart can neither lengthen the runway nor plant a low figure the full map must wait out.
+ * - Not a report result: the worker's basis reset (resetWorkerReportCaches) leaves it alone, like
+ *   the runway's carried load; it is persisted measured state.
  *
  * THREADING. computeRunway / getDayForecast / computeMultiDayForecast run in the analytics
  * WORKER; they share the worker's tracker (analytics.ts), which is the only writer of
@@ -251,6 +256,22 @@ export class PoolEnergyBasisTracker {
       }
     }
     const prev = this.panels.get(panel.sn);
+    if (cand.basis !== 'measured') {
+      // A figure built on SUBSTITUTES — a connected Core not reporting (a restart while the Cores
+      // report in, a cloud-offline Core) took its held ratio, the lowest known, or nameplate — is
+      // this instant's answer, never above the applied figure, but it is not recorded: the
+      // increase hold runs only between complete measurements. Recorded, a partial boot map
+      // (one Core projected, the others on the lowest known ratio) planted a low figure that the
+      // first full map then had to wait 24 h out.
+      if (dirty) this.save();
+      return {
+        capacityScale: prev ? Math.min(prev.scale, cand.scale) : cand.scale,
+        capacityBasis: cand.basis,
+        connectedCores: cand.connected,
+        candidateScale: cand.scale,
+        increaseHeldSinceMs: prev?.pendingSinceMs ?? null,
+      };
+    }
     let next: PanelHold;
     if (!prev || cand.scale <= prev.scale) {
       // First figure for this panel, or a decrease (or no change): applies at once.

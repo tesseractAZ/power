@@ -4024,7 +4024,12 @@ disagrees with the Core's `packCount`, or a Core that is offline or has not repo
 Core incomplete: it uses its last complete ratio (persisted, `POOL_ENERGY_BASIS_DIR`, valid 30
 days), else the lowest ratio known for any Core; plain nameplate (1.0) only when no ratio has ever
 been measured. A lower scale applies at once; a higher one only after it has held 24 h (the
-lowest figure seen during the hold is applied). `capacityBasis` names the worst input used:
+lowest figure seen during the hold is applied). Only a complete measurement (every connected Core
+reporting) moves the applied scale or its hold: a figure built on substitutes is answered as
+`min(applied, figure)` and not recorded, so a partial boot map neither lengthens the runway nor
+plants a low figure that the first full map must wait 24 h out. The worker's basis reset
+(`resetWorkerReportCaches`) leaves this state alone: it is persisted measurement, not a report
+result. `capacityBasis` names the worst input used:
 `measured` | `held` | `min-known` | `nameplate`. The analytics worker's tracker is the only one
 the house runway and the forecasts read; a secondary panel's drain runway (`panelRunway.ts`,
 main thread) has its own tracker and file and applies the scale only — its drain is measured at
