@@ -1,7 +1,8 @@
 /**
  * v0.9.27 — Hierarchical Bayesian shrinkage for pack-level estimates.
  *
- * Track D. The operator has 25 packs (5 DPUs × 5 packs). Estimating each pack's
+ * Track D. One observation per pack across every DPU on the account (24 packs on
+ * 5 DPUs at 2026-10; a DPU carries one to five, and counts change). Estimating each pack's
  * metrics (SoH, IR, vol-spread, cycles-to-EOL) IN ISOLATION gives noisy
  * per-pack numbers. Pooling them gives precise fleet-mean but loses
  * individual signal. The right answer is **partial pooling** — let each

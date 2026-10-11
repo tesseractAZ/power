@@ -24,9 +24,9 @@ import {
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
  *
- * The 5 battery packs inside a DPU are wired in parallel, identical age and
+ * The battery packs inside a DPU (one to five) are wired in parallel, identical age and
  * identical duty — so they SHOULD read nearly the same. A pack that deviates
- * from its 4 siblings is a strong early-failure signal that static thresholds
+ * from its siblings is a strong early-failure signal that static thresholds
  * miss (a pack 8°F hotter than its peers isn't "hot" by an absolute limit, but
  * it's clearly the odd one out).
  *
@@ -1230,6 +1230,13 @@ export interface DayForecast {
    *  a boot-time map missing a Core fits a partial model that no incompleteness flag
    *  catches while the SHP2 is present. Absent on hand-built forecasts (no check). */
   solarModelSns?: string[];
+  /** v1.187.18 — the backup pool's full capacity (Wh) the SoC trajectory was integrated
+   *  against: the SHP2's own `backupFullCapWh`, the packs' nameplate sum (15 × 6,144 Wh =
+   *  92,160 at 2026-10), not their measured full-charge capacity. null when there is no
+   *  SHP2 or the pool readings are untrusted (projectedSocPct is then null throughout).
+   *  computeProbabilisticForecast reads it directly instead of guessing a fleet size.
+   *  Absent on hand-built forecasts (the trajectory inversion stays as their fallback). */
+  poolFullWh?: number | null;
   /** v1.178.0 — true when the published (display) basis has NO PV history to project from:
    *  neither a projected home Core nor a connected-but-unprojected one has recorded pv_total
    *  (before the first poll, or a cold recorder). The PV figures are then a
@@ -2454,6 +2461,7 @@ async function computeDayForecastUncached(
     minProjectedSocTs: minSocTs,
     solarModel,
     solarModelSns: homeModelSns(devices),
+    poolFullWh: fullWh,
     deviceModels,
     // v1.187.1 — an hour pairs only once its covering label predates the cache's fetch.
     soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,
@@ -3477,7 +3485,7 @@ export async function computeDegradation(
   // engine uses. Needs ≥3 packs with a real fade trend to form a peer group.
   //
   // v0.9.75 — restrict the peer-median baseline to SHP2-connected packs.
-  // Spare cores (the operator's Cores 4 + 5) cycle very differently from the home-
+  // Bench cores (off the SHP2 roster; Cores 3 + 4 at 2026-10) cycle very differently from the home-
   // serving cores: they may sit at storage SoC for months, charge once on
   // the bench, etc. Letting their fade rates into the baseline drags the
   // fleet median in the wrong direction and either suppresses legitimate
@@ -8687,7 +8695,7 @@ export function computeTariffReport(
   // charging from a wall outlet shows up in ac_in but isn't house grid
   // usage. Without this filter the on-peak cost dollars include spare-Core
   // bench-charging — small today ($0.40 live) but the bug is real and
-  // grows if Cores 4/5 see heavier wall charging.
+  // grows if the bench Cores see heavier wall charging.
   const connected = shp2ConnectedDpuSns(devices);
   const homeDpus = homeConnectedDpus(dpus, connected);
   const dpuAcInSeries = new Map<string, Array<{ ts: number; value: number }>>();
@@ -9082,36 +9090,42 @@ export async function computeProbabilisticForecast(
   // The inversion MUST use the same pv - load/η the forward integrator used, or
   // the recovered capacity (hence the P10/P90 band width) is biased.
   // Pick the hour with the largest |deltaSocPct| that isn't clamped — that
-  // maximises numerical conditioning. If no usable hour exists (e.g. the
-  // forecast was generated with no SHP2 projection so projectedSocPct is null
-  // throughout), fall back to a fleet estimate: DPU count × 5 packs × 6.144
-  // kWh/pack. The operator's ~4 DPUs × 5 × 6.144 ≈ 122.88 kWh — the prior code's
-  // hard-coded "1 kWh ≈ 0.5 %" implied a 200 kWh pool (or worse, a single 20
-  // kWh DPU) and badly understated the P10/P90 band width.
+  // maximises numerical conditioning.
+  // v1.187.18 — a production forecast carries that capacity itself (poolFullWh, the
+  // SHP2's backupFullCapWh the trajectory was integrated against), so it is read
+  // directly; the inversion remains for forecasts without it (hand-built ones). The
+  // last resort, reached only when every hour pair is clamped at 0/100 with no pool
+  // value, estimates HOME Cores × 5 packs × 6.144 kWh: it used to count every DPU in
+  // deviceModels, bench Cores included (5 × 5 × 6.144 = 153.6 kWh against a 92.16 kWh
+  // pool at 2026-10), which shrank the P10/P90 SoC offsets to ~0.6 of their size.
+  // When projectedSocPct is null throughout, fullKwh is never read.
   const PACK_KWH_NAMEPLATE = 6.144;
   const PACKS_PER_DPU = 5;
-  let fullKwh: number | null = null;
+  let fullKwh: number | null =
+    forecast.poolFullWh != null && forecast.poolFullWh > 0 ? forecast.poolFullWh / 1000 : null;
   let bestAbsDSocPct = 0;
-  for (let i = 1; i < forecast.hours.length; i++) {
-    const prev = forecast.hours[i - 1];
-    const cur = forecast.hours[i];
-    if (prev.projectedSocPct == null || cur.projectedSocPct == null) continue;
-    const dSocPct = cur.projectedSocPct - prev.projectedSocPct;
-    if (Math.abs(dSocPct) < 0.05) continue;                 // too small to invert reliably
-    if (prev.projectedSocPct <= 0.5 || prev.projectedSocPct >= 99.5) continue; // clamped
-    if (cur.projectedSocPct <= 0.5 || cur.projectedSocPct >= 99.5) continue;   // clamped
-    const kwhDelta = (cur.forecastPvW - cur.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
-    if (Math.abs(kwhDelta) < 0.05) continue;
-    const candidate = kwhDelta / (dSocPct / 100);           // kWh per 100 % SoC = full capacity
-    if (candidate < 5 || candidate > 1000) continue;        // sanity guard
-    if (Math.abs(dSocPct) > bestAbsDSocPct) {
-      bestAbsDSocPct = Math.abs(dSocPct);
-      fullKwh = candidate;
+  if (fullKwh == null) {
+    for (let i = 1; i < forecast.hours.length; i++) {
+      const prev = forecast.hours[i - 1];
+      const cur = forecast.hours[i];
+      if (prev.projectedSocPct == null || cur.projectedSocPct == null) continue;
+      const dSocPct = cur.projectedSocPct - prev.projectedSocPct;
+      if (Math.abs(dSocPct) < 0.05) continue;                 // too small to invert reliably
+      if (prev.projectedSocPct <= 0.5 || prev.projectedSocPct >= 99.5) continue; // clamped
+      if (cur.projectedSocPct <= 0.5 || cur.projectedSocPct >= 99.5) continue;   // clamped
+      const kwhDelta = (cur.forecastPvW - cur.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
+      if (Math.abs(kwhDelta) < 0.05) continue;
+      const candidate = kwhDelta / (dSocPct / 100);           // kWh per 100 % SoC = full capacity
+      if (candidate < 5 || candidate > 1000) continue;        // sanity guard
+      if (Math.abs(dSocPct) > bestAbsDSocPct) {
+        bestAbsDSocPct = Math.abs(dSocPct);
+        fullKwh = candidate;
+      }
     }
   }
   if (fullKwh == null) {
-    const dpuCount = Math.max(1, forecast.deviceModels.length);
-    fullKwh = dpuCount * PACKS_PER_DPU * PACK_KWH_NAMEPLATE;
+    const homeCores = Math.max(1, forecast.solarModelSns?.length ?? forecast.deviceModels.length);
+    fullKwh = homeCores * PACKS_PER_DPU * PACK_KWH_NAMEPLATE;
   }
   // v1.16.0 (engine-review F7) — coherent SoC trajectory ensemble replacing
   // the per-hour band reset. Every ensemble member (plus the dedicated

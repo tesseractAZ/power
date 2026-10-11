@@ -1347,6 +1347,13 @@ re-point it at a `pd303_mc.*` variant without changing the alarm), `backupReserv
 does not over/under-count the pool, and why a stale slot is **not** subtracted (that
 would falsely lower reserve % and false-escalate the floor alarm).
 
+`backupFullCap` is the sum of the sources' `fullCap` — the packs' **nameplate** (6,144 Wh per
+pack; 92,160 Wh at 15 packs) — and does not track pack health. At a 2026-10-11 reading
+`backupDischargeRmainBatCap` equalled each source's `batteryPercentage` applied to its `fullCap`,
+exactly: both figures are nameplate-scaled Wh. The packs' own measured full-charge capacity is
+the per-pack `fullCapMah` (94.4 % of nameplate across the home packs on that date;
+`docs/PERFORMANCE.md` §4).
+
 The trio is gated for coherence before publish:
 
 **`coherentBackupPool(pct, fullCapWh, remainWh)`** (v0.54.4): requires the full trio +

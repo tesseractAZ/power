@@ -52,3 +52,28 @@ export function strategyExclusion(loadIsEnable: boolean | null | undefined, watt
       : "not in the SHP2's load strategy",
   };
 }
+
+/** A Delta Pro Ultra carries one to five battery packs (hardware maximum). */
+export const DPU_MAX_PACKS = 5;
+
+/**
+ * v1.187.18 — the DPU card's pack tiles: one per pack NUMBER the Core reports, or null when the
+ * count is unknown. The card drew `p?.packs.length ?? 5` tiles: a Core with no direct projection
+ * (after a restart while it is cloud-offline, and briefly at every boot) showed "5 battery packs"
+ * and five placeholders whatever it holds — Core 4 has run on four since 2026-09-20. The count is
+ * the larger of the packs present and the Core's own valid pack count (bpNum, 1–5), and tiles are
+ * keyed by number, so a pack the projection is missing keeps its own position as a placeholder.
+ * Null (no projection, or no packs and no valid count) renders one line instead of tiles.
+ */
+export function dpuPackSlots(
+  p: { packCount: number | null; packs: ReadonlyArray<{ num: number }> } | null | undefined,
+): number[] | null {
+  if (!p) return null;
+  const nums = new Set<number>();
+  const bp = p.packCount;
+  if (bp != null && Number.isInteger(bp) && bp >= 1 && bp <= DPU_MAX_PACKS) {
+    for (let n = 1; n <= bp; n++) nums.add(n);
+  }
+  for (const pk of p.packs) if (Number.isInteger(pk.num) && pk.num >= 1) nums.add(pk.num);
+  return nums.size > 0 ? [...nums].sort((a, b) => a - b) : null;
+}

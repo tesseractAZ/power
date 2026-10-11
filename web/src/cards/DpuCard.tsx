@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { remainSuffix } from './cardText';
+import { dpuPackSlots, remainSuffix } from './cardText';
 import type { DeviceSnapshot, DpuProjection, Shp2EnergySource } from '../types';
 import { fmtMins, fmtPct, fmtTemp, fmtW, socColor } from '../format';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
@@ -17,7 +17,8 @@ export interface DpuViaShp2 {
  *  - Header: name, SN, status pills
  *  - Headline: best-available SoC (direct → SHP2 fallback), remaining time, 2 sparklines
  *  - Direct telemetry grid: filled when DPU WiFi is up; "—" otherwise
- *  - Per-pack tiles: 5 packs always; live data when direct, "no data" placeholder otherwise
+ *  - Per-pack tiles: one per pack the Core reports (dpuPackSlots); a pack missing from the direct
+ *    data is a "no data" placeholder; with no direct data, one "needs DPU WiFi" line instead
  *  - SHP2 view section: always shown for SHP2-bound DPUs (cross-reference + history fallback)
  */
 // v0.22.0 — memo skips re-renders when the parent (App) re-renders without a
@@ -37,8 +38,8 @@ export const DpuCard = memo(function DpuCard({
   const headlineSoc = p?.soc ?? viaShp2?.source.batteryPercentage ?? null;
   const headlineSocDigits = p?.soc != null ? 1 : 0;
   const remainTimeMin = p?.remainTimeMin ?? null;
-  // Pack count: direct tells us, otherwise we know DPUs hold 5 packs
-  const packCount = p?.packs.length ?? 5;
+  // v1.187.18 — tiles by pack number from the Core's own data; null = count unknown (no tiles).
+  const packSlots = dpuPackSlots(p);
   // SHP2 source if bound; "slot" used for sparkline metric keys
   const source = viaShp2?.source;
   const slot = source?.slot;
@@ -83,44 +84,49 @@ export const DpuCard = memo(function DpuCard({
       {/* Direct telemetry — same fields for every DPU; "—" when WiFi down */}
       <DirectGrid p={p} />
 
-      {/* Per-pack tiles — always 5 slots, real data when direct, placeholder otherwise */}
-      <div className="text-xs text-muted mb-1">
-        {packCount} battery packs{!directOk && ' (per-pack detail needs DPU WiFi)'}
-      </div>
-      <div className="grid grid-cols-5 gap-2">
-        {Array.from({ length: packCount }, (_, i) => {
-          const pk = p?.packs[i];
-          if (pk) {
-            return (
-              <div key={i + 1} className="bg-panel2 border border-line rounded-lg p-2 text-center">
-                <div className="text-[10px] text-muted">Pack {pk.num}</div>
-                <div className="text-lg font-semibold tabular-nums">{fmtPct(pk.soc)}</div>
-                <div className="bar mt-1"><div className={socColor(pk.soc)} style={{ width: `${pk.soc ?? 0}%` }} /></div>
-                <div className="text-[10px] text-muted mt-1 leading-tight">
-                  {fmtTemp(pk.temp)} · {pk.cycles ?? '—'}&#8635;
+      {/* Per-pack tiles — one per reported pack; a "no data" placeholder for a pack the direct data lacks */}
+      {packSlots == null ? (
+        <div className="text-xs text-muted">Pack detail needs DPU WiFi</div>
+      ) : (
+        <>
+          <div className="text-xs text-muted mb-1">
+            {packSlots.length} battery pack{packSlots.length === 1 ? '' : 's'}
+          </div>
+          <div className="grid grid-cols-5 gap-2">
+            {packSlots.map((num) => {
+              const pk = p?.packs.find((x) => x.num === num);
+              if (pk) {
+                return (
+                  <div key={num} className="bg-panel2 border border-line rounded-lg p-2 text-center">
+                    <div className="text-[10px] text-muted">Pack {pk.num}</div>
+                    <div className="text-lg font-semibold tabular-nums">{fmtPct(pk.soc)}</div>
+                    <div className="bar mt-1"><div className={socColor(pk.soc)} style={{ width: `${pk.soc ?? 0}%` }} /></div>
+                    <div className="text-[10px] text-muted mt-1 leading-tight">
+                      {fmtTemp(pk.temp)} · {pk.cycles ?? '—'}&#8635;
+                    </div>
+                    <div className="text-[10px] text-muted leading-tight">
+                      {(pk.outputWatts ?? 0) > (pk.inputWatts ?? 0)
+                        ? `▼ ${fmtW(pk.outputWatts)}`
+                        : (pk.inputWatts ?? 0) > 0
+                        ? `▲ ${fmtW(pk.inputWatts)}`
+                        : 'idle'}
+                    </div>
+                  </div>
+                );
+              }
+              // No reading for this pack: an empty bar, not the Core's SoC (that implied a per-pack value).
+              return (
+                <div key={num} className="bg-panel2/40 border border-line/50 rounded-lg p-2 text-center opacity-60">
+                  <div className="text-[10px] text-muted">Pack {num}</div>
+                  <div className="text-lg font-semibold tabular-nums text-muted">—</div>
+                  <div className="bar mt-1" />
+                  <div className="text-[10px] text-muted mt-1 leading-tight">no data</div>
                 </div>
-                <div className="text-[10px] text-muted leading-tight">
-                  {(pk.outputWatts ?? 0) > (pk.inputWatts ?? 0)
-                    ? `▼ ${fmtW(pk.outputWatts)}`
-                    : (pk.inputWatts ?? 0) > 0
-                    ? `▲ ${fmtW(pk.inputWatts)}`
-                    : 'idle'}
-                </div>
-              </div>
-            );
-          }
-          return (
-            <div key={i + 1} className="bg-panel2/40 border border-line/50 rounded-lg p-2 text-center opacity-60">
-              <div className="text-[10px] text-muted">Pack {i + 1}</div>
-              <div className="text-lg font-semibold tabular-nums text-muted">—</div>
-              <div className="bar mt-1">
-                <div className="bg-muted" style={{ width: `${headlineSoc ?? 0}%`, opacity: 0.3 }} />
-              </div>
-              <div className="text-[10px] text-muted mt-1 leading-tight">no data</div>
-            </div>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+        </>
+      )}
 
     </div>
   );

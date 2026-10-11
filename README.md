@@ -311,8 +311,11 @@ This is a life-safety system and is held to that bar. The measured record lives 
 against **independent** ground truth — Open-Meteo GHI, first-principles array
 physics, energy conservation, and the system's own forecast backtest — with
 concrete results tracked over time (daily PV matches independent expectation to
-~0–1%; measured pack capacity ties to nameplate within a fraction of a percent;
-the round-trip efficiency reconciles the conversion losses it should).
+~0–1%; the round-trip efficiency reconciles the conversion losses it should).
+The pool capacity the panel reports is the packs' nameplate sum, not a
+measurement; each pack's battery-management system measures a full-charge
+capacity below nameplate, which [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) §4
+records with its date.
 
 The real guardrail is process: **every** change to an engine or the alarm path
 ships through green tests **plus** an adversarial multi-agent review that
