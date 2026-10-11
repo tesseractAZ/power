@@ -1347,6 +1347,13 @@ re-point it at a `pd303_mc.*` variant without changing the alarm), `backupReserv
 does not over/under-count the pool, and why a stale slot is **not** subtracted (that
 would falsely lower reserve % and false-escalate the floor alarm).
 
+`backupFullCap` is the sum of the sources' `fullCap` — the packs' **nameplate** (6,144 Wh per
+pack; 92,160 Wh at 15 packs) — and does not track pack health. At a 2026-10-11 reading
+`backupDischargeRmainBatCap` equalled each source's `batteryPercentage` applied to its `fullCap`,
+exactly: both figures are nameplate-scaled Wh. The packs' own measured full-charge capacity is
+the per-pack `fullCapMah` (94.4 % of nameplate across the home packs on that date;
+`docs/PERFORMANCE.md` §4).
+
 The trio is gated for coherence before publish:
 
 **`coherentBackupPool(pct, fullCapWh, remainWh)`** (v0.54.4): requires the full trio +
@@ -2626,6 +2633,7 @@ negative-cache TTL.
 | `homeBasisPending` | v1.187.10: built while a connected home Core's first reading was pending; publishers send the PV pair and Projected Low SoC as null while it is set |
 | `pvForecastUnavailable` | v1.178.0: the display basis has no PV history at all (`restoredPvSpan === 0`); publishers send null (HA "unknown") instead of a model-less 0 |
 | `solarModelSns` | v1.186.5: sorted SNs of the home Cores the solar model was fitted on; gates cache reuse and forecast-skill scoring |
+| `poolFullWh` | v1.187.18: the backup pool's full capacity (Wh) the SoC trajectory was integrated against (`backupFullCapWh`, the packs' nameplate sum); null with no SHP2 or an untrusted pool; read by the probabilistic band |
 
 #### Endpoint
 
@@ -2917,9 +2925,11 @@ member draws ONE z and holds it for the whole window (forecast errors are
 correlated across hours — a cloudy day is cloudy all day), so the trajectory is
 monotone in z and the z=∓1.282 paths are exact P10/P90 trajectories.
 
-**Back-out of full capacity** (`fullKwh`) — the forecast was generated against
-`backupFullCapWh` via `socWh += (pv − load/η)`, so it is inverted from the
-forecast's own SoC trajectory:
+**Full capacity** (`fullKwh`) — v1.187.18: a production forecast carries the capacity its
+trajectory was integrated against (`DayForecast.poolFullWh`, the SHP2's `backupFullCapWh`), and
+that value is used directly. The trajectory back-out below applies only to a forecast without it
+(hand-built ones): the forecast was generated against `backupFullCapWh` via
+`socWh += (pv − load/η)`, so it is inverted from the forecast's own SoC trajectory:
 
 ```
 fullKwh = (cur.forecastPvW − cur.forecastLoadW/η)/1000  /  (dSocPct/100)
@@ -2927,8 +2937,11 @@ fullKwh = (cur.forecastPvW − cur.forecastLoadW/η)/1000  /  (dSocPct/100)
 
 picking the hour with the largest unclamped `|dSocPct|` (best conditioning;
 skips deltas <0.05 pt, SoC within 0.5 of 0/100, kwhDelta <0.05, candidate outside
-[5,1000] kWh). Fallback when no SoC trajectory: `dpuCount · PACKS_PER_DPU(5) ·
-PACK_KWH_NAMEPLATE(6.144)`.
+[5,1000] kWh). Last resort, when there is no pool value and no hour pair yields a usable
+inversion: `homeCores · PACKS_PER_DPU(5) · PACK_KWH_NAMEPLATE(6.144)`, with `homeCores =
+max(1, solarModelSns.length ?? deviceModels.length)` (before v1.187.18 it counted every DPU in
+`deviceModels`, bench Cores included: 153.6 kWh against the 92.16 kWh pool). With no pool value
+`projectedSocPct` is null throughout and `fullKwh` is never read.
 
 **Integration** — each path (and the low/mid/high band paths) steps per hour:
 
@@ -5503,9 +5516,12 @@ want the shape) but `expectedSavingsUsd` is zeroed.
 
 #### 6.5 Endpoint — `GET /api/dispatch/recommend` (cached 300 s)
 
-Returns `503 {error:'SHP2 not online'}` if no SHP2. Inputs assembled in
-`index.ts`: `currentSocPct = backupBatPercent??50`, `reserveFloorPct =
-backupReserveSoc??20`, `capacityKwh = (backupFullCapWh??60000)/1000`, per-hour
+Returns `503 {error:'SHP2 not online'}` if no SHP2, and (v1.187.18) `503 {error:'backup pool
+unknown'}` when `mpcPoolBasis` (`dispatch/mpc.ts`) returns null: `backupFullCapWh` missing, not
+finite or ≤ 0, or `backupBatPercent` missing, not finite or outside 0–100 (0 % is valid). Before
+v1.187.18 the route substituted a 60 kWh pool at 50 % and served that plan with a 200. Inputs
+assembled in `index.ts`: `currentSocPct` and `capacityKwh` from `mpcPoolBasis` (no substitute
+values), `reserveFloorPct = backupReserveSoc??20`, per-hour
 `pvP50`/`pvP10` (from forecast + probabilistic bands), `loadForecast`,
 `tariffByHour` (`hourlyRateCents` for each hour of the local America/Phoenix day, falling back to the two-tier pair `TARIFF_ON_PEAK_CENTS_PER_KWH` / `TARIFF_OFF_PEAK_CENTS_PER_KWH`, default the flat rate, when the rate table is unconfirmed; v1.136.0), and **`gridAvailable = process.env.GRID_AVAILABLE
 === 'true'`** (default **false** — v0.15.2 off-grid honesty: a hardcoded `true`
@@ -7463,6 +7479,8 @@ Harness: `scripts/mutate-v1187-3h.mjs` (99 mutants, 99 killed after the seam rev
 
 **v1.187.17 — one pin per action across every workflow; workflow and origin comments corrected.** Dependabot ignores majors here, so each workflow kept the major it was written with: `actions/checkout` v5.0.1 in `ci.yml`, `images.yml`, `release.yml` and `tag-release.yml` against v7.0.1 in `codeql.yml`; `actions/upload-artifact` v4.6.2 (`ci.yml`) against v7.0.1; and the `ci.yml` Dockerfile smoke build on `docker/setup-buildx-action` v3.12.0 and `docker/build-push-action` v5.4.0 (Node 20) against `images.yml`'s v4.1.0 and v7.3.0. The grouped github-actions update then proposed one version for every checkout (#516, v5.1.0), downgrading `codeql.yml`. All are now on the newest pin already in the tree (no `with:` input changes; release notes for each major checked against the inputs used), and `github/codeql-action` is v4.38.3. `workflowActionPins.test.ts` fails on a `uses:` line without a full commit SHA and a version comment (a line it cannot parse fails rather than being skipped), on one action (owner/repo) at two commits, and on a `#` line inside a `build-args: |` block — the smoke build passed two such lines to `docker build` as build args (harness `scripts/mutate-v1187-17.mjs`, P-i–P-vii). Comments corrected against current state: the suite's run time, the advisory gate's rationale (both alert endpoints now return data), native-runner image builds with an unused QEMU step, the add-on's store name in the release summaries, which commits `tag-release.yml` acts on, `release.yml` not being the release path, and `codeql.yml` being the only CodeQL analysis. `LAN_ORIGIN_RE`'s JSDoc stated "ports 8123 or 8787 only"; the port has been optional and unrestricted since v1.47.2, and the comment now lists the matched host classes and where the regex is read (CORS and the `/ws` and `/console/ws` upgrades, never `requireWriteAuth`). README gives the home pool as 92.16 kWh nameplate (15 × 6.144 kWh), not usable.
 
+**v1.187.18 — no invented fleet shape; worker reports never outlive a partial boot map; the release pipeline reconciles tags with main.** Fleet shape: the DPU card draws its pack tiles from `dpuPackSlots` (the Core's `bpNum` and the packs present, keyed by pack number) instead of `p?.packs.length ?? 5`, and shows one line when the count is unknown; `computeProbabilisticForecast` reads `DayForecast.poolFullWh` (the SHP2 `backupFullCapWh` the trajectory used) and its last resort counts home Cores, not every DPU (153.6 against 92.16 kWh); `/api/dispatch/recommend` answers 503 through `mpcPoolBasis` instead of planning a 60 kWh pool at 50 % (harness `mutate-v1187-18f.mjs`, F-i–F-xvii). Boot basis: after the 2026-10-11 restart the degradation report was built on a map holding one bench Core and served for 30 min (HA `degradation_packs_total` 4 of 24); 13 of the worker's 25 reports could do the same, and the v1.186.3 hydration guard reached only the main-thread cache. Every worker report request now computes its device basis (projected Cores, projected panels, the Cores the panels list as sources); an element arriving in it resets the worker's result caches (a re-arrival at most once per five minutes), each flight runs in the basis generation it was asked in (`analytics/flightBasis.ts`, AsyncLocalStorage) and a flight on an older generation writes no cache, and the runway's carried load lives outside the reset caches. The degradation report also keys on every projected pack and on whether panel membership was known; a report built while a Core or panel listed online had no projection is pending (two-minute cache) and its six `degradation_*` HA fields publish unknown. Pack-risk, the dispatch plan and the multi-day rollup are reused only for the reports they were computed from (harness `mutate-v1187-18d.mjs`, 36 mutants). Release pipeline: `tag-release.yml` runs on every push to `main` and on dispatch, one run at a time, with no paths filter and no subject gate; it tags the version `config.yaml` declares when it is new and above every strict `vX.Y.Z` tag, at the commit that brought it, and fails the run while `main` declares a version below a released tag (HA offers any differing version, a lower one included), on a reused published number, a `Release vX` merge that changed no version, a non-strict version or a tag off `main`; only an HTTP 404 from the Releases API counts as "no Release". The release-PR check moved to `release-pr.yml` (same required-check name, re-runs on title edits) and compares the version across GitHub's test merge, including a one-commit PR's own subject. Every job runs on `ubuntu-24.04`/`ubuntu-24.04-arm` (a trial of every check on `ubuntu-26.04` passed), `images.yml` drops its unused QEMU step and picks the Latest release from strict tags compared as numbers (harness `mutate-v1187-18r.mjs`, 56 mutants). The v1.187.17 pin mutants insert a step instead of anchoring on a pinned line, so a pin bump cannot break an anchor (#519). README: the panel's pool capacity is the packs' nameplate sum; their BMS full-charge capacity is 94.4 % of it (PERFORMANCE §4, 2026-10-11).
+
 **v1.186.2 — no phantom battery discharge at the grid handover; curtailment hour pairing, cloudy hours and freeze membership.** (1) Measured 2026-09-27 01:34–01:40 at a handover to the grid (pool at its 16% floor, grid 4.45–4.54 kW = house load, panel `sourceWatts` [0,0,0]): `fleet_battery_net_watts` alternated 88, 2671, 21, 1436, 11, 125, 9, 92, 0 W. The recorder's per-pack rows show the cause: every Core's REST `/quota/all` (60 s, :22) returns each pack's last NON-ZERO `inputWatts`/`outputWatts` (a zero is never cached), while the MQTT stream (per-change deltas plus a full pack burst ~:42) carries the zeros; `setDeviceQuota` replaces the raw map, so the :22 publish summed the replay and the :52 publish the stream. The store now records each MQTT-delivered pack flow field with its arrival time and sets a display-only `pack.liveFlow` when one is at most `STREAM_FLOW_WINDOW_MS` (150 s) old; `aggregateFleetFlow` returns `fleetBatteryNetDisplay` beside the unchanged raw `fleetBatteryNet`, and the Battery Net sensor (`/api/ha-state`, MQTT discovery) and the Energy-flow card read the display sum. While the stream is alive the REST value cannot be fresher (the cloud caches what the device published); a silent stream hands back to the poll after the window. `gridState`'s at-floor `poolDischargingObserved` still reads the raw sum. (2) Open-Meteo's hourly `shortwave_radiation` is the average of the preceding hour, so the value labelled H covers [H−1, H). `coveringRadiationEpoch` (weather.ts) pairs the recorder hour [H, H+1) with the label H+1 in `sampleCurtailmentHour`, the live `currentHourGhi`, the Bayesian solar fit (and its OLS comparison) whose posterior curtailment applies, and `curtailmentDaySettled`'s coverage (a day needs the labels 01:00 through the next midnight). Other consumers of the same hours still pair by label: the per-hour and clear-sky PV coefficient fits, forecast skill scoring and the realized-GHI capture in the recorder (insert-once rows keyed by label); they are unchanged here. (3) A measured hour (present, not `radiationMissing`) below `CURTAIL_MIN_GHI_WM2` returns no sample, and a measured hour the posterior cannot predict returns none; the μ × 900 W/m² heuristic runs only for an hour with no weather value. (4) `curtailmentMembershipSound` gates the freeze: the live roster is non-empty, `membership-history.json` is `stable` across the day and `membershipAt(dayStart)` equals the roster's fingerprint, and every roster Core was walked and reported `soc` in at least one hour of the day; an unsound day stays live. The sidecar schema is now `v: 2` (`CURTAIL_FREEZE_SCHEMA`): a v1 file is dropped on load and rewritten, so the ≤ 7 days frozen under the old pairing and heuristic are re-walked from the recorder. Harness: `scripts/mutate-v1186-2.mjs` (15 mutants).
 
 **v1.186.1 — the 7-day curtailment figure stops rewriting history.** `computeCurtailment` re-walked all 168 past hours on every refresh through the current Bayesian posterior and the worker's current Open-Meteo cache, so `recent7dKwh` (`ecoflow_pv_curtailment_kwh_7d`, the card's "Past 7d lost") and the 7-day histogram moved with no new curtailment in the window (2026-09-25: 12.6 → 10.5 → 16.09 kWh). `curtailmentFreeze.ts` freezes a finished local day the first time a walk finds it settled — `curtailmentDaySettled`: the weather's `fetchedAt` ≥ day end + `CURTAIL_SETTLE_LAG_MS` (12 h; the cache mixes forecasts and past-hour estimates, an hour is a past-hour estimate only if it had ended at `fetchedAt` — the realized-GHI capture's rule — a failed fetch keeps serving the stale cache, and past hours are revised until the model runs covering them are ingested, ≤ ~7.2 h per the provider's model metadata), all 24 hours present without `radiationMissing`, and a posterior (`bayes.hourly.length > 0`, so a model-less walk never freezes a week of zeros). The frozen record holds the day's kWh and curtailed hours (hour of day, surplus W); `recent7dKwh`, `recent7dHoursCount` and `hourlyHistogram` read it, only unsettled days are re-walked, today stays live, and the new `recent7dSettledDays` counts the frozen days. Persisted in `curtailment-days.json` beside the database (atomic temp + rename; `CURTAILMENT_DAYS_PATH` overrides; memory only when neither it nor `SUPERVISOR_TOKEN` is set), pruned to the window, invalid entries dropped on load; a failed save is logged once and retried on each refresh. `computeCurtailment` takes the worker's logger and an injectable clock for the live state and day walk (the report cache stays on the real clock). Entity ids are unchanged. Harness: `scripts/mutate-curtail-freeze.mjs` (8 mutants).
@@ -8622,7 +8640,7 @@ Sources of truth cited throughout:
 - `server/src/auth.ts` — write-auth gate, CORS allow-list, token bootstrap
 - `server/src/ecoflow/commands.ts`, `server/src/writeLog.ts` — write-debug lockdown + audit log
 - `ecoflow_panel/apparmor.txt` — the LSM confinement profile
-- `.github/workflows/{ci,codeql,release,tag-release,images}.yml` — CI, the CodeQL gate and the release/publish pipeline
+- `.github/workflows/{ci,codeql,release-pr,release,tag-release,images}.yml` — CI, the CodeQL gate, the release-PR check and the release/publish pipeline
 - `Dockerfile`, `build.yaml`, `repository.yaml` — image build + add-on repository manifest
 
 ---
@@ -9071,6 +9089,14 @@ pinned the last three floating tags: `actions/setup-node` in `ci.yml`'s advisory
 `actions/checkout` in `release.yml` and `tag-release.yml`, the two workflows with write
 permissions.
 
+**Every job runs on a pinned runner image** (`ubuntu-24.04`, and `ubuntu-24.04-arm` for the
+aarch64 image build), never `ubuntu-latest`. GitHub moves `ubuntu-latest` to Ubuntu 26.04 in a
+rollout from 2026-10-19 to 2026-11-19 (actions/runner-images#14748); that one move would change
+python3, Docker, the docs jobs' pandoc and LibreOffice, possibly coreutils, and CodeQL's platform
+(its supported list names only Ubuntu 22.04 and 24.04), under every job at once. Moving to a newer
+image is a one-commit label change, made deliberately. `server/test/workflowRunners.test.ts` fails
+on a `-latest` label, a quoted or matrix `-latest` runner, and a job without `runs-on`.
+
 ---
 
 ### Release & publish pipeline
@@ -9085,14 +9111,17 @@ squash-commit is GitHub-web-flow-signed.
 Trigger from **Actions → Release → Run workflow**. Inputs: `bump` (patch/minor/major, default
 patch), `version` (explicit override), `notes` (markdown; auto-generated from the commit log
 since the previous tag if empty). It:
-1. Parses the current `version:` from `config.yaml`; computes the next semver (refuses if
-   `vX.Y.Z` tag already exists — idempotent).
+1. Parses the current `version:` from `config.yaml` and computes the next version from the
+   higher of that and the highest strict `vX.Y.Z` tag (a tag can sit above `main`'s version).
+   It refuses a version that is not strict `X.Y.Z`, is already tagged, or is not above both, so
+   re-runs are idempotent.
 2. Builds release notes.
 3. `sed`-bumps `version:` in `ecoflow_panel/config.yaml` and prepends a
    `## <version> — <date>` section to `ecoflow_panel/CHANGELOG.md`.
-4. Opens PR `release/vX.Y.Z` → `main` with commit subject **`Release vX.Y.Z`** and enables
-   `--squash --auto --delete-branch`. (The branch commit is unsigned; only the signed squash
-   commit lands on main.)
+4. Commits, runs `scripts/check-release-pr.py` with `BASE_REV=origin/main` (CI does not run on a
+   PR opened with `GITHUB_TOKEN`), then opens PR `release/vX.Y.Z` → `main` with commit subject
+   **`Release vX.Y.Z`** and enables `--squash --auto --delete-branch`. (The branch commit is
+   unsigned; only the signed squash commit lands on main.)
 
 #### Step 2 — CI checks gate the PR
 
@@ -9106,10 +9135,23 @@ since the previous tag if empty). It:
 - `Validate add-on config + translations`.
 - `Dockerfile smoke build (amd64)`.
 - `Build documentation (.docx + .pdf)`.
-- On a pull request only: `Release PR declares the version it names` (`scripts/check-release-pr.py`).
+
+`release-pr.yml` runs on every pull request to `main` (`opened`, `synchronize`, `reopened` and
+`edited`, so a title edit re-runs it): `Release PR declares the version it names`
+(`scripts/check-release-pr.py`). It checks out with `fetch-depth: 0` and compares the version in
+`config.yaml` before and after GitHub's test merge (`HEAD^1` against `HEAD`), so a branch cut
+before the last release is not read as a downgrade. It fails: a version change under a title other
+than `Release v<new>`; a `Release vX` title that changes no version (v1.130.0, or a second release
+PR racing one that already merged); for a one-commit PR, a commit subject starting `Release v` that
+names another version or changes none (the repository's squash default lands a one-commit PR with
+its commit's subject, not the title, and `tag-release.yml` judges that subject); a version that is not strict `X.Y.Z` or is declared twice; a
+downgrade; a version already tagged or below the highest strict tag; and a missing CHANGELOG
+section, matched with `images.yml`'s exact `^## v?X\b`. It fails closed when `HEAD` is not a merge
+commit, unless `BASE_REV` names the revision to compare against (as `release.yml` does). The job
+ran in `ci.yml` until v1.187.17; its name, the required check's context, is unchanged.
 
 Required before a merge: since 2026-10-11 branch protection on `main` requires every check above — the
-eleven `ci.yml` checks (the type-check job runs for server and web), `codeql.yml`'s three `Analyze (…)` jobs and the `CodeQL` result, fifteen in all
+ten `ci.yml` checks (the type-check job runs for server and web), `release-pr.yml`'s release-PR check, `codeql.yml`'s three `Analyze (…)` jobs and the `CodeQL` result, fifteen in all
 (branch protection's `strict` is off). The `BranchAuth` ruleset also requires `CodeQL`, and its status-check
 rule requires the branch to be up to date with `main`; repository admins may bypass the ruleset. A job
 that is renamed or removed must have its old name replaced or removed in that list, or every pull
@@ -9119,35 +9161,78 @@ request waits on a check that never reports; a new job is not required until it 
 It fails on an `error`-level result or a `security-severity` ≥ 7.0 (`.github/scripts/check-sarif.mjs`).
 `images.yml`'s `test` job re-runs the suite on the tag.
 
-#### Step 3 — `tag-release.yml` (post-merge)
+#### Step 3 — `tag-release.yml` (post-merge reconciler)
 
-Triggers on `push` to `main` touching `ecoflow_panel/config.yaml`, **gated by
-`if: startsWith(github.event.head_commit.message, 'Release v')`**. So the squash-merge subject
-**must start with `Release v`** — this is why `release.yml` titles the PR/commit `Release vX.Y.Z`.
-It parses the version, creates an annotated tag `vX.Y.Z` (idempotent — skips if the tag exists),
-pushes it, then **`gh workflow run images.yml -f version=X.Y.Z`**. (A tag pushed with the default
-`GITHUB_TOKEN` won't trigger other workflows due to GitHub's recursion guard, so it dispatches
-`images.yml` explicitly.) Permissions: `contents: write`, `actions: write`.
+Home Assistant offers whatever `version:` `config.yaml` declares on `main`, and a lower version is
+offered too: Supervisor's `need_update` is `version != latest_version`, and auto-update installs it.
+`tag-release.yml` therefore runs on **every** push to `main` (no paths filter, no subject gate) and
+on `workflow_dispatch`, one run at a time (`concurrency: tag-release`, `cancel-in-progress: false`,
+`queue: max`). Event data reaches its script only through `env` (`BEFORE`, `HEAD_MSG`,
+`EVENT_NAME`). The script first re-fetches `main` and every tag, because `actions/checkout` forces
+`origin/main` to the run's own commit and runs can execute out of order. It then decides, in order:
+
+1. The commit is not on `main` (a dispatch from another branch), or `config.yaml` declares a
+   version that is not strict `X.Y.Z` or declares it twice → red run.
+2. The subject starts `Release vX` but the push did not change the version → red run (the run
+   continues, and still tags or re-dispatches what it should).
+3. `main` has since moved to another version → notice, exit 0 (that push's run reconciles it).
+4. `vV` is already tagged: at this commit or a later commit on `main` → fine; off `main` → red run.
+   At an earlier commit it is judged on the state: while a higher strict tag exists (`main` was
+   reverted to an older release, which HA offers as a downgrade) every push and dispatch is red until
+   `main` moves above it; and a push from another released version to it (a reused number) is red.
+   Leaving a version that was never tagged (a pre-release spelling, or a release whose run was
+   superseded) for the released one is not. If it has no GitHub Release, a re-run
+   (`GITHUB_RUN_ATTEMPT` > 1) or a manual dispatch re-dispatches `images.yml`; a first attempt only
+   warns, since `images.yml` may still be running. Only a 404 from the Release lookup
+   (`gh api repos/…/releases/tags/vV`) counts as no Release; any other lookup failure is a red run,
+   never a re-dispatch that would rebuild a sealed version's images.
+5. `vV` is untagged and not above the highest strict tag → red run, nothing tagged.
+6. Otherwise it creates the annotated tag and pushes it, then
+   **`gh workflow run images.yml -f version=X.Y.Z`**. It tags this commit when the push changed the
+   version; otherwise (a lost run, or a dispatch) it tags the commit that brought the version to
+   `main`, found by a first-parent walk. A bump under a subject other than `Release vX` is tagged
+   with a warning; a subject naming another version is a red run after tagging.
+
+An ordinary push (version unchanged, tagged and released) is a no-op. A tag pushed with the default
+`GITHUB_TOKEN` won't trigger other workflows (GitHub's recursion guard), so it dispatches
+`images.yml` explicitly, after the tag push. Permissions: `contents: write`, `actions: write`;
+`timeout-minutes: 10`. Before this, the workflow ran only for a push that touched `config.yaml`
+with a subject starting `Release v`: a bump merged under another subject (v0.54.1) was never
+tagged (its Release was made by hand), and a `Release v` merge without the bump (v1.130.0) was
+never evaluated.
+`server/test/tagRelease.test.ts` and `tagReleaseEdges.test.ts` run the script in temporary
+repositories against a stub `gh`; `releasePrCheck.test.ts` runs `check-release-pr.py` against real
+test merges (harness `scripts/mutate-v1187-18r.mjs`).
 
 #### Step 4 — `images.yml` (build + publish + release)
 
 Triggers on `v[0-9]+.[0-9]+.[0-9]+` tag push, or manual `workflow_dispatch` with a `version`
-input. Jobs:
-1. **resolve** — validate/normalize the version.
+input. Its run name carries the version, and one run per version executes at a time
+(`concurrency: images-vX.Y.Z`, `cancel-in-progress: false`), so a re-dispatch cannot race a running
+build to `gh release create`. Jobs:
+1. **resolve** — validate/normalize the version: strict `X.Y.Z`, as `tag-release.yml` tags.
 2. **test** — checkout the tag, `npm ci`, `npm test`, `tsc --noEmit` on the server.
 3. **build** (matrix aarch64 + amd64, each on its **native** runner: `ubuntu-24.04-arm` /
    `ubuntu-24.04` — no QEMU emulation, ~3 min vs 30–60 min) — buildx build + push to
    `ghcr.io/<owner>/{arch}-ecoflow-panel` as both `:{version}` and `:latest`. Base images
    digest-pinned. GHA cache uses `ignore-error=true` so a flaky cache backend can't fail a release.
-   The QEMU and Buildx setup steps each get one retry after a 30 s pause, and a second failure fails
-   the job (v1.187.12). Before that, a failed Docker Hub token fetch failed the amd64 job before it
-   built, so the release job was skipped.
+   There is no QEMU step: nothing runs a foreign-arch binary, and it only pulled `tonistiigi/binfmt`
+   from Docker Hub on every job (`server/test/workflowNativeBuild.test.ts` fails if a matrix entry
+   pairs a platform with the other arch's runner, or if the step returns). The Buildx setup step
+   gets one retry after a 30 s pause, and a second failure fails the job: on the v1.187.12 release
+   run (2026-10-10) a Docker Hub token timeout failed the amd64 job before it built, so the release
+   job was skipped. On that run the `binfmt` pull recovered on its own retry; `setup-buildx-action`
+   v4.1.0 pulled `moby/buildkit` once and failed. From v4.4.0 (now pinned) that action
+   pre-pulls the BuildKit image itself, up to five attempts on a transient registry error, inside
+   the outer retry. The build step still resolves its Dockerfile frontend and `node:22-alpine` from
+   Docker Hub without a retry.
 4. **release** — extract the version's `CHANGELOG.md` section and `gh release create` the
    GitHub Release (skipped if it already exists). The section header may be `## X.Y.Z` or
    `## vX.Y.Z`; if there is no section, the job fails instead of publishing a placeholder. The
-   Release is marked Latest only when its tag is the highest `v*` tag (`--latest=false` otherwise;
-   GitHub decides if the lookup fails), so re-running an older version's release cannot demote a
-   newer one. **The Release appearing = "go ahead and update the Pi."**
+   Release is marked Latest only when its tag is the highest strict `vX.Y.Z` tag, compared as
+   numbers (`--latest=false` otherwise; GitHub decides if the lookup fails), so re-running an older
+   version's release cannot demote a newer one, and a stray `v1.2.3-rc1` (which `sort -V` ranked
+   above `v1.2.3`) does not count. **The Release appearing = "go ahead and update the Pi."**
    Permissions: `contents: write`, `packages: write`. The printable documentation (.docx and
    .pdf) is built first and attached at creation; those steps are best-effort
    (`continue-on-error`) and **bounded** (v1.187.3): each has `timeout-minutes` (pandoc 6,
@@ -9174,12 +9259,13 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
 **Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, open **Power**, click **Update**
 (HA reads the bumped `version:` from `config.yaml` on `main` and drives the update-entity).
 
-> Merge the release PR with a subject that **starts `Release vX.Y.Z`** (the `tag-release.yml`
-> gate). A `Release v` subject whose version does not parse tags nothing. CI's `Release PR
-> declares the version it names` check (`scripts/check-release-pr.py`) fails a release PR that
-> lacks the `config.yaml` bump or the CHANGELOG section. Without that check, a merge missing the
-> bump would pass silently, because `tag-release.yml` is path-filtered on `config.yaml` and would
-> never run.
+> Title the release PR `Release vX.Y.Z …` with the version above every `vX.Y.Z` tag (and, for a
+> one-commit PR, give the commit the same subject: its squash merge lands with it);
+> `release-pr.yml` fails it otherwise, or when the CHANGELOG section is missing. Whatever lands,
+> `tag-release.yml` runs on the push and tags what `config.yaml` declares, or fails the run when
+> that version cannot be published: HA already offers it, so a red `tag-release` run on `main` is
+> a production event, not a cosmetic one. A bump merged under another subject is still tagged (with
+> a warning). To recover a lost dispatch, re-run the `tag-release` job or dispatch it by hand.
 
 ---
 

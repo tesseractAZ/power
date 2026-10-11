@@ -1,7 +1,8 @@
 /**
  * GEN screen — generator (DPU) detail console.
  *
- * Each Delta Pro Ultra is a 7.2 kWh generator with up to 5 packs. This
+ * Each Delta Pro Ultra is a 7.2 kW inverter with one to five 6.144 kWh packs
+ * (up to 30.72 kWh). This
  * screen shows the operator everything an engine-room watchstander would
  * want about one machine: I/O power, SOC, per-pack SOC/temp/voltage,
  * MPPT inputs, error codes, cumulative kWh.

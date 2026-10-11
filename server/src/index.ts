@@ -73,7 +73,7 @@ import { physicsPmax, physicsScore, PHOENIX_SITE } from './physics/clearSky.js';
 import { analyzePackLfp } from './physics/lfpOcv.js';
 import { packCurrentAmps, observePackRest, lastNonRestingAtMs, retainPacks, packRestKey } from './physics/restTracker.js';
 import { fitHierarchical, findOutliers, type HBPackObs } from './models/hierarchicalBayes.js';
-import { recommendDispatch, type MpcInputs } from './dispatch/mpc.js';
+import { recommendDispatch, mpcPoolBasis, type MpcInputs } from './dispatch/mpc.js';
 import {
   // v0.10.0 — recorder-backed compute* moved to the analytics worker
   // (see analyticsClient.report). Only the PURE assemblers that take
@@ -1546,10 +1546,10 @@ app.get('/api/ha-state', async (req, reply) => {
     analytics.report('carbon'),
     analytics.report('tariff'),
   ]);
-  // v0.9.74 — only SHP2-bound DPUs count toward fleet totals. Spare cores
-  // (here, the operator's Cores 4 + 5) inflate every "fleet PV / battery net /
+  // v0.9.74 — only SHP2-bound DPUs count toward fleet totals. Bench cores
+  // (not SHP2 sources) inflate every "fleet PV / battery net /
   // total in / total out" reading because their energy can't actually
-  // reach the home power bus. The previous code summed all 5 cores and
+  // reach the home power bus. Before v0.9.74 the code summed all 5 cores and
   // overstated the home's available capacity by ~40%.
   // v0.52.0 — the per-pack fleet flow loop is shared with mqttDiscovery's
   // buildState via aggregateFleetFlow (raw, un-rounded sums; rounded at emission).
@@ -1813,6 +1813,7 @@ app.get('/api/ha-state', async (req, reply) => {
     curtailment,
     carbon,
     tariff,
+    degradation: deg, // v1.187.18
   }));
   return cached(req, reply, payload, 25);
 });
@@ -2006,6 +2007,11 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
     return { error: 'SHP2 not online' };
   }
   const sp: any = shp2.projection;
+  const pool = mpcPoolBasis(sp);
+  if (!pool) {
+    reply.code(503);
+    return { error: 'backup pool unknown' };
+  }
   // Pull current forecast + load history for the next 24 h.
   let fc: any = null;
   try { fc = await analytics.report('forecast'); } catch { /* */ }
@@ -2095,9 +2101,9 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
     }
   } catch { /* RTE is optional — keep the legacy default */ }
   const inputs: MpcInputs = {
-    currentSocPct: sp.backupBatPercent ?? 50,
+    currentSocPct: pool.currentSocPct,
     reserveFloorPct: sp.backupReserveSoc ?? 20,
-    capacityKwh: (sp.backupFullCapWh ?? 60_000) / 1000,
+    capacityKwh: pool.capacityKwh,
     pvForecastP50: pvP50,
     pvForecastP10: pvP10,
     loadForecast,

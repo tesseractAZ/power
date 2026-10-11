@@ -100,7 +100,7 @@ def('confidence', 'How trustworthy the learned model is, based on how many sampl
 def('z-score|peer z-score', 'Modified z-score — how many robust deviations a reading sits from normal. Higher = more anomalous; ≥ 3.5 flags, ≥ 5 warns.');
 def('fit quality|fit r²', 'R-squared — how well the trend line fits the data, 0–1. Higher means a more trustworthy projection.');
 def('samples|regression samples', 'How many data points the estimate is built from — more points, more reliable.');
-def('sibling median', 'The median reading across the pack’s four siblings — the “normal” this pack is compared against.');
+def('sibling median', 'The median reading across every pack in the same Core, this one included — the “normal” this pack is compared against.');
 def('this pack', 'This pack’s current reading.');
 def('deviation', 'How far this reading sits from the expected/normal value.');
 def('baseline window', 'The span of history and number of samples behind the self-baseline.');

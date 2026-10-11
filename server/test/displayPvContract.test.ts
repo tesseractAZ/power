@@ -58,3 +58,13 @@ test('★★ every Core reporting, F11 gate active: Home Assistant’s figure eq
   assert.equal(fc.forecastPvWhNext24Display, fc.forecastPvWhNext24, 'HA (display) and the dashboard (alarm) publish one number');
   assert.equal(fc.restoredSolarModel, (fc as any).solarModel, 'with no Core missing, the display model IS the alarm model');
 });
+
+test('★★ v1.187.18 — the forecast carries the SHP2 pool its SoC trajectory was integrated against', async () => {
+  const startHour = Math.ceil(now / H) * H;
+  setWeatherCacheForTesting({ fetchedAt: now, lat: 33.4, lon: -112, hours: Array.from({ length: 30 }, (_, k) => ({ ts: startHour - 2 * H + k * H, cloudCoverPct: 10, radiationWm2: ghiAt(startHour - 2 * H + k * H), tempC: 25 })) } as any);
+  resetForecastCachesForTesting();
+  resetRunwayCache();
+  const fc = await getDayForecast({ SHP2: shp2(['A', 'B', 'C']), A: dpu('A'), B: dpu('B'), C: dpu('C') } as any, rec);
+  assert.equal(fc.poolFullWh, 92000, 'poolFullWh is the SHP2 backupFullCapWh, so the probabilistic band needs no fleet guess');
+  assert.ok(fc.hours.some((h) => h.projectedSocPct != null), 'and the trajectory it describes exists');
+});

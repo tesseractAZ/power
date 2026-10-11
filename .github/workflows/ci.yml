@@ -2,9 +2,10 @@ name: CI
 
 # Every push to main and every PR: three type-checks (server, web, server
 # tests), the server suite and its README-claim check, the mutant-anchor,
-# personal-data, dependency-advisory and add-on-config checks, the release-PR
-# check (PRs only), a Dockerfile smoke build and the docs build. Cheap
-# insurance that no broken commit lands on main and gets installed onto the Pi.
+# personal-data, dependency-advisory and add-on-config checks, a Dockerfile
+# smoke build and the docs build. Cheap insurance that no broken commit lands
+# on main and gets installed onto the Pi. The release-PR version check is in
+# release-pr.yml, so a title edit re-runs it without re-running all of CI.
 
 on:
   push:
@@ -21,7 +22,7 @@ permissions:
 jobs:
   typecheck:
     name: Type-check ${{ matrix.project }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +56,7 @@ jobs:
     # tsconfig.test.json is check-only (noEmit) and covers src + test under the
     # same strict options. This job is what keeps that from rotting again.
     name: Type-check server tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -83,7 +84,7 @@ jobs:
     # suite once per mutant); checking that their anchors still RESOLVE is nearly
     # free and catches the whole failure mode.
     name: Mutant anchors resolve
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -96,7 +97,7 @@ jobs:
 
   server-tests:
     name: Server tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -146,7 +147,7 @@ jobs:
 
   no-secrets:
     name: No personal data in the tree
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -155,7 +156,7 @@ jobs:
 
   npm-audit:
     name: Dependency advisories
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -179,26 +180,9 @@ jobs:
       - name: Advisories in dependency trees
         run: node scripts/check-npm-audit.mjs
 
-  release-pr:
-    name: Release PR declares the version it names
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # v1.131.0 — the release pipeline's one silent step. tag-release.yml is
-      # paths-filtered on ecoflow_panel/config.yaml, so a "Release vX.Y.Z" merge
-      # that forgets the bump does not fail it — it never runs it. v1.130.0
-      # shipped that way: code and CHANGELOG on main, no tag, no image, HA still
-      # offering 1.129.2, and every workflow green.
-      - name: Version bump + CHANGELOG section present
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: python3 scripts/check-release-pr.py
-
   addon-config:
     name: Validate add-on config + translations
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -220,7 +204,7 @@ jobs:
     # in GitHub Actions cache keeps a run to about a minute or less (29–65 s
     # across v1.187.14–16 and the dependency merges after them).
     name: Dockerfile smoke build (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -256,7 +240,7 @@ jobs:
     # The same generator (scripts/build-docs-docx.py) attaches the .docx to the
     # GitHub Release in images.yml, so this job keeps that path exercised.
     name: Build documentation (.docx + .pdf)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # v1.187.3 — bounded, as images.yml's release job: the same unbounded apt-get stalled a
     # release run for the 6 h platform limit. On the PR this job is a hard gate, so a stall
     # now ends as a red check in minutes rather than a check held for six hours.

@@ -1,0 +1,40 @@
+name: Release PR
+
+# The pre-merge half of the release pipeline: scripts/check-release-pr.py on every
+# pull request to main. It compares the version ecoflow_panel/config.yaml declares
+# before and after the merge (GitHub's test-merge commit, HEAD^1 against HEAD) and
+# fails when the PR's title and that change disagree: a version change under a
+# title other than "Release v<new>", a "Release vX" title that changes nothing, a
+# one-commit PR whose commit subject (what a squash merge of it lands with) names
+# another version or a release that changes nothing, a downgrade, a reused or existing tag, a version below the highest vX.Y.Z tag, a
+# version that is not X.Y.Z, or a missing CHANGELOG section. tag-release.yml
+# reports the same cases after the merge, when Home Assistant already offers the
+# version; this check reports them while the PR can still be fixed.
+#
+# Its own workflow (it ran in ci.yml until v1.187.17) so that `edited` re-runs it
+# when only the title changes, without re-running CI. The job's `name:` is a
+# required status check on main and must not change.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  release-pr:
+    name: Release PR declares the version it names
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # fetch-depth 0: both parents of the test-merge commit, and every v* tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Version bump + CHANGELOG section present
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 scripts/check-release-pr.py

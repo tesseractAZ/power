@@ -31,7 +31,11 @@ const dbPath: string | undefined = (workerData as any)?.dbPath;
 const recorder = createReadRecorder(dbPath);
 let snapshot: FleetSnapshot = { generatedAt: 0, devices: {} };
 const ctx = () => ({ recorder, snapshot, log });
-const hasDevices = () => Object.keys(snapshot.devices).length > 0;
+// v1.187.18 — a device carries a PROJECTION, not merely a listing. The first snapshot at a boot is
+// the device list, every device without a projection: a warm pass on it scans every report over
+// nothing. Load hygiene only — the report chokepoint (reports.ts buildReport) is what keeps a
+// report built on a partial map from being served on the full one.
+const hasProjections = () => Object.values(snapshot.devices).some((d) => d?.projection != null);
 
 port.on('message', async (msg: any) => {
   try {
@@ -80,7 +84,7 @@ port.on('message', async (msg: any) => {
 const WARM_INTERVAL_MS = 4 * 60 * 1000;
 let warming = false;
 const warm = async () => {
-  if (warming || !hasDevices()) return;
+  if (warming || !hasProjections()) return;
   warming = true;
   try {
     // v1.186.0 — warmReports yields a macrotask turn between reports, so queued requests
@@ -95,10 +99,10 @@ const warm = async () => {
 };
 const warmTimer = setInterval(() => { void warm(); }, WARM_INTERVAL_MS);
 (warmTimer as any).unref?.();
-// First warm as soon as a non-empty snapshot lands (mirrors the old
+// First warm as soon as a snapshot with a projection lands (mirrors the old
 // cache-warmer's 250ms poll / 30s ceiling, but it's harmless to keep polling).
 const firstWarm = setInterval(() => {
-  if (hasDevices()) { clearInterval(firstWarm); void warm(); }
+  if (hasProjections()) { clearInterval(firstWarm); void warm(); }
 }, 500);
 (firstWarm as any).unref?.();
 

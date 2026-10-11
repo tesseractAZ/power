@@ -1,12 +1,11 @@
 /**
  * v0.9.74 — SHP2 membership filter for fleet-capacity aggregations.
  *
- * the operator's setup: 5 EcoFlow Delta Pro Ultra cores on the EcoFlow Cloud
- * account, but only 3 wired into the home's SHP2 (Smart Home Panel).
- * Cores 4 + 5 are spares — they can charge on the bench / off a wall
- * outlet and report telemetry, but they CAN'T deliver energy into the
- * home until they're physically connected to the (forthcoming second)
- * SHP2.
+ * The reference setup: 5 EcoFlow Delta Pro Ultra cores on the EcoFlow Cloud
+ * account, 3 of them wired into the home's SHP2 (Smart Home Panel) — Cores
+ * 1, 2 and 5 since the 2026-08-20 swap. The others are bench spares — they can
+ * charge on the bench / off a wall outlet and report telemetry, but they CAN'T
+ * deliver energy into the home until they're wired into an SHP2.
  *
  * Before this version, every "fleet" aggregation (lifetime kWh, runway,
  * backup-pool capacity, peer-pack outlier baseline, MQTT Discovery
@@ -210,8 +209,8 @@ export function shp2Panels(devices: Record<string, DeviceSnapshot>): {
  * observed), this returns true for every SN. That's the safe-default
  * behavior for DPU-only setups; see module docstring.
  *
- * For the operator's setup the SHP2 is always present, so this returns true
- * only for Cores 1, 2, 3 (slots 1-3) and false for Cores 4, 5.
+ * With the SHP2 present it returns true only for its connected sources (Cores
+ * 1, 2 and 5 at 2026-10) and false for the bench Cores.
  */
 export function isShp2Connected(sn: string, connected: Set<string>): boolean {
   if (connected.size === 0) return true;
@@ -219,7 +218,8 @@ export function isShp2Connected(sn: string, connected: Set<string>): boolean {
 }
 
 /**
- * v0.16.4 — Designated bench spares (Core 4 + Core 5).
+ * v0.16.4 — Designated bench spares (Core 4 + Core 5 when written; the literal
+ * is stale — see the v1.121.0 note below).
  *
  * These two DPUs are intentionally kept powered down and are NOT wired into
  * the home's SHP2. Their EcoFlow-Cloud "offline" / stale-telemetry state is an
@@ -230,7 +230,7 @@ export function isShp2Connected(sn: string, connected: Set<string>): boolean {
  * repairIssues.ts.
  *
  * Why an explicit SN allowlist (not the dynamic isConnected membership) is the
- * SAFETY FLOOR for the cloud-offline gate: a genuine home core (1/2/3) — even one that
+ * SAFETY FLOOR for the cloud-offline gate: a genuine home core — even one that
  * is faulted or unplugged and has therefore dropped out of the SHP2's
  * `isConnected` sources — must NEVER have its real offline alarm muted. Because
  * a home core's SN is never in this set, it can never be misclassified as a

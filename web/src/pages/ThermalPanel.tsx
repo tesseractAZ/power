@@ -482,7 +482,8 @@ function SummaryStrip({
 
   // Capacity + pool SoC come from the SHP2's OWN aggregate (backupFullCapWh/backupBatPercent)
   // when present — it counts the whole wired pool including a cloud-stale core, so the
-  // headline doesn't collapse ~33% the instant one core's WiFi drops. The per-pack sum is
+  // headline doesn't drop by one core's share (a third, with three wired cores) the instant
+  // that core's WiFi drops. The per-pack sum is
   // only a no-SHP2 fallback (spare-only fleets). Degradation/hottest/spread/balancing stay
   // per-pack over the reporting cores (you can't read a stale core's live cell data anyway).
   const perPackCapKwh = (fullMah * MAH_TO_WH) / 1000;

@@ -1423,12 +1423,13 @@ export function computeAlerts(
     });
   }
 
-  // v0.16.4 — designated bench spares (Core 4/5) are intentionally kept powered
+  // v0.16.4 — designated bench spares (SPARE_DPU_SNS) are intentionally kept powered
   // down and are NOT wired into the SHP2, so their EcoFlow-offline / stale state
   // is an EXPECTED steady state, not an event. Such a DPU's connectivity alert
   // is emitted non-annunciating (visible in the UI, but no chime/push/condition
   // raise — see the offline/stale branches below). The SPARE_DPU_SNS allowlist
-  // is the safety FLOOR: a real home core (1/2/3) is never in it, so even a
+  // is the safety FLOOR: a real home core is meant never to be in it (the literal is
+  // stale since 2026-08-20 — see shp2Membership.ts v1.121.0), so even a
   // faulted/unplugged home core — which drops out of the SHP2's connected
   // sources — still annunciates its genuine offline alarm. The positive
   // connected-source check re-arms a spare the moment it's wired into an SHP2.

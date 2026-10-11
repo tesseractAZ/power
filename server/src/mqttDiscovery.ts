@@ -1525,6 +1525,7 @@ export async function startMqttDiscovery(
       curtailment,
       carbon,
       tariff,
+      degradation: deg as { basisPending?: boolean } | null, // v1.187.18
     }));
   };
 

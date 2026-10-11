@@ -63,7 +63,7 @@ function core(): Any {
 const readiness = (devices: Any, nowMs = NOW) => publishReadiness({
   devices, alerts: [], alertsComplete: true, speakerLastProbeAt: NOW, forecast: { pvForecastUnavailable: false },
   runway: {}, clipping: { arrayPeakW: 9000 }, curtailment: { basisComplete: true }, carbon: { basisComplete: true },
-  tariff: { basisComplete: true }, nowMs,
+  tariff: { basisComplete: true }, degradation: { basisPending: false }, nowMs,
 });
 
 /* ── the readiness verdict ─────────────────────────────────────────────── */

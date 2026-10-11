@@ -200,7 +200,7 @@ export function dropSnapshot(alertId: string): void {
 /**
  * Extract the relevant feature vector from the live snapshot for an
  * alert. Different categories surface different signals — we don't want
- * to snapshot the entire 5-DPU × 5-pack telemetry for every alert.
+ * to snapshot every DPU's per-pack telemetry for every alert.
  *
  * Returns null if we don't know how to extract features for this alert
  * (no snapshot will be persisted; the outcome capture still works but

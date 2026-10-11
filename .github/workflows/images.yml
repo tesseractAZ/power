@@ -1,15 +1,19 @@
 name: Publish images
+run-name: Publish images ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
 
 # Build + push multi-arch Docker images to GHCR for a release tag, then cut the
 # GitHub Release that announces the version is fully installable.
 #
 # Flow:
-#   1. tag-release.yml dispatches this workflow right after it pushes the
-#      vX.Y.Z tag: a tag pushed with GITHUB_TOKEN does not fire the
-#      `push: tags` trigger below (only a tag pushed by hand would). A manual
-#      workflow_dispatch re-runs a version. The server suite runs first, then
-#      amd64 and aarch64 build in parallel, each on its own native runner
-#      (ubuntu-24.04, ubuntu-24.04-arm) with no emulation.
+#   1. tag-release.yml (which runs on every push to main) dispatches this
+#      workflow right after it pushes the vX.Y.Z tag for the version
+#      config.yaml declares on main, and re-dispatches it from a re-run or a
+#      manual run when the tag has no Release: a tag pushed with GITHUB_TOKEN
+#      does not fire the `push: tags` trigger below (only a tag pushed by hand
+#      would). A manual workflow_dispatch re-runs a version. The server suite
+#      runs first, then amd64 and aarch64 build in parallel, each on its own
+#      native runner (ubuntu-24.04, ubuntu-24.04-arm) with no emulation. Every
+#      job runs on a pinned image, never ubuntu-latest.
 #   2. Each image is pushed to ghcr.io/<owner>/{arch}-ecoflow-panel as both
 #      :{version} and :latest. HA Supervisor pulls these instead of building
 #      on the Pi.
@@ -36,23 +40,33 @@ permissions:
   contents: write   # GitHub Release creation
   packages: write   # GHCR push
 
+# One run per version at a time, none cancelled: a re-dispatch that raced a running
+# build would otherwise race it to `gh release create`, and the second one fails.
+concurrency:
+  group: images-${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   resolve:
     name: Resolve version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
     steps:
       - id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ -n "${{ inputs.version }}" ]]; then
-            v="${{ inputs.version }}"
+          if [[ -n "${INPUT_VERSION:-}" ]]; then
+            v="$INPUT_VERSION"
           else
             v="${GITHUB_REF_NAME#v}"
           fi
-          if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # Strict X.Y.Z, as tag-release.yml tags: no leading zeros, no suffix.
+          if [[ ! "$v" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::Invalid version '$v' (expected X.Y.Z)"
             exit 1
           fi
@@ -118,12 +132,14 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.tag }}
 
-      # QEMU is not a fallback, and no build here uses it: runs-on pins each arch
-      # to its native runner (an unavailable arm64 runner leaves the job queued;
-      # it never moves to an amd64 host), and each build targets only its host's
-      # platform. The step still registers every binfmt emulator and pulls
-      # tonistiigi/binfmt from Docker Hub (~9 s per job in v1.187.16), a Docker
-      # Hub dependency whose pull already errored once (v1.187.12, below).
+      # No QEMU step. runs-on pins each arch to its native runner (an
+      # unavailable arm64 runner leaves the job queued; it never moves to an amd64
+      # host), and each build targets only its host's platform, so nothing here runs
+      # a foreign-arch binary. docker/setup-qemu-action only registered binfmt
+      # emulators, pulling tonistiigi/binfmt from Docker Hub on every job (4-11 s)
+      # for no build that used them. server/test/workflowNativeBuild.test.ts fails if
+      # a matrix entry pairs a platform with the other arch's runner, or if the step
+      # returns.
       # v0.9.77 — bumped docker/* actions to Node-24 majors (v4 / v7). GitHub
       # is forcing Node 24 as the default runtime on June 2 2026 and removing
       # Node 20 entirely on Sep 16 2026; the previous @v3 / @v5 pins all ran
@@ -132,18 +148,14 @@ jobs:
       # plus internal ESM refactors; build-push-action v6+ also writes a build
       # summary and uploads a build-record artifact by default (a failure there
       # is only a warning).
-      # 2026-10-10 (v1.187.12) — the runner could not get a Docker Hub token to pull
-      # tonistiigi/binfmt and moby/buildkit; the amd64 job failed before building, the
-      # release job was skipped, and the version had no GitHub Release until a manual
-      # re-run. Each setup step gets one retry after a pause; a second failure fails the job.
-      - id: qemu
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-        continue-on-error: true
-      - if: steps.qemu.outcome == 'failure'
-        run: sleep 30
-      - if: steps.qemu.outcome == 'failure'
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-
+      # 2026-10-10 (v1.187.12) — the runner could not get a Docker Hub token. The binfmt
+      # pull recovered on setup-qemu-action's own retry; setup-buildx-action v4.1.0
+      # pulled moby/buildkit once, failed, and failed the amd64 job before it built,
+      # so the release job was skipped. From v4.4.0 the action pre-pulls the BuildKit
+      # image itself, up to five attempts with backoff on a transient registry error.
+      # This step keeps one outer retry after a pause, for an outage longer than those
+      # attempts; a second failure fails the job. The build step still resolves
+      # docker/dockerfile and node:22-alpine from Docker Hub, without a retry.
       - id: buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         continue-on-error: true
@@ -210,7 +222,7 @@ jobs:
   release:
     name: Cut GitHub Release
     needs: [resolve, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # v1.187.3 — BOUNDED. With no timeout anywhere, one stalled apt mirror in the best-effort
     # 'Ensure pandoc' step ran this job into the platform's 6 h limit; the job was CANCELLED,
     # so the steps after it — including 'Create GitHub Release' — never ran (v1.187.1, run
@@ -393,8 +405,13 @@ jobs:
           # v1.187.12 on 2026-10-11 made it Latest over v1.187.14.
           tag="${{ needs.resolve.outputs.tag }}"
           # A lookup that fails leaves the choice to GitHub (the previous behaviour) rather
-          # than failing the release.
-          highest=$(git ls-remote --tags --refs "https://github.com/${GITHUB_REPOSITORY}.git" 'v*' 2>/dev/null | sed 's#.*refs/tags/##' | sort -V | tail -1 || true)
+          # than failing the release. Only strict vX.Y.Z tags count, compared as numbers: `sort -V`
+          # ranked a stray v1.2.3-rc1 above v1.2.3 and would have demoted the real release.
+          highest=$(git ls-remote --tags --refs "https://github.com/${GITHUB_REPOSITORY}.git" 'v*' 2>/dev/null | python3 -c '
+          import re, sys
+          tags = [m.group(1) for l in sys.stdin if (m := re.search(r"refs/tags/(v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$", l.strip()))]
+          print(max(tags, key=lambda t: tuple(map(int, t[1:].split(".")))) if tags else "")
+          ' || true)
           latestFlag=()
           if [ -n "$highest" ]; then
             if [ "$highest" = "$tag" ]; then latestFlag=(--latest=true); else latestFlag=(--latest=false); fi

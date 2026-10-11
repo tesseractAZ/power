@@ -94,7 +94,8 @@ export interface NightChargeInputs {
   nowMs: number;
 
   // ── Battery state (read from the SHP2 projection upstream) ──
-  /** Usable pool capacity, kWh (backupFullCapWh/1000, ~92.16). */
+  /** Pool capacity as the SHP2 reports it, kWh (backupFullCapWh/1000): the packs' nameplate sum
+   *  (92.16 at 15 packs), not their measured full-charge capacity and not usable energy. */
   fullKwh: number;
   /** Current state-of-charge %, as the SHP2 reports it. */
   socNowPct: number;
