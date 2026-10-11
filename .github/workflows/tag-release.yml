@@ -12,9 +12,10 @@ name: Tag released version
 #     commit that brought it to main and dispatch images.yml;
 #   - it is tagged and released → nothing to do (an ordinary push, e.g. a
 #     Dependabot merge, is a no-op);
-#   - it is a version that cannot be published (not X.Y.Z, a revert to a
-#     released version, a reused number, not above the highest tag, a tag off
-#     main) → a red run, because HA already offers it.
+#   - it is a version that cannot be published (not X.Y.Z, a reused number, not
+#     above the highest tag, a tag off main) → a red run, because HA already
+#     offers it; and while main declares an older release than the newest one (a
+#     revert), every push and dispatch is red until main moves above it.
 #
 # A squash subject starting "Release vX" whose push did not change config.yaml's
 # version is an error (v1.130.0: the code and CHANGELOG landed without the bump,
@@ -32,6 +33,8 @@ name: Tag released version
 # A re-run (GITHUB_RUN_ATTEMPT > 1) or a manual workflow_dispatch re-dispatches
 # images.yml when the tag exists without a GitHub Release (a lost or failed
 # dispatch); a first attempt only warns, because images.yml may still be running.
+# Only an explicit 404 from the Release lookup counts as "no Release"; any other
+# lookup failure is a red run.
 #
 # Why we dispatch images.yml explicitly instead of relying on the tag push: a
 # tag pushed with the default `GITHUB_TOKEN` does NOT trigger other workflows
@@ -151,16 +154,30 @@ jobs:
             if [[ "$TAGC" == "$SHA" ]] || { git merge-base --is-ancestor "$SHA" "$TAGC" && git merge-base --is-ancestor "$TAGC" "$TIP"; }; then
               : # tagged at this commit, or at a later commit on main
             elif git merge-base --is-ancestor "$TAGC" "$SHA"; then
-              if [[ -n "$BV" && "$BV" != "$V" ]]; then
-                echo "::error::This push moved config.yaml from ${BV} to ${V}, but ${TAG} was released from ${TAGC:0:9}. HA offers any version that differs from the installed one (a downgrade if lower), and auto-update installs it. A Release tag cannot be reused: bump above ${HIGH}."
+              # Released at an earlier commit. Judged on the STATE, so every push and dispatch stays
+              # red while main sits below a newer release, not only the push that moved it there.
+              if [[ -n "$HIGH" ]] && gt "$HIGH" "$V"; then
+                echo "::error::main declares ${V} (released from ${TAGC:0:9}), but v${HIGH} is out. HA offers any version that differs from the installed one, so this is a downgrade offered to every newer install, and auto-update installs it. Bump above ${HIGH}."
+                exit 1
+              fi
+              # A reused number: this push left another PUBLISHED version for one released before.
+              # (Leaving a version that was never tagged, such as a pre-release spelling, is a fix.)
+              if [[ -n "$BV" && "$BV" != "$V" ]] && git rev-parse -q --verify "refs/tags/v${BV}" >/dev/null; then
+                echo "::error::This push moved config.yaml from ${BV} (released) to ${V}, but ${TAG} was released from ${TAGC:0:9}: the version on main is not what that Release holds. A Release tag cannot be reused: bump above ${HIGH}."
                 exit 1
               fi
             else
               echo "::error::${TAG} points at ${TAGC:0:9}, which is not on main."
               exit 1
             fi
-            if gh release view "$TAG" >/dev/null 2>&1; then
+            # Only an explicit 404 means "no Release". Any other failure (network, 5xx, rate limit,
+            # auth) is a red run, never a re-dispatch that rebuilds a sealed version's images.
+            if out=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --silent 2>&1); then
               echo "::notice::${TAG} is tagged and released; nothing to do."
+            elif ! grep -q 'HTTP 404' <<<"$out"; then
+              out=${out//$'\n'/ }
+              echo "::error::Could not look up the Release for ${TAG} (${out}). Not re-dispatching."
+              exit 1
             elif [[ "${GITHUB_RUN_ATTEMPT:-1}" != "1" || "${EVENT_NAME:-}" == "workflow_dispatch" ]]; then
               gh workflow run images.yml -f version="$V"
               echo "::notice::${TAG} exists without a Release; re-dispatched images.yml."

@@ -5,9 +5,12 @@
  *
  * The tag step's script runs with `bash -e`: per run, a fresh clone with HEAD detached at the
  * run's commit and refs/remotes/origin/main forced to it (what actions/checkout does on a push),
- * and a stub `gh` first on PATH that logs its arguments, answers `release view` from a list and
- * can fail `workflow run`. Every environment is built from scratch, never from process.env: a CI
- * re-run sets GITHUB_RUN_ATTEMPT=2, and a developer's tag.gpgSign or hooks would leak in.
+ * and a stub `gh` first on PATH that logs its arguments, answers the Release lookup (`gh api
+ * repos/<repo>/releases/tags/<tag>`) from a list with GitHub's 404 or a 502, and can fail
+ * `workflow run`. Every environment is built from scratch, never from process.env: a CI re-run sets
+ * GITHUB_RUN_ATTEMPT=2, and a developer's tag.gpgSign or hooks would leak in. The step itself gets a
+ * git config with NO identity (`user.useConfigOnly`), as on a GitHub-hosted runner: the step must
+ * set the tagger itself, and a step that does not fails here as it would there.
  */
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, chmodSync, rmSync, existsSync, unlinkSync } from 'node:fs';
@@ -65,8 +68,16 @@ export const TAG_SCRIPT = runBlock(TAG_STEP);
 
 const GH_STUB = `#!/bin/sh
 printf '%s\\n' "$*" >> "$GH_LOG"
+if [ "$1" = api ]; then
+  case "$2" in
+    "repos/$GITHUB_REPOSITORY/releases/tags/"*) tag=\${2##*/} ;;
+    *) echo "gh stub: unexpected api path: $2" >&2; exit 2 ;;
+  esac
+  if [ -n "\${GH_LOOKUP_FAILS:-}" ]; then echo "gh: Server Error (HTTP 502)" >&2; exit 1; fi
+  if grep -qxF -- "$tag" "$GH_RELEASES"; then exit 0; fi
+  echo "gh: Not Found (HTTP 404)" >&2; exit 1
+fi
 case "$1 $2" in
-  "release view") grep -qxF -- "$3" "$GH_RELEASES" ;;
   "workflow run") [ -z "\${GH_DISPATCH_FAILS:-}" ] ;;
   *) echo "gh stub: unexpected call: $*" >&2; exit 2 ;;
 esac
@@ -92,6 +103,8 @@ export interface RunOpts {
   /** Tags that have a GitHub Release. */
   releases?: string[];
   dispatchFails?: boolean;
+  /** The Release lookup fails with a 502 (network, API outage) instead of answering. */
+  lookupFails?: boolean;
 }
 export interface RunResult { status: number | null; out: string; gh: string[]; dispatched: string[] }
 
@@ -101,6 +114,8 @@ export class World {
   readonly origin = join(this.dir, 'origin.git');
   readonly dev = join(this.dir, 'dev');
   readonly env: Record<string, string>;
+  /** The step's git config: no identity, as on a GitHub-hosted runner. */
+  private readonly runnerCfg = join(this.dir, 'runner-gitconfig');
   private n = 0;
 
   constructor() {
@@ -113,6 +128,7 @@ export class World {
     const cfg = join(this.dir, 'gitconfig');
     writeFileSync(cfg, '[user]\n\tname = Test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgSign = false\n[tag]\n\tgpgSign = false\n[advice]\n\tdetachedHead = false\n');
     this.env = { PATH: `${bin}:${TEST_PATH}`, HOME: home, GIT_CONFIG_GLOBAL: cfg, GIT_CONFIG_NOSYSTEM: '1', LC_ALL: 'C' };
+    writeFileSync(this.runnerCfg, '[user]\n\tuseConfigOnly = true\n[commit]\n\tgpgSign = false\n[tag]\n\tgpgSign = false\n[advice]\n\tdetachedHead = false\n');
     this.git(this.dir, 'init', '-q', '--bare', '-b', 'main', this.origin);
     this.git(this.dir, 'init', '-q', '-b', 'main', this.dev);
     this.git(this.dev, 'remote', 'add', 'origin', this.origin);
@@ -161,6 +177,13 @@ export class World {
     this.git(this.dir, '--git-dir', this.origin, 'tag', '-d', name);
   }
 
+  /** A tag's object type in origin ('tag' for an annotated tag) and its tagger. */
+  tagInfo(name: string): { type: string; tagger: string } {
+    const type = this.git(this.dir, '--git-dir', this.origin, 'cat-file', '-t', `refs/tags/${name}`);
+    const tagger = this.git(this.dir, '--git-dir', this.origin, 'for-each-ref', `refs/tags/${name}`, '--format=%(taggername) %(taggeremail)');
+    return { type, tagger };
+  }
+
   /** Origin's tags, each with the commit it points at. */
   tags(): Record<string, string> {
     const out = this.git(this.dir, '--git-dir', this.origin, 'for-each-ref', 'refs/tags', '--format=%(refname:short) %(*objectname)%(objectname)');
@@ -192,11 +215,12 @@ export class World {
     const releases = join(this.dir, `releases-${k}`);
     writeFileSync(releases, (o.releases ?? []).map((r) => `${r}\n`).join(''));
     const env: Record<string, string> = {
-      ...this.env, GH_TOKEN: 'test-token', GH_LOG: log, GH_RELEASES: releases,
-      GITHUB_RUN_ATTEMPT: o.attempt ?? '1', EVENT_NAME: o.event ?? 'push', BEFORE: o.before ?? '',
+      ...this.env, GIT_CONFIG_GLOBAL: this.runnerCfg, GH_TOKEN: 'test-token', GH_LOG: log, GH_RELEASES: releases,
+      GITHUB_REPOSITORY: 'owner/repo', GITHUB_RUN_ATTEMPT: o.attempt ?? '1', EVENT_NAME: o.event ?? 'push', BEFORE: o.before ?? '',
     };
     if (o.msg !== null) env.HEAD_MSG = o.msg ?? '';
     if (o.dispatchFails) env.GH_DISPATCH_FAILS = '1';
+    if (o.lookupFails) env.GH_LOOKUP_FAILS = '1';
     const r = spawnSync('bash', ['-e', step], { cwd: runner, env, encoding: 'utf8' });
     const gh = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
     return { status: r.status, out: `${r.stdout}${r.stderr}`, gh, dispatched: gh.filter((l) => l.startsWith('workflow run ')) };

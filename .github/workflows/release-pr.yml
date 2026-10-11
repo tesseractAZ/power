@@ -5,7 +5,8 @@ name: Release PR
 # before and after the merge (GitHub's test-merge commit, HEAD^1 against HEAD) and
 # fails when the PR's title and that change disagree: a version change under a
 # title other than "Release v<new>", a "Release vX" title that changes nothing, a
-# downgrade, a reused or existing tag, a version below the highest vX.Y.Z tag, a
+# one-commit PR whose commit subject (what a squash merge of it lands with) names
+# another version or a release that changes nothing, a downgrade, a reused or existing tag, a version below the highest vX.Y.Z tag, a
 # version that is not X.Y.Z, or a missing CHANGELOG section. tag-release.yml
 # reports the same cases after the merge, when Home Assistant already offers the
 # version; this check reports them while the PR can still be fixed.

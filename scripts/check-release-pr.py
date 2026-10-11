@@ -14,6 +14,9 @@ main after the merge. Comparing the PR's own base and head instead would read a
 branch cut before the last release as a downgrade. It fails when:
 
   - the version changed, but the title is not "Release v<new version>";
+  - a one-commit PR whose commit subject starts "Release v" names another version, or
+    names one when the version does not change: GitHub's squash default for a one-commit
+    PR is the commit's subject, not the title, and tag-release.yml judges that subject;
   - the title is "Release vX", but the merge does not change the version
     (v1.130.0, PR #387, 2026-09-05: the code and CHANGELOG section landed,
     config.yaml stayed at 1.129.2, and nothing was released);
@@ -26,7 +29,9 @@ branch cut before the last release as a downgrade. It fails when:
     exact regex images.yml extracts the Release notes with, so a heading this
     accepts cannot fail the publish after the tag exists.
 
-A PR that changes no version and whose title is not a release title passes.
+A PR that changes no version passes when neither its title nor (for a one-commit
+PR) its commit's subject is a release subject. A rebase merge lands every commit's
+own subject; this check does not read those (main is squash-merged).
 
 It fails closed when HEAD is not a merge commit (a shallow or non-merge
 checkout). Set BASE_REV to compare against another revision instead: release.yml
@@ -83,6 +88,20 @@ def released() -> list[str]:
     return [t[1:] for t in r.stdout.split() if SEMVER_RE.match(t[1:])]
 
 
+def squash_subject() -> str | None:
+    """The subject a squash merge of this PR lands with when GitHub does not use the PR title.
+
+    The repository's squash default (COMMIT_OR_PR_TITLE) takes a one-commit PR's subject from that
+    commit, not from the PR title, and tag-release.yml judges the subject that lands. With more than
+    one commit (or no merge commit to read the PR head from) the squash subject is the PR title.
+    """
+    r = git("rev-list", "--count", "HEAD^1..HEAD^2")
+    if r.returncode or r.stdout.strip() != "1":
+        return None
+    s = git("log", "-1", "--format=%s", "HEAD^2")
+    return s.stdout.strip() if s.returncode == 0 else None
+
+
 def main() -> int:
     title = os.environ.get("PR_TITLE", "").strip()
     base_rev = os.environ.get("BASE_REV") or "HEAD^1"
@@ -97,18 +116,28 @@ def main() -> int:
     base, new = parse_version(show(base_rev, CONFIG)), parse_version(head_cfg)
     m = TITLE_RE.match(title)
     title_v = m.group(1) if m else None
+    subject = squash_subject()
+    sm = TITLE_RE.match(subject or "")
+    subject_v = sm.group(1) if sm else None
     changed = base != new
 
-    if not changed and title_v is None:
+    if not changed and title_v is None and subject_v is None:
         print(f"version unchanged ({new!r}) and not a release title — nothing to check")
         return 0
 
     failures: list[str] = []
     if not changed:
-        failures.append(
-            f"titled 'Release v{title_v}', but config.yaml's version is {new!r} before and after "
-            f"this merge.\n    Merging it releases nothing. Bump `version:` in {CONFIG}, or retitle the PR."
-        )
+        if title_v is not None:
+            failures.append(
+                f"titled 'Release v{title_v}', but config.yaml's version is {new!r} before and after "
+                f"this merge.\n    Merging it releases nothing. Bump `version:` in {CONFIG}, or retitle the PR."
+            )
+        if subject_v is not None:
+            failures.append(
+                f"this PR's one commit is '{subject}', and a squash merge of a one-commit PR lands with "
+                f"that subject, not the PR title.\n    tag-release.yml would report a release of "
+                f"v{subject_v} that changes no version ({new!r}). Reword the commit."
+            )
     elif new is None or not SEMVER_RE.match(new):
         failures.append(
             f"{CONFIG} declares version {new!r}, which is not X.Y.Z (no leading zeros, no suffix).\n"
@@ -135,6 +164,12 @@ def main() -> int:
             failures.append(f"{new} is below the highest release tag, v{top}.")
         if title_v != new:
             failures.append(f"this PR changes the version to {new}; title it 'Release v{new} — …'.")
+        if subject_v is not None and subject_v != new:
+            failures.append(
+                f"this PR's one commit is '{subject}', and a squash merge of a one-commit PR lands with "
+                f"that subject, not the PR title.\n    It names v{subject_v} while config.yaml says {new}; "
+                f"reword the commit to 'Release v{new} …'."
+            )
         notes = show("HEAD", CHANGELOG) or ""
         if not re.search(rf"^## v?{re.escape(new)}\b", notes, re.MULTILINE):
             failures.append(

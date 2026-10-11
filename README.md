@@ -279,14 +279,15 @@ Every configuration option is documented in
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 4,159 tests
+cd server && npm install && npm test     # 4,162 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
 ```
 
 **Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` →
-open a PR titled `Release vX.Y.Z …`. `main` is branch-
+open a PR titled `Release vX.Y.Z …` (for a one-commit PR, its commit subject too: GitHub's
+squash merge lands a one-commit PR with the commit's subject, not the title). `main` is branch-
 protected. CI runs the three type-checks (server, web, server tests), the test suite, the
 mutation-harness anchor check, the secrets scan, the dependency-advisory gate, the add-on
 config/translation validator, the Dockerfile smoke build, the docs `.docx`+`.pdf` build and
@@ -301,13 +302,14 @@ ch.12.
 
 The release-PR check (`release-pr.yml`, `scripts/check-release-pr.py`, the required check *"Release
 PR declares the version it names"*) compares the version before and after GitHub's test merge. It
-fails a version change under any title but `Release v<new>`, a `Release vX` title that changes no
-version (v1.130.0 merged that way and released nothing), a downgrade, a reused or lower version
+fails a version change under any title but `Release v<new>`, a `Release vX` title (or one-commit
+subject) that changes no version or names another one (v1.130.0 merged that way and released nothing), a downgrade, a reused or lower version
 than the highest tag, a version that is not `X.Y.Z`, and a missing CHANGELOG section. An admin
 merge can bypass required checks, so after the merge `tag-release.yml` fails the cases it can see
-from `main` as a red run: a `Release vX` merge that changed no version, a revert to a released
-version or a reused number, and a version it cannot tag. A bump merged under another subject is
-still tagged, with a warning.
+from `main` as a red run: a `Release vX` merge that changed no version, a reused number, and a
+version it cannot tag. While `main` declares an older release than the newest one (a revert), every
+push and dispatch is red until `main` moves above it. A bump merged under another subject is still
+tagged, with a warning.
 
 ## Quality & accuracy
 
@@ -330,7 +332,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **93 harnesses** (`scripts/mutate-*.mjs`) holding **1917
+regression. There are **93 harnesses** (`scripts/mutate-*.mjs`) holding **1930
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that

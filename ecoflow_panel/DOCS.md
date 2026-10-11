@@ -9124,7 +9124,9 @@ since the previous tag if empty). It:
 `config.yaml` before and after GitHub's test merge (`HEAD^1` against `HEAD`), so a branch cut
 before the last release is not read as a downgrade. It fails: a version change under a title other
 than `Release v<new>`; a `Release vX` title that changes no version (v1.130.0, or a second release
-PR racing one that already merged); a version that is not strict `X.Y.Z` or is declared twice; a
+PR racing one that already merged); for a one-commit PR, a commit subject starting `Release v` that
+names another version or changes none (the repository's squash default lands a one-commit PR with
+its commit's subject, not the title, and `tag-release.yml` judges that subject); a version that is not strict `X.Y.Z` or is declared twice; a
 downgrade; a version already tagged or below the highest strict tag; and a missing CHANGELOG
 section, matched with `images.yml`'s exact `^## v?X\b`. It fails closed when `HEAD` is not a merge
 commit, unless `BASE_REV` names the revision to compare against (as `release.yml` does). The job
@@ -9156,11 +9158,16 @@ on `workflow_dispatch`, one run at a time (`concurrency: tag-release`, `cancel-i
 2. The subject starts `Release vX` but the push did not change the version → red run (the run
    continues, and still tags or re-dispatches what it should).
 3. `main` has since moved to another version → notice, exit 0 (that push's run reconciles it).
-4. `vV` is already tagged: at this commit or a later commit on `main` → fine; at an earlier commit
-   while this push changed the version (a revert to a released version, or a reused number) → red
-   run; off `main` → red run. If it has no GitHub Release, a re-run (`GITHUB_RUN_ATTEMPT` > 1) or a
-   manual dispatch re-dispatches `images.yml`; a first attempt only warns, since `images.yml` may
-   still be running.
+4. `vV` is already tagged: at this commit or a later commit on `main` → fine; off `main` → red run.
+   At an earlier commit it is judged on the state: while a higher strict tag exists (`main` was
+   reverted to an older release, which HA offers as a downgrade) every push and dispatch is red until
+   `main` moves above it; and a push from another released version to it (a reused number) is red.
+   Leaving a version that was never tagged (a pre-release spelling, or a release whose run was
+   superseded) for the released one is not. If it has no GitHub Release, a re-run
+   (`GITHUB_RUN_ATTEMPT` > 1) or a manual dispatch re-dispatches `images.yml`; a first attempt only
+   warns, since `images.yml` may still be running. Only a 404 from the Release lookup
+   (`gh api repos/…/releases/tags/vV`) counts as no Release; any other lookup failure is a red run,
+   never a re-dispatch that would rebuild a sealed version's images.
 5. `vV` is untagged and not above the highest strict tag → red run, nothing tagged.
 6. Otherwise it creates the annotated tag and pushes it, then
    **`gh workflow run images.yml -f version=X.Y.Z`**. It tags this commit when the push changed the
@@ -9234,7 +9241,8 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
 **Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, open **Power**, click **Update**
 (HA reads the bumped `version:` from `config.yaml` on `main` and drives the update-entity).
 
-> Title the release PR `Release vX.Y.Z …` with the version above every `vX.Y.Z` tag;
+> Title the release PR `Release vX.Y.Z …` with the version above every `vX.Y.Z` tag (and, for a
+> one-commit PR, give the commit the same subject: its squash merge lands with it);
 > `release-pr.yml` fails it otherwise, or when the CHANGELOG section is missing. Whatever lands,
 > `tag-release.yml` runs on the push and tags what `config.yaml` declares, or fails the run when
 > that version cannot be published: HA already offers it, so a red `tag-release` run on `main` is

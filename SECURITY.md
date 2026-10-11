@@ -197,7 +197,8 @@ never blocked).
 - A release is a pull request titled `Release vX.Y.Z`. `release-pr.yml`
   (`scripts/check-release-pr.py`) compares `config.yaml`'s version before and
   after GitHub's test merge and fails a version change under another title, a
-  `Release vX` title that changes no version, a downgrade, a reused tag or a
+  `Release vX` title (or one-commit subject) that changes no version or names
+  another one, a downgrade, a reused tag or a
   version below the highest tag, a version that is not `X.Y.Z`, and a missing
   CHANGELOG section. Home Assistant offers any version that differs from the
   installed one, a lower one included.
@@ -206,9 +207,9 @@ never blocked).
   the tag and dispatches `images.yml`, which runs the test suite and type-check at
   the tag, builds each architecture on a native runner from the digest-pinned
   base, and pushes `ghcr.io/tesseractaz/{arch}-ecoflow-panel` as `:X.Y.Z` and
-  `:latest`. A revert to a released version, a reused number and a version it
-  cannot tag are red runs. Home Assistant installs the version named in
-  `config.yaml`.
+  `:latest`. A reused number and a version it cannot tag are red runs, and while
+  `main` declares an older release than the newest one (a revert) every push is
+  red. Home Assistant installs the version named in `config.yaml`.
 - Every job runs on a pinned runner image (`ubuntu-24.04`, `ubuntu-24.04-arm`),
   never `ubuntu-latest`, so the image changes only in a reviewed commit.
 - The image-build Buildx setup step gets one retry after a pause, so a transient registry

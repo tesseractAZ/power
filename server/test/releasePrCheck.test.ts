@@ -31,6 +31,9 @@ interface PrOpts {
   pr?: string | { raw: string };
   heading?: string | null;
   title: string;
+  /** The PR's commit subject (default 'pr change'), and an optional second commit's subject. */
+  subject?: string;
+  secondCommit?: string;
   /** Run on the PR head itself (not a merge), optionally with BASE_REV. */
   noMerge?: boolean;
   baseRev?: string;
@@ -68,7 +71,12 @@ function checkPr(o: PrOpts): { status: number | null; out: string } {
       write('ecoflow_panel/CHANGELOG.md', cl.replace('# Changelog\n\n', `# Changelog\n\n${o.heading}\n\n- new\n\n`));
     }
     w.git(repo, 'add', '-A');
-    w.git(repo, 'commit', '-q', '-m', 'pr change');
+    w.git(repo, 'commit', '-q', '-m', o.subject ?? 'pr change');
+    if (o.secondCommit) {
+      write('feature-2.txt', 'more\n');
+      w.git(repo, 'add', '-A');
+      w.git(repo, 'commit', '-q', '-m', o.secondCommit);
+    }
     // main moves on after the branch was cut.
     w.git(repo, 'checkout', '-q', 'main');
     if (o.mainAfter !== undefined) {
@@ -114,6 +122,18 @@ test('★★★ PR check: a "Release v" title that changes no version fails (v1.
   fails({ mainAfter: '1.0.1', pr: '1.0.1', heading: null, title: 'Release v1.0.1 — duplicate' }, 'raced duplicate', /releases nothing/);
 });
 
+test('★★★ PR check: a one-commit PR\'s own subject is what a squash merge lands with, so it is held to the same rules', () => {
+  // Renumbered in the train: the title was fixed, the single commit still names the old version.
+  fails({ pr: '1.0.2', heading: '## v1.0.2 — x', title: 'Release v1.0.2 — x', subject: 'Release v1.0.1 — x' }, 'stale commit subject', /one commit is 'Release v1\.0\.1 — x'.*\n.*names v1\.0\.1 while config\.yaml says 1\.0\.2/);
+  // The bump was dropped and the PR retitled; the commit still says Release.
+  fails({ title: 'docs: wording', subject: 'Release v1.0.1 — wip' }, 'no bump, release subject', /releases? of v1\.0\.1 that changes no version/);
+  // A matching subject, or a non-release subject, passes.
+  ok({ pr: '1.0.1', heading: '## v1.0.1 — x', title: 'Release v1.0.1 — x', subject: 'Release v1.0.1 — x' }, 'matching subject');
+  ok({ pr: '1.0.1', heading: '## v1.0.1 — x', title: 'Release v1.0.1 — x', subject: 'bump to 1.0.1' }, 'non-release subject');
+  // Two commits: the squash subject is the PR title, so the commits' own subjects are not read.
+  ok({ title: 'docs: wording', subject: 'docs: one', secondCommit: 'Release v1.0.1 — wip' }, 'two commits');
+});
+
 test('★★★ PR check: compares the test merge, so a branch cut before the last release is not read as a downgrade', () => {
   // main released 1.0.1 after this branch was cut at 1.0.0; the branch does not touch the version.
   ok({ mainAfter: '1.0.1', title: 'fix: stale branch' }, 'stale non-release branch');
@@ -125,6 +145,9 @@ test('★★★ PR check: a downgrade, a reused tag, or a version below the high
   fails({ base: '1.0.2', noTags: true, extraTags: { 'v1.0.0': '1.0.0' }, pr: '1.0.1', heading: '## v1.0.1 — x', title: 'Release v1.0.1' }, 'downgrade alone', /downgrade/);
   fails({ extraTags: { 'v1.0.1': '1.0.1' }, pr: '1.0.1', heading: '## v1.0.1 — x', title: 'Release v1.0.1' }, 'reused tag', /already tagged/);
   fails({ extraTags: { 'v1.0.5': '1.0.5' }, pr: '1.0.3', heading: '## v1.0.3 — x', title: 'Release v1.0.3' }, 'below the highest', /below the highest release tag, v1\.0\.5/);
+  // Numeric, not string, order: 1.0.9 → 1.0.10 is an upgrade, and v1.10.0 is above v1.9.0.
+  ok({ base: '1.0.9', pr: '1.0.10', heading: '## v1.0.10 — x', title: 'Release v1.0.10' }, '1.0.9 → 1.0.10');
+  fails({ base: '1.9.0', extraTags: { 'v1.10.0': '1.10.0' }, pr: '1.9.5', heading: '## v1.9.5 — x', title: 'Release v1.9.5' }, 'below v1.10.0', /below the highest release tag, v1\.10\.0/);
   // A pre-release tag above it does not count.
   ok({ extraTags: { 'v1.1.0-rc1': '1.1.0-rc1' }, pr: '1.0.1', heading: '## v1.0.1 — x', title: 'Release v1.0.1' }, 'non-strict tag ignored');
 });

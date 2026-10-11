@@ -37,7 +37,7 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 ### If this is a release PR
 - [ ] `ecoflow_panel/config.yaml` **version bumped** to exactly the version in the PR title
 - [ ] `ecoflow_panel/CHANGELOG.md` has a `## vX.Y.Z` section, **prepended without truncating the file** — check the entry count did not drop
-- [ ] Title (and the squash subject) is `Release vX.Y.Z …`, the version above every `vX.Y.Z` tag — Home Assistant offers whatever `config.yaml` declares on `main` (a lower version too), and `tag-release.yml` tags it on the merge or fails the run
+- [ ] Title (and, for a one-commit PR, the commit's subject, which its squash merge lands with) is `Release vX.Y.Z …`, the version above every `vX.Y.Z` tag — Home Assistant offers whatever `config.yaml` declares on `main` (a lower version too), and `tag-release.yml` tags it on the merge or fails the run
 - [ ] Merge is **gated on the CI conclusion**, not merely on CI finishing
 
 ## Release notes

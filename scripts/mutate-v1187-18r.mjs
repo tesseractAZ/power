@@ -4,7 +4,8 @@
  * on the test merge, pinned runners, native builds without QEMU, strict versions end to end.
  *
  *   T-i      a run whose push main has moved past is not treated as superseded
- *   T-ii     a revert to a released version (or a reused number) passes quietly
+ *   T-ii     main reverted below the newest release is green
+ *   T-ii-b   the downgrade is judged on the push, not the state
  *   T-iii    the step trusts checkout's origin/main (no re-fetch of main and the tags)
  *   T-iv     a "Release vX" merge that did not change the version is green
  *   T-v      every first attempt re-dispatches images.yml when the Release is not out yet
@@ -19,6 +20,12 @@
  *   T-xiv    a commit that is not on main can be tagged
  *   T-xv     a config.yaml that declares version twice is accepted
  *   T-xvi    a CRLF subject keeps its carriage return
+ *   T-xvii   a reused version number passes
+ *   T-xviii  leaving an unpublished version for the released one is a false red
+ *   T-xix    a failed Release lookup counts as "no Release"
+ *   T-xx     a superseded run drops the no-bump error
+ *   T-xxi    the step sets no tagger identity
+ *   T-xxii   a lightweight tag instead of an annotated one
  *   S-i      the paths filter returns
  *   S-ii     the subject gate returns
  *   S-iii    the commit message is interpolated into the script
@@ -46,6 +53,12 @@
  *   P-ix     a version change under the wrong title passes
  *   P-x      a doubled version line passes
  *   P-xi     no visible tags passes
+ *   P-xii    the downgrade check compares versions as strings
+ *   P-xiii   the highest tag is chosen as a string
+ *   P-xiv    the floor compares versions as strings
+ *   P-xv     a one-commit release subject without a bump passes
+ *   P-xvi    a one-commit subject naming another version passes
+ *   P-xvii   a multi-commit PR is judged on its last commit's subject
  *
  * Every kill comes from the subset (fullSuite: false): the tag step and check-release-pr.py are RUN
  * there, in temporary repositories. Anchors sit on script and step lines, never on a pinned
@@ -80,11 +93,18 @@ const MUTANTS = [
     why: "An older release's run executing after a newer one reports a false \"not above the highest tag\" error.",
   },
   {
-    id: "T-ii. ★★★ a revert to a released version (or a reused number) passes quietly",
+    id: "T-ii. ★★★ main reverted below the newest release is green",
     file: TAGREL,
-    find: "              if [[ -n \"$BV\" && \"$BV\" != \"$V\" ]]; then\n                echo \"::error::This push moved config.yaml",
-    to: "              if false; then # MUTANT\n                echo \"::error::This push moved config.yaml",
+    find: "              if [[ -n \"$HIGH\" ]] && gt \"$HIGH\" \"$V\"; then",
+    to: "              if false; then # MUTANT",
     why: "HA offers the downgrade (auto-update installs it) while the run is green.",
+  },
+  {
+    id: "T-ii-b. ★★★ the downgrade is judged on the push, not the state",
+    file: TAGREL,
+    find: "              if [[ -n \"$HIGH\" ]] && gt \"$HIGH\" \"$V\"; then",
+    to: "              if [[ -n \"$HIGH\" ]] && gt \"$HIGH\" \"$V\" && [[ -n \"$BV\" && \"$BV\" != \"$V\" ]]; then # MUTANT",
+    why: "Only the reverting push is red; every later push and dispatch is green while HA still offers the downgrade.",
   },
   {
     id: "T-iii. ★★★ the step trusts checkout's origin/main (no re-fetch of main and the tags)",
@@ -183,6 +203,48 @@ const MUTANTS = [
     find: "SUBJ=${SUBJ%%$'\\n'*}; SUBJ=${SUBJ%%$'\\r'*}",
     to: "SUBJ=${SUBJ%%$'\\n'*} # MUTANT",
     why: "The annotation and the subject parse carry a stray \\r.",
+  },
+  {
+    id: "T-xvii. ★★ a reused version number passes",
+    file: TAGREL,
+    find: "              if [[ -n \"$BV\" && \"$BV\" != \"$V\" ]] && git rev-parse -q --verify \"refs/tags/v${BV}\" >/dev/null; then",
+    to: "              if false; then # MUTANT",
+    why: "Main re-declares a released number whose Release holds other code.",
+  },
+  {
+    id: "T-xviii. ★★ leaving an unpublished version for the released one is a false red",
+    file: TAGREL,
+    find: "              if [[ -n \"$BV\" && \"$BV\" != \"$V\" ]] && git rev-parse -q --verify \"refs/tags/v${BV}\" >/dev/null; then",
+    to: "              if [[ -n \"$BV\" && \"$BV\" != \"$V\" ]]; then # MUTANT",
+    why: "Restoring 1.0.0 after a 1.0.1-beta that was never published reads as a reused number.",
+  },
+  {
+    id: "T-xix. ★★ a failed Release lookup counts as \"no Release\"",
+    file: TAGREL,
+    find: "            elif ! grep -q 'HTTP 404' <<<\"$out\"; then",
+    to: "            elif false; then # MUTANT",
+    why: "A network or API error re-dispatches images.yml and rebuilds a sealed version's :X.Y.Z and :latest.",
+  },
+  {
+    id: "T-xx. ★★ a superseded run drops the no-bump error",
+    file: TAGREL,
+    find: "              echo \"::notice::main moved on to ${TIPV} (${TIP:0:9}); ${V} from ${SHA:0:9} is no longer offered.\"\n              exit \"$rc\"",
+    to: "              echo \"::notice::main moved on to ${TIPV} (${TIP:0:9}); ${V} from ${SHA:0:9} is no longer offered.\"\n              exit 0 # MUTANT",
+    why: "A \"Release vX\" merge without the bump goes green when the fix lands before its run executes.",
+  },
+  {
+    id: "T-xxi. ★★★ the step sets no tagger identity",
+    file: TAGREL,
+    find: "          git config user.name  'github-actions[bot]'\n          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'\n          git tag -a \"$TAG\" -m \"Release $TAG\" \"$TARGET\"",
+    to: "          git tag -a \"$TAG\" -m \"Release $TAG\" \"$TARGET\" # MUTANT no identity",
+    why: "The runner has no git identity: `git tag -a` fails and nothing is tagged.",
+  },
+  {
+    id: "T-xxii. ★ a lightweight tag instead of an annotated one",
+    file: TAGREL,
+    find: "          git tag -a \"$TAG\" -m \"Release $TAG\" \"$TARGET\"",
+    to: "          git tag \"$TAG\" \"$TARGET\" # MUTANT lightweight",
+    why: "The tag carries no tagger, date or message.",
   },
   {
     id: "S-i. ★★★ the paths filter returns",
@@ -306,7 +368,7 @@ const MUTANTS = [
   {
     id: "P-ii. ★★★ a \"Release vX\" title that changes no version passes",
     file: PRCHECK,
-    find: "    if not changed and title_v is None:",
+    find: "    if not changed and title_v is None and subject_v is None:",
     to: "    if not changed:  # MUTANT",
     why: "v1.130.0 merges green again.",
   },
@@ -372,6 +434,48 @@ const MUTANTS = [
     find: "        if not tags:",
     to: "        if False:  # MUTANT",
     why: "A checkout without tags skips the reuse and floor checks.",
+  },
+  {
+    id: "P-xii. ★★ the downgrade check compares versions as strings",
+    file: PRCHECK,
+    find: "        if base and SEMVER_RE.match(base) and key(new) <= key(base):",
+    to: "        if base and SEMVER_RE.match(base) and new <= base:  # MUTANT",
+    why: "1.0.9 → 1.0.10 reads as a downgrade and blocks the release.",
+  },
+  {
+    id: "P-xiii. ★★ the highest tag is chosen as a string",
+    file: PRCHECK,
+    find: "        top = max(tags, key=key, default=None)",
+    to: "        top = max(tags, default=None)  # MUTANT",
+    why: "v1.9.0 ranks above v1.10.0: a version below the real highest tag passes.",
+  },
+  {
+    id: "P-xiv. ★★ the floor compares versions as strings",
+    file: PRCHECK,
+    find: "        if top and key(new) < key(top):",
+    to: "        if top and new < top:  # MUTANT",
+    why: "1.9.5 is not \"below\" 1.10.0 as a string: it passes, and tag-release refuses it after the merge.",
+  },
+  {
+    id: "P-xv. ★★ a one-commit release subject without a bump passes",
+    file: PRCHECK,
+    find: "        if subject_v is not None:\n",
+    to: "        if False:  # MUTANT\n",
+    why: "The squash lands as \"Release vX\" with no bump; tag-release is red after the merge.",
+  },
+  {
+    id: "P-xvi. ★★ a one-commit subject naming another version passes",
+    file: PRCHECK,
+    find: "        if subject_v is not None and subject_v != new:",
+    to: "        if False:  # MUTANT",
+    why: "The title was fixed, the commit was not; tag-release is red after the merge.",
+  },
+  {
+    id: "P-xvii. ★ a multi-commit PR is judged on its last commit's subject",
+    file: PRCHECK,
+    find: "    if r.returncode or r.stdout.strip() != \"1\":",
+    to: "    if r.returncode:  # MUTANT",
+    why: "A squash of several commits lands with the PR title; a stray subject fails a good PR.",
   },
 ];
 
