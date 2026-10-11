@@ -186,27 +186,38 @@ never blocked).
   rule in another file still fails.
 - CI runs on every push and pull request: the three type-checks, the test suite
   (and the README-claim check), the mutation-anchor check, the secrets scan, the
-  advisory gate, the add-on config validator, the release-PR version check, the
-  Docker smoke build, the documentation build and CodeQL. `main` is
+  advisory gate, the add-on config validator, the release-PR version check (pull
+  requests, `release-pr.yml`), the Docker smoke build, the documentation build and
+  CodeQL. `main` is
   branch-protected, and every one of those checks is a required status check
   (fifteen in all, since 2026-10-11).
 
 ### Release integrity
 
-- A release is a pull request titled `Release vX.Y.Z`. CI fails it unless
-  `ecoflow_panel/config.yaml` carries exactly that version and the CHANGELOG has
-  its section (`scripts/check-release-pr.py`).
-- On merge, `tag-release.yml` creates the tag and dispatches `images.yml`, which
-  runs the test suite and type-check at the tag, builds each architecture on a
-  native runner from the digest-pinned base, and pushes
-  `ghcr.io/tesseractaz/{arch}-ecoflow-panel` as `:X.Y.Z` and `:latest`. Home
-  Assistant installs the version named in `config.yaml`.
-- The image-build setup steps get one retry after a pause, so a transient registry
+- A release is a pull request titled `Release vX.Y.Z`. `release-pr.yml`
+  (`scripts/check-release-pr.py`) compares `config.yaml`'s version before and
+  after GitHub's test merge and fails a version change under another title, a
+  `Release vX` title that changes no version, a downgrade, a reused tag or a
+  version below the highest tag, a version that is not `X.Y.Z`, and a missing
+  CHANGELOG section. Home Assistant offers any version that differs from the
+  installed one, a lower one included.
+- `tag-release.yml` runs on every push to `main` (no paths filter, no subject
+  gate). When the declared version is new and above every `vX.Y.Z` tag it creates
+  the tag and dispatches `images.yml`, which runs the test suite and type-check at
+  the tag, builds each architecture on a native runner from the digest-pinned
+  base, and pushes `ghcr.io/tesseractaz/{arch}-ecoflow-panel` as `:X.Y.Z` and
+  `:latest`. A revert to a released version, a reused number and a version it
+  cannot tag are red runs. Home Assistant installs the version named in
+  `config.yaml`.
+- Every job runs on a pinned runner image (`ubuntu-24.04`, `ubuntu-24.04-arm`),
+  never `ubuntu-latest`, so the image changes only in a reviewed commit.
+- The image-build Buildx setup step gets one retry after a pause, so a transient registry
   failure does not leave a version without a release. The GitHub Release takes its
   notes from the CHANGELOG and fails if the section is missing; it attaches the
   documentation only when that build succeeded and left a non-empty file, because
-  Releases are immutable once created; and only the **highest** version is marked
-  Latest, so re-running an older release cannot demote a newer one.
+  Releases are immutable once created; and only the **highest** version (strict
+  `vX.Y.Z` tags, compared as numbers) is marked Latest, so re-running an older
+  release cannot demote a newer one.
 - Images are not signed and carry no provenance attestation; the integrity anchor
   is the version tag built by this repository's workflow.
 
