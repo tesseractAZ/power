@@ -7,6 +7,8 @@
  *   P-iii  codeql.yml's analyze step alone drifts back to codeql-action v4.38.2
  *   P-iv   images.yml's registry login is pinned by a movable tag, not a commit
  *   P-v    a comment line returns to ci.yml's smoke-build build-args block
+ *   P-vi   a movable tag hides behind words after the version comment (the reader must not skip it)
+ *   P-vii  a comment line inside a `|-` build-args block
  *
  *   node scripts/mutate-v1187-17.mjs
  */
@@ -55,6 +57,20 @@ const MUTANTS = [
     find: '          build-args: |\n            BUILD_FROM=ghcr.io/home-assistant/amd64-base',
     to: '          build-args: |\n            # MUTANT — keep in lockstep with images.yml\n            BUILD_FROM=ghcr.io/home-assistant/amd64-base',
     why: 'docker build receives the comment as a build arg.',
+  },
+  {
+    id: 'P-vi. ★★ a movable tag hides behind words after the version comment',
+    file: IMAGES,
+    find: '      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0',
+    to: '      - uses: docker/login-action@v4 # v4.6.0 (GHCR login)',
+    why: 'A line the strict pattern cannot parse must fail, not drop out of the check.',
+  },
+  {
+    id: 'P-vii. ★ a comment line inside a `|-` build-args block',
+    file: CI,
+    find: '          build-args: |\n            BUILD_FROM=ghcr.io/home-assistant/amd64-base',
+    to: '          build-args: |-\n            # MUTANT — keep in lockstep with images.yml\n            BUILD_FROM=ghcr.io/home-assistant/amd64-base',
+    why: 'Chomping indicators do not make a `#` line a YAML comment inside the block.',
   },
 ];
 

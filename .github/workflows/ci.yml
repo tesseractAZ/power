@@ -217,7 +217,8 @@ jobs:
   docker-smoke:
     # Build the Home Assistant add-on container (amd64 only) on every push/PR.
     # Catches Dockerfile regressions before they reach the Pi. Buildx cache
-    # in GitHub Actions cache keeps a run under a minute (29–44 s, v1.187.14–16).
+    # in GitHub Actions cache keeps a run to about a minute or less (29–65 s
+    # across v1.187.14–16 and the dependency merges after them).
     name: Dockerfile smoke build (amd64)
     runs-on: ubuntu-latest
     steps:
