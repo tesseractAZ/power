@@ -55,6 +55,13 @@ const SUBSET = [
 ];
 
 const MUTANTS = [
+  {
+    id: 'L-i. ★★ an older version re-run after a newer one is marked Latest',
+    file: IMG,
+    find: '            if [ "$highest" = "$tag" ]; then latestFlag=(--latest=true); else latestFlag=(--latest=false); fi',
+    to: '            latestFlag=(--latest=true) # MUTANT',
+    why: 'Re-running an older version\'s release (after a transient build failure) demotes the newest release on GitHub.',
+  },
   /* ── (1) the measurement ──────────────────────────────────────────────── */
   {
     id: 'i. ★★★ an actuated night measures nothing',
