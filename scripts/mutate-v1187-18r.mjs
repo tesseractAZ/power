@@ -172,7 +172,7 @@ const MUTANTS = [
   {
     id: "T-xii. ★★ a subject naming another version than config.yaml is green",
     file: TAGREL,
-    find: "          if [[ -n \"$SUBJ_V\" && \"$SUBJ_V\" != \"$V\" ]]; then\n            echo \"::error::The subject says",
+    find: "          if [[ -n \"$SUBJ_V\" && \"$SUBJ_V\" != \"$V\" && \"$BV\" != \"$V\" ]]; then\n            echo \"::error::The subject says",
     to: "          if false; then # MUTANT\n            echo \"::error::The subject says",
     why: "The squash subject and the tag disagree and nothing turns red.",
   },

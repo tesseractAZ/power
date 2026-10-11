@@ -132,6 +132,14 @@ jobs:
             rc=1
           fi
 
+          # A "Release vX" subject that names another version than config.yaml's, on a push that moved the
+          # version: judged here, before any branch, so it is reported whichever run creates the tag (runs can
+          # execute out of order, and a later push's run tags this commit first).
+          if [[ -n "$SUBJ_V" && "$SUBJ_V" != "$V" && "$BV" != "$V" ]]; then
+            echo "::error::The subject says Release v${SUBJ_V}; config.yaml says ${V}. ${TAG} is the version HA offers."
+            rc=1
+          fi
+
           # Superseded: main moved to another version after this push; that push's run reconciles it.
           if [[ "$TIP" != "$SHA" ]]; then
             TIPV=$(ver_at "$TIP")
@@ -191,10 +199,7 @@ jobs:
             echo "::error::main declares ${V}, never released and not above v${HIGH}. HA offers it (a downgrade if lower) and no image exists."
             exit 1
           fi
-          if [[ -n "$SUBJ_V" && "$SUBJ_V" != "$V" ]]; then
-            echo "::error::The subject says Release v${SUBJ_V}; config.yaml says ${V}. Tagging ${TAG}, the version HA offers."
-            rc=1
-          elif [[ -z "$SUBJ_V" && -n "$BV" && "$BV" != "$V" ]]; then
+          if [[ -z "$SUBJ_V" && -n "$BV" && "$BV" != "$V" ]]; then
             echo "::warning::${BV} -> ${V} landed under the subject '${SUBJ}'. Tagging it anyway."
           fi
           TARGET=$SHA

@@ -174,6 +174,24 @@ test('★★ a subject naming another version than config.yaml: tags config.yaml
   assert.equal(w.tags()['v1.0.1'], c2);
   assert.equal(w.tags()['v1.0.2'], undefined);
   assert.deepEqual(r.dispatched, [dispatchOf('1.0.1')]);
+  assert.match(r.out, /::error::The subject says Release v1\.0\.2; config\.yaml says 1\.0\.1/);
+}));
+
+test('★★ a subject naming another version is red even when a later push\'s run tagged that commit first', () => world((w) => {
+  released100(w);
+  const c2 = w.commit('1.0.1', 'Release v1.0.2 — typo');
+  const b2 = w.push();
+  const c3 = w.commit('1.0.1', 'deps: bump x (#8)');
+  const b3 = w.push();
+  // The later push's run executes first and tags c2, where 1.0.1 reached main.
+  const later = w.run({ sha: c3, before: b3, msg: 'deps: bump x (#8)', releases: ['v1.0.0'] });
+  assert.equal(later.status, 0, later.out);
+  assert.equal(w.tags()['v1.0.1'], c2);
+  // c2's own run finds the tag already there, and still reports the mismatched subject.
+  const first = w.run({ sha: c2, before: b2, msg: 'Release v1.0.2 — typo', releases: ['v1.0.0'] });
+  assert.equal(first.status, 1, first.out);
+  assert.match(first.out, /::error::The subject says Release v1\.0\.2; config\.yaml says 1\.0\.1/);
+  assert.deepEqual(first.dispatched, []);
 }));
 
 test('★★★ a revert to a released version is red on EVERY push and dispatch while main sits below the newest release', () => world((w) => {
