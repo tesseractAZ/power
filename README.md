@@ -7,7 +7,7 @@ EcoFlow off-grid system into a fully-instrumented, self-learning **control room*
 It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST + live MQTT),
 persists a per-metric SQLite time-series, runs **~40 analytics engines** in a
 worker thread, and serves the results three ways: a **React dashboard**, a
-**telnet "control-room" TUI**, **120+ Home Assistant MQTT-discovery entities**
+**telnet "control-room" TUI**, **~90 Home Assistant MQTT-discovery entities**
 (sensors, binary sensors, and alarm-priority switches — plus dynamic
 per-circuit sensors and the Energy Dashboard). When the pack is
 projected to reach its reserve floor, it raises an **audible alarm** — chimes +
@@ -18,7 +18,7 @@ Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each =
 92 kWh usable), a **42-panel / ~16.8 kW** array, and an EVSE — on the APS R-EV
 time-of-use rate.
 
-> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~11,154
+> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~11,650
 > lines) documents **every** feature and engine — what each does, the exact
 > algorithm and math it computes, how data traces through the pipeline, its
 > endpoints/sensors, config knobs, and edge-case guards. This README is the tour;
@@ -62,7 +62,7 @@ exactly what the app renders.
   1/2/4/21/28) → a unified snapshot for every DPU Core, the SHP2, and the EVSE —
   including **SHP2-attributed data for Cores whose Wi-Fi is down**.
 - SQLite time-series (adaptive interval + value-epsilon dedup; retention
-  configurable via `RECORDER_RETENTION_DAYS`, default 30 days, up to 2 years)
+  configurable via `RECORDER_RETENTION_DAYS`, default 30 days, up to 10 years)
   and monotonic lifetime-energy accumulators wired into the HA Energy Dashboard.
 
 **Forecasting**
@@ -115,9 +115,12 @@ exactly what the app renders.
   resilience answer, so the safety margin can never shrink when the objective
   changes. Two honest caveats, both documented in
   [`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`](docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md):
-  cost mode **fills further, it does not price** — it reads no tariff — and its
-  ceiling option cannot exceed the device's 50% reserve write envelope, so values
-  above that are advisory only.
+  cost mode **fills further, it does not price** — it reads no tariff — and the
+  reserve write itself is capped by the device at 50%. Since v1.165.0 a cost-mode
+  ceiling (`ARB_COST_MAX_SOC_PCT`) above 50% is delivered in supervised/auto mode by
+  the panel's per-channel force-charge. It switches on just in time, in the last
+  stretch of a night whose reserve write applied and verified, and off at the target
+  or the window close.
 - Two advisory round-trip-aware dispatch planners (greedy + a model-predictive
   DP), compute-only, never auto-applied.
 
@@ -127,7 +130,8 @@ exactly what the app renders.
   (transition debounce, incident clustering, churn auto-silence, quiet hours),
   a **repair-issues** feed, and an **online learning loop** (feature snapshots →
   realized outcomes → shadow models).
-- **Notifications are Home-Assistant-native.** Every alert becomes a card in the HA
+- **Notifications are Home-Assistant-native** and opt-in: with `NOTIFY_CHANNEL: ha` (the
+  shipped default, `none`, sends nothing) every alert becomes a card in the HA
   notification drawer (dedupe + morning digest, dismissed when the condition clears)
   and, for each service named in `NOTIFY_HA_PUSH_TARGETS`, a real push to the
   companion app. **Critical alerts — and only critical ones — carry the companion
@@ -159,8 +163,8 @@ the full, math-level treatment of each of the above.
 ## Architecture (60-second version)
 
 ```
-EcoFlow cloud ──MQTT──▶ snapshot store ──▶ SQLite recorder ──▶ analytics worker (≈40 engines)
-   (IoT-Open)          (DeviceSnapshot)     (time-series +           │
+EcoFlow cloud ────────▶ snapshot store ──▶ SQLite recorder ──▶ analytics worker (≈40 engines)
+   (REST+MQTT)         (DeviceSnapshot)     (time-series +           │
                                              lifetime accum.)        ├─▶ HTTP API  (:8787)
                                                                      ├─▶ HA MQTT-discovery entities
                                                                      ├─▶ React web UI
@@ -179,8 +183,11 @@ dependency graph, and full data-flow are in
 
 For a Pi running Home Assistant OS or Supervised:
 
-1. Enable the **Advanced SSH & Web Terminal** add-on (or use the HA Console) and
-   SSH in.
+1. In Home Assistant: **Settings → Add-ons → Add-on Store**, ⋮ menu → **Repositories**,
+   and add `https://github.com/tesseractAZ/power`. **Power** appears in the store, and
+   later releases arrive through HA's native **Update** button; continue at step 4.
+   Alternatively, install it as a local add-on with steps 2–3: enable the **Advanced
+   SSH & Web Terminal** add-on (or use the HA Console) and SSH in.
 2. Clone this repo into the local add-ons folder:
    ```bash
    cd /addons      # HA OS default; on HA Supervised: /usr/share/hassio/addons/local
@@ -192,7 +199,8 @@ For a Pi running Home Assistant OS or Supervised:
    (seconds, not a local build). Open **Configuration**, paste your EcoFlow
    `ECOFLOW_ACCESS_KEY` / `ECOFLOW_SECRET_KEY` and site location, then **Start**.
 5. Open the add-on's **Web UI** (HA ingress), or reach the trusted-LAN data API at
-   `http://<host>:8787`. The telnet TUI (`nc <host> 2323`) is **off by default** —
+   `http://<host>:8787`. The control-room console is always available in a browser at
+   `http://<host>:8787/console`; its telnet transport (`nc <host> 2323`) is **off by default** —
    set `TELNET_ENABLED: true` in Configuration first (and, on a shared LAN, set
    `TUI_PASSWORD` to require an operator login).
 
@@ -207,10 +215,12 @@ Every configuration option is documented in
 |------|-----------|
 | `server/` | Node/TypeScript server — ingest, recorder, ~40 analytics engines, HTTP API, MQTT discovery, broadcast/TTS, telnet TUI |
 | `web/` | React dashboard (Vite) |
-| `ecoflow_panel/` | Add-on manifest (`config.yaml`), `DOCS.md`, `CHANGELOG.md` (+ archive), AppArmor profile |
-| `scripts/` | Docs builder (`build-docs-docx.py`), device probes |
+| `ecoflow_panel/` | Add-on manifest (`config.yaml`), `translations/`, `DOCS.md`, `CHANGELOG.md` (+ archive), AppArmor profile |
+| `rootfs/` | s6 service runner (`etc/services.d/ecoflow-panel/run`) — the options→env bridge that turns the add-on Configuration into the server's environment |
+| `Dockerfile`, `build.yaml`, `repository.yaml` | Container build, digest-pinned per-arch base images, add-on repository manifest |
+| `scripts/` | Docs builder (`build-docs-docx.py`); CI gates (`check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the mutation harnesses (`mutate-*.mjs`); device probes |
 | `docs/` | `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
-| `.github/workflows/` | `ci.yml` (type-check ×2, Dockerfile smoke, docs `.docx`+`.pdf`) · `tag-release.yml` (tags a `Release …` merge) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch) · `codeql.yml` (CodeQL analysis). |
+| `.github/workflows/` | `ci.yml` (type-checks ×3, server tests + README-claim check, mutant-anchor check, personal-data scan, dependency advisories, release-PR version check, add-on config/translation validation, Dockerfile smoke, docs `.docx`+`.pdf`) · `tag-release.yml` (tags a `Release …` merge) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch) · `codeql.yml` (CodeQL analysis). |
 
 ## Development
 
@@ -223,7 +233,7 @@ cd web    && npm install && npm run build
 
 **Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` →
 open a PR whose squash subject starts `Release vX.Y.Z …`. `main` is branch-
-protected: the CI checks (both type-checks, the test suite, the mutation-harness
+protected: the CI checks (the three type-checks — server, web, server tests — the test suite, the mutation-harness
 anchor check, the secrets scan, the dependency-advisory gate, the add-on
 config/translation validator, the Dockerfile smoke build, the docs `.docx`+`.pdf`
 build, and CodeQL) must pass, and
@@ -298,7 +308,7 @@ inert or unreachable, so a quiet reading is not mistaken for a healthy one.
 
 See [`SECURITY.md`](SECURITY.md) for the vulnerability-reporting policy and the
 security posture: AppArmor confinement, device writes defaulting to off
-(`NIGHT_CHARGE_MODE: advisory`) behind an audit log and auth-gated endpoints, the unauthenticated TUI off by default, and
+(`NIGHT_CHARGE_MODE: advisory`) behind an audit log and auth-gated endpoints, the telnet TUI transport off by default (the same read-only console is always served at `/console` on the web port, behind the `TUI_PASSWORD` operator login when one is set), and
 secrets handled presence-only (never logged or echoed).
 
 ## License

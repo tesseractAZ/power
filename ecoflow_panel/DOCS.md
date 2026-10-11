@@ -4,7 +4,7 @@ This is the definitive technical reference for the **ecoflow-panel** Home Assist
 
 The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, and a telnet TUI (`:2323`). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and a SIP intercom) when the battery is projected to deplete.
 
-> Every constant, formula, endpoint path, and config key below was written directly from the source and independently completeness-/accuracy-checked against it. Where a value is a tunable default, that is noted. For the operator quick-start, install steps, and the option list, see the top of the **Configuration, Deployment, Security & Operations** chapter; for a high-level tour, see `README.md`.
+> Every constant, formula, endpoint path, and config key below was written directly from the source and independently completeness-/accuracy-checked against it. Where a value is a tunable default, that is noted. For install steps and a high-level tour, see `README.md`; for the full option list, the options→env bridge and the security posture, see chapter 12, **Configuration, Deployment, Security & Operations**.
 
 
 ## Table of Contents
@@ -21,6 +21,24 @@ The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQ
 10. [Audible Broadcast, Chimes & Text-to-Speech](#10-audible-broadcast-chimes--text-to-speech)
 11. [User Interfaces: Web Dashboard & Telnet TUI](#11-user-interfaces-web-dashboard--telnet-tui)
 12. [Configuration, Deployment, Security & Operations](#12-configuration-deployment-security--operations)
+    - [Vendor API notes (documented, not all used)](#vendor-api-notes-documented-not-all-used)
+    - [12a. Vendor energy ledger (`energyHistory.ts`, v1.82.0)](#12a-vendor-energy-ledger-energyhistoryts-v1820)
+    - [12b. Settings-drift watchdog (`settingsDrift.ts`, v1.83.0)](#12b-settings-drift-watchdog-settingsdriftts-v1830)
+    - [12c. Charge Now responder (`chargeNowResponder.ts`, v1.84.0)](#12c-charge-now-responder-chargenowresponderts-v1840)
+    - [12d. HA statistics export (`haStatistics.ts`, v1.89.0)](#12d-ha-statistics-export-hastatisticsts-v1890)
+    - [12e. Long-offline reconnect auto-audit (`reconnectAudit.ts`, v1.90.0)](#12e-long-offline-reconnect-auto-audit-reconnectauditts-v1900)
+    - [12f. Warranty evidence export (`warrantyExport.ts`, v1.90.0)](#12f-warranty-evidence-export-warrantyexportts-v1900)
+    - [12g. SQLite snapshot for external viewers (`dbExport.ts`, v1.107.0)](#12g-sqlite-snapshot-for-external-viewers-dbexportts-v11070)
+    - [12h. The owner reserve floor, and who is allowed to define it (v1.113.0–v1.116.0, v1.119.0)](#12h-the-owner-reserve-floor-and-who-is-allowed-to-define-it-v11130v11160-v11190)
+    - [12i. Announcement delivery: what a timeout means (v1.118.0–v1.119.0)](#12i-announcement-delivery-what-a-timeout-means-v11180v11190)
+    - [12j. Roster durability, and the audible cost of guessing (v1.117.0)](#12j-roster-durability-and-the-audible-cost-of-guessing-v11170)
+    - [12k. Detectors that could not fire (v1.120.0)](#12k-detectors-that-could-not-fire-v11200)
+    - [12l. The spare-DPU list has been inverted since 2026-08-20 (v1.121.0)](#12l-the-spare-dpu-list-has-been-inverted-since-2026-08-20-v11210)
+    - [12m. The SHP2 alone could not trigger self-heal (v1.121.0)](#12m-the-shp2-alone-could-not-trigger-self-heal-v11210)
+    - [12n. The announce path (v1.122.0)](#12n-the-announce-path-v11220)
+    - [12o. Reports that claimed more than they knew (v1.123.0)](#12o-reports-that-claimed-more-than-they-knew-v11230)
+    - [12p. Notifications are Home-Assistant-native (v1.124.0)](#12p-notifications-are-home-assistant-native-v11240)
+    - [12q. The outage cushion, re-scoped (v1.125.0)](#12q-the-outage-cushion-re-scoped-v11250)
 13. [Safety & Operational Plumbing](#13-safety--operational-plumbing)
 14. [Intelligent Lighting & HVAC Posture (energy-aware automation)](#14-intelligent-lighting--hvac-posture-energy-aware-automation)
 15. [Night-Charge TOU Arbitrage Advisor](#15-night-charge-tou-arbitrage-advisor)
@@ -92,7 +110,7 @@ schema (`translateDpuMqtt`); when translation succeeds, MQTT drives the live
 projection. For all other products (notably the SHP2), the MQTT message is stored
 for `/api/debug/raw` but does **not** refresh the projection — the REST poll owns
 those. This is why the SHP2's healthy MQTT chatter must **not** touch the
-freshness clock (see §7 `lastUpdated`).
+freshness clock (see §1.7, *The `lastUpdated` freshness contract*, below).
 
 ---
 
@@ -107,13 +125,13 @@ freshness clock (see §7 `lastUpdated`).
 | `ecoflow/project.ts` | main | `projectByProduct()` — raw quota → typed `Projection` (dpu/shp2/generic) |
 | `snapshot.ts` | main | `SnapshotStore` (live state), `startPollLoop`, `refreshAll` |
 | `recorder.ts` | main (write) | SQLite time-series writer, dedupe, lifetime rollup, retention, gap detection |
-| `readRecorder.ts` | worker (read) | Read-only twin of recorder's read path; byte-parity guaranteed by test |
+| `readRecorder.ts` | worker (read) | Read-only twin of recorder's read path; parity maintained by convention (§6.1), its own read semantics pinned by `test/worker-offload.test.ts` |
 | `aggregator.ts` | worker | Trapezoidal Wh integration (`integrateWh`, `computeTotals`, `circuitHistoryByDay`) |
 | `analyticsWorker.ts` | worker | Worker entry: owns read recorder, runs `buildReport`, self-warms caches |
 | `analyticsWorkerBootstrap.mjs` | worker | `.mjs` shim that registers tsx's loader then imports the `.ts` worker |
 | `analyticsClient.ts` | main | Main-thread proxy: spawn/respawn worker, id-correlate, coalesce + TTL-cache |
 | `reports.ts` | worker | The **report registry** (`BUILDERS`), dependency chains, `WARM_REPORTS` |
-| `analytics.ts` | worker | The ~450 KB compute engine (forecast, runway, degradation, …) |
+| `analytics.ts` | worker | The ~560 KB compute engine (forecast, runway, degradation, …) |
 | `index.ts` | main | Fastify bootstrap, all HTTP routes, `/ws`, wiring of every subsystem |
 | `mqttDiscovery.ts` | main | HA MQTT discovery config + 30s state publish |
 | `telnet/server.ts` | main | Telnet control-room TUI (port 2323) |
@@ -127,7 +145,9 @@ freshness clock (see §7 `lastUpdated`).
 
 `startPollLoop(store, POLL_INTERVAL_MS, log, warn)` runs `refreshAll(store)` on a
 `setTimeout` chain (self-rescheduling; **not** `setInterval`, so a slow poll can't
-overlap).
+overlap). Since v1.123.0 the chain is deadline-compensated: the next tick is armed
+`intervalMs − poll duration` later (`nextPollDelayMs`), so the period stays constant
+instead of stretching by the vendor's own latency.
 
 - `POLL_INTERVAL_MS` default `60_000` (env `POLL_INTERVAL_MS`).
 - `refreshAll`:
@@ -137,11 +157,18 @@ overlap).
      sets `online = (d.online === 1)`, logs online/offline transitions.
   3. For each `online === 1` device, `ecoflow.getQuotaAll(sn)` →
      `store.setDeviceQuota(sn, quota)`; on error `store.setDeviceError(sn, msg)`.
-- Logging discipline: routine "poll ok" is **debug-gated** (`POLL_DEBUG`);
-  only failure→recovery (`poll ok … (recovered)`) and slow polls
-  (`SLOW_POLL_MS = 5_000`) stay at INFO; a failed poll logs at **warn**.
+- Logging discipline: there is no per-poll success line. A poll after a failed one
+  logs `poll ok in Nms (recovered)` and a poll at or over `SLOW_POLL_MS = 5_000` logs
+  `poll slow: …`, both at INFO. At `LOG_LEVEL` debug/trace (`POLL_DEBUG`) a duration
+  summary (p50/p95/max) is logged once every `POLL_SUMMARY_EVERY` polls (default 30,
+  v1.148.0). A thrown poll logs `poll failed: …` at **warn**. Per-device quota failures
+  are logged as set-change deltas (`pollFailureLines`): warn for devices newly failing
+  outside the standing 1006 set, info for recoveries and the daily standing-set restatement.
 - A `fleet-status` line dumps per-SN MQTT msg-count + last-seen every
-  `STATUS_DUMP_INTERVAL_MS = 10 min`.
+  `STATUS_DUMP_INTERVAL_MS = 10 min`. It goes out in full at INFO only when the
+  per-device ON/OFF/API-online-no-MQTT state vector changes, plus an hourly anchor
+  (v1.145.0). Otherwise a compact `fleet-status (unchanged)` line carrying only the
+  MQTT-reporting devices' counters goes to debug (v1.187.10).
 
 #### 3.2 MQTT push (`ecoflow/mqtt.ts`)
 
@@ -156,15 +183,18 @@ overlap).
 
 Boot resilience (`index.ts` `startMqttWithRetry`): indefinite backoff
 `MQTT_RETRY_MS = [10s, 30s, 60s, 120s, 300s]` (cap 5 min). The first
-`MQTT_BOOT_GRACE_ATTEMPTS = 5` failures log at warn (benign boot transient);
-after that, error. REST polling works regardless of MQTT state.
+`MQTT_BOOT_GRACE_ATTEMPTS = 5` failures that match a boot transient
+(`MQTT_BOOT_TRANSIENT_RE`: DNS race `EAI_AGAIN`/`ENOTFOUND`/`getaddrinfo`, or EcoFlow
+`8521 signature is wrong`) log at warn. Any other error class, at any attempt, or a
+transient still recurring past the grace window, logs at error (`classifyMqttStartFailure`). REST polling works regardless of MQTT state.
 
 #### 3.3 Projection (`ecoflow/project.ts`)
 
 Every ingest path (`setDeviceQuota`, `mergeDeviceQuota`) calls
 `projectByProduct(productName, raw)` to rebuild a typed `Projection`
 (`kind: 'dpu' | 'shp2' | 'generic'`) attached to `devices[sn].projection`. After
-projecting, the store also runs three per-device trackers:
+projecting, the store hides phantom packs (`hidePhantomPacks`), annotates stream flow
+(`annotateStreamFlow`), and runs four per-device trackers:
 
 - `applyBackupPoolGraceHold` — SHP2 only; substitutes the last-coherent
   backup-pool trio (`backupBatPercent`/`backupFullCapWh`/`backupRemainWh`) across
@@ -175,6 +205,9 @@ projecting, the store also runs three per-device trackers:
   reconnect blips of the inverter-error CRITICAL.
 - `trackShp2SrcErrOnsets` — per-SHP2-slot source-error onset (`<sn>:<slot>`),
   the same debounce discipline for `shp2-src-err-<slot>` CRITICALs.
+- `trackMpptErrOnsets` (v1.174.0) — per-string MPPT error onset (`<sn>:hv` / `<sn>:lv`),
+  kept only while that string is producing, so the `dpu-pvh-err` / `dpu-pvl-err` warnings
+  need the code to stand rather than ride a sunrise-ramp standby code.
 
 #### 3.4 The `change` event and frame sequencing
 
@@ -218,6 +251,11 @@ CREATE TABLE IF NOT EXISTS lifetime_totals (
 );
 ```
 
+The same database also holds the durable night-charge tables `night_charge_ledger` and
+`night_charge_calibration` (chapter 15 §6), which the retention sweep never touches. Besides
+hardware serials, `samples.sn` carries three synthetic series: `weather` (GHI/cloud),
+`forecast` (day-ahead archive) and `night_charge` (disposable chart overlay).
+
 The composite `(sn, metric, ts)` index serves `query()`/`queryMulti()`; the
 dedicated single-column `idx_samples_ts` lets the hourly retention `DELETE WHERE
 ts < ?` seek instead of full-scanning under the write lock.
@@ -249,7 +287,7 @@ pushing only finite numbers. Metrics emitted per projection kind:
   `mppt_lv_temp`, `chg_max_soc`, and per pack `packN_soc/temp/in/out/cell_max/
   cell_min/mos_max/board/vol_diff_mv/vol_max_mv/vol_min_mv/balancing/soh/cycles/
   full_cap_mah/remain_cap_mah/lifetime_chg_mah/lifetime_dsg_mah`.
-- **SHP2**: `backup_pct`, `backup_remain_min`, `backup_charge_min`, per-circuit
+- **SHP2**: `backup_pct`, `backup_reserve` (the reserve setpoint, v1.117.0), `backup_remain_min`, `backup_charge_min`, per-circuit
   `chN_w`, summed `panel_load`, `grid_home_w` (SHP2-metered home grid import),
   split-phase `pairN_w`, per-source `srcN_pct/temp/w`.
 - **Generic**: `soc`, `in_watts`, `out_watts`, `pv_watts`, `ac_in`, `ac_out`,
@@ -269,7 +307,7 @@ pushing only finite numbers. Metrics emitted per projection kind:
 
 Hourly `setInterval` runs `DELETE FROM samples WHERE ts < now − RETAIN_MS`.
 `RETAIN_MS` derives from the `RECORDER_RETENTION_DAYS` option (v1.51.0 —
-default 30 days, clamped [7, 730]; malformed values fall back to the default
+default 30 days, clamped [7, 3650] (cap raised from 730 in v1.108.0); malformed values fall back to the default
 so a config typo can never become a delete-everything retention). The
 effective value is logged at startup. Timer is `.unref()`'d.
 
@@ -409,7 +447,7 @@ on a SQLite scan.
 
 #### 6.2 Worker message protocol
 
-Messages **in**: `{kind:'snapshot', snapshot}`, `{kind:'report', id, name, args}`,
+Messages **in**: `{kind:'snapshot', snapshot}`, `{kind:'ownerFloor', pct}` (v1.119.0 — the owner reserve floor the runway model measures against), `{kind:'report', id, name, args}` (single-flighted by name + args since v1.186.0),
 `{kind:'query', id, …}`, `{kind:'listMetrics', id, sn}`.
 Messages **out**: `{kind:'ready'}`, `{kind:'log', message}`,
 `{kind:'result', id, ok, result|error}`.
@@ -434,7 +472,13 @@ bootstrap, correlates request/response by incrementing `id`, and:
 - **Timeout / retry**: `REQUEST_TIMEOUT_MS = 30_000`; one retry on a timeout that
   isn't a stop (rides out cold-worker boot warm-up).
 - **Respawn**: on worker `exit`, fails all in-flight requests, clears caches, and
-  respawns after `RESPAWN_DELAY_MS = 1_000`; re-pushes `lastSnapshot` on `ready`.
+  respawns after `RESPAWN_DELAY_MS = 1_000`; on `ready` it re-pushes `lastSnapshot` and
+  replays the owner reserve floor (`{kind:'ownerFloor'}`, v1.119.0), without which a
+  respawned worker's runway model would read the device reserve instead.
+- **First-snapshot gate (v1.186.0)**: a report request waits until the worker holds a
+  snapshot with device projections. While no devices exist yet it waits up to
+  `FIRST_SNAPSHOT_WAIT_MS = 5_000`, once per process, so a boot-time report is not
+  computed against an empty fleet.
 - **Snapshot throttle**: `store.on('change')` → `pushSnapshot()` sets a dirty
   flag; a `SNAPSHOT_PUSH_MS = 750` timer forwards the latest snapshot at most
   ~once/750 ms (analytics is mostly historical; it doesn't need every frame).
@@ -469,8 +513,12 @@ rules keep it honest:
   e.g. every SHP2 message) updates `lastMqttAt`/source and emits `'change'` but
   does **not** bump `lastUpdated` — it carries no telemetry (v1.3.0).
 
-Only `setDeviceQuota` and `mergeDeviceQuota` (a real REST refresh or a translated
-DPU MQTT delta) advance `lastUpdated`.
+`setDeviceQuota` and `mergeDeviceQuota` (a real REST refresh or a translated DPU MQTT
+delta) advance `lastUpdated`. `setDeviceOnline` (an MQTT `/status` online/offline flip)
+also bumps it, deliberately (v1.142.0), so a brief status flip cannot raise a
+self-clearing stale alert. That path never refreshes the projection, so control readbacks
+key on `lastQuotaAtMs` (set only by `setDeviceQuota`) instead. An empty REST payload is a
+no-op and advances nothing (v1.171.1).
 
 ---
 
@@ -536,11 +584,12 @@ macOS resolves `.local` to IPv6). Notable endpoints:
 | Endpoint | Source | Cache |
 |---|---|---|
 | `/api/snapshot` | `snapshotForClient()` | none |
-| `/api/health`, `/api/version`, `/api/panel-info` | trivial | none |
+| `/api/health` | blind assessment (`assessBlind`) + `pollHealth()`, `shp2ContentFrozenMs`, vitals, heartbeat — **HTTP 503** while the add-on cannot see telemetry (v1.69.0) | none |
+| `/api/version`, `/api/panel-info` | trivial (`{version, builtAt, ref}`; write-auth hints) | none |
 | `/api/history?sn&metric&since&until&bucket` | `analytics.query()` | 15 s |
 | `/api/summary/today` | `analytics.report('totals', …)` | 30 s |
-| `/api/calendar.ics` | forecast + EV windows + active NWS alerts | none — a subscribable iCal feed; point a calendar client at it |
-| `/api/circuit/history?sn&(ch|pair)&days` | `analytics.report('circuitHistory')` | none (worker-cached) |
+| `/api/calendar.ics` | forecast + EV windows + active NWS alerts | `public, max-age=300` (5 min; honoured by HA's ics calendar) — a subscribable iCal feed; point a calendar client at it |
+| `/api/circuit/history?sn&(ch\|pair)&days` | `analytics.report('circuitHistory')` | none (worker-cached) |
 | `/api/metrics?sn` | `analytics.listMetrics(sn)` | none |
 | `/api/forecast`, `/api/runway`, `/api/degradation`, … | `analytics.report(name)` | 60 s (runway 30 s) |
 | `/api/ha-state` | composed multi-report | short |
@@ -553,7 +602,7 @@ private, max-age=N`, and returns a `304` (via `reply.code(304).send()`) on an
 #### 9.2 WebSocket `/ws`
 
 On connect, sends the current `snapshotFrame()`; on every store `'change'`, sends
-the (frame-sequence-cached) `{type:'snapshot', data: snapshotForClient()}`.
+the (frame-sequence-cached) `{type:'snapshot', serverNowMs, data: snapshotForClient()}`. The body is serialized once per emit; `serverNowMs` is stamped at send time (v1.176.0) so the dashboard measures data age on the server's clock.
 Cross-origin upgrades are rejected (`isAllowedOrigin`); missing-Origin
 (same-origin / HA dashboards / curl) passes. Registered with permessage-deflate
 and a 64 KiB inbound frame cap.
@@ -567,12 +616,21 @@ retained discovery configs (one-time legacy-config cleanup guarded by a
 `/data` dedup flag) and a single big JSON state payload to
 `ecoflow_panel/state` every `PUBLISH_INTERVAL_MS = 30 s` via `publishState()`
 → `buildState(snap)` (which reuses the same analytics reports as the HTTP layer).
+Live-measurement sensors carry `expire_after: 120` s (`EXPIRE_AFTER_S`), so a stalled
+publisher turns them unavailable instead of leaving a frozen value. `total_increasing`
+and `total` energy sensors carry no expiry, and the night-charge sensors carry ~25 h
+(`NIGHT_CHARGE_EXPIRE_AFTER_S`). Each report gets `STATE_REPORT_WAIT_MS = 5 s`; a late
+one publishes its last good value for no longer than `EXPIRE_AFTER_S`, then null
+(v1.186.0).
 
 #### 9.4 Telnet TUI
 
-`startTelnetServer` on `config.telnet.port` default `2323`, host `::`, enabled
-unless `TELNET_ENABLED=0`. Menu-driven fleet view reading the same store +
-analytics.
+`startTelnetServer` on `config.telnet.port` default `2323`, host `::`. In bare env it is
+enabled unless `TELNET_ENABLED=0`, but the add-on ships `TELNET_ENABLED: false`, which the
+runner bridges to `0`, so the telnet transport is **off by default**. The same Plant
+Operator console is always served in a browser at `/console` on the web port (xterm.js
+over `/console/ws`), independent of `TELNET_ENABLED`. Both transports require the
+operator login when `TUI_PASSWORD` is set.
 
 #### 9.5 Web UI
 
@@ -592,10 +650,10 @@ proxies `/api` + `/ws` back to this process.
 | `port` | `PORT` | `8787` | HTTP listen port |
 | `host` | `HOST` | `::` | HTTP bind (dual-stack) |
 | `dbPath` | `DB_PATH` | `/data/ecoflow.db` (container) | SQLite WAL DB |
-| `logLevel` | `LOG_LEVEL` | `info` | Pino level; `debug`/`trace` un-gate poll-ok lines |
+| `logLevel` | `LOG_LEVEL` | `info` | Pino level; `debug`/`trace` add the periodic poll-duration summary (every `POLL_SUMMARY_EVERY` polls) and the recorder's sample-count heartbeat |
 | `forecastLat` | `FORECAST_LAT` | `33.4484` | Solar forecast latitude (Phoenix) |
 | `forecastLon` | `FORECAST_LON` | `-112.074` | Solar forecast longitude |
-| `telnet.enabled` | `TELNET_ENABLED` | `true` (unless `0`) | TUI on/off |
+| `telnet.enabled` | `TELNET_ENABLED` | bare env: `true` (unless `0`); add-on option default `false` (bridged to `0`) | Telnet transport on/off (the `/console` browser terminal is always served) |
 | `telnet.host` | `TELNET_HOST` | `::` | TUI bind |
 | `telnet.port` | `TELNET_PORT` | `2323` | TUI port |
 | — | `POLL_INTERVAL_MS` | `60_000` | REST poll cadence |
@@ -606,6 +664,10 @@ proxies `/api` + `/ws` back to this process.
 | — | `BUILD_VERSION` / `BUILD_DATE` / `BUILD_REF` | `dev`/null/null | Version stamp for `/api/version` |
 | — | `ECOFLOW_TRACE_SN` | — | Env-gated MQTT topic/payload trace for one SN |
 | — | `BMS_REBASELINE_SUSPECT_ROLLUPS` | `3` | Rollups before a BMS reconnect re-baseline is trusted |
+| — | `BMS_RESEED_MIN_GAP_WH` / `BMS_RESEED_SUSTAINED_ROLLUPS` | `50_000` / `2` | Floor/live gap and dwell before a BMS-counter floor re-seeds (§4.6) |
+| — | `RECORDER_RETENTION_DAYS` | `30` (clamped [7, 3650]) | `samples` retention (§4.5) |
+| — | `BACKUP_POOL_GRACE_HOLD_MS` | `180_000` | SHP2 backup-pool grace hold (§3.3) |
+| — | `POLL_SUMMARY_EVERY` | `30` | Polls per debug-level poll-duration summary (§3.1) |
 
 **Secret handling**: `config.accessKey`/`secretKey` are lazy getters that throw
 `Missing required env var: …` on **first access**, not at import — so tests and
@@ -679,6 +741,10 @@ and the endpoint handlers in `server/src/index.ts`.
 - The write-command framework + audit log + rate limits
 - HTTP API surface: `/api/ha-state`, `/api/snapshot`, `/api/panel-info`, and friends
 - Config knobs (env / config.yaml) reference
+- Edge cases & honest-null summary
+- 2.14 Request-signing clock correction (`clockOffset.ts`)
+- 2.15 Telemetry-blind self-alert (`telemetryBlind.ts`)
+- 2.16 Cloud-session self-heal (`sessionSelfHeal.ts`)
 
 ---
 
@@ -730,7 +796,14 @@ Response envelope (`EcoFlowResponse<T>`): `{ code, message, data, eagleEyeTraceI
 #### `ecoflow/rest.ts`
 
 Thin client (`ecoflow` object) with `listDevices`, `getQuotaAll`, `getQuotaSpecific`,
-`getMqttCertification`, and `sendCommand`. Every call funnels through `call()`, which:
+`getQuotaData` (v1.82.0: `POST /iot-open/sign/device/quota/data`, the SHP2 historical-energy
+endpoint, read-only despite the verb), `getMqttCertification`, and `sendCommand`. Reads
+(GET/POST) are bounded by `ECOFLOW_REST_TIMEOUT_MS` = 30 s for headers and body (v1.179.0),
+so one hung read cannot hold the poll past `SHP2_READBACK_STALE_MS`. Writes (PUT) keep
+undici's defaults, because a slow write may still have landed and a re-send can escalate
+falsely. A read that answers code `"0"` with a null `data` throws (v1.171.1); a write may
+legitimately do so (v1.171.2). Every response's `Date` header feeds the clock-offset
+learner (§2.14). Every call funnels through `call()`, which:
 
 - signs via `signRequest()`,
 - for GET, appends a sorted query string (`buildQuery`) that **byte-matches the
@@ -759,7 +832,9 @@ The IoT-Open signing scheme:
 ```
 
 Headers returned: `{ accessKey, nonce, timestamp, sign }`. `nonce` is
-`randomInt(100000, 999999)`; `timestamp` is `Date.now()` in ms.
+`randomInt(100000, 999999)`; `timestamp` is the injected `nowMs` in ms. `rest.ts` passes
+`signingNowMs()`, the local clock corrected by the offset learned from server `Date` headers
+(§2.14); `Date.now()` is only the fallback when no clock is passed.
 
 **Security detail:** the flatten accumulator is a `Map`, not a plain object, to avoid
 prototype-pollution / remote-property-injection (CodeQL `js/remote-property-injection`)
@@ -786,9 +861,9 @@ Startup (`startMqtt`):
    unique client IDs at ~10/day per account** — a random ID per restart would exhaust
    the quota.
 3. Connect with `mqtt.connect(url, { protocolVersion: 5, clean: true,
-   reconnectPeriod: 5000, keepalive: 30, rejectUnauthorized: true })`.
+   reconnectPeriod: 5000, keepalive: 30, rejectUnauthorized: true, resubscribe: true })`.
 
-**Cert fetch retry** (`getMqttCertificationWithRetry`): backoff `2s, 4s, 8s, 16s, 30s`;
+**Cert fetch retry** (`getMqttCertificationWithRetry`): up to 5 attempts with waits of `2s, 4s, 8s, 16s` between them (the schedule's final `30s` entry is never reached, because the fifth failure throws);
 only retried when `isTransientNetworkError()` matches (`EAI_AGAIN`, `ENOTFOUND`,
 `ECONNREFUSED`, `ETIMEDOUT`, `timeout`, `connect timeout`, `fetch failed`). This is
 the same classifier the process guard uses as its survive/fatal gate, so it was
@@ -799,9 +874,12 @@ deliberately narrowed — the bare `network` token was dropped because it matche
 
 EcoFlow's ACL **rejects wildcard subscribes** (`+/quota`), so the client subscribes
 **per-SN**: `[/open/{username}/{sn}/quota, /open/{username}/{sn}/status]` at QoS 0.
-It subscribes to every SN currently in the store on `connect`, and re-subscribes
-whenever the store emits `change` (new devices appearing). A `subscribed` `Set`
-coalesces bursts and rolls back on subscribe error.
+It subscribes to every SN currently in the store on `connect`, and subscribes newly
+appearing devices whenever the store emits `change` (while connected). A `subscribed` `Set`
+coalesces bursts and rolls back on subscribe error. The set is never cleared on close, so
+after a reconnect or session rebuild this loop no-ops for every known SN. Re-subscription
+then rests on mqtt.js re-issuing the subscriptions itself, which the client pins with
+`resubscribe: true` (v1.145.0) rather than inheriting the library default.
 
 The `/get_reply` request-reply topic is **not** authorized by this API, so **active
 polling of silent devices is impossible over MQTT** — Delta 3 Plus, River 3 Plus,
@@ -842,7 +920,7 @@ REST-schema raw cache when a translator exists (DPU only — see next section).
 | 28 | per-pack BMS detail (identified by `packSn` lookup) |
 
 **Trace env knobs:** `ECOFLOW_TRACE_SN` (log one SN's topics+payloads),
-`ECOFLOW_TRACE_FILE` (append full messages to a file), `ECOFLOW_TRACE_TOPICS=1`
+`ECOFLOW_TRACE_FILE` (appends that SN's full messages to a file; it does nothing unless `ECOFLOW_TRACE_SN` is also set), `ECOFLOW_TRACE_TOPICS=1`
 (print each unique topic shape once).
 
 **Log-storm coalescing:** reconnect/close/error lines are coalesced
@@ -896,7 +974,7 @@ below.
 | `rawBySn` | REST-schema raw quota per SN (mutated in place on merge) |
 | `mqttByCmd` | per-SN `Map<cmdId, param>` (for `/api/debug/raw`) |
 | `mqttFlatBySn` | flat union of all MQTT fields seen per SN |
-| `lastSourceBySn` | `'rest' | 'mqtt'` |
+| `lastSourceBySn` | `'rest' \| 'mqtt'` |
 | `lastMqttAtBySn`, `mqttMsgCountBySn` | per-SN MQTT liveness |
 | `lastDeviceListAttemptAt` / `…SuccessAt` | distinguishes "cloud session stale" from "device genuinely offline" |
 | `frameSeq` | monotonic counter bumped on every `change` emit; lets the WS layer serialize the 50–150 KB snapshot frame **once** per emit and reuse the bytes across clients |
@@ -908,7 +986,10 @@ below.
   projection?, raw? /* only if SNAPSHOT_INCLUDE_RAW=1 */, grid?, off_grid? }
 ```
 
-`lastUpdated` = ms epoch of **last SUCCESSFUL fresh telemetry**. The `Telemetry stale`
+`lastUpdated` = ms epoch of the last evidence of life. That is a REST quota or a translated
+MQTT delta, and also, deliberately (v1.142.0), a bare `/status` online/offline flip, so a 6 s
+flip cannot raise a self-clearing stale alert. Control readbacks must not key on it; they read
+`lastQuotaAtMs` (see *Three clocks* below). The `Telemetry stale`
 alarm keys on this (`STALE_MS = 3 min` in `alerts.ts`), so several guards protect it:
 
 - **A failed REST poll does NOT bump `lastUpdated`** (v0.97.0). `setDeviceError` records
@@ -943,8 +1024,11 @@ alarm keys on this (`STALE_MS = 3 min` in `alerts.ts`), so several guards protec
 `getQuotaAll()` for each **online** device (in parallel; per-device errors captured via
 `setDeviceError`). Routine poll success is reported as a PERIODIC DISTRIBUTION (p50/p95/max per POLL_SUMMARY_EVERY polls, v1.148.0 — it was a line per poll and became 32.5% of all log bytes; demoting it would buy nothing because LOG_LEVEL=debug is standing and the ring captures stdout at every level); only **recovery**
 (failure→ok) and **slow** (`>= SLOW_POLL_MS = 5000`) polls stay at INFO; a failed poll
-logs at **warn**. Every 10 min a bounded **fleet-status** line dumps per-SN
-`ON/<count>msg/<age>s` (or `OFF` / `API-online/no-MQTT`).
+logs at **warn**. Every 10 min a **fleet-status** line reports each device by name as
+`ON/<count>msg/<age>s`, `OFF` or `API-online/no-MQTT`. The full line goes out at INFO on a
+state change, on the first dump and as an hourly anchor (`STATUS_ANCHOR_MS`). Otherwise a
+compact DEBUG line lists only the MQTT-reporting devices plus a count of the rest
+(v1.187.10; see *Log forensics* below).
 
 **v1.187.10 — failures as a delta, causes per episode.** The poll's failure set is logged as a
 change against the previous poll (`pollFailureLines`): **warn** names only the devices newly
@@ -957,50 +1041,6 @@ recovery) and the daily heartbeat are **info**. Each device's cause is logged on
 "serves from device/list presence only", and an alarm-path panel's cause is logged at warn. (It was
 once per process and serial, with the 1006 wording for every code: a one-poll 1020 rate limit read
 as permanent, and a device failing again later left no cause in the journal.)
-
-##### Per-circuit POWER sensors (v1.141.0)
-
-`planCircuitDiscovery` publishes **two** configs per channel: the existing
-`ecoflow_circuit_<ch>_lifetime_kwh` (energy) and `ecoflow_circuit_<ch>_watts`
-(power, `device_class: power`, `state_class: measurement`, `W`). The watts
-already existed end to end — `loadInfo.hall1Watt[i-1]` → `Shp2Circuit.watts`,
-recorded as `ch<ch>_w` — so no projection or recorder change was needed.
-
-**Twelve, not six.** The "primaries only" idea comes from a *naming* problem
-v1.65.0 already solved (legs labelled "X L1"/"X L2" while keeping twelve
-entities), and it does not transfer: `stat_rate` is a field **on** a
-`device_consumption` entry, of which there are twelve. Six sensors would fill six
-entries and silently drop half the panel from the Sankey, and putting a pair
-total on the primary would make that entity mean two things at once.
-
-- **Entity ids are stable across renames — but not because of `object_id`.**
-  v1.141.0 published one and it was inert: HA minted
-  `sensor.ecoflow_panel_east_wing_l1_power` (device slug + slugified name), so
-  the key was removed in v1.141.1. Stability comes from HA persisting an
-  entity_id against its `unique_id` at first discovery, which matters because the
-  energy prefs wire `stat_rate` **by string**. The proof is in this fleet: the
-  energy entity_ids still read `…_circuit_3_energy` from before v1.65.0's
-  pair-aware naming, while the power entity minted for the same channel reads
-  `…_east_wing_l2_power`.
-- A missing reading is `null`, **never 0** — on a `measurement` sensor a zero is
-  compiled into HA's mean as a positive claim the circuit drew nothing. A genuine
-  measured 0 passes through.
-- `circuitChannels` is shared by both field builders so they cannot drift; a
-  drift shows only as a permanent `unknown` on whichever entity was forgotten.
-- `clear` emits **both** config topics for a departed channel.
-- The dynamic configs are now routed through `auditDiscoveryTables` in the test
-  suite. They never had been — the audit only ever saw the static tables, which
-  is the same filtered-subset shape as the defect family above.
-
-**Operator step, HA-side:** add `"stat_rate": "sensor.ecoflow_circuit_<ch>_power"`
-to each of the twelve `device_consumption` entries in the energy prefs.
-`stat_consumption` is untouched and the Energy tab is unaffected. All three
-`energy_sources` already carry `stat_rate`; the twelve devices carry none, and
-that is the whole gap.
-
-> Circuit 1 will publish a permanent **0 W** — the unresolved ch1 CT question
-> (0.147 kWh lifetime against ch3's 66.6 kWh on a pairing that should be
-> comparable), settleable only physically. Publishing pair sums would hide it.
 
 ##### Attempted vs failed — the three-state rule (v1.138.0)
 
@@ -1017,8 +1057,13 @@ one of them is success:
 | the device was `online: 0`, so never fetched | **unevaluable** |
 | it fell out of `/device/list` entirely | **unevaluable** |
 
-Two detectors previously read absence as success. Both are now pure exported
-functions taking `attemptedSns` explicitly:
+Two detectors previously read absence as success. One survives as a pure exported
+function taking `attemptedSns` explicitly: `pollHealthVerdict` (S1). It separates an
+alarm-path SHP2 that was asked and failed (`shp2-fetch-failed`) from one never asked because
+the list showed it offline (`shp2-not-polled`), so a cloud-offline panel no longer counts as
+a healthy poll for the telemetry-blind detector. Its full verdict set, and its harness
+`scripts/mutate-poll-health-attribution.mjs`, are under *The evidence doctrine* below. The
+other detector was deleted:
 
 **`longFailureRecoveries(...)` was REMOVED in v1.139.0.** It announced the moment a
 1006-blocked accessory started answering — the "EcoFlow enablement doorbell". The premise
@@ -1276,7 +1321,11 @@ primary = smaller channel (carries name + breaker rating), watts = sum of both l
 **Energy sources / slots (1..3):** each `Shp2EnergySource` reads
 `pd303_mc.backupIncreInfo.Energy{i}Info.*`: `devInfo.modelInfo.sn`,
 `batteryPercentage`, `isConnect`, `isAcOpen`, `devInfo.fullCap`, `devInfo.ratePower`,
-`emsBatTemp`, `hwConnect`, `errorCodeNum`. The `sn` here is the Core↔SHP2 connector
+`emsBatTemp`, `hwConnect`, `errorCodeNum`, plus each slot's `ch{i}ForceCharge` (the flat key,
+else the `pd303_mc.`-prefixed one; v1.80.0) as `forceCharge`. That is the EcoFlow app's "Charge
+Now" switch, which the Charge Now responder and the house-panel pin guard read. Panel-level
+v1.80.0 fields: `forceChargeCeilingSoc` (`foceChargeHight`, sic), `stormWatchEnabled`
+(`stormIsEnable`), `epsMode` (`epsModeInfo`). The `sn` here is the Core↔SHP2 connector
 mapping — **positional to slot but the SN is read from the slot's own `devInfo`, not
 inferred from position**; spares never appear.
 
@@ -1321,7 +1370,7 @@ suppressed the 2026-06-21 `50→2%` false SoC-alarm cascade off a transient `0.0
 `gridSta` is the master controller's live line-sensing flag — present even when not
 momentarily drawing. It feeds `gridState.computeShp2GridConnected` as an additive
 backstop (true) — only from a fresh readback since v1.179.0 — and since v1.178.0 its last
-value vetoes a declared grid (false); see the Grid backstop resolver, 4.2.
+value vetoes a declared grid (false); see §5, *4. Grid backstop resolver — `gridState.ts`*, 4.2 Signals combined.
 
 #### Grace-hold + slew guard (`backupPoolWithGraceHold`)
 
@@ -1350,35 +1399,47 @@ real low.
 `snapshot.ts` also tracks `backupPoolUnknownSince` (onset of a published-null pool, for
 the reserve-blind compensating alert), `dpuErrOnset` (per-DPU `sysErrCode` onset,
 re-baselined on code change/clear — debounces the "Inverter error code" CRITICAL through
-20–160 s reconnect blips), and `shp2SrcErrOnsets` (per-slot `errorCodeNum` onset).
+20–160 s reconnect blips), `shp2SrcErrOnsets` (per-slot `errorCodeNum` onset), and `mpptErrOnsets` (v1.174.0: per-Core
+HV/LV MPPT string-error onset, whose clock runs only while the code is non-zero AND the string
+is producing). Since v1.187.4 the pool-unknown onset is persisted (`pool-unknown.json`,
+`POOL_UNKNOWN_PATH`), so a restart inside a blind window carries the onset instead of
+restarting the reserve-blind clock.
 
 ---
 
 ### SHP2 membership: home cores vs. spares (`shp2Membership.ts`)
 
-The operator's fleet has **5 DPU cores on the account but only 3 wired into the home
-SHP2**; Cores 4 & 5 are bench spares that report telemetry but cannot deliver energy to
-the home bus. Every fleet aggregation must exclude spares.
+The fleet has **5 DPU cores on the account but only 3 wired into the home SHP2**. The
+other two are bench units that report telemetry but cannot deliver energy to the home bus.
+Which Cores those are comes from the SHP2's own connected-source roster: since the
+2026-08-20 reconfiguration the wired set is Cores 1, 2 and 5 and the bench units are
+Cores 3 and 4 (§12l). Every fleet aggregation must exclude spares.
 
 - **`shp2ConnectedDpuSns(devices)`** → `Set<sn>` of connected sources = the SHP2's
   `sources[]` filtered on `isConnected && sn`. Empty when no SHP2 is present.
 - **`isShp2Connected(sn, connected)`** → **fallback semantics**: when `connected` is
   empty (no SHP2 observed / DPU-only setup) returns **true for every SN** (so a
   no-SHP2 user's tiles aren't zeroed). Otherwise membership is exact.
-- **`SPARE_DPU_SNS`** = explicit allowlist of the bench-spare DPU serials (Core 4,
-  Core 5). This is the **safety
-  floor**: a home core (1/2/3) can never be in this set, so it can never have its real
-  offline alarm muted, even if it faults out of the SHP2's `isConnected` list. A spare's
+- **`SPARE_DPU_SNS`** = the static allowlist of bench-spare serials as written (Core 4,
+  Core 5). It is a **floor, not the answer**: a DPU it does not name is never treated as a
+  spare. Since the 2026-08-20 reconfiguration it names a wired home Core (Core 5) and omits
+  the bench unit Core 3 (§12l). So `isBenchSpareSn(sn, lastKnownRoster?)` (v1.121.0) treats
+  an SN as a spare only when the literal names it AND the durable last-known SHP2 roster
+  (`setLastKnownHomeRoster`, persisted by index.ts) does not list it. It can only remove
+  spare status, never add it. A spare's
   offline state is the *expected* steady state → its connectivity alert is
   non-annunciating.
-- **`isExpectedOfflineSpare(sn, …)`** = `SPARE_DPU_SNS.has(sn) && !connected.has(sn)` —
-  the `!has` re-arms a spare the instant it's wired into an SHP2 and reports as a
+- **`isExpectedOfflineSpare(sn, …, lastKnownRoster?)`** = `!connected.has(sn) && isBenchSpareSn(sn, lastKnownRoster)`.
+  A live connected source is always re-armed, and while the SHP2 is dark (`connected` empty)
+  the persisted last-known roster decides, not the literal alone. The `!has` re-arms a spare the instant it's wired into an SHP2 and reports as a
   connected source.
 - **`isSourceDpuStale(source, devices)`** (observability only): a connected slot whose
   underlying DPU is itself cloud-offline. Surfaced as `dpuStale` on the source (set by
   `snapshotForClient`); does **not** change backup-pool capacity or the floor alarm.
 - **`homeCoreCoverage(devices)`** → `{ connected, reporting, complete }`. Roster = SHP2
-  connected sources, or (fallback) every non-spare DPU. `complete` = all roster cores
+  connected sources (the union across panels), else the persisted last-known home roster
+  (v1.121.0), else every DPU not in the `SPARE_DPU_SNS` literal. Roster SNs absent from the
+  device map count as not reporting, the conservative direction. `complete` = all roster cores
   reporting. Core principle: *we can PROVE discharge from a partial sum; we can never
   DISPROVE it.* An empty roster means no home cores exist at all → `complete` is vacuously
   true.
@@ -1391,11 +1452,17 @@ the home bus. Every fleet aggregation must exclude spares.
   `/api/ha-state` and MQTT `buildState` (previously two byte-identical loops). Sums
   `pvTotalWatts/totalInWatts/totalOutWatts/acInWatts` and per-pack net
   (`Σ outputWatts − inputWatts`) over **online, SHP2-connected** DPUs; `panelLoad` =
-  Σ SHP2 circuit watts. Returns raw un-rounded sums (each caller rounds at emission;
-  the raw `fleetBatteryNet` feeds the ±50 W charge/discharge timer gates). Guarded with
+  Σ SHP2 circuit watts. Returns raw un-rounded sums (each caller rounds at emission). There are two
+  battery-net sums (v1.186.2). `fleetBatteryNet` is built from the polled pack fields and is
+  the raw evidence the at-floor discharge guard (`gridState` `poolDischargingObserved`)
+  reads. `fleetBatteryNetDisplay` prefers each pack's fresh MQTT `liveFlow`; the Battery Net
+  sensor, `/api/ha-state` `fleet_battery_net_watts` and the ±50 W charge/discharge timer
+  gates read it. `panelLoad` sums every panel's circuits (v1.185.0). Guarded with
   `?? []` on `sources`/`packs`/`circuits` so a partial projection can't throw.
 
-Roster at the time of writing: Core 1/2/3 home; Core 4/5 bench spares as above.
+Roster since the 2026-08-20 reconfiguration: Cores 1/2/5 wired into the SHP2; Cores 3/4 on
+the bench. `SPARE_DPU_SNS` still names Cores 4 and 5, and the roster-aware predicates above
+correct for it (§12l).
 
 #### Two panels (v1.185.0)
 
@@ -1506,8 +1573,11 @@ classifyDeviceLink(cloudOnline, reachable):
 
 The broader root-cause context: "WiFi loss" is usually **not** radio — it's cloud
 session/MQTT wedge + DNS `EAI_AGAIN` from router power-cycling; the fix is LAN ping per
-DPU, not reflexive reboots. The write path's `refreshShp2CloudPresence` (below) is the
-add-on's *only* remediation lever, and it's a no-op cloud round-trip, not a reboot.
+DPU, not reflexive reboots. The add-on has two remediation levers, and neither is a reboot. One is the
+operator-triggered `refreshShp2CloudPresence` no-op write (below). The other is an automatic
+rebuild of the add-on's own MQTT session, which runs on a sustained multi-device
+message-rate collapse (§2.16) or immediately when the telemetry-blind alert goes active
+(§2.15, v1.166.0).
 
 ---
 
@@ -1520,9 +1590,11 @@ each returns `{ ok:false, error }` (no crash).
 Key helpers:
 
 - `callHaService(domain, service, data)` — POST `/services/…`; surfaces HA's JSON
-  `message` on non-2xx. Timeouts are tuned per service: Music Assistant
-  `play_announcement` gets **75 s headers / 120 s body** (a long repeated klaxon WAV to
-  slow ecobee speakers); everything else **5 s / 10 s**.
+  `message` on non-2xx. A caller may pass its own timeout budget. The announce path does, sizing it from
+  the rendered clip's duration (`announceTimeoutMs`, v1.119.0: floor 75 s, ceiling 10 min),
+  because `play_announcement` returns only when playback finishes. Without a budget, Music
+  Assistant `play_announcement` falls back to **75 s headers / 120 s body** and everything
+  else to **5 s / 10 s**.
 - `getEntityState(entityId, opts?)` — GET `/states/<encoded id>` (id is
   `encodeURIComponent`-encoded; operator-supplied). This is how the main loop reads the
   ping/grid-presence sensors each cycle.
@@ -1569,14 +1641,14 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
 `value_template` extracts its field from the single `ecoflow_panel/state` payload, so
 **one state publish refreshes every entity at once**. State is published every
 `PUBLISH_INTERVAL_MS = 30 s`. Connection defaults: port `MQTT_DISCOVERY_PORT` (1883),
-`MQTT_DISCOVERY_USER`/`PASS`, `protocolVersion: 5`, `reconnectPeriod: 30 s`, LWT retains
+`MQTT_DISCOVERY_USER`/`PASS`, `protocolVersion: 5`, `reconnectPeriod: 5 s` (v1.148.0; it was 30 s, which left every entity unavailable ~20 s longer than needed after a broker restart), LWT retains
 `offline`.
 
 #### Availability + expiry
 
 - `AVAILABILITY_TOPIC` is republished `online` on **every** state cycle and first on
   every broker **reconnect** (v1.14.1) — a broker-side LWT `offline` must be overwritten on
-  reconnect or HA holds all ~87 entities unavailable until an add-on restart.
+  reconnect or HA holds every entity (~116 on a 12-circuit panel) unavailable until an add-on restart.
 - **v1.187.10 — the process's first connect** (every restart) does not publish `online`
   ahead of the state: the state cycle (`publishStateCycle`) publishes the per-circuit
   configs, then the fresh state payload, then `online`, and asserts `online` also when the
@@ -1595,7 +1667,8 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
 
 #### Entity categories
 
-`SENSORS[]` (~50) and `BINARY_SENSORS[]` (~9). Selected groups:
+`SENSORS[]` (78) and `BINARY_SENSORS[]` (10), plus the four alarm-priority switches and two
+dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). Selected groups:
 
 - **Power flow:** `fleet_pv_watts`, `panel_load_watts`, `ac_import_watts`,
   `fleet_battery_net_watts`, `grid_home_watts` (SHP2 `gridWatt`).
@@ -1636,7 +1709,10 @@ Monotonic lifetime kWh counters HA accumulates into long-term statistics:
 that *charged the batteries*; a **diagnostic** sub-metric, near-zero on a solar home),
 `grid_to_home_lifetime_kwh` (SHP2-main `gridWatt` — the **true** whole-home grid import,
 the sensor to wire into HA Energy → Grid consumption), `battery_charge_lifetime_kwh`,
-`battery_discharge_lifetime_kwh`, plus per-circuit `carbon`/`tariff` sensors.
+`battery_discharge_lifetime_kwh`. The two lifetime CO2 counters (`carbon_lifetime_kg`,
+`carbon_lifetime_miles`) are also `total_increasing`. The tariff readouts are `measurement`
+(waived USD readouts; see Table invariants), and the per-circuit lifetime counters are
+described below.
 
 **Per-SHP2-circuit Energy sensors** are published dynamically (`planCircuitDiscovery` /
 `publishCircuitDiscovery`) driven by the recurring `publishState()` loop — NOT the
@@ -1646,6 +1722,54 @@ which can land *after* broker connect. `circuitLifetimeFields` emits a
 accumulator keys (so no discovered sensor references a missing `value_json` key, which
 would spam HA template warnings), and emits **null (not 0)** when the accumulator isn't
 ready (a 0 on a `total_increasing` sensor reads as a spurious reset).
+
+#### Per-circuit POWER sensors (v1.141.0)
+
+`planCircuitDiscovery` publishes **two** configs per channel: the existing
+`ecoflow_circuit_<ch>_lifetime_kwh` (energy) and `ecoflow_circuit_<ch>_watts`
+(power, `device_class: power`, `state_class: measurement`, `W`). The watts
+already existed end to end — `loadInfo.hall1Watt[i-1]` → `Shp2Circuit.watts`,
+recorded as `ch<ch>_w` — so no projection or recorder change was needed.
+
+**Twelve, not six.** The "primaries only" idea comes from a *naming* problem
+v1.65.0 already solved (legs labelled "X L1"/"X L2" while keeping twelve
+entities), and it does not transfer: `stat_rate` is a field **on** a
+`device_consumption` entry, of which there are twelve. Six sensors would fill six
+entries and silently drop half the panel from the Sankey, and putting a pair
+total on the primary would make that entity mean two things at once.
+
+- **Entity ids are stable across renames — but not because of `object_id`.**
+  v1.141.0 published one and it was inert: HA minted
+  `sensor.ecoflow_panel_east_wing_l1_power` (device slug + slugified name), so
+  the key was removed in v1.141.1. Stability comes from HA persisting an
+  entity_id against its `unique_id` at first discovery, which matters because the
+  energy prefs wire `stat_rate` **by string**. The proof is in this fleet: the
+  energy entity_ids still read `…_circuit_3_energy` from before v1.65.0's
+  pair-aware naming, while the power entity minted for the same channel reads
+  `…_east_wing_l2_power`.
+- A missing reading is `null`, **never 0** — on a `measurement` sensor a zero is
+  compiled into HA's mean as a positive claim the circuit drew nothing. A genuine
+  measured 0 passes through.
+- `circuitChannels` is shared by both field builders so they cannot drift; a
+  drift shows only as a permanent `unknown` on whichever entity was forgotten.
+- `clear` emits **both** config topics for a departed channel.
+- The dynamic configs are now routed through `auditDiscoveryTables` in the test
+  suite. They never had been — the audit only ever saw the static tables, which
+  is the same filtered-subset shape as the v1.137.0 table-invariant defects (Table
+  invariants + connect re-assertion, below).
+
+**Operator step, HA-side:** for each of the twelve `device_consumption` entries in the
+energy prefs, add a `"stat_rate"` naming that channel's power entity. Take the entity_id
+from HA's entity registry (unique_id `ecoflow_circuit_<ch>_watts`). HA mints it from the
+device and circuit name, e.g. `sensor.ecoflow_panel_east_wing_l1_power`, never
+`sensor.ecoflow_circuit_<ch>_power`.
+`stat_consumption` is untouched and the Energy tab is unaffected. All three
+`energy_sources` already carry `stat_rate`; the twelve devices carry none, and
+that is the whole gap.
+
+> Circuit 1 will publish a permanent **0 W** — the unresolved ch1 CT question
+> (0.147 kWh lifetime against ch3's 66.6 kWh on a pairing that should be
+> comparable), settleable only physically. Publishing pair sums would hide it.
 
 #### Alarm-priority switches (bidirectional)
 
@@ -1666,7 +1790,12 @@ TOCTOU-hardened read-probe + `wx` exclusive write).
 
 #### The state payload (`buildState`)
 
-Assembled from `aggregateFleetFlow(devices)` + the analytics worker's cached reports
+Each report settles independently (`settleStateReports`, v1.186.0). It uses its fresh
+answer if one arrives within `STATE_REPORT_WAIT_MS` (5 s), else its last good answer if that
+is no older than `STATE_REPORT_LAST_GOOD_MAX_AGE_MS` (= `EXPIRE_AFTER_S`, 120 s), else null.
+A slow or failed report therefore nulls only its own fields, and the snapshot, alarm and
+readiness fields publish on the 30 s cadence regardless. The payload is assembled from
+`aggregateFleetFlow(devices)` + the analytics worker's cached reports
 (`forecast`, `degradation`, `runway`, `roundTripEfficiency`, `clipping`,
 `selfConsumption`, `carbon`, `tariff`, `curtailment`), `recorder.getLifetimeTotals()`,
 lighting posture, `liveGridBackstop`, `countCloudWedges`, `systemOutageFields`, and
@@ -1717,14 +1846,14 @@ all. So:
 
 | Step | Every connect? | Why |
 |---|---|---|
-| availability `online` | yes, **first** | a retained LWT `offline` holds every entity unavailable regardless of what follows (live: 9+ h, 2026-07-12) |
+| availability `online` | **reconnects only**, first (v1.187.10) | a retained LWT `offline` holds every entity unavailable regardless of what follows (live: 9+ h, 2026-07-12). On the process's first connect it is asserted by the state cycle, right after the fresh payload (see Availability + expiry) |
 | `clearLegacyDiscovery()` | **no — once** | empty payloads to *retired* config topics need saying once; repeating them forever is traffic that never stops |
 | `publishDiscovery()` | yes | ~90 retained publishes of unchanged payloads; HA re-processes them as no-ops |
 | invalidate circuit signature | yes | the per-circuit configs are retained on the same broker and vanish with the same store |
 | `publishedCircuitChannels` | **never reset** | not a latch — it is the *orphan ledger*, the memory of which circuits to clear a config topic for. Reset it and a removed circuit's retained config sits on the broker forever with nothing left to remove it |
 | switch subscriptions | yes | MQTT subscriptions do not survive a clean-session reconnect |
 
-Proven by `scripts/mutate-discovery-invariants.mjs` (17/17 killed), which includes
+Proven by `scripts/mutate-discovery-invariants.mjs` (23 mutants: the original 17, plus six (xviii–xxiii) for the v1.141.0 per-circuit power sensors), which includes
 a mutant that leaves `runBrokerConnect` correct while making the **real**
 `client.on('connect')` handler inert — the failure mode where a wired, tested,
 mutation-proven mechanism never reaches production.
@@ -1746,8 +1875,22 @@ the cloud-presence refresh round-trips, with a changed value. The target is
 VALIDATED (not silently clamped) into the [10, 50] write envelope
 (`RESERVE_WRITE_MIN_PCT` / `RESERVE_WRITE_MAX_PCT`, nightChargeActuator.ts),
 audit-logged under action `night-charge-reserve`, and paced by a 5-minute
-per-SN cooldown. Only the night-charge actuator calls it (§15.8b) — there is
-no direct HTTP surface for arbitrary reserve writes.
+per-SN cooldown. It has two callers. One is the night-charge actuator
+(§15.8b). The other is the owner reserve-floor endpoint `POST /api/reserve-floor?pct=N`,
+which needs write-auth and is refused outside the same envelope and while a night-charge
+write holds the reserve raised (§12h). No surface writes an arbitrary reserve value.
+
+#### `setChannelForceCharge` / `setForceChargeCeiling` — the force-charge writes
+
+`setChannelForceCharge` (v1.84.0) sets `ch{n}ForceCharge` to `FORCE_CHARGE_ON`/`FORCE_CHARGE_OFF`,
+the EcoFlow app's "Charge Now", on SHP2 slot 1–3; any other slot is refused with
+`slot-out-of-range`. It is audit-logged as action `charge-now-ch<n>` and has a 5-min cooldown
+per slot and SN. An OFF is limited only by earlier OFFs, never by a preceding ON (v1.186.0).
+`setForceChargeCeiling` (v1.165.0) sets `foceChargeHight` (the vendor's spelling) within the
+documented [80, 100]; anything else is refused with `ceiling-out-of-range`. It is audit-logged
+as `force-charge-ceiling` and has a 5-min cooldown. Both use the same `PD303_APP_SET` shape and
+the audited `runCommand` path. Callers: the Charge Now responder (OFF only) and the night
+force-charge path.
 
 #### `refreshShp2CloudPresence` — the documented no-op write
 
@@ -1808,7 +1951,7 @@ first); surfaced at **`GET /api/writes/log`**.
 | `/api/device/refresh-cloud/:sn` | POST | write | no-op cloud-presence refresh |
 | `/api/device/refresh-cloud-cooldown?sn=` | GET | none | cooldown state |
 | `/api/device/send-command` | POST | write + debug token | arbitrary allow-listed command |
-| `/api/writes/log` | GET | — | tail of the audit log |
+| `/api/writes/log?limit=` | GET | write | tail of the audit log (default 50, max 500 entries); write-auth because rows carry source IPs and attempted command shapes |
 
 #### `snapshotForClient()`
 
@@ -1852,6 +1995,12 @@ are cached (~30 min) on the worker.
 | `SNAPSHOT_INCLUDE_RAW` | unset | `1` includes the full raw quota in each `DeviceSnapshot` |
 | `BACKUP_POOL_GRACE_HOLD_MS` | `180000` | grace-hold window for the coherence gate (0 disables) |
 | `BATTERY_SOC_MAX_DROP_PCT` | `25` | single-tick slew rejection threshold (`BACKUP_POOL_MAX_SLEW_PCT`) |
+| `HOUSE_PANEL_PATH` | `house-panel.json` beside the DB (supervised), else in memory | house-panel pin + per-panel last rosters (v1.185.0) |
+| `GRID_READING_PATH` | `grid-reading.json` beside the DB (supervised), else disabled | persisted not-OK grid reading for the declared-grid veto (v1.180.0); `''` disables |
+| `POOL_UNKNOWN_PATH` | `pool-unknown.json` beside the DB (supervised), else disabled | pool-unknown onsets carried across a restart (v1.187.4); `''` disables |
+| `PACK_GHOSTS_PATH` | `pack-ghosts.json` beside the DB (supervised), else disabled | hidden ghost pack slots carried across a restart (v1.187.1); `''` disables |
+| `SHADOW_WITNESS_PATH` | `shadow-witness.json` beside the DB | last SHP2 shadow witness (v1.148.0) |
+| `POLL_SUMMARY_EVERY` | `30` | polls per poll-duration summary line (v1.148.0) |
 
 (`BACKUP_POOL_COHERENCE_SLACK_PCT = 5`, `BACKUP_POOL_HEALTHY_BASELINE_PCT = 30`,
 `BACKUP_POOL_SLEW_MAX_AGE_MS = 10 min` are compile-time constants.)
@@ -1894,8 +2043,8 @@ are cached (~30 min) on the worker.
 | `PORT` | `8787` | HTTP server |
 | `HOST` | `::` | dual-stack bind |
 | `DB_PATH` | `/data/ecoflow.db` (supervised) | recorder DB |
-| `LOG_LEVEL` | `info` | `debug`/`trace` un-gates routine "poll ok" lines |
-| `TELNET_ENABLED` / `TELNET_HOST` / `TELNET_PORT` | on / `::` / `2323` | telnet TUI |
+| `LOG_LEVEL` | `info` | `debug`/`trace` adds the periodic poll-duration summary (p50/p95/max once per `POLL_SUMMARY_EVERY` polls, v1.148.0; there is no line per poll) and the DEBUG channel (e.g. the compact unchanged fleet-status line) |
+| `TELNET_ENABLED` / `TELNET_HOST` / `TELNET_PORT` | `false` (add-on option since v1.7.0; the server alone defaults on only when the env var is unset) / `::` / `2323` | telnet TUI |
 | `TUI_USERNAME` / `TUI_PASSWORD` | empty | console login (empty password = prompt disabled) |
 | `TUI_TRUSTED_ORIGINS` | empty | comma-separated extra origins accepted **verbatim, with no validation** — entries need not be private-range or `.local`; a public HTTPS origin is accepted, which is the point (remote HA Cloud access is the use case). The same set gates the write-auth origin check, the `/ws` and `/console/ws` upgrades, and CORS. Built-in LAN matching is separate and automatic. |
 
@@ -1904,8 +2053,8 @@ are cached (~30 min) on the worker.
 ### Edge cases & honest-null summary
 
 - **No LAN protocol.** Everything is cloud-sourced; resilience = LAN-ping
-  wedge-vs-outage classification + a no-op cloud-presence refresh, never a reflexive
-  reboot.
+  wedge-vs-outage classification + a no-op cloud-presence refresh + a bounded rebuild of
+  the add-on's own MQTT session (§2.15, §2.16), never a reflexive device reboot.
 - **SHP2 is never MQTT-translated** → its freshness clock is protected by *not* bumping
   `lastUpdated` on untranslatable messages; a frozen SHP2 with a failing REST poll will
   still trip `Telemetry stale`.
@@ -1914,8 +2063,10 @@ are cached (~30 min) on the worker.
 - **Coherence + grace-hold + slew guard** together suppress reconnect-blip false SoC
   cascades while never masking a real low near the danger zone (asymmetric drop/rise
   gating).
-- **Spares (Cores 4/5)** are an explicit SN allowlist safety-floor; home cores can never
-  be misclassified as spares and muted.
+- **Spares** are resolved from the SHP2's live connected-source roster, then the persisted
+  last-known roster, with the `SPARE_DPU_SNS` literal only as a floor (a DPU it does not name
+  is never a spare). The literal has been inverted since 2026-08-20 (it names wired Core 5
+  and not bench Core 3), so it is never consulted alone (§12l).
 - **Honest nulls everywhere:** null numeric fields emit `null` → HA `unknown`, never a
   fabricated 0/OFF; `gridSta` null stays null; `backup_reserve_enabled` reads `unknown`
   when the strategy object is absent.
@@ -2033,6 +2184,15 @@ successful poll — a device map left over from before an outage is not sight.
 `classifyPollError` splits `auth` (8521 / "signature is wrong" — on this
 hardware, clock skew, not credentials) from `network` from `other`; sustained
 auth-shaped failure recommends a client rebuild, cooldown-limited.
+**Remediate first (v1.166.0, `blindRemediation.ts`).** When the alert first goes active, the
+MQTT session rebuild fires at once. The alert is held non-annunciating (on screen and in
+`/api/health`, but no voice or push) for at most `BLIND_REMEDIATION_VERIFY_MS` (5 min). If
+telemetry returns inside that window, the alert clears without ever sounding; if the add-on
+is still blind at the deadline, the alert is released as before. When no remedy is
+available — the rolling-24 h heal budget shared with §2.16 is spent, or a heal ran less than
+`BLIND_REMEDIATION_MIN_GAP_MS` (15 min) ago — the alert fires immediately. There is one
+remediation per episode. A cause a rebuild cannot fix therefore alarms up to ~5 min later
+than the stale bound alone would.
 `/api/health` returns `ok:false` **and HTTP 503** while blind, so the HA
 watchdog and any uptime probe see it.
 `/api/health`'s `pollErrorKind` is that class only while a failure is current (blind, or a failed
@@ -2288,8 +2448,12 @@ falls back to the ungated union sum (pre-v1.10.0 behavior). The returned `map`
 feeds `solarModel = buildSolarResponse(fleetFit.map, ghiByEpoch)`.
 
 A separate **restored** model (`restoredSolarModel`) is fit from the ungated
-union *plus* each SHP2-connected-but-live-absent Core's own recorded `pv_total`.
-It is DISPLAY/clipping-only and never feeds the alarm.
+union *plus* each SHP2-connected-but-live-absent Core's own recorded `pv_total`, but
+only while such a Core exists. With every connected Core reporting, `restoredSolarModel`
+IS `solarModel` (v1.177.0): the earlier refit on the ungated union diverged from the
+F11-gated alarm model after any partial-fleet day in the window, so the display and the
+alarm disagreed on a fully reporting fleet. It is DISPLAY/clipping-only and never feeds
+the alarm.
 
 ---
 
@@ -2312,6 +2476,10 @@ battery SoC%. This is the object every downstream forecast/alarm consumer reads.
   (which previously cascaded to 30 s client timeout → retry → HTTP 500).
 - `dayForecastFlight = singleFlight<DayForecast>()` coalesces concurrent
   cold-cache callers onto one computation (v0.69.0).
+- A fresh cached forecast is reused only while its `solarModelSns` (the sorted SNs of the
+  home Cores its solar model was fitted on) equals the current map's home Cores
+  (`dayForecastCacheUsable`, v1.186.5). A forecast fitted on a boot-time map that had not
+  yet seen every Core is rebuilt instead of standing for the full 30-min TTL.
 
 #### Inputs
 
@@ -2398,9 +2566,13 @@ socPct = socWh / fullWh · 100
 ~unity; the AC load is pulled through the inverter at 1/η, so delivering 1 kWh
 costs the pack ~1/η kWh. This makes the pool drain ~6% faster than the raw load
 implies — the safe (shorter-runway) direction. Live-confirmed 2026-07-14: 6.22 kW
-gross drew for 5.88 kW delivered (ratio 0.945 = measured 7-day RTE). `min` with
-`socWh + delta` means this is applied on net-discharge hours; surplus/charging
-hours keep the raw delta, so the sim is never MORE optimistic than pre-v1.26.
+gross drew for 5.88 kW delivered (ratio 0.945, the measured pack-terminal→AC
+discharge-conversion leg; v1.32.0 corrected an earlier reading of it as the 7-day RTE, a
+different quantity that excludes both conversion legs). The η term applies in every hour,
+not only on net-discharge hours: a deficit drains at `load/η`, and a surplus charges by only
+the DC residual `pv − load/η`. Because `pv − load/η ≤ pv − load` for every `pv` and `load`,
+the sim is never MORE optimistic than pre-v1.26. The outer `min(fullWh, …)` / `max(0, …)`
+is only the pool clamp.
 
 `minProjectedSoc` / `minProjectedSocTs` track the lowest SoC over the horizon —
 these feed the forecast-soc-dip narrative and are bounded by the runtime card.
@@ -2410,9 +2582,13 @@ these feed the forecast-soc-dip narrative and are bounded by the runtime card.
 After the alarm loop, a second 24-hour loop re-runs `forecastHourPvW` with the
 `restoredSolarModel` + `restoredPvCurve` (all SHP2-connected Cores including
 cloud-wedged ones) to produce `forecastPvWhNext24Display` /
-`typicalPvWhPerDayDisplay` / `typicalPvCurveWhPerHourDisplay`. Built by SUMMING
-real recorded PV by SN only — never scaled/extrapolated. Equal to the
-reporting-basis fields exactly when no Core is missing. These NEVER feed the
+`typicalPvWhPerDayDisplay` / `typicalPvCurveWhPerHourDisplay`. The restored model and
+curve are built by SUMMING real recorded PV by SN only, never extrapolated. Since v1.177.0
+the display next-24 h sum applies the same `pvBiasFactor` and per-hour `observedMaxPvW·1.05`
+re-clamp as the alarm series, so `forecastPvWhNext24Display` equals `forecastPvWhNext24`
+exactly when no Core is missing (before v1.177.0 it stayed raw and differed by the bias
+factor). `typicalPvWhPerDayDisplay` / `typicalPvCurveWhPerHourDisplay` stay raw, like their
+reporting-basis counterparts. These NEVER feed the
 runway alarm.
 
 #### Structural-incompleteness gate
@@ -2421,7 +2597,8 @@ runway alarm.
 loadCold        = loadRes.spanMs === 0            // no panel_load history (also true when SHP2 absent)
 pvCold          = homeDpus.length > 0 && pvSpan === 0
 socBasisMissing = fullWh == null                  // no SHP2 / incoherent backup pool
-structurallyIncomplete = loadCold || pvCold || socBasisMissing || historyDays <= 0
+basisPending    = homeBasisPending(devices, now)  // v1.187.10: a connected home Core listed online whose first quota has not landed (boot race; only within HOME_BASIS_PENDING_MAX_MS = 10 min of analytics start)
+structurallyIncomplete = loadCold || pvCold || socBasisMissing || basisPending || historyDays <= 0
 ```
 
 Surfaced as `DayForecast.structurallyIncomplete` (v0.77.0) so ha-state/MQTT can
@@ -2445,6 +2622,10 @@ negative-cache TTL.
 | `soiling` | `fleetSoilingFromDevices(...)` (per-Core median drop; null <6 clean days) |
 | `*Display` fields | full-fleet display basis |
 | `homeDpusConnected/Reporting/CoveragePartial` | coverage caveat |
+| `structurallyIncomplete` | basis incomplete (gate below); selects the short negative-cache TTL |
+| `homeBasisPending` | v1.187.10: built while a connected home Core's first reading was pending; publishers send the PV pair and Projected Low SoC as null while it is set |
+| `pvForecastUnavailable` | v1.178.0: the display basis has no PV history at all (`restoredPvSpan === 0`); publishers send null (HA "unknown") instead of a model-less 0 |
+| `solarModelSns` | v1.186.5: sorted SNs of the home Cores the solar model was fitted on; gates cache reuse and forecast-skill scoring |
 
 #### Endpoint
 
@@ -2461,7 +2642,7 @@ over-predicted PV shrinks the runway deficit → latent islanding UNDER-alarm.
 This helper hindcasts the reporting-only `solarModel` against the last 7 days of
 actual home-Core PV and returns a **clamped, guarded scalar** applied to the
 alarm-facing PV before `computeRunway` / `computeMultiDayForecast` /
-`computeProbabilistic` consume it.
+`computeProbabilisticForecast` consume it.
 
 #### Calculation
 
@@ -2492,7 +2673,7 @@ filter); this brings the skill path into line without loosening the bias gate.
 
 ```
 predWh = Σ_h  resp[hod].coeff · ghi(h)          // where coeff != null
-actWh  = Σ_h  mean over SNs of hourly-mean pv_total
+actWh  = Σ_h  Σ_SN  mean(pv_total slice over the hour)   // per-SN hourly means are SUMMED (fleet total); an SN with no sample that hour adds 0
 ```
 
 A day feeds the ratio only if **mature**: `predKwh > 0.5 && actKwh > 0.5 &&
@@ -2524,8 +2705,8 @@ yielding MAE and a `biasFactor`. Powers `/api/forecast-skill`,
 
 #### Calculation
 
-Window `windowDays` (default 7, clamped 1–14 at the route; `/api/confidence`
-requests 30). For each past day `i = windowDays..1`, `dayStart = todayStart − i·1d`:
+Window `windowDays` (default 7, clamped 1–30 at the route since v1.30.0; `/api/confidence`
+and the band calibrator request 30). For each past day `i = windowDays..1`, `dayStart = todayStart − i·1d`:
 
 ```
 predWh = Σ_h  forecast.solarModel.hourly[hod].coeff · ghi(h)     // coeff != null
@@ -2567,14 +2748,14 @@ hours a restart leaves uncaptured use the provider's past-hour estimate, not the
 forecast. A persisted realized row ranks above the cache so that a restart cannot
 re-score a past day. A realized 0 removes the hour. The display report
 (`/api/forecast-skill`, `/api/confidence`, the forecast-bias repair card) passes
-`'realized'`. The PV band calibrator (`probabilisticForecast`) passes `'first-write'`
-explicitly: its skill sets `skillFrac`, `bandSigmaCal`, `bandRealizedCoveragePct`
-(the night-charge basis gate) and `realizedDailyErrHalfFrac` (the multi-day P10/P90
-widening that sizes a buy). A realized basis would cut that widening by about 40% on
-the 2026-09 window. It would also remove the weather-forecast error from a band that
-wraps a day-ahead forecast. Choosing a lead-matched calibrator basis is a policy
-decision. The cache key includes the basis because `/api/confidence` and the
-calibrator both use the 30-day window. Other readers of the stored series now take it
+`'realized'`. Since v1.173.1 the PV band calibrator (`probabilisticForecast`) also passes
+`'realized'` (a policy decision). Its skill sets `skillFrac`, `bandSigmaCal`,
+`bandRealizedCoveragePct` (the night-charge basis gate) and `realizedDailyErrHalfFrac` (the
+multi-day P10/P90 widening that sizes a buy). On the realized basis the errors no longer
+carry the ~3–4-day-lead weather-forecast component, and the widening narrows by about 40%
+on the 2026-09 window. Neither basis is lead-matched to a day-ahead band. No current caller
+uses the `'first-write'` function default. The cache key includes the basis so that a
+default-basis call can never be served a realized-basis score, or the reverse. Other readers of the stored series now take it
 realized-first, falling back to `ghi_wm2` hour by hour where no realized row exists:
 solar-model training, the soiling decomposition and the alarm-model backtest.
 Realized capture began 2026-09-06 17:00 MST, and `past_days=7` cannot backfill
@@ -2593,7 +2774,7 @@ ForecastSkillDay = { date, predictedKwh, actualKwh, errorKwh, errorPct|null,
 
 #### Endpoint
 
-`GET /api/forecast-skill?days=N` (N clamped 1–14, default 7) →
+`GET /api/forecast-skill?days=N` (N clamped 1–30, default 7) →
 `analytics.report('forecastSkill', {days})`, cache 60 s.
 
 ---
@@ -2643,7 +2824,11 @@ points whose r² is noise-dominated.
 
 Wraps the deterministic forecast in a **coherent trajectory ensemble** that
 compounds uncertainty across the horizon, producing P10/P50/P90 PV watts and SoC%
-per hour plus summary event probabilities. Cached `PROB_TTL_MS = 15 min`.
+per hour plus summary event probabilities. Cached `PROB_TTL_MS = 15 min` and reused only for
+the day forecast it was built on (`forecastTs === forecast.generatedAt`, v1.186.5). A band
+built on a structurally incomplete forecast is served but never cached: its skill is
+empty, and caching it would keep the night-charge basis gate failed for 15 min after the
+forecast became complete.
 
 #### Per-hour sigma (raw, then calibrated)
 
@@ -2686,9 +2871,13 @@ must be in the sample). The skill window feeding it is
 can never reach 14 scored days, which left the calibration dormant from
 v1.23.0 to v1.30.0). Shrink-only, floored at 0.4.
 
-**Honest label:** the floor binds in practice (realized/produced ≈ 0.1–0.2 <
-0.4), so this band targets "**≥ 80% coverage, deliberately conservative**" — not
-"= 80%". Known gaps the floor is insurance for (v1.31.0 review): the calibrator's errors come from a *current-model hindcast against stored `ghi_wm2`*, so they (a) are rewritten when the model re-learns, (b) — **corrected v1.156.0; this used to say they omit the weather-forecast component** — include a multi-day weather-forecast component, because stored `ghi_wm2` is first-write ~3–4-day-lead forecast irradiance rather than realized (see the weather source section) — and v1.173.0 deliberately keeps the calibrator on that basis (see §4), (c) apply `pvBiasFactor` as
+**Honest label:** the calibration is shrink-only (`min(1, …)`) and floored at 0.4, so
+the band targets "**≥ 80% coverage, deliberately conservative**" (not "= 80%") only while
+the calibrator is `shrunk` or `floor-pinned`. When realized error meets or exceeds the
+produced half-width, the calibrator is `saturated`: the band is too narrow and the
+calibrator cannot widen it, so coverage can fall below 80%. `bandSigmaCalBasis` (v1.149.0)
+publishes which of the five states (`operator-override` / `shrunk` / `floor-pinned` /
+`saturated` / `uncalibrated`) produced `bandSigmaCal`. Known gaps the floor is insurance for (v1.31.0 review): the calibrator's errors come from a *current-model hindcast against stored irradiance*, so they (a) are rewritten when the model re-learns, (b) since v1.173.1 score against realized-first irradiance (`ghi_wm2_realized`, falling back hour by hour to first-write `ghi_wm2`): they carry none of the weather-forecast error that a day-ahead band's real error contains, except on fallback hours, which still carry a ~3–4-day-lead forecast component (see §3.4, Irradiance basis, and §3.8), (c) apply `pvBiasFactor` as
 a plain daily multiply while publication re-clamps per-hour at the physical
 ceiling — under an *under-prediction* regime (`pvBiasFactor > 1`, ceiling
 pinned) the calibrator's basis sits above the published series and its errors
@@ -2704,9 +2893,11 @@ accumulates the *issued* forecasts so a future release can score genuinely
 out-of-sample; the published `calScoredDays` + `bandRealizedCoveragePct`
 diagnostics make the coverage claim continuously measurable — a reading
 trending toward 80% is the signal to revisit the floor, below it is a
-regression. **Display + MPC-recommend only; NOT an alarm input** (verified by
-exhaustive consumer census, v1.30.0 audit — wiring any field into
-mqttDiscovery/alerts/runwayAlarm requires re-auditing the calibration).
+regression. **NOT an alarm input** (verified by exhaustive consumer census, v1.30.0 audit; wiring any
+field into mqttDiscovery/alerts/runwayAlarm requires re-auditing the calibration).
+Consumers: the display, the recommend-only MPC planner, and the night-charge advisor
+(§15), which sizes a charge from the per-hour P10 PV, `realizedDailyErrHalfFrac`
+(multi-day widening) and `bandRealizedCoveragePct` (basis gate).
 
 #### PV band per hour
 
@@ -2783,16 +2974,17 @@ A non-finite PV/load hour sets `windowUnscored` and nulls the min/max summaries
 
 ```ts
 { generatedAt, hours: ForecastBand[], pAboveReservePct|null, pFullCharge|null,
-  uncertaintyKwhStdev, bandSigmaCal?, realizedDailyErrHalfFrac?,
-  calScoredDays?, bandRealizedCoveragePct? }   // v1.31.0 coverage diagnostics
+  uncertaintyKwhStdev, bandSigmaCal?, bandSigmaCalBasis?,   // v1.149.0: which of five states produced bandSigmaCal
+  realizedDailyErrHalfFrac?, calScoredDays?, bandRealizedCoveragePct?,   // v1.31.0 coverage diagnostics
+  solarModelSns? }   // v1.187.0: Cores the day forecast's solar model was fitted on (null = unknown)
 ForecastBand = { ts, p10W, p50W, p90W, p10SocPct|null, p50SocPct|null, p90SocPct|null }
 ```
 
 #### Endpoint
 
 `GET /api/forecast/probabilistic` → `analytics.report('probabilisticForecast')`,
-cache 60 s. Also consumed by the MPC dispatch planner (index.ts ~1600) for a
-pessimistic P10 PV envelope.
+cache 60 s. Also consumed by the recommend-only MPC planner (`/api/dispatch/recommend`)
+for a pessimistic P10 PV envelope, and by the night-charge advisor (§15).
 
 ---
 
@@ -2801,7 +2993,9 @@ pessimistic P10 PV envelope.
 #### What + why
 
 Extends the 24 h horizon to `horizonDays` (default 3, clamped 1–7 at route) with
-per-day rollups. Cached `MULTI_DAY_TTL_MS = 30 min`.
+per-day rollups. Cached `MULTI_DAY_TTL_MS = 30 min`, keyed by `horizonDays` (v1.33.0:
+otherwise a `days=3` UI call answered the night-charge planner's `days=4` request and
+truncated its weekend lookahead).
 
 #### Calculation
 
@@ -2813,15 +3007,17 @@ verbatim (bias-corrected PV + weekday/EV/trim-aware load) via `forecastByHourEpo
 Hours **beyond** the window:
 
 ```
-radiationWm2 = wx ? wx.radiationWm2 : climoRadiationWm2(hod)   // per-hour-of-day mean of observed GHI
+radiationWm2 = wx ? wx.radiationWm2 : climoRadiationWm2(hod)   // per-hour-of-day mean of the live Open-Meteo cache's non-zero radiation (past and forecast hours)
 pv = min(min(resp.coeff·rad, observedMaxPvW·1.05)·pvBiasFactor, ceilW)   // same bias + re-clamp
 load = useSplitLoad ? (weekend?weekend[hod]:weekday[hod]) : (loadByHod[hod] ?? fallbackLoad)
        + evLoad
 ```
 
-The radiation climatology (v0.10.4) is critical — Open-Meteo's hourly radiation
-reaches only ~48 h, so day-3 hours had no `wx` → PV computed 0 → a phantom
-"battery dead in 3 days" panic. `pvBiasFactor` is reused from the day-ahead
+The radiation climatology (v0.10.4) prevents a horizon cliff: with the 2-day forecast
+fetched at the time, day-3 hours had no `wx` → PV computed 0 → a phantom "battery dead in
+3 days" panic. Since v1.35.0 the fetch requests `forecast_days=4` (UTC days), so real
+forecast radiation covers days 3–4 and the climatology fills only hours past the end of
+the cached forecast. `pvBiasFactor` is reused from the day-ahead
 forecast (`forecast.pvBiasFactor ?? 1`).
 
 SoC integrated with the same v1.26.0 DC-bus balance
@@ -2831,7 +3027,8 @@ SoC integrated with the same v1.26.0 DC-bus balance
 
 ```ts
 { generatedAt, days: DayRollup[] }
-DayRollup = { date, pvKwh, loadKwh, minProjectedSoc|null, minProjectedSocTs|null }
+DayRollup = { date, pvKwh, loadKwh, minProjectedSoc|null, minProjectedSocTs|null,
+              hours: { ts, pvW, loadW, socPct|null }[] }   // v1.34.0: per-hour trajectory for the night-charge advisor; day 0 covers future hours only
 ```
 
 #### Endpoint
@@ -2853,7 +3050,9 @@ https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}
 ```
 
 `past_days=7` (v0.13.1) so one fetch backfills a week of irradiance into the
-recorder (`recordWeatherGhi` on `/api/weather/ensemble`), unblocking
+recorder (`recordWeatherGhi`, called by the 45-minute `ghiPersistTick` in `index.ts`
+(v0.13.3; skipped under critical host pressure) and on each `/api/weather/ensemble`
+request), unblocking
 forecast-skill days 4–7 and the soiling estimator beyond the in-memory window.
 No timezone is requested, so Open-Meteo returns GMT times (`utc_offset_seconds` = 0) and `forecast_days` / `past_days` count UTC days; the offset is still applied if one is ever sent.
 On fetch failure it returns the stale cache ("better than nothing").
@@ -2873,9 +3072,11 @@ stored explicitly (no same-as-previous collapse), revised in place by later fetc
 and never from a value the provider did not send (flagged `radiationMissing` at
 parse time; the stand-in 0 still reaches the existing consumers exactly as before).
 Stage 1 read nothing from it. Stage 2 (v1.173.0) switches training, soiling, the
-display skill report and the backtest to it, realized-first. The band calibrator stays
-on `ghi_wm2`, because switching its basis moves the night-charge basis gate and the
-P10 band that sizes a supervised reserve write (see §4, Irradiance basis). `past_days=7` is
+display skill report and the backtest to it, realized-first. The PV bias correction
+hindcasts on the training map, so it is realized-first too. Since v1.173.1 the band
+calibrator also reads it realized-first. This was a policy decision, because the
+calibrator's basis moves the night-charge basis gate and the P10 band that sizes a
+supervised reserve write (see §3.4, Irradiance basis). `past_days=7` is
 the capture horizon: an hour not captured within about seven UTC days cannot be
 recovered from this endpoint.
 
@@ -2958,11 +3159,14 @@ Hard-coded (non-env) constants: `DAYLIGHT_GHI=20`, `MIN_RESPONSE_PAIRS=2`,
 - **Coherent ensemble compounds uncertainty**; a NaN/non-finite hour skips the
   step (state carries, band recovers) and nulls the safety-facing min/max
   summaries rather than scoring only the clean prefix.
-- **Multi-day radiation climatology** prevents day-3 PV collapsing to 0 (phantom
-  depletion panic) once Open-Meteo's ~48 h radiation window runs out.
+- **Multi-day radiation climatology** prevents PV collapsing to 0 (phantom
+  depletion panic) for hours past the end of Open-Meteo's cached forecast
+  (`forecast_days=4` UTC days since v1.35.0).
 - **Fleet soiling** uses the per-Core median drop (`fleetSoilingFromDevices`),
   immune to the fleet-sum coverage-deflation artifact that once produced a false
-  ~35% soiling alarm; null until ≥6 clean days AND ≥2 covered Cores.
+  ~35% soiling alarm; null until ≥2 home Cores each have a valid per-Core estimate (≥6 clear days of ≥3 clear
+  hours each); well-covered (`recentCovered`) Cores are preferred, and all valid estimates
+  are pooled only when fewer than two are well-covered.
 
 
 ---
@@ -3307,11 +3511,11 @@ applies everywhere.
 
 #### TRACE
 
-- **Poll loop** (`index.ts` ~L1761, `restTrackerTick` on `POLL_INTERVAL_MS`):
+- **Poll loop** (`restTrackerTick` in `index.ts`, every `POLL_INTERVAL_MS`; the tick is skipped while host pressure is critical, `degradedMode()`):
   for every online DPU pack, `observePackRest(packRestKey(d.sn, pk),
   packCurrentAmps(pk.outputWatts, pk.inputWatts, pk.packVoltageMv ?? pk.adBatVoltageMv), now)`,
   then `retainPacks(keys)`.
-- **Endpoint** (`/api/physics/lfp-soc`, `index.ts` ~L1511): for every online DPU
+- **Endpoint** (`/api/physics/lfp-soc` in `index.ts`): for every online DPU
   pack, build `LfpAnalysisInputs` (voltage, reported SoC, cell voltages, derived
   current, and `lastNonRestingAtMs(packRestKey(...))`) → `analyzePackLfp(...)`.
 - **Out:** cached 30 s.
@@ -3360,7 +3564,8 @@ applies everywhere.
 
 #### WHAT + why
 
-The operator has ~25 packs (5 DPUs × 5 packs). Estimating each pack's SoH **in
+Each DPU carries up to 5 packs, and the fit takes every pack of every online DPU that
+reports a SoH (spares included). Estimating each pack's SoH **in
 isolation** is noisy; **fully pooling** them gives a precise fleet mean but
 erases individual signal. The right answer is **partial pooling** — every pack
 "borrows strength" from its siblings, drifting toward the group mean when its own
@@ -3396,8 +3601,8 @@ posterior_mean = (prior_mean · prior_precision + y · obs_precision)
   sigma = max(0.3, 3.0 − min(2.5, cycles / 500))
   ```
 
-  A 0-cycle pack → σ = 3.0; a ≥1250-cycle pack → σ floors at 0.5 (then the
-  0.3 floor). Packs with `actSoh == null && soh == null` are skipped.
+  A 0-cycle pack → σ = 3.0; a ≥1250-cycle pack → σ = 0.5. The outer
+  `max(0.3, …)` never binds, because `min(2.5, …)` already stops σ at 0.5. Packs with `actSoh == null && soh == null` are skipped.
 
 #### THE CALCULATION (`fitHierarchical`)
 
@@ -3462,7 +3667,7 @@ siblings — the exact thing worth flagging.
 
 #### TRACE
 
-- **In:** `/api/models/hierarchical-pack-soh` (`index.ts` ~L1537) iterates online
+- **In:** `/api/models/hierarchical-pack-soh` (in `index.ts`) iterates online
   DPU packs, building `HBPackObs` from `actSoh/soh` + cycle-derived σ.
 - **Compute:** `fitHierarchical(obs)` → `findOutliers(fit, 2.0)`.
 - **Out:** cached **300 s**.
@@ -3498,8 +3703,10 @@ winsorization fraction are compile-time.
 #### EDGE CASES / guards / honest-null
 
 - **No observations** → empty fit (`packs: []`, `fleetMean: 0`, σ's 0).
-- **Single-pack DPU / single DPU** → within-group σ falls back to `1` (can't
-  estimate spread from one point).
+- **No DPU with ≥2 packs** → `σ_withinDpu` falls back to `1`; **a single DPU** →
+  `σ_withinFleet` falls back to `1` (a spread cannot be estimated from one point). A
+  single-pack DPU alongside multi-pack DPUs simply contributes no squared deviation to
+  `σ_withinDpu`.
 - **σ = 0 observation** → clamped to a 1e-3 floor (avoids infinite precision
   pinning), and all precisions floor divisors at `1e-9`.
 - **Null SoH packs skipped**, never fabricated to 0.
@@ -3560,8 +3767,11 @@ more informative about the *slope* β than a low-irradiance one.)
 
 **`computeBayesianSolarModel(devices, recorder)`:**
 
-1. Pull weather (GHI series) and build `wxByHourEpoch`. Return empty if no
-   weather.
+1. Pull the live weather cache (`getWeather()`) and build `wxByHourEpoch`, keyed by the
+   recorder hour each value COVERS: provider label − 1 h (`RADIATION_LABEL_LAG_HOURS = 1`,
+   v1.186.2), because Open-Meteo's hourly `shortwave_radiation` is the average of the
+   preceding hour. Curtailment pairs hours the same way. Return empty if there are no DPUs
+   or no weather.
 2. Build **fleet PV per hour-epoch** from the recorder, summed over the
    **home-connected DPUs only** (`homeConnectedDpus`) — a spare's bench-charge PV
    would bias the prior away from what the connected arrays actually produce (v0.9.76).
@@ -3585,13 +3795,15 @@ DAYLIGHT_GHI     = 20 W/m²          // shared night gate
 
 #### TRACE
 
-- **In:** recorder PV history (`pv_total` per home DPU) + weather GHI
-  (`getWeather()`), 60-day window.
+- **In:** recorder PV history (`pv_total` per home DPU, 60-day query) + GHI from the
+  live weather cache only (`getWeather()`, `past_days=7`; the recorder's GHI series is not
+  read), so the posterior, recomputed from the prior on each build, folds in at most the
+  ~7 past days the cache covers.
 - **Compute:** `computeBayesianSolarModel` (registered as the `bayesianSolar`
   report in `reports.ts`: `bayesianSolar: (ctx) => computeBayesianSolarModel(...)`).
 - **Out:** `GET /api/forecast/bayesian` → `analytics.report('bayesianSolar')`,
   HTTP-cached 60 s (module-level cache 30 min). Also consumed internally by the
-  curtailment report (`analytics.ts` ~L6563) to derive `pvExpectedW` /
+  curtailment report (`computeCurtailment` in `analytics.ts`) to derive `pvExpectedW` /
   `bayesianSamples`.
 
 #### OUTPUT shape (`/api/forecast/bayesian`)
@@ -3617,7 +3829,9 @@ DAYLIGHT_GHI     = 20 W/m²          // shared night gate
 
 #### CONFIG knobs + defaults
 
-No env knobs; all four `BAYES_*` constants and `DAYLIGHT_GHI` are compile-time.
+No env knobs; all five `BAYES_*` constants (`BAYES_TTL_MS`, `BAYES_HISTORY_MS`,
+`BAYES_PRIOR_MU`, `BAYES_PRIOR_TAU2`, `BAYES_OBS_SIGMA2`) and `DAYLIGHT_GHI` are
+compile-time.
 `BAYES_OBS_SIGMA2` is *derived* from `PHOENIX_SITE.pNamplate`, so it automatically
 tracks the site nameplate.
 
@@ -3655,7 +3869,7 @@ preconditions (sun up, pack rested, ≥2 samples, non-null SoH) are actually met
 
 ## 5. Runway, Depletion & Battery-SoC Alarms (safety-critical)
 
-This cluster is the life-safety heart of the add-on: the engines that decide **when the home is at risk of losing power** and **when to make an audible alarm**. Four cooperating modules are documented here:
+This cluster is the life-safety heart of the add-on: the engines that decide **when the home is at risk of losing power** and **when to make an audible alarm**. Six cooperating modules are documented here:
 
 | Module | File | Role |
 | --- | --- | --- |
@@ -3677,14 +3891,14 @@ Two overarching **safety invariants** govern the whole cluster and are repeated 
 
 #### 1.1 What it does + why
 
-`computeRunway` (analytics.ts ~L2973) projects the SHP2 backup pool forward hour-by-hour over a 24 h horizon and reports **how many hours until the pool reaches its reserve floor (`hoursToReserve`) and until it hits empty (`hoursToEmpty`)**, given the recent load and the forecast solar. This is the "act now so we last until the sun comes back" signal that the SoC-threshold ladder (§3) cannot give — the ladder only fires once the pool has *already* fallen to a threshold, whereas the runway sim fires while the pool is still healthy but the (PV − load) trajectory is headed below reserve before solar recovers.
+`computeRunway` (analytics.ts) projects the SHP2 backup pool forward hour-by-hour over a 24 h horizon and reports **how many hours until the pool reaches its reserve floor (`hoursToReserve`) and until it hits empty (`hoursToEmpty`)**, given the recent load and the forecast solar. This is the "act now so we last until the sun comes back" signal that the SoC-threshold ladder (§3) cannot give — the ladder only fires once the pool has *already* fallen to a threshold, whereas the runway sim fires while the pool is still healthy but the (PV − load) trajectory is headed below reserve before solar recovers.
 
 #### 1.2 Inputs
 
 | Input | Source | Notes |
 | --- | --- | --- |
 | `backupRemainWh`, `backupFullCapWh` | SHP2 projection (`backupIncreInfo` aggregate) | Pool remaining / full capacity, Wh → kWh |
-| `backupReserveSoc` | SHP2 projection | Reserve floor %, **default 15** if null |
+| `getOwnerReserveFloorPct()` → `backupReserveSoc` | Owner floor (night-charge actuator), else SHP2 projection | Reserve floor %: the owner's floor first (v1.115.0, §12h), else the live `backupReserveSoc`, else **15** |
 | `panel_load` (last hour) | Recorder series on `shp2.sn` | Averaged over `RUNWAY_LOAD_WINDOW_MS` = 60 min |
 | `forecast.hours[h].forecastPvW` | `getDayForecast` (reporting-only `solarModel`) | Per-hour PV, first 24 h |
 | `forecast.hours[h].forecastLoadW` | `getDayForecast` diurnal/day-of-week load curve | Per-hour load |
@@ -3700,7 +3914,7 @@ Two overarching **safety invariants** govern the whole cluster and are repeated 
 ```
 backupRemainingKwh = backupRemainWh / 1000
 backupFullKwh      = backupFullCapWh / 1000
-reservePct         = backupReserveSoc ?? 15
+reservePct         = getOwnerReserveFloorPct() ?? backupReserveSoc ?? 15   # v1.115.0 — the owner's floor, not the night-charge hold
 backupReserveKwh   = backupFullKwh * reservePct / 100
 ```
 If the SHP2 or either capacity field is missing → early return `emptyRunway(..., 'SHP2 backup-pool capacity not yet reported')` (all hours null, `unavailable` set).
@@ -3708,7 +3922,7 @@ If the SHP2 or either capacity field is missing → early return `emptyRunway(..
 **Step 2 — recent load anchor.** Average `panel_load` over the last hour. If fewer than 2 recorded samples exist (sparse post-restart window), fall back in order to:
 1. Live SHP2 panel load = Σ circuit watts (available from MQTT immediately),
 2. a single recent recorded sample,
-3. the last good `runwayCache.value.recentLoadWatts`,
+3. the last good `runwayCache.value.recentLoadWatts`, but only while the last real panel reading (a recorded `panel_load` row or a live channel sum) is within `RUNWAY_LOAD_CARRY_MAX_MS` = 2 h (v1.175.0). The projection's `recentLoadBasis` names the source used (`hour-mean` | `live` | `single-sample` | `carried`),
 else early-return `emptyRunway(..., 'panel-load history insufficient — wait a few minutes')`. This keeps the sensor numeric instead of flapping to HA `unknown`/`unavailable` on an islanded home.
 
 **Step 3 — build the per-hour PV and load arrays** (24 entries each). PV = `forecastPvW/1000`. Load = `max(0, forecastLoadW − predictedEvLoadW)/1000`, falling back to the trailing average when a forecast hour carries no modelled load. Arrays are padded to 24 h (PV→0, load→trailing average).
@@ -3739,11 +3953,13 @@ if hoursToEmpty==null and stateKwh > 0 and nextState <= 0:
     frac = delta<0 ? stateKwh/(−delta) : 1
     hoursToEmpty = h + clamp(frac, 0, 1)
 
-stateKwh = max(0, nextState)
+stateKwh = min(backupFullKwh, max(0, nextState))   # v1.32.0 — capped at capacity; the cap can only shorten runway
 ```
 `totalForecastPv` and `totalLoad` accumulate the **raw** (reporting-basis) PV/load, so the reported `forecastPvUsedKwh` / `loadHorizonKwh` stay on the reporting basis even though the drain uses the η-corrected delta.
 
-**Step 7 — empty hysteresis** (see §1.6). `pubHoursToEmpty = applyEmptyHysteresis(hoursToEmpty, runwayEmptyState)`.
+**Step 7 — empty hysteresis** (see §1.6). `pubHoursToEmpty = basisPending ? hoursToEmpty : applyEmptyHysteresis(hoursToEmpty, runwayEmptyState)`. A compute made while a home Core's first reading is pending (`homeBasisPending`, v1.187.10) neither reads nor arms the latch, is not cached, and is marked `basisPending: true`. Its figures still reach the alarm, but the publishers withhold them (§1.8).
+
+**Step 8 — ordering repair (v1.129.0, `coherentRunwayPair`).** Above the floor the pool drains through the reserve on its way to empty, so a published `hoursToEmpty` earlier than `hoursToReserve` is impossible. In that case the reserve crossing is pulled back to the empty crossing (the repair only ever shortens) and the projection carries `runwayPairClamped: true`. At or below the floor the pair is left as computed.
 
 #### 1.4 Key constants
 
@@ -3758,7 +3974,7 @@ stateKwh = max(0, nextState)
 | `RUNWAY_EMPTY_CLEAR_SAMPLES` | 3 (default) | Empty-hysteresis latch length; env `RUNWAY_EMPTY_CLEAR_SAMPLES` |
 | `RUNWAY_NO_DEPLETION_SENTINEL_H` | 999 | Healthy-but-no-depletion publish sentinel |
 
-`RUNWAY_DISCHARGE_EFFICIENCY` default 0.94 is marginally conservative vs. the measured ~0.945 7-day RTE. It is clamped to `[0.80, 1.0]` so a bad env can never lengthen runway beyond the true (unity) reading or collapse it to an untrusted extreme. Because the η correction is applied to the deficit only and `delta ≤` the pre-v1.26 unity delta for all pv,load, **runway can only ever shorten-or-equal** — preserving the `runwayPvBasisGuard` "monotonic in forecastPvW" invariant.
+`RUNWAY_DISCHARGE_EFFICIENCY` default 0.94 is marginally conservative vs. the measured ~0.945 pack-terminal→AC discharge-conversion leg (6.22 kW drawn for 5.88 kW delivered). That figure only numerically coincided with a 7-day pack-plane RTE reading, which is a different quantity (v1.32.0). It is clamped to `[0.80, 1.0]` so a bad env can never lengthen runway beyond the true (unity) reading or collapse it to an untrusted extreme. Because η divides the load term in every hour (surplus hours included), `delta ≤` the pre-v1.26 unity delta for all pv,load, **runway can only ever shorten-or-equal** — preserving the `runwayPvBasisGuard` "monotonic in forecastPvW" invariant.
 
 #### 1.5 The PV-basis and predicted-EV safety invariants
 
@@ -3796,7 +4012,7 @@ It **only damps the optimistic direction** (finite→none): a real depletion (no
 
 #### 1.8 Outputs + endpoint
 
-`RunwayProjection` shape (analytics.ts ~L2878):
+`RunwayProjection` shape (analytics.ts). Besides the fields below, it carries `recentLoadBasis` (see Step 2), `troughKwh` / `troughAtMs` / `endKwh` (the islanded trajectory's minimum and end; reporting only, v1.177.0), `runwayPairClamped?` (Step 8, v1.129.0) and `basisPending?` (Step 7, v1.187.10):
 ```
 {
   generatedAt, backupRemainingKwh, backupReserveKwh, backupFullKwh,
@@ -3807,8 +4023,8 @@ It **only damps the optimistic direction** (finite→none): a real depletion (no
 
 | Sink | Where |
 | --- | --- |
-| REST | `GET /api/runway` → `analytics.report('runway')`, 30 s HTTP cache (index.ts L614) |
-| MQTT | `runway_to_reserve_hours` / `runway_to_empty_hours` in buildState (index.ts L1266, mqttDiscovery.ts L744) via `runwayHoursForPublish` |
+| REST | `GET /api/runway` → `analytics.report('runway')`, with two fields attached at the route: `belowReserveFloor` (null when undeterminable) and the live `grid` backstop (`liveGridBackstop`). 30 s HTTP cache (index.ts) |
+| MQTT | `runway_to_reserve_hours` / `runway_to_empty_hours` in `/api/ha-state` (index.ts) and the MQTT state payload (`buildState`, mqttDiscovery.ts), via `runwayHoursForPublish`. Both are null when no runway report was served that cycle (v1.186.0), and are withheld (null) while the projection is `basisPending` (`publishReadiness` `runwayBasis`, v1.187.10, which also governs `runway_recent_load_watts` and `runway_forecast_pv_used_kwh`) |
 | HA sensors | `sensor.ecoflow_runway_to_reserve` (`ecoflow_runway_to_reserve_hours`, unit h, mdi:timer-sand); `sensor.ecoflow_runway_to_empty` (`ecoflow_runway_to_empty_hours`, unit h, mdi:timer-off) |
 | Audible alarm | Consumed by `runwayAlarm.update` on a 2-min tick (§2) |
 | Load-shed advisor | Consumed by `loadShedAdvisor.update` (§5) |
@@ -3847,7 +4063,7 @@ EMPTY escalates harder than RESERVE because empty is the harder failure. `unavai
 
 #### 2.3 Grid presence — how it re-escalates islanded vs grid-backed
 
-The `grid?: GridContext` argument (`{present, backstopping}`) is resolved live by `liveGridBackstop(devices)` (§4) and passed in on every tick. **Omitted ⇒ treated as off-grid** (the safe default: floor stays critical). The distinction that matters is `backstopping` (grid actively carrying the load *now*), not merely `present` — a grid *declared* present but not carrying (pool still net-discharging) keeps the full ladder so a genuine fast depletion still annunciates.
+The `grid?: GridContext` argument (`{present, backstopping}`) is resolved live by `livePoolGridBackstop(devices, houseSnOf(devices))` (§4) and passed in on every tick. That is the house pool's own verdict on a multi-panel plant, and identical to `liveGridBackstop(devices)` with one panel. **Omitted ⇒ treated as off-grid** (the safe default: floor stays critical). The distinction that matters is `backstopping` (grid actively carrying the load *now*), not merely `present` — a grid *declared* present but not carrying (pool still net-discharging) keeps the full ladder so a genuine fast depletion still annunciates.
 
 #### 2.4 The alarm state machine — `createRunwayAlarm`
 
@@ -3870,7 +4086,12 @@ State (`{announcedPriority, lastAnnouncedAt, calmerSinceMs}`) is persisted atomi
 
 #### 2.6 Reaching the audible path (index.ts)
 
-A 2-min `setInterval` (index.ts L2050) runs: refresh the grid entity (TTL-gated) → `r = analytics.report('runway')` → `runwayGridForTick = liveGridBackstop(store.get().devices)` (assigned synchronously *before* update so `onTrigger` reads the same grid state the classifier saw) → `runwayAlarm.update(r, runwayGridForTick)`.
+A 2-min `setInterval` (index.ts) runs these steps in order:
+1. Refresh the HA state cache (TTL-gated) when a grid-presence or host-power entity is configured.
+2. In its own try block, update every secondary panel's drain-measured runway alarm (`panelRunway.ts`, v1.185.0, "at the current drain").
+3. `r = analytics.report('runway')`.
+4. `runwayGridForTick = livePoolGridBackstop(store.get().devices, houseSnOf(store.get().devices))` (assigned synchronously *before* update so `onTrigger` reads the same grid state the classifier saw).
+5. `runwayAlarm.update(r, runwayGridForTick)`.
 
 `onTrigger(priority, message, messageEs)`:
 1. `if (!isPriorityEnabled(priority)) return;` — honours the per-priority Alert-Settings annunciation toggles.
@@ -3935,7 +4156,7 @@ The guard **only** fires from a *fresh, healthy* baseline: a real deep discharge
 
 #### 3.7 SHP2-blind failover (index.ts, v1.8.0/F3)
 
-The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the 30-day review found blackouts (42.2 h, 25.8 h) in which the pool crossed 50/40/30/20 % while the ladder sat dark for 17.8–20.8 h. When `backupBatPercent` is null, index.ts falls back to `homeFleetMeanSoc(devices)` (the pool *is* those batteries). It returns null only when no Core is reporting, where `update(null)` is a safe no-op and the reserve-blind warning + offline alerts are the signal.
+The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the 30-day review found blackouts (42.2 h, 25.8 h) in which the pool crossed 50/40/30/20 % while the ladder sat dark for 17.8–20.8 h. When `backupBatPercent` is null, index.ts falls back to `housePoolFallbackSoc(devices, lastKnownRoster)` (the pool *is* those batteries). With one panel that is `homeFleetMeanSoc`, whose membership comes from the live roster, then the persisted last-known roster, then the `SPARE_DPU_SNS` literal (v1.117.0). On a two-panel plant it is the house panel's own Cores only (v1.185.0). It returns null only when no Core is reporting, where `update(null)` is a safe no-op and the reserve-blind warning + offline alerts are the signal.
 
 **v1.92.0 — pool membership is resolved from the SHP2's own connected-source roster, not from the static `SPARE_DPU_SNS` literal.** `isHomePoolDpu(sn, connectedOrDevices)` returns `connected.has(sn)` when the roster is known and falls back to `!SPARE_DPU_SNS.has(sn)` only when it is empty (the panel itself cloud-dark), which errs toward *including* a device. Motivating incident: a physical reconfiguration moved an allowlisted bench unit onto a panel slot and a home Core off it, inverting the literal. The allowlist-only filter then averaged the bench unit and dropped a live pool member — and because a bench unit charges independently, the reported mean acquired a hard floor of `benchSoc / 3`. Measured with the bench unit at 63 %, the fallback could not read below 21 %, so the 15/10/8/4/2 % rungs — the entire critical half of the ladder — were unreachable during exactly the SHP2-blind window the fallback exists to cover. Guards are mutation-proven load-bearing (`scripts/mutate-pool-membership.mjs`, 6/6), including an exemplar that reproduces the shipped defect verbatim. The same resolver now gates the reconnect auto-audit's device set (§12e), which previously exempted a live home Core while watching a bench unit.
 
@@ -3951,7 +4172,7 @@ The resolver was built (v0.23.0) on the premise that the SHP2 cloud telemetry ex
 
 | Signal | Function | Threshold |
 | --- | --- | --- |
-| DPU AC-in import | `computeGridImportWatts` | `GRID_IMPORT_WATTS` = 5 W; scoped **strictly** to SHP2 source SNs; **0 if source identity unknown** (a wall-charging spare must not masquerade as house grid); only Cores whose content clock (`lastTelemetryAtMs`) is within `SHP2_READBACK_STALE_MS` (v1.179.0) |
+| DPU AC-in import | `computeGridImportWatts` | `GRID_IMPORT_WATTS` = 5 W; scoped **strictly** to SHP2 source SNs; **0 if source identity unknown** (a wall-charging spare must not masquerade as house grid); only Cores whose content-change clock (`contentChangedAtMs`, v1.181.0; `lastTelemetryAtMs` in v1.179.0) is within `SHP2_READBACK_STALE_MS`. The sources of any panel freshly reporting no grid are dropped (v1.181.0, applied per panel since v1.185.0) |
 | SHP2 main-line grid | `computeHomeGridWatts` (`wattInfo.gridWatt`) | `HOME_GRID_IMPORT_WATTS` = 25 W; **0 unless a fresh readback** (`shp2ReadbackFresh`, v1.179.0; offline/shadowed only before — a frozen sample must not fabricate presence) |
 | SHP2 own grid flag | `computeShp2GridConnected` (`pd303_mc.masterIncreInfo.gridSta`, value-1-only) | true=Grid OK / false=islanded / null=unknown; **null unless a fresh readback** (`shp2ReadbackFresh`: online, a REST quota within `SHP2_READBACK_STALE_MS` = 5 min, not shadowed — v1.179.0; online-and-unshadowed only before); burst-gap immune |
 | HA entity | `interpretGridEntity(GRID_PRESENCE_ENTITY)` | on/true/home/…→present; numeric voltage >50→present; unavailable/unknown→null |
@@ -3961,7 +4182,7 @@ Derived flags:
 ```
 importLive = importWatts ≥ 5 OR homeGridWatts ≥ 25          # positive, unambiguous
 declaredRaw = entity configured ? (entityPresent === true) : gridAvailableFallback
-declared    = declaredRaw AND NOT ((panel.projection.gridConnected ?? panel.lastGridReading.connected) === false)   # v1.178.0 veto: the LAST reading
+declared    = declaredRaw AND NOT gridMeasuredAbsent   # v1.178.0 veto: ANY panel's LAST not-OK reading (panelVetoes; v1.185.0 all panels by identity; a reading at or before a v1.184.0 operator clear does not count), or the persisted reading when no panel device exists (v1.180.0)
 present     = importLive OR declared OR shp2GridConnected===true
 ```
 
@@ -4097,7 +4318,7 @@ Away from the floor, a flow-less declaration remains a valid backstop (grid avai
 
 #### 4.4 Staleness fail-safe (`liveGridBackstop`)
 
-`liveGridBackstop(devices)` reads env + HA cache. A configured grid entity older than `GRID_ENTITY_MAX_AGE_MS` = 120 s (`getCacheAgeMs` since the last *successful* fetch) is treated as **UNKNOWN, not its frozen value** — when HA is unreachable (Pi reboot / network partition / token expiry, exactly when the grid may be down), replaying a stale "on" is the one false "grid is fine" the safety posture forbids. `atReserveFloor` is derived from `socPct = backupRemainWh/backupFullCapWh × 100 ≤ backupReserveSoc + 1.5` (the 1.5 % slack absorbs SoC quantisation jitter).
+`liveGridBackstop(devices)` reads env + HA cache. A configured grid entity older than `GRID_ENTITY_MAX_AGE_MS` = 120 s (`getCacheAgeMs` since the last *successful* fetch) is treated as **UNKNOWN, not its frozen value** — when HA is unreachable (Pi reboot / network partition / token expiry, exactly when the grid may be down), replaying a stale "on" is the one false "grid is fine" the safety posture forbids. `atReserveFloor` is true when any panel's `socPct = backupRemainWh/backupFullCapWh × 100 ≤ backupReserveSoc + floorSlackPct()` (`GRID_FLOOR_SLACK_PCT`, default 1.5, see §4.3). The slack absorbs SoC quantisation jitter.
 
 #### 4.5 Grid-aware priority downgrade + SoC dispatch (`socGridDispatch.ts`)
 
@@ -4145,9 +4366,9 @@ The `/η` on the shed term is essential: since v1.26 `hours` is the η-corrected
 
 - REST: `GET /api/load-shedding/status` → `{enabled, mode:'advisory', candidatesConfigured, haStateCacheAgeMs, advisory}`.
 - MQTT (via `advisoryStateFields`): `load_shed_recommended` (bool), `load_shed_recommended_count`, `load_shed_recommended_watts`, `runway_to_reserve_if_shed_hours`.
-- Driven by a 2-min tick (index.ts L2175) that skips entirely when no candidates are configured (opted-out installs pay zero cost).
+- Driven by a 2-min tick (index.ts, `loadShedTick`) that skips entirely when no candidates are configured (opted-out installs pay zero cost).
 
-> Memory note (`project_ecoflow_expected_unknowns`): `..._runway_to_reserve_if_shed` reading `unknown` is **by design** on a healthy fleet (no depletion → nothing to shed), not a broken sensor.
+> `..._runway_to_reserve_if_shed` reading `unknown` is **by design** on a healthy fleet: with no depletion in the horizon `projectedAfterShed.hoursToReserve` is null, and `advisoryStateFields` publishes it as null. It is not a broken sensor.
 
 ---
 
@@ -4155,7 +4376,7 @@ The `/η` on the shed term is essential: since v1.26 `hours` is the η-corrected
 
 All three alarms (runway, SoC, and the grid-drop re-escalation) converge on `broadcast.announce(priority, message, messageEs)` — a **dedicated** audible path bypassing the alert→condition pipeline so they annunciate even at a `critical` broadcast min-severity. Every announce is gated by `isPriorityEnabled(priority)` (per-priority Alert-Settings toggles) and, for runway, additionally by `shouldGateRunwayAudible` (mute while grid backstopping). Each message carries an English + Latin-American-Spanish second pass. The matching on-screen alerts (`forecast-runtime-*` for runway, the `alerts.ts` reserve band for SoC) are excluded from the broadcast condition so nothing double-chimes.
 
-> Operational note (memory `project_alarm_audible_and_host_dns`): the audible path is LIVE via 2 ecobee speaker targets; quiet-hours 22:00–05:00 gating criticals to a 06:00 digest is an **accepted, postponed** configuration — do not re-surface it as a defect.
+> **Quiet hours.** Inside `BROADCAST_QUIET_HOURS` (default `22-06`) the audible broadcast is silent — the condition broadcast and the dedicated `announce` path alike — unless `CRITICAL_BREAKS_QUIET_HOURS` is on (default off), in which case a red condition (or, for `announce`, a high or critical priority) still sounds. Pushes have their own window, `NOTIFY_QUIET_HOURS` (default `22-06`): warnings and info are held for the morning digest, and critical is held too unless the same option is on (§8, 4.2). On-screen alerts are unaffected. On an off-grid site with quiet hours set and that option off, the add-on logs a boot warning naming the trade-off.
 
 
 ---
@@ -4164,13 +4385,13 @@ All three alarms (runway, SoC, and the grid-drop re-escalation) converge on `bro
 
 This cluster covers every long-horizon *health* analytic in the ecoflow-panel add-on: pack state-of-health (SoH) fade and end-of-life (EOL) projection, coulombic efficiency, internal resistance, round-trip efficiency (RTE), charge-curve fingerprinting, ambient-coupled thermal forecasting, thermal-event counting, string-mismatch / per-Core underperformance, soiling decomposition, inverter clipping, MPPT/inverter equipment health, and the two pack-risk scorers (heuristic v1 + ML v2).
 
-All of these live in `server/src/analytics.ts` (~450 KB) except the ML risk model, which lives in `server/src/ml.ts`. They are pure(ish) compute functions fed by the `Recorder` time-series store plus the live `DeviceSnapshot` map, run on the analytics worker thread, cached with per-engine TTLs, and surfaced over `/api/*` endpoints. None of these engines is an *alarm* source (the alarm paths are documented separately); they are diagnostic/planning KPIs, and every one of them prefers an honest `null`/`no-data`/`learning` state over a fabricated number.
+All of these live in `server/src/analytics.ts` (~560 KB) except the ML risk model, which lives in `server/src/ml.ts`. They are pure(ish) compute functions fed by the `Recorder` time-series store plus the live `DeviceSnapshot` map, run on the analytics worker thread, cached with per-engine TTLs, and surfaced over `/api/*` endpoints. None of these engines is an *alarm* source (the alarm paths are documented separately); they are diagnostic/planning KPIs, and every one of them prefers an honest `null`/`no-data`/`learning` state over a fabricated number.
 
 ### Shared conventions
 
 - **Recorder queries.** `recorder.query(sn, metric, since, now, bucketSec?)` and `recorder.queryMulti(sn, [metrics], since, now, bucketSec?)` return `Array<{ts, value}>` in ascending-ts order, optionally SQL-bucketed (GROUP BY) to a coarser interval to cut row counts. `queryMulti` collapses N per-metric round-trips to one. `node:sqlite` is fully synchronous, so several engines run `await new Promise(r => setImmediate(r))` between packs to yield the event loop.
 - **Pack keying.** Packs are keyed `` `${sn}|${pk.num}` ``. Per-pack metric names are templated: `pack${n}_soh`, `pack${n}_cycles`, `pack${n}_temp`, `pack${n}_in`, `pack${n}_out`, `pack${n}_soc`, `pack${n}_vol_max_mv`, `pack${n}_lifetime_chg_mah`, `pack${n}_lifetime_dsg_mah`. DPU-bus metrics: `bat_vol`, `bat_amp`, `pv_total`, `total_in`, `total_out`, `panel_load`.
-- **Fleet scoping.** `shp2ConnectedDpuSns(devices)` returns the SNs of DPU Cores actually wired into the SHP2 backup panel; `homeConnectedDpus(dpus, connected)` filters to them; `isShp2Connected(sn, connected)` tests membership. Spare Cores (4 & 5) are still *analyzed* per-pack but are excluded from any *baseline* that a Core is compared against (they cycle differently — storage SoC, bench top-ups). This "filter the baseline, score everyone" pattern recurs in degradation peer-fade, RTE, string-mismatch, novelty, clipping, and soiling.
+- **Fleet scoping.** `shp2ConnectedDpuSns(devices)` returns the SNs of DPU Cores actually wired into the SHP2 backup panel; `homeConnectedDpus(dpus, connected)` filters to them; `isShp2Connected(sn, connected)` tests membership. Bench-spare Cores (any DPU not on the panel's connected-source roster) are still *analyzed* per-pack but are excluded from any *baseline* that a Core is compared against (they cycle differently — storage SoC, bench top-ups). This "filter the baseline, score everyone" pattern recurs in degradation peer-fade, RTE, string-mismatch, novelty, clipping, and soiling.
 - **Robust statistics.** `median(arr)`, `mad(arr, med)` (median absolute deviation), and `robustZ(x, med, mad, floor, zAtFloor)` (MAD-floored modified z-score) are shared helpers. `Z_INFO = 3.5`, `Z_WARN = 5`. `linregress(pts)` returns `{slopePerMs, slopeStdErrPerMs, r2}`; `lstsq2(rows)` returns a 2-regressor fit `{b0, b1, b2, r2}`.
 - **Endpoint wrapper.** Almost all endpoints go through `analytics.report('<name>', opts?)` on the worker, then `cached(req, reply, value, seconds)` which adds a hash-ETag + `Cache-Control`.
 
@@ -4393,7 +4614,7 @@ A hand-tuned weighted-sum-then-sigmoid risk score (0–100) per pack. **Not** a 
 | 2 | Internal-R trend | `ir.trendMilliohmsPerMonth` (bus-level, shared per DPU) | `clamp01(r/3)` (3 mΩ/mo→max) | 0.15 |
 | 3 | Coulombic efficiency | `deg.coulombicEffPct` | `clamp01((99−ce)/2)` (97%→max) | 0.15 |
 | 4 | Thermal hard-life | `therm.hardLifeScore` | `clamp01(h/300)` | 0.15 |
-| 5 | Charge-curve drift | `cc.meanDriftMv` | `clamp01(|d|/50)` | 0.10 |
+| 5 | Charge-curve drift | `cc.meanDriftMv` | `clamp01(\|d\|/50)` | 0.10 |
 | 6 | Capacity fade rate | `deg.fadePctPerYear` | `clamp01((f−1)/5)` | 0.20 |
 
 Weights sum to 1.
@@ -4405,7 +4626,7 @@ Weights sum to 1.
 `GET /api/pack-risk` (composes degradation + thermalEvents + internalResistance + chargeCurve reports) → `FleetRiskReport { generatedAt, modelVersion, packs: PackRiskScore[] }`.
 
 #### Edge cases
-A null feature normalizes to 0 (neutral), so missing data never inflates risk. On the current near-new fleet CE is null for all packs and immature fade is null → most packs read `low`.
+A null feature normalizes to 0 (neutral), so missing data never inflates risk. CE is null wherever the F17 gates fail (§2). The step-dominated, below-floor and implausible-fade gates null the fade (§1). Unlike v2, v1 reads `deg.fadePctPerYear` at any status, so an immature `learning` pack's preliminary fade does feed feature 6.
 
 ---
 
@@ -5033,7 +5254,7 @@ at TOU rates.
 
 | Constant | Env | Default |
 |---|---|---|
-| `TARIFF_FLAT_CENTS` | `TARIFF_FLAT_CENTS_PER_KWH` | `17` (operator's APS flat plan) |
+| `TARIFF_FLAT_CENTS` | `TARIFF_FLAT_CENTS_PER_KWH` | `17` (flat-rate default) |
 | `TARIFF_ON_PEAK_CENTS` | `TARIFF_ON_PEAK_CENTS` | = flat (17) |
 | `TARIFF_OFF_PEAK_CENTS` | `TARIFF_OFF_PEAK_CENTS` | = flat (17) |
 | `TARIFF_ON_PEAK_HOURS_ENV` | `TARIFF_ON_PEAK_HOURS` | `"15-20"` |
@@ -5041,7 +5262,10 @@ at TOU rates.
 
 > **v0.9.58:** defaults to a **flat** rate — the prior 25¢/8¢ split implied a TOU
 > plan most APS customers lack and silently overstated both cost and solar value.
-> A TOU-plan user sets `TARIFF_ON_PEAK_CENTS` / `TARIFF_OFF_PEAK_CENTS`.
+> Note: `TARIFF_ON_PEAK_CENTS` / `TARIFF_OFF_PEAK_CENTS` (and the other variables in this
+> table) are environment variables, not add-on options; the add-on's run script does not
+> export them. In the add-on, a TOU plan is configured with the `TARIFF_APS_*_CENTS` options
+> and `TARIFF_APS_RATES_CONFIRMED` (§4.2b).
 >
 > The table above pins the **unconfigured-install** contract. On an install that
 > has confirmed its utility's rate table, §4.2b supersedes it — do not read the
@@ -5072,7 +5296,7 @@ and picks the first tier that applies:
 | 3 | Flat default | `'flat-default'` | neither of the above |
 
 The resolved basis is published as `tariffBasis` on `/api/tariff` (§4.4) and is
-shared by the dispatch planner (§4.5), so the two engines can no longer disagree
+shared by the dispatch planner (§5), so the two engines can no longer disagree
 about what a kWh costs.
 
 **Seasonality** is a usage-month test from the tariff model's own season
@@ -5098,7 +5322,7 @@ calling `integrateWh` per hour (cuts ~960 SQL round-trips to ~5). Scope = SHP2
 home DPUs only. Per hour:
 
 ```
-rate  = (onPeakAt(t) ? ON_PEAK : OFF_PEAK)/100
+rate  = hourlyRateCents(t, resolveTariffCents(now))/100   # v1.136.0 — the confirmed table's period for the hour; two-tier onPeakAt fallback when unconfirmed
 gridWh = Σ integrateWh(ac_in_series[d], t, tEnd)            // home DPUs
 loadWh = integrateWh(panel_load_series, t, tEnd)            // SHP2
 if shp2 && gridHomeTrusted:  gridWh = max(gridWh, integrateWh(grid_home_w, t, tEnd))   // audit #5
@@ -5283,7 +5507,7 @@ Returns `503 {error:'SHP2 not online'}` if no SHP2. Inputs assembled in
 `index.ts`: `currentSocPct = backupBatPercent??50`, `reserveFloorPct =
 backupReserveSoc??20`, `capacityKwh = (backupFullCapWh??60000)/1000`, per-hour
 `pvP50`/`pvP10` (from forecast + probabilistic bands), `loadForecast`,
-`tariffByHour` (on-peak 15–20 h), and **`gridAvailable = process.env.GRID_AVAILABLE
+`tariffByHour` (`hourlyRateCents` for each hour of the local America/Phoenix day, falling back to the two-tier pair `TARIFF_ON_PEAK_CENTS_PER_KWH` / `TARIFF_OFF_PEAK_CENTS_PER_KWH`, default the flat rate, when the rate table is unconfirmed; v1.136.0), and **`gridAvailable = process.env.GRID_AVAILABLE
 === 'true'`** (default **false** — v0.15.2 off-grid honesty: a hardcoded `true`
 let the optimizer "assume away" reserve dips via imports that don't physically
 exist on an islanded site). `cyclingCostUsdPerKwh` is fed **live** from RTE:
@@ -5450,10 +5674,21 @@ time, once (not verified against Home Assistant).
 - **No poison-cache of zeros.** All device-integrating engines require a
   *structurally complete* fleet (≥1 DPU **and** the SHP2) before latching, so a
   post-restart boot-partial snapshot is returned once but never cached.
+  Since v1.178.0 the carbon, tariff and curtailment reports also carry
+  `basisComplete`:
+  - carbon: a DPU and the panel are projected;
+  - tariff: DPUs, plus the panel unless none is listed;
+  - curtailment: home Cores, the panel, weather and a solar posterior.
+  While it is false the HA publishers send the governed fields as null
+  (`publishReadiness`):
+  - `carbon_kg_avoided_7d`;
+  - the three `tariff_*_dollars` figures;
+  - `pv_curtailment_active` / `_surplus_watts` / `_kwh_today` / `_kwh_7d`.
+  A model-less boot 0 therefore never reaches a sensor.
 - **Advisory ≠ control.** `computeDispatchPlan` and `recommendDispatch` are both
   recommend-only and touch no safety alarm or device write.
 
-### 7.9 On-peak grid-to-battery detection (`server/src/peakGridDraw.ts`)
+### 10. On-peak grid-to-battery detection (`server/src/peakGridDraw.ts`)
 
 **v1.80.0 — the cause is read, not inferred.** `ch{n}ForceCharge` (PD303 quota)
 is the per-channel force-charge switch = the app's "Charge Now". The verdict
@@ -5530,10 +5765,12 @@ Cores charging at once, not one panel-level decision.
 > `smartBackupMode` stayed at `2` and every other field in the SHP2 strategy blob was
 > byte-identical. The setting is not on the panel.
 
-**Why inference, not a flag read.** Nothing in the SHP2 strategy and no projected DPU
-field exposes Charge Now. It is invisible in telemetry, so the only observable is the
-energy actually moving — which is why this detector is built on a power residual. A
-flag-reading implementation was never possible.
+**Detection is a power residual; the cause is read when reported.** The detector fires on
+the measured residual. Since v1.80.0, the panel quota's per-channel `ch{n}ForceCharge`
+(Charge Now) is read into `forceChargeOn`:
+- named channels: the alert names the units with Charge Now on;
+- `[]`: it says Charge Now reads off on all channels and points to another setting;
+- `null` (not reported this tick): it falls back to the inferred wording (`forceChargeText`).
 
 **Per-Core attribution.** `attributeCores(draws)` names the units actually drawing,
 largest first, from each DPU's `acInWatts` (the same field `aggregateFleetFlow` sums into
@@ -5542,7 +5779,7 @@ are standby and are not named; when none qualify the fact reads `no single Core 
 
 **Proof.** `scripts/mutate-peak-grid-draw.mjs`, 15 anchor-asserted mutants, 15/15 killed.
 
-#### 7.9b On-peak grid while the house pool sits idle (`peakGridDraw.ts`, v1.187.0)
+#### 10.1 On-peak grid while the house pool sits idle (`peakGridDraw.ts`, v1.187.0)
 
 The detector above watches grid flowing **into** the pack. It cannot see the opposite
 waste: the grid carrying the house on-peak while the pool, well above its reserve, does
@@ -5603,7 +5840,7 @@ as an idle pool.
 **Counts like the grid-to-battery notice.** It carries no `source`, so while active it counts
 in the HA `alert_warning_count` (**Warning Alerts**, `makeAlertCounter`) and — through its
 explicit priority — `alert_low_count` (**Low Priority Alarms (P4)**), exactly as
-`peak-grid-draw` (§7.9, also warning / low) does, and the warning-tier auto-tune rules apply
+`peak-grid-draw` (§7.10, also warning / low) does, and the warning-tier auto-tune rules apply
 to it (it is not an `ENERGY_STATE_FAMILIES` member). An automation keyed to
 `alert_warning_count` therefore sees an on-peak spend notice as one warning; the priority
 counts place it in P4. Tests: `peakIdlePool.test.ts`.
@@ -5660,7 +5897,12 @@ interface Alert {
   packNum?: number | null;                // subject identity: pack number
   facts?: AlertFact[];                    // { label, value } statistical breakdown
   fault?: string;                         // v1.64.0 sub-identity: WHICH fault, when one id spans many
+  sourceSn?: string;                      // v1.78.0 serial whose telemetry proves the condition (falling-edge evidence gate)
+  sourcePackSn?: string;                  // v1.102.0 BMS-reported pack serial on pack-scoped alerts
   annunciate?: boolean;                   // false = VISIBLE but never chime/push/raise-condition
+  audible?: boolean;                      // v1.187.0 false = card + push, never raises or voices the broadcast condition
+  mutedBy?: VdiffCritMuteReason;          // v1.187.0 the bounded cell-spread mute holding a vdiff-crit this tick
+  muteReason?: string;                    // v1.187.0 why annunciate is false, in words (diagnostic only)
 }
 ```
 
@@ -5717,7 +5959,7 @@ The High-vs-Medium split on `source` is itself ISA logic: a deterministic thresh
 
 **WHAT.** The static-rule engine and the single source of truth for `snapshot.alerts`. Given the device map (plus optional connectivity and grid context) it returns a sorted `Alert[]`. The web UI renders this; the monitor uses the same output to decide what to push.
 
-**Signature:** `computeAlerts(devices, connectivity?, grid?)`.
+**Signature:** `computeAlerts(devices, connectivity?, grid?, poolGrid?)`. `poolGrid?: (panelSn) => verdict` (v1.185.0) is passed only on a multi-panel plant; each pool's reserve alarms then read their own panel's verdict (`livePoolGridBackstop`) instead of the plant `grid`.
 
 - `grid?: { present?, backstopping?, reason? }` — when the grid backstops the home, at/near-reserve conditions merely transfer to mains and are downgraded critical→info (still visible, no chime). Omitted ⇒ treated as off-grid (safe default).
 - `connectivity?: ConnectivityContext` — carries last `/device/list` attempt/success timestamps, per-device MQTT last-seen/count, and several debounce-onset maps read from the snapshot store (`backupPoolUnknownSinceMs`, `dpuErrOnsetBySn`, `shp2SrcErrOnsetBySlot`).
@@ -5746,7 +5988,7 @@ Battery/voltage/health thresholds:
 | `VOL_DIFF_CRIT_MV` | 50 | cell-imbalance critical (off-plateau) |
 | `VOL_DIFF_PLATEAU_SOC_PCT` | 85 (`VOL_DIFF_PLATEAU_SOC_PCT` env) | above this SoC, relax the crit; the knee session (`graceFromMs`) and its rest run at or above it, and a reading below it ends the session (v1.187.2) |
 | `VOL_DIFF_PLATEAU_CRIT_MV` | 90 (`VOL_DIFF_PLATEAU_CRIT_MV` env) | relaxed crit on the LFP top-of-charge plateau |
-| `VOL_DIFF_PLATEAU_QUIET_SOC_PCT` | 95 (env) | at/above this pack SoC, warn-band spread is visible but `annunciate:false` (v1.45.0) |
+| `VOL_DIFF_PLATEAU_QUIET_SOC_PCT` | 95 (env) | top-of-charge line (`topOfChargeQuietSpread`): gates the peer cell-spread outlier's audible and the vdiff-crit end-of-charge / charging graces. The warn-band push quiet has run from `VOL_DIFF_PLATEAU_SOC_PCT` (85%) since v1.187.14 (from 95% since v1.45.0) |
 | `VOL_DIFF_KNEE_HARD_MV` | 150 | unconditional ceiling on every cell-spread mute (fixed, not env) |
 | `VDIFF_KNEE_RELAX_MS` | 5 min | end-of-charge relaxation window after the last top-of-charge balancing; also the longest charge input alone holds a critical at the top of charge, from the session's first crossing (`graceFromMs`) |
 | `VDIFF_KNEE_MAX_MUTE_MS` | 20 min | longest a plateau-critical spread stays silent, from its first crossing; also the longest the end-of-charge grace and the balancing mute last in one session (on the plateau, v1.187.2), and the unbroken rest under 50 mV that ends a session |
@@ -5772,6 +6014,10 @@ Battery/voltage/health thresholds:
 
 - `cloud-session-stale` (warning, Connectivity) — no successful `/device/list` in `CLOUD_SESSION_STALE_MS`; per-device online flags are last-known, not current.
 - `host-power-undervoltage` (warning) — `HOST_POWER_ENTITY` (HA RPi Power Supply Checker) tripped; early warning the Pi is browning out.
+- `host-temp-warn` / `host-temp-crit` (warning / critical, Connectivity) — the alarm host's SoC temperature past `HOST_TEMP_WARN_C` / `HOST_TEMP_CRIT_C`, with rise/clear hysteresis (§13.0).
+- `host-pressure-warn` / `host-pressure-crit` (warning / critical, Connectivity) — one rolled host-resource-pressure alert; it rises as critical only once crit pressure has stood its dwell (`hostPressureCritSustained`, §13.0b).
+- `tts-render-degraded` (warning, Connectivity) — ≥ 2 consecutive failed fresh TTS renders; chimes still deliver, without speech (§10, 4.7).
+- `shp2-multi-panel` (critical, SHP2, explicit `priority: 'critical'`) — two or more smart panels with none pinned as the house panel, or the pinned house panel missing from the device list. Supervised reserve and Charge-Now writes are blocked while it stands. In `isNeverMutedAlert` (§2, *Two panels (v1.185.0)*).
 - `grid-offgrid` (info, Grid) — off-grid. Decision uses `grid.present` when supplied (the same resolver behind `binary_sensor.off_grid`); falls back to `acIn < 5` W over SHP2-bound cores only. Wall-charging spares never register as grid.
 - `offline-<SN>` / `offline-spare-<SN>` (warning for Core/Panel, info otherwise; spare=info+`annunciate:false`) — device offline per `/device/list`. Enriched with last-data age/source, MQTT count, and a cause-matched hint (**v1.187.1:** only for a measured gap — a device with no data since the add-on started is said to have "not reported since the add-on started", with how long EcoFlow has reported it offline when this session saw it go offline (`onlineChangedAtMs`), or else that it has been listed offline since the add-on's first device list and for how long (`ConnectivityContext.perDevice.firstListedAtMs`, from `SnapshotStore.firstListedAt`), and that the cause is not known; no ">30 min", no cloud-session cause, no power-cycle advice. A device with REST data but no MQTT this session states its last data instead of "no telemetry". Whether the device has reported is decided from data — a last source or MQTT time in the store, or the device's `lastTelemetryAtMs` / `lastQuotaAtMs` — never from `lastUpdated`, which a bare MQTT `/status` online/offline flip also bumps (`setDeviceOnline`); a device whose only traffic this session was such a flip is still "not reported since the add-on started"); when `ECOFLOW_DEVICE_REACHABILITY` is configured, `classifyDeviceLink()` adds a `cloud_wedge` vs `real_outage` fact and hint. **v1.187.10:** the listing time is per process, so after every restart the hint said "listed offline since the add-on's first device list (5 h ago); how long before that … is not known here" of peripherals the repair card had on record as offline for 89–104 days. The alert monitor now keeps a restart-persistent "first seen listed offline" stamp every evaluation (`repairIssues.syncCloudOfflineFirstSeen`, the `cloud-offline-<SN>` entries of `repair-first-seen.json`): set when a device that is not a bench spare is first seen listed offline, cleared only when it is listed ONLINE (an MQTT `/status` online flip counts), and persisted on either change; absence from a list, or a `/api/repair-issues` fetch on a map without the device, clears nothing. When the stamp predates this process's first listing (`ConnectivityContext.perDevice.offlineSinceMs`), the hint reads "listed it offline since at least <age> ago (first seen offline before the add-on's last restart, and not seen online since)"; a stamp taken in this process leaves the v1.187.1 wording. The repair card's `firstSeenAt` for the same device is the same stamp. Explicit priority: Panel=high (alarm data source), Core=medium, peripheral=low, spare=low. **v1.187.10 — onset hold** (`cloudOfflineOnsetHeld`): a home Core listed offline while its own MQTT data still arrives (a data message within `CLOUD_OFFLINE_MQTT_LIVE_MS`, 90 s) is on screen at once but `annunciate:false` (`MUTE_REASON_CLOUD_OFFLINE_MQTT_LIVE`, and an `Onset hold` fact) — not spoken, not pushed, not counted toward the condition — for `CLOUD_OFFLINE_ONSET_HOLD_MS` (3 min) from the transition (`onlineChangedAtMs`). It is judged on every evaluation: the moment no data message has landed for 90 s, or the hold runs out, it annunciates as before, and its push dwell has already run (it counts from the first sighting). Never held: a device with no transition seen in this process (offline at the first device list), no MQTT data this session, a peripheral, a bench spare, or the panel — its MQTT messages stamp `lastMqttAt` but are never translated into its projection (only Core quotas are), and its REST quota is fetched only for devices listed online, so while it is listed offline its backup pool, reserve, grid status and `lastQuotaAtMs` are frozen and arriving panel data is not evidence the alarm inputs are live. 2026-10-03 19:31, right after a WAN drop, the device list flagged the panel and every Core offline in one poll; the condition went yellow in the same second, was spoken for 92 s and three Medium pushes went out, and every flag cleared within about 2 minutes. Residual: a device whose data stops at the same moment as the flag is held until its last message is 90 s old.
 - `stale-<SN>` / `stale-spare-<SN>` (warning; spare=info) — online per EcoFlow but no fresh telemetry for > `STALE_MS`.
@@ -5780,14 +6026,14 @@ Battery/voltage/health thresholds:
 
 - `dpu-err-<SN>` (critical, Battery) — `sysErrCode != 0`, **debounced** by `DPU_ERR_DEBOUNCE_MS`: suppressed until the SAME code has stood 3 min (cloud-reconnect blips 20–160 s are dropped). No onset context ⇒ fires immediately (never silently loses a real fault).
 - `dpu-pvh-err-<SN>` / `dpu-pvl-err-<SN>` (warning, Solar) — HV/LV MPPT error code AND the string is actually producing per `mpptProducing(watts, amps)` (`server/src/mppt.ts` since v1.174.0; needs BOTH watts > 20 W and, if reported, amps > 0.3 A) AND, since **v1.174.0**, the SAME code has stood for `MPPT_ERR_DEBOUNCE_MS` (3 min, shared with the inverter-error and SHP2-source-error windows). The producing test rejects sunset/dusk standby codes that are identical across independent cores; the debounce rejects the SUNRISE case the producing test cannot see, where the same standby code rides a ramping string that is genuinely producing (2026-09-22: 407 W / 301 V / 1.38 A, ~60 s, twice). The window is measured by `SnapshotStore.trackMpptErrOnsets` (keyed `<sn>:hv` / `<sn>:lv`), whose clock advances only while the code is non-zero AND the string is producing — so a code standing overnight on a dark string banks no time, and no onset context at all (older callers, unit tests) fires immediately.
-- `mppt-hv-temp-<SN>` / `mppt-lv-temp-<SN>` — `MPPT_TEMP` band. Channel slug precedes SN so `familyOf` yields per-channel families.
-- `ems-volt-<SN>` (info, Battery, `priority: 'low'`, `audible: false`; **v1.187.3**, a warning until then) — "Pack voltage swing outside EMS band": `batVol` outside EcoFlow's `emsParaVolMin/Max` parallel band. The band is relative, not a limit: 2.3-3.0 V wide around a reference voltage the Core reports in the same ~5-minute backend block as `batVol`, within about 40 mV of `batVol` at rest, and found anywhere from 81.6 to 112.4 V across the cleared ledger. `batVol` leaves it on a fast current change (night grid-charge onset, an evening load step) or at the top of charge: 33 home-Core episodes from 2026-08-25 to 10-01 had `batVol` 102.3-109.3 V and a highest cell of at most 3.512 V. As a warning it took ISA High, raised the yellow, was spoken and pushed — the one audible alarm of a top of charge on 2026-10-01 (108.9 V, 0.45 V below a 109.4-112.4 V band, highest cell 3.494 V). As info it stays on the card, below the push minimum, and is never counted toward or voiced in the broadcast condition; the detail says whether `batVol` is below or above the band and that the band is not a voltage limit. A real overvoltage is `cell-ovp-*` (critical at 3.600 V, never muted) and an inverter/BMS fault `dpu-err-*`; neither reads the band. The band is recorded (`ems_para_vol_min_mv` / `ems_para_vol_max_mv`, §4.3), and its cleared rows keep the warning eviction tier (`CLEARED_INFO_KEPT_AS_WARNING_PREFIXES`).
+- `mppt-hv-temp-<SN>-<severity>` / `mppt-lv-temp-<SN>-<severity>` — `MPPT_TEMP` band (`tempAlert` appends the band's severity to the id). Channel slug precedes SN so `familyOf` yields per-channel families.
+- `ems-volt-<SN>` (info, Battery, `priority: 'low'`, `audible: false`; **v1.187.3**, a warning until then) — "Pack voltage swing outside EMS band": `batVol` outside EcoFlow's `emsParaVolMin/Max` parallel band. The band is relative, not a limit: 2.3-3.0 V wide around a reference voltage the Core reports in the same ~5-minute backend block as `batVol`, within about 40 mV of `batVol` at rest, and found anywhere from 81.6 to 112.4 V across the cleared ledger. `batVol` leaves it on a fast current change (night grid-charge onset, an evening load step) or at the top of charge: 33 home-Core episodes from 2026-08-25 to 10-01 had `batVol` 102.3-109.3 V and a highest cell of at most 3.512 V. As a warning it took ISA High, raised the yellow, was spoken and pushed — the one audible alarm of a top of charge on 2026-10-01 (108.9 V, 0.45 V below a 109.4-112.4 V band, highest cell 3.494 V). As info it stays on the card, below the push minimum, and is never counted toward or voiced in the broadcast condition; the detail says whether `batVol` is below or above the band and that the band is not a voltage limit. A real overvoltage is `cell-ovp-*` (critical at 3.600 V, never muted) and an inverter/BMS fault `dpu-err-*`; neither reads the band. The band is recorded (`ems_para_vol_min_mv` / `ems_para_vol_max_mv`, §1, 4.3), and its cleared rows keep the warning eviction tier (`CLEARED_INFO_KEPT_AS_WARNING_PREFIXES`).
 - `dpu-imbalance-<SN>` (warning) — SoC spread across the DPU's packs ≥ `PACK_IMBALANCE_WARN_PCT` (15%).
 
 **Per-pack (each DPU pack):**
 
 - `soh-crit-<SN>-<pk>` (critical) / `soh-warn-<SN>-<pk>` (warning) — `actSoh ?? soh` below 75 / 85%.
-- `vdiff-crit-<SN>-<pk>` (critical) / `vdiff-warn-<SN>-<pk>` (warning) — cell spread. **v1.187.14:** a warn-band spread pushes only below the plateau (`plateauQuietWarnSpread`, < `VOL_DIFF_PLATEAU_SOC_PCT` 85%); from 85% it is visible without a push (the 95% `topOfChargeQuietSpread` line still gates the peer outlier and the critical mutes). **v1.187.12:** `vdiff-warn` carries `audible: false` — its card and push stand, it never raises the spoken condition; `vdiff-crit` is unchanged. **Rise-side hysteresis** (F28): warning fires only at ≥ `VOL_DIFF_WARN_RISE_MV` (24 mV), then HOLDS while still ≥ `VOL_DIFF_WARN_MV` (20 mV); held state is keyed `${sn}-${pk}` and pruned each cycle for any pack that produced no reading. Critical at ≥ `critMv` where `critMv` = 90 mV on the plateau (`packSoc ≥ 85%`) else 50 mV. Three `annunciate:false` demotions keep benign excursions visible-but-silent: (a) `balanceState != 0` (BMS actively balancing), (b) a plateau-benign excursion (would be crit off-plateau but under the relaxed plateau ceiling, BMS idle), (c) **v1.45.0** — any warn-band spread on a pack at ≥ `VOL_DIFF_PLATEAU_QUIET_SOC_PCT` (95%): at top of charge the LFP curve transiently widens warn-band spread fleet-wide (observed: 14 of 15 packs within two hours of a full top-up, all self-clearing), so those stay visible without pushing. Silence is bounded — SoC dropping below the respective plateau line re-arms standard annunciation. The critical and the plateau lines (`VOL_DIFF_CRIT_MV`, `VOL_DIFF_PLATEAU_*`, `vdiffCritMvFor`, `topOfChargeQuietSpread`) live in `cellSpread.ts`, shared with the peer engine. **v1.187.0 — the critical's mute is `vdiffCritMute`'s alone**, over per-pack state from `advanceVdiffKnee` (keyed `${sn}-${pk}`, bound to the pack serial): a spread ≥ `VOL_DIFF_KNEE_HARD_MV` (150 mV) annunciates at any SoC, balancing or not; on the plateau, a spread first at the critical line `VDIFF_KNEE_MAX_MUTE_MS` (20 min) ago annunciates even while balancing ("First reached the critical line N minutes ago."); otherwise `balancing` mutes (`mutedBy: 'balancing'`). At ≥ 95% SoC two narrower graces follow, each fed by evidence recorded only while the spread is ≥ `VOL_DIFF_WARN_MV`: (1) **end-of-charge** (`mutedBy: 'end-of-charge'`, detail "End-of-charge cell spread, relaxing.") for `VDIFF_KNEE_RELAX_MS` (5 min) after the last BALANCING tick — the observed benign mechanism, since every benign reading ≥ 90 mV in the recorder had balancing on; (2) **charging** (`mutedBy: 'charging'`, detail "Top-of-charge cell spread while charging.") while stream-delivered charge input > `VDIFF_KNEE_CHARGE_W` was seen within `VDIFF_KNEE_RELAX_MS` AND the session's first crossing (below) was less than `VDIFF_KNEE_RELAX_MS` ago — measured from the first crossing, never the last charge tick, so a steady trickle cannot refresh its own mute (charge-only benign peaks: 84 and 77 mV; the one charge-only reading ≥ 90 mV in history was a fault). **Both graces are bounded by the SESSION (v1.187.0 log review).** `graceFromMs` is the first critical-line crossing seen on the plateau, at ≥ `VOL_DIFF_PLATEAU_SOC_PCT` (85%) SoC (**v1.187.2** — until then the first seen at ≥ 95%, from the running episode's own first crossing when it began lower on the plateau); it is not reset when the spread falls under 50 mV, and is carried across reading gaps like the critical-line clock. It is cleared by a reading below 85% (until v1.187.2 below 95%; a missing SoC does not clear it) or once the pack has **rested** on the plateau: an unbroken `VDIFF_KNEE_MAX_MUTE_MS` of readings under 50 mV (`quietSinceMs`; started only at ≥ 85% (v1.187.2; ≥ 95% until then), broken by any reading at or above 50 mV — one with no SoC included — not started by a reading with no SoC, and not carried across a reading gap — a rest must be seen). The charging grace lasts at most `VDIFF_KNEE_RELAX_MS` and the end-of-charge grace at most `VDIFF_KNEE_MAX_MUTE_MS` from it, and while it runs the **balancing mute** too lasts at most `VDIFF_KNEE_MAX_MUTE_MS` from it, at any SoC the session stands at ("First reached the critical line at this top of charge N minutes ago." at ≥ 95%, "First reached the critical line above 85% charge N minutes ago." below). The graces themselves apply only at ≥ 95%, and a session begun lower on the plateau bounds them from that first crossing (fail loud: a crossing at 90%, no rest, then 95 mV at 97% on a 600 W charge annunciates at once). **v1.187.2** — until then no session ran between 85% and 95%, so the balancing mute there was bounded by the critical-line clock alone, which (v1.187.1, log review) survives readings under the line shorter than `VDIFF_KNEE_RELAX_MS` (below) but ends after a longer run: a balancing spread at 95 / 45 / 45 mV on a ~180 s cadence, 95 / 45 mV with one reading missed, or 95 / 70 / 70 mV restarted the bound on every crossing and was never announced; it now annunciates on the first critical tick at or past `VDIFF_KNEE_MAX_MUTE_MS` from its first crossing (at most one reading later), in-process and across a restart. Measured from the current crossing instead, each dip under 50 mV restarted both: a spread that follows the charge current on isolated readings (95 / 45 mV every ~180 s at 97% on a 600 W charge) was held as "charging" on every crossing for a whole afternoon, and a 100 mV reading between balancing 45 mV readings as "end-of-charge"; both now annunciate on the first critical reading past the bound, and so does a spread balancing on alternate readings (95 mV balancing / 45 mV), which the episode-bound balancing mute held for hours. A second knee in the same session without a rest gets no second grace and annunciates (fail loud); a pack that rests on the plateau for 20 minutes, or discharges below 85% and charges back, starts a new session (v1.187.2; at the top of charge and below 95% until then) — a benign pack relaxes to 3-30 mV within minutes, while a spread that follows the charge current is never under 50 mV for 20 minutes. Charge input is `vdiffKneeChargeW`: `DpuPack.streamInputW`, the pack's `inputWatts` exactly as the MQTT stream delivered it, at most `VDIFF_KNEE_STREAM_FRESH_MS` old — never the REST value (the poll replays the last non-zero reading) and never `liveFlow` (which falls back per field to the polled value); absent or stale ⇒ no charge evidence ⇒ the critical keeps only its balancing grace. A spread still at the line when a grace lapses annunciates ("Did not relax at the top of charge."). The BMS reports cell voltages every ~180 s, so the window always holds a reading taken ≥ 2 min after balancing stopped; benign top-of-charge spreads ≥ 90 mV were back under it within 2.7 min, slow-relaxing ones (110-138 mV, 3-9% in 3 min) annunciate. The critical-line clock ends when the pack leaves the plateau, or once the spread has stayed under the plateau line for an unbroken `VDIFF_KNEE_RELAX_MS` (one sub-line reading does not end it). **v1.187.1 (log review)** — that includes readings under 50 mV, which used to end it at once: between 85% and 95% no session ran until v1.187.2, so this clock was the balancing mute's only bound there, and a balancing spread alternating 95 / 45 mV every ~180 s restarted it on every low reading and was held silent with no limit (and the persisted session held its latest crossing, or none, so a restart did not catch it either). It now annunciates on the first critical reading at or past `VDIFF_KNEE_MAX_MUTE_MS` from its first crossing ("First reached the critical line N minutes ago."), and the file carries that first crossing across a restart. A spread that stays under the line for 5 minutes between crossings starts a new episode each time, as before; since v1.187.2 the session still bounds it. A clock seeded from a persisted onset (`vdiffKneeSeed`: never seen in a process) still ends on a reading under 50 mV, as in v1.187.0 — the onset may be a day old, and kept for five more minutes it made the next day's benign knee annunciate. **v1.187.2** — on ANY reading under 50 mV until a reading at the critical line confirms it (`VdiffKneeState.critSeeded`: set by `vdiffKneeSeed`, cleared by a reading at or above `vdiffCritMvFor(packSoc)` and whenever `critSinceMs` is cleared), where v1.187.1 applied it only to the first reading after the restart, so a first reading at 50-89 mV kept a day-old onset through the readings under 50 mV after it. The mark is written to the knee-session file with the clock (`critSeeded: true`, present only while set; a non-boolean value makes the entry malformed) and restored with it (a mark with no clock is dropped): without it the restore read the clock as one a process had seen, and a second restart restored the day-old onset unmarked. For v1.187.1, the recorded days with top-of-charge spreads (2026-07-23, 07-28, 09-18, 09-25 and 09-29, every pack, replayed through `computeAlerts`) gave the same critical ticks and the same annunciations as before. On a reading gap the activity evidence is dropped (re-earned from fresh readings) but the clocks (`critSinceMs`, `graceFromMs`) are carried, bound to the pack serial, for `VDIFF_KNEE_GAP_CARRY_MS` from the last reading, so offline blips cannot restart the duration bound or re-grant a grace. **Across a restart (v1.187.1)** the clocks are persisted per pack: `vdiff-knee-state.json` beside the database (`VDIFF_KNEE_STATE_PATH` overrides) holds, for each `${sn}-${pk}` holding a clock, the pack serial, `critSinceMs`, `graceFromMs`, the rest (`quietSinceMs`), the last reading time and (v1.187.2) the seed mark (`critSeeded`), floored to `VDIFF_KNEE_SEEN_PERSIST_MS` (5 min). The monitor restores it at start-up, before its first evaluation (`restoreVdiffKneeSessions`), and writes it after each `computeAlerts` only when a persisted value changed (`persistVdiffKneeSessions`): a serial, a clock or the rest, an entry gained or lost, or the last reading entering a new 5-minute grain — never on a tick that changed nothing. The grain turns on the same tick for every pack seen, so the last reading costs one write per 5 minutes however many packs hold a session. The restore applies the in-process gap rule: an entry is carried while the pack's last reading is at most `VDIFF_KNEE_GAP_CARRY_MS` old — the outage, never the onset's age — reading the file's last-reading time as the latest the true one can have been (file value + 5 min − 1 ms, capped at the restart; that bound floors back to the file value, so restarts that see no reading cannot walk it forward), and dropped after it. As across any reading gap, the activity evidence (`lastBalancingMs`, `lastChargeMs`) and the under-the-line run (`belowCritSinceMs`) are neither persisted nor restored: a mute is re-earned from fresh readings. The rest is restored only when the file's last reading is at most `VDIFF_KNEE_SEEN_PERSIST_MS` + `VDIFF_KNEE_RELAX_MS` (10 min) old at the restart — that age bounds the outage from above, and at most three ~180 s BMS readings fall inside it — and starts over at the restart otherwise; a pack unseen on a tick after the restart loses it, as in the process. It is also restored only when it is coherent (`vdiffKneeRestCoherent`, v1.187.1 log review): an unfinished rest inside a running session, begun after the session's first crossing and, while an episode still stands, after that episode's first crossing (the episode outlives the first `VDIFF_KNEE_RELAX_MS` of a rest), and less than `VDIFF_KNEE_MAX_MUTE_MS` before the file's last reading. Anything else — 0, a negative clock, a rest before the session — came from a corrupt file and starts over at the restart: restored, a rest dated far enough back ended a running session on the first reading under 50 mV and granted the next crossing fresh graces. Started over at every restart, the rest after a benign knee kept the restored session up to 20 minutes longer than the process would have, and a second benign knee inside that window (two knees 30 minutes apart, the add-on restarted 12-25 minutes after the first) sounded the red klaxon. After a longer outage the rest must be seen again for 20 minutes, and a second knee inside that window annunciates (fail loud). A spread that follows the charge current breaks its rest on every crossing, before and after a restart (hi / lo / lo with a crossing hidden inside the outage rests at most 15 minutes); only a spread crossing the line on one reading in four or fewer (about every 12 minutes or longer) can have its session ended by a crossing hidden inside a restart's outage — the add-on down for at least one whole ~180 s reading — and its next crossing then earns one more session's graces (a spread with 20 minutes under 50 mV between crossings ends its session in the process alike). A clock ahead of the restart (a clock step) is clamped to it; the restored state stays bound to the pack serial. Restored by the onset's age instead (v1.187.0), a fault that crosses the line on isolated readings came back from a restart on a sub-line reading with no session — its onset held through the resolve dwell for over an hour (95 / 45 mV alternating), or already retired (hi / lo / lo) — and the next crossing opened a new session with up to `VDIFF_KNEE_MAX_MUTE_MS` more silence; it now stays loud. A missing, unreadable or malformed file is ignored with one log line, and a malformed entry is skipped and counted in that line. A pack the file holds no entry for — the file ignored, or the outage longer than the carry — starts from `vdiffKneeSeed`: the persisted onset of its standing `vdiff-crit-<SN>-<pk>` (alertOnset.ts), clamped to now, seeds both clocks — the session clock only from an onset at most `VDIFF_KNEE_GAP_CARRY_MS` old (an onset persisted before a long outage that began inside a knee is not the current session, and seeded it was never ended, so the next day's benign knee had no grace; a critical still standing re-derives the session from the seeded critical-line clock on its first reading at the line and still fails loud) — and the current reading then clears whichever it contradicts. The evidence is never seeded. An onset is at or before the true first crossing, so the bounds can only come due sooner (fail loud): a restart at minute 21 of a balancing-held spread keeps it annunciating ("First reached the critical line 21 minutes ago.") instead of buying up to 20 more minutes of silence, and a restart inside a grace does not re-grant it. A pack with neither an entry nor a standing critical starts fresh. The key is pack SoC, never the max cell alone: a runaway-high cell on a mid-SoC pack stays an immediate critical.
+- `vdiff-crit-<SN>-<pk>` (critical) / `vdiff-warn-<SN>-<pk>` (warning) — cell spread. **v1.187.14:** a warn-band spread pushes only below the plateau (`plateauQuietWarnSpread`, < `VOL_DIFF_PLATEAU_SOC_PCT` 85%); from 85% it is visible without a push (the 95% `topOfChargeQuietSpread` line still gates the peer outlier and the critical mutes). **v1.187.12:** `vdiff-warn` carries `audible: false` — its card and push stand, it never raises the spoken condition; `vdiff-crit` is unchanged. **Rise-side hysteresis** (F28): warning fires only at ≥ `VOL_DIFF_WARN_RISE_MV` (24 mV), then HOLDS while still ≥ `VOL_DIFF_WARN_MV` (20 mV); held state is keyed `${sn}-${pk}` and pruned each cycle for any pack that produced no reading. Critical at ≥ `critMv` where `critMv` = 90 mV on the plateau (`packSoc ≥ 85%`) else 50 mV. Three `annunciate:false` demotions keep benign excursions visible-but-silent: (a) `balanceState != 0` (BMS actively balancing), (b) a plateau-benign excursion (would be crit off-plateau but under the relaxed plateau ceiling, BMS idle), (c) **v1.45.0, widened v1.187.14** — any warn-band spread on a pack at ≥ `VOL_DIFF_PLATEAU_SOC_PCT` (85%; `plateauQuietWarnSpread`; ≥ `VOL_DIFF_PLATEAU_QUIET_SOC_PCT` 95% until v1.187.14): at top of charge the LFP curve transiently widens warn-band spread fleet-wide (observed: 14 of 15 packs within two hours of a full top-up, all self-clearing), so those stay visible without pushing. Silence is bounded — SoC dropping below the respective plateau line re-arms standard annunciation. The critical and the plateau lines (`VOL_DIFF_CRIT_MV`, `VOL_DIFF_PLATEAU_*`, `vdiffCritMvFor`, `topOfChargeQuietSpread`) live in `cellSpread.ts`, shared with the peer engine. **v1.187.0 — the critical's mute is `vdiffCritMute`'s alone**, over per-pack state from `advanceVdiffKnee` (keyed `${sn}-${pk}`, bound to the pack serial): a spread ≥ `VOL_DIFF_KNEE_HARD_MV` (150 mV) annunciates at any SoC, balancing or not; on the plateau, a spread first at the critical line `VDIFF_KNEE_MAX_MUTE_MS` (20 min) ago annunciates even while balancing ("First reached the critical line N minutes ago."); otherwise `balancing` mutes (`mutedBy: 'balancing'`). At ≥ 95% SoC two narrower graces follow, each fed by evidence recorded only while the spread is ≥ `VOL_DIFF_WARN_MV`: (1) **end-of-charge** (`mutedBy: 'end-of-charge'`, detail "End-of-charge cell spread, relaxing.") for `VDIFF_KNEE_RELAX_MS` (5 min) after the last BALANCING tick — the observed benign mechanism, since every benign reading ≥ 90 mV in the recorder had balancing on; (2) **charging** (`mutedBy: 'charging'`, detail "Top-of-charge cell spread while charging.") while stream-delivered charge input > `VDIFF_KNEE_CHARGE_W` was seen within `VDIFF_KNEE_RELAX_MS` AND the session's first crossing (below) was less than `VDIFF_KNEE_RELAX_MS` ago — measured from the first crossing, never the last charge tick, so a steady trickle cannot refresh its own mute (charge-only benign peaks: 84 and 77 mV; the one charge-only reading ≥ 90 mV in history was a fault). **Both graces are bounded by the SESSION (v1.187.0 log review).** `graceFromMs` is the first critical-line crossing seen on the plateau, at ≥ `VOL_DIFF_PLATEAU_SOC_PCT` (85%) SoC (**v1.187.2** — until then the first seen at ≥ 95%, from the running episode's own first crossing when it began lower on the plateau); it is not reset when the spread falls under 50 mV, and is carried across reading gaps like the critical-line clock. It is cleared by a reading below 85% (until v1.187.2 below 95%; a missing SoC does not clear it) or once the pack has **rested** on the plateau: an unbroken `VDIFF_KNEE_MAX_MUTE_MS` of readings under 50 mV (`quietSinceMs`; started only at ≥ 85% (v1.187.2; ≥ 95% until then), broken by any reading at or above 50 mV — one with no SoC included — not started by a reading with no SoC, and not carried across a reading gap — a rest must be seen). The charging grace lasts at most `VDIFF_KNEE_RELAX_MS` and the end-of-charge grace at most `VDIFF_KNEE_MAX_MUTE_MS` from it, and while it runs the **balancing mute** too lasts at most `VDIFF_KNEE_MAX_MUTE_MS` from it, at any SoC the session stands at ("First reached the critical line at this top of charge N minutes ago." at ≥ 95%, "First reached the critical line above 85% charge N minutes ago." below). The graces themselves apply only at ≥ 95%, and a session begun lower on the plateau bounds them from that first crossing (fail loud: a crossing at 90%, no rest, then 95 mV at 97% on a 600 W charge annunciates at once). **v1.187.2** — until then no session ran between 85% and 95%, so the balancing mute there was bounded by the critical-line clock alone, which (v1.187.1, log review) survives readings under the line shorter than `VDIFF_KNEE_RELAX_MS` (below) but ends after a longer run: a balancing spread at 95 / 45 / 45 mV on a ~180 s cadence, 95 / 45 mV with one reading missed, or 95 / 70 / 70 mV restarted the bound on every crossing and was never announced; it now annunciates on the first critical tick at or past `VDIFF_KNEE_MAX_MUTE_MS` from its first crossing (at most one reading later), in-process and across a restart. Measured from the current crossing instead, each dip under 50 mV restarted both: a spread that follows the charge current on isolated readings (95 / 45 mV every ~180 s at 97% on a 600 W charge) was held as "charging" on every crossing for a whole afternoon, and a 100 mV reading between balancing 45 mV readings as "end-of-charge"; both now annunciate on the first critical reading past the bound, and so does a spread balancing on alternate readings (95 mV balancing / 45 mV), which the episode-bound balancing mute held for hours. A second knee in the same session without a rest gets no second grace and annunciates (fail loud); a pack that rests on the plateau for 20 minutes, or discharges below 85% and charges back, starts a new session (v1.187.2; at the top of charge and below 95% until then) — a benign pack relaxes to 3-30 mV within minutes, while a spread that follows the charge current is never under 50 mV for 20 minutes. Charge input is `vdiffKneeChargeW`: `DpuPack.streamInputW`, the pack's `inputWatts` exactly as the MQTT stream delivered it, at most `VDIFF_KNEE_STREAM_FRESH_MS` old — never the REST value (the poll replays the last non-zero reading) and never `liveFlow` (which falls back per field to the polled value); absent or stale ⇒ no charge evidence ⇒ the critical keeps only its balancing grace. A spread still at the line when a grace lapses annunciates ("Did not relax at the top of charge."). The BMS reports cell voltages every ~180 s, so the window always holds a reading taken ≥ 2 min after balancing stopped; benign top-of-charge spreads ≥ 90 mV were back under it within 2.7 min, slow-relaxing ones (110-138 mV, 3-9% in 3 min) annunciate. The critical-line clock ends when the pack leaves the plateau, or once the spread has stayed under the plateau line for an unbroken `VDIFF_KNEE_RELAX_MS` (one sub-line reading does not end it). **v1.187.1 (log review)** — that includes readings under 50 mV, which used to end it at once: between 85% and 95% no session ran until v1.187.2, so this clock was the balancing mute's only bound there, and a balancing spread alternating 95 / 45 mV every ~180 s restarted it on every low reading and was held silent with no limit (and the persisted session held its latest crossing, or none, so a restart did not catch it either). It now annunciates on the first critical reading at or past `VDIFF_KNEE_MAX_MUTE_MS` from its first crossing ("First reached the critical line N minutes ago."), and the file carries that first crossing across a restart. A spread that stays under the line for 5 minutes between crossings starts a new episode each time, as before; since v1.187.2 the session still bounds it. A clock seeded from a persisted onset (`vdiffKneeSeed`: never seen in a process) still ends on a reading under 50 mV, as in v1.187.0 — the onset may be a day old, and kept for five more minutes it made the next day's benign knee annunciate. **v1.187.2** — on ANY reading under 50 mV until a reading at the critical line confirms it (`VdiffKneeState.critSeeded`: set by `vdiffKneeSeed`, cleared by a reading at or above `vdiffCritMvFor(packSoc)` and whenever `critSinceMs` is cleared), where v1.187.1 applied it only to the first reading after the restart, so a first reading at 50-89 mV kept a day-old onset through the readings under 50 mV after it. The mark is written to the knee-session file with the clock (`critSeeded: true`, present only while set; a non-boolean value makes the entry malformed) and restored with it (a mark with no clock is dropped): without it the restore read the clock as one a process had seen, and a second restart restored the day-old onset unmarked. For v1.187.1, the recorded days with top-of-charge spreads (2026-07-23, 07-28, 09-18, 09-25 and 09-29, every pack, replayed through `computeAlerts`) gave the same critical ticks and the same annunciations as before. On a reading gap the activity evidence is dropped (re-earned from fresh readings) but the clocks (`critSinceMs`, `graceFromMs`) are carried, bound to the pack serial, for `VDIFF_KNEE_GAP_CARRY_MS` from the last reading, so offline blips cannot restart the duration bound or re-grant a grace. **Across a restart (v1.187.1)** the clocks are persisted per pack: `vdiff-knee-state.json` beside the database (`VDIFF_KNEE_STATE_PATH` overrides) holds, for each `${sn}-${pk}` holding a clock, the pack serial, `critSinceMs`, `graceFromMs`, the rest (`quietSinceMs`), the last reading time and (v1.187.2) the seed mark (`critSeeded`), floored to `VDIFF_KNEE_SEEN_PERSIST_MS` (5 min). The monitor restores it at start-up, before its first evaluation (`restoreVdiffKneeSessions`), and writes it after each `computeAlerts` only when a persisted value changed (`persistVdiffKneeSessions`): a serial, a clock or the rest, an entry gained or lost, or the last reading entering a new 5-minute grain — never on a tick that changed nothing. The grain turns on the same tick for every pack seen, so the last reading costs one write per 5 minutes however many packs hold a session. The restore applies the in-process gap rule: an entry is carried while the pack's last reading is at most `VDIFF_KNEE_GAP_CARRY_MS` old — the outage, never the onset's age — reading the file's last-reading time as the latest the true one can have been (file value + 5 min − 1 ms, capped at the restart; that bound floors back to the file value, so restarts that see no reading cannot walk it forward), and dropped after it. As across any reading gap, the activity evidence (`lastBalancingMs`, `lastChargeMs`) and the under-the-line run (`belowCritSinceMs`) are neither persisted nor restored: a mute is re-earned from fresh readings. The rest is restored only when the file's last reading is at most `VDIFF_KNEE_SEEN_PERSIST_MS` + `VDIFF_KNEE_RELAX_MS` (10 min) old at the restart — that age bounds the outage from above, and at most three ~180 s BMS readings fall inside it — and starts over at the restart otherwise; a pack unseen on a tick after the restart loses it, as in the process. It is also restored only when it is coherent (`vdiffKneeRestCoherent`, v1.187.1 log review): an unfinished rest inside a running session, begun after the session's first crossing and, while an episode still stands, after that episode's first crossing (the episode outlives the first `VDIFF_KNEE_RELAX_MS` of a rest), and less than `VDIFF_KNEE_MAX_MUTE_MS` before the file's last reading. Anything else — 0, a negative clock, a rest before the session — came from a corrupt file and starts over at the restart: restored, a rest dated far enough back ended a running session on the first reading under 50 mV and granted the next crossing fresh graces. Started over at every restart, the rest after a benign knee kept the restored session up to 20 minutes longer than the process would have, and a second benign knee inside that window (two knees 30 minutes apart, the add-on restarted 12-25 minutes after the first) sounded the red klaxon. After a longer outage the rest must be seen again for 20 minutes, and a second knee inside that window annunciates (fail loud). A spread that follows the charge current breaks its rest on every crossing, before and after a restart (hi / lo / lo with a crossing hidden inside the outage rests at most 15 minutes); only a spread crossing the line on one reading in four or fewer (about every 12 minutes or longer) can have its session ended by a crossing hidden inside a restart's outage — the add-on down for at least one whole ~180 s reading — and its next crossing then earns one more session's graces (a spread with 20 minutes under 50 mV between crossings ends its session in the process alike). A clock ahead of the restart (a clock step) is clamped to it; the restored state stays bound to the pack serial. Restored by the onset's age instead (v1.187.0), a fault that crosses the line on isolated readings came back from a restart on a sub-line reading with no session — its onset held through the resolve dwell for over an hour (95 / 45 mV alternating), or already retired (hi / lo / lo) — and the next crossing opened a new session with up to `VDIFF_KNEE_MAX_MUTE_MS` more silence; it now stays loud. A missing, unreadable or malformed file is ignored with one log line, and a malformed entry is skipped and counted in that line. A pack the file holds no entry for — the file ignored, or the outage longer than the carry — starts from `vdiffKneeSeed`: the persisted onset of its standing `vdiff-crit-<SN>-<pk>` (alertOnset.ts), clamped to now, seeds both clocks — the session clock only from an onset at most `VDIFF_KNEE_GAP_CARRY_MS` old (an onset persisted before a long outage that began inside a knee is not the current session, and seeded it was never ended, so the next day's benign knee had no grace; a critical still standing re-derives the session from the seeded critical-line clock on its first reading at the line and still fails loud) — and the current reading then clears whichever it contradicts. The evidence is never seeded. An onset is at or before the true first crossing, so the bounds can only come due sooner (fail loud): a restart at minute 21 of a balancing-held spread keeps it annunciating ("First reached the critical line 21 minutes ago.") instead of buying up to 20 more minutes of silence, and a restart inside a grace does not re-grant it. A pack with neither an entry nor a standing critical starts fresh. The key is pack SoC, never the max cell alone: a runaway-high cell on a mid-SoC pack stays an immediate critical.
 - `cell-ovp-<SN>-<pk>` (critical, Battery, **v1.187.0**) — "Cell overvoltage": `maxCellVoltageMv` ≥ `CELL_OVP_CRIT_MV` (3.600 V; LFP rating ~3.65 V; fleet maximum observed 3.533 V) and below `CELL_OVP_IMPLAUSIBLE_MV` (65535 is the BMS "unknown" sentinel). Independent of the spread rule and all its gates, and in `isNeverMutedAlert` (exempt from the bench-spare stamp and the off-panel demotion, like a critical Thermal alert). Facts: highest and lowest cell, the line, pack SoC, cell forensics.
 - **Cell forensics (v1.41.0).** Every cell-fault alert carries detection → isolation → root cause with supporting ranges, sourced from the pure helpers `packCellForensics` and `packLatchSignature` (`alerts.ts`, unit-tested, null when per-cell telemetry is absent):
   - `packCellForensics` isolates the cell farthest from the pack's median cell voltage across the 32S1P string (`cellVoltagesMv`) and reports the deviant cell's 1-based index, its voltage, the pack median, the **signed deviation** (negative = weak/low cell), the pack spread, and the sibling packs' spreads for contrast. The critical's detail names the isolated cell inline (spoken by the audible pipeline); the full dossier renders as alert facts.
@@ -5795,7 +6041,7 @@ Battery/voltage/health thresholds:
   - `dpu-err-<SN>` titles by error-code band: codes 500–599 present as **"Battery protection fault"** (battery/BMS protection band) instead of the historical blanket "Inverter error code" that mis-pointed triage; the alert id is unchanged so a standing fault does not re-raise on upgrade. When a pack shows the latch signature, the alert names the probable source pack and attaches the cell dossier.
   - `dpu-imbalance-<SN>` names the lowest pack and, when the latch signature holds, states the stranded-pack flow contrast explicitly.
 - `balancing-<SN>-<pk>` (info) — BMS actively balancing (housekeeping).
-- `temp-cell-` / `temp-mos-` / `temp-board-` / `temp-shunt-<SN>-<pk>` — per-sensor `tempAlert()` against the respective band.
+- `temp-cell-` / `temp-mos-` / `temp-board-` / `temp-shunt-<SN>-<pk>-<severity>` — per-sensor `tempAlert()` against the respective band. The id ends in the band's severity (`info` / `warning` / `critical`), so a band change is a different id: the previous band's alert clears and the new one rises.
 - `temp-cold-<SN>-<pk>` (warning, Thermal) — min cell temp ≤ 41 °F (charge derates near freezing).
 - `soc-low-<SN>-<pk>` (warning) — pack SoC ≤ `PACK_SOC_LOW_PCT` (10%).
 
@@ -5805,15 +6051,16 @@ Online bench spares (`SPARE_DPU_SNS` not wired into SHP2) get `annunciate:false`
 
 **SHP2:**
 
-- `shp2-below-reserve` (critical off-grid, info on-grid, SHP2) — `backupBatPercent <= reserve` (INCLUSIVE, matching `runwayAlarm.belowReserveFloor`; the pool pins at exactly the integer reserve for hours nightly). `reserve = backupReserveSoc ?? 15`.
+- `shp2-below-reserve` (critical off-grid; on-grid a warning with explicit `priority: 'medium'` (v1.81.0), or info while the night-charge plan holds the reserve raised (`getReserveArbitrageRaised`, title "Backup filling to arbitrage reserve"); SHP2) — `backupBatPercent <= reserve` (INCLUSIVE, matching `runwayAlarm.belowReserveFloor`; the pool pins at exactly the integer reserve for hours nightly). `reserve = backupReserveSoc ?? 15`.
 - `shp2-near-reserve` (warning off-grid, info on-grid) — `reserve < backupBatPercent < reserve+10`.
-- `shp2-src-err-<slot>` (critical, SHP2) — energy-source error count `errorCodeNum != 0`, **debounced** by the same `DPU_ERR_DEBOUNCE_MS` per `<sn>:<slot>` onset.
+- `shp2-src-err-<slot>` (critical, SHP2) — energy-source error code `errorCodeNum != 0` (the source device's error code, not a count, v1.45.0; carried as `fault: err<code>`), **debounced** by the same `DPU_ERR_DEBOUNCE_MS` per `<sn>:<slot>` onset.
 - `shp2-src-hw-<slot>` (warning) — slot `isConnected && !hwConnect`.
 - `circuit-overload-<primaryCh>` (warning) — paired-circuit watts ≥ `capacity * 0.9`, where `capacity = breakerAmps * (isSplitPhase ? 240 : 120)`.
+- **Secondary panels (v1.185.0).** On a multi-panel plant, `secondaryPanelAlerts` gives every panel other than the house panel the same reserve pair, source, circuit, reserve-blind and SoC-band alerts. Their ids carry a `-<serial>` suffix (`familyOf` stops at the serial, so every family rule applies) and their titles lead with the panel's name. Each reads its own panel's grid verdict and has no arbitrage posture: on grid at or below reserve is always a Medium warning (§2, *Two panels (v1.185.0)*).
 
 **Reserve-alarm-blind compensating alert (F3):**
 
-- `reserve-alarm-blind` (warning; critical after `RESERVE_BLIND_CRITICAL_MS` off-grid) — the entire reserve chain keys off the SHP2 backup-pool %; when that reads null (cloud wedge) for ≥ `RESERVE_BLIND_AFTER_MS` (15 min past the grace hold), this says the reserve alarm is *blind right now*. Reports the `homeFleetMeanSoc()` fallback ladder. Listed in `ENERGY_STATE_FAMILIES` so the auto-silencer can never eat it. **v1.187.4** — the onset (`backupPoolUnknownSince`) survives a restart: the store writes each unknown pool's onset and when it was last seen unknown to `pool-unknown.json` beside the DB, and a panel whose first projection after the restart reads unknown again carries it when the add-on was down at most `POOL_UNKNOWN_CARRY_MAX_GAP_MS`. The file is refreshed by the poll loop too, so a panel gone dark keeps its onset; until a panel reports after the restart its carriable entry keeps the alert set unsettled. Before, the alarm was absent for 15 min after every restart and came back as a warning until boot + 60 even when it had been critical.
+- `reserve-alarm-blind` (warning; critical after `RESERVE_BLIND_CRITICAL_MS` off-grid) — the entire reserve chain keys off the SHP2 backup-pool %; when that reads null (cloud wedge) for ≥ `RESERVE_BLIND_AFTER_MS` (15 min past the grace hold), this says the reserve alarm is *blind right now*. Reports the `housePoolFallbackSoc()` fallback ladder (`homeFleetMeanSoc` on a one-panel plant; the house panel's own Cores on two, v1.185.0). Listed in `ENERGY_STATE_FAMILIES` so the auto-silencer can never eat it. **v1.187.4** — the onset (`backupPoolUnknownSince`) survives a restart: the store writes each unknown pool's onset and when it was last seen unknown to `pool-unknown.json` beside the DB, and a panel whose first projection after the restart reads unknown again carries it when the add-on was down at most `POOL_UNKNOWN_CARRY_MAX_GAP_MS`. The file is refreshed by the poll loop too, so a panel gone dark keeps its onset; until a panel reports after the restart its carriable entry keeps the alert set unsettled. Before, the alarm was absent for 15 min after every restart and came back as a warning until boot + 60 even when it had been critical.
 
 **Backup-pool SoC ladder:**
 
@@ -5851,7 +6098,7 @@ Learned alerts carry `source: 'learned'` (→ ISA Medium at warning severity). R
 | `soh` | state of health | Battery | 2 % | `actSoh ?? soh` |
 | `soc` | state of charge | Battery | 8 % | `soc` |
 
-**CALCULATION.** Per metric: collect finite sibling values → `med`, `m = mad`. For each pack, `absDev = |v − med|`; skip if `absDev < floor`. Compute `z = robustZ(v, med, m, floor, Z_INFO)` (a bare floor-cross with zero sibling scatter scores exactly `Z_INFO`, not infinity); skip if `z < Z_INFO`. **Hysteresis** (`bumpPeerHit(key)` keyed `metric-sn-pack`): require ≥ `PEER_HIT_EMIT_MIN` = 3 consecutive eval cycles before emitting; `prunePeerHitCounts(seen)` resets any key that lapsed a cycle. Severity: `z ≥ Z_WARN && warnEligible ? 'warning' : 'info'`, where thermal outliers are `warnEligible` only on the HOT side (a cold pack is benign). **v1.187.1** — the cell-voltage spread (`voldiff`) is one-sided too: a spread LOWER than the sibling median is the healthy direction (a better-balanced pack, or the first pack to report after the knee relaxes, compared with siblings' staler knee readings), so it is never `warnEligible`, and it is emitted at info with `annunciate: false` and `muteReason` `PEER_SPREAD_LOW_MUTE_REASON` and a detail that says it is not a fault — on screen only: not pushed, not spoken, not counted toward the condition, and (`autoTuneCounts`) not fed to the auto-tune rollups. The high side, and SoC and SoH in both directions, keep the rule above; `vdiff-warn` / `vdiff-crit` judge every pack against fixed limits whatever its siblings read.
+**CALCULATION.** Per metric: collect finite sibling values → `med`, `m = mad`. For each pack, `absDev = |v − med|`; skip if `absDev < floor`. Compute `z = robustZ(v, med, m, floor, Z_INFO)` (a bare floor-cross with zero sibling scatter scores exactly `Z_INFO`, not infinity); skip if `z < Z_INFO`. **Hysteresis** (`bumpPeerHit(key)` keyed `metric-sn-pack-packSn`; since v1.173.0 a different pack in the slot re-earns its cycles): require ≥ `PEER_HIT_EMIT_MIN` = 3 consecutive eval cycles before emitting; `prunePeerHitCounts(seen)` resets any key that lapsed a cycle. Severity: `z ≥ Z_WARN && warnEligible ? 'warning' : 'info'`, where thermal outliers are `warnEligible` only on the HOT side (a cold pack is benign). **v1.187.1** — the cell-voltage spread (`voldiff`) is one-sided too: a spread LOWER than the sibling median is the healthy direction (a better-balanced pack, or the first pack to report after the knee relaxes, compared with siblings' staler knee readings), so it is never `warnEligible`, and it is emitted at info with `annunciate: false` and `muteReason` `PEER_SPREAD_LOW_MUTE_REASON` and a detail that says it is not a fault — on screen only: not pushed, not spoken, not counted toward the condition, and (`autoTuneCounts`) not fed to the auto-tune rollups. The high side, and SoC and SoH in both directions, keep the rule above; `vdiff-warn` / `vdiff-crit` judge every pack against fixed limits whatever its siblings read.
 
 **OUTPUT id** `peer-<key>-<SN>-<pk>` with facts: this pack, sibling median, deviation, peer z-score, flag thresholds.
 
@@ -5893,7 +6140,7 @@ The typical load, the load step and the loaded references come from `coreActivit
 
 - **`forecast-soc-dip`** (warning; info when grid backstopping, SHP2) — `minProjectedSoc < reserveSoc`. Discriminates severity by *hours-below-reserve* (depth alone is degenerate on a grid-tied home that pins at the floor). `why` text is chosen by average cloud cover (>50% / >30% / else). Facts: projected low SoC, reserve, hours below reserve, expected-at, solar next 24 h, clear-sky ceiling, avg cloud.
 - **`forecast-low-solar`** (info, Solar) — `forecastPvWhNext24 < 0.6 × typicalBiasAdjusted`, where `typicalBiasAdjusted = typicalPvWhPerDay × pvBiasFactor` (puts both sides on the same bias basis). `why` attributes the gap to cloud (>60% / >40% / else) vs equipment.
-- **`soiling-pv`** (info; warning if `dropPct ≥ 22`, Solar) — clear-sky output ≥ 12% below the clean-panel baseline, with `cleanDays ≥ 6` and `recentCovered !== false`. `audible: false` at every severity (v1.187.1): a maintenance estimate that moves over weeks keeps its card and push but never raises or voices the broadcast condition (§2.1); `conditionFromAlerts` also excludes the id.
+- **`soiling-pv`** (info; warning if `dropPct ≥ 22`, Solar) — clear-sky output ≥ 12% below the clean-panel baseline, with `cleanDays ≥ 6` and `recentCovered !== false`. `audible: false` at every severity (v1.187.1): a maintenance estimate that moves over weeks keeps its card and push but never raises or voices the broadcast condition (§10, 2.1); `conditionFromAlerts` also excludes the id.
 
 #### Other learned/situational sources threaded into the monitor's eval
 
@@ -5901,20 +6148,23 @@ The typical load, the load step and the loaded references come from `coreActivit
 - **`curtailmentAlerts`** (analytics report) — SoC-saturation headroom advisory (info).
 - **`broadcastHealthAlert(getBroadcastHealth(), now)`** — the audible-delivery self-alert: when audible broadcasting is enabled but the broadcast monitor CONFIRMED no reachable speaker, one WARNING push rides the notify path (the audible channel can't announce its own outage). Null health ⇒ no alert. Its id is excluded from `conditionFromAlerts` so it never tries to chime.
 - **`rateFloorAlerts(getRateFloorCollapses())`** — devices whose incoming message RATE collapsed below their learned baseline while `lastUpdated` stays fresh (the SHP2 ~13 h crawl that defeats staleness/gap detectors). WARNING push.
+- **`broadcastDegradedAlert(getBroadcastHealth(), now)`** (v1.186.0) — the partial audible channel: some, not all, configured speakers usable, each named. It rides the same push path and is likewise excluded from the audible condition, and yields to the unreachable alert once no speaker is usable (§10, 13).
+- **`telemetryBlindAlerts(...)`** — `telemetry-blind`: the add-on can see no device. It is held non-annunciating while `blindRemediationStep` runs its remediate-first hold (`MUTE_REASON_REMEDIATION`, v1.166.0) (§2.15).
+- **`peakGridDrawAlerts`** / **`peakIdlePoolAlerts`** — the on-peak grid-to-battery notice `peak-grid-draw` (§7.10) and the on-peak idle-pool notice `peak-idle-pool` (§7.10.1, v1.187.0). Both are assembled on the main thread together with the `computeAlerts` and `computeLearnedAlerts` output.
 
 ---
 
 ### 4. The alert monitor — `startAlertMonitor()` (`alertMonitor.ts`)
 
-**WHAT.** Runs `evaluate()` every `EVAL_INTERVAL_MS` (`ALERT_EVAL_MS`, default 20 s), re-entrancy-guarded (`evaluating` latch — an overlapping tick during a hung send is skipped). Each tick: assembles the full alert list from all sources above, `store.setAlerts()`, `buildIncidents()`, then processes rising edges, the morning digest, and falling edges.
+**WHAT.** Runs `evaluate()` every `EVAL_INTERVAL_MS` (`ALERT_EVAL_MS`, default 20 s), re-entrancy-guarded (`evaluating` latch — an overlapping tick during a hung send is skipped). **Boot gate (v1.186.0):** no pass runs (no publish, no first-run seeding, no onset prune) until the store is hydrated by its first complete poll or `BOOT_HYDRATION_MAX_MS` (`ALERT_BOOT_HYDRATION_MAX_MS`, default 30 s) passes. Past that bound the monitor evaluates on the data that exists and logs a WARNING; offline and telemetry-blind alarms still fire. Each tick: assembles the full alert list from all sources above, `store.setAlerts()`, `buildIncidents()`, then processes rising edges, the morning digest, and falling edges.
 
 **Worker-served inputs.** forecast, storm-prep, curtailmentAlerts, baselineAlerts and forecastAlerts are last-good feeds (`createLastGoodFeed`): each tick waits at most `ALERT_FEED_BUDGET_MS` (2.5 s) and otherwise carries the last good value, never an empty list. The worker's recompute of the four analytics feeds routinely outlasts the budget, so a one-pass budget carry is the normal path and is **not logged** (v1.187.0). A carry is logged when the read FAILED (at once), when a budget carry reaches `ALERT_FEED_CARRY_LOG_PASSES` (2) consecutive passes, and — as a WARNING through the monitor's warn sink, once per episode — at `ALERT_FEED_STUCK_WARN_PASSES` (15, ~5 min; the four worker feeds — storm-prep keeps the info sink, its line still reads "WARNING —"); "fresh again" is logged only for an episode whose carry was. `/api/notify/status` `alertFeeds[]` reports each feed's `warm`, `ageMs`, `carrying`, `lastError` and `carryEpisodes` (every carry since boot, logged or not).
 
 #### 4.1 Rising edges, debounce, dispatch decision
 
-For each alert not yet tracked, the monitor captures a feature snapshot (§6), `recordRise()`, and seeds a `TrackedAlert` with `notified = bootSeedNotified(...)` (a boot-standing alert is seeded as already notified, except an outage event and a critical with no notify-state record). For an already-tracked alert it updates `peakSeverity` (the most-severe severity ever reached), refreshes the notify-state record if older than `NOTIFY_STATE_REFRESH_MS` (12 h), and — if annunciating — computes the dispatch decision.
+For each alert not yet tracked, the monitor queues a feature snapshot (§6; taken detached after the tick's dispatches since v1.186.0, `captureFeaturesDetached`) and counts the rise with `recordRise()` only when the alert annunciates (`autoTuneCounts`) and is not a re-track of a condition that predates the restart (`bootRetrackDecision`). It then seeds a `TrackedAlert` with `notified = bootSeedNotified(...)` (a boot-standing alert is seeded as already notified, except an outage event and a critical with no notify-state record). For an already-tracked alert it updates `peakSeverity` (the most-severe severity ever reached), refreshes the notify-state record if older than `NOTIFY_STATE_REFRESH_MS` (12 h), and — if annunciating — computes the dispatch decision.
 
-**Debounce.** `DEBOUNCE_MS` (`ALERT_DEBOUNCE_MS`, default 60 s). Critical alerts bypass debounce (0 ms) so a brief critical isn't swallowed. The per-circuit load-anomaly family (`baseline-(ch|pair)N_w-…`, `isSustainGatedLoadAnomaly`) uses a much longer fire debounce `BASELINE_LOAD_SUSTAIN_MS` (`BASELINE_LOAD_SUSTAIN_MS`, default 8 min) so a normal compressor cycle clears inside the window and never pushes.
+**Debounce.** `DEBOUNCE_MS` (`ALERT_DEBOUNCE_MS`, default 60 s). Critical alerts bypass this debounce (0 ms) so a brief critical isn't swallowed. The push hold-downs of `pushDebounceMsFor` (§4.5) still apply on top, so a fresh `vdiff-crit-` push waits `SETTLE_PUSH_DEBOUNCE_MS` (5 min); only an escalation to critical skips every hold (`escDebounceMs = 0`). The per-circuit load-anomaly family (`baseline-(ch|pair)N_w-…`, `isSustainGatedLoadAnomaly`) uses a much longer fire debounce `BASELINE_LOAD_SUSTAIN_MS` (`BASELINE_LOAD_SUSTAIN_MS`, default 8 min) so a normal compressor cycle clears inside the window and never pushes.
 
 **Escalation.** `isAlertEscalation(prev, severity)` — an alert that has escalated above the severity it was last acted on (dispatched OR queued) re-notifies even after a prior push; a critical escalation bypasses debounce.
 
@@ -5930,11 +6180,11 @@ return inQuiet && !breaksThrough ? 'queue' : 'dispatch'
 
 #### 4.2 Quiet hours (F1) and the morning digest
 
-- `QUIET_WINDOW = parseQuietHours(NOTIFY_QUIET_HOURS)` (default `"22-06"`; `inQuietWindow` handles the midnight wrap). **This is the F1 knob the memory flags as the #1 postponed risk** — during quiet hours warning/info are queued for the morning digest.
-- `CRITICAL_BREAKS_QUIET` (`CRITICAL_BREAKS_QUIET_HOURS`, default **false**) — when false, critical alerts are ALSO held for the digest (nights stay truly quiet); set `true`/`1` to be woken for criticals. The live config on this host holds every tier including critical until `DIGEST_HOUR`.
+- `QUIET_WINDOW = parseQuietHours(NOTIFY_QUIET_HOURS)` (default `"22-06"`; `inQuietWindow` handles the midnight wrap). During quiet hours warning/info are queued for the morning digest.
+- `CRITICAL_BREAKS_QUIET` (`CRITICAL_BREAKS_QUIET_HOURS`, default **false**) — when false, critical alerts are ALSO held for the digest (nights stay truly quiet); set `true`/`1` to be woken for criticals. At the default, every tier including critical is held until `DIGEST_HOUR`, and the digest says so and names the option.
 - `DIGEST_HOUR` (`NOTIFY_DIGEST_HOUR`, default 7). `dispatchDigest()` fires once when the local hour rolls to `DIGEST_HOUR`, sorted most-severe first, one line per subject with ISA-priority labels. It only digests entries still legitimately held (`tracked.get(id)?.queued === true`), and on success marks them notified + `pushSent` + persisted (deferred from queue-time, so a pre-digest restart re-queues rather than drops). A failed digest send does NOT latch `lastDigestHour`, so it retries each tick within the hour. No channel configured ⇒ it logs loudly and drops the queue.
 
-Queue mechanics: `action === 'queue'` sets only the in-memory `queued` flag and `notifiedSeverity` (NOT `notified`, NOT persisted) so a restart re-evaluates and re-queues; an escalation-while-queued replaces the held entry in place (one line, escalated severity).
+Queue mechanics: `action === 'queue'` sets the `queued` flag and `notifiedSeverity` (NOT `notified`, and no notify-state record), so a restart re-evaluates the alert. The held queue itself and the overnight-resolved records persist to `digest-queue.json` beside the DB (`DIGEST_STATE_PATH`, v1.86.0, written on every change) and are rehydrated at boot, so a hold that spans a restart still reaches the digest (`queuedRehydrated`, v1.130.0); an escalation-while-queued replaces the held entry in place (one line, escalated severity).
 
 #### 4.3 Incident clustering — `buildIncidents(alerts)`
 
@@ -5963,7 +6213,7 @@ Family rollups (`AlertActionStats`, keyed by `familyOf`) track `riseCount`, `sho
 
 **Rebased families (v1.187.0).** `TELEMETRY_FAMILY_BASIS` (alertTelemetry.ts) lists families whose emitter changed what it lets annunciate — `baseline-mppt_hv_temp` and `baseline-mppt_lv_temp` (basis `mppt-load-comparable`: cooler-than-typical and load-explained MPPT readings stopped annunciating), and **v1.187.3** `peer-voldiff` (basis `peer-voldiff-high-side`: since v1.187.1 a lower cell spread than the siblings' is info and `annunciate:false`; its earlier short episodes were part of the 80.0% that held Rule 2 at its cutoff on 2026-10-01, and without three of them the family read 78.1%). `appendTelemetryEvent` stamps their basis on every new line, and `replayTelemetryEvents` does not replay a line of such a family without it (`rebasedSkipped` / `rebasedFamilies`, logged at boot by `rebasedReplayLine` with what each basis left out — `TELEMETRY_BASIS_DROPPED` — and the verdicts lifted). Like the v1.186.0 scope reset, this can only lift a silence or demotion; a family that is genuinely noisy re-latches from current-rule events (Rule 2 after 10 rises).
 
-**Critical is never silenced or demoted.** `ENERGY_STATE_FAMILIES` are exempt from all four rules (a fast clear is a genuine recovery, not jitter): `backup-soc`, `shp2-below-reserve`, `shp2-near-reserve`, `soc-low`, `forecast-runtime`, `offline`, `stale`, `forecast-soc-dip`, `reserve-alarm-blind`. Bench-spare churn rolls up under separate `offline-spare` / `stale-spare` families so it can still be auto-tuned without poisoning home-device stats.
+**Critical is never silenced or demoted.** `ENERGY_STATE_FAMILIES` are exempt from all four rules (a fast clear is a genuine recovery, not jitter): `backup-soc`, `shp2-below-reserve`, `shp2-near-reserve`, `soc-low`, `forecast-runtime`, `offline`, `stale`, `msg-rate-floor` (v1.120.0), `forecast-soc-dip`, `reserve-alarm-blind`. Bench-spare churn rolls up under separate `offline-spare` / `stale-spare` families so it can still be auto-tuned without poisoning home-device stats.
 
 **v1.95.0 — off-panel annunciation demotion.** Annunciation used to be gated solely by the static `SPARE_DPU_SNS` literal, which describes the bench only at the moment it was written; the 2026-08-20 reconfiguration inverted it, so a benched Core chimed at full volume (19 of 19 pushes and 48 of 67 s of audio in one window) while a live home Core sat inside the literal. A DPU absent from a **non-empty** SHP2 roster is now demoted to `annunciate:false`, with three guards, each mutation-proven load-bearing (`scripts/mutate-off-panel-annunciation.mjs`, 6/6): **hysteresis** — `OFF_PANEL_DEMOTE_TICKS` (3) consecutive absences to demote but **one** sighting to re-arm, so a flickering `isConnect` can never silence a live home Core; **empty roster demotes nobody**, because an unreadable panel is not evidence; and a **thermal-critical carve-out** — a `critical` alert in category `Thermal` is never demoted, since a bench pack that is overheating must page regardless of where it is wired. Pure cores `advanceOffPanelStreaks` / `shouldDemoteAnnunciation` are exported for tests.
 
@@ -5982,7 +6232,7 @@ An alert absent this tick is a candidate for "Resolved:". Several family-specifi
 | `learned` alert within post-boot window | `LEARNED_RESOLVE_GRACE_MS` (10 min) | — (warm-up guard) |
 | `isSustainGatedLoadAnomaly` | `BASELINE_LOAD_RESOLVE_DWELL_MS` (8 min) | `BASELINE_LOAD_RESOLVE_DWELL_MS` |
 | `isSocResolveDwellFamily` (`soc-low-`) | `SOC_RESOLVE_DWELL_MS` (3 min) | `SOC_RESOLVE_DWELL_MS` |
-| `isCellImbalanceResolveDwellFamily` (`vdiff-(warn|crit)-`, `peer-voldiff-`) | `VDIFF_RESOLVE_DWELL_MS` (3 min) | `VDIFF_RESOLVE_DWELL_MS` |
+| `isCellImbalanceResolveDwellFamily` (`vdiff-(warn\|crit)-`, `peer-voldiff-`) | `VDIFF_RESOLVE_DWELL_MS` (3 min) | `VDIFF_RESOLVE_DWELL_MS` |
 | `isForecastDipResolveDwellFamily` (`forecast-soc-dip`) | `FORECAST_DIP_RESOLVE_DWELL_MS` (90 min) | `FORECAST_DIP_RESOLVE_DWELL_MS` |
 
 The PUSH side has its own hold-downs in `pushDebounceMsFor`: the settle families
@@ -5999,7 +6249,7 @@ Once the dwell passes: the notify-state record is deleted FIRST (so a failed res
 
 #### 4.6 Notify-state persistence & boot reconcile
 
-`persistedNotified: Map<id, NotifyRecord{ts, sent, sev?, title?}>` survives restarts at `NOTIFY_STATE_PATH` (default sibling of the DB). Loaded with a `NOTIFY_STATE_MAX_AGE_MS` (24 h) TTL; still-active records are refreshed every 12 h so a >25 h cloud wedge keeps its owed "Resolved:" across the daily reboot. `orphanedNotifiedIds()` runs once per boot after `LEARNED_RESOLVE_GRACE_MS` warm-up: persisted ids neither firing nor tracked are retired — resolved (if owed, dismissing the exact HA card via the id-as-dedupId) or merely dropped. Dispatch is **at-least-once** (F): send first, mark `notified`/persist only when not `failed`; a failed send retries next tick.
+`persistedNotified: Map<id, NotifyRecord{ts, sent, sev?, title?, sourceSn?}>` survives restarts at `NOTIFY_STATE_PATH` (default sibling of the DB). Loaded with a `NOTIFY_STATE_MAX_AGE_MS` (24 h) TTL; still-active records are refreshed every 12 h so a >25 h cloud wedge keeps its owed "Resolved:" across the daily reboot. `orphanedNotifiedIds()` runs after the `LEARNED_RESOLVE_GRACE_MS` warm-up: persisted ids neither firing nor tracked are retired — resolved (if owed, dismissing the exact HA card via the id-as-dedupId) or merely dropped. The sweep waits out notify quiet hours (v1.129.0). An orphan whose source cannot be judged is HELD and re-checked each tick (v1.140.0, v1.186.0): its device absent or stale (`fallingEdgeFrozenByEvidence`, read through the record's `sourceSn`), a worker feed that owns it not yet delivered, or no complete poll yet. A held orphan still unobservable at `bootMs + LEARNED_RESOLVE_GRACE_MS + ORPHAN_HOLD_MAX_MS` (`ALERT_ORPHAN_HOLD_MAX_MS`, default 6 h) is dropped with a WARNING and no "Resolved:". One `notify: boot reconcile` line reports how many records were resolved, dropped and held. Dispatch is **at-least-once** (F): send first, mark `notified`/persist only when not `failed`; a failed send retries next tick.
 
 Cleared history persists to `CLEARED_LOG_PATH` (default sibling of DB), cap `CLEARED_LOG_MAX` (`CLEARED_LOG_MAX`, default 1500, min 50). Eviction (`pruneOldestNonSignificant`) is severity-tiered; a critical is evicted only when the whole log is criticals. **v1.187.1** — each new row records `pushed` (the episode's push went out) and `rosterMuted` (`clearedRetention`: the alert never annunciated on any tick of the episode, its push never went out, and its id carries a serial the roster mutes — a bench spare or an off-panel Core — when it cleared). A tick on which the alert's Core has no settled roster mute does not count as annunciating (`rosterMuteUnsettledSns`: the panel roster not yet read in this process, or the Core part-way through its `OFF_PANEL_DEMOTE_TICKS` off-panel streak), since the streak restarts at 0 in every process and an off-panel Core's standing alerts annunciated on the first ticks after each restart; the mute, the push and the speech are unchanged, and a push still records `pushed`. Order: oldest info (**v1.187.3** — except a `CLEARED_INFO_KEPT_AS_WARNING_PREFIXES` row, `ems-volt-*`, a warning until v1.187.3, which is evicted as a warning: at the cap the info tier is nearly empty, and its rows are the band episodes' record and warranty evidence) → oldest roster-muted warning older than `CLEARED_ROSTER_MUTED_KEEP_MS` (30 days; the last month of bench-spare record stays whole) → oldest noise-flagged warning (auto-tune family flags) recorded as not pushed → oldest noise-flagged warning not recorded as pushed (**v1.187.10**) → oldest warning that is not `isNeverMutedAlert` and not warranty evidence (**v1.187.10 review** — a pushed noise row no longer leaves in the noise tiers, so it reaches this tier, and it must not outlive the evidence it used to leave before) → oldest warning that is not `isNeverMutedAlert` → oldest warning that is not `pack-defective-*` (the other never-muted ids, such as `shp2-multi-panel`, leave before it) → oldest warning → oldest overall. Warranty evidence (`warrantyEvidence`: every `pack-defective-*` row, the rows of its Core whose episode overlaps a pack-defective episode, and every row carrying that pack's `sourcePackSn`) never leaves in the roster or noise tiers, and `pack-defective-*` rows leave after every other warning. A row muted by a condition (balancing, top of charge) is not roster-muted and stays in the plain oldest-warning tier, so the record of whether a mute hid a real fault is kept like annunciated history; rows written before v1.187.1 carry neither field and stay there too. **v1.187.1 (log review)** — `loadClearedLog` keeps a row only when its alert's `id` and `severity` are strings, and the never-muted tier and `warrantyEvidence` read a non-string id as no id (such a row leaves with the ordinary warnings and is no one's evidence): a hand-edited or corrupt row without them threw in the eviction on every clear at the cap, so the tick aborted before its pushes, or re-sent the same "Resolved" push every tick. The monitor never writes such a row. **v1.187.10 (log review)** — at the live cap the ledger held 1417 warnings, 83 criticals and 0 info rows over 85 days: with no info row left, the oldest info row was the one just added, so every info clear left on arrival; and the window's only push (a noise-flagged `peer-voldiff` row) left on its own arrival through the noise tier while 85-day-old rows whose push is unknown stayed. The newest info rows now keep a reserve of one row in `CLEARED_INFO_RESERVE_DIVISOR` (15: 100 of 1500) — an info row leaves first only beyond it, and the reserved ones leave after every warning, still before any critical — and a row recorded as pushed never leaves in the noise tiers (it ages out with the ordinary warnings). The rehydrate line at the cap says what the ledger holds and what each new clear evicts (`clearedLedgerCapNote`: warning / critical / info counts, the oldest warning's age, the eviction order) instead of "older records are being dropped". Served at **`/api/alerts/history`** (`{ cleared }`, cached 30 s).
 
@@ -6068,7 +6318,7 @@ The operator's response is the ground-truth label. `AlertOutcome ∈ {ack, dismi
 
 `POST /api/alerts/outcome` (`{alertId, outcome, notes?}`) looks up the live alert (for category/severity) and the captured snapshot, appends an `AlertOutcomeEntry` (sanitized: verdict allow-listed, numbers coerced finite, strings control-stripped/length-bounded; IP+UA recorded for audit) to `ALERT_OUTCOMES_PATH` (append-only JSONL, kept forever), fires an online-LR weight update (`updateFromOutcome` — only when labelable and features exist; writes a shadow model, never overwrites the baseline), then drops the in-memory snapshot. Returns `{ ok, onlineLrUpdated }`.
 
-`GET /api/alerts/outcomes?limit=` → `{ entries }` (tail, newest-first). `GET /api/alerts/outcomes/stats` → `{ families }`: `computeFamilyStats()` groups by `familyOf`, precision = `(ack+failed)/(ack+failed+dismiss)`, plus median time-to-action — **null** for `PERSISTENT_FAMILIES` (`offline`, `grid-offgrid`) where `ts−alertFiredAt` is condition-age, not response latency.
+`GET /api/alerts/outcomes?limit=` → `{ entries }` (tail, newest-first). `GET /api/alerts/outcomes/stats` → `{ families }`: `computeFamilyStats()` groups by `familyOf`, precision = `(ack+failed)/(ack+failed+dismiss)` — `null` unless the family has at least one dismissal and `FAMILY_MIN_DECIDED_OUTCOMES` (3) decided outcomes (`familyPrecision`, v1.123.0), plus median time-to-action — **null** for `PERSISTENT_FAMILIES` (`offline`, `grid-offgrid`) where `ts−alertFiredAt` is condition-age, not response latency.
 
 #### Machine telemetry — `alertTelemetry.ts`
 
@@ -6101,7 +6351,7 @@ vi–viii).
 
 Issues emitted:
 
-- `cloud-offline-<SN>` (Connectivity) — offline device (skips `SPARE_DPU_SNS`); severity mirrors the alert engine via `isCoreOrShp2()` (Core/SHP2 = warning, peripheral = info). 5-step reconnect/power-cycle guide.
+- `cloud-offline-<SN>` (Connectivity) — offline device (skips bench spares via `isBenchSpareSn`, which the last-known home roster overrides); severity mirrors the alert engine via `isCoreOrShp2()` (Core/SHP2 = warning, peripheral = info). 5-step reconnect/power-cycle guide.
 - `wash-panels` (Cleaning) — per-DPU soiling ≥ `SOILING_CARD_DROP_PCT` (12%, aligned to the soiling alert) with `cleanDays ≥ 6` and, since v1.187.1, the row's `recentCovered` (as the alert requires it: a thin or stale recent window gives no card); warning if worst ≥ 22%.
 - `peer-outlier-<SN>-<pk>` (Battery, warning) — a `degradation.peerOutlier` pack fading fastest.
 - `mppt-drift-<SN>-<string>` (Hardware, info) — MPPT reading drift `< -3` pp. **v1.187.10** — titled "MPPT reading drift" and worded as a W ÷ V·A reading-consistency ratio; the steps are a meter check of the string's V and A at the MPPT input (it sent the operator to MC4 connectors, panel clamp checks and a warranty inquiry, none of which the ratio can indicate).
@@ -6117,9 +6367,9 @@ Stale ids are pruned each cycle. Served at **`/api/repair-issues`** (cached), as
 **WHAT.** The safety machinery that decides which DPUs count as home fleet and which are expected-offline bench spares, so a spare's offline state is muted while a real home Core's is NEVER muted.
 
 - `shp2ConnectedDpuSns(devices)` — set of DPU SNs the SHP2 reports as connected sources (`s.isConnected && s.sn`). Empty when no SHP2 observed → `isShp2Connected` returns true for every SN (DPU-only fallback; don't zero the dashboard).
-- **`SPARE_DPU_SNS`** — the explicit allowlist SAFETY FLOOR of bench-spare DPU serials (Core 4, Core 5). A home Core (1/2/3) is NEVER in this set, so even a faulted/unplugged home Core — which drops out of the SHP2's connected sources — still annunciates its genuine offline alarm. This is the "zombie gate": membership is by explicit SN, not by dynamic `isConnected` (which would mute a faulted core).
-- `isExpectedOfflineSpare(sn, connected)` — `SPARE_DPU_SNS.has(sn) && !connected.has(sn)`. The positive connected-source check RE-ARMS a spare the instant it is wired into an SHP2. Overloaded to accept a pre-computed Set (hot loop) or the raw devices Record.
-- The monitor applies a central spare gate each tick: any alert whose id contains a muted spare's SN gets `annunciate: false` stamped (idempotent with the per-emitter gate in `alerts.ts`).
+- **`SPARE_DPU_SNS`** — the explicit SN literal that is the SAFETY FLOOR for bench spares: a DPU it does not name is never treated as a spare, so a faulted/unplugged home Core — which drops out of the SHP2's connected sources — still annunciates its genuine offline alarm. The literal can drift from the wiring (a swap can move a listed serial into the home pool), so since v1.121.0 `isBenchSpareSn(sn, lastKnownRoster?)` removes spare status from any listed serial that the durable last-known home roster (`setLastKnownHomeRoster`) names as a home-pool source. The roster can only remove spare status, never add it. This is the "zombie gate": membership is by explicit SN, not by dynamic `isConnected` (which would mute a faulted core).
+- `isExpectedOfflineSpare(sn, connected, lastKnownRoster?)` — `!connected.has(sn) && isBenchSpareSn(sn, lastKnownRoster)` (v1.121.0; previously `SPARE_DPU_SNS.has(sn) && !connected.has(sn)`, which used the literal alone whenever the SHP2 went cloud-dark and `connected` emptied). The positive connected-source check RE-ARMS a spare the instant it is wired into an SHP2. Overloaded to accept a pre-computed Set (hot loop) or the raw devices Record.
+- The monitor applies a central roster gate each tick (`applyRosterMute`): any alert whose id carries the serial of a bench spare, or of a Core absent from a non-empty panel roster for `OFF_PANEL_DEMOTE_TICKS` ticks, is stamped `annunciate: false` with its `muteReason`, except the `isNeverMutedAlert` ids (idempotent with the per-emitter spare stamp in `alerts.ts`).
 - Supporting helpers: `isSourceDpuStale` (observability-only `dpuStale` flag), `homeCoreCoverage` (`{connected, reporting, complete}` — can we see the whole pool?), `homeFleetMeanSoc` (mean SoC of reporting home Cores — the reserve-alarm-blind fallback ladder), `aggregateFleetFlow` (SHP2-membership-filtered fleet power totals).
 
 ---
@@ -6169,6 +6419,11 @@ Served at **`GET /api/alert-settings`** (`alertSettingsResponse()`, cached in-pr
 | `/api/repair-issues` | GET | `RepairIssuesReport { generatedAt, issues: RepairIssue[] }` |
 | `/api/confidence` | GET | `ConfidenceSnapshot` (cached 60 s) |
 | `/api/alert-settings` | GET/PUT | `AlertSettings` (PUT write-gated) |
+| `/api/notify/status` | GET | notify config (`channel`, `configured`, `reachesAPhone`, `pushTargets`, `criticalBypassDnd`, `lastPushFailures`) plus `monitor.stats()`, including `alertFeeds[]` |
+| `/api/notify/test` | POST | sends a test push (write-gated) |
+| `/api/telemetry-gaps` | GET | gap ledger plus `telemetryGapLedgerSummary()` (cached 30 s) |
+| `/api/defective-packs` | GET | latched defective-pack records; `POST /api/defective-packs/clear?packSn=` clears one (write-gated) |
+| `/api/models/health` | GET | `ModelHealthReport` (cached 60 s, §9) |
 
 ---
 
@@ -6177,7 +6432,7 @@ Served at **`GET /api/alert-settings`** (`alertSettingsResponse()`, cached in-pr
 - **Debounce onsets are optional.** When `connectivity` (or a specific onset map) is absent — older callers/tests — the `dpu-err` / `shp2-src-err` debounce is skipped and the CRITICAL fires immediately (pre-v1.11 behaviour). No path silently loses a real fault.
 - **Reserve default.** Every reserve consumer defaults `backupReserveSoc ?? 15`, kept consistent between the near/below pair and the SoC-band dedup.
 - **`mpptProducing` fallback.** `amps == null` (device doesn't report current) falls back to the watt test alone rather than suppressing an MPPT error.
-- **Bench-spare mute is bidirectional & self-re-arming.** A spare wired into an SHP2 immediately loses `annunciate:false` (it becomes a connected source); a home Core can never be muted (never in `SPARE_DPU_SNS`).
+- **Bench-spare mute is bidirectional & self-re-arming.** A spare wired into an SHP2 immediately loses `annunciate:false` (it becomes a connected source); a Core the last-known home roster names is never treated as a spare (`isBenchSpareSn`, v1.121.0), and a DPU the literal does not name never is.
 - **Auto-silence never touches criticals** and never touches `ENERGY_STATE_FAMILIES`; flags are re-derived (not latched) each evaluation, so a family that stops flapping sheds its latch as the 30-day replay window decays.
 - **Delivery integrity.** At-least-once dispatch; a failed send retries; a "Resolved:" gates on a REAL delivered fire (`pushSent`), not boot-seeding; the notify-state record is deleted before a resolve attempt so a failed resolve can't eat a future re-fire.
 - **Clock skew.** The Pi is RTC-less and jumps at NTP resync; `recordClear` clamps durations `max(0, …)`, `SAME_RISE_GUARD_MS` uses `Math.abs`, and torn-append NUL runs are stripped from telemetry lines.
@@ -6188,7 +6443,7 @@ Served at **`GET /api/alert-settings`** (`alertSettingsResponse()`, cached in-pr
 
 ---
 
-### 8.9 Resolve integrity — positive evidence only (v1.75.0, extended v1.77.0/v1.78.0)
+### 14. Resolve integrity — positive evidence only (v1.75.0, extended v1.77.0/v1.78.0)
 
 **v1.77.0** — a device flagged `online: false` is not positive evidence regardless of
 data freshness (`deviceEvidencePositive` = fresh **and** not currently offline);
@@ -6207,7 +6462,10 @@ data freshness (`deviceEvidencePositive` = fresh **and** not currently offline);
   `shp2-below-reserve`/`shp2-near-reserve` is active in the same tick is the v0.44.0
   dedup transferring the story on a *worsening* transition, not a recovery: the
   tracked entry retires with **no resolve push** and one log line. A genuine band
-  recovery (successor absent) resolves unchanged.
+  recovery (successor absent) resolves unchanged. **v1.185.0** — a secondary panel's band
+  (`backup-soc-<pct>-<serial>`) hands off only to that panel's own pair. **v1.186.0** —
+  `system-audible-degraded` vanishing while `system-audible-unreachable` is active is likewise
+  a worsening handoff: no "Resolved: Audible alarm channel degraded".
   **v1.158.0 — `forecast-runtime-<SN>` joins the same rule.** Its producer stops AT the
   floor by construction (analytics gates the projection on `cur > reserve`, while
   `shp2-below-reserve` raises on `<= reserve`: complements on the same field), so its
@@ -6230,7 +6488,7 @@ Three rules now hold:
   device is absent or its `lastUpdated` is older than `ALERT_EVIDENCE_STALE_MS`
   (default 5 min, the telemetry-blind bound), the falling edge FREEZES and any
   accrued resolve-dwell resets — unevaluable is not recovered. Exempt families
-  (`offline-*`, `msg-rate-floor-*`, `zombie-*`): their subject IS absence, so
+  (`offline-*`, `msg-rate-floor-*`, `zombie-*`, and since v1.155.0 the per-device gap ids `system-outage-device-*`): their subject IS absence, so
   their clear is computed from the very signal that gates here. System alerts
   with no source SN never freeze — `telemetry-blind` resolving while devices are
   absent is exactly its recovery.
@@ -6344,18 +6602,18 @@ actually saw*, the feature vector is frozen **at fire time**, keyed by `alertId`
 
 #### What is captured
 
-`captureSnapshot` (featureSnapshot.ts:154) writes a `SnapshotRecord` carrying two
+`captureSnapshot` (featureSnapshot.ts:155) writes a `SnapshotRecord` carrying two
 distinct payloads:
 
 1. **`features`** — a category-specific generic vector (diagnostics + pre-v0.9.59
-   fallback). Extractors per category (`extractFeatures`, ts:209):
+   fallback). Extractors per category (`extractFeatures`, ts:210):
    - **Thermal** → `pack_temp_c`, `min/max_cell_temp_c`, `board_temp_c`, `pack_soc`, `mppt_hv/lv_temp_c`
    - **Battery** → `device_soc`, `p_in_w`, `p_out_w`, `bat_v_mv`, `bat_a_ma`, `pack_soc`, `pack_soh`, `pack_cycles`, `pack_vol_diff_mv`
    - **SHP2** → `pool_soc`, `reserve_soc`, `panel_load_w`
    - **Solar** → `pv_total_w`, `pv_hv/lv_w`, `pv_hv/lv_v`, `pv_hv/lv_a`
    - **Grid/Connectivity** → `device_online`, `snapshot_age_ms`
 2. **`lrFeatures`** — the **real normalized 6-dim LR vector** (v0.9.59), produced
-   by `captureLrFeatures` (ts:317) which calls the *same* `extractFeatures` /
+   by `captureLrFeatures` (ts:326) which calls the *same* `extractFeatures` /
    `normalize` path (`ml.ts`) that `computePackRiskV2` uses for inference. This is
    the training-inference-parity fix: the model trains on exactly the inputs it
    predicted from, not a proxy reconstructed later. It is populated **only for
@@ -6376,7 +6634,7 @@ announcement (before, the rising-edge loop awaited it).
 - Persisted append-only to `/data/feature-snapshots.jsonl`; on boot the most
   recent entries are re-hydrated (delete-before-set again so recency = *last*
   appearance, not first).
-- **F20 fix (v1.19.0):** the caller (`alertMonitor`, line 1474–1483) captures
+- **F20 fix (v1.19.0):** the caller (`alertMonitor`'s rising-edge pass, through `captureFeaturesDetached`) captures
   once per **rise** (transition from not-firing to firing). The old dedup
   (`if (cache.has(id)) return`) against a boot-hydrated cache meant a recurring
   alertId was *never* re-snapshotted — the "fire-time" vector could be weeks
@@ -6406,9 +6664,9 @@ The operator's response is the ground-truth label (`AlertOutcome`):
 
 #### The record and its endpoint
 
-`POST /api/alerts/outcome` (index.ts ~1440) validates the verdict against
+`POST /api/alerts/outcome` (index.ts ~1861) validates the verdict against
 `['ack','dismiss','failed','resolved']`, then assembles an `AlertOutcomeEntry`
-(alertOutcomes.ts:29) by joining the request to the frozen snapshot:
+(alertOutcomes.ts:33) by joining the request to the frozen snapshot:
 
 ```
 ts, alertId, category, severity, outcome, notes,
@@ -6418,9 +6676,9 @@ alertFiredAt: snap?.ts,            // for time-to-action
 source: { ip, ua }
 ```
 
-`appendAlertOutcome` (ts:127) sanitizes before writing one JSON line to
+`appendAlertOutcome` (ts:131) sanitizes before writing one JSON line to
 `/data/alert-outcomes.jsonl` (append-only, kept forever — the labeled dataset
-grows in value). Sanitization (`sanitizeOutcomeEntry`, ts:96) re-serializes an
+grows in value). Sanitization (`sanitizeOutcomeEntry`, ts:100) re-serializes an
 explicit typed shape: verdict allow-listed to a fresh literal, numbers coerced
 finite, feature maps bounded to 64 keys with cleaned keys, strings length-bounded
 — defending the on-disk file against the operator-supplied `notes` and any
@@ -6430,14 +6688,14 @@ is preserved: `undefined` = pre-v0.9.59 row (key omitted), `null` = "no LR vecto
 
 #### Family rollups and precision
 
-`computeFamilyStats` (ts:253) groups outcomes by **family** — `familyOf` (ts:237)
+`computeFamilyStats` (ts:282) groups outcomes by **family** — `familyOf` (ts:241)
 strips the device serial by splitting `alertId` on `-` and stopping at the first
 token containing an uppercase letter (families are all-lowercase like `pack-hot`,
 `cell-imbalance`; serials are uppercase), then drops a trailing all-digits pack
 number so `pack-hot-3` and `pack-hot-7` roll up under `pack-hot`. Per family:
 
 ```
-precision = (ack + failed) / (ack + failed + dismiss)      // null if no decided outcomes
+precision = (ack + failed) / (ack + failed + dismiss)      // null unless ≥1 dismiss and ≥3 decided (familyPrecision, v1.123.0)
 medianTimeToActionMs = median(ts − alertFiredAt)           // null for persistent families
 ```
 
@@ -6451,7 +6709,7 @@ noisiest-first (lowest precision, then highest volume).
 
 ### Stage 3 — The online SGD step (`onlineLR.ts` → `updateFromOutcome`)
 
-Fired synchronously from the outcome endpoint (index.ts:1475) on every submission.
+Fired synchronously from the outcome endpoint (index.ts:1902) on every submission.
 
 #### Constants
 
@@ -6642,7 +6900,7 @@ fires:
 #### The report — `computeModelHealth()` → `GET /api/models/health`
 
 Endpoint: `app.get('/api/models/health', cached(..., computeModelHealth(), 60))`
-(index.ts:1488) — 60 s cache.
+(index.ts:1915) — 60 s cache.
 
 `computeModelHealth` (modelHealth.ts:69) resolves a **true** baseline via
 `loadBaselineModelOnly()` (falling back to in-code `DEFAULT_MODEL` when absent —
@@ -6772,7 +7030,7 @@ alert condition transition (or a dedicated announce()/test()/preview() call)
         │
         ▼
  renderAnnouncement(...)  →  build (or cache-hit) the combined WAV:
-        │                     [lead silence][chime×N][gap][TTS][terminator], ×repeat
+        │                     [lead silence][chime][gap][TTS][terminator], ×repeat
         │                     TTS rendered via Wyoming/Piper over TCP
         ▼
  url = audioBase + /audio-render/<sha1>.wav
@@ -6825,15 +7083,19 @@ Before counting, alerts are filtered out ("not counted") when:
 - `a.id` starts with `system-outage` (a retrospective event, fires its own one-shot push);
 - `a.id` starts with `system-audible` (the audible-unreachable self-alert — must never chime over the channel it reports broken);
 - `a.id` starts with `soiling-pv` (v1.187.1 — the panel-soiling estimate is maintenance, never danger: push and card only). A second guard: the alert carries `audible: false`, which `speakableAlerts` drops before this count and before the spoken message is built.
-- `a.id` starts with `peak-idle-pool` (v1.187.0 — the on-peak idle-pool notice reports spend, never danger: push and card only, §7.9b). A second guard: the notice also carries `audible: false`, which the tick's `speakableAlerts` drops before this count and before the spoken message is built — the id exclusion alone left it eligible to be the alert a yellow names aloud.
+- `a.id` starts with `peak-idle-pool` (v1.187.0 — the on-peak idle-pool notice reports spend, never danger: push and card only, §7.10.1). A second guard: the notice also carries `audible: false`, which the tick's `speakableAlerts` drops before this count and before the spoken message is built — the id exclusion alone left it eligible to be the alert a yellow names aloud.
+- `a.audible === false` (v1.187.0 — card and push only; e.g. `vdiff-warn-*` since v1.187.12, `ems-volt-*`, the soiling and idle-pool notices, a quieted peer cell-spread outlier);
+- `a.id` starts with `msg-rate-floor-` or `stale-` (v1.173.0 — stale-data warnings sound only after the remediation has failed: push and card only; the `telemetry-blind` critical is the audible, remediate-first path).
 
 These exclusions keep the standing chime/all-clear from double-announcing a
 crossing that a dedicated `announce()` path already owns.
 
-Additionally, on every tick, alerts whose **ISA priority is silenced** on the
-Alert Settings page are dropped *before* `conditionFromAlerts` runs
-(`isPriorityEnabled(priorityOf(a))`), so a silenced priority never raises the
-level. The alerts stay visible in the UI — only the audible annunciation is gated.
+Additionally, on every tick the alert list passes through `speakableAlerts`
+*before* `conditionFromAlerts` and `messageFor` run. It drops alerts whose **ISA priority is
+silenced** on the Alert Settings page (`isPriorityEnabled(priorityOf(a))`), alerts carrying
+`audible: false`, and a cell-imbalance warning (`vdiff-warn-*`, `peer-voldiff-*`) that has not
+yet stood `IMBALANCE_SPEAK_HOLD_MS` (10 min, from the restart-persistent onset;
+`heldForImbalanceConfirm`). None of them can raise the level or be the alert named aloud. The alerts stay visible in the UI — only the audible annunciation is gated.
 
 #### 2.2 The tick loop and its guards (`tick()`, every 10 s)
 
@@ -6842,17 +7104,17 @@ The monitor polls `store.get().alerts` on a **10 s `setInterval`** and fires on
 
 | Guard | Behavior |
 |-------|----------|
-| `firstTick` | The very first observation only records `prevLevel`/`prevCrit` and returns — joining an already-RED state at boot is silent. |
-| `transitioned` | `level !== prevLevel`, or `newWarn`. |
+| `firstTick` | A **green** first observation only records `prevLevel`/`prevCrit` and returns (an unpopulated store reads green; it never wipes the red-replay evidence). Since v1.186.0 a **non-green** first observation is not joined silently: it is treated as a transition from green on that tick and passes through the boot gates below (restart continuation, the boot yellow hold, `holdBootRed`, the red replay gate). |
+| `transitioned` | `level !== prevLevel`, `newWarn`, or `unheardReturn` (v1.187.4: a return to the level a de-escalation hold is holding is a transition when that level was never audible in its episode, `committedAudible`; only a heard level's return is a flicker the dwell absorbs). |
 | `newCrit` | `level === 'red'` and either `crit > prevCrit` or a counted critical whose **fingerprint** (`alertFingerprint`: `id` + `title` + `fault`) was not in the set recorded when the standing level was committed (`prevCritFps`, `hasNewIdentity`) — a *new* critical while already red re-fires, including a different critical that replaces a cleared one at the same count. While the committed level stays red the recorded set **accumulates** (`adoptLevel` unions it), so each distinct critical is announced once per red episode: a critical whose fault code alternates between two values is announced once per value, not on every flip. A commit of a lower level starts the set afresh. |
 | `newWarn` | `level === 'yellow'` while a de-escalation is held (below a held red, or returning inside a held yellow→green), with a counted warning whose fingerprint was not in the set recorded at the last commit (`prevWarnFps`; `conditionFromAlerts` returns `warningFingerprints`). A new warning is never held. Below a sounded critical that is only held (`soundedCriticalHeld`, next row) it is spoken at once, but the committed level **stays red** (`keepRed`: `adoptLevel('red', prevCrit, …)`, also on the restart-continuation path): committing yellow there ended the red episode (`prevCritFps` started afresh), so the held critical's next loud reading was a new red and could sound the klaxon again. |
 | **De-escalation dwell** (`deescalationDue`, `CONDITION_CLEAR_DWELL_MS` = 3 min, v1.187.0) | A move to a **lower** level commits only once the condition has stood at or below it for the dwell — the same 3 min as the push path's cell-imbalance resolve dwell (`VDIFF_RESOLVE_DWELL_MS`). Green commits after **green** has stood 3 min (from yellow or red); yellow commits from red after the level has been **below red** for 3 min. Until then `prevLevel` is not advanced and nothing is spoken, so a flicker back up is no transition at all (a peer outlier whose z-score crosses the warning line as sibling readings land no longer speaks a false "All clear"). The clocks (`belowRedSinceMs`, `greenSinceMs`) run on every tick. Rises, `newCrit` and `newWarn` never wait. One log line per held episode, one when it is abandoned. While a hold stands, the condition record's heard flag (`conditionSpoken`) is demoted to unheard, so a restart inside the dwell never boots on a heard baseline of a level the house has left (it would swallow a standing yellow as a restart continuation of a cleared red); the flag is restored when the level returns to the committed one with nothing new (`endDeescalationHold`). Green **observed** under a held level destroys the red-replay evidence at once (below). **A critical that sounded and is then held by a bounded cell-spread mute is held, not cleared** (`soundedCriticalHeld`, v1.187.0 log review): while a critical whose fingerprint was counted at a committed red (`soundedCritFps`, a map of fingerprint → the last tick it was present, recorded by `adoptLevel` at a red commit **and on every tick the committed level is red** — a critical that clears and comes back loud inside a hold is a flicker the hold absorbs and commits nothing) is present with `mutedBy` set, the tick treats the observation as red for both clocks, so no move below red — nor yellow → green — commits. **A sounded `vdiff-crit-` that is ABSENT holds too**, until it has been gone `SOUNDED_VDIFF_ABSENT_HOLD_MS` (7 min: two ~180 s BMS reading periods plus a 20 s monitor tick, rounded up): a spread that follows the charge current is loud on alternate readings and absent 180-200 s between them — as long as the dwell — and green had committed between two klaxons (8 cycles: 8 klaxons, 7 all-clears); one missed reading makes the gap 360 s. A genuine clear of a sounded cell-spread critical therefore gets its all-clear about 7 + 3 minutes after the clear. Any other critical is released the tick it clears, as before. A `vdiff-crit` that sounded and was then muted again by balancing (a pack below 95%, where the balancing mute holds up to 20 min) made the level green, and `allClearSpeechBlocked`, which reads `annunciate`, let the all-clear be spoken with the card open, between two klaxons for the same pack. The hold ends when that critical has cleared and stayed gone the absent hold (the lower level then stands its own full dwell and the all-clear is spoken) or annunciates again (a flicker absorbed, nothing re-spoken). A new critical inside it is still announced at once; a new warning is spoken at once with the red kept committed (`newWarn`). A muted critical that never sounded, or one muted by policy (bench spare, off-panel Core), holds nothing, as before. **v1.187.1** — a policy stamp that takes precedence over a bounded mute clears `mutedBy` (the bench-spare stamp in `computeAlerts`, `applyRosterMute` in the monitor): both used to overwrite `annunciate` and `muteReason` and leave `mutedBy` set, so a sounded `vdiff-crit` muted by policy that also carried a knee mute held the red and delayed the all-clear for as long as the knee mute lasted. `muteReason` stays diagnostic only; `mutedBy` names the mute in force. **v1.187.3 (log review) — the sounded record survives a restart** (`restoreSoundedCriticals`): `soundedCritFps` lived only in memory, so after a restart a sounded `vdiff-crit` muted again by its knee mute (the knee session survives an outage under `VDIFF_KNEE_GAP_CARRY_MS`), or absent between two readings, held nothing. A warning standing at the first tick was adopted as a continuation of the heard red, it cleared, and the green was announced as a recovery (`isRestartRecovery`, next row): "All clear" with the critical's card open, then the klaxon when the mute lapsed. The record's cell-spread entries (`soundedCritPersists`: `vdiff-crit-`, the only criticals that can hold after a restart — `mutedBy`, which holds a present critical, is stamped only on a `vdiff-crit`, and the absent hold applies only to `vdiff-crit-`) are written to `broadcast-last.json` (`soundedCrit`: fingerprint → last-present ms) whenever their set changes, and at most every `SOUNDED_CRIT_PERSIST_EVERY_MS` (1 min) while there are any. Any other sounded critical stays in memory only: persisted, a standing critical whose fault code alternates rewrote the file on every flip (the absent code pruned, the present one recorded), and every minute while it stood. The record is restored before the first tick: each cell-spread entry with a well-formed fingerprint and a finite last-present time at most `SOUNDED_CRIT_RESTORE_MAX_AGE_MS` old (= `VDIFF_KNEE_GAP_CARRY_MS`, 60 min: after a longer outage the knee mute starts a new session, and its critical is a new episode), stamped at the boot. Nothing is observed during the outage, so it is not counted as absence: an absent cell-spread critical is held `SOUNDED_VDIFF_ABSENT_HOLD_MS` from the boot. The boot stamp is for the hold only: the file keeps the entry's own last-present time, never later than the boot (a clock stepped back), until the critical is present again, muted or loud (`soundedCritRestoredAt`). The 60-min bound therefore counts from when the critical was last present, however many restarts follow; written back at the first tick, the boot stamp renewed an absent critical at every restart, and restarts under 7 min apart kept it restorable for ever. It is restored whatever the condition record says, because only a red writes an entry and the record prunes itself, while the hold demotes the record's heard flag exactly when a sounded critical is muted. A status file written before v1.187.3 has no record; under a **committed** red on record (`conditionLevel` red, heard or not) the cell-spread criticals of the red announcement on record (`redReplayGate.state().activeFingerprints`, read at boot before the first green observed under a hold can clear it) are seeded instead. Keyed on a heard red, the fallback seeded nothing when the upgrade restart landed inside such a hold, the heard flag demoted while the critical was muted; below a committed yellow (the red's criticals released) nothing is seeded. One boot line names what was restored. |
-| **Restart continuation** (`isRestartContinuation`) | Within `BROADCAST_BOOT_WARMUP_MS` (default **10 min**), a yellow/green transition at or below the persisted pre-restart baseline is adopted silently (analytics warm-up re-presents an already-broadcast advisory as a fresh rise). **RED is never suppressed here** — this function sees only levels, and a level-only red≤red match would swallow a new critical behind a stale one. **v1.187.3 — a green that has stood its dwell on a settled alert set is a recovery, not a continuation** (`isRestartRecovery`): the first tick joins a green silently, so a green transition always follows a yellow or red committed since boot, and its clearing is news. When a heard baseline exists and the green has stood `CONDITION_CLEAR_DWELL_MS` **on a settled alert set** — measured from the later of `greenSinceMs` and the alert monitor's settled stamp (`BroadcastMonitorOpts.alertSetSettledSince`, wired in index.ts to `AlertMonitor.alertSetSettledSince`; absent, throwing or not a finite number ⇒ never settled) — the green goes on as an ordinary transition (the all-clear speech gate, quiet hours and the storm gates still apply) and the continuation baseline ends (`continuationBaseline`), so it is announced once and a later warning inside the warm-up is spoken as new. On 2026-10-01 a heard yellow standing at a deploy was adopted as a continuation, cleared, and its green was adopted in silence 3 minutes later, leaving the cleared warning as the last words. **The settled stamp** (`alertSetTrusted`, stamped by the alert monitor at the publish of the first set of a run of trusted ones and cleared before the first publish of any pass whose set is not one): the store hydrated; every worker/NWS feed's value in the published set is a delivery computed on a hydrated store, judged on the value each read returned (`AlertFeedRead.warm`), not on `warm()`, which turns true when a fetch lands, before its alerts reach the set; the live alarms computed at least `BOOT_RESET_ONSET_DEBOUNCE_MS` (3 min) after `firstPollSettledAt`; and no in-memory onset clock withholding a fault the device reports now (`debouncedOnsetsPending`: an inverter error or an SHP2 source error inside its 3-minute window, both critical; an MPPT string error inside its window; a backup pool unknown for under 15 min, which withholds `reserve-alarm-blind`). These clocks restart at zero in every process, so a fault that stood before the restart is absent after it for one window (3 min for the device error codes, as long as the green's dwell): measured from the green alone, a green that began on that set could be spoken seconds before the critical re-published ("All clear", then the klaxon). Until the green has stood its dwell on a settled set it is **held** like any de-escalation (logged once: `green has stood 180 s but is held, not adopted`); if the warm-up ends first it is adopted silently as a continuation, the pre-v1.187.3 outcome, unless a condition above green has been spoken since the boot (seam review, below). A yellow at or below the baseline and the silent boot green are unchanged. `bootBaselineLevel` (status) stays the value read at boot. **v1.187.3 (log review)** — a cell-spread critical that sounded before the restart and is muted by its knee mute after it, or absent between two readings, holds the green as it does in one process (the sounded record is restored at boot, `soundedCriticalHeld` in the row above): the green clock does not start, so no recovery is announced while the critical's card is open; a genuine clear gets its all-clear after the absent hold and the dwell. A failed first NWS fetch keeps the storm-prep feed cold (`stormPrepAlerts`), so the set is not settled while its storm alerts are unknown. **(seam fix)** A green held inside the warm-up by such a sounded critical has its recovery decided even when its dwell ends after the warm-up (`deescalationHold.soundedHeldInWarmup`, set on each hold tick such a critical holds inside the warm-up): the restored absent hold (7 min from the boot) plus the dwell (3 min) ended exactly as the 10-min warm-up did, so the green always took the late-green path, an ordinary transition, and was spoken with the set never settled, where the same restart without the record adopted it silently. From its first due tick (`recoveryHoldSinceMs`) it is a recovery as soon as it has stood its dwell on a settled set, for at most one more `CONDITION_CLEAR_DWELL_MS`, the patience the warm-up path gives; then it is adopted silently as a continuation. Decided on the due tick alone, a settled stamp reset by one transient onset 30 s before it silenced the all-clear. This holds whenever the dwell ends, so a green after a long knee mute that began inside the warm-up is also adopted silently if the set has still not settled (a feed that has never delivered). **(v1.187.5)** Since v1.187.4 the restart question itself (open to boot + 16 min, 19 on a set settled by then) decides the absent-hold case above (the green due near boot + 10). The mark decides a green whose dwell ends after the question has closed: a restored critical held past boot + 6 min (9 on a set settled by then) and then gone, such as its knee mute back after the restart (bounded 20 min from the crossing before the restart). Decided on the due tick alone, such a green would now be announced 30 s after a stamp reset, before it had stood its dwell on the settled set, and adopted in silence when the set settled 30 s after the due tick (a set settled at the decision is announced since v1.187.4). A hold that ends (the level back up, or a commit) forgets the mark. **(seam review)** Only a critical of before the restart marks the hold: one restored or seeded at the boot and not released since (`bootSoundedFps`, read on a copy of the record). A critical that first sounded after the boot, or a restored one released and back, is the house's own news, so its green is an ordinary transition, as is a green that any sounded critical first holds after the warm-up. Marked by a cell-spread red heard after the restart, the green was decided on one tick and, on an unsettled set, adopted in silence, so the cleared critical stayed the last words. **(seam review)** A green still held for its recovery when the warm-up ends is announced as an ordinary transition, not adopted silently, when a condition above green has been spoken since the boot (`lastConditionPlayedLevel`, kept in memory only). The last words in the house are then that condition, not the pre-restart level. |
+| **Restart continuation** (`isRestartContinuation`) | Within `BROADCAST_BOOT_WARMUP_MS` (default **10 min**), a yellow/green transition at or below the persisted pre-restart baseline is adopted silently (analytics warm-up re-presents an already-broadcast advisory as a fresh rise). **RED is never suppressed here** — this function sees only levels, and a level-only red≤red match would swallow a new critical behind a stale one. **v1.187.3 — a green that has stood its dwell on a settled alert set is a recovery, not a continuation** (`isRestartRecovery`): the first tick joins a green silently, so a green transition always follows a yellow or red committed since boot, and its clearing is news. When a heard baseline exists and the green has stood `CONDITION_CLEAR_DWELL_MS` **on a settled alert set** — measured from the later of `greenSinceMs` and the alert monitor's settled stamp (`BroadcastMonitorOpts.alertSetSettledSince`, wired in index.ts to `AlertMonitor.alertSetSettledSince`; absent, throwing or not a finite number ⇒ never settled) — the green goes on as an ordinary transition (the all-clear speech gate, quiet hours and the storm gates still apply) and the continuation baseline ends (`continuationBaseline`), so it is announced once and a later warning inside the warm-up is spoken as new. On 2026-10-01 a heard yellow standing at a deploy was adopted as a continuation, cleared, and its green was adopted in silence 3 minutes later, leaving the cleared warning as the last words. **The settled stamp** (`alertSetTrusted`, stamped by the alert monitor at the publish of the first set of a run of trusted ones and cleared before the first publish of any pass whose set is not one): the store hydrated; every worker/NWS feed's value in the published set is a delivery computed on a hydrated store, judged on the value each read returned (`AlertFeedRead.warm`), not on `warm()`, which turns true when a fetch lands, before its alerts reach the set; the live alarms computed at least `BOOT_RESET_ONSET_DEBOUNCE_MS` (3 min) after `firstPollSettledAt`; and no in-memory onset clock withholding a fault the device reports now (`debouncedOnsetsPending`: an inverter error or an SHP2 source error inside its 3-minute window, both critical; an MPPT string error inside its window; a backup pool unknown for under 15 min, which withholds `reserve-alarm-blind`). These clocks restart at zero in every process, so a fault that stood before the restart is absent after it for one window (3 min for the device error codes, as long as the green's dwell): measured from the green alone, a green that began on that set could be spoken seconds before the critical re-published ("All clear", then the klaxon). Until the green has stood its dwell on a settled set it is **held** like any de-escalation (logged once: `green has stood 180 s but is held, not adopted`); if the restart question closes first (`restartQuestionOpen`, v1.187.4: open until `LONGEST_RESTARTED_ONSET_MS` + `RESTARTED_ONSET_HOLD_MARGIN_MS` = 16 min after the boot, and at least the warm-up; on a set settled by then, one more `CONDITION_CLEAR_DWELL_MS`), it is announced as a transition when a condition above green has been audible since the boot (`conditionAudibleSinceBootLevel`) or the set is settled at that moment, and otherwise adopted silently as a continuation. The decision waits while a broadcast is in flight or queued, a SIP outcome is pending, or a condition retry could still raise the level (`conditionRetryCouldRaise`). A yellow at or below the baseline is still adopted as a continuation, except when a higher level has been audible since the boot and has since cleared (`higherAudible`, v1.187.4; not while that level is only held, `keepRed`). A green first tick is still joined silently. `bootBaselineLevel` (status) stays the value read at boot. **v1.187.3 (log review)** — a cell-spread critical that sounded before the restart and is muted by its knee mute after it, or absent between two readings, holds the green as it does in one process (the sounded record is restored at boot, `soundedCriticalHeld` in the row above): the green clock does not start, so no recovery is announced while the critical's card is open; a genuine clear gets its all-clear after the absent hold and the dwell. A failed first NWS fetch keeps the storm-prep feed cold (`stormPrepAlerts`), so the set is not settled while its storm alerts are unknown. **(seam fix)** A green held inside the warm-up by such a sounded critical has its recovery decided even when its dwell ends after the warm-up (`deescalationHold.soundedHeldInWarmup`, set on each hold tick such a critical holds inside the warm-up): the restored absent hold (7 min from the boot) plus the dwell (3 min) ended exactly as the 10-min warm-up did, so the green always took the late-green path, an ordinary transition, and was spoken with the set never settled, where the same restart without the record adopted it silently. From its first due tick (`recoveryHoldSinceMs`) it is a recovery as soon as it has stood its dwell on a settled set, for at most one more `CONDITION_CLEAR_DWELL_MS`, the patience the warm-up path gives; then it is adopted silently as a continuation. Decided on the due tick alone, a settled stamp reset by one transient onset 30 s before it silenced the all-clear. This holds whenever the dwell ends, so a green after a long knee mute that began inside the warm-up is also adopted silently if the set has still not settled (a feed that has never delivered). **(v1.187.5)** Since v1.187.4 the restart question itself (open to boot + 16 min, 19 on a set settled by then) decides the absent-hold case above (the green due near boot + 10). The mark decides a green whose dwell ends after the question has closed: a restored critical held past boot + 6 min (9 on a set settled by then) and then gone, such as its knee mute back after the restart (bounded 20 min from the crossing before the restart). Decided on the due tick alone, such a green would now be announced 30 s after a stamp reset, before it had stood its dwell on the settled set, and adopted in silence when the set settled 30 s after the due tick (a set settled at the decision is announced since v1.187.4). A hold that ends (the level back up, or a commit) forgets the mark. **(seam review)** Only a critical of before the restart marks the hold: one restored or seeded at the boot and not released since (`bootSoundedFps`, read on a copy of the record). A critical that first sounded after the boot, or a restored one released and back, is the house's own news, so its green is an ordinary transition, as is a green that any sounded critical first holds after the warm-up. Marked by a cell-spread red heard after the restart, the green was decided on one tick and, on an unsettled set, adopted in silence, so the cleared critical stayed the last words. **(seam review)** A green still held for its recovery when the restart question closes is announced as an ordinary transition, not adopted silently, when a condition above green has been made audible since the boot on any channel (`conditionAudibleSinceBootLevel`, in memory only — since v1.187.4 a tone-only play after a failed spoken render, a delivery-unknown Music Assistant timeout and a confirmed SIP delivery all count; `lastConditionPlayedLevel` remains the storm gates' evidence). The last words in the house are then that condition, not the pre-restart level. |
 | **Boot phantom-red hold** (`holdBootRed`) | Within the warm-up window, the *first* fresh red is held for **one tick** to confirm it is standing and not a telemetry-populate phantom (`prevLevel` is NOT advanced, so a persisting red re-fires ≤10 s late; a one-tick phantom clears and is never spoken). A fresh yellow in the window is held until it has stood `BOOT_YELLOW_CONFIRM_MS` (`holdBootYellow`, v1.173.1). **v1.187.1** — each hold line names what it holds (`describeFingerprint` of the counted warnings or criticals), and a hold that ends below its level writes one line naming what it held: `boot yellow dropped after N s — cleared inside the hold, not spoken (…)` when a held yellow falls to green (every warning seen during the hold), `boot red dropped — the level fell to <level> inside its one-tick confirmation; not spoken (…)`. A rise from a held yellow to red is not a drop (red logs its own hold and transition), and a hold that is adopted (`adoptLevel`: spoken, or silenced by a gate with its own line) ends without one. **v1.187.10** — the drop line splits the held warnings against the alerts of the dropping tick (`bootYellowDropLine`): one no longer present is "cleared inside the hold"; one still present is "still active but no longer counted toward the condition", named with why (its `muteReason`, `annunciate:false`, `audible:false`, or a new severity). An off-panel Core's standing imbalance, muted only once its roster streak rebuilds a few ticks after each restart, had been logged as cleared. |
 | **Red replay gate** (`redReplayGate`, v1.64.0) | Runs *after* the phantom hold, so only a confirmed red reaches it. Suppresses a red re-announce **only when all of these hold**: inside the warm-up window; the last verified broadcast of any level was itself a red (so this is **not an escalation** — same `LEVEL_RANK` ladder as the storm gate); the critical that would be **spoken now** has the same **fingerprint** (`id` + `title` + `fault` code, ★ never the bare id — `dpu-err-<sn>` spans every `sysErrCode`) as the one that **was spoken** then; no unrecognised critical is active alongside it; and the announcement is not older than `BROADCAST_RED_REPLAY_MIN_GAP_MS` — **default `Infinity` since v1.78.0** ("announced since this fault began"): an unchanged, verifiably announced fault never replays at boot; setting the env var restores the v1.64.0 timed reminder. A changed fault, a new fault or an escalation announces immediately at any age. Reaching **green** destroys the evidence (all-clear ⇒ the next red is a new event) — a green committed by `adoptLevel`, and since v1.187.0 a green first **observed** under a held de-escalation, before the dwell commits it: the evidence is read only at boot, and a restart inside the dwell (the boot green is joined silently and never wipes) otherwise muted the same critical re-raising in the warm-up. Missing/corrupt/future-dated/legacy-shape state ⇒ announce. Level adopted on suppression (no retry). |
 | **In-flight** (`tickInFlight`) | An MA announcement blocks 20–105 s (>> the 10 s tick). If a different level arrives mid-flight, the tick returns WITHOUT advancing `prevLevel`, so the missed transition re-presents next tick (prevents a lost yellow→green). |
 | `cfg.enabled` | Disabled → adopt level, no broadcast. |
-| **All-clear-vs-critical** | A `green` is adopted silently (no spoken all-clear) if any critical alert with `annunciate !== false` is still active — avoids a spoken "all clear" contradicting a runway-alarm critical on the same speakers. |
+| **All-clear-vs-critical** | A `green` is adopted silently (no spoken all-clear) if any critical alert with `annunciate !== false` is still active, or the `telemetry-blind` critical is held silent by its remediate-first gate (`allClearSpeechBlocked`, v1.166.0: held is not cleared) — avoids a spoken "all clear" contradicting a runway-alarm critical on the same speakers. |
 | `minSeverity` | `yellow` is skipped when `cfg.minSeverity === 'critical'` (the default). |
 | **Quiet hours** | `yellow`/`green` always respect quiet hours. `red` breaks through ONLY when `criticalBreakThrough` is opted in; default OFF ⇒ red is also suppressed overnight (alert stays on-screen; push queues the morning digest). |
 
@@ -6869,9 +7131,12 @@ last thing that *actually played*) and by test/preview:
 - **`SAME_MESSAGE_GAP_MS = 10 min`** — an identical spoken message within the window is suppressed (tier-boundary flapping repeats the exact text).
 - **`SAME_LEVEL_GAP_MS = 2 min`** — any same-or-lower level within the window is suppressed (at most one non-escalating voice alarm per gap).
 
-Gates key off `lastPlayedAt`/`lastPlayedLevel`/`lastPlayedMessage`, which are set
-**only on verified playback**, so a failed/unverified dispatch never blocks its
-own retry. `stormSuppressedCount` is surfaced in `/api/broadcast/status`.
+The identical-message gate keys off `lastPlayedAt`/`lastPlayedLevel`/`lastPlayedMessage`.
+Since v1.186.0 the same-level gap keys off `lastConditionPlayedAt`/`lastConditionPlayedLevel`,
+armed only by a **condition** delivery: a dedicated SoC/runway/notice announcement arms the
+identical-message gate only, and a test arms neither. Both are set **only on verified,
+error-free playback**, so a failed or unverified dispatch never blocks its own retry. A dedicated
+`consentNotice` (the supervised night-charge arm/cancel, v1.122.0) bypasses both gates. `stormSuppressedCount` is surfaced in `/api/broadcast/status`.
 
 **Repeat-warning gate** (`sameWarningRepeat`, `SAME_WARNING_REPEAT_GAP_MS` = 30 min,
 v1.187.0). A warning's spoken detail carries its live reading, so the identical-message
@@ -6912,8 +7177,10 @@ describing the last broadcast that was attempted.
 
 #### 2.4 Single-flight serialization
 
-Every broadcast (tick, `announce()`, `test()`, `preview()` speakers, retries)
-is serialized through one promise chain (`broadcastChain`). A second request
+Every broadcast that goes through `runBroadcast` (tick, `announce()`, `test()`, deferred and
+spoken retries), and the boot terminator pre-warm, is serialized through one promise chain
+(`broadcastChain`). The `preview()` speakers target is not: it calls `playAnnounce` and
+`playSipAnnounce` directly, so a speaker preview can overlap a real announcement. A second request
 waits for the first playback to finish rather than overlapping `play_announcement`
 calls (which wedged MA into 500s).
 
@@ -6926,7 +7193,7 @@ completion). A retry:
 
 - re-checks `cfg.enabled` (an operator who disabled broadcasts must not hear an armed retry);
 - skips the SIP cordless while the last SIP dispatch delivered (`lastSipDispatchOk`, v1.32.0) — it already took the audio, so it isn't replayed at +30/+90/+180 s — and, for a condition retry, only while the retry names the alert that dispatch named (v1.187.11);
-- resets `retryAttempt` to 0 on any verified success;
+- resets `retryAttempt` to 0 on a verified, error-free delivery of a real broadcast (v1.186.0: a test never resets the budget);
 - replays the words it was armed with — a dedicated retry always; a condition retry while the alert they name is the one the condition names when it runs (v1.187.11 — see below).
 
 **v1.159.0 — the budget now COUNTS.** The timer callback used to clear `retryLevel` before
@@ -6940,6 +7207,21 @@ cannot make later milder deferrals "keep-pending" against a retry that no longer
 This matters beyond the noise: the single-flight note below records that overlapping
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
+
+**v1.160.0 — the slot is released on every exit.** v1.159.0 released it only at the
+completion tail, but the broadcast routine returns early in six places before it can arm
+anything: not supervised, no MA targets, the two storm gates, and the two render failures.
+A fired retry that met one of those — most plausibly the **same-level storm gate**, since a
+retry replays the same rung ~30 s later, which is exactly what `SAME_LEVEL_GAP_MS` absorbs —
+left the slot held with **no timer armed**. That phantom slot is worse than the defect it
+came from: every later milder deferral logs "keeping the pending <level> retry" against a
+retry that does not exist, and the next same-level failure can reach "giving up after 3"
+having made zero attempts. `runBroadcastInner` is now a wrapper that calls the gated routine
+inside `try { … } finally { releaseRetrySlotIfIdle(); }`, so every exit — including a throw —
+releases an idle slot. The call is idempotent (a no-op while a timer is armed) and
+`scheduleBroadcastRetry` runs *inside* the routine, so a retry this broadcast armed is always
+already armed when the release runs. Releasing on the way **in** would be the v1.159.0 defect
+restored, and is pinned against.
 
 **v1.187.4 — a condition retry is replayed only within its condition episode.** A condition
 retry (`kind === 'condition'`) is the tick's commit spoken late; it carries the condition episode
@@ -7002,6 +7284,12 @@ gap expires (`refusedRetryRepresent` into `deferredCondition`; only that refusal
 re-present already waiting). A re-present below the committed level (a warning under a kept red)
 waits while the observed level is the committed one, and does not end the red's held de-escalation.
 Dedicated retries are unchanged. Residual: a cordless dispatch that timed out is re-fired only by a retry that runs; a condition retry dropped when it runs (a speech gate, the repeat-warning check, the restart replay check, or giving way to a waiting announcement) neither re-fires the cordless nor gives the restart decision its evidence. Harness: `scripts/mutate-v1187-5.mjs` (W-i to W-xlix).
+
+#### 2.6 Release log (all subsystems)
+
+Per-release notes for every subsystem, kept here in the order they were written (not
+strictly by version). The subsystem chapters describe current behaviour; a note below
+records what a release changed and why.
 
 **v1.173.1 — calibrator on realized GHI; boot yellow confirmation.** reports.ts passes
 `ghiBasis = 'realized'` to the band calibrator's skill (a policy decision); `holdBootYellow` holds a
@@ -7336,24 +7624,9 @@ inert. On 2026-09-16 the engine asked for `setpointSocPct: 100` and wrote 50. �
 described itself as *the device's documented [10, 50] range* in four places **without citing a
 document**, and no vendor source on disk mentions `backupReserveSoc` at all — so whether the SHP2
 enforces a ceiling of its own is **unverified**. The actuator no longer needs that answer in
-advance: see *Device-ceiling adoption* above, which turns a hardware limit into one log line
+advance: see *Device-ceiling adoption* in §15 (8b. Supervised write mode, Apply step), which turns a hardware limit into one log line
 instead of a false forfeiture page, and makes the first raised night settle the question from the
 readback.
-
-**v1.160.0 — the slot is released on every exit.** v1.159.0 released it only at the
-completion tail, but the broadcast routine returns early in six places before it can arm
-anything: not supervised, no MA targets, the two storm gates, and the two render failures.
-A fired retry that met one of those — most plausibly the **same-level storm gate**, since a
-retry replays the same rung ~30 s later, which is exactly what `SAME_LEVEL_GAP_MS` absorbs —
-left the slot held with **no timer armed**. That phantom slot is worse than the defect it
-came from: every later milder deferral logs "keeping the pending <level> retry" against a
-retry that does not exist, and the next same-level failure can reach "giving up after 3"
-having made zero attempts. `runBroadcastInner` is now a wrapper that calls the gated routine
-inside `try { … } finally { releaseRetrySlotIfIdle(); }`, so every exit — including a throw —
-releases an idle slot. The call is idempotent (a no-op while a timer is armed) and
-`scheduleBroadcastRetry` runs *inside* the routine, so a retry this broadcast armed is always
-already armed when the release runs. Releasing on the way **in** would be the v1.159.0 defect
-restored, and is pinned against.
 
 ---
 
@@ -7390,7 +7663,7 @@ music_assistant.play_announcement({
 })
 ```
 
-Retried up to `cfg.announceRetries` times (1.5 s apart) on an actual call failure.
+Retried up to `cfg.announceRetries` times (1.5 s apart) on a definite call failure (an HTTP error or a refused connection). A timeout is delivery UNKNOWN (v1.118.1, §12i): it is retried neither in-call nor by the deferred ladder, and the play reports `ok` but not `verified`. The call's timeout is sized to the clip (`announceTimeoutMs`: play time at 44 100 B/s + 45 s, floor 75 s, ceiling 10 min; body timeout = that + 45 s).
 
 #### 3.2 SIP side-channel (v1.25.0)
 
@@ -7416,15 +7689,6 @@ Outcome (`'success'` / `'partial'` / `'failure'`), errors, level, spoken message
 and last render diagnostics are persisted to `broadcast-last.json` (next to the
 SQLite DB) so "what played last and did it work" survives the very restarts that
 most need auditing.
-
-**v1.79.0 — apply readback:** the actuator no longer treats a cloud ACK as an
-actuation. An applied night carries `applyVerifiedAtMs` (device readback matched
-the target), up to 2 re-issues on readback failure (5-min windows, never into a
-closing charge window), and a once-per-night operator warning + `actuated: 0`
-ledger correction on exhaustion. Grid loss during an applied window reverts
-immediately (`gridLossAbort`). The `vitalsRed` gate is HOST-vitals (struggling
-process), not alert-condition — documented as such after the 08-17 audit.
-Harness: `scripts/mutate-actuation-readback.mjs` (5 mutants).
 
 A second sidecar, `broadcast-red-replay.json`, records `{lastRedAnnouncedAtMs,
 voicedFingerprint, activeFingerprints, lastPlayedLevel}` on every
@@ -7465,7 +7729,7 @@ Timing knobs (all resolved once and folded into the cache key):
 
 | Knob | Default | Meaning |
 |------|---------|---------|
-| `leadSilenceMs` | 1500 ms | Digital silence before the first chime so AirPlay/multi-room speakers sync up (prevents clipped chime starts + slow devices missing short clips). 0 disables. |
+| `leadSilenceMs` | 1000 ms (add-on option default; 1500 ms only when `BROADCAST_LEAD_SILENCE_MS` is unset) | Digital silence before the first chime so AirPlay/multi-room speakers sync up (prevents clipped chime starts + slow devices missing short clips). 0 disables. |
 | `chimeGapMs` | 1000 ms | Silence after the chime group, before the spoken message (chime decays first). |
 | `announceRepeat` (`cfg.repeat`) | 2 | Whole (chime+message) block repeats so a missed first pass gets a second. Clamped 1..3. **Ignored when bilingual** (the two languages ARE the redundancy). |
 | `repeatGapMs` | 1500 ms | Silence between repeated blocks. |
@@ -7629,8 +7893,8 @@ Alert Console rather than choosing a set globally:
 
 | Pack | red | yellow | green |
 |------|-----|--------|-------|
-| **`powerplant`** (default) | Fast hi/lo square warble ~4 alt/s, 880/587 Hz, ~2.6 s ("drop everything") | Slow ~1.5 Hz single-tone sine, 620 Hz, 3 beeps, ~1.9 s | Soft descending bell double-chime 660→554 Hz, ~1.0 s |
-| **`airport`** | Descending struck-bell Am arpeggio C5→A4→F4, ×2, ~3.0 s | Two-note "bing-bong" E5→C5 bell, ~1.4 s | Rising C-major arpeggio C5→E5→G5 bell, ~1.3 s |
+| **`powerplant`** (named tones `powerplant-*`; the `builtin` tone of the high and low rungs) | Fast hi/lo square warble ~4 alt/s, 880/587 Hz, ~2.6 s ("drop everything") | Slow ~1.5 Hz single-tone sine, 620 Hz, 3 beeps, ~1.9 s | Soft descending bell double-chime 660→554 Hz, ~1.0 s |
+| **`airport`** (named tones `airport-*`; also the synthesized `red-alert`/`yellow-alert`/`all-clear` level klaxons, the `builtin` tone of critical, medium and clear) | Descending struck-bell Am arpeggio C5→A4→F4, ×2, ~3.0 s | Two-note "bing-bong" E5→C5 bell, ~1.4 s | Rising C-major arpeggio C5→E5→G5 bell, ~1.3 s |
 
 The `powerplant` pack follows ISA-18.2 / EEMUA-191 convention (priority conveyed
 by *cadence*: fast warble = emergency, slow pulse = caution, soft chime =
@@ -7642,6 +7906,8 @@ A fixed, **selectable** library of 22 short tones (separate from the 4 klaxons),
 synthesized once to `/data/audio/<id>.wav`, pack-independent. Catalog
 (`BUILTIN_TONES`, ordered as shown in the UI dropdown):
 
+`airport-red-alert`, `airport-yellow-alert`, `airport-all-clear`, `powerplant-red-alert`,
+`powerplant-yellow-alert`, `powerplant-all-clear` (v1.55.0 — the six pack klaxons, listed first),
 `ping-single` (Single Ping), `ping-double` (Double Ping), `triad-bell` (Triad
 Bell), `triad-up` (Rising Triad), `marimba-run` (Marimba Run), `cascade` (Chime
 Cascade), `doorbell` (Two-Tone Doorbell), `chirp-rise` (Rising Chirp),
@@ -7660,9 +7926,10 @@ tone that writes no WAV). A named-tone id must match
 #### 5.3 Version-gated regeneration
 
 `AUDIO_ASSETS_VERSION = 6`. A marker file `/data/audio/.assets-version` stores
-`"<version>:<pack>"` (e.g. `"5:powerplant"`). If it doesn't match, all WAVs are
-force-regenerated at boot (atomic tmp→rename). So bumping the version OR
-switching the pack regenerates without manual `/data/audio` cleanup.
+`v<version>` (`v6`). Since v1.56.0 removed the chime-pack option, the marker is version-only and
+matches no earlier `<n>` or `<n>:<pack>` marker, so every install regenerated once. If it doesn't
+match, all WAVs are force-regenerated at boot (atomic tmp→rename), so bumping the version
+regenerates without manual `/data/audio` cleanup.
 `regenerateAudioAssets` (tests / explicit reset) deletes all assets + the marker
 first.
 
@@ -7671,7 +7938,7 @@ first.
 ### 6. Operator-uploaded tones (`chimeStore.ts`)
 
 The operator can upload their own short WAV to prepend the spoken message.
-Library lives at `CHIMES_DIR` (`$CHIMES_DIR` / `$DATA_DIR/chimes`, default
+Library lives at `CHIMES_DIR` (`<$CHIMES_DIR, else $DATA_DIR, else /data>/chimes`, default
 `/data/chimes`): `<id>.wav` (normalized) + `manifest.json`.
 
 **Two hard safety rules:**
@@ -7750,7 +8017,7 @@ when that tone is deleted.
 #### 8.1 `buildAlertMessage(level, alerts)` → spoken English sentence
 
 - `green` → `"All clear. All stations report normal."`
-- `red`/`yellow` → picks a **primary alert** (`pickPrimaryAlert`: prefer target severity, then alerts with a location, then category rank Battery > SHP2 > Solar > Grid > Thermal > Connectivity; never a non-annunciating alert) and builds:
+- `red`/`yellow` → picks a **primary alert** (`pickPrimaryAlert`: only alerts of the level's severity — critical for red, warning for yellow — then those with a location (`coreNum`), then category rank Battery > SHP2 > Solar > Grid > Thermal > Connectivity; never a non-annunciating or `audible: false` alert. The tick passes only the alerts the condition counts, `conditionNamePool`, v1.187.11) and builds:
 
   ```
   <ISA priority prefix> <Category clause> <Location>. <Title>. <detail>[ Acknowledge at console.][ Repeat. <prefix> <Title>.]
@@ -7839,7 +8106,7 @@ tuned per service:
 
 | Call | headersTimeout | bodyTimeout | Why |
 |------|----------------|-------------|-----|
-| `music_assistant.play_announcement` | **75 s** | **120 s** | MA blocks until the announce is queued + started on every target; a ~2.2 MB / ~24 s repeated WAV to slow ecobees needs the headroom, else it aborts "partial" though audio played. |
+| `music_assistant.play_announcement` | caller's budget, else **75 s** | caller's budget + 45 s, else **120 s** | MA blocks until playback finishes. Since v1.119.0 the broadcast monitor passes a budget sized to the clip (`announceTimeoutMs`: play time + 45 s, floor 75 s, ceiling 10 min); 75 s / 120 s remain the defaults for a caller that passes none. A timeout is delivery unknown, not a failure (§12i). |
 | everything else | 5 s | 10 s | Keep hangs visible. |
 
 Helpers used by the broadcast monitor: `getEntityState` (pre-flight + health
@@ -7863,18 +8130,17 @@ user-mutable **override** layer persisted at
 `broadcast-runtime-config.json` (next to the DB) sits on top. Each field is an
 override: `null` = defer to env, a concrete value wins. `loadBroadcastConfig()`
 re-merges the override every tick (~10 s) and per broadcast, so a UI change takes
-effect within one tick with **no restart**. Only `enabled` and `volume` are
-overridable this way. Writes are atomic (tmp+rename) with change listeners; the
+effect within one tick with **no restart**. Only `enabled` is
+overridable this way. Since v1.57.0 `volume` has one source, the `BROADCAST_VOLUME` add-on
+option (applied on restart), and the Alert Console carries no volume slider. Writes are atomic (tmp+rename) with change listeners; the
 monitor subscribes (`onBroadcastRuntimeConfigChange`) to keep its closure `cfg`
 coherent for immediate read-back on `/api/broadcast/config` + `/status`.
 
-**Important coupling:** `volume` here is the abstract 0..1 master level. What
-actually reaches the speakers is `announceVolume` (0..100), which
-`loadBroadcastConfig` recomputes from the effective volume — setting only
-`volume` without that recompute would be audibly inert. When
-`BROADCAST_ANNOUNCE_VOLUME` is pinned in env (a number or `'off'`/`'standing'`),
-that advanced override wins and the slider is informational only
-(`announceVolumePinned` in the API discloses this).
+**Important coupling:** `volume` is the abstract 0..1 master level from
+`BROADCAST_VOLUME`. What actually reaches the speakers is `announceVolume` (0..100), which
+`loadBroadcastConfig` derives from it. When `BROADCAST_ANNOUNCE_VOLUME` is pinned in env (a
+number or `'off'`/`'standing'`), that advanced override wins and `BROADCAST_VOLUME` is
+informational only (`announceVolumePinned` in `GET /api/broadcast/config` discloses this).
 
 #### 11.2 `resolveAnnounceVolume` / `announceVolumeLevel`
 
@@ -7898,17 +8164,17 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_TARGETS` | — | Comma-separated `media_player.*` entity ids (MA speakers). Non-`media_player.` entries dropped. |
 | `BROADCAST_SIP_TARGETS` | — | Comma-separated `media_player.*` SIP/announce-only targets. Entries also in `BROADCAST_TARGETS` dropped. |
 | `BROADCAST_AUDIO_BASE` | `http://homeassistant.local:8787` | URL prefix speakers fetch the rendered WAV from (trailing slash stripped). |
-| `BROADCAST_VOLUME` | `0.5` | 0..1 master level (overridable live). Clamped. |
+| `BROADCAST_VOLUME` | `0.5` | 0..1 master level, the only volume source (v1.57.0; applied on restart). Clamped. |
 | `BROADCAST_ANNOUNCE_VOLUME` | (empty → volume×100) | Pins announce volume: a `0..100` number, or `off`/`none`/`standing` to omit it. |
 | `BROADCAST_MIN_SEVERITY` | `critical` | `critical` or `warning` — the lowest level that broadcasts (`yellow` skipped when `critical`). |
-| `BROADCAST_QUIET_HOURS` | (empty) | e.g. `"22-06"`. Suppresses non-critical (and critical unless break-through) in-window. |
+| `BROADCAST_QUIET_HOURS` | `22-06` | Whole local hours `HH-HH`, wrapping past midnight; empty = no quiet window. Suppresses non-critical (and critical unless break-through) in-window. |
 | `CRITICAL_BREAKS_QUIET_HOURS` | `false` | When true, red/high/critical break through quiet hours; default OFF ⇒ everything held overnight. |
 | `BROADCAST_WYOMING_HOST` | `core-piper` | Wyoming/Piper TCP host. |
 | `BROADCAST_WYOMING_PORT` | `10200` | Wyoming/Piper TCP port. |
 | `BROADCAST_WYOMING_VOICE` | (Piper default) | Piper voice override (e.g. `en_US-amy-medium`). Folded into the cache key. |
 | `BROADCAST_WYOMING_VOICE_ES` | (empty) | Second-language (Spanish) Piper voice. Empty → bilingual inactive. |
 | `BROADCAST_BILINGUAL` | `true` | Enable the Spanish second pass (no-op until `_VOICE_ES` set). |
-| `BROADCAST_LEAD_SILENCE_MS` | `1500` | Lead-in silence, clamped 0..5000. |
+| `BROADCAST_LEAD_SILENCE_MS` | `1000` | Lead-in silence, clamped 0..5000 (1500 when the variable is unset). |
 | `BROADCAST_REPEAT` | `2` | Whole-block repeats, clamped 1..3. |
 | `BROADCAST_REPEAT_GAP_MS` | `1500` | Silence between repeats, clamped 0..5000. |
 | `BROADCAST_CHIME_GAP_MS` | `1000` | Post-chime gap, clamped 0..5000. |
@@ -7919,7 +8185,7 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_END_OF_MESSAGE_PHRASE_ES` | `Fin del mensaje` | Spanish terminator. |
 | `BROADCAST_END_OF_MESSAGE_GAP_MS` | `700` | Pre-terminator gap, clamped 0..5000. |
 | `BROADCAST_BOOT_WARMUP_MS` | `600000` (10 min) | Restart-continuation + boot phantom-red + red-replay window. |
-| `BROADCAST_RED_REPLAY_MIN_GAP_MS` | `1800000` (30 min) | Minimum gap before a *standing* red re-announces across a restart. A changed/new fault, or an escalation, ignores it. |
+| `BROADCAST_RED_REPLAY_MIN_GAP_MS` | unset (`Infinity`, v1.78.0) | Unset: an unchanged, verifiably announced standing red never replays at boot. A positive value restores the v1.64.0 timed reminder (that many ms of silence per announcement). A changed or new fault, or an escalation, ignores it. |
 | `BROADCAST_RED_REPLAY_STATE_PATH` | `<db>/../broadcast-red-replay.json` | Persisted `{lastRedAnnouncedAtMs, voicedFingerprint, activeFingerprints, lastPlayedLevel}` — the only channel the gate has across a restart. |
 | `BROADCAST_HEALTH_PROBE_MS` | `60000` | Audible-health probe interval. |
 | `BROADCAST_UNREACHABLE_CONFIRM` | `3` | Consecutive-fail streak before confirming unreachable. |
@@ -7967,6 +8233,14 @@ so it can never circularly try to chime over the channel it reports broken.
 Severity is medium so it never wakes the household through quiet hours — an
 unreachable speaker is not itself an emergency (the real emergencies push on
 their own alerts). It also mirrors to HA diagnostic sensors via `mqttDiscovery`.
+
+**`broadcastDegradedAlert(h, nowMs)`** (v1.186.0): while fewer Music Assistant targets are usable
+than configured, confirmed by the same `AUDIBLE_UNREACHABLE_CONFIRM`-probe debounce
+(`audibleDegradedStep`), a **WARNING / MEDIUM** push alert `system-audible-degraded`
+(`AUDIBLE_DEGRADED_ALERT_ID`) names the speakers that will not play. It yields to
+`system-audible-unreachable` once that is confirmed, resolves when every target is usable again,
+and shares the `system-audible` prefix that keeps it out of the audible condition. Each broadcast
+also logs `only N of M Music Assistant target(s) usable`.
 The status sensor (`audible_status`, "Audible Alarm Channel") has four values, from
 `audibleStatus(h)`: `unknown` before the first probe (`lastProbeAt` null), then `disabled`
 when broadcast is off, `reachable` / `UNREACHABLE` by the debounced `reachable`, and
@@ -7994,10 +8268,10 @@ JSON endpoints:
 
 | Method + path | Auth | Purpose |
 |---------------|------|---------|
-| `GET /api/broadcast/status` | none (read-only) | Full status snapshot: `enabled`, `targetCount` (**v1.131.0**: Music-Assistant **plus** SIP targets, itemised as `maTargets`/`sipTargets`; `targets` is retained for back-compat and still lists the MA set only), `lastBroadcastAt/Level/Outcome/Errors` (the last broadcast attempted; since **v1.187.0** a storm-gate refusal is reported apart in `lastSuppressedAt/Level/Kind/Reason` and never becomes the last broadcast), `musicAssistantAvailable` (honest: present AND not confirmed-unreachable), `wyomingReachable`, `stormSuppressedCount`, `audibleReachable`/`audibleUsableTargets`/`audibleReason`, `lastRender` (filename/bytes/ttsRenderMs/fromCache/error), live `grid` backstop, and a resolved `config` block (all knobs + `announceVolume`). `sipTargets` arrived in v1.25.0 and was threaded through dispatch and the log lines ("2 MA + 1 SIP") but not through `status()`, so the route named two of three speakers — and the one it omitted is specifically the redundant channel designed to work when Music Assistant is down, which is exactly when an operator reads this. |
+| `GET /api/broadcast/status` | none (read-only) | Full status snapshot: `enabled`, `targetCount` (**v1.131.0**: Music-Assistant **plus** SIP targets, itemised as `maTargets`/`sipTargets`; `targets` is retained for back-compat and still lists the MA set only), `lastBroadcastAt/Level/Outcome/Errors` (the last broadcast attempted; since **v1.187.0** a storm-gate refusal is reported apart in `lastSuppressedAt/Level/Kind/Reason` and never becomes the last broadcast), `musicAssistantAvailable` (honest: present AND not confirmed-unreachable), `wyomingReachable`, `stormSuppressedCount`, `audibleReachable`/`audibleUsableTargets`/`audibleReason`, the degraded channel `audibleConfiguredTargets`/`audibleDegraded`/`audibleUnusableTargets` (v1.186.0), `lastBroadcastKind`, the restart-baseline record `conditionLevel`/`conditionSpoken`/`conditionAt`/`bootBaselineLevel`, `lastRender` (filename/bytes/ttsRenderMs/fromCache/error), live `grid` backstop, and a resolved `config` block (all knobs + `announceVolume`). `sipTargets` arrived in v1.25.0 and was threaded through dispatch and the log lines ("2 MA + 1 SIP") but not through `status()`, so the route named two of three speakers — and the one it omitted is specifically the redundant channel designed to work when Music Assistant is down, which is exactly when an operator reads this. |
 | `GET /api/broadcast/config` | none (120/min bucket) | Effective enable/volume + `announceVolume` + `announceVolumePinned` + `override` + `envBaseline`. |
-| `PUT /api/broadcast/config` | write (30/min) | Set/clear the runtime `enabled`/`volume` override (`null` clears to env). Audit-logged. |
-| `POST /api/broadcast/test` | write | Fire a test broadcast at `{ level }` (default `red`). Bypasses all gates except the 10 s test cooldown (`TEST_COOLDOWN_MS`). 429 on cooldown, 502 on failure. |
+| `PUT /api/broadcast/config` | write (30/min) | Set/clear the runtime `enabled` override (`{ enabled }`: `true`, `false`, or `null` to clear to env). Volume is not settable here (v1.57.0). Audit-logged. |
+| `POST /api/broadcast/test` | write | Fire a test broadcast at `{ level }` — `red`, `yellow` or `green` (default `red`; any other value is refused with 400, v1.185.1). Bypasses all gates except the 10 s test cooldown (`TEST_COOLDOWN_MS`). 429 on cooldown, 502 on failure. |
 | `GET /api/broadcast/discover` | write | Enumerate every `media_player` HA knows (friendly name, inferred family, state, volume, `currently_configured`) so the operator picks targets from a real list. 503 if unsupervised/unreachable. |
 | `POST /api/broadcast/setup-piper` / `reset-piper` | write | Add/reset the Wyoming Protocol integration via config-flow helpers. |
 | `GET /api/chimes`, `GET /api/chime-config` | none | Console payload: the five rungs, their labels, per-rung `assignments`, uploaded `chimes`, `builtinTones`, `maxUploadBytes`. |
@@ -8011,7 +8285,7 @@ JSON endpoints:
 
 - **`test(level)`** — 10 s cooldown; bypasses storm gate + all annunciation gates; speaks an ISA-prefixed "Test broadcast. This is only a test." (bilingual when a Spanish voice is set).
 - **`preview(priority, target)`** — 2 s cooldown; renders via the identical `renderAnnouncement` call so it sounds exactly like a real alarm; `browser` never touches MA (works even when broadcasts are disabled / no targets).
-- **`announce(priority, message, messageEs?)`** — the dedicated edge-triggered path for SoC / runway crossings. Maps priority → level via `klaxonLevelForPriority`, reuses `runBroadcast`, applies the quiet-hours gate but **no cooldown** (the SoC/runway monitors already edge-limit crossings). Never throws.
+- **`announce(priority, message, messageEs, opts?)`** — the dedicated path (kind `dedicated`) for the SoC ladder, the runway alarm, and the night-charge and Charge Now notices. Returns at once when broadcasts are disabled; maps priority → level via `klaxonLevelForPriority`, reuses `runBroadcast`, applies the quiet-hours gate (high/critical break through only with `CRITICAL_BREAKS_QUIET_HOURS`) but **no cooldown** (the callers edge-limit). `opts.consentNotice` (the supervised night-charge arm/cancel, v1.122.0) bypasses the storm gates. A failed spoken render earns the one spoken retry with its own words. Never throws.
 
 ---
 
@@ -8026,7 +8300,7 @@ JSON endpoints:
 - **`audibleReachable = null`** (pre-probe / transient restart) never raises the self-alert — only a debounced `false` does.
 - **VOLUME_SET-incapable target** (cordless) → per-target pin isolates it so capable ecobees are still pinned.
 - **Renderer cache** keyed on version + every timing/tone/voice/message input; incomplete renders never occupy the complete key; hourly prune at 7-day age plus a 1-hour orphan-`.tmp` sweep.
-- **Restart** → boot warm-up (10 min) suppresses re-spoken yellow/green advisories; the first fresh red is held one tick to filter a telemetry-populate phantom. A red is **never** suppressed on level alone, and **never on the bare alert id** either (`dpu-err-<sn>` is emitted for every `sysErrCode`, so one id spans many faults) — only a red whose **spoken** critical carries the same `id`+`title`+`fault` fingerprint announced < 30 min ago, with nothing new alongside it and no escalation, is skipped for that boot (`redReplayGate`). A standing fault re-klaxoning on every deploy trains the household to ignore the loudest tone the system has; a changed fault, a new fault, an escalation, or an intervening all-clear always fires.
+- **Restart** → boot warm-up (10 min) suppresses re-spoken yellow/green advisories; the first fresh red is held one tick to filter a telemetry-populate phantom. A red is **never** suppressed on level alone, and **never on the bare alert id** either (`dpu-err-<sn>` is emitted for every `sysErrCode`, so one id spans many faults) — only a red whose **spoken** critical carries the same `id`+`title`+`fault` fingerprint already verifiably announced since that fault began (no time bound by default, v1.78.0; `BROADCAST_RED_REPLAY_MIN_GAP_MS` restores a timed one), with nothing new alongside it and no escalation, is skipped for that boot (`redReplayGate`). A standing fault re-klaxoning on every deploy trains the household to ignore the loudest tone the system has; a changed fault, a new fault, an escalation, or an intervening all-clear always fires.
 
 
 ---
@@ -8040,7 +8314,7 @@ The ecoflow-panel add-on exposes the same underlying fleet telemetry through **t
 | **React web dashboard (PWA)** | WebSocket `/ws` + REST `/api/*` | Browser at `:8787` or via HA Ingress sidebar | Same-origin; writes need ingress/same-origin/token |
 | **Control-room TUI** | Raw telnet TCP `:2323` **and** browser xterm.js at `/console` | `nc`/`telnet` client, or browser | LAN-trust by default; opt-in operator login via `TUI_PASSWORD` (§11 2.3) |
 
-Both read the **same `FleetSnapshot`** the server pushes ~1×/sec over `/ws`, plus the same analytics REST endpoints. This document is a features-and-navigation reference for each surface.
+Both read the **same `FleetSnapshot`** the server pushes over `/ws` on every snapshot change, plus the same analytics REST endpoints. This document is a features-and-navigation reference for each surface.
 
 The server that backs both is a single Fastify instance (`server/src/index.ts`) listening on port **8787** (web + REST + WS), with the raw telnet listener on **2323**. Both ports are declared in the add-on `config.yaml`:
 
@@ -8060,28 +8334,32 @@ panel_title: Power
 
 Every UI follows the same two-tier data model:
 
-1. **Live snapshot over WebSocket** — the server pushes a JSON frame `{ type: 'snapshot', data: FleetSnapshot }` roughly once per second. `FleetSnapshot` carries `devices` (per-device projections: DPU packs, SHP2 backup pool, generic small devices), `grid`, `alerts`, and `generatedAt`. This is the source of truth for all live tiles.
+1. **Live snapshot over WebSocket** — the server sends a JSON frame `{ type: 'snapshot', serverNowMs, data: FleetSnapshot }` when the socket opens and again on every snapshot change (each MQTT message, poll result or alert update). This is event-driven, not a fixed 1 Hz tick. The body is serialized once per change and shared by every client; `serverNowMs` is stamped per send (v1.176.0). `FleetSnapshot` carries `devices` (per-device projections: DPU packs, SHP2 backup pool, generic small devices), `grid`, `alerts`, and `generatedAt`. This is the source of truth for all live tiles.
 2. **On-demand analytics over REST** — heavier computed views (forecast, runway, degradation, self-consumption, per-circuit history, etc.) are fetched from `/api/*` endpoints on mount and/or a refresh interval. These are cached server-side and never streamed on the WS hot path.
 
-The full set of REST endpoints consumed by the front ends:
+The REST endpoints the web dashboard calls. The Lovelace card family that also consumed several of
+them was removed in v1.47.0 (§3 below). The dashboard seeds from the `/ws` connect-time frame, not
+from `/api/snapshot`.
 
 | Endpoint | Consumed by | Payload |
 |---|---|---|
-| `/api/snapshot` | one-shot seed (web + cards) | full `FleetSnapshot` |
-| `/api/runway` | web RunwayCard, fleet-card | reserve-runway projection |
-| `/api/summary/today` | web TodaySummary/SolarPanel, fleet-card, solar-card | day energy totals |
-| `/api/forecast` | web ForecastCard/ForecastDetail/SolarResponseCard, fleet-card, solar-card | day-ahead forecast |
-| `/api/forecast/probabilistic` | solar-card | P10/P50/P90 forecast bands |
-| `/api/degradation` | web DegradationCard, battery-card | capacity-fade report |
-| `/api/round-trip-efficiency` | web DegradationCard, battery-card | RTE |
-| `/api/curtailment`, `/api/clipping` | web CurtailmentCard, solar-card | clipping/curtailment diagnostics |
-| `/api/history`, `/api/circuit/history` | Sparkline/TrendChart, CircuitModal, circuit-card | recorder time-series |
-| `/api/dispatch-plan` | none — the strategy-card was removed with the Lovelace cards in v1.47.0 (Appendix A.7) | dispatch plan |
-| `/api/alerts/history`, `/api/alerts/outcome` | web AlertsPanel/AlertOutcomeButtons, alerts-card | cleared-alert log, outcome tagging |
-| `/api/notify/status`, `/api/notify/test` | alerts-card | notify channel status/test |
-| `/api/alert-settings`, `/api/chimes`, `/api/chime-config`, `/api/broadcast/config`, `/api/alert-preview` | web Alert Console | alarm-audio administration |
-| `/api/self-consumption`, `/api/thermal-events`, `/api/equipment-health`, `/api/shade-report`, `/api/soiling-decomposition`, `/api/string-mismatch`, `/api/ev-window-prediction`, `/api/charge-curve`, `/api/internal-resistance`, `/api/forecast-skill`, `/api/ambient-thermal-forecast`, `/api/confidence`, `/api/nws-alerts`, `/api/incidents`, `/api/weather/ensemble` | web AdvancedInsightsCard, insights-card | predictive/analytics detail |
-| `/api/device/refresh-cloud/<sn>`, `/api/device/refresh-cloud-cooldown` | web RefreshCloudButton | manual cloud-poll trigger (write) |
+| `/api/runway` | RunwayCard | reserve-runway projection |
+| `/api/summary/today` | TodaySummary, SolarPanel | day energy totals |
+| `/api/forecast` | ForecastCard, ForecastDetail, SolarResponseCard | day-ahead forecast |
+| `/api/degradation`, `/api/round-trip-efficiency` | DegradationCard | capacity-fade report, RTE |
+| `/api/curtailment` | CurtailmentCard | curtailment diagnostics |
+| `/api/history`, `/api/circuit/history` | Sparkline/TrendChart, SolarPanel, CircuitModal | recorder time-series |
+| `/api/alerts/history`, `/api/alerts/outcome` | AlertsPanel, AlertOutcomeButtons | cleared-alert log, outcome tagging |
+| `/api/alert-settings`, `/api/chimes`, `/api/chime-config`, `/api/broadcast/config`, `/api/alert-preview` | Alert Console | alarm-audio administration |
+| `/api/night-charge/status`, `/api/night-charge/cancel` | NightChargeCard (Strategy tab) | tonight's plan; cancel (write) |
+| `/api/db-export` | DbExportButton (Strategy tab) | database-copy age; export (write) |
+| `/api/house-panel` | HousePanelPin (Dashboard) | pin the house panel (write) |
+| `/api/grid-veto/clear` | GridVetoClear (Dashboard) | clear a stale grid veto (write) |
+| `/api/self-consumption`, `/api/thermal-events`, `/api/equipment-health`, `/api/shade-report`, `/api/soiling-decomposition`, `/api/string-mismatch`, `/api/ev-window-prediction`, `/api/charge-curve`, `/api/internal-resistance`, `/api/forecast-skill`, `/api/ambient-thermal-forecast`, `/api/confidence`, `/api/nws-alerts`, `/api/incidents`, `/api/weather/ensemble` | AdvancedInsightsCard | predictive/analytics detail |
+| `/api/device/refresh-cloud/<sn>`, `/api/device/refresh-cloud-cooldown` | RefreshCloudButton (Shp2Card) | manual cloud-poll trigger (write) |
+
+`/api/snapshot`, `/api/clipping`, `/api/forecast/probabilistic`, `/api/dispatch-plan`, `/api/notify/status`
+and `/api/notify/test` remain on the server with no front-end consumer (Appendix A.7).
 
 ---
 
@@ -8119,7 +8397,7 @@ The header renders a **5-tab pill** (reduced from 7 in v0.85.0). The tab set (`A
 | **Strategy** | `strategy` | `pages/StrategyPanel.tsx` | SHP2 dispatch config + circuit priority |
 | **Alerts** | `alerts` | `pages/AlertsPanel.tsx` | Active/Learned/Cleared alerts + settings |
 
-The **Alerts** tab carries a numeric badge = `critical + high + medium` count of *threshold* alerts (learned/model alerts are excluded from the count). The badge color follows the highest present ISA priority (bad → high → warn), computed via `alertPriority.priorityCounts()`.
+The **Alerts** tab carries a numeric badge: the `critical + high + medium` count of *threshold* alerts plus, since v1.182.0, every *learned* alert at Critical priority (other learned alerts are not counted). The badge colour follows the highest present ISA priority (bad → high → warn; a learned Critical colours it bad). It is computed by `alertBadge()` in `web/src/alertPriority.ts`.
 
 Note the id/label mismatch: the **Battery** tab uses internal id `thermal` (historically the thermal panel). The former standalone "Predictive Insights" and "Alert Console" tabs were dissolved in v0.85.0 — predictive sections were relocated into their home pages, and the Alert Console became a sub-view of the Alerts page.
 
@@ -8127,10 +8405,13 @@ Note the id/label mismatch: the **Battery** tab uses internal id `thermal` (hist
 
 Rendered inline in `App.tsx`. Top-to-bottom:
 
+- **GridVetoClear** (`components/GridVetoClear.tsx`, v1.184.0): the "Grid is back — clear" button. It appears only while the top-level `grid.vetoClearable` is set, so it shows even with no projected panel, and it posts `/api/grid-veto/clear` (write-auth).
+- **HousePanelPin** (`components/HousePanelPin.tsx`, v1.185.0): appears while `snapshot.housePanel` is ambiguous or missing, and pins the panel night charge writes to with `POST /api/house-panel` (write-auth).
+
 - **RunwayCard** (`cards/RunwayCard.tsx`) — reserve-runway headline, fetches `/api/runway` through `usePolled` (v1.176.0): a failed refresh keeps the last projection, and once it has missed 2.5 polls (`pollStale`) the header shows a `StaleNote` ("stale · as of <time>", naming the day when it is not today). `CurtailmentCard` follows the same pattern. Since **v1.177.0** its wording comes from the pure `cards/runwayText.ts` (run by `server/test/runwayCardText.test.ts`): with no reserve crossing in the horizon the headline is "reserve holds N h", labelled with the projection's lowest point (`troughKwh`/`troughAtMs`) and its margin over the floor — "forecast PV keeps up with the load" only when the pool never falls below its current level — and neutral (not green) when that margin is under `TROUGH_TIGHT_FRAC` (15%) of full. The grid note (`gridNote`) is shown only while `grid.backstopping` — the resolver's verdict, which HA's `runway_projection_islanded_only` and the runway alarm's audible gate also use; a grid merely reported `present` at the reserve floor, which the resolver distrusts, gets no "not a live countdown" note — and says "grid is supplying the house" only when `grid.importLive`, else "grid available as backup" (v1.186.3 wording; both followed by "these are outage projections (if the grid goes down), not a live countdown"). The header names the load model in use ("typical load", or "last-hour load" when `loadModelDegraded`); "Recent load" is captioned by `recentLoadBasis`; the PV tile's load says it excludes predicted EV (the Solar tab's forecast load says it includes it).
 - **EnergyFlow** (`cards/EnergyFlow.tsx`) — animated SVG power-flow diagram; reads `snapshot.devices` + `snapshot.grid`, no fetch. Since **v1.175.0** every number comes from the pure `cards/energyFlowModel.ts` (run by `server/test/energyFlowModel.test.ts`). Two cadences drive it: the panel's figures (`homeGridWatts`, house load, channels) arrive in one frame every ~60 s; the Cores' `acIn`/`acOut` every ~10 s. Attribution uses the fresher meter first. Edges: Solar → Batteries `pv`; Grid → Batteries `gridToCoresW` = the Cores' draw (`acIn` over the Cores drawn in the Batteries node when the connection table exists; `grid.importWatts`, which fails safe to 0, when it does not — so a bench spare's wall charge is never drawn as grid); Grid → Loads `gridToHouseW`, drawn below the battery node; Batteries → Loads `coresToHouseW`. The Cores deliver only when their inverters report `acOut` ≥ 5 W. Cores idle → the grid carries the whole house (`gridState` is also active when the Cores deliver nothing while the house draws and the grid is present: the minute before the panel's next frame shows the main rising). Cores the only source → their edge is the house load. Both → `coresToHouseW = min(acOut, load)`, `gridToHouseW = load − coresToHouseW`. The two edges into Loads always sum to the node; edges under 5 W are not drawn. The Grid node shows `homeGridWatts` unless it differs from the sum of its edges by more than max(500 W, 10%) — then the main is a frame behind and the node shows its edges. The Loads node is the SHP2 channel sum, NULL ("—") when the panel is silent (every channel `watts: null`: "panel not reporting") or frozen (offline, `contentStaleSinceMs` set, or — since v1.179.0 — `grid.panelFresh === false`: "panel data stale" — the server already zeroes such a panel's grid reading); the subtitle counts `pairedCircuits`, not channels. The Solar and Batteries nodes are not balanced against the house: PV is DC-side, the house AC-side, and conversion losses are not drawn.
 - **TodaySummary** (`cards/TodaySummary.tsx`) — today's energy totals from `/api/summary/today` through `usePolled`. The response carries `dayEndMs` (v1.176.0: the local midnight that ends its day, from `setDate(+1)`, exact across daylight-saving changes); a payload whose day is over is dropped rather than shown under "since 12:00 AM" (`dayWindowExpired`, server-clock now estimated as `untilMs` + time since it arrived). The Solar tab's Today tile applies the same rule.
-- **Shp2Card** — the SHP2 backup pool card (backup %, panel load, sources).
+- **Shp2Card**: one card per Smart Home Panel (v1.185.0), with the house panel (`findHousePanel`) first and then any other panel. Each shows backup %, panel load, sources and the `RefreshCloudButton`.
 - **DpuCard** per Delta Pro Ultra — with a `viaShp2` fallback so a cloud-offline DPU still shows the state the SHP2 reports over its wired link (battery %, contributed watts, AC-open, temp, errors).
 - **ForecastCard** (lazy) — 24 h day-ahead forecast, `/api/forecast`.
 - **Two TrendCharts** (lazy, recharts) — "Backup pool & panel load (24h)" and "DPU output & PV (24h)", each pulling `/api/history` per series over a 24 h / 60 s-bucket window.
@@ -8144,17 +8425,22 @@ Live PV surface. Summary tiles ("Producing now" split HV/LV, HV/LV channel count
 - **SolarResponseCard** — forecast-vs-actual response (`/api/forecast`).
 - **CurtailmentCard** — clipping/curtailment (`/api/curtailment`).
 - **ForecastDetail** — the deep day-ahead breakdown (`/api/forecast`).
-- **AdvancedInsightsCard** filtered to the solar-relevant sections (shade, soiling, string-mismatch, forecast-skill, ambient-thermal, etc.).
+- **AdvancedInsightsCard** filtered to `['forecast-skill', 'weather-ensemble', 'equipment-health', 'shade', 'soiling-decomposition', 'string-mismatch']`. Ambient-thermal is on the Battery tab.
 
 Producing/idle/no-sun/fault status labels classify each array.
 
 #### 1.5 Battery tab (`ThermalPanel.tsx`, internal `thermal`)
 
-Fleet thermal + per-pack detail. A **SummaryStrip** (Avg SoC, Avg SoH, hottest pack, cells balancing). A selectable per-pack **PackDetail** pane exposing every BMS reading: SoC, runtime, representative/cell-max/cell-min/board/shunt/MOS-max temps, pack voltage, open-circuit voltage, cell mean, plus **per-cell temperature and voltage sensor grids** (32 cells). Color banding thresholds are labeled inline (SoC `<25% / 25–50% / ≥50%`; SoH `<75% / 75–85% / 85–95% / ≥95%`; cell imbalance `≤5 / ≤20 / ≤50 / >50 mV`). Cloud-offline cores are flagged ("still wired and counted in the pool capacity"). Below: **DegradationCard** (`/api/degradation` + `/api/round-trip-efficiency`) and an `AdvancedInsightsCard` filtered to battery sections (equipment-health, internal-resistance, charge-curve, thermal-events).
+Fleet thermal + per-pack detail. A **SummaryStrip** (Avg SoC, Avg SoH, hottest pack, cells balancing). A selectable per-pack **PackDetail** pane exposing every BMS reading: SoC, runtime, representative/cell-max/cell-min/board/shunt/MOS-max temps, pack voltage, open-circuit voltage, cell mean, plus **per-cell temperature and voltage sensor grids** (32 cells). Color banding thresholds are labeled inline (SoC `<25% / 25–50% / ≥50%`; SoH `<75% / 75–85% / 85–95% / ≥95%`; cell imbalance `≤5 / ≤20 / ≤50 / >50 mV`). Cloud-offline cores are flagged ("still wired and counted in the pool capacity"). Below: **DegradationCard** (`/api/degradation` + `/api/round-trip-efficiency`) and an `AdvancedInsightsCard` filtered to `['ambient-thermal', 'thermal-events', 'internal-resistance', 'charge-curve']` (equipment-health is on the Solar tab).
 
 #### 1.6 Strategy tab (`StrategyPanel.tsx`)
 
-SHP2 dispatch strategy, read from the SHP2 projection in the snapshot. Tiles for mid-priority discharge floor SoC, backup reserve SoC (+enabled), solar backup reserve SoC, and raw SHP2 mode codes (smart-backup mode, backup mode, overload mode). A **circuit-priority ranking** (`PriorityRow` per paired circuit, ranked). A **charge time-task** panel (task type, repeat mode, charge ceiling/floor SoC, charge watts) with a **DayTimeline** of charge windows and a "now" marker. Predictive strip = `AdvancedInsightsCard` filtered to `['ev-window', 'nws']` (EV-charging window prediction + NWS weather alerts).
+SHP2 dispatch strategy of the house panel (`findHousePanel`, v1.185.0), read from its projection only while that panel is online; otherwise the tab shows a "SHP2 not available" card plus the predictive strip. With the panel online, top to bottom:
+
+- **NightChargeCard** — tonight's night-charge plan from `/api/night-charge/status`, with the cancel button (§15.9).
+- The predictive strip — `AdvancedInsightsCard` filtered to `['ev-window', 'nws']` (EV-charging window prediction + NWS weather alerts).
+- A **Maintenance** block (v1.135.0) with `DbExportButton`: the published database copy and its age (`/api/db-export`).
+- The live SHP2 state: tiles for mid-priority discharge floor SoC, backup reserve SoC (+enabled), solar backup reserve SoC, and raw SHP2 mode codes (smart-backup mode, backup mode, overload mode); a **circuit-priority ranking** (`PriorityRow` per paired circuit, ranked); a **charge time-task** panel (task type, repeat mode, charge ceiling/floor SoC, charge watts) with a **DayTimeline** of charge windows and a "now" marker.
 
 #### 1.7 Alerts tab (`AlertsPanel.tsx`)
 
@@ -8332,7 +8618,7 @@ Sources of truth cited throughout:
 - `server/src/auth.ts` — write-auth gate, CORS allow-list, token bootstrap
 - `server/src/ecoflow/commands.ts`, `server/src/writeLog.ts` — write-debug lockdown + audit log
 - `ecoflow_panel/apparmor.txt` — the LSM confinement profile
-- `.github/workflows/{ci,release,tag-release,images}.yml` — CI + release/publish pipeline
+- `.github/workflows/{ci,codeql,release,tag-release,images}.yml` — CI, the CodeQL gate and the release/publish pipeline
 - `Dockerfile`, `build.yaml`, `repository.yaml` — image build + add-on repository manifest
 
 ---
@@ -8359,7 +8645,7 @@ runs the container.
 | `panel_icon` | `mdi:home-battery` | Sidebar icon |
 | `panel_title` | `Power` | Sidebar label |
 | `panel_admin` | `false` | Non-admin HA users may see the sidebar panel |
-| `map` | `data:rw` | `/data` volume mounted read-write (persistence) |
+| `map` | `data:rw`, `share:rw` | `/data` read-write (persistence). `/share` read-write (v1.107.0) so the SQLite snapshot (`POST /api/db-export`, §12g) is published where other add-ons can read it; the add-on writes only that snapshot there. |
 | `homeassistant_api` | `true` | Grants `SUPERVISOR_TOKEN` access to Core `/core/api/*` — needed for `media_player.play_media` broadcasts and entity-state reads. Without it, broadcasts fail with "SUPERVISOR_TOKEN missing or HA unreachable". |
 | `hassio_api` | `true` | Grants Supervisor API access (read-only survey of installed add-ons for Piper/speaker visibility). |
 | `hassio_role` | `homeassistant` | **Least-privilege (v1.7.0, CWE-250).** Downgraded from `manager`. `homeassistant` keeps Core API + the read it needs but drops add-on start/stop/reconfigure that `manager` would grant a compromised process. Bump back to `manager` only if a feature needs true add-on management. |
@@ -8399,7 +8685,7 @@ expects. This is deliberate; changing one to the other silently breaks the featu
 server's parser only recognizes its own convention).
 
 **Numeric `1`/`0`** — used for:
-`TELNET_ENABLED`, `NOTIFY_RESOLVED`, `NWS_ENABLED`, `MQTT_DISCOVERY_ENABLED`
+`TELNET_ENABLED`, `NOTIFY_RESOLVED`, `NOTIFY_CRITICAL_BYPASS_DND`, `NWS_ENABLED`, `MQTT_DISCOVERY_ENABLED`
 
 ```sh
 if bashio::config.true 'TELNET_ENABLED'; then export TELNET_ENABLED=1; else export TELNET_ENABLED=0; fi
@@ -8408,7 +8694,8 @@ if bashio::config.true 'TELNET_ENABLED'; then export TELNET_ENABLED=1; else expo
 **String `true`/`false`** — used for:
 `BROADCAST_ENABLED`, `BROADCAST_USE_PRE_ANNOUNCE`, `CRITICAL_BREAKS_QUIET_HOURS`,
 `BROADCAST_BILINGUAL`, `GRID_AVAILABLE`, `BATTERY_SOC_ALARM_ENABLED`,
-`BATTERY_RUNWAY_ALARM_ENABLED`, `LOAD_SHEDDING_ADVISORY_ENABLED`
+`BATTERY_RUNWAY_ALARM_ENABLED`, `LOAD_SHEDDING_ADVISORY_ENABLED`,
+`NIGHT_CHARGE_ADVISOR_ENABLED`, `NIGHT_CHARGE_NOTIFY_ON_HOLD`, `TARIFF_APS_RATES_CONFIRMED`
 
 ```sh
 if bashio::config.true 'BROADCAST_ENABLED'; then export BROADCAST_ENABLED=true; else export BROADCAST_ENABLED=false; fi
@@ -8501,6 +8788,8 @@ trailing `?` marks the field optional. Defaults are the values in the `options:`
 | `BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN` | `60` | `int(5,720)?` | Minutes between re-announcements of an active runway alarm. |
 | `GRID_AVAILABLE` | `false` | `bool` (→ `true`/`false`) | (v0.15.2) Must be `false` for an islanded/off-grid site — drives off-grid honesty + the grid-aware floor. |
 | `GRID_PRESENCE_ENTITY` | `""` | `str?` | (v0.23.0) HA entity reporting real grid presence (grid-aware floor re-escalation). |
+| `GRID_FLOOR_SLACK_PCT` | `"1.5"` | `str?` | (v1.74.0) Points above the backup reserve at which a declared grid with no measured flow stops being trusted and lighting austerity may pre-arm. Runtime-clamped to 0–10; blank or garbage = 1.5. The critical floor alarm's own +1.5 % coherence check is unaffected (§5 4.3). |
+| `CHARGE_NOW_RESPONSE` | `advisory` | `list(off\|advisory\|supervised)?` | (v1.84.0) Response to on-peak grid charging while the SHP2 "Charge Now" switch is on. `advisory` pushes once per episode; `supervised` also turns the switch OFF through the audited write path; `off` disables it (§12c). |
 | `HOST_POWER_ENTITY` | `""` | `str?` | (v1.6.0) HA `binary_sensor` (device_class=problem) reporting the Pi's kernel under-voltage flag. When set, the alarm engine warns on a browning-out host before it goes dark. Empty = dormant. |
 
 #### Load-shedding advisor (read + advise only; never actuates)
@@ -8524,7 +8813,7 @@ trailing `?` marks the field optional. Defaults are the values in the `options:`
 | `MQTT_DISCOVERY_PASS` | `""` | `password?` | MQTT password. |
 | `MQTT_DISCOVERY_PREFIX` | `homeassistant` | `str?` | MQTT discovery topic prefix. |
 
-#### Telnet control-room TUI (LAN-only, unauthenticated)
+#### Telnet control-room TUI (LAN-only; unauthenticated unless a console password is set)
 
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
@@ -8532,12 +8821,13 @@ trailing `?` marks the field optional. Defaults are the values in the `options:`
 | `TELNET_PORT` | `2323` | `port` | Telnet TUI port. |
 | `TUI_USERNAME` | empty | `str?` | Console login username (defaults to `operator` when empty and a password is set). |
 | `TUI_PASSWORD` | empty | `password?` | Console login password; empty disables the login prompt. Masked in the options UI. |
+| `TUI_TRUSTED_ORIGINS` | empty | `str?` | (v1.47.3) Comma-separated EXACT browser origins (for example one specific Nabu Casa URL) added to the same-origin set. A listed origin can open `/console/ws` and `/ws`, **and it passes the write-auth gate with no token** (Security posture, condition 2). Empty = LAN + ingress only. |
 
 #### Night-charge engine + tariff + heartbeat
 
 The night-charge option group (`NIGHT_CHARGE_ADVISOR_ENABLED`,
 `NIGHT_CHARGE_MODE` — `list(advisory|supervised|auto)`, default `advisory` —
-`ARB_OUTAGE_CUSHION_PCT`, `ARB_MIN_BUY_KWH`, `ARB_CHARGE_CAP_KW`,
+`ARB_OUTAGE_CUSHION_PCT`, `ARB_OUTAGE_CUSHION_HOURS` (default 4 h, 0–72), `ARB_ISLANDED_LOAD_SAFETY` (default 1.25, 1–5), `ARB_OBJECTIVE` (`resilience`/`cost`, default `resilience`), `ARB_COST_MAX_SOC_PCT` (default 90, 50–100), `ARB_MIN_BUY_KWH`, `ARB_CHARGE_CAP_KW`, `ARB_GRID_INPUT_CAP_KW` (default 17 kW, 0–100; 0 ignores grid-input contention),
 `ARB_LOAD_P90_FACTOR`, `NIGHT_CHARGE_NOTIFY_HOUR`/`_MINUTE`,
 `NIGHT_CHARGE_NOTIFY_ON_HOLD`) and the APS R-EV tariff options
 (`TARIFF_APS_*_CENTS` ×6, `TARIFF_APS_RATES_CONFIRMED`) are documented with
@@ -8571,8 +8861,11 @@ AppArmor profile.
 #### Write-auth gate (`requireWriteAuth`, `server/src/auth.ts`)
 
 Built by `createAuth({ host, port, log })` at boot. Applied as a Fastify `preHandler` on
-every POST/PUT/DELETE route and on admin GETs (audit log, add-on listing, media-player
-discovery). A request is accepted if **any** of three conditions hold:
+every POST/PUT/DELETE route except two:
+- `POST /api/alerts/outcome`: the alert-feedback log, which also updates the online pack-risk model.
+- `POST /api/energy-history/backfill`: a bounded background vendor-history fetch.
+
+It is also applied on the admin GETs `/api/writes/log`, `/api/admin/addons` and `/api/broadcast/discover`. A request is accepted if **any** of three conditions hold:
 
 1. **HA Ingress** — `req.headers['x-ingress-path']` is present **AND** `isSupervisorSource(req.ip)`
    is true. The header alone is forgeable from the directly-published `:8787` LAN port, so the
@@ -8582,7 +8875,10 @@ discovery). A request is accepted if **any** of three conditions hold:
    `X-Forwarded-For` cannot fake it. **Both** conditions must hold, closing the LAN-forge bypass.
 2. **Same-origin** — `req.headers.origin` is in the same-origin allow-list built by
    `buildSameOrigins(host, port)`: `http(s)://{host}:{port}`, `http(s)://homeassistant.local:{port}`,
-   `http(s)://localhost:{port}`, `http(s)://127.0.0.1:{port}`.
+   `http(s)://localhost:{port}`, `http(s)://127.0.0.1:{port}`, `http(s)://[::1]:{port}`, plus every
+   exact origin listed in `TUI_TRUSTED_ORIGINS` (v1.47.3). A trusted origin therefore satisfies this
+   condition for every write, not only the `/console` upgrade. It also passes CORS and the `/ws` and
+   `/console/ws` origin checks.
 3. **Explicit token** — `req.headers['x-panel-write-token']` equals the bootstrap token
    (constant-time compare via `tokenEquals`, which does a length-independent `timingSafeEqual`
    even on length mismatch to avoid leaking token length by timing).
@@ -8605,9 +8901,10 @@ Otherwise returns `401 {"error":"write-auth-required", "hint":"set X-Panel-Write
 `@fastify/cors` is registered with the callback form. Same-origin requests (no `Origin`
 header, curl, server-side) pass. Cross-origin requests pass only if the origin is:
 - in the same-origin set, **or**
-- in `HA_DASHBOARD_ORIGINS` (`homeassistant.local` / `homeassistant` on `:8123` and `:8787`), **or**
+- in `HA_DASHBOARD_ORIGINS` (`homeassistant.local` on `:8123` and `:8787`, `homeassistant` on `:8123`), **or**
 - matched by `LAN_ORIGIN_RE`: RFC1918 ranges (`10.x`, `127.x`, `192.168.x`, `172.16–31.x`) or
-  `*.local`, **on ports 8123 or 8787 only**.
+  `*.local`, on **any port or none**. Since v1.47.2 the port is optional, so HA behind a reverse
+  proxy, or the companion app on the default port, matches.
 
 Anything else gets no `Access-Control-Allow-Origin` header and the browser blocks the JS from
 reading the response.
@@ -8629,13 +8926,13 @@ gated by **five** layers (`server/src/index.ts`, `server/src/ecoflow/commands.ts
    total keys, max 1 KB serialized; plus a **per-SN cooldown** `SEND_CMD_COOLDOWN_MS`
    (env, default `30000` ms) returning `429` while cooling down.
 
-The non-debug writes are: `POST /api/device/refresh-cloud/:sn`, a true no-op
-cloud-presence refresh (re-sends the current `backupReserveSoc`) with its own
-`REFRESH_COOLDOWN_MS = 30_000` per-SN cooldown; and, since v1.50.0, the
-supervised night-charge reserve write (`setBackupReserveSoc`, audit action
-`night-charge-reserve`, 5-min cooldown) — actuator-only, no direct HTTP
-surface (§15.8b). `POST /api/night-charge/cancel` (write-auth via
-`requireWriteAuth`) disarms or reverts tonight's supervised write.
+The non-debug device writes all use the documented `PD303_APP_SET` shape and the audit log:
+- `POST /api/device/refresh-cloud/:sn`: a true no-op cloud-presence refresh that re-sends the current `backupReserveSoc`. Cooldown `REFRESH_COOLDOWN_MS = 30_000` per SN.
+- `setBackupReserveSoc` (audit action `night-charge-reserve`, 5-min per-SN cooldown, integer within the reserve write envelope). Used by the supervised night-charge reserve write (v1.50.0, §15.8b) and, since v1.114.0, by the owner reserve floor `POST /api/reserve-floor`. That route requires write-auth, shares a 10/h limit, and is refused with 409 while a night-charge write holds the reserve up (§12h).
+- `setChannelForceCharge` (audit action `charge-now-ch{n}`, slot 1–3, 5-min cooldown; since v1.186.0 an OFF is limited only by earlier OFFs). Used by the Charge Now responder's OFF (`CHARGE_NOW_RESPONSE: supervised`, v1.84.0, §12c) and by the night force-charge ON/OFF (v1.165.0).
+- `setForceChargeCeiling` (audit action `force-charge-ceiling`, `foceChargeHight` 80–100, 5-min cooldown). Used by the night force-charge ceiling sync (v1.165.0).
+
+`POST /api/night-charge/cancel` (write-auth) disarms or reverts tonight's supervised write.
 
 #### Audit log (`server/src/writeLog.ts`)
 
@@ -8654,11 +8951,19 @@ command shapes.
 `makeRateLimiter(max, windowMs)` — a dependency-free fixed-window limiter returning `429`
 when exceeded. `chimeWriteRateLimit = makeRateLimiter(30, 60_000)` guards the chime
 upload/delete/config write routes (bounds CPU for WAV normalization + disk churn; addresses
-CodeQL `js/missing-rate-limiting`). WebSocket inbound frames are capped at `maxPayload = 64 KiB`.
+CodeQL `js/missing-rate-limiting`). Each limiter is one shared bucket per route group, not per client:
+- `exportHaRateLimit` 6/h: `POST /api/energy-history/export-ha`.
+- `dbExportRateLimit` 6/h: `POST /api/db-export`.
+- `latchWriteRateLimit` 10/h: `POST /api/reserve-floor` and `POST /api/defective-packs/clear`.
+- `latchReadRateLimit` 60/min: `GET /api/defective-packs` and `GET /api/db-export`.
+- `broadcastConfigRateLimit` 30/min: `PUT /api/broadcast/config`.
+- 120/min read limiters on `GET /api/broadcast/config`, `GET /api/alert-settings`, and `GET /api/chimes` + `GET /api/chime-config` (one shared bucket).
+
+WebSocket inbound frames are capped at `maxPayload = 64 KiB`.
 
 #### AppArmor profile (`ecoflow_panel/apparmor.txt`)
 
-Loaded by Supervisor as the container's LSM profile (`profile addon_ecoflow_panel`). It bumps
+Loaded by Supervisor as the container's LSM profile. The file declares `profile addon_ecoflow_panel`, but the Supervisor renames the profile to the installed add-on's slug (`<repository-hash>_ecoflow_panel`) when it loads it. Look for that name in `/sys/kernel/security/apparmor/profiles` and in audit records. It bumps
 the HA security rating and confines the process even if a Fastify endpoint is exploited.
 
 - **Capabilities allowed (v1.187.15):** `chown`, `dac_override` only. Every process runs as
@@ -8703,8 +9008,11 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
    with `w`; validate any mask change with `apparmor_parser -T -Q` (fresh, cache-skipping)
    before shipping.**
 
-Diagnostic note: after a profile change, denied ops log to `/var/log/audit/audit.log` on the
-host (Pi) as `type=AVC`.
+Diagnostic note: on Home Assistant OS, AppArmor records go to the host's audit journal
+(`journalctl _TRANSPORT=audit` on the host), not to `/var/log/audit/audit.log` and not to `dmesg`.
+An explicit `deny` rule is silent and logs nothing. Only an `audit deny` rule, or an operation that
+no allow rule covers, is recorded. That is why the v1.187.15 review loaded the new write-locks as
+`audit deny`.
 
 #### Image signing / rating ceiling
 
@@ -8721,7 +9029,7 @@ unreferenced and harmless.
 | Port | Protocol | Purpose | Auth |
 |------|----------|---------|------|
 | `8787/tcp` | HTTP | Web dashboard + REST API + WebSocket (`/ws`) | Reads open; writes via `requireWriteAuth`. Also the `ingress_port`. |
-| `2323/tcp` | Telnet | "Control-room" TUI | **None** — keep on a trusted LAN; default OFF (`TELNET_ENABLED=false`). |
+| `2323/tcp` | Telnet | "Control-room" TUI | None unless `TUI_PASSWORD` is set (operator login, v1.46.0, §11 2.3). Unencrypted either way, so keep it on a trusted LAN. Default OFF (`TELNET_ENABLED=false`). The browser console at `/console` on `:8787` uses the same login. |
 
 **Ingress:** with `ingress: true` / `ingress_port: 8787`, the Supervisor reverse-proxies the
 same server into the HA sidebar ("Power"), authenticated by HA's session (visible in the HA
@@ -8775,11 +9083,20 @@ since the previous tag if empty). It:
 #### Step 2 — CI checks gate the PR
 
 `ci.yml` runs on every push/PR to `main`:
-- **`typecheck` (matrix: server, web)** — `npm ci` + `tsc --noEmit` → **2 checks**.
-- **`docker-smoke`** — buildx amd64-only Dockerfile build (`push:false`) → **1 check**.
+- `Type-check server` / `Type-check web` (`tsc --noEmit`).
+- `Type-check server tests` (`tsconfig.test.json`, src + test).
+- `Mutant anchors resolve` (`scripts/check-mutant-anchors.mjs`).
+- `Server tests`: `npm test`, then `scripts/check-doc-claims.mjs` against the pass count. The suite has gated the PR since v1.58.0.
+- `No personal data in the tree` (`scripts/check-no-secrets.py`).
+- `Dependency advisories` (`scripts/check-npm-audit.mjs`).
+- `Validate add-on config + translations`.
+- `Dockerfile smoke build (amd64)`.
+- `Build documentation (.docx + .pdf)`.
+- On a pull request only: `Release PR declares the version it names` (`scripts/check-release-pr.py`).
 
-`images.yml`'s `test` job (`npm test` + `tsc --noEmit` on the server) runs post-tag, not as a
-PR gate. CodeQL is enforced via the repo's GHAS ruleset (not a workflow file in this repo).
+`codeql.yml` analyses `actions`, `javascript-typescript` and `python` on every push/PR and weekly.
+It fails on an `error`-level result or a `security-severity` ≥ 7.0 (`.github/scripts/check-sarif.mjs`).
+`images.yml`'s `test` job re-runs the suite on the tag.
 
 #### Step 3 — `tag-release.yml` (post-merge)
 
@@ -8801,8 +9118,15 @@ input. Jobs:
    `ubuntu-24.04` — no QEMU emulation, ~3 min vs 30–60 min) — buildx build + push to
    `ghcr.io/<owner>/{arch}-ecoflow-panel` as both `:{version}` and `:latest`. Base images
    digest-pinned. GHA cache uses `ignore-error=true` so a flaky cache backend can't fail a release.
+   The QEMU and Buildx setup steps each get one retry after a 30 s pause, and a second failure fails
+   the job (v1.187.12). Before that, a failed Docker Hub token fetch failed the amd64 job before it
+   built, so the release job was skipped.
 4. **release** — extract the version's `CHANGELOG.md` section and `gh release create` the
-   GitHub Release (skipped if it already exists). **The Release appearing = "go ahead and update the Pi."**
+   GitHub Release (skipped if it already exists). The section header may be `## X.Y.Z` or
+   `## vX.Y.Z`; if there is no section, the job fails instead of publishing a placeholder. The
+   Release is marked Latest only when its tag is the highest `v*` tag (`--latest=false` otherwise;
+   GitHub decides if the lookup fails), so re-running an older version's release cannot demote a
+   newer one. **The Release appearing = "go ahead and update the Pi."**
    Permissions: `contents: write`, `packages: write`. The printable documentation (.docx and
    .pdf) is built first and attached at creation; those steps are best-effort
    (`continue-on-error`) and **bounded** (v1.187.3): each has `timeout-minutes` (pandoc 6,
@@ -8829,10 +9153,12 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
 **Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, open **Power**, click **Update**
 (HA reads the bumped `version:` from `config.yaml` on `main` and drives the update-entity).
 
-> Per the project's standing memory: for ecoflow-panel, always merge the release PR with a
-> subject that **starts `Release vX.Y.Z`** (the `tag-release.yml` gate) — never `Release v` +
-> something that doesn't parse. If the bot reviewer (Codex/Copilot) is down, proceed with
-> admin-merge + deploy; green tests + adversarial review are the gate.
+> Merge the release PR with a subject that **starts `Release vX.Y.Z`** (the `tag-release.yml`
+> gate). A `Release v` subject whose version does not parse tags nothing. CI's `Release PR
+> declares the version it names` check (`scripts/check-release-pr.py`) fails a release PR that
+> lacks the `config.yaml` bump or the CHANGELOG section. Without that check, a merge missing the
+> bump would pass silently, because `tag-release.yml` is path-filtered on `config.yaml` and would
+> never run.
 
 ---
 
@@ -8855,22 +9181,31 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
    (the runner exits without them). Set `FORECAST_LAT`/`LON` if not Phoenix.
 2. Devices populate from the REST poll within ~15–60 s (MQTT warms up after).
 
-#### Common failure modes (from DOCS.md + memory)
+#### Common failure modes
 
 - **"Missing required env var: ECOFLOW_ACCESS_KEY"** — set the key, Save, Restart.
 - **`401` from `api-a.ecoflow.com`** — switch `ECOFLOW_API_HOST` to `api-e` (EU) / `api-us` (US).
 - **Dashboard loads but no devices** — check the Log tab; the REST poll fills the snapshot in 15–60 s.
 - **Telnet refuses connection** — confirm `TELNET_ENABLED` is on and `:2323` is exposed in the Network tab.
-- **PV forecast "no history yet"** — the learned solar model needs a handful of clear-sky
-  daylight hours of recorded PV first; give it a day.
-- **AppArmor profile change → container won't start / alarm dark** — a bad mask (e.g. `wal`) or a
-  denial in the s6 init trees fails the profile compile; check `/var/log/audit/audit.log`
-  (`type=AVC`) on the Pi, and validate with `apparmor_parser -T -Q`. `/command` + `/package`
-  (s6 PID1 trees) are intentionally left `rwix` — a mistaken denial there is an *invisible* init
-  crash-loop, so tightening them requires a host audit-log boot-test (deferred).
-- **Errored add-on after a bad boot** — needs an explicit `/restart` (per the apparmor-init memory).
+- **The forecast card reads "Building the forecast — needs a little recorded history first."**
+  (or the Solar tab's response card reads "Learning your arrays — needs a bit more paired
+  sunlight + output history."). The learned solar model needs recorded daylight PV first; give it
+  a day.
+- **AppArmor profile change → container won't start / alarm dark.** There are two causes. A bad
+  mask (e.g. `wal`) fails the profile compile, so the container cannot start. A wrong deny in the s6
+  init trees compiles but makes init crash-loop. Validate with a fresh, cache-skipping
+  `apparmor_parser -T -Q`, and read denials from the host audit journal (`journalctl
+  _TRANSPORT=audit`). Explicit `deny` rules are silent, so boot-test new denies as `audit deny`.
+  Since v1.187.15 `/command`, `/package` and `/etc` are write-locked (`deny … wl`); `/command` and
+  `/package` are the s6 PID1 trees. The locks were added after that boot test (§12 AppArmor
+  profile). A mistaken denial in those trees is an *invisible* init crash-loop, so any further
+  change to them needs the same boot test.
+- **Errored add-on after a bad boot**: updating an add-on that is already in the `error` state
+  installs the new image but does not start it. Start it explicitly, with the add-on page's Start
+  button or the Supervisor `POST /addons/<slug>/restart`.
 - **★ Physical power to the Pi:** the Pi's circuit has been observed losing power for
-  84–187 min/day → the alarm goes dark with no self-alert. The monitor must be on an always-on
+  84–187 min/day → the alarm goes dark and cannot report itself; only the out-of-band heartbeat
+  (`HEARTBEAT_URL`, §13.0c) notices, from outside the house. The monitor must be on an always-on
   circuit. `HOST_POWER_ENTITY` (a `binary_sensor` device_class=problem) can warn on a
   browning-out host before it goes fully dark.
 
@@ -8883,1672 +9218,102 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
 
 ---
 
-## 13. Safety & Operational Plumbing
-
-### 13.0 Alarm-host thermal monitor (v1.42.0)
-
-The add-on monitors the machine it runs on. `hostThermal.ts` samples the kernel thermal zones (`/sys/class/thermal/thermal_zone*/temp`, read-only in the container) every 60 s, takes the hottest valid zone (readings outside 5–130 °C are rejected), and holds the freshest sample with a 5-minute staleness bound. Surfaces:
-
-- `host_soc_temp_c` in `/api/ha-state` and the MQTT state payload; discovery sensor `ecoflow_host_soc_temp` (`device_class: temperature`, diagnostic). Trend history comes from the Home Assistant recorder — the add-on stores none.
-- Alerts `host-temp-warn` (warning, ≥ `HOST_TEMP_WARN_C`, default 78 °C) and `host-temp-crit` (critical, ≥ `HOST_TEMP_CRIT_C`, default 84 °C), with 3 °C rise/clear hysteresis (`hostTempLevel`, pure). The critical sits just below the host SoC's ~85 °C throttle point: thermal throttling slows the alarm pipeline precisely when extreme ambient heat makes it matter most.
-- Null-honest: a host with no readable thermal zone produces a null sensor and no alerts. Thresholds are env-overridable (`HOST_TEMP_WARN_C`, `HOST_TEMP_CRIT_C`), not add-on options.
-
-### 13.0b Co-tenant degradation defense — self-vitals (v1.43.0)
-
-The alarm shares its host with other add-ons; a co-tenant failure (memory leak, CPU spin, disk fill) degrades the alarm indirectly. `selfVitals.ts` provides in-band early warning across four dimensions, each null-honest when its source is unreadable:
-
-| Dimension | Source | Warn / Crit (env-overridable) |
-|---|---|---|
-| Event-loop lag | 500 ms drift probe, EMA α=0.2 + 60 s max | ≥ 200 ms / ≥ 1000 ms EMA (`VITALS_LAG_*_MS`) |
-| Memory available | `/proc/meminfo` MemAvailable | < 700 MB / < 350 MB (`VITALS_MEM_*_MB`) |
-| Data-disk free | `statfs` on the data directory | < 2048 MB / < 512 MB (`VITALS_DISK_*_MB`) |
-| Load (1 min) | `/proc/loadavg` | ≥ 3.5 / ≥ 6 (`VITALS_LOAD_*`, 4-core host) |
-
-`assessVitals` (pure) applies per-dimension hysteresis — escalation immediate, de-escalation only past a clearance margin — and rolls the maximum into one assessment. Surfaces: four HA diagnostic sensors (`ecoflow_host_evloop_lag`, `ecoflow_host_mem_available`, `ecoflow_host_disk_free`, `ecoflow_host_load_1m`), `vitalsLevel` on `/api/health`, and ONE rolled alert (`host-pressure-warn`/`host-pressure-crit`) whose detail names every pressured dimension with its value — a starved host is one operator situation, not four alert families. Under a critical assessment, **alarm-first QoS** pauses discretionary analytics ticks (rest tracker, GHI persistence) so the process's remaining CPU serves the poll → alert → broadcast path; the alert states that this shedding is active.
-
-**Crit dwell (v1.45.0).** The critical alert (and the red broadcast it raises)
-requires the crit assessment to sustain for `HOST_PRESSURE_CRIT_DWELL_S`
-(default 180 s, range 0–900) — observed transient spikes (boot load, store
-refresh, the nightly backup's docker exports) each last 1–3 minutes and are
-real pressure but not red-klaxon events. During the dwell the condition
-surfaces as the warning; QoS shedding keys on the raw assessment level and
-engages immediately regardless.
-
-### 13.0c Out-of-band dead-man heartbeat (v1.43.0)
-
-In-band self-monitoring fails with the host, so the final layer lives outside the failure domain: `heartbeat.ts` sends an HTTPS GET to an operator-configured external heartbeat receiver (`HEARTBEAT_URL`, healthchecks.io-style) every `HEARTBEAT_INTERVAL_S` (60–3600 s, default 300, ±10 % jitter), starting at boot. When the pings stop — host dead, container OOM-killed, kernel wedged, power lost — the external service notifies the operator from outside the house. Properties: fully inert when no URL is configured; https-only; the URL is treated as a capability token and never logged (only its host, once, on rejection); state-transition-only logging; a send failure is local information only (internet-down ≠ host-down — the external service's own grace period makes the dead-man decision), so the module raises no alerts and only reports `heartbeatStatus()` on `/api/health`. Recommended external configuration: check period = the configured interval, grace ≈ 2 intervals.
-
-*Process guard, host-power self-monitor, HA state cache, onset persistence, message-rate floor, and log/format hygiene — the reliability layer that keeps a life-safety monitor alive and honest.*
-
-This cluster is not a feature the operator sees on a screen. It is the connective tissue that lets every other engine survive the real-world failure modes of an off-grid Raspberry Pi: a daily Supervisor maintenance bounce, a Pi that loses power almost every day, an EcoFlow cloud session that wedges without going fully silent, and a log stream that floods during outages. Three of these modules (`processGuard`, `hostPower`, `messageRateFloor`) are load-bearing safety components — a bug in them can either kill the alarm or blind it. The rest bound what lands on disk and in the log so a real signal stays greppable and a hostile device name can't hijack the operator's terminal.
-
-All file paths below are relative to `server/src/`. Line numbers cite the code as read at documentation time.
-
----
-
-### 1. `processGuard.ts` — top-level crash survival (SAFETY-CRITICAL)
-
-#### What + why
-
-The add-on once crashed with `exit code 255` during the daily 13:00 Supervisor maintenance window (a CoreDNS plugin restart + AppArmor reload). A transient DNS/network bounce leaked out of the MQTT reconnect path as an uncaught error and killed a **critical** power monitor for ~2 minutes. `processGuard` installs the process-level `uncaughtException` / `unhandledRejection` handlers that decide, per error, whether to **survive** (a transient network/DNS blip that must not take the alarm down) or **re-raise as fatal** (a genuine bug we must never silently swallow).
-
-The animating principle: a life-safety process should not die from the network sneezing, but it also must not become a zombie that has quietly eaten a real crash.
-
-#### Inputs
-
-- The thrown error / rejection reason (`unknown`).
-- A logger with `error` and `fatal` sinks.
-- An optional `onFatal` sink (tests inject a non-exiting one; production defaults to `process.exit(1)`).
-
-#### The classification (real algorithm)
-
-```
-classifyTopLevelError(e):
-    return isTransientNetworkError(e) ? 'survive' : 'fatal'
-```
-
-`isTransientNetworkError` (shared with the MQTT cert-fetch retry in `ecoflow/mqtt.ts:53`) matches on two axes:
-
-| Axis | Pattern |
-|------|---------|
-| `e.code` | `/EAI_AGAIN\|ENOTFOUND\|ECONNREFUSED\|ETIMEDOUT/i` |
-| `e.message` (lowercased) | `/eai_again\|enotfound\|econnrefused\|etimedout\|timeout\|connect timeout\|fetch failed/i` |
-
-A match on **either** axis ⇒ transient ⇒ survive. Everything else ⇒ fatal.
-
-> **Deliberate narrowing (v0.60.0):** the classifier used to also match a bare `network` token in the message. That was dropped because it matched *any* string containing "network" (e.g. `"neural network training failed"`). Harmless when the classifier only gated an MQTT retry, but dangerous now that it is *also* the process-guard's survive/fatal gate — an over-broad match could **mask a genuine bug**. The specific terms still cover every real transient case, which also carry a `code`.
-
-#### The handler body
-
-`handleTopLevelError(e, kind, log, onFatal)`:
-
-1. Compute `decision = classifyTopLevelError(e)`.
-2. Extract `detail = e.stack ?? e.message ?? String(e)`.
-3. If `survive`: log **loudly** at ERROR with the greppable prefix
-   `process-guard: SURVIVED transient <kind> (network/DNS, not exiting): <detail>`
-   and return — the process keeps running. The line is intentionally noisy so a *misclassified recurring* fault (something that keeps "surviving" but is actually broken) is still findable by grep.
-4. If `fatal`: log at FATAL `process-guard: FATAL <kind>, exiting: <detail>` and call `onFatal(e)`.
-
-`installProcessGuards(log, opts?)` wires both `process.on('uncaughtException', …)` and `process.on('unhandledRejection', …)` to that body. `onFatal` defaults to `() => process.exit(1)`.
-
-#### Trace / wire-in
-
-Installed once at startup in **`index.ts:2872`**:
-
-```ts
-installProcessGuards({
-  error: (m) => app.log.error(m),
-  fatal: (m) => app.log.fatal(m),
-});
-```
-
-It covers the **post-boot steady state**, where a transient DNS error can escape the MQTT client's reconnect path as an unhandled rejection. Boot-time DNS transients are handled separately by the cert-fetch retry (`getMqttCertificationWithRetry`), and a genuine boot-time crash is correctly left fatal.
-
-#### Edge cases / guards
-
-- **Pure + exported.** `classifyTopLevelError` and `handleTopLevelError` take injected logger + `onFatal`, so both are unit-tested without registering real process listeners or exiting the test runner.
-- **Shared classifier.** Reusing `isTransientNetworkError` keeps the guard and the MQTT retry from drifting apart on what counts as "transient."
-- **Never silent.** A survived error is *always* logged at ERROR — surviving is not the same as ignoring.
-
----
-
-### 2. `hostPower.ts` — Pi under-voltage self-monitor (SAFETY-CRITICAL)
-
-#### What + why
-
-The alarm's own host — the Raspberry Pi — is the single point of failure for the entire monitor: if it loses power, every channel goes dark **at once**. HA's *"Raspberry Pi Power Supply Checker"* exposes the kernel under-voltage/throttling flag as a `binary_sensor` with `device_class: problem` (`on` = under-voltage/throttling detected, `off` = OK). A marginal supply — or a sagging power circuit — trips this flag *before* the Pi actually browns out, so surfacing it is an early warning to fix the supply while the alarm is still up. (Per operational memory, the Pi circuit has historically lost power daily for 84–187 min; this signal is the leading indicator for that class of failure.)
-
-#### Inputs
-
-- `HOST_POWER_ENTITY` env var — the configured binary_sensor entity id. Empty ⇒ the feature is dormant.
-- The shared HA state cache (`haStateCache`), which `index.ts` keeps warm whenever a host/grid entity is configured.
-
-#### Key constant
-
-```
-HOST_POWER_MAX_AGE_MS = 120_000   // 2 min
-```
-
-Chosen comfortably above the ~30 s cache TTL. Beyond 2 min the cached read is treated as stale and reported as **unknown** rather than replaying a frozen last value.
-
-#### The interpretation (pure)
-
-```
-interpretHostPowerEntity(e):
-    if e is null                        → null
-    s = lowercase(e.state)
-    if s in {on, true, problem}         → true    (under-voltage present)
-    if s in {off, false, ok}            → false   (OK)
-    otherwise (unavailable/unknown/…)   → null
-```
-
-#### The live wrapper
-
-`liveHostPower(now = Date.now())` returns a `HostPowerHealth`:
-
-```
-if !entityId                        → { configured:false, entityId:'', underVoltage:null, stale:false }
-if cacheAge > HOST_POWER_MAX_AGE_MS → { configured:true, entityId, underVoltage:null, stale:true }
-else                                → { configured:true, entityId,
-                                        underVoltage: interpretHostPowerEntity(getCachedEntity(entityId)),
-                                        stale:false }
-```
-
-#### Trace / wire-in
-
-- **Cache warm-keeping:** `index.ts:1981` and `:2056` call `haStateCache.refreshIfStale()` whenever `gridPresenceEntityId() || hostPowerEntityId()` is set — the host-power entity rides the same TTL-gated refresh as the grid-presence classifier (ingestion mirrors `gridState.ts`).
-- **Alert emission:** `alerts.ts:349` calls `liveHostPower()`; when `underVoltage === true` it pushes a **warning** alert `host-power-undervoltage` (category `Connectivity`, device `System`) advising the operator to check the Pi's supply and circuit before it browns out.
-
-#### Output shape (the alert)
-
-```json
-{ "id": "host-power-undervoltage", "severity": "warning",
-  "category": "Connectivity", "device": "System",
-  "title": "Alarm host power — under-voltage",
-  "detail": "The Raspberry Pi running this monitor reported under-voltage (<entityId>). …" }
-```
-
-#### Config knobs
-
-| Env var | Default | Meaning |
-|---------|---------|---------|
-| `HOST_POWER_ENTITY` | *(empty)* | binary_sensor entity id; empty ⇒ dormant |
-
-#### Edge cases / honest-null
-
-- **Best-effort throughout.** An unset entity or a stale cache reads as `null` (unknown), never as a false alarm.
-- **Warning, not critical.** This is a *leading* indicator, not a live emergency, so it rides the push/UI channel without breaking through quiet hours.
-
----
-
-### 3. `haStateCache.ts` — TTL-gated HA entity-watts cache
-
-#### What + why
-
-The load-shedding advisor needs to know which household devices are on and how many watts they draw, so it can decompose the opaque SHP2 `panel_load` number into named contributors and simulate "what if we shed the pool pump?". Polling HA's full state list on every decision tick would be wasteful, so this wraps `getAllStates()` behind a short TTL. It is also the shared substrate for the **grid-presence** and **host-power** reads. **Read-only** — it never calls a service or mutates HA state.
-
-#### Key constant
-
-```
-TTL_MS = Number(process.env.HA_STATE_CACHE_TTL_MS ?? 30_000)   // 30 s default
-```
-
-Plenty fresh for runway decisions that operate on hours-scale projections, and (importantly) below the 120 s host-power/grid staleness ceilings that consume it.
-
-#### Watts extraction (`extractEntityWatts`)
-
-Precedence, first hit wins:
-
-1. **Explicit power attribute** — scan, in order:
-   `current_power_w`, `current_power`, `power_w`, `power`, `wattage`, `active_power`.
-   Accept a number, or a string coercible to a finite number.
-2. **Dedicated power sensor** — if `attributes.device_class === 'power'`, read the entity **state** as the value, honoring unit: `unit_of_measurement === 'KW'` ⇒ multiply by 1000, else watts as-is.
-3. Otherwise ⇒ `null` (a plain on/off switch with no metering). The advisor then falls back to SHP2 circuit watts or the operator's estimate.
-
-#### The cache mechanism
-
-Module-level state: `cache: Map<entityId, CachedEntity>`, `lastFetchedAt`, `inflight`.
-
-`refreshIfStale(now = Date.now())`:
-
-- If `now - lastFetchedAt < TTL_MS` ⇒ return immediately (fresh).
-- If a fetch is already `inflight` ⇒ return that promise (**concurrent-call coalescing** — no stampede).
-- Otherwise fetch `getAllStates()`, and *only if it returns states*, rebuild the map atomically: each `CachedEntity` carries `{entityId, state, attributes, watts: extractEntityWatts(s), fetchedAt}`, then swap `cache` and set `lastFetchedAt`. `inflight` is always cleared in `finally`.
-
-Read accessors:
-
-| Function | Returns |
-|----------|---------|
-| `getCachedEntity(entityId)` | the `CachedEntity` or `null` |
-| `getCacheAgeMs(now)` | `lastFetchedAt ? now - lastFetchedAt : +Infinity` |
-| `__resetHaStateCache()` | test hook |
-
-#### Trace / wire-in
-
-- Refreshed at `index.ts:1981/2056/2181` before grid/host reads and before the load-shed advisor tick.
-- `haEntity: (id) => haStateCache.getCachedEntity(id)` supplied to the advisor (`index.ts:2163`).
-- Age surfaced on `/api/load-shedding/status` as `haStateCacheAgeMs` (`index.ts:2243`).
-- Consumed by `hostPower.liveHostPower` and the grid classifier.
-
-#### Edge cases
-
-- **Failed fetch keeps the old cache.** If `getAllStates()` returns falsy, the map and `lastFetchedAt` are untouched — but `getCacheAgeMs` then keeps climbing, so consumers with a staleness ceiling (host-power's 120 s) correctly flip to unknown rather than trusting a frozen value.
-- **Cold cache ⇒ `+Infinity` age**, which every staleness gate reads as stale/safe.
-
----
-
-### 4. `alertOnset.ts` — restart-persistent alarm onset timestamps
-
-#### What + why
-
-The `Alert` type is **stateless** — every field is recomputed fresh on each `alertMonitor.evaluate()` tick — so nothing on the alert records *when* it first became active. The ALM screen (`telnet/plant/alm.ts`) used to stamp every alarm row with `snapshot.generatedAt` (this refresh's clock), which is wrong for any alarm that's been active longer than one poll. `alertMonitor`'s in-memory `TrackedAlert.firstSeen` would be correct, but it lives only in the in-process `tracked` Map and resets to "now" on **every add-on restart — and this host restarts roughly daily**. This sidecar is the durable source of truth for first-seen time.
-
-#### Storage
-
-- Path: `ALERT_ONSET_PATH` env, else `resolve(cwd, config.dbPath, '..', 'alert-onset.json')` — the same state-dir convention as the other alarm sidecars (`notify-state.json`, `alert-telemetry.jsonl`, `alert-family-meta.json`).
-- Format: a flat JSON object `{ <alertId>: <firstSeenMs> }`.
-- Written via `atomicWriteFileSync` (crash-safe temp-then-rename).
-
-#### Key constant
-
-```
-ALERT_ONSET_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000   // 7 days
-```
-
-Entries older than 7 days are dropped at load. Scaled up from the notify-state sibling since an onset record is smaller and less sensitive; an onset this old belongs to an alert every other persistence layer has long since forgotten anyway.
-
-#### Mechanism
-
-- `loadAlertOnsets(path, nowMs)` — parse the file; keep only entries where `v` is a finite number **and** `v > nowMs - ALERT_ONSET_MAX_AGE_MS`. Corrupt/missing file ⇒ empty map (start fresh, never throw).
-- `saveAlertOnsets(path, state)` — atomic write; on failure, swallow (ALM just falls back to `generatedAt`).
-- `syncAlertOnsets(activeIds, nowMs)` — **the single per-cycle hook.** For each active id not yet recorded, stamp `nowMs` (`changed = true`); for each recorded id no longer active, delete it (`changed = true`); persist **only if `changed`**. A steady-state tick with an unchanged roster is a pure in-memory no-op. Wrapped in try/catch so a disk/permission failure can never propagate into the alarm loop.
-- `getAlertOnset(id)` — look up first-seen ms; `undefined` if never recorded, pruned, or the sidecar failed to load.
-
-#### The clear-then-rise semantics
-
-Pruning an id the moment it leaves the active set means a later **re-fire** of the same id gets a *fresh* onset — matching how every other alarm-lifecycle concept in this codebase (`tracked`, notify-state, telemetry) treats a clear-then-rise as a **new event**, not a continuation.
-
-#### Trace / wire-in
-
-- **Write:** `alertMonitor.ts:1790` calls `syncAlertOnsets(new Set(tracked.keys()), now)` once per evaluate tick, alongside the falling-edge/dwell loop.
-- **Read:** `telnet/plant/alm.ts:123` renders each row's timestamp as `fmtTs(getAlertOnset(a.id) ?? stamp)` — onset if known, else the pre-existing `generatedAt` fallback.
-
-#### Edge cases / honest-null
-
-- Best-effort everywhere; the alarm loop is never blocked or crashed by onset I/O.
-- `resetAlertOnsetCacheForTests()` clears the module cache so tests can repoint `ALERT_ONSET_PATH` per test.
-
----
-
-### 5. `messageRateFloor.ts` + `messageRateFloorAlert.ts` — data-quality "rate collapse" detector (SAFETY-CRITICAL)
-
-#### What + why
-
-The staleness alarm (`alerts.ts`) and the recorder gap detector (`recorder.ts`) both key off the **time since the last message**. A device can defeat *both* by still sending *something*. The live audit caught the SHP2 crawling at **~0.24 msg/min for ~13 h** (150× below its ~30 msg/min norm): its ~5-min heartbeat kept `lastUpdated` under the 180 s stale threshold *and* under the 15-min recorder-gap threshold, so neither fired while the device was effectively not reporting. The SHP2 is the single-point-critical alarm **data source** (floor / SoC / runway), so a silent rate-collapse is a real blind spot — the inputs look live while being effectively stale.
-
-`RateFloorTracker` watches each device's incoming message **rate** against its own learned baseline and flags a sustained collapse even while `lastUpdated` stays fresh.
-
-#### Inputs
-
-- Per-SN cumulative message count `store.mqttMsgCountBySn`.
-- The current time (injected for determinism).
-
-#### Config + constants (`DEFAULT_RATE_FLOOR_CONFIG`)
-
-| Field | Env var | Default | Meaning |
-|-------|---------|---------|---------|
-| `minBaselineRate` | `MSG_RATE_FLOOR_MIN_BASELINE` | `10` msg/min | Min learned baseline for a device to be **eligible** at all |
-| `floorFraction` | `MSG_RATE_FLOOR_FRACTION` | `0.2` | Collapse trips when live rate `<` this fraction of baseline |
-| `collapseMs` | `MSG_RATE_FLOOR_COLLAPSE_MIN` | `20` min (`× 60_000`) | A collapse must persist this long before firing |
-| `baselineAlpha` | *(constant)* | `0.2` | EWMA smoothing for the baseline |
-
-#### The algorithm (`sample(sn, cumulativeCount, nowMs)`)
-
-Per SN it holds `{lastCount, lastMs, baseline, collapseSinceMs, fired}`.
-
-1. **First sample** ⇒ seed state, return `{rate:null, baseline:0, collapsed:false, recovered:false, collapsing:false}`.
-2. `dtMin = (nowMs - lastMs) / 60000`. If `dtMin <= 0` ⇒ return the current state's `collapsing = fired` (no time passed).
-3. **Counter reset guard:** if `cumulativeCount < lastCount` (a process restart re-zeroes the counter) ⇒ re-baseline instead of computing a negative/huge rate; clear the collapse; `recovered` reflects whether it had `fired`.
-4. `rate = max(0, (cumulativeCount - lastCount) / dtMin)`.
-5. `eligible = baseline >= minBaselineRate`.
-6. `isCollapsed = eligible && rate < floorFraction * baseline`.
-7. **Baseline update — healthy samples only:**
-   ```
-   if !isCollapsed:
-       baseline = (baseline == 0) ? rate
-                                  : baselineAlpha*rate + (1-baselineAlpha)*baseline
-   ```
-   A collapse never erodes the baseline, so it **cannot drag the baseline down to meet itself**.
-8. **Persistence / edge-trigger:**
-   - If `isCollapsed`: set `collapseSinceMs` (from the last healthy sample) if unset; if `!fired && nowMs - collapseSinceMs >= collapseMs` ⇒ `fired = true`, emit `collapsed = true` (the one-tick edge).
-   - Else: if it had `fired`, emit `recovered = true`; clear `collapseSinceMs` and `fired`.
-9. Return `{rate, baseline, collapsed, recovered, collapsing: fired}`.
-
-#### False-positive guards (by design)
-
-- **Eligibility floor** — only devices sustaining `>= minBaselineRate` (SHP2 ~30/min qualifies; idle/spare units never do) can "collapse."
-- **Healthy-only EWMA** — the baseline is immune to the collapse it's detecting.
-- **Persistence window** — rides out a brief burst gap before firing.
-- **Edge-triggered** — fires once, then holds `collapsing` until recovery (stable dedup key across ticks).
-
-#### The self-alert (`messageRateFloorAlert.ts`)
-
-v0.92.0 only `app.log.warn`-ed a collapse — invisible to the operator. v0.93.0 promotes it to a push alert. The 60 s tick publishes the currently-collapsing set via `setRateFloorCollapses(...)`; `alertMonitor` turns each into a **warning** Alert through the same notify + `snapshot.alerts` pipeline as offline/stale alerts (it is **not** `annunciate:false`).
-
-- `rateFloorAlertId(sn) = "msg-rate-floor-<sn>"` — stable per device, so it de-dups across ticks and simply drops from the set on recovery.
-- `rateFloorAlerts(collapses)` — pure builder, one Alert per device: `severity: 'warning'`, `category: 'Connectivity'`, `priority: 'medium'` (explicit ISA P3 — serious but must **not** read as a High protective-limit breach and must **not** break through quiet hours as a full emergency). Facts: live rate + `~<baseline>` msg/min. Detail names the trap explicitly (looks fresh, defeats staleness + gap detectors, floor/SoC/runway effectively stale) and recommends a power-cycle for a clean reconnect. **v1.187.10** — the first surfacing of an episode freezes its onset rate and baseline (`surfacedCollapseEntry`, a `Rate at onset` fact); a card whose live rate is back at or above the floor during the 5-min recovery dwell says it fell to the onset figures and is now recovering, with the recovery bar, instead of "collapsed to 27.0 msg/min, far below its learned ~25" (all 78 closing bodies in the live ledger were at or above the floor). The collapse log line is WARN, or INFO naming the mute for a device the roster mutes (bench spare, off-panel Core: `rateFloorCollapseLine`, `rosterMuteReasonForSn` from the last alert tick).
-
-#### Trace / wire-in
-
-`index.ts:2204–2236` — `const rateFloor = new RateFloorTracker()` plus a 60 s `setInterval` (`.unref()`-ed):
-
-```
-for {sn, count} of rateFloorSampleSet(Object.keys(devices), store.mqttMsgCountBySn):
-    r = rateFloor.sample(sn, count, now)
-    if r.collapsing → push {sn, deviceName, rate, baseline} into collapses
-    if r.collapsed  → app.log.warn(...)      // preserved verbatim
-    else if r.recovered → app.log.info(...)
-setRateFloorCollapses(collapses)
-```
-
-**v1.131.0 — sample the roster, not the observation map.** The tick used to
-iterate `store.mqttMsgCountBySn` directly. That map gains an entry only inside the
-MQTT ingest path, so a device that has produced **zero** messages since process
-start is simply absent from it and was never sampled at all: the detector was
-armed for a 0.2 msg/min collapse and blind to a 0.0 msg/min one — and a restart is
-precisely what converts the first into the second. The blind spot landed on the
-one device the section above calls "the single-point-critical alarm data source".
-`rateFloorSampleSet(rosterSns, counts)` (`messageRateFloor.ts`) drives from the
-device roster with `counts.get(sn) ?? 0`, so silence enters the existing dwell and
-eligibility logic as the rate-0 sample it is; serials present in the counter map
-but absent from the roster are still sampled, so a mid-run roster change cannot
-silently drop a device out of monitoring. Mutation-proven load-bearing
-(`scripts/mutate-detector-honesty.mjs`, mutants xiv–xv).
-
-Errors in the tick are caught and logged at DEBUG (`tick skipped`). The tick is purely observational — it **cannot suppress or alter any existing alarm**.
-
-#### Edge cases
-
-- Counter reset (restart) is explicitly handled to avoid a spurious negative/huge rate.
-- `rate` is `null` until two samples exist; the alert renders `—` / `?` when a rate isn't yet computed.
-
----
-
-### 6. Log & format hygiene helpers
-
-These bound what lands on disk and in the log, and keep a real signal greppable during a storm. Individually small; collectively they are why an outage log is still readable.
-
-#### 6.1 `logCoalesce.ts` — duplicate-line storm suppression
-
-**What + why.** Some emitters fire the *same* line over and over during a transient incident. The smoking gun: a 66-minute DNS brownout drove the MQTT client into a tight reconnect→close→error loop, logging `mqtt: error getaddrinfo EAI_AGAIN …` **514 times** — pure noise that buried the real signal.
-
-**Mechanism.** `makeLogCoalescer(emit, opts)` returns `{ log, flush }`:
-
-- **First sighting** of a key logs immediately at original level/format (a state *change* is never swallowed).
-- Repeats are counted as `suppressed` and rolled up **at most once per `summaryWindowMs`** (default `60_000`) as
-  `"<sample> : <N> more in last <window>"` (window humanized to `ms`/`s`/`m`/`h`).
-- **State is per distinct key** — default key is the exact message string; several interleaving lines (reconnect / close / error) each coalesce independently. Override `keyFor` to collapse messages varying only in a volatile suffix.
-- `flush()` force-emits all pending summaries and clears state so the tail isn't lost and the next sighting logs fresh — call it on recovery (successful reconnect) or shutdown.
-- Clock is injectable (`now`) for testing; no module-global state.
-
-**Wire-in.** `ecoflow/mqtt.ts:147/151` — `stormLog` and `stormWarn` wrap the module's info/warn loggers around the reconnect loop. This is the logging analogue of the storm gate in `broadcast.ts`.
-
-#### 6.2 `logSanitize.ts` — bound what's persisted / rendered
-
-Shared sanitizers for request/network-derived values that are **intentionally** persisted (audit log, alert outcomes, model notes) or rendered to a terminal. They don't make tainted data "safe" in the CodeQL sense (recording provenance is the feature) — they bound what can land on disk.
-
-| Function | Behavior |
-|----------|----------|
-| `cleanText(v, max)` | Non-string ⇒ `undefined`. Strip C0/DEL (` –`, ``), clamp to `max`. |
-| `sanitizeDisplayName(v, max=64, fallback='')` | **Security #2, CWE-150.** Strip **all C0 (incl. ESC 0x1b), DEL, and C1 (0x7f–0x9f, incl. 8-bit CSI 0x9b)**, collapse runs to a space, trim, clamp. Non-string / all-control ⇒ `fallback`. Prevents a device/circuit name set in the EcoFlow app or SHP2 config from injecting terminal escape sequences (OSC title-set, OSC 52 clipboard-write, cursor control) that would execute in the operator's terminal when they view the TUI. |
-| `cleanMultilineText(v, max)` | Like `cleanText` but **preserves `\n` and `\t`** (operator-typed multi-line notes). |
-| `finiteNumber(v)` | Finite number or `undefined` (so `JSON.stringify` drops it like an absent field). |
-
-**Wire-in.** `sanitizeDisplayName` guards every cloud/MQTT-sourced display name at the ingest boundary: `snapshot.ts:214` (`deviceName`, max 48, falls back to the SN) and `ecoflow/project.ts:579/592` (device + SHP2 circuit names).
-
-#### 6.3 `mqttStartClassify.ts` — boot-grace log-level selection
-
-**What + why.** The first few MQTT start failures that look like a boot-time DNS race (`EAI_AGAIN` / `ENOTFOUND` / `getaddrinfo`) or the EcoFlow `8521 "signature is wrong"` handshake error are **benign** — they self-heal within ~10 min on the retry backoff *while REST polling (the alarm data path) never stops*. So they should log at **WARN**, not ERROR, and not alarm an operator reading the boot log.
-
-**Mechanism.**
-
-```
-MQTT_BOOT_TRANSIENT_RE = /EAI_AGAIN|ENOTFOUND|getaddrinfo|8521|signature is wrong/i
-
-classifyMqttStartFailure(attempt, message, graceAttempts):
-    return (attempt < graceAttempts && MQTT_BOOT_TRANSIENT_RE.test(message))
-             ? 'warn' : 'error'
-```
-
-A failure recurring **past** the grace window, or **any other** error class at any attempt, logs at ERROR so it stands out instead of being buried under benign boot artifacts. Extracted from `index.ts` specifically so the v0.75.0 boot-grace behaviour is unit-tested (it had zero coverage and no post-deploy boot had hit a DNS race).
-
-**Wire-in.** `index.ts:1831` — `const transientBoot = classifyMqttStartFailure(attempt, msg, MQTT_BOOT_GRACE_ATTEMPTS) === 'warn'`.
-
-#### 6.4 `haPayloadFmt.ts` — shared HA payload formatting
-
-**What + why.** The REST `/api/ha-state` handler (`index.ts`) and the MQTT-discovery `buildState` (`mqttDiscovery.ts`) carried **byte-identical** copies of these formatters. Factored out **verbatim** so the published HA sensor values are unchanged across both surfaces.
-
-| Helper | Behavior |
-|--------|----------|
-| `kwh1(wh)` | Wh → kWh at 1 decimal, null-safe: `wh == null ? null : Math.round(wh/100)/10`. Used for SHP2 backup-pool fields. |
-| `makeLifetimeKwh(lifetime)` | Returns `(k) =>` lifetime key → kWh at 3 decimals over `persistedWh + pendingWh`. Preserves the exact **falsy-entry** guard (`lifetime[k] ? … : null`, *not* `!= null`), so a missing **or** zero/falsy entry maps to `null` as before. |
-| `makeAlertCounter(alerts)` | Returns `(src, sev) =>` count. `src === 'learned'` ⇒ `a.source === 'learned'`; `'threshold'` matches **every non-`learned`** source (`a.source !== 'learned'`) — verbatim. |
-| `soonestProjecting(packs)` | Returns `{ projecting, soonest }`: packs with `status === 'projecting'`, and the fewest-`yearsToEol` pack via a reduce using the `?? 1e9` sentinel so a `null` `yearsToEol` sorts **last** — verbatim. |
-
-**Wire-in.** `index.ts:17` imports all four; `:1183` (`lifetimeKwh`), `:1187` (`soonestProjecting`), `:1199` (`makeAlertCounter`), `:1219–1220` (`kwh1` for `backup_full_capacity_kwh` / `backup_remaining_kwh`).
-
----
-
-### Cross-cutting design invariants
-
-- **Collapse the method, never the measurement.** Every unknown here (host-power stale, cache cold, onset missing, rate not yet computed) reports honest-null and falls back — none fabricates a value or a false alarm.
-- **Best-effort never blocks the alarm loop.** `alertOnset`, `haStateCache`, and the rate-floor tick all wrap I/O in try/catch so a disk/permission/network failure degrades gracefully instead of crashing the life-safety process.
-- **Pure cores, injected clocks.** `classifyTopLevelError`, `interpretHostPowerEntity`, `extractEntityWatts`, `RateFloorTracker.sample`, `makeLogCoalescer`, `classifyMqttStartFailure`, and the `haPayloadFmt` helpers are all pure/clock-injected and unit-tested off the live pipeline.
-- **Greppable loudness.** Survived-but-suspicious events (`process-guard: SURVIVED …`, coalescer roll-ups, boot-grace WARNs) stay findable so a *masked recurring* fault can still be diagnosed.
-
-
----
-
-## 14. Intelligent Lighting & HVAC Posture (energy-aware automation)
-
-This cluster documents the add-on's **energy-aware automation layer** — the signals the
-add-on computes and publishes so that *Home-Assistant-side* automations can make the
-home's lighting (and, in an aspirational Phase-2 sense, its HVAC) behave according to how
-much stored/harvested energy is actually available overnight.
-
-> **Read this first — the division of labor.** The add-on is a *sensor*, not an
-> *actuator*, in this layer. It computes one runway-driven enum (**Lighting Posture**) and
-> a set of **PV-curtailment / surplus** signals, and publishes them as MQTT sensors. It
-> **never toggles a light, never sets a thermostat, never calls a dimmer**. All of the
-> actuation the design narrative describes — heartbeat pulses, exterior-light policy,
-> "dimmer ceilings", pre-cool — lives in **Home Assistant automations** that the operator
-> writes and that are gated behind `input_boolean.lighting_postures_enabled`. Where the
-> code is explicit that a consumer is HA-side or a feature is dormant, this document says
-> so plainly rather than describing behavior that does not exist in the repo.
-
-The two concrete engines that live in the add-on are:
-
-1. **Lighting Posture sensor** — `server/src/lightingPosture.ts` (the runway-driven enum +
-   asymmetric hysteresis + restart persistence), published by
-   `server/src/mqttDiscovery.ts`.
-2. **PV-curtailment / surplus + opportunistic loads** — `computeCurtailment()` in
-   `server/src/analytics.ts`, which produces the `surplus` posture trigger and the
-   (advisory-only) `ac_precool` / `dehumidifier` HVAC suggestions.
-
-Everything else in the "HVAC posture framework" is **dormant** — it exists as data
-structures and `null`-valued hint fields, not as running logic. This is stated honestly in
-the relevant section below.
-
----
-
-### 1. Lighting Posture sensor
-
-#### 1.1 WHAT it does + why
-
-`lightingPosture.ts` distills the whole overnight-energy question into **one enum** that HA
-automations can key on. The central design decision (from the file header) is that the
-posture is driven by the **runway model's forward question** — *"will we reach sunrise
-above the reserve floor?"* — **not by raw State-of-Charge**:
-
-> *"a 45% pool at 21:00 with a clear-day forecast is fine; the same pool at 01:00 drawing
-> 8 kW is not. Raw-SoC triggers nag on good nights and under-react on bad ones."*
-
-The published enum is a six-level escalating ladder:
-
-| Posture | Meaning (from header) | Severity rank |
-|---|---|---|
-| `surplus` | PV curtailment active — energy is going unharvested; lighting (and everything) may run freely. Only entered from normal. | 0 |
-| `normal` | Projected dawn minimum comfortably above reserve. | 0 |
-| `conserve` | Projected dawn minimum getting thin (`< CONSERVE_DAWN_PCT`). | 1 |
-| `amber` | A reserve crossing is projected within the horizon. | 2 |
-| `red` | The crossing is near (`≤ RED_HOURS_TO_RESERVE` h away). | 3 |
-| `critical` | The pool is at/below its reserve floor **right now**. | 4 |
-
-The severity ranks come from `POSTURE_RANK`:
-
-```ts
-const POSTURE_RANK: Record<LightingPosture, number> = {
-  surplus: 0, normal: 0, conserve: 1, amber: 2, red: 3, critical: 4,
-};
-```
-
-Note `surplus` and `normal` **share rank 0** — `surplus` is *not* a warning tier, it is
-"normal with headroom", so the two swap freely without tripping the hysteresis.
-
-#### 1.2 INPUTS
-
-The classifier takes a `PostureInputs` object (assembled fresh on every MQTT publish in
-`mqttDiscovery.ts`):
-
-| Field | Type | Source (see §1.5 trace) | Meaning |
-|---|---|---|---|
-| `belowReserveFloor` | `boolean` | `belowReserveFloor(runway)` — the runway report | Pool currently at/below its reserve floor. |
-| `hoursToReserve` | `number \| null` | `runway.hoursToReserve` | Projected hours until the pool crosses reserve; `null` = no crossing in horizon. |
-| `dawnMinSocPct` | `number \| null` | `forecast.minProjectedSoc` | Forecast's projected minimum SoC % over the horizon (the "dawn minimum"). |
-| `reservePct` | `number \| null` | `shp2.projection.backupReserveSoc` | The SHP2's configured reserve %, used for the amber margin. |
-| `curtailmentActive` | `boolean` | `curtailment.active` (`computeCurtailment`) | PV curtailment currently active (energy going unharvested). |
-| `gridBackstopping` | `boolean?` (v0.87.0) | `liveGridBackstop(snap.devices).backstopping` | The utility grid is genuinely carrying/able to carry the home right now. |
-| `nowMs` | `number` | `Date.now()` | Clock injection (deterministic in tests). |
-
-#### 1.3 The CALCULATION — `rawPosture(i)` then hysteresis
-
-The classification is a **pure function** `rawPosture()` (no state, exported for tests),
-wrapped by a **stateful tracker** that applies asymmetric hysteresis and restart
-persistence.
-
-##### 1.3.1 `rawPosture()` — the pure classifier
-
-Real constants (from the file):
-
-```ts
-const CONSERVE_DAWN_PCT      = 35;   // dawn-min % below which "conserve" engages
-const AMBER_DAWN_MARGIN_PCT  = 5;    // margin above reserve % treated as "grazing"
-const RED_HOURS_TO_RESERVE   = 4;    // hoursToReserve at/below which "red" engages
-```
-
-Evaluation order (first match wins):
-
-1. **`critical`** — if `belowReserveFloor` is true → `critical`, reason `"pool at/below
-   reserve floor"`. (This is the only branch that fires when below floor; it is checked
-   *before* the grid-backstop short-circuit, so a floored pool is always critical.)
-
-2. **Grid-backstop short-circuit (v0.87.0)** — if `gridBackstopping` is true (and we are
-   above the floor, since branch 1 already handled the floor): the runway-to-reserve
-   projection is *islanded-only* — on a grid-tied evening the SHP2 simply transfers to
-   mains at the floor, so the depletion escalations must **not** fire. Result:
-   - if `curtailmentActive` → `surplus` (excess solar still applies), else
-   - `normal`, reason `"grid available as backup — depletion projection is for an outage only"` — or `"grid supplying the house — …"` while measured grid import flows (`gridImportLive`, v1.186.3; wording only).
-
-   When `gridBackstopping` is false/absent (islanding — the **safe default**), the full
-   ladder below runs unchanged.
-
-3. **`red`** — if `hoursToReserve != null && hoursToReserve <= RED_HOURS_TO_RESERVE (4)` →
-   `red`, reason `"reserve crossing in {h}h"`.
-
-4. **`amber`** — with `reserve = reservePct ?? 15` (the 15% fallback), amber fires if
-   **either**:
-   - `hoursToReserve != null` (a crossing is projected, just >4 h out), **or**
-   - `dawnMinSocPct != null && dawnMinSocPct < reserve + AMBER_DAWN_MARGIN_PCT` (dawn
-     minimum grazes within 5 points of reserve).
-
-   Reason is either `"reserve crossing in {h}h"` or `"dawn minimum {n}% grazes reserve
-   {reserve}%"`.
-
-5. **`conserve`** — if `dawnMinSocPct != null && dawnMinSocPct < CONSERVE_DAWN_PCT (35)` →
-   `conserve`, reason `"dawn minimum {n}% (< 35%)"`.
-
-6. **`surplus`** — if `curtailmentActive` → `surplus`, reason `"PV curtailment active —
-   surplus energy available"`.
-
-7. **`normal`** (fallthrough) — reason `"dawn minimum {n}%"` when a dawn minimum is available, else `"no
-   depletion projected"`.
-
-##### 1.3.2 Asymmetric hysteresis — `createPostureTracker()`
-
-The stateful wrapper enforces **"escalate immediately, de-escalate slowly"**:
-
-```ts
-export const DEESCALATE_HOLD_MS = 15 * 60 * 1000;   // 15 minutes
-```
-
-On each `update(i)`:
-
-- **First tick** (`current == null`): adopt the raw posture, set `changedAtMs = nowMs`.
-- **Escalation** (`POSTURE_RANK[raw] > POSTURE_RANK[current]`): apply **immediately**
-  (safety first), reset the calmer-hold timer.
-- **De-escalation** (`POSTURE_RANK[raw] < POSTURE_RANK[current]`): start (or continue) a
-  `calmerSinceMs` timer. Only when the calmer raw posture has **held for `holdMs`
-  (15 min)** does `current` actually relax. Otherwise the sterner posture (and its
-  original reason) is held. This stops a cloud edge or a compressor cycle from making the
-  house "breathe up and down".
-- **Same rank**: adopt the fresh reason immediately, and if it's a `normal↔surplus` swap
-  (same rank 0) the posture text changes freely; the calmer-hold timer is cleared.
-
-The classifier is deliberately re-evaluated every publish; only the *hold* is asymmetric.
-
-##### 1.3.3 Restart persistence (v0.15.20)
-
-The tracker was process-local, so an add-on restart mid-event flapped the published
-posture (observed live Jun 11 19:28 local: `amber → normal → amber` within minutes),
-firing a spurious "restore-then-reclamp" heartbeat at the family. The tracker now
-persists `{posture, reason, changedAtMs, calmerSinceMs, savedAtMs}` to disk:
-
-- **Write policy (SD-card diet):** persist only on posture changes and hold-window
-  transitions — **not** every tick.
-- **Load-on-start:** on construction with a `statePath`, `loadPersisted()` restores the
-  held posture so a restart **resumes** it. A half-warm calmer reading after restart is
-  merely a de-escalation *candidate* that must still survive the 15-min hold.
-- **Staleness guard:** persisted state older than `PERSIST_MAX_AGE_MS = 60 * 60 * 1000`
-  (1 hour) is discarded (the event is likely over → start fresh). Corrupt JSON or an
-  unknown posture string also → start fresh.
-- Writes go through `atomicWriteFileSync` (`atomicWrite.ts`, shared with battery-soc-alarm
-  / runway-alarm) so a crash mid-write cannot corrupt the file.
-
-State path resolution:
-
-```ts
-const STATE_PATH =
-  process.env.LIGHTING_POSTURE_STATE_PATH ??
-  resolve(process.cwd(), config.dbPath, '..', 'lighting-posture.json');
-```
-
-The process-wide singleton `lightingPostureTracker` (created with `DEESCALATE_HOLD_MS` and
-`STATE_PATH`) is shared by every consumer.
-
-#### 1.4 OUTPUTS + API / MQTT
-
-The tracker returns `{ posture, reason, changedAtMs }`. Two values are published as MQTT
-discovery sensors (`mqttDiscovery.ts`):
-
-| MQTT `unique_id` | Sensor name | value_json key | Notes |
-|---|---|---|---|
-| `ecoflow_lighting_posture` | EcoFlow Lighting Posture | `lighting_posture` | icon `mdi:lightbulb-auto`; the enum string. |
-| `ecoflow_lighting_posture_reason` | EcoFlow Lighting Posture Reason | `lighting_posture_reason` | icon `mdi:information-outline`; `entity_category: diagnostic`; human-readable basis. |
-
-Data shape (fields of the MQTT state payload):
-
-```json
-{
-  "lighting_posture": "amber",
-  "lighting_posture_reason": "dawn minimum 18% grazes reserve 15%"
-}
-```
-
-These are **not** exposed on a dedicated REST endpoint — they are computed inside the MQTT
-`buildState` path (`mqttDiscovery.ts` ~line 691) and delivered to HA via MQTT. (The
-underlying inputs — `runway`, `forecast`, `curtailment` — each have their own `/api/*`
-endpoints; see §2 for curtailment.)
-
-#### 1.5 The TRACE — where inputs come from, where the output goes
-
-**Upstream (inputs):** In `mqttDiscovery.ts` `buildState`, the code fetches the analytics
-reports in one `Promise.all` — `forecast`, `degradation`, `runway`, `roundTripEfficiency`,
-`clipping`, `selfConsumption`, `carbon`, `tariff`, `curtailment` — then calls
-`lightingPostureTracker.update({...})` with:
-
-```
-belowReserveFloor : belowReserveFloor(runway)
-hoursToReserve    : runway.hoursToReserve
-dawnMinSocPct     : forecast.minProjectedSoc
-reservePct        : shp2.projection.backupReserveSoc ?? null
-curtailmentActive : !!curtailment.active
-gridBackstopping  : liveGridBackstop(snap.devices).backstopping
-nowMs             : Date.now()
-```
-
-The `gridBackstopping` resolver `liveGridBackstop()` is the **same** grid-presence
-resolver used by the `off_grid` and `runway_projection_islanded_only` sensors and by the
-floor-alarm engine, so the posture's grid-awareness is coherent with the alarm layer.
-
-**Downstream (output → actuation):** The two MQTT sensors land in HA. From the file
-header and `mqttDiscovery.ts` comments, the intended HA-side consumers are:
-
-- a **heartbeat pulse** (a brief light flash on escalation edges),
-- an **exterior-light policy**,
-- **dimmer ceilings** (cap brightness under conserve/amber/red).
-
-**All of these are HA automations the operator writes**, and they are **gated behind
-`input_boolean.lighting_postures_enabled`** — the add-on "only ever computes and
-publishes" and "never toggles a light". The escalation-edge-triggered nature of these
-consumers is exactly why the restart-persistence work (§1.3.3) matters: a flap would fire a
-spurious pulse at the family.
-
-#### 1.6 CONFIG knobs
-
-| Knob | Where | Default | Effect |
-|---|---|---|---|
-| `LIGHTING_POSTURE_STATE_PATH` | env var | `<config.dbPath>/../lighting-posture.json` | Override the persistence file location. |
-| `input_boolean.lighting_postures_enabled` | **HA-side** (operator-created) | — | Master gate for all lighting-posture *consumers*. The add-on ignores it; it only gates HA automations. |
-
-The classification thresholds — `CONSERVE_DAWN_PCT` (35), `AMBER_DAWN_MARGIN_PCT` (5),
-`RED_HOURS_TO_RESERVE` (4), `DEESCALATE_HOLD_MS` (15 min), `PERSIST_MAX_AGE_MS` (1 h) — are
-**compile-time constants**, not env/config options. There is no config.yaml option to tune
-the posture ladder; changing it requires a code change.
-
-#### 1.7 EDGE CASES / guards / honest-null behavior
-
-- **Floor beats everything.** `belowReserveFloor → critical` is checked *before* the
-  grid-backstop short-circuit, so a floored pool is `critical` even on grid.
-- **Grid-tied evenings do not nag.** With `gridBackstopping` true and above floor, the
-  depletion escalations (`red`/`amber`/`conserve`) are suppressed — only `surplus`/`normal`
-  can publish. Absent/false grid signal → full ladder (the islanding-safe default).
-- **Missing forecast/runway inputs** are `null`-tolerant: with `hoursToReserve == null` and
-  `dawnMinSocPct == null`, none of the amber/conserve branches fire and the result is
-  `normal` ("no depletion projected") — an honest "no data → no alarm" rather than a
-  fabricated warning.
-- **`reservePct` fallback** is `15` when the SHP2 reserve is unknown.
-- **Same-rank `surplus↔normal`** swaps are free and don't trip hysteresis (both rank 0).
-- **Persistence is best-effort:** save failures are swallowed (`catch {}`) — the only cost
-  is one possible restart flap; corrupt/stale state is discarded, never trusted.
-- **Restart mid-hold resumes the countdown** rather than resetting it (the hold-start
-  timestamp is persisted).
-
----
-
-### 2. PV-curtailment / surplus signal + opportunistic loads
-
-#### 2.1 WHAT it does + why
-
-`computeCurtailment()` (`analytics.ts`) is the engine behind the **`surplus`** posture and
-the surplus/opportunistic-load layer. It answers: *is the fleet's PV being thrown away
-right now because the batteries are saturated, and if so how much surplus power is
-available to soak up?* This is distinct from inverter **clipping** (a separate report) —
-this is **SoC-saturation** curtailment: PV that the array could produce but the pool won't
-accept because it's near its charge ceiling.
-
-Two things flow out of it into the automation layer:
-
-1. `active` / `currentSurplusW` → the **`curtailmentActive`** input to lighting posture
-   (drives `surplus`) and the `pv_curtailment_*` MQTT sensors.
-2. `opportunisticLoads[]` → a ranked list of loads that could absorb the surplus, each
-   flagged `fitsInSurplus`. This is where the (advisory) HVAC pre-cool suggestion lives.
-
-#### 2.2 INPUTS
-
-- Live home-DPU SoC, PV actual (W), and load (W) from the device snapshots
-  (`homeConnectedDpus`, the SHP2 device).
-- Per-DPU charge ceiling `projection.chgMaxSoc` → `homeChargeCeilingPct()` (mean across
-  home DPUs).
-- Weather GHI (`radiationWm2`) for the current hour from the weather cache.
-- The **Bayesian solar posterior** (expected PV given hour-of-day and GHI).
-- 7 days of recorder history for the today/7-day curtailment walk and hour-of-day
-  histogram.
-
-#### 2.3 The CALCULATION (relevant constants)
-
-```ts
-const CURTAIL_TTL_MS         = 5 * 60 * 1000;  // report cached 5 min
-const CURTAIL_MIN_SURPLUS_W  = 300;            // min gap before we call it curtailment
-const CURTAIL_MIN_BAYES_SAMPLES = 3;           // posterior support required
-const CURTAIL_TAPER_BAND_PCT = 10;             // SoC band below ceiling where shedding begins
-```
-
-- **Saturation threshold:** `saturationThresholdPct(ceiling) = max(0, (ceiling>0 ? ceiling
-  : 100) − CURTAIL_TAPER_BAND_PCT)`. With no reported ceiling this is `100 − 10 = 90%`
-  (taper-aware; replaces an older fixed 96).
-- **Expected PV** comes from `predictExpectedPv()` = `posteriorMean × GHI`, but only if the
-  hour's posterior has `≥ CURTAIL_MIN_BAYES_SAMPLES (3)` samples — else `null` (honest
-  "no model").
-- **Surplus** is the expected-minus-actual PV gap (net of load); curtailment is `active`
-  only when SoC ≥ saturation threshold, there is daylight/GHI, a trusted model exists, and
-  the gap `≥ CURTAIL_MIN_SURPLUS_W (300 W)`. Otherwise `inactiveReason` is one of:
-  `soc-too-low | pv-too-low | no-daylight | no-model | small-gap | pv-exceeds-load |
-  no-shp2 | no-home-dpus`.
-- **Opportunistic loads** are sized against `currentSurplusW`: each load's `fitsInSurplus =
-  currentSurplusW >= estimatedW`.
-
-#### 2.4 OUTPUTS + endpoints
-
-**REST:** `GET /api/curtailment` (cached 60 s) returns the full `CurtailmentReport`;
-curtailment fields are also folded into the big `/api/ha-state` payload
-(`pv_curtailment_active`, `pv_curtailment_surplus_watts`, `pv_curtailment_kwh_today`,
-`pv_curtailment_kwh_7d`, …).
-
-**MQTT sensors** (`mqttDiscovery.ts`):
-
-| unique_id | key | notes |
-|---|---|---|
-| `ecoflow_pv_curtailment_active` | `pv_curtailment_active` | binary ON/OFF; the `surplus`-posture trigger. |
-| `ecoflow_pv_curtailment_surplus_watts` | `pv_curtailment_surplus_watts` | power (W). |
-| `ecoflow_pv_curtailment_kwh_today` | `pv_curtailment_kwh_today` | energy, `total` with `last_reset` from `pv_curtailment_kwh_today_since` (v1.187.10). |
-| `ecoflow_pv_curtailment_kwh_7d` | `pv_curtailment_kwh_7d` | 7-day kWh. |
-| `ecoflow_charge_ceiling` | `pv_curtailment_charge_ceiling_pct` | diagnostic, %. |
-
-> Historical note (v0.15.3): the `curtailment` report was originally not fetched in the
-> MQTT `buildState`, so the five `pv_curtailment_*` sensors (added v0.9.77) read permanent
-> "unknown". Wiring the fetch lit them up *and* gave lighting posture its live
-> `pv_curtailment_active` signal.
-
-#### 2.5 CONFIG knobs
-
-The opportunistic-load catalog is a **hardcoded** default sized for the operator's Phoenix
-off-grid home; the comment explicitly says *"Update via config in a later rev"* — i.e. it
-is **not yet config-driven**. The curtail constants above are compile-time. There is no
-env/config.yaml knob for the surplus thresholds or the load list.
-
----
-
-### 3. HVAC posture framework + surplus pre-cool — DORMANT (honest status)
-
-**This is the section to read carefully, because most of the "HVAC posture" narrative is
-aspirational, not running code.**
-
-#### 3.1 What actually exists
-
-The only HVAC-related logic in the add-on is **two entries in the opportunistic-load
-catalog** (`DEFAULT_OPPORTUNISTIC_LOADS` in `analytics.ts`), both `category: 'hvac'`:
-
-```ts
-{ id: 'ac_precool',
-  name: 'AC pre-cool (-5°F)',
-  estimatedW: 3500,
-  category: 'hvac',
-  description: 'Drop the thermostat ~5°F now to bank thermal mass for evening hours when SoC is dropping.' },
-{ id: 'dehumidifier',
-  name: 'Dehumidifier',
-  estimatedW: 700,
-  category: 'hvac',
-  description: 'Reduces moisture load the AC has to remove later — banks comfort into the building envelope.' },
-```
-
-**Surplus pre-cool rationale:** when PV is being curtailed (surplus energy is free and
-otherwise wasted), it is cheap to over-cool the house now — "banking thermal mass" into the
-building envelope — so the AC runs *less* in the evening when SoC is falling and every watt
-comes out of the battery. The engine surfaces `ac_precool` with `fitsInSurplus = true`
-whenever `currentSurplusW ≥ 3500 W`, and `dehumidifier` when `≥ 700 W`. That is the extent
-of the computation.
-
-#### 3.2 What does NOT exist (dormant / Phase-2)
-
-- **No HVAC posture sensor.** There is no `hvac_posture` / `climate_posture` /
-  `cooling_posture` MQTT sensor or REST field anywhere in the code — grep confirms zero
-  matches. The "posture" concept is implemented only for **lighting**.
-- **No ecobee / thermostat actuation from this layer.** The only `ecobee` references in the
-  server are in `broadcast.ts` — and those are about the ecobee units' **speakers** as
-  audible-alert / TTS targets (`media_player.*`), **not** climate control. The add-on never
-  calls `climate.set_temperature` or any thermostat service.
-- **`haServiceHint` is always `null`.** Every opportunistic load is built with
-  `haServiceHint: null // Phase 2 — wire to HA service.call here.` The intended automatic
-  actuation (have the add-on itself call an HA service to start the pre-cool) is an
-  explicitly-deferred Phase-2 feature that is not implemented.
-- **`haService.ts` snapshot/restore is unrelated.** The `sonos.snapshot` / `sonos.restore`
-  helpers in `haService.ts` exist to avoid clobbering music during audible announcements —
-  they are **not** an HVAC/lighting "snapshot & restore" mechanism. Likewise the "gauge"
-  references in the codebase are the SHP2 backup-pool gauge and self-consumption gauge
-  *icons*, not a "capacity-gauge ceiling" engine.
-
-#### 3.3 On "capacity-gauge ceilings" and "dimmer ceilings"
-
-The design narrative refers to "ceilings" in a couple of senses; to be precise about what
-is add-on code vs. HA-side:
-
-- The only **ceiling computed by the add-on** is the battery **charge ceiling**
-  (`homeChargeCeilingPct()` = mean `chgMaxSoc` across home DPUs), used by the curtailment
-  engine to decide when the pool is saturated. This is a battery-charge ceiling, not a
-  lighting/HVAC output ceiling.
-- **"Dimmer ceilings"** (capping light brightness under conserve/amber/red) are named only
-  in comments as an **HA-side consumer** of the posture enum. There is **no dimmer-ceiling
-  code, no snapshot/restore of light state, and no occupancy-sweep logic in the add-on** —
-  those are automations the operator builds in Home Assistant, gated behind
-  `input_boolean.lighting_postures_enabled`. If you are looking for the occupancy-sweep or
-  brightness-ceiling implementation, it is not in this repo; the add-on's contribution ends
-  at publishing `lighting_posture` + `lighting_posture_reason`.
-
----
-
-### 4. Summary — add-on vs. Home Assistant responsibilities
-
-| Responsibility | Where it lives | Status |
-|---|---|---|
-| Compute runway-driven lighting posture enum | Add-on (`lightingPosture.ts`) | **Live** |
-| Asymmetric hysteresis (immediate up, 15-min down) | Add-on | **Live** |
-| Restart-persist the held posture | Add-on (atomic JSON, 1-h staleness) | **Live** |
-| Publish `lighting_posture` + `_reason` MQTT sensors | Add-on (`mqttDiscovery.ts`) | **Live** |
-| Compute PV-curtailment / surplus + `surplus` trigger | Add-on (`computeCurtailment`) | **Live** |
-| Rank opportunistic loads incl. AC pre-cool / dehumidifier | Add-on | **Live (advisory only)** |
-| Heartbeat pulse / exterior policy / dimmer ceilings / occupancy sweeps | **Home Assistant automations** | HA-side, gated by `input_boolean.lighting_postures_enabled` |
-| HVAC posture sensor | — | **Does not exist** |
-| Automatic pre-cool actuation (`haServiceHint`) | — | **Dormant / Phase-2 (`null`)** |
-| Ecobee climate control | — | **Not implemented** (ecobee is only an audible-alert speaker target) |
-
-**Bottom line:** the add-on is a *posture publisher and surplus estimator*. It computes the
-signals honestly (including null-safe "no data → normal/inactive" behavior) and hands them
-to Home Assistant. Every actuation — lighting or HVAC — is HA-side automation, and the HVAC
-side is little more than a labeled recommendation today.
-
----
-
-## 15. Night-Charge TOU Arbitrage Advisor
-
-*Tariff model, worst-case sizing brain, learning ledger, completion-gated scoring, the frozen write-readiness gate, and the supervised bounded write — the engine that recommends (and, when the owner enables a write mode, delivers) a cheap-overnight grid buy sized to hold an outage cushion above the reserve floor.*
-
-On a day a battery shortfall is anticipated, the advisor recommends buying the *right* amount of grid energy in the cheap APS R-EV overnight window (23:00–05:00 Mon–Fri) so the home (a) never imports at the 4–7pm on-peak and (b) carries an **outage cushion** above the reserve floor into the next day. It is framed as much a *resilience* feature as a cost feature. The write posture is owned by `NIGHT_CHARGE_MODE`: **`advisory`** (default) never issues a device write — the recommendation is published as HA entities, an API endpoint, a nightly notification, and TUI/web panels, and an owner-authored HA automation decides whether to act; **`supervised`** performs one announced, cancellable, bounded reserve write per charge night with an automatic revert (§10); **`auto`** is honored only after the readiness gate graduates on actuated-night evidence and operates as supervised until then. In parallel, every night's plan is frozen into a durable ledger and scored against measured reality, and a fail-closed readiness gate reduces that record into a single "is the accuracy proven enough for unattended writes?" verdict.
-
-The subsystem spans six modules, all shipped incrementally (v1.36.0 tariff → v1.37.0 sizing brain → v1.38.0 ledger + wiring + surfaces → v1.39.x scoring/gate hardening → v1.49.0 sizing-model correction → v1.50.0 supervised write + gate v2):
-
-| Module | Role |
-|---|---|
-| `tariff.ts` | Declarative multi-period, seasonal, timezone-resolved TOU model + `rateAt` resolver (pure) |
-| `nightChargeAdvisor.ts` | Pure sizing brain (`computeNightChargePlan`), input assembly, outcome scoring math, actuated-delivery helpers, night-clock bounds, plan holder |
-| `nightChargeGate.ts` | Pure write-readiness reduction (v2: actuated-night evidence) over the ledger + readiness holder |
-| `nightChargeActuator.ts` | Pure supervised-write decision core: mode resolution, arming from the announced plan, apply/revert decisions (all clocks injected) |
-| `recorder.ts` | `night_charge_ledger` / `night_charge_calibration` durable tables + injection-safe upsert |
-| `index.ts:2320–3400` | Orchestration: 30-min recompute tick, ~21:30 evening job, backfill scorer, premature-capture repair, 60 s actuator tick, `/api/night-charge/status`, `/api/night-charge/cancel` |
-
----
-
-### 1. Purpose & safety posture
-
-The binding safety invariants, enforced structurally rather than by convention:
-
-- **The alarm spine never consumes engine state.** The engine reads the same `projection.backupReserveSoc` the reserve-floor alarm (§5) defends — the *same field*, never a divergent copy — and produces **no** state the floor/runway/SoC alarms consume. In `advisory` mode (the default) nothing is ever written; in `supervised`/`auto` the actuator's one bounded write raises that reserve for the charge-window span and auto-restores it (§8b), while the floor alarms keep their own independent protection throughout — a bug here can mis-recommend or mis-charge within the [10, 50] clamp (`RESERVE_WRITE_MIN_PCT` / `RESERVE_WRITE_MAX_PCT`); it cannot mis-alarm.
-- **Under-buy is a safety miss, not a cost miss.** The outage cushion is an explicit resilience requirement; a confidently under-sized buy leaves the home at the floor with no cushion when an outage hits. Sizing therefore uses **worst-case inputs**: P10 (pessimistic-low) PV and P90 (pessimistic-high) load, with committed EV load placed as a worst-case block.
-- **The over-buy ceiling is the deliberate asymmetry.** The floor is sized with P10 PV (never under-buy); the "don't clip tomorrow morning's PV" ceiling is sized with **P90** PV (never over-buy into clipping). Where the two collide on a genuinely tight day, **resilience wins**: the buy is kept, the clip is accepted, and `bindingCap='overBuy'` is surfaced.
-- **Emit null over a fabricated number.** An incomplete, incoherent, thin, or climatology-only basis yields a *null plan* (`chargeTonight=false`, every numeric field `null`) — never a best-effort small number the operator might trust as cushion. The same discipline runs through the tariff (`ratesConfirmed=false` ⇒ every `$` output null), the scorer (zero telemetry samples ⇒ `null`, not a "measured" `0`), and the gate (null readiness ⇒ `write_ready` strictly `false`).
-- **The gate governs unattended writes only.** `writeReady` gates the `auto` mode alone (`effectiveActuationMode` structurally demotes `auto` to `supervised` until the gate graduates, §8); `supervised` is an explicit owner action in the add-on configuration with a per-night announced cancel window (§8b). The write path shipped in v1.50.0 per the 2026-07-31 amendment to `docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`.
-
----
-
-### 2. Architecture & data flow
-
-```
-  SHP2 projection (backupFullCapWh, backupBatPercent,      analytics worker reports
-  backupRemainWh, backupReserveSoc)                        probabilisticForecast · forecast
-          │                                                multiDayForecast(4d) · evWindowPrediction
-          └──────────────┬─────────────────────────────────────────┘
-                         ▼
-        recomputeNightChargePlan()  (index.ts:2451, every 30 min + evening job)
-          buildApsREvModel(env) → periodIdAt = rateAt(...).periodId
-          buildNightChargeInputs(deps)   (nightChargeAdvisor.ts:712, pure)
-          computeNightChargePlan(inputs) (nightChargeAdvisor.ts:258, pure)
-                         │
-                         ▼
-        setLatestNightChargePlan(plan)  — in-process holder (12 h staleness guard)
-          ├─→ /api/ha-state + MQTT state payload (nightChargeStateFields)
-          ├─→ /api/night-charge/status (index.ts:3180)
-          ├─→ web NightChargeCard (Strategy panel)
-          │
-   ~21:30 evening job (once per Phoenix day, restart-persistent latch)
-          ├─→ recordNightPlanRow() → night_charge_ledger (frozen PLAN columns)
-          ├─→ scoreCompletedNights() → OUTCOME + SCORE columns (completion-gated)
-          ├─→ computeNightChargeReadiness(readNightLedger(400)) → readiness holder
-          └─→ ONE notification (buildNightChargeMessage, dedupId night_charge_plan)
-```
-
-Everything below the report boundary is dependency-injected and pure — `computeNightChargePlan`, `buildNightChargeInputs`, `resolveCheapWindow`, `scoreNightOutcome`, `nightWindowBounds`, `medianFilter3`, and `computeNightChargeReadiness` perform no I/O and read no clocks, so the sizing and gating math is provable by unit test.
-
-**Timers** (all created only when `NIGHT_CHARGE_ADVISOR_ENABLED !== 'false'`, all `unref()`'d):
-
-| Timer | Cadence | Work |
-|---|---|---|
-| Recompute tick | 30 min | Fresh plan → holder; score completed nights; recompute readiness; refresh the status route's in-memory ledger cache |
-| Evening-job tick | 60 s | `runNightChargeEveningJob()` (minute-granular fire gate, see below) |
-| Boot warm-up | once, +60 s | `repairPrematureNightOutcomes()`; fresh plan; score; readiness — so the holder and HA gate fields are not null for up to 30 min after the daily host power-cycle (v1.39.0) |
-
-**The evening job** (`index.ts:3009`). Fires at most **once per Phoenix calendar day**, keyed by a restart-persistent latch file (`.night-charge-latch.json` beside the DB, atomic write, in-memory mirror so no request/timer performs an unbounded filesystem read). The fire window is `[NIGHT_CHARGE_NOTIFY_HOUR:MINUTE, 23:00)` local (default 21:30); a re-entrancy guard prevents a slow run (awaited analytics + weather + notify) from overlapping the next 60 s tick (v1.39.0). In order: recompute fresh plan → record the plan row → score completed nights → recompute readiness → send **one** notification → latch *only after a successful send* (failure retries on the next tick within the window). Past 23:00 the notify is skipped-and-latched — a plan pushed after charging should already have begun is worse than none — but scoring and readiness still run, so a missed notify window can never orphan a night's outcome (an MNAR bias in the gate's evidence). All local-time gates resolve via explicit `America/Phoenix` `Intl` parts (`phoenixMinuteOfDay`, `localParts`), never the host clock. The freshest pre-window plan (with its ledger extras) also persists to disk on every recompute (`.night-charge-plan.json`, atomic write, v1.40.0); when the live record window is missed entirely (a restart or update between 21:30 and 23:00), the next run records the persisted plan with its original `generatedAt` — the plan row survives, timestamps are never backdated.
-
----
-
-### 3. The tariff model (`tariff.ts`, v1.36.0)
-
-A declarative, pure TOU model — periods, seasons, holidays, timezone — plus the `rateAt(model, tsMs)` resolver. `buildApsREvModel(rates)` constructs the deployed plan, **APS Rate Schedule R-EV** (four periods, two seasons, no demand charge):
-
-| Period id | Local window | Days | Seasons | Notes |
-|---|---|---|---|---|
-| `on_peak` | 16:00–19:00 | Mon–Fri | year-round | `onPeak: true` (drives the `isOnPeak` back-compat flag) |
-| `super_off_peak` | 10:00–15:00 | Mon–Fri | winter only | overlaps solar |
-| `overnight` | 23:00–05:00 (wraps) | Mon–Fri | year-round | **the cheap charge window the advisor sizes against** |
-| `off_peak` | catch-all | — | — | all remaining hours, all weekends, observed holidays |
-
-Holidays (v1.187.13): the APS model's `holidays` default to `APS_OFF_PEAK_HOLIDAYS`, Rate Schedule R-EV's rule (A.C.C. No. 6152, effective 2024-03-08) computed for 2015–2045 by `apsOffPeakHolidays(year)`: New Year's Day, Cesar Chavez Day (Mar 31), Juneteenth, Independence Day, Veterans Day and Christmas Day observed on the Friday before a Saturday or the Monday after a Sunday; Martin Luther King Day and Presidents Day (3rd Monday of January / February), Memorial Day (last Monday of May), Labor Day (1st Monday of September), Indigenous Peoples' / Columbus Day (2nd Monday of October), Thanksgiving (4th Thursday of November); Christmas Eve and New Year's Eve on the day itself. A holiday is off-peak all day — no on-peak, overnight or super off-peak hour — so the night-charge window search (`periodId === 'overnight'`), the on-peak checks and the ledger pricing all see it. Until v1.187.13 the list was empty and a holiday was priced as an ordinary weekday.
-
-Seasons (v1.187.10 — billing cycles, by usage month): `APS_SUMMER_MONTHS = [4,5,6,7,8,9]` (April–September usage); the rest is winter. APS bills May–October at summer rates and November–April at winter rates, and each bill covers the usage since the previous meter read, early in the month — so summer usage runs from the early-April read to the early-October read (the 2026-10-02 APS notice: winter rates from the November billing period, the winter 10:00–15:00 super-off-peak in effect). Until v1.187.10 the months were read as if they were bills (`[5..10]`), so October usage priced as summer — summer on-peak, no super-off-peak tier — and April as winter; `analytics.ts` also carried its own calendar May–October test for the two-tier basis. **One season source:** `seasonAt(model, tsMs)` = `seasonOf(localParts(tsMs, model.timezone).month, model.summerMonths)`, read by `rateAt` (same function on the same local month), `resolveTariffCents` (`apsSeasonIsSummer`), the `/api/tariff` view (`tariffPricingView`) and the nightly plan's tariff snapshot (tests: `tariffBillingSeason.test.ts`). **Approximation:** the boundary is the 1st of the local month; the real one is the meter-read day, which falls in the first days of the month and varies by billing cycle, so the first few days of April and of October can be seasoned one cycle off (± the read day; inert while rates are unconfirmed). Ledger rows captured before v1.187.10 keep the cost they were priced with, except the rows the one-time forecast-span repair re-captures (`repairShortForecastSpanOutcomes`, §7): their `realized_cost_cents` is re-priced by `rateAt` on the current season map, so a span in October is priced at winter rates — NULL with an unpriced note where a winter rate is blank. With the winter On-Peak / Off-Peak options blank, only `resolveTariffCents` (the KPIs) falls back to the flat default; `rateAt` leaves those hours unpriced, so `tariff_rate_now_usd_per_kwh` (Grid Rate Now) reads unknown outside the overnight period and every October ledger row's realized cost is NULL. `holidays` (local `YYYY-MM-DD` strings, all-day off-peak, checked *before* every specific period) defaults to `[]` — the APS observed-holiday list is documented as "confirm from a bill", not guessed.
-
-**Resolution algorithm** (`rateAt`): resolve the instant into local parts via a memoized `Intl.DateTimeFormat('en-US', { timeZone, hourCycle:'h23' })` `formatToParts` (one formatter per timezone; never the host clock, so a non-Phoenix container cannot bleed a rate boundary); derive day-of-week from the *resolved calendar date* via `Date.UTC(y,m-1,d).getUTCDay()` rather than an ICU `weekday` part — a degraded/small-ICU runtime that dropped the part would otherwise collapse every weekday to Sunday and silently misprice every on-peak/overnight hour as weekend off-peak (fail-safe by construction). Then: holiday check → first matching period in priority order (season gate, weekday gate, `inHourWindow` with wrap-around: `start>end` wraps past midnight, `start===end` means all 24 h) → the `off_peak` catch-all.
-
-**★ Per-instant weekday semantics (load-bearing).** A period's `weekdays` gate is evaluated against **each instant's own** local day-of-week, not the day the window "started". The wrap-around overnight window therefore resolves literally: Fri 23:00 *is* overnight (Friday is Mon–Fri) but Sat 00:00–05:00 is **off-peak** (Saturday is a weekend); likewise Sun 23:00 is off-peak while Mon 00:00–05:00 is overnight. Whether real APS billing treats Friday-night→Saturday-morning as a single overnight block is an **open tariff question** only a bill can settle (see §11); the model's reading is the defensible default consistent with "off-peak = all weekends".
-
-**Rates-unconfirmed ⇒ `$` outputs null.** Every period carries per-season `centsBySeason` values that default to `null`, and the model carries `ratesConfirmed` (default `false`). While `ratesConfirmed=false`, `rateAt` resolves `centsPerKwh` to **null for every period regardless of the numbers in the model**, and `buildApsREvModel` also nulls `fixedDailyCents` — an unconfirmed model can never leak a fabricated basic-service charge or energy rate into a cost consumer. The returned `RateSlice` mirrors `ratesConfirmed` so a consumer can distinguish "null because unconfirmed" from "null because this confirmed period has a missing-season data gap". `periodId` is **structural** and needs no confirmed rate — which is what lets the advisor resolve the charge window while every `$` output stays null. `flatTariffModel(cents)` wraps a single-rate legacy plan in the same shape so an eventual consumer rewire is a behavior-preserving swap.
-
-**Env mapping** (`apsREvRatesFromEnv`, `index.ts`): empty-string/unset options read as `null` (unconfirmed).
-
-| Env option | Fills |
-|---|---|
-| `TARIFF_APS_ONPEAK_SUMMER_CENTS` / `TARIFF_APS_ONPEAK_WINTER_CENTS` | `on_peak` summer / winter |
-| `TARIFF_APS_OFFPEAK_SUMMER_CENTS` / `TARIFF_APS_OFFPEAK_WINTER_CENTS` | `off_peak` summer / winter |
-| `TARIFF_APS_OVERNIGHT_CENTS` | `overnight`, **both** seasons (one env, same rate) |
-| `TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS` | `super_off_peak` winter (summer stays `null` — the period is winter-only) |
-| `TARIFF_APS_RATES_CONFIRMED` | `ratesConfirmed` (`'true'` only) |
-
----
-
-### 4. Input assembly — the worst-case basis
-
-`recomputeNightChargePlan()` (`index.ts:2451`) assembles `NightChargeInputDeps` from live state, then hands off to the pure `buildNightChargeInputs` → `computeNightChargePlan`. It returns `null` (no plan recorded, holder untouched) when inputs cannot be constructed at all — SHP2 projection missing, or `backupFullCapWh`/`backupBatPercent`/`backupReserveSoc` absent (design invariant I5).
-
-**Battery state.** `fullKwh = backupFullCapWh/1000`, `socNowPct = backupBatPercent`, `reserveFloorPct = backupReserveSoc`. SoC coherence (I11): `socCoherent = |remainWh/fullWh·100 − socNowPct| ≤ 8` — the same %-vs-Wh cross-check discipline the SoC alarm uses; `false` forces a null plan downstream.
-
-**Efficiency seams** (injected, never hard-coded downstream): `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927` (charge leg — the pack stores `legEff` of what reaches the charger; `DISPATCH_ROUND_TRIP_EFFICIENCY` defaults 0.86, §7) and `dischargeEff = RUNWAY_DISCHARGE_EFFICIENCY` (default 0.94, the runway DC-bus discharge tax, §5).
-
-**The conservative band** (within ~24 h, authoritative): for each probabilistic-forecast hour with a matching day-ahead hour, `pvP10W = p10W` and `loadP90W = forecastLoadW × ARB_LOAD_P90_FACTOR` (default 1.15). The day-ahead load already folds an *expected-value* EV block (`predictedEvLoadW`) into `forecastLoadW`, so `embeddedEvW = predictedEvLoadW × factor` is carried alongside for de-duplication. Hours with no load side are skipped — the band must carry both.
-
-**Beyond the band**: multi-day rollup hours, widened per day by `√daysAhead`: `pvP10 = pvW·max(0, 1 − errHalfFrac·√daysAhead)`, `loadP90 = loadW·(1 + errHalfFrac·√daysAhead)` where `errHalfFrac` is the probabilistic forecast's realized daily error half-width. The merge is keyed by hour timestamp and **the band always wins** where both cover an hour.
-
-**Cheap-window resolution** (`resolveCheapWindow`, `nightChargeAdvisor.ts:662`): scan the injected `periodIdAt` resolver forward hour-by-hour (default 30 h) for the next contiguous run of the `overnight` period id; a run's *end* is scanned up to 24 h past the run's own start so a run straddling the scan edge is not truncated (v1.39.0 — a Saturday-evening scan finding Monday 00:00 at hour 27 of 30 must still report the close as 05:00, not 04:00). When the scan instant is already *inside* a cheap window (the recompute tick runs around the clock), the resolver walks **back** to the window's true start so the reported `window_start` is the real 23:00, not the live mid-window clock (display honesty). A pathological always-cheap resolver is bounded at 25 h.
-
-**`nextRechargeMs`** = the start of the *next* cheap window after tonight's (separate 96 h scan) — the horizon end. Tariff-based and deterministic: a single transient sunny hour, or a central-forecast pv≥load crossing that the P10/P90 sim would still be draining through, cannot truncate the multi-day carry. On a weekday this lands ~tomorrow night; across a weekend it produces the 24–50 h carry described in §11.
-
-**Morning-PV ceiling headroom**: `morningPvSurplusP90Kwh = Σ max(0, p90W − forecastLoadW)/1000` over `[windowEnd, windowEnd+14 h)` — P90 (best-case) PV by design, so the ceiling never over-buys into clipping. `null` when the band doesn't cover the span (ceiling simply not applied).
-
-**Committed-EV worst case**: from the EV window prediction report — `p90SessionKwh` (the P90 session energy, **not** the probability-weighted expected value), `chargeStartMs` = the first upcoming/ongoing predicted session (floored to ≥ the current hour), `sessionCount`. Placement (in `buildNightChargeInputs`) lays the P90 energy down from the predicted charge hour forward, capped at `EV_MAX_LOAD_W` (default 11 520 W) per hour, spilling into later hours until exhausted, and bounded to the next-24 h band region (beyond-24 h rollup hours already embed typical EV in their `loadW` and are not de-duplicated — adding the block there would double-count).
-
-**★ EV strip/re-add atomicity.** The embedded expected-value EV is stripped from the base load **only** on the hours the committed P90 block actually covers, hour-by-hour, atomically with the re-add: `loadP90W = max(0, loadP90W − embeddedEvW) + addW`. Hours before the block, after it exhausts, or beyond the band keep their embedded EV untouched. Stripping without replacing would erase a real charging night from the sizing basis and under-buy — a safety miss — so "never strip without replacing" holds **per-hour**, not per-plan (v1.39.0; the earlier whole-band strip erased *other* predicted sessions). A degenerate `evMaxLoadW` (≤ 0 / NaN) would make every placement hour add 0 W while still stripping — it is treated as "cannot place" and the embedded EV is kept.
-
-**Confidence tier**: `forecast` when the whole horizon (through `nextRecharge`) is inside the real-weather horizon; `climatology` when there is no weather-backed day-ahead forecast at all *or* the charge window itself lies past the weather horizon; `mixed` when only part of the horizon runs past it (the weekend carry beyond the ~4-day forecast).
-
-**`basisComplete`** = `forecastPresent && confidenceTier !== 'climatology' && calScoredDays ≥ 14 && bandCoverageFrac ≥ BASIS_MIN_BAND_COVERAGE` — the probabilistic band must have ≥ `NIGHT_MIN_CAL_DAYS = 14` scored calibration days *and* realized in-band coverage ≥ **78%** (`BASIS_MIN_BAND_COVERAGE = 0.78`, `nightChargeAdvisor.ts:74`) before the advisor will size anything on it. `false` forces the null plan.
-
-> **This line read `≥ 0.9` / “≥ 90%” until v1.149.0, and that was wrong by twelve points.** The error is recorded rather than silently corrected because of how it survived: `docs/PERFORMANCE.md` identified and corrected the identical claim on 2026-09-06 — in its own text, about its own prior snapshot — and this file, the normative reference the correction was measured against, was never touched. A correction applied to one document is not applied to the codebase. The threshold is now read from the named constant in both places so the two cannot drift apart again.
-
-**`basisBlockedBy`** (v1.148.0) names *which* of the four conditions failed, because “forecast/telemetry basis incomplete” is four conditions wearing one coat and the null-plan rationale previously printed only the coat. It is evaluated in the same order as the gate — no forecast → climatology tier → too few calibration days → band coverage — and the coverage branch additionally prints the three quantities that *passed*, so a reader can tell a six-point miss from a collapsed forecast: `PV band coverage 72% < 78% (forecast present, tier=forecast, calDays 29/14)`. It is an advisor **input**, not a plan field: it reaches the operator through the rationale string (and therefore the 21:30 notification and the spoken broadcast), and `plan.basisBlockedBy` is correctly absent from `/api/night-charge/status`.
-
-Finally the horizon is trimmed to `[floor(now to hour), nextRecharge)`.
-
----
-
-### 5. The sizing brain (`computeNightChargePlan`, `nightChargeAdvisor.ts:258`)
-
-Pure; the objective is **lexicographic**: (1) *hard resilience constraint* — the P10-PV/P90-load pool trajectory must stay ≥ floor+cushion from window-end to the next recharge; (2) source that energy in the cheap window (the arbitrage); (3) ceiling so a too-full pack doesn't clip morning PV.
-
-#### Fail-closed gates (every one ⇒ the null plan — all numerics null, `chargeTonight` strictly false)
-
-1. `basisComplete === false`; 2. `socCoherent === false`; 3. `confidenceTier === 'climatology'` ("will not size a buy on a guessed sky"); 4. no valid window (`window` null or `endMs ≤ startMs`); 5. non-finite/non-positive `fullKwh`; 6. non-finite `socNowPct`; 7. non-finite or negative `reserveFloorPct`/`cushionPct` (v1.39.0 — a NaN floor made `targetFloorKwh` NaN, every bisection comparison false, and the buy silently resolved to the *full pool headroom*: a confident max-buy instead of the promised fail-closed null); 8. non-finite `legEff`/`dischargeEff`/`chargeCapKw` (same class — all operator-config-sourced); 9. empty horizon.
-
-#### The DC-bus recurrence
-
-Each simulated hour: `packWh ← clamp(packWh + pvP10W − loadP90W/dischargeEff, [0, fullWh])` — delivering `load` at the panel draws `load/η` from the pack. This is **identical** to the runway/forecast/multi-day recurrence (`analytics.ts:7973`), so the advisor's trough is consistent with the alarm's runway projection. The simulation starts from the **floor of the current hour** (`simFromMs = floor(nowMs/1h)·1h`), not `nowMs`: filtering `≥ nowMs` dropped the in-progress hour entirely, under-simulating ~30 min of drain at the 21:30 issue time (an under-buy); including the full current hour over-counts by at most the elapsed fraction — the conservative, over-buy direction (v1.39.0).
-
-#### Baseline and the pre-window carry
-
-One baseline walk yields `packAtWindowEnd_noBuy` (pack entering the window close with no buy, carrying tonight's pre-window + in-window house load) and the no-buy trough over `[windowEnd, horizon end]` → `baselineMinSocPct`.
-
-When the plan is issued *before* the window opens, a second walk over `[simFromMs, windowStart)` produces the **pre-window carry** (v1.39.0, §4-honesty): `projSocAtWindowStartPct` (pack entering the window — frozen into the ledger's `soc_at_window_start_pct`) and `preWindowMinSocPct` (the projected minimum over the span a tonight buy *cannot* protect). On weekend evenings the resolved window can be 24–50 h away, so this span covers whole nights the scored `[windowEnd, …)` trough never sees; if it dips below floor+cushion, the rationale carries an explicit "a dip tonight's buy cannot prevent; the floor alarm owns that span" note with the day-qualified window-open time. **Mid-window** (`nowMs ≥ windowStart`) there is no pre-window span: both fields stay `null` and no note is emitted — the pre-fix code collapsed them to the current SoC and could emit a false "before the charge window opens" statement about a window already open.
-
-#### The hold branch
-
-With `targetFloorKwh = fullKwh·(reserveFloorPct + cushionPct)/100`: if the no-buy trough already holds the line (`≥ targetFloorKwh − 1e-9`), the plan is an honest **hold** — `buyKwh: 0`, `requiredExtraKwh: 0`, `objective: 'none'`, trough fields populated, rationale "no charge needed".
-
-#### ★★ The sizing authority — bisection against the re-simulated with-buy trough
-
-`troughAtLift(lift)` re-runs the full post-window simulation with the window-close pack raised by `lift` kWh. Sizing is **solved against this clamp-exact re-simulation, never the additive offset** `targetFloor − clampedBaselineTrough`, which the DC-bus clamps break in *both* safety-critical directions (two confirmed v1.37.0 criticals):
-
-- (a) a mid-window PV surge that clamps the pack to FULL **erases the lift** — an additive estimate reports "requirement met" while the trajectory still dips below floor+cushion (unflagged residual risk);
-- (b) a deep drain that clamps the baseline trough at 0 **truncates the apparent deficit** at `targetFloor` — the additive requiredExtra under-sizes the buy on exactly the deep-shortfall night (an under-buy, the life-safety miss).
-
-`trough(lift)` is monotone non-decreasing in `lift` (`max(0,min(full,·))` preserves order), so a bisection is exact: if even `troughAtLift(poolHeadroomLiftKwh)` cannot hold the line, `requiredExtraKwh = poolHeadroomLiftKwh` (the requirement *is* the full-pack lift; the unmet cushion is flagged via the trough below, never assumed met); otherwise 48 bisection iterations over `[0, poolHeadroomLiftKwh]` find the minimal lift whose re-simulated trough reaches `targetFloorKwh`.
-
-#### The three caps
-
-```
-remainingWindowHours  = max(0, (windowEnd − max(windowStart, nowMs)) / 1 h)     // mid-window clamp (v1.39.0)
-windowLoadKwh         = Σ loadP90W/1000 over horizon hours in [windowStart, windowEnd)
-chargePowerLiftKwh    = max(0, (chargeCapKw · remainingWindowHours − windowLoadKwh) · legEff)
-poolHeadroomLiftKwh   = max(0, fullKwh − packAtWindowEnd_noBuy)
-liftKwh               = min(requiredExtraKwh, chargePowerLiftKwh)
-```
-
-The charge-power cap credits only the **remaining** window when computed mid-window: the 30-min recompute tick runs around the clock and `resolveCheapWindow` deliberately walks back to the true window start for display honesty, so crediting the full window length would over-credit up to ~6 h × `chargeCapKw` of nonexistent lift and present an undeliverable buy as fully meeting the cushion (v1.39.0). The horizon is already trimmed to ≥ the current hour upstream. v1.49.0: the cap is **charge-only** — `chChargeWatt` limits grid→battery power and window house load rides the grid service feed, never debiting the charge budget; while the charger runs, the home is on grid bypass, so charging hours do not drain the pack either (the prior shared-budget model double-counted window load and under-sized buys ~5×, falsified by measured window imports sustaining ~2× the cap). Only `legEff` of what reaches the charger is stored.
-
-`bindingCap` resolution: `'requirement'` by default; `'poolHeadroom'` when `requiredExtraKwh ≥ poolHeadroomLiftKwh − 1e-6`; `'chargePower'` when `chargePowerLiftKwh < requiredExtraKwh − 1e-6`. **`cushionShortfall`** is driven by the re-simulated trough *under the lift actually deliverable* (`troughAtLift(liftKwh).minKwh < targetFloorKwh − 1e-6`) — so neither a full-clamp erasing the lift nor a below-empty deficit can present as "requirement met". If the shortfall exists while `bindingCap` still reads `'requirement'` (a clamp, not a linear cap, was the limiter), the flag is re-attributed to the tighter physical bound so it is never `'requirement'`-with-shortfall. Finally the **over-buy ceiling** is a *flag only* (resilience wins): when the cushion IS met and `targetPackKwh > fullKwh − morningPvSurplusP90Kwh + 1e-6`, `bindingCap='overBuy'` — the buy is kept and the accepted clip is disclosed.
-
-#### Outputs
-
-`buyKwh = liftKwh / legEff` (the meter sees more than the pack stores), `targetSocPct = (packAtWindowEnd_noBuy + liftKwh)/fullKwh·100` (clamped to full), `minProjSocPct`/`minProjSocTsMs` from the with-buy re-simulation (the number the ledger's floor verdict is scored on), `baselineMinSocPct`, `chargeTonight = buyKwh ≥ minBuyKwh` (`ARB_MIN_BUY_KWH`, default 1 — below it the night is a "hold", no nagging about a trivial top-up), and a composed `rationale` string carrying the buy, target, no-buy trough, floor+cushion line, and the honest shortfall / over-buy / pre-window notes.
-
----
-
-### 6. The learning ledger (`night_charge_ledger`, `recorder.ts`, v1.38.0)
-
-One durable row per `plan_date` (`YYYY-MM-DD`, America/Phoenix; primary key), in three column groups:
-
-- **PLAN** (frozen the evening before; a re-issue for the same date overwrites only the plan columns): `issued_at_ms`, `algo_version` (stored TEXT — a physics fix bumps it and makes prior rows excludable, §8), `posture` (`'advisory'`), `objective`, `rationale`, `confidence_tier`, `horizon_hours`, `soc_now_pct`, `soc_at_window_start_pct` (v1.39.0 — the plan's own projected pack SoC entering the window; NULL on every pre-v1.39.0 row), `target_soc_pct`, `buy_kwh`, `required_extra_kwh`, `reserve_floor_pct`, `cushion_pct`, `cushion_kwh`, `binding_cap`, the forecast basis (`pv_p10/p50/p90_kwh`, `load_p10/p50/p90_kwh`, `ev_p90_session_kwh`, `ev_session_count`, `band_sigma_cal`, `cal_scored_days`, `forecast_basis`, `weather_covered`), `min_proj_soc_pct`/`min_proj_soc_ts_ms` (the simulated plan trajectory — **omitted entirely for an incomplete-basis plan**, so a NULL here is the scorer's "no basis" sentinel), `pool_full_kwh`, `tariff_snapshot` (JSON: plan/season/period-now/ratesConfirmed/cents-by-tier), and **`window_start_ms` / `window_end_ms`** (v1.39.0) — the plan's *actually resolved* charge window. Weekend plans resolve windows disjoint from the canonical 23:00–05:00 night (a Saturday plan's window is Monday 00:00–05:00), and the scorer/completion gate must pair actuals to the **real** window; without these columns a Saturday night would be captured before its window even opened. Added to existing databases by an idempotent `ALTER TABLE` migration.
-- **OUTCOME** (NULL until the night completes): `outcome_captured_at_ms`, `actual_pv_kwh`, `actual_load_kwh`, `actual_window_import_kwh`, `actual_onpeak_import_kwh`, `onpeak_import_occurred`, `actual_min_soc_pct`/`_ts_ms`, `plan_traj_floor_breached`, `cushion_breached`, `grid_home_coverage_frac`, `scored` (0/1), `score_notes`; v1.187.0: `onpeak_start_ms` / `onpeak_end_ms` / `onpeak_basis` and `realized_cost_cents` (both §7).
-- **ON-PEAK OUTCOME (v1.187.0).** `actual_onpeak_import_kwh` is `grid_home_w` import over the on-peak period the plan **governs** — the first run of on-peak hours at or after its own window closes, provided it starts before the next cheap window opens (`nightLedgerScoring.governedOnPeakSpan`, resolved from the tariff model, so the Mon–Fri gate and the holiday list are the tariff's own). A Mon–Thu plan governs the next day's 16:00–19:00; a Saturday or Sunday plan (window Monday 00:00–05:00) governs Monday's; a Friday plan governs none. `onpeak_basis` says which applies: `governed` (measured over `onpeak_start_ms`–`onpeak_end_ms`; NULL value when `grid_home_w` covers < 90% of the span), `none` (no on-peak governed — NULL, never a measured 0; also a plan that resolved no charge window at all, `windowlessLedgerColumns`), or `superseded` (a later plan resolved the same window — Sunday's for Saturday's — and carries it, so the shared Monday is recorded once). `onpeak_basis` NULL means **not measured on the governed basis**: a row captured before v1.187.0, or a pre-v1.39.0 row whose window was never recorded (nothing can be paired to it). **Rows captured before v1.187.0 carry `onpeak_basis` NULL and are kept as recorded:** their on-peak columns measured the plan day's own 16:00–19:00, which closes ~2.5 h before the ~21:30 plan exists, with no weekday gate — each weekday row holds the previous night's on-peak outcome, and Saturday/Sunday rows hold an off-peak afternoon. They are not rewritten.
-- **PV EVIDENCE (v1.187.0).** `pv_model_sns` (plan time) records the Cores the PV band's solar model was fitted on (`ProbabilisticForecast.solarModelSns`, sorted, comma-joined). At capture, `pv_verdict_set_aside` records why the row's PV verdict is not forecast-skill evidence when that set differs from the Cores whose actual PV is summed (`pvVerdictSetAside`); `pv_in_band` / `pv_err_frac` are still written as measured. Rows planned before v1.187.0 have no `pv_model_sns` and their verdicts stand, with one exception in `KNOWN_FLEET_MISMATCH_PV_ROWS`, matched by exact `plan_date` + `issued_at_ms`: the 2026-09-27 plan, whose band came from the 21:06 restart's partial-map forecast (solar model fitted on one Core, v1.186.5) and was graded against three Cores' 9.6 kWh (`pv_in_band` 1). A once-per-boot pass (`tagKnownFleetMismatchPvRows`) writes only its `pv_verdict_set_aside`, logged; the captured verdict is kept.
-- **DELIVERED ENERGY (v1.187.3).** On an actuated night `delivered_kwh` is the energy into the home Cores over the hold span (§7 "Delivered energy"), and `delivered_basis` records the method: `source-charge` (`DELIVERED_BASIS`), written exactly when `delivered_kwh` is a number. A NULL `delivered_kwh` has a NULL basis and a `Delivered:` clause in `score_notes` naming why. **Rows captured before v1.187.3 carry `delivered_basis` NULL beside a number and are kept as recorded:** their `delivered_kwh` is window grid import minus the concurrent house load, which assumed the house ran on the grid for the whole hold and under-counts every night the SHP2 carried the house from the pack inside it (2026-09-30: 4.71 kWh against ~20.3 kWh into the Cores). The buy de-bias learner reads only the current basis (§15.x "Announced-buy de-bias").
-- **SCORE** (NULL until scored): `pv_err_frac`, `pv_in_band`, `load_err_frac`, `load_in_band`, `buy_err_kwh` (signed, + = over-bought), `soc_min_err_pct`.
-- **DISPOSITION** (v1.132.0, both NULL on rows written before it):
-  - `arm_disposition` — why an armed night never became an actuation. `actuated` alone is over-loaded: `NULL` covers at least five dispositions (superseded by a later plan, held below the minimum buy, no window resolved, advisory mode, apply guards refused). The 2026-08-29 row sat at `actuated=NULL` with `buy_kwh=36` and read like a failed 36 kWh buy when it was a routine Sat/Sun shared-window supersede — a log line recorded it, the ledger did not.
-  - `cost_ceiling_basis` — `'pv-headroom' | 'max-soc' | NULL`. **The field that makes cost mode auditable.** `objective` only records which mode was *configured* plus buy/no-buy; `costModeTargetKwh` floors at the resilience answer and raises only under a strict inequality, so a row labelled `cost_arbitrage` can carry **zero** cost-mode contribution. This value was computed and thrown away, which is why "is cost mode actually doing anything" could not be answered from the ledger.
-
-**Cost columns (v1.187.0).** `realized_cost_cents` is **written**: metered `grid_home_w` import (positive-clamped, gaps over 1 h skipped — the kWh columns' rules) priced interval by interval at `rateAt(apsREvModelFromEnv(), t).centsPerKwh` (`pricedImport`), over the night's scored span — from the window open (or the reserve write, when a pre-v1.187.0 schedule applied it earlier) to window close + 16 h: the overnight buy, the day's off-peak import and the governed on-peak (`realizedCostOutcome`, assembled by `assembleNightLedgerColumns`). Energy only (no basic-service charge). NULL on unconfirmed rates or any interval without a rate, under 90% `grid_home_w` coverage of the span, or a row superseded for its window (the later row carries it); **a `Cost:` clause in `score_notes` always says which** — the priced total, `rates unconfirmed`, `no <season> rate configured for <period>`, `coverage N% < 90%`, or `carried by the <date> plan`. Rates are those configured at capture time; the plan-time rates stay in `tariff_snapshot`.
-
-> **The column is not summable to a bill.** Row spans do not tile time: on a weekday 21:00–23:00 falls in no row (one row ends at close + 16 h = 21:00, the next opens at 23:00), and a Friday row (window Fri 23:00 → Sat 00:00) ends Saturday 16:00, so Saturday 16:00 → Monday 00:00 falls in none. Spans also differ in length (17 h on a Friday row, 21 h on a Monday-window row). A month's sum misses ~2 h every weekday and ~32 h every weekend; the daily grid cost is the HA **Grid Cost Today** sensor.
->
-> **A missing season rate nulls whole rows.** `pricedImport` never half-prices a span, and `TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS` defaults to `""`: on a confirmed table without it, every row whose span holds a winter weekday 10:00–15:00 records NULL from October — the first winter usage month, v1.187.10 (the note names the period). The boot logs such gaps once (`unpricedTariffPeriods`: every period, per season it applies in, with no rate on a confirmed table).
-
-Several declared columns are *never written* and read NULL by design: `actual_grid_to_battery_kwh`, `outage_during_day`, `demand_charge_savings_cents` (APS R-EV has no demand charge), and the counterfactual columns `counterfactual_cost_cents`, `realized_savings_cents` and `would_have_peak_imported`. The reasons first given for the counterfactuals (no actuated nights, rates unconfirmed) no longer hold; the one that remains is that each needs the no-buy trajectory, and the recorded one does not supply it: shifting the measured trajectory down by the delivered energy assumes the panel would have discharged the same way from a lower pool, and the SHP2 does not — after it stops at its reserve it resumes discharging only ~20 points above it (2026-09-13/14/27/28), so a lower pool can sit idle and buy grid through hours the measured night discharged. A modelled no-buy day would be an estimate in columns the gate and the owner read as measurements. The grid cost of every day, in dollars, is the HA **Grid Cost Today** sensor (chapter 7 §4, `computeTariffReport`).
-
-**★ Never pruned.** The table is created alongside `lifetime_totals` and is never referenced by the hourly `samples` prune — the multi-month verification record the write-readiness gate reduces over **must survive the samples retention** (design §0.1, binding; 30 days by default, `RECORDER_RETENTION_DAYS` since v1.51.0). The companion `night_charge_calibration` singleton (`id=1 CHECK`; seasonal cushion learner / buy de-bias / EV-tail inflation state, design §3.4) has schema and read/write API but **no live producer or consumer yet** — the learner is a later increment.
-
-**Write path.** `nightUpsert` builds a dynamic `INSERT … ON CONFLICT(plan_date) DO UPDATE` where column names come *only* from a frozen whitelist (`NIGHT_LEDGER_COLUMNS`), never caller keys — that is what makes the interpolation injection-safe. Only columns present and not `undefined` are written, so a partial outcome merge preserves every frozen plan column; prepared statements are cached per column-shape; JS booleans are coerced to INTEGER 0/1 (`node:sqlite` rejects a boolean bind). `recordNightPlanRow` (`index.ts:2668`) coerces nullable plan numerics to 0 for the non-null plan columns (`target_soc_pct`, `buy_kwh`, `required_extra_kwh`) but *omits* `min_proj_soc_pct` when null so the sentinel survives. The synthetic SN `night_charge` is reserved for optional disposable chart-overlay samples (subject to the configured samples retention) and joins the restart-gap exclusion list (like `weather`/`forecast`) so off-cadence wall-clock rows can never mask a real telemetry stall; the durable ledger itself never rides the `samples` table.
-
----
-
-### 7. Completion-gated outcome scoring
-
-#### The night clock (`nightWindowBounds`, `nightChargeAdvisor.ts:951`)
-
-The single source of truth for a plan date's spans, in fixed America/Phoenix arithmetic (UTC−7, no DST; pure, null on a malformed date): plan for day `D` covers charge window `[D 23:00, D+1 05:00)`; the plan-trajectory score span runs `[D+1 05:00, D+1 21:00)`; the night is **complete** — and may be outcome-captured — only at/after `D+1 21:00` (`completeMs`, = day-start + 45 h). `nightSpansForRow` (`index.ts:2782`) prefers the row's **own stored window** when present: the score span then runs **16 h past the real window close** (`window_end_ms + 16 h` — the same close+16 h shape as the canonical 05:00→21:00), which is what pairs a weekend plan's actuals to its Monday-morning window instead of the canonical night. Rows without a stored window (`pre-v1.39.0`) are marked `windowKnown=false` and captured honestly as `scored=0` — actuals cannot be paired to the plan's real window, and a fabricated cross-span comparison must never enter the gate's evidence.
-
-**★ The completion gate** (v1.39.0): a night may be captured only once `nowMs ≥ completeMs`. The pre-fix midnight tick captured yesterday's row while its charge window was still *open* — window coverage ~25% ⇒ `scored=0`, inverted SoC query ⇒ null actuals — and the idempotence latch then froze those truncated actuals into the never-pruned ledger forever, so the readiness gate could never accumulate a single scored night.
-
-**★ …and the forecast span** (v1.187.10): the sweep captures a row only once `nowMs ≥ ledgerCaptureDueMs(completeMs, issued_at_ms)` = `max(completeMs, issued_at_ms + FORECAST_SPAN_MS)` (24 h; `ledgerRowsDueForCapture`, nightLedgerScoring.ts). The PV/load actuals are integrated over `[issued_at_ms, +24 h]` clipped to the capture instant (`forecastActualsSpan`), so a capture before issue + 24 h froze a short actual against a 24 h forecast. On a weekday the gap was 0.1–0.5 h (completion ~21:00, issue ~21:30); a Friday 1 h window closes Saturday 00:00 and completes Saturday 16:00, ~5.4 h short. The 2026-10-02 row was captured at 16:08:08 on 18.6 h of load: 39.62 kWh against an 81.8 kWh forecast, `load_err_frac` −0.52, `buy_err_kwh` +51.09 kWh — a positive skew of ~10–12 kWh on every such Friday row, the direction that masks a real under-buy from the HARD criterion, and an inflated \|`load_err_frac`\| in the load-band calibration. `completeMs` itself is unchanged (the premature-capture repair below resets any row captured before it, across a 60-day sweep that can reach past the samples retention). Consequences: a weekday row now captures at the first sweep after issue + 24 h (~21:30–22:00), usually the 30-min tick after that evening's job, so the evening plan's ledger-derived calibrations and the evening notification's readiness see the previous night one sweep later; the tick that captures it also recomputes the readiness the apply moment reads (the window opens at 23:00 or later). A Friday row captures Saturday ~21:30–22:00. Known limit: the P50 sums the forecast's 24 hourly slots from the next whole hour after issue, so the actual span leads the forecast span by up to 1 h; the lengths are equal.
-
-#### The backfill sweep (`scoreCompletedNights`, `index.ts:2804`)
-
-Runs on the 30-min tick, the evening job, and the boot warm-up. Sweeps the last **60 days** of ledger rows (not exactly-yesterday — the old scorer orphaned any night left uncaptured across SHP2-wedge/downtime days forever, an uncounted MNAR exclusion), skipping rows already captured (`outcome_captured_at_ms != null` — idempotent) and rows still in flight. A night whose raw telemetry has aged past the configured samples retention (default 30 days) captures honestly as `scored=0` with null actuals — it does not stay uncaptured forever.
-
-#### Measuring one night (`scoreNightRow`, `index.ts:2840`)
-
-- **Grid import**: trapezoidal integration of SHP2 `grid_home_w` (positive-clamped, gaps > 1 h skipped; `integrateWh` / `coverageFrac`, nightLedgerScoring.ts) over the real charge window and — v1.187.0 — over the on-peak period the plan governs (`nightSpansForRow` → `ledgerSpansForWindow` → `governedOnPeakSpan`; §6 "ON-PEAK OUTCOME"; `nightOnPeakOutcome` writes the value, `onpeak_start_ms`/`_end_ms` and `onpeak_basis`, and appends an `On-peak:` clause to `score_notes`). It was the plan day's own 16:00–19:00 until v1.187.0. A row superseded for its window (`supersedingPlanDate`: a later `plan_date` with the identical stored window) records no on-peak and no cost, and queries neither span. The completion boundary is `max(window close + 16 h, governed on-peak end)` (`ledgerSpansForWindow`); under R-EV the governed on-peak (16:00–19:00 after a 05:00 close) always ends inside the 16 h span, so no capture moves. **Null-over-fabrication**: zero samples record NULL, never a "measured" 0 kWh.
-- **The assembly is pure** (v1.187.0): the on-peak, realized-cost, delivered-energy and PV set-aside columns come from `assembleNightLedgerColumns`, which reads the house panel's series only through a `query(metric, start, end)` seam; `scoreNightRow` runs it against the recorder and writes the result (`ledgerScorerAssembly.test.ts` drives it with a stub).
-- **Realized cost** (v1.187.0): `realized_cost_cents` — §6 "Cost columns". **Delivered energy** on an actuated night integrates the span the write was actually held (`deliveredHoldSpan`), from the write (or the window open, whichever is earlier) to: the restore's own time, `actuation_reverted_at_ms` (stamped by the actuator from v1.187.0), clamped to `[close, close + HOLD_TAIL_MAX_MS]` (30 min — past that the span would integrate the solar morning, where import − load turns negative), plus `HOLD_DEVICE_SETTLE_MS` (1 min); with no stamp and a write before the window (the pre-v1.187.0 schedule), close + `LEGACY_REVERT_LAG_MS` (5 min) as before; with no stamp on the current schedule, close + `ACTUATOR_TICK_MS` + `HOLD_DEVICE_SETTLE_MS`. A span ending exactly at the close dropped the restore's own tick (up to ~60 s) plus the device's stop — 0.1–0.5 kWh at 16–19 kW on a night still charging at the close, always toward under-delivery, in the column the buy de-bias calibrator trains on (the v1.115.0 defect class). A cancel or grid-loss abort keeps the window, as before.
-- **What delivered energy measures** (v1.187.3, `deliveredIntoCores`): the energy into the home Cores — the charging part (> 0) of the house panel's source channels (`src{n}_w`, from `backupInfo.chWatt`; positive = the panel charging that Core, negative = the Core carrying the house), integrated over the hold span and summed. **The channels come from the hold:** every source channel (`SOURCE_CHANNEL_SLOTS`, slots 1–3) with at least one recorded sample inside the hold, plus every slot the house panel reports connected at capture (`houseConnectedSlots` → `connectedSourceSlots`: connected and carrying a serial — the live rule of `panelRoster`, without its persisted `lastRoster` fallback). Capture runs ~16 h after the close, so membership at that moment is not the night's: a Core unplugged or in service by then, or a `/quota/all` that came back without the `pd303_mc` sources subtree that minute, would otherwise drop a channel that charged all night (or every channel) from a column written once. The recorder writes `src{n}_w` for every `chWatt` entry whether or not the slot is connected, so an empty slot reads zeros and adds nothing, and the slot ↔ `chWatt` index mapping does not affect the total. A slot connected at capture whose channel recorded nothing over the hold is still read, as a dark channel, so the coverage gate below withholds the night. Until v1.187.3 the column was window grid import minus the concurrent house load (`actuatedDeliveredKwh`, removed), which assumed the house ran on the grid for the whole hold; when the SHP2 carries the house from the pack — above its reserve before a just-in-time force-charge, and after the force-charge's OFF — the subtraction removed load the grid never carried. 2026-09-30: import 23.38 − load 18.67 = 4.71 kWh, against 20.34 kWh on the source channels (the Cores' own AC input 20.25, the pool 55→76%). On nights the house rode the grid all window the two agree to within ~3% on 09-24 (23.64 vs 24.26 kWh) and 09-28 (46.26 vs 47.41) and ~10% on the small 09-29 night (7.23 vs 7.93). A channel carrying the house reads negative and adds nothing, so hours on the pack cost nothing and hours on the grid count only what reached the Cores. NULL, with a `Delivered:` clause in `score_notes`, when no channel recorded anything over the hold and no connected Core is known; when any channel covers less than `LEDGER_SPAN_MIN_COVERAGE` (0.9) of the hold — the minimum over channels, as `actual_pv_kwh`'s per-core gate, since one dark channel in three averages to a healthy 0.67 while the total is a third short; or when the total exceeds the metered `grid_home_w` import over the hold (when that is itself ≥ 0.9 covered) by more than `DELIVERED_IMPORT_SLACK_FRAC` (5%) + `DELIVERED_IMPORT_SLACK_KWH` (0.5 kWh) — overnight the grid is the only source that can charge the Cores, so more than that is a channel read with the wrong sign or meaning. `HOLD_TAIL_MAX_MS` is unchanged; the morning bias it was sized against was import − load's.
-- **Coverage**: fraction of 5-min buckets in the window with ≥ 1 sample; `< 0.9` ⇒ `scored=0` ("MNAR-excluded").
-- **PV/load actuals** are integrated over `[issued_at_ms, +24 h]` — the same horizon the frozen P50 forecast covered, so `pv_err_frac`/`load_err_frac` are like-for-like. Actual PV = Σ `pv_total` over the SHP2-connected home DPUs (the same basis the forecast is built from); actual load = SHP2 `panel_load`. v1.187.10: the span is whole at capture (the forecast-span gate above); before it a row captured earlier integrated only to the capture instant.
-- **Minimum SoC** over the score span passes through `medianFilter3` (3-sample median; endpoints pass through) *before* the min-scan: the documented SHP2 cloud-reconnect artifact emits a single transient `backupBatPercent=0` sample, and an unfiltered min-scan latches it — fabricating a realized need equal to the full floor+cushion and a false HARD under-buy in the gate's evidence. A genuine sustained low has agreeing neighbors and passes.
-- **Realized-need buy** — the hindsight counterfactual `buy_err_kwh` is scored against — is defensible **only on a clean night**: in advisory phase the home runs *without* the buy, and on a grid-tied home its own overnight import props the SoC. `scored=1` requires: plan had a trajectory (`min_proj_soc_pct` non-null) ∧ coverage ≥ 0.9 ∧ a min-SoC read exists ∧ window import ≤ `ARB_MIN_BUY_KWH` (near-zero — "clean islanded baseline"). Then `realizedNeedBuyKwh = max(0, targetFloorKwh − actualMinPackKwh)/legEff`. Every other case records `scored=0` with an explicit `score_notes` reason.
-- **The floor verdict is the plan trajectory, never baseline telemetry** (design §3.3): `plan_traj_floor_breached` = the plan's own sized trough below its own line — v1.186.0: `cushionTroughSocPct < cushionLineSocPct` (the trough that set `cushionShortfall`, and reserve floor + the cushion applied; `legacy-pct` keeps the whole-house `minProjSocPct` against floor + `cushionPct`; no recorded trough ⇒ null). Before v1.186.0 it compared the whole-house disclosure trough, which reads 0% on every cost-mode night, so the gate counted every such night as a strike; a pre-v1.186 row with `cushion_shortfall` 0 and no trough is set aside by `nightChargeGate`. In advisory phase raw min-SoC telemetry measures the un-actuated baseline, not the plan's line. Raw telemetry feeds only `soc_min_err_pct` (plan minus actual) and the separate `cushion_breached` observation. `pv_in_band`/`load_in_band` check the actual against the frozen `[P10, P90]`; `onpeak_import_occurred` uses a 0.05 kWh threshold.
-
-#### Premature-capture repair (`repairPrematureNightOutcomes`, `index.ts:3096`)
-
-Once per boot, idempotent: any row whose `outcome_captured_at_ms` **precedes its own night's `completeMs`** (the pre-v1.39.0 mid-window defect) has its outcome/score columns reset to NULL (`scored=0`, explanatory `score_notes`) so the now-completion-gated sweep re-captures it with full-span actuals. Rows are corrected in place — never deleted.
-
-#### Forecast-span repair (`repairShortForecastSpanOutcomes`, v1.187.10)
-
-Once per boot, idempotent, before the warm sweep: `forecastSpanRepair` (nightLedgerScoring.ts) selects captured rows with a stored window whose capture preceded `issued_at_ms + 24 h` by at least `FORECAST_SPAN_REPAIR_MIN_SHORT_MS` (1 h) — Friday 1 h windows (~5.4 h short) and evening jobs delayed past ~22:00.
-- **Inside the re-capture horizon** — `issued_at_ms` within `min(RECORDER_RETENTION_DAYS, 60) − 2` days (`forecastSpanRecaptureHorizonMs`; 28 days at the default 30-day retention, 58 days with multi-year retention, so the row keeps its raw samples and stays inside the 60-day sweep) — the outcome columns are reset as the premature-capture repair resets them (`forecastSpanResetColumns`: capture stamp NULL, `scored=0`, a `reset —` note) and the sweep re-captures the row over the full span. A re-capture re-scores every outcome column on the current scorer — the delivered-energy basis, the governed on-peak, the PV coverage gate and the Cores connected at capture — like any late capture. One info line per row names the shortfall and the captured load and `buy_err_kwh`.
-- **Not re-scorable on today's devices** (review, `forecastSpanRecapturable`) — a row inside the horizon is tagged like one past it when it has no `pv_model_sns` (planned before v1.187.0, or with no recorded model set: `pvVerdictSetAside` cannot see a roster change, and a re-capture sums actual PV over today's panel-connected Cores — before the 2026-08-20 roster change another Core held slot 3), or when it carries a `delivered_kwh` with no `delivered_basis` (captured before v1.187.3: the buy de-bias learner reads those as legacy and they are never rewritten). The live 2026-10-02 row carries both and is re-captured.
-- **Past it** the row is kept as captured and `score_notes` gains a `Forecast span:` clause stating the hours covered and that the PV/load errors under-count (`forecastSpanTagNote`; the marker makes it idempotent). One summary line lists the tagged rows. The tag is not read by the readiness gate or the load-band calibration; such rows age out of the 120-day band window.
-- **Not repaired:** weekday rows captured before v1.187.10, 0.1–0.5 h short, are kept as captured (a re-capture is spent only where the PV/load/buy columns are materially wrong).
-
----
-
-### 8. The write-readiness gate (`computeNightChargeReadiness`, `nightChargeGate.ts:193`)
-
-A pure reduction over the ledger (no I/O, `nowMs` injected) into one of three states — `LEARNING` / `READY_TO_CONSIDER_WRITES` / `BLOCKED` — plus `writeReady` and a human-readable `blocking[]` list. It gates **only on physically-measured prediction accuracy**: there is deliberately *no* savings term (no valid counterfactual exists pre-write, so a savings gate would certify a number the system cannot observe). Recomputed over `readNightLedger(400)` on every tick, evening job, and warm-up.
-
-**Thresholds are pre-registered and frozen** — never tuned on the season they gate (garden-of-forking-paths); a re-tune bumps `CURRENT_ALGO_VERSION` (currently **2**: the v1.49.0 charge-only-cap sizing correction changed the planner physics, which invalidates every v1 row's plan, trajectory, and strike verdict) and resets the readiness clock. Rows are filtered to the current algo version by **string** comparison (`recordNightPlan` persists `algo_version` as SQLite TEXT; a numeric compare never matched a real row and left the gate permanently stuck). Prior-version rows are *excluded*, not tagged.
-
-**The v2 evidence base is ACTUATED nights** (v1.50.0). The v1 gate scored a night only on a "clean islanded baseline" (near-zero window import) — on a grid-tied home the SHP2 carries the house on grid at the floor and imports every night, so `scoredDays` was structurally 0 and the gate could never open. v2 splits the evidence into two pools:
-
-- **Actuated pool** — current-algo rows with `actuated=1` ∧ `scored=1` (a bounded reserve write was applied and its delivery measured, §10). Feeds the under-buy rate, the sizing bias, and the graduation night count.
-- **Forecast pool** — current-algo, outcome-captured, `confidence_tier='forecast'` rows. Feeds PV/load accuracy and band coverage (those columns are recorded on every captured night regardless of the realized-need `scored` flag). v1.187.0: the PV figures (`pvMae`, `pvBias`, `pvBandCoverage`, the effective-N residual series) and the verdict-bearing sample (`coverageNights`, the informational joint) read only rows whose `pv_verdict_set_aside` is NULL — a band built for other Cores than the actuals is not forecast-skill evidence (§6 "PV EVIDENCE"). Such rows are counted in `pvVerdictsSetAside`; the load figures are unaffected. **An incomplete-basis night is not set aside for that alone**: a plan refused for a lasting forecast failure (2026-09-11: "PV band coverage 72% < 78%") is exactly the evidence this gate grades, and dropping those nights would raise PV coverage by survivorship. On the 2026-09-29 ledger the one set-aside row moves PV coverage 33/36 (0.917) to 32/35 (0.914) and `coverageNights` 36 to 35; no verdict changes.
-
-**HARD failures ⇒ `BLOCKED`** (evaluated first):
-
-| Gate | Rule |
-|---|---|
-| Engine-fault strikes | A strike requires the plan to have **claimed hold** (`cushion_shortfall` falsy — a NULL/legacy row still counts as claimed, fail-closed) AND either the plan's own simulated trajectory breached floor+cushion (forecast-tier rows, §3.3) or an actuated night's **realized** outcome breached (`cushion_breached`, any tier — a delivered buy that still breached is fault evidence regardless of forecast basis). A plan that honestly disclosed `cushionShortfall` is physics, not fault — exempt. Strikes count within a rolling `STRIKE_WINDOW_DAYS = 45` window and clear after `STRIKE_CLEAR_STREAK = 14` consecutive strike-free actuated nights — escapable by demonstrated performance, never by waiting alone. |
-| `buy_err_kwh` basis | **v1.105.0 (algo v3)** — the PLANNER-SIZING basis: `buy_err = planBuy − (planBuy + netMiss/legEff) = −netMiss/legEff`, where `netMiss = (forecastPv − actualPv) + (actualLoad − forecastLoad)`. It answers exactly one question — *did the planner size the buy correctly?* — and contains no delivered term, no trough and no reserve setpoint. The prior definition was `planBuy − (delivered + troughDeficit)`, the difference of two questions: it counted the actuator's by-design over-delivery (29-41 kWh against 21-22 kWh plans) as under-buy, and anchored on a 16 h post-window trough that is really the reverted `backupReserveSoc` (a fixed −14.9 kWh at a 10 % trough). Across four live nights that was −62.13 kWh of residual, 52 % over-delivery / 48 % trough, producing a 56 % under-buy rate no forecast change could move. Actuated and advisory nights share the basis — one column, one meaning. Delivery quality is a separate question. |
-| Under-buy rate | With ≥ `MIN_NIGHTS_TO_JUDGE_UNDERBUY = 5` actuated nights: fraction of `buy_err_kwh < −UNDERBUY_DEADBAND_KWH` (0.5, **v1.105.0** — an untoleranced `< 0` scored a −0.01 kWh rounding residual as a life-safety miss) must be ≤ `MAX_UNDERBUY_RATE = 0.10` (under-buy is the asymmetric safety miss). Below 5 nights this is still LEARNING, not BLOCKED. **v1.104.0** — the pool EXCLUDES nights whose plan disclosed a cushion shortfall (`cushion_shortfall`), matching the exemption the strike rule already applies ("disclosed — physics, not fault"): a plan that declared up front it could not meet the cushion, because charge and pool caps prevent it, is not evidence that the engine under-bought. `underBuyExcluded` reports how many were dropped. Removing bad evidence leaves NO evidence, so the rate becomes null and the state falls to LEARNING — fail-closed, never READY. (The hybrid-residual limitation recorded here before algo v3 — delivered energy added back into realized need, a trough anchored on the reverted setpoint — was removed by v1.105.0; see the basis row above.) |
-
-**Graduation criteria** (adopted 2026-07-31) — *any* unmet or uncomputable metric ⇒ fail-closed `LEARNING` (design I13; missing/thin/young data is never null-as-ready):
-
-| Metric | Threshold | Constant |
-|---|---|---|
-| Scored actuated nights | ≥ 21 | `MIN_ACTUATED_NIGHTS = 21` |
-| Under-buy rate (actuated pool) | ≤ 0.10 | `MAX_UNDERBUY_RATE` |
-| Signed sizing bias (mean `buy_err_kwh`, actuated pool — the P50 PV/load forecast miss in kWh; delivered energy is not part of it) | in `[0, 5]` kWh | `BUY_BIAS_MIN_KWH = 0`, `BUY_BIAS_MAX_KWH = 5` — never net under, never gross over. v1.187.10: the blocker reads "sizing bias … (mean buy_err_kwh: the P50 PV/load forecast miss in kWh; delivered energy is not part of it)"; it read "delivery bias", which pointed at the actuator when the live 22.27 kWh was load over-forecast |
-| Realized band coverage — **v1.106.0: PER MARGINAL** (`pvBandCoverage`, `loadBandCoverage`), each in `[P10,P90]`, forecast pool | each in `[0.78, 0.92]` over ≥ 14 verdict-bearing nights | `BAND_COVERAGE_MIN/MAX`, `MIN_COVERAGE_NIGHTS = 14` — too high means the band is uselessly wide, too low means unsafe. Previously the **AND** of the two was graded against this marginal target: for two independent 80 %-calibrated marginals the joint is 0.64 and the Fréchet bounds put it in `[0.60, 0.80]`, so the upper half of the target was UNREACHABLE by construction and a perfectly calibrated pair could never pass. It also hid WHICH input was broken — the live joint read 9.5 % while the marginals were PV 57 % / load 14 %. The joint is retained as an informational figure only, and the blocking line names both marginals. |
-| Load band construction — **v1.106.0** | `calibratedLoadBandFactor`: nearest-rank 80th percentile of realized \|`load_err_frac`\|, FLOORED at the historical hand-set 1.15 and capped (default 2.0) | The band was `P50 ÷ 1.15` / `P50 × 1.15` — a fixed ±15 % sizing multiplier that nothing estimated from data, yet named P10/P90 and graded as a calibrated 80 % interval; it contained the actual **14 %** of the time. The floor makes the change monotone: it can only WIDEN. Only `loadP90W` feeds sizing (the projected drain), so a wider band buys more — the safe direction for an asymmetric under-buy miss. Below 10 samples it returns the floor with `basis: 'default'` rather than calibrating on noise. |
-| Zero engine-fault strikes | active (uncleared, in-window) strikes = 0 | `STRIKE_WINDOW_DAYS`, `STRIKE_CLEAR_STREAK` |
-
-PV/load MAE and signed bias, the autocorrelation-adjusted effective N, and the MNAR exclusion fraction remain computed and published as diagnostics (same definitions as v1) but no longer gate — the five criteria above are the graduation contract. Accuracy remains **normalized MAE + a separate signed bias, deliberately not r²**: r² is variance-driven and inflated by monsoon swings — a +15–20% biased-but-correlated forecast passes r² ≥ 0.80 yet mis-sizes the buy.
-
-**Effective N** (`effectiveSampleSize`, `nightChargeGate.ts:157`): `n·(1−r₁)/(1+r₁)` with lag-1 autocorrelation `r₁` computed over the PV residual series (fallback: load residuals, then the raw count), clamped to `[0, 0.99]` — a cloudy stretch is several *correlated* bad nights, so raw count over-counts evidence; negative autocorrelation is clamped to 0 so it can only ever reduce, never inflate.
-
-**The MNAR denominator is *expected* nights, not captured rows** (v1.39.0): nights that never produced a ledger row at all — add-on down at the evening job, SHP2 cloud-offline, the documented *adverse* failure modes — must count as exclusions; keying the fraction on captured rows let exactly those nights vanish from both numerator and denominator. Expected range = every Phoenix calendar date from the first current-algo plan (bounded to a trailing 120 days) through the most recent *completed* night — the Phoenix date of `now − 45 h` (plan `D` completes at `D+1 21:00`). `exclusionFrac = max(0, expected − distinct scored plan-dates in range)/expected`. Phoenix dates are built from `en-US` `formatToParts` (v1.39.1) — the `en-CA` `format()` shortcut silently falls back to a non-ISO shape on a small-ICU Node, cascading into a swallowed throw and a permanently-null readiness.
-
-`nightChargeGateFields` flattens the result for the state payloads; on a null readiness it emits `night_charge_readiness: 'unknown'`, **`night_charge_write_ready` strictly `false`**, and every diagnostic null. v2 note: `night_charge_plan_nights_scored` counts scored **actuated** nights.
-
----
-
-### 8b. Supervised write mode (`nightChargeActuator.ts`, v1.50.0)
-
-When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one bounded, announced, cancellable, auto-reverting reserve write. The decision core is pure (`decideActuation` — all clocks injected, unit-tested against every guard); the integrator executes decisions through the audited write helper and persists every transition to a restart-surviving state file (`.night-charge-actuation.json`, atomic write, in-memory mirror).
-
-**The nightly flow:**
-
-1. **Announce + arm (~21:30, inside the evening job).** When the recorded plan is a charge with a complete basis, a resolved window, and a positive buy, the actuation candidate is computed **from the announced plan** — a fresher recompute never silently substitutes a different buy, because the owner's cancel window runs against the announced numbers. The evening notification names the write, the clamped target, and the cancel deadline; the audible broadcast channel announces the same (no phone-push dependency). The armed state **persists only after at least one announcement channel confirms delivery** (`NOTIFY_CHANNEL` other than `none`, or a successful audible announce) — a write the owner never heard about cannot fire; an undelivered night stays advisory and logs at error level. Arming is refused while a prior night is unresolved (applied-unreverted, or an unconfirmed attempt not provably un-applied — a raised reserve is never orphaned or buried).
-2. **Apply (at the window open, tolerance +30 min).** v1.187.0: `APPLY_LEAD_MS` is 0 (it was 5 min). The reserve raise is a grid charge the moment it exceeds the pool, and the panel takes the write within seconds: on 2026-09-28 the write landed at 22:55:28 and the Cores took ~5.2 kW each from 22:55:42 — 1.12 kWh at the off-peak rate before the 23:00 overnight rate (09-22: ~0.85 kWh). The write moment is also the announced cancel deadline, so the owner's cancel window now runs to the window open. Force-charge keeps its order (reserve applied → readback-verified → ceiling synced → ON, never before the window opens); its ceiling sync already waited for the open, so it follows the verified reserve one tick (~1 min) later than before. The attempt is a **write-ahead intent**: the state file records the attempt and its pre-write baseline BEFORE the device call. One write raises `backupReserveSoc` to `min(round(targetSocPct), RESERVE_WRITE_MAX_PCT)` (`clampReserveTarget`; `RESERVE_WRITE_MAX_PCT` = 50, the SHP2's own reserve ceiling — proven on the device 2026-09-16, v1.164.0) — validated (not silently clamped) into the `[RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT]` = `[10, 50]` write envelope by `setBackupReserveSoc` (`ecoflow/commands.ts`), which imports the bound from `nightChargeActuator.ts` so there is exactly one definition, the same documented `PD303_APP_SET` shape the cloud-presence refresh has round-tripped since v0.9.10, audit-logged under `night-charge-reserve` with a 5-min retry cooldown. Every apply guard fails closed: advisory mode, a cancelled night, a red alert condition, an incoherent SoC read (I11), an unknown/out-of-range current reserve, a missed window, or a target at/below the current reserve ⇒ no write. The row is stamped `actuated=1` at write time. **Lost-confirmation adoption:** when an attempted write reports failure but the live reserve later reads back exactly the attempted target (≠ the attempt baseline), the write is proven applied — the actuator adopts it (applied state stamped from the attempt baseline) and the normal auto-revert takes over. **Device-ceiling adoption (v1.161.0):** when the reserve reads back *between* the attempt baseline and the target and still does after `APPLY_VERIFY_AFTER_MS`, the panel took the write but settled short — of its own accord, or because the owner moved the slider. That is a real partial actuation, so `deviceCeilingPct` adopts the achieved value AS `targetPct` (the original ask is preserved in `requestedPct`) and stamps the apply verified. Without it a short readback is indistinguishable from the 2026-08-16 phantom: both retries burn and the night ends on `applyFailed`, which pages "tonight's buy is forfeited" and corrects the ledger to `actuated:0` — while the reserve is genuinely raised and the buy is genuinely happening. A reserve that did **not** move still takes the phantom path, unchanged.
-3. **Revert (at the window close, or immediately on a post-apply cancel or a grid loss).** v1.187.0: `REVERT_LAG_MS` is 0 (it was 5 min): a pack still under its target at the close kept grid-charging at the off-peak rate until the restore. The revert readback verification and the settling grace (`REVERT_VERIFY_AFTER_MS`, `REVERT_READBACK_GRACE_MS`) are measured from the revert itself and do not move. **Force-charge's OFF goes first on that tick** (`actuationStepOrder`, nightForceCharge.ts): whenever a force-charge OFF is due on the night's own record — window closed, no window, cancelled, or reserve already reverted (`forceChargeOffDueNow`) — the tick runs the force-charge step before the reserve step; otherwise the reserve step runs first, so the START still rides the reserve it just verified. Each step runs in its own try (`runActuationSteps`), in either order. Without this the OFF waited behind the revert PUT (writes carry no timeout of their own; undici's 300 s default applies) and the morning summary while the Cores kept grid-charging at 16–19 kW. Both are OFF-direction writes, so neither order can raise a charge. The restore stamps `actuation_reverted_at_ms` on the ledger row (the delivered-energy span's end, §7). The prior reserve value is restored. The revert path is mode-independent — it runs even if the owner flips the option back to advisory mid-night — and refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive CLOUD-REJECTED writes it annunciates a critical (audible + HA notification) once and keeps retrying; the floor/runway/SoC alarm spine is fully independent throughout. A successful revert sends a morning summary notification — not awaited (v1.187.0): an info push (5 s headers + 10 s body per target) never holds the tick.
-
-   **v1.131.0 — revert readback.** The revert stamped `revertedAtMs` the moment the cloud
-   ACK'd, which is exactly the evidence v1.79.0 ruled insufficient on the apply side, and
-   the revert branch is gated on `revertedAtMs == null` — so the stamp also stopped the
-   actuator looking at the panel at all. A restore the SHP2 accepted-then-ignored therefore
-   left the reserve pinned at the raised target with the ledger recording a clean, completed
-   night. That is the expensive end state: the panel holds the raised value as its floor, so
-   it buys grid at on-peak instead of discharging the pack the plan had just paid overnight
-   rates to fill, and the floor alarm reads a false AT-RESERVE-FLOOR posture. A reverted
-   night now verifies against the DEVICE: reading the restored floor stamps
-   `revertVerifiedAtMs`; still reading the RAISED target after `REVERT_VERIFY_AFTER_MS`
-   (= `REVERT_READBACK_GRACE_MS` = 5 min, so a verdict can never be reached inside the
-   settling window `isRevertSettling` exists to cover) re-issues the restore up to
-   `REVERT_MAX_RETRIES = 2`, then escalates once — critical announce plus a critical HA push
-   naming the manual fix. Strict equality on both sides: a reading that is *neither* the
-   restore target nor the raised target means the owner moved the floor themselves, and the
-   actuator falls through rather than overwriting their change (the same "never guess"
-   discipline as adoption). Guards are mutation-proven load-bearing
-   (`scripts/mutate-detector-honesty.mjs`, mutants ix–xii).
-4. **Score.** The scorer's actuated branch (§7) measures the delivered buy as the energy into the home Cores on the house panel's source channels (`deliveredIntoCores`, v1.187.3; window grid import minus the concurrent house load before it) and records `delivered_kwh` with `delivered_basis`, read by the buy de-bias learner (§15.x). v1.187.0: over the span the write was held (`deliveredHoldSpan`), which ends at the restore the actuator stamps on the row (`actuation_reverted_at_ms`, a ledger column since v1.187.0, NULL before it) plus the device settle — §7 "Realized cost" / "Delivered energy". *(Corrected v1.132.0: this previously also described deriving the realized-need counterfactual via `actuatedRealizedNeedBuyKwh`. That helper still exists in `nightChargeAdvisor.ts` but is **no longer on the scoring path** — it is exercised only by tests. Do not reason about live scoring from it.)*
-
-**Deadline phrasing (v1.51.2).** The announced cancel deadline is **day-qualified beyond 24 h** ("on Sunday at 11:55 PM") in both the notification and the spoken broadcast: weekend tariff semantics routinely resolve a Saturday-evening plan's window to Monday 00:00, putting the write moment ~28 h out, where a bare clock time would read as tonight. The spoken text also carries the `cushionShortfall` disclosure whenever the plan discloses one — the audible channel is never quieter about residual risk than the text channel.
-
-**Disabling the outage cushion (`ARB_OUTAGE_CUSHION_HOURS: 0`) — v1.133.0.**
-
-`outageCushionKwh` returns a `CushionBasis` of `islanded-outage`, `legacy-pct` or
-**`disabled`**, and the three are genuinely different states that one number cannot
-distinguish:
-
-| basis | meaning | trough test |
-|---|---|---|
-| `islanded-outage` | sized from a measured islanded load over a bounded outage — the intended path | pack **at window close** (outage onset) |
-| `legacy-pct` | no usable islanded-load measurement; the flat percentage-of-pool band stands in | whole-house **forward trough** (harsher) |
-| `disabled` | the owner set the cushion to zero — the plan stops sizing for an outage entirely | pack **at window close** |
-
-**Before v1.133.0 an exact `0` was not a decision, it was a fallback.** The guard folded
-`outageHours <= 0` into the same branch as "no measurement available", so setting the option
-to 0 silently delivered the legacy band (15% of pool ≈ 13.8 kWh on this plant) — the option
-was accepted, `validate-addon-config` passed, and the setting did not take effect. It was
-worse than inert: the legacy basis also switches the cushion test to the whole-house forward
-trough, so **asking for no cushion made the requirement larger**. An exact `0` is now honoured,
-and is checked FIRST — a disabled cushion does not depend on an islanded-load reading, so a
-missing measurement cannot resurrect the legacy band underneath it. Anything else nonsensical
-(negative, `NaN`, `Infinity`) still falls back: fail toward more cushion, never less.
-
-**A disabled cushion announces itself in the rationale** — "the N% reserve floor alone — the
-outage cushion is DISABLED, so nothing is held back for an outage". Without that, a night with
-no outage margin reads as one whose floor+cushion was comfortably covered, which is a standard
-that was lowered being reported as one that was met. Note also that `cushionShortfall` changes
-meaning under `disabled`: with the cushion at zero it fires only when the pack cannot hold the
-**reserve floor itself**, which is a stronger and rarer signal than the pre-v1.133.0 flag.
-Guards are mutation-proven load-bearing (`scripts/mutate-zero-cushion.mjs`, 6/6).
-
-**Objective mode: resilience vs cost (`ARB_OBJECTIVE`, `ARB_COST_MAX_SOC_PCT`) — v1.127.0, documented v1.132.1.**
-
-The planner sizes a buy against one of two objectives, selected by `ARB_OBJECTIVE`
-(`resilience` | `cost`, default `resilience`):
-
-- **`resilience`** — buy exactly enough that the post-window trough holds the reserve floor
-  plus the outage cushion. The buy is a *requirement*; anything beyond it is waste.
-- **`cost`** — the resilience answer is a **floor**, not a target. `costModeTargetKwh`
-  (`nightChargeAdvisor.ts`) raises the target toward `min(ARB_COST_MAX_SOC_PCT % of pool,
-  pool − morning-PV surplus)` and records which of the two bound it in the ledger's
-  `cost_ceiling_basis` column (`'max-soc'` | `'pv-headroom'`). The morning surplus is the
-  P50 (the P90 stands in when the P50 is unknown; a long-gap night uses the pre-peak P10),
-  computed on a **de-biased load** where the ledger shows the load forecast running high
-  (§15.x "Cost-ceiling load de-bias"; never on a `cushionShortfall` night);
-  `costCeilingSurplusKwh` is the figure used and `costCeilingSurplusRawKwh` the one on the
-  forecast load as is (ledger `cost_surplus_kwh` / `cost_surplus_raw_kwh`). It is bounded below by the
-  resilience target, so **the safety margin can never shrink when the objective changes**;
-  the only direction cost mode moves a buy is up. Every physical cap downstream — charge
-  power, pool headroom, EV contention — is re-applied unchanged.
-
-Three properties an operator needs before setting these:
-
-1. **`ARB_COST_MAX_SOC_PCT` is deliverable to 90 from v1.161.0** (it was capped at 50 before, which made every value the option's `int(50,100)` schema allowed above 50 inert). The actuator's only write is the
-   panel's backup-reserve setpoint, and both `clampReserveTarget` (`nightChargeActuator.ts`,
-   `Math.min(50, Math.max(10, …))`) and `setBackupReserveSoc`'s own range check
-   (`ecoflow/commands.ts`) cap it at 50. The option's schema is `int(50,100)` — its minimum
-   equals the write's maximum — so **every legal value produces the same instruction**, and
-   anything above 50 is advisory-only. Charge power binds first regardless: a six-hour
-   weeknight tops out near 60% SoC even with the clamp removed. Raising the achievable
-   ceiling would need a force-charge write path, which this engine does not have
-   (`setChannelForceCharge` exists but is only ever called with `on: false`).
-2. **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" here means *fill
-   further*, on the premise that overnight energy is the cheapest the day will offer — not
-   that the planner optimises against the rate table. The tariff model informs the *window*,
-   not the *target*.
-3. **The cost question is only asked on nights that need a buy.** The no-shortfall hold
-   returns before the objective is read, so on a night whose projected trough already clears
-   floor + cushion, `ARB_OBJECTIVE` has no effect. Measured 2026-09-06 over the trailing
-   seven ledger rows: **one** row held, and it held because a one-hour Friday window could
-   not serve the requirement — not because the night was comfortable. On this plant the
-   comfortable-hold case is rare, so moving the objective check earlier would address a
-   population that is close to empty (see `docs/PERFORMANCE.md` §3).
-
-**Manual cancel:** `POST /api/night-charge/cancel` (write-auth; surfaced as a button on the `NightChargeCard`). Before the apply moment it disarms; after a successful apply it triggers an immediate revert on the next actuator tick.
-
-**`auto` semantics:** `effectiveActuationMode(mode, writeReady)` is the binding enforcement point — `auto` is structurally demoted to `supervised` while the readiness gate has not graduated, and any future auto-only relaxation (e.g. dropping the evening cancel checkpoint) must branch on the demoted mode, never the raw config value. `advisory` remains the default; enabling a write mode is an explicit owner action in the add-on configuration.
-
----
-
-### 9. Delivery surfaces
-
-**State payloads.** `nightChargeStateFields(plan, now)` + `nightChargeGateFields(readiness)` are spread into **both** the MQTT state payload (`mqttDiscovery.ts:894`) and `/api/ha-state` (`index.ts:1444`) — deliberate MQTT/REST parity. A plan is *fresh* only when `basisComplete && age < PLAN_STALENESS_MS` (12 h = 43 200 000 ms, design I12): numeric fields are null and `charge_tonight` strictly `false` otherwise, so a dead or wedged advisor (the host power-cycles daily) can never leave a stale ON. The window strings are informational (published whenever the plan carries a window) and **day-qualified beyond 24 h** via `fmtPhoenixDayHm` — `"23:00"` within a day, `"Mon 00:00"` beyond — so a Saturday plan resolving Monday's window is never presented as tonight's (v1.39.0).
-
-**HA MQTT-discovery entities** (all carry `expire_after = 90 000 s` (~25 h) so the once-nightly cadence doesn't trip expiry but a dead add-on flips them to `unavailable` — a retained `charge_tonight=ON` from a dead advisor would be worse):
-
-| Entity | Type | Content |
-|---|---|---|
-| `ecoflow_night_charge_recommended` | binary_sensor | `charge_tonight` — the single flag an owner automation gates on |
-| `ecoflow_night_charge_target_soc` | sensor (%) | The reserve SETPOINT for the advisory automation to write — `plan.setpointSocPct` clamped to the actuator's `[10, 50]` envelope (`clampReserveTarget`); not a predicted SoC (v1.62.0 ask/forecast split) |
-| `ecoflow_night_charge_expected_soc` | sensor (%) | The predicted, contention-derated pool SoC at window close (`plan.targetSocPct`) |
-| `ecoflow_night_charge_buy_kwh` | sensor (kWh) | Recommended meter-side buy (`plan.buyKwh`) |
-| `ecoflow_night_charge_window_start` / `_end` | sensor (string) | Day-qualified Phoenix `HH:MM` window bounds |
-| `ecoflow_night_charge_readiness` | sensor (diagnostic) | `LEARNING` / `READY_TO_CONSIDER_WRITES` / `BLOCKED` |
-| `ecoflow_night_charge_write_ready` | binary_sensor (diagnostic) | Fail-closed gate boolean |
-
-Buy, expected SoC and the window come from the latest plan, recomputed every 30 min: before the window they can differ from the announced and armed figures (`GET /api/night-charge/status` → `actuation`), and inside it the buy is what is still needed and reaches 0 once the target is met. The armed buy is not an actuation input — force-charge stops on the frozen SoC target.
-
-The remaining gate diagnostics (`night_charge_under_buy_rate`, `night_charge_band_coverage_pct`, `night_charge_plan_nights_scored`, `night_charge_effective_n`, `night_charge_forecast_basis_pct`, `night_charge_exclusion_fraction`) ride the same payloads without dedicated discovery entities.
-
-**`GET /api/night-charge/status`**: `{ enabled, mode, window, reserveFloorPercent, confidence, notify:{hour,minute,lastNotifyDay}, plan, readiness, actuation, recentOutcomes }`. `mode` is the resolved `NIGHT_CHARGE_MODE`; `actuation` is tonight's supervised-write record (armed/applied/cancelled/reverted + `cancelDeadlineMs`, §8b). `reserveFloorPercent` is read live from `projection.backupReserveSoc` — the same field the floor alarm defends. `recentOutcomes` is an in-memory mirror of the last 7 ledger days refreshed by the timers, so the request handler never touches the DB inline (CWE-770). No auth: read-only, exposes no secrets, actuates nothing.
-
-**Notification** (`buildNightChargeMessage`, `notify.ts:245`): three shapes — `charge` (buy kWh, target SoC, low-SoC without vs with the buy, floor+cushion line, confidence, honest shortfall/over-buy notes, and the advisory automation contract), `hold` (no charge needed), and `insufficient_basis` (sent so the *absence* of a plan is explicit — the owner never wonders if the job died; a null plan can only ever render this shape regardless of the requested one). All severity `info` with a single `dedupId: 'night_charge_plan'` so the nightly message lands in **one updating card**, and dispatched via a *direct* `sendNotification` that bypasses quiet-hours and min-severity (design I10) — a plan queued past the charge-window open is worse than none. `NIGHT_CHARGE_NOTIFY_ON_HOLD=false` suppresses hold-night sends (still latching the day).
-
-**Web**: `NightChargeCard` on the Strategy panel — zero-prop, self-fetching `/api/night-charge/status` on a 60 s poll, with its own matching 12 h client-side staleness guard; a null/incomplete/stale plan renders the grey "unavailable" shape, never a fabricated number.
-
----
-
-### 10. Configuration
-
-Add-on options (`config.yaml` → env):
-
-| Option | Default | Range | Meaning |
-|---|---|---|---|
-| `NIGHT_CHARGE_ADVISOR_ENABLED` | `true` | bool | Master switch for the timers + surfaces (env compare is `!== 'false'`) |
-| `NIGHT_CHARGE_MODE` | `advisory` | list(advisory\|supervised\|auto) | Write posture (v1.50.0). `advisory` never writes; `supervised` runs the announced, cancellable, bounded, auto-reverting reserve write per charge night (§8b); `auto` is honored only after gate graduation and operates as supervised until then. Unknown values fail closed to `advisory`. |
-| `ARB_OUTAGE_CUSHION_PCT` | `15` | int 0–40 | Cushion % above the reserve floor the trough must hold; never changes the independent floor alarm |
-| `ARB_MIN_BUY_KWH` | `1` | float 0–50 | Below this recommended buy, the night is a "hold" |
-| `ARB_CHARGE_CAP_KW` | `0` | float 0–50 | Grid-side charge-power ceiling for the feasibility cap. `0` = AUTO (v1.173.0): connected Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE (~5.9 kW per Core); > 0 is a fixed override. Home load comes off separately via `ARB_GRID_INPUT_CAP_KW`. Sizing only, no device is ever set |
-| `ARB_LOAD_P90_FACTOR` | `1.15` | float 1–2 | Pessimistic-high load multiplier on the day-ahead forecast |
-| `NIGHT_CHARGE_NOTIFY_HOUR` / `_MINUTE` | `21` / `30` | runtime-clamped int 0–**22** / 0–59 | Evening-job fire time; hour is clamped to ≤ 22 because the catch-up window is `[fire, 23:00)` — hour 23 made it the empty set (v1.39.0) |
-| `NIGHT_CHARGE_NOTIFY_ON_HOLD` | `true` | bool | Send the nightly advisory even on hold nights (consistent "the job ran" confirmation) |
-| `TARIFF_APS_*_CENTS` ×6 | `""` | str | Per-period effective ¢/kWh from a bill (§3 table); empty = unconfirmed |
-| `TARIFF_APS_RATES_CONFIRMED` | `false` | bool | While false, **every** `$` output is null regardless of entered rates |
-
-Env-only knobs (not in the options form): `NIGHT_CHARGE_LATCH_PATH` (latch file location; defaults beside the DB), `EV_MAX_LOAD_W` (default `11520` — the per-hour EV block cap, shared with the EV detection engine), `ARB_LOAD_P90_CAP` (default `2.0`, `index.ts:3218` — the upper bound of the load-band widening; **if this is ever added to the options schema it MUST ship an `options:` default**, because `Number('')` is `0` and an unset option would pin the load band to zero), and the shared efficiency seams `DISPATCH_ROUND_TRIP_EFFICIENCY` (default `0.86`, clamped [0.8, 1]; the advisor's charge leg is its square root ≈ 0.927) and `RUNWAY_DISCHARGE_EFFICIENCY` (default `0.94`, clamped [0.8, 1]) — both injected from `analytics.ts`, never re-declared.
-
----
-
-### 11. Failure modes & known limitations
-
-- **Basis-completeness gate.** No plan is sized unless the probabilistic band exists, the confidence tier is not climatology, `calScoredDays ≥ 14`, *and* realized band coverage ≥ 0.9. On a young install (or after a forecast-model reset) the advisor publishes the explicit `insufficient_basis` shape nightly — this is by design, not a fault.
-- **SHP2 offline / missing battery fields** ⇒ `recomputeNightChargePlan` returns null and the holder keeps the prior plan until the 12 h staleness guard nulls the surfaces and the ~25 h `expire_after` flips the HA entities to `unavailable`. The scorer likewise cannot source actuals while the SHP2 projection is absent; affected nights land as MNAR exclusions, which the gate's expected-nights denominator counts against readiness.
-- **Weekend tariff boundary (open question).** The model's per-instant weekday gating makes Friday's window Fri 23:00–24:00 only (Sat 00:00–05:00 is weekend off-peak) with the next window opening Mon 00:00 — a ~48 h carry sized against a 1-hour charge window (charge-power capped, `cushionShortfall` honestly flagged) on a mostly `mixed`-tier basis that never enters gate eligibility. Whether real APS billing extends Friday's overnight into Saturday morning can only be settled from a bill; if it does, the correction belongs in `tariff.ts` weekday gating. Rates are null until confirmed, so no `$` output depends on the answer.
-- **Hardware charge envelope.** Measured 2026-09-16/18: grid import pins at ~19.1 kW and the pack takes (19.1 − house) × ~0.93, up to ~17 kW across three Cores. Since v1.173.0 `ARB_CHARGE_CAP_KW` = 0 derives the cap from the connected Cores; the old 7.2 kW (`chChargeWatt`) under-stated every plan.
-- **Write posture is mode-gated and fail-closed.** In `advisory` (the default) the add-on performs no night-charge writes; `supervised` performs exactly one announced, cancellable, bounded, auto-reverting reserve write per charge night (§8b), and `auto` is demoted to supervised until the gate graduates (§8). On non-actuated nights the realized-need counterfactual is defensible only on clean (near-zero-import) nights, so grid-propped nights are excluded from scoring rather than fabricated; actuated nights score from the measured delivered charge instead.
-- **A ledger row with no stored window** is unscoreable, and **v1.132.0 distinguishes the two reasons**: a *pre-v1.39.0* row predates the window columns (a data-vintage problem), while a current-`algo_version` row with no window simply had **no cheap window to resolve that night** — normal on a tariff day that offers none, e.g. Saturday on this plan. Both capture as `scored=0`, now with different `score_notes`; calling the second a "pre-v1.39.0 row" sent readers hunting a migration bug that was not there. Nights whose raw telemetry has aged past the configured samples retention (default 30 days) capture honestly unscored rather than staying open forever.
-- **The calibration learner is not yet live.** `night_charge_calibration` (seasonal cushion, buy de-bias, EV-tail inflation) exists as schema + API only; the cushion remains the static `ARB_OUTAGE_CUSHION_PCT` until the learner ships as its own increment.
-
----
-
-### 15.x Announced-buy de-bias (`calibratedBuyDebiasFactor`, v1.112.0)
-
-The 08-26/27 night announced "buy ~21.6 kWh" and delivered ~35.8 — a 1.66×
-under-prediction. Actuation is bounded by the reserve setpoint so nothing
-unsafe happened, but the announcement is the advisory's product. The factor is
-the MEDIAN of `delivered_kwh / buy_kwh` over eligible ledger nights (actuated,
-scored, no disclosed cushion shortfall, plan ≥ 3 kWh), FLOOR 1.0 (only ever
-raises the announcement — the raw physics estimate is the lower bound), CAP
-1.75, minSamples 7. It multiplies the ANNOUNCED figure only: `plan.buyKwh`
-stays raw and is what the ledger records (★ the self-reference guard — feeding
-the debiased figure back would collapse each night's ratio to ~1 and the
-learner would eat its own output), and `chargeTonight` thresholds on the raw
-figure so learned data can never flip the decision, only the disclosure. New
-plan fields `buyKwhDebiased` / `buyDebiasFactor`; the rationale and the ARM
-announcement disclose the calibration when active. This is the first live
-producer/consumer for the design §3.4 "buy de-bias" lane.
-
-**One delivered basis (v1.187.3).** A night is a sample only when its
-`delivered_basis` is `DELIVERED_BASIS` (`source-charge`, §6 "DELIVERED ENERGY").
-Rows captured before v1.187.3 hold the import-minus-house-load estimate, which
-under-counts any night the SHP2 carried the house from the pack inside the hold
-(2026-09-30: a 0.26 delivered/planned ratio for a true ~1.1); they are kept as
-recorded, never samples, and counted in the result's `setAside`. Until seven
-nights on the current basis exist the factor is 1.0 with basis `default`, and the
-`announced-buy calibration UNMEASURED (N eligible night(s), M set aside …)` line
-says so on change. `plan.buyDebiasBasis` / `plan.buyDebiasSamples` report the
-learner's own basis and sample count; before v1.187.3 `buildNightChargeInputs`
-copied only the factor, so every plan reported `default` / 0 whatever the learner
-said (the 09-30 log counted 6 eligible nights while the plan said 0).
-
-### 15.x Cost-ceiling load de-bias (`costSurplusLoadFactor`, v1.187.1)
-
-The cost ceiling leaves room for the morning surplus, Σ max(0, P50 PV − load) over window
-close → +14 h. The load forecast is the panel's hour-of-day history curve, and on every ledger
-night `/api/night-charge/status` shows on 2026-09-30 (09-23..29) it ran above the measured load
-(`load_err_frac` −0.29 to −0.43, the actual under the load P10 on all seven). Every kW of
-over-forecast load is a kW of sun the ceiling leaves no room for: the 09-29 ceiling of 77.7%
-bought ~18.9 kWh, the pool was full by 13:00 on 09-30 and ~9-12 kWh of PV was curtailed until
-~16:00.
-
-The surplus the cost ceiling uses is computed on a de-biased load by `buildCostSurplusLoad`
-(`nightChargeAdvisor.ts`; `index.ts` supplies the ledger read, the hourly panel-load query and
-the tariff timezone's clock hour as callbacks):
-
-- **Builder** (`buildCostSurplusLoad`): the hours are those of the raw morning surplus (window
-  close → +14 h, an hour with no day-ahead load skipped). It returns null — the planner keeps
-  the raw surplus — in resilience mode, with no morning hour, under 5 ledger nights, or with a
-  factor of 1. A ledger read that throws counts as no nights. The panel-load query runs only
-  when a de-bias can apply; a query that fails or returns nothing leaves every hour on its
-  forecast. A change of factor, sample count or floor coverage is logged once
-  (`night-charge: cost-ceiling surplus counts the house load at ×…`).
-- **Factor** (`costSurplusLoadFactor`): the median of `1 + load_err_frac` over the ledger rows
-  of the last `COST_SURPLUS_LOAD_LOOKBACK_DAYS` (14) days (rows with no finite error, or an
-  actual of 0 or less, are not samples). Capped at **1** — the load is only ever lowered, so
-  the ceiling can only fall. Under `COST_SURPLUS_LOAD_MIN_SAMPLES` (5) nights it is 1; from
-  there the correction ramps in linearly (`n / COST_SURPLUS_LOAD_FULL_SAMPLES`, whole at 10).
-  Bounded below at `COST_SURPLUS_LOAD_FACTOR_MIN` (0.6): `actual_load_kwh` skips telemetry
-  gaps, so a broken night under-counts the actual.
-- **Physical floor** (`measuredHourlyLoadFloorW`): per local clock hour, the least hourly-mean
-  panel load over the trailing `COST_SURPLUS_FLOOR_DAYS` (7) days, read in hourly buckets; an
-  hour seen on fewer than `COST_SURPLUS_FLOOR_MIN_DAYS` (4) days has no floor.
-- **Per hour** (`costSurplusLoadW`): the expected-value EV block (`predictedEvLoadW`) is kept
-  whole; the rest is `max(rest × factor, min(floor, rest))` — never below the floor, never above
-  the forecast. An hour with no floor keeps its forecast.
-- **Use** (`debiasedCostSurplusKwh`): the de-biased P50 (or P90 stand-in) replaces the raw one
-  only where it is **larger**, and never so large that the ceiling falls below the pack the
-  resilience lift arrives at (`targetPackKwh`; the force-charge stops at the ceiling) — unless
-  the raw ceiling already sat below it. Raw unknown ⇒ raw. **A `cushionShortfall` night keeps
-  the raw surplus**: there the arrival is derated (charge rate, a predicted EV sharing the grid
-  input, a clamp) below the requirement, and a stop bounded by it could fall under the cushion
-  line the raw stop cleared — a 10 kW islanded load (line 73.71%), a 12 kW grid input and a
-  40 kWh session predicted at window open give an arrival of 21.5%, a raw stop of 77.7% and a
-  de-biased one of 72.8%, and a car that never plugs in lets the force-charge run at full rate
-  to that stop. On any other night the arrival holds the line: on the islanded cushion it is
-  the trough itself, and on the legacy band its whole-house trough clears the line.
-
-Scope: cost mode only, and only the `p50` / `p90` bases — a long-gap night keeps its
-pessimistic P10 pre-peak surplus. The P90 over-buy flag, the resilience sizing, the setpoint
-requirement, the islanded cushion, the solar model, the runway and every alarm read the
-forecast load as before. The PV side of the surplus is unchanged: the solar fit and
-`pvBiasFactor` still include hours when the pool was full (curtailed output), and those feed
-the alarm-facing forecast. Plan fields `costCeilingSurplusRawKwh`, `costSurplusLoadFactor`,
-`costSurplusLoadSamples` (cost mode); when the de-bias widened the headroom the rationale
-gives both figures. Ledger columns (`costSurplusLedgerColumns`, written with each plan row):
-`cost_surplus_kwh` (the headroom used), `cost_surplus_raw_kwh` (on the forecast load as is),
-`cost_surplus_load_factor`, `cost_surplus_load_samples`; NULL in resilience mode and on rows
-before v1.187.1, used = raw where the de-bias did not widen the headroom.
-
-Reconstructed on the 2026-09-29 night (the hourly shape of the 09-30 band, P50 PV scaled to
-the recorded 20.55 kWh surplus) with the six rows scored before it that the status still shows
-(09-23..28, ×0.793): ceiling 77.7% → 72.8%. The deployed planner reads up to 14 days of the
-ledger, the correction whole at ten nights, including rows the status no longer shows, so the
-factor it applies differs and the log line above states it; the same morning at ×0.70 gives
-70.7%. Harness: `scripts/mutate-v1187-1f.mjs` (53).
-
-## Appendix A — Feature Inventory (evidence linkage)
-
-Purpose: a pruning-oriented ledger of every substantive feature/engine, what math it runs, which field signals feed it, and — decisive for keeping it — **what actually consumes its output**. Consumer columns were verified by grepping the pinned source revision (`git grep … HEAD -- server/src web/src`), not by reading intent from comments. Evidence status is one of:
-
-- **measured-and-active** — output is consumed by at least one live surface (alarm, HA sensor, UI card, TUI screen, or another engine) and the math has operated on real field data.
-- **data-gated (…)** — wired and correct, but a stated gate holds the output at `null`/inactive until the field record satisfies it; the parenthetical names what unlocks it.
-- **advisory-dormant** — deliberately advisory or deliberately not wired (documented posture, not an accident).
-- **weak-linkage candidate** — no consumer beyond its own ad-hoc endpoint, or math that has never received field validation; one-line justification given. These are the removal-review set collected at the end.
-
-Diagnostic endpoints with a documented validation role (e.g. the forecast backtest) are not flagged merely for lacking an automated consumer; endpoint-only engines with no validation role are.
-
-### A.1 Ingest, storage & threading (§1, §2)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| `SnapshotStore` dual-schema ingest | Two caches (REST `rawBySn`, MQTT `mqttFlatBySn`), single `change` fan-out with `frameSeq` (§1.1, §1.3) | REST `/device/list`+`/quota/all` (60 s poll); MQTT `/open/{user}/{sn}/quota`,`/status` | recorder, analytics worker, `/ws`, alert monitor, MQTT discovery — every downstream | measured-and-active |
-| DPU MQTT→REST translation | `translateDpuMqtt()` cmdId schema → `hs_yj751_*` quota shape; only DPUs drive live projection from MQTT (§2) | DPU cmdId frames (`bpInfo[].*`) | `SnapshotStore` projection refresh | measured-and-active |
-| Product projections | `projectByProduct()` → typed dpu/shp2/generic `Projection` (§2) | Raw quota maps | Every engine, UI, sensors | measured-and-active |
-| Backup-pool grace-hold + slew guard | `backupPoolWithGraceHold` holds last-good pool through transient nulls; slew-limits implausible jumps (§2) | SHP2 `backupIncreInfo.*` (aggregate `backup{Remain,FullCap}Wh`, `backupBatPercent`) | Runway, SoC alarm, HA `backup_pool` sensors | measured-and-active |
-| SQLite recorder | `record(extract(snap))` with dedupe/heartbeat, retention, WAL; read-only worker twin `readRecorder.ts` byte-parity-tested (§1.4) | All projected metrics | Every history-driven engine | measured-and-active |
-| Lifetime accumulators | `rollupLifetime()` monotonic Wh counters; micro-dip clamp `clampLifetimeDip` (§1.4.6, §7.2). The steady-state RTE clamp this row used to name was removed in v0.45.0 — `charge == discharge` is NOT an invariant (see §1.4.6) | `pv_total`, `panel_load`, `ac_in`, `grid_home_w`, pack in/out | `/api/lifetime-energy`, HA Energy Dashboard `*_lifetime_kwh` | measured-and-active |
-| Telemetry-gap detection | Recorder gap scan → outage/gap events (§1.4.7) | Sample timestamps | `/api/telemetry-gaps`, `outageAlerts()`, HA `system_outage_*` / `system_telemetry_gap_count_24h` / `system_device_gap_count_24h` | measured-and-active |
-| Trapezoidal integration | `integrateWh` gap-aware trapezoid; shared day-boundary endpoint (§1.5, §7.0.1) | Any W-metric series | selfConsumption, RTE, tariff, carbon, totals, circuit history | measured-and-active |
-| Analytics worker + report registry | Worker thread, `BUILDERS` registry, coalesce + TTL cache, `WARM_REPORTS` self-warm (§1.6, §1.8) | — (infrastructure) | All `/api/<report>` routes, MQTT state, TUI | measured-and-active |
-| `lastUpdated` freshness contract | SHP2 MQTT chatter must not touch the freshness clock; REST owns non-DPU freshness (§1.7) | Message arrival times | Staleness alerts, grace-holds | measured-and-active |
-
-### A.2 Cloud protocol & HA wiring (§2)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| REST client + HMAC signing | `ecoflow/sign.ts` HMAC-SHA256 request signing (§2) | Cloud credentials (env) | Poll loop | measured-and-active |
-| MQTT client (`param`-not-`params` fix) | Per-device quota/status subscription; corrected payload key (§2) | Broker frames | Ingest | measured-and-active |
-| SHP2 membership + spare roster | Core↔SHP2 from `backupIncreInfo.Energy{1,2,3}Info`, not positional; explicit spare-SN allowlist (§2, §8.8) | SHP2 energy-info slots; `SPARE_DPU_SNS` env | Zombie gate, selfConsumption scope, degradation peer baselines | measured-and-active |
-| Cloud-wedge vs outage classifier | `deviceLink.ts` pure classifier: LAN-reachable + cloud-silent = wedge, both-dark = outage (§2) | LAN ICMP ping, MQTT/REST freshness | Offline alerts, HA `ecoflow_cloud_wedge_count` | measured-and-active |
-| HA service layer | `haService.ts` `callHaService` — total, never throws (§2, §10.10) | HA supervisor API | Broadcast, shed registry, hostPower, haStateCache | measured-and-active |
-| MQTT discovery entity set | ~50 sensors + ~9 binary sensors, availability + expiry, honest-null templating (§2) | `buildState()` composition | Home Assistant | measured-and-active |
-| Energy Dashboard counters | `total_increasing` lifetime kWh set incl. dynamic per-circuit discovery (§2) | Lifetime accumulators | HA Energy | measured-and-active |
-| Alarm-priority switches | Bidirectional `switch` per ISA priority; `parseAlertSwitchCommand` no-op on unknown payload (§2) | HA command topic | `alertSettings`, alarm gating | measured-and-active |
-| `refreshShp2CloudPresence` write | The one real write; audited (`writeLog.ts`), rate-limited, `requireWriteAuth` (§2, §12) | Operator action | Web `RefreshCloudButton`, cooldown endpoint | measured-and-active |
-| `debugSendCommand` | Arbitrary-command escape hatch; off unless write-debug env + token (§2, §12) | Operator action | `/api/device/send-command` | advisory-dormant (disabled by default, by design) |
-
-### A.3 Solar & PV forecast (§3)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| GHI→PV response model | Per-hour through-origin OLS `β = Σ(pv·ghi)/Σ(ghi²)`; `peakCoeff` gated on GHI ≥ 300 W/m² + ≥3 samples (§3.1) | Recorder `pv_total`, Open-Meteo GHI | `getDayForecast`, `SolarResponseCard`, backtest | measured-and-active |
-| Full-coverage fitting gate | `fullCoverageFleetPv` excludes cloud-gap hours from fitting (§3.1) | Per-Core coverage | Response model | measured-and-active |
-| Day-ahead forecast | Per-hour `forecastPvW`/`forecastLoadW`; PV bias correction; structural-incompleteness gate; restored display basis (§3.2) | Response model, weather, load history, EV prediction | Runway, runway/forecast alarms, HA sensors, cards, TUI, calendar, MPC | measured-and-active |
-| PV bias correction | `pvBiasFactor = Σactual/Σpredicted` multiplier (§3.3) | Forecast vs recorded PV | Day-ahead forecast, `/api/confidence` | measured-and-active |
-| EV-window prediction | `computeEvWindowPrediction` expected-value `evLoadByHour`; subtracted from the alarm load (safety invariant §5.1.5) | EVSE circuit history | Forecast load, runway (subtraction), calendar, insights cards | measured-and-active |
-| Forecast skill | Day-level replay MAE/bias/r² over covered days (§3.4) | Forecast archive vs actuals | Probabilistic band calibration, `/api/confidence.forecastDayR2`, repair issues, insights | measured-and-active |
-| Confidence snapshot | Medians of engine r² + forecast bias/MAE (§3.5, §8.10) | degradation, thermal, skill reports | `/api/confidence`, insights cards | measured-and-active |
-| Probabilistic P10/P90 SoC band | Per-hour sigma + coherent SoC ensemble; F30 self-calibrating shrink over `PV_BAND_CAL_WINDOW_DAYS = 30` (§3.6) | Forecast + skill | `/api/forecast/probabilistic`, MPC P10 envelope | measured-and-active; band **calibration** data-gated (needs ≥14 scored days in the 30-day window) |
-| Multi-day horizon | `computeMultiDayForecast` extends PV/SoC 2–3 days on typical-day curves (§3.7) | Forecast + weather | `/api/forecast/multi-day` **and** the night-charge planner (`index.ts` requests it at `days: 4` and maps it into `dayRollups`) | measured-and-active |
-| Open-Meteo ingestion | GHI + temp hourly fetch, cached (§3.8) | Open-Meteo API | Forecast, curtailment, thermal, shade | measured-and-active |
-| NWS NDFD ensemble | Opt-in second cloud source + disagreement metric (§3.8) | NWS NDFD (`NWS_ENABLED`) | `/api/weather/ensemble`, insights cards | data-gated (off unless `NWS_ENABLED`) |
-| NWS storm alerts | CAP alert fetch → alert/calendar/broadcast context (§8.3.4) | NWS CAP feed | `forecastDayAlerts`, calendar, insights cards | data-gated (off unless `NWS_ENABLED`) |
-| Forecast backtest | `backtestPvForecast` RMSE/MAE/bias/R² replay incl. the alarm-facing predictor (F24) (§1.8) | 168 h recorder actuals | `/api/backtest/forecast` (operator-invoked validation harness) | measured-and-active (validation instrument; no automated consumer by design) |
-
-### A.4 Physics & Bayesian tier (§4)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| Clear-sky PV model | Solar geometry → `clearSkyGHI` → POA → cell-temp derate → `physicsPmax`; `physicsScore = realized/theoretical` (§4.1) | Site constants, ambient temp, live PV | `/api/physics/pv-pmax` only (referee role is manual; `PHOENIX_SITE.pNamplate` is separately load-bearing in `BAYES_OBS_SIGMA2`) | **weak-linkage candidate** — no automated cross-check consumes `physicsScore` |
-| LFP OCV→SoC + rest tracker | OCV lookup on rested packs (`REST_CURRENT_THRESHOLD_A = 0.5`, 60 s tick) → `socDriftPct` vs BMS (§4.2) | `bmsMaster` volts/amps per pack | `/api/physics/lfp-soc` only | **weak-linkage candidate** — drift feeds no alarm/engine; tick runs regardless |
-| Hierarchical Bayes pack SoH | Partial pooling `fitHierarchical` + `findOutliers(z ≥ 2.0)` (§4.3) | Per-pack SoH cross-section | `/api/models/hierarchical-pack-soh` only | **weak-linkage candidate** — endpoint-only; near-new fleet has produced no outlier to validate against |
-| Recursive Bayesian solar model | Per-hour Gaussian posterior over GHI→PV slope with `agreementWithOls` (§4.4) | Recorder pv/GHI pairs | **Curtailment expected-PV** (`predictExpectedPv`), `/api/forecast/bayesian` | measured-and-active |
-| Kalman SoH filter | 2-state constant-velocity filter (`R = 0.05`) run side-by-side with OLS fade; mirrors every OLS gate (§6.8) | `sohPts` per pack | `kalman*` fields inside `/api/degradation` | measured-and-active (parallel diagnostic inside a consumed report) |
-
-### A.5 Runway, depletion & SoC alarms (§5) — safety-critical
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| Runway depletion simulation | DC-bus drain `delta = pv − load/η` (`RUNWAY_DISCHARGE_EFFICIENCY`), interpolated reserve/empty crossings, 4 h observed-load `max()` blend, 50 W degenerate-curve guard (§5.1) | SHP2 pool fields, `panel_load` history, day-ahead forecast, `backupReserveSoc` | Audible alarm, HA runway sensors, `RunwayCard`, fleet-card, TUI, shed advisor | measured-and-active |
-| Empty hysteresis | `applyEmptyHysteresis` de-flaps the published hours-to-empty (§5.1.6) | Raw crossing | Published runway | measured-and-active |
-| Runway severity ladder | `classifyRunway(p, grid)` bands + grid-aware null while backstopping; islanded re-escalation (§5.2) | Runway + grid backstop | Alarm state machine, shed advisor, TUI banners | measured-and-active |
-| Runway alarm state machine | `createRunwayAlarm` edge-triggered spoken alarms (§5.2.4) | Severity band | Audible path, notify | measured-and-active |
-| Battery-SoC floor alarm | Ladder 50/40/30/20/15/10/8/4/2 % with arming hysteresis + coherence guard (% vs `remainWh/fullCapWh`) against transient zeros (§5.3) | `backupBatPercent`, pool Wh | Audible path, HA alert counts, banding helpers | measured-and-active |
-| SHP2-blind failover | Fleet-median DPU SoC drives the ladder when the SHP2 aggregate is absent (§5.3.7) | Per-DPU `soc` | SoC alarm | measured-and-active |
-| Grid backstop resolver | `resolveGridBackstop`/`liveGridBackstop` combine `gridSta` (0/1/2), grid watts, staleness fail-safe; `backstopping` stricter than `present` (§5.4) | SHP2 `pd303_mc.masterIncreInfo.gridSta`, `grid_home_w` | Alarms, `off_grid` sensor, lighting posture, TUI, analytics | measured-and-active |
-| Grid-aware SoC dispatch | `socGridCrossDecision` downgrade on-grid + `reEscalateGridDrop` on islanding (§5.4.5) | SoC bands + backstop | SoC alarm tick | measured-and-active |
-| Load-shed advisor | Upper-bound counterfactual `computeRunwayWithShedOffset` (`shedKw/η` on pool basis); recommends only in actionable band with ≥ 0.25 h benefit (§5.5) | Runway, HA entity watts (`haStateCache`), SHP2 circuits | `load_shed_recommended*` sensors, `/api/load-shedding/status`, `runway_to_reserve_if_shed_hours` | data-gated (inactive until `LOAD_SHEDDING_SHED_ENTITIES` allowlist is configured; advisory-only by design) |
-| Load-shed registry | Candidate composition: SHP2 circuit → HA sensor → estimate; phantom-entity flagging (§5.5) | Allowlist + HA states | Shed advisor, StrategyPanel/TUI priority displays | data-gated (same allowlist) |
-
-### A.6 Battery & PV health (§6)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| SoH fade + EOL projection | OLS fade `−slope×YEAR_MS` ±1 SE, Arrhenius `2^((T−25)/10)`, 7-state gate chain, `EOL_SOH = 80` (§6.1) | `actSoh`/`soh`, `pack{n}_temp`, cycles | HA `..._soonest_pack_eol`, `DegradationCard`, battery-card, TUI, pack-risk, confidence, repair issues | measured-and-active; dated EOL data-gated (fade gates on near-new fleet — `unknown` by design) |
-| Peer fade comparison | Robust median+MAD z on projecting, connected packs; spares scored, never baseline (§6.1) | Fade rates | Degradation summaries | data-gated (needs ≥3 projecting packs) |
-| Coulombic efficiency (F17) | 7-day counter-edge ratio with span/full-window/consistency triple gate (§6.2) | `pack{n}_lifetime_{chg,dsg}_mah` edges | `coulombicEffPct` in degradation; pack-risk feature 3 | data-gated (all three F17 gates; null on current counters by design) |
-| Round-trip efficiency | Day-level `discharged/charged` in [0.8, 1.05] with ≥50 % coverage; ≤100 clamp; v0.65.0 extended-lookback backstop (§6.3) | Pack in/out integrals | HA RTE sensor, `DegradationCard`, battery-card, MPC cycling cost | measured-and-active |
-| Internal resistance | Steady-state-filtered `dV/dI` (≥5 A steps, sign-checked F27), median recent vs baseline, gated trend (§6.4) | `bmsMaster` V/A pairs | `/api/internal-resistance`, insights, pack-risk feature | data-gated (trend needs r² ≥ 0.3, 14 d span; currently immature by design) |
-| Charge-curve fingerprint | Median V drift at SoC checkpoints [40, 60, 80, 95] % during active charge; baseline vs recent 14 d windows (§6.5) | V + SoC + input W | `/api/charge-curve`, insights, pack-risk feature 5 | measured-and-active (holds at `baseline` until ~28 d span) |
-| Ambient-thermal forecast | 2-var least squares `pack_temp ~ ambient + load`; 24 h predicted peak (§6.6) | `pack{n}_temp`, weather, in/out | `/api/ambient-thermal-forecast`, insights, `thermalMedianR2` | measured-and-active |
-| Thermal-event counter | Rising-edge events at 35.6/45/55 °C with 1.5 °C hysteresis; gap-capped time-above; `hardLifeScore` (§6.7) | `pack{n}_temp` raw | `/api/thermal-events`, insights, pack-risk feature | measured-and-active |
-| Pack-risk v1 heuristic | Weighted six-feature composite (fade, thermal, IR, CE, curve-drift, cycles) (§6.9) | Health reports above | `/api/pack-risk` + input to v2 only | **weak-linkage candidate** — no alarm/UI/sensor reads either pack-risk endpoint |
-| Pack-risk v2 ML | Logistic regression + novelty + auto-downgrade gate; heuristic-pinned below `PACK_RISK_MIN_TRAINING_SAMPLES = 100` (§6.10, §9) | LR features + shadow model | `/api/pack-risk/v2` only | **weak-linkage candidate** — endpoint-only AND gate-pinned (≥100 labeled outcomes required); no field validation event yet |
-| String mismatch | Per-DPU PV ratio vs fleet at same hour, robust median+MAD (§6.11) | Per-Core `pv_total` | `/api/string-mismatch`, insights cards | measured-and-active |
-| Soiling decomposition | Per-Core soiling estimate; published fleet figure = per-Core **median** (v0.63.0 anti-deflation); F29 multi-week weather backfill (§6.12) | Per-Core PV, GHI | `/api/soiling-decomposition`, `/api/debug/soiling`, insights, solar-card, repair issues | measured-and-active (validated against a real soiling event and a false-alarm fix) |
-| Shade report | Recurring same-hour shortfall vs clear-day reference, `SHADE_DROP_THRESHOLD = 0.18`, ≥`SHADE_MIN_CLEAR_DAYS = 5`, per-Core median (§6.12 note) | Per-Core PV, weather | `/api/shade-report`, insights, solar-card | measured-and-active |
-| Inverter clipping | Flat-top detection vs forecast peak (§6.13, §7.7) | `pv_total`, forecast | HA clipping sensor, solar-card | measured-and-active |
-| Equipment health | MPPT ratio series + inverter standby `cappedMedianEffPct` (§6.14) | MPPT in/out, standby W | `/api/equipment-health`, insights, repair issues (−3 pp MPPT drift gate) | measured-and-active |
-
-### A.7 Energy accounting, cost & dispatch (§7)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| Self-consumption / solar fraction | Grid-displacement form `(load − gridForKpi)/load`; PV↔battery↔grid apportionment; coverage gate `GRID_HOME_MIN_COVERAGE = 0.9` (§7.1) | `pv_total`, `panel_load`, `ac_in`, `grid_home_w`, pack in/out | HA sensors, insights, carbon, tariff | measured-and-active |
-| Two-grid-quantities discipline | `gridImport` (DPU `ac_in`) vs `gridToHome` (SHP2 `grid_home_w`); KPI picks trusted superset (§7.0.2) | Both grid metrics | selfConsumption, tariff, HA Energy wiring | measured-and-active |
-| Carbon accounting | `gridDisplacedKwh × 0.4990 kg/kWh` (`GRID_CO2_INTENSITY_LB_PER_MWH = 1100`); capped part-sum (§7.3) | selfConsumption output | `/api/carbon`, HA carbon sensor | measured-and-active |
-| Legacy tariff report | Hourly `onPeakAt` walk; `TARIFF_FLAT_CENTS_PER_KWH = 17` default; whole-home superset (audit #5) (§7.4) | Grid + load integrals | `/api/tariff`, HA `tariff_*` sensors | measured-and-active |
-| Greedy dispatch plan | Per-hour charge/discharge/import branches, `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY` (0.86 → ≈0.927), reserve guard on drawn amount (§7.5) | SoC, forecast, tariff constants | `/api/dispatch-plan` only — no card, sensor, or engine consumer | **weak-linkage candidate** — advisory-only by design; `computeDispatchPlan` has exactly one caller (the route) |
-| MPC dispatch recommender | Rolling DP over 24 h with P10 risk branch, degrade detection, `reserveDipPenaltyUsdPerKwh = 1.0` (§7.6) | Forecast, probabilistic band, RTE, legacy flat-tariff env (not `tariff.ts`) | `/api/dispatch/recommend` only — no card, sensor, or engine | **weak-linkage candidate** — endpoint-only; tariff basis diverges from the canonical R-EV model |
-| SoC-saturation curtailment | Bayesian expected-PV gap vs live PV above dynamic charge ceiling `homeChargeCeilingPct()`; surplus W + kWh history (§7.8, §14.2) | SoC, `pv_total`, GHI, circuits | `pv_curtailment_*` sensors, `CurtailmentCard`, lighting posture `surplus` trigger, curtailment alerts | measured-and-active |
-
-### A.8 Alerts, incidents & learning loop (§8, §9)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| Alert taxonomy + ISA priority | `Alert` shape; ISA-18.2/IEC 62682 priority derivation (§8.1) | — | Everything alert-adjacent | measured-and-active |
-| Threshold alerts | `computeAlerts()` temp/SoC/offline/reserve bands incl. LFP top-of-charge relaxation (§8.2) | Projections, connectivity, grid | Monitor → notify/audible/sensors/UI | measured-and-active |
-| Outage events | `outageAlerts()` power-loss vs telemetry-gap vs per-device-gap events (§8.2.3) | Gap detection | Monitor, HA outage sensors | measured-and-active |
-| Peer-comparison learned alerts | Robust median+MAD cross-fleet outliers (§8.3.1) | Fleet projections | Monitor | measured-and-active |
-| Self-baseline alerts | Per-device baseline drift (§8.3.2) | Recorder history | Monitor | measured-and-active |
-| Degradation/runtime forecast alerts | Trailing-3h runtime + SoH-decline with `SOH_FORECAST_*` gates (§8.3.3) | Degradation, forecast | Monitor | measured-and-active |
-| Day-ahead solar/load alerts | `forecastDayAlerts(df, grid)` incl. storm context (§8.3.4) | Forecast, NWS | Monitor | measured-and-active |
-| Alert monitor | 20 s eval; rising-edge debounce, dwell, dispatch decision (§8.4) | All alert sources | notify, broadcast, incidents, persistence | measured-and-active |
-| Quiet hours + morning digest | `NOTIFY_QUIET_HOURS` (default `22-06`), `CRITICAL_BREAKS_QUIET_HOURS` (default false), digest at `NOTIFY_DIGEST_HOUR = 7` (§8.4.2) | Wall clock | notify queue | measured-and-active |
-| Incident clustering | `buildIncidents(alerts)` correlation grouping (§8.4.3) | Live alerts | `/api/incidents`, insights cards | measured-and-active |
-| Cooldown auto-silence | Churn detection → temporary silence (§8.4.4) | Fire history | Monitor | measured-and-active |
-| Notification delivery | HA drawer card + `notify.mobile_app_*` push, dedupe, digest (§8.5) | Monitor decisions | Operator push | measured-and-active |
-| Feature snapshots | `featureSnapshot.ts` captures LR feature vector once per rise (§8.6, §9.1) | degradation/thermal/IR/chargeCurve reports | Outcome→LR training join | measured-and-active (scaffolding for the gated loop) |
-| Outcome capture | `POST /api/alerts/outcome` labels + family precision rollups (§8.6, §9.2) | Operator button presses (web dashboard) | LR update, `/api/alerts/outcomes/stats` | measured-and-active |
-| Online LR (SGD) | `updateFromOutcome` shadow-only step + prequential loss (§9.3) | Snapshots + labels | Shadow model → pack-risk v2 gate | data-gated (gate floor 100 samples; no promotion path by design) |
-| Model health + gate | `computeGateDecision` samples/drift/precision policing (§9.4) | Shadow model state | `/api/models/health`; gate applied inside `computePackRiskV2` | data-gated (same floor; report endpoint has no other consumer) |
-| Machine alert telemetry | `alertTelemetry.ts` structured fire/resolve log (§8.6) | Monitor events | `/api/alert-telemetry` only | **weak-linkage candidate** — machine-readable diagnostic no tool ingests |
-| Repair issues | `computeRepairIssues` composes degradation+soiling+equipmentHealth+skill into repair cards (§8.7) | Those four reports | `/api/repair-issues` only — no UI/HA surface renders it | **weak-linkage candidate** — endpoint-only composition of already-surfaced engines |
-| Zombie gate | Spare-DPU offline-alert gate via explicit SN allowlist (§8.8) | `SPARE_DPU_SNS` | Offline alerting | measured-and-active |
-| Root-cause map | `rootCausesFor(alertId)` static cause suggestions (§8.9) | Alert id | `/api/root-cause` only | **weak-linkage candidate** — no UI passes an alert id to it |
-| Annunciation settings | `alertSettings.ts` per-priority enable, MQTT-bidirectional (§8.11) | Operator toggles | Alert Console, HA switches, broadcast gating | measured-and-active |
-
-### A.9 Audible broadcast & TTS (§10)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| Condition derivation + tick | `conditionFromAlerts` → level; 10 s tick with boot-grace, priority and settings gates (§10.2) | Live alerts | Speaker/SIP announcements | measured-and-active |
-| Alarm-storm gates | Identical-message and per-rung repeat suppression; repeat-warning identity gate; one re-present of a refused de-escalation or of a refused same-level transition carrying a new alert; escalations always play (§10.2.3) | Broadcast history | Tick loop | measured-and-active |
-| MA + SIP dispatch | Media-player pre-flight + verification; per-target volume pin; `BROADCAST_SIP_TARGETS` side-channel (§10.3) | HA media players, SIP endpoint | Household audible path | measured-and-active |
-| Announcement renderer | Chime + TTS layout, per-language terminator, content-keyed cache (§10.4) | Level + message | Broadcast, browser/speaker test paths | measured-and-active |
-| Tone library | Five rung klaxons + named built-ins, version-gated regeneration (§10.5) | — | Renderer | measured-and-active |
-| Operator tones + per-rung assignment | `chimeStore.ts` uploads; `chimeConfig.ts` rung→chime map + legacy migration (§10.6–10.7) | Operator uploads | Alert Console, renderer | measured-and-active |
-| TTS build + verbalizer | `buildAlertMessage` → `verbalizeForTts` (idempotent normalizer); optional second-language pass (§10.8) | Alert facts | Renderer | measured-and-active (second language data-gated on config) |
-| Wyoming/Piper client | Raw-PCM synth over Wyoming protocol, `en_US-lessac-medium` (§10.9) | Piper add-on | Renderer | measured-and-active |
-| Runtime config two-layer | Env baseline + live override file; `resolveAnnounceVolume` (§10.11) | Operator PUT | Broadcast | measured-and-active |
-| Audible-delivery health | `broadcastHealth.ts` reachability probes → `audible_channel_status` + self-alert (§10.13) | MA/SIP probe results | HA sensors, alert monitor | measured-and-active |
-
-### A.10 Night-charge engine stack (v1.36–v1.51 — `tariff.ts`, `nightChargeAdvisor.ts`, `nightChargeGate.ts`, `nightChargeActuator.ts`; chapter §15)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| APS R-EV tariff model | `buildApsREvModel`/`rateAt`: 4-period, 2-season, weekday-literal windows; unconfirmed rates resolve to `null` cents (fail-safe) | Env rate config (`apsREvRatesFromEnv()`; no price API exists) | Night-charge advisor + gate | measured-and-active |
-| Night-charge plan | `computeNightChargePlan`: deep-shortfall buy sized by **bisection against a clamp-exact with-buy re-sim trough** (never additive offset); `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927` | Day forecast, probabilistic band, SoC/pool, tariff windows, EV commitments | Evening notify (bypasses quiet hours as a plan advisory), HA `charge_tonight` sensors, `/api/night-charge/status`, `NightChargeCard` | measured-and-active (write posture per `NIGHT_CHARGE_MODE`: advisory default; supervised = one announced, cancellable, bounded, auto-reverting `backupReserveSoc` write per charge night — §8b) |
-| Plan staleness fail-safe | `nightChargeStateFields`: `charge_tonight` strictly `false` unless plan < 12 h old (`PLAN_STALENESS_MS`) | Latest plan timestamp | HA sensors, `/api/ha-state` | measured-and-active |
-| Night ledger + outcome scorer | Never-pruned `night_charge_ledger`/`_calibration`; `scoreNightOutcome` against the ledger's **stored per-plan window** (weekend windows are disjoint from weekday 23:00–05:00); premature-capture repair; grid-import-propped baselines refused a score | Recorder actuals over the plan window | Readiness gate, status endpoint, card | measured-and-active |
-| Write-readiness gate (v2) | `computeNightChargeReadiness`: ≥21 scored **actuated** nights, under-buy ≤ 10 %, sizing bias 0–5 kWh, band coverage 0.78–0.92 (≥14 verdict nights), zero uncleared engine-fault strikes (45-day window, 14-night clean-streak clearing, `cushionShortfall`-disclosed breaches exempt) | Ledger rows | HA `write_ready` flag (strictly false on failure), status endpoint | data-gated (`writeReady` unlocks AUTO only; supervised mode is an explicit owner action — §8b) |
-
-### A.11 Safety & operational plumbing (§13)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| `processGuard` | Top-level crash classification + survival policy (§13.1) | Uncaught errors | Process lifetime (safety-critical) | measured-and-active |
-| `hostPower` | Pi under-voltage interpretation with `HOST_POWER_MAX_AGE_MS = 120 000` staleness (§13.2) | HA entity named by `HOST_POWER_ENTITY` | Self-alert via `alerts.ts` | data-gated (inert until `HOST_POWER_ENTITY` is configured) |
-| `haStateCache` | TTL-gated entity-watts cache + `extractEntityWatts` (§13.3) | HA states API | Shed advisor, hostPower | measured-and-active |
-| `alertOnset` | Restart-persistent alarm onset timestamps, clear-then-rise semantics (§13.4) | Alert edges | Monitor, TUI ALM screen | measured-and-active |
-| Message-rate floor | Per-SN hour-of-day EWMA baselines; collapse < 0.2× baseline sustained 20 min → edge-triggered P3 alert. **v1.95.0**: the dwell is chosen from the device's OWN profile — a FLAT device (cv ≤ `MSG_RATE_FLOOR_FLATNESS_MAX_CV` = 0.15 across ≥ 18 mature hour buckets, e.g. the SHP2 at cv ≈ 0.022) fires on `MSG_RATE_FLOOR_FLAT_COLLAPSE_MIN` = 4 min instead. The 20-min dwell exists only to separate legitimate Core idle (4.4 msg/min) from a collapse (2.1-2.9), a 1.5× problem created by the Cores' 13× diurnal swing; a flat device has no such ambiguity, and making it wait 20 min let the SHP2 run at 0.20 msg/min for ~17 min with nothing firing (5 instances in 4 days). Flatness must be EARNED — thin evidence keeps the conservative dwell. **v1.95.0** also gates on presence: a device that is actually OFFLINE no longer surfaces a collapse (the offline/stale alert owns that; the detector's subject is "barely reporting while still appearing FRESH"). Eligibility from a 7-day-half-life high-water mark (`eligibilityPeak`) so a collapse cannot disarm the detector; a fired collapse clears only on dwelled traffic ≥ max(0.2× baseline, `minBaselineRate`) — losing eligibility is never reported as recovery (§13.5) | Cumulative MQTT message counters | Alert monitor self-alert (defeats the "looks fresh" wedge trap) | measured-and-active |
-| Log/format hygiene | `logCoalesce` storm suppression, `logSanitize` bounds, `mqttStartClassify` boot-grace levels, `haPayloadFmt` shared formatting (§13.6) | Log/publish paths | All logging + HA payloads | measured-and-active |
-
-### A.12 UI surfaces & automation posture (§11, §14)
-
-| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
-|---|---|---|---|---|
-| `/ws` snapshot spine | Throttled full-snapshot frames (§11.0) | SnapshotStore | Web dashboard, wsConsole | measured-and-active |
-| Web dashboard (React PWA) | Tabs: Dashboard/Solar/Battery/Strategy/Alerts/Console (§11.1) | `/ws` + 30+ `/api/*` | Operator | measured-and-active |
-| Telnet TUI | Plant Operator + Summary consoles, DoS-hardened, port 2323 (§11.2) | dataProvider (`totals`/`forecast`/`degradation`) + snapshot | Operator | measured-and-active |
-| HACS Lovelace cards | REMOVED in v1.47.0 (duplicated the web dashboard; consumer had pinned a stale CDN snapshot) | — | — | removed |
-| Lighting posture | `rawPosture` ladder (critical/red ≤ 4 h/amber/conserve < 35 % dawn/surplus/normal) + asymmetric 15-min de-escalation hold + restart persistence (§14.1) | Runway, dawn-min SoC, reserve, curtailment, grid backstop | HA `lighting_posture`(+`_reason`) sensors → HA-side automations | measured-and-active |
-| Surplus / opportunistic loads | Curtailment surplus vs hardcoded load catalog (`fitsInSurplus = surplus ≥ estimatedW`) (§14.2) | Curtailment report | Curtailment endpoint/card fields | measured-and-active (catalog hardcoded; `haServiceHint` always `null` — Phase-2 actuation not implemented) |
-| HVAC posture | Two `category:'hvac'` catalog entries only; no posture sensor, no thermostat actuation (§14.3) | — | — | advisory-dormant (documented DORMANT) |
-
-### Candidates for removal review
-
-Consumers verified at the pinned revision; deleting an engine also deletes its listed route/fields. Items are candidates for *review*, not verdicts — each line states the linkage failure.
-
-1. ~~`server/src/analytics.ts:computeMultiDayForecast`~~ — **NOT a candidate; do not remove.** `recomputeNightChargePlan()` requests `multiDayForecast` at `days: 4` and maps it into `dayRollups`, which feed the night-charge plan (§15.2 shows this). ★★★ Analytics reports dispatch **by string**, so dropping the builder compiles clean, throws at runtime, and is swallowed by the caller's `.catch(() => null)` — `dayRollups` silently degrades to `[]` inside the engine that actuates a device write. Any future removal audit must grep the report NAME, not just the symbol.
-2. `server/src/dispatch/mpc.ts:recommendDispatch` (entire module + `/api/dispatch/recommend`) — endpoint-only; duplicates dispatch-plan territory on a legacy flat-tariff basis that diverges from `tariff.ts`.
-3. `server/src/analytics.ts:computePackRiskScores` + `server/src/ml.ts:computePackRiskV2` (+ `/api/pack-risk`, `/api/pack-risk/v2`) — nothing reads either endpoint. Removing v2 orphans the chain `server/src/models/onlineLR.ts` + `server/src/models/modelHealth.ts` + the LR-vector portion of `featureSnapshot.ts`; outcome capture itself should stay (it powers `/api/alerts/outcomes/stats` precision accounting).
-4. `server/src/models/hierarchicalBayes.ts:fitHierarchical` (+ `/api/models/hierarchical-pack-soh`) — endpoint-only referee; no automated cross-check.
-5. `server/src/physics/clearSky.ts:physicsPmax`/`physicsScore` (+ `/api/physics/pv-pmax`) — endpoint-only. **`PHOENIX_SITE` must survive any removal** (consumed by `BAYES_OBS_SIGMA2` in `analytics.ts`).
-6. `server/src/physics/lfpOcv.ts:analyzePackLfp` + `server/src/physics/restTracker.ts` (+ `/api/physics/lfp-soc` and the 60 s rest-tracker interval) — `socDriftPct` feeds no alarm or engine; the tick costs cycles regardless.
-7. `server/src/repairIssues.ts:computeRepairIssues` (+ `/api/repair-issues`) — recomposes four already-surfaced engines into cards nothing renders.
-8. `server/src/analytics.ts:rootCausesFor` (+ `/api/root-cause`) — no caller passes an alert id.
-9. `server/src/alertTelemetry.ts` (+ `/api/alert-telemetry`) — marginal: machine-readable fire/resolve log with no ingesting tool; cheapest to keep, first to cut if the file grows.
-
-Not candidates despite thin linkage: the forecast backtest (`/api/backtest/forecast`) is the validation instrument for the alarm-facing PV model; `debugSendCommand` and the HVAC-posture stub are documented deliberate postures, not orphans.
-
-## 12c. Charge Now responder (`chargeNowResponder.ts`, v1.84.0)
+**Chapter 12 addenda (v1.82.0 onward).** Subsystems and release-scoped notes added to this
+chapter after it was first written: the vendor API notes, then 12a–12q in letter order.
+
+### Vendor API notes (documented, not all used)
+
+From the official EcoFlow IoT Open Platform pages (DELTA Pro Ultra = YJ751,
+Smart Home Panel 2 = PD303), verified against live `quota/all` payloads on
+2026-08-17. Read-only keys in use are listed with their projection fields in
+the sections above. Documented but **not used yet**:
+
+- **Historical data**: `POST /iot-open/sign/device/quota/data` with PD303 codes
+  (`PD303-App-LOAD-…-Week`, `PD303-Dashboard-Circuits-Line-Week` with
+  `energy_hour_{grid,oil,bak}_ch{1-12}`, battery in/out, grid, solar,
+  generator, savings). Per-circuit energy split by SOURCE. **In use since v1.82.0**: the
+  vendor energy ledger (12a) fetches it daily via `ecoflow.getQuotaData`, and
+  `GET /api/debug/vendor-history-probe` (12f) probes it.
+- **Targeted reads**: `POST /iot-open/sign/device/quota` with
+  `params.quotas: [...]` returns single keys (e.g. `backupReserveSoc`) —
+  a lighter readback than `quota/all` if the actuator ever needs one.
+- **Control (write) command codes** — documented, deliberately unused beyond
+  `PD303_APP_SET` `backupReserveSoc` (night charge, owner floor), `ch{n}ForceCharge`
+  (Charge Now responder OFF since v1.84.0; night force-charge ON/OFF since v1.165.0) and
+  `foceChargeHight` (force-charge ceiling sync/restore, v1.165.0): `ch{n}EnableSet`,
+  `stormIsEnable`, `epsModeInfo`, `chargeWattPower`,
+  `masterCur`, `oilMaxOutputWatt`, per-branch `setAmp`/`chName`/`loadSta`;
+  YJ751: `YJ751_PD_AC_CHG_SET` (`chgC20Watts`/`chg5p8Watts`),
+  `CHG_SOC_MAX_SET`/`DSG_SOC_MIN_SET`, `AC_DSG_SET`, `AC_OFTEN_OPEN_SET`,
+  standby timers. Any future write goes through the audited write framework
+  with the v1.79.0 readback pattern.
+
+### 12a. Vendor energy ledger (`energyHistory.ts`, v1.82.0)
+
+Daily job (06:35-09:00 Phoenix window, day-latched in the sidecar, restart
+safe) fetching yesterday's SHP2 historical-data record: `homeWh`, `gridWh`,
+`solarWh`, `generatorWh`, `batteryInWh`/`batteryOutWh` (extra 1/2), and 12
+per-circuit rows split by source (`energy_hour_{grid,oil,bak}_ch{n}`).
+
+Reconciliation scores LIKE BASES ONLY (`driftPct`, signed toward the vendor,
+null under 100 Wh on either side): vendor home ↔ local `fleet.panelLoadWh`,
+vendor solar ↔ local `fleet.pvWh` (both from the analytics `totals` report
+over the same Phoenix day). Grid/generator/battery are recorded unscored —
+see the two-grid-quantities note in §7.0.2. No alert is emitted from this engine.
+
+State: `/data/vendor-energy-daily.json` (atomic writes, 120-day cap, corrupt
+file = start fresh). API: `GET /api/energy-history[?day=]` (includes the
+advisory `empiricalRte` summary since v1.85.0),
+`GET /api/debug/vendor-history?day=` (live, unstored),
+`POST /api/energy-history/backfill?days=N` (bounded manual backfill).
+**v1.85.0**: the morning job also backfills up to 10 older missing days
+(60-day horizon, per-day persistence) and reports empirical RTE
+(`computeEmpiricalRte`: qualifying days need ≥ 1 kWh vendor battery-in;
+≥ 5 qualifying days before any number is reported; advisory only —
+`DISPATCH_RTE` is untouched until the vendor's battery-in semantics have a
+proven baseline). Failure mode: any
+single fetch failure logs at warn, leaves that field null, and the batch
+continues; a failed batch retries each tick inside the window.
+**v1.90.0**: the morning digest carries a one-line ledger summary
+(`vendorDigestLine`, pure): home (with signed home drift), solar, grid, battery
+out / grid-charge, and the dark-core PV estimate when present. Null when the
+record is missing or empty — the digest never carries a hollow line.
+**v1.100.0**: the line had never rendered. The digest fires at
+`NOTIFY_DIGEST_HOUR` (default 7, so 07:00 local) while this job is gated to 06:35-09:00
+Phoenix, so `prevYmd(today)` is absent at digest time whenever the digest hour comes
+before the job completes. That is every morning at a digest hour of 6 or earlier, or when the job runs late in its window. It now falls back to `latestVendorDay(state)` and NAMES the day:
+"Yesterday per the EcoFlow ledger: …" only when the record genuinely is
+yesterday, otherwise "Per the EcoFlow ledger (YYYY-MM-DD): …". Moving the job
+earlier was rejected — the 06:35 window exists so ~19 sequential vendor requests
+do not compete with the morning poll budget, and the vendor's daily record is
+not reliably complete before then.
+
+### 12b. Settings-drift watchdog (`settingsDrift.ts`, v1.83.0)
+
+Read-only 60 s tick over the raw quota of the SHP2 + every DPU. Pure core:
+`extractSettingsSurface` (flat-first with `pd303_mc.` fallback; DPU keys under
+`hs_yj751_pd_app_set_info_addr.`), `diffSurfaces` (both-sides rule — a key
+missing on either side is availability, never drift), `evaluateDrift`
+(2-observation debounce; confirmed baseline advances and persists),
+`classifyChange` (own-write = SHP2 `backupReserveSoc` moving to the actuator's
+target/restore while a night is in flight, or to the owner's pending
+`/api/reserve-floor` value — logged, not pushed; v1.165.0 adds the force-charge
+keys `ch{n}ForceCharge` / `foceChargeHight` inside our force-charge window and its
+15-min tails; everything else external). v1.187.10 — inside that window a
+force-charge key is own-write only at a value this add-on COMMANDED
+(`forceChargeCommandsOf`, nightForceCharge.ts: ON to the slots it switched on while
+no OFF has been issued, OFF to those slots once it has, the ceiling at the synced
+backstop or, once the restore is issued, the panel's own value). Any other movement
+in the window is `panel-side` — logged at info as changed on the panel, not by the
+add-on (the panel's own ceiling stop, or a manual Charge Now), and not pushed, as
+before. On 2026-10-02 the panel's 87% ceiling stopped slots 2 and 1 at ~04:24–04:25,
+~4 min before the add-on's OFF, and both were logged as the add-on's write. Known
+limit: a manual Charge Now inside the window or its tails is still not pushed. External changes batch into ONE [Medium] push (dedupId
+`settings_drift`) held through `NOTIFY_QUIET_HOURS`. First boot adopts
+silently. Sidecar `/data/settings-surface.json` (atomic; corrupt = silent
+re-adoption). Harness: `scripts/mutate-settings-drift.mjs` (5 mutants).
+
+### 12c. Charge Now responder (`chargeNowResponder.ts`, v1.84.0)
 
 Consumes the peak-grid-draw observation (verdict + slot-numbered force-charge
 states) published by the alert monitor (`setLastPeakDrawObservation`) — never
@@ -10563,7 +9328,7 @@ clears or force charge reads OFF); daily cap 2 (past it: advise, never
 write); OFF is the only writable value. Harness:
 `scripts/mutate-charge-now.mjs` (5 mutants).
 
-## 12d. HA statistics export (`haStatistics.ts`, v1.89.0)
+### 12d. HA statistics export (`haStatistics.ts`, v1.89.0)
 
 Publishes the vendor ledger as EXTERNAL long-term statistics over the
 supervisor's Core WebSocket (`recorder/import_statistics`): five `Wh` series
@@ -10583,7 +9348,7 @@ reports the pack-DC round-trip ratio on `/api/energy-history` — declared
 `basis: 'pack-dc'`, an upper bound on the AC dispatch RTE. `DISPATCH_RTE`
 (0.86) is unchanged.
 
-## 12e. Long-offline reconnect auto-audit (`reconnectAudit.ts`, v1.90.0)
+### 12e. Long-offline reconnect auto-audit (`reconnectAudit.ts`, v1.90.0)
 
 Watches every non-spare DPU's cloud presence and, when one returns after
 ≥ 24 h continuously offline, runs a 30-minute transition audit automatically —
@@ -10609,7 +9374,7 @@ blind-spot restoration signal). Exactly one `[Medium]` push per reconnect.
   this watch exists for). Spare DPUs are excluded (expected-offline is the
   zombie gate's domain).
 
-## 12f. Warranty evidence export (`warrantyExport.ts`, v1.90.0)
+### 12f. Warranty evidence export (`warrantyExport.ts`, v1.90.0)
 
 `GET /api/warranty-export?sn=<SN>&format=md|csv|json` (default SN = Core 3,
 default format = markdown) renders a paste-ready RMA evidence bundle from the
@@ -10626,32 +9391,9 @@ cell grid when present (min/max), falling back to the projected
 (`?month=YYYY-MM`, default last month) asks the historical-data endpoint
 whether `-Month`/`-Year` variants of the five documented `-Week` chart codes
 exist, at 400 ms spacing, and returns the raw per-code outcomes. Read-only,
-on-demand only; results are recorded in §12 once known.
+on-demand only; results are recorded in the chapter-12 "Vendor API notes" once known.
 
-Read-only 60 s tick over the raw quota of the SHP2 + every DPU. Pure core:
-`extractSettingsSurface` (flat-first with `pd303_mc.` fallback; DPU keys under
-`hs_yj751_pd_app_set_info_addr.`), `diffSurfaces` (both-sides rule — a key
-missing on either side is availability, never drift), `evaluateDrift`
-(2-observation debounce; confirmed baseline advances and persists),
-`classifyChange` (own-write = SHP2 `backupReserveSoc` moving to the actuator's
-target/restore while a night is in flight, or to the owner's pending
-`/api/reserve-floor` value — logged, not pushed; v1.165.0 adds the force-charge
-keys `ch{n}ForceCharge` / `foceChargeHight` inside our force-charge window and its
-15-min tails; everything else external). v1.187.10 — inside that window a
-force-charge key is own-write only at a value this add-on COMMANDED
-(`forceChargeCommandsOf`, nightForceCharge.ts: ON to the slots it switched on while
-no OFF has been issued, OFF to those slots once it has, the ceiling at the synced
-backstop or, once the restore is issued, the panel's own value). Any other movement
-in the window is `panel-side` — logged at info as changed on the panel, not by the
-add-on (the panel's own ceiling stop, or a manual Charge Now), and not pushed, as
-before. On 2026-10-02 the panel's 87% ceiling stopped slots 2 and 1 at ~04:24–04:25,
-~4 min before the add-on's OFF, and both were logged as the add-on's write. Known
-limit: a manual Charge Now inside the window or its tails is still not pushed. External changes batch into ONE [Medium] push (dedupId
-`settings_drift`) held through `NOTIFY_QUIET_HOURS`. First boot adopts
-silently. Sidecar `/data/settings-surface.json` (atomic; corrupt = silent
-re-adoption). Harness: `scripts/mutate-settings-drift.mjs` (5 mutants).
-
-## 12g. SQLite snapshot for external viewers (`dbExport.ts`, v1.107.0)
+### 12g. SQLite snapshot for external viewers (`dbExport.ts`, v1.107.0)
 
 The recorder database lives at `/data/ecoflow.db`. `/data` is **private per
 add-on** — no other add-on can open it, so a viewer such as sqlite-web has no
@@ -10690,7 +9432,7 @@ The single caller-controlled path component is validated by
 are single-flighted so concurrent requests join one run rather than racing onto
 the shared temp path. Harness: `scripts/mutate-db-export.mjs` (8 mutants).
 
-## 12h. The owner reserve floor, and who is allowed to define it (v1.113.0–v1.116.0, v1.119.0)
+### 12h. The owner reserve floor, and who is allowed to define it (v1.113.0–v1.116.0, v1.119.0)
 
 `backupReserveSoc` has **three possible authors** — the owner, this add-on's
 night-charge actuator, and EcoFlow Storm Guard (which raised it 20 → 40
@@ -10761,7 +9503,7 @@ Harness: `scripts/mutate-reserve-posture.mjs` (8 mutants) covers both silent
 inversions — the magnitude proxy returning, and the arbitrage window paging
 nightly — plus the runway regression and a corrupt-prior fallback.
 
-## 12i. Announcement delivery: what a timeout means (v1.118.0–v1.119.0)
+### 12i. Announcement delivery: what a timeout means (v1.118.0–v1.119.0)
 
 `music_assistant.play_announcement` **does not return until playback finishes**.
 Two consequences the pipeline had to learn the hard way, both on 2026-08-30 when
@@ -10801,7 +9543,7 @@ playing". Both roads led back to "retry". A verification probe that shares the
 failing dependency, and runs after the failing call's own timeout, verifies
 nothing.
 
-## 12j. Roster durability, and the audible cost of guessing (v1.117.0)
+### 12j. Roster durability, and the audible cost of guessing (v1.117.0)
 
 The SHP2 connected-source roster is derived from the live projection every tick,
 so it reads EMPTY for the first tick after a boot and through any SHP2
@@ -10832,70 +9574,6 @@ failover goes dark.
 **Also v1.117.0:** `backup_reserve` is recorded alongside `backup_pct`. The
 reserve setpoint — owner-set and rewritten twice nightly — had no time series at
 all, so a bad revert was invisible to every historical query.
-
-## 12a. Vendor energy ledger (`energyHistory.ts`, v1.82.0)
-
-Daily job (06:35-09:00 Phoenix window, day-latched in the sidecar, restart
-safe) fetching yesterday's SHP2 historical-data record: `homeWh`, `gridWh`,
-`solarWh`, `generatorWh`, `batteryInWh`/`batteryOutWh` (extra 1/2), and 12
-per-circuit rows split by source (`energy_hour_{grid,oil,bak}_ch{n}`).
-
-Reconciliation scores LIKE BASES ONLY (`driftPct`, signed toward the vendor,
-null under 100 Wh on either side): vendor home ↔ local `fleet.panelLoadWh`,
-vendor solar ↔ local `fleet.pvWh` (both from the analytics `totals` report
-over the same Phoenix day). Grid/generator/battery are recorded unscored —
-see the two-grid-quantities note in §5. No alert is emitted from this engine.
-
-State: `/data/vendor-energy-daily.json` (atomic writes, 120-day cap, corrupt
-file = start fresh). API: `GET /api/energy-history[?day=]` (includes the
-advisory `empiricalRte` summary since v1.85.0),
-`GET /api/debug/vendor-history?day=` (live, unstored),
-`POST /api/energy-history/backfill?days=N` (bounded manual backfill).
-**v1.85.0**: the morning job also backfills up to 10 older missing days
-(60-day horizon, per-day persistence) and reports empirical RTE
-(`computeEmpiricalRte`: qualifying days need ≥ 1 kWh vendor battery-in;
-≥ 5 qualifying days before any number is reported; advisory only —
-`DISPATCH_RTE` is untouched until the vendor's battery-in semantics have a
-proven baseline). Failure mode: any
-single fetch failure logs at warn, leaves that field null, and the batch
-continues; a failed batch retries each tick inside the window.
-**v1.90.0**: the morning digest carries a one-line ledger summary
-(`vendorDigestLine`, pure): home (with signed home drift), solar, grid, battery
-out / grid-charge, and the dark-core PV estimate when present. Null when the
-record is missing or empty — the digest never carries a hollow line.
-**v1.100.0**: the line had never rendered. The digest fires at
-`NOTIFY_DIGEST_HOUR` (06:00 local) while this job is gated to 06:35-09:00
-Phoenix — deliberately AFTER the digest — so `prevYmd(today)` was never present
-at digest time. It now falls back to `latestVendorDay(state)` and NAMES the day:
-"Yesterday per the EcoFlow ledger: …" only when the record genuinely is
-yesterday, otherwise "Per the EcoFlow ledger (YYYY-MM-DD): …". Moving the job
-earlier was rejected — the 06:35 window exists so ~19 sequential vendor requests
-do not compete with the morning poll budget, and the vendor's daily record is
-not reliably complete before then.
-
-## 12. Vendor API notes (documented, not all used)
-
-From the official EcoFlow IoT Open Platform pages (DELTA Pro Ultra = YJ751,
-Smart Home Panel 2 = PD303), verified against live `quota/all` payloads on
-2026-08-17. Read-only keys in use are listed with their projection fields in
-the sections above. Documented but **not used yet**:
-
-- **Historical data**: `POST /iot-open/sign/device/quota/data` with PD303 codes
-  (`PD303-App-LOAD-…-Week`, `PD303-Dashboard-Circuits-Line-Week` with
-  `energy_hour_{grid,oil,bak}_ch{1-12}`, battery in/out, grid, solar,
-  generator, savings). Per-circuit energy split by SOURCE — a future
-  reconciliation/backfill engine for the local accumulators.
-- **Targeted reads**: `POST /iot-open/sign/device/quota` with
-  `params.quotas: [...]` returns single keys (e.g. `backupReserveSoc`) —
-  a lighter readback than `quota/all` if the actuator ever needs one.
-- **Control (write) command codes** — documented, deliberately unused beyond
-  `PD303_APP_SET backupReserveSoc`: `ch{n}EnableSet`, `ch{n}ForceCharge`,
-  `stormIsEnable`, `epsModeInfo`, `chargeWattPower`, `foceChargeHight`,
-  `masterCur`, `oilMaxOutputWatt`, per-branch `setAmp`/`chName`/`loadSta`;
-  YJ751: `YJ751_PD_AC_CHG_SET` (`chgC20Watts`/`chg5p8Watts`),
-  `CHG_SOC_MAX_SET`/`DSG_SOC_MIN_SET`, `AC_DSG_SET`, `AC_OFTEN_OPEN_SET`,
-  standby timers. Any future write goes through the audited write framework
-  with the v1.79.0 readback pattern.
 
 ### 12k. Detectors that could not fire (v1.120.0)
 
@@ -11082,12 +9760,12 @@ Also corrected: the Notify Channel description implied `ha` delivers a phone pus
 did not — `persistent_notification.create` creates a card in the HA drawer with no OS
 alert and no sound.
 
-> **Superseded by §13 (v1.124.0).** That release made the `ha` channel deliver a real
+> **Superseded by §12p (v1.124.0).** That release made the `ha` channel deliver a real
 > push via `notify.mobile_app_*`, so the claim this section corrected is true again —
 > but only when `NOTIFY_HA_PUSH_TARGETS` names at least one service. The ntfy /
 > Pushover / webhook channels this section pointed at no longer exist.
 
-### 13. Notifications are Home-Assistant-native (v1.124.0)
+### 12p. Notifications are Home-Assistant-native (v1.124.0)
 
 Before this release the live channel was `ha`, whose entire transport was
 `persistent_notification.create` — a card in the HA notification drawer. The companion
@@ -11157,7 +9835,7 @@ without them and re-reading it returned all five, proving `info.options` is the 
 set with `config.yaml` defaults merged in — so they were defaults, never stored user
 data, and dropping them from the schema leaves nothing stale behind.
 
-### 14. The outage cushion, re-scoped (v1.125.0)
+### 12q. The outage cushion, re-scoped (v1.125.0)
 
 `ARB_OUTAGE_CUSHION_PCT` was a flat 15 % of pool, and the test asked whether a
 deliberately grid-blind forward simulation stayed above floor+cushion. That
@@ -11223,3 +9901,1750 @@ behaviour rather than silently granting a weaker guarantee. The pair is never mi
 The whole-house forward trough is still computed and still reported as
 `minProjSocPct` / `baselineMinSocPct`: "what if the entire house ran off the pack" is a
 true and useful thing to disclose, it is simply not what the cushion is sized against.
+
+---
+
+## 13. Safety & Operational Plumbing
+
+### 13.0 Alarm-host thermal monitor (v1.42.0)
+
+The add-on monitors the machine it runs on. `hostThermal.ts` samples the kernel thermal zones (`/sys/class/thermal/thermal_zone*/temp`, read-only in the container) every 60 s, takes the hottest valid zone (readings outside 5–130 °C are rejected), and holds the freshest sample with a 5-minute staleness bound. Surfaces:
+
+- `host_soc_temp_c` in `/api/ha-state` and the MQTT state payload; discovery sensor `ecoflow_host_soc_temp` (`device_class: temperature`, diagnostic). Trend history comes from the Home Assistant recorder — the add-on stores none.
+- Alerts `host-temp-warn` (warning, ≥ `HOST_TEMP_WARN_C`, default 78 °C) and `host-temp-crit` (critical, ≥ `HOST_TEMP_CRIT_C`, default 84 °C), with 3 °C rise/clear hysteresis (`hostTempLevel`, pure). The critical sits just below the host SoC's ~85 °C throttle point: thermal throttling slows the alarm pipeline precisely when extreme ambient heat makes it matter most.
+- Null-honest: a host with no readable thermal zone produces a null sensor and no alerts. Thresholds are env-overridable (`HOST_TEMP_WARN_C`, `HOST_TEMP_CRIT_C`), not add-on options.
+
+### 13.0b Co-tenant degradation defense — self-vitals (v1.43.0)
+
+The alarm shares its host with other add-ons; a co-tenant failure (memory leak, CPU spin, disk fill) degrades the alarm indirectly. `selfVitals.ts` provides in-band early warning across four dimensions, each null-honest when its source is unreadable:
+
+| Dimension | Source | Warn / Crit (env-overridable) |
+|---|---|---|
+| Event-loop lag | 500 ms drift probe, EMA α=0.2 + 60 s max | ≥ 200 ms / ≥ 1000 ms EMA (`VITALS_LAG_*_MS`) |
+| Memory available | `/proc/meminfo` MemAvailable | < 700 MB / < 350 MB (`VITALS_MEM_*_MB`) |
+| Data-disk free | `statfs` on the data directory | < 2048 MB / < 512 MB (`VITALS_DISK_*_MB`) |
+| Load (1 min) | `/proc/loadavg` | ≥ 3.5 / ≥ 6 (`VITALS_LOAD_*`, 4-core host) |
+
+`assessVitals` (pure) applies per-dimension hysteresis — escalation immediate, de-escalation only past a clearance margin — and rolls the maximum into one assessment. Surfaces: four HA diagnostic sensors (`ecoflow_host_evloop_lag`, `ecoflow_host_mem_available`, `ecoflow_host_disk_free`, `ecoflow_host_load_1m`), `vitalsLevel` on `/api/health`, and ONE rolled alert (`host-pressure-warn`/`host-pressure-crit`) whose detail names every pressured dimension with its value — a starved host is one operator situation, not four alert families. Under a critical assessment, **alarm-first QoS** pauses discretionary analytics ticks (rest tracker, GHI persistence) so the process's remaining CPU serves the poll → alert → broadcast path; the alert states that this shedding is active.
+
+**Crit dwell (v1.45.0).** The critical alert (and the red broadcast it raises)
+requires the crit assessment to sustain for `HOST_PRESSURE_CRIT_DWELL_S`
+(default 180 s, range 0–900) — observed transient spikes (boot load, store
+refresh, the nightly backup's docker exports) each last 1–3 minutes and are
+real pressure but not red-klaxon events. During the dwell the condition
+surfaces as the warning; QoS shedding keys on the raw assessment level and
+engages immediately regardless.
+
+### 13.0c Out-of-band dead-man heartbeat (v1.43.0)
+
+In-band self-monitoring fails with the host, so the final layer lives outside the failure domain: `heartbeat.ts` sends an HTTPS GET to an operator-configured external heartbeat receiver (`HEARTBEAT_URL`, healthchecks.io-style) every `HEARTBEAT_INTERVAL_S` (60–3600 s, default 300, ±10 % jitter), starting at boot. When the pings stop — host dead, container OOM-killed, kernel wedged, power lost — the external service notifies the operator from outside the house. Properties: fully inert when no URL is configured; https-only; the URL is treated as a capability token and never logged (only its host, once, on rejection); state-transition-only logging; a send failure is local information only (internet-down ≠ host-down — the external service's own grace period makes the dead-man decision), so the module raises no alerts and only reports `heartbeatStatus()` on `/api/health`. Recommended external configuration: check period = the configured interval, grace ≈ 2 intervals.
+
+*Process guard, host-power self-monitor, HA state cache, onset persistence, message-rate floor, and log/format hygiene — the reliability layer that keeps a life-safety monitor alive and honest.*
+
+This cluster is not a feature the operator sees on a screen. It is the connective tissue that lets every other engine survive the real-world failure modes of an off-grid Raspberry Pi: a daily Supervisor maintenance bounce, a Pi that loses power almost every day, an EcoFlow cloud session that wedges without going fully silent, and a log stream that floods during outages. Three of these modules (`processGuard`, `hostPower`, `messageRateFloor`) are load-bearing safety components — a bug in them can either kill the alarm or blind it. The rest bound what lands on disk and in the log so a real signal stays greppable and a hostile device name can't hijack the operator's terminal.
+
+All file paths below are relative to `server/src/`. Line numbers cite main at v1.187.15; function and constant names are authoritative where they drift.
+
+---
+
+### 1. `processGuard.ts` — top-level crash survival (SAFETY-CRITICAL)
+
+#### What + why
+
+The add-on once crashed with `exit code 255` during the daily 13:00 Supervisor maintenance window (a CoreDNS plugin restart + AppArmor reload). A transient DNS/network bounce leaked out of the MQTT reconnect path as an uncaught error and killed a **critical** power monitor for ~2 minutes. `processGuard` installs the process-level `uncaughtException` / `unhandledRejection` handlers that decide, per error, whether to **survive** (a transient network/DNS blip that must not take the alarm down) or **re-raise as fatal** (a genuine bug we must never silently swallow).
+
+The animating principle: a life-safety process should not die from the network sneezing, but it also must not become a zombie that has quietly eaten a real crash.
+
+#### Inputs
+
+- The thrown error / rejection reason (`unknown`).
+- A logger with `error` and `fatal` sinks.
+- An optional `onFatal` sink (tests inject a non-exiting one; production defaults to `process.exit(1)`).
+
+#### The classification (real algorithm)
+
+```
+classifyTopLevelError(e):
+    return isTransientNetworkError(e) ? 'survive' : 'fatal'
+```
+
+`isTransientNetworkError` (shared with the MQTT cert-fetch retry in `ecoflow/mqtt.ts:53`) matches on two axes:
+
+| Axis | Pattern |
+|------|---------|
+| `e.code` | `/EAI_AGAIN\|ENOTFOUND\|ECONNREFUSED\|ETIMEDOUT/i` |
+| `e.message` (lowercased) | `/eai_again\|enotfound\|econnrefused\|etimedout\|timeout\|connect timeout\|fetch failed/i` |
+
+A match on **either** axis ⇒ transient ⇒ survive. Everything else ⇒ fatal.
+
+> **Deliberate narrowing (v0.60.0):** the classifier used to also match a bare `network` token in the message. That was dropped because it matched *any* string containing "network" (e.g. `"neural network training failed"`). Harmless when the classifier only gated an MQTT retry, but dangerous now that it is *also* the process-guard's survive/fatal gate — an over-broad match could **mask a genuine bug**. The specific terms still cover every real transient case, which also carry a `code`.
+
+#### The handler body
+
+`handleTopLevelError(e, kind, log, onFatal)`:
+
+1. Compute `decision = classifyTopLevelError(e)`.
+2. Extract `detail = e.stack ?? e.message ?? String(e)`.
+3. If `survive`: log **loudly** at ERROR with the greppable prefix
+   `process-guard: SURVIVED transient <kind> (network/DNS, not exiting): <detail>`
+   and return — the process keeps running. The line is intentionally noisy so a *misclassified recurring* fault (something that keeps "surviving" but is actually broken) is still findable by grep.
+4. If `fatal`: log at FATAL `process-guard: FATAL <kind>, exiting: <detail>` and call `onFatal(e)`.
+
+`installProcessGuards(log, opts?)` wires both `process.on('uncaughtException', …)` and `process.on('unhandledRejection', …)` to that body. `onFatal` defaults to `() => process.exit(1)`.
+
+#### Trace / wire-in
+
+Installed once near the end of boot in **`index.ts:7032`**:
+
+```ts
+installProcessGuards({
+  error: (m) => app.log.error(m),
+  fatal: (m) => app.log.fatal(m),
+});
+```
+
+It covers the **post-boot steady state**, where a transient DNS error can escape the MQTT client's reconnect path as an unhandled rejection. Boot-time DNS transients are handled separately by the cert-fetch retry (`getMqttCertificationWithRetry`), and a genuine boot-time crash is correctly left fatal.
+
+#### Edge cases / guards
+
+- **Pure + exported.** `classifyTopLevelError` and `handleTopLevelError` take injected logger + `onFatal`, so both are unit-tested without registering real process listeners or exiting the test runner.
+- **Shared classifier.** Reusing `isTransientNetworkError` keeps the guard and the MQTT retry from drifting apart on what counts as "transient."
+- **Never silent.** A survived error is *always* logged at ERROR — surviving is not the same as ignoring.
+
+---
+
+### 2. `hostPower.ts` — Pi under-voltage self-monitor (SAFETY-CRITICAL)
+
+#### What + why
+
+The alarm's own host — the Raspberry Pi — is the single point of failure for the entire monitor: if it loses power, every channel goes dark **at once**. HA's *"Raspberry Pi Power Supply Checker"* exposes the kernel under-voltage/throttling flag as a `binary_sensor` with `device_class: problem` (`on` = under-voltage/throttling detected, `off` = OK). A marginal supply — or a sagging power circuit — trips this flag *before* the Pi actually browns out, so surfacing it is an early warning to fix the supply while the alarm is still up. (Per operational memory, the Pi circuit has historically lost power daily for 84–187 min; this signal is the leading indicator for that class of failure.)
+
+#### Inputs
+
+- `HOST_POWER_ENTITY` env var — the configured binary_sensor entity id. Empty ⇒ the feature is dormant.
+- The shared HA state cache (`haStateCache`), which `index.ts` keeps warm whenever a host/grid entity is configured.
+
+#### Key constant
+
+```
+HOST_POWER_MAX_AGE_MS = 120_000   // 2 min
+```
+
+Chosen comfortably above the ~30 s cache TTL. Beyond 2 min the cached read is treated as stale and reported as **unknown** rather than replaying a frozen last value.
+
+#### The interpretation (pure)
+
+```
+interpretHostPowerEntity(e):
+    if e is null                        → null
+    s = lowercase(e.state)
+    if s in {on, true, problem}         → true    (under-voltage present)
+    if s in {off, false, ok}            → false   (OK)
+    otherwise (unavailable/unknown/…)   → null
+```
+
+#### The live wrapper
+
+`liveHostPower(now = Date.now())` returns a `HostPowerHealth`:
+
+```
+if !entityId                        → { configured:false, entityId:'', underVoltage:null, stale:false }
+if cacheAge > HOST_POWER_MAX_AGE_MS → { configured:true, entityId, underVoltage:null, stale:true }
+else                                → { configured:true, entityId,
+                                        underVoltage: interpretHostPowerEntity(getCachedEntity(entityId)),
+                                        stale:false }
+```
+
+#### Trace / wire-in
+
+- **Cache warm-keeping:** `index.ts:2573` and `:2689` call `haStateCache.refreshIfStale()` whenever `gridPresenceEntityId() || hostPowerEntityId()` is set — the host-power entity rides the same TTL-gated refresh as the grid-presence classifier (ingestion mirrors `gridState.ts`).
+- **Alert emission:** `alerts.ts:1338` calls `liveHostPower()`; when `underVoltage === true` it pushes a **warning** alert `host-power-undervoltage` (category `Connectivity`, device `System`) advising the operator to check the Pi's supply and circuit before it browns out.
+
+#### Output shape (the alert)
+
+```json
+{ "id": "host-power-undervoltage", "severity": "warning",
+  "category": "Connectivity", "device": "System",
+  "title": "Alarm host power — under-voltage",
+  "detail": "The Raspberry Pi running this monitor reported under-voltage (<entityId>). …" }
+```
+
+#### Config knobs
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `HOST_POWER_ENTITY` | *(empty)* | binary_sensor entity id; empty ⇒ dormant |
+
+#### Edge cases / honest-null
+
+- **Best-effort throughout.** An unset entity or a stale cache reads as `null` (unknown), never as a false alarm.
+- **Warning, not critical.** This is a *leading* indicator, not a live emergency, so it rides the push/UI channel without breaking through quiet hours.
+
+---
+
+### 3. `haStateCache.ts` — TTL-gated HA entity-watts cache
+
+#### What + why
+
+The load-shedding advisor needs to know which household devices are on and how many watts they draw, so it can decompose the opaque SHP2 `panel_load` number into named contributors and simulate "what if we shed the pool pump?". Polling HA's full state list on every decision tick would be wasteful, so this wraps `getAllStates()` behind a short TTL. It is also the shared substrate for the **grid-presence** and **host-power** reads. **Read-only** — it never calls a service or mutates HA state.
+
+#### Key constant
+
+```
+TTL_MS = Number(process.env.HA_STATE_CACHE_TTL_MS ?? 30_000)   // 30 s default
+```
+
+Plenty fresh for runway decisions that operate on hours-scale projections, and (importantly) below the 120 s host-power/grid staleness ceilings that consume it.
+
+#### Watts extraction (`extractEntityWatts`)
+
+Precedence, first hit wins:
+
+1. **Explicit power attribute** — scan, in order:
+   `current_power_w`, `current_power`, `power_w`, `power`, `wattage`, `active_power`.
+   Accept a number, or a string coercible to a finite number.
+2. **Dedicated power sensor** — if `attributes.device_class === 'power'`, read the entity **state** as the value, honoring unit: when `unit_of_measurement` is `kW` in any case (the code upper-cases it before comparing with `'KW'`), multiply by 1000; otherwise watts as-is.
+3. Otherwise ⇒ `null` (a plain on/off switch with no metering). The advisor then falls back to SHP2 circuit watts or the operator's estimate.
+
+#### The cache mechanism
+
+Module-level state: `cache: Map<entityId, CachedEntity>`, `lastFetchedAt`, `inflight`.
+
+`refreshIfStale(now = Date.now())`:
+
+- If `now - lastFetchedAt < TTL_MS` ⇒ return immediately (fresh).
+- If a fetch is already `inflight` ⇒ return that promise (**concurrent-call coalescing** — no stampede).
+- Otherwise fetch `getAllStates()`, and *only if it returns states*, rebuild the map atomically: each `CachedEntity` carries `{entityId, state, attributes, watts: extractEntityWatts(s), fetchedAt}`, then swap `cache` and set `lastFetchedAt`. `inflight` is always cleared in `finally`.
+
+Read accessors:
+
+| Function | Returns |
+|----------|---------|
+| `getCachedEntity(entityId)` | the `CachedEntity` or `null` |
+| `getCacheAgeMs(now)` | `lastFetchedAt ? now - lastFetchedAt : +Infinity` |
+| `refreshIfStale(now)` | `Promise<void>`: the TTL-gated, coalesced refresh above (the module exports no test-reset hook) |
+
+#### Trace / wire-in
+
+- Refreshed at `index.ts:2573/2689` before grid/host reads, and at `:2832` before the load-shed advisor tick (only when shed candidates are configured).
+- `haEntity: (id) => haStateCache.getCachedEntity(id)` supplied to the advisor (`index.ts:2814`).
+- Age surfaced on `/api/load-shedding/status` as `haStateCacheAgeMs` (`index.ts:3203`).
+- Consumed by `hostPower.liveHostPower` and the grid classifier.
+
+#### Edge cases
+
+- **Failed fetch keeps the old cache.** If `getAllStates()` returns falsy, the map and `lastFetchedAt` are untouched — but `getCacheAgeMs` then keeps climbing, so consumers with a staleness ceiling (host-power's 120 s) correctly flip to unknown rather than trusting a frozen value.
+- **Cold cache ⇒ `+Infinity` age**, which every staleness gate reads as stale/safe.
+
+---
+
+### 4. `alertOnset.ts` — restart-persistent alarm onset timestamps
+
+#### What + why
+
+The `Alert` type is **stateless** — every field is recomputed fresh on each `alertMonitor.evaluate()` tick — so nothing on the alert records *when* it first became active. The ALM screen (`telnet/plant/alm.ts`) used to stamp every alarm row with `snapshot.generatedAt` (this refresh's clock), which is wrong for any alarm that's been active longer than one poll. `alertMonitor`'s in-memory `TrackedAlert.firstSeen` would be correct, but it lives only in the in-process `tracked` Map and resets to "now" on **every add-on restart — and this host restarts roughly daily**. This sidecar is the durable source of truth for first-seen time.
+
+#### Storage
+
+- Path: `ALERT_ONSET_PATH` env, else `resolve(cwd, config.dbPath, '..', 'alert-onset.json')` — the same state-dir convention as the other alarm sidecars (`notify-state.json`, `alert-telemetry.jsonl`, `alert-family-meta.json`).
+- Format: a flat JSON object `{ <alertId>: <firstSeenMs> }`.
+- Written via `atomicWriteFileSync` (crash-safe temp-then-rename).
+
+#### Key constant
+
+```
+ALERT_ONSET_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000   // 7 days
+```
+
+Entries older than 7 days are dropped at load. Scaled up from the notify-state sibling since an onset record is smaller and less sensitive; an onset this old belongs to an alert every other persistence layer has long since forgotten anyway.
+
+#### Mechanism
+
+- `loadAlertOnsets(path, nowMs)` — parse the file; keep only entries where `v` is a finite number **and** `v > nowMs - ALERT_ONSET_MAX_AGE_MS`. Corrupt/missing file ⇒ empty map (start fresh, never throw).
+- `saveAlertOnsets(path, state)` — atomic write; on failure, swallow (ALM just falls back to `generatedAt`).
+- `syncAlertOnsets(activeIds, nowMs, { prune })` — **the single per-cycle hook.** Each active id not yet recorded is stamped `nowMs` (`changed = true`). Each recorded id no longer active is deleted (`changed = true`) unless `prune` withholds it: `prune: false` keeps every absent id, and a predicate (v1.186.0) prunes only the ids it returns true for. It persists **only if `changed`**. `alertMonitor` prunes an absent id once its absence is evidence: the analytics-worker feed that owns it has delivered since boot, or, for a live-snapshot id, the store has hydrated. As a fallback bound, it also prunes once `LEARNED_RESOLVE_GRACE_MS` (10 min) has passed, counted from hydration for a device-derived id (v1.186.3) and from boot for any other. A steady-state tick with an unchanged roster is a pure in-memory no-op. Wrapped in try/catch so a disk/permission failure can never propagate into the alarm loop.
+- `getAlertOnset(id)` — look up first-seen ms; `undefined` if never recorded, pruned, or the sidecar failed to load.
+
+#### The clear-then-rise semantics
+
+Pruning an id once it has left the active set and its absence is evidence (above) means a later **re-fire** of the same id gets a *fresh* onset — matching how every other alarm-lifecycle concept in this codebase (`tracked`, notify-state, telemetry) treats a clear-then-rise as a **new event**, not a continuation.
+
+#### Trace / wire-in
+
+- **Write:** `alertMonitor.ts:4155` calls `syncAlertOnsets(new Set(tracked.keys()), now, { prune })` once per evaluate tick, alongside the falling-edge/dwell loop. `alertMonitor.ts:3724` calls `restampAlertOnset(id, now)` (v1.173.0) when the pack residency check finds a new subject under a still-active id.
+- **Read:** `telnet/plant/alm.ts:205` renders each row's timestamp as `fmtTs(getAlertOnset(a.id) ?? stamp)`: the onset if known, else the pre-existing `generatedAt` fallback. Two other readers:
+  - `alertMonitor`, for a cleared alert's true duration in its history record (`getAlertOnset(id) ?? t.firstSeen`, `:3651`) and for the boot re-track decision (`priorOnsetMs`, `:3761`).
+  - The broadcast pre-filter `speakableAlerts` (`broadcast.ts`), which passes it as `onsetOf` to the cell-imbalance speak hold (`heldForImbalanceConfirm`).
+
+#### Edge cases / honest-null
+
+- Best-effort everywhere; the alarm loop is never blocked or crashed by onset I/O.
+- `resetAlertOnsetCacheForTests()` clears the module cache so tests can repoint `ALERT_ONSET_PATH` per test.
+
+---
+
+### 5. `messageRateFloor.ts` + `messageRateFloorAlert.ts` — data-quality "rate collapse" detector (SAFETY-CRITICAL)
+
+#### What + why
+
+The staleness alarm (`alerts.ts`) and the recorder gap detector (`recorder.ts`) both key off the **time since the last message**. A device can defeat *both* by still sending *something*. The live audit caught the SHP2 crawling at **~0.24 msg/min for ~13 h** (150× below its ~30 msg/min norm): its ~5-min heartbeat kept `lastUpdated` under the 180 s stale threshold *and* under the 15-min recorder-gap threshold, so neither fired while the device was effectively not reporting. The SHP2 is the single-point-critical alarm **data source** (floor / SoC / runway), so a silent rate-collapse is a real blind spot — the inputs look live while being effectively stale.
+
+`RateFloorTracker` watches each device's incoming message **rate** against its own learned baseline and flags a sustained collapse even while `lastUpdated` stays fresh.
+
+#### Inputs
+
+- Per-SN cumulative message count `store.mqttMsgCountBySn`.
+- The current time (injected for determinism).
+
+#### Config + constants (`DEFAULT_RATE_FLOOR_CONFIG`)
+
+| Field | Env var | Default | Meaning |
+|-------|---------|---------|---------|
+| `minBaselineRate` | `MSG_RATE_FLOOR_MIN_BASELINE` | `10` msg/min | Eligibility floor, tested against the high-water mark `peak` |
+| `floorFraction` | `MSG_RATE_FLOOR_FRACTION` | `0.2` | Collapse when the live rate is below this fraction of the comparison baseline |
+| `collapseMs` | `MSG_RATE_FLOOR_COLLAPSE_MIN` | `20` min | Collapse dwell for a device with a diurnal profile |
+| `flatCollapseMs` | `MSG_RATE_FLOOR_FLAT_COLLAPSE_MIN` | `4` min | Collapse dwell for a flat-profile device (v1.95.0) |
+| `flatnessMaxCv` | `MSG_RATE_FLOOR_FLATNESS_MAX_CV` | `0.15` | Max coefficient of variation across mature hour buckets for "flat" |
+| `flatnessMinMatureHours` | `MSG_RATE_FLOOR_FLATNESS_MIN_HOURS` | `18` | Mature hour buckets required before flatness is trusted |
+| `recoverMs` | `MSG_RATE_FLOOR_RECOVER_MIN` | `5` min | Dwell before a fired collapse clears, or a pending one is forgiven |
+| `baselineAlpha` | *(constant)* | `0.2` | EWMA alpha upward, and the symmetric global EWMA |
+| `baselineAlphaDown` | *(constant)* | `0.02` | Hour-bucket EWMA alpha downward (10× slower) |
+| `minHourSamples` | `MSG_RATE_FLOOR_MIN_HOUR_SAMPLES` | `30` | Healthy samples before an hour bucket outranks the global baseline |
+| `peakHalfLifeMs` | `MSG_RATE_FLOOR_PEAK_HALFLIFE_DAYS` | `7` days | Half-life of the eligibility high-water mark |
+
+#### The algorithm (`sample(sn, cumulativeCount, nowMs)`)
+
+Per SN it holds `{lastCount, lastMs, baseline, peak, hourly[24], hourlyN[24], collapseSinceMs, recoverSinceMs, fired, wasEligible}`. The learned part (`baseline`, `hourly`, `hourlyN`, `peak`) is written to `msg-rate-floor.json` beside the database every 10 ticks and hydrated at boot; `MSG_RATE_FLOOR_STATE_PATH` overrides the path. Counters and timers are never restored, so a restart cannot resurrect an in-flight collapse.
+
+1. **First sample** ⇒ seed state, return `{rate:null, baseline:0, collapsed:false, recovered:false, collapsing:false}`.
+2. `dtMin = (nowMs - lastMs) / 60000`. If `dtMin <= 0` ⇒ return the current state's `collapsing = fired` (no time passed).
+3. **Counter reset guard:** if `cumulativeCount < lastCount` (a process restart re-zeroes the counter) ⇒ re-baseline instead of computing a negative/huge rate; clear the collapse; `recovered` reflects whether it had `fired`.
+4. `rate = max(0, (cumulativeCount - lastCount) / dtMin)`.
+5. **Eligibility from a high-water mark:** `peak = max(rate, peak × 0.5^(dt / peakHalfLife))`; `eligible = peak >= minBaselineRate`. The mark rises instantly and decays over days, so a collapse cannot disarm the detector. A device that does lose eligibility is logged `NO LONGER MONITORED` (`eligibilityLost`).
+6. **Comparison baseline:** `cmpBaseline` is this hour-of-day's bucket once it holds `minHourSamples` healthy samples, else the global EWMA (v1.66.0). Then `isCollapsed = eligible && rate < floorFraction * cmpBaseline`.
+7. **Baseline update — each estimator gated on its own view:**
+   - global: unless `eligible && rate < floorFraction × baseline`, `baseline = baseline == 0 ? rate : 0.2·rate + 0.8·baseline`. It is symmetric, so it follows the diurnal swing while buckets are immature.
+   - hour bucket: unless the bucket is mature and `rate < floorFraction × bucket`, update at `baselineAlpha` (0.2) when `rate ≥ bucket` and at `baselineAlphaDown` (0.02) when below, and count the sample.
+
+   A sub-floor sample never moves an estimator, and the 10× slower downward rate stops a ramp-down from walking the bucket down to meet a collapse. The v0.92.0 claim that a single healthy-only EWMA was immune was false: samples between 0.2× and 1× of the baseline still eroded it.
+8. **Dwell on both edges:**
+   - Not fired, `isCollapsed`: set `collapseSinceMs` (from the last healthy sample) if unset. The collapse fires (`fired = true`, `collapsed = true` for one tick) after `flatCollapseMs` (4 min) if the device's mature hour buckets are flat (`isFlatProfile`: ≥ 18 mature buckets, cv ≤ 0.15; v1.95.0), else after `collapseMs` (20 min).
+   - Not fired, not collapsed: a pending `collapseSinceMs` is forgiven only after `recoverMs` (5 min) of non-collapsed samples.
+   - Fired: it clears (`recovered = true`) only after `recoverMs` of `rate ≥ max(floorFraction × cmpBaseline, minBaselineRate)`. Losing eligibility, or a bucket that learned the starved rate, never reads as recovery.
+9. Return `{rate, baseline: cmpBaseline, collapsed, recovered, collapsing: fired, usedHourBucket, eligibilityLost, eligibilityPeak}`.
+
+#### False-positive guards (by design)
+
+- **Eligibility floor** — only a device whose high-water mark reaches `minBaselineRate` can "collapse" (SHP2 ~30/min qualifies; idle/spare units never do). The mark's 7-day half-life means an outage cannot disarm it.
+- **Hour-of-day baselines** — the Cores' 13× diurnal swing (idle ~4.6–6.2 msg/min at 19:00–22:00) is compared against the same hour, not a daily average (v1.66.0).
+- **Asymmetric bucket EWMA** — a sub-floor sample never updates an estimator, and a mature bucket decays 10× slower than it rises.
+- **Persistence windows** — 20 min (4 min for a flat-profile device) before firing; 5 min of genuinely healthy traffic before clearing.
+- **Surfacing gates** (index.ts tick, `decideCollapseSurfacing`) — an offline device is never surfaced; the offline alert owns it. An electrically idle device (< 30 W in + out, v1.108.0), or one whose rate has already rebounded (v1.112.1), does not enter the surfaced set, but neither condition evicts an episode already surfaced.
+- **Edge-triggered** — fires once, then holds `collapsing` until recovery (stable dedup key across ticks).
+
+#### The self-alert (`messageRateFloorAlert.ts`)
+
+v0.92.0 only `app.log.warn`-ed a collapse — invisible to the operator. v0.93.0 promotes it to a push alert. The 60 s tick publishes the currently-collapsing set via `setRateFloorCollapses(...)`; `alertMonitor` turns each into a **warning** Alert through the same notify + `snapshot.alerts` pipeline as offline/stale alerts (it is **not** `annunciate:false`).
+
+- `rateFloorAlertId(sn) = "msg-rate-floor-<sn>"` — stable per device, so it de-dups across ticks and simply drops from the set on recovery.
+- `rateFloorAlerts(collapses)` — pure builder, one Alert per device: `severity: 'warning'`, `category: 'Connectivity'`, `priority: 'medium'` (explicit ISA P3 — serious but must **not** read as a High protective-limit breach and must **not** break through quiet hours as a full emergency). Facts: live rate + `~<baseline>` msg/min. Detail names the trap explicitly (looks fresh, defeats staleness + gap detectors, floor/SoC/runway effectively stale) and recommends a power-cycle for a clean reconnect. **v1.187.10** — the first surfacing of an episode freezes its onset rate and baseline (`surfacedCollapseEntry`, a `Rate at onset` fact); a card whose live rate is back at or above the floor during the 5-min recovery dwell says it fell to the onset figures and is now recovering, with the recovery bar, instead of "collapsed to 27.0 msg/min, far below its learned ~25" (all 78 closing bodies in the live ledger were at or above the floor). The collapse log line is WARN, or INFO naming the mute for a device the roster mutes (bench spare, off-panel Core: `rateFloorCollapseLine`, `rosterMuteReasonForSn` from the last alert tick).
+
+#### Trace / wire-in
+
+`index.ts:2855`: `const rateFloor = new RateFloorTracker()`, hydrated from `msg-rate-floor.json` at `:2933–2939`. It is driven by a 60 s `setInterval` (`.unref()`-ed) at `:3029–3195`:
+
+```
+for {sn, count} of rateFloorSampleSet(Object.keys(devices), store.mqttMsgCountBySn):
+    r = rateFloor.sample(sn, count, now)
+    dec = decideCollapseSurfacing(r.collapsing, online, idle, alreadySurfaced, starvedNow)
+    if !online → drop sn from the surfaced set; continue
+    if dec.surfaced → push surfacedCollapseEntry(...) into collapses   // onset rate frozen (v1.187.10)
+    if dec.logCollapse → WARN (INFO naming the mute for a roster-muted device)
+    else if r.recovered and it had surfaced → app.log.info(... recovered)
+    if r.eligibilityLost → WARN 'NO LONGER MONITORED'
+setRateFloorCollapses(collapses)
+→ session self-heal quorum (v1.76.0); learned baselines persisted every 10 ticks
+```
+
+**v1.131.0 — sample the roster, not the observation map.** The tick used to
+iterate `store.mqttMsgCountBySn` directly. That map gains an entry only inside the
+MQTT ingest path, so a device that has produced **zero** messages since process
+start is simply absent from it and was never sampled at all: the detector was
+armed for a 0.2 msg/min collapse and blind to a 0.0 msg/min one — and a restart is
+precisely what converts the first into the second. The blind spot landed on the
+one device the section above calls "the single-point-critical alarm data source".
+`rateFloorSampleSet(rosterSns, counts)` (`messageRateFloor.ts`) drives from the
+device roster with `counts.get(sn) ?? 0`, so silence enters the existing dwell and
+eligibility logic as the rate-0 sample it is; serials present in the counter map
+but absent from the roster are still sampled, so a mid-run roster change cannot
+silently drop a device out of monitoring. Mutation-proven load-bearing
+(`scripts/mutate-detector-honesty.mjs`, mutants xiv–xv).
+
+Errors in the tick are caught and logged at DEBUG (`tick skipped`). The tick raises only its own `msg-rate-floor-*` alerts, but its output acts elsewhere in two ways:
+- The published collapse set freezes learned `baseline-*` anomalies for a starved Core (`applyStarvedFeedFilter` / `starvedFeedSns` in `alertMonitor`, v1.79.0/v1.184.0). While the feed is starved they are neither raised nor resolved.
+- A sustained collapse quorum triggers the MQTT session self-heal (`rebuildMqttSession`, v1.76.0, with a cooldown and a 24 h budget).
+
+It never touches the REST poll, which is the alarm data path.
+
+#### Edge cases
+
+- Counter reset (restart) is explicitly handled to avoid a spurious negative/huge rate.
+- `rate` is `null` until two samples exist; the alert renders `—` / `?` when a rate isn't yet computed.
+
+---
+
+### 6. Log & format hygiene helpers
+
+These bound what lands on disk and in the log, and keep a real signal greppable during a storm. Individually small; collectively they are why an outage log is still readable.
+
+#### 6.1 `logCoalesce.ts` — duplicate-line storm suppression
+
+**What + why.** Some emitters fire the *same* line over and over during a transient incident. The smoking gun: a 66-minute DNS brownout drove the MQTT client into a tight reconnect→close→error loop, logging `mqtt: error getaddrinfo EAI_AGAIN …` **514 times** — pure noise that buried the real signal.
+
+**Mechanism.** `makeLogCoalescer(emit, opts)` returns `{ log, flush }`:
+
+- **First sighting** of a key logs immediately at original level/format (a state *change* is never swallowed).
+- Repeats are counted as `suppressed` and rolled up **at most once per `summaryWindowMs`** (default `60_000`) as
+  `"<sample> : <N> more in last <window>"` (window humanized to `ms`/`s`/`m`/`h`).
+- **State is per distinct key** — default key is the exact message string; several interleaving lines (reconnect / close / error) each coalesce independently. Override `keyFor` to collapse messages varying only in a volatile suffix.
+- `flush()` force-emits all pending summaries and clears state so the tail isn't lost and the next sighting logs fresh — call it on recovery (successful reconnect) or shutdown.
+- Clock is injectable (`now`) for testing; no module-global state.
+
+**Wire-in.** `ecoflow/mqtt.ts:161/165` — `stormLog` and `stormWarn` (flushed on recovery at `:168–169`) wrap the module's info/warn loggers around the reconnect loop. This is the logging analogue of the storm gate in `broadcast.ts`.
+
+#### 6.2 `logSanitize.ts` — bound what's persisted / rendered
+
+Shared sanitizers for request/network-derived values that are **intentionally** persisted (audit log, alert outcomes, model notes) or rendered to a terminal. They don't make tainted data "safe" in the CodeQL sense (recording provenance is the feature) — they bound what can land on disk.
+
+| Function | Behavior |
+|----------|----------|
+| `cleanText(v, max)` | Non-string ⇒ `undefined`. Strip C0/DEL (` –`, ``), clamp to `max`. |
+| `sanitizeDisplayName(v, max=64, fallback='')` | **Security #2, CWE-150.** Strip **all C0 (incl. ESC 0x1b), DEL, and C1 (0x7f–0x9f, incl. 8-bit CSI 0x9b)**, collapse runs to a space, trim, clamp. Non-string / all-control ⇒ `fallback`. Prevents a device/circuit name set in the EcoFlow app or SHP2 config from injecting terminal escape sequences (OSC title-set, OSC 52 clipboard-write, cursor control) that would execute in the operator's terminal when they view the TUI. |
+| `cleanMultilineText(v, max)` | Like `cleanText` but **preserves `\n` and `\t`** (operator-typed multi-line notes). |
+| `finiteNumber(v)` | Finite number or `undefined` (so `JSON.stringify` drops it like an absent field). |
+
+**Wire-in.** `sanitizeDisplayName` guards every cloud/MQTT-sourced display name at the ingest boundary: `snapshot.ts:586` (`deviceName`, max 48, falls back to the SN) and `ecoflow/project.ts:617/630` (device + SHP2 circuit names).
+
+#### 6.3 `mqttStartClassify.ts` — boot-grace log-level selection
+
+**What + why.** The first few MQTT start failures that look like a boot-time DNS race (`EAI_AGAIN` / `ENOTFOUND` / `getaddrinfo`) or the EcoFlow `8521 "signature is wrong"` handshake error are **benign** — they self-heal within ~10 min on the retry backoff *while REST polling (the alarm data path) never stops*. So they should log at **WARN**, not ERROR, and not alarm an operator reading the boot log.
+
+**Mechanism.**
+
+```
+MQTT_BOOT_TRANSIENT_RE = /EAI_AGAIN|ENOTFOUND|getaddrinfo|8521|signature is wrong/i
+
+classifyMqttStartFailure(attempt, message, graceAttempts):
+    return (attempt < graceAttempts && MQTT_BOOT_TRANSIENT_RE.test(message))
+             ? 'warn' : 'error'
+```
+
+A failure recurring **past** the grace window, or **any other** error class at any attempt, logs at ERROR so it stands out instead of being buried under benign boot artifacts. Extracted from `index.ts` specifically so the v0.75.0 boot-grace behaviour is unit-tested (it had zero coverage and no post-deploy boot had hit a DNS race).
+
+**Wire-in.** `index.ts:2352` — `const transientBoot = classifyMqttStartFailure(attempt, msg, MQTT_BOOT_GRACE_ATTEMPTS) === 'warn'`.
+
+#### 6.4 `haPayloadFmt.ts` — shared HA payload formatting
+
+**What + why.** The REST `/api/ha-state` handler (`index.ts`) and the MQTT-discovery `buildState` (`mqttDiscovery.ts`) carried **byte-identical** copies of these formatters. Factored out **verbatim** so the published HA sensor values are unchanged across both surfaces.
+
+| Helper | Behavior |
+|--------|----------|
+| `kwh1(wh)` | Wh → kWh at 1 decimal, null-safe: `wh == null ? null : Math.round(wh/100)/10`. Used for SHP2 backup-pool fields. |
+| `makeLifetimeKwh(lifetime)` | Returns `(k) =>` lifetime key → kWh at 3 decimals over `persistedWh + pendingWh`. Preserves the exact **falsy-entry** guard (`lifetime[k] ? … : null`, *not* `!= null`), so a missing **or** zero/falsy entry maps to `null` as before. |
+| `makeAlertCounter(alerts)` | Returns `(src, sev) =>` count. `src === 'learned'` ⇒ `a.source === 'learned'`; `'threshold'` matches **every non-`learned`** source (`a.source !== 'learned'`) — verbatim. |
+| `soonestProjecting(packs)` | Returns `{ projecting, soonest }`: packs with `status === 'projecting'`, and the fewest-`yearsToEol` pack via a reduce using the `?? 1e9` sentinel so a `null` `yearsToEol` sorts **last** — verbatim. |
+
+A fifth helper, `dailyFigureResetIso(reportGeneratedAtMs)` (v1.187.10), returns the ISO local midnight that starts the day a re-estimated daily figure covers. It takes that day from the report's `generatedAt`, or uses today when there is no report. Its output is published as `pv_clipped_kwh_today_since` and `pv_curtailment_kwh_today_since`.
+
+**Wire-in.** `index.ts:23` and `mqttDiscovery.ts:11` import all five. In the `/api/ha-state` handler: `:1573` (`lifetimeKwh`), `:1577` (`soonestProjecting`), `:1589` (`makeAlertCounter`), `:1609–1610` (`kwh1` for `backup_full_capacity_kwh` / `backup_remaining_kwh`), `:1681`/`:1692` (`dailyFigureResetIso`).
+
+---
+
+### Cross-cutting design invariants
+
+- **Collapse the method, never the measurement.** Every unknown here (host-power stale, cache cold, onset missing, rate not yet computed) reports honest-null and falls back — none fabricates a value or a false alarm.
+- **Best-effort never blocks the alarm loop.** `alertOnset`, `haStateCache`, and the rate-floor tick all wrap I/O in try/catch so a disk/permission/network failure degrades gracefully instead of crashing the life-safety process.
+- **Pure cores, injected clocks.** `classifyTopLevelError`, `interpretHostPowerEntity`, `extractEntityWatts`, `RateFloorTracker.sample`, `makeLogCoalescer`, `classifyMqttStartFailure`, and the `haPayloadFmt` helpers are all pure/clock-injected and unit-tested off the live pipeline.
+- **Greppable loudness.** Survived-but-suspicious events (`process-guard: SURVIVED …`, coalescer roll-ups, boot-grace WARNs) stay findable so a *masked recurring* fault can still be diagnosed.
+
+
+---
+
+## 14. Intelligent Lighting & HVAC Posture (energy-aware automation)
+
+This cluster documents the add-on's **energy-aware automation layer** — the signals the
+add-on computes and publishes so that *Home-Assistant-side* automations can make the
+home's lighting (and, in an aspirational Phase-2 sense, its HVAC) behave according to how
+much stored/harvested energy is actually available overnight.
+
+> **Read this first — the division of labor.** The add-on is a *sensor*, not an
+> *actuator*, in this layer. It computes one runway-driven enum (**Lighting Posture**) and
+> a set of **PV-curtailment / surplus** signals, and publishes them as MQTT sensors. It
+> **never toggles a light, never sets a thermostat, never calls a dimmer**. All of the
+> actuation the design narrative describes — heartbeat pulses, exterior-light policy,
+> "dimmer ceilings", pre-cool — lives in **Home Assistant automations** that the operator
+> writes and that are gated behind `input_boolean.lighting_postures_enabled`. Where the
+> code is explicit that a consumer is HA-side or a feature is dormant, this document says
+> so plainly rather than describing behavior that does not exist in the repo.
+
+The two concrete engines that live in the add-on are:
+
+1. **Lighting Posture sensor** — `server/src/lightingPosture.ts` (the runway-driven enum +
+   asymmetric hysteresis + restart persistence), published by
+   `server/src/mqttDiscovery.ts`.
+2. **PV-curtailment / surplus + opportunistic loads** — `computeCurtailment()` in
+   `server/src/analytics.ts`, which produces the `surplus` posture trigger and the
+   (advisory-only) `ac_precool` / `dehumidifier` HVAC suggestions.
+
+Everything else in the "HVAC posture framework" is **dormant** — it exists as data
+structures and `null`-valued hint fields, not as running logic. This is stated honestly in
+the relevant section below.
+
+---
+
+### 1. Lighting Posture sensor
+
+#### 1.1 WHAT it does + why
+
+`lightingPosture.ts` distills the whole overnight-energy question into **one enum** that HA
+automations can key on. The central design decision (from the file header) is that the
+posture is driven by the **runway model's forward question** — *"will we reach sunrise
+above the reserve floor?"* — **not by raw State-of-Charge**:
+
+> *"a 45% pool at 21:00 with a clear-day forecast is fine; the same pool at 01:00 drawing
+> 8 kW is not. Raw-SoC triggers nag on good nights and under-react on bad ones."*
+
+The published enum is a six-level escalating ladder:
+
+| Posture | Meaning (from header) | Severity rank |
+|---|---|---|
+| `surplus` | PV curtailment active — energy is going unharvested; lighting (and everything) may run freely. Only entered from normal. | 0 |
+| `normal` | Projected dawn minimum comfortably above reserve. | 0 |
+| `conserve` | Projected dawn minimum getting thin (`< CONSERVE_DAWN_PCT`). | 1 |
+| `amber` | A reserve crossing is projected within the horizon. | 2 |
+| `red` | The crossing is near (`≤ RED_HOURS_TO_RESERVE` h away). | 3 |
+| `critical` | The pool is at/below its reserve floor **right now**. | 4 |
+
+The severity ranks come from `POSTURE_RANK`:
+
+```ts
+const POSTURE_RANK: Record<LightingPosture, number> = {
+  surplus: 0, normal: 0, conserve: 1, amber: 2, red: 3, critical: 4,
+};
+```
+
+Note `surplus` and `normal` **share rank 0** — `surplus` is *not* a warning tier, it is
+"normal with headroom", so the two swap freely without tripping the hysteresis.
+
+#### 1.2 INPUTS
+
+The classifier takes a `PostureInputs` object (assembled fresh on every MQTT publish in
+`mqttDiscovery.ts`):
+
+| Field | Type | Source (see §1.5 trace) | Meaning |
+|---|---|---|---|
+| `belowReserveFloor` | `boolean` | `belowReserveFloor(runway)` — the runway report | Pool currently at/below its reserve floor. |
+| `hoursToReserve` | `number \| null` | `runway.hoursToReserve` | Projected hours until the pool crosses reserve; `null` = no crossing in horizon. |
+| `dawnMinSocPct` | `number \| null` | `forecast.minProjectedSoc` | Forecast's projected minimum SoC % over the horizon (the "dawn minimum"). |
+| `reservePct` | `number \| null` | `shp2.projection.backupReserveSoc` | The SHP2's configured reserve %, used for the amber margin. |
+| `curtailmentActive` | `boolean` | `curtailment.active` (`computeCurtailment`) | PV curtailment currently active (energy going unharvested). |
+| `gridBackstopping` | `boolean?` (v0.87.0) | `liveGridBackstop(snap.devices).backstopping` | The utility grid is genuinely carrying/able to carry the home right now. |
+| `gridImportLive` | `boolean?` (v1.186.3) | `liveGridBackstop(snap.devices).importLive` | Measured grid import is flowing. Selects only the wording of the grid-backstop reason ("grid supplying the house" vs "grid available as backup"). |
+| `nowMs` | `number` | `Date.now()` | Clock injection (deterministic in tests). |
+
+#### 1.3 The CALCULATION — `rawPosture(i)` then hysteresis
+
+The classification is a **pure function** `rawPosture()` (no state, exported for tests),
+wrapped by a **stateful tracker** that applies asymmetric hysteresis and restart
+persistence.
+
+##### 1.3.1 `rawPosture()` — the pure classifier
+
+Real constants (from the file):
+
+```ts
+const CONSERVE_DAWN_PCT      = 35;   // dawn-min % below which "conserve" engages
+const AMBER_DAWN_MARGIN_PCT  = 5;    // margin above reserve % treated as "grazing"
+const RED_HOURS_TO_RESERVE   = 4;    // hoursToReserve at/below which "red" engages
+```
+
+Evaluation order (first match wins):
+
+1. **`critical`** — if `belowReserveFloor` is true → `critical`, reason `"pool at/below
+   reserve floor"`. (This is the only branch that fires when below floor; it is checked
+   *before* the grid-backstop short-circuit, so a floored pool is always critical.)
+
+2. **Grid-backstop short-circuit (v0.87.0)** — if `gridBackstopping` is true (and we are
+   above the floor, since branch 1 already handled the floor): the runway-to-reserve
+   projection is *islanded-only* — on a grid-tied evening the SHP2 simply transfers to
+   mains at the floor, so the depletion escalations must **not** fire. Result:
+   - if `curtailmentActive` → `surplus` (excess solar still applies), else
+   - `normal`, reason `"grid available as backup — depletion projection is for an outage only"` — or `"grid supplying the house — …"` while measured grid import flows (`gridImportLive`, v1.186.3; wording only).
+
+   When `gridBackstopping` is false/absent (islanding — the **safe default**), the full
+   ladder below runs unchanged.
+
+3. **`red`** — if `hoursToReserve != null && hoursToReserve <= RED_HOURS_TO_RESERVE (4)` →
+   `red`, reason `"reserve crossing in {h}h"`.
+
+4. **`amber`** — with `reserve = reservePct ?? 15` (the 15% fallback), amber fires if
+   **either**:
+   - `hoursToReserve != null` (a crossing is projected, just >4 h out), **or**
+   - `dawnMinSocPct != null && dawnMinSocPct < reserve + AMBER_DAWN_MARGIN_PCT` (dawn
+     minimum grazes within 5 points of reserve).
+
+   Reason is either `"reserve crossing in {h}h"` or `"dawn minimum {n}% grazes reserve
+   {reserve}%"`.
+
+5. **`conserve`** — if `dawnMinSocPct != null && dawnMinSocPct < CONSERVE_DAWN_PCT (35)` →
+   `conserve`, reason `"dawn minimum {n}% (< 35%)"`.
+
+6. **`surplus`** — if `curtailmentActive` → `surplus`, reason `"PV curtailment active —
+   surplus energy available"`.
+
+7. **`normal`** (fallthrough) — reason `"dawn minimum {n}%"` when a dawn minimum is available, else `"no
+   depletion projected"`.
+
+##### 1.3.2 Asymmetric hysteresis — `createPostureTracker()`
+
+The stateful wrapper enforces **"escalate immediately, de-escalate slowly"**:
+
+```ts
+export const DEESCALATE_HOLD_MS = 15 * 60 * 1000;   // 15 minutes
+```
+
+On each `update(i)`:
+
+- **First tick** (`current == null`): adopt the raw posture, set `changedAtMs = nowMs`.
+- **Escalation** (`POSTURE_RANK[raw] > POSTURE_RANK[current]`): apply **immediately**
+  (safety first), reset the calmer-hold timer.
+- **De-escalation** (`POSTURE_RANK[raw] < POSTURE_RANK[current]`): start (or continue) a
+  `calmerSinceMs` timer. Only when the calmer raw posture has **held for `holdMs`
+  (15 min)** does `current` actually relax. Otherwise the sterner posture (and its
+  original reason) is held. This stops a cloud edge or a compressor cycle from making the
+  house "breathe up and down".
+- **Same rank, same posture**: adopt the fresh reason immediately; any pending hold or dwell is cleared.
+- **Same rank, different posture** (`normal↔surplus`, v1.63.0): the swap must hold for
+  `SURPLUS_DWELL_MS` (10 min) before it is adopted, in both directions. Until then the current
+  posture is held. The posture is an actuation edge for HA-side automations, such as a surplus
+  pre-cool that moves thermostat setpoints on `→ surplus` and restores them on `→ normal`. The
+  upstream curtailment signal is a bare 300 W threshold with no hysteresis of its own. A move
+  from `surplus` to `conserve`/`amber`/`red`/`critical` is a rank increase and still applies on
+  the next tick.
+
+The classifier is deliberately re-evaluated every publish; only the *hold* is asymmetric.
+
+##### 1.3.3 Restart persistence (v0.15.20)
+
+The tracker was process-local, so an add-on restart mid-event flapped the published
+posture (observed live Jun 11 19:28 local: `amber → normal → amber` within minutes),
+firing a spurious "restore-then-reclamp" heartbeat at the family. The tracker now
+persists `{posture, reason, changedAtMs, calmerSinceMs, swapSinceMs, savedAtMs}` to disk (`swapSinceMs`, v1.63.0, is absent from older files and read as null, so the dwell restarts):
+
+- **Write policy (SD-card diet):** persist only on posture changes and hold-window
+  transitions — **not** every tick.
+- **Load-on-start:** on construction with a `statePath`, `loadPersisted()` restores the
+  held posture so a restart **resumes** it. A half-warm calmer reading after restart is
+  merely a de-escalation *candidate* that must still survive the 15-min hold.
+- **Staleness guard:** persisted state older than `PERSIST_MAX_AGE_MS = 60 * 60 * 1000`
+  (1 hour) is discarded (the event is likely over → start fresh). Corrupt JSON or an
+  unknown posture string also → start fresh.
+- Writes go through `atomicWriteFileSync` (`atomicWrite.ts`, shared with battery-soc-alarm
+  / runway-alarm) so a crash mid-write cannot corrupt the file.
+
+State path resolution:
+
+```ts
+const STATE_PATH =
+  process.env.LIGHTING_POSTURE_STATE_PATH ??
+  resolve(process.cwd(), config.dbPath, '..', 'lighting-posture.json');
+```
+
+The process-wide singleton `lightingPostureTracker` (created with `DEESCALATE_HOLD_MS` and
+`STATE_PATH`) is shared by every consumer.
+
+#### 1.4 OUTPUTS + API / MQTT
+
+The tracker returns `{ posture, reason, changedAtMs }`. Two values are published as MQTT
+discovery sensors (`mqttDiscovery.ts`):
+
+| MQTT `unique_id` | Sensor name | value_json key | Notes |
+|---|---|---|---|
+| `ecoflow_lighting_posture` | Lighting Posture | `lighting_posture` | icon `mdi:lightbulb-auto`; the enum string. |
+| `ecoflow_lighting_posture_reason` | Lighting Posture Reason | `lighting_posture_reason` | icon `mdi:information-outline`; `entity_category: diagnostic`; human-readable basis. |
+
+Data shape (fields of the MQTT state payload):
+
+```json
+{
+  "lighting_posture": "amber",
+  "lighting_posture_reason": "dawn minimum 18% grazes reserve 15%"
+}
+```
+
+These are **not** exposed on a dedicated REST endpoint — they are computed inside the MQTT
+`buildState` path (`mqttDiscovery.ts` ~line 1337) and delivered to HA via MQTT. (The
+underlying inputs — `runway`, `forecast`, `curtailment` — each have their own `/api/*`
+endpoints; see §2 for curtailment.)
+
+#### 1.5 The TRACE — where inputs come from, where the output goes
+
+**Upstream (inputs):** In `mqttDiscovery.ts` `buildState`, the code settles each analytics
+report on its own with `settleStateReports` (v1.186.0). A report's value is its answer within
+`STATE_REPORT_WAIT_MS` (5 s), otherwise its last good answer if that is no older than the live
+sensors' `expire_after`, otherwise null. The reports are `forecast`, `degradation`, `runway`, `roundTripEfficiency`,
+`clipping`, `selfConsumption`, `carbon`, `tariff`, `curtailment` — then calls
+`lightingPostureTracker.update({...})` with:
+
+```
+belowReserveFloor : belowReserveFloor(runway)
+hoursToReserve    : runway.hoursToReserve
+dawnMinSocPct     : forecast.minProjectedSoc
+reservePct        : shp2.projection.backupReserveSoc ?? null
+curtailmentActive : !!curtailment.active
+gridBackstopping  : liveGridBackstop(snap.devices).backstopping
+gridImportLive    : liveGridBackstop(snap.devices).importLive   // v1.186.3 — reason wording only
+nowMs             : Date.now()
+```
+
+The `gridBackstopping` resolver `liveGridBackstop()` is the **same** grid-presence
+resolver used by the `off_grid` and `runway_projection_islanded_only` sensors and by the
+floor-alarm engine, so the posture's grid-awareness is coherent with the alarm layer.
+
+**Downstream (output → actuation):** The two MQTT sensors land in HA. From the file
+header and `mqttDiscovery.ts` comments, the intended HA-side consumers are:
+
+- a **heartbeat pulse** (a brief light flash on escalation edges),
+- an **exterior-light policy**,
+- **dimmer ceilings** (cap brightness under conserve/amber/red).
+
+**All of these are HA automations the operator writes**, and they are **gated behind
+`input_boolean.lighting_postures_enabled`** — the add-on "only ever computes and
+publishes" and "never toggles a light". The escalation-edge-triggered nature of these
+consumers is exactly why the restart-persistence work (§1.3.3) matters: a flap would fire a
+spurious pulse at the family.
+
+#### 1.6 CONFIG knobs
+
+| Knob | Where | Default | Effect |
+|---|---|---|---|
+| `LIGHTING_POSTURE_STATE_PATH` | env var | `<config.dbPath>/../lighting-posture.json` | Override the persistence file location. |
+| `input_boolean.lighting_postures_enabled` | **HA-side** (operator-created) | — | Master gate for all lighting-posture *consumers*. The add-on ignores it; it only gates HA automations. |
+
+The classification thresholds — `CONSERVE_DAWN_PCT` (35), `AMBER_DAWN_MARGIN_PCT` (5),
+`RED_HOURS_TO_RESERVE` (4), `DEESCALATE_HOLD_MS` (15 min), `SURPLUS_DWELL_MS` (10 min, v1.63.0), `PERSIST_MAX_AGE_MS` (1 h) — are
+**compile-time constants**, not env/config options. There is no config.yaml option to tune
+the posture ladder; changing it requires a code change.
+
+#### 1.7 EDGE CASES / guards / honest-null behavior
+
+- **Floor beats everything.** `belowReserveFloor → critical` is checked *before* the
+  grid-backstop short-circuit, so a floored pool is `critical` even on grid.
+- **Grid-tied evenings do not nag.** With `gridBackstopping` true and above floor, the
+  depletion escalations (`red`/`amber`/`conserve`) are suppressed — only `surplus`/`normal`
+  can publish. Absent/false grid signal → full ladder (the islanding-safe default).
+- **Missing reports publish no posture (v1.186.0, v1.187.10).** The tracker is advanced only
+  when the `runway`, `forecast` and `curtailment` reports all settled. It is also not advanced
+  when the forecast (`homeBasisPending`) or the runway (`basisPending`) was built while a home
+  Core's first reading was pending. Otherwise `lighting_posture` and `lighting_posture_reason`
+  publish null ("unknown" in HA) and the held posture is left untouched, so no posture is
+  computed from reports that were never measured.
+- **Missing forecast/runway inputs** are `null`-tolerant: with `hoursToReserve == null` and
+  `dawnMinSocPct == null`, none of the amber/conserve branches fire and the result is
+  `normal` ("no depletion projected") — an honest "no data → no alarm" rather than a
+  fabricated warning.
+- **`reservePct` fallback** is `15` when the SHP2 reserve is unknown.
+- **Same-rank `surplus↔normal`** swaps do not trip the 15-min de-escalation hold (both rank 0), but they must dwell `SURPLUS_DWELL_MS` (10 min) before they publish (v1.63.0). A restart mid-dwell resumes the countdown because `swapSinceMs` is persisted.
+- **Persistence is best-effort:** save failures are swallowed (`catch {}`) — the only cost
+  is one possible restart flap; corrupt/stale state is discarded, never trusted.
+- **Restart mid-hold resumes the countdown** rather than resetting it (the hold-start
+  timestamp is persisted).
+
+---
+
+### 2. PV-curtailment / surplus signal + opportunistic loads
+
+#### 2.1 WHAT it does + why
+
+`computeCurtailment()` (`analytics.ts`) is the engine behind the **`surplus`** posture and
+the surplus/opportunistic-load layer. It answers: *is the fleet's PV being thrown away
+right now because the batteries are saturated, and if so how much surplus power is
+available to soak up?* This is distinct from inverter **clipping** (a separate report) —
+this is **SoC-saturation** curtailment: PV that the array could produce but the pool won't
+accept because it's near its charge ceiling.
+
+Two things flow out of it into the automation layer:
+
+1. `active` / `currentSurplusW` → the **`curtailmentActive`** input to lighting posture
+   (drives `surplus`) and the `pv_curtailment_*` MQTT sensors.
+2. `opportunisticLoads[]` → a ranked list of loads that could absorb the surplus, each
+   flagged `fitsInSurplus`. This is where the (advisory) HVAC pre-cool suggestion lives.
+
+#### 2.2 INPUTS
+
+- Live home-DPU SoC, PV actual (W), and load (W) from the device snapshots
+  (`homeConnectedDpus`, the SHP2 device).
+- Per-DPU charge ceiling `projection.chgMaxSoc` → `homeChargeCeilingPct()` (mean across
+  home DPUs).
+- Weather GHI (`radiationWm2`) for the current hour from the weather cache.
+- The **Bayesian solar posterior** (expected PV given hour-of-day and GHI).
+- 7 days of recorder history for the today/7-day curtailment walk and hour-of-day
+  histogram.
+
+#### 2.3 The CALCULATION (relevant constants)
+
+```ts
+const CURTAIL_TTL_MS         = 5 * 60 * 1000;  // report cached 5 min
+const CURTAIL_MIN_SURPLUS_W  = 300;            // min gap before we call it curtailment
+const CURTAIL_MIN_BAYES_SAMPLES = 3;           // posterior support required
+const CURTAIL_TAPER_BAND_PCT = 10;             // SoC band below ceiling where shedding begins
+```
+
+- **Saturation threshold:** `saturationThresholdPct(ceiling) = max(0, (ceiling>0 ? ceiling
+  : 100) − CURTAIL_TAPER_BAND_PCT)`. With no reported ceiling this is `100 − 10 = 90%`
+  (taper-aware; replaces an older fixed 96).
+- **Expected PV** comes from `predictExpectedPv()` = `posteriorMean × GHI`, but only if the
+  hour's posterior has `≥ CURTAIL_MIN_BAYES_SAMPLES (3)` samples — else `null` (honest
+  "no model").
+- **Surplus** is the expected-minus-actual PV gap (`expected − pvActualW`, not netted against
+  load). Curtailment is `active` only when all of these hold:
+  - the home-DPU mean SoC is ≥ the saturation threshold;
+  - actual PV is ≥ `CURTAIL_MIN_PV_W` (200 W);
+  - GHI is ≥ `CURTAIL_MIN_GHI_WM2` (100 W/m²);
+  - a trusted model exists;
+  - the gap is ≥ `CURTAIL_MIN_SURPLUS_W` (300 W);
+  - PV does not exceed `CURTAIL_PV_MATCH_LOAD_FACTOR` (2.0) × the SHP2 circuit load when that
+    load is > 100 W. Load is used only as this disqualifier. Otherwise `inactiveReason` is one of:
+  `soc-too-low | pv-too-low | no-daylight | no-model | small-gap | pv-exceeds-load |
+  no-shp2 | no-home-dpus`.
+- **Opportunistic loads** are sized against `currentSurplusW`: each load's `fitsInSurplus =
+  currentSurplusW >= estimatedW`.
+
+#### 2.4 OUTPUTS + endpoints
+
+**REST:** `GET /api/curtailment` (cached 60 s) returns the full `CurtailmentReport`;
+curtailment fields are also folded into the big `/api/ha-state` payload
+(`pv_curtailment_active`, `pv_curtailment_surplus_watts`, `pv_curtailment_kwh_today`,
+`pv_curtailment_kwh_7d`, …).
+
+**MQTT sensors** (`mqttDiscovery.ts`):
+
+| unique_id | key | notes |
+|---|---|---|
+| `ecoflow_pv_curtailment_active` | `pv_curtailment_active` | binary ON/OFF; the `surplus`-posture trigger. |
+| `ecoflow_pv_curtailment_surplus_watts` | `pv_curtailment_surplus_watts` | power (W). |
+| `ecoflow_pv_curtailment_kwh_today` | `pv_curtailment_kwh_today` | energy, `total` with `last_reset` from `pv_curtailment_kwh_today_since` (v1.187.10). |
+| `ecoflow_pv_curtailment_kwh_7d` | `pv_curtailment_kwh_7d` | 7-day kWh. |
+| `ecoflow_charge_ceiling` | `pv_curtailment_charge_ceiling_pct` | diagnostic, %. |
+
+> Historical note (v0.15.3): the `curtailment` report was originally not fetched in the
+> MQTT `buildState`, so the five `pv_curtailment_*` sensors (added v0.9.77) read permanent
+> "unknown". Wiring the fetch lit them up *and* gave lighting posture its live
+> `pv_curtailment_active` signal.
+
+#### 2.5 CONFIG knobs
+
+The opportunistic-load catalog is a **hardcoded** default sized for the operator's Phoenix
+off-grid home; the comment explicitly says *"Update via config in a later rev"* — i.e. it
+is **not yet config-driven**. The curtail constants above are compile-time. There is no
+env/config.yaml knob for the surplus thresholds or the load list.
+
+---
+
+### 3. HVAC posture framework + surplus pre-cool — DORMANT (honest status)
+
+**This is the section to read carefully, because most of the "HVAC posture" narrative is
+aspirational, not running code.**
+
+#### 3.1 What actually exists
+
+The only HVAC-related logic in the add-on is **two entries in the opportunistic-load
+catalog** (`DEFAULT_OPPORTUNISTIC_LOADS` in `analytics.ts`), both `category: 'hvac'`:
+
+```ts
+{ id: 'ac_precool',
+  name: 'AC pre-cool (-5°F)',
+  estimatedW: 3500,
+  category: 'hvac',
+  description: 'Drop the thermostat ~5°F now to bank thermal mass for evening hours when SoC is dropping.' },
+{ id: 'dehumidifier',
+  name: 'Dehumidifier',
+  estimatedW: 700,
+  category: 'hvac',
+  description: 'Reduces moisture load the AC has to remove later — banks comfort into the building envelope.' },
+```
+
+**Surplus pre-cool rationale:** when PV is being curtailed (surplus energy is free and
+otherwise wasted), it is cheap to over-cool the house now — "banking thermal mass" into the
+building envelope — so the AC runs *less* in the evening when SoC is falling and every watt
+comes out of the battery. The engine surfaces `ac_precool` with `fitsInSurplus = true`
+whenever `currentSurplusW ≥ 3500 W`, and `dehumidifier` when `≥ 700 W`. That is the extent
+of the computation.
+
+#### 3.2 What does NOT exist (dormant / Phase-2)
+
+- **No HVAC posture sensor.** There is no `hvac_posture` / `climate_posture` /
+  `cooling_posture` MQTT sensor or REST field anywhere in the code — grep confirms zero
+  matches. The "posture" concept is implemented only for **lighting**.
+- **No ecobee / thermostat actuation from this layer.** The `ecobee` references in the
+  server (`broadcast.ts`, plus one comment in `haService.ts`) — and those are about the ecobee units' **speakers** as
+  audible-alert / TTS targets (`media_player.*`), **not** climate control. The add-on never
+  calls `climate.set_temperature` or any thermostat service.
+- **`haServiceHint` is always `null`.** Every opportunistic load is built with
+  `haServiceHint: null // Phase 2 — wire to HA service.call here.` The intended automatic
+  actuation (have the add-on itself call an HA service to start the pre-cool) is an
+  explicitly-deferred Phase-2 feature that is not implemented.
+- **`haService.ts` snapshot/restore is unrelated.** The `sonos.snapshot` / `sonos.restore`
+  helpers in `haService.ts` exist to avoid clobbering music during audible announcements —
+  they are **not** an HVAC/lighting "snapshot & restore" mechanism. Likewise the "gauge"
+  references in the codebase are the SHP2 backup-pool gauge and self-consumption gauge
+  *icons*, not a "capacity-gauge ceiling" engine.
+
+#### 3.3 On "capacity-gauge ceilings" and "dimmer ceilings"
+
+The design narrative refers to "ceilings" in a couple of senses; to be precise about what
+is add-on code vs. HA-side:
+
+- The only **ceiling computed by the add-on** is the battery **charge ceiling**
+  (`homeChargeCeilingPct()` = mean `chgMaxSoc` across home DPUs), used by the curtailment
+  engine to decide when the pool is saturated. This is a battery-charge ceiling, not a
+  lighting/HVAC output ceiling.
+- **"Dimmer ceilings"** (capping light brightness under conserve/amber/red) are named only
+  in comments as an **HA-side consumer** of the posture enum. There is **no dimmer-ceiling
+  code, no snapshot/restore of light state, and no occupancy-sweep logic in the add-on** —
+  those are automations the operator builds in Home Assistant, gated behind
+  `input_boolean.lighting_postures_enabled`. If you are looking for the occupancy-sweep or
+  brightness-ceiling implementation, it is not in this repo; the add-on's contribution ends
+  at publishing `lighting_posture` + `lighting_posture_reason`.
+
+---
+
+### 4. Summary — add-on vs. Home Assistant responsibilities
+
+| Responsibility | Where it lives | Status |
+|---|---|---|
+| Compute runway-driven lighting posture enum | Add-on (`lightingPosture.ts`) | **Live** |
+| Asymmetric hysteresis (immediate up, 15-min down) + 10-min `normal↔surplus` dwell | Add-on | **Live** |
+| Restart-persist the held posture | Add-on (atomic JSON, 1-h staleness) | **Live** |
+| Publish `lighting_posture` + `_reason` MQTT sensors | Add-on (`mqttDiscovery.ts`) | **Live** |
+| Compute PV-curtailment / surplus + `surplus` trigger | Add-on (`computeCurtailment`) | **Live** |
+| Rank opportunistic loads incl. AC pre-cool / dehumidifier | Add-on | **Live (advisory only)** |
+| Heartbeat pulse / exterior policy / dimmer ceilings / occupancy sweeps | **Home Assistant automations** | HA-side, gated by `input_boolean.lighting_postures_enabled` |
+| HVAC posture sensor | — | **Does not exist** |
+| Automatic pre-cool actuation (`haServiceHint`) | — | **Dormant / Phase-2 (`null`)** |
+| Ecobee climate control | — | **Not implemented** (ecobee is only an audible-alert speaker target) |
+
+**Bottom line:** the add-on is a *posture publisher and surplus estimator*. It computes the
+signals honestly (including null-safe "no data → normal/inactive" behavior) and hands them
+to Home Assistant. Every actuation — lighting or HVAC — is HA-side automation, and the HVAC
+side is little more than a labeled recommendation today.
+
+---
+
+## 15. Night-Charge TOU Arbitrage Advisor
+
+*Tariff model, worst-case sizing brain, learning ledger, completion-gated scoring, the frozen write-readiness gate, and the supervised bounded write — the engine that recommends (and, when the owner enables a write mode, delivers) a cheap-overnight grid buy sized to hold an outage cushion above the reserve floor.*
+
+On a day a battery shortfall is anticipated, the advisor recommends buying the *right* amount of grid energy in the cheap APS R-EV overnight window (23:00–05:00 Mon–Fri) so the home (a) never imports at the 4–7pm on-peak and (b) carries an **outage cushion** above the reserve floor into the next day. It is framed as much a *resilience* feature as a cost feature. The write posture is owned by `NIGHT_CHARGE_MODE`: **`advisory`** (default) never issues a device write — the recommendation is published as HA entities, an API endpoint, a nightly notification, and TUI/web panels, and an owner-authored HA automation decides whether to act; **`supervised`** performs one announced, cancellable, bounded reserve write per charge night with an automatic revert, plus a force-charge that rides the verified write to the night's ceiling when the objective is `cost` and `ARB_COST_MAX_SOC_PCT` is above 50 (v1.165.0) (§8b); **`auto`** is honored only after the readiness gate graduates on actuated-night evidence and operates as supervised until then. In parallel, every night's plan is frozen into a durable ledger and scored against measured reality, and a fail-closed readiness gate reduces that record into a single "is the accuracy proven enough for unattended writes?" verdict.
+
+The subsystem spans eight modules, all shipped incrementally (v1.36.0 tariff → v1.37.0 sizing brain → v1.38.0 ledger + wiring + surfaces → v1.39.x scoring/gate hardening → v1.49.0 sizing-model correction → v1.50.0 supervised write + gate v2 → v1.165.0 force-charge → v1.187.0 pure ledger scoring):
+
+| Module | Role |
+|---|---|
+| `tariff.ts` | Declarative multi-period, seasonal, timezone-resolved TOU model + `rateAt` resolver (pure) |
+| `nightChargeAdvisor.ts` | Pure sizing brain (`computeNightChargePlan`), input assembly, outcome scoring math, actuated-delivery helpers, night-clock bounds, plan holder |
+| `nightChargeGate.ts` | Pure write-readiness reduction (v2: actuated-night evidence) over the ledger + readiness holder |
+| `nightChargeActuator.ts` | Pure supervised-write decision core: mode resolution, arming from the announced plan, apply/revert decisions (all clocks injected) |
+| `nightForceCharge.ts` | Pure force-charge core: gate, just-in-time start, software stop, OFF triggers and wall-clock deadline, `foceChargeHight` backstop sync/restore, step order against the reserve revert |
+| `nightLedgerScoring.ts` | Pure ledger-scoring spans: governed on-peak span, realized cost, delivered-energy hold span, PV verdict set-aside, forecast-span capture gate and repair |
+| `recorder.ts` | `night_charge_ledger` / `night_charge_calibration` durable tables + injection-safe upsert |
+| `index.ts:3220–6180` (`recomputeNightChargePlan`, `runNightChargeEveningJob`, `runNightActuationTick`, the `nightChargeEnabled` timer block, the status/cancel routes) | Orchestration: 30-min recompute tick, ~21:30 evening job, backfill scorer, premature-capture repair, 60 s actuator tick, `/api/night-charge/status`, `/api/night-charge/cancel` |
+
+---
+
+### 1. Purpose & safety posture
+
+The binding safety invariants, enforced structurally rather than by convention:
+
+- **The alarm spine never consumes engine state.** The engine reads the same `projection.backupReserveSoc` the reserve-floor alarm (§5) defends — the *same field*, never a divergent copy — and produces **no** state the floor/runway/SoC alarms consume. In `advisory` mode (the default) nothing is ever written; in `supervised`/`auto` the actuator's one bounded write raises that reserve for the charge-window span and auto-restores it (§8b), while the floor alarms keep their own independent protection throughout — a bug here can mis-recommend or mis-charge within the [10, 50] clamp (`RESERVE_WRITE_MIN_PCT` / `RESERVE_WRITE_MAX_PCT`); it cannot mis-alarm.
+- **Under-buy is a safety miss, not a cost miss.** The outage cushion is an explicit resilience requirement; a confidently under-sized buy leaves the home at the floor with no cushion when an outage hits. Sizing therefore uses **worst-case inputs**: P10 (pessimistic-low) PV and P90 (pessimistic-high) load, with committed EV load placed as a worst-case block.
+- **The over-buy ceiling is the deliberate asymmetry.** The floor is sized with P10 PV (never under-buy); the "don't clip tomorrow morning's PV" ceiling is sized with **P90** PV (never over-buy into clipping). Where the two collide on a genuinely tight day, **resilience wins**: the buy is kept, the clip is accepted, and `bindingCap='overBuy'` is surfaced.
+- **Emit null over a fabricated number.** An incomplete, incoherent, thin, or climatology-only basis yields a *null plan* (`chargeTonight=false`, every numeric field `null`) — never a best-effort small number the operator might trust as cushion. The same discipline runs through the tariff (`ratesConfirmed=false` ⇒ every `$` output null), the scorer (zero telemetry samples ⇒ `null`, not a "measured" `0`), and the gate (null readiness ⇒ `write_ready` strictly `false`).
+- **The gate governs unattended writes only.** `writeReady` gates the `auto` mode alone (`effectiveActuationMode` structurally demotes `auto` to `supervised` until the gate graduates, §8); `supervised` is an explicit owner action in the add-on configuration with a per-night announced cancel window (§8b). The write path shipped in v1.50.0 per the 2026-07-31 amendment to `docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`.
+
+---
+
+### 2. Architecture & data flow
+
+```
+  SHP2 projection (backupFullCapWh, backupBatPercent,      analytics worker reports
+  backupRemainWh, backupReserveSoc)                        probabilisticForecast · forecast
+          │                                                multiDayForecast(4d) · evWindowPrediction
+          └──────────────┬─────────────────────────────────────────┘
+                         ▼
+        recomputeNightChargePlan()  (index.ts:3476, every 30 min + evening job)
+          buildApsREvModel(env) → periodIdAt = rateAt(...).periodId
+          buildNightChargeInputs(deps)   (nightChargeAdvisor.ts:1665, pure)
+          computeNightChargePlan(inputs) (nightChargeAdvisor.ts:543, pure)
+                         │
+                         ▼
+        setLatestNightChargePlan(plan)  — in-process holder (12 h staleness guard)
+          ├─→ /api/ha-state + MQTT state payload (nightChargeStateFields)
+          ├─→ /api/night-charge/status (index.ts:6123)
+          ├─→ web NightChargeCard (Strategy panel)
+          │
+   ~21:30 evening job (once per Phoenix day, restart-persistent latch)
+          ├─→ recordNightPlanRow() → night_charge_ledger (frozen PLAN columns)
+          ├─→ scoreCompletedNights() → OUTCOME + SCORE columns (completion-gated)
+          ├─→ computeNightChargeReadiness(readNightLedger(400)) → readiness holder
+          └─→ ONE notification (buildNightChargeMessage, dedupId night_charge_plan)
+```
+
+Everything below the report boundary is dependency-injected and pure — `computeNightChargePlan`, `buildNightChargeInputs`, `resolveCheapWindow`, `scoreNightOutcome`, `nightWindowBounds`, `medianFilter3`, and `computeNightChargeReadiness` perform no I/O and read no clocks, so the sizing and gating math is provable by unit test.
+
+**Timers** (all created only when `NIGHT_CHARGE_ADVISOR_ENABLED !== 'false'`, all `unref()`'d):
+
+| Timer | Cadence | Work |
+|---|---|---|
+| Recompute tick | 30 min | Fresh plan → holder; score completed nights; recompute readiness; refresh the status route's in-memory ledger cache |
+| Evening-job tick | 60 s | `runNightChargeEveningJob()` (minute-granular fire gate, see below) |
+| Actuator tick | 60 s | `runNightActuationTick()`: supervised apply / verify / revert and the force-charge steps (§8b) |
+| Boot warm-up | once, +60 s | `repairPrematureNightOutcomes()`; `repairShortForecastSpanOutcomes()` (v1.187.10); `tagKnownFleetMismatchPvRows()` (v1.187.0); a once-per-boot warning for confirmed-tariff periods with no rate (`unpricedTariffPeriods`); fresh plan; score; readiness. This keeps the holder and HA gate fields from being null for up to 30 min after the daily host power-cycle (v1.39.0) |
+
+The recompute tick also refreshes the islanded load that sizes the outage cushion (v1.129.0). Outside the `NIGHT_CHARGE_ADVISOR_ENABLED` block, a 60 s force-charge safety tick (v1.165.0) runs while the advisor is disabled. It can only switch a force-charge of this add-on OFF.
+
+**The evening job** (`index.ts:4416`). Fires at most **once per Phoenix calendar day**, keyed by a restart-persistent latch file (`.night-charge-latch.json` beside the DB, atomic write, in-memory mirror so no request/timer performs an unbounded filesystem read). The fire window is `[NIGHT_CHARGE_NOTIFY_HOUR:MINUTE, 23:00)` local (default 21:30); a re-entrancy guard prevents a slow run (awaited analytics + weather + notify) from overlapping the next 60 s tick (v1.39.0). In order: recompute fresh plan → record the plan row → score completed nights → recompute readiness → send **one** notification → latch *only after a successful send* (failure retries on the next tick within the window). Before 22:30 (`NIGHT_PLAN_STALE_DEFER_UNTIL_MIN`) the job **defers** while the panel reading is stale (v1.174.0) or the basis is incomplete for a transient-shaped reason (`eveningBasisDefers`, v1.186.5). A deferral writes no plan row, sends no notification, sets no latch and cancels no prior arm; the minute tick retries, and from 22:30 the night is decided on what is known. A prior night's never-applied arm that tonight's plan does not supersede is cancelled (`cancelStalePriorArm`, v1.171.1). Past 23:00 the notify is skipped-and-latched — a plan pushed after charging should already have begun is worse than none — but scoring and readiness still run, so a missed notify window can never orphan a night's outcome (an MNAR bias in the gate's evidence). All local-time gates resolve via explicit `America/Phoenix` `Intl` parts (`phoenixMinuteOfDay`, `localParts`), never the host clock. The freshest pre-window plan (with its ledger extras) also persists to disk on every recompute (`.night-charge-plan.json`, atomic write, v1.40.0); when the live record window is missed entirely (a restart or update between 21:30 and 23:00), the next run records the persisted plan with its original `generatedAt` — the plan row survives, timestamps are never backdated.
+
+---
+
+### 3. The tariff model (`tariff.ts`, v1.36.0)
+
+A declarative, pure TOU model — periods, seasons, holidays, timezone — plus the `rateAt(model, tsMs)` resolver. `buildApsREvModel(rates)` constructs the deployed plan, **APS Rate Schedule R-EV** (four periods, two seasons, no demand charge):
+
+| Period id | Local window | Days | Seasons | Notes |
+|---|---|---|---|---|
+| `on_peak` | 16:00–19:00 | Mon–Fri | year-round | `onPeak: true` (drives the `isOnPeak` back-compat flag) |
+| `super_off_peak` | 10:00–15:00 | Mon–Fri | winter only | overlaps solar |
+| `overnight` | 23:00–05:00 (wraps) | Mon–Fri | year-round | **the cheap charge window the advisor sizes against** |
+| `off_peak` | catch-all | — | — | all remaining hours, all weekends, observed holidays |
+
+Holidays (v1.187.13): the APS model's `holidays` default to `APS_OFF_PEAK_HOLIDAYS`, Rate Schedule R-EV's rule (A.C.C. No. 6152, effective 2024-03-08) computed for 2015–2045 by `apsOffPeakHolidays(year)`: New Year's Day, Cesar Chavez Day (Mar 31), Juneteenth, Independence Day, Veterans Day and Christmas Day observed on the Friday before a Saturday or the Monday after a Sunday; Martin Luther King Day and Presidents Day (3rd Monday of January / February), Memorial Day (last Monday of May), Labor Day (1st Monday of September), Indigenous Peoples' / Columbus Day (2nd Monday of October), Thanksgiving (4th Thursday of November); Christmas Eve and New Year's Eve on the day itself. A holiday is off-peak all day — no on-peak, overnight or super off-peak hour — so the night-charge window search (`periodId === 'overnight'`), the on-peak checks and the ledger pricing all see it. Until v1.187.13 the list was empty and a holiday was priced as an ordinary weekday.
+
+Seasons (v1.187.10 — billing cycles, by usage month): `APS_SUMMER_MONTHS = [4,5,6,7,8,9]` (April–September usage); the rest is winter. APS bills May–October at summer rates and November–April at winter rates, and each bill covers the usage since the previous meter read, early in the month — so summer usage runs from the early-April read to the early-October read (the 2026-10-02 APS notice: winter rates from the November billing period, the winter 10:00–15:00 super-off-peak in effect). Until v1.187.10 the months were read as if they were bills (`[5..10]`), so October usage priced as summer — summer on-peak, no super-off-peak tier — and April as winter; `analytics.ts` also carried its own calendar May–October test for the two-tier basis. **One season source:** `seasonAt(model, tsMs)` = `seasonOf(localParts(tsMs, model.timezone).month, model.summerMonths)`, read by `rateAt` (same function on the same local month), `resolveTariffCents` (`apsSeasonIsSummer`), the `/api/tariff` view (`tariffPricingView`) and the nightly plan's tariff snapshot (tests: `tariffBillingSeason.test.ts`). **Approximation:** the boundary is the 1st of the local month; the real one is the meter-read day, which falls in the first days of the month and varies by billing cycle, so the first few days of April and of October can be seasoned one cycle off (± the read day; inert while rates are unconfirmed). Ledger rows captured before v1.187.10 keep the cost they were priced with, except the rows the one-time forecast-span repair re-captures (`repairShortForecastSpanOutcomes`, §7): their `realized_cost_cents` is re-priced by `rateAt` on the current season map, so a span in October is priced at winter rates — NULL with an unpriced note where a winter rate is blank. With the winter On-Peak / Off-Peak options blank, only `resolveTariffCents` (the KPIs) falls back to the flat default; `rateAt` leaves those hours unpriced, so `tariff_rate_now_usd_per_kwh` (Grid Rate Now) reads unknown outside the overnight period and every October ledger row's realized cost is NULL. `holidays` (local `YYYY-MM-DD` strings, all-day off-peak, checked *before* every specific period) defaults in `buildApsREvModel` to the R-EV rule list `APS_OFF_PEAK_HOLIDAYS` (v1.187.13, above) unless the rates name their own list; `flatTariffModel` carries none.
+
+**Resolution algorithm** (`rateAt`): resolve the instant into local parts via a memoized `Intl.DateTimeFormat('en-US', { timeZone, hourCycle:'h23' })` `formatToParts` (one formatter per timezone; never the host clock, so a non-Phoenix container cannot bleed a rate boundary); derive day-of-week from the *resolved calendar date* via `Date.UTC(y,m-1,d).getUTCDay()` rather than an ICU `weekday` part — a degraded/small-ICU runtime that dropped the part would otherwise collapse every weekday to Sunday and silently misprice every on-peak/overnight hour as weekend off-peak (fail-safe by construction). Then: holiday check → first matching period in priority order (season gate, weekday gate, `inHourWindow` with wrap-around: `start>end` wraps past midnight, `start===end` means all 24 h) → the `off_peak` catch-all.
+
+**★ Per-instant weekday semantics (load-bearing).** A period's `weekdays` gate is evaluated against **each instant's own** local day-of-week, not the day the window "started". The wrap-around overnight window therefore resolves literally: Fri 23:00 *is* overnight (Friday is Mon–Fri) but Sat 00:00–05:00 is **off-peak** (Saturday is a weekend); likewise Sun 23:00 is off-peak while Mon 00:00–05:00 is overnight. Whether real APS billing treats Friday-night→Saturday-morning as a single overnight block is an **open tariff question** only a bill can settle (see §11); the model's reading is the defensible default consistent with "off-peak = all weekends".
+
+**Rates-unconfirmed ⇒ `$` outputs null.** Every period carries per-season `centsBySeason` values that default to `null`, and the model carries `ratesConfirmed` (default `false`). While `ratesConfirmed=false`, `rateAt` resolves `centsPerKwh` to **null for every period regardless of the numbers in the model**, and `buildApsREvModel` also nulls `fixedDailyCents` — an unconfirmed model can never leak a fabricated basic-service charge or energy rate into a cost consumer. The returned `RateSlice` mirrors `ratesConfirmed` so a consumer can distinguish "null because unconfirmed" from "null because this confirmed period has a missing-season data gap". `periodId` is **structural** and needs no confirmed rate — which is what lets the advisor resolve the charge window while every `$` output stays null. `flatTariffModel(cents)` wraps a single-rate legacy plan in the same shape so an eventual consumer rewire is a behavior-preserving swap.
+
+**Env mapping** (`apsREvRatesFromEnv`, `tariff.ts` — moved from `index.ts` in v1.70.0 so every consumer shares one reader): empty-string/unset options read as `null` (unconfirmed).
+
+| Env option | Fills |
+|---|---|
+| `TARIFF_APS_ONPEAK_SUMMER_CENTS` / `TARIFF_APS_ONPEAK_WINTER_CENTS` | `on_peak` summer / winter |
+| `TARIFF_APS_OFFPEAK_SUMMER_CENTS` / `TARIFF_APS_OFFPEAK_WINTER_CENTS` | `off_peak` summer / winter |
+| `TARIFF_APS_OVERNIGHT_CENTS` | `overnight`, **both** seasons (one env, same rate) |
+| `TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS` | `super_off_peak` winter (summer stays `null` — the period is winter-only) |
+| `TARIFF_APS_RATES_CONFIRMED` | `ratesConfirmed` (`'true'` only) |
+
+---
+
+### 4. Input assembly — the worst-case basis
+
+`recomputeNightChargePlan()` (`index.ts:3476`) assembles `NightChargeInputDeps` from live state, then hands off to the pure `buildNightChargeInputs` → `computeNightChargePlan`. It returns `null` (no plan recorded, holder untouched) when inputs cannot be constructed at all — SHP2 projection missing, or `backupFullCapWh`/`backupBatPercent`/`backupReserveSoc` absent (design invariant I5).
+
+**Battery state.** `fullKwh = backupFullCapWh/1000`, `socNowPct = backupBatPercent`, `reserveFloorPct = backupReserveSoc`. SoC coherence (I11): `socCoherent = |remainWh/fullWh·100 − socNowPct| ≤ 8` — the same %-vs-Wh cross-check discipline the SoC alarm uses; `false` forces a null plan downstream.
+
+**Efficiency seams** (injected, never hard-coded downstream): `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927` (charge leg — the pack stores `legEff` of what reaches the charger; `DISPATCH_ROUND_TRIP_EFFICIENCY` defaults 0.86, §7) and `dischargeEff = RUNWAY_DISCHARGE_EFFICIENCY` (default 0.94, the runway DC-bus discharge tax, §5).
+
+**The conservative band** (within ~24 h, authoritative): for each probabilistic-forecast hour with a matching day-ahead hour, `pvP10W = p10W` and `loadP90W = forecastLoadW × loadP90Factor`. Since v1.106.0 `loadP90Factor` is `calibratedLoadBandFactor` over 120 days of ledger `load_err_frac`: 1 + the nearest-rank 80th percentile of the absolute error. It is floored at `ARB_LOAD_P90_FACTOR` (default 1.15), capped at `ARB_LOAD_P90_CAP` (default 2.0), and below 10 samples it is the floor alone (§8). The day-ahead load already folds an *expected-value* EV block (`predictedEvLoadW`) into `forecastLoadW`, so `embeddedEvW = predictedEvLoadW × factor` is carried alongside for de-duplication. Hours with no load side are skipped — the band must carry both.
+
+**Beyond the band**: multi-day rollup hours, widened per day by `√daysAhead`: `pvP10 = pvW·max(0, 1 − errHalfFrac·√daysAhead)`, `loadP90 = loadW·(1 + errHalfFrac·√daysAhead)` where `errHalfFrac` is the probabilistic forecast's realized daily error half-width. The merge is keyed by hour timestamp and **the band always wins** where both cover an hour.
+
+**Cheap-window resolution** (`resolveCheapWindow`, `nightChargeAdvisor.ts:1527`): scan the injected `periodIdAt` resolver forward hour-by-hour (default 30 h) for the next contiguous run of the `overnight` period id; a run's *end* is scanned up to 24 h past the run's own start so a run straddling the scan edge is not truncated (v1.39.0 — a Saturday-evening scan finding Monday 00:00 at hour 27 of 30 must still report the close as 05:00, not 04:00). When the scan instant is already *inside* a cheap window (the recompute tick runs around the clock), the resolver walks **back** to the window's true start so the reported `window_start` is the real 23:00, not the live mid-window clock (display honesty). A pathological always-cheap resolver is bounded at 25 h.
+
+**`nextRechargeMs`** = the start of the *next* cheap window after tonight's (separate 96 h scan) — the horizon end. Tariff-based and deterministic: a single transient sunny hour, or a central-forecast pv≥load crossing that the P10/P90 sim would still be draining through, cannot truncate the multi-day carry. On a weekday this lands ~tomorrow night; across a weekend it produces the 24–50 h carry described in §11.
+
+**Morning-PV ceiling headroom**: `morningPvSurplusP90Kwh = Σ max(0, p90W − forecastLoadW)/1000` over `[windowEnd, windowEnd+14 h)` — P90 (best-case) PV by design, so the ceiling never over-buys into clipping. `null` when the band doesn't cover the span (ceiling simply not applied).
+
+**Committed-EV worst case**: from the EV window prediction report — `p90SessionKwh` (the P90 session energy, **not** the probability-weighted expected value), `chargeStartMs` = the first upcoming/ongoing predicted session (floored to ≥ the current hour), `sessionCount`. Placement (in `buildNightChargeInputs`) lays the P90 energy down from the predicted charge hour forward, capped at `EV_MAX_LOAD_W` (default 11 520 W) per hour, spilling into later hours until exhausted, and bounded to the next-24 h band region (beyond-24 h rollup hours already embed typical EV in their `loadW` and are not de-duplicated — adding the block there would double-count).
+
+**★ EV strip/re-add atomicity.** The embedded expected-value EV is stripped from the base load **only** on the hours the committed P90 block actually covers, hour-by-hour, atomically with the re-add: `loadP90W = max(0, loadP90W − embeddedEvW) + addW`. Hours before the block, after it exhausts, or beyond the band keep their embedded EV untouched. Stripping without replacing would erase a real charging night from the sizing basis and under-buy — a safety miss — so "never strip without replacing" holds **per-hour**, not per-plan (v1.39.0; the earlier whole-band strip erased *other* predicted sessions). A degenerate `evMaxLoadW` (≤ 0 / NaN) would make every placement hour add 0 W while still stripping — it is treated as "cannot place" and the embedded EV is kept.
+
+**Confidence tier**: `forecast` when the whole horizon (through `nextRecharge`) is inside the real-weather horizon; `climatology` when there is no weather-backed day-ahead forecast at all *or* the charge window itself lies past the weather horizon; `mixed` when only part of the horizon runs past it (the weekend carry beyond the ~4-day forecast).
+
+**`basisComplete`** = `forecastPresent && confidenceTier !== 'climatology' && calScoredDays ≥ 14 && bandCoverageFrac ≥ BASIS_MIN_BAND_COVERAGE` — the probabilistic band must have ≥ `NIGHT_MIN_CAL_DAYS = 14` scored calibration days *and* realized in-band coverage ≥ **78%** (`BASIS_MIN_BAND_COVERAGE = 0.78`, `nightChargeAdvisor.ts:74`) before the advisor will size anything on it. `false` forces the null plan.
+
+> **This line read `≥ 0.9` / “≥ 90%” until v1.149.0, and that was wrong by twelve points.** The error is recorded rather than silently corrected because of how it survived: `docs/PERFORMANCE.md` identified and corrected the identical claim on 2026-09-06 — in its own text, about its own prior snapshot — and this file, the normative reference the correction was measured against, was never touched. A correction applied to one document is not applied to the codebase. The threshold is now read from the named constant in both places so the two cannot drift apart again.
+
+**`basisBlockedBy`** (v1.148.0) names *which* of the four conditions failed, because “forecast/telemetry basis incomplete” is four conditions wearing one coat and the null-plan rationale previously printed only the coat. It is evaluated in the same order as the gate — no forecast → climatology tier → too few calibration days → band coverage — and the coverage branch additionally prints the three quantities that *passed*, so a reader can tell a six-point miss from a collapsed forecast: `PV band coverage 72% < 78% (forecast present, tier=forecast, calDays 29/14)`. It is an advisor **input**, not a plan field: it reaches the operator through the rationale string (and therefore the 21:30 notification and the spoken broadcast), and `plan.basisBlockedBy` is correctly absent from `/api/night-charge/status`.
+
+Finally the horizon is trimmed to `[floor(now to hour), nextRecharge)`.
+
+---
+
+### 5. The sizing brain (`computeNightChargePlan`, `nightChargeAdvisor.ts:543`)
+
+Pure; the objective is **lexicographic**: (1) *hard resilience constraint* — the P10-PV/P90-load pool trajectory must stay ≥ floor+cushion from window-end to the next recharge; (2) source that energy in the cheap window (the arbitrage); (3) ceiling so a too-full pack doesn't clip morning PV.
+
+#### Fail-closed gates (every one ⇒ the null plan — all numerics null, `chargeTonight` strictly false)
+
+1. `basisComplete === false`; 2. `socCoherent === false`; 3. `confidenceTier === 'climatology'` ("will not size a buy on a guessed sky"); 4. no valid window (`window` null or `endMs ≤ startMs`); 5. non-finite/non-positive `fullKwh`; 6. non-finite `socNowPct`; 7. non-finite or negative `reserveFloorPct`/`cushionPct` (v1.39.0 — a NaN floor made `targetFloorKwh` NaN, every bisection comparison false, and the buy silently resolved to the *full pool headroom*: a confident max-buy instead of the promised fail-closed null); 8. non-finite `legEff`/`dischargeEff`/`chargeCapKw` (same class — all operator-config-sourced); 9. empty horizon.
+
+#### The DC-bus recurrence
+
+Each simulated hour: `packWh ← clamp(packWh + pvP10W − loadP90W/dischargeEff, [0, fullWh])` — delivering `load` at the panel draws `load/η` from the pack. This is **identical** to the runway/forecast/multi-day recurrence (`analytics.ts` `computeDayForecastUncached` / `computeMultiDayForecast`, both dividing load by `RUNWAY_DISCHARGE_EFFICIENCY`), so the advisor's trough is consistent with the alarm's runway projection. The simulation starts from the **floor of the current hour** (`simFromMs = floor(nowMs/1h)·1h`), not `nowMs`: filtering `≥ nowMs` dropped the in-progress hour entirely, under-simulating ~30 min of drain at the 21:30 issue time (an under-buy); including the full current hour over-counts by at most the elapsed fraction — the conservative, over-buy direction (v1.39.0).
+
+#### Baseline and the pre-window carry
+
+One baseline walk yields `packAtWindowEnd_noBuy` (pack entering the window close with no buy, carrying tonight's pre-window + in-window house load) and the no-buy trough over `[windowEnd, horizon end]` → `baselineMinSocPct`.
+
+When the plan is issued *before* the window opens, a second walk over `[simFromMs, windowStart)` produces the **pre-window carry** (v1.39.0, §4-honesty): `projSocAtWindowStartPct` (pack entering the window — frozen into the ledger's `soc_at_window_start_pct`) and `preWindowMinSocPct` (the projected minimum over the span a tonight buy *cannot* protect). On weekend evenings the resolved window can be 24–50 h away, so this span covers whole nights the scored `[windowEnd, …)` trough never sees; if it dips below floor+cushion, the rationale carries an explicit "a dip tonight's buy cannot prevent; the floor alarm owns that span" note with the day-qualified window-open time. **Mid-window** (`nowMs ≥ windowStart`) there is no pre-window span: both fields stay `null` and no note is emitted — the pre-fix code collapsed them to the current SoC and could emit a false "before the charge window opens" statement about a window already open.
+
+#### The hold branch
+
+With `targetFloorKwh = reserveKwh + cushionKwh`, where `reserveKwh = fullKwh·reserveFloorPct/100` and `cushionKwh` comes from `outageCushionKwh` (v1.125.0):
+- `islanded-outage`: `outageHours × islandedLoadKw × safetyFactor / dischargeEff`, tested against the pack at window close;
+- `legacy-pct` fallback: `fullKwh·cushionPct/100`, tested against the whole-house forward trough;
+- `disabled`: 0.
+
+If the no-buy trough already holds the line (`≥ targetFloorKwh − 1e-9`) and the objective is `resilience`, the plan is an honest **hold** — `buyKwh: 0`, `requiredExtraKwh: 0`, `objective: 'none'`, trough fields populated, rationale "no charge needed". In `cost` mode (v1.174.0) the plan instead falls through to the cost block. It holds only when the pack already sits at or above the night's cost ceiling, or when the window can deliver less than `ARB_MIN_BUY_KWH` toward it.
+
+#### ★★ The sizing authority — bisection against the re-simulated with-buy trough
+
+`troughAtLift(lift)` re-runs the full post-window simulation with the window-close pack raised by `lift` kWh. Sizing is **solved against this clamp-exact re-simulation, never the additive offset** `targetFloor − clampedBaselineTrough`, which the DC-bus clamps break in *both* safety-critical directions (two confirmed v1.37.0 criticals):
+
+- (a) a mid-window PV surge that clamps the pack to FULL **erases the lift** — an additive estimate reports "requirement met" while the trajectory still dips below floor+cushion (unflagged residual risk);
+- (b) a deep drain that clamps the baseline trough at 0 **truncates the apparent deficit** at `targetFloor` — the additive requiredExtra under-sizes the buy on exactly the deep-shortfall night (an under-buy, the life-safety miss).
+
+`trough(lift)` is monotone non-decreasing in `lift` (`max(0,min(full,·))` preserves order), so a bisection is exact: if even `troughAtLift(poolHeadroomLiftKwh)` cannot hold the line, `requiredExtraKwh = poolHeadroomLiftKwh` (the requirement *is* the full-pack lift; the unmet cushion is flagged via the trough below, never assumed met); otherwise 48 bisection iterations over `[0, poolHeadroomLiftKwh]` find the minimal lift whose re-simulated trough reaches `targetFloorKwh`.
+
+#### The three caps
+
+```
+remainingWindowHours  = max(0, (windowEnd − max(windowStart, nowMs)) / 1 h)     // mid-window clamp (v1.39.0)
+windowLoadKwh         = Σ loadP90W/1000 over horizon hours in [windowStart, windowEnd)
+chargePowerLiftKwh    = max(0, (chargeCapKw · remainingWindowHours − windowLoadKwh) · legEff)
+poolHeadroomLiftKwh   = max(0, fullKwh − packAtWindowEnd_noBuy)
+liftKwh               = min(requiredExtraKwh, chargePowerLiftKwh)
+```
+
+The charge-power cap credits only the **remaining** window when computed mid-window: the 30-min recompute tick runs around the clock and `resolveCheapWindow` deliberately walks back to the true window start for display honesty, so crediting the full window length would over-credit up to ~6 h × `chargeCapKw` of nonexistent lift and present an undeliverable buy as fully meeting the cushion (v1.39.0). The horizon is already trimmed to ≥ the current hour upstream. v1.49.0: the cap is **charge-only** — `chChargeWatt` limits grid→battery power and window house load rides the grid service feed, never debiting the charge budget; while the charger runs, the home is on grid bypass, so charging hours do not drain the pack either (the prior shared-budget model double-counted window load and under-sized buys ~5×, falsified by measured window imports sustaining ~2× the cap). Only `legEff` of what reaches the charger is stored.
+
+`bindingCap` resolution: `'requirement'` by default; `'poolHeadroom'` when `requiredExtraKwh ≥ poolHeadroomLiftKwh − 1e-6`; `'chargePower'` when `chargePowerLiftKwh < requiredExtraKwh − 1e-6`. **`cushionShortfall`** is driven by the re-simulated trough *under the lift actually deliverable* (`troughAtLift(liftKwh).minKwh < targetFloorKwh − 1e-6`) — so neither a full-clamp erasing the lift nor a below-empty deficit can present as "requirement met". If the shortfall exists while `bindingCap` still reads `'requirement'` (a clamp, not a linear cap, was the limiter), the flag is re-attributed to the tighter physical bound so it is never `'requirement'`-with-shortfall. Finally the **over-buy ceiling** is a *flag only* (resilience wins): when the cushion IS met and `targetPackKwh > fullKwh − morningPvSurplusP90Kwh + 1e-6`, `bindingCap='overBuy'` — the buy is kept and the accepted clip is disclosed.
+
+#### Outputs
+
+`buyKwh = liftKwh / legEff` (the meter sees more than the pack stores), `targetSocPct = (packAtWindowEnd_noBuy + liftKwh)/fullKwh·100` (clamped to full), `minProjSocPct`/`minProjSocTsMs` from the with-buy re-simulation (the number the ledger's floor verdict is scored on), `baselineMinSocPct`, `chargeTonight = buyKwh ≥ minBuyKwh` (`ARB_MIN_BUY_KWH`, default 1 — below it the night is a "hold", no nagging about a trivial top-up), and a composed `rationale` string carrying the buy, target, no-buy trough, floor+cushion line, and the honest shortfall / over-buy / pre-window notes.
+
+---
+
+### 6. The learning ledger (`night_charge_ledger`, `recorder.ts`, v1.38.0)
+
+One durable row per `plan_date` (`YYYY-MM-DD`, America/Phoenix; primary key), in three column groups:
+
+- **PLAN** (frozen the evening before; a re-issue for the same date overwrites only the plan columns): `issued_at_ms`, `algo_version` (stored TEXT — a physics fix bumps it and makes prior rows excludable, §8), `posture` (the configured `NIGHT_CHARGE_MODE`: `advisory` / `supervised` / `auto`), `objective`, `rationale`, `confidence_tier`, `horizon_hours`, `soc_now_pct`, `soc_at_window_start_pct` (v1.39.0 — the plan's own projected pack SoC entering the window; NULL on every pre-v1.39.0 row), `target_soc_pct`, `buy_kwh`, `required_extra_kwh`, `reserve_floor_pct`, `cushion_pct`, `cushion_kwh`, `binding_cap`, the forecast basis (`pv_p10/p50/p90_kwh`, `load_p10/p50/p90_kwh`, `ev_p90_session_kwh`, `ev_session_count`, `band_sigma_cal`, `cal_scored_days`, `forecast_basis`, `weather_covered`), `min_proj_soc_pct`/`min_proj_soc_ts_ms` (the simulated plan trajectory — **omitted entirely for an incomplete-basis plan**, so a NULL here is the scorer's "no basis" sentinel), `pool_full_kwh`, `tariff_snapshot` (JSON: plan/season/period-now/ratesConfirmed/cents-by-tier), and **`window_start_ms` / `window_end_ms`** (v1.39.0) — the plan's *actually resolved* charge window. Weekend plans resolve windows disjoint from the canonical 23:00–05:00 night (a Saturday plan's window is Monday 00:00–05:00), and the scorer/completion gate must pair actuals to the **real** window; without these columns a Saturday night would be captured before its window even opened. Added to existing databases by an idempotent `ALTER TABLE` migration.
+- **OUTCOME** (NULL until the night completes): `outcome_captured_at_ms`, `actual_pv_kwh`, `actual_load_kwh`, `actual_window_import_kwh`, `actual_onpeak_import_kwh`, `onpeak_import_occurred`, `actual_min_soc_pct`/`_ts_ms`, `plan_traj_floor_breached`, `cushion_breached`, `grid_home_coverage_frac`, `scored` (0/1), `score_notes`; v1.187.0: `onpeak_start_ms` / `onpeak_end_ms` / `onpeak_basis` and `realized_cost_cents` (both §7).
+- **ON-PEAK OUTCOME (v1.187.0).** `actual_onpeak_import_kwh` is `grid_home_w` import over the on-peak period the plan **governs** — the first run of on-peak hours at or after its own window closes, provided it starts before the next cheap window opens (`nightLedgerScoring.governedOnPeakSpan`, resolved from the tariff model, so the Mon–Fri gate and the holiday list are the tariff's own). A Mon–Thu plan governs the next day's 16:00–19:00; a Saturday or Sunday plan (window Monday 00:00–05:00) governs Monday's; a Friday plan governs none. `onpeak_basis` says which applies: `governed` (measured over `onpeak_start_ms`–`onpeak_end_ms`; NULL value when `grid_home_w` covers < 90% of the span), `none` (no on-peak governed — NULL, never a measured 0; also a plan that resolved no charge window at all, `windowlessLedgerColumns`), or `superseded` (a later plan resolved the same window — Sunday's for Saturday's — and carries it, so the shared Monday is recorded once). `onpeak_basis` NULL means **not measured on the governed basis**: a row captured before v1.187.0, or a pre-v1.39.0 row whose window was never recorded (nothing can be paired to it). **Rows captured before v1.187.0 carry `onpeak_basis` NULL and are kept as recorded:** their on-peak columns measured the plan day's own 16:00–19:00, which closes ~2.5 h before the ~21:30 plan exists, with no weekday gate — each weekday row holds the previous night's on-peak outcome, and Saturday/Sunday rows hold an off-peak afternoon. They are not rewritten.
+- **PV EVIDENCE (v1.187.0).** `pv_model_sns` (plan time) records the Cores the PV band's solar model was fitted on (`ProbabilisticForecast.solarModelSns`, sorted, comma-joined). At capture, `pv_verdict_set_aside` records why the row's PV verdict is not forecast-skill evidence when that set differs from the Cores whose actual PV is summed (`pvVerdictSetAside`); `pv_in_band` / `pv_err_frac` are still written as measured. Rows planned before v1.187.0 have no `pv_model_sns` and their verdicts stand, with one exception in `KNOWN_FLEET_MISMATCH_PV_ROWS`, matched by exact `plan_date` + `issued_at_ms`: the 2026-09-27 plan, whose band came from the 21:06 restart's partial-map forecast (solar model fitted on one Core, v1.186.5) and was graded against three Cores' 9.6 kWh (`pv_in_band` 1). A once-per-boot pass (`tagKnownFleetMismatchPvRows`) writes only its `pv_verdict_set_aside`, logged; the captured verdict is kept.
+- **DELIVERED ENERGY (v1.187.3).** On an actuated night `delivered_kwh` is the energy into the home Cores over the hold span (§7 "Delivered energy"), and `delivered_basis` records the method: `source-charge` (`DELIVERED_BASIS`), written exactly when `delivered_kwh` is a number. A NULL `delivered_kwh` has a NULL basis and a `Delivered:` clause in `score_notes` naming why. **Rows captured before v1.187.3 carry `delivered_basis` NULL beside a number and are kept as recorded:** their `delivered_kwh` is window grid import minus the concurrent house load, which assumed the house ran on the grid for the whole hold and under-counts every night the SHP2 carried the house from the pack inside it (2026-09-30: 4.71 kWh against ~20.3 kWh into the Cores). The buy de-bias learner reads only the current basis (§15.12 "Announced-buy de-bias").
+- **SCORE** (NULL until scored): `pv_err_frac`, `pv_in_band`, `load_err_frac`, `load_in_band`, `buy_err_kwh` (signed, + = over-bought), `soc_min_err_pct`.
+- **DISPOSITION** (v1.132.0, both NULL on rows written before it):
+  - `arm_disposition` — why an armed night never became an actuation. `actuated` alone is over-loaded: `NULL` covers at least five dispositions (superseded by a later plan, held below the minimum buy, no window resolved, advisory mode, apply guards refused). The 2026-08-29 row sat at `actuated=NULL` with `buy_kwh=36` and read like a failed 36 kWh buy when it was a routine Sat/Sun shared-window supersede — a log line recorded it, the ledger did not.
+  - `cost_ceiling_basis` — `'pv-headroom' | 'max-soc' | NULL`. **The field that makes cost mode auditable.** `objective` only records which mode was *configured* plus buy/no-buy; `costModeTargetKwh` floors at the resilience answer and raises only under a strict inequality, so a row labelled `cost_arbitrage` can carry **zero** cost-mode contribution. This value was computed and thrown away, which is why "is cost mode actually doing anything" could not be answered from the ledger.
+
+**Cost columns (v1.187.0).** `realized_cost_cents` is **written**: metered `grid_home_w` import (positive-clamped, gaps over 1 h skipped — the kWh columns' rules) priced interval by interval at `rateAt(apsREvModelFromEnv(), t).centsPerKwh` (`pricedImport`), over the night's scored span — from the window open (or the reserve write, when a pre-v1.187.0 schedule applied it earlier) to window close + 16 h: the overnight buy, the day's off-peak import and the governed on-peak (`realizedCostOutcome`, assembled by `assembleNightLedgerColumns`). Energy only (no basic-service charge). NULL on unconfirmed rates or any interval without a rate, under 90% `grid_home_w` coverage of the span, or a row superseded for its window (the later row carries it); **a `Cost:` clause in `score_notes` always says which** — the priced total, `rates unconfirmed`, `no <season> rate configured for <period>`, `coverage N% < 90%`, or `carried by the <date> plan`. Rates are those configured at capture time; the plan-time rates stay in `tariff_snapshot`.
+
+> **The column is not summable to a bill.** Row spans do not tile time: on a weekday 21:00–23:00 falls in no row (one row ends at close + 16 h = 21:00, the next opens at 23:00), and a Friday row (window Fri 23:00 → Sat 00:00) ends Saturday 16:00, so Saturday 16:00 → Monday 00:00 falls in none. Spans also differ in length (17 h on a Friday row, 21 h on a Monday-window row). A month's sum misses ~2 h every weekday and ~32 h every weekend; the daily grid cost is the HA **Grid Cost Today** sensor.
+>
+> **A missing season rate nulls whole rows.** `pricedImport` never half-prices a span, and `TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS` defaults to `""`: on a confirmed table without it, every row whose span holds a winter weekday 10:00–15:00 records NULL from October — the first winter usage month, v1.187.10 (the note names the period). The boot logs such gaps once (`unpricedTariffPeriods`: every period, per season it applies in, with no rate on a confirmed table).
+
+Several declared columns are *never written* and read NULL by design: `actual_grid_to_battery_kwh`, `outage_during_day`, `demand_charge_savings_cents` (APS R-EV has no demand charge), and the counterfactual columns `counterfactual_cost_cents`, `realized_savings_cents` and `would_have_peak_imported`. The reasons first given for the counterfactuals (no actuated nights, rates unconfirmed) no longer hold; the one that remains is that each needs the no-buy trajectory, and the recorded one does not supply it: shifting the measured trajectory down by the delivered energy assumes the panel would have discharged the same way from a lower pool, and the SHP2 does not — after it stops at its reserve it resumes discharging only ~20 points above it (2026-09-13/14/27/28), so a lower pool can sit idle and buy grid through hours the measured night discharged. A modelled no-buy day would be an estimate in columns the gate and the owner read as measurements. The grid cost of every day, in dollars, is the HA **Grid Cost Today** sensor (chapter 7 §4, `computeTariffReport`).
+
+**★ Never pruned.** The table is created alongside `lifetime_totals` and is never referenced by the hourly `samples` prune — the multi-month verification record the write-readiness gate reduces over **must survive the samples retention** (design §0.1, binding; 30 days by default, `RECORDER_RETENTION_DAYS` since v1.51.0). The companion `night_charge_calibration` singleton (`id=1 CHECK`; seasonal cushion learner / buy de-bias / EV-tail inflation state, design §3.4) has schema and read/write API but **no live producer or consumer yet** — the learner is a later increment.
+
+**Write path.** `nightUpsert` builds a dynamic `INSERT … ON CONFLICT(plan_date) DO UPDATE` where column names come *only* from a frozen whitelist (`NIGHT_LEDGER_COLUMNS`), never caller keys — that is what makes the interpolation injection-safe. Only columns present and not `undefined` are written, so a partial outcome merge preserves every frozen plan column; prepared statements are cached per column-shape; JS booleans are coerced to INTEGER 0/1 (`node:sqlite` rejects a boolean bind). `recordNightPlanRow` (`index.ts:3902`) coerces nullable plan numerics to 0 for the non-null plan columns (`target_soc_pct`, `buy_kwh`, `required_extra_kwh`) but *omits* `min_proj_soc_pct` when null so the sentinel survives. The synthetic SN `night_charge` is reserved for optional disposable chart-overlay samples (subject to the configured samples retention) and joins the restart-gap exclusion list (like `weather`/`forecast`) so off-cadence wall-clock rows can never mask a real telemetry stall; the durable ledger itself never rides the `samples` table.
+
+---
+
+### 7. Completion-gated outcome scoring
+
+#### The night clock (`nightWindowBounds`, `nightChargeAdvisor.ts:2743`)
+
+The single source of truth for a plan date's spans, in fixed America/Phoenix arithmetic (UTC−7, no DST; pure, null on a malformed date): plan for day `D` covers charge window `[D 23:00, D+1 05:00)`; the plan-trajectory score span runs `[D+1 05:00, D+1 21:00)`; the night is **complete** — and may be outcome-captured — only at/after `D+1 21:00` (`completeMs`, = day-start + 45 h). `nightSpansForRow` (`index.ts:4034`) prefers the row's **own stored window** when present: the score span then runs **16 h past the real window close** (`window_end_ms + 16 h` — the same close+16 h shape as the canonical 05:00→21:00), which is what pairs a weekend plan's actuals to its Monday-morning window instead of the canonical night. Rows without a stored window (`pre-v1.39.0`) are marked `windowKnown=false` and captured honestly as `scored=0` — actuals cannot be paired to the plan's real window, and a fabricated cross-span comparison must never enter the gate's evidence.
+
+**★ The completion gate** (v1.39.0): a night may be captured only once `nowMs ≥ completeMs`. The pre-fix midnight tick captured yesterday's row while its charge window was still *open* — window coverage ~25% ⇒ `scored=0`, inverted SoC query ⇒ null actuals — and the idempotence latch then froze those truncated actuals into the never-pruned ledger forever, so the readiness gate could never accumulate a single scored night.
+
+**★ …and the forecast span** (v1.187.10): the sweep captures a row only once `nowMs ≥ ledgerCaptureDueMs(completeMs, issued_at_ms)` = `max(completeMs, issued_at_ms + FORECAST_SPAN_MS)` (24 h; `ledgerRowsDueForCapture`, nightLedgerScoring.ts). The PV/load actuals are integrated over `[issued_at_ms, +24 h]` clipped to the capture instant (`forecastActualsSpan`), so a capture before issue + 24 h froze a short actual against a 24 h forecast. On a weekday the gap was 0.1–0.5 h (completion ~21:00, issue ~21:30); a Friday 1 h window closes Saturday 00:00 and completes Saturday 16:00, ~5.4 h short. The 2026-10-02 row was captured at 16:08:08 on 18.6 h of load: 39.62 kWh against an 81.8 kWh forecast, `load_err_frac` −0.52, `buy_err_kwh` +51.09 kWh — a positive skew of ~10–12 kWh on every such Friday row, the direction that masks a real under-buy from the HARD criterion, and an inflated \|`load_err_frac`\| in the load-band calibration. `completeMs` itself is unchanged (the premature-capture repair below resets any row captured before it, across a 60-day sweep that can reach past the samples retention). Consequences: a weekday row now captures at the first sweep after issue + 24 h (~21:30–22:00), usually the 30-min tick after that evening's job, so the evening plan's ledger-derived calibrations and the evening notification's readiness see the previous night one sweep later; the tick that captures it also recomputes the readiness the apply moment reads (the window opens at 23:00 or later). A Friday row captures Saturday ~21:30–22:00. Known limit: the P50 sums the forecast's 24 hourly slots from the next whole hour after issue, so the actual span leads the forecast span by up to 1 h; the lengths are equal.
+
+#### The backfill sweep (`scoreCompletedNights`, `index.ts:4065`)
+
+Runs on the 30-min tick, the evening job, and the boot warm-up. Sweeps the last **60 days** of ledger rows (not exactly-yesterday — the old scorer orphaned any night left uncaptured across SHP2-wedge/downtime days forever, an uncounted MNAR exclusion), skipping rows already captured (`outcome_captured_at_ms != null` — idempotent) and rows still in flight. A night whose raw telemetry has aged past the configured samples retention (default 30 days) captures honestly as `scored=0` with null actuals — it does not stay uncaptured forever.
+
+#### Measuring one night (`scoreNightRow`, `index.ts:4103`)
+
+- **Grid import**: trapezoidal integration of SHP2 `grid_home_w` (positive-clamped, gaps > 1 h skipped; `integrateWh` / `coverageFrac`, nightLedgerScoring.ts) over the real charge window and — v1.187.0 — over the on-peak period the plan governs (`nightSpansForRow` → `ledgerSpansForWindow` → `governedOnPeakSpan`; §6 "ON-PEAK OUTCOME"; `nightOnPeakOutcome` writes the value, `onpeak_start_ms`/`_end_ms` and `onpeak_basis`, and appends an `On-peak:` clause to `score_notes`). It was the plan day's own 16:00–19:00 until v1.187.0. A row superseded for its window (`supersedingPlanDate`: a later `plan_date` with the identical stored window) records no on-peak and no cost, and queries neither span. The completion boundary is `max(window close + 16 h, governed on-peak end)` (`ledgerSpansForWindow`); under R-EV the governed on-peak (16:00–19:00 after a 05:00 close) always ends inside the 16 h span, so no capture moves. **Null-over-fabrication**: zero samples record NULL, never a "measured" 0 kWh.
+- **The assembly is pure** (v1.187.0): the on-peak, realized-cost, delivered-energy and PV set-aside columns come from `assembleNightLedgerColumns`, which reads the house panel's series only through a `query(metric, start, end)` seam; `scoreNightRow` runs it against the recorder and writes the result (`ledgerScorerAssembly.test.ts` drives it with a stub).
+- **Realized cost** (v1.187.0): `realized_cost_cents` — §6 "Cost columns". **Delivered energy** on an actuated night integrates the span the write was actually held (`deliveredHoldSpan`), from the write (or the window open, whichever is earlier) to: the restore's own time, `actuation_reverted_at_ms` (stamped by the actuator from v1.187.0), clamped to `[close, close + HOLD_TAIL_MAX_MS]` (30 min — past that the span would integrate the solar morning, where import − load turns negative), plus `HOLD_DEVICE_SETTLE_MS` (1 min); with no stamp and a write before the window (the pre-v1.187.0 schedule), close + `LEGACY_REVERT_LAG_MS` (5 min) as before; with no stamp on the current schedule, close + `ACTUATOR_TICK_MS` + `HOLD_DEVICE_SETTLE_MS`. A span ending exactly at the close dropped the restore's own tick (up to ~60 s) plus the device's stop — 0.1–0.5 kWh at 16–19 kW on a night still charging at the close, always toward under-delivery, in the column the buy de-bias calibrator trains on (the v1.115.0 defect class). A cancel or grid-loss abort keeps the window, as before.
+- **What delivered energy measures** (v1.187.3, `deliveredIntoCores`): the energy into the home Cores — the charging part (> 0) of the house panel's source channels (`src{n}_w`, from `backupInfo.chWatt`; positive = the panel charging that Core, negative = the Core carrying the house), integrated over the hold span and summed. **The channels come from the hold:** every source channel (`SOURCE_CHANNEL_SLOTS`, slots 1–3) with at least one recorded sample inside the hold, plus every slot the house panel reports connected at capture (`houseConnectedSlots` → `connectedSourceSlots`: connected and carrying a serial — the live rule of `panelRoster`, without its persisted `lastRoster` fallback). Capture runs ~16 h after the close, so membership at that moment is not the night's: a Core unplugged or in service by then, or a `/quota/all` that came back without the `pd303_mc` sources subtree that minute, would otherwise drop a channel that charged all night (or every channel) from a column written once. The recorder writes `src{n}_w` for every `chWatt` entry whether or not the slot is connected, so an empty slot reads zeros and adds nothing, and the slot ↔ `chWatt` index mapping does not affect the total. A slot connected at capture whose channel recorded nothing over the hold is still read, as a dark channel, so the coverage gate below withholds the night. Until v1.187.3 the column was window grid import minus the concurrent house load (`actuatedDeliveredKwh`, removed), which assumed the house ran on the grid for the whole hold; when the SHP2 carries the house from the pack — above its reserve before a just-in-time force-charge, and after the force-charge's OFF — the subtraction removed load the grid never carried. 2026-09-30: import 23.38 − load 18.67 = 4.71 kWh, against 20.34 kWh on the source channels (the Cores' own AC input 20.25, the pool 55→76%). On nights the house rode the grid all window the two agree to within ~3% on 09-24 (23.64 vs 24.26 kWh) and 09-28 (46.26 vs 47.41) and ~10% on the small 09-29 night (7.23 vs 7.93). A channel carrying the house reads negative and adds nothing, so hours on the pack cost nothing and hours on the grid count only what reached the Cores. NULL, with a `Delivered:` clause in `score_notes`, when no channel recorded anything over the hold and no connected Core is known; when any channel covers less than `LEDGER_SPAN_MIN_COVERAGE` (0.9) of the hold — the minimum over channels, as `actual_pv_kwh`'s per-core gate, since one dark channel in three averages to a healthy 0.67 while the total is a third short; or when the total exceeds the metered `grid_home_w` import over the hold (when that is itself ≥ 0.9 covered) by more than `DELIVERED_IMPORT_SLACK_FRAC` (5%) + `DELIVERED_IMPORT_SLACK_KWH` (0.5 kWh) — overnight the grid is the only source that can charge the Cores, so more than that is a channel read with the wrong sign or meaning. `HOLD_TAIL_MAX_MS` is unchanged; the morning bias it was sized against was import − load's.
+- **Coverage**: fraction of 5-min buckets in the window with ≥ 1 sample; `< 0.9` ⇒ `scored=0` ("MNAR-excluded").
+- **PV/load actuals** are integrated over `[issued_at_ms, +24 h]` — the same horizon the frozen P50 forecast covered, so `pv_err_frac`/`load_err_frac` are like-for-like. Actual PV = Σ `pv_total` over the SHP2-connected home DPUs (the same basis the forecast is built from); actual load = SHP2 `panel_load`. v1.187.10: the span is whole at capture (the forecast-span gate above); before it a row captured earlier integrated only to the capture instant.
+- **Minimum SoC** over the score span passes through `medianFilter3` (3-sample median; endpoints pass through) *before* the min-scan: the documented SHP2 cloud-reconnect artifact emits a single transient `backupBatPercent=0` sample, and an unfiltered min-scan latches it — fabricating a realized need equal to the full floor+cushion and a false HARD under-buy in the gate's evidence. A genuine sustained low has agreeing neighbors and passes.
+- **Realized-need buy** — the hindsight counterfactual `buy_err_kwh` is scored against — is defensible **only on a clean night**: in advisory phase the home runs *without* the buy, and on a grid-tied home its own overnight import props the SoC. `scored=1` requires: plan had a trajectory (`min_proj_soc_pct` non-null) ∧ coverage ≥ 0.9 ∧ a min-SoC read exists ∧ window import ≤ `ARB_MIN_BUY_KWH` (near-zero — "clean islanded baseline"). Then `realizedNeedBuyKwh = max(0, targetFloorKwh − actualMinPackKwh)/legEff`. Every other case records `scored=0` with an explicit `score_notes` reason.
+- **The floor verdict is the plan trajectory, never baseline telemetry** (design §3.3): `plan_traj_floor_breached` = the plan's own sized trough below its own line — v1.186.0: `cushionTroughSocPct < cushionLineSocPct` (the trough that set `cushionShortfall`, and reserve floor + the cushion applied; `legacy-pct` keeps the whole-house `minProjSocPct` against floor + `cushionPct`; no recorded trough ⇒ null). Before v1.186.0 it compared the whole-house disclosure trough, which reads 0% on every cost-mode night, so the gate counted every such night as a strike; a pre-v1.186 row with `cushion_shortfall` 0 and no trough is set aside by `nightChargeGate`. In advisory phase raw min-SoC telemetry measures the un-actuated baseline, not the plan's line. Raw telemetry feeds only `soc_min_err_pct` (plan minus actual) and the separate `cushion_breached` observation. `pv_in_band`/`load_in_band` check the actual against the frozen `[P10, P90]`; `onpeak_import_occurred` uses a 0.05 kWh threshold.
+
+#### Premature-capture repair (`repairPrematureNightOutcomes`, `index.ts:4720`)
+
+Once per boot, idempotent: any row whose `outcome_captured_at_ms` **precedes its own night's `completeMs`** (the pre-v1.39.0 mid-window defect) has its outcome/score columns reset to NULL (`scored=0`, explanatory `score_notes`) so the now-completion-gated sweep re-captures it with full-span actuals. Rows are corrected in place — never deleted.
+
+#### Forecast-span repair (`repairShortForecastSpanOutcomes`, v1.187.10)
+
+Once per boot, idempotent, before the warm sweep: `forecastSpanRepair` (nightLedgerScoring.ts) selects captured rows with a stored window whose capture preceded `issued_at_ms + 24 h` by at least `FORECAST_SPAN_REPAIR_MIN_SHORT_MS` (1 h) — Friday 1 h windows (~5.4 h short) and evening jobs delayed past ~22:00.
+- **Inside the re-capture horizon** — `issued_at_ms` within `min(RECORDER_RETENTION_DAYS, 60) − 2` days (`forecastSpanRecaptureHorizonMs`; 28 days at the default 30-day retention, 58 days with multi-year retention, so the row keeps its raw samples and stays inside the 60-day sweep) — the outcome columns are reset as the premature-capture repair resets them (`forecastSpanResetColumns`: capture stamp NULL, `scored=0`, a `reset —` note) and the sweep re-captures the row over the full span. A re-capture re-scores every outcome column on the current scorer — the delivered-energy basis, the governed on-peak, the PV coverage gate and the Cores connected at capture — like any late capture. One info line per row names the shortfall and the captured load and `buy_err_kwh`.
+- **Not re-scorable on today's devices** (review, `forecastSpanRecapturable`) — a row inside the horizon is tagged like one past it when it has no `pv_model_sns` (planned before v1.187.0, or with no recorded model set: `pvVerdictSetAside` cannot see a roster change, and a re-capture sums actual PV over today's panel-connected Cores — before the 2026-08-20 roster change another Core held slot 3), or when it carries a `delivered_kwh` with no `delivered_basis` (captured before v1.187.3: the buy de-bias learner reads those as legacy and they are never rewritten). The live 2026-10-02 row carries both and is re-captured.
+- **Past it** the row is kept as captured and `score_notes` gains a `Forecast span:` clause stating the hours covered and that the PV/load errors under-count (`forecastSpanTagNote`; the marker makes it idempotent). One summary line lists the tagged rows. The tag is not read by the readiness gate or the load-band calibration; such rows age out of the 120-day band window.
+- **Not repaired:** weekday rows captured before v1.187.10, 0.1–0.5 h short, are kept as captured (a re-capture is spent only where the PV/load/buy columns are materially wrong).
+
+---
+
+### 8. The write-readiness gate (`computeNightChargeReadiness`, `nightChargeGate.ts:219`)
+
+A pure reduction over the ledger (no I/O, `nowMs` injected) into one of three states — `LEARNING` / `READY_TO_CONSIDER_WRITES` / `BLOCKED` — plus `writeReady` and a human-readable `blocking[]` list. It gates **only on physically-measured prediction accuracy**: there is deliberately *no* savings term (no valid counterfactual exists pre-write, so a savings gate would certify a number the system cannot observe). Recomputed over `readNightLedger(400)` on every tick, evening job, and warm-up.
+
+**Thresholds are pre-registered and frozen** — never tuned on the season they gate (garden-of-forking-paths); a re-tune bumps `CURRENT_ALGO_VERSION` (currently **3**: v1.105.0 redefined `buy_err_kwh` onto the planner-sizing basis, so v2 rows' values are not comparable and are excluded, resetting the evidence clock; v2 was the v1.49.0 charge-only-cap sizing correction, which invalidated every v1 row) and resets the readiness clock. Rows are filtered to the current algo version by **string** comparison (`recordNightPlan` persists `algo_version` as SQLite TEXT; a numeric compare never matched a real row and left the gate permanently stuck). Prior-version rows are *excluded*, not tagged.
+
+**The v2 evidence base is ACTUATED nights** (v1.50.0). The v1 gate scored a night only on a "clean islanded baseline" (near-zero window import) — on a grid-tied home the SHP2 carries the house on grid at the floor and imports every night, so `scoredDays` was structurally 0 and the gate could never open. v2 splits the evidence into two pools:
+
+- **Actuated pool** — current-algo rows with `actuated=1` ∧ `scored=1` (a bounded reserve write was applied, §8b, and its delivery measured, §7). Feeds the under-buy rate, the sizing bias, and the graduation night count.
+- **Forecast pool** — current-algo, outcome-captured, `confidence_tier='forecast'` rows. Feeds PV/load accuracy and band coverage (those columns are recorded on every captured night regardless of the realized-need `scored` flag). v1.187.0: the PV figures (`pvMae`, `pvBias`, `pvBandCoverage`, the effective-N residual series) and the verdict-bearing sample (`coverageNights`, the informational joint) read only rows whose `pv_verdict_set_aside` is NULL — a band built for other Cores than the actuals is not forecast-skill evidence (§6 "PV EVIDENCE"). Such rows are counted in `pvVerdictsSetAside`; the load figures are unaffected. **An incomplete-basis night is not set aside for that alone**: a plan refused for a lasting forecast failure (2026-09-11: "PV band coverage 72% < 78%") is exactly the evidence this gate grades, and dropping those nights would raise PV coverage by survivorship. On the 2026-09-29 ledger the one set-aside row moves PV coverage 33/36 (0.917) to 32/35 (0.914) and `coverageNights` 36 to 35; no verdict changes.
+
+**HARD failures ⇒ `BLOCKED`** (evaluated first):
+
+| Gate | Rule |
+|---|---|
+| Engine-fault strikes | A strike requires the plan to have **claimed hold** (`cushion_shortfall` falsy — a NULL/legacy row still counts as claimed, fail-closed) AND either the plan's own simulated trajectory breached floor+cushion (forecast-tier rows, §3.3) or an actuated night's **realized** outcome breached (`cushion_breached`, any tier — a delivered buy that still breached is fault evidence regardless of forecast basis). A plan that honestly disclosed `cushionShortfall` is physics, not fault — exempt. Strikes count within a rolling `STRIKE_WINDOW_DAYS = 45` window and clear after `STRIKE_CLEAR_STREAK = 14` consecutive strike-free actuated nights — escapable by demonstrated performance, never by waiting alone. |
+| `buy_err_kwh` basis | **v1.105.0 (algo v3)** — the PLANNER-SIZING basis: `buy_err = planBuy − (planBuy + netMiss/legEff) = −netMiss/legEff`, where `netMiss = (forecastPv − actualPv) + (actualLoad − forecastLoad)`. It answers exactly one question — *did the planner size the buy correctly?* — and contains no delivered term, no trough and no reserve setpoint. The prior definition was `planBuy − (delivered + troughDeficit)`, the difference of two questions: it counted the actuator's by-design over-delivery (29-41 kWh against 21-22 kWh plans) as under-buy, and anchored on a 16 h post-window trough that is really the reverted `backupReserveSoc` (a fixed −14.9 kWh at a 10 % trough). Across four live nights that was −62.13 kWh of residual, 52 % over-delivery / 48 % trough, producing a 56 % under-buy rate no forecast change could move. Actuated and advisory nights share the basis — one column, one meaning. Delivery quality is a separate question. |
+| Under-buy rate | With ≥ `MIN_NIGHTS_TO_JUDGE_UNDERBUY = 5` actuated nights: fraction of `buy_err_kwh < −UNDERBUY_DEADBAND_KWH` (0.5, **v1.105.0** — an untoleranced `< 0` scored a −0.01 kWh rounding residual as a life-safety miss) must be ≤ `MAX_UNDERBUY_RATE = 0.10` (under-buy is the asymmetric safety miss). Below 5 nights this is still LEARNING, not BLOCKED. **v1.104.0** — the pool EXCLUDES nights whose plan disclosed a cushion shortfall (`cushion_shortfall`), matching the exemption the strike rule already applies ("disclosed — physics, not fault"): a plan that declared up front it could not meet the cushion, because charge and pool caps prevent it, is not evidence that the engine under-bought. `underBuyExcluded` reports how many were dropped. Removing bad evidence leaves NO evidence, so the rate becomes null and the state falls to LEARNING — fail-closed, never READY. (The hybrid-residual limitation recorded here before algo v3 — delivered energy added back into realized need, a trough anchored on the reverted setpoint — was removed by v1.105.0; see the basis row above.) |
+
+**Graduation criteria** (adopted 2026-07-31) — *any* unmet or uncomputable metric ⇒ fail-closed `LEARNING` (design I13; missing/thin/young data is never null-as-ready):
+
+| Metric | Threshold | Constant |
+|---|---|---|
+| Scored actuated nights | ≥ 21 | `MIN_ACTUATED_NIGHTS = 21` |
+| Under-buy rate (actuated pool) | ≤ 0.10 | `MAX_UNDERBUY_RATE` |
+| Signed sizing bias (mean `buy_err_kwh`, actuated pool — the P50 PV/load forecast miss in kWh; delivered energy is not part of it) | in `[0, 5]` kWh | `BUY_BIAS_MIN_KWH = 0`, `BUY_BIAS_MAX_KWH = 5` — never net under, never gross over. v1.187.10: the blocker reads "sizing bias … (mean buy_err_kwh: the P50 PV/load forecast miss in kWh; delivered energy is not part of it)"; it read "delivery bias", which pointed at the actuator when the live 22.27 kWh was load over-forecast |
+| Realized band coverage — **v1.106.0: PER MARGINAL** (`pvBandCoverage`, `loadBandCoverage`), each in `[P10,P90]`, forecast pool | each in `[0.78, 0.92]` over ≥ 14 verdict-bearing nights | `BAND_COVERAGE_MIN/MAX`, `MIN_COVERAGE_NIGHTS = 14` — too high means the band is uselessly wide, too low means unsafe. Previously the **AND** of the two was graded against this marginal target: for two independent 80 %-calibrated marginals the joint is 0.64 and the Fréchet bounds put it in `[0.60, 0.80]`, so the upper half of the target was UNREACHABLE by construction and a perfectly calibrated pair could never pass. It also hid WHICH input was broken — the live joint read 9.5 % while the marginals were PV 57 % / load 14 %. The joint is retained as an informational figure only, and the blocking line names both marginals. |
+| Load band construction — **v1.106.0** | `calibratedLoadBandFactor`: nearest-rank 80th percentile of realized \|`load_err_frac`\|, FLOORED at the historical hand-set 1.15 and capped (default 2.0) | The band was `P50 ÷ 1.15` / `P50 × 1.15` — a fixed ±15 % sizing multiplier that nothing estimated from data, yet named P10/P90 and graded as a calibrated 80 % interval; it contained the actual **14 %** of the time. The floor makes the change monotone: it can only WIDEN. Only `loadP90W` feeds sizing (the projected drain), so a wider band buys more — the safe direction for an asymmetric under-buy miss. Below 10 samples it returns the floor with `basis: 'default'` rather than calibrating on noise. |
+| Zero engine-fault strikes | active (uncleared, in-window) strikes = 0 | `STRIKE_WINDOW_DAYS`, `STRIKE_CLEAR_STREAK` |
+
+PV/load MAE and signed bias, the autocorrelation-adjusted effective N, and the MNAR exclusion fraction remain computed and published as diagnostics (same definitions as v1) but no longer gate — the five criteria above are the graduation contract. Accuracy remains **normalized MAE + a separate signed bias, deliberately not r²**: r² is variance-driven and inflated by monsoon swings — a +15–20% biased-but-correlated forecast passes r² ≥ 0.80 yet mis-sizes the buy.
+
+**Effective N** (`effectiveSampleSize`, `nightChargeGate.ts:174`): `n·(1−r₁)/(1+r₁)` with lag-1 autocorrelation `r₁` computed over the PV residual series (fallback: load residuals, then the raw count), clamped to `[0, 0.99]` — a cloudy stretch is several *correlated* bad nights, so raw count over-counts evidence; negative autocorrelation is clamped to 0 so it can only ever reduce, never inflate.
+
+**The MNAR denominator is *expected* nights, not captured rows** (v1.39.0): nights that never produced a ledger row at all — add-on down at the evening job, SHP2 cloud-offline, the documented *adverse* failure modes — must count as exclusions; keying the fraction on captured rows let exactly those nights vanish from both numerator and denominator. Expected range = every Phoenix calendar date from the first current-algo plan (bounded to a trailing 120 days) through the most recent *completed* night — the Phoenix date of `now − 45 h` (plan `D` completes at `D+1 21:00`). `exclusionFrac = max(0, expected − distinct scored plan-dates in range)/expected`. Phoenix dates are built from `en-US` `formatToParts` (v1.39.1) — the `en-CA` `format()` shortcut silently falls back to a non-ISO shape on a small-ICU Node, cascading into a swallowed throw and a permanently-null readiness.
+
+`nightChargeGateFields` flattens the result for the state payloads; on a null readiness it emits `night_charge_readiness: 'unknown'`, **`night_charge_write_ready` strictly `false`**, and every diagnostic null. v2 note: `night_charge_plan_nights_scored` counts scored **actuated** nights.
+
+---
+
+### 8b. Supervised write mode (`nightChargeActuator.ts`, v1.50.0)
+
+When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one bounded, announced, cancellable, auto-reverting reserve write. The decision core is pure (`decideActuation` — all clocks injected, unit-tested against every guard); the integrator executes decisions through the audited write helper and persists every transition to a restart-surviving state file (`.night-charge-actuation.json`, atomic write, in-memory mirror).
+
+**The nightly flow:**
+
+1. **Announce + arm (~21:30, inside the evening job).** When the recorded plan is a charge with a complete basis, a resolved window, and a positive buy, the actuation candidate is computed **from the announced plan** — a fresher recompute never silently substitutes a different buy, because the owner's cancel window runs against the announced numbers. The evening notification names the write, the clamped target, and the cancel deadline; the audible broadcast channel announces the same (no phone-push dependency). The armed state **persists only after at least one announcement channel confirms delivery** (`NOTIFY_CHANNEL` other than `none`, or a successful audible announce) — a write the owner never heard about cannot fire; an undelivered night stays advisory and logs at error level. Arming is refused while a prior night is unresolved (applied-unreverted, or an unconfirmed attempt not provably un-applied — a raised reserve is never orphaned or buried).
+2. **Apply (at the window open, tolerance +30 min).** v1.187.0: `APPLY_LEAD_MS` is 0 (it was 5 min). The reserve raise is a grid charge the moment it exceeds the pool, and the panel takes the write within seconds: on 2026-09-28 the write landed at 22:55:28 and the Cores took ~5.2 kW each from 22:55:42 — 1.12 kWh at the off-peak rate before the 23:00 overnight rate (09-22: ~0.85 kWh). The write moment is also the announced cancel deadline, so the owner's cancel window now runs to the window open. Force-charge keeps its order (reserve applied → readback-verified → ceiling synced → ON, never before the window opens); its ceiling sync already waited for the open, so it follows the verified reserve one tick (~1 min) later than before. The attempt is a **write-ahead intent**: the state file records the attempt and its pre-write baseline BEFORE the device call. One write raises `backupReserveSoc` to `min(round(targetSocPct), RESERVE_WRITE_MAX_PCT)` (`clampReserveTarget`; `RESERVE_WRITE_MAX_PCT` = 50, the SHP2's own reserve ceiling — proven on the device 2026-09-16, v1.164.0) — validated (not silently clamped) into the `[RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT]` = `[10, 50]` write envelope by `setBackupReserveSoc` (`ecoflow/commands.ts`), which imports the bound from `nightChargeActuator.ts` so there is exactly one definition, the same documented `PD303_APP_SET` shape the cloud-presence refresh has round-tripped since v0.9.10, audit-logged under `night-charge-reserve` with a 5-min retry cooldown. Every apply guard fails closed: advisory mode, a cancelled night, a red alert condition, an incoherent SoC read (I11), an unknown/out-of-range current reserve, a missed window, or a target at/below the current reserve ⇒ no write. The row is stamped `actuated=1` at write time. **Lost-confirmation adoption:** when an attempted write reports failure but the live reserve later reads back exactly the attempted target (≠ the attempt baseline), the write is proven applied — the actuator adopts it (applied state stamped from the attempt baseline) and the normal auto-revert takes over. **Device-ceiling adoption (v1.161.0):** when the reserve reads back *between* the attempt baseline and the target and still does after `APPLY_VERIFY_AFTER_MS`, the panel took the write but settled short — of its own accord, or because the owner moved the slider. That is a real partial actuation, so `deviceCeilingPct` adopts the achieved value AS `targetPct` (the original ask is preserved in `requestedPct`) and stamps the apply verified. Without it a short readback is indistinguishable from the 2026-08-16 phantom: both retries burn and the night ends on `applyFailed`, which pages "tonight's buy is forfeited" and corrects the ledger to `actuated:0` — while the reserve is genuinely raised and the buy is genuinely happening. A reserve that did **not** move still takes the phantom path, unchanged.
+
+   **v1.79.0 — apply readback:** the actuator no longer treats a cloud ACK as an
+   actuation. An applied night carries `applyVerifiedAtMs` (device readback matched
+   the target), up to 2 re-issues on readback failure (5-min windows, never into a
+   closing charge window), and a once-per-night operator warning + `actuated: 0`
+   ledger correction on exhaustion. Grid loss during an applied window reverts
+   immediately (`gridLossAbort`). The `vitalsRed` gate is HOST-vitals (struggling
+   process), not alert-condition — documented as such after the 08-17 audit.
+   Harness: `scripts/mutate-actuation-readback.mjs` (5 mutants).
+
+3. **Revert (at the window close, or immediately on a post-apply cancel or a grid loss).** v1.187.0: `REVERT_LAG_MS` is 0 (it was 5 min): a pack still under its target at the close kept grid-charging at the off-peak rate until the restore. The revert readback verification and the settling grace (`REVERT_VERIFY_AFTER_MS`, `REVERT_READBACK_GRACE_MS`) are measured from the revert itself and do not move. **Force-charge's OFF goes first on that tick** (`actuationStepOrder`, nightForceCharge.ts): whenever a force-charge OFF is due on the night's own record — window closed, no window, cancelled, or reserve already reverted (`forceChargeOffDueNow`) — the tick runs the force-charge step before the reserve step; otherwise the reserve step runs first, so the START still rides the reserve it just verified. Each step runs in its own try (`runActuationSteps`), in either order. Without this the OFF waited behind the revert PUT (writes carry no timeout of their own; undici's 300 s default applies) and the morning summary while the Cores kept grid-charging at 16–19 kW. Both are OFF-direction writes, so neither order can raise a charge. The restore stamps `actuation_reverted_at_ms` on the ledger row (the delivered-energy span's end, §7). The prior reserve value is restored. The revert path is mode-independent — it runs even if the owner flips the option back to advisory mid-night — and refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive CLOUD-REJECTED writes it annunciates a critical (audible + HA notification) once and keeps retrying; the floor/runway/SoC alarm spine is fully independent throughout. A successful revert sends a morning summary notification — not awaited (v1.187.0): an info push (5 s headers + 10 s body per target) never holds the tick.
+
+   **v1.131.0 — revert readback.** The revert stamped `revertedAtMs` the moment the cloud
+   ACK'd, which is exactly the evidence v1.79.0 ruled insufficient on the apply side, and
+   the revert branch is gated on `revertedAtMs == null` — so the stamp also stopped the
+   actuator looking at the panel at all. A restore the SHP2 accepted-then-ignored therefore
+   left the reserve pinned at the raised target with the ledger recording a clean, completed
+   night. That is the expensive end state: the panel holds the raised value as its floor, so
+   it buys grid at on-peak instead of discharging the pack the plan had just paid overnight
+   rates to fill, and the floor alarm reads a false AT-RESERVE-FLOOR posture. A reverted
+   night now verifies against the DEVICE: reading the restored floor stamps
+   `revertVerifiedAtMs`; still reading the RAISED target after `REVERT_VERIFY_AFTER_MS`
+   (= `REVERT_READBACK_GRACE_MS` = 5 min, so a verdict can never be reached inside the
+   settling window `isRevertSettling` exists to cover) re-issues the restore up to
+   `REVERT_MAX_RETRIES = 2`, then escalates once — critical announce plus a critical HA push
+   naming the manual fix. Strict equality on both sides: a reading that is *neither* the
+   restore target nor the raised target means the owner moved the floor themselves, and the
+   actuator falls through rather than overwriting their change (the same "never guess"
+   discipline as adoption). Guards are mutation-proven load-bearing
+   (`scripts/mutate-detector-honesty.mjs`, mutants ix–xii).
+4. **Score.** The scorer's actuated branch (§7) measures the delivered buy as the energy into the home Cores on the house panel's source channels (`deliveredIntoCores`, v1.187.3; window grid import minus the concurrent house load before it) and records `delivered_kwh` with `delivered_basis`, read by the buy de-bias learner (§15.12). v1.187.0: over the span the write was held (`deliveredHoldSpan`), which ends at the restore the actuator stamps on the row (`actuation_reverted_at_ms`, a ledger column since v1.187.0, NULL before it) plus the device settle — §7 "Realized cost" / "Delivered energy". *(Corrected v1.132.0: this previously also described deriving the realized-need counterfactual via `actuatedRealizedNeedBuyKwh`. That helper still exists in `nightChargeAdvisor.ts` but is **no longer on the scoring path** — it is exercised only by tests. Do not reason about live scoring from it.)*
+
+**Deadline phrasing (v1.51.2).** The announced cancel deadline is **day-qualified beyond 24 h** ("on Sunday at 11:55 PM") in both the notification and the spoken broadcast: weekend tariff semantics routinely resolve a Saturday-evening plan's window to Monday 00:00, putting the write moment ~28 h out, where a bare clock time would read as tonight. The spoken text also carries the `cushionShortfall` disclosure whenever the plan discloses one — the audible channel is never quieter about residual risk than the text channel.
+
+**Disabling the outage cushion (`ARB_OUTAGE_CUSHION_HOURS: 0`) — v1.133.0.**
+
+`outageCushionKwh` returns a `CushionBasis` of `islanded-outage`, `legacy-pct` or
+**`disabled`**, and the three are genuinely different states that one number cannot
+distinguish:
+
+| basis | meaning | trough test |
+|---|---|---|
+| `islanded-outage` | sized from a measured islanded load over a bounded outage — the intended path | pack **at window close** (outage onset) |
+| `legacy-pct` | no usable islanded-load measurement; the flat percentage-of-pool band stands in | whole-house **forward trough** (harsher) |
+| `disabled` | the owner set the cushion to zero — the plan stops sizing for an outage entirely | pack **at window close** |
+
+**Before v1.133.0 an exact `0` was not a decision, it was a fallback.** The guard folded
+`outageHours <= 0` into the same branch as "no measurement available", so setting the option
+to 0 silently delivered the legacy band (15% of pool ≈ 13.8 kWh on this plant) — the option
+was accepted, `validate-addon-config` passed, and the setting did not take effect. It was
+worse than inert: the legacy basis also switches the cushion test to the whole-house forward
+trough, so **asking for no cushion made the requirement larger**. An exact `0` is now honoured,
+and is checked FIRST — a disabled cushion does not depend on an islanded-load reading, so a
+missing measurement cannot resurrect the legacy band underneath it. Anything else nonsensical
+(negative, `NaN`, `Infinity`) still falls back: fail toward more cushion, never less.
+
+**A disabled cushion announces itself in the rationale** — "the N% reserve floor alone — the
+outage cushion is DISABLED, so nothing is held back for an outage". Without that, a night with
+no outage margin reads as one whose floor+cushion was comfortably covered, which is a standard
+that was lowered being reported as one that was met. Note also that `cushionShortfall` changes
+meaning under `disabled`: with the cushion at zero it fires only when the pack cannot hold the
+**reserve floor itself**, which is a stronger and rarer signal than the pre-v1.133.0 flag.
+Guards are mutation-proven load-bearing (`scripts/mutate-zero-cushion.mjs`, 6/6).
+
+**Objective mode: resilience vs cost (`ARB_OBJECTIVE`, `ARB_COST_MAX_SOC_PCT`) — v1.127.0, documented v1.132.1.**
+
+The planner sizes a buy against one of two objectives, selected by `ARB_OBJECTIVE`
+(`resilience` | `cost`, default `resilience`):
+
+- **`resilience`** — buy exactly enough that the post-window trough holds the reserve floor
+  plus the outage cushion. The buy is a *requirement*; anything beyond it is waste.
+- **`cost`** — the resilience answer is a **floor**, not a target. `costModeTargetKwh`
+  (`nightChargeAdvisor.ts`) raises the target toward `min(ARB_COST_MAX_SOC_PCT % of pool,
+  pool − morning-PV surplus)` and records which of the two bound it in the ledger's
+  `cost_ceiling_basis` column (`'max-soc'` | `'pv-headroom'`). The morning surplus is the
+  P50 (the P90 stands in when the P50 is unknown; a long-gap night uses the pre-peak P10),
+  computed on a **de-biased load** where the ledger shows the load forecast running high
+  (§15.13 "Cost-ceiling load de-bias"; never on a `cushionShortfall` night);
+  `costCeilingSurplusKwh` is the figure used and `costCeilingSurplusRawKwh` the one on the
+  forecast load as is (ledger `cost_surplus_kwh` / `cost_surplus_raw_kwh`). It is bounded below by the
+  resilience target, so **the safety margin can never shrink when the objective changes**;
+  the only direction cost mode moves a buy is up. Every physical cap downstream — charge
+  power, pool headroom, EV contention — is re-applied unchanged.
+
+Three properties an operator needs before setting these:
+
+1. **`ARB_COST_MAX_SOC_PCT` above 50 is delivered by force-charge, not by the reserve write.**
+   The reserve write is capped at 50, the SHP2's own ceiling (`RESERVE_WRITE_MAX_PCT`).
+   v1.161.0 raised the bound to 90, the device settled the 2026-09-16 write at 50, and v1.164.0
+   restored 50. Both `clampReserveTarget` (`nightChargeActuator.ts`) and `setBackupReserveSoc`'s
+   range check (`ecoflow/commands.ts`) enforce it.
+
+   Since v1.165.0, force-charge runs on a night whose reserve write is applied and
+   readback-verified, with `ARB_OBJECTIVE: cost` and `ARB_COST_MAX_SOC_PCT` above 50.
+   `nightForceCharge.ts` switches the panel's per-channel force-charge (`setChannelForceCharge`,
+   `ch{n}ForceCharge`) ON just in time to reach the announced economic ceiling,
+   `min(ARB_COST_MAX_SOC_PCT, full − the morning solar surplus)`. It switches it OFF at that
+   target or at the window close. The panel's `foceChargeHight` ceiling is synced as a backstop
+   and restored afterwards.
+
+   Setting `ARB_COST_MAX_SOC_PCT` to 50 disables force-charge.
+2. **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" here means *fill
+   further*, on the premise that overnight energy is the cheapest the day will offer — not
+   that the planner optimises against the rate table. The tariff model informs the *window*,
+   not the *target*.
+3. **Cost mode is asked before it holds (v1.174.0).** The resilience hold returns early only in
+   `resilience` mode. In `cost` mode, a night whose no-buy trough already clears floor + cushion
+   still evaluates the cost target. It holds only when the pack already sits at or above the
+   night's cost ceiling, or when the window can deliver less than the minimum buy toward it.
+   The hold rationale names which case applied, and the ledger records the ceiling the night
+   was measured against. Before v1.174.0 the hold returned ahead of the objective in both
+   modes, so a high-pack night, including the long-gap 90% ceiling, never bought toward the
+   cost ceiling.
+
+**Manual cancel:** `POST /api/night-charge/cancel` (write-auth; surfaced as a button on the `NightChargeCard`). Before the apply moment it disarms; after a successful apply it triggers an immediate revert on the next actuator tick.
+
+**`auto` semantics:** `effectiveActuationMode(mode, writeReady)` is the binding enforcement point — `auto` is structurally demoted to `supervised` while the readiness gate has not graduated, and any future auto-only relaxation (e.g. dropping the evening cancel checkpoint) must branch on the demoted mode, never the raw config value. `advisory` remains the default; enabling a write mode is an explicit owner action in the add-on configuration.
+
+---
+
+### 9. Delivery surfaces
+
+**State payloads.** `nightChargeStateFields(plan, now)` + `nightChargeGateFields(readiness)` are spread into **both** the MQTT state payload (`mqttDiscovery.ts:1498`) and `/api/ha-state` (`index.ts:1791`) — deliberate MQTT/REST parity. A plan is *fresh* only when `basisComplete && age < PLAN_STALENESS_MS` (12 h = 43 200 000 ms, design I12): numeric fields are null and `charge_tonight` strictly `false` otherwise, so a dead or wedged advisor (the host power-cycles daily) can never leave a stale ON. The window strings are informational (published whenever the plan carries a window) and **day-qualified beyond 24 h** via `fmtPhoenixDayHm` — `"23:00"` within a day, `"Mon 00:00"` beyond — so a Saturday plan resolving Monday's window is never presented as tonight's (v1.39.0).
+
+**HA MQTT-discovery entities** (all carry `expire_after = 90 000 s` (~25 h) so the once-nightly cadence doesn't trip expiry but a dead add-on flips them to `unavailable` — a retained `charge_tonight=ON` from a dead advisor would be worse):
+
+| Entity | Type | Content |
+|---|---|---|
+| `ecoflow_night_charge_recommended` | binary_sensor | `charge_tonight` — the single flag an owner automation gates on |
+| `ecoflow_night_charge_target_soc` | sensor (%) | The reserve SETPOINT for the advisory automation to write — `plan.setpointSocPct` clamped to the actuator's `[10, 50]` envelope (`clampReserveTarget`); not a predicted SoC (v1.62.0 ask/forecast split) |
+| `ecoflow_night_charge_expected_soc` | sensor (%) | The predicted, contention-derated pool SoC at window close (`plan.targetSocPct`) |
+| `ecoflow_night_charge_buy_kwh` | sensor (kWh) | Recommended meter-side buy (`plan.buyKwh`) |
+| `ecoflow_night_charge_window_start` / `_end` | sensor (string) | Day-qualified Phoenix `HH:MM` window bounds |
+| `ecoflow_night_charge_readiness` | sensor (diagnostic) | `LEARNING` / `READY_TO_CONSIDER_WRITES` / `BLOCKED` |
+| `ecoflow_night_charge_write_ready` | binary_sensor (diagnostic) | Fail-closed gate boolean |
+
+Buy, expected SoC and the window come from the latest plan, recomputed every 30 min: before the window they can differ from the announced and armed figures (`GET /api/night-charge/status` → `actuation`), and inside it the buy is what is still needed and reaches 0 once the target is met. The armed buy is not an actuation input — force-charge stops on the frozen SoC target.
+
+The remaining gate diagnostics (`night_charge_under_buy_rate`, `night_charge_band_coverage_pct`, `night_charge_plan_nights_scored`, `night_charge_effective_n`, `night_charge_forecast_basis_pct`, `night_charge_exclusion_fraction`) ride the same payloads without dedicated discovery entities.
+
+**`GET /api/night-charge/status`**: `{ enabled, mode, reserveWriteMaxPct, window, reserveFloorPercent, confidence, notify:{hour,minute,lastNotifyDay}, plan, readiness, actuation, recentOutcomes }`. `mode` is the resolved `NIGHT_CHARGE_MODE`. `reserveWriteMaxPct` (v1.182.0) is the panel's reserve maximum, so the card shows what will actually be written. `actuation` is tonight's supervised-write record: armed/applied/cancelled/reverted, the force-charge fields, `cancelDeadlineMs`, and `forceChargeOnVerify` (v1.186.0, whether the force-charge ON was read back) (§8b). `reserveFloorPercent` is read live from `projection.backupReserveSoc` — the same field the floor alarm defends. `recentOutcomes` is an in-memory mirror of the last 7 ledger days refreshed by the timers, so the request handler never touches the DB inline (CWE-770). No auth: read-only, exposes no secrets, actuates nothing.
+
+**Notification** (`buildNightChargeMessage`, `notify.ts:373`): three shapes — `charge` (buy kWh, target SoC, low-SoC without vs with the buy, floor+cushion line, confidence, honest shortfall/over-buy notes, and the advisory automation contract), `hold` (no charge needed), and `insufficient_basis` (sent so the *absence* of a plan is explicit — the owner never wonders if the job died; a null plan can only ever render this shape regardless of the requested one). All severity `info` with a single `dedupId: 'night_charge_plan'` so the nightly message lands in **one updating card**, and dispatched via a *direct* `sendNotification` that bypasses quiet-hours and min-severity (design I10) — a plan queued past the charge-window open is worse than none. `NIGHT_CHARGE_NOTIFY_ON_HOLD=false` suppresses hold-night sends (still latching the day).
+
+**Web**: `NightChargeCard` on the Strategy panel — zero-prop, self-fetching `/api/night-charge/status` on a 60 s poll, with its own matching 12 h client-side staleness guard; a null/incomplete/stale plan renders the grey "unavailable" shape, never a fabricated number.
+
+---
+
+### 10. Configuration
+
+Add-on options (`config.yaml` → env):
+
+| Option | Default | Range | Meaning |
+|---|---|---|---|
+| `NIGHT_CHARGE_ADVISOR_ENABLED` | `true` | bool | Master switch for the timers + surfaces (env compare is `!== 'false'`) |
+| `NIGHT_CHARGE_MODE` | `advisory` | list(advisory\|supervised\|auto) | Write posture (v1.50.0). `advisory` never writes; `supervised` runs the announced, cancellable, bounded, auto-reverting reserve write per charge night. In `cost` mode with `ARB_COST_MAX_SOC_PCT` above 50 it adds a force-charge that rides the verified write to the night's ceiling (v1.165.0) (§8b); `auto` is honored only after gate graduation and operates as supervised until then. Unknown values fail closed to `advisory`. |
+| `ARB_OUTAGE_CUSHION_PCT` | `15` | int 0–40 | Legacy fallback only: the cushion as % of pool, tested against the whole-house forward trough. It is used only when no islanded-load measurement exists. The primary cushion is `ARB_OUTAGE_CUSHION_HOURS` × 7-day mean islanded load × `ARB_ISLANDED_LOAD_SAFETY` ÷ discharge efficiency (v1.125.0). Never changes the independent floor alarm |
+| `ARB_MIN_BUY_KWH` | `1` | float 0–50 | Below this recommended buy, the night is a "hold" |
+| `ARB_CHARGE_CAP_KW` | `0` | float 0–50 | Grid-side charge-power ceiling for the feasibility cap. `0` = AUTO (v1.173.0): connected Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE (~5.9 kW per Core); > 0 is a fixed override. Home load comes off separately via `ARB_GRID_INPUT_CAP_KW`. Sizing only, no device is ever set |
+| `ARB_LOAD_P90_FACTOR` | `1.15` | float 1–2 | Floor of the calibrated load-band multiplier (`calibratedLoadBandFactor`, v1.106.0): the band can only widen above it, and it is the factor itself below 10 ledger samples |
+| `NIGHT_CHARGE_NOTIFY_HOUR` / `_MINUTE` | `21` / `30` | runtime-clamped int 0–**22** / 0–59 | Evening-job fire time; hour is clamped to ≤ 22 because the catch-up window is `[fire, 23:00)` — hour 23 made it the empty set (v1.39.0) |
+| `NIGHT_CHARGE_NOTIFY_ON_HOLD` | `true` | bool | Send the nightly advisory even on hold nights (consistent "the job ran" confirmation) |
+| `TARIFF_APS_*_CENTS` ×6 | `""` | str | Per-period effective ¢/kWh from a bill (§3 table); empty = unconfirmed |
+| `TARIFF_APS_RATES_CONFIRMED` | `false` | bool | While false, **every** `$` output is null regardless of entered rates |
+| `ARB_OUTAGE_CUSHION_HOURS` | `4` | float 0–72 | Outage length the cushion carries the measured islanded load through (v1.125.0); `0` disables the cushion (basis `disabled`, v1.133.0) |
+| `ARB_ISLANDED_LOAD_SAFETY` | `1.25` | float 1–5 | Multiplier on the 7-day mean islanded (panel) load in the cushion; raising it buys more |
+| `ARB_OBJECTIVE` | `resilience` | list(resilience\|cost) | Sizing objective (§8b) |
+| `ARB_COST_MAX_SOC_PCT` | `90` | int 50–100 | Cost-mode fill ceiling; above 50 it is reached by force-charge (v1.165.0); `50` disables force-charge |
+| `ARB_GRID_INPUT_CAP_KW` | `17` | float 0–100 | The panel's total grid-input envelope shared by house load and charging; sets the live force-charge rate and the planner's contention cap (≤ 0 disables contention modelling) |
+
+Env-only knobs (not in the options form): `NIGHT_CHARGE_LATCH_PATH`, `NIGHT_CHARGE_PLANSNAP_PATH`, `NIGHT_CHARGE_ACTUATION_PATH` (latch, persisted pre-window plan and actuation-state files; all default beside the DB), `EV_MAX_LOAD_W` (default `11520` — the per-hour EV block cap, shared with the EV detection engine), `ARB_LOAD_P90_CAP` (default `2.0`, `index.ts:3547` — the upper bound of the load-band widening; **if this is ever added to the options schema it MUST ship an `options:` default**, because `Number('')` is `0` and an unset option would pin the load band to zero), and the shared efficiency seams `DISPATCH_ROUND_TRIP_EFFICIENCY` (default `0.86`, clamped [0.8, 1]; the advisor's charge leg is its square root ≈ 0.927) and `RUNWAY_DISCHARGE_EFFICIENCY` (default `0.94`, clamped [0.8, 1]) — both injected from `analytics.ts`, never re-declared.
+
+---
+
+### 11. Failure modes & known limitations
+
+- **Basis-completeness gate.** No plan is sized unless the probabilistic band exists, the confidence tier is not climatology, `calScoredDays ≥ 14`, *and* realized band coverage ≥ 0.78 (`BASIS_MIN_BAND_COVERAGE`). On a young install (or after a forecast-model reset) the advisor publishes the explicit `insufficient_basis` shape nightly — this is by design, not a fault.
+- **SHP2 offline / missing battery fields** ⇒ `recomputeNightChargePlan` returns null and the holder keeps the prior plan until the 12 h staleness guard nulls the surfaces and the ~25 h `expire_after` flips the HA entities to `unavailable`. The scorer likewise cannot source actuals while the SHP2 projection is absent; affected nights land as MNAR exclusions, which the gate's expected-nights denominator counts against readiness.
+- **Weekend tariff boundary (open question).** The model's per-instant weekday gating makes Friday's window Fri 23:00–24:00 only (Sat 00:00–05:00 is weekend off-peak) with the next window opening Mon 00:00 — a ~48 h carry sized against a 1-hour charge window (charge-power capped, `cushionShortfall` honestly flagged) on a mostly `mixed`-tier basis that never enters gate eligibility. Whether real APS billing extends Friday's overnight into Saturday morning can only be settled from a bill; if it does, the correction belongs in `tariff.ts` weekday gating. Rates are null until confirmed, so no `$` output depends on the answer.
+- **Hardware charge envelope.** Measured 2026-09-16/18: grid import pins at ~19.1 kW and the pack takes (19.1 − house) × ~0.93, up to ~17 kW across three Cores. Since v1.173.0 `ARB_CHARGE_CAP_KW` = 0 derives the cap from the connected Cores; the old 7.2 kW (`chChargeWatt`) under-stated every plan.
+- **Write posture is mode-gated and fail-closed.** In `advisory` (the default) the add-on performs no night-charge writes; `supervised` performs one announced, cancellable, bounded, auto-reverting reserve write per charge night, plus in `cost` mode above 50% a force-charge that rides the verified write and is switched OFF at the target, the window close, a revert, a cancel or a grid loss (§8b), and `auto` is demoted to supervised until the gate graduates (§8). On non-actuated nights the realized-need counterfactual is defensible only on clean (near-zero-import) nights, so grid-propped nights are excluded from scoring rather than fabricated; actuated nights score from the measured delivered charge instead.
+- **A ledger row with no stored window** is unscoreable, and **v1.132.0 distinguishes the two reasons**: a *pre-v1.39.0* row predates the window columns (a data-vintage problem), while a current-`algo_version` row with no window simply had **no cheap window to resolve that night** — normal on a tariff day that offers none, e.g. Saturday on this plan. Both capture as `scored=0`, now with different `score_notes`; calling the second a "pre-v1.39.0 row" sent readers hunting a migration bug that was not there. Nights whose raw telemetry has aged past the configured samples retention (default 30 days) capture honestly unscored rather than staying open forever.
+- **The calibration table is not yet live.** The `night_charge_calibration` table (seasonal cushion, buy de-bias, EV-tail inflation) exists as schema and API only and nothing reads or writes it. Three ledger-driven calibrations do run, computed directly from `night_charge_ledger` rows:
+  - the announced-buy de-bias (§15.12);
+  - the load-band factor (§8);
+  - the cost-ceiling load de-bias (§15.13).
+
+  Since v1.125.0 the cushion is sized from the measured islanded load (`ARB_OUTAGE_CUSHION_HOURS` / `ARB_ISLANDED_LOAD_SAFETY`). `ARB_OUTAGE_CUSHION_PCT` is only its legacy fallback.
+
+---
+
+### 12. Announced-buy de-bias (`calibratedBuyDebiasFactor`, v1.112.0)
+
+The 08-26/27 night announced "buy ~21.6 kWh" and delivered ~35.8 — a 1.66×
+under-prediction. Actuation is bounded by the reserve setpoint so nothing
+unsafe happened, but the announcement is the advisory's product. The factor is
+the MEDIAN of `delivered_kwh / buy_kwh` over eligible ledger nights (actuated,
+scored, no disclosed cushion shortfall, plan ≥ 3 kWh), FLOOR 1.0 (only ever
+raises the announcement — the raw physics estimate is the lower bound), CAP
+1.75, minSamples 7. It multiplies the ANNOUNCED figure only: `plan.buyKwh`
+stays raw and is what the ledger records (★ the self-reference guard — feeding
+the debiased figure back would collapse each night's ratio to ~1 and the
+learner would eat its own output), and `chargeTonight` thresholds on the raw
+figure so learned data can never flip the decision, only the disclosure. New
+plan fields `buyKwhDebiased` / `buyDebiasFactor`; the rationale and the ARM
+announcement disclose the calibration when active. This is the first live
+producer/consumer for the design §3.4 "buy de-bias" lane.
+
+**One delivered basis (v1.187.3).** A night is a sample only when its
+`delivered_basis` is `DELIVERED_BASIS` (`source-charge`, §6 "DELIVERED ENERGY").
+Rows captured before v1.187.3 hold the import-minus-house-load estimate, which
+under-counts any night the SHP2 carried the house from the pack inside the hold
+(2026-09-30: a 0.26 delivered/planned ratio for a true ~1.1); they are kept as
+recorded, never samples, and counted in the result's `setAside`. Until seven
+nights on the current basis exist the factor is 1.0 with basis `default`, and the
+`announced-buy calibration UNMEASURED (N eligible night(s), M set aside …)` line
+says so on change. `plan.buyDebiasBasis` / `plan.buyDebiasSamples` report the
+learner's own basis and sample count; before v1.187.3 `buildNightChargeInputs`
+copied only the factor, so every plan reported `default` / 0 whatever the learner
+said (the 09-30 log counted 6 eligible nights while the plan said 0).
+
+### 13. Cost-ceiling load de-bias (`costSurplusLoadFactor`, v1.187.1)
+
+The cost ceiling leaves room for the morning surplus, Σ max(0, P50 PV − load) over window
+close → +14 h. The load forecast is the panel's hour-of-day history curve, and on every ledger
+night `/api/night-charge/status` shows on 2026-09-30 (09-23..29) it ran above the measured load
+(`load_err_frac` −0.29 to −0.43, the actual under the load P10 on all seven). Every kW of
+over-forecast load is a kW of sun the ceiling leaves no room for: the 09-29 ceiling of 77.7%
+bought ~18.9 kWh, the pool was full by 13:00 on 09-30 and ~9-12 kWh of PV was curtailed until
+~16:00.
+
+The surplus the cost ceiling uses is computed on a de-biased load by `buildCostSurplusLoad`
+(`nightChargeAdvisor.ts`; `index.ts` supplies the ledger read, the hourly panel-load query and
+the tariff timezone's clock hour as callbacks):
+
+- **Builder** (`buildCostSurplusLoad`): the hours are those of the raw morning surplus (window
+  close → +14 h, an hour with no day-ahead load skipped). It returns null — the planner keeps
+  the raw surplus — in resilience mode, with no morning hour, under 5 ledger nights, or with a
+  factor of 1. A ledger read that throws counts as no nights. The panel-load query runs only
+  when a de-bias can apply; a query that fails or returns nothing leaves every hour on its
+  forecast. A change of factor, sample count or floor coverage is logged once
+  (`night-charge: cost-ceiling surplus counts the house load at ×…`).
+- **Factor** (`costSurplusLoadFactor`): the median of `1 + load_err_frac` over the ledger rows
+  of the last `COST_SURPLUS_LOAD_LOOKBACK_DAYS` (14) days (rows with no finite error, or an
+  actual of 0 or less, are not samples). Capped at **1** — the load is only ever lowered, so
+  the ceiling can only fall. Under `COST_SURPLUS_LOAD_MIN_SAMPLES` (5) nights it is 1; from
+  there the correction ramps in linearly (`n / COST_SURPLUS_LOAD_FULL_SAMPLES`, whole at 10).
+  Bounded below at `COST_SURPLUS_LOAD_FACTOR_MIN` (0.6): `actual_load_kwh` skips telemetry
+  gaps, so a broken night under-counts the actual.
+- **Physical floor** (`measuredHourlyLoadFloorW`): per local clock hour, the least hourly-mean
+  panel load over the trailing `COST_SURPLUS_FLOOR_DAYS` (7) days, read in hourly buckets; an
+  hour seen on fewer than `COST_SURPLUS_FLOOR_MIN_DAYS` (4) days has no floor.
+- **Per hour** (`costSurplusLoadW`): the expected-value EV block (`predictedEvLoadW`) is kept
+  whole; the rest is `max(rest × factor, min(floor, rest))` — never below the floor, never above
+  the forecast. An hour with no floor keeps its forecast.
+- **Use** (`debiasedCostSurplusKwh`): the de-biased P50 (or P90 stand-in) replaces the raw one
+  only where it is **larger**, and never so large that the ceiling falls below the pack the
+  resilience lift arrives at (`targetPackKwh`; the force-charge stops at the ceiling) — unless
+  the raw ceiling already sat below it. Raw unknown ⇒ raw. **A `cushionShortfall` night keeps
+  the raw surplus**: there the arrival is derated (charge rate, a predicted EV sharing the grid
+  input, a clamp) below the requirement, and a stop bounded by it could fall under the cushion
+  line the raw stop cleared — a 10 kW islanded load (line 73.71%), a 12 kW grid input and a
+  40 kWh session predicted at window open give an arrival of 21.5%, a raw stop of 77.7% and a
+  de-biased one of 72.8%, and a car that never plugs in lets the force-charge run at full rate
+  to that stop. On any other night the arrival holds the line: on the islanded cushion it is
+  the trough itself, and on the legacy band its whole-house trough clears the line.
+
+Scope: cost mode only, and only the `p50` / `p90` bases — a long-gap night keeps its
+pessimistic P10 pre-peak surplus. The P90 over-buy flag, the resilience sizing, the setpoint
+requirement, the islanded cushion, the solar model, the runway and every alarm read the
+forecast load as before. The PV side of the surplus is unchanged: the solar fit and
+`pvBiasFactor` still include hours when the pool was full (curtailed output), and those feed
+the alarm-facing forecast. Plan fields `costCeilingSurplusRawKwh`, `costSurplusLoadFactor`,
+`costSurplusLoadSamples` (cost mode); when the de-bias widened the headroom the rationale
+gives both figures. Ledger columns (`costSurplusLedgerColumns`, written with each plan row):
+`cost_surplus_kwh` (the headroom used), `cost_surplus_raw_kwh` (on the forecast load as is),
+`cost_surplus_load_factor`, `cost_surplus_load_samples`; NULL in resilience mode and on rows
+before v1.187.1, used = raw where the de-bias did not widen the headroom.
+
+Reconstructed on the 2026-09-29 night (the hourly shape of the 09-30 band, P50 PV scaled to
+the recorded 20.55 kWh surplus) with the six rows scored before it that the status still shows
+(09-23..28, ×0.793): ceiling 77.7% → 72.8%. The deployed planner reads up to 14 days of the
+ledger, the correction whole at ten nights, including rows the status no longer shows, so the
+factor it applies differs and the log line above states it; the same morning at ×0.70 gives
+70.7%. Harness: `scripts/mutate-v1187-1f.mjs` (53).
+
+## Appendix A — Feature Inventory (evidence linkage)
+
+Purpose: a pruning-oriented ledger of every substantive feature/engine, what math it runs, which field signals feed it, and — decisive for keeping it — **what actually consumes its output**. Consumer columns were verified by grepping the pinned source revision (`git grep … HEAD -- server/src web/src`), not by reading intent from comments. Evidence status is one of:
+
+- **measured-and-active** — output is consumed by at least one live surface (alarm, HA sensor, UI card, TUI screen, or another engine) and the math has operated on real field data.
+- **data-gated (…)** — wired and correct, but a stated gate holds the output at `null`/inactive until the field record satisfies it; the parenthetical names what unlocks it.
+- **advisory-dormant** — deliberately advisory or deliberately not wired (documented posture, not an accident).
+- **weak-linkage candidate** — no consumer beyond its own ad-hoc endpoint, or math that has never received field validation; one-line justification given. These are the removal-review set collected at the end.
+
+Diagnostic endpoints with a documented validation role (e.g. the forecast backtest) are not flagged merely for lacking an automated consumer; endpoint-only engines with no validation role are.
+
+### A.1 Ingest, storage & threading (§1, §2)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| `SnapshotStore` dual-schema ingest | Two caches (REST `rawBySn`, MQTT `mqttFlatBySn`), single `change` fan-out with `frameSeq` (§1.1, §1.3) | REST `/device/list`+`/quota/all` (60 s poll); MQTT `/open/{user}/{sn}/quota`,`/status` | recorder, analytics worker, `/ws`, alert monitor, MQTT discovery — every downstream | measured-and-active |
+| DPU MQTT→REST translation | `translateDpuMqtt()` cmdId schema → `hs_yj751_*` quota shape; only DPUs drive live projection from MQTT (§2) | DPU cmdId frames (`bpInfo[].*`) | `SnapshotStore` projection refresh | measured-and-active |
+| Product projections | `projectByProduct()` → typed dpu/shp2/generic `Projection` (§2) | Raw quota maps | Every engine, UI, sensors | measured-and-active |
+| Backup-pool grace-hold + slew guard | `backupPoolWithGraceHold` holds last-good pool through transient nulls; slew-limits implausible jumps (§2) | SHP2 `backupIncreInfo.*` (aggregate `backup{Remain,FullCap}Wh`, `backupBatPercent`) | Runway, SoC alarm, HA `backup_pool` sensors | measured-and-active |
+| SQLite recorder | `record(extract(snap))` with dedupe/heartbeat, retention, WAL; read-only worker twin `readRecorder.ts` byte-parity-tested (§1.4) | All projected metrics | Every history-driven engine | measured-and-active |
+| Lifetime accumulators | `rollupLifetime()` monotonic Wh counters; micro-dip clamp `clampLifetimeDip` (§1.4.6, §7.2). The steady-state RTE clamp this row used to name was removed in v0.45.0 — `charge == discharge` is NOT an invariant (see §1.4.6) | `pv_total`, `panel_load`, `ac_in`, `grid_home_w`, pack in/out | `/api/lifetime-energy`, HA Energy Dashboard `*_lifetime_kwh` | measured-and-active |
+| Telemetry-gap detection | Recorder gap scan → outage/gap events (§1.4.7) | Sample timestamps | `/api/telemetry-gaps`, `outageAlerts()`, HA `system_outage_*` / `system_telemetry_gap_count_24h` / `system_device_gap_count_24h` | measured-and-active |
+| Trapezoidal integration | `integrateWh` gap-aware trapezoid; shared day-boundary endpoint (§1.5, §7.0.1) | Any W-metric series | selfConsumption, RTE, tariff, carbon, totals, circuit history | measured-and-active |
+| Analytics worker + report registry | Worker thread, `BUILDERS` registry, coalesce + TTL cache, `WARM_REPORTS` self-warm (§1.6, §1.8) | — (infrastructure) | All `/api/<report>` routes, MQTT state, TUI | measured-and-active |
+| `lastUpdated` freshness contract | SHP2 MQTT chatter must not touch the freshness clock; REST owns non-DPU freshness (§1.7) | Message arrival times | Staleness alerts, grace-holds | measured-and-active |
+
+### A.2 Cloud protocol & HA wiring (§2)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| REST client + HMAC signing | `ecoflow/sign.ts` HMAC-SHA256 request signing (§2) | Cloud credentials (env) | Poll loop | measured-and-active |
+| MQTT client (`param`-not-`params` fix) | Per-device quota/status subscription; corrected payload key (§2) | Broker frames | Ingest | measured-and-active |
+| SHP2 membership + spare roster | Core↔SHP2 from `backupIncreInfo.Energy{1,2,3}Info`, not positional; explicit spare-SN allowlist (§2, §8.8) | SHP2 energy-info slots; `SPARE_DPU_SNS` env | Zombie gate, selfConsumption scope, degradation peer baselines | measured-and-active |
+| Cloud-wedge vs outage classifier | `deviceLink.ts` pure classifier: LAN-reachable + cloud-silent = wedge, both-dark = outage (§2) | LAN ICMP ping, MQTT/REST freshness | Offline alerts, HA `ecoflow_cloud_wedge_count` | measured-and-active |
+| HA service layer | `haService.ts` `callHaService` — total, never throws (§2, §10.10) | HA supervisor API | Broadcast, shed registry, hostPower, haStateCache | measured-and-active |
+| MQTT discovery entity set | 78 sensors + 10 binary sensors in the static tables, plus per-circuit energy sensors and per-priority alarm switches, availability + expiry, honest-null templating (§2) | `buildState()` composition | Home Assistant | measured-and-active |
+| Energy Dashboard counters | `total_increasing` lifetime kWh set incl. dynamic per-circuit discovery (§2) | Lifetime accumulators | HA Energy | measured-and-active |
+| Alarm-priority switches | Bidirectional `switch` per ISA priority; `parseAlertSwitchCommand` no-op on unknown payload (§2) | HA command topic | `alertSettings`, alarm gating | measured-and-active |
+| `refreshShp2CloudPresence` write | One of the audited device writes. The others are the night-charge reserve write, force-charge and its `foceChargeHight` ceiling (§15.8b), the Charge Now responder's OFF, and the owner `/api/reserve-floor` write; audited (`writeLog.ts`), rate-limited, `requireWriteAuth` (§2, §12) | Operator action | Web `RefreshCloudButton`, cooldown endpoint | measured-and-active |
+| `debugSendCommand` | Arbitrary-command escape hatch; off unless write-debug env + token (§2, §12) | Operator action | `/api/device/send-command` | advisory-dormant (disabled by default, by design) |
+
+### A.3 Solar & PV forecast (§3)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| GHI→PV response model | Per-hour through-origin OLS `β = Σ(pv·ghi)/Σ(ghi²)`; `peakCoeff` gated on GHI ≥ 300 W/m² + ≥3 samples (§3.1) | Recorder `pv_total`, Open-Meteo GHI | `getDayForecast`, `SolarResponseCard`, backtest | measured-and-active |
+| Full-coverage fitting gate | `fullCoverageFleetPv` excludes cloud-gap hours from fitting (§3.1) | Per-Core coverage | Response model | measured-and-active |
+| Day-ahead forecast | Per-hour `forecastPvW`/`forecastLoadW`; PV bias correction; structural-incompleteness gate; restored display basis (§3.2) | Response model, weather, load history, EV prediction | Runway, runway/forecast alarms, HA sensors, cards, TUI, calendar, MPC | measured-and-active |
+| PV bias correction | `pvBiasFactor = Σactual/Σpredicted` multiplier (§3.3) | Forecast vs recorded PV | Day-ahead forecast, `/api/confidence` | measured-and-active |
+| EV-window prediction | `computeEvWindowPrediction` expected-value `evLoadByHour`; subtracted from the alarm load (safety invariant §5.1.5) | EVSE circuit history | Forecast load, runway (subtraction), calendar, insights cards | measured-and-active |
+| Forecast skill | Day-level replay MAE/bias/r² over covered days (§3.4) | Forecast archive vs actuals | Probabilistic band calibration, `/api/confidence.forecastDayR2`, repair issues, insights | measured-and-active |
+| Confidence snapshot | Medians of engine r² + forecast bias/MAE (§3.5, §8.10) | degradation, thermal, skill reports | `/api/confidence`, insights cards | measured-and-active |
+| Probabilistic P10/P90 SoC band | Per-hour sigma + coherent SoC ensemble; F30 self-calibrating shrink over `PV_BAND_CAL_WINDOW_DAYS = 30` (§3.6) | Forecast + skill | `/api/forecast/probabilistic`, MPC P10 envelope | measured-and-active; band **calibration** data-gated (needs ≥14 scored days in the 30-day window) |
+| Multi-day horizon | `computeMultiDayForecast` extends PV/SoC 2–3 days on typical-day curves (§3.7) | Forecast + weather | `/api/forecast/multi-day` **and** the night-charge planner (`index.ts` requests it at `days: 4` and maps it into `dayRollups`) | measured-and-active |
+| Open-Meteo ingestion | GHI + temp hourly fetch, cached (§3.8) | Open-Meteo API | Forecast, curtailment, thermal, shade | measured-and-active |
+| NWS NDFD ensemble | Opt-in second cloud source + disagreement metric (§3.8) | NWS NDFD (`NWS_ENABLED`) | `/api/weather/ensemble`, insights cards | data-gated (off unless `NWS_ENABLED`) |
+| NWS storm alerts | CAP alert fetch → alert/calendar/broadcast context (§8.3.4) | NWS CAP feed | `forecastDayAlerts`, calendar, insights cards | data-gated (off unless `NWS_ENABLED`) |
+| Forecast backtest | `backtestPvForecast` RMSE/MAE/bias/R² replay incl. the alarm-facing predictor (F24) (§1.8) | 168 h recorder actuals | `/api/backtest/forecast` (operator-invoked validation harness) | measured-and-active (validation instrument; no automated consumer by design) |
+
+### A.4 Physics & Bayesian tier (§4)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Clear-sky PV model | Solar geometry → `clearSkyGHI` → POA → cell-temp derate → `physicsPmax`; `physicsScore = realized/theoretical` (§4.1) | Site constants, ambient temp, live PV | `/api/physics/pv-pmax` only (referee role is manual; `PHOENIX_SITE.pNamplate` is separately load-bearing in `BAYES_OBS_SIGMA2`) | **weak-linkage candidate** — no automated cross-check consumes `physicsScore` |
+| LFP OCV→SoC + rest tracker | OCV lookup on rested packs (`REST_CURRENT_THRESHOLD_A = 0.5`, 60 s tick) → `socDriftPct` vs BMS (§4.2) | `bmsMaster` volts/amps per pack | `/api/physics/lfp-soc` only | **weak-linkage candidate** — drift feeds no alarm/engine; tick runs regardless |
+| Hierarchical Bayes pack SoH | Partial pooling `fitHierarchical` + `findOutliers(z ≥ 2.0)` (§4.3) | Per-pack SoH cross-section | `/api/models/hierarchical-pack-soh` only | **weak-linkage candidate** — endpoint-only; near-new fleet has produced no outlier to validate against |
+| Recursive Bayesian solar model | Per-hour Gaussian posterior over GHI→PV slope with `agreementWithOls` (§4.4) | Recorder pv/GHI pairs | **Curtailment expected-PV** (`predictExpectedPv`), `/api/forecast/bayesian` | measured-and-active |
+| Kalman SoH filter | 2-state constant-velocity filter (`R = 0.05`) run side-by-side with OLS fade; mirrors every OLS gate (§6.8) | `sohPts` per pack | `kalman*` fields inside `/api/degradation` | measured-and-active (parallel diagnostic inside a consumed report) |
+
+### A.5 Runway, depletion & SoC alarms (§5) — safety-critical
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Runway depletion simulation | DC-bus drain `delta = pv − load/η` (`RUNWAY_DISCHARGE_EFFICIENCY`), interpolated reserve/empty crossings, 4 h observed-load `max()` blend, 50 W degenerate-curve guard (§5.1) | SHP2 pool fields, `panel_load` history, day-ahead forecast, `backupReserveSoc` | Audible alarm, HA runway sensors, `RunwayCard`, fleet-card, TUI, shed advisor | measured-and-active |
+| Empty hysteresis | `applyEmptyHysteresis` de-flaps the published hours-to-empty (§5.1.6) | Raw crossing | Published runway | measured-and-active |
+| Runway severity ladder | `classifyRunway(p, grid)` bands + grid-aware null while backstopping; islanded re-escalation (§5.2) | Runway + grid backstop | Alarm state machine, shed advisor, TUI banners | measured-and-active |
+| Runway alarm state machine | `createRunwayAlarm` edge-triggered spoken alarms (§5.2.4) | Severity band | Audible path, notify | measured-and-active |
+| Battery-SoC floor alarm | Ladder 50/40/30/20/15/10/8/4/2 % with arming hysteresis + coherence guard (% vs `remainWh/fullCapWh`) against transient zeros (§5.3) | `backupBatPercent`, pool Wh | Audible path, HA alert counts, banding helpers | measured-and-active |
+| SHP2-blind failover | Fleet-median DPU SoC drives the ladder when the SHP2 aggregate is absent (§5.3.7) | Per-DPU `soc` | SoC alarm | measured-and-active |
+| Grid backstop resolver | `resolveGridBackstop`/`liveGridBackstop` combine `gridSta` (0/1/2), grid watts, staleness fail-safe; `backstopping` stricter than `present` (§5.4) | SHP2 `pd303_mc.masterIncreInfo.gridSta`, `grid_home_w` | Alarms, `off_grid` sensor, lighting posture, TUI, analytics | measured-and-active |
+| Grid-aware SoC dispatch | `socGridCrossDecision` downgrade on-grid + `reEscalateGridDrop` on islanding (§5.4.5) | SoC bands + backstop | SoC alarm tick | measured-and-active |
+| Load-shed advisor | Upper-bound counterfactual `computeRunwayWithShedOffset` (`shedKw/η` on pool basis); recommends only in actionable band with ≥ 0.25 h benefit (§5.5) | Runway, HA entity watts (`haStateCache`), SHP2 circuits | `load_shed_recommended*` sensors, `/api/load-shedding/status`, `runway_to_reserve_if_shed_hours` | data-gated (inactive until `LOAD_SHEDDING_SHED_ENTITIES` allowlist is configured; advisory-only by design) |
+| Load-shed registry | Candidate composition: SHP2 circuit → HA sensor → estimate; phantom-entity flagging (§5.5) | Allowlist + HA states | Shed advisor, StrategyPanel/TUI priority displays | data-gated (same allowlist) |
+
+### A.6 Battery & PV health (§6)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| SoH fade + EOL projection | OLS fade `−slope×YEAR_MS` ±1 SE, Arrhenius `2^((T−25)/10)`, 7-state gate chain, `EOL_SOH = 80` (§6.1) | `actSoh`/`soh`, `pack{n}_temp`, cycles | HA `..._soonest_pack_eol`, `DegradationCard`, battery-card, TUI, pack-risk, confidence, repair issues | measured-and-active; dated EOL data-gated (fade gates on near-new fleet — `unknown` by design) |
+| Peer fade comparison | Robust median+MAD z on projecting, connected packs; spares scored, never baseline (§6.1) | Fade rates | Degradation summaries | data-gated (needs ≥3 projecting packs) |
+| Coulombic efficiency (F17) | 7-day counter-edge ratio with span/full-window/consistency triple gate (§6.2) | `pack{n}_lifetime_{chg,dsg}_mah` edges | `coulombicEffPct` in degradation; pack-risk feature 3 | data-gated (all three F17 gates; null on current counters by design) |
+| Round-trip efficiency | Day-level `discharged/charged` in [0.8, 1.05] with ≥50 % coverage; ≤100 clamp; v0.65.0 extended-lookback backstop (§6.3) | Pack in/out integrals | HA RTE sensor, `DegradationCard`, battery-card, MPC cycling cost | measured-and-active |
+| Internal resistance | Steady-state-filtered `dV/dI` (≥5 A steps, sign-checked F27), median recent vs baseline, gated trend (§6.4) | `bmsMaster` V/A pairs | `/api/internal-resistance`, insights, pack-risk feature | data-gated (trend needs r² ≥ 0.3, 14 d span; currently immature by design) |
+| Charge-curve fingerprint | Median V drift at SoC checkpoints [40, 60, 80, 95] % during active charge; baseline vs recent 14 d windows (§6.5) | V + SoC + input W | `/api/charge-curve`, insights, pack-risk feature 5 | measured-and-active (holds at `baseline` until ~28 d span) |
+| Ambient-thermal forecast | 2-var least squares `pack_temp ~ ambient + load`; 24 h predicted peak (§6.6) | `pack{n}_temp`, weather, in/out | `/api/ambient-thermal-forecast`, insights, `thermalMedianR2` | measured-and-active |
+| Thermal-event counter | Rising-edge events at 35.6/45/55 °C with 1.5 °C hysteresis; gap-capped time-above; `hardLifeScore` (§6.7) | `pack{n}_temp` raw | `/api/thermal-events`, insights, pack-risk feature | measured-and-active |
+| Pack-risk v1 heuristic | Weighted six-feature composite (fade, thermal, IR, CE, curve-drift, cycles) (§6.9) | Health reports above | `/api/pack-risk` + input to v2 only | **weak-linkage candidate** — no alarm/UI/sensor reads either pack-risk endpoint |
+| Pack-risk v2 ML | Logistic regression + novelty + auto-downgrade gate; heuristic-pinned below `PACK_RISK_MIN_TRAINING_SAMPLES = 100` (§6.10, §9) | LR features + shadow model | `/api/pack-risk/v2` only | **weak-linkage candidate** — endpoint-only AND gate-pinned (≥100 labeled outcomes required); no field validation event yet |
+| String mismatch | Per-DPU PV ratio vs fleet at same hour, robust median+MAD (§6.11) | Per-Core `pv_total` | `/api/string-mismatch`, insights cards | measured-and-active |
+| Soiling decomposition | Per-Core soiling estimate; published fleet figure = per-Core **median** (v0.63.0 anti-deflation); F29 multi-week weather backfill (§6.12) | Per-Core PV, GHI | `/api/soiling-decomposition`, `/api/debug/soiling`, insights, solar-card, repair issues | measured-and-active (validated against a real soiling event and a false-alarm fix) |
+| Shade report | Recurring same-hour shortfall vs clear-day reference, `SHADE_DROP_THRESHOLD = 0.18`, ≥`SHADE_MIN_CLEAR_DAYS = 5`, per-Core median (§6.12 note) | Per-Core PV, weather | `/api/shade-report`, insights, solar-card | measured-and-active |
+| Inverter clipping | Flat-top detection vs forecast peak (§6.13, §7.7) | `pv_total`, forecast | HA clipping sensor, solar-card | measured-and-active |
+| Equipment health | MPPT ratio series + inverter standby `cappedMedianEffPct` (§6.14) | MPPT in/out, standby W | `/api/equipment-health`, insights, repair issues (−3 pp MPPT drift gate) | measured-and-active |
+
+### A.7 Energy accounting, cost & dispatch (§7)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Self-consumption / solar fraction | Grid-displacement form `(load − gridForKpi)/load`; PV↔battery↔grid apportionment; coverage gate `GRID_HOME_MIN_COVERAGE = 0.9` (§7.1) | `pv_total`, `panel_load`, `ac_in`, `grid_home_w`, pack in/out | HA sensors, insights, carbon, tariff | measured-and-active |
+| Two-grid-quantities discipline | `gridImport` (DPU `ac_in`) vs `gridToHome` (SHP2 `grid_home_w`); KPI picks trusted superset (§7.0.2) | Both grid metrics | selfConsumption, tariff, HA Energy wiring | measured-and-active |
+| Carbon accounting | `gridDisplacedKwh × 0.4990 kg/kWh` (`GRID_CO2_INTENSITY_LB_PER_MWH = 1100`); capped part-sum (§7.3) | selfConsumption output | `/api/carbon`, HA carbon sensor | measured-and-active |
+| Legacy tariff report | Hourly `onPeakAt` walk; `TARIFF_FLAT_CENTS_PER_KWH = 17` default; whole-home superset (audit #5) (§7.4) | Grid + load integrals | `/api/tariff`, HA `tariff_*` sensors | measured-and-active |
+| Greedy dispatch plan | Per-hour charge/discharge/import branches, `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY` (0.86 → ≈0.927), reserve guard on drawn amount (§7.5) | SoC, forecast, tariff constants | `/api/dispatch-plan` only — no card, sensor, or engine consumer | **weak-linkage candidate** — advisory-only by design; `computeDispatchPlan` has exactly one caller (the route) |
+| MPC dispatch recommender | Rolling DP over 24 h with P10 risk branch, degrade detection, `reserveDipPenaltyUsdPerKwh = 1.0` (§7.6) | Forecast, probabilistic band, RTE, legacy flat-tariff env (not `tariff.ts`) | `/api/dispatch/recommend` only — no card, sensor, or engine | **weak-linkage candidate** — endpoint-only; tariff basis diverges from the canonical R-EV model |
+| SoC-saturation curtailment | Bayesian expected-PV gap vs live PV above dynamic charge ceiling `homeChargeCeilingPct()`; surplus W + kWh history (§7.8, §14.2) | SoC, `pv_total`, GHI, circuits | `pv_curtailment_*` sensors, `CurtailmentCard`, lighting posture `surplus` trigger, curtailment alerts | measured-and-active |
+
+### A.8 Alerts, incidents & learning loop (§8, §9)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Alert taxonomy + ISA priority | `Alert` shape; ISA-18.2/IEC 62682 priority derivation (§8.1) | — | Everything alert-adjacent | measured-and-active |
+| Threshold alerts | `computeAlerts()` temp/SoC/offline/reserve bands incl. LFP top-of-charge relaxation (§8.2) | Projections, connectivity, grid | Monitor → notify/audible/sensors/UI | measured-and-active |
+| Outage events | `outageAlerts()` power-loss vs telemetry-gap vs per-device-gap events (§8.2.3) | Gap detection | Monitor, HA outage sensors | measured-and-active |
+| Peer-comparison learned alerts | Robust median+MAD cross-fleet outliers (§8.3.1) | Fleet projections | Monitor | measured-and-active |
+| Self-baseline alerts | Per-device baseline drift (§8.3.2) | Recorder history | Monitor | measured-and-active |
+| Degradation/runtime forecast alerts | Trailing-3h runtime + SoH-decline with `SOH_FORECAST_*` gates (§8.3.3) | Degradation, forecast | Monitor | measured-and-active |
+| Day-ahead solar/load alerts | `forecastDayAlerts(df, grid)` incl. storm context (§8.3.4) | Forecast, NWS | Monitor | measured-and-active |
+| Alert monitor | 20 s eval; rising-edge debounce, dwell, dispatch decision (§8.4) | All alert sources | notify, broadcast, incidents, persistence | measured-and-active |
+| Quiet hours + morning digest | `NOTIFY_QUIET_HOURS` (default `22-06`), `CRITICAL_BREAKS_QUIET_HOURS` (default false), digest at `NOTIFY_DIGEST_HOUR = 7` (§8.4.2) | Wall clock | notify queue | measured-and-active |
+| Incident clustering | `buildIncidents(alerts)` correlation grouping (§8.4.3) | Live alerts | `/api/incidents`, insights cards | measured-and-active |
+| Cooldown auto-silence | Churn detection → temporary silence (§8.4.4) | Fire history | Monitor | measured-and-active |
+| Notification delivery | HA drawer card + `notify.mobile_app_*` push, dedupe, digest (§8.5) | Monitor decisions | Operator push | measured-and-active |
+| Feature snapshots | `featureSnapshot.ts` captures LR feature vector once per rise (§8.6, §9.1) | degradation/thermal/IR/chargeCurve reports | Outcome→LR training join | measured-and-active (scaffolding for the gated loop) |
+| Outcome capture | `POST /api/alerts/outcome` labels + family precision rollups (§8.6, §9.2) | Operator button presses (web dashboard) | LR update, `/api/alerts/outcomes/stats` | measured-and-active |
+| Online LR (SGD) | `updateFromOutcome` shadow-only step + prequential loss (§9.3) | Snapshots + labels | Shadow model → pack-risk v2 gate | data-gated (gate floor 100 samples; no promotion path by design) |
+| Model health + gate | `computeGateDecision` samples/drift/precision policing (§9.4) | Shadow model state | `/api/models/health`; gate applied inside `computePackRiskV2` | data-gated (same floor; report endpoint has no other consumer) |
+| Machine alert telemetry | `alertTelemetry.ts` structured fire/resolve log (§8.6) | Monitor events | `/api/alert-telemetry` only | **weak-linkage candidate** — machine-readable diagnostic no tool ingests |
+| Repair issues | `computeRepairIssues` composes degradation+soiling+equipmentHealth+skill into repair cards (§8.7) | Those four reports | `/api/repair-issues` only — no UI/HA surface renders it | **weak-linkage candidate** — endpoint-only composition of already-surfaced engines |
+| Zombie gate | Spare-DPU offline-alert gate via explicit SN allowlist (§8.8) | `SPARE_DPU_SNS` | Offline alerting | measured-and-active |
+| Root-cause map | `rootCausesFor(alertId)` static cause suggestions (§8.9) | Alert id | `/api/root-cause` only | **weak-linkage candidate** — no UI passes an alert id to it |
+| Annunciation settings | `alertSettings.ts` per-priority enable, MQTT-bidirectional (§8.11) | Operator toggles | Alert Console, HA switches, broadcast gating | measured-and-active |
+
+### A.9 Audible broadcast & TTS (§10)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Condition derivation + tick | `conditionFromAlerts` → level; 10 s tick with boot-grace, priority and settings gates (§10.2) | Live alerts | Speaker/SIP announcements | measured-and-active |
+| Alarm-storm gates | Identical-message and per-rung repeat suppression; repeat-warning identity gate; one re-present of a refused de-escalation or of a refused same-level transition carrying a new alert; escalations always play (§10.2.3) | Broadcast history | Tick loop | measured-and-active |
+| MA + SIP dispatch | Media-player pre-flight + verification; per-target volume pin; `BROADCAST_SIP_TARGETS` side-channel (§10.3) | HA media players, SIP endpoint | Household audible path | measured-and-active |
+| Announcement renderer | Chime + TTS layout, per-language terminator, content-keyed cache (§10.4) | Level + message | Broadcast, browser/speaker test paths | measured-and-active |
+| Tone library | Five rung klaxons + named built-ins, version-gated regeneration (§10.5) | — | Renderer | measured-and-active |
+| Operator tones + per-rung assignment | `chimeStore.ts` uploads; `chimeConfig.ts` rung→chime map + legacy migration (§10.6–10.7) | Operator uploads | Alert Console, renderer | measured-and-active |
+| TTS build + verbalizer | `buildAlertMessage` → `verbalizeForTts` (idempotent normalizer); optional second-language pass (§10.8) | Alert facts | Renderer | measured-and-active (second language data-gated on config) |
+| Wyoming/Piper client | Raw-PCM synth over Wyoming protocol, `en_US-lessac-medium` (§10.9) | Piper add-on | Renderer | measured-and-active |
+| Runtime config two-layer | Env baseline + live override file; `resolveAnnounceVolume` (§10.11) | Operator PUT | Broadcast | measured-and-active |
+| Audible-delivery health | `broadcastHealth.ts` reachability probes → `audible_channel_status` + self-alert (§10.13) | MA/SIP probe results | HA sensors, alert monitor | measured-and-active |
+
+### A.10 Night-charge engine stack (v1.36–v1.187 — `tariff.ts`, `nightChargeAdvisor.ts`, `nightChargeGate.ts`, `nightChargeActuator.ts`, `nightForceCharge.ts`, `nightLedgerScoring.ts`; chapter §15)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| APS R-EV tariff model | `buildApsREvModel`/`rateAt`: 4-period, 2-season, weekday-literal windows; unconfirmed rates resolve to `null` cents (fail-safe) | Env rate config (`apsREvRatesFromEnv()`; no price API exists) | Night-charge advisor + gate | measured-and-active |
+| Night-charge plan | `computeNightChargePlan`: deep-shortfall buy sized by **bisection against a clamp-exact with-buy re-sim trough** (never additive offset); `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927` | Day forecast, probabilistic band, SoC/pool, tariff windows, EV commitments | Evening notify (bypasses quiet hours as a plan advisory), HA `charge_tonight` sensors, `/api/night-charge/status`, `NightChargeCard` | measured-and-active (write posture per `NIGHT_CHARGE_MODE`: advisory default; supervised = one announced, cancellable, bounded, auto-reverting `backupReserveSoc` write per charge night — §8b) |
+| Plan staleness fail-safe | `nightChargeStateFields`: `charge_tonight` strictly `false` unless plan < 12 h old (`PLAN_STALENESS_MS`) | Latest plan timestamp | HA sensors, `/api/ha-state` | measured-and-active |
+| Night ledger + outcome scorer | Never-pruned `night_charge_ledger`/`_calibration`; `scoreNightOutcome` against the ledger's **stored per-plan window** (weekend windows are disjoint from weekday 23:00–05:00); premature-capture repair; grid-import-propped baselines refused a score | Recorder actuals over the plan window | Readiness gate, status endpoint, card | measured-and-active |
+| Write-readiness gate (v2) | `computeNightChargeReadiness`: ≥21 scored **actuated** nights, under-buy ≤ 10 %, sizing bias 0–5 kWh, band coverage 0.78–0.92 (≥14 verdict nights), zero uncleared engine-fault strikes (45-day window, 14-night clean-streak clearing, `cushionShortfall`-disclosed breaches exempt) | Ledger rows | HA `write_ready` flag (strictly false on failure), status endpoint | data-gated (`writeReady` unlocks AUTO only; supervised mode is an explicit owner action — §8b) |
+| Force-charge | `nightForceCharge.ts`: just-in-time per-channel force-charge to the announced cost ceiling on a verified reserve-write night; software stop, OFF on window end/cancel/revert/grid loss, wall-clock deadline, `foceChargeHight` backstop | Live pool SoC, house load, grid presence, slot readbacks | SHP2 `ch{n}ForceCharge` writes, notifications, status `actuation` | measured-and-active (cost mode, `ARB_COST_MAX_SOC_PCT` > 50) |
+
+### A.11 Safety & operational plumbing (§13)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| `processGuard` | Top-level crash classification + survival policy (§13.1) | Uncaught errors | Process lifetime (safety-critical) | measured-and-active |
+| `hostPower` | Pi under-voltage interpretation with `HOST_POWER_MAX_AGE_MS = 120 000` staleness (§13.2) | HA entity named by `HOST_POWER_ENTITY` | Self-alert via `alerts.ts` | data-gated (inert until `HOST_POWER_ENTITY` is configured) |
+| `haStateCache` | TTL-gated entity-watts cache + `extractEntityWatts` (§13.3) | HA states API | Shed advisor, hostPower | measured-and-active |
+| `alertOnset` | Restart-persistent alarm onset timestamps, clear-then-rise semantics (§13.4) | Alert edges | Monitor, TUI ALM screen | measured-and-active |
+| Message-rate floor | Per-SN hour-of-day EWMA baselines; collapse < 0.2× baseline sustained 20 min → edge-triggered P3 alert. **v1.95.0**: the dwell is chosen from the device's OWN profile — a FLAT device (cv ≤ `MSG_RATE_FLOOR_FLATNESS_MAX_CV` = 0.15 across ≥ 18 mature hour buckets, e.g. the SHP2 at cv ≈ 0.022) fires on `MSG_RATE_FLOOR_FLAT_COLLAPSE_MIN` = 4 min instead. The 20-min dwell exists only to separate legitimate Core idle (4.4 msg/min) from a collapse (2.1-2.9), a 1.5× problem created by the Cores' 13× diurnal swing; a flat device has no such ambiguity, and making it wait 20 min let the SHP2 run at 0.20 msg/min for ~17 min with nothing firing (5 instances in 4 days). Flatness must be EARNED — thin evidence keeps the conservative dwell. **v1.95.0** also gates on presence: a device that is actually OFFLINE no longer surfaces a collapse (the offline/stale alert owns that; the detector's subject is "barely reporting while still appearing FRESH"). Eligibility from a 7-day-half-life high-water mark (`eligibilityPeak`) so a collapse cannot disarm the detector; a fired collapse clears only on dwelled traffic ≥ max(0.2× baseline, `minBaselineRate`) — losing eligibility is never reported as recovery (§13.5) | Cumulative MQTT message counters | Alert monitor self-alert (defeats the "looks fresh" wedge trap) | measured-and-active |
+| Log/format hygiene | `logCoalesce` storm suppression, `logSanitize` bounds, `mqttStartClassify` boot-grace levels, `haPayloadFmt` shared formatting (§13.6) | Log/publish paths | All logging + HA payloads | measured-and-active |
+
+### A.12 UI surfaces & automation posture (§11, §14)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| `/ws` snapshot spine | Throttled full-snapshot frames (§11, "The shared data spine") | SnapshotStore | Web dashboard, wsConsole | measured-and-active |
+| Web dashboard (React PWA) | Tabs: Dashboard/Solar/Battery/Strategy/Alerts/Console (§11.1) | `/ws` + 30+ `/api/*` | Operator | measured-and-active |
+| Telnet TUI | Plant Operator + Summary consoles, DoS-hardened, port 2323 (§11.2) | dataProvider (`totals`/`forecast`/`degradation`) + snapshot | Operator | measured-and-active |
+| HACS Lovelace cards | REMOVED in v1.47.0 (duplicated the web dashboard; consumer had pinned a stale CDN snapshot) | — | — | removed |
+| Lighting posture | `rawPosture` ladder (critical/red ≤ 4 h/amber/conserve < 35 % dawn/surplus/normal) + asymmetric 15-min de-escalation hold + 10-min `normal↔surplus` dwell + restart persistence; null when its reports are missing (§14.1) | Runway, dawn-min SoC, reserve, curtailment, grid backstop | HA `lighting_posture`(+`_reason`) sensors → HA-side automations | measured-and-active |
+| Surplus / opportunistic loads | Curtailment surplus vs hardcoded load catalog (`fitsInSurplus = surplus ≥ estimatedW`) (§14.2) | Curtailment report | Curtailment endpoint/card fields | measured-and-active (catalog hardcoded; `haServiceHint` always `null` — Phase-2 actuation not implemented) |
+| HVAC posture | Two `category:'hvac'` catalog entries only; no posture sensor, no thermostat actuation (§14.3) | — | — | advisory-dormant (documented DORMANT) |
+
+### Candidates for removal review
+
+Consumers verified at the pinned revision; deleting an engine also deletes its listed route/fields. Items are candidates for *review*, not verdicts — each line states the linkage failure.
+
+1. ~~`server/src/analytics.ts:computeMultiDayForecast`~~ — **NOT a candidate; do not remove.** `recomputeNightChargePlan()` requests `multiDayForecast` at `days: 4` and maps it into `dayRollups`, which feed the night-charge plan (§15.2 shows this). ★★★ Analytics reports dispatch **by string**, so dropping the builder compiles clean, throws at runtime, and is swallowed by the caller's `.catch(() => null)` — `dayRollups` silently degrades to `[]` inside the engine that actuates a device write. Any future removal audit must grep the report NAME, not just the symbol.
+2. `server/src/dispatch/mpc.ts:recommendDispatch` (entire module + `/api/dispatch/recommend`) — endpoint-only; duplicates dispatch-plan territory on a legacy flat-tariff basis that diverges from `tariff.ts`.
+3. `server/src/analytics.ts:computePackRiskScores` + `server/src/ml.ts:computePackRiskV2` (+ `/api/pack-risk`, `/api/pack-risk/v2`) — nothing reads either endpoint. Removing v2 orphans the chain `server/src/models/onlineLR.ts` + `server/src/models/modelHealth.ts` + the LR-vector portion of `featureSnapshot.ts`; outcome capture itself should stay (it powers `/api/alerts/outcomes/stats` precision accounting).
+4. `server/src/models/hierarchicalBayes.ts:fitHierarchical` (+ `/api/models/hierarchical-pack-soh`) — endpoint-only referee; no automated cross-check.
+5. `server/src/physics/clearSky.ts:physicsPmax`/`physicsScore` (+ `/api/physics/pv-pmax`) — endpoint-only. **`PHOENIX_SITE` must survive any removal** (consumed by `BAYES_OBS_SIGMA2` in `analytics.ts`).
+6. `server/src/physics/lfpOcv.ts:analyzePackLfp` + `server/src/physics/restTracker.ts` (+ `/api/physics/lfp-soc` and the 60 s rest-tracker interval) — `socDriftPct` feeds no alarm or engine; the tick costs cycles regardless.
+7. `server/src/repairIssues.ts:computeRepairIssues` (+ `/api/repair-issues`) — recomposes four already-surfaced engines into cards nothing renders.
+8. `server/src/analytics.ts:rootCausesFor` (+ `/api/root-cause`) — no caller passes an alert id.
+9. `server/src/alertTelemetry.ts` (+ `/api/alert-telemetry`) — marginal: machine-readable fire/resolve log with no ingesting tool; cheapest to keep, first to cut if the file grows.
+
+Not candidates despite thin linkage: the forecast backtest (`/api/backtest/forecast`) is the validation instrument for the alarm-facing PV model; `debugSendCommand` and the HVAC-posture stub are documented deliberate postures, not orphans.

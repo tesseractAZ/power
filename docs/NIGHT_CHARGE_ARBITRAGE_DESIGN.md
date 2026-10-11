@@ -24,7 +24,7 @@ The design rationale is preserved wherever it is still load-bearing, because the
 | | |
 |---|---|
 | Posture | `NIGHT_CHARGE_MODE = supervised` (live). `advisory` is the default and writes nothing; `auto` is structurally demoted until the gate graduates |
-| Writes | **One** field, `backupReserveSoc`, once per charge night, auto-reverted |
+| Writes | `backupReserveSoc`, once per charge night, auto-reverted at the window close; since v1.165.0 also the per-channel force-charge (`ch{n}ForceCharge` ON/OFF + the `foceChargeHight` ceiling sync) when the cost ceiling is above 50 |
 | Write envelope | **`[10, 50]` percent** — `RESERVE_WRITE_MIN_PCT` / `RESERVE_WRITE_MAX_PCT` |
 | Objective | `ARB_OBJECTIVE = cost` (live). **Cost mode is rate-blind** — see §3.1 |
 | Actuated nights | 11 scored |
@@ -45,14 +45,14 @@ The design rationale is preserved wherever it is still load-bearing, because the
 
 ### 1.2 The write envelope is the ceiling on everything
 
-The only actuation is `setBackupReserveSoc`, and the device accepts a backup reserve **only in `[10, 50]` percent**. That bound is enforced twice: `clampReserveTarget` in `nightChargeActuator.ts`, and `setBackupReserveSoc`'s own range check in `ecoflow/commands.ts`, which refuses out-of-range *before any network call*.
+The reserve actuation is `setBackupReserveSoc`, and the device accepts a backup reserve **only in `[10, 50]` percent** (confirmed 2026-09-16: a write of 90 settled at 50). Since v1.165.0 a second, separately bounded actuation carries cost-mode targets above 50: the per-channel force-charge (`setChannelForceCharge`, `setForceChargeCeiling`, `nightForceCharge.ts`), started only on a night whose reserve write applied and verified. That bound is enforced twice: `clampReserveTarget` in `nightChargeActuator.ts`, and `setBackupReserveSoc`'s own range check in `ecoflow/commands.ts`, which refuses out-of-range *before any network call*.
 
 Until v1.133.1 this was a bare `50` in both places. Nothing in the codebase said out loud that it caps everything the engine can achieve — which is how `ARB_COST_MAX_SOC_PCT` came to ship with schema `int(50,100)`, **a minimum equal to the write maximum**, so every legal value produced the same instruction. It is now named (`RESERVE_WRITE_MIN_PCT` / `RESERVE_WRITE_MAX_PCT`) and anything reporting a reserve figure reconciles against it.
 
 Two consequences worth stating plainly:
 
-- **Charge power binds before the clamp does.** A six-hour weeknight tops out near 60% SoC even with the clamp removed, so a 90% target is unreachable by two independent limits.
-- **There is no force-charge path.** `setChannelForceCharge` exists and is symmetric, but its only caller passes `on: false`. Reaching above the reserve ceiling would need an unproven write pair against a live panel.
+- **The clamp binds, not charge power.** Measured 2026-09-16/18, the pack takes ~15 kW overnight (16% → 49% by 01:00 under the reserve write; 90% by 03:30 under force-charge), so a six-hour window is not the limit the original ~60% estimate assumed. v1.173.0 replaced the fixed 7.2 kW planning cap accordingly (`planChargeCapKw`).
+- **The force-charge path exists (v1.165.0).** `nightForceCharge.ts` switches `ch{n}ForceCharge` ON just in time and OFF at the target or the window close, with the panel's `foceChargeHight` ceiling as a backstop.
 
 ### 1.3 Why the reserve raise — the banned mechanism — became the shipped one
 
@@ -120,7 +120,7 @@ Pure `computeNightChargePlan(inputs)` → module holder → `nightChargeStateFie
 
 ★ **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" means *fill further*, on the premise that overnight energy is the cheapest the day offers — **not** that the planner optimises against the rate table. §2's tariff model informs the *window*, not the *target*. This is a known gap, not a subtlety: cost mode that genuinely optimises against the rate table has been an open requirement since 2026-09-06 and is not yet built.
 
-★ **The cost question is only asked on nights that need a buy.** The no-shortfall hold returns before `objectiveMode` is read — the objective is consulted ~120 lines later — so on a night whose projected trough already clears floor + cushion, `ARB_OBJECTIVE` has no effect at all. Measured over the trailing seven ledger rows: **one** row held, and it held because a one-hour Friday window could not serve the requirement, not because the night was comfortable. Reordering the check was investigated on 2026-09-06 and **deliberately not shipped** — the addressable population is close to empty, on-peak import measured 0 on every scored night, and the per-night ceiling is 8.09 kWh (the gap between the 41.2% hold bar and the 50% write clamp). ★ **Qualified (v1.187.0):** that column was measured on the pre-v1.187.0 **plan-day anchor** — each weekday row integrated the 16:00–19:00 *before* its own ~21:30 plan existed (the previous night's outcome), and Saturday/Sunday rows counted off-peak afternoons as zeros — so it never measured the on-peak each plan governed (Monday 2026-09-28 imported 4.27 kWh on-peak). It is not evidence that governed on-peak import is zero; the corrected measure is the rows with `onpeak_basis = 'governed'` (DOCS chapter 15 §6).
+★ **Superseded (v1.174.0): cost mode is now asked before it holds** — the no-shortfall hold returns early only in `resilience` mode, and a cost-mode night holds only when the pack already sits at or above the night's cost ceiling or the window can deliver less than `ARB_MIN_BUY_KWH` toward it (DOCS chapter 15 §8b). The pre-v1.174.0 behaviour, kept for the record: **the cost question was only asked on nights that need a buy.** The no-shortfall hold returns before `objectiveMode` is read — the objective is consulted ~120 lines later — so on a night whose projected trough already clears floor + cushion, `ARB_OBJECTIVE` has no effect at all. Measured over the trailing seven ledger rows: **one** row held, and it held because a one-hour Friday window could not serve the requirement, not because the night was comfortable. Reordering the check was investigated on 2026-09-06 and **deliberately not shipped** — the addressable population is close to empty, on-peak import measured 0 on every scored night, and the per-night ceiling is 8.09 kWh (the gap between the 41.2% hold bar and the 50% write clamp). ★ **Qualified (v1.187.0):** that column was measured on the pre-v1.187.0 **plan-day anchor** — each weekday row integrated the 16:00–19:00 *before* its own ~21:30 plan existed (the previous night's outcome), and Saturday/Sunday rows counted off-peak afternoons as zeros — so it never measured the on-peak each plan governed (Monday 2026-09-28 imported 4.27 kWh on-peak). It is not evidence that governed on-peak import is zero; the corrected measure is the rows with `onpeak_basis = 'governed'` (DOCS chapter 15 §6).
 
 ### 3.2 Sizing math and caps
 
@@ -133,7 +133,7 @@ Pure `computeNightChargePlan(inputs)` → module holder → `nightChargeStateFie
 
 **Caps.** `bindingCap` reports which bound produced the answer: `requirement` · `chargePower` · `evContention` · `poolHeadroom` · `overBuy`.
 
-★ **EV contention is the routine limiter.** With `ARB_GRID_INPUT_CAP_KW = 17` and the EVSE drawing ~11.5 kW, the packs are left ~5.5 kW against a 7.2 kW `ARB_CHARGE_CAP_KW`. Measured: `binding_cap = 'evContention'` on **five consecutive nights**. `evContention` is a *more specific* `chargePower`, not a parallel vocabulary, and it is claimed **only** when an EVSE prediction actually covers the window — a missing prediction can never masquerade as a modelled one.
+★ **EV contention is the routine limiter.** With `ARB_GRID_INPUT_CAP_KW = 17` and the EVSE drawing ~11.5 kW, the packs are left ~5.5 kW against the charge cap (`ARB_CHARGE_CAP_KW`, default 0 = auto since v1.173.0: connected Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` 5.5 kW ÷ the charge-leg efficiency, ≈ 17.8 kW with three Cores; the fixed 7.2 kW survives only as `LEGACY_CHARGE_CAP_KW` when the Core count is unknown). Measured: `binding_cap = 'evContention'` on **five consecutive nights**. `evContention` is a *more specific* `chargePower`, not a parallel vocabulary, and it is claimed **only** when an EVSE prediction actually covers the window — a missing prediction can never masquerade as a modelled one.
 
 **Under-buy remains classified as a safety miss**, not a cost miss (the original life-safety reclassification, still binding): P10 PV, P90 load, `p90SessionKwh` for a committed EV charge rather than the probability-weighted expected value, EV double-count guarded, and any thin/climatology-only basis resolving to null rather than a best-effort small buy the owner might trust as cushion.
 
@@ -167,7 +167,7 @@ It is stated on the trough itself rather than through a window walk, because it 
 
 A night that does not buy holds for one of three reasons, and they mean different things:
 
-1. **No shortfall** — the projected trough already clears floor + cushion. Returns early, before the objective is read (§3.1).
+1. **No shortfall** — the projected trough already clears floor + cushion. In `resilience` mode it returns early; since v1.174.0 `cost` mode reads the objective first and holds only if the cost target is not worth a buy (§3.1).
 2. **A genuinely small need** — the deliverable covers the requirement but falls under `ARB_MIN_BUY_KWH`.
 3. **A window that cannot serve** — the deliverable falls *short* of the requirement.
 
@@ -205,7 +205,7 @@ Both legs now: verify → retry (capped) → escalate once. On the revert leg, a
 
 ### 4.4 Revert
 
-The prior value restores at window close + 5 min, or immediately on a post-apply cancel. Mode-independent — it runs even if the owner flips back to advisory mid-night — and it refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive **cloud-rejected** writes it annunciates a critical once and keeps retrying; the readback-failure path (§4.3) escalates separately. The floor/runway/SoC alarm spine is fully independent throughout.
+The prior value restores at window close (`REVERT_LAG_MS = 0` since v1.187.0; 5 min before, `LEGACY_REVERT_LAG_MS`), with force-charge's OFF run first on the same tick, or immediately on a post-apply cancel. Mode-independent — it runs even if the owner flips back to advisory mid-night — and it refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive **cloud-rejected** writes it annunciates a critical once and keeps retrying; the readback-failure path (§4.3) escalates separately. The floor/runway/SoC alarm spine is fully independent throughout.
 
 **Revert settling.** The projection keeps reporting the raised reserve for ~20–60 s after the ACK. `isRevertSettling` holds the arbitrage posture true through a 5-minute grace window, because otherwise the alert engine sees `arbitrageRaised = false` against a still-raised reserve and classifies a normal pool as a floor breach — observed live as a false "[Medium] Backup at reserve" push followed by its own resolve ~40 s later. The readback verdict deliberately cannot be reached inside that same window.
 
@@ -287,13 +287,13 @@ The v1 gate this replaced failed for a structural reason worth preserving: its e
 
 Listed so a quiet reading is not mistaken for a healthy one. Every entry here was found by measuring the live system, not by reading the code.
 
-- **`ARB_COST_MAX_SOC_PCT` is not deliverable above 50.** Schema `int(50,100)`; write envelope caps at 50. Every legal value produces the identical instruction. Charge power binds first regardless (~60% SoC on a six-hour weeknight).
+- **~~`ARB_COST_MAX_SOC_PCT` is not deliverable above 50~~ — RESOLVED v1.165.0.** The reserve write still caps at 50 (device-confirmed 2026-09-16), but a cost ceiling above 50 is now delivered by force-charge (§1.2), and the measured ~15 kW charge rate retired the ~60% charge-power estimate.
 - **Cost mode is rate-blind** (§3.1). It fills further; it does not optimise against the rate table.
-- **The cost question is never asked on a comfortable night** (§3.1) — the no-shortfall hold returns first.
+- **~~The cost question is never asked on a comfortable night~~ — RESOLVED v1.174.0** (§3.1): cost mode is asked before the no-shortfall hold.
 - **The readiness gate cannot open** (§7) — under-buy is structurally unmeasurable while `cushion_shortfall` is pinned.
 - **`activeStrikes: 0` means "cannot count"**, not "no faults."
 - **`actual_grid_to_battery_kwh`** is declared and never written, so a `delivered_kwh` of 0 cannot be decomposed.
-- **No force-charge path** — `setChannelForceCharge` is only ever called with `on: false`.
+- **~~No force-charge path~~ — RESOLVED v1.165.0.** `setChannelForceCharge` is called with `on: true` by `nightForceCharge.ts`.
 - **The tariff has no expiry check** — a rate change would be silently stale.
 
 ---
@@ -304,7 +304,7 @@ Listed so a quiet reading is not mistaken for a healthy one. Every entry here wa
 
 1. **Call APS about the Friday 23:00 → Saturday 05:00 boundary** (§2.1). ~$312/yr, one phone call, and the difference between a one-hour and a six-hour Friday. The highest-value item in this document.
 2. **Re-scope the cushion**, which is the only thing that can open the readiness gate (§7). *Decided 2026-09-06: the protected floor becomes **10% total**, with the outage cushion **disabled** — accepting roughly 5 hours of planned outage margin to free ~23 kWh of arbitrage band. The engine can now express this (§3.3); the settings are not yet applied, deliberately, pending the rate-aware objective below.*
-3. **Whether to probe `backupReserveSoc` above 50** to learn if the `[10,50]` bound is the device's or only the client's. No probe exists in the repo and it cannot be answered from code. *Authorised 2026-09-06, not yet performed — it requires the pack to sit above the value written, or the panel grid-charges to reach it and the reserve alarm annunciates.*
+3. **Whether to probe `backupReserveSoc` above 50** to learn if the `[10,50]` bound is the device's or only the client's. No probe exists in the repo and it cannot be answered from code. *Settled 2026-09-16: a write of 90 settled at 50 on the panel — the `[10, 50]` bound is the device's own. The path above 50 is force-charge (v1.165.0, §1.2).*
 
 **Not yet built:**
 

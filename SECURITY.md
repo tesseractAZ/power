@@ -12,7 +12,7 @@ battery hardware, its security posture matters.
 
 The add-on ships as a single rolling release from `main`; only the **latest
 published version** receives fixes. Upgrade to the newest tag before reporting an
-issue, and include the version (`GET /api/version` returns `{version, ref}`).
+issue, and include the version (`GET /api/version` returns `{version, builtAt, ref}`).
 
 | Version | Supported |
 |---------|-----------|
@@ -40,18 +40,22 @@ changelog if you'd like it.
 
 - **AppArmor profile** (`ecoflow_panel/apparmor.txt`) confines the container's
   filesystem and capabilities.
-- **Device writes default to off.** The only production write path is the
-  night-charge supervised reserve write (v1.50.0), disabled unless the owner
-  sets `NIGHT_CHARGE_MODE` to `supervised` or `auto` (default `advisory` —
-  never writes); when enabled it is announced each evening, cancellable,
-  validated into the device's [10, 50] reserve range, and auto-reverted after
-  the charge window. The arbitrary send-command debug path additionally
+- **Device writes default to off.** Every automatic write is opt-in. The night-charge
+  reserve write and its revert (v1.50.0), and the v1.165.0 per-channel force-charge with
+  its ceiling sync (cost objective with `ARB_COST_MAX_SOC_PCT` above 50, only on a night
+  whose reserve write applied and verified), run only when `NIGHT_CHARGE_MODE` is
+  `supervised` or `auto` (default `advisory` — never writes). The Charge Now responder
+  writes force-charge OFF only when `CHARGE_NOW_RESPONSE` is `supervised` (default
+  `advisory`). When enabled, the night write is announced each evening, cancellable,
+  validated into the device's [10, 50] reserve range, and auto-reverted at the close of
+  the charge window. Owner-initiated writes (`POST /api/reserve-floor`,
+  `POST /api/device/refresh-cloud/:sn`) require write authorization. The arbitrary send-command debug path additionally
   requires a `WRITE_DEBUG_TOKEN`. Every write is recorded to an append-only
   audit log.
 - **Write/administrative endpoints are auth-gated** (CSRF/CORS controls, the
   send-command lockdown, and audit-log read auth).
-- **Secrets** (EcoFlow `ECOFLOW_ACCESS_KEY` / `ECOFLOW_SECRET_KEY`, weather/HA
-  tokens) are supplied through the add-on options and are never logged; the panel
+- **Secrets** (EcoFlow `ECOFLOW_ACCESS_KEY` / `ECOFLOW_SECRET_KEY`, `MQTT_DISCOVERY_PASS`,
+  `TUI_PASSWORD`, `WRITE_DEBUG_TOKEN`; the Supervisor injects `SUPERVISOR_TOKEN`) are supplied through the add-on options and are never logged; the panel
   reports credential **presence**, never values.
 - The trusted-LAN data API (`:8787`) and telnet TUI (`:2323`) are intended for the
   local network only; do not expose them to the internet. Use Home Assistant's

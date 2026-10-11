@@ -21,7 +21,7 @@
 > **not** read it as an open invitation to run the probe.
 
 ## Why BLE (and why only as a cross-check)
-Research (2026-06-25, see `memory/project_ecoflow_lan_feasibility.md`) established that the Delta Pro
+Research (2026-06-25) established that the Delta Pro
 Ultra (DPU, `EF-YJ`/`hs_yj751`) and SHP2 (`EF-HD3`/`pd303`) expose **no LAN-IP protocol** — no Modbus,
 no local HTTP, no honor-a-local-MQTT-broker. The *only* genuinely cloud-free telemetry path is
 reverse-engineered **BLE** via [`rabits/ha-ef-ble`](https://github.com/rabits/ha-ef-ble) +
@@ -70,10 +70,11 @@ per-circuit channels, **not** the `backupIncreInfo` aggregate the floor/SoC/runw
 ## Integration seam (only after the gate passes)
 - Emit raw maps keyed in the exact REST dot-keys the projectors read
   (`hs_yj751_pd_appshow_addr.*`, `hs_yj751_bms_slave_addr.{1..5}.*`) and feed them via
-  `SnapshotStore.mergeDeviceQuota(sn, partial, 'local_ble')` (`server/src/snapshot.ts:233`) into a
+  `SnapshotStore.mergeDeviceQuota(sn, partial, 'local_ble')` (`server/src/snapshot.ts`) into a
   **parallel/shadow channel only**.
-- Widen the `lastSourceBySn` union (`snapshot.ts:58`) and the alert-enrichment provenance map
-  (`alertMonitor.ts:739`) to carry `'local_ble'` so the source is explicit, never silently coerced
+- Widen the `'rest' | 'mqtt'` source type (`SnapshotStore.lastSourceBySn`, and the `source`
+  parameter of `setDeviceQuota`/`mergeDeviceQuota`) and the alert enrichment's `lastSource`
+  (`alertMonitor.ts`) to carry `'local_ble'` so the source is explicit, never silently coerced
   into `'rest'`/`'mqtt'`.
 - Run shadow mode for a sustained period; the alarm engine keeps consuming **cloud only**. Compare
   field-by-field; log divergences.
@@ -93,4 +94,4 @@ The *actual* fix for the recurring "cloud-offline" pain is **not** BLE — it's 
 real-outage classification (LAN reachability via HA ping sensors) shipped in the add-on, because the
 documented root cause is an EcoFlow cloud *session* wedge, not radio loss. BLE here only adds an
 optional, cloud-independent **cross-check** for the DPUs if you want one. See
-`memory/project_wifi_loss_root_cause.md` and `project_ecoflow_lan_feasibility.md`.
+[Cloud-wedge vs. real-outage classification](../ecoflow_panel/DOCS.md#cloud-wedge-vs-real-outage-classification-devicelinkts) in DOCS.md.
