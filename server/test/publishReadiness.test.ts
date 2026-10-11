@@ -31,6 +31,7 @@ const bootInputs = (): ReadinessInputs => ({
   curtailment: { basisComplete: false },
   carbon: { basisComplete: false },
   tariff: { basisComplete: false },
+  degradation: null, // v1.187.18 — no report yet
 });
 
 const warmInputs = (): ReadinessInputs => ({
@@ -48,6 +49,7 @@ const warmInputs = (): ReadinessInputs => ({
   curtailment: { basisComplete: true },
   carbon: { basisComplete: true },
   tariff: { basisComplete: true },
+  degradation: { basisPending: false }, // v1.187.18
 });
 
 /** A payload shaped like the boot publish: every governed field a model-less 0. */

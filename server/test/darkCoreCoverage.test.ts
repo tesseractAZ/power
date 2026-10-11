@@ -231,8 +231,9 @@ test('★ v1.152.0 — the inert boot pre-warm is GONE, not merely gated', () =>
   const reports = readFileSync(resolve(__dir, '../src/reports.ts'), 'utf8');
   assert.match(reports, /'equipmentHealth',/, 'equipmentHealth must remain in WARM_REPORTS');
   const worker = readFileSync(resolve(__dir, '../src/analyticsWorker.ts'), 'utf8');
-  assert.match(worker, /if \(hasDevices\(\)\) \{ clearInterval\(firstWarm\); void warm\(\); \}/,
-    'the worker firstWarm must still gate on a NON-EMPTY snapshot — the thing the pre-warm got wrong');
+  // v1.187.18 — the gate is now stricter: a device with a PROJECTION, not merely a listed one.
+  assert.match(worker, /if \(hasProjections\(\)\) \{ clearInterval\(firstWarm\); void warm\(\); \}/,
+    'the worker firstWarm must still gate on a snapshot with a projection — the thing the pre-warm got wrong');
 });
 
 test('★ v1.152.0 — the boot window is instrumented per phase', () => {
