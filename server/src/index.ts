@@ -901,7 +901,8 @@ app.post('/api/energy-history/export-ha', { preHandler: [requireWriteAuth, expor
 });
 
 /** v1.85.0 — manual bounded backfill trigger (runs in the background). */
-app.post<{ Querystring: { days?: string } }>('/api/energy-history/backfill', async (req) => {
+// v1.187.16 — write-gated like every other write route (it starts vendor fetches and writes the ledger).
+app.post<{ Querystring: { days?: string } }>('/api/energy-history/backfill', { preHandler: requireWriteAuth }, async (req) => {
   const cap = Math.max(1, Math.min(30, Number(req.query.days ?? 10) || 10));
   void runVendorBackfill(cap).catch((e: any) => app.log.warn(`energy-history: manual backfill failed (${e?.message ?? e})`));
   return { started: true, cap };
@@ -1855,11 +1856,12 @@ app.get('/api/alerts/history', async (req, reply) =>
  *   GET  /api/alerts/outcomes  recent submissions (debug + audit)
  *   GET  /api/alerts/outcomes/stats   per-family precision + counts
  *
- * No auth on these — same security model as the rest of the panel
- * (lives behind HA Ingress or the LAN-only port). The submitting
- * operator's IP + UA are recorded for audit. */
+ * v1.187.16 — write-gated (requireWriteAuth) like every other write route: the dashboard's
+ * outcome buttons reach it same-origin through HA Ingress; a bare LAN POST no longer writes the
+ * learning ledger. The submitting operator's IP + UA are recorded for audit. */
 app.post<{ Body: { alertId?: string; outcome?: string; notes?: string } }>(
   '/api/alerts/outcome',
+  { preHandler: requireWriteAuth },
   async (req, reply) => {
     const { alertId, outcome, notes } = req.body ?? {};
     if (!alertId || typeof alertId !== 'string') {

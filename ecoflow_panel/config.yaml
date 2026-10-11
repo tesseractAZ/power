@@ -1,5 +1,5 @@
 name: Power
-version: "1.187.15"
+version: "1.187.16"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -29,7 +29,7 @@ ports:
   2323/tcp: 2323
 ports_description:
   8787/tcp: Web dashboard + REST API + WebSocket
-  2323/tcp: Telnet "control-room" TUI (no auth — keep on a trusted LAN)
+  2323/tcp: Telnet "control-room" TUI (off by default; optional login — keep on a trusted LAN)
 # v0.9.5 — HA Ingress: makes the panel appear as a sidebar item inside
 # Home Assistant (visible in the HA mobile app), authenticated through
 # HA's normal session. Same server, same port — HA's hassio_ingress

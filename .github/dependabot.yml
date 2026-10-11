@@ -1,11 +1,10 @@
 version: 2
 
-# Weekly Monday morning PRs (your local Phoenix time), grouped by production
-# vs development to keep the PR list short. Major version bumps are
-# intentionally ignored — those need deliberate migrations (breaking
-# changes, API renames, build-tool rewrites) and shouldn't auto-merge.
-# When a major bump is genuinely wanted, open it manually or temporarily
-# drop the ignore rule below.
+# Weekly pull requests on Monday at 06:00 America/Phoenix, grouped production /
+# development to keep the list short. Major versions are not proposed: they need a
+# deliberate migration (Tailwind CSS 3 → 4 in v1.187.7 is the example) and are opened
+# by hand, or by dropping the ignore rule below for one run. Every Dependabot pull
+# request goes through the same CI gates as any other; none is merged automatically.
 
 updates:
   # ── npm: server (Fastify, MQTT, etc.) ────────────────────────────────────
@@ -65,7 +64,10 @@ updates:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
 
-  # ── Docker: Dockerfile FROM lines ────────────────────────────────────────
+  # ── Docker: the Dockerfile's build stages (node:22-alpine) ──────────────
+  # The runtime base (ghcr.io/home-assistant/{arch}-base:3.21@sha256:…) is passed in
+  # as BUILD_FROM and pinned by digest in build.yaml, ci.yml and images.yml. Dependabot
+  # cannot see it there, so a base update is a manual, three-file edit.
   - package-ecosystem: docker
     directory: /
     schedule:
