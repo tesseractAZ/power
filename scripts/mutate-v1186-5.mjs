@@ -52,8 +52,8 @@ const MUTANTS = [
   {
     id: 'iv. ★★ a band built on an incomplete forecast is cached',
     file: AN,
-    find: '  if (!forecast.structurallyIncomplete) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value };',
-    to: '  probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value }; /* MUTANT */',
+    find: '  if (!forecast.structurallyIncomplete && cacheWritable()) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value };',
+    to: '  if (cacheWritable()) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value }; /* MUTANT */',
     why: 'A band with calScoredDays 0 would fail the gate after the forecast became complete (if its generatedAt were reused).',
   },
   {

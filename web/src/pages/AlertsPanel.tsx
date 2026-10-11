@@ -186,7 +186,7 @@ function LearnedAlertsView({ alerts }: { alerts: Alert[] }) {
         </div>
         <HowItWorks>
           Model-driven detections, not fixed-threshold rules. The learned engine compares every
-          battery pack against its four siblings, every sensor against its own hour-of-day history,
+          battery pack against the other packs in its Core, every sensor against its own hour-of-day history,
           and projects current trends forward — surfacing problems an absolute limit would miss.
           Each signal shows the statistics behind the flag.
         </HowItWorks>

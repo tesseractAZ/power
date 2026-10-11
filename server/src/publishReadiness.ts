@@ -31,6 +31,10 @@
  * (`panel`, `panelLive`). And a forecast or runway the analytics worker built while a home Core's
  * first reading was still pending (homeBasisPending) is withheld: at boot they published
  * Projected Low SoC 0 % and a finite runway computed with that Core's PV missing.
+ *
+ * v1.187.18 — likewise the degradation report built while the device map was still filling
+ * (FleetDegradation.basisPending): 2026-10-11 12:23 it counted one bench Core's 4 packs of 24, and
+ * HA read degradation_packs_total 4, projecting 0 and no soonest EOL for 30 min.
  */
 
 import type { DeviceSnapshot } from './snapshot.js';
@@ -75,6 +79,9 @@ export interface PublishReadiness {
   carbon: boolean;
   /** The tariff report ran with Cores and a panel. */
   tariff: boolean;
+  /** v1.187.18 — the degradation report was not built on a device map still filling
+   *  (FleetDegradation.basisPending: a Core or panel listed online had no projection yet). */
+  degradation: boolean;
 }
 
 /** Keys each readiness flag governs, across BOTH publishers (a key absent from a payload is
@@ -107,6 +114,10 @@ export const READINESS_FIELDS: { readonly [K in keyof PublishReadiness]: readonl
   ],
   carbon: ['carbon_kg_avoided_7d'],
   tariff: ['tariff_today_grid_cost_dollars', 'tariff_today_solar_value_dollars', 'tariff_net_savings_7d_dollars'],
+  degradation: [
+    'degradation_packs_total', 'degradation_packs_projecting', 'degradation_soonest_eol_years',
+    'degradation_soonest_eol_date', 'degradation_soonest_eol_pack', 'degradation_peer_outliers',
+  ],
 };
 
 /** v1.187.10 — dynamic keys a flag governs, matched against every key of the payload. The
@@ -134,6 +145,8 @@ export interface ReadinessInputs {
   curtailment: { basisComplete?: boolean } | null | undefined;
   carbon: { basisComplete?: boolean } | null | undefined;
   tariff: { basisComplete?: boolean } | null | undefined;
+  /** v1.187.18 — the degradation report; absent or null reads as not ready (its fields are null). */
+  degradation: { basisPending?: boolean } | null | undefined;
   /** v1.187.10 — the clock the panel's freshness is judged on (default: now). */
   nowMs?: number;
 }
@@ -160,6 +173,7 @@ export function publishReadiness(i: ReadinessInputs): PublishReadiness {
     curtailment: !!i.curtailment && i.curtailment.basisComplete === true,
     carbon: !!i.carbon && i.carbon.basisComplete !== false,
     tariff: !!i.tariff && i.tariff.basisComplete !== false,
+    degradation: !!i.degradation && i.degradation.basisPending !== true,
   };
 }
 

@@ -496,6 +496,54 @@ test('probabilistic F23 — a mid-window dip that RECOVERS still counts (min-ove
   assert.equal(r.pAboveReservePct, 0, `mid-window dip must read 0% (end-state bug reads 100%); got ${r.pAboveReservePct}`);
 });
 
+/** v1.187.18 — a day pinned at full: no hour pair can be inverted, so the pool size decides the band. */
+function pinnedAtFull(): ForecastHour[] {
+  return hourlyForecast({
+    count: 24,
+    startTs: tomorrowLocalMidnight(),
+    forecastPvW: (h) => (h >= 8 && h <= 16 ? 6_000 : 0),
+    forecastLoadW: (h) => (h >= 8 && h <= 16 ? 1_500 : 300),
+    projectedSocPct: () => 100,
+  });
+}
+const fiveDpuModels = () => Array.from({ length: 5 }, () => ({}) as DayForecast['deviceModels'][number]);
+const p10s = (r: Awaited<ReturnType<typeof computeProbabilisticForecast>>) => r.hours.map((h) => h.p10SocPct);
+/** The probabilistic cache is keyed on generatedAt, which every hand-built forecast here shares. */
+const probFresh = (fc: DayForecast) => { resetForecastCachesForTesting(); return computeProbabilisticForecast(fc, null); };
+
+test('★★ probabilistic v1.187.18 — the SoC band uses the forecast\'s own pool (poolFullWh), not a count of every DPU', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // Production: the SHP2 pool rides on the forecast. Five DPUs on the account (two of them bench Cores).
+  const withPool = await probFresh(emptyForecast({ hours: pinnedAtFull(), poolFullWh: 92_160, deviceModels: fiveDpuModels() }));
+  // No pool value: the last resort counts HOME Cores (solarModelSns), 3 × 5 × 6.144 = the same 92.16 kWh.
+  const homeCount = await probFresh(emptyForecast({ hours: pinnedAtFull(), solarModelSns: ['A', 'B', 'C'], deviceModels: fiveDpuModels() }));
+  // The pre-v1.187.18 basis: every DPU in deviceModels, 5 × 5 × 6.144 = 153.6 kWh.
+  const everyDpu = await probFresh(emptyForecast({ hours: pinnedAtFull(), poolFullWh: 153_600, deviceModels: fiveDpuModels() }));
+  assert.deepEqual(p10s(withPool), p10s(homeCount), 'pool value and home-Core estimate agree on a 92.16 kWh pool');
+  const minP10 = (r: typeof withPool) => Math.min(...p10s(r).filter((v): v is number => v != null));
+  assert.ok(minP10(withPool) < minP10(everyDpu) - 0.1,
+    `a 92.16 kWh pool dips further below full than a 153.6 kWh one; got ${minP10(withPool)} vs ${minP10(everyDpu)}`);
+});
+
+test('★★ probabilistic v1.187.18 — poolFullWh takes precedence over backing the capacity out of the trajectory', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  const hours = () => hourlyForecast({
+    count: 6,
+    startTs: tomorrowLocalMidnight(),
+    forecastPvW: (h) => (h === 0 ? 0 : 2_000),
+    forecastLoadW: () => 800,
+    projectedSocPct: (h) => 50 + h * 1.0,   // inverts to 120 kWh (the v0.9.58 case)
+  });
+  const inverted = await probFresh(emptyForecast({ hours: hours() }));
+  const doubled = await probFresh(emptyForecast({ hours: hours(), poolFullWh: 240_000 }));
+  const width = (r: typeof inverted) => (r.hours[1].p90SocPct ?? 0) - (r.hours[1].p10SocPct ?? 0);
+  assert.ok(width(inverted) > 0);
+  assert.ok(Math.abs(width(doubled) - width(inverted) / 2) < 0.05,
+    `a 240 kWh poolFullWh halves the 120 kWh inverted band; got ${width(doubled).toFixed(3)} vs ${width(inverted).toFixed(3)}`);
+});
+
 test('probabilistic F23 — pFullCharge is max-over-path: touching full mid-window counts; 99.5% counts as full', async () => {
   resetForecastCachesForTesting();
   setWeatherCacheForTesting(null);

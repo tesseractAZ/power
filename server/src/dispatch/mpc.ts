@@ -56,8 +56,8 @@ const ROUND_TRIP_EFFICIENCY = Number(process.env.MPC_ROUND_TRIP_EFFICIENCY ?? 0.
 
 /**
  * Maximum battery charge / discharge rate as a fraction of pool capacity
- * per hour. SHP2 + 4 DPUs can move ~6 kW continuous (~5% of a 120 kWh pool
- * per hour); cap the per-hour battery flow to a realistic envelope.
+ * per hour, env-overridable. 0.25 × the 92.16 kWh pool (2026-10) ≈ 23 kW, about
+ * the three SHP2 source slots' combined 7.2 kW rating (21.6 kW).
  */
 const MAX_C_RATE = Number(process.env.MPC_MAX_C_RATE ?? 0.25);
 
@@ -346,6 +346,24 @@ function detectDegradeReason(
   const loadFlat = loadMean === 0 || loadRange / Math.max(0.01, loadMean) < 0.05;
   if (pvFlat && loadFlat) return 'flat-forecast';
   return null;
+}
+
+/**
+ * v1.187.18 — the pool the optimizer plans against, from the SHP2 projection's coherent
+ * backup trio, or null when either reading is missing or not a positive/finite number.
+ * The route used to substitute a 60 kWh pool at 50 % when coherentBackupPool marked the
+ * readings untrusted (the SHP2 still present), and returned a plan for the wrong pool,
+ * cached 300 s; it now answers 503 as it does with no SHP2.
+ */
+export function mpcPoolBasis(sp: {
+  backupFullCapWh?: number | null;
+  backupBatPercent?: number | null;
+}): { capacityKwh: number; currentSocPct: number } | null {
+  const fullWh = sp.backupFullCapWh;
+  const soc = sp.backupBatPercent;
+  if (fullWh == null || !Number.isFinite(fullWh) || fullWh <= 0) return null;
+  if (soc == null || !Number.isFinite(soc) || soc < 0 || soc > 100) return null;
+  return { capacityKwh: fullWh / 1000, currentSocPct: soc };
 }
 
 /**

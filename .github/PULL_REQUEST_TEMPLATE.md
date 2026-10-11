@@ -17,7 +17,7 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 - [ ] `node scripts/check-mutant-anchors.mjs` — all mutation-harness anchors still resolve
 - [ ] `node scripts/check-npm-audit.mjs` — no high/critical advisories in the production dependency tree, no expired waivers
 - [ ] If this adds or removes tests, harnesses or workflows, or changes DOCS.md length by more than 3%: the README sentence is updated and `node scripts/check-doc-claims.mjs --tests <N>` passes
-- [ ] CI green: type-check matrix · server-test type-check · server tests + README claims · mutant anchors · no personal data · dependency advisories · add-on config · release-PR version (release PRs only) · Docker smoke build · docs build · CodeQL
+- [ ] CI green: type-check matrix · server-test type-check · server tests + README claims · mutant anchors · no personal data · dependency advisories · add-on config · release-PR version (`release-pr.yml`) · Docker smoke build · docs build · CodeQL
 - [ ] Tested against live EcoFlow data, or N/A (docs / CI-only change)
 - [ ] If UI changed: screenshot or short clip attached below
 
@@ -37,7 +37,7 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 ### If this is a release PR
 - [ ] `ecoflow_panel/config.yaml` **version bumped** to exactly the version in the PR title
 - [ ] `ecoflow_panel/CHANGELOG.md` has a `## vX.Y.Z` section, **prepended without truncating the file** — check the entry count did not drop
-- [ ] Squash subject starts with `Release vX.Y.Z` — `tag-release.yml` is paths-filtered on `config.yaml`, so a missing bump means **no tag, no image, no release, and every check still green**
+- [ ] Title (and, for a one-commit PR, the commit's subject, which its squash merge lands with) is `Release vX.Y.Z …`, the version above every `vX.Y.Z` tag — Home Assistant offers whatever `config.yaml` declares on `main` (a lower version too), and `tag-release.yml` tags it on the merge or fails the run
 - [ ] Merge is **gated on the CI conclusion**, not merely on CI finishing
 
 ## Release notes

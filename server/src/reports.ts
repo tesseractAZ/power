@@ -32,7 +32,10 @@ import {
   forecastHourPvW,
   preferRealizedGhiRows,
   queryRealizedGhi,
+  resetWorkerReportCaches,
 } from './analytics.js';
+import { reportBasisKey } from './analytics/fleet.js';
+import { advanceBasisGeneration, basisGeneration, runInBasisGeneration, resetBasisGenerationForTesting } from './analytics/flightBasis.js';
 import { computeTotals, circuitHistoryByDay } from './aggregator.js';
 import { backtestPvForecast } from './backtest.js';
 
@@ -305,10 +308,104 @@ export function keyedSingleFlight(maxJoinMs: number = FLIGHT_MAX_JOIN_MS, now: (
 
 const reportFlights = keyedSingleFlight();
 
+/**
+ * v1.187.18 — a report is served only on the device basis it was computed on.
+ *
+ * 2026-10-11 12:23 (the v1.187.17 restart): the worker's first warm pass ran on a boot-time map
+ * where one bench Core had a projection and the panel did not, and every report it built was
+ * cached for its full TTL. Degradation read 4 packs of 24 until 12:53 (HA: packs_total 4,
+ * projecting 0, no soonest EOL); a sweep found 13 of the 25 worker reports could latch such a
+ * basis the same way. The v1.186.3 hydration guard clears only the main thread's 20 s report
+ * cache, never the worker's own caches; and a request on the hydrated map JOINED a flight that
+ * had started on the partial one (4/4/4 packs where 4/24/24 was right).
+ *
+ * Now every request computes the basis (reportBasisKey: projected Cores | projected panels |
+ * panel-listed Cores) from the snapshot it runs on:
+ *  - when an element ARRIVES, the worker's result caches are reset (resetWorkerReportCaches) and
+ *    the basis generation moves on (analytics/flightBasis.ts);
+ *  - the basis is part of the flight key, so a request on a new basis never joins a flight that
+ *    started on an old one;
+ *  - each flight runs in the generation it was asked in, and a flight whose generation has been
+ *    superseded writes no cache (cacheWritable): what it computes after the reset reaches only
+ *    its own caller (the readiness-vs-value-across-an-await pattern). A flight on the current
+ *    basis keeps everything it caches.
+ *
+ * An element that LEAVES does not reset (what is cached was built on more than the map now
+ * holds; the TTLs and the forecast's own model check bound it). Only the panel's source list can
+ * flicker (projections survive a cloud-offline transition), so a RE-arrival (an element already
+ * seen in this worker's life) resets at most once per BASIS_REARRIVAL_RESET_MIN_MS: the first one
+ * at once, later ones deferred to the end of that window, never dropped. A first sighting — the
+ * boot fill, a Core new to the account — always resets at once. A flapping source therefore costs
+ * at most one cold pass per window, and what was built during a dip is served for at most a window.
+ */
+export const BASIS_REARRIVAL_RESET_MIN_MS = 5 * 60_000;
+
+interface BasisState {
+  key: string | null;
+  parts: Set<string>;
+  seen: Set<string>;
+  lastRearrivalResetMs: number;
+  pending: boolean;
+}
+const freshBasis = (): BasisState => ({
+  key: null, parts: new Set(), seen: new Set(), lastRearrivalResetMs: -Infinity, pending: false,
+});
+let basis = freshBasis();
+
+/** `dpus|panels|home` → tagged elements (`0:sn` a projected Core, `1:sn` a panel, `2:sn` a home Core). */
+const basisParts = (key: string): string[] =>
+  key.split('|').flatMap((seg, i) => (seg ? seg.split(',').map((sn) => `${i}:${sn}`) : []));
+
+const countsOf = (key: string | null): string => {
+  const [d = '', p = '', h = ''] = (key ?? '').split('|');
+  const n = (seg: string) => (seg ? seg.split(',').length : 0);
+  return `${n(d)} Cores, ${n(p)} panels, ${n(h)} home`;
+};
+
+function resetBasisCaches(): void {
+  advanceBasisGeneration();
+  basis.pending = false;
+  resetWorkerReportCaches();
+}
+
+/** v1.187.18 — note the basis a request runs on, resetting the worker's result caches when an
+ *  element arrives (see above). Returns the generation the request runs in. Exported for tests. */
+export function noteReportBasis(key: string, nowMs: number = Date.now(), log: (m: string) => void = () => {}): number {
+  if (key === basis.key && !basis.pending) return basisGeneration();
+  const parts = basisParts(key);
+  const arrived = parts.filter((e) => !basis.parts.has(e));
+  const firstSight = arrived.some((e) => !basis.seen.has(e));
+  const prev = basis.key;
+  for (const e of parts) basis.seen.add(e);
+  basis.key = key;
+  basis.parts = new Set(parts);
+  if (firstSight) {
+    resetBasisCaches();
+    log(`analytics-worker: report basis ${countsOf(prev)} → ${countsOf(key)}: report caches reset (generation ${basisGeneration()})`);
+  } else if (arrived.length > 0 || basis.pending) {
+    if (nowMs - basis.lastRearrivalResetMs >= BASIS_REARRIVAL_RESET_MIN_MS) {
+      basis.lastRearrivalResetMs = nowMs;
+      resetBasisCaches();
+      log(`analytics-worker: report basis ${countsOf(prev)} → ${countsOf(key)} (a source returned): report caches reset (generation ${basisGeneration()})`);
+    } else if (!basis.pending) {
+      basis.pending = true;
+      log(`analytics-worker: report basis ${countsOf(prev)} → ${countsOf(key)} (a source returned within ${BASIS_REARRIVAL_RESET_MIN_MS / 60_000} min of the last): reset deferred`);
+    }
+  }
+  return basisGeneration();
+}
+
+/** Test seam: forget the basis (a fresh worker's state). */
+export function resetReportBasisForTesting(): void { basis = freshBasis(); resetBasisGenerationForTesting(); }
+
 export async function buildReport(name: string, ctx: ReportCtx, args: ReportArgs = {}): Promise<unknown> {
   const b = BUILDERS[name];
   if (!b) throw new Error(`unknown report '${name}'`);
-  return reportFlights.run(buildFlightKey(name, args), () => b(ctx, args));
+  const key = reportBasisKey(devicesOf(ctx));
+  // The generation is fixed when the report is ASKED: a flight scheduled before a reset in the
+  // same turn still belongs to the basis it was asked on.
+  const gen = noteReportBasis(key, Date.now(), ctx.log);
+  return reportFlights.run(`${buildFlightKey(name, args)} @${key}`, () => runInBasisGeneration(gen, () => b(ctx, args)));
 }
 
 /** v1.186.0 — give queued macrotasks (the worker's 'message' events) a turn. Awaiting a

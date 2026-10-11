@@ -405,7 +405,7 @@ test('v1.178.0 — the early returns (no home Cores, no panel) are incomplete', 
 function warmReadinessInputs(): ReadinessInputs {
   return {
     devices: {}, alerts: [], speakerLastProbeAt: 1, forecast: null, runway: null, clipping: null,
-    curtailment: null, carbon: null, tariff: null,
+    curtailment: null, carbon: null, tariff: null, degradation: null,
   };
 }
 

@@ -161,8 +161,9 @@ function runBlock(s: Step): string {
 }
 
 const RELEASE_STEP = stepNamed(RELEASE, 'Create GitHub Release (with docs asset)');
-const TAG = 'v0.0.0-test';
-const V = '0.0.0-test';
+// A strict X.Y.Z: the Latest lookup counts only strict vX.Y.Z tags (a `-test` suffix would not be one).
+const TAG = 'v1.2.3';
+const V = '1.2.3';
 const DOCX = `EcoFlow-Panel-Documentation-v${V}.docx`;
 const PDF = `EcoFlow-Panel-Documentation-v${V}.pdf`;
 
@@ -247,7 +248,17 @@ function releaseArgs(tags: string[] | null): string[] {
 }
 
 test('★★ only the highest version is marked Latest; a re-run older release is not; a failed lookup leaves it to GitHub', () => {
-  assert.ok(releaseArgs(['v0.0.0-alpha', TAG]).includes('--latest=true'), 'the highest tag is Latest');
+  assert.ok(releaseArgs(['v1.2.2', TAG]).includes('--latest=true'), 'the highest tag is Latest');
   assert.ok(releaseArgs([TAG, 'v99.0.0']).includes('--latest=false'), 'an older version re-run after a newer one is not Latest');
   assert.ok(!releaseArgs(null).some((a) => a.startsWith('--latest')), 'a failed lookup passes no flag (GitHub decides)');
+});
+
+test('★★ "highest" counts strict vX.Y.Z tags only, compared as numbers (sort -V ranked v1.2.3-rc1 above v1.2.3)', () => {
+  // A stray pre-release or malformed tag above the release must not demote it.
+  assert.ok(releaseArgs(['v1.2.2', TAG, 'v1.2.3-rc1', 'v1.2.4-beta', 'v01.9.9', 'vnext']).includes('--latest=true'));
+  // Numeric, not lexicographic: v1.2.10 is above v1.2.3 although "3" > "1".
+  assert.ok(releaseArgs(['v1.2.2', 'v1.2.10', TAG]).includes('--latest=false'));
+  assert.ok(releaseArgs([TAG, 'v1.10.0']).includes('--latest=false'));
+  // Only non-strict tags: no strict highest, so GitHub decides.
+  assert.ok(!releaseArgs(['v1.2.3-rc1']).some((a) => a.startsWith('--latest')));
 });

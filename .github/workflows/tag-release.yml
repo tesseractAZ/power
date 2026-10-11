@@ -1,79 +1,222 @@
 name: Tag released version
 
-# Post-merge half of the release pipeline.
+# Post-merge half of the release pipeline: a RECONCILER, not a gate.
 #
-# The `main` branch is governed by the `BranchAuth` ruleset (PR + verified
-# signatures + CodeQL), so a version bump reaches main only through a PR: in
-# practice a hand-made "Release vX.Y.Z …" PR (README's release pipeline), or
-# the PR `release.yml` opens. This workflow picks up once that release commit
-# lands on main: it creates the matching tag and kicks off the image build.
+# Home Assistant offers whatever `version:` ecoflow_panel/config.yaml declares on
+# main (Supervisor's need_update is `version != latest_version`, so a LOWER version
+# is offered as a downgrade, and auto-update installs it). This workflow therefore
+# runs on EVERY push to main, with no paths filter and no subject gate, and makes
+# the tags match what main declares:
 #
-# Why a separate workflow: tagging has to happen AFTER the PR merges, which is a
-# different event than the manual `release.yml` dispatch.
+#   - main's version is untagged and above every strict vX.Y.Z tag → tag the
+#     commit that brought it to main and dispatch images.yml;
+#   - it is tagged and released → nothing to do (an ordinary push, e.g. a
+#     Dependabot merge, is a no-op);
+#   - it is a version that cannot be published (not X.Y.Z, a reused number, not
+#     above the highest tag, a tag off main) → a red run, because HA already
+#     offers it; and while main declares an older release than the newest one (a
+#     revert), every push and dispatch is red until main moves above it.
+#
+# A squash subject starting "Release vX" whose push did not change config.yaml's
+# version is an error (v1.130.0: the code and CHANGELOG landed without the bump,
+# and nothing ran). A subject naming another version than config.yaml is an error
+# after tagging; a bump under any other subject is tagged with a warning. Before
+# this, the workflow ran only for a push that touched config.yaml AND whose
+# subject started "Release v": a bump merged under another subject (v0.54.1) was
+# never tagged, and a "Release v" merge without the bump was never evaluated.
+#
+# Runs can execute out of order (GitHub does not guarantee the order of a
+# concurrency queue), and checkout pins origin/main to this run's commit, so the
+# step re-fetches main and the tags first: a run whose push main has since moved
+# past reports "superseded" and leaves the newer state to that push's run.
+#
+# A re-run (GITHUB_RUN_ATTEMPT > 1) or a manual workflow_dispatch re-dispatches
+# images.yml when the tag exists without a GitHub Release (a lost or failed
+# dispatch); a first attempt only warns, because images.yml may still be running.
+# Only an explicit 404 from the Release lookup counts as "no Release"; any other
+# lookup failure is a red run.
 #
 # Why we dispatch images.yml explicitly instead of relying on the tag push: a
 # tag pushed with the default `GITHUB_TOKEN` does NOT trigger other workflows
 # (GitHub's recursion guard). `workflow_dispatch` via the API is exempt, so we
 # create the tag and then dispatch images.yml by hand.
+#
+# server/test/tagRelease.test.ts runs the step's script in temporary repositories
+# against a stub `gh` (harness scripts/mutate-v1187-18r.mjs).
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'ecoflow_panel/config.yaml'
+  workflow_dispatch:
 
 permissions:
   contents: write   # create + push the tag
   actions: write    # dispatch images.yml
 
+# One run at a time, and every waiting run is kept (`queue: max`) instead of the
+# default single pending slot. Order is still not guaranteed; the step handles a
+# run that executes after a later push.
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   tag:
     name: Tag + trigger image build
-    # Act only on a release merge: a push to main that touches config.yaml (the
-    # paths filter above) AND whose head commit message starts "Release v" —
-    # the squash subject of a release PR, whether made by hand (README's release
-    # pipeline) or opened by release.yml (last used for v0.15.3). The tag comes
-    # from config.yaml, not the subject; check-release-pr.py fails a "Release v"
-    # PR whose title and config.yaml version disagree.
-    if: startsWith(github.event.head_commit.message, 'Release v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
+      # Event data reaches the script through env only, never as an expression inside it.
       - name: Create tag and dispatch the image build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BEFORE: ${{ github.event.before }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          v=$(grep -E '^version:' ecoflow_panel/config.yaml \
-            | sed -E 's/version:[[:space:]]*"?([^"#]+)"?.*/\1/' \
-            | tr -d '[:space:]')
-          if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Could not parse version from config.yaml (got '$v')"
+          CFG=ecoflow_panel/config.yaml
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          # The first top-level `version:` line, quoted or not (check-release-pr.py reads it the same way).
+          ver_at() {
+            git show "$1:$CFG" 2>/dev/null \
+              | sed -nE "s/^version:[[:space:]]*[\"']?([^\"'#[:space:]]+)[\"']?.*/\1/p" \
+              | head -n1 || true
+          }
+          # gt A B: A is above B (both strict X.Y.Z).
+          gt() {
+            local IFS=. i; local -a a b; a=($1); b=($2)
+            for i in 0 1 2; do
+              if (( a[i] > b[i] )); then return 0; fi
+              if (( a[i] < b[i] )); then return 1; fi
+            done
+            return 1
+          }
+          rc=0
+          # checkout forces origin/main to this run's commit: fetch the real main, and every tag.
+          git fetch --quiet --force origin '+refs/heads/main:refs/remotes/origin/main' '+refs/tags/*:refs/tags/*'
+
+          SHA=$(git rev-parse HEAD)
+          TIP=$(git rev-parse refs/remotes/origin/main)
+          if ! git merge-base --is-ancestor "$SHA" "$TIP"; then
+            echo "::error::${SHA:0:9} is not on main. Only main's version is tagged."
             exit 1
           fi
-          tag="v${v}"
+          V=$(ver_at "$SHA")
+          NV=$(git show "$SHA:$CFG" 2>/dev/null | grep -c '^version:' || true)
+          if [[ ! "$V" =~ $SEMVER ]]; then
+            echo "::error::config.yaml at ${SHA:0:9} declares version '${V}', not X.Y.Z. Home Assistant offers it, but no tag or image can be made for it."
+            exit 1
+          fi
+          if [[ "$NV" != 1 ]]; then
+            echo "::error::config.yaml at ${SHA:0:9} has ${NV} top-level version: lines. This step reads the first; a YAML loader keeps the last."
+            exit 1
+          fi
+          TAG="v$V"
+          BV=""
+          if [[ -n "${BEFORE:-}" && ! "$BEFORE" =~ ^0+$ ]] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            BV=$(ver_at "$BEFORE")
+          fi
+          SUBJ=${HEAD_MSG:-}; SUBJ=${SUBJ%%$'\n'*}; SUBJ=${SUBJ%%$'\r'*}
+          SUBJ_V=""
+          if [[ "$SUBJ" =~ ^Release\ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then SUBJ_V=${BASH_REMATCH[1]}; fi
 
-          # Idempotent: if the tag already exists (re-run, or the version commit
-          # didn't actually bump), do nothing.
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1 \
-             || git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "::notice::Tag ${tag} already exists — nothing to do."
-            exit 0
+          # A "Release vX" merge that did not move the version released nothing (v1.130.0).
+          if [[ -n "$SUBJ_V" && -n "$BV" && "$BV" == "$V" ]]; then
+            echo "::error::'${SUBJ}' landed, but config.yaml's version did not change (still ${V}). Nothing was released."
+            rc=1
           fi
 
+          # A "Release vX" subject that names another version than config.yaml's, on a push that moved the
+          # version: judged here, before any branch, so it is reported whichever run creates the tag (runs can
+          # execute out of order, and a later push's run tags this commit first).
+          if [[ -n "$SUBJ_V" && "$SUBJ_V" != "$V" && "$BV" != "$V" ]]; then
+            echo "::error::The subject says Release v${SUBJ_V}; config.yaml says ${V}. ${TAG} is the version HA offers."
+            rc=1
+          fi
+
+          # Superseded: main moved to another version after this push; that push's run reconciles it.
+          if [[ "$TIP" != "$SHA" ]]; then
+            TIPV=$(ver_at "$TIP")
+            if [[ "$TIPV" != "$V" ]]; then
+              echo "::notice::main moved on to ${TIPV} (${TIP:0:9}); ${V} from ${SHA:0:9} is no longer offered."
+              exit "$rc"
+            fi
+          fi
+
+          HIGH=""
+          while read -r t; do
+            [[ -n "$t" ]] || continue
+            x=${t#v}
+            [[ "$x" =~ $SEMVER ]] || continue
+            if [[ -z "$HIGH" ]] || gt "$x" "$HIGH"; then HIGH=$x; fi
+          done < <(git tag -l 'v*')
+
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            TAGC=$(git rev-parse "${TAG}^{commit}")
+            if [[ "$TAGC" == "$SHA" ]] || { git merge-base --is-ancestor "$SHA" "$TAGC" && git merge-base --is-ancestor "$TAGC" "$TIP"; }; then
+              : # tagged at this commit, or at a later commit on main
+            elif git merge-base --is-ancestor "$TAGC" "$SHA"; then
+              # Released at an earlier commit. Judged on the STATE, so every push and dispatch stays
+              # red while main sits below a newer release, not only the push that moved it there.
+              if [[ -n "$HIGH" ]] && gt "$HIGH" "$V"; then
+                echo "::error::main declares ${V} (released from ${TAGC:0:9}), but v${HIGH} is out. HA offers any version that differs from the installed one, so this is a downgrade offered to every newer install, and auto-update installs it. Bump above ${HIGH}."
+                exit 1
+              fi
+              # A reused number: this push left another PUBLISHED version for one released before.
+              # (Leaving a version that was never tagged, such as a pre-release spelling, is a fix.)
+              if [[ -n "$BV" && "$BV" != "$V" ]] && git rev-parse -q --verify "refs/tags/v${BV}" >/dev/null; then
+                echo "::error::This push moved config.yaml from ${BV} (released) to ${V}, but ${TAG} was released from ${TAGC:0:9}: the version on main is not what that Release holds. A Release tag cannot be reused: bump above ${HIGH}."
+                exit 1
+              fi
+            else
+              echo "::error::${TAG} points at ${TAGC:0:9}, which is not on main."
+              exit 1
+            fi
+            # Only an explicit 404 means "no Release". Any other failure (network, 5xx, rate limit,
+            # auth) is a red run, never a re-dispatch that rebuilds a sealed version's images.
+            if out=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --silent 2>&1); then
+              echo "::notice::${TAG} is tagged and released; nothing to do."
+            elif ! grep -q 'HTTP 404' <<<"$out"; then
+              out=${out//$'\n'/ }
+              echo "::error::Could not look up the Release for ${TAG} (${out}). Not re-dispatching."
+              exit 1
+            elif [[ "${GITHUB_RUN_ATTEMPT:-1}" != "1" || "${EVENT_NAME:-}" == "workflow_dispatch" ]]; then
+              gh workflow run images.yml -f version="$V"
+              echo "::notice::${TAG} exists without a Release; re-dispatched images.yml."
+            else
+              echo "::warning::${TAG} exists but has no Release yet (images.yml running, or it failed). Re-run this job to re-dispatch it."
+            fi
+            exit "$rc"
+          fi
+
+          if [[ -n "$HIGH" ]] && ! gt "$V" "$HIGH"; then
+            echo "::error::main declares ${V}, never released and not above v${HIGH}. HA offers it (a downgrade if lower) and no image exists."
+            exit 1
+          fi
+          if [[ -z "$SUBJ_V" && -n "$BV" && "$BV" != "$V" ]]; then
+            echo "::warning::${BV} -> ${V} landed under the subject '${SUBJ}'. Tagging it anyway."
+          fi
+          TARGET=$SHA
+          if [[ -z "$BV" || "$BV" == "$V" ]]; then
+            # This push did not bring V: tag the commit that did (a first-parent walk).
+            while p=$(git rev-parse -q --verify "${TARGET}^1") && [[ "$(ver_at "$p")" == "$V" ]]; do TARGET=$p; done
+            echo "::warning::${TAG} was not tagged when ${V} reached main at ${TARGET:0:9}; tagging that commit now."
+          fi
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git tag -a "${tag}" -m "Release ${tag}"
-          git push origin "${tag}"
-          echo "Tagged ${tag}."
-
-          # Tag push via GITHUB_TOKEN won't trigger images.yml (recursion guard),
-          # so dispatch it. images.yml checks out the tag we just created.
-          gh workflow run images.yml -f version="${v}"
-          echo "Dispatched images.yml for ${v}."
+          git tag -a "$TAG" -m "Release $TAG" "$TARGET"
+          git push origin "refs/tags/${TAG}"
+          echo "Tagged ${TAG} at ${TARGET:0:9}."
+          # The tag push (GITHUB_TOKEN) does not start images.yml, so dispatch it; it checks out the tag.
+          gh workflow run images.yml -f version="$V"
+          echo "Dispatched images.yml for ${V}."
+          exit "$rc"
 
       - name: Summary
         if: always()
@@ -81,6 +224,8 @@ jobs:
           {
             echo "## 🏷️ Tag-release"
             echo
-            echo "If a new \`v*\` tag was created above, **\`images.yml\`** is now building"
-            echo "the amd64 + aarch64 GHCR images and will cut the GitHub Release."
+            echo "This run reconciled main's \`config.yaml\` version with the \`v*\` tags; its"
+            echo "annotations say what it found. If it created or re-dispatched a tag,"
+            echo "**\`images.yml\`** is now building the amd64 + aarch64 GHCR images and will"
+            echo "cut the GitHub Release."
           } >> "$GITHUB_STEP_SUMMARY"

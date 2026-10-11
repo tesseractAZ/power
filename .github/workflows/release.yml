@@ -8,18 +8,22 @@ name: Release
 # report on it and auto-merge could not fire; it would need an admin merge.
 #
 # Trigger from GitHub: Actions → Release → "Run workflow". The workflow:
-#   1. Computes the next version (semver bump or explicit override)
-#   2. Refuses if the new tag already exists, so re-runs are idempotent
+#   1. Computes the next version (semver bump or explicit override), bumping from
+#      the higher of config.yaml's version and the highest vX.Y.Z tag
+#   2. Refuses if the new tag already exists or the version is not above both, so
+#      re-runs are idempotent
 #   3. Builds release notes (from your `notes` input, or auto-generated from the
 #      commit log since the previous tag)
 #   4. Bumps `version:` in `ecoflow_panel/config.yaml` and prepends a CHANGELOG section
-#   5. Opens a `release/vX.Y.Z` PR and enables auto-merge
+#   5. Runs scripts/check-release-pr.py against main (CI will not run on the PR)
+#   6. Opens a `release/vX.Y.Z` PR and enables auto-merge
 #
 # The `main` branch is protected by the `BranchAuth` ruleset (PR + verified
 # signatures + CodeQL), so this workflow can't push to main directly — it goes
 # through a PR. The squash-merge commit is GitHub-signed, satisfying the rules.
-# Once the PR merges, `tag-release.yml` creates the tag and `images.yml` builds +
-# publishes the GHCR images and cuts the GitHub Release.
+# Once the PR merges, `tag-release.yml` (which runs on every push to main) creates
+# the tag and `images.yml` builds + publishes the GHCR images and cuts the GitHub
+# Release.
 #
 # Home Assistant (the add-on repository) reads the bumped `version:` from
 # `config.yaml` on main and surfaces a native Update button once the image is up.
@@ -49,7 +53,7 @@ permissions:
 jobs:
   release:
     name: Cut release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,34 +61,59 @@ jobs:
 
       - name: Compute next version
         id: ver
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          current=$(grep -E '^version:' ecoflow_panel/config.yaml \
-            | sed -E 's/version:[[:space:]]*"?([^"#]+)"?.*/\1/' \
-            | tr -d '[:space:]')
-          if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          # The first top-level `version:` line, quoted or not (as tag-release.yml reads it).
+          current=$(sed -nE "s/^version:[[:space:]]*[\"']?([^\"'#[:space:]]+)[\"']?.*/\1/p" ecoflow_panel/config.yaml | head -n1)
+          if [[ ! "$current" =~ $SEMVER ]]; then
             echo "::error::Could not parse current version from config.yaml (got '$current')"
             exit 1
           fi
+          # gt A B: A is above B (both strict X.Y.Z).
+          gt() {
+            local IFS=. i; local -a a b; a=($1); b=($2)
+            for i in 0 1 2; do
+              if (( a[i] > b[i] )); then return 0; fi
+              if (( a[i] < b[i] )); then return 1; fi
+            done
+            return 1
+          }
+          # The floor is the higher of config.yaml and the highest strict vX.Y.Z tag: a tag can
+          # sit above main's version (one made off main), and a Release tag cannot be reused.
+          # tag-release.yml refuses to tag a version that is not above every tag.
+          floor=$current
+          while read -r t; do
+            x=${t#v}
+            [[ "$x" =~ $SEMVER ]] || continue
+            if gt "$x" "$floor"; then floor=$x; fi
+          done < <(git tag -l 'v*')
 
-          if [[ -n "${{ inputs.version }}" ]]; then
-            next="${{ inputs.version }}"
+          if [[ -n "$EXPLICIT" ]]; then
+            next="$EXPLICIT"
           else
-            IFS='.' read -r maj min pat <<< "$current"
-            case "${{ inputs.bump }}" in
+            IFS='.' read -r maj min pat <<< "$floor"
+            case "$BUMP" in
               major) next="$((maj + 1)).0.0" ;;
               minor) next="${maj}.$((min + 1)).0" ;;
               patch) next="${maj}.${min}.$((pat + 1))" ;;
-              *) echo "::error::Unknown bump '${{ inputs.bump }}'"; exit 1 ;;
+              *) echo "::error::Unknown bump '${BUMP}'"; exit 1 ;;
             esac
           fi
 
-          if [[ ! "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid next version '$next' (expected X.Y.Z)"
+          if [[ ! "$next" =~ $SEMVER ]]; then
+            echo "::error::Invalid next version '$next' (expected X.Y.Z, no leading zeros)"
             exit 1
           fi
           if git rev-parse -q --verify "refs/tags/v${next}" >/dev/null 2>&1; then
             echo "::error::Tag v${next} already exists"
+            exit 1
+          fi
+          if ! gt "$next" "$floor"; then
+            echo "::error::v${next} is not above v${floor} (config.yaml ${current} or the highest tag)"
             exit 1
           fi
 
@@ -162,7 +191,8 @@ jobs:
       # commit below is unsigned, but that is fine: it never lands on main
       # directly — the SQUASH-merge commit is authored by GitHub's web-flow key
       # (signature-verified), which satisfies the `required_signatures` rule.
-      # Tagging + the image build happen post-merge in `tag-release.yml`.
+      # Tagging + the image build happen post-merge in `tag-release.yml`, which runs on
+      # every push to main and tags the version config.yaml declares there.
       - name: Open release PR (auto-merge)
         env:
           NEXT: ${{ steps.ver.outputs.next }}
@@ -176,6 +206,9 @@ jobs:
           git checkout -b "$branch"
           git add ecoflow_panel/config.yaml ecoflow_panel/CHANGELOG.md
           git commit -m "Release v${NEXT}"
+          # CI does not run on a PR opened with GITHUB_TOKEN, so the release-PR check runs here,
+          # against main, before the branch is pushed.
+          BASE_REV=origin/main PR_TITLE="Release v${NEXT}" python3 scripts/check-release-pr.py
           git push --force-with-lease origin "$branch"
 
           body_file="$(mktemp)"
@@ -217,7 +250,7 @@ jobs:
             echo "What happens next, automatically:"
             echo
             echo "1. The PR merges (as a signature-verified squash commit) once required checks — and any required review — pass."
-            echo "2. **\`tag-release.yml\`** fires on the merge: it tags \`v${NEXT}\` and dispatches **\`images.yml\`**."
+            echo "2. **\`tag-release.yml\`** runs on the merge (it runs on every push to \`main\`): it tags \`v${NEXT}\` and dispatches **\`images.yml\`**."
             echo "3. **\`images.yml\`** builds + publishes the amd64 + aarch64 GHCR images and creates the GitHub Release for v${NEXT}."
             echo
             echo "**The Release appearing on GitHub is the \"go ahead and update\" signal.** Then in Home Assistant:"
