@@ -63,3 +63,14 @@ export function gridNote(grid: RunwayProjection['grid']): string | null {
   if (grid?.backstopping !== true) return null;
   return `${grid.importLive === true ? 'grid is supplying the house' : 'grid available as backup'} — these are outage projections (if the grid goes down), not a live countdown`;
 }
+
+/** v1.187.19 — "of N full", and on what basis N is. The runway's kWh are the packs' measured
+ *  full-charge capacity, so they read below the panel's own Backup Capacity (nameplate); the
+ *  caption says so instead of leaving two different "full" figures unexplained. */
+export function fullCaption(r: Pick<RunwayProjection, 'backupFullKwh' | 'capacityScale' | 'capacityBasis'>): string | undefined {
+  if (r.backupFullKwh == null) return undefined;
+  const full = `of ${r.backupFullKwh.toFixed(1)} full`;
+  if (r.capacityScale == null || r.capacityBasis == null || r.capacityBasis === 'nameplate') return full;
+  const how = r.capacityBasis === 'measured' ? 'measured' : r.capacityBasis === 'held' ? 'last measured' : 'lowest measured';
+  return `${full} · ${how} ${Math.round(r.capacityScale * 100)}% of nameplate`;
+}

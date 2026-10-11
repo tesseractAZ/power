@@ -21,11 +21,17 @@
  *   measured, so the at-floor alarm never waits on the window.
  * - Beyond PANEL_RUNWAY_HORIZON_H the figure is dropped, matching the house runway's horizon,
  *   so a slow evening drain does not announce a thirty-hour "low" every hour.
+ * - v1.187.19 — the pool's energies are the panel's nameplate figures × the measured capacity
+ *   scale of ITS connected Cores (poolEnergyBasis.ts; the caller evaluates it on the main
+ *   thread's own tracker). The drain needs no overhead term: it is measured at the packs, so the
+ *   Cores' own consumption is already in it. The scale is clamped to [CAPACITY_SCALE_MIN, 1], so
+ *   it only ever lowers the energies; absent or non-finite it reads as 1 (unchanged).
  */
 import type { DeviceSnapshot } from './snapshot.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import type { RunwayAlarmInput } from './runwayAlarm.js';
 import { shp2ReadbackFresh } from './shp2Membership.js';
+import { CAPACITY_SCALE_MIN, type CapacityBasis } from './poolEnergyBasis.js';
 
 export const PANEL_DRAIN_WINDOW_MS = 30 * 60_000;
 /** The window must span at least this much before the mean is a drain rather than a moment. */
@@ -67,17 +73,28 @@ export interface PanelRunway extends RunwayAlarmInput {
   sn: string;
   name: string;
   drainW: number | null;
+  /** v1.187.19 — the capacity scale applied to the panel's energies, and its basis. */
+  capacityScale?: number;
+  capacityBasis?: CapacityBasis;
 }
 
 export function panelDrainRunway(
   panel: DeviceSnapshot & { projection: Shp2Projection },
   samples: readonly DrainSample[],
   nowMs: number,
+  basis?: { capacityScale: number; capacityBasis: CapacityBasis },
 ): PanelRunway {
-  const base = { sn: panel.sn, name: panel.deviceName, generatedAt: nowMs, hoursToReserve: null, hoursToEmpty: null, drainW: null };
-  const remainWh = panel.projection.backupRemainWh ?? null;
-  const fullWh = panel.projection.backupFullCapWh ?? null;
-  if (remainWh == null || fullWh == null || fullWh <= 0) return { ...base, unavailable: 'pool capacity not reported' };
+  const scale = basis && Number.isFinite(basis.capacityScale)
+    ? Math.min(1, Math.max(CAPACITY_SCALE_MIN, basis.capacityScale)) : 1;
+  const base = {
+    sn: panel.sn, name: panel.deviceName, generatedAt: nowMs, hoursToReserve: null, hoursToEmpty: null, drainW: null,
+    ...(basis ? { capacityScale: scale, capacityBasis: basis.capacityBasis } : {}),
+  };
+  const remainWhPlate = panel.projection.backupRemainWh ?? null;
+  const fullWhPlate = panel.projection.backupFullCapWh ?? null;
+  if (remainWhPlate == null || fullWhPlate == null || fullWhPlate <= 0) return { ...base, unavailable: 'pool capacity not reported' };
+  const remainWh = remainWhPlate * scale;
+  const fullWh = fullWhPlate * scale;
   if (!shp2ReadbackFresh(panel, nowMs)) return { ...base, unavailable: 'panel reading not fresh' };
   const reserveWh = (fullWh * (panel.projection.backupReserveSoc ?? 15)) / 100;
   const floor = { backupRemainingKwh: remainWh / 1000, backupReserveKwh: reserveWh / 1000 };

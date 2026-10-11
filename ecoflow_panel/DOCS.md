@@ -1354,6 +1354,13 @@ exactly: both figures are nameplate-scaled Wh. The packs' own measured full-char
 the per-pack `fullCapMah` (94.4 % of nameplate across the home packs on that date;
 `docs/PERFORMANCE.md` §4).
 
+The percent itself is a fraction of that measured capacity (each source's `batteryPercentage`
+follows its packs' `remainCapMah / fullCapMah`), so the nameplate energies read high by the
+packs' capacity ratio. Since v1.187.19 the runway and the forecast SoC trajectories multiply both
+energies by the measured ratio (`poolEnergyBasis.ts`, §5.1.3a); the published Backup Capacity /
+Backup Remaining sensors, the percent, the floor alarm and the night-charge planner keep the
+panel's own figures unchanged.
+
 The trio is gated for coherence before publish:
 
 **`coherentBackupPool(pct, fullCapWh, remainWh)`** (v0.54.4): requires the full trio +
@@ -2006,6 +2013,7 @@ are cached (~30 min) on the worker.
 | `GRID_READING_PATH` | `grid-reading.json` beside the DB (supervised), else disabled | persisted not-OK grid reading for the declared-grid veto (v1.180.0); `''` disables |
 | `POOL_UNKNOWN_PATH` | `pool-unknown.json` beside the DB (supervised), else disabled | pool-unknown onsets carried across a restart (v1.187.4); `''` disables |
 | `PACK_GHOSTS_PATH` | `pack-ghosts.json` beside the DB (supervised), else disabled | hidden ghost pack slots carried across a restart (v1.187.1); `''` disables |
+| `POOL_ENERGY_BASIS_DIR` | beside the DB (supervised), else disabled | directory for `pool-energy-basis.json` (the analytics worker's held per-Core capacity ratios and applied scale) and `pool-energy-basis-panels.json` (the main thread's, secondary panels) — v1.187.19, §5.1.3a; `''` disables |
 | `SHADOW_WITNESS_PATH` | `shadow-witness.json` beside the DB | last SHP2 shadow witness (v1.148.0) |
 | `POLL_SUMMARY_EVERY` | `30` | polls per poll-duration summary line (v1.148.0) |
 
@@ -2561,12 +2569,20 @@ load = baseLoad + evLoad
   decaying weight `w = 1 − hoursAhead/blendHours`, `max`-combined so it never
   makes a light day more optimistic. Mirrors the v0.15.17 runway fix.
 
-**(d) SoC integration — v1.26.0 DC-bus balance**:
+**(d) SoC integration — v1.26.0 DC-bus balance** (v1.187.19: on the measured basis, with the
+Cores' overhead):
 
 ```
-socWh = clamp(0, fullWh, socWh + (pvAlarm − load / RUNWAY_DISCHARGE_EFFICIENCY))
+basis  = runwayEnergyBasis(devices, shp2, now)          # capacityScale, overheadW (§5.1.3a)
+fullWh = backupFullCapWh · capacityScale                # published as poolFullWh
+socWh  = backupRemainWh · capacityScale                 # starts at the live percent
+socWh  = clamp(0, fullWh, socWh + (pvAlarm − runwayDrainW(load, overheadW)))
 socPct = socWh / fullWh · 100
 ```
+
+`runwayDrainW(load, overheadW) = max(load/η, overheadW + load/η_m)` — the same function
+`computeRunway`, the multi-day sim and the probabilistic band use (§5.1.3a). The description
+of η below is unchanged; the drain adds the Cores' fixed overhead to it.
 
 `RUNWAY_DISCHARGE_EFFICIENCY` (η) defaults to **0.94** (env
 `RUNWAY_DISCHARGE_EFFICIENCY`, clamped `[0.80, 1.0]`). PV enters the DC bus at
@@ -2633,7 +2649,8 @@ negative-cache TTL.
 | `homeBasisPending` | v1.187.10: built while a connected home Core's first reading was pending; publishers send the PV pair and Projected Low SoC as null while it is set |
 | `pvForecastUnavailable` | v1.178.0: the display basis has no PV history at all (`restoredPvSpan === 0`); publishers send null (HA "unknown") instead of a model-less 0 |
 | `solarModelSns` | v1.186.5: sorted SNs of the home Cores the solar model was fitted on; gates cache reuse and forecast-skill scoring |
-| `poolFullWh` | v1.187.18: the backup pool's full capacity (Wh) the SoC trajectory was integrated against (`backupFullCapWh`, the packs' nameplate sum); null with no SHP2 or an untrusted pool; read by the probabilistic band |
+| `poolFullWh` | v1.187.18: the backup pool's full capacity (Wh) the SoC trajectory was integrated against; null with no SHP2 or an untrusted pool; read by the probabilistic band. v1.187.19: `backupFullCapWh × poolCapacityScale`, the packs' measured capacity (was the nameplate sum) |
+| `poolCapacityScale` / `poolCapacityBasis` / `poolOverheadW` | v1.187.19 — the measured basis and the drain overhead the trajectory used (§5.1.3a); the probabilistic band reads `poolOverheadW` |
 
 #### Endpoint
 
@@ -2926,13 +2943,16 @@ correlated across hours — a cloudy day is cloudy all day), so the trajectory i
 monotone in z and the z=∓1.282 paths are exact P10/P90 trajectories.
 
 **Full capacity** (`fullKwh`) — v1.187.18: a production forecast carries the capacity its
-trajectory was integrated against (`DayForecast.poolFullWh`, the SHP2's `backupFullCapWh`), and
-that value is used directly. The trajectory back-out below applies only to a forecast without it
-(hand-built ones): the forecast was generated against `backupFullCapWh` via
-`socWh += (pv − load/η)`, so it is inverted from the forecast's own SoC trajectory:
+trajectory was integrated against (`DayForecast.poolFullWh`; since v1.187.19 the packs' measured
+capacity, `backupFullCapWh × poolCapacityScale`), and that value is used directly. The back-out
+below applies only to a forecast without it (hand-built ones): it is inverted from the forecast's
+own SoC trajectory with the drain that built it — `runwayDrainW(load, poolOverheadW ?? 0)`
+(v1.187.19; `netKwh` in the code), so a forecast with no overhead is read with the
+pre-v1.187.19 `load/η`:
 
 ```
-fullKwh = (cur.forecastPvW − cur.forecastLoadW/η)/1000  /  (dSocPct/100)
+fullKwh = netKwh(cur.forecastPvW, cur.forecastLoadW)  /  (dSocPct/100)
+netKwh(pv, load) = (pv − runwayDrainW(load, poolOverheadW ?? 0)) / 1000
 ```
 
 picking the hour with the largest unclamped `|dSocPct|` (best conditioning;
@@ -2949,7 +2969,7 @@ max(1, solarModelSns.length ?? deviceModels.length)` (before v1.187.18 it counte
 sigmaPvKwh   = (p90 − p10)/2000/Z10
 sigmaLoadKwh = PROB_LOAD_SIGMA_FRAC · max(0, forecastLoadW) / 1000    // 0.15 default (env PROB_LOAD_SIGMA_FRAC)
 sigmaNetKwh  = sqrt(sigmaPvKwh² + sigmaLoadKwh²)                       // quadrature within the hour
-dP50Kwh      = (p50 − forecastLoadW/η)/1000                            // v1.26.0 DC-bus balance
+dP50Kwh      = netKwh(p50, forecastLoadW)                              // v1.26.0 DC-bus balance (v1.187.19: runwayDrainW)
 stepPct(z)   = (dP50Kwh + z·sigmaNetKwh)/fullKwh · 100
 path = clampSoc(path + stepPct(z))                                    // clamp 0..100 per path
 ```
@@ -2966,7 +2986,7 @@ p90SocOut = clampSoc(anchorSoc + highSoc − midSoc)
 ```
 
 The ensemble is seeded ONE deterministic step behind the anchor (using hour-0's
-own `pv − load/η` delta) so the raw median doesn't clamp a rail an hour early.
+own `netKwh` delta) so the raw median doesn't clamp a rail an hour early.
 
 #### Summary probabilities (v1.16.0 F23)
 
@@ -3033,8 +3053,10 @@ forecast radiation covers days 3–4 and the climatology fills only hours past t
 the cached forecast. `pvBiasFactor` is reused from the day-ahead
 forecast (`forecast.pvBiasFactor ?? 1`).
 
-SoC integrated with the same v1.26.0 DC-bus balance
-`socWh + (pv − load/η)`, clamped `[0, fullWh]`. Report-only, never an alarm gate.
+SoC integrated with the same DC-bus balance as the day forecast — on the measured basis
+(`backupFullCapWh`/`backupRemainWh × capacityScale`) with `socWh + (pv − runwayDrainW(load,
+overheadW))` since v1.187.19 — clamped `[0, fullWh]`. Report-only, never an alarm gate. The
+night-charge planner reads only each hour's `pvW`/`loadW` from this report, never `socPct`.
 
 #### Output (`MultiDayForecast`)
 
@@ -3124,6 +3146,8 @@ persists GHI/cloud rows to the recorder.
 |---|---|---|
 | `PEAK_RESPONSE_MIN_GHI_WM2` | 300 | brightness floor for `peakCoeff` headline |
 | `RUNWAY_DISCHARGE_EFFICIENCY` | 0.94 (clamp 0.80–1.0) | η in DC-bus SoC balance `load/η` |
+| `RUNWAY_CORE_OVERHEAD_W` | 90 (clamp 0–500) | v1.187.19 — fixed drain per connected Core added to `load/η` (§5.1.3a) |
+| `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m`; the `max()` keeps the drain ≥ `load/η` |
 | `INCOMPLETE_FORECAST_TTL_MS` | 150000 | negative-cache TTL for incomplete forecast |
 | `FORECAST_RECENT_LOAD_WINDOW_MS` | 3 h | recent-load trailing window |
 | `FORECAST_NIGHT_START_HOUR` | 21 | night-band start |
@@ -3910,7 +3934,8 @@ Two overarching **safety invariants** govern the whole cluster and are repeated 
 
 | Input | Source | Notes |
 | --- | --- | --- |
-| `backupRemainWh`, `backupFullCapWh` | SHP2 projection (`backupIncreInfo` aggregate) | Pool remaining / full capacity, Wh → kWh |
+| `backupRemainWh`, `backupFullCapWh` | SHP2 projection (`backupIncreInfo` aggregate) | Pool remaining / full capacity, Wh → kWh; nameplate, so × `capacityScale` (v1.187.19, §1.3a) |
+| `capacityScale`, `overheadW` | `runwayEnergyBasis` (`poolEnergyBasis.ts` + `runwayPoolOverheadW`) | Measured full-charge / nameplate ratio of the panel's connected Cores; the Cores' fixed drain (§1.3a) |
 | `getOwnerReserveFloorPct()` → `backupReserveSoc` | Owner floor (night-charge actuator), else SHP2 projection | Reserve floor %: the owner's floor first (v1.115.0, §12h), else the live `backupReserveSoc`, else **15** |
 | `panel_load` (last hour) | Recorder series on `shp2.sn` | Averaged over `RUNWAY_LOAD_WINDOW_MS` = 60 min |
 | `forecast.hours[h].forecastPvW` | `getDayForecast` (reporting-only `solarModel`) | Per-hour PV, first 24 h |
@@ -3923,10 +3948,11 @@ Two overarching **safety invariants** govern the whole cluster and are repeated 
 
 **Step 0 — cache.** Returns the cached projection if it is younger than `RUNWAY_TTL_MS` = 60 s.
 
-**Step 1 — pool state.**
+**Step 1 — pool state** (v1.187.19: on the packs' measured energy, §1.3a).
 ```
-backupRemainingKwh = backupRemainWh / 1000
-backupFullKwh      = backupFullCapWh / 1000
+basis              = runwayEnergyBasis(devices, shp2, now)   # same snapshot, no await between
+backupRemainingKwh = backupRemainWh  · basis.capacityScale / 1000
+backupFullKwh      = backupFullCapWh · basis.capacityScale / 1000
 reservePct         = getOwnerReserveFloorPct() ?? backupReserveSoc ?? 15   # v1.115.0 — the owner's floor, not the night-charge hold
 backupReserveKwh   = backupFullKwh * reservePct / 100
 ```
@@ -3951,7 +3977,8 @@ The `max()` means a lighter-than-modelled day never becomes *more* optimistic, a
 
 **Step 6 — the DC-bus depletion loop** (the core math). For each hour h ∈ [0,24):
 ```
-delta   = pvKwh − loadKwhPerHour / RUNWAY_DISCHARGE_EFFICIENCY
+delta   = pvKwh − runwayDrainW(loadKwhPerHour·1000, basis.overheadW) / 1000
+        # runwayDrainW(load, ovh) = max(load/η, ovh + load/η_m)   (v1.187.19; was load/η)
 nextState = stateKwh + delta
 ```
 This is the **v1.26.0 DC-bus pool-drain accounting**: PV enters the DC bus at ~unity (MPPT); the AC home load is pulled through the inverter at `1/η_dis`; so the pool changes by `pv − load/η` per hour. It is deliberately **not** `(pv−load)/η` — that would wrongly divide the PV credit by η and stay optimistic whenever pv>0 (e.g. `pv==load` must still drain at `load·(1−1/η)`).
@@ -3974,6 +4001,61 @@ stateKwh = min(backupFullKwh, max(0, nextState))   # v1.32.0 — capped at capac
 
 **Step 8 — ordering repair (v1.129.0, `coherentRunwayPair`).** Above the floor the pool drains through the reserve on its way to empty, so a published `hoursToEmpty` earlier than `hoursToReserve` is impossible. In that case the reserve crossing is pulled back to the empty crossing (the repair only ever shortens) and the projection carries `runwayPairClamped: true`. At or below the floor the pair is left as computed.
 
+#### 1.3a The measured energy basis (v1.187.19)
+
+**Why.** The panel's pool percent (`backupBatPercent`, each source's `batteryPercentage`) is a
+fraction of the packs' BMS full-charge capacity (Σ `fullCapMah`), but the panel converts it to
+energy against nameplate (`backupRemainWh = pct × backupFullCapWh`, 30,720 Wh per Core). Every
+kWh the runway counted was therefore high by the packs' capacity ratio (0.944 on 2026-10-01).
+And the drain `load/η` omitted the Cores' own consumption, which never appears in
+`panel_load`. Replayed against 30 clean pack-only discharge spans (2026-09-02..10-11; loads
+2.1–7.7 kW; capacity ratios 0.981, 0.970, 0.959, 0.944) the old runway overstated the hours in
+every span, by +7.0 % to +18.7 % (worst at low load); the measured basis below predicts all 30
+within −2.6 % to +1.5 % (`docs/PERFORMANCE.md` §4a, `test/runwayReplayBacktest.test.ts`).
+
+**Capacity scale** (`poolEnergyBasis.ts`). Over the Cores the panel lists as connected sources
+(`sources[].isConnected` — not the online DPUs, not a spare list: a bench Core's fresher packs
+must not lend the pool capacity), each Core's ratio is Σ `fullCapMah` / Σ `designCapMah` over its
+packs; the scale is their capacity-weighted (`sources[].fullCap`) mean, which with every Core
+reporting equals Σ `fullCapMah` × 102.4 V ÷ `backupFullCapWh`. Clamped `[0.80, 1.00]` — never
+above nameplate. A pack with `fullCapMah` null, ≤ 0 or above 1.1 × its design, a pack count that
+disagrees with the Core's `packCount`, or a Core that is offline or has not reported, makes that
+Core incomplete: it uses its last complete ratio (persisted, `POOL_ENERGY_BASIS_DIR`, valid 30
+days), else the lowest ratio known for any Core; plain nameplate (1.0) only when no ratio has ever
+been measured. A lower scale applies at once; a higher one only after it has held 24 h (the
+lowest figure seen during the hold is applied). `capacityBasis` names the worst input used:
+`measured` | `held` | `min-known` | `nameplate`. The analytics worker's tracker is the only one
+the house runway and the forecasts read; a secondary panel's drain runway (`panelRunway.ts`,
+main thread) has its own tracker and file and applies the scale only — its drain is measured at
+the packs and already contains the Cores' overhead.
+
+**Drain.** `runwayDrainW(load, overheadW) = max(load/η, overheadW + load/η_m)`, with
+`overheadW = RUNWAY_CORE_OVERHEAD_W` (90 W) × connected Cores and `η_m =
+RUNWAY_DRAIN_MARGINAL_EFFICIENCY` (0.94). Fitted on the same 30 spans: on the measured capacity
+the pool's DC drain is ≈ 267 W + load/0.94 for three Cores (residual sd 40 W; a two-term fit,
+245 W + 1.070 × load, is indistinguishable over 2–8 kW). The overhead is a constant, not a live
+measurement: a live figure would difference the Cores' 10 s pack stream against the panel's 60 s
+load frame and is observable only with PV and grid both absent. It applies in every hour —
+in PV-surplus hours of the same history the pool charged 8–19 % less than `pv − load/η` predicts
+on the measured capacity (2–7 % less with the overhead), so the overhead is present by day too
+and the charge leg remains a little optimistic. The `max()` holds the drain at or above the
+pre-v1.187.19 `load/η` for any configuration, so with the scale ≤ 1 the runway can only shorten
+(`poolEnergyBasis.test.ts` checks 400 random pools, loads and PV curves; a pool already below
+its floor is the floor alarm's, not the hours'). ∂delta/∂pv is still 1, so the
+`runwayPvBasisGuard` monotonicity holds.
+
+**Published.** `RunwayProjection.capacityScale`, `capacityBasis`, `overheadW` (also on
+`/api/runway`); `backupRemainingKwh` / `backupFullKwh` / `backupReserveKwh` / `troughKwh` /
+`endKwh` are on the measured basis. The HA sensors `backup_full_capacity_kwh` /
+`backup_remaining_kwh` / `backup_pool_percent` keep the panel's own figures; the runway hours and
+`projected_low_soc_percent` carry the corrected values.
+
+**Not changed (owner decision "runway + alarms only").** The night-charge planner, its cushion,
+the JIT force-charge, the MPC/dispatch recommendations and `RUNWAY_DISCHARGE_EFFICIENCY` itself.
+The planner reads only the forecast's per-hour PV/load and the band's PV percentiles, which do not
+depend on the basis; `runwayBasisContracts.test.ts` builds every report on the old and the new
+basis and requires the planner's inputs and its plan to be identical.
+
 #### 1.4 Key constants
 
 | Constant | Value | Meaning |
@@ -3984,6 +4066,10 @@ stateKwh = min(backupFullKwh, max(0, nextState))   # v1.32.0 — capped at capac
 | `RUNWAY_BLEND_HOURS` | 4 | Observed-load anchor decay length |
 | `LOAD_CURVE_MIN_PLAUSIBLE_KW` | 0.05 kW | Degenerate-curve threshold |
 | `RUNWAY_DISCHARGE_EFFICIENCY` | 0.94 (default) | DC→AC discharge efficiency η; `min(1, max(0.8, env ?? 0.94))`, env `RUNWAY_DISCHARGE_EFFICIENCY` |
+| `RUNWAY_CORE_OVERHEAD_W` | 90 (default, clamp 0–500) | v1.187.19 — the pool overhead is this × connected Cores (§1.3a) |
+| `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (default, clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m` |
+| `CAPACITY_SCALE_MIN` / `CAPACITY_SCALE_MAX` | 0.80 / 1.00 | v1.187.19 — the capacity-scale clamp |
+| `CAPACITY_INCREASE_HOLD_MS` / `HELD_RATIO_MAX_AGE_MS` | 24 h / 30 d | v1.187.19 — increase hold; validity of a held per-Core ratio |
 | `RUNWAY_EMPTY_CLEAR_SAMPLES` | 3 (default) | Empty-hysteresis latch length; env `RUNWAY_EMPTY_CLEAR_SAMPLES` |
 | `RUNWAY_NO_DEPLETION_SENTINEL_H` | 999 | Healthy-but-no-depletion publish sentinel |
 
@@ -11101,7 +11187,7 @@ Pure; the objective is **lexicographic**: (1) *hard resilience constraint* — t
 
 #### The DC-bus recurrence
 
-Each simulated hour: `packWh ← clamp(packWh + pvP10W − loadP90W/dischargeEff, [0, fullWh])` — delivering `load` at the panel draws `load/η` from the pack. This is **identical** to the runway/forecast/multi-day recurrence (`analytics.ts` `computeDayForecastUncached` / `computeMultiDayForecast`, both dividing load by `RUNWAY_DISCHARGE_EFFICIENCY`), so the advisor's trough is consistent with the alarm's runway projection. The simulation starts from the **floor of the current hour** (`simFromMs = floor(nowMs/1h)·1h`), not `nowMs`: filtering `≥ nowMs` dropped the in-progress hour entirely, under-simulating ~30 min of drain at the 21:30 issue time (an under-buy); including the full current hour over-counts by at most the elapsed fraction — the conservative, over-buy direction (v1.39.0).
+Each simulated hour: `packWh ← clamp(packWh + pvP10W − loadP90W/dischargeEff, [0, fullWh])` — delivering `load` at the panel draws `load/η` from the pack. This was identical to the runway/forecast/multi-day recurrence until v1.187.19; since then those integrate on the packs' measured capacity with the Cores' overhead added (`runwayDrainW`, §5.1.3a), while the advisor keeps the panel's nameplate `fullKwh` and `load/η` by owner decision ("runway + alarms only"). For the same PV and load its trough therefore reads higher than the runway trajectory's — by about 6 % of the energy above the floor (the capacity) plus ~270 Wh per hour (the overhead). The simulation starts from the **floor of the current hour** (`simFromMs = floor(nowMs/1h)·1h`), not `nowMs`: filtering `≥ nowMs` dropped the in-progress hour entirely, under-simulating ~30 min of drain at the 21:30 issue time (an under-buy); including the full current hour over-counts by at most the elapsed fraction — the conservative, over-buy direction (v1.39.0).
 
 #### Baseline and the pre-window carry
 
@@ -11622,7 +11708,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 
 | Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
 |---|---|---|---|---|
-| Runway depletion simulation | DC-bus drain `delta = pv − load/η` (`RUNWAY_DISCHARGE_EFFICIENCY`), interpolated reserve/empty crossings, 4 h observed-load `max()` blend, 50 W degenerate-curve guard (§5.1) | SHP2 pool fields, `panel_load` history, day-ahead forecast, `backupReserveSoc` | Audible alarm, HA runway sensors, `RunwayCard`, fleet-card, TUI, shed advisor | measured-and-active |
+| Runway depletion simulation | DC-bus drain `delta = pv − runwayDrainW(load)` (`max(load/η, overhead + load/η_m)`) on the packs' measured capacity (v1.187.19), interpolated reserve/empty crossings, 4 h observed-load `max()` blend, 50 W degenerate-curve guard (§5.1) | SHP2 pool fields, `panel_load` history, day-ahead forecast, `backupReserveSoc` | Audible alarm, HA runway sensors, `RunwayCard`, fleet-card, TUI, shed advisor | measured-and-active |
 | Empty hysteresis | `applyEmptyHysteresis` de-flaps the published hours-to-empty (§5.1.6) | Raw crossing | Published runway | measured-and-active |
 | Runway severity ladder | `classifyRunway(p, grid)` bands + grid-aware null while backstopping; islanded re-escalation (§5.2) | Runway + grid backstop | Alarm state machine, shed advisor, TUI banners | measured-and-active |
 | Runway alarm state machine | `createRunwayAlarm` edge-triggered spoken alarms (§5.2.4) | Severity band | Audible path, notify | measured-and-active |

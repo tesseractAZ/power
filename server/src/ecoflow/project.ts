@@ -204,6 +204,9 @@ export interface DpuPack {
   packSn: string | null;
   // Capacity (single-string mAh). Each pack is 32S1P (~104 V nominal; 32 series
   // cells whose mV sum to packVoltageMv). Wh = mAh × (32 × 3.2 V) / 1000 = mAh × 0.1024.
+  // v1.187.19 — fullCapMah is the BMS full-charge capacity, and the pack/Core/pool SoC
+  // percent is a fraction of IT (not of designCapMah): the measured runway basis
+  // (poolEnergyBasis.ts) is Σ fullCapMah / Σ designCapMah over the panel's connected Cores.
   designCapMah: number | null;
   fullCapMah: number | null;
   remainCapMah: number | null;
@@ -455,6 +458,11 @@ export interface Shp2Projection {
   kind: 'shp2';
   area: string | null;
   backupBatPercent: number | null;
+  /** NAMEPLATE energy: 30,720 Wh per connected Core (5 × 6,144), and remain = percent × it.
+   *  The percent is a fraction of the packs' BMS full-charge capacity, so these read high by
+   *  the packs' capacity ratio (0.944 at 2026-10-01). Published unchanged (HA Backup Capacity /
+   *  Backup Remaining); the runway and the forecast SoC trajectory scale them by the measured
+   *  ratio (v1.187.19, poolEnergyBasis.ts). */
   backupFullCapWh: number | null;
   backupRemainWh: number | null;
   backupChargeTimeMin: number | null;
