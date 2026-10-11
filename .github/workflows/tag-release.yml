@@ -3,10 +3,10 @@ name: Tag released version
 # Post-merge half of the release pipeline.
 #
 # The `main` branch is governed by the `BranchAuth` ruleset (PR + verified
-# signatures + CodeQL), so `release.yml` can no longer push the version bump
-# straight to main — it opens an auto-merging PR instead. This workflow picks up
-# once that "Release vX.Y.Z" commit lands on main: it creates the matching tag
-# and kicks off the image build.
+# signatures + CodeQL), so a version bump reaches main only through a PR: in
+# practice a hand-made "Release vX.Y.Z …" PR (README's release pipeline), or
+# the PR `release.yml` opens. This workflow picks up once that release commit
+# lands on main: it creates the matching tag and kicks off the image build.
 #
 # Why a separate workflow: tagging has to happen AFTER the PR merges, which is a
 # different event than the manual `release.yml` dispatch.
@@ -29,11 +29,16 @@ permissions:
 jobs:
   tag:
     name: Tag + trigger image build
-    # Only act on the release-bump commit produced by release.yml's PR.
+    # Act only on a release merge: a push to main that touches config.yaml (the
+    # paths filter above) AND whose head commit message starts "Release v" —
+    # the squash subject of a release PR, whether made by hand (README's release
+    # pipeline) or opened by release.yml (last used for v0.15.3). The tag comes
+    # from config.yaml, not the subject; check-release-pr.py fails a "Release v"
+    # PR whose title and config.yaml version disagree.
     if: startsWith(github.event.head_commit.message, 'Release v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 

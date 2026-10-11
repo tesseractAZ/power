@@ -1,7 +1,10 @@
 name: CI
 
-# Type-check both projects on every push and PR. Cheap insurance that no
-# broken commit lands on main and gets installed onto the Pi.
+# Every push to main and every PR: three type-checks (server, web, server
+# tests), the server suite and its README-claim check, the mutant-anchor,
+# personal-data, dependency-advisory and add-on-config checks, the release-PR
+# check (PRs only), a Dockerfile smoke build and the docs build. Cheap
+# insurance that no broken commit lands on main and gets installed onto the Pi.
 
 on:
   push:
@@ -9,8 +12,9 @@ on:
   pull_request:
     branches: [main]
 
-# Least-privilege: both jobs only read the repo (checkout). Buildx GHA cache
-# uses the runtime token, not GITHUB_TOKEN, so no extra scopes are needed.
+# Least-privilege: every job only reads the repo (checkout). The Buildx GHA
+# cache and upload-artifact use the runtime token, not GITHUB_TOKEN, so no
+# extra scopes are needed.
 permissions:
   contents: read
 
@@ -23,7 +27,7 @@ jobs:
       matrix:
         project: [server, web]
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
@@ -53,7 +57,7 @@ jobs:
     name: Type-check server tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
@@ -81,7 +85,7 @@ jobs:
     name: Mutant anchors resolve
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
@@ -94,7 +98,7 @@ jobs:
     name: Server tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
@@ -108,8 +112,10 @@ jobs:
 
       # v1.58.0 — the suite previously ran ONLY in images.yml, post-tag, so a
       # behavioural regression reached main green and was caught (if at all) after
-      # the release was cut. This is a life-safety alarm path; the suite takes
-      # ~10 s and now gates the pull request.
+      # the release was cut. This is a life-safety alarm path; the suite now gates
+      # the pull request ("Server tests" is a required check on main). It is the
+      # slowest job here, a few minutes on a GitHub-hosted runner (v1.187.16:
+      # 4,115 tests; the test step took 124–150 s across 12 green runs).
       #
       # The pass count is captured here rather than recounted later: it is the one
       # README claim that cannot be derived statically (a scan of test()/it()
@@ -142,7 +148,7 @@ jobs:
     name: No personal data in the tree
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Scan tracked files for home addresses / personal identifiers
         run: python3 scripts/check-no-secrets.py
@@ -151,19 +157,21 @@ jobs:
     name: Dependency advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
 
-      # v1.133.3 — GHAS is unavailable on this repository: /dependabot/alerts and
-      # /code-scanning/alerts both return empty, which is why CodeQL is a
-      # self-contained CI job here rather than an alerting integration. The only
-      # security signal arriving today is a Dependabot VERSION pr that happens to
-      # carry a fix (that is how fastify's four GHSA advisories reached us in
-      # v1.133.2). A vulnerable dependency that never receives a routine bump
-      # would not surface at all. This does not depend on GHAS.
+      # v1.133.3 — written when /dependabot/alerts and /code-scanning/alerts both
+      # returned empty on this repository, so the only security signal was a
+      # Dependabot VERSION pr that happened to carry a fix (fastify's four GHSA
+      # advisories arrived that way in v1.133.2). The repository is public now
+      # and both endpoints return real data; the gate stays because a Dependabot
+      # alert blocks nothing, and an advisory with no fixed version never gets a
+      # PR at all. This job fails the build on a high or critical advisory in a
+      # production tree (server, web), fails on an expired waiver, and runs on
+      # every PR.
       #
       # The script self-tests its own policy before auditing, because a clean
       # `npm audit` is indistinguishable from a broken gate unless the gate has
@@ -176,7 +184,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # v1.131.0 — the release pipeline's one silent step. tag-release.yml is
       # paths-filtered on ecoflow_panel/config.yaml, so a "Release vX.Y.Z" merge
@@ -192,7 +200,7 @@ jobs:
     name: Validate add-on config + translations
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install PyYAML
         run: python3 -m pip install --no-cache-dir pyyaml
@@ -209,29 +217,30 @@ jobs:
   docker-smoke:
     # Build the Home Assistant add-on container (amd64 only) on every push/PR.
     # Catches Dockerfile regressions before they reach the Pi. Buildx cache
-    # in GitHub Actions cache cuts subsequent runs to ~1–2 minutes.
+    # in GitHub Actions cache keeps a run to about a minute or less (29–65 s
+    # across v1.187.14–16 and the dependency merges after them).
     name: Dockerfile smoke build (amd64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
-      - uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
           push: false
           load: false
+          # v1.7.0 (security #6, CWE-1357) — digest-pinned; keep in lockstep
+          # with images.yml amd64 base.
           build-args: |
-            # v1.7.0 (security #6, CWE-1357) — digest-pinned; keep in lockstep
-            # with images.yml amd64 base.
             BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.21@sha256:995fc8a44059b3bac015603f63b56b1bf935c2227c5176823d9bb76b45fc2249
             BUILD_ARCH=amd64
             BUILD_DATE=ci
-            BUILD_DESCRIPTION=EcoFlow Panel (smoke)
-            BUILD_NAME=EcoFlow Panel
+            BUILD_DESCRIPTION=Power (smoke)
+            BUILD_NAME=Power
             BUILD_REF=${{ github.sha }}
             BUILD_REPOSITORY=${{ github.repository }}
             BUILD_VERSION=ci
@@ -253,7 +262,7 @@ jobs:
     # now ends as a red check in minutes rather than a check held for six hours.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Ensure pandoc
         timeout-minutes: 6
@@ -297,7 +306,7 @@ jobs:
           test -s EcoFlow-Panel-Documentation.pdf
           ls -la EcoFlow-Panel-Documentation.pdf
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: documentation
           path: |

@@ -29,9 +29,11 @@ import { dirname, resolve } from 'node:path';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 
 /**
- * Build the panel's same-origin allow-list from host + port. Used by both
- * CORS and the same-origin check. Includes localhost / 127.0.0.1 / the
- * configured hostname / homeassistant.local on both http and https.
+ * Build the panel's same-origin allow-list from host + port: the configured
+ * host, homeassistant.local, localhost, 127.0.0.1 and [::1], each on http and
+ * https at `port` only. createAuth adds TUI_TRUSTED_ORIGINS entries verbatim.
+ * Read by requireWriteAuth (exact match) and by isAllowedOrigin (CORS, /ws,
+ * /console/ws).
  */
 export function buildSameOrigins(host: string, port: number): Set<string> {
   return new Set<string>([
@@ -59,9 +61,20 @@ export const HA_DASHBOARD_ORIGINS = new Set<string>([
 ]);
 
 /**
- * Matches LAN-style HA hosts: 10.x / 127.x / 192.168.x / 172.16-31.x /
- * `*.local` — on ports 8123 or 8787 only. Intentionally narrow — we
- * don't want to match arbitrary internet origins.
+ * Matches a cross-origin `Origin` from a LAN-style host, on ANY port or none:
+ *   scheme  `http` or `https` (lower-case, as browsers serialize it);
+ *   host    an IPv4 literal in 10/8, 127/8 (loopback), 192.168/16 or
+ *           172.16/12, or a single-label mDNS name `<label>.local`
+ *           (one [A-Za-z0-9-]+ label, so `a.b.local` does NOT match);
+ *   port    optional `:` + 1–5 digits (octets and port are not range-checked).
+ * NOT matched: public IPs and domains (including `*.ui.nabu.casa`), bare
+ * names (`homeassistant`, `localhost`), IPv6 literals (`[::1]`), 169.254/16,
+ * 100.64/10, other suffixes (`.lan`, `.home.arpa`), `null`, or any value with
+ * a path or trailing slash. Those pass only via HA_DASHBOARD_ORIGINS or the
+ * exact same-origin set (buildSameOrigins + TUI_TRUSTED_ORIGINS).
+ * Read only by isAllowedOrigin (CORS and the /ws and /console/ws upgrade
+ * checks); requireWriteAuth never consults it, so a LAN match never
+ * authorizes a write.
  */
 // v1.47.2/v1.47.3 — the port suffix is optional (HA behind a reverse proxy or
 // the companion app arrives on the default http/https port, no explicit
@@ -77,7 +90,12 @@ export const HA_DASHBOARD_ORIGINS = new Set<string>([
 export const LAN_ORIGIN_RE =
   /^https?:\/\/(?:(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|[a-zA-Z0-9-]+\.local)(?::\d{1,5})?$/;
 
-/** CORS allow-list check — used by the @fastify/cors origin callback. */
+/**
+ * Cross-origin allow-list: an exact same-origin member, an exact
+ * HA_DASHBOARD_ORIGINS member, or a LAN_ORIGIN_RE match. Used by the
+ * @fastify/cors origin callback and by the /ws and /console/ws upgrade Origin
+ * checks (index.ts). requireWriteAuth does NOT use it.
+ */
 export function isAllowedOrigin(origin: string, sameOrigins: Set<string>): boolean {
   if (sameOrigins.has(origin)) return true;
   if (HA_DASHBOARD_ORIGINS.has(origin)) return true;
