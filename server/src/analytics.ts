@@ -12,8 +12,7 @@ import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 import { getNwsAlerts, isNwsEnabled, nwsEventWindow, TTL_MS as NWS_ALERTS_TTL_MS, type NwsAlert } from './nws.js';
 import { PHOENIX_SITE } from './physics/clearSky.js';
 import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
-import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
-import { singleFlight } from './singleFlight.js';
+import { allDpus, homeConnectedDpus, reportBasisKey } from './analytics/fleet.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
 import { topOfChargeQuietSpread } from './cellSpread.js';
 import {
@@ -1797,7 +1796,11 @@ function dayForecastCacheFresh(now: number): boolean {
 }
 // v0.69.0 — coalesce concurrent cold-cache callers onto one forecast scan (the
 // heaviest analytics computation; see singleFlight.ts).
-const dayForecastFlight = singleFlight<DayForecast>();
+// v1.187.18 — one flight per device basis (reportBasisKey). The report chokepoint (reports.ts
+// buildReport) never lets a request on a new device map join a flight that started on an older
+// one; this inner flight was unkeyed, so a 'runway' or 'forecast' request on the hydrated map
+// could still be handed the forecast a boot-time flight was computing on the partial map.
+const dayForecastFlights = new Map<string, Promise<DayForecast>>();
 // v0.60.0 — throttle the "structurally incomplete" rebuild log. A cold post-boot
 // worker can hit this on every read for several minutes (the 4-min warm cycle +
 // per-request rebuilds), flooding the log with ~70 identical lines; the gate is
@@ -2021,7 +2024,13 @@ export async function getDayForecast(
   // analytics worker timed out 9x). The forecast is a slowly-varying day-ahead
   // projection, so callers within one cold window safely share one computation —
   // exactly the semantics the 30-min TTL already implies once warm.
-  return dayForecastFlight.run(() => computeDayForecastUncached(devices, recorder, log));
+  const basis = reportBasisKey(devices);
+  const flying = dayForecastFlights.get(basis);
+  if (flying) return flying;
+  const p: Promise<DayForecast> = computeDayForecastUncached(devices, recorder, log)
+    .finally(() => { if (dayForecastFlights.get(basis) === p) dayForecastFlights.delete(basis); });
+  dayForecastFlights.set(basis, p);
+  return p;
 }
 
 async function computeDayForecastUncached(
@@ -2800,6 +2809,10 @@ export interface FleetDegradation {
   /** v1.187.10 — the regression window in days (degradationWindowDays of the configured retention). */
   windowDays?: number;
   packs: PackDegradation[];
+  /** v1.187.18 — built while the device map was still filling (degradationBasisPending): a Core or
+   *  panel the device list reports online had no projection yet. Cached only
+   *  DEGRADE_PENDING_TTL_MS, and the publishers send the six degradation_* fields as null. */
+  basisPending?: boolean;
 }
 
 /**
@@ -3424,7 +3437,65 @@ function analysePack(
   });
 }
 
-let degradationCache: { ts: number; value: FleetDegradation } | null = null;
+/**
+ * v1.187.18 — what a degradation report was built on: every projected Core's packs (`sn#num`,
+ * sorted) and whether the panel membership that tags `home` and scopes the peer baseline was
+ * known (every panel the device list names has a projection).
+ *
+ * 2026-10-11 12:23: the worker's first warm pass ran on a boot-time map where one bench Core had a
+ * projection and the panel did not. The report (4 packs of 24, every one tagged home by the
+ * empty-membership fallback, none projecting) was cached for the full 30-min TTL; HA read
+ * degradation_packs_total 4, projecting 0 and no soonest EOL until 12:53. The cached report is now
+ * served only while it covers the current map (degradationCacheCovers).
+ */
+export interface DegradationBasis { pairs: string[]; membershipKnown: boolean }
+export function degradationBasis(devices: Record<string, DeviceSnapshot>): DegradationBasis {
+  const pairs: string[] = [];
+  for (const d of allDpus(devices)) for (const pk of d.projection.packs) pairs.push(`${d.sn}#${pk.num}`);
+  pairs.sort();
+  const membershipKnown = shp2Panels(devices).sns.every((sn) => devices[sn]?.projection?.kind === 'shp2');
+  return { pairs, membershipKnown };
+}
+/** v1.187.18 — the cached report still stands for `current`: every pack the current map projects
+ *  is in the cached basis, and membership was known then if it is known now. A Core or pack that
+ *  LEAVES the map does not invalidate it (a flapping Core does not force a rescan of every pack);
+ *  one that ARRIVES does. */
+export function degradationCacheCovers(cached: DegradationBasis, current: DegradationBasis): boolean {
+  if (current.membershipKnown && !cached.membershipKnown) return false;
+  const have = new Set(cached.pairs);
+  return current.pairs.every((k) => have.has(k));
+}
+/**
+ * v1.187.18 — the map is still filling: a Core or panel the device list reports ONLINE has no
+ * projection yet (its first quota has not landed), or no device is listed at all. Identity by
+ * product name, the predicate projectByProduct uses (ecoflow/project.ts), so an accessory that
+ * never projects never counts. A device listed OFFLINE is not pending: a cloud-wedged Core keeps
+ * the report on what is known.
+ * Reads only the posted device map and this module's load time, both of which exist in the
+ * worker. Bounded like homeBasisPending: past HOME_BASIS_PENDING_MAX_MS of the worker's life, a
+ * device whose quota keeps failing no longer holds the report pending.
+ */
+export function degradationBasisPending(
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number = Date.now(),
+  sinceMs: number = ANALYTICS_MODULE_LOADED_AT_MS,
+): boolean {
+  if (nowMs - sinceMs > HOME_BASIS_PENDING_MAX_MS) return false; // the homeBasisPending bound
+  const list = Object.values(devices);
+  if (list.length === 0) return true; // no device list yet: nothing is known (a report would read 0 packs)
+  for (const d of list) {
+    if (d?.online !== true) continue;
+    const p = (d.productName ?? '').toLowerCase();
+    if (p.includes('delta pro ultra') && d.projection?.kind !== 'dpu') return true;
+    if (p.includes('smart home panel') && d.projection?.kind !== 'shp2') return true;
+  }
+  return false;
+}
+/** v1.187.18 — how long a report built on a pending basis is served (DEGRADE_REPORT_TTL_MS otherwise). */
+export const DEGRADE_PENDING_TTL_MS = 2 * 60_000;
+let degradationCache: { ts: number; value: FleetDegradation; basis: DegradationBasis } | null = null;
+/** Test seam: drop the cached degradation report. */
+export function resetDegradationCacheForTesting(): void { degradationCache = null; }
 
 /** Per-pack capacity-fade → end-of-life projection, with fleet peer comparison.
  *  Cached ~30 min (the underlying SoH trend moves on a scale of weeks).
@@ -3451,7 +3522,12 @@ export async function computeDegradation(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
 ): Promise<FleetDegradation> {
-  if (degradationCache && Date.now() - degradationCache.ts < DEGRADE_REPORT_TTL_MS) {
+  // v1.187.18 — served only while it covers the current map (degradationCacheCovers), and a report
+  // built on a pending basis only for DEGRADE_PENDING_TTL_MS.
+  const basis = degradationBasis(devices);
+  if (degradationCache
+    && Date.now() - degradationCache.ts < (degradationCache.value.basisPending ? DEGRADE_PENDING_TTL_MS : DEGRADE_REPORT_TTL_MS)
+    && degradationCacheCovers(degradationCache.basis, basis)) {
     return degradationCache.value;
   }
   const now = Date.now();
@@ -3534,8 +3610,9 @@ export async function computeDegradation(
     return (a.coreNum ?? 999) - (b.coreNum ?? 999) || a.packNum - b.packNum;
   });
 
-  const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, windowDays, packs: tagHomePacks(packs, devices) };
-  if (dpus.length > 0) degradationCache = { ts: now, value };
+  const basisPending = degradationBasisPending(devices, now);
+  const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, windowDays, packs: tagHomePacks(packs, devices), basisPending };
+  if (dpus.length > 0) degradationCache = { ts: now, value, basis };
   return value;
 }
 
@@ -9416,7 +9493,7 @@ export interface MultiDayForecast {
   days: DayRollup[];
 }
 
-let multiDayCache: { ts: number; horizonDays: number; value: MultiDayForecast } | null = null;
+let multiDayCache: { ts: number; horizonDays: number; forecastTs: number; value: MultiDayForecast } | null = null;
 const MULTI_DAY_TTL_MS = 30 * 60 * 1000;
 
 export async function computeMultiDayForecast(
@@ -9428,10 +9505,13 @@ export async function computeMultiDayForecast(
   // v1.33.0 — cache MUST be keyed by horizonDays: a days=3 call (the UI default)
   // otherwise satisfied a subsequent days=4 request from the 30-min-TTL cache,
   // silently truncating the weekend (Fri->Mon) lookahead the night-charge planner needs.
+  // v1.187.18 — and, like the band (computeProbabilisticForecast), only for the forecast it was
+  // built on: a rollup from the boot forecast stood for 30 min after the forecast was rebuilt.
   if (
     multiDayCache &&
     multiDayCache.horizonDays === horizonDays &&
-    Date.now() - multiDayCache.ts < MULTI_DAY_TTL_MS
+    Date.now() - multiDayCache.ts < MULTI_DAY_TTL_MS &&
+    (forecast == null || multiDayCache.forecastTs === forecast.generatedAt)
   )
     return multiDayCache.value;
   const now = Date.now();
@@ -9607,7 +9687,8 @@ export async function computeMultiDayForecast(
     });
   }
   const value: MultiDayForecast = { generatedAt: now, days };
-  multiDayCache = { ts: now, horizonDays, value };
+  // v1.187.18 — a rollup built on a structurally incomplete forecast is served but never cached.
+  if (!forecast.structurallyIncomplete) multiDayCache = { ts: now, horizonDays, forecastTs: forecast.generatedAt, value };
   return value;
 }
 
@@ -9649,7 +9730,7 @@ export interface DispatchPlan {
   targetPrePeakSocPct: number;       // SoC target before peak hours
 }
 
-let dispatchCache: { ts: number; value: DispatchPlan } | null = null;
+let dispatchCache: { ts: number; forecastTs: number; value: DispatchPlan } | null = null;
 const DISPATCH_TTL_MS = 30 * 60 * 1000;
 
 /* v1.27.0 / CORRECTED v1.32.0 — round-trip storage efficiency for the ADVISORY
@@ -9719,7 +9800,10 @@ export function computeDispatchPlan(
   devices: Record<string, DeviceSnapshot>,
   forecast: DayForecast | null,
 ): DispatchPlan {
-  if (dispatchCache && Date.now() - dispatchCache.ts < DISPATCH_TTL_MS) return dispatchCache.value;
+  // v1.187.18 — a main-thread cache the worker's basis reset cannot reach: reused only for the
+  // forecast it was planned on (mirrors computeProbabilisticForecast).
+  if (dispatchCache && Date.now() - dispatchCache.ts < DISPATCH_TTL_MS
+      && (forecast == null || dispatchCache.forecastTs === forecast.generatedAt)) return dispatchCache.value;
   const now = Date.now();
   const empty = (): DispatchPlan => ({
     generatedAt: now, horizon: 0, hours: [], estimatedSavingsDollars: 0, targetPrePeakSocPct: 80,
@@ -9825,7 +9909,8 @@ export function computeDispatchPlan(
     estimatedSavingsDollars: round2(allGridCost - plannedCost),
     targetPrePeakSocPct,
   };
-  dispatchCache = { ts: now, value };
+  // v1.187.18 — a plan on a structurally incomplete forecast is served but never cached.
+  if (!forecast.structurallyIncomplete) dispatchCache = { ts: now, forecastTs: forecast.generatedAt, value };
   return value;
 }
 
@@ -10195,7 +10280,7 @@ export interface FleetRiskReport {
   packs: PackRiskScore[];
 }
 
-let riskCache: { ts: number; value: FleetRiskReport } | null = null;
+let riskCache: { ts: number; inputs: string; value: FleetRiskReport } | null = null;
 const RISK_TTL_MS = 30 * 60 * 1000;
 const RISK_MODEL_VERSION = 'heuristic-v1';
 
@@ -10206,7 +10291,11 @@ export function computePackRiskScores(
   internalR: InternalResistanceReport,
   chargeCurve: ChargeCurveReport,
 ): FleetRiskReport {
-  if (riskCache && Date.now() - riskCache.ts < RISK_TTL_MS) return riskCache.value;
+  // v1.187.18 — keyed on the reports it is built from. A main-thread cache the worker's basis
+  // reset cannot reach: keyed on time alone, the 2026-10-11 boot scores (built on the 4-pack
+  // degradation report) stood until 12:57, four minutes after that report itself was rebuilt.
+  const inputs = `${degradation.generatedAt}|${thermalEvents.generatedAt}|${internalR.generatedAt}|${chargeCurve.generatedAt}`;
+  if (riskCache && riskCache.inputs === inputs && Date.now() - riskCache.ts < RISK_TTL_MS) return riskCache.value;
   const now = Date.now();
   const dpus = allDpus(devices);
 
@@ -10381,7 +10470,7 @@ export function computePackRiskScores(
   out.sort((a, b) => tierRank[a.tier] - tierRank[b.tier] || b.score0to100 - a.score0to100);
 
   const value: FleetRiskReport = { generatedAt: now, modelVersion: RISK_MODEL_VERSION, packs: out };
-  if (dpus.length > 0) riskCache = { ts: now, value };
+  if (dpus.length > 0) riskCache = { ts: now, inputs, value };
   return value;
 }
 
@@ -10460,4 +10549,44 @@ export function resetForecastCachesForTesting(): void {
  *  can be exercised without a full recorder + weather walk. */
 export function setBayesianModelForTesting(value: BayesianSolarModel | null): void {
   bayesCache = value ? { ts: Date.now(), value } : null;
+}
+
+/**
+ * v1.187.18 — null every RESULT cache a worker report reads, so nothing built on an earlier device
+ * basis is served on a new one. Called by the report chokepoint (reports.ts buildReport) when the
+ * basis gains an element, and again when a flight that straddled that change settles.
+ *
+ * Deliberately NOT reset (test/workerCacheInventory.test.ts fails on a cache in neither list):
+ *   stormPrepCache     — the NWS feed only, read on the main thread (alertMonitor);
+ *   dailyEnergyWhCache — closed-day integrals keyed by (day, SN, metrics), immutable once the day ends;
+ *   eqSeriesCache      — bucketed recorder series keyed by (SN, metrics), topped up by tail;
+ *   dispatchCache, riskCache — main-thread caches (index.ts), keyed on the generatedAt of their inputs;
+ *   curtailmentFreeze.ts's frozen days (another module) — closed-day results, persisted, and
+ *     frozen only on a sound membership (curtailmentMembershipSound: every roster Core walked).
+ */
+export function resetWorkerReportCaches(): void {
+  baselineCache = null;
+  forecastCache = null;
+  dayForecastCache = null;
+  degradationCache = null;
+  runwayCache = null;
+  rteCache = null;
+  shadeCache = null;
+  soilingDecompCache = null;
+  stringMismatchCache = null;
+  evWindowCache = null;
+  chargeCurveCache = null;
+  irCache = null;
+  forecastSkillCache.clear();
+  ambientThermalCache = null;
+  selfConsumptionCache = null;
+  thermalEventsCache = null;
+  equipmentHealthCache = null;
+  clippingCache = null;
+  curtailmentCache = null;
+  carbonCache = null;
+  tariffCache = null;
+  probabilisticCache = null;
+  multiDayCache = null;
+  bayesCache = null;
 }

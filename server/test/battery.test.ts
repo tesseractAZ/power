@@ -568,32 +568,24 @@ test('computeDegradation — pack with no SoH history is classified "no-data"', 
 });
 
 test('computeDegradation — analysePack uses queryMulti for SoH/cycles/temp batch (v0.9.57)', async () => {
-  // We rely on the empty mock from a fresh SN — the cache is keyed on
-  // nothing, so the FIRST call after import populates the cache from
-  // whatever was in the test before. To verify the queryMulti contract
-  // specifically, we use a one-pack DPU with a unique SN and inspect
-  // what got asked.
+  // v1.187.18 — the cache was keyed on nothing, so this test asserted only when it happened to
+  // run cold. The cached report is now served only while it covers the map's packs
+  // (degradationCacheCovers): a one-pack DPU with a unique SN is not covered by whatever an
+  // earlier test cached, so the scan always runs and the contract is always checked.
   const sn = 'SN-QUERYMULTI-CONTRACT';
   const rec = mockRecorder({});
   const devices: Record<string, DeviceSnapshot> = { [sn]: buildDpu(sn, [1]) };
   await computeDegradation(devices, rec);
-  // Did we see the batched call? The result may be cached from a prior
-  // test, so we only assert if queryMultiCalls saw activity. When fresh,
-  // analysePack issues exactly one queryMulti call with the 3 pack metrics
-  // for soh/cycles/temp, and one more for the lifetime chg/dsg counters.
-  if (rec.queryMultiCalls.length > 0) {
-    const sohCall = rec.queryMultiCalls.find((c) =>
-      c.metrics.includes('pack1_soh') &&
-      c.metrics.includes('pack1_cycles') &&
-      c.metrics.includes('pack1_temp'),
-    );
-    assert.ok(sohCall, 'expected a queryMulti call batching pack1_soh + cycles + temp');
-    assert.equal(sohCall!.metrics.length, 3, 'SoH batch should be exactly 3 metrics');
-  } else {
-    // Cache hit — nothing to assert about batching, but the function still
-    // returned a valid report.
-    assert.ok(true, 'degradation cache was warm; queryMulti contract verified in another test/process');
-  }
+  // analysePack issues exactly one queryMulti call with the 3 pack metrics for
+  // soh/cycles/temp, and one more for the lifetime chg/dsg counters.
+  assert.ok(rec.queryMultiCalls.length > 0, 'a pack the cached report does not cover is scanned');
+  const sohCall = rec.queryMultiCalls.find((c) =>
+    c.metrics.includes('pack1_soh') &&
+    c.metrics.includes('pack1_cycles') &&
+    c.metrics.includes('pack1_temp'),
+  );
+  assert.ok(sohCall, 'expected a queryMulti call batching pack1_soh + cycles + temp');
+  assert.equal(sohCall!.metrics.length, 3, 'SoH batch should be exactly 3 metrics');
 });
 
 /* ===================================================================

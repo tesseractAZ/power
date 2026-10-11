@@ -180,7 +180,7 @@ test('★★ a forecast that was built pending marks the runway even on a comple
 
 const inputs = (fc: Any, runway: Any) => ({
   devices: {}, alerts: [], alertsComplete: true, speakerLastProbeAt: 1, forecast: fc, runway,
-  clipping: null, curtailment: null, carbon: null, tariff: null,
+  clipping: null, curtailment: null, carbon: null, tariff: null, degradation: null,
 });
 
 test('★★★ withheld while pending: the PV pair and Projected Low SoC (forecast), the runway fields (runway)', () => {

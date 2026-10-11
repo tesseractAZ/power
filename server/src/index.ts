@@ -1813,6 +1813,7 @@ app.get('/api/ha-state', async (req, reply) => {
     curtailment,
     carbon,
     tariff,
+    degradation: deg, // v1.187.18
   }));
   return cached(req, reply, payload, 25);
 });
