@@ -16,6 +16,10 @@
  *    that write succeeded. A baseline that already holds the new value never reaches disk ahead
  *    of the record of the change it hides; a failed write leaves the old baseline on disk, so a
  *    restart re-detects the change instead of losing it.
+ *  - A DEFERRED BASELINE IS RETRIED: a baseline save that commit could not make (the sidecar
+ *    write failed, or the save itself threw) stays pending. Every flush retries a failed sidecar
+ *    write and, once the held set is on disk, the pending save. Without that, the old baseline
+ *    stayed on disk after the push went out, and the next restart pushed the change again.
  *  - REHYDRATED AT CONSTRUCTION: the queue reads the sidecar when it is built (index.ts builds it
  *    at module load, before the first drift tick). An unreadable or malformed sidecar is logged
  *    and ignored; it never throws into boot.
@@ -30,13 +34,22 @@
  *  - AT-LEAST-ONCE AT A CRASH: a restart between a successful send and the sidecar rewrite sends
  *    the batch again. A duplicate push is the accepted cost; a lost one is the defect.
  *
+ * THE TICK: `settleDriftTick` is everything index.ts's drift tick does after evaluateDrift —
+ * adopt a first baseline, or classify each confirmed change (own-write / panel-side / external),
+ * commit the external ones and the baseline, and offer the held batch on EVERY tick (a change
+ * held overnight is pushed by a morning tick that confirms nothing). index.ts supplies only the
+ * classifier's context, so the tests drive the production code path.
+ *
  * Main thread only (index.ts's drift tick); nothing here runs in a worker.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
-import { renderDriftPush, settingsSurfacePath, type SettingChange, type SettingValue } from './settingsDrift.js';
+import {
+  classifyChange, renderDriftPush, saveConfirmedSurface, settingsSurfacePath,
+  type ActuatorContext, type DriftEvaluation, type DriftState, type SettingChange, type SettingValue,
+} from './settingsDrift.js';
 
 /** A held external change: one per setting key. */
 export interface HeldDriftChange {
@@ -134,6 +147,8 @@ export interface DriftHoldOptions {
   log: DriftHoldLog;
   /** The clock for the construction-time bounds check (tests). */
   nowMs?: () => number;
+  /** Writes the sidecar; throws on failure (atomicWriteFileSync in production; tests inject faults). */
+  writeFile?: (path: string, text: string) => void;
   maxAgeMs?: number;
   maxEntries?: number;
   sendDeadlineMs?: number;
@@ -148,8 +163,14 @@ export class DriftHoldQueue {
   private readonly maxAgeMs: number;
   private readonly maxEntries: number;
   private readonly sendDeadlineMs: number;
-  /** False after a failed sidecar write: the next commit retries it before saving a baseline. */
+  private readonly writeFile: (path: string, text: string) => void;
+  /** False after a failed sidecar write: every flush (and the next commit) retries it. */
   private onDisk = true;
+  /** A baseline save commit() could not make yet (the sidecar write or the save failed). Every
+   *  flush runs it once the held set is on disk; it reads the live surface when it runs. */
+  private pendingBaseline: (() => void) | null = null;
+  /** True while the pending baseline save keeps failing: logged once, not on every retry. */
+  private baselineFailing = false;
   /** The unresolved send, if any. Compared by identity, so a late resolution of a send that was
    *  given up on never releases the guard of the one after it. */
   private flight: { sinceMs: number } | null = null;
@@ -165,6 +186,7 @@ export class DriftHoldQueue {
     this.maxAgeMs = o.maxAgeMs ?? HELD_MAX_AGE_MS;
     this.maxEntries = o.maxEntries ?? HELD_MAX_ENTRIES;
     this.sendDeadlineMs = o.sendDeadlineMs ?? SEND_DEADLINE_MS;
+    this.writeFile = o.writeFile ?? atomicWriteFileSync;
     this.entries = this.rehydrate();
     if (this.enforceBounds((o.nowMs ?? Date.now)())) this.persist();
   }
@@ -202,15 +224,32 @@ export class DriftHoldQueue {
 
   /**
    * The tick's commit: hold the external changes, THEN save the baseline that hides them — and
-   * only when the hold reached disk. Returns whether the baseline was saved.
+   * only when the hold reached disk. Returns whether the baseline was saved. Never throws: a
+   * save that cannot be made now stays pending, and every flush retries it.
    */
   commit(external: SettingChange[], nowMs: number, saveBaseline: () => void): boolean {
+    this.pendingBaseline = saveBaseline;
     if (!this.hold(external, nowMs)) {
       this.log.warn('settings-drift: baseline NOT saved — the held change(s) are not on disk; '
-        + 'a restart re-detects them instead of losing them');
+        + 'retried every tick, and a restart before then re-detects them instead of losing them');
       return false;
     }
-    saveBaseline();
+    return this.runPendingBaseline();
+  }
+
+  /** Run the pending baseline save, if any; it stays pending when it throws. */
+  private runPendingBaseline(): boolean {
+    const save = this.pendingBaseline;
+    if (save == null) return true;
+    try {
+      save();
+    } catch (e: any) {
+      if (!this.baselineFailing) this.log.warn(`settings-drift: baseline save failed (${e?.message ?? e}) — retried every tick`);
+      this.baselineFailing = true;
+      return false;
+    }
+    this.baselineFailing = false;
+    this.pendingBaseline = null;
     return true;
   }
 
@@ -220,7 +259,14 @@ export class DriftHoldQueue {
    */
   async flush(now: Date): Promise<DriftFlushOutcome> {
     try {
-      if (this.enforceBounds(now.getTime())) { this.version++; this.persist(); }
+      const bounded = this.enforceBounds(now.getTime());
+      if (bounded) this.version++;
+      // A failed sidecar write is retried on every tick, not only at the next confirmed change:
+      // until it lands, the sidecar on disk is stale (a change missing, or one already pushed).
+      if (bounded || !this.onDisk) this.persist();
+      if (this.pendingBaseline != null && this.onDisk && this.runPendingBaseline()) {
+        this.log.info('settings-drift: deferred baseline saved — the held change(s) it hides are on disk');
+      }
       if (this.entries.length === 0) return 'empty';
       if (this.flight != null) {
         if (now.getTime() - this.flight.sinceMs < this.sendDeadlineMs) return 'in-flight';
@@ -296,14 +342,20 @@ export class DriftHoldQueue {
     return dropped;
   }
 
+  /** Write the sidecar. A failure is logged when it starts and the recovery when it ends — not
+   *  on every retry (one per tick while the disk is down). */
   private persist(): boolean {
+    const wasOnDisk = this.onDisk;
     try {
-      atomicWriteFileSync(this.path, JSON.stringify({ v: 1, held: this.entries }));
+      this.writeFile(this.path, JSON.stringify({ v: 1, held: this.entries }));
       this.onDisk = true;
+      if (!wasOnDisk) this.log.info(`settings-drift: ${this.path} written again — ${this.entries.length} held change(s) on disk`);
     } catch (e: any) {
       this.onDisk = false;
-      this.log.warn(`settings-drift: could not write ${this.path} (${e?.message ?? e}) — `
-        + `${this.entries.length} held change(s) are in memory only`);
+      if (wasOnDisk) {
+        this.log.warn(`settings-drift: could not write ${this.path} (${e?.message ?? e}) — `
+          + `${this.entries.length} held change(s) are in memory only; retried every tick`);
+      }
     }
     return this.onDisk;
   }
@@ -343,4 +395,71 @@ export class DriftHoldQueue {
     }
     return out;
   }
+}
+
+/* ─── the tick ─────────────────────────────────────────────────────────────── */
+
+export type DriftTickOutcome = 'adopted' | DriftFlushOutcome;
+
+export interface DriftTickInput {
+  queue: DriftHoldQueue;
+  /** The drift state evaluateDrift just advanced; its `confirmed` is the baseline to save. */
+  state: DriftState;
+  /** evaluateDrift's result for this tick. */
+  evaluation: DriftEvaluation;
+  now: Date;
+  /** The classifier's context (index.ts's actuator memory). Built only when a change is confirmed. */
+  context: (nowMs: number) => ActuatorContext;
+  log: DriftHoldLog;
+  /** Writes the baseline (saveConfirmedSurface; injectable for tests). Throws on failure. */
+  saveBaseline?: (surface: Record<string, SettingValue>) => void;
+}
+
+/**
+ * v1.187.20 — everything the drift tick does after evaluateDrift, moved out of index.ts so the
+ * tests run the code that ships. The adoption tick saves the first baseline and announces
+ * nothing. Otherwise each confirmed change is classified: own-write and panel-side changes are
+ * logged and not announced, external ones are held. `commit` puts the held changes on disk
+ * before the baseline that hides them; a tick whose changes are all this add-on's own still
+ * saves the baseline, so a restart does not re-detect (and push) the owner's own write. The
+ * held batch is then offered on EVERY tick, whether or not this one confirmed anything: the
+ * 2026-10-10 change held at 23:02 must go out at 06:00, a tick that confirms nothing.
+ *
+ * The classify and commit run synchronously, before the first await. A failure there is logged
+ * and the flush still runs.
+ */
+export async function settleDriftTick(t: DriftTickInput): Promise<DriftTickOutcome> {
+  const { queue, state, evaluation, now, log } = t;
+  const writeBaseline = t.saveBaseline ?? saveConfirmedSurface;
+  const saveBaseline = (): void => writeBaseline(state.confirmed!);
+  if (evaluation.adoptedBaseline) {
+    saveBaseline();
+    log.info(`settings-drift: baseline adopted (${Object.keys(state.confirmed!).length} keys) — changes announce from here on`);
+    return 'adopted';
+  }
+  if (evaluation.confirmedChanges.length > 0) {
+    try {
+      const nowMs = now.getTime();
+      const ctx = t.context(nowMs);
+      const external: SettingChange[] = [];
+      for (const c of evaluation.confirmedChanges) {
+        const kind = classifyChange(c, ctx);
+        if (kind === 'own-write') {
+          log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (this add-on's night-charge write — not announced)`);
+        } else if (kind === 'panel-side') {
+          log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (changed on the panel during this add-on's night force-charge, not by it — the panel's own ceiling stop or a manual Charge Now; not announced)`);
+        } else {
+          log.warn(`settings-drift: EXTERNAL change — ${c.key} ${c.from} → ${c.to}`);
+          external.push(c);
+        }
+      }
+      // The external changes reach disk BEFORE the baseline that hides them is saved, and the
+      // baseline is saved only if they did; otherwise it stays pending (DriftHoldQueue.commit).
+      queue.commit(external, nowMs, saveBaseline);
+    } catch (e: any) {
+      log.warn(`settings-drift: tick failed (${e?.message ?? e})`);
+    }
+  }
+  // Every tick, not only one that confirmed a change.
+  return queue.flush(now);
 }

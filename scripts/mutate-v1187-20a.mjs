@@ -13,9 +13,21 @@
  *         change is lost; quiet hours ignored; the sidecar is not rewritten after the push, so a
  *         restart sends it again
  *   O–P   the reserve-floor dedupId is lost; the sidecar leaves the baseline's directory
- *   Q–R   index.ts saves the baseline around the commit; index.ts never flushes
+ *   Q–R   index.ts never hands the tick to settleDriftTick, or hands it only a tick that
+ *         confirmed a change; R3 replaces the classifier's context with a stand-in
  *   S–U   the held line logs every tick; the merged count is not rendered; a failed write
  *         passes for on-disk
+ *
+ *   Round 2 (the adversarial review of 98bb3f1 — each of these SURVIVED it):
+ *   V1–V3 the post-evaluate step (settleDriftTick): the flush runs only on a tick that confirmed
+ *         a change (the 10-10 loss again); an external change is never held; the own-write
+ *         classification is skipped
+ *   W     the commit is skipped when nothing is external: an own write's baseline never saves
+ *   X1–X7 a deferred baseline save: recovery never noticed; never retried; a failed sidecar write
+ *         not retried; saved while the change is memory-only; dropped when the save throws;
+ *         the two failure lines logged on every retry
+ *   Y1–Y2 expiry: a merge does not refresh the age; no expiry at flush time
+ *   AA    the adoption tick does not save the first baseline
  *
  *   node scripts/mutate-v1187-20a.mjs
  */
@@ -156,18 +168,25 @@ const MUTANTS = [
     why: 'Off /data the sidecar does not survive an add-on update, and the atomic rename may cross filesystems.',
   },
   {
-    id: 'Q. ★★★ index.ts saves the baseline directly, around the commit',
+    id: 'Q. ★★★ index.ts never hands the tick to settleDriftTick',
     file: IDX,
-    find: '      driftHold.commit(external, nowMs, () => saveConfirmedSurface(settingsDriftState.confirmed!));',
-    to: '      void external; saveConfirmedSurface(settingsDriftState.confirmed!); /* MUTANT */',
-    why: 'The production tick never holds anything: the module is correct and unused.',
+    find: '    void settleDriftTick({',
+    to: '    void Promise.resolve({ /* MUTANT */',
+    why: 'The production tick neither holds nor pushes anything: the module is correct and unused.',
   },
   {
-    id: 'R. ★★★ index.ts never flushes the held batch',
+    id: 'R. ★★★ index.ts hands settleDriftTick only a tick that confirmed a change (review finding 1)',
     file: IDX,
-    find: '    void driftHold.flush(new Date()).catch(',
-    to: '    void Promise.resolve().catch( /* MUTANT */',
-    why: 'Changes are held forever; no push ever goes out.',
+    find: '    void settleDriftTick({',
+    to: '    if (evaln.confirmedChanges.length > 0) void settleDriftTick({ /* MUTANT */',
+    why: 'The 06:00 tick confirms nothing, so the change held at 23:02 is never pushed: the 10-10 loss.',
+  },
+  {
+    id: 'R3. ★★ index.ts classifies with a stand-in context',
+    file: IDX,
+    find: '      context: driftActuatorContext,',
+    to: '      context: () => ({ targetPct: null, priorReservePct: null, nightActive: false }), /* MUTANT */',
+    why: 'Every own write (the owner floor, the night reserve, our force-charge) is pushed as external.',
   },
   {
     id: 'S. the held line logs on every quiet tick',
@@ -190,10 +209,112 @@ const MUTANTS = [
     to: '      this.onDisk = true; /* MUTANT */',
     why: 'The commit saves the baseline although the change it hides is in memory only.',
   },
+
+  /* ── round 2: the review's surviving mutants, now killed behaviourally ── */
+  {
+    id: 'V1. ★★★ the flush runs only on a tick that confirmed a change (review finding 1)',
+    file: HOLD,
+    find: '  return queue.flush(now);',
+    to: "  return evaluation.confirmedChanges.length > 0 ? queue.flush(now) : 'empty'; /* MUTANT */",
+    why: 'The 23:02 change is held, the 06:00 tick confirms nothing, and no push ever goes out.',
+  },
+  {
+    id: 'V2. ★★★ an external change is never held (review finding 2)',
+    file: HOLD,
+    find: '          external.push(c);',
+    to: '          void c; /* MUTANT */',
+    why: 'The EXTERNAL line is logged, commit([]) saves the baseline, and the change is invisible for good.',
+  },
+  {
+    id: 'V3. ★★ the own-write classification is skipped',
+    file: HOLD,
+    find: '        const kind = classifyChange(c, ctx);',
+    to: "        const kind = 'external' as string; /* MUTANT */",
+    why: "The owner's own floor write and our force-charge are pushed as third-party changes.",
+  },
+  {
+    id: 'W. ★★★ the commit is skipped when nothing is external (review finding 3)',
+    file: HOLD,
+    find: '      queue.commit(external, nowMs, saveBaseline);',
+    to: '      if (external.length > 0) queue.commit(external, nowMs, saveBaseline); /* MUTANT */',
+    why: "An own-write tick never saves the baseline; after a restart the owner's floor write is pushed as external.",
+  },
+  {
+    id: 'X1. ★★ a sidecar write that succeeds again is never noticed (review finding 4)',
+    file: HOLD,
+    find: '      this.onDisk = true;\n      if (!wasOnDisk)',
+    to: '      /* MUTANT */\n      if (!wasOnDisk)',
+    why: 'Every later baseline save is refused for the life of the process; a restart pushes the change again.',
+  },
+  {
+    id: 'X2. ★★★ a deferred baseline save is never retried (review finding 4)',
+    file: HOLD,
+    find: '      if (this.pendingBaseline != null && this.onDisk && this.runPendingBaseline()) {',
+    to: '      if (false) { /* MUTANT */',
+    why: 'The old baseline stays on disk after the push goes out; the next restart pushes it a second time.',
+  },
+  {
+    id: 'X3. ★★ a failed sidecar write is retried only at the next confirmed change',
+    file: HOLD,
+    find: '      if (bounded || !this.onDisk) this.persist();',
+    to: '      if (bounded) this.persist(); /* MUTANT */',
+    why: 'The held change stays memory-only after the disk recovers, and a cleared batch stays on disk to be re-sent.',
+  },
+  {
+    id: 'X4. ★★★ the deferred baseline is saved while the held change is memory-only',
+    file: HOLD,
+    find: '      if (this.pendingBaseline != null && this.onDisk && this.runPendingBaseline()) {',
+    to: '      if (this.pendingBaseline != null && this.runPendingBaseline()) { /* MUTANT */',
+    why: 'The retry defeats the commit order: a restart finds a baseline hiding a change nothing holds.',
+  },
+  {
+    id: 'X5. ★★ a baseline save that throws is dropped, not kept pending',
+    file: HOLD,
+    find: '      this.baselineFailing = true;\n      return false;',
+    to: '      this.baselineFailing = true; this.pendingBaseline = null; /* MUTANT */\n      return false;',
+    why: 'One ENOSPC leaves the old baseline on disk; the next restart pushes the change again.',
+  },
+  {
+    id: 'X6. a failing baseline save is logged on every retry',
+    file: HOLD,
+    find: '      if (!this.baselineFailing) this.log.warn(',
+    to: '      if (true) this.log.warn( /* MUTANT */',
+    why: 'A full disk writes a warning every minute and pushes the incident out of the log ring.',
+  },
+  {
+    id: 'X7. a failing sidecar write is logged on every retry',
+    file: HOLD,
+    find: '      if (wasOnDisk) {',
+    to: '      if (true) { /* MUTANT */',
+    why: 'The same, for the sidecar: one line per tick for as long as the disk is down.',
+  },
+  {
+    id: 'Y1. ★ a merge no longer refreshes the age (review finding 5)',
+    file: HOLD,
+    find: '        e.lastAtMs = nowMs;\n',
+    to: '        /* MUTANT */\n',
+    why: 'A change made two days ago is dropped as "never pushed in 168 h" because the key first moved 8 days ago.',
+  },
+  {
+    id: 'Y2. ★ no expiry at flush time (review finding 5)',
+    file: HOLD,
+    find: '      const bounded = this.enforceBounds(now.getTime());',
+    to: '      const bounded = false; /* MUTANT */',
+    why: 'In a process that never restarts, a week-stale change is pushed as news when the channel recovers.',
+  },
+  {
+    id: 'AA. ★ the adoption tick does not save the first baseline',
+    file: HOLD,
+    find: '    saveBaseline();\n    log.info(`settings-drift: baseline adopted',
+    to: '    /* MUTANT */\n    log.info(`settings-drift: baseline adopted',
+    why: 'Until the first confirmed change nothing is on disk, and a restart silently re-adopts whatever is there.',
+  },
 ];
 
 // Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs).
 // fullSuite: false — the subset holds every test that guards these mutants, so a kill always
-// comes from the subset (the SOURCE PIN in settingsDriftHold.test.ts covers the index.ts wiring).
+// comes from the subset. The tick's behaviour is driven through settleDriftTick, the function
+// index.ts calls; the SOURCE PIN in settingsDriftHold.test.ts pins index.ts's whole (short) tick
+// text, so a guard around the call or a stand-in context (Q, R, R3) changes it.
 import { runMutantsParallel } from './lib/mutateParallel.mjs';
 await runMutantsParallel({ name: 'mutate-v1187-20a', mutants: MUTANTS, subset: SUBSET, root: REPO, fullSuite: false });

@@ -6,11 +6,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface, saveConfirmedSurface,
-  type SurfaceDevice,
+  type ActuatorContext, type SettingValue, type SurfaceDevice,
 } from '../src/settingsDrift.js';
 import {
-  DriftHoldQueue, driftHeldPath, driftNotification, type DriftHoldOptions, type DriftPushMessage, type HeldDriftChange,
+  DriftHoldQueue, driftHeldPath, driftNotification, settleDriftTick,
+  type DriftHoldOptions, type DriftPushMessage, type DriftTickOutcome, type HeldDriftChange,
 } from '../src/settingsDriftHold.js';
+import { atomicWriteFileSync } from '../src/atomicWrite.js';
 import { parseQuietHours, inQuietWindow } from '../src/alertMonitor.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -22,7 +24,8 @@ import { parseQuietHours, inQuietWindow } from '../src/alertMonitor.js';
  * the new value as the baseline. The 23:25 deploy restart dropped the array, the
  * baseline already held 2, and the 06:00 morning found nothing to say. These
  * tests re-enact that night against the real baseline persistence, the real
- * 2-observation debounce and the real quiet-window predicate.
+ * 2-observation debounce, the real quiet-window predicate and the tick's own
+ * post-evaluate step (settleDriftTick — the code index.ts runs).
  * ═════════════════════════════════════════════════════════════════════════ */
 
 const ROOT = mkdtempSync(join(tmpdir(), 'drift-hold-'));
@@ -59,13 +62,22 @@ const shp2 = (over: Record<string, unknown> = {}): SurfaceDevice => ({
 });
 const MODE = 'Smart Home Panel 2 · smartBackupMode';
 const FLOOR = 'Smart Home Panel 2 · backupReserveSoc';
+const SLOT1 = 'Smart Home Panel 2 · ch1ForceCharge';
+const SLOT2 = 'Smart Home Panel 2 · ch2ForceCharge';
+
+/** No night in flight, no owner write, no force-charge: every change is external. */
+const NO_OWN_WRITE: ActuatorContext = {
+  targetPct: null, priorReservePct: null, nightActive: false, ownerFloorPct: null,
+  forceChargeActive: false, forceChargeCommands: null,
+};
 
 interface Harness {
   queue: DriftHoldQueue;
   sends: DriftPushMessage[];
   logs: string[];
-  /** One drift tick, as index.ts's runSettingsDriftTick runs it (every change here is external). */
-  tick: (now: Date, surface: SurfaceDevice[]) => Promise<string>;
+  /** One drift tick, as index.ts's runSettingsDriftTick runs it: evaluateDrift, then the SAME
+   *  settleDriftTick. `context` is what index.ts's driftActuatorContext would return. */
+  tick: (now: Date, surface: SurfaceDevice[], context?: ActuatorContext) => Promise<DriftTickOutcome>;
   state: ReturnType<typeof freshDriftState>;
 }
 
@@ -74,7 +86,10 @@ interface Harness {
  * (loadConfirmedSurface) and the held queue built (which rehydrates it), then ticks. `send`
  * defaults to a working channel.
  */
-function boot(dir: string, send?: (m: DriftPushMessage) => Promise<unknown>, heldPath?: string): Harness {
+function boot(
+  dir: string, send?: (m: DriftPushMessage) => Promise<unknown>, heldPath?: string,
+  saveBaseline?: (surface: Record<string, SettingValue>) => void,
+): Harness {
   process.env.SETTINGS_DRIFT_STATE_PATH = join(dir, 'settings-surface.json');
   if (heldPath != null) process.env.SETTINGS_DRIFT_HELD_PATH = heldPath;
   else delete process.env.SETTINGS_DRIFT_HELD_PATH;
@@ -89,14 +104,12 @@ function boot(dir: string, send?: (m: DriftPushMessage) => Promise<unknown>, hel
     log: { info: (m) => logs.push(`INFO ${m}`), warn: (m) => logs.push(`WARN ${m}`) },
     nowMs: () => at(10, 18).getTime(),
   });
-  const tick = async (now: Date, surface: SurfaceDevice[]): Promise<string> => {
-    const evaln = evaluateDrift(state, extractSettingsSurface(surface));
-    if (evaln.adoptedBaseline) { saveConfirmedSurface(state.confirmed!); return 'adopted'; }
-    if (evaln.confirmedChanges.length > 0) {
-      queue.commit(evaln.confirmedChanges, now.getTime(), () => saveConfirmedSurface(state.confirmed!));
-    }
-    return queue.flush(now);
-  };
+  const log = { info: (m: string) => logs.push(`INFO ${m}`), warn: (m: string) => logs.push(`WARN ${m}`) };
+  const tick = (now: Date, surface: SurfaceDevice[], context: ActuatorContext = NO_OWN_WRITE): Promise<DriftTickOutcome> =>
+    settleDriftTick({
+      queue, state, evaluation: evaluateDrift(state, extractSettingsSurface(surface)), now,
+      context: () => context, log, saveBaseline,
+    });
   return { queue, sends, logs, tick, state };
 }
 
@@ -108,6 +121,7 @@ test('★★★ THE 10-10 NIGHT: external change at 23:00 → restart at 23:30 �
   // Evening: the baseline is adopted (mode 0).
   const p1 = boot(dir);
   assert.equal(await p1.tick(at(10, 18), [shp2()]), 'adopted');
+  assert.equal(loadConfirmedSurface()![MODE], 0, 'the adoption tick saves the first baseline');
   // 23:00 — the vendor app moves the mode 0 → 2; confirmed on the second observation, in quiet hours.
   assert.equal(await p1.tick(at(10, 23, 0), [shp2({ smartBackupMode: 2 })]), 'empty', 'first sighting is a transient');
   assert.equal(await p1.tick(at(10, 23, 1), [shp2({ smartBackupMode: 2 })]), 'held');
@@ -241,7 +255,8 @@ test('★★★ ORDER: the held change is on disk BEFORE the baseline is saved �
   const dir = freshDir();
   const path = join(dir, 'held.json');
   const q = mk({ path });
-  assert.throws(() => q.commit([{ key: MODE, from: 0, to: 2 }], T(1), () => { throw new Error('power cut mid-save'); }));
+  // The save throws (a crash mid-save, simulated): commit does not throw into the tick, and reports it unsaved.
+  assert.equal(q.commit([{ key: MODE, from: 0, to: 2 }], T(1), () => { throw new Error('power cut mid-save'); }), false);
   const reboot = mk({ path });
   assert.deepEqual(reboot.held().map((e) => [e.key, e.from, e.to]), [[MODE, 0, 2]]);
 });
@@ -436,8 +451,180 @@ test('★★ a Storm Guard floor raise at 01:00 survives a 02:00 restart and is 
   assert.equal(p2.sends[0].title, 'Reserve floor changed externally: 20% → 40%');
 });
 
+/* ══ the tick's post-evaluate step: classify → commit → flush (settleDriftTick) ══ */
+
+test('★★★ CLASSIFY → COMMIT: in one tick an external change is held and the owner\'s own write is not; the baseline takes both', async () => {
+  const dir = freshDir();
+  const p = boot(dir);
+  await p.tick(at(10, 14), [shp2()]);
+  // The owner set the floor 20 → 30 through /api/reserve-floor (index.ts: ownerFloorWrite), and the
+  // vendor app moved the mode 0 → 2: both confirmed on the same tick, inside quiet hours.
+  const owner: ActuatorContext = { ...NO_OWN_WRITE, ownerFloorPct: 30 };
+  const both = [shp2({ smartBackupMode: 2, backupReserveSoc: 30 })];
+  await p.tick(at(10, 23, 0), both, owner);
+  assert.equal(await p.tick(at(10, 23, 1), both, owner), 'held');
+  assert.deepEqual(p.queue.held().map((e) => [e.key, e.from, e.to]), [[MODE, 0, 2]], 'only the external change is held');
+  assert.deepEqual(readHeld(dir).map((e) => e.key), [MODE]);
+  assert.ok(p.logs.includes(`WARN settings-drift: EXTERNAL change — ${MODE} 0 → 2`), p.logs.join(' | '));
+  assert.ok(p.logs.includes(`INFO settings-drift: ${FLOOR} 20 → 30 (this add-on's night-charge write — not announced)`), p.logs.join(' | '));
+  const base = loadConfirmedSurface()!;
+  assert.deepEqual([base[MODE], base[FLOOR]], [2, 30], 'the baseline is saved once the held change is on disk');
+  assert.equal(await p.tick(at(11, 6, 0), both), 'sent');
+  assert.equal(p.sends.length, 1);
+  assert.equal(p.sends[0].dedupId, 'settings_drift', "the owner's own floor write is not announced");
+  assert.ok(!p.sends[0].body.includes(FLOOR), p.sends[0].body);
+});
+
+test('★★★ an ALL-own-write tick still saves the baseline — a restart does not push the owner\'s own floor write as external', async () => {
+  const dir = freshDir();
+  const p1 = boot(dir);
+  await p1.tick(at(10, 14), [shp2()]);
+  const owner: ActuatorContext = { ...NO_OWN_WRITE, ownerFloorPct: 30 };
+  await p1.tick(at(10, 14, 1), [shp2({ backupReserveSoc: 30 })], owner);
+  assert.equal(await p1.tick(at(10, 14, 2), [shp2({ backupReserveSoc: 30 })], owner), 'empty');
+  assert.deepEqual(p1.queue.held(), []);
+  assert.equal(loadConfirmedSurface()![FLOOR], 30, 'nothing was held, and the baseline is saved anyway');
+  // The deploy restart: index.ts's owner-write memory is gone, so the same movement would now be external.
+  const p2 = boot(dir);
+  for (let m = 3; m < 8; m++) assert.equal(await p2.tick(at(10, 14, m), [shp2({ backupReserveSoc: 30 })]), 'empty');
+  assert.equal(p1.sends.length + p2.sends.length, 0, 'no "Reserve floor changed externally: 20% → 30%" for our own write');
+});
+
+test('★★★ FLUSH ON EVERY TICK: a held change goes out on a morning tick that confirms nothing (only a first sighting)', async () => {
+  const dir = freshDir();
+  const p = boot(dir);
+  await p.tick(at(10, 18), [shp2()]);
+  await p.tick(at(10, 23, 0), [shp2({ smartBackupMode: 2 })]);
+  assert.equal(await p.tick(at(10, 23, 1), [shp2({ smartBackupMode: 2 })]), 'held');
+  // 06:00 — another key is seen changed for the FIRST time (not confirmed yet): this tick confirms nothing.
+  assert.equal(await p.tick(at(11, 6, 0), [shp2({ smartBackupMode: 2, chargeWattPower: 3000 })]), 'sent');
+  assert.equal(p.sends.length, 1);
+  assert.ok(p.sends[0].body.includes(`${MODE}: 0 → 2`), p.sends[0].body);
+});
+
+test('★★ inside our force-charge: a slot the panel turned OFF is logged panel-side and our own OFF is own-write — neither is held', async () => {
+  const dir = freshDir();
+  const p = boot(dir);
+  const on = { ch1ForceCharge: 'FORCE_CHARGE_ON', ch2ForceCharge: 'FORCE_CHARGE_ON' };
+  await p.tick(at(11, 4, 0), [shp2(on)]);
+  // 04:24 — the panel's ceiling stop turns slot 2 OFF before the add-on issued its OFF.
+  const before: ActuatorContext = { ...NO_OWN_WRITE, forceChargeActive: true, forceChargeCommands: { onSlots: [1, 2], offIssued: false, ceilingPcts: [] } };
+  await p.tick(at(11, 4, 24), [shp2({ ...on, ch2ForceCharge: 'FORCE_CHARGE_OFF' })], before);
+  assert.equal(await p.tick(at(11, 4, 25), [shp2({ ...on, ch2ForceCharge: 'FORCE_CHARGE_OFF' })], before), 'empty');
+  assert.ok(p.logs.includes(`INFO settings-drift: ${SLOT2} FORCE_CHARGE_ON → FORCE_CHARGE_OFF (changed on the panel during this add-on's night force-charge, not by it — the panel's own ceiling stop or a manual Charge Now; not announced)`), p.logs.join(' | '));
+  // 04:29 — the add-on's own OFF reaches slot 1.
+  const after: ActuatorContext = { ...before, forceChargeCommands: { onSlots: [1, 2], offIssued: true, ceilingPcts: [] } };
+  const off = [shp2({ ch1ForceCharge: 'FORCE_CHARGE_OFF', ch2ForceCharge: 'FORCE_CHARGE_OFF' })];
+  await p.tick(at(11, 4, 29), off, after);
+  assert.equal(await p.tick(at(11, 4, 30), off, after), 'empty');
+  assert.ok(p.logs.includes(`INFO settings-drift: ${SLOT1} FORCE_CHARGE_ON → FORCE_CHARGE_OFF (this add-on's night-charge write — not announced)`), p.logs.join(' | '));
+  assert.deepEqual(p.queue.held(), []);
+  assert.ok(!p.logs.some((l) => l.includes('EXTERNAL change')), p.logs.join(' | '));
+  assert.equal(loadConfirmedSurface()![SLOT1], 'FORCE_CHARGE_OFF');
+});
+
+/* ══ a deferred baseline save is retried ══ */
+
+test('★★★ a TRANSIENT sidecar failure: once the disk recovers the held change reaches disk and the deferred baseline is saved — one push, none after a restart', async () => {
+  const dir = freshDir();
+  const blocker = join(dir, 'held-dir');
+  writeFileSync(blocker, 'x'); // a FILE where the sidecar's directory should be: sidecar writes fail
+  const heldPath = join(blocker, 'settings-drift-held.json');
+  const p1 = boot(dir, undefined, heldPath);
+  await p1.tick(at(10, 18), [shp2()]);
+  await p1.tick(at(10, 23, 0), [shp2({ smartBackupMode: 2 })]);
+  assert.equal(await p1.tick(at(10, 23, 1), [shp2({ smartBackupMode: 2 })]), 'held');
+  assert.equal(loadConfirmedSurface()![MODE], 0, 'deferred: the change is in memory only');
+  assert.equal(await p1.tick(at(10, 23, 2), [shp2({ smartBackupMode: 2 })]), 'held');
+  assert.equal(loadConfirmedSurface()![MODE], 0, 'still deferred while the write keeps failing');
+  // 23:05 — the disk recovers. The next tick (which confirms nothing) writes the held change, then the baseline.
+  rmSync(blocker);
+  assert.equal(await p1.tick(at(10, 23, 5), [shp2({ smartBackupMode: 2 })]), 'held');
+  assert.deepEqual(JSON.parse(readFileSync(heldPath, 'utf8')).held.map((e: HeldDriftChange) => [e.key, e.from, e.to]), [[MODE, 0, 2]]);
+  assert.equal(loadConfirmedSurface()![MODE], 2, 'the deferred baseline is saved once the held change is on disk');
+  assert.ok(p1.logs.some((l) => l.startsWith('INFO settings-drift: deferred baseline saved')), p1.logs.join(' | '));
+  assert.equal(p1.logs.filter((l) => l.startsWith('WARN settings-drift: could not write')).length, 1,
+    'the failure is logged when it starts, not on every retry');
+  // 06:00 one push; quiet ticks until noon; a restart at 12:00 finds nothing to announce again.
+  assert.equal(await p1.tick(at(11, 6, 0), [shp2({ smartBackupMode: 2 })]), 'sent');
+  for (const h of [7, 9, 11]) assert.equal(await p1.tick(at(11, h, 0), [shp2({ smartBackupMode: 2 })]), 'empty');
+  const p2 = boot(dir, undefined, heldPath);
+  await p2.tick(at(11, 12, 0), [shp2({ smartBackupMode: 2 })]);
+  assert.equal(await p2.tick(at(11, 12, 1), [shp2({ smartBackupMode: 2 })]), 'empty');
+  assert.equal(p1.sends.length + p2.sends.length, 1, 'exactly one push');
+});
+
+test('★★ a baseline save that THROWS stays pending and is retried every tick until it lands (logged once)', async () => {
+  const dir = freshDir();
+  let failSaves = 0;
+  const p = boot(dir, undefined, undefined, (surface) => {
+    if (failSaves > 0) { failSaves--; throw new Error('ENOSPC: no space left on device'); }
+    saveConfirmedSurface(surface);
+  });
+  await p.tick(at(10, 14), [shp2()]);
+  failSaves = 3; // the commit's save, then the same tick's retry, then 23:02's retry
+  await p.tick(at(10, 23, 0), [shp2({ smartBackupMode: 2 })]);
+  assert.equal(await p.tick(at(10, 23, 1), [shp2({ smartBackupMode: 2 })]), 'held');
+  assert.equal(loadConfirmedSurface()![MODE], 0);
+  assert.equal(await p.tick(at(10, 23, 2), [shp2({ smartBackupMode: 2 })]), 'held');
+  assert.equal(loadConfirmedSurface()![MODE], 0);
+  assert.equal(await p.tick(at(10, 23, 3), [shp2({ smartBackupMode: 2 })]), 'held');
+  assert.equal(loadConfirmedSurface()![MODE], 2, 'saved on the first retry that succeeds');
+  assert.equal(p.logs.filter((l) => l.startsWith('WARN settings-drift: baseline save failed (ENOSPC')).length, 1, p.logs.join(' | '));
+  assert.ok(p.logs.some((l) => l.startsWith('INFO settings-drift: deferred baseline saved')));
+});
+
+test('★ a sidecar write that fails AFTER the push (the clear) is retried on the next tick — a later restart does not send it again', async () => {
+  const path = join(freshDir(), 'held.json');
+  let failWrites = false;
+  const writeFile = (p: string, text: string): void => {
+    if (failWrites) throw new Error('EIO: i/o error');
+    atomicWriteFileSync(p, text);
+  };
+  const sends: DriftPushMessage[] = [];
+  const q = mk({ path, isQuiet: () => false, send: async (m) => { sends.push(m); }, writeFile });
+  q.hold([{ key: MODE, from: 0, to: 2 }], T(1));
+  failWrites = true;
+  assert.equal(await q.flush(at(11, 6, 0)), 'sent');
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).held.map((e: HeldDriftChange) => e.key), [MODE], 'the clear did not reach disk');
+  failWrites = false;
+  assert.equal(await q.flush(at(11, 6, 1)), 'empty');
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).held, [], 'rewritten on the next tick, with nothing new to hold');
+  const reboot = mk({ path, isQuiet: () => false, send: async (m) => { sends.push(m); } });
+  assert.equal(await reboot.flush(at(11, 12, 0)), 'empty');
+  assert.equal(sends.length, 1);
+});
+
+/* ══ expiry in a process that never restarts ══ */
+
+test('★ BOUNDED while running: a merge refreshes the age; a flush drops an entry untouched for 7 days, logs it, rewrites the sidecar — never pushed as news', async () => {
+  const path = join(freshDir(), 'held.json');
+  const DAY = 86_400_000;
+  const logs: string[] = [];
+  const sends: DriftPushMessage[] = [];
+  let channelDown = true;
+  const q = mk({
+    path, isQuiet: () => false,
+    send: async (m) => { if (channelDown) throw new Error('SUPERVISOR_TOKEN missing'); sends.push(m); },
+    log: { info: (m) => logs.push(m), warn: (m) => logs.push(`WARN ${m}`) },
+  });
+  const t0 = T(1);
+  q.hold([{ key: MODE, from: 0, to: 2 }], t0);
+  q.hold([{ key: MODE, from: 2, to: 1 }], t0 + 6 * DAY); // moved again on day 6
+  assert.equal(await q.flush(new Date(t0 + 8 * DAY)), 'failed', 'day 8: last moved 2 days ago — kept, and the push retried');
+  assert.deepEqual(q.held().map((e) => [e.key, e.from, e.to, e.changes, e.lastAtMs]), [[MODE, 0, 1, 2, t0 + 6 * DAY]]);
+  assert.ok(!logs.some((l) => l.includes('never pushed in')), logs.join(' | '));
+  // Day 13.1: untouched for 7.1 days. The channel is back, but the change is a week stale.
+  channelDown = false;
+  assert.equal(await q.flush(new Date(t0 + 13.1 * DAY)), 'empty');
+  assert.deepEqual(q.held(), []);
+  assert.ok(logs.some((l) => l.startsWith('WARN settings-drift: dropped 1 held change(s) never pushed in 168 h') && l.includes(`${MODE} 0 → 1`)), logs.join(' | '));
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).held, []);
+  assert.equal(sends.length, 0);
+});
+
 /* ══ wiring pin (index.ts has no seam a unit test can drive) — a SOURCE PIN, labelled ══ */
-test('★★ SOURCE PIN: index.ts builds the held queue at module load (before the tick timer), commits through it, flushes it', () => {
+test('★★ SOURCE PIN: index.ts builds the held queue at module load and hands EVERY tick, ungated, to settleDriftTick', () => {
   const idx = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8');
   const built = idx.indexOf('const driftHold = new DriftHoldQueue({');
   const timer = idx.indexOf('setInterval(() => { runSettingsDriftTick(); }');
@@ -445,11 +632,24 @@ test('★★ SOURCE PIN: index.ts builds the held queue at module load (before t
   assert.ok(idx.includes('  path: driftHeldPath(),'));
   assert.ok(idx.includes('  isQuiet: (now) => DRIFT_QUIET != null && inNotifyQuiet(now, DRIFT_QUIET),'));
   assert.ok(idx.includes('  send: (msg) => sendNotification(loadNotifyConfig(), msg),'));
+  // The WHOLE tick, comment lines aside. A guard around the call (the review's
+  // `if (evaln.confirmedChanges.length > 0)`), a direct baseline save or a stand-in context
+  // changes this text; the behaviour after the call is tested above through settleDriftTick.
   const start = idx.indexOf('function runSettingsDriftTick(');
-  const body = idx.slice(start, idx.indexOf('\n}\n', start));
-  assert.ok(body.includes('driftHold.commit(external, nowMs, () => saveConfirmedSurface(settingsDriftState.confirmed!));'),
-    'the baseline is saved THROUGH the commit, after the held changes reach disk');
-  assert.equal(body.split('saveConfirmedSurface(').length - 1, 2, 'only the first-boot adoption saves the baseline directly');
-  assert.ok(body.includes('void driftHold.flush(new Date())'), 'every tick offers the held batch for delivery');
+  const body = idx.slice(start, idx.indexOf('\n}\n', start)).split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert.equal(body, [
+    'function runSettingsDriftTick(): void {',
+    '  try {',
+    '    const surface = extractSettingsSurface(settingsSurfaceDevices());',
+    '    const evaln = evaluateDrift(settingsDriftState, surface);',
+    '    void settleDriftTick({',
+    '      queue: driftHold, state: settingsDriftState, evaluation: evaln, now: new Date(), log: driftHoldLog,',
+    '      context: driftActuatorContext,',
+    '    }).catch((e: any) => app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`));',
+    '  } catch (e: any) {',
+    '    app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`);',
+    '  }',
+  ].join('\n'));
+  assert.ok(!/\bsaveConfirmedSurface\(/.test(idx), 'only settleDriftTick saves the baseline');
   assert.ok(!idx.includes('driftPendingPush'), 'no in-memory-only hold remains');
 });
