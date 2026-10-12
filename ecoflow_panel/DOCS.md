@@ -470,7 +470,9 @@ value over a ~1 ms IPC hop.
 bootstrap, correlates request/response by incrementing `id`, and:
 
 - **Timeout / retry**: `REQUEST_TIMEOUT_MS = 30_000`; one retry on a timeout that
-  isn't a stop (rides out cold-worker boot warm-up).
+  isn't a stop (rides out cold-worker boot warm-up). v1.187.20: per-report budgets in
+  `REPORT_TIMEOUT_OVERRIDES_MS` (`reportTimeoutMs`) — `chargeCurve` 90 s, for its cold build
+  after a start or a device-basis reset.
 - **Respawn**: on worker `exit`, fails all in-flight requests, clears caches, and
   respawns after `RESPAWN_DELAY_MS = 1_000`; on `ready` it re-pushes `lastSnapshot` and
   replays the owner reserve floor (`{kind:'ownerFloor'}`, v1.119.0), without which a
@@ -4647,7 +4649,7 @@ Need ≥10 accepted samples. `recentMilliohms = median(samples in last 7 d)`. `b
 Tracks how the pack's max-cell voltage at fixed SoC checkpoints drifts from its early-life baseline during active charge. A widening voltage plateau at a given SoC is a slow aging fingerprint.
 
 #### Inputs / constants
-Per pack `queryMulti` of `pack${n}_soc`, `pack${n}_vol_max_mv`, `pack${n}_in` over `CHARGE_CURVE_HISTORY_MS = 200 d`, `CHARGE_CURVE_TTL_MS = 60 min`. Needs ≥50 SoC and ≥50 V samples else `no-data`.
+Per pack `queryMulti` of `pack${n}_soc`, `pack${n}_vol_max_mv`, `pack${n}_in` over `CHARGE_CURVE_HISTORY_MS = 200 d`, `CHARGE_CURVE_TTL_MS = 60 min`. Needs ≥50 SoC and ≥50 V samples else `no-data`. v1.187.20 — stale-while-revalidate: from `TTL − CHARGE_CURVE_REFRESH_AHEAD_MS` (8 min = 2 × `WARM_INTERVAL_MS`) the cached value is returned at once and one background rebuild (single-flight per basis generation, run in that generation) replaces it; past expiry it is served for at most `CHARGE_CURVE_STALE_MAX_MS` (60 min), after which the request computes in the foreground. A device-basis reset nulls the cache, so no stale value crosses it.
 
 #### Calculation
 Snap V and IN to nearest SoC sample (two-pointer). Checkpoints `CHARGE_CHECKPOINTS = [40, 60, 80, 95]` %, tolerance `±CHARGE_CHECKPOINT_TOLERANCE_PCT (1.5)`. Only samples **during active charge** (`inW ≥ 100`, avoids resting voltage) count.

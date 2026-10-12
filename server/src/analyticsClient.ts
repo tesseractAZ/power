@@ -43,6 +43,22 @@ export interface AnalyticsClient {
 }
 
 const REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * v1.187.20 — reports whose COLD build legitimately runs past REQUEST_TIMEOUT_MS get their own
+ * budget (the retry after it is unchanged). chargeCurve scans 200 days of three metrics for every
+ * pack: ~32 s on 24 packs when the worker is otherwise idle (log 2026-10-12 10:09:44-10:10:16), longer
+ * when it shares the worker with the boot warm pass. Under the 30 s default its first build after
+ * every start was logged "timed out — retrying once" (7 of 7 starts, 2026-10-10..12) although the
+ * retry only joined the same scan. Steady-state requests no longer wait for a build at all (the
+ * worker serves the previous value while it rebuilds, analytics.ts computeChargeCurveFingerprint);
+ * this budget covers the cold build after a start or a device-basis reset.
+ */
+export const REPORT_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
+  chargeCurve: 90_000,
+};
+/** The request budget for one attempt at report `name` (the client's default unless overridden). */
+export const reportTimeoutMs = (name: string, defaultMs: number = REQUEST_TIMEOUT_MS): number =>
+  Object.prototype.hasOwnProperty.call(REPORT_TIMEOUT_OVERRIDES_MS, name) ? REPORT_TIMEOUT_OVERRIDES_MS[name] : defaultMs;
 const SNAPSHOT_PUSH_MS = 750;
 const RESPAWN_DELAY_MS = 1_000;
 /** v1.186.0 — how long a report request waits for the worker's first snapshot with projections.
@@ -261,7 +277,7 @@ export function createAnalyticsClient(
   // answer arrives first settles the caller. Before, the first attempt's late answer was
   // dropped and the retry started a second full scan (log 2026-09-23 12:59: that retry timed
   // out too, and two HA state publishes were lost with it).
-  const requestWithRetry = <T>(payload: Record<string, unknown>): Promise<T> =>
+  const requestWithRetry = <T>(payload: Record<string, unknown>, timeoutMs: number = requestTimeoutMs): Promise<T> =>
     new Promise<T>((resolve, reject) => {
       if (stopped) { reject(new Error('analytics client stopped')); return; }
       const label = `${String(payload.kind)}${payload.name ? ':' + String(payload.name) : ''}`;
@@ -286,7 +302,7 @@ export function createAnalyticsClient(
             return;
           }
           settle(() => reject(new Error(`analytics request '${label}' timed out`)));
-        }, requestTimeoutMs);
+        }, timeoutMs);
         pending.set(id, {
           resolve: (v) => settle(() => resolve(v)),
           reject: (e) => settle(() => reject(e)),
@@ -327,7 +343,7 @@ export function createAnalyticsClient(
       //    v1.186.0 — never ahead of the worker's first snapshot (awaitFirstSnapshot).
       const gen = reportGen; // v1.186.3 — a value from before the hydrated map is not cached
       const p = awaitFirstSnapshot()
-        .then(() => requestWithRetry<T>({ kind: 'report', name, args: a }))
+        .then(() => requestWithRetry<T>({ kind: 'report', name, args: a }, reportTimeoutMs(name, requestTimeoutMs)))
         .then((v) => {
           if (ttl > 0 && gen === reportGen) reportCache.set(key, { value: v, expiresAt: Date.now() + ttl });
           return v;
