@@ -21,6 +21,21 @@
  *   R-i    the recorder opens with auto-checkpoint 0
  *   A-i    the AppArmor profile loses the /usr/bin exec rule the hook runs under
  *   W-i    index.ts never registers the hook routes
+ *   K-i    pre ignores the hook's deadline
+ *   K-ii   the pre route never reports a closed connection
+ *   K-iii  the pre route never passes its guard to pre
+ *   K-iv   a refused pre falls through to the checkpoint and the freeze
+ *   K-v    the hook client stops sending its deadline
+ *   K-vi   the hook client's deadline leaves no grace before it gives up
+ *   K-vii  the loopback check runs at preHandler, after a client may have left
+ *   S-i    the recorder hands the window a second connection, not the one it commits on
+ *   D-iii  a second pre leaves the first pre's dead-man armed
+ *   P-iii  post leaves the window reported open
+ *   O-i    pre reports ok whatever happened
+ *   O-ii   post and the dead-man report ok whatever happened
+ *   O-iii  pre's ok ignores a failed checkpoint
+ *   O-iv   the restore's ok ignores a setting that did not take
+ *   O-v    a failed pre is logged at info
  *
  *   node scripts/mutate-v1187-20d.mjs
  */
@@ -156,6 +171,111 @@ const MUTANTS = [
     find: 'registerBackupWindowRoutes(app, backupWindow);\n',
     to: '/* MUTANT: routes not registered */\n',
     why: 'The hook gets a 404 every night and the quiesce never happens.',
+  },
+  {
+    id: "K-i. ★★★ pre ignores the hook's deadline",
+    file: BW,
+    find: '      const late = deadlineMs != null && t > deadlineMs;',
+    to: '      const late = false; /* MUTANT */',
+    why: 'A pre queued behind a main-thread stall runs after the hook gave up: TRUNCATE rewrites ecoflow.db and shrinks the WAL while tar reads it.',
+  },
+  {
+    id: 'K-ii. ★★ the pre route never reports a closed connection',
+    file: BW,
+    find: 'return { deadlineMs, clientGone: req.raw.socket?.destroyed === true };',
+    to: 'return { deadlineMs, clientGone: false }; /* MUTANT */',
+    why: 'A request whose client already left (a hand-run call with no deadline) still checkpoints and freezes.',
+  },
+  {
+    id: 'K-iii. ★★★ the pre route never passes its guard to pre',
+    file: BW,
+    find: 'const rec = bw.pre(req.socket?.remoteAddress, preGuardFor(req));',
+    to: 'const rec = bw.pre(req.socket?.remoteAddress); /* MUTANT */',
+    why: 'The deadline header arrives and nothing reads it: the late TRUNCATE is back.',
+  },
+  {
+    id: 'K-iv. ★★★ a refused pre falls through to the checkpoint and the freeze',
+    file: BW,
+    find: '        return rec;\n      }\n      const rearmed = openedAtMs != null;',
+    to: '      } /* MUTANT: no return */\n      const rearmed = openedAtMs != null;',
+    why: 'The refusal is journaled and then the TRUNCATE runs anyway.',
+  },
+  {
+    id: 'K-v. ★★★ the hook client stops sending its deadline',
+    file: CLIENT,
+    find: "      headers: { 'x-backup-hook-deadline': String(t0 + TIMEOUT_MS - START_GRACE_MS) },\n",
+    to: '      /* MUTANT: no deadline header */\n',
+    why: 'The server cannot tell a request the hook abandoned during a stall from a live one.',
+  },
+  {
+    id: "K-vi. ★★ the hook client's deadline leaves no grace before it gives up",
+    file: CLIENT,
+    find: 'String(t0 + TIMEOUT_MS - START_GRACE_MS)',
+    to: 'String(t0 + TIMEOUT_MS) /* MUTANT */',
+    why: 'A TRUNCATE started just before the deadline is still running when the client gives up and tar starts.',
+  },
+  {
+    id: 'K-vii. ★★ the loopback check runs at preHandler, after a client may have left',
+    file: BW,
+    find: 'app.post(`${BACKUP_WINDOW_ROUTE}/pre`, { onRequest: requireLoopbackPeer }',
+    to: 'app.post(`${BACKUP_WINDOW_ROUTE}/pre`, { preHandler: requireLoopbackPeer } /* MUTANT */',
+    why: 'A closed socket no longer reports its peer: the request is refused as non-loopback and the "client gone" line is never journaled.',
+  },
+  {
+    id: 'S-i. ★★★ the recorder hands the window a second connection, not the one it commits on',
+    file: REC,
+    find: '    walControl: walControlFor(db, dbPath),',
+    to: '    walControl: walControlFor(new DatabaseSync(dbPath), dbPath), /* MUTANT */',
+    why: "wal_autocheckpoint is per connection: the recorder's commits keep checkpointing under tar while pre, the journal and the status route all say frozen.",
+  },
+  {
+    id: "D-iii. ★★★ a second pre leaves the first pre's dead-man armed",
+    file: BW,
+    find: '      disarm();\n      deadMan = setTimeout(fireDeadMan, deadManMs);',
+    to: '      /* MUTANT: the first dead-man is not cancelled */\n      deadMan = setTimeout(fireDeadMan, deadManMs);',
+    why: "A retried backup's copy is cut short at the first pre's deadline: checkpoints come back mid-copy.",
+  },
+  {
+    id: 'P-iii. ★★ post leaves the window reported open',
+    file: BW,
+    find: '      openedAtMs = null;\n      closedByDeadMan = false;\n      lastPost = rec;',
+    to: '      /* MUTANT: the window is left open */\n      lastPost = rec;',
+    why: 'GET /api/backup-window says windowOpen with checkpoints restored, and the next night\'s pre reads as a re-arm.',
+  },
+  {
+    id: 'O-i. ★★★ pre reports ok whatever happened',
+    file: BW,
+    find: 'rec.ok = rec.autocheckpoint === 0 && rec.checkpointError == null;',
+    to: 'rec.ok = true; /* MUTANT */',
+    why: 'A freeze that failed is journaled as a quiesced copy.',
+  },
+  {
+    id: 'O-ii. ★★ post and the dead-man report ok whatever happened',
+    file: BW,
+    find: 'out.ok = out.autocheckpoint === restoreTo && out.checkpointError == null;',
+    to: 'out.ok = true; /* MUTANT */',
+    why: 'A restore that failed (checkpoints still off) is journaled as done.',
+  },
+  {
+    id: "O-iii. ★★ pre's ok ignores a failed checkpoint",
+    file: BW,
+    find: 'rec.autocheckpoint === 0 && rec.checkpointError == null',
+    to: 'rec.autocheckpoint === 0 /* MUTANT */',
+    why: 'The TRUNCATE failed (the copy starts from a full WAL) and the phase still reads ok.',
+  },
+  {
+    id: "O-iv. ★★ the restore's ok ignores a setting that did not take",
+    file: BW,
+    find: 'out.autocheckpoint === restoreTo && out.checkpointError == null',
+    to: 'out.checkpointError == null /* MUTANT */',
+    why: 'Checkpoints stuck at 0 after post read as restored.',
+  },
+  {
+    id: 'O-v. ★★ a failed pre is logged at info',
+    file: BW,
+    find: '      if (rec.ok) log.info(line); else log.warn(line);\n      return rec;\n    },\n\n    post(peer) {',
+    to: '      log.info(line); /* MUTANT */\n      return rec;\n    },\n\n    post(peer) {',
+    why: 'An unquiesced backup leaves no warning in the add-on log.',
   },
 ];
 

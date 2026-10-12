@@ -24,6 +24,12 @@ const phase = process.argv[2];
 const port = Number(process.env.PORT) || 8787;
 // The exec environment carries the image's ENV (PORT=8787), not the options the run script exports.
 const TIMEOUT_MS = Math.min(8000, Math.max(100, Number(process.env.BACKUP_HOOK_TIMEOUT_MS) || 8000));
+// The server must START pre by t0 + TIMEOUT_MS - START_GRACE_MS (sent as x-backup-hook-deadline,
+// backupWindow.ts BACKUP_DEADLINE_HEADER) and refuses past it. Once this client gives up, the
+// Supervisor starts copying /data, and a pre that ran after that (a request queued behind a stalled
+// main thread) would rewrite ecoflow.db and shrink ecoflow.db-wal under tar. The grace lets a
+// checkpoint that started on time finish before this client gives up.
+const START_GRACE_MS = Math.min(2000, Math.floor(TIMEOUT_MS / 4));
 // Same resolution as backupWindow.ts resolveBackupJournalPath (dataDir /data).
 const journal = process.env.BACKUP_WINDOW_LOG
   || (existsSync('/share') ? '/share/ecoflow-panel/backup-window.jsonl' : '/data/backup-window.jsonl');
@@ -45,6 +51,7 @@ async function main() {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/api/internal/backup-window/${phase}`, {
       method: 'POST',
+      headers: { 'x-backup-hook-deadline': String(t0 + TIMEOUT_MS - START_GRACE_MS) },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     const body = await res.text();

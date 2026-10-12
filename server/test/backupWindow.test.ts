@@ -13,13 +13,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import Fastify from 'fastify';
 import {
-  BACKUP_DEAD_MAN_MS, BACKUP_WINDOW_ROUTE, RECORDER_WAL_AUTOCHECKPOINT, createBackupWindow, isLoopbackPeer,
-  registerBackupWindowRoutes, resolveBackupJournalPath, walControlFor, type BackupWindow,
+  BACKUP_DEADLINE_HEADER, BACKUP_DEAD_MAN_MS, BACKUP_WINDOW_ROUTE, RECORDER_WAL_AUTOCHECKPOINT, createBackupWindow, isLoopbackPeer,
+  registerBackupWindowRoutes, resolveBackupJournalPath, walControlFor, type BackupWindow, type CheckpointResult, type WalControl,
 } from '../src/backupWindow.js';
 import { panelFastifyOptions } from '../src/logHooks.js';
 
@@ -86,8 +87,12 @@ test('★★★ pre empties the WAL and stops auto-checkpoints; the main file ca
     assert.ok((wal.walBytes() ?? 0) > RECORDER_WAL_AUTOCHECKPOINT * 4096, 'the WAL went past the threshold');
     assert.equal(sha(path), mainAtCopy, 'no checkpoint touched the main file inside the window');
 
+    assert.equal(bw.status().windowOpen, true);
     const post = bw.post('127.0.0.1');
     assert.equal(post.ok, true);
+    assert.equal(bw.status().windowOpen, false, 'post closes the window');
+    assert.equal(bw.status().openedAt, null);
+    assert.equal(bw.status().deadManDueAt, null);
     assert.equal(wal.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT, "post restores the recorder's value");
     assert.equal(post.autocheckpoint, RECORDER_WAL_AUTOCHECKPOINT);
     assert.equal(post.hadPre, true);
@@ -138,10 +143,18 @@ test('★★ post disarms the dead-man; the default deadline is 10 minutes', asy
   const bw = createBackupWindow({ wal: walControlFor(db, path), journalPath: journal, log: quietLog().log, deadManMs: 40 });
   try {
     bw.pre();
+    assert.equal(bw.status().windowOpen, true);
+    assert.ok(bw.status().openedAt);
     bw.post();
+    // The status route reports a closed window after every completed backup, and the next
+    // night's pre is a fresh window, not a re-arm of a window this one left open.
+    assert.equal(bw.status().windowOpen, false, 'post closes the window');
+    assert.equal(bw.status().openedAt, null);
+    assert.equal(bw.status().deadManDueAt, null);
     await new Promise((r) => setTimeout(r, 150));
     assert.equal(bw.status().lastDeadMan, null, 'no dead-man after a completed window');
     assert.deepEqual(journalLines(journal).map((r) => r.phase), ['pre', 'post']);
+    assert.equal(bw.pre().rearmed, false, "the next pre does not find this window still open");
   } finally { bw.stop(); db.close(); }
 });
 
@@ -160,6 +173,32 @@ test("★★ a second pre re-arms, and post still restores the recorder's value,
     assert.equal(wal.autocheckpoint(), 0);
     bw.post();
     assert.equal(wal.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT);
+  } finally { bw.stop(); db.close(); }
+});
+
+test("★★★ a second pre cancels the first pre's dead-man: past the first deadline the window is still frozen", (t) => {
+  // Timing on node:test's mock timers (deterministic under load): dead-man 200 ms; pre at 0,
+  // pre again at 120, look at 270 (past the first deadline, before the second at 320), then at 330.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { db, path, journal } = freshDb();
+  const wal = walControlFor(db, path);
+  let now = Date.parse('2026-10-12T03:30:00Z');
+  const l = quietLog();
+  const bw = createBackupWindow({ wal, journalPath: journal, log: l.log, deadManMs: 200, now: () => now });
+  const advance = (ms: number) => { now += ms; t.mock.timers.tick(ms); };
+  try {
+    bw.pre();
+    advance(120);
+    assert.equal(bw.pre().rearmed, true);
+    advance(150);
+    assert.equal(wal.autocheckpoint(), 0, "the first pre's deadline passed and checkpoints are still held");
+    assert.equal(bw.status().windowOpen, true);
+    assert.equal(bw.status().lastDeadMan, null, 'the first dead-man was cancelled, not left to fire');
+    assert.equal(l.warn.length, 0);
+    advance(60);
+    assert.equal(wal.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT, "the second pre's dead-man fires on time");
+    assert.equal(bw.status().windowOpen, false);
+    assert.deepEqual(journalLines(journal).map((r) => r.phase), ['pre', 'pre', 'deadman'], 'exactly one dead-man');
   } finally { bw.stop(); db.close(); }
 });
 
@@ -262,20 +301,247 @@ test('★★ the journal goes to /share/ecoflow-panel when /share is mapped, els
   assert.equal(resolveBackupJournalPath({ dataDir: data, shareRoot: share, env: { BACKUP_WINDOW_LOG: '/x/y.jsonl' } as NodeJS.ProcessEnv }), '/x/y.jsonl');
 });
 
-test('★★★ the recorder sets its auto-checkpoint explicitly and hands the window its write connection', async () => {
+test('★★★ the window freezes the connection the recorder COMMITS on — proved through the recorder\'s own write path', async () => {
+  // wal_autocheckpoint is per connection, and reads through walControl give the same answers on
+  // ANY connection to the file. So this drives commits through the recorder's own API and watches
+  // the main file: only a setting on the committing connection decides whether they reach it.
   const { createRecorder } = await import('../src/recorder.js');
   const { SnapshotStore } = await import('../src/snapshot.js');
   const rec = createRecorder(new SnapshotStore(), () => {});
+  const dbPath = process.env.DB_PATH as string;
   let bw: BackupWindow | null = null;
+  let hour = Date.parse('2026-10-12T00:00:00Z');
+  let pv = 70_000;
+  // One autocommit row per call (an hour-snapped forecast archive row, distinct hour and value).
+  const write = (n: number) => { for (let i = 0; i < n; i++) rec.recordForecastArchive((pv += 1000), (hour += 3_600_000)); };
   try {
-    assert.equal(rec.walControl.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT);
-    bw = createBackupWindow({ wal: rec.walControl, journalPath: join(tmp, 'recorder', 'backup-window.jsonl'), log: quietLog().log });
-    bw.pre();
-    assert.equal(rec.walControl.autocheckpoint(), 0);
-    assert.equal(rec.walControl.walBytes(), 0);
-    bw.post();
-    assert.equal(rec.walControl.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT);
+    assert.equal(rec.walControl.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT, 'set explicitly at open');
+
+    // (1) A 1-page threshold set through walControl makes the recorder's very next commit
+    // checkpoint into the main file — only if walControl is the connection that commits.
+    rec.walControl.checkpoint('TRUNCATE');
+    rec.walControl.setAutocheckpoint(1);
+    const beforeOne = sha(dbPath);
+    write(1);
+    assert.notEqual(sha(dbPath), beforeOne, "walControl's setting governs the recorder's own commits");
+
+    // (2) The window over that connection (restoreTo 1, so any commit outside it reaches the main
+    // file at once): 50 recorder commits inside the window leave the main file byte-identical.
+    bw = createBackupWindow({ wal: rec.walControl, journalPath: join(tmp, 'recorder', 'backup-window.jsonl'), log: quietLog().log, restoreTo: 1 });
+    const pre = bw.pre();
+    assert.equal(pre.ok, true);
+    assert.equal(rec.walControl.walBytes(), 0, 'TRUNCATE emptied the WAL');
+    const mainAtCopy = sha(dbPath);
+    write(50);
+    assert.ok((rec.walControl.walBytes() ?? 0) > 0, 'the commits went to the WAL');
+    assert.equal(sha(dbPath), mainAtCopy, "no checkpoint touched the main file while the recorder committed inside the window");
+
+    // (3) post restores the threshold on that same connection: the next commit reaches the file.
+    assert.equal(bw.post().ok, true);
+    const afterPost = sha(dbPath);
+    assert.notEqual(afterPost, mainAtCopy, "post's PASSIVE checkpoint folded the window in");
+    write(1);
+    assert.notEqual(sha(dbPath), afterPost, "the recorder's commits checkpoint again after post");
+    rec.walControl.setAutocheckpoint(RECORDER_WAL_AUTOCHECKPOINT);
   } finally { bw?.stop(); rec.close(); }
+});
+
+/** A WalControl whose calls fail as a closed handle's do (or whose setting does not take). */
+function stubWal(o: { checkpointThrows?: boolean; setThrows?: boolean; readThrows?: boolean; stuckAt?: number }): WalControl {
+  const boom = (): never => { throw new Error('database is not open'); };
+  let ac = RECORDER_WAL_AUTOCHECKPOINT;
+  return {
+    checkpoint: (): CheckpointResult => (o.checkpointThrows ? boom() : { busy: 0, log: 0, checkpointed: 0 }),
+    setAutocheckpoint: (pages) => { if (o.setThrows) boom(); ac = o.stuckAt ?? pages; return ac; },
+    autocheckpoint: () => (o.readThrows ? boom() : ac),
+    walBytes: () => null,
+  };
+}
+
+test('★★★ a freeze or restore that fails is journaled ok:false with its error and logged as a warning — never as a success', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = join(tmp, `stub-${++seq}`);
+  const journal = join(dir, 'backup-window.jsonl');
+  const l = quietLog();
+  // The recorder handle closed under the window (a shutdown overlapping a backup): every call throws.
+  const bw = createBackupWindow({ wal: stubWal({ checkpointThrows: true, setThrows: true, readThrows: true }), journalPath: journal, log: l.log });
+  try {
+    const pre = bw.pre('127.0.0.1');
+    assert.equal(pre.ok, false, 'checkpoints were not frozen: pre must not report a quiesced copy');
+    assert.equal(pre.autocheckpoint, null);
+    assert.match(String(pre.autocheckpointError), /not open/);
+    assert.match(String(pre.checkpointError), /not open/);
+    t.mock.timers.tick(BACKUP_DEAD_MAN_MS);
+    assert.equal(bw.status().lastDeadMan?.ok, false, 'the dead-man restore failed too');
+    const post = bw.post('127.0.0.1');
+    assert.equal(post.ok, false);
+    assert.equal(post.autocheckpoint, null);
+    assert.match(String(post.autocheckpointError), /not open/);
+    assert.match(String(post.checkpointError), /not open/);
+    assert.equal(bw.status().autocheckpoint, null, 'status reports an unreadable setting as null');
+
+    const lines = journalLines(journal);
+    assert.deepEqual(lines.map((r) => `${r.phase}:${r.ok}`), ['pre:false', 'deadman:false', 'post:false'], 'the journal, the only evidence outside the container, says so');
+    for (const r of lines) assert.ok(r.autocheckpointError && r.checkpointError, `${r.phase} carries both errors`);
+    assert.equal(l.info.length, 0, 'nothing logged at info');
+    assert.ok(l.warn.some((m) => m.startsWith('backup-window: pre')) && l.warn.some((m) => m.startsWith('backup-window: post')), 'both logged as warnings');
+  } finally { bw.stop(); }
+});
+
+test('★★ ok needs BOTH halves: a failed checkpoint, or a setting that did not take, is ok:false', () => {
+  const dir = join(tmp, `stub-${++seq}`);
+  // The checkpoint fails while the setting works: the value is right, the phase is still not ok.
+  const l = quietLog();
+  const cp = createBackupWindow({ wal: stubWal({ checkpointThrows: true }), journalPath: join(dir, 'a.jsonl'), log: l.log });
+  try {
+    const pre = cp.pre();
+    assert.equal(pre.autocheckpoint, 0);
+    assert.equal(pre.ok, false);
+    const post = cp.post();
+    assert.equal(post.autocheckpoint, RECORDER_WAL_AUTOCHECKPOINT);
+    assert.equal(post.ok, false);
+    assert.deepEqual(journalLines(join(dir, 'a.jsonl')).map((r) => r.ok), [false, false]);
+    assert.equal(l.info.length, 0);
+    assert.equal(l.warn.length, 2);
+  } finally { cp.stop(); }
+  // The setting reads back as something other than what was asked: pre stuck at the recorder's
+  // value never froze; post stuck at 0 never restored.
+  for (const [stuckAt, phase] of [[RECORDER_WAL_AUTOCHECKPOINT, 'pre'], [0, 'post']] as const) {
+    const bw = createBackupWindow({ wal: stubWal({ stuckAt }), journalPath: join(dir, `stuck-${stuckAt}.jsonl`), log: quietLog().log });
+    try {
+      const pre = bw.pre();
+      const post = bw.post();
+      assert.equal(pre.ok, phase !== 'pre', `pre with the setting stuck at ${stuckAt}`);
+      assert.equal(post.ok, phase !== 'post', `post with the setting stuck at ${stuckAt}`);
+    } finally { bw.stop(); }
+  }
+});
+
+test('★★★ a pre the hook has already given up on changes nothing — past its deadline, or with its connection closed', () => {
+  const { db, path, journal } = freshDb();
+  const wal = walControlFor(db, path);
+  let t = Date.parse('2026-10-12T03:30:08Z');
+  const l = quietLog();
+  const bw = createBackupWindow({ wal, journalPath: journal, log: l.log, now: () => t });
+  try {
+    commit(db, 3);
+    const walBefore = wal.walBytes();
+    assert.ok((walBefore ?? 0) > 0, 'precondition: frames in the WAL');
+    const mainBefore = sha(path);
+    const late = [{ deadlineMs: t - 1 }, { deadlineMs: t - 60_000 }, { clientGone: true }, { deadlineMs: t + 5000, clientGone: true }];
+    for (const guard of late) {
+      const r = bw.pre('127.0.0.1', guard);
+      assert.equal(r.ok, false, JSON.stringify(guard));
+      assert.equal(r.refused, true);
+      assert.equal(r.error, 'client gone');
+      assert.equal(wal.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT, 'no freeze');
+      assert.equal(wal.walBytes(), walBefore, 'no TRUNCATE: a WAL tar may be reading did not shrink');
+      assert.equal(sha(path), mainBefore, 'no checkpoint wrote the main file');
+      assert.equal(bw.status().windowOpen, false);
+      assert.equal(bw.status().deadManDueAt, null, 'no dead-man armed');
+    }
+    assert.match(String(bw.status().lastPre?.reason), /closed/);
+    const lines = journalLines(journal);
+    assert.deepEqual(lines.map((r) => `${r.phase}:${r.ok}:${r.error}`), late.map(() => 'pre:false:client gone'), 'one ok:false line each');
+    assert.match(lines[0].reason, /deadline passed 1 ms ago/);
+    assert.equal(lines[0].deadlineAt, new Date(t - 1).toISOString());
+    assert.equal(l.warn.length, late.length);
+    assert.ok(l.warn.every((m) => m.startsWith('backup-window: pre refused — client gone')));
+    assert.equal(l.info.length, 0);
+
+    // On time (the deadline is now, or none was sent): the window opens as before.
+    const onTime = bw.pre('127.0.0.1', { deadlineMs: t, clientGone: false });
+    assert.equal(onTime.ok, true);
+    assert.equal(wal.autocheckpoint(), 0);
+    assert.equal(wal.walBytes(), 0);
+    bw.post();
+    assert.equal(bw.pre('127.0.0.1', { deadlineMs: null }).ok, true);
+  } finally { bw.stop(); db.close(); }
+});
+
+test('★★ a late pre leaves an open window alone: its freeze and its dead-man stay as they were', () => {
+  const { db, path, journal } = freshDb();
+  const wal = walControlFor(db, path);
+  let t = Date.parse('2026-10-12T03:30:00Z');
+  const bw = createBackupWindow({ wal, journalPath: journal, log: quietLog().log, now: () => t });
+  try {
+    assert.equal(bw.pre().ok, true);
+    const before = bw.status();
+    t += 9000;
+    const r = bw.pre('127.0.0.1', { deadlineMs: t - 1000 });
+    assert.equal(r.refused, true);
+    assert.equal(r.windowOpen, true);
+    const after = bw.status();
+    assert.equal(after.windowOpen, true);
+    assert.equal(after.autocheckpoint, 0);
+    assert.equal(after.openedAt, before.openedAt);
+    assert.equal(after.deadManDueAt, before.deadManDueAt);
+  } finally { bw.stop(); db.close(); }
+});
+
+test('★★★ the pre route reads the hook deadline header: past it 409 and nothing changes, ahead of it the window opens', async () => {
+  const { db, path, journal } = freshDb();
+  const wal = walControlFor(db, path);
+  const bw = createBackupWindow({ wal, journalPath: journal, log: quietLog().log });
+  const app = Fastify(panelFastifyOptions('silent'));
+  registerBackupWindowRoutes(app, bw);
+  try {
+    commit(db, 2);
+    const walBefore = wal.walBytes();
+    const pre = (headers: Record<string, string>) => app.inject({ method: 'POST', url: `${BACKUP_WINDOW_ROUTE}/pre`, remoteAddress: '127.0.0.1', headers });
+    const past = await pre({ [BACKUP_DEADLINE_HEADER]: String(Date.now() - 1000) });
+    assert.equal(past.statusCode, 409);
+    assert.equal(past.json().ok, false);
+    assert.equal(past.json().error, 'client gone');
+    assert.equal(wal.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT);
+    assert.equal(wal.walBytes(), walBefore);
+
+    // A header that is not epoch milliseconds is no deadline (as for a hand-run call).
+    const odd = await pre({ [BACKUP_DEADLINE_HEADER]: 'soon' });
+    assert.equal(odd.statusCode, 200);
+    assert.equal(odd.json().ok, true);
+    await app.inject({ method: 'POST', url: `${BACKUP_WINDOW_ROUTE}/post`, remoteAddress: '127.0.0.1', headers: { [BACKUP_DEADLINE_HEADER]: String(Date.now() - 1000) } })
+      .then((r) => assert.equal(r.statusCode, 200, 'post is never refused: it only restores, after the copy'));
+    assert.equal(wal.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT);
+
+    const ahead = await pre({ [BACKUP_DEADLINE_HEADER]: String(Date.now() + 60_000) });
+    assert.equal(ahead.statusCode, 200);
+    assert.equal(ahead.json().ok, true);
+    assert.equal(wal.autocheckpoint(), 0);
+  } finally { bw.stop(); await app.close(); db.close(); }
+});
+
+test('★★ a pre whose connection closed before its handler ran is refused, even with no deadline header', async () => {
+  const { db, path, journal } = freshDb();
+  const wal = walControlFor(db, path);
+  const bw = createBackupWindow({ wal, journalPath: journal, log: quietLog().log });
+  const app = Fastify(panelFastifyOptions('silent'));
+  let arrived = () => {};
+  const arrivedP = new Promise<void>((r) => { arrived = r; });
+  // Holds the request after the route's loopback check until its client has left, as a slow
+  // hook chain or body read would; Fastify still runs the handler after that.
+  app.addHook('preHandler', async (req) => {
+    if (!req.url.endsWith('/pre')) return;
+    arrived();
+    await until(() => req.raw.socket.destroyed, 5000);
+  });
+  registerBackupWindowRoutes(app, bw);
+  try {
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const port = (app.server.address() as { port: number }).port;
+    const c = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: `${BACKUP_WINDOW_ROUTE}/pre` });
+    c.on('error', () => { /* destroyed on purpose */ });
+    c.end();
+    await arrivedP;
+    c.destroy();
+    assert.ok(await until(() => bw.status().lastPre != null), 'the handler still ran');
+    const r = bw.status().lastPre as Record<string, unknown>;
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'client gone');
+    assert.match(String(r.reason), /connection was already closed/);
+    assert.equal(wal.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT);
+    assert.equal(bw.status().windowOpen, false);
+  } finally { bw.stop(); await app.close(); db.close(); }
 });
 
 test('★ index.ts builds the window over the recorder connection, registers the routes and disarms it at shutdown', () => {

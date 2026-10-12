@@ -17,7 +17,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import Fastify from 'fastify';
-import { RECORDER_WAL_AUTOCHECKPOINT, createBackupWindow, registerBackupWindowRoutes, walControlFor } from '../src/backupWindow.js';
+import {
+  BACKUP_DEADLINE_HEADER, RECORDER_WAL_AUTOCHECKPOINT, createBackupWindow, registerBackupWindowRoutes, walControlFor,
+} from '../src/backupWindow.js';
 import { panelFastifyOptions } from '../src/logHooks.js';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -52,6 +54,15 @@ function hookCopy(client = CLIENT): string {
   writeFileSync(out, src.replace(IMAGE_NODE, process.execPath).replace(IMAGE_CLIENT, client));
   chmodSync(out, 0o755);
   return out;
+}
+
+async function until(cond: () => boolean, ms = 5000) {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > ms) return false;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return true;
 }
 
 async function closedPort(): Promise<number> {
@@ -165,6 +176,77 @@ test('★★★ end to end: the shipped hook drives the server — pre freezes a
     const lines = journalLines(journal);
     assert.deepEqual(lines.map((r) => `${r.phase}:${r.ok}`), ['pre:true', 'post:true'], 'the server journaled both; the client added nothing');
   } finally { bw.stop(); await app.close(); db.close(); }
+});
+
+test('★★★ a pre the hook gave up on during a main-thread stall is refused when it finally runs: no TRUNCATE, no freeze', async () => {
+  // The 03:30 failure: the server's main thread stalls past the hook's timeout, the hook exits 0,
+  // the Supervisor starts copying /data, and only then does the queued pre reach its handler — with
+  // its socket not yet seen as closed. A TRUNCATE then would shrink ecoflow.db-wal under tar.
+  const dir = fresh('stall');
+  const dbPath = join(dir, 'ecoflow.db');
+  const journal = join(dir, 'backup-window.jsonl');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = ${RECORDER_WAL_AUTOCHECKPOINT};
+           CREATE TABLE t (x BLOB); INSERT INTO t VALUES (randomblob(50000));`);
+  const wal = walControlFor(db, dbPath);
+  const warn: string[] = [];
+  const bw = createBackupWindow({ wal, journalPath: journal, log: { info: () => {}, warn: (m) => { warn.push(m); } } });
+  const app = Fastify(panelFastifyOptions('silent'));
+  const TIMEOUT_MS = 400;
+  const STALL_MS = 1500;
+  // The stall: once the hook's request is in, this thread is busy for STALL_MS, as in the
+  // 3.5-9.7 s main-thread stalls of the 08-05 review. The hook gives up meanwhile.
+  app.addHook('onRequest', (req, _reply, done) => {
+    if (req.url.endsWith('/pre')) { const end = Date.now() + STALL_MS; while (Date.now() < end) { /* stalled */ } }
+    done();
+  });
+  registerBackupWindowRoutes(app, bw);
+  try {
+    let host = '::';
+    try { await app.listen({ host, port: 0 }); } catch { host = '127.0.0.1'; await app.listen({ host, port: 0 }); }
+    const env = { PORT: String((app.server.address() as { port: number }).port), BACKUP_WINDOW_LOG: journal, BACKUP_HOOK_TIMEOUT_MS: String(TIMEOUT_MS) };
+    const walBefore = wal.walBytes();
+    assert.ok((walBefore ?? 0) > 0, 'precondition: frames in the WAL');
+
+    const r = await run(hookCopy(), ['pre'], env);
+    assert.equal(r.code, 0);
+    assert.ok(await until(() => bw.status().lastPre != null), 'the queued pre reached its handler after the stall');
+    const lines = journalLines(journal);
+    const byHook = lines.filter((x) => x.by === 'hook');
+    const byServer = lines.filter((x) => x.by == null);
+    assert.equal(byHook.length, 1);
+    assert.match(byHook[0].error, new RegExp(`no answer within ${TIMEOUT_MS} ms`), 'the hook gave up first');
+    assert.equal(byServer.length, 1);
+    assert.equal(byServer[0].phase, 'pre');
+    assert.equal(byServer[0].ok, false, 'never journaled as a quiesced copy');
+    assert.equal(byServer[0].error, 'client gone');
+    assert.match(byServer[0].reason, /deadline passed/);
+    assert.equal(wal.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT, 'no freeze');
+    assert.equal(wal.walBytes(), walBefore, 'no TRUNCATE: the WAL tar may be reading did not shrink');
+    assert.equal(bw.status().windowOpen, false);
+    assert.ok(warn.some((m) => m.startsWith('backup-window: pre refused — client gone')));
+  } finally { bw.stop(); await app.close(); db.close(); }
+});
+
+test('★★ the hook client sends the moment pre must start by: its own give-up time less a grace', async () => {
+  let deadline = Number.NaN;
+  let closedAt = Number.NaN;
+  const hang = createServer((req) => {
+    deadline = Number(req.headers[BACKUP_DEADLINE_HEADER]);
+    req.socket.on('close', () => { closedAt = Date.now(); });
+  });
+  const port = await listen(hang);
+  try {
+    const journal = join(fresh('deadline'), 'backup-window.jsonl');
+    const spawnedAt = Date.now();
+    // 2000 ms timeout: the grace is min(2000, 2000 / 4) = 500 ms.
+    const r = await runClient('pre', { PORT: String(port), BACKUP_WINDOW_LOG: journal, BACKUP_HOOK_TIMEOUT_MS: '2000' });
+    assert.equal(r.code, 0);
+    assert.ok(await until(() => Number.isFinite(closedAt)), 'the client gave up and closed');
+    assert.ok(Number.isFinite(deadline), 'the header carries epoch milliseconds');
+    assert.ok(deadline >= spawnedAt + 1500, `the deadline is ${deadline - spawnedAt} ms after the client started: its timeout less the grace`);
+    assert.ok(closedAt - deadline >= 400, `the client gave up ${closedAt - deadline} ms after the deadline: a pre that started by then has the grace to finish`);
+  } finally { hang.closeAllConnections(); await new Promise<void>((res) => hang.close(() => res())); }
 });
 
 test('★ the client resolves the journal exactly as the server does', () => {

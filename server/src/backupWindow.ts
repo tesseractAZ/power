@@ -38,6 +38,19 @@
  * connection, on the main thread, where the route handlers and the dead-man timer also run. There
  * is no await between the checkpoint and the freeze.
  *
+ * A LATE PRE IS REFUSED. The hook client gives up after 8 s and exits 0, and the Supervisor then
+ * starts copying /data at once. A request it abandoned can still reach the pre handler afterwards:
+ * when the main thread stalls, Fastify parses the queued request and runs the handler once the loop
+ * frees, with the socket not yet seen as closed. A pre that ran then would checkpoint into
+ * `ecoflow.db` and TRUNCATE `ecoflow.db-wal` to 0 bytes while tar reads them — a torn copy, or a
+ * WAL that shrinks under tar (tarfile "unexpected end of data", which drops the add-on from that
+ * backup). So the client sends BACKUP_DEADLINE_HEADER, the moment by which pre must START (its own
+ * give-up time less a grace, so a checkpoint started on time ends before it gives up), and pre
+ * refuses past it, or when the request's socket is already closed: no checkpoint, no freeze, no
+ * dead-man, one `ok:false` "client gone" journal line, a warning, and 409. That backup's copy is
+ * then unquiesced, as every copy was before v1.187.20. `post` is never refused: it only restores,
+ * and it runs after the copy.
+ *
  * EVIDENCE. A `docker exec`'d hook's stdout never reaches the add-on log (Switchboard v0.58.1), so
  * every phase appends one JSON line to `/share/ecoflow-panel/backup-window.jsonl` (`/share` is
  * mapped read-write; `/data/backup-window.jsonl` when it is not) and logs through the server log.
@@ -57,6 +70,10 @@ export const BACKUP_DEAD_MAN_MS = 10 * 60_000;
 
 /** Where the hook routes live. Loopback-only: see requireLoopbackPeer. */
 export const BACKUP_WINDOW_ROUTE = '/api/internal/backup-window';
+
+/** Request header from the hook client (backupHook.mjs): the epoch-ms moment by which `pre` must
+ *  START. Past it the client may have given up and the Supervisor may be copying /data. */
+export const BACKUP_DEADLINE_HEADER = 'x-backup-hook-deadline';
 
 /** The journal is capped: past this size it is rotated to `<path>.1` (two lines a night). */
 export const BACKUP_JOURNAL_MAX_BYTES = 1024 * 1024;
@@ -119,8 +136,11 @@ export function isLoopbackPeer(addr: string | undefined | null): boolean {
 }
 
 /**
- * Fastify preHandler for the hook routes. It reads the raw socket peer, never `req.ip` or a
- * forwarding header, so it stays correct even if trustProxy is ever turned on.
+ * Route-level onRequest hook for the hook routes. It reads the raw socket peer, never `req.ip` or a
+ * forwarding header, so it stays correct even if trustProxy is ever turned on. It runs at the
+ * route's first hook, while the socket is still open: a closed socket no longer reports its peer
+ * unless it was read before (Node caches it then), so a client that leaves later still reaches the
+ * pre handler as a loopback peer and is refused and journaled there as "client gone".
  */
 export function requireLoopbackPeer(req: FastifyRequest, reply: FastifyReply, done: (err?: Error) => void): void {
   if (isLoopbackPeer(req.socket?.remoteAddress)) return done();
@@ -162,8 +182,17 @@ export interface BackupWindowStatus {
   lastDeadMan: Record<string, unknown> | null;
 }
 
+/** What the pre route knows about the hook's request (see "A LATE PRE IS REFUSED"). */
+export interface PreGuard {
+  /** BACKUP_DEADLINE_HEADER, in epoch ms; null when the request carried none (a hand-run call). */
+  deadlineMs?: number | null;
+  /** The request's socket was already closed when the handler ran: the client has left. */
+  clientGone?: boolean;
+}
+
 export interface BackupWindow {
-  pre(peer?: string): Record<string, unknown>;
+  /** Refuses (ok:false, refused:true, nothing changed) when the guard says the client is gone. */
+  pre(peer?: string, guard?: PreGuard): Record<string, unknown>;
   post(peer?: string): Record<string, unknown>;
   status(): BackupWindowStatus;
   /** Disarm the dead-man (shutdown). */
@@ -234,8 +263,28 @@ export function createBackupWindow(opts: BackupWindowOptions): BackupWindow {
   };
 
   return {
-    pre(peer) {
+    pre(peer, guard) {
       const t = now();
+      const deadlineMs = guard?.deadlineMs ?? null;
+      const late = deadlineMs != null && t > deadlineMs;
+      if (guard?.clientGone === true || late) {
+        // The hook has given up and the Supervisor may already be copying /data: a TRUNCATE now
+        // would rewrite ecoflow.db and shrink ecoflow.db-wal under tar. Change nothing.
+        const reason = late
+          ? `the hook's deadline passed ${t - (deadlineMs as number)} ms ago`
+          : 'the hook connection was already closed';
+        let autocheckpoint: number | null = null;
+        try { autocheckpoint = wal.autocheckpoint(); } catch { /* reported as null */ }
+        const rec = record({
+          phase: 'pre', ts: new Date(t).toISOString(), peer: peer ?? null, ok: false, refused: true, error: 'client gone', reason,
+          deadlineAt: deadlineMs == null ? null : new Date(deadlineMs).toISOString(), windowOpen: openedAtMs != null, autocheckpoint,
+          walBytes: wal.walBytes(),
+        });
+        lastPre = rec;
+        log.warn(`backup-window: pre refused — client gone (${reason}); no checkpoint and no freeze, so this backup copies /data `
+          + `unquiesced (auto-checkpoint ${String(autocheckpoint)}${openedAtMs != null ? ', an earlier window is still open' : ''})`);
+        return rec;
+      }
       const rearmed = openedAtMs != null;
       const walBytesBefore = wal.walBytes();
       const rec: Record<string, unknown> = { phase: 'pre', ts: new Date(t).toISOString(), peer: peer ?? null, rearmed, walBytesBefore };
@@ -299,11 +348,27 @@ export function createBackupWindow(opts: BackupWindowOptions): BackupWindow {
 }
 
 /**
+ * The pre route's guard: the hook's deadline header (digits only, else none) and whether the
+ * request's socket is already closed. The socket check alone cannot see a client that gave up
+ * during a main-thread stall: the handler runs in the same tick that parses the queued request,
+ * before the close is read, so the deadline is the check that holds there.
+ */
+export function preGuardFor(req: FastifyRequest): PreGuard {
+  const raw = req.headers[BACKUP_DEADLINE_HEADER];
+  const deadlineMs = typeof raw === 'string' && /^\d{1,16}$/.test(raw.trim()) ? Number(raw.trim()) : null;
+  return { deadlineMs, clientGone: req.raw.socket?.destroyed === true };
+}
+
+/**
  * POST <route>/pre and /post (loopback-only, called by the hook) and GET /api/backup-window
- * (read-only status, for verification from outside the container).
+ * (read-only status, for verification from outside the container). A refused pre answers 409.
  */
 export function registerBackupWindowRoutes(app: FastifyInstance, bw: BackupWindow): void {
-  app.post(`${BACKUP_WINDOW_ROUTE}/pre`, { preHandler: requireLoopbackPeer }, async (req) => bw.pre(req.socket?.remoteAddress));
-  app.post(`${BACKUP_WINDOW_ROUTE}/post`, { preHandler: requireLoopbackPeer }, async (req) => bw.post(req.socket?.remoteAddress));
+  app.post(`${BACKUP_WINDOW_ROUTE}/pre`, { onRequest: requireLoopbackPeer }, async (req, reply) => {
+    const rec = bw.pre(req.socket?.remoteAddress, preGuardFor(req));
+    if (rec.refused === true) reply.code(409);
+    return rec;
+  });
+  app.post(`${BACKUP_WINDOW_ROUTE}/post`, { onRequest: requireLoopbackPeer }, async (req) => bw.post(req.socket?.remoteAddress));
   app.get('/api/backup-window', async () => ({ ok: true, ...bw.status() }));
 }
