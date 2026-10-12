@@ -3,7 +3,7 @@ import type { RunwayProjection } from '../types';
 import { usePolled, useNow } from '../usePolled';
 import { pollStale } from '../freshness';
 import { StaleNote } from '../components/StaleNote';
-import { holdsLabel, troughTight, recentLoadCaption, gridNote } from './runwayText';
+import { holdsLabel, troughTight, recentLoadCaption, gridNote, fullCaption, fullTitle } from './runwayText';
 
 const RUNWAY_POLL_MS = 60_000;
 
@@ -130,7 +130,8 @@ export const RunwayCard = memo(function RunwayCard() {
         <Stat
           label="Backup now"
           value={runway.backupRemainingKwh != null ? `${runway.backupRemainingKwh.toFixed(1)} kWh` : '—'}
-          sub={runway.backupFullKwh != null ? `of ${runway.backupFullKwh.toFixed(1)} full` : undefined}
+          sub={fullCaption(runway)}
+          title={fullTitle(runway)}
         />
         <Stat
           label="Reserve floor"

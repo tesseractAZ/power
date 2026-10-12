@@ -134,6 +134,7 @@ import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvi
 import { createRunwayAlarm, shouldGateRunwayAudible, runwayAlarmStatePathFor } from './runwayAlarm.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { panelPoolNetWatts, noteDrainSample, panelDrainRunway, type DrainSample, type PanelRunway } from './panelRunway.js';
+import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath } from './poolEnergyBasis.js';
 import { liveGridBackstop, livePoolGridBackstop, gridPresenceEntityId, setPersistedGridAbsentSource, type GridBackstop } from './gridState.js';
 import { getBroadcastHealth } from './broadcastHealth.js';
 import { publishReadiness, withholdUnready } from './publishReadiness.js';
@@ -2641,6 +2642,10 @@ const runwayAlarmEnabled = process.env.BATTERY_RUNWAY_ALARM_ENABLED !== 'false';
 let runwayGridForTick = liveGridBackstop({});
 // v1.185.0 — a SECONDARY panel's drain samples, latest runway (for /api/house-panel) and alarm.
 const panelDrainSamples = new Map<string, DrainSample[]>();
+/** v1.187.19 — the MAIN thread's capacity-basis tracker, for the secondary panels' drain runways
+ *  only (the house runway's lives in the analytics worker). Its own file: the two threads never
+ *  share one. */
+const panelPoolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis-panels') });
 const lastPanelRunways = new Map<string, PanelRunway>();
 const panelRunwayAlarms = new Map<string, ReturnType<typeof createRunwayAlarm>>();
 const panelRunwayGrid = new Map<string, GridBackstop>();
@@ -2707,7 +2712,7 @@ if (runwayAlarmEnabled) {
           for (const p of secondaryShp2s(devs)) {
             const samples = noteDrainSample(panelDrainSamples.get(p.sn) ?? [], panelPoolNetWatts(devs, p).netW, nowMs);
             panelDrainSamples.set(p.sn, samples);
-            const pr = panelDrainRunway(p, samples, nowMs);
+            const pr = panelDrainRunway(p, samples, nowMs, panelPoolBasisTracker.evaluate(devs, p, nowMs));
             lastPanelRunways.set(p.sn, pr);
             const g = livePoolGridBackstop(devs, p.sn);
             panelRunwayGrid.set(p.sn, g);

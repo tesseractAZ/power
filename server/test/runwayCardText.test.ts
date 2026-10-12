@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { holdsLabel, troughTight, recentLoadCaption, gridNote, TROUGH_TIGHT_FRAC } from '../../web/src/cards/runwayText.js';
+import { holdsLabel, troughTight, recentLoadCaption, gridNote, fullCaption, fullTitle, TROUGH_TIGHT_FRAC } from '../../web/src/cards/runwayText.js';
 import { resolveGridBackstop } from '../src/gridState.js';
 
 const FULL = 92.16, RESERVE = 14.75;
@@ -89,7 +89,9 @@ test('the card renders the model it runs: header, headline, captions, one-decima
   assert.ok(card.includes("? (troughTight(runway) ? 'text-ink' : 'text-ok')"), 'tight is neutral — never more alarming than a real crossing');
   assert.ok(card.includes('const note = gridNote(runway.grid);') && card.includes('{note && '), 'the grid note comes from gridNote');
   assert.ok(card.includes('sub={recentLoadCaption(runway.recentLoadBasis)}'));
-  assert.ok(card.includes('`of ${runway.backupFullKwh.toFixed(1)} full`'));
+  // v1.187.19 — the one-decimal capacity moved into fullCaption (runwayText.ts), which adds the basis.
+  assert.ok(card.includes('sub={fullCaption(runway)}'));
+  assert.equal(fullCaption({ backupFullKwh: 92.16 }), 'of 92.2 full');
   assert.ok(card.includes('kWh load, no predicted EV`'), 'the runway load says it excludes the PREDICTED-EV layer (the curve itself averages past EV charging)');
 });
 
@@ -103,4 +105,25 @@ test('★★ the display PV sum carries the same bias correction and ceiling as 
   const an = src('../src/analytics.ts');
   assert.ok(an.includes('restoredPvSum += restoredCeil != null ? Math.min(pv * pvBiasFactor, restoredCeil) : pv * pvBiasFactor;'),
     'without it the dashboard (52.9 kWh) and Home Assistant (51.4 kWh) disagree by exactly pvBiasFactor');
+});
+
+test('v1.187.19 — "of N full" says when N is the packs\' measured capacity, not the panel\'s nameplate', () => {
+  assert.equal(fullCaption({ backupFullKwh: null, capacityScale: 0.944, capacityBasis: 'measured' }), undefined);
+  assert.equal(fullCaption({ backupFullKwh: 92.16, capacityScale: 1, capacityBasis: 'nameplate' }), 'of 92.2 full');
+  assert.equal(fullCaption({ backupFullKwh: 92.16 }), 'of 92.2 full', 'an older server without the basis: unchanged');
+  assert.equal(fullCaption({ backupFullKwh: 87.0, capacityScale: 0.944, capacityBasis: 'measured' }), 'of 87.0 full · measured 94% of nameplate');
+  assert.equal(fullCaption({ backupFullKwh: 87.0, capacityScale: 0.944, capacityBasis: 'held' }), 'of 87.0 full · last measured 94% of nameplate');
+  assert.equal(fullCaption({ backupFullKwh: 86.0, capacityScale: 0.933, capacityBasis: 'min-known' }), 'of 86.0 full · lowest measured 93% of nameplate');
+  const card = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../web/src/cards/RunwayCard.tsx'), 'utf8');
+  assert.ok(card.includes('sub={fullCaption(runway)}'), 'the card renders the caption');
+  assert.ok(card.includes('title={fullTitle(runway)}'), 'and the tooltip from the same basis');
+});
+
+test('v1.187.19 — the "Backup now" tooltip says measured only on a measured basis', () => {
+  for (const b of ['measured', 'held', 'min-known'] as const) assert.match(fullTitle({ capacityBasis: b }), /measured full-charge capacity/);
+  for (const b of ['nameplate', null, undefined] as const) {
+    const t = fullTitle({ capacityBasis: b });
+    assert.match(t, /nameplate capacity/);
+    assert.doesNotMatch(t, /measured full-charge/);
+  }
 });
