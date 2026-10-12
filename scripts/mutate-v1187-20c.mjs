@@ -17,6 +17,7 @@
  *   C-xiii  the worker log is not wired to the charge-curve builder
  *   C-xiv   the chargeCurve budget back to 30 s
  *   C-xv    report() ignores the per-report budget (every report 30 s again)
+ *   C-xvi   the retry attempt gets the 30 s default instead of the per-report budget
  *
  *   node scripts/mutate-v1187-20c.mjs
  */
@@ -134,6 +135,13 @@ const MUTANTS = [
     find: "requestWithRetry<T>({ kind: 'report', name, args: a }, reportTimeoutMs(name, requestTimeoutMs))",
     to: "requestWithRetry<T>({ kind: 'report', name, args: a } /* MUTANT */)",
     why: 'The override table exists but the request path never reads it.',
+  },
+  {
+    id: 'C-xvi. ★★ the retry attempt gets the 30 s default instead of the per-report budget',
+    file: CLIENT,
+    find: '        }, timeoutMs);',
+    to: '        }, retry ? requestTimeoutMs : timeoutMs); /* MUTANT */',
+    why: 'An unanswered chargeCurve is rejected at 120 s instead of 180 s: a cold build that finishes between the two (beside the boot warm pass) fails instead of being answered.',
   },
 ];
 

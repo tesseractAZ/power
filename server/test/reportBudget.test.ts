@@ -59,7 +59,7 @@ test('★★★ a cold chargeCurve build that answers after 36.9 s settles insid
   }
 });
 
-test('★★ the budget is still a bound: an unanswered chargeCurve times out at 90 s, retries once, then rejects', async (t) => {
+test('★★ the budget is still a bound, and the retry gets the same 90 s: an unanswered chargeCurve times out at 90 s, retries once, then rejects at 180 s', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const fw = new FakeWorker();
   const logs: string[] = [];
@@ -77,9 +77,41 @@ test('★★ the budget is still a bound: an unanswered chargeCurve times out at
     await turn();
     assert.ok(logs.some((l) => l.includes("'report:chargeCurve' timed out — retrying once")));
     assert.equal(fw.reports('chargeCurve').length, 2, 'the retry, joining the worker\'s running scan');
-    t.mock.timers.tick(90_000);
+    // The retry's own budget is 90 s too, not the 30 s default: a cold build that finishes between
+    // 120 s and 180 s after the request (beside the boot warm pass) is still answered.
+    t.mock.timers.tick(89_999);
+    await turn();
+    assert.equal(rejected, null, 'the retry is still pending 1 ms before its own 90 s budget');
+    t.mock.timers.tick(1);
     await turn();
     assert.match(String(rejected), /analytics request 'report:chargeCurve' timed out/);
+    assert.equal(fw.reports('chargeCurve').length, 2, 'one retry only');
+  } finally {
+    c.stop();
+  }
+});
+
+test('★★ a cold chargeCurve build that answers at 150 s (past a 30 s retry budget, inside 90 s) still settles the caller', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const fw = new FakeWorker();
+  const logs: string[] = [];
+  const c = createAnalyticsClient('unused.db', (m) => logs.push(m), { spawnWorker: () => fw });
+  try {
+    c.pushSnapshot(withDevices());
+    const p = c.report('chargeCurve');
+    let rejected: Error | null = null;
+    p.catch((e) => { rejected = e; });
+    await turn();
+    t.mock.timers.tick(90_000);
+    await turn();
+    assert.equal(fw.reports('chargeCurve').length, 2, 'the retry is posted at 90 s');
+    t.mock.timers.tick(60_000); // 150 s after the request: a 30 s retry budget would have rejected at 120 s
+    await turn();
+    assert.equal(rejected, null, 'still pending at 150 s');
+    // The worker's single-flight answers both attempts with the one scan; the first answer settles the caller.
+    fw.answer(fw.reports('chargeCurve')[0].id, { generatedAt: 2, packs: [] });
+    assert.deepEqual(await p, { generatedAt: 2, packs: [] });
+    assert.equal(logs.filter((l) => l.includes('chargeCurve')).length, 1, `only the one retry line: ${logs.join(' | ')}`);
   } finally {
     c.stop();
   }
