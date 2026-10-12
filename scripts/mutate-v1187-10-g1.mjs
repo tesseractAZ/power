@@ -303,8 +303,8 @@ const MUTANTS = [
   {
     id: 'C17-ix. ★★ the drift tick classifies without the commanded writes',
     file: IDX, tests: [T_FC],
-    find: '        forceChargeCommands: forceChargeCommandsOf(act),',
-    to: '        forceChargeCommands: null, /* MUTANT */',
+    find: '    forceChargeCommands: forceChargeCommandsOf(act),',
+    to: '    forceChargeCommands: null, /* MUTANT */',
     why: 'Every force-charge movement, ours included, is logged as panel-side.',
   },
 

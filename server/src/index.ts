@@ -40,10 +40,10 @@ import {
   FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnReadbackStatus,
 } from './nightForceCharge.js';
 import {
-  extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
-  loadConfirmedSurface, saveConfirmedSurface, renderDriftPush,
-  type SettingChange, type SurfaceDevice,
+  extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
+  type ActuatorContext, type SurfaceDevice,
 } from './settingsDrift.js';
+import { DriftHoldQueue, driftHeldPath, settleDriftTick, type DriftHoldLog } from './settingsDriftHold.js';
 import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } from './alertMonitor.js';
 import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, isIncompleteDay, computeEmpiricalRte, computeLocalPackRte, type VendorDayRecord } from './energyHistory.js';
 import { exportVendorStatistics } from './haStatistics.js';
@@ -4993,11 +4993,22 @@ async function runChargeNowTick(): Promise<void> {
  * two consecutive observations, classify the actuator's own reserve writes,
  * and push one batched [Medium] notification for external changes — held
  * through the notify quiet window like resolves are.
+ * v1.187.20 — the held push is ON DISK (settings-drift-held.json, beside the
+ * baseline), rehydrated here at module load, before the first tick: a restart
+ * inside the quiet window lost it on 2026-10-10 (settingsDriftHold.ts). What
+ * follows the evaluation (adopt, or classify → commit → flush on every tick)
+ * is settleDriftTick there, so the tests drive the code that ships.
  */
 const settingsDriftState = freshDriftState();
 settingsDriftState.confirmed = loadConfirmedSurface(); // null on first boot = silent adoption
-let driftPendingPush: SettingChange[] = [];
 const DRIFT_QUIET = parseNotifyQuiet(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
+const driftHoldLog: DriftHoldLog = { info: (m) => app.log.info(m), warn: (m) => app.log.warn(m) };
+const driftHold = new DriftHoldQueue({
+  path: driftHeldPath(),
+  isQuiet: (now) => DRIFT_QUIET != null && inNotifyQuiet(now, DRIFT_QUIET),
+  send: (msg) => sendNotification(loadNotifyConfig(), msg),
+  log: driftHoldLog,
+});
 
 function settingsSurfaceDevices(): SurfaceDevice[] {
   const snap = store.get();
@@ -5010,94 +5021,55 @@ function settingsSurfaceDevices(): SurfaceDevice[] {
   return out;
 }
 
+/**
+ * The classifier's context for a confirmed drift change: which of this add-on's own writes
+ * are in flight. Read from this module's actuator memory; settleDriftTick calls it only when
+ * a change is confirmed.
+ */
+function driftActuatorContext(nowMs: number): ActuatorContext {
+  const act = nightActuationMem;
+  const nightActive =
+    act.day != null &&
+    ((act.appliedAtMs != null && act.revertedAtMs == null) ||
+     (act.announcedAtMs != null && act.appliedAtMs == null && act.cancelled !== true) ||
+     (act.revertedAtMs != null && nowMs - act.revertedAtMs < 15 * 60_000));
+  // v1.115.0 — an owner-floor write through /api/reserve-floor was being
+  // reported back as an EXTERNAL change at warn level ~3 min later (the
+  // add-on flagging its own write as third-party tampering). Own-write
+  // attribution covered the night-charge path only. The grace window is
+  // supplied here so classifyChange stays clock-free.
+  const ownerFloorPct =
+    ownerFloorWrite != null && nowMs - ownerFloorWrite.atMs <= OWNER_FLOOR_WRITE_GRACE_MS
+      ? ownerFloorWrite.pct
+      : null;
+  // v1.165.0 — our own force-charge ON/OFF (and the ceiling sync) are not
+  // "external". Same 15-minute tail as the reserve: the slots read back OFF a
+  // poll or two after the write.
+  const forceChargeActive =
+    forceChargeInFlight(act) ||
+    (act.forceChargeOffVerifiedAtMs != null && nowMs - act.forceChargeOffVerifiedAtMs < 15 * 60_000) ||
+    (act.forceChargeCeilingAttemptedAtMs != null && nowMs - act.forceChargeCeilingAttemptedAtMs < 15 * 60_000) ||
+    // v1.173.0 — and the RESTORE: on a night whose force-charge never started, the 05:00
+    // restore of the panel's own ceiling was pushed as an external "Setting changed".
+    (act.forceChargeCeilingRestoreLastAttemptMs != null && nowMs - act.forceChargeCeilingRestoreLastAttemptMs < 15 * 60_000);
+  // v1.187.10 — and only what it COMMANDED is its own write (forceChargeCommandsOf):
+  // inside that window the panel's own ceiling stop turns slots OFF before ours.
+  return {
+    targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct, forceChargeActive,
+    forceChargeCommands: forceChargeCommandsOf(act),
+  };
+}
+
 function runSettingsDriftTick(): void {
   try {
     const surface = extractSettingsSurface(settingsSurfaceDevices());
     const evaln = evaluateDrift(settingsDriftState, surface);
-    if (evaln.adoptedBaseline) {
-      saveConfirmedSurface(settingsDriftState.confirmed!);
-      app.log.info(`settings-drift: baseline adopted (${Object.keys(settingsDriftState.confirmed!).length} keys) — changes announce from here on`);
-      return;
-    }
-    if (evaln.confirmedChanges.length > 0) {
-      const act = nightActuationMem;
-      const nowMs = Date.now();
-      const nightActive =
-        act.day != null &&
-        ((act.appliedAtMs != null && act.revertedAtMs == null) ||
-         (act.announcedAtMs != null && act.appliedAtMs == null && act.cancelled !== true) ||
-         (act.revertedAtMs != null && nowMs - act.revertedAtMs < 15 * 60_000));
-      // v1.115.0 — an owner-floor write through /api/reserve-floor was being
-      // reported back as an EXTERNAL change at warn level ~3 min later (the
-      // add-on flagging its own write as third-party tampering). Own-write
-      // attribution covered the night-charge path only. The grace window is
-      // supplied here so classifyChange stays clock-free.
-      const ownerFloorPct =
-        ownerFloorWrite != null && nowMs - ownerFloorWrite.atMs <= OWNER_FLOOR_WRITE_GRACE_MS
-          ? ownerFloorWrite.pct
-          : null;
-      // v1.165.0 — our own force-charge ON/OFF (and the ceiling sync) are not
-      // "external". Same 15-minute tail as the reserve: the slots read back OFF a
-      // poll or two after the write.
-      const forceChargeActive =
-        forceChargeInFlight(act) ||
-        (act.forceChargeOffVerifiedAtMs != null && nowMs - act.forceChargeOffVerifiedAtMs < 15 * 60_000) ||
-        (act.forceChargeCeilingAttemptedAtMs != null && nowMs - act.forceChargeCeilingAttemptedAtMs < 15 * 60_000) ||
-        // v1.173.0 — and the RESTORE: on a night whose force-charge never started, the 05:00
-        // restore of the panel's own ceiling was pushed as an external "Setting changed".
-        (act.forceChargeCeilingRestoreLastAttemptMs != null && nowMs - act.forceChargeCeilingRestoreLastAttemptMs < 15 * 60_000);
-      // v1.187.10 — and only what it COMMANDED is its own write (forceChargeCommandsOf):
-      // inside that window the panel's own ceiling stop turns slots OFF before ours.
-      const ctx = {
-        targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct, forceChargeActive,
-        forceChargeCommands: forceChargeCommandsOf(act),
-      };
-      for (const c of evaln.confirmedChanges) {
-        const kind = classifyChange(c, ctx);
-        if (kind === 'own-write') {
-          app.log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (this add-on's night-charge write — not announced)`);
-        } else if (kind === 'panel-side') {
-          app.log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (changed on the panel during this add-on's night force-charge, not by it — the panel's own ceiling stop or a manual Charge Now; not announced)`);
-        } else {
-          app.log.warn(`settings-drift: EXTERNAL change — ${c.key} ${c.from} → ${c.to}`);
-          driftPendingPush.push(c);
-        }
-      }
-      saveConfirmedSurface(settingsDriftState.confirmed!);
-    }
-    if (driftPendingPush.length > 0 && !(DRIFT_QUIET != null && inNotifyQuiet(new Date(), DRIFT_QUIET))) {
-      const batch = driftPendingPush;
-      driftPendingPush = [];
-      const msg = renderDriftPush(batch);
-      // v1.119.0 — a reserve-floor change is NOT cosmetic drift: it moves the
-      // value the floor alarm defends and the night-charge planner sizes
-      // against. On 2026-08-30 EcoFlow Storm Guard raised it 20 -> 40 and the
-      // operator only learned of it from a later audit. Give it its own dedupId
-      // so it can never be coalesced away behind an unrelated settings batch,
-      // and name the consequence in the title.
-      const floorChange = batch.find((c) => c.key.endsWith(' · backupReserveSoc'));
-      const dedupId = floorChange ? 'settings_drift_reserve_floor' : 'settings_drift';
-      const title = floorChange
-        ? `Reserve floor changed externally: ${floorChange.from}% → ${floorChange.to}%`
-        : msg.title;
-      const body = floorChange
-        ? `${msg.body}\n\nThis is the floor the backup-pool alarm defends and the night-charge planner sizes against. `
-          + 'It was not written by this add-on — EcoFlow Storm Guard and the vendor app can both move it.'
-        : msg.body;
-      // v1.119.0 — LOG THE OUTCOME. This path previously logged nothing on
-      // success and nothing on a non-throwing failure, so "was the operator
-      // told?" was unanswerable from any artifact — the exact question the
-      // 08-31 audit could not settle. Mirrors alertMonitor's "notify: sent".
-      void sendNotification(loadNotifyConfig(), { severity: 'warning', dedupId, title, body })
-        .then(() => {
-          app.log.info(`settings-drift: push sent — ${title} (${batch.length} change(s), dedupId ${dedupId})`);
-        })
-        .catch((e: any) => {
-          // best-effort: on failure, requeue so the next tick retries
-          driftPendingPush.unshift(...batch);
-          app.log.warn(`settings-drift: push failed (${e?.message ?? e}) — will retry`);
-        });
-    }
+    // v1.187.20 — adopt, or classify → commit → flush (the flush on EVERY tick): settleDriftTick
+    // in settingsDriftHold.ts. The classify and commit run before it returns; the push resolves later.
+    void settleDriftTick({
+      queue: driftHold, state: settingsDriftState, evaluation: evaln, now: new Date(), log: driftHoldLog,
+      context: driftActuatorContext,
+    }).catch((e: any) => app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`));
   } catch (e: any) {
     app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`);
   }
