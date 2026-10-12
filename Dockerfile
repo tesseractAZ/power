@@ -52,8 +52,11 @@ COPY --from=webbuilder /build/web/dist ./web/dist
 # v0.9.55 — bundle the prebuilt HACS Lovelace cards so the add-on can
 
 # s6 service runner — bashio translates HA Options into env vars at start time.
+# v1.187.20 — plus the backup hook (config.yaml backup_pre / backup_post). The Supervisor execs it
+# by path at BACKUP time, so a missing execute bit would fail every backup, not the build; it is
+# set here explicitly rather than trusting the build context's file mode.
 COPY rootfs/ /
-RUN chmod a+x /etc/services.d/ecoflow-panel/run
+RUN chmod a+x /etc/services.d/ecoflow-panel/run /usr/bin/ecoflow-panel-backup-hook
 
 # Web + API; telnet TUI
 EXPOSE 8787 2323

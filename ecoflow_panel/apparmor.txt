@@ -93,6 +93,12 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
 
   # s6-overlay init system (HA base image uses s6). The `w` in the rwix grants
   # on /etc/* and /command below is subtracted by the v1.187.15 write-locks.
+  # v1.187.20 — the backup hook runs under THIS profile too (the Supervisor
+  # `docker exec`s config.yaml backup_pre / backup_post into the container):
+  # /usr/bin/ecoflow-panel-backup-hook (sh, /bin/** ix) runs /usr/bin/node, which
+  # connects to 127.0.0.1:8787 (network inet stream) and may append to
+  # /share/ecoflow-panel/backup-window.jsonl or /data (`file,`). A rule removed
+  # here fails at BACKUP time; apparmorProfile.test.ts pins what the hook needs.
   /init ix,
   /bin/** ix,
   /usr/bin/** ix,
