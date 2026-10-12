@@ -29,6 +29,12 @@
  *   Y1–Y2 expiry: a merge does not refresh the age; no expiry at flush time
  *   AA    the adoption tick does not save the first baseline
  *
+ *   Round 3 (the review of 3e3fb27; X8 SURVIVED it, X9 is the unlogged recovery it found):
+ *   X8    the deferred baseline is retried only while something is held: a batch delivered while
+ *         the sidecar was down leaves the old baseline, and a restart pushes it again
+ *   X9–X10 the recovery line: dropped (a save that lands inside commit() was never logged), or
+ *         logged for every save
+ *
  *   node scripts/mutate-v1187-20a.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -249,8 +255,8 @@ const MUTANTS = [
   {
     id: 'X2. ★★★ a deferred baseline save is never retried (review finding 4)',
     file: HOLD,
-    find: '      if (this.pendingBaseline != null && this.onDisk && this.runPendingBaseline()) {',
-    to: '      if (false) { /* MUTANT */',
+    find: '      if (this.pendingBaseline != null && this.onDisk) this.runPendingBaseline();',
+    to: '      /* MUTANT */',
     why: 'The old baseline stays on disk after the push goes out; the next restart pushes it a second time.',
   },
   {
@@ -263,8 +269,8 @@ const MUTANTS = [
   {
     id: 'X4. ★★★ the deferred baseline is saved while the held change is memory-only',
     file: HOLD,
-    find: '      if (this.pendingBaseline != null && this.onDisk && this.runPendingBaseline()) {',
-    to: '      if (this.pendingBaseline != null && this.runPendingBaseline()) { /* MUTANT */',
+    find: '      if (this.pendingBaseline != null && this.onDisk) this.runPendingBaseline();',
+    to: '      if (this.pendingBaseline != null) this.runPendingBaseline(); /* MUTANT */',
     why: 'The retry defeats the commit order: a restart finds a baseline hiding a change nothing holds.',
   },
   {
@@ -287,6 +293,27 @@ const MUTANTS = [
     find: '      if (wasOnDisk) {',
     to: '      if (true) { /* MUTANT */',
     why: 'The same, for the sidecar: one line per tick for as long as the disk is down.',
+  },
+  {
+    id: 'X8. ★★★ the deferred baseline is retried only while something is still held (review of 3e3fb27)',
+    file: HOLD,
+    find: '      if (this.pendingBaseline != null && this.onDisk) this.runPendingBaseline();',
+    to: '      if (this.entries.length > 0 && this.pendingBaseline != null && this.onDisk) this.runPendingBaseline(); /* MUTANT */',
+    why: 'The batch went out at 06:00 while the sidecar was down; the disk recovers at 06:30 with nothing held, the old baseline stays, and a restart pushes the change a second time.',
+  },
+  {
+    id: 'X9. a deferred baseline save that lands is not logged (review of 3e3fb27)',
+    file: HOLD,
+    find: '      this.log.info(`settings-drift: deferred baseline saved (${this.entries.length} held change(s) on disk)`);',
+    to: '      /* MUTANT */',
+    why: 'The failure is logged and its end is not: the log cannot say whether a restart would push the change again.',
+  },
+  {
+    id: 'X10. every baseline save is logged as a recovery',
+    file: HOLD,
+    find: '    if (this.baselineFailing || this.baselineDeferred) {',
+    to: '    if (true) { /* MUTANT */',
+    why: 'Each confirmed change logs "deferred baseline saved" although nothing was deferred: the recovery line stops meaning anything.',
   },
   {
     id: 'Y1. ★ a merge no longer refreshes the age (review finding 5)',

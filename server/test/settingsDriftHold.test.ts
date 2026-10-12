@@ -128,6 +128,7 @@ test('★★★ THE 10-10 NIGHT: external change at 23:00 → restart at 23:30 �
   assert.equal(p1.sends.length, 0, 'quiet hours: nothing pushed at 23:01');
   // The baseline on disk already holds the NEW value — exactly the trap: nothing can re-detect it.
   assert.equal(loadConfirmedSurface()![MODE], 2);
+  assert.ok(!p1.logs.some((l) => l.includes('deferred baseline saved')), 'a save that lands at its own commit is no recovery');
 
   // 23:30 — the deploy restart. p1 (and its memory) is gone.
   const p2 = boot(dir);
@@ -554,7 +555,36 @@ test('★★★ a TRANSIENT sidecar failure: once the disk recovers the held cha
   assert.equal(p1.sends.length + p2.sends.length, 1, 'exactly one push');
 });
 
-test('★★ a baseline save that THROWS stays pending and is retried every tick until it lands (logged once)', async () => {
+test('★★★ the sidecar stays down THROUGH the 06:00 push and recovers at 06:30: the deferred baseline is saved with nothing left to hold — one push, none after a 12:00 restart', async () => {
+  const dir = freshDir();
+  const blocker = join(dir, 'held-dir');
+  writeFileSync(blocker, 'x'); // a FILE where the sidecar's directory should be: sidecar writes fail
+  const heldPath = join(blocker, 'settings-drift-held.json');
+  const p1 = boot(dir, undefined, heldPath);
+  await p1.tick(at(10, 18), [shp2()]);
+  await p1.tick(at(10, 23, 0), [shp2({ smartBackupMode: 2 })]);
+  assert.equal(await p1.tick(at(10, 23, 1), [shp2({ smartBackupMode: 2 })]), 'held');
+  assert.equal(loadConfirmedSurface()![MODE], 0, 'deferred: the change is in memory only');
+  // 06:00 — the window ends with the disk still down: the push goes out, its clear cannot be written.
+  assert.equal(await p1.tick(at(11, 6, 0), [shp2({ smartBackupMode: 2 })]), 'sent');
+  assert.deepEqual(p1.queue.held(), []);
+  assert.equal(await p1.tick(at(11, 6, 15), [shp2({ smartBackupMode: 2 })]), 'empty');
+  assert.equal(loadConfirmedSurface()![MODE], 0, 'still deferred: the held set never reached disk');
+  // 06:30 — the disk recovers. Nothing is held any more, and the deferred baseline must still land.
+  rmSync(blocker);
+  assert.equal(await p1.tick(at(11, 6, 30), [shp2({ smartBackupMode: 2 })]), 'empty');
+  assert.deepEqual(JSON.parse(readFileSync(heldPath, 'utf8')).held, [], 'the (empty) held set is on disk');
+  assert.equal(loadConfirmedSurface()![MODE], 2, 'the deferred baseline is saved although nothing is held');
+  assert.deepEqual(p1.logs.filter((l) => l.includes('deferred baseline saved')),
+    ['INFO settings-drift: deferred baseline saved (0 held change(s) on disk)'], p1.logs.join(' | '));
+  // 12:00 — the restart finds the new baseline and an empty sidecar: nothing to announce again.
+  const p2 = boot(dir, undefined, heldPath);
+  await p2.tick(at(11, 12, 0), [shp2({ smartBackupMode: 2 })]);
+  assert.equal(await p2.tick(at(11, 12, 1), [shp2({ smartBackupMode: 2 })]), 'empty');
+  assert.equal(p1.sends.length + p2.sends.length, 1, 'exactly one push in total');
+});
+
+test('★★ a baseline save that THROWS stays pending and is retried every tick until it lands (logged once) — here inside commit(), on a tick that confirms another change', async () => {
   const dir = freshDir();
   let failSaves = 0;
   const p = boot(dir, undefined, undefined, (surface) => {
@@ -566,12 +596,18 @@ test('★★ a baseline save that THROWS stays pending and is retried every tick
   await p.tick(at(10, 23, 0), [shp2({ smartBackupMode: 2 })]);
   assert.equal(await p.tick(at(10, 23, 1), [shp2({ smartBackupMode: 2 })]), 'held');
   assert.equal(loadConfirmedSurface()![MODE], 0);
-  assert.equal(await p.tick(at(10, 23, 2), [shp2({ smartBackupMode: 2 })]), 'held');
+  // 23:02 — the floor moves 20 → 40 (a first sighting: nothing confirmed); the retry fails again.
+  const both = [shp2({ smartBackupMode: 2, backupReserveSoc: 40 })];
+  assert.equal(await p.tick(at(10, 23, 2), both), 'held');
   assert.equal(loadConfirmedSurface()![MODE], 0);
-  assert.equal(await p.tick(at(10, 23, 3), [shp2({ smartBackupMode: 2 })]), 'held');
-  assert.equal(loadConfirmedSurface()![MODE], 2, 'saved on the first retry that succeeds');
+  assert.equal(failSaves, 0, 'the save was retried on every tick');
+  // 23:03 — the floor is confirmed: commit() holds it, and its own save is the first that lands.
+  assert.equal(await p.tick(at(10, 23, 3), both), 'held');
+  const base = loadConfirmedSurface()!;
+  assert.deepEqual([base[MODE], base[FLOOR]], [2, 40], 'saved on the first attempt that succeeds');
   assert.equal(p.logs.filter((l) => l.startsWith('WARN settings-drift: baseline save failed (ENOSPC')).length, 1, p.logs.join(' | '));
-  assert.ok(p.logs.some((l) => l.startsWith('INFO settings-drift: deferred baseline saved')));
+  assert.deepEqual(p.logs.filter((l) => l.includes('deferred baseline saved')),
+    ['INFO settings-drift: deferred baseline saved (2 held change(s) on disk)'], 'the recovery inside commit() is logged, once');
 });
 
 test('★ a sidecar write that fails AFTER the push (the clear) is retried on the next tick — a later restart does not send it again', async () => {

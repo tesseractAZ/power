@@ -18,8 +18,10 @@
  *    restart re-detects the change instead of losing it.
  *  - A DEFERRED BASELINE IS RETRIED: a baseline save that commit could not make (the sidecar
  *    write failed, or the save itself threw) stays pending. Every flush retries a failed sidecar
- *    write and, once the held set is on disk, the pending save. Without that, the old baseline
- *    stayed on disk after the push went out, and the next restart pushed the change again.
+ *    write and, once the held set is on disk, the pending save — also when nothing is held any
+ *    more (the batch went out while the sidecar was down). Without that, the old baseline
+ *    stayed on disk after the push went out, and the next restart pushed the change again. The
+ *    save that finally lands is logged once ("deferred baseline saved"), from either caller.
  *  - REHYDRATED AT CONSTRUCTION: the queue reads the sidecar when it is built (index.ts builds it
  *    at module load, before the first drift tick). An unreadable or malformed sidecar is logged
  *    and ignored; it never throws into boot.
@@ -171,6 +173,9 @@ export class DriftHoldQueue {
   private pendingBaseline: (() => void) | null = null;
   /** True while the pending baseline save keeps failing: logged once, not on every retry. */
   private baselineFailing = false;
+  /** True once commit() deferred the pending save (the held set was not on disk): the save that
+   *  finally lands is logged, like one that lands after baselineFailing. */
+  private baselineDeferred = false;
   /** The unresolved send, if any. Compared by identity, so a late resolution of a send that was
    *  given up on never releases the guard of the one after it. */
   private flight: { sinceMs: number } | null = null;
@@ -230,6 +235,7 @@ export class DriftHoldQueue {
   commit(external: SettingChange[], nowMs: number, saveBaseline: () => void): boolean {
     this.pendingBaseline = saveBaseline;
     if (!this.hold(external, nowMs)) {
+      this.baselineDeferred = true;
       this.log.warn('settings-drift: baseline NOT saved — the held change(s) are not on disk; '
         + 'retried every tick, and a restart before then re-detects them instead of losing them');
       return false;
@@ -237,7 +243,12 @@ export class DriftHoldQueue {
     return this.runPendingBaseline();
   }
 
-  /** Run the pending baseline save, if any; it stays pending when it throws. */
+  /**
+   * Run the pending baseline save, if any; it stays pending when it throws. A save that lands
+   * after a failure or a deferral logs its recovery HERE, so the line covers both callers: a
+   * flush retry, and a commit() on a later tick that confirms another change. Both run it only
+   * once the held set is on disk — possibly empty, when the batch was delivered meanwhile.
+   */
   private runPendingBaseline(): boolean {
     const save = this.pendingBaseline;
     if (save == null) return true;
@@ -248,7 +259,11 @@ export class DriftHoldQueue {
       this.baselineFailing = true;
       return false;
     }
+    if (this.baselineFailing || this.baselineDeferred) {
+      this.log.info(`settings-drift: deferred baseline saved (${this.entries.length} held change(s) on disk)`);
+    }
     this.baselineFailing = false;
+    this.baselineDeferred = false;
     this.pendingBaseline = null;
     return true;
   }
@@ -264,9 +279,10 @@ export class DriftHoldQueue {
       // A failed sidecar write is retried on every tick, not only at the next confirmed change:
       // until it lands, the sidecar on disk is stale (a change missing, or one already pushed).
       if (bounded || !this.onDisk) this.persist();
-      if (this.pendingBaseline != null && this.onDisk && this.runPendingBaseline()) {
-        this.log.info('settings-drift: deferred baseline saved — the held change(s) it hides are on disk');
-      }
+      // The deferred baseline is retried whether or not anything is still held: a batch delivered
+      // while the sidecar was down leaves the old baseline on disk, and until this save lands a
+      // restart re-detects the change and pushes it a second time.
+      if (this.pendingBaseline != null && this.onDisk) this.runPendingBaseline();
       if (this.entries.length === 0) return 'empty';
       if (this.flight != null) {
         if (now.getTime() - this.flight.sinceMs < this.sendDeadlineMs) return 'in-flight';
