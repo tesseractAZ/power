@@ -279,7 +279,7 @@ Every configuration option is documented in
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 4,252 tests
+cd server && npm install && npm test     # 4,357 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -335,7 +335,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **96 harnesses** (`scripts/mutate-*.mjs`) holding **2021
+regression. There are **100 harnesses** (`scripts/mutate-*.mjs`) holding **2148
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that

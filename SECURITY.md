@@ -83,6 +83,15 @@ outside that boundary needs to reach it.
   registered without it. The chime, broadcast-configuration, database-export,
   statistics-export, reserve-floor and defective-pack routes are also
   rate-limited.
+- **The two backup-window hook routes are loopback-only** (v1.187.20).
+  `POST /api/internal/backup-window/pre` and `/post` are what the Supervisor's
+  `backup_pre` / `backup_post` hook calls from inside the container, with no
+  token. They answer only a TCP peer on the container's own loopback
+  (`127.0.0.1`, `::ffff:127.0.0.1`, `::1`), read from the raw socket, never from
+  a header; the LAN port and Ingress get 403. They can only pause and resume the
+  database's WAL checkpoints for a backup copy, and a 10-minute dead-man resumes
+  them if `post` never arrives. The write-route test scans every server module,
+  so a route registered outside `index.ts` with neither gate fails the build.
 
 Do not forward ports 8787 or 2323 to the internet.
 
