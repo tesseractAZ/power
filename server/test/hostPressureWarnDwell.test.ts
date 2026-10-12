@@ -31,10 +31,10 @@ delete process.env.HOST_PRESSURE_CRIT_DWELL_S;
 
 const {
   computeAlerts, hostPressureWarnAudible, hostPressureWarnDwellMsFrom, hostPressureDwellText,
-  HOST_PRESSURE_WARN_DWELL_MS, HOST_PRESSURE_CRIT_DWELL_MS, _resetHostPressureDwellForTest,
+  HOST_PRESSURE_WARN_DWELL_MS, HOST_PRESSURE_CRIT_DWELL_MS, HOST_PRESSURE_LATCH_CLEAR_MS, _resetHostPressureDwellForTest,
 } = await import('../src/alerts.js');
 const { ingestLagProbe, tickAssess, _resetVitalsForTest } = await import('../src/selfVitals.js');
-const { conditionFromAlerts, speakableAlerts } = await import('../src/broadcast.js');
+const { conditionFromAlerts, speakableAlerts, CONDITION_CLEAR_DWELL_MS } = await import('../src/broadcast.js');
 const { risingEdgePushes } = await import('../src/alertMonitor.js');
 
 const SEC = 1_000;
@@ -169,29 +169,96 @@ test('★★ a crit spike that never sustains is as silent as a warning blip', (
   assert.deepEqual(transitions(ticks), [], 'no yellow, no red');
 });
 
-/* ══ the dwell resets after recovery ═══════════════════════════════════════════════════════ */
+/* ══ the end of an episode ═════════════════════════════════════════════════════════════════ */
 
-test('★★★ the dwell resets after recovery: a later blip is held again, and a later episode waits its own dwell', () => {
-  // Episode 1: 0-360 s (yellow at 300), ok at 420. Episode 2: from 480 s, held to 840 s.
+test('★★★ v1.187.20 (review): one ok assessment during sustained pressure does not end an audible episode — the warning is back audible at once', () => {
+  // The review's sequence: pressure 0-360 s (yellow at 300), ONE ok assessment at 420 s, pressure
+  // again from 480 s. Ended on that ok, the returning warning was held another 300 s
+  // (green→yellow@780): the broadcast's held green stood its clear dwell under it and "All clear"
+  // was spoken with the warning back on the card, then a second yellow.
   const ticks = run(0, 900, (s) => (s <= 360 || s >= 480 ? 4.2 : 0.8));
-  assert.deepEqual(transitions(ticks), ['green→yellow@300', 'yellow→green@420', 'green→yellow@780'],
+  assert.deepEqual(transitions(ticks), ['green→yellow@300', 'yellow→green@420', 'green→yellow@480'],
+    '★ the dip is 60 s, inside the clear window: the warning is audible again the moment it returns');
+  for (const t of ticks.filter((x) => x.s >= 480)) {
+    assert.equal(t.hp?.id, 'host-pressure-warn');
+    assert.notEqual(t.hp?.audible, false, `★ not held again at +${t.s} s`);
+    assert.ok(!t.hp?.detail.includes('Not announced'), 'the card does not say it is held');
+  }
+  // One identity across the dip, so the broadcast's flicker guard reads the return as the same yellow.
+  const fps = new Set(ticks.filter((t) => t.level === 'yellow').map((t) => conditionFromAlerts(t.spoken).warningFingerprints.join('|')));
+  assert.equal(fps.size, 1);
+});
+
+test('★★★ v1.187.20 (review): an audible episode ends once ok has stood the clear window — a later episode then waits its own dwell', () => {
+  // Episode 1: 0-360 s (yellow at 300); ok assessed at 420, 480, 540 and 600 s; the pass at 600 s
+  // is 180 s into the ok, and ends it. Episode 2: from 660 s, held to 960 s.
+  const ticks = run(0, 1020, (s) => (s <= 360 || s >= 660 ? 4.2 : 0.8));
+  assert.deepEqual(transitions(ticks), ['green→yellow@300', 'yellow→green@420', 'green→yellow@960'],
     '★ the second episode is audible 300 s after ITS onset, not at once');
-  for (const t of ticks.filter((x) => x.s >= 480 && x.s < 780)) {
+  for (const t of ticks.filter((x) => x.s >= 660 && x.s < 960)) {
     assert.equal(t.hp?.audible, false, `episode 2 held at +${t.s} s`);
   }
 });
 
-test('★★ the episode clock spans levels and resets only on an ok assessment', () => {
+test('★★★ v1.187.20 (review): the latch clear window is the broadcast\'s clear dwell, measured from the first ok evaluation', () => {
+  assert.equal(HOST_PRESSURE_LATCH_CLEAR_MS, CONDITION_CLEAR_DWELL_MS, 'the two cannot drift: the latch outlasts any dip the flicker guard absorbs');
+  _resetHostPressureDwellForTest();
+  hostPressureWarnAudible('warn', false, 0);
+  assert.equal(hostPressureWarnAudible('warn', false, WARN_D), true, 'audible');
+  const ok0 = WARN_D + 20 * SEC;
+  assert.equal(hostPressureWarnAudible('ok', false, ok0), false, 'the first ok evaluation opens the window');
+  assert.equal(hostPressureWarnAudible('ok', false, ok0 + HOST_PRESSURE_LATCH_CLEAR_MS - 1), false);
+  assert.equal(hostPressureWarnAudible('warn', false, ok0 + HOST_PRESSURE_LATCH_CLEAR_MS - 1), true, '★ back 1 ms inside the window: audible at once');
+  // The return closed the window: a new one opens at the next ok.
+  const ok1 = ok0 + HOST_PRESSURE_LATCH_CLEAR_MS;
+  assert.equal(hostPressureWarnAudible('ok', false, ok1), false);
+  assert.equal(hostPressureWarnAudible('ok', false, ok1 + HOST_PRESSURE_LATCH_CLEAR_MS - 1), false);
+  assert.equal(hostPressureWarnAudible('warn', false, ok1 + HOST_PRESSURE_LATCH_CLEAR_MS - 1), true, 'the window restarted at its own first ok');
+  const ok2 = ok1 + 2 * HOST_PRESSURE_LATCH_CLEAR_MS;
+  assert.equal(hostPressureWarnAudible('ok', false, ok2), false);
+  assert.equal(hostPressureWarnAudible('ok', false, ok2 + HOST_PRESSURE_LATCH_CLEAR_MS), false, 'ok for the whole window: the episode ends');
+  assert.equal(hostPressureWarnAudible('warn', false, ok2 + HOST_PRESSURE_LATCH_CLEAR_MS + 20 * SEC), false, '★ a new episode starts over');
+});
+
+test('★★★ an episode that never became audible still ends on the first ok: a blip after a blip is held again', () => {
+  _resetHostPressureDwellForTest();
+  assert.equal(hostPressureWarnAudible('warn', false, 0), false);
+  assert.equal(hostPressureWarnAudible('warn', false, 240 * SEC), false);
+  assert.equal(hostPressureWarnAudible('ok', false, 260 * SEC), false, 'one ok ends a held episode');
+  assert.equal(hostPressureWarnAudible('warn', false, 280 * SEC), false, '★ not timed from the first blip');
+  assert.equal(hostPressureWarnAudible('warn', false, 280 * SEC + WARN_D - 1), false);
+  assert.equal(hostPressureWarnAudible('warn', false, 280 * SEC + WARN_D), true, 'its own dwell');
+  // Through computeAlerts: a 240 s blip, one ok assessment, another 240 s blip — never audible.
+  _resetHostPressureDwellForTest();
+  _resetVitalsForTest();
+  const ticks = run(0, 600, (s) => (s < 240 || (s >= 300 && s < 540) ? 4.2 : 0.8));
+  assert.deepEqual(transitions(ticks), [], 'two held blips, one ok between them: nothing audible');
+});
+
+test('★★ v1.187.20 (review): a sustained critical, a short ok, then crit again: the returning pressure is audible yellow at once, never green under a crit assessment', () => {
+  // The review's critical sequence: crit 0-240 s (red at 180), ok at 300 and 360, crit from 420.
+  // The crit dwell restarts at 420 (unchanged), so the returning pressure is the warning until 600;
+  // ended on the first ok, it was HELD and the condition read green while the assessment was crit.
+  const ticks = run(0, 660, (s) => (s <= 240 || s >= 420 ? 7.0 : 0.8));
+  assert.deepEqual(transitions(ticks), ['green→red@180', 'red→green@300', 'green→yellow@420', 'yellow→red@600']);
+  for (const t of ticks.filter((x) => x.s >= 420 && x.s < 600)) {
+    assert.equal(t.hp?.id, 'host-pressure-warn', 'inside the restarted crit dwell');
+    assert.notEqual(t.hp?.audible, false, `★ audible at +${t.s} s: the episode was latched by the sustained critical`);
+  }
+});
+
+test('★★ the episode clock spans levels; an audible episode survives a short ok', () => {
   _resetHostPressureDwellForTest();
   assert.equal(hostPressureWarnAudible('crit', false, 0), false, 'a crit tick starts the episode');
   assert.equal(hostPressureWarnAudible('warn', false, 120 * SEC), false);
   assert.equal(hostPressureWarnAudible('warn', false, WARN_D - 1), false, 'inside the dwell');
   assert.equal(hostPressureWarnAudible('warn', false, WARN_D), true, 'audible at exactly the dwell');
   assert.equal(hostPressureWarnAudible('crit', false, WARN_D + 20 * SEC), true, 'latched across levels');
-  assert.equal(hostPressureWarnAudible('ok', false, WARN_D + 40 * SEC), false, 'recovery');
-  assert.equal(hostPressureWarnAudible('warn', false, WARN_D + 60 * SEC), false, '★ a new episode starts over');
-  assert.equal(hostPressureWarnAudible('warn', false, 2 * WARN_D + 59 * SEC), false);
-  assert.equal(hostPressureWarnAudible('warn', false, 2 * WARN_D + 60 * SEC), true);
+  assert.equal(hostPressureWarnAudible('ok', false, WARN_D + 40 * SEC), false, 'recovery begins');
+  assert.equal(hostPressureWarnAudible('warn', false, WARN_D + 60 * SEC), true, '★ back after 20 s of ok: the same episode');
+  assert.equal(hostPressureWarnAudible('ok', false, WARN_D + 80 * SEC), false);
+  assert.equal(hostPressureWarnAudible('ok', false, WARN_D + 80 * SEC + HOST_PRESSURE_LATCH_CLEAR_MS), false, 'the recovery stood its window');
+  assert.equal(hostPressureWarnAudible('warn', false, WARN_D + 100 * SEC + HOST_PRESSURE_LATCH_CLEAR_MS), false, '★ a new episode starts over');
 });
 
 test('★★ a sustained critical latches the warning audible for the rest of the episode', () => {
@@ -200,7 +267,10 @@ test('★★ a sustained critical latches the warning audible for the rest of th
   assert.equal(hostPressureWarnAudible('crit', true, 180 * SEC), true, 'the critical sustained');
   assert.equal(hostPressureWarnAudible('warn', false, 200 * SEC), true, '★ still audible after the step down');
   assert.equal(hostPressureWarnAudible('ok', false, 260 * SEC), false);
-  assert.equal(hostPressureWarnAudible('warn', false, 280 * SEC), false, 'the latch went with the episode');
+  assert.equal(hostPressureWarnAudible('warn', false, 280 * SEC), true, 'a 20 s dip: still the latched episode');
+  assert.equal(hostPressureWarnAudible('ok', false, 300 * SEC), false);
+  assert.equal(hostPressureWarnAudible('ok', false, 300 * SEC + HOST_PRESSURE_LATCH_CLEAR_MS), false);
+  assert.equal(hostPressureWarnAudible('warn', false, 320 * SEC + HOST_PRESSURE_LATCH_CLEAR_MS), false, 'the latch went with the episode');
 });
 
 /* ══ the evidence and the configuration ════════════════════════════════════════════════════ */

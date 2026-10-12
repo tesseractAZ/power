@@ -1017,6 +1017,9 @@ export interface ConnectivityContext {
   /** v1.187.4 (review) — the onset each of those panels would carry (SnapshotStore.poolUnknownCarried):
    *  one still dark after the restart is blind since then. */
   poolUnknownCarriedSinceBySn?: ReadonlyMap<string, number>;
+  /** v1.187.20 (review) — when the host-pressure episode carried across the restart was last held,
+   *  while no vitals assessment has resumed it yet (hostPressureCarryPendingHeldAt); else null. */
+  hostPressureCarriedHeldAtMs?: number | null;
   /** v1.185.0 — when each panel was first listed in this process (SnapshotStore.firstListedAt): a
    *  panel with no projection since then has had an unreadable pool at least that long. */
   panelFirstListedBySn?: Map<string, number | null>;
@@ -1132,9 +1135,11 @@ export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS,
  * post-restart recovery (broadcast.isRestartRecovery) is not taken on it. Same comparison as the
  * rules above (`now - sinceMs < window` withholds), so a withheld alert is always listed. Kept
  * beside the windows it reads so the two cannot drift. Pure; the descriptions are for the log.
+ * v1.187.20 (review) — and a host-pressure episode carried across the restart that no vitals
+ * assessment has resumed yet (hostPressureCarryPendingHeldAt), for at most its carry window.
  */
 export function debouncedOnsetsPending(
-  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn' | 'poolUnknownCarryPending'> | undefined,
+  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn' | 'poolUnknownCarryPending' | 'hostPressureCarriedHeldAtMs'> | undefined,
   nowMs: number,
 ): string[] {
   if (connectivity == null) return [];
@@ -1153,6 +1158,9 @@ export function debouncedOnsetsPending(
   // its first projection may raise reserve-alarm-blind at once (carried), so a green read before it
   // is not an all-clear. Bounded by the carry window (SnapshotStore.poolUnknownCarryPending).
   for (const sn of connectivity.poolUnknownCarryPending ?? []) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);
+  // v1.187.20 (review) — a host-pressure episode carried across the restart that no vitals assessment
+  // has resumed yet: the first may raise the warning audible at once. Bounded by the carry window.
+  if (within(connectivity.hostPressureCarriedHeldAtMs, HOST_PRESSURE_CARRY_MAX_GAP_MS)) out.push('host-pressure (carried episode; not assessed since the restart)');
   return out;
 }
 
@@ -1175,6 +1183,9 @@ export function _resetHostPressureDwellForTest(): void {
   hostPressureCritSinceMs = null;
   hostPressureSinceMs = null;
   hostPressureWarnAudibleLatched = false;
+  hostPressureOkSinceMs = null;
+  hostPressureHeldAtMs = null;
+  hostPressureCarried = null;
 }
 
 /* v1.187.20 — host-pressure WARNING audible dwell. The warning is on the card at once and keeps
@@ -1192,11 +1203,39 @@ export function _resetHostPressureDwellForTest(): void {
  * The clock is the EPISODE's (first non-ok assessment until ok again), whatever its level, so a
  * crit spike that falls back to the warning keeps counting. Audible LATCHES for the rest of the
  * episode once the dwell has elapsed or once the critical has sustained (a red that de-escalates
- * to the warning goes red → yellow, never red → green → yellow), and resets only on an ok
- * assessment: the boundary is crossed once per episode. The critical keeps its own dwell (above)
- * and is never held here. Pure over (level, critSustained, now) with a main-thread module holder,
- * as the crit dwell. HOST_PRESSURE_WARN_DWELL_S overrides (0-900 s; empty or out of range ⇒ 300 s;
- * 0 = audible at once, the pre-v1.187.20 behaviour). */
+ * to the warning goes red → yellow, never red → green → yellow): the boundary is crossed once per
+ * episode. An ok assessment ends an episode that never became audible at once, so a blip stays
+ * silent. v1.187.20 (review) — an AUDIBLE episode ends only once ok has stood
+ * HOST_PRESSURE_LATCH_CLEAR_MS, the broadcast's own clear dwell (CONDITION_CLEAR_DWELL_MS): pressure
+ * back inside it is audible at once, and the broadcast's flicker guard absorbs the dip. Ended on the
+ * first ok, one dip during sustained pressure re-held the returning warning for another 300 s; the
+ * green under it stood the clear dwell, "All clear" was spoken with the warning back on the card,
+ * and a second yellow followed at the new dwell. The critical keeps its own dwell (above) and is
+ * never held here. Pure over (level, critSustained, now) with a main-thread module holder, as the
+ * crit dwell. HOST_PRESSURE_WARN_DWELL_S overrides (0-900 s; empty or out of range ⇒ 300 s; 0 =
+ * audible at once, the pre-v1.187.20 behaviour).
+ *
+ * v1.187.20 (review) — THE EPISODE SURVIVES A RESTART (host-pressure-state.json). The clock and the
+ * latch lived only in this process. A restart (a deploy, an add-on update, the watchdog) during a
+ * yellow the house had heard held the same warning again for the first assessment (~60 s after the
+ * boot) plus the 300 s dwell. The audible condition read green meanwhile, so another warning that
+ * cleared early in the boot let the restart recovery (broadcast.isRestartRecovery) speak "All
+ * clear", and the yellow was spoken again at the new dwell; pressure spanning restarts less than
+ * ~6 minutes apart was never announced. As the backup pool's unknown onset (pool-unknown.json) and
+ * the cell-spread knee sessions (vdiff-knee-state.json) are, the episode (its onset, whether it is
+ * audible, and when this process last held it) is written beside the DB after each evaluation
+ * (persistHostPressureEpisode) and read back at start-up (restoreHostPressureEpisode). It is
+ * CARRIED to the first vitals assessment after the restart (none exists for ~60 s, and computeAlerts
+ * leaves the episode alone until one does), which resumes it by the in-process rules when this
+ * process held it at most HOST_PRESSURE_CARRY_MAX_GAP_MS before: pressure still standing continues
+ * it, its onset kept (the outage counts toward the dwell, the fail-loud direction) and an audible
+ * one audible at once; an ok assessment ends one that was not audible and opens an audible one's
+ * clear window. That window matters at a boot too: a fresh process has no vitals hysteresis, so a
+ * load between the clear and the raise lines reads ok there at first. Not resumed yet, a carried
+ * episode is listed by debouncedOnsetsPending, so the alert set is not settled on a green that is
+ * only the boot's missing assessment. Listing the held warning itself as pending instead would hold
+ * every boot under pressure unsettled for up to 6 minutes and still lose the latch: the heard yellow
+ * held another 300 s, and pressure across repeated restarts never announced. */
 export function hostPressureWarnDwellMsFrom(raw: string | undefined): number {
   const v = raw == null || raw.trim() === '' ? NaN : Number(raw);
   return Number.isFinite(v) && v >= 0 && v <= 900 ? v * 1000 : 300_000;
@@ -1206,13 +1245,132 @@ export const HOST_PRESSURE_WARN_DWELL_MS = hostPressureWarnDwellMsFrom(process.e
 export function hostPressureDwellText(ms: number): string {
   return ms % 60_000 === 0 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`;
 }
+/** v1.187.20 (review) — how long ok must stand before an AUDIBLE episode ends: the broadcast's
+ *  de-escalation dwell (broadcast.CONDITION_CLEAR_DWELL_MS; not imported, broadcast.ts imports this
+ *  module — a test pins the two equal). */
+export const HOST_PRESSURE_LATCH_CLEAR_MS = 3 * 60_000;
+/** v1.187.20 (review) — the longest gap, from the last evaluation that held an episode before a
+ *  restart to the first vitals assessment after it, across which the episode is carried. A deploy or
+ *  an add-on update is back within minutes, and the first assessment follows 60 s after the boot;
+ *  ten minutes covers a slow image pull. Pressure unseen for longer is a new episode. */
+export const HOST_PRESSURE_CARRY_MAX_GAP_MS = 10 * 60_000;
+/** v1.187.20 (review) — while an episode stands, its last-held time is rewritten at most this often
+ *  (the assessment cadence): one write a minute while the host is under pressure, no more. */
+export const HOST_PRESSURE_PERSIST_EVERY_MS = 60_000;
+/** v1.187.20 (review) — a host-pressure episode as host-pressure-state.json holds it. */
+export interface HostPressureEpisode { sinceMs: number; heldAtMs: number; latched: boolean }
 let hostPressureSinceMs: number | null = null;
 let hostPressureWarnAudibleLatched = false;
+/** v1.187.20 (review) — the first ok evaluation of an audible episode's clear window. */
+let hostPressureOkSinceMs: number | null = null;
+/** v1.187.20 (review) — the last evaluation at which this process held an episode. */
+let hostPressureHeldAtMs: number | null = null;
+/** v1.187.20 (review) — the episode read at start-up, until the first vitals assessment resumes it. */
+let hostPressureCarried: HostPressureEpisode | null = null;
 export function hostPressureWarnAudible(level: 'ok' | 'warn' | 'crit', critSustained: boolean, now: number): boolean {
-  if (level === 'ok') { hostPressureSinceMs = null; hostPressureWarnAudibleLatched = false; return false; }
+  // v1.187.20 (review) — the first assessment after a restart resumes the episode carried across it.
+  if (hostPressureCarried != null) {
+    const carried = hostPressureCarried;
+    hostPressureCarried = null;
+    if (hostPressureSinceMs == null && now - carried.heldAtMs <= HOST_PRESSURE_CARRY_MAX_GAP_MS) {
+      hostPressureSinceMs = Math.min(carried.sinceMs, now);
+      hostPressureWarnAudibleLatched = carried.latched;
+    }
+  }
+  if (level === 'ok') {
+    // v1.187.20 (review) — an audible episode ends only once ok has stood its clear window.
+    if (hostPressureWarnAudibleLatched) {
+      hostPressureOkSinceMs ??= now;
+      if (now - hostPressureOkSinceMs < HOST_PRESSURE_LATCH_CLEAR_MS) { hostPressureHeldAtMs = now; return false; }
+    }
+    hostPressureSinceMs = null;
+    hostPressureWarnAudibleLatched = false;
+    hostPressureOkSinceMs = null;
+    hostPressureHeldAtMs = null;
+    return false;
+  }
+  hostPressureOkSinceMs = null;
   hostPressureSinceMs ??= now;
+  hostPressureHeldAtMs = now;
   if (critSustained || now - hostPressureSinceMs >= HOST_PRESSURE_WARN_DWELL_MS) hostPressureWarnAudibleLatched = true;
   return hostPressureWarnAudibleLatched;
+}
+
+/** v1.187.20 (review) — when the episode carried across the restart was last held, while no vitals
+ *  assessment has resumed it yet; else null. The monitor hands it to debouncedOnsetsPending. */
+export function hostPressureCarryPendingHeldAt(): number | null {
+  return hostPressureCarried?.heldAtMs ?? null;
+}
+
+/** v1.187.20 (review) — the file's episode: sinceMs and heldAtMs finite, 0 < sinceMs ≤ heldAtMs, and
+ *  latched a boolean. Anything else (corrupt, hand-edited) is null. */
+export function parseHostPressureEpisode(raw: unknown): HostPressureEpisode | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const { sinceMs, heldAtMs, latched } = raw as Record<string, unknown>;
+  if (typeof sinceMs !== 'number' || !Number.isFinite(sinceMs) || sinceMs <= 0) return null;
+  if (typeof heldAtMs !== 'number' || !Number.isFinite(heldAtMs) || heldAtMs < sinceMs) return null;
+  if (typeof latched !== 'boolean') return null;
+  return { sinceMs, heldAtMs, latched };
+}
+
+/**
+ * v1.187.20 (review) — read `path` at start-up (before the first computeAlerts) and carry its
+ * episode to the first vitals assessment when it was last held at most HOST_PRESSURE_CARRY_MAX_GAP_MS
+ * ago (the assessment re-judges the gap: it comes ~60 s later). Logs only when the file names an
+ * episode, or cannot be read. Returns what is on disk: the baseline persistHostPressureEpisode
+ * compares against. Best-effort: a missing, unreadable or malformed file carries nothing (the
+ * warning then waits its full dwell, as before).
+ */
+export function restoreHostPressureEpisode(path: string, nowMs: number, log: (m: string) => void): HostPressureEpisode | null {
+  const fallback = 'a host-pressure warning after the restart waits its full dwell';
+  let raw: unknown;
+  try {
+    if (!existsSync(path)) return null;
+    raw = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (e) {
+    log(`host pressure: episode state at ${path} is unreadable (${e instanceof Error ? e.message : String(e)}) — ignored; ${fallback}`);
+    return null;
+  }
+  const body = raw != null && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { episode?: unknown }).episode : undefined;
+  if (body === null) return null;
+  const ep = parseHostPressureEpisode(body);
+  if (ep == null) {
+    log(`host pressure: episode state at ${path} is malformed — ignored; ${fallback}`);
+    return null;
+  }
+  const gapS = Math.round((nowMs - ep.heldAtMs) / 1000);
+  if (nowMs - ep.heldAtMs > HOST_PRESSURE_CARRY_MAX_GAP_MS) {
+    log(`host pressure: the episode on file was last held ${gapS} s before the restart, more than ${Math.round(HOST_PRESSURE_CARRY_MAX_GAP_MS / 60_000)} min — not carried`);
+    return ep;
+  }
+  hostPressureCarried = ep;
+  log(`host pressure: an episode of before the restart is carried (onset ${Math.round((nowMs - ep.sinceMs) / 1000)} s ago, ${ep.latched ? 'audible' : 'not yet audible'}, last held ${gapS} s ago) — the first vitals assessment resumes it if it comes within ${Math.round(HOST_PRESSURE_CARRY_MAX_GAP_MS / 60_000)} min of that`);
+  return ep;
+}
+
+/**
+ * v1.187.20 (review) — write the episode to `path` when it differs from `onDisk` (the value last
+ * written): one started, ended, or became audible, or its last-held time HOST_PRESSURE_PERSIST_EVERY_MS
+ * on. A carried episode not resumed yet is written back unchanged, so a second restart before the
+ * first assessment still carries it (it expires with its gap). Returns what is now on disk: `onDisk`
+ * again when nothing changed or the write failed (retried on the next evaluation). Best-effort —
+ * never throws into the alarm loop. Main thread only, like the holder.
+ */
+export function persistHostPressureEpisode(path: string, onDisk: HostPressureEpisode | null): HostPressureEpisode | null {
+  const next: HostPressureEpisode | null = hostPressureSinceMs != null && hostPressureHeldAtMs != null
+    ? { sinceMs: hostPressureSinceMs, heldAtMs: hostPressureHeldAtMs, latched: hostPressureWarnAudibleLatched }
+    : hostPressureCarried;
+  const unchanged = next == null
+    ? onDisk == null
+    : onDisk != null && next.sinceMs === onDisk.sinceMs && next.latched === onDisk.latched
+      && next.heldAtMs >= onDisk.heldAtMs && next.heldAtMs - onDisk.heldAtMs < HOST_PRESSURE_PERSIST_EVERY_MS;
+  if (unchanged) return onDisk;
+  try {
+    atomicWriteFileSync(path, JSON.stringify({ episode: next }));
+    return next;
+  } catch {
+    return onDisk; // retried on the next evaluation
+  }
 }
 
 /**
@@ -1446,7 +1604,10 @@ export function computeAlerts(
     });
   } else {
     hostPressureCritSustained('ok', now); // clears the dwell holder between episodes
-    hostPressureWarnAudible('ok', false, now); // v1.187.20 — and the warning's episode clock
+    // v1.187.20 — and an OK assessment advances the warning's episode (v1.187.20 review: an audible
+    // one ends only after its clear window). No assessment yet (the ~60 s after a boot) leaves the
+    // episode, and one carried across the restart, as it stands.
+    if (vitals) hostPressureWarnAudible('ok', false, now);
   }
 
   // v1.44.0 — dead-voice self-alert. A wedged TTS engine hides behind the

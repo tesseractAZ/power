@@ -201,3 +201,36 @@ test('★★★ the critical is unchanged: crit pressure is red after its 180 s 
   assert.equal(played(r, 'yellow'), 0, '★ no yellow was spoken before the red');
   assert.equal(r.count('condition transition → red'), 1);
 });
+
+test('★★★ v1.187.20 (review): one ok assessment during sustained pressure speaks nothing — ONE yellow, and the all-clear only after the final recovery has stood its dwell', async () => {
+  // The review's replay: load 4.2 assessed at +0 … +360 s, ONE ok assessment (0.8) at +420 s, then
+  // 4.2 again from +480 s. Ended on that ok, the returning warning was held another 300 s: the
+  // held green stood the clear dwell, "All clear" was spoken at +631 s with the warning back on the
+  // card, and a second yellow at +822 s (three announcements; one before v1.187.20).
+  // (Each play advances the clock 30 s, as a real clip does; the times below are approximate.)
+  const r = await started();
+  await hold(4.2, 300);
+  await until(r, () => played(r, 'yellow') === 1, 'the yellow at the dwell (+300 s)');
+  await hold(4.2, 120); // two more assessments at 4.2
+  assess(0.8); // the one ok assessment
+  await until(r, () => r.has('yellow → green held'), 'the clear-dwell hold');
+  await sleep(40);
+  offset += 60 * SEC; // the next assessment: pressure is back
+  await hold(4.2, 360); // six minutes more, well past the clear dwell and a second 300 s dwell
+  await sleep(80);
+  assert.ok(r.has('(flicker absorbed, nothing spoken)'), `★ the dip is absorbed as a flicker\n${r.logs.join('\n')}`);
+  assert.equal(played(r, 'green'), 0, '★ no all-clear while the pressure is back on the card');
+  assert.equal(r.count('condition transition → green'), 0);
+  assert.equal(r.count('condition transition → yellow'), 1, '★ one yellow for the whole episode');
+  assert.equal(announces, 1);
+  assert.equal(r.mon.status().conditionLevel, 'yellow');
+  // The final recovery: the ordinary de-escalation, held for the clear dwell, then the all-clear.
+  assess(0.8);
+  await until(r, () => r.count('yellow → green held') === 2, 'the second clear-dwell hold');
+  offset += B.CONDITION_CLEAR_DWELL_MS - 10 * SEC;
+  await sleep(60);
+  assert.equal(played(r, 'green'), 0, 'no all-clear before the clear dwell');
+  offset += 11 * SEC;
+  await until(r, () => played(r, 'green') === 1, 'the all-clear');
+  assert.equal(announces, 2, 'one yellow, one all-clear');
+});
