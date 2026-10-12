@@ -41,9 +41,10 @@ import {
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
-  loadConfirmedSurface, saveConfirmedSurface, renderDriftPush,
+  loadConfirmedSurface, saveConfirmedSurface,
   type SettingChange, type SurfaceDevice,
 } from './settingsDrift.js';
+import { DriftHoldQueue, driftHeldPath } from './settingsDriftHold.js';
 import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } from './alertMonitor.js';
 import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, isIncompleteDay, computeEmpiricalRte, computeLocalPackRte, type VendorDayRecord } from './energyHistory.js';
 import { exportVendorStatistics } from './haStatistics.js';
@@ -4983,11 +4984,19 @@ async function runChargeNowTick(): Promise<void> {
  * two consecutive observations, classify the actuator's own reserve writes,
  * and push one batched [Medium] notification for external changes — held
  * through the notify quiet window like resolves are.
+ * v1.187.20 — the held push is ON DISK (settings-drift-held.json, beside the
+ * baseline), rehydrated here at module load, before the first tick: a restart
+ * inside the quiet window lost it on 2026-10-10 (settingsDriftHold.ts).
  */
 const settingsDriftState = freshDriftState();
 settingsDriftState.confirmed = loadConfirmedSurface(); // null on first boot = silent adoption
-let driftPendingPush: SettingChange[] = [];
 const DRIFT_QUIET = parseNotifyQuiet(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
+const driftHold = new DriftHoldQueue({
+  path: driftHeldPath(),
+  isQuiet: (now) => DRIFT_QUIET != null && inNotifyQuiet(now, DRIFT_QUIET),
+  send: (msg) => sendNotification(loadNotifyConfig(), msg),
+  log: { info: (m) => app.log.info(m), warn: (m) => app.log.warn(m) },
+});
 
 function settingsSurfaceDevices(): SurfaceDevice[] {
   const snap = store.get();
@@ -5042,6 +5051,7 @@ function runSettingsDriftTick(): void {
         targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct, forceChargeActive,
         forceChargeCommands: forceChargeCommandsOf(act),
       };
+      const external: SettingChange[] = [];
       for (const c of evaln.confirmedChanges) {
         const kind = classifyChange(c, ctx);
         if (kind === 'own-write') {
@@ -5050,44 +5060,17 @@ function runSettingsDriftTick(): void {
           app.log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (changed on the panel during this add-on's night force-charge, not by it — the panel's own ceiling stop or a manual Charge Now; not announced)`);
         } else {
           app.log.warn(`settings-drift: EXTERNAL change — ${c.key} ${c.from} → ${c.to}`);
-          driftPendingPush.push(c);
+          external.push(c);
         }
       }
-      saveConfirmedSurface(settingsDriftState.confirmed!);
+      // v1.187.20 — the external changes reach disk BEFORE the baseline that hides them is
+      // saved, and the baseline is saved only if they did (DriftHoldQueue.commit).
+      driftHold.commit(external, nowMs, () => saveConfirmedSurface(settingsDriftState.confirmed!));
     }
-    if (driftPendingPush.length > 0 && !(DRIFT_QUIET != null && inNotifyQuiet(new Date(), DRIFT_QUIET))) {
-      const batch = driftPendingPush;
-      driftPendingPush = [];
-      const msg = renderDriftPush(batch);
-      // v1.119.0 — a reserve-floor change is NOT cosmetic drift: it moves the
-      // value the floor alarm defends and the night-charge planner sizes
-      // against. On 2026-08-30 EcoFlow Storm Guard raised it 20 -> 40 and the
-      // operator only learned of it from a later audit. Give it its own dedupId
-      // so it can never be coalesced away behind an unrelated settings batch,
-      // and name the consequence in the title.
-      const floorChange = batch.find((c) => c.key.endsWith(' · backupReserveSoc'));
-      const dedupId = floorChange ? 'settings_drift_reserve_floor' : 'settings_drift';
-      const title = floorChange
-        ? `Reserve floor changed externally: ${floorChange.from}% → ${floorChange.to}%`
-        : msg.title;
-      const body = floorChange
-        ? `${msg.body}\n\nThis is the floor the backup-pool alarm defends and the night-charge planner sizes against. `
-          + 'It was not written by this add-on — EcoFlow Storm Guard and the vendor app can both move it.'
-        : msg.body;
-      // v1.119.0 — LOG THE OUTCOME. This path previously logged nothing on
-      // success and nothing on a non-throwing failure, so "was the operator
-      // told?" was unanswerable from any artifact — the exact question the
-      // 08-31 audit could not settle. Mirrors alertMonitor's "notify: sent".
-      void sendNotification(loadNotifyConfig(), { severity: 'warning', dedupId, title, body })
-        .then(() => {
-          app.log.info(`settings-drift: push sent — ${title} (${batch.length} change(s), dedupId ${dedupId})`);
-        })
-        .catch((e: any) => {
-          // best-effort: on failure, requeue so the next tick retries
-          driftPendingPush.unshift(...batch);
-          app.log.warn(`settings-drift: push failed (${e?.message ?? e}) — will retry`);
-        });
-    }
+    // Held through the notify quiet window ON DISK; the sidecar is cleared only once the push
+    // resolves, and a failed push stays held for the next tick. v1.119.0's reserve-floor
+    // dedupId/title and the "push sent" outcome line live in settingsDriftHold.ts.
+    void driftHold.flush(new Date()).catch((e: any) => app.log.warn(`settings-drift: flush failed (${e?.message ?? e})`));
   } catch (e: any) {
     app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`);
   }
