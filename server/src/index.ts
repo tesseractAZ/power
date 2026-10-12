@@ -235,6 +235,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
 import type { NightLedgerRow } from './recorder.js';
 import { panelFastifyOptions } from './logHooks.js';
+import { createBackupWindow, registerBackupWindowRoutes, resolveBackupJournalPath } from './backupWindow.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -645,6 +646,15 @@ export function noteLiveRoster(roster: ReadonlySet<string>): void {
 const recorderCallT0 = performance.now();
 const recorder = createRecorder(store, (m) => app.log.info(m), (m) => app.log.debug(m));
 app.log.info(`recorder: createRecorder returned after ${Math.round(performance.now() - recorderCallT0)}ms`);
+// v1.187.20 — the Home Assistant backup hooks (config.yaml backup_pre / backup_post) hold the
+// recorder connection's WAL checkpoints still while the Supervisor copies /data, so no checkpoint
+// rewrites ecoflow.db under the copy. Loopback-only routes; see backupWindow.ts.
+const backupWindow = createBackupWindow({
+  wal: recorder.walControl,
+  journalPath: resolveBackupJournalPath({ dataDir: dirname(resolve(process.cwd(), config.dbPath)) }),
+  log: { info: (m) => app.log.info(m), warn: (m) => app.log.warn(m) },
+});
+registerBackupWindowRoutes(app, backupWindow);
 // v0.10.0 — analytics worker. Every heavy history scan (the cache-warmer's
 // reports + each /api/* analytics endpoint) runs on the worker's event loop
 // against a read-only connection to the same WAL DB. The main thread keeps
@@ -7059,6 +7069,7 @@ const shutdown = async () => {
   stopMqttDiscovery?.();
   analytics.stop();
   broadcast.stop();
+  backupWindow.stop();
   recorder.close();
   await app.close();
   process.exit(0);
