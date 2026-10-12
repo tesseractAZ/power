@@ -46,6 +46,10 @@ concurrency:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
+    # Ubuntu 24.04, not 26.04 like the other workflows: CodeQL's system requirements
+    # (codeql.github.com/docs/codeql-overview/system-requirements) list Ubuntu 22.04 and 24.04
+    # only (2026-10-12). A trial on 26.04 (#520) ran clean, but this is the required security
+    # scan; it moves when 26.04 is listed. server/test/workflowRunners.test.ts holds it there.
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false

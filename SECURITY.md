@@ -210,8 +210,9 @@ never blocked).
   `:latest`. A reused number and a version it cannot tag are red runs, and while
   `main` declares an older release than the newest one (a revert) every push is
   red. Home Assistant installs the version named in `config.yaml`.
-- Every job runs on a pinned runner image (`ubuntu-24.04`, `ubuntu-24.04-arm`),
-  never `ubuntu-latest`, so the image changes only in a reviewed commit.
+- Every job runs on a pinned runner image (`ubuntu-26.04`, `ubuntu-26.04-arm`;
+  CodeQL on `ubuntu-24.04` until CodeQL lists 26.04 as supported), never
+  `ubuntu-latest`, so the image changes only in a reviewed commit.
 - The image-build Buildx setup step gets one retry after a pause, so a transient registry
   failure does not leave a version without a release. The GitHub Release takes its
   notes from the CHANGELOG and fails if the section is missing; it attaches the

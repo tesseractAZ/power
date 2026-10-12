@@ -9193,13 +9193,17 @@ pinned the last three floating tags: `actions/setup-node` in `ci.yml`'s advisory
 `actions/checkout` in `release.yml` and `tag-release.yml`, the two workflows with write
 permissions.
 
-**Every job runs on a pinned runner image** (`ubuntu-24.04`, and `ubuntu-24.04-arm` for the
-aarch64 image build), never `ubuntu-latest`. GitHub moves `ubuntu-latest` to Ubuntu 26.04 in a
+**Every job runs on a pinned runner image** (`ubuntu-26.04`, and `ubuntu-26.04-arm` for the
+aarch64 image build, since v1.187.20; `codeql.yml` stays on `ubuntu-24.04` because CodeQL's system
+requirements list only Ubuntu 22.04 and 24.04), never `ubuntu-latest`. GitHub moves `ubuntu-latest` to Ubuntu 26.04 in a
 rollout from 2026-10-19 to 2026-11-19 (actions/runner-images#14748); that one move would change
 python3, Docker, the docs jobs' pandoc and LibreOffice, possibly coreutils, and CodeQL's platform
 (its supported list names only Ubuntu 22.04 and 24.04), under every job at once. Moving to a newer
-image is a one-commit label change, made deliberately. `server/test/workflowRunners.test.ts` fails
-on a `-latest` label, a quoted or matrix `-latest` runner, and a job without `runs-on`.
+image is a one-commit label change, made deliberately: v1.187.20 moved every job to 26.04 after a
+trial of all fifteen checks (#520, pandoc 3.7.0.2, LibreOffice 26.2.6) and of the native per-arch
+image builds (#523) on it. `server/test/workflowRunners.test.ts` fails on a `-latest` label, a
+quoted or matrix `-latest` runner, a job without `runs-on`, and a CodeQL runner outside the
+versions CodeQL supports.
 
 ---
 
@@ -9316,8 +9320,8 @@ input. Its run name carries the version, and one run per version executes at a t
 build to `gh release create`. Jobs:
 1. **resolve** — validate/normalize the version: strict `X.Y.Z`, as `tag-release.yml` tags.
 2. **test** — checkout the tag, `npm ci`, `npm test`, `tsc --noEmit` on the server.
-3. **build** (matrix aarch64 + amd64, each on its **native** runner: `ubuntu-24.04-arm` /
-   `ubuntu-24.04` — no QEMU emulation, ~3 min vs 30–60 min) — buildx build + push to
+3. **build** (matrix aarch64 + amd64, each on its **native** runner: `ubuntu-26.04-arm` /
+   `ubuntu-26.04` — no QEMU emulation, about a minute per arch vs 30–60 min under QEMU) — buildx build + push to
    `ghcr.io/<owner>/{arch}-ecoflow-panel` as both `:{version}` and `:latest`. Base images
    digest-pinned. GHA cache uses `ignore-error=true` so a flaky cache backend can't fail a release.
    There is no QEMU step: nothing runs a foreign-arch binary, and it only pulled `tonistiigi/binfmt`
