@@ -1171,7 +1171,49 @@ export function hostPressureCritSustained(level: 'ok' | 'warn' | 'crit', now: nu
   hostPressureCritSinceMs ??= now;
   return now - hostPressureCritSinceMs >= HOST_PRESSURE_CRIT_DWELL_MS;
 }
-export function _resetHostPressureDwellForTest(): void { hostPressureCritSinceMs = null; }
+export function _resetHostPressureDwellForTest(): void {
+  hostPressureCritSinceMs = null;
+  hostPressureSinceMs = null;
+  hostPressureWarnAudibleLatched = false;
+}
+
+/* v1.187.20 — host-pressure WARNING audible dwell. The warning is on the card at once and keeps
+ * its push (the alert monitor's own 60 s debounce), but it raises the AUDIBLE condition only once
+ * host pressure has stood for HOST_PRESSURE_WARN_DWELL_MS. Until then it carries `audible: false`
+ * (Alert.audible: card and push kept; conditionFromAlerts and speakableAlerts drop it), the gate
+ * vdiff-warn and the top-of-charge peer outlier use.
+ *
+ * Evidence. 2026-10-10 22:33: a Home Assistant Core update on the same host raised the warning for
+ * 59 s, and it spoke a yellow on the speakers and the cordless phone. The cleared history holds 33
+ * warning episodes from 07-25 to 08-23 of 60-256 s each (boot, backups, updates, store refreshes);
+ * 5 of them reach the crit's 180 s, none reaches 300 s. The default 300 s dwell keeps all of them
+ * off the speakers, and pressure that outlasts them is announced.
+ *
+ * The clock is the EPISODE's (first non-ok assessment until ok again), whatever its level, so a
+ * crit spike that falls back to the warning keeps counting. Audible LATCHES for the rest of the
+ * episode once the dwell has elapsed or once the critical has sustained (a red that de-escalates
+ * to the warning goes red → yellow, never red → green → yellow), and resets only on an ok
+ * assessment: the boundary is crossed once per episode. The critical keeps its own dwell (above)
+ * and is never held here. Pure over (level, critSustained, now) with a main-thread module holder,
+ * as the crit dwell. HOST_PRESSURE_WARN_DWELL_S overrides (0-900 s; empty or out of range ⇒ 300 s;
+ * 0 = audible at once, the pre-v1.187.20 behaviour). */
+export function hostPressureWarnDwellMsFrom(raw: string | undefined): number {
+  const v = raw == null || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(v) && v >= 0 && v <= 900 ? v * 1000 : 300_000;
+}
+export const HOST_PRESSURE_WARN_DWELL_MS = hostPressureWarnDwellMsFrom(process.env.HOST_PRESSURE_WARN_DWELL_S);
+/** The dwell as the card words it: whole minutes, else seconds. */
+export function hostPressureDwellText(ms: number): string {
+  return ms % 60_000 === 0 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`;
+}
+let hostPressureSinceMs: number | null = null;
+let hostPressureWarnAudibleLatched = false;
+export function hostPressureWarnAudible(level: 'ok' | 'warn' | 'crit', critSustained: boolean, now: number): boolean {
+  if (level === 'ok') { hostPressureSinceMs = null; hostPressureWarnAudibleLatched = false; return false; }
+  hostPressureSinceMs ??= now;
+  if (critSustained || now - hostPressureSinceMs >= HOST_PRESSURE_WARN_DWELL_MS) hostPressureWarnAudibleLatched = true;
+  return hostPressureWarnAudibleLatched;
+}
 
 /**
  * v1.140.0 — is this DPU evaluable this tick? Shared by the pack loop and the
@@ -1388,17 +1430,23 @@ export function computeAlerts(
     // dwell. QoS/degraded-mode is driven by the assessment level directly and
     // still engages instantly — only the annunciation waits.
     const crit = vitals.level === 'crit' && hostPressureCritSustained(vitals.level, now);
+    // v1.187.20 — and the WARNING is audible only once the episode has stood its own dwell (or
+    // the critical has sustained): a 59 s Core-update blip spoke a yellow on 2026-10-10. Called
+    // on every non-ok assessment, whatever `crit` is, so the episode clock and latch are kept.
+    const warnAudible = hostPressureWarnAudible(vitals.level, crit, now);
     out.push({
       id: crit ? 'host-pressure-crit' : 'host-pressure-warn',
       severity: crit ? 'critical' : 'warning',
+      ...(crit || warnAudible ? {} : { audible: false }),
       category: 'Connectivity',
       device: 'System',
       title: crit ? 'Alarm host under critical pressure' : 'Alarm host under pressure',
-      detail: `The host running this monitor shows resource pressure — ${vitals.reasons.join('; ')}. Another add-on is likely consuming the host; check the Home Assistant add-on pages for the top CPU/memory consumer. Alert delivery may be delayed while pressure persists${crit ? ' (discretionary analytics are paused to protect the alarm path)' : ''}.`,
+      detail: `The host running this monitor shows resource pressure — ${vitals.reasons.join('; ')}. Another add-on is likely consuming the host; check the Home Assistant add-on pages for the top CPU/memory consumer. Alert delivery may be delayed while pressure persists${crit ? ' (discretionary analytics are paused to protect the alarm path)' : ''}.${crit || warnAudible ? '' : ` Not announced on the speakers unless the pressure lasts ${hostPressureDwellText(HOST_PRESSURE_WARN_DWELL_MS)}.`}`,
       facts: vitals.reasons.map((r, i) => ({ label: `Signal ${i + 1}`, value: r })),
     });
   } else {
     hostPressureCritSustained('ok', now); // clears the dwell holder between episodes
+    hostPressureWarnAudible('ok', false, now); // v1.187.20 — and the warning's episode clock
   }
 
   // v1.44.0 — dead-voice self-alert. A wedged TTS engine hides behind the
