@@ -40,3 +40,17 @@ test('★★ the code, system and config directories are write-locked', () => {
   }
   assert.ok(rules.includes('deny /init wl,'));
 });
+
+test('★★ v1.187.20 — the backup hook can run under this profile (docker exec runs it confined by it)', () => {
+  // config.yaml backup_pre / backup_post → /usr/bin/ecoflow-panel-backup-hook (sh) → /usr/bin/node →
+  // TCP to 127.0.0.1:8787, appending to /share/ecoflow-panel or /data. A rule this needs, removed,
+  // fails at BACKUP time: the hook exits non-zero or hangs and the add-on drops out of the backup.
+  for (const r of ['/usr/bin/** ix,', '/bin/** ix,', 'network inet stream,', 'network inet6 stream,']) {
+    assert.ok(rules.includes(r), `the hook needs: ${r}`);
+  }
+  for (const r of rules.filter((x) => /^(?:audit\s+)?deny\s+\//.test(x))) {
+    const path = r.replace(/^(?:audit\s+)?deny\s+/, '').split(/\s+/)[0];
+    assert.ok(!/^\/(?:share|data)(?:\/|\{|$)/.test(path), `no deny on the journal locations: ${r}`);
+    if (/^\/usr\/(?:\{|bin)/.test(path) || /^\/bin\//.test(path)) assert.ok(!/x/.test(r.split(/\s+/).pop() ?? ''), `no exec deny on the hook or its interpreters: ${r}`);
+  }
+});

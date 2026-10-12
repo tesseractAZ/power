@@ -77,12 +77,22 @@ outside that boundary needs to reach it.
   `Access-Control-Allow-Origin`.
 - **Every POST, PUT and DELETE route requires write authorization**, and so do the
   three administrative reads (the write log, the add-on list and speaker
-  discovery). Since v1.187.16 there is no exception: the alert-outcome and
-  vendor-history backfill routes, the last two without the gate, now carry it, and
-  `server/test/writeRoutesGated.test.ts` fails the build if any write route is
-  registered without it. The chime, broadcast-configuration, database-export,
+  discovery). The only exceptions are the two loopback-only backup-hook routes
+  described in the next bullet (v1.187.20). Since v1.187.16 the alert-outcome and
+  vendor-history backfill routes, the last two without the gate, carry it, and
+  `server/test/writeRoutesGated.test.ts` fails the build if a write route in any
+  server module is registered with neither the write gate nor the loopback gate. The chime, broadcast-configuration, database-export,
   statistics-export, reserve-floor and defective-pack routes are also
   rate-limited.
+- **The two backup-window hook routes are loopback-only** (v1.187.20).
+  `POST /api/internal/backup-window/pre` and `/post` are what the Supervisor's
+  `backup_pre` / `backup_post` hook calls from inside the container, with no
+  token. They answer only a TCP peer on the container's own loopback
+  (`127.0.0.1`, `::ffff:127.0.0.1`, `::1`), read from the raw socket, never from
+  a header; the LAN port and Ingress get 403. They can only pause and resume the
+  database's WAL checkpoints for a backup copy, and a 10-minute dead-man resumes
+  them if `post` never arrives. The write-route test scans every server module,
+  so a route registered outside `index.ts` with neither gate fails the build.
 
 Do not forward ports 8787 or 2323 to the internet.
 
@@ -210,8 +220,9 @@ never blocked).
   `:latest`. A reused number and a version it cannot tag are red runs, and while
   `main` declares an older release than the newest one (a revert) every push is
   red. Home Assistant installs the version named in `config.yaml`.
-- Every job runs on a pinned runner image (`ubuntu-24.04`, `ubuntu-24.04-arm`),
-  never `ubuntu-latest`, so the image changes only in a reviewed commit.
+- Every job runs on a pinned runner image (`ubuntu-26.04`, `ubuntu-26.04-arm`;
+  CodeQL on `ubuntu-24.04` until CodeQL lists 26.04 as supported), never
+  `ubuntu-latest`, so the image changes only in a reviewed commit.
 - The image-build Buildx setup step gets one retry after a pause, so a transient registry
   failure does not leave a version without a release. The GitHub Release takes its
   notes from the CHANGELOG and fails if the section is missing; it attaches the

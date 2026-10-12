@@ -12,7 +12,7 @@ run-name: Publish images ${{ inputs.version && format('v{0}', inputs.version) ||
 #      does not fire the `push: tags` trigger below (only a tag pushed by hand
 #      would). A manual workflow_dispatch re-runs a version. The server suite
 #      runs first, then amd64 and aarch64 build in parallel, each on its own
-#      native runner (ubuntu-24.04, ubuntu-24.04-arm) with no emulation. Every
+#      native runner (ubuntu-26.04, ubuntu-26.04-arm) with no emulation. Every
 #      job runs on a pinned image, never ubuntu-latest.
 #   2. Each image is pushed to ghcr.io/<owner>/{arch}-ecoflow-panel as both
 #      :{version} and :latest. HA Supervisor pulls these instead of building
@@ -50,7 +50,7 @@ concurrency:
 jobs:
   resolve:
     name: Resolve version
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -77,7 +77,7 @@ jobs:
   test:
     name: Server tests
     needs: resolve
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -122,11 +122,11 @@ jobs:
             # repointed upstream `3.21` tag can't silently change our runtime.
             # Update the digest deliberately when bumping the base.
             base: ghcr.io/home-assistant/aarch64-base:3.21@sha256:5100b3a2e4741440e7bd587c124920fa3bf02287c4de3cb48aacef7049530ee1
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
           - arch: amd64
             platform: linux/amd64
             base: ghcr.io/home-assistant/amd64-base:3.21@sha256:995fc8a44059b3bac015603f63b56b1bf935c2227c5176823d9bb76b45fc2249
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -222,7 +222,7 @@ jobs:
   release:
     name: Cut GitHub Release
     needs: [resolve, build]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # v1.187.3 — BOUNDED. With no timeout anywhere, one stalled apt mirror in the best-effort
     # 'Ensure pandoc' step ran this job into the platform's 6 h limit; the job was CANCELLED,
     # so the steps after it — including 'Create GitHub Release' — never ran (v1.187.1, run

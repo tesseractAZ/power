@@ -2,6 +2,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { createReadRecorder } from './readRecorder.js';
 import { setOwnerReserveFloorPct } from './nightChargeActuator.js';
 import { buildReport, warmReports } from './reports.js';
+import { WARM_INTERVAL_MS } from './analytics/warmCadence.js';
 import type { FleetSnapshot } from './snapshot.js';
 
 /**
@@ -81,7 +82,9 @@ port.on('message', async (msg: any) => {
 // ── Self-warm: keep the report TTL caches hot so endpoint requests return
 // the cached value over a ~1ms IPC hop instead of triggering a recompute.
 // Recomputes that DO happen run here, on the worker — never on main.
-const WARM_INTERVAL_MS = 4 * 60 * 1000;
+// v1.187.20 — the interval is shared (analytics/warmCadence.ts): the charge-curve report refreshes
+// ahead of its TTL by two of these, so a warm pass lands inside its refresh window even when one
+// tick is skipped (a pass still running when it fires).
 let warming = false;
 const warm = async () => {
   if (warming || !hasProjections()) return;

@@ -1,0 +1,24 @@
+#!/bin/sh
+# ==============================================================================
+# Power (ecoflow_panel) — Home Assistant backup hook.
+#
+#   ecoflow-panel-backup-hook pre    config.yaml backup_pre
+#   ecoflow-panel-backup-hook post   config.yaml backup_post
+#
+# The Supervisor runs this with `docker exec` inside the running add-on, under
+# the add-on's AppArmor profile, just before (pre) and just after (post) it
+# copies /data. The client asks the server, over loopback only, to empty the
+# SQLite WAL and hold checkpoints still until post, so the backup's copy of
+# ecoflow.db + ecoflow.db-wal is consistent (server/src/backupWindow.ts).
+#
+# It ALWAYS exits 0. A non-zero exit makes the Supervisor drop the whole add-on
+# from the backup; a hook that could not reach the server only means an
+# unquiesced copy, as before v1.187.20. The client bounds its own run time and
+# journals every failure to /share/ecoflow-panel/backup-window.jsonl.
+# ==============================================================================
+/usr/bin/node /app/server/src/backupHook.mjs "$1"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "ecoflow-panel-backup-hook $1: hook client exited $rc; the backup continues" >&2
+fi
+exit 0

@@ -256,8 +256,8 @@ const MUTANTS = [
   {
     id: "S-ii. ★★★ the subject gate returns",
     file: TAGREL,
-    find: "    name: Tag + trigger image build\n    runs-on: ubuntu-24.04",
-    to: "    name: Tag + trigger image build\n    if: startsWith(github.event.head_commit.message, 'Release v')\n    runs-on: ubuntu-24.04",
+    find: "    name: Tag + trigger image build\n    runs-on: ubuntu-26.04",
+    to: "    name: Tag + trigger image build\n    if: startsWith(github.event.head_commit.message, 'Release v')\n    runs-on: ubuntu-26.04",
     why: "A bump merged under another subject is never tagged (v0.54.1).",
   },
   {
@@ -305,14 +305,14 @@ const MUTANTS = [
   {
     id: "I-ii. ★★ the arm64 build moves to an x64 runner",
     file: IMG,
-    find: "            runner: ubuntu-24.04-arm",
-    to: "            runner: ubuntu-24.04",
+    find: "            runner: ubuntu-26.04-arm",
+    to: "            runner: ubuntu-26.04",
     why: "linux/arm64 on an amd64 host needs emulation (30-60 min builds).",
   },
   {
     id: "I-iii. ★★★ a job runs on the moving ubuntu-latest label",
     file: IMG,
-    find: "    name: Resolve version\n    runs-on: ubuntu-24.04",
+    find: "    name: Resolve version\n    runs-on: ubuntu-26.04",
     to: "    name: Resolve version\n    runs-on: ubuntu-latest",
     why: "ubuntu-latest becomes Ubuntu 26.04 from 2026-10-19, under every job at once.",
   },

@@ -70,9 +70,12 @@ for (const h of harnesses) {
     // timeouts, and an anchor in a file this list cannot see would read as 0 matches.
     // v1.187.16 — `.txt` too: mutate-v1187-15.mjs mutates ecoflow_panel/apparmor.txt.
     // `.py` too: mutate-v1187-18r.mjs mutates scripts/check-release-pr.py.
+    // v1.187.20 — any file under rootfs/ too, extension or not: mutate-v1187-20d.mjs mutates the
+    // backup hook rootfs/usr/bin/ecoflow-panel-backup-hook, which (like every executable the image
+    // ships in /usr/bin) has no extension.
     ...[...src.matchAll(/resolve\((?:REPO|ROOT),\s*'([^']+)'\)/g)]
       .map((m) => m[1])
-      .filter((rel) => rel.includes('/') && /\.(ts|tsx|mjs|js|ya?ml|txt|py)$/.test(rel))
+      .filter((rel) => rel.includes('/') && (/\.(ts|tsx|mjs|js|ya?ml|txt|py)$/.test(rel) || rel.startsWith('rootfs/')))
       .map((rel) => join(ROOT, rel)),
   ];
   if (targets.length === 0) { console.log(`  skip   ${h} (no resolvable target)`); continue; }

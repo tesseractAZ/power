@@ -495,12 +495,15 @@ test('★★ outside a force-charge every force-charge key stays EXTERNAL, whate
 });
 
 /* ══ wiring pin (index.ts has no seam a unit test can drive) — a SOURCE PIN, labelled ══ */
-test('★★ SOURCE PIN: the drift tick classifies with the commanded writes and logs panel-side as such', () => {
+// v1.187.20 — the classify-and-log step moved into settingsDriftHold.ts's settleDriftTick, where
+// settingsDriftHold.test.ts drives the panel-side and own-write lines behaviourally. index.ts keeps
+// the classifier's context (driftActuatorContext), which the drift tick passes to it.
+test('★★ SOURCE PIN: the drift tick classifies with the commanded writes', () => {
   const idx = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8');
-  const body = idx.slice(idx.indexOf('function runSettingsDriftTick('), idx.indexOf('\n}\n', idx.indexOf('function runSettingsDriftTick(')));
-  assert.ok(body.includes('        forceChargeCommands: forceChargeCommandsOf(act),'));
-  assert.ok(body.includes("} else if (kind === 'panel-side') {"));
-  assert.ok(body.includes("not by it — the panel's own ceiling stop or a manual Charge Now; not announced"));
+  const body = idx.slice(idx.indexOf('function driftActuatorContext('), idx.indexOf('\n}\n', idx.indexOf('function driftActuatorContext(')));
+  assert.ok(body.includes('    forceChargeCommands: forceChargeCommandsOf(act),'));
+  const tick = idx.slice(idx.indexOf('function runSettingsDriftTick('), idx.indexOf('\n}\n', idx.indexOf('function runSettingsDriftTick(')));
+  assert.ok(tick.includes('      context: driftActuatorContext,'));
 });
 
 /* ══ the announcement says what the panel will be told ════════════════════ */
