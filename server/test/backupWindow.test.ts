@@ -211,6 +211,7 @@ test('★★ post without a pre (a restart inside the window) still restores, an
   try {
     const post = bw.post();
     assert.equal(post.hadPre, false);
+    assert.equal(post.preRefused, false);
     assert.equal(wal.autocheckpoint(), RECORDER_WAL_AUTOCHECKPOINT);
     assert.ok(l.info.some((m) => m.includes('no pre hook was seen')));
   } finally { bw.stop(); db.close(); }
@@ -476,6 +477,43 @@ test('★★ a late pre leaves an open window alone: its freeze and its dead-man
     assert.equal(after.autocheckpoint, 0);
     assert.equal(after.openedAt, before.openedAt);
     assert.equal(after.deadManDueAt, before.deadManDueAt);
+  } finally { bw.stop(); db.close(); }
+});
+
+test('★★ the post after a refused pre says the pre was refused, not that none was seen; an accepted pre or a post clears it', () => {
+  const { db, path, journal } = freshDb();
+  const wal = walControlFor(db, path);
+  let t = Date.parse('2026-10-12T03:30:08Z');
+  const l = quietLog();
+  const bw = createBackupWindow({ wal, journalPath: journal, log: l.log, now: () => t });
+  const lastPostLine = () => l.info.filter((m) => m.startsWith('backup-window: post')).at(-1) ?? '';
+  try {
+    // The hook gave up, the Supervisor copied /data unquiesced, then ran the post hook.
+    assert.equal(bw.pre('127.0.0.1', { deadlineMs: t - 1 }).refused, true);
+    t += 30_000;
+    const post = bw.post('127.0.0.1');
+    assert.equal(post.ok, true, 'the restore itself worked');
+    assert.equal(post.hadPre, false);
+    assert.equal(post.preRefused, true);
+    assert.match(lastPostLine(), /; the pre hook was refused \(client gone\), so this copy was not quiesced$/);
+    assert.doesNotMatch(lastPostLine(), /no pre hook was seen/, 'no contradiction of the refusal warning above it');
+
+    // Post clears it: a later post with no pre in between (a restart, a hand-run call) has no refusal to report.
+    const again = bw.post();
+    assert.equal(again.preRefused, false);
+    assert.match(lastPostLine(), /; no pre hook was seen$/);
+
+    // An accepted pre after a refused one clears it: that backup's copy was quiesced.
+    assert.equal(bw.pre('127.0.0.1', { clientGone: true }).refused, true);
+    assert.equal(bw.pre('127.0.0.1', { deadlineMs: t + 5000 }).ok, true);
+    t += 30_000;
+    const quiesced = bw.post('127.0.0.1');
+    assert.equal(quiesced.preRefused, false);
+    assert.match(lastPostLine(), /; window 30 s$/);
+
+    const posts = journalLines(journal).filter((r) => r.phase === 'post');
+    assert.deepEqual(posts.map((r) => r.preRefused), [true, false, false], 'the journal carries it on each post line');
+    assert.equal(l.warn.length, 2, 'only the two refusals warn');
   } finally { bw.stop(); db.close(); }
 });
 

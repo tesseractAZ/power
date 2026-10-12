@@ -36,6 +36,9 @@
  *   O-iii  pre's ok ignores a failed checkpoint
  *   O-iv   the restore's ok ignores a setting that did not take
  *   O-v    a failed pre is logged at info
+ *   Q-i    a refused pre is not recorded: its post says no pre hook was seen
+ *   Q-ii   an accepted pre leaves an earlier refusal standing
+ *   Q-iii  post leaves a refusal standing for the next post
  *
  *   node scripts/mutate-v1187-20d.mjs
  */
@@ -276,6 +279,27 @@ const MUTANTS = [
     find: '      if (rec.ok) log.info(line); else log.warn(line);\n      return rec;\n    },\n\n    post(peer) {',
     to: '      log.info(line); /* MUTANT */\n      return rec;\n    },\n\n    post(peer) {',
     why: 'An unquiesced backup leaves no warning in the add-on log.',
+  },
+  {
+    id: 'Q-i. ★ a refused pre is not recorded: its post says no pre hook was seen',
+    file: BW,
+    find: '        refusedPreAtMs = t;\n',
+    to: '        /* MUTANT: the refusal is not recorded */\n',
+    why: "The post line contradicts the refusal warning just above it, and its journal line drops preRefused: the unquiesced copy reads as a post with no pre.",
+  },
+  {
+    id: 'Q-ii. ★ an accepted pre leaves an earlier refusal standing',
+    file: BW,
+    find: '      closedByDeadMan = false;\n      refusedPreAtMs = null;\n      rec.ok',
+    to: '      closedByDeadMan = false;\n      /* MUTANT: the refusal is not cleared */\n      rec.ok',
+    why: 'A backup whose pre was accepted after an earlier refusal is journaled preRefused, as if its copy ran unquiesced.',
+  },
+  {
+    id: 'Q-iii. ★ post leaves a refusal standing for the next post',
+    file: BW,
+    find: '      refusedPreAtMs = null;\n      openedAtMs = null;',
+    to: '      /* MUTANT: the refusal is not cleared */\n      openedAtMs = null;',
+    why: "One refused pre marks every later post with no pre (a restart, a hand-run call) as an unquiesced copy.",
   },
 ];
 

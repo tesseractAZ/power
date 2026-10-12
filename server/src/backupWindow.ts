@@ -48,8 +48,9 @@
  * give-up time less a grace, so a checkpoint started on time ends before it gives up), and pre
  * refuses past it, or when the request's socket is already closed: no checkpoint, no freeze, no
  * dead-man, one `ok:false` "client gone" journal line, a warning, and 409. That backup's copy is
- * then unquiesced, as every copy was before v1.187.20. `post` is never refused: it only restores,
- * and it runs after the copy.
+ * then unquiesced, as every copy was before v1.187.20, and the post line that follows says so
+ * (`preRefused`) instead of reporting that no pre hook was seen. `post` is never refused: it only
+ * restores, and it runs after the copy.
  *
  * EVIDENCE. A `docker exec`'d hook's stdout never reaches the add-on log (Switchboard v0.58.1), so
  * every phase appends one JSON line to `/share/ecoflow-panel/backup-window.jsonl` (`/share` is
@@ -225,6 +226,9 @@ export function createBackupWindow(opts: BackupWindowOptions): BackupWindow {
   let lastDeadMan: Record<string, unknown> | null = null;
   /** The dead-man closed the current window before its post hook came. */
   let closedByDeadMan = false;
+  /** When a pre was last refused (client gone), until an accepted pre or a post clears it: the
+   *  post that follows reports that its copy ran unquiesced, not that no pre hook was seen. */
+  let refusedPreAtMs: number | null = null;
 
   const disarm = () => {
     if (deadMan) clearTimeout(deadMan);
@@ -280,6 +284,7 @@ export function createBackupWindow(opts: BackupWindowOptions): BackupWindow {
           deadlineAt: deadlineMs == null ? null : new Date(deadlineMs).toISOString(), windowOpen: openedAtMs != null, autocheckpoint,
           walBytes: wal.walBytes(),
         });
+        refusedPreAtMs = t;
         lastPre = rec;
         log.warn(`backup-window: pre refused — client gone (${reason}); no checkpoint and no freeze, so this backup copies /data `
           + `unquiesced (auto-checkpoint ${String(autocheckpoint)}${openedAtMs != null ? ', an earlier window is still open' : ''})`);
@@ -299,6 +304,7 @@ export function createBackupWindow(opts: BackupWindowOptions): BackupWindow {
       rec.deadManMs = deadManMs;
       openedAtMs = t;
       closedByDeadMan = false;
+      refusedPreAtMs = null;
       rec.ok = rec.autocheckpoint === 0 && rec.checkpointError == null;
       record(rec);
       lastPre = rec;
@@ -313,16 +319,21 @@ export function createBackupWindow(opts: BackupWindowOptions): BackupWindow {
     post(peer) {
       const t = now();
       disarm();
+      const preRefused = refusedPreAtMs != null;
       const hadPre = openedAtMs != null;
       const r = restore();
-      const rec = record({ phase: 'post', ts: new Date(t).toISOString(), peer: peer ?? null, hadPre, deadManClosedWindow: closedByDeadMan, windowMs: hadPre ? t - (openedAtMs as number) : null, restoreTo, ...r });
+      const rec = record({ phase: 'post', ts: new Date(t).toISOString(), peer: peer ?? null, hadPre, deadManClosedWindow: closedByDeadMan, preRefused, windowMs: hadPre ? t - (openedAtMs as number) : null, restoreTo, ...r });
+      refusedPreAtMs = null;
       openedAtMs = null;
       closedByDeadMan = false;
       lastPost = rec;
       const cp = rec.checkpoint as CheckpointResult | null;
+      const tail = hadPre ? `; window ${Math.round((rec.windowMs as number) / 1000)} s`
+        : rec.deadManClosedWindow ? '; the dead-man had already closed the window'
+          : preRefused ? '; the pre hook was refused (client gone), so this copy was not quiesced'
+            : '; no pre hook was seen';
       const line = `backup-window: post — auto-checkpoint ${String(rec.autocheckpoint)} (restored to ${restoreTo}), `
-        + `WAL checkpoint(PASSIVE) ${cp ? `busy=${cp.busy} ${cp.checkpointed}/${cp.log} frames` : `failed: ${String(rec.checkpointError)}`}`
-        + `${hadPre ? `; window ${Math.round((rec.windowMs as number) / 1000)} s` : rec.deadManClosedWindow ? '; the dead-man had already closed the window' : '; no pre hook was seen'}`;
+        + `WAL checkpoint(PASSIVE) ${cp ? `busy=${cp.busy} ${cp.checkpointed}/${cp.log} frames` : `failed: ${String(rec.checkpointError)}`}${tail}`;
       if (rec.ok) log.info(line); else log.warn(line);
       return rec;
     },
