@@ -602,19 +602,24 @@ test('★ index.ts builds the window over the recorder connection, registers the
   assert.ok(shutdown.indexOf('backupWindow.stop();') > 0 && shutdown.indexOf('backupWindow.stop();') < shutdown.indexOf('recorder.close();'));
 });
 
-test('★ the journal rotates once past its cap, sized through the open file, and never throws', () => {
+test('★ past its cap the journal keeps its newest half on the same file, and never throws', () => {
   const dir = mkdtempSync(join(tmpdir(), 'bw-rot-'));
   try {
     const path = join(dir, 'backup-window.jsonl');
-    writeFileSync(path, 'x'.repeat(BACKUP_JOURNAL_MAX_BYTES + 1));
+    const old = Array.from({ length: Math.ceil(BACKUP_JOURNAL_MAX_BYTES / 18) + 100 }, (_, i) => `{"old":"${String(i).padStart(10, '0')}"}`);
+    writeFileSync(path, old.join('\n') + '\n');
+    assert.ok(statSync(path).size > BACKUP_JOURNAL_MAX_BYTES);
     assert.equal(appendBackupJournal(path, { phase: 'pre', n: 1 }), true);
-    assert.equal(statSync(`${path}.1`).size, BACKUP_JOURNAL_MAX_BYTES + 1, 'the full file moved to .1');
-    assert.equal(readFileSync(path, 'utf8'), '{"phase":"pre","n":1}\n', 'a fresh file holds only the new line');
+    const lines = readFileSync(path, 'utf8').trimEnd().split('\n');
+    assert.ok(statSync(path).size <= BACKUP_JOURNAL_MAX_BYTES / 2 + 64, 'about half the cap remains');
+    assert.equal(lines.at(-1), '{"phase":"pre","n":1}', 'the new line is last');
+    assert.equal(lines.at(-2), old.at(-1), 'the newest old line is kept whole');
+    for (const l of lines) JSON.parse(l); // every kept line is whole (cut at a line start)
+    assert.equal(existsSync(`${path}.1`), false, 'no second file');
     assert.equal(appendBackupJournal(path, { phase: 'post', n: 2 }), true);
-    assert.equal(readFileSync(path, 'utf8').trim().split('\n').length, 2, 'under the cap it appends');
-    // A path whose parent is a file cannot be written: false, not a throw.
+    assert.equal(readFileSync(path, 'utf8').trimEnd().split('\n').at(-1), '{"phase":"post","n":2}', 'under the cap it appends');
     writeFileSync(join(dir, 'not-a-dir'), '');
-    assert.equal(appendBackupJournal(join(dir, 'not-a-dir', 'j.jsonl'), { phase: 'pre' }), false);
+    assert.equal(appendBackupJournal(join(dir, 'not-a-dir', 'j.jsonl'), { phase: 'pre' }), false, 'false, not a throw');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

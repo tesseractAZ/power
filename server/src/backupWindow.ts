@@ -59,7 +59,7 @@
  * other connection can read.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, renameSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, ftruncateSync, mkdirSync, openSync, readSync, statSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /** The recorder connection's automatic-checkpoint threshold in pages (SQLite's default, set
@@ -76,7 +76,7 @@ export const BACKUP_WINDOW_ROUTE = '/api/internal/backup-window';
  *  START. Past it the client may have given up and the Supervisor may be copying /data. */
 export const BACKUP_DEADLINE_HEADER = 'x-backup-hook-deadline';
 
-/** The journal is capped: past this size it is rotated to `<path>.1` (two lines a night). */
+/** The journal is capped: past this size only its newest half is kept (two lines a night: years to reach). */
 export const BACKUP_JOURNAL_MAX_BYTES = 1024 * 1024;
 
 export type CheckpointMode = 'PASSIVE' | 'TRUNCATE';
@@ -157,21 +157,26 @@ export function resolveBackupJournalPath(opts: { dataDir: string; shareRoot?: st
   return existsSync(shareRoot) ? join(shareRoot, 'ecoflow-panel', 'backup-window.jsonl') : join(opts.dataDir, 'backup-window.jsonl');
 }
 
-/** Append one JSON line. Best-effort: returns false instead of throwing. The size is read through the
- *  open descriptor, not the path (a path stat followed by a write to that path is a check-then-use race,
- *  CodeQL js/file-system-race); past the cap the file rotates to `.1` once and a fresh one is opened. */
+/** Append one JSON line. Best-effort: returns false instead of throwing. Everything after the open goes
+ *  through that one descriptor ('a+'): a path re-used after checking it is a check-then-use race (CodeQL
+ *  js/file-system-race). Past the cap the newest half is kept, from a line start, by read → ftruncate →
+ *  write on the same descriptor; with O_APPEND every write lands at the current end. */
 export function appendBackupJournal(path: string, rec: Record<string, unknown>): boolean {
   let fd: number | null = null;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    fd = openSync(path, 'a');
-    if (fstatSync(fd).size > BACKUP_JOURNAL_MAX_BYTES) {
-      closeSync(fd);
-      fd = null;
-      renameSync(path, `${path}.1`);
-      fd = openSync(path, 'a');
+    fd = openSync(path, 'a+');
+    const size = fstatSync(fd).size;
+    if (size > BACKUP_JOURNAL_MAX_BYTES) {
+      const keep = Math.floor(BACKUP_JOURNAL_MAX_BYTES / 2);
+      const buf = Buffer.alloc(keep);
+      const n = readSync(fd, buf, 0, keep, size - keep);
+      const tail = buf.subarray(0, n);
+      const nl = tail.indexOf(0x0a);
+      ftruncateSync(fd, 0);
+      if (nl >= 0 && nl + 1 < tail.length) writeSync(fd, tail.subarray(nl + 1));
     }
-    appendFileSync(fd, `${JSON.stringify(rec)}\n`);
+    writeSync(fd, `${JSON.stringify(rec)}\n`);
     return true;
   } catch {
     return false;
