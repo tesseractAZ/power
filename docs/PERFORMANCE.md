@@ -317,7 +317,7 @@ for the new basis and a > 5 % miss for the old one.
 
 **What it means for the alarms (perfect-foresight islanded replay, not the live forecast).**
 Re-running each span minute by minute from its live pool percent against the recorded load and
-PV of the following 24 h, with the 16 % owner floor: the medium tier (reserve within 6 h) is
+PV of the following 24 h, with the 16 % reserve floor: the medium tier (reserve within 6 h) is
 reached on 9 of the 30 nights instead of 6 (three new nights: 09-15, 10-04, 10-08, first at
 22:10–23:23), and 0–40 min earlier on the other six (0 where both already read medium at the
 span's start); the high tier (empty within 8 h) on the same
@@ -331,7 +331,7 @@ least 1.5 kW above the load, pool 25–85 %) the pool charged 8–19 % less than
 predicts on the measured capacity, and still 2–7 % less with the 270 W overhead subtracted
 (which is why the overhead applies in every hour). A projection that crosses a sunny day
 therefore still reads somewhat long on the far side of it. The night-charge planner keeps the
-nameplate basis and `load/0.94` (owner decision; DOCS §5.1.3a).
+nameplate basis and `load/0.94` (unchanged by design; DOCS §5.1.3a).
 
 ---
 

@@ -24,8 +24,9 @@
  * - A pack whose fullCapMah is null, ≤ 0, or above PACK_FULL_CAP_MAX_OF_DESIGN × its design is
  *   invalid, and a Core with any invalid pack, a pack count that disagrees with its own
  *   `packCount`, or no live reading (offline, not yet reported) is INCOMPLETE. An incomplete
- *   Core uses its last complete ratio, persisted (DATA_DIR) and valid for HELD_RATIO_MAX_AGE_MS;
- *   past that, or never seen, the LOWEST ratio known for any Core. Plain nameplate (1.0) only
+ *   Core uses its last complete ratio — persisted (POOL_ENERGY_BASIS_DIR, else beside the
+ *   database under the Supervisor) and valid for HELD_RATIO_MAX_AGE_MS; past that, or never
+ *   seen, the LOWEST ratio known for any Core. Plain nameplate (1.0) only
  *   when no ratio has ever been measured: once one exists the basis never silently returns to
  *   nameplate.
  * - Asymmetric: a lower figure applies at once; a higher one only after it has held for

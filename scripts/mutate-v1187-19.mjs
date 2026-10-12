@@ -37,6 +37,9 @@
  *   V-xxxiii a figure built on substitutes (a partial map) is recorded as the applied scale
  *   V-xxxiv  a figure built on substitutes may exceed the applied scale
  *   V-xxxv   the worker's basis reset wipes the measured basis
+ *   V-xxxvi  the runway drops the overhead in PV-surplus hours
+ *   V-xxxvii the band seeds hour 0 with the old drain
+ *   V-xxxviii the band steps every hour with the old drain
  *
  *   node scripts/mutate-v1187-19.mjs
  */
@@ -258,21 +261,21 @@ const MUTANTS = [
     file: IDX,
     find: 'c.batteryPercentage : null]));\n  const fullWh: number | null = sp?.backupFullCapWh ?? null;',
     to: "c.batteryPercentage : null]));\n  const fullWh: number | null = sp?.backupFullCapWh != null ? sp.backupFullCapWh * (((await analytics.report('runway')) as { capacityScale?: number } | null)?.capacityScale ?? 1) : null; /* MUTANT */",
-    why: 'Owner decision: the force-charge keeps the panel\'s own capacity.',
+    why: 'Out of scope for the measured basis: the force-charge keeps the panel\'s own capacity.',
   },
   {
     id: 'V-xxx. ★★★ the reserve actuator reads the runway\'s measured capacity',
     file: IDX,
     find: '      ? shp2.projection\n      : null;\n  const fullWh: number | null = sp?.backupFullCapWh ?? null;',
     to: "      ? shp2.projection\n      : null;\n  const fullWh: number | null = sp?.backupFullCapWh != null ? sp.backupFullCapWh * (((await analytics.report('runway')) as { capacityScale?: number } | null)?.capacityScale ?? 1) : null; /* MUTANT */",
-    why: 'Owner decision: the actuator keeps the panel\'s own capacity.',
+    why: 'Out of scope for the measured basis: the actuator keeps the panel\'s own capacity.',
   },
   {
     id: 'V-xxxi. ★★★ the night-charge planner sizes on the runway\'s measured capacity',
     file: IDX,
     find: '  const fullWh: number | null = sp.backupFullCapWh ?? null;',
     to: "  const fullWh: number | null = sp.backupFullCapWh != null ? sp.backupFullCapWh * (((await analytics.report('runway')) as { capacityScale?: number } | null)?.capacityScale ?? 1) : null; /* MUTANT */",
-    why: 'Owner decision: the planner and its cushion keep the panel\'s own capacity.',
+    why: 'Out of scope for the measured basis: the planner and its cushion keep the panel\'s own capacity.',
   },
   {
     id: 'V-xxxii. ★★ a secondary panel\'s runway is computed without its measured basis',
@@ -301,6 +304,27 @@ const MUTANTS = [
     find: '  multiDayCache = null;\n  bayesCache = null;\n}\n',
     to: '  multiDayCache = null;\n  bayesCache = null;\n  poolBasisTracker.reset(); /* MUTANT */\n}\n',
     why: 'Every boot-basis step forgets the held ratios: a Core still reporting in runs on the lowest known.',
+  },
+  {
+    id: 'V-xxxvi. ★★★ the runway drops the overhead in PV-surplus hours',
+    file: ANALYTICS,
+    find: '    const delta = pvKwh - runwayDrainW(loadKwhPerHour * 1000, basis.overheadW) / 1000;',
+    to: '    const delta = pvKwh - runwayDrainW(loadKwhPerHour * 1000, pvKwh > loadKwhPerHour / RUNWAY_DISCHARGE_EFFICIENCY ? 0 : basis.overheadW) / 1000; /* MUTANT */',
+    why: 'A sunny stretch banks the 270 W the Cores still draw: the next night\'s runway reads long.',
+  },
+  {
+    id: 'V-xxxvii. ★★ the band seeds hour 0 with the old drain',
+    file: ANALYTICS,
+    find: '    const d0Kwh = netKwh(h0.forecastPvW, h0.forecastLoadW);',
+    to: '    const d0Kwh = (h0.forecastPvW - h0.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000; /* MUTANT */',
+    why: 'The raw paths start above the anchor and reach the empty rail late: the band moves there.',
+  },
+  {
+    id: 'V-xxxviii. ★★ the band steps every hour with the old drain',
+    file: ANALYTICS,
+    find: '    const dP50Kwh = netKwh(p50, h.forecastLoadW);',
+    to: '    const dP50Kwh = (p50 - h.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000; /* MUTANT */',
+    why: 'The raw median falls slower than the anchor: at the empty rail the published band diverges.',
   },
 ];
 

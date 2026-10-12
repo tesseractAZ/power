@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { holdsLabel, troughTight, recentLoadCaption, gridNote, fullCaption, TROUGH_TIGHT_FRAC } from '../../web/src/cards/runwayText.js';
+import { holdsLabel, troughTight, recentLoadCaption, gridNote, fullCaption, fullTitle, TROUGH_TIGHT_FRAC } from '../../web/src/cards/runwayText.js';
 import { resolveGridBackstop } from '../src/gridState.js';
 
 const FULL = 92.16, RESERVE = 14.75;
@@ -116,4 +116,14 @@ test('v1.187.19 — "of N full" says when N is the packs\' measured capacity, no
   assert.equal(fullCaption({ backupFullKwh: 86.0, capacityScale: 0.933, capacityBasis: 'min-known' }), 'of 86.0 full · lowest measured 93% of nameplate');
   const card = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../web/src/cards/RunwayCard.tsx'), 'utf8');
   assert.ok(card.includes('sub={fullCaption(runway)}'), 'the card renders the caption');
+  assert.ok(card.includes('title={fullTitle(runway)}'), 'and the tooltip from the same basis');
+});
+
+test('v1.187.19 — the "Backup now" tooltip says measured only on a measured basis', () => {
+  for (const b of ['measured', 'held', 'min-known'] as const) assert.match(fullTitle({ capacityBasis: b }), /measured full-charge capacity/);
+  for (const b of ['nameplate', null, undefined] as const) {
+    const t = fullTitle({ capacityBasis: b });
+    assert.match(t, /nameplate capacity/);
+    assert.doesNotMatch(t, /measured full-charge/);
+  }
 });

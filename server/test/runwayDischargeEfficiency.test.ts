@@ -107,9 +107,10 @@ test('v1.26.0 — time-to-empty is also shortened by the discharge loss (never o
 
 test('v1.26.0 — pv==load still DRAINS (the pack pays the inverter tax); (pv−load)/η would wrongly read flat/never-empty', () => {
   resetRunwayCache();
-  // pv (DC) == load (AC) == 10 kW. Real DC-bus drain = pv − load/η = 10·(1 − 1/η)
-  // ≈ −0.638 kW/h. The rejected (pv−load)/η formula gives 0 ⇒ pool flat ⇒ hoursToEmpty
-  // null (a fully suppressed depletion crossing) — the exact optimism this pins out.
+  // pv (DC) == load (AC) == 10 kW. Real DC-bus drain = load/η + overhead − pv = 10·(1/η − 1)
+  // + 0.27 ≈ 0.908 kW/h (v1.187.19 adds the Cores' 270 W). The rejected (pv−load)/η formula
+  // leaves only the overhead, 0.27 kW/h: 10 kWh lasts ~37 h, past the 24 h horizon ⇒
+  // hoursToEmpty null (a suppressed depletion crossing) — the exact optimism this pins out.
   const full = 92.16, reserve = 0, remaining = 10;
   const kw = 10;
   const r = computeRunway(shp2(remaining, reserve, full), loadRecorder(kw * 1000), islanded(kw * 1000, kw * 1000));
@@ -117,7 +118,7 @@ test('v1.26.0 — pv==load still DRAINS (the pack pays the inverter tax); (pv−
   const drainKw = kw / RUNWAY_DISCHARGE_EFFICIENCY + OVH_KW - kw;    // load/η + overhead − pv
   const expected = remaining / drainKw;                    // ≈ 11 h (15.7 h on the η leg alone)
   assert.ok(Math.abs(r.hoursToEmpty! - expected) < 0.3,
-    `hoursToEmpty should be ~${expected.toFixed(1)}h (drain = load/η − pv); got ${r.hoursToEmpty}`);
+    `hoursToEmpty should be ~${expected.toFixed(1)}h (drain = load/η + overhead − pv); got ${r.hoursToEmpty}`);
 });
 
 test('v1.26.0 — daytime partial-cloud deficit uses pv − load/η, not (pv−load)/η (PV not over-credited)', () => {
@@ -128,10 +129,10 @@ test('v1.26.0 — daytime partial-cloud deficit uses pv − load/η, not (pv−l
   assert.ok(r.hoursToReserve != null, 'a daytime deficit still crosses reserve');
   const correctDrainKw = 5 / RUNWAY_DISCHARGE_EFFICIENCY + OVH_KW - 2;   // load/η + overhead − pv ≈ 3.589
   const correct = 30 / correctDrainKw;                          // ≈ 8.4 h
-  const buggyDrainKw = (5 - 2) / RUNWAY_DISCHARGE_EFFICIENCY;    // (load−pv)/η ≈ 3.191
-  const buggy = 30 / buggyDrainKw;                              // ≈ 9.4 h (optimistic)
+  const buggyDrainKw = (5 - 2) / RUNWAY_DISCHARGE_EFFICIENCY + OVH_KW;    // (load−pv)/η + overhead ≈ 3.461
+  const buggy = 30 / buggyDrainKw;                              // ≈ 8.67 h (optimistic: PV over-credited)
   assert.ok(Math.abs(r.hoursToReserve! - correct) < 0.3,
-    `hoursToReserve should be ~${correct.toFixed(1)}h (drain load/η − pv); got ${r.hoursToReserve}`);
+    `hoursToReserve should be ~${correct.toFixed(1)}h (drain load/η + overhead − pv); got ${r.hoursToReserve}`);
   assert.ok(r.hoursToReserve! < buggy - 0.15,
     `must be shorter than the (pv−load)/η value ${buggy.toFixed(1)}h that over-credits PV; got ${r.hoursToReserve}`);
 });

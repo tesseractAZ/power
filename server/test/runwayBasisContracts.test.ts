@@ -40,14 +40,15 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
 /* ═══════════════════════════════════════════════════════════════════════════
  * v1.187.19 — contracts around the measured runway basis.
  *
- * (1) OWNER DECISION "runway + alarms only": the night-charge planner, its cushion, the
- *     JIT force-charge and the MPC/dispatch recommendations are UNCHANGED. The day forecast,
+ * (1) SCOPE — the measured basis is scoped to the runway and its alarms: the night-charge
+ *     planner, its cushion, the JIT force-charge and the MPC/dispatch recommendations are
+ *     UNCHANGED. The day forecast,
  *     the probabilistic band and the multi-day forecast now carry a measured SoC trajectory;
  *     everything the planner and the MPC read from them must be byte-identical between the
  *     pre-v1.187.19 basis (the legacy override: nameplate kWh, load/η) and the measured one,
  *     and the planner run on each must produce the identical plan.
- * (2) The band's trajectory inversion and hour-0 seed use the SAME drain as the forward
- *     integrator that built the trajectory.
+ * (2) The band's trajectory inversion, hour-0 seed and per-hour steps use the SAME drain as
+ *     the forward integrator that built the trajectory (a reference band near the empty rail).
  * ═════════════════════════════════════════════════════════════════════════ */
 
 const HOUR = 3_600_000;
@@ -183,7 +184,7 @@ function planFrom(r: Reports, nowMs: number) {
 beforeEach(() => { resetOwnerReserveFloorPct(); setWeatherCacheForTesting(weather()); });
 afterEach(() => { setWeatherCacheForTesting(null); setPoolBasisOverrideForTesting(null); resetPoolEnergyBasisForTesting(); resetForecastCachesForTesting(); });
 
-test('★★★ OWNER DECISION — the planner and MPC inputs are byte-identical on the legacy and the measured basis; the planner\'s plan is identical', async () => {
+test('★★★ SCOPE — the planner and MPC inputs are byte-identical on the legacy and the measured basis; the planner\'s plan is identical', async () => {
   let legacy = await reports('legacy');
   let measured = await reports('measured');
   if (legacy.fc.hours[0].ts !== measured.fc.hours[0].ts) { // an hour boundary between the two builds
@@ -213,7 +214,7 @@ test('★★★ OWNER DECISION — the planner and MPC inputs are byte-identical
   assert.deepEqual({ ...dM, generatedAt: 0 }, { ...dL, generatedAt: 0 });
 });
 
-test('★★★ OWNER DECISION — source pins: the planner, JIT force-charge and MPC never read the measured basis', () => {
+test('★★★ SCOPE — source pins: the planner, JIT force-charge and MPC never read the measured basis', () => {
   const src = (p: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src', p), 'utf8');
   const index = src('index.ts');
   /** A top-level function's text: from its declaration to the next top-level function. */
@@ -312,6 +313,45 @@ test('★★★ band — the inversion recovers the measured capacity only with 
   }
   // Read with the pre-v1.187.19 drain the same trajectory implies a ~13 % smaller pool: a visibly wider band.
   assert.ok(width(oldDrain, 11) > width(known, 11) * 1.06, `old drain ${width(oldDrain, 11)} vs ${width(known, 11)}`);
+});
+
+test('★★★ band — near the empty rail the hour-0 seed and every step drain through runwayDrainW with the forecast\'s overhead', async () => {
+  // A night that empties the pool inside the window: the median path must reach the rail exactly
+  // when the deterministic trajectory does, so the published P10/P90 equal a reference band built
+  // with the same drain. Seeded or stepped with load/η alone, the raw paths lag the anchor by the
+  // overhead and the published band moves at the rail.
+  setWeatherCacheForTesting(null);
+  const fullWh = 92_160 * 0.944;
+  const fullKwh = fullWh / 1000;
+  const startTs = Math.ceil(Date.now() / HOUR) * HOUR + 48 * HOUR;
+  let socWh = 0.12 * fullWh;
+  const hours: ForecastHour[] = Array.from({ length: 10 }, (_, h) => {
+    const loadW = 3_000 + 300 * (h % 2);
+    socWh = Math.max(0, Math.min(fullWh, socWh - runwayDrainW(loadW, 270)));
+    return { ts: startTs + h * HOUR, forecastPvW: 0, forecastLoadW: loadW, cloudCoverPct: null, ghiWm2: null, projectedSocPct: Math.round((socWh / fullWh) * 1000) / 10, modelled: false };
+  });
+  assert.ok(hours.some((h) => h.projectedSocPct === 0) && hours[0].projectedSocPct! > 5, 'the trajectory reaches the rail inside the window');
+  resetForecastCachesForTesting();
+  const band = await computeProbabilisticForecast(bareForecast(hours, { poolFullWh: fullWh, poolOverheadW: 270 }), null);
+  // The reference: night hours carry no PV sigma, so each path steps by (net ± z·σ_load)/full.
+  const Z = 1.282, SIGMA_LOAD_FRAC = 0.15;
+  const clamp = (v: number) => Math.min(100, Math.max(0, v));
+  const net = (loadW: number) => -runwayDrainW(loadW, 270) / 1000;
+  const start = clamp(hours[0].projectedSocPct! - (net(hours[0].forecastLoadW) / fullKwh) * 100);
+  let low = start, mid = start, high = start;
+  let railHours = 0;
+  hours.forEach((h, i) => {
+    const sigma = (SIGMA_LOAD_FRAC * h.forecastLoadW) / 1000;
+    low = clamp(low + ((net(h.forecastLoadW) - Z * sigma) / fullKwh) * 100);
+    mid = clamp(mid + (net(h.forecastLoadW) / fullKwh) * 100);
+    high = clamp(high + ((net(h.forecastLoadW) + Z * sigma) / fullKwh) * 100);
+    const anchor = h.projectedSocPct!;
+    const p10 = clamp(anchor + low - mid), p90 = clamp(anchor + high - mid);
+    if (anchor === 0) railHours += 1;
+    assert.ok(Math.abs(band.hours[i].p10SocPct! - p10) <= 0.05 + 1e-6, `hour ${i}: P10 ${band.hours[i].p10SocPct} vs reference ${p10.toFixed(3)}`);
+    assert.ok(Math.abs(band.hours[i].p90SocPct! - p90) <= 0.05 + 1e-6, `hour ${i}: P90 ${band.hours[i].p90SocPct} vs reference ${p90.toFixed(3)}`);
+  });
+  assert.ok(railHours >= 3, `${railHours} hours on the rail`);
 });
 
 test('★★ band — a hand-built forecast with no poolOverheadW is read with the drain it was built with (load/η)', async () => {

@@ -74,3 +74,12 @@ export function fullCaption(r: Pick<RunwayProjection, 'backupFullKwh' | 'capacit
   const how = r.capacityBasis === 'measured' ? 'measured' : r.capacityBasis === 'held' ? 'last measured' : 'lowest measured';
   return `${full} · ${how} ${Math.round(r.capacityScale * 100)}% of nameplate`;
 }
+
+/** v1.187.19 — the "Backup now" tile's tooltip, on the same basis as fullCaption: the measured
+ *  wording only when the figures ARE on the packs' measured capacity. */
+export function fullTitle(r: Pick<RunwayProjection, 'capacityBasis'>): string {
+  const measured = r.capacityBasis === 'measured' || r.capacityBasis === 'held' || r.capacityBasis === 'min-known';
+  return measured
+    ? "Energy on the packs' measured full-charge capacity (their BMS reading), the basis the runway hours count down. The panel's Backup Capacity and Backup Remaining stay at nameplate."
+    : "Energy on the panel's nameplate capacity: no measured pack capacity is known yet.";
+}

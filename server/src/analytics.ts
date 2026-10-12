@@ -3822,7 +3822,9 @@ export interface RunwayProjection {
    *  troughKwh / endKwh are the panel's nameplate figures × capacityScale — the packs'
    *  measured full-charge capacity — so they read below the panel's own Backup Remaining /
    *  Backup Capacity (which stay nameplate). overheadW is the fixed pool drain added to
-   *  load/η in every hour (runwayDrainW). Null on an unavailable projection. */
+   *  load/η in every hour (runwayDrainW). Null when the SHP2 or its capacity is not reported; an
+   *  unavailable projection that still knows the pool (panel-load history insufficient) carries
+   *  them with the kWh fields. */
   capacityScale: number | null;
   capacityBasis: CapacityBasis | null;
   overheadW: number | null;
