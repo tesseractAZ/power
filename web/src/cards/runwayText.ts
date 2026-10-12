@@ -63,3 +63,23 @@ export function gridNote(grid: RunwayProjection['grid']): string | null {
   if (grid?.backstopping !== true) return null;
   return `${grid.importLive === true ? 'grid is supplying the house' : 'grid available as backup'} — these are outage projections (if the grid goes down), not a live countdown`;
 }
+
+/** v1.187.19 — "of N full", and on what basis N is. The runway's kWh are the packs' measured
+ *  full-charge capacity, so they read below the panel's own Backup Capacity (nameplate); the
+ *  caption says so instead of leaving two different "full" figures unexplained. */
+export function fullCaption(r: Pick<RunwayProjection, 'backupFullKwh' | 'capacityScale' | 'capacityBasis'>): string | undefined {
+  if (r.backupFullKwh == null) return undefined;
+  const full = `of ${r.backupFullKwh.toFixed(1)} full`;
+  if (r.capacityScale == null || r.capacityBasis == null || r.capacityBasis === 'nameplate') return full;
+  const how = r.capacityBasis === 'measured' ? 'measured' : r.capacityBasis === 'held' ? 'last measured' : 'lowest measured';
+  return `${full} · ${how} ${Math.round(r.capacityScale * 100)}% of nameplate`;
+}
+
+/** v1.187.19 — the "Backup now" tile's tooltip, on the same basis as fullCaption: the measured
+ *  wording only when the figures ARE on the packs' measured capacity. */
+export function fullTitle(r: Pick<RunwayProjection, 'capacityBasis'>): string {
+  const measured = r.capacityBasis === 'measured' || r.capacityBasis === 'held' || r.capacityBasis === 'min-known';
+  return measured
+    ? "Energy on the packs' measured full-charge capacity (their BMS reading), the basis the runway hours count down. The panel's Backup Capacity and Backup Remaining stay at nameplate."
+    : "Energy on the panel's nameplate capacity: no measured pack capacity is known yet.";
+}

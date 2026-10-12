@@ -464,6 +464,12 @@ export interface RunwayProjection {
   endKwh?: number | null;
   /** v1.177.0 — what recentLoadWatts is (see server RunwayProjection). */
   recentLoadBasis?: 'hour-mean' | 'live' | 'single-sample' | 'carried' | null;
+  /** v1.187.19 — the energy basis (see server RunwayProjection): the kWh figures are the
+   *  panel's nameplate × capacityScale (the packs' measured full-charge capacity), and the
+   *  hours drain load/η plus overheadW. */
+  capacityScale?: number | null;
+  capacityBasis?: 'measured' | 'held' | 'min-known' | 'nameplate' | null;
+  overheadW?: number | null;
 }
 
 export interface RoundTripDay {

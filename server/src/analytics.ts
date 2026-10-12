@@ -16,6 +16,7 @@ import { allDpus, homeConnectedDpus, reportBasisKey } from './analytics/fleet.js
 import { cacheWritable } from './analytics/flightBasis.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
 import { topOfChargeQuietSpread } from './cellSpread.js';
+import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, NAMEPLATE_BASIS, type PoolEnergyBasis, type CapacityBasis } from './poolEnergyBasis.js';
 import {
   curtailmentDaySettled, frozenCurtailmentDay, freezeCurtailmentDay, pruneFrozenCurtailmentDays, persistFrozenCurtailmentDays,
   curtailmentMembershipSound, curtailmentMembershipHistory,
@@ -43,6 +44,8 @@ const pvBiasExclusionLogged = new Set<string>();
 /** Test seam. */
 /** v1.145.0 — dedupe key for the solar-fit line. */
 let lastSolarFitKey = '';
+/** v1.187.19 — dedupe key for the runway-basis line (logged on change only). */
+let lastPoolBasisKey = '';
 
 export function resetPvBiasExclusionLogForTesting(): void { pvBiasExclusionLogged.clear(); }
 const Z_INFO = 3.5;
@@ -1011,8 +1014,10 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
             facts: [
               { label: 'Backup pool now', value: `${cur}%` },
               { label: 'Decline rate', value: `${(-pctPerHour).toFixed(2)} %/h` },
+              // v1.187.19 — the percent is a fraction of the packs' measured capacity: the
+              // draw it implies uses the forecast's capacity scale (nameplate without one).
               ...(sp.backupFullCapWh != null
-                ? [{ label: 'Implied draw', value: `${Math.round((-pctPerHour / 100) * sp.backupFullCapWh)} W avg` }]
+                ? [{ label: 'Implied draw', value: `${Math.round((-pctPerHour / 100) * sp.backupFullCapWh * (forecast.poolCapacityScale ?? 1))} W avg` }]
                 : []),
               { label: 'Trailing window', value: '3 h regression' },
               // v1.81.0 — the alert is served from a cache (up to FORECAST_TTL_MS
@@ -1231,12 +1236,20 @@ export interface DayForecast {
    *  catches while the SHP2 is present. Absent on hand-built forecasts (no check). */
   solarModelSns?: string[];
   /** v1.187.18 — the backup pool's full capacity (Wh) the SoC trajectory was integrated
-   *  against: the SHP2's own `backupFullCapWh`, the packs' nameplate sum (15 × 6,144 Wh =
-   *  92,160 at 2026-10), not their measured full-charge capacity. null when there is no
-   *  SHP2 or the pool readings are untrusted (projectedSocPct is then null throughout).
+   *  against. v1.187.19: the SHP2's nameplate `backupFullCapWh` × poolCapacityScale, i.e. the
+   *  packs' measured full-charge capacity (≈ 87.0 of 92.16 kWh at 2026-10). null when there is
+   *  no SHP2 or the pool readings are untrusted (projectedSocPct is then null throughout).
    *  computeProbabilisticForecast reads it directly instead of guessing a fleet size.
    *  Absent on hand-built forecasts (the trajectory inversion stays as their fallback). */
   poolFullWh?: number | null;
+  /** v1.187.19 — the measured capacity scale and its basis the trajectory used
+   *  (poolEnergyBasis.ts); null without an SHP2. Absent on hand-built forecasts. */
+  poolCapacityScale?: number | null;
+  poolCapacityBasis?: CapacityBasis | null;
+  /** v1.187.19 — the fixed pool overhead (W) runwayDrainW added to every hour's load. The
+   *  probabilistic band inverts and seeds with the same figure; a forecast without it (hand-built)
+   *  is read as 0, the pre-v1.187.19 drain it was built with. */
+  poolOverheadW?: number;
   /** v1.178.0 — true when the published (display) basis has NO PV history to project from:
    *  neither a projected home Core nor a connected-but-unprojected one has recorded pv_total
    *  (before the first poll, or a cold recorder). The PV figures are then a
@@ -2259,9 +2272,21 @@ async function computeDayForecastUncached(
     if (past.length) clearnessHist = Math.max(0.2, 1 - (0.75 * mean(past.map((h) => h.cloudCoverPct))) / 100);
   }
 
-  const fullWh = shp2?.projection.backupFullCapWh ?? null;
-  let socWh = shp2?.projection.backupRemainWh ?? null;
+  // v1.187.19 — integrate on the packs' MEASURED energy (poolEnergyBasis.ts): full and the
+  // starting energy both × capacityScale, so projectedSocPct starts at the live percent and
+  // falls at the measured rate; the drain is runwayDrainW (load/η + the Cores' overhead).
+  // Same `devices` object as the panel figures, read with no await in between.
+  const poolBasis = runwayEnergyBasis(devices, shp2, now);
+  const nameplateFullWh = shp2?.projection.backupFullCapWh ?? null;
+  const nameplateRemainWh = shp2?.projection.backupRemainWh ?? null;
+  const fullWh = nameplateFullWh != null ? nameplateFullWh * poolBasis.capacityScale : null;
+  let socWh = nameplateRemainWh != null ? nameplateRemainWh * poolBasis.capacityScale : null;
   const reserveSoc = shp2?.projection.backupReserveSoc ?? 15;
+  const basisKey = `${poolBasis.capacityBasis}:${poolBasis.capacityScale.toFixed(4)}:${Math.round(poolBasis.overheadW)}`;
+  if (shp2 && basisKey !== lastPoolBasisKey) {
+    lastPoolBasisKey = basisKey;
+    log(`runway basis: pool capacity ×${poolBasis.capacityScale.toFixed(3)} of nameplate (${poolBasis.capacityBasis}, ${poolBasis.connectedCores} connected Core(s)), overhead ${Math.round(poolBasis.overheadW)} W`);
+  }
 
   const hours: ForecastHour[] = [];
   const startHour = Math.ceil(now / 3_600_000) * 3_600_000;
@@ -2404,7 +2429,8 @@ async function computeDayForecastUncached(
       // card BOUNDS itself by) consistent with the η-corrected /api/runway and
       // makes minProjectedSoc equally honest. delta ≤ the pre-v1.26 unity value
       // for all pv,load ⇒ only ever LOWERS the SoC path (conservative).
-      socWh = Math.max(0, Math.min(fullWh, socWh + (pvAlarm - load / RUNWAY_DISCHARGE_EFFICIENCY)));
+      // v1.187.19 — through runwayDrainW (the Cores' overhead added), on the measured basis.
+      socWh = Math.max(0, Math.min(fullWh, socWh + (pvAlarm - runwayDrainW(load, poolBasis.overheadW))));
       socPct = (socWh / fullWh) * 100;
       if (minSoc == null || socPct < minSoc) {
         minSoc = socPct;
@@ -2472,6 +2498,9 @@ async function computeDayForecastUncached(
     solarModel,
     solarModelSns: homeModelSns(devices),
     poolFullWh: fullWh,
+    poolCapacityScale: shp2 ? poolBasis.capacityScale : null,
+    poolCapacityBasis: shp2 ? poolBasis.capacityBasis : null,
+    poolOverheadW: poolBasis.overheadW,
     deviceModels,
     // v1.187.1 — an hour pairs only once its covering label predates the cache's fetch.
     soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,
@@ -3641,7 +3670,8 @@ const RUNWAY_BLEND_HOURS = 4;
 // guard in computeRunway.
 const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
 // v1.26.0 (accuracy audit) — the depletion sim tracks the DC battery POOL
-// (backupRemainingKwh = backupBatPercent × backupFullCapWh) yet subtracts the
+// (backupRemainingKwh = backupBatPercent × backupFullCapWh — v1.187.19: times the
+// packs' measured capacity scale, poolEnergyBasis.ts) yet subtracts the
 // DELIVERED home load, ignoring the DC→AC discharge conversion loss. Delivering
 // 1 kWh at the panel costs the pack 1/η_dis kWh, so the pool drains ~6% faster
 // than the raw load implies — a runway that reads LONG (optimistic), the unsafe
@@ -3653,17 +3683,99 @@ const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
 // terminals and excludes both conversion legs. The one-leg value is exactly what
 // THIS pool-drain constant needs; treating it as the system round trip is the
 // error that produced the v1.27 dispatch constant, fixed in v1.32.0.)
-// Divide the net DEFICIT by this efficiency so the countdown reflects real pool
-// drain. Applied to net-DISCHARGE hours ONLY (surplus/charging hours keep the raw
-// delta, so the sim is never MORE optimistic than pre-v1.26) ⇒ runway can only
+// The integrators charge the load at load/η in every hour (pv − load/η — see the
+// loop in computeRunway), so a deficit drains faster and a surplus charges by the
+// DC residual; delta ≤ the unity delta for every pv, load ⇒ runway can only
 // shorten-or-equal, preserving the runwayPvBasisGuard monotonic-in-forecastPvW
 // invariant. Default 0.94 (marginally conservative vs the measured ~0.945),
 // env-overridable, clamped to [0.80,1.0] so a bad env can never lengthen runway
 // beyond the true (unity) reading or collapse it to an untrusted extreme.
+// v1.187.19 — this leg alone UNDER-states the pool drain: the Cores' own fixed
+// consumption (≈ 270 W for the three home Cores, see below) never appears in panel_load. The
+// runway, the day/multi-day SoC trajectories and the probabilistic band now drain
+// the pool through runwayDrainW below; this constant is unchanged and stays the
+// night-charge planner's and the load-shed advisor's discharge leg.
 export const RUNWAY_DISCHARGE_EFFICIENCY = Math.min(
   1,
   Math.max(0.8, Number(process.env.RUNWAY_DISCHARGE_EFFICIENCY ?? 0.94) || 0.94),
 );
+
+/** Clamp an env number into [lo, hi]; a missing or malformed value takes `dflt`. */
+function envClamped(raw: string | undefined, dflt: number, lo: number, hi: number): number {
+  const n = raw == null || raw.trim() === '' ? dflt : Number(raw);
+  return Math.min(hi, Math.max(lo, Number.isFinite(n) ? n : dflt));
+}
+// v1.187.19 — the measured pool drain. Fitted on 30 clean pack-only discharge spans
+// (2026-09-02..10-11, loads 2.1-7.7 kW, FCC ratios 0.981/0.970/0.959/0.944; the
+// aggregated spans are test/fixtures/runwayReplaySpans.json): on the measured
+// capacity basis (poolEnergyBasis.ts) the DC drain is ≈ 267 W + load/0.94 (residual
+// sd 40 W; an OLS fit of both terms, 245 W + 1.070 × load, is indistinguishable over
+// 2-8 kW). That 267 W is a POOL figure fitted on spans that all had the same three
+// Cores connected; the fit cannot split it per Core. Each Core's own stream can:
+// Σ pack_out − ac_out/0.94 over the same spans is 17-75 W on SHP2 slot 1, 21-82 W
+// on slot 2 and 128-200 W on slot 3 (means 41 / 52 / 175 W, summing to 269 W), so
+// the overhead is NOT even per Core and most of it sits on one slot. Hence a FLOOR:
+// while the panel reports a pool, the overhead never drops below the fitted
+// three-Core figure (RUNWAY_POOL_OVERHEAD_FLOOR_W, 270 W), even when a Core leaves
+// (conservative, by up to ~230 W if only a slot-1/2 Core remains); 90 W × connected
+// Cores only lifts it for a pool with more than three. Constants, not a live
+// measurement: the panel-side figure (pack drain − panel_load) mixes the Cores' 10 s
+// stream with the panel's 60 s frame (the two-cadence trap), and the single-stream
+// per-Core figure above works only while islanded — grid-tied, ac_out reads 0 (the
+// Cores feed the house through the panel link). Clamps: floor [0, 1500] W, per-Core
+// [0, 500] W, marginal η [0.80, 1.0].
+export const RUNWAY_POOL_OVERHEAD_FLOOR_W = envClamped(process.env.RUNWAY_POOL_OVERHEAD_FLOOR_W, 270, 0, 1500);
+export const RUNWAY_CORE_OVERHEAD_W = envClamped(process.env.RUNWAY_CORE_OVERHEAD_W, 90, 0, 500);
+export const RUNWAY_DRAIN_MARGINAL_EFFICIENCY = envClamped(process.env.RUNWAY_DRAIN_MARGINAL_EFFICIENCY, 0.94, 0.8, 1);
+
+/** v1.187.19 — the pool overhead (W): never below the fitted three-Core floor while the panel
+ *  reports a pool (`poolReported`), whatever the connected count says — a Core leaving, or a
+ *  partial reading that lists no connected source, must not shed overhead the remaining Cores
+ *  still burn. */
+export function runwayPoolOverheadW(connectedCores: number, poolReported: boolean): number {
+  return Math.max(poolReported ? RUNWAY_POOL_OVERHEAD_FLOOR_W : 0, RUNWAY_CORE_OVERHEAD_W * Math.max(0, Math.floor(connectedCores)));
+}
+
+/** v1.187.19 — the DC power the pool gives up to deliver `loadW` at the panel. The max()
+ *  keeps it at or above the pre-v1.187.19 load/η for ANY configuration (a zero or negative
+ *  overhead, a marginal η above 0.94), so the runway can only shorten. Shared by computeRunway,
+ *  getDayForecast, computeMultiDayForecast and computeProbabilisticForecast — one function, so
+ *  the band's trajectory inversion uses exactly the drain that built the trajectory. `etaM` is
+ *  the configured marginal efficiency; a parameter only so the guard is testable. */
+export function runwayDrainW(loadW: number, overheadW: number, etaM: number = RUNWAY_DRAIN_MARGINAL_EFFICIENCY): number {
+  return Math.max(loadW / RUNWAY_DISCHARGE_EFFICIENCY, overheadW + loadW / etaM);
+}
+
+/** v1.187.19 — the analytics WORKER's capacity-basis tracker (poolEnergyBasis.ts). The only
+ *  writer of pool-energy-basis.json; nothing on the main thread evaluates it. */
+const poolBasisTracker = new PoolEnergyBasisTracker({ path: defaultPoolEnergyBasisPath('pool-energy-basis') });
+/** Test seam: replace the measured basis with fixed figures (legacy = scale 1, overhead 0 —
+ *  exactly the pre-v1.187.19 arithmetic at the default 0.94 legs). null restores it. */
+let poolBasisOverrideForTesting: { capacityScale: number; overheadW: number } | null = null;
+export function setPoolBasisOverrideForTesting(o: { capacityScale: number; overheadW: number } | null): void {
+  poolBasisOverrideForTesting = o;
+}
+export function resetPoolEnergyBasisForTesting(): void {
+  poolBasisTracker.reset();
+  poolBasisOverrideForTesting = null;
+}
+
+/** v1.187.19 — the energy basis one integrator uses: the panel's measured capacity scale and
+ *  the pool overhead for its connected Cores. Evaluated from the SAME devices object the caller
+ *  reads backupRemainWh / backupFullCapWh from, with no await in between. */
+export interface RunwayEnergyBasis extends PoolEnergyBasis { overheadW: number }
+export function runwayEnergyBasis(
+  devices: Record<string, DeviceSnapshot>,
+  panel: (DeviceSnapshot & { projection: Shp2Projection }) | undefined,
+  nowMs: number,
+): RunwayEnergyBasis {
+  if (poolBasisOverrideForTesting) {
+    return { ...NAMEPLATE_BASIS, capacityScale: poolBasisOverrideForTesting.capacityScale, candidateScale: poolBasisOverrideForTesting.capacityScale, overheadW: poolBasisOverrideForTesting.overheadW };
+  }
+  const b = panel ? poolBasisTracker.evaluate(devices, panel, nowMs) : NAMEPLATE_BASIS;
+  const poolReported = panel != null && (panel.projection.backupFullCapWh ?? 0) > 0;
+  return { ...b, overheadW: runwayPoolOverheadW(b.connectedCores, poolReported) };
+}
 
 export interface RunwayProjection {
   /** v1.129.0 — true when the published pair was repaired because empty
@@ -3705,6 +3817,17 @@ export interface RunwayProjection {
    *  the pending Cores' PV is missing) but are not cached, do not touch the to-empty hysteresis,
    *  and the publishers send them as null. Absent: not pending. */
   basisPending?: boolean;
+  /** v1.187.19 — the energy basis the kWh fields and the hours were computed on
+   *  (poolEnergyBasis.ts). backupRemainingKwh / backupFullKwh / backupReserveKwh /
+   *  troughKwh / endKwh are the panel's nameplate figures × capacityScale — the packs'
+   *  measured full-charge capacity — so they read below the panel's own Backup Remaining /
+   *  Backup Capacity (which stay nameplate). overheadW is the fixed pool drain added to
+   *  load/η in every hour (runwayDrainW). Null when the SHP2 or its capacity is not reported; an
+   *  unavailable projection that still knows the pool (panel-load history insufficient) carries
+   *  them with the kWh fields. */
+  capacityScale: number | null;
+  capacityBasis: CapacityBasis | null;
+  overheadW: number | null;
 }
 
 let runwayCache: { ts: number; value: RunwayProjection } | null = null;
@@ -3781,6 +3904,9 @@ const emptyRunway = (now: number, reason: string, extra: Partial<RunwayProjectio
   troughAtMs: null,
   endKwh: null,
   recentLoadBasis: null,
+  capacityScale: null,
+  capacityBasis: null,
+  overheadW: null,
   ...extra,
 });
 
@@ -3815,8 +3941,14 @@ export function computeRunway(
     return emptyRunway(now, 'SHP2 backup-pool capacity not yet reported');
   }
 
-  const backupRemainingKwh = shp2.projection.backupRemainWh / 1000;
-  const backupFullKwh = shp2.projection.backupFullCapWh / 1000;
+  // v1.187.19 — the pool's energy on the packs' MEASURED basis. The panel converts its percent
+  // (a fraction of the BMS full-charge capacity) to energy against NAMEPLATE; capacityScale
+  // corrects both figures (the percent is unchanged), and the reserve below follows full.
+  // Evaluated from this same `devices` object, synchronously.
+  const basis = runwayEnergyBasis(devices, shp2, now);
+  const backupRemainingKwh = (shp2.projection.backupRemainWh * basis.capacityScale) / 1000;
+  const backupFullKwh = (shp2.projection.backupFullCapWh * basis.capacityScale) / 1000;
+  const basisFields = { capacityScale: Math.round(basis.capacityScale * 10_000) / 10_000, capacityBasis: basis.capacityBasis, overheadW: Math.round(basis.overheadW) };
   // v1.115.0 — the OWNER's floor, not the device's current instruction. While
   // the night-charge actuator holds the reserve at 50 the device reports 50,
   // and reading it here manufactured an "AT RESERVE FLOOR" posture for the
@@ -3857,6 +3989,7 @@ export function computeRunway(
         backupRemainingKwh: round2(backupRemainingKwh),
         backupReserveKwh: round2(backupReserveKwh),
         backupFullKwh: round2(backupFullKwh),
+        ...basisFields,
       });
     }
     loadAvgWatts = fallback;
@@ -3958,7 +4091,10 @@ export function computeRunway(
     // above stay RAW (reporting basis). delta ≤ the pre-v1.26 unity delta for all
     // pv,load ⇒ runway only ever shortens; ∂delta/∂pv = 1 ⇒ monotonic in
     // forecastPvW (the runwayPvBasisGuard invariant holds).
-    const delta = pvKwh - loadKwhPerHour / RUNWAY_DISCHARGE_EFFICIENCY;
+    // v1.187.19 — the load is drawn through runwayDrainW: load/η plus the Cores' fixed
+    // overhead, never less than load/η, in every hour (the overhead runs whether or not the
+    // sun is up; measured in PV-surplus hours too). Still ≤ the unity delta and ∂/∂pv = 1.
+    const delta = pvKwh - runwayDrainW(loadKwhPerHour * 1000, basis.overheadW) / 1000;
     const nextState = stateKwh + delta;
     if (hoursToReserve == null && stateKwh > backupReserveKwh && nextState <= backupReserveKwh) {
       const frac = delta < 0 ? (stateKwh - backupReserveKwh) / -delta : 1;
@@ -4024,6 +4160,7 @@ export function computeRunway(
     troughAtMs: Math.round(now + troughH * 3_600_000),
     endKwh: round2(stateKwh),
     recentLoadBasis,
+    ...basisFields,
     ...(basisPending ? { basisPending: true } : {}),
   };
   // v1.187.18 — the load to carry, from every compute (a pending one too: the panel's load does
@@ -9177,10 +9314,13 @@ export async function computeProbabilisticForecast(
   //     fullKwh = (pv - load/η) [kWh] / (deltaSocPct / 100)
   // The inversion MUST use the same pv - load/η the forward integrator used, or
   // the recovered capacity (hence the P10/P90 band width) is biased.
+  // v1.187.19 — that drain is now runwayDrainW (load/η + the Cores' overhead, the
+  // forecast's poolOverheadW) on the measured capacity; `netKwh` below is it.
   // Pick the hour with the largest |deltaSocPct| that isn't clamped — that
   // maximises numerical conditioning.
   // v1.187.18 — a production forecast carries that capacity itself (poolFullWh, the
-  // SHP2's backupFullCapWh the trajectory was integrated against), so it is read
+  // SHP2's backupFullCapWh — v1.187.19: × the measured capacity scale — the trajectory
+  // was integrated against), so it is read
   // directly; the inversion remains for forecasts without it (hand-built ones). The
   // last resort, reached when there is no pool value and no hour pair yields a usable
   // inversion (all null, clamped at 0/100, too small, or outside the 5–1000 kWh guard),
@@ -9190,6 +9330,11 @@ export async function computeProbabilisticForecast(
   // When projectedSocPct is null throughout, fullKwh is never read.
   const PACK_KWH_NAMEPLATE = 6.144;
   const PACKS_PER_DPU = 5;
+  // v1.187.19 — the trajectory's own drain: runwayDrainW with the overhead the forecast was
+  // integrated with (a hand-built forecast carries none: 0, the drain it was built with). The
+  // inversion, the hour-0 seed and every band step below use exactly this.
+  const bandOverheadW = Number.isFinite(forecast.poolOverheadW) ? (forecast.poolOverheadW as number) : 0;
+  const netKwh = (pvW: number, loadW: number): number => (pvW - runwayDrainW(loadW, bandOverheadW)) / 1000;
   let fullKwh: number | null =
     forecast.poolFullWh != null && forecast.poolFullWh > 0 ? forecast.poolFullWh / 1000 : null;
   let bestAbsDSocPct = 0;
@@ -9202,7 +9347,7 @@ export async function computeProbabilisticForecast(
       if (Math.abs(dSocPct) < 0.05) continue;                 // too small to invert reliably
       if (prev.projectedSocPct <= 0.5 || prev.projectedSocPct >= 99.5) continue; // clamped
       if (cur.projectedSocPct <= 0.5 || cur.projectedSocPct >= 99.5) continue;   // clamped
-      const kwhDelta = (cur.forecastPvW - cur.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
+      const kwhDelta = netKwh(cur.forecastPvW, cur.forecastLoadW);
       if (Math.abs(kwhDelta) < 0.05) continue;
       const candidate = kwhDelta / (dSocPct / 100);           // kWh per 100 % SoC = full capacity
       if (candidate < 5 || candidate > 1000) continue;        // sanity guard
@@ -9241,7 +9386,7 @@ export async function computeProbabilisticForecast(
     // forward integrator used, so the one-step-behind seed lands where the
     // deterministic sim actually started (matters at the empty rail, where the
     // seed's clamp behaviour sets the near-zero band).
-    const d0Kwh = (h0.forecastPvW - h0.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
+    const d0Kwh = netKwh(h0.forecastPvW, h0.forecastLoadW);
     startSoc = clampSoc(rawStart - (Number.isFinite(d0Kwh) ? (d0Kwh / fullKwh) * 100 : 0));
   }
   const paths = startSoc != null ? PROB_ENSEMBLE_Z.map(() => startSoc) : [];
@@ -9344,7 +9489,8 @@ export async function computeProbabilisticForecast(
     // the published ±kWh figure can't read 0 beside a several-point overnight
     // band (the old PV-only accumulation did exactly that at night).
     if (Number.isFinite(sigmaNetKwh)) stdevAccum += sigmaNetKwh;
-    // v1.26.0 — pv − load/η, uniform with the other integrators. The published
+    // v1.26.0 — pv − load/η, uniform with the other integrators (v1.187.19: netKwh,
+    // runwayDrainW with the forecast's own overhead). The published
     // band anchors on projectedSocPct + (path − midSoc), so in the UNCLAMPED
     // interior dP50Kwh cancels in the offset and is output-neutral; near the
     // 0/100 rails the per-path clampSoc is nonlinear so it does affect clamp
@@ -9352,7 +9498,7 @@ export async function computeProbabilisticForecast(
     // empty-rail arrival with the anchor's own η-integrator, collapsing spread
     // in step with the floor rather than showing phantom spread below it). Kept
     // aligned so no future reader mistakes it for the raw-vs-η bug fixed elsewhere.
-    const dP50Kwh = (p50 - h.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
+    const dP50Kwh = netKwh(p50, h.forecastLoadW);
     let p10SocOut: number | null = null;
     let p50SocOut: number | null = null;
     let p90SocOut: number | null = null;
@@ -9549,8 +9695,11 @@ export async function computeMultiDayForecast(
   for (const wh of weather.hours) wxByHour.set(Math.floor(wh.ts / 3_600_000), wh);
 
   const shp2 = findShp2(devices);
-  const fullWh = shp2?.projection.backupFullCapWh ?? null;
-  let socWh = shp2?.projection.backupRemainWh ?? null;
+  // v1.187.19 — the same measured energy basis and drain as getDayForecast (display only; the
+  // night-charge planner reads these days' pvW/loadW, which do not depend on it).
+  const poolBasis = runwayEnergyBasis(devices, shp2, now);
+  const fullWh = shp2?.projection.backupFullCapWh != null ? shp2.projection.backupFullCapWh * poolBasis.capacityScale : null;
+  let socWh = shp2?.projection.backupRemainWh != null ? shp2.projection.backupRemainWh * poolBasis.capacityScale : null;
 
   // v1.4.4 (finding #50/#22) — index the day-ahead forecast's hours by
   // absolute hour-epoch. Each ForecastHour already carries getDayForecast's
@@ -9686,7 +9835,7 @@ export async function computeMultiDayForecast(
         // getDayForecast, so day-0 minProjectedSoc stays consistent with
         // getDayForecast (no cross-surface contradiction) and the multi-day SoC
         // path is equally honest. Report-only (not an alarm gate).
-        socWh = Math.max(0, Math.min(fullWh, socWh + (pv - load / RUNWAY_DISCHARGE_EFFICIENCY)));
+        socWh = Math.max(0, Math.min(fullWh, socWh + (pv - runwayDrainW(load, poolBasis.overheadW))));
         const socPct = (socWh / fullWh) * 100;
         socPctThisHour = socPct;
         if (minSoc == null || socPct < minSoc) {
@@ -10582,7 +10731,10 @@ export function setBayesianModelForTesting(value: BayesianSolarModel | null): vo
  * basis is served on a new one. Called by the report chokepoint (reports.ts buildReport) when the
  * basis gains an element; a flight still running on the old basis writes none of them afterwards
  * (each write is gated on cacheWritable, analytics/flightBasis.ts). State that is not a result
- * — the runway's carried load and to-empty hysteresis — is deliberately left alone.
+ * — the runway's carried load and to-empty hysteresis, and (v1.187.19) the pool's measured
+ * capacity basis (poolBasisTracker: persisted per-Core ratios and the applied scale with its
+ * increase hold) — is deliberately left alone. A partial map cannot corrupt that basis: only a
+ * complete measurement moves the applied scale (poolEnergyBasis.ts).
  *
  * Deliberately NOT reset (test/workerCacheInventory.test.ts fails on a cache in neither list):
  *   stormPrepCache     — the NWS feed only, read on the main thread (alertMonitor);

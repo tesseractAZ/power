@@ -1,3 +1,14 @@
+## 1.187.19
+
+### The battery runway counts what the batteries really hold
+
+**Runway and alarms**
+
+- The battery runway was overstating how long the batteries would last by 7–19 %, most on quiet nights. It counted the packs at their original rated size, where they now hold about 94 % of it, and left out the roughly 270 W the Cores use themselves. Checked against 30 recorded nights, it is now within 3 %.
+- That 270 W is always counted while the panel reports the batteries, even when a Core drops off, so if the runway errs, it errs short rather than long.
+- Runway warnings, the lighting posture and the projected low battery come earlier to match; in the 30-night replay, medium warnings came on 3 more nights. Alarm levels are unchanged.
+- The Runway card shows the measured capacity ("of 87.0 full · measured 94% of nameplate"). Home Assistant's Backup Capacity and Backup Remaining, the battery floor alarm and the night-charge plan are unchanged.
+
 ## 1.187.18
 
 ### Real pack counts and pool size; reports rebuilt after a half-loaded start; a stricter release pipeline
