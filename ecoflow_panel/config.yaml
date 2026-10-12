@@ -1,5 +1,5 @@
 name: Power
-version: "1.187.19"
+version: "1.187.20"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -46,6 +46,15 @@ map:
   # this add-on and no other add-on can ever read it; /share is the
   # cross-add-on interchange point. We only ever WRITE the snapshot here.
   - share:rw
+# v1.187.20 — backups stay HOT: a cold backup stops the add-on, and with it the alarm engine, for
+# the whole copy every night. Instead the Supervisor runs these with `docker exec` in the running
+# container just before and after it copies /data: `pre` empties the SQLite WAL and holds
+# checkpoints still, `post` restores them (server/src/backupWindow.ts), so no checkpoint rewrites
+# ecoflow.db while it is copied. The hook always exits 0 (a non-zero exit would drop the add-on
+# from the backup) and journals each run to /share/ecoflow-panel/backup-window.jsonl.
+backup: hot
+backup_pre: /usr/bin/ecoflow-panel-backup-hook pre
+backup_post: /usr/bin/ecoflow-panel-backup-hook post
 # v0.9.20 — request access to Home Assistant's Core REST API so the
 # add-on can call media_player.play_media (HomePod/Sonos broadcasts),
 # enumerate media_player entities for the SHIPWIDE INTERCOM discovery

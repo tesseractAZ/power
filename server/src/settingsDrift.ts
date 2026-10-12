@@ -243,6 +243,11 @@ const SIDECAR = () =>
   process.env.SETTINGS_DRIFT_STATE_PATH
     ?? resolve(process.cwd(), config.dbPath, '..', 'settings-surface.json');
 
+/** v1.187.20 — the baseline's path; the held-push sidecar lives beside it (settingsDriftHold.ts). */
+export function settingsSurfacePath(): string {
+  return SIDECAR();
+}
+
 export function loadConfirmedSurface(): Record<string, SettingValue> | null {
   try {
     if (!existsSync(SIDECAR())) return null;
@@ -265,12 +270,20 @@ export function saveConfirmedSurface(surface: Record<string, SettingValue>): voi
 
 /* ─── message rendering ───────────────────────────────────────────────────── */
 
-export function renderDriftPush(external: SettingChange[]): { title: string; body: string } {
+/** v1.187.20 — a held entry that merged several changes of one key says so (settingsDriftHold.ts). */
+function mergedNote(c: SettingChange & { changes?: number }): string {
+  if (c.changes == null || c.changes <= 1) return '';
+  return c.from === c.to
+    ? ` (changed ${c.changes} times while held, back to where it started)`
+    : ` (${c.changes} changes while held)`;
+}
+
+export function renderDriftPush(external: Array<SettingChange & { changes?: number }>): { title: string; body: string } {
   const n = external.length;
   const title = n === 1
     ? `Setting changed: ${external[0].key}`
     : `${n} settings changed on the EcoFlow fleet`;
-  const lines = external.map((c) => `${c.key}: ${String(c.from)} → ${String(c.to)}`);
+  const lines = external.map((c) => `${c.key}: ${String(c.from)} → ${String(c.to)}${mergedNote(c)}`);
   return {
     title,
     body:

@@ -12,6 +12,8 @@ import { loadMembershipHistory, saveMembershipHistory, recordMembership } from '
 // `.ymd` is the same America/Phoenix YYYY-MM-DD key the ledger stores plan_date as.
 import { localParts } from './tariff.js';
 import { resolveRetentionDays } from './retention.js';
+// v1.187.20 — the backup window (checkpoints held still while a Home Assistant backup copies /data).
+import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './backupWindow.js';
 
 interface MetricSample {
   sn: string;
@@ -777,7 +779,7 @@ export function createRecorder(
   store: SnapshotStore,
   log: (m: string) => void,
   debug: (m: string) => void = log,
-): Recorder {
+): Recorder & { walControl: WalControl } {
   const dbPath = resolve(process.cwd(), config.dbPath);
   mkdirSync(dirname(dbPath), { recursive: true });
   log(`recorder: opening ${dbPath}`);
@@ -809,6 +811,9 @@ export function createRecorder(
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
+    -- v1.187.20 — SQLite's default (1000 pages), set explicitly: the backup window sets it to 0
+    -- for the length of a Home Assistant backup and restores THIS value (backupWindow.ts).
+    PRAGMA wal_autocheckpoint = ${RECORDER_WAL_AUTOCHECKPOINT};
     -- v0.9.14 — 32 MB page cache (negative N = KiB). Default is 2 MB, which
     -- is too small once the samples table grows past ~50 MB on disk: cold
     -- queries hit disk for index + data pages. 32 MB easily holds the
@@ -3092,5 +3097,8 @@ export function createRecorder(
     getLifetimeTotals,
     listLifetimeKeys,
     batteryLifetimeDebug,
+    // v1.187.20 — this connection is the only one that commits, so it is the one whose
+    // checkpoints the backup window holds still (backupWindow.ts).
+    walControl: walControlFor(db, dbPath),
   };
 }

@@ -4,6 +4,7 @@
  *
  *   W-i   the alert-outcome route loses its write gate
  *   W-ii  the vendor-backfill route loses its write gate
+ *   W-iii (v1.187.20) a backup-window hook route outside index.ts loses its loopback gate
  *
  *   node scripts/mutate-v1187-16.mjs
  */
@@ -12,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const IDX = resolve(REPO, 'server/src/index.ts');
+const BACKUP_WINDOW = resolve(REPO, 'server/src/backupWindow.ts');
 const SUBSET = ['test/writeRoutesGated.test.ts'];
 
 const MUTANTS = [
@@ -28,6 +30,13 @@ const MUTANTS = [
     find: "'/api/energy-history/backfill', { preHandler: requireWriteAuth }, async (req) => {",
     to: "'/api/energy-history/backfill', async (req) => { /* MUTANT */",
     why: 'A bare LAN POST starts vendor fetches and ledger writes.',
+  },
+  {
+    id: 'W-iii. ★★ a backup-window hook route outside index.ts loses its loopback gate',
+    file: BACKUP_WINDOW,
+    find: "  app.post(`${BACKUP_WINDOW_ROUTE}/post`, { onRequest: requireLoopbackPeer }, async (req)",
+    to: "  app.post(`${BACKUP_WINDOW_ROUTE}/post`, async (req)",
+    why: 'A LAN POST lifts the checkpoint freeze mid-copy.',
   },
 ];
 

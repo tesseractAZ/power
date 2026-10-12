@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot, type FleetSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext, debouncedOnsetsPending, BOOT_RESET_ONSET_DEBOUNCE_MS } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext, debouncedOnsetsPending, BOOT_RESET_ONSET_DEBOUNCE_MS, restoreHostPressureEpisode, persistHostPressureEpisode, hostPressureCarryPendingHeldAt } from './alerts.js';
 import { broadcastHealthAlert, broadcastDegradedAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds, rateFloorIdleHeldSns } from './messageRateFloorAlert.js';
@@ -2560,6 +2560,12 @@ export function startAlertMonitor(
   const vdiffKneeStatePath =
     process.env.VDIFF_KNEE_STATE_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'vdiff-knee-state.json');
   let vdiffKneeOnDisk = restoreVdiffKneeSessions(vdiffKneeStatePath, Date.now(), log);
+  // v1.187.20 (review) — the host-pressure warning's episode (onset, audible latch) survives a
+  // restart: read here, before the first computeAlerts, and carried to the first vitals assessment
+  // (alerts.ts restoreHostPressureEpisode); written after each evaluation. Main thread, like the holder.
+  const hostPressureStatePath =
+    process.env.HOST_PRESSURE_STATE_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'host-pressure-state.json');
+  let hostPressureOnDisk = restoreHostPressureEpisode(hostPressureStatePath, Date.now(), log);
   // v1.86.0 — the digest's MATERIAL survives restarts. On 2026-08-17 the
   // 04:30/04:52 deploys destroyed the in-memory quietQueue + overnightResolved,
   // three overnight fires left zero trace, and the empty-queue digest returned
@@ -3323,6 +3329,8 @@ export function startAlertMonitor(
       shp2SrcErrOnsetBySlot: store.shp2SrcErrOnsets(),
       // v1.174.0 — per-string MPPT error onsets for the dpu-pvh-err / dpu-pvl-err debounce.
       mpptErrOnsetByKey: store.mpptErrOnsets(),
+      // v1.187.20 (review) — a host-pressure episode carried across the restart, not resumed yet.
+      hostPressureCarriedHeldAtMs: hostPressureCarryPendingHeldAt(),
     };
 
     // v0.23.0 — grid-backstop context for the reserve/floor alerts. Keep the HA
@@ -3415,6 +3423,8 @@ export function startAlertMonitor(
     ]);
     // v1.187.1 — the knee sessions computeAlerts just advanced, written only when one changed.
     vdiffKneeOnDisk = persistVdiffKneeSessions(vdiffKneeStatePath, vdiffKneeOnDisk);
+    // v1.187.20 (review) — and the host-pressure episode computeAlerts just advanced.
+    hostPressureOnDisk = persistHostPressureEpisode(hostPressureStatePath, hostPressureOnDisk);
     const liveTail: Alert[] = [
       // v0.83.0 — recorded telemetry blackouts (host power loss / add-on stop /
       // MQTT stall) surfaced as operator push alerts. Reads the recorder's durable

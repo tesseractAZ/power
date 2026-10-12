@@ -470,7 +470,9 @@ value over a ~1 ms IPC hop.
 bootstrap, correlates request/response by incrementing `id`, and:
 
 - **Timeout / retry**: `REQUEST_TIMEOUT_MS = 30_000`; one retry on a timeout that
-  isn't a stop (rides out cold-worker boot warm-up).
+  isn't a stop (rides out cold-worker boot warm-up). v1.187.20: per-report budgets in
+  `REPORT_TIMEOUT_OVERRIDES_MS` (`reportTimeoutMs`) — `chargeCurve` 90 s, for its cold build
+  after a start or a device-basis reset.
 - **Respawn**: on worker `exit`, fails all in-flight requests, clears caches, and
   respawns after `RESPAWN_DELAY_MS = 1_000`; on `ready` it re-pushes `lastSnapshot` and
   replays the owner reserve floor (`{kind:'ownerFloor'}`, v1.119.0), without which a
@@ -4647,7 +4649,7 @@ Need ≥10 accepted samples. `recentMilliohms = median(samples in last 7 d)`. `b
 Tracks how the pack's max-cell voltage at fixed SoC checkpoints drifts from its early-life baseline during active charge. A widening voltage plateau at a given SoC is a slow aging fingerprint.
 
 #### Inputs / constants
-Per pack `queryMulti` of `pack${n}_soc`, `pack${n}_vol_max_mv`, `pack${n}_in` over `CHARGE_CURVE_HISTORY_MS = 200 d`, `CHARGE_CURVE_TTL_MS = 60 min`. Needs ≥50 SoC and ≥50 V samples else `no-data`.
+Per pack `queryMulti` of `pack${n}_soc`, `pack${n}_vol_max_mv`, `pack${n}_in` over `CHARGE_CURVE_HISTORY_MS = 200 d`, `CHARGE_CURVE_TTL_MS = 60 min`. Needs ≥50 SoC and ≥50 V samples else `no-data`. v1.187.20 — stale-while-revalidate: from `TTL − CHARGE_CURVE_REFRESH_AHEAD_MS` (8 min = 2 × `WARM_INTERVAL_MS`) the cached value is returned at once and one background rebuild (single-flight per basis generation, run in that generation) replaces it; past expiry it is served for at most `CHARGE_CURVE_STALE_MAX_MS` (60 min), after which the request computes in the foreground. A device-basis reset nulls the cache, so no stale value crosses it.
 
 #### Calculation
 Snap V and IN to nearest SoC sample (two-pointer). Checkpoints `CHARGE_CHECKPOINTS = [40, 60, 80, 95]` %, tolerance `±CHARGE_CHECKPOINT_TOLERANCE_PCT (1.5)`. Only samples **during active charge** (`inW ≥ 100`, avoids resting voltage) count.
@@ -6133,7 +6135,7 @@ Battery/voltage/health thresholds:
 - `cloud-session-stale` (warning, Connectivity) — no successful `/device/list` in `CLOUD_SESSION_STALE_MS`; per-device online flags are last-known, not current.
 - `host-power-undervoltage` (warning) — `HOST_POWER_ENTITY` (HA RPi Power Supply Checker) tripped; early warning the Pi is browning out.
 - `host-temp-warn` / `host-temp-crit` (warning / critical, Connectivity) — the alarm host's SoC temperature past `HOST_TEMP_WARN_C` / `HOST_TEMP_CRIT_C`, with rise/clear hysteresis (§13.0).
-- `host-pressure-warn` / `host-pressure-crit` (warning / critical, Connectivity) — one rolled host-resource-pressure alert; it rises as critical only once crit pressure has stood its dwell (`hostPressureCritSustained`, §13.0b).
+- `host-pressure-warn` / `host-pressure-crit` (warning / critical, Connectivity) — one rolled host-resource-pressure alert; it rises as critical only once crit pressure has stood its dwell (`hostPressureCritSustained`, §13.0b), and since v1.187.20 the warning is audible only after the warning dwell (§13.0b).
 - `tts-render-degraded` (warning, Connectivity) — ≥ 2 consecutive failed fresh TTS renders; chimes still deliver, without speech (§10, 4.7).
 - `shp2-multi-panel` (critical, SHP2, explicit `priority: 'critical'`) — two or more smart panels with none pinned as the house panel, or the pinned house panel missing from the device list. Supervised reserve and Charge-Now writes are blocked while it stands. In `isNeverMutedAlert` (§2, *Two panels (v1.185.0)*).
 - `grid-offgrid` (info, Grid) — off-grid. Decision uses `grid.present` when supplied (the same resolver behind `binary_sensor.off_grid`); falls back to `acIn < 5` W over SHP2-bound cores only. Wall-charging spares never register as grid.
@@ -7585,6 +7587,8 @@ Harness: `scripts/mutate-v1187-3h.mjs` (99 mutants, 99 killed after the seam rev
 
 **v1.187.19 — the runway counts the pool's measured energy.** The panel's pool percent is a fraction of the packs' BMS full-charge capacity, but the panel converts it to energy against nameplate, and the runway's drain (`load/0.94`) left out the Cores' own consumption; replayed against 30 clean pack-only discharge spans (2026-09-02..10-11), the runway overstated the hours in every span, by +7.0 % to +18.7 %. The runway, the day and multi-day SoC trajectories and the probabilistic band now scale the panel's energies by the measured full-charge ratio of its connected Cores (`poolEnergyBasis.ts`: clamped 0.80–1.00; a Core not reporting uses its persisted ratio for 30 days, then the lowest known; increases wait 24 h, and only a complete measurement moves the applied figure). The pool drains at `max(load/0.94, overhead + load/0.94)`, where the overhead never falls below a fitted 270 W floor while the panel reports a pool (measured per slot at about 41 / 52 / 175 W) and rises by 90 W per Core only above three. The same 30 spans replay within −2.6 % to +1.5 % (`runwayReplayBacktest.test.ts`, PERFORMANCE §4a). `/api/runway` publishes `capacityScale`, `capacityBasis` and `overheadW`; the runway alarms, lighting posture and Projected Low SoC move earlier to match, with thresholds unchanged. The Backup Capacity / Backup Remaining sensors, the floor alarm, the night-charge planner and its cushion, force-charge, the actuator and the dispatch recommendations keep the panel's own figures, pinned by a test that builds every report on both bases (harness `scripts/mutate-v1187-19.mjs`, 38 mutants).
 
+**v1.187.20 — log-review fixes (2026-10-10..12); every workflow on Ubuntu 26.04.** Host pressure: `host-pressure-warn` keeps its card and push from the first non-ok assessment but counts toward the audible condition only after `HOST_PRESSURE_WARN_DWELL_S` (default 300 s); an audible episode ends only after ok has stood 180 s, and the episode (onset, audible, last held) survives a restart through `host-pressure-state.json` — the 10-10 22:33 yellow came from a 59 s spike during the HA Core 2026.10.1 update (harness `mutate-v1187-20b.mjs`). Settings drift: an external change held through the notify quiet window is written atomically to `settings-drift-held.json` before the baseline that hides it, rehydrated at boot, offered on every tick by `settleDriftTick` and cleared only after the push resolves — the 10-10 23:02 `smartBackupMode` 0 → 2 push was lost to the 23:25 deploy restart (`mutate-v1187-20a.mjs`). Backups: `backup_pre` / `backup_post` run `/usr/bin/ecoflow-panel-backup-hook`, which always exits 0 within ~8 s and calls the loopback-only `POST /api/internal/backup-window/{pre,post}`; `pre` runs `wal_checkpoint(TRUNCATE)` and sets `wal_autocheckpoint = 0` on the recorder's write connection (refused after the hook's deadline), `post` restores 1000 and checkpoints, a 10-minute dead-man restores it, and each phase is journaled to `/share/ecoflow-panel/backup-window.jsonl` (`mutate-v1187-20d.mjs`); `writeRoutesGated.test.ts` now scans every server module and accepts `requireWriteAuth` or `requireLoopbackPeer` (W-iii). Charge curve: `computeChargeCurveFingerprint` serves its previous value while one background rebuild runs, refreshes 8 min ahead of its 60-min TTL, never across a basis reset, and the client gives `chargeCurve` 90 s per attempt (`mutate-v1187-20c.mjs`). CI: every job runs on `ubuntu-26.04` / `ubuntu-26.04-arm` after trials of all fifteen checks (#520) and of both native image builds (#523); `codeql.yml` stays on `ubuntu-24.04` because CodeQL's system requirements list only Ubuntu 22.04 and 24.04, and `workflowRunners.test.ts` pins both.
+
 **v1.186.2 — no phantom battery discharge at the grid handover; curtailment hour pairing, cloudy hours and freeze membership.** (1) Measured 2026-09-27 01:34–01:40 at a handover to the grid (pool at its 16% floor, grid 4.45–4.54 kW = house load, panel `sourceWatts` [0,0,0]): `fleet_battery_net_watts` alternated 88, 2671, 21, 1436, 11, 125, 9, 92, 0 W. The recorder's per-pack rows show the cause: every Core's REST `/quota/all` (60 s, :22) returns each pack's last NON-ZERO `inputWatts`/`outputWatts` (a zero is never cached), while the MQTT stream (per-change deltas plus a full pack burst ~:42) carries the zeros; `setDeviceQuota` replaces the raw map, so the :22 publish summed the replay and the :52 publish the stream. The store now records each MQTT-delivered pack flow field with its arrival time and sets a display-only `pack.liveFlow` when one is at most `STREAM_FLOW_WINDOW_MS` (150 s) old; `aggregateFleetFlow` returns `fleetBatteryNetDisplay` beside the unchanged raw `fleetBatteryNet`, and the Battery Net sensor (`/api/ha-state`, MQTT discovery) and the Energy-flow card read the display sum. While the stream is alive the REST value cannot be fresher (the cloud caches what the device published); a silent stream hands back to the poll after the window. `gridState`'s at-floor `poolDischargingObserved` still reads the raw sum. (2) Open-Meteo's hourly `shortwave_radiation` is the average of the preceding hour, so the value labelled H covers [H−1, H). `coveringRadiationEpoch` (weather.ts) pairs the recorder hour [H, H+1) with the label H+1 in `sampleCurtailmentHour`, the live `currentHourGhi`, the Bayesian solar fit (and its OLS comparison) whose posterior curtailment applies, and `curtailmentDaySettled`'s coverage (a day needs the labels 01:00 through the next midnight). Other consumers of the same hours still pair by label: the per-hour and clear-sky PV coefficient fits, forecast skill scoring and the realized-GHI capture in the recorder (insert-once rows keyed by label); they are unchanged here. (3) A measured hour (present, not `radiationMissing`) below `CURTAIL_MIN_GHI_WM2` returns no sample, and a measured hour the posterior cannot predict returns none; the μ × 900 W/m² heuristic runs only for an hour with no weather value. (4) `curtailmentMembershipSound` gates the freeze: the live roster is non-empty, `membership-history.json` is `stable` across the day and `membershipAt(dayStart)` equals the roster's fingerprint, and every roster Core was walked and reported `soc` in at least one hour of the day; an unsound day stays live. The sidecar schema is now `v: 2` (`CURTAIL_FREEZE_SCHEMA`): a v1 file is dropped on load and rewritten, so the ≤ 7 days frozen under the old pairing and heuristic are re-walked from the recorder. Harness: `scripts/mutate-v1186-2.mjs` (15 mutants).
 
 **v1.186.1 — the 7-day curtailment figure stops rewriting history.** `computeCurtailment` re-walked all 168 past hours on every refresh through the current Bayesian posterior and the worker's current Open-Meteo cache, so `recent7dKwh` (`ecoflow_pv_curtailment_kwh_7d`, the card's "Past 7d lost") and the 7-day histogram moved with no new curtailment in the window (2026-09-25: 12.6 → 10.5 → 16.09 kWh). `curtailmentFreeze.ts` freezes a finished local day the first time a walk finds it settled — `curtailmentDaySettled`: the weather's `fetchedAt` ≥ day end + `CURTAIL_SETTLE_LAG_MS` (12 h; the cache mixes forecasts and past-hour estimates, an hour is a past-hour estimate only if it had ended at `fetchedAt` — the realized-GHI capture's rule — a failed fetch keeps serving the stale cache, and past hours are revised until the model runs covering them are ingested, ≤ ~7.2 h per the provider's model metadata), all 24 hours present without `radiationMissing`, and a posterior (`bayes.hourly.length > 0`, so a model-less walk never freezes a week of zeros). The frozen record holds the day's kWh and curtailed hours (hour of day, surplus W); `recent7dKwh`, `recent7dHoursCount` and `hourlyHistogram` read it, only unsettled days are re-walked, today stays live, and the new `recent7dSettledDays` counts the frozen days. Persisted in `curtailment-days.json` beside the database (atomic temp + rename; `CURTAILMENT_DAYS_PATH` overrides; memory only when neither it nor `SUPERVISOR_TOKEN` is set), pruned to the window, invalid entries dropped on load; a failed save is logged once and retried on each refresh. `computeCurtailment` takes the worker's logger and an injectable clock for the live state and day walk (the report cache stays on the real clock). Entity ids are unchanged. Harness: `scripts/mutate-curtail-freeze.mjs` (8 mutants).
@@ -8987,12 +8991,15 @@ AppArmor profile.
 #### Write-auth gate (`requireWriteAuth`, `server/src/auth.ts`)
 
 Built by `createAuth({ host, port, log })` at boot. Applied as a Fastify `preHandler` on
-every POST/PUT/DELETE route, without exception since v1.187.16. Until then two routes were
+every POST/PUT/DELETE route since v1.187.16, except the two loopback-only backup-hook routes
+(`POST /api/internal/backup-window/{pre,post}`, v1.187.20), which answer only a loopback TCP peer
+(`requireLoopbackPeer`) because the Supervisor's `backup_pre`/`backup_post` hook has no token. Until then two routes were
 open: `POST /api/alerts/outcome` (the alert-feedback log, which also updates the online
 pack-risk model) and `POST /api/energy-history/backfill` (a bounded background vendor-history
 fetch that writes the vendor ledger). `server/test/writeRoutesGated.test.ts` scans every
-`app.post`/`put`/`patch`/`delete` registration in `index.ts` and fails if one lacks the gate
-(harness `scripts/mutate-v1187-16.mjs`). The dashboard's outcome buttons reach the route
+`app.post`/`put`/`patch`/`delete` registration in `index.ts` and fails if one lacks the gate, and
+since v1.187.20 also every registration in any server module (template-literal paths included),
+accepting `requireWriteAuth` or `requireLoopbackPeer` (harness `scripts/mutate-v1187-16.mjs`, W-i–W-iii). The dashboard's outcome buttons reach the route
 through Ingress or same-origin, like every other dashboard write.
 
 It is also applied on the admin GETs `/api/writes/log`, `/api/admin/addons` and `/api/broadcast/discover`. A request is accepted if **any** of three conditions hold:
@@ -9193,13 +9200,17 @@ pinned the last three floating tags: `actions/setup-node` in `ci.yml`'s advisory
 `actions/checkout` in `release.yml` and `tag-release.yml`, the two workflows with write
 permissions.
 
-**Every job runs on a pinned runner image** (`ubuntu-24.04`, and `ubuntu-24.04-arm` for the
-aarch64 image build), never `ubuntu-latest`. GitHub moves `ubuntu-latest` to Ubuntu 26.04 in a
+**Every job runs on a pinned runner image** (`ubuntu-26.04`, and `ubuntu-26.04-arm` for the
+aarch64 image build, since v1.187.20; `codeql.yml` stays on `ubuntu-24.04` because CodeQL's system
+requirements list only Ubuntu 22.04 and 24.04), never `ubuntu-latest`. GitHub moves `ubuntu-latest` to Ubuntu 26.04 in a
 rollout from 2026-10-19 to 2026-11-19 (actions/runner-images#14748); that one move would change
 python3, Docker, the docs jobs' pandoc and LibreOffice, possibly coreutils, and CodeQL's platform
 (its supported list names only Ubuntu 22.04 and 24.04), under every job at once. Moving to a newer
-image is a one-commit label change, made deliberately. `server/test/workflowRunners.test.ts` fails
-on a `-latest` label, a quoted or matrix `-latest` runner, and a job without `runs-on`.
+image is a one-commit label change, made deliberately: v1.187.20 moved every job to 26.04 after a
+trial of all fifteen checks (#520, pandoc 3.7.0.2, LibreOffice 26.2.6) and of the native per-arch
+image builds (#523) on it. `server/test/workflowRunners.test.ts` fails on a `-latest` label, a
+quoted or matrix `-latest` runner, a job without `runs-on`, and a CodeQL runner outside the
+versions CodeQL supports.
 
 ---
 
@@ -9316,8 +9327,8 @@ input. Its run name carries the version, and one run per version executes at a t
 build to `gh release create`. Jobs:
 1. **resolve** — validate/normalize the version: strict `X.Y.Z`, as `tag-release.yml` tags.
 2. **test** — checkout the tag, `npm ci`, `npm test`, `tsc --noEmit` on the server.
-3. **build** (matrix aarch64 + amd64, each on its **native** runner: `ubuntu-24.04-arm` /
-   `ubuntu-24.04` — no QEMU emulation, ~3 min vs 30–60 min) — buildx build + push to
+3. **build** (matrix aarch64 + amd64, each on its **native** runner: `ubuntu-26.04-arm` /
+   `ubuntu-26.04` — no QEMU emulation, about a minute per arch vs 30–60 min under QEMU) — buildx build + push to
    `ghcr.io/<owner>/{arch}-ecoflow-panel` as both `:{version}` and `:latest`. Base images
    digest-pinned. GHA cache uses `ignore-error=true` so a flaky cache backend can't fail a release.
    There is no QEMU step: nothing runs a foreign-arch binary, and it only pulled `tonistiigi/binfmt`
@@ -10143,8 +10154,20 @@ requires the crit assessment to sustain for `HOST_PRESSURE_CRIT_DWELL_S`
 (default 180 s, range 0–900) — observed transient spikes (boot load, store
 refresh, the nightly backup's docker exports) each last 1–3 minutes and are
 real pressure but not red-klaxon events. During the dwell the condition
-surfaces as the warning; QoS shedding keys on the raw assessment level and
-engages immediately regardless.
+surfaces as the warning (on the card; audible only once the episode has stood the warning dwell
+below); QoS shedding keys on the raw assessment level and engages immediately regardless.
+
+**Warning dwell (v1.187.20).** `host-pressure-warn` is on the card from the first non-ok
+assessment and its push keeps the usual 60 s debounce (overnight it goes to the morning digest),
+but it counts toward the audible condition only after the pressure episode has stood
+`HOST_PRESSURE_WARN_DWELL_S` (default 300 s, range 0–900; 0 = audible at once) or the critical has
+sustained; until then it carries `audible: false` and its card says when it would be announced (the
+critical dwell when the reading is at critical level). Once audible it stays audible for the episode,
+which ends only after ok has stood 180 s (the broadcast's clear dwell), so a dip does not speak an
+all-clear and then a second yellow. The episode (onset, audible, last held) is written to
+`host-pressure-state.json` beside the database (`HOST_PRESSURE_STATE_PATH`) and carried across a
+restart when the add-on held it at most 10 minutes before. The 2026-10-10 22:33 yellow came from a
+59 s spike during the HA Core 2026.10.1 update.
 
 ### 13.0c Out-of-band dead-man heartbeat (v1.43.0)
 

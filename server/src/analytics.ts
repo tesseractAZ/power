@@ -13,7 +13,8 @@ import { getNwsAlerts, isNwsEnabled, nwsEventWindow, TTL_MS as NWS_ALERTS_TTL_MS
 import { PHOENIX_SITE } from './physics/clearSky.js';
 import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
 import { allDpus, homeConnectedDpus, reportBasisKey } from './analytics/fleet.js';
-import { cacheWritable } from './analytics/flightBasis.js';
+import { cacheWritable, basisGeneration, runInBasisGeneration } from './analytics/flightBasis.js';
+import { WARM_INTERVAL_MS } from './analytics/warmCadence.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
 import { topOfChargeQuietSpread } from './cellSpread.js';
 import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, NAMEPLATE_BASIS, type PoolEnergyBasis, type CapacityBasis } from './poolEnergyBasis.js';
@@ -5429,10 +5430,22 @@ export function computeEvWindowPrediction(
  * charge and compare today's most-recent fingerprints against a
  * "fresh" baseline laid down in the earliest weeks of recording.
  *
- * Cached 1 h.
+ * Cached 1 h, refreshed in the background (v1.187.20, below).
  * =================================================================== */
 
-const CHARGE_CURVE_TTL_MS = 60 * 60 * 1000;
+export const CHARGE_CURVE_TTL_MS = 60 * 60 * 1000;
+/** v1.187.20 — refresh ahead: a value this close to its TTL is rebuilt in the background while it is
+ *  still served. Log 2026-10-12 10:09:39: the warm loop (every WARM_INTERVAL_MS) rebuilt the report
+ *  only after expiry, so a dashboard request landing in the gap paid the cold scan itself — 32 s of
+ *  scan plus 5 s queued, past the client's 30 s budget ("timed out — retrying once"), and the ingress
+ *  stream had closed before the 36.9 s answer. Two warm intervals put at least one warm pass inside
+ *  the window even when one pass is skipped (a pass still running when the next tick fires). */
+export const CHARGE_CURVE_REFRESH_AHEAD_MS = 2 * WARM_INTERVAL_MS;
+/** v1.187.20 — stale-while-revalidate bound: past its TTL a value is still served (with one
+ *  background rebuild running) for at most this long. Older than TTL + this, the request computes
+ *  in the foreground, so a rebuild that keeps failing surfaces as an error instead of a value that
+ *  silently stops moving. */
+export const CHARGE_CURVE_STALE_MAX_MS = CHARGE_CURVE_TTL_MS;
 const CHARGE_CURVE_HISTORY_MS = 200 * 24 * 60 * 60 * 1000;
 /** v1.171.0 — bucket the 200-day pack scan. UNBUCKETED it read every raw sample of three
  *  metrics for every pack of every Core (log 2026-09-19/20: the single analytics worker was
@@ -5484,9 +5497,15 @@ export interface ChargeCurveReport {
 }
 
 let chargeCurveCache: { ts: number; value: ChargeCurveReport } | null = null;
+/** v1.187.20 — the one background rebuild in flight, and the basis generation it runs (and may
+ *  write) in. Not a result: it holds no value, and a rebuild from a superseded generation neither
+ *  writes (cacheWritable) nor blocks a rebuild on the current one (the `gen` check). */
+let chargeCurveRefresh: { gen: number; done: Promise<void> } | null = null;
 
 /** Test-only seam: force the next computeChargeCurveFingerprint to recompute. */
 export function resetChargeCurveCacheForTesting(): void { chargeCurveCache = null; }
+/** Test-only seam: the background rebuild in flight, if any (await it to see its write). */
+export function chargeCurveRefreshForTesting(): Promise<void> | null { return chargeCurveRefresh?.done ?? null; }
 
 /**
  * v1.186.0 — the inclusive [lo, hi] ranges the pack scan reads, in order, covering
@@ -5538,12 +5557,63 @@ export async function readChargeCurveRows(
   return out;
 }
 
+export interface ChargeCurveOpts {
+  sliceMs?: number;
+  /** Where a failed background rebuild is reported (the worker log). */
+  log?: (m: string) => void;
+}
+
+/**
+ * v1.187.20 — stale-while-revalidate. Once a value exists it is returned at once: inside
+ * TTL − CHARGE_CURVE_REFRESH_AHEAD_MS it is simply fresh; past that (ahead of expiry, or up to
+ * CHARGE_CURVE_STALE_MAX_MS after it) the caller still gets it immediately and one background rebuild
+ * replaces it. Only a cold cache — the first build after a start, or after a device-basis reset,
+ * which nulls the cache (resetWorkerReportCaches) — or a value past the stale bound is computed in
+ * the foreground. A basis reset therefore never leaves a stale value to serve: there is none.
+ */
 export async function computeChargeCurveFingerprint(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
-  opts: { sliceMs?: number } = {},
+  opts: ChargeCurveOpts = {},
 ): Promise<ChargeCurveReport> {
-  if (chargeCurveCache && Date.now() - chargeCurveCache.ts < CHARGE_CURVE_TTL_MS) return chargeCurveCache.value;
+  const cached = chargeCurveCache;
+  if (cached) {
+    const age = Date.now() - cached.ts;
+    if (age < CHARGE_CURVE_TTL_MS + CHARGE_CURVE_STALE_MAX_MS) {
+      if (age >= CHARGE_CURVE_TTL_MS - CHARGE_CURVE_REFRESH_AHEAD_MS) refreshChargeCurve(devices, recorder, opts);
+      return cached.value;
+    }
+  }
+  return buildChargeCurveFingerprint(devices, recorder, opts);
+}
+
+/**
+ * v1.187.20 — start the background rebuild unless one is already running on this basis generation.
+ * It runs inside the generation it was started in (runInBasisGeneration), so when a device-basis
+ * reset lands while it scans, its write is dropped (cacheWritable) like any superseded flight's.
+ */
+function refreshChargeCurve(devices: Record<string, DeviceSnapshot>, recorder: Recorder, opts: ChargeCurveOpts): void {
+  // A superseded flight (asked before a basis reset) could write nothing, and its map is the old one.
+  if (!cacheWritable()) return;
+  // Inside a flight that may write, the current generation IS the flight's own; outside any flight
+  // (a direct call) the rebuild is still pinned to the generation it started in.
+  const gen = basisGeneration();
+  if (chargeCurveRefresh && chargeCurveRefresh.gen === gen) return; // one rebuild at a time
+  const slot = { gen, done: Promise.resolve() };
+  slot.done = runInBasisGeneration(gen, () => buildChargeCurveFingerprint(devices, recorder, opts))
+    .then(
+      () => undefined,
+      (e: any) => { opts.log?.(`analytics: chargeCurve background rebuild failed (the previous value is still served): ${e?.message ?? e}`); },
+    )
+    .finally(() => { if (chargeCurveRefresh === slot) chargeCurveRefresh = null; });
+  chargeCurveRefresh = slot;
+}
+
+async function buildChargeCurveFingerprint(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  opts: ChargeCurveOpts,
+): Promise<ChargeCurveReport> {
   const now = Date.now();
   const since = now - CHARGE_CURVE_HISTORY_MS;
   const dpus = allDpus(devices);

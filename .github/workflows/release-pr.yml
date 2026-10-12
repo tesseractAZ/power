@@ -26,7 +26,7 @@ permissions:
 jobs:
   release-pr:
     name: Release PR declares the version it names
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       # fetch-depth 0: both parents of the test-merge commit, and every v* tag.

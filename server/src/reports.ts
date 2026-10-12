@@ -168,7 +168,9 @@ const BUILDERS: Record<string, Builder> = {
   soilingDecomposition: (ctx) => computeSoilingDecomposition(devicesOf(ctx), ctx.recorder),
   stringMismatch: (ctx) => computeStringMismatch(devicesOf(ctx), ctx.recorder),
   evWindowPrediction: (ctx) => computeEvWindowPrediction(devicesOf(ctx), ctx.recorder),
-  chargeCurve: (ctx) => computeChargeCurveFingerprint(devicesOf(ctx), ctx.recorder),
+  // v1.187.20 — stale-while-revalidate (analytics.ts): a value past its refresh point is returned at
+  // once and rebuilt in the background inside this flight's basis generation; a failed rebuild logs.
+  chargeCurve: (ctx) => computeChargeCurveFingerprint(devicesOf(ctx), ctx.recorder, { log: ctx.log }),
   internalResistance: (ctx) => computeInternalResistance(devicesOf(ctx), ctx.recorder),
   forecastSkill: async (ctx, a) => {
     const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
