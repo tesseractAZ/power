@@ -6135,7 +6135,7 @@ Battery/voltage/health thresholds:
 - `cloud-session-stale` (warning, Connectivity) — no successful `/device/list` in `CLOUD_SESSION_STALE_MS`; per-device online flags are last-known, not current.
 - `host-power-undervoltage` (warning) — `HOST_POWER_ENTITY` (HA RPi Power Supply Checker) tripped; early warning the Pi is browning out.
 - `host-temp-warn` / `host-temp-crit` (warning / critical, Connectivity) — the alarm host's SoC temperature past `HOST_TEMP_WARN_C` / `HOST_TEMP_CRIT_C`, with rise/clear hysteresis (§13.0).
-- `host-pressure-warn` / `host-pressure-crit` (warning / critical, Connectivity) — one rolled host-resource-pressure alert; it rises as critical only once crit pressure has stood its dwell (`hostPressureCritSustained`, §13.0b).
+- `host-pressure-warn` / `host-pressure-crit` (warning / critical, Connectivity) — one rolled host-resource-pressure alert; it rises as critical only once crit pressure has stood its dwell (`hostPressureCritSustained`, §13.0b), and since v1.187.20 the warning is audible only after the warning dwell (§13.0b).
 - `tts-render-degraded` (warning, Connectivity) — ≥ 2 consecutive failed fresh TTS renders; chimes still deliver, without speech (§10, 4.7).
 - `shp2-multi-panel` (critical, SHP2, explicit `priority: 'critical'`) — two or more smart panels with none pinned as the house panel, or the pinned house panel missing from the device list. Supervised reserve and Charge-Now writes are blocked while it stands. In `isNeverMutedAlert` (§2, *Two panels (v1.185.0)*).
 - `grid-offgrid` (info, Grid) — off-grid. Decision uses `grid.present` when supplied (the same resolver behind `binary_sensor.off_grid`); falls back to `acIn < 5` W over SHP2-bound cores only. Wall-charging spares never register as grid.
@@ -8991,12 +8991,15 @@ AppArmor profile.
 #### Write-auth gate (`requireWriteAuth`, `server/src/auth.ts`)
 
 Built by `createAuth({ host, port, log })` at boot. Applied as a Fastify `preHandler` on
-every POST/PUT/DELETE route, without exception since v1.187.16. Until then two routes were
+every POST/PUT/DELETE route since v1.187.16, except the two loopback-only backup-hook routes
+(`POST /api/internal/backup-window/{pre,post}`, v1.187.20), which answer only a loopback TCP peer
+(`requireLoopbackPeer`) because the Supervisor's `backup_pre`/`backup_post` hook has no token. Until then two routes were
 open: `POST /api/alerts/outcome` (the alert-feedback log, which also updates the online
 pack-risk model) and `POST /api/energy-history/backfill` (a bounded background vendor-history
 fetch that writes the vendor ledger). `server/test/writeRoutesGated.test.ts` scans every
-`app.post`/`put`/`patch`/`delete` registration in `index.ts` and fails if one lacks the gate
-(harness `scripts/mutate-v1187-16.mjs`). The dashboard's outcome buttons reach the route
+`app.post`/`put`/`patch`/`delete` registration in `index.ts` and fails if one lacks the gate, and
+since v1.187.20 also every registration in any server module (template-literal paths included),
+accepting `requireWriteAuth` or `requireLoopbackPeer` (harness `scripts/mutate-v1187-16.mjs`, W-i–W-iii). The dashboard's outcome buttons reach the route
 through Ingress or same-origin, like every other dashboard write.
 
 It is also applied on the admin GETs `/api/writes/log`, `/api/admin/addons` and `/api/broadcast/discover`. A request is accepted if **any** of three conditions hold:
@@ -10151,8 +10154,20 @@ requires the crit assessment to sustain for `HOST_PRESSURE_CRIT_DWELL_S`
 (default 180 s, range 0–900) — observed transient spikes (boot load, store
 refresh, the nightly backup's docker exports) each last 1–3 minutes and are
 real pressure but not red-klaxon events. During the dwell the condition
-surfaces as the warning; QoS shedding keys on the raw assessment level and
-engages immediately regardless.
+surfaces as the warning (on the card; audible only once the episode has stood the warning dwell
+below); QoS shedding keys on the raw assessment level and engages immediately regardless.
+
+**Warning dwell (v1.187.20).** `host-pressure-warn` is on the card from the first non-ok
+assessment and its push keeps the usual 60 s debounce (overnight it goes to the morning digest),
+but it counts toward the audible condition only after the pressure episode has stood
+`HOST_PRESSURE_WARN_DWELL_S` (default 300 s, range 0–900; 0 = audible at once) or the critical has
+sustained; until then it carries `audible: false` and its card says when it would be announced (the
+critical dwell when the reading is at critical level). Once audible it stays audible for the episode,
+which ends only after ok has stood 180 s (the broadcast's clear dwell), so a dip does not speak an
+all-clear and then a second yellow. The episode (onset, audible, last held) is written to
+`host-pressure-state.json` beside the database (`HOST_PRESSURE_STATE_PATH`) and carried across a
+restart when the add-on held it at most 10 minutes before. The 2026-10-10 22:33 yellow came from a
+59 s spike during the HA Core 2026.10.1 update.
 
 ### 13.0c Out-of-band dead-man heartbeat (v1.43.0)
 

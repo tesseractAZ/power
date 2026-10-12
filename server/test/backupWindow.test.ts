@@ -12,15 +12,27 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import Fastify from 'fastify';
 import {
-  BACKUP_DEADLINE_HEADER, BACKUP_DEAD_MAN_MS, BACKUP_WINDOW_ROUTE, RECORDER_WAL_AUTOCHECKPOINT, createBackupWindow, isLoopbackPeer,
-  registerBackupWindowRoutes, resolveBackupJournalPath, walControlFor, type BackupWindow, type CheckpointResult, type WalControl,
+  BACKUP_DEADLINE_HEADER,
+  BACKUP_DEAD_MAN_MS,
+  BACKUP_WINDOW_ROUTE,
+  RECORDER_WAL_AUTOCHECKPOINT,
+  createBackupWindow,
+  isLoopbackPeer,
+  registerBackupWindowRoutes,
+  resolveBackupJournalPath,
+  walControlFor,
+  type BackupWindow,
+  type CheckpointResult,
+  type WalControl,
+  appendBackupJournal,
+  BACKUP_JOURNAL_MAX_BYTES,
 } from '../src/backupWindow.js';
 import { panelFastifyOptions } from '../src/logHooks.js';
 
@@ -588,4 +600,22 @@ test('★ index.ts builds the window over the recorder connection, registers the
   assert.match(src, /registerBackupWindowRoutes\(app, backupWindow\);/);
   const shutdown = src.slice(src.indexOf('const shutdown = async () => {'));
   assert.ok(shutdown.indexOf('backupWindow.stop();') > 0 && shutdown.indexOf('backupWindow.stop();') < shutdown.indexOf('recorder.close();'));
+});
+
+test('★ the journal rotates once past its cap, sized through the open file, and never throws', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bw-rot-'));
+  try {
+    const path = join(dir, 'backup-window.jsonl');
+    writeFileSync(path, 'x'.repeat(BACKUP_JOURNAL_MAX_BYTES + 1));
+    assert.equal(appendBackupJournal(path, { phase: 'pre', n: 1 }), true);
+    assert.equal(statSync(`${path}.1`).size, BACKUP_JOURNAL_MAX_BYTES + 1, 'the full file moved to .1');
+    assert.equal(readFileSync(path, 'utf8'), '{"phase":"pre","n":1}\n', 'a fresh file holds only the new line');
+    assert.equal(appendBackupJournal(path, { phase: 'post', n: 2 }), true);
+    assert.equal(readFileSync(path, 'utf8').trim().split('\n').length, 2, 'under the cap it appends');
+    // A path whose parent is a file cannot be written: false, not a throw.
+    writeFileSync(join(dir, 'not-a-dir'), '');
+    assert.equal(appendBackupJournal(join(dir, 'not-a-dir', 'j.jsonl'), { phase: 'pre' }), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

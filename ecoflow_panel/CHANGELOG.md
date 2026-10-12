@@ -4,12 +4,12 @@
 
 **Alarms and notifications**
 
-- The "alarm host under pressure" warning no longer speaks over the house for a load spike of a minute or two, such as a Home Assistant update or a backup (one was announced at 22:34 on 10 October for a 59-second spike). It still appears on the card and sends its notification right away, and it is announced only if the pressure lasts 5 minutes. Once announced, a brief dip or an add-on restart does not produce a false "All clear" followed by the same warning again. The critical alarm is unchanged.
+- The "alarm host under pressure" warning no longer speaks over the house for a load spike of a minute or two, such as a Home Assistant update or a backup (one was announced at 22:34 on 10 October for a 59-second spike). It still appears on the card at once and its notification is sent as before, and it is announced only if the pressure lasts 5 minutes. Once announced, a brief dip or an add-on restart does not produce a false "All clear" followed by the same warning again. The critical alarm is unchanged.
 - A settings change made in the EcoFlow app overnight, including a reserve-floor change, is no longer lost if the add-on restarts before morning. The waiting notification is saved and goes out once when quiet hours end; a failed send is retried rather than dropped.
 
 **Backups**
 
-- Nightly Home Assistant backups now hold a clean copy of Power's history database. Just before the backup copies Power's files, Power pauses the database's background tidy-up, and resumes it right after; restoring a backup can no longer bring back a damaged database. Power and its alarms keep running during the backup, the pause lifts on its own after 10 minutes if a backup never finishes, and if the pause cannot be set in time the backup proceeds exactly as before.
+- Nightly Home Assistant backups now hold a clean copy of Power's history database. Just before the backup copies Power's files, Power pauses the database's background tidy-up, and resumes it right after, so a restored backup no longer brings back a damaged database. Power and its alarms keep running during the backup, and the pause lifts on its own 10 minutes after it was set if the backup never reports back. If the pause cannot be set in time (for example while Power is still starting), that one backup is copied as before.
 
 **Dashboard**
 

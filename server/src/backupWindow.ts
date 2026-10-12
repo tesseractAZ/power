@@ -59,7 +59,7 @@
  * other connection can read.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, renameSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /** The recorder connection's automatic-checkpoint threshold in pages (SQLite's default, set
@@ -157,15 +157,26 @@ export function resolveBackupJournalPath(opts: { dataDir: string; shareRoot?: st
   return existsSync(shareRoot) ? join(shareRoot, 'ecoflow-panel', 'backup-window.jsonl') : join(opts.dataDir, 'backup-window.jsonl');
 }
 
-/** Append one JSON line. Best-effort: returns false instead of throwing. */
+/** Append one JSON line. Best-effort: returns false instead of throwing. The size is read through the
+ *  open descriptor, not the path (a path stat followed by a write to that path is a check-then-use race,
+ *  CodeQL js/file-system-race); past the cap the file rotates to `.1` once and a fresh one is opened. */
 export function appendBackupJournal(path: string, rec: Record<string, unknown>): boolean {
+  let fd: number | null = null;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    try { if (statSync(path).size > BACKUP_JOURNAL_MAX_BYTES) renameSync(path, `${path}.1`); } catch { /* absent: first line */ }
-    appendFileSync(path, `${JSON.stringify(rec)}\n`);
+    fd = openSync(path, 'a');
+    if (fstatSync(fd).size > BACKUP_JOURNAL_MAX_BYTES) {
+      closeSync(fd);
+      fd = null;
+      renameSync(path, `${path}.1`);
+      fd = openSync(path, 'a');
+    }
+    appendFileSync(fd, `${JSON.stringify(rec)}\n`);
     return true;
   } catch {
     return false;
+  } finally {
+    if (fd != null) try { closeSync(fd); } catch { /* best-effort */ }
   }
 }
 

@@ -1599,7 +1599,7 @@ export function computeAlerts(
       category: 'Connectivity',
       device: 'System',
       title: crit ? 'Alarm host under critical pressure' : 'Alarm host under pressure',
-      detail: `The host running this monitor shows resource pressure — ${vitals.reasons.join('; ')}. Another add-on is likely consuming the host; check the Home Assistant add-on pages for the top CPU/memory consumer. Alert delivery may be delayed while pressure persists${crit ? ' (discretionary analytics are paused to protect the alarm path)' : ''}.${crit || warnAudible ? '' : ` Not announced on the speakers unless the pressure lasts ${hostPressureDwellText(HOST_PRESSURE_WARN_DWELL_MS)}.`}`,
+      detail: `The host running this monitor shows resource pressure — ${vitals.reasons.join('; ')}. Another add-on is likely consuming the host; check the Home Assistant add-on pages for the top CPU/memory consumer. Alert delivery may be delayed while pressure persists${crit ? ' (discretionary analytics are paused to protect the alarm path)' : ''}.${crit || warnAudible ? '' : ` Not announced on the speakers unless the pressure lasts ${hostPressureDwellText(vitals.level === 'crit' ? Math.min(HOST_PRESSURE_CRIT_DWELL_MS, HOST_PRESSURE_WARN_DWELL_MS) : HOST_PRESSURE_WARN_DWELL_MS)}.`}`,
       facts: vitals.reasons.map((r, i) => ({ label: `Signal ${i + 1}`, value: r })),
     });
   } else {

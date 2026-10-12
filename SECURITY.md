@@ -77,10 +77,11 @@ outside that boundary needs to reach it.
   `Access-Control-Allow-Origin`.
 - **Every POST, PUT and DELETE route requires write authorization**, and so do the
   three administrative reads (the write log, the add-on list and speaker
-  discovery). Since v1.187.16 there is no exception: the alert-outcome and
-  vendor-history backfill routes, the last two without the gate, now carry it, and
-  `server/test/writeRoutesGated.test.ts` fails the build if any write route is
-  registered without it. The chime, broadcast-configuration, database-export,
+  discovery). The only exceptions are the two loopback-only backup-hook routes
+  described in the next bullet (v1.187.20). Since v1.187.16 the alert-outcome and
+  vendor-history backfill routes, the last two without the gate, carry it, and
+  `server/test/writeRoutesGated.test.ts` fails the build if a write route in any
+  server module is registered with neither the write gate nor the loopback gate. The chime, broadcast-configuration, database-export,
   statistics-export, reserve-floor and defective-pack routes are also
   rate-limited.
 - **The two backup-window hook routes are loopback-only** (v1.187.20).

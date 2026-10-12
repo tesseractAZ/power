@@ -159,9 +159,16 @@ const MUTANTS = [
   {
     id: 'H-xv. ★ the card no longer says the warning is held off the speakers',
     file: ALERTS,
-    find: ' Not announced on the speakers unless the pressure lasts ${hostPressureDwellText(HOST_PRESSURE_WARN_DWELL_MS)}.',
+    find: " Not announced on the speakers unless the pressure lasts ${hostPressureDwellText(vitals.level === 'crit' ? Math.min(HOST_PRESSURE_CRIT_DWELL_MS, HOST_PRESSURE_WARN_DWELL_MS) : HOST_PRESSURE_WARN_DWELL_MS)}.",
     to: ' /* MUTANT */',
     why: 'The card reads as an announced alarm while it is held.',
+  },
+  {
+    id: 'H-xvi. ★ at critical level the held card names the warning dwell, not the sooner critical one',
+    file: ALERTS,
+    find: "vitals.level === 'crit' ? Math.min(HOST_PRESSURE_CRIT_DWELL_MS, HOST_PRESSURE_WARN_DWELL_MS) : HOST_PRESSURE_WARN_DWELL_MS",
+    to: 'HOST_PRESSURE_WARN_DWELL_MS',
+    why: 'The card says 5 min while the red is announced at 3 min.',
   },
   {
     id: 'H-xvi. ★★ the held warning is annunciate:false instead of audible:false',

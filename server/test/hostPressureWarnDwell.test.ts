@@ -307,3 +307,12 @@ test('★ HOST_PRESSURE_WARN_DWELL_S: 0-900 s, anything else (empty included) is
   assert.equal(hostPressureDwellText(300_000), '5 min');
   assert.equal(hostPressureDwellText(90_000), '90 s');
 });
+
+test('★ v1.187.20 review — at critical level the held warning names the critical dwell (the red is announced sooner)', () => {
+  const ticks = run(0, 60, () => 9.0); // load ≥ VITALS_LOAD_CRIT: a crit assessment, not yet sustained
+  const first = ticks[0];
+  assert.ok(first.hp, 'the rolled host-pressure alert is on the card');
+  assert.equal(first.hp.id, 'host-pressure-warn', 'still the warning until the critical dwell elapses');
+  assert.match(first.hp.detail, /Not announced on the speakers unless the pressure lasts 3 min\./);
+  assert.doesNotMatch(first.hp.detail, /lasts 5 min/);
+});
