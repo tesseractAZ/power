@@ -4,7 +4,7 @@ import { computeLearnedAlerts, _resetPeerHitCounts } from '../src/analytics.js';
 import { conditionFromAlerts, speakableAlerts, IMBALANCE_SPEAK_HOLD_MS } from '../src/broadcast.js';
 import { buildAlertMessage } from '../src/ttsService.js';
 import { risingEdgePushes, shouldDemoteAnnunciation, shouldSendResolve } from '../src/alertMonitor.js';
-import { topOfChargeQuietSpread, vdiffCritMvFor, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, VOL_DIFF_PLATEAU_CRIT_MV } from '../src/cellSpread.js';
+import { vdiffCritMvFor, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, VOL_DIFF_PLATEAU_CRIT_MV } from '../src/cellSpread.js';
 import type { Alert } from '../src/alerts.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
@@ -17,11 +17,17 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * an all-clear — the only family speaking — while the same packs' own vdiff-warn was quiet
  * under v1.45.0's plateauQuietWarn.
  *
- * The gate is that predicate on the OUTLIER pack's own SoC and spread. It removes the audible
- * only: v1.45.0 quieted vdiff-warn on the premise that the peer engine still tracks a diverging
- * pack, so the card and the PUSH stay. The gate lifts below the quiet line, or at the critical
- * line — where, while vdiff-crit is held by a bounded mute, alertMonitor's stamp keeps it quiet
- * (peerSpreadYieldsToHeldCritical.test.ts).
+ * The gate removed the audible only: v1.45.0 quieted vdiff-warn on the premise that the peer
+ * engine still tracks a diverging pack, so the card and the PUSH stay.
+ *
+ * v1.187.21 — the gate is gone because its window is now the whole range: a cell-spread outlier
+ * at WARNING is audible:false at any SoC (2026-10-12 18:31:59, a yellow spoken for one on an
+ * evening discharge at 64% — peerSpreadPushedNotAnnounced.test.ts). The 09-29 knee keeps its
+ * tests here (still a pushed card, still never spoken). Three tests asserted that the outlier
+ * SPEAKS outside the gate — below the 95% line, with a sibling (not itself) at the top, and with
+ * no SoC at all; each now asserts it does not, deliberately: the v1.187.12 rule for a
+ * warning-level cell spread (pushed, not announced) applies to this report of the same signal
+ * too. At the critical line the pack's own vdiff-crit is the audible owner.
  * =================================================================== */
 
 const SN = 'DPU-PEER';
@@ -56,10 +62,12 @@ test('★★★ 09-29 knee: the outlier is still raised as a WARNING card, but a
   assert.ok(a, 'the peer engine still tracks the pack');
   assert.equal(a!.severity, 'warning', 'the fixture reproduces the warning that spoke');
   assert.equal(a!.audible, false, 'at top of charge it is not spoken');
-  assert.match(a!.detail, /At top of charge: not announced on the speakers\./);
+  // v1.187.21 — the card says why in the words of the rule (no longer a top-of-charge note).
+  assert.match(a!.detail, /Cell-spread warnings are pushed, not announced; a cell imbalance at the critical line is announced\./);
+  assert.doesNotMatch(a!.detail, /At top of charge/);
 });
 
-test('★★★ the push is kept: the gate never sets annunciate:false, and no push gate reads audible', () => {
+test('★★★ the push is kept: the rule never sets annunciate:false, and no push gate reads audible', () => {
   const a = peerSpread(KNEE_0929)!;
   assert.notEqual(a.annunciate, false, 'annunciate:false would drop the push — the v1.45.0 backstop');
   assert.equal(risingEdgePushes(a), true, 'the rising-edge push is owed');
@@ -71,7 +79,7 @@ test('★★★ the push is kept: the gate never sets annunciate:false, and no p
 test('★★★ the audible condition does not count it (no yellow, no all-clear)', () => {
   const a = peerSpread(KNEE_0929)!;
   assert.equal(conditionFromAlerts([a]).level, 'green');
-  assert.equal(conditionFromAlerts([{ ...a, audible: undefined }]).level, 'yellow', 'the same alert without the gate speaks');
+  assert.equal(conditionFromAlerts([{ ...a, audible: undefined }]).level, 'yellow', 'the same alert without the flag speaks');
 });
 
 test('★★★ the broadcast tick drops audible:false before the condition AND the spoken message', () => {
@@ -93,43 +101,52 @@ test('★★★ the broadcast tick drops audible:false before the condition AND 
   assert.doesNotMatch(said, /pack one|spread/i, 'the quiet outlier is never named');
   // And the voiced-primary choice refuses it on its own, for any caller that skips the tick.
   assert.doesNotMatch(buildAlertMessage('yellow', [other, quiet]), /pack one|spread/i);
-  // Control: the same outlier WITHOUT the gate is the one voiced (it has the location).
+  // Control: the same outlier WITHOUT the flag is the one voiced (it has the location).
   assert.match(buildAlertMessage('yellow', speakableAlerts([other, { ...quiet, audible: undefined }], now, onsetOf)), /pack one/i);
 });
 
-test('★★ below the quiet line the outlier speaks as before (after its 10-minute hold)', () => {
+test('★★ below the quiet line the outlier is quiet too (v1.187.21 — until then it spoke after its 10-minute hold)', () => {
+  // Changed deliberately: a warning-level cell spread is pushed, not announced, at any SoC.
   const a = peerSpread(KNEE_0929.map((p, i) => (i === 0 ? { ...p, soc: 94 } : p)));
   assert.ok(a);
-  assert.equal(a!.audible, undefined);
+  assert.equal(a!.severity, 'warning');
+  assert.equal(a!.audible, false);
+  assert.notEqual(a!.annunciate, false, 'and still pushed');
 });
 
-test('★★ the gate reads the OUTLIER pack, never a sibling on the knee', () => {
-  // Siblings at 99-100% do not quiet a pack at 80%.
+test('★★ a pack at 80% among siblings at the top is quiet too (v1.187.21 — until then the gate read its SoC and it spoke)', () => {
+  // Changed deliberately: no SoC decides it any more — the outlier pack's or a sibling's.
   const a = peerSpread(KNEE_0929.map((p, i) => (i === 0 ? { ...p, soc: 80 } : p)));
   assert.ok(a);
-  assert.equal(a!.audible, undefined);
+  assert.equal(a!.audible, false);
+  assert.notEqual(a!.annunciate, false);
 });
 
-test('★★★ at the critical line this gate lifts, even at top of charge', () => {
-  // From here the pack's own vdiff-crit decides: while a bounded mute holds it, alertMonitor's
-  // stamp keeps this outlier quiet too (peerSpreadYieldsToHeldCritical.test.ts); when it speaks,
-  // so does this.
+test('★★★ at the critical line the outlier stays quiet: the pack\'s own vdiff-crit is the audible owner', () => {
+  // v1.187.0 lifted the gate here, and alertMonitor's stamp quieted the outlier only while a
+  // bounded mute held vdiff-crit (removed in v1.187.21 with the gate). vdiff-crit at its fixed
+  // line is the audible signal for this spread (peerSpreadPushedNotAnnounced.test.ts).
   const a = peerSpread(KNEE_0929.map((p, i) => (i === 0 ? { ...p, vd: VOL_DIFF_PLATEAU_CRIT_MV } : p)));
   assert.ok(a);
-  assert.equal(a!.audible, undefined, 'a genuinely large spread is never quieted by the top-of-charge gate');
+  assert.equal(a!.severity, 'warning', 'peer anomalies cap at warning');
+  assert.equal(a!.audible, false);
+  assert.notEqual(a!.annunciate, false, 'pushed');
 });
 
-test('★ an unknown pack SoC falls back to the Core SoC (as vdiff does); both unknown → speaks', () => {
+test('★ no SoC at all: quiet as well (v1.187.21 — until then an unknown SoC kept it audible)', () => {
+  // Changed deliberately. The fail-loud rule ("never quiet on a reading that is not there")
+  // protected an audible this alert no longer has; its push does not read SoC.
   const fallback = peerSpread(KNEE_0929.map((p) => ({ ...p, soc: null })), 99);
   assert.equal(fallback!.audible, false);
   _resetPeerHitCounts();
   const unknown = peerSpread(KNEE_0929.map((p) => ({ ...p, soc: null })), null);
-  assert.equal(unknown!.audible, undefined, 'never quiet on a reading that is not there');
+  assert.equal(unknown!.audible, false);
+  assert.notEqual(unknown!.annunciate, false, 'pushed whatever the SoC reads');
 });
 
-test('★★ only the cell-spread metric is gated', () => {
-  // A pack at 99% whose SoH (85%) is a peer outlier: its value is under 90, so a gate that
-  // forgot the metric scope would quiet it as if it were a cell spread.
+test('★★ only the cell-spread metric is quiet', () => {
+  // A pack at 99% whose SoH (85%) is a peer outlier: a rule that forgot the metric scope would
+  // quiet it as if it were a cell spread.
   let out: Alert[] = [];
   const worn = core(KNEE_0929);
   (worn[SN].projection as any).packs[0].actSoh = 85;
@@ -146,12 +163,8 @@ test('★★ only the cell-spread metric is gated', () => {
   assert.equal(t!.audible, undefined);
 });
 
-test('topOfChargeQuietSpread is v1.45.0 plateauQuietWarn, on one definition', () => {
+test('the plateau lines the critical reads are unchanged (topOfChargeQuietSpread retired in v1.187.21)', () => {
   assert.equal(VOL_DIFF_PLATEAU_QUIET_SOC_PCT, 95);
-  assert.equal(topOfChargeQuietSpread(95, 89), true);
-  assert.equal(topOfChargeQuietSpread(94, 30), false);
-  assert.equal(topOfChargeQuietSpread(100, 90), false);
-  assert.equal(topOfChargeQuietSpread(null, 30), false);
   assert.equal(vdiffCritMvFor(84), 50);
   assert.equal(vdiffCritMvFor(85), 90);
   assert.equal(vdiffCritMvFor(null), 50, 'an unknown SoC takes the stricter line');

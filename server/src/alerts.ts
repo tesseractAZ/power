@@ -37,7 +37,7 @@ export function resetVdiffWarnHoldForTesting(): void {
   heldVdiffWarnKeys.clear();
   vdiffKneeByKey.clear(); // v1.187.0 — the end-of-charge knee state is per-pack vdiff state too
 }
-import { VOL_DIFF_CRIT_MV, VOL_DIFF_PLATEAU_SOC_PCT, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, vdiffCritMvFor, topOfChargeQuietSpread, plateauQuietWarnSpread } from './cellSpread.js';
+import { VOL_DIFF_CRIT_MV, VOL_DIFF_PLATEAU_SOC_PCT, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, vdiffCritMvFor, plateauQuietWarnSpread } from './cellSpread.js';
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, housePoolFallbackSoc, shp2Panels, findShp2, secondaryPanels, panelMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import { mpptProducing } from './mppt.js';
@@ -302,17 +302,20 @@ export interface Alert {
    * v1.187.0 — audible-only gate. `false` = the alert stays on the card AND still pushes, but
    * never raises or voices the broadcast condition (broadcast.conditionFromAlerts and the
    * broadcast tick's speech filter). Narrower than `annunciate:false`, which drops the push too.
-   * Used for a peer cell-spread outlier at top of charge (analytics.computeLearnedAlerts), and
-   * for one whose pack's vdiff-crit is held by a bounded cell-spread mute
-   * (alertMonitor.quietPeerSpreadUnderHeldCritical). v1.187.3 — also on the info-tier EMS band
-   * notice (`ems-volt-`), where it backs up the severity: an info alert neither pushes nor counts.
+   * First used for a peer cell-spread outlier at top of charge, or while its pack's vdiff-crit was
+   * held by a bounded cell-spread mute; since v1.187.21 every peer cell-spread outlier at WARNING
+   * carries it (analytics.computeLearnedAlerts), as `vdiff-warn` has since v1.187.12: a cell-spread
+   * warning is pushed, not announced, and the critical line (`vdiff-crit`) is the audible one.
+   * v1.187.3 — also on the info-tier EMS band notice (`ems-volt-`), where it backs up the severity:
+   * an info alert neither pushes nor counts.
    */
   audible?: boolean;
   /**
    * v1.187.0 — which bounded cell-spread mute holds a `vdiff-crit-*` non-annunciating this tick.
    * alertMonitor names it in the "held non-annunciating" log line, which blamed every silent
    * critical on a bench spare or off-panel Core (2026-09-29: all three were the balancing mute
-   * on home Cores), and quiets the same pack's peer cell-spread outlier while it is set.
+   * on home Cores). Until v1.187.21 it also quieted the same pack's peer cell-spread outlier while
+   * set (that outlier is now never audible at warning).
    * v1.187.1 — it names the mute IN FORCE: a policy stamp that takes precedence (bench spare,
    * off-panel roster) clears it, so a policy-muted critical holds nothing (soundedCriticalHeld).
    */
@@ -397,7 +400,8 @@ const VOL_DIFF_WARN_MV = 20;
 // transients via the balancing/plateau annunciate gates).
 const VOL_DIFF_WARN_RISE_MV = 24;
 // VOL_DIFF_CRIT_MV and the v0.58.0 / v1.45.0 plateau lines (VOL_DIFF_PLATEAU_*) live in
-// cellSpread.ts since v1.187.0, so the peer-outlier rule reads the same definitions.
+// cellSpread.ts since v1.187.0, when the peer-outlier rule read the top-of-charge line too (its
+// audible gate, removed in v1.187.21: a peer cell-spread warning is now never audible).
 
 /*
  * v1.187.0 — THE END-OF-CHARGE KNEE. On 2026-09-29 two healthy packs at 100% sounded the
@@ -1191,8 +1195,8 @@ export function _resetHostPressureDwellForTest(): void {
 /* v1.187.20 — host-pressure WARNING audible dwell. The warning is on the card at once and keeps
  * its push (the alert monitor's own 60 s debounce), but it raises the AUDIBLE condition only once
  * host pressure has stood for HOST_PRESSURE_WARN_DWELL_MS. Until then it carries `audible: false`
- * (Alert.audible: card and push kept; conditionFromAlerts and speakableAlerts drop it), the gate
- * vdiff-warn and the top-of-charge peer outlier use.
+ * (Alert.audible: card and push kept; conditionFromAlerts and speakableAlerts drop it), the flag
+ * vdiff-warn and the peer cell-spread warning carry.
  *
  * Evidence. 2026-10-10 22:33: a Home Assistant Core update on the same host raised the warning for
  * 59 s, and it spoke a yellow on the speakers and the cordless phone. The cleared history holds 33
@@ -1994,7 +1998,8 @@ export function computeAlerts(
         // diverging pack rides its spread DOWN off the plateau (the 50 mV crit
         // re-arms below 85%) and the peer/SoH engines track it independently.
         // Warn-band spread on a >= 95% pack stays VISIBLE but does not push.
-        // v1.187.0 — the same predicate (cellSpread.ts) now gates the peer outlier's audible.
+        // v1.187.0 — the 95% form of this predicate (topOfChargeQuietSpread) also gated the peer
+        // outlier's audible, until v1.187.21 made a peer cell-spread warning never audible.
         // v1.187.14 — the warning's push quiets from the plateau (85%), not only from 95%.
         const plateauQuietWarn = plateauQuietWarnSpread(packSoc, pk.maxVolDiffMv);
         const plateauNote = (plateauBenign || plateauQuietWarn) ? ' Expected top-of-charge cell spread.' : '';
@@ -2087,7 +2092,8 @@ export function computeAlerts(
           });
         } else if (warnActive) {
           // v1.187.12 — a warning-level spread keeps its card and its push but is never voiced
-          // (`audible:false`, as the top-of-charge peer outlier): it recurs on the same packs for
+          // (`audible:false`, as the top-of-charge peer outlier then was; v1.187.21 — the peer
+          // cell-spread warning too, at any SoC): it recurs on the same packs for
           // 40 min to 2 h as the morning charge begins (10 rises, median 40 min, longest 111 min by
           // 10-08), a pack-health trend rather than an event to announce. The critical line stays audible.
           out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', audible: false, category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning fires ≥ ${VOL_DIFF_WARN_RISE_MV} mV, holds ≥ ${VOL_DIFF_WARN_MV} mV).${cellNote}${balanceNote}${plateauNote}`, ...facts, ...annun });
@@ -2269,8 +2275,8 @@ export function computeAlerts(
         out[i].annunciate = false;
         out[i].muteReason = MUTE_REASON_BENCH_SPARE;
         // v1.187.1 — and the bounded cell-spread mute is no longer the one holding it: mutedBy names
-        // the mute in force (soundedCriticalHeld holds a sounded critical red on it, and
-        // quietPeerSpreadUnderHeldCritical quiets the pack's outlier on it). Left set under the
+        // the mute in force (soundedCriticalHeld holds a sounded critical red on it; until v1.187.21
+        // quietPeerSpreadUnderHeldCritical also quieted the pack's outlier on it). Left set under the
         // spare stamp, a sounded vdiff-crit muted by policy held the level red and delayed the
         // all-clear while the knee mute lasted — "a policy mute holds nothing".
         delete out[i].mutedBy;

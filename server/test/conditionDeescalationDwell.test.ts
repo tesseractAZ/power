@@ -93,7 +93,9 @@ const store = {
 } as any;
 
 /** The 09-29 peer outlier: ONE alert id whose severity flips warning↔info with the sibling MAD,
- *  and whose detail carries the live reading. */
+ *  and whose detail carries the live reading. Built as it stood then, with no audible flag; since
+ *  v1.187.21 computeLearnedAlerts raises a peer cell-spread warning with `audible: false` (pushed,
+ *  not announced), so here it stands for any speakable warning that flickers with its reading. */
 const PEER_ID = 'peer-voldiff-COREXXX00XXX0001-1';
 const peer = (severity: 'warning' | 'info', mv: number): Alert => ({
   id: PEER_ID, severity, category: 'Battery', source: 'learned', device: 'Core 1', coreNum: 1, packNum: 1,

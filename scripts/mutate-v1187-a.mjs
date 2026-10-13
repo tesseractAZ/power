@@ -3,9 +3,10 @@
  * mutate-v1187-a.mjs — committed harness for v1.187.0 group A (cell-spread alarms): the
  * end-of-charge knee grace on the vdiff critical and its bounds (ceiling, duration,
  * fail-to-relax, evidence — balancing vs the narrower stream-delivered charge input — and the
- * episode clock across dips and reading gaps), the never-muted cell-overvoltage critical, the
- * peer cell-spread outlier's top-of-charge audible gate and its yield to a held critical, and
- * the audible chain (speakableAlerts, the voiced primary, the push gate).
+ * episode clock across dips and reading gaps), the never-muted cell-overvoltage critical, and
+ * the audible chain (speakableAlerts, the voiced primary, the push gate). The peer cell-spread
+ * outlier's top-of-charge audible gate and its yield to a held critical (xxx-xxxix) were retired
+ * in v1.187.21 with the code they pinned: see the note at their place below.
  *
  * Log review 09-29 (xlvi-lvii): both graces are bounded by the top-of-charge SESSION
  * (graceFromMs), not by the current crossing; after a restart a pack's clocks start from its
@@ -29,7 +30,6 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const AL = resolve(SERVER, 'src/alerts.ts');
-const AN = resolve(SERVER, 'src/analytics.ts');
 const BC = resolve(SERVER, 'src/broadcast.ts');
 const AM = resolve(SERVER, 'src/alertMonitor.ts');
 const SN = resolve(SERVER, 'src/snapshot.ts');
@@ -261,84 +261,22 @@ const MUTANTS = [
     why: 'Before the first complete poll a standing overvoltage alert resolves as if it cleared.',
   },
   /* ── the peer outlier's audible ───────────────────────────────────────── */
-  {
-    id: 'xxx. ★★★ the peer top-of-charge gate is gone',
-    file: AN,
-    find: '          ...(topOfChargeSpread ? { audible: false } : {}),',
-    to: '          /* MUTANT */',
-    why: 'Every full-charge afternoon speaks yellows for the pack that reached the knee first (2026-09-29).',
-  },
-  {
-    id: 'xxxi. ★★★ the peer gate drops the push too (annunciate:false)',
-    file: AN,
-    find: '          ...(topOfChargeSpread ? { audible: false } : {}),',
-    to: '          ...(topOfChargeSpread ? { annunciate: false } : {}), /* MUTANT */',
-    why: 'A sub-critical top-of-charge spread is neither spoken nor pushed — the backstop v1.45.0 relies on is gone.',
-  },
-  {
-    id: 'xxxii. ★★★ the peer gate reads the Core SoC instead of the outlier pack',
-    file: AN,
-    find: "        const topOfChargeSpread = metric.key === 'voldiff' && topOfChargeQuietSpread(pk.soc ?? d.projection.soc, v);",
-    to: "        const topOfChargeSpread = metric.key === 'voldiff' && topOfChargeQuietSpread(d.projection.soc, v); /* MUTANT */",
-    why: 'A diverging pack at 80% is quieted because its siblings are full.',
-  },
-  {
-    id: 'xxxiii. ★★ the peer gate is not scoped to the cell-spread metric',
-    file: AN,
-    find: "        const topOfChargeSpread = metric.key === 'voldiff' && topOfChargeQuietSpread(pk.soc ?? d.projection.soc, v);",
-    to: '        const topOfChargeSpread = topOfChargeQuietSpread(pk.soc ?? d.projection.soc, v); /* MUTANT */',
-    why: 'A worn (SoH) outlier at top of charge stops being spoken.',
-  },
-  /* ── review-3: the outlier yields to its pack's held critical ─────────── */
-  {
-    id: 'xxxiv. ★★★ the monitor does not stamp the outlier under a held critical',
-    file: AM,
-    find: '    const liveHead: Alert[] = quietPeerSpreadUnderHeldCritical([',
-    to: '    const liveHead: Alert[] = ([ /* MUTANT */',
-    why: 'During the knee the outlier voices yellow / all-clear / yellow / all-clear in place of the suppressed red (2026-09-29 15:32-15:38).',
-  },
-  {
-    id: 'xxxv. ★★★ the stamp does nothing',
-    file: AM,
-    find: '    a.audible = false;\n',
-    to: '    /* MUTANT */\n',
-    why: 'As xxxiv: the Core 1 replay speaks a yellow at 15:32:00.',
-  },
-  {
-    id: 'xxxvi. ★★★ the stamp drops the push instead of the audible',
-    file: AM,
-    find: '    a.audible = false;\n',
-    to: '    a.annunciate = false; /* MUTANT */\n',
-    why: 'A 93-101 mV outlier is neither spoken nor pushed while its critical is held.',
-  },
-  {
-    id: 'xxxvii. ★★ a critical that still annunciates counts as held',
-    file: AM,
-    find: "    if (a.id.startsWith('vdiff-crit-') && a.mutedBy != null && a.annunciate === false) {",
-    to: "    if (a.id.startsWith('vdiff-crit-') && a.mutedBy != null) { /* MUTANT */",
-    why: 'An inconsistent critical (mutedBy set, still speaking) silences its outlier with nothing held.',
-  },
-  {
-    id: 'xxxviii. ★★ the stamp quiets every peer metric of the pack',
-    file: AM,
-    find: "    if (!a.id.startsWith('peer-voldiff-') || a.audible === false) continue;\n    const why = held.get(a.id.slice('peer-voldiff-'.length));",
-    to: "    if (!a.id.startsWith('peer-') || a.audible === false) continue; /* MUTANT */\n    const why = held.get(a.id.replace(/^peer-[a-z]+-/, ''));",
-    why: 'A hot or worn pack at top of charge stops being spoken because its cell spread is on the knee.',
-  },
-  {
-    id: 'xxxix. ★ the stamp matches packs by prefix',
-    file: AM,
-    find: "    const why = held.get(a.id.slice('peer-voldiff-'.length));",
-    to: "    const why = [...held].find(([k]) => a.id.slice('peer-voldiff-'.length).startsWith(k))?.[1]; /* MUTANT */",
-    why: 'Pack 1 held quiets pack 11.',
-  },
+  // xxx-xxxix RETIRED in v1.187.21. They pinned the peer cell-spread outlier's top-of-charge
+  // audible gate (analytics: topOfChargeSpread / cellSpread.topOfChargeQuietSpread — removed, the
+  // gate, its push-dropping variant, its SoC source and its metric scope) and its yield to a held
+  // critical (alertMonitor.quietPeerSpreadUnderHeldCritical — removed, its wiring, its write, its
+  // push-dropping variant, its hold test, its metric scope and its pack match). A peer cell-spread
+  // outlier at WARNING is now audible:false at any SoC and any spread, so both mechanisms decided
+  // nothing and were deleted rather than kept inert. The properties they held — the outlier never
+  // speaks at the knee or in place of a held red, keeps its push, and only the cell spread is
+  // quiet — are now the unconditional rule, pinned by scripts/mutate-v1187-21.mjs (P-i to P-vi).
   /* ── the audible chain (review-6) ─────────────────────────────────────── */
   {
     id: 'xl. ★★★ the audible condition counts audible:false',
     file: BC,
     find: '      a.audible !== false &&',
     to: '      /* MUTANT */',
-    why: 'The top-of-charge peer outlier raises yellow and the all-clear again.',
+    why: 'A cell-spread warning (vdiff-warn, or the peer outlier) raises yellow and the all-clear again.',
   },
   {
     id: 'xli. ★★★ the broadcast tick keeps audible:false in the spoken array',
