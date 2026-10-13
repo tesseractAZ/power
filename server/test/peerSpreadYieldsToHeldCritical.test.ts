@@ -22,7 +22,8 @@ import { readFileSync } from 'node:fs';
  * audible:false at any SoC and any spread (peerSpreadPushedNotAnnounced.test.ts), so there is
  * nothing left for a held critical to yield. The knee replay stays and must stay silent with no
  * stamp in the pipeline. The test that showed the replay speaking without the stamp now strips
- * the outlier's audible flag instead (the v1.187.0 shape at the line), and the stamp's own unit
+ * the outlier's audible flag instead on every tick (the pre-v1.187.0 shape: yellows below the line
+ * from 15:16 and beside the held red from 15:32), and the stamp's own unit
  * and wiring tests are gone with it — deliberately, not as a loss of cover: the property they
  * held (the outlier never speaks in place of a held red) is now the unconditional rule.
  *
@@ -161,6 +162,12 @@ test('★★★ the replay exercises the defect: with the outlier\'s audible fla
   for (const s of yellow) {
     assert.ok(s.spoken.some((a) => a.id === `peer-voldiff-${SN}-1`), `${s.hms}: the yellow is pack 1's peer outlier`);
   }
+  // Stripping applies on every tick, so it also brings back the sub-line yellows the v1.187.0 gate
+  // quieted (from 15:16, 44 mV, no critical yet). Pin the case this file is about: at least one yellow
+  // spoken while pack 1's vdiff-crit is HELD (muted, not annunciated) — the outlier in place of the red.
+  const inPlaceOfHeldRed = yellow.filter((s) =>
+    s.all.some((a) => a.id === `vdiff-crit-${SN}-1` && a.mutedBy != null && a.annunciate === false));
+  assert.ok(inPlaceOfHeldRed.length > 0, 'a yellow spoken beside the held vdiff-crit (from 15:32 in the replay)');
 });
 
 test('★★★ at the line, beside the held critical, the outlier keeps its card and its PUSH (annunciate untouched)', () => {
