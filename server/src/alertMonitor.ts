@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot, type FleetSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, type VdiffCritMuteReason, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext, debouncedOnsetsPending, BOOT_RESET_ONSET_DEBOUNCE_MS, restoreHostPressureEpisode, persistHostPressureEpisode, hostPressureCarryPendingHeldAt } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext, debouncedOnsetsPending, BOOT_RESET_ONSET_DEBOUNCE_MS, restoreHostPressureEpisode, persistHostPressureEpisode, hostPressureCarryPendingHeldAt } from './alerts.js';
 import { broadcastHealthAlert, broadcastDegradedAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds, rateFloorIdleHeldSns } from './messageRateFloorAlert.js';
@@ -196,51 +196,10 @@ const silentCriticalLogged = new Set<string>();
 
 
 /**
- * v1.187.0 — ONE AUDIBLE OWNER PER PHYSICAL EVENT at the top of charge. The peer cell-spread
- * outlier (`peer-voldiff-<sn>-<pk>`) speaks again once its pack's spread reaches the critical
- * line (analytics.computeLearnedAlerts: topOfChargeQuietSpread is false there), on the premise
- * that vdiff-crit speaks too. But vdiff-crit is exactly what the bounded cell-spread mutes
- * (balancing, the end-of-charge grace) hold at that point, so during the knee the outlier voiced
- * a yellow and then an all-clear in place of the suppressed red (2026-09-29 Core 1 replay:
- * yellow 15:32:00, all-clear 15:36:20, yellow 15:37:00, all-clear 15:38:40, pack 1 at 93-101 mV
- * against siblings at 31-46).
- *
- * While the same pack's `vdiff-crit-<sn>-<pk>` is held non-annunciating by one of those mutes
- * (`mutedBy` set, `annunciate:false`), the outlier is stamped `audible:false`: the bounded
- * critical owns the audible for the event, and both speak the moment its bounds lapse (at most
- * VDIFF_KNEE_MAX_MUTE_MS; VOL_DIFF_KNEE_HARD_MV at once). The card and the PUSH are untouched
- * (annunciate is never written here): v1.45.0 relies on this engine as the independent tracker.
- * A critical muted for any OTHER reason (bench spare, off-panel) quiets nothing here. Runs on the
- * main thread over the same tick's computeAlerts + computeLearnedAlerts output. Mutates and
- * returns `alerts`; pure otherwise. Exported for tests.
- * v1.187.1 — a policy stamp that takes precedence clears `mutedBy`, so a bench spare's critical
- * (alerts.ts stamps it before this runs) quiets nothing here even while a knee mute also applies.
- * The roster stamp (applyRosterMute) runs after this, on the assembled list, and mutes the
- * outlier itself in the same pass: its id carries the same serial.
- */
-export function quietPeerSpreadUnderHeldCritical<T extends Alert>(alerts: T[]): T[] {
-  const held = new Map<string, VdiffCritMuteReason>();
-  for (const a of alerts) {
-    if (a.id.startsWith('vdiff-crit-') && a.mutedBy != null && a.annunciate === false) {
-      held.set(a.id.slice('vdiff-crit-'.length), a.mutedBy);
-    }
-  }
-  if (held.size === 0) return alerts;
-  for (const a of alerts) {
-    if (!a.id.startsWith('peer-voldiff-') || a.audible === false) continue;
-    const why = held.get(a.id.slice('peer-voldiff-'.length));
-    if (why == null) continue;
-    a.audible = false;
-    a.detail = `${a.detail} Not announced on the speakers while this pack's cell-imbalance critical is held (${CELL_SPREAD_MUTE_TEXT[why]}).`;
-  }
-  return alerts;
-}
-
-/**
  * v1.187.0 — the rising-edge PUSH gate, as a predicate so its inputs are pinned by test: a push
  * is owed unless the alert is `annunciate:false`. `Alert.audible` is deliberately NOT read — an
- * `audible:false` alert (a peer cell-spread outlier at top of charge, or under a held
- * vdiff-crit) stays off the speakers but still reaches the phone.
+ * `audible:false` alert (a cell-spread warning: `vdiff-warn` since v1.187.12, the peer outlier since
+ * v1.187.21) stays off the speakers but still reaches the phone.
  */
 export function risingEdgePushes(a: Pick<Alert, 'annunciate'>): boolean {
   return a.annunciate !== false;
@@ -3402,8 +3361,9 @@ export function startAlertMonitor(
     // main-thread state, none of it from the worker. These publish before any wait. Split
     // in two only so the assembled list keeps its pre-v1.186.0 order (worker-served alerts
     // sat between them), which a stable sort then preserves among equal-rank alerts.
-    // v1.187.0 — quietPeerSpreadUnderHeldCritical: a pack's peer cell-spread outlier stays off
-    // the speakers while its own vdiff-crit is held by a bounded cell-spread mute (same tick).
+    // v1.187.21 — no peer-spread stamp here any more: v1.187.0's quietPeerSpreadUnderHeldCritical
+    // kept a pack's peer cell-spread outlier off the speakers while its vdiff-crit was held by a
+    // bounded mute, and that outlier is now never audible at warning (analytics.computeLearnedAlerts).
     // v1.187.3 (review) — when the live alarms were computed, and which in-memory onset clocks are
     // withholding a fault at that moment (alertSetTrusted). A pass whose first publish (below: these
     // live alarms and each feed's last value) is not a trusted set clears the settled stamp BEFORE
@@ -3413,14 +3373,14 @@ export function startAlertMonitor(
     if (!alertSetTrusted({ firstPollSettledAt: store.firstPollSettledAt, feedsInSet: alertFeeds.map((f) => f.warm()), liveAtMs, pendingOnsets })) {
       alertSetSettledSinceMs = null;
     }
-    const liveHead: Alert[] = quietPeerSpreadUnderHeldCritical([
+    const liveHead: Alert[] = [
       // v1.185.0 — each pool's own verdict, on a multi-panel plant only (one panel: `grid`, unchanged).
       ...computeAlerts(snap.devices, connectivity, grid,
         shp2Panels(snap.devices).sns.length > 1 ? (sn: string) => livePoolGridBackstop(snap.devices, sn) : undefined),
       ...computeLearnedAlerts(snap.devices),
       ...peakGridDrawAlerts(peakDraw, Date.now()),
       ...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0
-    ]);
+    ];
     // v1.187.1 — the knee sessions computeAlerts just advanced, written only when one changed.
     vdiffKneeOnDisk = persistVdiffKneeSessions(vdiffKneeStatePath, vdiffKneeOnDisk);
     // v1.187.20 (review) — and the host-pressure episode computeAlerts just advanced.

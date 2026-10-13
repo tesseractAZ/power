@@ -10,6 +10,10 @@
  *
  * Scope is the point of these tests: the hold must touch the AUDIBLE path only, must not
  * touch the CRITICAL, and must not touch any other warning.
+ *
+ * Since v1.187.12 (vdiff-warn) and v1.187.21 (peer-voldiff) both families are raised with
+ * `audible: false` at warning, and speakableAlerts drops those before this hold. The fixtures
+ * below carry no flag: they pin the hold itself, which stays as the second guard.
  */
 
 import { test } from 'node:test';

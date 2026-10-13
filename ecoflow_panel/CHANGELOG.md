@@ -1,3 +1,11 @@
+## 1.187.21
+
+### A cell-spread warning from the pack comparison is pushed, not announced
+
+**Alarms**
+
+- A cell-voltage spread warning from the pack-to-pack comparison is now sent to the phone and shown on its card but no longer announced on the speakers, the same as each pack's own cell-spread warning has been since 1.187.12. One was announced at 18:32 on 12 October for a spread on Core 2 pack 4. A critical cell imbalance is still announced, and the temperature, charge-level and health comparisons are unchanged.
+
 ## 1.187.20
 
 ### Log-review fixes; the build machines move to Ubuntu 26.04
