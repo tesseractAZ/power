@@ -9,7 +9,8 @@
  * that also carried a knee mute held the level red and delayed the all-clear while the knee mute
  * lasted, against "a policy mute holds nothing". The stamps now clear `mutedBy` (it names the mute
  * in force); `muteReason` stays diagnostic only (muteReasonLog.test.ts). The peer outlier's yield
- * (quietPeerSpreadUnderHeldCritical, which reads `mutedBy` too) follows the same precedence.
+ * (quietPeerSpreadUnderHeldCritical, which read `mutedBy` too) followed the same precedence until
+ * v1.187.21 retired it: a peer cell-spread warning is never audible, so it yields to nothing.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,7 +25,7 @@ process.env.DB_PATH = join(tmp, 'ecoflow.db');
 process.env.ALERT_ONSET_PATH = join(tmp, 'alert-onset.json');
 
 const { computeAlerts, resetVdiffWarnHoldForTesting, MUTE_REASON_BALANCING, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL } = await import('../src/alerts.js');
-const { applyRosterMute, quietPeerSpreadUnderHeldCritical } = await import('../src/alertMonitor.js');
+const { applyRosterMute } = await import('../src/alertMonitor.js');
 const { soundedCriticalHeld } = await import('../src/broadcast.js');
 const { alertFingerprint } = await import('../src/redReplayGate.js');
 const { SPARE_DPU_SNS } = await import('../src/shp2Membership.js');
@@ -58,9 +59,6 @@ function critOf(sn: string, name: string): Alert {
 }
 /** soundedCriticalHeld for one present critical that sounded at an earlier committed red. */
 const holds = (a: Alert): boolean => soundedCriticalHeld([a], new Map([[alertFingerprint(a), T - 60_000]]), T);
-const peerOf = (sn: string): Alert => ({
-  id: `peer-voldiff-${sn}-1`, severity: 'warning', category: 'Battery', device: 'Core', title: 'Cell spread outlier', detail: 'x',
-});
 
 test('★★★ soundedCriticalHeld: a sounded critical under the BENCH-SPARE stamp holds nothing, though the knee mute also applies', () => {
   const home = critOf(HOME, 'Core 1');
@@ -96,11 +94,4 @@ test('★★★ soundedCriticalHeld: a sounded critical under the monitor\'s ROS
   applyRosterMute(home, [OFF], []);
   assert.equal(home.mutedBy, 'balancing');
   assert.equal(holds(home), true);
-});
-
-test('★★ the peer outlier\'s yield follows the same precedence: a bench spare\'s policy-muted critical quiets nothing', () => {
-  const spareSet = quietPeerSpreadUnderHeldCritical([critOf(SPARE, 'Core 9'), peerOf(SPARE)]);
-  assert.equal(spareSet[1].audible, undefined, 'the bench spare\'s critical is muted by policy, not held by a bounded mute');
-  const homeSet = quietPeerSpreadUnderHeldCritical([critOf(HOME, 'Core 1'), peerOf(HOME)]);
-  assert.equal(homeSet[1].audible, false, 'a home Core\'s held critical owns the audible, as before');
 });

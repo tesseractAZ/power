@@ -365,8 +365,8 @@ export function conditionFromAlerts(
     (a) =>
       a.annunciate !== false &&
       // v1.187.0 — `audible:false` keeps the card and the push but never raises the condition
-      // (a peer cell-spread outlier at top of charge; see Alert.audible). The broadcast tick
-      // also drops it before messageFor, so it can never be the alert that is voiced.
+      // (e.g. a cell-spread warning, vdiff-warn or the peer outlier; see Alert.audible). The
+      // broadcast tick also drops it before messageFor, so it can never be the alert that is voiced.
       a.audible !== false &&
       !a.id.startsWith('backup-soc') &&
       !a.id.startsWith('shp2-below-reserve') &&
@@ -739,6 +739,11 @@ export function audibleDegradedStep(
  * stamps every active id once per 20 s tick, so the unknown state is bounded to one tick —
  * and an id whose onset was never recorded is, by that same sync, one that has only just
  * appeared.
+ *
+ * Both families now carry `audible:false` at warning (vdiff-warn since v1.187.12, the peer
+ * outlier since v1.187.21: a cell-spread warning is pushed, not announced), and speakableAlerts
+ * drops those before this hold runs. The hold stays as the second guard: a cell-spread warning
+ * that regains a voice still waits for the spread to stand.
  */
 export const IMBALANCE_SPEAK_HOLD_MS = 10 * 60_000;
 /** The id prefixes the hold applies to — one physical event, reported twice (the pack's own
@@ -761,8 +766,8 @@ export function heldForImbalanceConfirm(
  * (the level) and messageFor (the words), so nothing it drops can raise the condition or be the
  * alert that is voiced when something else raises it. In order:
  *  - a priority silenced on the Alert Settings page (v0.11.0);
- *  - `audible:false` (v1.187.0 — a peer cell-spread outlier at top of charge, or while its pack's
- *    vdiff-crit is held by a bounded cell-spread mute; card and push kept);
+ *  - `audible:false` (v1.187.0 — card and push kept; e.g. a cell-spread warning: vdiff-warn since
+ *    v1.187.12, the peer cell-spread outlier since v1.187.21);
  *  - a cell-imbalance warning still inside its speak hold (heldForImbalanceConfirm, v1.174.0).
  * `onsetOf` is the restart-persistent onset lookup (alertOnset.getAlertOnset in production).
  */

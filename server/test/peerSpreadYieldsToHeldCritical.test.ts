@@ -2,26 +2,34 @@ import { test, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeAlerts, resetVdiffWarnHoldForTesting, type Alert } from '../src/alerts.js';
 import { computeLearnedAlerts, _resetPeerHitCounts } from '../src/analytics.js';
-import { quietPeerSpreadUnderHeldCritical, risingEdgePushes } from '../src/alertMonitor.js';
+import { risingEdgePushes } from '../src/alertMonitor.js';
 import { conditionFromAlerts, speakableAlerts } from '../src/broadcast.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 import { readFileSync } from 'node:fs';
 
 /* ===================================================================
- * v1.187.0 — the peer cell-spread outlier yields to its pack's HELD critical.
+ * v1.187.0 — the peer cell-spread outlier yielded to its pack's HELD critical.
  *
  * The top-of-charge gate on peer-voldiff (analytics.computeLearnedAlerts, topOfChargeQuietSpread)
- * lifts once the outlier's spread reaches the critical line, on the premise that vdiff-crit
+ * lifted once the outlier's spread reached the critical line, on the premise that vdiff-crit
  * speaks there. But the bounded cell-spread mutes (balancing, the end-of-charge grace) hold
  * vdiff-crit silent at exactly that point, so during the 2026-09-29 knee the Core 1 pack 1
  * outlier voiced yellow / all-clear / yellow / all-clear (15:32:00-15:38:40) in place of the
- * suppressed red. alertMonitor.quietPeerSpreadUnderHeldCritical stamps it audible:false while
- * the same pack's vdiff-crit is held (mutedBy); card and push unchanged.
+ * suppressed red. alertMonitor.quietPeerSpreadUnderHeldCritical stamped it audible:false while
+ * the same pack's vdiff-crit was held (mutedBy); card and push unchanged.
+ *
+ * v1.187.21 — the gate and the stamp are retired: a peer cell-spread outlier at WARNING is
+ * audible:false at any SoC and any spread (peerSpreadPushedNotAnnounced.test.ts), so there is
+ * nothing left for a held critical to yield. The knee replay stays and must stay silent with no
+ * stamp in the pipeline. The test that showed the replay speaking without the stamp now strips
+ * the outlier's audible flag instead (the v1.187.0 shape at the line), and the stamp's own unit
+ * and wiring tests are gone with it — deliberately, not as a loss of cover: the property they
+ * held (the outlier never speaks in place of a held red) is now the unconditional rule.
  *
  * The replay below is the recorder's raw rows for all five Core 1 packs, 14:50-15:56
  * (pack*_vol_diff_mv, _vol_max_mv, _soc, _balancing, _in; charge input thinned to its crossings
- * of 50 W), through the same-tick pipeline: computeAlerts + computeLearnedAlerts → the stamp →
- * the broadcast tick's speakableAlerts (with the 10-minute onset hold) → conditionFromAlerts.
+ * of 50 W), through the same-tick pipeline: computeAlerts + computeLearnedAlerts → the broadcast
+ * tick's speakableAlerts (with the 10-minute onset hold) → conditionFromAlerts.
  * =================================================================== */
 
 type Field = 'vd' | 'vmax' | 'soc' | 'bal' | 'in';
@@ -101,8 +109,11 @@ function core(vals: Record<number, Record<Field, number>>): Record<string, Devic
 }
 
 interface Step { hms: string; level: string; spoken: Alert[]; all: Alert[] }
-/** Replay 14:50:00 → 15:56:00 on the 20 s tick; `stamp` = whether the monitor's stamp runs. */
-function replay(stamp: boolean): Step[] {
+/**
+ * Replay 14:50:00 → 15:56:00 on the 20 s tick. `strip` = remove the pack 1 peer outlier's audible
+ * flag before the broadcast filters (the control: the outlier as v1.187.0 raised it at the line).
+ */
+function replay(strip: boolean): Step[] {
   const vals: Record<number, Record<Field, number>> = { 1: {} as any, 2: {} as any, 3: {} as any, 4: {} as any, 5: {} as any };
   const onset = new Map<string, number>(); // alertOnset: first tick present, dropped on absence
   const out: Step[] = [];
@@ -112,7 +123,7 @@ function replay(stamp: boolean): Step[] {
     clock = t;
     const devices = core(vals);
     const raw = [...computeAlerts(devices), ...computeLearnedAlerts(devices)];
-    const all = stamp ? quietPeerSpreadUnderHeldCritical(raw) : raw;
+    const all = strip ? raw.map((a) => (a.id === `peer-voldiff-${SN}-1` ? { ...a, audible: undefined } : a)) : raw;
     const ids = new Set(all.map((a) => a.id));
     for (const id of [...onset.keys()]) if (!ids.has(id)) onset.delete(id);
     for (const id of ids) if (!onset.has(id)) onset.set(id, t);
@@ -131,7 +142,7 @@ beforeEach(() => {
 afterEach(() => mock.restoreAll());
 
 test('★★★ 2026-09-29 Core 1, all five packs, 14:50-15:56: the knee never speaks (no yellow, no red, no all-clear)', () => {
-  const steps = replay(true);
+  const steps = replay(false);
   const pack1Crit = steps.filter((s) => s.all.some((a) => a.id === `vdiff-crit-${SN}-1`));
   assert.ok(pack1Crit.length > 0, 'the fixture reaches pack 1\'s plateau critical line');
   const pack1PeerAtLine = steps.filter((s) => s.all.some((a) => a.id === `peer-voldiff-${SN}-1` && /is (9\d|1\d\d) mV/.test(a.detail)));
@@ -141,70 +152,38 @@ test('★★★ 2026-09-29 Core 1, all five packs, 14:50-15:56: the knee never s
   }
 });
 
-test('★★★ the replay exercises the defect: without the stamp the outlier speaks a yellow at the line', () => {
-  const steps = replay(false);
+test('★★★ the replay exercises the defect: with the outlier\'s audible flag stripped it speaks a yellow at the line', () => {
+  // v1.187.21 — was "without the stamp"; the stamp is retired, and the outlier's own flag is what
+  // keeps it quiet now. Stripped, the v1.187.0 failure (a yellow in place of the held red) returns.
+  const steps = replay(true);
   const yellow = steps.filter((s) => s.level === 'yellow');
-  assert.ok(yellow.length > 0, 'the v1.187.0-without-stamp pipeline raises yellow during the knee');
+  assert.ok(yellow.length > 0, 'the outlier at the line, audible, raises yellow during the knee');
   for (const s of yellow) {
     assert.ok(s.spoken.some((a) => a.id === `peer-voldiff-${SN}-1`), `${s.hms}: the yellow is pack 1's peer outlier`);
   }
 });
 
-test('★★★ while held, the outlier keeps its card and its PUSH (annunciate untouched)', () => {
-  const steps = replay(true);
-  const held = steps.flatMap((s) => s.all.filter((a) => a.id === `peer-voldiff-${SN}-1` && /critical is held/.test(a.detail)));
-  assert.ok(held.length > 0, 'the stamp ran during the knee');
-  assert.ok(held.some((a) => a.severity === 'warning'), 'including at warning severity (the tier that spoke)');
-  for (const a of held) {
+test('★★★ at the line, beside the held critical, the outlier keeps its card and its PUSH (annunciate untouched)', () => {
+  const steps = replay(false);
+  const atLine = steps.flatMap((s) => {
+    const crit = s.all.find((a) => a.id === `vdiff-crit-${SN}-1`);
+    if (crit == null || crit.annunciate !== false || crit.mutedBy == null) return [];
+    return s.all.filter((a) => a.id === `peer-voldiff-${SN}-1` && a.severity === 'warning');
+  });
+  assert.ok(atLine.length > 0, 'the outlier stands at warning while its pack\'s critical is held by a bounded mute');
+  for (const a of atLine) {
     assert.equal(a.audible, false);
     assert.notEqual(a.annunciate, false);
     assert.equal(risingEdgePushes(a), true, 'the phone still gets it');
+    assert.doesNotMatch(a.detail, /critical is held/, 'no stamp: the v1.187.0 note is gone');
   }
 });
 
-/* ── the stamp itself ───────────────────────────────────────────────────── */
-
-const crit = (pk: number, o: Partial<Alert> = {}): Alert => ({
-  id: `vdiff-crit-${SN}-${pk}`, severity: 'critical', category: 'Battery', device: 'Core 1', title: 'Cell imbalance',
-  detail: `Core 1 Pack ${pk} cell spread 95 mV.`, ...o,
-});
-const peer = (key: string, pk: number, o: Partial<Alert> = {}): Alert => ({
-  id: `peer-${key}-${SN}-${pk}`, severity: 'warning', category: 'Battery', device: 'Core 1', source: 'learned', coreNum: 1, packNum: pk,
-  title: 'Cell-voltage spread — peer outlier', detail: `Core 1 Pack ${pk} cell-voltage spread is 95 mV.`, ...o,
-});
-
-test('★★★ quietPeerSpreadUnderHeldCritical: a held critical quiets its OWN pack\'s spread outlier only', () => {
-  for (const mutedBy of ['balancing', 'end-of-charge', 'charging'] as const) {
-    const set = [crit(1, { annunciate: false, mutedBy }), peer('voldiff', 1), peer('voldiff', 2), peer('soh', 1), peer('voldiff', 11)];
-    quietPeerSpreadUnderHeldCritical(set);
-    assert.equal(set[1].audible, false, `${mutedBy}: the same pack's outlier is quiet`);
-    assert.equal(set[1].annunciate, undefined, 'the push is kept');
-    assert.match(set[1].detail, /Not announced on the speakers while this pack's cell-imbalance critical is held/);
-    assert.equal(set[2].audible, undefined, 'another pack is untouched');
-    assert.equal(set[3].audible, undefined, 'another peer metric is untouched');
-    assert.equal(set[4].audible, undefined, 'pack 11 is not pack 1');
-  }
-});
-
-test('★★★ quietPeerSpreadUnderHeldCritical: an ANNUNCIATING critical, or one muted by membership, quiets nothing', () => {
-  const speaking = [crit(1), peer('voldiff', 1)];
-  quietPeerSpreadUnderHeldCritical(speaking);
-  assert.equal(speaking[1].audible, undefined, 'the critical speaks — so does the outlier');
-  const bench = [crit(1, { annunciate: false }), peer('voldiff', 1)];
-  quietPeerSpreadUnderHeldCritical(bench);
-  assert.equal(bench[1].audible, undefined, 'a bench / off-panel mute carries no mutedBy and quiets nothing here');
-  const inconsistent = [crit(1, { mutedBy: 'balancing' }), peer('voldiff', 1)];
-  quietPeerSpreadUnderHeldCritical(inconsistent);
-  assert.equal(inconsistent[1].audible, undefined, 'mutedBy on a critical that still annunciates is not a hold');
-});
-
-test('★★ the monitor stamps the SAME tick\'s computeAlerts + computeLearnedAlerts output (main thread)', () => {
-  // Both sets must be in hand for the stamp to see the held critical; the analytics worker has
-  // no alerts.ts state (see the v1.184.0 worker-guard lesson), so it cannot run there.
+test('★★ the monitor assembles the same tick\'s computeAlerts + computeLearnedAlerts output as one list (v1.187.21: no stamp around it)', () => {
   const M = readFileSync(new URL('../src/alertMonitor.ts', import.meta.url), 'utf8');
-  const call = M.slice(M.indexOf('const liveHead: Alert[] = quietPeerSpreadUnderHeldCritical(['));
-  assert.ok(call.length < M.length, 'liveHead is built through the stamp');
-  const body = call.slice(0, call.indexOf(']);'));
+  const call = M.slice(M.indexOf('const liveHead: Alert[] = ['));
+  assert.ok(call.length < M.length, 'liveHead is a plain list');
+  const body = call.slice(0, call.indexOf('];'));
   assert.match(body, /\.\.\.computeAlerts\(snap\.devices/);
   assert.match(body, /\.\.\.computeLearnedAlerts\(snap\.devices\)/);
 });

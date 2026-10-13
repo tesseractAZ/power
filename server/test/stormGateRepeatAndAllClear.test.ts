@@ -94,7 +94,11 @@ let alerts: Alert[] = [];
 const store = { get: () => ({ alerts }) } as any;
 
 const PEER_ID = 'peer-voldiff-COREXXX00XXX0001-1';
-/** The 09-29 warning: its spoken detail carries the live mV and z. */
+/** The 09-29 warning: its spoken detail carries the live mV and z. Built as the alert stood then,
+ *  with no audible flag. Since v1.187.21 computeLearnedAlerts raises a peer cell-spread warning
+ *  with `audible: false` (pushed, not announced), so this fixture now stands for any speakable
+ *  warning whose words carry a live reading: the gates under test read identity and level, never
+ *  the id's family. */
 const peer = (mv: number): Alert => ({
   id: PEER_ID, severity: 'warning', category: 'Battery', source: 'learned', device: 'Core 1', coreNum: 1, packNum: 1,
   title: 'Cell voltage spread — peer outlier',

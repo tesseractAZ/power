@@ -18,7 +18,8 @@ const MUTANTS = [
     id: 'Q-i. ★★ the warning push quiets only at the top of charge again',
     file: AL,
     find: '        const plateauQuietWarn = plateauQuietWarnSpread(packSoc, pk.maxVolDiffMv);',
-    to: '        const plateauQuietWarn = topOfChargeQuietSpread(packSoc, pk.maxVolDiffMv); /* MUTANT */',
+    // v1.187.21 — topOfChargeQuietSpread (the 95% predicate) was retired; the mutant inlines it.
+    to: '        const plateauQuietWarn = packSoc != null && packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT && pk.maxVolDiffMv < critMv; /* MUTANT */',
     why: 'A charge toward full pushes a warn-band spread for every pack crossing 85-95% (nine pushes in 30 min on 10-10).',
   },
 ];

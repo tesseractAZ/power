@@ -16,7 +16,6 @@ import { allDpus, homeConnectedDpus, reportBasisKey } from './analytics/fleet.js
 import { cacheWritable, basisGeneration, runInBasisGeneration } from './analytics/flightBasis.js';
 import { WARM_INTERVAL_MS } from './analytics/warmCadence.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
-import { topOfChargeQuietSpread } from './cellSpread.js';
 import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, NAMEPLATE_BASIS, type PoolEnergyBasis, type CapacityBasis } from './poolEnergyBasis.js';
 import {
   curtailmentDaySettled, frozenCurtailmentDay, freezeCurtailmentDay, pruneFrozenCurtailmentDays, persistFrozenCurtailmentDays,
@@ -230,27 +229,36 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
         // charge as the best-balanced pack of five. The low side stays visible at info with
         // annunciate:false — not pushed, not spoken, not counted toward the condition, and through
         // autoTuneCounts not fed to the auto-tune rollups, so its benign short clears cannot help
-        // demote the high side. The high side is unchanged, and vdiff-warn / vdiff-crit judge every
+        // demote the high side. This rule leaves the high side alone, and vdiff-warn / vdiff-crit judge every
         // pack against fixed limits whatever its siblings read. SoC and SoH keep the symmetric rule.
         const lowSpread = metric.key === 'voldiff' && v < med;
         const warnEligible = isThermal ? v > med : !lowSpread;
         const severity = z >= Z_WARN && warnEligible ? 'warning' : 'info';
-        // v1.187.0 — TOP-OF-CHARGE GATE for the cell-spread outlier. On 2026-09-29 (15:06-15:27)
-        // this was the only alert family that spoke during a top-of-charge knee: packs enter the
-        // knee one at a time, so whichever arrives first is an "outlier" at a 14 mV deviation
-        // (Core 5 pack 1 at 28 mV vs 12-16; Core 1 pack 1 at 39 mV vs 12-19; both at 99% and
-        // charging). It spoke four yellows and an all-clear while the same pack's own vdiff-warn
-        // was quiet under v1.45.0's plateauQuietWarn. The gate is that predicate, on the OUTLIER
-        // pack's own SoC and spread (never a sibling's). It removes the AUDIBLE only: the card
-        // and the push stay, because v1.45.0 quieted vdiff-warn on the premise that this engine
-        // still tracks a diverging pack — annunciate:false would drop the push and leave a
-        // sub-critical top-of-charge spread neither spoken nor pushed. This gate lifts below the
-        // quiet line or at the critical line. At the line vdiff-crit owns the event, and its
-        // bounded mutes (balancing, the end-of-charge grace) can hold it silent for a while — so
-        // alertMonitor.quietPeerSpreadUnderHeldCritical keeps this outlier off the speakers
-        // exactly while that pack's vdiff-crit is held (main thread, same tick; this function
-        // cannot see alerts.ts state). Both speak once the critical's bounds lapse.
-        const topOfChargeSpread = metric.key === 'voldiff' && topOfChargeQuietSpread(pk.soc ?? d.projection.soc, v);
+        // v1.187.21 — A CELL-SPREAD WARNING IS PUSHED, NOT ANNOUNCED. Since v1.187.12 the pack's own
+        // warning-level spread (vdiff-warn) is audible:false — a pack-health trend, not an event to
+        // announce — and the critical line (vdiff-crit, at fixed limits) is the audible signal for a
+        // cell spread. This outlier reports the same physical signal and was still an audible
+        // warning. On 2026-10-12 it was the only speakable alert live and spoke a yellow at 18:31:59:
+        // Core 2 pack 4 on an evening discharge at 63-65% SoC, raised 18:21:59 at 17 mV against a
+        // sibling median of 4 mV (z 4.5, info), a warning once it read 20 mV (z 5.6), voiced when its
+        // 10-minute speak hold ran out; the same pack's vdiff-warn rose at 18:36:59 and stayed off
+        // the speakers. In the cleared ledger the family reached warning 7 times from 10-04 to 10-12. At
+        // warning it now carries audible:false: the card and the PUSH stay (annunciate untouched —
+        // v1.45.0 quieted vdiff-warn's push at the top of charge, widened to the whole plateau in
+        // v1.187.14, on the premise that this engine still tracks a diverging pack). Info and the
+        // low side are unchanged, and so are the thermal, SoC and SoH outliers, which still speak.
+        //
+        // This retires two v1.187.0 mechanisms that took this outlier off the speakers only in
+        // specific windows. The TOP-OF-CHARGE gate (cellSpread.topOfChargeQuietSpread on the outlier
+        // pack's own SoC and spread): on 2026-09-29 15:06-15:27 packs entered the knee one at a time,
+        // whichever arrived first was an outlier at a 14 mV deviation (Core 5 pack 1 at 28 mV vs
+        // 12-16; Core 1 pack 1 at 39 mV vs 12-19; both at 99% and charging), and it spoke four yellows
+        // and an all-clear while the pack's own vdiff-warn was quiet under v1.45.0's plateauQuietWarn.
+        // And alertMonitor.quietPeerSpreadUnderHeldCritical, which kept it quiet at the critical line
+        // while the pack's vdiff-crit was held by a bounded cell-spread mute (the 09-29 Core 1 knee
+        // voiced yellow / all-clear in place of the suppressed red). With the warning never audible
+        // both were redundant, and they were removed rather than kept as gates that decide nothing.
+        const spreadWarning = metric.key === 'voldiff' && severity === 'warning';
         out.push({
           id: `peer-${metric.key}-${d.sn}-${pk.num}`,
           severity,
@@ -261,8 +269,8 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
           packNum: pk.num,
           ...(pk.packSn ? { sourcePackSn: pk.packSn } : {}), // v1.173.0 — lets the residency check see a new pack under this id
           title: `${cap(metric.label)} — peer outlier`,
-          detail: `${d.deviceName} Pack ${pk.num} ${metric.label} is ${metric.fmt(v)}, ${metric.fmt(absDev)} ${dir} the sibling-pack median of ${metric.fmt(med)} (peer z-score ${z.toFixed(1)}).${topOfChargeSpread ? ' At top of charge: not announced on the speakers.' : ''}${lowSpread ? ' A lower spread than its siblings is not a fault: shown for reference; not pushed or announced.' : ''}`,
-          ...(topOfChargeSpread ? { audible: false } : {}),
+          detail: `${d.deviceName} Pack ${pk.num} ${metric.label} is ${metric.fmt(v)}, ${metric.fmt(absDev)} ${dir} the sibling-pack median of ${metric.fmt(med)} (peer z-score ${z.toFixed(1)}).${spreadWarning ? ' Cell-spread warnings are pushed, not announced; a cell imbalance at the critical line is announced.' : ''}${lowSpread ? ' A lower spread than its siblings is not a fault: shown for reference; not pushed or announced.' : ''}`,
+          ...(spreadWarning ? { audible: false } : {}), // v1.187.21 — see spreadWarning above.
           // v1.187.1 — see lowSpread above.
           ...(lowSpread ? { annunciate: false, muteReason: PEER_SPREAD_LOW_MUTE_REASON } : {}),
           facts: [
