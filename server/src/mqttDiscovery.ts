@@ -410,8 +410,13 @@ export const SENSORS: SensorConfig[] = [
   // separate, contention-derated PREDICTION of where the pack actually lands.
   // Keeping the ask on the existing entity means a wired automation keeps
   // asking for the requirement instead of silently capping itself at a forecast.
+  // v1.187.22 — that "prediction" is the arrival projected on the islanded worst case the plan
+  // is sized on (plan.targetSocPct), not the charge the write is expected to make: named for it
+  // ("Arrival SoC (Worst Case)", was "Expected SoC") beside "Expected Buy", which is the expected
+  // charge. As with the buy entity below only the NAME changes — unique_id, config topic, value
+  // and value key are unchanged and no object_id is published, so HA keeps the entity_id.
   { unique_id: 'ecoflow_night_charge_target_soc', name: 'Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}' },
-  { unique_id: 'ecoflow_night_charge_expected_soc', name: 'Night-Charge Expected SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-clock', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_soc_percent }}' },
+  { unique_id: 'ecoflow_night_charge_expected_soc', name: 'Night-Charge Arrival SoC (Worst Case)', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-clock', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_soc_percent }}' },
   // v1.42.0 — alarm-host SoC temperature (heat tripwire; HA recorder provides
   // the trend history). Null when the host exposes no readable thermal zone.
   { unique_id: 'ecoflow_host_evloop_lag', name: 'Host Event-Loop Lag', state_class: 'measurement', unit_of_measurement: 'ms', icon: 'mdi:timer-sand', entity_category: 'diagnostic', value_template: '{{ value_json.host_evloop_lag_ms }}' },

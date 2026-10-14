@@ -358,10 +358,18 @@ export interface NightChargePlan {
    *  reserve setpoint as written, or the force-charge stop when force-charge rides the
    *  night. null on a hold and on a null plan (it does not need a P50 basis). */
   expectedWriteLevelPct?: number | null;
+  /** v1.187.22 — the window cannot pass the whole expected draw on the median load
+   *  (expectedBuyFromPlan's deliverableBound): the write charges TOWARD expectedWriteLevelPct and
+   *  the window closes first (Friday's one-hour 23:00 window from ~48%: ~14 kWh, ~62%, not 80%).
+   *  Every surface that states the level then says "toward". Absent/false otherwise. */
+  expectedDeliverableBound?: boolean;
   /** PREDICTION: the pack SoC % the window is expected to actually REACH by its
    *  close, given every cap — including the v1.60.0 EV-contention derate. This
    *  is the number the ledger scores (a systematic gap between this and the
    *  measured arrival is what under-buy detection is made of).
+   *  v1.187.22 — on the islanded worst case the plan is SIZED on (the sizing sentence's
+   *  "projecting ~X% by the window close"), not the charge the write is expected to make
+   *  (expectedWriteLevelPct / expectedBuyKwh): no spoken or pushed line calls it expected.
    *
    *  ★★ NOT the write setpoint — see `setpointSocPct`. Do not merge them. */
   targetSocPct: number | null;
@@ -896,6 +904,13 @@ export function chargeLevelPct(plan: Pick<NightChargePlan, 'setpointSocPct' | 'e
   if (level != null && Number.isFinite(level)) return level;
   const setpoint = plan.setpointSocPct;
   return setpoint != null && Number.isFinite(setpoint) ? clampReserveTarget(setpoint) : null;
+}
+
+/** v1.187.22 — the window closes before the write reaches chargeLevelPct
+ *  (plan.expectedDeliverableBound): the line says it charges TOWARD the level, as the rationale
+ *  headline does, never "to" a level the plan itself says the night will not reach. PURE. */
+export function chargeIsWindowBound(plan: Pick<NightChargePlan, 'expectedDeliverableBound'>): boolean {
+  return plan.expectedDeliverableBound === true;
 }
 
 /** v1.187.22 — the ONLY buy figure a spoken or pushed line states: the expected draw of the armed
@@ -1623,8 +1638,12 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const writtenPct = clampReserveTarget(setpointSocPct);
   const truncated = setpointSocPct > writtenPct + 0.05;
   const askName = baselineHolds ? "tonight's cost target" : 'the resilience requirement';
+  // v1.187.22 — the third quantity ("the window is only expected to reach ~X%") was the
+  // islanded worst case's arrival, already stated once as such by the sizing sentence just
+  // before; called "expected" it contradicted the Expected: sentence (~5 kWh to 50%, then
+  // "only expected to reach ~27.5%"). The written reserve and the ask remain.
   const setpointNote = setpointSocPct > targetSocPct + 0.05
-    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}, and the window is only expected to reach ~${targetSocPct}%.`
+    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}.`
     : '';
 
   // v1.112.0 — the ANNOUNCED buy carries the learned de-bias; the raw figure
@@ -1727,6 +1746,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     expectedBuyKwh: expected.buyKwh,
     expectedStartSocPct,
     expectedWriteLevelPct: expected.levelPct,
+    expectedDeliverableBound: expected.deliverableBound === true,
     targetSocPct,
     setpointSocPct,
     requiredExtraKwh: round2(requiredExtraKwh),
@@ -1860,6 +1880,8 @@ export function nightChargeStateFields(
       fresh && plan!.setpointSocPct != null ? clampReserveTarget(plan!.setpointSocPct) : null,
     // …and the PREDICTION gets its own entity, so "what will the pack actually
     // reach tonight" stays visible instead of being overwritten by the ask.
+    // v1.187.22 — that arrival is the islanded worst case's (NightChargePlan.targetSocPct); the
+    // entity keeps its key and value and is named for it ("Arrival SoC (Worst Case)").
     night_charge_expected_soc_percent: fresh ? plan!.targetSocPct : null,
     // The worst case the plan is SIZED on, unchanged in meaning (history and automations read it).
     night_charge_buy_kwh: fresh ? plan!.buyKwh : null,

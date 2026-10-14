@@ -529,7 +529,10 @@ test('the 21:30 announcement names the force-charge and its TARGET, and drops th
 
   const plain = buildNightChargeMessage(chargePlan(), 'charge', { cancelDeadlineText: 'at 10:55 PM', targetPct: 50 });
   assert.doesNotMatch(plain.body, /force-charge/, 'a reserve-only night reads exactly as before');
-  assert.match(plain.body, /only expected to reach ~43.5%/);
+  // v1.187.22 — the 43.5% is targetSocPct, the arrival projected on the islanded worst case the
+  // plan is sized on: no longer pushed as what the pack is "expected to reach" (the rationale's
+  // sizing sentence and the card name it, labelled).
+  assert.doesNotMatch(plain.body, /expected to reach|43\.5%/);
 });
 
 /* ══ v1.170.0 — the software stop at EVERY target (the 80+ coast is retired) ══ */

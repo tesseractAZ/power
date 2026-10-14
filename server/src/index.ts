@@ -38,6 +38,7 @@ import {
   evDisplacedPackKwh,
   FORCE_CHARGE_PROVEN_KW_PER_SLOT,
   FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnReadbackStatus,
+  armedForceChargeStopPct,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -185,6 +186,7 @@ import {
   // v1.187.22 — the expected buy: its ledger columns, and what a spoken line states (the level
   // the write drives to and the expected draw — never the worst case, which only logs name).
   expectedBuyLedgerColumns, ledgerExpectedBuyKwh, chargeLevelPct, statedBuyKwh, buyFiguresLogText,
+  chargeIsWindowBound,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -205,6 +207,7 @@ import {
   resolveNightChargeMode,
   APPLY_MAX_RETRIES,
   armFromPlan,
+  armRefusalReason,
   decideActuation,
   emptyActuationState,
   coerceActuationState,
@@ -4662,8 +4665,12 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       forceChargeTargetPct?: number | null;
     } | null = null;
     let armedCandidate: NightActuationState | null = null;
+    // v1.187.22 — why a write mode refused to arm a charge plan; the push then says no write is
+    // armed instead of recommending the plan's level and draw (buildNightChargeMessage).
+    let armRefused: string | null = null;
     if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
       armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct);
+      if (!armedCandidate) armRefused = armRefusalReason(nightActuationMem, plan, nowMs, plan.reserveFloorPct);
       if (armedCandidate) {
         // v1.79.0 — an earlier evening's never-applied ARM being replaced is a
         // normal weekend pattern, but 3 ARMED vs 2 APPLIED was untraceable
@@ -4713,10 +4720,12 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         nightActuationMem.revertedAtMs == null
       ) {
         app.log.warn("night-charge: supervised arming refused — a prior night's reserve write is unresolved (applied or unconfirmed-attempt, not yet reverted).");
+      } else if (armRefused) {
+        app.log.warn(`night-charge: supervised arming refused — ${armRefused}.`);
       }
     }
     const cfg = loadNotifyConfig();
-    const msg = buildNightChargeMessage(plan, shape, supervisedCtx);
+    const msg = buildNightChargeMessage(plan, shape, supervisedCtx, armRefused);
     await sendNotification(cfg, msg); // direct — bypasses quiet-hours/min-severity (I10)
     // NOTIFY_CHANNEL 'none' makes sendNotification a silent no-op — that is
     // NOT a delivered announcement for arming purposes.
@@ -4735,6 +4744,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       const spokenPair = nightChargeSpokenNotice({
         levelPct: chargeLevelPct(plan) ?? supervisedCtx.targetPct,
         expectedKwh: statedBuyKwh(plan),
+        toward: chargeIsWindowBound(plan),
         deadlineText: supervisedCtx.cancelDeadlineText,
         deadlineTextEs: supervisedCtx.cancelDeadlineTextEs,
         cushionShortfall: plan.cushionShortfall === true,
@@ -5970,9 +5980,13 @@ async function runNightActuationTickInner(): Promise<void> {
     // v1.187.0 (review) — NOT awaited: an info push (5 s headers + 10 s body per target)
     // must never hold the tick, and with it any force-charge step still to run.
     // v1.187.22 — the armed day's EXPECTED figure, or none: state.buyKwh is the worst case.
+    // The force-charge stop names the level the figure belongs to; a cancel or a grid-loss abort
+    // ended the night early and is said so, with no figure.
     void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({
       day: state.day, targetPct: state.targetPct, restorePct: action.restorePct,
       expectedKwh: armedExpectedBuyKwh(state.day),
+      forceChargeStopPct: armedForceChargeStopPct(state, forceChargeOn()),
+      ended: action.gridLossAbort ? 'gridLoss' : state.cancelled ? 'cancelled' : 'window',
     })).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
     });

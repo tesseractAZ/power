@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from 'react';
-import { actuationBannerVisible, chargeFigureParts, reserveWriteLabel, revertUnconfirmed, sizingLine } from './nightChargeText';
+import { actuationBannerVisible, chargeFigureParts, holdSummary, reserveWriteLabel, revertUnconfirmed, sizingLine } from './nightChargeText';
 import { apiUrl } from '../api';
 
 /**
@@ -34,7 +34,10 @@ interface NightChargePlan {
   expectedBuyKwh?: number | null;
   /** v1.187.22 — the level that write drives the pool to; absent on older plans. */
   expectedWriteLevelPct?: number | null;
-  /** The contention-derated PREDICTION of where the pack lands. */
+  /** v1.187.22 — the window closes before that level is reached ("toward"). */
+  expectedDeliverableBound?: boolean;
+  /** The arrival projected on the islanded worst case the plan is sized on (v1.187.22: shown
+   *  as "Worst-case arrival", never as the expected outcome). */
   targetSocPct: number | null;
   /** v1.60.0 — the WRITE SETPOINT (the resilience requirement). Higher than
    *  `targetSocPct` exactly when a cap prevents delivering the requirement; the
@@ -56,6 +59,10 @@ interface NightChargePlan {
   minProjSocPct: number | null;
   minProjSocTsMs: number | null;
   baselineMinSocPct: number | null;
+  /** v1.186.0 — the trough the cushion test judged and its line, and the cushion basis. */
+  cushionTroughSocPct?: number | null;
+  cushionLineSocPct?: number | null;
+  cushionBasis?: string | null;
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
   window: { startMs: number; endMs: number } | null;
   reserveFloorPct: number;
@@ -208,20 +215,19 @@ export const NightChargeCard = memo(function NightChargeCard() {
     </span>
   ) : null;
 
-  // HOLD — basis complete, projected trough already holds floor+cushion.
+  // HOLD — nothing is charged tonight. v1.187.22 — which hold, on the figure it was decided on
+  // (holdSummary, the evening push's hold shape): the islanded trough labelled as such, and a
+  // window that cannot cover the cushion said so rather than "No overnight charge needed."
   if (!plan.chargeTonight) {
+    const hold = holdSummary(plan);
     return (
       <div className="card text-sm">
         <div className="card-title flex items-center justify-between">
           <span>Tonight's night-charge plan</span>
           {readinessNote}
         </div>
-        <div className="text-ok font-medium">No overnight charge needed.</div>
-        <div className="text-muted mt-1 leading-relaxed">
-          Projected overnight trough{' '}
-          <span className="text-ink font-medium">{fmtSoc(plan.baselineMinSocPct)}</span> stays at/above the{' '}
-          {floorCushionPct.toFixed(0)}% floor+cushion — no cheap-window buy required tonight.
-        </div>
+        <div className={`${hold.tone === 'warn' ? 'text-warn' : hold.tone === 'ok' ? 'text-ok' : 'text-muted'} font-medium`}>{hold.headline}</div>
+        <div className="text-muted mt-1 leading-relaxed">{hold.detail}</div>
         <AdvisoryNote mode={status.mode} />
       </div>
     );
@@ -292,16 +298,21 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-        <Stat label="Trough without buy" value={fmtSoc(plan.baselineMinSocPct)} sub="P10 PV / P90 load" />
-        <Stat label="Trough with buy" value={fmtSoc(plan.minProjSocPct)} sub={`floor+cushion ${floorCushionPct.toFixed(0)}%`} />
+        {/* v1.187.22 — the whole-house island troughs, labelled as such: with the grid present
+            the SHP2 holds the reserve, so neither is where the pool is expected to go. */}
+        <Stat label="Island low, no charge" value={fmtSoc(plan.baselineMinSocPct)} sub="if the grid were lost · P10 PV / P90 load" />
+        <Stat label="Island low, with charge" value={fmtSoc(plan.minProjSocPct)} sub={`if the grid were lost · floor+cushion ${floorCushionPct.toFixed(0)}%`} />
         <Stat
-          label="Expected SoC"
+          // v1.187.22 — the arrival on the islanded worst case the plan is sized on, labelled as
+          // that basis: under "Expected SoC" it sat beside the headline's expected charge as a
+          // second, contradicting outcome (80% next to "expected charge to ~50%").
+          label="Worst-case arrival"
           value={fmtSoc(plan.targetSocPct)}
-          // v1.60.0 — the headline number is the PREDICTION; the reserve we ask
-          // the device for is shown alongside it only when the two diverge (a
-          // cap prevented delivering the requirement), never as a silent swap.
+          // v1.60.0 — the reserve we ask the device for is shown alongside it only when the two
+          // diverge (a cap prevented delivering the requirement), never as a silent swap.
           sub={
             [
+              'sizing basis',
               // v1.182.0 — what will actually be WRITTEN (clamped to the panel's maximum).
               reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),
               plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,

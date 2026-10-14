@@ -20,6 +20,12 @@
  *                  the expected draw, no kWh without one — never the worst case, which only the
  *                  rationale and the card name, as the sizing basis; the worst-case entity's
  *                  name; the in-progress hour's EV in the just-in-time walk
+ *   C-lxxii…C-xcvii no line presents a sizing figure as the outcome: the worst-case arrival is
+ *                  never "expected"; "toward" on a window-bound night on every surface; the
+ *                  window's time on the speakers; which hold it is, on the trough it was decided
+ *                  on, labelled; a refused arm pushes no level or draw; the morning push names
+ *                  the force-charge level and does not call a cancel or an abort completed; the
+ *                  card's and the arrival entity's labels
  *
  *   node scripts/mutate-v1187-22c.mjs
  */
@@ -36,6 +42,7 @@ const MQTT = resolve(REPO, 'server/src/mqttDiscovery.ts');
 const REC = resolve(REPO, 'server/src/recorder.ts');
 const NLS = resolve(REPO, 'server/src/nightLedgerScoring.ts');
 const WEB = resolve(REPO, 'web/src/cards/nightChargeText.ts');
+const CARD = resolve(REPO, 'web/src/cards/NightChargeCard.tsx');
 const SUBSET = [
   'test/nightChargeExpectedBuy.test.ts',
   'test/ledgerExpectedBuy.test.ts',
@@ -282,8 +289,9 @@ const MUTANTS = [
   {
     id: 'C-xxxiii. ★★ the card\'s headline number is the worst case',
     file: WEB,
-    find: "  return { main: exp.toFixed(1), unit: 'kWh', label: `expected charge to ~${levelText}%` };",
-    to: "  return { main: (plan.buyKwh ?? 0).toFixed(1), unit: 'kWh', label: `expected charge to ~${levelText}%` }; /* MUTANT */",
+    // v1.187.22 — re-pointed: the label says "toward" on a window-bound night.
+    find: "  return { main: exp.toFixed(1), unit: 'kWh', label: `expected charge ${to} ~${levelText}%` };",
+    to: "  return { main: (plan.buyKwh ?? 0).toFixed(1), unit: 'kWh', label: `expected charge ${to} ~${levelText}%` }; /* MUTANT */",
     why: 'The dashboard shows the worst case as the charge while the push says the expected figure.',
   },
   // ── the ledger ──
@@ -515,8 +523,9 @@ const MUTANTS = [
   {
     id: 'C-lxi. ★★ an advisory push says the add-on is charging',
     file: NOTIFY,
-    find: '    title: `Night-charge: ${supervised ? `charging to ${levelText}` : `charge to ${levelText} recommended`} tonight`',
-    to: '    title: `Night-charge: charging to ${levelText} tonight` /* MUTANT */',
+    // v1.187.22 — re-pointed: "to" or "toward".
+    find: '    title: `Night-charge: ${supervised ? `charging ${to} ${levelText}` : `charge ${to} ${levelText} recommended`} tonight`',
+    to: '    title: `Night-charge: charging ${to} ${levelText} tonight` /* MUTANT */',
     why: 'In advisory mode nothing is written; the title would claim an action the add-on does not take.',
   },
   {
@@ -529,22 +538,24 @@ const MUTANTS = [
   {
     id: 'C-lxiii. ★★ the English line drops the expected draw',
     file: ACT,
-    find: '      `Night charge notice. Charging the backup pool to about ${level} percent overnight${kwhEn}, `',
-    to: '      `Night charge notice. Charging the backup pool to about ${level} percent overnight, ` /* MUTANT */',
+    // v1.187.22 — re-pointed: the line names the window, and "toward" a level it cannot reach.
+    find: "      `Night charge notice. Charging the backup pool ${toward ? 'toward' : 'to about'} ${level} percent${kwhEn}, `",
+    to: "      `Night charge notice. Charging the backup pool ${toward ? 'toward' : 'to about'} ${level} percent, ` /* MUTANT */",
     why: 'The speakers say where the pool is charged to but not how much it is expected to buy.',
   },
   {
     id: 'C-lxiv. ★★ the Spanish line drops the expected draw',
     file: ACT,
-    find: '      + `durante la noche${kwhEs}, comenzando ${o.deadlineTextEs}.`',
-    to: '      + `durante la noche, comenzando ${o.deadlineTextEs}.` /* MUTANT */',
+    find: "      + `${kwhEs}, en la ventana de carga que comienza ${o.deadlineTextEs}${toward ? ' y termina antes de alcanzar ese nivel' : ''}.`",
+    to: "      + `, en la ventana de carga que comienza ${o.deadlineTextEs}${toward ? ' y termina antes de alcanzar ese nivel' : ''}.` /* MUTANT */",
     why: 'The bilingual pair disagrees: the Spanish pass omits the figure the English states.',
   },
   {
     id: 'C-lxv. ★★ the morning summary drops the expected figure',
     file: NOTIFY,
-    find: "      + `${expected ? ` (${expected})` : ''} and restored to ${o.restorePct}%. `",
-    to: '      + ` and restored to ${o.restorePct}%. ` /* MUTANT */',
+    // v1.187.22 — re-pointed: the reserve-only shape of the completed summary.
+    find: '        : `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. `)',
+    to: '        : `reserve raised to ${raised} and restored to ${o.restorePct}%. `) /* MUTANT */',
     why: 'Delivery is scored the next evening against a figure the morning push never stated.',
   },
   {
@@ -588,6 +599,189 @@ const MUTANTS = [
     find: '    const ev = bandHourAt(byHour, slot, walkFromMs)?.evP90W;',
     to: '    const ev = byHour.get(Math.floor(slot / HOUR_MS))?.evP90W; /* MUTANT */',
     why: 'On a band starting at the next hour the first part-hour carries its load but not its EV: the start ignores the displacement the live tick counts.',
+  },
+  // ── no line presents a sizing figure as the outcome ──
+  {
+    id: 'C-lxxii. ★★★ the push calls the worst-case arrival expected again',
+    file: NOTIFY,
+    find: '      + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). `',
+    to: '      + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). The pack is only expected to reach ~${pct(plan.targetSocPct)} — the reserve is the ask, not a forecast. ` /* MUTANT */',
+    why: 'A reserve-only night reads "charging to ~50% … ~5.1 kWh expected … only expected to reach ~27.5%": two outcomes, the one called expected the sizing basis.',
+  },
+  {
+    id: 'C-lxxiii. ★★ the rationale repeats the worst-case arrival as "expected"',
+    file: NCA,
+    find: "    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}.`",
+    to: "    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}, and the window is only expected to reach ~${targetSocPct}%.` /* MUTANT */",
+    why: 'The worst case\'s arrival is stated twice, the second time as what the window is expected to reach, beside the Expected: sentence\'s 50%.',
+  },
+  {
+    id: 'C-lxxiv. ★★ the plan never carries the window bound',
+    file: NCA,
+    find: '    expectedDeliverableBound: expected.deliverableBound === true,',
+    to: '    expectedDeliverableBound: false, /* MUTANT */',
+    why: 'Friday\'s one-hour window is pushed, spoken and shown as a charge "to ~80%" that ends near 62%.',
+  },
+  {
+    id: 'C-lxxv. ★★ the push says "to" on a window-bound night',
+    file: NOTIFY,
+    find: "  const to = bound ? 'toward' : 'to';",
+    to: "  const to = 'to'; /* MUTANT */",
+    why: 'The phone title says "charging to ~80%" for a window the plan itself says closes first.',
+  },
+  {
+    id: 'C-lxxvi. ★★ the speakers are never told the window bound',
+    file: IDX,
+    find: '        toward: chargeIsWindowBound(plan),',
+    to: '        toward: false, /* MUTANT */',
+    why: 'The spoken line says "to about 80 percent" on a Friday the push says "toward".',
+  },
+  {
+    id: 'C-lxxvii. ★★ the Spanish line says "hasta cerca del" a level the window cannot reach',
+    file: ACT,
+    find: "      `Aviso de carga nocturna. Se cargarán las baterías de respaldo ${toward ? 'rumbo al' : 'hasta cerca del'} ${level} por ciento`",
+    to: "      `Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del ${level} por ciento` /* MUTANT */",
+    why: 'The bilingual pair disagrees on a window-bound night: the English says toward, the Spanish to.',
+  },
+  {
+    id: 'C-lxxviii. ★★ the English line drops "which ends before it gets there"',
+    file: ACT,
+    find: "      + `in the charge window that opens ${o.deadlineText}${toward ? ', which ends before it gets there' : ''}.`",
+    to: '      + `in the charge window that opens ${o.deadlineText}.` /* MUTANT */',
+    why: '"Toward 80 percent" alone does not tell the listener the window closes first.',
+  },
+  {
+    id: 'C-lxxix. ★★★ the speakers say charging starts at the write moment again',
+    file: ACT,
+    find: "      + `in the charge window that opens ${o.deadlineText}${toward ? ', which ends before it gets there' : ''}.`",
+    to: "      + `starting ${o.deadlineText}${toward ? ', which ends before it gets there' : ''}.` /* MUTANT */",
+    why: 'From 74% at 21:30 the pool is not charged at 00:00 — the house draws it until ~03:14 — yet the line says charging starts then.',
+  },
+  {
+    id: 'C-lxxx. ★★★ the hold push states the whole-house island trough as the night\'s low',
+    file: NOTIFY,
+    find: '    const trough = plan.cushionTroughSocPct ?? plan.minProjSocPct ?? plan.baselineMinSocPct;',
+    to: '    const trough = plan.minProjSocPct ?? plan.baselineMinSocPct; /* MUTANT */',
+    why: '"the pack would close the charge window at ~0%, at or above the 31.1% line" — the pre-fix self-contradiction.',
+  },
+  {
+    id: 'C-lxxxi. ★★ the hold push loses its islanded label',
+    file: NOTIFY,
+    find: '        `No overnight charge needed — even if the grid were lost overnight, ${wholeHouse',
+    to: '        `No overnight charge needed — ${wholeHouse /* MUTANT */',
+    why: 'An islanded projection reads as the night\'s outcome; with the grid present the SHP2 holds the reserve.',
+  },
+  {
+    id: 'C-lxxxii. ★★★ a starved hold is pushed as "No overnight charge needed"',
+    file: NOTIFY,
+    find: '    if (plan.cushionShortfall) {\n      return {\n        ...base,\n        title: \'Night-charge: no charge tonight (the window cannot cover the cushion)\',',
+    to: '    if (plan.cushionShortfall && plan.requiredExtraKwh < 0) { /* MUTANT */\n      return {\n        ...base,\n        title: \'Night-charge: no charge tonight (the window cannot cover the cushion)\',',
+    why: 'A window that cannot cover the cushion reads as a night with nothing to do, and the residual risk goes unsaid.',
+  },
+  {
+    id: 'C-lxxxiii. ★★ a hold that needs a top-up says the cushion is covered',
+    file: NOTIFY,
+    find: '    if (plan.requiredExtraKwh > 0) {',
+    to: '    if (plan.requiredExtraKwh > 1e9) { /* MUTANT */',
+    why: 'A need under the minimum buy is pushed as "No overnight charge needed … at or above the line".',
+  },
+  {
+    id: 'C-lxxxiv. ★ the hold line is the legacy flat band',
+    file: NOTIFY,
+    find: '    const line = plan.cushionLineSocPct ?? floorCushion;',
+    to: '    const line = floorCushion; /* MUTANT */',
+    why: 'The hold is judged against the applied cushion line (31.1%), not reserve floor + the flat band.',
+  },
+  {
+    id: 'C-lxxxv. ★★ the card\'s hold summary states the whole-house trough',
+    file: WEB,
+    find: '  const trough = plan.cushionTroughSocPct ?? plan.minProjSocPct ?? plan.baselineMinSocPct;\n  const line = plan.cushionLineSocPct ?? plan.reserveFloorPct',
+    to: '  const trough = plan.baselineMinSocPct; /* MUTANT */\n  const line = plan.cushionLineSocPct ?? plan.reserveFloorPct',
+    why: 'The card says "~0%" where the push says "~37.5%" for the same hold.',
+  },
+  {
+    id: 'C-lxxxvi. ★★ the card\'s starved hold reads as fine',
+    file: WEB,
+    find: "      tone: 'warn',",
+    to: "      tone: 'ok', /* MUTANT */",
+    why: 'A window that cannot cover the cushion is shown in the all-clear colour.',
+  },
+  {
+    id: 'C-lxxxvii. ★★★ a refused arm pushes the advisory recommendation',
+    file: NOTIFY,
+    find: '  if (!supervised && armRefused) {',
+    to: "  if (!supervised && armRefused === '\\u0000') { /* MUTANT */",
+    why: '"charge to ~80% … ~34.9 kWh of grid energy expected" for a force-charge night nothing will run.',
+  },
+  {
+    id: 'C-lxxxviii. ★★ the evening job never passes the refusal',
+    file: IDX,
+    find: '    const msg = buildNightChargeMessage(plan, shape, supervisedCtx, armRefused);',
+    to: '    const msg = buildNightChargeMessage(plan, shape, supervisedCtx); /* MUTANT */',
+    why: 'The builder can say "NOT armed", but the push that goes out still recommends the write.',
+  },
+  {
+    id: 'C-lxxxix. ★★ the refusal reason drifts from armFromPlan (the late-window check)',
+    file: ACT,
+    find: '  if (plan.window.startMs <= nowMs - APPLY_LATE_MS) return `the charge window opened more than ${APPLY_LATE_MS / 60_000} minutes ago`;',
+    to: '  /* MUTANT */',
+    why: 'A late refusal gets no reason, and the push falls back to the advisory recommendation.',
+  },
+  {
+    id: 'C-xc. ★★ the morning push reports an owner cancel as completed',
+    file: NOTIFY,
+    find: "  if (o.ended === 'cancelled' || o.ended === 'gridLoss') {",
+    to: "  if (o.ended === 'gridLoss' || (o.ended as string) === '\\u0000') { /* MUTANT */",
+    why: '"completed … (~34.9 kWh expected)" for a charge the owner stopped.',
+  },
+  {
+    id: 'C-xci. ★★ the revert never says why the night ended',
+    file: IDX,
+    find: "      ended: action.gridLossAbort ? 'gridLoss' : state.cancelled ? 'cancelled' : 'window',",
+    to: "      ended: 'window', /* MUTANT */",
+    why: 'A cancel or a grid-loss abort is pushed as a completed night with its full expected purchase.',
+  },
+  {
+    id: 'C-xcii. ★★ the morning push pairs the force-charge figure with the reserve alone',
+    file: NOTIFY,
+    find: '        ? `reserve raised to ${raised} with force-charge toward ~${round1(fc)}%${note}; the reserve is restored to ${o.restorePct}%. `',
+    to: '        ? `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. ` /* MUTANT */',
+    why: '"reserve raised to 50% (~34.9 kWh expected)": the figure covers the force-charge to 80%, which the push never names.',
+  },
+  {
+    id: 'C-xciii. ★★ the revert never passes the force-charge stop',
+    file: IDX,
+    find: '      forceChargeStopPct: armedForceChargeStopPct(state, forceChargeOn()),',
+    to: '      forceChargeStopPct: null, /* MUTANT */',
+    why: 'The morning push names the 50% reserve beside a figure that covers the force-charge leg.',
+  },
+  {
+    id: 'C-xciv. ★ the force-charge stop ignores whether force-charge is enabled',
+    file: FC,
+    find: '  return enabled && c != null && Number.isFinite(c) && c > RESERVE_WRITE_MAX_PCT ? forceChargeStopPct(c) : null;',
+    to: '  return c != null && Number.isFinite(c) && c > RESERVE_WRITE_MAX_PCT ? forceChargeStopPct(c) : null; /* MUTANT */',
+    why: 'With force-charge disabled the morning push names a force-charge to 80% that never ran.',
+  },
+  {
+    id: 'C-xcv. ★★ the arrival entity is named "Expected SoC" again',
+    file: MQTT,
+    find: "name: 'Night-Charge Arrival SoC (Worst Case)',",
+    to: "name: 'Night-Charge Expected SoC', /* MUTANT */",
+    why: 'Home Assistant shows the worst case\'s arrival as the expected SoC beside the expected buy.',
+  },
+  {
+    id: 'C-xcvi. ★★ the card labels the worst-case arrival "Expected SoC" again',
+    file: CARD,
+    find: '          label="Worst-case arrival"',
+    to: '          label="Expected SoC"',
+    why: '"Expected SoC 80%" beside "expected charge to ~50%": two outcomes on one card.',
+  },
+  {
+    id: 'C-xcvii. ★★ the card\'s headline ignores the window bound',
+    file: WEB,
+    find: "  const to = plan.expectedDeliverableBound === true ? 'toward' : 'to';",
+    to: "  const to = 'to'; /* MUTANT */",
+    why: 'The dashboard says "expected charge to ~80%" for Friday\'s window while the push says toward.',
   },
 ];
 

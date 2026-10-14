@@ -189,10 +189,13 @@ test('night-charge message: the charge shape states the level, the labelled isla
 });
 
 test('night-charge message: the hold shape says no charge is needed and reports the trough vs floor+cushion', () => {
-  const msg = buildNightChargeMessage(fakePlan({ chargeTonight: false, minProjSocPct: 41.0 }), 'hold');
+  // v1.187.22 — a hold the cushion already covers (requiredExtraKwh 0). The fixture predates the
+  // v1.186.0 cushion trough, so the figure is the whole-house low — labelled as the islanded case
+  // it is ("even if the grid were lost"), never stated as the night's outcome.
+  const msg = buildNightChargeMessage(fakePlan({ chargeTonight: false, requiredExtraKwh: 0, minProjSocPct: 41.0 }), 'hold');
   assert.match(msg.body, /No overnight charge needed/i);
-  assert.match(msg.body, /41%/);
-  assert.match(msg.body, /25%/); // floor+cushion
+  assert.match(msg.body, /even if the grid were lost overnight, the whole-house low would stay at ~41%/);
+  assert.match(msg.body, /25% floor\+cushion line/); // floor+cushion
   assert.doesNotMatch(msg.body, /Buy ~/);
 });
 
@@ -210,7 +213,7 @@ test('night-charge message: cushion-shortfall and over-buy caveats surface in th
  * reserve SETPOINT (clampReserveTarget(plan.setpointSocPct)) since the v1.62.0 ask/forecast
  * split — and did not list `ecoflow_night_charge_expected_soc`, the prediction. On 10-02
  * target_soc read 50 all night while the pack aimed at 73.1%. */
-test('★ DOCS §9: every night-charge discovery entity has a row; target_soc is the setpoint, expected_soc the prediction', () => {
+test('★ DOCS §9: every night-charge discovery entity has a row; target_soc is the setpoint, expected_soc the worst-case arrival', () => {
   const docs = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../ecoflow_panel/DOCS.md'), 'utf8');
   const start = docs.indexOf('### 9. Delivery surfaces');
   assert.ok(start > 0, 'the section exists');
@@ -223,7 +226,10 @@ test('★ DOCS §9: every night-charge discovery entity has a row; target_soc is
   const row = (id: string) => sec.split('\n').find((l) => l.startsWith(`| \`${id}\``)) ?? '';
   assert.match(row('ecoflow_night_charge_target_soc'), /SETPOINT/);
   assert.doesNotMatch(row('ecoflow_night_charge_target_soc'), /by window close/);
-  assert.match(row('ecoflow_night_charge_expected_soc'), /predicted/);
+  // v1.187.22 — the "prediction" is the arrival projected on the islanded worst case the plan is
+  // sized on, and the row says so (the entity is named "Arrival SoC (Worst Case)").
+  assert.match(row('ecoflow_night_charge_expected_soc'), /islanded worst case/);
+  assert.match(row('ecoflow_night_charge_expected_soc'), /Arrival SoC \(Worst Case\)/);
   // And the code still splits them that way (the row is only true while this holds).
   const plan = { generatedAt: Date.now(), basisComplete: true, setpointSocPct: 64, targetSocPct: 73.1, buyKwh: 9.13,
     chargeTonight: true, window: null } as unknown as NightChargePlan;

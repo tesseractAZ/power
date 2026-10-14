@@ -435,6 +435,18 @@ export function armedWriteLevelPct(
   return Math.max(reservePct, forceChargeStopPct(ceiling));
 }
 
+/** v1.187.22 — PURE. Where an ARMED night's force-charge stops, %, when it rides the night: the
+ *  armed ceiling above the reserve maximum through forceChargeStopPct, force-charge `enabled`
+ *  (forceChargeEnabled) — the evening push's own condition; null = reserve only. The morning
+ *  summary names it beside the expected figure, which covers that leg. */
+export function armedForceChargeStopPct(
+  s: Pick<NightActuationState, 'forceChargeCeilingPct'>,
+  enabled: boolean,
+): number | null {
+  const c = s.forceChargeCeilingPct;
+  return enabled && c != null && Number.isFinite(c) && c > RESERVE_WRITE_MAX_PCT ? forceChargeStopPct(c) : null;
+}
+
 /** v1.168.0 — when a force-charge of ours that has not verified OFF must escalate,
  *  whatever the readback says: the LATER of (first OFF + 30 min) and (window end +
  *  60 min). A missing window counts from the ON — it stops at once (offReason), so it

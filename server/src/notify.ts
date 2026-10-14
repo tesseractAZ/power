@@ -5,7 +5,7 @@ import { packSnTail, type Severity } from './alerts.js';
 import type { NightChargePlan } from './nightChargeAdvisor.js';
 // v1.187.22 — a night-charge push states what the write will do: the level it drives the pool to
 // and the energy it is expected to draw. The worst case the plan is sized on is never pushed.
-import { armedExpectedPhrase, chargeLevelPct, statedBuyKwh } from './nightChargeAdvisor.js';
+import { armedExpectedPhrase, chargeIsWindowBound, chargeLevelPct, statedBuyKwh } from './nightChargeAdvisor.js';
 import { forceChargeStopPct } from './nightForceCharge.js';
 
 /**
@@ -368,7 +368,10 @@ export async function dispatchMobilePush(
  *               tier, and the ADVISORY-ONLY automation contract (the add-on never
  *               charges; wire your HA automation to charge_tonight gated on
  *               write-ready+window) or the supervised write.
- *   • hold    — no charge needed; the projected trough already clears floor+cushion.
+ *   • hold    — nothing is charged tonight. v1.187.22: which hold it is — the cushion
+ *               already holds (the trough it was decided on, labelled as the islanded
+ *               case it is), the need is under the minimum buy, the window cannot cover
+ *               the cushion (the shortfall disclosed), or no window resolved.
  *   • insufficient_basis — no plan tonight (basis incomplete). Sending this makes
  *               the ABSENCE explicit so the owner never wonders if the job died.
  *
@@ -390,6 +393,10 @@ export function buildNightChargeMessage(
      *  charges to, just in time. null/omitted = reserve only. */
     forceChargeTargetPct?: number | null;
   } | null,
+  /** v1.187.22 — set when a supervised/auto mode REFUSED to arm tonight's charge plan
+   *  (armRefusalReason): the push says no write is armed, and why, instead of recommending the
+   *  level and draw of a write nothing will make. null/omitted = not refused. */
+  armRefused?: string | null,
 ): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_plan' };
 
@@ -410,29 +417,6 @@ export function buildNightChargeMessage(
   const kwh = (n: number | null): string => (n == null ? '—' : `${round1(n)} kWh`);
   const floorCushion = round1(plan.reserveFloorPct + plan.cushionPct);
 
-  if (shape === 'hold') {
-    return {
-      ...base,
-      title: 'Night-charge: hold (no charge needed)',
-      body:
-        `No overnight charge needed — the projected overnight low SoC `
-        + `(${pct(plan.minProjSocPct ?? plan.baselineMinSocPct)}) stays at or above the `
-        + `${floorCushion}% floor+cushion. Nothing will be charged.`,
-    };
-  }
-
-  // shape === 'charge'
-  const shortfallNote = plan.cushionShortfall
-    ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'
-    : '';
-  const overBuyNote = plan.bindingCap === 'overBuy'
-    ? ' NOTE: the buy exceeds tomorrow morning’s PV headroom; a small clip is accepted to hold resilience.'
-    : '';
-  // v1.174.0 — an ECONOMIC-ONLY buy (cost mode on a night resilience needed nothing): say
-  // so, or "without it … ~X%; with it, ~X%" reads as a buy that changes nothing.
-  const economicNote = plan.objective === 'cost_arbitrage' && plan.requiredExtraKwh === 0
-    ? ' Resilience needs no buy tonight — the pack already covers the outage cushion; this buy is economic (cost mode).'
-    : '';
   // v1.60.0 — EV contention. The car and the charger share one grid input, so a
   // predicted overnight session comes straight out of the buy. Two shapes, and
   // the second is deliberately a WARNING: a missing EVSE prediction must never
@@ -447,22 +431,91 @@ export function buildNightChargeMessage(
       : ev?.basis === 'unavailable' && plan.cushionShortfall
         ? ' NOTE: no EVSE prediction covers this window, so EV contention is NOT modelled — if the car charges overnight the packs will receive less than planned.'
         : '';
-  // v1.60.0 — the reserve we ASK for (the requirement) and the arrival we
-  // EXPECT (contention-derated) are different numbers whenever a cap bites. Say
-  // both, or the owner hears a promise the window cannot keep; say one when
-  // they agree, rather than inventing a distinction that does not exist
-  // tonight. Only "expect BELOW the ask" is worth a clause — the reverse is
-  // just the [10,50] write bound, which the sentence already states.
-  // v1.165.0 — on a force-charge night the reserve is NOT where charging stops, so
-  // "only expected to reach ~X" would be an under-statement of what the panel does.
+  const shortfallNote = plan.cushionShortfall
+    ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'
+    : '';
+
+  if (shape === 'hold') {
+    // v1.187.22 — SAY WHICH HOLD THIS IS, on the figure it was decided on. The body said "the
+    // projected overnight low SoC (0%) stays at or above the 31% floor+cushion" on every hold:
+    // that figure was the whole-house island trough (minProjSocPct), not the trough the cushion
+    // test judged (cushionTroughSocPct — the pack at window close on the islanded-outage basis),
+    // so it read as a 0% outcome that contradicted its own claim; and a starved hold, where the
+    // window cannot cover the cushion, still said "No overnight charge needed".
+    if (plan.requiredExtraKwh == null) {
+      // A basis-complete plan with no sizing: no cheap window resolved tonight.
+      return {
+        ...base,
+        title: 'Night-charge: hold (no charge window)',
+        body: 'No overnight charge tonight — no cheap charge window was resolved. Nothing will be charged.',
+      };
+    }
+    if (plan.cushionShortfall) {
+      return {
+        ...base,
+        title: 'Night-charge: no charge tonight (the window cannot cover the cushion)',
+        body:
+          'No overnight charge tonight — the outage cushion needs a charge, but this window cannot deliver '
+          + `enough to clear the minimum buy, so nothing will be charged.${shortfallNote}${evNote}`,
+      };
+    }
+    if (plan.requiredExtraKwh > 0) {
+      return {
+        ...base,
+        title: 'Night-charge: hold (the need is under the minimum buy)',
+        body:
+          'No overnight charge tonight — the islanded worst case the plan is sized on needs only a small '
+          + 'top-up, under the minimum buy, so nothing will be charged.',
+      };
+    }
+    // The cushion holds with no charge. Its trough is an islanded projection (no grid, P90 load):
+    // labelled as such — with the grid present the SHP2 holds the reserve.
+    const trough = plan.cushionTroughSocPct ?? plan.minProjSocPct ?? plan.baselineMinSocPct;
+    const line = plan.cushionLineSocPct ?? floorCushion;
+    const wholeHouse = plan.cushionBasis === 'legacy-pct' || plan.cushionTroughSocPct == null;
+    return {
+      ...base,
+      title: 'Night-charge: hold (no charge needed)',
+      body:
+        `No overnight charge needed — even if the grid were lost overnight, ${wholeHouse
+          ? `the whole-house low would stay at ~${pct(trough)}`
+          : `the pack would close the charge window at ~${pct(trough)}`}, at or above the `
+        + `${pct(line)} floor+cushion line. Nothing will be charged.`,
+    };
+  }
+
+  // shape === 'charge'
+  // v1.187.22 — a supervised or auto mode refused to arm tonight's write (armRefusalReason). The
+  // plan's level and expected draw describe that write, and nothing will make it: the advisory
+  // contract writes the reserve alone, and the add-on arms nothing. Say so, and why.
+  if (!supervised && armRefused) {
+    return {
+      ...base,
+      title: 'Night-charge: planned charge NOT armed tonight',
+      body:
+        `Tonight's plan calls for a charge, but the supervised write was not armed — ${armRefused}. `
+        + `The add-on will not charge tonight.${shortfallNote}`,
+    };
+  }
+  const overBuyNote = plan.bindingCap === 'overBuy'
+    ? ' NOTE: the buy exceeds tomorrow morning’s PV headroom; a small clip is accepted to hold resilience.'
+    : '';
+  // v1.174.0 — an ECONOMIC-ONLY buy (cost mode on a night resilience needed nothing): say
+  // so, or "without it … ~X%; with it, ~X%" reads as a buy that changes nothing.
+  const economicNote = plan.objective === 'cost_arbitrage' && plan.requiredExtraKwh === 0
+    ? ' Resilience needs no buy tonight — the pack already covers the outage cushion; this buy is economic (cost mode).'
+    : '';
+  // v1.60.0 said both the reserve ASKED for and the arrival EXPECTED ("The pack is only expected
+  // to reach ~X% — the reserve is the ask, not a forecast"). v1.187.22 — that arrival was
+  // targetSocPct, the islanded worst case the plan is sized on: on a reserve-only night it read
+  // "charging to ~50% … ~5.1 kWh expected … only expected to reach ~27.5%", two outcomes, the
+  // one called expected the sizing basis. The headline now states the expected charge, "toward"
+  // the level when the window cannot get there (chargeIsWindowBound); the worst-case arrival is
+  // the rationale's and the card's, labelled.
   const forceCeiling = supervised?.forceChargeTargetPct ?? null;
-  const expectNote =
-    supervised && forceCeiling == null && plan.targetSocPct != null && plan.targetSocPct < supervised.targetPct - 0.5
-      ? ` The pack is only expected to reach ~${pct(plan.targetSocPct)} — the reserve is the ask, not a forecast.`
-      : '';
   const tail = supervised
     ? `SUPERVISED: ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
-      + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes).${expectNote} `
+      + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). `
       + (forceCeiling != null
         // v1.170.0 — one wording for every target: the 80+ coast is retired.
         // v1.187.22 — where it stops (forceChargeStopPct), the level the title states: an 80.4
@@ -484,12 +537,16 @@ export function buildNightChargeMessage(
   const level = chargeLevelPct(plan);
   const expected = statedBuyKwh(plan);
   const levelText = level == null ? '—' : `~${round1(level)}%`;
+  // v1.187.22 — "toward" when the window closes before the write reaches the level.
+  const bound = chargeIsWindowBound(plan);
+  const to = bound ? 'toward' : 'to';
   return {
     ...base,
-    title: `Night-charge: ${supervised ? `charging to ${levelText}` : `charge to ${levelText} recommended`} tonight`
+    title: `Night-charge: ${supervised ? `charging ${to} ${levelText}` : `charge ${to} ${levelText} recommended`} tonight`
       + (expected == null ? '' : ` (~${kwh(expected)})`),
     body:
-      `${supervised ? 'Charging' : 'Recommended: charge'} the backup pool to ${levelText} overnight`
+      `${supervised ? 'Charging' : 'Recommended: charge'} the backup pool ${to} ${levelText} overnight`
+      + (bound ? ', as far as the window can deliver' : '')
       + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected. `)
       + `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
       + `without this charge, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${floorCushion}%. `
@@ -501,22 +558,49 @@ export function buildNightChargeMessage(
 /**
  * v1.187.22 — the morning summary of an applied night, sent when its reserve is restored. The
  * buy it names is the EXPECTED figure on the armed day's plan row (armedExpectedPhrase), or none:
- * the armed record's buyKwh is the worst case the plan was sized on and is never pushed. PURE.
+ * the armed record's buyKwh is the worst case the plan was sized on and is never pushed. The
+ * figure is named beside the level it belongs to: on a force-charge night it covers the
+ * force-charge leg too, so "reserve raised to 50% (~34.9 kWh expected)" paired it with a level
+ * the pool was never meant to stop at. A restore that ENDED the night early — an owner cancel
+ * after the write, or a grid-loss abort — is not a completed charge: it says so, with no figure.
+ * PURE.
  */
 export function buildNightChargeMorningSummary(o: {
   day: string | null;
   targetPct: number | null;
   restorePct: number;
   expectedKwh: number | null;
+  /** Where the night's force-charge stops when it rode the night (armedForceChargeStopPct);
+   *  null/omitted = reserve only. */
+  forceChargeStopPct?: number | null;
+  /** Why the reserve came down: the window closed (default), the owner cancelled after the
+   *  write, or the grid was lost (decideActuation's gridLossAbort). */
+  ended?: 'window' | 'cancelled' | 'gridLoss';
 }): NotifyMessage {
+  const base = { severity: 'info' as const, dedupId: 'night_charge_actuation' };
+  const day = o.day ?? '—';
+  const raised = `${o.targetPct ?? '—'}%`;
+  if (o.ended === 'cancelled' || o.ended === 'gridLoss') {
+    const cancelled = o.ended === 'cancelled';
+    return {
+      ...base,
+      title: `Night-charge: ${cancelled ? 'cancelled' : 'stopped (grid lost)'} — reserve restored to ${o.restorePct}%`,
+      body:
+        `Supervised night charge for ${day} ${cancelled ? 'was cancelled after the write' : 'stopped: the grid was lost during the window'}: `
+        + `the reserve, raised to ${raised}, is restored to ${o.restorePct}% and nothing more is charged tonight.`,
+    };
+  }
   const expected = armedExpectedPhrase(o.expectedKwh);
+  const fc = o.forceChargeStopPct != null && Number.isFinite(o.forceChargeStopPct) ? o.forceChargeStopPct : null;
+  const note = expected ? ` (${expected})` : '';
   return {
-    severity: 'info',
-    dedupId: 'night_charge_actuation',
+    ...base,
     title: `Night-charge: reserve restored to ${o.restorePct}%`,
     body:
-      `Supervised night charge for ${o.day ?? '—'} completed: reserve raised to ${o.targetPct ?? '—'}%`
-      + `${expected ? ` (${expected})` : ''} and restored to ${o.restorePct}%. `
+      `Supervised night charge for ${day} completed: `
+      + (fc != null
+        ? `reserve raised to ${raised} with force-charge toward ~${round1(fc)}%${note}; the reserve is restored to ${o.restorePct}%. `
+        : `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. `)
       + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
   };
 }

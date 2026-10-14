@@ -124,12 +124,19 @@ export const MAX_SPOKEN_ADVISORY_CHARS = 560;
  * draw. On 2026-10-12 it said "Buying about 64 kilowatt hours" — the islanded worst case the plan
  * is sized on — for a write that would have drawn ≈34. With no expected figure it speaks no
  * energy figure at all, never the worst case. Under 1 kWh is said as such, not "about 0".
+ * The time is the WINDOW's ("in the charge window that opens at 00:00"), not "starting at": a
+ * pool that opens above the reserve is not charged at the open — the house draws it until the
+ * just-in-time force-charge (~03:14 from 74% at 21:30). A window that closes before the level is
+ * reached (`toward`) is said so: "toward 80 percent, … in the charge window that opens at 23:00,
+ * which ends before it gets there."
  */
 export function nightChargeSpokenNotice(o: {
   /** The level tonight's write drives the pool to, % (nightChargeAdvisor.chargeLevelPct). */
   levelPct: number;
   /** The expected draw, kWh (nightChargeAdvisor.statedBuyKwh); null ⇒ no energy figure. */
   expectedKwh: number | null;
+  /** The window closes before the level is reached (nightChargeAdvisor.chargeIsWindowBound). */
+  toward?: boolean;
   deadlineText: string;
   deadlineTextEs: string;
   cushionShortfall: boolean;
@@ -147,14 +154,15 @@ export function nightChargeSpokenNotice(o: {
   const kwhEs = kwh == null ? ''
     : kwh < 1 ? ', menos de 1 kilovatio hora'
       : kwh === 1 ? ', alrededor de 1 kilovatio hora' : `, unos ${kwh} kilovatios hora`;
+  const toward = o.toward === true;
   return {
     en:
-      `Night charge notice. Charging the backup pool to about ${level} percent overnight${kwhEn}, `
-      + `starting ${o.deadlineText}.`
+      `Night charge notice. Charging the backup pool ${toward ? 'toward' : 'to about'} ${level} percent${kwhEn}, `
+      + `in the charge window that opens ${o.deadlineText}${toward ? ', which ends before it gets there' : ''}.`
       + `${shortEn} Cancel on the Power panel before then.`,
     es:
-      `Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del ${level} por ciento `
-      + `durante la noche${kwhEs}, comenzando ${o.deadlineTextEs}.`
+      `Aviso de carga nocturna. Se cargarán las baterías de respaldo ${toward ? 'rumbo al' : 'hasta cerca del'} ${level} por ciento`
+      + `${kwhEs}, en la ventana de carga que comienza ${o.deadlineTextEs}${toward ? ' y termina antes de alcanzar ese nivel' : ''}.`
       + `${shortEs} Cancele en el panel Power antes de esa hora.`,
   };
 }
@@ -640,6 +648,37 @@ export function armFromPlan(
       prev.forceChargeCeilingPriorPct != null && prev.forceChargeCeilingRestoredAtMs == null
         ? prev.forceChargeCeilingPriorPct : null,
   };
+}
+
+/**
+ * v1.187.22 — PURE. Why armFromPlan refuses `plan`, in words for the evening push; null when it
+ * would arm. The checks are armFromPlan's, in its order (a test holds the two equivalent). With a
+ * refused arm in a write mode the push used to take the advisory shape and recommend the plan's
+ * level and expected draw — a force-charge to ~80% and ~35 kWh — for a write nothing would make.
+ */
+export function armRefusalReason(
+  prev: NightActuationState,
+  plan: ArmablePlan,
+  nowMs: number,
+  liveReservePct: number | null,
+): string | null {
+  const night = prev.day ?? 'a previous night';
+  if (prev.appliedAtMs != null && prev.revertedAtMs == null) return `the ${night} reserve write is still applied and not yet restored`;
+  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) {
+    return `the ${night} force-charge was switched ON and its OFF has not verified`;
+  }
+  if (
+    prev.applyAttemptedAtMs != null && prev.appliedAtMs == null && prev.revertedAtMs == null &&
+    !(liveReservePct != null && prev.attemptBaselinePct != null && liveReservePct === prev.attemptBaselinePct)
+  ) {
+    return `the ${night} reserve write was attempted and is not confirmed either way`;
+  }
+  if (!plan.chargeTonight || !plan.basisComplete) return 'the plan does not call for a charge';
+  if (plan.window == null || plan.setpointSocPct == null) return 'the plan has no window or reserve setpoint';
+  if (plan.buyKwh == null || plan.buyKwh <= 0) return 'the plan sizes no buy';
+  if (plan.window.endMs <= plan.window.startMs) return 'the plan has no valid window';
+  if (plan.window.startMs <= nowMs - APPLY_LATE_MS) return `the charge window opened more than ${APPLY_LATE_MS / 60_000} minutes ago`;
+  return null;
 }
 
 export type ActuationAction =
