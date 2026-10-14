@@ -761,6 +761,55 @@ export function deliveredIntoCores(i: {
   };
 }
 
+/** v1.187.22 — how far before the window open measuredWindowOpenSocPct looks. The reserve
+ *  write fires AT the window open (APPLY_LEAD_MS = 0), so these readings precede any charge. */
+export const WINDOW_OPEN_SOC_LEAD_MS = 15 * 60_000;
+
+/**
+ * v1.187.22 — PURE. The pool SoC measured as the charge window opened: the MEDIAN of the
+ * backup_pct readings in [windowStart − WINDOW_OPEN_SOC_LEAD_MS, windowStart], to 0.1 — a median,
+ * so the SHP2's single-sample reconnect 0 cannot stand in for the pool. The ledger had no such
+ * figure: on 2026-10-12 the plan sized from 16.9% at the window open and the pool was at ~46%,
+ * which only a live read showed. null when no finite reading falls in the lead-in.
+ */
+export function measuredWindowOpenSocPct(pts: ReadonlyArray<Sample>, windowStartMs: number): number | null {
+  const vals = pts
+    .filter((p) => p.ts >= windowStartMs - WINDOW_OPEN_SOC_LEAD_MS && p.ts <= windowStartMs && Number.isFinite(p.value))
+    .map((p) => p.value)
+    .sort((a, b) => a - b);
+  if (vals.length === 0) return null;
+  const mid = Math.floor(vals.length / 2);
+  const median = vals.length % 2 === 1 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
+  return Math.round(median * 10) / 10;
+}
+
+/**
+ * v1.187.22 — PURE. The score_notes clause that grades a plan's EXPECTED figures: the expected
+ * buy against the energy delivered into the Cores (actuated nights), and the expected window-open
+ * SoC against the measured one, with the islanded sizing start beside it. '' on a row with no
+ * expected figure (written before v1.187.22, or no P50 basis). Notes only: buy_err_kwh, the
+ * de-bias learner and the readiness gate read none of it.
+ */
+export function expectedBuyScoreNote(i: {
+  expectedBuyKwh: number | null;
+  expectedStartSocPct: number | null;
+  /** soc_at_window_start_pct: the islanded worst-case start the buy was sized from. */
+  sizingStartSocPct: number | null;
+  windowOpenSocPct: number | null;
+  actuated: boolean;
+  deliveredKwh: number | null;
+}): string {
+  if (i.expectedBuyKwh == null && i.expectedStartSocPct == null) return '';
+  const buy = i.expectedBuyKwh == null ? 'Expected buy: none stated'
+    : `Expected buy ~${i.expectedBuyKwh} kWh${!i.actuated ? ' (not actuated — nothing delivered to compare)'
+      : i.deliveredKwh == null ? ', delivered unmeasured'
+        : `, delivered ${i.deliveredKwh} kWh${i.expectedBuyKwh > 0 ? ` (${round2(i.deliveredKwh / i.expectedBuyKwh)}× expected)` : ''}`}`;
+  const start = i.expectedStartSocPct == null ? '' : `; window-open SoC expected ~${i.expectedStartSocPct}%, `
+    + `measured ${i.windowOpenSocPct == null ? 'unavailable' : `${i.windowOpenSocPct}%`}`
+    + `${i.sizingStartSocPct == null ? '' : ` (the islanded sizing start was ${i.sizingStartSocPct}%)`}`;
+  return ` ${buy}${start}.`;
+}
+
 /** v1.187.3 (review) — the ledger fields the scorer writes for delivered energy, as ONE
  *  patch: `delivered_basis` is written exactly when `delivered_kwh` is a number, so a NULL
  *  value can never carry the current basis and a value can never be written without it

@@ -1,5 +1,8 @@
 import { memo, useEffect, useState } from 'react';
-import { actuationBannerVisible, reserveWriteLabel, revertUnconfirmed } from './nightChargeText';
+import {
+  actuationBannerVisible, chargeFigureParts, floorCushionLinePct, fmtLinePct, holdSummary, noChargeExpected, refusedArmLead,
+  reserveWriteLabel, revertUnconfirmed, sizingLine, writtenReservePct,
+} from './nightChargeText';
 import { apiUrl } from '../api';
 
 /**
@@ -25,8 +28,22 @@ interface NightChargePlan {
   basisComplete: boolean;
   objective: string;
   chargeTonight: boolean;
+  /** The worst case the plan is SIZED on (islanded, P10 PV / P90 load). */
   buyKwh: number | null;
-  /** The contention-derated PREDICTION of where the pack lands. */
+  /** The worst case × the realized-buy calibration, and that factor (1 = uncalibrated). */
+  buyKwhDebiased?: number | null;
+  buyDebiasFactor?: number;
+  /** v1.187.22 — what the armed write is expected to draw; absent on older plans. */
+  expectedBuyKwh?: number | null;
+  /** v1.187.22 — the level that write drives the pool to; absent on older plans. */
+  expectedWriteLevelPct?: number | null;
+  /** v1.187.22 — the window closes before that level is reached ("toward"). */
+  expectedDeliverableBound?: boolean;
+  /** v1.187.22 — force-charge rides the night: its expected start; null = none expected (the night
+   *  stops at the reserve). Absent otherwise and on older plans. */
+  expectedForceChargeStartMs?: number | null;
+  /** The arrival projected on the islanded worst case the plan is sized on (v1.187.22: shown
+   *  as "Worst-case arrival", never as the expected outcome). */
   targetSocPct: number | null;
   /** v1.60.0 — the WRITE SETPOINT (the resilience requirement). Higher than
    *  `targetSocPct` exactly when a cap prevents delivering the requirement; the
@@ -48,6 +65,10 @@ interface NightChargePlan {
   minProjSocPct: number | null;
   minProjSocTsMs: number | null;
   baselineMinSocPct: number | null;
+  /** v1.186.0 — the trough the cushion test judged and its line, and the cushion basis. */
+  cushionTroughSocPct?: number | null;
+  cushionLineSocPct?: number | null;
+  cushionBasis?: string | null;
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
   window: { startMs: number; endMs: number } | null;
   reserveFloorPct: number;
@@ -91,6 +112,9 @@ interface NightChargeStatus {
   confidence: string | null;
   notify: { hour: number; minute: number; lastNotifyDay: string | null } | null;
   plan: NightChargePlan | null;
+  /** v1.187.22 — why a supervised/auto mode refused to arm this plan's window (servedArmRefusal);
+   *  null/absent = not refused (or an older server). */
+  armRefusal?: string | null;
   readiness: NightChargeReadiness | null;
   actuation?: NightActuation | null;
   recentOutcomes?: unknown;
@@ -193,27 +217,27 @@ export const NightChargeCard = memo(function NightChargeCard() {
   }
 
   const readiness = status.readiness;
-  const floorCushionPct = plan.reserveFloorPct + plan.cushionPct;
+  // v1.187.22 — the line the plan is sized on (floorCushionLinePct), the push's and the hold's.
+  const floorCushionLine = fmtLinePct(floorCushionLinePct(plan));
   const readinessNote = readiness ? (
     <span className="text-xs text-muted normal-case tracking-normal">
       readiness: {READINESS_LABEL[readiness.state] ?? readiness.state}
     </span>
   ) : null;
 
-  // HOLD — basis complete, projected trough already holds floor+cushion.
+  // HOLD — nothing is charged tonight. v1.187.22 — which hold, on the figure it was decided on
+  // (holdSummary, the evening push's hold shape): the islanded trough labelled as such, and a
+  // window that cannot cover the cushion said so rather than "No overnight charge needed."
   if (!plan.chargeTonight) {
+    const hold = holdSummary(plan);
     return (
       <div className="card text-sm">
         <div className="card-title flex items-center justify-between">
           <span>Tonight's night-charge plan</span>
           {readinessNote}
         </div>
-        <div className="text-ok font-medium">No overnight charge needed.</div>
-        <div className="text-muted mt-1 leading-relaxed">
-          Projected overnight trough{' '}
-          <span className="text-ink font-medium">{fmtSoc(plan.baselineMinSocPct)}</span> stays at/above the{' '}
-          {floorCushionPct.toFixed(0)}% floor+cushion — no cheap-window buy required tonight.
-        </div>
+        <div className={`${hold.tone === 'warn' ? 'text-warn' : hold.tone === 'ok' ? 'text-ok' : 'text-muted'} font-medium`}>{hold.headline}</div>
+        <div className="text-muted mt-1 leading-relaxed">{hold.detail}</div>
         <AdvisoryNote mode={status.mode} />
       </div>
     );
@@ -222,6 +246,17 @@ export const NightChargeCard = memo(function NightChargeCard() {
   // CHARGE — surface buy, target SoC, baseline→plan trough, window, confidence.
   const ws = phoenixHHMM(plan.window?.startMs);
   const we = phoenixHHMM(plan.window?.endMs);
+  // v1.187.22 — the headline is the charge the write arms (the expected draw and the level it
+  // drives to); the worst case appears once, in the labelled sizing line beneath.
+  const fig = chargeFigureParts(plan, status.reserveWriteMaxPct ?? null);
+  const sizing = sizingLine(plan);
+  // v1.187.22 — a night expected to charge nothing: the reserve is held as a floor.
+  const noChargeNight = noChargeExpected(plan);
+  // v1.187.22 — a write mode refused to arm tonight: lead with that, never the plan's expected charge
+  // — in the words for the night the plan is (a charge, or the reserve held).
+  const refused = status.mode !== 'advisory' && status.armRefusal
+    ? refusedArmLead(status.armRefusal, { mode: status.mode, held: noChargeNight, reservePct: writtenReservePct(plan, status.reserveWriteMaxPct ?? null) })
+    : null;
 
   return (
     <div className="card">
@@ -230,21 +265,30 @@ export const NightChargeCard = memo(function NightChargeCard() {
         {readinessNote}
       </div>
 
-      <div className="flex items-baseline gap-4 mb-3 flex-wrap">
-        <div className="text-4xl font-bold tabular-nums text-ink">
-          {plan.buyKwh != null ? plan.buyKwh.toFixed(1) : '—'}
-          <span className="text-2xl font-semibold ml-1">kWh</span>
+      {refused ? (
+        <div className="mb-3 text-sm">
+          <div className="text-warn font-medium">{refused.headline}</div>
+          <div className="text-muted mt-1 leading-relaxed">{refused.detail}</div>
         </div>
-        <div className="text-sm text-muted">
-          buy overnight → expect <span className="text-ink font-medium">{fmtSoc(plan.targetSocPct)}</span>
-          {ws && we && (
-            <>
-              {' '}
-              in the <span className="text-ink font-medium">{ws}–{we}</span> window
-            </>
-          )}
+      ) : (
+        <div className="flex items-baseline gap-4 mb-3 flex-wrap">
+          <div className="text-4xl font-bold tabular-nums text-ink">
+            {fig.main}
+            <span className={`text-2xl font-semibold${fig.unit === '%' ? '' : ' ml-1'}`}>{fig.unit}</span>
+          </div>
+          <div className="text-sm text-muted">
+            {fig.label}
+            {ws && we && (
+              <>
+                {' '}
+                in the <span className="text-ink font-medium">{ws}–{we}</span> window
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
+
+      {sizing && <div className="text-xs text-muted mb-3 -mt-2">{sizing}</div>}
 
       {plan.cushionShortfall && (
         <div className="text-xs text-warn mb-3 -mt-1">
@@ -254,8 +298,9 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
       {/* v1.60.0 — EV contention. Either the predicted session is quantified, or
           we say plainly that it is UNMODELLED; the absent-prediction line is a
-          warning, never a "no EV expected tonight". */}
-      {plan.bindingCap === 'evContention' && plan.evContention?.windowEvKwh != null && (
+          warning, never a "no EV expected tonight". v1.187.22 — neither on a night
+          expected to charge nothing: there is no pack charge for the car to share with. */}
+      {!noChargeNight && plan.bindingCap === 'evContention' && plan.evContention?.windowEvKwh != null && (
         <div className="text-xs text-warn mb-3 -mt-1">
           EV charging predicted in the window (~{plan.evContention.windowEvKwh.toFixed(1)} kWh
           {plan.evContention.peakEvKw != null && <>, peak ~{plan.evContention.peakEvKw.toFixed(1)} kW</>}) — it
@@ -267,7 +312,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
           .
         </div>
       )}
-      {plan.evContention?.basis === 'unavailable' && plan.cushionShortfall && (
+      {!noChargeNight && plan.evContention?.basis === 'unavailable' && plan.cushionShortfall && (
         <div className="text-xs text-muted mb-3 -mt-1">
           no EVSE prediction covers this window — EV contention is not modelled; if the car charges
           overnight the packs will receive less than planned
@@ -278,16 +323,21 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-        <Stat label="Trough without buy" value={fmtSoc(plan.baselineMinSocPct)} sub="P10 PV / P90 load" />
-        <Stat label="Trough with buy" value={fmtSoc(plan.minProjSocPct)} sub={`floor+cushion ${floorCushionPct.toFixed(0)}%`} />
+        {/* v1.187.22 — the whole-house island troughs, labelled as such: with the grid present
+            the SHP2 holds the reserve, so neither is where the pool is expected to go. */}
+        <Stat label="Island low, no charge" value={fmtSoc(plan.baselineMinSocPct)} sub="if the grid were lost · P10 PV / P90 load" />
+        <Stat label="Island low, with charge" value={fmtSoc(plan.minProjSocPct)} sub={`if the grid were lost · floor+cushion ${floorCushionLine}`} />
         <Stat
-          label="Expected SoC"
+          // v1.187.22 — the arrival on the islanded worst case the plan is sized on, labelled as
+          // that basis: under "Expected SoC" it sat beside the headline's expected charge as a
+          // second, contradicting outcome (80% next to "expected charge to ~50%").
+          label="Worst-case arrival"
           value={fmtSoc(plan.targetSocPct)}
-          // v1.60.0 — the headline number is the PREDICTION; the reserve we ask
-          // the device for is shown alongside it only when the two diverge (a
-          // cap prevented delivering the requirement), never as a silent swap.
+          // v1.60.0 — the reserve we ask the device for is shown alongside it only when the two
+          // diverge (a cap prevented delivering the requirement), never as a silent swap.
           sub={
             [
+              'sizing basis',
               // v1.182.0 — what will actually be WRITTEN (clamped to the panel's maximum).
               reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),
               plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,

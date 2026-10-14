@@ -136,8 +136,11 @@ const MUTANTS = [
   {
     id: 'xvi. ★★ arming stops capturing the announced ceiling',
     file: ACT,
-    find: '        ? plan.costCeilingSocPct : null,',
-    to: '        ? null : null, /* MUTANT */',
+    // v1.187.22 — re-pointed: the capture is armedForceChargeCeilingPct, shared with the
+    // expected-buy disclosure; this is armFromPlan's own use of it (recheck 3: read once into
+    // `ceiling`, which the force-charge stamp reads too).
+    find: '    forceChargeCeilingPct: ceiling,',
+    to: '    forceChargeCeilingPct: null, /* MUTANT */',
     why: 'Every night arms with no ceiling, so force-charge never starts — the feature silently does nothing.',
   },
   {
@@ -315,8 +318,11 @@ const MUTANTS = [
     // v1.170.0 — REPLACES the coast-wording mutant (property retired).
     id: 'xl. ★ the announcement says an 80+ night stays on to the window close',
     file: NOTIFY,
-    find: "          + `reach ~${pct(forceCeiling)}, and OFF when it gets there (or when the window closes). `",
-    to: "          + `reach ~${pct(forceCeiling)}; it stays on until the window closes. ` /* MUTANT */",
+    // v1.187.22 — re-pointed: the announcement names where the force-charge stops (forceChargeStopPct).
+    // v1.187.22 (recheck) — re-pointed: the untimed clause (a plan with no expected start), which
+    // nightForceCharge.test.ts pins; the timed shapes are mutate-v1187-22c's.
+    find: "        + `reach ${stop}, and OFF when it gets there (or when the window closes). `;\n    }",
+    to: "        + `reach ${stop}; it stays on until the window closes. `; /* MUTANT */\n    }",
     why: 'The 21:30 notice describes the retired coast.',
   },
   {

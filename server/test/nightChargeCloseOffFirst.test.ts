@@ -125,6 +125,7 @@ test('★★ the morning summary after a revert is not awaited, and the restore 
   assert.ok(i > fn);
   const branch = INDEX.slice(i, INDEX.indexOf('\n    return;\n  }', i));
   assert.ok(branch.includes('recorder.recordNightOutcome(state.day, { actuation_reverted_at_ms: nowMs });'));
-  assert.ok(branch.includes('void sendNotification(loadNotifyConfig(), {'), 'the info push is fire-and-forget');
+  // v1.187.22 — the summary is built by buildNightChargeMorningSummary (notify.ts), where its text is tested.
+  assert.ok(branch.includes('void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({'), 'the info push is fire-and-forget');
   assert.ok(!branch.includes('await sendNotification('), 'nothing in the revert branch waits on a push');
 });

@@ -410,8 +410,13 @@ export const SENSORS: SensorConfig[] = [
   // separate, contention-derated PREDICTION of where the pack actually lands.
   // Keeping the ask on the existing entity means a wired automation keeps
   // asking for the requirement instead of silently capping itself at a forecast.
+  // v1.187.22 — that "prediction" is the arrival projected on the islanded worst case the plan
+  // is sized on (plan.targetSocPct), not the charge the write is expected to make: named for it
+  // ("Arrival SoC (Worst Case)", was "Expected SoC") beside "Expected Buy", which is the expected
+  // charge. As with the buy entity below only the NAME changes — unique_id, config topic, value
+  // and value key are unchanged and no object_id is published, so HA keeps the entity_id.
   { unique_id: 'ecoflow_night_charge_target_soc', name: 'Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}' },
-  { unique_id: 'ecoflow_night_charge_expected_soc', name: 'Night-Charge Expected SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-clock', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_soc_percent }}' },
+  { unique_id: 'ecoflow_night_charge_expected_soc', name: 'Night-Charge Arrival SoC (Worst Case)', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-clock', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_soc_percent }}' },
   // v1.42.0 — alarm-host SoC temperature (heat tripwire; HA recorder provides
   // the trend history). Null when the host exposes no readable thermal zone.
   { unique_id: 'ecoflow_host_evloop_lag', name: 'Host Event-Loop Lag', state_class: 'measurement', unit_of_measurement: 'ms', icon: 'mdi:timer-sand', entity_category: 'diagnostic', value_template: '{{ value_json.host_evloop_lag_ms }}' },
@@ -419,7 +424,16 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_host_disk_free', name: 'Host Data Disk Free', state_class: 'measurement', unit_of_measurement: 'MB', icon: 'mdi:harddisk', entity_category: 'diagnostic', value_template: '{{ value_json.host_data_disk_free_mb }}' },
   { unique_id: 'ecoflow_host_load_1m', name: 'Host Load (1m)', state_class: 'measurement', icon: 'mdi:chip', entity_category: 'diagnostic', value_template: '{{ value_json.host_load_1m }}' },
   { unique_id: 'ecoflow_host_soc_temp', name: 'Host SoC Temperature', device_class: 'temperature', state_class: 'measurement', unit_of_measurement: '°C', entity_category: 'diagnostic', value_template: '{{ value_json.host_soc_temp_c }}' },
-  { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'Night-Charge Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
+  // v1.187.22 — the worst case the plan is SIZED on (plan.buyKwh), named for what it is: the bare
+  // "Night-Charge Buy" read as the purchase, which it is not. Only the NAME changes: the
+  // unique_id (and with it the config topic) and the value are unchanged, and no object_id is
+  // published, so HA keeps the entity_id it minted against this unique_id at first discovery —
+  // its history and any automation on it carry over (the v1.65.0 note in this file).
+  { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'Night-Charge Buy (Worst Case)', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
+  // v1.187.22 — the EXPECTED buy beside it: what the armed write is expected to draw from the
+  // expected window-open SoC. The worst-case entity keeps its meaning and value. Same shape: no
+  // device_class, the night-charge expire_after, null → 'unknown' with no P50 basis.
+  { unique_id: 'ecoflow_night_charge_expected_buy_kwh', name: 'Night-Charge Expected Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_buy_kwh }}' },
   { unique_id: 'ecoflow_night_charge_readiness', name: 'Night-Charge Readiness', icon: 'mdi:clipboard-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_readiness }}' },
   { unique_id: 'ecoflow_night_charge_window_start', name: 'Night-Charge Window Start', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_start }}' },
   { unique_id: 'ecoflow_night_charge_window_end', name: 'Night-Charge Window End', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_end }}' },

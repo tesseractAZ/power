@@ -522,14 +522,20 @@ test('the 21:30 announcement names the force-charge and its TARGET, and drops th
   const m = buildNightChargeMessage(chargePlan(), 'charge', {
     cancelDeadlineText: 'at 10:55 PM', targetPct: 50, forceChargeTargetPct: 64.3,
   });
-  assert.match(m.body, /near the end of the window, it switches the panel's force-charge ON just long enough to reach ~64\.3%/);
+  // v1.187.22 (recheck) — a plan with no expected start (issued before it, or no P50 basis): the
+  // start is timed to finish by the window close, not "near the end of the window" (updated
+  // deliberately; the timed shapes are pinned in nightChargeExpectedBuy.test.ts).
+  assert.match(m.body, /Then, just in time to finish by the window close, it switches the panel's force-charge ON just long enough to reach ~64\.3%/);
   assert.match(m.body, /OFF when it gets there/);
   assert.doesNotMatch(m.body, /only expected to reach/,
     'on a force-charge night the reserve is not where charging stops');
 
   const plain = buildNightChargeMessage(chargePlan(), 'charge', { cancelDeadlineText: 'at 10:55 PM', targetPct: 50 });
   assert.doesNotMatch(plain.body, /force-charge/, 'a reserve-only night reads exactly as before');
-  assert.match(plain.body, /only expected to reach ~43.5%/);
+  // v1.187.22 — the 43.5% is targetSocPct, the arrival projected on the islanded worst case the
+  // plan is sized on: no longer pushed as what the pack is "expected to reach" (the rationale's
+  // sizing sentence and the card name it, labelled).
+  assert.doesNotMatch(plain.body, /expected to reach|43\.5%/);
 });
 
 /* ══ v1.170.0 — the software stop at EVERY target (the 80+ coast is retired) ══ */
