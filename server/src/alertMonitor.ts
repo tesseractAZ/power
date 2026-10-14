@@ -47,6 +47,7 @@ import { setNwsLog } from './nws.js';
 // effectively never fire on a panel that gets occasional restarts.
 import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, TELEMETRY_SCOPE_ANNUNCIATING, TELEMETRY_BASIS_DROPPED, telemetryBasisFor, type FamilyMeta, type TelemetryEntry } from './alertTelemetry.js';
 import type { Recorder } from './recorder.js';
+import { CAPACITY_SCALE_MIN, type CapacityBasis } from './poolEnergyBasis.js';
 import { getAnalytics, type AnalyticsClient } from './analyticsClient.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate. The internal severity
 // union is unchanged; priority is DERIVED from (severity, source). Disabling
@@ -2021,6 +2022,15 @@ export function deviceEvidencePositive(
 }
 
 /**
+ * v1.187.23 — the forecast capacity bases (poolEnergyBasis.ts CapacityBasis) whose `poolFullWh` is a
+ * MEASURED capacity: every connected Core reporting complete packs now ('measured'), a Core's
+ * persisted ratio ('held'), or the lowest ratio measured for any Core ('min-known'). Not
+ * 'nameplate' (no ratio ever measured, scale 1: the figure is the nameplate), and not an absent
+ * basis. An ALLOWLIST: a basis added later is not presented as measured until listed here.
+ */
+const MEASURED_POOL_BASES: ReadonlySet<CapacityBasis> = new Set<CapacityBasis>(['measured', 'held', 'min-known']);
+
+/**
  * v1.187.0 — the on-peak idle-pool detector's inputs, read from the HOUSE panel
  * (findShp2) of one snapshot. PURE. Extracted from the monitor tick (review) so the
  * wiring is tested, not pinned: `fresh` is POSITIVE device evidence (fresh telemetry and
@@ -2028,14 +2038,37 @@ export function deviceEvidencePositive(
  * verbatim and its last channel watts would read "idle" for as long as it stays dark.
  * No house panel ⇒ every reading null and `fresh` false (the detector's
  * insufficient-data suppression).
+ *
+ * v1.187.23 — `forecastPool` is the day forecast the monitor holds in its forecast feed; its
+ * `poolFullWh` (the panel's nameplate `backupFullCapWh` × poolCapacityScale) is the house pool's
+ * MEASURED capacity, the one the SoC percent is a share of since v1.187.19. The kWh "above the
+ * reserve" the push states was (soc − reserve)% of the NAMEPLATE, high by the packs' whole
+ * measured fade. The forecast's figure is taken only when its own `poolCapacityBasis` says it was
+ * measured (MEASURED_POOL_BASES): with basis 'nameplate' — no Core capacity ratio ever measured,
+ * scale 1 — the forecast's figure IS the nameplate, and an absent basis vouches for nothing. In
+ * every other case (no forecast delivered yet, one with no pool, or one not measured) the panel's
+ * own nameplate is read, and its basis travels with the figure, so the push names it.
+ *
+ * v1.187.23 (review) — the forecast can be up to its day TTL old, and the worker resets its
+ * report caches when a Core JOINS the pool, not when one leaves. A measured figure is therefore
+ * taken only while it still describes the panel's pool as it is now: between CAPACITY_SCALE_MIN
+ * and 1 × the live nameplate (the measured scale's own clamp). Outside that band the forecast
+ * was built on a different pool, and the live nameplate is read and named instead.
  */
 export function idlePoolInputsFrom(
   devices: Record<string, DeviceSnapshot>,
   gridPresent: boolean,
   nowMs: number,
+  forecastPool?: Pick<DayForecast, 'poolFullWh' | 'poolCapacityBasis'> | null,
 ): IdlePoolInputs {
   const shp2 = findShp2(devices);
   const p = shp2?.projection;
+  const forecastWh = forecastPool?.poolFullWh;
+  const forecastBasis = forecastPool?.poolCapacityBasis;
+  const nameplate = p?.backupFullCapWh ?? null;
+  const measured = forecastWh != null && Number.isFinite(forecastWh) && forecastWh > 0
+    && forecastBasis != null && MEASURED_POOL_BASES.has(forecastBasis)
+    && (nameplate == null || (forecastWh <= nameplate && forecastWh >= nameplate * CAPACITY_SCALE_MIN));
   return {
     nowMs,
     gridPresent,
@@ -2044,7 +2077,8 @@ export function idlePoolInputsFrom(
     reserveSocPct: p?.strategy?.backupReserveSoc ?? null,
     sourceWatts: p?.sourceWatts ?? null,
     fresh: shp2 != null && deviceEvidencePositive(devices[shp2.sn], nowMs),
-    poolFullWh: p?.backupFullCapWh ?? null,
+    poolFullWh: p == null ? null : measured ? forecastWh : nameplate,
+    poolCapacityBasis: p == null ? null : measured ? 'measured' : nameplate != null ? 'nameplate' : null,
     smartBackupMode: p?.strategy?.smartBackupMode ?? null,
   };
 }
@@ -3354,7 +3388,12 @@ export function startAlertMonitor(
     // 16% reserve). The house panel's own readings, and only while they are live: a frozen
     // projection reads its last channel watts forever. Advisory: warning/low, never audible.
     const idleNowMs = Date.now();
-    const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs), apsREvModelFromEnv());
+    // v1.187.23 — the kWh above the reserve on the pool's measured capacity: the forecast feed's
+    // last good value carries it (DayForecast.poolFullWh, with its poolCapacityBasis — the pair
+    // from one forecast); read once here and again, unchanged, by the publish-first set below (no
+    // await between them).
+    const forecastNow = feedForecast.peek();
+    const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow), apsREvModelFromEnv());
     idlePoolFiredDayOnDisk = persistIdlePoolFiredDay(idlePoolStatePath, idlePoolFiredDayOnDisk);
 
     // v1.186.0 — the LIVE-SNAPSHOT alarms: everything computed from the snapshot and
@@ -3554,7 +3593,7 @@ export function startAlertMonitor(
     // any wait on the worker. The screen and the broadcast (store.get().alerts) see an
     // offline, blind, reserve or thermal alarm on the tick it is computed.
     publish(assemble(workerDerived({
-      forecast: feedForecast.peek(),
+      forecast: forecastNow,
       stormPrep: feedStormPrep.peek(),
       curtailment: feedCurtailment.peek(),
       baselineAlerts: feedBaseline.peek(),
