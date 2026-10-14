@@ -10,6 +10,10 @@
  * ~87.0 kWh. The pure input assembly is pinned in peakIdlePool.test.ts; this pins the tick's
  * wiring — the forecast feed's capacity reaches the detector — and the nameplate fallback when
  * the feed carries none.
+ *
+ * v1.187.23 (review) — and the forecast's OWN basis reaches it too: a forecast whose
+ * poolCapacityBasis is 'nameplate' (no Core capacity ratio ever measured) carries the nameplate as
+ * its poolFullWh, and the push names it rather than presenting it as measured.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,6 +49,7 @@ delete process.env.NOTIFY_RESOLVED;
 const { startAlertMonitor } = await import('../src/alertMonitor.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
 const { resetIdlePoolState, IDLE_DWELL_MS } = await import('../src/peakGridDraw.js');
+const { PoolEnergyBasisTracker } = await import('../src/poolEnergyBasis.js');
 
 /* ── clock: real time flows from an on-peak weekday 16:00 MST, `offset` jumps it ── */
 const MIN = 60_000;
@@ -83,10 +88,10 @@ const devices = () => ({
 });
 
 /** The day forecast the analytics feed serves: only what the monitor reads from it. */
-const forecast = (poolFullWh: number | null) => ({
+const forecast = (poolFullWh: number | null, poolCapacityBasis: string | null) => ({
   generatedAt: Date.now(), hasWeather: false, historyDays: 7, reserveSoc: 16, hours: [],
   forecastPvWhNext24: 0, typicalPvWhPerDay: 0, minProjectedSoc: null, minProjectedSocTs: null,
-  solarModel: { hourly: [] }, poolFullWh,
+  solarModel: { hourly: [] }, poolFullWh, poolCapacityBasis,
 });
 
 const IDLE_TITLE = 'Buying grid power on-peak while the battery pool sits idle';
@@ -128,13 +133,38 @@ async function afternoon(dayUtc: number, served: unknown): Promise<string> {
 }
 
 test('★★★ the push states the kWh above the reserve on the forecast\'s MEASURED pool capacity', { timeout: 30_000 }, async () => {
-  const body = await afternoon(Date.UTC(2026, 8, 28, 23, 0), forecast(MEASURED_WH)); // Mon 16:00 MST
+  const body = await afternoon(Date.UTC(2026, 8, 28, 23, 0), forecast(MEASURED_WH, 'measured')); // Mon 16:00 MST
   assert.match(body, /at 26% against a 16% reserve \(about 8\.7 kWh above it\), has not discharged/,
     `10 points of the measured 87.0 kWh, not of the 92.16 kWh nameplate: ${body}`);
   assert.doesNotMatch(body, /nameplate/);
 });
 
 test('★★ no measured capacity in the feed: the nameplate figure, named as the nameplate', { timeout: 30_000 }, async () => {
-  const body = await afternoon(Date.UTC(2026, 8, 29, 23, 0), forecast(null)); // Tue 16:00 MST
+  const body = await afternoon(Date.UTC(2026, 8, 29, 23, 0), forecast(null, null)); // Tue 16:00 MST
   assert.match(body, /\(about 9\.2 kWh above it on the nameplate capacity\), has not discharged/, body);
+});
+
+test('★★★ a forecast on the NAMEPLATE basis (no capacity ratio ever measured): the push names the nameplate', { timeout: 30_000 }, async () => {
+  // The forecast's pool figure as analytics builds it (backupFullCapWh × capacityScale, with the
+  // tracker's capacityBasis beside it), from the REAL tracker: the panel's one connected Core
+  // reports packs without fullCapMah, and nothing was ever persisted — the state of a fresh
+  // install, or of packs that never report capacity.
+  const CORE = 'COREXXX00XXX0001';
+  const now = Date.UTC(2026, 8, 30, 23, 0);
+  const panel = {
+    ...devices()[PANEL], lastUpdated: now,
+    projection: { ...devices()[PANEL].projection, sources: [{ sn: CORE, isConnected: true, fullCap: 30_720 }] },
+  };
+  const core = {
+    sn: CORE, deviceName: 'Core', productName: 'DELTA Pro Ultra', online: true, lastUpdated: now,
+    projection: { kind: 'dpu', packCount: 1, packs: [{ fullCapMah: null, designCapMah: 300_000 }] },
+  };
+  const basis = new PoolEnergyBasisTracker({ path: null }).evaluate({ [PANEL]: panel, [CORE]: core } as any, panel as any, now);
+  assert.equal(basis.capacityBasis, 'nameplate', 'no ratio measured: the tracker answers the nameplate');
+  assert.equal(basis.capacityScale, 1);
+  const served = forecast(NAMEPLATE_WH * basis.capacityScale, basis.capacityBasis);
+  assert.equal(served.poolFullWh, NAMEPLATE_WH, 'the forecast\'s pool figure IS the nameplate');
+  const body = await afternoon(now, served); // Wed 16:00 MST
+  assert.match(body, /\(about 9\.2 kWh above it on the nameplate capacity\), has not discharged/,
+    `the nameplate-basis figure is named, not presented as measured: ${body}`);
 });

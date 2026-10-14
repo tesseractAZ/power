@@ -14,6 +14,13 @@
  *   C-v     the push no longer names the nameplate basis
  *   C-vi    a verdict with no kWh figure still carries a basis
  *   C-vii   with no house panel the forecast's capacity is read anyway
+ *   C-viii  the forecast's own basis is ignored: any finite figure is taken as measured (review)
+ *   C-ix    an absent forecast basis vouches for the figure (the allowlist fails open)
+ *   C-x     'nameplate' is a measured basis
+ *   C-xi    'held' (a Core's persisted ratio) is not a measured basis
+ *   C-xii   'min-known' (the lowest ratio measured) is not a measured basis
+ *   C-xiii  a non-measured forecast's own figure is used under the nameplate label
+ *   C-xiv   the monitor tick passes the forecast's figure but not its basis (the review's finding)
  *   T-i     the English normalizer reads no range (every dash a pause again)
  *   T-ii    the Spanish normalizer reads no range
  *   T-iii   the Spanish normalizer reads ranges with " to "
@@ -28,6 +35,7 @@
  *   T-xii   the hyphen rule needs no unit (a bare number pair, a date read "to")
  *   T-xiii  am/pm or % before the hyphen is not a range ("10am-3pm")
  *   T-xiv   the hyphen unit list loses a source token its expansion keeps (not idempotent)
+ *   T-xv    the hyphen unit list loses "mins", a spelling the minute rule reads (review)
  *
  *   node scripts/mutate-v1187-23.mjs
  */
@@ -69,22 +77,22 @@ const MUTANTS = [
   {
     id: 'C-i. ★★★ idlePoolInputsFrom ignores the measured capacity',
     file: AM,
-    find: '    poolFullWh: p == null ? null : measured ? measuredPoolFullWh : nameplate,',
+    find: '    poolFullWh: p == null ? null : measured ? forecastWh : nameplate,',
     to: '    poolFullWh: p == null ? null : nameplate, /* MUTANT */',
     why: 'The push states (soc − reserve)% of the 92.16 kWh nameplate while the SoC is a share of ~87.0 kWh.',
   },
   {
     id: 'C-ii. ★★★ the monitor tick passes no measured capacity',
     file: AM,
-    find: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow?.poolFullWh)',
+    find: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow)',
     to: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs) /* MUTANT */',
     why: 'The fix is inert in production: the forecast feed holds the measured capacity and the detector never sees it.',
   },
   {
     id: 'C-iii. ★★ a zero, negative or non-finite measured capacity is taken as one',
     file: AM,
-    find: '  const measured = measuredPoolFullWh != null && Number.isFinite(measuredPoolFullWh) && measuredPoolFullWh > 0;',
-    to: '  const measured = measuredPoolFullWh != null; /* MUTANT */',
+    find: '  const measured = forecastWh != null && Number.isFinite(forecastWh) && forecastWh > 0\n',
+    to: '  const measured = forecastWh != null /* MUTANT */\n',
     why: 'A forecast with a broken pool figure pushes "about 0.0 kWh above it" (or NaN) as a measurement.',
   },
   {
@@ -111,9 +119,58 @@ const MUTANTS = [
   {
     id: 'C-vii. ★ with no house panel the forecast\'s capacity is read anyway',
     file: AM,
-    find: '    poolFullWh: p == null ? null : measured ? measuredPoolFullWh : nameplate,',
-    to: '    poolFullWh: measured ? measuredPoolFullWh : nameplate, /* MUTANT */',
+    find: '    poolFullWh: p == null ? null : measured ? forecastWh : nameplate,',
+    to: '    poolFullWh: measured ? forecastWh : nameplate, /* MUTANT */',
     why: 'Inputs claim a pool capacity for a panel that is not there.',
+  },
+  {
+    id: 'C-viii. ★★★ the forecast\'s own basis is ignored: any finite figure is taken as measured',
+    file: AM,
+    find: '    && forecastBasis != null && MEASURED_POOL_BASES.has(forecastBasis);',
+    to: '    ; /* MUTANT */',
+    why: 'A nameplate-basis forecast (no capacity ratio ever measured) carries the 92.16 kWh nameplate as its figure, and the push states it unlabelled, as if measured.',
+  },
+  {
+    id: 'C-ix. ★★ an absent forecast basis vouches for the figure',
+    file: AM,
+    find: '    && forecastBasis != null && MEASURED_POOL_BASES.has(forecastBasis);',
+    to: '    && (forecastBasis == null || MEASURED_POOL_BASES.has(forecastBasis)); /* MUTANT */',
+    why: 'A forecast that does not say how its figure was obtained (an older or hand-built one) is presented as measured.',
+  },
+  {
+    id: 'C-x. ★★★ \'nameplate\' is a measured basis',
+    file: AM,
+    find: "new Set<CapacityBasis>(['measured', 'held', 'min-known'])",
+    to: "new Set<CapacityBasis>(['measured', 'held', 'min-known', 'nameplate']) /* MUTANT */",
+    why: 'The forecast\'s nameplate figure is pushed with no qualifier.',
+  },
+  {
+    id: 'C-xi. ★ \'held\' is not a measured basis',
+    file: AM,
+    find: "new Set<CapacityBasis>(['measured', 'held', 'min-known'])",
+    to: "new Set<CapacityBasis>(['measured', 'min-known']) /* MUTANT */",
+    why: 'While a Core is not reporting (its persisted ratio stands in) the push falls back to the nameplate figure.',
+  },
+  {
+    id: 'C-xii. ★ \'min-known\' is not a measured basis',
+    file: AM,
+    find: "new Set<CapacityBasis>(['measured', 'held', 'min-known'])",
+    to: "new Set<CapacityBasis>(['measured', 'held']) /* MUTANT */",
+    why: 'While a Core has no held ratio (the lowest measured one stands in) the push falls back to the nameplate figure.',
+  },
+  {
+    id: 'C-xiii. ★★ a non-measured forecast\'s own figure is used under the nameplate label',
+    file: AM,
+    find: '    poolFullWh: p == null ? null : measured ? forecastWh : nameplate,',
+    to: '    poolFullWh: p == null ? null : (forecastWh != null && Number.isFinite(forecastWh) && forecastWh > 0 ? forecastWh : nameplate), /* MUTANT */',
+    why: 'A figure the forecast does not vouch for is pushed as "on the nameplate capacity" although it is not the panel\'s nameplate.',
+  },
+  {
+    id: 'C-xiv. ★★★ the monitor tick passes the forecast\'s figure but not its basis',
+    file: AM,
+    find: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow)',
+    to: "idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow == null ? null : { poolFullWh: forecastNow.poolFullWh, poolCapacityBasis: 'measured' }) /* MUTANT */",
+    why: 'The review\'s finding: the tick drops the forecast\'s basis, so a nameplate-basis forecast is labelled measured in production.',
   },
 
   /* ── ranges read "to" / "a" ── */
@@ -211,9 +268,16 @@ const MUTANTS = [
   {
     id: 'T-xiv. ★★ the hyphen unit list loses a source token its expansion keeps',
     file: TTS,
-    find: "|min|minutes?|s|seconds?|mo|months?|days?|",
-    to: "|min|minutes?|s|seconds?|months?|days?|",
+    find: "|mins?|minutes?|s|seconds?|mo|months?|days?|",
+    to: "|mins?|minutes?|s|seconds?|months?|days?|",
     why: '"4-7 mo" is left on the first pass and read "4 to 7 months" on the second: the normalizer is no longer idempotent.',
+  },
+  {
+    id: 'T-xv. ★★ the hyphen unit list loses "mins", a spelling the minute rule reads',
+    file: TTS,
+    find: "|hours?|mins?|minutes?|",
+    to: "|hours?|min|minutes?|",
+    why: '"4-7 mins" is read "4-7 minutes" on the first pass and "4 to 7 minutes" on the second: not idempotent, and a single-pass path speaks the hyphen.',
   },
 ];
 

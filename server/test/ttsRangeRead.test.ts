@@ -108,7 +108,7 @@ test('★★★ ES — the same ranges read "a"; a prose dash stays a pause', ()
 test('★★ both normalizers stay idempotent over ranges and their controls', () => {
   const samples = [
     peakGridDraw().title, label('super_off_peak'), label('overnight'),
-    '4-7pm', '10am-3pm', '36-38%', '5-10 min', '4-7 mo', '4-7s', '4-7 watts', '2-3 kWh',
+    '4-7pm', '10am-3pm', '36-38%', '5-10 min', '4-7 mins', '5-10mins', 'retry in 2-3 mins', '4-7 mo', '4-7s', '4-7 watts', '2-3 kWh',
     'Backup pool low — 20%', 'Core 3 – 45%', 'drift -3%', 'since 2026-10-12', 'Mon-Fri', 'lun–vie',
   ];
   for (const s of samples) {
@@ -117,4 +117,35 @@ test('★★ both normalizers stay idempotent over ranges and their controls', (
     const es = verbalizeForTtsEs(s);
     assert.equal(verbalizeForTtsEs(es), es, `ES not idempotent for: ${s}`);
   }
+});
+
+/* ══ v1.187.23 (review) — the hyphen unit list holds EVERY spelling a unit rule matches ══ */
+
+/** Every unit spelling the English unit rules read after a number (kWh … V, the time units in
+ *  each form the hour / minute / seconds / month rules accept, °F/°C, %), plus am/pm and the
+ *  words they expand to. A spelling a rule expands but the hyphen list lacks is left by the first
+ *  pass and read as a range by the second: the function is no longer idempotent. */
+const UNIT_SPELLINGS = [
+  'kWh', 'Wh', 'kWp', 'kW', 'W', 'mAh', 'Ah', 'mA', 'A', 'mV', 'kV', 'V',
+  'h', 'hr', 'hrs', 'hour', 'hours', 'min', 'mins', 'minute', 'minutes', 's', 'mo',
+  '°F', '°C', '%', 'am', 'pm',
+  'kilowatt hours', 'watt hours', 'kilowatts peak', 'kilowatts', 'watts', 'milliamp hours', 'amp hours',
+  'milliamps', 'amps', 'millivolts', 'kilovolts', 'volts', 'seconds', 'months', 'percent', 'degrees Fahrenheit',
+];
+
+test('★★ every unit spelling a unit rule reads: "4-7 <unit>" is a range on the FIRST pass, and both normalizers stay idempotent', () => {
+  for (const u of UNIT_SPELLINGS) {
+    for (const s of [`4-7 ${u}`, `4-7${u}`]) {
+      const en = verbalizeForTts(s);
+      assert.match(en, /^4 to 7(?!\d)/, `EN reads ${JSON.stringify(s)} as a range on the first pass: ${en}`);
+      assert.equal(verbalizeForTts(en), en, `EN not idempotent for: ${s}`);
+      const es = verbalizeForTtsEs(s);
+      assert.equal(verbalizeForTtsEs(es), es, `ES not idempotent for: ${s}`);
+    }
+  }
+  // The finding's own strings: "mins" was missing from the list, so the minute rule's expansion
+  // ("minutes") turned a left hyphen into a range only on the second pass.
+  assert.equal(verbalizeForTts('4-7 mins'), '4 to 7 minutes');
+  assert.equal(verbalizeForTts('retry in 2-3 mins'), 'retry in 2 to 3 minutes');
+  assert.equal(verbalizeForTts('5-10mins'), '5 to 10 minutes');
 });

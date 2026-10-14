@@ -162,7 +162,9 @@ function numberWord(n: number): string {
  *  - a hyphen between two weekday names ("Mon-Fri") is a range too.
  * Idempotent: every tight dash it does not read is a pause after the separator rule, and the
  * hyphen rule's unit list holds both every unit token and every word the unit rules expand it to,
- * so a second pass finds nothing the first did not.
+ * so a second pass finds nothing the first did not. Every spelling a unit rule matches is a token
+ * here — "mins" as well as "min", both of which the minute rule expands to "minutes": with "mins"
+ * missing, "4-7 mins" was left on the first pass and read "4 to 7 minutes" on the second.
  */
 const EN_WEEKDAYS = 'Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday';
 const ES_WEEKDAYS = 'lun|mar|mié|mie|jue|vie|sáb|sab|dom|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
@@ -177,7 +179,7 @@ const RANGE_DASH_RE = new RegExp(
   'gi',
 );
 const RANGE_UNITS_AFTER =
-  'am|pm|kWh|kWp|Wh|kW|W|mAh|Ah|mA|A|mV|kV|V|h|hrs?|hours?|min|minutes?|s|seconds?|mo|months?|days?|weeks?|years?|points?'
+  'am|pm|kWh|kWp|Wh|kW|W|mAh|Ah|mA|A|mV|kV|V|h|hrs?|hours?|mins?|minutes?|s|seconds?|mo|months?|days?|weeks?|years?|points?'
   + '|kilowatts?|watts?|milliamps?|amps?|millivolts?|kilovolts?|volts?|percent|degrees'
   + '|horas?|minutos?|segundos?|días?|semanas?|meses|años?|puntos?|vatios?|voltios?|grados|por ciento';
 /** A hyphen-minus between two numbers, the right one carrying a unit. */
