@@ -9,8 +9,8 @@ import {
   armedExpectedPhrase, chargeIsWindowBound, chargeLevelPct, chargeReservePct, floorCushionLinePct, fmtPhoenixDayHm,
   noChargeExpected, statedBuyKwh,
 } from './nightChargeAdvisor.js';
-import { forceChargeStopPct, type ForceChargeNightOutcome } from './nightForceCharge.js';
-import { isNoChargeKwh } from './nightChargeActuator.js';
+import { forceChargeStopPct, partialForceChargeOnFailureSlots, type ForceChargeNightOutcome } from './nightForceCharge.js';
+import { isNoChargeKwh, RESERVE_WRITE_MAX_PCT, type NightChargeMode } from './nightChargeActuator.js';
 
 /**
  * v1.120.0 — NOTIFY HTTP BUDGETS.
@@ -401,6 +401,9 @@ export function buildNightChargeMessage(
    *  (armRefusalReason): the push says no write is armed, and why, instead of recommending the
    *  level and draw of a write nothing will make. null/omitted = not refused. */
   armRefused?: string | null,
+  /** v1.187.22 — NIGHT_CHARGE_MODE, for the refused shape's name of the write: "the supervised
+   *  write" in supervised mode, "the write" in auto. Omitted = supervised. */
+  mode?: NightChargeMode,
 ): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_plan' };
 
@@ -423,6 +426,10 @@ export function buildNightChargeMessage(
   // (floorCushionLinePct — the reserve floor plus the cushion as applied), not the legacy
   // reserveFloorPct + cushionPct band the charge shape used to state beside the hold's line.
   const line = floorCushionLinePct(plan);
+
+  // v1.187.22 — a night expected to charge NOTHING (noChargeExpected: the pool is expected to stay
+  // at or above the level the write drives it to) is not a charge (see the charge shape below).
+  const held = noChargeExpected(plan);
 
   // v1.60.0 — EV contention. The car and the charger share one grid input, so a
   // predicted overnight session comes straight out of the buy. Two shapes, and
@@ -491,23 +498,34 @@ export function buildNightChargeMessage(
   }
 
   // shape === 'charge'
+  // v1.187.22 — a night expected to charge NOTHING (`held`) is not a charge. Every line said
+  // "charging to ~50% tonight (~0 kWh)"; it says what happens: the reserve is held as a floor
+  // overnight and no charge is expected.
+  const reservePct = supervised?.targetPct ?? chargeReservePct(plan);
+  const reserveText = reservePct == null ? '—' : `${reservePct}%`;
   // v1.187.22 — a supervised or auto mode refused to arm tonight's write (armRefusalReason). The
   // plan's level and expected draw describe that write, and nothing will make it: the advisory
-  // contract writes the reserve alone, and the add-on arms nothing. Say so, and why.
+  // contract writes the reserve alone, and the add-on arms nothing. Say so, and why — for the
+  // night the plan is: a charge, or the reserve held as a floor with no charge expected. In auto
+  // mode it is "the write": nothing about it is supervised.
   if (!supervised && armRefused) {
-    return {
-      ...base,
-      title: 'Night-charge: planned charge NOT armed tonight',
-      body:
-        `Tonight's plan calls for a charge, but the supervised write was not armed — ${armRefused}. `
-        + `The add-on will not charge tonight.${shortfallNote}`,
-    };
+    const write = mode === 'auto' ? 'the write' : 'the supervised write';
+    return held
+      ? {
+        ...base,
+        title: 'Night-charge: planned reserve hold NOT armed tonight',
+        body:
+          `Tonight's plan holds the backup reserve at ${reserveText} overnight as a floor, with no charge expected, but ${write} `
+          + `was not armed — ${armRefused}. The add-on will not raise the reserve tonight.${shortfallNote}`,
+      }
+      : {
+        ...base,
+        title: 'Night-charge: planned charge NOT armed tonight',
+        body:
+          `Tonight's plan calls for a charge, but ${write} was not armed — ${armRefused}. `
+          + `The add-on will not charge tonight.${shortfallNote}`,
+      };
   }
-  // v1.187.22 — a night expected to charge NOTHING (noChargeExpected: the pool is expected to stay
-  // at or above the level the write drives it to) is not a charge. Every line said "charging to
-  // ~50% tonight (~0 kWh)"; it says what happens: the reserve is held as a floor overnight and no
-  // charge is expected.
-  const held = noChargeExpected(plan);
   const overBuyNote = plan.bindingCap === 'overBuy'
     ? ' NOTE: the buy exceeds tomorrow morning’s PV headroom; a small clip is accepted to hold resilience.'
     : '';
@@ -524,8 +542,8 @@ export function buildNightChargeMessage(
   // the level when the window cannot get there (chargeIsWindowBound); the worst-case arrival is
   // the rationale's and the card's, labelled.
   const forceCeiling = supervised?.forceChargeTargetPct ?? null;
-  const reservePct = supervised?.targetPct ?? chargeReservePct(plan);
-  const reserveText = reservePct == null ? '—' : `${reservePct}%`;
+  // v1.187.22 — the level the night is expected to reach (chargeLevelPct): on a force-charge night
+  // with no just-in-time start expected, the reserve, not the force-charge stop it stands by for.
   const level = chargeLevelPct(plan);
   const expected = statedBuyKwh(plan);
   const levelText = level == null ? '—' : `~${round1(level)}%`;
@@ -571,9 +589,12 @@ export function buildNightChargeMessage(
   // The worst case stays in the rationale and the card, labelled as the sizing basis. The
   // whole-house island troughs are labelled as such: with the grid present the SHP2 holds the
   // reserve, so neither is where the pool is expected to go.
+  // v1.187.22 — no EV-contention note on a night expected to charge nothing: "leaving ~2.5 kW for
+  // the packs while the car charges" (or "the packs will receive less than planned") describes a
+  // pack charge the night is not expected to make.
   const projection = `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
     + `without ${held ? "tonight's write" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. `
-    + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${evNote} `;
+    + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;
   if (held) {
     // Where the pool is expected to open the window, when that is at or above the reserve (the
     // reason nothing is charged); a figure under it would contradict the clause, so none is given.
@@ -606,14 +627,17 @@ export function buildNightChargeMessage(
  * states what the night DID, from the actuation record:
  *  - the reserve: raised to its target — or, on a night expected to charge nothing
  *    (isNoChargeKwh), held there overnight as a floor;
- *  - the force-charge, when it rode the night (forceChargeNightOutcome): it ran (a readback proved
- *    the ON), was switched ON but never confirmed, did not take effect, or never started.
+ *  - the force-charge, when it rode the night (forceChargeNightOutcome — the arm-time stamp, not
+ *    the option at the restore): it ran (a readback proved the ON), was switched ON but never
+ *    confirmed, did not take effect — on every slot, or "on slot(s) 2" when the others took it
+ *    (the ON-failure push's own "on those slot(s)") — or never started.
  *    armedForceChargeStopPct alone (the armed ceiling and the option) named "force-charge toward
  *    ~80%" on nights decideForceCharge never started it;
  *  - the buy: the EXPECTED figure on the armed day's plan row (armedExpectedPhrase), or none —
- *    named only beside a night that ran as planned (reserve only, or a force-charge that ran),
- *    since on a force-charge night it covers the force-charge leg too. The armed record's buyKwh
- *    is the worst case the plan was sized on and is never pushed.
+ *    named only beside an account of the legs it counts (ForceChargeNightOutcome.expectedLeg):
+ *    reserve only with a figure that counts no force-charge leg, or a force-charge that ran with a
+ *    figure that counts it. The armed record's buyKwh is the worst case the plan was sized on and
+ *    is never pushed.
  * A restore that ENDED the night early — an owner cancel after the write, or a grid-loss abort —
  * is not a completed charge: it says so, with no figure. PURE.
  */
@@ -643,8 +667,14 @@ export function buildNightChargeMorningSummary(o: {
   }
   const held = isNoChargeKwh(o.expectedKwh);
   const expected = armedExpectedPhrase(o.expectedKwh);
-  const note = expected ? ` (${expected})` : '';
-  const fc = o.forceCharge ?? { kind: 'none' as const };
+  const fc: ForceChargeNightOutcome = o.forceCharge ?? { kind: 'none', expectedLeg: false };
+  // v1.187.22 — the figure rides only an account of the legs it counts: reserve only beside a
+  // figure that counts no force-charge leg, a force-charge that ran beside one that counts it.
+  // Never "reserve raised to 50% (~34.9 kWh expected)" beside a figure that may count a force-charge
+  // leg (a record armed before the stamp, the option off by the restore), nor "force-charge ran"
+  // beside a reserve-only figure, nor beside a leg that never started, failed or never confirmed.
+  const figureFits = fc.kind === 'none' ? fc.expectedLeg === false : fc.kind === 'ran' && fc.expectedLeg === true;
+  const note = expected && figureFits ? ` (${expected})` : '';
   const restored = `the reserve is restored to ${o.restorePct}%. `;
   let night: string;
   if (fc.kind === 'none') {
@@ -654,10 +684,17 @@ export function buildNightChargeMorningSummary(o: {
   } else {
     const reserve = held ? `the reserve was held at ${raised} overnight as a floor (no charge was expected)` : `reserve raised to ${raised}`;
     const toward = fc.stopPct != null && Number.isFinite(fc.stopPct) ? ` toward ~${round1(fc.stopPct)}%` : '';
+    // v1.187.22 — a PARTIAL failure (the other slots took the ON) is not "did not take effect":
+    // the slots, as the ON-failure push named them ("will not happen on those slot(s)").
+    const failedOn = fc.kind === 'failed' && fc.partialSlots != null
+      ? `was switched ON but did not take effect on slot(s) ${fc.partialSlots.join(', ')} (the buy above the reserve did not happen on those slot(s))`
+      : 'was switched ON but did not take effect';
+    // (`note` is decided once, by figureFits: empty beside a force-charge that never started,
+    // failed or never confirmed.)
     night = fc.kind === 'ran'
       ? `${reserve}, and force-charge ran${toward}${note}; ${restored}`
-      : `${reserve}; force-charge${toward} ${fc.kind === 'neverStarted' ? 'never started'
-        : fc.kind === 'failed' ? 'was switched ON but did not take effect'
+      : `${reserve}${note}; force-charge${toward} ${fc.kind === 'neverStarted' ? 'never started'
+        : fc.kind === 'failed' ? failedOn
           : 'was switched ON but the panel never confirmed it'}; ${restored}`;
   }
   return {
@@ -695,6 +732,38 @@ export function buildNightChargeApplyFailure(o: {
       + `still reads ${o.currentReservePct ?? 'unknown'}% (target ${o.targetPct ?? '—'}%) after ${o.applyRetries} re-issues. `
       + `Tonight's planned ${planned} will not happen; the pool stays on its normal floor. `
       + 'No action needed tonight — the grid is available as backup — but if this repeats, check the SHP2 cloud link.',
+  };
+}
+
+/**
+ * v1.187.22 — the warning sent when a force-charge ON never took effect (decideForceCharge's
+ * onFailed: the re-issue spent, or too close to the window end for one). It names where the
+ * force-charge stops (forceChargeStopPct: "toward ~80%"), as every other surface does — it named
+ * the raw ceiling ("toward 80.4%"), which the force-charge never reaches. A failure on only some of
+ * our slots (partialForceChargeOnFailureSlots) says the buy "will not happen on those slot(s)". PURE.
+ */
+export function buildNightForceChargeOnFailure(o: {
+  day: string | null;
+  /** The slots still reading OFF (onFailed's slots). */
+  slots: number[];
+  /** Every slot of ours (the record's forceChargeSlots). */
+  ourSlots: number[] | null;
+  retries: number;
+  noRetry: boolean;
+  /** The armed ceiling (forceChargeCeilingPct). */
+  ceilingPct: number | null;
+}): NotifyMessage {
+  const partial = partialForceChargeOnFailureSlots({ forceChargeSlots: o.ourSlots, forceChargeOnFailedSlots: o.slots }) != null;
+  const toward = o.ceilingPct != null && Number.isFinite(o.ceilingPct) ? ` (toward ~${round1(forceChargeStopPct(o.ceilingPct))}%)` : '';
+  return {
+    severity: 'warning',
+    dedupId: 'night_charge_force_charge_on_failure',
+    title: 'Night-charge: force-charge did not take effect',
+    body:
+      `The night-charge for ${o.day ?? '—'} switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 `
+      + `still reads slot(s) ${o.slots.join(', ')} OFF after ${o.retries} re-issue(s)${o.noRetry ? ' (too close to the window end to re-issue)' : ''}. `
+      + `Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve${toward} will not happen${partial ? ' on those slot(s)' : ''}; `
+      + 'the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link.',
   };
 }
 

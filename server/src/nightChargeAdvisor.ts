@@ -367,7 +367,8 @@ export interface NightChargePlan {
    *  (expectedBuyFromPlan's forceChargeStartMs), or null when no start is expected (the pool stays
    *  at or near the stop). Absent on a reserve-only night, with no P50 basis, on a hold and on
    *  plans issued before it. Read by the supervised push, which says when force-charge is expected
-   *  to switch on; disclosure only. */
+   *  to switch on, and by chargeLevelPct: with no start expected the night is expected to reach the
+   *  reserve, not the stop, and every line states the reserve. Disclosure only. */
   expectedForceChargeStartMs?: number | null;
   /** PREDICTION: the pack SoC % the window is expected to actually REACH by its
    *  close, given every cap — including the v1.60.0 EV-contention derate. This
@@ -901,15 +902,20 @@ export function expectedBuyFromPlan(o: {
  * for a write that would have drawn ≈34 kWh, and the night was cancelled on the figure.
  */
 
-/** v1.187.22 — the level tonight's write drives the pool to, %: plan.expectedWriteLevelPct
- *  (armedWriteLevelPct — the reserve as written, or the force-charge stop when force-charge rides
- *  the night); on a plan issued before it, the reserve as written (clampReserveTarget). null with
- *  neither (a hold, a null plan). PURE. */
-export function chargeLevelPct(plan: Pick<NightChargePlan, 'setpointSocPct' | 'expectedWriteLevelPct'>): number | null {
+/** v1.187.22 — the level tonight's night is expected to REACH, % — the level every line states:
+ *  plan.expectedWriteLevelPct (armedWriteLevelPct — the reserve as written, or the force-charge stop
+ *  when force-charge rides the night), except on a force-charge night with no just-in-time start
+ *  expected (expectedForceChargeStartMs === null), where the night stops at the reserve as written
+ *  and the force-charge only stands by: from 40% under a 51% ceiling the write charges ~18 kWh to
+ *  the 50% reserve, and every line said "to ~51%". On a plan issued before v1.187.22, the reserve
+ *  as written (clampReserveTarget). null with neither (a hold, a null plan). PURE. */
+export function chargeLevelPct(
+  plan: Pick<NightChargePlan, 'setpointSocPct' | 'expectedWriteLevelPct' | 'expectedForceChargeStartMs'>,
+): number | null {
+  const reserve = chargeReservePct(plan);
   const level = plan.expectedWriteLevelPct;
-  if (level != null && Number.isFinite(level)) return level;
-  const setpoint = plan.setpointSocPct;
-  return setpoint != null && Number.isFinite(setpoint) ? clampReserveTarget(setpoint) : null;
+  if (level == null || !Number.isFinite(level)) return reserve;
+  return plan.expectedForceChargeStartMs === null && reserve != null ? reserve : level;
 }
 
 /** v1.187.22 — the window closes before the write reaches chargeLevelPct
@@ -1710,11 +1716,15 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // window, the expected draw (no kWh with no P50 basis). The worst case follows once, in its own
   // sentence labelled as the sizing basis (sizingNote), the de-bias disclosure beside it.
   // A night expected to charge nothing (isNoChargeKwh) is headlined as the reserve it holds, not
-  // as a charge of ~0 kWh to a level the pool already sits above.
+  // as a charge of ~0 kWh to a level the pool already sits above. The level is the one the night is
+  // expected to reach (chargeLevelPct): the reserve when no force-charge start is expected.
   const windowText = `${fmtPhoenixDayHm(windowStart, nowMs)}–${fmtPhoenixDayHm(windowEnd, nowMs)} window`;
+  const headlineLevelPct = chargeLevelPct({
+    setpointSocPct, expectedWriteLevelPct: expected.levelPct, expectedForceChargeStartMs: expected.forceChargeStartMs,
+  }) ?? writtenPct;
   const chargeHeadline = isNoChargeKwh(expected.buyKwh)
     ? `Hold the reserve at ${writtenPct}% in the ${windowText}: no charge expected.`
-    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the ${windowText}`
+    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${headlineLevelPct}% in the ${windowText}`
       + `${expected.buyKwh == null ? '' : `: ~${round1(expected.buyKwh)} kWh expected`}.`;
   const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote)}${projSocAtWindowStartPct != null
     ? `, from ~${projSocAtWindowStartPct}% at the window open` : ''}, projecting ~${targetSocPct}% by ${fmtLocalHint(windowEnd)}.`;

@@ -10,18 +10,21 @@ import {
 } from '../src/nightChargeAdvisor.js';
 import {
   armedWriteLevelPct, forceChargeEnabled, forceChargeStartAtMs, forceChargeStopPct, FORCE_CHARGE_MIN_RUN_MS,
-  armedForceChargeStopPct, forceChargeNightOutcome, type ForceChargeNightOutcome,
+  armedForceChargeStopPct, forceChargeNightOutcome, type ForceChargeNightOutcome, partialForceChargeOnFailureSlots,
 } from '../src/nightForceCharge.js';
 import {
   armFromPlan, emptyActuationState, nightChargeSpokenNotice, RESERVE_WRITE_MAX_PCT, MAX_SPOKEN_ADVISORY_CHARS,
   armRefusalReason, APPLY_LATE_MS, type NightActuationState,
   isNoChargeKwh, NO_CHARGE_EXPECTED_KWH, servedArmRefusal, coerceArmRefusalRecord,
+  coerceActuationState, eveningNotArmedReason, ARM_UNDELIVERED_REASON,
 } from '../src/nightChargeActuator.js';
-import { buildNightChargeMessage, buildNightChargeMorningSummary, buildNightChargeApplyFailure } from '../src/notify.js';
+import {
+  buildNightChargeMessage, buildNightChargeMorningSummary, buildNightChargeApplyFailure, buildNightForceChargeOnFailure,
+} from '../src/notify.js';
 import { SENSORS, sensorDiscoveryConfig } from '../src/mqttDiscovery.js';
 import {
   chargeFigureParts, sizingLine, holdSummary, refusedArmLead, floorCushionLinePct as webFloorCushionLinePct, fmtLinePct,
-  NO_CHARGE_EXPECTED_KWH as WEB_NO_CHARGE_EXPECTED_KWH,
+  NO_CHARGE_EXPECTED_KWH as WEB_NO_CHARGE_EXPECTED_KWH, noChargeExpected as webNoChargeExpected, writtenReservePct,
 } from '../../web/src/cards/nightChargeText.js';
 
 /**
@@ -588,13 +591,14 @@ test('★★★ MQTT: night_charge_expected_buy_kwh publishes the expected figur
  *  evening job and the actuation tick are not reachable from a unit test; the wiring pins below
  *  hold index.ts to these calls). */
 function nightTexts(p: NightChargePlan): Array<[string, string]> {
-  const armed = armFromPlan(emptyActuationState(), '2026-10-12', p, NOW, 16)!;
-  assert.ok(armed, 'an armable plan');
   // Force-charge rides the night exactly when the plan was made with it enabled (index.ts passes
-  // forceChargeOn() to both): the plan's level is then above the reserve maximum.
-  const fcOn = (chargeLevelPct(p) ?? 0) > RESERVE_WRITE_MAX_PCT;
-  const ceiling = fcOn && armed.forceChargeCeilingPct != null && armed.forceChargeCeilingPct > RESERVE_WRITE_MAX_PCT
-    ? armed.forceChargeCeilingPct : null;
+  // forceChargeOn() to both): the write's level is then above the reserve maximum. The arm stamps
+  // it (forceChargeRides), and the push names the force-charge from the stamp, as index.ts does.
+  const fcOn = (p.expectedWriteLevelPct ?? 0) > RESERVE_WRITE_MAX_PCT;
+  const armed = armFromPlan(emptyActuationState(), '2026-10-12', p, NOW, 16, fcOn)!;
+  assert.ok(armed, 'an armable plan');
+  assert.equal(armed.forceChargeRides, fcOn);
+  const ceiling = armed.forceChargeRides === true ? armed.forceChargeCeilingPct : null;
   const sup = buildNightChargeMessage(p, 'charge', { cancelDeadlineText: 'at 00:00', targetPct: armed.targetPct!, forceChargeTargetPct: ceiling });
   const reserveOnly = buildNightChargeMessage(p, 'charge', { cancelDeadlineText: 'at 00:00', targetPct: armed.targetPct! });
   const advisory = buildNightChargeMessage(p, 'charge');
@@ -620,21 +624,27 @@ function nightTexts(p: NightChargePlan): Array<[string, string]> {
   })] as const);
   const cancelled = buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: armed.targetPct, restorePct: 16, expectedKwh, forceCharge: forceChargeNightOutcome(armed, fcOn), ended: 'cancelled' });
   const failed = buildNightChargeApplyFailure({ day: '2026-10-12', currentReservePct: 16, targetPct: armed.targetPct, applyRetries: 2, expectedKwh });
-  // v1.187.22 — a write mode that refused to arm: no level, no draw.
-  const refused = buildNightChargeMessage(p, 'charge', null, 'the 2026-10-11 force-charge was switched ON and its OFF has not verified');
-  // The card's lead (the dashboard, not pushed, held to the same rule), and its refused-arm lead.
+  // v1.187.22 — a write mode that refused to arm: no level, no draw (supervised and auto).
+  const why = 'the 2026-10-11 force-charge was switched ON and its OFF has not verified';
+  const refused = buildNightChargeMessage(p, 'charge', null, why);
+  const refusedAuto = buildNightChargeMessage(p, 'charge', null, why, 'auto');
+  // The card's lead (the dashboard, not pushed, held to the same rule), and its refused-arm lead, as
+  // NightChargeCard builds it.
   const card = chargeFigureParts(p, RESERVE_WRITE_MAX_PCT);
-  const cardRefused = refusedArmLead('the 2026-10-11 force-charge was switched ON and its OFF has not verified');
+  const cardRefused = refusedArmLead(why, { mode: 'supervised', held: webNoChargeExpected(p), reservePct: writtenReservePct(p, RESERVE_WRITE_MAX_PCT) });
+  const cardUndelivered = refusedArmLead(ARM_UNDELIVERED_REASON, { mode: 'auto', held: webNoChargeExpected(p), reservePct: writtenReservePct(p, RESERVE_WRITE_MAX_PCT) });
   return [
     ['push title', sup.title], ['push body', sup.body], ['push body (reserve only)', reserveOnly.body],
     ['advisory title', advisory.title], ['advisory body', advisory.body],
     ['refused-arm title', refused.title], ['refused-arm body', refused.body],
+    ['refused-arm title (auto)', refusedAuto.title], ['refused-arm body (auto)', refusedAuto.body],
     ['spoken en', spoken.en], ['spoken es', spoken.es],
     ...mornings.flatMap(([what, m]): Array<[string, string]> => [[`morning title (${what})`, m.title], [`morning body (${what})`, m.body]]),
     ['cancelled title', cancelled.title], ['cancelled body', cancelled.body],
     ['apply-failure title', failed.title], ['apply-failure body', failed.body],
     ['card lead', `${card.main}${card.unit} ${card.label}`],
     ['card lead (refused)', `${cardRefused.headline} ${cardRefused.detail}`],
+    ['card lead (not delivered)', `${cardUndelivered.headline} ${cardUndelivered.detail}`],
   ];
 }
 /** The energy figures a text states: a number followed by kWh, kilowatt or kilovatio. */
@@ -656,6 +666,8 @@ test('★★★ no spoken or pushed night-charge text states the worst case: the
     ['Friday one-hour window', fridayPlan()],
     // v1.187.22 (recheck) — nights expected to charge nothing (reserve only; force-charge with no start).
     ['74%, reserve only', plan({ socNowPct: 74, forceChargeEligible: false })], ['100%, force-charge', plan({ socNowPct: 100 })],
+    // v1.187.22 (recheck 3) — force-charge armed, not expected to start; the reserve leg charges.
+    ['40% under a 51% ceiling', plan({ socNowPct: 40, costMaxSocPct: 51 })],
   ];
   for (const [name, p] of cases) {
     const expected = statedBuyKwh(p);
@@ -783,7 +795,7 @@ test('★★ the morning summary and the apply-failure push: the armed day\'s ex
   // force-charge leg, so it is named beside where that leg stops, not beside the 50% reserve alone.
   // (v1.187.22 recheck: what the force-charge did is the actuation record's — the ran /
   // unconfirmed / failed / never-started shapes are pinned in the force-charge outcome test.)
-  assert.equal(buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: 34.88, forceCharge: { kind: 'ran', stopPct: 80 } }).body,
+  assert.equal(buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: 34.88, forceCharge: { kind: 'ran', stopPct: 80, expectedLeg: true } }).body,
     'Supervised night charge for 2026-10-12 completed: reserve raised to 50%, and force-charge ran toward ~80% (~34.9 kWh expected); '
     + "the reserve is restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update.");
   const f = buildNightChargeApplyFailure({ day: '2026-10-12', currentReservePct: 16, targetPct: 50, applyRetries: 2, expectedKwh: 34.88 });
@@ -1114,7 +1126,7 @@ test('★★ the morning push after a cancel or a grid-loss abort says the night
   // Every successful revert sent "Supervised night charge … completed: reserve raised to 50% (~34.9
   // kWh expected)", including an owner cancel after the write and a grid-loss abort — a charge
   // that was stopped, reported as completed with its full expected purchase.
-  const cancelled = buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: 34.88, forceCharge: { kind: 'ran', stopPct: 80 }, ended: 'cancelled' });
+  const cancelled = buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: 34.88, forceCharge: { kind: 'ran', stopPct: 80, expectedLeg: true }, ended: 'cancelled' });
   assert.equal(cancelled.title, 'Night-charge: cancelled — reserve restored to 16%');
   assert.equal(cancelled.body, 'Supervised night charge for 2026-10-12 was cancelled after the write: the reserve, raised to 50%, is restored to 16% and nothing more is charged tonight.');
   const lost = buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: 34.88, ended: 'gridLoss' });
@@ -1160,8 +1172,8 @@ test('★★ HA: the worst-case arrival entity is named for it — same unique_i
 
 test('★★ wiring (index.ts is not reachable from a unit test): the refused arm, "toward" on the speakers, the morning push', () => {
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-  assert.match(idx, /armedCandidate = armFromPlan\(nightActuationMem, today, plan, nowMs, plan\.reserveFloorPct\);\n\s+if \(!armedCandidate\) armRefused = armRefusalReason\(nightActuationMem, plan, nowMs, plan\.reserveFloorPct\);/);
-  assert.match(idx, /const msg = buildNightChargeMessage\(plan, shape, supervisedCtx, armRefused\);/);
+  assert.match(idx, /armedCandidate = armFromPlan\(nightActuationMem, today, plan, nowMs, plan\.reserveFloorPct, forceChargeOn\(\)\);\n\s+if \(!armedCandidate\) armRefused = armRefusalReason\(nightActuationMem, plan, nowMs, plan\.reserveFloorPct\);/);
+  assert.match(idx, /const msg = buildNightChargeMessage\(plan, shape, supervisedCtx, armRefused, NIGHT_CHARGE_MODE\);/);
   assert.match(idx, /\n\s+expectedKwh: statedBuyKwh\(plan\),\n\s+toward: chargeIsWindowBound\(plan\),\n/);
   assert.match(idx, /\n\s+expectedKwh: armedExpectedBuyKwh\(state\.day\),\n\s+forceCharge: forceChargeNightOutcome\(state, forceChargeOn\(\)\),\n\s+ended: action\.gridLossAbort \? 'gridLoss' : state\.cancelled \? 'cancelled' : 'window',\n/);
   // What the force-charge did is read from the record, never from the armed ceiling and the option alone.
@@ -1299,24 +1311,39 @@ test('★★★ the morning push states what the force-charge actually did, from
   // started it (the ceiling never read back, Charge Now already on, the grid unknown, no slot
   // readback, vitals red, the pool already at the stop).
   const p = plan();
-  const armed = armFromPlan(emptyActuationState(), '2026-10-12', p, NOW, 16)!;
+  // v1.187.22 (recheck 3) — armed with force-charge enabled: the record carries the stamp.
+  const armed = armFromPlan(emptyActuationState(), '2026-10-12', p, NOW, 16, true)!;
+  assert.equal(armed.forceChargeRides, true);
   const onAt = phx(10, 13, 2, 43);
   const ran: NightActuationState = { ...armed, forceChargeOnAtMs: onAt, forceChargeOnVerifiedAtMs: onAt + 60_000 };
   const failed: NightActuationState = { ...armed, forceChargeOnAtMs: onAt, forceChargeOnFailedAtMs: onAt + 600_000 };
   const late: NightActuationState = { ...failed, forceChargeOnVerifiedAtMs: onAt + 900_000 };
   const unconfirmed: NightActuationState = { ...armed, forceChargeOnAtMs: onAt };
+  // A record armed before the stamp: whether force-charge rode is read from the option now.
+  const legacy: NightActuationState = { ...armed, forceChargeRides: null };
+  const leg = { expectedLeg: true };
   const outcomes: Array<[string, NightActuationState, boolean, ForceChargeNightOutcome]> = [
-    ['never started', armed, true, { kind: 'neverStarted', stopPct: 80 }],
-    ['ran', ran, true, { kind: 'ran', stopPct: 80 }],
-    ['failed', failed, true, { kind: 'failed', stopPct: 80 }],
-    ['applied after the warning', late, true, { kind: 'ran', stopPct: 80 }],
-    ['unconfirmed', unconfirmed, true, { kind: 'unconfirmed', stopPct: 80 }],
-    // Force-charge off: never armed above the reserve — unless something of ours was switched ON.
-    ['disabled, never on', armed, false, { kind: 'none' }],
-    ['disabled, but switched on', ran, false, { kind: 'ran', stopPct: 80 }],
-    ['reserve-only ceiling', { ...armed, forceChargeCeilingPct: 50 }, true, { kind: 'none' }],
-    ['no ceiling', { ...armed, forceChargeCeilingPct: null }, true, { kind: 'none' }],
-    ['on with no ceiling', { ...unconfirmed, forceChargeCeilingPct: null }, true, { kind: 'unconfirmed', stopPct: null }],
+    ['never started', armed, true, { kind: 'neverStarted', stopPct: 80, ...leg }],
+    ['ran', ran, true, { kind: 'ran', stopPct: 80, ...leg }],
+    ['failed', failed, true, { kind: 'failed', stopPct: 80, ...leg, partialSlots: null }],
+    ['applied after the warning', late, true, { kind: 'ran', stopPct: 80, ...leg }],
+    ['unconfirmed', unconfirmed, true, { kind: 'unconfirmed', stopPct: 80, ...leg }],
+    // The stamp, not the option at the restore: a restart with force-charge switched off does not
+    // turn the armed-to-ride night into "reserve only".
+    ['armed to ride, option off by the restore', armed, false, { kind: 'neverStarted', stopPct: 80, ...leg }],
+    ['armed to ride, option off, but switched on', ran, false, { kind: 'ran', stopPct: 80, ...leg }],
+    // Armed with force-charge disabled: reserve only — unless something of ours was switched ON.
+    ['armed disabled, option on by the restore', { ...armed, forceChargeRides: false }, true, { kind: 'none', expectedLeg: false }],
+    ['armed disabled, but switched on', { ...ran, forceChargeRides: false }, true, { kind: 'ran', stopPct: 80, expectedLeg: false }],
+    ['reserve-only ceiling', { ...armed, forceChargeCeilingPct: 50, forceChargeRides: false }, true, { kind: 'none', expectedLeg: false }],
+    ['no ceiling', { ...armed, forceChargeCeilingPct: null, forceChargeRides: false }, true, { kind: 'none', expectedLeg: false }],
+    ['on with no ceiling', { ...unconfirmed, forceChargeCeilingPct: null, forceChargeRides: false }, true, { kind: 'unconfirmed', stopPct: null, expectedLeg: false }],
+    // Before the stamp: the option now decides whether it rode, and whether the figure counts a
+    // force-charge leg is unknown while the armed ceiling sat above the reserve maximum.
+    ['before the stamp, enabled', legacy, true, { kind: 'neverStarted', stopPct: 80, expectedLeg: null }],
+    ['before the stamp, disabled', legacy, false, { kind: 'none', expectedLeg: null }],
+    ['before the stamp, no ceiling', { ...legacy, forceChargeCeilingPct: null }, true, { kind: 'none', expectedLeg: false }],
+    ['before the stamp, ran', { ...ran, forceChargeRides: null }, false, { kind: 'ran', stopPct: 80, expectedLeg: null }],
   ];
   for (const [name, rec, enabled, want] of outcomes) assert.deepEqual(forceChargeNightOutcome(rec, enabled), want, name);
   const body = (rec: NightActuationState, expectedKwh: number | null = 34.88) => buildNightChargeMorningSummary({
@@ -1340,7 +1367,7 @@ test('★★★ the morning push states what the force-charge actually did, from
   assert.equal(body(armed, 0), 'Supervised night charge for 2026-10-12 completed: the reserve was held at 50% overnight as a floor '
     + `(no charge was expected); force-charge toward ~80% never started; the reserve is restored to 16%. ${tail}`);
   // Reserve only: as before.
-  assert.equal(buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: 5.05, forceCharge: { kind: 'none' } }).body,
+  assert.equal(buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: 5.05, forceCharge: { kind: 'none', expectedLeg: false } }).body,
     `Supervised night charge for 2026-10-12 completed: reserve raised to 50% (~5.1 kWh expected) and restored to 16%. ${tail}`);
 });
 
@@ -1413,11 +1440,12 @@ test('★★ a refused arm: the card leads with "not armed tonight — <reason>"
   // The card renders it in place of the expected charge (a source pin: the card is not reachable
   // from a unit test).
   const card = readFileSync(new URL('../../web/src/cards/NightChargeCard.tsx', import.meta.url), 'utf8');
-  assert.match(card, /const refused = status\.mode !== 'advisory' && status\.armRefusal \? refusedArmLead\(status\.armRefusal\) : null;/);
+  assert.match(card, /const noChargeNight = noChargeExpected\(plan\);\n(\s+\/\/.*\n)*\s+const refused = status\.mode !== 'advisory' && status\.armRefusal\n\s+\? refusedArmLead\(status\.armRefusal, \{ mode: status\.mode, held: noChargeNight, reservePct: writtenReservePct\(plan, status\.reserveWriteMaxPct \?\? null\) \}\)\n\s+: null;/);
   assert.match(card, /\{refused \? \(\n\s+<div className="mb-3 text-sm">\n\s+<div className="text-warn font-medium">\{refused\.headline\}<\/div>\n\s+<div className="text-muted mt-1 leading-relaxed">\{refused\.detail\}<\/div>\n\s+<\/div>\n\s+\) : \(\n\s+<div className="flex items-baseline gap-4 mb-3 flex-wrap">\n\s+<div className="text-4xl font-bold tabular-nums text-ink">\n\s+\{fig\.main\}/);
   // index.ts records the refusal with the evening latch, reads it back coerced, and serves it.
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-  assert.match(idx, /\n\s+writeNightChargeLatch\(\{\n\s+lastNotifyDay: today,\n\s+armRefused: armRefused && plan\?\.window\n\s+\? \{ reason: armRefused, windowStartMs: plan\.window\.startMs, windowEndMs: plan\.window\.endMs \} : null,\n\s+\}\); \/\/ latch AFTER a successful send/);
+  // v1.187.22 (recheck 3) — a refusal, or a write no channel delivered (eveningNotArmedReason).
+  assert.match(idx, /\n\s+const notArmed = eveningNotArmedReason\(\{\n\s+refused: armRefused, candidate: armedCandidate, delivered: haNotifyDelivered \|\| audibleDelivered, prior: nightActuationMem,\n\s+\}\);\n\s+writeNightChargeLatch\(\{\n\s+lastNotifyDay: today,\n\s+armRefused: notArmed && plan\?\.window\n\s+\? \{ reason: notArmed, windowStartMs: plan\.window\.startMs, windowEndMs: plan\.window\.endMs \} : null,\n\s+\}\); \/\/ latch AFTER a successful send/);
   assert.match(idx, /return \{ lastNotifyDay: typeof d === 'string' \? d : null, armRefused: coerceArmRefusalRecord\(raw\?\.armRefused\) \};/);
   assert.match(idx, /nightChargeLatchMem = \{ lastNotifyDay: l\.lastNotifyDay, armRefused: l\.armRefused \?\? null \};/);
   const route = idx.slice(idx.indexOf("app.get('/api/night-charge/status'"), idx.indexOf("app.post('/api/night-charge/cancel'"));
@@ -1456,4 +1484,326 @@ test('★★ the force-charge clause says when the force-charge is expected to s
   assert.equal('expectedForceChargeStartMs' in plan({ forceChargeEligible: false }), false);
   assert.equal('expectedForceChargeStartMs' in legacyPlan(), false);
   assert.equal('expectedForceChargeStartMs' in plan({ minBuyKwh: 1000 }), false, 'a hold');
+});
+
+/* ── v1.187.22 (recheck 3) — the level the night reaches, the arm-time stamp, partial failures,
+ *    every way a night ends up not armed ─────────────────────────────────────────────────── */
+
+/** Force-charge riding the night with no just-in-time start expected while the reserve leg still
+ *  charges: from 40% under a 51% cost ceiling the pool opens near ~31.9%, the 50% reserve draws
+ *  ~18 kWh, and the force-charge to 51% is not expected to start. */
+const reserveLegOnly = (): NightChargePlan => plan({ socNowPct: 40, costMaxSocPct: 51 });
+const TAIL = "Delivery vs plan scores in the ledger at tomorrow evening's update.";
+
+test('★★★ force-charge armed but not expected to start: every line states the reserve the night reaches, not the stop', () => {
+  // Every surface said "to ~51%" — the force-charge stop — on a night the pool is expected to stop
+  // at the 50% reserve: the ~18 kWh is the reserve leg alone.
+  const p = reserveLegOnly();
+  assert.equal(p.chargeTonight, true);
+  assert.equal(p.expectedWriteLevelPct, 51, 'the write still arms the force-charge to 51% (unchanged)');
+  assert.equal(p.expectedForceChargeStartMs, null);
+  assert.equal(p.expectedStartSocPct, 31.9);
+  assert.equal(p.expectedBuyKwh, 17.97);
+  assert.ok(Math.abs(p.expectedBuyKwh! - legKwh(31.9, 50)) < 0.1, 'the figure is the reserve leg alone');
+  assert.equal(noChargeExpected(p), false);
+  assert.equal(chargeLevelPct(p), 50);
+  const armed = armFromPlan(emptyActuationState(), '2026-10-12', p, NOW, 16, true)!;
+  assert.equal(armed.targetPct, 50);
+  assert.equal(armed.forceChargeCeilingPct, 51);
+  assert.equal(armed.forceChargeRides, true);
+  const sup = buildNightChargeMessage(p, 'charge', { cancelDeadlineText: 'at 00:00', targetPct: 50, forceChargeTargetPct: armed.forceChargeCeilingPct });
+  assert.equal(sup.title, 'Night-charge: charging to ~50% tonight (~18 kWh)');
+  assert.equal(sup.body, 'Charging the backup pool to ~50% overnight, ~18 kWh of grid energy expected. '
+    + 'Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; '
+    + 'the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 00:00 the add-on raises the backup reserve to 50% '
+    + "(bounded write; auto-restores after the charge window closes). It also arms the panel's force-charge toward ~51%, "
+    + 'timed to finish by the window close; it is not expected to start. Cancel from the night-charge card on the panel before then.');
+  assert.equal(buildNightChargeMessage(p, 'charge').title, 'Night-charge: charge to ~50% recommended tonight (~18 kWh)');
+  const spoken = nightChargeSpokenNotice({
+    levelPct: chargeLevelPct(p)!, reservePct: armed.targetPct!, expectedKwh: statedBuyKwh(p), toward: chargeIsWindowBound(p),
+    deadlineText: 'at 00:00', deadlineTextEs: 'a las 00:00', cushionShortfall: p.cushionShortfall,
+  });
+  assert.equal(spoken.en, 'Night charge notice. Charging the backup pool to about 50 percent, about 18 kilowatt hours, '
+    + 'in the charge window that opens at 00:00. Cancel on the Power panel before then.');
+  assert.equal(spoken.es, 'Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 50 por ciento, '
+    + 'unos 18 kilovatios hora, en la ventana de carga que comienza a las 00:00. Cancele en el panel Power antes de esa hora.');
+  assert.deepEqual(chargeFigureParts(p, 50), { main: '18.0', unit: 'kWh', label: 'expected charge to ~50%' });
+  assert.ok(p.rationale.startsWith('Charge to ~50% in the 00:00–05:00 window: ~18 kWh expected. Expected: the pool should open the window '
+    + "near ~31.9% with the grid present (median load and PV, never below the 16% reserve), and tonight's write charges it to the 50% "
+    + 'reserve; the just-in-time force-charge to 51% is not expected to start. '), p.rationale);
+  // No surface states the stop as the level: 51% appears only where the force-charge is named by
+  // where it stops (armed and not expected to start; after the fact, what it did).
+  for (const [where, t] of nightTexts(p)) {
+    const rest = t.replace(/force-charge (ran )?toward ~51%/g, '');
+    assert.doesNotMatch(rest, /(^|[^\d.])51(\.0)?( ?%| percent| por ciento)/, `${where}: ${t}`);
+  }
+  // The stop whenever a start is expected (2026-10-12), the write's level on a plan with no start
+  // field (reserve only, no basis), the reserve as written on a plan from before v1.187.22.
+  assert.equal(chargeLevelPct(plan()), 80);
+  assert.equal(chargeLevelPct({ setpointSocPct: 80.4, expectedWriteLevelPct: 80, expectedForceChargeStartMs: null }), 50);
+  assert.equal(chargeLevelPct({ setpointSocPct: 80.4, expectedWriteLevelPct: 80, expectedForceChargeStartMs: phx(10, 13, 2, 43) }), 80);
+  assert.equal(chargeLevelPct({ setpointSocPct: 80.4, expectedWriteLevelPct: 80 }), 80);
+  assert.equal(chargeLevelPct({ setpointSocPct: 37.6, expectedWriteLevelPct: 38 }), 38);
+  assert.equal(chargeLevelPct({ setpointSocPct: 80.4 }), 50);
+  assert.equal(chargeLevelPct({ setpointSocPct: null, expectedWriteLevelPct: 80, expectedForceChargeStartMs: null }), 80, 'no reserve to state');
+  // The card mirrors it.
+  const label = (start?: number | null) => chargeFigureParts({
+    buyKwh: 50.8, setpointSocPct: 73.1, expectedBuyKwh: 17.97, expectedWriteLevelPct: 51,
+    ...(start === undefined ? {} : { expectedForceChargeStartMs: start }),
+  }, 50).label;
+  assert.equal(label(null), 'expected charge to ~50%');
+  assert.equal(label(phx(10, 13, 4, 50)), 'expected charge to ~51%');
+  assert.equal(label(), 'expected charge to ~51%');
+  // A night expected to charge nothing leads with the reserve the write holds, whatever the level.
+  assert.equal(chargeFigureParts({ ...heldForceCharge(), expectedForceChargeStartMs: phx(10, 13, 4, 30) }, 50).main, '50');
+  // …from the field the status route serves (a source pin: the card is not reachable from a unit test).
+  const card = readFileSync(new URL('../../web/src/cards/NightChargeCard.tsx', import.meta.url), 'utf8');
+  assert.match(card, /\n\s+expectedForceChargeStartMs\?: number \| null;\n/);
+});
+
+test('★★★ the morning push reads whether force-charge rode the night from the arm-time stamp, never the option at the restore', () => {
+  const p = plan();
+  // armFromPlan stamps the evening push's own condition: enabled, and the ceiling above the reserve maximum.
+  const a = armFromPlan(emptyActuationState(), '2026-10-12', p, NOW, 16, true)!;
+  const b = armFromPlan(emptyActuationState(), '2026-10-12', p, NOW, 16, false)!;
+  assert.equal(a.forceChargeRides, true);
+  assert.equal(b.forceChargeRides, false);
+  assert.equal(armFromPlan(emptyActuationState(), '2026-10-12', p, NOW, 16)!.forceChargeRides, null, 'not given: unknown');
+  assert.equal(armFromPlan(emptyActuationState(), '2026-10-12', { ...p, costCeilingSocPct: 50 }, NOW, 16, true)!.forceChargeRides, false);
+  assert.equal(armFromPlan(emptyActuationState(), '2026-10-12', { ...p, costCeilingSocPct: null }, NOW, 16, true)!.forceChargeRides, false);
+  assert.equal(emptyActuationState().forceChargeRides, null);
+  // The stamp changes nothing the write does.
+  assert.deepEqual({ ...a, forceChargeRides: null }, { ...b, forceChargeRides: null });
+  // It survives a restart; a record from before it reads as unknown, never a guess.
+  assert.equal(coerceActuationState(JSON.parse(JSON.stringify(a))).forceChargeRides, true);
+  assert.equal(coerceActuationState(JSON.parse(JSON.stringify(b))).forceChargeRides, false);
+  const old: Record<string, unknown> = JSON.parse(JSON.stringify(a));
+  delete old.forceChargeRides;
+  assert.equal(coerceActuationState(old).forceChargeRides, null);
+  assert.equal(coerceActuationState({ ...old, forceChargeRides: 'true' }).forceChargeRides, null);
+  const morning = (rec: NightActuationState, enabled: boolean, expectedKwh = 34.88) => buildNightChargeMorningSummary({
+    day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh, forceCharge: forceChargeNightOutcome(rec, enabled),
+  }).body;
+  // Armed to ride, then a restart with force-charge switched off (decideForceCharge then never starts
+  // it): it said "reserve raised to 50% (~34.9 kWh expected) and restored to 16%" — the force-charge
+  // leg's figure beside a reserve-only account.
+  assert.equal(morning(a, false), 'Supervised night charge for 2026-10-12 completed: reserve raised to 50%; force-charge toward ~80% '
+    + `never started; the reserve is restored to 16%. ${TAIL}`);
+  // A record from before the stamp with the option off at the restore: reserve only — and its figure,
+  // which may count the force-charge leg, is not named beside it.
+  assert.equal(morning({ ...a, forceChargeRides: null }, false), `Supervised night charge for 2026-10-12 completed: reserve raised to 50% and restored to 16%. ${TAIL}`);
+  // …unless no leg was possible (no armed ceiling above the reserve maximum).
+  assert.equal(morning({ ...a, forceChargeRides: null, forceChargeCeilingPct: null }, false, 5.05),
+    `Supervised night charge for 2026-10-12 completed: reserve raised to 50% (~5.1 kWh expected) and restored to 16%. ${TAIL}`);
+  // Armed with force-charge disabled: reserve only, with its figure, whatever the option reads by the restore.
+  assert.equal(morning(b, true, 5.05), `Supervised night charge for 2026-10-12 completed: reserve raised to 50% (~5.1 kWh expected) and restored to 16%. ${TAIL}`);
+  // …and a force-charge that ran anyway (switched on by a restart mid-night) is reported, without the
+  // reserve-only figure beside it.
+  const onAt = phx(10, 13, 2, 43);
+  const bRan: NightActuationState = { ...b, forceChargeOnAtMs: onAt, forceChargeOnVerifiedAtMs: onAt + 60_000 };
+  assert.equal(morning(bRan, true, 5.05), 'Supervised night charge for 2026-10-12 completed: reserve raised to 50%, and force-charge ran toward ~80%; '
+    + `the reserve is restored to 16%. ${TAIL}`);
+  // Every record, every option at the restore: the figure appears only beside the legs it counts.
+  const on = { forceChargeOnAtMs: onAt };
+  for (const stamp of [true, false, null]) {
+    for (const [what, extra] of [
+      ['never on', {}], ['ran', { ...on, forceChargeOnVerifiedAtMs: onAt + 60_000 }],
+      ['failed', { ...on, forceChargeOnFailedAtMs: onAt + 600_000 }], ['unconfirmed', on],
+    ] as const) {
+      for (const enabled of [true, false]) {
+        const rec: NightActuationState = { ...a, ...extra, forceChargeRides: stamp };
+        const fc = forceChargeNightOutcome(rec, enabled);
+        const named = morning(rec, enabled).includes('kWh expected');
+        const fits = fc.kind === 'none' ? fc.expectedLeg === false : fc.kind === 'ran' && fc.expectedLeg === true;
+        assert.equal(named, fits, `${stamp}/${what}/${enabled}: ${morning(rec, enabled)}`);
+        // (Under an 80.4% ceiling a reserve-only account names it only when the arm stamped that
+        // force-charge did not ride: before the stamp, its figure may count the leg.)
+        if (named && fc.kind === 'none') assert.equal(stamp, false, `${stamp}/${what}/${enabled}`);
+      }
+    }
+  }
+  // index.ts arms with the gate and names the force-charge on the evening push from the stamp.
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.match(idx, /\n\s+forceChargeTargetPct: armedCandidate\.forceChargeRides === true \? armedCandidate\.forceChargeCeilingPct : null,\n/);
+  assert.doesNotMatch(idx, /forceChargeOn\(\) && armedCandidate\.forceChargeCeilingPct/);
+});
+
+test('★★ a force-charge ON that failed on only some slots is reported as such, in the warning and the morning push', () => {
+  const armed = armFromPlan(emptyActuationState(), '2026-10-12', plan(), NOW, 16, true)!;
+  const onAt = phx(10, 13, 2, 43);
+  const on: NightActuationState = { ...armed, forceChargeOnAtMs: onAt, forceChargeSlots: [1, 2, 3], forceChargeOnFailedAtMs: onAt + 30 * 60_000 };
+  const partial: NightActuationState = { ...on, forceChargeOnFailedSlots: [2] };
+  const total: NightActuationState = { ...on, forceChargeOnFailedSlots: [1, 2, 3] };
+  const before: NightActuationState = { ...on, forceChargeOnFailedSlots: null };
+  assert.deepEqual(partialForceChargeOnFailureSlots(partial), [2]);
+  assert.equal(partialForceChargeOnFailureSlots(total), null);
+  assert.equal(partialForceChargeOnFailureSlots(before), null, 'a failure recorded before the slots were kept: whole-night');
+  assert.equal(partialForceChargeOnFailureSlots({ forceChargeSlots: null, forceChargeOnFailedSlots: [2] }), null, 'no slot list');
+  assert.equal(partialForceChargeOnFailureSlots({ forceChargeSlots: [1, 2, 3], forceChargeOnFailedSlots: [] }), null);
+  assert.deepEqual(forceChargeNightOutcome(partial, true), { kind: 'failed', stopPct: 80, expectedLeg: true, partialSlots: [2] });
+  assert.deepEqual(forceChargeNightOutcome(total, true), { kind: 'failed', stopPct: 80, expectedLeg: true, partialSlots: null });
+  const body = (rec: NightActuationState) => buildNightChargeMorningSummary({
+    day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: 34.88, forceCharge: forceChargeNightOutcome(rec, true),
+  }).body;
+  // It said "was switched ON but did not take effect" though the other slots took the ON.
+  assert.equal(body(partial), 'Supervised night charge for 2026-10-12 completed: reserve raised to 50%; force-charge toward ~80% was switched ON '
+    + 'but did not take effect on slot(s) 2 (the buy above the reserve did not happen on those slot(s)); the reserve is restored to 16%. '
+    + TAIL);
+  assert.equal(body(total), 'Supervised night charge for 2026-10-12 completed: reserve raised to 50%; force-charge toward ~80% was switched ON '
+    + `but did not take effect; the reserve is restored to 16%. ${TAIL}`);
+  assert.equal(body(before), body(total));
+  for (const r of [partial, total]) assert.doesNotMatch(body(r), /kWh/);
+  // The record keeps the slots across a restart.
+  assert.deepEqual(coerceActuationState(JSON.parse(JSON.stringify(partial))).forceChargeOnFailedSlots, [2]);
+  assert.equal(coerceActuationState({ ...partial, forceChargeOnFailedSlots: undefined }).forceChargeOnFailedSlots, null);
+  assert.deepEqual(coerceActuationState({ ...partial, forceChargeOnFailedSlots: [2, 7, 'x', 2.5] }).forceChargeOnFailedSlots, [2]);
+  assert.equal(emptyActuationState().forceChargeOnFailedSlots, null);
+  // The warning says "on those slot(s)" on exactly the same test.
+  const warn = (slots: number[], ours: number[] | null) => buildNightForceChargeOnFailure({
+    day: '2026-10-12', slots, ourSlots: ours, retries: 1, noRetry: false, ceilingPct: 80.4,
+  }).body;
+  assert.match(warn([2], [1, 2, 3]), /\(toward ~80%\) will not happen on those slot\(s\); the reserve charge is unaffected\./);
+  assert.match(warn([1, 2, 3], [1, 2, 3]), /\(toward ~80%\) will not happen; the reserve charge is unaffected\./);
+  assert.match(warn([2], null), /will not happen; /);
+  // index.ts keeps the slots the warning names, and decides "on those slot(s)" on the same helper.
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.match(idx, /persistNightActuation\(\{ \.\.\.nightActuationMem, forceChargeOnFailedAtMs: nowMs, forceChargeOnFailedSlots: \[\.\.\.action\.slots\] \}\);\n\s+const all = partialForceChargeOnFailureSlots\(\{ forceChargeSlots: state\.forceChargeSlots, forceChargeOnFailedSlots: action\.slots \}\) == null;/);
+});
+
+test('★★ the force-charge ON-failure push names where the force-charge stops (~80%), not the ceiling (80.4%)', () => {
+  const m = buildNightForceChargeOnFailure({ day: '2026-10-12', slots: [1, 2, 3], ourSlots: [1, 2, 3], retries: 1, noRetry: false, ceilingPct: 80.4 });
+  assert.equal(m.severity, 'warning');
+  assert.equal(m.dedupId, 'night_charge_force_charge_on_failure');
+  assert.equal(m.title, 'Night-charge: force-charge did not take effect');
+  assert.equal(m.body, 'The night-charge for 2026-10-12 switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 still reads '
+    + "slot(s) 1, 2, 3 OFF after 1 re-issue(s). Tonight's buy above the 50% reserve (toward ~80%) will not happen; the reserve charge "
+    + 'is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link.');
+  assert.doesNotMatch(m.body, /80\.4/);
+  const at = (ceilingPct: number | null, noRetry = false) => buildNightForceChargeOnFailure({
+    day: '2026-10-12', slots: [3], ourSlots: [3], retries: 0, noRetry, ceilingPct,
+  }).body;
+  assert.match(at(64.3), /reserve \(toward ~64\.3%\) will not happen;/, 'below 80 the target is the stop');
+  assert.match(at(85.3), /reserve \(toward ~85%\) will not happen;/, 'a whole-number ceiling stops it at 85');
+  assert.match(at(null), /above the 50% reserve will not happen;/);
+  assert.doesNotMatch(at(null), /toward|—%|\(—/);
+  assert.match(at(80.4, true), /OFF after 0 re-issue\(s\) \(too close to the window end to re-issue\)\. /);
+  // index.ts builds it from the record: the slots, ours, the armed ceiling.
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true, ceilingPct: state\.forceChargeCeilingPct,\n\s+\}\)\)/);
+  assert.doesNotMatch(idx, /\(toward \$\{state\.forceChargeCeilingPct/);
+  // The stop is the one the morning push and the evening push name.
+  assert.match(buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: null,
+    forceCharge: forceChargeNightOutcome({ ...armFromPlan(emptyActuationState(), '2026-10-12', plan(), NOW, 16, true)!, forceChargeOnAtMs: NOW }, true) }).body,
+  /force-charge toward ~80% was switched ON but the panel never confirmed it/);
+});
+
+test('★★ a write no announcement delivered is recorded like a refusal; a missed evening keeps a refusal that still stands', () => {
+  const p = plan();
+  const cand = armFromPlan(emptyActuationState(), '2026-10-12', p, NOW, 16, true)!;
+  const idle = emptyActuationState();
+  assert.equal(ARM_UNDELIVERED_REASON, 'the announcement could not be delivered');
+  assert.equal(eveningNotArmedReason({ refused: null, candidate: cand, delivered: false, prior: idle }), ARM_UNDELIVERED_REASON);
+  assert.equal(eveningNotArmedReason({ refused: null, candidate: cand, delivered: true, prior: idle }), null, 'armed');
+  assert.equal(eveningNotArmedReason({ refused: null, candidate: null, delivered: false, prior: idle }), null, 'nothing to arm');
+  assert.equal(eveningNotArmedReason({ refused: 'the plan sizes no buy', candidate: null, delivered: true, prior: idle }), 'the plan sizes no buy');
+  // Saturday's arm for the same (Monday) window stays in place and will write: a write is armed.
+  const sat: NightActuationState = { ...cand, day: '2026-10-10' };
+  assert.equal(eveningNotArmedReason({ refused: null, candidate: cand, delivered: false, prior: sat }), null);
+  // …unless it was cancelled, restored, never targeted, or is for another window.
+  for (const prior of [
+    { ...sat, cancelled: true }, { ...sat, revertedAtMs: NOW - H }, { ...sat, targetPct: null }, { ...sat, day: null },
+    { ...sat, windowStartMs: NEXT_WINDOW }, { ...sat, windowEndMs: NEXT_WINDOW + H },
+  ]) {
+    assert.equal(eveningNotArmedReason({ refused: null, candidate: cand, delivered: false, prior }), ARM_UNDELIVERED_REASON, JSON.stringify(prior).slice(0, 60));
+  }
+  // It is served like a refusal, and the card leads with it.
+  const rec = { reason: ARM_UNDELIVERED_REASON, windowStartMs: WIN_START, windowEndMs: WIN_END };
+  assert.equal(servedArmRefusal(rec, p, 'supervised', NOW), ARM_UNDELIVERED_REASON);
+  assert.deepEqual(refusedArmLead(ARM_UNDELIVERED_REASON, { mode: 'supervised', held: false, reservePct: 50 }), {
+    headline: 'Planned charge not armed tonight — the announcement could not be delivered.',
+    detail: "Tonight's plan calls for a charge, but the supervised write was not armed. The add-on will not charge tonight.",
+  });
+  // The missed-evening cutoff latches the day and keeps the record: Saturday's refusal for the window
+  // Sat and Sun share is still served on Sunday night.
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const job = idx.slice(idx.indexOf('async function runNightChargeEveningJobInner'));
+  const cutoffAt = job.indexOf('if (nowMin >= cutoffMin) {');
+  assert.ok(cutoffAt > 0);
+  const cutoff = job.slice(cutoffAt, job.indexOf('return;', cutoffAt));
+  assert.match(cutoff, /\n\s+writeNightChargeLatch\(\{ lastNotifyDay: today, armRefused: latch\.armRefused \?\? null \}\);\n/);
+  assert.doesNotMatch(cutoff, /writeNightChargeLatch\(\{ lastNotifyDay: today \}\)/);
+  assert.ok(job.indexOf('const latch = readNightChargeLatch();') < cutoffAt, 'the latch it keeps is the one read at the top');
+  const satRefusal = { reason: 'the 2026-10-09 reserve write is still applied and not yet restored', windowStartMs: WIN_START, windowEndMs: WIN_END };
+  assert.equal(servedArmRefusal(coerceArmRefusalRecord(JSON.parse(JSON.stringify(satRefusal))), p, 'auto', WIN_START - 30 * 60_000), satRefusal.reason);
+});
+
+test('★★ a refused arm on a night expected to charge nothing is pushed and shown as the reserve hold it was; "the write" in auto mode', () => {
+  const p = heldReserveOnly();
+  const why = 'the 2026-10-11 reserve write is still applied and not yet restored';
+  const m = buildNightChargeMessage(p, 'charge', null, why);
+  assert.equal(m.title, 'Night-charge: planned reserve hold NOT armed tonight');
+  assert.equal(m.body, "Tonight's plan holds the backup reserve at 50% overnight as a floor, with no charge expected, but the supervised write "
+    + `was not armed — ${why}. The add-on will not raise the reserve tonight.`);
+  const auto = buildNightChargeMessage(p, 'charge', null, why, 'auto');
+  assert.equal(auto.title, m.title);
+  assert.equal(auto.body, "Tonight's plan holds the backup reserve at 50% overnight as a floor, with no charge expected, but the write "
+    + `was not armed — ${why}. The add-on will not raise the reserve tonight.`);
+  // A charge night: "calls for a charge", and the write named for the mode.
+  const c = buildNightChargeMessage(plan(), 'charge', null, why, 'auto');
+  assert.equal(c.title, 'Night-charge: planned charge NOT armed tonight');
+  assert.equal(c.body, `Tonight's plan calls for a charge, but the write was not armed — ${why}. The add-on will not charge tonight.`);
+  assert.match(buildNightChargeMessage(plan(), 'charge', null, why, 'supervised').body, /, but the supervised write was not armed — /);
+  for (const t of [m.title, m.body, auto.title, auto.body]) assert.doesNotMatch(t, /calls for a charge|planned charge|will not charge|kWh|~\d/, t);
+  // The shortfall stays disclosed.
+  assert.match(buildNightChargeMessage({ ...p, cushionShortfall: true }, 'charge', null, why).body, /raise the reserve tonight\. NOTE: .* residual risk remains\./);
+  // The card, in the push's words.
+  assert.deepEqual(refusedArmLead(why, { mode: 'supervised', held: true, reservePct: 50 }), {
+    headline: `Planned reserve hold not armed tonight — ${why}.`,
+    detail: "Tonight's plan holds the backup reserve at 50% overnight as a floor, with no charge expected, but the supervised write "
+      + 'was not armed. The add-on will not raise the reserve tonight.',
+  });
+  assert.match(refusedArmLead(why, { mode: 'auto', held: true, reservePct: 50 }).detail, /, but the write was not armed\. /);
+  assert.equal(refusedArmLead(why, { mode: 'auto' }).detail, "Tonight's plan calls for a charge, but the write was not armed. The add-on will not charge tonight.");
+  assert.equal(refusedArmLead(why, { held: true }).detail.includes('at — overnight'), true, 'no reserve known: a dash, never a guess');
+  // The card's inputs are the server's: noChargeExpected and the reserve the write sets.
+  for (const q of [p, heldResilience(), heldForceCharge(), plan(), reserveLegOnly(), legacyPlan(), resilience8()]) {
+    assert.equal(webNoChargeExpected(q), noChargeExpected(q));
+    assert.equal(writtenReservePct(q, RESERVE_WRITE_MAX_PCT), chargeReservePct(q));
+  }
+  // Every night expected to charge nothing: the refused lines never call it a charge, on any surface.
+  for (const q of [heldReserveOnly(), heldResilience(), heldForceCharge()]) {
+    const texts = Object.fromEntries(nightTexts(q));
+    for (const k of ['refused-arm title', 'refused-arm body', 'refused-arm title (auto)', 'refused-arm body (auto)', 'card lead (refused)', 'card lead (not delivered)']) {
+      assert.doesNotMatch(texts[k], /[Cc]harge NOT armed|charge not armed|calls for a charge|will not charge/, `${k}: ${texts[k]}`);
+    }
+    assert.match(texts['refused-arm body (auto)'], /, but the write was not armed — /);
+    assert.match(texts['card lead (not delivered)'], /^Planned reserve hold not armed tonight — the announcement could not be delivered\. .*, but the write was not armed\./);
+  }
+});
+
+test('★★ no EV-contention note on a night expected to charge nothing — on the push or the card', () => {
+  const ev = { basis: 'predicted' as const, windowEvKwh: 19.3, peakEvKw: 11.5, minChargeRateKw: 2.5, derateKwh: 4.1 };
+  const charging: NightChargePlan = { ...plan({ forceChargeEligible: false }), bindingCap: 'evContention', evContention: ev };
+  const held: NightChargePlan = { ...heldReserveOnly(), bindingCap: 'evContention', evContention: ev };
+  assert.equal(noChargeExpected(charging), false);
+  assert.equal(noChargeExpected(held), true);
+  const sup = { cancelDeadlineText: 'at 00:00', targetPct: 50 };
+  assert.match(buildNightChargeMessage(charging, 'charge', sup).body,
+    / NOTE: EV charging is predicted inside the window \(~19\.3 kWh, peak ~11\.5 kW\); it shares the grid input, leaving ~2\.5 kW for the packs while the car charges\. /);
+  // It said "…leaving ~2.5 kW for the packs while the car charges" beside "no charge is expected".
+  for (const m of [buildNightChargeMessage(held, 'charge', sup), buildNightChargeMessage(held, 'charge')]) {
+    assert.doesNotMatch(m.body, /EV|for the packs|while the car charges/, m.body);
+  }
+  // The unmodelled shape describes a pack charge too.
+  const unavailable = { basis: 'unavailable' as const, windowEvKwh: null, peakEvKw: null, minChargeRateKw: null, derateKwh: null };
+  const heldUnmodelled: NightChargePlan = { ...heldReserveOnly(), cushionShortfall: true, evContention: unavailable };
+  assert.doesNotMatch(buildNightChargeMessage(heldUnmodelled, 'charge', sup).body, /EVSE|less than planned/);
+  assert.match(buildNightChargeMessage({ ...heldUnmodelled, expectedBuyKwh: 5 }, 'charge', sup).body, / NOTE: no EVSE prediction covers this window/);
+  // A hold the car's charging starves keeps the note: it is why nothing can be charged.
+  assert.match(buildNightChargeMessage({ ...holdStarved(), bindingCap: 'evContention', evContention: ev }, 'hold').body, /leaving ~2\.5 kW for the packs/);
+  // The card drops both lines on such a night (a source pin: the card is not reachable from a unit test).
+  const card = readFileSync(new URL('../../web/src/cards/NightChargeCard.tsx', import.meta.url), 'utf8');
+  assert.match(card, /\n\s+const noChargeNight = noChargeExpected\(plan\);\n/);
+  assert.match(card, /\{!noChargeNight && plan\.bindingCap === 'evContention' && plan\.evContention\?\.windowEvKwh != null && \(/);
+  assert.match(card, /\{!noChargeNight && plan\.evContention\?\.basis === 'unavailable' && plan\.cushionShortfall && \(/);
 });

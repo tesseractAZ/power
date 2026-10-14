@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from 'react';
 import {
-  actuationBannerVisible, chargeFigureParts, floorCushionLinePct, fmtLinePct, holdSummary, refusedArmLead, reserveWriteLabel,
-  revertUnconfirmed, sizingLine,
+  actuationBannerVisible, chargeFigureParts, floorCushionLinePct, fmtLinePct, holdSummary, noChargeExpected, refusedArmLead,
+  reserveWriteLabel, revertUnconfirmed, sizingLine, writtenReservePct,
 } from './nightChargeText';
 import { apiUrl } from '../api';
 
@@ -39,6 +39,9 @@ interface NightChargePlan {
   expectedWriteLevelPct?: number | null;
   /** v1.187.22 — the window closes before that level is reached ("toward"). */
   expectedDeliverableBound?: boolean;
+  /** v1.187.22 — force-charge rides the night: its expected start; null = none expected (the night
+   *  stops at the reserve). Absent otherwise and on older plans. */
+  expectedForceChargeStartMs?: number | null;
   /** The arrival projected on the islanded worst case the plan is sized on (v1.187.22: shown
    *  as "Worst-case arrival", never as the expected outcome). */
   targetSocPct: number | null;
@@ -247,8 +250,13 @@ export const NightChargeCard = memo(function NightChargeCard() {
   // drives to); the worst case appears once, in the labelled sizing line beneath.
   const fig = chargeFigureParts(plan, status.reserveWriteMaxPct ?? null);
   const sizing = sizingLine(plan);
-  // v1.187.22 — a write mode refused to arm tonight: lead with that, never the plan's expected charge.
-  const refused = status.mode !== 'advisory' && status.armRefusal ? refusedArmLead(status.armRefusal) : null;
+  // v1.187.22 — a night expected to charge nothing: the reserve is held as a floor.
+  const noChargeNight = noChargeExpected(plan);
+  // v1.187.22 — a write mode refused to arm tonight: lead with that, never the plan's expected charge
+  // — in the words for the night the plan is (a charge, or the reserve held).
+  const refused = status.mode !== 'advisory' && status.armRefusal
+    ? refusedArmLead(status.armRefusal, { mode: status.mode, held: noChargeNight, reservePct: writtenReservePct(plan, status.reserveWriteMaxPct ?? null) })
+    : null;
 
   return (
     <div className="card">
@@ -290,8 +298,9 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
       {/* v1.60.0 — EV contention. Either the predicted session is quantified, or
           we say plainly that it is UNMODELLED; the absent-prediction line is a
-          warning, never a "no EV expected tonight". */}
-      {plan.bindingCap === 'evContention' && plan.evContention?.windowEvKwh != null && (
+          warning, never a "no EV expected tonight". v1.187.22 — neither on a night
+          expected to charge nothing: there is no pack charge for the car to share with. */}
+      {!noChargeNight && plan.bindingCap === 'evContention' && plan.evContention?.windowEvKwh != null && (
         <div className="text-xs text-warn mb-3 -mt-1">
           EV charging predicted in the window (~{plan.evContention.windowEvKwh.toFixed(1)} kWh
           {plan.evContention.peakEvKw != null && <>, peak ~{plan.evContention.peakEvKw.toFixed(1)} kW</>}) — it
@@ -303,7 +312,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
           .
         </div>
       )}
-      {plan.evContention?.basis === 'unavailable' && plan.cushionShortfall && (
+      {!noChargeNight && plan.evContention?.basis === 'unavailable' && plan.cushionShortfall && (
         <div className="text-xs text-muted mb-3 -mt-1">
           no EVSE prediction covers this window — EV contention is not modelled; if the car charges
           overnight the packs will receive less than planned

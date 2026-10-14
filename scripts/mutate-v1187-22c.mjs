@@ -32,6 +32,12 @@
  *                  the force-charge clause says when it is expected to start and that it may not
  *                  get there; one floor+cushion line (the one the plan is sized on); the card
  *                  leads with a refused arm
+ *   C-cxxxix…C-clxix (recheck 3) the level a force-charge night with no start expected reaches
+ *                  (the reserve); whether force-charge rode the night, stamped at arm time and read
+ *                  by the morning push, which names the expected figure only beside the legs it
+ *                  counts; a partial ON failure; an arm no announcement delivered and a refusal a
+ *                  missed evening keeps; a refused hold worded as a hold, "the write" in auto
+ *                  mode; no EV note on a no-charge night; the ON-failure push names the stop
  *
  *   node scripts/mutate-v1187-22c.mjs
  */
@@ -509,8 +515,9 @@ const MUTANTS = [
   {
     id: 'C-lviii. ★★★ the level ignores the force-charge stop',
     file: NCA,
-    find: '  if (level != null && Number.isFinite(level)) return level;',
-    to: '  /* MUTANT */',
+    // v1.187.22 (recheck 3) — re-pointed: the level's return beside the no-start reserve.
+    find: '  return plan.expectedForceChargeStartMs === null && reserve != null ? reserve : level;',
+    to: '  return reserve; /* MUTANT */',
     why: 'A force-charge night (to 80%) is announced as a charge to the 50% reserve.',
   },
   {
@@ -592,16 +599,17 @@ const MUTANTS = [
   {
     id: 'C-lxix. ★★ the rationale headline states the sizing prediction as the level',
     file: NCA,
-    // v1.187.22 (recheck) — re-pointed: the charge shape of the headline.
-    find: "    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the ${windowText}`",
+    // v1.187.22 (recheck) — re-pointed: the charge shape of the headline (recheck 3: its level
+    // is headlineLevelPct).
+    find: "    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${headlineLevelPct}% in the ${windowText}`",
     to: "    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${targetSocPct}% in the ${windowText}` /* MUTANT */",
     why: 'The headline names the islanded projection (80.4%) instead of where the write stops (80%).',
   },
   {
     id: 'C-lxx. ★ a window-bound charge is headlined as reaching the level',
     file: NCA,
-    find: "    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the ${windowText}`",
-    to: "    : `Charge to ~${expected.levelPct ?? writtenPct}% in the ${windowText}` /* MUTANT */",
+    find: "    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${headlineLevelPct}% in the ${windowText}`",
+    to: "    : `Charge to ~${headlineLevelPct}% in the ${windowText}` /* MUTANT */",
     why: 'Friday\'s one-hour window is headlined "to 80%" though it passes a fraction of the draw.',
   },
   {
@@ -728,7 +736,7 @@ const MUTANTS = [
   {
     id: 'C-lxxxviii. ★★ the evening job never passes the refusal',
     file: IDX,
-    find: '    const msg = buildNightChargeMessage(plan, shape, supervisedCtx, armRefused);',
+    find: '    const msg = buildNightChargeMessage(plan, shape, supervisedCtx, armRefused, NIGHT_CHARGE_MODE);',
     to: '    const msg = buildNightChargeMessage(plan, shape, supervisedCtx); /* MUTANT */',
     why: 'The builder can say "NOT armed", but the push that goes out still recommends the write.',
   },
@@ -900,15 +908,17 @@ const MUTANTS = [
   {
     id: 'C-cxii. ★★ the card shows "0.0 kWh expected charge" on a no-charge night',
     file: WEB,
-    find: '  if (exp < NO_CHARGE_EXPECTED_KWH) {',
-    to: '  if (exp < 0) { /* MUTANT */',
+    // v1.187.22 (recheck 3) — re-pointed: the card's no-charge test is noChargeExpected.
+    find: '  if (noChargeExpected(plan)) {',
+    to: '  if (false as boolean) { /* MUTANT */',
     why: 'The dashboard leads with "0.0 kWh — expected charge to ~50%" while the push says the reserve is held.',
   },
   {
     id: 'C-cxiii. ★★ the card\'s held lead names the level, not the reserve',
     file: WEB,
-    find: "    const reserve = set != null && Number.isFinite(set) ? `${Math.min(Math.round(set), cap)}` : '—';",
-    to: '    const reserve = levelText; /* MUTANT */',
+    // v1.187.22 (recheck 3) — re-pointed: the held lead reads writtenReservePct.
+    find: "    return { main: written == null ? '—' : `${written}`, unit: '%', label: 'reserve held as a floor — no charge expected' };",
+    to: "    return { main: levelText, unit: '%', label: 'reserve held as a floor — no charge expected' }; /* MUTANT */",
     why: 'A force-charge night with no start expected shows "80% reserve held as a floor".',
   },
   {
@@ -922,15 +932,17 @@ const MUTANTS = [
   {
     id: 'C-cxv. ★★★ every force-charge switched ON is reported as having run',
     file: FC,
-    find: "    return { kind: on === 'verified' ? 'ran' : on === 'failed' ? 'failed' : 'unconfirmed', stopPct };",
-    to: "    return { kind: 'ran', stopPct }; /* MUTANT */",
+    // v1.187.22 (recheck 3) — re-pointed: the failed shape returns on its own line.
+    find: "    return { kind: on === 'verified' ? 'ran' : 'unconfirmed', stopPct, expectedLeg };",
+    to: "    return { kind: 'ran', stopPct, expectedLeg }; /* MUTANT */",
     why: 'A force-charge whose ON never took effect is pushed as "force-charge ran toward ~80% (~34.9 kWh expected)".',
   },
   {
     id: 'C-cxvi. ★★ an unverified ON is reported as never started',
     file: FC,
     find: '  if (on != null) {',
-    to: "  if (on === 'verified') { /* MUTANT */",
+    // (recheck 3 — the failed shape is narrowed inside: the cast keeps the mutant compiling.)
+    to: "  if (on === 'verified' || (on as string) === '\\u0000') { /* MUTANT */",
     why: 'A force-charge switched ON (and failed, or never confirmed) is reported as never having started.',
   },
   {
@@ -943,15 +955,17 @@ const MUTANTS = [
   {
     id: 'C-cxviii. ★★ the expected figure rides a force-charge that did not run',
     file: NOTIFY,
-    find: "      : `${reserve}; force-charge${toward} ${fc.kind === 'neverStarted' ? 'never started'",
-    to: "      : `${reserve}${note}; force-charge${toward} ${fc.kind === 'neverStarted' ? 'never started' /* MUTANT */",
+    // v1.187.22 (recheck 3) — re-pointed: the figure is decided once (figureFits) for every account.
+    find: "  const figureFits = fc.kind === 'none' ? fc.expectedLeg === false : fc.kind === 'ran' && fc.expectedLeg === true;",
+    to: "  const figureFits = fc.kind === 'none' ? fc.expectedLeg === false : fc.expectedLeg === true; /* MUTANT */",
     why: '"reserve raised to 50% (~34.9 kWh expected); force-charge toward ~80% never started": a figure for a leg that never ran.',
   },
   {
     id: 'C-cxix. ★ a failed ON is reported as merely unconfirmed',
     file: NOTIFY,
-    find: "        : fc.kind === 'failed' ? 'was switched ON but did not take effect'",
-    to: "        : fc.kind === 'unconfirmed' ? 'was switched ON but did not take effect' /* MUTANT */",
+    // v1.187.22 (recheck 3) — re-pointed: the failed wording is failedOn (whole or partial).
+    find: "        : fc.kind === 'failed' ? failedOn",
+    to: "        : fc.kind === 'unconfirmed' ? failedOn /* MUTANT */",
     why: 'The warning already said the ON did not take effect; the morning push softens it to "never confirmed".',
   },
   // ── when the force-charge is expected to start ──
@@ -1051,8 +1065,9 @@ const MUTANTS = [
   {
     id: 'C-cxxxiii. ★★ the evening job never records the refusal',
     file: IDX,
-    find: '      armRefused: armRefused && plan?.window\n',
-    to: "      armRefused: armRefused === '\\u0000' && plan?.window /* MUTANT */\n",
+    // v1.187.22 (recheck 3) — re-pointed: the record is eveningNotArmedReason's.
+    find: '      armRefused: notArmed && plan?.window\n',
+    to: "      armRefused: notArmed === '\\u0000' && plan?.window /* MUTANT */\n",
     why: 'The push says "NOT armed" and the card still leads with "34.9 kWh — expected charge to ~80%".',
   },
   {
@@ -1079,8 +1094,9 @@ const MUTANTS = [
   {
     id: 'C-cxxxvii. ★★ the card never leads with the refusal',
     file: CARD,
-    find: "  const refused = status.mode !== 'advisory' && status.armRefusal ? refusedArmLead(status.armRefusal) : null;",
-    to: '  const refused = null as ReturnType<typeof refusedArmLead> | null; /* MUTANT */',
+    // v1.187.22 (recheck 3) — re-pointed: the lead is built over two lines.
+    find: "  const refused = status.mode !== 'advisory' && status.armRefusal\n",
+    to: "  const refused = (status.mode as string) === '\\u0000' && status.armRefusal /* MUTANT */\n",
     why: 'The dashboard says "34.9 kWh — expected charge to ~80%" on a night nothing is armed.',
   },
   {
@@ -1089,6 +1105,228 @@ const MUTANTS = [
     find: '    headline: `Planned charge not armed tonight — ${reason}.`,',
     to: "    headline: 'Planned charge not armed tonight.', /* MUTANT */",
     why: 'The card says nothing is armed but not why; the push names the unresolved prior night.',
+  },  // ── v1.187.22 (recheck 3): the level a force-charge night with no start expected reaches ──
+  {
+    id: 'C-cxxxix. ★★★ a force-charge night with no start expected is stated at the stop',
+    file: NCA,
+    find: '  return plan.expectedForceChargeStartMs === null && reserve != null ? reserve : level;',
+    to: '  return level; /* MUTANT */',
+    why: 'From 40% under a 51% ceiling the push, the speakers and the card say "to ~51%" for ~18 kWh that stops at the 50% reserve.',
+  },
+  {
+    id: 'C-cxl. ★★ the rationale headline states the stop on a night with no start expected',
+    file: NCA,
+    find: '    setpointSocPct, expectedWriteLevelPct: expected.levelPct, expectedForceChargeStartMs: expected.forceChargeStartMs,\n  }) ?? writtenPct;',
+    to: '    setpointSocPct, expectedWriteLevelPct: expected.levelPct,\n  }) ?? writtenPct; /* MUTANT */',
+    why: 'The rationale headline says "Charge to ~51%" above "the just-in-time force-charge to 51% is not expected to start".',
+  },
+  {
+    id: 'C-cxli. ★★ the card states the stop on a night with no start expected',
+    file: WEB,
+    find: '    ? (plan.expectedForceChargeStartMs === null && written != null ? written : lvl)',
+    to: '    ? lvl /* MUTANT */',
+    why: 'The card says "18.0 kWh — expected charge to ~51%" where the push says ~50%.',
+  },
+  // ── whether force-charge rode the night: stamped at arm time ──
+  {
+    id: 'C-cxlii. ★★★ the morning push reads the option at the restore, not the stamp',
+    file: FC,
+    find: '  const armedStop = armedForceChargeStopPct(s, s.forceChargeRides ?? enabled);',
+    to: '  const armedStop = armedForceChargeStopPct(s, enabled); /* MUTANT */',
+    why: 'A restart with force-charge switched off turns an armed-to-ride night into "reserve raised to 50% (~34.9 kWh expected)".',
+  },
+  {
+    id: 'C-cxliii. ★★★ the arm never stamps whether force-charge rides the night',
+    file: ACT,
+    find: '      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,',
+    to: '      : null, /* MUTANT */',
+    why: 'Every record reads as armed before the stamp: the option at the restore decides again.',
+  },
+  {
+    id: 'C-cxliv. ★★ the stamp ignores the armed ceiling',
+    file: ACT,
+    find: '      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,',
+    to: '      : forceChargeEnabled, /* MUTANT */',
+    why: 'A 50% ceiling (the reserve reaches it alone) is stamped as riding: the morning says "force-charge … never started".',
+  },
+  {
+    id: 'C-cxlv. ★★ a restart forgets the stamp',
+    file: ACT,
+    find: "    forceChargeRides: typeof o.forceChargeRides === 'boolean' ? o.forceChargeRides : null,",
+    to: '    forceChargeRides: null, /* MUTANT */',
+    why: 'An add-on update mid-night loses the stamp, and the option at the restore decides again.',
+  },
+  {
+    id: 'C-cxlvi. ★★ a record from before the stamp is read as reserve only for certain',
+    file: FC,
+    find: '  const expectedLeg = s.forceChargeRides ?? (above ? null : false);',
+    to: '  const expectedLeg = s.forceChargeRides ?? false; /* MUTANT */',
+    why: 'The figure that may count the force-charge leg is named beside a reserve-only account.',
+  },
+  {
+    id: 'C-cxlvii. ★★★ the morning names the figure beside any reserve-only or ran account',
+    file: NOTIFY,
+    find: "  const figureFits = fc.kind === 'none' ? fc.expectedLeg === false : fc.kind === 'ran' && fc.expectedLeg === true;",
+    to: "  const figureFits = fc.kind === 'none' || fc.kind === 'ran'; /* MUTANT */",
+    why: '"reserve raised to 50% (~34.9 kWh expected)": the force-charge leg\'s figure beside a reserve-only account.',
+  },
+  {
+    id: 'C-cxlviii. ★★ index.ts arms without the force-charge gate',
+    file: IDX,
+    find: '      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn());',
+    to: '      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct); /* MUTANT */',
+    why: 'Every armed record carries no stamp, so the morning reads the option at the restore.',
+  },
+  {
+    id: 'C-cxlix. ★ the evening push names the force-charge from the option, not the stamp',
+    file: IDX,
+    find: '          forceChargeTargetPct: armedCandidate.forceChargeRides === true ? armedCandidate.forceChargeCeilingPct : null,',
+    to: '          forceChargeTargetPct: forceChargeOn() ? armedCandidate.forceChargeCeilingPct : null, /* MUTANT */',
+    why: 'A 50% ceiling is pushed as "It also arms the panel\'s force-charge toward ~50%".',
+  },
+  // ── a force-charge ON that failed on only some slots ──
+  {
+    id: 'C-cl. ★★ a partial ON failure is read as a whole-night failure',
+    file: FC,
+    find: '  return failed.length < ours.length ? [...failed] : null;',
+    to: '  return null; /* MUTANT */',
+    why: 'The morning push says force-charge "did not take effect" though slots 1 and 3 took it.',
+  },
+  {
+    id: 'C-cli. ★★ the outcome drops the partial slots',
+    file: FC,
+    find: "    if (on === 'failed') return { kind: 'failed', stopPct, expectedLeg, partialSlots: partialForceChargeOnFailureSlots(s) };",
+    to: "    if (on === 'failed') return { kind: 'failed', stopPct, expectedLeg, partialSlots: null }; /* MUTANT */",
+    why: 'The record knows only slot 2 failed; the morning push still reports a whole-night failure.',
+  },
+  {
+    id: 'C-clii. ★★ the morning push ignores a partial failure',
+    file: NOTIFY,
+    find: "    const failedOn = fc.kind === 'failed' && fc.partialSlots != null\n",
+    to: "    const failedOn = fc.kind === 'failed' && fc.partialSlots != null && fc.partialSlots.length > 99 /* MUTANT */\n",
+    why: 'The warning said "on those slot(s)"; the morning push says the force-charge did not take effect.',
+  },
+  {
+    id: 'C-cliii. ★ a restart forgets which slots failed',
+    file: ACT,
+    find: '    forceChargeOnFailedSlots: Array.isArray(o.forceChargeOnFailedSlots)\n',
+    to: '    forceChargeOnFailedSlots: Array.isArray(o.forceChargeOnFailedSlots) && Number.isNaN(1) /* MUTANT */\n',
+    why: 'An add-on update before the restore turns a partial failure into a whole-night one.',
+  },
+  {
+    id: 'C-cliv. ★★ index.ts never records which slots failed',
+    file: IDX,
+    find: '    persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs, forceChargeOnFailedSlots: [...action.slots] });',
+    to: '    persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs }); /* MUTANT */',
+    why: 'Every failure reads as whole-night in the morning, partial ones included.',
+  },
+  // ── every way a night ends up not armed ──
+  {
+    id: 'C-clv. ★★ an arm no announcement delivered records nothing',
+    file: ACT,
+    find: '  return priorWrites ? null : ARM_UNDELIVERED_REASON;',
+    to: '  return null; /* MUTANT */',
+    why: 'Nothing is armed, and the card still leads with "34.9 kWh — expected charge to ~80%".',
+  },
+  {
+    id: 'C-clvi. ★★ an undelivered arm is recorded over a prior arm that will still write',
+    file: ACT,
+    find: '  return priorWrites ? null : ARM_UNDELIVERED_REASON;',
+    to: '  return ARM_UNDELIVERED_REASON; /* MUTANT */',
+    why: 'Saturday\'s arm for the shared Monday window writes, and the card says "not armed tonight".',
+  },
+  {
+    id: 'C-clvii. ★ a cancelled prior arm counts as one that will still write',
+    file: ACT,
+    find: '  const priorWrites = p.day != null && !p.cancelled && p.targetPct != null && p.revertedAtMs == null\n',
+    to: '  const priorWrites = p.day != null && p.targetPct != null && p.revertedAtMs == null /* MUTANT */\n',
+    why: 'Nothing will write, and the card leads with the expected charge.',
+  },
+  {
+    id: 'C-clviii. ★★ index.ts records only refusals',
+    file: IDX,
+    find: '      refused: armRefused, candidate: armedCandidate, delivered: haNotifyDelivered || audibleDelivered, prior: nightActuationMem,',
+    to: '      refused: armRefused, candidate: null, delivered: haNotifyDelivered || audibleDelivered, prior: nightActuationMem, /* MUTANT */',
+    why: 'An arm no channel delivered is not recorded; the card leads with a charge nothing will make.',
+  },
+  {
+    id: 'C-clix. ★★ the missed evening drops a refusal that still stands',
+    file: IDX,
+    find: '    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null });',
+    to: '    writeNightChargeLatch({ lastNotifyDay: today }); /* MUTANT */',
+    why: 'Saturday refused the Monday window; Sunday\'s evening is missed and the card leads with the expected charge.',
+  },
+  {
+    id: 'C-clx. ★★ a refused hold is pushed as a planned charge',
+    file: NOTIFY,
+    find: "    return held\n      ? {\n        ...base,\n        title: 'Night-charge: planned reserve hold NOT armed tonight',",
+    to: "    return false /* MUTANT */\n      ? {\n        ...base,\n        title: 'Night-charge: planned reserve hold NOT armed tonight',",
+    why: '"Tonight\'s plan calls for a charge" on a night expected to charge nothing.',
+  },
+  {
+    id: 'C-clxi. ★ auto mode is told "the supervised write"',
+    file: NOTIFY,
+    find: "    const write = mode === 'auto' ? 'the write' : 'the supervised write';",
+    to: "    const write = 'the supervised write'; /* MUTANT */",
+    why: 'Auto mode supervises nothing; the push names a supervised write.',
+  },
+  {
+    id: 'C-clxii. ★★ the card leads a refused hold as a planned charge',
+    file: WEB,
+    find: '  if (o.held) {\n',
+    to: '  if (false as boolean) { /* MUTANT */\n',
+    why: '"Planned charge not armed tonight" on a night expected to charge nothing.',
+  },
+  {
+    id: 'C-clxiii. ★ the card tells auto mode "the supervised write"',
+    file: WEB,
+    find: "  const write = o.mode === 'auto' ? 'the write' : 'the supervised write';",
+    to: "  const write = 'the supervised write'; /* MUTANT */",
+    why: 'The card and the push name the write differently in auto mode.',
+  },
+  {
+    id: 'C-clxiv. ★★ the card never tells the lead which night it is',
+    file: CARD,
+    find: '    ? refusedArmLead(status.armRefusal, { mode: status.mode, held: noChargeNight, reservePct: writtenReservePct(plan, status.reserveWriteMaxPct ?? null) })',
+    to: '    ? refusedArmLead(status.armRefusal) /* MUTANT */',
+    why: 'The card says "calls for a charge … the supervised write" on an auto-mode reserve hold.',
+  },
+  // ── no EV-contention note on a night expected to charge nothing ──
+  {
+    id: 'C-clxv. ★★ the push keeps the EV note on a night expected to charge nothing',
+    file: NOTIFY,
+    find: "    + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${held ? '' : evNote} `;",
+    to: '    + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${evNote} `; /* MUTANT */',
+    why: '"no charge is expected" beside "leaving ~2.5 kW for the packs while the car charges".',
+  },
+  {
+    id: 'C-clxvi. ★ the card keeps the EV line on a night expected to charge nothing',
+    file: CARD,
+    find: "      {!noChargeNight && plan.bindingCap === 'evContention'",
+    to: "      {/* MUTANT */ plan.bindingCap === 'evContention'",
+    why: 'The card leads with "reserve held as a floor — no charge expected" above "leaving ~2.5 kW for the packs".',
+  },
+  // ── the force-charge ON-failure push names the stop ──
+  {
+    id: 'C-clxvii. ★★ the ON-failure push names the raw ceiling again',
+    file: NOTIFY,
+    find: "  const toward = o.ceilingPct != null && Number.isFinite(o.ceilingPct) ? ` (toward ~${round1(forceChargeStopPct(o.ceilingPct))}%)` : '';",
+    to: "  const toward = o.ceilingPct != null && Number.isFinite(o.ceilingPct) ? ` (toward ${o.ceilingPct}%)` : ''; /* MUTANT */",
+    why: '"(toward 80.4%)" where every other surface says the force-charge stops at ~80%.',
+  },
+  {
+    id: 'C-clxviii. ★★ the ON-failure push loses "on those slot(s)"',
+    file: NOTIFY,
+    find: '  const partial = partialForceChargeOnFailureSlots({ forceChargeSlots: o.ourSlots, forceChargeOnFailedSlots: o.slots }) != null;',
+    to: '  const partial = false; /* MUTANT */',
+    why: 'A failure on slot 2 alone is pushed as the whole buy above the reserve not happening.',
+  },
+  {
+    id: 'C-clxix. ★ index.ts builds the ON-failure push without the armed ceiling',
+    file: IDX,
+    find: '        noRetry: action.noRetry === true, ceilingPct: state.forceChargeCeilingPct,',
+    to: '        noRetry: action.noRetry === true, ceilingPct: null, /* MUTANT */',
+    why: 'The warning no longer says where the forfeited force-charge would have stopped.',
   },
 ];
 

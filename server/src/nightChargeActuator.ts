@@ -474,6 +474,11 @@ export interface NightActuationState {
   /** v1.186.0 — the FAILURE marker: when the "tonight's buy above the reserve did not
    *  take effect" warning went (once per night). A restart must not repeat it. */
   forceChargeOnFailedAtMs: number | null;
+  /** v1.187.22 — the slots that warning named (the ones still reading OFF). Fewer than
+   *  `forceChargeSlots` = a PARTIAL failure: the other slots took the ON
+   *  (nightForceCharge.partialForceChargeOnFailureSlots), and the morning push says "on those
+   *  slot(s)", as the warning did. null = no failure, or a record from before it was kept. */
+  forceChargeOnFailedSlots: number[] | null;
   forceChargeOffAtMs: number | null;
   forceChargeOffReason: string | null;
   forceChargeOffLastAttemptMs: number | null;
@@ -502,6 +507,14 @@ export interface NightActuationState {
   /** The ANNOUNCED plan's economic ceiling, captured at arming — like targetPct, a
    *  fresher recompute never silently substitutes a different buy. */
   forceChargeCeilingPct: number | null;
+  /** v1.187.22 — STAMPED AT ARM TIME: whether force-charge rides this night — force-charge
+   *  enabled (forceChargeEnabled) and the armed ceiling above the reserve maximum. The gate the
+   *  evening push named the force-charge on, and the one the plan's expected figure was made with
+   *  (forceChargeEligible), so the morning push reads it (forceChargeNightOutcome) instead of the
+   *  option as it stands at the restore: a restart mid-night with the option changed turned an
+   *  armed-to-ride night into "reserve only" beside a figure that counts the force-charge leg.
+   *  Arming does not change what decideForceCharge does. null = a record armed before the stamp. */
+  forceChargeRides: boolean | null;
   lastError: string | null;
 }
 
@@ -517,7 +530,7 @@ export function emptyActuationState(): NightActuationState {
     requestedPct: null,
     forceChargeOnAtMs: null, forceChargeSlots: null,
     forceChargeOnVerifiedAtMs: null, forceChargeOnLastAttemptMs: null, forceChargeOnRetries: 0,
-    forceChargeOnFailedAtMs: null,
+    forceChargeOnFailedAtMs: null, forceChargeOnFailedSlots: null,
     forceChargeOffAtMs: null,
     forceChargeOffReason: null, forceChargeOffLastAttemptMs: null, forceChargeOffRetries: 0,
     forceChargeOffVerifiedAtMs: null, forceChargeOffEscalated: false, forceChargeOffDeadlinePagedAtMs: null,
@@ -526,6 +539,7 @@ export function emptyActuationState(): NightActuationState {
     forceChargeCeilingSyncRetries: 0, forceChargeCeilingPriorPct: null,
     forceChargeCeilingRestoredAtMs: null, forceChargeCeilingRestoreAttempts: 0,
     forceChargeCeilingRestoreLastAttemptMs: null,
+    forceChargeRides: null,
     lastError: null,
   };
 }
@@ -580,6 +594,11 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeOnLastAttemptMs: num(o.forceChargeOnLastAttemptMs),
     forceChargeOnRetries: num(o.forceChargeOnRetries) ?? 0,
     forceChargeOnFailedAtMs: num(o.forceChargeOnFailedAtMs),
+    // v1.187.22 — as the slots above: 1-3 integers, else no list (read as a whole-night failure,
+    // as every failure before the list was kept).
+    forceChargeOnFailedSlots: Array.isArray(o.forceChargeOnFailedSlots)
+      ? o.forceChargeOnFailedSlots.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 3)
+      : null,
     forceChargeOffAtMs: num(o.forceChargeOffAtMs),
     forceChargeOffReason: str(o.forceChargeOffReason),
     forceChargeOffLastAttemptMs: num(o.forceChargeOffLastAttemptMs),
@@ -596,6 +615,8 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeCeilingRestoredAtMs: num(o.forceChargeCeilingRestoredAtMs),
     forceChargeCeilingRestoreAttempts: num(o.forceChargeCeilingRestoreAttempts) ?? 0,
     forceChargeCeilingRestoreLastAttemptMs: num(o.forceChargeCeilingRestoreLastAttemptMs),
+    // v1.187.22 — a record armed before the stamp has none: null, never a guess.
+    forceChargeRides: typeof o.forceChargeRides === 'boolean' ? o.forceChargeRides : null,
     lastError: str(o.lastError),
   };
 }
@@ -649,6 +670,9 @@ export function armFromPlan(
   nowMs: number,
   /** Live backupReserveSoc at arm time (null = unknown → fail-closed). */
   liveReservePct: number | null,
+  /** v1.187.22 — force-charge enabled at arm time (index.ts: forceChargeOn(), the gate the plan's
+   *  expected figure was made with), stamped as `forceChargeRides`. Omitted ⇒ null, unknown. */
+  forceChargeEnabled?: boolean,
 ): NightActuationState | null {
   if (prev.appliedAtMs != null && prev.revertedAtMs == null) return null; // unresolved night
   // v1.165.0 — a force-charge that was switched ON and never verified OFF is an
@@ -666,6 +690,7 @@ export function armFromPlan(
   if (plan.window == null || plan.setpointSocPct == null) return null;
   if (plan.buyKwh == null || plan.buyKwh <= 0) return null;
   if (plan.window.endMs <= plan.window.startMs || plan.window.startMs <= nowMs - APPLY_LATE_MS) return null;
+  const ceiling = armedForceChargeCeilingPct(plan);
   return {
     ...emptyActuationState(),
     day,
@@ -674,7 +699,11 @@ export function armFromPlan(
     buyKwh: plan.buyKwh,
     windowStartMs: plan.window.startMs,
     windowEndMs: plan.window.endMs,
-    forceChargeCeilingPct: armedForceChargeCeilingPct(plan),
+    forceChargeCeilingPct: ceiling,
+    // v1.187.22 — whether force-charge rides this night, as the evening push names it: enabled,
+    // and the armed ceiling above the reserve maximum (at or below it the reserve reaches it alone).
+    forceChargeRides: forceChargeEnabled === undefined ? null
+      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,
     // An unrestored original survives the fresh record, so tonight's restore still
     // returns the OWNER's ceiling, never a value we left behind.
     forceChargeCeilingPriorPct:
@@ -749,6 +778,33 @@ export function servedArmRefusal(
   if (rec == null || mode === 'advisory' || plan == null || !plan.chargeTonight || plan.window == null) return null;
   if (plan.window.startMs !== rec.windowStartMs || plan.window.endMs !== rec.windowEndMs) return null;
   return nowMs < rec.windowEndMs ? rec.reason : null;
+}
+
+/** v1.187.22 — the reason recorded when armFromPlan returned a write but no announcement channel
+ *  delivered it, so nothing was armed (a write the owner never heard about must not fire). */
+export const ARM_UNDELIVERED_REASON = 'the announcement could not be delivered';
+
+/**
+ * v1.187.22 — PURE. What the evening job records as tonight's refusal (ArmRefusalRecord), so the
+ * card leads with it (servedArmRefusal): armRefusalReason's reason; or, when armFromPlan returned a
+ * `candidate` that no announcement channel `delivered` — nothing is armed, and the card led with
+ * the plan's expected charge — ARM_UNDELIVERED_REASON. Not when the record that stays in place
+ * (`prior`, since the candidate is not persisted) is itself an arm for the same window that will
+ * still write (Saturday's arm for the shared Monday window): a write is armed then. null = armed,
+ * or nothing to arm.
+ */
+export function eveningNotArmedReason(o: {
+  refused: string | null;
+  candidate: Pick<NightActuationState, 'windowStartMs' | 'windowEndMs'> | null;
+  delivered: boolean;
+  prior: Pick<NightActuationState, 'day' | 'cancelled' | 'targetPct' | 'revertedAtMs' | 'windowStartMs' | 'windowEndMs'>;
+}): string | null {
+  if (o.refused) return o.refused;
+  if (o.candidate == null || o.delivered) return null;
+  const p = o.prior;
+  const priorWrites = p.day != null && !p.cancelled && p.targetPct != null && p.revertedAtMs == null
+    && p.windowStartMs === o.candidate.windowStartMs && p.windowEndMs === o.candidate.windowEndMs;
+  return priorWrites ? null : ARM_UNDELIVERED_REASON;
 }
 
 export type ActuationAction =

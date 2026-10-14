@@ -72,6 +72,9 @@ export interface ChargeFigurePlan {
   expectedWriteLevelPct?: number | null;
   /** v1.187.22 — the window closes before that level is reached ("toward"). */
   expectedDeliverableBound?: boolean;
+  /** v1.187.22 — force-charge rides the night: its expected start, null when none is expected
+   *  (the night then stops at the reserve); absent otherwise. */
+  expectedForceChargeStartMs?: number | null;
   setpointSocPct: number | null;
 }
 
@@ -79,12 +82,29 @@ export interface ChargeFigurePlan {
  *  nightChargeActuator.ts): what the card would show as "0.0 kWh". */
 export const NO_CHARGE_EXPECTED_KWH = 0.05;
 
+/** v1.187.22 — tonight's write is expected to charge nothing (the server's noChargeExpected): an
+ *  expected figure under NO_CHARGE_EXPECTED_KWH. false with no expected figure. */
+export function noChargeExpected(plan: { expectedBuyKwh?: number | null }): boolean {
+  const exp = plan.expectedBuyKwh;
+  return exp != null && Number.isFinite(exp) && exp < NO_CHARGE_EXPECTED_KWH;
+}
+
+/** v1.187.22 — the reserve the write sets, % (the server's chargeReservePct): the setpoint,
+ *  rounded, at most the panel's maximum. null with no setpoint. */
+export function writtenReservePct(plan: { setpointSocPct: number | null }, maxPct: number | null): number | null {
+  const set = plan.setpointSocPct;
+  const cap = maxPct != null && maxPct > 0 ? maxPct : Infinity;
+  return set != null && Number.isFinite(set) ? Math.min(Math.round(set), cap) : null;
+}
+
 /**
  * v1.187.22 — the card's headline: the CHARGE the write arms. With an expected figure the big
  * number is that draw ("34.9 kWh — expected charge to ~80%"); without one the big number is the
  * level and no kWh is shown. The level is the plan's expectedWriteLevelPct (the reserve as written,
  * or the force-charge stop when force-charge rides the night), else — a plan issued before it —
- * the setpoint as written (rounded, at most the panel's maximum). Never the worst case: that is
+ * the setpoint as written (rounded, at most the panel's maximum) — and, on a force-charge night with
+ * no just-in-time start expected (expectedForceChargeStartMs null), the reserve: the level the night
+ * is expected to reach. Never the worst case: that is
  * sizingLine's. Mirrors the server's chargeLevelPct / statedBuyKwh (nightChargeAdvisor.ts), and says
  * "toward" the level when the window closes before it is reached (chargeIsWindowBound): Friday's
  * one-hour window from ~48% passes ~14 kWh, ~62%, not the 80% it charges toward.
@@ -97,18 +117,16 @@ export function chargeFigureParts(
   maxPct: number | null,
 ): { main: string; unit: string; label: string } {
   const lvl = plan.expectedWriteLevelPct;
-  const set = plan.setpointSocPct;
-  const cap = maxPct != null && maxPct > 0 ? maxPct : Infinity;
-  const level = lvl != null && Number.isFinite(lvl) ? lvl
-    : set != null && Number.isFinite(set) ? Math.min(Math.round(set), cap)
-      : null;
+  const written = writtenReservePct(plan, maxPct);
+  const level = lvl != null && Number.isFinite(lvl)
+    ? (plan.expectedForceChargeStartMs === null && written != null ? written : lvl)
+    : written;
   const levelText = level == null ? '—' : `${Math.round(level * 10) / 10}`;
   const exp = plan.expectedBuyKwh;
   if (exp == null || !Number.isFinite(exp)) return { main: levelText, unit: '%', label: 'charge target' };
-  if (exp < NO_CHARGE_EXPECTED_KWH) {
+  if (noChargeExpected(plan)) {
     // The reserve as written (the server's chargeReservePct): the setpoint, rounded, at most the maximum.
-    const reserve = set != null && Number.isFinite(set) ? `${Math.min(Math.round(set), cap)}` : '—';
-    return { main: reserve, unit: '%', label: 'reserve held as a floor — no charge expected' };
+    return { main: written == null ? '—' : `${written}`, unit: '%', label: 'reserve held as a floor — no charge expected' };
   }
   const to = plan.expectedDeliverableBound === true ? 'toward' : 'to';
   return { main: exp.toFixed(1), unit: 'kWh', label: `expected charge ${to} ~${levelText}%` };
@@ -217,13 +235,28 @@ export function fmtLinePct(n: number | null): string {
 
 /**
  * v1.187.22 — the card's lead on a night a supervised or auto mode REFUSED to arm (the status
- * route's armRefusal, servedArmRefusal): the evening push says "planned charge NOT armed tonight",
- * and the card led with the plan's expected charge ("34.9 kWh — expected charge to ~80%") for a
- * write nothing would make. It leads with the refusal and its reason, and states no level or kWh.
+ * route's armRefusal, servedArmRefusal — a refusal, or a write no announcement channel delivered):
+ * the evening push says "planned charge NOT armed tonight", and the card led with the plan's
+ * expected charge ("34.9 kWh — expected charge to ~80%") for a write nothing would make. It leads
+ * with the refusal and its reason, and states no level or kWh — for the night the plan is (the
+ * push's words): a charge, or, on a night expected to charge nothing (`held`), the reserve held as
+ * a floor. "the write" in auto mode, "the supervised write" otherwise.
  */
-export function refusedArmLead(reason: string): { headline: string; detail: string } {
+export function refusedArmLead(
+  reason: string,
+  o: { mode?: string; held?: boolean; reservePct?: number | null } = {},
+): { headline: string; detail: string } {
+  const write = o.mode === 'auto' ? 'the write' : 'the supervised write';
+  if (o.held) {
+    const reserve = o.reservePct != null && Number.isFinite(o.reservePct) ? `${o.reservePct}%` : '—';
+    return {
+      headline: `Planned reserve hold not armed tonight — ${reason}.`,
+      detail: `Tonight's plan holds the backup reserve at ${reserve} overnight as a floor, with no charge expected, but ${write} `
+        + 'was not armed. The add-on will not raise the reserve tonight.',
+    };
+  }
   return {
     headline: `Planned charge not armed tonight — ${reason}.`,
-    detail: "Tonight's plan calls for a charge, but the supervised write was not armed. The add-on will not charge tonight.",
+    detail: `Tonight's plan calls for a charge, but ${write} was not armed. The add-on will not charge tonight.`,
   };
 }

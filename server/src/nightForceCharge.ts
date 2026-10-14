@@ -451,34 +451,67 @@ export function armedForceChargeStopPct(
  * v1.187.22 — what tonight's force-charge actually did, from the actuation record, for the
  * morning summary:
  *  - `none` — it did not ride the night (no armed ceiling above the reserve maximum, or
- *    force-charge disabled) and nothing of ours was switched ON;
+ *    force-charge disabled when the night was armed) and nothing of ours was switched ON;
  *  - `neverStarted` — it rode the night and was never switched ON (decideForceCharge declined
  *    every tick: the pool stayed at or above the stop, the ceiling never read back, Charge Now was
- *    already on, the grid was unknown, the vitals were red, …);
+ *    already on, the grid was unknown, the vitals were red, the option was switched off, …);
  *  - `ran` — switched ON and a live readback proved it (forceChargeOnVerifiedAtMs, a late apply
  *    included);
  *  - `failed` — switched ON and the "did not take effect" warning went (forceChargeOnFailedAtMs);
+ *    `partialSlots` names the slots that did not take it when the others did
+ *    (partialForceChargeOnFailureSlots), null when it failed on every slot;
  *  - `unconfirmed` — switched ON and neither proven nor failed when the night ended.
  * `stopPct` is where it stops (armedForceChargeStopPct); null on a stamped ON with no armed
- * ceiling above the reserve maximum. A stamped ON counts whatever `enabled` reads now.
- * armedForceChargeStopPct alone (the armed ceiling and the option) named a force-charge that may
- * never have run. PURE.
+ * ceiling above the reserve maximum. A stamped ON counts whatever the stamp or the option says.
+ * Whether it rode the night is the arm-time stamp (`forceChargeRides`, armFromPlan), never the
+ * option as it reads at the restore: a restart mid-night with the option changed turned an
+ * armed-to-ride night into `none`. Only a record armed before the stamp reads `enabled` (the option
+ * now), as every record did before it.
+ * `expectedLeg` — whether the armed day's EXPECTED figure counts a force-charge leg: the same stamp
+ * (the plan's figure is made on the gate the arm read, forceChargeEligible); with no stamp, false
+ * when no armed ceiling sat above the reserve maximum (no leg was possible), else null (unknown).
+ * The morning push names the figure only beside an account of the same legs. PURE.
  */
 export type ForceChargeNightOutcome =
-  | { kind: 'none' }
-  | { kind: 'neverStarted' | 'ran' | 'failed' | 'unconfirmed'; stopPct: number | null };
+  | { kind: 'none'; expectedLeg: boolean | null }
+  | { kind: 'neverStarted' | 'ran' | 'unconfirmed'; stopPct: number | null; expectedLeg: boolean | null }
+  | { kind: 'failed'; stopPct: number | null; expectedLeg: boolean | null; partialSlots: number[] | null };
 
 export function forceChargeNightOutcome(
-  s: Pick<NightActuationState, 'forceChargeCeilingPct' | 'forceChargeOnAtMs' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs'>,
+  s: Pick<NightActuationState,
+    | 'forceChargeCeilingPct' | 'forceChargeOnAtMs' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs'
+    | 'forceChargeRides' | 'forceChargeSlots' | 'forceChargeOnFailedSlots'>,
+  /** Force-charge enabled NOW: read only for a record armed before the stamp. */
   enabled: boolean,
 ): ForceChargeNightOutcome {
+  const c = s.forceChargeCeilingPct;
+  const above = c != null && Number.isFinite(c) && c > RESERVE_WRITE_MAX_PCT;
+  const expectedLeg = s.forceChargeRides ?? (above ? null : false);
   const on = forceChargeOnReadbackStatus(s);
   if (on != null) {
     const stopPct = armedForceChargeStopPct(s, true);
-    return { kind: on === 'verified' ? 'ran' : on === 'failed' ? 'failed' : 'unconfirmed', stopPct };
+    if (on === 'failed') return { kind: 'failed', stopPct, expectedLeg, partialSlots: partialForceChargeOnFailureSlots(s) };
+    return { kind: on === 'verified' ? 'ran' : 'unconfirmed', stopPct, expectedLeg };
   }
-  const armedStop = armedForceChargeStopPct(s, enabled);
-  return armedStop == null ? { kind: 'none' } : { kind: 'neverStarted', stopPct: armedStop };
+  const armedStop = armedForceChargeStopPct(s, s.forceChargeRides ?? enabled);
+  return armedStop == null ? { kind: 'none', expectedLeg } : { kind: 'neverStarted', stopPct: armedStop, expectedLeg };
+}
+
+/**
+ * v1.187.22 — PURE. The slots a force-charge ON failure covered when it covered only SOME of ours
+ * (the others read ON, or their Cores sat at the panel's ceiling, when the warning went): the
+ * failed slots, or null when it covered every slot of ours, or the record cannot say (no slot
+ * list, or a failure recorded before the failed slots were kept — read as whole-night, as it always
+ * was). The ON-failure push says "will not happen on those slot(s)" on exactly these
+ * (buildNightForceChargeOnFailure), and the morning push matches it.
+ */
+export function partialForceChargeOnFailureSlots(
+  s: Pick<NightActuationState, 'forceChargeSlots' | 'forceChargeOnFailedSlots'>,
+): number[] | null {
+  const failed = s.forceChargeOnFailedSlots;
+  const ours = s.forceChargeSlots;
+  if (failed == null || failed.length === 0 || ours == null) return null;
+  return failed.length < ours.length ? [...failed] : null;
 }
 
 /** v1.168.0 — when a force-charge of ours that has not verified OFF must escalate,

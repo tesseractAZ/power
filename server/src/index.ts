@@ -38,7 +38,7 @@ import {
   evDisplacedPackKwh,
   FORCE_CHARGE_PROVEN_KW_PER_SLOT,
   FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnReadbackStatus,
-  forceChargeNightOutcome,
+  forceChargeNightOutcome, partialForceChargeOnFailureSlots,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -210,6 +210,7 @@ import {
   armRefusalReason,
   coerceArmRefusalRecord,
   servedArmRefusal,
+  eveningNotArmedReason,
   type ArmRefusalRecord,
   decideActuation,
   emptyActuationState,
@@ -231,7 +232,7 @@ import {
 import {
   buildNightChargeMessage, sendNotification, loadNotifyConfig,
   // v1.187.22 — the after-the-fact night-charge pushes, built where their text is tested.
-  buildNightChargeMorningSummary, buildNightChargeApplyFailure,
+  buildNightChargeMorningSummary, buildNightChargeApplyFailure, buildNightForceChargeOnFailure,
 } from './notify.js';
 import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonAt } from './tariff.js';
@@ -4582,7 +4583,10 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     try { scoreCompletedNights(nowMs); } catch (e: any) { app.log.debug(`night-charge: cutoff scoring skipped (${e?.message ?? e})`); }
     try { setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION })); } catch (e: any) { app.log.debug(`night-charge: cutoff readiness recompute failed (${e?.message ?? e})`); }
     refreshNightRecentOutcomes(); // scoring may have updated rows the status route serves
-    writeNightChargeLatch({ lastNotifyDay: today });
+    // v1.187.22 — no decision was reached tonight, so a refusal recorded on an earlier evening still
+    // stands (Saturday's, for the window Sat and Sun share): keep it. servedArmRefusal serves it only
+    // beside a charge plan for that window, and only until the window closes.
+    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null });
     return;
   }
 
@@ -4677,7 +4681,9 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // armed instead of recommending the plan's level and draw (buildNightChargeMessage).
     let armRefused: string | null = null;
     if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
-      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct);
+      // v1.187.22 — the force-charge gate is stamped on the record (forceChargeRides): the gate this
+      // plan's expected figure was made with, read back by the morning push.
+      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn());
       if (!armedCandidate) armRefused = armRefusalReason(nightActuationMem, plan, nowMs, plan.reserveFloorPct);
       if (armedCandidate) {
         // v1.79.0 — an earlier evening's never-applied ARM being replaced is a
@@ -4711,11 +4717,9 @@ async function runNightChargeEveningJobInner(): Promise<void> {
           cancelDeadlineText: fmtDeadlineSpoken(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           cancelDeadlineTextEs: fmtDeadlineSpokenEs(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           targetPct: armedCandidate.targetPct!,
-          // v1.165.0 — say so when force-charge will ride this window.
-          forceChargeTargetPct:
-            forceChargeOn() && armedCandidate.forceChargeCeilingPct != null
-              && armedCandidate.forceChargeCeilingPct > RESERVE_WRITE_MAX_PCT
-              ? armedCandidate.forceChargeCeilingPct : null,
+          // v1.165.0 — say so when force-charge will ride this window. v1.187.22 — from the stamp
+          // the morning push reads back (forceChargeRides): one decision, made once.
+          forceChargeTargetPct: armedCandidate.forceChargeRides === true ? armedCandidate.forceChargeCeilingPct : null,
         };
       } else if (
         nightActuationMem.forceChargeOnAtMs != null && nightActuationMem.forceChargeOffVerifiedAtMs == null
@@ -4733,7 +4737,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       }
     }
     const cfg = loadNotifyConfig();
-    const msg = buildNightChargeMessage(plan, shape, supervisedCtx, armRefused);
+    const msg = buildNightChargeMessage(plan, shape, supervisedCtx, armRefused, NIGHT_CHARGE_MODE);
     await sendNotification(cfg, msg); // direct — bypasses quiet-hours/min-severity (I10)
     // NOTIFY_CHANNEL 'none' makes sendNotification a silent no-op — that is
     // NOT a delivered announcement for arming purposes.
@@ -4789,11 +4793,16 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         );
       }
     }
-    // v1.187.22 — and the refused arm, keyed by its window, for the card (servedArmRefusal).
+    // v1.187.22 — and the refused arm, keyed by its window, for the card (servedArmRefusal): a
+    // refusal, or a write no announcement channel delivered (nothing is armed — unless the record
+    // left in place is an arm for the same window that will still write).
+    const notArmed = eveningNotArmedReason({
+      refused: armRefused, candidate: armedCandidate, delivered: haNotifyDelivered || audibleDelivered, prior: nightActuationMem,
+    });
     writeNightChargeLatch({
       lastNotifyDay: today,
-      armRefused: armRefused && plan?.window
-        ? { reason: armRefused, windowStartMs: plan.window.startMs, windowEndMs: plan.window.endMs } : null,
+      armRefused: notArmed && plan?.window
+        ? { reason: notArmed, windowStartMs: plan.window.startMs, windowEndMs: plan.window.endMs } : null,
     }); // latch AFTER a successful send
     app.log.info(`night-charge: evening advisory sent (${shape}) and latched for ${today}.`);
   } catch (e: any) {
@@ -5618,20 +5627,17 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // v1.186.0 — the buy above the reserve is forfeited on these slots. A cost, not a
     // safety, matter: the reserve write is verified on its own, and the OFF side (window
     // end, deadline) runs exactly as before. Once per night — the marker survives a restart.
-    persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs });
-    const all = state.forceChargeSlots == null || action.slots.length >= state.forceChargeSlots.length;
+    // v1.187.22 — and which slots: a failure on only some of ours is reported as such, here and in
+    // the morning push (partialForceChargeOnFailureSlots).
+    persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs, forceChargeOnFailedSlots: [...action.slots] });
+    const all = partialForceChargeOnFailureSlots({ forceChargeSlots: state.forceChargeSlots, forceChargeOnFailedSlots: action.slots }) == null;
     app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${action.slots.join(',')} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
     try {
-      await sendNotification(loadNotifyConfig(), {
-        severity: 'warning',
-        dedupId: 'night_charge_force_charge_on_failure',
-        title: 'Night-charge: force-charge did not take effect',
-        body:
-          `The night-charge for ${state.day} switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 `
-          + `still reads slot(s) ${action.slots.join(', ')} OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ' (too close to the window end to re-issue)' : ''}. `
-          + `Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve (toward ${state.forceChargeCeilingPct ?? '—'}%) will not happen${all ? '' : ' on those slot(s)'}; `
-          + 'the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link.',
-      });
+      // v1.187.22 — toward where it stops (~80%), as every other surface names it, not the ceiling.
+      await sendNotification(loadNotifyConfig(), buildNightForceChargeOnFailure({
+        day: state.day, slots: action.slots, ourSlots: state.forceChargeSlots, retries: state.forceChargeOnRetries,
+        noRetry: action.noRetry === true, ceilingPct: state.forceChargeCeilingPct,
+      }));
     } catch (e: any) {
       app.log.warn(`night-charge: force-charge ON-failure notify failed (${e?.message ?? e})`);
     }
