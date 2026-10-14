@@ -8,12 +8,14 @@ import {
   BATTERY_SOC_THRESHOLDS,
   createBatterySocAlarm,
   socAlarmMessage,
+  socAlarmMessageEs,
+  socAlarmAdvisory,
+  socAlarmAdvisoryEs,
   activeSocBand,
   socAlertSeverity,
   type SocThreshold,
 } from '../src/batterySocAlarm.js';
-import { socGridCrossDecision, reEscalateGridDrop } from '../src/socGridDispatch.js';
-import type { AlarmPriority } from '../src/alertPriority.js';
+import { socLadderHarness, settle, house, HOUSE } from './helpers/socLadderHarness.js';
 
 // v0.12.0 — Unit tests for the backup-pool SoC audible alarm. Each test uses a
 // UNIQUE tmp statePath so the persisted armed-map / lastSoc never leaks between
@@ -281,7 +283,7 @@ test('v0.75.0 — bands re-arm after recovery so a later dip re-announces the wo
 });
 
 test('v0.75.0 — onCross fires for EVERY crossed band, flagging only the most-severe as primary', () => {
-  // Guards the regression the adversarial review caught: the consumer (index.ts) records the
+  // Guards the regression the adversarial review caught: the consumer (socLadders.ts) records the
   // grid-downgrade re-escalation map inside onCross, so it must hear EVERY crossed band — not
   // just the announced one — or a later grid drop can fail-silent on the higher emergency bands.
   const calls: { pct: number; primary: boolean }[] = [];
@@ -298,50 +300,39 @@ test('v0.75.0 — onCross fires for EVERY crossed band, flagging only the most-s
   );
 });
 
-test('v0.75.0 — REGRESSION: grid-drop re-escalates ALL crossed emergency bands after a partial recovery', () => {
-  // The first adversarial review's exact fail-silent scenario, locked in end-to-end: a FAITHFUL copy
-  // of the index.ts onCross + socDowngraded re-escalation consumer, driven by the REAL alarm module.
-  // On-grid same-tick multi-emergency crossing → partial recovery above the worst band → grid drop
-  // MUST audibly re-escalate the shallower high bands (pre-collapse behaviour). If the collapse had
-  // starved socDowngraded of the non-worst bands (the bug), the grid drop would be silent here.
-  const sp = join(tmpdir(), `soc-reesc-${process.pid}-${Date.now()}-${seq++}.json`);
-  tmpPaths.push(sp);
-  const announced: { pct: number; priority: AlarmPriority }[] = [];
-  const socDowngraded = new Map<number, AlarmPriority>();
+test('v0.75.0 — REGRESSION: grid-drop re-escalates ALL crossed emergency bands after a partial recovery', async (t) => {
+  // The first adversarial review's exact fail-silent scenario, locked in end-to-end: on-grid same-tick
+  // multi-emergency crossing → partial recovery above the worst band → grid drop MUST audibly
+  // re-escalate the shallower emergency bands. If the collapse had starved the grid-downgrade record
+  // of the non-worst bands (the bug), the grid drop would be silent here.
+  // v1.187.22 — driven through the PRODUCTION glue (socLadders.ts startSocLadders: the house onCross,
+  // its record and the re-escalation pass) by store ticks, the grid verdict flipped between them; the
+  // hand copy of the consumer this test used to carry is gone. Secondary panels: test/socLadders.test.ts.
   let backstopping = true; // grid present
-  // v0.76.0 — drives the REAL extracted dispatch functions (socGridCrossDecision +
-  // reEscalateGridDrop) instead of a hand-copied mirror, so this regression can no
-  // longer pass while index.ts's actual logic drifts. The only thing reproduced
-  // here is index.ts's tiny onCross consumer glue (record every band, announce
-  // only the primary) — the grid-downgrade decision and the re-escalation pass are
-  // the production functions verbatim.
-  const a = createBatterySocAlarm({
-    statePath: sp,
-    onCross: (t, isPrimary) => {
-      const { priority, onGrid } = socGridCrossDecision(t, backstopping);
-      if (onGrid) socDowngraded.set(t.pct, t.priority);
-      else socDowngraded.delete(t.pct);
-      if (!isPrimary) return;
-      announced.push({ pct: t.pct, priority });
-    },
-  });
-  const reEscalate = (soc: number) => {
-    for (const band of reEscalateGridDrop(socDowngraded, soc, backstopping, () => true)) {
-      announced.push(band);
-    }
-  };
-
-  a.update(12, 0); // boot low, on-grid (baseline <30 arms 10/8/4/2)
-  a.update(3, 1 * MIN); reEscalate(3); // 12→3 crosses 10/8/4 in one tick — collapse announces worst(4) only
+  const h = socLadderHarness(t, { hydrated: true, grid: () => ({ backstopping, importLive: true }) });
+  const tick = async (soc: number) => { h.store.change({ [HOUSE]: house(soc) }); await settle(); };
+  await tick(12); // boot low, on-grid (a cold-start baseline <30 arms 10/8/4/2)
+  await tick(3); // 12→3 crosses 10/8/4 in one tick — the collapse announces the worst (4) only, downgraded
+  assert.deepEqual(h.announced, [{ priority: 'low', message: socAlarmAdvisory(4, undefined, true) }],
+    'one on-grid advisory for the worst band, worded by the measured import');
+  assert.deepEqual(h.messagesEs(), [socAlarmAdvisoryEs(4, undefined, true)], 'its Spanish second pass worded by the measured import too');
   // Despite the audible collapse, EVERY crossed emergency band is recorded for later re-escalation:
-  assert.deepEqual([...socDowngraded.keys()].sort((x, y) => y - x), [10, 8, 4]);
-  a.update(5, 2 * MIN); reEscalate(5); // partial recovery to 5%: climbs out 4 (5>4); 8/10 remain
-  assert.deepEqual([...socDowngraded.keys()].sort((x, y) => y - x), [10, 8]);
+  assert.deepEqual([...h.ladders.houseDowngraded.keys()].sort((x, y) => y - x), [10, 8, 4]);
+  await tick(5); // partial recovery to 5%: climbs out 4 (5>4); 8/10 remain
+  assert.deepEqual([...h.ladders.houseDowngraded.keys()].sort((x, y) => y - x), [10, 8]);
   backstopping = false; // GRID DROPS
-  a.update(5, 3 * MIN); reEscalate(5); // at 5% off-grid → re-escalate the still-active emergency bands
-  // audit #24 — 10%/8% are now priority='critical' in the ladder (reconciled to the reserve-floor classifier).
-  const reesc = announced.filter((x) => x.priority === 'critical').map((x) => x.pct).sort((x, y) => y - x);
-  assert.deepEqual(reesc, [10, 8], 'grid drop must audibly re-escalate the higher emergency bands, not go silent');
+  await tick(5); // at 5% off-grid → re-escalate the still-active emergency bands
+  // audit #24 — 10%/8% are priority='critical' in the ladder (reconciled to the reserve-floor classifier).
+  assert.deepEqual(h.announced.slice(1), [
+    { priority: 'critical', message: socAlarmMessage({ pct: 10, priority: 'critical' }) },
+    { priority: 'critical', message: socAlarmMessage({ pct: 8, priority: 'critical' }) },
+  ], 'grid drop must audibly re-escalate the higher emergency bands, not go silent');
+  assert.deepEqual(h.messagesEs().slice(1), [
+    socAlarmMessageEs({ pct: 10, priority: 'critical' }),
+    socAlarmMessageEs({ pct: 8, priority: 'critical' }),
+  ], 'each re-escalation with its Spanish second pass');
+  await tick(5);
+  assert.equal(h.announced.length, 3, 'once each');
 });
 
 test('cleanup — remove tmp state files (best effort)', () => {

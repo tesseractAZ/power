@@ -2509,7 +2509,7 @@ export function computeAlerts(
   // SoC threshold the backup pool is currently at/below (50/40/30/20/15/10/8/4/2 %),
   // its severity/source chosen by socAlertSeverity so priorityOf() derives the
   // matching ISA tier (Low→Critical). The audible escalating alarm is fired
-  // separately via broadcast.announce (batterySocAlarm + index.ts); the id MUST
+  // separately via broadcast.announce (batterySocAlarm + socLadders.ts); the id MUST
   // start with 'backup-soc' so broadcast.ts excludes it from its own chime and
   // the dedicated announce stays the sole SoC audible.
   // v1.185.0 — the HOUSE panel (first-in-map before); every other panel: secondaryPanelAlerts.

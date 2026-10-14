@@ -123,7 +123,7 @@ const MUTANTS = [
   {
     id: 'xiv. ★★ the house blind fallback averages both pools',
     file: MEMB,
-    find: '  if (shp2Panels(devices).sns.length <= 1 && !missingPin) return homeFleetMeanSoc(devices, lastKnownRoster);',
+    find: '  if (housePoolIsOnePanel(devices)) return homeFleetMeanSoc(devices, lastKnownRoster);',
     to: '  return homeFleetMeanSoc(devices, lastKnownRoster); /* MUTANT */',
     why: 'A full garage bank holds the house ladder above its critical rungs while the house pool empties.',
   },
