@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calibratedBuyDebiasFactor, computeNightChargePlan, buildNightChargeInputs, DELIVERED_BASIS } from '../src/nightChargeAdvisor.js';
+import { calibratedBuyDebiasFactor, computeNightChargePlan, buildNightChargeInputs, DELIVERED_BASIS, WORST_CASE_BASIS } from '../src/nightChargeAdvisor.js';
 
 /**
  * v1.112.0 — the buy de-bias (design §3.4's lane, first live producer).
@@ -61,7 +61,7 @@ test('eligibility: unactuated, unscored, shortfall-disclosed, tiny-plan, and nul
 
 // ── through the plan: announcement carries the factor, raw stays raw ─────────
 
-function planWith(factor?: number) {
+function planWith(factor?: number, p50 = true) {
   const nowMs = Date.UTC(2026, 7, 27, 4, 30); // 21:30 MST
   const winStart = Date.UTC(2026, 7, 27, 6, 0);
   const winEnd = Date.UTC(2026, 7, 27, 12, 0);
@@ -71,8 +71,9 @@ function planWith(factor?: number) {
     periodIdAt: (ms: number) => (ms >= winStart && ms < winEnd ? 'offpeak' : 'onpeak'),
     cheapPeriodId: 'offpeak', windowScanHours: 30,
     bandHours: Array.from({ length: 24 }, (_, h) => ({
-      ts: nowMs + h * 3_600_000, pvP10W: 0, pvP50W: 0, pvP90W: 0,
-      loadP10W: 3000, loadP50W: 3000, loadP90W: 3000, embeddedEvW: 0,
+      ts: nowMs + h * 3_600_000, pvP10W: 0, pvP90W: 0, loadP10W: 3000, loadP90W: 3000, embeddedEvW: 0,
+      // v1.187.22 — without the median basis the plan states no expected figure (the fallback headline).
+      ...(p50 ? { pvP50W: 0, loadP50W: 3000 } : {}),
     })),
     dayRollups: [], realizedDailyErrHalfFrac: null, nextRechargeMs: null,
     ev: null, evMaxLoadW: 11520,
@@ -90,7 +91,29 @@ test('plan: debiased = raw × factor; raw buyKwh untouched; rationale discloses 
   assert.equal(cal.buyKwh, raw.buyKwh, 'the RAW estimate must not move with the factor');
   assert.equal(cal.buyKwhDebiased, Math.round(cal.buyKwh! * 1.66 * 100) / 100);
   assert.match(cal.rationale, /realized-buy calibration/);
-  assert.match(cal.rationale, new RegExp(`Buy ~${Math.round(cal.buyKwhDebiased! * 10) / 10}`), 'headline uses the debiased figure');
+  // v1.187.22 — the headline is the charge the write arms, with the EXPECTED draw; the debiased
+  // figure is the worst case, named once in the sizing sentence, the calibration beside it.
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  assert.match(cal.rationale, new RegExp(`^Charge to ~50% in the 23:00–05:00 window: ~${r1(cal.expectedBuyKwh!)} kWh expected\\. `));
+  assert.ok(cal.rationale.includes(`Sized on an islanded worst case (${WORST_CASE_BASIS}) of ~${r1(cal.buyKwhDebiased!)} kWh `
+    + `(raw estimate ${r1(cal.buyKwh!)} kWh × 1.66 realized-buy calibration)`), 'the worst case named is the debiased figure');
+  assert.equal(cal.expectedBuyKwh, raw.expectedBuyKwh, 'the de-bias never touches the expected figure');
+});
+
+test('plan: with no median basis the headline states no kWh; the de-biased worst case stays the sizing sentence, the calibration beside it', () => {
+  // v1.187.22 — no expected figure: the charge without an energy figure, never the worst case.
+  const cal = planWith(1.66, false);
+  const raw = planWith(undefined, false);
+  assert.ok(cal.chargeTonight && cal.buyKwh != null, `expected a charging plan, got: ${cal.rationale}`);
+  assert.equal(cal.expectedBuyKwh, null, 'no P50 basis — no expected figure');
+  assert.equal(cal.buyKwh, raw.buyKwh);
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  assert.ok(cal.rationale.startsWith(
+    `Charge to ~50% in the 23:00–05:00 window. Sized on an islanded worst case (${WORST_CASE_BASIS}) `
+    + `of ~${r1(cal.buyKwhDebiased!)} kWh (raw estimate ${r1(cal.buyKwh!)} kWh × 1.66 realized-buy calibration), from ~`,
+  ), cal.rationale);
+  assert.ok(raw.rationale.startsWith(`Charge to ~50% in the 23:00–05:00 window. Sized on an islanded worst case (${WORST_CASE_BASIS}) `
+    + `of ~${r1(raw.buyKwh!)} kWh, from ~`), raw.rationale);
 });
 
 test('plan: factor 1 (or absent) is invisible — no calibration note, debiased === raw', () => {

@@ -473,7 +473,12 @@ test('setpoint — the contended night asks for the requirement, predicts the ar
   // truncated and the announcement must say so rather than promise 75.
   assert.match(p.rationale, /reserve is set to 50%/, 'announces what is actually written');
   assert.match(p.rationale, /the resilience requirement asks for 75%/, 'and still discloses the ask');
-  assert.match(p.rationale, /only expected to reach ~66\.4%/);
+  // v1.187.22 — the arrival is stated once, by the sizing sentence that labels it the islanded
+  // worst case ("projecting ~66.4% by the window close"); the reserve sentence no longer repeats
+  // it as what the window is "only expected to reach".
+  assert.doesNotMatch(p.rationale, /expected to reach/);
+  assert.equal(p.rationale.split('66.4%').length - 1, 1, p.rationale);
+  assert.match(p.rationale, /Sized on an islanded worst case \([^)]*\) of ~[\d.]+ kWh[^.]*, projecting ~66\.4% by the window close\./);
 });
 
 test('setpoint — an uncapped night has NO divergence to disclose', () => {
@@ -532,12 +537,17 @@ test('consumer (HA/MQTT) — the write entity carries the ask, a separate entity
   assert.equal(stale.night_charge_expected_soc_percent, null);
 });
 
-test('consumer (notify) — the announcement names the ask AND the expectation when they differ', () => {
+test('consumer (notify) — the announcement names the ask; the worst-case arrival is not pushed as expected', () => {
   const sup = { cancelDeadlineText: 'tonight at 22:55', targetPct: 41 };
   const diverged = buildNightChargeMessage(mkPlan({ setpointSocPct: 41.2, targetSocPct: 31.4 }), 'charge', sup);
   assert.match(diverged.body, /raises the backup reserve to 41%/);
-  assert.match(diverged.body, /only expected to reach ~31\.4%/);
-  assert.match(diverged.body, /the reserve is the ask, not a forecast/);
+  // v1.187.22 — 31.4% is targetSocPct, the arrival projected on the islanded worst case the plan
+  // is sized on. Pushed as "The pack is only expected to reach ~31.4%" it contradicted the
+  // headline's expected charge; a window that cannot reach the level now says "toward" instead.
+  assert.doesNotMatch(diverged.body, /expected to reach|31\.4%/);
+  const bound = buildNightChargeMessage(mkPlan({ setpointSocPct: 41.2, targetSocPct: 31.4, expectedDeliverableBound: true }), 'charge', sup);
+  assert.match(bound.title, /charging toward ~41% tonight/);
+  assert.match(bound.body, /^Charging the backup pool toward ~41% overnight, as far as the window can deliver[,.]/);
 
   // Equal numbers ⇒ no clutter.
   const agreed = buildNightChargeMessage(mkPlan({ setpointSocPct: 41, targetSocPct: 41 }), 'charge', sup);

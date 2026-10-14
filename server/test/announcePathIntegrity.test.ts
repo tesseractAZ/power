@@ -16,9 +16,11 @@ import {
 
 /* ── #14 the nightly advisory held both alarm speakers for a full minute ──── */
 
+// v1.187.22 — the line states the level the write drives to and the expected draw.
 const LIVE = {
-  buyKwhRounded: 16,
-  targetPct: 50,
+  levelPct: 50,
+  reservePct: 50,
+  expectedKwh: 16,
   deadlineText: 'tonight at 10:55 PM',
   deadlineTextEs: 'esta noche a las 10:55 PM',
   cushionShortfall: true,   // pinned true on this plant — the worst case
@@ -58,7 +60,7 @@ test('the advisory still carries what the listener must act on', () => {
   const { en, es } = nightChargeSpokenNotice(LIVE);
   for (const [label, t] of [['en', en], ['es', es]] as const) {
     assert.match(t, /16/, `${label}: how much`);
-    assert.match(t, /50/, `${label}: to what reserve`);
+    assert.match(t, /50/, `${label}: to what level`);
     assert.match(t, /10:55/, `${label}: by when`);
     assert.match(t, /Power/, `${label}: how to cancel`);
   }

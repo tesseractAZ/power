@@ -160,15 +160,18 @@ jobs:
 
           # CHANGELOG.md: prepend a new section before the most recent version section
           python3 - <<'PY'
-          import os, re, datetime
+          import os, re
           version = os.environ["NEXT"]
-          today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
           with open(os.environ["NOTES_FILE"]) as f:
               notes = f.read().strip() or "_(see commit history for details)_"
 
           with open("ecoflow_panel/CHANGELOG.md", "r") as f:
               content = f.read()
-          new_section = f"## {version} — {today}\n\n{notes}\n\n"
+          # v1.187.22 — an undated `## X.Y.Z` heading: Home Assistant's update dialog shows only the new
+          # section when the heading is exactly the version, and the whole file otherwise. A `#`/`##`
+          # line inside the notes is demoted so it cannot end the section early.
+          notes = re.sub(r"(?m)^#{1,2}(?=\s)", "###", notes)
+          new_section = f"## {version}\n\n{notes}\n\n"
           m = re.search(r"^## \d", content, re.MULTILINE)
           if m:
               content = content[:m.start()] + new_section + content[m.start():]
@@ -177,6 +180,10 @@ jobs:
           with open("ecoflow_panel/CHANGELOG.md", "w") as f:
               f.write(content)
           PY
+
+          # v1.187.22 — Home Assistant's Changelog dialog renders the whole of CHANGELOG.md; keep it
+          # small by moving older releases to CHANGELOG-ARCHIVE.md (CI fails past the size limit).
+          node scripts/roll-changelog.mjs
 
           echo "── config.yaml version line ─────────────────"
           grep '^version:' ecoflow_panel/config.yaml
@@ -204,7 +211,7 @@ jobs:
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git checkout -b "$branch"
-          git add ecoflow_panel/config.yaml ecoflow_panel/CHANGELOG.md
+          git add ecoflow_panel/config.yaml ecoflow_panel/CHANGELOG.md ecoflow_panel/CHANGELOG-ARCHIVE.md
           git commit -m "Release v${NEXT}"
           # CI does not run on a PR opened with GITHUB_TOKEN, so the release-PR check runs here,
           # against main, before the branch is pushed.

@@ -3392,6 +3392,13 @@ export function startAlertMonitor(
       // caused it) still fires after the process comes back.
       // v1.155.0 — the device map names a per-device gap's SN ("Core 2").
       ...outageAlerts(recorder.telemetryGaps(), Date.now(), OUTAGE_ALERT_OPTS, (sn) => snap.devices[sn]?.deviceName),
+    ];
+    // v1.187.22 — the audible-channel alerts are read when each set is ASSEMBLED, not once with
+    // the live alarms: the second assembly follows the worker wait (up to ALERT_FEED_BUDGET_MS),
+    // and a probe that restored the channel inside that wait left the stale "unreachable" in the
+    // set the tick then dispatched (2026-10-12: restored 22:06:08, pushed 22:06:09, its
+    // "Resolved" at 22:06:29). Same position in the set as before, so the order is unchanged.
+    const liveAudible = (): Alert[] => [
       // v0.84.0 — audible-delivery self-alert. When audible broadcasting is
       // enabled but the broadcast monitor has CONFIRMED no reachable speaker
       // (Music Assistant down → its media_players go unavailable), surface it as
@@ -3405,6 +3412,8 @@ export function startAlertMonitor(
       // Same push path, same exclusion from the audible condition (the system-audible prefix);
       // it yields to the unreachable alert above once no speaker is usable.
       ...(() => { const a = broadcastDegradedAlert(getBroadcastHealth(), Date.now()); return a ? [a] : []; })(),
+    ];
+    const liveTailRest: Alert[] = [
       // v0.93.0 (audit #1 phase-2) — devices whose incoming message RATE has
       // collapsed below their learned baseline while `lastUpdated` stays fresh
       // (the SHP2 ~13 h crawl that defeated the staleness + gap detectors). The
@@ -3530,7 +3539,7 @@ export function startAlertMonitor(
     })();
     lastRosterMute = { muted, spares: mutedSpareSns }; // v1.187.10 — rosterMuteReasonForSn
     const assemble = (workerAlerts: Alert[]): Alert[] => {
-      const all = [...liveHead, ...workerAlerts, ...liveTail]
+      const all = [...liveHead, ...workerAlerts, ...liveTail, ...liveAudible(), ...liveTailRest]
         .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
       // v1.187.0 — the roster mute, with its reason (diagnostic only) taking precedence over a
       // condition gate's (applyRosterMute).

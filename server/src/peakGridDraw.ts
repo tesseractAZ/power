@@ -271,10 +271,12 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
   if (!v.active) return [];
   const kw = (v.gridToBatteryW / 1000).toFixed(1);
   const mins = Math.max(1, Math.round(v.heldForMs / 60_000));
+  // v1.187.22 — the on-peak SPEND rate (kW into the pack × the current rate), stated as that. It
+  // said "… per hour more than buying the same energy overnight", but nothing subtracts the
+  // overnight rate: the figure is the whole on-peak cost, not the premium over overnight.
   const costText = v.centsPerHour == null
     ? ' The tariff rates are not confirmed in config, so the cost is not estimated here.'
-    : ` At the current ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour`
-      + ` more than buying the same energy overnight.`;
+    : ` At the current ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour.`;
   const whoText = v.coreAttribution == null ? '' : ` Drawing now: ${v.coreAttribution}.`;
   return [{
     id: PEAK_GRID_DRAW_ALERT_ID,

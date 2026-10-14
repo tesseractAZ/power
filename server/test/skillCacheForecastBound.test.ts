@@ -208,7 +208,9 @@ test('★★ the evening job defers BEFORE it records a row, notifies, latches o
   for (const later of [
     'recordNightPlanRow(today, fresh.plan, fresh.extras);',
     "cancelStalePriorArm(today, nowMs, shape === 'hold'",
-    'writeNightChargeLatch({ lastNotifyDay: today }); // latch AFTER a successful send',
+    // v1.187.22 — the latch write also records a refused arm, so it spans lines; its trailing
+    // marker identifies it.
+    '}); // latch AFTER a successful send',
   ]) {
     const i = body.indexOf(later);
     assert.ok(i > defer, `${later} comes after the defer`);

@@ -1521,9 +1521,9 @@ A second SHP2 is supported. Its model:
   panel's reserve pair, source and circuit faults, reserve-blind and SoC band, with ids suffixed
   `-<serial>` (`familyOf` stops at the serial, so every family rule applies) and titles led by
   the panel's name; no arbitrage posture (night charge never writes it). `resolveHandoffOwner`
-  hands `backup-soc-<pct>-<serial>` to that panel's own pair. index.ts runs a SoC ladder per
-  secondary panel (`battery-soc-alarm-<serial>.json`, `socAlarmMessage(t, poolName)`) and a
-  runway alarm per panel (`runway-alarm-<serial>.json`, `RunwayWording { poolName, basis: 'drain' }`).
+  hands `backup-soc-<pct>-<serial>` to that panel's own pair. `socLadders.ts` runs a SoC ladder
+  per secondary panel (`battery-soc-alarm-<serial>.json`, `socAlarmMessage(t, poolName)`), and
+  index.ts a runway alarm per panel (`runway-alarm-<serial>.json`, `RunwayWording { poolName, basis: 'drain' }`).
 - **The secondary runway** (`panelRunway.ts`) is the pool's energy against its measured drain:
   the net pack flow of the panel's connected Cores (`panelPoolNetWatts`, null unless EVERY one
   reports), sampled each 2-min runway tick (before, and independent of, the analytics worker's
@@ -3909,13 +3909,14 @@ preconditions (sun up, pack rested, ≥2 samples, non-null SoH) are actually met
 
 ## 5. Runway, Depletion & Battery-SoC Alarms (safety-critical)
 
-This cluster is the life-safety heart of the add-on: the engines that decide **when the home is at risk of losing power** and **when to make an audible alarm**. Six cooperating modules are documented here:
+This cluster is the life-safety heart of the add-on: the engines that decide **when the home is at risk of losing power** and **when to make an audible alarm**. Seven cooperating modules are documented here:
 
 | Module | File | Role |
 | --- | --- | --- |
 | Runway depletion sim | `analytics.ts` (`computeRunway`) | Hour-by-hour DC-pool depletion projection → `hoursToReserve` / `hoursToEmpty` |
 | Runway audible alarm | `runwayAlarm.ts` (`classifyRunway`, `createRunwayAlarm`) | Maps a runway projection to an ISA priority and drives the dedicated audible path |
 | Battery-SoC floor alarm | `batterySocAlarm.ts` | The 50/40/30/20/15/10/8/4/2 % descending-crossing ladder |
+| SoC ladder wiring | `socLadders.ts` (`startSocLadders`) | The store tick that feeds the house ladder, one ladder per secondary panel and the grid-drop re-escalation, behind the boot gate (§3.8) |
 | Grid backstop resolver | `gridState.ts` (`resolveGridBackstop`, `liveGridBackstop`) | Answers "is the grid carrying the home right now?" — the input that re-escalates islanded vs grid-backed |
 | Load-shed advisor | `loadShedAdvisor.ts` | Advisory-only counterfactual: "shed X, runway extends to Y" |
 | Grid dispatch helpers | `socGridDispatch.ts` | Pure SoC grid-downgrade + grid-drop re-escalation logic |
@@ -4225,6 +4226,8 @@ Enabled unless `BATTERY_RUNWAY_ALARM_ENABLED=false`.
 
 Fires an escalating audible announcement when the SHP2 backup-pool SoC crosses **down** through a threshold, with priority rising as the reserve gets lower. Like the runway alarm it is a **dedicated audible path** (`broadcast.announce` directly), because the normal pipeline only chimes for warning/critical and the user wants the 40 %/30 % (low-priority) crossings audible too. The matching on-screen alert is emitted by `alerts.ts` (and excluded from the broadcast condition so it never double-chimes).
 
+The ladders and the store tick that feeds them live in `server/src/socLadders.ts` (`startSocLadders`, v1.187.22; index.ts before, which now only starts it): the house ladder with its grid-downgrade record (§4.5), one ladder per secondary panel, and the grid-drop re-escalation pass.
+
 #### 3.2 The SoC ladder — `BATTERY_SOC_THRESHOLDS`
 
 | SoC % | Priority |
@@ -4271,11 +4274,15 @@ The guard **only** fires from a *fresh, healthy* baseline: a real deep discharge
 - `activeSocBandWithHysteresis(socPct, prevBandPct)` (v1.17.0/F15) — adds the ladder's 2 % re-arm margin to the on-screen band. A deeper crossing takes effect immediately; the held band clears/ascends only once SoC climbs *above* `band + 2`. Pure banding had 399 on-screen rises in 30 days vs ~115 real crossings (3.5× churn) polluting cleared-history and the auto-silencer's training data.
 - `socAlertSeverity(priority)` — stamps `{severity, source:'threshold', priority}` so the web/TUI `priorityOf()` derives the same ISA tier as the audible. Always `source:'threshold'` (a real measurement, not a learned forecast); Medium is carried by an explicit `priority` field rather than faking `source:'learned'`.
 
-#### 3.7 SHP2-blind failover (index.ts, v1.8.0/F3)
+#### 3.7 SHP2-blind failover (`socLadders.ts`, v1.8.0/F3)
 
-The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the 30-day review found blackouts (42.2 h, 25.8 h) in which the pool crossed 50/40/30/20 % while the ladder sat dark for 17.8–20.8 h. When `backupBatPercent` is null, index.ts falls back to `housePoolFallbackSoc(devices, lastKnownRoster)` (the pool *is* those batteries). With one panel that is `homeFleetMeanSoc`, whose membership comes from the live roster, then the persisted last-known roster, then the `SPARE_DPU_SNS` literal (v1.117.0). On a two-panel plant it is the house panel's own Cores only (v1.185.0). It returns null only when no Core is reporting, where `update(null)` is a safe no-op and the reserve-blind warning + offline alerts are the signal.
+The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the 30-day review found blackouts (42.2 h, 25.8 h) in which the pool crossed 50/40/30/20 % while the ladder sat dark for 17.8–20.8 h. When `backupBatPercent` is null, the ladder tick (`socLadders.ts`) falls back to `housePoolFallbackSoc(devices, lastKnownRoster)` (the pool *is* those batteries). With one panel that is `homeFleetMeanSoc`, whose membership comes from the live roster, then the persisted last-known roster, then the `SPARE_DPU_SNS` literal (v1.117.0). On a two-panel plant it is the house panel's own Cores only (v1.185.0). It returns null only when no Core is reporting, where `update(null)` is a safe no-op and the reserve-blind warning + offline alerts are the signal.
 
 **v1.92.0 — pool membership is resolved from the SHP2's own connected-source roster, not from the static `SPARE_DPU_SNS` literal.** `isHomePoolDpu(sn, connectedOrDevices)` returns `connected.has(sn)` when the roster is known and falls back to `!SPARE_DPU_SNS.has(sn)` only when it is empty (the panel itself cloud-dark), which errs toward *including* a device. Motivating incident: a physical reconfiguration moved an allowlisted bench unit onto a panel slot and a home Core off it, inverting the literal. The allowlist-only filter then averaged the bench unit and dropped a live pool member — and because a bench unit charges independently, the reported mean acquired a hard floor of `benchSoc / 3`. Measured with the bench unit at 63 %, the fallback could not read below 21 %, so the 15/10/8/4/2 % rungs — the entire critical half of the ladder — were unreachable during exactly the SHP2-blind window the fallback exists to cover. Guards are mutation-proven load-bearing (`scripts/mutate-pool-membership.mjs`, 6/6), including an exemplar that reproduces the shipped defect verbatim. The same resolver now gates the reconnect auto-audit's device set (§12e), which previously exempted a live home Core while watching a bench unit.
+
+#### 3.8 Boot gate (`socLadders.ts`, v1.187.22)
+
+Until the store is hydrated (`SnapshotStore.firstPollSettledAt`: the first poll has asked every listed-online device for its quota), a tick reads a partial device map: the device list has landed, but only the devices that already answered carry a projection. After a host reboot on 2026-10-12 the first tick carried no panel pool % and only one of the three roster Cores; the fallback mean (§3.7) read 49 % against a real 52 %, the armed 50 % rung was spoken, and the real crossing was spoken again twenty minutes later. The ladders are a dedicated audible path (`broadcast.announce`), outside the broadcast's boot holds, so they now gate themselves: the house ladder, every other panel's ladder and the grid-drop re-escalation (§4.5) are fed only once the first poll has settled (`socLadderBootGate`; the gate latches open), bounded by `BOOT_HYDRATION_MAX_MS` from start — the alert monitor's bound, default 30 s (`ALERT_BOOT_HYDRATION_MAX_MS`; `0` disables the wait). Past the bound the ladders are fed the data that exists, exactly as before, so a cloud outage at boot never holds a real alarm for good. The `hydrated` event and the bound each run a tick, so the first hydrated value is evaluated at once, not on the next change; the live roster is still noted on a withheld tick. One log line when the gate first withholds a tick (`soc-ladder: withholding the SoC ladders until the first poll settles …`, with what the house pool, or its fallback, reads), and one when it opens (`soc-ladder: the first poll settled <n> ms after start …`, or a WARNING when the bound opened it: `no complete poll within <n> s of start …`).
 
 ---
 
@@ -4444,7 +4451,7 @@ Away from the floor, a flow-less declaration remains a valid backstop (grid avai
 - `socGridCrossDecision(t, backstopping)` → `{priority, onGrid}` where `onGrid = priority !== t.priority`. `onGrid=true` means the consumer must **record** the crossing's true priority in the `socDowngraded` map so a later grid drop can restore it.
 - `reEscalateGridDrop(socDowngraded, soc, backstopping, isPriorityEnabled)` — the grid-drop re-escalation pass. Deletes any band the pool climbed back above; and when the grid is **not** backstopping, deletes and returns every still-active downgraded band so the consumer re-announces it at its **true** priority. This closes the one-shot fail-silent window: the SoC ladder fires once per downward crossing, so without re-escalation a grid drop while the pool sits in a downgraded band would never re-fire.
 
-In index.ts the SoC alarm's `onCross` uses `socGridCrossDecision`, records/clears `socDowngraded` for **every** crossed band (not just the primary), and the store-change handler runs `reEscalateGridDrop` each tick. This self-heals on the ~60 s REST poll cadence even under a total MQTT stall (the poll loop unconditionally emits 'change').
+In `socLadders.ts` (index.ts before v1.187.22) the SoC alarm's `onCross` uses `socGridCrossDecision`, records/clears `socDowngraded` for **every** crossed band (not just the primary), and the store-change tick runs `reEscalateGridDrop` each tick once the boot gate is open (§3.8). This self-heals on the ~60 s REST poll cadence even under a total MQTT stall (the poll loop unconditionally emits 'change').
 
 ---
 
@@ -5874,7 +5881,10 @@ unmet and the alert permanently silent, with every unit test still green — mut
 **Alert.** Id `peak-grid-draw`, severity `warning`, category `Grid`, priority `low`.
 Deliberately below every physical-risk condition: this reports spend, not danger, and
 placing money in the critical tier devalues the tier that must never be discounted. Cost
-is emitted as `null` — never a guess — when `ratesConfirmed` is false.
+is emitted as `null` — never a guess — when `ratesConfirmed` is false. The cost is the
+on-peak spend rate, `centsPerHour` = kW into the pack × the current period's rate, and the
+detail states it as that ("about $X per hour"); until v1.187.22 it was worded as the premium
+over buying the same energy overnight, which nothing subtracts.
 
 **Causing setting: "Charge Now", which is PER-DPU.** Enabled on individual Delta Pro
 Ultra units in the EcoFlow app, which is why the observed draw reached ~16 kW — several
@@ -6180,11 +6190,11 @@ Online bench spares (`SPARE_DPU_SNS` not wired into SHP2) get `annunciate:false`
 
 **Reserve-alarm-blind compensating alert (F3):**
 
-- `reserve-alarm-blind` (warning; critical after `RESERVE_BLIND_CRITICAL_MS` off-grid) — the entire reserve chain keys off the SHP2 backup-pool %; when that reads null (cloud wedge) for ≥ `RESERVE_BLIND_AFTER_MS` (15 min past the grace hold), this says the reserve alarm is *blind right now*. Reports the `housePoolFallbackSoc()` fallback ladder (`homeFleetMeanSoc` on a one-panel plant; the house panel's own Cores on two, v1.185.0). Listed in `ENERGY_STATE_FAMILIES` so the auto-silencer can never eat it. **v1.187.4** — the onset (`backupPoolUnknownSince`) survives a restart: the store writes each unknown pool's onset and when it was last seen unknown to `pool-unknown.json` beside the DB, and a panel whose first projection after the restart reads unknown again carries it when the add-on was down at most `POOL_UNKNOWN_CARRY_MAX_GAP_MS`. The file is refreshed by the poll loop too, so a panel gone dark keeps its onset; until a panel reports after the restart its carriable entry keeps the alert set unsettled. Before, the alarm was absent for 15 min after every restart and came back as a warning until boot + 60 even when it had been critical.
+- `reserve-alarm-blind` (warning; critical after `RESERVE_BLIND_CRITICAL_MS` off-grid) — the entire reserve chain keys off the SHP2 backup-pool %; when that reads null (cloud wedge) for ≥ `RESERVE_BLIND_AFTER_MS` (15 min past the grace hold), this says the reserve alarm is *blind right now*. Reports the `housePoolFallbackSoc()` fallback ladder (`homeFleetMeanSoc` on a one-panel plant; the house panel's own Cores on two, v1.185.0), resolved on the roster the ladder reads (`lastKnownHomeRoster()`, the set index.ts publishes and hands socLadders.ts; v1.187.22 — without it, a panel whose sources lost `isConnected` fell back to the stale `SPARE_DPU_SNS` literal here while the ladder used the remembered roster, and the push could name a mean ~20 points off the ladder's). Listed in `ENERGY_STATE_FAMILIES` so the auto-silencer can never eat it. **v1.187.4** — the onset (`backupPoolUnknownSince`) survives a restart: the store writes each unknown pool's onset and when it was last seen unknown to `pool-unknown.json` beside the DB, and a panel whose first projection after the restart reads unknown again carries it when the add-on was down at most `POOL_UNKNOWN_CARRY_MAX_GAP_MS`. The file is refreshed by the poll loop too, so a panel gone dark keeps its onset; until a panel reports after the restart its carriable entry keeps the alert set unsettled. Before, the alarm was absent for 15 min after every restart and came back as a warning until boot + 60 even when it had been critical.
 
 **Backup-pool SoC ladder:**
 
-- `backup-soc-<pct>` — one on-screen alert for the lowest SoC threshold the pool is at/below, ladder **50 / 40 / 30 / 20 / 15 / 10 / 8 / 4 / 2 %**, via `activeSocBandWithHysteresis(soc, heldBand)` (clears only once SoC climbs past band+2, matching the audible ladder's re-arm margin). Severity/priority from `socAlertSeverity`. **Dedup:** suppressed inside the `shp2-near/below-reserve` window when the SHP2 is online (`coveredByShp2Pair`); on a cloud-offline SHP2 the band remains the fallback. The id MUST start `backup-soc` so `broadcast.ts` excludes it from its own chime — the escalating audible SoC alarm is fired separately by `batterySocAlarm`/`index.ts`.
+- `backup-soc-<pct>` — one on-screen alert for the lowest SoC threshold the pool is at/below, ladder **50 / 40 / 30 / 20 / 15 / 10 / 8 / 4 / 2 %**, via `activeSocBandWithHysteresis(soc, heldBand)` (clears only once SoC climbs past band+2, matching the audible ladder's re-arm margin). Severity/priority from `socAlertSeverity`. **Dedup:** suppressed inside the `shp2-near/below-reserve` window when the SHP2 is online (`coveredByShp2Pair`); on a cloud-offline SHP2 the band remains the fallback. The id MUST start `backup-soc` so `broadcast.ts` excludes it from its own chime — the escalating audible SoC alarm is fired separately by `batterySocAlarm`/`socLadders.ts`.
 
 Output is sorted by `SEVERITY_ORDER` (critical=0, warning=1, info=2) then category.
 
@@ -7814,7 +7824,7 @@ via `media_player.play_media` with `announce: true`, `media_content_type:
 
 After the SIP dispatch, before the MA call:
 
-- **Pre-flight:** `getEntityState` each MA target; require `≥1` registered and not `'unavailable'`. During HA/MA restart windows entities briefly deregister and HA *accepts* `play_announcement` then silently drops it (3 confirmed swallowed broadcasts, each "ok" in 20–34 ms). If `usable === 0`, defer + retry, mark `lastOutcome = 'failure'`, and freshen the health probe.
+- **Pre-flight:** `getEntityState` each MA target; require `≥1` registered and not `'unavailable'`. During HA/MA restart windows entities briefly deregister and HA *accepts* `play_announcement` then silently drops it (3 confirmed swallowed broadcasts, each "ok" in 20–34 ms). If `usable === 0`, defer + retry, mark `lastOutcome = 'failure'`, and force a health probe (it counts toward the debounce run but does not restart or shorten its span, §13).
 - **Post-call verification:** a real MA announcement blocks until playback completes (17–34 s). If the call returns `ok` in **< 2000 ms**, it is treated as unverified (`unverified: completed in <n>ms — too fast for real playback`) and a retry is scheduled — a success no one heard is not reported as success.
 
 Outcome (`'success'` / `'partial'` / `'failure'`), errors, level, spoken message,
@@ -8158,9 +8168,14 @@ when that tone is deleted.
   Critical uses a doubled prefix ("Critical alarm. Critical alarm.") and appends
   an acknowledge + a brief repeat. Category is spoken-friendly ("Battery" →
   "Battery system", "SHP2" → "Smart panel"); location is number-worded ("Core 3
-  Pack 2" → "Core three pack two"). Detail is shortened to ~200 chars at a
-  sentence boundary. A no-primary fallback derives the prefix from the level's
-  severity.
+  Pack 2" → "Core three pack two"). Detail is shortened to ~200 chars
+  (`shortenDetail`): at the last sentence end past char 100 — a `.`, `!` or `?`
+  (and any closing quote or bracket) followed by whitespace or the end of the
+  detail — else at the last whitespace, with an ellipsis. v1.187.22: the cut was
+  the last `.` of the first 200 chars, and a decimal point is one, so a spoken
+  figure was cut short ("about $2." for $2.19 on every spoken `peak-grid-draw`
+  with confirmed rates; "load1 6." for 6.37 on host pressure). A no-primary
+  fallback derives the prefix from the level's severity.
 
 #### 8.2 `verbalizeForTts(s)` — the normalizer
 
@@ -8319,8 +8334,8 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_BOOT_WARMUP_MS` | `600000` (10 min) | Restart-continuation + boot phantom-red + red-replay window. |
 | `BROADCAST_RED_REPLAY_MIN_GAP_MS` | unset (`Infinity`, v1.78.0) | Unset: an unchanged, verifiably announced standing red never replays at boot. A positive value restores the v1.64.0 timed reminder (that many ms of silence per announcement). A changed or new fault, or an escalation, ignores it. |
 | `BROADCAST_RED_REPLAY_STATE_PATH` | `<db>/../broadcast-red-replay.json` | Persisted `{lastRedAnnouncedAtMs, voicedFingerprint, activeFingerprints, lastPlayedLevel}` — the only channel the gate has across a restart. |
-| `BROADCAST_HEALTH_PROBE_MS` | `60000` | Audible-health probe interval. |
-| `BROADCAST_UNREACHABLE_CONFIRM` | `3` | Consecutive-fail streak before confirming unreachable. |
+| `BROADCAST_HEALTH_PROBE_MS` | `60000` | Audible-health probe period P. The periodic probe runs once P − min(1 s, P/10) has passed since the last probe of any kind (a tolerance for the interval's own jitter); a probe is also armed at a pending run's span end (§13, v1.187.22). |
+| `BROADCAST_UNREACHABLE_CONFIRM` | `3` | C: the unreachable and degraded runs are confirmed after C failing probes **and** (C − 1) × `BROADCAST_HEALTH_PROBE_MS` since the run's first failing probe (v1.187.22; a count alone before). Forced probes count but do not restart or shorten the span. `1` confirms on the first failing probe. |
 | `DATA_DIR` / `CHIMES_DIR` / `CHIME_CONFIG_PATH` / `BROADCAST_RUNTIME_CONFIG_PATH` | `/data`-relative | Storage locations. |
 
 Alert-settings knob consumed by rendering: the per-priority annunciation enable
@@ -8336,15 +8351,57 @@ silent failure that once hid a dead alarm channel (Music Assistant fell into
 This module makes that self-announcing.
 
 The monitor runs `computeAudibleHealth()` on its own throttle
-(`AUDIBLE_HEALTH_PROBE_MS`, default 60 s, seeded ~15 s after boot) — **not** only
-when a broadcast fires — so a dead channel is caught even while the fleet is
-green. It probes target availability (`getEntityState` each target; usable =
-present and not `'unavailable'`) and publishes a `BroadcastHealth` snapshot via
-`setBroadcastHealth`. Reachability is **debounced**: `reachable` stays `null`
-until `unreachableStreak >= AUDIBLE_UNREACHABLE_CONFIRM` (default 3) flips it to
-`false`, so a transient HA/MA restart blip never fires. A re-entrancy guard
-(`audibleProbeInFlight`) coalesces overlapping probes so one real window can't
-double-increment the streak.
+(`AUDIBLE_HEALTH_PROBE_MS` from `BROADCAST_HEALTH_PROBE_MS`, P below, default 60 s) — **not**
+only when a broadcast fires — so a dead channel is caught even while the fleet is
+green. Three kinds of probe are *forced* past the throttle: the boot kick (~15 s after start),
+the probe a broadcast forces when its pre-flight finds no usable speaker, and the deadline probe
+at the end of a run's span (below). Each probe reads target
+availability (`getEntityState` each target; usable = present and not `'unavailable'`) and
+publishes a `BroadcastHealth` snapshot via `setBroadcastHealth`. A re-entrancy guard
+(`audibleProbeInFlight`) coalesces overlapping probes, so one real window is counted once.
+
+**Debounce — a run that spans time (v1.187.22).** The unreachable state (zero usable speakers)
+and the degraded state (fewer usable than configured) are each debounced by a *run* of failing
+probes (`audibleRunStep`: the run's count and the time of its first failing probe). A run is
+confirmed only once it holds C failing probes (`AUDIBLE_UNREACHABLE_CONFIRM` from
+`BROADCAST_UNREACHABLE_CONFIRM`, default 3) **and** (C − 1) × P has passed since its first
+failing probe — two minutes at the defaults; C = 1 confirms on the first failing probe. Forced
+probes count toward C but neither restart nor shorten the span, so a Music Assistant restart
+that puts a failed broadcast, the boot kick and a failed retry within ~30 s is not confirmed as
+a dead channel (a count alone confirmed it, and pushed "unreachable" and its "Resolved" within
+two minutes). Until a run is confirmed, `reachable` holds its prior published value (`null` at
+boot, which never alarms; `true` after a usable read); a probe that reads any usable speaker
+publishes `true` at once and ends the unreachable run. A wall clock stepped back past the run's
+first failing probe re-anchors the span at the current probe.
+
+**Probe timing.** A forced probe restarts the periodic throttle, so the tick that would have
+reached a run's span can be skipped, and a run opened by a forced probe reaches its span between
+ticks. After every probe that ran, a **deadline probe** is therefore armed at the earlier span
+end of the open, unconfirmed runs (`audibleProbeDeadline`, judged from the probe's start, so a
+deadline probe dropped by the re-entrancy guard is re-armed by the probe it ran into):
+confirmation lands at the span, not up to two periods past it. A run already past its span with
+a short count is left to the periodic probe, so rapid probes cannot make up the count. The
+periodic throttle (`audibleProbeDue`) runs a tick once P − min(1 s, P/10) has passed since the
+last probe of any kind: a tolerance for the interval's own jitter (a tick read P − 1 ms after
+the last one was skipped, the run lost a probe, and confirmation waited a further period). The
+periodic probe therefore never runs within P − min(1 s, P/10) after another probe, and a clock
+stepped back past the last probe is due at once.
+
+**Holds.** A confirmed unreachable channel reads `false` until a probe reads a usable speaker. A
+confirmed degraded channel holds through every failing probe until a probe reads every
+configured speaker usable (`audibleDegradedStep`), so a re-anchored run cannot read as
+"restored" and push the degraded alert a second time.
+
+**Immediate paths (unchanged).** No speakers configured (`BROADCAST_TARGETS` empty) reads
+unreachable on the first probe, and the config-drift resolver's rename signature (below) marks
+the channel unreachable at once: neither is a transient, so neither is debounced.
+
+**Read at dispatch.** The alert monitor reads the two audible-channel alerts afresh every time it
+assembles an alert set, including the set it dispatches after its wait on the analytics worker (up
+to `ALERT_FEED_BUDGET_MS`). A probe that clears the channel during that wait therefore keeps the
+stale alert out of the push. Rising edges are then dispatched one at a time, so a probe that clears
+the channel between assembly and that alert's own dispatch can still let one stale push through; the
+next tick resolves it.
 
 Two not-usable signatures are distinguished for triage: all-`null`
 (entities NOT FOUND → MA likely down/removed its players, or HA API unreachable)
@@ -8367,8 +8424,8 @@ unreachable speaker is not itself an emergency (the real emergencies push on
 their own alerts). It also mirrors to HA diagnostic sensors via `mqttDiscovery`.
 
 **`broadcastDegradedAlert(h, nowMs)`** (v1.186.0): while fewer Music Assistant targets are usable
-than configured, confirmed by the same `AUDIBLE_UNREACHABLE_CONFIRM`-probe debounce
-(`audibleDegradedStep`), a **WARNING / MEDIUM** push alert `system-audible-degraded`
+than configured, confirmed by the same time-spanned debounce (`audibleDegradedStep`, held once
+confirmed — see above), a **WARNING / MEDIUM** push alert `system-audible-degraded`
 (`AUDIBLE_DEGRADED_ALERT_ID`) names the speakers that will not play. It yields to
 `system-audible-unreachable` once that is confirmed, resolves when every target is usable again,
 and shares the `system-audible` prefix that keeps it out of the audible condition. Each broadcast
@@ -9234,7 +9291,13 @@ since the previous tag if empty). It:
    re-runs are idempotent.
 2. Builds release notes.
 3. `sed`-bumps `version:` in `ecoflow_panel/config.yaml` and prepends a
-   `## <version> — <date>` section to `ecoflow_panel/CHANGELOG.md`.
+   `## <version>` section to `ecoflow_panel/CHANGELOG.md`, then runs
+   `scripts/roll-changelog.mjs`. Home Assistant's Changelog dialog renders the whole file, so the
+   script keeps the newest releases that fit in 32 KiB and moves older ones, unedited, to the top of
+   `CHANGELOG-ARCHIVE.md`. CI fails once `CHANGELOG.md` passes 48 KiB. The new section's heading is
+   the bare version (`## X.Y.Z`): Home Assistant's update dialog shows only the sections between the
+   installed and the new version when the headings are exactly the versions, and the whole file
+   otherwise.
 4. Commits, runs `scripts/check-release-pr.py` with `BASE_REV=origin/main` (CI does not run on a
    PR opened with `GITHUB_TOKEN`), then opens PR `release/vX.Y.Z` → `main` with commit subject
    **`Release vX.Y.Z`** and enables `--squash --auto --delete-branch`. (The branch commit is
@@ -11274,6 +11337,29 @@ The charge-power cap credits only the **remaining** window when computed mid-win
 
 `buyKwh = liftKwh / legEff` (the meter sees more than the pack stores), `targetSocPct = (packAtWindowEnd_noBuy + liftKwh)/fullKwh·100` (clamped to full), `minProjSocPct`/`minProjSocTsMs` from the with-buy re-simulation (the number the ledger's floor verdict is scored on), `baselineMinSocPct`, `chargeTonight = buyKwh ≥ minBuyKwh` (`ARB_MIN_BUY_KWH`, default 1 — below it the night is a "hold", no nagging about a trivial top-up), and a composed `rationale` string carrying the buy, target, no-buy trough, floor+cushion line, and the honest shortfall / over-buy / pre-window notes.
 
+**Expected buy (v1.187.22).** `buyKwh` is the buy the plan is **sized** on: the islanded worst case (P10 PV, P90 load, the committed P90 EV block, no reserve floor on the pre-window carry). It is not what the write draws. The write is level-driven: the reserve setpoint (`clampReserveTarget(setpointSocPct)`, at most 50%), then — when force-charge rides the night (`forceChargeEnabled`) and the cost ceiling sits above the reserve maximum — force-charge to `forceChargeStopPct(costCeilingSocPct)` (`nightForceCharge.armedWriteLevelPct`, from the same plan fields `armFromPlan` arms). On 2026-10-12 the plan announced "Buy ~64.2 kWh" from a sizing start of 16.9% at the 00:00 window open (P90 load ×1.35 and a 19.3 kWh P90 EV block before the window); the pool was at 46%, and from there the write draws ≈34 kWh (50% reserve, then force-charge to 80.4%). Over the seven nights scored on the delivered basis, delivered/buy had a median of 0.49. The plan now also carries:
+
+- `expectedStartSocPct` — the SoC expected **at the window open**: a **grid-present** carry from now to the window open on the median forecast (`loadP50W`: the day-ahead `forecastLoadW` without the P90 factor, its expected-value EV kept, never the P90 block; `pvP50W`, falling back to P10), weighting the current hour by its remaining part, floored at the reserve the SHP2 holds (`expectedCarryKwh`). The day-ahead forecast's hours start at the next hour, so an in-progress hour missing from the band is carried at the next hour's figures; any other missing hour leaves no median basis. Mid-window it is the live SoC.
+- `expectedWriteLevelPct` — the level the write drives to (above).
+- `expectedBuyKwh` — what the write draws from that start (`expectedBuyFromPlan`), never negative, bounded by what the window can deliver on the median load (`expectedWindowLiftKwh`, the sizing's contended rate with `loadP50W`), × `fullKwh / legEff`:
+  - the **reserve leg** — below the written reserve the reserve charges the pool up to it at the window open and then holds the house on the grid; at or above it, nothing;
+  - the **force-charge leg**, when force-charge rides the night — from the reserve or above, the house runs from the pool (held at the reserve) until the just-in-time start, and the force-charge then fills to its stop, so the drain before the start is bought back too. `expectedForceChargeStart` walks the window minute by minute on the median load the way `decideForceCharge` decides each tick: no start at or above the stop, none in the last `FORCE_CHARGE_MIN_RUN_MS`, otherwise the start is due once the clock reaches `forceChargeStartAtMs` for the armed ceiling, the pool, the hour's median contended rate × `legEff` (what `forceChargeRateKw` reads live) and the window's remaining P90 EV displacement (`evDisplacedPackKwh`, as the live tick reads it from the plan; an in-progress hour missing from the band supplies its EV from the same next-hour stand-in as its load). Draw = stop − the pool at the start; no start expected ⇒ 0.
+
+  From below the reserve the two legs come to `level − start` (2026-10-12: ~45% → 50% → 80%, ≈35 kWh). From above it they come to more: on the 2026-10-12 inputs a pool at 74% at 21:30 opens near 66%, is drawn to ~58% by a ~03:14 start, and buys ≈22 kWh (the window-open arithmetic said ≈14); 2026-09-30 (74% at 23:00, drawn to ~55%, charged to 76%) is that shape. 0 on a hold; null when an hour of the carry or the window, or a minute of the walk, has no P50 basis (the rationale's and the card's headlines and every spoken or pushed line then state no expected kWh; the worst case appears only in the labelled sizing sentence and sizing line). The rationale's `Expected:` sentence names the start, the reserve leg, the expected force-charge start and the pool then, or that no start is expected.
+
+The pool basis is the planner's nameplate `fullKwh`, the same as `buyKwh`, so the two figures compare like for like (the SoC itself is a share of the packs' BMS full-charge capacity, ~0.944 of nameplate on this fleet; the measured capacity scale lives in the analytics worker and does not reach the planner; the live force-charge times its start on the panel's `backupFullCapWh`, the same nameplate figure). Nothing sizes, arms or gates on the expected figures, and the de-bias (§12) never touches them.
+
+**What is stated (v1.187.22).** Anything spoken or pushed states what the write will do: the level it drives the pool to (`chargeLevelPct` — `expectedWriteLevelPct`, else, on an older plan, the reserve as written) and the energy it is expected to draw (`statedBuyKwh` — `expectedBuyKwh`, else nothing: never a fallback to `buyKwh`). The islanded worst case is a sizing basis, not an outcome: it appears once, in the rationale and on the card, labelled as such. The rationale leads with the charge — "Charge to ~80% in the 00:00–05:00 window: ~34.9 kWh expected." ("toward" when the window cannot pass the whole draw; no kWh with no expected figure) — followed by the `Expected:` sentence and then the sizing sentence: "Sized on an islanded worst case (P10 PV, P90 load including any committed EV session, no grid) of ~63.9 kWh, from ~17.6% at the window open, projecting ~80.4% by the window close." (`sizingBasisText`; with a learned de-bias, §12, the de-biased figure with "(raw estimate … × F realized-buy calibration)" beside it).
+
+- **The worst-case arrival** (`targetSocPct`, the sizing sentence's "projecting ~X%") is stated once, there. The reserve sentence that follows when the requirement exceeds it names the written reserve and the ask only — it no longer adds "and the window is only expected to reach ~X%" — and the supervised push no longer says "The pack is only expected to reach ~X% — the reserve is the ask, not a forecast": on a reserve-only night that read "charging to ~50% … ~5.1 kWh expected … only expected to reach ~27.5%", two outcomes, the one called expected the sizing basis. The card shows it as "Worst-case arrival" (sub "sizing basis") and Home Assistant as "Night-Charge Arrival SoC (Worst Case)" (§9).
+- **"Toward", not "to"** (`expectedDeliverableBound`, `chargeIsWindowBound`): when the window cannot pass the whole expected draw on the median load, every surface that states the level says the write charges *toward* it — the push title and body ("charging toward ~80% tonight", "… overnight, as far as the window can deliver, ~14.2 kWh of grid energy expected"), the spoken pair ("toward 80 percent … which ends before it gets there" / "rumbo al 80 por ciento … y termina antes de alcanzar ese nivel"), and the card ("expected charge toward ~80%"). Friday's one-hour 23:00 window from ~48% passes ~14 kWh, ~62%, not the 80% it charges toward.
+- **The whole-house island troughs** are labelled wherever they appear ("Whole-house island projection (if the grid were lost)" in the push; "Island low, no charge" / "Island low, with charge", sub "if the grid were lost", on the card): with the grid present the SHP2 holds the reserve.
+- **A night expected to charge nothing** (`noChargeExpected`: the expected draw is under `NO_CHARGE_EXPECTED_KWH`, 0.05 kWh — what a push would state as "~0 kWh") is not a charge. The pool is expected to open the window at or above the level the write drives it to: above the reserve on a reserve-only night (the 2026-10-12 inputs at 74%, force-charge not riding: opening ~65.9% over a 50% reserve), or — force-charge riding the night — near enough its stop that no just-in-time start is expected (opening ~91.9% under an 80% stop). The write is unchanged (the reserve is still raised and restored; a force-charge still stands by), and every surface says what it does: the push "Night-charge: reserve held at 50% tonight — no charge expected" ("Holding the backup reserve at 50% overnight as a floor; no charge is expected — the pool should open the window near ~65.9% and stay at or above 50%"; "reserve hold at 50% recommended" in advisory mode), the spoken pair "The backup reserve will be held at 50 percent in the charge window that opens at 00:00; no charge is expected." / "La reserva de respaldo se mantendrá en el 50 por ciento … ; no se espera ninguna carga.", the card "50% — reserve held as a floor — no charge expected", the morning push "the reserve was held at 50% overnight as a floor (no charge was expected)", and the rationale "Hold the reserve at 50% in the 00:00–05:00 window: no charge expected." — never "charging to ~50% (~0 kWh)", "about 0" or "less than 1 kilowatt hour". No expected figure is not an expectation of none: with no P50 basis the charge shapes apply, with no kWh.
+- **One floor+cushion line** (`floorCushionLinePct`): the line the plan is sized on — the reserve floor plus the cushion as applied (`targetFloorKwh = reserveKwh + cushionKwh`, recorded as `cushionLineSocPct`) — on the charge push, the hold push, the card's hold summary and its "Island low, with charge" stat. The charge push and the stat used to state `reserveFloorPct + cushionPct`, the legacy flat band, which is the applied cushion only on the `legacy-pct` basis (a resilience plan with an 8 h cushion on a 1 kW island is sized on 27.55% and was pushed as 31%). The sum stands in only on a plan issued before v1.186.0, which has no `cushionLineSocPct`.
+- **When force-charge is expected to start** (`expectedForceChargeStartMs`, the just-in-time walk's start; null when none is expected): the supervised push's force-charge clause says it — "Then, at ~02:43, timed to finish by the window close, it switches the panel's force-charge ON just long enough to reach ~80%, …"; on a window-bound night "Then it switches the panel's force-charge ON at ~23:00 and charges toward ~80%; the window is expected to close before it gets there, and force-charge switches OFF then."; with no start expected "It also arms the panel's force-charge toward ~80%, timed to finish by the window close; it is not expected to start."; with no P50 basis, untimed ("just in time to finish by the window close"). It said "near the end of the window, … just long enough to reach ~80%" on every night, Friday's included.
+- **The level a night is expected to reach** (`chargeLevelPct`): the force-charge stop when force-charge rides the night and a just-in-time start is expected; the reserve as written when no start is expected (`expectedForceChargeStartMs` null) — the force-charge only stands by, and the pool is expected to stop at the reserve. From 40% under a 51% cost ceiling the pool opens near ~31.9%, the reserve leg draws ~18 kWh to 50% and no force-charge start is expected: the push says "Night-charge: charging to ~50% tonight (~18 kWh)", the speakers "Charging the backup pool to about 50 percent, about 18 kilowatt hours, …", the card "18.0 kWh — expected charge to ~50%" and the rationale "Charge to ~50% in the 00:00–05:00 window: ~18 kWh expected." — every surface said "to ~51%". The force-charge clause still says it is armed toward ~51% and not expected to start. The write's own level (`expectedWriteLevelPct`) and the expected-buy model are unchanged; the card mirrors the rule (`chargeFigureParts`).
+- **No EV-contention note on a night expected to charge nothing.** The push's "NOTE: EV charging is predicted inside the window (…); it shares the grid input, leaving ~2.5 kW for the packs while the car charges." (and the unmodelled "if the car charges overnight the packs will receive less than planned") describe a pack charge such a night is not expected to make; the push and the card leave both out there. A charge night keeps them, and so does a hold the car's charging starves, where the note is why nothing can be charged.
+
 ---
 
 ### 6. The learning ledger (`night_charge_ledger`, `recorder.ts`, v1.38.0)
@@ -11284,6 +11370,7 @@ One durable row per `plan_date` (`YYYY-MM-DD`, America/Phoenix; primary key), in
 - **OUTCOME** (NULL until the night completes): `outcome_captured_at_ms`, `actual_pv_kwh`, `actual_load_kwh`, `actual_window_import_kwh`, `actual_onpeak_import_kwh`, `onpeak_import_occurred`, `actual_min_soc_pct`/`_ts_ms`, `plan_traj_floor_breached`, `cushion_breached`, `grid_home_coverage_frac`, `scored` (0/1), `score_notes`; v1.187.0: `onpeak_start_ms` / `onpeak_end_ms` / `onpeak_basis` and `realized_cost_cents` (both §7).
 - **ON-PEAK OUTCOME (v1.187.0).** `actual_onpeak_import_kwh` is `grid_home_w` import over the on-peak period the plan **governs** — the first run of on-peak hours at or after its own window closes, provided it starts before the next cheap window opens (`nightLedgerScoring.governedOnPeakSpan`, resolved from the tariff model, so the Mon–Fri gate and the holiday list are the tariff's own). A Mon–Thu plan governs the next day's 16:00–19:00; a Saturday or Sunday plan (window Monday 00:00–05:00) governs Monday's; a Friday plan governs none. `onpeak_basis` says which applies: `governed` (measured over `onpeak_start_ms`–`onpeak_end_ms`; NULL value when `grid_home_w` covers < 90% of the span), `none` (no on-peak governed — NULL, never a measured 0; also a plan that resolved no charge window at all, `windowlessLedgerColumns`), or `superseded` (a later plan resolved the same window — Sunday's for Saturday's — and carries it, so the shared Monday is recorded once). `onpeak_basis` NULL means **not measured on the governed basis**: a row captured before v1.187.0, or a pre-v1.39.0 row whose window was never recorded (nothing can be paired to it). **Rows captured before v1.187.0 carry `onpeak_basis` NULL and are kept as recorded:** their on-peak columns measured the plan day's own 16:00–19:00, which closes ~2.5 h before the ~21:30 plan exists, with no weekday gate — each weekday row holds the previous night's on-peak outcome, and Saturday/Sunday rows hold an off-peak afternoon. They are not rewritten.
 - **PV EVIDENCE (v1.187.0).** `pv_model_sns` (plan time) records the Cores the PV band's solar model was fitted on (`ProbabilisticForecast.solarModelSns`, sorted, comma-joined). At capture, `pv_verdict_set_aside` records why the row's PV verdict is not forecast-skill evidence when that set differs from the Cores whose actual PV is summed (`pvVerdictSetAside`); `pv_in_band` / `pv_err_frac` are still written as measured. Rows planned before v1.187.0 have no `pv_model_sns` and their verdicts stand, with one exception in `KNOWN_FLEET_MISMATCH_PV_ROWS`, matched by exact `plan_date` + `issued_at_ms`: the 2026-09-27 plan, whose band came from the 21:06 restart's partial-map forecast (solar model fitted on one Core, v1.186.5) and was graded against three Cores' 9.6 kWh (`pv_in_band` 1). A once-per-boot pass (`tagKnownFleetMismatchPvRows`) writes only its `pv_verdict_set_aside`, logged; the captured verdict is kept.
+- **EXPECTED BUY (v1.187.22).** `expected_buy_kwh` and `expected_start_soc_pct` (plan columns, `expectedBuyLedgerColumns`) record the plan's expected buy and expected SoC at the window open (§5 "Expected buy"), beside `buy_kwh`, which keeps the worst case. `window_open_soc_pct` (outcome) is the pool SoC measured as the window opened — the median `backup_pct` over the 15 min before the open (`measuredWindowOpenSocPct`), NULL when nothing covers it. `score_notes` gains a clause grading them (`expectedBuyScoreNote`): the expected buy against `delivered_kwh` on an actuated night, and the expected window-open SoC against the measured one, with the islanded sizing start (`soc_at_window_start_pct`) beside it. Notes only: `buy_err_kwh`, the de-bias learner and the readiness gate do not read them. NULL on rows written before v1.187.22.
 - **DELIVERED ENERGY (v1.187.3).** On an actuated night `delivered_kwh` is the energy into the home Cores over the hold span (§7 "Delivered energy"), and `delivered_basis` records the method: `source-charge` (`DELIVERED_BASIS`), written exactly when `delivered_kwh` is a number. A NULL `delivered_kwh` has a NULL basis and a `Delivered:` clause in `score_notes` naming why. **Rows captured before v1.187.3 carry `delivered_basis` NULL beside a number and are kept as recorded:** their `delivered_kwh` is window grid import minus the concurrent house load, which assumed the house ran on the grid for the whole hold and under-counts every night the SHP2 carried the house from the pack inside it (2026-09-30: 4.71 kWh against ~20.3 kWh into the Cores). The buy de-bias learner reads only the current basis (§15.12 "Announced-buy de-bias").
 - **SCORE** (NULL until scored): `pv_err_frac`, `pv_in_band`, `load_err_frac`, `load_in_band`, `buy_err_kwh` (signed, + = over-bought), `soc_min_err_pct`.
 - **DISPOSITION** (v1.132.0, both NULL on rows written before it):
@@ -11390,7 +11477,7 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
 
 **The nightly flow:**
 
-1. **Announce + arm (~21:30, inside the evening job).** When the recorded plan is a charge with a complete basis, a resolved window, and a positive buy, the actuation candidate is computed **from the announced plan** — a fresher recompute never silently substitutes a different buy, because the owner's cancel window runs against the announced numbers. The evening notification names the write, the clamped target, and the cancel deadline; the audible broadcast channel announces the same (no phone-push dependency). The armed state **persists only after at least one announcement channel confirms delivery** (`NOTIFY_CHANNEL` other than `none`, or a successful audible announce) — a write the owner never heard about cannot fire; an undelivered night stays advisory and logs at error level. Arming is refused while a prior night is unresolved (applied-unreverted, or an unconfirmed attempt not provably un-applied — a raised reserve is never orphaned or buried).
+1. **Announce + arm (~21:30, inside the evening job).** When the recorded plan is a charge with a complete basis, a resolved window, and a positive buy, the actuation candidate is computed **from the announced plan** — a fresher recompute never silently substitutes a different buy, because the owner's cancel window runs against the announced numbers. The evening notification names the write, the clamped target, and the cancel deadline; the audible broadcast channel announces the same (no phone-push dependency). The armed state **persists only after at least one announcement channel confirms delivery** (`NOTIFY_CHANNEL` other than `none`, or a successful audible announce) — a write the owner never heard about cannot fire; an undelivered night stays advisory and logs at error level, and (v1.187.22) the evening job records it like a refused arm ("the announcement could not be delivered", `eveningNotArmedReason`) so the card leads with "Planned charge not armed tonight — the announcement could not be delivered." — unless the record left in place is an arm for the same window that will still write (Saturday's arm for the Monday window Saturday and Sunday share). Since v1.187.22 the arm also stamps whether force-charge rides the night (`forceChargeRides`: force-charge enabled and the armed ceiling above the reserve maximum — the evening push's condition, and the gate the plan's expected figure was made with); the evening push names the force-charge from that stamp, and the morning push reads it back. Arming is refused while a prior night is unresolved (applied-unreverted, or an unconfirmed attempt not provably un-applied — a raised reserve is never orphaned or buried).
 2. **Apply (at the window open, tolerance +30 min).** v1.187.0: `APPLY_LEAD_MS` is 0 (it was 5 min). The reserve raise is a grid charge the moment it exceeds the pool, and the panel takes the write within seconds: on 2026-09-28 the write landed at 22:55:28 and the Cores took ~5.2 kW each from 22:55:42 — 1.12 kWh at the off-peak rate before the 23:00 overnight rate (09-22: ~0.85 kWh). The write moment is also the announced cancel deadline, so the owner's cancel window now runs to the window open. Force-charge keeps its order (reserve applied → readback-verified → ceiling synced → ON, never before the window opens); its ceiling sync already waited for the open, so it follows the verified reserve one tick (~1 min) later than before. The attempt is a **write-ahead intent**: the state file records the attempt and its pre-write baseline BEFORE the device call. One write raises `backupReserveSoc` to `min(round(targetSocPct), RESERVE_WRITE_MAX_PCT)` (`clampReserveTarget`; `RESERVE_WRITE_MAX_PCT` = 50, the SHP2's own reserve ceiling — proven on the device 2026-09-16, v1.164.0) — validated (not silently clamped) into the `[RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT]` = `[10, 50]` write envelope by `setBackupReserveSoc` (`ecoflow/commands.ts`), which imports the bound from `nightChargeActuator.ts` so there is exactly one definition, the same documented `PD303_APP_SET` shape the cloud-presence refresh has round-tripped since v0.9.10, audit-logged under `night-charge-reserve` with a 5-min retry cooldown. Every apply guard fails closed: advisory mode, a cancelled night, a red alert condition, an incoherent SoC read (I11), an unknown/out-of-range current reserve, a missed window, or a target at/below the current reserve ⇒ no write. The row is stamped `actuated=1` at write time. **Lost-confirmation adoption:** when an attempted write reports failure but the live reserve later reads back exactly the attempted target (≠ the attempt baseline), the write is proven applied — the actuator adopts it (applied state stamped from the attempt baseline) and the normal auto-revert takes over. **Device-ceiling adoption (v1.161.0):** when the reserve reads back *between* the attempt baseline and the target and still does after `APPLY_VERIFY_AFTER_MS`, the panel took the write but settled short — of its own accord, or because the owner moved the slider. That is a real partial actuation, so `deviceCeilingPct` adopts the achieved value AS `targetPct` (the original ask is preserved in `requestedPct`) and stamps the apply verified. Without it a short readback is indistinguishable from the 2026-08-16 phantom: both retries burn and the night ends on `applyFailed`, which pages "tonight's buy is forfeited" and corrects the ledger to `actuated:0` — while the reserve is genuinely raised and the buy is genuinely happening. A reserve that did **not** move still takes the phantom path, unchanged.
 
    **v1.79.0 — apply readback:** the actuator no longer treats a cloud ACK as an
@@ -11398,7 +11485,41 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
    the target), up to 2 re-issues on readback failure (5-min windows, never into a
    closing charge window), and a once-per-night operator warning + `actuated: 0`
    ledger correction on exhaustion. Grid loss during an applied window reverts
-   immediately (`gridLossAbort`). The `vitalsRed` gate is HOST-vitals (struggling
+   immediately (`gridLossAbort`). v1.187.22: that warning (`buildNightChargeApplyFailure`) and
+   the info push sent when an applied night's reserve is restored
+   (`buildNightChargeMorningSummary`) state the expected figure read back from the armed day's
+   ledger row (`expected_buy_kwh`, `ledgerExpectedBuyKwh`) — "(~34.9 kWh expected)" — or, a row
+   with none, no kWh at all. The morning push states what the force-charge did, from the
+   actuation record (`forceChargeNightOutcome`): "reserve raised to 50%, and force-charge ran
+   toward ~80% (~34.9 kWh expected); the reserve is restored to 16%" when a readback proved the
+   ON (`forceChargeOnVerifiedAtMs`, a late apply included); "force-charge toward ~80% was switched
+   ON but did not take effect" (`forceChargeOnFailedAtMs`) — or, when the failure covered only
+   some of our slots (`forceChargeOnFailedSlots`, the slots the ON-failure warning named, fewer
+   than `forceChargeSlots`; `partialForceChargeOnFailureSlots`), "… was switched ON but did not
+   take effect on slot(s) 2 (the buy above the reserve did not happen on those slot(s))", as the
+   warning said "on those slot(s)"; "… was switched ON but the panel never confirmed it", or
+   "force-charge toward ~80% never started" (armed to ride, no ON stamped — `decideForceCharge`
+   declined every tick, or the option was switched off by a restart). Whether force-charge rode
+   the night is the arm-time stamp (`forceChargeRides`), not the option at the restore: a restart
+   mid-night with the option changed turned an armed-to-ride night into "reserve raised to 50%
+   (~34.9 kWh expected)" — a figure counting the force-charge leg beside a reserve-only account. A
+   record armed before the stamp reads the option, as before. The expected figure is named only
+   beside an account of the legs it counts (`expectedLeg`): reserve only with a figure that counts
+   no force-charge leg, or a force-charge that ran with one that counts it — never beside a
+   reserve-only account whose figure may count the leg (a record from before the stamp with the
+   armed ceiling above the reserve maximum), nor beside a force-charge that ran on a night armed
+   without it. It used to name "force-charge toward ~80%" from the armed ceiling and the
+   option alone (`armedForceChargeStopPct`), on nights the force-charge never ran. The
+   force-charge ON-failure warning (`buildNightForceChargeOnFailure`, "Night-charge: force-charge
+   did not take effect") names where the force-charge stops — "Tonight's buy above the 50% reserve
+   (toward ~80%) will not happen" (`forceChargeStopPct`), where it named the 80.4% ceiling — and
+   adds "on those slot(s)" on a partial failure. A night
+   expected to charge nothing reads "the reserve was held at 50% overnight as a floor (no charge
+   was expected)", and the apply-failure warning calls it a reserve hold. A restore that ended the night early is not reported as completed: an owner
+   cancel after the write ("Night-charge: cancelled — reserve restored to 16%") and a grid-loss
+   abort ("Night-charge: stopped (grid lost) — …") say so, with no figure. The armed record's
+   `buyKwh` is the worst case and is never pushed;
+   only the log lines name it, labelled (`buyFiguresLogText`). The `vitalsRed` gate is HOST-vitals (struggling
    process), not alert-condition — documented as such after the 08-17 audit.
    Harness: `scripts/mutate-actuation-readback.mjs` (5 mutants).
 
@@ -11522,8 +11643,9 @@ Three properties an operator needs before setting these:
 |---|---|---|
 | `ecoflow_night_charge_recommended` | binary_sensor | `charge_tonight` — the single flag an owner automation gates on |
 | `ecoflow_night_charge_target_soc` | sensor (%) | The reserve SETPOINT for the advisory automation to write — `plan.setpointSocPct` clamped to the actuator's `[10, 50]` envelope (`clampReserveTarget`); not a predicted SoC (v1.62.0 ask/forecast split) |
-| `ecoflow_night_charge_expected_soc` | sensor (%) | The predicted, contention-derated pool SoC at window close (`plan.targetSocPct`) |
-| `ecoflow_night_charge_buy_kwh` | sensor (kWh) | Recommended meter-side buy (`plan.buyKwh`) |
+| `ecoflow_night_charge_expected_soc` | sensor (%) | The pool SoC at window close projected on the islanded worst case the plan is sized on (`plan.targetSocPct`, contention-derated; the rationale's "projecting ~X% by the window close"), not the charge the write is expected to make (that is `ecoflow_night_charge_expected_buy_kwh` and the push's level). Its value is unchanged by v1.187.22, and its friendly name is "Night-Charge Arrival SoC (Worst Case)" (was "Night-Charge Expected SoC"); the unique_id, the config topic, the value key and the value are the same and no `object_id` is published, so Home Assistant keeps the entity_id it minted at first discovery |
+| `ecoflow_night_charge_buy_kwh` | sensor (kWh) | The meter-side buy the plan is sized on — the islanded worst case (`plan.buyKwh`); its value is unchanged by v1.187.22, and its friendly name is "Night-Charge Buy (Worst Case)" (was "Night-Charge Buy"). The unique_id, the config topic and the value are the same and no `object_id` is published, so Home Assistant keeps the entity_id it minted at first discovery: history and automations carry over (a fresh install mints one from the new name) |
+| `ecoflow_night_charge_expected_buy_kwh` | sensor (kWh) | v1.187.22 — what the armed write is expected to draw from the expected window-open SoC (`plan.expectedBuyKwh`, §5 "Expected buy"); `unknown` with no P50 basis |
 | `ecoflow_night_charge_window_start` / `_end` | sensor (string) | Day-qualified Phoenix `HH:MM` window bounds |
 | `ecoflow_night_charge_readiness` | sensor (diagnostic) | `LEARNING` / `READY_TO_CONSIDER_WRITES` / `BLOCKED` |
 | `ecoflow_night_charge_write_ready` | binary_sensor (diagnostic) | Fail-closed gate boolean |
@@ -11532,11 +11654,11 @@ Buy, expected SoC and the window come from the latest plan, recomputed every 30 
 
 The remaining gate diagnostics (`night_charge_under_buy_rate`, `night_charge_band_coverage_pct`, `night_charge_plan_nights_scored`, `night_charge_effective_n`, `night_charge_forecast_basis_pct`, `night_charge_exclusion_fraction`) ride the same payloads without dedicated discovery entities.
 
-**`GET /api/night-charge/status`**: `{ enabled, mode, reserveWriteMaxPct, window, reserveFloorPercent, confidence, notify:{hour,minute,lastNotifyDay}, plan, readiness, actuation, recentOutcomes }`. `mode` is the resolved `NIGHT_CHARGE_MODE`. `reserveWriteMaxPct` (v1.182.0) is the panel's reserve maximum, so the card shows what will actually be written. `actuation` is tonight's supervised-write record: armed/applied/cancelled/reverted, the force-charge fields, `cancelDeadlineMs`, and `forceChargeOnVerify` (v1.186.0, whether the force-charge ON was read back) (§8b). `reserveFloorPercent` is read live from `projection.backupReserveSoc` — the same field the floor alarm defends. `recentOutcomes` is an in-memory mirror of the last 7 ledger days refreshed by the timers, so the request handler never touches the DB inline (CWE-770). No auth: read-only, exposes no secrets, actuates nothing.
+**`GET /api/night-charge/status`**: `{ enabled, mode, reserveWriteMaxPct, window, reserveFloorPercent, confidence, notify:{hour,minute,lastNotifyDay}, plan, armRefusal, readiness, actuation, recentOutcomes }`. `armRefusal` (v1.187.22) is why a supervised or auto mode refused to arm this plan (`armRefusalReason`) — or "the announcement could not be delivered" when the arm reached no announcement channel (`eveningNotArmedReason`, §8b) — recorded by the evening job with the notify latch, keyed by the refused plan's window, and served (`servedArmRefusal`) while the served plan is a charge plan for that window, in a write mode, until the window closes; null otherwise. An evening that misses its notify window latches the day and keeps a standing record: Saturday's refusal for the Monday window Saturday and Sunday share still leads the card on Sunday night. `mode` is the resolved `NIGHT_CHARGE_MODE`. `reserveWriteMaxPct` (v1.182.0) is the panel's reserve maximum, so the card shows what will actually be written. `actuation` is tonight's supervised-write record: armed/applied/cancelled/reverted, the force-charge fields, `cancelDeadlineMs`, and `forceChargeOnVerify` (v1.186.0, whether the force-charge ON was read back) (§8b). `reserveFloorPercent` is read live from `projection.backupReserveSoc` — the same field the floor alarm defends. `recentOutcomes` is an in-memory mirror of the last 7 ledger days refreshed by the timers, so the request handler never touches the DB inline (CWE-770). No auth: read-only, exposes no secrets, actuates nothing.
 
-**Notification** (`buildNightChargeMessage`, `notify.ts:373`): three shapes — `charge` (buy kWh, target SoC, low-SoC without vs with the buy, floor+cushion line, confidence, honest shortfall/over-buy notes, and the advisory automation contract), `hold` (no charge needed), and `insufficient_basis` (sent so the *absence* of a plan is explicit — the owner never wonders if the job died; a null plan can only ever render this shape regardless of the requested one). All severity `info` with a single `dedupId: 'night_charge_plan'` so the nightly message lands in **one updating card**, and dispatched via a *direct* `sendNotification` that bypasses quiet-hours and min-severity (design I10) — a plan queued past the charge-window open is worse than none. `NIGHT_CHARGE_NOTIFY_ON_HOLD=false` suppresses hold-night sends (still latching the day).
+**Notification** (`buildNightChargeMessage`, `notify.ts:383`): three shapes — `charge` (since v1.187.22 the charge the write arms, never the worst case it is sized on (§5 "What is stated"): the title "Night-charge: charging to ~80% tonight (~34.9 kWh)" — "charge to ~50% recommended tonight" in advisory mode — and the body "Charging the backup pool to ~80% overnight, ~34.9 kWh of grid energy expected.", no kWh with no expected figure; the whole-house island troughs without vs with the charge, labelled "Whole-house island projection (if the grid were lost)" because with the grid present the SHP2 holds the reserve; the floor+cushion line the plan is sized on (`floorCushionLinePct`, §5), confidence, honest shortfall/over-buy notes, and the advisory automation contract or the supervised write, whose force-charge clause names where it stops (`forceChargeStopPct`) and when it is expected to start (§5); on a night expected to charge nothing, "Night-charge: reserve held at 50% tonight — no charge expected" (§5); "toward" the level when the window cannot reach it (§5); when a supervised or auto mode REFUSED to arm the plan (`armRefusalReason`, armFromPlan's checks in its order — an unresolved prior write, a force-charge OFF not verified, a window already more than 30 minutes under way), "Night-charge: planned charge NOT armed tonight" with the reason and no level or kWh, never the advisory recommendation of a write nothing will make — on a night expected to charge nothing, "Night-charge: planned reserve hold NOT armed tonight" ("Tonight's plan holds the backup reserve at 50% overnight as a floor, with no charge expected, but the supervised write was not armed — <reason>. The add-on will not raise the reserve tonight."), and "the write" rather than "the supervised write" in auto mode), `hold` (nothing is charged; since v1.187.22 it says which hold, on the figure the hold was decided on: "No overnight charge needed — even if the grid were lost overnight, the pack would close the charge window at ~37.5%, at or above the 31.1% floor+cushion line" — the trough the cushion test judged, `cushionTroughSocPct` against `cushionLineSocPct`, labelled as the islanded case it is (the whole-house low on the `legacy-pct` basis), never the unlabelled whole-house island trough it used to state as "the projected overnight low SoC (0%)"; "the need is under the minimum buy"; "no charge tonight (the window cannot cover the cushion)" with the shortfall disclosed, where it used to say "No overnight charge needed"; or no window resolved), and `insufficient_basis` (sent so the *absence* of a plan is explicit — the owner never wonders if the job died; a null plan can only ever render this shape regardless of the requested one). All severity `info` with a single `dedupId: 'night_charge_plan'` so the nightly message lands in **one updating card**, and dispatched via a *direct* `sendNotification` that bypasses quiet-hours and min-severity (design I10) — a plan queued past the charge-window open is worse than none. `NIGHT_CHARGE_NOTIFY_ON_HOLD=false` suppresses hold-night sends (still latching the day). On a supervised arm the spoken advisory (`nightChargeSpokenNotice`, bilingual) states, since v1.187.22, the level and the expected draw — "Night charge notice. Charging the backup pool to about 80 percent, about 35 kilowatt hours, in the charge window that opens at 00:00. Cancel on the Power panel before then." — with no energy figure when there is no expected one, and "less than 1 kilowatt hour" rather than "about 0"; a night expected to charge nothing is spoken as the reserve held, "… ; no charge is expected." (§5). The time is the window's, not "starting at": a pool that opens above the reserve is not charged at the open (the house draws it until the just-in-time force-charge).
 
-**Web**: `NightChargeCard` on the Strategy panel — zero-prop, self-fetching `/api/night-charge/status` on a 60 s poll, with its own matching 12 h client-side staleness guard; a null/incomplete/stale plan renders the grey "unavailable" shape, never a fabricated number.
+**Web**: `NightChargeCard` on the Strategy panel — zero-prop, self-fetching `/api/night-charge/status` on a 60 s poll, with its own matching 12 h client-side staleness guard; a null/incomplete/stale plan renders the grey "unavailable" shape, never a fabricated number. Since v1.187.22 its headline is the charge the write arms — the expected draw and the level ("34.9 kWh — expected charge to ~80%"), or the level alone with no expected figure (`chargeFigureParts`, nightChargeText.ts) — and the worst case appears once, in the sizing line beneath it (`sizingLine`, the server's `sizingBasisText` wording, the calibration beside the figure it multiplies). The stats label the sizing figures as such — "Worst-case arrival" (`targetSocPct`, sub "sizing basis", was "Expected SoC") and "Island low, no charge" / "Island low, with charge" (sub "if the grid were lost") — and a hold night shows the push's hold shape (`holdSummary`). A night expected to charge nothing leads with the reserve the write holds ("50% — reserve held as a floor — no charge expected"); a night a write mode refused to arm (the status's `armRefusal`) leads with "Planned charge not armed tonight — <reason>." and no level or kWh (`refusedArmLead`), as the push does — "Planned reserve hold not armed tonight — <reason>." on a night expected to charge nothing, and "the write" in auto mode; on a force-charge night with no start expected the headline states the reserve the night reaches ("expected charge to ~50%", §5); a night expected to charge nothing shows no EV-contention line; the "Island low, with charge" stat states the line the plan is sized on (`floorCushionLinePct`).
 
 ---
 
@@ -11595,9 +11717,12 @@ raises the announcement — the raw physics estimate is the lower bound), CAP
 stays raw and is what the ledger records (★ the self-reference guard — feeding
 the debiased figure back would collapse each night's ratio to ~1 and the
 learner would eat its own output), and `chargeTonight` thresholds on the raw
-figure so learned data can never flip the decision, only the disclosure. New
-plan fields `buyKwhDebiased` / `buyDebiasFactor`; the rationale and the ARM
-announcement disclose the calibration when active. This is the first live
+figure so learned data can never flip the decision, only the disclosure.
+v1.187.22: the factor multiplies the worst-case figure only, which no spoken or
+pushed line states; the rationale's sizing sentence and the card's sizing line name
+the de-biased figure with the calibration beside it, and the expected buy (§5) is
+never de-biased. New plan fields `buyKwhDebiased` / `buyDebiasFactor`; the rationale
+and the card disclose the calibration when active. This is the first live
 producer/consumer for the design §3.4 "buy de-bias" lane.
 
 **One delivered basis (v1.187.3).** A night is a sample only when its

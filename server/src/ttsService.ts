@@ -247,15 +247,33 @@ export function verbalizeForTts(s: string): string {
     .trim();
 }
 
-/** Detail strings can run long. For TTS we keep it under ~200 chars
- *  to stay snappy — listeners tune out longer narrations. */
-function shortenDetail(detail: string): string {
-  if (detail.length <= 200) return detail;
-  // Try to cut at a sentence boundary.
-  const truncated = detail.slice(0, 200);
-  const lastPeriod = truncated.lastIndexOf('.');
-  if (lastPeriod > 100) return truncated.slice(0, lastPeriod + 1);
-  return truncated + '...';
+/** Spoken detail is kept to about this many characters — listeners tune out longer narrations. */
+export const SPOKEN_DETAIL_MAX_CHARS = 200;
+/** A sentence end at or before this index is too early to cut at: the cut falls between words instead. */
+const SPOKEN_DETAIL_MIN_SENTENCE_CUT = 100;
+
+/** Detail strings can run long. For TTS we keep it under ~200 chars to stay snappy.
+ *
+ *  v1.187.22 — the cut is made only at a sentence END: a '.', '!' or '?' (and any closing quote or
+ *  bracket) followed by whitespace or the end of the detail, past char 100. A decimal point is not
+ *  one: the cut at the last '.' of the first 200 chars spoke "about $2." for "$2.19" (every spoken
+ *  peak-grid-draw) and "load1 6." for "6.37" (host-pressure). With no sentence end in range it cuts
+ *  at the last whitespace and adds an ellipsis, so a figure is never split mid-number. */
+export function shortenDetail(detail: string): string {
+  if (detail.length <= SPOKEN_DETAIL_MAX_CHARS) return detail;
+  let sentenceEnd = -1;
+  for (const m of detail.matchAll(/[.!?]["')\]]*(?=\s|$)/g)) {
+    const at = m.index ?? 0;
+    const end = at + m[0].length;
+    if (end > SPOKEN_DETAIL_MAX_CHARS) break;
+    if (at > SPOKEN_DETAIL_MIN_SENTENCE_CUT) sentenceEnd = end;
+  }
+  if (sentenceEnd > 0) return detail.slice(0, sentenceEnd);
+  // No sentence end in range: cut between words (a space AT the limit keeps the whole last word).
+  const head = detail.slice(0, SPOKEN_DETAIL_MAX_CHARS + 1);
+  const ws = head.search(/\s\S*$/);
+  const words = ws > 0 ? head.slice(0, ws) : detail.slice(0, SPOKEN_DETAIL_MAX_CHARS);
+  return words.replace(/[\s,;:—–-]+$/, '') + '...';
 }
 
 /* ─── v0.62.0 — Spanish (Latin American) second pass ─────────────────────────
