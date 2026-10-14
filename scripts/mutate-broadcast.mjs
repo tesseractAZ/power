@@ -85,15 +85,17 @@ const MUTANTS = [
   {
     id: 'ix. ★★★ the degraded channel is "nothing usable" again',
     file: BC,
-    find: '  if (configured === 0 || usable >= configured) return { streak: 0, degraded: false };',
-    to: '  if (configured === 0 || usable > 0) return { streak: 0, degraded: false }; /* MUTANT */',
+    // v1.187.22 — repointed: the degraded run is now audibleRunStep's `failing` input.
+    find: '  const run = audibleRunStep(prev, configured > 0 && usable < configured, nowMs, confirm, probeMs);',
+    to: '  const run = audibleRunStep(prev, configured > 0 && usable === 0, nowMs, confirm, probeMs); /* MUTANT */',
     why: 'One of two speakers dark for ~27 h raises nothing — the v0.84.0 blind spot.',
   },
   {
     id: 'x. ★★ no debounce: a restart blip raises the degraded alert',
     file: BC,
-    find: '  return { streak, degraded: streak >= confirm };',
-    to: '  return { streak, degraded: true }; /* MUTANT */',
+    // v1.187.22 — repointed: degraded is the run's confirmation; "no debounce" is any failing probe.
+    find: '  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.confirmed };',
+    to: '  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.streak > 0 }; /* MUTANT */',
     why: 'Every HA/MA restart that briefly deregisters one speaker pushes a false "degraded" alert.',
   },
   {
