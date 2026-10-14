@@ -8345,8 +8345,9 @@ This module makes that self-announcing.
 The monitor runs `computeAudibleHealth()` on its own throttle
 (`AUDIBLE_HEALTH_PROBE_MS` from `BROADCAST_HEALTH_PROBE_MS`, P below, default 60 s) — **not**
 only when a broadcast fires — so a dead channel is caught even while the fleet is
-green. Two kinds of probe are *forced* past the throttle: the boot kick (~15 s after start) and
-the probe a broadcast forces when its pre-flight finds no usable speaker. Each probe reads target
+green. Three kinds of probe are *forced* past the throttle: the boot kick (~15 s after start),
+the probe a broadcast forces when its pre-flight finds no usable speaker, and the deadline probe
+at the end of a run's span (below). Each probe reads target
 availability (`getEntityState` each target; usable = present and not `'unavailable'`) and
 publishes a `BroadcastHealth` snapshot via `setBroadcastHealth`. A re-entrancy guard
 (`audibleProbeInFlight`) coalesces overlapping probes, so one real window is counted once.
@@ -8387,10 +8388,12 @@ configured speaker usable (`audibleDegradedStep`), so a re-anchored run cannot r
 unreachable on the first probe, and the config-drift resolver's rename signature (below) marks
 the channel unreachable at once: neither is a transient, so neither is debounced.
 
-**Read at dispatch.** The alert monitor reads the two audible-channel alerts when it assembles
-the alert set it dispatches — after its wait on the analytics worker (up to
-`ALERT_FEED_BUDGET_MS`) — not with the live alarms before that wait, so a push never carries a
-channel state that the last probe already cleared.
+**Read at dispatch.** The alert monitor reads the two audible-channel alerts afresh every time it
+assembles an alert set, including the set it dispatches after its wait on the analytics worker (up
+to `ALERT_FEED_BUDGET_MS`). A probe that clears the channel during that wait therefore keeps the
+stale alert out of the push. Rising edges are then dispatched one at a time, so a probe that clears
+the channel between assembly and that alert's own dispatch can still let one stale push through; the
+next tick resolves it.
 
 Two not-usable signatures are distinguished for triage: all-`null`
 (entities NOT FOUND → MA likely down/removed its players, or HA API unreachable)
