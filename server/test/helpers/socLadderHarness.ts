@@ -4,7 +4,7 @@
  * persisted state in a temp directory.
  *
  * TIME IS DETERMINISTIC. The ladders read an injected clock (`advanceClock`), and setTimeout — the
- * boot bound's timer — is a node:test mock timer (`advance` moves both). A real bound of a few tens
+ * boot bound's timer — is a node:test mock timer (`advanceTimers`; `advance` moves both). A real bound of a few tens
  * of milliseconds failed the 'inside the bound: withheld' assertions under parallel load (a GC pause
  * or a busy CPU between start and the first change opened the gate early). setImmediate stays real,
  * so settle() still drains a tick's async body.
@@ -117,6 +117,8 @@ export function socLadderHarness(t: TestContext, o: SocLadderHarnessOptions = {}
   const store = new FakeStore(now);
   if (o.hydrated) store.firstPollSettledAt = now();
   const announced: Array<{ priority: AlarmPriority; message: string }> = [];
+  // v1.187.22 — the Spanish second pass (announce's third argument), in `announced` order.
+  const announcedEs: Array<string | null> = [];
   const logs: string[] = [];
   const warns: string[] = [];
   const calls = { poolGrid: 0, refreshGrid: 0, noted: 0 };
@@ -124,7 +126,7 @@ export function socLadderHarness(t: TestContext, o: SocLadderHarnessOptions = {}
   let roster: ReadonlySet<string> = new Set(o.roster ?? [C1, C2, C5]);
   const ladders = startSocLadders(store, {
     enabled: o.enabled ?? true,
-    announce: async (priority, message) => { announced.push({ priority, message }); return { ok: true }; },
+    announce: async (priority, message, messageEs) => { announced.push({ priority, message }); announcedEs.push(messageEs); return { ok: true }; },
     isPriorityEnabled: o.isPriorityEnabled ?? (() => true),
     refreshGrid: async () => { calls.refreshGrid++; },
     poolGrid: (_d, sn) => { calls.poolGrid++; return o.grid?.(sn) ?? { backstopping: false }; },
@@ -141,9 +143,17 @@ export function socLadderHarness(t: TestContext, o: SocLadderHarnessOptions = {}
   return {
     store, announced, logs, warns, calls, ladders,
     messages: () => announced.map((a) => a.message),
+    /** The Spanish second pass of each announce, in `announced` order. */
+    messagesEs: () => [...announcedEs],
     /** Time passes: the clock moves and any due timer (the boot bound) fires. */
     advance: (ms: number) => { clockMs += ms; t.mock.timers.tick(ms); },
-    /** Only the clock moves — a timer held back by a blocked event loop. */
+    /** Only the clock moves — a timer held back by a blocked event loop (negative: a backward step). */
     advanceClock: (ms: number) => { clockMs += ms; },
+    /**
+     * Only the timers move — the bound timer fires while the injected clock reads short of the bound:
+     * setTimeout runs on the monotonic clock and the gate reads the wall clock (Date.now), so the two
+     * can disagree by a millisecond, or by a backward wall-clock step at boot.
+     */
+    advanceTimers: (ms: number) => { t.mock.timers.tick(ms); },
   };
 }

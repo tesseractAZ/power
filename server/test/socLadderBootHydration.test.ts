@@ -16,13 +16,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { socLadderBootGate, socAlarmMessage } from '../src/batterySocAlarm.js';
+import { socLadderBootGate, socAlarmMessage, socAlarmMessageEs } from '../src/batterySocAlarm.js';
 import { BOOT_HYDRATION_MAX_MS } from '../src/alertMonitor.js';
 import {
   socLadderHarness as harness, settle, persistedAt, core, house, twoPanels, HOUSE, C1, C2, C5, GARAGE,
 } from './helpers/socLadderHarness.js';
 
 const FIFTY = socAlarmMessage({ pct: 50, priority: 'low' });
+const FIFTY_ES = socAlarmMessageEs({ pct: 50, priority: 'low' });
 
 // ── the pure gate ────────────────────────────────────────────────────────────
 
@@ -74,6 +75,7 @@ test('★★★ THE 2026-10-12 22:04:09 REPLAY — a one-Core boot mean is never
   h.store.change({ ...hydrated, [HOUSE]: house(49.5) });
   await settle();
   assert.deepEqual(h.messages(), [FIFTY], 'exactly one 50 % announcement');
+  assert.deepEqual(h.messagesEs(), [FIFTY_ES], 'with its Spanish second pass');
   assert.equal(h.logs.filter((l) => l.includes('the first poll settled') || l.includes('withholding')).length, 2, 'no further gate lines');
 });
 
@@ -130,6 +132,38 @@ test('★★★ the PRODUCTION bound read from the clock: a change at BOOT_HYDRA
   h.store.change(PARTIAL());
   await settle();
   assert.deepEqual(h.messages(), [FIFTY]);
+});
+
+// setTimeout runs on the monotonic clock and the gate reads the wall clock (Date.now): the bound
+// timer can fire with the wall clock still a millisecond short of the bound, or after a backward
+// wall-clock step at boot. With the cloud down and no further store change, the timer's tick is the
+// only one, so it is the bound by itself — it must not re-read the clock and withhold.
+
+test('★★ the bound TIMER feeds what exists even with the wall clock 1 ms short of the bound', async (t) => {
+  const h = harness(t, { houseState: persistedAt(52) });
+  h.store.change(PARTIAL());
+  await settle();
+  h.advance(BOOT_HYDRATION_MAX_MS - 1);
+  await settle();
+  assert.deepEqual(h.messages(), []);
+  h.advanceTimers(1); // the bound timer is due; the wall clock still reads BOOT_HYDRATION_MAX_MS − 1
+  await settle();
+  assert.deepEqual(h.messages(), [FIFTY], 'the timer\'s tick is the bound: the one-Core mean is fed, with no further change');
+  assert.match(h.warns[0] ?? '', /no complete poll within 30 s of start; the SoC ladders read the data that exists \(1 tick\(s\) withheld\)/);
+});
+
+test('★★ the bound TIMER feeds what exists after a backward wall-clock step', async (t) => {
+  const h = harness(t, { houseState: persistedAt(52), maxMs: 30_000 });
+  h.store.change(PARTIAL());
+  await settle();
+  h.advanceClock(-3_600_000); // the wall clock is stepped back an hour (a boot-time time sync)
+  h.advanceTimers(30_000);
+  await settle();
+  assert.deepEqual(h.messages(), [FIFTY], 'thirty seconds of monotonic time: the bound, whatever the wall clock reads');
+  h.store.change(PARTIAL());
+  await settle();
+  assert.deepEqual(h.messages(), [FIFTY], 'the gate stays open (latched) with the wall clock still behind start; no second announce');
+  assert.equal(h.warns.length, 1);
 });
 
 test('★★★ never hydrated: at a configured bound the fallback feeds exactly as before (a timer, no change needed)', async (t) => {
@@ -204,6 +238,7 @@ test('★★★ a SECONDARY panel\'s ladder is gated too: nothing before hydrati
   h.store.change(twoPanels(49));
   await settle();
   assert.deepEqual(h.messages(), [GARAGE_FIFTY]);
+  assert.deepEqual(h.messagesEs(), [socAlarmMessageEs({ pct: 50, priority: 'low' }, 'Garage Panel')], 'the Spanish pass names the pool too');
 });
 
 test('★★★ a SECONDARY panel\'s ladder opens at the bound like the house ladder', async (t) => {
@@ -235,6 +270,7 @@ test('★★★ the grid-drop re-escalation pass is behind the gate: no re-escal
   await settle();
   assert.deepEqual(h.announced, [{ priority: 'critical', message: socAlarmMessage({ pct: 10, priority: 'critical' }) }],
     'hydrated, off-grid, still under 10 %: the downgraded rung re-escalates once');
+  assert.deepEqual(h.messagesEs(), [socAlarmMessageEs({ pct: 10, priority: 'critical' })], 'with its Spanish second pass');
   h.store.change({ [HOUSE]: house(9), [C1]: core(C1, 9), [C2]: core(C2, 9), [C5]: core(C5, 9) });
   await settle();
   assert.equal(h.announced.length, 1);

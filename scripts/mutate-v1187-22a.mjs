@@ -33,6 +33,15 @@
  *   A-xxviii a secondary panel's grid drop is never seen by its re-escalation pass
  *   A-xxix  a secondary panel records only its announced band
  *   A-xxx   the house grid-drop re-escalation ignores the Alert Settings toggles
+ *   A-xxxi  the bound timer's tick re-reads the wall clock (a timer 1 ms early withholds)
+ *   A-xxxii the house crossing's Spanish pass repeats the English words
+ *   A-xxxiii the house crossing's Spanish pass is dropped
+ *   A-xxxiv the house on-grid advisory's Spanish pass is the emergency wording
+ *   A-xxxv  the house Spanish advisory drops the measured import
+ *   A-xxxvi a secondary panel's Spanish crossing drops its pool's name
+ *   A-xxxvii a secondary panel's Spanish advisory is spoken in English
+ *   A-xxxviii the house grid-drop re-escalation's Spanish pass repeats the English words
+ *   A-xxxix a secondary panel's re-escalation drops its pool's name from the Spanish pass
  *
  *   node scripts/mutate-v1187-22a.mjs
  */
@@ -261,6 +270,69 @@ const MUTANTS = [
     find: '    for (const { pct, priority } of reEscalateGridDrop(socDowngraded, soc, backstopping, isPriorityEnabled)) {',
     to: '    for (const { pct, priority } of reEscalateGridDrop(socDowngraded, soc, backstopping, () => true)) { /* MUTANT */',
     why: 'A critical rung muted in Alert Settings is spoken anyway when the grid drops.',
+  },
+  {
+    id: 'A-xxxi. ★★ the bound timer\'s tick re-reads the wall clock',
+    file: SL,
+    find: '      elapsedMs: boundReached ? Math.max(elapsedMs, maxMs) : elapsedMs,',
+    to: '      elapsedMs, /* MUTANT */',
+    why: 'The bound timer fires with Date.now() a millisecond short of the bound (or after a backward clock step): its tick withholds, and with the cloud down and no further change the ladders stay silent past the bound.',
+  },
+  {
+    id: 'A-xxxii. ★★ the house crossing\'s Spanish pass repeats the English words',
+    file: SL,
+    find: '      const messageEs = onGrid ? socAlarmAdvisoryEs(t.pct, undefined, socGridForTick.importLive) : socAlarmMessageEs(t);',
+    to: '      const messageEs = message; /* MUTANT */',
+    why: 'The bilingual second pass of a house SoC rung speaks the English words twice — no rung is heard in Spanish.',
+  },
+  {
+    id: 'A-xxxiii. ★★ the house crossing\'s Spanish pass is dropped',
+    file: SL,
+    find: '      void announce(priority, message, messageEs).then(',
+    to: '      void announce(priority, message, null).then( /* MUTANT */',
+    why: 'A bilingual installation hears every house SoC rung in English only.',
+  },
+  {
+    id: 'A-xxxiv. ★ the house on-grid advisory\'s Spanish pass is the emergency wording',
+    file: SL,
+    find: 'socAlarmAdvisoryEs(t.pct, undefined, socGridForTick.importLive)',
+    to: 'socAlarmMessageEs(t) /* MUTANT */',
+    why: 'An on-grid low pool is a calm advisory in English and "Restablezca la carga de inmediato" in Spanish.',
+  },
+  {
+    id: 'A-xxxv. ★ the house Spanish advisory drops the measured import',
+    file: SL,
+    find: 'socAlarmAdvisoryEs(t.pct, undefined, socGridForTick.importLive)',
+    to: 'socAlarmAdvisoryEs(t.pct, undefined, undefined) /* MUTANT */',
+    why: 'The Spanish advisory says the grid is only available as backup while the house is drawing from it.',
+  },
+  {
+    id: 'A-xxxvi. ★★ a secondary panel\'s Spanish crossing drops its pool\'s name',
+    file: SL,
+    find: ': socAlarmMessageEs(t, name),',
+    to: ': socAlarmMessageEs(t), /* MUTANT */',
+    why: 'A garage rung is named in English and spoken as the house pool in Spanish.',
+  },
+  {
+    id: 'A-xxxvii. ★★ a secondary panel\'s Spanish advisory is spoken in English',
+    file: SL,
+    find: 'onGrid ? socAlarmAdvisoryEs(t.pct, name, poolGrid.importLive)',
+    to: 'onGrid ? socAlarmAdvisory(t.pct, name, poolGrid.importLive) /* MUTANT */',
+    why: 'The Spanish second pass of an on-grid garage advisory repeats the English words.',
+  },
+  {
+    id: 'A-xxxviii. ★★ the house grid-drop re-escalation\'s Spanish pass repeats the English words',
+    file: SL,
+    find: 'socAlarmMessage({ pct, priority }), socAlarmMessageEs({ pct, priority })).then(',
+    to: 'socAlarmMessage({ pct, priority }), socAlarmMessage({ pct, priority })).then( /* MUTANT */',
+    why: 'A re-escalated critical house rung is never heard in Spanish.',
+  },
+  {
+    id: 'A-xxxix. ★★ a secondary panel\'s re-escalation drops its pool\'s name from the Spanish pass',
+    file: SL,
+    find: 'socAlarmMessageEs({ pct, priority }, name), \'grid-drop re-escalation\'',
+    to: 'socAlarmMessageEs({ pct, priority }), \'grid-drop re-escalation\' /* MUTANT */',
+    why: 'A re-escalated garage rung is spoken as the house pool in Spanish.',
   },
 ];
 

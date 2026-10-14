@@ -3,13 +3,14 @@
  * each ladder announces, at which priority and in which words, against which pool's grid, and what a
  * grid drop re-escalates. The rules themselves are unit-tested elsewhere (batterySocAlarm: crossings,
  * hysteresis, the same-tick collapse; socGridDispatch: the downgrade and the re-escalation pass); these
- * cases hold the wiring between them, which a hand copy of the consumer cannot. The house ladder's
+ * cases hold the wiring between them, which a hand copy of the consumer cannot — the Spanish second
+ * pass (announce's third argument) included. The house ladder's
  * v0.75.0 grid-drop regression: test/batterySocAlarm.test.ts. The boot gate:
  * test/socLadderBootHydration.test.ts.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { socAlarmMessage, socAlarmAdvisory } from '../src/batterySocAlarm.js';
+import { socAlarmMessage, socAlarmMessageEs, socAlarmAdvisory, socAlarmAdvisoryEs } from '../src/batterySocAlarm.js';
 import type { PoolGrid } from '../src/socLadders.js';
 import { socLadderHarness as harness, settle, persistedAt, twoPanels, HOUSE, GARAGE } from './helpers/socLadderHarness.js';
 
@@ -29,6 +30,10 @@ test('★★★ every pool reads its OWN grid verdict; a secondary panel keeps i
     { priority: 'critical', message: socAlarmMessage({ pct: 4, priority: 'critical' }) },
     { priority: 'low', message: socAlarmAdvisory(4, G, true) },
   ], 'the house pool (off-grid) speaks its worst band as critical; the garage pool (on-grid) one advisory in its own words');
+  assert.deepEqual(h.messagesEs(), [
+    socAlarmMessageEs({ pct: 4, priority: 'critical' }),
+    socAlarmAdvisoryEs(4, G, true),
+  ], 'each in its Spanish second pass: the house emergency words, the garage advisory named and worded by its import');
   await tick(5, 5); // a partial recovery out of the 4 % band
   assert.equal(h.announced.length, 2);
   grid[GARAGE] = { backstopping: false }; // the GARAGE grid drops
@@ -37,6 +42,10 @@ test('★★★ every pool reads its OWN grid verdict; a secondary panel keeps i
     { priority: 'critical', message: socAlarmMessage({ pct: 10, priority: 'critical' }, G) },
     { priority: 'critical', message: socAlarmMessage({ pct: 8, priority: 'critical' }, G) },
   ], 'the garage pool re-escalates every band it is still in, named, once; the house pool has nothing downgraded');
+  assert.deepEqual(h.messagesEs().slice(2), [
+    socAlarmMessageEs({ pct: 10, priority: 'critical' }, G),
+    socAlarmMessageEs({ pct: 8, priority: 'critical' }, G),
+  ], 'the re-escalation\'s Spanish pass names the garage pool too');
   await tick(5, 5);
   assert.equal(h.announced.length, 4, 'once each');
 });
@@ -53,6 +62,7 @@ test('★★ the house pool\'s grid verdict is read for the house pool, not anot
   await settle();
   assert.deepEqual(h.announced, [{ priority: 'low', message: socAlarmAdvisory(4, undefined, undefined) }],
     'on-grid house pool: one advisory, the grid named as available (no import measured)');
+  assert.deepEqual(h.messagesEs(), [socAlarmAdvisoryEs(4, undefined, undefined)], 'the advisory in Spanish too, not the emergency words');
 });
 
 test('★★ the Alert Settings annunciation toggles silence a disabled priority on every ladder — crossings and re-escalations', async (t) => {
@@ -69,6 +79,10 @@ test('★★ the Alert Settings annunciation toggles silence a disabled priority
   assert.deepEqual(h.announced, [
     { priority: 'medium', message: socAlarmMessage({ pct: 20, priority: 'medium' }) },
     { priority: 'medium', message: socAlarmMessage({ pct: 20, priority: 'medium' }, G) },
+  ]);
+  assert.deepEqual(h.messagesEs(), [
+    socAlarmMessageEs({ pct: 20, priority: 'medium' }),
+    socAlarmMessageEs({ pct: 20, priority: 'medium' }, G),
   ]);
 });
 

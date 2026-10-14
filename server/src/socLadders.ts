@@ -212,6 +212,8 @@ export function startSocLadders(store: SocLadderStore, deps: SocLaddersDeps): So
   const bootGateOpen = (devices: Record<string, DeviceSnapshot>, shp2Soc: number | null, soc: number | null): boolean => {
     if (gateOpen) return true;
     const elapsedMs = now() - startMs;
+    // Once the bound timer has fired, its tick IS the bound: setTimeout runs on the monotonic clock
+    // and now() is the wall clock, which can read a millisecond short (or be stepped back at boot).
     const gate = socLadderBootGate({
       firstPollSettledAt: store.firstPollSettledAt,
       elapsedMs: boundReached ? Math.max(elapsedMs, maxMs) : elapsedMs,

@@ -8,7 +8,9 @@ import {
   BATTERY_SOC_THRESHOLDS,
   createBatterySocAlarm,
   socAlarmMessage,
+  socAlarmMessageEs,
   socAlarmAdvisory,
+  socAlarmAdvisoryEs,
   activeSocBand,
   socAlertSeverity,
   type SocThreshold,
@@ -313,6 +315,7 @@ test('v0.75.0 — REGRESSION: grid-drop re-escalates ALL crossed emergency bands
   await tick(3); // 12→3 crosses 10/8/4 in one tick — the collapse announces the worst (4) only, downgraded
   assert.deepEqual(h.announced, [{ priority: 'low', message: socAlarmAdvisory(4, undefined, true) }],
     'one on-grid advisory for the worst band, worded by the measured import');
+  assert.deepEqual(h.messagesEs(), [socAlarmAdvisoryEs(4, undefined, true)], 'its Spanish second pass worded by the measured import too');
   // Despite the audible collapse, EVERY crossed emergency band is recorded for later re-escalation:
   assert.deepEqual([...h.ladders.houseDowngraded.keys()].sort((x, y) => y - x), [10, 8, 4]);
   await tick(5); // partial recovery to 5%: climbs out 4 (5>4); 8/10 remain
@@ -324,6 +327,10 @@ test('v0.75.0 — REGRESSION: grid-drop re-escalates ALL crossed emergency bands
     { priority: 'critical', message: socAlarmMessage({ pct: 10, priority: 'critical' }) },
     { priority: 'critical', message: socAlarmMessage({ pct: 8, priority: 'critical' }) },
   ], 'grid drop must audibly re-escalate the higher emergency bands, not go silent');
+  assert.deepEqual(h.messagesEs().slice(1), [
+    socAlarmMessageEs({ pct: 10, priority: 'critical' }),
+    socAlarmMessageEs({ pct: 8, priority: 'critical' }),
+  ], 'each re-escalation with its Spanish second pass');
   await tick(5);
   assert.equal(h.announced.length, 3, 'once each');
 });
