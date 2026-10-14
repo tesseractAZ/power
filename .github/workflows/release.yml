@@ -178,6 +178,10 @@ jobs:
               f.write(content)
           PY
 
+          # v1.187.22 — Home Assistant's Changelog dialog renders the whole of CHANGELOG.md; keep it
+          # small by moving older releases to CHANGELOG-ARCHIVE.md (CI fails past the size limit).
+          node scripts/roll-changelog.mjs
+
           echo "── config.yaml version line ─────────────────"
           grep '^version:' ecoflow_panel/config.yaml
           echo "── CHANGELOG.md head ────────────────────────"
@@ -204,7 +208,7 @@ jobs:
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git checkout -b "$branch"
-          git add ecoflow_panel/config.yaml ecoflow_panel/CHANGELOG.md
+          git add ecoflow_panel/config.yaml ecoflow_panel/CHANGELOG.md ecoflow_panel/CHANGELOG-ARCHIVE.md
           git commit -m "Release v${NEXT}"
           # CI does not run on a PR opened with GITHUB_TOKEN, so the release-PR check runs here,
           # against main, before the branch is pushed.

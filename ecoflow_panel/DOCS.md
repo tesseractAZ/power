@@ -9234,7 +9234,10 @@ since the previous tag if empty). It:
    re-runs are idempotent.
 2. Builds release notes.
 3. `sed`-bumps `version:` in `ecoflow_panel/config.yaml` and prepends a
-   `## <version> — <date>` section to `ecoflow_panel/CHANGELOG.md`.
+   `## <version> — <date>` section to `ecoflow_panel/CHANGELOG.md`, then runs
+   `scripts/roll-changelog.mjs`. Home Assistant's Changelog dialog renders the whole file, so the
+   script keeps the newest releases that fit in about 40 KB and moves older ones, unedited, to the
+   top of `CHANGELOG-ARCHIVE.md`. CI fails once `CHANGELOG.md` passes 64 KB.
 4. Commits, runs `scripts/check-release-pr.py` with `BASE_REV=origin/main` (CI does not run on a
    PR opened with `GITHUB_TOKEN`), then opens PR `release/vX.Y.Z` → `main` with commit subject
    **`Release vX.Y.Z`** and enables `--squash --auto --delete-branch`. (The branch commit is

@@ -285,7 +285,8 @@ cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + test
 cd web    && npm install && npm run build
 ```
 
-**Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` →
+**Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` (then
+`node scripts/roll-changelog.mjs`, which keeps it small for Home Assistant's Changelog dialog) →
 open a PR titled `Release vX.Y.Z …` (for a one-commit PR, its commit subject too: GitHub's
 squash merge lands a one-commit PR with the commit's subject, not the title). `main` is branch-
 protected. CI runs the three type-checks (server, web, server tests), the test suite, the
