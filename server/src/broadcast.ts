@@ -737,10 +737,15 @@ export function audibleReachableStep(
  * and it clears on the first probe that reads every target usable (a failed read never counts as
  * usable, so absence cannot clear it). Zero usable counts too, so the degraded alert stands while
  * the unreachable run builds; the alert builder hands over to the unreachable alert once that is
- * confirmed. Pure + exported for tests.
+ * confirmed. Once confirmed it HOLDS (`prevDegraded`) through every failing probe, as the
+ * unreachable state holds through audibleReachableStep: the run's own confirmation is not sticky,
+ * since a wall clock stepped back re-anchors the span (audibleRunStep), and that alone would read
+ * an already-confirmed degraded channel as restored — logged, its alert resolved, then confirmed and
+ * pushed again a span later — with no speaker back. Pure + exported for tests.
  */
 export function audibleDegradedStep(
   prev: AudibleRun,
+  prevDegraded: boolean,
   configured: number,
   usable: number,
   nowMs: number,
@@ -748,7 +753,8 @@ export function audibleDegradedStep(
   probeMs: number,
 ): AudibleRun & { degraded: boolean } {
   const run = audibleRunStep(prev, configured > 0 && usable < configured, nowMs, confirm, probeMs);
-  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.confirmed };
+  // v1.187.22 — a failing probe (streak > 0) never clears a confirmed degraded channel.
+  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.confirmed || (prevDegraded && run.streak > 0) };
 }
 
 /**
@@ -778,6 +784,35 @@ export function audibleProbeDeadline(
   const a = due(unreachable, reachable === false);
   const b = due(degraded, degradedConfirmed);
   return a == null ? b : b == null ? a : Math.min(a, b);
+}
+
+/**
+ * v1.187.22 — the largest jitter tolerance audibleProbeDue gives the periodic probe (the cap of
+ * min(1 s, P/10)).
+ */
+export const AUDIBLE_PROBE_JITTER_MAX_MS = 1_000;
+
+/**
+ * v1.187.22 — whether the PERIODIC audible-health probe is due at `nowMs`, the last probe of any
+ * kind having run at `lastAt`. A full probe period, less a tolerance for the interval's own
+ * jitter: Node re-arms setInterval from its monotonic loop clock, read just before the callback,
+ * while the probe reads Date.now() — the two round to different milliseconds, and any stall
+ * between them (a GC pause, a busy host) is taken off the next interval as read by Date.now(), so
+ * a tick can read P − 1 ms, or less, after the one before. The strict `< P` (v0.84.0) skipped that
+ * tick: the run lost a probe, one past its span could be left a count short, and
+ * audibleProbeDeadline leaves a run past its span to the periodic probe, so confirmation waited a
+ * further period. The tolerance is min(1 s, P/10): far above that jitter (the deadline's 25 ms
+ * slack is not — a stall on a loaded host alone exceeds it), far below a period. A forced probe (a
+ * failed broadcast, its retries, the deadline probe) still restarts the throttle: the tick after
+ * it is skipped unless it ran within the tolerance after the tick before, so the periodic probe
+ * never runs within P − tolerance of any other probe, and rapid forced probes add no periodic
+ * ones. A wall clock stepped back past the last probe is due at once: the strict rule skipped
+ * every tick until the clock caught up, so an hour's step stopped the periodic probe for an hour
+ * — a confirmed alert held after the speakers returned. Pure + exported for tests.
+ */
+export function audibleProbeDue(nowMs: number, lastAt: number, probeMs: number): boolean {
+  const since = nowMs - lastAt;
+  return since < 0 || since >= probeMs - Math.min(AUDIBLE_PROBE_JITTER_MAX_MS, probeMs / 10);
 }
 
 /**
@@ -2218,7 +2253,8 @@ export function startBroadcastMonitor(
   };
   const computeAudibleHealth = async (force = false): Promise<void> => {
     const nowMs = Date.now();
-    if (!force && nowMs - lastAudibleHealthAt < AUDIBLE_HEALTH_PROBE_MS) return;
+    // v1.187.22 — a jitter tolerance, and a clock stepped back is due (audibleProbeDue).
+    if (!force && !audibleProbeDue(nowMs, lastAudibleHealthAt, AUDIBLE_HEALTH_PROBE_MS)) return;
     if (audibleProbeInFlight) return;
     audibleProbeInFlight = true;
     lastAudibleHealthAt = nowMs;
@@ -2260,7 +2296,7 @@ export function startBroadcastMonitor(
       // v1.186.0 — classified per target, so the degraded alert can NAME what is missing.
       const probed = classifyAudibleTargets(cfg.targets, states);
       const usable = probed.usable.length;
-      const degraded = audibleDegradedStep(degradedRun, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);
+      const degraded = audibleDegradedStep(degradedRun, audibleDegraded, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);
       if (degraded.degraded && !audibleDegraded) {
         log(`broadcast: audible channel DEGRADED — ${usable} of ${cfg.targets.length} Music Assistant target(s) usable; not reachable: ${probed.unusable.join(', ')}`);
       } else if (!degraded.degraded && audibleDegraded) {

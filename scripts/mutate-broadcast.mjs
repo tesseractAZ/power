@@ -93,8 +93,9 @@ const MUTANTS = [
   {
     id: 'x. ★★ no debounce: a restart blip raises the degraded alert',
     file: BC,
-    // v1.187.22 — repointed: degraded is the run's confirmation; "no debounce" is any failing probe.
-    find: '  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.confirmed };',
+    // v1.187.22 — repointed: degraded is the run's confirmation, held once confirmed (prevDegraded);
+    // "no debounce" is any failing probe.
+    find: '  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.confirmed || (prevDegraded && run.streak > 0) };',
     to: '  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.streak > 0 }; /* MUTANT */',
     why: 'Every HA/MA restart that briefly deregisters one speaker pushes a false "degraded" alert.',
   },

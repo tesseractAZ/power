@@ -24,6 +24,13 @@
  *   B-xv   a wall clock stepped back mid-run does not re-anchor the span
  *   B-xvi  no speakers configured waits for the debounce instead of reporting at once
  *   B-xvii a renamed speaker id waits for the debounce instead of reporting at once
+ *   B-xviii  the periodic throttle drops its jitter tolerance (a tick read P − 1 ms after the last is skipped)
+ *   B-xix    a wall clock stepped back stalls the periodic probe until the clock catches up
+ *   B-xx     the throttle is gone: a forced probe no longer defers the next tick
+ *   B-xxi    the monitor's throttle is the v0.84.0 strict comparison again
+ *   B-xxii   the deadline is re-armed from the probe's END, so one dropped by the re-entrancy guard is lost
+ *   B-xxiii  a confirmed degraded channel is not held through failing probes (a clock step un-confirms it)
+ *   B-xxiv   the monitor does not hand the degraded step its confirmed state
  *
  *   node scripts/mutate-v1187-22b.mjs
  */
@@ -49,8 +56,8 @@ const MUTANTS = [
   {
     id: 'B-ii. ★★ the degraded run drops its time condition',
     file: BC,
-    find: '      const degraded = audibleDegradedStep(degradedRun, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);',
-    to: '      const degraded = audibleDegradedStep(degradedRun, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, 0); /* MUTANT */',
+    find: '      const degraded = audibleDegradedStep(degradedRun, audibleDegraded, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);',
+    to: '      const degraded = audibleDegradedStep(degradedRun, audibleDegraded, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, 0); /* MUTANT */',
     why: 'The same restart window logs "audible channel DEGRADED" at 22:04:44 and raises the degraded alert while the speakers are seconds from returning.',
   },
   {
@@ -157,6 +164,55 @@ const MUTANTS = [
     find: '      unreachableRun = { streak: AUDIBLE_UNREACHABLE_CONFIRM, sinceMs: unreachableRun.sinceMs ?? Date.now() };\n      audibleReachable = false;',
     to: '      unreachableRun = { streak: AUDIBLE_UNREACHABLE_CONFIRM, sinceMs: unreachableRun.sinceMs ?? Date.now() }; /* MUTANT */',
     why: 'Renamed speaker ids (the v0.92.0 audit found 8 alarm broadcasts, a red among them, dropped this way) read "unknown" for a full probe span before the alert, though a rename never self-heals.',
+  },
+  {
+    id: 'B-xviii. ★★★ the periodic throttle drops its jitter tolerance',
+    file: BC,
+    find: '  return since < 0 || since >= probeMs - Math.min(AUDIBLE_PROBE_JITTER_MAX_MS, probeMs / 10);',
+    to: '  return since < 0 || since >= probeMs; /* MUTANT */',
+    why: 'A tick the interval delivers P − 1 ms after the last (by Date.now) is skipped: a run loses a probe, and one past its span waits a further period to be confirmed (7 of 21 real-interval runs under load).',
+  },
+  {
+    id: 'B-xix. ★★ a wall clock stepped back stalls the periodic probe',
+    file: BC,
+    find: '  return since < 0 || since >= probeMs - Math.min(AUDIBLE_PROBE_JITTER_MAX_MS, probeMs / 10);',
+    to: '  return since >= probeMs - Math.min(AUDIBLE_PROBE_JITTER_MAX_MS, probeMs / 10); /* MUTANT */',
+    why: 'An NTP correction stepping the clock back an hour stops the periodic probe for that hour: a confirmed dead-channel alert is held long after the speakers return.',
+  },
+  {
+    id: 'B-xx. ★★ the throttle is gone: a forced probe no longer defers the next tick',
+    file: BC,
+    find: '  return since < 0 || since >= probeMs - Math.min(AUDIBLE_PROBE_JITTER_MAX_MS, probeMs / 10);',
+    to: '  return true; /* MUTANT */',
+    why: 'Every tick probes regardless of the forced probe just before it, so failed broadcasts and their retries double the Home Assistant reads in a restart window.',
+  },
+  {
+    id: 'B-xxi. ★★ the monitor\'s throttle is the v0.84.0 strict comparison again',
+    file: BC,
+    find: '    if (!force && !audibleProbeDue(nowMs, lastAudibleHealthAt, AUDIBLE_HEALTH_PROBE_MS)) return;',
+    to: '    if (!force && nowMs - lastAudibleHealthAt < AUDIBLE_HEALTH_PROBE_MS) return; /* MUTANT */',
+    why: 'Interval jitter skips ticks again, and a clock stepped back stops the periodic probe until it catches up.',
+  },
+  {
+    id: 'B-xxii. ★★ the deadline is re-armed from the probe\'s end, not its start',
+    file: BC,
+    find: '      armAudibleDeadline(nowMs); // v1.187.22',
+    to: '      armAudibleDeadline(Date.now()); /* MUTANT */',
+    why: 'A probe begun short of the span and still in flight past it (a slow Home Assistant read) swallows the probe armed at the span and arms none: confirmation waits for the next tick, a period late.',
+  },
+  {
+    id: 'B-xxiii. ★★★ a confirmed degraded channel is not held through failing probes',
+    file: BC,
+    find: '  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.confirmed || (prevDegraded && run.streak > 0) };',
+    to: '  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.confirmed }; /* MUTANT */',
+    why: 'A wall clock stepped back re-anchors the run, which un-confirms it: "audible channel restored" is logged and the degraded alert resolves with the speaker still dark, then is pushed again a span later.',
+  },
+  {
+    id: 'B-xxiv. ★★ the monitor does not hand the degraded step its confirmed state',
+    file: BC,
+    find: '      const degraded = audibleDegradedStep(degradedRun, audibleDegraded, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);',
+    to: '      const degraded = audibleDegradedStep(degradedRun, false, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS); /* MUTANT */',
+    why: 'The hold exists only on paper: a clock step still logs a false "restored" and re-pushes the degraded alert.',
   },
 ];
 
