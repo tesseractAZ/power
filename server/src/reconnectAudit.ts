@@ -198,11 +198,14 @@ export function renderReconnectReport(r: ReconnectReport): { title: string; body
   const cov = r.pvCoverageAtFlip != null && r.pvCoverageAtReport != null
     ? `PV coverage ${(r.pvCoverageAtFlip * 100).toFixed(0)}% → ${(r.pvCoverageAtReport * 100).toFixed(0)}%`
     : 'PV coverage change unavailable';
+  // v1.187.23 — the report states what the audit measured, and nothing it did not. Until now
+  // every report ended with a fixed prediction written for one device of one installation — a
+  // solar-yield constant carried from a past outage, never computed, pushed whichever device
+  // returned. The PV-coverage line above is the measured outcome.
   return {
     title: `${r.name} is back — reconnect audit`,
     body:
       `${r.name} reconnected after ${days} days offline. First telemetry: ${lat}. `
-      + `Offline alert resolved: ${res}. Packs: ${packs}. ${cov}. `
-      + 'If this is Core 2: expect local solar to rise ~20 kWh/day and the ledger solar drift to collapse — the blind-spot prediction is now testable.',
+      + `Offline alert resolved: ${res}. Packs: ${packs}. ${cov}.`,
   };
 }

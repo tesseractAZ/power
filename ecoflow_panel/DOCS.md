@@ -5953,6 +5953,25 @@ place) or a manual dismissal.
 **Alert.** Id `peak-idle-pool`, severity `warning` (so it pushes), priority `low`, category
 `Grid`; the detail names the pool, the reserve, the kWh held above it, the import and its
 on-peak cost per hour, describes the re-entry band, and says the add-on changes no setting.
+The kWh held above the reserve is (SoC − reserve)% of the pool's **measured** capacity, the
+capacity the panel's percent is a share of (v1.187.19): the day forecast's `poolFullWh`
+(`backupFullCapWh × poolCapacityScale`, §5.1.3a), which the monitor reads from its forecast
+feed each pass and hands `idlePoolInputsFrom` together with the forecast's own
+`poolCapacityBasis`. The forecast's figure counts as measured only when that basis is `measured`,
+`held` or `min-known` (an allowlist, §5.1.3a); with basis `nameplate` — no Core capacity ratio
+ever measured, as on a fresh install or with packs that never report `fullCapMah`/`designCapMah`
+— the forecast's figure is the nameplate itself, and a forecast with no basis vouches for nothing.
+The forecast can be up to its day TTL old, and the worker resets its report caches when a Core
+joins the pool but not when one leaves, so a measured figure is also taken only while it lies
+between `CAPACITY_SCALE_MIN` (0.8) and 1 × the panel's live nameplate: outside that band it
+describes a different pool. Only when no measured capacity is available — no forecast delivered
+yet after a start, one with no pool, one whose basis is not a measured one, or one outside the
+live-pool band — is the panel's nameplate `backupFullCapWh`
+used, and the alert then names it: "(about 9.2 kWh above it on the nameplate capacity)", and the
+card's *Above reserve* fact "9.2 kWh (nameplate capacity)" (`poolCapacityBasis` on the inputs and
+the verdict). Until v1.187.23 the figure was always on the nameplate, high by
+the packs' whole measured fade (~6% at a 0.944 scale). Pinned through the real monitor in
+`peakIdlePoolMeasuredCapacity.test.ts`.
 **Never audible**: the alert carries `audible: false`, which is what keeps it off the speakers —
 `speakableAlerts` (broadcast.ts) drops it from the array the condition count and the spoken
 message are both built from, and `pickPrimaryAlert` refuses it, so it neither raises the chime
@@ -7601,6 +7620,8 @@ Harness: `scripts/mutate-v1187-3h.mjs` (99 mutants, 99 killed after the seam rev
 
 **v1.187.21 — a peer cell-spread warning is pushed, not announced.** A `peer-voldiff` outlier at warning now carries `audible: false` at any SoC: its card and push stand, and it never raises or voices the broadcast condition, as `vdiff-warn` has not since v1.187.12; `vdiff-crit` remains the audible signal for a cell spread, and the thermal, SoC and SoH peer warnings are unchanged. On 2026-10-12 at 18:31:59 the outlier for Core 2 pack 4 (an evening discharge at 63-65 % SoC, 20 mV against a 4-5 mV sibling median) was the only speakable alert and spoke a yellow, while the same pack's `vdiff-warn` stayed off the speakers. With the warning never audible, the v1.187.0 top-of-charge gate (`topOfChargeQuietSpread`) and `alertMonitor.quietPeerSpreadUnderHeldCritical` decided nothing and were removed. Tests: `peerSpreadPushedNotAnnounced.test.ts`; harness `scripts/mutate-v1187-21.mjs` (P-i–P-vi); `mutate-v1187-a.mjs` xxx–xxxix retired.
 
+**v1.187.23 — what is spoken or pushed states only what the system measures.** (1) The long-offline reconnect report (`renderReconnectReport`, §12e) ends at its measured checkpoints, the PV-coverage change being the outcome; it no longer appends a fixed solar-yield prediction written for one device of one installation, which was pushed whichever device returned after 24 h offline. (2) The on-peak idle-pool notice states the kWh above the reserve on the pool's measured capacity — the forecast feed's `poolFullWh` (`backupFullCapWh × poolCapacityScale`), passed by the monitor to `idlePoolInputsFrom` with the forecast's own `poolCapacityBasis`, and taken only when that basis is a measured one (`measured`, `held`, `min-known`) — with the nameplate only as a fallback the alert names (`poolCapacityBasis`, §10.1); a forecast on the `nameplate` basis (no capacity ratio ever measured) gets the named fallback, not the measured label, and so does a measured figure outside 0.8-1 × the live nameplate (a forecast built before a Core left or joined). (3) Both TTS normalizers read a range as "to" / "a" (`readRanges`): a dash tight between two numbers or two weekday names, and a hyphen between two numbers whose right one carries a unit or am/pm; a spaced dash stays a pause, and a negative number, a date or an id is never a range (§8.2, §8.3). Tests: `reconnectAudit.test.ts`, `peakIdlePool.test.ts`, `peakIdlePoolMeasuredCapacity.test.ts` (the real monitor), `ttsRangeRead.test.ts`; harness `scripts/mutate-v1187-23.mjs` (33 mutants, 33 killed).
+
 **v1.186.2 — no phantom battery discharge at the grid handover; curtailment hour pairing, cloudy hours and freeze membership.** (1) Measured 2026-09-27 01:34–01:40 at a handover to the grid (pool at its 16% floor, grid 4.45–4.54 kW = house load, panel `sourceWatts` [0,0,0]): `fleet_battery_net_watts` alternated 88, 2671, 21, 1436, 11, 125, 9, 92, 0 W. The recorder's per-pack rows show the cause: every Core's REST `/quota/all` (60 s, :22) returns each pack's last NON-ZERO `inputWatts`/`outputWatts` (a zero is never cached), while the MQTT stream (per-change deltas plus a full pack burst ~:42) carries the zeros; `setDeviceQuota` replaces the raw map, so the :22 publish summed the replay and the :52 publish the stream. The store now records each MQTT-delivered pack flow field with its arrival time and sets a display-only `pack.liveFlow` when one is at most `STREAM_FLOW_WINDOW_MS` (150 s) old; `aggregateFleetFlow` returns `fleetBatteryNetDisplay` beside the unchanged raw `fleetBatteryNet`, and the Battery Net sensor (`/api/ha-state`, MQTT discovery) and the Energy-flow card read the display sum. While the stream is alive the REST value cannot be fresher (the cloud caches what the device published); a silent stream hands back to the poll after the window. `gridState`'s at-floor `poolDischargingObserved` still reads the raw sum. (2) Open-Meteo's hourly `shortwave_radiation` is the average of the preceding hour, so the value labelled H covers [H−1, H). `coveringRadiationEpoch` (weather.ts) pairs the recorder hour [H, H+1) with the label H+1 in `sampleCurtailmentHour`, the live `currentHourGhi`, the Bayesian solar fit (and its OLS comparison) whose posterior curtailment applies, and `curtailmentDaySettled`'s coverage (a day needs the labels 01:00 through the next midnight). Other consumers of the same hours still pair by label: the per-hour and clear-sky PV coefficient fits, forecast skill scoring and the realized-GHI capture in the recorder (insert-once rows keyed by label); they are unchanged here. (3) A measured hour (present, not `radiationMissing`) below `CURTAIL_MIN_GHI_WM2` returns no sample, and a measured hour the posterior cannot predict returns none; the μ × 900 W/m² heuristic runs only for an hour with no weather value. (4) `curtailmentMembershipSound` gates the freeze: the live roster is non-empty, `membership-history.json` is `stable` across the day and `membershipAt(dayStart)` equals the roster's fingerprint, and every roster Core was walked and reported `soc` in at least one hour of the day; an unsound day stays live. The sidecar schema is now `v: 2` (`CURTAIL_FREEZE_SCHEMA`): a v1 file is dropped on load and rewritten, so the ≤ 7 days frozen under the old pairing and heuristic are re-walked from the recorder. Harness: `scripts/mutate-v1186-2.mjs` (15 mutants).
 
 **v1.186.1 — the 7-day curtailment figure stops rewriting history.** `computeCurtailment` re-walked all 168 past hours on every refresh through the current Bayesian posterior and the worker's current Open-Meteo cache, so `recent7dKwh` (`ecoflow_pv_curtailment_kwh_7d`, the card's "Past 7d lost") and the 7-day histogram moved with no new curtailment in the window (2026-09-25: 12.6 → 10.5 → 16.09 kWh). `curtailmentFreeze.ts` freezes a finished local day the first time a walk finds it settled — `curtailmentDaySettled`: the weather's `fetchedAt` ≥ day end + `CURTAIL_SETTLE_LAG_MS` (12 h; the cache mixes forecasts and past-hour estimates, an hour is a past-hour estimate only if it had ended at `fetchedAt` — the realized-GHI capture's rule — a failed fetch keeps serving the stale cache, and past hours are revised until the model runs covering them are ingested, ≤ ~7.2 h per the provider's model metadata), all 24 hours present without `radiationMissing`, and a posterior (`bayes.hourly.length > 0`, so a model-less walk never freezes a week of zeros). The frozen record holds the day's kWh and curtailed hours (hour of day, surplus W); `recent7dKwh`, `recent7dHoursCount` and `hourlyHistogram` read it, only unsettled days are re-walked, today stays live, and the new `recent7dSettledDays` counts the frozen days. Persisted in `curtailment-days.json` beside the database (atomic temp + rename; `CURTAILMENT_DAYS_PATH` overrides; memory only when neither it nor `SUPERVISOR_TOKEN` is set), pruned to the window, invalid entries dropped on load; a failed save is logged once and retried on each refresh. `computeCurtailment` takes the worker's logger and an injectable clock for the live state and day walk (the report cache stays on the real clock). Entity ids are unchanged. Harness: `scripts/mutate-curtail-freeze.mjs` (8 mutants).
@@ -8191,7 +8212,8 @@ Rules (order matters — longest token first):
 - rate slashes → "per unit" (`%/h` → `percent per hour`);
 - **v1.187.10** — an API path is read as its words, without slashes (`EcoFlow's /device/list` → `EcoFlow's device list`; only a slash that starts a word, after the rate slashes);
 - relational/math symbols (`≥`→"at or above", `≤`→"at or below", `≈`/`~`→"about", `<`→"below", `>`→"above", `→`→"to", `²`→"squared"), plus ASCII `>=`/`<=`;
-- em/en dash, middot → a spoken pause; parens dropped;
+- **v1.187.23** — a range is read "to" (`readRanges`, first in the chain): an em/en dash with no space on either side between two numbers (the left one may carry a unit, am/pm or `%`; the right one may start with `$` or a weekday name) or between two weekday names (`On-Peak (4–7pm Mon–Fri)` → `On-Peak 4 to 7pm Mon to Fri`, read "On-Peak 4, 7pm Mon, Fri" on every spoken `peak-grid-draw` before; `23:00–Tue 05:00` → `23:00 to Tue 05:00`); a hyphen-minus between two weekday names, or between two numbers only when the right one carries am/pm, `%` or a unit (`4-7pm`, `36-38%`, `5-10 min`) and the left one does not follow a word character, `.`, `:` or a hyphen — so a negative number (`-3%`), a date (`2026-10-12`), a serial or alert id (`XXX0015-2`) or a version is never read as a range. The hyphen rule's unit list holds every unit spelling a unit rule matches (`min` and `mins` alike) and every word the unit rules expand it to, which keeps the function idempotent (`ttsRangeRead.test.ts` walks every spelling, spaced and glued);
+- em/en dash, middot → a spoken pause; parens dropped. A **spaced** dash is always a pause, between numbers too (`Core 3 — 45%` → `Core 3, 45 percent`): prose dashes are written spaced;
 - energy/power/electrical units, **number-anchored** (`(\d…)\s*UNIT\b`): `kWh`→"kilowatt hours", `Wh`, `kWp`, `kW`, `W`→"watts", `mAh`, `Ah`, `mA`, `A`→"amps", `mV`, `kV`, `V`→"volts";
 - time units: `h`/`hr`/`hrs`/`hours`→"hours", `min`→"minutes", `mo`→"months", combo `3h 7m`→"3 hours 7 minutes"; **v1.187.10** a glued seconds age `31s`→"31 seconds" (the alert ages, `fmtAge`);
 - `°F`/`°C`→degrees, `%`→"percent";
@@ -8211,7 +8233,9 @@ Unit rules are number-anchored so device SNs (`XXX0015`), error codes, and prose
 free-form **detail tail** falls back to the English original (verbalized) — by
 design, no translation API on the alarm path. `verbalizeForTtsEs` is the light
 Spanish normalizer (templates are authored spoken-ready, so it only converts
-stray symbols). Green → `"Todo despejado. Todas las estaciones reportan
+stray symbols). **v1.187.23** — it reads ranges by the same rules with "a"
+(`4–7pm lun–vie` → `4 a 7pm lun a vie`, `20-30%` → `20 a 30 por ciento`; Spanish
+weekday names as well as English), and keeps a spaced dash as a pause. Green → `"Todo despejado. Todas las estaciones reportan
 normalidad."`
 
 ---
@@ -9645,6 +9669,11 @@ flip time, first-telemetry latency, `offline-<sn>` alert resolution latency
 `monitor.activeAlertIds()`), a pack SoC/spread table captured ≥ 10 min after
 the flip, and fleet `pvCoverage` at flip vs. at report (the dark-core
 blind-spot restoration signal). Exactly one `[Medium]` push per reconnect.
+The report states those checkpoints and nothing else; the PV-coverage change is
+the outcome it reports (`renderReconnectReport`). Until v1.187.23 every report
+also ended with a fixed solar-yield prediction written for one device of one
+installation — a constant from a past outage, never computed, pushed whichever
+device returned.
 
 - Pure decision core (`evaluateReconnectWatch`) over injected `DeviceObs`
   snapshots; the index.ts driver ticks at 60 s and only feeds and dispatches.

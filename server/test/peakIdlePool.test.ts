@@ -240,7 +240,9 @@ test('★★ the monitor evaluates it on the house panel\'s readings (idlePoolIn
   // v1.187.0 (review) — the input assembly and its freshness gate are tested behaviourally
   // below (idlePoolInputsFrom); this pins only the tick's wiring.
   const m = SRC('alertMonitor.ts');
-  assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs), apsREvModelFromEnv());'));
+  // v1.187.23 — with the forecast feed's pool capacity and its basis, the pair from one forecast
+  // (pinned behaviourally through the real monitor in peakIdlePoolMeasuredCapacity.test.ts).
+  assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow), apsREvModelFromEnv());'));
   assert.ok(m.includes('...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0'));
   assert.ok(m.includes("  'peak-idle-pool',\n];"), 'a device-derived family (hydration rules)');
   // v1.187.0 (log review) — the fired day's restore at start-up and persist on every tick are
@@ -262,7 +264,8 @@ test('★★★ a STALE or offline house panel is not live evidence: the frozen 
     },
   }) as any;
   const live = idlePoolInputsFrom(panel(MON_1600 - 30_000), true, MON_1600);
-  assert.deepEqual(live, incident({ nowMs: MON_1600 }), 'every field read from the house panel');
+  // v1.187.23 — no measured capacity passed: the nameplate, named as such.
+  assert.deepEqual(live, incident({ nowMs: MON_1600, poolCapacityBasis: 'nameplate' }), 'every field read from the house panel');
   // Cloud-dark for 20 min: the projection is kept verbatim, but it is not evidence.
   const stale = idlePoolInputsFrom(panel(MON_1600 - 20 * MIN), true, MON_1600);
   assert.equal(stale.fresh, false);
@@ -276,4 +279,183 @@ test('★★★ a STALE or offline house panel is not live evidence: the frozen 
   assert.equal(classifyIdlePool(none, REV).suppressed, 'insufficient-data');
   // The grid verdict is the caller's, passed through.
   assert.equal(idlePoolInputsFrom(panel(MON_1600 - 30_000), false, MON_1600).gridPresent, false);
+});
+
+/* ══ v1.187.23 — the kWh above the reserve is on the pool's MEASURED capacity ══ */
+
+test('★★★ v1.187.23 — a measured pool capacity is the one the kWh figure uses: (soc − reserve)% of it, not of the nameplate', () => {
+  // The SoC percent is a share of the measured capacity since v1.187.19 (nameplate × poolCapacityScale);
+  // the push said "(about 9.2 kWh above it)" from the 92.16 kWh nameplate while the forecast and the
+  // runway integrated the same 10 points on ~87.0 kWh.
+  const MEASURED_WH = 92_160 * 0.944;
+  const live = MON_1600 - 30_000;
+  const panel = {
+    'SHP2-A': {
+      sn: 'SHP2-A', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: live,
+      projection: {
+        kind: 'shp2', gridWatt: 1301, backupBatPercent: 26, backupFullCapWh: 92_160,
+        sourceWatts: [0, 0, 0], strategy: { backupReserveSoc: 16, smartBackupMode: 2 },
+        sources: [], pairedCircuits: [],
+      },
+    },
+  } as any;
+  const inputs = idlePoolInputsFrom(panel, true, MON_1600, { poolFullWh: MEASURED_WH, poolCapacityBasis: 'measured' });
+  assert.equal(inputs.poolFullWh, MEASURED_WH);
+  assert.equal(inputs.poolCapacityBasis, 'measured');
+  run(MON_1600, 9);
+  const v = evaluateIdlePool({ ...inputs, nowMs: MON_1600 + IDLE_DWELL_MS }, REV);
+  assert.equal(v.active, true);
+  assert.ok(Math.abs(v.aboveReserveKwh! - 8.6999) < 0.001, `10 points of the measured 87.0 kWh, got ${v.aboveReserveKwh}`);
+  assert.equal(v.poolCapacityBasis, 'measured');
+  const [a] = peakIdlePoolAlerts(v, MON_1600 + IDLE_DWELL_MS);
+  assert.match(a.detail, /at 26% against a 16% reserve \(about 8\.7 kWh above it\), has not discharged/);
+  assert.doesNotMatch(a.detail, /nameplate/, 'the measured figure needs no qualifier');
+  assert.equal(a.facts!.find((f) => f.label === 'Above reserve')!.value, '8.7 kWh');
+});
+
+test('★★ v1.187.23 — with no measured capacity the nameplate is the fallback, and the push names it', () => {
+  const panel = (extra: Record<string, unknown> = {}) => ({
+    'SHP2-A': {
+      sn: 'SHP2-A', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: MON_1600 - 30_000,
+      projection: {
+        kind: 'shp2', gridWatt: 1301, backupBatPercent: 26, backupFullCapWh: 92_160,
+        sourceWatts: [0, 0, 0], strategy: { backupReserveSoc: 16, smartBackupMode: 2 }, sources: [], pairedCircuits: [],
+        ...extra,
+      },
+    },
+  }) as any;
+  // No forecast delivered (undefined, null), a forecast with no pool (null), or an unusable figure.
+  for (const none of [undefined, null]) {
+    const i = idlePoolInputsFrom(panel(), true, MON_1600, none);
+    assert.equal(i.poolFullWh, 92_160, `fallback for no forecast (${none})`);
+    assert.equal(i.poolCapacityBasis, 'nameplate', `fallback for no forecast (${none})`);
+  }
+  for (const none of [undefined, null, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const i = idlePoolInputsFrom(panel(), true, MON_1600, { poolFullWh: none, poolCapacityBasis: 'measured' });
+    assert.equal(i.poolFullWh, 92_160, `fallback for ${none}`);
+    assert.equal(i.poolCapacityBasis, 'nameplate', `fallback for ${none}`);
+  }
+  run(MON_1600, 9);
+  const v = evaluateIdlePool({ ...idlePoolInputsFrom(panel(), true, MON_1600, { poolFullWh: null, poolCapacityBasis: null }), nowMs: MON_1600 + IDLE_DWELL_MS }, REV);
+  assert.equal(v.active, true);
+  assert.ok(Math.abs(v.aboveReserveKwh! - 9.216) < 0.001);
+  assert.equal(v.poolCapacityBasis, 'nameplate');
+  const [a] = peakIdlePoolAlerts(v, MON_1600 + IDLE_DWELL_MS);
+  assert.match(a.detail, /\(about 9\.2 kWh above it on the nameplate capacity\), has not discharged/);
+  assert.equal(a.facts!.find((f) => f.label === 'Above reserve')!.value, '9.2 kWh (nameplate capacity)');
+  // A panel reporting no nameplate either: capacity unknown, no figure and no basis.
+  const bare = idlePoolInputsFrom(panel({ backupFullCapWh: undefined }), true, MON_1600, { poolFullWh: null, poolCapacityBasis: null });
+  assert.equal(bare.poolFullWh, null);
+  assert.equal(bare.poolCapacityBasis, null);
+  // ...but a measured capacity still serves.
+  const measuredOnly = idlePoolInputsFrom(panel({ backupFullCapWh: undefined }), true, MON_1600, { poolFullWh: 80_000, poolCapacityBasis: 'measured' });
+  assert.equal(measuredOnly.poolFullWh, 80_000);
+  assert.equal(measuredOnly.poolCapacityBasis, 'measured');
+  // No house panel: nothing is read, whatever the forecast carries.
+  const none = idlePoolInputsFrom({}, true, MON_1600, { poolFullWh: 87_000, poolCapacityBasis: 'measured' });
+  assert.equal(none.poolFullWh, null);
+  assert.equal(none.poolCapacityBasis, null);
+});
+
+test('★★★ v1.187.23 (review) — the forecast\'s figure counts as measured only when its OWN basis says so: a nameplate-basis forecast is the named nameplate', () => {
+  // poolEnergyBasis.ts: with no Core capacity ratio ever measured (a fresh install, or packs that
+  // never report fullCapMah/designCapMah) the forecast's basis is 'nameplate' at scale 1, so its
+  // poolFullWh IS the 92,160 Wh nameplate. Taken as measured, the push said "(about 9.2 kWh above
+  // it)" with no qualifier — the rated size presented as what the pool holds.
+  const panel = {
+    'SHP2-A': {
+      sn: 'SHP2-A', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: MON_1600 - 30_000,
+      projection: {
+        kind: 'shp2', gridWatt: 1301, backupBatPercent: 26, backupFullCapWh: 92_160,
+        sourceWatts: [0, 0, 0], strategy: { backupReserveSoc: 16, smartBackupMode: 2 }, sources: [], pairedCircuits: [],
+      },
+    },
+  } as any;
+  // The forecast's own nameplate figure, its basis 'nameplate': the panel's nameplate, named.
+  const onNameplate = idlePoolInputsFrom(panel, true, MON_1600, { poolFullWh: 92_160, poolCapacityBasis: 'nameplate' });
+  assert.equal(onNameplate.poolFullWh, 92_160);
+  assert.equal(onNameplate.poolCapacityBasis, 'nameplate');
+  // Whatever figure a non-measured forecast carries, the figure used is the panel's own nameplate
+  // (the forecast's is not passed off under the nameplate's name either).
+  for (const basis of ['nameplate', null, undefined] as const) {
+    const i = idlePoolInputsFrom(panel, true, MON_1600, { poolFullWh: 90_000, poolCapacityBasis: basis });
+    assert.equal(i.poolFullWh, 92_160, `basis ${basis}: the panel's nameplate`);
+    assert.equal(i.poolCapacityBasis, 'nameplate', `basis ${basis}: an absent basis vouches for nothing`);
+  }
+  // A basis the allowlist does not hold (a future one) is not presented as measured either.
+  const unknown = idlePoolInputsFrom(panel, true, MON_1600, { poolFullWh: 90_000, poolCapacityBasis: 'estimated' as any });
+  assert.equal(unknown.poolCapacityBasis, 'nameplate');
+  // 'measured', 'held' (a Core's persisted ratio) and 'min-known' (the lowest ratio measured) are
+  // all scaled from measured ratios: the forecast's figure, unlabelled.
+  for (const basis of ['measured', 'held', 'min-known'] as const) {
+    const i = idlePoolInputsFrom(panel, true, MON_1600, { poolFullWh: 87_000, poolCapacityBasis: basis });
+    assert.equal(i.poolFullWh, 87_000, `basis ${basis}`);
+    assert.equal(i.poolCapacityBasis, 'measured', `basis ${basis}`);
+  }
+  // The push for the nameplate-basis forecast names the nameplate.
+  run(MON_1600, 9);
+  const v = evaluateIdlePool({ ...onNameplate, nowMs: MON_1600 + IDLE_DWELL_MS }, REV);
+  assert.equal(v.active, true);
+  assert.equal(v.poolCapacityBasis, 'nameplate');
+  const [a] = peakIdlePoolAlerts(v, MON_1600 + IDLE_DWELL_MS);
+  assert.match(a.detail, /\(about 9\.2 kWh above it on the nameplate capacity\), has not discharged/, a.detail);
+  assert.equal(a.facts!.find((f) => f.label === 'Above reserve')!.value, '9.2 kWh (nameplate capacity)');
+});
+
+test('★ v1.187.23 — a verdict with no kWh figure carries no basis (the card reads "capacity unknown")', () => {
+  run(MON_1600, 9, { poolFullWh: null, poolCapacityBasis: 'nameplate' });
+  const v = evaluateIdlePool(incident({ nowMs: MON_1600 + IDLE_DWELL_MS, poolFullWh: null, poolCapacityBasis: 'nameplate' }), REV);
+  assert.equal(v.active, true);
+  assert.equal(v.aboveReserveKwh, null);
+  assert.equal(v.poolCapacityBasis, null);
+  const [a] = peakIdlePoolAlerts(v, MON_1600 + IDLE_DWELL_MS);
+  assert.match(a.detail, /against a 16% reserve, has not discharged/);
+  assert.equal(a.facts!.find((f) => f.label === 'Above reserve')!.value, 'capacity unknown');
+});
+
+test('★★ v1.187.23 (review) — a measured capacity from a different pool is not used: a Core left or joined since the forecast', () => {
+  // The forecast can be up to its day TTL old, and a Core leaving the panel does not reset the
+  // worker's caches: its measured 87.0 kWh then describes three Cores while the live panel holds two.
+  const panel = (fullCapWh: number) => ({
+    'SHP2-A': {
+      sn: 'SHP2-A', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: MON_1600 - 30_000,
+      projection: {
+        kind: 'shp2', gridWatt: 1301, backupBatPercent: 26, backupFullCapWh: fullCapWh,
+        sourceWatts: [0, 0], strategy: { backupReserveSoc: 16, smartBackupMode: 2 }, sources: [], pairedCircuits: [],
+      },
+    },
+  }) as any;
+  const forecast = { poolFullWh: 92_160 * 0.944, poolCapacityBasis: 'measured' as const };
+  // Same pool: the measured figure (inside [0.8, 1] × the live nameplate).
+  const same = idlePoolInputsFrom(panel(92_160), true, MON_1600, forecast);
+  assert.equal(same.poolCapacityBasis, 'measured');
+  assert.equal(same.poolFullWh, forecast.poolFullWh);
+  // A Core left (live nameplate 61.44 kWh < the forecast's 87.0): the live nameplate, named.
+  const left = idlePoolInputsFrom(panel(61_440), true, MON_1600, forecast);
+  assert.equal(left.poolCapacityBasis, 'nameplate', 'a measured figure above the live nameplate is a different pool');
+  assert.equal(left.poolFullWh, 61_440);
+  // A Core joined (live nameplate 122.88 kWh; 87.0 is under 0.8 × it): the live nameplate, named.
+  const joined = idlePoolInputsFrom(panel(122_880), true, MON_1600, forecast);
+  assert.equal(joined.poolCapacityBasis, 'nameplate', 'a measured figure under the scale floor is a different pool');
+  assert.equal(joined.poolFullWh, 122_880);
+  // The boundaries themselves are accepted: exactly the nameplate, and exactly the scale floor.
+  assert.equal(idlePoolInputsFrom(panel(92_160), true, MON_1600, { poolFullWh: 92_160, poolCapacityBasis: 'measured' }).poolCapacityBasis, 'measured');
+  assert.equal(idlePoolInputsFrom(panel(100_000), true, MON_1600, { poolFullWh: 80_000, poolCapacityBasis: 'measured' }).poolCapacityBasis, 'measured');
+});
+
+test('★ v1.187.23 (review) — with no live nameplate to bound it, an unusable measured figure is still refused', () => {
+  const panel = {
+    'SHP2-A': {
+      sn: 'SHP2-A', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: MON_1600 - 30_000,
+      projection: {
+        kind: 'shp2', gridWatt: 1301, backupBatPercent: 26, sourceWatts: [0, 0, 0],
+        strategy: { backupReserveSoc: 16, smartBackupMode: 2 }, sources: [], pairedCircuits: [],
+      },
+    },
+  } as any;
+  for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const i = idlePoolInputsFrom(panel, true, MON_1600, { poolFullWh: bad, poolCapacityBasis: 'measured' });
+    assert.equal(i.poolFullWh, null, `no figure from ${bad}`);
+    assert.equal(i.poolCapacityBasis, null, `no basis from ${bad}`);
+  }
 });
