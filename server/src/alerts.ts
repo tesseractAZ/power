@@ -38,7 +38,7 @@ export function resetVdiffWarnHoldForTesting(): void {
   vdiffKneeByKey.clear(); // v1.187.0 — the end-of-charge knee state is per-pack vdiff state too
 }
 import { VOL_DIFF_CRIT_MV, VOL_DIFF_PLATEAU_SOC_PCT, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, vdiffCritMvFor, plateauQuietWarnSpread } from './cellSpread.js';
-import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, housePoolFallbackSoc, shp2Panels, findShp2, secondaryPanels, panelMeanSoc } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, housePoolFallbackSoc, lastKnownHomeRoster, shp2Panels, findShp2, secondaryPanels, panelMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import { mpptProducing } from './mppt.js';
 import { getReserveArbitrageRaised } from './nightChargeActuator.js';
@@ -2485,7 +2485,11 @@ export function computeAlerts(
     if (blindSinceMs != null && blindMs >= RESERVE_BLIND_AFTER_MS) {
       const offGrid = grid?.backstopping !== true;
       const critical = offGrid && blindMs >= RESERVE_BLIND_CRITICAL_MS;
-      const fallbackSoc = housePoolFallbackSoc(devices); // v1.185.0 — this pool's own Cores on a two-panel plant
+      // v1.185.0 — this pool's own Cores on a two-panel plant. v1.187.22 — with the roster the ladder
+      // reads (socLadders.ts passes the same remembered set): without it, a panel whose sources[] lost
+      // isConnected fell back to the stale spare literal here while the ladder used the remembered
+      // roster, and the push named a mean ~20 points off the one the ladder ran on.
+      const fallbackSoc = housePoolFallbackSoc(devices, lastKnownHomeRoster());
       const fallbackTxt = fallbackSoc != null
         ? `The SoC alarm ladder is running on the Core-fleet fallback (mean ${fallbackSoc.toFixed(0)}% across reporting Cores).`
         : 'No home Core is reporting either — the SoC alarm ladder is fully dark.';
@@ -2509,7 +2513,7 @@ export function computeAlerts(
   // SoC threshold the backup pool is currently at/below (50/40/30/20/15/10/8/4/2 %),
   // its severity/source chosen by socAlertSeverity so priorityOf() derives the
   // matching ISA tier (Low→Critical). The audible escalating alarm is fired
-  // separately via broadcast.announce (batterySocAlarm + index.ts); the id MUST
+  // separately via broadcast.announce (batterySocAlarm + socLadders.ts); the id MUST
   // start with 'backup-soc' so broadcast.ts excludes it from its own chime and
   // the dedicated announce stays the sole SoC audible.
   // v1.185.0 — the HOUSE panel (first-in-map before); every other panel: secondaryPanelAlerts.

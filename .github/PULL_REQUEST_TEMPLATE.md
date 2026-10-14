@@ -36,7 +36,7 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 
 ### If this is a release PR
 - [ ] `ecoflow_panel/config.yaml` **version bumped** to exactly the version in the PR title
-- [ ] `ecoflow_panel/CHANGELOG.md` has a `## vX.Y.Z` section, **prepended without truncating the file** — check the entry count did not drop
+- [ ] `ecoflow_panel/CHANGELOG.md` has a bare `## X.Y.Z` section (no `v`, no date — Home Assistant's update dialog shows only the new notes when the heading is exactly the version), **prepended without truncating the file**, then `node scripts/roll-changelog.mjs` — check that `CHANGELOG.md` and `CHANGELOG-ARCHIVE.md` together lost no entry (the roll moves older releases to the archive, so the live count drops on purpose)
 - [ ] Title (and, for a one-commit PR, the commit's subject, which its squash merge lands with) is `Release vX.Y.Z …`, the version above every `vX.Y.Z` tag — Home Assistant offers whatever `config.yaml` declares on `main` (a lower version too), and `tag-release.yml` tags it on the merge or fails the run
 - [ ] Merge is **gated on the CI conclusion**, not merely on CI finishing
 

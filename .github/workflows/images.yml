@@ -266,8 +266,9 @@ jobs:
           # Match the "## <version> …" header through end of section (next "## " or EOF).
           #
           # The `v` prefix is OPTIONAL here and that is the whole point: this job
-          # receives the bare version from config.yaml ("1.126.0") while every
-          # CHANGELOG header is written "## v1.126.0 — …". The original pattern
+          # receives the bare version from config.yaml ("1.126.0") while the
+          # CHANGELOG headers were written "## v1.126.0 — …" (bare "## 1.187.22"
+          # since v1.187.22, which this matches too). The original pattern
           # required an exact match, so it never matched ANY release and every
           # GitHub Release since this workflow was written carried the
           # "_(see CHANGELOG.md)_" placeholder instead of its notes. Nothing

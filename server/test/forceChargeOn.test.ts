@@ -273,11 +273,12 @@ test('★★★ index.ts: the re-issue is spent BEFORE its writes (write-ahead) 
 
 test('★★★ index.ts: the failure is persisted once, logged as a warning and pushed', () => {
   const b = branch('onFailed');
-  assert.ok(b.includes('persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs });'));
+  // v1.187.22 — with the slots the warning names (a partial failure is reported as one).
+  assert.ok(b.includes('persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs, forceChargeOnFailedSlots: [...action.slots] });'));
   assert.ok(b.includes('app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT'));
-  assert.ok(b.includes("dedupId: 'night_charge_force_charge_on_failure',"));
-  assert.ok(b.includes("severity: 'warning',"), 'a cost, not a safety, matter — the reserve is verified on its own');
-  assert.match(b, /Tonight's buy above the \$\{RESERVE_WRITE_MAX_PCT\}% reserve/);
+  // v1.187.22 — the push is built where its text is tested (notify.buildNightForceChargeOnFailure:
+  // a warning, deduped on night_charge_force_charge_on_failure — nightChargeExpectedBuy.test.ts).
+  assert.match(b, /await sendNotification\(loadNotifyConfig\(\), buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true, ceilingPct: state\.forceChargeCeilingPct,\n\s+\}\)\);/);
   assert.ok(!b.includes('setChannelForceCharge'), 'the warning writes nothing');
   const v = branch('onVerified');
   assert.ok(v.includes('persistNightActuation({ ...nightActuationMem, forceChargeOnVerifiedAtMs: nowMs });'));

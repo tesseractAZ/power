@@ -654,6 +654,17 @@ export interface NightLedgerRow {
    *  night, under five nights, a load at/above forecast) and before v1.187.1. */
   cost_surplus_load_factor: number | null;
   cost_surplus_load_samples: number | null;
+  /** v1.187.22 — the EXPECTED meter-side buy (plan expectedBuyKwh: what the armed write would
+   *  draw from the expected window-open SoC, the drain to a just-in-time force-charge included)
+   *  and that expected window-open SoC (plan expectedStartSocPct), beside buy_kwh — the worst
+   *  case, unchanged. NULL with no P50 basis and on rows written before v1.187.22. */
+  expected_buy_kwh: number | null;
+  expected_start_soc_pct: number | null;
+  /** v1.187.22 — OUTCOME: the pool SoC measured just before the window opened (backup_pct over
+   *  the WINDOW_OPEN_SOC_LEAD_MS lead-in, median; nightLedgerScoring.measuredWindowOpenSocPct) —
+   *  what expected_start_soc_pct and soc_at_window_start_pct (the islanded sizing start) are
+   *  graded against. NULL when no reading covers the lead-in, and on rows captured earlier. */
+  window_open_soc_pct: number | null;
 
   // ── SCORE (NULL until scored) ──
   pv_err_frac: number | null;
@@ -748,6 +759,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'actuation_reverted_at_ms',
   // v1.187.3 — the method behind delivered_kwh.
   'delivered_basis',
+  // v1.187.22 — the expected buy and start beside the worst case, and the measured window-open SoC.
+  'expected_buy_kwh', 'expected_start_soc_pct', 'window_open_soc_pct',
 ];
 const NIGHT_LEDGER_COLUMN_SET = new Set<string>(NIGHT_LEDGER_COLUMNS as readonly string[]);
 
@@ -972,6 +985,8 @@ export function createRecorder(
     'cost_surplus_load_samples INTEGER',
     // v1.187.3 — see NightLedgerRow.delivered_basis.
     'delivered_basis TEXT',
+    // v1.187.22 — see NightLedgerRow.expected_buy_kwh / window_open_soc_pct.
+    'expected_buy_kwh REAL', 'expected_start_soc_pct REAL', 'window_open_soc_pct REAL',
   ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);

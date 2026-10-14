@@ -11,7 +11,7 @@
  * bands at once (a long-offline source returning at a low SoC, or a fast discharge
  * spanning bands in one ~60s poll), only the MOST-SEVERE band crossed is announced.
  * onCross still fires for EVERY crossed band (with isPrimary=true only on the worst)
- * so the consumer's per-band bookkeeping — notably index.ts's grid-downgrade
+ * so the consumer's per-band bookkeeping — notably socLadders.ts's grid-downgrade
  * re-escalation map — stays complete; only the audible announce collapses. A normal
  * gradual discharge (one band per tick) is unchanged.
  *
@@ -24,7 +24,8 @@
  *
  * The actual chime + speech is delegated via the `announce` callback so this
  * module stays dependency-light and unit-testable; the annunciation gate
- * (per-priority enable from alertSettings) is applied by the caller (index.ts).
+ * (per-priority enable from alertSettings) is applied by the caller (socLadders.ts, v1.187.22;
+ * index.ts before).
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -228,6 +229,25 @@ export function socAlarmStatePathFor(sn: string): string {
   return STATE_PATH.replace(/\.json$/, '') + `-${sn.replace(/[^A-Za-z0-9]/g, '')}.json`;
 }
 
+/**
+ * v1.187.22 — THE SoC LADDERS' BOOT GATE: may a store tick feed the SoC ladders (the house ladder,
+ * every secondary panel's, and the grid-drop re-escalation pass)? 'hydrated' once the store is
+ * hydrated (SnapshotStore.firstPollSettledAt > 0: the first poll asked every listed-online device for
+ * its quota); 'bound' once `maxMs` (BOOT_HYDRATION_MAX_MS) has elapsed without that, after which what
+ * exists is fed exactly as before (a cloud outage at boot never holds the ladders for good);
+ * 'withhold' before either. Before hydration the device map is partial: on 2026-10-12 22:04:09 the
+ * first tick after a host reboot carried one of the three roster Cores (49 %) and no panel pool %, the
+ * fallback mean read 49 % against a real 52 %, and the armed 50 % rung was spoken twenty minutes
+ * before the real crossing was spoken again. Pure; the caller (socLadders.ts) latches the first open.
+ */
+export type SocLadderBootGate = 'hydrated' | 'bound' | 'withhold';
+
+export function socLadderBootGate(p: { firstPollSettledAt: number; elapsedMs: number; maxMs: number }): SocLadderBootGate {
+  if (p.firstPollSettledAt > 0) return 'hydrated';
+  if (p.elapsedMs >= p.maxMs) return 'bound';
+  return 'withhold';
+}
+
 export interface BatterySocAlarm {
   /** Feed the latest backup-pool SoC (%). Fires onCross for each downward crossing.
    *  `nowMs` is injectable for deterministic tests (defaults to Date.now()). */
@@ -243,7 +263,7 @@ export interface BatterySocAlarmOptions {
    * consumer should ANNOUNCE only when `isPrimary` is true — this collapses a
    * same-tick multi-band crossing (a long-offline reconnect at low SoC, or a fast
    * discharge) to a single audible alarm — but should apply any PER-BAND
-   * bookkeeping (e.g. the grid-downgrade re-escalation record in index.ts) on
+   * bookkeeping (e.g. the grid-downgrade re-escalation record in socLadders.ts) on
    * EVERY call, so a later grid drop can still re-escalate every band the pool
    * crossed. Collapsing the announce must never collapse the bookkeeping.
    */

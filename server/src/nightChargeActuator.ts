@@ -118,9 +118,47 @@ export function ownerReserveFloorPct(
  */
 export const MAX_SPOKEN_ADVISORY_CHARS = 560;
 
+/**
+ * v1.187.22 — below this an expected draw is NO charge: the figure a push would state as "~0 kWh"
+ * (pushes state one decimal). A night whose expected draw is under it is a night the write only
+ * holds the reserve as a floor — the pool is expected to open the window at or above the level the
+ * write drives it to — and every line says so ("reserve held at 50% tonight — no charge expected"),
+ * never "charging to ~50% (~0 kWh)" or "less than 1 kilowatt hour". Here, beside the spoken line,
+ * because this module imports nothing; nightChargeAdvisor.noChargeExpected reads it for a plan.
+ */
+export const NO_CHARGE_EXPECTED_KWH = 0.05;
+
+/** v1.187.22 — an expected draw that is no charge at all (NO_CHARGE_EXPECTED_KWH). false with no
+ *  figure: no expected figure is not an expectation of none. PURE. */
+export function isNoChargeKwh(kwh: number | null | undefined): boolean {
+  return kwh != null && Number.isFinite(kwh) && kwh < NO_CHARGE_EXPECTED_KWH;
+}
+
+/*
+ * v1.187.22 — the line says what the write will do: the level it drives the pool to (the reserve,
+ * or the force-charge stop when force-charge rides the night) and the energy it is expected to
+ * draw. On 2026-10-12 it said "Buying about 64 kilowatt hours" — the islanded worst case the plan
+ * is sized on — for a write that would have drawn ≈34. With no expected figure it speaks no
+ * energy figure at all, never the worst case. Under 1 kWh is said as such, not "about 0".
+ * The time is the WINDOW's ("in the charge window that opens at 00:00"), not "starting at": a
+ * pool that opens above the reserve is not charged at the open — the house draws it until the
+ * just-in-time force-charge (~03:14 from 74% at 21:30). A window that closes before the level is
+ * reached (`toward`) is said so: "toward 80 percent, … in the charge window that opens at 23:00,
+ * which ends before it gets there."
+ * A night that charges nothing (isNoChargeKwh — the pool is expected to stay at or above the
+ * level) is not a charge: "The backup reserve will be held at 50 percent in the charge window
+ * that opens at 00:00; no charge is expected." — the reserve the write sets (`reservePct`), not
+ * the level, and no figure.
+ */
 export function nightChargeSpokenNotice(o: {
-  buyKwhRounded: number;
-  targetPct: number;
+  /** The level tonight's write drives the pool to, % (nightChargeAdvisor.chargeLevelPct). */
+  levelPct: number;
+  /** The reserve the write sets, % (the armed targetPct): what a night that charges nothing holds. */
+  reservePct: number;
+  /** The expected draw, kWh (nightChargeAdvisor.statedBuyKwh); null ⇒ no energy figure. */
+  expectedKwh: number | null;
+  /** The window closes before the level is reached (nightChargeAdvisor.chargeIsWindowBound). */
+  toward?: boolean;
   deadlineText: string;
   deadlineTextEs: string;
   cushionShortfall: boolean;
@@ -130,14 +168,34 @@ export function nightChargeSpokenNotice(o: {
   // because it discloses on every single plan.
   const shortEn = o.cushionShortfall ? ' Outage cushion not fully met.' : '';
   const shortEs = o.cushionShortfall ? ' Margen de respaldo no cubierto por completo.' : '';
+  if (isNoChargeKwh(o.expectedKwh)) {
+    const reserve = Math.round(o.reservePct);
+    return {
+      en:
+        `Night charge notice. The backup reserve will be held at ${reserve} percent in the charge window that opens `
+        + `${o.deadlineText}; no charge is expected.${shortEn} Cancel on the Power panel before then.`,
+      es:
+        `Aviso de carga nocturna. La reserva de respaldo se mantendrá en el ${reserve} por ciento en la ventana de carga que comienza `
+        + `${o.deadlineTextEs}; no se espera ninguna carga.${shortEs} Cancele en el panel Power antes de esa hora.`,
+    };
+  }
+  const level = Math.round(o.levelPct);
+  const kwh = o.expectedKwh != null && Number.isFinite(o.expectedKwh) ? Math.round(o.expectedKwh) : null;
+  const kwhEn = kwh == null ? ''
+    : kwh < 1 ? ', less than 1 kilowatt hour'
+      : `, about ${kwh} kilowatt hour${kwh === 1 ? '' : 's'}`;
+  const kwhEs = kwh == null ? ''
+    : kwh < 1 ? ', menos de 1 kilovatio hora'
+      : kwh === 1 ? ', alrededor de 1 kilovatio hora' : `, unos ${kwh} kilovatios hora`;
+  const toward = o.toward === true;
   return {
     en:
-      `Night charge notice. Buying about ${o.buyKwhRounded} kilowatt hours overnight, `
-      + `raising backup reserve to ${o.targetPct} percent ${o.deadlineText}.`
+      `Night charge notice. Charging the backup pool ${toward ? 'toward' : 'to about'} ${level} percent${kwhEn}, `
+      + `in the charge window that opens ${o.deadlineText}${toward ? ', which ends before it gets there' : ''}.`
       + `${shortEn} Cancel on the Power panel before then.`,
     es:
-      `Aviso de carga nocturna. Comprando unos ${o.buyKwhRounded} kilovatios hora durante la noche, `
-      + `elevando la reserva de respaldo al ${o.targetPct} por ciento ${o.deadlineTextEs}.`
+      `Aviso de carga nocturna. Se cargarán las baterías de respaldo ${toward ? 'rumbo al' : 'hasta cerca del'} ${level} por ciento`
+      + `${kwhEs}, en la ventana de carga que comienza ${o.deadlineTextEs}${toward ? ' y termina antes de alcanzar ese nivel' : ''}.`
       + `${shortEs} Cancele en el panel Power antes de esa hora.`,
   };
 }
@@ -416,6 +474,11 @@ export interface NightActuationState {
   /** v1.186.0 — the FAILURE marker: when the "tonight's buy above the reserve did not
    *  take effect" warning went (once per night). A restart must not repeat it. */
   forceChargeOnFailedAtMs: number | null;
+  /** v1.187.22 — the slots that warning named (the ones still reading OFF). Fewer than
+   *  `forceChargeSlots` = a PARTIAL failure: the other slots took the ON
+   *  (nightForceCharge.partialForceChargeOnFailureSlots), and the morning push says "on those
+   *  slot(s)", as the warning did. null = no failure, or a record from before it was kept. */
+  forceChargeOnFailedSlots: number[] | null;
   forceChargeOffAtMs: number | null;
   forceChargeOffReason: string | null;
   forceChargeOffLastAttemptMs: number | null;
@@ -444,6 +507,14 @@ export interface NightActuationState {
   /** The ANNOUNCED plan's economic ceiling, captured at arming — like targetPct, a
    *  fresher recompute never silently substitutes a different buy. */
   forceChargeCeilingPct: number | null;
+  /** v1.187.22 — STAMPED AT ARM TIME: whether force-charge rides this night — force-charge
+   *  enabled (forceChargeEnabled) and the armed ceiling above the reserve maximum. The gate the
+   *  evening push named the force-charge on, and the one the plan's expected figure was made with
+   *  (forceChargeEligible), so the morning push reads it (forceChargeNightOutcome) instead of the
+   *  option as it stands at the restore: a restart mid-night with the option changed turned an
+   *  armed-to-ride night into "reserve only" beside a figure that counts the force-charge leg.
+   *  Arming does not change what decideForceCharge does. null = a record armed before the stamp. */
+  forceChargeRides: boolean | null;
   lastError: string | null;
 }
 
@@ -459,7 +530,7 @@ export function emptyActuationState(): NightActuationState {
     requestedPct: null,
     forceChargeOnAtMs: null, forceChargeSlots: null,
     forceChargeOnVerifiedAtMs: null, forceChargeOnLastAttemptMs: null, forceChargeOnRetries: 0,
-    forceChargeOnFailedAtMs: null,
+    forceChargeOnFailedAtMs: null, forceChargeOnFailedSlots: null,
     forceChargeOffAtMs: null,
     forceChargeOffReason: null, forceChargeOffLastAttemptMs: null, forceChargeOffRetries: 0,
     forceChargeOffVerifiedAtMs: null, forceChargeOffEscalated: false, forceChargeOffDeadlinePagedAtMs: null,
@@ -468,6 +539,7 @@ export function emptyActuationState(): NightActuationState {
     forceChargeCeilingSyncRetries: 0, forceChargeCeilingPriorPct: null,
     forceChargeCeilingRestoredAtMs: null, forceChargeCeilingRestoreAttempts: 0,
     forceChargeCeilingRestoreLastAttemptMs: null,
+    forceChargeRides: null,
     lastError: null,
   };
 }
@@ -522,6 +594,11 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeOnLastAttemptMs: num(o.forceChargeOnLastAttemptMs),
     forceChargeOnRetries: num(o.forceChargeOnRetries) ?? 0,
     forceChargeOnFailedAtMs: num(o.forceChargeOnFailedAtMs),
+    // v1.187.22 — as the slots above: 1-3 integers, else no list (read as a whole-night failure,
+    // as every failure before the list was kept).
+    forceChargeOnFailedSlots: Array.isArray(o.forceChargeOnFailedSlots)
+      ? o.forceChargeOnFailedSlots.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 3)
+      : null,
     forceChargeOffAtMs: num(o.forceChargeOffAtMs),
     forceChargeOffReason: str(o.forceChargeOffReason),
     forceChargeOffLastAttemptMs: num(o.forceChargeOffLastAttemptMs),
@@ -538,6 +615,8 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeCeilingRestoredAtMs: num(o.forceChargeCeilingRestoredAtMs),
     forceChargeCeilingRestoreAttempts: num(o.forceChargeCeilingRestoreAttempts) ?? 0,
     forceChargeCeilingRestoreLastAttemptMs: num(o.forceChargeCeilingRestoreLastAttemptMs),
+    // v1.187.22 — a record armed before the stamp has none: null, never a guess.
+    forceChargeRides: typeof o.forceChargeRides === 'boolean' ? o.forceChargeRides : null,
     lastError: str(o.lastError),
   };
 }
@@ -563,6 +642,15 @@ export interface ArmablePlan {
   window: { startMs: number; endMs: number } | null;
 }
 
+/** v1.187.22 — the force-charge ceiling armFromPlan records from a plan: its economic ceiling
+ *  when finite, else null (a reserve-only night). One definition, shared with the expected-buy
+ *  disclosure (nightForceCharge.armedWriteLevelPct), so the level a plan says its write drives
+ *  the pool to is read from the field this records. PURE. */
+export function armedForceChargeCeilingPct(plan: Pick<ArmablePlan, 'costCeilingSocPct'>): number | null {
+  return typeof plan.costCeilingSocPct === 'number' && Number.isFinite(plan.costCeilingSocPct)
+    ? plan.costCeilingSocPct : null;
+}
+
 /**
  * Arm tonight's actuation from the evening job's announced plan. Returns the
  * armed state, or null when the plan is not actuatable (hold night,
@@ -582,6 +670,9 @@ export function armFromPlan(
   nowMs: number,
   /** Live backupReserveSoc at arm time (null = unknown → fail-closed). */
   liveReservePct: number | null,
+  /** v1.187.22 — force-charge enabled at arm time (index.ts: forceChargeOn(), the gate the plan's
+   *  expected figure was made with), stamped as `forceChargeRides`. Omitted ⇒ null, unknown. */
+  forceChargeEnabled?: boolean,
 ): NightActuationState | null {
   if (prev.appliedAtMs != null && prev.revertedAtMs == null) return null; // unresolved night
   // v1.165.0 — a force-charge that was switched ON and never verified OFF is an
@@ -599,6 +690,7 @@ export function armFromPlan(
   if (plan.window == null || plan.setpointSocPct == null) return null;
   if (plan.buyKwh == null || plan.buyKwh <= 0) return null;
   if (plan.window.endMs <= plan.window.startMs || plan.window.startMs <= nowMs - APPLY_LATE_MS) return null;
+  const ceiling = armedForceChargeCeilingPct(plan);
   return {
     ...emptyActuationState(),
     day,
@@ -607,15 +699,112 @@ export function armFromPlan(
     buyKwh: plan.buyKwh,
     windowStartMs: plan.window.startMs,
     windowEndMs: plan.window.endMs,
-    forceChargeCeilingPct:
-      typeof plan.costCeilingSocPct === 'number' && Number.isFinite(plan.costCeilingSocPct)
-        ? plan.costCeilingSocPct : null,
+    forceChargeCeilingPct: ceiling,
+    // v1.187.22 — whether force-charge rides this night, as the evening push names it: enabled,
+    // and the armed ceiling above the reserve maximum (at or below it the reserve reaches it alone).
+    forceChargeRides: forceChargeEnabled === undefined ? null
+      : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,
     // An unrestored original survives the fresh record, so tonight's restore still
     // returns the OWNER's ceiling, never a value we left behind.
     forceChargeCeilingPriorPct:
       prev.forceChargeCeilingPriorPct != null && prev.forceChargeCeilingRestoredAtMs == null
         ? prev.forceChargeCeilingPriorPct : null,
   };
+}
+
+/**
+ * v1.187.22 — PURE. Why armFromPlan refuses `plan`, in words for the evening push; null when it
+ * would arm. The checks are armFromPlan's, in its order (a test holds the two equivalent). With a
+ * refused arm in a write mode the push used to take the advisory shape and recommend the plan's
+ * level and expected draw — a force-charge to ~80% and ~35 kWh — for a write nothing would make.
+ */
+export function armRefusalReason(
+  prev: NightActuationState,
+  plan: ArmablePlan,
+  nowMs: number,
+  liveReservePct: number | null,
+): string | null {
+  const night = prev.day ?? 'a previous night';
+  if (prev.appliedAtMs != null && prev.revertedAtMs == null) return `the ${night} reserve write is still applied and not yet restored`;
+  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) {
+    return `the ${night} force-charge was switched ON and its OFF has not verified`;
+  }
+  if (
+    prev.applyAttemptedAtMs != null && prev.appliedAtMs == null && prev.revertedAtMs == null &&
+    !(liveReservePct != null && prev.attemptBaselinePct != null && liveReservePct === prev.attemptBaselinePct)
+  ) {
+    return `the ${night} reserve write was attempted and is not confirmed either way`;
+  }
+  if (!plan.chargeTonight || !plan.basisComplete) return 'the plan does not call for a charge';
+  if (plan.window == null || plan.setpointSocPct == null) return 'the plan has no window or reserve setpoint';
+  if (plan.buyKwh == null || plan.buyKwh <= 0) return 'the plan sizes no buy';
+  if (plan.window.endMs <= plan.window.startMs) return 'the plan has no valid window';
+  if (plan.window.startMs <= nowMs - APPLY_LATE_MS) return `the charge window opened more than ${APPLY_LATE_MS / 60_000} minutes ago`;
+  return null;
+}
+
+/** v1.187.22 — the evening job's record of a refused arm (armRefusalReason), keyed by the window
+ *  the refused plan resolved: persisted beside the notify latch so the card can lead with it. */
+export interface ArmRefusalRecord {
+  reason: string;
+  windowStartMs: number;
+  windowEndMs: number;
+}
+
+/** v1.187.22 — a persisted refusal record read back (the latch file, restart path): anything
+ *  malformed is no record — never a fabricated refusal. PURE. */
+export function coerceArmRefusalRecord(raw: unknown): ArmRefusalRecord | null {
+  if (raw == null || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  if (typeof o.reason !== 'string' || o.reason.length === 0 || !fin(o.windowStartMs) || !fin(o.windowEndMs)) return null;
+  return { reason: o.reason, windowStartMs: o.windowStartMs, windowEndMs: o.windowEndMs };
+}
+
+/**
+ * v1.187.22 — PURE. The refusal the card leads with, or null. A supervised or auto mode that
+ * refused to arm tonight's charge plan pushes "planned charge NOT armed tonight — <reason>"; the
+ * card, which reads the plan the 30-min recompute keeps fresh, still led with that plan's expected
+ * charge ("34.9 kWh — expected charge to ~80%") for a write nothing would make. The record applies
+ * to the plan it was refused for — the same window — until that window closes, in a write mode,
+ * on a charge plan; a later evening that arms the window writes no record.
+ */
+export function servedArmRefusal(
+  rec: ArmRefusalRecord | null | undefined,
+  plan: { chargeTonight: boolean; window: { startMs: number; endMs: number } | null } | null,
+  mode: NightChargeMode,
+  nowMs: number,
+): string | null {
+  if (rec == null || mode === 'advisory' || plan == null || !plan.chargeTonight || plan.window == null) return null;
+  if (plan.window.startMs !== rec.windowStartMs || plan.window.endMs !== rec.windowEndMs) return null;
+  return nowMs < rec.windowEndMs ? rec.reason : null;
+}
+
+/** v1.187.22 — the reason recorded when armFromPlan returned a write but no announcement channel
+ *  delivered it, so nothing was armed (a write the owner never heard about must not fire). */
+export const ARM_UNDELIVERED_REASON = 'the announcement could not be delivered';
+
+/**
+ * v1.187.22 — PURE. What the evening job records as tonight's refusal (ArmRefusalRecord), so the
+ * card leads with it (servedArmRefusal): armRefusalReason's reason; or, when armFromPlan returned a
+ * `candidate` that no announcement channel `delivered` — nothing is armed, and the card led with
+ * the plan's expected charge — ARM_UNDELIVERED_REASON. Not when the record that stays in place
+ * (`prior`, since the candidate is not persisted) is itself an arm for the same window that will
+ * still write (Saturday's arm for the shared Monday window): a write is armed then. null = armed,
+ * or nothing to arm.
+ */
+export function eveningNotArmedReason(o: {
+  refused: string | null;
+  candidate: Pick<NightActuationState, 'windowStartMs' | 'windowEndMs'> | null;
+  delivered: boolean;
+  prior: Pick<NightActuationState, 'day' | 'cancelled' | 'targetPct' | 'revertedAtMs' | 'windowStartMs' | 'windowEndMs'>;
+}): string | null {
+  if (o.refused) return o.refused;
+  if (o.candidate == null || o.delivered) return null;
+  const p = o.prior;
+  const priorWrites = p.day != null && !p.cancelled && p.targetPct != null && p.revertedAtMs == null
+    && p.windowStartMs === o.candidate.windowStartMs && p.windowEndMs === o.candidate.windowEndMs;
+  return priorWrites ? null : ARM_UNDELIVERED_REASON;
 }
 
 export type ActuationAction =

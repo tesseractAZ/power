@@ -672,25 +672,147 @@ export function classifyAudibleTargets(
 }
 
 /**
+ * v1.187.22 — one failing run of the audible-health probe: how many consecutive probes have read
+ * it, and when the FIRST of them ran (null while no run is open).
+ */
+export interface AudibleRun {
+  streak: number;
+  sinceMs: number | null;
+}
+
+/**
+ * v1.187.22 — the audible debounce spans TIME, not just probes. `confirm` consecutive failing
+ * probes exist to ride out a Home Assistant / Music Assistant restart, but a failed broadcast and
+ * the 15 s boot kick both FORCE a probe, and every forced probe counted: on 2026-10-12, while
+ * Music Assistant restarted after a host reboot, three probes in 31 s (22:04:13 forced, 22:04:24
+ * the kick, 22:04:44 forced) confirmed the channel dead and degraded; it was back at 22:05:09, and
+ * an "unreachable" push and its "Resolved" went out anyway. A run now confirms only once BOTH
+ * `confirm` failing probes have read it AND (confirm − 1) probe periods have passed since its
+ * FIRST failing probe — the span three periodic probes cover. A forced probe still counts and
+ * freshens the reading, but never restarts the run's clock; a usable read ends the run at once.
+ * confirm = 1 is immediate (a zero span). The run confirms on the first probe at or past the span,
+ * and the monitor arms a probe AT the span (audibleProbeDeadline), so that is where it lands. A
+ * wall clock stepped back past the run's first probe re-anchors the span at the step, so the hold
+ * stays bounded by one span. Pure + exported for tests.
+ */
+export function audibleRunStep(
+  prev: AudibleRun,
+  failing: boolean,
+  nowMs: number,
+  confirm: number,
+  probeMs: number,
+): AudibleRun & { confirmed: boolean } {
+  if (!failing) return { streak: 0, sinceMs: null, confirmed: false };
+  const sinceMs = prev.sinceMs != null && prev.sinceMs <= nowMs ? prev.sinceMs : nowMs;
+  const streak = prev.streak + 1;
+  const spanMet = nowMs - sinceMs >= (confirm - 1) * probeMs;
+  return { streak, sinceMs, confirmed: streak >= confirm && spanMet };
+}
+
+/**
+ * v1.187.22 — the published reachability after one probe (the v0.84.0 rule, debounced by
+ * audibleRunStep): any usable speaker reads `true` at once; a probe with none HOLDS the prior
+ * published value — `null` at boot, which never alarms (broadcastHealthAlert) — until the run is
+ * confirmed, and only then `false`. Pure + exported for tests.
+ */
+export function audibleReachableStep(
+  prev: AudibleRun,
+  prevReachable: boolean | null,
+  usable: number,
+  nowMs: number,
+  confirm: number,
+  probeMs: number,
+): AudibleRun & { reachable: boolean | null } {
+  const run = audibleRunStep(prev, usable === 0, nowMs, confirm, probeMs);
+  const reachable = usable > 0 ? true : run.confirmed ? false : prevReachable;
+  return { streak: run.streak, sinceMs: run.sinceMs, reachable };
+}
+
+/**
  * v1.186.0 — the DEGRADED audible channel: fewer usable Music Assistant targets than are
  * configured. The unreachable alarm (v0.84.0) fires only at ZERO usable, so a speaker that went
  * `unavailable` (one of two was dark for ~27 h on 2026-09-23/24) raised nothing while every
- * broadcast logged "2 MA … → ok". Same debounce style as the unreachable streak — `confirm`
- * consecutive short probes before it is raised, so a restart blip is silent — and it clears on
- * the first probe that reads every target usable (a failed read never counts as usable, so
- * absence cannot clear it). Zero usable counts too, so the degraded alert stands while the
- * unreachable streak builds; the alert builder hands over to the unreachable alert once that is
- * confirmed. Pure + exported for tests.
+ * broadcast logged "2 MA … → ok". Same debounce as the unreachable run (v1.187.22: `confirm`
+ * failing probes over (confirm − 1) probe periods, audibleRunStep), so a restart blip is silent,
+ * and it clears on the first probe that reads every target usable (a failed read never counts as
+ * usable, so absence cannot clear it). Zero usable counts too, so the degraded alert stands while
+ * the unreachable run builds; the alert builder hands over to the unreachable alert once that is
+ * confirmed. Once confirmed it HOLDS (`prevDegraded`) through every failing probe, as the
+ * unreachable state holds through audibleReachableStep: the run's own confirmation is not sticky,
+ * since a wall clock stepped back re-anchors the span (audibleRunStep), and that alone would read
+ * an already-confirmed degraded channel as restored — logged, its alert resolved, then confirmed and
+ * pushed again a span later — with no speaker back. Pure + exported for tests.
  */
 export function audibleDegradedStep(
-  prevStreak: number,
+  prev: AudibleRun,
+  prevDegraded: boolean,
   configured: number,
   usable: number,
+  nowMs: number,
   confirm: number,
-): { streak: number; degraded: boolean } {
-  if (configured === 0 || usable >= configured) return { streak: 0, degraded: false };
-  const streak = prevStreak + 1;
-  return { streak, degraded: streak >= confirm };
+  probeMs: number,
+): AudibleRun & { degraded: boolean } {
+  const run = audibleRunStep(prev, configured > 0 && usable < configured, nowMs, confirm, probeMs);
+  // v1.187.22 — a failing probe (streak > 0) never clears a confirmed degraded channel.
+  return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.confirmed || (prevDegraded && run.streak > 0) };
+}
+
+/**
+ * v1.187.22 — when the monitor must probe so that a pending run is confirmed AT its span: the
+ * earlier span end of the unreachable and degraded runs that are open, not yet confirmed (the
+ * unreachable run is confirmed once `reachable` reads false) and not yet past their span at
+ * `nowMs` (the probe just run); null when there is none. The periodic probe cannot promise it: a
+ * forced probe (a failed broadcast, its deferred retries) restarts the probe throttle, so one that
+ * lands just short of the span skips the tick that would have confirmed, and a run opened by a
+ * forced probe reaches its span between ticks — left to the ticks, confirmation could land up to
+ * two probe periods past the span. A run already past its span is left to the periodic probe: its
+ * count is short only if ticks were skipped, and probing it again at once would let rapid probes
+ * make up the count. Pure + exported for tests.
+ */
+export function audibleProbeDeadline(
+  unreachable: AudibleRun,
+  reachable: boolean | null,
+  degraded: AudibleRun,
+  degradedConfirmed: boolean,
+  nowMs: number,
+  confirm: number,
+  probeMs: number,
+): number | null {
+  const span = (confirm - 1) * probeMs;
+  const due = (run: AudibleRun, confirmed: boolean): number | null =>
+    run.sinceMs == null || confirmed || nowMs >= run.sinceMs + span ? null : run.sinceMs + span;
+  const a = due(unreachable, reachable === false);
+  const b = due(degraded, degradedConfirmed);
+  return a == null ? b : b == null ? a : Math.min(a, b);
+}
+
+/**
+ * v1.187.22 — the largest jitter tolerance audibleProbeDue gives the periodic probe (the cap of
+ * min(1 s, P/10)).
+ */
+export const AUDIBLE_PROBE_JITTER_MAX_MS = 1_000;
+
+/**
+ * v1.187.22 — whether the PERIODIC audible-health probe is due at `nowMs`, the last probe of any
+ * kind having run at `lastAt`. A full probe period, less a tolerance for the interval's own
+ * jitter: Node re-arms setInterval from its monotonic loop clock, read just before the callback,
+ * while the probe reads Date.now() — the two round to different milliseconds, and any stall
+ * between them (a GC pause, a busy host) is taken off the next interval as read by Date.now(), so
+ * a tick can read P − 1 ms, or less, after the one before. The strict `< P` (v0.84.0) skipped that
+ * tick: the run lost a probe, one past its span could be left a count short, and
+ * audibleProbeDeadline leaves a run past its span to the periodic probe, so confirmation waited a
+ * further period. The tolerance is min(1 s, P/10): far above that jitter (the deadline's 25 ms
+ * slack is not — a stall on a loaded host alone exceeds it), far below a period. A forced probe (a
+ * failed broadcast, its retries, the deadline probe) still restarts the throttle: the tick after
+ * it is skipped unless it ran within the tolerance after the tick before, so the periodic probe
+ * never runs within P − tolerance of any other probe, and rapid forced probes add no periodic
+ * ones. A wall clock stepped back past the last probe is due at once: the strict rule skipped
+ * every tick until the clock caught up, so an hour's step stopped the periodic probe for an hour
+ * — a confirmed alert held after the speakers returned. Pure + exported for tests.
+ */
+export function audibleProbeDue(nowMs: number, lastAt: number, probeMs: number): boolean {
+  const since = nowMs - lastAt;
+  return since < 0 || since >= probeMs - Math.min(AUDIBLE_PROBE_JITTER_MAX_MS, probeMs / 10);
 }
 
 /**
@@ -1157,6 +1279,9 @@ export interface BroadcastMonitorOpts {
   /** v1.187.12 — test seam: the timeout probe's delay after a timed-out SIP dispatch
    *  (SIP_TIMEOUT_PROBE_DELAY_MS, 8 s). Production passes none. */
   sipTimeoutProbeDelayMs?: number;
+  /** v1.187.22 — test seam: the one-shot target-drift resolver's delay after boot (16 s).
+   *  Production passes none. */
+  targetDriftDelayMs?: number;
   /**
    * v1.187.3 — since when the alert set the condition is read from has been SETTLED (the alert
    * monitor's AlertMonitor.alertSetSettledSince, wired in index.ts), or null while it is not. Only
@@ -2092,22 +2217,44 @@ export function startBroadcastMonitor(
   let audibleReachable: boolean | null = null; // published, debounced
   let audibleUsableTargets = 0;
   let audibleReason: string | null = null;
-  let unreachableStreak = 0;
+  // v1.187.22 — each streak is a RUN (audibleRunStep): its count and the time of its first failing
+  // probe, so forced probes (a failed broadcast, the boot kick) cannot confirm a restart window.
+  let unreachableRun: AudibleRun = { streak: 0, sinceMs: null };
   // v1.186.0 — the degraded channel (audibleDegradedStep): usable < configured, debounced.
-  let degradedStreak = 0;
+  let degradedRun: AudibleRun = { streak: 0, sinceMs: null };
   let audibleDegraded = false;
   let audibleUnusable: string[] = [];
   // Re-entrancy guard: the zero-target broadcast path fires computeAudibleHealth(
   // true) fire-and-forget, which can overlap the periodic interval (or a second
   // failed broadcast) while the prior call is parked on the getEntityState await.
-  // Two overlapping runs would each `unreachableStreak += 1` for ONE real probe
-  // window and trip CONFIRM early — defeating the very debounce meant to ride out
-  // a restart flap. Coalesce: a concurrent call just no-ops (force callers only
+  // Two overlapping runs would each count a failing probe (unreachableRun) for ONE
+  // real probe window and trip CONFIRM early — defeating the very debounce meant to
+  // ride out a restart flap. Coalesce: a concurrent call just no-ops (force callers only
   // want to freshen, which the in-flight probe already does).
   let audibleProbeInFlight = false;
+  // v1.187.22 — the probe at a pending run's span (audibleProbeDeadline), so a forced probe that
+  // restarted the throttle cannot push confirmation to a later tick. Re-armed after every probe
+  // that ran: a deadline probe dropped by the re-entrancy guard is re-armed by the probe it ran
+  // into, and one that fired early against Date.now() is re-armed for the rest of the span. The
+  // slack covers a timer firing a few ms early.
+  const AUDIBLE_DEADLINE_SLACK_MS = 25;
+  let audibleDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  const armAudibleDeadline = (nowMs: number): void => {
+    if (audibleDeadlineTimer) clearTimeout(audibleDeadlineTimer);
+    audibleDeadlineTimer = null;
+    if (stopped) return;
+    const at = audibleProbeDeadline(unreachableRun, audibleReachable, degradedRun, audibleDegraded, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);
+    if (at == null) return;
+    audibleDeadlineTimer = setTimeout(() => {
+      audibleDeadlineTimer = null;
+      computeAudibleHealth(true).catch(onProbeError);
+    }, Math.max(0, at - Date.now()) + AUDIBLE_DEADLINE_SLACK_MS);
+    audibleDeadlineTimer.unref();
+  };
   const computeAudibleHealth = async (force = false): Promise<void> => {
     const nowMs = Date.now();
-    if (!force && nowMs - lastAudibleHealthAt < AUDIBLE_HEALTH_PROBE_MS) return;
+    // v1.187.22 — a jitter tolerance, and a clock stepped back is due (audibleProbeDue).
+    if (!force && !audibleProbeDue(nowMs, lastAudibleHealthAt, AUDIBLE_HEALTH_PROBE_MS)) return;
     if (audibleProbeInFlight) return;
     audibleProbeInFlight = true;
     lastAudibleHealthAt = nowMs;
@@ -2131,17 +2278,17 @@ export function startBroadcastMonitor(
       // alarms. The HA status reads "disabled" when the operator turned audible off, "unknown"
       // when unsupervised (audibleStatus, broadcastHealth.ts).
       if (!supervised || !cfg.enabled) {
-        unreachableStreak = 0; audibleReachable = null; audibleUsableTargets = 0; audibleReason = null;
-        degradedStreak = 0; audibleDegraded = false; audibleUnusable = [];
+        unreachableRun = { streak: 0, sinceMs: null }; audibleReachable = null; audibleUsableTargets = 0; audibleReason = null;
+        degradedRun = { streak: 0, sinceMs: null }; audibleDegraded = false; audibleUnusable = [];
         publish();
         return;
       }
       // Enabled but no speakers configured → a persistent config error, report it
       // immediately (not a transient restart, so no debounce needed).
       if (cfg.targets.length === 0) {
-        unreachableStreak = AUDIBLE_UNREACHABLE_CONFIRM; audibleReachable = false; audibleUsableTargets = 0;
+        unreachableRun = { streak: AUDIBLE_UNREACHABLE_CONFIRM, sinceMs: unreachableRun.sinceMs ?? nowMs }; audibleReachable = false; audibleUsableTargets = 0;
         audibleReason = 'no speakers configured (BROADCAST_TARGETS empty)';
-        degradedStreak = 0; audibleDegraded = false; audibleUnusable = [];
+        degradedRun = { streak: 0, sinceMs: null }; audibleDegraded = false; audibleUnusable = [];
         publish();
         return;
       }
@@ -2149,13 +2296,13 @@ export function startBroadcastMonitor(
       // v1.186.0 — classified per target, so the degraded alert can NAME what is missing.
       const probed = classifyAudibleTargets(cfg.targets, states);
       const usable = probed.usable.length;
-      const degraded = audibleDegradedStep(degradedStreak, cfg.targets.length, usable, AUDIBLE_UNREACHABLE_CONFIRM);
+      const degraded = audibleDegradedStep(degradedRun, audibleDegraded, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);
       if (degraded.degraded && !audibleDegraded) {
         log(`broadcast: audible channel DEGRADED — ${usable} of ${cfg.targets.length} Music Assistant target(s) usable; not reachable: ${probed.unusable.join(', ')}`);
       } else if (!degraded.degraded && audibleDegraded) {
         log(`broadcast: audible channel restored — all ${cfg.targets.length} Music Assistant target(s) usable`);
       }
-      degradedStreak = degraded.streak;
+      degradedRun = { streak: degraded.streak, sinceMs: degraded.sinceMs };
       audibleDegraded = degraded.degraded;
       audibleUnusable = probed.unusable;
       // Two distinct not-usable signatures, worth distinguishing for triage:
@@ -2171,20 +2318,20 @@ export function startBroadcastMonitor(
       //     the likelier cause of an isolated all-null speaker probe).
       const anyReadable = states.some((s) => s != null);
       audibleUsableTargets = usable;
-      if (usable > 0) {
-        unreachableStreak = 0; audibleReachable = true; audibleReason = null;
-      } else {
-        unreachableStreak += 1;
-        audibleReason = !anyReadable
+      // Only CONFIRM once the run clears the debounce (v1.187.22: its count AND its span); until
+      // then hold the prior published value (null at boot) so a restart window is silent.
+      const reach = audibleReachableStep(unreachableRun, audibleReachable, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);
+      unreachableRun = { streak: reach.streak, sinceMs: reach.sinceMs };
+      audibleReachable = reach.reachable;
+      audibleReason = usable > 0
+        ? null
+        : !anyReadable
           ? 'configured speaker(s) not found in Home Assistant — Music Assistant is likely down (its media_players disappear in setup_error), or the HA API is unreachable'
           : `all ${cfg.targets.length} configured speaker(s) report unavailable (Music Assistant or the speakers may be down)`;
-        // Only CONFIRM after the streak clears the debounce; until then hold the
-        // prior published value (null at boot) so a single restart blip is silent.
-        if (unreachableStreak >= AUDIBLE_UNREACHABLE_CONFIRM) audibleReachable = false;
-      }
       publish();
     } finally {
       audibleProbeInFlight = false;
+      armAudibleDeadline(nowMs); // v1.187.22
     }
   };
   // Seed once shortly after boot (HA registry warm), then on the recurring probe.
@@ -2229,12 +2376,14 @@ export function startBroadcastMonitor(
     // Surface it to the operator health tile immediately (un-debounced): a rename
     // never self-heals, so waiting on the streak just delays the signal.
     if (missing.length === cfg.targets.length) {
-      unreachableStreak = AUDIBLE_UNREACHABLE_CONFIRM;
+      // v1.187.22 — confirmed as it stands, span or not; audibleReachableStep holds the false
+      // through the failing probes that follow, and only a usable read clears it.
+      unreachableRun = { streak: AUDIBLE_UNREACHABLE_CONFIRM, sinceMs: unreachableRun.sinceMs ?? Date.now() };
       audibleReachable = false;
       audibleReason = `configured speaker id(s) not found in Home Assistant (renamed/mistyped): ${missing.join(', ')}`;
     }
   };
-  const targetDriftKick = setTimeout(() => { void resolveTargetDriftOnce().catch(onProbeError); }, 16_000);
+  const targetDriftKick = setTimeout(() => { void resolveTargetDriftOnce().catch(onProbeError); }, opts.targetDriftDelayMs ?? 16_000);
   targetDriftKick.unref();
   const audibleHealthInterval = setInterval(() => {
     // v1.48.4 — self-heal the MA service-detection flag. A CONFIRMED-absent at
@@ -4140,6 +4289,7 @@ export function startBroadcastMonitor(
       clearInterval(pruneInterval);
       clearInterval(audibleHealthInterval);
       clearTimeout(audibleHealthKick);
+      if (audibleDeadlineTimer) clearTimeout(audibleDeadlineTimer); // v1.187.22
       clearTimeout(prewarmTimer);
       offRuntimeConfig();
     },

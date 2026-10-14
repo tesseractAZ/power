@@ -270,6 +270,10 @@ export function setLastKnownHomeRoster(roster: ReadonlySet<string> | null | unde
   publishedRoster = roster && roster.size > 0 ? new Set(roster) : null;
 }
 export function resetLastKnownHomeRoster(): void { publishedRoster = null; }
+/** v1.187.22 — the published last-known home roster (null until one is known): the roster the SoC
+ *  ladders' fallback reads (index.ts passes the same set), so a reader that names the fallback figure
+ *  — the reserve-alarm-blind alert — resolves the same Cores the ladder runs on. */
+export function lastKnownHomeRoster(): ReadonlySet<string> | null { return rosterOf(); }
 
 /** Explicit arg wins (tests, pure callers); otherwise the published roster. */
 function rosterOf(explicit?: ReadonlySet<string> | null): ReadonlySet<string> | null {
@@ -674,6 +678,18 @@ export function homeFleetMeanSoc(
 }
 
 /**
+ * v1.185.0 — is the HOUSE pool's SHP2-blind fallback the one-panel case (homeFleetMeanSoc and its
+ * roster tiers)? v1.187.22 — one decision, read by housePoolFallbackSoc and by its log-line
+ * denominator housePoolFallbackCoverage, so the two can never resolve different rosters.
+ */
+function housePoolIsOnePanel(devices: Record<string, DeviceSnapshot>): boolean {
+  // v1.185.0 (review) — a MISSING house pin is never the one-panel case: the panel left on the
+  // account is another pool (a replacement, or the garage panel after the house panel dropped off).
+  const missingPin = Object.values(devices).some((d) => d.housePanelMissing != null);
+  return shp2Panels(devices).sns.length <= 1 && !missingPin;
+}
+
+/**
  * v1.185.0 — the HOUSE pool's SHP2-blind fallback SoC. With one panel this is homeFleetMeanSoc,
  * unchanged (its roster fallbacks cover a panel with no projection). With a second panel the
  * plant-wide mean would average the other pool's Cores into the house figure, so it is the house
@@ -683,10 +699,7 @@ export function housePoolFallbackSoc(
   devices: Record<string, DeviceSnapshot>,
   lastKnownRoster?: ReadonlySet<string> | null,
 ): number | null {
-  // v1.185.0 (review) — a MISSING house pin is never the one-panel case: the panel left on the
-  // account is another pool (a replacement, or the garage panel after the house panel dropped off).
-  const missingPin = Object.values(devices).some((d) => d.housePanelMissing != null);
-  if (shp2Panels(devices).sns.length <= 1 && !missingPin) return homeFleetMeanSoc(devices, lastKnownRoster);
+  if (housePoolIsOnePanel(devices)) return homeFleetMeanSoc(devices, lastKnownRoster);
   // v1.185.0 (review) — two panels: ONLY the house pool's own Cores, even while the house panel has
   // no projection (restart while dark: its persisted roster). Never the union — that would be the
   // other pool's Cores, holding the house ladder above rungs its own pool has crossed. No roster
@@ -694,6 +707,37 @@ export function housePoolFallbackSoc(
   const sn = houseSnOf(devices);
   const house = sn ? devices[sn] : undefined;
   return house ? panelMeanSoc(devices, house) : null;
+}
+
+/**
+ * v1.187.22 — housePoolFallbackSoc's denominator, for the SoC ladders' boot-gate log line: how many
+ * Cores of the roster that fallback averages over are reporting a SoC, of how many. The same roster
+ * resolution: one panel — live sources, else the remembered roster, else every non-spare Core; several
+ * panels — the house panel's own roster (none known: 0 of 0).
+ */
+export function housePoolFallbackCoverage(
+  devices: Record<string, DeviceSnapshot>,
+  lastKnownRoster?: ReadonlySet<string> | null,
+): { reporting: number; roster: number } {
+  let roster: string[];
+  if (housePoolIsOnePanel(devices)) {
+    const live = shp2ConnectedDpuSns(devices);
+    roster = live.size > 0
+      ? [...live]
+      : lastKnownRoster && lastKnownRoster.size > 0
+        ? [...lastKnownRoster]
+        : Object.values(devices).filter((d) => d.projection?.kind === 'dpu' && !SPARE_DPU_SNS.has(d.sn)).map((d) => d.sn);
+  } else {
+    const sn = houseSnOf(devices);
+    const house = sn ? devices[sn] : undefined;
+    roster = house ? panelRoster(house) : [];
+  }
+  const reporting = roster.filter((sn) => {
+    const d = devices[sn];
+    const s = d?.online && d.projection?.kind === 'dpu' ? d.projection.soc : null;
+    return s != null && Number.isFinite(s);
+  }).length;
+  return { reporting, roster: roster.length };
 }
 
 export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {

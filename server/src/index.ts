@@ -12,7 +12,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, housePoolFallbackSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, secondaryPanels, panelMeanSoc, houseSnOf } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, houseSnOf } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -38,6 +38,7 @@ import {
   evDisplacedPackKwh,
   FORCE_CHARGE_PROVEN_KW_PER_SLOT,
   FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnReadbackStatus,
+  forceChargeNightOutcome, partialForceChargeOnFailureSlots,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -129,8 +130,8 @@ import {
 } from './chimeConfig.js';
 import type { AnnouncementLevel } from './audioRenderer.js';
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority, type AlarmRung } from './alertPriority.js';
-// v0.12.0 — backup-pool SoC audible alarm (escalating priority).
-import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisory, socAlarmAdvisoryEs, socAlarmStatePathFor } from './batterySocAlarm.js';
+// v0.12.0 — backup-pool SoC audible alarm (escalating priority). v1.187.22 — the ladders live in socLadders.ts.
+import { startSocLadders } from './socLadders.js';
 import { createRunwayAlarm, shouldGateRunwayAudible, runwayAlarmStatePathFor } from './runwayAlarm.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { panelPoolNetWatts, noteDrainSample, panelDrainRunway, type DrainSample, type PanelRunway } from './panelRunway.js';
@@ -142,7 +143,6 @@ import { hostPowerEntityId } from './hostPower.js';
 import { sampleHostTemp, liveHostTemp } from './hostThermal.js';
 import { startVitals, tickAssess, liveVitals, currentAssessment, degradedMode } from './selfVitals.js';
 import { startHeartbeat, heartbeatStatus } from './heartbeat.js';
-import { socGridCrossDecision, reEscalateGridDrop } from './socGridDispatch.js';
 import { classifyMqttStartFailure } from './mqttStartClassify.js';
 import {
   hasReachabilityConfig,
@@ -182,6 +182,10 @@ import {
   plannerSizingNeedBuyKwh,
   calibratedLoadBandFactor, calibratedBuyDebiasFactor, buyDebiasUnmeasuredLogLine,
   buildCostSurplusLoad, costSurplusLedgerColumns,
+  // v1.187.22 — the expected buy: its ledger columns, and what a spoken line states (the level
+  // the write drives to and the expected draw — never the worst case, which only logs name).
+  expectedBuyLedgerColumns, ledgerExpectedBuyKwh, chargeLevelPct, statedBuyKwh, buyFiguresLogText,
+  chargeIsWindowBound,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -202,6 +206,11 @@ import {
   resolveNightChargeMode,
   APPLY_MAX_RETRIES,
   armFromPlan,
+  armRefusalReason,
+  coerceArmRefusalRecord,
+  servedArmRefusal,
+  eveningNotArmedReason,
+  type ArmRefusalRecord,
   decideActuation,
   emptyActuationState,
   coerceActuationState,
@@ -219,7 +228,11 @@ import {
   REVERT_MAX_RETRIES,
   type NightActuationState,
 } from './nightChargeActuator.js';
-import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
+import {
+  buildNightChargeMessage, sendNotification, loadNotifyConfig,
+  // v1.187.22 — the after-the-fact night-charge pushes, built where their text is tested.
+  buildNightChargeMorningSummary, buildNightChargeApplyFailure, buildNightForceChargeOnFailure,
+} from './notify.js';
 import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonAt } from './tariff.js';
 // v1.187.0 — the scorer's span, cost and PV-evidence decisions, pure (nightLedgerScoring.ts).
@@ -227,6 +240,8 @@ import {
   supersedingPlanDate, knownFleetMismatchReason, type TimeSpan,
   integrateWh, coverageFrac, ledgerSpansForWindow, assembleNightLedgerColumns, windowlessLedgerColumns,
   unpricedTariffPeriods, houseConnectedSlots, deliveredLedgerFields,
+  // v1.187.22 — the measured window-open SoC and the expected-buy score clause.
+  measuredWindowOpenSocPct, expectedBuyScoreNote, WINDOW_OPEN_SOC_LEAD_MS,
   // v1.187.10 — the forecast span: capture waits for issue + 24 h; the one-time repair.
   ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
@@ -2468,167 +2483,24 @@ const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m), {
   alertSetSettledSince: () => monitor.alertSetSettledSince(),
 });
 
-// v0.12.0 — backup-pool SoC audible alarm (50/40/30/20/15/10/8/4/2%, escalating priority).
+// v0.12.0 — backup-pool SoC audible alarm (50/40/30/20/15/10/8/4/2%, escalating priority): the house
+// ladder and its grid-drop re-escalation (v0.23.0), and one ladder per secondary panel (v1.185.0).
+// v1.187.22 — in socLadders.ts, fed by the store tick only once the store is hydrated (bounded by
+// BOOT_HYDRATION_MAX_MS): a partial boot map spoke a false 50 % rung on 2026-10-12.
 const socAlarmEnabled = process.env.BATTERY_SOC_ALARM_ENABLED !== 'false';
-// v0.23.0 — the grid-backstop snapshot for the CURRENT tick, recomputed once per
-// store change (with a fresh HA cache when a grid entity is configured) and read
-// by onCross — so the audible downgrade decision uses the same grid state as the
-// on-screen alerts.ts path (no stale-cache divergence).
-let socGridForTick = liveGridBackstop({});
-// v0.23.0 — thresholds whose audible was grid-downgraded to a low advisory:
-// pct → the TRUE (high/critical) priority. The SoC ladder is one-shot per
-// downward crossing, so if the grid stops backstopping while the pool is still
-// in a downgraded band, the dedicated audible would otherwise NEVER re-fire
-// (fail-silent). We re-escalate it from the tick below.
-const socDowngraded = new Map<number, AlarmPriority>();
-const batterySocAlarm = createBatterySocAlarm({
-  onCross: (t, isPrimary) => {
-    // Grid-aware: when the grid is backstopping the home, a low pool is a
-    // non-event (the SHP2 transfers to mains at the floor), so the emergency
-    // tiers (high/critical — the ≤10% bands) collapse to a low advisory. Off-grid
-    // (the safe default) keeps the original priority.
-    // v0.76.0 — grid-aware downgrade decision extracted to the pure, tested
-    // socGridCrossDecision() (was inline downgradePriorityForGrid + comparison).
-    const { priority, onGrid } = socGridCrossDecision(t, socGridForTick.backstopping);
-    // Record/clear the grid-downgrade re-escalation state for EVERY crossed band —
-    // primary or not — so a later grid drop re-escalates every band the pool is
-    // still in. v0.75.0 collapses only the ANNOUNCE (below), never this bookkeeping;
-    // recording only the worst band would let a grid drop fail-silent on the higher
-    // emergency bands after a partial recovery above the worst one.
-    if (onGrid) socDowngraded.set(t.pct, t.priority);
-    else socDowngraded.delete(t.pct);
-    // v0.75.0 — only the most-severe band of a same-tick multi-band crossing
-    // announces, so a reconnect-at-low-SoC (or fast discharge) produces ONE audible
-    // alarm rather than laddering 50/40/30/20. The on-screen alert (activeSocBand)
-    // shows the current band independently, and the per-band socDowngraded record
-    // above is unaffected, so nothing is suppressed — only the audio is de-duped.
-    if (!isPrimary) return;
-    if (!isPriorityEnabled(priority)) return;          // honour the Alert Settings annunciation toggles
-    const message = onGrid
-      ? socAlarmAdvisory(t.pct, undefined, socGridForTick.importLive) // v1.186.3 — wording by measured import
-      : socAlarmMessage(t);
-    const messageEs = onGrid ? socAlarmAdvisoryEs(t.pct, undefined, socGridForTick.importLive) : socAlarmMessageEs(t); // v0.62.0 — Spanish second pass
-    // v1.78.0 — surface the disposition: the 08-12 21:11 SoC-ladder suppression
-    // (deepest rung of the day) left NO log line and cost two audits a false
-    // timezone theory. Suppressions are config-correct; they must still be seen.
-    void broadcast.announce(priority, message, messageEs).then(
-      (a) => { if (!a.ok) app.log.info(`soc-alarm: audible suppressed (${a.error ?? 'unknown'}) — push/on-screen unaffected`); },
-      () => { /* announce() reports via its own path; never let a rejection escape a fire-and-forget */ },
-    );
+const socLadders = startSocLadders(store, {
+  enabled: socAlarmEnabled,
+  announce: (priority, message, messageEs) => broadcast.announce(priority, message, messageEs),
+  isPriorityEnabled,
+  // Keep the grid-presence entity fresh (TTL-gated) so the tick's grid verdicts are live.
+  refreshGrid: async () => {
+    if (gridPresenceEntityId() || hostPowerEntityId()) await haStateCache.refreshIfStale();
   },
+  poolGrid: livePoolGridBackstop,
+  noteLiveRoster,
+  lastKnownRoster: () => lastKnownRoster,
   log: (m) => app.log.info(m),
-});
-// v1.185.0 — one SoC ladder per SECONDARY panel, created on first sight: its own persisted arming
-// state (battery-soc-alarm-<serial>.json), its own grid-downgrade record, and words that name
-// its pool. The rules are the house ladder's above, read against the same tick's grid.
-type PoolGrid = { backstopping: boolean; importLive?: boolean }; // v1.186.3 — importLive: wording only
-const panelLadders = new Map<string, { update: (soc: number | null, name: string, grid: PoolGrid) => void }>();
-function panelSocLadder(sn: string): { update: (soc: number | null, name: string, grid: PoolGrid) => void } {
-  const have = panelLadders.get(sn);
-  if (have) return have;
-  const downgraded = new Map<number, AlarmPriority>();
-  let name = sn;
-  // v1.185.0 (review) — THIS pool's grid verdict (livePoolGridBackstop), set before each update.
-  let poolGrid: PoolGrid = { backstopping: false };
-  const say = (priority: AlarmPriority, en: string, es: string, what: string) => {
-    void broadcast.announce(priority, en, es).then(
-      (a) => { if (!a.ok) app.log.info(`soc-alarm [${name}]: ${what} audible suppressed (${a.error ?? 'unknown'}) — push/on-screen unaffected`); },
-      () => { /* see soc-alarm note above */ },
-    );
-  };
-  const alarm = createBatterySocAlarm({
-    statePath: socAlarmStatePathFor(sn),
-    onCross: (t, isPrimary) => {
-      const { priority, onGrid } = socGridCrossDecision(t, poolGrid.backstopping);
-      if (onGrid) downgraded.set(t.pct, t.priority);
-      else downgraded.delete(t.pct);
-      if (!isPrimary || !isPriorityEnabled(priority)) return;
-      say(
-        priority,
-        onGrid ? socAlarmAdvisory(t.pct, name, poolGrid.importLive) : socAlarmMessage(t, name), // v1.186.3
-        onGrid ? socAlarmAdvisoryEs(t.pct, name, poolGrid.importLive) : socAlarmMessageEs(t, name),
-        'crossing',
-      );
-    },
-    log: (m) => app.log.info(`${m} [${name}]`),
-  });
-  const ladder = {
-    update: (soc: number | null, n: string, grid: PoolGrid) => {
-      name = n;
-      poolGrid = grid;
-      alarm.update(soc);
-      for (const { pct, priority } of reEscalateGridDrop(downgraded, soc, poolGrid.backstopping, isPriorityEnabled)) {
-        say(priority, socAlarmMessage({ pct, priority }, name), socAlarmMessageEs({ pct, priority }, name), 'grid-drop re-escalation');
-      }
-    },
-  };
-  panelLadders.set(sn, ladder);
-  return ladder;
-}
-store.on('change', (snap: FleetSnapshot) => {
-  if (!socAlarmEnabled) return;
-  const shp2 = findShp2(snap.devices);
-  const shp2Soc = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection.backupBatPercent : null;
-  // v1.8.0 (review F3) — reserve-chain SHP2-blind failover. The SoC ladder reads
-  // ONLY the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the
-  // 30-day review found two blackouts (42.2h, 25.8h) in which the pool crossed
-  // 50/40/30/20% while the ladder sat dark for 17.8-20.8h. When that field is null,
-  // fall back to the mean SoC of the home Cores still reporting (the pool IS those
-  // batteries) so the audible ladder keeps firing. homeFleetMeanSoc returns null
-  // only when NO Core is reporting — then the reserve-blind warning (computeAlerts)
-  // + the offline alerts are the signal, and update(null) is a safe no-op. The
-  // engine's own coherence guard still rejects an implausible drop from a fresh
-  // baseline, so a bad fallback read can't ladder falsely.
-  // v1.117.0 — keep the durable roster fresh, and hand it to the fallback so an
-  // unhydrated tick can never admit a bench spare into the pool mean.
-  noteLiveRoster(shp2ConnectedDpuSns(snap.devices));
-  const soc = shp2Soc != null ? shp2Soc : housePoolFallbackSoc(snap.devices, lastKnownRoster);
-  void (async () => {
-    // Keep the grid-presence entity fresh (TTL-gated) so onCross + the
-    // re-escalation below see live grid state. Assign + update run synchronously
-    // after the await, so onCross reads exactly the grid computed for this tick.
-    if (gridPresenceEntityId() || hostPowerEntityId()) {
-      try {
-        await haStateCache.refreshIfStale();
-      } catch {
-        /* cold/stale cache ⇒ resolves to off-grid (safe) */
-      }
-    }
-    // v1.185.0 (review) — the HOUSE pool's own verdict on a multi-panel plant; one panel: identical
-    // (livePoolGridBackstop returns liveGridBackstop there).
-    socGridForTick = livePoolGridBackstop(snap.devices, houseSnOf(snap.devices));
-    batterySocAlarm.update(soc); // fires onCross synchronously, reading socGridForTick
-    // v1.185.0 — every OTHER panel's pool on its own ladder, against its own panel's grid — including
-    // a panel with no projection (dark since a restart): its own Cores, from its persisted roster.
-    for (const p of secondaryPanels(snap.devices)) {
-      const own = p.projection?.kind === 'shp2' ? p.projection.backupBatPercent : null;
-      panelSocLadder(p.sn).update(own ?? panelMeanSoc(snap.devices, p), p.deviceName, livePoolGridBackstop(snap.devices, p.sn));
-    }
-    // Re-escalate a previously grid-downgraded crossing if the grid is no longer
-    // backstopping while the pool is still at/below that threshold — closes the
-    // one-shot fail-silent window on a grid drop.
-    //
-    // NOTE (do not "fix" as fail-silent): this store 'change' handler is NOT
-    // driven only by SHP2 MQTT telemetry. SnapshotStore.setDeviceList() emits
-    // 'change' UNCONDITIONALLY on every REST poll tick (snapshot.ts:174, via
-    // refreshAll → setDeviceList, driven by startPollLoop every POLL_INTERVAL_MS,
-    // default 60s — index.ts:98/1588), and that same poll refreshes acInWatts /
-    // backupBatPercent / chargeWattPower via getQuotaAll; the grid-presence HA
-    // entity is refreshed independently just above (haStateCache.refreshIfStale).
-    // So this re-escalation self-heals on the ~60s REST cadence even under a
-    // TOTAL MQTT stall — the poll loop is the de facto timer that closes the
-    // grid-drop window; it does not depend on fresh SHP2 MQTT telemetry.
-    // v0.76.0 — the grid-drop re-escalation pass is now the pure, tested
-    // reEscalateGridDrop() (mutates socDowngraded + returns the bands to announce),
-    // so the exact v0.75.0-regressed path is exercised by a test driving the REAL
-    // function instead of a hand-copied mirror.
-    for (const { pct, priority } of reEscalateGridDrop(socDowngraded, soc, socGridForTick.backstopping, isPriorityEnabled)) {
-      void broadcast.announce(priority, socAlarmMessage({ pct, priority }), socAlarmMessageEs({ pct, priority })).then(
-        (a) => { if (!a.ok) app.log.info(`soc-alarm: grid-drop re-escalation audible suppressed (${a.error ?? 'unknown'})`); },
-        () => { /* see soc-alarm note above */ },
-      );
-    }
-  })();
+  warn: (m) => app.log.warn(m),
 });
 
 // v0.14.0 — projection-depletion audible alarm. Rides the off-grid runway
@@ -2673,7 +2545,7 @@ function panelRunwayAlarm(sn: string, name: string): ReturnType<typeof createRun
       }
       void broadcast.announce(priority, message, messageEs).then(
         (a) => { if (!a.ok) app.log.info(`runway-alarm [${name}]: audible suppressed (${a.error ?? 'unknown'})`); },
-        () => { /* see soc-alarm note above */ },
+        () => { /* see the soc-alarm note in socLadders.ts */ },
       );
     },
     log: (m) => app.log.info(`${m} [${name}]`),
@@ -2695,7 +2567,7 @@ const runwayAlarm = createRunwayAlarm({
     }
     void broadcast.announce(priority, message, messageEs).then( // v0.62.0 — Spanish second pass
       (a) => { if (!a.ok) app.log.info(`runway-alarm: audible suppressed (${a.error ?? 'unknown'}) — push/on-screen unaffected`); },
-      () => { /* see soc-alarm note above */ },
+      () => { /* see the soc-alarm note in socLadders.ts */ },
     );
   },
   log: (m) => app.log.info(m),
@@ -3285,14 +3157,19 @@ function clampInt(v: number, lo: number, hi: number, dflt: number): number {
  *  the evening job to fire at most ONCE per Phoenix calendar day. (v1.40.0:
  *  the host itself is verified stable — the earlier "daily power-cycle"
  *  premise no longer holds; restart-resilience is still required.) */
-interface NightChargeLatch { lastNotifyDay: string | null }
+interface NightChargeLatch {
+  lastNotifyDay: string | null;
+  /** v1.187.22 — the evening's refused arm (armRefusalReason) and the window it was refused for:
+   *  the status route serves it (servedArmRefusal) so the card leads with it. null = none. */
+  armRefused?: ArmRefusalRecord | null;
+}
 function readNightChargeLatchFile(): NightChargeLatch {
   try {
     const raw = JSON.parse(readFileSync(NIGHT_CHARGE_LATCH_PATH, 'utf8'));
     const d = raw?.lastNotifyDay;
-    return { lastNotifyDay: typeof d === 'string' ? d : null };
+    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused) };
   } catch {
-    return { lastNotifyDay: null };
+    return { lastNotifyDay: null, armRefused: null };
   }
 }
 // In-memory mirror of the persisted latch, seeded once from disk at module load.
@@ -3305,7 +3182,7 @@ function readNightChargeLatch(): NightChargeLatch {
   return nightChargeLatchMem;
 }
 function writeNightChargeLatch(l: NightChargeLatch): void {
-  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay };
+  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null };
   try {
     atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(l));
   } catch (e: any) {
@@ -3650,6 +3527,10 @@ async function recomputeNightChargePlan(
       pvP10W: pb.p10W,
       loadP90W: fh.forecastLoadW * loadP90Factor,
       embeddedEvW: (fh.predictedEvLoadW ?? 0) * loadP90Factor,
+      // v1.187.22 — the MEDIAN load and PV, for the expected-buy disclosure only: forecastLoadW
+      // WITHOUT the P90 factor, its expected-value EV left in (never the committed P90 block).
+      loadP50W: fh.forecastLoadW,
+      pvP50W: pb.p50W,
     });
   }
 
@@ -3823,6 +3704,9 @@ async function recomputeNightChargePlan(
     buyDebiasFactor: buyDebiasCal.factor,
     buyDebiasBasis: buyDebiasCal.basis,
     buyDebiasSamples: buyDebiasCal.samples,
+    // v1.187.22 — the gate the force-charge itself runs on, so the expected buy reads the level
+    // the armed write drives to (armedWriteLevelPct).
+    forceChargeEligible: forceChargeOn(),
   };
 
   const inputs = buildNightChargeInputs(deps);
@@ -3919,6 +3803,18 @@ async function recomputeNightChargePlan(
   return { plan, extras };
 }
 
+/** v1.187.22 — the armed night's EXPECTED buy, read back from its plan row (ledgerExpectedBuyKwh),
+ *  for the morning summary and the apply-failure push. null when the row has none or the ledger
+ *  cannot be read: the push then states no kWh (the armed record's buyKwh is the worst case). */
+function armedExpectedBuyKwh(day: string | null): number | null {
+  try {
+    return ledgerExpectedBuyKwh(recorder.readNightLedger(14), day);
+  } catch (e: any) {
+    app.log.debug(`night-charge: expected-buy lookup failed (${e?.message ?? e})`);
+    return null;
+  }
+}
+
 /** Map a fresh plan + extras → the frozen NightLedgerRow PLAN columns and upsert.
  *  For an incomplete-basis plan the trajectory fields are OMITTED (→ NULL) so the
  *  scorer can detect "no basis" via a null min_proj_soc_pct and mark scored=0. */
@@ -3985,6 +3881,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // cushion_shortfall.
     cushion_trough_soc_pct: plan.cushionTroughSocPct ?? null,
     cushion_line_soc_pct: plan.cushionLineSocPct ?? null,
+    // v1.187.22 — the expected buy and start beside buy_kwh (the worst case), so the scorer can
+    // grade them. Written unconditionally (null with none) for the same reason as above.
+    ...expectedBuyLedgerColumns(plan),
   };
   // Only a plan with a real trajectory records min_proj_soc — a null-basis /
   // insufficient plan leaves it NULL so the scorer recognises "no basis".
@@ -4175,6 +4074,10 @@ function scoreNightRow(
   const gridWin = recorder.query(shp2Sn, 'grid_home_w', windowStart, windowEnd);
   const socPts = recorder.query(shp2Sn, 'backup_pct', scoreFrom, spanEnd);
   const loadPts = recorder.query(shp2Sn, 'panel_load', fcSpanStart, fcSpanEnd);
+  // v1.187.22 — the pool SoC as the window opened: what the plan's expected start and its
+  // islanded sizing start (soc_at_window_start_pct) are graded against.
+  const windowOpenSocPct = measuredWindowOpenSocPct(
+    recorder.query(shp2Sn, 'backup_pct', windowStart - WINDOW_OPEN_SOC_LEAD_MS, windowStart), windowStart);
 
   // v1.39.0 2nd-pass: null-over-fabrication — zero samples must record NULL,
   // not a "measured" 0 kWh import (matching the on-peak guard below).
@@ -4329,6 +4232,17 @@ function scoreNightRow(
       + `${wasActuated ? `; delivered ~${deliveredKwh ?? '?'} kWh, deliberately NOT part of this metric` : '; advisory night'}.`;
   }
 
+  // v1.187.22 — the plan's expected buy against what was delivered, and its expected window-open
+  // SoC against the measured one (expectedBuyScoreNote; '' on a row without them). Notes only.
+  scoreNotes += expectedBuyScoreNote({
+    expectedBuyKwh: y.expected_buy_kwh ?? null,
+    expectedStartSocPct: y.expected_start_soc_pct ?? null,
+    sizingStartSocPct: y.soc_at_window_start_pct ?? null,
+    windowOpenSocPct,
+    actuated: wasActuated,
+    deliveredKwh,
+  });
+
   // Reconstruct just the plan fields the scorer reads.
   const yPlan: NightChargePlan = {
     generatedAt: y.issued_at_ms,
@@ -4409,6 +4323,7 @@ function scoreNightRow(
     ...deliveredLedgerFields(cols),
     grid_home_coverage_frac: winCoverage,
     scored,
+    window_open_soc_pct: windowOpenSocPct,
     // v1.187.0 — the on-peak and cost clauses always say what was measured (or why
     // nothing was), and the PV set-aside when there is one.
     score_notes: `${scoreNotes} ${cols.notes}`,
@@ -4467,7 +4382,7 @@ function cancelStalePriorArm(today: string, nowMs: number, reason: string): bool
   if (s.forceChargeOnAtMs != null && s.forceChargeOffVerifiedAtMs == null) return false;
   if (s.forceChargeCeilingPriorPct != null && s.forceChargeCeilingRestoredAtMs == null) return false;
   const stale = s.day;
-  app.log.warn(`night-charge: CANCELLING the prior ARM for ${stale} (target ${s.targetPct}%, buy ~${s.buyKwh ?? '—'} kWh${s.forceChargeCeilingPct != null ? `, force-charge to ${s.forceChargeCeilingPct}%` : ''}) — ${reason}. Without this it would have written at ${new Date(s.windowStartMs - APPLY_LEAD_MS).toISOString()} against tonight's decision.`);
+  app.log.warn(`night-charge: CANCELLING the prior ARM for ${stale} (target ${s.targetPct}%, worst-case sizing ~${s.buyKwh ?? '—'} kWh${s.forceChargeCeilingPct != null ? `, force-charge to ${s.forceChargeCeilingPct}%` : ''}) — ${reason}. Without this it would have written at ${new Date(s.windowStartMs - APPLY_LEAD_MS).toISOString()} against tonight's decision.`);
   try {
     recorder.recordNightOutcome(stale, {
       arm_disposition: `cancelled by the ${today} plan — ${reason}`,
@@ -4524,7 +4439,10 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     try { scoreCompletedNights(nowMs); } catch (e: any) { app.log.debug(`night-charge: cutoff scoring skipped (${e?.message ?? e})`); }
     try { setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION })); } catch (e: any) { app.log.debug(`night-charge: cutoff readiness recompute failed (${e?.message ?? e})`); }
     refreshNightRecentOutcomes(); // scoring may have updated rows the status route serves
-    writeNightChargeLatch({ lastNotifyDay: today });
+    // v1.187.22 — no decision was reached tonight, so a refusal recorded on an earlier evening still
+    // stands (Saturday's, for the window Sat and Sun share): keep it. servedArmRefusal serves it only
+    // beside a charge plan for that window, and only until the window closes.
+    writeNightChargeLatch({ lastNotifyDay: today, armRefused: latch.armRefused ?? null });
     return;
   }
 
@@ -4568,7 +4486,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       const winStr = w
         ? `${new Date(w.startMs).toISOString()}→${new Date(w.endMs).toISOString()} (${round1((w.endMs - w.startMs) / 3_600_000)}h)`
         : 'none';
-      app.log.info(`night-charge: plan row recorded for ${today} — chargeTonight=${fresh.plan.chargeTonight} buyKwh=${fresh.plan.buyKwh ?? 'null'} window=${winStr}`);
+      app.log.info(`night-charge: plan row recorded for ${today} — chargeTonight=${fresh.plan.chargeTonight} buyKwh=${fresh.plan.buyKwh ?? 'null'} expectedBuyKwh=${fresh.plan.expectedBuyKwh ?? 'null'} window=${winStr}`);
     } else {
       app.log.info(`night-charge: no plan row for ${today} — inputs unavailable (SHP2 offline / missing battery fields); the night will count as an exclusion.`);
     }
@@ -4615,8 +4533,14 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       forceChargeTargetPct?: number | null;
     } | null = null;
     let armedCandidate: NightActuationState | null = null;
+    // v1.187.22 — why a write mode refused to arm a charge plan; the push then says no write is
+    // armed instead of recommending the plan's level and draw (buildNightChargeMessage).
+    let armRefused: string | null = null;
     if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
-      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct);
+      // v1.187.22 — the force-charge gate is stamped on the record (forceChargeRides): the gate this
+      // plan's expected figure was made with, read back by the morning push.
+      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn());
+      if (!armedCandidate) armRefused = armRefusalReason(nightActuationMem, plan, nowMs, plan.reserveFloorPct);
       if (armedCandidate) {
         // v1.79.0 — an earlier evening's never-applied ARM being replaced is a
         // normal weekend pattern, but 3 ARMED vs 2 APPLIED was untraceable
@@ -4629,7 +4553,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         if (nightActuationMem.day != null && nightActuationMem.day !== today &&
             nightActuationMem.appliedAtMs == null && nightActuationMem.applyAttemptedAtMs == null &&
             nightActuationMem.targetPct != null) {
-          app.log.info(`night-charge: prior ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%, buy ~${nightActuationMem.buyKwh ?? '—'} kWh) superseded by tonight's plan — one write fires at the shared window.`);
+          app.log.info(`night-charge: prior ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%, worst-case sizing ~${nightActuationMem.buyKwh ?? '—'} kWh) superseded by tonight's plan — one write fires at the shared window.`);
           // v1.132.0 — and STAMP it. A log line is not the ledger: the superseded
           // night keeps actuated=null forever, indistinguishable from four other
           // dispositions (held below minimum buy, no window, advisory mode, apply
@@ -4649,11 +4573,9 @@ async function runNightChargeEveningJobInner(): Promise<void> {
           cancelDeadlineText: fmtDeadlineSpoken(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           cancelDeadlineTextEs: fmtDeadlineSpokenEs(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           targetPct: armedCandidate.targetPct!,
-          // v1.165.0 — say so when force-charge will ride this window.
-          forceChargeTargetPct:
-            forceChargeOn() && armedCandidate.forceChargeCeilingPct != null
-              && armedCandidate.forceChargeCeilingPct > RESERVE_WRITE_MAX_PCT
-              ? armedCandidate.forceChargeCeilingPct : null,
+          // v1.165.0 — say so when force-charge will ride this window. v1.187.22 — from the stamp
+          // the morning push reads back (forceChargeRides): one decision, made once.
+          forceChargeTargetPct: armedCandidate.forceChargeRides === true ? armedCandidate.forceChargeCeilingPct : null,
         };
       } else if (
         nightActuationMem.forceChargeOnAtMs != null && nightActuationMem.forceChargeOffVerifiedAtMs == null
@@ -4666,10 +4588,12 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         nightActuationMem.revertedAtMs == null
       ) {
         app.log.warn("night-charge: supervised arming refused — a prior night's reserve write is unresolved (applied or unconfirmed-attempt, not yet reverted).");
+      } else if (armRefused) {
+        app.log.warn(`night-charge: supervised arming refused — ${armRefused}.`);
       }
     }
     const cfg = loadNotifyConfig();
-    const msg = buildNightChargeMessage(plan, shape, supervisedCtx);
+    const msg = buildNightChargeMessage(plan, shape, supervisedCtx, armRefused, NIGHT_CHARGE_MODE);
     await sendNotification(cfg, msg); // direct — bypasses quiet-hours/min-severity (I10)
     // NOTIFY_CHANNEL 'none' makes sendNotification a silent no-op — that is
     // NOT a delivered announcement for arming purposes.
@@ -4678,15 +4602,19 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // dependency): announce the armed write once, at the same evening moment.
     let audibleDelivered = false;
     if (supervisedCtx && plan) {
-      const buyRounded = plan.buyKwh != null ? Math.round(plan.buyKwh) : 0;
+      // v1.187.22 — what the write will do: the level it drives the pool to and the expected draw
+      // (none spoken with no expected figure). The worst case the plan is sized on is not spoken.
       // Disclose a plan that cannot hold the cushion — the HA notification says
       // so, and the audible channel (the one that reaches the owner without a
       // phone) must not be quieter about residual risk than the text channel.
       // v1.122.0 — the SPOKEN variant is deliberately shorter than the push, and
       // its length is bounded by a test. See nightChargeSpokenNotice.
       const spokenPair = nightChargeSpokenNotice({
-        buyKwhRounded: buyRounded,
-        targetPct: supervisedCtx.targetPct,
+        levelPct: chargeLevelPct(plan) ?? supervisedCtx.targetPct,
+        // v1.187.22 — what a night expected to charge nothing holds: the armed reserve.
+        reservePct: supervisedCtx.targetPct,
+        expectedKwh: statedBuyKwh(plan),
+        toward: chargeIsWindowBound(plan),
         deadlineText: supervisedCtx.cancelDeadlineText,
         deadlineTextEs: supervisedCtx.cancelDeadlineTextEs,
         cushionShortfall: plan.cushionShortfall === true,
@@ -4713,7 +4641,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       if (haNotifyDelivered || audibleDelivered) {
         persistNightActuation(armedCandidate);
         app.log.info(
-          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan?.buyKwhDebiased ?? plan?.buyKwh ?? '?'} kWh); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}`,
+          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (${buyFiguresLogText(plan?.expectedBuyKwh, plan?.buyKwhDebiased ?? plan?.buyKwh)}); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}`,
         );
       } else {
         app.log.error(
@@ -4721,7 +4649,17 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         );
       }
     }
-    writeNightChargeLatch({ lastNotifyDay: today }); // latch AFTER a successful send
+    // v1.187.22 — and the refused arm, keyed by its window, for the card (servedArmRefusal): a
+    // refusal, or a write no announcement channel delivered (nothing is armed — unless the record
+    // left in place is an arm for the same window that will still write).
+    const notArmed = eveningNotArmedReason({
+      refused: armRefused, candidate: armedCandidate, delivered: haNotifyDelivered || audibleDelivered, prior: nightActuationMem,
+    });
+    writeNightChargeLatch({
+      lastNotifyDay: today,
+      armRefused: notArmed && plan?.window
+        ? { reason: notArmed, windowStartMs: plan.window.startMs, windowEndMs: plan.window.endMs } : null,
+    }); // latch AFTER a successful send
     app.log.info(`night-charge: evening advisory sent (${shape}) and latched for ${today}.`);
   } catch (e: any) {
     // Do NOT latch on failure — retry next minute-tick within the window.
@@ -5545,20 +5483,17 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // v1.186.0 — the buy above the reserve is forfeited on these slots. A cost, not a
     // safety, matter: the reserve write is verified on its own, and the OFF side (window
     // end, deadline) runs exactly as before. Once per night — the marker survives a restart.
-    persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs });
-    const all = state.forceChargeSlots == null || action.slots.length >= state.forceChargeSlots.length;
+    // v1.187.22 — and which slots: a failure on only some of ours is reported as such, here and in
+    // the morning push (partialForceChargeOnFailureSlots).
+    persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs, forceChargeOnFailedSlots: [...action.slots] });
+    const all = partialForceChargeOnFailureSlots({ forceChargeSlots: state.forceChargeSlots, forceChargeOnFailedSlots: action.slots }) == null;
     app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${action.slots.join(',')} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
     try {
-      await sendNotification(loadNotifyConfig(), {
-        severity: 'warning',
-        dedupId: 'night_charge_force_charge_on_failure',
-        title: 'Night-charge: force-charge did not take effect',
-        body:
-          `The night-charge for ${state.day} switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 `
-          + `still reads slot(s) ${action.slots.join(', ')} OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ' (too close to the window end to re-issue)' : ''}. `
-          + `Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve (toward ${state.forceChargeCeilingPct ?? '—'}%) will not happen${all ? '' : ' on those slot(s)'}; `
-          + 'the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link.',
-      });
+      // v1.187.22 — toward where it stops (~80%), as every other surface names it, not the ceiling.
+      await sendNotification(loadNotifyConfig(), buildNightForceChargeOnFailure({
+        day: state.day, slots: action.slots, ourSlots: state.forceChargeSlots, retries: state.forceChargeOnRetries,
+        noRetry: action.noRetry === true, ceilingPct: state.forceChargeCeilingPct,
+      }));
     } catch (e: any) {
       app.log.warn(`night-charge: force-charge ON-failure notify failed (${e?.message ?? e})`);
     }
@@ -5828,18 +5763,14 @@ async function runNightActuationTickInner(): Promise<void> {
     persistNightActuation({ ...state, applyEscalated: true });
     try { recorder.recordNightOutcome(state.day, { actuated: 0 }); }
     catch (e: any) { app.log.warn(`night-charge: actuated correction failed (${e?.message ?? e})`); }
-    app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's buy (~${state.buyKwh ?? '—'} kWh) is forfeited; ledger corrected to actuated:0.`);
+    // v1.187.22 — the push states the armed day's EXPECTED figure, or none (never the worst case,
+    // state.buyKwh); the log keeps both, labelled.
+    const expectedKwh = armedExpectedBuyKwh(state.day);
+    app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) is forfeited; ledger corrected to actuated:0.`);
     try {
-      await sendNotification(loadNotifyConfig(), {
-        severity: 'warning',
-        dedupId: 'night_charge_apply_failure',
-        title: 'Night-charge: write did not take effect',
-        body:
-          `The supervised reserve write for ${state.day} was accepted by the EcoFlow cloud but the Smart Home Panel 2 `
-          + `still reads ${currentReservePct ?? 'unknown'}% (target ${state.targetPct}%) after ${state.applyRetries} re-issues. `
-          + `Tonight's planned buy (~${state.buyKwh ?? '—'} kWh) will not happen; the pool stays on its normal floor. `
-          + 'No action needed tonight — the grid is available as backup — but if this repeats, check the SHP2 cloud link.',
-      });
+      await sendNotification(loadNotifyConfig(), buildNightChargeApplyFailure({
+        day: state.day, currentReservePct, targetPct: state.targetPct, applyRetries: state.applyRetries, expectedKwh,
+      }));
     } catch (e: any) {
       app.log.warn(`night-charge: apply-failure notify failed (${e?.message ?? e})`);
     }
@@ -5925,15 +5856,16 @@ async function runNightActuationTickInner(): Promise<void> {
     );
     // v1.187.0 (review) — NOT awaited: an info push (5 s headers + 10 s body per target)
     // must never hold the tick, and with it any force-charge step still to run.
-    void sendNotification(loadNotifyConfig(), {
-      severity: 'info',
-      dedupId: 'night_charge_actuation',
-      title: `Night-charge: reserve restored to ${action.restorePct}%`,
-      body:
-        `Supervised night charge for ${state.day} completed: reserve raised to ${state.targetPct}% `
-        + `(planned buy ~${state.buyKwh ?? '—'} kWh) and restored to ${action.restorePct}%. `
-        + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
-    }).catch((e: any) => {
+    // v1.187.22 — the armed day's EXPECTED figure, or none: state.buyKwh is the worst case.
+    // What the force-charge did comes from this record (forceChargeNightOutcome: ran, switched
+    // ON but unconfirmed or failed, never started); a cancel or a grid-loss abort ended the night
+    // early and is said so, with no figure.
+    void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({
+      day: state.day, targetPct: state.targetPct, restorePct: action.restorePct,
+      expectedKwh: armedExpectedBuyKwh(state.day),
+      forceCharge: forceChargeNightOutcome(state, forceChargeOn()),
+      ended: action.gridLossAbort ? 'gridLoss' : state.cancelled ? 'cancelled' : 'window',
+    })).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
     });
     return;
@@ -6130,6 +6062,9 @@ app.get('/api/night-charge/status', async () => {
     confidence: plan?.confidenceTier ?? null,
     notify: { hour: NIGHT_CHARGE_NOTIFY_HOUR, minute: NIGHT_CHARGE_NOTIFY_MINUTE, lastNotifyDay: latch.lastNotifyDay },
     plan,
+    // v1.187.22 — why a write mode refused to arm this plan's window, until it closes; the card
+    // leads with it instead of the plan's expected charge (servedArmRefusal). null = not refused.
+    armRefusal: servedArmRefusal(latch.armRefused, plan, NIGHT_CHARGE_MODE, Date.now()),
     readiness: getLatestReadiness(),
     // v1.50.0 — tonight's supervised-write record (armed/applied/cancelled/
     // reverted), served from the in-memory mirror.
@@ -7036,6 +6971,7 @@ const shutdown = async () => {
   clearInterval(restTrackerTick);
   stopMqtt?.();
   monitor.stop();
+  socLadders.stop();
   stopTelnet?.();
   stopTuiData(); // shared TUI refresh timers (telnet + /console)
   stopMqttDiscovery?.();

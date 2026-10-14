@@ -31,7 +31,7 @@ inverter units add no capacity), a **42-panel / ~16.8 kW** array, and an EVSE �
 on the APS R-EV time-of-use rate. Two further Cores sit off the panel as bench
 spares: they are monitored, but are not part of the backup pool.
 
-> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~11,670
+> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~12,000
 > lines) documents **every** feature and engine — what each does, the exact
 > algorithm and math it computes, how data traces through the pipeline, its
 > endpoints/sensors, config knobs, and edge-case guards. This README is the tour;
@@ -279,13 +279,14 @@ Every configuration option is documented in
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 4,363 tests
+cd server && npm install && npm test     # 4,483 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
 ```
 
-**Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` →
+**Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` (then
+`node scripts/roll-changelog.mjs`, which keeps it small for Home Assistant's Changelog dialog) →
 open a PR titled `Release vX.Y.Z …` (for a one-commit PR, its commit subject too: GitHub's
 squash merge lands a one-commit PR with the commit's subject, not the title). `main` is branch-
 protected. CI runs the three type-checks (server, web, server tests), the test suite, the
@@ -335,7 +336,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **101 harnesses** (`scripts/mutate-*.mjs`) holding **2145
+regression. There are **105 harnesses** (`scripts/mutate-*.mjs`) holding **2402
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that
