@@ -317,8 +317,9 @@ const MUTANTS = [
     // v1.170.0 — REPLACES the coast-wording mutant (property retired).
     id: 'xl. ★ the announcement says an 80+ night stays on to the window close',
     file: NOTIFY,
-    find: "          + `reach ~${pct(forceCeiling)}, and OFF when it gets there (or when the window closes). `",
-    to: "          + `reach ~${pct(forceCeiling)}; it stays on until the window closes. ` /* MUTANT */",
+    // v1.187.22 — re-pointed: the announcement names where the force-charge stops (forceChargeStopPct).
+    find: "          + `reach ~${pct(forceChargeStopPct(forceCeiling))}, and OFF when it gets there (or when the window closes). `",
+    to: "          + `reach ~${pct(forceChargeStopPct(forceCeiling))}; it stays on until the window closes. ` /* MUTANT */",
     why: 'The 21:30 notice describes the retired coast.',
   },
   {

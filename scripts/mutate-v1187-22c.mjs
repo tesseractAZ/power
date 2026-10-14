@@ -16,6 +16,10 @@
  *   C-xli          the force-charge ceiling armFromPlan and the expected level share
  *   C-xlii…C-lvi   the drain to the just-in-time force-charge start, the in-progress hour,
  *                  the after-the-fact pushes, the no-basis headline
+ *   C-lvii…C-lxxi  what is spoken and pushed states the charge the write arms — the level and
+ *                  the expected draw, no kWh without one — never the worst case, which only the
+ *                  rationale and the card name, as the sizing basis; the worst-case entity's
+ *                  name; the in-progress hour's EV in the just-in-time walk
  *
  *   node scripts/mutate-v1187-22c.mjs
  */
@@ -38,6 +42,7 @@ const SUBSET = [
   'test/buyDebiasCalibration.test.ts',
   'test/nightChargeMqtt.test.ts',
   'test/nightForceCharge.test.ts',
+  'test/announcePathIntegrity.test.ts',
 ];
 
 const MUTANTS = [
@@ -150,25 +155,28 @@ const MUTANTS = [
   },
   // ── the headline and the rationale ──
   {
-    id: 'C-xvi. ★★★ the headline leads with the worst case again',
+    // v1.187.22 — re-pointed: the headline is the charge the write arms.
+    id: 'C-xvi. ★★★ the headline states the worst case again',
     file: NCA,
-    find: '  const buyHeadline = expected.buyKwh == null',
-    to: '  const buyHeadline = expected.buyKwh != null /* MUTANT */',
-    why: 'The 10-12 headline "Buy ~64.2 kWh overnight" returns.',
+    find: "    + `${expected.buyKwh == null ? '' : `: ~${round1(expected.buyKwh)} kWh expected`}.`;",
+    to: "    + `${expected.buyKwh == null ? '' : `: ~${round1(buyKwhDebiased)} kWh expected`}.`; /* MUTANT */",
+    why: 'The 10-12 headline leads with ~64 kWh again, now called "expected".',
   },
   {
+    // v1.187.22 — re-pointed at the sizing sentence, the one place it is named.
     id: 'C-xvii. ★★ the worst case named is the raw figure, not the announced (de-biased) one',
     file: NCA,
-    find: '    : `Buy ${buyFigureText(expected.buyKwh, buyKwhDebiased, buyDebiasFactor > 1.005',
-    to: '    : `Buy ${buyFigureText(expected.buyKwh, buyKwh, buyDebiasFactor > 1.005 /* MUTANT */',
-    why: 'With a learned calibration the "worst case" in the headline disagrees with the calibration note beside it.',
+    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote)}${projSocAtWindowStartPct != null',
+    to: '  const sizingNote = ` ${sizingBasisText(buyKwh, calNote)}${projSocAtWindowStartPct != null /* MUTANT */',
+    why: 'With a learned calibration the worst case named disagrees with the calibration note beside it.',
   },
   {
-    id: 'C-xviii. ★★ "up to" is said of a worst case below the expected figure',
+    // v1.187.22 — REPLACES the "up to" mutant (the phrase is retired).
+    id: 'C-xviii. ★★★ with no expected figure the headline falls back to the worst case',
     file: NCA,
-    find: '  return within\n    ?',
-    to: '  return !within /* MUTANT */\n    ?',
-    why: 'The phrase is chosen backwards: "up to" a figure the expected buy exceeds.',
+    find: "    + `${expected.buyKwh == null ? '' : `: ~${round1(expected.buyKwh)} kWh expected`}.`;",
+    to: "    + `${expected.buyKwh == null ? `: ~${round1(buyKwhDebiased)} kWh` : `: ~${round1(expected.buyKwh)} kWh expected`}.`; /* MUTANT */",
+    why: 'A plan with no P50 basis heads the rationale with the sizing basis as if it were the charge.',
   },
   {
     id: 'C-xix. ★ the rationale says the write charges a pool that opens above it',
@@ -250,32 +258,33 @@ const MUTANTS = [
     why: 'The figure is published into the state payload but no Home Assistant entity reads it.',
   },
   {
+    // v1.187.22 — re-pointed: the title is the level and the expected draw.
     id: 'C-xxx. ★★★ the push title says the worst case',
     file: NOTIFY,
-    find: '    title: `Night-charge: buy ~${kwh(headlineBuyKwh(plan))} tonight`,',
-    to: '    title: `Night-charge: buy ~${kwh(plan.buyKwh)} tonight`, /* MUTANT */',
-    why: 'The phone shows "buy ~64.2 kWh tonight" — the line the owner cancelled on.',
+    find: "      + (expected == null ? '' : ` (~${kwh(expected)})`),",
+    to: "      + ` (~${kwh(plan.buyKwh)})`, /* MUTANT */",
+    why: 'The phone shows "~64.2 kWh" in the title — the figure the 10-12 night was cancelled on.',
   },
   {
     id: 'C-xxxi. ★★ the push body drops the expected figure',
     file: NOTIFY,
-    find: '      `Buy ${buyFigureText(plan.expectedBuyKwh, plan.buyKwh)} of grid energy overnight',
-    to: '      `Buy ${buyFigureText(null /* MUTANT */, plan.buyKwh)} of grid energy overnight',
-    why: 'The push body states the worst case alone.',
+    find: "      + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected. `)",
+    to: "      + '. ' /* MUTANT */",
+    why: 'The push says where the pool is charged to but not how much it is expected to buy.',
   },
   {
     id: 'C-xxxii. ★★★ the spoken line says the worst case',
     file: IDX,
-    find: '      const buyRounded = Math.round(headlineBuyKwh(plan) ?? 0);',
-    to: '      const buyRounded = plan.buyKwh != null ? Math.round(plan.buyKwh) : 0; /* MUTANT */',
-    why: 'The speakers say "Buying about 64 kilowatt hours" for a ~34 kWh draw.',
+    find: '        expectedKwh: statedBuyKwh(plan),',
+    to: '        expectedKwh: plan.buyKwh, /* MUTANT */',
+    why: 'The speakers say "about 64 kilowatt hours" for a ~34 kWh draw.',
   },
   {
     id: 'C-xxxiii. ★★ the card\'s headline number is the worst case',
     file: WEB,
-    find: '    main: expectedKwh.toFixed(1),',
-    to: '    main: worst, /* MUTANT */',
-    why: 'The dashboard shows the worst case as the buy while the push says the expected figure.',
+    find: "  return { main: exp.toFixed(1), unit: 'kWh', label: `expected charge to ~${levelText}%` };",
+    to: "  return { main: (plan.buyKwh ?? 0).toFixed(1), unit: 'kWh', label: `expected charge to ~${levelText}%` }; /* MUTANT */",
+    why: 'The dashboard shows the worst case as the charge while the push says the expected figure.',
   },
   // ── the ledger ──
   {
@@ -409,15 +418,15 @@ const MUTANTS = [
   {
     id: 'C-li. ★★ the in-progress hour missing from the band drops the carry again',
     file: NCA,
-    find: '  const h = byHour.get(key) ?? (slotTs < fromMs ? byHour.get(key + 1) : undefined);',
-    to: '  const h = byHour.get(key); /* MUTANT */',
+    find: '  return byHour.get(key) ?? (slotTs < fromMs ? byHour.get(key + 1) : undefined);',
+    to: '  return byHour.get(key); /* MUTANT */',
     why: 'At 21:05 with the band starting at 22:00 the plan states no expected figure (or, as before the review, up to ~3 kWh too little).',
   },
   {
     id: 'C-lii. ★ any missing hour is stood in for by the next',
     file: NCA,
-    find: '  const h = byHour.get(key) ?? (slotTs < fromMs ? byHour.get(key + 1) : undefined);',
-    to: '  const h = byHour.get(key) ?? byHour.get(key + 1); /* MUTANT */',
+    find: '  return byHour.get(key) ?? (slotTs < fromMs ? byHour.get(key + 1) : undefined);',
+    to: '  return byHour.get(key) ?? byHour.get(key + 1); /* MUTANT */',
     why: 'A gap inside the span is papered over with a neighbour\'s load instead of voiding a figure with no basis.',
   },
   {
@@ -429,18 +438,19 @@ const MUTANTS = [
   },
   // ── the after-the-fact pushes ──
   {
-    id: 'C-liv. ★★★ the morning summary calls the worst case the planned buy',
+    // v1.187.22 — re-pointed: the summary is built by buildNightChargeMorningSummary.
+    id: 'C-liv. ★★★ the morning summary states the worst case',
     file: IDX,
-    find: '        + `(planned buy ${armedBuyPhrase(armedExpectedBuyKwh(state.day), state.buyKwh)}) and restored to ${action.restorePct}%. `',
-    to: '        + `(planned buy ~${state.buyKwh ?? \'—\'} kWh) and restored to ${action.restorePct}%. ` /* MUTANT */',
-    why: 'The evening says ~35 kWh, the morning "planned buy ~64 kWh" — delivery reads as half the plan.',
+    find: '      expectedKwh: armedExpectedBuyKwh(state.day),\n',
+    to: '      expectedKwh: state.buyKwh, /* MUTANT */\n',
+    why: 'The evening says ~35 kWh, the morning ~64 kWh — delivery reads as half the plan.',
   },
   {
-    id: 'C-lv. ★★ the apply-failure push calls the worst case the planned buy',
+    id: 'C-lv. ★★ the apply-failure push states the worst case',
     file: IDX,
-    find: '    const buyPhrase = armedBuyPhrase(armedExpectedBuyKwh(state.day), state.buyKwh);',
-    to: '    const buyPhrase = `~${state.buyKwh ?? \'—\'} kWh`; /* MUTANT */',
-    why: 'The forfeited buy is stated as the worst case, unlabelled.',
+    find: '    const expectedKwh = armedExpectedBuyKwh(state.day);',
+    to: '    const expectedKwh = state.buyKwh; /* MUTANT */',
+    why: 'The forfeited charge is stated as the worst case, called expected.',
   },
   {
     id: 'C-lv-b. ★★ the pushes never read the armed day\'s expected figure',
@@ -457,19 +467,127 @@ const MUTANTS = [
     why: 'The morning push states the expected figure of the oldest row in the fortnight, not the armed night\'s.',
   },
   {
-    id: 'C-lv-d. ★★ with no expected figure the worst case is stated unlabelled',
+    // v1.187.22 — REPLACES the unlabelled-worst-case mutant (armedBuyPhrase is retired).
+    id: 'C-lv-d. ★★ with no expected figure an after-the-fact push still states a kWh figure',
     file: NCA,
-    find: '  if (expectedKwh == null || !Number.isFinite(expectedKwh)) return `${worst}, the worst case the plan was sized on`;',
-    to: '  if (expectedKwh == null || !Number.isFinite(expectedKwh)) return worst; /* MUTANT */',
-    why: 'An older plan row brings back "planned buy ~64 kWh" with nothing saying it is the worst case.',
+    find: '  return expectedKwh != null && Number.isFinite(expectedKwh) ? `~${round1(expectedKwh)} kWh expected` : null;',
+    to: "  return expectedKwh != null && Number.isFinite(expectedKwh) ? `~${round1(expectedKwh)} kWh expected` : '~— kWh expected'; /* MUTANT */",
+    why: 'An older plan row puts a placeholder figure in the morning push instead of none.',
   },
   // ── the no-basis headline ──
   {
-    id: 'C-lvi. ★★ the no-basis headline states the raw figure and drops the calibration',
+    // v1.187.22 — re-pointed: the calibration rides in the sizing sentence.
+    id: 'C-lvi. ★★ the sizing sentence drops the calibration',
     file: NCA,
-    find: '    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote}`',
-    to: '    ? `Buy ~${round1(buyKwh)} kWh overnight` /* MUTANT */',
-    why: 'With a learned de-bias and no median basis the announced figure loses its calibration, silently.',
+    find: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote)}${projSocAtWindowStartPct != null',
+    to: '  const sizingNote = ` ${sizingBasisText(buyKwhDebiased)}${projSocAtWindowStartPct != null /* MUTANT */',
+    why: 'With a learned de-bias the worst case is named at ×1.66 with nothing saying so.',
+  },
+  // ── what is spoken and pushed: the charge the write arms ──
+  {
+    id: 'C-lvii. ★★★ the stated figure falls back to the worst case',
+    file: NCA,
+    find: '  return e != null && Number.isFinite(e) ? e : null;',
+    to: '  return e != null && Number.isFinite(e) ? e : ((plan as any).buyKwh ?? null); /* MUTANT */',
+    why: 'A plan with no P50 basis speaks and pushes ~64 kWh again — the pre-v1.187.22 fallback.',
+  },
+  {
+    id: 'C-lviii. ★★★ the level ignores the force-charge stop',
+    file: NCA,
+    find: '  if (level != null && Number.isFinite(level)) return level;',
+    to: '  /* MUTANT */',
+    why: 'A force-charge night (to 80%) is announced as a charge to the 50% reserve.',
+  },
+  {
+    id: 'C-lix. ★★ the push states the sizing prediction as the level',
+    file: NOTIFY,
+    find: '  const level = chargeLevelPct(plan);',
+    to: '  const level = plan.targetSocPct; /* MUTANT */',
+    why: 'The title reads "~80.4%" (or a reserve-only night\'s unwritten 78%) instead of where the write stops.',
+  },
+  {
+    id: 'C-lx. ★★ the island troughs lose their label',
+    file: NOTIFY,
+    find: '      + `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `',
+    to: '      + `Tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} ` /* MUTANT */',
+    why: '"Tomorrow’s low SoC ~0% with it" reads as the outcome; with the grid present the SHP2 holds the reserve.',
+  },
+  {
+    id: 'C-lxi. ★★ an advisory push says the add-on is charging',
+    file: NOTIFY,
+    find: '    title: `Night-charge: ${supervised ? `charging to ${levelText}` : `charge to ${levelText} recommended`} tonight`',
+    to: '    title: `Night-charge: charging to ${levelText} tonight` /* MUTANT */',
+    why: 'In advisory mode nothing is written; the title would claim an action the add-on does not take.',
+  },
+  {
+    id: 'C-lxii. ★★ the spoken line says "about 0 kilowatt hours"',
+    file: ACT,
+    find: "    : kwh < 1 ? ', less than 1 kilowatt hour'",
+    to: "    : kwh < 0 ? ', less than 1 kilowatt hour' /* MUTANT */",
+    why: 'A pool expected above the level is announced as a charge of "about 0".',
+  },
+  {
+    id: 'C-lxiii. ★★ the English line drops the expected draw',
+    file: ACT,
+    find: '      `Night charge notice. Charging the backup pool to about ${level} percent overnight${kwhEn}, `',
+    to: '      `Night charge notice. Charging the backup pool to about ${level} percent overnight, ` /* MUTANT */',
+    why: 'The speakers say where the pool is charged to but not how much it is expected to buy.',
+  },
+  {
+    id: 'C-lxiv. ★★ the Spanish line drops the expected draw',
+    file: ACT,
+    find: '      + `durante la noche${kwhEs}, comenzando ${o.deadlineTextEs}.`',
+    to: '      + `durante la noche, comenzando ${o.deadlineTextEs}.` /* MUTANT */',
+    why: 'The bilingual pair disagrees: the Spanish pass omits the figure the English states.',
+  },
+  {
+    id: 'C-lxv. ★★ the morning summary drops the expected figure',
+    file: NOTIFY,
+    find: "      + `${expected ? ` (${expected})` : ''} and restored to ${o.restorePct}%. `",
+    to: '      + ` and restored to ${o.restorePct}%. ` /* MUTANT */',
+    why: 'Delivery is scored the next evening against a figure the morning push never stated.',
+  },
+  {
+    id: 'C-lxvi. ★★ the apply-failure push drops the expected figure',
+    file: NOTIFY,
+    find: "      + `Tonight's planned charge${expected ? ` (${expected})` : ''} will not happen; the pool stays on its normal floor. `",
+    to: "      + `Tonight's planned charge will not happen; the pool stays on its normal floor. ` /* MUTANT */",
+    why: 'The warning does not say how much of a charge was forfeited.',
+  },
+  {
+    id: 'C-lxvii. ★ the force-charge tail names the target, not where it stops',
+    file: NOTIFY,
+    find: '          + `reach ~${pct(forceChargeStopPct(forceCeiling))}, and OFF when it gets there (or when the window closes). `',
+    to: '          + `reach ~${pct(forceCeiling)}, and OFF when it gets there (or when the window closes). ` /* MUTANT */',
+    why: 'The title says ~80% and the tail ~80.4%: an 80.4 target syncs an 80 ceiling and stops at 80.',
+  },
+  {
+    id: 'C-lxviii. ★★ the worst-case entity loses its name',
+    file: MQTT,
+    find: "name: 'Night-Charge Buy (Worst Case)',",
+    to: "name: 'Night-Charge Buy', /* MUTANT */",
+    why: 'Home Assistant shows the sizing basis as "Night-Charge Buy", the purchase it is not.',
+  },
+  {
+    id: 'C-lxix. ★★ the rationale headline states the sizing prediction as the level',
+    file: NCA,
+    find: "  const chargeHeadline = `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the `",
+    to: "  const chargeHeadline = `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${targetSocPct}% in the ` /* MUTANT */",
+    why: 'The headline names the islanded projection (80.4%) instead of where the write stops (80%).',
+  },
+  {
+    id: 'C-lxx. ★ a window-bound charge is headlined as reaching the level',
+    file: NCA,
+    find: "  const chargeHeadline = `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the `",
+    to: "  const chargeHeadline = `Charge to ~${expected.levelPct ?? writtenPct}% in the ` /* MUTANT */",
+    why: 'Friday\'s one-hour window is headlined "to 80%" though it passes a fraction of the draw.',
+  },
+  {
+    id: 'C-lxxi. ★★ the walk reads the in-progress hour\'s EV directly again',
+    file: NCA,
+    find: '    const ev = bandHourAt(byHour, slot, walkFromMs)?.evP90W;',
+    to: '    const ev = byHour.get(Math.floor(slot / HOUR_MS))?.evP90W; /* MUTANT */',
+    why: 'On a band starting at the next hour the first part-hour carries its load but not its EV: the start ignores the displacement the live tick counts.',
   },
 ];
 

@@ -168,12 +168,17 @@ test('night-charge message: a null plan yields the insufficient_basis shape rega
   }
 });
 
-test('night-charge message: the charge shape states buy, target, without/with dip, floor+cushion, confidence, and the advisory note', () => {
+test('night-charge message: the charge shape states the level, the labelled island dips, floor+cushion, confidence, and the advisory note', () => {
   const msg = buildNightChargeMessage(fakePlan(), 'charge');
-  assert.match(msg.body, /12\.3 kWh/); // buy kWh
-  assert.match(msg.body, /78%/);       // target SoC
-  assert.match(msg.body, /7\.2%/);     // tomorrow's dip WITHOUT the buy (baseline)
-  assert.match(msg.body, /26\.4%/);    // dip WITH the buy (plan trajectory)
+  // v1.187.22 — what the write does: the level it drives to (the 78% setpoint is written as the
+  // panel's 50% maximum), and no kWh — this plan has no expected figure, and the 12.3 kWh it is
+  // sized on is never pushed.
+  assert.match(msg.title, /charge to ~50% recommended tonight$/);
+  assert.match(msg.body, /^Recommended: charge the backup pool to ~50% overnight\. /);
+  assert.doesNotMatch(`${msg.title} ${msg.body}`, /12\.3|kWh/);
+  assert.match(msg.body, /if the grid were lost/); // the island troughs, labelled
+  assert.match(msg.body, /7\.2%/);     // tomorrow's island low WITHOUT the charge (baseline)
+  assert.match(msg.body, /26\.4%/);    // …and WITH it (plan trajectory)
   assert.match(msg.body, /25%/);       // floor (10) + cushion (15)
   assert.match(msg.body, /forecast/);  // confidence tier
   // Advisory-only automation contract — the crux of the read-only posture.

@@ -419,10 +419,14 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_host_disk_free', name: 'Host Data Disk Free', state_class: 'measurement', unit_of_measurement: 'MB', icon: 'mdi:harddisk', entity_category: 'diagnostic', value_template: '{{ value_json.host_data_disk_free_mb }}' },
   { unique_id: 'ecoflow_host_load_1m', name: 'Host Load (1m)', state_class: 'measurement', icon: 'mdi:chip', entity_category: 'diagnostic', value_template: '{{ value_json.host_load_1m }}' },
   { unique_id: 'ecoflow_host_soc_temp', name: 'Host SoC Temperature', device_class: 'temperature', state_class: 'measurement', unit_of_measurement: '°C', entity_category: 'diagnostic', value_template: '{{ value_json.host_soc_temp_c }}' },
-  { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'Night-Charge Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
+  // v1.187.22 — the worst case the plan is SIZED on (plan.buyKwh), named for what it is: the bare
+  // "Night-Charge Buy" read as the purchase, which it is not. Only the NAME changes: the
+  // unique_id (and with it the config topic) and the value are unchanged, and no object_id is
+  // published, so HA keeps the entity_id it minted against this unique_id at first discovery —
+  // its history and any automation on it carry over (the v1.65.0 note in this file).
+  { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'Night-Charge Buy (Worst Case)', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
   // v1.187.22 — the EXPECTED buy beside it: what the armed write is expected to draw from the
-  // expected window-open SoC. Night-Charge Buy keeps its meaning (the worst case the plan is
-  // sized on — its history and any automation on it are unchanged). Same shape: no
+  // expected window-open SoC. The worst-case entity keeps its meaning and value. Same shape: no
   // device_class, the night-charge expire_after, null → 'unknown' with no P50 basis.
   { unique_id: 'ecoflow_night_charge_expected_buy_kwh', name: 'Night-Charge Expected Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_buy_kwh }}' },
   { unique_id: 'ecoflow_night_charge_readiness', name: 'Night-Charge Readiness', icon: 'mdi:clipboard-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_readiness }}' },

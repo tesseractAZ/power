@@ -609,9 +609,15 @@ export function holdIsStarved(o: {
  * drain). Any other missing hour, or one without a finite loadP50W, is no P50 basis: null.
  */
 function p50HourAt(byHour: ReadonlyMap<number, NightChargeHour>, slotTs: number, fromMs: number): NightChargeHour | null {
-  const key = Math.floor(slotTs / HOUR_MS);
-  const h = byHour.get(key) ?? (slotTs < fromMs ? byHour.get(key + 1) : undefined);
+  const h = bandHourAt(byHour, slotTs, fromMs);
   return h != null && h.loadP50W != null && Number.isFinite(h.loadP50W) ? h : null;
+}
+/** v1.187.22 — the band hour covering `slotTs`, the in-progress hour at `fromMs` stood in for by
+ *  the next one when the band lacks it (p50HourAt). Shared with remainingEvP90, so the walk reads
+ *  the load and the EV of one hour from the same entry. */
+function bandHourAt(byHour: ReadonlyMap<number, NightChargeHour>, slotTs: number, fromMs: number): NightChargeHour | undefined {
+  const key = Math.floor(slotTs / HOUR_MS);
+  return byHour.get(key) ?? (slotTs < fromMs ? byHour.get(key + 1) : undefined);
 }
 function hoursByEpoch(hours: ReadonlyArray<NightChargeHour>): Map<number, NightChargeHour> {
   const m = new Map<number, NightChargeHour>();
@@ -739,7 +745,7 @@ export function expectedForceChargeStart(o: {
     const poolPct = (pack / o.fullKwh) * 100;
     if (poolPct < stopPct) {
       const rateKw = o.envelopeKw == null ? null : p50ChargeRateKw(loadW, o.chargeCapKw, o.envelopeKw) * o.legEff;
-      const ev = remainingEvP90(byHour, t, o.windowEndMs);
+      const ev = remainingEvP90(byHour, t, o.windowEndMs, o.fromMs);
       const evDisplacedKwh = ev == null ? null : evDisplacedPackKwh({
         evKwh: ev.kwh, peakEvKw: ev.peakKw, rateKw,
         unboundedRateKw: o.envelopeKw == null ? null
@@ -758,16 +764,19 @@ export function expectedForceChargeStart(o: {
 
 /** v1.187.22 — the window's P90 EV energy (kWh) and peak (kW) from `fromMs` to the close, as the
  *  plan's evContention states it for a plan computed at `fromMs`; null unless every remaining
- *  hour carries a finite evP90W (a missing prediction is never a predicted 0). */
+ *  hour carries a finite evP90W (a missing prediction is never a predicted 0). The hour in
+ *  progress at the walk's start (`walkFromMs`) is stood in for by the next one when the band
+ *  lacks it, as the load beside it is (bandHourAt): reading it directly voided the EV term for
+ *  the walk's whole first part-hour while its load was carried. */
 function remainingEvP90(
-  byHour: ReadonlyMap<number, NightChargeHour>, fromMs: number, windowEndMs: number,
+  byHour: ReadonlyMap<number, NightChargeHour>, fromMs: number, windowEndMs: number, walkFromMs: number,
 ): { kwh: number; peakKw: number } | null {
   let kwh = 0;
   let peakKw = 0;
   for (let slot = Math.floor(fromMs / HOUR_MS) * HOUR_MS; slot < windowEndMs; slot += HOUR_MS) {
     const availH = windowHourAvailH(slot, fromMs, windowEndMs);
     if (availH <= 0) continue;
-    const ev = byHour.get(Math.floor(slot / HOUR_MS))?.evP90W;
+    const ev = bandHourAt(byHour, slot, walkFromMs)?.evP90W;
     if (ev == null || !Number.isFinite(ev)) return null;
     kwh += (Math.max(0, ev) / 1000) * availH;
     peakKw = Math.max(peakKw, Math.max(0, ev) / 1000);
@@ -869,49 +878,59 @@ export function expectedBuyFromPlan(o: {
   return out;
 }
 
-/**
- * v1.187.22 — the buy as the plan, the push and the card state it: the EXPECTED figure first,
- * the worst case the plan is sized on named beside it — "~33.8 kWh expected (up to ~64.2 kWh in
- * the worst case)". Where the expected figure exceeds the worst case (the worst case's P90 EV
- * block takes the window's grid input; the median load does not), "up to" would be false, and
- * the worst case is named as the sizing basis instead. `worstNote` rides inside the parenthesis
- * (the de-bias disclosure). No expected figure ⇒ the worst case alone, as before v1.187.22. PURE.
+/*
+ * v1.187.22 — WHAT A NIGHT-CHARGE LINE STATES. Anything spoken or pushed states what the write
+ * will do: the level it drives the pool to (chargeLevelPct) and the energy it is expected to draw
+ * (statedBuyKwh). The islanded worst case the plan is SIZED on (buyKwh) is not an outcome: it
+ * belongs to the rationale and the card, in one sentence labelled as the sizing basis
+ * (sizingBasisText). On 2026-10-12 the push and the speakers said "Buy ~64.2 kWh" — that basis —
+ * for a write that would have drawn ≈34 kWh, and the night was cancelled on the figure.
  */
-export function buyFigureText(
-  expectedKwh: number | null | undefined,
-  worstKwh: number | null | undefined,
-  worstNote = '',
-): string {
-  const worst = worstKwh == null || !Number.isFinite(worstKwh) ? '—' : `${round1(worstKwh)}`;
-  if (expectedKwh == null || !Number.isFinite(expectedKwh)) return `~${worst} kWh`;
-  const within = worstKwh != null && Number.isFinite(worstKwh) && expectedKwh <= worstKwh + 0.05;
-  return within
-    ? `~${round1(expectedKwh)} kWh expected (up to ~${worst} kWh in the worst case${worstNote})`
-    : `~${round1(expectedKwh)} kWh expected (the worst case it is sized on is ~${worst} kWh${worstNote})`;
+
+/** v1.187.22 — the level tonight's write drives the pool to, %: plan.expectedWriteLevelPct
+ *  (armedWriteLevelPct — the reserve as written, or the force-charge stop when force-charge rides
+ *  the night); on a plan issued before it, the reserve as written (clampReserveTarget). null with
+ *  neither (a hold, a null plan). PURE. */
+export function chargeLevelPct(plan: Pick<NightChargePlan, 'setpointSocPct' | 'expectedWriteLevelPct'>): number | null {
+  const level = plan.expectedWriteLevelPct;
+  if (level != null && Number.isFinite(level)) return level;
+  const setpoint = plan.setpointSocPct;
+  return setpoint != null && Number.isFinite(setpoint) ? clampReserveTarget(setpoint) : null;
 }
 
-/** v1.187.22 — the ONE buy figure a surface with room for a single number says (the spoken
- *  advisory, the push title): the expected buy, else the worst case (a plan issued before
- *  v1.187.22, or no P50 basis). PURE. */
-export function headlineBuyKwh(plan: Pick<NightChargePlan, 'buyKwh' | 'expectedBuyKwh'>): number | null {
+/** v1.187.22 — the ONLY buy figure a spoken or pushed line states: the expected draw of the armed
+ *  write (plan.expectedBuyKwh). null — no P50 basis, or a plan issued before v1.187.22 — means
+ *  the line states no energy figure at all; it never falls back to the worst case. PURE. */
+export function statedBuyKwh(plan: Pick<NightChargePlan, 'expectedBuyKwh'>): number | null {
   const e = plan.expectedBuyKwh;
-  return e != null && Number.isFinite(e) ? e : plan.buyKwh;
+  return e != null && Number.isFinite(e) ? e : null;
 }
 
-/**
- * v1.187.22 — an armed night's buy as a phrase inside a sentence (the morning summary and the
- * apply-failure push, which read the armed record's worst case and the plan row's expected
- * figure): "~34.9 kWh expected, up to ~63.9 kWh in the worst case". With no expected figure (a
- * plan row from before v1.187.22, no P50 basis, an unreadable ledger) the worst case is named as
- * what it is — "~63.9 kWh, the worst case the plan was sized on" — never as the plan. PURE.
- */
-export function armedBuyPhrase(expectedKwh: number | null | undefined, worstKwh: number | null | undefined): string {
-  const worstOk = worstKwh != null && Number.isFinite(worstKwh);
-  const worst = worstOk ? `~${round1(worstKwh)} kWh` : '~— kWh';
-  if (expectedKwh == null || !Number.isFinite(expectedKwh)) return `${worst}, the worst case the plan was sized on`;
-  return worstOk && expectedKwh <= worstKwh + 0.05
-    ? `~${round1(expectedKwh)} kWh expected, up to ${worst} in the worst case`
-    : `~${round1(expectedKwh)} kWh expected; the worst case the plan was sized on is ${worst}`;
+/** v1.187.22 — an armed night's buy inside an after-the-fact push (the morning summary, the
+ *  apply-failure warning), from the expected figure the armed day's plan row holds: "~34.9 kWh
+ *  expected". null with none (a row from before v1.187.22, no P50 basis, an unreadable ledger):
+ *  the push then states no kWh. The armed record's buyKwh is the worst case and is never pushed. */
+export function armedExpectedPhrase(expectedKwh: number | null | undefined): string | null {
+  return expectedKwh != null && Number.isFinite(expectedKwh) ? `~${round1(expectedKwh)} kWh expected` : null;
+}
+
+/** v1.187.22 — what the sizing basis is, in the words the rationale and the card label it with. */
+export const WORST_CASE_BASIS = 'P10 PV, P90 load including any committed EV session, no grid';
+
+/** v1.187.22 — the ONE sentence that names the worst case, labelled as the basis the plan is sized
+ *  on: "Sized on an islanded worst case (P10 PV, …, no grid) of ~64.2 kWh" + `calNote` (the de-bias
+ *  disclosure, beside the figure it multiplies). The card mirrors it (sizingLine, nightChargeText.ts).
+ *  null with no figure. PURE. */
+export function sizingBasisText(worstKwh: number | null | undefined, calNote = ''): string | null {
+  if (worstKwh == null || !Number.isFinite(worstKwh)) return null;
+  return `Sized on an islanded worst case (${WORST_CASE_BASIS}) of ~${round1(worstKwh)} kWh${calNote}`;
+}
+
+/** v1.187.22 — both buy figures for a LOG line, each labelled: logs serve diagnosis, so they keep
+ *  the worst case — named as the sizing basis, never as the buy. PURE. */
+export function buyFiguresLogText(expectedKwh: number | null | undefined, worstKwh: number | null | undefined): string {
+  const fmt = (n: number | null | undefined): string => (n != null && Number.isFinite(n) ? `~${round1(n)} kWh` : 'none');
+  return `expected buy ${fmt(expectedKwh)}, islanded worst-case sizing ${fmt(worstKwh)}`;
 }
 
 export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
@@ -1623,12 +1642,14 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw },
     })
     : { buyKwh: 0, levelPct: null };
-  // The headline leads with the expected figure and names the worst case; the de-bias
-  // disclosure rides with the worst case it multiplies. No P50 basis ⇒ the pre-v1.187.22 line.
-  const buyHeadline = expected.buyKwh == null
-    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote}`
-    : `Buy ${buyFigureText(expected.buyKwh, buyKwhDebiased, buyDebiasFactor > 1.005
-      ? `; raw estimate ${round1(buyKwh)} kWh × ${buyDebiasFactor.toFixed(2)} realized-buy calibration` : '')}`;
+  // v1.187.22 — the headline is the CHARGE the write arms: the level it drives the pool to, the
+  // window, the expected draw (no kWh with no P50 basis). The worst case follows once, in its own
+  // sentence labelled as the sizing basis (sizingNote), the de-bias disclosure beside it.
+  const chargeHeadline = `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the `
+    + `${fmtPhoenixDayHm(windowStart, nowMs)}–${fmtPhoenixDayHm(windowEnd, nowMs)} window`
+    + `${expected.buyKwh == null ? '' : `: ~${round1(expected.buyKwh)} kWh expected`}.`;
+  const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote)}${projSocAtWindowStartPct != null
+    ? `, from ~${projSocAtWindowStartPct}% at the window open` : ''}, projecting ~${targetSocPct}% by ${fmtLocalHint(windowEnd)}.`;
   // What the write does from the expected start (expectedBuyFromPlan): the reserve leg, then — when
   // force-charge rides the night — the house's drain to the just-in-time start and the fill to the stop.
   const expectedWriteNote = (start: number, level: number): string => {
@@ -1653,8 +1674,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const expectedNote = expected.buyKwh != null && expected.levelPct != null && expectedStartSocPct != null
     ? ` Expected: ${midWindow
       ? `the pool is at ~${expectedStartSocPct}% now`
-      : `the pool should open the window near ~${expectedStartSocPct}% with the grid present (median load and PV, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedWriteNote(expectedStartSocPct, expected.levelPct)}${projSocAtWindowStartPct != null
-      ? `; the worst case is sized from ~${projSocAtWindowStartPct}% at the window open, the islanded P10-PV/P90-load carry` : ''}.`
+      : `the pool should open the window near ~${expectedStartSocPct}% with the grid present (median load and PV, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedWriteNote(expectedStartSocPct, expected.levelPct)}.`
     : '';
   // v1.132.0 — SAY WHICH HOLD THIS IS.
   //
@@ -1691,7 +1711,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
-    ? `${buyHeadline} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${expectedNote}${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `${chargeHeadline}${expectedNote}${sizingNote}${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {

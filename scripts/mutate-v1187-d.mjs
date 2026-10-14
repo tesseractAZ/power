@@ -306,8 +306,9 @@ const MUTANTS = [
   {
     id: 'xxxv. ★★ the morning summary is awaited again',
     file: IX,
-    find: "    void sendNotification(loadNotifyConfig(), {\n      severity: 'info',\n      dedupId: 'night_charge_actuation',",
-    to: "    await sendNotification(loadNotifyConfig(), { /* MUTANT */\n      severity: 'info',\n      dedupId: 'night_charge_actuation',",
+    // v1.187.22 — re-pointed: the summary is built by buildNightChargeMorningSummary (notify.ts).
+    find: '    void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({',
+    to: '    await sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({ /* MUTANT */',
     why: 'A slow notify target holds the tick behind an info push.',
   },
   // ── review: the delivered-energy span ends at the restore ──

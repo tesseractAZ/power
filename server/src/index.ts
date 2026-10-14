@@ -182,9 +182,9 @@ import {
   plannerSizingNeedBuyKwh,
   calibratedLoadBandFactor, calibratedBuyDebiasFactor, buyDebiasUnmeasuredLogLine,
   buildCostSurplusLoad, costSurplusLedgerColumns,
-  // v1.187.22 — the expected buy beside the worst case: its ledger columns, its one figure, and
-  // how the after-the-fact pushes state an armed night's buy.
-  expectedBuyLedgerColumns, headlineBuyKwh, ledgerExpectedBuyKwh, armedBuyPhrase,
+  // v1.187.22 — the expected buy: its ledger columns, and what a spoken line states (the level
+  // the write drives to and the expected draw — never the worst case, which only logs name).
+  expectedBuyLedgerColumns, ledgerExpectedBuyKwh, chargeLevelPct, statedBuyKwh, buyFiguresLogText,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -222,7 +222,11 @@ import {
   REVERT_MAX_RETRIES,
   type NightActuationState,
 } from './nightChargeActuator.js';
-import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
+import {
+  buildNightChargeMessage, sendNotification, loadNotifyConfig,
+  // v1.187.22 — the after-the-fact night-charge pushes, built where their text is tested.
+  buildNightChargeMorningSummary, buildNightChargeApplyFailure,
+} from './notify.js';
 import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonAt } from './tariff.js';
 // v1.187.0 — the scorer's span, cost and PV-evidence decisions, pure (nightLedgerScoring.ts).
@@ -3933,7 +3937,7 @@ async function recomputeNightChargePlan(
 
 /** v1.187.22 — the armed night's EXPECTED buy, read back from its plan row (ledgerExpectedBuyKwh),
  *  for the morning summary and the apply-failure push. null when the row has none or the ledger
- *  cannot be read: the push then names the worst case as such (armedBuyPhrase). */
+ *  cannot be read: the push then states no kWh (the armed record's buyKwh is the worst case). */
 function armedExpectedBuyKwh(day: string | null): number | null {
   try {
     return ledgerExpectedBuyKwh(recorder.readNightLedger(14), day);
@@ -4510,7 +4514,7 @@ function cancelStalePriorArm(today: string, nowMs: number, reason: string): bool
   if (s.forceChargeOnAtMs != null && s.forceChargeOffVerifiedAtMs == null) return false;
   if (s.forceChargeCeilingPriorPct != null && s.forceChargeCeilingRestoredAtMs == null) return false;
   const stale = s.day;
-  app.log.warn(`night-charge: CANCELLING the prior ARM for ${stale} (target ${s.targetPct}%, buy ~${s.buyKwh ?? '—'} kWh${s.forceChargeCeilingPct != null ? `, force-charge to ${s.forceChargeCeilingPct}%` : ''}) — ${reason}. Without this it would have written at ${new Date(s.windowStartMs - APPLY_LEAD_MS).toISOString()} against tonight's decision.`);
+  app.log.warn(`night-charge: CANCELLING the prior ARM for ${stale} (target ${s.targetPct}%, worst-case sizing ~${s.buyKwh ?? '—'} kWh${s.forceChargeCeilingPct != null ? `, force-charge to ${s.forceChargeCeilingPct}%` : ''}) — ${reason}. Without this it would have written at ${new Date(s.windowStartMs - APPLY_LEAD_MS).toISOString()} against tonight's decision.`);
   try {
     recorder.recordNightOutcome(stale, {
       arm_disposition: `cancelled by the ${today} plan — ${reason}`,
@@ -4672,7 +4676,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         if (nightActuationMem.day != null && nightActuationMem.day !== today &&
             nightActuationMem.appliedAtMs == null && nightActuationMem.applyAttemptedAtMs == null &&
             nightActuationMem.targetPct != null) {
-          app.log.info(`night-charge: prior ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%, buy ~${nightActuationMem.buyKwh ?? '—'} kWh) superseded by tonight's plan — one write fires at the shared window.`);
+          app.log.info(`night-charge: prior ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%, worst-case sizing ~${nightActuationMem.buyKwh ?? '—'} kWh) superseded by tonight's plan — one write fires at the shared window.`);
           // v1.132.0 — and STAMP it. A log line is not the ledger: the superseded
           // night keeps actuated=null forever, indistinguishable from four other
           // dispositions (held below minimum buy, no window, advisory mode, apply
@@ -4721,17 +4725,16 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // dependency): announce the armed write once, at the same evening moment.
     let audibleDelivered = false;
     if (supervisedCtx && plan) {
-      // v1.187.22 — the EXPECTED figure (headlineBuyKwh): the spoken line has room for one number,
-      // and the worst case the plan is sized on is not what the write is expected to draw.
-      const buyRounded = Math.round(headlineBuyKwh(plan) ?? 0);
+      // v1.187.22 — what the write will do: the level it drives the pool to and the expected draw
+      // (none spoken with no expected figure). The worst case the plan is sized on is not spoken.
       // Disclose a plan that cannot hold the cushion — the HA notification says
       // so, and the audible channel (the one that reaches the owner without a
       // phone) must not be quieter about residual risk than the text channel.
       // v1.122.0 — the SPOKEN variant is deliberately shorter than the push, and
       // its length is bounded by a test. See nightChargeSpokenNotice.
       const spokenPair = nightChargeSpokenNotice({
-        buyKwhRounded: buyRounded,
-        targetPct: supervisedCtx.targetPct,
+        levelPct: chargeLevelPct(plan) ?? supervisedCtx.targetPct,
+        expectedKwh: statedBuyKwh(plan),
         deadlineText: supervisedCtx.cancelDeadlineText,
         deadlineTextEs: supervisedCtx.cancelDeadlineTextEs,
         cushionShortfall: plan.cushionShortfall === true,
@@ -4758,7 +4761,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       if (haNotifyDelivered || audibleDelivered) {
         persistNightActuation(armedCandidate);
         app.log.info(
-          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan?.expectedBuyKwh ?? '?'} kWh expected, ~${plan?.buyKwhDebiased ?? plan?.buyKwh ?? '?'} kWh worst case); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}`,
+          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (${buyFiguresLogText(plan?.expectedBuyKwh, plan?.buyKwhDebiased ?? plan?.buyKwh)}); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}`,
         );
       } else {
         app.log.error(
@@ -5873,20 +5876,14 @@ async function runNightActuationTickInner(): Promise<void> {
     persistNightActuation({ ...state, applyEscalated: true });
     try { recorder.recordNightOutcome(state.day, { actuated: 0 }); }
     catch (e: any) { app.log.warn(`night-charge: actuated correction failed (${e?.message ?? e})`); }
-    // v1.187.22 — the buy as the plan stated it: expected first, the worst case named as such.
-    const buyPhrase = armedBuyPhrase(armedExpectedBuyKwh(state.day), state.buyKwh);
-    app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's buy (${buyPhrase}) is forfeited; ledger corrected to actuated:0.`);
+    // v1.187.22 — the push states the armed day's EXPECTED figure, or none (never the worst case,
+    // state.buyKwh); the log keeps both, labelled.
+    const expectedKwh = armedExpectedBuyKwh(state.day);
+    app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's charge (${buyFiguresLogText(expectedKwh, state.buyKwh)}) is forfeited; ledger corrected to actuated:0.`);
     try {
-      await sendNotification(loadNotifyConfig(), {
-        severity: 'warning',
-        dedupId: 'night_charge_apply_failure',
-        title: 'Night-charge: write did not take effect',
-        body:
-          `The supervised reserve write for ${state.day} was accepted by the EcoFlow cloud but the Smart Home Panel 2 `
-          + `still reads ${currentReservePct ?? 'unknown'}% (target ${state.targetPct}%) after ${state.applyRetries} re-issues. `
-          + `Tonight's planned buy (${buyPhrase}) will not happen; the pool stays on its normal floor. `
-          + 'No action needed tonight — the grid is available as backup — but if this repeats, check the SHP2 cloud link.',
-      });
+      await sendNotification(loadNotifyConfig(), buildNightChargeApplyFailure({
+        day: state.day, currentReservePct, targetPct: state.targetPct, applyRetries: state.applyRetries, expectedKwh,
+      }));
     } catch (e: any) {
       app.log.warn(`night-charge: apply-failure notify failed (${e?.message ?? e})`);
     }
@@ -5972,16 +5969,11 @@ async function runNightActuationTickInner(): Promise<void> {
     );
     // v1.187.0 (review) — NOT awaited: an info push (5 s headers + 10 s body per target)
     // must never hold the tick, and with it any force-charge step still to run.
-    void sendNotification(loadNotifyConfig(), {
-      severity: 'info',
-      dedupId: 'night_charge_actuation',
-      title: `Night-charge: reserve restored to ${action.restorePct}%`,
-      body:
-        `Supervised night charge for ${state.day} completed: reserve raised to ${state.targetPct}% `
-        // v1.187.22 — expected first, the worst case named as such (state.buyKwh is the sized figure).
-        + `(planned buy ${armedBuyPhrase(armedExpectedBuyKwh(state.day), state.buyKwh)}) and restored to ${action.restorePct}%. `
-        + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
-    }).catch((e: any) => {
+    // v1.187.22 — the armed day's EXPECTED figure, or none: state.buyKwh is the worst case.
+    void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({
+      day: state.day, targetPct: state.targetPct, restorePct: action.restorePct,
+      expectedKwh: armedExpectedBuyKwh(state.day),
+    })).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
     });
     return;

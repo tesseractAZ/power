@@ -59,25 +59,55 @@ export function reserveWriteLabel(setpointPct: number | null, predictedPct: numb
   return null;
 }
 
+/** The plan fields the card's charge figures read (a subset of /api/night-charge/status → plan). */
+export interface ChargeFigurePlan {
+  /** The worst case the plan is SIZED on (raw). */
+  buyKwh: number | null;
+  /** The worst case × the realized-buy calibration (the figure the sizing line names). */
+  buyKwhDebiased?: number | null;
+  buyDebiasFactor?: number;
+  /** v1.187.22 — what the armed write is expected to draw; absent on older plans. */
+  expectedBuyKwh?: number | null;
+  /** v1.187.22 — the level that write drives the pool to; absent on older plans. */
+  expectedWriteLevelPct?: number | null;
+  setpointSocPct: number | null;
+}
+
 /**
- * v1.187.22 — the card's buy figure, split for layout: the EXPECTED draw is the headline number
- * and the worst case the plan is sized on is named beneath it, mirroring the server's
- * buyFigureText (nightChargeAdvisor.ts) — "up to ~W kWh in the worst case", or, when the
- * expected figure exceeds it, "the worst case it is sized on is ~W kWh". A plan with no expected
- * figure (issued before v1.187.22, or no P50 basis) shows the worst case alone, as before.
+ * v1.187.22 — the card's headline: the CHARGE the write arms. With an expected figure the big
+ * number is that draw ("34.9 kWh — expected charge to ~80%"); without one the big number is the
+ * level and no kWh is shown. The level is the plan's expectedWriteLevelPct (the reserve as written,
+ * or the force-charge stop when force-charge rides the night), else — a plan issued before it —
+ * the setpoint as written (rounded, at most the panel's maximum). Never the worst case: that is
+ * sizingLine's. Mirrors the server's chargeLevelPct / statedBuyKwh (nightChargeAdvisor.ts).
  */
-export function buyFigureParts(
-  expectedKwh: number | null | undefined,
-  worstKwh: number | null | undefined,
-): { main: string; label: string; worst: string | null } {
-  const worstOk = worstKwh != null && Number.isFinite(worstKwh);
-  const worst = worstOk ? worstKwh.toFixed(1) : '—';
-  if (expectedKwh == null || !Number.isFinite(expectedKwh)) return { main: worst, label: 'buy overnight', worst: null };
-  return {
-    main: expectedKwh.toFixed(1),
-    label: 'expected buy overnight',
-    worst: worstOk && expectedKwh <= worstKwh + 0.05
-      ? `up to ~${worst} kWh in the worst case`
-      : `the worst case it is sized on is ~${worst} kWh`,
-  };
+export function chargeFigureParts(
+  plan: ChargeFigurePlan,
+  maxPct: number | null,
+): { main: string; unit: string; label: string } {
+  const lvl = plan.expectedWriteLevelPct;
+  const set = plan.setpointSocPct;
+  const level = lvl != null && Number.isFinite(lvl) ? lvl
+    : set != null && Number.isFinite(set) ? Math.min(Math.round(set), maxPct != null && maxPct > 0 ? maxPct : Infinity)
+      : null;
+  const levelText = level == null ? '—' : `${Math.round(level * 10) / 10}`;
+  const exp = plan.expectedBuyKwh;
+  if (exp == null || !Number.isFinite(exp)) return { main: levelText, unit: '%', label: 'charge target' };
+  return { main: exp.toFixed(1), unit: 'kWh', label: `expected charge to ~${levelText}%` };
+}
+
+/**
+ * v1.187.22 — the ONE line on the card that names the worst case, labelled as the basis the plan
+ * is sized on, with the realized-buy calibration beside the figure it multiplies — the server's
+ * sizingBasisText wording (nightChargeAdvisor.ts). null with no figure.
+ */
+export function sizingLine(plan: ChargeFigurePlan): string | null {
+  const factor = plan.buyDebiasFactor ?? 1;
+  const deb = plan.buyKwhDebiased;
+  const worst = deb != null && Number.isFinite(deb) ? deb : plan.buyKwh;
+  if (worst == null || !Number.isFinite(worst)) return null;
+  const r1 = (n: number): number => Math.round(n * 10) / 10;
+  const cal = factor > 1.005 && plan.buyKwh != null && Number.isFinite(plan.buyKwh)
+    ? ` (raw estimate ${r1(plan.buyKwh)} kWh × ${factor.toFixed(2)} realized-buy calibration)` : '';
+  return `Sized on an islanded worst case (P10 PV, P90 load including any committed EV session, no grid) of ~${r1(worst)} kWh${cal}.`;
 }

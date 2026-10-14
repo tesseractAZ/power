@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calibratedBuyDebiasFactor, computeNightChargePlan, buildNightChargeInputs, DELIVERED_BASIS } from '../src/nightChargeAdvisor.js';
+import { calibratedBuyDebiasFactor, computeNightChargePlan, buildNightChargeInputs, DELIVERED_BASIS, WORST_CASE_BASIS } from '../src/nightChargeAdvisor.js';
 
 /**
  * v1.112.0 — the buy de-bias (design §3.4's lane, first live producer).
@@ -91,14 +91,17 @@ test('plan: debiased = raw × factor; raw buyKwh untouched; rationale discloses 
   assert.equal(cal.buyKwh, raw.buyKwh, 'the RAW estimate must not move with the factor');
   assert.equal(cal.buyKwhDebiased, Math.round(cal.buyKwh! * 1.66 * 100) / 100);
   assert.match(cal.rationale, /realized-buy calibration/);
-  // v1.187.22 — the headline leads with the EXPECTED buy; the debiased figure is the worst case
-  // named beside it, and the calibration note rides with the figure it multiplies.
-  assert.match(cal.rationale, new RegExp(`^Buy ~${Math.round(cal.expectedBuyKwh! * 10) / 10} kWh expected \\(up to ~${Math.round(cal.buyKwhDebiased! * 10) / 10} kWh in the worst case; raw estimate`), 'the worst case named is the debiased figure');
+  // v1.187.22 — the headline is the charge the write arms, with the EXPECTED draw; the debiased
+  // figure is the worst case, named once in the sizing sentence, the calibration beside it.
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  assert.match(cal.rationale, new RegExp(`^Charge to ~50% in the 23:00–05:00 window: ~${r1(cal.expectedBuyKwh!)} kWh expected\\. `));
+  assert.ok(cal.rationale.includes(`Sized on an islanded worst case (${WORST_CASE_BASIS}) of ~${r1(cal.buyKwhDebiased!)} kWh `
+    + `(raw estimate ${r1(cal.buyKwh!)} kWh × 1.66 realized-buy calibration)`), 'the worst case named is the debiased figure');
   assert.equal(cal.expectedBuyKwh, raw.expectedBuyKwh, 'the de-bias never touches the expected figure');
 });
 
-test('plan: with no median basis the headline is the de-biased worst case, the calibration disclosed beside it', () => {
-  // v1.187.22 — the pre-v1.187.22 headline, kept for a plan that states no expected figure.
+test('plan: with no median basis the headline states no kWh; the de-biased worst case stays the sizing sentence, the calibration beside it', () => {
+  // v1.187.22 — no expected figure: the charge without an energy figure, never the worst case.
   const cal = planWith(1.66, false);
   const raw = planWith(undefined, false);
   assert.ok(cal.chargeTonight && cal.buyKwh != null, `expected a charging plan, got: ${cal.rationale}`);
@@ -106,9 +109,11 @@ test('plan: with no median basis the headline is the de-biased worst case, the c
   assert.equal(cal.buyKwh, raw.buyKwh);
   const r1 = (n: number) => Math.round(n * 10) / 10;
   assert.ok(cal.rationale.startsWith(
-    `Buy ~${r1(cal.buyKwhDebiased!)} kWh overnight (raw estimate ${r1(cal.buyKwh!)} kWh × 1.66 realized-buy calibration) → target `,
+    `Charge to ~50% in the 23:00–05:00 window. Sized on an islanded worst case (${WORST_CASE_BASIS}) `
+    + `of ~${r1(cal.buyKwhDebiased!)} kWh (raw estimate ${r1(cal.buyKwh!)} kWh × 1.66 realized-buy calibration), from ~`,
   ), cal.rationale);
-  assert.ok(raw.rationale.startsWith(`Buy ~${r1(raw.buyKwh!)} kWh overnight → target `), raw.rationale);
+  assert.ok(raw.rationale.startsWith(`Charge to ~50% in the 23:00–05:00 window. Sized on an islanded worst case (${WORST_CASE_BASIS}) `
+    + `of ~${r1(raw.buyKwh!)} kWh, from ~`), raw.rationale);
 });
 
 test('plan: factor 1 (or absent) is invisible — no calibration note, debiased === raw', () => {

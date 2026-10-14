@@ -3,8 +3,10 @@ import { request } from 'undici';
 import { callHaService } from './haService.js';
 import { packSnTail, type Severity } from './alerts.js';
 import type { NightChargePlan } from './nightChargeAdvisor.js';
-// v1.187.22 — the buy is stated as the plan states it: expected first, the worst case beside it.
-import { buyFigureText, headlineBuyKwh } from './nightChargeAdvisor.js';
+// v1.187.22 — a night-charge push states what the write will do: the level it drives the pool to
+// and the energy it is expected to draw. The worst case the plan is sized on is never pushed.
+import { armedExpectedPhrase, chargeLevelPct, statedBuyKwh } from './nightChargeAdvisor.js';
+import { forceChargeStopPct } from './nightForceCharge.js';
 
 /**
  * v1.120.0 — NOTIFY HTTP BUDGETS.
@@ -358,11 +360,14 @@ export async function dispatchMobilePush(
  * pushed after charging should begin is worse than none, so it must not sit in a
  * quiet-hours queue.
  *
- *   • charge  — a buy IS recommended tonight. The body states the buy kWh, the
- *               target pool SoC %, tomorrow's projected low SoC WITHOUT vs WITH
- *               the buy, the floor+cushion line, the confidence tier, and the
- *               ADVISORY-ONLY automation contract (the add-on never charges; wire
- *               your HA automation to charge_tonight gated on write-ready+window).
+ *   • charge  — a buy IS recommended tonight. The body states the level the write
+ *               drives the pool to and (v1.187.22) the energy it is expected to draw
+ *               — never the worst case the plan is sized on, and no kWh with no
+ *               expected figure — the whole-house island troughs WITHOUT vs WITH
+ *               the charge, labelled as such, the floor+cushion line, the confidence
+ *               tier, and the ADVISORY-ONLY automation contract (the add-on never
+ *               charges; wire your HA automation to charge_tonight gated on
+ *               write-ready+window) or the supervised write.
  *   • hold    — no charge needed; the projected trough already clears floor+cushion.
  *   • insufficient_basis — no plan tonight (basis incomplete). Sending this makes
  *               the ABSENCE explicit so the owner never wonders if the job died.
@@ -433,10 +438,12 @@ export function buildNightChargeMessage(
   // the second is deliberately a WARNING: a missing EVSE prediction must never
   // read as a reassuring "no EV expected tonight".
   const ev = plan.evContention;
+  // v1.187.22 — no "the buy above" here: the figure above is the expected draw, and a plan
+  // with none states no buy at all.
   const evNote =
     plan.bindingCap === 'evContention' && ev?.windowEvKwh != null
       ? ` NOTE: EV charging is predicted inside the window (~${round1(ev.windowEvKwh)} kWh, peak ~${ev.peakEvKw ?? '—'} kW);`
-        + ` it shares the grid input, leaving ~${ev.minChargeRateKw ?? '—'} kW for the packs — the buy above is what the window can actually deliver.`
+        + ` it shares the grid input, leaving ~${ev.minChargeRateKw ?? '—'} kW for the packs while the car charges.`
       : ev?.basis === 'unavailable' && plan.cushionShortfall
         ? ' NOTE: no EVSE prediction covers this window, so EV contention is NOT modelled — if the car charges overnight the packs will receive less than planned.'
         : '';
@@ -458,25 +465,84 @@ export function buildNightChargeMessage(
       + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes).${expectNote} `
       + (forceCeiling != null
         // v1.170.0 — one wording for every target: the 80+ coast is retired.
+        // v1.187.22 — where it stops (forceChargeStopPct), the level the title states: an 80.4
+        // target syncs an 80 ceiling and stops at 80.
         ? `Then, near the end of the window, it switches the panel's force-charge ON just long enough to `
-          + `reach ~${pct(forceCeiling)}, and OFF when it gets there (or when the window closes). `
+          + `reach ~${pct(forceChargeStopPct(forceCeiling))}, and OFF when it gets there (or when the window closes). `
         : '')
       + 'Cancel from the night-charge card on the panel before then.'
     : 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
       + 'night_charge_recommended (charge_tonight) entity, gated on night_charge_write_ready '
       + 'and the night_charge_window_start/_end sensors.';
-  // v1.187.22 — the EXPECTED draw leads (title and body) and the worst case the plan is sized
-  // on is named beside it: on 2026-10-12 this push said "Buy ~64.2 kWh" for a night whose write
-  // would have drawn ≈34 kWh. A plan with no expected figure keeps the pre-v1.187.22 wording.
+  // v1.187.22 — the push states what the write will do: the level it drives the pool to
+  // (chargeLevelPct) and the energy it is expected to draw (statedBuyKwh); no expected figure ⇒
+  // no kWh. On 2026-10-12 it said "Buy ~64.2 kWh" — the islanded worst case the plan is sized
+  // on — for a write that would have drawn ≈34 kWh, and the night was cancelled on the figure.
+  // The worst case stays in the rationale and the card, labelled as the sizing basis. The
+  // whole-house island troughs are labelled as such: with the grid present the SHP2 holds the
+  // reserve, so neither is where the pool is expected to go.
+  const level = chargeLevelPct(plan);
+  const expected = statedBuyKwh(plan);
+  const levelText = level == null ? '—' : `~${round1(level)}%`;
   return {
     ...base,
-    title: `Night-charge: buy ~${kwh(headlineBuyKwh(plan))} tonight`,
+    title: `Night-charge: ${supervised ? `charging to ${levelText}` : `charge to ${levelText} recommended`} tonight`
+      + (expected == null ? '' : ` (~${kwh(expected)})`),
     body:
-      `Buy ${buyFigureText(plan.expectedBuyKwh, plan.buyKwh)} of grid energy overnight → target ${pct(plan.targetSocPct)} pool SoC. `
-      + `Without it, tomorrow’s projected low SoC falls to ~${pct(plan.baselineMinSocPct)}; `
-      + `with it, ~${pct(plan.minProjSocPct)} (the floor+cushion line is ${floorCushion}%). `
+      `${supervised ? 'Charging' : 'Recommended: charge'} the backup pool to ${levelText} overnight`
+      + (expected == null ? '. ' : `, ~${kwh(expected)} of grid energy expected. `)
+      + `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `
+      + `without this charge, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${floorCushion}%. `
       + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${evNote} `
       + tail,
+  };
+}
+
+/**
+ * v1.187.22 — the morning summary of an applied night, sent when its reserve is restored. The
+ * buy it names is the EXPECTED figure on the armed day's plan row (armedExpectedPhrase), or none:
+ * the armed record's buyKwh is the worst case the plan was sized on and is never pushed. PURE.
+ */
+export function buildNightChargeMorningSummary(o: {
+  day: string | null;
+  targetPct: number | null;
+  restorePct: number;
+  expectedKwh: number | null;
+}): NotifyMessage {
+  const expected = armedExpectedPhrase(o.expectedKwh);
+  return {
+    severity: 'info',
+    dedupId: 'night_charge_actuation',
+    title: `Night-charge: reserve restored to ${o.restorePct}%`,
+    body:
+      `Supervised night charge for ${o.day ?? '—'} completed: reserve raised to ${o.targetPct ?? '—'}%`
+      + `${expected ? ` (${expected})` : ''} and restored to ${o.restorePct}%. `
+      + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
+  };
+}
+
+/**
+ * v1.187.22 — the warning sent when the reserve write never took effect (apply retries spent).
+ * The charge it says will not happen is stated as the armed day's EXPECTED figure, or with no
+ * figure at all — never the worst case (buildNightChargeMorningSummary). PURE.
+ */
+export function buildNightChargeApplyFailure(o: {
+  day: string | null;
+  currentReservePct: number | null;
+  targetPct: number | null;
+  applyRetries: number;
+  expectedKwh: number | null;
+}): NotifyMessage {
+  const expected = armedExpectedPhrase(o.expectedKwh);
+  return {
+    severity: 'warning',
+    dedupId: 'night_charge_apply_failure',
+    title: 'Night-charge: write did not take effect',
+    body:
+      `The supervised reserve write for ${o.day ?? '—'} was accepted by the EcoFlow cloud but the Smart Home Panel 2 `
+      + `still reads ${o.currentReservePct ?? 'unknown'}% (target ${o.targetPct ?? '—'}%) after ${o.applyRetries} re-issues. `
+      + `Tonight's planned charge${expected ? ` (${expected})` : ''} will not happen; the pool stays on its normal floor. `
+      + 'No action needed tonight — the grid is available as backup — but if this repeats, check the SHP2 cloud link.',
   };
 }
 

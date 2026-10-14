@@ -118,9 +118,18 @@ export function ownerReserveFloorPct(
  */
 export const MAX_SPOKEN_ADVISORY_CHARS = 560;
 
+/*
+ * v1.187.22 — the line says what the write will do: the level it drives the pool to (the reserve,
+ * or the force-charge stop when force-charge rides the night) and the energy it is expected to
+ * draw. On 2026-10-12 it said "Buying about 64 kilowatt hours" — the islanded worst case the plan
+ * is sized on — for a write that would have drawn ≈34. With no expected figure it speaks no
+ * energy figure at all, never the worst case. Under 1 kWh is said as such, not "about 0".
+ */
 export function nightChargeSpokenNotice(o: {
-  buyKwhRounded: number;
-  targetPct: number;
+  /** The level tonight's write drives the pool to, % (nightChargeAdvisor.chargeLevelPct). */
+  levelPct: number;
+  /** The expected draw, kWh (nightChargeAdvisor.statedBuyKwh); null ⇒ no energy figure. */
+  expectedKwh: number | null;
   deadlineText: string;
   deadlineTextEs: string;
   cushionShortfall: boolean;
@@ -130,14 +139,22 @@ export function nightChargeSpokenNotice(o: {
   // because it discloses on every single plan.
   const shortEn = o.cushionShortfall ? ' Outage cushion not fully met.' : '';
   const shortEs = o.cushionShortfall ? ' Margen de respaldo no cubierto por completo.' : '';
+  const level = Math.round(o.levelPct);
+  const kwh = o.expectedKwh != null && Number.isFinite(o.expectedKwh) ? Math.round(o.expectedKwh) : null;
+  const kwhEn = kwh == null ? ''
+    : kwh < 1 ? ', less than 1 kilowatt hour'
+      : `, about ${kwh} kilowatt hour${kwh === 1 ? '' : 's'}`;
+  const kwhEs = kwh == null ? ''
+    : kwh < 1 ? ', menos de 1 kilovatio hora'
+      : kwh === 1 ? ', alrededor de 1 kilovatio hora' : `, unos ${kwh} kilovatios hora`;
   return {
     en:
-      `Night charge notice. Buying about ${o.buyKwhRounded} kilowatt hours overnight, `
-      + `raising backup reserve to ${o.targetPct} percent ${o.deadlineText}.`
+      `Night charge notice. Charging the backup pool to about ${level} percent overnight${kwhEn}, `
+      + `starting ${o.deadlineText}.`
       + `${shortEn} Cancel on the Power panel before then.`,
     es:
-      `Aviso de carga nocturna. Comprando unos ${o.buyKwhRounded} kilovatios hora durante la noche, `
-      + `elevando la reserva de respaldo al ${o.targetPct} por ciento ${o.deadlineTextEs}.`
+      `Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del ${level} por ciento `
+      + `durante la noche${kwhEs}, comenzando ${o.deadlineTextEs}.`
       + `${shortEs} Cancele en el panel Power antes de esa hora.`,
   };
 }

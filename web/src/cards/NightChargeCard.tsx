@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from 'react';
-import { actuationBannerVisible, buyFigureParts, reserveWriteLabel, revertUnconfirmed } from './nightChargeText';
+import { actuationBannerVisible, chargeFigureParts, reserveWriteLabel, revertUnconfirmed, sizingLine } from './nightChargeText';
 import { apiUrl } from '../api';
 
 /**
@@ -27,8 +27,13 @@ interface NightChargePlan {
   chargeTonight: boolean;
   /** The worst case the plan is SIZED on (islanded, P10 PV / P90 load). */
   buyKwh: number | null;
+  /** The worst case × the realized-buy calibration, and that factor (1 = uncalibrated). */
+  buyKwhDebiased?: number | null;
+  buyDebiasFactor?: number;
   /** v1.187.22 — what the armed write is expected to draw; absent on older plans. */
   expectedBuyKwh?: number | null;
+  /** v1.187.22 — the level that write drives the pool to; absent on older plans. */
+  expectedWriteLevelPct?: number | null;
   /** The contention-derated PREDICTION of where the pack lands. */
   targetSocPct: number | null;
   /** v1.60.0 — the WRITE SETPOINT (the resilience requirement). Higher than
@@ -225,8 +230,10 @@ export const NightChargeCard = memo(function NightChargeCard() {
   // CHARGE — surface buy, target SoC, baseline→plan trough, window, confidence.
   const ws = phoenixHHMM(plan.window?.startMs);
   const we = phoenixHHMM(plan.window?.endMs);
-  // v1.187.22 — the expected draw is the headline; the worst case is named beneath it.
-  const buyFig = buyFigureParts(plan.expectedBuyKwh, plan.buyKwh);
+  // v1.187.22 — the headline is the charge the write arms (the expected draw and the level it
+  // drives to); the worst case appears once, in the labelled sizing line beneath.
+  const fig = chargeFigureParts(plan, status.reserveWriteMaxPct ?? null);
+  const sizing = sizingLine(plan);
 
   return (
     <div className="card">
@@ -237,11 +244,11 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
       <div className="flex items-baseline gap-4 mb-3 flex-wrap">
         <div className="text-4xl font-bold tabular-nums text-ink">
-          {buyFig.main}
-          <span className="text-2xl font-semibold ml-1">kWh</span>
+          {fig.main}
+          <span className={`text-2xl font-semibold${fig.unit === '%' ? '' : ' ml-1'}`}>{fig.unit}</span>
         </div>
         <div className="text-sm text-muted">
-          {buyFig.label} → expect <span className="text-ink font-medium">{fmtSoc(plan.targetSocPct)}</span>
+          {fig.label}
           {ws && we && (
             <>
               {' '}
@@ -251,7 +258,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
         </div>
       </div>
 
-      {buyFig.worst && <div className="text-xs text-muted mb-3 -mt-2">{buyFig.worst}</div>}
+      {sizing && <div className="text-xs text-muted mb-3 -mt-2">{sizing}</div>}
 
       {plan.cushionShortfall && (
         <div className="text-xs text-warn mb-3 -mt-1">
