@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from 'react';
-import { actuationBannerVisible, reserveWriteLabel, revertUnconfirmed } from './nightChargeText';
+import { actuationBannerVisible, buyFigureParts, reserveWriteLabel, revertUnconfirmed } from './nightChargeText';
 import { apiUrl } from '../api';
 
 /**
@@ -25,7 +25,10 @@ interface NightChargePlan {
   basisComplete: boolean;
   objective: string;
   chargeTonight: boolean;
+  /** The worst case the plan is SIZED on (islanded, P10 PV / P90 load). */
   buyKwh: number | null;
+  /** v1.187.22 — what the armed write is expected to draw; absent on older plans. */
+  expectedBuyKwh?: number | null;
   /** The contention-derated PREDICTION of where the pack lands. */
   targetSocPct: number | null;
   /** v1.60.0 — the WRITE SETPOINT (the resilience requirement). Higher than
@@ -222,6 +225,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
   // CHARGE — surface buy, target SoC, baseline→plan trough, window, confidence.
   const ws = phoenixHHMM(plan.window?.startMs);
   const we = phoenixHHMM(plan.window?.endMs);
+  // v1.187.22 — the expected draw is the headline; the worst case is named beneath it.
+  const buyFig = buyFigureParts(plan.expectedBuyKwh, plan.buyKwh);
 
   return (
     <div className="card">
@@ -232,11 +237,11 @@ export const NightChargeCard = memo(function NightChargeCard() {
 
       <div className="flex items-baseline gap-4 mb-3 flex-wrap">
         <div className="text-4xl font-bold tabular-nums text-ink">
-          {plan.buyKwh != null ? plan.buyKwh.toFixed(1) : '—'}
+          {buyFig.main}
           <span className="text-2xl font-semibold ml-1">kWh</span>
         </div>
         <div className="text-sm text-muted">
-          buy overnight → expect <span className="text-ink font-medium">{fmtSoc(plan.targetSocPct)}</span>
+          {buyFig.label} → expect <span className="text-ink font-medium">{fmtSoc(plan.targetSocPct)}</span>
           {ws && we && (
             <>
               {' '}
@@ -245,6 +250,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
           )}
         </div>
       </div>
+
+      {buyFig.worst && <div className="text-xs text-muted mb-3 -mt-2">{buyFig.worst}</div>}
 
       {plan.cushionShortfall && (
         <div className="text-xs text-warn mb-3 -mt-1">

@@ -119,7 +119,9 @@
  *    it decides nothing on a stale readback.
  */
 
-import { RESERVE_WRITE_MAX_PCT, type NightActuationState } from './nightChargeActuator.js';
+import {
+  RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct, clampReserveTarget, type NightActuationState,
+} from './nightChargeActuator.js';
 import type { ForceChargeCommands } from './settingsDrift.js';
 
 /** The panel's documented force-charge ceiling range (`foceChargeHight`). */
@@ -410,6 +412,27 @@ export async function runActuationSteps(
  *  and v1.170.0 retired it.) */
 export function forceChargeStopPct(targetPct: number): number {
   return Math.min(targetPct, desiredForceChargeCeilingPct(targetPct));
+}
+
+/**
+ * v1.187.22 — PURE. The pool level an armed plan's write drives to, %: the reserve setpoint as
+ * armFromPlan writes it (clampReserveTarget), or — when force-charge rides the night
+ * (`eligible`, i.e. forceChargeEnabled) and the ceiling armFromPlan records
+ * (armedForceChargeCeilingPct) sits above the reserve maximum — where the force-charge stops
+ * (forceChargeStopPct), whichever is higher. The same fields and functions the write uses,
+ * never a re-derivation; the expected-buy disclosure (nightChargeAdvisor.expectedBuyFromPlan)
+ * reads it. At or below the reserve maximum decideForceCharge starts nothing (the reserve
+ * alone reaches it). null with no setpoint.
+ */
+export function armedWriteLevelPct(
+  plan: { setpointSocPct: number | null; costCeilingSocPct?: number | null },
+  eligible: boolean,
+): number | null {
+  if (plan.setpointSocPct == null || !Number.isFinite(plan.setpointSocPct)) return null;
+  const reservePct = clampReserveTarget(plan.setpointSocPct);
+  const ceiling = eligible ? armedForceChargeCeilingPct(plan) : null;
+  if (ceiling == null || ceiling <= RESERVE_WRITE_MAX_PCT) return reservePct;
+  return Math.max(reservePct, forceChargeStopPct(ceiling));
 }
 
 /** v1.168.0 — when a force-charge of ours that has not verified OFF must escalate,

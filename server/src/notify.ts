@@ -3,6 +3,8 @@ import { request } from 'undici';
 import { callHaService } from './haService.js';
 import { packSnTail, type Severity } from './alerts.js';
 import type { NightChargePlan } from './nightChargeAdvisor.js';
+// v1.187.22 — the buy is stated as the plan states it: expected first, the worst case beside it.
+import { buyFigureText, headlineBuyKwh } from './nightChargeAdvisor.js';
 
 /**
  * v1.120.0 — NOTIFY HTTP BUDGETS.
@@ -463,11 +465,14 @@ export function buildNightChargeMessage(
     : 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
       + 'night_charge_recommended (charge_tonight) entity, gated on night_charge_write_ready '
       + 'and the night_charge_window_start/_end sensors.';
+  // v1.187.22 — the EXPECTED draw leads (title and body) and the worst case the plan is sized
+  // on is named beside it: on 2026-10-12 this push said "Buy ~64.2 kWh" for a night whose write
+  // would have drawn ≈34 kWh. A plan with no expected figure keeps the pre-v1.187.22 wording.
   return {
     ...base,
-    title: `Night-charge: buy ~${kwh(plan.buyKwh)} tonight`,
+    title: `Night-charge: buy ~${kwh(headlineBuyKwh(plan))} tonight`,
     body:
-      `Buy ~${kwh(plan.buyKwh)} of grid energy overnight → target ${pct(plan.targetSocPct)} pool SoC. `
+      `Buy ${buyFigureText(plan.expectedBuyKwh, plan.buyKwh)} of grid energy overnight → target ${pct(plan.targetSocPct)} pool SoC. `
       + `Without it, tomorrow’s projected low SoC falls to ~${pct(plan.baselineMinSocPct)}; `
       + `with it, ~${pct(plan.minProjSocPct)} (the floor+cushion line is ${floorCushion}%). `
       + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${evNote} `

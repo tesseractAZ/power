@@ -136,8 +136,10 @@ const MUTANTS = [
   {
     id: 'xvi. ★★ arming stops capturing the announced ceiling',
     file: ACT,
-    find: '        ? plan.costCeilingSocPct : null,',
-    to: '        ? null : null, /* MUTANT */',
+    // v1.187.22 — re-pointed: the capture is armedForceChargeCeilingPct, shared with the
+    // expected-buy disclosure; this is armFromPlan's own use of it.
+    find: '    forceChargeCeilingPct: armedForceChargeCeilingPct(plan),',
+    to: '    forceChargeCeilingPct: null, /* MUTANT */',
     why: 'Every night arms with no ceiling, so force-charge never starts — the feature silently does nothing.',
   },
   {

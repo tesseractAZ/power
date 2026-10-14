@@ -42,12 +42,18 @@
  *    floor+cushion collides with morning-PV headroom, RESILIENCE FLOOR WINS,
  *    accept the clip, surface bindingCap='overBuy'.
  *
- * The DC-bus depletion recurrence matches computeRunway / getDayForecast /
- * the multi-day sim EXACTLY (analytics.ts:7973): each hour the pack changes by
+ * The DC-bus depletion recurrence: each hour the pack changes by
  * `pvW − loadW / dischargeEff` (delivering `load` at the panel draws `load/η`
- * from the pack — the discharge conversion tax), clamped to [0, fullWh]. Using
- * the same recurrence keeps the advisor's trough consistent with the alarm's
- * runway projection.
+ * from the pack — the discharge conversion tax), clamped to [0, fullWh], with the
+ * pool sized on the panel's NAMEPLATE capacity (fullKwh = backupFullCapWh).
+ * v1.187.22 — this is NOT the runway's recurrence any more. Since v1.187.19 the
+ * runway, the day/multi-day SoC trajectories and the probabilistic band drain the
+ * pool by the load leg PLUS the Cores' standby overhead (~270 W, analytics.ts), on
+ * the MEASURED capacity basis (the packs' BMS full-charge capacity, ~0.944 of
+ * nameplate on this fleet). The planner keeps the bare load/η leg on nameplate —
+ * its sizing basis is unchanged, and a source-pin test keeps the runway's basis out
+ * of this module — so its trough and the runway's projection are no longer the
+ * same number.
  * ═════════════════════════════════════════════════════════════════════════ */
 
 // The ONE definition of the reserve-write bound ([10,50], the device's own
@@ -55,6 +61,9 @@
 // automation and the value the supervised path writes can never drift apart.
 // (nightChargeActuator.ts imports nothing — no cycle.)
 import { clampReserveTarget, RESERVE_WRITE_MAX_PCT } from './nightChargeActuator.js';
+// v1.187.22 — the level an armed write drives the pool to, for the expected-buy disclosure.
+// (nightForceCharge.ts imports only nightChargeActuator.ts — no cycle.)
+import { armedWriteLevelPct } from './nightForceCharge.js';
 
 const HOUR_MS = 3_600_000;
 
@@ -87,6 +96,14 @@ export interface NightChargeHour {
    *  evContention.basis='unavailable' (contention unmodelled, disclosed), while
    *  a 0 hour is a real predicted-zero the plan may rely on. */
   evP90W?: number | null;
+  /** v1.187.22 — the MEDIAN (P50) load, watts: the day-ahead forecastLoadW WITHOUT the P90
+   *  factor, with the forecast's expected-value EV left in (never the committed P90 block).
+   *  Read ONLY by the expected-buy disclosure (expectedBuyFromPlan) — never by sizing.
+   *  null/absent ⇒ no P50 basis for this hour, and the plan states no expected buy. */
+  loadP50W?: number | null;
+  /** v1.187.22 — the MEDIAN (P50) PV, watts, for the same disclosure; absent ⇒ pvP10W
+   *  stands in (a lower PV, so a larger expected buy — never a smaller one). */
+  pvP50W?: number | null;
 }
 
 export interface NightChargeInputs {
@@ -149,6 +166,11 @@ export interface NightChargeInputs {
   buyDebiasFactor?: number;
   buyDebiasBasis?: 'measured' | 'default';
   buyDebiasSamples?: number;
+  /** v1.187.22 — the night force-charge will ride an armed plan (forceChargeEnabled: a write
+   *  mode, cost objective, ARB_COST_MAX_SOC_PCT above the reserve maximum). Read ONLY by the
+   *  expected-buy disclosure, to know which level the armed write drives the pool to.
+   *  absent/false ⇒ the reserve setpoint alone. */
+  forceChargeEligible?: boolean;
 
   // ── The cheap charge window tonight (resolved upstream via tariff.rateAt) ──
   window: { startMs: number; endMs: number } | null;
@@ -303,6 +325,31 @@ export interface NightChargePlan {
    */
   buyDebiasBasis: 'measured' | 'default';
   buyDebiasSamples: number;
+  /**
+   * v1.187.22 — the EXPECTED meter-side purchase: what the armed write would actually draw
+   * into the Cores, beside `buyKwh`, the islanded worst case the plan is SIZED on. On
+   * 2026-10-12 the plan said "Buy ~64.2 kWh" from a sizing start of 16.9% at the window
+   * open (P90 load ×1.35, a 19.3 kWh P90 EV block before the 00:00 window, no reserve
+   * floor); the pool was really at 46%, and from there the write (reserve 50%, then
+   * force-charge to 80.4%) draws ≈34 kWh. Over the seven nights scored on the delivered
+   * basis, delivered/buy had a median of 0.49.
+   *
+   * = (the level the armed write drives the pool to − expectedStartSocPct) × fullKwh /
+   * legEff, never negative, bounded by what the window can deliver on the P50 load
+   * (expectedBuyFromPlan). 0 on a hold (nothing is written). null when no P50 basis covers
+   * the carry or the window, and on a null plan. DISCLOSURE ONLY: it sizes nothing, arms
+   * nothing, and the de-bias never touches it. Absent on plans issued before v1.187.22.
+   */
+  expectedBuyKwh?: number | null;
+  /** v1.187.22 — the pool SoC % expected when charging starts: the GRID-PRESENT P50 carry
+   *  from now to the window open, floored at the reserve the SHP2 holds (expectedCarryKwh);
+   *  the live SoC on a mid-window recompute. null with no P50 basis. Not the sizing start
+   *  (`projSocAtWindowStartPct`, the islanded worst case — unchanged and unclamped). */
+  expectedStartSocPct?: number | null;
+  /** v1.187.22 — the level that write drives the pool to, % (armedWriteLevelPct): the
+   *  reserve setpoint as written, or the force-charge stop when force-charge rides the
+   *  night. null on a hold and on a null plan (it does not need a P50 basis). */
+  expectedWriteLevelPct?: number | null;
   /** PREDICTION: the pack SoC % the window is expected to actually REACH by its
    *  close, given every cap — including the v1.60.0 EV-contention derate. This
    *  is the number the ledger scores (a systematic gap between this and the
@@ -423,7 +470,8 @@ interface SimResult {
 
 /** Walk the DC-bus recurrence from startPackKwh across `hours`, tracking the
  *  minimum pack over [scoreFromMs, ∞) and the pack level AT `markMs`.
- *  Recurrence identical to analytics.ts:7973 (pv − load/η, clamp [0,full]). */
+ *  Recurrence pv − load/η, clamp [0,full] (the planner's own; see the header for
+ *  how it differs from the runway's since v1.187.19). */
 function simulate(
   startPackKwh: number,
   fullKwh: number,
@@ -480,6 +528,9 @@ function nullPlan(
     buyDebiasFactor: inputs.buyDebiasFactor ?? 1,
     buyDebiasBasis: inputs.buyDebiasBasis ?? 'default',
     buyDebiasSamples: inputs.buyDebiasSamples ?? 0,
+    expectedBuyKwh: null,
+    expectedStartSocPct: null,
+    expectedWriteLevelPct: null,
     objective: 'none',
     chargeTonight: false,
     buyKwh: null,
@@ -539,6 +590,139 @@ export function holdIsStarved(o: {
 }): boolean {
   if (!o.meetable) return true;
   return o.requiredExtraKwh / o.legEff > o.deliverableKwh + 1e-6;
+}
+
+/**
+ * v1.187.22 — PURE. The EXPECTED pack (kWh) at `toMs`: a GRID-PRESENT carry from `fromMs` on the
+ * median forecast — each hour pvP50W − loadP50W / dischargeEff, weighted by the part of the hour
+ * inside [fromMs, toMs) (the elapsed part of the current hour has already happened: the SoC now
+ * reflects it) — clamped to [floor, full]. The floor is the reserve the SHP2 holds while the grid
+ * is present (or the start, when the pool already sits under it: the carry neither drains it
+ * further nor lifts it). The sizing carry (simulate) is the opposite on purpose: islanded,
+ * P10 PV / P90 load with the committed P90 EV block, from the top of the hour, no floor.
+ * null when an hour in the span carries no finite loadP50W (no P50 basis — no expected figure).
+ */
+export function expectedCarryKwh(o: {
+  startKwh: number;
+  fullKwh: number;
+  reserveKwh: number;
+  dischargeEff: number;
+  hours: ReadonlyArray<NightChargeHour>;
+  fromMs: number;
+  toMs: number;
+}): number | null {
+  let pack = Math.max(0, Math.min(o.fullKwh, o.startKwh));
+  const floor = Math.min(Math.max(0, o.reserveKwh), pack);
+  for (const h of o.hours) {
+    const w = windowHourAvailH(h.ts, o.fromMs, o.toMs);
+    if (w <= 0) continue;
+    const load = h.loadP50W;
+    if (load == null || !Number.isFinite(load)) return null;
+    const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
+    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, load) / o.dischargeEff)) / 1000));
+  }
+  return pack;
+}
+
+/**
+ * v1.187.22 — PURE. The pack-kWh the window can deliver on the MEDIAN load: the sizing's
+ * per-hour contended rate (chargeRateKwAt) with loadP50W in place of loadP90W, × legEff × the
+ * hour's remaining fraction. Bounds the expected buy on a short window (Friday's one hour) or a
+ * busy grid input, as chargePowerLiftKwh bounds the worst case. null when a window hour carries
+ * no finite loadP50W.
+ */
+export function expectedWindowLiftKwh(o: {
+  hours: ReadonlyArray<NightChargeHour>;
+  fromMs: number;
+  windowEndMs: number;
+  chargeCapKw: number;
+  envelopeKw: number | null;
+  legEff: number;
+}): number | null {
+  let kwh = 0;
+  for (const h of o.hours) {
+    const availH = windowHourAvailH(h.ts, o.fromMs, o.windowEndMs);
+    if (availH <= 0) continue;
+    const load = h.loadP50W;
+    if (load == null || !Number.isFinite(load)) return null;
+    const rateKw = o.envelopeKw == null
+      ? o.chargeCapKw
+      : Math.max(0, Math.min(o.chargeCapKw, o.envelopeKw - Math.max(0, load) / 1000));
+    kwh += rateKw * o.legEff * availH;
+  }
+  return Math.max(0, kwh);
+}
+
+/**
+ * v1.187.22 — PURE. The EXPECTED meter-side buy of an armed plan: the energy its write would
+ * draw into the Cores = (the level the write drives to − the expected pack when charging starts)
+ * ÷ legEff, never negative, never past what the window can deliver on the median load.
+ *
+ * WHAT THE WRITE DOES, by where the pool opens the window (S) against the written reserve (R)
+ * and the force-charge stop (F, when force-charge rides the night):
+ *  - S < R: the reserve charges the pool R − S at the window open, then holds the house on the
+ *    grid; the force-charge adds F − R before the close. Draw = F − S (R − S on a reserve-only
+ *    night). This is 2026-10-12: ~46% → 50% → 80%.
+ *  - S ≥ R, reserve only: nothing is charged — the house draws the pool down toward R. Draw 0.
+ *  - R ≤ S < F: the reserve charges nothing; the just-in-time force-charge fills to F. Draw ≥ F − S:
+ *    the house runs from the pool until the force-charge starts, and that drain is bought back too
+ *    (not modelled — the start comes from the live rate). S ≥ F: 0 at the window open, likewise.
+ * The level is armedWriteLevelPct (the fields armFromPlan writes); `levelPct` is returned even
+ * when the buy is null (no P50 basis), because it is a fact about the write.
+ *
+ * kWh per percent: `fullKwh`, the planner's nameplate pool — the basis `buyKwh` is sized on, so
+ * the expected and worst-case figures compare like for like and the ledger grades both against
+ * `delivered_kwh` on one basis. The SoC is a share of the packs' BMS full-charge capacity (~0.944
+ * of nameplate on this fleet), so a percent holds less energy than this counts; the measured
+ * scale lives in the analytics worker and never reaches the planner, and the sizing basis is not
+ * this disclosure's to change.
+ */
+export function expectedBuyFromPlan(o: {
+  setpointSocPct: number | null;
+  costCeilingSocPct: number | null;
+  forceChargeEligible: boolean;
+  /** The expected pack when charging starts (expectedCarryKwh, or the live pack mid-window). */
+  startKwh: number | null;
+  /** expectedWindowLiftKwh. */
+  deliverableKwh: number | null;
+  fullKwh: number;
+  legEff: number;
+}): { buyKwh: number | null; levelPct: number | null } {
+  const levelPct = armedWriteLevelPct(
+    { setpointSocPct: o.setpointSocPct, costCeilingSocPct: o.costCeilingSocPct }, o.forceChargeEligible,
+  );
+  if (levelPct == null || o.startKwh == null || o.deliverableKwh == null) return { buyKwh: null, levelPct };
+  const liftKwh = Math.min(Math.max(0, (levelPct / 100) * o.fullKwh - o.startKwh), Math.max(0, o.deliverableKwh));
+  return { buyKwh: round2(liftKwh / o.legEff), levelPct };
+}
+
+/**
+ * v1.187.22 — the buy as the plan, the push and the card state it: the EXPECTED figure first,
+ * the worst case the plan is sized on named beside it — "~33.8 kWh expected (up to ~64.2 kWh in
+ * the worst case)". Where the expected figure exceeds the worst case (the worst case's P90 EV
+ * block takes the window's grid input; the median load does not), "up to" would be false, and
+ * the worst case is named as the sizing basis instead. `worstNote` rides inside the parenthesis
+ * (the de-bias disclosure). No expected figure ⇒ the worst case alone, as before v1.187.22. PURE.
+ */
+export function buyFigureText(
+  expectedKwh: number | null | undefined,
+  worstKwh: number | null | undefined,
+  worstNote = '',
+): string {
+  const worst = worstKwh == null || !Number.isFinite(worstKwh) ? '—' : `${round1(worstKwh)}`;
+  if (expectedKwh == null || !Number.isFinite(expectedKwh)) return `~${worst} kWh`;
+  const within = worstKwh != null && Number.isFinite(worstKwh) && expectedKwh <= worstKwh + 0.05;
+  return within
+    ? `~${round1(expectedKwh)} kWh expected (up to ~${worst} kWh in the worst case${worstNote})`
+    : `~${round1(expectedKwh)} kWh expected (the worst case it is sized on is ~${worst} kWh${worstNote})`;
+}
+
+/** v1.187.22 — the ONE buy figure a surface with room for a single number says (the spoken
+ *  advisory, the push title): the expected buy, else the worst case (a plan issued before
+ *  v1.187.22, or no P50 basis). PURE. */
+export function headlineBuyKwh(plan: Pick<NightChargePlan, 'buyKwh' | 'expectedBuyKwh'>): number | null {
+  const e = plan.expectedBuyKwh;
+  return e != null && Number.isFinite(e) ? e : plan.buyKwh;
 }
 
 export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
@@ -678,6 +862,14 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       preWindowNote = ` NOTE: before the charge window opens (${fmtPhoenixDayHm(windowStart, nowMs)}) the pack is projected to dip to ~${preWindowMinSocPct}% if islanded — a dip tonight's buy cannot prevent; the floor alarm owns that span.${gridHeldNote}`;
     }
   }
+  // v1.187.22 — the EXPECTED pack when charging starts, for the expected-buy disclosure only
+  // (expectedBuyFromPlan): the grid-present median carry to the window open, or the live pack
+  // on a mid-window recompute. Nothing below sizes on it; the sizing anchor stays the
+  // unclamped islanded carry above.
+  const expectedStartKwh: number | null = midWindow
+    ? socNowKwh
+    : expectedCarryKwh({ startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: nowMs, toMs: windowStart });
+  const expectedStartSocPct = expectedStartKwh == null ? null : round1((expectedStartKwh / fullKwh) * 100);
 
   // ★★ THE SIZING AUTHORITY (v1.37.0 review fix — two CONFIRMED criticals):
   // `trough(lift)` = the simulated PLAN-trajectory minimum pack over
@@ -759,6 +951,10 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // quantify the derate for the disclosure — never to size a buy.
   const chargePowerLiftUncontendedKwh = Math.max(0, chargeCapKw * Math.min(remainingWindowHours, windowHrs.length) * legEff);
   const contentionDerateKwh = Math.max(0, chargePowerLiftUncontendedKwh - chargePowerLiftKwh);
+  // v1.187.22 — the same window on the median load: what bounds the EXPECTED buy (disclosure only).
+  const expectedDeliverableKwh = expectedWindowLiftKwh({
+    hours: windowHrs, fromMs: effChargeStartMs, windowEndMs: windowEnd, chargeCapKw, envelopeKw, legEff,
+  });
 
   // ── The EV-contention DISCLOSURE (honesty, not sizing) ──
   // basis='predicted' requires the EVSE predictor to cover EVERY simulated
@@ -886,6 +1082,11 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       buyDebiasFactor: inputs.buyDebiasFactor ?? 1,
       buyDebiasBasis: inputs.buyDebiasBasis ?? 'default',
       buyDebiasSamples: inputs.buyDebiasSamples ?? 0,
+      // v1.187.22 — a hold arms nothing, so the expected draw is exactly 0; the expected start
+      // is still a fact about tonight and the ledger scores it.
+      expectedBuyKwh: 0,
+      expectedStartSocPct,
+      expectedWriteLevelPct: null,
       requiredExtraKwh: 0,
       targetSocPct: round1((packAtWindowEnd_noBuy / fullKwh) * 100),
       // A hold night asks for nothing: the trough already holds the line, no
@@ -1221,6 +1422,29 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const buyDebiasFactor = inputs.buyDebiasFactor ?? 1;
   const buyKwhDebiased = round2(buyKwh * buyDebiasFactor);
   const calNote = buyDebiasFactor > 1.005 ? ` (raw estimate ${round1(buyKwh)} kWh × ${buyDebiasFactor.toFixed(2)} realized-buy calibration)` : '';
+  // v1.187.22 — the EXPECTED buy beside the worst case (NightChargePlan.expectedBuyKwh): what
+  // the write armFromPlan arms from this plan would draw. A night that does not arm (under the
+  // minimum buy, below) writes nothing, so its expected draw is 0.
+  const expected = chargeTonight
+    ? expectedBuyFromPlan({
+      setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true,
+      startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff,
+    })
+    : { buyKwh: 0, levelPct: null };
+  // The headline leads with the expected figure and names the worst case; the de-bias
+  // disclosure rides with the worst case it multiplies. No P50 basis ⇒ the pre-v1.187.22 line.
+  const buyHeadline = expected.buyKwh == null
+    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote}`
+    : `Buy ${buyFigureText(expected.buyKwh, buyKwhDebiased, buyDebiasFactor > 1.005
+      ? `; raw estimate ${round1(buyKwh)} kWh × ${buyDebiasFactor.toFixed(2)} realized-buy calibration` : '')}`;
+  const expectedNote = expected.buyKwh != null && expected.levelPct != null && expectedStartSocPct != null
+    ? ` Expected: ${midWindow
+      ? `the pool is at ~${expectedStartSocPct}% now`
+      : `the pool should open the window near ~${expectedStartSocPct}% with the grid present (median load and PV, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedStartSocPct < expected.levelPct
+      ? `, and tonight's write charges it to ${expected.levelPct}%${expected.levelPct > writtenPct ? ` (the ${writtenPct}% reserve, then force-charge)` : ''}`
+      : `, already at or above the ${expected.levelPct}% tonight's write charges to`}${projSocAtWindowStartPct != null
+      ? `; the worst case is sized from ~${projSocAtWindowStartPct}% at the window open, the islanded P10-PV/P90-load carry` : ''}.`
+    : '';
   // v1.132.0 — SAY WHICH HOLD THIS IS.
   //
   // This branch used to print `buyKwh` labelled "the projected shortfall". It is
@@ -1256,7 +1480,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `${buyHeadline} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${expectedNote}${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
@@ -1269,6 +1493,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     buyDebiasFactor,
     buyDebiasBasis: inputs.buyDebiasBasis ?? 'default',
     buyDebiasSamples: inputs.buyDebiasSamples ?? 0,
+    expectedBuyKwh: expected.buyKwh,
+    expectedStartSocPct,
+    expectedWriteLevelPct: expected.levelPct,
     targetSocPct,
     setpointSocPct,
     requiredExtraKwh: round2(requiredExtraKwh),
@@ -1304,6 +1531,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
 
 function round1(n: number): number { return Math.round(n * 10) / 10; }
 function round2(n: number): number { return Math.round(n * 100) / 100; }
+function finiteOrNull(n: number | null | undefined): number | null {
+  return typeof n === 'number' && Number.isFinite(n) ? Math.max(0, n) : null;
+}
 /** Hour-of-day hint for the rationale string (no TZ math — display only; the
  *  window bounds are already resolved in Phoenix upstream). */
 function fmtLocalHint(_ms: number): string { return 'the window close'; }
@@ -1379,6 +1609,7 @@ export function nightChargeStateFields(
   night_charge_target_soc_percent: number | null;
   night_charge_expected_soc_percent: number | null;
   night_charge_buy_kwh: number | null;
+  night_charge_expected_buy_kwh: number | null;
   night_charge_window_start: string | null;
   night_charge_window_end: string | null;
   charge_tonight: boolean;
@@ -1399,7 +1630,11 @@ export function nightChargeStateFields(
     // …and the PREDICTION gets its own entity, so "what will the pack actually
     // reach tonight" stays visible instead of being overwritten by the ask.
     night_charge_expected_soc_percent: fresh ? plan!.targetSocPct : null,
+    // The worst case the plan is SIZED on, unchanged in meaning (history and automations read it).
     night_charge_buy_kwh: fresh ? plan!.buyKwh : null,
+    // v1.187.22 — the EXPECTED draw beside it (NightChargePlan.expectedBuyKwh); null with no P50
+    // basis and on a plan issued before v1.187.22.
+    night_charge_expected_buy_kwh: fresh ? (plan!.expectedBuyKwh ?? null) : null,
     // Window is informational (the automation gates on availability+charge_tonight
     // AND honors this window). Surfaced from plan.window whenever present; null on
     // no window / null plan. HA expire_after (§I12) covers the dead-advisor case.
@@ -1427,6 +1662,11 @@ export interface NightForecastHour {
   loadP90W: number;
   /** Historical EV watts embedded in loadP90W to de-dup (default 0 = EV-clean). */
   embeddedEvW?: number;
+  /** v1.187.22 — the MEDIAN load (forecastLoadW, no P90 factor, its expected-value EV kept) and
+   *  PV, watts: copied onto the planner hour for the expected-buy disclosure only. Never
+   *  de-duped or replaced by the committed P90 EV block. */
+  loadP50W?: number | null;
+  pvP50W?: number | null;
 }
 
 /** A future day's hourly trajectory (multi-day sim rollup), used beyond the 24 h
@@ -1509,6 +1749,8 @@ export interface NightChargeInputDeps {
   buyDebiasFactor?: number;
   buyDebiasBasis?: 'measured' | 'default';
   buyDebiasSamples?: number;
+  /** v1.187.22 — forwarded verbatim (see NightChargeInputs). */
+  forceChargeEligible?: boolean;
 }
 
 /**
@@ -1679,6 +1921,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // whatever the learner said (the 09-30 log: "UNMEASURED (6 eligible night(s))" while
     // the plan the log points to said 0) — the hazard the note below describes.
     buyDebiasBasis, buyDebiasSamples,
+    // v1.187.22 — read by the expected-buy disclosure; copied through like the fields below.
+    forceChargeEligible,
     // v1.125.0 — the islanded-outage cushion inputs. Destructuring here is not
     // decoration: NightChargeInputs is built field-by-field below, so a field
     // added to the deps interface and to the inputs interface but NOT copied
@@ -1738,6 +1982,10 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
       // exists: it is the day-ahead expected-value EV embedded in loadP90W,
       // replaced hour-by-hour below wherever the committed p90 block lands.
       evP90W: evPredictionAvailable ? embW : undefined,
+      // v1.187.22 — copied, not derived: an hour without them has no P50 basis (and the plan
+      // then states no expected buy). The block placement below never touches them.
+      loadP50W: finiteOrNull(h.loadP50W),
+      pvP50W: finiteOrNull(h.pvP50W),
     });
   }
   for (const dr of dayRollups) {
@@ -1751,6 +1999,10 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
         ts: hh.ts,
         pvP10W: Math.max(0, hh.pvW * p10Frac),
         loadP90W: Math.max(0, hh.loadW * p90Frac),
+        // v1.187.22 — the rollup's own (central) figures, unwidened: its loadW already embeds
+        // typical EV, and the committed P90 block is never placed out here.
+        loadP50W: finiteOrNull(hh.loadW),
+        pvP50W: finiteOrNull(hh.pvW),
       });
     }
   }
@@ -1863,6 +2115,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // v1.187.3 — forwarded verbatim; see the destructure note above.
     buyDebiasBasis,
     buyDebiasSamples,
+    // v1.187.22 — forwarded verbatim; see the destructure note above.
+    forceChargeEligible,
     confidenceTier,
     basisComplete,
     minBuyKwh,
@@ -2435,6 +2689,21 @@ export function costSurplusLedgerColumns(
     cost_surplus_raw_kwh: plan.costCeilingSurplusRawKwh ?? null,
     cost_surplus_load_factor: plan.costSurplusLoadFactor ?? null,
     cost_surplus_load_samples: plan.costSurplusLoadSamples ?? null,
+  };
+}
+
+/**
+ * v1.187.22 — the night ledger's record of the EXPECTED buy and the expected SoC when charging
+ * starts, beside `buy_kwh` (the worst case, unchanged): what lets the scorer grade the expected
+ * figure against `delivered_kwh` and the measured window-open SoC. Null when the plan has none
+ * (a null plan, no P50 basis, a plan snapshot from before v1.187.22). PURE.
+ */
+export function expectedBuyLedgerColumns(
+  plan: Pick<NightChargePlan, 'expectedBuyKwh' | 'expectedStartSocPct'>,
+): { expected_buy_kwh: number | null; expected_start_soc_pct: number | null } {
+  return {
+    expected_buy_kwh: plan.expectedBuyKwh ?? null,
+    expected_start_soc_pct: plan.expectedStartSocPct ?? null,
   };
 }
 

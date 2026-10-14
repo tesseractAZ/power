@@ -58,3 +58,26 @@ export function reserveWriteLabel(setpointPct: number | null, predictedPct: numb
   if (predictedPct != null && setpointPct > predictedPct + 0.5) return `reserve set to ${rounded}%`;
   return null;
 }
+
+/**
+ * v1.187.22 — the card's buy figure, split for layout: the EXPECTED draw is the headline number
+ * and the worst case the plan is sized on is named beneath it, mirroring the server's
+ * buyFigureText (nightChargeAdvisor.ts) — "up to ~W kWh in the worst case", or, when the
+ * expected figure exceeds it, "the worst case it is sized on is ~W kWh". A plan with no expected
+ * figure (issued before v1.187.22, or no P50 basis) shows the worst case alone, as before.
+ */
+export function buyFigureParts(
+  expectedKwh: number | null | undefined,
+  worstKwh: number | null | undefined,
+): { main: string; label: string; worst: string | null } {
+  const worstOk = worstKwh != null && Number.isFinite(worstKwh);
+  const worst = worstOk ? worstKwh.toFixed(1) : '—';
+  if (expectedKwh == null || !Number.isFinite(expectedKwh)) return { main: worst, label: 'buy overnight', worst: null };
+  return {
+    main: expectedKwh.toFixed(1),
+    label: 'expected buy overnight',
+    worst: worstOk && expectedKwh <= worstKwh + 0.05
+      ? `up to ~${worst} kWh in the worst case`
+      : `the worst case it is sized on is ~${worst} kWh`,
+  };
+}

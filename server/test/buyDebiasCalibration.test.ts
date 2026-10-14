@@ -90,7 +90,10 @@ test('plan: debiased = raw × factor; raw buyKwh untouched; rationale discloses 
   assert.equal(cal.buyKwh, raw.buyKwh, 'the RAW estimate must not move with the factor');
   assert.equal(cal.buyKwhDebiased, Math.round(cal.buyKwh! * 1.66 * 100) / 100);
   assert.match(cal.rationale, /realized-buy calibration/);
-  assert.match(cal.rationale, new RegExp(`Buy ~${Math.round(cal.buyKwhDebiased! * 10) / 10}`), 'headline uses the debiased figure');
+  // v1.187.22 — the headline leads with the EXPECTED buy; the debiased figure is the worst case
+  // named beside it, and the calibration note rides with the figure it multiplies.
+  assert.match(cal.rationale, new RegExp(`^Buy ~${Math.round(cal.expectedBuyKwh! * 10) / 10} kWh expected \\(up to ~${Math.round(cal.buyKwhDebiased! * 10) / 10} kWh in the worst case; raw estimate`), 'the worst case named is the debiased figure');
+  assert.equal(cal.expectedBuyKwh, raw.expectedBuyKwh, 'the de-bias never touches the expected figure');
 });
 
 test('plan: factor 1 (or absent) is invisible — no calibration note, debiased === raw', () => {

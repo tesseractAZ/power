@@ -182,6 +182,8 @@ import {
   plannerSizingNeedBuyKwh,
   calibratedLoadBandFactor, calibratedBuyDebiasFactor, buyDebiasUnmeasuredLogLine,
   buildCostSurplusLoad, costSurplusLedgerColumns,
+  // v1.187.22 — the expected buy beside the worst case: its ledger columns and its one figure.
+  expectedBuyLedgerColumns, headlineBuyKwh,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -227,6 +229,8 @@ import {
   supersedingPlanDate, knownFleetMismatchReason, type TimeSpan,
   integrateWh, coverageFrac, ledgerSpansForWindow, assembleNightLedgerColumns, windowlessLedgerColumns,
   unpricedTariffPeriods, houseConnectedSlots, deliveredLedgerFields,
+  // v1.187.22 — the measured window-open SoC and the expected-buy score clause.
+  measuredWindowOpenSocPct, expectedBuyScoreNote, WINDOW_OPEN_SOC_LEAD_MS,
   // v1.187.10 — the forecast span: capture waits for issue + 24 h; the one-time repair.
   ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
@@ -3650,6 +3654,10 @@ async function recomputeNightChargePlan(
       pvP10W: pb.p10W,
       loadP90W: fh.forecastLoadW * loadP90Factor,
       embeddedEvW: (fh.predictedEvLoadW ?? 0) * loadP90Factor,
+      // v1.187.22 — the MEDIAN load and PV, for the expected-buy disclosure only: forecastLoadW
+      // WITHOUT the P90 factor, its expected-value EV left in (never the committed P90 block).
+      loadP50W: fh.forecastLoadW,
+      pvP50W: pb.p50W,
     });
   }
 
@@ -3823,6 +3831,9 @@ async function recomputeNightChargePlan(
     buyDebiasFactor: buyDebiasCal.factor,
     buyDebiasBasis: buyDebiasCal.basis,
     buyDebiasSamples: buyDebiasCal.samples,
+    // v1.187.22 — the gate the force-charge itself runs on, so the expected buy reads the level
+    // the armed write drives to (armedWriteLevelPct).
+    forceChargeEligible: forceChargeOn(),
   };
 
   const inputs = buildNightChargeInputs(deps);
@@ -3985,6 +3996,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // cushion_shortfall.
     cushion_trough_soc_pct: plan.cushionTroughSocPct ?? null,
     cushion_line_soc_pct: plan.cushionLineSocPct ?? null,
+    // v1.187.22 — the expected buy and start beside buy_kwh (the worst case), so the scorer can
+    // grade them. Written unconditionally (null with none) for the same reason as above.
+    ...expectedBuyLedgerColumns(plan),
   };
   // Only a plan with a real trajectory records min_proj_soc — a null-basis /
   // insufficient plan leaves it NULL so the scorer recognises "no basis".
@@ -4175,6 +4189,10 @@ function scoreNightRow(
   const gridWin = recorder.query(shp2Sn, 'grid_home_w', windowStart, windowEnd);
   const socPts = recorder.query(shp2Sn, 'backup_pct', scoreFrom, spanEnd);
   const loadPts = recorder.query(shp2Sn, 'panel_load', fcSpanStart, fcSpanEnd);
+  // v1.187.22 — the pool SoC as the window opened: what the plan's expected start and its
+  // islanded sizing start (soc_at_window_start_pct) are graded against.
+  const windowOpenSocPct = measuredWindowOpenSocPct(
+    recorder.query(shp2Sn, 'backup_pct', windowStart - WINDOW_OPEN_SOC_LEAD_MS, windowStart), windowStart);
 
   // v1.39.0 2nd-pass: null-over-fabrication — zero samples must record NULL,
   // not a "measured" 0 kWh import (matching the on-peak guard below).
@@ -4329,6 +4347,17 @@ function scoreNightRow(
       + `${wasActuated ? `; delivered ~${deliveredKwh ?? '?'} kWh, deliberately NOT part of this metric` : '; advisory night'}.`;
   }
 
+  // v1.187.22 — the plan's expected buy against what was delivered, and its expected window-open
+  // SoC against the measured one (expectedBuyScoreNote; '' on a row without them). Notes only.
+  scoreNotes += expectedBuyScoreNote({
+    expectedBuyKwh: y.expected_buy_kwh ?? null,
+    expectedStartSocPct: y.expected_start_soc_pct ?? null,
+    sizingStartSocPct: y.soc_at_window_start_pct ?? null,
+    windowOpenSocPct,
+    actuated: wasActuated,
+    deliveredKwh,
+  });
+
   // Reconstruct just the plan fields the scorer reads.
   const yPlan: NightChargePlan = {
     generatedAt: y.issued_at_ms,
@@ -4409,6 +4438,7 @@ function scoreNightRow(
     ...deliveredLedgerFields(cols),
     grid_home_coverage_frac: winCoverage,
     scored,
+    window_open_soc_pct: windowOpenSocPct,
     // v1.187.0 — the on-peak and cost clauses always say what was measured (or why
     // nothing was), and the PV set-aside when there is one.
     score_notes: `${scoreNotes} ${cols.notes}`,
@@ -4568,7 +4598,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       const winStr = w
         ? `${new Date(w.startMs).toISOString()}→${new Date(w.endMs).toISOString()} (${round1((w.endMs - w.startMs) / 3_600_000)}h)`
         : 'none';
-      app.log.info(`night-charge: plan row recorded for ${today} — chargeTonight=${fresh.plan.chargeTonight} buyKwh=${fresh.plan.buyKwh ?? 'null'} window=${winStr}`);
+      app.log.info(`night-charge: plan row recorded for ${today} — chargeTonight=${fresh.plan.chargeTonight} buyKwh=${fresh.plan.buyKwh ?? 'null'} expectedBuyKwh=${fresh.plan.expectedBuyKwh ?? 'null'} window=${winStr}`);
     } else {
       app.log.info(`night-charge: no plan row for ${today} — inputs unavailable (SHP2 offline / missing battery fields); the night will count as an exclusion.`);
     }
@@ -4678,7 +4708,9 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // dependency): announce the armed write once, at the same evening moment.
     let audibleDelivered = false;
     if (supervisedCtx && plan) {
-      const buyRounded = plan.buyKwh != null ? Math.round(plan.buyKwh) : 0;
+      // v1.187.22 — the EXPECTED figure (headlineBuyKwh): the spoken line has room for one number,
+      // and the worst case the plan is sized on is not what the write is expected to draw.
+      const buyRounded = Math.round(headlineBuyKwh(plan) ?? 0);
       // Disclose a plan that cannot hold the cushion — the HA notification says
       // so, and the audible channel (the one that reaches the owner without a
       // phone) must not be quieter about residual risk than the text channel.
@@ -4713,7 +4745,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       if (haNotifyDelivered || audibleDelivered) {
         persistNightActuation(armedCandidate);
         app.log.info(
-          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan?.buyKwhDebiased ?? plan?.buyKwh ?? '?'} kWh); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}`,
+          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan?.expectedBuyKwh ?? '?'} kWh expected, ~${plan?.buyKwhDebiased ?? plan?.buyKwh ?? '?'} kWh worst case); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}`,
         );
       } else {
         app.log.error(

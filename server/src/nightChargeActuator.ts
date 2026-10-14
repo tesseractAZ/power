@@ -563,6 +563,15 @@ export interface ArmablePlan {
   window: { startMs: number; endMs: number } | null;
 }
 
+/** v1.187.22 — the force-charge ceiling armFromPlan records from a plan: its economic ceiling
+ *  when finite, else null (a reserve-only night). One definition, shared with the expected-buy
+ *  disclosure (nightForceCharge.armedWriteLevelPct), so the level a plan says its write drives
+ *  the pool to is read from the field this records. PURE. */
+export function armedForceChargeCeilingPct(plan: Pick<ArmablePlan, 'costCeilingSocPct'>): number | null {
+  return typeof plan.costCeilingSocPct === 'number' && Number.isFinite(plan.costCeilingSocPct)
+    ? plan.costCeilingSocPct : null;
+}
+
 /**
  * Arm tonight's actuation from the evening job's announced plan. Returns the
  * armed state, or null when the plan is not actuatable (hold night,
@@ -607,9 +616,7 @@ export function armFromPlan(
     buyKwh: plan.buyKwh,
     windowStartMs: plan.window.startMs,
     windowEndMs: plan.window.endMs,
-    forceChargeCeilingPct:
-      typeof plan.costCeilingSocPct === 'number' && Number.isFinite(plan.costCeilingSocPct)
-        ? plan.costCeilingSocPct : null,
+    forceChargeCeilingPct: armedForceChargeCeilingPct(plan),
     // An unrestored original survives the fresh record, so tonight's restore still
     // returns the OWNER's ceiling, never a value we left behind.
     forceChargeCeilingPriorPct:

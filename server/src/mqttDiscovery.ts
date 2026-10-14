@@ -420,6 +420,11 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_host_load_1m', name: 'Host Load (1m)', state_class: 'measurement', icon: 'mdi:chip', entity_category: 'diagnostic', value_template: '{{ value_json.host_load_1m }}' },
   { unique_id: 'ecoflow_host_soc_temp', name: 'Host SoC Temperature', device_class: 'temperature', state_class: 'measurement', unit_of_measurement: '°C', entity_category: 'diagnostic', value_template: '{{ value_json.host_soc_temp_c }}' },
   { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'Night-Charge Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
+  // v1.187.22 — the EXPECTED buy beside it: what the armed write is expected to draw from the
+  // expected window-open SoC. Night-Charge Buy keeps its meaning (the worst case the plan is
+  // sized on — its history and any automation on it are unchanged). Same shape: no
+  // device_class, the night-charge expire_after, null → 'unknown' with no P50 basis.
+  { unique_id: 'ecoflow_night_charge_expected_buy_kwh', name: 'Night-Charge Expected Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_buy_kwh }}' },
   { unique_id: 'ecoflow_night_charge_readiness', name: 'Night-Charge Readiness', icon: 'mdi:clipboard-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_readiness }}' },
   { unique_id: 'ecoflow_night_charge_window_start', name: 'Night-Charge Window Start', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_start }}' },
   { unique_id: 'ecoflow_night_charge_window_end', name: 'Night-Charge Window End', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_end }}' },

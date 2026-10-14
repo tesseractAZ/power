@@ -31,10 +31,12 @@ function referencedKeys(value_template: string): string[] {
 const NIGHT_CHARGE_SENSORS = SENSORS.filter((s) => s.unique_id.startsWith('ecoflow_night_charge_'));
 const NIGHT_CHARGE_BINARY = BINARY_SENSORS.filter((s) => s.unique_id.startsWith('ecoflow_night_charge_'));
 
-test('night-charge: the expected 6 sensors + 2 binary_sensors are registered', () => {
+test('night-charge: the expected 7 sensors + 2 binary_sensors are registered', () => {
   const sensorIds = NIGHT_CHARGE_SENSORS.map((s) => s.unique_id).sort();
   assert.deepEqual(sensorIds, [
     'ecoflow_night_charge_buy_kwh',
+    // v1.187.22 — the EXPECTED draw, beside buy_kwh (the worst case, its meaning unchanged).
+    'ecoflow_night_charge_expected_buy_kwh',
     // v1.60.0 — the contention-derated PREDICTION, published separately from
     // the write setpoint on ..._target_soc so neither can shadow the other.
     'ecoflow_night_charge_expected_soc',
