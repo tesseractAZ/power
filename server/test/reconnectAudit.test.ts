@@ -134,7 +134,7 @@ test('sidecar roundtrip: tenure + armed flags survive, an in-flight audit does n
   }
 });
 
-test('report render names the Core 2 blind-spot prediction', () => {
+test('report render states the measured checkpoints, the PV-coverage change as the outcome', () => {
   const msg = renderReconnectReport({
     sn: 'CORE2SN', name: 'Core 2', offlineForMs: 26 * 86_400_000, onlineAtMs: T0,
     firstTelemetryLatencyMs: 95_000, offlineAlertResolvedAfterMs: 240_000,
@@ -146,6 +146,29 @@ test('report render names the Core 2 blind-spot prediction', () => {
   assert.match(msg.body, /First telemetry: 95s/);
   assert.match(msg.body, /pack 1: 44% \(38 mV spread\)/);
   assert.match(msg.body, /pack 2: 46%/);
-  assert.match(msg.body, /PV coverage 67% → 100%/);
-  assert.match(msg.body, /~20 kWh\/day/);
+  assert.match(msg.body, /PV coverage 67% → 100%\.$/, 'the measured coverage change is the last thing said');
+});
+
+test('★★ v1.187.23 — the report carries no fixed prediction: it ends at what the audit measured, whichever device returned', () => {
+  // Until v1.187.23 every report ended with a constant written for one device of one install (a
+  // daily solar-yield figure from a past outage), pushed whenever ANY device came back after 24 h.
+  const base = {
+    onlineAtMs: T0, firstTelemetryLatencyMs: 95_000, offlineAlertResolvedAfterMs: 240_000,
+    packs: [{ num: 1, socPct: 44, spreadMv: 38 }],
+  };
+  const measured = renderReconnectReport({
+    ...base, sn: 'CORE1SN', name: 'Core 1', offlineForMs: 2 * 86_400_000,
+    pvCoverageAtFlip: 0.5, pvCoverageAtReport: 0.75,
+  });
+  assert.equal(measured.body,
+    'Core 1 reconnected after 2.0 days offline. First telemetry: 95s. Offline alert resolved: 240s after the flip. '
+    + 'Packs: pack 1: 44% (38 mV spread). PV coverage 50% → 75%.');
+  const unmeasured = renderReconnectReport({
+    ...base, sn: 'CORE2SN', name: 'Core 2', offlineForMs: 26 * 86_400_000,
+    pvCoverageAtFlip: null, pvCoverageAtReport: null,
+  });
+  assert.match(unmeasured.body, /PV coverage change unavailable\.$/, 'no coverage measured: no outcome stated in its place');
+  for (const { body } of [measured, unmeasured]) {
+    assert.doesNotMatch(body, /kWh|expect|predict|If this is/i, `no fixed prediction: ${body}`);
+  }
 });

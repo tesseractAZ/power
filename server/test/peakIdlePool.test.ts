@@ -240,7 +240,9 @@ test('★★ the monitor evaluates it on the house panel\'s readings (idlePoolIn
   // v1.187.0 (review) — the input assembly and its freshness gate are tested behaviourally
   // below (idlePoolInputsFrom); this pins only the tick's wiring.
   const m = SRC('alertMonitor.ts');
-  assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs), apsREvModelFromEnv());'));
+  // v1.187.23 — with the forecast feed's measured pool capacity (pinned behaviourally through the
+  // real monitor in peakIdlePoolMeasuredCapacity.test.ts).
+  assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow?.poolFullWh), apsREvModelFromEnv());'));
   assert.ok(m.includes('...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0'));
   assert.ok(m.includes("  'peak-idle-pool',\n];"), 'a device-derived family (hydration rules)');
   // v1.187.0 (log review) — the fired day's restore at start-up and persist on every tick are
@@ -262,7 +264,8 @@ test('★★★ a STALE or offline house panel is not live evidence: the frozen 
     },
   }) as any;
   const live = idlePoolInputsFrom(panel(MON_1600 - 30_000), true, MON_1600);
-  assert.deepEqual(live, incident({ nowMs: MON_1600 }), 'every field read from the house panel');
+  // v1.187.23 — no measured capacity passed: the nameplate, named as such.
+  assert.deepEqual(live, incident({ nowMs: MON_1600, poolCapacityBasis: 'nameplate' }), 'every field read from the house panel');
   // Cloud-dark for 20 min: the projection is kept verbatim, but it is not evidence.
   const stale = idlePoolInputsFrom(panel(MON_1600 - 20 * MIN), true, MON_1600);
   assert.equal(stale.fresh, false);
@@ -276,4 +279,86 @@ test('★★★ a STALE or offline house panel is not live evidence: the frozen 
   assert.equal(classifyIdlePool(none, REV).suppressed, 'insufficient-data');
   // The grid verdict is the caller's, passed through.
   assert.equal(idlePoolInputsFrom(panel(MON_1600 - 30_000), false, MON_1600).gridPresent, false);
+});
+
+/* ══ v1.187.23 — the kWh above the reserve is on the pool's MEASURED capacity ══ */
+
+test('★★★ v1.187.23 — a measured pool capacity is the one the kWh figure uses: (soc − reserve)% of it, not of the nameplate', () => {
+  // The SoC percent is a share of the measured capacity since v1.187.19 (nameplate × poolCapacityScale);
+  // the push said "(about 9.2 kWh above it)" from the 92.16 kWh nameplate while the forecast and the
+  // runway integrated the same 10 points on ~87.0 kWh.
+  const MEASURED_WH = 92_160 * 0.944;
+  const live = MON_1600 - 30_000;
+  const panel = {
+    'SHP2-A': {
+      sn: 'SHP2-A', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: live,
+      projection: {
+        kind: 'shp2', gridWatt: 1301, backupBatPercent: 26, backupFullCapWh: 92_160,
+        sourceWatts: [0, 0, 0], strategy: { backupReserveSoc: 16, smartBackupMode: 2 },
+        sources: [], pairedCircuits: [],
+      },
+    },
+  } as any;
+  const inputs = idlePoolInputsFrom(panel, true, MON_1600, MEASURED_WH);
+  assert.equal(inputs.poolFullWh, MEASURED_WH);
+  assert.equal(inputs.poolCapacityBasis, 'measured');
+  run(MON_1600, 9);
+  const v = evaluateIdlePool({ ...inputs, nowMs: MON_1600 + IDLE_DWELL_MS }, REV);
+  assert.equal(v.active, true);
+  assert.ok(Math.abs(v.aboveReserveKwh! - 8.6999) < 0.001, `10 points of the measured 87.0 kWh, got ${v.aboveReserveKwh}`);
+  assert.equal(v.poolCapacityBasis, 'measured');
+  const [a] = peakIdlePoolAlerts(v, MON_1600 + IDLE_DWELL_MS);
+  assert.match(a.detail, /at 26% against a 16% reserve \(about 8\.7 kWh above it\), has not discharged/);
+  assert.doesNotMatch(a.detail, /nameplate/, 'the measured figure needs no qualifier');
+  assert.equal(a.facts!.find((f) => f.label === 'Above reserve')!.value, '8.7 kWh');
+});
+
+test('★★ v1.187.23 — with no measured capacity the nameplate is the fallback, and the push names it', () => {
+  const panel = (extra: Record<string, unknown> = {}) => ({
+    'SHP2-A': {
+      sn: 'SHP2-A', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: MON_1600 - 30_000,
+      projection: {
+        kind: 'shp2', gridWatt: 1301, backupBatPercent: 26, backupFullCapWh: 92_160,
+        sourceWatts: [0, 0, 0], strategy: { backupReserveSoc: 16, smartBackupMode: 2 }, sources: [], pairedCircuits: [],
+        ...extra,
+      },
+    },
+  }) as any;
+  // No forecast delivered (undefined), a forecast with no pool (null), or an unusable figure.
+  for (const none of [undefined, null, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const i = idlePoolInputsFrom(panel(), true, MON_1600, none);
+    assert.equal(i.poolFullWh, 92_160, `fallback for ${none}`);
+    assert.equal(i.poolCapacityBasis, 'nameplate', `fallback for ${none}`);
+  }
+  run(MON_1600, 9);
+  const v = evaluateIdlePool({ ...idlePoolInputsFrom(panel(), true, MON_1600, null), nowMs: MON_1600 + IDLE_DWELL_MS }, REV);
+  assert.equal(v.active, true);
+  assert.ok(Math.abs(v.aboveReserveKwh! - 9.216) < 0.001);
+  assert.equal(v.poolCapacityBasis, 'nameplate');
+  const [a] = peakIdlePoolAlerts(v, MON_1600 + IDLE_DWELL_MS);
+  assert.match(a.detail, /\(about 9\.2 kWh above it on the nameplate capacity\), has not discharged/);
+  assert.equal(a.facts!.find((f) => f.label === 'Above reserve')!.value, '9.2 kWh (nameplate capacity)');
+  // A panel reporting no nameplate either: capacity unknown, no figure and no basis.
+  const bare = idlePoolInputsFrom(panel({ backupFullCapWh: undefined }), true, MON_1600, null);
+  assert.equal(bare.poolFullWh, null);
+  assert.equal(bare.poolCapacityBasis, null);
+  // ...but a measured capacity still serves.
+  const measuredOnly = idlePoolInputsFrom(panel({ backupFullCapWh: undefined }), true, MON_1600, 80_000);
+  assert.equal(measuredOnly.poolFullWh, 80_000);
+  assert.equal(measuredOnly.poolCapacityBasis, 'measured');
+  // No house panel: nothing is read, whatever the forecast carries.
+  const none = idlePoolInputsFrom({}, true, MON_1600, 87_000);
+  assert.equal(none.poolFullWh, null);
+  assert.equal(none.poolCapacityBasis, null);
+});
+
+test('★ v1.187.23 — a verdict with no kWh figure carries no basis (the card reads "capacity unknown")', () => {
+  run(MON_1600, 9, { poolFullWh: null, poolCapacityBasis: 'nameplate' });
+  const v = evaluateIdlePool(incident({ nowMs: MON_1600 + IDLE_DWELL_MS, poolFullWh: null, poolCapacityBasis: 'nameplate' }), REV);
+  assert.equal(v.active, true);
+  assert.equal(v.aboveReserveKwh, null);
+  assert.equal(v.poolCapacityBasis, null);
+  const [a] = peakIdlePoolAlerts(v, MON_1600 + IDLE_DWELL_MS);
+  assert.match(a.detail, /against a 16% reserve, has not discharged/);
+  assert.equal(a.facts!.find((f) => f.label === 'Above reserve')!.value, 'capacity unknown');
 });

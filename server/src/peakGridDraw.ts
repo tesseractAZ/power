@@ -380,11 +380,19 @@ export interface IdlePoolInputs {
   sourceWatts: readonly number[] | null;
   /** The panel's reading is live (fresh device evidence). A frozen projection is not. */
   fresh: boolean;
-  /** Pool capacity (Wh), for the kWh the pool is holding above its reserve. */
+  /** Pool capacity (Wh), for the kWh the pool is holding above its reserve. v1.187.23 — the
+   *  MEASURED capacity (nameplate × poolCapacityScale, the capacity the SoC percent is a share of)
+   *  whenever one is known; the nameplate only as the fallback (`poolCapacityBasis`). */
   poolFullWh?: number | null;
+  /** v1.187.23 — which capacity `poolFullWh` is: 'measured', or 'nameplate' when no measured
+   *  capacity was available (the push then names the basis). null/absent: unknown, read as measured. */
+  poolCapacityBasis?: PoolCapacityBasis | null;
   /** The panel's smartBackupMode code, reported as found (2 = self-powered on this plant). */
   smartBackupMode?: number | null;
 }
+
+/** v1.187.23 — the capacity the idle-pool kWh figure is computed on. */
+export type PoolCapacityBasis = 'measured' | 'nameplate';
 
 export type IdlePoolSuppression =
   | 'outage' | 'off-peak' | 'insufficient-data' | 'near-reserve' | 'pool-active' | 'low-import' | 'fired-today';
@@ -399,6 +407,8 @@ export interface IdlePoolVerdict {
   reserveSocPct: number | null;
   /** kWh the pool holds above its reserve; null when the capacity is unknown. */
   aboveReserveKwh: number | null;
+  /** v1.187.23 — the capacity aboveReserveKwh is computed on (IdlePoolInputs.poolCapacityBasis). */
+  poolCapacityBasis: PoolCapacityBasis | null;
   /** The on-peak import's cost for an hour, cents; null on unconfirmed rates. */
   centsPerHour: number | null;
   heldForMs: number;
@@ -547,6 +557,7 @@ export function evaluateIdlePool(
     socPct: i.socPct,
     reserveSocPct: i.reserveSocPct,
     aboveReserveKwh: above,
+    poolCapacityBasis: above == null ? null : (i.poolCapacityBasis ?? null),
     centsPerHour: c.centsPerKwh == null ? null : (importW / 1000) * c.centsPerKwh,
     heldForMs: step.state.onsetMs == null ? 0 : i.nowMs - step.state.onsetMs,
     suppressed: firedToday ? 'fired-today' : c.suppressed,
@@ -558,7 +569,11 @@ export function peakIdlePoolAlerts(v: IdlePoolVerdict, nowMs: number): Alert[] {
   if (!v.active) return [];
   const kw = (v.gridImportW / 1000).toFixed(1);
   const mins = Math.max(1, Math.round(v.heldForMs / 60_000));
-  const aboveText = v.aboveReserveKwh == null ? '' : ` (about ${v.aboveReserveKwh.toFixed(1)} kWh above it)`;
+  // v1.187.23 — the figure is on the pool's measured capacity (idlePoolInputsFrom); when only the
+  // nameplate was available it says so, rather than presenting the rated size as what the pool holds.
+  const onNameplate = v.poolCapacityBasis === 'nameplate';
+  const aboveText = v.aboveReserveKwh == null ? ''
+    : ` (about ${v.aboveReserveKwh.toFixed(1)} kWh above it${onNameplate ? ' on the nameplate capacity' : ''})`;
   const costText = v.centsPerHour == null
     ? ' The tariff rates are not confirmed in config, so the cost is not estimated here.'
     : ` At the ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour.`;
@@ -589,7 +604,7 @@ export function peakIdlePoolAlerts(v: IdlePoolVerdict, nowMs: number): Alert[] {
       { label: 'Grid import', value: `${kw} kW` },
       { label: 'Pool', value: `${v.socPct}%` },
       { label: 'Reserve', value: `${v.reserveSocPct}%` },
-      { label: 'Above reserve', value: v.aboveReserveKwh == null ? 'capacity unknown' : `${v.aboveReserveKwh.toFixed(1)} kWh` },
+      { label: 'Above reserve', value: v.aboveReserveKwh == null ? 'capacity unknown' : `${v.aboveReserveKwh.toFixed(1)} kWh${onNameplate ? ' (nameplate capacity)' : ''}` },
       { label: 'Pool flow', value: `${Math.round(v.poolFlowW)} W` },
       { label: 'Smart backup mode', value: v.smartBackupMode == null ? 'not reported' : String(v.smartBackupMode) },
       { label: 'Period', value: v.periodLabel },

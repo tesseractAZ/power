@@ -145,6 +145,54 @@ function numberWord(n: number): string {
   return String(n);
 }
 
+/*
+ * v1.187.23 — A RANGE IS READ "TO", NOT AS A PAUSE. Every em/en dash was a spoken pause, so the
+ * tariff's own period label "On-Peak (4–7pm Mon–Fri)" — in every spoken peak-grid-draw title and
+ * cost sentence — was read "On-Peak 4, 7pm Mon, Fri". Both normalizers now read a range first:
+ *  - an en/em dash with NO space on either side, between two numbers (the left one may carry a
+ *    unit, am/pm or %; the right one may start with "$", or with a weekday name: the night-charge
+ *    window "23:00–Tue 05:00"), or between two weekday names, is a range. A spaced dash stays a
+ *    pause: prose dashes are written spaced ("Backup pool low — 20%"), and a spaced dash between
+ *    numbers ("Core 3 — 45%") is prose, not a range;
+ *  - a hyphen-minus between two numbers is a range only when it is clearly one: the right number
+ *    carries am/pm, % or a unit ("4-7pm", "36-38%", "5-10 min"). The left number must not follow
+ *    a word character, '.', ':' or another hyphen, and the right one is not followed by another
+ *    hyphen-number, so a date (2026-10-12), a serial or alert id (XXX0015-2, shp2-src-err-1) or a
+ *    version is never read as one; a negative number ("-3%") has no number before its hyphen;
+ *  - a hyphen between two weekday names ("Mon-Fri") is a range too.
+ * Idempotent: every tight dash it does not read is a pause after the separator rule, and the
+ * hyphen rule's unit list holds both every unit token and every word the unit rules expand it to,
+ * so a second pass finds nothing the first did not.
+ */
+const EN_WEEKDAYS = 'Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday';
+const ES_WEEKDAYS = 'lun|mar|mié|mie|jue|vie|sáb|sab|dom|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
+/** A dash or hyphen between two weekday names (letters on neither side). */
+const weekdayRangeRe = (days: string): RegExp =>
+  new RegExp(String.raw`(?<!\p{L})((?:${days})\.?)[–—-](?=(?:${days})(?!\p{L}))`, 'giu');
+const EN_WEEKDAY_RANGE_RE = weekdayRangeRe(EN_WEEKDAYS);
+const ES_WEEKDAY_RANGE_RE = weekdayRangeRe(`${EN_WEEKDAYS}|${ES_WEEKDAYS}`);
+/** An en/em dash tight between two numbers (the right one may follow a weekday name). */
+const RANGE_DASH_RE = new RegExp(
+  String.raw`(\d(?:\s?(?:am|pm|%|°[FC]|kWh|kWp|Wh|kW|W|mAh|Ah|mA|A|mV|kV|V|h|hrs?|min|s|mo)(?![A-Za-z]))?)[–—](?=\$?\d|(?:${EN_WEEKDAYS}|${ES_WEEKDAYS}) \d)`,
+  'gi',
+);
+const RANGE_UNITS_AFTER =
+  'am|pm|kWh|kWp|Wh|kW|W|mAh|Ah|mA|A|mV|kV|V|h|hrs?|hours?|min|minutes?|s|seconds?|mo|months?|days?|weeks?|years?|points?'
+  + '|kilowatts?|watts?|milliamps?|amps?|millivolts?|kilovolts?|volts?|percent|degrees'
+  + '|horas?|minutos?|segundos?|días?|semanas?|meses|años?|puntos?|vatios?|voltios?|grados|por ciento';
+/** A hyphen-minus between two numbers, the right one carrying a unit. */
+const RANGE_HYPHEN_RE = new RegExp(
+  String.raw`(?<![\w.:\-−])(\d{1,4}(?:\.\d+)?(?:\s?(?:am|pm|%))?)-(?=\d{1,4}(?:\.\d+)?\s?(?:%|°[FC]|(?:${RANGE_UNITS_AFTER})\b))`,
+  'gi',
+);
+/** v1.187.23 — read every range in `s` with the language's range word `to` (see above). Pure. */
+export function readRanges(s: string, to: string, weekdayRange: RegExp = EN_WEEKDAY_RANGE_RE): string {
+  return s
+    .replace(RANGE_DASH_RE, `$1${to}`)
+    .replace(weekdayRange, `$1${to}`)
+    .replace(RANGE_HYPHEN_RE, `$1${to}`);
+}
+
 /**
  * Verbalize a string for TTS so Piper/Wyoming reads it naturally instead of
  * letter-by-letter or symbol-literal. Supersedes the old narrow `ttsifyText`:
@@ -173,7 +221,8 @@ function numberWord(n: number): string {
  *  • Only the SPOKEN path calls this; on-screen / notification copy keeps its
  *    symbols. en_US only (the deployment's Piper voice). */
 export function verbalizeForTts(s: string): string {
-  return s
+  // v1.187.23 — a range is read "to" first (readRanges), before the separator rule makes its dash a pause.
+  return readRanges(s, ' to ')
     // plural "(s)" → plain plural BEFORE parens are stripped: "month(s)" → "months"
     .replace(/\b(hour|minute|second|day|week|month|year|pack|cell|core|unit|panel)\(s\)/gi, '$1s')
     // v1.187.10 — any other "(s)" plural too: "MQTT message(s)" was read as "message s" (2026-10-03).
@@ -298,7 +347,8 @@ export function shortenDetail(detail: string): string {
  * before they reach here. IDEMPOTENT.
  */
 export function verbalizeForTtsEs(s: string): string {
-  return s
+  // v1.187.23 — a range is read "a" first (readRanges), before the separator rule makes its dash a pause.
+  return readRanges(s, ' a ', ES_WEEKDAY_RANGE_RE)
     .replace(/\s*≥\s*/g, ' mayor o igual a ')
     .replace(/\s*≤\s*/g, ' menor o igual a ')
     .replace(/\s*>=\s*/g, ' mayor o igual a ')
