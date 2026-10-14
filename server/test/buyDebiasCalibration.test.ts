@@ -61,7 +61,7 @@ test('eligibility: unactuated, unscored, shortfall-disclosed, tiny-plan, and nul
 
 // ── through the plan: announcement carries the factor, raw stays raw ─────────
 
-function planWith(factor?: number) {
+function planWith(factor?: number, p50 = true) {
   const nowMs = Date.UTC(2026, 7, 27, 4, 30); // 21:30 MST
   const winStart = Date.UTC(2026, 7, 27, 6, 0);
   const winEnd = Date.UTC(2026, 7, 27, 12, 0);
@@ -71,8 +71,9 @@ function planWith(factor?: number) {
     periodIdAt: (ms: number) => (ms >= winStart && ms < winEnd ? 'offpeak' : 'onpeak'),
     cheapPeriodId: 'offpeak', windowScanHours: 30,
     bandHours: Array.from({ length: 24 }, (_, h) => ({
-      ts: nowMs + h * 3_600_000, pvP10W: 0, pvP50W: 0, pvP90W: 0,
-      loadP10W: 3000, loadP50W: 3000, loadP90W: 3000, embeddedEvW: 0,
+      ts: nowMs + h * 3_600_000, pvP10W: 0, pvP90W: 0, loadP10W: 3000, loadP90W: 3000, embeddedEvW: 0,
+      // v1.187.22 — without the median basis the plan states no expected figure (the fallback headline).
+      ...(p50 ? { pvP50W: 0, loadP50W: 3000 } : {}),
     })),
     dayRollups: [], realizedDailyErrHalfFrac: null, nextRechargeMs: null,
     ev: null, evMaxLoadW: 11520,
@@ -94,6 +95,20 @@ test('plan: debiased = raw × factor; raw buyKwh untouched; rationale discloses 
   // named beside it, and the calibration note rides with the figure it multiplies.
   assert.match(cal.rationale, new RegExp(`^Buy ~${Math.round(cal.expectedBuyKwh! * 10) / 10} kWh expected \\(up to ~${Math.round(cal.buyKwhDebiased! * 10) / 10} kWh in the worst case; raw estimate`), 'the worst case named is the debiased figure');
   assert.equal(cal.expectedBuyKwh, raw.expectedBuyKwh, 'the de-bias never touches the expected figure');
+});
+
+test('plan: with no median basis the headline is the de-biased worst case, the calibration disclosed beside it', () => {
+  // v1.187.22 — the pre-v1.187.22 headline, kept for a plan that states no expected figure.
+  const cal = planWith(1.66, false);
+  const raw = planWith(undefined, false);
+  assert.ok(cal.chargeTonight && cal.buyKwh != null, `expected a charging plan, got: ${cal.rationale}`);
+  assert.equal(cal.expectedBuyKwh, null, 'no P50 basis — no expected figure');
+  assert.equal(cal.buyKwh, raw.buyKwh);
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  assert.ok(cal.rationale.startsWith(
+    `Buy ~${r1(cal.buyKwhDebiased!)} kWh overnight (raw estimate ${r1(cal.buyKwh!)} kWh × 1.66 realized-buy calibration) → target `,
+  ), cal.rationale);
+  assert.ok(raw.rationale.startsWith(`Buy ~${r1(raw.buyKwh!)} kWh overnight → target `), raw.rationale);
 });
 
 test('plan: factor 1 (or absent) is invisible — no calibration note, debiased === raw', () => {

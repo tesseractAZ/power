@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   computeNightChargePlan, buildNightChargeInputs, nightChargeStateFields, expectedCarryKwh,
-  expectedWindowLiftKwh, expectedBuyFromPlan, buyFigureText, headlineBuyKwh,
-  type NightChargeInputDeps, type NightForecastHour, type NightChargePlan,
+  expectedWindowLiftKwh, expectedBuyFromPlan, expectedForceChargeStart, buyFigureText, headlineBuyKwh,
+  armedBuyPhrase, ledgerExpectedBuyKwh,
+  type NightChargeInputDeps, type NightForecastHour, type NightChargePlan, type NightChargeHour,
 } from '../src/nightChargeAdvisor.js';
-import { armedWriteLevelPct, forceChargeEnabled } from '../src/nightForceCharge.js';
+import {
+  armedWriteLevelPct, forceChargeEnabled, forceChargeStartAtMs, forceChargeStopPct, FORCE_CHARGE_MIN_RUN_MS,
+} from '../src/nightForceCharge.js';
 import { armFromPlan, emptyActuationState, nightChargeSpokenNotice, RESERVE_WRITE_MAX_PCT } from '../src/nightChargeActuator.js';
 import { buildNightChargeMessage } from '../src/notify.js';
 import { SENSORS } from '../src/mqttDiscovery.js';
@@ -46,11 +49,15 @@ const houseKw = (h: number): number => (h >= 21 || h < 0 ? 2.8 : h < 5 ? 2.2 : h
 /** A typical-day PV curve (P50), kW. */
 const pvP50Kw = (h: number): number => (h >= 7 && h < 18 ? 6 * Math.sin(((h - 7 + 0.5) / 11) * Math.PI) : 0);
 
-/** The band as index.ts builds it: P90 = forecastLoadW × factor, embedded EV × factor, P50 copied. */
-function band(o: { evExpectedW?: (ts: number) => number; p50?: boolean } = {}): NightForecastHour[] {
+/** The Phoenix hour of a UTC ms. */
+const phxHour = (ts: number): number => (new Date(ts).getUTCHours() + 17) % 24;
+
+/** The band as index.ts builds it: P90 = forecastLoadW × factor, embedded EV × factor, P50 copied.
+ *  `from` — the first hour; the day-ahead forecast's hours start at the NEXT hour (ceil(now)). */
+function band(o: { evExpectedW?: (ts: number) => number; p50?: boolean; from?: number } = {}): NightForecastHour[] {
   const out: NightForecastHour[] = [];
-  for (let ts = phx(10, 12, 21); ts < NEXT_WINDOW; ts += H) {
-    const hour = (new Date(ts).getUTCHours() + 17) % 24; // Phoenix hour
+  for (let ts = o.from ?? phx(10, 12, 21); ts < NEXT_WINDOW; ts += H) {
+    const hour = phxHour(ts);
     const evW = o.evExpectedW?.(ts) ?? 0;
     const forecastLoadW = houseKw(hour) * 1000 + evW;
     const p50W = pvP50Kw(hour) * 1000;
@@ -88,6 +95,42 @@ const plan = (over: Partial<NightChargeInputDeps> = {}): NightChargePlan => comp
 /** The pre-v1.187.22 inputs: no P50 copied onto the band, no force-charge eligibility. */
 const legacyPlan = (): NightChargePlan => plan({ bandHours: band({ p50: false }), forceChargeEligible: undefined });
 const r1 = (n: number) => Math.round(n * 10) / 10;
+const round2 = (n: number) => Math.round(n * 100) / 100;
+/** (to − from) % of the pool, meter-side: the bare "level − start" arithmetic. */
+const legKwh = (fromPct: number, toPct: number) => Math.max(0, ((toPct - fromPct) / 100) * POOL / LEG);
+
+/**
+ * v1.187.22 — an INDEPENDENT minute-by-minute model of the night the armed write produces:
+ * the oracle the expected figure is checked against. Unlike the walk under test (which only finds
+ * the force-charge start) it CHARGES: below the written reserve the reserve charges at the live
+ * rate; at or above it the house runs from the pool (2.2 kW in the window, ÷ the 0.94 discharge
+ * leg), held at the reserve; the force-charge switches on once, when the clock reaches the write's
+ * own forceChargeStartAtMs, charges at the live rate ((17 kW grid cap − the house) × the charge
+ * leg, forceChargeRateKw) and stops at forceChargeStopPct. What it charges, ÷ the charge leg, is
+ * what the night buys.
+ */
+function simulateNight(fromMs: number, openPct: number, ceilingPct: number, reservePct = 50): { buyKwh: number; onAtMs: number | null } {
+  const stop = forceChargeStopPct(ceilingPct);
+  let soc = openPct;
+  let buy = 0;
+  let on = false;
+  let onAtMs: number | null = null;
+  for (let t = fromMs; t < WIN_END; t += 60_000) {
+    const house = houseKw(phxHour(t));
+    const rate = (17 - house) * LEG;
+    if (onAtMs == null && soc < stop && t < WIN_END - FORCE_CHARGE_MIN_RUN_MS
+      && t >= forceChargeStartAtMs(WIN_END, ceilingPct, soc, POOL, rate, 0)) { on = true; onAtMs = t; }
+    const charge = (toPct: number) => {
+      const add = Math.min(rate / 60, Math.max(0, ((toPct - soc) / 100) * POOL));
+      soc += (add / POOL) * 100;
+      buy += add / LEG;
+    };
+    if (on) { charge(stop); if (soc >= stop - 1e-9) on = false; }
+    else if (soc < reservePct) charge(reservePct);
+    else soc = Math.max(reservePct, soc - ((house / 0.94 / 60) / POOL) * 100);
+  }
+  return { buyKwh: buy, onAtMs };
+}
 
 /* ── the 2026-10-12 replay ──────────────────────────────────────────────── */
 
@@ -117,8 +160,13 @@ test('★★★ 2026-10-12: the worst case stays ~64 kWh, the expected buy is ~3
   // The headline: expected first, the worst case named, then the target.
   assert.ok(p.rationale.startsWith(`Buy ~${r1(p.expectedBuyKwh!)} kWh expected (up to ~${r1(p.buyKwh!)} kWh in the worst case) → target 80.4% by the window close.`), p.rationale);
   assert.match(p.rationale, /Expected: the pool should open the window near ~4\d\.\d% with the grid present/);
-  assert.match(p.rationale, /charges it to 80% \(the 50% reserve, then force-charge\)/);
+  // v1.187.22 — the force-charge leg is timed by the write's own just-in-time start.
+  assert.match(p.rationale, /charges it to 80% \(the 50% reserve, then force-charge from ~02:4\d\)/);
   assert.match(p.rationale, /the worst case is sized from ~17\.6% at the window open/);
+  // Below the reserve the drain question does not arise: the night the write produces from the
+  // expected open buys what the plan states.
+  const sim = simulateNight(WIN_START, p.expectedStartSocPct!, 80.4);
+  assert.ok(Math.abs(p.expectedBuyKwh! - sim.buyKwh) < 0.3, `${p.expectedBuyKwh} vs the simulated night's ${sim.buyKwh}`);
 });
 
 test('★★★ the sizing does not move: every sizing field equals the pre-v1.187.22 plan of the same night', () => {
@@ -154,9 +202,9 @@ test('★★ the level comes from the fields armFromPlan writes: force-charge in
   assert.equal(forceChargeEnabled({ mode: 'advisory', objective: 'cost', costMaxSocPct: 90, reserveWriteMaxPct: RESERVE_WRITE_MAX_PCT }), false);
 });
 
-test('★★ an expected start ABOVE the write level draws nothing at the window open', () => {
-  // Reserve only (force-charge ineligible): from ~66% the pool sits above the 50% reserve all
-  // night, the house draws it toward 50%, and nothing is charged — exactly 0.
+test('★★ reserve only, an expected start ABOVE the reserve draws nothing', () => {
+  // Force-charge ineligible: from ~66% the pool sits above the 50% reserve all night, the house
+  // draws it toward 50%, and nothing is charged — exactly 0.
   const reserveOnly = plan({ socNowPct: 74, forceChargeEligible: false });
   assert.equal(reserveOnly.chargeTonight, true, 'the worst case still buys');
   assert.ok(reserveOnly.buyKwh! > 20, `worst case ${reserveOnly.buyKwh}`);
@@ -164,13 +212,59 @@ test('★★ an expected start ABOVE the write level draws nothing at the window
   assert.equal(reserveOnly.expectedBuyKwh, 0);
   assert.match(reserveOnly.rationale, /^Buy ~0 kWh expected \(up to ~[\d.]+ kWh in the worst case\)/);
   assert.match(reserveOnly.rationale, /already at or above the 50% tonight's write charges to/);
-  // Force-charge riding the night, opening above its 80% stop: 0 at the window open (a drain
-  // below the stop before the close would be bought back by the just-in-time start — not modelled).
+});
+
+test('★★★ force-charge nights that open ABOVE the reserve: the drain before the just-in-time start is bought back too', () => {
+  // With the reserve at 50% and the pool above it, the house runs from the pool until the
+  // just-in-time start, and the force-charge then fills back to its stop. Taking the pool at the
+  // window OPEN as the start of charging understated these nights by up to the window's median
+  // drain (~12 kWh), and announced "about 0" at 90%+ on nights that buy ~4-9.
+  for (const socNowPct of [53, 60, 66, 74, 80, 88, 96]) {
+    const p = plan({ socNowPct });
+    assert.equal(p.chargeTonight, true, `${socNowPct}%: the worst case still buys`);
+    assert.equal(p.expectedWriteLevelPct, 80);
+    const sim = simulateNight(WIN_START, p.expectedStartSocPct!, 80.4);
+    assert.ok(Math.abs(p.expectedBuyKwh! - sim.buyKwh) < 0.3,
+      `${socNowPct}%: expected ${p.expectedBuyKwh} vs the simulated night's ${sim.buyKwh.toFixed(2)}`);
+  }
+  // 74% at 21:30: the pool opens ~65.9%, the house draws it to ~57.7% by the ~03:14 start, and the
+  // force-charge buys back that drain: ~22 kWh, not the ~14 kWh of (80 − 65.9).
+  const p74 = plan({ socNowPct: 74 });
+  assert.ok(p74.expectedBuyKwh! > legKwh(p74.expectedStartSocPct!, 80) + 6, `${p74.expectedBuyKwh}`);
+  assert.ok(p74.expectedBuyKwh! >= 21 && p74.expectedBuyKwh! <= 23.5, `${p74.expectedBuyKwh}`);
+  assert.match(p74.rationale, /above the 50% reserve: the house should draw it to ~5\d\.\d% before the just-in-time force-charge \(~03:1\d\) charges it to 80%/);
+  // 96%: opening ~87.9%, above the 80% stop; the house draws it under the stop and the
+  // just-in-time start (~04:30) buys ~3.5 kWh — not the 0 the window-open start implied.
   const fc = plan({ socNowPct: 96 });
-  assert.equal(fc.chargeTonight, true, 'the worst case still buys');
   assert.ok(fc.expectedStartSocPct! > 80, `expected start ${fc.expectedStartSocPct}`);
-  assert.equal(fc.expectedWriteLevelPct, 80);
-  assert.equal(fc.expectedBuyKwh, 0);
+  assert.ok(fc.expectedBuyKwh! >= 3 && fc.expectedBuyKwh! <= 4.2, `${fc.expectedBuyKwh}`);
+  assert.match(fc.rationale, /before the just-in-time force-charge \(~04:[23]\d\) charges it to 80%/);
+  // The single-number surfaces carry it: the push title and the spoken line are not "about 0".
+  assert.notEqual(Math.round(headlineBuyKwh(fc)!), 0);
+  assert.doesNotMatch(buildNightChargeMessage(fc, 'charge').title, /~0 kWh/);
+});
+
+test('★★ the 2026-09-30 shape: ~74% at 23:00, ceiling 76% — the drain to the start is most of the buy', () => {
+  // That night the pool sat at 74% at 23:00, was drawn to ~55% and charged to 76%; ~20.3 kWh went
+  // into the Cores. The window-open arithmetic, (76 − ~71) of the pool, said ~5 kWh.
+  const p = plan({ nowMs: phx(10, 12, 23), socNowPct: 74, morningPvSurplusP50Kwh: POOL * 0.24 });
+  assert.equal(p.chargeTonight, true, p.rationale);
+  assert.equal(p.costCeilingSocPct, 76);
+  assert.equal(p.expectedWriteLevelPct, 76);
+  assert.ok(p.expectedStartSocPct! > 70 && p.expectedStartSocPct! < 72, `${p.expectedStartSocPct}`);
+  const sim = simulateNight(WIN_START, p.expectedStartSocPct!, 76);
+  assert.ok(Math.abs(p.expectedBuyKwh! - sim.buyKwh) < 0.3, `${p.expectedBuyKwh} vs ${sim.buyKwh}`);
+  assert.ok(p.expectedBuyKwh! > 2.5 * legKwh(p.expectedStartSocPct!, 76), `${p.expectedBuyKwh} vs ${legKwh(p.expectedStartSocPct!, 76)}`);
+});
+
+test('★★ a pool that stays at or near the force-charge stop: no start is expected, and the plan says so', () => {
+  // 100% at 21:30 opens ~92% and is drawn under 80% only inside the window's last 20 minutes,
+  // where decideForceCharge starts nothing (FORCE_CHARGE_MIN_RUN_MS): nothing is charged.
+  const p = plan({ socNowPct: 100 });
+  assert.equal(p.chargeTonight, true, 'the worst case still buys');
+  assert.equal(p.expectedBuyKwh, 0);
+  assert.equal(simulateNight(WIN_START, p.expectedStartSocPct!, 80.4).onAtMs, null, 'the simulated night starts nothing either');
+  assert.match(p.rationale, /above the 50% reserve; the just-in-time force-charge to 80% is not expected to start/);
 });
 
 test('★★ the expected carry keeps the forecast\'s expected-value EV and never reads the P90 block', () => {
@@ -212,15 +306,23 @@ test('★★ buildNightChargeInputs copies the P50 fields and the force-charge g
   assert.equal(buildNightChargeInputs(deps({ forceChargeEligible: undefined })).forceChargeEligible, undefined);
 });
 
-test('★ mid-window the expected start is the live SoC (what is still to draw)', () => {
+test('★ mid-window the expected start is the live SoC, and the walk runs from now', () => {
+  // 02:10, 62%: above the reserve — the house draws it until the just-in-time start, then the
+  // force-charge fills to 80%.
   const p = plan({ nowMs: phx(10, 13, 2, 10), socNowPct: 62 });
   assert.equal(p.chargeTonight, true, p.rationale);
   assert.equal(p.expectedStartSocPct, 62);
   assert.equal(p.expectedWriteLevelPct, 80);
-  const want = ((80 - 62) / 100) * POOL / LEG;
-  assert.ok(Math.abs(p.expectedBuyKwh! - want) < 0.1, `${p.expectedBuyKwh} vs ${want}`);
-  assert.match(p.rationale, /Expected: the pool is at ~62% now, and tonight's write charges it to 80%/);
+  const sim = simulateNight(phx(10, 13, 2, 10), 62, 80.4);
+  assert.ok(Math.abs(p.expectedBuyKwh! - sim.buyKwh) < 0.3, `${p.expectedBuyKwh} vs ${sim.buyKwh}`);
+  assert.ok(p.expectedBuyKwh! > legKwh(62, 80) + 2);
+  assert.match(p.rationale, /Expected: the pool is at ~62% now, above the 50% reserve: the house should draw it to ~\d\d(\.\d)?% before the just-in-time force-charge \(~03:\d\d\) charges it to 80%/);
   assert.doesNotMatch(p.rationale, /worst case is sized from/, 'no pre-window carry mid-window');
+  // While the force-charge runs at the rate it was timed with, its own start reads "now": what is
+  // still to draw is the stop less the pool. (02:43 from 50% at (17 − 2.2) × 0.927 kW → ~61.6% at 03:30.)
+  const during = plan({ nowMs: phx(10, 13, 3, 30), socNowPct: 61.6 });
+  assert.ok(Math.abs(during.expectedBuyKwh! - legKwh(61.6, 80)) < 0.1, `${during.expectedBuyKwh} vs ${legKwh(61.6, 80)}`);
+  assert.match(during.rationale, /the force-charge is due at once \(~03:30\) and charges it to 80%/);
 });
 
 test('★ the expected buy never exceeds what the window can deliver on the median load', () => {
@@ -232,6 +334,27 @@ test('★ the expected buy never exceeds what the window can deliver on the medi
   const deliverable = (17 - 2.8) * LEG; // one hour at the envelope less the median house load
   assert.ok(fri.expectedBuyKwh! <= deliverable / LEG + 0.01, `${fri.expectedBuyKwh} vs ${deliverable / LEG}`);
   assert.ok(Math.abs(fri.expectedBuyKwh! - deliverable / LEG) < 0.05, 'bound by the window, not by the level');
+  assert.match(fri.rationale, /charges it toward 80% \(the 50% reserve, then force-charge from ~23:00\), as far as the window can deliver/);
+});
+
+test('★★ the in-progress hour: a band that starts at the NEXT hour still carries the drain to it', () => {
+  // The day-ahead forecast's hours start at ceil(now), so at 21:05 the band usually starts at
+  // 22:00. The 21:05-22:00 drain was dropped: the expected start read 46.5% at 21:00:30, 21:05 and
+  // 21:30 alike. It is carried at the next hour's figures.
+  const from22 = band({ from: phx(10, 12, 22) });
+  for (const mi of [5, 30]) {
+    const withHour = plan({ nowMs: phx(10, 12, 21, mi) });
+    const next = plan({ nowMs: phx(10, 12, 21, mi), bandHours: from22 });
+    assert.equal(next.expectedStartSocPct, withHour.expectedStartSocPct, `21:${mi}: 2.8 kW in both hours`);
+    assert.equal(next.expectedBuyKwh, withHour.expectedBuyKwh);
+  }
+  const at2105 = plan({ nowMs: phx(10, 12, 21, 5), bandHours: from22 });
+  const at2130 = plan({ nowMs: phx(10, 12, 21, 30), bandHours: from22 });
+  // 25 more minutes at 2.8 kW / 0.94 ≈ 1.24 kWh ≈ 1.3 points.
+  assert.ok(at2130.expectedStartSocPct! - at2105.expectedStartSocPct! > 1.1, `${at2105.expectedStartSocPct} → ${at2130.expectedStartSocPct}`);
+  // Mid-window the same: at 02:10 a band from 03:00 still has a basis for 02:10-03:00.
+  const mid = plan({ nowMs: phx(10, 13, 2, 10), socNowPct: 62, bandHours: band({ from: phx(10, 13, 3) }) });
+  assert.ok(mid.expectedBuyKwh != null, 'the walk has a basis for the in-progress hour');
 });
 
 test('★ a hold states an expected buy of 0 and still records the expected start', () => {
@@ -278,7 +401,14 @@ test('expectedCarryKwh: the current hour by its remaining part, the reserve as a
   assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: [{ ...sun[0], pvP50W: null }], fromMs: 0, toMs: H }), 51);
   assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: [{ ts: 0, pvP10W: 0, loadP90W: 1 }], fromMs: 0, toMs: H }), null);
   // An hour outside the span is not read at all (its missing P50 does not null the carry).
-  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: [{ ts: 5 * H, pvP10W: 0, loadP90W: 1 }], fromMs: 0, toMs: H }), 50);
+  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: [{ ts: 0, pvP10W: 0, loadP90W: 1, loadP50W: 0 }, { ts: 5 * H, pvP10W: 0, loadP90W: 1 }], fromMs: 0, toMs: H }), 50);
+  // v1.187.22 — the in-progress hour missing from the band (it starts at ceil(now)) is carried
+  // at the next hour's figures: from 0.5 h, 0.5 h at hour 1's 1.88 kW, then hours 1 and 2.
+  const fromNext = hrs.slice(1);
+  assert.equal(r1(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: fromNext, fromMs: 0.5 * H, toMs: 3 * H })!), 45);
+  // Only the in-progress hour: a missing hour later in the span is no P50 basis.
+  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: [hrs[0], hrs[2]], fromMs: 0.5 * H, toMs: 3 * H }), null);
+  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: hrs.slice(2), fromMs: 0.5 * H, toMs: 3 * H }), null, 'two hours missing');
 });
 
 test('expectedWindowLiftKwh: the contended rate on the median load × legEff × the hour left', () => {
@@ -286,6 +416,9 @@ test('expectedWindowLiftKwh: the contended rate on the median load × legEff × 
   assert.equal(r1(expectedWindowLiftKwh({ hours: hrs, fromMs: 0.5 * H, windowEndMs: 2 * H, chargeCapKw: 20, envelopeKw: 17, legEff: 0.9 })!), r1(14 * 0.9 * 1.5));
   assert.equal(r1(expectedWindowLiftKwh({ hours: hrs, fromMs: 0, windowEndMs: 2 * H, chargeCapKw: 10, envelopeKw: null, legEff: 0.9 })!), 18);
   assert.equal(expectedWindowLiftKwh({ hours: [{ ts: 0, pvP10W: 0, loadP90W: 1 }], fromMs: 0, windowEndMs: H, chargeCapKw: 10, envelopeKw: null, legEff: 0.9 }), null);
+  // The in-progress hour at the next hour's figures; a missing later hour voids the bound.
+  assert.equal(r1(expectedWindowLiftKwh({ hours: hrs.slice(1), fromMs: 0.5 * H, windowEndMs: 2 * H, chargeCapKw: 20, envelopeKw: 17, legEff: 0.9 })!), r1(14 * 0.9 * 1.5));
+  assert.equal(expectedWindowLiftKwh({ hours: hrs.slice(0, 1), fromMs: 0, windowEndMs: 2 * H, chargeCapKw: 20, envelopeKw: 17, legEff: 0.9 }), null);
 });
 
 test('armedWriteLevelPct: the reserve as written, or the force-charge stop above it', () => {
@@ -298,13 +431,66 @@ test('armedWriteLevelPct: the reserve as written, or the force-charge stop above
   assert.equal(armedWriteLevelPct({ setpointSocPct: null, costCeilingSocPct: 80 }, true), null);
 });
 
-test('expectedBuyFromPlan: never negative, bounded by the deliverable, null without a basis', () => {
-  const base = { setpointSocPct: 80.4, costCeilingSocPct: 80.4, forceChargeEligible: true, fullKwh: 100, legEff: 0.9 };
-  assert.deepEqual(expectedBuyFromPlan({ ...base, startKwh: 44, deliverableKwh: 1e9 }), { buyKwh: 40, levelPct: 80 });
-  assert.deepEqual(expectedBuyFromPlan({ ...base, startKwh: 90, deliverableKwh: 1e9 }), { buyKwh: 0, levelPct: 80 });
-  assert.deepEqual(expectedBuyFromPlan({ ...base, startKwh: 44, deliverableKwh: 9 }), { buyKwh: 10, levelPct: 80 });
+/** A 5-hour window, 0 → 5 h, at a flat median load, no PV. */
+const flatWindow = (loadW: number): NightChargeHour[] => [0, 1, 2, 3, 4].map((i) => ({ ts: i * H, pvP10W: 0, loadP90W: 9000, loadP50W: loadW, pvP50W: 0 }));
+const win = (loadW: number, envelopeKw: number | null = null) => ({
+  hours: flatWindow(loadW), fromMs: 0, windowEndMs: 5 * H, dischargeEff: 1, chargeCapKw: 20, envelopeKw,
+});
+
+test('expectedForceChargeStart: the house drains the pool, held at the reserve, until the just-in-time start', () => {
+  // 4 kW from 70 of a 100 kWh pool; no envelope ⇒ the write's fixed 10 kW plan rate. The start is
+  // where t = 5 h − ((80.4 − pool(t)) / 10 h + 15 min), pool(t) = 70 − 4t: t ≈ 2.65 h, pool ≈ 59.4.
+  const o = { startKwh: 70, reserveKwh: 50, fullKwh: 100, ceilingPct: 80.4, ...win(4000), legEff: 0.9 };
+  const r = expectedForceChargeStart(o)!;
+  assert.ok(Math.abs(r.startMs! / H - 2.65) < 0.02, `start ${r.startMs! / H} h`);
+  assert.ok(Math.abs(r.packKwh - 59.4) < 0.1, `pack ${r.packKwh}`);
+  // The start is the write's own condition, read on the pool at that minute.
+  assert.ok(r.startMs! >= forceChargeStartAtMs(5 * H, 80.4, r.packKwh, 100, null, null));
+  // Held at the written reserve: a heavy house load stops at 50, and the start comes from there.
+  const heavy = expectedForceChargeStart({ ...o, ...win(12000) })!;
+  assert.equal(heavy.packKwh, 50);
+  // At or above the stop nothing starts; drained under it only inside the last 20 min ⇒ no start.
+  const high = expectedForceChargeStart({ ...o, startKwh: 90, ...win(2000) })!;
+  assert.equal(high.startMs, null);
+  // The P50 basis is required for every minute walked.
+  assert.equal(expectedForceChargeStart({ ...o, hours: flatWindow(4000).slice(0, 2) }), null);
+  // A predicted EV in the window pulls the start earlier, as the live tick's evDisplacedKwh does
+  // (11.52 kW against a (10 − 4) × 0.9 kW rate: due from the first minute) — but at or above the
+  // stop nothing starts: the start comes the minute the pool falls under 80, at 2.5 h. (Without the
+  // EV term it would come at ~3.75 h, from 75.)
+  const ev = expectedForceChargeStart({
+    ...o, startKwh: 90, envelopeKw: 10, hours: flatWindow(4000).map((h) => ({ ...h, evP90W: 11520 })),
+  })!;
+  assert.ok(ev.startMs! / H >= 2.45 && ev.startMs! / H <= 2.6, `start ${ev.startMs! / H} h`);
+  assert.ok(ev.packKwh < 80 && ev.packKwh > 79.5, `pack ${ev.packKwh}`);
+});
+
+test('expectedBuyFromPlan: the reserve leg, the drain-and-refill force-charge leg, bounded, null without a basis', () => {
+  const base = { setpointSocPct: 80.4, costCeilingSocPct: 80.4, forceChargeEligible: true, fullKwh: 100, legEff: 0.9, window: win(2000) };
+  // Below the reserve: 44 → 50 (the reserve), then 50 → 80 at the just-in-time start = F − S.
+  const below = expectedBuyFromPlan({ ...base, startKwh: 44, deliverableKwh: 1e9 });
+  assert.equal(below.buyKwh, 40);
+  assert.equal(below.levelPct, 80);
+  assert.ok(below.forceChargeStartMs! > 0 && below.forceChargeFromPct === 50);
+  // Above the reserve: the drain to the start is bought back — more than the old (80 − 70).
+  const above = expectedBuyFromPlan({ ...base, startKwh: 70, deliverableKwh: 1e9, window: win(4000) });
+  assert.ok(Math.abs(above.buyKwh! - (80 - 59.4) / 0.9) < 0.2, `${above.buyKwh}`);
+  assert.ok(above.buyKwh! > (80 - 70) / 0.9 + 9);
+  // Above the stop all night: 0, and no start.
+  const none = expectedBuyFromPlan({ ...base, startKwh: 90, deliverableKwh: 1e9 });
+  assert.equal(none.buyKwh, 0);
+  assert.equal(none.forceChargeStartMs, null);
+  // The window bounds it; reserve only takes no walk.
+  const bound = expectedBuyFromPlan({ ...base, startKwh: 44, deliverableKwh: 9 });
+  assert.equal(bound.buyKwh, 10);
+  assert.equal(bound.deliverableBound, true);
+  const reserveOnly = expectedBuyFromPlan({ ...base, forceChargeEligible: false, startKwh: 44, deliverableKwh: 1e9 });
+  assert.deepEqual(reserveOnly, { buyKwh: round2(6 / 0.9), levelPct: 50 });
+  assert.deepEqual(expectedBuyFromPlan({ ...base, forceChargeEligible: false, startKwh: 70, deliverableKwh: 1e9 }), { buyKwh: 0, levelPct: 50 });
+  // No basis: the carry, the deliverable, or a minute of the walk.
   assert.deepEqual(expectedBuyFromPlan({ ...base, startKwh: null, deliverableKwh: 9 }), { buyKwh: null, levelPct: 80 });
   assert.deepEqual(expectedBuyFromPlan({ ...base, startKwh: 44, deliverableKwh: null }), { buyKwh: null, levelPct: 80 });
+  assert.deepEqual(expectedBuyFromPlan({ ...base, startKwh: 44, deliverableKwh: 1e9, window: { ...win(2000), hours: [] } }), { buyKwh: null, levelPct: 80 });
 });
 
 test('buyFigureText / buyFigureParts: expected first, the worst case named; "up to" only when it is one', () => {
@@ -367,4 +553,29 @@ test('★★★ the spoken advisory says the expected figure — short, one numb
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   assert.match(idx, /const buyRounded = Math\.round\(headlineBuyKwh\(plan\) \?\? 0\);/);
   assert.match(idx, /buyKwhRounded: buyRounded,/);
+});
+
+test('★★ the morning summary and the apply-failure push state the expected buy and name the worst case', () => {
+  assert.equal(armedBuyPhrase(34.88, 63.92), '~34.9 kWh expected, up to ~63.9 kWh in the worst case');
+  assert.equal(armedBuyPhrase(15.2, 12.1), '~15.2 kWh expected; the worst case the plan was sized on is ~12.1 kWh');
+  assert.equal(armedBuyPhrase(null, 63.92), '~63.9 kWh, the worst case the plan was sized on');
+  assert.equal(armedBuyPhrase(undefined, null), '~— kWh, the worst case the plan was sized on');
+  // The armed record keeps only the worst case (armFromPlan, unchanged); the expected figure is
+  // read back from the plan row of the armed day.
+  const rows = [
+    { plan_date: '2026-10-11', expected_buy_kwh: 20.1 },
+    { plan_date: '2026-10-12', expected_buy_kwh: 34.88 },
+    { plan_date: '2026-10-13', expected_buy_kwh: null },
+  ];
+  assert.equal(ledgerExpectedBuyKwh(rows, '2026-10-12'), 34.88);
+  assert.equal(ledgerExpectedBuyKwh(rows, '2026-10-13'), null);
+  assert.equal(ledgerExpectedBuyKwh(rows, '2026-10-14'), null);
+  assert.equal(ledgerExpectedBuyKwh(rows, null), null);
+  // The wiring (index.ts is not reachable from a unit test): both pushes read it for state.day.
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.match(idx, /function armedExpectedBuyKwh\(day: string \| null\): number \| null \{\n\s+try \{\n\s+return ledgerExpectedBuyKwh\(recorder\.readNightLedger\(14\), day\);/);
+  assert.match(idx, /const buyPhrase = armedBuyPhrase\(armedExpectedBuyKwh\(state\.day\), state\.buyKwh\);/);
+  assert.match(idx, /`Tonight's planned buy \(\$\{buyPhrase\}\) will not happen; /);
+  assert.match(idx, /`\(planned buy \$\{armedBuyPhrase\(armedExpectedBuyKwh\(state\.day\), state\.buyKwh\)\}\) and restored to /);
+  assert.doesNotMatch(idx, /planned buy \(?~\$\{state\.buyKwh/, 'no push calls the worst case the planned buy');
 });

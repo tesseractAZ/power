@@ -182,8 +182,9 @@ import {
   plannerSizingNeedBuyKwh,
   calibratedLoadBandFactor, calibratedBuyDebiasFactor, buyDebiasUnmeasuredLogLine,
   buildCostSurplusLoad, costSurplusLedgerColumns,
-  // v1.187.22 — the expected buy beside the worst case: its ledger columns and its one figure.
-  expectedBuyLedgerColumns, headlineBuyKwh,
+  // v1.187.22 — the expected buy beside the worst case: its ledger columns, its one figure, and
+  // how the after-the-fact pushes state an armed night's buy.
+  expectedBuyLedgerColumns, headlineBuyKwh, ledgerExpectedBuyKwh, armedBuyPhrase,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -3930,6 +3931,18 @@ async function recomputeNightChargePlan(
   return { plan, extras };
 }
 
+/** v1.187.22 — the armed night's EXPECTED buy, read back from its plan row (ledgerExpectedBuyKwh),
+ *  for the morning summary and the apply-failure push. null when the row has none or the ledger
+ *  cannot be read: the push then names the worst case as such (armedBuyPhrase). */
+function armedExpectedBuyKwh(day: string | null): number | null {
+  try {
+    return ledgerExpectedBuyKwh(recorder.readNightLedger(14), day);
+  } catch (e: any) {
+    app.log.debug(`night-charge: expected-buy lookup failed (${e?.message ?? e})`);
+    return null;
+  }
+}
+
 /** Map a fresh plan + extras → the frozen NightLedgerRow PLAN columns and upsert.
  *  For an incomplete-basis plan the trajectory fields are OMITTED (→ NULL) so the
  *  scorer can detect "no basis" via a null min_proj_soc_pct and mark scored=0. */
@@ -5860,7 +5873,9 @@ async function runNightActuationTickInner(): Promise<void> {
     persistNightActuation({ ...state, applyEscalated: true });
     try { recorder.recordNightOutcome(state.day, { actuated: 0 }); }
     catch (e: any) { app.log.warn(`night-charge: actuated correction failed (${e?.message ?? e})`); }
-    app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's buy (~${state.buyKwh ?? '—'} kWh) is forfeited; ledger corrected to actuated:0.`);
+    // v1.187.22 — the buy as the plan stated it: expected first, the worst case named as such.
+    const buyPhrase = armedBuyPhrase(armedExpectedBuyKwh(state.day), state.buyKwh);
+    app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's buy (${buyPhrase}) is forfeited; ledger corrected to actuated:0.`);
     try {
       await sendNotification(loadNotifyConfig(), {
         severity: 'warning',
@@ -5869,7 +5884,7 @@ async function runNightActuationTickInner(): Promise<void> {
         body:
           `The supervised reserve write for ${state.day} was accepted by the EcoFlow cloud but the Smart Home Panel 2 `
           + `still reads ${currentReservePct ?? 'unknown'}% (target ${state.targetPct}%) after ${state.applyRetries} re-issues. `
-          + `Tonight's planned buy (~${state.buyKwh ?? '—'} kWh) will not happen; the pool stays on its normal floor. `
+          + `Tonight's planned buy (${buyPhrase}) will not happen; the pool stays on its normal floor. `
           + 'No action needed tonight — the grid is available as backup — but if this repeats, check the SHP2 cloud link.',
       });
     } catch (e: any) {
@@ -5963,7 +5978,8 @@ async function runNightActuationTickInner(): Promise<void> {
       title: `Night-charge: reserve restored to ${action.restorePct}%`,
       body:
         `Supervised night charge for ${state.day} completed: reserve raised to ${state.targetPct}% `
-        + `(planned buy ~${state.buyKwh ?? '—'} kWh) and restored to ${action.restorePct}%. `
+        // v1.187.22 — expected first, the worst case named as such (state.buyKwh is the sized figure).
+        + `(planned buy ${armedBuyPhrase(armedExpectedBuyKwh(state.day), state.buyKwh)}) and restored to ${action.restorePct}%. `
         + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
     }).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);

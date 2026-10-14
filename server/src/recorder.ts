@@ -655,9 +655,9 @@ export interface NightLedgerRow {
   cost_surplus_load_factor: number | null;
   cost_surplus_load_samples: number | null;
   /** v1.187.22 — the EXPECTED meter-side buy (plan expectedBuyKwh: what the armed write would
-   *  draw from the expected window-open SoC) and that expected SoC when charging starts (plan
-   *  expectedStartSocPct), beside buy_kwh — the worst case, unchanged. NULL with no P50 basis
-   *  and on rows written before v1.187.22. */
+   *  draw from the expected window-open SoC, the drain to a just-in-time force-charge included)
+   *  and that expected window-open SoC (plan expectedStartSocPct), beside buy_kwh — the worst
+   *  case, unchanged. NULL with no P50 basis and on rows written before v1.187.22. */
   expected_buy_kwh: number | null;
   expected_start_soc_pct: number | null;
   /** v1.187.22 — OUTCOME: the pool SoC measured just before the window opened (backup_pct over

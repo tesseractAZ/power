@@ -14,6 +14,8 @@
  *   C-xxvii…C-xxxiii the surfaces: MQTT, push, spoken line, card
  *   C-xxxiv…C-xl   the ledger: columns, migration, the measured open, the score clause (C-xl-b)
  *   C-xli          the force-charge ceiling armFromPlan and the expected level share
+ *   C-xlii…C-lvi   the drain to the just-in-time force-charge start, the in-progress hour,
+ *                  the after-the-fact pushes, the no-basis headline
  *
  *   node scripts/mutate-v1187-22c.mjs
  */
@@ -43,15 +45,15 @@ const MUTANTS = [
   {
     id: 'C-i. ★★★ the expected carry drains the P90 load',
     file: NCA,
-    find: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, load) / o.dischargeEff)) / 1000));',
+    find: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000));',
     to: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP90W) / o.dischargeEff)) / 1000)); /* MUTANT */',
     why: 'The "expected" start collapses onto the worst case again and the 10-12 plan says ~62 kWh expected.',
   },
   {
     id: 'C-ii. ★★ the expected carry is not floored at the reserve',
     file: NCA,
-    find: '  const floor = Math.min(Math.max(0, o.reserveKwh), pack);',
-    to: '  const floor = 0; /* MUTANT */',
+    find: '  const floor = Math.min(Math.max(0, o.reserveKwh), pack);\n  const byHour = hoursByEpoch(o.hours);\n  for (let slot',
+    to: '  const floor = 0; /* MUTANT */\n  const byHour = hoursByEpoch(o.hours);\n  for (let slot',
     why: 'A grid-present carry drains through the reserve the SHP2 holds, overstating the expected buy on a heavy evening.',
   },
   {
@@ -64,15 +66,15 @@ const MUTANTS = [
   {
     id: 'C-iv. ★ the expected carry reads P10 PV',
     file: NCA,
-    find: '    const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;',
-    to: '    const pv = h.pvP10W; /* MUTANT */',
+    find: '    const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;\n    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w *',
+    to: '    const pv = h.pvP10W; /* MUTANT */\n    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w *',
     why: 'An afternoon plan understates the sun the pool expects before the window and overstates the buy.',
   },
   {
-    id: 'C-v. ★★ an hour without a P50 load is skipped instead of voiding the figure',
+    id: 'C-v. ★★ an hour without a P50 load counts as a basis',
     file: NCA,
-    find: '    if (load == null || !Number.isFinite(load)) return null;\n    const pv = h.pvP50W',
-    to: '    if (load == null || !Number.isFinite(load)) continue; /* MUTANT */\n    const pv = h.pvP50W',
+    find: '  return h != null && h.loadP50W != null && Number.isFinite(h.loadP50W) ? h : null;',
+    to: '  return h ?? null; /* MUTANT */',
     why: 'A plan with no median basis states an "expected" buy built on a carry with no drain at all.',
   },
   // ── the level and the arithmetic ──
@@ -114,29 +116,29 @@ const MUTANTS = [
   {
     id: 'C-xi. ★★ the expected buy is not bounded by what the window can deliver',
     file: NCA,
-    find: '  const liftKwh = Math.min(Math.max(0, (levelPct / 100) * o.fullKwh - o.startKwh), Math.max(0, o.deliverableKwh));',
-    to: '  const liftKwh = Math.max(0, (levelPct / 100) * o.fullKwh - o.startKwh); /* MUTANT */',
+    find: '  out.buyKwh = round2(Math.min(liftKwh, deliverableKwh) / o.legEff);',
+    to: '  out.buyKwh = round2(liftKwh / o.legEff); /* MUTANT */',
     why: 'Friday\'s one-hour window states a draw it cannot pass.',
   },
   {
     id: 'C-xii. ★★ the expected buy can be negative',
     file: NCA,
-    find: '  const liftKwh = Math.min(Math.max(0, (levelPct / 100) * o.fullKwh - o.startKwh), Math.max(0, o.deliverableKwh));',
-    to: '  const liftKwh = Math.min((levelPct / 100) * o.fullKwh - o.startKwh, Math.max(0, o.deliverableKwh)); /* MUTANT */',
-    why: 'A pool opening above the write level states a negative purchase.',
+    find: '  let liftKwh = Math.max(0, Math.min(levelKwh, reserveKwh) - o.startKwh);',
+    to: '  let liftKwh = Math.min(levelKwh, reserveKwh) - o.startKwh; /* MUTANT */',
+    why: 'A pool opening above the reserve states a negative reserve leg, and a smaller (or negative) purchase.',
   },
   {
     id: 'C-xiii. ★★ the expected buy is pack-side (no charge leg)',
     file: NCA,
-    find: '  return { buyKwh: round2(liftKwh / o.legEff), levelPct };',
-    to: '  return { buyKwh: round2(liftKwh), levelPct }; /* MUTANT */',
+    find: '  out.buyKwh = round2(Math.min(liftKwh, deliverableKwh) / o.legEff);',
+    to: '  out.buyKwh = round2(Math.min(liftKwh, deliverableKwh)); /* MUTANT */',
     why: 'The meter-side figure loses the ~7% charge-leg loss and no longer compares with buy_kwh or delivered_kwh.',
   },
   {
     id: 'C-xiv. ★★ a night that does not arm states a positive expected buy',
     file: NCA,
     find: '    : { buyKwh: 0, levelPct: null };',
-    to: '    : expectedBuyFromPlan({ setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true, startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff }); /* MUTANT */',
+    to: '    : expectedBuyFromPlan({ setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true, startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff, window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw } }); /* MUTANT */',
     why: 'A buy under the minimum arms nothing, yet the ledger and the sensor would say ~35 kWh is expected.',
   },
   {
@@ -171,15 +173,15 @@ const MUTANTS = [
   {
     id: 'C-xix. ★ the rationale says the write charges a pool that opens above it',
     file: NCA,
-    find: '      : `the pool should open the window near ~${expectedStartSocPct}% with the grid present (median load and PV, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedStartSocPct < expected.levelPct',
-    to: '      : `the pool should open the window near ~${expectedStartSocPct}% with the grid present (median load and PV, never below the ${round1(reserveFloorPct)}% reserve)`}${expectedStartSocPct >= expected.levelPct /* MUTANT */',
+    find: '      return start < level\n',
+    to: '      return start >= level /* MUTANT */\n',
     why: '"tonight\'s write charges it to 50%" of a pool at 66% — the zero expected buy loses its reason.',
   },
   {
     id: 'C-xx. ★ the rationale stops naming the force-charge leg',
     file: NCA,
-    find: '      ? `, and tonight\'s write charges it to ${expected.levelPct}%${expected.levelPct > writtenPct ?',
-    to: '      ? `, and tonight\'s write charges it to ${expected.levelPct}%${expected.levelPct < writtenPct ? /* MUTANT */',
+    find: '    if (start < writtenPct) return `, and tonight\'s write charges it ${to} (the ${writtenPct}% reserve, then force-charge from ~${at})${asFar}`;',
+    to: '    if (start < writtenPct) return `, and tonight\'s write charges it ${to}${asFar}`; /* MUTANT */',
     why: 'An 80% level with a 50% reserve reads as one write; the reader cannot tell the force-charge carries most of it.',
   },
   // ── the P50 plumbing ──
@@ -338,6 +340,136 @@ const MUTANTS = [
     find: '    ? plan.costCeilingSocPct : null;',
     to: '    ? null : null; /* MUTANT */',
     why: 'armFromPlan and the expected level both lose the force-charge ceiling — the shared definition is what keeps them one.',
+  },
+  // ── the drain to the just-in-time start ──
+  {
+    id: 'C-xlii. ★★★ the force-charge leg starts from the window open again',
+    file: NCA,
+    find: '    if (jit.startMs != null) liftKwh += Math.max(0, levelKwh - jit.packKwh);',
+    to: '    liftKwh += Math.max(0, levelKwh - Math.max(o.startKwh, reserveKwh)); /* MUTANT */',
+    why: 'The drain the just-in-time start buys back is dropped: a 74% evening states ~14 kWh for a ~22 kWh night, a 96% one ~0 for ~3.5.',
+  },
+  {
+    id: 'C-xliii. ★★★ the walk does not drain the pool before the start',
+    file: NCA,
+    find: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + ((pv - loadW / o.dischargeEff) / 1000) * (EXPECTED_JIT_STEP_MS / HOUR_MS)));',
+    to: '    pack = Math.max(floor, Math.min(o.fullKwh, pack)); /* MUTANT */',
+    why: 'The pool sits at its window-open level until the start: the same understatement by another road.',
+  },
+  {
+    id: 'C-xliv. ★★ the walk drains through the written reserve',
+    file: NCA,
+    find: '  const floor = Math.min(Math.max(0, o.reserveKwh), pack);\n  const lastStartMs',
+    to: '  const floor = 0; /* MUTANT */\n  const lastStartMs',
+    why: 'With the grid present the SHP2 holds the 50% reserve; a heavy house load would be bought back from below it.',
+  },
+  {
+    id: 'C-xlv. ★★ the walk starts a force-charge inside the last 20 minutes',
+    file: NCA,
+    find: '  const lastStartMs = o.windowEndMs - FORCE_CHARGE_MIN_RUN_MS;',
+    to: '  const lastStartMs = o.windowEndMs; /* MUTANT */',
+    why: 'decideForceCharge starts nothing that late; a pool drifting under its stop at 04:43 would state a buy that never happens.',
+  },
+  {
+    id: 'C-xlvi. ★★ the walk starts a force-charge at or above the stop',
+    file: NCA,
+    find: '    if (poolPct < stopPct) {',
+    to: '    if (true) { /* MUTANT */',
+    why: 'With an EV predicted the start is due early, but decideForceCharge starts nothing above the stop — the walk would start from 90%.',
+  },
+  {
+    id: 'C-xlvii. ★★ the walk ignores the predicted EV the live start counts',
+    file: NCA,
+    find: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.fullKwh, rateKw, evDisplacedKwh)) {',
+    to: '      if (t >= forceChargeStartAtMs(o.windowEndMs, o.ceilingPct, poolPct, o.fullKwh, rateKw, null)) { /* MUTANT */',
+    why: 'index.ts times the live start with the plan\'s EV displacement; without it the walk starts later and states more drain than the write allows.',
+  },
+  {
+    id: 'C-xlviii. ★★ the walk times the start with the fixed plan rate',
+    file: NCA,
+    find: '      const rateKw = o.envelopeKw == null ? null : p50ChargeRateKw(loadW, o.chargeCapKw, o.envelopeKw) * o.legEff;',
+    to: '      const rateKw = null; /* MUTANT */',
+    why: 'The live start reads the grid cap less the house (forceChargeRateKw); the 10 kW fallback starts ~30 min early and understates the drain.',
+  },
+  {
+    id: 'C-xlix. ★★ the rationale names the window-open level as the pool at the start',
+    file: NCA,
+    find: 'the house should draw it to ~${expected.forceChargeFromPct}% before the just-in-time force-charge',
+    to: 'the house should draw it to ~${start}% /* MUTANT */ before the just-in-time force-charge',
+    why: 'The sentence that explains the larger figure says the pool is not drawn down at all.',
+  },
+  {
+    id: 'C-l. ★ a window-bound buy reads as reaching the level',
+    file: NCA,
+    find: '  if (liftKwh > deliverableKwh + 1e-9) out.deliverableBound = true;',
+    to: '  /* MUTANT */',
+    why: 'Friday\'s rationale says the write charges the pool to 80% in a window that passes a fraction of it.',
+  },
+  // ── the in-progress hour ──
+  {
+    id: 'C-li. ★★ the in-progress hour missing from the band drops the carry again',
+    file: NCA,
+    find: '  const h = byHour.get(key) ?? (slotTs < fromMs ? byHour.get(key + 1) : undefined);',
+    to: '  const h = byHour.get(key); /* MUTANT */',
+    why: 'At 21:05 with the band starting at 22:00 the plan states no expected figure (or, as before the review, up to ~3 kWh too little).',
+  },
+  {
+    id: 'C-lii. ★ any missing hour is stood in for by the next',
+    file: NCA,
+    find: '  const h = byHour.get(key) ?? (slotTs < fromMs ? byHour.get(key + 1) : undefined);',
+    to: '  const h = byHour.get(key) ?? byHour.get(key + 1); /* MUTANT */',
+    why: 'A gap inside the span is papered over with a neighbour\'s load instead of voiding a figure with no basis.',
+  },
+  {
+    id: 'C-liii. ★ the window bound skips a missing hour',
+    file: NCA,
+    find: '    if (h == null) return null;\n    kwh += p50ChargeRateKw(',
+    to: '    if (h == null) continue; /* MUTANT */\n    kwh += p50ChargeRateKw(',
+    why: 'A window hour with no basis silently shrinks the bound, capping the expected buy with no disclosure.',
+  },
+  // ── the after-the-fact pushes ──
+  {
+    id: 'C-liv. ★★★ the morning summary calls the worst case the planned buy',
+    file: IDX,
+    find: '        + `(planned buy ${armedBuyPhrase(armedExpectedBuyKwh(state.day), state.buyKwh)}) and restored to ${action.restorePct}%. `',
+    to: '        + `(planned buy ~${state.buyKwh ?? \'—\'} kWh) and restored to ${action.restorePct}%. ` /* MUTANT */',
+    why: 'The evening says ~35 kWh, the morning "planned buy ~64 kWh" — delivery reads as half the plan.',
+  },
+  {
+    id: 'C-lv. ★★ the apply-failure push calls the worst case the planned buy',
+    file: IDX,
+    find: '    const buyPhrase = armedBuyPhrase(armedExpectedBuyKwh(state.day), state.buyKwh);',
+    to: '    const buyPhrase = `~${state.buyKwh ?? \'—\'} kWh`; /* MUTANT */',
+    why: 'The forfeited buy is stated as the worst case, unlabelled.',
+  },
+  {
+    id: 'C-lv-b. ★★ the pushes never read the armed day\'s expected figure',
+    file: IDX,
+    find: '    return ledgerExpectedBuyKwh(recorder.readNightLedger(14), day);',
+    to: '    return null; /* MUTANT */',
+    why: 'Every after-the-fact push falls back to the worst case though the plan row holds the expected figure.',
+  },
+  {
+    id: 'C-lv-c. ★ the ledger lookup reads another night\'s row',
+    file: NCA,
+    find: '  const v = rows.find((r) => r.plan_date === day)?.expected_buy_kwh;',
+    to: '  const v = rows[0]?.expected_buy_kwh; /* MUTANT */',
+    why: 'The morning push states the expected figure of the oldest row in the fortnight, not the armed night\'s.',
+  },
+  {
+    id: 'C-lv-d. ★★ with no expected figure the worst case is stated unlabelled',
+    file: NCA,
+    find: '  if (expectedKwh == null || !Number.isFinite(expectedKwh)) return `${worst}, the worst case the plan was sized on`;',
+    to: '  if (expectedKwh == null || !Number.isFinite(expectedKwh)) return worst; /* MUTANT */',
+    why: 'An older plan row brings back "planned buy ~64 kWh" with nothing saying it is the worst case.',
+  },
+  // ── the no-basis headline ──
+  {
+    id: 'C-lvi. ★★ the no-basis headline states the raw figure and drops the calibration',
+    file: NCA,
+    find: '    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote}`',
+    to: '    ? `Buy ~${round1(buyKwh)} kWh overnight` /* MUTANT */',
+    why: 'With a learned de-bias and no median basis the announced figure loses its calibration, silently.',
   },
 ];
 
