@@ -94,11 +94,12 @@ export const OTHER_DOC_LIMIT_BYTES = 128 * 1024;
 /**
  * D11 — every `export async function` in server/src/ecoflow/commands.ts (each one writes to the
  * panel) and the phrase(s) the guide's write section must use for it, one per family of call
- * sites. docsLayout.test.ts fails when the keys and the exports differ.
+ * sites. docsLayout.test.ts fails when the keys and the exports differ. `ch{n}ForceCharge` is
+ * the switch on each of the panel's three AC slots (one Core each), not on a load circuit.
  */
 export const WRITERS = {
   setBackupReserveSoc: ['Backup-reserve setpoint', 'Reserve floor'],
-  setChannelForceCharge: ['Per-circuit force charge', 'Force charge OFF'],
+  setChannelForceCharge: ['Force charge ON/OFF per Core slot', 'Force charge OFF'],
   setForceChargeCeiling: ['force-charge ceiling'],
   refreshShp2CloudPresence: ['Cloud-presence refresh'],
   debugSendCommand: ['Raw command'],

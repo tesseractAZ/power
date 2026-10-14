@@ -208,13 +208,14 @@ test('night-charge message: cushion-shortfall and over-buy caveats surface in th
 });
 
 /* ── v1.187.10 — DOCS §9 names every night-charge entity for what it carries ──────────
- * A doc-claim check (it reads DOCS.md, not the code): the §9 table described
+ * A doc-claim check (it reads the engineering reference, not the code): the §9 table described
  * `ecoflow_night_charge_target_soc` as "Target pool SoC by window close" — it carries the
  * reserve SETPOINT (clampReserveTarget(plan.setpointSocPct)) since the v1.62.0 ask/forecast
  * split — and did not list `ecoflow_night_charge_expected_soc`, the prediction. On 10-02
  * target_soc read 50 all night while the pack aimed at 73.1%. */
 test('★ DOCS §9: every night-charge discovery entity has a row; target_soc is the setpoint, expected_soc the worst-case arrival', () => {
-  const docs = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../ecoflow_panel/DOCS.md'), 'utf8');
+  // v1.188.0 — the chapter moved to docs/reference; ecoflow_panel/DOCS.md is the operator guide.
+  const docs = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../docs/reference/15-2-night-charge-writes.md'), 'utf8');
   const start = docs.indexOf('### 9. Delivery surfaces');
   assert.ok(start > 0, 'the section exists');
   const sec = docs.slice(start, docs.indexOf('\n### ', start + 10));
