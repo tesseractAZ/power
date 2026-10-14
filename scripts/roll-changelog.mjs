@@ -12,6 +12,12 @@
  * live file with an "Older releases" section linking the archive. `--check` fails once the live
  * file passes LIVE_LIMIT_BYTES; server/test/changelogSize.test.ts runs it in CI.
  *
+ * The budget is measured, not guessed: a ~30 KB changelog renders in about 5 ms on a desktop
+ * browser against 57-79 ms for ~375 KB, and slower devices scale by the same factor. Every
+ * release heading in the live file must be a plain `## X.Y.Z`: Home Assistant's update dialog
+ * slices the notes between `## <new>` and `## <installed>` only when the heading is exactly the
+ * version, and shows the whole file otherwise (core hassio/update.py, async_release_notes).
+ *
  *   node scripts/roll-changelog.mjs          roll (idempotent: a file already within the target is untouched)
  *   node scripts/roll-changelog.mjs --check  exit 1 when the live file is over the limit
  *   --live <path> --archive <path>           operate on other files (tests)
@@ -28,9 +34,9 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** The live file is rolled back down to this many bytes of release sections. */
-export const ROLL_TARGET_BYTES = 40 * 1024;
-/** CI fails past this: headroom for roughly a dozen ordinary releases between rolls. */
-export const LIVE_LIMIT_BYTES = 64 * 1024;
+export const ROLL_TARGET_BYTES = 32 * 1024;
+/** CI fails past this: headroom for several ordinary releases between rolls. */
+export const LIVE_LIMIT_BYTES = 48 * 1024;
 
 export const FOOTER_HEADING = '## Older releases';
 export const FOOTER = `${FOOTER_HEADING}
