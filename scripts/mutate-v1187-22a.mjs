@@ -17,6 +17,22 @@
  *   A-xii   the withheld line counts online Cores, not reporting ones
  *   A-xiii  the live roster is no longer noted on a withheld tick
  *   A-xiv   index.ts ignores BATTERY_SOC_ALARM_ENABLED
+ *   A-xv    the production bound defaults to zero (the gate is off in production)
+ *   A-xvi   the production bound defaults to ~24.8 days (an unbounded hold)
+ *   A-xvii  index.ts passes a zero bound
+ *   A-xviii index.ts silences the ladders' announce
+ *   A-xix   index.ts replaces the Alert Settings toggles
+ *   A-xx    index.ts no longer refreshes the grid entity before a tick
+ *   A-xxi   every crossed band of a same-tick crossing announces (the collapse is lost)
+ *   A-xxii  only the announced band is recorded for re-escalation (the v0.75.0 fail-silent bug)
+ *   A-xxiii the house ladder ignores its pool's grid verdict
+ *   A-xxiv  the house ladder ignores the Alert Settings toggles
+ *   A-xxv   the on-grid advisory wording is never used
+ *   A-xxvi  the advisory drops the measured import
+ *   A-xxvii a secondary panel's ladder reads the house pool's grid
+ *   A-xxviii a secondary panel's grid drop is never seen by its re-escalation pass
+ *   A-xxix  a secondary panel records only its announced band
+ *   A-xxx   the house grid-drop re-escalation ignores the Alert Settings toggles
  *
  *   node scripts/mutate-v1187-22a.mjs
  */
@@ -30,6 +46,7 @@ const MEM = resolve(REPO, 'server/src/shp2Membership.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const SUBSET = [
   'test/socLadderBootHydration.test.ts',
+  'test/socLadders.test.ts',
   'test/batterySocAlarm.test.ts',
   'test/multiPanel.test.ts',
 ];
@@ -132,6 +149,118 @@ const MUTANTS = [
     find: '  enabled: socAlarmEnabled,',
     to: '  enabled: true, /* MUTANT */',
     why: 'An installation that turned the SoC ladder off hears it again.',
+  },
+  {
+    id: 'A-xv. ★★★ the production bound defaults to zero',
+    file: SL,
+    find: '  const maxMs = deps.bootHydrationMaxMs ?? BOOT_HYDRATION_MAX_MS;',
+    to: '  const maxMs = deps.bootHydrationMaxMs ?? 0; /* MUTANT */',
+    why: 'index.ts passes no bound, so the gate is off in production and the 2026-10-12 22:04:09 one-Core mean is spoken again.',
+  },
+  {
+    id: 'A-xvi. ★★★ the production bound defaults to ~24.8 days',
+    file: SL,
+    find: '  const maxMs = deps.bootHydrationMaxMs ?? BOOT_HYDRATION_MAX_MS;',
+    to: '  const maxMs = deps.bootHydrationMaxMs ?? 2_147_483_647; /* MUTANT */',
+    why: 'On a boot with the cloud down every SoC ladder stays silent until a first poll settles — a real depletion is never spoken.',
+  },
+  {
+    id: 'A-xvii. ★★★ index.ts passes a zero bound',
+    file: IDX,
+    find: '  lastKnownRoster: () => lastKnownRoster,\n  log: (m) => app.log.info(m),',
+    to: '  lastKnownRoster: () => lastKnownRoster,\n  bootHydrationMaxMs: 0, /* MUTANT */\n  log: (m) => app.log.info(m),',
+    why: 'The production ladders never wait for a hydrated store: the false boot rung is back with every test of the gate green.',
+  },
+  {
+    id: 'A-xviii. ★★★ index.ts silences the ladders\' announce',
+    file: IDX,
+    find: '  announce: (priority, message, messageEs) => broadcast.announce(priority, message, messageEs),',
+    to: '  announce: async () => ({ ok: true }), /* MUTANT */',
+    why: 'Every house and secondary-panel SoC rung is silent in production while the on-screen alert still shows it.',
+  },
+  {
+    id: 'A-xix. ★★ index.ts replaces the Alert Settings toggles',
+    file: IDX,
+    find: '  isPriorityEnabled,\n  // Keep the grid-presence entity fresh (TTL-gated) so the tick\'s grid verdicts are live.',
+    to: '  isPriorityEnabled: () => true, /* MUTANT */\n  // Keep the grid-presence entity fresh (TTL-gated) so the tick\'s grid verdicts are live.',
+    why: 'A priority muted in Alert Settings is still spoken by the SoC ladders.',
+  },
+  {
+    id: 'A-xx. ★★ index.ts no longer refreshes the grid entity before a tick',
+    file: IDX,
+    find: '    if (gridPresenceEntityId() || hostPowerEntityId()) await haStateCache.refreshIfStale();\n  },\n  poolGrid: livePoolGridBackstop,',
+    to: '    /* MUTANT */\n  },\n  poolGrid: livePoolGridBackstop,',
+    why: 'The grid verdicts read a stale cache: a grid drop is not seen and a downgraded emergency rung is not re-escalated.',
+  },
+  {
+    id: 'A-xxi. ★★★ every crossed band of a same-tick crossing announces',
+    file: SL,
+    find: '      if (!isPrimary) return;',
+    to: '      /* MUTANT */',
+    why: 'A reconnect at a low SoC ladders 10, 8 and 4 % to the speakers in one tick instead of one alarm.',
+  },
+  {
+    id: 'A-xxii. ★★★ only the announced band is recorded for re-escalation',
+    file: SL,
+    find: '      if (onGrid) socDowngraded.set(t.pct, t.priority);',
+    to: '      if (onGrid && isPrimary) socDowngraded.set(t.pct, t.priority); /* MUTANT */',
+    why: 'The v0.75.0 fail-silent bug: after a partial recovery a grid drop re-escalates nothing while the pool sits under 10 %.',
+  },
+  {
+    id: 'A-xxiii. ★★★ the house ladder ignores its pool\'s grid verdict',
+    file: SL,
+    find: '      socGridForTick = deps.poolGrid(snap.devices, houseSnOf(snap.devices));',
+    to: '      socGridForTick = { backstopping: false }; /* MUTANT */',
+    why: 'Every on-grid emergency rung is spoken as critical, and no grid drop is ever re-escalated.',
+  },
+  {
+    id: 'A-xxiv. ★★ the house ladder ignores the Alert Settings toggles',
+    file: SL,
+    find: '      if (!isPriorityEnabled(priority)) return;          // honour the Alert Settings annunciation toggles',
+    to: '      /* MUTANT */',
+    why: 'A priority muted in Alert Settings is still spoken by the house ladder.',
+  },
+  {
+    id: 'A-xxv. ★ the on-grid advisory wording is never used',
+    file: SL,
+    find: '        ? socAlarmAdvisory(t.pct, undefined, socGridForTick.importLive) // v1.186.3 — wording by measured import',
+    to: '        ? socAlarmMessage(t) /* MUTANT */',
+    why: 'An on-grid low pool is spoken in the emergency words ("Restore charge immediately.") that the grid made a non-event.',
+  },
+  {
+    id: 'A-xxvi. ★ the advisory drops the measured import',
+    file: SL,
+    find: '        ? socAlarmAdvisory(t.pct, undefined, socGridForTick.importLive) // v1.186.3 — wording by measured import',
+    to: '        ? socAlarmAdvisory(t.pct, undefined, undefined) /* MUTANT */',
+    why: 'The advisory says the grid is available as backup while the house is drawing from it.',
+  },
+  {
+    id: 'A-xxvii. ★★★ a secondary panel\'s ladder reads the house pool\'s grid',
+    file: SL,
+    find: '        panelSocLadder(p.sn).update(own ?? panelMeanSoc(snap.devices, p), p.deviceName, deps.poolGrid(snap.devices, p.sn));',
+    to: '        panelSocLadder(p.sn).update(own ?? panelMeanSoc(snap.devices, p), p.deviceName, deps.poolGrid(snap.devices, houseSnOf(snap.devices))); /* MUTANT */',
+    why: 'An off-grid garage pool crossing 10 % is spoken as an advisory because the house has grid.',
+  },
+  {
+    id: 'A-xxviii. ★★★ a secondary panel\'s grid drop is never seen by its re-escalation pass',
+    file: SL,
+    find: '        for (const { pct, priority } of reEscalateGridDrop(downgraded, soc, poolGrid.backstopping, isPriorityEnabled)) {',
+    to: '        for (const { pct, priority } of reEscalateGridDrop(downgraded, soc, true, isPriorityEnabled)) { /* MUTANT */',
+    why: 'The garage grid drops with its pool under 10 %: the downgraded emergency rung is never spoken.',
+  },
+  {
+    id: 'A-xxix. ★★ a secondary panel records only its announced band',
+    file: SL,
+    find: '        if (onGrid) downgraded.set(t.pct, t.priority);',
+    to: '        if (onGrid && isPrimary) downgraded.set(t.pct, t.priority); /* MUTANT */',
+    why: 'The v0.75.0 fail-silent bug on the garage pool: after a partial recovery its grid drop re-escalates nothing.',
+  },
+  {
+    id: 'A-xxx. ★ the house grid-drop re-escalation ignores the Alert Settings toggles',
+    file: SL,
+    find: '    for (const { pct, priority } of reEscalateGridDrop(socDowngraded, soc, backstopping, isPriorityEnabled)) {',
+    to: '    for (const { pct, priority } of reEscalateGridDrop(socDowngraded, soc, backstopping, () => true)) { /* MUTANT */',
+    why: 'A critical rung muted in Alert Settings is spoken anyway when the grid drops.',
   },
 ];
 

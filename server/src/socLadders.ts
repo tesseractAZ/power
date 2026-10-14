@@ -1,7 +1,10 @@
 /**
  * v1.187.22 — the backup-pool SoC audible ladders and the store tick that feeds them, moved out of
- * index.ts so the wiring is exercised by a test (test/socLadderBootHydration.test.ts) rather than
- * pinned by source: the HOUSE ladder (v0.12.0, 50/40/30/20/15/10/8/4/2 %, escalating priority) with
+ * index.ts so the wiring is driven by tests rather than pinned by source (the boot gate:
+ * test/socLadderBootHydration.test.ts; each pool's grid verdict, the Alert Settings toggles, the
+ * advisory words and the grid-drop re-escalation: test/socLadders.test.ts and the v0.75.0 regression in
+ * test/batterySocAlarm.test.ts; index.ts's call itself stays pinned verbatim, as the only part left
+ * there): the HOUSE ladder (v0.12.0, 50/40/30/20/15/10/8/4/2 %, escalating priority) with
  * its grid-downgrade record (v0.23.0), one ladder per SECONDARY panel (v1.185.0), and the grid-drop
  * re-escalation pass — every one of them behind the boot gate (batterySocAlarm.ts socLadderBootGate).
  *

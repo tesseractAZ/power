@@ -674,6 +674,18 @@ export function homeFleetMeanSoc(
 }
 
 /**
+ * v1.185.0 — is the HOUSE pool's SHP2-blind fallback the one-panel case (homeFleetMeanSoc and its
+ * roster tiers)? v1.187.22 — one decision, read by housePoolFallbackSoc and by its log-line
+ * denominator housePoolFallbackCoverage, so the two can never resolve different rosters.
+ */
+function housePoolIsOnePanel(devices: Record<string, DeviceSnapshot>): boolean {
+  // v1.185.0 (review) — a MISSING house pin is never the one-panel case: the panel left on the
+  // account is another pool (a replacement, or the garage panel after the house panel dropped off).
+  const missingPin = Object.values(devices).some((d) => d.housePanelMissing != null);
+  return shp2Panels(devices).sns.length <= 1 && !missingPin;
+}
+
+/**
  * v1.185.0 — the HOUSE pool's SHP2-blind fallback SoC. With one panel this is homeFleetMeanSoc,
  * unchanged (its roster fallbacks cover a panel with no projection). With a second panel the
  * plant-wide mean would average the other pool's Cores into the house figure, so it is the house
@@ -683,10 +695,7 @@ export function housePoolFallbackSoc(
   devices: Record<string, DeviceSnapshot>,
   lastKnownRoster?: ReadonlySet<string> | null,
 ): number | null {
-  // v1.185.0 (review) — a MISSING house pin is never the one-panel case: the panel left on the
-  // account is another pool (a replacement, or the garage panel after the house panel dropped off).
-  const missingPin = Object.values(devices).some((d) => d.housePanelMissing != null);
-  if (shp2Panels(devices).sns.length <= 1 && !missingPin) return homeFleetMeanSoc(devices, lastKnownRoster);
+  if (housePoolIsOnePanel(devices)) return homeFleetMeanSoc(devices, lastKnownRoster);
   // v1.185.0 (review) — two panels: ONLY the house pool's own Cores, even while the house panel has
   // no projection (restart while dark: its persisted roster). Never the union — that would be the
   // other pool's Cores, holding the house ladder above rungs its own pool has crossed. No roster
@@ -706,9 +715,8 @@ export function housePoolFallbackCoverage(
   devices: Record<string, DeviceSnapshot>,
   lastKnownRoster?: ReadonlySet<string> | null,
 ): { reporting: number; roster: number } {
-  const missingPin = Object.values(devices).some((d) => d.housePanelMissing != null);
   let roster: string[];
-  if (shp2Panels(devices).sns.length <= 1 && !missingPin) {
+  if (housePoolIsOnePanel(devices)) {
     const live = shp2ConnectedDpuSns(devices);
     roster = live.size > 0
       ? [...live]
