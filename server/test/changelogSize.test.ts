@@ -3,14 +3,16 @@
  * which renders the whole file. v1.38.3 trimmed it to 20 releases with only a sentence to hold
  * the line, and it grew back to 109 releases and ~330 KB. scripts/roll-changelog.mjs moves
  * older releases to CHANGELOG-ARCHIVE.md; this test runs its --check in CI, pins that the two
- * files together hold every release once, newest first, and drives the roll on fixtures.
+ * files together hold every release once, newest first, with bare `## X.Y.Z` headings in the live
+ * file, drives the roll on fixtures, and runs release.yml's changelog step.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { stepText, runBlock } from './helpers/workflowRepo.js';
 
 const ROOT = resolve(import.meta.dirname, '..', '..');
 const SCRIPT = join(ROOT, 'scripts', 'roll-changelog.mjs');
@@ -85,7 +87,7 @@ test('an oversized file: the oldest releases move to the TOP of the archive, une
   assert.equal(r.status, 0, r.stderr);
   const live = readFileSync(f.live, 'utf8');
   const archive = readFileSync(f.archive, 'utf8');
-  assert.ok(Buffer.byteLength(live) <= 40 * 1024 + 1024, `live file rolled to ~40 KB, got ${Buffer.byteLength(live)}`);
+  assert.ok(Buffer.byteLength(live) <= 32 * 1024 + 1024, `live file rolled to ~32 KiB, got ${Buffer.byteLength(live)}`);
   assert.equal(run(['--check', ...f.args]).status, 0);
   const kept = headings(live).slice(0, -1);
   assert.equal(kept[0], '## 2.0.29', 'the newest release stays');
@@ -126,4 +128,41 @@ test('release.yml rolls the changelog after prepending the new section, and comm
   const commit = yml.indexOf('git commit -m "Release v${NEXT}"');
   assert.ok(prepend > 0 && roll > prepend && commit > roll, 'prepend → roll → commit');
   assert.match(yml, /git add ecoflow_panel\/config\.yaml ecoflow_panel\/CHANGELOG\.md ecoflow_panel\/CHANGELOG-ARCHIVE\.md\n/);
+});
+
+test('every release heading in the live CHANGELOG.md is a bare `## X.Y.Z` (Home Assistant slices the update notes only on those)', () => {
+  const heads = headings(readFileSync(LIVE, 'utf8')).filter((h) => h !== FOOTER_HEADING);
+  const bad = heads.filter((h) => !/^## \d+\.\d+\.\d+$/.test(h));
+  assert.deepEqual(bad, [], 'a date or suffix on a heading makes the update dialog show the whole file');
+});
+
+test("release.yml's changelog step writes a bare heading, demotes headings inside the notes, and rolls", (t) => {
+  const step = stepText(readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8'), /^ {6}- name: Update config\.yaml \+ CHANGELOG\.md$/);
+  const dir = mkdtempSync(join(tmpdir(), 'release-changelog-step-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, 'ecoflow_panel'));
+  mkdirSync(join(dir, 'scripts'));
+  copyFileSync(SCRIPT, join(dir, 'scripts', 'roll-changelog.mjs'));
+  writeFileSync(join(dir, 'ecoflow_panel', 'config.yaml'), 'name: x\nversion: "2.0.29"\n');
+  writeFileSync(join(dir, 'ecoflow_panel', 'CHANGELOG.md'), Array.from({ length: 30 }, (_, i) => section(`2.0.${29 - i}`, 3000)).join(''));
+  writeFileSync(join(dir, 'ecoflow_panel', 'CHANGELOG-ARCHIVE.md'), ARCHIVE_PREAMBLE);
+  const notes = join(dir, 'notes.md');
+  writeFileSync(notes, '## Highlights\n\n- one\n\n# Also\n\n- two\n');
+  const script = join(dir, 'step.sh');
+  writeFileSync(script, runBlock(step));
+  const r = spawnSync('bash', [script], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, NEXT: '2.0.30', NOTES_FILE: notes, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ''}` },
+  });
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+  const live = readFileSync(join(dir, 'ecoflow_panel', 'CHANGELOG.md'), 'utf8');
+  const heads = headings(live);
+  assert.equal(heads[0], '## 2.0.30', 'a bare, undated heading');
+  assert.ok(heads.every((h) => h === FOOTER_HEADING || /^## \d+\.\d+\.\d+$/.test(h)), `only version headings and the footer: ${heads.join(' | ')}`);
+  assert.match(live, /^### Highlights$/m, 'a ## line inside the notes is demoted');
+  assert.match(live, /^### Also$/m, 'a # line inside the notes is demoted');
+  assert.match(readFileSync(join(dir, 'ecoflow_panel', 'config.yaml'), 'utf8'), /^version: "2\.0\.30"$/m);
+  assert.ok(Buffer.byteLength(live) <= 48 * 1024, 'the step rolled the oversized file');
+  assert.ok(headings(readFileSync(join(dir, 'ecoflow_panel', 'CHANGELOG-ARCHIVE.md'), 'utf8')).includes('## 2.0.0'), 'the oldest release moved to the archive');
 });

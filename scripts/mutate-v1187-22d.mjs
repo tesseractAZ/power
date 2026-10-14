@@ -11,6 +11,8 @@
  *   D-vi   the newest release is moved when it alone exceeds the target (an empty live file)
  *   D-vii  release.yml no longer rolls the changelog
  *   D-viii release.yml rolls but does not commit the archive (the moved releases are lost)
+ *   D-ix   release.yml writes a dated heading again (the update dialog shows the whole file)
+ *   D-x    release.yml leaves headings inside the notes (a section ends early)
  *
  *   node scripts/mutate-v1187-22d.mjs
  */
@@ -78,6 +80,20 @@ const MUTANTS = [
     find: '          git add ecoflow_panel/config.yaml ecoflow_panel/CHANGELOG.md ecoflow_panel/CHANGELOG-ARCHIVE.md\n',
     to: '          git add ecoflow_panel/config.yaml ecoflow_panel/CHANGELOG.md # MUTANT\n',
     why: 'The roll removes releases from CHANGELOG.md and the commit leaves the archive copy behind — history lost on main.',
+  },
+  {
+    id: 'D-ix. ★★ release.yml writes a dated heading again',
+    file: RELEASE_YML,
+    find: '          new_section = f"## {version}\\n\\n{notes}\\n\\n"\n',
+    to: '          new_section = f"## {version} — 2026-01-01\\n\\n{notes}\\n\\n"  # MUTANT\n',
+    why: "Home Assistant's update dialog stops slicing the notes and shows the whole changelog for every automated release.",
+  },
+  {
+    id: 'D-x. ★★ release.yml leaves headings inside the notes',
+    file: RELEASE_YML,
+    find: '          notes = re.sub(r"(?m)^#{1,2}(?=\\s)", "###", notes)\n',
+    to: '          pass  # MUTANT\n',
+    why: 'A "## " line in the notes starts a new section: the published Release notes and the update dialog stop at it.',
   },
 ];
 
