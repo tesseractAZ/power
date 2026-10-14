@@ -1022,6 +1022,24 @@ export function planCircuitDiscovery(
 }
 
 /**
+ * v1.188.0 — every unique_id the discovery publishers in this module build for a given circuit
+ * list: the SENSORS and BINARY_SENSORS tables, one switch per alarm priority (alertSwitchUniqueId),
+ * and the per-circuit energy and power sensors planCircuitDiscovery publishes. Pure: it reads the
+ * same tables and builders startMqttDiscovery publishes from, so the operator entity table
+ * (docs/guide/entities.md) can be held to it by server/test/docsLayout.test.ts.
+ */
+export function discoveryUniqueIds(
+  circuits: ReadonlyArray<{ ch: number; name?: string | null; linkCh?: number | null; linkMark?: boolean }>,
+): string[] {
+  return [
+    ...SENSORS.map((s) => s.unique_id),
+    ...BINARY_SENSORS.map((s) => s.unique_id),
+    ...ALARM_PRIORITY_ORDER.map(alertSwitchUniqueId),
+    ...planCircuitDiscovery('homeassistant', [], [...circuits]).publish.map((p) => String(p.cfg.unique_id)),
+  ];
+}
+
+/**
  * v1.141.0 — per-circuit instantaneous watts for the state payload.
  *
  * Enumerated from the SAME channel set the discovery configs use, so the two

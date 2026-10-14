@@ -1,0 +1,18 @@
+{
+  "_about": "Data for scripts/check-docs.mjs. reference: the chapter numbers and appendix letters the reference must hold (D6). ratchet: exact counts over docs/reference (D8); when one falls, lower it to the number the check prints, never raise it. The seeds are the whole single-file manual before the split, measured by ratchetCounts. history: sha256 of each frozen file in docs/history (D9); null until the file is committed. nameAllowlist: backticked UPPER_SNAKE names the operator pages may use that are not option keys (D4); each must occur as a string literal in server/src (docsLayout.test.ts).",
+  "reference": {
+    "chapters": 15,
+    "appendices": ["A"]
+  },
+  "ratchet": {
+    "releaseParagraphs": 105,
+    "fileLineCitations": 52,
+    "sectionSigns": 352
+  },
+  "history": {
+    "docs/history/engineering-release-log-1.md": null,
+    "docs/history/engineering-release-log-2.md": null,
+    "docs/history/operations-audits.md": null
+  },
+  "nameAllowlist": ["LEARNING", "READY_TO_CONSIDER_WRITES", "BLOCKED"]
+}
