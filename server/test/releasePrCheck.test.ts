@@ -160,9 +160,9 @@ test('★★ PR check: non-strict versions and a doubled version: key fail; a si
 });
 
 test('★★★ PR check: the CHANGELOG heading must match images.yml\'s exact regex (`^## v?X\\b`)', () => {
-  fails({ pr: '1.0.1', heading: null, title: 'Release v1.0.1' }, 'no section', /no '## v1\.0\.1' section/);
+  fails({ pr: '1.0.1', heading: null, title: 'Release v1.0.1' }, 'no section', /no '## 1\.0\.1' section/);
   for (const h of ['##  v1.0.1 — two spaces', '##\tv1.0.1 — tab', '##\nv1.0.1 — newline', '### v1.0.1 — h3', '## v1.0.10 — another']) {
-    fails({ pr: '1.0.1', heading: h, title: 'Release v1.0.1' }, JSON.stringify(h), /no '## v1\.0\.1' section/);
+    fails({ pr: '1.0.1', heading: h, title: 'Release v1.0.1' }, JSON.stringify(h), /no '## 1\.0\.1' section/);
   }
   for (const h of ['## v1.0.1', '## 1.0.1 — 2026-10-11', '## v1.0.1 — 2026-10-11']) {
     ok({ pr: '1.0.1', heading: h, title: 'Release v1.0.1' }, JSON.stringify(h));

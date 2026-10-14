@@ -25,9 +25,13 @@ branch cut before the last release as a downgrade. It fails when:
     a YAML loader keeps the last);
   - the new version is not above the old one (a downgrade), is already tagged
     (a Release tag cannot be reused), or is below the highest vX.Y.Z tag;
-  - ecoflow_panel/CHANGELOG.md has no `## vX.Y.Z` section, matched with the
+  - ecoflow_panel/CHANGELOG.md has no `## X.Y.Z` section, matched with the
     exact regex images.yml extracts the Release notes with, so a heading this
-    accepts cannot fail the publish after the tag exists.
+    accepts cannot fail the publish after the tag exists. That regex also
+    accepts `## vX.Y.Z`, but the heading to write is the bare version:
+    server/test/changelogSize.test.ts fails any other, because Home Assistant's
+    update dialog shows only the new notes when the heading is exactly the
+    version (v1.187.22).
 
 A PR that changes no version passes when neither its title nor (for a one-commit
 PR) its commit's subject is a release subject. A rebase merge lands every commit's
@@ -173,9 +177,10 @@ def main() -> int:
         notes = show("HEAD", CHANGELOG) or ""
         if not re.search(rf"^## v?{re.escape(new)}\b", notes, re.MULTILINE):
             failures.append(
-                f"{CHANGELOG} has no '## v{new}' section.\n"
+                f"{CHANGELOG} has no '## {new}' section.\n"
                 f"    images.yml extracts the GitHub Release notes from that heading and fails "
-                f"without it, after the tag has already been created."
+                f"without it, after the tag has already been created. Write the bare version "
+                f"(no 'v', no date): Home Assistant's update dialog needs it exactly."
             )
 
     if failures:

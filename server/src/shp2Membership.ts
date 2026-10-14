@@ -270,6 +270,10 @@ export function setLastKnownHomeRoster(roster: ReadonlySet<string> | null | unde
   publishedRoster = roster && roster.size > 0 ? new Set(roster) : null;
 }
 export function resetLastKnownHomeRoster(): void { publishedRoster = null; }
+/** v1.187.22 — the published last-known home roster (null until one is known): the roster the SoC
+ *  ladders' fallback reads (index.ts passes the same set), so a reader that names the fallback figure
+ *  — the reserve-alarm-blind alert — resolves the same Cores the ladder runs on. */
+export function lastKnownHomeRoster(): ReadonlySet<string> | null { return rosterOf(); }
 
 /** Explicit arg wins (tests, pure callers); otherwise the published roster. */
 function rosterOf(explicit?: ReadonlySet<string> | null): ReadonlySet<string> | null {

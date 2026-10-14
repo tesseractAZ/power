@@ -13,11 +13,14 @@
 **Alarms**
 
 - After a restart, the battery-level alarm waits for the first complete reading of the fleet, at most 30 seconds, before it can announce. On 12 October at 22:06, right after the host rebooted, it announced "50 percent" from the one Core that had reported (49%) while the pool was at 52%, then announced 50 percent again at 22:26 when the pool reached it.
-- The "Audible alarm channel unreachable" notification no longer goes out for a speaker restart of a minute or two: the check now needs failing readings spread over two minutes. On 12 October, announcements that failed while Music Assistant restarted after the reboot forced three checks into 31 seconds, and the notification and its "Resolved" went out 20 seconds apart. The channel's state is also read again just before a notification is sent.
+- The "Audible alarm channel unreachable" notification no longer goes out for a speaker restart of a minute or two: the check now needs failing readings spread over two minutes. On 12 October, announcements that failed while Music Assistant restarted after the reboot forced three checks into 31 seconds, and the notification and its "Resolved" went out 20 seconds apart. The channel's state is also read again when the alerts are gathered for sending, after the wait on the analytics worker.
+- A spoken alarm detail is no longer cut at a decimal point. Details are shortened for the speakers, and the cut was made at the last full stop in the first 200 characters, which could be the point in a number: with tariff rates confirmed, the on-peak grid-charging alarm said "about $2." for $2.19 an hour, and a host-pressure alarm could say "load1 6." for a load of 6.37. The cut is now made at the end of a sentence, or else between words, so a figure is spoken whole.
+- The on-peak grid-charging notice states its cost as "about $X per hour", the on-peak cost of the energy going into the battery. It called that figure the extra over buying the same energy overnight, but the overnight rate was never subtracted, so it overstated the extra by the whole overnight cost.
+- The "Reserve alarm blind" notice names the battery level the alarm is actually running on. While the panel's source list was empty it could average a different set of Cores than the alarm uses, including one not wired to the panel: with a charged bench Core counted, it could read about 20 points above the level the alarm used.
 
 **Changelog**
 
-- Home Assistant's Changelog dialog loads quickly again. This file now keeps the newest releases (about 32 KB, down from 330 KB); older ones are in CHANGELOG-ARCHIVE.md, linked at the bottom. A check stops it growing back, and every release heading is the bare version, so the update dialog shows only what changed.
+- Home Assistant's Changelog dialog loads quickly again. This file now keeps only the newest releases, at most about 32 KB (it had grown to 330 KB); older ones are in CHANGELOG-ARCHIVE.md, linked at the bottom. A check stops it growing back, and every release heading is the bare version, so the update dialog shows only what changed.
 
 **Updates**
 

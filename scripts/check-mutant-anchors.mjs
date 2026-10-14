@@ -73,9 +73,10 @@ for (const h of harnesses) {
     // v1.187.20 — any file under rootfs/ too, extension or not: mutate-v1187-20d.mjs mutates the
     // backup hook rootfs/usr/bin/ecoflow-panel-backup-hook, which (like every executable the image
     // ships in /usr/bin) has no extension.
+    // v1.187.22 — `.md` too: mutate-v1187-22d.mjs mutates .github/PULL_REQUEST_TEMPLATE.md.
     ...[...src.matchAll(/resolve\((?:REPO|ROOT),\s*'([^']+)'\)/g)]
       .map((m) => m[1])
-      .filter((rel) => rel.includes('/') && (/\.(ts|tsx|mjs|js|ya?ml|txt|py)$/.test(rel) || rel.startsWith('rootfs/')))
+      .filter((rel) => rel.includes('/') && (/\.(ts|tsx|mjs|js|ya?ml|txt|py|md)$/.test(rel) || rel.startsWith('rootfs/')))
       .map((rel) => join(ROOT, rel)),
   ];
   if (targets.length === 0) { console.log(`  skip   ${h} (no resolvable target)`); continue; }

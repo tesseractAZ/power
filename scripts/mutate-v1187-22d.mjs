@@ -13,6 +13,9 @@
  *   D-viii release.yml rolls but does not commit the archive (the moved releases are lost)
  *   D-ix   release.yml writes a dated heading again (the update dialog shows the whole file)
  *   D-x    release.yml leaves headings inside the notes (a section ends early)
+ *   D-xi   the main guard compares the unresolved path again (a run through a symlink does nothing, exit 0)
+ *   D-xii  the PR template asks for a `## vX.Y.Z` heading and an unchanged entry count again
+ *   D-xiii check-release-pr.py's hint names `## v<version>` again
  *
  *   node scripts/mutate-v1187-22d.mjs
  */
@@ -22,6 +25,8 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROLL = resolve(REPO, 'scripts/roll-changelog.mjs');
 const RELEASE_YML = resolve(REPO, '.github/workflows/release.yml');
+const PR_TEMPLATE = resolve(REPO, '.github/PULL_REQUEST_TEMPLATE.md');
+const PRCHECK = resolve(REPO, 'scripts/check-release-pr.py');
 const SUBSET = ['test/changelogSize.test.ts'];
 
 const MUTANTS = [
@@ -94,6 +99,27 @@ const MUTANTS = [
     find: '          notes = re.sub(r"(?m)^#{1,2}(?=\\s)", "###", notes)\n',
     to: '          pass  # MUTANT\n',
     why: 'A "## " line in the notes starts a new section: the published Release notes and the update dialog stop at it.',
+  },
+  {
+    id: 'D-xi. ★★★ the main guard compares the unresolved path again',
+    file: ROLL,
+    find: '    real = realpathSync(entry);',
+    to: '    real = resolve(entry); /* MUTANT */',
+    why: 'Run through a symlink (macOS /tmp, a linked checkout) the script prints nothing and exits 0: --check passes an over-limit file and a hand roll is skipped.',
+  },
+  {
+    id: 'D-xii. ★★ the PR template asks for `## vX.Y.Z` and an unchanged entry count again',
+    file: PR_TEMPLATE,
+    find: '- [ ] `ecoflow_panel/CHANGELOG.md` has a bare `## X.Y.Z` section',
+    to: '- [ ] `ecoflow_panel/CHANGELOG.md` has a `## vX.Y.Z` section, check the entry count did not drop; MUTANT',
+    why: 'A release author writes `## v1.187.23`, which the Server tests reject and Home Assistant\'s update dialog cannot slice.',
+  },
+  {
+    id: 'D-xiii. ★ check-release-pr.py\'s hint names `## v<version>` again',
+    file: PRCHECK,
+    find: '                f"{CHANGELOG} has no \'## {new}\' section.\\n"',
+    to: '                f"{CHANGELOG} has no \'## v{new}\' section.\\n"  # MUTANT',
+    why: 'One required check tells the author to write a heading another required check rejects.',
   },
 ];
 

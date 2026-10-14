@@ -27,7 +27,7 @@
  * by opening it for writing before it had been read, and 145 entries had to be recovered from
  * git history.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -124,6 +124,22 @@ function main(argv) {
   console.log(`roll-changelog: kept ${out.kept} release(s), moved ${out.moved} to the archive; CHANGELOG.md is now ${Buffer.byteLength(out.live)} bytes.`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/** Is this module the script node was asked to run? Node gives the entry module the REAL path as
+ *  import.meta.url, while argv[1] keeps any symlink in the path it was given (macOS /tmp, a linked
+ *  checkout): compared unresolved, a run through a symlink did nothing and exited 0, so `--check`
+ *  passed an over-limit file and a hand roll was skipped without a word. */
+function invokedDirectly() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  let real;
+  try {
+    real = realpathSync(entry);
+  } catch {
+    real = resolve(entry); // argv[1] names no file (node -e … arg): not this script
+  }
+  return real === fileURLToPath(import.meta.url);
+}
+
+if (invokedDirectly()) {
   main(process.argv.slice(2));
 }

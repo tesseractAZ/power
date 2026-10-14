@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, copyFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -165,4 +165,35 @@ test("release.yml's changelog step writes a bare heading, demotes headings insid
   assert.match(readFileSync(join(dir, 'ecoflow_panel', 'config.yaml'), 'utf8'), /^version: "2\.0\.30"$/m);
   assert.ok(Buffer.byteLength(live) <= 48 * 1024, 'the step rolled the oversized file');
   assert.ok(headings(readFileSync(join(dir, 'ecoflow_panel', 'CHANGELOG-ARCHIVE.md'), 'utf8')).includes('## 2.0.0'), 'the oldest release moved to the archive');
+});
+
+test('★★★ run through a symlinked path, the script still runs: --check fails an over-limit file, and a roll rolls', (t) => {
+  // Node gives the entry module its REAL path as import.meta.url; argv[1] keeps the symlink. The
+  // main guard compared them unresolved, so a run through a symlink (macOS /tmp, a linked
+  // checkout) printed nothing and exited 0 — --check passed and a hand roll was skipped silently.
+  const f = fixture(Array.from({ length: 30 }, (_, i) => section(`2.0.${29 - i}`, 3000)).join(''), ARCHIVE_PREAMBLE);
+  t.after(f.cleanup);
+  const link = join(f.dir, 'scripts-link');
+  symlinkSync(dirname(SCRIPT), link, 'dir');
+  const viaLink = (args: string[]) => spawnSync(process.execPath, [join(link, 'roll-changelog.mjs'), ...args], { encoding: 'utf8' });
+  const check = viaLink(['--check', ...f.args]);
+  assert.equal(check.status, 1, `an over-limit file fails --check through the link: ${check.stdout}${check.stderr}`);
+  assert.match(check.stderr, /over the \d+-byte limit/);
+  const roll = viaLink(f.args);
+  assert.equal(roll.status, 0, roll.stderr);
+  assert.match(roll.stdout, /kept \d+ release\(s\), moved \d+/, 'the roll ran');
+  assert.equal(viaLink(['--check', ...f.args]).status, 0);
+  assert.match(viaLink(['--check', ...f.args]).stdout, /CHANGELOG\.md is \d+ bytes \(limit \d+\)\./, 'and says so');
+});
+
+test('★★ the release guidance asks for the bare heading and the roll (PR template, check-release-pr.py)', () => {
+  const tpl = readFileSync(join(ROOT, '.github', 'PULL_REQUEST_TEMPLATE.md'), 'utf8');
+  const line = tpl.split('\n').find((l) => l.includes('ecoflow_panel/CHANGELOG.md')) ?? '';
+  assert.match(line, /bare `## X\.Y\.Z` section/, 'the template names the bare heading');
+  assert.ok(!/## vX\.Y\.Z/.test(line), 'and not the `## vX.Y.Z` that changelogSize rejects');
+  assert.match(line, /node scripts\/roll-changelog\.mjs/, 'it runs the roll');
+  assert.ok(!/entry count did not drop/.test(line), 'a roll drops the live count on purpose');
+  assert.match(line, /CHANGELOG-ARCHIVE\.md.{0,20}together lost no entry/);
+  const checker = readFileSync(join(ROOT, 'scripts', 'check-release-pr.py'), 'utf8');
+  assert.match(checker, /has no '## \{new\}' section/, "the checker's hint names the bare heading");
 });

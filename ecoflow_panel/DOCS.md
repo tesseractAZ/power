@@ -5881,7 +5881,10 @@ unmet and the alert permanently silent, with every unit test still green — mut
 **Alert.** Id `peak-grid-draw`, severity `warning`, category `Grid`, priority `low`.
 Deliberately below every physical-risk condition: this reports spend, not danger, and
 placing money in the critical tier devalues the tier that must never be discounted. Cost
-is emitted as `null` — never a guess — when `ratesConfirmed` is false.
+is emitted as `null` — never a guess — when `ratesConfirmed` is false. The cost is the
+on-peak spend rate, `centsPerHour` = kW into the pack × the current period's rate, and the
+detail states it as that ("about $X per hour"); until v1.187.22 it was worded as the premium
+over buying the same energy overnight, which nothing subtracts.
 
 **Causing setting: "Charge Now", which is PER-DPU.** Enabled on individual Delta Pro
 Ultra units in the EcoFlow app, which is why the observed draw reached ~16 kW — several
@@ -6187,7 +6190,7 @@ Online bench spares (`SPARE_DPU_SNS` not wired into SHP2) get `annunciate:false`
 
 **Reserve-alarm-blind compensating alert (F3):**
 
-- `reserve-alarm-blind` (warning; critical after `RESERVE_BLIND_CRITICAL_MS` off-grid) — the entire reserve chain keys off the SHP2 backup-pool %; when that reads null (cloud wedge) for ≥ `RESERVE_BLIND_AFTER_MS` (15 min past the grace hold), this says the reserve alarm is *blind right now*. Reports the `housePoolFallbackSoc()` fallback ladder (`homeFleetMeanSoc` on a one-panel plant; the house panel's own Cores on two, v1.185.0). Listed in `ENERGY_STATE_FAMILIES` so the auto-silencer can never eat it. **v1.187.4** — the onset (`backupPoolUnknownSince`) survives a restart: the store writes each unknown pool's onset and when it was last seen unknown to `pool-unknown.json` beside the DB, and a panel whose first projection after the restart reads unknown again carries it when the add-on was down at most `POOL_UNKNOWN_CARRY_MAX_GAP_MS`. The file is refreshed by the poll loop too, so a panel gone dark keeps its onset; until a panel reports after the restart its carriable entry keeps the alert set unsettled. Before, the alarm was absent for 15 min after every restart and came back as a warning until boot + 60 even when it had been critical.
+- `reserve-alarm-blind` (warning; critical after `RESERVE_BLIND_CRITICAL_MS` off-grid) — the entire reserve chain keys off the SHP2 backup-pool %; when that reads null (cloud wedge) for ≥ `RESERVE_BLIND_AFTER_MS` (15 min past the grace hold), this says the reserve alarm is *blind right now*. Reports the `housePoolFallbackSoc()` fallback ladder (`homeFleetMeanSoc` on a one-panel plant; the house panel's own Cores on two, v1.185.0), resolved on the roster the ladder reads (`lastKnownHomeRoster()`, the set index.ts publishes and hands socLadders.ts; v1.187.22 — without it, a panel whose sources lost `isConnected` fell back to the stale `SPARE_DPU_SNS` literal here while the ladder used the remembered roster, and the push could name a mean ~20 points off the ladder's). Listed in `ENERGY_STATE_FAMILIES` so the auto-silencer can never eat it. **v1.187.4** — the onset (`backupPoolUnknownSince`) survives a restart: the store writes each unknown pool's onset and when it was last seen unknown to `pool-unknown.json` beside the DB, and a panel whose first projection after the restart reads unknown again carries it when the add-on was down at most `POOL_UNKNOWN_CARRY_MAX_GAP_MS`. The file is refreshed by the poll loop too, so a panel gone dark keeps its onset; until a panel reports after the restart its carriable entry keeps the alert set unsettled. Before, the alarm was absent for 15 min after every restart and came back as a warning until boot + 60 even when it had been critical.
 
 **Backup-pool SoC ladder:**
 
@@ -8165,9 +8168,14 @@ when that tone is deleted.
   Critical uses a doubled prefix ("Critical alarm. Critical alarm.") and appends
   an acknowledge + a brief repeat. Category is spoken-friendly ("Battery" →
   "Battery system", "SHP2" → "Smart panel"); location is number-worded ("Core 3
-  Pack 2" → "Core three pack two"). Detail is shortened to ~200 chars at a
-  sentence boundary. A no-primary fallback derives the prefix from the level's
-  severity.
+  Pack 2" → "Core three pack two"). Detail is shortened to ~200 chars
+  (`shortenDetail`): at the last sentence end past char 100 — a `.`, `!` or `?`
+  (and any closing quote or bracket) followed by whitespace or the end of the
+  detail — else at the last whitespace, with an ellipsis. v1.187.22: the cut was
+  the last `.` of the first 200 chars, and a decimal point is one, so a spoken
+  figure was cut short ("about $2." for $2.19 on every spoken `peak-grid-draw`
+  with confirmed rates; "load1 6." for 6.37 on host pressure). A no-primary
+  fallback derives the prefix from the level's severity.
 
 #### 8.2 `verbalizeForTts(s)` — the normalizer
 

@@ -42,6 +42,8 @@
  *   A-xxxvii a secondary panel's Spanish advisory is spoken in English
  *   A-xxxviii the house grid-drop re-escalation's Spanish pass repeats the English words
  *   A-xxxix a secondary panel's re-escalation drops its pool's name from the Spanish pass
+ *   A-xl    the reserve-alarm-blind push resolves its fallback SoC without the ladder's roster
+ *   A-xli   the published roster's getter returns nothing (the push falls back to the stale literal)
  *
  *   node scripts/mutate-v1187-22a.mjs
  */
@@ -53,11 +55,13 @@ const SL = resolve(REPO, 'server/src/socLadders.ts');
 const BA = resolve(REPO, 'server/src/batterySocAlarm.ts');
 const MEM = resolve(REPO, 'server/src/shp2Membership.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
+const ALERTS = resolve(REPO, 'server/src/alerts.ts');
 const SUBSET = [
   'test/socLadderBootHydration.test.ts',
   'test/socLadders.test.ts',
   'test/batterySocAlarm.test.ts',
   'test/multiPanel.test.ts',
+  'test/reserveBlindRoster.test.ts',
 ];
 
 const MUTANTS = [
@@ -333,6 +337,20 @@ const MUTANTS = [
     find: 'socAlarmMessageEs({ pct, priority }, name), \'grid-drop re-escalation\'',
     to: 'socAlarmMessageEs({ pct, priority }), \'grid-drop re-escalation\' /* MUTANT */',
     why: 'A re-escalated garage rung is spoken as the house pool in Spanish.',
+  },
+  {
+    id: 'A-xl. ★★★ the reserve-alarm-blind push resolves its fallback SoC without the ladder\'s roster',
+    file: ALERTS,
+    find: '      const fallbackSoc = housePoolFallbackSoc(devices, lastKnownHomeRoster());',
+    to: '      const fallbackSoc = housePoolFallbackSoc(devices); /* MUTANT */',
+    why: 'Sources without isConnected: the off-grid critical push says "mean 52%" (bench Core 3 in, wired Core 5 out) while the ladder runs on 30 %.',
+  },
+  {
+    id: 'A-xli. ★★ the published roster\'s getter returns nothing',
+    file: MEM,
+    find: 'export function lastKnownHomeRoster(): ReadonlySet<string> | null { return rosterOf(); }',
+    to: 'export function lastKnownHomeRoster(): ReadonlySet<string> | null { return null; } /* MUTANT */',
+    why: 'The alert passes no roster again and names the stale literal\'s mean, not the one the ladder runs on.',
   },
 ];
 

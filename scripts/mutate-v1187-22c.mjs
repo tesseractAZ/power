@@ -38,6 +38,9 @@
  *                  counts; a partial ON failure; an arm no announcement delivered and a refusal a
  *                  missed evening keeps; a refused hold worded as a hold, "the write" in auto
  *                  mode; no EV note on a no-charge night; the ON-failure push names the stop
+ *   C-clxx…C-clxxiv  (final review) a spoken detail is cut at a sentence end, never at a decimal
+ *                  point, and otherwise between words (a figure is never split); the peak-grid-draw
+ *                  cost is stated as the on-peak spend it is, not a premium over overnight
  *
  *   node scripts/mutate-v1187-22c.mjs
  */
@@ -55,6 +58,8 @@ const REC = resolve(REPO, 'server/src/recorder.ts');
 const NLS = resolve(REPO, 'server/src/nightLedgerScoring.ts');
 const WEB = resolve(REPO, 'web/src/cards/nightChargeText.ts');
 const CARD = resolve(REPO, 'web/src/cards/NightChargeCard.tsx');
+const TTS = resolve(REPO, 'server/src/ttsService.ts');
+const PGD = resolve(REPO, 'server/src/peakGridDraw.ts');
 const SUBSET = [
   'test/nightChargeExpectedBuy.test.ts',
   'test/ledgerExpectedBuy.test.ts',
@@ -62,6 +67,7 @@ const SUBSET = [
   'test/nightChargeMqtt.test.ts',
   'test/nightForceCharge.test.ts',
   'test/announcePathIntegrity.test.ts',
+  'test/spokenDetailCut.test.ts',
 ];
 
 const MUTANTS = [
@@ -1327,6 +1333,42 @@ const MUTANTS = [
     find: '        noRetry: action.noRetry === true, ceilingPct: state.forceChargeCeilingPct,',
     to: '        noRetry: action.noRetry === true, ceilingPct: null, /* MUTANT */',
     why: 'The warning no longer says where the forfeited force-charge would have stopped.',
+  },
+  // ── (final review) a spoken detail states its figures whole ──
+  {
+    id: 'C-clxx. ★★★ a decimal point is a sentence end again (the spoken cut lands in a figure)',
+    file: TTS,
+    find: '  for (const m of detail.matchAll(/[.!?]["\')\\]]*(?=\\s|$)/g)) {',
+    to: '  for (const m of detail.matchAll(/[.!?]["\')\\]]*/g)) { /* MUTANT */',
+    why: 'Every spoken peak-grid-draw with confirmed rates says "about $2." for $2.19, and host pressure "load1 6." for 6.37.',
+  },
+  {
+    id: 'C-clxxi. ★★★ with no sentence end in range the cut is at char 200 again (a figure split mid-number)',
+    file: TTS,
+    find: '  const words = ws > 0 ? head.slice(0, ws) : detail.slice(0, SPOKEN_DETAIL_MAX_CHARS);',
+    to: '  const words = detail.slice(0, SPOKEN_DETAIL_MAX_CHARS); /* MUTANT */',
+    why: 'A reading of 12.05 straddling the limit is spoken "12.0".',
+  },
+  {
+    id: 'C-clxxii. ★ a sentence end in the first 100 chars is taken (the spoken detail stops after one short clause)',
+    file: TTS,
+    find: '    if (at > SPOKEN_DETAIL_MIN_SENTENCE_CUT) sentenceEnd = end;',
+    to: '    sentenceEnd = end; /* MUTANT */',
+    why: 'A detail whose only early full stop is at char 60 speaks 60 chars and drops the reading that follows.',
+  },
+  {
+    id: 'C-clxxiii. ★★ a sentence end past the limit is taken (the spoken detail runs long)',
+    file: TTS,
+    find: '    if (end > SPOKEN_DETAIL_MAX_CHARS) break;',
+    to: '    /* MUTANT */',
+    why: 'The cut lands at the last sentence end of the whole detail: the speakers read the full narration.',
+  },
+  {
+    id: 'C-clxxiv. ★★★ peak-grid-draw calls the on-peak spend a premium over overnight again',
+    file: PGD,
+    find: '    : ` At the current ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour.`;',
+    to: '    : ` At the current ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour more than buying the same energy overnight.`; /* MUTANT */',
+    why: 'The push states $2.19/h as the extra over overnight; the real premium at 34 c against 8 c is $1.68/h.',
   },
 ];
 
