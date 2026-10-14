@@ -129,7 +129,9 @@ const live: Rig[] = [];
 function rig(opts: { probeMs?: number; targetDriftDelayMs?: number } = {}): Rig {
   process.env.BROADCAST_HEALTH_PROBE_MS = String(opts.probeMs ?? 3_600_000);
   const logs: string[] = [];
-  const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-bcint-cache-'));
+  // v1.187.22 — under the file's ROOT: a render still in flight when the rig stops can re-create
+  // the directory after stop() removed it, and the file-level after() removes ROOT once those land.
+  const cacheDir = mkdtempSync(resolve(ROOT, 'cache-'));
   const mon = B.startBroadcastMonitor(store, (m) => logs.push(m), {
     klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', renderTts, tickMs: 10,
     targetDriftDelayMs: opts.targetDriftDelayMs,
@@ -175,6 +177,8 @@ after(async () => {
   for (const r of live.splice(0)) r.stop();
   setGlobalDispatcher(prevDispatcher);
   await agent.close();
+  // v1.187.22 — a stopped rig's in-flight render can still write its cache dir (under ROOT).
+  await sleep(250);
   rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   rmSync(KLAXON, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 });
@@ -645,6 +649,11 @@ test('★★★ a run opened by a forced probe between ticks is confirmed at its
     const since = seen.find((x) => x.usable === 0)!.at;
     const trace = JSON.stringify(seen.map((x) => [x.at - since, x.usable, x.reachable]));
     assert.ok(since - seen[0].at < 0.5 * P, `precondition: the forced probe opened the run between two ticks: ${trace}`);
+    // The forced probe restarts the periodic throttle: the tick due under 0.5P after it is
+    // skipped, so no periodic probe runs within P less the jitter tolerance (audibleProbeDue).
+    const quiet = P - Math.min(B.AUDIBLE_PROBE_JITTER_MAX_MS, P / 10);
+    assert.deepEqual(seen.filter((x) => x.at > since && x.at < since + quiet).map((x) => x.at - since), [],
+      `the forced probe restarted the throttle: no periodic probe within ${quiet} ms of it: ${trace}`);
     const c = seen.find((x) => x.reachable === false)!;
     const took = c.at - since;
     assert.ok(took >= 2 * P, `not before the span: ${trace}`);

@@ -13,7 +13,7 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BroadcastHealth } from '../src/broadcastHealth.js';
@@ -25,6 +25,8 @@ after(() => clearInterval(keepAlive));
 
 // Sidecar paths and knobs are read at import, so they are set first and every app import is dynamic.
 const tmp = mkdtempSync(join(tmpdir(), 'ef-am-audible-'));
+// Removed once the file is done; retried, as a state write the stopped monitor started can still land.
+after(() => rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }));
 process.env.DB_PATH = join(tmp, 'ecoflow.db');
 process.env.ALERT_EVAL_MS = '200';
 process.env.ALERT_FEED_BUDGET_MS = '1500';

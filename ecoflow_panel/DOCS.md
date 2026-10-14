@@ -1521,9 +1521,9 @@ A second SHP2 is supported. Its model:
   panel's reserve pair, source and circuit faults, reserve-blind and SoC band, with ids suffixed
   `-<serial>` (`familyOf` stops at the serial, so every family rule applies) and titles led by
   the panel's name; no arbitrage posture (night charge never writes it). `resolveHandoffOwner`
-  hands `backup-soc-<pct>-<serial>` to that panel's own pair. index.ts runs a SoC ladder per
-  secondary panel (`battery-soc-alarm-<serial>.json`, `socAlarmMessage(t, poolName)`) and a
-  runway alarm per panel (`runway-alarm-<serial>.json`, `RunwayWording { poolName, basis: 'drain' }`).
+  hands `backup-soc-<pct>-<serial>` to that panel's own pair. `socLadders.ts` runs a SoC ladder
+  per secondary panel (`battery-soc-alarm-<serial>.json`, `socAlarmMessage(t, poolName)`), and
+  index.ts a runway alarm per panel (`runway-alarm-<serial>.json`, `RunwayWording { poolName, basis: 'drain' }`).
 - **The secondary runway** (`panelRunway.ts`) is the pool's energy against its measured drain:
   the net pack flow of the panel's connected Cores (`panelPoolNetWatts`, null unless EVERY one
   reports), sampled each 2-min runway tick (before, and independent of, the analytics worker's
@@ -3909,13 +3909,14 @@ preconditions (sun up, pack rested, ≥2 samples, non-null SoH) are actually met
 
 ## 5. Runway, Depletion & Battery-SoC Alarms (safety-critical)
 
-This cluster is the life-safety heart of the add-on: the engines that decide **when the home is at risk of losing power** and **when to make an audible alarm**. Six cooperating modules are documented here:
+This cluster is the life-safety heart of the add-on: the engines that decide **when the home is at risk of losing power** and **when to make an audible alarm**. Seven cooperating modules are documented here:
 
 | Module | File | Role |
 | --- | --- | --- |
 | Runway depletion sim | `analytics.ts` (`computeRunway`) | Hour-by-hour DC-pool depletion projection → `hoursToReserve` / `hoursToEmpty` |
 | Runway audible alarm | `runwayAlarm.ts` (`classifyRunway`, `createRunwayAlarm`) | Maps a runway projection to an ISA priority and drives the dedicated audible path |
 | Battery-SoC floor alarm | `batterySocAlarm.ts` | The 50/40/30/20/15/10/8/4/2 % descending-crossing ladder |
+| SoC ladder wiring | `socLadders.ts` (`startSocLadders`) | The store tick that feeds the house ladder, one ladder per secondary panel and the grid-drop re-escalation, behind the boot gate (§3.8) |
 | Grid backstop resolver | `gridState.ts` (`resolveGridBackstop`, `liveGridBackstop`) | Answers "is the grid carrying the home right now?" — the input that re-escalates islanded vs grid-backed |
 | Load-shed advisor | `loadShedAdvisor.ts` | Advisory-only counterfactual: "shed X, runway extends to Y" |
 | Grid dispatch helpers | `socGridDispatch.ts` | Pure SoC grid-downgrade + grid-drop re-escalation logic |
@@ -4225,6 +4226,8 @@ Enabled unless `BATTERY_RUNWAY_ALARM_ENABLED=false`.
 
 Fires an escalating audible announcement when the SHP2 backup-pool SoC crosses **down** through a threshold, with priority rising as the reserve gets lower. Like the runway alarm it is a **dedicated audible path** (`broadcast.announce` directly), because the normal pipeline only chimes for warning/critical and the user wants the 40 %/30 % (low-priority) crossings audible too. The matching on-screen alert is emitted by `alerts.ts` (and excluded from the broadcast condition so it never double-chimes).
 
+The ladders and the store tick that feeds them live in `server/src/socLadders.ts` (`startSocLadders`, v1.187.22; index.ts before, which now only starts it): the house ladder with its grid-downgrade record (§4.5), one ladder per secondary panel, and the grid-drop re-escalation pass.
+
 #### 3.2 The SoC ladder — `BATTERY_SOC_THRESHOLDS`
 
 | SoC % | Priority |
@@ -4271,11 +4274,15 @@ The guard **only** fires from a *fresh, healthy* baseline: a real deep discharge
 - `activeSocBandWithHysteresis(socPct, prevBandPct)` (v1.17.0/F15) — adds the ladder's 2 % re-arm margin to the on-screen band. A deeper crossing takes effect immediately; the held band clears/ascends only once SoC climbs *above* `band + 2`. Pure banding had 399 on-screen rises in 30 days vs ~115 real crossings (3.5× churn) polluting cleared-history and the auto-silencer's training data.
 - `socAlertSeverity(priority)` — stamps `{severity, source:'threshold', priority}` so the web/TUI `priorityOf()` derives the same ISA tier as the audible. Always `source:'threshold'` (a real measurement, not a learned forecast); Medium is carried by an explicit `priority` field rather than faking `source:'learned'`.
 
-#### 3.7 SHP2-blind failover (index.ts, v1.8.0/F3)
+#### 3.7 SHP2-blind failover (`socLadders.ts`, v1.8.0/F3)
 
-The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the 30-day review found blackouts (42.2 h, 25.8 h) in which the pool crossed 50/40/30/20 % while the ladder sat dark for 17.8–20.8 h. When `backupBatPercent` is null, index.ts falls back to `housePoolFallbackSoc(devices, lastKnownRoster)` (the pool *is* those batteries). With one panel that is `homeFleetMeanSoc`, whose membership comes from the live roster, then the persisted last-known roster, then the `SPARE_DPU_SNS` literal (v1.117.0). On a two-panel plant it is the house panel's own Cores only (v1.185.0). It returns null only when no Core is reporting, where `update(null)` is a safe no-op and the reserve-blind warning + offline alerts are the signal.
+The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the 30-day review found blackouts (42.2 h, 25.8 h) in which the pool crossed 50/40/30/20 % while the ladder sat dark for 17.8–20.8 h. When `backupBatPercent` is null, the ladder tick (`socLadders.ts`) falls back to `housePoolFallbackSoc(devices, lastKnownRoster)` (the pool *is* those batteries). With one panel that is `homeFleetMeanSoc`, whose membership comes from the live roster, then the persisted last-known roster, then the `SPARE_DPU_SNS` literal (v1.117.0). On a two-panel plant it is the house panel's own Cores only (v1.185.0). It returns null only when no Core is reporting, where `update(null)` is a safe no-op and the reserve-blind warning + offline alerts are the signal.
 
 **v1.92.0 — pool membership is resolved from the SHP2's own connected-source roster, not from the static `SPARE_DPU_SNS` literal.** `isHomePoolDpu(sn, connectedOrDevices)` returns `connected.has(sn)` when the roster is known and falls back to `!SPARE_DPU_SNS.has(sn)` only when it is empty (the panel itself cloud-dark), which errs toward *including* a device. Motivating incident: a physical reconfiguration moved an allowlisted bench unit onto a panel slot and a home Core off it, inverting the literal. The allowlist-only filter then averaged the bench unit and dropped a live pool member — and because a bench unit charges independently, the reported mean acquired a hard floor of `benchSoc / 3`. Measured with the bench unit at 63 %, the fallback could not read below 21 %, so the 15/10/8/4/2 % rungs — the entire critical half of the ladder — were unreachable during exactly the SHP2-blind window the fallback exists to cover. Guards are mutation-proven load-bearing (`scripts/mutate-pool-membership.mjs`, 6/6), including an exemplar that reproduces the shipped defect verbatim. The same resolver now gates the reconnect auto-audit's device set (§12e), which previously exempted a live home Core while watching a bench unit.
+
+#### 3.8 Boot gate (`socLadders.ts`, v1.187.22)
+
+Until the store is hydrated (`SnapshotStore.firstPollSettledAt`: the first poll has asked every listed-online device for its quota), a tick reads a partial device map: the device list has landed, but only the devices that already answered carry a projection. After a host reboot on 2026-10-12 the first tick carried no panel pool % and only one of the three roster Cores; the fallback mean (§3.7) read 49 % against a real 52 %, the armed 50 % rung was spoken, and the real crossing was spoken again twenty minutes later. The ladders are a dedicated audible path (`broadcast.announce`), outside the broadcast's boot holds, so they now gate themselves: the house ladder, every other panel's ladder and the grid-drop re-escalation (§4.5) are fed only once the first poll has settled (`socLadderBootGate`; the gate latches open), bounded by `BOOT_HYDRATION_MAX_MS` from start — the alert monitor's bound, default 30 s (`ALERT_BOOT_HYDRATION_MAX_MS`; `0` disables the wait). Past the bound the ladders are fed the data that exists, exactly as before, so a cloud outage at boot never holds a real alarm for good. The `hydrated` event and the bound each run a tick, so the first hydrated value is evaluated at once, not on the next change; the live roster is still noted on a withheld tick. One log line when the gate first withholds a tick (`soc-ladder: withholding the SoC ladders until the first poll settles …`, with what the house pool, or its fallback, reads), and one when it opens (`soc-ladder: the first poll settled <n> ms after start …`, or a WARNING when the bound opened it: `no complete poll within <n> s of start …`).
 
 ---
 
@@ -4444,7 +4451,7 @@ Away from the floor, a flow-less declaration remains a valid backstop (grid avai
 - `socGridCrossDecision(t, backstopping)` → `{priority, onGrid}` where `onGrid = priority !== t.priority`. `onGrid=true` means the consumer must **record** the crossing's true priority in the `socDowngraded` map so a later grid drop can restore it.
 - `reEscalateGridDrop(socDowngraded, soc, backstopping, isPriorityEnabled)` — the grid-drop re-escalation pass. Deletes any band the pool climbed back above; and when the grid is **not** backstopping, deletes and returns every still-active downgraded band so the consumer re-announces it at its **true** priority. This closes the one-shot fail-silent window: the SoC ladder fires once per downward crossing, so without re-escalation a grid drop while the pool sits in a downgraded band would never re-fire.
 
-In index.ts the SoC alarm's `onCross` uses `socGridCrossDecision`, records/clears `socDowngraded` for **every** crossed band (not just the primary), and the store-change handler runs `reEscalateGridDrop` each tick. This self-heals on the ~60 s REST poll cadence even under a total MQTT stall (the poll loop unconditionally emits 'change').
+In `socLadders.ts` (index.ts before v1.187.22) the SoC alarm's `onCross` uses `socGridCrossDecision`, records/clears `socDowngraded` for **every** crossed band (not just the primary), and the store-change tick runs `reEscalateGridDrop` each tick once the boot gate is open (§3.8). This self-heals on the ~60 s REST poll cadence even under a total MQTT stall (the poll loop unconditionally emits 'change').
 
 ---
 
@@ -6184,7 +6191,7 @@ Online bench spares (`SPARE_DPU_SNS` not wired into SHP2) get `annunciate:false`
 
 **Backup-pool SoC ladder:**
 
-- `backup-soc-<pct>` — one on-screen alert for the lowest SoC threshold the pool is at/below, ladder **50 / 40 / 30 / 20 / 15 / 10 / 8 / 4 / 2 %**, via `activeSocBandWithHysteresis(soc, heldBand)` (clears only once SoC climbs past band+2, matching the audible ladder's re-arm margin). Severity/priority from `socAlertSeverity`. **Dedup:** suppressed inside the `shp2-near/below-reserve` window when the SHP2 is online (`coveredByShp2Pair`); on a cloud-offline SHP2 the band remains the fallback. The id MUST start `backup-soc` so `broadcast.ts` excludes it from its own chime — the escalating audible SoC alarm is fired separately by `batterySocAlarm`/`index.ts`.
+- `backup-soc-<pct>` — one on-screen alert for the lowest SoC threshold the pool is at/below, ladder **50 / 40 / 30 / 20 / 15 / 10 / 8 / 4 / 2 %**, via `activeSocBandWithHysteresis(soc, heldBand)` (clears only once SoC climbs past band+2, matching the audible ladder's re-arm margin). Severity/priority from `socAlertSeverity`. **Dedup:** suppressed inside the `shp2-near/below-reserve` window when the SHP2 is online (`coveredByShp2Pair`); on a cloud-offline SHP2 the band remains the fallback. The id MUST start `backup-soc` so `broadcast.ts` excludes it from its own chime — the escalating audible SoC alarm is fired separately by `batterySocAlarm`/`socLadders.ts`.
 
 Output is sorted by `SEVERITY_ORDER` (critical=0, warning=1, info=2) then category.
 
@@ -7814,7 +7821,7 @@ via `media_player.play_media` with `announce: true`, `media_content_type:
 
 After the SIP dispatch, before the MA call:
 
-- **Pre-flight:** `getEntityState` each MA target; require `≥1` registered and not `'unavailable'`. During HA/MA restart windows entities briefly deregister and HA *accepts* `play_announcement` then silently drops it (3 confirmed swallowed broadcasts, each "ok" in 20–34 ms). If `usable === 0`, defer + retry, mark `lastOutcome = 'failure'`, and freshen the health probe.
+- **Pre-flight:** `getEntityState` each MA target; require `≥1` registered and not `'unavailable'`. During HA/MA restart windows entities briefly deregister and HA *accepts* `play_announcement` then silently drops it (3 confirmed swallowed broadcasts, each "ok" in 20–34 ms). If `usable === 0`, defer + retry, mark `lastOutcome = 'failure'`, and force a health probe (it counts toward the debounce run but does not restart or shorten its span, §13).
 - **Post-call verification:** a real MA announcement blocks until playback completes (17–34 s). If the call returns `ok` in **< 2000 ms**, it is treated as unverified (`unverified: completed in <n>ms — too fast for real playback`) and a retry is scheduled — a success no one heard is not reported as success.
 
 Outcome (`'success'` / `'partial'` / `'failure'`), errors, level, spoken message,
@@ -8319,8 +8326,8 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_BOOT_WARMUP_MS` | `600000` (10 min) | Restart-continuation + boot phantom-red + red-replay window. |
 | `BROADCAST_RED_REPLAY_MIN_GAP_MS` | unset (`Infinity`, v1.78.0) | Unset: an unchanged, verifiably announced standing red never replays at boot. A positive value restores the v1.64.0 timed reminder (that many ms of silence per announcement). A changed or new fault, or an escalation, ignores it. |
 | `BROADCAST_RED_REPLAY_STATE_PATH` | `<db>/../broadcast-red-replay.json` | Persisted `{lastRedAnnouncedAtMs, voicedFingerprint, activeFingerprints, lastPlayedLevel}` — the only channel the gate has across a restart. |
-| `BROADCAST_HEALTH_PROBE_MS` | `60000` | Audible-health probe interval. |
-| `BROADCAST_UNREACHABLE_CONFIRM` | `3` | Consecutive-fail streak before confirming unreachable. |
+| `BROADCAST_HEALTH_PROBE_MS` | `60000` | Audible-health probe period P. The periodic probe runs once P − min(1 s, P/10) has passed since the last probe of any kind (a tolerance for the interval's own jitter); a probe is also armed at a pending run's span end (§13, v1.187.22). |
+| `BROADCAST_UNREACHABLE_CONFIRM` | `3` | C: the unreachable and degraded runs are confirmed after C failing probes **and** (C − 1) × `BROADCAST_HEALTH_PROBE_MS` since the run's first failing probe (v1.187.22; a count alone before). Forced probes count but do not restart or shorten the span. `1` confirms on the first failing probe. |
 | `DATA_DIR` / `CHIMES_DIR` / `CHIME_CONFIG_PATH` / `BROADCAST_RUNTIME_CONFIG_PATH` | `/data`-relative | Storage locations. |
 
 Alert-settings knob consumed by rendering: the per-priority annunciation enable
@@ -8336,15 +8343,54 @@ silent failure that once hid a dead alarm channel (Music Assistant fell into
 This module makes that self-announcing.
 
 The monitor runs `computeAudibleHealth()` on its own throttle
-(`AUDIBLE_HEALTH_PROBE_MS`, default 60 s, seeded ~15 s after boot) — **not** only
-when a broadcast fires — so a dead channel is caught even while the fleet is
-green. It probes target availability (`getEntityState` each target; usable =
-present and not `'unavailable'`) and publishes a `BroadcastHealth` snapshot via
-`setBroadcastHealth`. Reachability is **debounced**: `reachable` stays `null`
-until `unreachableStreak >= AUDIBLE_UNREACHABLE_CONFIRM` (default 3) flips it to
-`false`, so a transient HA/MA restart blip never fires. A re-entrancy guard
-(`audibleProbeInFlight`) coalesces overlapping probes so one real window can't
-double-increment the streak.
+(`AUDIBLE_HEALTH_PROBE_MS` from `BROADCAST_HEALTH_PROBE_MS`, P below, default 60 s) — **not**
+only when a broadcast fires — so a dead channel is caught even while the fleet is
+green. Two kinds of probe are *forced* past the throttle: the boot kick (~15 s after start) and
+the probe a broadcast forces when its pre-flight finds no usable speaker. Each probe reads target
+availability (`getEntityState` each target; usable = present and not `'unavailable'`) and
+publishes a `BroadcastHealth` snapshot via `setBroadcastHealth`. A re-entrancy guard
+(`audibleProbeInFlight`) coalesces overlapping probes, so one real window is counted once.
+
+**Debounce — a run that spans time (v1.187.22).** The unreachable state (zero usable speakers)
+and the degraded state (fewer usable than configured) are each debounced by a *run* of failing
+probes (`audibleRunStep`: the run's count and the time of its first failing probe). A run is
+confirmed only once it holds C failing probes (`AUDIBLE_UNREACHABLE_CONFIRM` from
+`BROADCAST_UNREACHABLE_CONFIRM`, default 3) **and** (C − 1) × P has passed since its first
+failing probe — two minutes at the defaults; C = 1 confirms on the first failing probe. Forced
+probes count toward C but neither restart nor shorten the span, so a Music Assistant restart
+that puts a failed broadcast, the boot kick and a failed retry within ~30 s is not confirmed as
+a dead channel (a count alone confirmed it, and pushed "unreachable" and its "Resolved" within
+two minutes). Until a run is confirmed, `reachable` holds its prior published value (`null` at
+boot, which never alarms; `true` after a usable read); a probe that reads any usable speaker
+publishes `true` at once and ends the unreachable run. A wall clock stepped back past the run's
+first failing probe re-anchors the span at the current probe.
+
+**Probe timing.** A forced probe restarts the periodic throttle, so the tick that would have
+reached a run's span can be skipped, and a run opened by a forced probe reaches its span between
+ticks. After every probe that ran, a **deadline probe** is therefore armed at the earlier span
+end of the open, unconfirmed runs (`audibleProbeDeadline`, judged from the probe's start, so a
+deadline probe dropped by the re-entrancy guard is re-armed by the probe it ran into):
+confirmation lands at the span, not up to two periods past it. A run already past its span with
+a short count is left to the periodic probe, so rapid probes cannot make up the count. The
+periodic throttle (`audibleProbeDue`) runs a tick once P − min(1 s, P/10) has passed since the
+last probe of any kind: a tolerance for the interval's own jitter (a tick read P − 1 ms after
+the last one was skipped, the run lost a probe, and confirmation waited a further period). The
+periodic probe therefore never runs within P − min(1 s, P/10) after another probe, and a clock
+stepped back past the last probe is due at once.
+
+**Holds.** A confirmed unreachable channel reads `false` until a probe reads a usable speaker. A
+confirmed degraded channel holds through every failing probe until a probe reads every
+configured speaker usable (`audibleDegradedStep`), so a re-anchored run cannot read as
+"restored" and push the degraded alert a second time.
+
+**Immediate paths (unchanged).** No speakers configured (`BROADCAST_TARGETS` empty) reads
+unreachable on the first probe, and the config-drift resolver's rename signature (below) marks
+the channel unreachable at once: neither is a transient, so neither is debounced.
+
+**Read at dispatch.** The alert monitor reads the two audible-channel alerts when it assembles
+the alert set it dispatches — after its wait on the analytics worker (up to
+`ALERT_FEED_BUDGET_MS`) — not with the live alarms before that wait, so a push never carries a
+channel state that the last probe already cleared.
 
 Two not-usable signatures are distinguished for triage: all-`null`
 (entities NOT FOUND → MA likely down/removed its players, or HA API unreachable)
@@ -8367,8 +8413,8 @@ unreachable speaker is not itself an emergency (the real emergencies push on
 their own alerts). It also mirrors to HA diagnostic sensors via `mqttDiscovery`.
 
 **`broadcastDegradedAlert(h, nowMs)`** (v1.186.0): while fewer Music Assistant targets are usable
-than configured, confirmed by the same `AUDIBLE_UNREACHABLE_CONFIRM`-probe debounce
-(`audibleDegradedStep`), a **WARNING / MEDIUM** push alert `system-audible-degraded`
+than configured, confirmed by the same time-spanned debounce (`audibleDegradedStep`, held once
+confirmed — see above), a **WARNING / MEDIUM** push alert `system-audible-degraded`
 (`AUDIBLE_DEGRADED_ALERT_ID`) names the speakers that will not play. It yields to
 `system-audible-unreachable` once that is confirmed, resolves when every target is usable again,
 and shares the `system-audible` prefix that keeps it out of the audible condition. Each broadcast

@@ -31,6 +31,7 @@
  *   B-xxii   the deadline is re-armed from the probe's END, so one dropped by the re-entrancy guard is lost
  *   B-xxiii  a confirmed degraded channel is not held through failing probes (a clock step un-confirms it)
  *   B-xxiv   the monitor does not hand the degraded step its confirmed state
+ *   B-xxv    a forced probe does not restart the periodic throttle (the tick just after it probes too)
  *
  *   node scripts/mutate-v1187-22b.mjs
  */
@@ -213,6 +214,13 @@ const MUTANTS = [
     find: '      const degraded = audibleDegradedStep(degradedRun, audibleDegraded, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);',
     to: '      const degraded = audibleDegradedStep(degradedRun, false, cfg.targets.length, usable, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS); /* MUTANT */',
     why: 'The hold exists only on paper: a clock step still logs a false "restored" and re-pushes the degraded alert.',
+  },
+  {
+    id: 'B-xxv. ★★ a forced probe does not restart the periodic throttle',
+    file: BC,
+    find: '    lastAudibleHealthAt = nowMs;',
+    to: '    if (!force) lastAudibleHealthAt = nowMs; /* MUTANT */',
+    why: 'A failed broadcast\'s probe no longer defers the next tick: the periodic probe runs a fraction of a period after it, so failed broadcasts and their retries add Home Assistant reads in a restart window.',
   },
 ];
 
