@@ -38,7 +38,7 @@ import {
   evDisplacedPackKwh,
   FORCE_CHARGE_PROVEN_KW_PER_SLOT,
   FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnReadbackStatus,
-  armedForceChargeStopPct,
+  forceChargeNightOutcome,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -208,6 +208,9 @@ import {
   APPLY_MAX_RETRIES,
   armFromPlan,
   armRefusalReason,
+  coerceArmRefusalRecord,
+  servedArmRefusal,
+  type ArmRefusalRecord,
   decideActuation,
   emptyActuationState,
   coerceActuationState,
@@ -3297,14 +3300,19 @@ function clampInt(v: number, lo: number, hi: number, dflt: number): number {
  *  the evening job to fire at most ONCE per Phoenix calendar day. (v1.40.0:
  *  the host itself is verified stable — the earlier "daily power-cycle"
  *  premise no longer holds; restart-resilience is still required.) */
-interface NightChargeLatch { lastNotifyDay: string | null }
+interface NightChargeLatch {
+  lastNotifyDay: string | null;
+  /** v1.187.22 — the evening's refused arm (armRefusalReason) and the window it was refused for:
+   *  the status route serves it (servedArmRefusal) so the card leads with it. null = none. */
+  armRefused?: ArmRefusalRecord | null;
+}
 function readNightChargeLatchFile(): NightChargeLatch {
   try {
     const raw = JSON.parse(readFileSync(NIGHT_CHARGE_LATCH_PATH, 'utf8'));
     const d = raw?.lastNotifyDay;
-    return { lastNotifyDay: typeof d === 'string' ? d : null };
+    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused) };
   } catch {
-    return { lastNotifyDay: null };
+    return { lastNotifyDay: null, armRefused: null };
   }
 }
 // In-memory mirror of the persisted latch, seeded once from disk at module load.
@@ -3317,7 +3325,7 @@ function readNightChargeLatch(): NightChargeLatch {
   return nightChargeLatchMem;
 }
 function writeNightChargeLatch(l: NightChargeLatch): void {
-  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay };
+  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null };
   try {
     atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(l));
   } catch (e: any) {
@@ -4743,6 +4751,8 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       // its length is bounded by a test. See nightChargeSpokenNotice.
       const spokenPair = nightChargeSpokenNotice({
         levelPct: chargeLevelPct(plan) ?? supervisedCtx.targetPct,
+        // v1.187.22 — what a night expected to charge nothing holds: the armed reserve.
+        reservePct: supervisedCtx.targetPct,
         expectedKwh: statedBuyKwh(plan),
         toward: chargeIsWindowBound(plan),
         deadlineText: supervisedCtx.cancelDeadlineText,
@@ -4779,7 +4789,12 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         );
       }
     }
-    writeNightChargeLatch({ lastNotifyDay: today }); // latch AFTER a successful send
+    // v1.187.22 — and the refused arm, keyed by its window, for the card (servedArmRefusal).
+    writeNightChargeLatch({
+      lastNotifyDay: today,
+      armRefused: armRefused && plan?.window
+        ? { reason: armRefused, windowStartMs: plan.window.startMs, windowEndMs: plan.window.endMs } : null,
+    }); // latch AFTER a successful send
     app.log.info(`night-charge: evening advisory sent (${shape}) and latched for ${today}.`);
   } catch (e: any) {
     // Do NOT latch on failure — retry next minute-tick within the window.
@@ -5980,12 +5995,13 @@ async function runNightActuationTickInner(): Promise<void> {
     // v1.187.0 (review) — NOT awaited: an info push (5 s headers + 10 s body per target)
     // must never hold the tick, and with it any force-charge step still to run.
     // v1.187.22 — the armed day's EXPECTED figure, or none: state.buyKwh is the worst case.
-    // The force-charge stop names the level the figure belongs to; a cancel or a grid-loss abort
-    // ended the night early and is said so, with no figure.
+    // What the force-charge did comes from this record (forceChargeNightOutcome: ran, switched
+    // ON but unconfirmed or failed, never started); a cancel or a grid-loss abort ended the night
+    // early and is said so, with no figure.
     void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({
       day: state.day, targetPct: state.targetPct, restorePct: action.restorePct,
       expectedKwh: armedExpectedBuyKwh(state.day),
-      forceChargeStopPct: armedForceChargeStopPct(state, forceChargeOn()),
+      forceCharge: forceChargeNightOutcome(state, forceChargeOn()),
       ended: action.gridLossAbort ? 'gridLoss' : state.cancelled ? 'cancelled' : 'window',
     })).catch((e: any) => {
       app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
@@ -6184,6 +6200,9 @@ app.get('/api/night-charge/status', async () => {
     confidence: plan?.confidenceTier ?? null,
     notify: { hour: NIGHT_CHARGE_NOTIFY_HOUR, minute: NIGHT_CHARGE_NOTIFY_MINUTE, lastNotifyDay: latch.lastNotifyDay },
     plan,
+    // v1.187.22 — why a write mode refused to arm this plan's window, until it closes; the card
+    // leads with it instead of the plan's expected charge (servedArmRefusal). null = not refused.
+    armRefusal: servedArmRefusal(latch.armRefused, plan, NIGHT_CHARGE_MODE, Date.now()),
     readiness: getLatestReadiness(),
     // v1.50.0 — tonight's supervised-write record (armed/applied/cancelled/
     // reverted), served from the in-memory mirror.

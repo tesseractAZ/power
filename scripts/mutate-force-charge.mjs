@@ -318,8 +318,10 @@ const MUTANTS = [
     id: 'xl. ★ the announcement says an 80+ night stays on to the window close',
     file: NOTIFY,
     // v1.187.22 — re-pointed: the announcement names where the force-charge stops (forceChargeStopPct).
-    find: "          + `reach ~${pct(forceChargeStopPct(forceCeiling))}, and OFF when it gets there (or when the window closes). `",
-    to: "          + `reach ~${pct(forceChargeStopPct(forceCeiling))}; it stays on until the window closes. ` /* MUTANT */",
+    // v1.187.22 (recheck) — re-pointed: the untimed clause (a plan with no expected start), which
+    // nightForceCharge.test.ts pins; the timed shapes are mutate-v1187-22c's.
+    find: "        + `reach ${stop}, and OFF when it gets there (or when the window closes). `;\n    }",
+    to: "        + `reach ${stop}; it stays on until the window closes. `; /* MUTANT */\n    }",
     why: 'The 21:30 notice describes the retired coast.',
   },
   {

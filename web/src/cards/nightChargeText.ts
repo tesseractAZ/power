@@ -75,6 +75,10 @@ export interface ChargeFigurePlan {
   setpointSocPct: number | null;
 }
 
+/** v1.187.22 — below this an expected draw is NO charge (the server's NO_CHARGE_EXPECTED_KWH,
+ *  nightChargeActuator.ts): what the card would show as "0.0 kWh". */
+export const NO_CHARGE_EXPECTED_KWH = 0.05;
+
 /**
  * v1.187.22 — the card's headline: the CHARGE the write arms. With an expected figure the big
  * number is that draw ("34.9 kWh — expected charge to ~80%"); without one the big number is the
@@ -84,6 +88,9 @@ export interface ChargeFigurePlan {
  * sizingLine's. Mirrors the server's chargeLevelPct / statedBuyKwh (nightChargeAdvisor.ts), and says
  * "toward" the level when the window closes before it is reached (chargeIsWindowBound): Friday's
  * one-hour window from ~48% passes ~14 kWh, ~62%, not the 80% it charges toward.
+ * A night expected to charge nothing (the server's noChargeExpected: the pool is expected to stay
+ * at or above the level) shows the reserve the write holds — "50% reserve held as a floor — no
+ * charge expected" — never "0.0 kWh expected charge to ~50%".
  */
 export function chargeFigureParts(
   plan: ChargeFigurePlan,
@@ -91,12 +98,18 @@ export function chargeFigureParts(
 ): { main: string; unit: string; label: string } {
   const lvl = plan.expectedWriteLevelPct;
   const set = plan.setpointSocPct;
+  const cap = maxPct != null && maxPct > 0 ? maxPct : Infinity;
   const level = lvl != null && Number.isFinite(lvl) ? lvl
-    : set != null && Number.isFinite(set) ? Math.min(Math.round(set), maxPct != null && maxPct > 0 ? maxPct : Infinity)
+    : set != null && Number.isFinite(set) ? Math.min(Math.round(set), cap)
       : null;
   const levelText = level == null ? '—' : `${Math.round(level * 10) / 10}`;
   const exp = plan.expectedBuyKwh;
   if (exp == null || !Number.isFinite(exp)) return { main: levelText, unit: '%', label: 'charge target' };
+  if (exp < NO_CHARGE_EXPECTED_KWH) {
+    // The reserve as written (the server's chargeReservePct): the setpoint, rounded, at most the maximum.
+    const reserve = set != null && Number.isFinite(set) ? `${Math.min(Math.round(set), cap)}` : '—';
+    return { main: reserve, unit: '%', label: 'reserve held as a floor — no charge expected' };
+  }
   const to = plan.expectedDeliverableBound === true ? 'toward' : 'to';
   return { main: exp.toFixed(1), unit: 'kWh', label: `expected charge ${to} ~${levelText}%` };
 }
@@ -165,7 +178,7 @@ export function holdSummary(plan: HoldSummaryPlan): { headline: string; detail: 
     };
   }
   const trough = plan.cushionTroughSocPct ?? plan.minProjSocPct ?? plan.baselineMinSocPct;
-  const line = plan.cushionLineSocPct ?? plan.reserveFloorPct + plan.cushionPct;
+  const line = floorCushionLinePct(plan);
   const wholeHouse = plan.cushionBasis === 'legacy-pct' || plan.cushionTroughSocPct == null;
   return {
     headline: 'No overnight charge needed.',
@@ -173,5 +186,44 @@ export function holdSummary(plan: HoldSummaryPlan): { headline: string; detail: 
       ? `the whole-house low would stay at ~${pct(trough)}`
       : `the pack would close the charge window at ~${pct(trough)}`}, at or above the ${pct(line)} floor+cushion line — nothing will be charged.`,
     tone: 'ok',
+  };
+}
+
+/** The plan fields the floor+cushion line reads. */
+export interface FloorCushionPlan {
+  cushionLineSocPct?: number | null;
+  reserveFloorPct: number;
+  cushionPct: number;
+}
+
+/**
+ * v1.187.22 — the floor+cushion line the card states, %: the line the plan is SIZED on
+ * (cushionLineSocPct — the reserve floor plus the cushion as applied), the server's
+ * floorCushionLinePct (nightChargeAdvisor.ts). The hold summary stated it while the
+ * "Island low, with charge" stat stated reserveFloorPct + cushionPct, the legacy flat band; that
+ * sum stands in only on a plan issued before v1.186.0. null when neither is finite.
+ */
+export function floorCushionLinePct(plan: FloorCushionPlan): number | null {
+  const line = plan.cushionLineSocPct;
+  if (line != null && Number.isFinite(line)) return line;
+  const legacy = plan.reserveFloorPct + plan.cushionPct;
+  return Number.isFinite(legacy) ? legacy : null;
+}
+
+/** v1.187.22 — a percentage as the card and the push state it: one decimal. */
+export function fmtLinePct(n: number | null): string {
+  return n == null || !Number.isFinite(n) ? '—' : `${Math.round(n * 10) / 10}%`;
+}
+
+/**
+ * v1.187.22 — the card's lead on a night a supervised or auto mode REFUSED to arm (the status
+ * route's armRefusal, servedArmRefusal): the evening push says "planned charge NOT armed tonight",
+ * and the card led with the plan's expected charge ("34.9 kWh — expected charge to ~80%") for a
+ * write nothing would make. It leads with the refusal and its reason, and states no level or kWh.
+ */
+export function refusedArmLead(reason: string): { headline: string; detail: string } {
+  return {
+    headline: `Planned charge not armed tonight — ${reason}.`,
+    detail: "Tonight's plan calls for a charge, but the supervised write was not armed. The add-on will not charge tonight.",
   };
 }

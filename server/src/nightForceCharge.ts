@@ -437,14 +437,48 @@ export function armedWriteLevelPct(
 
 /** v1.187.22 — PURE. Where an ARMED night's force-charge stops, %, when it rides the night: the
  *  armed ceiling above the reserve maximum through forceChargeStopPct, force-charge `enabled`
- *  (forceChargeEnabled) — the evening push's own condition; null = reserve only. The morning
- *  summary names it beside the expected figure, which covers that leg. */
+ *  (forceChargeEnabled) — the evening push's own condition; null = reserve only. Whether it ever
+ *  ran is the actuation record's (forceChargeNightOutcome), not this. */
 export function armedForceChargeStopPct(
   s: Pick<NightActuationState, 'forceChargeCeilingPct'>,
   enabled: boolean,
 ): number | null {
   const c = s.forceChargeCeilingPct;
   return enabled && c != null && Number.isFinite(c) && c > RESERVE_WRITE_MAX_PCT ? forceChargeStopPct(c) : null;
+}
+
+/**
+ * v1.187.22 — what tonight's force-charge actually did, from the actuation record, for the
+ * morning summary:
+ *  - `none` — it did not ride the night (no armed ceiling above the reserve maximum, or
+ *    force-charge disabled) and nothing of ours was switched ON;
+ *  - `neverStarted` — it rode the night and was never switched ON (decideForceCharge declined
+ *    every tick: the pool stayed at or above the stop, the ceiling never read back, Charge Now was
+ *    already on, the grid was unknown, the vitals were red, …);
+ *  - `ran` — switched ON and a live readback proved it (forceChargeOnVerifiedAtMs, a late apply
+ *    included);
+ *  - `failed` — switched ON and the "did not take effect" warning went (forceChargeOnFailedAtMs);
+ *  - `unconfirmed` — switched ON and neither proven nor failed when the night ended.
+ * `stopPct` is where it stops (armedForceChargeStopPct); null on a stamped ON with no armed
+ * ceiling above the reserve maximum. A stamped ON counts whatever `enabled` reads now.
+ * armedForceChargeStopPct alone (the armed ceiling and the option) named a force-charge that may
+ * never have run. PURE.
+ */
+export type ForceChargeNightOutcome =
+  | { kind: 'none' }
+  | { kind: 'neverStarted' | 'ran' | 'failed' | 'unconfirmed'; stopPct: number | null };
+
+export function forceChargeNightOutcome(
+  s: Pick<NightActuationState, 'forceChargeCeilingPct' | 'forceChargeOnAtMs' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs'>,
+  enabled: boolean,
+): ForceChargeNightOutcome {
+  const on = forceChargeOnReadbackStatus(s);
+  if (on != null) {
+    const stopPct = armedForceChargeStopPct(s, true);
+    return { kind: on === 'verified' ? 'ran' : on === 'failed' ? 'failed' : 'unconfirmed', stopPct };
+  }
+  const armedStop = armedForceChargeStopPct(s, enabled);
+  return armedStop == null ? { kind: 'none' } : { kind: 'neverStarted', stopPct: armedStop };
 }
 
 /** v1.168.0 — when a force-charge of ours that has not verified OFF must escalate,
@@ -546,7 +580,7 @@ function verifyForceChargeOn(
  *  null = no force-charge tonight; 'unverified' = ON issued, no live readback has proven it
  *  yet (stays so if the night ends that way). */
 export function forceChargeOnReadbackStatus(
-  s: NightActuationState,
+  s: Pick<NightActuationState, 'forceChargeOnAtMs' | 'forceChargeOnVerifiedAtMs' | 'forceChargeOnFailedAtMs'>,
 ): 'verified' | 'failed' | 'unverified' | null {
   if (s.forceChargeOnAtMs == null) return null;
   if (s.forceChargeOnVerifiedAtMs != null) return 'verified';

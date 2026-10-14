@@ -60,7 +60,7 @@
 // clamp). Imported rather than re-stated so the value published to the HA
 // automation and the value the supervised path writes can never drift apart.
 // (nightChargeActuator.ts imports nothing — no cycle.)
-import { clampReserveTarget, RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct } from './nightChargeActuator.js';
+import { clampReserveTarget, RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct, isNoChargeKwh } from './nightChargeActuator.js';
 // v1.187.22 — the level an armed write drives the pool to, and the just-in-time start the
 // force-charge times itself by, for the expected-buy disclosure.
 // (nightForceCharge.ts imports only nightChargeActuator.ts — no cycle.)
@@ -363,6 +363,12 @@ export interface NightChargePlan {
    *  the window closes first (Friday's one-hour 23:00 window from ~48%: ~14 kWh, ~62%, not 80%).
    *  Every surface that states the level then says "toward". Absent/false otherwise. */
   expectedDeliverableBound?: boolean;
+  /** v1.187.22 — when force-charge rides the night: the expected just-in-time start
+   *  (expectedBuyFromPlan's forceChargeStartMs), or null when no start is expected (the pool stays
+   *  at or near the stop). Absent on a reserve-only night, with no P50 basis, on a hold and on
+   *  plans issued before it. Read by the supervised push, which says when force-charge is expected
+   *  to switch on; disclosure only. */
+  expectedForceChargeStartMs?: number | null;
   /** PREDICTION: the pack SoC % the window is expected to actually REACH by its
    *  close, given every cap — including the v1.60.0 EV-contention derate. This
    *  is the number the ledger scores (a systematic gap between this and the
@@ -921,12 +927,51 @@ export function statedBuyKwh(plan: Pick<NightChargePlan, 'expectedBuyKwh'>): num
   return e != null && Number.isFinite(e) ? e : null;
 }
 
+/** v1.187.22 — tonight's write is expected to charge NOTHING (isNoChargeKwh on the stated figure):
+ *  the pool is expected to open the window at or above the level the write drives it to — the
+ *  reserve on a reserve-only night (2026-10-12's inputs at 74%: opening ~65.9% over a 50% reserve);
+ *  above the reserve, with force-charge riding the night, no just-in-time start expected. The write
+ *  then only holds the reserve as a floor, and every line says so — "reserve held at 50% tonight —
+ *  no charge expected" — never "charging to ~50% (~0 kWh)". false with no expected figure. PURE. */
+export function noChargeExpected(plan: Pick<NightChargePlan, 'expectedBuyKwh'>): boolean {
+  return isNoChargeKwh(statedBuyKwh(plan));
+}
+
+/** v1.187.22 — the reserve tonight's write sets, % (clampReserveTarget of the setpoint, as
+ *  armFromPlan writes it): what a night that charges nothing holds. null with no setpoint. PURE. */
+export function chargeReservePct(plan: Pick<NightChargePlan, 'setpointSocPct'>): number | null {
+  const setpoint = plan.setpointSocPct;
+  return setpoint != null && Number.isFinite(setpoint) ? clampReserveTarget(setpoint) : null;
+}
+
+/**
+ * v1.187.22 — the floor+cushion line every surface states, %: the line the plan is SIZED on — the
+ * reserve floor plus the cushion as applied (`targetFloorKwh = reserveKwh + cushionKwh`, the line
+ * the bisection holds the trough to, recorded as cushionLineSocPct). The hold push stated it while
+ * the charge push and the card stated reserveFloorPct + cushionPct, the legacy flat band — the
+ * applied cushion only on the `legacy-pct` basis (resilience with an 8 h cushion on a 1 kW island:
+ * sized on 27.6%, pushed as 31%). That sum stands in only on a plan issued before v1.186.0, which
+ * has no cushionLineSocPct. The card mirrors it (nightChargeText.floorCushionLinePct). null when
+ * neither is finite. PURE.
+ */
+export function floorCushionLinePct(
+  plan: Pick<NightChargePlan, 'cushionLineSocPct' | 'reserveFloorPct' | 'cushionPct'>,
+): number | null {
+  const line = plan.cushionLineSocPct;
+  if (line != null && Number.isFinite(line)) return line;
+  const legacy = plan.reserveFloorPct + plan.cushionPct;
+  return Number.isFinite(legacy) ? legacy : null;
+}
+
 /** v1.187.22 — an armed night's buy inside an after-the-fact push (the morning summary, the
  *  apply-failure warning), from the expected figure the armed day's plan row holds: "~34.9 kWh
- *  expected". null with none (a row from before v1.187.22, no P50 basis, an unreadable ledger):
- *  the push then states no kWh. The armed record's buyKwh is the worst case and is never pushed. */
+ *  expected". null with none (a row from before v1.187.22, no P50 basis, an unreadable ledger)
+ *  and on a night that was expected to charge nothing (isNoChargeKwh — the push says the reserve
+ *  was held, never "~0 kWh expected"): the push then states no kWh. The armed record's buyKwh is
+ *  the worst case and is never pushed. */
 export function armedExpectedPhrase(expectedKwh: number | null | undefined): string | null {
-  return expectedKwh != null && Number.isFinite(expectedKwh) ? `~${round1(expectedKwh)} kWh expected` : null;
+  return expectedKwh != null && Number.isFinite(expectedKwh) && !isNoChargeKwh(expectedKwh)
+    ? `~${round1(expectedKwh)} kWh expected` : null;
 }
 
 /** v1.187.22 — what the sizing basis is, in the words the rationale and the card label it with. */
@@ -1664,9 +1709,13 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // v1.187.22 — the headline is the CHARGE the write arms: the level it drives the pool to, the
   // window, the expected draw (no kWh with no P50 basis). The worst case follows once, in its own
   // sentence labelled as the sizing basis (sizingNote), the de-bias disclosure beside it.
-  const chargeHeadline = `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the `
-    + `${fmtPhoenixDayHm(windowStart, nowMs)}–${fmtPhoenixDayHm(windowEnd, nowMs)} window`
-    + `${expected.buyKwh == null ? '' : `: ~${round1(expected.buyKwh)} kWh expected`}.`;
+  // A night expected to charge nothing (isNoChargeKwh) is headlined as the reserve it holds, not
+  // as a charge of ~0 kWh to a level the pool already sits above.
+  const windowText = `${fmtPhoenixDayHm(windowStart, nowMs)}–${fmtPhoenixDayHm(windowEnd, nowMs)} window`;
+  const chargeHeadline = isNoChargeKwh(expected.buyKwh)
+    ? `Hold the reserve at ${writtenPct}% in the ${windowText}: no charge expected.`
+    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the ${windowText}`
+      + `${expected.buyKwh == null ? '' : `: ~${round1(expected.buyKwh)} kWh expected`}.`;
   const sizingNote = ` ${sizingBasisText(buyKwhDebiased, calNote)}${projSocAtWindowStartPct != null
     ? `, from ~${projSocAtWindowStartPct}% at the window open` : ''}, projecting ~${targetSocPct}% by ${fmtLocalHint(windowEnd)}.`;
   // What the write does from the expected start (expectedBuyFromPlan): the reserve leg, then — when
@@ -1747,6 +1796,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     expectedStartSocPct,
     expectedWriteLevelPct: expected.levelPct,
     expectedDeliverableBound: expected.deliverableBound === true,
+    ...(expected.forceChargeStartMs !== undefined ? { expectedForceChargeStartMs: expected.forceChargeStartMs } : {}),
     targetSocPct,
     setpointSocPct,
     requiredExtraKwh: round2(requiredExtraKwh),

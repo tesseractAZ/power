@@ -26,6 +26,12 @@
  *                  on, labelled; a refused arm pushes no level or draw; the morning push names
  *                  the force-charge level and does not call a cancel or an abort completed; the
  *                  card's and the arrival entity's labels
+ *   C-xcviii…C-cxxxviii (recheck) what the system will actually do: a night expected to charge
+ *                  nothing says the reserve is held and no charge is expected, on every surface;
+ *                  the morning push states what the force-charge did, from the actuation record;
+ *                  the force-charge clause says when it is expected to start and that it may not
+ *                  get there; one floor+cushion line (the one the plan is sized on); the card
+ *                  leads with a refused arm
  *
  *   node scripts/mutate-v1187-22c.mjs
  */
@@ -478,8 +484,9 @@ const MUTANTS = [
     // v1.187.22 — REPLACES the unlabelled-worst-case mutant (armedBuyPhrase is retired).
     id: 'C-lv-d. ★★ with no expected figure an after-the-fact push still states a kWh figure',
     file: NCA,
-    find: '  return expectedKwh != null && Number.isFinite(expectedKwh) ? `~${round1(expectedKwh)} kWh expected` : null;',
-    to: "  return expectedKwh != null && Number.isFinite(expectedKwh) ? `~${round1(expectedKwh)} kWh expected` : '~— kWh expected'; /* MUTANT */",
+    // v1.187.22 (recheck) — re-pointed: the phrase also states nothing for a no-charge night.
+    find: '    ? `~${round1(expectedKwh)} kWh expected` : null;',
+    to: "    ? `~${round1(expectedKwh)} kWh expected` : '~— kWh expected'; /* MUTANT */",
     why: 'An older plan row puts a placeholder figure in the morning push instead of none.',
   },
   // ── the no-basis headline ──
@@ -516,8 +523,9 @@ const MUTANTS = [
   {
     id: 'C-lx. ★★ the island troughs lose their label',
     file: NOTIFY,
-    find: '      + `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `',
-    to: '      + `Tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} ` /* MUTANT */',
+    // v1.187.22 (recheck) — re-pointed: the projection is shared by the charge and held shapes.
+    find: '  const projection = `Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} `',
+    to: '  const projection = `Tomorrow’s low SoC ~${pct(plan.baselineMinSocPct)} ` /* MUTANT */',
     why: '"Tomorrow’s low SoC ~0% with it" reads as the outcome; with the grid present the SHP2 holds the reserve.',
   },
   {
@@ -554,22 +562,24 @@ const MUTANTS = [
     id: 'C-lxv. ★★ the morning summary drops the expected figure',
     file: NOTIFY,
     // v1.187.22 — re-pointed: the reserve-only shape of the completed summary.
-    find: '        : `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. `)',
-    to: '        : `reserve raised to ${raised} and restored to ${o.restorePct}%. `) /* MUTANT */',
+    find: '      : `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. `;',
+    to: '      : `reserve raised to ${raised} and restored to ${o.restorePct}%. `; /* MUTANT */',
     why: 'Delivery is scored the next evening against a figure the morning push never stated.',
   },
   {
     id: 'C-lxvi. ★★ the apply-failure push drops the expected figure',
     file: NOTIFY,
-    find: "      + `Tonight's planned charge${expected ? ` (${expected})` : ''} will not happen; the pool stays on its normal floor. `",
-    to: "      + `Tonight's planned charge will not happen; the pool stays on its normal floor. ` /* MUTANT */",
+    // v1.187.22 (recheck) — re-pointed: the charge shape of what will not happen.
+    find: "    : `charge${expected ? ` (${expected})` : ''}`;",
+    to: "    : 'charge'; /* MUTANT */",
     why: 'The warning does not say how much of a charge was forfeited.',
   },
   {
     id: 'C-lxvii. ★ the force-charge tail names the target, not where it stops',
     file: NOTIFY,
-    find: '          + `reach ~${pct(forceChargeStopPct(forceCeiling))}, and OFF when it gets there (or when the window closes). `',
-    to: '          + `reach ~${pct(forceCeiling)}, and OFF when it gets there (or when the window closes). ` /* MUTANT */',
+    // v1.187.22 (recheck) — re-pointed: every shape of the clause reads the stop from one place.
+    find: '    const stop = `~${pct(forceChargeStopPct(ceiling))}`;',
+    to: '    const stop = `~${pct(ceiling)}`; /* MUTANT */',
     why: 'The title says ~80% and the tail ~80.4%: an 80.4 target syncs an 80 ceiling and stops at 80.',
   },
   {
@@ -582,15 +592,16 @@ const MUTANTS = [
   {
     id: 'C-lxix. ★★ the rationale headline states the sizing prediction as the level',
     file: NCA,
-    find: "  const chargeHeadline = `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the `",
-    to: "  const chargeHeadline = `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${targetSocPct}% in the ` /* MUTANT */",
+    // v1.187.22 (recheck) — re-pointed: the charge shape of the headline.
+    find: "    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the ${windowText}`",
+    to: "    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${targetSocPct}% in the ${windowText}` /* MUTANT */",
     why: 'The headline names the islanded projection (80.4%) instead of where the write stops (80%).',
   },
   {
     id: 'C-lxx. ★ a window-bound charge is headlined as reaching the level',
     file: NCA,
-    find: "  const chargeHeadline = `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the `",
-    to: "  const chargeHeadline = `Charge to ~${expected.levelPct ?? writtenPct}% in the ` /* MUTANT */",
+    find: "    : `Charge ${expected.deliverableBound ? 'toward' : 'to'} ~${expected.levelPct ?? writtenPct}% in the ${windowText}`",
+    to: "    : `Charge to ~${expected.levelPct ?? writtenPct}% in the ${windowText}` /* MUTANT */",
     why: 'Friday\'s one-hour window is headlined "to 80%" though it passes a fraction of the draw.',
   },
   {
@@ -686,17 +697,18 @@ const MUTANTS = [
     why: 'A need under the minimum buy is pushed as "No overnight charge needed … at or above the line".',
   },
   {
-    id: 'C-lxxxiv. ★ the hold line is the legacy flat band',
+    id: 'C-lxxxiv. ★★ the push\'s floor+cushion line is the legacy flat band',
     file: NOTIFY,
-    find: '    const line = plan.cushionLineSocPct ?? floorCushion;',
-    to: '    const line = floorCushion; /* MUTANT */',
-    why: 'The hold is judged against the applied cushion line (31.1%), not reserve floor + the flat band.',
+    // v1.187.22 (recheck) — re-pointed: one line for the hold and the charge shapes.
+    find: "  // reserveFloorPct + cushionPct band the charge shape used to state beside the hold's line.\n  const line = floorCushionLinePct(plan);",
+    to: "  // reserveFloorPct + cushionPct band the charge shape used to state beside the hold's line.\n  const line = plan.reserveFloorPct + plan.cushionPct; /* MUTANT */",
+    why: 'The hold and the charge push state 31% beside a plan sized on its applied cushion line (31.1%; 27.6% on an 8 h resilience cushion).',
   },
   {
     id: 'C-lxxxv. ★★ the card\'s hold summary states the whole-house trough',
     file: WEB,
-    find: '  const trough = plan.cushionTroughSocPct ?? plan.minProjSocPct ?? plan.baselineMinSocPct;\n  const line = plan.cushionLineSocPct ?? plan.reserveFloorPct',
-    to: '  const trough = plan.baselineMinSocPct; /* MUTANT */\n  const line = plan.cushionLineSocPct ?? plan.reserveFloorPct',
+    find: '  const trough = plan.cushionTroughSocPct ?? plan.minProjSocPct ?? plan.baselineMinSocPct;\n  const line = floorCushionLinePct(plan);',
+    to: '  const trough = plan.baselineMinSocPct; /* MUTANT */\n  const line = floorCushionLinePct(plan);',
     why: 'The card says "~0%" where the push says "~37.5%" for the same hold.',
   },
   {
@@ -744,16 +756,18 @@ const MUTANTS = [
   {
     id: 'C-xcii. ★★ the morning push pairs the force-charge figure with the reserve alone',
     file: NOTIFY,
-    find: '        ? `reserve raised to ${raised} with force-charge toward ~${round1(fc)}%${note}; the reserve is restored to ${o.restorePct}%. `',
-    to: '        ? `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. ` /* MUTANT */',
+    // v1.187.22 (recheck) — re-pointed: the shape of a force-charge that ran.
+    find: '      ? `${reserve}, and force-charge ran${toward}${note}; ${restored}`',
+    to: '      ? `${reserve}${note}; ${restored}` /* MUTANT */',
     why: '"reserve raised to 50% (~34.9 kWh expected)": the figure covers the force-charge to 80%, which the push never names.',
   },
   {
-    id: 'C-xciii. ★★ the revert never passes the force-charge stop',
+    id: 'C-xciii. ★★ the revert never passes what the force-charge did',
     file: IDX,
-    find: '      forceChargeStopPct: armedForceChargeStopPct(state, forceChargeOn()),',
-    to: '      forceChargeStopPct: null, /* MUTANT */',
-    why: 'The morning push names the 50% reserve beside a figure that covers the force-charge leg.',
+    // v1.187.22 (recheck) — re-pointed: the outcome from the actuation record.
+    find: '      forceCharge: forceChargeNightOutcome(state, forceChargeOn()),',
+    to: '      forceCharge: null, /* MUTANT */',
+    why: 'The morning push names the 50% reserve beside a figure that covers the force-charge leg, and never says whether it ran.',
   },
   {
     id: 'C-xciv. ★ the force-charge stop ignores whether force-charge is enabled',
@@ -782,6 +796,299 @@ const MUTANTS = [
     find: "  const to = plan.expectedDeliverableBound === true ? 'toward' : 'to';",
     to: "  const to = 'to'; /* MUTANT */",
     why: 'The dashboard says "expected charge to ~80%" for Friday\'s window while the push says toward.',
+  },
+
+  // ── v1.187.22 (recheck) — a night expected to charge nothing ──
+  {
+    id: 'C-xcviii. ★★★ a no-charge night is never recognised',
+    file: ACT,
+    find: '  return kwh != null && Number.isFinite(kwh) && kwh < NO_CHARGE_EXPECTED_KWH;',
+    to: '  return kwh != null && Number.isFinite(kwh) && kwh < 0; /* MUTANT */',
+    why: '"charging to ~50% tonight (~0 kWh)" on the push, "less than 1 kilowatt hour" on the speakers, "0.0 kWh" on the card.',
+  },
+  {
+    id: 'C-xcix. ★★ no expected figure counts as an expectation of none',
+    file: ACT,
+    find: '  return kwh != null && Number.isFinite(kwh) && kwh < NO_CHARGE_EXPECTED_KWH;',
+    to: '  return kwh == null || (Number.isFinite(kwh) && kwh < NO_CHARGE_EXPECTED_KWH); /* MUTANT */',
+    why: 'A plan with no P50 basis is announced as a reserve hold with no charge expected.',
+  },
+  {
+    id: 'C-c. ★★ the held spoken line names the level, not the reserve',
+    file: ACT,
+    find: '    const reserve = Math.round(o.reservePct);',
+    to: '    const reserve = Math.round(o.levelPct); /* MUTANT */',
+    why: 'A force-charge night with no start expected is announced as "the backup reserve will be held at 80 percent".',
+  },
+  {
+    id: 'C-ci. ★★★ the speakers announce a no-charge night as a charge',
+    file: ACT,
+    find: '  if (isNoChargeKwh(o.expectedKwh)) {',
+    to: '  if (o.expectedKwh === -1) { /* MUTANT */',
+    why: '"Charging the backup pool to about 50 percent, less than 1 kilowatt hour" for a night that charges nothing.',
+  },
+  {
+    id: 'C-cii. ★★ the speakers are never told the reserve',
+    file: IDX,
+    find: '        reservePct: supervisedCtx.targetPct,',
+    to: '        reservePct: chargeLevelPct(plan) ?? supervisedCtx.targetPct, /* MUTANT */',
+    why: 'The held line speaks the force-charge stop as the reserve the panel holds.',
+  },
+  {
+    id: 'C-ciii. ★★★ the push never recognises a no-charge night',
+    file: NOTIFY,
+    find: '  const held = noChargeExpected(plan);',
+    to: '  const held = false; /* MUTANT */',
+    why: 'The push title reads "charging to ~50% tonight (~0 kWh)" for a night the pool stays above the reserve.',
+  },
+  {
+    id: 'C-civ. ★★ an advisory no-charge push claims the add-on holds the reserve',
+    file: NOTIFY,
+    find: '      title: `Night-charge: ${supervised ? `reserve held at ${reserveText}` : `reserve hold at ${reserveText} recommended`} tonight — no charge expected`,',
+    to: '      title: `Night-charge: reserve held at ${reserveText} tonight — no charge expected`, /* MUTANT */',
+    why: 'In advisory mode nothing is written; the title would claim an action the add-on does not take.',
+  },
+  {
+    id: 'C-cv. ★★ the held push says the pool stays above a reserve it opens under',
+    file: NOTIFY,
+    find: '    const stays = start != null && Number.isFinite(start) && reservePct != null && start >= reservePct',
+    to: '    const stays = start != null && Number.isFinite(start) && reservePct != null && start >= 0 /* MUTANT */',
+    why: '"the pool should open the window near ~49.98% and stay at or above 50%" — a clause its own figure contradicts.',
+  },
+  {
+    id: 'C-cvi. ★★ the held push calls the write "this charge"',
+    file: NOTIFY,
+    find: "    + `without ${held ? \"tonight's write\" : 'this charge'}, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. `",
+    to: "    + `without this charge, ~${pct(plan.minProjSocPct)} with it; the floor+cushion line is ${pct(line)}. ` /* MUTANT */",
+    why: 'A night that charges nothing is described as having a charge.',
+  },
+  {
+    id: 'C-cvii. ★ the held push calls the write an economic buy',
+    file: NOTIFY,
+    find: "    ? ` Resilience needs no buy tonight — the pack already covers the outage cushion; this ${held ? 'write' : 'buy'} is economic (cost mode).`",
+    to: "    ? ' Resilience needs no buy tonight — the pack already covers the outage cushion; this buy is economic (cost mode).' /* MUTANT */",
+    why: '"this buy is economic" on a night no buy is expected.',
+  },
+  {
+    id: 'C-cviii. ★★ the rationale headlines a no-charge night as a charge of ~0 kWh',
+    file: NCA,
+    find: '  const chargeHeadline = isNoChargeKwh(expected.buyKwh)',
+    to: '  const chargeHeadline = (expected.buyKwh as number | null) === -1 /* MUTANT */',
+    why: '"Charge to ~50% in the 00:00–05:00 window: ~0 kWh expected."',
+  },
+  {
+    id: 'C-cix. ★★ the after-the-fact phrase states "~0 kWh expected"',
+    file: NCA,
+    find: '  return expectedKwh != null && Number.isFinite(expectedKwh) && !isNoChargeKwh(expectedKwh)',
+    to: '  return expectedKwh != null && Number.isFinite(expectedKwh) /* MUTANT */',
+    why: 'The morning push of a reserve-held night reads "(~0 kWh expected)".',
+  },
+  {
+    id: 'C-cx. ★★ the morning push reports a reserve hold as a raise with no figure',
+    file: NOTIFY,
+    find: '  const held = isNoChargeKwh(o.expectedKwh);',
+    to: '  const held = false; /* MUTANT */',
+    why: 'A night that only held the reserve is reported as "reserve raised to 50%", silent on why nothing was charged.',
+  },
+  {
+    id: 'C-cxi. ★ the apply-failure push calls a reserve hold a planned charge',
+    file: NOTIFY,
+    find: '  const planned = isNoChargeKwh(o.expectedKwh)',
+    to: '  const planned = (o.expectedKwh as number | null) === -1 /* MUTANT */',
+    why: '"Tonight\'s planned charge will not happen" for a night that was expected to charge nothing.',
+  },
+  {
+    id: 'C-cxii. ★★ the card shows "0.0 kWh expected charge" on a no-charge night',
+    file: WEB,
+    find: '  if (exp < NO_CHARGE_EXPECTED_KWH) {',
+    to: '  if (exp < 0) { /* MUTANT */',
+    why: 'The dashboard leads with "0.0 kWh — expected charge to ~50%" while the push says the reserve is held.',
+  },
+  {
+    id: 'C-cxiii. ★★ the card\'s held lead names the level, not the reserve',
+    file: WEB,
+    find: "    const reserve = set != null && Number.isFinite(set) ? `${Math.min(Math.round(set), cap)}` : '—';",
+    to: '    const reserve = levelText; /* MUTANT */',
+    why: 'A force-charge night with no start expected shows "80% reserve held as a floor".',
+  },
+  {
+    id: 'C-cxiv. ★ the card\'s no-charge threshold drifts from the server\'s',
+    file: WEB,
+    find: ' *  nightChargeActuator.ts): what the card would show as "0.0 kWh". */\nexport const NO_CHARGE_EXPECTED_KWH = 0.05;',
+    to: ' *  nightChargeActuator.ts): what the card would show as "0.0 kWh". */\nexport const NO_CHARGE_EXPECTED_KWH = 0.5; /* MUTANT */',
+    why: 'A 0.3 kWh night is a charge on the push and a reserve hold on the card.',
+  },
+  // ── what the force-charge did, from the actuation record ──
+  {
+    id: 'C-cxv. ★★★ every force-charge switched ON is reported as having run',
+    file: FC,
+    find: "    return { kind: on === 'verified' ? 'ran' : on === 'failed' ? 'failed' : 'unconfirmed', stopPct };",
+    to: "    return { kind: 'ran', stopPct }; /* MUTANT */",
+    why: 'A force-charge whose ON never took effect is pushed as "force-charge ran toward ~80% (~34.9 kWh expected)".',
+  },
+  {
+    id: 'C-cxvi. ★★ an unverified ON is reported as never started',
+    file: FC,
+    find: '  if (on != null) {',
+    to: "  if (on === 'verified') { /* MUTANT */",
+    why: 'A force-charge switched ON (and failed, or never confirmed) is reported as never having started.',
+  },
+  {
+    id: 'C-cxvii. ★★★ the morning push reports a force-charge that never started as having run',
+    file: NOTIFY,
+    find: "    night = fc.kind === 'ran'",
+    to: "    night = (fc.kind as string) !== 'failed' && (fc.kind as string) !== 'unconfirmed' /* MUTANT */",
+    why: 'The 10-12 morning push names "force-charge ran toward ~80%" on a night decideForceCharge never started it.',
+  },
+  {
+    id: 'C-cxviii. ★★ the expected figure rides a force-charge that did not run',
+    file: NOTIFY,
+    find: "      : `${reserve}; force-charge${toward} ${fc.kind === 'neverStarted' ? 'never started'",
+    to: "      : `${reserve}${note}; force-charge${toward} ${fc.kind === 'neverStarted' ? 'never started' /* MUTANT */",
+    why: '"reserve raised to 50% (~34.9 kWh expected); force-charge toward ~80% never started": a figure for a leg that never ran.',
+  },
+  {
+    id: 'C-cxix. ★ a failed ON is reported as merely unconfirmed',
+    file: NOTIFY,
+    find: "        : fc.kind === 'failed' ? 'was switched ON but did not take effect'",
+    to: "        : fc.kind === 'unconfirmed' ? 'was switched ON but did not take effect' /* MUTANT */",
+    why: 'The warning already said the ON did not take effect; the morning push softens it to "never confirmed".',
+  },
+  // ── when the force-charge is expected to start ──
+  {
+    id: 'C-cxx. ★★ the plan never carries the expected force-charge start',
+    file: NCA,
+    find: '    ...(expected.forceChargeStartMs !== undefined ? { expectedForceChargeStartMs: expected.forceChargeStartMs } : {}),',
+    to: '    /* MUTANT */',
+    why: 'The push falls back to an untimed clause on every night, Friday included.',
+  },
+  {
+    id: 'C-cxxi. ★★★ a window-bound night is told the force-charge reaches the stop',
+    file: NOTIFY,
+    find: "    return bound\n      ? `Then it switches the panel's force-charge ON at ~${at}",
+    to: "    return false /* MUTANT */\n      ? `Then it switches the panel's force-charge ON at ~${at}",
+    why: 'Friday: "charging toward ~80%" then "just long enough to reach ~80%" for a window that closes near 62%.',
+  },
+  {
+    id: 'C-cxxii. ★★ the force-charge clause names the window close as its start',
+    file: NOTIFY,
+    find: '    const at = fmtPhoenixDayHm(startMs, plan.generatedAt);',
+    to: '    const at = fmtPhoenixDayHm(plan.window!.endMs, plan.generatedAt); /* MUTANT */',
+    why: 'The push says the force-charge switches on at 05:00 on a night it is due at ~02:43.',
+  },
+  {
+    id: 'C-cxxiii. ★★ a force-charge not expected to start is pushed as switching on',
+    file: NOTIFY,
+    find: "    if (held || startMs === null) {\n      return `It also arms the panel's force-charge toward ${stop}, timed to finish by the window close; it is not expected to start. `;\n    }\n    if (startMs === undefined) {",
+    to: "    if (held) { /* MUTANT */\n      return `It also arms the panel's force-charge toward ${stop}, timed to finish by the window close; it is not expected to start. `;\n    }\n    if (startMs == null) {",
+    why: 'A night whose walk expects no start is told the force-charge switches on just in time.',
+  },
+  {
+    id: 'C-cxxiv. ★★ a no-charge night is pushed a timed force-charge',
+    file: NOTIFY,
+    find: '    if (held || startMs === null) {',
+    to: '    if (startMs === null) { /* MUTANT */',
+    why: '"reserve held — no charge expected" above "it switches the panel\'s force-charge ON at ~04:30".',
+  },
+  // ── one floor+cushion line ──
+  {
+    id: 'C-cxxv. ★★ the server\'s line ignores the applied cushion',
+    file: NCA,
+    find: "'cushionPct'>,\n): number | null {\n  const line = plan.cushionLineSocPct;\n  if (line != null && Number.isFinite(line)) return line;",
+    to: "'cushionPct'>,\n): number | null {\n  const line = plan.cushionLineSocPct;\n  if (line != null && Number.isFinite(line) && line < 0) return line; /* MUTANT */",
+    why: 'Every push states reserve floor + the flat band (31%) beside a plan sized on 27.55%.',
+  },
+  {
+    id: 'C-cxxvi. ★★ the card\'s line ignores the applied cushion',
+    file: WEB,
+    find: '(plan: FloorCushionPlan): number | null {\n  const line = plan.cushionLineSocPct;\n  if (line != null && Number.isFinite(line)) return line;',
+    to: '(plan: FloorCushionPlan): number | null {\n  const line = plan.cushionLineSocPct;\n  if (line != null && Number.isFinite(line) && line < 0) return line; /* MUTANT */',
+    why: 'The card states 31% where the push states 27.6% for the same plan.',
+  },
+  {
+    id: 'C-cxxvii. ★★ the card\'s stat states the legacy flat band',
+    file: CARD,
+    find: '  const floorCushionLine = fmtLinePct(floorCushionLinePct(plan));',
+    to: '  const floorCushionLine = `${(plan.reserveFloorPct + plan.cushionPct).toFixed(0)}%`; /* MUTANT */',
+    why: '"Island low, with charge … floor+cushion 31%" beside a push and a hold summary at 31.1%.',
+  },
+  {
+    id: 'C-cxxviii. ★★ the card\'s hold summary states the legacy flat band',
+    file: WEB,
+    find: '  const line = floorCushionLinePct(plan);\n  const wholeHouse',
+    to: '  const line = plan.reserveFloorPct + plan.cushionPct; /* MUTANT */\n  const wholeHouse',
+    why: 'The card\'s hold says 31% where the hold push says 27.6%.',
+  },
+  // ── the card leads with a refused arm ──
+  {
+    id: 'C-cxxix. ★★ a refusal is served beside another window\'s plan',
+    file: ACT,
+    find: '  if (plan.window.startMs !== rec.windowStartMs || plan.window.endMs !== rec.windowEndMs) return null;',
+    to: '  /* MUTANT */',
+    why: 'Saturday\'s refusal stays on the card for a different window\'s armed plan.',
+  },
+  {
+    id: 'C-cxxx. ★★ a refusal outlives its window',
+    file: ACT,
+    find: '  return nowMs < rec.windowEndMs ? rec.reason : null;',
+    to: '  return rec.reason; /* MUTANT */',
+    why: 'The card says "not armed tonight" the next day about a window that has closed.',
+  },
+  {
+    id: 'C-cxxxi. ★ an advisory card leads with a write-mode refusal',
+    file: ACT,
+    find: "  if (rec == null || mode === 'advisory' || plan == null || !plan.chargeTonight || plan.window == null) return null;",
+    to: '  if (rec == null || plan == null || !plan.chargeTonight || plan.window == null) return null; /* MUTANT */',
+    why: 'Advisory arms nothing; a refusal recorded before a mode change leads the advisory card.',
+  },
+  {
+    id: 'C-cxxxii. ★ an empty reason is read back as a refusal',
+    file: ACT,
+    find: "  if (typeof o.reason !== 'string' || o.reason.length === 0 || !fin(o.windowStartMs) || !fin(o.windowEndMs)) return null;",
+    to: "  if (typeof o.reason !== 'string' || !fin(o.windowStartMs) || !fin(o.windowEndMs)) return null; /* MUTANT */",
+    why: 'A malformed latch file fabricates "not armed tonight — ." on the card.',
+  },
+  {
+    id: 'C-cxxxiii. ★★ the evening job never records the refusal',
+    file: IDX,
+    find: '      armRefused: armRefused && plan?.window\n',
+    to: "      armRefused: armRefused === '\\u0000' && plan?.window /* MUTANT */\n",
+    why: 'The push says "NOT armed" and the card still leads with "34.9 kWh — expected charge to ~80%".',
+  },
+  {
+    id: 'C-cxxxiv. ★★ the status route never serves the refusal',
+    file: IDX,
+    find: '    armRefusal: servedArmRefusal(latch.armRefused, plan, NIGHT_CHARGE_MODE, Date.now()),',
+    to: '    armRefusal: null, /* MUTANT */',
+    why: 'The refusal is recorded and never reaches the card.',
+  },
+  {
+    id: 'C-cxxxv. ★★ the latch drops the refusal in memory',
+    file: IDX,
+    find: '  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay, armRefused: l.armRefused ?? null };',
+    to: '  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay }; /* MUTANT */',
+    why: 'The refusal reaches the file but not the route, until a restart.',
+  },
+  {
+    id: 'C-cxxxvi. ★ a restart forgets the refusal',
+    file: IDX,
+    find: "    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: coerceArmRefusalRecord(raw?.armRefused) };",
+    to: "    return { lastNotifyDay: typeof d === 'string' ? d : null, armRefused: null }; /* MUTANT */",
+    why: 'After an add-on update mid-evening the card leads with the expected charge again.',
+  },
+  {
+    id: 'C-cxxxvii. ★★ the card never leads with the refusal',
+    file: CARD,
+    find: "  const refused = status.mode !== 'advisory' && status.armRefusal ? refusedArmLead(status.armRefusal) : null;",
+    to: '  const refused = null as ReturnType<typeof refusedArmLead> | null; /* MUTANT */',
+    why: 'The dashboard says "34.9 kWh — expected charge to ~80%" on a night nothing is armed.',
+  },
+  {
+    id: 'C-cxxxviii. ★ the card\'s refused lead drops the reason',
+    file: WEB,
+    find: '    headline: `Planned charge not armed tonight — ${reason}.`,',
+    to: "    headline: 'Planned charge not armed tonight.', /* MUTANT */",
+    why: 'The card says nothing is armed but not why; the push names the unresolved prior night.',
   },
 ];
 

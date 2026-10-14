@@ -118,6 +118,22 @@ export function ownerReserveFloorPct(
  */
 export const MAX_SPOKEN_ADVISORY_CHARS = 560;
 
+/**
+ * v1.187.22 — below this an expected draw is NO charge: the figure a push would state as "~0 kWh"
+ * (pushes state one decimal). A night whose expected draw is under it is a night the write only
+ * holds the reserve as a floor — the pool is expected to open the window at or above the level the
+ * write drives it to — and every line says so ("reserve held at 50% tonight — no charge expected"),
+ * never "charging to ~50% (~0 kWh)" or "less than 1 kilowatt hour". Here, beside the spoken line,
+ * because this module imports nothing; nightChargeAdvisor.noChargeExpected reads it for a plan.
+ */
+export const NO_CHARGE_EXPECTED_KWH = 0.05;
+
+/** v1.187.22 — an expected draw that is no charge at all (NO_CHARGE_EXPECTED_KWH). false with no
+ *  figure: no expected figure is not an expectation of none. PURE. */
+export function isNoChargeKwh(kwh: number | null | undefined): boolean {
+  return kwh != null && Number.isFinite(kwh) && kwh < NO_CHARGE_EXPECTED_KWH;
+}
+
 /*
  * v1.187.22 — the line says what the write will do: the level it drives the pool to (the reserve,
  * or the force-charge stop when force-charge rides the night) and the energy it is expected to
@@ -129,10 +145,16 @@ export const MAX_SPOKEN_ADVISORY_CHARS = 560;
  * just-in-time force-charge (~03:14 from 74% at 21:30). A window that closes before the level is
  * reached (`toward`) is said so: "toward 80 percent, … in the charge window that opens at 23:00,
  * which ends before it gets there."
+ * A night that charges nothing (isNoChargeKwh — the pool is expected to stay at or above the
+ * level) is not a charge: "The backup reserve will be held at 50 percent in the charge window
+ * that opens at 00:00; no charge is expected." — the reserve the write sets (`reservePct`), not
+ * the level, and no figure.
  */
 export function nightChargeSpokenNotice(o: {
   /** The level tonight's write drives the pool to, % (nightChargeAdvisor.chargeLevelPct). */
   levelPct: number;
+  /** The reserve the write sets, % (the armed targetPct): what a night that charges nothing holds. */
+  reservePct: number;
   /** The expected draw, kWh (nightChargeAdvisor.statedBuyKwh); null ⇒ no energy figure. */
   expectedKwh: number | null;
   /** The window closes before the level is reached (nightChargeAdvisor.chargeIsWindowBound). */
@@ -146,6 +168,17 @@ export function nightChargeSpokenNotice(o: {
   // because it discloses on every single plan.
   const shortEn = o.cushionShortfall ? ' Outage cushion not fully met.' : '';
   const shortEs = o.cushionShortfall ? ' Margen de respaldo no cubierto por completo.' : '';
+  if (isNoChargeKwh(o.expectedKwh)) {
+    const reserve = Math.round(o.reservePct);
+    return {
+      en:
+        `Night charge notice. The backup reserve will be held at ${reserve} percent in the charge window that opens `
+        + `${o.deadlineText}; no charge is expected.${shortEn} Cancel on the Power panel before then.`,
+      es:
+        `Aviso de carga nocturna. La reserva de respaldo se mantendrá en el ${reserve} por ciento en la ventana de carga que comienza `
+        + `${o.deadlineTextEs}; no se espera ninguna carga.${shortEs} Cancele en el panel Power antes de esa hora.`,
+    };
+  }
   const level = Math.round(o.levelPct);
   const kwh = o.expectedKwh != null && Number.isFinite(o.expectedKwh) ? Math.round(o.expectedKwh) : null;
   const kwhEn = kwh == null ? ''
@@ -679,6 +712,43 @@ export function armRefusalReason(
   if (plan.window.endMs <= plan.window.startMs) return 'the plan has no valid window';
   if (plan.window.startMs <= nowMs - APPLY_LATE_MS) return `the charge window opened more than ${APPLY_LATE_MS / 60_000} minutes ago`;
   return null;
+}
+
+/** v1.187.22 — the evening job's record of a refused arm (armRefusalReason), keyed by the window
+ *  the refused plan resolved: persisted beside the notify latch so the card can lead with it. */
+export interface ArmRefusalRecord {
+  reason: string;
+  windowStartMs: number;
+  windowEndMs: number;
+}
+
+/** v1.187.22 — a persisted refusal record read back (the latch file, restart path): anything
+ *  malformed is no record — never a fabricated refusal. PURE. */
+export function coerceArmRefusalRecord(raw: unknown): ArmRefusalRecord | null {
+  if (raw == null || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  if (typeof o.reason !== 'string' || o.reason.length === 0 || !fin(o.windowStartMs) || !fin(o.windowEndMs)) return null;
+  return { reason: o.reason, windowStartMs: o.windowStartMs, windowEndMs: o.windowEndMs };
+}
+
+/**
+ * v1.187.22 — PURE. The refusal the card leads with, or null. A supervised or auto mode that
+ * refused to arm tonight's charge plan pushes "planned charge NOT armed tonight — <reason>"; the
+ * card, which reads the plan the 30-min recompute keeps fresh, still led with that plan's expected
+ * charge ("34.9 kWh — expected charge to ~80%") for a write nothing would make. The record applies
+ * to the plan it was refused for — the same window — until that window closes, in a write mode,
+ * on a charge plan; a later evening that arms the window writes no record.
+ */
+export function servedArmRefusal(
+  rec: ArmRefusalRecord | null | undefined,
+  plan: { chargeTonight: boolean; window: { startMs: number; endMs: number } | null } | null,
+  mode: NightChargeMode,
+  nowMs: number,
+): string | null {
+  if (rec == null || mode === 'advisory' || plan == null || !plan.chargeTonight || plan.window == null) return null;
+  if (plan.window.startMs !== rec.windowStartMs || plan.window.endMs !== rec.windowEndMs) return null;
+  return nowMs < rec.windowEndMs ? rec.reason : null;
 }
 
 export type ActuationAction =

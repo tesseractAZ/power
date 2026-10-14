@@ -1,5 +1,8 @@
 import { memo, useEffect, useState } from 'react';
-import { actuationBannerVisible, chargeFigureParts, holdSummary, reserveWriteLabel, revertUnconfirmed, sizingLine } from './nightChargeText';
+import {
+  actuationBannerVisible, chargeFigureParts, floorCushionLinePct, fmtLinePct, holdSummary, refusedArmLead, reserveWriteLabel,
+  revertUnconfirmed, sizingLine,
+} from './nightChargeText';
 import { apiUrl } from '../api';
 
 /**
@@ -106,6 +109,9 @@ interface NightChargeStatus {
   confidence: string | null;
   notify: { hour: number; minute: number; lastNotifyDay: string | null } | null;
   plan: NightChargePlan | null;
+  /** v1.187.22 — why a supervised/auto mode refused to arm this plan's window (servedArmRefusal);
+   *  null/absent = not refused (or an older server). */
+  armRefusal?: string | null;
   readiness: NightChargeReadiness | null;
   actuation?: NightActuation | null;
   recentOutcomes?: unknown;
@@ -208,7 +214,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
   }
 
   const readiness = status.readiness;
-  const floorCushionPct = plan.reserveFloorPct + plan.cushionPct;
+  // v1.187.22 — the line the plan is sized on (floorCushionLinePct), the push's and the hold's.
+  const floorCushionLine = fmtLinePct(floorCushionLinePct(plan));
   const readinessNote = readiness ? (
     <span className="text-xs text-muted normal-case tracking-normal">
       readiness: {READINESS_LABEL[readiness.state] ?? readiness.state}
@@ -240,6 +247,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
   // drives to); the worst case appears once, in the labelled sizing line beneath.
   const fig = chargeFigureParts(plan, status.reserveWriteMaxPct ?? null);
   const sizing = sizingLine(plan);
+  // v1.187.22 — a write mode refused to arm tonight: lead with that, never the plan's expected charge.
+  const refused = status.mode !== 'advisory' && status.armRefusal ? refusedArmLead(status.armRefusal) : null;
 
   return (
     <div className="card">
@@ -248,21 +257,28 @@ export const NightChargeCard = memo(function NightChargeCard() {
         {readinessNote}
       </div>
 
-      <div className="flex items-baseline gap-4 mb-3 flex-wrap">
-        <div className="text-4xl font-bold tabular-nums text-ink">
-          {fig.main}
-          <span className={`text-2xl font-semibold${fig.unit === '%' ? '' : ' ml-1'}`}>{fig.unit}</span>
+      {refused ? (
+        <div className="mb-3 text-sm">
+          <div className="text-warn font-medium">{refused.headline}</div>
+          <div className="text-muted mt-1 leading-relaxed">{refused.detail}</div>
         </div>
-        <div className="text-sm text-muted">
-          {fig.label}
-          {ws && we && (
-            <>
-              {' '}
-              in the <span className="text-ink font-medium">{ws}–{we}</span> window
-            </>
-          )}
+      ) : (
+        <div className="flex items-baseline gap-4 mb-3 flex-wrap">
+          <div className="text-4xl font-bold tabular-nums text-ink">
+            {fig.main}
+            <span className={`text-2xl font-semibold${fig.unit === '%' ? '' : ' ml-1'}`}>{fig.unit}</span>
+          </div>
+          <div className="text-sm text-muted">
+            {fig.label}
+            {ws && we && (
+              <>
+                {' '}
+                in the <span className="text-ink font-medium">{ws}–{we}</span> window
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {sizing && <div className="text-xs text-muted mb-3 -mt-2">{sizing}</div>}
 
@@ -301,7 +317,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
         {/* v1.187.22 — the whole-house island troughs, labelled as such: with the grid present
             the SHP2 holds the reserve, so neither is where the pool is expected to go. */}
         <Stat label="Island low, no charge" value={fmtSoc(plan.baselineMinSocPct)} sub="if the grid were lost · P10 PV / P90 load" />
-        <Stat label="Island low, with charge" value={fmtSoc(plan.minProjSocPct)} sub={`if the grid were lost · floor+cushion ${floorCushionPct.toFixed(0)}%`} />
+        <Stat label="Island low, with charge" value={fmtSoc(plan.minProjSocPct)} sub={`if the grid were lost · floor+cushion ${floorCushionLine}`} />
         <Stat
           // v1.187.22 — the arrival on the islanded worst case the plan is sized on, labelled as
           // that basis: under "Expected SoC" it sat beside the headline's expected charge as a

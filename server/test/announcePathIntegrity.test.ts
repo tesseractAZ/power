@@ -19,6 +19,7 @@ import {
 // v1.187.22 — the line states the level the write drives to and the expected draw.
 const LIVE = {
   levelPct: 50,
+  reservePct: 50,
   expectedKwh: 16,
   deadlineText: 'tonight at 10:55 PM',
   deadlineTextEs: 'esta noche a las 10:55 PM',
