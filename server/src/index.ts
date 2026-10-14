@@ -12,7 +12,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, housePoolFallbackSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, secondaryPanels, panelMeanSoc, houseSnOf } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, houseSnOf } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -129,8 +129,8 @@ import {
 } from './chimeConfig.js';
 import type { AnnouncementLevel } from './audioRenderer.js';
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority, type AlarmRung } from './alertPriority.js';
-// v0.12.0 — backup-pool SoC audible alarm (escalating priority).
-import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisory, socAlarmAdvisoryEs, socAlarmStatePathFor } from './batterySocAlarm.js';
+// v0.12.0 — backup-pool SoC audible alarm (escalating priority). v1.187.22 — the ladders live in socLadders.ts.
+import { startSocLadders } from './socLadders.js';
 import { createRunwayAlarm, shouldGateRunwayAudible, runwayAlarmStatePathFor } from './runwayAlarm.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { panelPoolNetWatts, noteDrainSample, panelDrainRunway, type DrainSample, type PanelRunway } from './panelRunway.js';
@@ -142,7 +142,6 @@ import { hostPowerEntityId } from './hostPower.js';
 import { sampleHostTemp, liveHostTemp } from './hostThermal.js';
 import { startVitals, tickAssess, liveVitals, currentAssessment, degradedMode } from './selfVitals.js';
 import { startHeartbeat, heartbeatStatus } from './heartbeat.js';
-import { socGridCrossDecision, reEscalateGridDrop } from './socGridDispatch.js';
 import { classifyMqttStartFailure } from './mqttStartClassify.js';
 import {
   hasReachabilityConfig,
@@ -2468,167 +2467,24 @@ const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m), {
   alertSetSettledSince: () => monitor.alertSetSettledSince(),
 });
 
-// v0.12.0 — backup-pool SoC audible alarm (50/40/30/20/15/10/8/4/2%, escalating priority).
+// v0.12.0 — backup-pool SoC audible alarm (50/40/30/20/15/10/8/4/2%, escalating priority): the house
+// ladder and its grid-drop re-escalation (v0.23.0), and one ladder per secondary panel (v1.185.0).
+// v1.187.22 — in socLadders.ts, fed by the store tick only once the store is hydrated (bounded by
+// BOOT_HYDRATION_MAX_MS): a partial boot map spoke a false 50 % rung on 2026-10-12.
 const socAlarmEnabled = process.env.BATTERY_SOC_ALARM_ENABLED !== 'false';
-// v0.23.0 — the grid-backstop snapshot for the CURRENT tick, recomputed once per
-// store change (with a fresh HA cache when a grid entity is configured) and read
-// by onCross — so the audible downgrade decision uses the same grid state as the
-// on-screen alerts.ts path (no stale-cache divergence).
-let socGridForTick = liveGridBackstop({});
-// v0.23.0 — thresholds whose audible was grid-downgraded to a low advisory:
-// pct → the TRUE (high/critical) priority. The SoC ladder is one-shot per
-// downward crossing, so if the grid stops backstopping while the pool is still
-// in a downgraded band, the dedicated audible would otherwise NEVER re-fire
-// (fail-silent). We re-escalate it from the tick below.
-const socDowngraded = new Map<number, AlarmPriority>();
-const batterySocAlarm = createBatterySocAlarm({
-  onCross: (t, isPrimary) => {
-    // Grid-aware: when the grid is backstopping the home, a low pool is a
-    // non-event (the SHP2 transfers to mains at the floor), so the emergency
-    // tiers (high/critical — the ≤10% bands) collapse to a low advisory. Off-grid
-    // (the safe default) keeps the original priority.
-    // v0.76.0 — grid-aware downgrade decision extracted to the pure, tested
-    // socGridCrossDecision() (was inline downgradePriorityForGrid + comparison).
-    const { priority, onGrid } = socGridCrossDecision(t, socGridForTick.backstopping);
-    // Record/clear the grid-downgrade re-escalation state for EVERY crossed band —
-    // primary or not — so a later grid drop re-escalates every band the pool is
-    // still in. v0.75.0 collapses only the ANNOUNCE (below), never this bookkeeping;
-    // recording only the worst band would let a grid drop fail-silent on the higher
-    // emergency bands after a partial recovery above the worst one.
-    if (onGrid) socDowngraded.set(t.pct, t.priority);
-    else socDowngraded.delete(t.pct);
-    // v0.75.0 — only the most-severe band of a same-tick multi-band crossing
-    // announces, so a reconnect-at-low-SoC (or fast discharge) produces ONE audible
-    // alarm rather than laddering 50/40/30/20. The on-screen alert (activeSocBand)
-    // shows the current band independently, and the per-band socDowngraded record
-    // above is unaffected, so nothing is suppressed — only the audio is de-duped.
-    if (!isPrimary) return;
-    if (!isPriorityEnabled(priority)) return;          // honour the Alert Settings annunciation toggles
-    const message = onGrid
-      ? socAlarmAdvisory(t.pct, undefined, socGridForTick.importLive) // v1.186.3 — wording by measured import
-      : socAlarmMessage(t);
-    const messageEs = onGrid ? socAlarmAdvisoryEs(t.pct, undefined, socGridForTick.importLive) : socAlarmMessageEs(t); // v0.62.0 — Spanish second pass
-    // v1.78.0 — surface the disposition: the 08-12 21:11 SoC-ladder suppression
-    // (deepest rung of the day) left NO log line and cost two audits a false
-    // timezone theory. Suppressions are config-correct; they must still be seen.
-    void broadcast.announce(priority, message, messageEs).then(
-      (a) => { if (!a.ok) app.log.info(`soc-alarm: audible suppressed (${a.error ?? 'unknown'}) — push/on-screen unaffected`); },
-      () => { /* announce() reports via its own path; never let a rejection escape a fire-and-forget */ },
-    );
+const socLadders = startSocLadders(store, {
+  enabled: socAlarmEnabled,
+  announce: (priority, message, messageEs) => broadcast.announce(priority, message, messageEs),
+  isPriorityEnabled,
+  // Keep the grid-presence entity fresh (TTL-gated) so the tick's grid verdicts are live.
+  refreshGrid: async () => {
+    if (gridPresenceEntityId() || hostPowerEntityId()) await haStateCache.refreshIfStale();
   },
+  poolGrid: livePoolGridBackstop,
+  noteLiveRoster,
+  lastKnownRoster: () => lastKnownRoster,
   log: (m) => app.log.info(m),
-});
-// v1.185.0 — one SoC ladder per SECONDARY panel, created on first sight: its own persisted arming
-// state (battery-soc-alarm-<serial>.json), its own grid-downgrade record, and words that name
-// its pool. The rules are the house ladder's above, read against the same tick's grid.
-type PoolGrid = { backstopping: boolean; importLive?: boolean }; // v1.186.3 — importLive: wording only
-const panelLadders = new Map<string, { update: (soc: number | null, name: string, grid: PoolGrid) => void }>();
-function panelSocLadder(sn: string): { update: (soc: number | null, name: string, grid: PoolGrid) => void } {
-  const have = panelLadders.get(sn);
-  if (have) return have;
-  const downgraded = new Map<number, AlarmPriority>();
-  let name = sn;
-  // v1.185.0 (review) — THIS pool's grid verdict (livePoolGridBackstop), set before each update.
-  let poolGrid: PoolGrid = { backstopping: false };
-  const say = (priority: AlarmPriority, en: string, es: string, what: string) => {
-    void broadcast.announce(priority, en, es).then(
-      (a) => { if (!a.ok) app.log.info(`soc-alarm [${name}]: ${what} audible suppressed (${a.error ?? 'unknown'}) — push/on-screen unaffected`); },
-      () => { /* see soc-alarm note above */ },
-    );
-  };
-  const alarm = createBatterySocAlarm({
-    statePath: socAlarmStatePathFor(sn),
-    onCross: (t, isPrimary) => {
-      const { priority, onGrid } = socGridCrossDecision(t, poolGrid.backstopping);
-      if (onGrid) downgraded.set(t.pct, t.priority);
-      else downgraded.delete(t.pct);
-      if (!isPrimary || !isPriorityEnabled(priority)) return;
-      say(
-        priority,
-        onGrid ? socAlarmAdvisory(t.pct, name, poolGrid.importLive) : socAlarmMessage(t, name), // v1.186.3
-        onGrid ? socAlarmAdvisoryEs(t.pct, name, poolGrid.importLive) : socAlarmMessageEs(t, name),
-        'crossing',
-      );
-    },
-    log: (m) => app.log.info(`${m} [${name}]`),
-  });
-  const ladder = {
-    update: (soc: number | null, n: string, grid: PoolGrid) => {
-      name = n;
-      poolGrid = grid;
-      alarm.update(soc);
-      for (const { pct, priority } of reEscalateGridDrop(downgraded, soc, poolGrid.backstopping, isPriorityEnabled)) {
-        say(priority, socAlarmMessage({ pct, priority }, name), socAlarmMessageEs({ pct, priority }, name), 'grid-drop re-escalation');
-      }
-    },
-  };
-  panelLadders.set(sn, ladder);
-  return ladder;
-}
-store.on('change', (snap: FleetSnapshot) => {
-  if (!socAlarmEnabled) return;
-  const shp2 = findShp2(snap.devices);
-  const shp2Soc = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection.backupBatPercent : null;
-  // v1.8.0 (review F3) — reserve-chain SHP2-blind failover. The SoC ladder reads
-  // ONLY the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the
-  // 30-day review found two blackouts (42.2h, 25.8h) in which the pool crossed
-  // 50/40/30/20% while the ladder sat dark for 17.8-20.8h. When that field is null,
-  // fall back to the mean SoC of the home Cores still reporting (the pool IS those
-  // batteries) so the audible ladder keeps firing. homeFleetMeanSoc returns null
-  // only when NO Core is reporting — then the reserve-blind warning (computeAlerts)
-  // + the offline alerts are the signal, and update(null) is a safe no-op. The
-  // engine's own coherence guard still rejects an implausible drop from a fresh
-  // baseline, so a bad fallback read can't ladder falsely.
-  // v1.117.0 — keep the durable roster fresh, and hand it to the fallback so an
-  // unhydrated tick can never admit a bench spare into the pool mean.
-  noteLiveRoster(shp2ConnectedDpuSns(snap.devices));
-  const soc = shp2Soc != null ? shp2Soc : housePoolFallbackSoc(snap.devices, lastKnownRoster);
-  void (async () => {
-    // Keep the grid-presence entity fresh (TTL-gated) so onCross + the
-    // re-escalation below see live grid state. Assign + update run synchronously
-    // after the await, so onCross reads exactly the grid computed for this tick.
-    if (gridPresenceEntityId() || hostPowerEntityId()) {
-      try {
-        await haStateCache.refreshIfStale();
-      } catch {
-        /* cold/stale cache ⇒ resolves to off-grid (safe) */
-      }
-    }
-    // v1.185.0 (review) — the HOUSE pool's own verdict on a multi-panel plant; one panel: identical
-    // (livePoolGridBackstop returns liveGridBackstop there).
-    socGridForTick = livePoolGridBackstop(snap.devices, houseSnOf(snap.devices));
-    batterySocAlarm.update(soc); // fires onCross synchronously, reading socGridForTick
-    // v1.185.0 — every OTHER panel's pool on its own ladder, against its own panel's grid — including
-    // a panel with no projection (dark since a restart): its own Cores, from its persisted roster.
-    for (const p of secondaryPanels(snap.devices)) {
-      const own = p.projection?.kind === 'shp2' ? p.projection.backupBatPercent : null;
-      panelSocLadder(p.sn).update(own ?? panelMeanSoc(snap.devices, p), p.deviceName, livePoolGridBackstop(snap.devices, p.sn));
-    }
-    // Re-escalate a previously grid-downgraded crossing if the grid is no longer
-    // backstopping while the pool is still at/below that threshold — closes the
-    // one-shot fail-silent window on a grid drop.
-    //
-    // NOTE (do not "fix" as fail-silent): this store 'change' handler is NOT
-    // driven only by SHP2 MQTT telemetry. SnapshotStore.setDeviceList() emits
-    // 'change' UNCONDITIONALLY on every REST poll tick (snapshot.ts:174, via
-    // refreshAll → setDeviceList, driven by startPollLoop every POLL_INTERVAL_MS,
-    // default 60s — index.ts:98/1588), and that same poll refreshes acInWatts /
-    // backupBatPercent / chargeWattPower via getQuotaAll; the grid-presence HA
-    // entity is refreshed independently just above (haStateCache.refreshIfStale).
-    // So this re-escalation self-heals on the ~60s REST cadence even under a
-    // TOTAL MQTT stall — the poll loop is the de facto timer that closes the
-    // grid-drop window; it does not depend on fresh SHP2 MQTT telemetry.
-    // v0.76.0 — the grid-drop re-escalation pass is now the pure, tested
-    // reEscalateGridDrop() (mutates socDowngraded + returns the bands to announce),
-    // so the exact v0.75.0-regressed path is exercised by a test driving the REAL
-    // function instead of a hand-copied mirror.
-    for (const { pct, priority } of reEscalateGridDrop(socDowngraded, soc, socGridForTick.backstopping, isPriorityEnabled)) {
-      void broadcast.announce(priority, socAlarmMessage({ pct, priority }), socAlarmMessageEs({ pct, priority })).then(
-        (a) => { if (!a.ok) app.log.info(`soc-alarm: grid-drop re-escalation audible suppressed (${a.error ?? 'unknown'})`); },
-        () => { /* see soc-alarm note above */ },
-      );
-    }
-  })();
+  warn: (m) => app.log.warn(m),
 });
 
 // v0.14.0 — projection-depletion audible alarm. Rides the off-grid runway
@@ -2673,7 +2529,7 @@ function panelRunwayAlarm(sn: string, name: string): ReturnType<typeof createRun
       }
       void broadcast.announce(priority, message, messageEs).then(
         (a) => { if (!a.ok) app.log.info(`runway-alarm [${name}]: audible suppressed (${a.error ?? 'unknown'})`); },
-        () => { /* see soc-alarm note above */ },
+        () => { /* see the soc-alarm note in socLadders.ts */ },
       );
     },
     log: (m) => app.log.info(`${m} [${name}]`),
@@ -2695,7 +2551,7 @@ const runwayAlarm = createRunwayAlarm({
     }
     void broadcast.announce(priority, message, messageEs).then( // v0.62.0 — Spanish second pass
       (a) => { if (!a.ok) app.log.info(`runway-alarm: audible suppressed (${a.error ?? 'unknown'}) — push/on-screen unaffected`); },
-      () => { /* see soc-alarm note above */ },
+      () => { /* see the soc-alarm note in socLadders.ts */ },
     );
   },
   log: (m) => app.log.info(m),
@@ -7036,6 +6892,7 @@ const shutdown = async () => {
   clearInterval(restTrackerTick);
   stopMqtt?.();
   monitor.stop();
+  socLadders.stop();
   stopTelnet?.();
   stopTuiData(); // shared TUI refresh timers (telnet + /console)
   stopMqttDiscovery?.();

@@ -696,6 +696,38 @@ export function housePoolFallbackSoc(
   return house ? panelMeanSoc(devices, house) : null;
 }
 
+/**
+ * v1.187.22 — housePoolFallbackSoc's denominator, for the SoC ladders' boot-gate log line: how many
+ * Cores of the roster that fallback averages over are reporting a SoC, of how many. The same roster
+ * resolution: one panel — live sources, else the remembered roster, else every non-spare Core; several
+ * panels — the house panel's own roster (none known: 0 of 0).
+ */
+export function housePoolFallbackCoverage(
+  devices: Record<string, DeviceSnapshot>,
+  lastKnownRoster?: ReadonlySet<string> | null,
+): { reporting: number; roster: number } {
+  const missingPin = Object.values(devices).some((d) => d.housePanelMissing != null);
+  let roster: string[];
+  if (shp2Panels(devices).sns.length <= 1 && !missingPin) {
+    const live = shp2ConnectedDpuSns(devices);
+    roster = live.size > 0
+      ? [...live]
+      : lastKnownRoster && lastKnownRoster.size > 0
+        ? [...lastKnownRoster]
+        : Object.values(devices).filter((d) => d.projection?.kind === 'dpu' && !SPARE_DPU_SNS.has(d.sn)).map((d) => d.sn);
+  } else {
+    const sn = houseSnOf(devices);
+    const house = sn ? devices[sn] : undefined;
+    roster = house ? panelRoster(house) : [];
+  }
+  const reporting = roster.filter((sn) => {
+    const d = devices[sn];
+    const s = d?.online && d.projection?.kind === 'dpu' ? d.projection.soc : null;
+    return s != null && Number.isFinite(s);
+  }).length;
+  return { reporting, roster: roster.length };
+}
+
 export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
   fleetPv: number;
   fleetIn: number;

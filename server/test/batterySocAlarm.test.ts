@@ -281,7 +281,7 @@ test('v0.75.0 — bands re-arm after recovery so a later dip re-announces the wo
 });
 
 test('v0.75.0 — onCross fires for EVERY crossed band, flagging only the most-severe as primary', () => {
-  // Guards the regression the adversarial review caught: the consumer (index.ts) records the
+  // Guards the regression the adversarial review caught: the consumer (socLadders.ts) records the
   // grid-downgrade re-escalation map inside onCross, so it must hear EVERY crossed band — not
   // just the announced one — or a later grid drop can fail-silent on the higher emergency bands.
   const calls: { pct: number; primary: boolean }[] = [];
@@ -300,7 +300,7 @@ test('v0.75.0 — onCross fires for EVERY crossed band, flagging only the most-s
 
 test('v0.75.0 — REGRESSION: grid-drop re-escalates ALL crossed emergency bands after a partial recovery', () => {
   // The first adversarial review's exact fail-silent scenario, locked in end-to-end: a FAITHFUL copy
-  // of the index.ts onCross + socDowngraded re-escalation consumer, driven by the REAL alarm module.
+  // of the socLadders.ts onCross + socDowngraded re-escalation consumer, driven by the REAL alarm module.
   // On-grid same-tick multi-emergency crossing → partial recovery above the worst band → grid drop
   // MUST audibly re-escalate the shallower high bands (pre-collapse behaviour). If the collapse had
   // starved socDowngraded of the non-worst bands (the bug), the grid drop would be silent here.
@@ -311,8 +311,8 @@ test('v0.75.0 — REGRESSION: grid-drop re-escalates ALL crossed emergency bands
   let backstopping = true; // grid present
   // v0.76.0 — drives the REAL extracted dispatch functions (socGridCrossDecision +
   // reEscalateGridDrop) instead of a hand-copied mirror, so this regression can no
-  // longer pass while index.ts's actual logic drifts. The only thing reproduced
-  // here is index.ts's tiny onCross consumer glue (record every band, announce
+  // longer pass while socLadders.ts's actual logic drifts. The only thing reproduced
+  // here is socLadders.ts's tiny onCross consumer glue (record every band, announce
   // only the primary) — the grid-downgrade decision and the re-escalation pass are
   // the production functions verbatim.
   const a = createBatterySocAlarm({
