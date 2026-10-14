@@ -58,6 +58,8 @@ const speakers: Record<string, string | null> = {};
 let reads: Record<string, number> = {};
 let blipReads: Record<string, number> = {};
 let announces: Array<{ entity_id: string[]; url: string }> = [];
+// v1.187.22 — the full registry (GET /core/api/states) the target-drift resolver reads.
+let haStates: Array<{ entity_id: string; state: string; attributes: Record<string, unknown> }> = [];
 const agent = new MockAgent();
 agent.disableNetConnect();
 const prevDispatcher = getGlobalDispatcher();
@@ -65,7 +67,8 @@ setGlobalDispatcher(agent);
 const ha = agent.get('http://supervisor');
 ha.intercept({ path: '/core/api/services', method: 'GET' })
   .reply(200, JSON.stringify([{ domain: 'music_assistant', services: { play_announcement: {} } }])).persist();
-ha.intercept({ path: '/core/api/states', method: 'GET' }).reply(200, '[]').persist();
+ha.intercept({ path: '/core/api/states', method: 'GET' })
+  .reply(() => ({ statusCode: 200, data: JSON.stringify(haStates) })).persist();
 ha.intercept({ path: (p: string) => p.startsWith('/core/api/states/'), method: 'GET' })
   .reply((opts) => {
     const id = decodeURIComponent(String(opts.path).slice('/core/api/states/'.length));
@@ -105,12 +108,13 @@ interface Rig {
   stop: () => void;
 }
 const live: Rig[] = [];
-function rig(opts: { probeMs?: number } = {}): Rig {
+function rig(opts: { probeMs?: number; targetDriftDelayMs?: number } = {}): Rig {
   process.env.BROADCAST_HEALTH_PROBE_MS = String(opts.probeMs ?? 3_600_000);
   const logs: string[] = [];
   const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-bcint-cache-'));
   const mon = B.startBroadcastMonitor(store, (m) => logs.push(m), {
     klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', renderTts, tickMs: 10,
+    targetDriftDelayMs: opts.targetDriftDelayMs,
   });
   const r: Rig = {
     mon, logs,
@@ -141,6 +145,7 @@ beforeEach(() => {
   reads = {};
   blipReads = {};
   announces = [];
+  haStates = [];
   alerts = [];
   ttsFailing = false;
   H.resetBroadcastHealth();
@@ -473,6 +478,7 @@ async function forcedProbe(r: Rig, tag: string): Promise<void> {
   const at = Date.now();
   const res = await r.mon.announce('high', `Warning. Probe ${tag}.`, null);
   assert.equal(res.ok, false, `broadcast ${tag} found no usable speaker`);
+  assert.match(res.error ?? '', /all broadcast targets unavailable/, `broadcast ${tag} reached the pre-flight that forces the probe`);
   await until(r, () => (H.getBroadcastHealth().lastProbeAt ?? 0) >= at, `the probe forced by broadcast ${tag}`);
 }
 
@@ -504,6 +510,143 @@ test('★★★ forced probes in a restart window never confirm the channel dead
   assert.ok(H.broadcastHealthAlert(h, realNow()));
   assert.ok(r.has('audible channel DEGRADED'));
   assert.equal(r.mon.status().audibleReachable, false);
+});
+
+/**
+ * v1.187.22 — every probe the monitor publishes from now on, sampled every 2 ms (these probes run
+ * ≥ 25 ms apart); `sample()` takes the current one at once, before a test reads `seen`.
+ */
+interface Seen { at: number; usable: number; reachable: boolean | null; degraded: boolean }
+function watchProbes(): { seen: Seen[]; sample: () => Seen[]; stop: () => void } {
+  const seen: Seen[] = [];
+  const from = Date.now();
+  const sample = (): Seen[] => {
+    const h = H.getBroadcastHealth();
+    if (h.lastProbeAt != null && h.lastProbeAt >= from && h.lastProbeAt !== seen[seen.length - 1]?.at) {
+      seen.push({ at: h.lastProbeAt, usable: h.usableTargets, reachable: h.reachable, degraded: h.degraded === true });
+    }
+    return seen;
+  };
+  const t = setInterval(sample, 2);
+  return { seen, sample, stop: () => clearInterval(t) };
+}
+/** Sleep until the test clock (Date.now, offset included) reaches `at`. */
+async function sleepUntil(at: number): Promise<void> {
+  const d = at - Date.now();
+  if (d > 0) await sleep(d);
+}
+// A real-time probe period: the next tests run the monitor's own interval and timers. A late
+// confirmation lands on the tick past the span — 3P after the run's first probe in the first test,
+// over 2.5P in the second (its run opens under 0.5P after a tick); LATE sits under both.
+const P = 1000;
+const LATE = 2.4 * P;
+
+test('★★★ a forced probe just short of the span does not push confirmation to a later tick', async () => {
+  speakers['media_player.alpha'] = null;
+  speakers['media_player.beta'] = null;
+  const w = watchProbes();
+  try {
+    const r = rig({ probeMs: P });
+    await joined();
+    pastWarmup();
+    await until(r, () => w.seen.length >= 2, 'two periodic probes', 4 * P);
+    const since = w.seen[0].at;
+    assert.equal(w.seen[0].usable, 0);
+    assert.equal(w.seen[1].reachable, null, 'two periodic probes: pending');
+    // A failed alarm broadcast forces a probe after the second tick and short of the span: the
+    // count is met, the span is not, and the forced probe restarts the throttle, so the tick AT the
+    // span is skipped. The probe armed at the span confirms, not the tick a period later.
+    await sleepUntil(w.seen[1].at + 0.1 * P);
+    await forcedProbe(r, 'short of the span');
+    await until(r, () => H.getBroadcastHealth().reachable === false, 'the confirmation', 4 * P);
+    const seen = w.sample();
+    const trace = JSON.stringify(seen.map((x) => [x.at - since, x.usable, x.reachable]));
+    const forced = seen[2];
+    assert.ok(forced.at - since < 1.9 * P, `precondition: the forced probe ran short of the span: ${trace}`);
+    assert.equal(forced.reachable, null, 'three failing probes, span not met: not confirmed');
+    assert.equal(forced.degraded, false);
+    const c = seen.find((x) => x.reachable === false)!;
+    const took = c.at - since;
+    assert.ok(took >= 2 * P, `not before the span: ${trace}`);
+    assert.ok(took < LATE, `confirmed at the span (${2 * P} ms), not at a later tick: ${trace}`);
+    assert.equal(c.degraded, true, 'the degraded run is confirmed at the same span');
+  } finally {
+    w.stop();
+  }
+});
+
+test('★★★ a run opened by a forced probe between ticks is confirmed at its span, not at the next tick past it', async () => {
+  const w = watchProbes();
+  try {
+    const r = rig({ probeMs: P });
+    await joined();
+    pastWarmup();
+    await until(r, () => w.seen.length >= 1, 'the first periodic probe', 4 * P);
+    assert.equal(w.seen[0].reachable, true);
+    // Music Assistant goes down just after that tick, and a failed alarm broadcast sees it first.
+    await sleepUntil(w.seen[0].at + 0.1 * P);
+    speakers['media_player.alpha'] = null;
+    speakers['media_player.beta'] = null;
+    await forcedProbe(r, 'opens the run');
+    await until(r, () => H.getBroadcastHealth().reachable === false, 'the confirmation', 5 * P);
+    const seen = w.sample();
+    const since = seen.find((x) => x.usable === 0)!.at;
+    const trace = JSON.stringify(seen.map((x) => [x.at - since, x.usable, x.reachable]));
+    assert.ok(since - seen[0].at < 0.5 * P, `precondition: the forced probe opened the run between two ticks: ${trace}`);
+    const c = seen.find((x) => x.reachable === false)!;
+    const took = c.at - since;
+    assert.ok(took >= 2 * P, `not before the span: ${trace}`);
+    assert.ok(took < LATE, `confirmed at the span (${2 * P} ms), not at the next tick past it: ${trace}`);
+    assert.equal(c.degraded, true);
+    assert.ok(seen.filter((x) => x.at >= since && x.at < c.at).every((x) => x.reachable === true), `held true until then: ${trace}`);
+  } finally {
+    w.stop();
+  }
+});
+
+test('★★ no speakers configured: unreachable on the FIRST probe, never debounced', async () => {
+  const saved = process.env.BROADCAST_TARGETS;
+  process.env.BROADCAST_TARGETS = '';
+  const w = watchProbes();
+  try {
+    const r = rig({ probeMs: 150 });
+    await until(r, () => w.seen.length >= 2, 'two probes', 3000);
+    assert.equal(w.sample()[0].reachable, false, 'the first probe reports it');
+    const h = H.getBroadcastHealth();
+    assert.equal(h.reachable, false);
+    assert.equal(h.reason, 'no speakers configured (BROADCAST_TARGETS empty)');
+    assert.ok(H.broadcastHealthAlert(h, realNow()));
+    assert.equal(r.mon.status().audibleReachable, false);
+  } finally {
+    w.stop();
+    process.env.BROADCAST_TARGETS = saved;
+  }
+});
+
+test('★★ a renamed speaker id is unreachable at once and stays so through the failing probes inside the span', async () => {
+  speakers['media_player.alpha'] = null;
+  speakers['media_player.beta'] = null;
+  // Other media_players exist, the configured ids do not: the rename signature.
+  haStates = [
+    { entity_id: 'media_player.alpha_2', state: 'idle', attributes: {} },
+    { entity_id: 'media_player.beta_2', state: 'idle', attributes: {} },
+  ];
+  const r = rig({ probeMs: MIN, targetDriftDelayMs: 200 });
+  pastWarmup(); // before the resolver runs, so its run starts on the clock the probes below read
+  await joined();
+  await until(r, () => r.has('NOT FOUND in Home Assistant'), 'the target-drift resolver');
+  const s = r.mon.status();
+  assert.equal(s.audibleReachable, false, 'surfaced at once: a rename never self-heals');
+  assert.match(s.audibleReason ?? '', /renamed\/mistyped/);
+  assert.equal(H.getBroadcastHealth().lastProbeAt, null, 'before any probe ran');
+  const base = offset;
+  for (const [tag, at] of [['one', 0], ['two', 11_000], ['three', 31_000]] as const) {
+    offset = base + at;
+    await forcedProbe(r, tag);
+    const h = H.getBroadcastHealth();
+    assert.equal(h.reachable, false, `+${at / 1000} s: a failing probe inside the span keeps it unreachable`);
+    assert.ok(H.broadcastHealthAlert(h, realNow()));
+  }
 });
 
 test('★★ a broadcast logs the USABLE count and names the speaker it will not reach', async () => {
@@ -602,7 +745,9 @@ test('★★★ a real outage probed at 0/60/120 s is confirmed at 120 s — not
   assert.equal(st.deg.degraded, true);
 });
 
-test('★★★ forced probes inside a real outage neither accelerate confirmation nor delay it past the span', () => {
+// The step's half of the rule; the monitor's half (a probe armed AT the span, whatever the
+// throttle skipped) is driven through the real interval in the tests above.
+test('★★★ forced probes inside a real outage neither accelerate confirmation nor restart its clock', () => {
   const T0 = 9_000_000;
   let st = bootState();
   // The streak reaches 3 at +10 s; the span is not met until +120 s.
@@ -653,6 +798,47 @@ test('★★ partial channel: one usable speaker clears the unreachable run at o
   st = probeBoth(st, T0 + 2 * MIN, 1);
   assert.equal(st.deg.degraded, true, 'degraded confirmed on the run that began at zero usable');
   assert.equal(st.reach.reachable, true);
+});
+
+test('★★★ audibleProbeDeadline — a pending run is probed AT its span, measured from its first failing probe', () => {
+  const T = 9_000_000;
+  const none: Run = { streak: 0, sinceMs: null };
+  const run = (sinceMs: number, streak = 1): Run => ({ streak, sinceMs });
+  assert.equal(B.audibleProbeDeadline(none, null, none, false, T, 3, MIN), null, 'nothing open');
+  assert.equal(B.audibleProbeDeadline(run(T), null, run(T), false, T + 50 * S, 3, MIN), T + 2 * MIN,
+    'from the first failing probe, not the latest');
+  assert.equal(B.audibleProbeDeadline(run(T), true, none, false, T + 90 * S, 3, MIN), T + 2 * MIN,
+    'a held `true` is still pending');
+  assert.equal(B.audibleProbeDeadline(none, true, run(T), false, T + S, 3, MIN), T + 2 * MIN,
+    'a degraded run alone is probed at its span');
+  assert.equal(B.audibleProbeDeadline(run(T + 30 * S), true, run(T - 5 * MIN, 6), true, T + 40 * S, 3, MIN), T + 30 * S + 2 * MIN,
+    'an unreachable run alone (the degraded one already confirmed) is probed at its span');
+  assert.equal(B.audibleProbeDeadline(run(T + 10 * S), null, run(T), false, T + 20 * S, 3, MIN), T + 2 * MIN, 'both open: the earlier');
+  assert.equal(B.audibleProbeDeadline(run(T, 3), false, run(T, 3), true, T + 2 * MIN, 3, MIN), null, 'both confirmed');
+  assert.equal(B.audibleProbeDeadline(run(T, 3), false, none, false, T + S, 3, MIN), null,
+    'reachable already false (a rename, no speakers): nothing to confirm');
+  assert.equal(B.audibleProbeDeadline(run(T, 2), null, none, false, T + 2 * MIN, 3, MIN), null,
+    'a run at its span with a short count is left to the periodic probe');
+  assert.equal(B.audibleProbeDeadline(run(T, 2), null, run(T, 2), false, T + 3 * MIN, 3, MIN), null,
+    'and one past it is not probed again at once (no probe storm)');
+  assert.equal(B.audibleProbeDeadline(run(T), null, run(T), false, T, 1, MIN), null, 'CONFIRM = 1: nothing to wait for');
+});
+
+test('★★ a wall clock stepped back past the run\'s first probe re-anchors the span: the hold stays bounded', () => {
+  const T0 = 9_000_000_000;
+  let st = bootState();
+  st = probeBoth(st, T0, 0);
+  st = probeBoth(st, T0 + MIN, 0);
+  const back = T0 + 90 * S - 3_600_000; // the clock steps back an hour
+  st = probeBoth(st, back, 0);
+  assert.equal(st.reach.sinceMs, back, 're-anchored at the step');
+  assert.equal(st.deg.sinceMs, back);
+  assert.equal(st.reach.reachable, null);
+  assert.equal(B.audibleProbeDeadline(st.reach, st.reach.reachable, st.deg, st.deg.degraded, back, 3, MIN), back + 2 * MIN,
+    'the probe is armed one span away, not an hour and a span');
+  st = probeBoth(st, back + 2 * MIN, 0);
+  assert.equal(st.reach.reachable, false, 'confirmed one span after the step');
+  assert.equal(st.deg.degraded, true);
 });
 
 const HB = (over: Partial<import('../src/broadcastHealth.js').BroadcastHealth>) => ({

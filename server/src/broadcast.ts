@@ -691,8 +691,9 @@ export interface AudibleRun {
  * FIRST failing probe — the span three periodic probes cover. A forced probe still counts and
  * freshens the reading, but never restarts the run's clock; a usable read ends the run at once.
  * confirm = 1 is immediate (a zero span). The run confirms on the first probe at or past the span,
- * and the periodic probe runs within two probe periods of any other probe, so the hold has a
- * deadline. Pure + exported for tests.
+ * and the monitor arms a probe AT the span (audibleProbeDeadline), so that is where it lands. A
+ * wall clock stepped back past the run's first probe re-anchors the span at the step, so the hold
+ * stays bounded by one span. Pure + exported for tests.
  */
 export function audibleRunStep(
   prev: AudibleRun,
@@ -702,7 +703,7 @@ export function audibleRunStep(
   probeMs: number,
 ): AudibleRun & { confirmed: boolean } {
   if (!failing) return { streak: 0, sinceMs: null, confirmed: false };
-  const sinceMs = prev.sinceMs ?? nowMs;
+  const sinceMs = prev.sinceMs != null && prev.sinceMs <= nowMs ? prev.sinceMs : nowMs;
   const streak = prev.streak + 1;
   const spanMet = nowMs - sinceMs >= (confirm - 1) * probeMs;
   return { streak, sinceMs, confirmed: streak >= confirm && spanMet };
@@ -748,6 +749,35 @@ export function audibleDegradedStep(
 ): AudibleRun & { degraded: boolean } {
   const run = audibleRunStep(prev, configured > 0 && usable < configured, nowMs, confirm, probeMs);
   return { streak: run.streak, sinceMs: run.sinceMs, degraded: run.confirmed };
+}
+
+/**
+ * v1.187.22 — when the monitor must probe so that a pending run is confirmed AT its span: the
+ * earlier span end of the unreachable and degraded runs that are open, not yet confirmed (the
+ * unreachable run is confirmed once `reachable` reads false) and not yet past their span at
+ * `nowMs` (the probe just run); null when there is none. The periodic probe cannot promise it: a
+ * forced probe (a failed broadcast, its deferred retries) restarts the probe throttle, so one that
+ * lands just short of the span skips the tick that would have confirmed, and a run opened by a
+ * forced probe reaches its span between ticks — left to the ticks, confirmation could land up to
+ * two probe periods past the span. A run already past its span is left to the periodic probe: its
+ * count is short only if ticks were skipped, and probing it again at once would let rapid probes
+ * make up the count. Pure + exported for tests.
+ */
+export function audibleProbeDeadline(
+  unreachable: AudibleRun,
+  reachable: boolean | null,
+  degraded: AudibleRun,
+  degradedConfirmed: boolean,
+  nowMs: number,
+  confirm: number,
+  probeMs: number,
+): number | null {
+  const span = (confirm - 1) * probeMs;
+  const due = (run: AudibleRun, confirmed: boolean): number | null =>
+    run.sinceMs == null || confirmed || nowMs >= run.sinceMs + span ? null : run.sinceMs + span;
+  const a = due(unreachable, reachable === false);
+  const b = due(degraded, degradedConfirmed);
+  return a == null ? b : b == null ? a : Math.min(a, b);
 }
 
 /**
@@ -1214,6 +1244,9 @@ export interface BroadcastMonitorOpts {
   /** v1.187.12 — test seam: the timeout probe's delay after a timed-out SIP dispatch
    *  (SIP_TIMEOUT_PROBE_DELAY_MS, 8 s). Production passes none. */
   sipTimeoutProbeDelayMs?: number;
+  /** v1.187.22 — test seam: the one-shot target-drift resolver's delay after boot (16 s).
+   *  Production passes none. */
+  targetDriftDelayMs?: number;
   /**
    * v1.187.3 — since when the alert set the condition is read from has been SETTLED (the alert
    * monitor's AlertMonitor.alertSetSettledSince, wired in index.ts), or null while it is not. Only
@@ -2164,6 +2197,25 @@ export function startBroadcastMonitor(
   // ride out a restart flap. Coalesce: a concurrent call just no-ops (force callers only
   // want to freshen, which the in-flight probe already does).
   let audibleProbeInFlight = false;
+  // v1.187.22 — the probe at a pending run's span (audibleProbeDeadline), so a forced probe that
+  // restarted the throttle cannot push confirmation to a later tick. Re-armed after every probe
+  // that ran: a deadline probe dropped by the re-entrancy guard is re-armed by the probe it ran
+  // into, and one that fired early against Date.now() is re-armed for the rest of the span. The
+  // slack covers a timer firing a few ms early.
+  const AUDIBLE_DEADLINE_SLACK_MS = 25;
+  let audibleDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  const armAudibleDeadline = (nowMs: number): void => {
+    if (audibleDeadlineTimer) clearTimeout(audibleDeadlineTimer);
+    audibleDeadlineTimer = null;
+    if (stopped) return;
+    const at = audibleProbeDeadline(unreachableRun, audibleReachable, degradedRun, audibleDegraded, nowMs, AUDIBLE_UNREACHABLE_CONFIRM, AUDIBLE_HEALTH_PROBE_MS);
+    if (at == null) return;
+    audibleDeadlineTimer = setTimeout(() => {
+      audibleDeadlineTimer = null;
+      computeAudibleHealth(true).catch(onProbeError);
+    }, Math.max(0, at - Date.now()) + AUDIBLE_DEADLINE_SLACK_MS);
+    audibleDeadlineTimer.unref();
+  };
   const computeAudibleHealth = async (force = false): Promise<void> => {
     const nowMs = Date.now();
     if (!force && nowMs - lastAudibleHealthAt < AUDIBLE_HEALTH_PROBE_MS) return;
@@ -2243,6 +2295,7 @@ export function startBroadcastMonitor(
       publish();
     } finally {
       audibleProbeInFlight = false;
+      armAudibleDeadline(nowMs); // v1.187.22
     }
   };
   // Seed once shortly after boot (HA registry warm), then on the recurring probe.
@@ -2294,7 +2347,7 @@ export function startBroadcastMonitor(
       audibleReason = `configured speaker id(s) not found in Home Assistant (renamed/mistyped): ${missing.join(', ')}`;
     }
   };
-  const targetDriftKick = setTimeout(() => { void resolveTargetDriftOnce().catch(onProbeError); }, 16_000);
+  const targetDriftKick = setTimeout(() => { void resolveTargetDriftOnce().catch(onProbeError); }, opts.targetDriftDelayMs ?? 16_000);
   targetDriftKick.unref();
   const audibleHealthInterval = setInterval(() => {
     // v1.48.4 — self-heal the MA service-detection flag. A CONFIRMED-absent at
@@ -4200,6 +4253,7 @@ export function startBroadcastMonitor(
       clearInterval(pruneInterval);
       clearInterval(audibleHealthInterval);
       clearTimeout(audibleHealthKick);
+      if (audibleDeadlineTimer) clearTimeout(audibleDeadlineTimer); // v1.187.22
       clearTimeout(prewarmTimer);
       offRuntimeConfig();
     },

@@ -2,8 +2,10 @@
 /**
  * mutate-v1187-22b.mjs — v1.187.22: the audible-unreachable and audible-degraded debounce spans
  * TIME, not just probes (confirm failing probes AND (confirm − 1) probe periods since the run's
- * first failing probe), and the alert monitor reads the audible-channel alerts when it assembles
- * the set it dispatches, not before its wait on the analytics worker.
+ * first failing probe), a probe is armed AT a pending run's span so a forced probe cannot push
+ * confirmation to a later tick, the no-speakers and rename paths stay immediate, and the alert
+ * monitor reads the audible-channel alerts when it assembles the set it dispatches, not before its
+ * wait on the analytics worker.
  *
  *   B-i    the unreachable run drops its time condition (the 2026-10-12 22:04 forced-probe trio)
  *   B-ii   the degraded run drops its time condition
@@ -14,6 +16,14 @@
  *   B-vii  a usable read no longer restores reachable at once
  *   B-viii a pending run publishes unknown instead of holding the prior value
  *   B-ix   the alert monitor reads the audible alerts once, before the worker wait
+ *   B-x    no probe is armed at a pending run's span (a forced probe pushes confirmation to a later tick)
+ *   B-xi   the armed probe is measured from the latest probe instead of the run's first failing one
+ *   B-xii  the degraded run is not probed at its span
+ *   B-xiii the unreachable run is not probed at its span
+ *   B-xiv  a run past its span with a short count is probed again at once
+ *   B-xv   a wall clock stepped back mid-run does not re-anchor the span
+ *   B-xvi  no speakers configured waits for the debounce instead of reporting at once
+ *   B-xvii a renamed speaker id waits for the debounce instead of reporting at once
  *
  *   node scripts/mutate-v1187-22b.mjs
  */
@@ -53,7 +63,7 @@ const MUTANTS = [
   {
     id: 'B-iv. ★★★ the span is measured from the latest probe instead of the first failing one',
     file: BC,
-    find: '  const sinceMs = prev.sinceMs ?? nowMs;',
+    find: '  const sinceMs = prev.sinceMs != null && prev.sinceMs <= nowMs ? prev.sinceMs : nowMs;',
     to: '  const sinceMs = nowMs; /* MUTANT */',
     why: 'Each probe restarts the clock, so a real outage is never confirmed and the dead audible channel never raises its alert.',
   },
@@ -91,6 +101,62 @@ const MUTANTS = [
     find: '      const all = [...liveHead, ...workerAlerts, ...liveTail, ...liveAudible(), ...liveTailRest]',
     to: '      const all = [...liveHead, ...workerAlerts, ...liveTail, ...(((liveHead as any).audibleOnce ??= liveAudible()) as Alert[]), ...liveTailRest] /* MUTANT */',
     why: 'A channel restored during the worker wait is still pushed as unreachable, then resolved a tick later (2026-10-12 22:06:09 / 22:06:29).',
+  },
+  {
+    id: 'B-x. ★★★ no probe is armed at a pending run\'s span',
+    file: BC,
+    find: '      armAudibleDeadline(nowMs); // v1.187.22',
+    to: '      /* MUTANT */',
+    why: 'A failed alarm broadcast just short of the span skips the tick that would confirm, so the dead-channel push goes out a probe period late — up to two when the run began on a forced probe.',
+  },
+  {
+    id: 'B-xi. ★★★ the armed probe is measured from the latest probe instead of the first failing one',
+    file: BC,
+    find: '    run.sinceMs == null || confirmed || nowMs >= run.sinceMs + span ? null : run.sinceMs + span;',
+    to: '    run.sinceMs == null || confirmed || nowMs >= run.sinceMs + span ? null : nowMs + span; /* MUTANT */',
+    why: 'Each forced probe pushes the armed probe a full span out, so confirmation falls back to the next tick past the span, a period or more late.',
+  },
+  {
+    id: 'B-xii. ★★ the degraded run is not probed at its span',
+    file: BC,
+    find: '  const b = due(degraded, degradedConfirmed);',
+    to: '  const b: number | null = null; /* MUTANT */',
+    why: 'A speaker found dark by the 15 s boot probe is reported degraded a tick after its span (the boot probe made the first tick skip), not at the span.',
+  },
+  {
+    id: 'B-xiii. ★★ the unreachable run is not probed at its span',
+    file: BC,
+    find: '  const a = due(unreachable, reachable === false);',
+    to: '  const a: number | null = null; /* MUTANT */',
+    why: 'Once the degraded alert stands, the last speaker going dark is confirmed unreachable at the next tick past its span, up to two periods late when failed broadcasts moved the probe beat.',
+  },
+  {
+    id: 'B-xiv. ★★ a run past its span with a short count is probed again at once',
+    file: BC,
+    find: '    run.sinceMs == null || confirmed || nowMs >= run.sinceMs + span ? null : run.sinceMs + span;',
+    to: '    run.sinceMs == null || confirmed ? null : run.sinceMs + span; /* MUTANT */',
+    why: 'A run whose count fell short at its span is probed every 25 ms until the burst makes up the count: a request storm against Home Assistant that confirms on probes no period apart.',
+  },
+  {
+    id: 'B-xv. ★★ a wall clock stepped back mid-run does not re-anchor the span',
+    file: BC,
+    find: '  const sinceMs = prev.sinceMs != null && prev.sinceMs <= nowMs ? prev.sinceMs : nowMs;',
+    to: '  const sinceMs = prev.sinceMs ?? nowMs; /* MUTANT */',
+    why: 'An NTP correction stepping the clock back an hour during a real outage holds the dead-channel alert for that hour.',
+  },
+  {
+    id: 'B-xvi. ★★★ no speakers configured waits for the debounce',
+    file: BC,
+    find: '        unreachableRun = { streak: AUDIBLE_UNREACHABLE_CONFIRM, sinceMs: unreachableRun.sinceMs ?? nowMs }; audibleReachable = false; audibleUsableTargets = 0;',
+    to: '        unreachableRun = { streak: AUDIBLE_UNREACHABLE_CONFIRM, sinceMs: unreachableRun.sinceMs ?? nowMs }; audibleUsableTargets = 0; /* MUTANT */',
+    why: 'Audible enabled with BROADCAST_TARGETS empty reads "unknown" for ever: every alarm plays to no one and no alert says so.',
+  },
+  {
+    id: 'B-xvii. ★★★ a renamed speaker id waits for the debounce',
+    file: BC,
+    find: '      unreachableRun = { streak: AUDIBLE_UNREACHABLE_CONFIRM, sinceMs: unreachableRun.sinceMs ?? Date.now() };\n      audibleReachable = false;',
+    to: '      unreachableRun = { streak: AUDIBLE_UNREACHABLE_CONFIRM, sinceMs: unreachableRun.sinceMs ?? Date.now() }; /* MUTANT */',
+    why: 'Renamed speaker ids (the v0.92.0 audit found 8 alarm broadcasts, a red among them, dropped this way) read "unknown" for a full probe span before the alert, though a rename never self-heals.',
   },
 ];
 
