@@ -1,3 +1,13 @@
+## 1.187.23
+
+### Spoken and pushed figures state what the system measured
+
+**Notifications and announcements**
+
+- The on-peak "battery idle while the grid is used" notice states the energy above the reserve on the batteries' measured capacity, the same basis the runway and the battery level use, instead of the panel's nameplate, which overstated it by about 6%. When no measured capacity is available, the notice says the figure is on the nameplate capacity.
+- The report sent when a device returns after a day or more offline no longer ends with a fixed solar-yield prediction written for one past outage; it reports what was measured.
+- Times and ranges are read aloud as ranges: "4–7pm Mon–Fri" is now spoken "4 to 7pm Mon to Fri" (Spanish "4 a 7pm"), instead of as separate numbers. Dashes between words still read as a pause.
+
 ## 1.187.22
 
 ### The night-charge notice states the charge it will make; boot-time false alarms; a fast Changelog

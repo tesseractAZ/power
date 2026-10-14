@@ -57,6 +57,20 @@ const SUBSET = [
 ];
 
 const MUTANTS = [
+  {
+    id: 'C-xv. ★★ a measured capacity from a different pool is used (the live-nameplate band is dropped)',
+    file: AM,
+    find: '    && (nameplate == null || (forecastWh <= nameplate && forecastWh >= nameplate * CAPACITY_SCALE_MIN));',
+    to: '    /* MUTANT */;',
+    why: 'A Core leaves the panel and the push states kWh above reserve on the old, larger pool for up to the forecast TTL.',
+  },
+  {
+    id: 'C-xvi. ★ the band keeps only its upper edge (a Core that joined is not caught)',
+    file: AM,
+    find: '    && (nameplate == null || (forecastWh <= nameplate && forecastWh >= nameplate * CAPACITY_SCALE_MIN));',
+    to: '    && (nameplate == null || forecastWh <= nameplate); /* MUTANT */',
+    why: 'A Core joins and the push states kWh above reserve on the smaller pool the forecast was built on.',
+  },
   /* ── the reconnect report ── */
   {
     id: 'R-i. ★★★ the reconnect report ends with a fixed prediction again',
@@ -126,15 +140,15 @@ const MUTANTS = [
   {
     id: 'C-viii. ★★★ the forecast\'s own basis is ignored: any finite figure is taken as measured',
     file: AM,
-    find: '    && forecastBasis != null && MEASURED_POOL_BASES.has(forecastBasis);',
-    to: '    ; /* MUTANT */',
+    find: '    && forecastBasis != null && MEASURED_POOL_BASES.has(forecastBasis)\n',
+    to: '    /* MUTANT */\n',
     why: 'A nameplate-basis forecast (no capacity ratio ever measured) carries the 92.16 kWh nameplate as its figure, and the push states it unlabelled, as if measured.',
   },
   {
     id: 'C-ix. ★★ an absent forecast basis vouches for the figure',
     file: AM,
-    find: '    && forecastBasis != null && MEASURED_POOL_BASES.has(forecastBasis);',
-    to: '    && (forecastBasis == null || MEASURED_POOL_BASES.has(forecastBasis)); /* MUTANT */',
+    find: '    && forecastBasis != null && MEASURED_POOL_BASES.has(forecastBasis)\n',
+    to: '    && (forecastBasis == null || MEASURED_POOL_BASES.has(forecastBasis)) /* MUTANT */\n',
     why: 'A forecast that does not say how its figure was obtained (an older or hand-built one) is presented as measured.',
   },
   {

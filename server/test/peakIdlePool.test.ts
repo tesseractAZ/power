@@ -412,3 +412,50 @@ test('★ v1.187.23 — a verdict with no kWh figure carries no basis (the card 
   assert.match(a.detail, /against a 16% reserve, has not discharged/);
   assert.equal(a.facts!.find((f) => f.label === 'Above reserve')!.value, 'capacity unknown');
 });
+
+test('★★ v1.187.23 (review) — a measured capacity from a different pool is not used: a Core left or joined since the forecast', () => {
+  // The forecast can be up to its day TTL old, and a Core leaving the panel does not reset the
+  // worker's caches: its measured 87.0 kWh then describes three Cores while the live panel holds two.
+  const panel = (fullCapWh: number) => ({
+    'SHP2-A': {
+      sn: 'SHP2-A', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: MON_1600 - 30_000,
+      projection: {
+        kind: 'shp2', gridWatt: 1301, backupBatPercent: 26, backupFullCapWh: fullCapWh,
+        sourceWatts: [0, 0], strategy: { backupReserveSoc: 16, smartBackupMode: 2 }, sources: [], pairedCircuits: [],
+      },
+    },
+  }) as any;
+  const forecast = { poolFullWh: 92_160 * 0.944, poolCapacityBasis: 'measured' as const };
+  // Same pool: the measured figure (inside [0.8, 1] × the live nameplate).
+  const same = idlePoolInputsFrom(panel(92_160), true, MON_1600, forecast);
+  assert.equal(same.poolCapacityBasis, 'measured');
+  assert.equal(same.poolFullWh, forecast.poolFullWh);
+  // A Core left (live nameplate 61.44 kWh < the forecast's 87.0): the live nameplate, named.
+  const left = idlePoolInputsFrom(panel(61_440), true, MON_1600, forecast);
+  assert.equal(left.poolCapacityBasis, 'nameplate', 'a measured figure above the live nameplate is a different pool');
+  assert.equal(left.poolFullWh, 61_440);
+  // A Core joined (live nameplate 122.88 kWh; 87.0 is under 0.8 × it): the live nameplate, named.
+  const joined = idlePoolInputsFrom(panel(122_880), true, MON_1600, forecast);
+  assert.equal(joined.poolCapacityBasis, 'nameplate', 'a measured figure under the scale floor is a different pool');
+  assert.equal(joined.poolFullWh, 122_880);
+  // The boundaries themselves are accepted: exactly the nameplate, and exactly the scale floor.
+  assert.equal(idlePoolInputsFrom(panel(92_160), true, MON_1600, { poolFullWh: 92_160, poolCapacityBasis: 'measured' }).poolCapacityBasis, 'measured');
+  assert.equal(idlePoolInputsFrom(panel(100_000), true, MON_1600, { poolFullWh: 80_000, poolCapacityBasis: 'measured' }).poolCapacityBasis, 'measured');
+});
+
+test('★ v1.187.23 (review) — with no live nameplate to bound it, an unusable measured figure is still refused', () => {
+  const panel = {
+    'SHP2-A': {
+      sn: 'SHP2-A', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: MON_1600 - 30_000,
+      projection: {
+        kind: 'shp2', gridWatt: 1301, backupBatPercent: 26, sourceWatts: [0, 0, 0],
+        strategy: { backupReserveSoc: 16, smartBackupMode: 2 }, sources: [], pairedCircuits: [],
+      },
+    },
+  } as any;
+  for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const i = idlePoolInputsFrom(panel, true, MON_1600, { poolFullWh: bad, poolCapacityBasis: 'measured' });
+    assert.equal(i.poolFullWh, null, `no figure from ${bad}`);
+    assert.equal(i.poolCapacityBasis, null, `no basis from ${bad}`);
+  }
+});
