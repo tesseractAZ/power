@@ -29,6 +29,7 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { discoveryUniqueIds, SENSORS, BINARY_SENSORS } from '../src/mqttDiscovery.js';
 import { ALARM_PRIORITY_ORDER } from '../src/alertPriority.js';
+import { GITHUB_NUMBER_AND_JOINER_SLUGS } from './helpers/githubSlugCases.js';
 
 const ROOT = resolve(import.meta.dirname, '..', '..');
 const SCRIPT = join(ROOT, 'scripts', 'check-docs.mjs');
@@ -107,7 +108,7 @@ const sha = (c: string | Buffer) => createHash('sha256').update(c).digest('hex')
 const lines = (...ls: string[]) => `${ls.join('\n')}\n`;
 
 function guideText(): string {
-  const rows = Object.entries(cd.WRITERS).flatMap(([fn, phrases]) => phrases.map((p) => `| ${p} | when \`${fn}\` runs | bounded |`));
+  const rows = Object.entries(cd.WRITERS).flatMap(([fn, phrases]) => phrases.map((p) => `| **${p}** (writer) | when \`${fn}\` runs | bounded |`));
   const filler = Array.from({ length: 90 }, (_, i) => `Filler paragraph ${i + 1} keeps the guide above its size floor without saying anything new.`);
   return lines(
     '# Power',
@@ -632,16 +633,29 @@ test('D10: every docs/…/*.md mention must exist', () => {
 
 /* ── D11 the write list ─────────────────────────────────────────────────── */
 
-test('D11: the write section names every WRITERS phrase', () => {
+test('D11: the write table has a bold row label for every WRITERS phrase', () => {
   // every phrase of every writer, not just the first: a writer with two families of call sites
   // (the reserve setpoint and the reserve floor) must keep both rows
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const row = (p: string) => `| **${p}** (writer) |`;
   for (const [fn, phrases] of Object.entries(cd.WRITERS)) {
-    for (const p of phrases) expectFail('D11', (f) => replace(f, P.guide, `| ${p} |`, '| Something |'), new RegExp(`does not name "${esc(p)}" \\(${fn}`));
+    for (const p of phrases) expectFail('D11', (f) => replace(f, P.guide, row(p), '| Something |'), new RegExp(`does not name "${esc(p)}" \\(${fn}`));
   }
   expectFail('D11', (f) => replace(f, P.guide, `## ${cd.WRITE_SECTION}`, '## What Power writes'), /no "## What Power changes on your system" section/);
+  const [first] = Object.values(cd.WRITERS).flat();
   const last = Object.values(cd.WRITERS).flat().at(-1)!;
-  expectFail('D11', (f) => { replace(f, P.guide, `| ${last} |`, '| Something |'); append(f, P.guide, `\n${last} is mentioned elsewhere.\n`); }, new RegExp(`does not name "${last}"`));
+  const named = (p: string) => new RegExp(`does not name "${esc(p)}"`);
+  // a sentence of the write section, even with the phrase in bold, does not stand in for its row
+  // (the real guide's two-panel paragraph says "set the reserve floor" and "force charge off")
+  expectFail('D11', (f) => { replace(f, P.guide, row(first), '| Something |'); replace(f, P.guide, '\n## Names', `\nThe **${first}** also writes; ${first.toLowerCase()} too.\n\n## Names`); }, named(first));
+  // the phrase in a later cell of a row, or in its row label but not in bold or not in its case
+  expectFail('D11', (f) => replace(f, P.guide, `${row(last)} when`, `| Something | **${last}** when`), named(last));
+  expectFail('D11', (f) => replace(f, P.guide, row(last), `| ${last} (writer) |`), named(last));
+  expectFail('D11', (f) => replace(f, P.guide, row(last), `| **${last.toUpperCase()}** (writer) |`), named(last));
+  // a table row in a later section does not count
+  expectFail('D11', (f) => { replace(f, P.guide, row(last), '| Something |'); append(f, P.guide, `\n## Later\n\n| Writer | When |\n|---|---|\n| **${last}** | later |\n`); }, named(last));
+  // the label may carry more text around the bold phrase
+  expectPass((f) => replace(f, P.guide, row(last), `| The **${last}** (debugging) |`));
 });
 
 test('WRITERS names exactly the writers exported from server/src/ecoflow/commands.ts', () => {
@@ -699,6 +713,7 @@ test('slugs match the ids GitHub gives this repository\'s headings', () => {
     ['Energy Dashboard **power** wiring', 'energy-dashboard-power-wiring'],
     ['A _quiet_ [link](https://example.com/x) &amp; more', 'a-quiet-link--more'],
     ['Ünïcödé Ça', 'ünïcödé-ça'],
+    ...GITHUB_NUMBER_AND_JOINER_SLUGS,
   ];
   for (const [heading, slug] of cases) {
     const scan = ms.scanMarkdown(`## ${heading}\n`);

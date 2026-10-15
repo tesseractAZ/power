@@ -45,7 +45,9 @@
  *   D9  docs/history holds exactly the pinned files, byte-identical, each with its banner
  *   D10 no pointer into the old monolith by section sign or quoted heading anywhere in code,
  *       config, .github or the checked Markdown; every docs/…/*.md mention exists
- *   D11 the guide's write section names every writer in WRITERS
+ *   D11 the guide's write table has a row for every writer phrase in WRITERS: the phrase, in
+ *       bold, in the first cell of a row of a table inside the write section (a sentence that
+ *       mentions a writer in passing does not stand in for its row)
  *
  * File access follows the CodeQL rules for this repository: each file is read once and its
  * size taken from the buffer; a missing file is a caught ENOENT, never a stat or an existence
@@ -93,9 +95,10 @@ export const OTHER_DOC_LIMIT_BYTES = 128 * 1024;
 
 /**
  * D11 — every `export async function` in server/src/ecoflow/commands.ts (each one writes to the
- * panel) and the phrase(s) the guide's write section must use for it, one per family of call
- * sites. docsLayout.test.ts fails when the keys and the exports differ. `ch{n}ForceCharge` is
- * the switch on each of the panel's three AC slots (one Core each), not on a load circuit.
+ * panel) and the row label(s) the guide's write table must carry for it, one per family of call
+ * sites: each phrase must appear exactly as written, in bold, in the first cell of a row.
+ * docsLayout.test.ts fails when the keys and the exports differ. `ch{n}ForceCharge` is the
+ * switch on each of the panel's three AC slots (one Core each), not on a load circuit.
  */
 export const WRITERS = {
   setBackupReserveSoc: ['Backup-reserve setpoint', 'Reserve floor'],
@@ -802,10 +805,18 @@ export function runChecks(root = REPO, { only = null } = {}) {
         fail('D11', GUIDE, 0, `no "## ${WRITE_SECTION}" section`);
       } else {
         const next = d.scan.headings.find((x) => x.line > h.line && x.level <= 2);
-        const section = d.scan.lines.slice(h.line - 1, next ? next.line - 1 : undefined).join('\n').toLowerCase();
+        const end = next ? next.line : Infinity;
+        // Only the row labels count: the first cell of each row of a table inside the section. The
+        // section's prose repeats some phrases ("set the reserve floor"), so a whole-text match
+        // let a writer's row go with the check still green.
+        const tables = readTables(d.scan).filter((t) => t.line > h.line && t.line < end);
+        const labels = tables.flatMap((t) => t.rows.map((r) => r.cells[0] ?? ''));
         for (const [fn, phrases] of Object.entries(WRITERS)) {
           for (const p of phrases) {
-            if (!section.includes(p.toLowerCase())) fail('D11', GUIDE, h.line, `the write section does not name "${p}" (${fn} in server/src/ecoflow/commands.ts)`);
+            const bold = `**${p}**`;
+            if (!labels.some((label) => label.includes(bold))) {
+              fail('D11', GUIDE, h.line, `the write table does not name "${p}" (${fn} in server/src/ecoflow/commands.ts) in bold in a row's first cell`);
+            }
           }
         }
       }

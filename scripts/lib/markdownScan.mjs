@@ -26,8 +26,10 @@
  *
  * The slugger is GitHub's (github-slugger, the same algorithm GitHub uses for `user-content-` ids):
  * lower-case the heading's rendered text, delete every character that is not a letter, mark,
- * number, connector punctuation, space or hyphen, turn each space into a hyphen, and suffix
- * repeats `-1`, `-2`, … in document order. scripts/build-docs-docx.py carries the Python copy.
+ * decimal digit, letter number (Ⅻ), connector punctuation, zero-width joiner or non-joiner, space
+ * or hyphen, turn each space into a hyphen, and suffix repeats `-1`, `-2`, … in document order.
+ * Other numbers go: GitHub gives "Fit quality (R²)" the id `fit-quality-r` and "CO₂ ½" `co-`.
+ * scripts/build-docs-docx.py carries the Python copy.
  */
 
 const ASCII_PUNCT = '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~';
@@ -42,8 +44,12 @@ const isAsciiAlnum = (c) => isAsciiLetter(c) || isAsciiDigit(c);
 
 /* ─────────────────────────────── slugger ─────────────────────────────── */
 
-/** Characters GitHub deletes from a heading's text before it becomes an id. */
-const SLUG_REMOVE = /[^\p{L}\p{M}\p{N}\p{Pc}\- ]/gu;
+/**
+ * Characters GitHub deletes from a heading's text before it becomes an id: all but letters, marks,
+ * decimal digits, letter numbers, connector punctuation, ZWNJ (U+200C), ZWJ (U+200D), hyphen and
+ * space. Superscripts, subscripts and fractions (other numbers) are deleted, as GitHub does.
+ */
+const SLUG_REMOVE = /[^\p{L}\p{M}\p{Nd}\p{Nl}\p{Pc}\u200C\u200D\- ]/gu;
 
 /** GitHub's base slug for a heading's rendered text (no duplicate suffix). */
 export function githubSlug(text) {

@@ -34,6 +34,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { GITHUB_NUMBER_AND_JOINER_SLUGS } from './helpers/githubSlugCases.js';
 
 const ROOT = resolve(import.meta.dirname, '..', '..');
 const BUILDER = join(ROOT, 'scripts', 'build-docs-docx.py');
@@ -470,6 +471,25 @@ test('the repository: the Python slugger gives every printed heading the id mark
     }
   }
   assert.ok(n > 600, `only ${n} printed headings`);
+});
+
+test('the Python slugger gives the ids GitHub gives: other numbers deleted, digits, letter numbers and joiners kept', () => {
+  // against GitHub's own ids, not only against markdownScan.mjs: two sluggers that make the same
+  // mistake agree with each other, and D5 would then accept a fragment that is dead on GitHub
+  const code = [
+    'import importlib.util, json, sys',
+    'spec = importlib.util.spec_from_file_location("build_docs", sys.argv[1])',
+    'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)',
+    'print(json.dumps([m.github_slug(t) for t in json.loads(sys.stdin.buffer.read().decode("utf-8"))]))',
+  ].join('\n');
+  const headings = GITHUB_NUMBER_AND_JOINER_SLUGS.map(([h]) => h);
+  const r = spawnSync(PYTHON, ['-I', '-B', '-c', code, BUILDER], { encoding: 'utf8', input: JSON.stringify(headings) });
+  assert.equal(r.status, 0, out(r));
+  const py = JSON.parse(r.stdout) as string[];
+  GITHUB_NUMBER_AND_JOINER_SLUGS.forEach(([heading, id], i) => {
+    assert.equal(py[i], id, `Python: ${JSON.stringify(heading)}`);
+    assert.equal(ms.createSlugger()(heading), id, `Node: ${JSON.stringify(heading)}`);
+  });
 });
 
 function versionAtLeast(v: string, min: string): boolean {

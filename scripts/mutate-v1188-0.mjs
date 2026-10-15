@@ -14,16 +14,20 @@
  *       entity page, a duplicated unique_id, a loose <ch> or <p> placeholder, the guide pages unchecked
  *   L   links, slugs and structure (D5, D6, scanner): a missing target, an unchecked fragment, a
  *       suffixed or shared slug, a #L line anchor; a punctuation-keeping or non-deduplicating
- *       slugger, a fence-blind scanner, a short fence closer; an unclosed fence, an unlisted,
- *       missing, doubly listed or out-of-order manifest entry, a wrong chapter opening, a
- *       part out of sequence, an incomplete chapter or appendix set
+ *       slugger, one that keeps superscripts and fractions or drops letter numbers or the
+ *       zero-width joiners, a fence-blind scanner, a short fence closer; an unclosed fence, an
+ *       unlisted, missing, doubly listed or out-of-order manifest entry, a wrong chapter opening,
+ *       a part out of sequence, an incomplete chapter or appendix set
  *   C   content rules (D7–D11): an option default, schema or row unchecked; a ratchet that does
  *       not demand lowering or lets a count rise; a release heading allowed; the history hash,
  *       banner or pin unchecked; a stale pointer or a dead docs/ mention allowed, extension-less
- *       files or .github unscanned; a writer dropped, a phrase dropped, the write section unbounded
+ *       files or .github unscanned; a writer dropped, a phrase dropped, the write section unbounded;
+ *       a write-table row label matched in the section's prose, in any cell, without its bold, in
+ *       another section's table, or regardless of case
  *   P   the printable: the last chapter dropped, a bundled link left external, an unresolved or
  *       non-unique link passing, history bundled, the synthetic h1 omitted, the alert marker
  *       kept, --fail-if-warnings or --resource-path dropped, a punctuation-keeping Python slugger,
+ *       one that keeps superscripts and fractions or drops the zero-width joiners,
  *       a missing, unlisted or unprinted file passing, links not pinned to --ref, no page breaks
  *
  * Every anchor sits on a comparison, a condition or a call, never on a baseline value or a pinned
@@ -314,8 +318,8 @@ const MUTANTS = [
   {
     id: 'L-vii. ★★★ the slugger keeps punctuation',
     file: MS,
-    find: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{N}\\p{Pc}\\- ]/gu;',
-    to: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{N}\\p{Pc}\\p{P}\\- ]/gu; /* MUTANT */',
+    find: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{Nd}\\p{Nl}\\p{Pc}\\u200C\\u200D\\- ]/gu;',
+    to: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{Nd}\\p{Nl}\\p{Pc}\\u200C\\u200D\\p{P}\\- ]/gu; /* MUTANT */',
     why: 'Every checked fragment is compared with an id GitHub never generates.',
   },
   {
@@ -408,6 +412,27 @@ const MUTANTS = [
     find: "if (appendices.join(',') !== wantAppendices.join(',')) fail('D6',",
     to: "if (false) fail('D6', /* MUTANT */",
     why: 'The feature inventory can disappear with its manifest line.',
+  },
+  {
+    id: 'L-xxi. ★★ the slugger keeps superscripts, subscripts and fractions',
+    file: MS,
+    find: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{Nd}\\p{Nl}\\p{Pc}\\u200C\\u200D\\- ]/gu;',
+    to: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{N}\\p{Pc}\\u200C\\u200D\\- ]/gu; /* MUTANT */',
+    why: 'A heading "Fit quality (R²)" gets an id ending in r² where GitHub\'s ends in r: D5 rejects the live fragment and accepts the dead one.',
+  },
+  {
+    id: 'L-xxii. ★ the slugger drops letter numbers',
+    file: MS,
+    find: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{Nd}\\p{Nl}\\p{Pc}\\u200C\\u200D\\- ]/gu;',
+    to: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{Nd}\\p{Pc}\\u200C\\u200D\\- ]/gu; /* MUTANT */',
+    why: 'A heading with a Roman numeral character gets an id GitHub never generates.',
+  },
+  {
+    id: 'L-xxiii. ★ the slugger drops the zero-width joiners',
+    file: MS,
+    find: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{Nd}\\p{Nl}\\p{Pc}\\u200C\\u200D\\- ]/gu;',
+    to: 'const SLUG_REMOVE = /[^\\p{L}\\p{M}\\p{Nd}\\p{Nl}\\p{Pc}\\- ]/gu; /* MUTANT */',
+    why: 'A heading written in a script that joins with ZWJ or ZWNJ gets an id GitHub never generates.',
   },
 
   /* ── C: content rules (D7–D11) ── */
@@ -537,6 +562,41 @@ const MUTANTS = [
     to: 'const next = null; /* MUTANT */',
     why: 'A writer mentioned anywhere in the guide counts as listed in the write table.',
   },
+  {
+    id: 'C-xix. ★★★ a sentence of the write section stands in for a writer\'s row',
+    file: CD,
+    find: "        const labels = tables.flatMap((t) => t.rows.map((r) => r.cells[0] ?? ''));",
+    to: '        const labels = d.scan.lines.slice(h.line - 1, next ? next.line - 1 : undefined); /* MUTANT */',
+    why: 'The two-panel paragraph says "set the reserve floor", so the reserve-floor row can leave the write list with the check green.',
+  },
+  {
+    id: 'C-xx. ★★ any cell of a row counts as its label',
+    file: CD,
+    find: "        const labels = tables.flatMap((t) => t.rows.map((r) => r.cells[0] ?? ''));",
+    to: "        const labels = tables.flatMap((t) => t.rows.map((r) => r.cells.join(' | '))); /* MUTANT */",
+    why: 'A writer named only inside another writer\'s row (its trigger or off switch) counts as having a row.',
+  },
+  {
+    id: 'C-xxi. ★★ a row label need not be bold',
+    file: CD,
+    find: '            const bold = `**${p}**`;',
+    to: '            const bold = p; /* MUTANT */',
+    why: 'A label that only mentions a writer in plain words, not as the row\'s bold name, counts as its row.',
+  },
+  {
+    id: 'C-xxii. ★★ a table in another section counts',
+    file: CD,
+    find: '        const tables = readTables(d.scan).filter((t) => t.line > h.line && t.line < end);',
+    to: '        const tables = readTables(d.scan); /* MUTANT */',
+    why: 'A writer listed only in a troubleshooting row counts as listed in the write table.',
+  },
+  {
+    id: 'C-xxiii. ★ a row label is matched regardless of case',
+    file: CD,
+    find: '            if (!labels.some((label) => label.includes(bold))) {',
+    to: '            if (!labels.some((label) => label.toLowerCase().includes(bold.toLowerCase()))) { /* MUTANT */',
+    why: 'The labels drift from the WRITERS phrases they are held to, and "force charge off" matches a label it was not written for.',
+  },
 
   /* ── P: the printable (build-docs-docx.py) ── */
   {
@@ -605,8 +665,8 @@ const MUTANTS = [
   {
     id: 'P-x. ★★★ the Python slugger keeps punctuation',
     file: BD,
-    find: 'if cat[0] in "LMN" or cat == "Pc":',
-    to: 'if cat[0] in "LMNP" or cat == "Pc":  # MUTANT',
+    find: 'if cat[0] in "LM" or cat in SLUG_KEEP_CATEGORIES or ch in SLUG_KEEP_JOINERS:',
+    to: 'if cat[0] in "LMP" or cat in SLUG_KEEP_CATEGORIES or ch in SLUG_KEEP_JOINERS:  # MUTANT',
     why: 'The printable\'s ids differ from GitHub\'s, so the links resolved against them do not match.',
   },
   {
@@ -643,6 +703,20 @@ const MUTANTS = [
     find: 'pieces.append(PAGE_BREAK + body)',
     to: 'pieces.append("\\n\\n" + body)  # MUTANT',
     why: 'Chapters run on mid-page in the 400-page printable.',
+  },
+  {
+    id: 'P-xvi. ★★ the Python slugger keeps superscripts, subscripts and fractions',
+    file: BD,
+    find: 'if cat[0] in "LM" or cat in SLUG_KEEP_CATEGORIES or ch in SLUG_KEEP_JOINERS:',
+    to: 'if cat[0] in "LMN" or cat in SLUG_KEEP_CATEGORIES or ch in SLUG_KEEP_JOINERS:  # MUTANT',
+    why: 'The printable\'s id for "Fit quality (R²)" differs from GitHub\'s and from the one D5 checked.',
+  },
+  {
+    id: 'P-xvii. ★ the Python slugger drops the zero-width joiners',
+    file: BD,
+    find: 'if cat[0] in "LM" or cat in SLUG_KEEP_CATEGORIES or ch in SLUG_KEEP_JOINERS:',
+    to: 'if cat[0] in "LM" or cat in SLUG_KEEP_CATEGORIES:  # MUTANT',
+    why: 'A heading with a joiner gets a printable id that the links resolved against GitHub\'s ids miss.',
   },
 ];
 

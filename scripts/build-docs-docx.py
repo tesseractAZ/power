@@ -167,16 +167,24 @@ def js_trim_start_len(s: str) -> int:
 # ─────────────────────────────── slugger ───────────────────────────────
 
 
+# Kept besides letters and marks: decimal digits, letter numbers (Ⅻ) and connector punctuation.
+# Other numbers (superscripts, subscripts, fractions) are deleted, as GitHub does.
+SLUG_KEEP_CATEGORIES = ("Nd", "Nl", "Pc")
+# Zero-width non-joiner and joiner: format characters GitHub keeps in an id.
+SLUG_KEEP_JOINERS = ("\u200c", "\u200d")
+
+
 def github_slug(text: str) -> str:
-    """GitHub's base slug (github-slugger): lower-case, keep letters, marks, numbers, connector
-    punctuation, spaces and hyphens, then each space becomes a hyphen."""
+    """GitHub's base slug (github-slugger): lower-case, keep letters, marks, decimal digits, letter
+    numbers, connector punctuation, the zero-width joiners, spaces and hyphens, then each space
+    becomes a hyphen. scripts/lib/markdownScan.mjs carries the Node copy."""
     out = []
     for ch in text.lower():
         if ch == " " or ch == "-":
             out.append("-")
             continue
         cat = unicodedata.category(ch)
-        if cat[0] in "LMN" or cat == "Pc":
+        if cat[0] in "LM" or cat in SLUG_KEEP_CATEGORIES or ch in SLUG_KEEP_JOINERS:
             out.append(ch)
     return "".join(out)
 
