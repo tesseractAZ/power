@@ -93,8 +93,11 @@ Saving any option restarts the add-on; its alarms are silent until it is back.
 Power speaks an alarm as a chime and then the words. With a Spanish voice set
 (`BROADCAST_WYOMING_VOICE_ES`) and `BROADCAST_BILINGUAL` on, it says them in English and then in
 Spanish; otherwise it plays them `BROADCAST_REPEAT` times (default 2). An announcement whose
-delivery cannot be confirmed is retried after 30 seconds, 90 seconds and 3 minutes. The same
-alarm is pushed to your phone and shown on the dashboard.
+delivery cannot be confirmed is retried after 30 seconds, 90 seconds and 3 minutes. The charge
+levels also show on the dashboard, and the alert behind each is pushed to your phone when it is a
+warning or a critical (see `NOTIFY_MIN_SEVERITY`). The Low levels are information only: spoken
+and shown, never pushed. The runway's "Projected runtime … to reserve" alert is pushed only
+inside 6 hours.
 
 | You hear | It means | Do this |
 |---|---|---|
@@ -104,7 +107,7 @@ alarm is pushed to your phone and shown on the dashboard.
 | "Projected to reach reserve in about N hours" (Low, or Medium within 6 hours) | The forecast trajectory reaches the reserve before solar recovers. | Reduce consumption. |
 | High, "projected to deplete in about N hours … reduce load now" (P2) | Empty within 8 hours on the forecast. | Shed load now. |
 | Critical, "projected empty …" or "at the reserve floor … start the generator" (P1) | Empty within 3 hours, or at the reserve with no grid carrying the house. | Shed load; start a generator; check the panel. |
-| "… reached the reserve floor … no action needed" | At the reserve, with the grid carrying the house. | Nothing. |
+| Advisory, "backup pool at 10 / 8 / 4 / 2 percent … no action needed" (Low, P4) | A near-empty level, with the grid carrying the house. | Nothing. |
 
 Each charge level is spoken once on the way down and re-arms when the pool recovers. A runway
 alarm repeats every `BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN` minutes (default 60) while it lasts.
@@ -119,11 +122,14 @@ alarm stays visible on the dashboard. Other alarms are spoken only at or above
 `BROADCAST_MIN_SEVERITY` (default: critical only); the charge-level and runway alarms above
 speak at every priority.
 
-**Quiet hours.** `BROADCAST_QUIET_HOURS` and `NOTIFY_QUIET_HOURS` (both `22-06` by default)
-hold every spoken alarm and push, critical included. Held pushes arrive in one morning digest at
-`NOTIFY_DIGEST_HOUR`. Turn on `CRITICAL_BREAKS_QUIET_HOURS` to be woken: then a critical push,
-and a High or Critical spoken alarm, break through. The nightly night-charge notice ignores the
-push quiet hours.
+**Quiet hours.** By default `BROADCAST_QUIET_HOURS` silences every spoken alarm and
+`NOTIFY_QUIET_HOURS` holds every push, critical included (both `22-06`). Silenced speech is not
+played later: a charge level crossed overnight is not spoken in the morning. A runway alarm that
+still stands speaks at its next repeat, and a night-charge force charge that will not switch off
+is paged again. Held pushes arrive in one morning digest at `NOTIFY_DIGEST_HOUR`. Turn on
+`CRITICAL_BREAKS_QUIET_HOURS` to be woken: then a critical push, any critical spoken alarm and a
+High runway alarm break through; other High alarms stay silent. The nightly night-charge notice
+ignores the push quiet hours.
 
 **The audible channel.** Power probes its speakers. When none can play, "Audible alarm channel
 unreachable" is pushed; when some cannot, "Audible alarm channel degraded" names them. Both are
@@ -199,8 +205,9 @@ the night-charge card on the **Strategy** page. To stop all writes, set `NIGHT_C
 `advisory`: a reserve already raised is still restored. To stop only the force charge, set
 `ARB_COST_MAX_SOC_PCT` to 50. Change `NIGHT_CHARGE_ADVISOR_ENABLED` only outside a charge night:
 turning it off also stops the timer that restores a raised reserve. The planner's write-readiness
-gate reports `LEARNING`, `READY_TO_CONSIDER_WRITES` or `BLOCKED` from scored nights; it informs
-`auto` only and does not hold back `supervised`. Planning in full:
+gate reports `LEARNING`, `READY_TO_CONSIDER_WRITES` or `BLOCKED` from scored nights on which Power
+itself raised the reserve. It needs at least 21, so it never graduates in an install that only
+advises; it informs `auto` only and does not hold back `supervised`. Planning in full:
 [night-charge planning](https://github.com/tesseractAZ/power/blob/main/docs/reference/15-1-night-charge-planning.md).
 
 **Load shedding.** With `LOAD_SHEDDING_SHED_ENTITIES` listing your sheddable loads, Power
@@ -288,11 +295,15 @@ describes both.
 
 ## Access and security
 
-- Port 8787 is published on your network. Reading (the dashboard and the read API) needs no
-  login, so keep the host on a trusted network.
+- Port 8787 is published on your network and is meant for a trusted network only. Reading (the
+  dashboard and the read API) needs no login.
 - Every write and every admin request needs one of: Home Assistant's sidebar (ingress), the
   dashboard's own origin, or the `X-Panel-Write-Token` header carrying the token Power creates
   on first start in `/data/panel-write-token.txt`.
+- The origin condition is not a login. It stops a web page on another site from writing through
+  a browser, but any program on your network can send that origin and write, including turning
+  the alarm-priority switches off. Keep untrusted devices off the host's network, and reach Power
+  from outside it only through Home Assistant, which asks for its own login.
 - `TUI_TRUSTED_ORIGINS` adds exact browser origins to the dashboard's own; a listed origin
   passes the write gate without a token.
 - The telnet console is unencrypted and off by default.
@@ -301,6 +312,8 @@ describes both.
   list. Every device write is recorded in `/data/writes.log` (`GET /api/writes/log`, through the
   write gate).
 
+How writes are authorised:
+[trust boundary and network exposure](https://github.com/tesseractAZ/power/blob/main/SECURITY.md#trust-boundary-and-network-exposure).
 The full posture and how to report a vulnerability:
 [security policy](https://github.com/tesseractAZ/power/blob/main/SECURITY.md).
 
@@ -321,7 +334,7 @@ to `/share/ecoflow-panel/` for an outside SQLite viewer.
 | No devices; the log shows a 401 | The keys belong to another EcoFlow region. | Set `ECOFLOW_API_HOST` to `https://api-e.ecoflow.com` (EU) or `https://api-us.ecoflow.com` (US). |
 | No push on the phone | `NOTIFY_CHANNEL` is `none`, or `NOTIFY_HA_PUSH_TARGETS` is empty. | Set both; check the notify service name under Developer tools. |
 | Nothing is spoken | Broadcast off, no targets, quiet hours, or the speakers cannot reach `BROADCAST_AUDIO_BASE`. | Check those, then play a spoken preview from Alert Settings. |
-| Alarms are silent overnight | Quiet hours hold every tier. | Turn on `CRITICAL_BREAKS_QUIET_HOURS`. |
+| Alarms are silent overnight | Quiet hours silence every tier. | Turn on `CRITICAL_BREAKS_QUIET_HOURS`. |
 | Low-battery alarms on a grid-tied home | Power does not know the grid is there. | Set `GRID_AVAILABLE` and `GRID_PRESENCE_ENTITY`. |
 | No Home Assistant entities | MQTT discovery is off or cannot reach the broker. | Set `MQTT_DISCOVERY_ENABLED` and the broker options; check the log. |
 | Entities read unavailable | The add-on is stopped or its state messages stopped. | Check the add-on and broker logs. |
@@ -330,7 +343,7 @@ to `/share/ecoflow-panel/` for an outside SQLite viewer.
 | Cost figures look flat | The tariff is not confirmed. | Enter the rates, then `TARIFF_APS_RATES_CONFIRMED`. |
 | "Setting changed" notification | A setting was changed outside Power, usually in the EcoFlow app. | Confirm the change was yours. |
 | An API write returns 401 | The request has no write authority. | Use the sidebar, or send `X-Panel-Write-Token`. |
-| Heartbeat monitor reports down | Pings stopped, or the URL was rejected. | Use an https URL; the log names a rejection. |
+| Heartbeat monitor reports down | Power stopped checking in. The host, the add-on or its power is down, so no alarm of Power's is running; or the internet link is down, so Power cannot reach the EcoFlow cloud either. Less often, a changed URL was rejected. | Check the batteries and the panel in the EcoFlow app now, then the host and the add-on. If Power is running, use an https URL; the log names a rejection. |
 
 ## More documentation
 

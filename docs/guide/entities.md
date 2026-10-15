@@ -173,7 +173,7 @@ Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-ho
 | `sensor.ecoflow_panel_night_charge_window_start` | `ecoflow_night_charge_window_start` | Charge window start, America/Phoenix (`23:00`, or `Mon 00:00` when more than a day away) | text |
 | `sensor.ecoflow_panel_night_charge_window_end` | `ecoflow_night_charge_window_end` | Charge window end, same format | text |
 | `sensor.ecoflow_panel_night_charge_readiness` | `ecoflow_night_charge_readiness` | `LEARNING`, `READY_TO_CONSIDER_WRITES` or `BLOCKED`: the write-readiness gate (diagnostic) | text |
-| `binary_sensor.ecoflow_panel_night_charge_write_ready` | `ecoflow_night_charge_write_ready` | On when the readiness gate has graduated; off when it has not or is unknown (diagnostic) | on / off |
+| `binary_sensor.ecoflow_panel_night_charge_write_ready` | `ecoflow_night_charge_write_ready` | On when the readiness gate has graduated; off when it has not or is unknown (diagnostic). Graduating takes at least 21 scored nights on which Power itself raised the reserve (`supervised` or `auto`), so it stays off in an install that only advises | on / off |
 
 ## Load shedding and lighting
 
@@ -204,15 +204,17 @@ are removed when a circuit leaves the panel.
 One switch per alarm priority. Off silences that priority's announcements: its phone pushes,
 its spoken alarm and its chime. The alarm itself stays on the dashboard and in the counts above.
 The same toggles are on the dashboard (**Alerts → Alert Settings**); a change in either place
-shows in both, and it is kept across restarts. The discovery message requests the entity_id
-shown.
+shows in both, and it is kept across restarts. The discovery message also asks for
+`switch.ecoflow_alarms_critical_p1` and so on through `object_id`, a key current Home Assistant
+ignores, so a fresh install gets the ids below. An install whose switches were first discovered
+while that key was honoured keeps the shorter ids; look the switches up by unique_id.
 
-| entity_id (requested) | unique_id | Meaning | Unit |
+| entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `switch.ecoflow_alarms_critical_p1` | `ecoflow_alerts_critical` | Announce Critical (P1) alarms | on / off |
-| `switch.ecoflow_alarms_high_p2` | `ecoflow_alerts_high` | Announce High (P2) alarms | on / off |
-| `switch.ecoflow_alarms_medium_p3` | `ecoflow_alerts_medium` | Announce Medium (P3) alarms | on / off |
-| `switch.ecoflow_alarms_low_p4` | `ecoflow_alerts_low` | Announce Low (P4) alarms | on / off |
+| `switch.ecoflow_panel_alarms_critical_p1` | `ecoflow_alerts_critical` | Announce Critical (P1) alarms | on / off |
+| `switch.ecoflow_panel_alarms_high_p2` | `ecoflow_alerts_high` | Announce High (P2) alarms | on / off |
+| `switch.ecoflow_panel_alarms_medium_p3` | `ecoflow_alerts_medium` | Announce Medium (P3) alarms | on / off |
+| `switch.ecoflow_panel_alarms_low_p4` | `ecoflow_alerts_low` | Announce Low (P4) alarms | on / off |
 
 ## Energy Dashboard wiring
 
@@ -243,9 +245,9 @@ Power computes and advises; these are the entities an automation of yours can ac
 
 | To do this | Gate on | Notes |
 |---|---|---|
-| Charge overnight yourself (advisory mode) | `ecoflow_night_charge_recommended` on, `ecoflow_night_charge_write_ready` on, inside `ecoflow_night_charge_window_start` to `ecoflow_night_charge_window_end` | Write `ecoflow_night_charge_target_soc` to the panel's backup reserve, and restore it after the window |
+| Charge overnight yourself (advisory mode) | `ecoflow_night_charge_recommended` on, inside `ecoflow_night_charge_window_start` to `ecoflow_night_charge_window_end` | Write `ecoflow_night_charge_target_soc` to the panel's backup reserve, and restore it after the window. Do not require `ecoflow_night_charge_write_ready`: it turns on only after 21 scored nights on which Power itself raised the reserve, so in an install that only advises it never does. Once Power has run `supervised`, it is an optional extra gate |
 | Shed loads when the runway is short | `ecoflow_load_shed_recommended` | `ecoflow_runway_to_reserve_if_shed_hours` says what shedding buys |
 | Dim or limit lighting | `ecoflow_lighting_posture` | Escalates at once; steps back down only after the calmer posture has held 15 minutes |
 | React to a grid loss | `ecoflow_off_grid` | Reads not present when the signal is missing |
 | React to any critical alarm | `ecoflow_alert_critical_count` above 0 | Counts active threshold criticals |
-| Mute a priority on a schedule | the `switch.ecoflow_alarms_*` switches | Muting hides nothing from the dashboard |
+| Mute a priority on a schedule | the four alarm-priority switches, unique_ids `ecoflow_alerts_critical` to `ecoflow_alerts_low` (entity_ids `switch.ecoflow_panel_alarms_*` on a fresh install) | Muting hides nothing from the dashboard |

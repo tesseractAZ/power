@@ -10,7 +10,9 @@ and its Delta Pro Ultra battery Cores.
 - Pack health: state of health, cell spread, end-of-life projection and a warranty export.
 - Home Assistant entities through MQTT discovery, including Energy Dashboard counters.
 - A night-charge planner for the APS R-EV time-of-use rate. It only advises unless you set
-  `NIGHT_CHARGE_MODE` to let it raise the panel's backup reserve overnight.
+  `NIGHT_CHARGE_MODE` to let it raise the panel's backup reserve overnight and, with
+  `ARB_OBJECTIVE` set to `cost`, run a force charge. The Documentation tab lists every write
+  Power can make.
 
 > [!WARNING]
 > Power can warn you only while its host, your network, the EcoFlow cloud and your speakers all

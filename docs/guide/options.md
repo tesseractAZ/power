@@ -46,7 +46,7 @@ common ones by goal.
 | `BROADCAST_SIP_TARGETS` | `""` | `str?` | Second list of announce-only targets (for example a SIP phone exposed as a media player) that get alarms via `media_player.play_media(announce)` instead of Music Assistant. |
 | `BROADCAST_MIN_SEVERITY` | `critical` | `list(critical\|warning)` | Minimum severity for an audible broadcast. |
 | `BROADCAST_QUIET_HOURS` | `"22-06"` | `str?` | Quiet window for audible alarms. |
-| `CRITICAL_BREAKS_QUIET_HOURS` | `false` | `bool` (→ `true`/`false`) | When true, a critical alert breaks through quiet hours on the push channel, and a High (P2) or Critical (P1) announcement breaks through on the speakers. Default false ⇒ quiet hours silence every tier (the alert still shows on screen, and its push arrives in the morning digest). Shared by alertMonitor (push) and broadcast (audible). |
+| `CRITICAL_BREAKS_QUIET_HOURS` | `false` | `bool` (→ `true`/`false`) | When true, a critical alert breaks through quiet hours on the push channel, and on the speakers every critical alarm breaks through, as does a High (P2) runway alarm; other High alarms stay silent. Default false ⇒ quiet hours silence every tier (the alert still shows on screen, and its push arrives in the morning digest; the speech is not played later). Shared by alertMonitor (push) and broadcast (audible). |
 | `BROADCAST_AUDIO_BASE` | `http://homeassistant.local:8787` | `str?` | Base URL speakers fetch klaxon/announcement WAVs from. |
 | `BROADCAST_VOLUME` | `0.5` | `float(0,1)` | Broadcast (chime) volume. |
 | `BROADCAST_ANNOUNCE_VOLUME` | `""` | `str?` | Optional separate volume for the spoken announcement. |
@@ -150,7 +150,7 @@ of use. Enter each rate as the effective ¢/kWh from a bill.
 | `TARIFF_APS_OFFPEAK_WINTER_CENTS` | `""` | `str?` | Winter off-peak rate. |
 | `TARIFF_APS_OVERNIGHT_CENTS` | `""` | `str?` | Overnight rate, both seasons. |
 | `TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS` | `""` | `str?` | Winter super-off-peak rate. |
-| `TARIFF_APS_RATES_CONFIRMED` | `false` | `bool` (→ `true`/`false`) | Confirms the rates above come from a bill. While false the tariff table prices nothing (Grid Rate Now reads unknown), and the cost and savings figures use a flat 17 ¢/kWh default. Fill the rates in first: a period left without a rate is still priced at the flat default. |
+| `TARIFF_APS_RATES_CONFIRMED` | `false` | `bool` (→ `true`/`false`) | Confirms the rates above come from a bill. While false the tariff table prices nothing (Grid Rate Now reads unknown), and the cost and savings figures use a flat 17 ¢/kWh default. Fill the rates in first: once confirmed, a period left without a rate (overnight or super-off-peak) is priced at that season's off-peak rate, and every unpriced hour falls back to the flat 17 ¢ when the season's on-peak or off-peak rate is empty too. |
 
 #### Heartbeat (dead-man's switch)
 
