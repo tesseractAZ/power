@@ -199,7 +199,8 @@ The planner sizes a buy against one of two objectives, selected by `ARB_OBJECTIV
 - **`cost`** — the resilience answer is a **floor**, not a target. `costModeTargetKwh`
   (`nightChargeAdvisor.ts`) raises the target toward `min(ARB_COST_MAX_SOC_PCT % of pool,
   pool − morning-PV surplus)` and records which of the two bound it in the ledger's
-  `cost_ceiling_basis` column (`'max-soc'` | `'pv-headroom'`). The morning surplus is the
+  `cost_ceiling_basis` column (`'max-soc'` | `'pv-headroom'`; `'pv-curtail'` on a mid-day leg,
+  which nothing plans yet: the solar headroom under the charge taper). The morning surplus is the
   P50 (the P90 stands in when the P50 is unknown; a long-gap night uses the pre-peak P10),
   computed on a **de-biased load** where the ledger shows the load forecast running high
   (§15.13 "Cost-ceiling load de-bias"; never on a `cushionShortfall` night);
@@ -227,7 +228,10 @@ Three properties an operator needs before setting these:
    afterwards. Its wall-clock OFF deadline (the later of the first OFF + 30 min and the window
    close + 60 min) is capped `ON_PEAK_PAGE_LEAD_MS` (30 min) before on-peak; blind OFF re-sends
    (no readback, after the escalation) stop 12 h after the first OFF or at the next charge
-   window's open, whichever is first (`blindResendStopMs`).
+   window's open, whichever is first (`blindResendStopMs`). Force-charge is per leg
+   (`forceChargeOn(role)`, `legForceChargeEligible`, `chargeWindows.ts`): a resilience-only
+   backup leg ahead of a mid-day buy never force-charges. Every leg armed today is the overnight
+   cost leg.
 
    Setting `ARB_COST_MAX_SOC_PCT` to 50 disables force-charge.
 2. **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" here means *fill

@@ -400,7 +400,7 @@ test('★★ wiring (index.ts is not reachable from a unit test): P50 onto the b
   // The band carries the MEDIAN load — forecastLoadW without the P90 factor — and the median PV.
   assert.match(idx, /loadP90W: fh\.forecastLoadW \* loadP90Factor,\n\s+embeddedEvW: \(fh\.predictedEvLoadW \?\? 0\) \* loadP90Factor,\n(\s+\/\/.*\n)*\s+loadP50W: fh\.forecastLoadW,\n\s+pvP50W: pb\.p50W,\n/);
   // The planner is told the force-charge's own gate.
-  assert.match(idx, /\n\s+forceChargeEligible: forceChargeOn\(\),\n/);
+  assert.match(idx, /\n\s+forceChargeEligible: forceChargeOn\(legRole\),\n/);
   // The plan row records the expected columns; the scorer records the measured open and grades it.
   assert.match(idx, /\n\s+\.\.\.expectedBuyLedgerColumns\(plan\),\n/);
   assert.match(idx, /measuredWindowOpenSocPct\(\n\s+recorder\.query\(shp2Sn, 'backup_pct', windowStart - WINDOW_OPEN_SOC_LEAD_MS, windowStart\), windowStart\);/);

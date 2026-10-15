@@ -1,5 +1,6 @@
 import type { DeviceSnapshot } from './snapshot.js';
-import { rateAt, apsREvModelFromEnv, seasonAt, onPeakWindowStrings, type TariffModel } from './tariff.js';
+import { rateAt, apsREvModelFromEnv, seasonAt, onPeakWindowStrings, APS_PERIOD, type TariffModel } from './tariff.js';
+import { saturationThresholdPct, meanChargeCeilingPct } from './chargeTaper.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
@@ -8017,48 +8018,21 @@ const CURTAIL_HISTORY_DAYS = 7;
 // automatically track whatever mode is active without needing a separate
 // storm-guard flag.
 //
-// v0.9.79 — curtailment doesn't begin AT the ceiling, it begins in the
-// CV/absorption taper BELOW it. As the LFP packs approach full, charge
-// acceptance falls and the DPU backs off its MPPTs to match (load +
-// dwindling charge current) — shedding the LV string first. Live evidence
-// from the operator's Core 3 (ceiling 100): the LV MPPT held ~900-1060 W all day,
-// then collapsed 698 W → 0 W as SoC climbed 88 → 90 %, while HV only
-// throttled partially. So real PV rejection starts ~10 % below the
-// ceiling, not 2 %. The saturation threshold is therefore `ceiling − band`
-// with a 10-point taper band. The downstream guards still prevent false
-// positives: the expected-vs-actual gap must exceed MIN_SURPLUS_W (so we
-// only fire when PV is genuinely being rejected, not merely tapering into
-// a battery that's still absorbing), and the PV-matched-to-load check
-// rejects bulk-charge hours where PV >> load.
-const CURTAIL_TAPER_BAND_PCT = 10;   // SoC band below the ceiling where shedding begins
+// v0.9.79 — the charge-taper band and the saturation threshold (`ceiling − band`) live in
+// chargeTaper.ts (R2), shared with the mid-day charge ceiling. The downstream guards still
+// prevent false positives: the expected-vs-actual gap must exceed MIN_SURPLUS_W (so we only fire
+// when PV is genuinely being rejected, not merely tapering into a battery that's still
+// absorbing), and the PV-matched-to-load check rejects bulk-charge hours where PV >> load.
 
 /**
  * Effective charge ceiling (%) for the home pool: mean of the
- * SHP2-connected DPUs' configured `chgMaxSoc`. Returns null when no DPU
- * reports one. Mean (not min) is the physically correct pool aggregate —
- * we compare it against mean SoC, and the pool is "saturated" only when
- * the average has reached the average ceiling (i.e. every DPU is at its
- * own limit). In the common case all DPUs share one ceiling, so mean =
- * that value.
+ * SHP2-connected DPUs' configured `chgMaxSoc` (chargeTaper.ts meanChargeCeilingPct).
+ * Returns null when no DPU reports one.
  */
 function homeChargeCeilingPct(
   homeDpus: Array<DeviceSnapshot & { projection: DpuProjection }>,
 ): number | null {
-  const ceilings = homeDpus
-    .map((d) => d.projection.chgMaxSoc)
-    .filter((v): v is number => v != null && v > 0);
-  if (ceilings.length === 0) return null;
-  return ceilings.reduce((s, v) => s + v, 0) / ceilings.length;
-}
-
-/** The SoC at/above which the pool enters the charge-taper band where PV
- *  shedding begins (curtailment can occur): `ceiling − taper band`. When no
- *  ceiling is reported we assume 100 (the EcoFlow default), so the fallback
- *  threshold is 90 — consistent with the taper-aware model rather than the
- *  old fixed 96. */
-function saturationThresholdPct(ceiling: number | null): number {
-  const eff = ceiling != null && ceiling > 0 ? ceiling : 100;
-  return Math.max(0, eff - CURTAIL_TAPER_BAND_PCT);
+  return meanChargeCeilingPct(homeDpus.map((d) => d.projection.chgMaxSoc));
 }
 
 // Phoenix off-grid home opportunistic loads. Estimated wattages are
@@ -8922,8 +8896,8 @@ export function tariffPricingView(
   return {
     onPeakCents: onPeakPeriod?.centsBySeason[season] ?? fallback.onPeak,
     offPeakCents: model.offPeak.centsBySeason[season] ?? fallback.offPeak,
-    overnightCents: inSeason('overnight')?.centsBySeason[season] ?? null,
-    superOffPeakCents: inSeason('super_off_peak')?.centsBySeason[season] ?? null,
+    overnightCents: inSeason(APS_PERIOD.OVERNIGHT)?.centsBySeason[season] ?? null,
+    superOffPeakCents: inSeason(APS_PERIOD.SUPER_OFF_PEAK)?.centsBySeason[season] ?? null,
     // isOnPeakHour answers from the table's on-peak period on a confirmed install.
     onPeakHours: win?.hours ?? legacy.hours,
     onPeakDays: win?.days ?? legacy.days,

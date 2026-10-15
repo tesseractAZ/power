@@ -188,6 +188,8 @@ import {
   // the write drives to and the expected draw — never the worst case, which only logs name).
   expectedBuyLedgerColumns, ledgerExpectedBuyKwh, chargeLevelPct, statedBuyKwh, buyFiguresLogText,
   chargeIsWindowBound,
+  // R2 — the leg a plan sizes (every live plan is the overnight cost leg).
+  OVERNIGHT_WINDOW_SPEC,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -234,7 +236,8 @@ import {
   chargeWriteHold, setChargeWriteHold, FOREIGN_RESERVE_SETTLE_MS,
   type RevertDeadlineDecision,
 } from './nightChargeActuator.js';
-import { nextOnPeakStartMs } from './chargeWindows.js';
+import { nextOnPeakStartMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, type ChargeLegRole } from './chargeWindows.js';
+import { pvSurplusFromBand, surplusSpanEndMs } from './chargeTaper.js';
 import {
   buildNightChargeMessage, sendNotification, loadNotifyConfig,
   // v1.187.22 — the after-the-fact night-charge pushes, built where their text is tested.
@@ -242,7 +245,7 @@ import {
   buildNightChargeRevertDeadline, buildNightChargeForeignReserve,
 } from './notify.js';
 import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
-import { apsREvModelFromEnv, rateAt, localParts, seasonAt } from './tariff.js';
+import { apsREvModelFromEnv, rateAt, localParts, seasonAt, APS_PERIOD } from './tariff.js';
 // v1.187.0 — the scorer's span, cost and PV-evidence decisions, pure (nightLedgerScoring.ts).
 import {
   supersedingPlanDate, knownFleetMismatchReason, type TimeSpan,
@@ -3151,12 +3154,14 @@ const NIGHT_CHARGE_MODE = resolveNightChargeMode(process.env.NIGHT_CHARGE_MODE);
 const FORCE_CHARGE_OBJECTIVE =
   (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost' ? 'cost' as const : 'resilience' as const;
 const FORCE_CHARGE_COST_MAX_SOC_PCT = Number(process.env.ARB_COST_MAX_SOC_PCT ?? DEFAULT_COST_MAX_SOC_PCT);
-const forceChargeOn = (): boolean => forceChargeEnabled({
+// R2 — per leg: a backup leg never force-charges (chargeWindows.ts legForceChargeEligible). Every
+// caller today arms the overnight cost leg, the default.
+const forceChargeOn = (role: ChargeLegRole = 'cost'): boolean => legForceChargeEligible(role, forceChargeEnabled({
   mode: NIGHT_CHARGE_MODE,
   objective: FORCE_CHARGE_OBJECTIVE,
   costMaxSocPct: FORCE_CHARGE_COST_MAX_SOC_PCT,
   reserveWriteMaxPct: RESERVE_WRITE_MAX_PCT,
-});
+}));
 // Restart-persistent per-night actuation record — a raised reserve MUST be
 // findable (and revertable) across an add-on restart mid-window.
 const NIGHT_CHARGE_ACTUATION_PATH =
@@ -3357,7 +3362,7 @@ function phoenixMinuteOfDay(ms: number): number {
 // grid-draw detector reads the SAME tariff this file does. See tariff.ts.
 
 /** Cheap-period id the advisor sizes the buy against (the OVERNIGHT R-EV tier). */
-const NIGHT_CHEAP_PERIOD_ID = 'overnight';
+const NIGHT_CHEAP_PERIOD_ID = APS_PERIOD.OVERNIGHT;
 /** N_MIN scored calibration days before the band is trusted (design §2.3). */
 const NIGHT_MIN_CAL_DAYS = 14;
 
@@ -3395,9 +3400,12 @@ function round1(n: number): number { return Math.round(n * 10) / 10; }
  * update() — buildInputs there is synchronous, but we need awaited analytics).
  */
 async function recomputeNightChargePlan(
-  opts: { allowStalePanel?: boolean } = {},
+  opts: { allowStalePanel?: boolean; role?: ChargeLegRole } = {},
 ): Promise<{ plan: NightChargePlan; extras: NightPlanExtras } | 'panelStale' | null> {
   const nowMs = Date.now();
+  // R2 — the leg's role sets its objective and force-charge (legObjective, forceChargeOn). Every
+  // caller today plans the overnight cost leg.
+  const legRole: ChargeLegRole = opts.role ?? 'cost';
   const shp2 = findShp2(store.get().devices);
   if (!shp2 || shp2.projection?.kind !== 'shp2') return null; // I5 — advisory null
   // v1.174.0 — the R3 freshness gate the actuator and force-charge ticks already apply.
@@ -3438,7 +3446,7 @@ async function recomputeNightChargePlan(
   // v1.127.0 — buy objective. 'cost' maximises arbitrage against the configured
   // tariff; 'resilience' (legacy) sizes only to hold floor+cushion. Cost mode is
   // bounded below by the resilience answer, so it can never buy less.
-  const objectiveMode = (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost' ? 'cost' as const : 'resilience' as const;
+  const objectiveMode = legObjective(legRole, (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost' ? 'cost' as const : 'resilience' as const);
   const costMaxSocPct = Number(process.env.ARB_COST_MAX_SOC_PCT ?? DEFAULT_COST_MAX_SOC_PCT);
   const islandedLoadSafety = Number(process.env.ARB_ISLANDED_LOAD_SAFETY ?? DEFAULT_ISLANDED_LOAD_SAFETY);
   // v1.173.0 — 0 (default) = AUTO: connected Cores × the proven per-Core rate (planChargeCapKw).
@@ -3586,36 +3594,26 @@ async function recomputeNightChargePlan(
   // tariff question only the owner's bill can settle; if it does, the fix
   // belongs in tariff.ts's weekday gating, not here. Scan 4 days to bridge
   // the weekend gap either way.
-  const nextWindow = resolveCheapWindow(periodIdAt, windowEndMs + HOUR_MS, NIGHT_CHEAP_PERIOD_ID, 96);
-  const nextRechargeMs: number | null = nextWindow?.startMs ?? null;
+  // R2 — nextChargeableOpenMs over the overnight cycle: the same 96 h overnight scan.
+  const nextRechargeMs: number | null = nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);
 
   // morningPvSurplusP90Kwh — the over-buy ceiling headroom. Sum over the next
   // solar day (window-end → +14 h) of max(0, P90 PV − forecast load). P90 PV =
   // the probabilistic p90W (best case) — the deliberate asymmetry so we never
   // over-buy into morning-PV clipping. null when the band doesn't cover it.
-  let morningSurplusKwh = 0;
   // v1.168.0 — the MEDIAN surplus, over the same hours: what the cost ceiling leaves
   // room for. Null unless every covered hour carries a finite p50W.
-  let morningSurplusP50Kwh = 0;
-  let morningP50Complete = true;
-  let morningHasData = false;
-  const morningEndMs = windowEndMs + 14 * HOUR_MS;
-  if (window) {
-    for (const pb of prob?.hours ?? []) {
-      if (pb.ts < windowEndMs || pb.ts >= morningEndMs) continue;
-      const fh = dayAheadByEpoch.get(Math.floor(pb.ts / HOUR_MS));
-      if (!fh) continue;
-      morningHasData = true;
-      morningSurplusKwh += Math.max(0, pb.p90W - fh.forecastLoadW) / 1000;
-      if (typeof pb.p50W === 'number' && Number.isFinite(pb.p50W)) {
-        morningSurplusP50Kwh += Math.max(0, pb.p50W - fh.forecastLoadW) / 1000;
-      } else {
-        morningP50Complete = false;
-      }
-    }
-  }
-  const morningPvSurplusP90Kwh = morningHasData ? round2(morningSurplusKwh) : null;
-  const morningPvSurplusP50Kwh = morningHasData && morningP50Complete ? round2(morningSurplusP50Kwh) : null;
+  // R2 — the sums are chargeTaper.ts pvSurplusFromBand, the span its surplusSpanEndMs (an
+  // overnight window: close + 14 h).
+  const morningEndMs = surplusSpanEndMs('overnight', windowEndMs, null);
+  const { p90Kwh: morningPvSurplusP90Kwh, p50Kwh: morningPvSurplusP50Kwh } = window
+    ? pvSurplusFromBand({
+      hours: prob?.hours ?? [],
+      loadAt: (ts) => dayAheadByEpoch.get(Math.floor(ts / HOUR_MS))?.forecastLoadW,
+      fromMs: windowEndMs,
+      toMs: morningEndMs,
+    })
+    : { p90Kwh: null, p50Kwh: null };
   // v1.187.1 — the cost ceiling's surplus on a DE-BIASED load (buildCostSurplusLoad): the
   // forecast load ran above the measured load on every readable ledger night of 2026-09-23..29
   // (load_err_frac −0.29 to −0.43), so the surplus above left too little room and the pool
@@ -3726,8 +3724,10 @@ async function recomputeNightChargePlan(
     buyDebiasBasis: buyDebiasCal.basis,
     buyDebiasSamples: buyDebiasCal.samples,
     // v1.187.22 — the gate the force-charge itself runs on, so the expected buy reads the level
-    // the armed write drives to (armedWriteLevelPct).
-    forceChargeEligible: forceChargeOn(),
+    // the armed write drives to (armedWriteLevelPct). R2 — the leg's own (forceChargeOn(role)).
+    forceChargeEligible: forceChargeOn(legRole),
+    // R2 — the leg: today always the overnight window (resolved above), its role the caller's.
+    windowSpec: legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },
   };
 
   const inputs = buildNightChargeInputs(deps);
@@ -3756,9 +3756,9 @@ async function recomputeNightChargePlan(
     periodIdNow: periodIdAt(nowMs),
     ratesConfirmed: tariffModel.ratesConfirmed,
     centsByTier: {
-      onPeak: tariffModel.periods.find((p) => p.id === 'on_peak')?.centsBySeason[season] ?? null,
-      overnight: tariffModel.periods.find((p) => p.id === 'overnight')?.centsBySeason[season] ?? null,
-      superOffPeak: tariffModel.periods.find((p) => p.id === 'super_off_peak')?.centsBySeason[season] ?? null,
+      onPeak: tariffModel.periods.find((p) => p.id === APS_PERIOD.ON_PEAK)?.centsBySeason[season] ?? null,
+      overnight: tariffModel.periods.find((p) => p.id === APS_PERIOD.OVERNIGHT)?.centsBySeason[season] ?? null,
+      superOffPeak: tariffModel.periods.find((p) => p.id === APS_PERIOD.SUPER_OFF_PEAK)?.centsBySeason[season] ?? null,
       offPeak: tariffModel.offPeak.centsBySeason[season] ?? null,
     },
     demandUsdPerKw: null,

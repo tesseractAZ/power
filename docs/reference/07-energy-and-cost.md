@@ -1077,7 +1077,7 @@ the current hour, **all** hold:
 
 | Guard | Constant |
 |---|---|
-| SoC ≥ saturation threshold | `saturationThresholdPct(ceiling)` = `(ceiling or 100) − CURTAIL_TAPER_BAND_PCT(10)` |
+| SoC ≥ saturation threshold | `saturationThresholdPct(ceiling)` = `(ceiling or 100) − CURTAIL_TAPER_BAND_PCT(10)` (`chargeTaper.ts`, shared with the mid-day charge ceiling) |
 | PV actually producing | `CURTAIL_MIN_PV_W = 200` |
 | meaningful gap (expected − actual) | `CURTAIL_MIN_SURPLUS_W = 300` |
 | daylight | `CURTAIL_MIN_GHI_WM2 = 100` |

@@ -68,6 +68,12 @@ import {
   armedWriteLevelPct, forceChargeStartAtMs, forceChargeStopPct, evDisplacedPackKwh,
   FORCE_CHARGE_MIN_RUN_MS, FORCE_CHARGE_MIN_RATE_KW,
 } from './nightForceCharge.js';
+// R2 — the window resolver and the per-leg rules live with the cycle chooser; the taper ceiling
+// with the curtailment engine's taper band. (chargeWindows.ts imports only tariff.ts;
+// chargeTaper.ts imports nothing — no cycle.)
+import { resolveCheapWindow, legObjective, legForceChargeEligible, type ChargeWindowKind, type ChargeLegRole } from './chargeWindows.js';
+import { taperCeilingKwh } from './chargeTaper.js';
+export { resolveCheapWindow } from './chargeWindows.js';
 
 const HOUR_MS = 3_600_000;
 
@@ -110,9 +116,52 @@ export interface NightChargeHour {
   pvP50W?: number | null;
 }
 
+/**
+ * R2 — WHICH window a plan sizes, and how that window's physics differ from the overnight one.
+ *
+ * Every live plan is the overnight cost leg (OVERNIGHT_WINDOW_SPEC, or no spec at all — the two
+ * are the same plan, byte for byte: legacyIdentity.test.ts). The mid-day super off-peak leg and
+ * the overnight backup ahead of it (chargeWindows.ts chooseChargeCycle) are sized by the same
+ * engine with these differences, each of which is a no-op on the overnight leg:
+ *  - `window`: the leg's window as the chooser pinned it (the resolver is not asked);
+ *  - `packAcceptKw`: PV and the grid charger share what the packs accept, so an hour's grid gain
+ *    is at most packAcceptKw − PV (no PV ⇒ the contended charge rate alone, as before);
+ *  - `curtailFromPct`: the cost ceiling leaves the PV surplus room under the charge taper rather
+ *    than under full (basis 'pv-curtail', chargeTaper.ts);
+ *  - `backupHold`: the pool this leg is sized from is the one an armed backup leg protects;
+ *  - a super off-peak leg's reserve write is middayReserveTargetPct (T_mid), and the force-charge
+ *    carries only the cost fill;
+ *  - role 'backup': resilience only, never force-charges (legObjective, legForceChargeEligible).
+ * P50 PV that lands in the pack while a write charges it is credited against the expected buy
+ * (expectedPvChargeWalk) — 0 with no PV.
+ */
+export interface WindowSpec {
+  kind: ChargeWindowKind;
+  role: ChargeLegRole;
+  /** The leg's window as chooseChargeCycle pinned it. Absent ⇒ resolved from periodIdAt /
+   *  cheapPeriodId over windowScanHours, as before. null ⇒ no window (a null plan). */
+  window?: { startMs: number; endMs: number } | null;
+  /** What the packs accept at once from PV and the grid charger together, kW (pack side).
+   *  null/absent ⇒ chargeCapKw × legEff — the grid charge rate alone, the bound with no PV. */
+  packAcceptKw?: number | null;
+  /** The taper line the cost ceiling measures the PV headroom from, % (chargeTaper.ts
+   *  saturationThresholdPct of the pool's charge ceiling). null/absent ⇒ from full (the
+   *  overnight morning-solar headroom). */
+  curtailFromPct?: number | null;
+  /** An armed backup leg ahead of this one: the reserve it writes (%) and its window close. The
+   *  islanded carry is lifted to it at the close (max(walk, hold)) and the expected carry floored
+   *  at it until then. null/absent ⇒ no backup armed. */
+  backupHold?: { pct: number; untilMs: number } | null;
+}
+
+/** Today's leg: the overnight window carrying the cost (or the resilience) buy. */
+export const OVERNIGHT_WINDOW_SPEC: Readonly<WindowSpec> = Object.freeze({ kind: 'overnight', role: 'cost' });
+
 export interface NightChargeInputs {
   /** Evaluation instant (~21:30). Drives the pre-window carry start. */
   nowMs: number;
+  /** R2 — the leg this plan sizes (see WindowSpec). Absent ⇒ the overnight cost leg. */
+  windowSpec?: WindowSpec;
 
   // ── Battery state (read from the SHP2 projection upstream) ──
   /** Pool capacity as the SHP2 reports it, kWh (backupFullCapWh/1000): the packs' nameplate sum
@@ -453,8 +502,8 @@ export interface NightChargePlan {
   /** v1.125.0 — the cushion in kWh, as actually applied. */
   cushionKwh?: number;
   cushionBasis?: CushionBasis;
-  /** v1.127.0 — which ceiling bound the cost-mode target. */
-  costCeilingBasis?: 'pv-headroom' | 'max-soc' | null;
+  /** v1.127.0 — which ceiling bound the cost-mode target. R2 — 'pv-curtail' on a mid-day leg. */
+  costCeilingBasis?: CostCeilingBasis | null;
   /** v1.165.0 — the economic ceiling itself, % of pool (null in resilience mode).
    *  The night force-charge fills to this, never past it. */
   costCeilingSocPct?: number | null;
@@ -478,6 +527,9 @@ export interface NightChargePlan {
   costSurplusLoadSamples?: number | null;
   /** v1.125.0 — the outage this cushion is sized to survive, hours. */
   cushionOutageHours?: number;
+  /** R2 — a mid-day (super off-peak) leg only: which term of T_mid set the reserve it writes
+   *  (middayReserveTargetPct). Absent on every overnight plan. */
+  reserveTargetBasis?: MiddayReserveBasis;
   rationale: string;
 }
 
@@ -502,6 +554,9 @@ function simulate(
   dischargeEff: number,
   scoreFromMs: number,
   markMs: number,
+  /** R2 — an armed backup leg: entering the first hour at/after `atMs` (its window close) the
+   *  pack is max(walk, minKwh). null/absent ⇒ the bare walk. */
+  lift: { atMs: number; minKwh: number } | null = null,
 ): SimResult {
   const fullWh = fullKwh * 1000;
   let packWh = Math.max(0, Math.min(fullWh, startPackKwh * 1000));
@@ -512,8 +567,13 @@ function simulate(
   // still gets a defined value.
   let packAtMarkWh = packWh;
   let markCaptured = false;
+  let lifted = lift == null;
 
   for (const h of hours) {
+    if (!lifted && h.ts >= lift!.atMs) {
+      packWh = Math.max(packWh, Math.min(fullWh, Math.max(0, lift!.minKwh) * 1000));
+      lifted = true;
+    }
     // Capture the mark level at the FIRST hour at/after markMs, BEFORE applying
     // that hour's flux — i.e. the pack level entering the mark hour.
     if (!markCaptured && h.ts >= markMs) {
@@ -660,9 +720,14 @@ export function expectedCarryKwh(o: {
   hours: ReadonlyArray<NightChargeHour>;
   fromMs: number;
   toMs: number;
+  /** R2 — an armed backup leg: the reserve it writes (kWh) holds the pool (lifting it, the grid
+   *  being present) through every hour that starts before its window close `untilMs`.
+   *  null/absent ⇒ the owner's reserve alone. */
+  hold?: { kwh: number; untilMs: number } | null;
 }): number | null {
   let pack = Math.max(0, Math.min(o.fullKwh, o.startKwh));
   const floor = Math.min(Math.max(0, o.reserveKwh), pack);
+  const hold = o.hold != null && Number.isFinite(o.hold.kwh) && Number.isFinite(o.hold.untilMs) ? o.hold : null;
   const byHour = hoursByEpoch(o.hours);
   for (let slot = Math.floor(o.fromMs / HOUR_MS) * HOUR_MS; slot < o.toMs; slot += HOUR_MS) {
     const w = windowHourAvailH(slot, o.fromMs, o.toMs);
@@ -670,7 +735,8 @@ export function expectedCarryKwh(o: {
     const h = p50HourAt(byHour, slot, o.fromMs);
     if (h == null) return null;
     const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
-    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000));
+    const slotFloor = hold != null && slot < hold.untilMs ? Math.max(floor, Math.min(o.fullKwh, hold.kwh)) : floor;
+    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000));
   }
   return pack;
 }
@@ -697,6 +763,9 @@ export function expectedWindowLiftKwh(o: {
   chargeCapKw: number;
   envelopeKw: number | null;
   legEff: number;
+  /** R2 — what the packs accept from PV and the grid together, kW: an hour with P50 PV passes
+   *  at most this less the PV (gridGainKw). null/absent ⇒ no acceptance bound. */
+  acceptKw?: number | null;
 }): number | null {
   let kwh = 0;
   const byHour = hoursByEpoch(o.hours);
@@ -705,9 +774,67 @@ export function expectedWindowLiftKwh(o: {
     if (availH <= 0) continue;
     const h = p50HourAt(byHour, slot, o.fromMs);
     if (h == null) return null;
-    kwh += p50ChargeRateKw(h.loadP50W!, o.chargeCapKw, o.envelopeKw) * o.legEff * availH;
+    kwh += gridGainKw(p50ChargeRateKw(h.loadP50W!, o.chargeCapKw, o.envelopeKw) * o.legEff, p50PvW(h), o.acceptKw ?? null) * availH;
   }
   return Math.max(0, kwh);
+}
+
+/**
+ * R2 — PURE. The pack-side grid gain of one charging hour, kW: `rateGainKw` (the contended charge
+ * rate × legEff) and, with PV on the DC bus, no more than the packs accept beyond that PV
+ * (`acceptKw` − PV). No PV, or no acceptance bound ⇒ `rateGainKw` itself, unchanged — the bound
+ * every overnight hour has always had.
+ */
+export function gridGainKw(rateGainKw: number, pvW: number, acceptKw: number | null): number {
+  return pvW > 0 && acceptKw != null ? Math.min(rateGainKw, Math.max(0, acceptKw - pvW / 1000)) : rateGainKw;
+}
+
+/** R2 — an hour's MEDIAN PV, watts, ≥ 0 (pvP10W stands in, as in expectedCarryKwh). */
+function p50PvW(h: NightChargeHour): number {
+  const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
+  return Number.isFinite(pv) ? Math.max(0, pv) : 0;
+}
+
+/**
+ * R2 — PURE. The share of a charge's lift the sun supplies, kWh (pack side), and when the charge
+ * completes. Walked minute by minute from `fromMs` on the MEDIAN basis, the way a write charges
+ * (the reserve leg below the written reserve, or the force-charge): the house on the grid, the grid
+ * charging at the hour's median contended rate × legEff (gridGainKw against `acceptKw`), the P50 PV
+ * going into the pack on top, until the pack has gained `liftKwh` or the window closes. The grid buys
+ * `liftKwh` less `creditKwh`; `doneMs` is when the lift is complete (the window close if it is not).
+ *
+ * `creditKwh` is 0 with no PV in the span — the figure before R2, which had the grid supply every
+ * kWh of the lift — and 0 when a minute of the span has no P50 basis (the grid is then taken to
+ * supply all of it: a missing forecast never shrinks the buy). `doneMs` is meaningful only with a
+ * credit: with none, the planner keeps its pre-R2 timing (the reserve leg taken as instant).
+ */
+export function expectedPvChargeWalk(o: {
+  liftKwh: number;
+  hours: ReadonlyArray<NightChargeHour>;
+  fromMs: number;
+  windowEndMs: number;
+  chargeCapKw: number;
+  envelopeKw: number | null;
+  legEff: number;
+  acceptKw: number | null;
+}): { creditKwh: number; doneMs: number } {
+  if (!(o.liftKwh > 0)) return { creditKwh: 0, doneMs: o.fromMs };
+  const byHour = hoursByEpoch(o.hours);
+  let gained = 0;
+  let credit = 0;
+  let t = o.fromMs;
+  for (; t < o.windowEndMs && gained < o.liftKwh; t += EXPECTED_JIT_STEP_MS) {
+    const h = p50HourAt(byHour, Math.floor(t / HOUR_MS) * HOUR_MS, o.fromMs);
+    if (h == null) return { creditKwh: 0, doneMs: o.fromMs };
+    const dtH = Math.min(EXPECTED_JIT_STEP_MS, o.windowEndMs - t) / HOUR_MS;
+    const pvW = p50PvW(h);
+    const gainKw = gridGainKw(p50ChargeRateKw(h.loadP50W!, o.chargeCapKw, o.envelopeKw) * o.legEff, pvW, o.acceptKw);
+    const pvStep = Math.min((pvW / 1000) * dtH, o.liftKwh - gained);
+    const gridStep = Math.min(gainKw * dtH, o.liftKwh - gained - pvStep);
+    gained += pvStep + gridStep;
+    credit += pvStep;
+  }
+  return { creditKwh: credit, doneMs: Math.min(t, o.windowEndMs) };
 }
 
 /** v1.187.22 — the step of the just-in-time walk (expectedForceChargeStart). */
@@ -809,6 +936,9 @@ export interface ExpectedBuyWindow {
   dischargeEff: number;
   chargeCapKw: number;
   envelopeKw: number | null;
+  /** R2 — what the packs accept from PV and the grid together, kW (expectedPvChargeWalk).
+   *  null/absent ⇒ no acceptance bound. */
+  acceptKw?: number | null;
 }
 
 /** v1.187.22 — expectedBuyFromPlan's result. */
@@ -874,6 +1004,15 @@ export function expectedBuyFromPlan(o: {
   const levelKwh = (levelPct / 100) * o.fullKwh;
   // The reserve leg (the level is never below the reserve: armedWriteLevelPct).
   let liftKwh = Math.max(0, Math.min(levelKwh, reserveKwh) - o.startKwh);
+  // R2 — the P50 PV that lands in the pack while the reserve leg charges is not bought, and the
+  // house draws on the pool only once the leg is done (0 with no PV: the reserve leg is taken as
+  // instant, as before).
+  const pvWalk = (lift: number, fromMs: number) => expectedPvChargeWalk({
+    liftKwh: lift, hours: o.window.hours, fromMs, windowEndMs: o.window.windowEndMs,
+    chargeCapKw: o.window.chargeCapKw, envelopeKw: o.window.envelopeKw, legEff: o.legEff, acceptKw: o.window.acceptKw ?? null,
+  });
+  const reserveLeg = pvWalk(liftKwh, o.window.fromMs);
+  liftKwh -= reserveLeg.creditKwh;
   const out: ExpectedBuy = { buyKwh: null, levelPct };
   const ceilingPct = armedForceChargeCeilingPct({ costCeilingSocPct: o.costCeilingSocPct });
   if (levelPct > reservePct && ceilingPct != null) {
@@ -881,11 +1020,16 @@ export function expectedBuyFromPlan(o: {
     const jit = expectedForceChargeStart({
       startKwh: Math.max(o.startKwh, reserveKwh), reserveKwh, fullKwh: o.fullKwh, ceilingPct,
       ...o.window, legEff: o.legEff,
+      ...(reserveLeg.creditKwh > 0 ? { fromMs: reserveLeg.doneMs } : {}),
     });
     if (jit == null) return out;
     out.forceChargeStartMs = jit.startMs;
     out.forceChargeFromPct = round1((jit.packKwh / o.fullKwh) * 100);
-    if (jit.startMs != null) liftKwh += Math.max(0, levelKwh - jit.packKwh);
+    if (jit.startMs != null) {
+      // R2 — the P50 PV that lands in the pack during the force-charge is not bought (0 with no PV).
+      const fcLiftKwh = Math.max(0, levelKwh - jit.packKwh);
+      liftKwh += fcLiftKwh - pvWalk(fcLiftKwh, jit.startMs).creditKwh;
+    }
   }
   const deliverableKwh = Math.max(0, o.deliverableKwh);
   if (liftKwh > deliverableKwh + 1e-9) out.deliverableBound = true;
@@ -1034,6 +1178,20 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     return nullPlan(inputs, false, 'No plan — efficiency/charge-power configuration is not a finite number.');
   if (horizon.length === 0) return nullPlan(inputs, false, 'No plan — empty forecast horizon.', true);
 
+  // R2 — the leg (WindowSpec). Every term below that reads it is a no-op on the overnight leg.
+  const spec = inputs.windowSpec;
+  const midday = spec?.kind === 'super_off_peak';
+  /** What the packs accept from PV and the grid charger together, kW (gridGainKw). The default is
+   *  the grid charge rate alone — the bound when there is no PV. */
+  const acceptKw = spec?.packAcceptKw != null && Number.isFinite(spec.packAcceptKw) && spec.packAcceptKw >= 0
+    ? spec.packAcceptKw : chargeCapKw * legEff;
+  /** An armed backup leg still ahead of (or in) its window: the islanded carry is max(walk, hold)
+   *  at its close, the expected carry floored at it until then. */
+  const holdLift = spec?.backupHold != null && Number.isFinite(spec.backupHold.pct) && Number.isFinite(spec.backupHold.untilMs)
+    && spec.backupHold.untilMs > nowMs
+    ? { atMs: spec.backupHold.untilMs, minKwh: (fullKwh * Math.max(0, Math.min(100, spec.backupHold.pct))) / 100 }
+    : null;
+
   const fullWh = fullKwh * 1000;
   const reserveKwh = (fullKwh * reserveFloorPct) / 100;
   // v1.125.0 — the cushion is the energy to carry the ISLANDED load through a
@@ -1086,11 +1244,11 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // the conservative (over-buy) direction, consistent with buildInputs' trim.
   const simFromMs = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
   const preHorizon = horizon.filter((h) => h.ts >= simFromMs);
-  const baseline = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, windowEnd, windowEnd);
+  const baseline = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, windowEnd, windowEnd, holdLift);
   const packAtWindowEnd_noBuy = baseline.packAtMarkKwh;
   // v1.49.0 — pack level ENTERING the window (carry to window OPEN), the anchor
   // for the lift-aware window model below.
-  const packAtWindowStartKwh = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, windowStart, windowStart).packAtMarkKwh;
+  const packAtWindowStartKwh = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, windowStart, windowStart, holdLift).packAtMarkKwh;
 
   // v1.39.0 (§4 honesty): the PRE-WINDOW carry — pack path from now to the
   // window OPEN. A tonight buy cannot prevent a pre-window dip (the floor alarm
@@ -1111,7 +1269,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     const preWindow = simulate(
       socNowKwh, fullKwh,
       horizon.filter((h) => h.ts >= simFromMs && h.ts < windowStart),
-      dischargeEff, 0, windowStart,
+      dischargeEff, 0, windowStart, holdLift,
     );
     projSocAtWindowStartPct = round1((preWindow.packAtMarkKwh / fullKwh) * 100);
     preWindowMinSocPct = round1((preWindow.minPackKwh / fullKwh) * 100);
@@ -1142,7 +1300,10 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // unclamped islanded carry above.
   const expectedStartKwh: number | null = midWindow
     ? socNowKwh
-    : expectedCarryKwh({ startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: nowMs, toMs: windowStart });
+    : expectedCarryKwh({
+      startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: nowMs, toMs: windowStart,
+      ...(holdLift != null ? { hold: { kwh: holdLift.minKwh, untilMs: holdLift.atMs } } : {}),
+    });
   const expectedStartSocPct = expectedStartKwh == null ? null : round1((expectedStartKwh / fullKwh) * 100);
 
   // ★★ THE SIZING AUTHORITY (v1.37.0 review fix — two CONFIRMED criticals):
@@ -1202,14 +1363,17 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   };
   // Per-hour {rate, wall-clock availability}. availH carries the mid-window
   // partial hour the flat model used to fold into `chargeHours`.
-  const windowRates: Array<{ hour: NightChargeHour; rateKw: number; availH: number }> = [];
+  // R2 — `gainKw`: the pack-side grid gain of the hour (gridGainKw): rateKw × legEff, and no more
+  // than the packs accept beyond the hour's P10 PV. No PV ⇒ rateKw × legEff exactly.
+  const windowRates: Array<{ hour: NightChargeHour; rateKw: number; availH: number; gainKw: number }> = [];
   // v1.169.0 — each hour gets its OWN remaining fraction (windowHourAvailH). The old
   // running countdown gave the current hour a full 1 and the partial remainder to the
   // LAST hour, so a mid-window recompute under-counted the final hour — e.g. at 02:55 an
   // EV predicted for 04:00-05:00 counted ~1/12 of its energy (review, 2026-09-18). Before
   // the window every hour is whole, so the 21:30 arming plan is unchanged.
   for (const h of windowHrs) {
-    windowRates.push({ hour: h, rateKw: chargeRateKwAt(h), availH: windowHourAvailH(h.ts, effChargeStartMs, windowEnd) });
+    const rateKw = chargeRateKwAt(h);
+    windowRates.push({ hour: h, rateKw, availH: windowHourAvailH(h.ts, effChargeStartMs, windowEnd), gainKw: gridGainKw(rateKw * legEff, h.pvP10W, acceptKw) });
   }
 
   // The deliverable-lift ceiling is now the SUM of the per-hour contended rates,
@@ -1219,17 +1383,20 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // window can never bill grid energy the trajectory model cannot absorb.
   const chargePowerLiftKwh = Math.max(
     0,
-    windowRates.reduce((acc, w) => acc + w.rateKw * legEff * w.availH, 0),
+    windowRates.reduce((acc, w) => acc + w.gainKw * w.availH, 0),
   );
   // The same ceiling WITHOUT contention (the pre-v1.60.0 figure). Used ONLY to
   // quantify the derate for the disclosure — never to size a buy.
   const chargePowerLiftUncontendedKwh = Math.max(0, chargeCapKw * Math.min(remainingWindowHours, windowHrs.length) * legEff);
-  const contentionDerateKwh = Math.max(0, chargePowerLiftUncontendedKwh - chargePowerLiftKwh);
+  // R2 — the derate the EV disclosure names is the grid input's alone: the PV acceptance bound
+  // (gridGainKw) is not contention, so it is measured on the contended rate without it.
+  const chargeRateLiftKwh = Math.max(0, windowRates.reduce((acc, w) => acc + w.rateKw * legEff * w.availH, 0));
+  const contentionDerateKwh = Math.max(0, chargePowerLiftUncontendedKwh - chargeRateLiftKwh);
   // v1.187.22 — the same window on the median load: what bounds the EXPECTED buy (disclosure only).
   // The whole horizon, not windowHrs: an in-progress hour missing from the band is carried at the
   // next hour's figures (p50HourAt), which may lie past the close.
   const expectedDeliverableKwh = expectedWindowLiftKwh({
-    hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, chargeCapKw, envelopeKw, legEff,
+    hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, chargeCapKw, envelopeKw, legEff, acceptKw,
   });
 
   // ── The EV-contention DISCLOSURE (honesty, not sizing) ──
@@ -1273,10 +1440,11 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     if (lift <= 0 || chargeCapKw <= 0) return packAtWindowEnd_noBuy;
     let pack = packAtWindowStartKwh;
     let remainingLift = lift;
-    for (const { hour: h, rateKw, availH } of windowRates) {
+    for (const { hour: h, availH, gainKw } of windowRates) {
       // Pack-kWh a FULL hour of charging would add here (0 when the house has
-      // taken the whole envelope — that hour simply cannot charge).
-      const hourLiftKwh = rateKw * legEff;
+      // taken the whole envelope — that hour simply cannot charge). R2 — and no more than the
+      // packs accept beyond the hour's PV (gridGainKw; rateKw × legEff with no PV).
+      const hourLiftKwh = gainKw;
       const chargeFrac = hourLiftKwh > 0
         ? Math.max(0, Math.min(availH, remainingLift / hourLiftKwh))
         : 0;
@@ -1492,7 +1660,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // Everything downstream is unchanged: the charge-power and pool-headroom caps
   // still bind, the cushion is still computed and disclosed, and the reserve floor
   // is still a hard minimum.
-  let costCeilingBasis: 'pv-headroom' | 'max-soc' | null = null;
+  let costCeilingBasis: CostCeilingBasis | null = null;
   /** v1.174.0 — the cost target (pack kWh at window close) and whether the charge rate,
    *  not the ceiling, bounded the buy toward it. Read by the cost-mode hold below. */
   let costTargetKwh: number | null = null;
@@ -1557,6 +1725,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       morningPvSurplusKwh: costHeadroomKwh,
       maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
       resilienceTargetKwh: targetPackKwh,
+      curtailFromPct: spec?.curtailFromPct,
     });
     costCeilingBasis = ct.ceilingBasis;
     costTargetKwh = ct.targetKwh;
@@ -1564,6 +1733,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     if (fullKwh > 0) {
       costCeilingSocPct = round1((costCeilingKwh({
         fullKwh, morningPvSurplusKwh: costHeadroomKwh, maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
+        curtailFromPct: spec?.curtailFromPct,
       }).ceilingKwh / fullKwh) * 100);
     }
     // Convert the desired pack level back into a lift, then re-apply the SAME
@@ -1634,10 +1804,12 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const troughFromPack = (p: number): number =>
     simulate(p, fullKwh, postHours, dischargeEff, windowEnd, windowEnd).minPackKwh;
   let requiredPackAtWindowEndKwh: number;
-  if (baselineHolds) {
+  if (baselineHolds && !midday) {
     // v1.174.0 — an economic-only night (cost mode; floor+cushion holds with no buy): the
     // ask is the COST TARGET. The whole-house trough below would demand ~100% (clamped to
     // a 50% write) — above a sub-50% ceiling, and labelled a resilience need there is not.
+    // R2 — a mid-day leg asks the resilience question whatever cost mode says: its reserve
+    // write (T_mid) carries the resilience lift, and the force-charge only the cost fill.
     requiredPackAtWindowEndKwh = Math.max(packAtWindowEnd_noBuy, costTargetKwh ?? packAtWindowEnd_noBuy);
   } else if (troughFromPack(fullKwh) < targetFloorKwh - 1e-9) {
     requiredPackAtWindowEndKwh = fullKwh; // even a full pack cannot hold the line — ask for all of it
@@ -1651,11 +1823,22 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     }
     requiredPackAtWindowEndKwh = hi;
   }
+  // R2 — a mid-day leg writes T_mid (middayReserveTargetPct): R is the resilience setpoint above,
+  // over [window close, next chargeable open). The force-charge, not the reserve, carries the
+  // cost fill to the ceiling, so the arrival does not bound it.
+  const middayReserve = midday
+    ? middayReserveTargetPct({
+      floorPct: reserveFloorPct,
+      linePct: (targetFloorKwh / fullKwh) * 100,
+      expectedPoolPct: expectedStartSocPct,
+      resiliencePct: (requiredPackAtWindowEndKwh / fullKwh) * 100,
+    })
+    : null;
   // The setpoint can never sit BELOW the arrival we already predict — that
   // would be strictly worse than the pre-v1.60.0 write and would cap a charge
   // the window can demonstrably deliver. (Only bisection tolerance can put them
   // out of order; the guard makes the ordering structural.)
-  const setpointSocPct = Math.max(
+  const setpointSocPct = middayReserve != null ? middayReserve.pct : Math.max(
     targetSocPct,
     round1((requiredPackAtWindowEndKwh / fullKwh) * 100),
   );
@@ -1709,7 +1892,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     ? expectedBuyFromPlan({
       setpointSocPct, costCeilingSocPct, forceChargeEligible: inputs.forceChargeEligible === true,
       startKwh: expectedStartKwh, deliverableKwh: expectedDeliverableKwh, fullKwh, legEff,
-      window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw },
+      window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw, acceptKw },
     })
     : { buyKwh: 0, levelPct: null };
   // v1.187.22 — the headline is the CHARGE the write arms: the level it drives the pool to, the
@@ -1789,7 +1972,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
-    ? `${chargeHeadline}${expectedNote}${sizingNote}${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `${chargeHeadline}${expectedNote}${sizingNote}${setpointNote} ${costMode ? `Objective: COST — buying cheap ${midday ? 'super off-peak' : 'overnight'} energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? `morning-solar headroom${headroomNote}` : costCeilingBasis === 'pv-curtail' ? `solar headroom under the ${round1(spec?.curtailFromPct ?? 0)}% charge taper${headroomNote}` : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
@@ -1836,8 +2019,47 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     // islanded-outage requirement from the legacy flat band at a glance.
     cushionBasis,
     cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
+    // R2 — a mid-day leg only: which term set its reserve write (middayReserveTargetPct).
+    ...(middayReserve != null ? { reserveTargetBasis: middayReserve.basis } : {}),
     rationale,
   };
+}
+
+/** R2 — which term of T_mid set a mid-day leg's reserve write (middayReserveTargetPct). */
+export type MiddayReserveBasis = 'floor' | 'line' | 'pool' | 'resilience';
+
+/**
+ * R2 — PURE. T_mid, the reserve a mid-day (super off-peak) cost leg writes at its window open, %:
+ *
+ *     clampReserveTarget(max(floor + 1, ⌈line⌉, ⌊expected pool⌋ − 2, ⌈R⌉))
+ *
+ *  - floor + 1: a raise over the owner's floor — the write is a write;
+ *  - ⌈line⌉: the floor + cushion line the plan is sized on (cushionLineSocPct);
+ *  - ⌊expected pool⌋ − 2: the pool held about where the window finds it (expectedStartSocPct), so
+ *    the house runs on the cheap grid through the window rather than drawing the pool down for the
+ *    force-charge to buy back;
+ *  - ⌈R⌉: the resilience setpoint — the pack at the window close whose islanded P10/P90 trough
+ *    holds the line until the next chargeable window opens (troughFromPack). The reserve write
+ *    carries the resilience lift, as the overnight write does; the force-charge carries only the
+ *    cost fill. R is usually above 50 (the line plus about 8 h of P90 drain), so T_mid is usually 50.
+ * Clamped to the reserve write envelope [10, 50]. A term with no figure drops out (no P50 basis ⇒
+ * no pool term). `basis` names the largest term (the first, in the order above, on a tie).
+ */
+export function middayReserveTargetPct(o: {
+  floorPct: number;
+  linePct: number;
+  expectedPoolPct: number | null;
+  resiliencePct: number | null;
+}): { pct: number; basis: MiddayReserveBasis } {
+  const terms: Array<[MiddayReserveBasis, number]> = [
+    ['floor', o.floorPct + 1],
+    ['line', Math.ceil(o.linePct)],
+  ];
+  if (o.expectedPoolPct != null && Number.isFinite(o.expectedPoolPct)) terms.push(['pool', Math.floor(o.expectedPoolPct) - 2]);
+  if (o.resiliencePct != null && Number.isFinite(o.resiliencePct)) terms.push(['resilience', Math.ceil(o.resiliencePct)]);
+  let best = terms[0];
+  for (const t of terms) if (Number.isFinite(t[1]) && (!Number.isFinite(best[1]) || t[1] > best[1])) best = t;
+  return { pct: clampReserveTarget(best[1]), basis: best[0] };
 }
 
 function round1(n: number): number { return Math.round(n * 10) / 10; }
@@ -1998,6 +2220,9 @@ export interface NightEvCommit {
 }
 
 export interface NightChargeInputDeps {
+  /** R2 — the leg this plan sizes, forwarded to the inputs (see WindowSpec). Absent ⇒ the
+   *  overnight cost leg, exactly as before. */
+  windowSpec?: WindowSpec;
   /** v1.125.0 — observed ISLANDED load (the SHP2's backup circuits), kW. */
   islandedLoadKw?: number | null;
   /** v1.125.0 — bounded outage the cushion must survive, hours. */
@@ -2066,12 +2291,6 @@ export interface NightChargeInputDeps {
   forceChargeEligible?: boolean;
 }
 
-/**
- * Resolve tonight's cheap charge window by scanning a period resolver forward
- * for the next contiguous run of `cheapPeriodId` (the OVERNIGHT tier, §1). Hour-
- * aligned bounds. Returns null if no cheap hour is found within `scanHours`.
- * PURE — the resolver (rateAt-backed) is injected, resolved in Phoenix upstream.
- */
 /** v1.169.0 — PURE. The fraction of the window hour starting at `hourTs` that is still
  *  ahead: from max(hour start, `fromMs`) to min(hour end, `windowEndMs`), clamped to [0, 1]. */
 export function windowHourAvailH(hourTs: number, fromMs: number, windowEndMs: number): number {
@@ -2080,43 +2299,7 @@ export function windowHourAvailH(hourTs: number, fromMs: number, windowEndMs: nu
   return Math.max(0, Math.min(1, (b - a) / HOUR_MS));
 }
 
-export function resolveCheapWindow(
-  periodIdAt: (tsMs: number) => string,
-  fromMs: number,
-  cheapPeriodId: string,
-  scanHours = 30,
-): { startMs: number; endMs: number } | null {
-  const h0 = Math.floor(fromMs / HOUR_MS) * HOUR_MS;
-  // v1.39.0 review fix: the END of a found run is scanned up to 24 h past the
-  // run's own start — a window START must lie within scanHours, but a run
-  // straddling the scan edge must not have its end truncated to the horizon
-  // (a Saturday-evening scan found Monday 00:00 at hour 27 of a 30 h scan and
-  // clipped the window end to Monday 04:00 instead of 05:00).
-  const endOfRun = (runStartMs: number): number => {
-    for (let i = 1; i <= 24; i++) {
-      const t = runStartMs + i * HOUR_MS;
-      if (periodIdAt(t) !== cheapPeriodId) return t;
-    }
-    return runStartMs + 25 * HOUR_MS; // pathological always-cheap resolver — bounded
-  };
-  // If `fromMs` is ALREADY inside a cheap window (a recompute running during the
-  // 23:00–05:00 window), walk BACK to the window's true start so the reported
-  // window_start isn't truncated to the live mid-window clock (§4 display honesty).
-  if (periodIdAt(h0) === cheapPeriodId) {
-    let s = h0;
-    for (let i = 1; i <= scanHours; i++) {
-      const t = h0 - i * HOUR_MS;
-      if (periodIdAt(t) === cheapPeriodId) s = t;
-      else break;
-    }
-    return { startMs: s, endMs: endOfRun(h0) };
-  }
-  for (let i = 0; i <= scanHours; i++) {
-    const t = h0 + i * HOUR_MS;
-    if (periodIdAt(t) === cheapPeriodId) return { startMs: t, endMs: endOfRun(t) };
-  }
-  return null;
-}
+// resolveCheapWindow — moved to chargeWindows.ts (R2), re-exported above.
 
 /** v1.168.0 — a cheap window shorter than this is not a recharge: Friday's 23:00-24:00
  *  (Saturday 00:00-05:00 is weekend off-peak) buys ~15 kWh at most. */
@@ -2245,9 +2428,19 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // function all passed.
     islandedLoadKw, outageCushionHours, islandedLoadSafety,
     objectiveMode, costMaxSocPct,
+    // R2 — the leg (WindowSpec): its pinned window, and its role's objective and force-charge.
+    windowSpec,
   } = deps;
 
-  const window = resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, windowScanHours);
+  // R2 — a leg the chooser pinned is sized on that window; otherwise the resolver, as before.
+  const window = windowSpec?.window !== undefined
+    ? (windowSpec.window != null && Number.isFinite(windowSpec.window.startMs) && Number.isFinite(windowSpec.window.endMs)
+      ? { startMs: windowSpec.window.startMs, endMs: windowSpec.window.endMs } : null)
+    : resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, windowScanHours);
+  // R2 — per leg: the backup leg is resilience-only and never force-charges, whatever the
+  // configuration says (chargeWindows.ts legObjective / legForceChargeEligible). The cost leg —
+  // and a plan with no spec — keeps the configured values exactly as passed.
+  const legRole: ChargeLegRole = windowSpec?.role ?? 'cost';
 
   // ★ EV de-dup MUST be atomic with the re-add (§2.3): only STRIP the embedded
   // expected-value EV from the base load when we will actually place the
@@ -2401,6 +2594,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   const basisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);
   return {
     nowMs,
+    // R2 — forwarded only when given, so a plan with no spec carries exactly the inputs it did.
+    ...(windowSpec !== undefined ? { windowSpec } : {}),
     basisBlockedBy,
     basisTransient,
     fullKwh,
@@ -2411,7 +2606,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     islandedLoadKw,
     outageCushionHours,
     islandedLoadSafety,
-    objectiveMode,
+    objectiveMode: legObjective(legRole, objectiveMode),
     costMaxSocPct,
     socCoherent,
     legEff,
@@ -2428,8 +2623,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // v1.187.3 — forwarded verbatim; see the destructure note above.
     buyDebiasBasis,
     buyDebiasSamples,
-    // v1.187.22 — forwarded verbatim; see the destructure note above.
-    forceChargeEligible,
+    // v1.187.22 — forwarded verbatim; see the destructure note above. R2 — never on a backup leg.
+    forceChargeEligible: forceChargeEligible === undefined ? undefined : legForceChargeEligible(legRole, forceChargeEligible),
     confidenceTier,
     basisComplete,
     minBuyKwh,
@@ -2815,16 +3010,30 @@ export function costCeilingKwh(o: {
   fullKwh: number;
   morningPvSurplusKwh: number | null | undefined;
   maxSocPct: number;
-}): { ceilingKwh: number; basis: 'pv-headroom' | 'max-soc' } {
+  /** R2 — a mid-day leg's taper line (WindowSpec.curtailFromPct): the PV headroom is left under
+   *  it (chargeTaper.ts taperCeilingKwh, basis 'pv-curtail') rather than under full. null/absent ⇒
+   *  the overnight form, unchanged. */
+  curtailFromPct?: number | null;
+}): { ceilingKwh: number; basis: CostCeilingBasis } {
   const { fullKwh, morningPvSurplusKwh, maxSocPct } = o;
   const socCap = (fullKwh * Math.max(0, Math.min(100, maxSocPct))) / 100;
+  if (o.curtailFromPct != null && Number.isFinite(o.curtailFromPct)) {
+    // C_mid = min(maxSoc, taper − surplus): the sun that follows the charge fills the pool to the
+    // taper, where the Cores start shedding it, and no further. No surplus known ⇒ the taper.
+    const curtailCap = taperCeilingKwh(fullKwh, o.curtailFromPct, morningPvSurplusKwh);
+    return { ceilingKwh: Math.min(socCap, curtailCap), basis: curtailCap <= socCap ? 'pv-curtail' : 'max-soc' };
+  }
   const pvCap = morningPvSurplusKwh != null && Number.isFinite(morningPvSurplusKwh)
     ? fullKwh - Math.max(0, morningPvSurplusKwh)
     : null;
   const ceilingKwh = pvCap != null ? Math.min(socCap, pvCap) : socCap;
-  const basis: 'pv-headroom' | 'max-soc' = pvCap != null && pvCap <= socCap ? 'pv-headroom' : 'max-soc';
+  const basis: CostCeilingBasis = pvCap != null && pvCap <= socCap ? 'pv-headroom' : 'max-soc';
   return { ceilingKwh, basis };
 }
+
+/** Which ceiling bound a cost-mode target: the morning-solar headroom under full (overnight), the
+ *  owner's SoC ceiling, or — R2, a mid-day leg — the solar headroom under the charge taper. */
+export type CostCeilingBasis = 'pv-headroom' | 'max-soc' | 'pv-curtail';
 
 export function costModeTargetKwh(o: {
   fullKwh: number;
@@ -2833,9 +3042,11 @@ export function costModeTargetKwh(o: {
   maxSocPct: number;
   /** The resilience target, so cost mode can never sit BELOW it. */
   resilienceTargetKwh: number;
-}): { targetKwh: number; ceilingBasis: 'pv-headroom' | 'max-soc' } {
+  /** R2 — see costCeilingKwh. */
+  curtailFromPct?: number | null;
+}): { targetKwh: number; ceilingBasis: CostCeilingBasis } {
   const { fullKwh, reserveKwh, morningPvSurplusKwh, maxSocPct, resilienceTargetKwh } = o;
-  const { ceilingKwh: ceiling, basis } = costCeilingKwh({ fullKwh, morningPvSurplusKwh, maxSocPct });
+  const { ceilingKwh: ceiling, basis } = costCeilingKwh({ fullKwh, morningPvSurplusKwh, maxSocPct, curtailFromPct: o.curtailFromPct });
   // Never below the reserve floor, and never below what resilience would have asked.
   const targetKwh = Math.max(reserveKwh, resilienceTargetKwh, Math.min(ceiling, fullKwh));
   return { targetKwh: round2(targetKwh), ceilingBasis: basis };

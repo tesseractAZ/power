@@ -199,7 +199,7 @@ const MUTANTS = [
   {
     id: 'xx. ★ the overnight rate is left out',
     file: AN,
-    find: "    overnightCents: inSeason('overnight')?.centsBySeason[season] ?? null,",
+    find: '    overnightCents: inSeason(APS_PERIOD.OVERNIGHT)?.centsBySeason[season] ?? null,',
     to: '    overnightCents: null /* MUTANT */,',
     why: 'The rate that prices every overnight kWh appears nowhere.',
   },

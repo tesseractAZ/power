@@ -1,0 +1,143 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  buildNightChargeInputs, computeNightChargePlan, resolveCheapWindow, OVERNIGHT_WINDOW_SPEC,
+  type NightChargePlan,
+} from '../src/nightChargeAdvisor.js';
+import { nextChargeableOpenMs, OVERNIGHT_CYCLE, resolveCheapWindow as cwResolveCheapWindow } from '../src/chargeWindows.js';
+import { pvSurplusFromBand, surplusSpanEndMs } from '../src/chargeTaper.js';
+import {
+  legacyIdentityCases, legacyIdentityDigests, legacyMorningSurplus, planDigest, MODEL, periodIdAt,
+} from './fixtures/legacyIdentityFixtures.js';
+
+/**
+ * R2 — THE OVERNIGHT PLAN DOES NOT MOVE.
+ *
+ * R2 threads a WindowSpec (the leg a plan sizes) through buildNightChargeInputs and
+ * computeNightChargePlan and adds the terms a mid-day window needs: the PV acceptance bound on the
+ * grid gain, the P50 PV credited against the expected buy, the taper ceiling, T_mid, the backup
+ * hold. Each is a no-op on the overnight leg, where there is no sun. Nothing live consumes the
+ * mid-day leg yet, so every plan the add-on makes must be the one it made before R2, byte for byte.
+ *
+ * legacyIdentity.golden.json holds the digest (JSON and key list) of 1,104 plans as the planner
+ * produced them at 4d10c53, the tree before R2: a year of live-shaped evenings, middays and
+ * mid-window recomputes (legacyIdentityFixtures.ts), and the 2026-10-12 and 2026-09-29/30 nights.
+ */
+
+const GOLDEN = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures/legacyIdentity.golden.json'), 'utf8')) as {
+  generatedAt: string;
+  digests: Record<string, string>;
+};
+const H = 3_600_000;
+const plan = (deps: Parameters<typeof buildNightChargeInputs>[0]): NightChargePlan => computeNightChargePlan(buildNightChargeInputs(deps));
+
+test('★★★ a year of overnight plans is byte-identical to the planner before R2 (no spec)', () => {
+  const got = legacyIdentityDigests();
+  const labels = Object.keys(GOLDEN.digests);
+  assert.equal(labels.length, 1104);
+  assert.deepEqual(Object.keys(got), labels, 'the same cases, in the same order');
+  const moved = labels.filter((l) => got[l] !== GOLDEN.digests[l]);
+  assert.deepEqual(moved, [], `${moved.length} plan(s) moved: ${moved.slice(0, 5).join('; ')}`);
+});
+
+test('★★★ ... and with the overnight spec passed explicitly (what index.ts passes)', () => {
+  const got = legacyIdentityDigests((c) => ({ ...c.deps, windowSpec: OVERNIGHT_WINDOW_SPEC }));
+  const moved = Object.keys(GOLDEN.digests).filter((l) => got[l] !== GOLDEN.digests[l]);
+  assert.deepEqual(moved, []);
+});
+
+test('★★ ... and with a spec that pins the window the resolver finds, carries the default acceptance and no backup', () => {
+  // The PV terms are evaluated, not skipped: an explicit acceptance (the default value), a pinned
+  // window, an explicit null hold. With no sun in the window they change nothing.
+  const got = legacyIdentityDigests((c) => {
+    const w = resolveCheapWindow(c.deps.periodIdAt, c.deps.nowMs, c.deps.cheapPeriodId, c.deps.windowScanHours);
+    return {
+      ...c.deps,
+      windowSpec: { kind: 'overnight', role: 'cost', window: w, packAcceptKw: c.deps.chargeCapKw * c.deps.legEff, backupHold: null },
+    };
+  });
+  const moved = Object.keys(GOLDEN.digests).filter((l) => got[l] !== GOLDEN.digests[l]);
+  assert.deepEqual(moved, []);
+});
+
+test('★★ the cases are not vacuous: buys, holds, force-charge starts, cost and resilience, null plans, mid-window', () => {
+  const plans = legacyIdentityCases().map((c) => ({ c, p: plan(c.deps) }));
+  const count = (f: (x: { c: (typeof plans)[number]['c']; p: NightChargePlan }) => boolean): number => plans.filter(f).length;
+  // (At 4d10c53: 740 charge, 232 hold, 132 null, 524 cost, 216 resilience, 324 force-charge starts,
+  // 562 expected buys, 248 mid-window, 100 long-gap, 71 EV-bound, 131 shortfall, 117 window-bound.)
+  assert.ok(count((x) => x.p.chargeTonight) >= 600, 'charge nights');
+  assert.ok(count((x) => !x.p.chargeTonight && x.p.basisComplete) >= 180, 'hold nights');
+  assert.ok(count((x) => !x.p.basisComplete) >= 100, 'null plans');
+  assert.ok(count((x) => x.p.objective === 'cost_arbitrage') >= 400, 'cost buys');
+  assert.ok(count((x) => x.p.objective === 'resilience_cushion') >= 170, 'resilience buys');
+  assert.ok(count((x) => typeof x.p.expectedForceChargeStartMs === 'number') >= 250, 'force-charge starts expected');
+  assert.ok(count((x) => (x.p.expectedBuyKwh ?? 0) > 1) >= 450, 'expected buys');
+  assert.ok(count((x) => x.p.window != null && x.c.deps.nowMs >= x.p.window.startMs) >= 200, 'mid-window recomputes');
+  assert.ok(count((x) => x.p.longGapAhead === true) >= 80, 'long-gap nights');
+  assert.ok(count((x) => x.p.bindingCap === 'evContention') >= 50, 'EV contention');
+  assert.ok(count((x) => x.p.cushionShortfall) >= 100, 'cushion shortfalls');
+  assert.ok(count((x) => x.p.expectedDeliverableBound === true) >= 90, 'window-bound expected buys');
+});
+
+test('★★ the premise: no overnight window hour of any case carries sun', () => {
+  for (const c of legacyIdentityCases()) {
+    const inputs = buildNightChargeInputs(c.deps);
+    const w = inputs.window;
+    if (!w) continue;
+    for (const h of inputs.horizon) {
+      if (h.ts < w.startMs || h.ts >= w.endMs) continue;
+      assert.equal(h.pvP10W, 0, `${c.label}: P10 PV at ${new Date(h.ts).toISOString()}`);
+      assert.ok(!(h.pvP50W ?? 0), `${c.label}: P50 PV at ${new Date(h.ts).toISOString()}`);
+    }
+  }
+});
+
+test('★★ the planDigest notices a field added with an undefined value', () => {
+  const p = plan(legacyIdentityCases()[0].deps);
+  assert.notEqual(planDigest({ ...p, reserveTargetBasis: undefined }), planDigest(p));
+});
+
+test('★★★ nextChargeableOpenMs under the overnight cycle is the 96 h overnight scan index.ts ran, every hour of a year', () => {
+  const t0 = Date.UTC(2026, 9, 13, 7);
+  for (let t = t0, i = 0; t < t0 + 366 * 24 * H; t += H, i++) {
+    const from = t + (i % 2) * 30 * 60_000; // on the hour and on the half hour, alternately
+    const legacy = resolveCheapWindow(periodIdAt, from, 'overnight', 96)?.startMs ?? null;
+    assert.equal(i % 3 === 0 ? nextChargeableOpenMs(MODEL, from, OVERNIGHT_CYCLE) : nextChargeableOpenMs(MODEL, from), legacy, new Date(from).toISOString());
+  }
+});
+
+test('★★★ the morning surplus helper is the loop index.ts ran inline, on every case', () => {
+  for (const c of legacyIdentityCases()) {
+    const w = resolveCheapWindow(c.deps.periodIdAt, c.deps.nowMs, c.deps.cheapPeriodId, 30);
+    const windowEndMs = w?.endMs ?? c.deps.nowMs;
+    // The band the fixtures build, as the probabilistic forecast hours index.ts reads.
+    const prob = c.deps.bandHours.map((h) => ({ ts: h.ts, p50W: h.pvP50W ?? 0, p90W: (h.pvP50W ?? 0) * 1.25, loadW: h.loadP50W ?? 0 }));
+    const legacy = legacyMorningSurplus(prob, w, windowEndMs);
+    const loads = new Map(prob.map((p) => [p.ts, p.loadW]));
+    const now = w
+      ? pvSurplusFromBand({ hours: prob, loadAt: (ts) => loads.get(ts), fromMs: windowEndMs, toMs: surplusSpanEndMs('overnight', windowEndMs, null) })
+      : { p90Kwh: null, p50Kwh: null };
+    assert.deepEqual([now.p90Kwh, now.p50Kwh], [legacy.p90, legacy.p50], c.label);
+  }
+});
+
+test('★ resolveCheapWindow moved to chargeWindows.ts: the planner re-exports the same function', () => {
+  assert.equal(resolveCheapWindow, cwResolveCheapWindow);
+});
+
+test('★★ wiring — index.ts plans the overnight leg: the overnight cycle, the overnight span, the overnight spec', () => {
+  const index = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8');
+  assert.ok(index.includes('const nextRechargeMs: number | null = nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);'),
+    'the horizon end is the overnight cycle\'s next open (no mid-day config passed until the switch)');
+  assert.ok(index.includes("const morningEndMs = surplusSpanEndMs('overnight', windowEndMs, null);"));
+  assert.ok(index.includes("windowSpec: legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },"));
+  assert.ok(index.includes('const NIGHT_CHEAP_PERIOD_ID = APS_PERIOD.OVERNIGHT;'));
+  // Per leg: the force-charge gate and the objective follow the leg's role.
+  assert.ok(index.includes("const forceChargeOn = (role: ChargeLegRole = 'cost'): boolean => legForceChargeEligible(role, forceChargeEnabled({"));
+  assert.ok(index.includes("const objectiveMode = legObjective(legRole, (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost'"));
+  assert.equal(index.split('chooseChargeCycle(').length - 1, 0, 'the chooser is not wired to the actuator in this release');
+  assert.equal(index.split('recomputeNightChargePlan({ role').length - 1, 0, 'every caller plans the overnight cost leg');
+});

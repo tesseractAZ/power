@@ -229,6 +229,20 @@ export function rateAt(model: TariffModel, tsMs: number): RateSlice {
   };
 }
 
+/**
+ * The APS R-EV period ids, named once. `buildApsREvModel` builds its periods from these, and
+ * every consumer that asks which period an instant is in (`rateAt(...).periodId`) compares against
+ * them rather than a string literal: the overnight charge window, the mid-day super off-peak
+ * window (chargeWindows.ts), the nightly plan's tariff snapshot and the /api/tariff view.
+ */
+export const APS_PERIOD = Object.freeze({
+  ON_PEAK: 'on_peak',
+  SUPER_OFF_PEAK: 'super_off_peak',
+  OVERNIGHT: 'overnight',
+  OFF_PEAK: 'off_peak',
+} as const);
+export type ApsPeriodId = (typeof APS_PERIOD)[keyof typeof APS_PERIOD];
+
 const MON_FRI = [1, 2, 3, 4, 5];
 /** APS seasons, by USAGE month: SUMMER = Apr–Sep, WINTER = Oct–Mar.
  *
@@ -314,7 +328,7 @@ export function buildApsREvModel(rates: ApsREvRates = {}): TariffModel {
     // R-EV, so order is only a safety net against future overlapping edits.)
     periods: [
       {
-        id: 'on_peak',
+        id: APS_PERIOD.ON_PEAK,
         label: 'On-Peak (4–7pm Mon–Fri)',
         startHour: 16,
         endHour: 19,
@@ -324,7 +338,7 @@ export function buildApsREvModel(rates: ApsREvRates = {}): TariffModel {
         onPeak: true,
       },
       {
-        id: 'super_off_peak',
+        id: APS_PERIOD.SUPER_OFF_PEAK,
         label: 'Super Off-Peak (10am–3pm Mon–Fri, winter)',
         startHour: 10,
         endHour: 15,
@@ -333,7 +347,7 @@ export function buildApsREvModel(rates: ApsREvRates = {}): TariffModel {
         centsBySeason: rates.superOffPeak ?? NULL_SEASON,
       },
       {
-        id: 'overnight',
+        id: APS_PERIOD.OVERNIGHT,
         label: 'Overnight (11pm–5am Mon–Fri)',
         startHour: 23,
         endHour: 5,
@@ -343,7 +357,7 @@ export function buildApsREvModel(rates: ApsREvRates = {}): TariffModel {
       },
     ],
     offPeak: {
-      id: 'off_peak',
+      id: APS_PERIOD.OFF_PEAK,
       label: 'Off-Peak (nights/weekends/holidays)',
       centsBySeason: rates.offPeak ?? NULL_SEASON,
     },
