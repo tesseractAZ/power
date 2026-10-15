@@ -1,3 +1,19 @@
+## 1.188.0
+
+### The Documentation tab opens a short operator guide
+
+**Documentation**
+
+- The add-on's Documentation tab now opens a short operator guide: what Power needs, what it changes on the panel and how to turn each change off, what to do when an alarm sounds, setup by goal, and troubleshooting. It replaces the full engineering manual, which had grown past 1.1 MB, was slow to open and grew with every release.
+- The Info tab now shows a short summary of the add-on, with links to the guide and the reference pages.
+- Every option has a row on one page, with its default and its allowed values, and every published entity has a row on another: the [option reference](https://github.com/tesseractAZ/power/blob/main/docs/guide/options.md) and the [entity reference](https://github.com/tesseractAZ/power/blob/main/docs/guide/entities.md).
+- The full engineering reference is on GitHub in 19 files by chapter, listed in [its index](https://github.com/tesseractAZ/power/blob/main/docs/reference/README.md). Chapter and section numbers are unchanged. An old link into the manual now opens the guide, whose last section links a table of where each linked section moved.
+- The per-release engineering log and the past operations audits are kept unchanged on GitHub under docs/history, and are no longer printed in the manual attached to each release. Every version's notes remain in this changelog, its archive and the Releases page.
+
+**Updating**
+
+- Documentation only: nothing Power monitors, announces or writes changes. Updating restarts the add-on.
+
 ## 1.187.23
 
 ### Spoken and pushed figures state what the system measured

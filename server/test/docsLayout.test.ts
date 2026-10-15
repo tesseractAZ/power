@@ -633,8 +633,12 @@ test('D10: every docs/…/*.md mention must exist', () => {
 /* ── D11 the write list ─────────────────────────────────────────────────── */
 
 test('D11: the write section names every WRITERS phrase', () => {
-  const [fn, phrases] = Object.entries(cd.WRITERS)[0];
-  expectFail('D11', (f) => replace(f, P.guide, `| ${phrases[0]} |`, '| Something |'), new RegExp(`does not name "${phrases[0]}" \\(${fn}`));
+  // every phrase of every writer, not just the first: a writer with two families of call sites
+  // (the reserve setpoint and the reserve floor) must keep both rows
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const [fn, phrases] of Object.entries(cd.WRITERS)) {
+    for (const p of phrases) expectFail('D11', (f) => replace(f, P.guide, `| ${p} |`, '| Something |'), new RegExp(`does not name "${esc(p)}" \\(${fn}`));
+  }
   expectFail('D11', (f) => replace(f, P.guide, `## ${cd.WRITE_SECTION}`, '## What Power writes'), /no "## What Power changes on your system" section/);
   const last = Object.values(cd.WRITERS).flat().at(-1)!;
   expectFail('D11', (f) => { replace(f, P.guide, `| ${last} |`, '| Something |'); append(f, P.guide, `\n${last} is mentioned elsewhere.\n`); }, new RegExp(`does not name "${last}"`));
