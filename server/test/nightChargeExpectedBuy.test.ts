@@ -1065,7 +1065,8 @@ test('★★★ the hold push and the card say which hold it is, on the trough i
   }
   // The card renders the summary (a source pin: the card is not reachable from a unit test).
   const card = readFileSync(new URL('../../web/src/cards/NightChargeCard.tsx', import.meta.url), 'utf8');
-  assert.match(card, /const hold = holdSummary\(plan\);/);
+  // v1.189.0 — with whether a write armed from the announced plan stands (chargeCardCancel.test.ts).
+  assert.match(card, /const hold = holdSummary\(plan, \{ writeStands: stands \}\);/);
   assert.match(card, />\{hold\.headline\}<\/div>\n\s+<div className="text-muted mt-1 leading-relaxed">\{hold\.detail\}<\/div>/);
   assert.doesNotMatch(card, /Projected overnight trough/);
 });
