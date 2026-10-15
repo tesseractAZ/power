@@ -79,8 +79,13 @@ export interface PeakDrawInputs {
   pvW: number | null;
   /** Pack state of charge, percent. */
   socPct: number | null;
-  /** The configured backup reserve, percent. */
+  /** The configured backup reserve, percent. heldByChargeWrite: the prior floor while a
+   *  night-charge restore that did not take leaves the night's target as the panel's reserve. */
   reserveSocPct: number | null;
+  /** True when reserveSocPct is that prior floor (nightChargeActuator.moneyDetectorReservePct). */
+  heldByChargeWrite?: boolean;
+  /** The reserve the panel itself reads (the night's target while heldByChargeWrite). */
+  panelReserveSocPct?: number | null;
   /** False when the grid is absent (outage) — nothing to buy. */
   gridPresent: boolean;
   /** Per-Core AC input, so the alert can name which units are drawing. Charge Now
@@ -133,6 +138,9 @@ export interface PeakDrawVerdict {
   /** v1.80.0 — Core/channel labels whose force-charge reads ON; [] = all read
    *  OFF; null = state unknown (not reported). The alert stops inferring. */
   forceChargeOn: string[] | null;
+  /** heldByChargeWrite: measured against the prior floor because the night charge's restore did
+   *  not take; the alert then says so, with the reserve the panel reads and the one to restore. */
+  heldByChargeWrite?: { panelReservePct: number | null; floorPct: number | null } | null;
 }
 
 /**
@@ -193,7 +201,19 @@ export function assessPeakDraw(
     coreAttribution: attributeCores(i.coreDraws),
     forceChargeOn: i.forceCharge == null ? null
       : i.forceCharge.filter((f) => f.on).map((f) => f.label),
+    // Only on a held write: every other verdict is the shape it always was.
+    ...(i.heldByChargeWrite === true
+      ? { heldByChargeWrite: { panelReservePct: i.panelReserveSocPct ?? null, floorPct: i.reserveSocPct } } : {}),
   };
+}
+
+/** heldByChargeWrite — the sentence both money alerts carry while they measure against the prior
+ *  floor: the reserve the panel reads is the night charge's, and the restore did not take. */
+export function heldByChargeWriteText(h: { panelReservePct: number | null; floorPct: number | null }): string {
+  const panel = h.panelReservePct != null ? `${h.panelReservePct}%` : 'the night charge\'s raised value';
+  const floor = h.floorPct != null ? `${h.floorPct}%` : 'its usual level';
+  return ` The panel's backup reserve still reads ${panel}: the night charge's restore to ${floor} has not taken effect, `
+    + `so the panel holds ${panel} as its floor. This is measured against the ${floor} floor. Set the backup reserve to ${floor} in the EcoFlow app.`;
 }
 
 /* ─── onset tracking ──────────────────────────────────────────────────────── */
@@ -278,6 +298,7 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
     ? ' The tariff rates are not confirmed in config, so the cost is not estimated here.'
     : ` At the current ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour.`;
   const whoText = v.coreAttribution == null ? '' : ` Drawing now: ${v.coreAttribution}.`;
+  const held = v.heldByChargeWrite ?? null;
   return [{
     id: PEAK_GRID_DRAW_ALERT_ID,
     severity: 'warning' as const,
@@ -291,8 +312,9 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
       `About ${kw} kW of grid import has been going into the pack rather than the house for ${mins} minutes, `
       + `while on-peak.${costText} The pack is comfortably above its reserve, so this is not outage protection — `
       + `it is buying at the day's highest rate energy the overnight charge window would buy cheaply.`
-      + `${whoText}${forceChargeText(v.forceChargeOn)}`,
+      + `${held ? heldByChargeWriteText(held) : ''}${whoText}${forceChargeText(v.forceChargeOn)}`,
     facts: [
+      ...(held ? [{ label: 'Reserve', value: `${held.floorPct ?? '?'}% (the panel reads ${held.panelReservePct ?? '?'}%: night-charge restore not taken)` }] : []),
       { label: 'Grid → battery', value: `${kw} kW` },
       { label: 'Drawing', value: v.coreAttribution ?? 'no single Core dominant' },
       { label: 'Charge Now (force charge)', value: v.forceChargeOn == null ? 'not reported' : (v.forceChargeOn.length ? `ON: ${v.forceChargeOn.join(', ')}` : 'off on all channels') },
@@ -372,9 +394,14 @@ export interface IdlePoolInputs {
   gridPresent: boolean;
   /** Grid import at the panel main (SHP2 gridWatt), W. */
   gridImportW: number | null;
-  /** House pool SoC and the reserve it is held to, %. */
+  /** House pool SoC and the reserve it is held to, %. heldByChargeWrite: the prior floor while a
+   *  night-charge restore that did not take leaves the night's target as the panel's reserve. */
   socPct: number | null;
   reserveSocPct: number | null;
+  /** True when reserveSocPct is that prior floor (nightChargeActuator.moneyDetectorReservePct). */
+  heldByChargeWrite?: boolean;
+  /** The reserve the panel itself reads (the night's target while heldByChargeWrite). */
+  panelReserveSocPct?: number | null;
   /** Per-channel watts between the panel and each Core (backupInfo.chWatt): negative =
    *  the Core discharging into the house, positive = charging from the panel. */
   sourceWatts: readonly number[] | null;
@@ -415,6 +442,8 @@ export interface IdlePoolVerdict {
   /** Why the condition does not hold this tick (null = it holds). */
   suppressed: IdlePoolSuppression | null;
   smartBackupMode: number | null;
+  /** heldByChargeWrite: measured against the prior floor (PeakDrawVerdict.heldByChargeWrite). */
+  heldByChargeWrite?: { panelReservePct: number | null; floorPct: number | null } | null;
 }
 
 /** The condition, one tick, no memory. PURE. */
@@ -562,6 +591,9 @@ export function evaluateIdlePool(
     heldForMs: step.state.onsetMs == null ? 0 : i.nowMs - step.state.onsetMs,
     suppressed: firedToday ? 'fired-today' : c.suppressed,
     smartBackupMode: i.smartBackupMode ?? null,
+    // Only on a held write: every other verdict is the shape it always was.
+    ...(i.heldByChargeWrite === true
+      ? { heldByChargeWrite: { panelReservePct: i.panelReserveSocPct ?? null, floorPct: i.reserveSocPct } } : {}),
   };
 }
 
@@ -577,6 +609,7 @@ export function peakIdlePoolAlerts(v: IdlePoolVerdict, nowMs: number): Alert[] {
   const costText = v.centsPerHour == null
     ? ' The tariff rates are not confirmed in config, so the cost is not estimated here.'
     : ` At the ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour.`;
+  const held = v.heldByChargeWrite ?? null;
   return [{
     id: PEAK_IDLE_POOL_ALERT_ID,
     severity: 'warning' as const,
@@ -599,11 +632,11 @@ export function peakIdlePoolAlerts(v: IdlePoolVerdict, nowMs: number): Alert[] {
       + 'the pool climbs back roughly 20 points above the reserve; a pool that refilled only part of the way sits '
       + 'idle in that band while the house buys at the on-peak rate. A backup mode that holds the pool does the same. '
       + 'The add-on changes no setting — if the pool should be carrying the house, check the panel\'s backup '
-      + 'settings in the EcoFlow app. Sent at most once per on-peak day.',
+      + `settings in the EcoFlow app.${held ? heldByChargeWriteText(held) : ''} Sent at most once per on-peak day.`,
     facts: [
       { label: 'Grid import', value: `${kw} kW` },
       { label: 'Pool', value: `${v.socPct}%` },
-      { label: 'Reserve', value: `${v.reserveSocPct}%` },
+      { label: 'Reserve', value: held ? `${v.reserveSocPct}% (the panel reads ${held.panelReservePct ?? '?'}%: night-charge restore not taken)` : `${v.reserveSocPct}%` },
       { label: 'Above reserve', value: v.aboveReserveKwh == null ? 'capacity unknown' : `${v.aboveReserveKwh.toFixed(1)} kWh${onNameplate ? ' (nameplate capacity)' : ''}` },
       { label: 'Pool flow', value: `${Math.round(v.poolFlowW)} W` },
       { label: 'Smart backup mode', value: v.smartBackupMode == null ? 'not reported' : String(v.smartBackupMode) },

@@ -206,7 +206,7 @@ const MUTANTS = [
   {
     id: 'xv. ★★★ just-in-time is removed (starts at the window open, then the house drains it)',
     file: FC,
-    find: '  if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above',
+    find: '  if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above',
     to: '  if (false) { /* MUTANT */',
     why: 'Force-charge reaches the target at ~02:00 and the house draws the pack back toward the 50% reserve for three hours — ~57% at dawn instead of 64%.',
   },
@@ -268,15 +268,15 @@ const MUTANTS = [
   {
     id: 'xxxiii. ★★ the deadline takes the EARLIER bound',
     file: FC,
-    find: '  return fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
-    to: '  return fromOff != null ? Math.min(fromOff, fromWindow) : fromWindow; /* MUTANT */',
+    find: '  const later = fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
+    to: '  const later = fromOff != null ? Math.min(fromOff, fromWindow) : fromWindow; /* MUTANT */',
     why: 'A 03:00 target OFF slow to verify pages the house at 03:30 over a force-charge that costs nothing extra inside the cheap window.',
   },
   {
     id: 'xxxiv. ★★★ the deadline only counts from an OFF that was sent',
     file: FC,
-    find: '  return fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
-    to: '  return fromOff; /* MUTANT */',
+    find: '  const later = fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
+    to: '  if (fromOff == null) return null; /* MUTANT */\n  const later = fromOff;',
     why: 'A tick that never ran at 05:00 never sends the OFF, so the deadline never starts — the one case it exists for.',
   },
   {

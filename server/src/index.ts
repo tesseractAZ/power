@@ -229,11 +229,17 @@ import {
   REVERT_ESCALATE_AFTER,
   REVERT_MAX_RETRIES,
   type NightActuationState,
+  // The on-peak guard, the foreign rule, revertDeadline and heldByChargeWrite.
+  decideRevertDeadline, revertDeadlineSpoken, restoreTargetPct, revertDeadlineMs, reserveRestoreNote,
+  chargeWriteHold, setChargeWriteHold, FOREIGN_RESERVE_SETTLE_MS,
+  type RevertDeadlineDecision,
 } from './nightChargeActuator.js';
+import { nextOnPeakStartMs } from './chargeWindows.js';
 import {
   buildNightChargeMessage, sendNotification, loadNotifyConfig,
   // v1.187.22 — the after-the-fact night-charge pushes, built where their text is tested.
   buildNightChargeMorningSummary, buildNightChargeApplyFailure, buildNightForceChargeOnFailure,
+  buildNightChargeRevertDeadline, buildNightChargeForeignReserve,
 } from './notify.js';
 import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonAt } from './tariff.js';
@@ -3215,6 +3221,8 @@ let nightActuationMem: NightActuationState = (() => {
 setReserveArbitrageRaised(effectiveArbitragePosture(nightActuationMem, liveReserveSocPct(), Date.now()));
 setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct(), Date.now()));
 analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct(), Date.now()));
+// heldByChargeWrite — the on-peak money detectors' view of a write whose restore did not take.
+setChargeWriteHold(chargeWriteHold(nightActuationMem));
 
 // v1.119.2 — republish the OWNER floor on every snapshot, not only on an
 // actuation-state write: the floor has three possible authors — the owner, our
@@ -3263,6 +3271,9 @@ function persistNightActuation(s: NightActuationState): void {
   const ownerFloor = ownerReserveFloorPct(s, liveReserveSocPct(), Date.now());
   setOwnerReserveFloorPct(ownerFloor);
   analytics.pushOwnerFloor(ownerFloor);
+  // heldByChargeWrite — and the write the on-peak money detectors measure past (alertMonitor):
+  // the prior floor while a restore that did not take leaves our target standing.
+  setChargeWriteHold(chargeWriteHold(s));
   try {
     atomicWriteFileSync(NIGHT_CHARGE_ACTUATION_PATH, JSON.stringify(s));
   } catch (e: any) {
@@ -4575,7 +4586,10 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
       // v1.187.22 — the force-charge gate is stamped on the record (forceChargeRides): the gate this
       // plan's expected figure was made with, read back by the morning push.
-      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn());
+      // The on-peak guard: the start of the on-peak period after the window open, stamped on the
+      // arm (nextOnPeakStartMs) — raises stop, and the restore falls due, an hour before it.
+      const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(apsREvModelFromEnv(), plan.window.startMs) : null;
+      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn(), armOnPeakStartMs);
       if (!armedCandidate) armRefused = armRefusalReason(nightActuationMem, plan, nowMs, plan.reserveFloorPct);
       if (armedCandidate) {
         // v1.79.0 — an earlier evening's never-applied ARM being replaced is a
@@ -5048,7 +5062,7 @@ function driftActuatorContext(nowMs: number): ActuatorContext {
   const act = nightActuationMem;
   const nightActive =
     act.day != null &&
-    ((act.appliedAtMs != null && act.revertedAtMs == null) ||
+    ((act.appliedAtMs != null && act.revertedAtMs == null && act.foreignSettledAtMs == null) ||
      (act.announcedAtMs != null && act.appliedAtMs == null && act.cancelled !== true) ||
      (act.revertedAtMs != null && nowMs - act.revertedAtMs < 15 * 60_000));
   // v1.115.0 — an owner-floor write through /api/reserve-floor was being
@@ -5434,6 +5448,10 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // fresh, coherent reading: an unknown SoC never starts one and never stops one early.
     poolSocPct: socCoherent ? socNowPct : null,
     fullKwh: fullWh != null && fullWh > 0 ? fullWh / 1000 : null,
+    // Blind OFF re-sends stop at the next charge window's open at the latest (blindResendStopMs):
+    // the latest plan's window, when it opens after this night's closes.
+    nextLegOpenMs: fcPlan?.window != null && state.windowEndMs != null && fcPlan.window.startMs >= state.windowEndMs
+      ? fcPlan.window.startMs : null,
     chargeRateKw,
     evDisplacedKwh,
   });
@@ -5717,8 +5735,58 @@ async function escalateForceChargeStuck(
   }
 }
 
+/**
+ * revertDeadline — page an unconfirmed restore (decideRevertDeadline): an audible critical and a
+ * critical push. The stage is stamped BEFORE anything is said, so a restart never pages it twice;
+ * the on-peak page stands for the deadline page as well when both fall due on one tick (a process
+ * that was down through both). The announce and the push are not awaited: a page must never hold
+ * the tick, and with it the restore re-issue the same tick may need. Broadcast quiet hours apply
+ * to the spoken page as to every critical announce; the push always goes.
+ */
+function pageRevertDeadline(
+  state: NightActuationState,
+  d: Extract<RevertDeadlineDecision, { kind: 'page' }>,
+  nowMs: number,
+): void {
+  persistNightActuation({
+    ...state,
+    revertDeadlinePagedAtMs: state.revertDeadlinePagedAtMs ?? nowMs,
+    revertDeadlineOnPeakPagedAtMs: d.stage === 'onPeak' ? nowMs : state.revertDeadlineOnPeakPagedAtMs,
+  });
+  const restorePct = restoreTargetPct(state);
+  const targetPct = state.targetPct!; // decideRevertDeadline pages only a record with a target
+  const onPeakClock = state.nextOnPeakStartMs != null ? fmtPhoenixClock(state.nextOnPeakStartMs) : null;
+  const deadlineMs = revertDeadlineMs(state);
+  app.log.error(
+    `night-charge: revertDeadline — the restore of the backup reserve to ${restorePct ?? '?'}% for ${state.day} `
+    + (d.unknown ? 'could not be confirmed (no live panel reading)' : `has not taken effect (the panel still reads ${targetPct}%)`)
+    + (d.stage === 'onPeak'
+      ? `, and on-peak pricing has started (${new Date(state.nextOnPeakStartMs!).toISOString()})`
+      : ` by its deadline (${deadlineMs != null ? new Date(deadlineMs).toISOString() : '?'})`)
+    + '. Paging: critical, spoken and pushed. The restore keeps being retried.',
+  );
+  const spoken = revertDeadlineSpoken({ stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock });
+  void (async () => {
+    try {
+      const heard = await broadcast.announce('critical', spoken.en, spoken.es);
+      if (heard && heard.ok === false) {
+        app.log.warn(`night-charge: revertDeadline page was NOT spoken (${heard.error ?? 'refused'}) — push only${d.stage === 'deadline' && state.nextOnPeakStartMs != null ? '; it pages again at the on-peak start' : ''}.`);
+      }
+    } catch (e: any) {
+      app.log.warn(`night-charge: revertDeadline announce failed (${e?.message ?? e})`);
+    }
+    try {
+      await sendNotification(loadNotifyConfig(), buildNightChargeRevertDeadline({
+        day: state.day, stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock,
+      }));
+    } catch (e: any) {
+      app.log.error(`night-charge: revertDeadline push FAILED — ${e?.message ?? e}.`);
+    }
+  })();
+}
+
 async function runNightActuationTickInner(): Promise<void> {
-  const state = nightActuationMem;
+  let state = nightActuationMem;
   if (state.day == null) return;
   const nowMs = Date.now();
   const shp2 = findShp2(store.get().devices);
@@ -5744,6 +5812,15 @@ async function runNightActuationTickInner(): Promise<void> {
     Math.abs((remainWh / fullWh) * 100 - socNowPct) <= 8;
   const currentReservePct: number | null =
     typeof sp?.backupReserveSoc === 'number' ? sp.backupReserveSoc : null;
+
+  // revertDeadline — ahead of the decision, and of the `!shp2` return below: a panel missing
+  // from the device list, or not reporting, is exactly the unconfirmed restore it pages about.
+  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct);
+  if (revertPage.kind === 'page') {
+    pageRevertDeadline(state, revertPage, nowMs);
+    state = nightActuationMem; // the stamp is on the record every write below spreads
+    if (state.day == null) return;
+  }
 
   const gridNow = liveGridBackstop(store.get().devices);
   const action = decideActuation(state, nowMs, {
@@ -5791,6 +5868,33 @@ async function runNightActuationTickInner(): Promise<void> {
       persistNightActuation({ ...nightActuationMem, lastError: r.message ?? r.code ?? 'write failed' });
       app.log.warn(`night-charge: supervised write failed (${r.code}: ${r.message}); retrying within the apply window (the attempt is recorded — a lost confirmation reconciles from the live reserve reading).`);
     }
+    return;
+  }
+
+  if (action.kind === 'foreignSeen') {
+    // The foreign rule (nightChargeActuator.foreignStep): the first of the two readings.
+    persistNightActuation({ ...state, foreignReservePct: action.pct, foreignSeenAtMs: nowMs });
+    app.log.info(`night-charge: foreign reserve reading — the panel reads ${action.pct}%, neither the ${state.targetPct}% set for ${state.day} nor the ${state.priorReservePct ?? '?'}% it restores; taken as set outside the add-on if it still reads ${action.pct}% in ${Math.round(FOREIGN_RESERVE_SETTLE_MS / 60_000)} min.`);
+    return;
+  }
+
+  if (action.kind === 'foreignCleared') {
+    persistNightActuation({ ...state, foreignReservePct: null, foreignSeenAtMs: null });
+    app.log.info(`night-charge: foreign reserve reading cleared — the panel reads ${currentReservePct ?? '?'}% again for ${state.day}.`);
+    return;
+  }
+
+  if (action.kind === 'foreignSettled') {
+    // Someone else's reserve: nothing more is written to it for this night (decideActuation
+    // returns 'none' from here), the night is resolved for the next arm, and the force-charge
+    // riding the write switches OFF (nightForceCharge offReason 'foreign').
+    persistNightActuation({ ...state, foreignSettledAtMs: nowMs, foreignReservePct: action.pct, lastError: null });
+    app.log.warn(`night-charge: foreign reserve SETTLED — the panel has read ${action.pct}% since ${state.foreignSeenAtMs != null ? new Date(state.foreignSeenAtMs).toISOString() : '?'}: neither the ${state.targetPct}% set for ${state.day} nor the ${state.priorReservePct ?? '?'}% it restores. Taken as set outside the add-on; nothing more is written to the reserve for this night${state.revertedAtMs != null ? ' (the restore was sent and did not read back)' : ' (no restore is sent)'}.`);
+    void sendNotification(loadNotifyConfig(), buildNightChargeForeignReserve({
+      day: state.day, pct: action.pct, targetPct: state.targetPct, restorePct: state.priorReservePct,
+    })).catch((e: any) => {
+      app.log.debug(`night-charge: foreign-reserve notify failed (${e?.message ?? e})`);
+    });
     return;
   }
 
@@ -6176,6 +6280,10 @@ app.post('/api/night-charge/cancel', { preHandler: requireWriteAuth }, async (_r
   if (s.revertedAtMs != null) {
     reply.code(409);
     return { ok: false, error: 'tonight’s write already completed and reverted' };
+  }
+  if (s.foreignSettledAtMs != null) {
+    reply.code(409);
+    return { ok: false, error: `the reserve was set to ${s.foreignReservePct ?? '?'}% outside the add-on; nothing of tonight’s write is left to cancel` };
   }
   persistNightActuation({ ...s, cancelled: true });
   app.log.info(
@@ -6680,11 +6788,15 @@ app.post<{ Querystring: { pct?: string } }>(
       };
     }
     if (isReserveArbitrageRaised(nightActuationMem)) {
+      // The active night's restore time, named: the window close, or an hour before on-peak if that
+      // is sooner (revertDueMs) — immediately on a cancel.
+      const restore = reserveRestoreNote(nightActuationMem, Date.now(), fmtDeadlineSpoken);
       reply.code(409);
       return {
         ok: false,
-        error: 'a night-charge write is currently holding the reserve up; it would revert to the old floor at window close',
+        error: `a night-charge write is currently holding the reserve up; ${restore.text}`,
         priorReservePct: nightActuationMem.priorReservePct,
+        restoreAtMs: restore.atMs,
         hint: 'retry after the scheduled revert, or POST /api/night-charge/cancel first',
       };
     }

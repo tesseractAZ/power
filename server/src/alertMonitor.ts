@@ -48,6 +48,9 @@ import { setNwsLog } from './nws.js';
 import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, TELEMETRY_SCOPE_ANNUNCIATING, TELEMETRY_BASIS_DROPPED, telemetryBasisFor, type FamilyMeta, type TelemetryEntry } from './alertTelemetry.js';
 import type { Recorder } from './recorder.js';
 import { CAPACITY_SCALE_MIN, type CapacityBasis } from './poolEnergyBasis.js';
+// heldByChargeWrite — the on-peak money detectors measure past a night-charge write whose restore
+// did not take (nightChargeActuator.moneyDetectorReservePct).
+import { getChargeWriteHold, moneyDetectorReservePct, type ChargeWriteHold } from './nightChargeActuator.js';
 import { getAnalytics, type AnalyticsClient } from './analyticsClient.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate. The internal severity
 // union is unchanged; priority is DERIVED from (severity, source). Disabling
@@ -2060,9 +2063,13 @@ export function idlePoolInputsFrom(
   gridPresent: boolean,
   nowMs: number,
   forecastPool?: Pick<DayForecast, 'poolFullWh' | 'poolCapacityBasis'> | null,
+  /** heldByChargeWrite: a night-charge write whose restore did not take (getChargeWriteHold). While
+   *  the panel still reads its target past the restore, the reserve is the prior floor. */
+  chargeHold?: ChargeWriteHold | null,
 ): IdlePoolInputs {
   const shp2 = findShp2(devices);
   const p = shp2?.projection;
+  const reserve = moneyDetectorReservePct(p?.strategy?.backupReserveSoc ?? null, chargeHold ?? null, nowMs);
   const forecastWh = forecastPool?.poolFullWh;
   const forecastBasis = forecastPool?.poolCapacityBasis;
   const nameplate = p?.backupFullCapWh ?? null;
@@ -2074,7 +2081,9 @@ export function idlePoolInputsFrom(
     gridPresent,
     gridImportW: p?.gridWatt ?? null,
     socPct: p?.backupBatPercent ?? null,
-    reserveSocPct: p?.strategy?.backupReserveSoc ?? null,
+    reserveSocPct: reserve.reservePct,
+    // Only on a held write: every other input set is the shape it always was.
+    ...(reserve.heldByChargeWrite ? { heldByChargeWrite: true, panelReserveSocPct: p?.strategy?.backupReserveSoc ?? null } : {}),
     sourceWatts: p?.sourceWatts ?? null,
     fresh: shp2 != null && deviceEvidencePositive(devices[shp2.sn], nowMs),
     poolFullWh: p == null ? null : measured ? forecastWh : nameplate,
@@ -2526,6 +2535,8 @@ export function startAlertMonitor(
   const heldOrphanLogged = new Set<string>();
   /** v1.143.0 — the boot reconcile outcome is logged once, run or no-op. */
   let orphanReconcileLogged = false;
+  /** heldByChargeWrite — whether the money detectors last measured past a held write (logged on change). */
+  let moneyHeldLogged = false;
   let lastDigestHour = -1;
   /** v1.95.0 — consecutive ticks a DPU has been absent from a non-empty SHP2 roster. */
   const offPanelStreak = new Map<string, number>();
@@ -3354,13 +3365,27 @@ export function startAlertMonitor(
             on: src.forceCharge === 'FORCE_CHARGE_ON',
           }))
       : null;
+    // heldByChargeWrite — a night-charge restore that did not take leaves the night's target as
+    // the panel's reserve; past its restore both money detectors measure against the prior floor.
+    const chargeHold = getChargeWriteHold();
+    const peakReserve = moneyDetectorReservePct(peakShp2?.projection.strategy?.backupReserveSoc ?? null, chargeHold, Date.now());
+    if (peakReserve.heldByChargeWrite !== moneyHeldLogged) {
+      moneyHeldLogged = peakReserve.heldByChargeWrite;
+      if (moneyHeldLogged) {
+        warn(`alert-monitor: heldByChargeWrite — the panel still reads the night charge's ${chargeHold?.targetPct ?? '?'}% reserve past its restore; the on-peak money detectors measure against the ${peakReserve.reservePct ?? '?'}% floor until it is restored.`);
+      } else {
+        log('alert-monitor: heldByChargeWrite cleared — the on-peak money detectors measure against the panel\'s reserve again.');
+      }
+    }
     const peakDraw = evaluatePeakDraw({
       nowMs: Date.now(),
       gridImportW: peakFlow.acIn,
       panelLoadW: peakFlow.panelLoad,
       pvW: peakFlow.fleetPv,
       socPct: peakShp2?.projection.backupBatPercent ?? null,
-      reserveSocPct: peakShp2?.projection.strategy?.backupReserveSoc ?? null,
+      reserveSocPct: peakReserve.reservePct,
+      heldByChargeWrite: peakReserve.heldByChargeWrite,
+      panelReserveSocPct: peakShp2?.projection.strategy?.backupReserveSoc ?? null,
       gridPresent: grid.present,
       // v1.71.0 — Charge Now is a PER-DPU setting, so name the Cores actually
       // drawing. Same acInWatts field aggregateFleetFlow sums, so parts == total.
@@ -3393,7 +3418,7 @@ export function startAlertMonitor(
     // from one forecast); read once here and again, unchanged, by the publish-first set below (no
     // await between them).
     const forecastNow = feedForecast.peek();
-    const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow), apsREvModelFromEnv());
+    const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow, chargeHold), apsREvModelFromEnv());
     idlePoolFiredDayOnDisk = persistIdlePoolFiredDay(idlePoolStatePath, idlePoolFiredDayOnDisk);
 
     // v1.186.0 — the LIVE-SNAPSHOT alarms: everything computed from the snapshot and

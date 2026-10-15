@@ -276,9 +276,11 @@ test('★ a reading that is NEITHER value is treated as interference, not failur
   // The owner moved the floor in the EcoFlow app after the revert. Re-issuing
   // our restore would silently overwrite their change — the same discipline
   // ADOPT applies ("never guess a revert target").
+  // R1 (v1.189.0) — the reading is now recorded as the first of the two the foreign rule needs
+  // (foreignSeen: a state stamp, no device write); it is still never a re-issue or a failure.
   for (const pct of [10, 20, 30, 40, 49]) {
     const a = decideActuation(revertedState(), T0 + REVERT_VERIFY_AFTER_MS, opts({ currentReservePct: pct }));
-    assert.equal(a.kind, 'none', `reserve=${pct}% is not ours to correct`);
+    assert.deepEqual(a, { kind: 'foreignSeen', pct }, `reserve=${pct}% is not ours to correct`);
   }
 });
 

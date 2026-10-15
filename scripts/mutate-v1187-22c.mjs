@@ -1179,8 +1179,8 @@ const MUTANTS = [
   {
     id: 'C-cxlviii. ★★ index.ts arms without the force-charge gate',
     file: IDX,
-    find: '      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn());',
-    to: '      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct); /* MUTANT */',
+    find: '      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn(), armOnPeakStartMs);',
+    to: '      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, undefined, armOnPeakStartMs); /* MUTANT */',
     why: 'Every armed record carries no stamp, so the morning reads the option at the restore.',
   },
   {

@@ -4,7 +4,7 @@
 
 On a day a battery shortfall is anticipated, the advisor recommends buying the *right* amount of grid energy in the cheap APS R-EV overnight window (23:00–05:00 Mon–Fri) so the home (a) never imports at the 4–7pm on-peak and (b) carries an **outage cushion** above the reserve floor into the next day. It is framed as much a *resilience* feature as a cost feature. The write posture is owned by `NIGHT_CHARGE_MODE`: **`advisory`** (default) never issues a device write — the recommendation is published as HA entities, an API endpoint, a nightly notification, and TUI/web panels, and an owner-authored HA automation decides whether to act; **`supervised`** performs one announced, cancellable, bounded reserve write per charge night with an automatic revert, plus a force-charge that rides the verified write to the night's ceiling when the objective is `cost` and `ARB_COST_MAX_SOC_PCT` is above 50 (v1.165.0) (§8b); **`auto`** is honored only after the readiness gate graduates on actuated-night evidence and operates as supervised until then. In parallel, every night's plan is frozen into a durable ledger and scored against measured reality, and a fail-closed readiness gate reduces that record into a single "is the accuracy proven enough for unattended writes?" verdict.
 
-The subsystem spans eight modules, all shipped incrementally (v1.36.0 tariff → v1.37.0 sizing brain → v1.38.0 ledger + wiring + surfaces → v1.39.x scoring/gate hardening → v1.49.0 sizing-model correction → v1.50.0 supervised write + gate v2 → v1.165.0 force-charge → v1.187.0 pure ledger scoring):
+The subsystem spans nine modules, all shipped incrementally (v1.36.0 tariff → v1.37.0 sizing brain → v1.38.0 ledger + wiring + surfaces → v1.39.x scoring/gate hardening → v1.49.0 sizing-model correction → v1.50.0 supervised write + gate v2 → v1.165.0 force-charge → v1.187.0 pure ledger scoring):
 
 | Module | Role |
 |---|---|
@@ -13,6 +13,7 @@ The subsystem spans eight modules, all shipped incrementally (v1.36.0 tariff →
 | `nightChargeGate.ts` | Pure write-readiness reduction (v2: actuated-night evidence) over the ledger + readiness holder |
 | `nightChargeActuator.ts` | Pure supervised-write decision core: mode resolution, arming from the announced plan, apply/revert decisions (all clocks injected) |
 | `nightForceCharge.ts` | Pure force-charge core: gate, just-in-time start, software stop, OFF triggers and wall-clock deadline, `foceChargeHight` backstop sync/restore, step order against the reserve revert |
+| `chargeWindows.ts` | Pure: the start of the on-peak period after a charge window (`nextOnPeakStartMs`), stamped on each armed night for the on-peak guard |
 | `nightLedgerScoring.ts` | Pure ledger-scoring spans: governed on-peak span, realized cost, delivered-energy hold span, PV verdict set-aside, forecast-span capture gate and repair |
 | `recorder.ts` | `night_charge_ledger` / `night_charge_calibration` durable tables + injection-safe upsert |
 | `index.ts:3220–6180` (`recomputeNightChargePlan`, `runNightChargeEveningJob`, `runNightActuationTick`, the `nightChargeEnabled` timer block, the status/cancel routes) | Orchestration: 30-min recompute tick, ~21:30 evening job, backfill scorer, premature-capture repair, 60 s actuator tick, `/api/night-charge/status`, `/api/night-charge/cancel` |

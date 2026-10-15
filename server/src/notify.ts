@@ -707,6 +707,61 @@ export function buildNightChargeMorningSummary(o: {
 }
 
 /**
+ * revertDeadline — the critical push beside the spoken page (nightChargeActuator
+ * decideRevertDeadline): a restore of the night's reserve write that has not read back by its
+ * deadline, or by the on-peak start. `unknown` = no live reading: the words say the restore could
+ * not be CONFIRMED, never that the reserve reads raised. `onPeakClock` names the on-peak start
+ * ("4:00 PM"); null when the night has none on record. PURE.
+ */
+export function buildNightChargeRevertDeadline(o: {
+  day: string | null;
+  stage: 'deadline' | 'onPeak';
+  unknown: boolean;
+  targetPct: number;
+  restorePct: number | null;
+  onPeakClock: string | null;
+}): NotifyMessage {
+  const to = o.restorePct != null ? `${o.restorePct}%` : 'its usual level';
+  const peak = o.onPeakClock == null ? ''
+    : o.stage === 'onPeak' ? ` On-peak pricing started at ${o.onPeakClock}.` : ` On-peak pricing starts at ${o.onPeakClock}.`;
+  const state = o.unknown
+    ? `could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's ${o.targetPct}% may still stand.`
+    : `has not taken effect: the Smart Home Panel 2 still reads ${o.targetPct}%.`;
+  return {
+    severity: 'critical',
+    dedupId: 'night_charge_revert_deadline',
+    title: o.unknown ? 'Night-charge: reserve restore not confirmed' : 'Night-charge: reserve still raised',
+    body:
+      `The restore of the backup reserve to ${to} after the ${o.day ?? '—'} night charge ${state}${peak} `
+      + `While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. `
+      + `Set the backup reserve to ${to} in the EcoFlow app. The add-on keeps retrying the restore.`,
+  };
+}
+
+/**
+ * The info push sent when the reserve settled as someone else's (nightChargeActuator foreignStep):
+ * the same value, neither the night's target nor the value it restores, on two readings five or
+ * more minutes apart. Nothing more is written to the reserve for that night. PURE.
+ */
+export function buildNightChargeForeignReserve(o: {
+  day: string | null;
+  pct: number;
+  targetPct: number | null;
+  restorePct: number | null;
+}): NotifyMessage {
+  return {
+    severity: 'info',
+    dedupId: 'night_charge_actuation',
+    title: `Night-charge: reserve set to ${o.pct}% outside the add-on`,
+    body:
+      `The backup reserve reads ${o.pct}% — not the ${o.targetPct ?? '—'}% the ${o.day ?? '—'} night charge set, nor the `
+      + `${o.restorePct ?? '—'}% it would restore — on two readings five or more minutes apart. It was changed outside `
+      + `the add-on (the EcoFlow app, or the panel itself), so the night charge leaves it at ${o.pct}% and writes nothing `
+      + 'more to it for this charge.',
+  };
+}
+
+/**
  * v1.187.22 — the warning sent when the reserve write never took effect (apply retries spent).
  * The charge it says will not happen is stated as the armed day's EXPECTED figure, or with no
  * figure at all — never the worst case (buildNightChargeMorningSummary); a night expected to

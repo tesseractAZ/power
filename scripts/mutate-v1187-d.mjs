@@ -285,8 +285,8 @@ const MUTANTS = [
   {
     id: 'xxxii. ★★ a cancelled night does not put the OFF first',
     file: NFC,
-    find: '  return s.cancelled || s.revertedAtMs != null || s.windowEndMs == null || nowMs >= s.windowEndMs;',
-    to: '  return s.revertedAtMs != null || s.windowEndMs == null || nowMs >= s.windowEndMs; /* MUTANT */',
+    find: '  return s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null\n    || s.windowEndMs == null || nowMs >= writeWindowEndMs(s)!;',
+    to: '  return s.revertedAtMs != null || s.foreignSettledAtMs != null\n    || s.windowEndMs == null || nowMs >= writeWindowEndMs(s)!; /* MUTANT */',
     why: 'The owner\'s cancel holds the OFF behind the immediate revert.',
   },
   {

@@ -1236,6 +1236,15 @@ same aggregation the dashboard renders — and SoC/reserve from `findShp2().proj
 > sensitive and is therefore invisible in review — it is covered by mutant `iii` of the
 > committed harness for exactly that reason.
 
+**Against the owner's floor while a night-charge restore has not taken (heldByChargeWrite).**
+The guard protects the owner's floor. A night-charge restore that did not take leaves the
+night's target (50%) as the panel's reserve, and a pool refilling to it at the on-peak rate
+then reads "near the reserve". While a write of ours is past its restore with the restore not
+read back (`chargeWriteHold`, published by the actuator) and the panel still reads exactly its
+target, `moneyDetectorReservePct` hands this detector and the idle-pool detector below the
+prior floor, and each alert names the reserve the panel reads and the one to restore
+(`heldByChargeWriteText`). The runway and below-reserve alarms keep the live value.
+
 **Tuning** (env, all with defaults — no add-on config option):
 
 | Env | Default | Purpose |

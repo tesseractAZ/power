@@ -861,7 +861,10 @@ Consumers, each of which had the bug independently:
 through the add-on (write-auth, rate-limited, same audited helper and `[10,50]`
 envelope as the actuator). It **refuses with 409 while a night-charge write is
 in flight**: the actuator restores `priorReservePct` at window close, so a
-change made underneath a live write would be silently reverted hours later.
+change made underneath a live write would be silently reverted hours later. The
+refusal names when that is (`reserveRestoreNote`, `restoreAtMs`): the window
+close, or an hour before on-peak if that is sooner (`revertDueMs`); within a
+minute on a cancelled night; or that the restore was due and has not completed.
 `GET` is not provided — the device value is authoritative and already published.
 
 **Drift disclosure (v1.119.0).** A `backupReserveSoc` change carries its own

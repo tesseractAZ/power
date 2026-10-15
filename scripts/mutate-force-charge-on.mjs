@@ -97,7 +97,7 @@ const MUTANTS = [
   {
     id: 'xi. ★★★ the ON is re-issued right up to the window end',
     file: FC,
-    find: '    if (s.windowEndMs == null || nowMs >= s.windowEndMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) {',
+    find: '    if (s.windowEndMs == null || nowMs >= writeWindowEndMs(s)! - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) {',
     to: '    if (false) { /* MUTANT */',
     why: 'A re-issue at WE-2 takes the slot\'s cooldown; the window-end OFF comes back rate-limited and it grid-charges past the close.',
   },

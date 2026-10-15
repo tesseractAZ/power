@@ -23,6 +23,10 @@
  *  - The reserve ALWAYS reverts: at window close (v1.187.0; +5 min before) (or immediately on
  *    a post-apply cancel) the prior value is restored. Repeated revert
  *    failure escalates to a critical annunciation while retries continue.
+ *  - R1 — never into on-peak: no raise from an hour before the on-peak period after the
+ *    window, and the restore falls due then at the latest (writeWindowEndMs, revertDueMs);
+ *    an unconfirmed restore pages on the clock alone (decideRevertDeadline); a reserve
+ *    someone else set is left alone (foreignStep).
  *    The floor/runway/SoC alarm spine is fully independent of this module
  *    and keeps its own protection throughout.
  * ═════════════════════════════════════════════════════════════════════════ */
@@ -57,9 +61,11 @@ export function resolveNightChargeMode(raw: string | undefined | null): NightCha
  * restarts. Key on that, never on the number.
  */
 export function isReserveArbitrageRaised(
-  state: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs'>,
+  state: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs'> & Partial<Pick<NightActuationState, 'foreignSettledAtMs'>>,
 ): boolean {
-  return state.appliedAtMs != null && state.revertedAtMs == null;
+  // A reserve someone else set during the window (foreignSettledAtMs, decideActuation's two-poll
+  // rule) is theirs: our write no longer holds it, and nothing of ours will restore it.
+  return state.appliedAtMs != null && state.revertedAtMs == null && state.foreignSettledAtMs == null;
 }
 
 /**
@@ -91,7 +97,8 @@ export function isReserveArbitrageRaised(
  * within REVERT_READBACK_GRACE_MS of the revert.
  */
 export function ownerReserveFloorPct(
-  state: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs' | 'priorReservePct' | 'targetPct'>,
+  state: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs' | 'priorReservePct' | 'targetPct'>
+    & Partial<Pick<NightActuationState, 'foreignSettledAtMs'>>,
   liveReservePct: number | null,
   nowMs: number,
 ): number | null {
@@ -397,6 +404,63 @@ export const REVERT_VERIFY_AFTER_MS = REVERT_READBACK_GRACE_MS;
  *  readback. Mirrors APPLY_MAX_RETRIES. */
 export const REVERT_MAX_RETRIES = 2;
 
+/*
+ * THE ON-PEAK GUARD. A raise left standing into the on-peak period is the expensive end
+ * state: the panel holds the raised reserve as its floor and refills to it from the grid at
+ * the day's highest rate. Each armed night therefore carries the start of the on-peak period
+ * that follows its window (`nextOnPeakStartMs`, stamped by armFromPlan from
+ * chargeWindows.nextOnPeakStartMs), and:
+ *  - no raise is issued from ON_PEAK_RAISE_GUARD_MS before it: the apply, its re-issues, and
+ *    on the force-charge side the ceiling sync, the ON and its re-issue
+ *    (writeWindowEndMs bounds them all);
+ *  - the restore and the force-charge OFF fall due at min(window end, that same moment)
+ *    (revertDueMs, writeWindowEndMs);
+ *  - an unconfirmed restore pages ON_PEAK_PAGE_LEAD_MS before it at the latest, and again
+ *    when it starts (decideRevertDeadline); the force-charge OFF deadline is capped at the
+ *    same lead (nightForceCharge.forceChargeOffDeadlineMs).
+ * The overnight window ends at 05:00, eleven hours before the 16:00 on-peak start, so on a
+ * night that goes to plan none of this moves anything. A record armed before the stamp
+ * (null) keeps the window-only schedule.
+ */
+export const ON_PEAK_RAISE_GUARD_MS = 60 * 60_000;
+/** The latest an unconfirmed restore (or force-charge OFF) is paged before on-peak starts. */
+export const ON_PEAK_PAGE_LEAD_MS = 30 * 60_000;
+/** An unconfirmed restore pages this long after the window close, if on-peak is further off. */
+export const REVERT_DEADLINE_AFTER_WINDOW_MS = 30 * 60_000;
+/** A reserve reading that is neither ours nor the value we restore must stand this long — the
+ *  same value on two readings at least this far apart — before it is taken as someone else's. */
+export const FOREIGN_RESERVE_SETTLE_MS = 5 * 60_000;
+
+/** The moment raises stop: ON_PEAK_RAISE_GUARD_MS before the stamped on-peak start; null with
+ *  no stamp. PURE. */
+export function onPeakGuardStartMs(s: Pick<NightActuationState, 'nextOnPeakStartMs'>): number | null {
+  const p = s.nextOnPeakStartMs;
+  return p != null && Number.isFinite(p) ? p - ON_PEAK_RAISE_GUARD_MS : null;
+}
+
+/** The end of the span a night's raises may stand in: min(window end, onPeakGuardStartMs). The
+ *  window end alone with no stamp; the guard alone with no window; null with neither. PURE. */
+export function writeWindowEndMs(s: Pick<NightActuationState, 'windowEndMs' | 'nextOnPeakStartMs'>): number | null {
+  const guard = onPeakGuardStartMs(s);
+  if (s.windowEndMs == null) return guard;
+  return guard == null ? s.windowEndMs : Math.min(s.windowEndMs, guard);
+}
+
+/** When the restore falls due on the clock: min(window end + REVERT_LAG_MS, onPeakGuardStartMs);
+ *  null with neither (only a cancel or a grid loss then reverts). PURE. */
+export function revertDueMs(s: Pick<NightActuationState, 'windowEndMs' | 'nextOnPeakStartMs'>): number | null {
+  const guard = onPeakGuardStartMs(s);
+  if (s.windowEndMs == null) return guard;
+  const close = s.windowEndMs + REVERT_LAG_MS;
+  return guard == null ? close : Math.min(close, guard);
+}
+
+/** True from onPeakGuardStartMs on: no raise of any kind is issued. PURE. */
+export function onPeakGuardActive(s: Pick<NightActuationState, 'nextOnPeakStartMs'>, nowMs: number): boolean {
+  const guard = onPeakGuardStartMs(s);
+  return guard != null && nowMs >= guard;
+}
+
 /** Restart-persistent per-night actuation record (one file, day-keyed). */
 export interface NightActuationState {
   /** plan_date (YYYY-MM-DD America/Phoenix) of the armed plan; null = idle. */
@@ -516,6 +580,22 @@ export interface NightActuationState {
    *  armed-to-ride night into "reserve only" beside a figure that counts the force-charge leg.
    *  Arming does not change what decideForceCharge does. null = a record armed before the stamp. */
   forceChargeRides: boolean | null;
+  /** STAMPED AT ARM TIME: the start of the first on-peak period at or after the window open
+   *  (chargeWindows.nextOnPeakStartMs). Raises stop, and the restore and force-charge OFF fall
+   *  due, ON_PEAK_RAISE_GUARD_MS before it. null = no on-peak period ahead, or a record armed
+   *  before the stamp (the window-only schedule). */
+  nextOnPeakStartMs: number | null;
+  /** A reserve reading that is neither our target nor the value we restore, and when it was
+   *  first read: the first of the two readings the foreign rule needs (decideActuation). */
+  foreignReservePct: number | null;
+  foreignSeenAtMs: number | null;
+  /** When that reading was read again, FOREIGN_RESERVE_SETTLE_MS or more later: the reserve is
+   *  someone else's. Nothing more is written to it for this night, and the night is resolved. */
+  foreignSettledAtMs: number | null;
+  /** When the unconfirmed-restore page went (decideRevertDeadline): once at the deadline, once
+   *  at the on-peak start. */
+  revertDeadlinePagedAtMs: number | null;
+  revertDeadlineOnPeakPagedAtMs: number | null;
   lastError: string | null;
 }
 
@@ -541,6 +621,9 @@ export function emptyActuationState(): NightActuationState {
     forceChargeCeilingRestoredAtMs: null, forceChargeCeilingRestoreAttempts: 0,
     forceChargeCeilingRestoreLastAttemptMs: null,
     forceChargeRides: null,
+    nextOnPeakStartMs: null,
+    foreignReservePct: null, foreignSeenAtMs: null, foreignSettledAtMs: null,
+    revertDeadlinePagedAtMs: null, revertDeadlineOnPeakPagedAtMs: null,
     lastError: null,
   };
 }
@@ -618,6 +701,12 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeCeilingRestoreLastAttemptMs: num(o.forceChargeCeilingRestoreLastAttemptMs),
     // v1.187.22 — a record armed before the stamp has none: null, never a guess.
     forceChargeRides: typeof o.forceChargeRides === 'boolean' ? o.forceChargeRides : null,
+    nextOnPeakStartMs: num(o.nextOnPeakStartMs),
+    foreignReservePct: num(o.foreignReservePct),
+    foreignSeenAtMs: num(o.foreignSeenAtMs),
+    foreignSettledAtMs: num(o.foreignSettledAtMs),
+    revertDeadlinePagedAtMs: num(o.revertDeadlinePagedAtMs),
+    revertDeadlineOnPeakPagedAtMs: num(o.revertDeadlineOnPeakPagedAtMs),
     lastError: str(o.lastError),
   };
 }
@@ -674,8 +763,13 @@ export function armFromPlan(
   /** v1.187.22 — force-charge enabled at arm time (index.ts: forceChargeOn(), the gate the plan's
    *  expected figure was made with), stamped as `forceChargeRides`. Omitted ⇒ null, unknown. */
   forceChargeEnabled?: boolean,
+  /** The start of the on-peak period after the window open (chargeWindows.nextOnPeakStartMs),
+   *  stamped as `nextOnPeakStartMs`. Omitted ⇒ null: the window-only schedule. */
+  nextOnPeakStartMs?: number | null,
 ): NightActuationState | null {
-  if (prev.appliedAtMs != null && prev.revertedAtMs == null) return null; // unresolved night
+  // Unresolved: applied and not restored — unless the reserve settled as someone else's
+  // (foreignSettledAtMs), which nothing of ours will restore.
+  if (prev.appliedAtMs != null && prev.revertedAtMs == null && prev.foreignSettledAtMs == null) return null;
   // v1.165.0 — a force-charge that was switched ON and never verified OFF is an
   // unresolved night too. Arming returns a FRESH record, so re-arming here would
   // bury the only record that knows to switch it off. Verification keeps running
@@ -705,6 +799,7 @@ export function armFromPlan(
     // and the armed ceiling above the reserve maximum (at or below it the reserve reaches it alone).
     forceChargeRides: forceChargeEnabled === undefined ? null
       : forceChargeEnabled && ceiling != null && ceiling > RESERVE_WRITE_MAX_PCT,
+    nextOnPeakStartMs: nextOnPeakStartMs != null && Number.isFinite(nextOnPeakStartMs) ? nextOnPeakStartMs : null,
     // An unrestored original survives the fresh record, so tonight's restore still
     // returns the OWNER's ceiling, never a value we left behind.
     forceChargeCeilingPriorPct:
@@ -726,7 +821,9 @@ export function armRefusalReason(
   liveReservePct: number | null,
 ): string | null {
   const night = prev.day ?? 'a previous night';
-  if (prev.appliedAtMs != null && prev.revertedAtMs == null) return `the ${night} reserve write is still applied and not yet restored`;
+  if (prev.appliedAtMs != null && prev.revertedAtMs == null && prev.foreignSettledAtMs == null) {
+    return `the ${night} reserve write is still applied and not yet restored`;
+  }
   if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) {
     return `the ${night} force-charge was switched ON and its OFF has not verified`;
   }
@@ -837,7 +934,15 @@ export type ActuationAction =
   /** v1.131.0 - revert retries exhausted and the reserve is still stuck raised.
    *  Escalate once: this is the expensive end state (the panel holds the raised
    *  floor, so it buys grid instead of discharging) and it does not self-heal. */
-  | { kind: 'revertFailed'; restorePct: number };
+  | { kind: 'revertFailed'; restorePct: number }
+  /** The reserve reads `pct`, neither our target nor the value we restore: the first of the
+   *  two readings the foreign rule needs. Record it (foreignReservePct, foreignSeenAtMs). */
+  | { kind: 'foreignSeen'; pct: number }
+  /** The reserve reads one of our own values again: the pending sighting no longer stands. */
+  | { kind: 'foreignCleared' }
+  /** The same foreign value FOREIGN_RESERVE_SETTLE_MS or more after it was first read: it is
+   *  someone else's. Stamp foreignSettledAtMs, write nothing, and send an info push. */
+  | { kind: 'foreignSettled'; pct: number };
 
 export interface ActuationTickOpts {
   mode: NightChargeMode;
@@ -910,6 +1015,9 @@ export function decideActuation(
   // ── REVERT (checked next — always allowed, mode-independent: a raised
   // reserve must come back down even if the owner flipped to advisory). ──
   if (state.appliedAtMs != null && state.revertedAtMs == null) {
+    // The reserve settled as someone else's (the foreign rule below): nothing of ours holds it,
+    // and restoring our prior would overwrite their value. Write nothing.
+    if (state.foreignSettledAtMs != null) return { kind: 'none' };
     // ★★★ v1.162.0 — this MUST track the same envelope as the apply guard below.
     // It was a bare [10,50] pair while the apply guard was too, which is the only
     // reason v1.161.0 was survivable: the apply refused a baseline above 50, so no
@@ -927,12 +1035,22 @@ export function decideActuation(
     if (opts.gridPresent === false && restorable) {
       return { kind: 'revert', restorePct: state.priorReservePct!, gridLossAbort: true };
     }
-    const due =
-      state.cancelled ||
-      (state.windowEndMs != null && nowMs >= state.windowEndMs + REVERT_LAG_MS);
+    // FOREIGN. Once the write has read back, a reserve reading that is an in-envelope whole
+    // number and neither our target nor our prior is someone else's change — but only on two
+    // readings of the same value FOREIGN_RESERVE_SETTLE_MS apart (foreignStep). A settled one
+    // wins over the clock: the restore would overwrite it. A pending one does not hold the
+    // restore — the window-end revert stays clock-driven, and blind on a null or out-of-envelope
+    // reading. Before the write reads back, a short reading is the apply ladder's (applyCeiling).
+    const foreign = state.applyVerifiedAtMs != null ? foreignStep(state, opts.currentReservePct, nowMs) : null;
+    if (foreign?.kind === 'foreignSettled') return foreign;
+    // The restore falls due at the window close, or an hour before on-peak if that is sooner
+    // (revertDueMs: the on-peak guard).
+    const dueAt = revertDueMs(state);
+    const due = state.cancelled || (dueAt != null && nowMs >= dueAt);
     if (due && restorable) {
       return { kind: 'revert', restorePct: state.priorReservePct! };
     }
+    if (foreign) return foreign;
     // v1.79.0 — READBACK VERIFICATION. A cloud ACK is not an actuation: on
     // 2026-08-16 23:55 an ACK'd write never reached the SHP2, nothing compared
     // the device's reserve to the target, and the night ran its drawdown on a
@@ -949,8 +1067,11 @@ export function decideActuation(
         // against a reserve that is genuinely raised.
         const achieved = deviceCeilingPct(state, opts.currentReservePct);
         if (achieved != null) return { kind: 'applyCeiling', achievedPct: achieved };
+        // A re-issue is a raise: never into a closing window, nor within an hour of on-peak
+        // (writeWindowEndMs).
+        const writeEnd = writeWindowEndMs(state);
         if (state.applyRetries < APPLY_MAX_RETRIES &&
-            (state.windowEndMs == null || nowMs < state.windowEndMs - APPLY_VERIFY_AFTER_MS)) {
+            (writeEnd == null || nowMs < writeEnd - APPLY_VERIFY_AFTER_MS)) {
           return { kind: 'retryApply', targetPct: state.targetPct };
         }
         if (!state.applyEscalated) return { kind: 'applyFailed' };
@@ -975,10 +1096,15 @@ export function decideActuation(
   // alternative is a `return` whose safety depends on a guard two branches away.
   if (
     state.appliedAtMs != null && state.revertedAtMs != null &&
-    state.revertVerifiedAtMs == null && state.priorReservePct != null && state.targetPct != null
+    state.revertVerifiedAtMs == null && state.priorReservePct != null && state.targetPct != null &&
+    state.foreignSettledAtMs == null
   ) {
     const restorePct = state.priorReservePct;
     if (opts.currentReservePct === restorePct) return { kind: 'revertVerified' };
+    // A value that is neither ours nor the restore, standing on two readings, settles the night
+    // as someone else's (foreignStep) — the wait for our restore to read back ends there.
+    const foreign = foreignStep(state, opts.currentReservePct, nowMs);
+    if (foreign) return foreign;
     // Strict equality against the RAISED target for the failure verdict, the
     // same discipline as ADOPT: a reading that is neither value means the owner
     // (or the app) moved the floor themselves, and re-issuing our restore would
@@ -999,6 +1125,7 @@ export function decideActuation(
   if (state.targetPct == null || state.windowStartMs == null) return { kind: 'none' };
   if (nowMs < state.windowStartMs - APPLY_LEAD_MS) return { kind: 'none' }; // too early
   if (nowMs > state.windowStartMs + APPLY_LATE_MS) return { kind: 'none' }; // window missed — no late write
+  if (onPeakGuardActive(state, nowMs)) return { kind: 'none' }; // never a raise within an hour of on-peak
   if (opts.vitalsRed) return { kind: 'none' }; // never actuate during an active critical
   if (!opts.socCoherent) return { kind: 'none' };
   const cur = opts.currentReservePct;
@@ -1008,4 +1135,242 @@ export function decideActuation(
       || cur < RESERVE_WRITE_MIN_PCT || cur > RESERVE_WRITE_MAX_PCT) return { kind: 'none' };
   if (state.targetPct <= cur) return { kind: 'none' }; // nothing to raise
   return { kind: 'apply', targetPct: state.targetPct };
+}
+
+/** A reading that could be someone else's reserve: an in-envelope whole number that is neither
+ *  our target nor the value we restore. A null, fractional or out-of-envelope reading never is
+ *  (a reconnect 0 is not a setting), and nothing is while the value we restore is not itself a
+ *  valid reserve — without it, ours and theirs cannot be told apart. PURE. */
+export function isForeignReserveReading(
+  s: Pick<NightActuationState, 'targetPct' | 'priorReservePct'>,
+  liveReservePct: number | null,
+): boolean {
+  const inEnvelope = (v: number | null): v is number =>
+    v != null && Number.isInteger(v) && v >= RESERVE_WRITE_MIN_PCT && v <= RESERVE_WRITE_MAX_PCT;
+  return inEnvelope(liveReservePct) && inEnvelope(s.priorReservePct) && s.targetPct != null
+    && liveReservePct !== s.targetPct && liveReservePct !== s.priorReservePct;
+}
+
+/**
+ * THE FOREIGN RULE, one reading at a time. PURE. A reserve someone else set during the night
+ * (the EcoFlow app, Storm Guard) is theirs, and restoring our prior over it would undo their
+ * change at the window close. One reading proves nothing: a foreign value must read the same on
+ * two readings at least FOREIGN_RESERVE_SETTLE_MS apart.
+ *  - a foreign reading (isForeignReserveReading): the first sighting of that value is recorded
+ *    (foreignSeen; a different value restarts it); the same value FOREIGN_RESERVE_SETTLE_MS or
+ *    more after it settles (foreignSettled);
+ *  - one of our own values (the target, or the restore) with a sighting pending: cleared;
+ *  - a null or out-of-envelope reading: nothing — absence is not evidence either way.
+ * null = nothing to record.
+ */
+export function foreignStep(
+  s: Pick<NightActuationState, 'targetPct' | 'priorReservePct' | 'foreignReservePct' | 'foreignSeenAtMs'>,
+  liveReservePct: number | null,
+  nowMs: number,
+): Extract<ActuationAction, { kind: 'foreignSeen' | 'foreignCleared' | 'foreignSettled' }> | null {
+  if (isForeignReserveReading(s, liveReservePct)) {
+    const pct = liveReservePct!;
+    if (s.foreignReservePct === pct && s.foreignSeenAtMs != null) {
+      return nowMs - s.foreignSeenAtMs >= FOREIGN_RESERVE_SETTLE_MS ? { kind: 'foreignSettled', pct } : null;
+    }
+    return { kind: 'foreignSeen', pct };
+  }
+  if (s.foreignSeenAtMs != null && liveReservePct != null
+      && (liveReservePct === s.targetPct || liveReservePct === s.priorReservePct)) {
+    return { kind: 'foreignCleared' };
+  }
+  return null;
+}
+
+/**
+ * A write of ours may still hold the reserve. PURE. One was applied — or attempted and never
+ * confirmed either way — its restore has not read back, and the reserve has not settled as
+ * someone else's.
+ */
+export function revertOutstanding(
+  s: Pick<NightActuationState, 'targetPct' | 'appliedAtMs' | 'applyAttemptedAtMs' | 'revertedAtMs'
+    | 'revertVerifiedAtMs' | 'foreignSettledAtMs'>,
+): boolean {
+  if (s.targetPct == null || s.revertVerifiedAtMs != null || s.foreignSettledAtMs != null) return false;
+  if (s.appliedAtMs != null) return true;
+  return s.applyAttemptedAtMs != null && s.revertedAtMs == null;
+}
+
+/** When an unconfirmed restore pages: min(window close + REVERT_DEADLINE_AFTER_WINDOW_MS, on-peak
+ *  start − ON_PEAK_PAGE_LEAD_MS); either alone when the other is unknown; null with neither. PURE. */
+export function revertDeadlineMs(s: Pick<NightActuationState, 'windowEndMs' | 'nextOnPeakStartMs'>): number | null {
+  const afterClose = s.windowEndMs != null ? s.windowEndMs + REVERT_DEADLINE_AFTER_WINDOW_MS : null;
+  const beforePeak = s.nextOnPeakStartMs != null && Number.isFinite(s.nextOnPeakStartMs)
+    ? s.nextOnPeakStartMs - ON_PEAK_PAGE_LEAD_MS : null;
+  if (afterClose == null) return beforePeak;
+  return beforePeak == null ? afterClose : Math.min(afterClose, beforePeak);
+}
+
+export type RevertDeadlineDecision =
+  | { kind: 'none' }
+  /** `stage`: the deadline (revertDeadlineMs), or the on-peak start itself. `unknown`: no live
+   *  reading — the words say the restore could not be CONFIRMED, never that it reads raised. */
+  | { kind: 'page'; stage: 'deadline' | 'onPeak'; unknown: boolean };
+
+/**
+ * revertDeadline — the wall-clock page for a restore that has not read back. PURE.
+ *
+ * Every other revert escalation needs evidence: three cloud-rejected writes, or a live reading
+ * of the raised target after the re-issues. A panel whose readback goes dark at the close gave
+ * neither, and the reserve could stand raised into the on-peak period with nothing said. This
+ * needs only the clock: an audible critical (and a critical push) once at revertDeadlineMs and
+ * once more at the on-peak start, while a write of ours may still hold the reserve
+ * (revertOutstanding) and the live reading is our target or unknown. Any other reading is not
+ * ours to page about: the restore itself (it reads back on this tick), or a value someone else
+ * set. Broadcast quiet hours apply as to every critical announce; the push always goes.
+ */
+export function decideRevertDeadline(
+  s: NightActuationState,
+  nowMs: number,
+  liveReservePct: number | null,
+): RevertDeadlineDecision {
+  if (s.day == null || !revertOutstanding(s)) return { kind: 'none' };
+  if (liveReservePct != null && liveReservePct !== s.targetPct) return { kind: 'none' };
+  const unknown = liveReservePct == null;
+  if (s.nextOnPeakStartMs != null && nowMs >= s.nextOnPeakStartMs && s.revertDeadlineOnPeakPagedAtMs == null) {
+    return { kind: 'page', stage: 'onPeak', unknown };
+  }
+  const deadline = revertDeadlineMs(s);
+  if (deadline != null && nowMs >= deadline && s.revertDeadlinePagedAtMs == null) {
+    return { kind: 'page', stage: 'deadline', unknown };
+  }
+  return { kind: 'none' };
+}
+
+/** The value an outstanding write restores: the prior read before the write, else (an attempt
+ *  never confirmed) the attempt-time baseline; null when neither is a valid reserve. PURE. */
+export function restoreTargetPct(s: Pick<NightActuationState, 'priorReservePct' | 'attemptBaselinePct'>): number | null {
+  const ok = (v: number | null): v is number =>
+    v != null && Number.isInteger(v) && v >= RESERVE_WRITE_MIN_PCT && v <= RESERVE_WRITE_MAX_PCT;
+  if (ok(s.priorReservePct)) return s.priorReservePct;
+  return ok(s.attemptBaselinePct) ? s.attemptBaselinePct : null;
+}
+
+/**
+ * The spoken revertDeadline page, English and Spanish. PURE. `onPeakClock` is the on-peak start
+ * as a clock ("4:00 PM"), null when the night has no stamp. With no live reading it says the
+ * restore could not be confirmed; with our target still read back it says the reserve still
+ * reads it. A restore value that is not known is "its usual level".
+ */
+export function revertDeadlineSpoken(o: {
+  stage: 'deadline' | 'onPeak';
+  unknown: boolean;
+  /** Our target — what the reserve still reads when the reading is known. */
+  targetPct: number;
+  restorePct: number | null;
+  onPeakClock: string | null;
+}): { en: string; es: string } {
+  const r = o.restorePct;
+  const toEn = r != null ? `${r} percent` : 'its usual level';
+  const insteadEs = r != null ? `en lugar del ${r} por ciento` : 'en lugar de su nivel habitual';
+  const toEs = r != null ? `al ${r} por ciento` : 'a su nivel habitual';
+  const t = o.targetPct;
+  const peakEn = o.onPeakClock != null ? `, and on-peak pricing starts at ${o.onPeakClock}` : '';
+  const peakEs = o.onPeakClock != null ? `, y la tarifa punta comienza a las ${o.onPeakClock}` : '';
+  if (o.stage === 'onPeak') {
+    return o.unknown
+      ? {
+        en: `Critical. On-peak pricing has started and the night charge system still cannot confirm that the backup reserve was restored to ${toEn}. `
+          + `Check the backup reserve in the EcoFlow app and set it to ${toEn}.`,
+        es: 'Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y el sistema de carga nocturna sigue sin poder confirmar '
+          + `que la reserva de respaldo se restableció ${toEs}. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela ${toEs}.`,
+      }
+      : {
+        en: `Critical. On-peak pricing has started and the backup reserve still reads ${t} percent instead of ${toEn}. `
+          + `The house is buying grid power at the peak rate to hold it. Set the backup reserve to ${toEn} in the EcoFlow app.`,
+        es: `Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y la reserva de respaldo sigue en el ${t} por ciento ${insteadEs}. `
+          + `La casa está comprando energía de la red a la tarifa punta para mantenerla. Ajuste la reserva de respaldo ${toEs} en la aplicación EcoFlow.`,
+      };
+  }
+  return o.unknown
+    ? {
+      en: `Critical. The night charge system could not confirm that the backup reserve was restored to ${toEn}: `
+        + `the panel is not reporting it${peakEn}. Check the backup reserve in the EcoFlow app and set it to ${toEn}.`,
+      es: 'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo confirmar que la reserva de respaldo se restableció '
+        + `${toEs}: el panel no la está informando${peakEs}. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela ${toEs}.`,
+    }
+    : {
+      en: `Critical. The night charge system could not restore the backup reserve. It still reads ${t} percent instead of ${toEn}${peakEn}. `
+        + `Set the backup reserve to ${toEn} in the EcoFlow app.`,
+      es: 'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo restablecer la reserva de respaldo. '
+        + `Sigue en el ${t} por ciento ${insteadEs}${peakEs}. Ajuste la reserva de respaldo ${toEs} en la aplicación EcoFlow.`,
+    };
+}
+
+/**
+ * heldByChargeWrite — the on-peak MONEY detectors (peakGridDraw.ts: the grid-to-battery draw and
+ * the idle pool) stay quiet near the reserve, because near the OWNER's floor buying on-peak is
+ * outage protection. A restore of ours that did not take leaves OUR target standing as the
+ * panel's reserve, and against it those detectors read "near the reserve" and stay silent while
+ * the panel refills to our value at the peak rate. While that holds they measure against the
+ * prior floor instead. The runway and below-reserve alarms are untouched: they keep the live
+ * value, the conservative side for safety.
+ *
+ * chargeWriteHold is the record's half (PURE): an applied write whose restore has not read back
+ * and has not settled as someone else's, with a valid prior that differs from the target, and
+ * the moment its restore fell due (revertDueMs). moneyDetectorReservePct is the reading's half:
+ * past that moment, with the panel still reading exactly our target, the prior; otherwise the
+ * live value.
+ */
+export interface ChargeWriteHold {
+  targetPct: number;
+  priorPct: number;
+  restoreDueMs: number;
+}
+
+export function chargeWriteHold(s: NightActuationState): ChargeWriteHold | null {
+  if (s.appliedAtMs == null || !revertOutstanding(s)) return null;
+  const prior = s.priorReservePct;
+  const target = s.targetPct;
+  const due = revertDueMs(s);
+  if (prior == null || !Number.isInteger(prior) || prior < RESERVE_WRITE_MIN_PCT || prior > RESERVE_WRITE_MAX_PCT) return null;
+  if (target == null || target === prior || due == null) return null;
+  return { targetPct: target, priorPct: prior, restoreDueMs: due };
+}
+
+export function moneyDetectorReservePct(
+  liveReservePct: number | null,
+  hold: ChargeWriteHold | null,
+  nowMs: number,
+): { reservePct: number | null; heldByChargeWrite: boolean } {
+  if (hold != null && liveReservePct != null && liveReservePct === hold.targetPct && nowMs >= hold.restoreDueMs) {
+    return { reservePct: hold.priorPct, heldByChargeWrite: true };
+  }
+  return { reservePct: liveReservePct, heldByChargeWrite: false };
+}
+
+/** Publisher (same set/get pattern as the owner floor): index.ts sets it on every actuation-state
+ *  write, the alert monitor reads it. */
+let chargeWriteHoldPub: ChargeWriteHold | null = null;
+export function setChargeWriteHold(v: ChargeWriteHold | null): void { chargeWriteHoldPub = v; }
+export function getChargeWriteHold(): ChargeWriteHold | null { return chargeWriteHoldPub; }
+/** Test seam. */
+export function resetChargeWriteHold(): void { chargeWriteHoldPub = null; }
+
+/**
+ * What /api/reserve-floor's refusal says about the active night's restore. PURE. While the night's
+ * write holds the reserve, a floor set now would be overwritten by the restore, so the refusal names
+ * when that is: on a cancelled night, on the next actuator tick; otherwise at revertDueMs (the window
+ * close, or an hour before on-peak if that is sooner) — or, past it, that it was due then and has not
+ * completed. `fmtWhen` renders an instant as the announcement does ("at 5:00 AM", "on Monday at
+ * 12:00 AM"). `atMs` is the restore moment; null when only a cancel would restore.
+ */
+export function reserveRestoreNote(
+  s: Pick<NightActuationState, 'priorReservePct' | 'cancelled' | 'windowEndMs' | 'nextOnPeakStartMs'>,
+  nowMs: number,
+  fmtWhen: (ms: number, nowMs: number) => string,
+): { text: string; atMs: number | null } {
+  const prior = s.priorReservePct != null ? `${s.priorReservePct}%` : 'the old floor';
+  if (s.cancelled) return { text: `the night was cancelled and it restores ${prior} within a minute`, atMs: nowMs };
+  const due = revertDueMs(s);
+  if (due == null) return { text: `it restores ${prior} only when the night's write is cancelled`, atMs: null };
+  const when = fmtWhen(due, nowMs);
+  return due > nowMs
+    ? { text: `it restores ${prior} ${when}, and would put that back over a floor set now`, atMs: due }
+    : { text: `its restore to ${prior} was due ${when} and has not completed yet`, atMs: due };
 }
