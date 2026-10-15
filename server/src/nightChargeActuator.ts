@@ -262,7 +262,8 @@ export function resetReserveArbitrageRaised(): void { reserveArbitrageRaised = f
  * inside setBackupReserveSoc's range check, so nothing in the codebase said out
  * loud that it is the ceiling on everything the night-charge engine can achieve
  * — which is how `ARB_COST_MAX_SOC_PCT`, schema `int(50,100)`, came to ship with
- * a minimum equal to this maximum (see DOCS.md §8b). Anything that reports a
+ * a minimum equal to this maximum (see docs/reference/15-2-night-charge-writes.md
+ * “8b. Supervised write mode”). Anything that reports a
  * reserve figure to an operator must reconcile against these. There is now ONE
  * definition: `ecoflow/commands.ts` imports these rather than repeating them.
  *

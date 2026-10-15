@@ -235,8 +235,9 @@ export interface ForceChargeOpts {
   enabled: boolean;
   /** Live grid presence (null = unknown). ON needs true; OFF fires on false. */
   gridPresent: boolean | null;
-  /** SHP2 `gridSta` read directly: connected is `=== 1` ONLY (DOCS "Grid presence";
-   *  2 is islanded/EPS, 0 is absent). Anything else is an independent grid-loss
+  /** SHP2 `gridSta` read directly: connected is `=== 1` ONLY (2 is islanded/EPS, 0 is
+   *  absent; docs/reference/02-1-cloud-protocol-and-snapshot.md “Backup pool + grid
+   *  presence”). Anything else is an independent grid-loss
    *  signal that turns force-charge OFF even if the resolver disagrees. */
   gridStaLost: boolean;
   /** Live readback of the panel's force-charge ceiling (foceChargeHight); null = no

@@ -1,7 +1,8 @@
 /**
  * v1.187.16 — every write route (POST/PUT/PATCH/DELETE) registered in index.ts carries the write
  * gate (requireWriteAuth). Until v1.187.16 two did not (/api/energy-history/backfill and
- * /api/alerts/outcome), while DOCS stated every write is gated.
+ * /api/alerts/outcome), while the manual stated every write is gated
+ * (docs/reference/12-configuration-deployment-security.md “Security posture”).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

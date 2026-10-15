@@ -1,0 +1,18 @@
+{
+  "_about": "Data for scripts/check-docs.mjs. reference: the chapter numbers and appendix letters the reference must hold (D6). ratchet: exact counts over docs/reference (D8); when one falls, lower it to the number the check prints, never raise it. They were set at the split to what docs/reference measured (the single-file manual before it measured 105 release paragraphs, 52 file:line citations and 352 section signs; the release log and the audits took the rest to docs/history, the option table to docs/guide). history: sha256 of each frozen file in docs/history (D9). nameAllowlist: backticked UPPER_SNAKE names the operator pages may use that are not option keys (D4); each must occur as a string literal in server/src (docsLayout.test.ts).",
+  "reference": {
+    "chapters": 15,
+    "appendices": ["A"]
+  },
+  "ratchet": {
+    "releaseParagraphs": 45,
+    "fileLineCitations": 52,
+    "sectionSigns": 333
+  },
+  "history": {
+    "docs/history/engineering-release-log-1.md": "0b35a675203993257b364e8b3b9542e1db66809aa47a6ae8799586fd2faa68be",
+    "docs/history/engineering-release-log-2.md": "7939f035a6ea81ec728ec04037311eb02dc91a3d6ca60873d1afb97f8e100fa8",
+    "docs/history/operations-audits.md": "d140f0fe5cd9d77850feb5e0e272622087f15f0fdc47f65ac7f89fbe0aac2e95"
+  },
+  "nameAllowlist": ["LEARNING", "READY_TO_CONSIDER_WRITES", "BLOCKED"]
+}
