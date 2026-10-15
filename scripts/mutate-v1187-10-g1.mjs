@@ -27,8 +27,10 @@
  * from ONE source (tariff.ts seasonAt) for the rate table, the two-tier basis, the /api/tariff
  * view and the nightly plan's tariff snapshot. Mutants S-i..vi.
  *
- * Not mutated: the DOCS §9 entity rows (C35 — a documentation fix; nightChargeMqtt.test.ts reads
- * DOCS.md, and check-mutant-anchors.mjs does not resolve .md targets); the one-line log texts.
+ * Not mutated: the night-charge entity rows of the manual's chapter 15 section 9 (C35 — a
+ * documentation fix; nightChargeMqtt.test.ts reads them, now in
+ * docs/reference/15-2-night-charge-writes.md “9. Delivery surfaces” and docs/guide/entities.md,
+ * and check-mutant-anchors.mjs did not resolve .md targets then); the one-line log texts.
  *
  * Re-pointed elsewhere in this release: mutate-reserve-posture.mjs vii (the owner-floor condition
  * line) and mutate-force-charge.mjs xiv (classifyChange's force-charge guard).

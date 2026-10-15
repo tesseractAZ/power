@@ -1551,9 +1551,10 @@ app.get('/api/repair-issues', async (req, reply) => {
 
 /**
  * Flat key-value snapshot for Home Assistant REST sensors. One HTTP call
- * returns every metric we expose as an HA entity (`configuration.yaml`
- * snippet is in DOCS.md). Cached forecast + degradation are reused, so
- * HA can poll this every 30s without hammering the recorder.
+ * returns every metric we expose as an HA entity (the fields:
+ * docs/reference/02-2-home-assistant-wiring.md “/api/ha-state (selected fields)”).
+ * Cached forecast + degradation are reused, so HA can poll this every 30s
+ * without hammering the recorder.
  */
 app.get('/api/ha-state', async (req, reply) => {
   const snap = store.get();
@@ -1758,7 +1759,7 @@ app.get('/api/ha-state', async (req, reply) => {
     grid_import_lifetime_kwh: lifetimeKwh('fleet_grid_import_wh'),
     // v1.3.0 (audit rank 12) — the SHP2-gridWatt whole-home counter (v0.34.0). It was
     // published by /api/lifetime-energy but absent from /api/ha-state, so the REST sensor
-    // DOCS.md tells operators to create against ha-state read `unknown` forever. Distinct
+    // the manual of the time told operators to create against ha-state read `unknown` forever. Distinct
     // from grid_import_lifetime_kwh (DPU ac_in basis) — see project_energy_grid_reconcile.
     grid_to_home_lifetime_kwh: lifetimeKwh('fleet_grid_home_wh'),
     battery_charge_lifetime_kwh: lifetimeKwh('fleet_battery_charge_wh'),
@@ -5341,7 +5342,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     enabled: !opts.forceDisabled && forceChargeOn(),
     // v1.179.0 — tri-state: null when presence is false only because nothing can be heard.
     gridPresent: gridNow.present ? true : gridNow.presenceUnknown ? null : false,
-    // Connected is gridSta === 1 ONLY (DOCS "Grid presence"): 2 is islanded, 0 absent.
+    // Connected is gridSta === 1 ONLY (docs/reference/02-1-cloud-protocol-and-snapshot.md
+    // “Backup pool + grid presence”): 2 is islanded, 0 absent.
     gridStaLost: sp != null && typeof sp.gridSta === 'number' && sp.gridSta !== 1,
     slotsOn,
     connectedSlots,
@@ -6104,7 +6106,8 @@ app.post('/api/night-charge/cancel', { preHandler: requireWriteAuth }, async (_r
 });
 
 // v1.184.0 — the operator's "the grid is back" for a declared-grid veto held on a panel reading
-// the panel is not refreshing (DOCS "Grid backstop resolver" 4.2). Refused while the panel is
+// the panel is not refreshing (docs/reference/05-runway-and-soc-alarms.md “4.2 Signals combined
+// (resolveGridBackstop)”). Refused while the panel is
 // freshly reporting no grid: that is the measurement, and its next poll would veto again.
 // v1.185.0 — the house panel: which one night charge writes to, every panel's pool, and (POST) the
 // operator's pin when two panels stand with none pinned. Moving an EXISTING pin is refused while a

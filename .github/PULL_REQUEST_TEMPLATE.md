@@ -15,8 +15,9 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 - [ ] `python3 scripts/check-no-secrets.py` — no home IPs, DIDs, VoIP credentials, personal email or device serials in tracked files
 - [ ] If `config.yaml` options/schema changed: `python3 scripts/validate-addon-config.py` — **every option needs `en` AND `es`** entries and a `config.yaml` default
 - [ ] `node scripts/check-mutant-anchors.mjs` — all mutation-harness anchors still resolve
+- [ ] `node scripts/check-docs.mjs --check` — documentation sizes, links and completeness (D1–D11); the operator guide `ecoflow_panel/DOCS.md` stays at or under 32 KiB (Home Assistant renders all of it on every open of the Documentation tab)
 - [ ] `node scripts/check-npm-audit.mjs` — no high/critical advisories in the production dependency tree, no expired waivers
-- [ ] If this adds or removes tests, harnesses or workflows, or changes DOCS.md length by more than 3%: the README sentence is updated and `node scripts/check-doc-claims.mjs --tests <N>` passes
+- [ ] If this adds or removes tests, harnesses or workflows, changes the length of the engineering reference in `docs/reference/` by more than 3%, or adds or removes a reference file: the README sentence is updated and `node scripts/check-doc-claims.mjs --tests <N>` passes
 - [ ] CI green: type-check matrix · server-test type-check · server tests + README claims · mutant anchors · no personal data · dependency advisories · add-on config · release-PR version (`release-pr.yml`) · Docker smoke build · docs build · CodeQL
 - [ ] Tested against live EcoFlow data, or N/A (docs / CI-only change)
 - [ ] If UI changed: screenshot or short clip attached below
@@ -25,7 +26,8 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 - [ ] A **committed mutation harness** covers it (`scripts/mutate-*.mjs`), and it kills every mutant. Reverting the fix must make a test fail — "the tests would catch it" is not a claim this repo accepts without the harness.
 - [ ] An exemplar reproducing the **motivating defect verbatim** is in the harness, not just the general case.
 - [ ] If a mutant survived and you could not kill it, say so here and say why — a known survivor documented in the harness beats a silent gap.
-- [ ] `DOCS.md` updated in the same PR if this adds or changes an engine, option or API surface.
+- [ ] The operator guide updated in the same PR, in the present tense, if this adds or changes an option, alarm, entity, device write or setup step: `ecoflow_panel/DOCS.md`, `docs/guide/options.md`, `docs/guide/entities.md`.
+- [ ] The owning chapter in `docs/reference/` updated in the same PR, in the present tense, if this adds or changes an engine or API surface. What changed and why goes in `CHANGELOG.md` and this PR, not in the reference.
 - [ ] The harness runs on `scripts/lib/mutateParallel.mjs` and its baseline passes in every worker. A baseline ABORT is not a result: lower `MUTATE_CONCURRENCY` or fix the flaky case.
 - [ ] If this moves an existing guard, the harnesses that pin it were re-run — a moved guard can leave its mutant equivalent (2026-10-10: `mutate-analytics-worker` xi after v1.187.10).
 

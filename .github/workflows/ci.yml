@@ -137,7 +137,7 @@ jobs:
           echo "parsed pass count: $count"
 
       # v1.149.0 — every counted claim in README.md had silently rotted (tests,
-      # harnesses, anchors, DOCS.md length, the workflow roster, and a paragraph
+      # harnesses, anchors, manual length, the workflow roster, and a paragraph
       # asserting GitHub's alert endpoints return empty — true when written, false
       # once the repository went public). None of them failed anything, because a
       # number in prose has no mechanism holding it to the tree. This is that
@@ -233,9 +233,11 @@ jobs:
           cache-to: type=gha,mode=max,scope=docker-smoke,ignore-error=true
 
   docs-docx:
-    # Assemble README + SECURITY + DOCS into the printable .docx on every
-    # push/PR. Purpose is twofold: (1) catch a DOCS.md that no longer converts
-    # cleanly BEFORE it reaches a release, and (2) publish a downloadable
+    # Assemble README, the operator guide (DOCS.md, docs/guide/), SECURITY and the
+    # engineering reference (docs/reference/, in manifest order) into the printable
+    # .docx on every push/PR. Purpose is twofold: (1) catch documentation that no
+    # longer converts cleanly, or a link that no longer resolves, BEFORE it reaches
+    # a release, and (2) publish a downloadable
     # preview artifact so reviewers can read the offline manual for the branch.
     # The same generator (scripts/build-docs-docx.py) attaches the .docx to the
     # GitHub Release in images.yml, so this job keeps that path exercised.
@@ -268,7 +270,7 @@ jobs:
 
       # A PDF alongside the .docx — a faithful render of the SAME document (same
       # generated TOC + page breaks) via LibreOffice headless (no LaTeX). On the
-      # PR this is a HARD gate (if-no-files-found: error below): a DOCS.md or
+      # PR this is a HARD gate (if-no-files-found: error below): a documentation or
       # toolchain change that can't produce a PDF fails the check rather than
       # silently shipping a release without one.
       - name: Ensure LibreOffice (docx → pdf)

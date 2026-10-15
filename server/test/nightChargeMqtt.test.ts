@@ -7,9 +7,7 @@ import { nightChargeStateFields } from '../src/nightChargeAdvisor.js';
 import type { NightChargePlan } from '../src/nightChargeAdvisor.js';
 import { nightChargeGateFields } from '../src/nightChargeGate.js';
 import { buildNightChargeMessage } from '../src/notify.js';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { referenceSection, entityRows } from './helpers/referenceDocs.js';
 
 /**
  * WS5 (MQTT + notify) tests for the night-charge advisory surfaces.
@@ -207,30 +205,42 @@ test('night-charge message: cushion-shortfall and over-buy caveats surface in th
   assert.match(overBuy.body, /clip is accepted/i);
 });
 
-/* ── v1.187.10 — DOCS §9 names every night-charge entity for what it carries ──────────
- * A doc-claim check (it reads the engineering reference, not the code): the §9 table described
+/* ── v1.187.10 — the night-charge chapter's section 9 names every entity for what it carries ──
+ * A doc-claim check (it reads the docs, not the code): the section 9 table described
  * `ecoflow_night_charge_target_soc` as "Target pool SoC by window close" — it carries the
  * reserve SETPOINT (clampReserveTarget(plan.setpointSocPct)) since the v1.62.0 ask/forecast
  * split — and did not list `ecoflow_night_charge_expected_soc`, the prediction. On 10-02
- * target_soc read 50 all night while the pack aimed at 73.1%. */
-test('★ DOCS §9: every night-charge discovery entity has a row; target_soc is the setpoint, expected_soc the worst-case arrival', () => {
-  // v1.188.0 — the chapter moved to docs/reference; ecoflow_panel/DOCS.md is the operator guide.
-  const docs = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../docs/reference/15-2-night-charge-writes.md'), 'utf8');
-  const start = docs.indexOf('### 9. Delivery surfaces');
-  assert.ok(start > 0, 'the section exists');
-  const sec = docs.slice(start, docs.indexOf('\n### ', start + 10));
+ * target_soc read 50 all night while the pack aimed at 73.1%.
+ * v1.188.0 — the chapter moved to docs/reference/ and is found by its heading through the
+ * manifest (helpers/referenceDocs.ts), so a later split of the file cannot strand this check. The
+ * operator's entity page, docs/guide/entities.md, carries the same two rows and is held to the
+ * same claims. */
+test('★ reference ch.15 section 9 + entities.md: every night-charge discovery entity has a row; target_soc is the setpoint, expected_soc the worst-case arrival', () => {
+  const { text: sec } = referenceSection(3, '9. Delivery surfaces');
+  const entities = entityRows();
   for (const { unique_id: id } of [...NIGHT_CHARGE_SENSORS, ...NIGHT_CHARGE_BINARY]) {
     const listed = sec.includes(`| \`${id}\``)
       || (id.endsWith('_end') && sec.includes(`| \`${id.replace(/_end$/, '_start')}\` / \`_end\``));
-    assert.ok(listed, `${id} has a §9 row`);
+    assert.ok(listed, `${id} has a section 9 row`);
+    assert.ok(entities.has(id), `${id} has a row in docs/guide/entities.md`);
   }
   const row = (id: string) => sec.split('\n').find((l) => l.startsWith(`| \`${id}\``)) ?? '';
-  assert.match(row('ecoflow_night_charge_target_soc'), /SETPOINT/);
-  assert.doesNotMatch(row('ecoflow_night_charge_target_soc'), /by window close/);
+  for (const [where, line] of [
+    ['reference', row('ecoflow_night_charge_target_soc')],
+    ['entities.md', entities.get('ecoflow_night_charge_target_soc')?.text ?? ''],
+  ] as const) {
+    assert.match(line, /SETPOINT/, `${where}: target_soc is the setpoint`);
+    assert.doesNotMatch(line, /by window close/, `${where}: target_soc is not a window-close prediction`);
+  }
   // v1.187.22 — the "prediction" is the arrival projected on the islanded worst case the plan is
   // sized on, and the row says so (the entity is named "Arrival SoC (Worst Case)").
-  assert.match(row('ecoflow_night_charge_expected_soc'), /islanded worst case/);
-  assert.match(row('ecoflow_night_charge_expected_soc'), /Arrival SoC \(Worst Case\)/);
+  for (const [where, line] of [
+    ['reference', row('ecoflow_night_charge_expected_soc')],
+    ['entities.md', entities.get('ecoflow_night_charge_expected_soc')?.text ?? ''],
+  ] as const) {
+    assert.match(line, /islanded worst case/, `${where}: expected_soc is the islanded worst case`);
+    assert.match(line, /Arrival SoC \(Worst Case\)/, `${where}: expected_soc names the entity`);
+  }
   // And the code still splits them that way (the row is only true while this holds).
   const plan = { generatedAt: Date.now(), basisComplete: true, setpointSocPct: 64, targetSocPct: 73.1, buyKwh: 9.13,
     chargeTonight: true, window: null } as unknown as NightChargePlan;

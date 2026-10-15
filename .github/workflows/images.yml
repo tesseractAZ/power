@@ -302,7 +302,8 @@ jobs:
       # assets cannot be added after `gh release create` (HTTP 422) — the file is
       # therefore passed as a positional asset to `gh release create` below, not
       # uploaded in a later step. Same generator CI uses (scripts/build-docs-docx.py);
-      # the document bundles README + SECURITY + the full DOCS.md engine reference.
+      # the document bundles README, the operator guide (DOCS.md, docs/guide/), SECURITY
+      # and the engineering reference (docs/reference/); docs/history/ is not printed.
       #
       # Best-effort: gated on `!skip` (only when we actually create the Release) and
       # `hashFiles(script) != ''` (a workflow_dispatch re-run against an OLD tag that

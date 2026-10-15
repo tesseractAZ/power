@@ -142,7 +142,7 @@ never blocked).
   These invariants are pinned by `server/test/apparmorProfile.test.ts`, which runs
   in CI, and by the mutation harness `scripts/mutate-v1187-15.mjs`, whose anchors
   the CI anchor check resolves. The procedure and its evidence are in
-  [`ecoflow_panel/DOCS.md`, “AppArmor profile”](ecoflow_panel/DOCS.md#apparmor-profile-ecoflow_panelapparmortxt).
+  [`docs/reference/12-configuration-deployment-security.md`, “AppArmor profile”](docs/reference/12-configuration-deployment-security.md#apparmor-profile-ecoflow_panelapparmortxt).
 - **Least-privilege Home Assistant access.** `hassio_role: homeassistant` (not
   `manager`): the only Supervisor call is a read-only add-on listing.
   `homeassistant_api` is used for notifications and announcements, entity state,

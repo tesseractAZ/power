@@ -31,17 +31,24 @@ inverter units add no capacity), a **42-panel / ~16.8 kW** array, and an EVSE �
 on the APS R-EV time-of-use rate. Two further Cores sit off the panel as bench
 spares: they are monitored, but are not part of the backup pool.
 
-> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~12,000
-> lines) documents **every** feature and engine — what each does, the exact
-> algorithm and math it computes, how data traces through the pipeline, its
-> endpoints/sensors, config knobs, and edge-case guards. This README is the tour;
-> DOCS.md is the manual.
+> 📖 **Documentation.** The operator guide, [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md),
+> is what Home Assistant shows on the add-on's Documentation tab: setup, what an alarm means
+> and what to do, what Power writes to your devices, options by goal, and troubleshooting.
+> Every option is in [`docs/guide/options.md`](docs/guide/options.md) and every Home
+> Assistant entity in [`docs/guide/entities.md`](docs/guide/entities.md). The
+> [engineering reference](docs/reference/README.md) (~11,300 lines in 19 reference files)
+> documents **every** feature and engine — what each does, the exact algorithm and math it
+> computes, how data traces through the pipeline, its endpoints/sensors, config knobs, and
+> edge-case guards. This README is the tour; the reference is the manual.
 >
-> 🖨️ **Offline / printable:** a single-file **`.docx` and `.pdf`** build of this
-> README + `SECURITY.md` + the full `DOCS.md` (with a linked table of contents)
-> is attached to every [GitHub Release](https://github.com/tesseractAZ/power/releases).
-> Regenerate locally with `python3 scripts/build-docs-docx.py` (needs `pandoc`;
-> the PDF additionally needs LibreOffice).
+> 🖨️ **Offline / printable:** a single-file **`.docx` and `.pdf`** build is attached to every
+> [GitHub Release](https://github.com/tesseractAZ/power/releases). It holds this README, the
+> operator guide with its option and entity pages, `SECURITY.md` and the whole engineering
+> reference, and a link between them jumps within the document. The frozen release log and
+> operations audits in [`docs/history/`](docs/history/) are not printed, and the PDF's
+> table-of-contents page is empty for now. Regenerate locally with
+> `python3 -I -B scripts/build-docs-docx.py` (needs `pandoc`; the PDF additionally needs
+> LibreOffice).
 
 ---
 
@@ -209,8 +216,8 @@ exactly what the app renders.
   viewers, the vendor's own daily energy ledger exported to HA long-term
   statistics, and a pack warranty evidence bundle.
 
-See the [DOCS.md table of contents](ecoflow_panel/DOCS.md#table-of-contents) for
-the full, math-level treatment of each of the above.
+See the [engineering reference](docs/reference/README.md) for the full, math-level
+treatment of each of the above.
 
 ---
 
@@ -229,7 +236,7 @@ EcoFlow cloud ────────▶ snapshot store ──▶ SQLite record
 Analytics run **off the main thread** (a worker + a client proxy with per-report
 caching) so ingest and the API never block. The recorder schema, report
 dependency graph, and full data-flow are in
-[DOCS.md ch.1 — System Architecture & Data Flow](ecoflow_panel/DOCS.md#1-system-architecture--data-flow).
+[reference chapter 1 — System Architecture & Data Flow](docs/reference/01-architecture.md#1-system-architecture--data-flow).
 
 ---
 
@@ -258,8 +265,10 @@ For a Pi running Home Assistant OS or Supervised:
    set `TELNET_ENABLED: true` in Configuration first (and, on a shared LAN, set
    `TUI_PASSWORD` to require an operator login).
 
-Every configuration option is documented in
-[DOCS.md ch.12 — Configuration, Deployment, Security & Operations](ecoflow_panel/DOCS.md#12-configuration-deployment-security--operations).
+Every configuration option, with its default and allowed range, is in
+[`docs/guide/options.md`](docs/guide/options.md); the operator guide's
+[Configuration by goal](ecoflow_panel/DOCS.md#configuration-by-goal) groups them by what you
+want to do, and the add-on's Configuration tab shows each one's help text.
 
 ---
 
@@ -269,11 +278,11 @@ Every configuration option is documented in
 |------|-----------|
 | `server/` | Node/TypeScript server — ingest, recorder, ~40 analytics engines, HTTP API, MQTT discovery, broadcast/TTS, telnet TUI |
 | `web/` | React dashboard (Vite) |
-| `ecoflow_panel/` | Add-on manifest (`config.yaml`), `translations/`, `DOCS.md`, `CHANGELOG.md` (+ archive), AppArmor profile |
+| `ecoflow_panel/` | Add-on manifest (`config.yaml`), `translations/`, `DOCS.md` (the operator guide, on the Documentation tab), `README.md` (the Info-tab card), `CHANGELOG.md` (+ archive), AppArmor profile |
 | `rootfs/` | s6 service runner (`etc/services.d/ecoflow-panel/run`) — the options→env bridge that turns the add-on Configuration into the server's environment |
 | `Dockerfile`, `build.yaml`, `repository.yaml` | Container build, digest-pinned per-arch base images, add-on repository manifest |
-| `scripts/` | Docs builder (`build-docs-docx.py`); CI gates (`check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the mutation harnesses (`mutate-*.mjs`); device probes |
-| `docs/` | `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
+| `scripts/` | Docs builder (`build-docs-docx.py`); CI gates (`check-docs.mjs`, `check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the mutation harnesses (`mutate-*.mjs`); device probes |
+| `docs/` | `guide/` (every option and every Home Assistant entity), `reference/` (the engineering reference: an index and one file per chapter or part), `history/` (the engineering release log and operations audits, frozen), `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
 | `.github/workflows/` | `ci.yml` (type-checks ×3, server tests + README-claim check, mutant-anchor check, personal-data scan, dependency advisories, add-on config/translation validation, Dockerfile smoke, docs `.docx`+`.pdf`) · `release-pr.yml` (release-PR version check, re-run on a title edit) · `tag-release.yml` (on every push to `main`: tags the version the add-on manifest declares, or fails when it cannot be published) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch) · `codeql.yml` (CodeQL analysis). Every job runs on a pinned runner image (`ubuntu-26.04`, `ubuntu-26.04-arm`; CodeQL on `ubuntu-24.04` until CodeQL supports 26.04). |
 
 ## Development
@@ -298,8 +307,8 @@ can reach the alarm path. Home Assistant offers whatever version `config.yaml` d
 `main` (a lower one too, as a downgrade), so `tag-release.yml` runs on **every** push to `main`:
 when that version is new and above every `vX.Y.Z` tag it creates the tag and dispatches
 `images.yml` — that workflow runs the test suite, builds the multi-arch GHCR image and cuts a
-GitHub Release (with the docs attached); the add-on then updates in place. Full runbook in DOCS.md
-ch.12.
+GitHub Release (with the docs attached); the add-on then updates in place. Full runbook in
+[reference chapter 12](docs/reference/12-configuration-deployment-security.md#release--publish-pipeline).
 
 The release-PR check (`release-pr.yml`, `scripts/check-release-pr.py`, the required check *"Release
 PR declares the version it names"*) compares the version before and after GitHub's test merge. It
