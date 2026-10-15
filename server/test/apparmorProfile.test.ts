@@ -1,6 +1,7 @@
 /**
  * v1.187.15 — the AppArmor profile's invariants, pinned so a later edit cannot silently undo
- * the 2026-10-11 review or reintroduce the two outages it recorded (DOCS "AppArmor profile").
+ * the 2026-10-11 review or reintroduce the two outages it recorded
+ * (docs/reference/12-configuration-deployment-security.md “AppArmor profile”).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

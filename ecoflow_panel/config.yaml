@@ -1,5 +1,5 @@
 name: Power
-version: "1.187.23"
+version: "1.188.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -77,7 +77,8 @@ hassio_api: true
 # future feature needs true add-on management, bump this back to manager.
 hassio_role: homeassistant
 # Per-field labels + help render on the Configuration page from
-# translations/en.yaml; full reference is in DOCS.md “Options”.
+# translations/en.yaml; every option's default, range and meaning is in
+# docs/guide/options.md (grouped by goal in the operator guide, ecoflow_panel/DOCS.md).
 # Order below = the order shown in the HA form (essentials first).
 options:
   # Credentials & core — the only fields a fresh install must set
@@ -88,7 +89,7 @@ options:
   # Site location — used only for the solar day-ahead forecast
   FORECAST_LAT: 33.4484
   FORECAST_LON: -112.074
-  # Notifications — per-alert push (see DOCS.md “Options” for per-field help)
+  # Notifications — per-alert push (per-field help: docs/guide/options.md)
   NOTIFY_CHANNEL: none
   NOTIFY_MIN_SEVERITY: warning
   NOTIFY_RESOLVED: true
@@ -134,6 +135,9 @@ options:
   # Night-charge TOU-arbitrage engine. Write posture per NIGHT_CHARGE_MODE:
   # advisory (default, never writes) | supervised (one announced, cancellable,
   # bounded, auto-reverting reserve write per charge night) | auto (gated).
+  # With ARB_OBJECTIVE cost and ARB_COST_MAX_SOC_PCT above 50, a supervised or
+  # auto night also sets the panel's force-charge ceiling (80-100, restored
+  # afterwards) and switches force charge ON then OFF per Core slot.
   NIGHT_CHARGE_ADVISOR_ENABLED: true
   NIGHT_CHARGE_MODE: advisory
   ARB_OUTAGE_CUSHION_PCT: 15
@@ -188,7 +192,7 @@ schema:
   # Site location — used only for the solar day-ahead forecast
   FORECAST_LAT: float(-90,90)
   FORECAST_LON: float(-180,180)
-  # Notifications — per-alert push (see DOCS.md “Options” for per-field help)
+  # Notifications — per-alert push (per-field help: docs/guide/options.md)
   NOTIFY_CHANNEL: list(none|ha)
   NOTIFY_MIN_SEVERITY: list(warning|critical)
   NOTIFY_RESOLVED: bool
@@ -232,8 +236,12 @@ schema:
   LOAD_SHEDDING_RUNWAY_THRESHOLD_H: float(0,168)
   LOAD_SHEDDING_RESTORE_MARGIN_H: float(0,168)
   # Night-charge TOU-arbitrage engine. Writes ONLY when NIGHT_CHARGE_MODE is
-  # supervised or auto (default advisory writes nothing); the single write is the
-  # panel backup-reserve setpoint, clamped to 10-50. See DOCS.md §8b.
+  # supervised or auto (default advisory writes nothing): the panel backup-reserve
+  # setpoint, clamped to 10-50; and, with ARB_OBJECTIVE cost and
+  # ARB_COST_MAX_SOC_PCT above 50, the force-charge ceiling (80-100) and force
+  # charge ON/OFF per Core slot. See docs/reference/15-2-night-charge-writes.md
+  # “8b. Supervised write mode”; every writer: the operator guide's
+  # “What Power changes on your system”.
   NIGHT_CHARGE_ADVISOR_ENABLED: bool
   NIGHT_CHARGE_MODE: list(advisory|supervised|auto)
   ARB_OUTAGE_CUSHION_PCT: int(0,40)

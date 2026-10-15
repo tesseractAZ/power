@@ -21,7 +21,7 @@
 > **not** read it as an open invitation to run the probe.
 
 ## Why BLE (and why only as a cross-check)
-Research (2026-06-25; summarised in DOCS.md, [The EcoFlow IoT-Open cloud protocol (no LAN)](../ecoflow_panel/DOCS.md#the-ecoflow-iot-open-cloud-protocol-no-lan))
+Research (2026-06-25; summarised in the engineering reference, [The EcoFlow IoT-Open cloud protocol (no LAN)](reference/02-1-cloud-protocol-and-snapshot.md#the-ecoflow-iot-open-cloud-protocol-no-lan))
 established that the Delta Pro
 Ultra (DPU, `EF-YJ`/`hs_yj751`) and SHP2 (`EF-HD3`/`pd303`) expose **no LAN-IP protocol** — no Modbus,
 no local HTTP, no honor-a-local-MQTT-broker. The *only* genuinely cloud-free telemetry path is
@@ -95,7 +95,7 @@ The *actual* fix for the recurring "cloud-offline" pain is **not** BLE — it's 
 real-outage classification (LAN reachability via HA ping sensors) shipped in the add-on, because the
 documented root cause is an EcoFlow cloud *session* wedge, not radio loss. BLE here only adds an
 optional, cloud-independent **cross-check** for the DPUs if you want one. See
-[Cloud-wedge vs. real-outage classification](../ecoflow_panel/DOCS.md#cloud-wedge-vs-real-outage-classification-devicelinkts) in DOCS.md.
+[Cloud-wedge vs. real-outage classification](reference/02-1-cloud-protocol-and-snapshot.md#cloud-wedge-vs-real-outage-classification-devicelinkts) in the engineering reference.
 Two later releases address the same cause directly: the cloud-session self-heal (v1.76.0,
 `sessionSelfHeal.ts`) rebuilds the add-on's own MQTT session when message rates collapse, and
 since v1.166.0 a telemetry-blind episode is remediated first (`blindRemediation.ts`) and alarms

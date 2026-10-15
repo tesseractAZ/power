@@ -109,9 +109,20 @@ if (anchors == null) {
   claim('anchor-asserted mutants', /\*\*(\d+)\s*\n?anchor-asserted mutants\*\*/, anchors);
 }
 
-// ----------------------------------------------------------- DOCS.md length
-const docsLines = readFileSync(resolve(REPO, 'ecoflow_panel/DOCS.md'), 'utf8').split('\n').length;
-claim('DOCS.md line count', /\(~([\d,]+)\s*\n?>\s*lines\)/, docsLines, { tolerance: 0.03 });
+// ------------------------------------------------- engineering reference size
+// v1.188.0 — the manual is the engineering reference in docs/reference/: one file per chapter or
+// part, listed by the index (README.md there, which is not counted). ecoflow_panel/DOCS.md is now
+// the operator guide, held to its own size by check-docs.mjs. The README states the reference's
+// total line count (within 3 %) and its exact file count, in one parenthesis that a line break
+// and a blockquote marker may split.
+const REFERENCE_DIR = resolve(REPO, 'docs/reference');
+const referenceFiles = readdirSync(REFERENCE_DIR, { withFileTypes: true })
+  .filter((e) => e.isFile() && e.name.endsWith('.md') && e.name !== 'README.md')
+  .map((e) => e.name);
+const referenceLines = referenceFiles.reduce(
+  (n, f) => n + readFileSync(resolve(REFERENCE_DIR, f), 'utf8').split('\n').length, 0);
+claim('engineering reference line count', /\(~([\d,]+)[\s>]*lines in\b/, referenceLines, { tolerance: 0.03 });
+claim('engineering reference file count', /\blines in[\s>]*(\d+)[\s>]*reference files\)/, referenceFiles.length);
 
 // --------------------------------------------------------- workflow roster
 // The README's repository-layout table names every workflow. A workflow added or

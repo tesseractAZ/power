@@ -24,6 +24,9 @@ server/dist/
 # logs
 *.log
 
+# Python bytecode (scripts/*.py run as `python3 -I -B`, which writes none; this is the backstop)
+__pycache__/
+
 # OS / editor
 .DS_Store
 .vscode/

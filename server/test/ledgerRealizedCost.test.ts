@@ -3,7 +3,8 @@
  * for each interval, over the night's scored span. It was declared in v1.38.0 and never
  * written, on the stated grounds that rates were unconfirmed and no night had actuated —
  * both long expired (ratesConfirmed:true in every tariff_snapshot, 24 actuated nights).
- * The counterfactual columns stay null, and the docs now say why (DOCS §6).
+ * The counterfactual columns stay null, and the docs now say why
+ * (docs/reference/15-1-night-charge-planning.md “6. The learning ledger”).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

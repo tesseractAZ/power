@@ -1,0 +1,102 @@
+# split-map.tsv — the v1.188.0 split of the single-file manual (ecoflow_panel/DOCS.md) into
+# docs/reference/, docs/history/ and docs/guide/options.md. Read by split-docs.mjs, beside it; committed
+# with the split and removed in the follow-up. One row per line, tab-separated; text columns are JSON
+# strings. Rows are in source order.
+#
+# seg     <dest>  <first line>  <manifest label>
+#     The manual from <first line> (a heading line; "" = the top of the file) up to the next seg's
+#     first line goes to <dest>. <manifest label> is its entry in the reference index's chapter list
+#     (the index's own row has none to give).
+# move    <edit>  <dest>  <first line>  <next heading>  <pointer>
+#     The text from <first line> up to <next heading>, less a closing "\n---\n\n" separator (which
+#     stays with the chapter), moves to <dest> and is replaced in place by <pointer>.
+# cut     <edit>  <dest>  <line prefix>
+#     The rest of <edit>'s moved text, from the line that starts with <line prefix>, goes to <dest>.
+# frame   <dest>  <text>
+#     Prepended to a destination that holds moved text: the frozen-history banners, the option page's
+#     title.
+# sub     <edit>  <dest>  <old>  <new>
+#     After the moves, <old> occurs exactly once in <dest> and becomes <new>. "@index" is the generated
+#     index text (split-docs.mjs indexTail): how the reference is organised, the chapter manifest, the
+#     Moved-sections table and the history list.
+# anchor  <old id>  <file, relative to docs/reference>  <id there, or ->
+#     A Moved-sections row: a heading id that was linked into the manual, and where it is now.
+
+seg	docs/reference/README.md	""	"Index"
+seg	docs/reference/01-architecture.md	"## 1. System Architecture & Data Flow"	"1. System Architecture & Data Flow"
+seg	docs/reference/02-1-cloud-protocol-and-snapshot.md	"## 2. EcoFlow Cloud Integration & Home Assistant Wiring"	"2. EcoFlow Cloud Integration & Home Assistant Wiring, part 1 — the IoT-Open protocol, request signing, MQTT telemetry, the snapshot store, projections, SHP2 membership, cloud-wedge classification"
+seg	docs/reference/02-2-home-assistant-wiring.md	"### Home Assistant service layer (`haService.ts`)"	"2. EcoFlow Cloud Integration & Home Assistant Wiring, part 2 — the Home Assistant service layer, MQTT discovery and the Energy Dashboard, the write-command framework, the HTTP API, sections 2.14–2.16"
+seg	docs/reference/03-solar-forecast.md	"## 3. Solar & PV Forecast Engine"	"3. Solar & PV Forecast Engine"
+seg	docs/reference/04-physics-and-bayes.md	"## 4. Physics-Based & Bayesian Model Tier"	"4. Physics-Based & Bayesian Model Tier"
+seg	docs/reference/05-runway-and-soc-alarms.md	"## 5. Runway, Depletion & Battery-SoC Alarms (safety-critical)"	"5. Runway, Depletion & Battery-SoC Alarms (safety-critical)"
+seg	docs/reference/06-health-engines.md	"## 6. Battery & PV Health Engines (SoH, EOL, pack-risk, resistance, RTE, thermal, soiling)"	"6. Battery & PV Health Engines (SoH, EOL, pack-risk, resistance, RTE, thermal, soiling)"
+seg	docs/reference/07-energy-and-cost.md	"## 7. Energy Accounting, Self-Consumption, Cost & Dispatch"	"7. Energy Accounting, Self-Consumption, Cost & Dispatch"
+seg	docs/reference/08-1-alerts.md	"## 8. Alerts, Anomaly Detection, Incidents & Learning Loop"	"8. Alerts, Anomaly Detection, Incidents & Learning Loop, part 1 — sections 1–3: the alert taxonomy, threshold alerts, the learned-alert families"
+seg	docs/reference/08-2-alert-monitor.md	"### 4. The alert monitor — `startAlertMonitor()` (`alertMonitor.ts`)"	"8. Alerts, Anomaly Detection, Incidents & Learning Loop, part 2 — sections 4–14: the alert monitor, notification delivery, outcome capture, repair issues, resolve integrity"
+seg	docs/reference/09-learning-loop.md	"## 9. The Online Learning Loop (shadow models, online regression, model health)"	"9. The Online Learning Loop (shadow models, online regression, model health)"
+seg	docs/reference/10-audible-broadcast.md	"## 10. Audible Broadcast, Chimes & Text-to-Speech"	"10. Audible Broadcast, Chimes & Text-to-Speech"
+seg	docs/reference/11-user-interfaces.md	"## 11. User Interfaces: Web Dashboard & Telnet TUI"	"11. User Interfaces: Web Dashboard & Telnet TUI"
+seg	docs/reference/12-configuration-deployment-security.md	"## 12. Configuration, Deployment, Security & Operations"	"12. Configuration, Deployment, Security & Operations"
+seg	docs/reference/13-safety-plumbing.md	"## 13. Safety & Operational Plumbing"	"13. Safety & Operational Plumbing"
+seg	docs/reference/14-lighting-and-hvac.md	"## 14. Intelligent Lighting & HVAC Posture (energy-aware automation)"	"14. Intelligent Lighting & HVAC Posture (energy-aware automation)"
+seg	docs/reference/15-1-night-charge-planning.md	"## 15. Night-Charge TOU Arbitrage Advisor"	"15. Night-Charge TOU Arbitrage Advisor, part 1 — sections 1–7: purpose, the tariff model, inputs, the sizing brain, the ledger, outcome scoring"
+seg	docs/reference/15-2-night-charge-writes.md	"### 8. The write-readiness gate (`computeNightChargeReadiness`, `nightChargeGate.ts:219`)"	"15. Night-Charge TOU Arbitrage Advisor, part 2 — sections 8–13: the write-readiness gate, supervised writes, delivery surfaces, configuration, failure modes, the de-bias factors"
+seg	docs/reference/A-feature-inventory.md	"## Appendix A — Feature Inventory (evidence linkage)"	"Appendix A — Feature Inventory (evidence linkage)"
+move	E1	docs/history/engineering-release-log-1.md	"#### 2.6 Release log (all subsystems)"	"### 3. The audible dispatch: MA + SIP (`broadcast.ts`)"	"#### 2.6 Engineering history (moved)\n\nThe per-release notes that stood here are frozen, unedited, in [engineering-release-log-1.md](../history/engineering-release-log-1.md)\nand [engineering-release-log-2.md](../history/engineering-release-log-2.md); what each release changed is in the [CHANGELOG](../../ecoflow_panel/CHANGELOG.md).\n"
+cut	E1	docs/history/engineering-release-log-2.md	"**v1.187.3 (ledger and tooling) — "
+move	E2a	docs/history/operations-audits.md	"### 3. HACS Lovelace cards — removed (v1.47.0)"	"## 12. Configuration, Deployment, Security & Operations"	"### 3. HACS Lovelace cards (moved)\n\nThe note on the removed HACS Lovelace cards is frozen, unedited, in\n[operations-audits.md](../history/operations-audits.md#3-hacs-lovelace-cards--removed-v1470).\n\n"
+move	E3	docs/guide/options.md	"Every option is grouped by function. \"Env var\" is the exported name (identical to the option"	"### Security posture"	"The option table, one row per option with its default and schema, is\n[docs/guide/options.md](../guide/options.md).\n"
+move	E2b	docs/history/operations-audits.md	"### 12i. Announcement delivery: what a timeout means (v1.118.0–v1.119.0)"	"### 12p. Notifications are Home-Assistant-native (v1.124.0)"	"### 12i–12o. Operations audits (moved)\n\nSections 12i–12o (announcement delivery, roster durability, detectors that could not fire, the spare-DPU list,\nSHP2 self-heal, the announce path, reports that claimed more than they knew) are frozen, unedited, in\n[operations-audits.md](../history/operations-audits.md).\n\n"
+frame	docs/history/engineering-release-log-1.md	"> [!NOTE]\n> Historical, and frozen: part 1 of 2 of the engineering release log that was section 2.6 of chapter 10\n> in the single-file manual, moved here unedited. A later release may have superseded what an entry says:\n> the v1.161.0 entry (in part 2), for example, raised the reserve-write ceiling to 90 %, and it is now 50.\n> Current behaviour is in the [engineering reference](../reference/README.md), and what each release\n> changed is in the [CHANGELOG](../../ecoflow_panel/CHANGELOG.md). Part 2 is [engineering-release-log-2.md](engineering-release-log-2.md).\n> This file is not part of the printable manual.\n\n"
+frame	docs/history/engineering-release-log-2.md	"> [!NOTE]\n> Historical, and frozen: part 2 of 2 of the engineering release log that was section 2.6 of chapter 10\n> in the single-file manual, moved here unedited. A later release may have superseded what an entry says:\n> the v1.161.0 entry, for example, raised the reserve-write ceiling to 90 %, and it is now 50.\n> Current behaviour is in the [engineering reference](../reference/README.md), and what each release\n> changed is in the [CHANGELOG](../../ecoflow_panel/CHANGELOG.md). Part 1 is [engineering-release-log-1.md](engineering-release-log-1.md).\n> This file is not part of the printable manual.\n\n"
+frame	docs/history/operations-audits.md	"> [!NOTE]\n> Historical, and frozen: the note on the removed HACS cards (chapter 11, section 3) and sections 12i–12o of\n> chapter 12 in the single-file manual, moved here unedited. A later release may have superseded what they\n> say (section 12o's pointers to the ntfy, Pushover and webhook channels, for example, name channels that no\n> longer exist). Current behaviour is in the [engineering reference](../reference/README.md). This file is\n> not part of the printable manual.\n\n"
+frame	docs/guide/options.md	"# Configuration options\n\n"
+sub	E4	docs/reference/README.md	"## Table of Contents\n\n1. [System Architecture & Data Flow](#1-system-architecture--data-flow)\n2. [EcoFlow Cloud Integration & Home Assistant Wiring](#2-ecoflow-cloud-integration--home-assistant-wiring)\n3. [Solar & PV Forecast Engine](#3-solar--pv-forecast-engine)\n4. [Physics-Based & Bayesian Model Tier](#4-physics-based--bayesian-model-tier)\n5. [Runway, Depletion & Battery-SoC Alarms (safety-critical)](#5-runway-depletion--battery-soc-alarms-safety-critical)\n6. [Battery & PV Health Engines (SoH, EOL, pack-risk, resistance, RTE, thermal, soiling)](#6-battery--pv-health-engines-soh-eol-pack-risk-resistance-rte-thermal-soiling)\n7. [Energy Accounting, Self-Consumption, Cost & Dispatch](#7-energy-accounting-self-consumption-cost--dispatch)\n8. [Alerts, Anomaly Detection, Incidents & Learning Loop](#8-alerts-anomaly-detection-incidents--learning-loop)\n9. [The Online Learning Loop (shadow models, online regression, model health)](#9-the-online-learning-loop-shadow-models-online-regression-model-health)\n10. [Audible Broadcast, Chimes & Text-to-Speech](#10-audible-broadcast-chimes--text-to-speech)\n11. [User Interfaces: Web Dashboard & Telnet TUI](#11-user-interfaces-web-dashboard--telnet-tui)\n12. [Configuration, Deployment, Security & Operations](#12-configuration-deployment-security--operations)\n    - [Vendor API notes (documented, not all used)](#vendor-api-notes-documented-not-all-used)\n    - [12a. Vendor energy ledger (`energyHistory.ts`, v1.82.0)](#12a-vendor-energy-ledger-energyhistoryts-v1820)\n    - [12b. Settings-drift watchdog (`settingsDrift.ts`, v1.83.0)](#12b-settings-drift-watchdog-settingsdriftts-v1830)\n    - [12c. Charge Now responder (`chargeNowResponder.ts`, v1.84.0)](#12c-charge-now-responder-chargenowresponderts-v1840)\n    - [12d. HA statistics export (`haStatistics.ts`, v1.89.0)](#12d-ha-statistics-export-hastatisticsts-v1890)\n    - [12e. Long-offline reconnect auto-audit (`reconnectAudit.ts`, v1.90.0)](#12e-long-offline-reconnect-auto-audit-reconnectauditts-v1900)\n    - [12f. Warranty evidence export (`warrantyExport.ts`, v1.90.0)](#12f-warranty-evidence-export-warrantyexportts-v1900)\n    - [12g. SQLite snapshot for external viewers (`dbExport.ts`, v1.107.0)](#12g-sqlite-snapshot-for-external-viewers-dbexportts-v11070)\n    - [12h. The owner reserve floor, and who is allowed to define it (v1.113.0–v1.116.0, v1.119.0)](#12h-the-owner-reserve-floor-and-who-is-allowed-to-define-it-v11130v11160-v11190)\n    - [12i. Announcement delivery: what a timeout means (v1.118.0–v1.119.0)](#12i-announcement-delivery-what-a-timeout-means-v11180v11190)\n    - [12j. Roster durability, and the audible cost of guessing (v1.117.0)](#12j-roster-durability-and-the-audible-cost-of-guessing-v11170)\n    - [12k. Detectors that could not fire (v1.120.0)](#12k-detectors-that-could-not-fire-v11200)\n    - [12l. The spare-DPU list has been inverted since 2026-08-20 (v1.121.0)](#12l-the-spare-dpu-list-has-been-inverted-since-2026-08-20-v11210)\n    - [12m. The SHP2 alone could not trigger self-heal (v1.121.0)](#12m-the-shp2-alone-could-not-trigger-self-heal-v11210)\n    - [12n. The announce path (v1.122.0)](#12n-the-announce-path-v11220)\n    - [12o. Reports that claimed more than they knew (v1.123.0)](#12o-reports-that-claimed-more-than-they-knew-v11230)\n    - [12p. Notifications are Home-Assistant-native (v1.124.0)](#12p-notifications-are-home-assistant-native-v11240)\n    - [12q. The outage cushion, re-scoped (v1.125.0)](#12q-the-outage-cushion-re-scoped-v11250)\n13. [Safety & Operational Plumbing](#13-safety--operational-plumbing)\n14. [Intelligent Lighting & HVAC Posture (energy-aware automation)](#14-intelligent-lighting--hvac-posture-energy-aware-automation)\n15. [Night-Charge TOU Arbitrage Advisor](#15-night-charge-tou-arbitrage-advisor)\n16. [Appendix A — Feature Inventory (evidence linkage)](#appendix-a--feature-inventory-evidence-linkage)\n\n\n---\n\n"	"@index"
+sub	E5	docs/reference/13-safety-plumbing.md	"(`\u0000–\u001f`, ``)"	"(`\\x00–\\x1f`, `\\x7f`)"
+sub	E6	docs/reference/08-1-alerts.md	"listed it offline since at least <age> ago"	"listed it offline since at least `<age>` ago"
+sub	E6	docs/reference/10-audible-broadcast.md	"keeping the pending <level> retry"	"keeping the pending `<level>` retry"
+sub	E6	docs/reference/11-user-interfaces.md	"stale · as of <time>"	"stale · as of `<time>`"
+sub	E6	docs/reference/15-2-night-charge-writes.md	"was not armed — <reason>. The add-on"	"was not armed — `<reason>`. The add-on"
+sub	E6	docs/reference/15-2-night-charge-writes.md	"Planned charge not armed tonight — <reason>."	"Planned charge not armed tonight — `<reason>`."
+sub	E6	docs/reference/15-2-night-charge-writes.md	"Planned reserve hold not armed tonight — <reason>."	"Planned reserve hold not armed tonight — `<reason>`."
+anchor	table-of-contents	README.md	chapters
+anchor	1-system-architecture--data-flow	01-architecture.md	1-system-architecture--data-flow
+anchor	2-ecoflow-cloud-integration--home-assistant-wiring	02-1-cloud-protocol-and-snapshot.md	2-ecoflow-cloud-integration--home-assistant-wiring
+anchor	the-ecoflow-iot-open-cloud-protocol-no-lan	02-1-cloud-protocol-and-snapshot.md	the-ecoflow-iot-open-cloud-protocol-no-lan
+anchor	cloud-wedge-vs-real-outage-classification-devicelinkts	02-1-cloud-protocol-and-snapshot.md	cloud-wedge-vs-real-outage-classification-devicelinkts
+anchor	3-solar--pv-forecast-engine	03-solar-forecast.md	3-solar--pv-forecast-engine
+anchor	4-physics-based--bayesian-model-tier	04-physics-and-bayes.md	4-physics-based--bayesian-model-tier
+anchor	5-runway-depletion--battery-soc-alarms-safety-critical	05-runway-and-soc-alarms.md	5-runway-depletion--battery-soc-alarms-safety-critical
+anchor	6-battery--pv-health-engines-soh-eol-pack-risk-resistance-rte-thermal-soiling	06-health-engines.md	6-battery--pv-health-engines-soh-eol-pack-risk-resistance-rte-thermal-soiling
+anchor	7-energy-accounting-self-consumption-cost--dispatch	07-energy-and-cost.md	7-energy-accounting-self-consumption-cost--dispatch
+anchor	8-alerts-anomaly-detection-incidents--learning-loop	08-1-alerts.md	8-alerts-anomaly-detection-incidents--learning-loop
+anchor	9-the-online-learning-loop-shadow-models-online-regression-model-health	09-learning-loop.md	9-the-online-learning-loop-shadow-models-online-regression-model-health
+anchor	10-audible-broadcast-chimes--text-to-speech	10-audible-broadcast.md	10-audible-broadcast-chimes--text-to-speech
+anchor	26-release-log-all-subsystems	../history/engineering-release-log-1.md	26-release-log-all-subsystems
+anchor	11-user-interfaces-web-dashboard--telnet-tui	11-user-interfaces.md	11-user-interfaces-web-dashboard--telnet-tui
+anchor	3-hacs-lovelace-cards--removed-v1470	../history/operations-audits.md	3-hacs-lovelace-cards--removed-v1470
+anchor	12-configuration-deployment-security--operations	12-configuration-deployment-security.md	12-configuration-deployment-security--operations
+anchor	full-configyaml-option-reference	../guide/options.md	-
+anchor	apparmor-profile-ecoflow_panelapparmortxt	12-configuration-deployment-security.md	apparmor-profile-ecoflow_panelapparmortxt
+anchor	vendor-api-notes-documented-not-all-used	12-configuration-deployment-security.md	vendor-api-notes-documented-not-all-used
+anchor	12a-vendor-energy-ledger-energyhistoryts-v1820	12-configuration-deployment-security.md	12a-vendor-energy-ledger-energyhistoryts-v1820
+anchor	12b-settings-drift-watchdog-settingsdriftts-v1830	12-configuration-deployment-security.md	12b-settings-drift-watchdog-settingsdriftts-v1830
+anchor	12c-charge-now-responder-chargenowresponderts-v1840	12-configuration-deployment-security.md	12c-charge-now-responder-chargenowresponderts-v1840
+anchor	12d-ha-statistics-export-hastatisticsts-v1890	12-configuration-deployment-security.md	12d-ha-statistics-export-hastatisticsts-v1890
+anchor	12e-long-offline-reconnect-auto-audit-reconnectauditts-v1900	12-configuration-deployment-security.md	12e-long-offline-reconnect-auto-audit-reconnectauditts-v1900
+anchor	12f-warranty-evidence-export-warrantyexportts-v1900	12-configuration-deployment-security.md	12f-warranty-evidence-export-warrantyexportts-v1900
+anchor	12g-sqlite-snapshot-for-external-viewers-dbexportts-v11070	12-configuration-deployment-security.md	12g-sqlite-snapshot-for-external-viewers-dbexportts-v11070
+anchor	12h-the-owner-reserve-floor-and-who-is-allowed-to-define-it-v11130v11160-v11190	12-configuration-deployment-security.md	12h-the-owner-reserve-floor-and-who-is-allowed-to-define-it-v11130v11160-v11190
+anchor	12i-announcement-delivery-what-a-timeout-means-v11180v11190	../history/operations-audits.md	12i-announcement-delivery-what-a-timeout-means-v11180v11190
+anchor	12j-roster-durability-and-the-audible-cost-of-guessing-v11170	../history/operations-audits.md	12j-roster-durability-and-the-audible-cost-of-guessing-v11170
+anchor	12k-detectors-that-could-not-fire-v11200	../history/operations-audits.md	12k-detectors-that-could-not-fire-v11200
+anchor	12l-the-spare-dpu-list-has-been-inverted-since-2026-08-20-v11210	../history/operations-audits.md	12l-the-spare-dpu-list-has-been-inverted-since-2026-08-20-v11210
+anchor	12m-the-shp2-alone-could-not-trigger-self-heal-v11210	../history/operations-audits.md	12m-the-shp2-alone-could-not-trigger-self-heal-v11210
+anchor	12n-the-announce-path-v11220	../history/operations-audits.md	12n-the-announce-path-v11220
+anchor	12o-reports-that-claimed-more-than-they-knew-v11230	../history/operations-audits.md	12o-reports-that-claimed-more-than-they-knew-v11230
+anchor	12p-notifications-are-home-assistant-native-v11240	12-configuration-deployment-security.md	12p-notifications-are-home-assistant-native-v11240
+anchor	12q-the-outage-cushion-re-scoped-v11250	12-configuration-deployment-security.md	12q-the-outage-cushion-re-scoped-v11250
+anchor	13-safety--operational-plumbing	13-safety-plumbing.md	13-safety--operational-plumbing
+anchor	14-intelligent-lighting--hvac-posture-energy-aware-automation	14-lighting-and-hvac.md	14-intelligent-lighting--hvac-posture-energy-aware-automation
+anchor	15-night-charge-tou-arbitrage-advisor	15-1-night-charge-planning.md	15-night-charge-tou-arbitrage-advisor
+anchor	appendix-a--feature-inventory-evidence-linkage	A-feature-inventory.md	appendix-a--feature-inventory-evidence-linkage

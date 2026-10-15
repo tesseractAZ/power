@@ -1595,7 +1595,7 @@ export function nextPollDelayMs(intervalMs: number, tookMs: number): number {
  * detector that can only ever fire falsely is worse than no detector: it trains
  * the operator to discount a push on a life-safety system.
  *
- * The repo previously asserted BOTH readings — DOCS.md said "by design" while a
+ * The repo previously asserted BOTH readings — the manual (then DOCS.md) said "by design" while a
  * v1.40.0 comment here said "account-permission limitation". That contradiction
  * is what allowed the feature to be built at all. It is now reconciled to one
  * reading everywhere.

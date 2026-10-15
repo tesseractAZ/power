@@ -242,7 +242,8 @@ export const SENSORS: SensorConfig[] = [
   // power complement of the grid_to_home lifetime energy sensor (v0.44.0).
   // v1.53.0 — the rewire this sensor existed to enable is DONE: the HA Energy
   // Dashboard grid source now carries power_config.stat_rate = this sensor, not
-  // DPU ac_in. See §"HA Energy Dashboard wiring" in DOCS.md for the full mapping.
+  // DPU ac_in. The full mapping: docs/reference/07-energy-and-cost.md “2.6 HA Energy Dashboard
+  // wiring” and “2.7 Energy Dashboard power wiring (stat_rate)”.
   { unique_id: 'ecoflow_grid_home_watts', name: 'Grid Power (Home)', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:transmission-tower', value_template: '{{ value_json.grid_home_watts }}' },
   // SHP2 backup pool
   { unique_id: 'ecoflow_backup_pool', name: 'Backup Pool', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', value_template: '{{ value_json.backup_pool_percent }}' },
@@ -1019,6 +1020,24 @@ export function planCircuitDiscovery(
     ];
   });
   return { sig, publish, clear };
+}
+
+/**
+ * v1.188.0 — every unique_id the discovery publishers in this module build for a given circuit
+ * list: the SENSORS and BINARY_SENSORS tables, one switch per alarm priority (alertSwitchUniqueId),
+ * and the per-circuit energy and power sensors planCircuitDiscovery publishes. Pure: it reads the
+ * same tables and builders startMqttDiscovery publishes from, so the operator entity table
+ * (docs/guide/entities.md) can be held to it by server/test/docsLayout.test.ts.
+ */
+export function discoveryUniqueIds(
+  circuits: ReadonlyArray<{ ch: number; name?: string | null; linkCh?: number | null; linkMark?: boolean }>,
+): string[] {
+  return [
+    ...SENSORS.map((s) => s.unique_id),
+    ...BINARY_SENSORS.map((s) => s.unique_id),
+    ...ALARM_PRIORITY_ORDER.map(alertSwitchUniqueId),
+    ...planCircuitDiscovery('homeassistant', [], [...circuits]).publish.map((p) => String(p.cfg.unique_id)),
+  ];
 }
 
 /**
