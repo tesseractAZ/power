@@ -315,8 +315,9 @@ const MUTANTS = [
   {
     id: 'xxxvi. ★★ the restore is never stamped on the ledger',
     file: IX,
-    find: '    try { recorder.recordNightOutcome(state.day, { actuation_reverted_at_ms: nowMs }); }',
-    to: '    try { /* MUTANT */ }',
+    // v1.189.0 — re-pointed: the stamp goes through stampLegOutcome (the leg's own columns).
+    find: '    stampLegOutcome(state, { actuation_reverted_at_ms: nowMs });',
+    to: '    /* MUTANT */',
     why: 'Every night falls back to the unstamped span; a late restore is never followed.',
   },
   {

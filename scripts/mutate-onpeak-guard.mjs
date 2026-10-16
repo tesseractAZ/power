@@ -238,8 +238,9 @@ const MUTANTS = [
   {
     id: 'F-vi. ★★★ a settled foreign reserve still refuses the next arm',
     file: ACT,
-    find: '  if (prev.appliedAtMs != null && prev.revertedAtMs == null && prev.foreignSettledAtMs == null) return null;',
-    to: '  if (prev.appliedAtMs != null && prev.revertedAtMs == null) return null; /* MUTANT */',
+    // v1.189.0 — re-pointed: armFromPlan refuses on armOpenItem (one definition).
+    find: '  if (prev.appliedAtMs != null && prev.revertedAtMs == null && prev.foreignSettledAtMs == null) {\n    return `the ${night} reserve write is still applied',
+    to: '  if (prev.appliedAtMs != null && prev.revertedAtMs == null) { /* MUTANT */\n    return `the ${night} reserve write is still applied',
     why: 'One owner change disarms the night charge for good.',
   },
   {

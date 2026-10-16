@@ -112,9 +112,11 @@ const MUTANTS = [
   {
     id: 'xii. ★★★ arming buries a force-charge whose OFF never verified',
     file: ACT,
-    find: '  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) return null;',
-    to: '  /* MUTANT */',
-    why: 'The next 21:30 arming returns a fresh record and erases the only record that knows to switch the stuck force-charge off.',
+    // v1.189.0 — re-pointed: armFromPlan refuses on armOpenItem (one definition, shared with the
+    // charge cycle's legResolved); here an OFF merely SENT counts as verified.
+    find: '  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) {\n    return `the ${night} force-charge was switched ON',
+    to: '  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffAtMs == null) { /* MUTANT */\n    return `the ${night} force-charge was switched ON',
+    why: 'The next 21:30 arming returns a fresh record over an OFF that never read back, and erases the only record that knows to switch the stuck force-charge off.',
   },
   {
     id: 'xiii. ★★★ the force-charge step is never called',
@@ -392,7 +394,8 @@ const MUTANTS = [
   {
     id: 'l. ★★ the deadline page is never recorded',
     file: IDX,
-    find: '    forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,',
+    // v1.189.0 — re-pointed: the escalation writes through its leg slot (active or trailing).
+    find: '      forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : leg.get().forceChargeOffDeadlinePagedAtMs,',
     to: '    /* MUTANT */',
     why: 'The deadline re-pages audibly on every tick once it has passed.',
   },

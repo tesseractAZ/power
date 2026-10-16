@@ -1174,7 +1174,9 @@ test('★★ HA: the worst-case arrival entity is named for it — same unique_i
 test('★★ wiring (index.ts is not reachable from a unit test): the refused arm, "toward" on the speakers, the morning push', () => {
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   // R1 (v1.189.0) — the arm also stamps the on-peak start (armOnPeakStartMs; onPeakGuard.test.ts).
-  assert.match(idx, /armedCandidate = armFromPlan\(nightActuationMem, today, plan, nowMs, plan\.reserveFloorPct, forceChargeOn\(\), armOnPeakStartMs\);\n\s+if \(!armedCandidate\) armRefused = armRefusalReason\(nightActuationMem, plan, nowMs, plan\.reserveFloorPct\);/);
+  // v1.189.0 — through armCycle (chargeCycle.ts): with one leg, armFromPlan / armRefusalReason against the
+  // active leg (chargeCycle.test.ts holds the two equal).
+  assert.match(idx, /const arm = armCycle\(nightCycleView\(\), today, \[\{\n\s+role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn\(\), nextOnPeakStartMs: armOnPeakStartMs,\n[^\n]*\n\s+\}\], nowMs, plan\.reserveFloorPct\);\n\s+armedCycle = arm\.cycle;\n\s+armedCandidate = arm\.cycle\?\.active \?\? null;\n\s+if \(!armedCandidate\) armRefused = arm\.refused\[0\]\?\.reason \?\? null;/);
   assert.match(idx, /const msg = buildNightChargeMessage\(plan, shape, supervisedCtx, armRefused, NIGHT_CHARGE_MODE\);/);
   assert.match(idx, /\n\s+expectedKwh: statedBuyKwh\(plan\),\n\s+toward: chargeIsWindowBound\(plan\),\n/);
   assert.match(idx, /\n\s+expectedKwh: armedExpectedBuyKwh\(state\.day\),\n\s+forceCharge: forceChargeNightOutcome\(state, forceChargeOn\(\)\),\n\s+ended: action\.gridLossAbort \? 'gridLoss' : state\.cancelled \? 'cancelled' : 'window',\n/);

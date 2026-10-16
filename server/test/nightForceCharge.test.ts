@@ -790,7 +790,8 @@ test('★★★ v1.168.0 — every stuck/unconfirmed path goes through ONE escal
 test('★★ v1.168.0 — the deadline records its own page, and a silenced announcement is logged', () => {
   const fn = INDEX.indexOf('async function escalateForceChargeStuck(');
   const body = INDEX.slice(fn, INDEX.indexOf('async function runNightActuationTickInner(', fn));
-  assert.ok(body.includes('forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,'));
+  // v1.189.0 — through its leg slot: the active leg's record, or the trailing leg's.
+  assert.ok(body.includes('forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : leg.get().forceChargeOffDeadlinePagedAtMs,'));
   assert.ok(body.includes("if (heard && heard.ok === false) {"), 'a quiet-hours suppression is visible in the log');
 });
 

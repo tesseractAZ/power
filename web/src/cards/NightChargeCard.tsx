@@ -1,6 +1,6 @@
 import { memo, useEffect, useState } from 'react';
 import {
-  actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, chargeFigureParts, floorCushionLinePct, fmtLinePct,
+  actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
   holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, withConfirmedCancel, writeStands,
   writtenReservePct,
 } from './nightChargeText';
@@ -101,6 +101,11 @@ interface NightActuation {
   revertVerifiedAtMs?: number | null;
   revertRetries?: number;
   revertReadbackEscalated?: boolean;
+  /** v1.189.0 — the charge cycle's leg this record is (absent from an older server: the cost leg). */
+  leg?: 'cost' | 'backup';
+  /** v1.189.0 — the reserve settled as someone else's (the foreign rule): nothing left to cancel. */
+  foreignSettledAtMs?: number | null;
+  foreignReservePct?: number | null;
 }
 
 interface NightChargeStatus {
@@ -406,7 +411,7 @@ function ActuationBanner({ mode, actuation, onCancelled, spacing }: {
   const doCancel = async () => {
     setBusy(true);
     setCancelErr(null);
-    const out = await postCancel();
+    const out = await postCancel(actuation.leg ?? null);
     if (out.ok) onCancelled();
     else setCancelErr(out.text);
     setBusy(false);
@@ -456,10 +461,12 @@ function CancelButton({ label, busy, onClick }: { label: string; busy: boolean; 
   );
 }
 
-/** v1.50.0 — the owner's cancel (write-auth); v1.189.0 — its answer in the card's words (cancelOutcome). */
-async function postCancel(): Promise<{ ok: boolean; done: boolean; text: string }> {
+/** v1.50.0 — the owner's cancel (write-auth); v1.189.0 — its answer in the card's words (cancelOutcome),
+ *  for the leg named (cancelRequestInit): the banner's own leg; none from the status-blind Cancel,
+ *  which the server reads as the cost leg — tonight's, with one leg. */
+async function postCancel(leg: 'cost' | 'backup' | null = null): Promise<{ ok: boolean; done: boolean; text: string }> {
   try {
-    const r = await fetch(apiUrl('api/night-charge/cancel'), { method: 'POST' });
+    const r = await fetch(apiUrl('api/night-charge/cancel'), cancelRequestInit(leg));
     let body: unknown = null;
     try { body = await r.json(); } catch { /* not JSON: judged on the status alone */ }
     return cancelOutcome(r.status, body);

@@ -618,7 +618,8 @@ const SRC = (f: string) => readFileSync(resolve(dirname(fileURLToPath(import.met
 test('★★★ index.ts: the arm stamps the on-peak start from the plan\'s window, from the tariff model the window comes from', () => {
   const idx = SRC('index.ts');
   assert.ok(idx.includes('const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(apsREvModelFromEnv(), plan.window.startMs) : null;'));
-  assert.ok(idx.includes('armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn(), armOnPeakStartMs);'));
+  // v1.189.0 — armed through armCycle (chargeCycle.ts), the stamp on the leg.
+  assert.ok(idx.includes("role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,"));
 });
 
 test('★★★ index.ts: revertDeadline is decided ahead of the reserve decision and of the no-panel return, and stamped before it speaks', () => {
@@ -646,8 +647,11 @@ test('★★ index.ts: the foreign decisions are recorded, and the settle pushes
   assert.ok(idx.includes("persistNightActuation({ ...state, foreignSettledAtMs: nowMs, foreignReservePct: action.pct, lastError: null });"));
   assert.ok(idx.includes('void sendNotification(loadNotifyConfig(), buildNightChargeForeignReserve({'));
   // A settled night has nothing left to cancel, and its owner's later reserve moves are external again.
-  assert.ok(idx.includes("if (s.foreignSettledAtMs != null) {\n    reply.code(409);"));
-  assert.ok(idx.includes('((act.appliedAtMs != null && act.revertedAtMs == null && act.foreignSettledAtMs == null) ||'));
+  // v1.189.0 — the cancel is decided per leg (chargeCycle.cancelLeg), and so is the drift attribution
+  // (chargeCycle.legDriftActive; the overnight leg keeps this rule).
+  const cyc = SRC('chargeCycle.ts');
+  assert.ok(cyc.includes("if (s.foreignSettledAtMs != null) {\n    return { ok: false, error: `the reserve was set to"));
+  assert.ok(cyc.includes('return (leg.appliedAtMs != null && leg.revertedAtMs == null && leg.foreignSettledAtMs == null) ||'));
 });
 
 test('★★ index.ts: the write hold is published with every record, the next window bounds blind re-sends, and the refusal names the restore', () => {
@@ -655,7 +659,8 @@ test('★★ index.ts: the write hold is published with every record, the next w
   const persist = idx.slice(idx.indexOf('function persistNightActuation('), idx.indexOf('atomicWriteFileSync(NIGHT_CHARGE_ACTUATION_PATH', idx.indexOf('function persistNightActuation(')));
   assert.ok(persist.includes('setChargeWriteHold(chargeWriteHold(s));'));
   assert.ok(idx.includes('setChargeWriteHold(chargeWriteHold(nightActuationMem));'), 'and at boot, from the persisted record');
-  assert.ok(idx.includes('nextLegOpenMs: fcPlan?.window != null && state.windowEndMs != null && fcPlan.window.startMs >= state.windowEndMs'));
+  // v1.189.0 — the next cost leg pending in the cycle, else the latest plan's window (chargeCycle.nextForceChargeOpenMs).
+  assert.ok(idx.includes('nextLegOpenMs: nextForceChargeOpenMs(state, nightCyclePending, fcPlan?.window?.startMs),'));
   assert.ok(idx.includes('const restore = reserveRestoreNote(nightActuationMem, Date.now(), fmtDeadlineSpoken);'));
   assert.ok(idx.includes('error: `a night-charge write is currently holding the reserve up; ${restore.text}`,'));
   assert.ok(idx.includes('restoreAtMs: restore.atMs,'));

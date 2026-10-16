@@ -14,6 +14,10 @@ export interface BannerActuation {
   revertVerifiedAtMs?: number | null;
   revertRetries?: number;
   revertReadbackEscalated?: boolean;
+  /** v1.189.0 — the reserve settled as someone else's (the server's foreign rule): the night is
+   *  resolved, its write no longer holds the reserve, and there is nothing of it left to cancel. */
+  foreignSettledAtMs?: number | null;
+  foreignReservePct?: number | null;
 }
 
 /** A restore the cloud acknowledged but the panel has not confirmed, and the actuator is retrying
@@ -34,6 +38,8 @@ export const COMPLETED_BANNER_MS = 6 * 3_600_000;
  */
 export function actuationBannerVisible(a: BannerActuation | null, nowMs: number): boolean {
   if (!a || a.day == null) return false;
+  // v1.189.0 — a reserve someone else set settles the night like a restore: shown as long.
+  if (a.foreignSettledAtMs != null) return nowMs - a.foreignSettledAtMs < COMPLETED_BANNER_MS;
   if (revertUnconfirmed(a)) return true;
   if (a.revertedAtMs != null) return nowMs - (a.revertVerifiedAtMs ?? a.revertedAtMs) < COMPLETED_BANNER_MS;
   const windowOver = a.windowEndMs != null ? nowMs > a.windowEndMs + 3_600_000 : false;
@@ -71,6 +77,12 @@ export interface BannerState {
  */
 export function actuationBannerState(a: BannerTextActuation, deadline: string | null): BannerState {
   const prior = a.priorReservePct ?? '—';
+  // v1.189.0 — first: once the reserve has settled as someone else's, nothing of ours holds it and
+  // the server answers a cancel with 409, so the banner offers none ("Cancel & revert" over a
+  // reserve the owner set would read as a promise to restore it).
+  if (a.foreignSettledAtMs != null) {
+    return { text: `The reserve was set to ${a.foreignReservePct ?? '—'}% outside the add-on — tonight's write no longer holds it.`, settled: true, cancel: null };
+  }
   if (revertUnconfirmed(a)) {
     return { text: `Restore not confirmed — the panel has not reported the reserve back at ${prior}%.`, settled: false, cancel: null };
   }
@@ -92,8 +104,10 @@ export function actuationBannerState(a: BannerTextActuation, deadline: string | 
  * as a flag, a cancel made on one night showed the next night's write, on a card left open, as
  * "Cancelled", with no Cancel. null when nothing is armed.
  */
-export function actuationKey(a: { day: string | null; windowStartMs?: number | null } | null): string | null {
-  return a == null || a.day == null ? null : `${a.day}|${a.windowStartMs ?? '-'}`;
+export function actuationKey(a: { day: string | null; windowStartMs?: number | null; leg?: string | null } | null): string | null {
+  // v1.189.0 — and its leg: a cycle's two legs share a plan date, and a cancel of one is not a cancel
+  // of the other.
+  return a == null || a.day == null ? null : `${a.day}|${a.leg ?? 'cost'}|${a.windowStartMs ?? '-'}`;
 }
 
 /** v1.189.0 — the record with a cancel the server confirmed for it (actuationKey), until the
@@ -130,6 +144,14 @@ export function noPlanText(basisIncomplete: boolean, stands: boolean): string {
   return basisIncomplete
     ? 'No plan tonight — forecast/telemetry basis incomplete; nothing will be charged.'
     : 'No night-charge plan available — advisor idle or plan stale.';
+}
+
+/**
+ * v1.189.0 — the cancel request: a POST, with `{ leg }` when one is named (the server cancels the
+ * cost leg when none is — with one leg, tonight's write).
+ */
+export function cancelRequestInit(leg: 'cost' | 'backup' | null): { method: 'POST'; headers?: Record<string, string>; body?: string } {
+  return leg == null ? { method: 'POST' } : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ leg }) };
 }
 
 /**

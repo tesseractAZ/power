@@ -16,8 +16,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, holdSummary, noPlanText, withConfirmedCancel,
-  writeStands, WRITE_STANDS_HEADLINE, WRITE_STANDS_NOTE, type BannerTextActuation, type HoldSummaryPlan,
+  actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, holdSummary, noPlanText, withConfirmedCancel,
+  writeStands, COMPLETED_BANNER_MS, WRITE_STANDS_HEADLINE, WRITE_STANDS_NOTE, type BannerTextActuation, type HoldSummaryPlan,
 } from '../../web/src/cards/nightChargeText.js';
 
 const H = 3_600_000;
@@ -163,18 +163,26 @@ test('★★ the cancel\'s answer in the card\'s words: 2xx cancelled, 409 nothi
   for (const st of [401, 403, 500, 502]) assert.deepEqual(cancelOutcome(st, { error: 'x' }), { ok: false, done: false, text: `cancel failed (HTTP ${st})` });
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   const route = idx.slice(idx.indexOf("app.post('/api/night-charge/cancel'"), idx.indexOf('// v1.184.0 — the operator\'s "the grid is back"'));
-  assert.match(route, /reply\.code\(409\);\n\s+return \{ ok: false, error: 'no supervised write is armed' \};/);
-  assert.match(route, /reply\.code\(409\);\n\s+return \{ ok: false, error: 'tonight’s write already completed and reverted' \};/);
-  assert.match(route, /return \{ ok: true, actuation: nightActuationMem \};/);
+  // v1.189.0 — the answers come from chargeCycle.cancelLeg (by leg), word for word; the route answers 409
+  // with them and returns the leg it cancelled.
+  const cyc = readFileSync(new URL('../src/chargeCycle.ts', import.meta.url), 'utf8');
+  assert.match(cyc, /error: req === 'backup' \? 'no outage backup is armed' : 'no supervised write is armed'/);
+  assert.match(cyc, /if \(s\.revertedAtMs != null\) return \{ ok: false, error: 'tonight’s write already completed and reverted' \};/);
+  assert.match(route, /if \(!r\.ok\) \{\n\s+reply\.code\(409\);\n\s+return \{ ok: false, error: r\.error \};/);
+  assert.match(route, /return \{ ok: true, actuation: s, leg: s\.leg, legs: cycleLegsStatus\(nightCycleView\(\), Date\.now\(\)\) \};/);
 });
 
 test('★★★ a confirmed cancel holds for its own write only — the next night\'s write keeps its Cancel', () => {
   const tonight = armed();
   const key = actuationKey(tonight);
-  assert.equal(key, `2026-10-12|${WIN_START}`);
+  // v1.189.0 — keyed by its leg too: a record with none (an older server) is the cost leg.
+  assert.equal(key, `2026-10-12|cost|${WIN_START}`);
   assert.equal(actuationKey(null), null);
   assert.equal(actuationKey(armed({ day: null })), null);
-  assert.equal(actuationKey({ day: '2026-10-12' }), '2026-10-12|-', 'no window on record');
+  assert.equal(actuationKey({ day: '2026-10-12' }), '2026-10-12|cost|-', 'no window on record');
+  assert.equal(actuationKey({ day: '2026-10-12', leg: 'backup', windowStartMs: WIN_START }), `2026-10-12|backup|${WIN_START}`);
+  // A cycle's two legs share a plan date: a cancel of one is not a cancel of the other.
+  assert.equal(withConfirmedCancel({ ...armed(), leg: 'backup' }, key)!.cancelled, false);
   // The confirmed cancel shows at once, before the poll carries it…
   const shown = withConfirmedCancel(tonight, key)!;
   assert.equal(shown.cancelled, true);
@@ -191,6 +199,23 @@ test('★★★ a confirmed cancel holds for its own write only — the next nig
   assert.equal(withConfirmedCancel(armed({ windowStartMs: WIN_START + 25 * H }), key)!.cancelled, false);
   assert.equal(withConfirmedCancel(tonight, null), tonight);
   assert.equal(withConfirmedCancel(null, key), null);
+});
+
+test('★★ R3: a reserve settled as someone else\'s offers no Cancel (the server answers 409); the cancel names its leg', () => {
+  const settledAt = WIN_START + 2 * H;
+  const foreign = applied({ foreignSettledAtMs: settledAt, foreignReservePct: 30 });
+  assert.deepEqual(actuationBannerState(foreign, '23:00'), {
+    text: 'The reserve was set to 30% outside the add-on — tonight\'s write no longer holds it.', settled: true, cancel: null,
+  });
+  // Ahead of an unconfirmed restore too: a value someone else set is not ours to restore.
+  assert.equal(actuationBannerState({ ...foreign, revertedAtMs: WIN_END, revertRetries: 1 }, null).cancel, null);
+  assert.equal(writeStands(foreign, 'supervised', settledAt + H), false, 'no write stands');
+  assert.equal(actuationBannerVisible(foreign, settledAt + H), true);
+  assert.equal(actuationBannerVisible(foreign, settledAt + COMPLETED_BANNER_MS), false, 'shown as long as a completed night');
+  // The request: no body with no leg (the server cancels the cost leg — tonight's, with one leg).
+  assert.deepEqual(cancelRequestInit(null), { method: 'POST' });
+  assert.deepEqual(cancelRequestInit('backup'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"leg":"backup"}' });
+  assert.deepEqual(JSON.parse(cancelRequestInit('cost').body!), { leg: 'cost' });
 });
 
 /* ── the card's shapes (source: the card is not reachable from a unit test) ─────────────── */
@@ -245,7 +270,8 @@ test('★★★ the banner shows its Cancel whenever its state offers one, gated
   // …with the button on `state.cancel` alone.
   assert.match(fn, /\n\s+\{state\.cancel && <CancelButton label=\{state\.cancel\} busy=\{busy\} onClick=\{doCancel\} \/>\}\n/);
   assert.match(fn, /<span className=\{state\.settled \? 'text-muted' : 'text-warn'\}>\{state\.text\}<\/span>/);
-  assert.match(fn, /const out = await postCancel\(\);\n\s+if \(out\.ok\) onCancelled\(\);\n\s+else setCancelErr\(out\.text\);/);
+  // v1.189.0 — for the banner's own leg (none from an older server: the server reads it as the cost leg).
+  assert.match(fn, /const out = await postCancel\(actuation\.leg \?\? null\);\n\s+if \(out\.ok\) onCancelled\(\);\n\s+else setCancelErr\(out\.text\);/);
   // The card holds a confirmed cancel against its write (never an unkeyed flag that outlives the night).
   assert.match(card, /\n\s+const \[cancelledKey, setCancelledKey\] = useState<string \| null>\(null\);\n/);
   assert.match(card, /\n\s+const actuation = withConfirmedCancel\(status\.actuation \?\? null, cancelledKey\);\n\s+const onCancelled = \(\) => setCancelledKey\(actuationKey\(actuation\)\);\n/);
@@ -255,7 +281,7 @@ test('★★★ the banner shows its Cancel whenever its state offers one, gated
   const blind = card.slice(card.indexOf('function StatusBlindCancel('), card.indexOf('function CancelButton('));
   assert.match(blind, /setOut\(await postCancel\(\)\);/);
   assert.match(blind, /\{!out\?\.done && <CancelButton label="Cancel tonight" busy=\{busy\} onClick=\{doCancel\} \/>\}/);
-  assert.match(card, /const r = await fetch\(apiUrl\('api\/night-charge\/cancel'\), \{ method: 'POST' \}\);\n\s+let body: unknown = null;\n\s+try \{ body = await r\.json\(\); \} catch \{[^}]*\}\n\s+return cancelOutcome\(r\.status, body\);/);
+  assert.match(card, /const r = await fetch\(apiUrl\('api\/night-charge\/cancel'\), cancelRequestInit\(leg\)\);\n\s+let body: unknown = null;\n\s+try \{ body = await r\.json\(\); \} catch \{[^}]*\}\n\s+return cancelOutcome\(r\.status, body\);/);
   // The pure rules live in one place.
   assert.match(web, /\nexport function actuationBannerState\(a: BannerTextActuation, deadline: string \| null\): BannerState \{\n/);
 });

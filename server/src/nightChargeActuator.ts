@@ -767,20 +767,14 @@ export function armFromPlan(
    *  stamped as `nextOnPeakStartMs`. Omitted ⇒ null: the window-only schedule. */
   nextOnPeakStartMs?: number | null,
 ): NightActuationState | null {
-  // Unresolved: applied and not restored — unless the reserve settled as someone else's
-  // (foreignSettledAtMs), which nothing of ours will restore.
-  if (prev.appliedAtMs != null && prev.revertedAtMs == null && prev.foreignSettledAtMs == null) return null;
-  // v1.165.0 — a force-charge that was switched ON and never verified OFF is an
-  // unresolved night too. Arming returns a FRESH record, so re-arming here would
-  // bury the only record that knows to switch it off. Verification keeps running
-  // after an escalation, so this clears itself once the slots read OFF.
-  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) return null;
-  if (
-    prev.applyAttemptedAtMs != null && prev.appliedAtMs == null && prev.revertedAtMs == null &&
-    !(liveReservePct != null && prev.attemptBaselinePct != null && liveReservePct === prev.attemptBaselinePct)
-  ) {
-    return null; // unconfirmed attempt not provably un-applied — never bury it
-  }
+  // Unresolved (armOpenItem, below — one definition, which the charge cycle's legResolved reads too):
+  //  - applied and not restored — unless the reserve settled as someone else's (foreignSettledAtMs),
+  //    which nothing of ours will restore;
+  //  - v1.165.0 — a force-charge that was switched ON and never verified OFF. Arming returns a FRESH
+  //    record, so re-arming here would bury the only record that knows to switch it off.
+  //    Verification keeps running after an escalation, so this clears itself once the slots read OFF;
+  //  - an attempt confirmed neither way, not provably un-applied — never bury it.
+  if (armOpenItem(prev, liveReservePct) != null) return null;
   if (!plan.chargeTonight || !plan.basisComplete) return null;
   if (plan.window == null || plan.setpointSocPct == null) return null;
   if (plan.buyKwh == null || plan.buyKwh <= 0) return null;
@@ -809,17 +803,16 @@ export function armFromPlan(
 }
 
 /**
- * v1.187.22 — PURE. Why armFromPlan refuses `plan`, in words for the evening push; null when it
- * would arm. The checks are armFromPlan's, in its order (a test holds the two equivalent). With a
- * refused arm in a write mode the push used to take the advisory shape and recommend the plan's
- * level and expected draw — a force-charge to ~80% and ~35 kWh — for a write nothing would make.
+ * What a record still holds on the device, in words — the first of armFromPlan's three
+ * unresolved conditions, in its order; null when it holds nothing of ours. PURE.
+ *  - a reserve write applied and not restored (unless the reserve settled as someone else's);
+ *  - a force-charge switched ON whose OFF has not verified;
+ *  - a reserve write attempted and confirmed neither way — unless the live reading proves it
+ *    never landed (it still reads the attempt-time baseline).
+ * One definition: armRefusalReason leads with it, and the charge cycle's legResolved reads it
+ * (chargeCycle.ts), so promotion within a cycle and arming the next one refuse on the same facts.
  */
-export function armRefusalReason(
-  prev: NightActuationState,
-  plan: ArmablePlan,
-  nowMs: number,
-  liveReservePct: number | null,
-): string | null {
+export function armOpenItem(prev: NightActuationState, liveReservePct: number | null): string | null {
   const night = prev.day ?? 'a previous night';
   if (prev.appliedAtMs != null && prev.revertedAtMs == null && prev.foreignSettledAtMs == null) {
     return `the ${night} reserve write is still applied and not yet restored`;
@@ -833,6 +826,23 @@ export function armRefusalReason(
   ) {
     return `the ${night} reserve write was attempted and is not confirmed either way`;
   }
+  return null;
+}
+
+/**
+ * v1.187.22 — PURE. Why armFromPlan refuses `plan`, in words for the evening push; null when it
+ * would arm. The checks are armFromPlan's, in its order (a test holds the two equivalent). With a
+ * refused arm in a write mode the push used to take the advisory shape and recommend the plan's
+ * level and expected draw — a force-charge to ~80% and ~35 kWh — for a write nothing would make.
+ */
+export function armRefusalReason(
+  prev: NightActuationState,
+  plan: ArmablePlan,
+  nowMs: number,
+  liveReservePct: number | null,
+): string | null {
+  const open = armOpenItem(prev, liveReservePct);
+  if (open != null) return open;
   if (!plan.chargeTonight || !plan.basisComplete) return 'the plan does not call for a charge';
   if (plan.window == null || plan.setpointSocPct == null) return 'the plan has no window or reserve setpoint';
   if (plan.buyKwh == null || plan.buyKwh <= 0) return 'the plan sizes no buy';

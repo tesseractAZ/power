@@ -209,15 +209,12 @@ import {
 import {
   resolveNightChargeMode,
   APPLY_MAX_RETRIES,
-  armFromPlan,
-  armRefusalReason,
   coerceArmRefusalRecord,
   servedArmRefusal,
   eveningNotArmedReason,
   type ArmRefusalRecord,
   decideActuation,
   emptyActuationState,
-  coerceActuationState,
   isReserveArbitrageRaised,
   setReserveArbitrageRaised, getReserveArbitrageRaised,
   clampReserveTarget,
@@ -242,8 +239,15 @@ import {
   buildNightChargeMessage, sendNotification, loadNotifyConfig,
   // v1.187.22 — the after-the-fact night-charge pushes, built where their text is tested.
   buildNightChargeMorningSummary, buildNightChargeApplyFailure, buildNightForceChargeOnFailure,
-  buildNightChargeRevertDeadline, buildNightChargeForeignReserve,
+  buildNightChargeRevertDeadline, buildNightChargeForeignReserve, buildNightChargeMissedApply,
 } from './notify.js';
+// v1.189.0 — the charge cycle: the legs one evening arms (chargeCycle.ts).
+import {
+  coerceCycle, serializeCycle, emptyCycle, asChargeLeg, legRoleOf, armCycle, promoteCycle, cancelLeg, parseCancelLeg,
+  cycleLegsStatus, cycleDriftLeg, missedApplyDue, missedApplyReason, legLedgerFields, supersededLegs, trailingResolved,
+  nextForceChargeOpenMs, withLiveTrailing, MISSED_APPLY_FALLBACK_REASON,
+  type ChargeCycleState, type ChargeLegState,
+} from './chargeCycle.js';
 import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonAt, APS_PERIOD } from './tariff.js';
 // v1.187.0 — the scorer's span, cost and PV-evidence decisions, pure (nightLedgerScoring.ts).
@@ -3214,13 +3218,27 @@ function writeNightChargeLatch(l: NightChargeLatch): void {
 // v1.50.0 — in-memory mirror of the persisted actuation state, seeded once at
 // module load (same pattern as the notify latch: reads hit memory, writes go to
 // memory + disk in lock-step).
-let nightActuationMem: NightActuationState = (() => {
+// v1.189.0 — the file holds the charge CYCLE (chargeCycle.ts): the active leg at the top level, in
+// the shape every earlier release reads (a rollback still finds and reverts it), plus the legs
+// pending behind it and a trailing leg. The per-night record below stays the ACTIVE leg, so every
+// reader of it is unchanged; with one leg nothing is pending or trailing.
+const nightCycleAtBoot: ChargeCycleState = (() => {
   try {
-    return coerceActuationState(JSON.parse(readFileSync(NIGHT_CHARGE_ACTUATION_PATH, 'utf8')));
+    return coerceCycle(JSON.parse(readFileSync(NIGHT_CHARGE_ACTUATION_PATH, 'utf8')));
   } catch {
-    return emptyActuationState();
+    return emptyCycle();
   }
 })();
+let nightActuationMem: ChargeLegState = nightCycleAtBoot.active;
+/** v1.189.0 — the legs armed behind the active one, in order. They have written nothing. */
+let nightCyclePending: ChargeLegState[] = nightCycleAtBoot.pendingLegs;
+/** v1.189.0 — a prior leg still verifying its force-charge OFF while a reserve-only backup leg
+ *  runs (chargeCycle.armCycle); driven by runTrailingLegTick. */
+let nightCycleTrailing: ChargeLegState | null = nightCycleAtBoot.trailing;
+/** v1.189.0 — the cycle as one value (the record is the three bindings above). */
+function nightCycleView(): ChargeCycleState {
+  return { active: nightActuationMem, pendingLegs: nightCyclePending, trailing: nightCycleTrailing };
+}
 // v1.113.0 — seed the posture from persisted state so a restart mid-window
 // does not momentarily present an arbitrage-raised reserve as a genuine floor.
 setReserveArbitrageRaised(effectiveArbitragePosture(nightActuationMem, liveReserveSocPct(), Date.now()));
@@ -3266,7 +3284,8 @@ store.on('change', (snap: FleetSnapshot) => {
   setReserveArbitrageRaised(effectiveArbitragePosture(nightActuationMem, live, Date.now()));
 });
 function persistNightActuation(s: NightActuationState): void {
-  nightActuationMem = s;
+  // v1.189.0 — the active leg keeps its name (a record built fresh is the overnight cost leg).
+  nightActuationMem = asChargeLeg(s);
   // v1.113.0 — keep the alert engine's reserve-posture flag in lockstep with
   // every actuation-state write (apply, revert, cancel, abort).
   setReserveArbitrageRaised(effectiveArbitragePosture(s, liveReserveSocPct(), Date.now()));
@@ -3280,10 +3299,63 @@ function persistNightActuation(s: NightActuationState): void {
   // the prior floor while a restore that did not take leaves our target standing.
   setChargeWriteHold(chargeWriteHold(s));
   try {
-    atomicWriteFileSync(NIGHT_CHARGE_ACTUATION_PATH, JSON.stringify(s));
+    // v1.189.0 — the whole cycle (chargeCycle.serializeCycle): the active leg at the top level.
+    atomicWriteFileSync(NIGHT_CHARGE_ACTUATION_PATH, JSON.stringify(serializeCycle(nightCycleView())));
   } catch (e: any) {
     app.log.debug(`night-charge: actuation persist failed (${e?.message ?? e})`);
   }
+}
+
+/** v1.189.0 — persist a whole cycle: its pending and trailing legs, then the active leg (which
+ *  publishes the posture, the owner floor and the write hold, and writes the file). */
+function persistCycle(c: ChargeCycleState): void {
+  nightCyclePending = c.pendingLegs;
+  nightCycleTrailing = c.trailing;
+  persistNightActuation(c.active);
+}
+
+/** v1.189.0 — persist the trailing leg, only while it is still the one on record: the evening job
+ *  re-arming the cycle during a trailing step's await must not have its record overwritten. */
+function persistTrailing(t: NightActuationState): void {
+  const cur = nightCycleTrailing;
+  if (cur == null || cur.day !== t.day || cur.windowStartMs !== t.windowStartMs) {
+    app.log.warn(`night-charge: trailing-leg write for ${t.day ?? '—'} dropped — the cycle no longer holds that leg.`);
+    return;
+  }
+  persistCycle({ ...nightCycleView(), trailing: asChargeLeg(t, cur) });
+}
+
+/**
+ * v1.189.0 — where a force-charge step's record lives: the active leg, or the trailing one. The
+ * escalation (escalateForceChargeStuck) writes through it, so a trailing leg's page is recorded on
+ * the trailing leg.
+ */
+interface LegSlot {
+  get(): NightActuationState;
+  put(s: NightActuationState): void;
+}
+const ACTIVE_LEG: LegSlot = { get: () => nightActuationMem, put: (s) => persistNightActuation(s) };
+const TRAILING_LEG: LegSlot = {
+  get: () => nightCycleTrailing ?? emptyActuationState(),
+  put: (s) => persistTrailing(s),
+};
+
+/** v1.189.0 — a leg's ledger stamp, to its leg's columns (chargeCycle.legLedgerFields: a backup
+ *  leg's go to backup_*; one with no backup column is not written). Never throws. */
+function stampLegOutcome(leg: NightActuationState & { leg?: ChargeLegRole }, fields: Partial<NightLedgerRow>): void {
+  if (leg.day == null) return;
+  const cols = legLedgerFields(legRoleOf(leg), fields as Record<string, unknown>) as Partial<NightLedgerRow>;
+  if (Object.keys(cols).length === 0) return;
+  try { recorder.recordNightOutcome(leg.day, cols); }
+  catch (e: any) { app.log.warn(`night-charge: ledger stamp failed for ${leg.day} (${e?.message ?? e})`); }
+}
+
+/** v1.189.0 — the house panel's backup reserve from a FRESH readback (the reserve step's R3 rule:
+ *  a frozen projection never decides), or null. */
+function freshReserveReadingPct(nowMs: number): number | null {
+  const shp2 = findShp2(store.get().devices);
+  const sp: any = shp2 && shp2.projection?.kind === 'shp2' && shp2ReadbackFresh(shp2, nowMs) ? shp2.projection : null;
+  return typeof sp?.backupReserveSoc === 'number' ? sp.backupReserveSoc : null;
 }
 
 /** Clock text ("10:55 PM") of an instant in America/Phoenix. */
@@ -3905,6 +3977,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // v1.187.22 — the expected buy and start beside buy_kwh (the worst case), so the scorer can
     // grade them. Written unconditionally (null with none) for the same reason as above.
     ...expectedBuyLedgerColumns(plan),
+    // v1.189.0 — the cost leg's window (the charge cycle's ledger columns): every plan of record is
+    // the overnight leg until the mid-day switch.
+    window_kind: 'overnight',
   };
   // Only a plan with a real trajectory records min_proj_soc — a null-basis /
   // insufficient plan leaves it NULL so the scorer recognises "no basis".
@@ -4437,6 +4512,12 @@ function cancelStalePriorArm(today: string, nowMs: number, reason: string): bool
   } catch (e: any) {
     app.log.warn(`night-charge: cancel stamp failed for ${stale} (${e?.message ?? e})`);
   }
+  // v1.189.0 — and the legs pending behind it (armed with it, never written): with nothing active
+  // they would be promoted and write against tonight's decision.
+  for (const p of nightCyclePending) {
+    stampLegOutcome(p, { arm_disposition: `cancelled by the ${today} plan — ${reason}` });
+  }
+  nightCyclePending = [];
   persistNightActuation(emptyActuationState());
   return true;
 }
@@ -4580,6 +4661,10 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       forceChargeTargetPct?: number | null;
     } | null = null;
     let armedCandidate: NightActuationState | null = null;
+    // v1.189.0 — the cycle armCycle built (chargeCycle.ts), persisted only once delivered, and the
+    // prior cycle's pending legs it replaces (stamped then).
+    let armedCycle: ChargeCycleState | null = null;
+    let supersededPending: Array<{ leg: ChargeLegState; sharedWindow: boolean }> = [];
     // v1.187.22 — why a write mode refused to arm a charge plan; the push then says no write is
     // armed instead of recommending the plan's level and draw (buildNightChargeMessage).
     let armRefused: string | null = null;
@@ -4589,8 +4674,16 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       // The on-peak guard: the start of the on-peak period after the window open, stamped on the
       // arm (nextOnPeakStartMs) — raises stop, and the restore falls due, an hour before it.
       const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(apsREvModelFromEnv(), plan.window.startMs) : null;
-      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn(), armOnPeakStartMs);
-      if (!armedCandidate) armRefused = armRefusalReason(nightActuationMem, plan, nowMs, plan.reserveFloorPct);
+      // v1.189.0 — armed as a charge cycle (chargeCycle.armCycle). With one leg — tonight's
+      // overnight cost leg, every cycle until the mid-day switch — it arms what armFromPlan arms
+      // against the active leg, and refuses with armRefusalReason's words, unchanged.
+      const arm = armCycle(nightCycleView(), today, [{
+        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,
+        announcedLevelPct: chargeLevelPct(plan), announcedExpectedKwh: statedBuyKwh(plan),
+      }], nowMs, plan.reserveFloorPct);
+      armedCycle = arm.cycle;
+      armedCandidate = arm.cycle?.active ?? null;
+      if (!armedCandidate) armRefused = arm.refused[0]?.reason ?? null;
       if (armedCandidate) {
         // v1.79.0 — an earlier evening's never-applied ARM being replaced is a
         // normal weekend pattern, but 3 ARMED vs 2 APPLIED was untraceable
@@ -4617,6 +4710,10 @@ async function runNightChargeEveningJobInner(): Promise<void> {
             app.log.warn(`night-charge: supersede stamp failed for ${nightActuationMem.day} (${e?.message ?? e})`);
           }
         }
+        // v1.189.0 — and a prior cycle's pending leg that never wrote (chargeCycle.supersededLegs;
+        // the active leg is stamped above, as it always was). Stamped once the cycle that replaces
+        // it is persisted (below): an undelivered arm replaces nothing.
+        supersededPending = supersededLegs(nightCycleView(), arm.legs, today, nowMs).filter(({ leg }) => leg !== nightActuationMem);
         supervisedCtx = {
           // Day-qualified: a weekend plan's window can be ~28 h out, and a bare
           // clock time would read as tonight (see fmtDeadlineSpoken).
@@ -4689,7 +4786,13 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     }
     if (armedCandidate) {
       if (haNotifyDelivered || audibleDelivered) {
-        persistNightActuation(armedCandidate);
+        // v1.189.0 — the whole cycle, only now it is delivered (the trailing leg, if any, with it, as
+        // the ticks during the announcement left it: chargeCycle.withLiveTrailing).
+        persistCycle(withLiveTrailing(armedCycle!, nightActuationMem));
+        for (const { leg, sharedWindow } of supersededPending) {
+          app.log.info(`night-charge: prior ${leg.leg} leg for ${leg.day} (target ${leg.targetPct}%) superseded by tonight's plan${sharedWindow ? ' — the same window' : ''}.`);
+          stampLegOutcome(leg, { arm_disposition: `superseded by the ${today} plan` });
+        }
         app.log.info(
           `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (${buyFiguresLogText(plan?.expectedBuyKwh, plan?.buyKwhDebiased ?? plan?.buyKwh)}); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}`,
         );
@@ -5059,12 +5162,13 @@ function settingsSurfaceDevices(): SurfaceDevice[] {
  * a change is confirmed.
  */
 function driftActuatorContext(nowMs: number): ActuatorContext {
-  const act = nightActuationMem;
-  const nightActive =
-    act.day != null &&
-    ((act.appliedAtMs != null && act.revertedAtMs == null && act.foreignSettledAtMs == null) ||
-     (act.announcedAtMs != null && act.appliedAtMs == null && act.cancelled !== true) ||
-     (act.revertedAtMs != null && nowMs - act.revertedAtMs < 15 * 60_000));
+  // v1.189.0 — per leg (chargeCycle.legDriftActive): the leg whose write a reserve change now could
+  // be — of the trailing, active and pending legs. The overnight leg keeps the rule this has always
+  // applied, so with one leg the attribution is today's; a mid-day leg's armed 21:30 → 10:00 span
+  // is not attributed (only its apply window and its write to 15 min after the last restore).
+  const own = cycleDriftLeg(nightCycleView(), nowMs);
+  const nightActive = own != null;
+  const reserveLeg = own ?? nightActuationMem;
   // v1.115.0 — an owner-floor write through /api/reserve-floor was being
   // reported back as an EXTERNAL change at warn level ~3 min later (the
   // add-on flagging its own write as third-party tampering). Own-write
@@ -5075,21 +5179,28 @@ function driftActuatorContext(nowMs: number): ActuatorContext {
       ? ownerFloorWrite.pct
       : null;
   // v1.165.0 — our own force-charge ON/OFF (and the ceiling sync) are not
-  // "external". Same 15-minute tail as the reserve: the slots read back OFF a
-  // poll or two after the write.
-  const forceChargeActive =
-    forceChargeInFlight(act) ||
+  // "external" (forceChargeDriftActive). v1.189.0 — the active leg's, or the trailing leg's while
+  // its OFF is in flight or recent (its re-sends are ours too).
+  const act = nightCycleTrailing != null && forceChargeDriftActive(nightCycleTrailing, nowMs) ? nightCycleTrailing : nightActuationMem;
+  const forceChargeActive = forceChargeDriftActive(act, nowMs);
+  // v1.187.10 — and only what it COMMANDED is its own write (forceChargeCommandsOf):
+  // inside that window the panel's own ceiling stop turns slots OFF before ours.
+  return {
+    targetPct: reserveLeg.targetPct, priorReservePct: reserveLeg.priorReservePct, nightActive, ownerFloorPct, forceChargeActive,
+    forceChargeCommands: forceChargeCommandsOf(act),
+  };
+}
+
+/** v1.165.0 — a record's force-charge writes are in flight, or were made within the last 15
+ *  minutes: the same tail as the reserve, since the slots read back OFF a poll or two after the
+ *  write. (v1.189.0: a function, so the trailing leg is judged by the same rule.) */
+function forceChargeDriftActive(act: NightActuationState, nowMs: number): boolean {
+  return forceChargeInFlight(act) ||
     (act.forceChargeOffVerifiedAtMs != null && nowMs - act.forceChargeOffVerifiedAtMs < 15 * 60_000) ||
     (act.forceChargeCeilingAttemptedAtMs != null && nowMs - act.forceChargeCeilingAttemptedAtMs < 15 * 60_000) ||
     // v1.173.0 — and the RESTORE: on a night whose force-charge never started, the 05:00
     // restore of the panel's own ceiling was pushed as an external "Setting changed".
     (act.forceChargeCeilingRestoreLastAttemptMs != null && nowMs - act.forceChargeCeilingRestoreLastAttemptMs < 15 * 60_000);
-  // v1.187.10 — and only what it COMMANDED is its own write (forceChargeCommandsOf):
-  // inside that window the panel's own ceiling stop turns slots OFF before ours.
-  return {
-    targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct, forceChargeActive,
-    forceChargeCommands: forceChargeCommandsOf(act),
-  };
 }
 
 function runSettingsDriftTick(): void {
@@ -5319,6 +5430,14 @@ async function runNightActuationTick(): Promise<void> {
   if (nightActuationInFlight) return;
   nightActuationInFlight = true;
   try {
+    // v1.189.0 — the charge cycle's own steps (chargeCycle.ts), each in its own try; with one leg
+    // neither has anything to do. A trailing leg's force-charge OFF goes first — an OFF, as in the
+    // close-off-first order below — then the cycle step: a trailing leg that resolved leaves, and a
+    // resolved active leg hands over to the next pending one.
+    try { await runTrailingLegTick(); }
+    catch (e: any) { app.log.warn(`night-charge: trailing-leg tick failed (${e?.message ?? e})`); }
+    try { runCycleStep(); }
+    catch (e: any) { app.log.warn(`night-charge: cycle step failed (${e?.message ?? e})`); }
     // v1.165.0 — the force-charge step runs AFTER the reserve step (whose tick returns
     // early on 'none' for most of the window) and re-reads state fresh, so the START rides
     // the reserve the step just verified. Each step in its own try (runActuationSteps): a
@@ -5333,6 +5452,9 @@ async function runNightActuationTick(): Promise<void> {
     }, (step, e: any) => {
       app.log.warn(`night-charge: ${step === 'reserve' ? 'actuation' : 'force-charge'} tick failed (${e?.message ?? e})`);
     });
+    // v1.189.0 — a leg whose apply window passed with no write (chargeCycle.missedApplyDue).
+    try { await runMissedApplyStep(); }
+    catch (e: any) { app.log.warn(`night-charge: missed-apply step failed (${e?.message ?? e})`); }
   } finally {
     nightActuationInFlight = false;
   }
@@ -5432,7 +5554,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       })
       : null;
   const action = decideForceCharge(state, nowMs, {
-    enabled: !opts.forceDisabled && forceChargeOn(),
+    // v1.189.0 — per leg: a backup leg never force-charges (chargeWindows.legForceChargeEligible).
+    enabled: !opts.forceDisabled && forceChargeOn(legRoleOf(state)),
     // v1.179.0 — tri-state: null when presence is false only because nothing can be heard.
     gridPresent: gridNow.present ? true : gridNow.presenceUnknown ? null : false,
     // Connected is gridSta === 1 ONLY (docs/reference/02-1-cloud-protocol-and-snapshot.md
@@ -5449,9 +5572,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     poolSocPct: socCoherent ? socNowPct : null,
     fullKwh: fullWh != null && fullWh > 0 ? fullWh / 1000 : null,
     // Blind OFF re-sends stop at the next charge window's open at the latest (blindResendStopMs):
-    // the latest plan's window, when it opens after this night's closes.
-    nextLegOpenMs: fcPlan?.window != null && state.windowEndMs != null && fcPlan.window.startMs >= state.windowEndMs
-      ? fcPlan.window.startMs : null,
+    // v1.189.0 — the next cost leg pending in the cycle, else the latest plan's window, when it
+    // opens after this night's closes (chargeCycle.nextForceChargeOpenMs).
+    nextLegOpenMs: nextForceChargeOpenMs(state, nightCyclePending, fcPlan?.window?.startMs),
     chargeRateKw,
     evDisplacedKwh,
   });
@@ -5525,6 +5648,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // above: each slot's cooldown starts when its own write goes out, so slow PUTs measured
     // from the stamp let the one re-issue land inside a later slot's cooldown, rate-limited.
     persistNightActuation({ ...nightActuationMem, forceChargeOnLastAttemptMs: Date.now() });
+    stampLegOutcome(state, { force_charge_on_at_ms: nowMs }); // v1.189.0 — the ledger's force-charge stamps
     const slotsNow = connectedSlots.filter((n) => n >= 1 && n <= 3).length;
     const unboundedKw = gridCapKw != null ? (gridCapKw - Math.max(0, houseLoadKw ?? 0)) * Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY) : null;
     const rateNote = (chargeRateKw != null
@@ -5619,6 +5743,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     if (isRetry && acked > 0) {
       persistNightActuation({ ...nightActuationMem, forceChargeOffRetries: nightActuationMem.forceChargeOffRetries + 1 });
     }
+    if (!isRetry && state.forceChargeOffAtMs == null) {
+      stampLegOutcome(state, { force_charge_off_at_ms: nowMs, force_charge_off_reason: action.reason }); // v1.189.0
+    }
     if (isRetry && action.kind === 'offRetry' && action.unconfirmed) {
       app.log.warn(`night-charge: force-charge NOT CONFIRMED OFF (no live panel readback) — re-sending OFF to slots ${action.slots.join(',')} every 15 min until a readback shows it off: ${results.join(', ')}`);
     } else if (isRetry) {
@@ -5636,6 +5763,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
 
   if (action.kind === 'offVerified') {
     persistNightActuation({ ...nightActuationMem, forceChargeOffVerifiedAtMs: nowMs });
+    stampLegOutcome(state, { force_charge_off_verified_at_ms: nowMs }); // v1.189.0
     app.log.info(`night-charge: force-charge OFF VERIFIED by device readback for ${state.day}${state.forceChargeOffEscalated ? ' (after the escalation — resolved)' : ''}.`);
     return;
   }
@@ -5655,22 +5783,24 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
 async function escalateForceChargeStuck(
   state: NightActuationState,
   action: Extract<ForceChargeAction, { kind: 'offFailed' }>,
+  // v1.189.0 — the record it pages for: the active leg, or the trailing leg (runTrailingLegTick).
+  leg: LegSlot = ACTIVE_LEG,
 ): Promise<void> {
   const repage = action.repage === true;
   if (repage) {
     // v1.173.0 — a deadline page that quiet hours silenced: speak it again (no second push).
     // Booked as muted until the announce says it was heard.
-    persistNightActuation({
-      ...nightActuationMem,
-      forceChargeOffDeadlineRepages: nightActuationMem.forceChargeOffDeadlineRepages + 1,
+    leg.put({
+      ...leg.get(),
+      forceChargeOffDeadlineRepages: leg.get().forceChargeOffDeadlineRepages + 1,
       forceChargeOffDeadlineMutedAtMs: Date.now(),
     });
   } else {
-    persistNightActuation({
-      ...nightActuationMem,
+    leg.put({
+      ...leg.get(),
       forceChargeOffEscalated: true,
       // The deadline pages once, on its own record (see nightForceCharge.ts section 0).
-      forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,
+      forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : leg.get().forceChargeOffDeadlinePagedAtMs,
     });
   }
   const unconfirmed = action.unconfirmed === true;
@@ -5706,8 +5836,8 @@ async function escalateForceChargeStuck(
     // v1.173.0 — a deadline page records whether it was HEARD, so a quiet-hours mute is
     // re-spoken once quiet hours end (Friday's deadline lands at Sat 01:00).
     if (action.deadline) {
-      persistNightActuation({
-        ...nightActuationMem,
+      leg.put({
+        ...leg.get(),
         forceChargeOffDeadlineMutedAtMs: heard && heard.ok === false ? Date.now() : null,
       });
     }
@@ -5753,6 +5883,8 @@ function pageRevertDeadline(
     revertDeadlinePagedAtMs: state.revertDeadlinePagedAtMs ?? nowMs,
     revertDeadlineOnPeakPagedAtMs: d.stage === 'onPeak' ? nowMs : state.revertDeadlineOnPeakPagedAtMs,
   });
+  // v1.189.0 — the ledger keeps the first page (a backup leg's has no column: stampLegOutcome).
+  if (state.revertDeadlinePagedAtMs == null) stampLegOutcome(state, { revert_deadline_paged_at_ms: nowMs });
   const restorePct = restoreTargetPct(state);
   const targetPct = state.targetPct!; // decideRevertDeadline pages only a record with a target
   const onPeakClock = state.nextOnPeakStartMs != null ? fmtPhoenixClock(state.nextOnPeakStartMs) : null;
@@ -5840,8 +5972,7 @@ async function runNightActuationTickInner(): Promise<void> {
     // reading — stamp it so the normal revert path takes over. Without this a
     // raised reserve would sit orphaned behind the "nothing to raise" guard.
     persistNightActuation({ ...state, appliedAtMs: state.applyAttemptedAtMs ?? nowMs, priorReservePct: action.priorPct, lastError: null });
-    try { recorder.recordNightOutcome(state.day, { actuated: 1, actuation_applied_at_ms: state.applyAttemptedAtMs ?? nowMs }); }
-    catch (e: any) { app.log.warn(`night-charge: actuated stamp failed (${e?.message ?? e})`); }
+    stampLegOutcome(state, { actuated: 1, actuation_applied_at_ms: state.applyAttemptedAtMs ?? nowMs });
     app.log.warn(
       `night-charge: ADOPTED an unconfirmed write — the device reads ${state.targetPct}% (attempt baseline ${action.priorPct}%); the apply succeeded but its confirmation was lost. Normal auto-revert takes over.`,
     );
@@ -5859,8 +5990,7 @@ async function runNightActuationTickInner(): Promise<void> {
     });
     if (r.outcome === 'success') {
       persistNightActuation({ ...nightActuationMem, appliedAtMs: nowMs, priorReservePct: currentReservePct, lastError: null });
-      try { recorder.recordNightOutcome(state.day, { actuated: 1, actuation_applied_at_ms: nowMs }); }
-      catch (e: any) { app.log.warn(`night-charge: actuated stamp failed (${e?.message ?? e})`); }
+      stampLegOutcome(state, { actuated: 1, actuation_applied_at_ms: nowMs });
       app.log.info(
         `night-charge: SUPERVISED WRITE APPLIED — backupReserveSoc ${currentReservePct}% → ${action.targetPct}% for ${state.day}; auto-reverts after window close.`,
       );
@@ -5946,8 +6076,7 @@ async function runNightActuationTickInner(): Promise<void> {
     // actuation and the operator must hear about the forfeited buy. The night
     // still closes through the normal revert (a no-op restore).
     persistNightActuation({ ...state, applyEscalated: true });
-    try { recorder.recordNightOutcome(state.day, { actuated: 0 }); }
-    catch (e: any) { app.log.warn(`night-charge: actuated correction failed (${e?.message ?? e})`); }
+    stampLegOutcome(state, { actuated: 0 });
     // v1.187.22 — the push states the armed day's EXPECTED figure, or none (never the worst case,
     // state.buyKwh); the log keeps both, labelled.
     const expectedKwh = armedExpectedBuyKwh(state.day);
@@ -6034,8 +6163,8 @@ async function runNightActuationTickInner(): Promise<void> {
     // v1.187.0 (review) — where the hold ended, for the delivered-energy span
     // (nightLedgerScoring.deliveredHoldSpan): the restore lands on the first tick after
     // the close, and the pack charges until it does.
-    try { recorder.recordNightOutcome(state.day, { actuation_reverted_at_ms: nowMs }); }
-    catch (e: any) { app.log.warn(`night-charge: revert stamp failed (${e?.message ?? e})`); }
+    // v1.189.0 — to the leg's own columns (a backup leg's go to backup_*: stampLegOutcome).
+    stampLegOutcome(state, { actuation_reverted_at_ms: nowMs });
     app.log.info(
       `night-charge: reserve REVERTED to ${action.restorePct}% for ${state.day}${state.cancelled ? ' (owner cancel)' : ''}.`,
     );
@@ -6096,6 +6225,177 @@ async function runNightActuationTickInner(): Promise<void> {
     }
     persistNightActuation({ ...state, revertAttempts: attempts, revertEscalated: escalated, lastError: r.message ?? r.code ?? 'revert failed' });
   }
+}
+
+/* ═══ v1.189.0 — the charge cycle's own steps (chargeCycle.ts) ═══════════════════════════════════
+ * With one leg — every cycle the add-on arms until the mid-day switch — none of these has anything
+ * to do: nothing is pending, nothing trails, and the overnight cost leg never sends a missed-apply
+ * push. They write nothing to the device but a trailing leg's force-charge OFF. */
+
+/**
+ * The cycle step (chargeCycle.promoteCycle): a trailing leg that has resolved leaves the cycle, and
+ * a resolved active leg hands over to the first pending one (legResolved, with the live reserve
+ * from a FRESH readback for armOpenItem's never-landed proof). Nothing is written to the device.
+ */
+function runCycleStep(): void {
+  if (nightCyclePending.length === 0 && nightCycleTrailing == null) return;
+  const nowMs = Date.now();
+  const step = promoteCycle(nightCycleView(), nowMs, freshReserveReadingPct(nowMs));
+  if (step == null) return;
+  persistCycle(step.cycle);
+  if (step.trailingDone) {
+    app.log.info(`night-charge: the trailing ${step.trailingDone.day} leg is done — its force-charge OFF read back${step.trailingDone.forceChargeCeilingPriorPct != null && step.trailingDone.forceChargeCeilingRestoredAtMs == null ? '; the panel\'s ceiling restore goes on with the active leg' : ''}.`);
+  }
+  if (step.promoted) {
+    const { from, to } = step.promoted;
+    app.log.info(`night-charge: the ${from.leg} leg for ${from.day} is resolved; the ${to.leg} leg (${to.windowStartMs != null ? new Date(to.windowStartMs).toISOString() : '?'} → ${to.windowEndMs != null ? new Date(to.windowEndMs).toISOString() : '?'}, reserve → ${to.targetPct}%${to.cancelled ? ', cancelled' : ''}) is now active.`);
+  }
+}
+
+/**
+ * The trailing leg (chargeCycle.armCycle): a prior leg whose only open item was a force-charge OFF
+ * not yet verified when a reserve-only backup leg armed. It is driven by the same decision as the
+ * active leg (decideForceCharge) with force-charge DISABLED, so the only answers are the OFF, its
+ * re-sends and readback, the wall-clock deadline and the panel's ceiling restore — a trailing leg
+ * never switches anything on. Its records go to the trailing slot. Blind re-sends stop at the open
+ * of the next leg that may force-charge (the pending cost leg), which waits for this one anyway.
+ */
+async function runTrailingLegTick(): Promise<void> {
+  const t = nightCycleTrailing;
+  if (t == null) return;
+  const nowMs = Date.now();
+  const cur = (): NightActuationState => nightCycleTrailing ?? t;
+  const shp2 = findShp2(store.get().devices);
+  if (!shp2) {
+    const blind = decideForceCharge(t, nowMs, {
+      enabled: false, gridPresent: null, gridStaLost: false, slotsOn: null, connectedSlots: [],
+      vitalsRed: false, socCoherent: false, ceilingReadbackPct: null, poolSocPct: null, fullKwh: null,
+    });
+    if (blind.kind === 'offFailed') await escalateForceChargeStuck(t, blind, TRAILING_LEG);
+    return;
+  }
+  const sp: any = shp2.projection?.kind === 'shp2' && shp2ReadbackFresh(shp2, nowMs) ? shp2.projection : null;
+  const sources: any[] | null = Array.isArray(sp?.sources) ? sp.sources : null;
+  const slotsOn = sources == null ? null
+    : sources.filter((c) => c?.forceCharge === 'FORCE_CHARGE_ON').map((c) => Number(c.slot)).filter(Number.isInteger);
+  // No grid reading is passed: with force-charge disabled and the leg's window over, the grid can
+  // only ever matter to a start, which a trailing leg never makes (its OFF falls due on the clock).
+  const action = decideForceCharge(t, nowMs, {
+    enabled: false,
+    gridPresent: null,
+    gridStaLost: false,
+    slotsOn,
+    connectedSlots: [],
+    vitalsRed: currentAssessment()?.level === 'crit',
+    socCoherent: false,
+    ceilingReadbackPct: typeof sp?.forceChargeCeilingSoc === 'number' ? sp.forceChargeCeilingSoc : null,
+    poolSocPct: null,
+    fullKwh: null,
+    // Blind re-sends stop at the next cost leg's open (a backup leg never force-charges, so an OFF
+    // inside its window cuts nothing of ours), else the latest plan's (nextForceChargeOpenMs).
+    nextLegOpenMs: nextForceChargeOpenMs(t, [nightActuationMem, ...nightCyclePending], getLatestNightChargePlan()?.window?.startMs),
+  });
+  if (action.kind === 'off' || action.kind === 'offRetry') {
+    const isRetry = action.kind === 'offRetry';
+    persistTrailing({
+      ...cur(),
+      forceChargeOffAtMs: cur().forceChargeOffAtMs ?? nowMs,
+      forceChargeOffLastAttemptMs: nowMs,
+      forceChargeOffReason: isRetry ? cur().forceChargeOffReason : action.reason,
+    });
+    const results: string[] = [];
+    let acked = 0;
+    for (const slot of action.slots) {
+      const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: false, source: { ua: 'night-force-charge' } });
+      if (r.outcome === 'success') acked++;
+      results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
+    }
+    // As for the active leg: only an OFF the cloud accepted spends the readback budget.
+    if (isRetry && acked > 0) persistTrailing({ ...cur(), forceChargeOffRetries: cur().forceChargeOffRetries + 1 });
+    if (!isRetry && t.forceChargeOffAtMs == null) {
+      stampLegOutcome(t, { force_charge_off_at_ms: nowMs, force_charge_off_reason: action.reason });
+    }
+    app.log.warn(`night-charge: trailing ${t.day} leg — force-charge OFF ${isRetry ? 're-sent' : 'sent'} to slots ${action.slots.join(',')}${isRetry && action.kind === 'offRetry' && action.unconfirmed ? ' (no live readback)' : ''}: ${results.join(', ')}.`);
+    return;
+  }
+  if (action.kind === 'offVerified') {
+    persistTrailing({ ...cur(), forceChargeOffVerifiedAtMs: nowMs });
+    stampLegOutcome(t, { force_charge_off_verified_at_ms: nowMs });
+    app.log.info(`night-charge: trailing ${t.day} leg — force-charge OFF VERIFIED by device readback.`);
+    return;
+  }
+  if (action.kind === 'offFailed') {
+    await escalateForceChargeStuck(t, action, TRAILING_LEG);
+    return;
+  }
+  if (action.kind === 'restoreCeiling') {
+    persistTrailing({
+      ...cur(),
+      forceChargeCeilingRestoreAttempts: cur().forceChargeCeilingRestoreAttempts + 1,
+      forceChargeCeilingRestoreLastAttemptMs: nowMs,
+    });
+    const rc = await setForceChargeCeiling({ sn: shp2.sn, pct: action.pct, source: { ua: 'night-force-charge' } });
+    app.log.info(`night-charge: trailing ${t.day} leg — restoring the panel's force-charge ceiling to ${action.pct}% (${rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`})${action.lastAttempt ? ' — LAST attempt' : ''}.`);
+    return;
+  }
+  if (action.kind === 'ceilingRestored') {
+    persistTrailing({ ...cur(), forceChargeCeilingRestoredAtMs: nowMs });
+    app.log.info(`night-charge: trailing ${t.day} leg — the panel's own force-charge ceiling is back at ${t.forceChargeCeilingPriorPct}% (readback).`);
+    return;
+  }
+  // With force-charge disabled and the leg's window over, nothing else can come back; an answer
+  // that does is logged, never executed.
+  if (action.kind !== 'none') app.log.warn(`night-charge: trailing ${t.day} leg — '${action.kind}' not executed (a trailing leg only switches OFF).`);
+}
+
+/**
+ * The missed apply (plan §4.8; chargeCycle.missedApplyDue): a leg the overnight-only cycle never
+ * had — a mid-day leg, or the outage backup before one — whose apply window passed with no write
+ * sends ONE info push naming why (missedApplyReason, read from this tick's inputs) and the reserve
+ * in force. The leg is stamped before the push goes, and the push is not awaited. The overnight
+ * cost leg never sends it: there only a write that never took effect pushes (applyFailed).
+ */
+async function runMissedApplyStep(): Promise<void> {
+  const nowMs = Date.now();
+  const at = [nightActuationMem, ...nightCyclePending].findIndex((l) => missedApplyDue(l, nowMs));
+  if (at < 0) return;
+  const pending = at > 0;
+  const leg = pending ? nightCyclePending[at - 1] : nightActuationMem;
+  // The leg is stamped whatever the reason reads: the cycle step promotes a missed active leg only
+  // once its push is stamped (chargeCycle.promoteCycle), so a throw here must not block the stamp.
+  let reason = MISSED_APPLY_FALLBACK_REASON;
+  let currentReservePct: number | null = null;
+  try {
+    const shp2 = findShp2(store.get().devices);
+    const sp: any = shp2 && shp2.projection?.kind === 'shp2' && shp2ReadbackFresh(shp2, nowMs) ? shp2.projection : null;
+    const fullWh: number | null = sp?.backupFullCapWh ?? null;
+    const socNowPct: number | null = sp?.backupBatPercent ?? null;
+    const remainWh: number | null = sp?.backupRemainWh ?? null;
+    const socCoherent = fullWh != null && fullWh > 0 && socNowPct != null && remainWh != null
+      && Math.abs((remainWh / fullWh) * 100 - socNowPct) <= 8;
+    currentReservePct = typeof sp?.backupReserveSoc === 'number' ? sp.backupReserveSoc : null;
+    reason = missedApplyReason(leg, {
+      blockedBy: pending ? (nightCycleTrailing != null && !trailingResolved(nightCycleTrailing) ? nightCycleTrailing : nightActuationMem) : null,
+      mode: NIGHT_CHARGE_MODE,
+      vitalsRed: currentAssessment()?.level === 'crit',
+      socCoherent,
+      currentReservePct,
+      panelBlock: multiPanelWriteBlock(),
+    });
+  } catch (e: any) {
+    app.log.warn(`night-charge: missed-apply reason unavailable (${e?.message ?? e}) — the push names none.`);
+  }
+  const stamped: ChargeLegState = { ...leg, missedApplyPushedAtMs: nowMs };
+  if (pending) persistCycle({ ...nightCycleView(), pendingLegs: nightCyclePending.map((p, i) => (i === at - 1 ? stamped : p)) });
+  else persistNightActuation(stamped);
+  stampLegOutcome(leg, { arm_disposition: `missed — ${reason}` });
+  app.log.warn(`night-charge: the ${leg.leg} leg for ${leg.day} (${leg.windowStartMs != null ? new Date(leg.windowStartMs).toISOString() : '?'}) did not start — ${reason}. Nothing was written; the reserve reads ${currentReservePct ?? 'unknown'}%.`);
+  void sendNotification(loadNotifyConfig(), buildNightChargeMissedApply({
+    day: leg.day, role: leg.leg, windowStartMs: leg.windowStartMs ?? nowMs, windowEndMs: leg.windowEndMs ?? nowMs,
+    reason, reservePct: currentReservePct, nowMs,
+  })).catch((e: any) => {
+    app.log.debug(`night-charge: missed-apply notify failed (${e?.message ?? e})`);
+  });
 }
 
 if (nightChargeEnabled) {
@@ -6209,6 +6509,14 @@ if (nightChargeEnabled) {
 // and then it can only ever switch it OFF (forceDisabled).
 const forceChargeSafetyTick = setInterval(() => {
   if (nightChargeEnabled) return; // the normal tick owns it
+  // v1.189.0 — and a trailing leg's OFF (chargeCycle.ts), which only ever switches off.
+  if (nightCycleTrailing != null && forceChargeInFlight(nightCycleTrailing) && !nightActuationInFlight) {
+    nightActuationInFlight = true;
+    runTrailingLegTick()
+      .catch((e: any) => app.log.warn(`night-charge: trailing-leg safety tick failed (${e?.message ?? e})`))
+      .finally(() => { nightActuationInFlight = false; });
+    return;
+  }
   if (!forceChargeInFlight(nightActuationMem) || nightActuationInFlight) return;
   nightActuationInFlight = true;
   runForceChargeTick({ forceDisabled: true })
@@ -6261,6 +6569,9 @@ app.get('/api/night-charge/status', async () => {
       // forceChargeOnFailedAtMs, spread above): did the ON actually take?
       forceChargeOnVerify: forceChargeOnReadbackStatus(nightActuationMem),
     },
+    // v1.189.0 — the charge cycle's legs, in order: a trailing leg, the active one (the record
+    // above), the pending ones (chargeCycle.cycleLegsStatus). One entry with one leg.
+    legs: cycleLegsStatus(nightCycleView(), Date.now()),
     // In-memory cache refreshed by the recompute tick / evening job — the route
     // must NOT read the ledger (DB/filesystem) inline (CWE-770).
     recentOutcomes: nightRecentOutcomesMem,
@@ -6271,25 +6582,28 @@ app.get('/api/night-charge/status', async () => {
 // moment this disarms; after a successful apply it triggers an immediate
 // revert on the next actuator tick (≤60 s). Same write auth as every other
 // actuating endpoint.
-app.post('/api/night-charge/cancel', { preHandler: requireWriteAuth }, async (_req, reply) => {
-  const s = nightActuationMem;
-  if (s.day == null) {
-    reply.code(409);
-    return { ok: false, error: 'no supervised write is armed' };
+// v1.189.0 — by leg (chargeCycle.cancelLeg): an optional body { leg: 'cost' | 'backup' }. With no leg
+// named it cancels the cost leg wherever it is (active or pending), else the active leg — with one
+// leg, the active leg, as always. The pending legs are looked at before any 409; a 409 answers for
+// the leg named. `actuation` is the leg cancelled.
+app.post('/api/night-charge/cancel', { preHandler: requireWriteAuth }, async (req, reply) => {
+  const want = parseCancelLeg(req.body);
+  if (want === undefined) {
+    reply.code(400);
+    return { ok: false, error: 'leg must be "cost" or "backup"' };
   }
-  if (s.revertedAtMs != null) {
+  const r = cancelLeg(nightCycleView(), want);
+  if (!r.ok) {
     reply.code(409);
-    return { ok: false, error: 'tonight’s write already completed and reverted' };
+    return { ok: false, error: r.error };
   }
-  if (s.foreignSettledAtMs != null) {
-    reply.code(409);
-    return { ok: false, error: `the reserve was set to ${s.foreignReservePct ?? '?'}% outside the add-on; nothing of tonight’s write is left to cancel` };
-  }
-  persistNightActuation({ ...s, cancelled: true });
+  persistCycle(r.cycle);
+  const s = r.leg;
+  const which = s.leg === 'cost' && s.windowKind === 'overnight' ? '' : ` ${s.leg === 'backup' ? 'outage-backup' : 'daytime'} leg${r.where === 'pending' ? ' (pending)' : ''}`;
   app.log.info(
-    `night-charge: owner CANCELLED tonight's supervised write (${s.day})${s.appliedAtMs != null ? ' — the applied write reverts within a minute' : ''}.`,
+    `night-charge: owner CANCELLED tonight's supervised write${which} (${s.day})${s.appliedAtMs != null ? ' — the applied write reverts within a minute' : ''}.`,
   );
-  return { ok: true, actuation: nightActuationMem };
+  return { ok: true, actuation: s, leg: s.leg, legs: cycleLegsStatus(nightCycleView(), Date.now()) };
 });
 
 // v1.184.0 — the operator's "the grid is back" for a declared-grid veto held on a panel reading
@@ -6332,6 +6646,8 @@ app.post<{ Body: { sn?: unknown } }>('/api/house-panel', { preHandler: requireWr
     const busy = getReserveArbitrageRaised() ? 'the night-charge plan is holding the house panel\'s reserve raised'
       : m.applyAttemptedAtMs != null && m.appliedAtMs == null && m.revertedAtMs == null ? 'a night-charge reserve write is unconfirmed'
       : m.forceChargeCeilingPriorPct != null && m.forceChargeCeilingRestoredAtMs == null ? 'the house panel\'s force-charge ceiling is still to be restored'
+      // v1.189.0 — and a trailing leg (chargeCycle.ts) still switching its force-charge off.
+      : nightCycleTrailing != null && !trailingResolved(nightCycleTrailing) ? 'a previous night-charge leg is still confirming its force-charge off'
       : nightActuationInFlight ? 'a night-charge write is in flight'
         : chargeNowState.pendingVerify ? 'a Charge Now write is awaiting readback'
           : forcing ? 'a house-panel slot is force-charging'

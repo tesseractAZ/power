@@ -738,6 +738,58 @@ export function buildNightChargeRevertDeadline(o: {
   };
 }
 
+/** "10am", "3pm", "12am", "10:30am" in America/Phoenix (the add-on's tariff clock). */
+function phxShortClock(ms: number): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).formatToParts(new Date(ms));
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+  const minute = get('minute');
+  return `${get('hour')}${minute === '' || minute === '00' ? '' : `:${minute}`}${get('dayPeriod').toLowerCase()}`;
+}
+
+/** The Phoenix calendar date, weekday and hour of an instant. */
+function phxDayParts(ms: number): { ymd: string; weekday: string; hour: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Phoenix', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long', hour: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(ms));
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+  return { ymd: `${get('year')}-${get('month')}-${get('day')}`, weekday: get('weekday'), hour: Number(get('hour')) };
+}
+
+/**
+ * v1.189.0 — the missed apply (chargeCycle.missedApplyDue): a leg of a charge cycle passed its apply
+ * window (30 min after its window opens) with no write — the reason, and the reserve in force. An
+ * info push, once per leg. Only a leg the overnight-only cycle never had sends it (a mid-day leg, or
+ * the outage backup before one); the overnight leg keeps its own warning for a write that never took
+ * effect (buildNightChargeApplyFailure). PURE.
+ *   "Today's 10am–3pm charge did not start — <reason>. Nothing was written; the reserve stays at 16%."
+ */
+export function buildNightChargeMissedApply(o: {
+  day: string | null;
+  role: 'backup' | 'cost';
+  windowStartMs: number;
+  windowEndMs: number;
+  reason: string;
+  /** The reserve the panel reads now; null when it is not reporting. */
+  reservePct: number | null;
+  nowMs: number;
+}): NotifyMessage {
+  const start = phxDayParts(o.windowStartMs);
+  const sameDay = start.ymd === phxDayParts(o.nowMs).ymd;
+  // A window opening in the evening or before dawn (the overnight backup's 12am) is tonight's.
+  const when = sameDay ? (start.hour >= 18 || start.hour < 6 ? 'Tonight\'s' : 'Today\'s') : `${start.weekday}'s`;
+  const what = o.role === 'backup' ? 'outage backup' : 'charge';
+  const span = `${phxShortClock(o.windowStartMs)}–${phxShortClock(o.windowEndMs)}`;
+  const reserve = o.reservePct != null ? `the reserve stays at ${o.reservePct}%` : 'the reserve was not changed';
+  return {
+    severity: 'info',
+    dedupId: `night_charge_missed_apply_${o.role}`,
+    title: `Charge plan: ${sameDay ? when.toLowerCase() : when} ${what} did not start`,
+    body: `${when} ${span} ${what} did not start — ${o.reason}. Nothing was written; ${reserve}.`,
+  };
+}
+
 /**
  * The info push sent when the reserve settled as someone else's (nightChargeActuator foreignStep):
  * the same value, neither the night's target nor the value it restores, on two readings five or
