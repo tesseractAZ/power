@@ -1181,6 +1181,11 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // R2 — the leg (WindowSpec). Every term below that reads it is a no-op on the overnight leg.
   const spec = inputs.windowSpec;
   const midday = spec?.kind === 'super_off_peak';
+  /** R4 — the outage BACKUP leg ahead of a mid-day buy: its arm test and its setpoint are ONE
+   *  walk (troughAtLift below), the islanded P10 PV / P90 load walk from the window close to the
+   *  caller's horizon end (nextRechargeMs: option A, the next overnight open), against reserve +
+   *  cushion. Every other leg keeps the cushion test it has (the pack at the window close). */
+  const backupLeg = spec?.role === 'backup';
   /** What the packs accept from PV and the grid charger together, kW (gridGainKw). The default is
    *  the grid charge rate alone — the bound when there is no PV. */
   const acceptKw = spec?.packAcceptKw != null && Number.isFinite(spec.packAcceptKw) && spec.packAcceptKw >= 0
@@ -1478,7 +1483,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     // v1.133.0 — ONLY the legacy fallback uses the whole-house trough. A
     // `disabled` cushion keeps this form: the reserve floor is still the line,
     // there is simply no margin above it.
-    if (cushionBasis === 'legacy-pct') return houseTroughAtLift(lift);
+    // R4 — and the backup leg: the walk the setpoint below is solved on (troughFromPack), so the
+    // leg arms exactly when the walk it writes for dips under the line.
+    if (cushionBasis === 'legacy-pct' || backupLeg) return houseTroughAtLift(lift);
     // The pack AT OUTAGE ONSET. The outage energy itself lives in targetFloorKwh
     // (reserve + cushion), so subtracting it here too would double-count it and
     // demand twice the cushion.
@@ -1555,7 +1562,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // ceiling included) never bought toward the cost ceiling. Resilience keeps it; cost
   // mode falls through, and holds below only if the cost target is not worth a buy.
   if (baselineHolds && !costMode) {
-    return holdPlan(cushionBasis === 'legacy-pct'
+    return holdPlan(cushionBasis === 'legacy-pct' || backupLeg
       ? `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above ${cushionDesc}; no charge needed.${preWindowNote}`
       : `Hold — the pack at window close (${noBuyPct}%) already covers ${cushionDesc}; no charge needed. For reference, a whole-house island would trough at ~${baselineMinSocPct}%, which is not what the cushion is sized against.${preWindowNote}`);
   }
@@ -2181,6 +2188,26 @@ export function nightChargeStateFields(
   };
 }
 
+/**
+ * R4 (v1.189.0) — `ecoflow_night_charge_role`: what tonight's overnight window is for in the charge
+ * cycle the add-on runs. 'cost' — it carries the cost buy (today's cycle, and every cycle until the
+ * mid-day switch); 'backup' — it is the outage backup ahead of a mid-day charge. The night-charge
+ * entities (nightChargeStateFields) stay bound to the overnight leg, so an automation on them reads
+ * this beside them. null (HA 'unknown') under the same freshness rule as those entities: no fresh
+ * plan with a window. `role` is the live leg's; nothing passes 'backup' before the switch — a mid-day
+ * cycle computed in shadow (middayShadow.ts) never reaches it. PURE.
+ */
+export function nightChargeRoleFields(
+  plan: Pick<NightChargePlan, 'basisComplete' | 'generatedAt' | 'window'> | null,
+  nowMs: number = Date.now(),
+  role: ChargeLegRole = 'cost',
+): { night_charge_role: ChargeLegRole | null } {
+  const fresh = !!plan && plan.basisComplete && nowMs - plan.generatedAt < PLAN_STALENESS_MS;
+  return {
+    night_charge_role: fresh && plan!.window != null ? role : null,
+  };
+}
+
 // --- buildNightChargeInputs: assemble worst-case inputs from injected pieces ---
 // Design §2.3 (conservative worst-case: P10 PV, P90 load, committed-EV block,
 // EV de-dup) + §2.4 (multi-day horizon, daily P10/P90 widened by √daysAhead) +
@@ -2785,7 +2812,22 @@ export function calibratedLoadBandFactor(
  * 4.71 against ~20.3 kWh, a 0.26 ratio for a true ~1.1) — it is counted in `setAside`,
  * never a sample, and never rewritten. Until DELIVERED_BASIS rows reach minSamples the
  * factor is the floor with basis 'default', which the log says with the set-aside count.
+ *
+ * R4 (v1.189.0) — ONE STRATUM PER WINDOW KIND (plan §3.3 "Learners"). A mid-day leg charges
+ * beside the sun and an overnight one in the dark, so their delivered/planned ratios are not one
+ * population: the factor reads only the rows of `opts.windowKind` (default 'overnight'; a row
+ * written before the charge cycle has no `window_kind` and is an overnight row). The planned
+ * figure is the morning refresh's (`refreshed_buy_kwh`, the refreshed worst case — the same basis
+ * as `buy_kwh`) when the row has one: the leg ran on it. The load band and the cost-ceiling load
+ * factor stay POOLED — they learn the forecast load over [issue, +24 h], which does not depend on
+ * the window, and a thin mid-day stratum would sit on their floors.
  */
+/** R4 — the window kind a ledger row's cost leg charged in: NULL (a row written before the
+ *  charge cycle record) is overnight. PURE. */
+export function ledgerRowWindowKind(r: { window_kind?: string | null }): ChargeWindowKind {
+  return r.window_kind === 'super_off_peak' ? 'super_off_peak' : 'overnight';
+}
+
 export function calibratedBuyDebiasFactor(
   rows: ReadonlyArray<{
     buy_kwh?: number | null;
@@ -2794,24 +2836,33 @@ export function calibratedBuyDebiasFactor(
     actuated?: number | null;
     scored?: number | null;
     cushion_shortfall?: number | null;
+    window_kind?: string | null;
+    refreshed_buy_kwh?: number | null;
   }>,
-  opts: { floor?: number; cap?: number; minSamples?: number; minPlanKwh?: number } = {},
+  opts: { floor?: number; cap?: number; minSamples?: number; minPlanKwh?: number; windowKind?: ChargeWindowKind } = {},
 ): { factor: number; basis: 'measured' | 'default'; samples: number; setAside: number } {
   const floor = opts.floor ?? 1.0;
   const cap = opts.cap ?? 1.75;
   const minSamples = opts.minSamples ?? 7;
   const minPlanKwh = opts.minPlanKwh ?? 3;
+  const stratum = opts.windowKind ?? 'overnight';
+  /** The figure the leg ran on: the refreshed worst case when the row has one. */
+  const plannedKwh = (r: { buy_kwh?: number | null; refreshed_buy_kwh?: number | null }): number | null | undefined =>
+    typeof r.refreshed_buy_kwh === 'number' && Number.isFinite(r.refreshed_buy_kwh) ? r.refreshed_buy_kwh : r.buy_kwh;
   const eligible = rows
-    .filter((r) =>
-      r.actuated === 1 &&
-      r.scored === 1 &&
-      !(r.cushion_shortfall === 1) &&
-      typeof r.buy_kwh === 'number' && Number.isFinite(r.buy_kwh) && r.buy_kwh >= minPlanKwh &&
-      typeof r.delivered_kwh === 'number' && Number.isFinite(r.delivered_kwh) && r.delivered_kwh >= 0);
+    .filter((r) => ledgerRowWindowKind(r) === stratum)
+    .filter((r) => {
+      const planned = plannedKwh(r);
+      return r.actuated === 1 &&
+        r.scored === 1 &&
+        !(r.cushion_shortfall === 1) &&
+        typeof planned === 'number' && Number.isFinite(planned) && planned >= minPlanKwh &&
+        typeof r.delivered_kwh === 'number' && Number.isFinite(r.delivered_kwh) && r.delivered_kwh >= 0;
+    });
   const onBasis = eligible.filter((r) => r.delivered_basis === DELIVERED_BASIS);
   const setAside = eligible.length - onBasis.length;
   const ratios = onBasis
-    .map((r) => (r.delivered_kwh as number) / (r.buy_kwh as number))
+    .map((r) => (r.delivered_kwh as number) / (plannedKwh(r) as number))
     .sort((a, b) => a - b);
   if (ratios.length < minSamples) return { factor: floor, basis: 'default', samples: ratios.length, setAside };
   const median = ratios[Math.floor(ratios.length / 2)];

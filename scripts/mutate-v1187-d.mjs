@@ -83,7 +83,7 @@ const MUTANTS = [
   {
     id: 'iv. ★★ any later plan supersedes, whatever its window',
     file: NLS,
-    find: '    if (o.window_start_ms !== row.window_start_ms || o.window_end_ms !== row.window_end_ms) continue;',
+    find: '    if (!sameWindow && !asBackup) continue;',
     to: '    /* MUTANT */',
     why: 'Every row but the newest loses its on-peak and its cost.',
   },

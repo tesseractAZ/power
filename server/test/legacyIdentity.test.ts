@@ -130,10 +130,14 @@ test('★ resolveCheapWindow moved to chargeWindows.ts: the planner re-exports t
 
 test('★★ wiring — index.ts plans the overnight leg: the overnight cycle, the overnight span, the overnight spec', () => {
   const index = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8');
-  assert.ok(index.includes('const nextRechargeMs: number | null = nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);'),
+  // R4 — a shadow leg (middayShadow.ts) pins its own; every live plan takes the overnight branch.
+  assert.ok(index.includes('const nextRechargeMs: number | null = shadowLeg ? shadowLeg.nextRechargeMs : nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);'),
     'the horizon end is the overnight cycle\'s next open (no mid-day config passed until the switch)');
-  assert.ok(index.includes("const morningEndMs = surplusSpanEndMs('overnight', windowEndMs, null);"));
-  assert.ok(index.includes("windowSpec: legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },"));
+  assert.ok(index.includes("const morningEndMs = shadowLeg ? shadowLeg.surplusEndMs : surplusSpanEndMs('overnight', windowEndMs, null);"));
+  assert.ok(index.includes("windowSpec: shadowLeg ? shadowLeg.spec : legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },"));
+  assert.ok(index.includes('const window = shadowLeg ? (shadowLeg.spec.window ?? null) : resolveCheapWindow(periodIdAt, nowMs, NIGHT_CHEAP_PERIOD_ID, 30);'));
+  // The one shadow caller passes a shadow leg; no other caller does.
+  assert.equal(index.split('shadowLeg: sizing').length - 1, 1, 'only sizeShadowLeg sizes a shadow leg');
   assert.ok(index.includes('const NIGHT_CHEAP_PERIOD_ID = APS_PERIOD.OVERNIGHT;'));
   // Per leg: the force-charge gate and the objective follow the leg's role.
   assert.ok(index.includes("const forceChargeOn = (role: ChargeLegRole = 'cost'): boolean => legForceChargeEligible(role, forceChargeEnabled({"));

@@ -178,6 +178,22 @@ Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-ho
 | `sensor.ecoflow_panel_night_charge_window_end` | `ecoflow_night_charge_window_end` | Charge window end, same format | text |
 | `sensor.ecoflow_panel_night_charge_readiness` | `ecoflow_night_charge_readiness` | `LEARNING`, `READY_TO_CONSIDER_WRITES` or `BLOCKED`: the write-readiness gate (diagnostic) | text |
 | `binary_sensor.ecoflow_panel_night_charge_write_ready` | `ecoflow_night_charge_write_ready` | On when the readiness gate has graduated; off when it has not or is unknown (diagnostic). Graduating takes at least 21 scored nights on which Power itself raised the reserve (`supervised` or `auto`), so it stays off in an install that only advises | on / off |
+| `sensor.ecoflow_panel_night_charge_role` | `ecoflow_night_charge_role` | What tonight's overnight window is for: `cost` (it carries the charge, as on every night today) or `backup` (an outage backup ahead of a winter mid-day charge). The entities above always describe the overnight window; unknown with no current plan | text |
+
+## Mid-day charge
+
+In winter, APS charges its lowest rate from 10 AM to 3 PM on weekdays. On each winter weekday evening Power works out the charge it would make in that window: an outage backup overnight, then a daytime charge, and a morning re-check against the latest solar forecast. **For now this runs in shadow:** Power computes and records it, and writes, arms and announces nothing for it. Your nights charge overnight as before, and the card shows the mid-day plan in a read-only section. These entities carry the same 25-hour expiry as the night-charge ones. They are unknown when there is no daytime charge to plan, for example on a weekend, in summer or after the window closes.
+
+| entity_id (fresh install) | unique_id | Meaning | Unit |
+|---|---|---|---|
+| `binary_sensor.ecoflow_panel_midday_charge_recommended` | `ecoflow_midday_charge_recommended` | On only when a daytime charge is actually armed. It stays off while the mid-day charge runs in shadow, so do not use it to start a charge yourself | on / off |
+| `sensor.ecoflow_panel_midday_charge_target_soc` | `ecoflow_midday_charge_target_soc` | The level the daytime charge would bring the pool to, after the morning re-check | % |
+| `sensor.ecoflow_panel_midday_charge_reserve_hold` | `ecoflow_midday_charge_reserve_hold` | The backup reserve it would hold through the window, within the panel's 10–50 range | % |
+| `sensor.ecoflow_panel_midday_charge_expected_buy` | `ecoflow_midday_charge_expected_buy_kwh` | The grid energy the daytime charge is expected to draw | kWh |
+| `sensor.ecoflow_panel_midday_charge_buy_worst_case` | `ecoflow_midday_charge_buy_kwh` | Buy (Worst Case): the grid energy the daytime plan is sized on, assuming the islanded worst case | kWh |
+| `sensor.ecoflow_panel_midday_charge_window_start` | `ecoflow_midday_charge_window_start_at` | When the daytime window opens | timestamp |
+| `sensor.ecoflow_panel_midday_charge_window_end` | `ecoflow_midday_charge_window_end_at` | When it closes | timestamp |
+| `sensor.ecoflow_panel_midday_charge_refresh` | `ecoflow_midday_charge_refresh` | The morning re-check: `pending`, then `unchanged`, `lowered`, `capped` (the new forecast asked for more than the evening plan, which stays the limit), `cancelled` or `stood` (no re-check finished in time, so the evening plan stands) | text |
 
 ## Load shedding and lighting
 

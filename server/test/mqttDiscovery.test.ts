@@ -429,6 +429,23 @@ test('mqtt-discovery: every value_json key a sensor references is emitted by bui
     gStart = gateSrc.indexOf('return {', gEnd);
   }
 
+  // v1.189.0 (R4) — … plus nightChargeRoleFields() (nightChargeAdvisor.ts) and
+  // middayChargeStateFields() (middayShadow.ts): the overnight window's role and the winter mid-day
+  // charge, spread in beside the night-charge fields and in /api/ha-state alike.
+  const roleStart = ncSrc.indexOf('return {', ncSrc.indexOf('function nightChargeRoleFields'));
+  assert.ok(roleStart > 0, 'could not locate nightChargeRoleFields return block');
+  for (const m of ncSrc.slice(roleStart, ncSrc.indexOf('};', roleStart)).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+  assert.ok(src.includes('...nightChargeRoleFields(getLatestNightChargePlan()),'), 'buildState spreads the role field');
+  const mdSrc = readFileSync(resolve(__dir, '../src/middayShadow.ts'), 'utf8');
+  let mStart = mdSrc.indexOf('return {', mdSrc.indexOf('export function middayChargeStateFields'));
+  assert.ok(mStart > 0, 'could not locate middayChargeStateFields return block');
+  for (let i = 0; i < 2 && mStart > 0; i++) {
+    const mEnd = mdSrc.indexOf('};', mStart);
+    for (const m of mdSrc.slice(mStart, mEnd).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+    mStart = mdSrc.indexOf('return {', mEnd);
+  }
+  assert.ok(src.includes('...middayChargeStateFields(getMiddayShadow()),'), 'buildState spreads the mid-day fields');
+
   const missing = referenced.filter((k) => !emitted.has(k)).sort();
   assert.deepEqual(missing, [], `Sensors reference value_json keys buildState never emits: ${missing.join(', ')}`);
 });

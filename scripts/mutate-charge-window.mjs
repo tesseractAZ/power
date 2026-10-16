@@ -210,8 +210,8 @@ const MUTANTS = [
   {
     id: "W-xxiv. ★★★ index.ts's horizon ends at a mid-day window before the switch",
     file: IDX,
-    find: '  const nextRechargeMs: number | null = nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);',
-    to: "  const nextRechargeMs: number | null = nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS, { costWindow: 'super_off_peak', objective: 'cost', costMaxSocPct: 90 }); /* MUTANT */",
+    find: '  const nextRechargeMs: number | null = shadowLeg ? shadowLeg.nextRechargeMs : nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);',
+    to: "  const nextRechargeMs: number | null = shadowLeg ? shadowLeg.nextRechargeMs : nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS, { costWindow: 'super_off_peak', objective: 'cost', costMaxSocPct: 90 }); /* MUTANT */",
     why: 'A live change in a release that must change nothing: the overnight carry ends at 10:00.',
   },
   {

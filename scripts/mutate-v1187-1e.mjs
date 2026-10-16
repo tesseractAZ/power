@@ -177,8 +177,8 @@ const MUTANTS = [
   {
     id: 'xviii. ★★★ the forecast passes no taper hours',
     file: AN,
-    find: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,',
-    to: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, [], now, soilingPairedUntil(now, weather)) : null, /* MUTANT */',
+    find: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps.map((m) => withoutHourEpochs(m, chargeHours)), wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,',
+    to: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps.map((m) => withoutHourEpochs(m, chargeHours)), wxByHour, [], now, soilingPairedUntil(now, weather)) : null, /* MUTANT */',
     why: 'The published estimate (alert, HA sensor) is the v1.187.0 one.',
   },
   {
@@ -342,8 +342,8 @@ const MUTANTS = [
   {
     id: 'xli. ★★★ the forecast pairs up to the clock',
     file: AN,
-    find: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,',
-    to: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now, now) : null, /* MUTANT */',
+    find: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps.map((m) => withoutHourEpochs(m, chargeHours)), wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,',
+    to: '    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps.map((m) => withoutHourEpochs(m, chargeHours)), wxByHour, homeCoreTaperHours, now, now) : null, /* MUTANT */',
     why: 'As xxxvii, for the alert and the HA sensor.',
   },
   {

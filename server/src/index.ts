@@ -175,6 +175,8 @@ import {
   getLatestNightChargePlan,
   setLatestNightChargePlan,
   nightChargeStateFields,
+  // R4 — the overnight window's role in the cycle (the ecoflow_night_charge_role entity).
+  nightChargeRoleFields,
   buildNightChargeInputs,
   computeNightChargePlan,
   resolveCheapWindow, nextFullCheapWindow, longGapAhead, pessimisticPrePeakSurplus,
@@ -233,7 +235,15 @@ import {
   chargeWriteHold, setChargeWriteHold, FOREIGN_RESERVE_SETTLE_MS,
   type RevertDeadlineDecision,
 } from './nightChargeActuator.js';
-import { nextOnPeakStartMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, type ChargeLegRole } from './chargeWindows.js';
+import { nextOnPeakStartMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, planDateOwningCycle, type ChargeLegRole } from './chargeWindows.js';
+// R4 — the winter mid-day cycle computed in SHADOW: sized, probed and recorded, never armed,
+// written or announced (middayShadow.ts).
+import {
+  runMiddayShadowEvening, shadowCycleConfig, shadowRefreshDue, standingRefresh, refreshFromSized, refreshSizing,
+  middayShadowLedgerColumns, middayShadowRefreshLedgerColumns, middayShadowLogLines, middayShadowRefreshLogLine,
+  coerceMiddayShadowRecord, getMiddayShadow, setMiddayShadow, middayChargeStateFields, shadowServed, windowP50Kwh, MIDDAY_SHADOW_LOG_TAG,
+  type MiddayShadowRecord, type ShadowLegSizing, type ShadowSized, type ShadowArmCandidate, type ShadowArmVerdict,
+} from './middayShadow.js';
 import { pvSurplusFromBand, surplusSpanEndMs } from './chargeTaper.js';
 import {
   buildNightChargeMessage, sendNotification, loadNotifyConfig,
@@ -253,6 +263,8 @@ import { apsREvModelFromEnv, rateAt, localParts, seasonAt, APS_PERIOD } from './
 // v1.187.0 — the scorer's span, cost and PV-evidence decisions, pure (nightLedgerScoring.ts).
 import {
   supersedingPlanDate, knownFleetMismatchReason, type TimeSpan,
+  // R4 — a two-leg row's spans and cheap periods, and the shadow's measured window.
+  cycleLedgerSpans, ledgerCheapPeriodIds, minOverSpans, shadowWindowActuals,
   integrateWh, coverageFrac, ledgerSpansForWindow, assembleNightLedgerColumns, windowlessLedgerColumns,
   unpricedTariffPeriods, houseConnectedSlots, deliveredLedgerFields,
   // v1.187.22 — the measured window-open SoC and the expected-buy score clause.
@@ -1838,6 +1850,10 @@ app.get('/api/ha-state', async (req, reply) => {
     // <12 h old); nightChargeGateFields returns write_ready strictly false on a
     // null readiness. READ-ONLY — no field here is consumed by the alarm spine.
     ...nightChargeStateFields(getLatestNightChargePlan()),
+    // v1.189.0 (R4) — the overnight window's role, and the winter mid-day charge (shadow until the
+    // switch: midday_charge_recommended strictly false). In parity with mqttDiscovery.buildState.
+    ...nightChargeRoleFields(getLatestNightChargePlan()),
+    ...middayChargeStateFields(getMiddayShadow()),
     host_soc_temp_c: liveHostTemp()?.tempC ?? null,
     host_evloop_lag_ms: liveVitals()?.evLoopLagMs ?? null,
     host_mem_available_mb: liveVitals()?.memAvailableMb ?? null,
@@ -3459,6 +3475,10 @@ interface NightPlanExtras {
   /** v1.187.0 — the Cores the PV band's solar model was fitted on (sorted, comma-joined);
    *  null = unknown. Optional: a plan snapshot persisted before v1.187.0 has none. */
   pvModelSns?: string | null;
+  /** R4 — a shadow leg only: the P50 PV and the median house load over its window, kWh (null unless
+   *  the band covers every hour of it). Absent on every live plan. */
+  windowPvP50Kwh?: number | null;
+  windowLoadP50Kwh?: number | null;
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
@@ -3472,12 +3492,17 @@ function round1(n: number): number { return Math.round(n * 10) / 10; }
  * update() — buildInputs there is synchronous, but we need awaited analytics).
  */
 async function recomputeNightChargePlan(
-  opts: { allowStalePanel?: boolean; role?: ChargeLegRole } = {},
+  opts: { allowStalePanel?: boolean; role?: ChargeLegRole; shadowLeg?: ShadowLegSizing } = {},
 ): Promise<{ plan: NightChargePlan; extras: NightPlanExtras } | 'panelStale' | null> {
   const nowMs = Date.now();
+  // R4 — a mid-day cycle's leg sized in SHADOW (middayShadow.ts): its window, horizon end and PV
+  // surplus span are pinned by the caller, and the plan is RETURNED ONLY — it is never set as the
+  // latest plan (the night-charge entities, the card and the status keep the live overnight plan),
+  // never persisted as the plan snapshot, and never logged as a calibration change.
+  const shadowLeg = opts.shadowLeg ?? null;
   // R2 — the leg's role sets its objective and force-charge (legObjective, forceChargeOn). Every
-  // caller today plans the overnight cost leg.
-  const legRole: ChargeLegRole = opts.role ?? 'cost';
+  // live caller plans the overnight cost leg.
+  const legRole: ChargeLegRole = shadowLeg?.spec.role ?? opts.role ?? 'cost';
   const shp2 = findShp2(store.get().devices);
   if (!shp2 || shp2.projection?.kind !== 'shp2') return null; // I5 — advisory null
   // v1.174.0 — the R3 freshness gate the actuator and force-charge ticks already apply.
@@ -3550,10 +3575,13 @@ async function recomputeNightChargePlan(
   const loadP90Factor = loadBandCal.factor;
   // v1.112.0 — buy de-bias from realized nights (announcement-only; see
   // calibratedBuyDebiasFactor). Log on change, like the load band.
+  // R4 — the de-bias stratum of the leg's window kind (calibratedBuyDebiasFactor): the overnight
+  // rows for every live plan, as before.
   const buyDebiasCal = calibratedBuyDebiasFactor(
     (() => { try { return recorder.readNightLedger(120); } catch { return []; } })(),
+    { windowKind: shadowLeg?.spec.kind ?? 'overnight' },
   );
-  if (buyDebiasCal.basis === 'measured' && buyDebiasCal.factor > 1.005) {
+  if (!shadowLeg && buyDebiasCal.basis === 'measured' && buyDebiasCal.factor > 1.005) {
     const key = `${buyDebiasCal.factor.toFixed(3)}:${buyDebiasCal.samples}`;
     if (key !== lastLoggedBuyDebiasKey) {
       lastLoggedBuyDebiasKey = key;
@@ -3573,12 +3601,12 @@ async function recomputeNightChargePlan(
   // v1.187.3 — and says how many rows were set aside for their delivered_kwh basis (the
   // pre-v1.187.3 import − house-load estimate is never a sample), so a reset to 'default'
   // after the upgrade reads as what it is. The key and text are buyDebiasUnmeasuredLogLine's.
-  const buyDebiasUnmeasured = buyDebiasUnmeasuredLogLine(buyDebiasCal);
+  const buyDebiasUnmeasured = shadowLeg ? null : buyDebiasUnmeasuredLogLine(buyDebiasCal);
   if (buyDebiasUnmeasured && buyDebiasUnmeasured.key !== lastLoggedBuyDebiasKey) {
     lastLoggedBuyDebiasKey = buyDebiasUnmeasured.key;
     app.log.info(buyDebiasUnmeasured.text);
   }
-  if (loadBandCal.basis === 'measured' && loadBandCal.factor > loadBandFloor) {
+  if (!shadowLeg && loadBandCal.basis === 'measured' && loadBandCal.factor > loadBandFloor) {
     // v1.108.0 — this evaluation runs every 30 min; the calibration only moves
     // when the night ledger grows. Log on CHANGE, not on every look (the 08-24
     // audit counted 48 identical lines/day).
@@ -3649,7 +3677,8 @@ async function recomputeNightChargePlan(
 
   // Cheap window (needed here for nextRecharge + morning-surplus bounds; the
   // sizer resolves it again from the same resolver — identical result).
-  const window = resolveCheapWindow(periodIdAt, nowMs, NIGHT_CHEAP_PERIOD_ID, 30);
+  // R4 — a shadow leg's window is the one the chooser pinned.
+  const window = shadowLeg ? (shadowLeg.spec.window ?? null) : resolveCheapWindow(periodIdAt, nowMs, NIGHT_CHEAP_PERIOD_ID, 30);
   const windowEndMs = window?.endMs ?? nowMs;
 
   // nextRecharge = the START of the NEXT cheap charge window after tonight's —
@@ -3667,7 +3696,8 @@ async function recomputeNightChargePlan(
   // belongs in tariff.ts's weekday gating, not here. Scan 4 days to bridge
   // the weekend gap either way.
   // R2 — nextChargeableOpenMs over the overnight cycle: the same 96 h overnight scan.
-  const nextRechargeMs: number | null = nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);
+  // R4 — a shadow leg's horizon end is its own (option A for the backup, 23:00 for the mid-day leg).
+  const nextRechargeMs: number | null = shadowLeg ? shadowLeg.nextRechargeMs : nextChargeableOpenMs(tariffModel, windowEndMs + HOUR_MS);
 
   // morningPvSurplusP90Kwh — the over-buy ceiling headroom. Sum over the next
   // solar day (window-end → +14 h) of max(0, P90 PV − forecast load). P90 PV =
@@ -3677,7 +3707,7 @@ async function recomputeNightChargePlan(
   // room for. Null unless every covered hour carries a finite p50W.
   // R2 — the sums are chargeTaper.ts pvSurplusFromBand, the span its surplusSpanEndMs (an
   // overnight window: close + 14 h).
-  const morningEndMs = surplusSpanEndMs('overnight', windowEndMs, null);
+  const morningEndMs = shadowLeg ? shadowLeg.surplusEndMs : surplusSpanEndMs('overnight', windowEndMs, null);
   const { p90Kwh: morningPvSurplusP90Kwh, p50Kwh: morningPvSurplusP50Kwh } = window
     ? pvSurplusFromBand({
       hours: prob?.hours ?? [],
@@ -3704,7 +3734,7 @@ async function recomputeNightChargePlan(
     hourOf: (ts) => localParts(ts, tariffModel.timezone).hour,
   });
   const costSurplusLoad: NightChargeInputDeps['costSurplusLoad'] = costLoadBuilt?.load ?? null;
-  if (costLoadBuilt) {
+  if (costLoadBuilt && !shadowLeg) {
     const { load: cl, medianRatio, floored } = costLoadBuilt;
     const key = `${cl.factor.toFixed(3)}:${cl.samples}:${floored ? 'floor' : 'nofloor'}`;
     if (key !== lastLoggedCostLoadKey) {
@@ -3719,7 +3749,9 @@ async function recomputeNightChargePlan(
   }
   // v1.168.0 — the Thursday rule, from the tariff calendar: tonight is a full window and
   // the next full one is more than a day after it (short windows stepped over).
-  const nightLongGapAhead = longGapAhead(
+  // R4 — the Thursday rule is the overnight cycle's: a shadow leg is followed by a chargeable window
+  // the same evening (the mid-day leg) or sized for resilience only (the backup).
+  const nightLongGapAhead = shadowLeg ? false : longGapAhead(
     window,
     window ? nextFullCheapWindow(periodIdAt, window.endMs, NIGHT_CHEAP_PERIOD_ID) : null,
   );
@@ -3730,7 +3762,7 @@ async function recomputeNightChargePlan(
     const fh = dayAheadByEpoch.get(Math.floor(pb.ts / HOUR_MS));
     if (fh) prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p10W, loadW: fh.forecastLoadW });
   }
-  const prePeakPvSurplusP10Kwh = window
+  const prePeakPvSurplusP10Kwh = window && !shadowLeg
     ? pessimisticPrePeakSurplus({
       hours: prePeakP10Hours,
       windowEndMs: window.endMs,
@@ -3798,8 +3830,9 @@ async function recomputeNightChargePlan(
     // v1.187.22 — the gate the force-charge itself runs on, so the expected buy reads the level
     // the armed write drives to (armedWriteLevelPct). R2 — the leg's own (forceChargeOn(role)).
     forceChargeEligible: forceChargeOn(legRole),
-    // R2 — the leg: today always the overnight window (resolved above), its role the caller's.
-    windowSpec: legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },
+    // R2 — the leg: the overnight window (resolved above) for every live plan, its role the caller's.
+    // R4 — a shadow leg's own spec (its pinned window, taper line and backup hold).
+    windowSpec: shadowLeg ? shadowLeg.spec : legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },
   };
 
   const inputs = buildNightChargeInputs(deps);
@@ -3808,7 +3841,8 @@ async function recomputeNightChargePlan(
   if (!panel.fresh) {
     plan.rationale += ` NOTE: sized on a panel reading ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}) — it did not recover before the deferral deadline. The reserve write and force-charge still wait for a live readback.`;
   }
-  setLatestNightChargePlan(plan);
+  // R4 — never a shadow leg: the holder is the live overnight plan the entities, card and status serve.
+  if (!shadowLeg) setLatestNightChargePlan(plan);
 
   // Ledger diagnostics computed over the authoritative 24 h band (where the
   // P10/P50/P90 percentiles are actually defined).
@@ -3875,6 +3909,8 @@ async function recomputeNightChargePlan(
     // against other Cores' actuals (the 2026-09-27 partial-map restart) from a forecast miss.
     pvModelSns: Array.isArray(prob?.solarModelSns) && prob!.solarModelSns.length > 0
       ? [...prob!.solarModelSns].sort().join(',') : null,
+    // R4 — a shadow leg's planned window PV and load (the forecast skill its ledger columns grade).
+    ...(shadowLeg && window ? windowP50Kwh(bandHours, window) : {}),
   };
 
   // v1.40.0: persist the freshest PRE-WINDOW plan to disk. The evening job's
@@ -3884,10 +3920,16 @@ async function recomputeNightChargePlan(
   // The 30-min tick recomputes plans all day, so a late boot inside/after the
   // charge window can still record the last honest pre-window plan of the day
   // (issued_at stays the plan's own generatedAt — never backdated).
-  if (plan.window && nowMs < plan.window.startMs) {
+  // R4 — keyed by the plan date that owns the cycle (planDateOwningCycle): an overnight window's
+  // plan is always this evening's, so every live snapshot keeps its key; never a shadow leg.
+  if (!shadowLeg && plan.window && nowMs < plan.window.startMs) {
     try {
       atomicWriteFileSync(NIGHT_CHARGE_PLANSNAP_PATH, JSON.stringify({
-        day: localParts(nowMs, 'America/Phoenix').ymd, plan, extras,
+        day: planDateOwningCycle({
+          nowMs, firstLegStartMs: plan.window.startMs, timezone: 'America/Phoenix',
+          notifyMinuteOfDay: NIGHT_CHARGE_NOTIFY_HOUR * 60 + NIGHT_CHARGE_NOTIFY_MINUTE,
+        }),
+        plan, extras,
       }));
     } catch (e: any) {
       app.log.debug(`night-charge: plan snapshot persist failed (${e?.message ?? e})`);
@@ -4048,6 +4090,10 @@ interface NightScoringSpans {
   /** false ⇒ pre-v1.39.0 row with no stored window — actuals CANNOT be paired
    *  to the plan's real window; capture as scored=0, never fabricate. */
   windowKnown: boolean;
+  /** R4 — a two-leg (mid-day) row only: the backup and post spans the realized trough is taken
+   *  over (nightLedgerScoring.cycleLedgerSpans). Absent on every other row, whose trough is
+   *  [window close, scoreSpanEnd) as before. */
+  troughSpans?: TimeSpan[];
 }
 function nightSpansForRow(y: NightLedgerRow): NightScoringSpans | null {
   const b = nightWindowBounds(String(y.plan_date));
@@ -4060,6 +4106,21 @@ function nightSpansForRow(y: NightLedgerRow): NightScoringSpans | null {
     // governed on-peak has closed too (ledgerSpansForWindow). Structural only: period ids
     // and on-peak flags need no confirmed rate.
     const tariff = apsREvModelFromEnv();
+    // R4 — a two-leg (mid-day) row scores its backup, window and post spans and counts both cheap
+    // periods for the on-peak attribution (cycleLedgerSpans, ledgerCheapPeriodIds). No row is
+    // two-leg before the mid-day switch: every row takes the branch below, as before.
+    const cheapIds = ledgerCheapPeriodIds(y.window_kind);
+    const cycle = cycleLedgerSpans(
+      y,
+      (t) => rateAt(tariff, t).isOnPeak,
+      (t) => cheapIds.includes(rateAt(tariff, t).periodId),
+    );
+    if (cycle != null) {
+      return {
+        windowStart: ws, windowEnd: we, onpeak: cycle.onpeak,
+        scoreSpanEnd: cycle.scoreSpanEndMs, completeMs: cycle.completeMs, windowKnown: true, troughSpans: cycle.troughSpans,
+      };
+    }
     const spans = ledgerSpansForWindow(
       we,
       (t) => rateAt(tariff, t).isOnPeak,
@@ -4177,7 +4238,9 @@ function scoreNightRow(
   const fcSpanEnd = fcSpan.endMs;
 
   const gridWin = recorder.query(shp2Sn, 'grid_home_w', windowStart, windowEnd);
-  const socPts = recorder.query(shp2Sn, 'backup_pct', scoreFrom, spanEnd);
+  // R4 — a two-leg row's trough covers its backup and post spans (cycleLedgerSpans); every other row
+  // keeps [window close, close + 16 h).
+  const socPts = s.troughSpans == null ? recorder.query(shp2Sn, 'backup_pct', scoreFrom, spanEnd) : [];
   const loadPts = recorder.query(shp2Sn, 'panel_load', fcSpanStart, fcSpanEnd);
   // v1.187.22 — the pool SoC as the window opened: what the plan's expected start and its
   // islanded sizing start (soc_at_window_start_pct) are graded against.
@@ -4260,6 +4323,11 @@ function scoreNightRow(
   let actualMinSocTsMs: number | null = null;
   for (const p of medianFilter3(socPts)) {
     if (actualMinSocPct == null || p.value < actualMinSocPct) { actualMinSocPct = p.value; actualMinSocTsMs = p.ts; }
+  }
+  if (s.troughSpans != null) {
+    const low = minOverSpans(s.troughSpans, (a, b) => recorder.query(shp2Sn, 'backup_pct', a, Math.min(nowMs, b)), medianFilter3);
+    actualMinSocPct = low?.value ?? null;
+    actualMinSocTsMs = low?.ts ?? null;
   }
   if (actualMinSocPct != null) actualMinSocPct = round1(actualMinSocPct);
 
@@ -4456,6 +4524,17 @@ function scoreNightRow(
     buy_err_kwh: score.buyErrKwh,
     soc_min_err_pct: score.socMinErrPct,
   });
+  // R4 — the mid-day shadow's window, measured: the PV and load the shadow was planned on, graded
+  // (shadowWindowActuals). Only a row the shadow ran a mid-day leg for; written apart from the
+  // outcome above, which it leaves as it was.
+  const shadowActuals = shadowWindowActuals({
+    row: y, nowMs, homeSns: [...homeSns],
+    queryPv: (sn, a, b) => recorder.query(sn, 'pv_total', a, b),
+    queryLoad: (a, b) => recorder.query(shp2Sn, 'panel_load', a, b),
+  });
+  if (shadowActuals != null) {
+    recorder.recordNightOutcome(yDate, { shadow_window_pv_kwh: shadowActuals.pvKwh, shadow_window_load_kwh: shadowActuals.loadKwh });
+  }
 }
 
 /**
@@ -4818,6 +4897,154 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // Do NOT latch on failure — retry next minute-tick within the window.
     app.log.warn(`night-charge: evening job failed, will retry within the window (${e?.message ?? e})`);
   }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * R4 (v1.189.0) — THE WINTER MID-DAY CYCLE IN SHADOW (middayShadow.ts, plan §8 R4).
+ *
+ * Once tonight's evening job has run and latched, the mid-day cycle the switch would arm is
+ * computed beside it: the backup leg (option A) and the 10:00–15:00 cost leg, sized by the same
+ * planner (recomputeNightChargePlan with a shadow leg: the plan is returned only — no holder, no
+ * snapshot), and probed against the cycle in place (chargeCycle.armCycle on it; the result is
+ * dropped). At 09:30–09:55 the cost leg's morning refresh is computed the same way. The record goes
+ * to its own file, the log ("night-charge[midday-shadow]:"), the evening's ledger row (shadow_*
+ * columns), the ecoflow_midday_charge_* entities and the card's read-only section.
+ *
+ * ★ NOTHING HERE WRITES THE DEVICE, ARMS, PUSHES OR SPEAKS. No function in this block calls a
+ * panel writer, persists the charge cycle, sends a notification or announces; the live overnight
+ * cycle — its arm, its push and speech, its 23:00 and 05:00 writes — is the evening job's alone,
+ * unchanged, and the actuator ticks at 10:00 and 15:00 find no mid-day leg in the cycle.
+ * ═════════════════════════════════════════════════════════════════════════ */
+const NIGHT_CHARGE_MIDDAY_SHADOW_PATH = resolve(process.cwd(), config.dbPath, '..', '.night-charge-midday-shadow.json');
+setMiddayShadow((() => {
+  try {
+    return coerceMiddayShadowRecord(JSON.parse(readFileSync(NIGHT_CHARGE_MIDDAY_SHADOW_PATH, 'utf8')));
+  } catch {
+    return null;
+  }
+})());
+
+/** The shadow record to memory (the surfaces read it there) and to its own file. */
+function persistMiddayShadow(r: MiddayShadowRecord): void {
+  setMiddayShadow(r);
+  try {
+    atomicWriteFileSync(NIGHT_CHARGE_MIDDAY_SHADOW_PATH, JSON.stringify(r));
+  } catch (e: any) {
+    app.log.debug(`${MIDDAY_SHADOW_LOG_TAG} persist failed (${e?.message ?? e})`);
+  }
+}
+
+/** The house Cores' configured charge ceilings (chgMaxSoc): the mid-day leg's taper line. */
+function homeChgMaxSocPcts(): Array<number | null> {
+  const devices = store.get().devices;
+  const home = shp2ConnectedDpuSns(devices);
+  return Object.values(devices)
+    .filter((d) => home.has(d.sn))
+    .map((d) => {
+      const v = (d.projection as { chgMaxSoc?: unknown } | null | undefined)?.chgMaxSoc;
+      return Number.isFinite(v) ? Number(v) : null;
+    });
+}
+
+/** One shadow leg, sized: the plan only (recomputeNightChargePlan sets no holder and writes no
+ *  snapshot for a shadow leg) and its window's planned PV and load. */
+async function sizeShadowLeg(sizing: ShadowLegSizing, allowStalePanel: boolean): Promise<ShadowSized | null | 'panelStale'> {
+  const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing });
+  if (r === 'panelStale' || r == null) return r;
+  return { plan: r.plan, windowPvP50Kwh: r.extras.windowPvP50Kwh ?? null, windowLoadP50Kwh: r.extras.windowLoadP50Kwh ?? null };
+}
+
+/** Would these legs arm against the cycle in place? armCycle is pure: its cycle is DROPPED here —
+ *  only the verdict (which roles armed, which were refused and why) leaves this function. */
+function shadowArmProbe(day: string, nowMs: number): (cands: ShadowArmCandidate[]) => ShadowArmVerdict {
+  return (cands) => {
+    const model = apsREvModelFromEnv();
+    const verdict = armCycle(nightCycleView(), day, cands.map((c) => ({
+      role: c.role, kind: c.kind, plan: c.plan, forceChargeEnabled: forceChargeOn(c.role),
+      nextOnPeakStartMs: c.plan.window != null ? nextOnPeakStartMs(model, c.plan.window.startMs) : null,
+    })), nowMs, cands[0]?.plan.reserveFloorPct ?? null);
+    return { armed: verdict.legs.map((l) => l.leg), refused: verdict.refused };
+  };
+}
+
+/** The shadow's columns onto the evening's ledger row — only a row the live evening job recorded
+ *  (a shadow never creates a row: a row of shadow columns alone would read as a night with no plan). */
+function stampShadowLedger(day: string, cols: Partial<NightLedgerRow>): void {
+  try {
+    if (!recorder.readNightLedger(3).some((r) => r.plan_date === day)) {
+      app.log.info(`${MIDDAY_SHADOW_LOG_TAG} ${day} — no ledger row for the evening (no live plan was recorded); the shadow stays in the log and on the card.`);
+      return;
+    }
+    recorder.recordNightOutcome(day, cols);
+  } catch (e: any) {
+    app.log.warn(`${MIDDAY_SHADOW_LOG_TAG} ${day} — ledger stamp failed (${e?.message ?? e})`);
+  }
+}
+
+let middayShadowInFlight = false;
+let middayShadowDeferLoggedDay: string | null = null;
+/** The shadow's minute tick: single-flight; a failure is logged and retried — it can cost the shadow
+ *  its evening, never the live cycle anything. */
+async function runMiddayShadowTick(): Promise<void> {
+  if (middayShadowInFlight) return;
+  middayShadowInFlight = true;
+  try {
+    await runMiddayShadowTickInner(Date.now());
+  } catch (e: any) {
+    app.log.warn(`${MIDDAY_SHADOW_LOG_TAG} tick failed (${e?.message ?? e}); shadow only — nothing was written`);
+  } finally {
+    middayShadowInFlight = false;
+  }
+}
+
+async function runMiddayShadowTickInner(nowMs: number): Promise<void> {
+  const today = localParts(nowMs, 'America/Phoenix').ymd;
+  const model = apsREvModelFromEnv();
+  const cfg = shadowCycleConfig(FORCE_CHARGE_OBJECTIVE, FORCE_CHARGE_COST_MAX_SOC_PCT);
+  const cur = getMiddayShadow();
+  const nowMin = phoenixMinuteOfDay(nowMs);
+  const fireMin = NIGHT_CHARGE_NOTIFY_HOUR * 60 + NIGHT_CHARGE_NOTIFY_MINUTE;
+
+  // (1) The evening: after the live evening job latched today, inside its [fire, 23:00) window.
+  if (readNightChargeLatch().lastNotifyDay === today && cur?.day !== today && nowMin >= fireMin && nowMin < 23 * 60) {
+    const rec = await runMiddayShadowEvening({
+      nowMs, day: today, model, cfg, mode: NIGHT_CHARGE_MODE, chgMaxSocPcts: homeChgMaxSocPcts(),
+      sizeLeg: (sz) => sizeShadowLeg(sz, nowMin >= NIGHT_PLAN_STALE_DEFER_UNTIL_MIN),
+      armProbe: shadowArmProbe(today, nowMs),
+    });
+    if (rec === 'panelStale') {
+      if (middayShadowDeferLoggedDay !== today) {
+        middayShadowDeferLoggedDay = today;
+        app.log.info(`${MIDDAY_SHADOW_LOG_TAG} ${today} — the panel reading is stale; retrying each minute.`);
+      }
+      return;
+    }
+    persistMiddayShadow(rec);
+    for (const line of middayShadowLogLines(rec)) app.log.info(line);
+    stampShadowLedger(today, middayShadowLedgerColumns(rec));
+    return;
+  }
+
+  // (2) The cost leg's morning refresh — a computation only: it lowers or cancels nothing, because
+  // nothing is armed; it records what the live refresh would have done.
+  const due = shadowRefreshDue(cur, nowMs);
+  if (cur == null || due == null) return;
+  let refresh = due === 'stand' ? standingRefresh(cur, nowMs) : null;
+  if (refresh == null) {
+    const sizing = refreshSizing(model, cur, cfg, homeChgMaxSocPcts());
+    if (sizing == null) return;
+    // A fresh panel is required (plan §3.4 step 1); until the deadline a stale one retries.
+    const sized = await sizeShadowLeg(sizing, false);
+    if (sized === 'panelStale' || sized == null) return;
+    refresh = refreshFromSized(cur, sized, nowMs);
+  }
+  // Re-read after the await: a record replaced meanwhile (or refreshed) is not this refresh's.
+  const live = getMiddayShadow();
+  if (live == null || live.day !== cur.day || live.computedAtMs !== cur.computedAtMs || live.refresh != null) return;
+  const next: MiddayShadowRecord = { ...live, refresh };
+  persistMiddayShadow(next); // stamped before anything is said about it (plan §3.4 step 4)
+  app.log.info(middayShadowRefreshLogLine(next, refresh));
+  stampShadowLedger(next.day, middayShadowRefreshLedgerColumns(refresh));
 }
 
 /**
@@ -6499,6 +6726,9 @@ if (nightChargeEnabled) {
   // window close — APPLY_LEAD_MS / REVERT_LAG_MS are 0; both fail-closed, both audited).
   const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 60 * 1000);
   nightActuationTick.unref();
+  // R4 — the winter mid-day cycle in shadow: computed and recorded, never written (middayShadow.ts).
+  const nightMiddayShadowTick = setInterval(() => { void runMiddayShadowTick(); }, 60 * 1000);
+  nightMiddayShadowTick.unref();
 }
 
 // v1.165.0 — the force-charge OFF side must OUTLIVE the master switch. The actuation
@@ -6572,6 +6802,9 @@ app.get('/api/night-charge/status', async () => {
     // v1.189.0 — the charge cycle's legs, in order: a trailing leg, the active one (the record
     // above), the pending ones (chargeCycle.cycleLegsStatus). One entry with one leg.
     legs: cycleLegsStatus(nightCycleView(), Date.now()),
+    // v1.189.0 (R4) — the winter mid-day cycle computed in shadow (middayShadow.ts), while it is the
+    // current one (shadowServed); null otherwise. Read-only: the card shows it with no control.
+    middayShadow: shadowServed(getMiddayShadow(), Date.now()) ? getMiddayShadow() : null,
     // In-memory cache refreshed by the recompute tick / evening job — the route
     // must NOT read the ledger (DB/filesystem) inline (CWE-770).
     recentOutcomes: nightRecentOutcomesMem,

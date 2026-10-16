@@ -408,3 +408,79 @@ export function refusedArmLead(
     detail: `Tonight's plan calls for a charge, but ${write} was not armed. The add-on will not charge tonight.`,
   };
 }
+
+/* ── v1.189.0 (R4) — the winter mid-day cycle in shadow ─────────────────────────────────── */
+
+/** One leg of the mid-day cycle as /api/night-charge/status → middayShadow serves it. */
+export interface MiddayShadowLeg {
+  role: 'backup' | 'cost';
+  windowStartMs: number;
+  windowEndMs: number;
+  basisComplete: boolean;
+  chargeTonight: boolean;
+  reservePct: number | null;
+  levelPct: number | null;
+  buyKwh: number | null;
+  expectedBuyKwh: number | null;
+  wouldArm: boolean;
+  disposition: string;
+}
+
+/** The mid-day cycle computed in shadow (server: middayShadow.ts MiddayShadowRecord). */
+export interface MiddayShadowStatus {
+  day: string;
+  backup: MiddayShadowLeg | null;
+  cost: MiddayShadowLeg | null;
+  refresh: {
+    atMs: number;
+    disposition: string;
+    levelPct: number | null;
+    reservePct: number | null;
+    expectedBuyKwh: number | null;
+    reason: string;
+  } | null;
+}
+
+/** The section's closing words: what the shadow is, and that it has no control. */
+export const MIDDAY_SHADOW_NOTE =
+  'Shadow only: computed to judge the mid-day charge before it is switched on. Nothing is armed, written or announced for it, and there is nothing to cancel.';
+
+const fmtKwh = (v: number | null): string | null => (v == null || !Number.isFinite(v) ? null
+  : v < NO_CHARGE_EXPECTED_KWH ? 'no charge expected' : `~${Math.round(v * 10) / 10} kWh expected`);
+const fmtPct = (v: number | null): string => (v == null || !Number.isFinite(v) ? '—' : `${Math.round(v * 10) / 10}%`);
+
+/**
+ * v1.189.0 (R4) — the card's read-only section for the winter mid-day cycle computed in shadow: the
+ * outage backup, the 10:00–15:00 charge and its morning refresh, each with what it would do and
+ * whether it would arm. null with no mid-day leg (a weekend, summer, a configuration that asks for
+ * none): the card then shows nothing. `hhmm` formats an instant as the card's other times. PURE.
+ */
+export function middayShadowView(
+  s: MiddayShadowStatus | null | undefined,
+  hhmm: (ms: number) => string | null,
+): { title: string; lines: string[]; note: string } | null {
+  if (s == null || s.cost == null) return null;
+  const span = (l: MiddayShadowLeg): string => `${hhmm(l.windowStartMs) ?? '—'}–${hhmm(l.windowEndMs) ?? '—'}`;
+  const lines: string[] = [];
+  const b = s.backup;
+  if (b != null) {
+    const what = !b.basisComplete ? 'not sized (incomplete basis)'
+      : b.chargeTonight ? [`reserve held at ${fmtPct(b.reservePct)}`, fmtKwh(b.expectedBuyKwh)].filter(Boolean).join(', ')
+        : 'not needed — the pool holds the line without it';
+    lines.push(`Outage backup ${span(b)}: ${what} · ${b.disposition}`);
+  }
+  const c = s.cost;
+  const cWhat = !c.basisComplete ? 'not sized (incomplete basis)'
+    : c.chargeTonight ? [`to ~${fmtPct(c.levelPct)}`, fmtKwh(c.expectedBuyKwh), `reserve ${fmtPct(c.reservePct)} from the open`].filter(Boolean).join(', ')
+      : 'no charge needed';
+  lines.push(`Mid-day charge ${span(c)}: ${cWhat} · ${c.disposition}`);
+  const r = s.refresh;
+  if (r != null) {
+    const fig = r.disposition === 'cancelled' ? 'cancelled'
+      : [r.disposition, `~${fmtPct(r.levelPct)}`, fmtKwh(r.expectedBuyKwh)].filter(Boolean).join(', ');
+    lines.push(`Morning refresh ${hhmm(r.atMs) ?? '—'}: ${fig} — ${r.reason}`);
+  } else if (c.basisComplete && c.chargeTonight) {
+    lines.push(`Morning refresh: due 30 minutes before ${hhmm(c.windowStartMs) ?? 'the open'}`);
+  }
+  return { title: 'Mid-day charge (shadow)', lines, note: MIDDAY_SHADOW_NOTE };
+}

@@ -2,7 +2,7 @@ import { memo, useEffect, useState } from 'react';
 import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
   holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, withConfirmedCancel, writeStands,
-  writtenReservePct,
+  writtenReservePct, middayShadowView, type MiddayShadowStatus,
 } from './nightChargeText';
 import { apiUrl } from '../api';
 
@@ -123,6 +123,8 @@ interface NightChargeStatus {
   armRefusal?: string | null;
   readiness: NightChargeReadiness | null;
   actuation?: NightActuation | null;
+  /** v1.189.0 (R4) — the winter mid-day cycle computed in shadow; null/absent with none current. */
+  middayShadow?: MiddayShadowStatus | null;
   recentOutcomes?: unknown;
 }
 
@@ -244,6 +246,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
         <div className="card-title">Tonight's night-charge plan</div>
         <div className={stands ? 'text-warn' : 'text-muted'}>{noPlanText(plan != null && !plan.basisComplete, stands)}</div>
         {banner('mt-3')}
+        <MiddayShadowSection shadow={status.middayShadow} />
       </div>
     );
   }
@@ -273,6 +276,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
         <div className="text-muted mt-1 leading-relaxed">{hold.detail}</div>
         {banner('mt-3')}
         <AdvisoryNote mode={status.mode} />
+        <MiddayShadowSection shadow={status.middayShadow} />
       </div>
     );
   }
@@ -384,6 +388,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
       </div>
 
       <AdvisoryNote mode={status.mode} />
+      <MiddayShadowSection shadow={status.middayShadow} />
     </div>
   );
 });
@@ -473,6 +478,24 @@ async function postCancel(leg: 'cost' | 'backup' | null = null): Promise<{ ok: b
   } catch {
     return { ok: false, done: false, text: 'cancel failed — network error' };
   }
+}
+
+/**
+ * v1.189.0 (R4) — the winter mid-day cycle computed in shadow (middayShadowView): read-only. It has
+ * no Cancel and no other control — nothing of it is armed — and renders nothing with no mid-day leg.
+ */
+function MiddayShadowSection({ shadow }: { shadow: MiddayShadowStatus | null | undefined }) {
+  const view = middayShadowView(shadow, phoenixHHMM);
+  if (view == null) return null;
+  return (
+    <div className="mt-3 border-t border-line pt-2 text-xs">
+      <div className="text-[10px] uppercase tracking-widest text-muted">{view.title}</div>
+      {view.lines.map((line) => (
+        <div key={line} className="text-muted mt-0.5 leading-relaxed">{line}</div>
+      ))}
+      <div className="text-[11px] text-muted mt-1 leading-relaxed">{view.note}</div>
+    </div>
+  );
 }
 
 function AdvisoryNote({ mode }: { mode: NightChargeStatus['mode'] }) {

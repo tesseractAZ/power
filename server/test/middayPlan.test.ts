@@ -402,3 +402,50 @@ test('★★ the leg\'s window is the one the chooser pinned; a pinned null is n
   assert.equal(none.chargeTonight, false);
   assert.match(none.rationale, /no valid cheap charge window/);
 });
+
+/* ══ R4 — the backup leg: one walk ═════════════════════════════════════════ */
+
+/** A backup leg on its window, its walk to `horizonMs` (option A: Thursday 23:00; option B: the 10:00 open). */
+function backupPlan(socNowPct: number, horizonMs: number, role: 'backup' | 'cost' = 'backup'): NightChargePlan {
+  const spec: WindowSpec = { kind: 'overnight', role, window: { startMs: BACKUP.startMs, endMs: BACKUP.endMs } };
+  return computeNightChargePlan(buildNightChargeInputs(deps({
+    socNowPct, spec, over: { nextRechargeMs: horizonMs, objectiveMode: 'resilience', forceChargeEligible: false },
+  })));
+}
+
+test('★★★ R4 — the backup leg arms on the walk its setpoint is solved on: to the next overnight open (option A), against reserve + cushion', () => {
+  const A = phx(10, 15, 23);
+  for (const soc of [30, 45, 60, 80, 90, 98]) {
+    const p = backupPlan(soc, A);
+    // One walk: the no-buy trough of the walk (baselineMinSocPct, the whole-house islanded walk to the
+    // horizon) under the line is exactly when the leg charges.
+    assert.equal(p.chargeTonight, p.baselineMinSocPct! < p.cushionLineSocPct!, `${soc}%: trough ${p.baselineMinSocPct} vs line ${p.cushionLineSocPct}`);
+    if (p.chargeTonight) {
+      // …and the lift it is sized on brings that same walk's trough to the line (or as near as the window allows).
+      assert.ok(p.cushionTroughSocPct! >= p.cushionLineSocPct! - 0.01 || p.cushionShortfall, `${soc}%`);
+      assert.ok(p.setpointSocPct! > 50, `${soc}%: the walk to 23:00 asks for more than the panel takes (${p.setpointSocPct}%)`);
+    }
+  }
+  // At 80% the pool still clears the line at 05:00 — the cost leg's own test would hold — but the
+  // walk to 23:00 does not: the backup arms, and writes 50.
+  const cost80 = backupPlan(80, A, 'cost');
+  const backup80 = backupPlan(80, A);
+  assert.equal(cost80.chargeTonight, false, 'the pack at the close covers the line');
+  assert.equal(backup80.chargeTonight, true, 'the walk to the next overnight open does not');
+  assert.equal(Math.min(50, Math.round(backup80.setpointSocPct!)), 50);
+  assert.match(backup80.rationale, /Charge|buy/i);
+  const held = backupPlan(98, A);
+  assert.match(held.rationale, held.chargeTonight ? /./ : /^Hold — projected overnight trough/);
+});
+
+test('★★ R4 — option B (the walk ends at the 10:00 open) arms less often than option A', () => {
+  const A = phx(10, 15, 23);
+  const B = COST.startMs;
+  const a90 = backupPlan(90, A);
+  const b90 = backupPlan(90, B);
+  assert.equal(a90.chargeTonight, true);
+  assert.equal(b90.chargeTonight, false, 'from 90% the pool reaches 10:00 above the line');
+  for (const soc of [30, 50, 60, 70, 80, 90]) {
+    assert.ok(!backupPlan(soc, B).chargeTonight || backupPlan(soc, A).chargeTonight, `${soc}%: B arms only where A does`);
+  }
+});

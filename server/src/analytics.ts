@@ -17,6 +17,7 @@ import { allDpus, homeConnectedDpus, reportBasisKey } from './analytics/fleet.js
 import { cacheWritable, basisGeneration, runInBasisGeneration } from './analytics/flightBasis.js';
 import { WARM_INTERVAL_MS } from './analytics/warmCadence.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
+import { middayChargeHourEpochs, withoutHourEpochs } from './nightLedgerScoring.js';
 import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, NAMEPLATE_BASIS, type PoolEnergyBasis, type CapacityBasis } from './poolEnergyBasis.js';
 import {
   curtailmentDaySettled, frozenCurtailmentDay, freezeCurtailmentDay, pruneFrozenCurtailmentDays, persistFrozenCurtailmentDays,
@@ -1353,6 +1354,29 @@ function incompleteForecastTtlMs(): number {
   return Math.max(0, Number(process.env.INCOMPLETE_FORECAST_TTL_MS ?? 150 * 1000));
 }
 const TYPICAL_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** R4 (v1.189.0) — how far back the ledger is read for the mid-day charge hours: past the longest
+ *  learner window that drops them (the Bayesian posterior's 60 days). */
+const CHARGE_HOURS_LEDGER_DAYS = 62;
+/**
+ * R4 (v1.189.0) — plan §4 item 9, the accounting part: the hour epochs a mid-day charge of ours held
+ * the pool (nightLedgerScoring.middayChargeHourEpochs over the ledger). The soiling estimate, the
+ * Bayesian solar posterior and the PV bias hindcast drop them. Overnight rows contribute none, so
+ * the set is empty until the mid-day switch. A recorder without the ledger (a test double) or a
+ * failed read is an empty set: dropping nothing is what every learner did before.
+ */
+function middayChargeHoursFromLedger(recorder: Recorder): Set<number> {
+  try {
+    const read = (recorder as Partial<Recorder>).readNightLedger;
+    return typeof read === 'function' ? middayChargeHourEpochs(read.call(recorder, CHARGE_HOURS_LEDGER_DAYS)) : new Set<number>();
+  } catch {
+    return new Set<number>();
+  }
+}
+/** `pts` without the samples inside `drop`'s hour epochs; the same array when there is nothing to drop. */
+function withoutChargeHourPoints<P extends { ts: number }>(pts: P[], drop: ReadonlySet<number>): P[] {
+  return drop.size === 0 ? pts : pts.filter((p) => !drop.has(Math.floor(p.ts / 3_600_000)));
+}
 const MIN_RESPONSE_PAIRS = 2;   // min daylight (GHI,PV) pairs to fit an hour
 const DAYLIGHT_GHI = 20;        // W/m² — below this is night/near-night
 /* v1.20.0 (engine-review F21) — minimum slot MEAN GHI for the headline peak
@@ -2270,8 +2294,12 @@ async function computeDayForecastUncached(
   const biasTodayStart = startOfLocalDayMs();
   const biasWindowStart = biasTodayStart - 7 * 86_400_000;
   const pvBySnForBias = new Map<string, Array<{ ts: number; value: number }>>();
+  // R4 — §4 item 9: the hours a mid-day charge of ours held the pool are not array evidence — a
+  // grid charge beside the sun takes acceptance the PV would have had (middayChargeHoursFromLedger;
+  // empty until the mid-day switch, so nothing read here changes before it).
+  const chargeHours = middayChargeHoursFromLedger(recorder);
   for (const d of homeDpus) {
-    pvBySnForBias.set(d.sn, recorder.query(d.sn, 'pv_total', biasWindowStart, biasTodayStart));
+    pvBySnForBias.set(d.sn, withoutChargeHourPoints(recorder.query(d.sn, 'pv_total', biasWindowStart, biasTodayStart), chargeHours));
   }
   const pvBiasFactor = computePvBiasCorrection(solarModel, ghiByEpoch, pvBySnForBias, biasTodayStart, undefined, log);
 
@@ -2513,7 +2541,8 @@ async function computeDayForecastUncached(
     poolOverheadW: poolBasis.overheadW,
     deviceModels,
     // v1.187.1 — an hour pairs only once its covering label predates the cache's fetch.
-    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,
+    // R4 — not the hours a mid-day charge of ours held the pool (middayChargeHoursFromLedger).
+    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps.map((m) => withoutHourEpochs(m, chargeHours)), wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,
     homeDpusConnected: forecastCoverage.homeDpusConnected,
     homeDpusReporting: forecastCoverage.homeDpusReporting,
     homeDpusCoveragePartial: forecastCoverage.coveragePartial,
@@ -10262,8 +10291,11 @@ export async function computeBayesianSolarModel(
   const byHour: Array<{ mu: number; tau2: number; samples: number }> =
     Array.from({ length: 24 }, () => ({ mu: BAYES_PRIOR_MU, tau2: BAYES_PRIOR_TAU2, samples: 0 }));
 
+  // R4 — §4 item 9: not the hours a mid-day charge of ours held the pool (middayChargeHoursFromLedger).
+  const chargeHours = middayChargeHoursFromLedger(recorder);
   const entries = [...fleetPvByEpoch.entries()].sort((a, b) => a[0] - b[0]);
   for (const [he, pv] of entries) {
+    if (chargeHours.has(he)) continue;
     const wx = wxByHourEpoch.get(he);
     if (!wx || wx.radiationWm2 < DAYLIGHT_GHI) continue;
     const hod = new Date(he * 3_600_000).getHours();

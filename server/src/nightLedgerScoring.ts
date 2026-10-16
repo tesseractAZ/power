@@ -124,7 +124,8 @@ export function governedOnPeakSpan(
  */
 export function supersedingPlanDate(
   row: Pick<NightLedgerRow, 'plan_date' | 'window_start_ms' | 'window_end_ms'>,
-  rows: ReadonlyArray<Pick<NightLedgerRow, 'plan_date' | 'window_start_ms' | 'window_end_ms'>>,
+  rows: ReadonlyArray<Pick<NightLedgerRow, 'plan_date' | 'window_start_ms' | 'window_end_ms'>
+    & Partial<Pick<NightLedgerRow, 'backup_window_start_ms' | 'backup_window_end_ms'>>>,
 ): string | null {
   if (typeof row.window_start_ms !== 'number' || typeof row.window_end_ms !== 'number') return null;
   const own = String(row.plan_date);
@@ -132,10 +133,161 @@ export function supersedingPlanDate(
   for (const o of rows) {
     const d = String(o.plan_date);
     if (d <= own) continue;
-    if (o.window_start_ms !== row.window_start_ms || o.window_end_ms !== row.window_end_ms) continue;
+    // R4 (v1.189.0) — or a later mid-day cycle whose outage BACKUP leg takes this row's window:
+    // Sunday's two-leg plan holds Monday 00:00-05:00 as its backup, and Saturday's overnight arm for
+    // that window is superseded by it as by Sunday's overnight plan before the switch.
+    const sameWindow = o.window_start_ms === row.window_start_ms && o.window_end_ms === row.window_end_ms;
+    const asBackup = o.backup_window_start_ms === row.window_start_ms && o.backup_window_end_ms === row.window_end_ms;
+    if (!sameWindow && !asBackup) continue;
     if (latest == null || d > latest) latest = d;
   }
   return latest;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * R4 (v1.189.0) — A TWO-LEG ROW (plan §6 "Spans"). A winter mid-day cycle is one row keyed by its
+ * plan date whose plan columns hold the mid-day cost leg (`window_kind` 'super_off_peak'); its
+ * overnight backup leg has the backup_* columns. Such a row scores three spans, whether or not the
+ * backup armed: the backup span [overnight open, cost open), the window itself, and the post span
+ * [window close, min(close + 16 h, next chargeable open)) — 15:00 to 23:00 on a weekday. The rows
+ * then tile end to end, so the 05:00-10:00 low always falls inside one; a plain close + 16 h would
+ * end at 07:00 the next morning, inside the next row's backup span. The realized trough
+ * (`actual_min_soc_pct`, `cushion_breached`) covers the backup and post spans, so a 07:00 breach on
+ * an actuated cycle is a strike, armed backup or not (nightChargeGate.ts keeps its rule). Every
+ * other row — every row before the mid-day switch — keeps the close + 16 h span (ledgerSpansForWindow).
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** The tariff periods a row's cycle buys in, for the on-peak attribution (governedOnPeakSpan's
+ *  isCheapAt: the next plan's window opening first ends this plan's claim). A mid-day row buys in
+ *  the super off-peak window behind an overnight backup; every other row in the overnight window
+ *  alone, as before. PURE. */
+export function ledgerCheapPeriodIds(windowKind: string | null | undefined): readonly string[] {
+  return windowKind === 'super_off_peak' ? ['overnight', 'super_off_peak'] : ['overnight'];
+}
+
+export interface CycleLedgerSpans extends LedgerWindowSpans {
+  /** The spans the realized trough is taken over: the backup span (when its open is on the row)
+   *  and the post span. */
+  troughSpans: TimeSpan[];
+}
+
+/** The three spans of a two-leg row; null for any other row (ledgerSpansForWindow then applies).
+ *  The backup span needs the row's backup window open (`backup_window_start_ms`, written with the
+ *  plan whether or not the backup armed); a row without it scores the post span alone — no span is
+ *  invented. The post span ends at the next chargeable open (`next_recharge_ms`), at most 16 h past
+ *  the close. The row completes once that span and its governed on-peak have both closed. PURE. */
+export function cycleLedgerSpans(
+  row: Pick<NightLedgerRow, 'window_kind' | 'window_start_ms' | 'window_end_ms'>
+    & Partial<Pick<NightLedgerRow, 'backup_window_start_ms' | 'next_recharge_ms'>>,
+  isOnPeakAt: (tsMs: number) => boolean,
+  isCheapAt: (tsMs: number) => boolean,
+): CycleLedgerSpans | null {
+  if (row.window_kind !== 'super_off_peak') return null;
+  const ws = row.window_start_ms;
+  const we = row.window_end_ms;
+  if (typeof ws !== 'number' || typeof we !== 'number' || !(we > ws)) return null;
+  const capEnd = we + SCORE_SPAN_AFTER_CLOSE_MS;
+  const next = row.next_recharge_ms;
+  const postEnd = typeof next === 'number' && Number.isFinite(next) && next > we ? Math.min(capEnd, next) : capEnd;
+  const troughSpans: TimeSpan[] = [];
+  const bs = row.backup_window_start_ms;
+  if (typeof bs === 'number' && Number.isFinite(bs) && bs < ws) troughSpans.push({ startMs: bs, endMs: ws });
+  troughSpans.push({ startMs: we, endMs: postEnd });
+  const onpeak = governedOnPeakSpan(we, isOnPeakAt, isCheapAt);
+  return { onpeak, scoreSpanEndMs: postEnd, completeMs: Math.max(postEnd, onpeak?.endMs ?? 0), troughSpans };
+}
+
+/** The lowest value over several spans of one series, after the scorer's median-of-3 spike filter
+ *  per span (a reconnect's single 0 sample never decides it). null with no sample. PURE. */
+export function minOverSpans(
+  spans: ReadonlyArray<TimeSpan>,
+  query: (startMs: number, endMs: number) => ReadonlyArray<Sample>,
+  filter: (pts: ReadonlyArray<Sample>) => ReadonlyArray<Sample>,
+): { value: number; ts: number } | null {
+  let best: { value: number; ts: number } | null = null;
+  for (const sp of spans) {
+    for (const p of filter(query(sp.startMs, sp.endMs))) {
+      if (best == null || p.value < best.value) best = { value: p.value, ts: p.ts };
+    }
+  }
+  return best;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * R4 (v1.189.0) — THE MID-DAY SHADOW, GRADED. The shadow (middayShadow.ts) records the PV and
+ * load its mid-day leg was planned on over its window (P50, `shadow_window_*_p50_kwh`); the row's
+ * capture measures the same window. The pair is forecast skill for the hours a mid-day charge
+ * would run in, the evidence the switch waits on — not a validation of the sizing model.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** The measured PV (the home Cores' pv_total, each at least LEDGER_SPAN_MIN_COVERAGE covered —
+ *  the ledger's per-Core rule) and house load (the panel's panel_load, the same coverage) over the
+ *  shadow's mid-day window, kWh; null for a figure the coverage does not support. null altogether
+ *  when the row has no shadow window or it has not closed. PURE. */
+export function shadowWindowActuals(i: {
+  row: Partial<Pick<NightLedgerRow, 'shadow_cost_window_start_ms' | 'shadow_cost_window_end_ms'>>;
+  nowMs: number;
+  homeSns: readonly string[];
+  queryPv: (sn: string, startMs: number, endMs: number) => ReadonlyArray<Sample>;
+  queryLoad: (startMs: number, endMs: number) => ReadonlyArray<Sample>;
+}): { pvKwh: number | null; loadKwh: number | null } | null {
+  const a = i.row.shadow_cost_window_start_ms;
+  const b = i.row.shadow_cost_window_end_ms;
+  if (typeof a !== 'number' || typeof b !== 'number' || !(b > a) || i.nowMs < b) return null;
+  let pvKwh: number | null = null;
+  if (i.homeSns.length > 0) {
+    let pvEnergyWh = 0;
+    let worst = 1;
+    for (const sn of i.homeSns) {
+      const pts = i.queryPv(sn, a, b);
+      pvEnergyWh += integrateWh(pts, true);
+      worst = Math.min(worst, coverageFrac(pts, a, b));
+    }
+    pvKwh = worst >= LEDGER_SPAN_MIN_COVERAGE ? round2(pvEnergyWh / 1000) : null;
+  }
+  const load = i.queryLoad(a, b);
+  const loadKwh = load.length > 0 && coverageFrac(load, a, b) >= LEDGER_SPAN_MIN_COVERAGE
+    ? round2(integrateWh(load, false) / 1000) : null;
+  return { pvKwh, loadKwh };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * R4 (v1.189.0) — plan §4 item 9, the accounting part: the hours a mid-day charge of OURS held the
+ * pool are not evidence about the arrays. A grid charge beside the sun takes acceptance the PV would
+ * have had, so the MPPTs back off; a soiling estimate, the Bayesian solar posterior or the PV bias
+ * hindcast that read those hours would learn a dirty or under-producing array that is neither.
+ * Overnight rows contribute nothing (no sun: excluding them changes no figure), so every hour these
+ * learners read today is read as before.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** The hour epochs (floor(ts / 1 h)) of every mid-day charge of ours on the ledger: a row whose
+ *  cost leg charged in the super off-peak window and wrote (actuated, or a write or force-charge
+ *  stamp), from its window open to one hour past its close (the restore and its readback). PURE. */
+export function middayChargeHourEpochs(
+  rows: ReadonlyArray<Partial<Pick<NightLedgerRow, 'window_kind' | 'window_start_ms' | 'window_end_ms' | 'actuated'
+    | 'actuation_applied_at_ms' | 'force_charge_on_at_ms'>>>,
+): Set<number> {
+  const out = new Set<number>();
+  for (const r of rows) {
+    if (r.window_kind !== 'super_off_peak') continue;
+    const wrote = r.actuated === 1 || (r.actuated as unknown) === true
+      || typeof r.actuation_applied_at_ms === 'number' || typeof r.force_charge_on_at_ms === 'number';
+    if (!wrote) continue;
+    const a = r.window_start_ms;
+    const b = r.window_end_ms;
+    if (typeof a !== 'number' || typeof b !== 'number' || !(b > a)) continue;
+    const last = Math.ceil(b / HOUR_MS);
+    for (let he = Math.floor(a / HOUR_MS); he <= last && he - Math.floor(a / HOUR_MS) < 48; he++) out.add(he);
+  }
+  return out;
+}
+
+/** `map` without the hour epochs in `drop`; the same map when there is nothing to drop. PURE. */
+export function withoutHourEpochs<V>(map: Map<number, V>, drop: ReadonlySet<number>): Map<number, V> {
+  if (drop.size === 0) return map;
+  const out = new Map<number, V>();
+  for (const [he, v] of map) if (!drop.has(he)) out.set(he, v);
+  return out;
 }
 
 /** A measured on-peak import above this counts as "on-peak import occurred" (unchanged). */
