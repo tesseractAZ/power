@@ -68,7 +68,8 @@ EcoFlow's own daily energy record. The night-charge writes in full:
    (`developer.ecoflow.com`). On the add-on's **Configuration** tab, enter them as
    `ECOFLOW_ACCESS_KEY` and `ECOFLOW_SECRET_KEY`. Power does not start without both.
 3. Set `FORECAST_LAT` and `FORECAST_LON` to your site. The defaults are a placeholder; every
-   solar forecast, and so the runway and the night-charge plan, is fetched for these coordinates.
+   solar forecast, and so the runway and the night-charge plan, is fetched for these coordinates,
+   and day is told from night there while a Core's solar is counted at the panel.
 4. Tell Power whether you have a grid connection: `GRID_AVAILABLE` on if you do. Better still,
    name a Home Assistant entity that turns off when the grid drops in `GRID_PRESENCE_ENTITY`. A
    low battery is an emergency only when no grid can carry the house, and the alarms are graded
@@ -266,6 +267,14 @@ Every entity, its unique_id, meaning and unit:
   `ecoflow_battery_discharge_lifetime_kwh` (out). Give each source its power sensor too, or the
   dashboard's Now view gets consumption wrong. Each circuit's energy sensor can be an individual
   device.
+- **A Core with no reading of its own** (offline in the cloud, or its readings stopped). Its
+  battery and solar energy, and its share of Fleet PV and Battery Net, are counted from the
+  panel's meter on its slot, so the counters keep rising. In daylight the two power sensors read
+  unknown until the panel's solar reading has been checked against the Core's charge; the log
+  states each check. When the Core reports again, the jump in its own counters is absorbed, not
+  booked in one hour. Once energy has been counted this way, do not go back to a release that
+  does not count it: Home Assistant would book the battery energy it drops as a negative hour, or
+  as a meter reset ([the energy bridge](https://github.com/tesseractAZ/power/blob/main/docs/reference/07-energy-and-cost.md#22-the-two-accumulation-paths)).
 - **Gap-free history.** Each morning Power imports EcoFlow's own daily energy record into Home
   Assistant's statistics as series named "(EcoFlow ledger)"; pick those for history without the
   gaps restarts leave.

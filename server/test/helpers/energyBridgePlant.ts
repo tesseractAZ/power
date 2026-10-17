@@ -7,12 +7,16 @@
  * published read asserted never to decrease. Each Core's online flag carries the transition time the
  * store stamps (`onlineChangedAtMs`): `setOnline` stamps it, `darkAtFirstSight` (a Core offline
  * since before the add-on saw it) and a restart do not. Each Core's content clock
- * (`contentChangedAtMs`, the store's v1.181.0 witness) moves when it delivers data: fresh registers
- * while online (`regs` set, `coreBatW` moving them, the jump landing at `setOnline`), MQTT data
- * while the cloud lists it offline (`mqttWhileOffline`), a content change without pack data
- * (`touch`); a restart clears it (the store's first body after one only seeds the witness). A Core
- * that reports records its own pv_total / ac_in each minute; its BMS registers move with
- * `coreBatW` and freeze while it is offline, then jump to the true count when it reports again.
+ * (`contentChangedAtMs`, the store's v1.181.0 witness) moves when it delivers data: every minute
+ * while it is listed online and not `frozen`, fresh registers (`regs` set, `coreBatW` moving them,
+ * the jump landing at `setOnline`), MQTT data while the cloud lists it offline (`mqttWhileOffline`),
+ * a content change without pack data (`touch`); a restart clears it (the store's first body after
+ * one only seeds the witness). Its arrival clock (`lastTelemetryAtMs`) moves with it, and also each
+ * minute for a Core whose cloud `replay`s its cached body (content unchanged). A Core that reports
+ * records its own pv_total / ac_in each minute (what the recorder's gate writes: a `frozen` Core,
+ * listed online with its quota failing, records nothing, and neither does a replay once its
+ * content is older than the gate's window); its BMS registers move with `coreBatW` and freeze while
+ * it does not report, then jump to the true count when it reports again.
  * `restart` is a graceful stop (close(): a final rollup); `crash` is not.
  * Test serials are placeholders.
  *
@@ -56,11 +60,12 @@ export async function loadPlant(prefix: string) {
   type Rec = ReturnType<typeof createRecorder>;
   const realNow = Date.now;
 
-  function dpu(sn: string, online: boolean, regs: Regs | null, changedAt: number | undefined, contentAt: number | undefined): Any {
+  function dpu(sn: string, online: boolean, regs: Regs | null, changedAt: number | undefined, contentAt: number | undefined, telemetryAt: number | undefined): Any {
     return {
       sn, deviceName: sn, productName: 'DELTA Pro Ultra', online, lastUpdated: 0,
       ...(changedAt != null ? { onlineChangedAtMs: changedAt } : {}),
       ...(contentAt != null ? { contentChangedAtMs: contentAt } : {}),
+      ...(telemetryAt != null ? { lastTelemetryAtMs: telemetryAt } : {}),
       ...(regs ? {
         projection: {
           kind: 'dpu', soc: 60, packCount: PACKS, pvTotalWatts: 0, totalInWatts: 0, totalOutWatts: 0, acInWatts: 0, acOutWatts: 0,
@@ -113,6 +118,14 @@ export async function loadPlant(prefix: string) {
     changedAt: Record<string, number | undefined> = {};
     /** Each Core's content clock (the store's contentChangedAtMs). */
     contentAt: Record<string, number | undefined> = {};
+    /** Each Core's arrival clock beyond its content clock (a replayed body lands, nothing changes). */
+    telemetryAt: Record<string, number | undefined> = {};
+    /** Cores listed online whose quota keeps failing: no content, no arrival, no rows. */
+    frozen = new Set<string>();
+    /** Cores listed online whose cloud replays their cached body each minute: arrivals, no change. */
+    replay = new Set<string>();
+    /** Cores the store holds no projection for (an online flip after a restart, before the first quota). */
+    unprojected = new Set<string>();
     private _regs: Regs | null = { chg: 1_000_000, dsg: 1_000_000 };
     /** The registers every Core shows (tests that move all Cores together set this): setting them is
      *  fresh data from every online Core. */
@@ -167,9 +180,10 @@ export async function loadPlant(prefix: string) {
     touch(sns: string[] = CORES): void {
       for (const sn of sns) this.contentAt[sn] = this.clock;
     }
-    /** Offline since before the add-on saw them: the device list's first sight carries no transition. */
+    /** Offline since before the add-on saw them: the device list's first sight carries no transition,
+     *  and the store has seen no content from them. */
     darkAtFirstSight(): void {
-      for (const sn of CORES) { this.online[sn] = false; this.changedAt[sn] = undefined; }
+      for (const sn of CORES) { this.online[sn] = false; this.changedAt[sn] = undefined; this.contentAt[sn] = undefined; this.telemetryAt[sn] = undefined; }
     }
     open(): void {
       this.rec = createRecorder(this.store, (m) => this.logs.push(m));
@@ -180,7 +194,7 @@ export async function loadPlant(prefix: string) {
     restart(): void {
       this.rec.close();
       this.db.close();
-      for (const sn of CORES) { this.changedAt[sn] = undefined; this.contentAt[sn] = undefined; }
+      for (const sn of CORES) { this.changedAt[sn] = undefined; this.contentAt[sn] = undefined; this.telemetryAt[sn] = undefined; }
       this.open();
     }
     /** A CRASH (a power cut, an OOM kill, an uncaught exception): a new recorder over the same
@@ -189,7 +203,7 @@ export async function loadPlant(prefix: string) {
      *  no content clock); a Core listed offline then has no projection (no quota is fetched for a
      *  device listed offline) unless `keepProjection` (MQTT still delivers its data). */
     crash(opts: { keepProjection?: boolean } = {}): void {
-      for (const sn of CORES) { this.changedAt[sn] = undefined; this.contentAt[sn] = undefined; }
+      for (const sn of CORES) { this.changedAt[sn] = undefined; this.contentAt[sn] = undefined; this.telemetryAt[sn] = undefined; }
       this.frozenProjection = opts.keepProjection === true;
       this.rec = createRecorder(this.store, (m) => this.logs.push(m));
     }
@@ -204,8 +218,10 @@ export async function loadPlant(prefix: string) {
     devices(): Record<string, Any> {
       const out: Record<string, Any> = { [PANEL]: panelDev(this.panelStale ? this.clock - 600_000 : this.clock, this) };
       for (const sn of CORES) {
-        const projected = this.online[sn] || this.frozenProjection;
-        out[sn] = dpu(sn, this.online[sn], projected ? this.regsOf(sn) : null, this.changedAt[sn], this.contentAt[sn]);
+        const projected = (this.online[sn] || this.frozenProjection) && !this.unprojected.has(sn);
+        const c = this.contentAt[sn];
+        const a = this.telemetryAt[sn];
+        out[sn] = dpu(sn, this.online[sn], projected ? this.regsOf(sn) : null, this.changedAt[sn], c, a != null && (c == null || a > c) ? a : c);
       }
       return out;
     }
@@ -225,15 +241,28 @@ export async function loadPlant(prefix: string) {
     minute(t: number): void {
       this.panelSamples(t);
       CORES.forEach((sn, i) => {
+        const reports = this.online[sn] && !this.frozen.has(sn) && !this.replay.has(sn);
         if (this.coreBatW) {
           const tr = this.trueRegs[sn] ?? { ...(this.regs ?? { chg: 0, dsg: 0 }) };
           const mah = Math.abs(this.coreBatW[i]) / 60 / PACK_MAH_TO_WH / PACKS;
           if (this.coreBatW[i] > 0) tr.dsg += mah; else tr.chg += mah;
           this.trueRegs[sn] = tr;
-          if (this.online[sn]) { this.shown[sn] = { ...tr }; this.contentAt[sn] = t; }
+          if (reports) this.shown[sn] = { ...tr };
           else this.shown[sn] ??= { ...(this.regs ?? tr) };
         }
-        if (!this.online[sn]) return;
+        if (this.online[sn] && this.replay.has(sn)) {
+          // The cloud replays the cached body: it lands, nothing changes; the gate writes its rows
+          // only while that content is within its window.
+          this.telemetryAt[sn] = t;
+          const c = this.contentAt[sn];
+          if (c != null && t - c <= 5 * MIN) {
+            this.sample(sn, 'pv_total', this.corePv[i], t);
+            this.sample(sn, 'ac_in', this.coreAcIn[i], t);
+          }
+          return;
+        }
+        if (!reports) return;
+        this.contentAt[sn] = t;
         this.sample(sn, 'pv_total', this.corePv[i], t);
         this.sample(sn, 'ac_in', this.coreAcIn[i], t);
       });

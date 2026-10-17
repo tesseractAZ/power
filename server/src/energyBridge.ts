@@ -16,8 +16,8 @@
  * is NOT battery flow: PV that charges a Core's battery never crosses the slot, and the Cores'
  * own conversion and standby draw is invisible to it. The panel balance closes at AC (10-15:
  * grid 2.22 + slot out 45.60 kWh = 47.82 against a panel load of 47.95). So, for each DARK slot
- * (connected, its Core listed and cloud-offline for at least BRIDGE_DWELL_MS — see below), over
- * each rollup window:
+ * (connected, its Core listed on the account with no reading of its own for at least
+ * BRIDGE_DWELL_MS — see below), over each rollup window:
  *
  *     acOut = ∫ max(0, −chW),  acIn = ∫ max(0, chW)
  *     net   = acOut − acIn − pv        net ≥ 0 → battery out += net,  else battery in += −net
@@ -50,23 +50,45 @@
  *                 a slot on a cloud-offline panel out of both (bridgeFleetFlow).
  *                 Never PV that passed through a Core booked as battery out.
  *
- * WHEN A CORE IS DARK. A /status flip lasts seconds (setDeviceOnline) and a /device/list blip
- * flagged three Cores offline for ~92 s on 2026-10-03: neither is an outage. A Core is bridged once
- * it has been cloud-offline for BRIDGE_DWELL_MS (its `onlineChangedAtMs`), or when no run of the
- * add-on saw it go offline (no transition time, none persisted). The bridge takes it over at the
- * instant it went offline: its window starts at max(the rollup watermark, that instant), and the
- * recorder counts the Core's own pv_total / ac_in only up to it (offlineHomeCores, ownEnergyUntil)
- * — on every read at once, and in a rollup once the dwell has passed (a rollup inside the dwell
- * still counts the Core itself, and the bridge then starts at that rollup). So the read path never
- * drops energy it already showed, and no stretch is counted twice. A blip shorter than the dwell
- * writes no marker and no log line. The instant is persisted (`bridge_offline_<sn>`, written when
- * the store sees the flip, deleted once the Core is listed online): after a restart the store lists
- * the Core offline with no transition time, and the persisted instant stands in for it. A crash
- * runs no final rollup, so the watermark can be up to a rollup window old; without the instant the
- * first publish after it dropped the PV / AC input shown since the flip, and the bridge booked
- * again the battery energy the BMS counted before it. The recorder applies the same cut to a Core
- * with no projection (none is fetched for a device listed offline), so a crash restart publishes
- * what the uninterrupted process would have.
+ * WHEN A CORE IS DARK. v1.188.1 (review) — when it delivers no reading of its OWN, whatever the
+ * cloud's online flag says (coreReports): the recorder writes exactly the Cores that do (its
+ * freshness gate, heldSamples.projectionRecordable: content landed within 3 min and, for a Core,
+ * CHANGED within SHP2_READBACK_STALE_MS), the bridge meters every other connected home Core, and
+ * the power sensors sum each Core at one or the other — one notion, so no span is booked twice or
+ * by nobody. Dark: cloud-offline with no data since the flip; listed online on a frozen meter (a
+ * quota that keeps failing, a REST 200 replaying a cached body — the state the Energy flow card
+ * and the backup timers already read from the slot, isSourceDpuFrozen); listed online with no
+ * projection yet or a first body after a restart (it only seeds the witness). Not dark: a Core the
+ * cloud lists offline whose MQTT data still arrives and changes after the flip (its measured
+ * pv_total and BMS registers count). A Core the bridge has booked (it holds hand-over markers)
+ * stays dark until it hands back (handsBack: reported since its return AND a reading of its own
+ * now), the same test that spends its markers, so an online flip before the first fresh body, or a
+ * quota that keeps failing after it, is still metered at the slot.
+ *
+ * A /status flip lasts seconds (setDeviceOnline) and a /device/list blip flagged three Cores offline
+ * for ~92 s on 2026-10-03 while their MQTT data kept arriving: neither is an outage (the second is
+ * not even dark). A dark Core is bridged once its own reading has been absent for BRIDGE_DWELL_MS
+ * from the instant it stopped (ownReadingStoppedAt: listed offline, the later of its flip and its
+ * last content change; listed online, its last content change), or at once when no run of the
+ * add-on saw it stop (offline at the device list's first sight, none persisted) or when it is
+ * marked. An online Core with no instant known (a restart's first body) starts its dwell at this
+ * process's first sight of it, so a live Core reporting seconds after a restart is never bridged.
+ * The bridge takes it over at that instant: its window starts at max(the rollup watermark, the
+ * instant), and the recorder counts the Core's own pv_total / ac_in only up to it (offlineHomeCores,
+ * ownEnergyUntil) — on every read at once, and in a rollup once the dwell has passed (a rollup
+ * inside the dwell still counts the Core itself, and the bridge then starts at that rollup). So the
+ * read path never drops energy it already showed, and no stretch is counted twice. Inside the dwell
+ * a Core is in neither power figure, so both are withheld (unknown, never a partial sum). A blip
+ * shorter than the dwell writes no marker and no log line. The instant is persisted
+ * (`bridge_offline_<sn>`, written when the Core goes dark, kept through an online flip while it is
+ * marked, deleted once it is no longer dark): after a restart the store has no clocks for it, and
+ * the persisted instant stands in. A crash runs no final rollup, so the watermark can be up to a
+ * rollup window old; without the instant the first publish after it dropped the PV / AC input shown
+ * since the flip, and the bridge booked again the battery energy the BMS counted before it. The
+ * recorder applies the same cut to a Core with no projection (none is fetched for a device listed
+ * offline), so a crash restart publishes what the uninterrupted process would have. Where the
+ * bridge can book nothing for a dark slot in a window (the panel reading not fresh, no slot
+ * coverage), a marked Core whose own readings arrive again counts them for that window instead.
  *
  * PERSISTENCE AND HAND-OVER (recorder.ts). The bridged energy accumulates in its own rows
  * (`bridge_battery_charge_wh` / `_discharge_wh`, watermark = their ts), added to the emitted
@@ -80,11 +102,13 @@
  * `bridge_dark_<pack>` is written; when that Core reports again and its registers move, the
  * recorder re-baselines the pack so its BMS sum carries on from the held value: the counter jump
  * the dark days built is absorbed (the bridge already counted that energy), whatever its size.
- * The marker is spent only once the Core has REPORTED since it came back (reportsSinceReturn: its
- * content changed at or after its online flip). Register movement before that — MQTT data that
- * still arrives while the cloud lists the Core offline, or a frozen projection at an online flip
- * that lands before the first fresh reading — is absorbed as it is seen (re-baselined, the marker
- * kept), so the held value never trails the projection and the real jump cannot pass later.
+ * The marker is spent only once the Core hands back (handsBack: it has REPORTED since it came back —
+ * reportsSinceReturn, its content changed at or after its online flip — and delivers a reading of
+ * its own now), the instant the bridge stops metering it. Register movement before that — MQTT
+ * data that still arrives while the cloud lists the Core offline, or a frozen projection at an
+ * online flip that lands before the first fresh reading — is absorbed as it is seen (re-baselined,
+ * the marker kept), so the held value never trails the projection and the real jump cannot pass
+ * later.
  * Every term only grows, so nothing published steps down; as a backstop, the two counters whose
  * contributors change here (fleet_pv_wh, fleet_grid_import_wh) hold a dip between rollups up to
  * LIFETIME_HOLD_DIP_WH (recorder.ts). The per-Core rows
@@ -93,20 +117,18 @@
  * it is handed over — never by the hand-over itself, which usually runs first (a read).
  *
  * LIMITS. AC basis at the panel (on the online days the inferred split kept battery in within
- * ~2 kWh/day of the DC counters and read battery out 5-8 kWh/day low); up to one rollup window
- * misattributed at the return, and the BMS energy from the online flip to the Core's first fresh
- * reading is absorbed (seconds for a Core streaming MQTT); at an outage start, the battery flow
- * from the Core's last register reading to the bridge's window start (the cloud's offline
- * detection, and a rollup that fell inside the dwell: at most BRIDGE_DWELL_MS) is absorbed
- * unbridged, while register data that MQTT still delivers before the bridge's first marker is
- * counted by the BMS and again by the bridge (at most one rollup window); a Core whose flip no run
- * saw (it went offline while the add-on was down, or within one publish before a crash) is cut at
- * the watermark — harmless after a graceful stop (its final rollup leaves nothing pending), but
- * after a crash while it reported, the first publish drops the PV / AC input pending since the last
- * rollup until the bridge's first window books that span back, and the BMS and the bridge both
- * count that span's battery energy (at most one rollup window); nothing can be bridged while the
- * panel itself is dark; and there is no backfill — a bridge that starts mid-outage counts from its
- * first window.
+ * ~2 kWh/day of the DC counters and read battery out 5-8 kWh/day low); at the return, the span from
+ * the bridge's last rollup to the Core's hand-back (at most one rollup window) is booked by neither
+ * (the hand-over absorbs it), however long the Core stays listed online without a reading of its
+ * own before that; at an outage start, the battery flow from the Core's last register reading to
+ * the bridge's window start (the cloud's offline detection or the content window, and a rollup that
+ * fell inside the dwell) is absorbed unbridged; a Core whose flip no run saw (it went offline while
+ * the add-on was down, or within one publish before a crash) is cut at the watermark — harmless
+ * after a graceful stop (its final rollup leaves nothing pending), but after a crash while it
+ * reported, the first publish drops the PV / AC input pending since the last rollup until the
+ * bridge's first window books that span back, and the BMS and the bridge both count that span's
+ * battery energy (at most one rollup window); nothing can be bridged while the panel itself is
+ * dark; and there is no backfill — a bridge that starts mid-outage counts from its first window.
  *
  * Pure functions plus a small factory (createEnergyBridge) that the recorder hands its lifetime
  * table and sample queries.
@@ -114,6 +136,7 @@
 import type { DeviceSnapshot, FleetSnapshot } from './snapshot.js';
 import type { Shp2EnergySource } from './ecoflow/project.js';
 import { allShp2s, shp2ReadbackFresh } from './shp2Membership.js';
+import { projectionRecordable } from './heldSamples.js';
 import { integrateWh, INTEGRATE_HEAD_LOOKBACK_MS } from './aggregator.js';
 import { solarPosition, PHOENIX_SITE } from './physics/clearSky.js';
 
@@ -141,8 +164,11 @@ export const bridgeCoreKey = (sn: string, kind: 'chg' | 'dsg'): string => `${COR
  *  Deleted once the Core is listed online again. */
 export const bridgeOfflineKey = (sn: string): string => `${OFFLINE_PREFIX}${sn}`;
 
-/** The persisted hand-off instant of a Core (createEnergyBridge), or null when none is known. */
+/** The hand-off instant recorded for a Core (createEnergyBridge: persisted, or this process's first
+ *  sight of an online Core with no reading yet), or null when none is known. */
 export type KnownOfflineSince = (sn: string) => number | null;
+/** Does the Core still hold a hand-over marker (the bridge booked it and it has not handed over)? */
+export type MarkedCore = (sn: string) => boolean;
 
 /** A rollup window is never longer than this. Normal windows are 5 min; the first rollup after a
  *  restart would otherwise span the downtime (no samples: nothing lost by clamping), and a long
@@ -191,7 +217,7 @@ export function sunUp(ms: number, site: BridgeSite): boolean {
  * process saw it (no transition time), changed at all (the store's first body after a restart only
  * seeds the witness: it may be a replay). A frozen projection, MQTT data that arrived while the
  * cloud listed the Core offline, and a REST body replaying a cached one do not count. The
- * hand-over (recorder.computeBmsBatteryDetail) waits for it.
+ * hand-over (recorder.computeBmsBatteryDetail) waits for it, and for coreReports (handsBack).
  */
 export function reportsSinceReturn(d: Pick<DeviceSnapshot, 'online' | 'onlineChangedAtMs' | 'contentChangedAtMs'>): boolean {
   if (d.online !== true) return false;
@@ -199,6 +225,52 @@ export function reportsSinceReturn(d: Pick<DeviceSnapshot, 'online' | 'onlineCha
   if (c == null) return false;
   const o = finite(d.onlineChangedAtMs);
   return o == null || c >= o;
+}
+
+/** The fields of a Core the bridge judges its own reading on. */
+type ReadingFields = Pick<DeviceSnapshot, 'projection' | 'online' | 'onlineChangedAtMs' | 'contentChangedAtMs' | 'lastTelemetryAtMs' | 'contentStaleSinceMs'>;
+
+/**
+ * v1.188.1 (review) — does Core `d` deliver a reading of its OWN now? Its projection is one the
+ * recorder writes (heldSamples.projectionRecordable: content arrived within RECORD_FRESH_MS and its
+ * readings CHANGED within SHP2_READBACK_STALE_MS, the content clock the Energy flow card and the
+ * backup timers read); and, while the cloud lists it offline, that change came after the offline
+ * flip (MQTT data still arriving from a Core the cloud lists offline is its reading; its last
+ * report before the cloud declared it offline is not a reading after it). Not a reading: no
+ * projection yet (an online flip after a restart, before the first quota), a quota that keeps
+ * failing, a REST 200 replaying a cached body, a first body after a restart (it only seeds the
+ * witness). The bridge meters every connected home Core that does not report (darkHomeSlots), and
+ * the recorder writes exactly the Cores that do: one notion, so no span is counted twice or by
+ * nobody.
+ */
+export function coreReports(d: ReadingFields | undefined, nowMs: number): boolean {
+  if (d?.projection?.kind !== 'dpu' || !projectionRecordable(d, nowMs)) return false;
+  if (d.online !== false) return true;
+  const o = finite(d.onlineChangedAtMs);
+  const c = finite(d.contentChangedAtMs);
+  return o == null || (c != null && c > o);
+}
+
+/**
+ * v1.188.1 (review) — the bridge hands a MARKED Core back (the hand-over spends its markers) exactly
+ * when it stops metering it: the Core has reported since its return (reportsSinceReturn) and
+ * delivers a reading of its own now (coreReports). The bridge keeps a marked Core dark until then,
+ * so the bridge and the hand-over cannot leave a span between them.
+ */
+export function handsBack(d: ReadingFields, nowMs: number): boolean {
+  return reportsSinceReturn(d) && coreReports(d, nowMs);
+}
+
+/** When Core `d` stopped delivering a reading of its own, from the store's clocks alone: listed
+ *  offline, the later of its offline flip and its last content change; listed online, its last
+ *  content change. null when neither is known (offline since before this process saw it, or online
+ *  with no change seen since a restart). */
+export function ownReadingStoppedAt(d: ReadingFields): number | null {
+  const c = finite(d.contentChangedAtMs);
+  if (d.online !== false) return c;
+  const o = finite(d.onlineChangedAtMs);
+  if (o == null) return c;
+  return c == null ? o : Math.max(o, c);
 }
 
 /** The panel's PV figure for one source slot, W: the two MPPT fields when either is reported
@@ -218,9 +290,11 @@ export interface DarkSlot {
   slot: number;
   /** The dark Core. */
   sn: string;
-  /** When the Core went offline (`onlineChangedAtMs`): the bridge's window never starts before it.
-   *  null = offline since before this process saw it. */
+  /** When its own reading stopped (OfflineHomeCore.offlineSinceMs): the bridge's window never
+   *  starts before it. null = offline since before this process saw it. */
   darkSinceMs: number | null;
+  /** The Core is listed online (a frozen meter, no reading yet, or not reported since its return). */
+  listedOnline: boolean;
   source: Shp2EnergySource;
   /** The slot meter now, W (negative = the Core supplies the panel). */
   chW: number | null;
@@ -234,41 +308,55 @@ export interface DarkSlot {
   panelOnline: boolean;
 }
 
-/** A home Core the panel lists connected that is listed on the account and cloud-offline. */
+/** A home Core the panel lists connected, listed on the account, with no reading of its own
+ *  (coreReports is false: cloud-offline, or listed online on a frozen meter or with no reading
+ *  yet), or a marked Core that has not handed back (handsBack). The bridge's "offline" Core. */
 export interface OfflineHomeCore {
-  /** When it went offline (`onlineChangedAtMs`, else the instant a previous process persisted
-   *  for it, capped at now); null = no process saw it go offline (the device list's first sight
-   *  carries no transition, and none was persisted). */
+  /** When its own reading stopped (capped at now): a marked Core's dark span keeps the instant
+   *  recorded when it began (persisted, `bridge_offline_<sn>`); otherwise ownReadingStoppedAt, else
+   *  the recorded instant (after a restart, a crash too, the one the previous process persisted;
+   *  for an online Core with no reading yet, this process's first sight of it). null = no process
+   *  saw it stop (offline at the device list's first sight, none persisted). */
   offlineSinceMs: number | null;
-  /** The bridge has taken it over: offline for BRIDGE_DWELL_MS, or no instant is known (null). */
+  /** The bridge has taken it over: dark for BRIDGE_DWELL_MS, or marked, or listed offline with no
+   *  instant known (null). An online Core with no instant is not taken over: its first sight starts
+   *  the dwell (createEnergyBridge), so a restart's first body, which only seeds the witness, does
+   *  not hand a live Core to the bridge. */
   bridged: boolean;
 }
 
-/** A slot's Core is offline when the panel lists the slot connected, names its Core, and that Core
- *  is listed on the account and cloud-offline. Bridged (dark) once the dwell has passed: with the
- *  online Cores that is the complement of aggregateFleetFlow's members (onlineDpus ∩ connected)
- *  less the Cores inside the dwell. An online Core whose projection has not loaded yet (boot) is
- *  neither, so it keeps the v1.178.0 boot rule; a Core missing from the device list entirely is
- *  not bridged. */
+/** A slot's Core is offline (dark) when the panel lists the slot connected, names its Core, that
+ *  Core is listed on the account, and it delivers no reading of its own (coreReports) — or it is
+ *  marked and has not handed back (handsBack). Bridged once the dwell has passed. Every connected
+ *  home Core is therefore either a reading of its own (the recorder writes it, the power sensors sum
+ *  it), bridged (metered at its slot), or inside the dwell; a Core missing from the device list
+ *  entirely is none of them (not part of the fleet). */
 function offlineState(
-  src: Shp2EnergySource, devices: Record<string, DeviceSnapshot>, nowMs: number, known?: KnownOfflineSince,
+  src: Shp2EnergySource, devices: Record<string, DeviceSnapshot>, nowMs: number, known?: KnownOfflineSince, marked?: MarkedCore,
 ): OfflineHomeCore | null {
   if (!src.isConnected || !src.sn) return null;
   const dpu = devices[src.sn];
-  if (dpu == null || dpu.online !== false) return null;
-  // The store's transition time when this process saw the flip; after a restart (a crash too) the
-  // store sees the Core offline with none, and the instant the previous process persisted stands.
-  const t = finite(dpu.onlineChangedAtMs) ?? (known ? finite(known(src.sn)) : null);
+  if (dpu == null) return null;
+  const isMarked = marked?.(src.sn) === true;
+  if (isMarked ? handsBack(dpu, nowMs) : coreReports(dpu, nowMs)) return null;
+  // A marked Core is one dark span from the instant it began (recorded, or null: offline since
+  // before any run saw it), whatever its flag and content did since: the bridge has booked it from
+  // there, and its hand-over absorbs the whole jump. Otherwise the store's clocks say when its own
+  // reading stopped; after a restart (a crash too) the store has none, and the recorded instant
+  // stands in.
+  const rec = known ? finite(known(src.sn)) : null;
+  const t = isMarked ? rec : ownReadingStoppedAt(dpu) ?? rec;
   const offlineSinceMs = t == null ? null : Math.min(t, nowMs);
-  return { offlineSinceMs, bridged: offlineSinceMs == null || nowMs - offlineSinceMs >= BRIDGE_DWELL_MS };
+  const bridged = offlineSinceMs == null ? (isMarked || dpu.online === false) : nowMs - offlineSinceMs >= BRIDGE_DWELL_MS;
+  return { offlineSinceMs, bridged };
 }
 
-/** Every offline home Core, by SN (the recorder's contributor cut, ownEnergyUntil). */
-export function offlineHomeCores(devices: Record<string, DeviceSnapshot>, nowMs: number, known?: KnownOfflineSince): Map<string, OfflineHomeCore> {
+/** Every offline (dark) home Core, by SN (the recorder's contributor cut, ownEnergyUntil). */
+export function offlineHomeCores(devices: Record<string, DeviceSnapshot>, nowMs: number, known?: KnownOfflineSince, marked?: MarkedCore): Map<string, OfflineHomeCore> {
   const out = new Map<string, OfflineHomeCore>();
   for (const panel of allShp2s(devices)) {
     for (const src of panel.projection.sources ?? []) {
-      const o = offlineState(src, devices, nowMs, known);
+      const o = offlineState(src, devices, nowMs, known, marked);
       if (o) out.set(src.sn as string, o);
     }
   }
@@ -291,19 +379,20 @@ export function ownEnergyUntil(o: OfflineHomeCore | undefined, phase: 'read' | '
   return o.offlineSinceMs;
 }
 
-export function darkHomeSlots(devices: Record<string, DeviceSnapshot>, nowMs: number, known?: KnownOfflineSince): DarkSlot[] {
+export function darkHomeSlots(devices: Record<string, DeviceSnapshot>, nowMs: number, known?: KnownOfflineSince, marked?: MarkedCore): DarkSlot[] {
   const out: DarkSlot[] = [];
   for (const panel of allShp2s(devices)) {
     const fresh = shp2ReadbackFresh(panel, nowMs);
     const watts = panel.projection.sourceWatts ?? [];
     for (const src of panel.projection.sources ?? []) {
-      const o = offlineState(src, devices, nowMs, known);
+      const o = offlineState(src, devices, nowMs, known, marked);
       if (!o?.bridged) continue;
       out.push({
         panelSn: panel.sn,
         slot: src.slot,
         sn: src.sn as string,
         darkSinceMs: o.offlineSinceMs,
+        listedOnline: devices[src.sn as string]?.online === true,
         source: src,
         chW: finite(watts[src.slot - 1]),
         pvW: slotPvWatts(src),
@@ -396,28 +485,53 @@ export function slotPowerBasis(s: DarkSlot, nowMs: number, trusted: boolean, sit
 }
 
 export interface BridgedFleetFlow {
-  /** Fleet PV, W: the online Cores' sum plus the dark slots' PV; null while a dark slot cannot be bridged. */
+  /** Fleet PV, W: the reporting Cores' own figures plus the dark slots' PV; null while a home Core
+   *  is neither (inside the dwell) or a dark slot cannot be bridged. */
   fleetPv: number | null;
-  /** Battery Net, W (positive = discharging): the online Cores' sum plus Σ(−chW − pv) over the dark slots. */
+  /** Battery Net, W (positive = discharging): the reporting Cores' own pack net plus Σ(−chW − pv)
+   *  over the dark slots; null as fleetPv. */
   fleetBatteryNet: number | null;
   /** Dark slots counted into the two figures. */
   bridgedSlots: number;
-  /** false while any dark slot on an online panel cannot be bridged right now (publishReadiness
-   *  `flowBridged`). */
+  /** Connected home Cores counted at their own reading (coreReports). */
+  ownCores: number;
+  /** false while a connected home Core on an online panel is neither a reading of its own nor
+   *  bridged (inside the dwell), or a dark slot on an online panel cannot be bridged right now
+   *  (publishReadiness `flowBridged`). */
   ready: boolean;
+  /** Connected home Cores on an online panel inside the dwell: no reading of their own, not bridged
+   *  yet. Each withholds both figures. */
+  pending: string[];
   /** `leftOut`: the slot's panel is cloud-offline, so the slot is in neither figure and withholds
    *  neither (its basis reads 'unbridgeable'). */
   slots: Array<{ panelSn: string; slot: number; sn: string; basis: BridgeBasis; chW: number | null; pvW: number | null; leftOut: boolean }>;
 }
 
+/** A Core's own contribution to aggregateFleetFlow's fleetPv / fleetBatteryNetDisplay. */
+function ownFlow(d: DeviceSnapshot): { pv: number; net: number } {
+  if (d.projection?.kind !== 'dpu') return { pv: 0, net: 0 };
+  let net = 0;
+  for (const pk of d.projection.packs ?? []) {
+    const f = pk.liveFlow ?? pk;
+    net += (f.outputWatts ?? 0) - (f.inputWatts ?? 0);
+  }
+  return { pv: d.projection.pvTotalWatts ?? 0, net };
+}
+
 /**
- * The two power sensors the Energy dashboard's Now view rates on (Fleet PV, Battery Net), with
- * the dark slots metered at the panel: battery = −chW − pv per dark slot, pv from the panel field
- * ('measured') or 0 ('night'). `online` is aggregateFleetFlow's sums over the online Cores
- * (fleetPv and the display battery net). A dark slot on an online panel that cannot be bridged
- * right now withholds both figures (unknown, never a partial sum); one on a cloud-offline panel is
- * left out of both, as an offline Core was before the bridge: nothing of it can be read until that
- * panel returns, and on a two-panel plant it must not blank the other panel's Cores. Pure.
+ * The two power sensors the Energy dashboard's Now view rates on (Fleet PV, Battery Net). `online`
+ * is aggregateFleetFlow's sums over the online Cores (fleetPv and the display battery net). Each
+ * connected home Core is counted once, by what it delivers now:
+ *  - a reading of its own (coreReports): its own figures (a Core the cloud lists offline whose MQTT
+ *    data still arrives is added; it is not in `online`);
+ *  - dark (no reading of its own, bridged): metered at its slot, battery = −chW − pv, pv from the
+ *    panel field ('measured') or 0 ('night'); a frozen projection listed online is taken OUT of
+ *    `online` first, so its held figures are never published as live;
+ *  - inside the dwell: neither, so both figures are withheld (unknown, never a partial sum).
+ * A dark slot on an online panel that cannot be bridged right now withholds both figures; one on a
+ * cloud-offline panel is left out of both, as an offline Core was before the bridge: nothing of it
+ * can be read until that panel returns, and on a two-panel plant it must not blank the other
+ * panel's Cores. Pure.
  */
 export function bridgeFleetFlow(
   online: { fleetPv: number; fleetBatteryNet: number },
@@ -426,13 +540,35 @@ export function bridgeFleetFlow(
   isTrusted: (panelSn: string, slot: number) => boolean,
   site: BridgeSite,
   known?: KnownOfflineSince,
+  marked?: MarkedCore,
 ): BridgedFleetFlow {
   let pv = online.fleetPv;
   let net = online.fleetBatteryNet;
   let ready = true;
   let bridgedSlots = 0;
+  let ownCores = 0;
+  const pending: string[] = [];
   const slots: BridgedFleetFlow['slots'] = [];
-  for (const s of darkHomeSlots(devices, nowMs, known)) {
+  const seen = new Set<string>();
+  for (const panel of allShp2s(devices)) {
+    for (const src of panel.projection.sources ?? []) {
+      if (!src.isConnected || !src.sn || seen.has(src.sn)) continue;
+      seen.add(src.sn);
+      const d = devices[src.sn];
+      if (d == null) continue;
+      // In aggregateFleetFlow's sums (online, a Core projection, a connected source).
+      const summed = !!d.online && d.projection?.kind === 'dpu';
+      const o = offlineState(src, devices, nowMs, known, marked);
+      if (o == null) {
+        ownCores += 1;
+        if (!summed) { const f = ownFlow(d); pv += f.pv; net += f.net; }
+        continue;
+      }
+      if (summed) { const f = ownFlow(d); pv -= f.pv; net -= f.net; }
+      if (!o.bridged && panel.online === true) { pending.push(src.sn); ready = false; }
+    }
+  }
+  for (const s of darkHomeSlots(devices, nowMs, known, marked)) {
     if (!s.panelOnline) {
       slots.push({ panelSn: s.panelSn, slot: s.slot, sn: s.sn, basis: 'unbridgeable', chW: s.chW, pvW: s.pvW, leftOut: true });
       continue;
@@ -445,7 +581,7 @@ export function bridgeFleetFlow(
     net += -(s.chW as number) - p;
     bridgedSlots += 1;
   }
-  return { fleetPv: ready ? pv : null, fleetBatteryNet: ready ? net : null, bridgedSlots, ready, slots };
+  return { fleetPv: ready ? pv : null, fleetBatteryNet: ready ? net : null, bridgedSlots, ownCores, ready, pending, slots };
 }
 
 /** The pack cache keys (recorder packCacheKey) of every held pack row of Core `sn`. */
@@ -528,6 +664,8 @@ export interface EnergyBridgeDebug {
   offlineSince: Array<{ sn: string; sinceMs: number }>;
   /** The dark slots now, with the power basis the two power sensors use. */
   slots: BridgedFleetFlow['slots'];
+  /** Home Cores with no reading of their own inside the dwell (both power figures withheld). */
+  pending: string[];
   lastRollup: BridgeRollupResult | null;
 }
 
@@ -554,7 +692,7 @@ export interface EnergyBridge {
 
 /** The debug block at its empty identity (the read-only worker recorder, test stubs). */
 export function emptyBridgeDebug(): EnergyBridgeDebug {
-  return { chargeWh: 0, dischargeWh: 0, pvWh: 0, gridImportWh: 0, watermarkMs: 0, markers: [], absorbed: [], trustedSlots: [], pvChecks: [], cores: {}, offlineSince: [], slots: [], lastRollup: null };
+  return { chargeWh: 0, dischargeWh: 0, pvWh: 0, gridImportWh: 0, watermarkMs: 0, markers: [], absorbed: [], trustedSlots: [], pvChecks: [], cores: {}, offlineSince: [], slots: [], pending: [], lastRollup: null };
 }
 
 const markerSn = (packCacheKey: string): string => {
@@ -587,32 +725,53 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     const ts = deps.readLifetime(k).ts;
     if (ts > 0) offlineAt.set(k.slice(OFFLINE_PREFIX.length), ts);
   }
-  const known: KnownOfflineSince = (sn) => offlineAt.get(sn) ?? null;
+  /** v1.188.1 (review) — an online home Core with no reading of its own and no instant known (a
+   *  restart's first body only seeds the witness; an online flip with no projection yet): this
+   *  process's first sight of it, which starts its dwell. In memory only: a live Core reports
+   *  within seconds of a restart, and the next process sees it afresh. */
+  const firstSight = new Map<string, number>();
+  const known: KnownOfflineSince = (sn) => offlineAt.get(sn) ?? firstSight.get(sn) ?? null;
+  const isMarked: MarkedCore = (sn) => {
+    for (const k of markers) if (markerSn(k) === sn) return true;
+    return false;
+  };
   /**
-   * Persist the instant each home Core listed offline went offline, when the store saw the flip
-   * (onlineChangedAtMs): a restart, a crash included, then hands the Core to the bridge at that
-   * same instant instead of at the rollup watermark, so its reads keep what the crashed process
-   * showed and the bridge does not book again what the BMS counted before the flip. Deleted once
-   * the Core is listed online. Writes only when an instant changes.
+   * Record the instant each connected home Core stopped delivering a reading of its own
+   * (ownReadingStoppedAt), once, when it becomes dark, and persist it: a restart, a crash included,
+   * then hands the Core to the bridge at that same instant instead of at the rollup watermark, so
+   * its reads keep what the crashed process showed and the bridge does not book again what the BMS
+   * counted before it. A marked Core keeps the instant its dark span began, through an online flip
+   * and MQTT data, until it hands back. Deleted once the Core is no longer dark. Writes only when a
+   * Core goes dark or comes back.
    */
-  const observe = (devices: Record<string, DeviceSnapshot>): void => {
+  const observe = (devices: Record<string, DeviceSnapshot>, nowMs: number): void => {
+    const dark = new Set<string>();
+    for (const panel of allShp2s(devices)) {
+      for (const src of panel.projection.sources ?? []) {
+        if (!src.isConnected || !src.sn || dark.has(src.sn)) continue;
+        const d = devices[src.sn];
+        if (d == null) continue;
+        const marked = isMarked(src.sn);
+        if (marked ? handsBack(d, nowMs) : coreReports(d, nowMs)) continue;
+        dark.add(src.sn);
+        if (offlineAt.has(src.sn) || marked) continue;
+        // Kept as stamped (offlineState caps it at now where it is used), so a stamp ahead of the
+        // clock is written once, not on every read until the clock passes it.
+        const t = ownReadingStoppedAt(d);
+        if (t != null) {
+          offlineAt.set(src.sn, t);
+          deps.writeLifetime(bridgeOfflineKey(src.sn), 1, t);
+        } else if (d.online !== false && !firstSight.has(src.sn)) {
+          firstSight.set(src.sn, nowMs);
+        }
+      }
+    }
     for (const sn of [...offlineAt.keys()]) {
-      if (devices[sn]?.online !== true) continue;
+      if (dark.has(sn) || devices[sn] == null) continue;
       offlineAt.delete(sn);
       deps.deleteLifetime(bridgeOfflineKey(sn));
     }
-    for (const panel of allShp2s(devices)) {
-      for (const src of panel.projection.sources ?? []) {
-        if (!src.isConnected || !src.sn) continue;
-        const d = devices[src.sn];
-        // Kept as stamped (offlineState caps it at now where it is used), so a stamp ahead of the
-        // clock is written once, not on every read until the clock passes it.
-        const t = d?.online === false ? finite(d.onlineChangedAtMs) : null;
-        if (t == null || offlineAt.get(src.sn) === t) continue;
-        offlineAt.set(src.sn, t);
-        deps.writeLifetime(bridgeOfflineKey(src.sn), 1, t);
-      }
-    }
+    for (const sn of [...firstSight.keys()]) if (!dark.has(sn)) firstSight.delete(sn);
   };
   const infer = new Map<string, InferState>();
   const checks = new Map<string, FieldCheck>();
@@ -707,10 +866,11 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     const live = new Set<string>();
     const coreAdd = new Map<string, { chg: number; dsg: number }>();
     const site = deps.site();
-    // `known` holds the instants the recorder's contributor cut persisted (offlineHomeCores, which
-    // rollupLifetime runs before this): in this process the store's transition times are read
-    // directly; after a restart they stand in for the ones the store no longer has.
-    for (const s of darkHomeSlots(snap.devices, nowMs, known)) {
+    // `known` holds the instants the recorder's contributor cut recorded (offlineHomeCores, which
+    // rollupLifetime runs before this): in this process the store's clocks are read directly;
+    // after a restart they stand in for the ones the store no longer has, and a marked Core keeps
+    // the instant its dark span began.
+    for (const s of darkHomeSlots(snap.devices, nowMs, known, isMarked)) {
       nowBridging.set(s.sn, s);
       const inferKey = `${s.panelSn}#${s.slot}#${s.sn}`;
       // The bridge takes the Core over at the instant it went offline: before it the Core's own
@@ -796,7 +956,13 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     for (const [sn, s] of nowBridging) {
       if (bridging.has(sn)) continue;
       const at = s.darkSinceMs != null ? ` since ${new Date(s.darkSinceMs).toISOString()}` : '';
-      deps.log(`energy bridge: Core ${sn} is cloud-offline${at} — metering its battery and solar at panel ${s.panelSn} slot ${s.slot} until it reports again`);
+      const d = snap.devices[sn];
+      const why = !s.listedOnline
+        ? 'is cloud-offline'
+        : d?.projection?.kind !== 'dpu'
+          ? 'is listed online with no reading of its own yet'
+          : 'is listed online but its own readings are not fresh';
+      deps.log(`energy bridge: Core ${sn} ${why}${at} — metering its battery and solar at panel ${s.panelSn} slot ${s.slot} until it reports again`);
     }
     for (const sn of bridging) {
       if (nowBridging.has(sn)) continue;
@@ -833,8 +999,8 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
   return {
     rollup,
     offlineHomeCores: (devices, nowMs) => {
-      observe(devices);
-      return offlineHomeCores(devices, nowMs, known);
+      observe(devices, nowMs);
+      return offlineHomeCores(devices, nowMs, known, isMarked);
     },
     isTrusted,
     totals,
@@ -855,9 +1021,13 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     markersOf,
     coreBridged,
     clearCore,
-    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site(), known),
+    flow: (online, devices, nowMs) => {
+      observe(devices, nowMs);
+      return bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site(), known, isMarked);
+    },
     debug: (devices, nowMs) => {
       const t = totals();
+      const now = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, devices, nowMs, isTrusted, deps.site(), known, isMarked);
       const cores: Record<string, { chargeWh: number; dischargeWh: number }> = {};
       for (const k of deps.listLifetimeKeys()) {
         const m = /^bridge_core_(.+)_chg$/.exec(k);
@@ -879,7 +1049,8 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
         }).sort((a, b) => a.slot.localeCompare(b.slot)),
         cores,
         offlineSince: [...offlineAt.entries()].map(([sn, sinceMs]) => ({ sn, sinceMs })).sort((a, b) => a.sn.localeCompare(b.sn)),
-        slots: bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, devices, nowMs, isTrusted, deps.site(), known).slots,
+        slots: now.slots,
+        pending: now.pending,
         lastRollup,
       };
     },

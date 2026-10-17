@@ -76,8 +76,8 @@ let v = 0;
 const dpu = (...sns: string[]) => ({
   generatedAt: 0,
   // v1.188.1 — each with a content clock on the (mocked) wall: the recorder writes a projection
-  // only while it is fresh.
-  devices: Object.fromEntries(sns.map((sn) => [sn, { sn, lastTelemetryAtMs: Date.now(), projection: { kind: 'dpu', soc: 20 + (v++ % 60), packs: [] } }])),
+  // only while it is fresh (for a Core, its readings changed recently: contentChangedAtMs).
+  devices: Object.fromEntries(sns.map((sn) => [sn, { sn, lastTelemetryAtMs: Date.now(), contentChangedAtMs: Date.now(), projection: { kind: 'dpu', soc: 20 + (v++ % 60), packs: [] } }])),
 }) as any;
 const deviceGaps = (rec: { telemetryGaps: () => any[] }, sn: string) => rec.telemetryGaps().filter((g) => g.sn === sn);
 

@@ -102,6 +102,19 @@ test('projectionRecordable — fresh content only; the boundary, a clock step, a
   assert.equal(heldSinceMs({ lastTelemetryAtMs: 500 }), 500);
   assert.equal(heldSinceMs({}), null);
 });
+test('★★★ projectionRecordable for a Core: arrival is not enough — its readings must have CHANGED within SHP2_READBACK_STALE_MS', () => {
+  const now = 10_000_000;
+  const dpu = { kind: 'dpu' };
+  assert.equal(projectionRecordable({ projection: dpu, lastTelemetryAtMs: now, contentChangedAtMs: now - 2_000 }, now), true, 'a live Core');
+  assert.equal(projectionRecordable({ projection: dpu, lastTelemetryAtMs: now, contentChangedAtMs: now - 5 * MIN }, now), true, '★ exactly the content window is still fresh');
+  assert.equal(projectionRecordable({ projection: dpu, lastTelemetryAtMs: now, contentChangedAtMs: now - 5 * MIN - 1 }, now), false, '★★ a REST 200 replaying a cached body: it landed, nothing changed');
+  assert.equal(projectionRecordable({ projection: dpu, lastTelemetryAtMs: now }, now), false, '★★ no change seen since a restart: the first body only seeds the witness');
+  assert.equal(projectionRecordable({ projection: dpu, lastTelemetryAtMs: now - RECORD_FRESH_MS - 1, contentChangedAtMs: now - 2_000 }, now), false, 'the arrival window still applies');
+  assert.equal(projectionRecordable({ projection: { kind: 'shp2' }, lastTelemetryAtMs: now }, now), true, 'the panel has no content clock: its latch is its marker');
+  assert.equal(heldSinceMs({ projection: dpu, lastTelemetryAtMs: now, contentChangedAtMs: now - 20 * MIN }), now - 20 * MIN, 'a replayed Core is held from its last change, a start that does not move with each 200');
+  assert.equal(heldSinceMs({ projection: { kind: 'shp2' }, lastTelemetryAtMs: now, contentChangedAtMs: now - 20 * MIN }), now, 'the content clock is a Core\'s');
+});
+
 
 /* ══ the incident ═══════════════════════════════════════════════════════════ */
 
@@ -298,10 +311,61 @@ test('★★ a Core the cloud lists OFFLINE whose MQTT deltas keep arriving keep
     const from = c.wall;
     for (let i = 0; i < 20; i++) {
       advance(MIN);
-      store.mergeDeviceQuota(sn, { 'hs_yj751_pd_appshow_addr.wattsOutSum': 1_000 + 37 * i }, 'mqtt');
+      // A live Core's stream: its output power moves with every delta (its content clock moves).
+      store.mergeDeviceQuota(sn, { 'hs_yj751_pd_appshow_addr.wattsOutSum': 1_000 + 37 * i, 'hs_yj751_pd_appshow_addr.outAc5p8Pwr': 950 + 37 * i }, 'mqtt');
       await flush();
     }
     assert.ok(countRows(sn, from, c.wall) >= 20, 'every MQTT delta is a reading and is written');
+  } finally { rec.close(); }
+});
+
+test('★★★ a Core whose cloud REPLAYS its cached body (a REST 200 every poll, nothing changing) is not a reading: written only while its content clock is fresh', async (t) => {
+  const { c, advance, store, rec, sn } = await liveCore(t);
+  try {
+    // Live: a few polls with moving readings (the first only seeds the content witness).
+    for (let k = 2; k <= 5; k++) { advance(MIN); store.setDeviceQuota(sn, coreQuota(k)); store.setDeviceQuota(PANEL, panelQuota(k)); await flush(); }
+    const lastChange = c.wall;
+    assert.ok(countRows(sn, lastChange - 3 * MIN, c.wall) > 0, 'a live Core is written');
+    // Its own link drops; the cloud keeps it listed online and answers every poll with the same
+    // body (v1.181.0). Each 200 lands content (lastTelemetryAtMs), but nothing in it changes.
+    for (let i = 0; i < 50; i++) {
+      advance(MIN);
+      store.setDeviceQuota(sn, coreQuota(5));
+      store.setDeviceQuota(PANEL, panelQuota(10 + i));
+      await flush();
+    }
+    const d = store.get().devices[sn];
+    assert.equal(d.lastTelemetryAtMs, c.wall, 'precondition: every replayed 200 bumps the arrival clock');
+    assert.equal(d.contentChangedAtMs, lastChange, 'precondition: the content clock has not moved');
+    assert.equal(projectionRecordable(d, c.wall), false);
+    assert.equal(countRows(sn, lastChange + 5 * MIN, c.wall), 0, 'past the content window the replay writes nothing: the 5-min heartbeat restates nothing');
+    assert.ok(countRows(PANEL, lastChange + 5 * MIN, c.wall) > 0, 'the panel is still written');
+    // The first body that differs is a reading again.
+    advance(MIN);
+    store.setDeviceQuota(sn, coreQuota(6));
+    await flush();
+    assert.ok(countRows(sn, c.wall - 1, c.wall) > 0, 'recording resumes with its first change');
+  } finally { rec.close(); }
+});
+
+test('★★ after a restart a Core\'s first body only seeds its content witness: it is written from its first change', async (t) => {
+  resetDb();
+  const { c, advance } = clocks(t, phx(2026, 10, 16, 12, 0));
+  const store = new SnapshotStore();
+  store.setClock(() => Date.now());
+  store.setLogger(() => {});
+  const rec = createRecorder(store, () => {});
+  const sn = CORES[0];
+  try {
+    store.setDeviceList([listItem(sn, true), listItem(PANEL, true)]);
+    store.setDeviceQuota(sn, coreQuota(1));
+    store.setDeviceQuota(PANEL, panelQuota(1));
+    await flush();
+    assert.equal(countRows(sn, c.wall - 1, c.wall), 0, 'the first body may be a replay: not a reading yet');
+    advance(MIN);
+    store.setDeviceQuota(sn, coreQuota(2));
+    await flush();
+    assert.ok(countRows(sn, c.wall - 1, c.wall) > 0, 'its first change is');
   } finally { rec.close(); }
 });
 

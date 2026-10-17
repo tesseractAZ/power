@@ -258,6 +258,14 @@ screen. `Q`/`Ctrl-C` disconnects.
 
 The grid state resolver (`gridState.liveGridBackstop`) drives the console's ACTIVE / AVAILABLE / OFF-GRID grid annunciation.
 
+The console's PV and battery figures (PV.ARRAY.P, BATT.P.NET, the headline PV figure and the
+mimic's PV and BATT columns) are the HA sensors' Fleet PV and Battery Net exactly as both
+publishers compute them (v1.188.1, `PlantData.flow`, `plant/types.ts` `plantFlow`):
+`aggregateFleetFlow`'s online sums handed to `Recorder.bridgedFleetFlow`, which counts each home
+Core at its own reading or, dark, at its panel slot. While the sensors read unknown, the console
+shows "—". With every Core cloud-offline the Cores-only sum is 0 W: the console read
+"BATT.P.NET 0 W IDLE" beside a 3.4 kW drain through the panel (2026-10-16).
+
 #### 2.5 Large-format graphics (v1.46.0)
 
 Two pure primitive modules feed the screens; both emit plain strings (callers

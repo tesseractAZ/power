@@ -15,6 +15,8 @@
  *   G-vii   the gate keys on `online` (a Core streaming MQTT while listed offline is dropped)
  *   G-viii  the window becomes the 5-minute heartbeat (a held device gets one restatement)
  *   G-ix    heldSinceMs ignores the shadow onset
+ *   G-x     the gate ignores a Core's content clock (a REST 200 replaying a Core's cached body is written)
+ *   G-xi    heldSinceMs ignores a Core's content clock (a replay's held span restarts with every 200)
  *   R-i     the restart probe's graceful test is two-sided again (a deploy in a hold reads as power)
  *   R-ii    the restart probe never reads the marker
  *   S-i     a gate span is logged however short
@@ -125,8 +127,8 @@ const MUTANTS = [
   {
     id: 'G-v. ★★ the cloud-shadow clause is dropped',
     file: HS,
-    find: '  return d.contentStaleSinceMs == null;\n}',
-    to: '  return true; /* MUTANT */\n}',
+    find: "  if (d.contentStaleSinceMs != null) return false;\n  return d.projection?.kind !== 'dpu' || dpuContentFresh(d, nowMs);",
+    to: "  return d.projection?.kind !== 'dpu' || dpuContentFresh(d, nowMs); /* MUTANT */",
     why: 'A panel body the cloud replays (every REST 200 bumps lastTelemetryAtMs) is written as fresh readings.',
   },
   {
@@ -514,6 +516,20 @@ const MUTANTS = [
     find: 'dataBySeries, trendGapMs(bucketSec)),',
     to: 'dataBySeries, 10 * 60_000), /* MUTANT */',
     why: 'A chart bucketed coarser than 5 min breaks between every two buckets.',
+  },
+  {
+    id: 'G-x. ★★★ the gate ignores a Core\'s content clock',
+    file: HS,
+    find: "  return d.projection?.kind !== 'dpu' || dpuContentFresh(d, nowMs);",
+    to: '  return true; /* MUTANT */',
+    why: 'The review defect: a Core whose cloud replays its cached body bumps lastTelemetryAtMs on every poll; its held PV and AC input are written as heartbeat rows and integrated into the lifetime counters for good.',
+  },
+  {
+    id: 'G-xi. ★★ heldSinceMs ignores a Core\'s content clock',
+    file: HS,
+    find: "  if (d.projection?.kind === 'dpu' && ok(d.contentChangedAtMs)) c.push(d.contentChangedAtMs);",
+    to: '  /* MUTANT */',
+    why: 'A replaying Core\'s hold starts at its last arrival, which moves with every 200: the held span is never an hour long and is never logged.',
   },
 ];
 

@@ -20,9 +20,14 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   dpuContentFresh, isSourceDpuFrozen, panelForClient, poolNetUpperBound, backupTimerGate,
-  SHP2_READBACK_STALE_MS, BACKUP_TIMER_DEADBAND_W,
+  SHP2_READBACK_STALE_MS, BACKUP_TIMER_DEADBAND_W, SLOT_UNMETERED_DRAW_W,
 } from '../src/shp2Membership.js';
 import { renderConsole } from '../src/telnet/plant/console.js';
+import { plantFlow } from '../src/telnet/plant/types.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
+import { TuiSession } from '../src/telnet/session.js';
+import { bridgeFleetFlow, sunUp } from '../src/energyBridge.js';
+import { aggregateFleetFlow } from '../src/shp2Membership.js';
 import { energyFlowModel } from '../../web/src/cards/energyFlowModel.js';
 
 type Any = any; // fixtures carry only the fields the code reads
@@ -147,7 +152,7 @@ test('★★★ 10-16 20:04: every Core offline, the panel fresh, slots deliveri
   assert.equal(g.discharge, true, 'the time-to-reserve stays published');
   assert.equal(g.basis, 'panel');
   const b = poolNetUpperBound(live2004(), NOW);
-  assert.ok(Math.abs(b.watts - 3559.35) < 0.01, `the slots' delivery bounds the pool's net (got ${b.watts})`);
+  assert.ok(Math.abs(b.watts - (3559.35 + 3 * SLOT_UNMETERED_DRAW_W)) < 0.01, `the slots' delivery plus each Core's own draw bounds the pool's net (got ${b.watts})`);
 });
 
 test('★★★ a force charge with every Core offline: the slots taking AC prove the charge', () => {
@@ -195,7 +200,7 @@ test('★★ every home Core reporting: the Cores’ exact net, the v0.15.12 ±5
 test('★★ one Core dark: the reporting Cores’ net plus the dark slot’s bound', () => {
   // Two Cores charging 2 kW each on their own meters, the third offline delivering 500 W: at most −3.5 kW.
   const charging = devs(core('CORE-A', { packNet: -2000 }), core('CORE-B', { packNet: -2000 }), darkCore('CORE-C'), panel(SNS, [-9999, -9999, -500]));
-  assert.equal(poolNetUpperBound(charging, NOW).watts, -3500, 'a reporting Core’s slot is not read');
+  assert.equal(poolNetUpperBound(charging, NOW).watts, -3500 + SLOT_UNMETERED_DRAW_W, 'a reporting Core’s slot is not read');
   assert.deepEqual(backupTimerGate(charging, NOW), { charge: true, discharge: false, basis: 'panel' });
   // Two idle on their own meters, the third offline delivering 1.5 kW: a drain is not ruled out.
   const draining = devs(core('CORE-A'), core('CORE-B'), darkCore('CORE-C'), panel(SNS, [0, 0, -1500]));
@@ -226,6 +231,7 @@ test('★★★ /api/ha-state and the console both gate the timers on backupTime
 test('★★★ the console’s RUN line at 20:04: "▲ CHG —" beside the discharge time, not "▲ CHG 38m"', () => {
   const view: Any = { width: 100, height: 40, screen: 'console', genSel: 0, genPack: 0, almScroll: 0, connectedAt: NOW - 60_000 };
   const data: Any = { snap: { generatedAt: NOW, devices: live2004(), alerts: [] }, totals: null, forecast: null, degradation: { devices: [], fleetSummary: null }, serverStartedAt: NOW - 3_600_000 };
+  data.flow = plantFlow(makeRecorderStub(), data.snap.devices, NOW);
   const plain = renderConsole(view, data).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
   const run = plain.find((l) => l.includes('RUN '));
   assert.ok(run, 'the RUN line renders');
@@ -233,6 +239,7 @@ test('★★★ the console’s RUN line at 20:04: "▲ CHG —" beside the disc
   assert.ok(run!.includes('▼ DCH 20h 06m'), `the discharge time stays: ${run}`);
   // A force charge with the Cores dark: the charge timer, not the discharge one.
   data.snap.devices = devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), panel(SNS, [5300, 5300, 5300]));
+  data.flow = plantFlow(makeRecorderStub(), data.snap.devices, NOW);
   const chg = renderConsole(view, data).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).find((l) => l.includes('RUN '))!;
   assert.ok(chg.includes('▲ CHG 38m') && chg.includes('▼ DCH —'), chg);
 });
@@ -243,7 +250,7 @@ test('★★★ a bench spare in a DISCONNECTED slot, online and charging 4 kW f
   // Two home Cores dark, their slots delivering 1 kW each (a 2 kW drain); slot 3 is not connected.
   const ds = devs(darkCore('CORE-A'), darkCore('CORE-B'), core('SPARE-Z', { packNet: -4000 }),
     panel(['CORE-A', 'CORE-B', 'SPARE-Z'], [-1000, -1000, 0], { connected: [true, true, false] }));
-  assert.equal(poolNetUpperBound(ds, NOW).watts, 2000, 'the spare is not in the pool');
+  assert.equal(poolNetUpperBound(ds, NOW).watts, 2000 + 2 * SLOT_UNMETERED_DRAW_W, 'the spare is not in the pool');
   assert.deepEqual(backupTimerGate(ds, NOW), { charge: false, discharge: true, basis: 'panel' },
     'a time to full during the drain, and the time to reserve hidden, if the spare counted');
 });
@@ -251,7 +258,7 @@ test('★★★ a bench spare in a DISCONNECTED slot, online and charging 4 kW f
 test('★★ a Core listed by two panels is counted once', () => {
   const ds = devs(darkCore('CORE-A'),
     panel(['CORE-A'], [500]), panel(['CORE-A'], [500], { sn: 'PANEL-TEST-02' }));
-  assert.equal(poolNetUpperBound(ds, NOW).watts, -500, 'not −1000 W: one Core taking 500 W of AC');
+  assert.equal(poolNetUpperBound(ds, NOW).watts, -500 + SLOT_UNMETERED_DRAW_W, 'not −1000 W: one Core taking 500 W of AC');
 });
 
 test('★★★ an OFFLINE Core whose projection is still recent is not on its own meter: its slot is read', () => {
@@ -263,7 +270,7 @@ test('★★★ an OFFLINE Core whose projection is still recent is not on its o
     core('CORE-C', { online: false, packNet: -3000, changedAgoMs: 60_000 }),
     panel(SNS, [-1000, -1000, -1000]),
   );
-  assert.equal(poolNetUpperBound(ds, NOW).watts, 3000);
+  assert.equal(poolNetUpperBound(ds, NOW).watts, 3000 + 3 * SLOT_UNMETERED_DRAW_W);
   assert.deepEqual(backupTimerGate(ds, NOW), { charge: false, discharge: true, basis: 'panel' },
     'its last 3 kW charge is not a reading');
 });
@@ -271,6 +278,62 @@ test('★★★ an OFFLINE Core whose projection is still recent is not on its o
 test('★★ a reporting Core in a partial roster contributes its pack’s STREAM figure, not the poll’s replay', () => {
   // CORE-A reports: the poll replays a 3 kW charge, the stream says 2 kW out. CORE-B and CORE-C dark, slots idle.
   const ds = devs(core('CORE-A', { packNet: -3000, liveNet: 2000 }), darkCore('CORE-B'), darkCore('CORE-C'), panel(SNS, [-9999, 0, 0]));
-  assert.equal(poolNetUpperBound(ds, NOW).watts, 2000);
+  assert.equal(poolNetUpperBound(ds, NOW).watts, 2000 + 2 * SLOT_UNMETERED_DRAW_W);
   assert.deepEqual(backupTimerGate(ds, NOW), { charge: false, discharge: true, basis: 'panel' });
+});
+
+/* ══ v1.188.1 review — the timers' bound counts each dark Core's own draw ═══════════════ */
+
+test('★★★ at the reserve hold the dark slots read ~0 W while the packs still supply the Cores\u2019 own draw: no time to full is published', () => {
+  const at = (w: number) => backupTimerGate(devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), panel(SNS, [w, w, w])), NOW);
+  assert.deepEqual(at(0), { charge: false, discharge: true, basis: 'panel' }, 'slots at 0 W: the packs still discharge into the Cores\u2019 standby');
+  assert.deepEqual(at(30), { charge: false, discharge: true, basis: 'panel' }, '30 W of AC into each slot feeds standby: not a proven charge, the time to empty stays');
+  assert.deepEqual(at(500), { charge: true, discharge: false, basis: 'panel' }, 'a real charge still proves itself');
+  assert.equal(SLOT_UNMETERED_DRAW_W, 100);
+});
+
+/* ══ v1.188.1 review — the console's PV and battery figures are the published ones ══════ */
+
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+/** One console frame through the production session (session.ts renderLines → plantFlow). */
+function consoleFrame(devices: Any, recorder: Any): string[] {
+  const writes: string[] = [];
+  const snap = { generatedAt: NOW, devices, alerts: [] };
+  const session = new TuiSession({
+    write: (d) => writes.push(d),
+    data: { store: { get: () => snap } as Any, recorder, totals: () => null, forecast: () => null, degradation: () => null, serverStartedAt: NOW - 3_600_000 },
+    width: 120, height: 44, auth: null,
+  });
+  session.draw();
+  return writes.join('').replace(ANSI, '').split('\r\n');
+}
+/** A site where the sun is down at `ms` (one of four equatorial points 90° apart always is). */
+const nightSite = (ms: number) => [{ lat: 0, lon: 0 }, { lat: 0, lon: 90 }, { lat: 0, lon: 180 }, { lat: 0, lon: -90 }].find((s) => !sunUp(ms, s))!;
+
+test('★★★ the console\u2019s PV.ARRAY.P, BATT.P.NET and mimic are the HA sensors\u2019 figures: every Core dark, the pool delivering 3.56 kW through the panel — not "0 W IDLE"', () => {
+  const ds = live2004();
+  const site = nightSite(NOW);
+  const recorder = makeRecorderStub({ bridgedFleetFlow: (o, d, n) => bridgeFleetFlow(o, d, n, () => false, site) });
+  const { fleetPv, fleetBatteryNetDisplay } = aggregateFleetFlow(ds);
+  const ha = bridgeFleetFlow({ fleetPv, fleetBatteryNet: fleetBatteryNetDisplay }, ds, NOW, () => false, site);
+  assert.ok(Math.abs((ha.fleetBatteryNet as number) - 3559.35) < 0.01, 'precondition: the Battery Net sensor publishes the slots');
+  const lines = consoleFrame(ds, recorder);
+  const net = lines.find((l) => l.includes('BATT.P.NET'));
+  assert.ok(net && /3\.56\s*kW/.test(net) && net.includes('DCH'), `BATT.P.NET: ${net}`);
+  const pv = lines.find((l) => l.includes('PV.ARRAY.P'));
+  assert.ok(pv && /\b0\s*W/.test(pv), `PV.ARRAY.P: night, a real 0 W: ${pv}`);
+  const mimic = lines.find((l) => l.includes('BATT ') && l.includes('%') && !l.includes('BATT.'));
+  assert.ok(mimic && mimic.includes('▼ DCH') && !mimic.includes('idle'), `the mimic draws the drain: ${mimic}`);
+});
+
+test('★★ while the sensors are unknown (a dark slot not bridgeable, a Core inside its dwell), the console shows "—", never a Cores-only sum', () => {
+  const ds = live2004();
+  const unknown = { fleetPv: null, fleetBatteryNet: null, bridgedSlots: 0, ownCores: 0, ready: false, pending: [], slots: [] };
+  const lines = consoleFrame(ds, makeRecorderStub({ bridgedFleetFlow: () => unknown }));
+  const net = lines.find((l) => l.includes('BATT.P.NET'));
+  const pv = lines.find((l) => l.includes('PV.ARRAY.P'));
+  assert.ok(net && net.includes('—') && !/\b0\s*W/.test(net) && !net.includes('IDLE'), `BATT.P.NET: ${net}`);
+  assert.ok(pv && pv.includes('—') && !/\b0\s*W/.test(pv), `PV.ARRAY.P: ${pv}`);
+  const mimic = lines.find((l) => l.includes('BATT ') && l.includes('%') && !l.includes('BATT.'));
+  assert.ok(mimic && !mimic.includes('idle') && !mimic.includes('DCH'), `the mimic: ${mimic}`);
 });

@@ -19,8 +19,10 @@
  * WHAT THIS MODULE DOES.
  *  1. The gate (`projectionRecordable`): a projection is a READING only while its content is
  *     recent — `lastTelemetryAtMs`, stamped only when telemetry content lands (a REST quota or a
- *     translated MQTT delta) — and, for the panel, while its cloud-shadow latch is clear. A held
- *     device writes no rows, so every consumer sees a gap, which each of them already handles.
+ *     translated MQTT delta) — and, for the panel, while its cloud-shadow latch is clear; for a
+ *     Core, while its readings have CHANGED recently (its content clock: a cloud replaying a Core's
+ *     cached body still lands content). A held device writes no rows, so every consumer sees a gap,
+ *     which each of them already handles.
  *  2. The held-span log (`held_spans`): a hold of an hour or more is recorded with its start
  *     (the last fresh content) and end, so the night-charge ledger can say why it did not score.
  *  3. The exclusion of held rows already written (`held_samples`): a stretch of an hour or more
@@ -34,6 +36,7 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
+import { dpuContentFresh } from './shp2Membership.js';
 
 const MIN_MS = 60_000;
 const HOUR_MS = 60 * MIN_MS;
@@ -54,6 +57,9 @@ export const RECORD_FRESH_MS = 3 * MIN_MS;
 export interface FreshnessFields {
   lastTelemetryAtMs?: number;
   contentStaleSinceMs?: number | null;
+  /** A Core's content clock (snapshot.ts dpuContentWitness): read for a 'dpu' projection only. */
+  contentChangedAtMs?: number;
+  projection?: { kind: string } | null;
 }
 
 /**
@@ -69,22 +75,33 @@ export interface FreshnessFields {
  *    its projection.
  * A missing clock is not a reading (fail-closed): every production writer of a projection
  * (setDeviceQuota, mergeDeviceQuota) stamps it. `Math.abs` also refuses a clock stepped either way
- * by more than the window. A latched panel cloud shadow (`contentStaleSinceMs`) is a replayed body:
- * a REST 200 that replays it still bumps `lastTelemetryAtMs`, and the latch is the only marker.
+ * by more than the window. A REST 200 that replays a cached body still bumps `lastTelemetryAtMs`,
+ * so arrival alone does not make a reading. A latched panel cloud shadow (`contentStaleSinceMs`) is
+ * the panel's marker of a replayed body. A Core has no latch: its marker is its content clock
+ * (`contentChangedAtMs`, v1.181.0), which moves only when its readings change. A Core's projection is
+ * a reading only while that clock is fresh (dpuContentFresh, the clock the grid resolver, the
+ * Energy flow card and the backup timers read). Unknown is not fresh: after a restart the store's
+ * first body only seeds the witness, so a Core is written from its first change (seconds over
+ * MQTT, one poll over REST).
  */
 export function projectionRecordable(d: FreshnessFields, nowMs: number, freshMs: number = RECORD_FRESH_MS): boolean {
   const t = d.lastTelemetryAtMs;
   if (typeof t !== 'number' || !Number.isFinite(t) || t <= 0) return false;
   if (Math.abs(nowMs - t) > freshMs) return false;
-  return d.contentStaleSinceMs == null;
+  if (d.contentStaleSinceMs != null) return false;
+  return d.projection?.kind !== 'dpu' || dpuContentFresh(d, nowMs);
 }
 
 /** v1.188.1 — the instant after which a held device's content was not fresh: the panel's shadow
- *  onset or the last content arrival, whichever is earlier; null when it has neither. PURE. */
+ *  onset, a Core's last content change, or the last content arrival, whichever is earliest; null
+ *  when it has none. A Core whose cloud replays its body keeps one start (its content clock) while
+ *  the arrivals move. PURE. */
 export function heldSinceMs(d: FreshnessFields): number | null {
   const c: number[] = [];
-  if (typeof d.contentStaleSinceMs === 'number' && Number.isFinite(d.contentStaleSinceMs) && d.contentStaleSinceMs > 0) c.push(d.contentStaleSinceMs);
-  if (typeof d.lastTelemetryAtMs === 'number' && Number.isFinite(d.lastTelemetryAtMs) && d.lastTelemetryAtMs > 0) c.push(d.lastTelemetryAtMs);
+  const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  if (ok(d.contentStaleSinceMs)) c.push(d.contentStaleSinceMs);
+  if (d.projection?.kind === 'dpu' && ok(d.contentChangedAtMs)) c.push(d.contentChangedAtMs);
+  if (ok(d.lastTelemetryAtMs)) c.push(d.lastTelemetryAtMs);
   return c.length === 0 ? null : Math.min(...c);
 }
 

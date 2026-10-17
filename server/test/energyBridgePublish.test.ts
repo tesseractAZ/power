@@ -53,7 +53,7 @@ function devices(at: number, coresOnline: boolean): Any {
   };
   for (const sn of CORES) {
     out[sn] = coresOnline
-      ? { sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: true, lastUpdated: at,
+      ? { sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: true, lastUpdated: at, lastTelemetryAtMs: at, contentChangedAtMs: at - 2_000,
         projection: { kind: 'dpu', soc: 85, pvTotalWatts: 0, totalInWatts: 0, totalOutWatts: 625, acInWatts: 0, packs: [{ outputWatts: 640, inputWatts: 0 }] } }
       : { sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: false, lastUpdated: 0 };
   }

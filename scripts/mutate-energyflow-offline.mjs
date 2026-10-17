@@ -72,6 +72,10 @@
  *   T-xiii  a Core listed by two panels is counted twice
  *   T-xiv   the bound reads the poll's pack flow, not the stream's
  *   T-xv    an offline Core with a recent projection is read on its own meter
+ *   T-xvi   the bound leaves out each dark Core's own draw (the reserve hold reads as a charge)
+ *   V-i     the console reads the Cores-only sums again, not the published figures
+ *   V-ii    the console's BATT.P.NET reads IDLE while the sensors are unknown
+ *   V-iii   the console's mimic draws the battery idle while the sensors are unknown
  *
  *   node scripts/mutate-energyflow-offline.mjs
  */
@@ -84,6 +88,7 @@ const CARD = resolve(REPO, 'web/src/cards/EnergyFlow.tsx');
 const MEMB = resolve(REPO, 'server/src/shp2Membership.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const CONSOLE = resolve(REPO, 'server/src/telnet/plant/console.ts');
+const TYPES = resolve(REPO, 'server/src/telnet/plant/types.ts');
 const SUBSET = [
   'test/energyFlowCoresOffline.test.ts',
   'test/energyFlowModel.test.ts',
@@ -368,8 +373,8 @@ const MUTANTS = [
   {
     id: 'T-iii. ★★★ the slot sign is not negated in the bound',
     file: MEMB,
-    find: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w : Infinity;",
-    to: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? w : Infinity; /* MUTANT */",
+    find: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : Infinity;",
+    to: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? w + SLOT_UNMETERED_DRAW_W : Infinity; /* MUTANT */",
     why: 'A drain through the slots reads as a charge: the charge timer during the drain, the discharge timer hidden.',
   },
   {
@@ -382,8 +387,8 @@ const MUTANTS = [
   {
     id: 'T-v. ★★ a slot with no figure counts as 0 W',
     file: MEMB,
-    find: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w : Infinity;",
-    to: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w : 0; /* MUTANT */",
+    find: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : Infinity;",
+    to: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : 0; /* MUTANT */",
     why: 'An unmeasured Core reads as idle: the absence this release removes.',
   },
   {
@@ -418,7 +423,9 @@ const MUTANTS = [
     id: 'T-x. ★★★ the console gates CHG on the Cores’ sum again',
     file: CONSOLE,
     find: '    const chMin = timers.charge ? p.backupChargeTimeMin : null;',
-    to: '    const chMin = batNet > 50 ? null : p.backupChargeTimeMin; /* MUTANT */',
+    // The Cores-only sum, as the pre-fix gate read it (the console's own battery figure is the
+    // published, bridged one since the review).
+    to: '    const chMin = dpus.reduce((t, d) => t + (d.projection.packs ?? []).reduce((u, pk) => u + (pk.outputWatts ?? 0) - (pk.inputWatts ?? 0), 0), 0) > 50 ? null : p.backupChargeTimeMin; /* MUTANT */',
     why: '"▲ CHG 38m" beside a 0 W BATT.P.NET while the pool drains through the panel.',
   },
   {
@@ -555,6 +562,34 @@ const MUTANTS = [
     find: '    gridToHouseW = coresShareUnmeasured ? Math.min(rest, Math.max(0, homeGridW - coresAcIn)) : rest;',
     to: '    gridToHouseW = coresShareUnmeasured ? Math.min(rest, homeGridW) : rest; /* MUTANT */',
     why: 'A dark Core’s 2 kW charge through the main is drawn a second time, as the house on the grid.',
+  },
+  {
+    id: 'T-xvi. ★★ the bound leaves out each dark Core\'s own draw',
+    file: MEMB,
+    find: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : Infinity;",
+    to: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w : Infinity; /* MUTANT */",
+    why: 'The review defect: at the reserve hold the slots read about 0 W while the packs supply the Cores\' standby, and the time to full is published; 30 W of standby intake reads as a proven charge and hides the time to empty.',
+  },
+  {
+    id: 'V-i. ★★★ the console reads the Cores-only sums again',
+    file: TYPES,
+    find: '  return { fleetPv: b.fleetPv, fleetBatteryNet: b.fleetBatteryNet };',
+    to: '  return { fleetPv, fleetBatteryNet }; /* MUTANT */',
+    why: 'The review defect: with every Core cloud-offline the console reads "BATT.P.NET 0 W IDLE" and "BATT idle" beside a 3.4 kW drain the HA sensors publish.',
+  },
+  {
+    id: 'V-ii. ★★ the console\'s BATT.P.NET reads IDLE while the sensors are unknown',
+    file: CONSOLE,
+    find: "      flags: batNet == null ? '—' : batNet > 5 ? 'DCH' : batNet < -5 ? 'CHG' : 'IDLE',",
+    to: "      flags: batNet == null ? 'IDLE' : batNet > 5 ? 'DCH' : batNet < -5 ? 'CHG' : 'IDLE', /* MUTANT */",
+    why: 'An unknown battery net reads as an idle pool.',
+  },
+  {
+    id: 'V-iii. ★★ the console\'s mimic draws the battery idle while the sensors are unknown',
+    file: CONSOLE,
+    find: "    (batNet == null ? c.grey('—') : batNet > 5 ? c.yellow('▼ DCH') : batNet < -5 ? c.green('▲ CHG') : c.grey('idle'));",
+    to: "    (batNet == null ? c.grey('idle') : batNet > 5 ? c.yellow('▼ DCH') : batNet < -5 ? c.green('▲ CHG') : c.grey('idle')); /* MUTANT */",
+    why: 'An unknown battery net is drawn as an idle pool beside the house load.',
   },
 ];
 

@@ -160,8 +160,9 @@ export interface ReadinessInputs {
   /** v1.187.10 — the clock the panel's freshness is judged on (default: now). */
   nowMs?: number;
   /** v1.188.1 — the publisher's bridged flow (Recorder.bridgedFleetFlow), precomputed so this
-   *  stays pure. Absent: `flowBridged` reads exactly as `flow`. */
-  flowBridge?: { bridgedSlots: number; ready: boolean } | null;
+   *  stays pure. Absent: `flowBridged` reads exactly as `flow`. `ownCores`: home Cores counted at
+   *  their own reading (a Core the cloud lists offline whose MQTT data still arrives among them). */
+  flowBridge?: { bridgedSlots: number; ownCores?: number; ready: boolean } | null;
 }
 
 export function publishReadiness(i: ReadinessInputs): PublishReadiness {
@@ -189,10 +190,11 @@ export function publishReadiness(i: ReadinessInputs): PublishReadiness {
     tariff: !!i.tariff && i.tariff.basisComplete !== false,
     degradation: !!i.degradation && i.degradation.basisPending !== true,
   };
-  // v1.188.1 — something is summed (an online home Core, or a slot the bridge meters), membership
-  // is known, and no dark slot is unbridgeable right now.
+  // v1.188.1 — something is summed (an online home Core, a home Core at its own reading, or a slot
+  // the bridge meters), membership is known, and every connected home Core is counted right now:
+  // none inside the dwell, no dark slot unbridgeable (fb.ready).
   const fb = i.flowBridge;
-  r.flowBridged = fb == null ? r.flow : (r.flow || (membershipKnown && fb.bridgedSlots > 0)) && fb.ready;
+  r.flowBridged = fb == null ? r.flow : (r.flow || (membershipKnown && (fb.bridgedSlots > 0 || (fb.ownCores ?? 0) > 0))) && fb.ready;
   return r;
 }
 

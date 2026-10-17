@@ -783,9 +783,13 @@ Cores 3 and 4 (§12l). Every fleet aggregation must exclude spares.
   Σ SHP2 circuit watts. Returns raw un-rounded sums (each caller rounds at emission). There are two
   battery-net sums (v1.186.2). `fleetBatteryNet` is built from the polled pack fields and is
   the raw evidence the at-floor discharge guard (`gridState` `poolDischargingObserved`)
-  reads. `fleetBatteryNetDisplay` prefers each pack's fresh MQTT `liveFlow`; the Battery Net
-  sensor, `/api/ha-state` `fleet_battery_net_watts` and the ±50 W charge/discharge timer
-  gate (`backupTimerGate`, while every home Core reports) read it. `panelLoad` sums every
+  reads. `fleetBatteryNetDisplay` prefers each pack's fresh MQTT `liveFlow`. The Battery Net
+  sensor and `/api/ha-state` `fleet_battery_net_watts` read it with each home Core counted
+  once by what it delivers (`Recorder.bridgedFleetFlow`, [chapter 7, path
+  (c)](07-energy-and-cost.md#22-the-two-accumulation-paths)): a frozen projection listed
+  online is taken out, a Core the cloud lists offline whose own data still arrives is added,
+  and every dark home slot is metered at the panel. The ±50 W charge/discharge timer gate
+  (`backupTimerGate`, while every home Core reports) reads it alone. `panelLoad` sums every
   panel's circuits (v1.185.0). Guarded with `?? []` on `sources`/`packs`/`circuits` so a
   partial projection can't throw.
 

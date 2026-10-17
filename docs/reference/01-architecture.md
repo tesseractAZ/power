@@ -249,14 +249,19 @@ pushing only finite numbers. Metrics emitted per projection kind:
   full_cap_mah/remain_cap_mah/lifetime_chg_mah/lifetime_dsg_mah`.
 - **SHP2**: `backup_pct`, `backup_reserve` (the reserve setpoint, v1.117.0), `backup_remain_min`, `backup_charge_min`, per-circuit
   `chN_w`, summed `panel_load`, `grid_home_w` (SHP2-metered home grid import),
-  split-phase `pairN_w`, per-source `srcN_pct/temp/w`.
+  split-phase `pairN_w`, per-source `srcN_pct/temp/w` and the panel's per-slot PV and input
+  fields `srcN_pv_w/pv_hv_w/pv_lv_w/in_w` (the energy bridge's).
 - **Generic**: `soc`, `in_watts`, `out_watts`, `pv_watts`, `ac_in`, `ac_out`,
   `temp`.
 
 **Freshness gate (v1.188.1).** `extract()` writes a device's projection only while
 `projectionRecordable(d, now)` holds: its `lastTelemetryAtMs` is within `RECORD_FRESH_MS`
-(3 min, the 'Telemetry stale' alarm's figure) of now in either direction, and the panel's
-cloud-shadow latch (`contentStaleSinceMs`) is clear. `lastTelemetryAtMs` is stamped only when
+(3 min, the 'Telemetry stale' alarm's figure) of now in either direction, the panel's
+cloud-shadow latch (`contentStaleSinceMs`) is clear, and for a Core its content clock
+(`contentChangedAtMs`, the v1.181.0 witness) moved within `SHP2_READBACK_STALE_MS` (5 min,
+`dpuContentFresh`): a REST 200 replaying a Core's cached body still lands content, so arrival
+alone is not a reading, and a Core's first body after a restart only seeds the witness (it is
+written from its first change). `lastTelemetryAtMs` is stamped only when
 telemetry content lands, by `setDeviceQuota` (a REST quota) or `mergeDeviceQuota` (a translated
 MQTT delta), the only writers of a projection; a device without it is not recorded. The store keeps
 a device's last projection across `/device/list` polls (the alarms read it) and fetches quota only
@@ -353,6 +358,12 @@ Two kinds of lifetime keys:
    only 60 s back (avoids integrating all history).
    - `LIFETIME_ROLLUP_LOOKBACK_MS = 10 min` (== `integrateWh` default `maxGapMs`).
    - Fleet PV/grid rollups are gated on SHP2 membership (spare cores excluded).
+   - A dark home Core (no reading of its own, which the energy bridge meters at its panel
+     slot) counts its own `pv_total` / `ac_in` only up to the instant its reading stopped.
+     Its slot's bridged PV and AC input are added to `fleet_pv_wh` / `fleet_grid_import_wh`,
+     and its bridged battery energy (`bridge_battery_charge_wh` / `_discharge_wh`) rides on
+     top of the two battery totals, never folded into the floors ([chapter 7, path
+     (c)](07-energy-and-cost.md#22-the-two-accumulation-paths)).
 2. **BMS coulomb-counter keys**: `fleet_battery_charge_wh` /
    `fleet_battery_discharge_wh`, stored as monotone `max(BMS, persistedFloor)`.
    The old discharge≤charge clamp was **removed** in v0.45.0 — over an open

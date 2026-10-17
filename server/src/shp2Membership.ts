@@ -374,8 +374,9 @@ export function isSourceDpuStale(
 /**
  * v1.188.1 — a Core's OWN meter is fresh: its telemetry content CHANGED (contentChangedAtMs,
  * snapshot.ts dpuContentWitness) within SHP2_READBACK_STALE_MS. The clock the grid resolver's
- * Core-import gate reads (gridState.ts coreContentFresh, v1.179.0/v1.181.0): arrival is not
- * enough, since a REST 200 replaying a Core's cached body still bumps lastTelemetryAtMs. The
+ * Core-import gate reads (gridState.ts coreContentFresh, v1.179.0/v1.181.0), and the recorder's
+ * freshness gate for a Core (heldSamples.projectionRecordable): arrival is not enough, since a
+ * REST 200 replaying a Core's cached body still bumps lastTelemetryAtMs. The
  * witness carries battery volts and amps, which move with every real reading, so a live Core's
  * clock moves within seconds (MQTT) or one poll (REST). Unknown (no change seen since a restart) =
  * not fresh.
@@ -395,7 +396,8 @@ export function dpuContentFresh(
  * projection frozen"), when the cloud replays its cached body (v1.181.0: its own connection lost,
  * the panel's still up), and for one list cycle after an OFFLINE→ONLINE /status flip. The Energy
  * flow card reads such a Core from the panel's meter of its slot, as it does an offline one
- * (dpuStale), and the backup timers do the same (poolNetUpperBound). An offline Core is dpuStale,
+ * (dpuStale), and the backup timers do the same (poolNetUpperBound), as do the energy bridge and
+ * the two power sensors (energyBridge.ts coreReports: no reading of its own). An offline Core is dpuStale,
  * not frozen; a Core with no projection has no figures to freeze.
  */
 export function isSourceDpuFrozen(
@@ -855,6 +857,14 @@ export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
 export const BACKUP_TIMER_DEADBAND_W = 50;
 
 /**
+ * v1.188.1 (review) — what a Core draws from its own packs without it crossing its panel slot: its
+ * standby and conversion losses. The energy bridge measured them at 4.7-6.1 kWh/day for the three
+ * home Cores (energyBridge.ts, the inferred PV basis's near-constant shortfall on 8 recorded days:
+ * 65-85 W per Core), rounded up, since poolNetUpperBound must bound the pack net from above.
+ */
+export const SLOT_UNMETERED_DRAW_W = 100;
+
+/**
  * v1.188.1 — an UPPER BOUND on the home pool's battery net (W, > 0 = discharging), for the backup
  * timers' direction gate (backupTimerGate); +Infinity when nothing bounds it.
  *
@@ -867,10 +877,14 @@ export const BACKUP_TIMER_DEADBAND_W = 50;
  * battery net. Each connected slot then contributes:
  *   · its Core's own pack net, when that Core reports on a fresh meter;
  *   · else, while that panel's reading is fresh (shp2ReadbackFresh), the negated slot meter
- *     (−sourceWatts: the AC the Core delivers into the panel). The panel cannot see the Core's PV,
- *     which only adds to its charge, so this bounds its pack net from ABOVE: a slot taking AC
- *     proves a charge, a slot delivering does not prove a discharge (by day that can be the Core's
- *     PV passing through while its packs charge);
+ *     (−sourceWatts: the AC the Core delivers into the panel) plus SLOT_UNMETERED_DRAW_W. The slot
+ *     sees neither the Core's PV, which only adds to its charge, nor its standby draw and conversion
+ *     losses, which come out of its packs: pack net = −slot − PV + draw ≤ −slot + draw. So this
+ *     bounds the pack net from ABOVE: a slot proves a charge only while it takes in more AC than the
+ *     Core's own draw, and a slot delivering does not prove a discharge (by day that can be the
+ *     Core's PV passing through while its packs charge). At the reserve hold, where the slots read
+ *     about 0 W while the packs still supply the Cores' standby, the bound reads a discharge, never
+ *     a charge;
  *   · else +Infinity, basis 'unmeasured'.
  * As in gridState's at-floor guard (v1.3.0), a partial roster can prove one direction and never
  * disprove the other, and the unknown resolves toward discharging.
@@ -897,7 +911,7 @@ export function poolNetUpperBound(
         return;
       }
       const w = p.projection.sourceWatts?.[i];
-      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w : Infinity;
+      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : Infinity;
     });
   }
   // No slot to read: the roster is a remembered or fallback one (no connection table).

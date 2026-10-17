@@ -219,7 +219,7 @@ test('★ an hourly scan extends a hold still running from where the last move s
     const kept = all('samples', CORE_A).filter((r) => r[0] > lastFresh);
     assert.ok(kept.length > 0, '★ rows younger than 15 min stay until the next scan (the lifetime rollup re-reads its last 10 min)');
     assert.ok(kept.every((r) => r[0] > firstAt - HELD_MOVE_MIN_AGE_MS), 'and only those');
-    // An hour later the slip-through hold is still being restated (a REST replay the gate cannot see).
+    // An hour later the slip-through hold is still being restated (held rows that reached samples anyway, as before the gate).
     withDb((db) => {
       const ins = db.prepare('INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)');
       for (const r of held(CORE_A, a1, lastFresh + 4 * H + 5 * MIN, lastFresh + 5 * H)) ins.run(...r);

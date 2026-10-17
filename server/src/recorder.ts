@@ -23,7 +23,7 @@ export { projectionRecordable, RECORD_FRESH_MS } from './heldSamples.js';
 export type { HeldSpan, HeldScanSummary } from './heldSamples.js';
 // v1.188.1 — battery and solar energy metered at the panel's source slots while a home Core is dark.
 import {
-  createEnergyBridge, ownEnergyUntil, reportsSinceReturn, slotPvWatts, bridgeSite,
+  createEnergyBridge, ownEnergyUntil, handsBack, coreReports, slotPvWatts, bridgeSite,
   type BridgedFleetFlow, type BridgeRollupResult, type EnergyBridgeDebug,
 } from './energyBridge.js';
 
@@ -2043,20 +2043,22 @@ export function createRecorder(
     };
     const devices = Object.values(snap.devices);
     const sourceSns = sourceSnsOf(snap);
-    // v1.188.1 — an OFFLINE home Core (its panel slot connected, the Core cloud-offline) is handed
-    // to the energy bridge, metered at its panel slot (energyBridge.ts), at the instant it went
-    // offline: its own pv_total / ac_in count up to that instant and no further (rows past it are
-    // held values, not readings, and the bridge counts that span). A read cuts at once, so a dark
-    // flip between rollups keeps what it already showed; a rollup inside the dwell still counts
+    // v1.188.1 — a DARK home Core (its panel slot connected, the Core with no reading of its own:
+    // cloud-offline, or listed online on a frozen meter or with no reading yet; energyBridge.ts
+    // coreReports) is handed to the energy bridge, metered at its panel slot, at the instant its own
+    // reading stopped: its own pv_total / ac_in count up to that instant and no further (rows past
+    // it are held values, not readings, and the bridge counts that span). A read cuts at once, so a
+    // dark flip between rollups keeps what it already showed; a rollup inside the dwell still counts
     // the Core itself (ownEnergyUntil). The instant is persisted (energyBridge.offlineHomeCores),
     // so after a restart, a crash included, the cut falls where it fell before it.
     const offline = energyBridge.offlineHomeCores(snap.devices, nowMs);
     for (const d of devices) {
       const p = d.projection;
       if (!p) {
-        // v1.188.1 — an offline home Core with no projection (a restart while it is dark: no quota
-        // is fetched for a device listed offline) keeps its recorded series up to the same cut, so
-        // a crash restart neither drops what the reads showed nor leaves a span to nobody.
+        // v1.188.1 — a dark home Core with no projection (a restart while it is dark: no quota is
+        // fetched for a device listed offline; an online flip before its first quota) keeps its
+        // recorded series up to the same cut, so a crash restart neither drops what the reads
+        // showed nor leaves a span to nobody.
         const o = offline.get(d.sn);
         if (o) {
           const untilMs = ownEnergyUntil(o, phase);
@@ -2368,10 +2370,12 @@ export function createRecorder(
           // arriving while the cloud lists the Core offline, a frozen projection at an online flip
           // that lands before the first fresh reading — so it is absorbed with the marker kept:
           // the held value never trails the projection, and re-baselining on a stale register
-          // cannot spend the marker and let the real jump through later. A marked pack reports
-          // `held` until then. A read-only (debug) pass reports `held` and writes nothing. The
-          // v0.45.0 guard and v0.81.0 re-baseline below still cover a gap no bridge counted (no
-          // marker).
+          // cannot spend the marker and let the real jump through later. The marker is spent on the
+          // bridge's own test (handsBack: reported since the return AND a reading of its own now,
+          // coreReports), so the bridge meters the slot until the instant the hand-over absorbs.
+          // A marked pack reports `held` until then. A read-only (debug) pass reports `held` and
+          // writes nothing. The v0.45.0 guard and v0.81.0 re-baseline below still cover a gap no
+          // bridge counted (no marker).
           if (held && energyBridge.hasMarker(cacheKey)) {
             const moved = fresh.chgWh > held.chgWh || fresh.dsgWh > held.dsgWh;
             if (opts.mutate && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {
@@ -2385,7 +2389,7 @@ export function createRecorder(
               bmsCorruptWarned.delete(cacheKey);
               const chgWh = Math.max(0, fresh.chgWh - held.chgWh);
               const dsgWh = Math.max(0, fresh.dsgWh - held.dsgWh);
-              if (reportsSinceReturn(d)) {
+              if (handsBack(d, Date.now())) {
                 const before = energyBridge.clearMarker(cacheKey);
                 const h = handedOver.get(d.sn) ?? { packs: 0, chgWh: 0, dsgWh: 0 };
                 h.packs += 1;
@@ -2856,6 +2860,15 @@ export function createRecorder(
       if (msg !== lastBridgeError) log(`recorder: energy bridge rollup failed (${msg}) — the other lifetime counters advance without it`);
       lastBridgeError = msg;
     }
+    // v1.188.1 (review) — a dark Core whose own readings arrive again before it hands back (a marked
+    // Core the cloud still lists offline, its MQTT data back) is cut at its dark instant so the
+    // bridge's slot figure stands for it. Where the bridge could book nothing for its slot this
+    // window (the panel reading not fresh, no slot coverage), its own measured pv_total / ac_in
+    // rows count instead: the gate wrote them as readings, and nothing else counts the window.
+    const ownInstead = new Set<string>();
+    for (const w of br?.slots ?? []) {
+      if (w.basis === 'unbridgeable' && coreReports(snap.devices[w.sn], now)) ownInstead.add(w.sn);
+    }
 
     // Watt-integrated metrics — fleet + per-circuit keys.
     const wattKeys = Object.keys(contributors); // fleet_pv/load/grid + circuit_<N>
@@ -2867,8 +2880,9 @@ export function createRecorder(
       if (since >= now) continue;
       let addedWh = 0;
       for (const c of contributors[key] ?? []) {
-        // v1.188.1 — a Core handed to the energy bridge counts only up to the hand-off instant.
-        const until = c.untilMs === undefined ? now : c.untilMs === null ? since : Math.min(now, c.untilMs);
+        // v1.188.1 — a Core handed to the energy bridge counts only up to the hand-off instant
+        // (unless the bridge booked nothing for it this window and its own readings arrive).
+        const until = c.untilMs === undefined || ownInstead.has(c.sn) ? now : c.untilMs === null ? since : Math.min(now, c.untilMs);
         if (until <= since) continue;
         // v1.12.0 (review F9) — fetch from `since - lookback` so integrateWh gets the
         // pre-window boundary sample; it still integrates only [since, until].

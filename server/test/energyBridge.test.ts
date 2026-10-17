@@ -49,11 +49,15 @@ const core = (sn: string, online: boolean, projected = online): Any => ({
   sn, deviceName: sn, productName: 'DELTA Pro Ultra', online, lastUpdated: online ? NIGHT : 0,
   ...(projected ? { projection: { kind: 'dpu', soc: 80, pvTotalWatts: 1500, totalInWatts: 0, totalOutWatts: 0, acInWatts: 0, packs: [{ outputWatts: 900, inputWatts: 0 }] } } : {}),
 });
+/** A Core listed online that REPORTS at `at`: its content landed and changed then (the store's
+ *  lastTelemetryAtMs / contentChangedAtMs). Without them, an online Core's projection is not a
+ *  reading of its own (a restart's first body, a frozen meter). */
+const live = (sn: string, at: number): Any => ({ ...core(sn, true), lastTelemetryAtMs: at, contentChangedAtMs: at });
 
 /* ── which slots are dark ─────────────────────────────────────────────── */
 
 test('★★★ a dark slot is exactly the complement of the Cores aggregateFleetFlow sums', () => {
-  const devices = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: core(C1, false, false), [C2]: core(C2, true), [C3]: core(C3, false, true) };
+  const devices = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: core(C1, false, false), [C2]: live(C2, NIGHT), [C3]: core(C3, false, true) };
   const dark = darkHomeSlots(devices, NIGHT);
   assert.deepEqual(dark.map((d) => [d.slot, d.sn, d.chW, d.darkSinceMs]), [[1, C1, -1145, null], [3, C3, -1119, null]]);
   assert.deepEqual([...offlineHomeCores(devices, NIGHT).keys()].sort(), [C1, C3]);
@@ -61,11 +65,22 @@ test('★★★ a dark slot is exactly the complement of the Cores aggregateFlee
   assert.equal(aggregateFleetFlow(devices).fleetPv, 1500);
 });
 
-test('★★ an online Core whose projection has not loaded (boot) is not dark; nor is an unlisted or unconnected one', () => {
+test('★★★ an online Core whose projection has not loaded (boot, or an online flip before its first quota) is not a reading: inside the dwell it withholds both power figures; an unlisted or unconnected one is not counted', () => {
   const p = panel(NIGHT, [-100, -100, -100]);
   p.projection.sources[2].isConnected = false;
   const devices = { [PANEL]: p, [C1]: core(C1, true, false) };
-  assert.deepEqual(darkHomeSlots(devices, NIGHT), [], 'boot: online, no projection; C2 unlisted; C3 not connected');
+  assert.deepEqual(darkHomeSlots(devices, NIGHT), [], 'boot: online, no projection, no instant known — not bridged; C2 unlisted; C3 not connected');
+  assert.deepEqual(offlineHomeCores(devices, NIGHT).get(C1), { offlineSinceMs: null, bridged: false });
+  assert.deepEqual([...offlineHomeCores(devices, NIGHT).keys()], [C1], 'C2 (unlisted) and C3 (not connected) are not part of the fleet');
+  const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, devices, NIGHT, () => false, PHX);
+  assert.deepEqual([f.ready, f.fleetBatteryNet, f.pending, f.ownCores], [false, null, [C1], 0], 'unknown, never a partial sum');
+  // Its first sight starts the dwell (the bridge records it): bridged once it has passed.
+  const seen = (sn: string): number | null => (sn === C1 ? NIGHT - BRIDGE_DWELL_MS : null);
+  assert.deepEqual(darkHomeSlots(devices, NIGHT, seen).map((d) => [d.sn, d.darkSinceMs, d.listedOnline]), [[C1, NIGHT - BRIDGE_DWELL_MS, true]]);
+  // A first body that only seeded the witness (no content change seen yet) is the same.
+  const seeded = { [PANEL]: p, [C1]: { ...core(C1, true), lastTelemetryAtMs: NIGHT } };
+  assert.deepEqual(offlineHomeCores(seeded, NIGHT).get(C1), { offlineSinceMs: null, bridged: false });
+  assert.equal(offlineHomeCores({ [PANEL]: p, [C1]: live(C1, NIGHT) }, NIGHT).has(C1), false, 'its content changed: it reports');
 });
 
 test('★★ the panel reading must be fresh for a slot to be bridged', () => {
@@ -78,7 +93,7 @@ test('★★ the panel reading must be fresh for a slot to be bridged', () => {
 
 test('★★★ a Core is bridged only once it has been offline for the dwell; inside it, it is neither summed nor bridged', () => {
   const at = (ago: number): Any => ({ ...core(C1, false), onlineChangedAtMs: NIGHT - ago });
-  const devs = (ago: number): Any => ({ [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: at(ago), [C2]: core(C2, true), [C3]: core(C3, true) });
+  const devs = (ago: number): Any => ({ [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: at(ago), [C2]: live(C2, NIGHT), [C3]: live(C3, NIGHT) });
   // A 6 s /status flip and the 2026-10-03 ~92 s /device/list blip are not outages.
   for (const ago of [6_000, 92_000, BRIDGE_DWELL_MS - 1]) {
     assert.deepEqual(darkHomeSlots(devs(ago), NIGHT), [], `offline ${ago} ms`);
@@ -88,13 +103,16 @@ test('★★★ a Core is bridged only once it has been offline for the dwell; i
   assert.deepEqual(dark.map((d) => [d.sn, d.darkSinceMs]), [[C1, NIGHT - BRIDGE_DWELL_MS]], 'from the instant it went offline');
   // A flip stamped in the future (clock skew) is read as now: inside the dwell.
   assert.deepEqual(offlineHomeCores(devs(-60_000), NIGHT).get(C1), { offlineSinceMs: NIGHT, bridged: false });
-  // The power sensors inside the dwell: the Core is not a dark slot, so nothing is withheld for it.
-  const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 1200 }, devs(30_000), NIGHT, () => false, PHX);
-  assert.deepEqual([f.ready, f.bridgedSlots, f.fleetBatteryNet], [true, 0, 1200]);
+  // The power sensors inside the dwell: the Core is neither summed nor bridged, so both figures
+  // are withheld (unknown, never a partial sum: the review's 3-min dwell case).
+  const f = bridgeFleetFlow({ fleetPv: 3000, fleetBatteryNet: 1800 }, devs(30_000), NIGHT, () => false, PHX);
+  assert.deepEqual([f.ready, f.bridgedSlots, f.fleetBatteryNet, f.pending, f.ownCores], [false, 0, null, [C1], 2]);
+  const g = bridgeFleetFlow({ fleetPv: 3000, fleetBatteryNet: 1800 }, devs(BRIDGE_DWELL_MS), NIGHT, () => false, PHX);
+  assert.deepEqual([g.ready, g.bridgedSlots, g.fleetBatteryNet, g.pending], [true, 1, 1800 + 1145, []]);
 });
 
 test('★★★ after a restart a Core listed offline with no transition time takes the persisted hand-off instant; the store\'s own transition time wins', () => {
-  const devs = (c1: Any): Any => ({ [PANEL]: panel(NOON, [-1145, -1145, -1119]), [C1]: c1, [C2]: core(C2, true), [C3]: core(C3, true) });
+  const devs = (c1: Any): Any => ({ [PANEL]: panel(NOON, [-1145, -1145, -1119]), [C1]: c1, [C2]: live(C2, NOON), [C3]: live(C3, NOON) });
   const persisted = NOON - 4 * 60_000;
   const known = (sn: string): number | null => (sn === C1 ? persisted : null);
   // First sight after a restart: no transition time. Without the lookup it reads as offline since
@@ -108,14 +126,14 @@ test('★★★ after a restart a Core listed offline with no transition time ta
   assert.deepEqual(darkHomeSlots(devs(core(C1, false, false)), NOON, recent), []);
   // The store's transition time (this process saw the flip) wins over a persisted one.
   assert.deepEqual(offlineHomeCores(devs({ ...core(C1, false), onlineChangedAtMs: NOON - 10 * 60_000 }), NOON, known).get(C1), { offlineSinceMs: NOON - 10 * 60_000, bridged: true });
-  // An online Core is not offline whatever was persisted for it.
-  assert.equal(offlineHomeCores(devs(core(C1, true)), NOON, known).has(C1), false);
-  // The power sensors read the same instant (a slot inside the dwell is not withheld).
+  // A Core that reports is not offline whatever was persisted for it.
+  assert.equal(offlineHomeCores(devs(live(C1, NOON)), NOON, known).has(C1), false);
+  // The power sensors read the same instant: inside the dwell the Core withholds both figures.
   const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, devs(core(C1, false, false)), NOON, () => false, PHX, recent);
-  assert.deepEqual([f.ready, f.bridgedSlots], [true, 0]);
+  assert.deepEqual([f.ready, f.bridgedSlots, f.pending], [false, 0, [C1]]);
 });
 
-test('★★★ the bridge persists each hand-off instant once, reads it back in a new process, and deletes it once the Core is listed online', () => {
+test('★★★ the bridge persists each hand-off instant once, reads it back in a new process, and deletes it once the Core reports again', () => {
   const rows = new Map<string, { wh: number; ts: number }>();
   const writes: string[] = [];
   const deps: Any = {
@@ -129,7 +147,7 @@ test('★★★ the bridge persists each hand-off instant once, reads it back in
     log: () => {},
   };
   const flip = NOON - 5 * 60_000;
-  const devs = (c1: Any): Any => ({ [PANEL]: panel(NOON, [-1145, -1145, -1119]), [C1]: c1, [C2]: core(C2, true), [C3]: core(C3, true) });
+  const devs = (c1: Any): Any => ({ [PANEL]: panel(NOON, [-1145, -1145, -1119]), [C1]: c1, [C2]: live(C2, NOON), [C3]: live(C3, NOON) });
   const a = createEnergyBridge(deps);
   assert.deepEqual(a.offlineHomeCores(devs({ ...core(C1, false), onlineChangedAtMs: flip }), NOON).get(C1), { offlineSinceMs: flip, bridged: true });
   assert.deepEqual(rows.get(bridgeOfflineKey(C1)), { wh: 1, ts: flip });
@@ -139,8 +157,12 @@ test('★★★ the bridge persists each hand-off instant once, reads it back in
   const b = createEnergyBridge(deps);
   assert.deepEqual(b.offlineHomeCores(devs(core(C1, false, false)), NOON + 60_000).get(C1), { offlineSinceMs: flip, bridged: true });
   assert.deepEqual(b.debug(devs(core(C1, false, false)), NOON + 60_000).offlineSince, [{ sn: C1, sinceMs: flip }]);
-  // Listed online again: deleted, so a later first sight offline does not reuse it.
-  b.offlineHomeCores(devs({ ...core(C1, true), onlineChangedAtMs: NOON + 90_000 }), NOON + 90_000);
+  // Listed online with no reading of its own yet (the flip before the first quota): still dark,
+  // from the same instant.
+  assert.deepEqual(b.offlineHomeCores(devs({ ...core(C1, true, false), onlineChangedAtMs: NOON + 80_000 }), NOON + 80_000).get(C1), { offlineSinceMs: flip, bridged: true });
+  assert.equal(rows.get(bridgeOfflineKey(C1))?.ts, flip);
+  // It reports again: deleted, so a later first sight offline does not reuse it.
+  b.offlineHomeCores(devs({ ...live(C1, NOON + 90_000), onlineChangedAtMs: NOON + 85_000 }), NOON + 90_000);
   assert.equal(rows.has(bridgeOfflineKey(C1)), false);
   assert.deepEqual(b.offlineHomeCores(devs(core(C1, false, false)), NOON + 120_000).get(C1), { offlineSinceMs: null, bridged: true });
   assert.equal(rows.has(bridgeOfflineKey(C1)), false, 'no transition time, nothing persisted');
@@ -314,17 +336,21 @@ test('★★★ two panels: a second panel that drops off the cloud with its Cor
   garage.projection = { ...garage.projection, sources: [{ slot: 1, sn: CG, isConnected: true, batteryPercentage: 50, fullCap: 30_720, pvWatts: null, pvHighWatts: null, pvLowWatts: null }] };
   const house = panel(NOON, [-500, -500, 0]);
   house.projection.sources = house.projection.sources.slice(0, 2);
-  const devices: Any = {
-    [PANEL]: house, [GARAGE]: garage,
-    [C1]: { ...core(C1, true), lastQuotaAtMs: NOON },
-    [C2]: { ...core(C2, true), lastQuotaAtMs: NOON },
-    [CG]: { ...core(CG, false, true), onlineChangedAtMs: NIGHT - 60 * 60_000 },
+  const plant = (at: number): Any => {
+    const devices: Any = {
+      [PANEL]: house, [GARAGE]: garage,
+      [C1]: { ...live(C1, at), lastQuotaAtMs: at },
+      [C2]: { ...live(C2, at), lastQuotaAtMs: at },
+      [CG]: { ...core(CG, false, true), onlineChangedAtMs: NIGHT - 60 * 60_000 },
+    };
+    devices[C1].projection = { ...devices[C1].projection, pvTotalWatts: 2000 };
+    devices[C2].projection = { ...devices[C2].projection, pvTotalWatts: 1500 };
+    return devices;
   };
-  devices[C1].projection = { ...devices[C1].projection, pvTotalWatts: 2000 };
-  devices[C2].projection = { ...devices[C2].projection, pvTotalWatts: 1500 };
-  const agg = aggregateFleetFlow(devices);
+  const agg = aggregateFleetFlow(plant(NOON));
   assert.equal(agg.fleetPv, 3500, 'the two house Cores');
   for (const at of [NOON, NIGHT]) {
+    const devices = plant(at);
     const f = bridgeFleetFlow({ fleetPv: agg.fleetPv, fleetBatteryNet: agg.fleetBatteryNetDisplay }, devices, at, () => true, PHX);
     assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet, f.bridgedSlots], [true, 3500, agg.fleetBatteryNetDisplay, 0], new Date(at).toISOString());
     assert.deepEqual(f.slots.map((s) => [s.panelSn, s.sn, s.basis, s.leftOut]), [[GARAGE, CG, 'unbridgeable', true]]);
@@ -333,7 +359,7 @@ test('★★★ two panels: a second panel that drops off the cloud with its Cor
     assert.equal(r.flowBridged, true, 'Fleet PV and Battery Net publish the house Cores');
   }
   // A single panel that is itself cloud-offline with every Core dark: nothing is summed, both withheld (as before the bridge).
-  const alone: Any = { [GARAGE]: garage, [CG]: devices[CG] };
+  const alone: Any = { [GARAGE]: garage, [CG]: plant(NIGHT)[CG] };
   const g = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, alone, NIGHT, () => true, PHX);
   assert.deepEqual([g.ready, g.bridgedSlots], [true, 0]);
   const r = publishReadiness({ devices: alone, alerts: [], alertsComplete: true, speakerLastProbeAt: 1, forecast: null, runway: null, clipping: null,
@@ -342,14 +368,14 @@ test('★★★ two panels: a second panel that drops off the cloud with its Cor
 });
 
 test('★★ a stale panel bridges nothing; an all-online fleet is unchanged by the bridge', () => {
-  const stale = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119], { lastQuotaAtMs: NIGHT - 400_000 }), [C1]: core(C1, false), [C2]: core(C2, true), [C3]: core(C3, true) };
+  const stale = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119], { lastQuotaAtMs: NIGHT - 400_000 }), [C1]: core(C1, false), [C2]: live(C2, NIGHT), [C3]: live(C3, NIGHT) };
   const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 1800 }, stale, NIGHT, () => true, PHX);
   assert.equal(f.ready, false);
   assert.equal(f.fleetBatteryNet, null);
   assert.equal(slotPowerBasis(darkHomeSlots(stale, NIGHT)[0], NIGHT, true, PHX), 'unbridgeable');
-  const online = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: core(C1, true), [C2]: core(C2, true), [C3]: core(C3, true) };
+  const online = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: live(C1, NIGHT), [C2]: live(C2, NIGHT), [C3]: live(C3, NIGHT) };
   const g = bridgeFleetFlow({ fleetPv: 4500, fleetBatteryNet: 2700 }, online, NIGHT, () => false, PHX);
-  assert.deepEqual([g.fleetPv, g.fleetBatteryNet, g.bridgedSlots, g.ready], [4500, 2700, 0, true]);
+  assert.deepEqual([g.fleetPv, g.fleetBatteryNet, g.bridgedSlots, g.ready, g.ownCores], [4500, 2700, 0, true, 3]);
 });
 
 test('held pack keys of a Core: both persisted shapes, and no other Core\'s rows', () => {
@@ -358,4 +384,21 @@ test('held pack keys of a Core: both persisted shapes, and no other Core\'s rows
     `pack_lastwhid_${C2}:${C2}-P1_chg`, `pack_base_${C1}_3_chg`, 'fleet_pv_wh', `bridge_dark_${C1}:${C1}-P1`,
   ];
   assert.deepEqual(heldPackKeysOf(C1, keys), [`${C1}:${C1}-P1`, `${C1}|3`]);
+});
+
+test('★★ every home Core listed offline but its own MQTT data arriving after the flip: each counts at its own reading, and both power figures publish', () => {
+  const off = (sn: string): Any => ({ ...live(sn, NIGHT), online: false, onlineChangedAtMs: NIGHT - 60_000 });
+  const devices: Any = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: off(C1), [C2]: off(C2), [C3]: off(C3) };
+  const agg = aggregateFleetFlow(devices);
+  assert.deepEqual([agg.fleetPv, agg.fleetBatteryNetDisplay], [0, 0], 'precondition: none is listed online');
+  const f = bridgeFleetFlow({ fleetPv: agg.fleetPv, fleetBatteryNet: agg.fleetBatteryNetDisplay }, devices, NIGHT, () => false, PHX);
+  assert.deepEqual([f.ready, f.ownCores, f.bridgedSlots, f.fleetPv, f.fleetBatteryNet], [true, 3, 0, 4500, 2700]);
+  assert.deepEqual(darkHomeSlots(devices, NIGHT), [], 'not dark: their own readings arrive');
+  const r = publishReadiness({ devices, alerts: [], alertsComplete: true, speakerLastProbeAt: 1, forecast: null, runway: null, clipping: null,
+    curtailment: null, carbon: null, tariff: null, degradation: null, nowMs: NIGHT, flowBridge: f } as Any);
+  assert.equal(r.flow, false, 'the Cores-only flows: none listed online');
+  assert.equal(r.flowBridged, true, 'Fleet PV and Battery Net: every figure a reading');
+  // Data from BEFORE the flip is its last report, not a reading after it: dark at the flip.
+  const stale: Any = { ...devices, [C1]: { ...off(C1), onlineChangedAtMs: NIGHT + 1 } };
+  assert.deepEqual(offlineHomeCores(stale, NIGHT + 2).get(C1), { offlineSinceMs: NIGHT + 1, bridged: false });
 });

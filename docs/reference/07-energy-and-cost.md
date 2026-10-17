@@ -229,35 +229,61 @@ power. Each rollup stores `max(BMS, persistedFloor)` so a momentary BMS readback
 dropout (0/null) never looks like "battery emptied".
 
 **(c) The energy bridge, while a home Core is dark** (`energyBridge.ts`). Paths (a)
-and (b) read the Cores themselves. A Core that is cloud-offline while its panel slot
-stays connected reports nothing: its packs are carried at their held values (both
+and (b) read the Cores themselves. A Core with no reading of its own while its panel
+slot stays connected reports nothing: its packs are carried at their held values (both
 counters flat) and its PV integrates to 0. On 2026-10-14 23:52 MST all five Cores
 went dark with the panel online; Home Assistant read battery in/out 0/0 and solar
 0.0 kWh for 10-15 and 10-16 while the house ran about 48 kWh a day off those
 batteries (the vendor ledger for 10-15: solar 48.8, battery out 49.0 kWh).
 
-A slot is **dark** when the panel lists it connected, names its Core, and that Core
-is listed on the account and has been cloud-offline for `BRIDGE_DWELL_MS` (3 min, from
-its `onlineChangedAtMs`, or after a restart from the instant persisted for it), or since
-before any run of the add-on saw it go offline (no transition time and none persisted).
-A `/status` flip lasts seconds and the 2026-10-03 `/device/list` blip flagged three
-Cores offline for about 92 s: inside the dwell nothing is bridged and no marker or log
-line is written, and the Core is neither summed by `aggregateFleetFlow` nor bridged.
-An online Core whose projection has not loaded yet (boot) is not dark either.
+A Core is **dark** when it delivers no reading of its **own** (`coreReports`), whatever
+the cloud's online flag says. Its own reading is a projection the recorder's gate writes:
+content landed within 3 min and, for a Core, changed within `SHP2_READBACK_STALE_MS`
+(5 min, the content clock the Energy flow card and the backup timers read). A Core the
+cloud lists offline must also have changed after the offline flip. Dark therefore covers:
 
-**The hand-off instant.** The bridge takes a Core over at the instant it went offline.
-For each dark slot the window starts at max(the rollup watermark, that instant), and the
-recorder counts the Core's own `pv_total` / `ac_in` only up to it
+- a Core cloud-offline with no data since the flip;
+- a Core listed online on a frozen meter: a quota that keeps failing, or a REST 200
+  replaying a cached body;
+- a Core listed online with no projection yet, or whose first body after a restart only
+  seeded the content witness.
+
+Not dark: a Core the cloud lists offline whose MQTT data still arrives and changes. Its
+measured `pv_total` and BMS registers count, as the gate records them. The recorder writes
+exactly the Cores that report, and the bridge meters every other connected home Core, so
+no span is booked twice or by nobody. A Core the bridge has booked (it holds hand-over
+markers) stays dark until it **hands back** (`handsBack`, below): through an online flip
+before its first fresh body, and through a quota that keeps failing after the flip.
+
+A slot is bridged once its Core has been dark for `BRIDGE_DWELL_MS` (3 min) from the
+instant its own reading stopped (`ownReadingStoppedAt`). Listed offline, that is the later
+of its `onlineChangedAtMs` and its last content change. Listed online, it is its last
+content change; after a restart the instant persisted for it stands in. A slot is bridged
+at once when no run of the add-on saw the Core stop (offline at the device list's first
+sight, none persisted), or while it is marked. An online Core with no instant known (a
+restart's first body) starts its dwell at the process's first sight of it, so a live Core
+that reports seconds after a restart is never bridged. A `/status` flip lasts seconds, and
+the 2026-10-03 `/device/list` blip flagged three Cores offline for about 92 s while their
+MQTT data kept arriving (not dark at all). Inside the dwell nothing is bridged and no marker
+or log line is written. The Core is then in neither power figure, so Fleet PV and Battery
+Net read unknown rather than a partial sum.
+
+**The hand-off instant.** The bridge takes a Core over at the instant its own reading
+stopped. For each dark slot the window starts at max(the rollup watermark, that instant),
+and the recorder counts the Core's own `pv_total` / `ac_in` only up to it
 (`offlineHomeCores` / `ownEnergyUntil` in `buildContributors`): on every read at once,
 and in a rollup once the dwell has passed. A rollup that falls inside the dwell still
 counts the Core itself, and the bridge then starts at that rollup. So a Core that goes
 dark between rollups keeps the energy the read path already showed, and no stretch is
-counted twice.
+counted twice. In a window where the bridge can book nothing for a dark slot (the panel
+reading not fresh, no slot coverage), a marked Core whose own readings arrive again counts
+its own measured `pv_total` / `ac_in` for that window instead.
 
-The instant is persisted (`bridge_offline_<sn>`, the row's ts; written when the store sees
-the flip, deleted once the Core is listed online again; `/api/debug/battery-lifetime` →
-`bridge.offlineSince`). A restart reads it back: the store then lists the Core offline with
-no transition time, and the persisted instant stands in for it. That matters after a
+The instant is persisted (`bridge_offline_<sn>`, the row's ts). It is written when the Core
+goes dark, kept through an online flip while the Core is marked, and deleted once the Core
+is no longer dark (`/api/debug/battery-lifetime` → `bridge.offlineSince`). A restart reads
+it back: the store then has no clocks for the Core, and the persisted instant stands in.
+That matters after a
 **crash** (a power cut, an OOM kill, an uncaught exception), which runs no final rollup:
 the watermark is the last rollup's, up to 5 min before the crash, and the emit high-water
 sidecar is the one that rollup persisted. Without the instant the cut and the bridge's
@@ -351,13 +377,14 @@ Where the energy goes:
 `bridge_dark_<pack>`. A marked pack reports its held value, and any movement of its
 registers off it is absorbed as `computeBmsBatteryDetail` sees it: the pack is re-baselined
 (`base := register − held`), so that pass reports exactly the held value and counting
-resumes from it. The marker is spent (the hand-over) only once the Core has **reported
-since its return** (`reportsSinceReturn`): it is online and its content clock
-(`contentChangedAtMs`, the v1.181.0 `dpuContentWitness`) moved at or after its online flip,
-or, online since before this process saw it, moved at all (the store's first body after a
-restart only seeds the witness). Movement before that is energy from the dark span, which
-the bridge counts, so it is absorbed with the marker kept and the energy kept in
-`bridge_absorbed_<pack>_chg` / `_dsg`:
+resumes from it. The marker is spent (the hand-over) only once the Core **hands back** (`handsBack`). It
+must have **reported since its return** (`reportsSinceReturn`): it is online and its content
+clock (`contentChangedAtMs`, the v1.181.0 `dpuContentWitness`) moved at or after its online
+flip, or, online since before this process saw it, moved at all (the store's first body
+after a restart only seeds the witness). It must also deliver a reading of its own now
+(`coreReports`). That is the instant the bridge stops metering it. Movement before that is
+energy from the dark span, which the bridge counts, so it is absorbed with the marker kept
+and the energy kept in `bridge_absorbed_<pack>_chg` / `_dsg`:
 
 - MQTT battery data (DPU `cmdId` 28, `accuChgCap` / `accuDsgCap`) that the store still
   translates while the cloud lists the Core offline. Without this the held value trailed
@@ -390,14 +417,14 @@ online days 10-03..10-14, the inferred split kept battery in within about 2 kWh/
 DC counters and read battery out 5-8 kWh/day low. Inferred PV is a lower bound: 0.83-0.90 of
 the measured PV on 8 recorded days, short by a near-constant 4.7-6.1 kWh/day (most likely
 the Cores' own draw), and up to one SoC step (~290 Wh) per Core per anchor either way. With
-the measured basis, battery in would read about 5 kWh/day high instead. Up to one rollup
-window is misattributed at the return, and the BMS energy from the online flip to the
-Core's first fresh reading is absorbed (seconds for a Core streaming MQTT, up to a REST
-poll otherwise). At an outage start, the battery flow from the
-Core's last register reading to the bridge's window start (the cloud's offline detection,
-and a rollup that fell inside the dwell: at most 3 min) is absorbed at the hand-over
-without being bridged; register data that MQTT still delivers before the bridge's first
-marker is counted by the BMS and again by the bridge (at most one rollup window). When no
+the measured basis, battery in would read about 5 kWh/day high instead. At the return, the
+span from the bridge's last rollup to the Core's hand-back (at most one rollup window, 5 min)
+is booked by neither: the hand-over absorbs it. That holds however long the Core stays listed
+online without a reading of its own before handing back, since the bridge meters it until
+then. At an outage start, the battery flow from the Core's last register reading to the
+bridge's window start is absorbed at the hand-over without being bridged. That window is the
+cloud's offline detection or the 5-min content window, plus a rollup that fell inside the
+dwell. When no
 run of the add-on saw the flip, there is no instant to persist: the Core went offline while
 the add-on was down, or within one publish (30 s) before a crash. After a graceful stop
 nothing is lost (the final rollup leaves nothing pending). After a crash while the Core
@@ -409,23 +436,25 @@ panel itself is dark; and there is no backfill: a bridge that starts mid-outage 
 from its first window (the energy before it is absorbed at the hand-over; the vendor's
 `ecoflow_panel:vendor_*` statistics cover those days).
 
-> **Anti-footgun — no rollback past the bridge while it holds energy.** The bridged battery
+> **Anti-footgun — no rollback past the bridge once it has booked energy.** The bridged battery
 > energy lives only in the `bridge_battery_*` rows, which a release without the bridge does not
-> read. Rolling back below v1.188.1 while `/api/debug/battery-lifetime` → `bridge.chargeWh` /
-> `dischargeWh` is non-zero drops that energy from the two emitted battery totals, and what
-> Home Assistant does with the step down depends on its size against the counter
-> (`reset_detected`: a reading below 0.9 × the previous one):
+> read. The rows only grow: a hand-over clears the markers and the per-Core rows, never these.
+> So from the bridge's first booked window (`/api/debug/battery-lifetime` → `bridge.chargeWh` /
+> `dischargeWh` non-zero) for good, rolling back below v1.188.1 drops every outage's bridged
+> energy at once from the two emitted battery totals. What Home Assistant does with the step
+> down depends on its size against the counter (`reset_detected`: a reading below 0.9 × the
+> previous one):
 >
-> - **Under 10 % of the counter** (any normal outage: at the 2026-10-16 totals, 3,589.7 kWh in
->   and 3,566.5 kWh out, that is up to about 359 kWh, roughly 7 days at about 50 kWh/day):
->   the hour of the rollback books the bridged energy as a negative change, with HA's "not
->   strictly increasing" warning, and an upgrade back to v1.188.1 or later reads the rows
->   again and books the same amount back as a positive hour.
+> - **Under 10 % of the counter** (the sum of every outage bridged so far: at the 2026-10-16
+>   totals, 3,589.7 kWh in and 3,566.5 kWh out, up to about 359 kWh, roughly 7 dark days at
+>   about 50 kWh/day): the hour of the rollback books the bridged energy as a negative change,
+>   with HA's "not strictly increasing" warning, and an upgrade back to v1.188.1 or later reads
+>   the rows again and books the same amount back as a positive hour.
 > - **10 % or more:** HA treats the drop as a meter reset and books the whole counter again
 >   (the phantom-kWh failure).
 >
-> Either way the Energy dashboard is wrong for those hours, so do not roll back while the
-> bridge holds energy.
+> Either way the Energy dashboard is wrong for those hours, so once the bridge has booked
+> battery energy, do not roll back below v1.188.1.
 
 #### 2.3 The RTE clamp invariant — history and current state
 

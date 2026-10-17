@@ -71,6 +71,20 @@
  *   B-lx    a dark Core with no projection is not cut (its last reading is held past the flip)
  *   B-lxi   the bridge's window ignores the persisted instant (a crash restart re-books what the BMS counted)
  *   B-lxii  the recorder's cut ignores the persisted instant (PV Production steps down at a crash restart)
+ *   B-lxiii a Core listed online is never dark (the cloud's flag decides again: a frozen meter is booked by nobody)
+ *   B-lxiv  a bridged Core hands back on its own reading alone (MQTT back while listed offline: booked by nobody)
+ *   B-lxv   a marked Core's dark instant is re-derived from the store's clocks (it moves with each MQTT delta)
+ *   B-lxvi  an offline Core's dark instant ignores its later content change (dark from the flip, not its last reading)
+ *   B-lxvii an offline Core's report from before the flip counts as its own reading
+ *   B-lxviii an online Core with no instant is bridged at once (a restart's first body hands a live Core over)
+ *   B-lxix  the first sight of an online Core with no reading is never recorded (a frozen Core after a restart is never bridged)
+ *   B-lxx   the hand-off instant is deleted at an online flip, not once the Core reports
+ *   B-lxxi  the power sensors sum a frozen projection listed online as live
+ *   B-lxxii the power sensors leave out a Core the cloud lists offline whose own data arrives
+ *   B-lxxiii a Core inside its dwell does not withhold the power figures (a partial sum publishes)
+ *   B-lxxiv readiness ignores the home Cores at their own reading
+ *   B-lxxv  where the bridge books nothing, a marked Core's own measured readings are still cut
+ *   B-lxxvi handsBack ignores whether the Core has a reading of its own (a frozen marked Core is handed back)
  *
  *   node scripts/mutate-energy-core-outage.mjs
  */
@@ -88,6 +102,7 @@ const SUBSET = [
   'test/energyBridgePublish.test.ts',
   'test/publishReadiness.test.ts',
   'test/lifetimeDipClamp.test.ts',
+  'test/energyBridgeOwnReading.test.ts',
 ];
 
 const MUTANTS = [
@@ -129,7 +144,7 @@ const MUTANTS = [
   {
     id: 'B-vi. ★★★ the hand-over fires on any online flag',
     file: RC,
-    find: '              if (reportsSinceReturn(d)) {',
+    find: '              if (handsBack(d, Date.now())) {',
     to: '              if (d.online === true) { /* MUTANT */',
     why: 'The review defect: a reconnect burst of queued MQTT data from early in the dark span, just before the online flip, spends the marker; the fresh data\'s jump then lands on top of the bridged energy.',
   },
@@ -192,8 +207,8 @@ const MUTANTS = [
   {
     id: 'B-xv. ★★ flowBridged is ready while a slot is unbridgeable',
     file: PR,
-    find: '  r.flowBridged = fb == null ? r.flow : (r.flow || (membershipKnown && fb.bridgedSlots > 0)) && fb.ready;',
-    to: '  r.flowBridged = fb == null ? r.flow : (r.flow || (membershipKnown && fb.bridgedSlots > 0)); /* MUTANT */',
+    find: '  r.flowBridged = fb == null ? r.flow : (r.flow || (membershipKnown && (fb.bridgedSlots > 0 || (fb.ownCores ?? 0) > 0))) && fb.ready;',
+    to: '  r.flowBridged = fb == null ? r.flow : (r.flow || (membershipKnown && (fb.bridgedSlots > 0 || (fb.ownCores ?? 0) > 0))); /* MUTANT */',
     why: 'The two power sensors publish a partial sum as the fleet\'s.',
   },
   {
@@ -269,8 +284,8 @@ const MUTANTS = [
   {
     id: 'B-xxvi. ★★★ the dwell is removed',
     file: EB,
-    find: '  return { offlineSinceMs, bridged: offlineSinceMs == null || nowMs - offlineSinceMs >= BRIDGE_DWELL_MS };',
-    to: '  return { offlineSinceMs, bridged: true }; /* MUTANT */',
+    find: '  const bridged = offlineSinceMs == null ? (isMarked || dpu.online === false) : nowMs - offlineSinceMs >= BRIDGE_DWELL_MS;',
+    to: '  const bridged = true; /* MUTANT */',
     why: 'A 6 s /status blip at a rollup activates the bridge: markers, three log lines, and the window\'s battery energy booked beside the BMS.',
   },
   {
@@ -472,15 +487,15 @@ const MUTANTS = [
   {
     id: 'B-lv. ★★ the power sensors\' day/night test ignores the configured site',
     file: EB,
-    find: '    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site(), known),',
-    to: '    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, PHOENIX_SITE, known), /* MUTANT */',
+    find: '      return bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site(), known, isMarked);',
+    to: '      return bridgeFleetFlow(online, devices, nowMs, isTrusted, PHOENIX_SITE, known, isMarked); /* MUTANT */',
     why: 'Outside Phoenix Fleet PV and Battery Net read unknown through the local night of a Core outage (Phoenix daylight, no trusted field).',
   },
   {
     id: 'B-lvi. ★★★ a restart ignores the persisted hand-off instant',
     file: EB,
-    find: '  const t = finite(dpu.onlineChangedAtMs) ?? (known ? finite(known(src.sn)) : null);',
-    to: '  const t = finite(dpu.onlineChangedAtMs); /* MUTANT */',
+    find: '  const rec = known ? finite(known(src.sn)) : null;',
+    to: '  const rec = null as number | null; /* MUTANT */',
     why: 'The review defect: a crash within one rollup of a daylight dark flip steps PV Production down at the first publish after the restart (150-525 Wh), and the bridge books again the battery energy the BMS counted before the flip.',
   },
   {
@@ -514,16 +529,114 @@ const MUTANTS = [
   {
     id: 'B-lxi. ★★★ the bridge\'s window ignores the persisted instant',
     file: EB,
-    find: '    for (const s of darkHomeSlots(snap.devices, nowMs, known)) {',
-    to: '    for (const s of darkHomeSlots(snap.devices, nowMs)) { /* MUTANT */',
+    find: '    for (const s of darkHomeSlots(snap.devices, nowMs, known, isMarked)) {',
+    to: '    for (const s of darkHomeSlots(snap.devices, nowMs, undefined, isMarked)) { /* MUTANT */',
     why: 'The review defect: after a crash restart the first bridged window starts at the watermark and books again the battery energy the BMS counted before the flip (125-375 Wh).',
   },
   {
     id: 'B-lxii. ★★★ the recorder\'s cut ignores the persisted instant',
     file: EB,
-    find: '      return offlineHomeCores(devices, nowMs, known);',
-    to: '      return offlineHomeCores(devices, nowMs); /* MUTANT */',
+    find: '      return offlineHomeCores(devices, nowMs, known, isMarked);',
+    to: '      return offlineHomeCores(devices, nowMs, undefined, isMarked); /* MUTANT */',
     why: 'The review defect: the first publish after a crash restart drops the PV and AC input the crashed process had shown since the flip (PV Production steps down).',
+  },
+  {
+    id: 'B-lxiii. ★★★ a Core listed online is never dark (the cloud\'s flag decides again)',
+    file: EB,
+    find: '  if (isMarked ? handsBack(dpu, nowMs) : coreReports(dpu, nowMs)) return null;',
+    to: '  if (dpu.online !== false) return null; /* MUTANT */',
+    why: 'The review defect: a Core listed online on a frozen meter (a quota that keeps failing, a REST 200 replaying a cached body) or with no projection yet after a restart is neither recorded nor bridged; its slot\'s battery and solar go into no counter, and Battery Net publishes a partial sum or a frozen figure.',
+  },
+  {
+    id: 'B-lxiv. ★★★ a bridged Core hands back on its own reading alone',
+    file: EB,
+    find: '  if (isMarked ? handsBack(dpu, nowMs) : coreReports(dpu, nowMs)) return null;',
+    to: '  if (coreReports(dpu, nowMs)) return null; /* MUTANT */',
+    why: 'A bridged Core whose MQTT data comes back while the cloud still lists it offline leaves the bridge, while its packs\' movement is still absorbed for the hand-over: that span is booked by nobody.',
+  },
+  {
+    id: 'B-lxv. ★★ a marked Core\'s dark instant is re-derived from the store\'s clocks',
+    file: EB,
+    find: '  const t = isMarked ? rec : ownReadingStoppedAt(dpu) ?? rec;',
+    to: '  const t = ownReadingStoppedAt(dpu) ?? rec; /* MUTANT */',
+    why: 'The instant follows each MQTT delta of a bridged Core still listed offline: each window starts a minute before its end and the rest of the span is booked by nobody.',
+  },
+  {
+    id: 'B-lxvi. ★★ an offline Core\'s dark instant ignores its later content change',
+    file: EB,
+    find: '  return c == null ? o : Math.max(o, c);',
+    to: '  return o; /* MUTANT */',
+    why: 'A Core whose MQTT data kept arriving after the offline flip is taken over from the flip, not from its last own reading.',
+  },
+  {
+    id: 'B-lxvii. ★★ an offline Core\'s report from before the flip counts as its own reading',
+    file: EB,
+    find: '  return o == null || (c != null && c > o);',
+    to: '  return true; /* MUTANT */',
+    why: 'Its last report before the cloud declared it offline keeps it "reporting" for minutes after the flip: the read path does not cut at the flip.',
+  },
+  {
+    id: 'B-lxviii. ★★★ an online Core with no instant is bridged at once',
+    file: EB,
+    find: '  const bridged = offlineSinceMs == null ? (isMarked || dpu.online === false) : nowMs - offlineSinceMs >= BRIDGE_DWELL_MS;',
+    to: '  const bridged = offlineSinceMs == null ? true : nowMs - offlineSinceMs >= BRIDGE_DWELL_MS; /* MUTANT */',
+    why: 'A restart\'s first body only seeds the witness: every live Core would be handed to the bridge for its first seconds, markers written.',
+  },
+  {
+    id: 'B-lxix. ★★★ the first sight of an online Core with no reading is never recorded',
+    file: EB,
+    find: '          firstSight.set(src.sn, nowMs);',
+    to: '          /* MUTANT */',
+    why: 'A Core listed online whose quota keeps failing from a restart on is never bridged: its slot\'s energy is booked by nobody and both power figures stay unknown.',
+  },
+  {
+    id: 'B-lxx. ★★★ the hand-off instant is deleted at an online flip, not once the Core reports',
+    file: EB,
+    find: '      if (dark.has(sn) || devices[sn] == null) continue;',
+    to: '      if (devices[sn]?.online !== true) continue; /* MUTANT */',
+    why: 'An online flip before the first fresh body drops the instant of a dark span that has not ended; a crash then hands the Core over at the watermark.',
+  },
+  {
+    id: 'B-lxxi. ★★★ the power sensors sum a frozen projection listed online as live',
+    file: EB,
+    find: '      if (summed) { const f = ownFlow(d); pv -= f.pv; net -= f.net; }',
+    to: '      /* MUTANT */',
+    why: 'The review defect: Battery Net and Fleet PV publish a frozen Core\'s held pack flows beside its slot (HA disagrees with the card and the timers).',
+  },
+  {
+    id: 'B-lxxii. ★★ the power sensors leave out a Core the cloud lists offline whose own data arrives',
+    file: EB,
+    find: '        if (!summed) { const f = ownFlow(d); pv += f.pv; net += f.net; }',
+    to: '        /* MUTANT */',
+    why: 'Fleet PV drops a Core that is measured, because the cloud lists it offline: a partial sum.',
+  },
+  {
+    id: 'B-lxxiii. ★★★ a Core inside its dwell does not withhold the power figures',
+    file: EB,
+    find: '      if (!o.bridged && panel.online === true) { pending.push(src.sn); ready = false; }',
+    to: '      if (!o.bridged && panel.online === true) { pending.push(src.sn); } /* MUTANT */',
+    why: 'The review defect: a Core flipped online by /status before its first quota, or offline inside the dwell, is in neither figure and Battery Net publishes a partial sum as a reading.',
+  },
+  {
+    id: 'B-lxxiv. ★★ readiness ignores the home Cores at their own reading',
+    file: PR,
+    find: '  r.flowBridged = fb == null ? r.flow : (r.flow || (membershipKnown && (fb.bridgedSlots > 0 || (fb.ownCores ?? 0) > 0))) && fb.ready;',
+    to: '  r.flowBridged = fb == null ? r.flow : (r.flow || (membershipKnown && fb.bridgedSlots > 0)) && fb.ready; /* MUTANT */',
+    why: 'With every Core listed offline but streaming its own data, both power sensors are withheld though every figure is a reading.',
+  },
+  {
+    id: 'B-lxxv. ★★ where the bridge books nothing, a marked Core\'s own measured readings are still cut',
+    file: RC,
+    find: "      if (w.basis === 'unbridgeable' && coreReports(snap.devices[w.sn], now)) ownInstead.add(w.sn);",
+    to: '      /* MUTANT */',
+    why: 'The review defect: with the panel reading not fresh, a dark Core\'s measured pv_total / ac_in rows are discarded and nothing is booked in their place.',
+  },
+  {
+    id: 'B-lxxvi. ★★★ handsBack ignores whether the Core has a reading of its own',
+    file: EB,
+    find: '  return reportsSinceReturn(d) && coreReports(d, nowMs);',
+    to: '  return reportsSinceReturn(d); /* MUTANT */',
+    why: 'A frozen marked Core counts as handed back: the bridge stops metering it, and register movement without a content change spends the markers and is counted beside the bridge.',
   },
 ];
 

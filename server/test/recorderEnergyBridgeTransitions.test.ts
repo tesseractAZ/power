@@ -226,13 +226,15 @@ for (const c of CRASH_CASES) {
   });
 }
 
-test('★★★ the hand-off instant is persisted at the flip, survives a crash, and is cleared once the Core is listed online again; none is invented for a Core dark since first sight', () => {
+test('★★★ the hand-off instant is persisted at the flip, survives a crash, and is cleared once the Core reports again; none is invented for a Core dark since first sight', () => {
   const p = new Plant(NIGHT);
   try {
     const key = `bridge_offline_${CORES[0]}`;
     p.rec.rollupLifetime();
     p.run(5);
-    const flip = p.clock - 20_000;
+    // Its last report (the minute) came 20 s before the cloud's offline flip.
+    p.clock += 20_000;
+    const flip = p.clock;
     p.setOnline(false, [CORES[0]], flip);
     p.read();
     assert.ok(p.lifetimeKeys().includes(key), 'written by the first read after the flip');
@@ -242,7 +244,10 @@ test('★★★ the hand-off instant is persisted at the flip, survives a crash,
     assert.ok(p.logs.some((l) => l.includes(`Core ${CORES[0]} is cloud-offline since ${new Date(flip).toISOString()}`)), 'the restarted process bridges it from the persisted instant');
     p.setOnline(true, [CORES[0]]);
     p.read();
-    assert.ok(!p.lifetimeKeys().includes(key), 'cleared once the Core is listed online');
+    assert.ok(p.lifetimeKeys().includes(key), 'listed online with no reading of its own yet (the crash cleared the store): still dark, from the same instant');
+    p.touch([CORES[0]]);
+    p.read();
+    assert.ok(!p.lifetimeKeys().includes(key), 'cleared once the Core reports again');
     assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.offlineSince, []);
     p.darkAtFirstSight();
     p.run(5);

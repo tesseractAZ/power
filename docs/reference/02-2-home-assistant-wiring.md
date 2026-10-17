@@ -89,12 +89,16 @@ dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). S
 
 - **Power flow:** `fleet_pv_watts`, `panel_load_watts`, `ac_import_watts`,
   `fleet_battery_net_watts`, `grid_home_watts` (SHP2 `gridWatt`). Fleet PV and Battery
-  Net add every dark home slot (its Core cloud-offline for at least 3 min) metered at the
-  panel (the energy bridge,
-  `Recorder.bridgedFleetFlow`; [chapter 7, path (c)](07-energy-and-cost.md#22-the-two-accumulation-paths))
-  and have their own readiness flag, `flowBridged`: null while a dark slot on an online
-  panel cannot be bridged, never a partial sum. A dark slot whose panel is itself
-  cloud-offline is left out of both, as an offline Core always was.
+  Net count each connected home Core once (the energy bridge, `Recorder.bridgedFleetFlow`;
+  [chapter 7, path (c)](07-energy-and-cost.md#22-the-two-accumulation-paths)). A Core
+  with a reading of its own counts at its own figures, even one the cloud lists offline
+  whose MQTT data still arrives. A dark Core is metered at its panel slot: no reading of its
+  own for at least 3 min, cloud-offline or listed online on a frozen meter or with no
+  projection yet. A frozen projection listed online is never summed as live. The two figures
+  have their own readiness flag, `flowBridged`. They are null, never a partial sum, while a
+  dark slot on an online panel cannot be bridged, or while a Core is inside its 3-min dwell
+  and so in neither figure. A dark slot whose panel is itself cloud-offline is left out of
+  both, as an offline Core always was.
 - **Backup pool:** `backup_pool` (%), `backup_remaining_kwh`, `backup_full_capacity_kwh`
   (both `energy_storage`).
 - **Forecast/degradation/runway/RTE/clipping/curtailment/self-consumption** — one sensor
@@ -400,8 +404,12 @@ the ±50 W deadband (both timers are always reported by the SHP2 regardless of d
 The gate (`backupTimerGate`, shared with the console's RUN line) reads the Cores' battery net
 while every home Core reports on a fresh meter. Otherwise that sum is not the pool's (0 W with
 every Core dark), so it reads an upper bound through the panel instead: each dark or frozen Core
-contributes its slot's delivery (`−sourceWatts`) while that panel is fresh. A slot taking AC
-proves a charge; a slot delivering never proves a discharge, since it can be the Core's PV passing
+contributes its slot's delivery (`−sourceWatts`) plus `SLOT_UNMETERED_DRAW_W` (100 W) while that
+panel is fresh. The slot sees neither the Core's PV nor its own standby and conversion draw, which
+comes out of its packs (65-85 W per Core, measured by the energy bridge), so pack net ≤ −slot +
+draw. A slot proves a charge only while it takes in more AC than that draw: at the reserve hold the
+slots read about 0 W while the packs still supply the Cores' standby, and no time to full is
+published. A slot delivering never proves a discharge, since it can be the Core's PV passing
 through. With nothing to bound it, only the discharge timer is published.
 Then forecast, degradation, alert counts (split by engine source × severity), runway,
 RTE, clipping, curtailment, and self-consumption blocks. Internally the analytics reports
@@ -507,8 +515,12 @@ are cached (~30 min) on the worker.
 - **Publish readiness (v1.178.0, `publishReadiness.ts`):** a figure computed before the data
   behind it exists is null, not 0. Both state publishers (MQTT `buildState` and the REST
   twin `/api/ha-state`) pass their payload through `withholdUnready(publishReadiness(...))`,
-  which nulls each group of fields whose own input is missing: fleet flows until an online
-  Core has a projection; `panel_load_watts` until the panel reports a channel; the nine
+  which nulls each group of fields whose own input is missing: the fleet in/out and AC-import
+  flows (`flow`) until an online Core has a projection; Fleet PV and Battery Net
+  (`flowBridged`) until an online Core has a projection, a home Core reports, or the energy
+  bridge meters a dark home slot, and while any connected home Core on an online panel is
+  counted by neither (inside its dwell, or its slot unbridgeable); `panel_load_watts` until
+  the panel reports a channel; the nine
   alarm counts until the monitor has evaluated once; `audible_usable_speakers` until the
   first speaker probe; the forecast PV pair while `pvForecastUnavailable` (no PV history on
   the published display basis, which re-adds connected-but-unprojected Cores' own records);
@@ -523,7 +535,8 @@ are cached (~30 min) on the worker.
   The fleet sums are taken after the reports' await, from the same live device map readiness
   judges (v1.178.1): taken before it, a boot-time sum over nothing passed a readiness verdict
   made after the first poll. The fleet flows need an online projected Core the panel lists as
-  a source (any Core on a DPU-only install — no panel listed at all): a bench spare's
+  a source (any Core on a DPU-only install — no panel listed at all), or for Fleet PV and
+  Battery Net a home Core at its own reading or a dark home slot the bridge meters: a bench spare's
   projection alone does not make a fleet sum real, and a panel listed but not yet projected
   leaves membership unknown.
   The first state publish runs on broker connect, ~0.8 s before the first poll, and the
@@ -543,7 +556,8 @@ are cached (~30 min) on the worker.
   Panel Load sat at its last value through a stale shadow while the Cores' battery net rose
   by ~2 kW; MQTT `expire_after` cannot catch a freeze, because each 30 s republish resets the
   timer. The lifetime counters (per-circuit too), the battery net, the capacity, the reserve
-  settings and the frozen-for diagnostic are not governed. Freshness is first proven by a
+  settings and the frozen-for diagnostic are not governed by this group (the battery net is
+  null while a dark home slot's panel reading is not fresh, through `flowBridged`). Freshness is first proven by a
   quota (`lastQuotaAtMs`, REST or MQTT), so these fields are also null after a restart
   until the panel's first quota lands. (2) `projected_low_soc_percent` / `_at` join the forecast PV group, and a new
   `runwayBasis` group governs `runway_to_reserve_hours`, `runway_to_empty_hours`,
