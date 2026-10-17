@@ -195,7 +195,7 @@ test('★★★ the move re-dates a record this boot filed from a held row; the 
     assert.equal(g[0].alertStartMs, lastHeldRow);
     assert.equal(g[0].durationMs, g[0].endMs - lastFresh);
     assert.deepEqual(deviceAlertIds(rec.telemetryGaps(), now), ids, '★★★ the same alert id');
-    assert.ok(lines.some((l) => l.includes(`device telemetry gap of ${CORE_A} re-dated from ${new Date(lastHeldRow).toISOString()} to its last fresh reading ${new Date(lastFresh).toISOString()}`)), lines.join('\n'));
+    assert.ok(lines.some((l) => l.includes(`device telemetry gap of ${CORE_A} re-dated from ${new Date(lastHeldRow).toISOString()} to ${new Date(lastFresh).toISOString()}, its newest row left in samples`)), lines.join('\n'));
     const persisted = JSON.parse(readFileSync(GAPS_PATH, 'utf8')) as Array<{ sn?: string; startMs: number }>;
     assert.equal(persisted.find((x) => x.sn === CORE_A)?.startMs, lastFresh, 'persisted, so the next boot reads it');
   } finally { rec.close(); }
@@ -443,7 +443,7 @@ test('★★ a fleet silence of a shadowed panel (no Core reporting) names the c
     const [a] = outageAlerts(JSON.parse(JSON.stringify(fleet)), c.wall, OPTS, (sn) => store.get().devices[sn]?.deviceName);
     assert.equal(a.title.startsWith('Telemetry gap — no data for '), true);
     assert.match(a.detail, /^No fresh home-device readings reached the recorder for \d+ min \(/);
-    assert.match(a.detail, /the add-on kept checking the fleet, but every home device it saw was held — the EcoFlow cloud replayed the last payload of Smart Home Panel 2 \(cloud shadow\); Core 2 sent no new readings, so nothing was recorded/);
+    assert.match(a.detail, /the add-on kept checking the fleet, but every home device it had a reading for was held — the EcoFlow cloud replayed the last payload of Smart Home Panel 2 \(cloud shadow\); Core 2 sent no new readings, so nothing was recorded/);
     assert.doesNotMatch(a.detail, /MQTT|broker/, `★★ ${a.detail}`);
     assert.equal(a.facts?.find((f) => f.label === 'Type')?.value, 'in-process (held readings)');
     assert.ok(lines.some((l) => l.includes('TELEMETRY GAP — no home-device samples') && l.includes(`held ${CORE_B} (no fresh content), ${PANEL} (cloud shadow)`)), lines.join('\n'));

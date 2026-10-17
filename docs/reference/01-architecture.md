@@ -212,8 +212,9 @@ Four tables hold what the recorder knows about held readings (`heldSamples.ts`, 
 they restated a held reading (see 4.4); nothing in it is read as a measurement. `held_spans`
 (`sn`, `start_ts`, `end_ts`, `reason`, `rows`, `detected_at_ms`, `restored_at_ms`) logs each hold
 of an hour or more: `gate-stale` or `gate-shadow` when the recorder wrote nothing (4.3), `frozen`
-when held rows were moved, with `start_ts` the device's last fresh reading (exclusive) and `rows`
-the rows moved. `held_scan` keeps the scan's watermark. `held_generation` is a single counter, the
+when held rows were moved, with `start_ts` the newest row of the device kept in `samples` before
+them (exclusive: its last fresh reading, or a restated row left there, 4.4) and `rows` the rows
+moved. `held_scan` keeps the scan's watermark. `held_generation` is a single counter, the
 samples generation, advanced in the same transaction as every move and every restore (4.4).
 
 The composite `(sn, metric, ts)` index serves `query()`/`queryMulti()`; the
@@ -311,7 +312,13 @@ stretch depends on its length (`HELD_RETURN_GAP_MS`, an hour: the night ledger's
   which then claimed 257.9 h.
 - A stretch that neither qualifies nor extends a moved span when a silence begins is over: its
   rows stay, and the next stretch starts from its last row, as it does after a return reading
-  that another silence follows.
+  that another silence follows. Such a kept restated row can then be a span's start. When it
+  starts a span an earlier scan moved, the scanner measures the gap to the next row again from the
+  end of the moved rows, so a scan that re-reads the span from before its start treats a short gap
+  there as a hole, as a scan anchored on that row does (v1.188.1, third review: the next row always
+  opened a return piece, and a scan that re-read the span left the rest of a hold that ended within
+  the hour in `samples` for good; the 3 h overlap, the boot scan after a stop and the retry after a
+  failed slice, which always re-reads from the span's start, all re-read it).
 
 The anchor of every stretch is therefore the newest row kept in `samples` before it, which is what
 an hourly scan reads as its anchor, and which rows are moved, where a span starts and where it ends
@@ -319,17 +326,18 @@ do not depend on how often the scan runs (v1.188.1, second review: with every ga
 heartbeats ending a stretch, a restart's 20-min hole had left a running hold's tail in `samples`,
 two 40-min parts of one hold had never added up, and a scan of the whole history and the hourly
 scans had disagreed about equal groups between two silences). The one limit is a hold whose
-observed hour takes longer than the 3 h rescan overlap to build up (many hour-long holes): only a
-scan that reads it whole, the first, moves it. A stretch that does not qualify on its own is kept
-only to extend a span an earlier scan moved, from the same last fresh reading; the scanner
-measures its first row from where that span ends (`movedThroughMs`), so a hole after the moved
-rows is a hole, and a longer silence makes the rows after it a return piece. Synthetic series and
+observed hour takes longer than the 3 h rescan overlap to build up. Any interval of more than two
+heartbeats between its rows adds nothing to the observed time, so restatements 25 min apart are
+enough, not only hour-long holes. Only a scan that reads such a hold whole, the first, moves all of
+it; the hourly scans leave its first restated rows in `samples` as the anchor. A stretch that does
+not qualify on its own is kept only to extend a span an earlier scan moved, from the same start;
+the scanner measures its first row from where that span ends (`movedThroughMs`), so a hole after
+the moved rows is a hole, and a longer silence makes the rows after it a return piece. Synthetic series and
 bench spares are never scanned. Each hour of a stretch moves in one transaction: copy, delete, the two counts
 compared (a mismatch rolls back), the span logged. A slice whose transaction fails rolls back,
 the rest of that span stays in `samples`, and the scan saves its watermark no later than the span's
-last fresh reading, so the next scan re-reads the span from there and extends what was already
-moved. Rows younger than 15 min wait for the next scan,
-because the lifetime rollup re-reads its last 10 min. The scan runs a minute after boot, then
+start, so the next scan re-reads the span from there and extends what was already moved. Rows
+younger than 15 min wait for the next scan, because the lifetime rollup re-reads its last 10 min. The scan runs a minute after boot, then
 hourly, on the main thread (the alarm engine's): six hours of one device's rows read, or one hour of
 them moved, per timer tick. A device's frozen spans are read once per scan, before its rows, and the
 scanner keeps only the stretches that can be moved (those that qualify and the tails above); the
@@ -340,15 +348,15 @@ retention window from each device's oldest row (one index seek per series), not 
 where most of its six-hour steps read nothing; the night-charge capture waits for it (section 7 of chapter 15); later scans
 re-read 3 h before their watermark, so a hold still running is extended from where its last move
 stopped. It runs in the add-on (`SUPERVISOR_TOKEN` set) unless `RECORDER_HELD_SCAN=off`, and
-elsewhere only with `RECORDER_HELD_SCAN=on`. Each span logs one `HELD SAMPLES` line, from its last
-fresh reading to the end of what that scan moves, with an estimate of the held flow the lifetime
+elsewhere only with `RECORDER_HELD_SCAN=on`. Each span logs one `HELD SAMPLES` line, from its start
+to the end of what that scan moves, with an estimate of the held flow the lifetime
 counters had integrated over the stretch's observed time in that range (`FrozenStretch.observed`,
 the intervals the counters integrate); each later scan that extends the span states the range it
 moved and the held flow in it on its `held samples of … moved` line, so the parts add up to the
 span's held flow once. The counters are not rewritten, because Home Assistant reads a decrease as a
-meter reset. If a device's seeded gap clock (4.7) was
-one of the moved rows, the clock goes back to the last fresh reading, and a per-device gap record
-whose start was one of them is re-dated to it, keeping its alert id (4.7).
+meter reset. If a device's gap clock (4.7), seeded at boot or written in this process, was one of
+the moved rows, the clock goes back to the span's start, and a per-device gap record whose start
+was one of them is re-dated to it, keeping its alert id (4.7).
 
 **Readers that memoise.** Every move and restore advances the samples generation
 (`held_generation`) in its own transaction; both recorders read it (`samplesGeneration()`). The
@@ -363,8 +371,8 @@ its held flows a minute before the scan moved them.
 
 **Restoring.** `restoreHeldSamples(sn, start)` moves one span back unchanged and sets
 `held_spans.restored_at_ms`; no later scan moves a restored span again. A per-device gap record the
-move had re-dated to the span's start goes back to the start it was filed with, and a seeded gap
-clock the move had set back goes forward again (4.7). In SQL, in one transaction:
+move had re-dated to the span's start goes back to the start it was filed with, and a gap clock
+the move had set back into that span goes forward again (4.7). In SQL, in one transaction:
 copy the span's rows (`sn = ? AND ts > start_ts AND ts <= end_ts`) from `held_samples` to `samples`,
 delete them from `held_samples`, set `restored_at_ms` on the span, and advance the samples
 generation with `UPDATE held_generation SET gen = gen + 1 WHERE id = 1`. Without that last step the
@@ -472,21 +480,29 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   more than 6 h filed every device but the first to answer. The fleet gap of a fleet-wide hold
   ends at the first FRESH home write; after the 2026-10-14 outage each Core still held is filed
   6 h after the panel's first fresh reading (04:16 → about 10:16), not 6 h after it went quiet.
-  A Core still held at a restart is measured from its last fresh sample once the scan has moved
-  its held rows (4.4).
+  A Core still held at a restart is measured from the start of its held span (as a rule its last
+  fresh sample) once the scan has moved its held rows (4.4). So is a Core whose replayed body was
+  written in this process (a Core has no shadow latch, so the gate passes a replay with a fresh
+  clock): when the hourly scan moves the row its clock reads, the clock goes back to the span's
+  start. Left on the moved row, the
+  sweep filed the record a hold late, with a start at the last held row and a duration short by
+  the whole hold, and no later move re-dated it.
 - **One blackout, one record (v1.188.1).** A per-device record filed from a held row (the seed
   before the scan moved it, by this boot or by an earlier version) is re-dated when that row is
-  moved: its start becomes the span's last fresh reading, the device's true last reading, and the
-  start it was filed with is kept as `alertStartMs`, which keys its alert id, so the push and digest
-  dedupe hold (alerts chapter, section 2.3). The sweep also extends an overlapping record of the
+  moved: its start becomes the span's start, the newest row of the device left in `samples` (its
+  last fresh reading, or a restated row too short to be a hold that a silence followed, 4.4, which
+  the log names as such and which the next boot's seed reads), and the start it was filed with is
+  kept as `alertStartMs`, which keys its alert id, so the push and digest dedupe hold (alerts
+  chapter, section 2.3). The sweep also extends an overlapping record of the
   same device that starts later than the gap it measures, with the same re-dating: that is the
   record a boot finds when the move happened in a process that did not re-date it. Matched only on
   the exact start, the restart after the move filed a second record for every Core still dark, with
   a new id: four more warnings pushed at once and `system_device_gap_count_24h` doubled. A device
   that wrote since its record starts its next gap after that record's end, so a second blackout is
   a second record. A restore of the span (4.4) returns the record to the start it was filed with
-  (`alertStartMs`, then dropped) and puts a seeded clock the move had set back where it was; a boot
-  whose seed reads that start again (a restore by SQL) does the same through the sweep. Left
+  (`alertStartMs`, then dropped) and puts a gap clock the move had set back into that span where it
+  was (the clock is remembered per device, and only the restore of the span it lies in uses it); a
+  boot whose seed reads that start again (a restore by SQL) does the same through the sweep. Left
   re-dated, the next boot's seed matched neither the record's start nor its overlap and filed a
   second record with the same alert id.
 - **Silences the gate explains (v1.188.1).** The recorder keeps the home devices the gate held in
@@ -495,7 +511,10 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   those evaluations. An in-process fleet gap (or the post-boot silence) carries the set (`held`:
   each SN, and whether it was the panel's cloud shadow) only when the evaluations went on through
   it, none more than `RECORD_FRESH_MS` (3 min) apart and the last that close to its end; its alert
-  then names what was held instead of an MQTT/broker stall. Before the gate a held projection was
+  then names what was held instead of an MQTT/broker stall. A home device those evaluations read
+  with fresh content and nothing measurable (an SHP2 body with no channel and no grid reading), never
+  held in the silence, is carried beside it (`unmeasured`), so the alert names it instead of saying
+  that every home device it had a reading for was held. Before the gate a held projection was
   restated every 5 min, so a fleet gap meant that no change event reached the recorder at all; with
   it, a panel shadowed or stale for 15 min while no Core has a projection files one. (The first
   version took the set from every evaluation that wrote no home row: a panel reading the dedupe

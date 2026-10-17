@@ -242,8 +242,8 @@ const MUTANTS = [
   {
     id: 'xxxii. ★ the post-boot silence is ledgered on the non-defer path only',
     file: RECORDER,
-    find: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now) });',
-    to: '      if (postBootSilence && !restartGapAnchorMs) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now) }); /* MUTANT: non-defer boots only */',
+    find: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now), unmeasured: silenceUnmeasuredList() });',
+    to: '      if (postBootSilence && !restartGapAnchorMs) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now), unmeasured: silenceUnmeasuredList() }); /* MUTANT: non-defer boots only */',
     why: 'The round-2 shape: an RTC-less boot whose clock starts behind the newest sample waits hours for its first write, and the next boot files a silent device as dark for the wait.',
   },
   {

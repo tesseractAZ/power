@@ -145,7 +145,9 @@ export function overlapMs(a0: number, a1: number, b0: number, b1: number): numbe
 /* ─────────────────────────────── the frozen detector ─────────────────────────────── */
 
 export interface FrozenStretch {
-  /** The last instant at which some metric changed (a fresh reading): exclusive. */
+  /** The stretch's anchor, exclusive: the newest row kept in `samples` before it — the last instant
+   *  at which some metric changed (a fresh reading), or (v1.188.1 review 2) a restated row left
+   *  there because what it ended did not continue a hold (createFrozenScanner). */
   startMs: number;
   /** The last restated row of the stretch: inclusive. */
   endMs: number;
@@ -280,7 +282,10 @@ const newStretchAcc = (): StretchAcc => ({
  * So whether a row is moved, where a span starts and where it ends do not depend on how often the
  * scan runs: the anchor of every stretch is the newest row kept in `samples` before it, which is
  * what an hourly scan reads as its anchor (`movedThroughMs` tells it where the rows an earlier
- * scan moved from that anchor end).
+ * scan moved from that anchor end; review 3: the gap after such an anchor is measured from there
+ * too). The one exception is a hold whose observed hour takes longer than the rescan overlap to
+ * build up (restatements more than a bridge apart add nothing to it): the hourly scans leave its
+ * first restated rows in samples as its anchor, and only a scan that reads it whole moves them.
  *
  * `prev` is each metric's value before the first fed row and `anchorMs` the ts of the newest such
  * row (the last fresh instant before the scan, when the scan starts mid-hold); both empty/null on
@@ -306,6 +311,8 @@ export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs:
     const movedEnd = movedThrough(ts);
     prevRowTs = movedEnd != null && movedEnd > ts ? movedEnd : ts;
   };
+  /** Is the gap with no rows before a row at `ts` a SILENCE (more than returnGapMs), not a hole? */
+  const silenceBefore = (ts: number) => prevRowTs != null && ts - prevRowTs > returnGapMs;
   if (anchorMs != null) setAnchor(anchorMs);
   const restatementsOf = (a: StretchAcc) => {
     let n = 0;
@@ -339,7 +346,7 @@ export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs:
           close();
           setAnchor(ts);
         } else {
-          if (prevRowTs != null && ts - prevRowTs > returnGapMs) {
+          if (silenceBefore(ts)) {
             // A silence. What came before it that cannot become part of a hold any more stays in
             // samples, and the stretch starts again from its last row: a return piece that did not
             // qualify on its own, or a stretch that neither qualifies nor extends a moved span.
@@ -352,7 +359,14 @@ export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs:
               close();
               setAnchor(kept);
             }
-            ret = newStretchAcc();
+            // v1.188.1 (review 3) — measured again from the new anchor. A kept row that starts a span
+            // an earlier scan moved has its previous row at that span's end (setAnchor), so this row
+            // may follow it within a hole: it continues the span, exactly as for a scan whose anchor
+            // is that row. Opened unconditionally, a scan that re-read the span from before its start
+            // (the 3 h overlap, a boot after a stop, the retry after a failed slice) made the rows
+            // after the moved part a return piece that had to qualify again, and a hold that ended
+            // within the hour stayed in samples for good: the next scan's anchor is a row after it.
+            if (silenceBefore(ts)) ret = newStretchAcc();
           }
           const acc = ret ?? cur;
           for (let k = i; k < j; k++) {
@@ -512,7 +526,10 @@ export interface HeldSamplesOptions {
   /** Each metric a device has rows for. */
   listMetrics: (sn: string) => string[];
   /** Called after a slice of a span was moved: no row of `sn` in (spanStartMs, endMs] is left in
-   *  `samples`, and spanStartMs is the stretch's last fresh reading. */
+   *  `samples`, and spanStartMs is the stretch's anchor, the newest row of `sn` kept there before
+   *  them (FrozenStretch.startMs): its last fresh reading, or (v1.188.1 review 2) a restated row
+   *  left there. v1.188.1 (review 3) — not always the last fresh reading, so a caller states it as
+   *  the newest row kept, not as the moment the device went quiet. */
   onMoved?: (sn: string, startMs: number, endMs: number) => void;
   /** v1.188.1 (review 2) — called after a span was restored: the rows of `sn` in (startMs, endMs]
    *  are back in `samples`, so whatever onMoved re-dated from them goes back too. */
@@ -574,6 +591,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
      ON CONFLICT(id) DO UPDATE SET scanned_to_ts = excluded.scanned_to_ts, full_scan_at_ms = COALESCE(held_scan.full_scan_at_ms, excluded.full_scan_at_ms)`,
   );
   const pruneHeldStmt = db.prepare('DELETE FROM held_samples WHERE ts < ?');
+  const heldRowWithinStmt = db.prepare('SELECT 1 AS one FROM held_samples WHERE sn = ? AND ts >= ? AND ts <= ? AND metric = ? LIMIT 1');
   const pruneSpansStmt = db.prepare('DELETE FROM held_spans WHERE end_ts < ?');
   const bumpGenerationStmt = db.prepare(SAMPLES_GENERATION_SQL.bump);
   const readGeneration = samplesGenerationReader(db);
@@ -805,9 +823,11 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     } catch (e: any) {
       try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
       // v1.188.1 (review) — the retry the log promises. The watermark is saved no later than this
-      // span's last fresh reading (finishScan), so the next scan re-reads the span from before it:
-      // its anchor is that fresh reading again, not one of the held rows left in place, and the
-      // slices already moved are extended from where they stopped (the span's prior end).
+      // span's start (finishScan), so the next scan re-reads the span from before it: its anchor is
+      // that start again, not one of the held rows left in place, and the slices already moved are
+      // extended from where they stopped (the span's prior end). v1.188.1 (review 3) — also when
+      // the start is a kept restated row the re-read passes as a silence: the rows after the moved
+      // part are measured from its end (createFrozenScanner), not made a return piece.
       if (job.spanStartMs < failedFromMs) failedFromMs = job.spanStartMs;
       o.log(`recorder: held-sample move FAILED for ${job.sn} (${new Date(job.fromMs).toISOString()} → ${new Date(job.toMs).toISOString()}): ${e?.message ?? e} — this slice was rolled back and the rest of the span left in samples; the next scan re-reads ${job.sn} from ${new Date(job.spanStartMs).toISOString()}`);
       // Drop the rest of this span's slices: the next scan re-reads the span.
@@ -932,6 +952,13 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     return out;
   }
 
+  /** v1.188.1 (review 3) — is a held row of (sn, metric) in [sinceMs, untilMs]? The night ledger's
+   *  reset note says an actual was integrated from held readings only when one was inside the span
+   *  it was captured over (nightLedgerScoring.heldCapturedClause). */
+  function heldRowsWithin(sn: string, metric: string, sinceMs: number, untilMs: number): boolean {
+    return heldRowWithinStmt.get(sn, sinceMs, untilMs, metric) != null;
+  }
+
   /** The hourly retention sweep: held rows age off with the samples they were part of; the span
    *  log is kept past the night ledger's 60-day sweep. */
   function prune(atMs: number): { rows: number; spans: number } {
@@ -956,6 +983,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     isRunning: () => running,
     restore,
     spans,
+    heldRowsWithin,
     prune,
     samplesGeneration: readGeneration,
   };

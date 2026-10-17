@@ -16,9 +16,10 @@
  */
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, unlinkSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 
@@ -149,23 +150,39 @@ test('★★ a span restored by SQL (architecture 4.4): the next boot returns th
   t.mock.method(Date, 'now', () => now);
   const rec = createRecorder(makeStore(), () => {});
   let ids: string[] = [];
+  let genBefore = 0;
   try {
     now = BOOT + MIN;
     panelReads(rec, now);
     ids = deviceAlertIds(rec.telemetryGaps(), now);
     now = BOOT + 2 * MIN;
     assert.equal(rec.scanHeldSamples!(now).rowsMoved, heldA.length);
+    genBefore = rec.samplesGeneration!();
+    assert.ok(genBefore > 0, 'precondition: the move advanced the samples generation');
   } finally { rec.close(); }
-  // The documented recipe, in one transaction: copy back, delete, mark restored, bump the generation.
+  // v1.188.1 (review 3) — the recipe AS DOCUMENTED (architecture 4.4, "Restoring"), in one
+  // transaction: copy back and delete on the documented row condition, mark the span restored, and
+  // run the documented generation statement. Before, this test ran the source's own bump, so the
+  // documented statement was never executed and nothing pinned the step.
+  const arch = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../docs/reference/01-architecture.md'), 'utf8');
+  const restoring = arch.slice(arch.indexOf('**Restoring.**'), arch.indexOf('#### 4.5'));
+  assert.ok(restoring.startsWith('**Restoring.**'), 'architecture 4.4 has its Restoring paragraph');
+  const rowsWhere = /copy the span's rows \(`([^`]+)`\) from `held_samples` to `samples`/.exec(restoring)?.[1];
+  assert.equal(rowsWhere, 'sn = ? AND ts > start_ts AND ts <= end_ts', 'the documented row condition');
+  assert.match(restoring, /delete them from `held_samples`, set `restored_at_ms` on the span/, 'the documented delete and mark');
+  const bump = /advance the samples\s+generation with `(UPDATE held_generation[^`]+)`/.exec(restoring)?.[1];
+  assert.ok(bump != null, `★★ the documented generation statement: ${restoring}`);
   withDb((db) => {
     const span = db.prepare("SELECT end_ts FROM held_spans WHERE sn = ? AND start_ts = ? AND reason = 'frozen'").get(CORE_A, lastFresh) as { end_ts: number };
+    const where = rowsWhere.replace('start_ts', String(lastFresh)).replace('end_ts', String(span.end_ts));
     db.exec('BEGIN');
-    db.prepare('INSERT INTO samples (ts, sn, metric, value) SELECT ts, sn, metric, value FROM held_samples WHERE sn = ? AND ts > ? AND ts <= ?').run(CORE_A, lastFresh, span.end_ts);
-    db.prepare('DELETE FROM held_samples WHERE sn = ? AND ts > ? AND ts <= ?').run(CORE_A, lastFresh, span.end_ts);
+    db.prepare(`INSERT INTO samples (ts, sn, metric, value) SELECT ts, sn, metric, value FROM held_samples WHERE ${where}`).run(CORE_A);
+    db.prepare(`DELETE FROM held_samples WHERE ${where}`).run(CORE_A);
     db.prepare("UPDATE held_spans SET restored_at_ms = ? WHERE sn = ? AND start_ts = ? AND reason = 'frozen'").run(now, CORE_A, lastFresh);
-    db.exec('INSERT INTO held_generation (id, gen) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET gen = gen + 1');
+    db.exec(bump!);
     db.exec('COMMIT');
   });
+  assert.equal(withDb((db) => Number((db.prepare('SELECT COUNT(*) AS n FROM held_samples').get() as { n: number }).n)), 0, 'every row is back in samples');
   now = BOOT + 4 * H;
   const lines: string[] = [];
   const rec2 = createRecorder(makeStore(), (m) => lines.push(m));
@@ -179,6 +196,7 @@ test('★★ a span restored by SQL (architecture 4.4): the next boot returns th
     assert.equal(g[0].endMs, now, 'and extended to this boot');
     assert.deepEqual(deviceAlertIds(rec2.telemetryGaps(), now), ids, '★★★ the same alert id');
     assert.ok(lines.some((l) => l.includes(`DEVICE TELEMETRY GAP — ${CORE_A}`) && l.includes(`returned from ${new Date(lastFresh).toISOString()}`)), lines.join('\n'));
+    assert.equal(rec2.samplesGeneration!(), genBefore + 1, '★★ the documented statement advanced the samples generation: the worker\'s memos see the restore');
   } finally { rec2.close(); }
 });
 
@@ -309,6 +327,13 @@ test('★★ what the gate held is taken only from evaluations with no recordabl
     assert.ok(g, `precondition: a fleet gap ${JSON.stringify(rec.telemetryGaps())}`);
     assert.equal(g.startMs, T0, 'precondition: nothing was written after T0 (the panel was skipped by the dedupe)');
     assert.deepEqual(g.held, [{ sn: PANEL, shadow: false }], `★★ the panel, held since its content stopped — not Core 2, held only while the panel was read: ${JSON.stringify(g)}`);
+    // v1.188.1 (review 3) — Core 2 was read fresh with nothing measurable through the silence: it
+    // is named as such, and the alert does not say that every home device it read was held.
+    assert.deepEqual(g.unmeasured, [CORE_B], '★ Core 2, read fresh with nothing measurable');
+    const [a] = outageAlerts(JSON.parse(JSON.stringify([g])), clk.now, OPTS, nameOf);
+    assert.ok(a.detail.startsWith('No home-device reading could be recorded for 26 min'), a.detail);
+    assert.ok(a.detail.includes('but no home device it had a reading for gave one to record — Smart Home Panel 2 sent no new readings; Core 2 reported nothing measurable, so nothing was recorded'), a.detail);
+    assert.doesNotMatch(a.detail, /every home device/, '★ not "every home device it read was held"');
   } finally { rec.close(); }
 });
 
@@ -335,6 +360,7 @@ test('★ a bench spare held through the silence is not named; a shadow seen onc
     assert.ok(g, `precondition: a fleet gap ${JSON.stringify(rec.telemetryGaps())}`);
     assert.deepEqual(g.held, [{ sn: CORE_B, shadow: false }, { sn: PANEL, shadow: true }],
       `★ the spare is dark by design and never named; the panel's shadow is kept: ${JSON.stringify(g.held)}`);
+    assert.equal(g.unmeasured, undefined, 'the panel\'s one empty body is not named beside its hold (review 3)');
   } finally { rec.close(); }
 });
 
@@ -358,6 +384,246 @@ test('★★ the post-boot silence carries what the gate held through it, and no
       return gaps[0];
     } finally { rec.close(); }
   };
-  assert.deepEqual(runCase(19).held, [{ sn: PANEL, shadow: false }], '★★ held through it');
+  const through = runCase(19);
+  assert.deepEqual(through.held, [{ sn: PANEL, shadow: false }], '★★ held through it');
+  assert.equal(through.unmeasured, undefined, 'its first, empty body is not named beside its hold (review 3)');
   assert.equal(runCase(5).held, undefined, '★ the evaluations stopped 15 min before its end');
+});
+
+/* ══ 3. review round 3 ═════════════════════════════════════════════════════ */
+
+const iso = (ms: number) => new Date(ms).toISOString();
+const fmtClock = (ms: number) => new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+/** A Core's DPU projection with a fresh content clock (14 metrics written). */
+const dpu = (sn: string, contentAt: number, soc: number): Snap => ({
+  sn, deviceName: names[sn] ?? sn, lastTelemetryAtMs: contentAt,
+  projection: {
+    kind: 'dpu', soc, pvTotalWatts: 0, pvHighWatts: 0, pvLowWatts: 0, pvHighVolts: 1, pvHighAmps: 1, pvLowVolts: 1, pvLowAmps: 1,
+    acInWatts: 0, acOutWatts: 300, totalInWatts: 0, totalOutWatts: 300, batVol: 52, batAmp: -6, packs: [],
+  },
+});
+
+/** In this process: a Core changes to T0 + 30 min, then the cloud replays its body with a fresh
+ *  clock for 2 h (a Core has no shadow latch: the gate passes it, the heartbeat writes it), then it
+ *  stops while the panel reports; the hourly scan moves the replay. */
+function replayedCore(t: TestContext, day: number) {
+  reset([]);
+  const T0 = phx(2026, 10, day, 5, 0);
+  const clk = clocked(t, T0);
+  const lines: string[] = [];
+  const rec = createRecorder(makeStore(), (m) => lines.push(m));
+  const send = (devices: Snap[]) => rec.insertSnapshot({ generatedAt: clk.now, devices: Object.fromEntries(devices.map((d) => [d.sn, d])) } as any);
+  for (let m = 1; m <= 30; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), dpu(CORE_A, clk.now, 50 + m)]); }
+  for (let m = 31; m <= 150; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), dpu(CORE_A, clk.now, 80)]); }
+  for (let m = 151; m <= 210; m++) { clk.at(T0 + m * MIN); send([panel(clk.now)]); }
+  const sum = rec.scanHeldSamples!(clk.now);
+  /** The panel reports each minute to `toMin`; returns when the Core's record was first filed. */
+  const panelUntil = (toMin: number) => {
+    let filedAt: number | null = null;
+    for (let m = Math.round((clk.now - T0) / MIN) + 1; m <= toMin; m++) {
+      clk.at(T0 + m * MIN);
+      send([panel(clk.now)]);
+      if (filedAt == null && rec.telemetryGaps().some((g) => g.sn === CORE_A)) filedAt = clk.now;
+    }
+    return filedAt;
+  };
+  return { T0, clk, rec, lines, sum, lastFresh: T0 + 30 * MIN, lastHeldWrite: T0 + 150 * MIN, panelUntil };
+}
+
+test('★★★ a Core written in this process whose replayed rows the scan moved: its gap is measured from the span\'s start and filed so', (t) => {
+  const { rec, sum, lastFresh, lastHeldWrite, panelUntil, clk } = replayedCore(t, 18);
+  try {
+    assert.ok(sum.rowsMoved > 0, 'precondition: the replay was moved');
+    assert.deepEqual(rec.heldSpans!(0, clk.now).filter((s) => s.reason === 'frozen').map((s) => [s.startMs, s.endMs]), [[lastFresh, lastHeldWrite]], 'precondition: the span');
+    const filedAt = panelUntil(150 + 6 * 60 + 5);
+    const g = rec.telemetryGaps().filter((x) => x.sn === CORE_A);
+    assert.equal(g.length, 1, JSON.stringify(rec.telemetryGaps()));
+    assert.equal(g[0].startMs, lastFresh, `★★★ from the span's start, not from the last held row it wrote: ${iso(g[0].startMs)}`);
+    assert.equal(g[0].alertStartMs, undefined, 'filed so: nothing to re-date');
+    assert.ok(filedAt != null && filedAt - lastFresh <= 6 * H + 2 * MIN, `★★ filed 6 h after the span's start, not a hold later: ${filedAt == null ? 'never' : iso(filedAt)}`);
+    const [a] = outageAlerts(JSON.parse(JSON.stringify(g)), clk.now, OPTS, nameOf);
+    assert.ok(a.detail.includes(`(${fmtClock(lastFresh)} → `), `★★ the pushed start: ${a.detail}`);
+  } finally { rec.close(); }
+});
+
+test('★★ restoring that span puts the in-process clock forward again: the gap is measured from the restored row', (t) => {
+  const { rec, lastFresh, lastHeldWrite, panelUntil } = replayedCore(t, 19);
+  try {
+    assert.ok(rec.restoreHeldSamples!(CORE_A, lastFresh) > 0, 'precondition: restored');
+    panelUntil(150 + 6 * 60 + 5);
+    const g = rec.telemetryGaps().filter((x) => x.sn === CORE_A);
+    assert.equal(g.length, 1, JSON.stringify(rec.telemetryGaps()));
+    assert.equal(g[0].startMs, lastHeldWrite, `★★ from the row back in samples: ${iso(g[0].startMs)}`);
+  } finally { rec.close(); }
+});
+
+/** Core A held twice: 4 h, then (a day later) 40 h; the record was filed from the last held row. */
+function twoHolds() {
+  const T0 = phx(2026, 10, 4, 17, 0);
+  const lastFresh1 = T0 + 2 * H;
+  const a1 = live(CORE_A, T0, lastFresh1);
+  const heldA1 = held(CORE_A, a1, lastFresh1 + 5 * MIN, lastFresh1 + 4 * H);
+  const lastFresh2 = lastFresh1 + 29 * H;
+  const a2 = live(CORE_A, lastFresh1 + 4 * H + 5 * MIN, lastFresh2, 5);
+  const heldA2 = held(CORE_A, a2, lastFresh2 + 5 * MIN, lastFresh2 + 40 * H);
+  const lastHeldRow = Math.max(...heldA2.map((r) => r[0]));
+  const BOOT = lastHeldRow + 7 * H;
+  return { lastFresh1, lastFresh2, BOOT, lastHeldRow, heldA1, heldA2, rows: [...a1, ...heldA1, ...a2, ...heldA2, ...panelRows(T0, BOOT - MIN)] };
+}
+
+for (const order of ['older', 'newer'] as const) {
+  test(`★ two spans of a device restored, the ${order} first: the clock and the record go back to the start it was filed with`, (t) => {
+    const { BOOT, rows, lastFresh1, lastFresh2, lastHeldRow, heldA1, heldA2 } = twoHolds();
+    reset(rows);
+    const filedEnd = lastHeldRow + 6 * H + 3 * MIN;
+    writeFileSync(GAPS_PATH, JSON.stringify([{ startMs: lastHeldRow, endMs: filedEnd, durationMs: filedEnd - lastHeldRow, detectedAt: filedEnd, sn: CORE_A }]));
+    let now = BOOT;
+    t.mock.method(Date, 'now', () => now);
+    const rec = createRecorder(makeStore(), () => {});
+    try {
+      now = BOOT + MIN;
+      assert.equal(rec.scanHeldSamples!(now).rowsMoved, heldA1.length + heldA2.length, 'precondition: both spans moved');
+      assert.equal(rec.telemetryGaps()[0].startMs, lastFresh2, 'precondition: re-dated to its own span\'s start');
+      const starts = order === 'older' ? [lastFresh1, lastFresh2] : [lastFresh2, lastFresh1];
+      for (const s of starts) assert.ok(rec.restoreHeldSamples!(CORE_A, s) > 0);
+      now = BOOT + 2 * MIN;
+      panelReads(rec, now);
+      const g = rec.telemetryGaps().filter((x) => x.sn === CORE_A);
+      assert.equal(g.length, 1);
+      assert.equal(g[0].startMs, lastHeldRow, `★ at the row it was filed from, not re-dated again by the sweep: ${iso(g[0].startMs)}`);
+      assert.equal(g[0].alertStartMs, undefined);
+    } finally { rec.close(); }
+  });
+}
+
+test('★ a device that reported fresh after the boot (off its seeded clock) still has its record re-dated by the move', (t) => {
+  const { BOOT, rows, heldA, lastHeldRow, lastFresh } = heldCore();
+  reset(rows);
+  const filedEnd = lastHeldRow + 6 * H + 3 * MIN;
+  writeFileSync(GAPS_PATH, JSON.stringify([{ startMs: lastHeldRow, endMs: filedEnd, durationMs: filedEnd - lastHeldRow, detectedAt: filedEnd, sn: CORE_A }]));
+  let now = BOOT;
+  t.mock.method(Date, 'now', () => now);
+  const rec = createRecorder(makeStore(), () => {});
+  try {
+    now = BOOT + MIN;
+    rec.insertSnapshot({ generatedAt: now, devices: { [PANEL]: panel(now), [CORE_A]: core(CORE_A, now) } } as any); // back, fresh
+    now = BOOT + 2 * MIN;
+    assert.equal(rec.scanHeldSamples!(now).rowsMoved, heldA.length);
+    const g = rec.telemetryGaps().filter((x) => x.sn === CORE_A);
+    assert.equal(g.length, 1);
+    assert.equal(g[0].startMs, lastFresh, `★ re-dated: its clock is in-process, the record still started at a moved row (${iso(g[0].startMs)})`);
+    assert.equal(g[0].alertStartMs, lastHeldRow);
+  } finally { rec.close(); }
+});
+
+test('★★ a record re-dated to a KEPT restated row says it is the newest row left in samples, and the next boot\'s seed reads that row: one record', (t) => {
+  // Live to X; a 35-min restated stretch (too short to be a hold; K = its last row) is left in
+  // samples; a 70-min silence; then a 2 h hold, which starts its span at K.
+  const T0 = phx(2026, 10, 15, 0, 0);
+  const X = T0 + 2 * H;
+  const a1 = live(CORE_A, T0, X);
+  const P1 = held(CORE_A, a1, X + 5 * MIN, X + 40 * MIN);
+  const K = Math.max(...P1.map((r) => r[0]));
+  const P2 = held(CORE_A, a1, X + 110 * MIN, X + 230 * MIN);
+  const lastHeldRow = Math.max(...P2.map((r) => r[0]));
+  const BOOT = lastHeldRow + 7 * H;
+  reset([...a1, ...P1, ...P2, ...panelRows(T0, BOOT - MIN)]);
+  let now = BOOT;
+  t.mock.method(Date, 'now', () => now);
+  const lines: string[] = [];
+  const rec = createRecorder(makeStore(), (m) => lines.push(m));
+  let ids: string[] = [];
+  try {
+    now = BOOT + MIN;
+    panelReads(rec, now);
+    assert.equal(rec.telemetryGaps().find((x) => x.sn === CORE_A)?.startMs, lastHeldRow, 'precondition: filed from the seed, the last held row');
+    ids = deviceAlertIds(rec.telemetryGaps(), now);
+    now = BOOT + 2 * MIN;
+    assert.equal(rec.scanHeldSamples!(now).rowsMoved, P2.length);
+    assert.deepEqual(rec.heldSpans!(0, now).map((s) => s.startMs), [K], 'precondition: the span starts at the kept row');
+    const g = rec.telemetryGaps().filter((x) => x.sn === CORE_A);
+    assert.equal(g[0].startMs, K);
+    const redate = lines.filter((l) => l.includes('re-dated'));
+    assert.ok(redate.some((l) => l.includes(`device telemetry gap of ${CORE_A} re-dated from ${iso(lastHeldRow)} to ${iso(K)}, its newest row left in samples`)), redate.join('\n'));
+    assert.ok(!redate.some((l) => /last fresh/.test(l)), `★★ K is a restated row, not its last fresh reading: ${redate.join('\n')}`);
+  } finally { rec.close(); }
+  now = BOOT + 4 * H;
+  const rec2 = createRecorder(makeStore(), () => {});
+  try {
+    now += MIN;
+    panelReads(rec2, now);
+    const gaps = rec2.telemetryGaps();
+    assert.equal(gaps.filter((x) => x.sn === CORE_A).length, 1, `★★ the seed reads K, the record's start: ${JSON.stringify(gaps)}`);
+    assert.deepEqual(deviceAlertIds(gaps, now), ids);
+  } finally { rec2.close(); }
+});
+
+test('★★ two held silences in one process: the second is judged on its own evaluations and names only what it held', (t) => {
+  reset([]);
+  const T0 = phx(2026, 10, 17, 18, 0);
+  const clk = clocked(t, T0 - MIN);
+  const rec = createRecorder(makeStore(), () => {});
+  const send = (devices: Snap[]) => rec.insertSnapshot({ generatedAt: clk.now, devices: Object.fromEntries(devices.map((d) => [d.sn, d])) } as any);
+  try {
+    let m = 0;
+    for (; m <= 4; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), core(CORE_B, T0 - 5 * MIN)]); }
+    // Silence 1: the panel's body replayed (shadowed), Core A read fresh with nothing measurable,
+    // evaluated only every 5 min: a stall, explained by nothing.
+    for (; m <= 24; m += 5) { clk.at(T0 + m * MIN); send([panel(clk.now, { shadowSince: T0 + 5 * MIN }), core(CORE_B, T0 - 5 * MIN), core(CORE_A, clk.now, true)]); }
+    for (; m <= 34; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), core(CORE_B, T0 - 5 * MIN)]); }
+    // Silence 2: the panel's content stops (stale), evaluated every minute.
+    const stopped = clk.now;
+    for (; m <= 54; m++) { clk.at(T0 + m * MIN); send([panel(clk.now, { contentAt: stopped, watts: 900 }), core(CORE_B, T0 - 5 * MIN)]); }
+    clk.at(T0 + m * MIN);
+    send([panel(clk.now), core(CORE_B, T0 - 5 * MIN)]);
+    const gaps = fleetGaps(rec);
+    assert.equal(gaps.length, 2, JSON.stringify(rec.telemetryGaps()));
+    assert.equal(gaps[0].held, undefined, 'precondition: silence 1, evaluated every 5 min, is a stall');
+    assert.deepEqual(gaps[1].held, [{ sn: CORE_B, shadow: false }, { sn: PANEL, shadow: false }],
+      `★★ silence 2 is explained (its evaluations were a minute apart), and the panel is stale there, not the shadow of silence 1: ${JSON.stringify(gaps[1])}`);
+    assert.equal(gaps[1].unmeasured, undefined, '★ and Core A, read with nothing measurable only in silence 1, is not named');
+  } finally { rec.close(); }
+});
+
+test('★ a bench spare reporting fresh through a held silence does not end it', (t) => {
+  const SPARE = benchSpareSns()[0];
+  assert.ok(SPARE, 'precondition: a bench spare');
+  reset([]);
+  const T0 = phx(2026, 10, 17, 19, 0);
+  const clk = clocked(t, T0 - MIN);
+  const rec = createRecorder(makeStore(), () => {});
+  const send = (devices: Snap[]) => rec.insertSnapshot({ generatedAt: clk.now, devices: Object.fromEntries(devices.map((d) => [d.sn, d])) } as any);
+  try {
+    let m = 0;
+    for (; m <= 4; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), core(CORE_B, T0 - 5 * MIN), dpu(SPARE, clk.now, 40 + m)]); }
+    for (; m <= 24; m++) { clk.at(T0 + m * MIN); send([panel(clk.now, { shadowSince: T0 + 5 * MIN }), core(CORE_B, T0 - 5 * MIN), dpu(SPARE, clk.now, 40 + m)]); }
+    clk.at(T0 + m * MIN);
+    send([panel(clk.now), core(CORE_B, T0 - 5 * MIN), dpu(SPARE, clk.now, 40 + m)]);
+    const [g] = fleetGaps(rec);
+    assert.ok(g, `precondition: a fleet gap ${JSON.stringify(rec.telemetryGaps())}`);
+    assert.deepEqual(g.held, [{ sn: CORE_B, shadow: false }, { sn: PANEL, shadow: true }], `★ the spare's rows are not a home reading: ${JSON.stringify(g)}`);
+  } finally { rec.close(); }
+});
+
+test('★ a held Core while the panel sends fresh bodies with nothing measurable: the alert names both, and not as "every home device held"', (t) => {
+  reset([]);
+  const T0 = phx(2026, 10, 17, 21, 0);
+  const clk = clocked(t, T0 - MIN);
+  const rec = createRecorder(makeStore(), () => {});
+  const send = (devices: Snap[]) => rec.insertSnapshot({ generatedAt: clk.now, devices: Object.fromEntries(devices.map((d) => [d.sn, d])) } as any);
+  try {
+    for (let m = 0; m <= 4; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), dpu(CORE_A, clk.now, 50 + m)]); }
+    // The Core's content stops; the panel goes on with fresh bodies that carry no channel and no grid reading.
+    for (let m = 5; m <= 29; m++) { clk.at(T0 + m * MIN); send([panel(clk.now, { watts: null }), dpu(CORE_A, T0 + 4 * MIN, 54)]); }
+    clk.at(T0 + 30 * MIN);
+    send([panel(clk.now), dpu(CORE_A, T0 + 4 * MIN, 54)]);
+    const [g] = fleetGaps(rec);
+    assert.ok(g, `precondition: a fleet gap ${JSON.stringify(rec.telemetryGaps())}`);
+    assert.deepEqual(g.held, [{ sn: CORE_A, shadow: false }]);
+    assert.deepEqual(g.unmeasured, [PANEL], '★ the panel was read fresh, not held');
+    const [a] = outageAlerts(JSON.parse(JSON.stringify([g])), clk.now, OPTS, nameOf);
+    assert.ok(a.detail.includes('no home device it had a reading for gave one to record — Core 1 sent no new readings; Smart Home Panel 2 reported nothing measurable'), a.detail);
+    assert.doesNotMatch(a.detail, /every home device/);
+    assert.equal(typeOf(g), 'in-process (held readings)');
+  } finally { rec.close(); }
 });

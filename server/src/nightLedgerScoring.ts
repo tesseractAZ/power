@@ -652,34 +652,58 @@ export function heldTagNote(v: HeldLedgerVerdict, name: (sn: string) => string):
     + 'the raw telemetry is past the re-capture horizon, so the row is kept as captured.';
 }
 
+/** v1.188.1 (review 3) — per side, whether a held row (`held_samples`) of a held device lies
+ *  inside the span the row was captured over: PV — `pv_total` of a held Core, load — `panel_load`
+ *  of the panel (recorder.heldRowsWithin). Absent (or a side absent), the side is taken as having
+ *  them: the reading before this check. */
+export interface HeldRowsInSpan { pv?: boolean; load?: boolean }
+
 /** v1.188.1 (dry run) — the actuals of a CAPTURED row that were integrated over held telemetry:
  *  an actual is named only when its side was held (PV — a home Core; load — the panel) and it was
- *  captured non-null. A null actual was never integrated, and an unheld side was not held. PURE. */
+ *  captured non-null. A null actual was never integrated, and an unheld side was not held. PURE.
+ *  v1.188.1 (review 3) — and only when a held row lies inside its span (`heldRows`): a frozen span
+ *  runs from the last change before a silence of more than an hour, so a row whose span overlaps
+ *  only that silence (an hour or more of it, no rows at all) is held by the verdict and had
+ *  integrated no held reading. */
 export function heldIntegratedActuals(
   v: HeldLedgerVerdict,
   captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+  heldRows: HeldRowsInSpan = {},
 ): Array<'PV' | 'load'> {
   const out: Array<'PV' | 'load'> = [];
-  if (v.pv.length > 0 && captured.actual_pv_kwh != null) out.push('PV');
-  if (v.load.length > 0 && captured.actual_load_kwh != null) out.push('load');
+  if (v.pv.length > 0 && captured.actual_pv_kwh != null && heldRows.pv !== false) out.push('PV');
+  if (v.load.length > 0 && captured.actual_load_kwh != null && heldRows.load !== false) out.push('load');
   return out;
 }
 
-/** v1.188.1 (dry run) — what a held-telemetry reset says about the actuals as captured. PURE. */
+/** v1.188.1 (dry run) — what a held-telemetry reset says about the actuals as captured. PURE.
+ *  v1.188.1 (review 3) — an actual captured non-null with no held row inside its span is said to
+ *  have been integrated over hours with no readings, not from held readings. */
 export function heldCapturedClause(
   v: HeldLedgerVerdict,
   captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+  heldRows: HeldRowsInSpan = {},
 ): string {
-  const named = heldIntegratedActuals(v, captured);
-  if (named.length > 0) return `the ${named.join(' and ')} actual${named.length > 1 ? 's' : ''} had been integrated from held readings`;
+  const actuals = (xs: string[]) => `${xs.join(' and ')} actual${xs.length > 1 ? 's' : ''}`;
+  const named = heldIntegratedActuals(v, captured, heldRows);
+  const across: string[] = [];
+  if (v.pv.length > 0 && captured.actual_pv_kwh != null && heldRows.pv === false) across.push('PV');
+  if (v.load.length > 0 && captured.actual_load_kwh != null && heldRows.load === false) across.push('load');
+  const clauses: string[] = [];
+  if (named.length > 0) clauses.push(`the ${actuals(named)} had been integrated from held readings`);
+  if (across.length > 0) clauses.push(`the ${actuals(across)} had been integrated over hours with no readings at all, and no held reading lay inside ${across.length > 1 ? 'their' : 'its'} span`);
+  if (clauses.length > 0) return clauses.join('; ');
   // Nothing integrated: every held side was captured empty.
   const sides = [...(v.pv.length > 0 ? ['PV'] : []), ...(v.load.length > 0 ? ['load'] : [])];
-  return `the held ${sides.join(' and ')} actual${sides.length > 1 ? 's' : ''} had been captured empty, so nothing had been integrated from held readings`;
+  return `the held ${actuals(sides)} had been captured empty, so nothing had been integrated from held readings`;
 }
 
 export interface HeldLedgerRepair {
   action: 'recapture' | 'tag';
   verdict: HeldLedgerVerdict;
+  /** v1.188.1 (review 3) — the PV/load span as captured, the one the verdict measured: where the
+   *  reset looks for held rows (HeldRowsInSpan). */
+  span: TimeSpan;
 }
 
 /**
@@ -702,13 +726,11 @@ export function heldLedgerRepair(
   const we = row.window_end_ms;
   if (typeof ws !== 'number' || typeof we !== 'number' || !(we > ws)) return null; // no window: nothing was integrated
   if (String(row.score_notes ?? '').toLowerCase().includes(HELD_TELEMETRY_MARKER)) return null;
-  const verdict = heldLedgerVerdict({
-    spans: i.spans, coreSns: i.coreSns, panelSn: i.panelSn,
-    span: { startMs: issued, endMs: Math.min(cap, issued + FORECAST_SPAN_MS) },
-  });
+  const span = { startMs: issued, endMs: Math.min(cap, issued + FORECAST_SPAN_MS) };
+  const verdict = heldLedgerVerdict({ spans: i.spans, coreSns: i.coreSns, panelSn: i.panelSn, span });
   if (!verdict) return null;
   const inside = i.nowMs - issued <= i.horizonMs && forecastSpanRecapturable(row);
-  return { action: inside ? 'recapture' : 'tag', verdict };
+  return { action: inside ? 'recapture' : 'tag', verdict, span };
 }
 
 /** v1.188.1 — the columns a held-telemetry re-capture resets: exactly the forecast-span reset's
@@ -720,10 +742,11 @@ export function heldResetColumns(
   v: HeldLedgerVerdict,
   name: (sn: string) => string,
   captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+  heldRows: HeldRowsInSpan = {},
 ): Partial<NightLedgerRow> {
   return {
     ...forecastSpanResetColumns(0),
-    score_notes: `reset — ${heldCapturedClause(v, captured)} (${heldParts(v, name)} with no fresh `
+    score_notes: `reset — ${heldCapturedClause(v, captured, heldRows)} (${heldParts(v, name)} with no fresh `
       + 'readings, before v1.188.1); re-captured by the backfill sweep.',
   };
 }

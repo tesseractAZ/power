@@ -223,6 +223,34 @@ test('★★ the reset note names only the actuals that were integrated over the
   assert.equal(heldCapturedClause(both, { actual_pv_kwh: null, actual_load_kwh: null }), 'the held PV and load actuals had been captured empty, so nothing had been integrated from held readings');
 });
 
+test('★★ v1.188.1 review 3: an actual captured over only the SILENT hours of a frozen span is not said to be integrated from held readings', () => {
+  // A Core's values change every 5 min to F, it is silent 2 h, then it restates its last values to
+  // F + 22 h: one frozen span from F (its last change) through the replay that joined it. A row
+  // whose 24 h span ends 1.5 h into that silence overlaps the span by 1.5 h and holds no held row.
+  const F = phx(2026, 10, 13, 20, 0);
+  const span = { startMs: F + 1.5 * H - FORECAST_SPAN_MS, endMs: F + 1.5 * H };
+  const v = heldLedgerVerdict({ spans: [{ sn: CORES[0], startMs: F, endMs: F + 22 * H }], coreSns: [CORES[0]], panelSn: PANEL, span })!;
+  assert.deepEqual(v.pv, [{ sn: CORES[0], heldMs: 1.5 * H }], 'precondition: held by the verdict');
+  const captured = { actual_pv_kwh: 11.92, actual_load_kwh: 20.5 };
+  const repair = heldLedgerRepair({ ...ROW_1014, issued_at_ms: span.startMs, outcome_captured_at_ms: span.endMs + 6 * H, window_start_ms: span.startMs + 7 * H, window_end_ms: span.startMs + 13 * H },
+    { spans: [{ sn: CORES[0], startMs: F, endMs: F + 22 * H }], coreSns: [CORES[0]], panelSn: PANEL, nowMs: span.endMs + 7 * H, horizonMs: HORIZON });
+  assert.deepEqual(repair?.span, span, 'the repair hands back the span the verdict measured, where the held rows are looked up');
+  const none = { pv: false, load: false };
+  assert.deepEqual(heldIntegratedActuals(v, captured, none), [], '★★ no held row inside the span: nothing integrated from held readings');
+  assert.deepEqual(heldIntegratedActuals(v, captured, { pv: true }), ['PV'], 'a held row inside it: named');
+  assert.deepEqual(heldIntegratedActuals(v, captured), ['PV'], 'unknown: as before the check');
+  const clause = heldCapturedClause(v, captured, none);
+  assert.equal(clause, 'the PV actual had been integrated over hours with no readings at all, and no held reading lay inside its span');
+  const note = String(heldResetColumns(v, name, captured, none).score_notes);
+  assert.equal(note, `reset — ${clause} (PV — Core 1 1.5 h with no fresh readings, before v1.188.1); re-captured by the backfill sweep.`);
+  assert.doesNotMatch(note, /from held readings/, note);
+  // Both kinds in one row: each actual is described by what its own span held.
+  const both = { pv: v.pv, load: [{ sn: PANEL, heldMs: 2 * H }] };
+  assert.equal(heldCapturedClause(both, captured, { pv: false, load: true }),
+    'the load actual had been integrated from held readings; the PV actual had been integrated over hours with no readings at all, and no held reading lay inside its span');
+  assert.equal(heldCapturedClause(both, { actual_pv_kwh: null, actual_load_kwh: null }, none), 'the held PV and load actuals had been captured empty, so nothing had been integrated from held readings');
+});
+
 test('★★ the tag note says the span had no fresh readings (held or missing), never that the actuals were integrated from held readings', () => {
   // The 08-18 / 08-19 rows: Core 2 wrote NO rows at all on those days (a 9.8-day silence), so
   // nothing held was integrated into their actuals.
@@ -263,8 +291,11 @@ test('★★ SOURCE PIN: the sweep waits for the first held-sample scan, then re
   assert.ok(wait > 0 && repair > wait && capture > repair, `${wait} < ${repair} < ${capture}`);
   const fix = fnBody('function repairHeldNightOutcomes(');
   assert.ok(fix.includes('const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs });'));
-  assert.ok(fix.includes('recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf, y));'), 'the row as captured names its own actuals');
-  assert.ok(fix.includes('night-charge: reset ${y.plan_date} for re-capture — ${heldCapturedClause(r.verdict, y)} ('), 'and the log line says the same');
+  assert.ok(fix.includes('recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf, y, heldRows));'), 'the row as captured names its own actuals');
+  assert.ok(fix.includes('night-charge: reset ${y.plan_date} for re-capture — ${heldCapturedClause(r.verdict, y, heldRows)} ('), 'and the log line says the same');
+  // v1.188.1 (review 3) — and only those a held row inside the span as captured fed, per side.
+  assert.ok(fix.includes("const heldRows = { pv: heldIn(r.verdict.pv, 'pv_total'), load: heldIn(r.verdict.load, 'panel_load') };"), 'the held rows are looked up per side, on the metric each actual integrates');
+  assert.ok(fix.includes('side.some((p) => recorder.heldRowsWithin?.(p.sn, metric, r.span.startMs, r.span.endMs) ?? true)'), 'over the span the verdict measured');
   assert.ok(!fix.includes('actuals were integrated from held readings'), 'the tag line does not claim an integration');
   assert.ok(fix.includes('const coreSns = [...shp2ConnectedDpuSns(store.get().devices)];'), 'the same Cores the capture reads');
 });

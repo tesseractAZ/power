@@ -4721,9 +4721,15 @@ function repairHeldNightOutcomes(rows: NightLedgerRow[], shp2Sn: string, nowMs: 
         app.log.info(`night-charge: tagged ${y.plan_date} — its PV/load span had an hour or more with no fresh readings (held or missing) and it is past the re-capture horizon; kept as captured.`);
         continue;
       }
-      recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf, y));
+      // v1.188.1 (review 3) — whether a held row lies inside the span as captured, per side: the
+      // verdict also counts the silent hours of a frozen span (no rows at all), and an actual
+      // integrated across those alone had integrated no held reading.
+      const heldIn = (side: Array<{ sn: string }>, metric: string) =>
+        side.some((p) => recorder.heldRowsWithin?.(p.sn, metric, r.span.startMs, r.span.endMs) ?? true);
+      const heldRows = { pv: heldIn(r.verdict.pv, 'pv_total'), load: heldIn(r.verdict.load, 'panel_load') };
+      recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf, y, heldRows));
       reset = true;
-      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — ${heldCapturedClause(r.verdict, y)} (pv ${y.actual_pv_kwh ?? 'null'} kWh, load ${y.actual_load_kwh ?? 'null'} kWh, buy_err ${y.buy_err_kwh ?? 'null'} kWh as captured).`);
+      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — ${heldCapturedClause(r.verdict, y, heldRows)} (pv ${y.actual_pv_kwh ?? 'null'} kWh, load ${y.actual_load_kwh ?? 'null'} kWh, buy_err ${y.buy_err_kwh ?? 'null'} kWh as captured).`);
     }
   } catch (e: any) {
     app.log.debug(`night-charge: held-telemetry repair skipped (${e?.message ?? e})`);

@@ -119,6 +119,31 @@
  *   E-v     bench spares are named in what the gate held
  *   E-vi    the post-boot silence never carries what the gate held
  *
+ * Review round 3 (a span's start; the gap clocks; what the alerts and notes state):
+ *   A-i     a re-read opens a return piece after a kept anchor's moved span (its tail stays for good)
+ *   A-ii    a re-dated record is logged at its "last fresh reading" again (a kept restated row)
+ *   A-iii   the move sets back only a seeded gap clock (an in-process replay is filed a hold late)
+ *   A-iv    a restore puts back only a seeded gap clock
+ *   A-v     a restore of any span forgets the clock the move set back
+ *   A-vi    the move re-dates a record only when it set a clock back
+ *   A-vii   a gate span is read as a moved frozen span (fresh return readings are moved)
+ *   A-viii  a return piece that joins on its last row leaves the stretch's end behind
+ *   A-ix    a return piece that joins on its last row adds none of its rows
+ *   A-x     the first scan starts at the last listed metric's oldest row
+ *   A-xi    the stall measure is not reset between silences
+ *   A-xii   what the gate held is not cleared between silences
+ *   A-xiii  the devices read with nothing measurable are not cleared between silences
+ *   A-xiv   a bench spare's fresh rows end a held silence
+ *   A-xv    the recorder does not keep the devices read with nothing measurable
+ *   A-xvi   a device held in the silence is also named as read with nothing measurable
+ *   A-xvii  the alert ignores the devices read with nothing measurable
+ *   A-xviii the phrase says every home device was held whatever was read
+ *   A-xix   the dark-device count is by overlap with the window again, not at one instant
+ *   A-xx    the reset note ignores whether a held row lay inside the span
+ *   A-xxi   the sweep does not look the held rows up
+ *   A-xxii  heldRowsWithin finds a held row everywhere
+ *   A-xxiii the documented SQL restore drops the samples-generation step
+ *
  *   node scripts/mutate-v1188-1.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -134,6 +159,7 @@ const REP = resolve(REPO, 'server/src/reports.ts');
 const TM = resolve(REPO, 'web/src/charts/trendMerge.ts');
 const TC = resolve(REPO, 'web/src/charts/TrendChart.tsx');
 const AL = resolve(REPO, 'server/src/alerts.ts');
+const ARCH = resolve(REPO, 'docs/reference/01-architecture.md');
 const SUBSET = [
   'test/recorderHeldReadings.test.ts',
   'test/heldSamplesBackfill.test.ts',
@@ -146,6 +172,7 @@ const SUBSET = [
   'test/deviceGapAlerts.test.ts',
   'test/heldSamplesHoles.test.ts',
   'test/heldGapRecords.test.ts',
+  'test/heldSamplesAnchors.test.ts',
 ];
 
 const MUTANTS = [
@@ -241,10 +268,10 @@ const MUTANTS = [
     why: 'A device that came back keeps an open span, and nothing records that its readings resumed.',
   },
   {
-    id: 'S-iii. ★★ the seeded gap clock is not moved back after a move',
+    id: 'S-iii. ★★ the gap clock is not moved back after a move',
     file: REC,
-    find: '      if (seededNotYetWritten.has(sn) && seed != null && seed > startMs && seed <= endMs) {',
-    to: '      if (seededNotYetWritten.has(sn) && seed != null && seed > startMs && seed <= endMs && Date.now() < 0) { /* MUTANT */',
+    find: '      if (clock != null && clock > startMs && clock <= endMs) {',
+    to: '      if (clock != null && clock > startMs && clock <= endMs && Date.now() < 0) { /* MUTANT */',
     why: 'A Core still held at the deploy is measured from a held row that no longer exists: its gap is filed 6 h late, from the wrong start, and a later boot files a second record.',
   },
   {
@@ -362,8 +389,8 @@ const MUTANTS = [
   {
     id: 'L-iv. the repair reads the full 24 h, not the span the row was captured over',
     file: NLS,
-    find: '    span: { startMs: issued, endMs: Math.min(cap, issued + FORECAST_SPAN_MS) },',
-    to: '    span: { startMs: issued, endMs: issued + FORECAST_SPAN_MS }, /* MUTANT */',
+    find: '  const span = { startMs: issued, endMs: Math.min(cap, issued + FORECAST_SPAN_MS) };',
+    to: '  const span = { startMs: issued, endMs: issued + FORECAST_SPAN_MS }; /* MUTANT */',
     why: 'A row is reset for a hold that began after its actuals were integrated.',
   },
   {
@@ -644,15 +671,15 @@ const MUTANTS = [
   {
     id: 'Z-iv. ★★★ a span\'s tail is extended across any gap',
     file: HS,
-    find: '          if (prevRowTs != null && ts - prevRowTs > returnGapMs) {',
-    to: '          if (prevRowTs != null && ts - prevRowTs > returnGapMs && (anchor == null || movedThrough(anchor) == null)) { /* MUTANT */',
+    find: '          if (silenceBefore(ts)) {',
+    to: '          if (silenceBefore(ts) && (anchor == null || movedThrough(anchor) == null)) { /* MUTANT */',
     why: 'When the Cores reconnect with a first group equal to their held values, the hourly scan moves their fresh return readings.',
   },
   {
     id: 'Z-v. a gap of exactly an hour is a silence, not a hole',
     file: HS,
-    find: '          if (prevRowTs != null && ts - prevRowTs > returnGapMs) {',
-    to: '          if (prevRowTs != null && ts - prevRowTs >= returnGapMs) { /* MUTANT */',
+    find: '  const silenceBefore = (ts: number) => prevRowTs != null && ts - prevRowTs > returnGapMs;',
+    to: '  const silenceBefore = (ts: number) => prevRowTs != null && ts - prevRowTs >= returnGapMs; /* MUTANT */',
     why: 'A hold whose rows resume an hour after a restart (the night ledger\'s own bridge) is split, its tail a return piece that must qualify again.',
   },
   {
@@ -686,22 +713,22 @@ const MUTANTS = [
   {
     id: 'X-iii. ★ the reset names an actual that was captured empty',
     file: NLS,
-    find: "  if (v.pv.length > 0 && captured.actual_pv_kwh != null) out.push('PV');",
-    to: "  if (v.pv.length > 0) out.push('PV'); /* MUTANT */",
+    find: "  if (v.pv.length > 0 && captured.actual_pv_kwh != null && heldRows.pv !== false) out.push('PV');",
+    to: "  if (v.pv.length > 0 && heldRows.pv !== false) out.push('PV'); /* MUTANT */",
     why: 'The 10-15 note says its PV was integrated from held readings: it was captured empty.',
   },
   {
     id: 'X-iv. ★ the reset names a side that was not held',
     file: NLS,
-    find: "  if (v.load.length > 0 && captured.actual_load_kwh != null) out.push('load');",
-    to: "  if (captured.actual_load_kwh != null) out.push('load'); /* MUTANT */",
+    find: "  if (v.load.length > 0 && captured.actual_load_kwh != null && heldRows.load !== false) out.push('load');",
+    to: "  if (captured.actual_load_kwh != null && heldRows.load !== false) out.push('load'); /* MUTANT */",
     why: 'The 10-15 note says its load was integrated from held readings: it came from fresh panel rows.',
   },
   {
     id: 'X-v. the sweep does not hand the reset the row as captured',
     file: IDX,
-    find: 'heldResetColumns(r.verdict, nameOf, y));',
-    to: 'heldResetColumns(r.verdict, nameOf, {})); /* MUTANT */',
+    find: 'heldResetColumns(r.verdict, nameOf, y, heldRows));',
+    to: 'heldResetColumns(r.verdict, nameOf, {}, heldRows)); /* MUTANT */',
     why: 'Every reset says nothing had been integrated from held readings.',
   },
   {
@@ -714,8 +741,8 @@ const MUTANTS = [
   {
     id: 'X-vii. the dark-device count is not by overlap',
     file: AL,
-    find: '    if (x.startMs < g.endMs && g.startMs < x.endMs) sns.add(x.sn);',
-    to: '    sns.add(x.sn); /* MUTANT */',
+    find: '    && x.startMs < g.endMs && g.startMs < x.endMs);',
+    to: '    ); /* MUTANT */',
     why: 'A device dark last week is counted as dark at the same time.',
   },
   {
@@ -839,16 +866,16 @@ const MUTANTS = [
     why: 'The record states a start the restore declared a held span no longer.',
   },
   {
-    id: 'Q-iv. ★★ a restore does not put the seeded clock back',
+    id: 'Q-iv. ★★ a restore does not put the gap clock back',
     file: REC,
-    find: '      if (seededNotYetWritten.has(sn) && seed != null && lastInsertBySn.get(sn) === startMs && seed > startMs && seed <= endMs) lastInsertBySn.set(sn, seed);',
-    to: '      void seed; /* MUTANT */',
+    find: '        if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);',
+    to: '        /* MUTANT */',
     why: 'The sweep measures the device from the span\'s start and re-dates the restored record again.',
   },
   {
-    id: 'Q-v. the move does not remember the seed it set back',
+    id: 'Q-v. the move does not remember the clock it set back',
     file: REC,
-    find: '        if (!seedBeforeMove.has(sn)) seedBeforeMove.set(sn, seed);',
+    find: '        clockBeforeMove.set(sn, clock);',
     to: '        /* MUTANT */',
     why: 'The same: nothing to put back.',
   },
@@ -890,9 +917,171 @@ const MUTANTS = [
   {
     id: 'E-vi. the post-boot silence never carries what the gate held',
     file: REC,
-    find: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now) });',
+    find: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now), unmeasured: silenceUnmeasuredList() });',
     to: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now); /* MUTANT */',
     why: 'A boot whose first 20 min the gate held is pushed as an MQTT/broker stall.',
+  },
+  // ── review round 3 ──
+  {
+    id: 'A-i. ★★★ a re-read opens a return piece after a kept anchor\'s moved span',
+    file: HS,
+    find: '            if (silenceBefore(ts)) ret = newStretchAcc();',
+    to: '            ret = newStretchAcc(); /* MUTANT */',
+    why: 'The boot scan after a stop, the 3 h overlap and the retry after a failed slice leave the rest of a hold that ended within the hour in samples for good.',
+  },
+  {
+    id: 'A-ii. ★ a re-dated record is logged at its last fresh reading again',
+    file: REC,
+    find: 'to ${new Date(spanStartMs).toISOString()}, its newest row left in samples (the rows after it were held restatements',
+    to: 'to its last fresh reading ${new Date(spanStartMs).toISOString()} (the rows between were held restatements /* MUTANT */',
+    why: 'A span that starts at a kept restated row is logged as the device\'s last fresh reading: the restatements before it are still in samples.',
+  },
+  {
+    id: 'A-iii. ★★★ the move sets back only a seeded gap clock',
+    file: REC,
+    find: '      if (clock != null && clock > startMs && clock <= endMs) {',
+    to: '      if (seededNotYetWritten.has(sn) && clock != null && clock > startMs && clock <= endMs) { /* MUTANT */',
+    why: 'A Core whose replayed body was written in this process is filed 6 h after its last held row, a hold late, with a start nothing measured.',
+  },
+  {
+    id: 'A-iv. ★ a restore puts back only a seeded gap clock',
+    file: REC,
+    find: '        if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);',
+    to: '        if (seededNotYetWritten.has(sn) && lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before); /* MUTANT */',
+    why: 'An in-process clock stays on the span\'s start after its rows are back in samples.',
+  },
+  {
+    id: 'A-v. ★ a restore of any span forgets the clock the move set back',
+    file: REC,
+    find: '        clockBeforeMove.delete(sn);\n      }\n      undateDeviceGap(sn, startMs, endMs);',
+    to: '      }\n      clockBeforeMove.delete(sn); /* MUTANT */\n      undateDeviceGap(sn, startMs, endMs);',
+    why: 'Restoring an older span first loses the current span\'s clock: the next sweep re-dates the restored record again.',
+  },
+  {
+    id: 'A-vi. ★ the move re-dates a record only when it set a clock back',
+    file: REC,
+    find: '        clockBeforeMove.set(sn, clock);\n      }\n      redateDeviceGap(sn, startMs, endMs);',
+    to: '        clockBeforeMove.set(sn, clock);\n        redateDeviceGap(sn, startMs, endMs); /* MUTANT */\n      }',
+    why: 'A device back fresh before the first scan keeps its record\'s held-row start for good (the next boot\'s seed is newer).',
+  },
+  {
+    id: 'A-vii. ★★ a gate span is read as a moved frozen span',
+    file: HS,
+    find: "  frozenOf: \"SELECT start_ts, end_ts FROM held_spans WHERE sn = ? AND reason = 'frozen' AND restored_at_ms IS NULL\",",
+    to: "  frozenOf: \"SELECT start_ts, end_ts FROM held_spans WHERE sn = ? AND restored_at_ms IS NULL\", /* MUTANT */",
+    why: 'A gate span from the last fresh row\'s own ms makes the device\'s fresh return readings a moved hold\'s tail.',
+  },
+  {
+    id: 'A-viii. ★★ a return piece that joins on its last row leaves the stretch\'s end behind',
+    file: HS,
+    find: '            cur.lastHeldTs = ret.lastHeldTs;',
+    to: '            /* MUTANT */',
+    why: 'The span ends before the replay that joined it (or nothing is moved), and the replay stays in samples.',
+  },
+  {
+    id: 'A-ix. ★★ a return piece that joins on its last row adds none of its rows',
+    file: HS,
+    find: '            cur.heldRows += ret.heldRows;',
+    to: '            /* MUTANT */',
+    why: 'An outage followed by an hour of replay is never moved.',
+  },
+  {
+    id: 'A-x. ★★ the first scan starts at the last listed metric\'s oldest row',
+    file: HS,
+    find: '          if (v != null && Number(v) < oldest) oldest = Number(v);',
+    to: '          if (v != null) oldest = Number(v); /* MUTANT */',
+    why: 'A metric added later (last in name order) hides the device\'s earlier history from the only scan that reads it.',
+  },
+  {
+    id: 'A-xi. ★ the stall measure is not reset between silences',
+    file: REC,
+    find: '    silenceEvalAtMs = atMs;\n    silenceEvalGapMs = 0;\n  };',
+    to: '    silenceEvalAtMs = atMs;\n  }; /* MUTANT */',
+    why: 'After one stalled silence every later held silence is blamed on an MQTT/broker stall.',
+  },
+  {
+    id: 'A-xii. ★ what the gate held is not cleared between silences',
+    file: REC,
+    find: '  const resetSilence = (atMs: number) => {\n    silenceHeld.clear();',
+    to: '  const resetSilence = (atMs: number) => { /* MUTANT */',
+    why: 'A later silence names the devices and shadow flags of an earlier one.',
+  },
+  {
+    id: 'A-xiii. the devices read with nothing measurable are not cleared between silences',
+    file: REC,
+    find: '    silenceUnmeasured.clear();',
+    to: '    /* MUTANT */',
+    why: 'A later silence names a device read with nothing measurable in an earlier one.',
+  },
+  {
+    id: 'A-xiv. ★ a bench spare\'s fresh rows end a held silence',
+    file: REC,
+    find: '    if (samples.some((x) => !isBenchSpareSn(x.sn))) {\n      resetSilence(nowMs);',
+    to: '    if (samples.length > 0) { /* MUTANT */\n      resetSilence(nowMs);',
+    why: 'A spare reporting through a held silence leaves it unexplained: pushed as an MQTT/broker stall.',
+  },
+  {
+    id: 'A-xv. ★ the recorder does not keep the devices read with nothing measurable',
+    file: REC,
+    find: '        silenceUnmeasured.add(d.sn);',
+    to: '        /* MUTANT */',
+    why: 'The alert says every home device it read was held while one was read fresh.',
+  },
+  {
+    id: 'A-xvi. a device held in the silence is also named as read with nothing measurable',
+    file: REC,
+    find: '[...silenceUnmeasured].filter((sn) => !silenceHeld.has(sn)).sort(bySn);',
+    to: '[...silenceUnmeasured].sort(bySn); /* MUTANT */',
+    why: 'A panel whose shadow released on an empty body is named both as held and as reporting nothing measurable.',
+  },
+  {
+    id: 'A-xvii. ★ the alert ignores the devices read with nothing measurable',
+    file: AL,
+    find: '${heldGapPhrase(held, deviceName, g.unmeasured ?? [])}',
+    to: '${heldGapPhrase(held, deviceName)} /* MUTANT */',
+    why: 'The push says every home device it read was held.',
+  },
+  {
+    id: 'A-xviii. the phrase says every home device was held whatever was read',
+    file: AL,
+    find: '  if (unmeasured.length === 0) return `every home device it had a reading for was held',
+    to: '  if (unmeasured.length >= 0) return `every home device it had a reading for was held /* MUTANT */',
+    why: 'The same, from the phrase.',
+  },
+  {
+    id: 'A-xix. ★★ the dark-device count is by overlap with the window again, not at one instant',
+    file: AL,
+    find: '    for (const x of others) if (x.startMs <= at && at < x.endMs) sns.add(x.sn!);',
+    to: '    for (const x of others) sns.add(x.sn!); /* MUTANT */',
+    why: 'Two devices dark at either end of a long record, never together, are pushed as three dark at the same time.',
+  },
+  {
+    id: 'A-xx. ★ the reset note ignores whether a held row lay inside the span',
+    file: NLS,
+    find: "  if (v.pv.length > 0 && captured.actual_pv_kwh != null && heldRows.pv !== false) out.push('PV');",
+    to: "  if (v.pv.length > 0 && captured.actual_pv_kwh != null) out.push('PV'); /* MUTANT */",
+    why: 'A row whose span overlapped only a frozen span\'s silent hours is said to have been integrated from held readings.',
+  },
+  {
+    id: 'A-xxi. the sweep does not look the held rows up',
+    file: IDX,
+    find: "      const heldRows = { pv: heldIn(r.verdict.pv, 'pv_total'), load: heldIn(r.verdict.load, 'panel_load') };",
+    to: '      const heldRows = {}; /* MUTANT */',
+    why: 'The same, from the sweep.',
+  },
+  {
+    id: 'A-xxii. heldRowsWithin finds a held row everywhere',
+    file: HS,
+    find: '    return heldRowWithinStmt.get(sn, sinceMs, untilMs, metric) != null;',
+    to: '    return true; /* MUTANT */',
+    why: 'The same, from the store.',
+  },
+  {
+    id: 'A-xxiii. ★ the documented SQL restore drops the samples-generation step',
+    file: ARCH,
+    find: ', and advance the samples\ngeneration with `UPDATE held_generation SET gen = gen + 1 WHERE id = 1`. Without that last step the\nanalytics worker\'s closed-day memos and report caches (above) keep serving the days without the\nrestored rows until the next restart: the generation is the only signal that `samples` changed\nother than by appending.',
+    to: '. <!-- MUTANT -->',
+    why: 'A restore by SQL leaves the worker serving the days without the restored rows until the next restart.',
   },
 ];
 

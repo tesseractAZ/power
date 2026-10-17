@@ -82,8 +82,9 @@ export interface TelemetryGap {
   sn?: string;
   /** v1.188.1 (dry run) — on a per-device record whose start was moved EARLIER, the start it was
    *  first filed with. Its alert id (alerts.ts deviceGapAlertId) stays keyed on this one, so the
-   *  push and digest dedupe hold for the same blackout; `startMs` is then the device's last fresh
-   *  reading. Absent while the start never moved. See recordTelemetryGap. */
+   *  push and digest dedupe hold for the same blackout; `startMs` is then the start of the device's
+   *  held span, its newest row kept in samples (v1.188.1 review 3: its last fresh reading, or a
+   *  restated row left there). Absent while the start never moved. See recordTelemetryGap. */
   alertStartMs?: number;
   /** v1.188.1 (dry run) — on an in-process FLEET gap: the home devices the freshness gate held
    *  while the recorder kept evaluating the fleet and found no recordable home reading (`shadow`:
@@ -91,6 +92,10 @@ export interface TelemetryGap {
    *  when the gate explains the silence — evaluations ran through it, none more than
    *  RECORD_FRESH_MS apart (v1.188.1 review 2) — so the alert does not blame a broker stall. */
   held?: Array<{ sn: string; shadow: boolean }>;
+  /** v1.188.1 (review 3) — with `held`: the home devices those evaluations found with FRESH
+   *  content and nothing measurable (no row to write), never held in the silence. Present only when
+   *  there are some, so the alert does not say that every home device it read was held. */
+  unmeasured?: string[];
 }
 
 /**
@@ -497,6 +502,10 @@ export interface Recorder {
    *  held rows moved out of `samples`. Main thread only; OPTIONAL so test stubs and the
    *  read-only worker keep compiling — a caller treats an absent method as "none". */
   heldSpans?: (sinceMs: number, untilMs: number) => HeldSpan[];
+  /** v1.188.1 (review 3) — whether `held_samples` holds a row of (sn, metric) with sinceMs ≤ ts ≤
+   *  untilMs: a held reading a capture of that window had integrated. Main thread only; OPTIONAL
+   *  like heldSpans (absent ⇒ unknown). */
+  heldRowsWithin?: (sn: string, metric: string, sinceMs: number, untilMs: number) => boolean;
   /** v1.188.1 — false until the first scan for held rows has finished (or failed), in a
    *  process that scans; the night-charge capture waits for it. Absent ⇒ ready. */
   heldSamplesReady?: () => boolean;
@@ -1180,8 +1189,15 @@ export function createRecorder(
       return out;
     },
     // A device still on its SEEDED gap clock whose newest persisted sample was a held row now
-    // moved: its clock goes back to the last fresh sample, so the per-device sweep measures the
-    // silence from where it really began.
+    // moved: its clock goes back to the span's start, the newest row of the device kept in samples,
+    // so the per-device sweep measures the silence from where it really began.
+    //
+    // v1.188.1 (review 3) — and so does a clock this process wrote, the device's last written
+    // row, when that row is one of those moved: a Core has no shadow latch, so a replayed Core
+    // body passes the gate and is written every 5 min, which is what the hourly scan exists to
+    // catch. Left on the moved row, the sweep filed the record 6 h after it, a hold late, and from
+    // it: a start at the last held row and a duration short by the whole hold, pushed so, with no
+    // later move to re-date it (redateDeviceGap only edits a record already filed).
     //
     // v1.188.1 (dry run) — and a per-device gap record already filed from that held row (by this
     // boot's sweep before the scan, or by an earlier version: the record was filed from the
@@ -1193,23 +1209,30 @@ export function createRecorder(
     // once and Device Telemetry Gaps 24h doubled. recordTelemetryGap now also extends an
     // overlapping record that starts later (for a record this process never re-dated).
     onMoved: (sn, startMs, endMs) => {
-      const seed = lastInsertBySn.get(sn);
-      if (seededNotYetWritten.has(sn) && seed != null && seed > startMs && seed <= endMs) {
+      const clock = lastInsertBySn.get(sn);
+      if (clock != null && clock > startMs && clock <= endMs) {
         lastInsertBySn.set(sn, startMs);
-        if (!seedBeforeMove.has(sn)) seedBeforeMove.set(sn, seed);
+        clockBeforeMove.set(sn, clock);
       }
       redateDeviceGap(sn, startMs, endMs);
     },
     // v1.188.1 (review 2) — a restored span's rows are back in samples, so what the move re-dated
-    // goes back too: the seeded clock to the row it read (when nothing was written since), and
-    // the device's gap record to the start it was filed with (undateDeviceGap). Left re-dated,
-    // the next boot's seed — that row again — matched neither the record's start nor its overlap
-    // (the record now starts earlier), and a second record with the same alert id was filed:
-    // two alerts with one id and system_device_gap_count_24h doubled.
+    // goes back too: the gap clock to the row it read (when nothing was written since), and the
+    // device's gap record to the start it was filed with (undateDeviceGap). Left re-dated, the
+    // next boot's seed — that row again — matched neither the record's start nor its overlap (the
+    // record now starts earlier), and a second record with the same alert id was filed: two
+    // alerts with one id and system_device_gap_count_24h doubled.
+    //
+    // v1.188.1 (review 3) — the remembered clock is this span's only when it lies in it. Forgotten
+    // on the restore of ANY span, restoring an older span of the device first lost the clock the
+    // move of its current span had set back: the restore of that span then left the clock at the
+    // span's start, and the next sweep re-dated the restored record to it again.
     onRestored: (sn, startMs, endMs) => {
-      const seed = seedBeforeMove.get(sn);
-      if (seededNotYetWritten.has(sn) && seed != null && lastInsertBySn.get(sn) === startMs && seed > startMs && seed <= endMs) lastInsertBySn.set(sn, seed);
-      seedBeforeMove.delete(sn);
+      const before = clockBeforeMove.get(sn);
+      if (before != null && before > startMs && before <= endMs) {
+        if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);
+        clockBeforeMove.delete(sn);
+      }
       undateDeviceGap(sn, startMs, endMs);
     },
   });
@@ -1280,9 +1303,10 @@ export function createRecorder(
   const perDeviceGapOpen = new Set<string>();
   /** v1.154.0 — SNs whose clock is still the SEEDED one (no write since boot). */
   const seededNotYetWritten = new Set<string>();
-  /** v1.188.1 (review 2) — a seeded clock the held-sample move set back (onMoved): the row it had
-   *  read, so a restore of that span can set it forward again (onRestored). */
-  const seedBeforeMove = new Map<string, number>();
+  /** v1.188.1 (review 2) — a gap clock the held-sample move set back (onMoved): the row it had
+   *  read, so a restore of that span can set it forward again (onRestored). v1.188.1 (review 3) —
+   *  any clock in the moved rows, seeded or written in this process. */
+  const clockBeforeMove = new Map<string, number>();
   /** v1.154.0 — the restart probe's MAX(ts) over home SNs; seededDeviceDarkMs's reference. */
   let bootFleetAnchorMs: number | null = null;
   /** v1.154.0 — monotonic instant of this process's first home-device write; -1 until then. */
@@ -1341,10 +1365,13 @@ export function createRecorder(
   };
 
   /**
-   * v1.188.1 (dry run) — move a per-device record's start EARLIER, to the device's true last fresh
-   * reading, keeping its alert id. Moved, not left: every row after that reading, from which the
-   * record had been filed, was a held restatement (now in held_samples, or never written behind the
-   * gate), so the device has delivered no fresh reading since `toStartMs`. A record left at the
+   * v1.188.1 (dry run) — move a per-device record's start EARLIER, to the start of the device's
+   * held span (the newest row of the device kept in samples), keeping its alert id. Moved, not
+   * left: every row after that one, from which the record had been filed, was a held restatement
+   * (now in held_samples, or never written behind the gate). v1.188.1 (review 3) — that row is the
+   * device's last fresh reading, or a restated row left in samples because what it ended did not
+   * continue a hold (heldSamples.ts createFrozenScanner): the newest row in samples either way, so
+   * the next boot's seed reads it and matches the record. A record left at the
    * later start understates the blackout by the whole hold, and its alert would push "no data for
    * N min (<the last held row> → …)", a start nothing measured. The id stays on the start the
    * record was first filed with (`alertStartMs`): the id is the push and digest dedupe key, so a
@@ -1359,14 +1386,15 @@ export function createRecorder(
   }
 
   /** v1.188.1 (dry run) — onMoved: the per-device record of `sn` whose start was one of the rows
-   *  just moved (in (spanStartMs, movedToMs]) starts at the span's last fresh reading instead. */
+   *  just moved (in (spanStartMs, movedToMs]) starts at the span's start instead. v1.188.1 (review
+   *  3) — logged as the newest row kept in samples: it is not always the last fresh reading. */
   function redateDeviceGap(sn: string, spanStartMs: number, movedToMs: number): void {
     const g = telemetryGapsLog.find((x) => x.sn === sn && x.startMs > spanStartMs && x.startMs <= movedToMs);
     if (!g) return;
     const from = g.startMs;
     moveDeviceGapStart(g, spanStartMs);
     persistTelemetryGaps();
-    log(`recorder: device telemetry gap of ${sn} re-dated from ${new Date(from).toISOString()} to its last fresh reading ${new Date(spanStartMs).toISOString()} (the rows between were held restatements, moved to held_samples) — ${Math.round(g.durationMs / 60_000)} min, the same record`);
+    log(`recorder: device telemetry gap of ${sn} re-dated from ${new Date(from).toISOString()} to ${new Date(spanStartMs).toISOString()}, its newest row left in samples (the rows after it were held restatements, moved to held_samples) — ${Math.round(g.durationMs / 60_000)} min, the same record`);
   }
 
   /** v1.188.1 (review 2) — onRestored: the per-device record of `sn` re-dated to the span's start
@@ -1382,7 +1410,7 @@ export function createRecorder(
     log(`recorder: device telemetry gap of ${sn} returned to ${new Date(g.startMs).toISOString()}, the start it was filed with (its held span was restored to samples) — ${Math.round(g.durationMs / 60_000)} min, the same record`);
   }
 
-  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean; graceful?: boolean; sn?: string; held?: TelemetryGap['held'] }) {
+  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean; graceful?: boolean; sn?: string; held?: TelemetryGap['held']; unmeasured?: TelemetryGap['unmeasured'] }) {
     // v0.80.0 — an ONGOING blackout re-detects at EVERY boot with the same
     // startMs (no home sample landed in between), e.g. consecutive restarts
     // inside one multi-hour power outage. Extend the existing record in place
@@ -1427,7 +1455,10 @@ export function createRecorder(
       if (opts?.restartSpanning) gap.restartSpanning = true;
       if (opts?.graceful) gap.graceful = true;
       if (opts?.sn) gap.sn = opts.sn;
-      if (opts?.held && opts.held.length > 0) gap.held = opts.held;
+      if (opts?.held && opts.held.length > 0) {
+        gap.held = opts.held;
+        if (opts.unmeasured && opts.unmeasured.length > 0) gap.unmeasured = opts.unmeasured;
+      }
       telemetryGapsLog.push(gap);
     }
     persistTelemetryGaps();
@@ -1441,15 +1472,16 @@ export function createRecorder(
       // writing. Named separately because the fleet stem would be a lie: home
       // samples were arriving the whole time, just not from this SN.
       const redated = movedFrom != null
-        ? ` (the same record, re-dated from ${new Date(movedFrom).toISOString()} to its last fresh sample)`
+        ? ` (the same record, re-dated from ${new Date(movedFrom).toISOString()} to its newest row left in samples)`
         : returnedFrom != null ? ` (the same record, returned from ${new Date(returnedFrom).toISOString()} to the start it was filed with: its held rows are back in samples)` : '';
       log(`recorder: ⚠ DEVICE TELEMETRY GAP — ${opts.sn} wrote no samples for ${mins} min (${range}) while other home devices kept reporting${redated}; anything summed over the fleet in that window UNDER-COUNTS`);
     } else if (opts?.restartSpanning) {
       const cause = opts?.graceful ? 'a deliberate add-on stop/update' : 'host down or add-on stopped';
       log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}) spanning a restart (${cause}); history in that window is unrecoverable`);
     } else {
-      // v1.188.1 (dry run) — when the gate held every home device it saw, say so.
-      const why = gap.held == null ? '' : ` — the recorder kept evaluating the fleet but held ${gap.held.map((h) => `${h.sn} (${h.shadow ? 'cloud shadow' : 'no fresh content'})`).join(', ')}`;
+      // v1.188.1 (dry run) — when the gate held every home device it read, say so; (review 3) and
+      // name a device read fresh with nothing measurable.
+      const why = gap.held == null ? '' : ` — the recorder kept evaluating the fleet but held ${gap.held.map((h) => `${h.sn} (${h.shadow ? 'cloud shadow' : 'no fresh content'})`).join(', ')}${gap.unmeasured == null ? '' : `, and ${gap.unmeasured.join(', ')} reported nothing measurable`}`;
       log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range})${why}; writes resumed`);
     }
   }
@@ -1618,21 +1650,33 @@ export function createRecorder(
    * (silenceHeldList). Filled from every evaluation that WROTE no home row, a panel reading the
    * dedupe skipped added every held Core, and a true stall minutes later, with no evaluation at
    * all, was then filed as "held readings".
+   *
+   * v1.188.1 (review 3) — `silenceUnmeasured` is the home devices those evaluations read with fresh
+   * content and nothing measurable (an SHP2 body with no channel and no grid reading: the v1.175.0
+   * "panel that reported nothing"). They were read and not held, so the alert names them instead
+   * of saying that every home device it read was held (silenceUnmeasuredList). A device held at
+   * any point of the silence is named as held only.
    */
   const SILENCE_EVAL_MAX_GAP_MS = RECORD_FRESH_MS;
   const silenceHeld = new Map<string, boolean>();
+  const silenceUnmeasured = new Set<string>();
   let silenceEvalAtMs = Date.now();
   let silenceEvalGapMs = 0;
   const resetSilence = (atMs: number) => {
     silenceHeld.clear();
+    silenceUnmeasured.clear();
     silenceEvalAtMs = atMs;
     silenceEvalGapMs = 0;
   };
+  const bySn = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
   /** What the gate held through a silence that ends now, or undefined when that does not explain it. */
   const silenceHeldList = (nowMs: number): TelemetryGap['held'] =>
     silenceHeld.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS
       ? undefined
-      : [...silenceHeld].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([sn, shadow]) => ({ sn, shadow }));
+      : [...silenceHeld].sort(([a], [b]) => bySn(a, b)).map(([sn, shadow]) => ({ sn, shadow }));
+  /** v1.188.1 (review 3) — the home devices read fresh with nothing measurable and never held in
+   *  the silence (recorded only beside silenceHeldList). */
+  const silenceUnmeasuredList = (): string[] => [...silenceUnmeasured].filter((sn) => !silenceHeld.has(sn)).sort(bySn);
 
   function record(samples: MetricSample[]): void {
     if (samples.length === 0) return;
@@ -1740,11 +1784,11 @@ export function createRecorder(
         lastHomeInsertTs = now;
       } else {
         if (detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
-          recordTelemetryGap(lastHomeInsertTs, now, { held: silenceHeldList(now) });
+          recordTelemetryGap(lastHomeInsertTs, now, { held: silenceHeldList(now), unmeasured: silenceUnmeasuredList() });
         }
         lastHomeInsertTs = now;
       }
-      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now) });
+      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now), unmeasured: silenceUnmeasuredList() });
     }
     // v0.9.74 — silence per-tick chatter. The previous "wrote N samples"
     // line fired every 10 s under normal load (~44 lines/min, ~88 % of
@@ -1957,6 +2001,12 @@ export function createRecorder(
       for (const [sn, h] of held) {
         if (SYNTHETIC_SNS.has(sn) || isBenchSpareSn(sn)) continue;
         silenceHeld.set(sn, (silenceHeld.get(sn) ?? false) || h.shadow);
+      }
+      // v1.188.1 (review 3) — read and not held, with nothing to write: fresh content, nothing
+      // measurable (no home sample came from this evaluation at all).
+      for (const d of Object.values(snap.devices)) {
+        if (!d.projection || held.has(d.sn) || SYNTHETIC_SNS.has(d.sn) || isBenchSpareSn(d.sn)) continue;
+        silenceUnmeasured.add(d.sn);
       }
     }
     try {
@@ -3405,6 +3455,7 @@ export function createRecorder(
     readNightCalibration,
     upsertNightCalibration,
     heldSpans: (sinceMs, untilMs) => heldStore.spans(sinceMs, untilMs),
+    heldRowsWithin: (sn, metric, sinceMs, untilMs) => heldStore.heldRowsWithin(sn, metric, sinceMs, untilMs),
     heldSamplesReady: () => !heldScanScheduled || heldStore.isReady(),
     scanHeldSamples: (nowMs) => heldStore.scanNow(nowMs),
     restoreHeldSamples: (sn, startMs) => heldStore.restore(sn, startMs),
