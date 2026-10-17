@@ -31,15 +31,17 @@ const NOW = Date.now();
 const here = dirname(fileURLToPath(import.meta.url));
 const src = (rel: string) => readFileSync(resolve(here, '..', rel), 'utf8');
 
-/** A Core reporting on its own meter: content changed `changedAgoMs` ago; packNet > 0 = discharging. */
-function core(sn: string, o: { packNet?: number; acOut?: number; changedAgoMs?: number | null; online?: boolean } = {}): Any {
+/** A Core reporting on its own meter: content changed `changedAgoMs` ago; packNet > 0 = discharging.
+ *  `liveNet`: the pack's stream figure (liveFlow), when it differs from the polled one. */
+function core(sn: string, o: { packNet?: number; liveNet?: number; acOut?: number; changedAgoMs?: number | null; online?: boolean } = {}): Any {
   const net = o.packNet ?? 0;
+  const live = o.liveNet == null ? {} : { liveFlow: { outputWatts: Math.max(0, o.liveNet), inputWatts: Math.max(0, -o.liveNet), atMs: NOW - 2_000 } };
   return {
     sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: o.online ?? true, lastUpdated: NOW,
     ...(o.changedAgoMs === null ? {} : { contentChangedAtMs: NOW - (o.changedAgoMs ?? 5_000) }),
     projection: {
       kind: 'dpu', soc: 60, pvTotalWatts: 0, acInWatts: 0, acOutWatts: o.acOut ?? 0,
-      packs: [{ num: 1, outputWatts: Math.max(0, net), inputWatts: Math.max(0, -net) }],
+      packs: [{ num: 1, outputWatts: Math.max(0, net), inputWatts: Math.max(0, -net), ...live }],
     },
   };
 }
@@ -47,17 +49,18 @@ function core(sn: string, o: { packNet?: number; acOut?: number; changedAgoMs?: 
 /** A cloud-offline Core as the snapshot carries it: listed, offline, no projection. */
 const darkCore = (sn: string): Any => ({ sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: false, lastUpdated: NOW - 45 * 3600_000 });
 
-/** The house panel: online, a quota `quotaAgoMs` ago, its slots' own meter (negative = delivering). */
-function panel(sns: string[], sourceWatts: number[], o: { quotaAgoMs?: number; shadowed?: boolean } = {}): Any {
+/** The house panel: online, a quota `quotaAgoMs` ago, its slots' own meter (negative = delivering).
+ *  `connected`: each slot's isConnected (default every slot); `sn`: a second panel's serial. */
+function panel(sns: string[], sourceWatts: number[], o: { quotaAgoMs?: number; shadowed?: boolean; connected?: boolean[]; sn?: string } = {}): Any {
   return {
-    sn: 'PANEL-TEST-01', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2', online: true, lastUpdated: NOW,
+    sn: o.sn ?? 'PANEL-TEST-01', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2', online: true, lastUpdated: NOW,
     lastQuotaAtMs: NOW - (o.quotaAgoMs ?? 30_000), contentStaleSinceMs: o.shadowed ? NOW - 60_000 : null,
     projection: {
       kind: 'shp2', area: 'Home', backupBatPercent: 86, backupFullCapWh: 92_160, backupRemainWh: 79_000,
       backupChargeTimeMin: 38, backupDischargeTimeMin: 1206, backupReserveSoc: 10, chargeWattPower: 7200, gridWatt: 0,
       circuits: Array.from({ length: 12 }, (_, i) => ({ ch: i + 1, name: `Circuit ${i + 1}`, watts: i < 3 ? 1130 : 0 })),
       pairedCircuits: [],
-      sources: sns.map((sn, i) => ({ slot: i + 1, sn, isConnected: true, batteryPercentage: 86, isAcOpen: true, fullCap: 30720, ratePower: 7200, emsBatTemp: 29, hwConnect: true, errorCodeNum: 0 })),
+      sources: sns.map((sn, i) => ({ slot: i + 1, sn, isConnected: o.connected?.[i] ?? true, batteryPercentage: 86, isAcOpen: true, fullCap: 30720, ratePower: 7200, emsBatTemp: 29, hwConnect: true, errorCodeNum: 0 })),
       sourceWatts,
     },
   };
@@ -232,4 +235,42 @@ test('★★★ the console’s RUN line at 20:04: "▲ CHG —" beside the disc
   data.snap.devices = devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), panel(SNS, [5300, 5300, 5300]));
   const chg = renderConsole(view, data).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).find((l) => l.includes('RUN '))!;
   assert.ok(chg.includes('▲ CHG 38m') && chg.includes('▼ DCH —'), chg);
+});
+
+/* ══ v1.188.1 review — poolNetUpperBound's per-slot guards ══════════════════ */
+
+test('★★★ a bench spare in a DISCONNECTED slot, online and charging 4 kW from the wall, does not reverse the timers', () => {
+  // Two home Cores dark, their slots delivering 1 kW each (a 2 kW drain); slot 3 is not connected.
+  const ds = devs(darkCore('CORE-A'), darkCore('CORE-B'), core('SPARE-Z', { packNet: -4000 }),
+    panel(['CORE-A', 'CORE-B', 'SPARE-Z'], [-1000, -1000, 0], { connected: [true, true, false] }));
+  assert.equal(poolNetUpperBound(ds, NOW).watts, 2000, 'the spare is not in the pool');
+  assert.deepEqual(backupTimerGate(ds, NOW), { charge: false, discharge: true, basis: 'panel' },
+    'a time to full during the drain, and the time to reserve hidden, if the spare counted');
+});
+
+test('★★ a Core listed by two panels is counted once', () => {
+  const ds = devs(darkCore('CORE-A'),
+    panel(['CORE-A'], [500]), panel(['CORE-A'], [500], { sn: 'PANEL-TEST-02' }));
+  assert.equal(poolNetUpperBound(ds, NOW).watts, -500, 'not −1000 W: one Core taking 500 W of AC');
+});
+
+test('★★★ an OFFLINE Core whose projection is still recent is not on its own meter: its slot is read', () => {
+  // setDeviceList carries the projection and its content clock across an offline flip: the packs
+  // still show the 3 kW charge they were in a minute ago, while the slots deliver 1 kW each.
+  const ds = devs(
+    core('CORE-A', { online: false, packNet: -3000, changedAgoMs: 60_000 }),
+    core('CORE-B', { online: false, packNet: -3000, changedAgoMs: 60_000 }),
+    core('CORE-C', { online: false, packNet: -3000, changedAgoMs: 60_000 }),
+    panel(SNS, [-1000, -1000, -1000]),
+  );
+  assert.equal(poolNetUpperBound(ds, NOW).watts, 3000);
+  assert.deepEqual(backupTimerGate(ds, NOW), { charge: false, discharge: true, basis: 'panel' },
+    'its last 3 kW charge is not a reading');
+});
+
+test('★★ a reporting Core in a partial roster contributes its pack’s STREAM figure, not the poll’s replay', () => {
+  // CORE-A reports: the poll replays a 3 kW charge, the stream says 2 kW out. CORE-B and CORE-C dark, slots idle.
+  const ds = devs(core('CORE-A', { packNet: -3000, liveNet: 2000 }), darkCore('CORE-B'), darkCore('CORE-C'), panel(SNS, [-9999, 0, 0]));
+  assert.equal(poolNetUpperBound(ds, NOW).watts, 2000);
+  assert.deepEqual(backupTimerGate(ds, NOW), { charge: false, discharge: true, basis: 'panel' });
 });

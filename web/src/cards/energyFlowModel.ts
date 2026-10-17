@@ -15,9 +15,11 @@ import { fmtW } from '../format';
  *   Grid  → Batteries   gridToCoresW  — the home Cores' own AC input (grid charging them)
  *   Grid  → Loads       gridToHouseW  — the grid serving the house through the panel
  *   Batteries → Loads   coresToHouseW — the Cores' delivery, never more than their inverters report
- * and the Loads NODE is the house total the panel measured. The two edges into Loads always
- * sum to the node: the Cores' share is taken from their own (faster) meter and the grid
- * takes the rest of the house. The Solar and Batteries
+ * and the Loads NODE is the house total the panel measured. The two edges into Loads sum to
+ * the node: the Cores' share is taken from their own (faster) meter and the grid
+ * takes the rest of the house. (v1.188.1 — except while a connected Core's delivery is
+ * unmeasured: the grid edge is then the measured main and the unmeasured share is not drawn.)
+ * The Solar and Batteries
  * nodes are NOT balanced against them: PV is metered on the DC side and the house on the
  * AC side, and the MPPT, charger and inverter losses between them are not drawn.
  *
@@ -34,6 +36,11 @@ import { fmtW } from '../format';
 /** Below this an edge is not drawn (and an active grid with no qualifying edge keeps
  *  the standby connector). */
 export const FLOW_EDGE_MIN_W = 5;
+
+/** v1.188.1 — a reporting Core's slot figure and its own meter agree within max(150 W, 20 %);
+ *  beyond that the panel's frame is behind the Cores (see behindPanels). */
+export const FRAME_LAG_MIN_W = 150;
+export const FRAME_LAG_FRACTION = 0.2;
 
 export type GridFlowState = 'active' | 'standby' | 'off';
 /** ok = reporting; silent = no channel watts in the payload; frozen = offline or replaying a
@@ -178,14 +185,34 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // judges frozen (dpuFrozen) is not on its own meter, so its slot is read.
   const ownMeter = new Set(metered.map((d) => d.sn));
   const silentSlots = panels
-    .flatMap((p) => (p.projection.sources ?? []).map((s, i) => ({ s, w: p.projection.sourceWatts?.[i] })))
+    .flatMap((p) => (p.projection.sources ?? []).map((s, i) => ({ p, s, w: p.projection.sourceWatts?.[i] })))
     .filter(({ s }) => s.isConnected && !!s.sn && !ownMeter.has(s.sn));
   const viaPanel = panelState === 'ok'
-    ? silentSlots.filter((x): x is { s: Shp2EnergySource; w: number } => typeof x.w === 'number' && Number.isFinite(x.w))
+    ? silentSlots.filter((x): x is { p: Shp2; s: Shp2EnergySource; w: number } => typeof x.w === 'number' && Number.isFinite(x.w))
     : [];
-  const acIn = ownAcIn + viaPanel.reduce((t, x) => t + Math.max(0, x.w), 0);
-  const acOut = ownAcOut + viaPanel.reduce((t, x) => t + Math.max(0, -x.w), 0);
-  const batNet = ownBatNet - viaPanel.reduce((t, x) => t + x.w, 0);
+  // v1.188.1 review — a panel's frame BEHIND the Cores' own meters. The ~60 s frame lags the ~10 s
+  // meters at every transition, and a Core that reports on its own meter shows it: its slot figure
+  // (the AC it exchanges with the panel, + = into the Core) disagrees with its own AC input less its
+  // AC output beyond the meters' tolerance. The dark Cores' slot figures on that panel are from the
+  // same old frame, so while it is behind their FLOWS are left out (their percentage and their place
+  // in the node stay), and the house-on-grid rule stands on the Cores' own meters, as it did before
+  // v1.188.1. A mixed fleet at the 09-21 hand-over (two Cores at 0 W on their own meters, the frame
+  // still showing every slot at −1712 W, main 0, house 5137 W) otherwise read the third, dark, Core's
+  // stale −1713 W as the Cores still delivering, put the grid on standby and drew a 5137 W
+  // Batteries → Loads edge; at the 09-22 charge end its stale +5300 W was drawn as a grid →
+  // Batteries edge after the charge had ended. Each panel has its own frame and is judged alone.
+  const ownBySn = new Map(metered.map((d) => [d.sn, d]));
+  const behindPanels = new Set(panels.filter((p) => (p.projection.sources ?? []).some((s, i) => {
+    const d = s.isConnected && s.sn ? ownBySn.get(s.sn) : undefined;
+    const w = p.projection.sourceWatts?.[i];
+    if (!d || typeof w !== 'number' || !Number.isFinite(w)) return false;
+    const own = (d.projection.acInWatts ?? 0) - (d.projection.acOutWatts ?? 0);
+    return Math.abs(w - own) > Math.max(FRAME_LAG_MIN_W, FRAME_LAG_FRACTION * Math.max(Math.abs(w), Math.abs(own)));
+  })));
+  const viaFlow = viaPanel.filter((x) => !behindPanels.has(x.p));
+  const acIn = ownAcIn + viaFlow.reduce((t, x) => t + Math.max(0, x.w), 0);
+  const acOut = ownAcOut + viaFlow.reduce((t, x) => t + Math.max(0, -x.w), 0);
+  const batNet = ownBatNet - viaFlow.reduce((t, x) => t + x.w, 0);
   const socVals = [...ownSocVals, ...viaPanel.map((x) => x.s.batteryPercentage)]
     .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
   const soc = socVals.length === 0 ? null : socVals.reduce((a, b) => a + b, 0) / socVals.length;
@@ -246,7 +273,9 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // its slot's via the panel); a Core with neither is unknown, not idle. With no Core's own meter
   // every figure comes from the panel's one frame, whose main measured the grid directly, so the
   // main is drawn and nothing is inferred (10-16 20:04: no Core reporting, main 0 W, the house
-  // drawn as 3.39 kW of grid import).
+  // drawn as 3.39 kW of grid import). A dark Core on a panel whose frame is behind the Cores
+  // (behindPanels) has a figure, a frame old: its flows wait for the next frame, and "the Cores
+  // deliver nothing" is the reporting Cores' reading, as at 09-21 before v1.188.1.
   const coresSeenIdle = !coresDelivering && ownMeter.size > 0 && unmeteredCores === 0;
   const houseOnGrid = gridPresent && coresSeenIdle && load != null && load >= FLOW_EDGE_MIN_W;
   const gridActive = grid
@@ -257,7 +286,8 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
 
   // ── who feeds the house ───────────────────────────────────────────────────
   //   · Cores idle (their inverters report < 5 W) and grid active → the grid carries the
-  //     whole house: grid → Loads is the house load.
+  //     whole house: grid → Loads is the house load. v1.188.1 — only when the Cores are SEEN
+  //     idle (coresSeenIdle); otherwise grid → Loads is the measured main less the Cores' draw.
   //   · Cores delivering, grid not active → the Cores are the only source: their edge IS the
   //     house load, so the arrow equals the box (the reported view had 1925 W into a
   //     "1.89 kW" box — the Cores' inverter meter against the panel's).
@@ -274,7 +304,12 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     gridToHouseW = Math.max(0, homeGridW - coresAcIn);
     coresToHouseW = coresDelivering ? acOut : 0;
   } else if (!coresDelivering) {
-    gridToHouseW = gridState === 'active' ? load : 0;
+    // v1.188.1 review — the grid carries the whole house only on the Cores' own evidence that they
+    // deliver nothing (coresSeenIdle). Without it (no Core on its own meter, or a connected Core with
+    // no figure from either meter) the measured main is drawn, less the Cores' own draw: a fresh
+    // main of 500 W below a 3.39 kW house was drawn as "GRID 3.39 kW" when the frame carried no
+    // slot figures. The share nothing measured is not drawn.
+    gridToHouseW = gridState !== 'active' ? 0 : coresSeenIdle ? load : Math.min(load, Math.max(0, homeGridW - coresAcIn));
     coresToHouseW = 0;
   } else if (gridState !== 'active') {
     gridToHouseW = 0;

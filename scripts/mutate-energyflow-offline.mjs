@@ -57,6 +57,22 @@
  *   T-x     the console gates CHG on the Cores' sum again
  *   T-xi    the console's DCH is ungated
  *
+ * Review round 2 (v1.188.1):
+ *   M-i     with the Cores' delivery unmeasured, the grid is given the whole house again
+ *   M-ii    the main is drawn without the Cores' own draw taken out
+ *   B-i     a frame behind the Cores' own meters is never detected
+ *   B-ii    the meters' tolerance loses its 150 W floor
+ *   B-iii   the meters' tolerance loses its 20 % share
+ *   B-iv    a reporting Core's own exchange is read with the wrong sign
+ *   B-v     one panel's frame behind drops every panel's dark slots
+ *   B-vi    a behind frame's dark slots still count as the Cores' grid draw
+ *   B-vii   a frozen Core's meter judges the frame
+ *   F-vii   a frozen Core's own AC input is counted as the Cores' grid draw
+ *   T-xii   a disconnected slot's Core bounds the pool
+ *   T-xiii  a Core listed by two panels is counted twice
+ *   T-xiv   the bound reads the poll's pack flow, not the stream's
+ *   T-xv    an offline Core with a recent projection is read on its own meter
+ *
  *   node scripts/mutate-energyflow-offline.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -99,28 +115,28 @@ const MUTANTS = [
   {
     id: 'O-iv. ★★★ the panel’s slot delivery is not counted as the Cores’ AC output',
     file: MODEL,
-    find: '  const acOut = ownAcOut + viaPanel.reduce((t, x) => t + Math.max(0, -x.w), 0);',
+    find: '  const acOut = ownAcOut + viaFlow.reduce((t, x) => t + Math.max(0, -x.w), 0);',
     to: '  const acOut = ownAcOut; /* MUTANT */',
     why: 'The 10-16 20:04 house is drawn with nothing feeding it while the slots deliver 3.4 kW.',
   },
   {
     id: 'O-v. ★★ the slot sign is read the wrong way round',
     file: MODEL,
-    find: '  const acOut = ownAcOut + viaPanel.reduce((t, x) => t + Math.max(0, -x.w), 0);',
-    to: '  const acOut = ownAcOut + viaPanel.reduce((t, x) => t + Math.max(0, x.w), 0); /* MUTANT */',
+    find: '  const acOut = ownAcOut + viaFlow.reduce((t, x) => t + Math.max(0, -x.w), 0);',
+    to: '  const acOut = ownAcOut + viaFlow.reduce((t, x) => t + Math.max(0, x.w), 0); /* MUTANT */',
     why: 'A force charge into the Cores is drawn as the Cores delivering to the house.',
   },
   {
     id: 'O-vi. ★★ the panel’s slot input is not counted as the Cores’ grid draw',
     file: MODEL,
-    find: '  const acIn = ownAcIn + viaPanel.reduce((t, x) => t + Math.max(0, x.w), 0);',
+    find: '  const acIn = ownAcIn + viaFlow.reduce((t, x) => t + Math.max(0, x.w), 0);',
     to: '  const acIn = ownAcIn; /* MUTANT */',
     why: 'A 16 kW force charge with the Cores offline draws no grid → Batteries edge and a Grid node of the house alone.',
   },
   {
     id: 'O-vii. ★★ the Batteries node’s net ignores the panel-metered Cores',
     file: MODEL,
-    find: '  const batNet = ownBatNet - viaPanel.reduce((t, x) => t + x.w, 0);',
+    find: '  const batNet = ownBatNet - viaFlow.reduce((t, x) => t + x.w, 0);',
     to: '  const batNet = ownBatNet; /* MUTANT */',
     why: '"Batteries — idle" beside a 3.4 kW Batteries → Loads edge (the 10-16 dashboard).',
   },
@@ -155,8 +171,8 @@ const MUTANTS = [
   {
     id: 'O-xii. ★★ a slot with no figure is drawn via the panel',
     file: MODEL,
-    find: "    ? silentSlots.filter((x): x is { s: Shp2EnergySource; w: number } => typeof x.w === 'number' && Number.isFinite(x.w))",
-    to: '    ? (silentSlots as Array<{ s: Shp2EnergySource; w: number }>) /* MUTANT */',
+    find: "    ? silentSlots.filter((x): x is { p: Shp2; s: Shp2EnergySource; w: number } => typeof x.w === 'number' && Number.isFinite(x.w))",
+    to: '    ? (silentSlots as Array<{ p: Shp2; s: Shp2EnergySource; w: number }>) /* MUTANT */',
     why: 'A frame without slot figures is drawn as three Cores via the panel delivering NaN.',
   },
   {
@@ -282,22 +298,22 @@ const MUTANTS = [
   {
     id: 'C-i. ★★ the slots are summed unclamped',
     file: MODEL,
-    find: '  const acOut = ownAcOut + viaPanel.reduce((t, x) => t + Math.max(0, -x.w), 0);',
-    to: '  const acOut = ownAcOut + viaPanel.reduce((t, x) => t - x.w, 0); /* MUTANT */',
+    find: '  const acOut = ownAcOut + viaFlow.reduce((t, x) => t + Math.max(0, -x.w), 0);',
+    to: '  const acOut = ownAcOut + viaFlow.reduce((t, x) => t - x.w, 0); /* MUTANT */',
     why: 'One Core force-charging cancels another’s delivery, and the whole house is drawn on the grid.',
   },
   {
     id: 'C-ii. ★★ the slots’ delivery is clamped after summing',
     file: MODEL,
-    find: '  const acOut = ownAcOut + viaPanel.reduce((t, x) => t + Math.max(0, -x.w), 0);',
-    to: '  const acOut = ownAcOut + Math.max(0, viaPanel.reduce((t, x) => t - x.w, 0)); /* MUTANT */',
+    find: '  const acOut = ownAcOut + viaFlow.reduce((t, x) => t + Math.max(0, -x.w), 0);',
+    to: '  const acOut = ownAcOut + Math.max(0, viaFlow.reduce((t, x) => t - x.w, 0)); /* MUTANT */',
     why: 'A charging slot hides a delivering one: 1.5 kW of delivery drawn as 0.',
   },
   {
     id: 'C-iii. ★★ the slots’ input is clamped after summing',
     file: MODEL,
-    find: '  const acIn = ownAcIn + viaPanel.reduce((t, x) => t + Math.max(0, x.w), 0);',
-    to: '  const acIn = ownAcIn + Math.max(0, viaPanel.reduce((t, x) => t + x.w, 0)); /* MUTANT */',
+    find: '  const acIn = ownAcIn + viaFlow.reduce((t, x) => t + Math.max(0, x.w), 0);',
+    to: '  const acIn = ownAcIn + Math.max(0, viaFlow.reduce((t, x) => t + x.w, 0)); /* MUTANT */',
     why: 'A delivering slot shrinks another’s grid charge: 3 kW into a Core drawn as 1.5 kW.',
   },
   {
@@ -411,6 +427,105 @@ const MUTANTS = [
     find: '    const dchMin = timers.discharge ? p.backupDischargeTimeMin : null;',
     to: '    const dchMin = p.backupDischargeTimeMin; /* MUTANT */',
     why: 'A time to reserve during a force charge, where /api/ha-state publishes none.',
+  },
+  // ── review round 2 ────────────────────────────────────────────────────────
+  {
+    id: 'M-i. ★★★ with the Cores’ delivery unmeasured, the grid is given the whole house again',
+    file: MODEL,
+    find: "    gridToHouseW = gridState !== 'active' ? 0 : coresSeenIdle ? load : Math.min(load, Math.max(0, homeGridW - coresAcIn));",
+    to: "    gridToHouseW = gridState === 'active' ? load : 0; /* MUTANT */",
+    why: 'A fresh main of 500 W below a 3.39 kW house is drawn as "GRID 3.39 kW" when the frame carries no slot figures.',
+  },
+  {
+    id: 'M-ii. ★★ the main is drawn without the Cores’ own draw taken out',
+    file: MODEL,
+    find: "    gridToHouseW = gridState !== 'active' ? 0 : coresSeenIdle ? load : Math.min(load, Math.max(0, homeGridW - coresAcIn));",
+    to: "    gridToHouseW = gridState !== 'active' ? 0 : coresSeenIdle ? load : Math.min(load, homeGridW); /* MUTANT */",
+    why: 'A Core’s 2 kW charge through the main is drawn a second time, as the house on the grid.',
+  },
+  {
+    id: 'B-i. ★★★ a frame behind the Cores’ own meters is never detected',
+    file: MODEL,
+    find: '  const viaFlow = viaPanel.filter((x) => !behindPanels.has(x.p));',
+    to: '  const viaFlow = viaPanel; /* MUTANT */',
+    why: 'At the 09-21 hand-over a dark Core’s stale −1713 W puts the grid on standby and draws a 5137 W Batteries → Loads edge.',
+  },
+  {
+    id: 'B-ii. ★★ the meters’ tolerance loses its 150 W floor',
+    file: MODEL,
+    find: '    return Math.abs(w - own) > Math.max(FRAME_LAG_MIN_W, FRAME_LAG_FRACTION * Math.max(Math.abs(w), Math.abs(own)));',
+    to: '    return Math.abs(w - own) > FRAME_LAG_FRACTION * Math.max(Math.abs(w), Math.abs(own)); /* MUTANT */',
+    why: 'An idle Core’s 100 W metering offset marks a current frame behind, and the dark Core’s delivery is drawn as grid import.',
+  },
+  {
+    id: 'B-iii. ★★ the meters’ tolerance loses its 20 % share',
+    file: MODEL,
+    find: '    return Math.abs(w - own) > Math.max(FRAME_LAG_MIN_W, FRAME_LAG_FRACTION * Math.max(Math.abs(w), Math.abs(own)));',
+    to: '    return Math.abs(w - own) > FRAME_LAG_MIN_W; /* MUTANT */',
+    why: '300 W of disagreement in a steady 5.3 kW charge drops the dark Core’s charge from the grid → Batteries edge.',
+  },
+  {
+    id: 'B-iv. ★★ a reporting Core’s own exchange is read with the wrong sign',
+    file: MODEL,
+    find: '    const own = (d.projection.acInWatts ?? 0) - (d.projection.acOutWatts ?? 0);',
+    to: '    const own = (d.projection.acOutWatts ?? 0) - (d.projection.acInWatts ?? 0); /* MUTANT */',
+    why: 'Every steady charge reads as a frame behind, and the dark Cores’ charge is never drawn.',
+  },
+  {
+    id: 'B-v. ★★ one panel’s frame behind drops every panel’s dark slots',
+    file: MODEL,
+    find: '  const viaFlow = viaPanel.filter((x) => !behindPanels.has(x.p));',
+    to: '  const viaFlow = behindPanels.size > 0 ? [] : viaPanel; /* MUTANT */',
+    why: 'A second panel’s current 3 kW charge disappears because the house panel’s frame is behind.',
+  },
+  {
+    id: 'B-vi. ★★ a behind frame’s dark slots still count as the Cores’ grid draw',
+    file: MODEL,
+    find: '  const acIn = ownAcIn + viaFlow.reduce((t, x) => t + Math.max(0, x.w), 0);',
+    to: '  const acIn = ownAcIn + viaPanel.reduce((t, x) => t + Math.max(0, x.w), 0); /* MUTANT */',
+    why: 'At the 09-22 charge end a dark Core’s stale +5.3 kW is drawn as grid → Batteries after the charge ended.',
+  },
+  {
+    id: 'B-vii. ★★ a frozen Core’s meter judges the frame',
+    file: MODEL,
+    find: '  const ownBySn = new Map(metered.map((d) => [d.sn, d]));',
+    to: '  const ownBySn = new Map(dpus.map((d) => [d.sn, d])); /* MUTANT */',
+    why: 'Three Cores frozen at 0 W mark a live frame behind, and the 20:04 house is drawn with nothing feeding it.',
+  },
+  {
+    id: 'F-vii. ★★★ a frozen Core’s own AC input is counted as the Cores’ grid draw',
+    file: MODEL,
+    find: '  const gridDpus = sourceSns.size > 0 ? metered.filter((d) => sourceSns.has(d.sn)) : metered;',
+    to: '  const gridDpus = sourceSns.size > 0 ? dpus.filter((d) => sourceSns.has(d.sn)) : dpus; /* MUTANT */',
+    why: 'Cores frozen mid-charge keep a 15.9 kW grid → Batteries edge on screen after the charge ended, or count a live charge twice.',
+  },
+  {
+    id: 'T-xii. ★★★ a disconnected slot’s Core bounds the pool',
+    file: MEMB,
+    find: '      if (!s.isConnected || !s.sn || seen.has(s.sn)) return;',
+    to: '      if (!s.sn || seen.has(s.sn)) return; /* MUTANT */',
+    why: 'A bench spare charging from the wall publishes a time to full and hides the time to reserve during a 2 kW drain.',
+  },
+  {
+    id: 'T-xiii. ★ a Core listed by two panels is counted twice',
+    file: MEMB,
+    find: '      if (!s.isConnected || !s.sn || seen.has(s.sn)) return;',
+    to: '      if (!s.isConnected || !s.sn) return; /* MUTANT */',
+    why: 'One Core’s exchange is added once per panel that lists it.',
+  },
+  {
+    id: 'T-xiv. ★★ the bound reads the poll’s pack flow, not the stream’s',
+    file: MEMB,
+    find: '        for (const pk of d.projection.packs ?? []) { const f = pk.liveFlow ?? pk; watts +=',
+    to: '        for (const pk of d.projection.packs ?? []) { const f = pk; /* MUTANT */ watts +=',
+    why: 'The poll’s replayed 3 kW charge outweighs the stream’s 2 kW discharge: a time to full during a drain (v1.186.2).',
+  },
+  {
+    id: 'T-xv. ★★★ an offline Core with a recent projection is read on its own meter',
+    file: MEMB,
+    find: "      if (d?.online === true && d.projection?.kind === 'dpu' && dpuContentFresh(d, nowMs)) {",
+    to: "      if (d?.projection?.kind === 'dpu' && dpuContentFresh(d, nowMs)) { /* MUTANT */",
+    why: 'The packs’ last charge, carried across the offline flip, publishes a time to full while the slots deliver 3 kW.',
   },
 ];
 
