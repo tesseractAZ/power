@@ -1,3 +1,35 @@
+## 1.189.0
+
+### The winter mid-day charge, in preview; the night-charge write bounded against on-peak; Cancel always on the card
+
+**Night charge: the winter mid-day charge, in preview**
+
+- On winter weekdays the APS super off-peak period, 10am–3pm, is cheaper than the overnight window. With the cost objective (`ARB_OBJECTIVE` `cost` and `ARB_COST_MAX_SOC_PCT` above 50), Power now works out, on the evening before each winter weekday (8 October to 31 March, holidays excepted), the charge it would make in that window instead of overnight: an outage backup on the overnight window before it when the worst case needs one, the daytime charge, and a re-check on the morning solar forecast that can lower or cancel the daytime charge but never raise it.
+- This is a preview only. Nothing is armed, written to the panel, pushed or spoken for it, and the overnight charge runs as before. A later release turns the mid-day charge on, after at least five winter weekdays of preview have been checked against what those days did.
+- The preview is published on new Midday-Charge entities (the level, the reserve it would hold, the expected and worst-case buy, the window, and the morning re-check's outcome) and in a read-only section of the night-charge card, with the title of the notice it would have sent. Midday-Charge Recommended stays off while the mid-day charge is a preview. The log shows each preview in full, tagged `night-charge[midday-shadow]:`, and each evening's ledger row records it, to be scored against the day.
+- New sensor Night-Charge Role: what tonight's overnight window is for, `cost` (it carries the charge, as on every night in this release) or `backup` (an outage backup ahead of a mid-day charge).
+
+**Night charge: the write never stands into on-peak**
+
+- No reserve raise or force-charge ON is sent from an hour before on-peak, and the reserve restore and the force-charge OFF fall due by then at the latest. The overnight window closes at 5am, eleven hours before on-peak, so a night that goes to plan is unchanged.
+- A restore the panel has not confirmed is paged as critical 30 minutes after the window closes (or 30 minutes before on-peak, if that comes first), and again when on-peak starts, for as long as the panel still reads the raised reserve or cannot be read. The push always goes; the spoken page follows the broadcast quiet hours, as every critical announcement does. The restore keeps being retried.
+- A backup reserve set outside the add-on while the night's raise stands (the same value on two readings at least five minutes apart) is left as set: the night counts as finished, its force charge switches off, a notification says so, and the card no longer offers Cancel for it.
+- While a restore has not taken and the panel still reads the raised reserve, the on-peak "battery idle while the grid is used" and grid-charging notices measure against the reserve as it was before the raise. The runway and below-reserve alarms are unchanged.
+- A reserve-floor request refused while a night-charge write holds the reserve up now says when the reserve is restored.
+
+**Night-charge card**
+
+- The card offers Cancel in every shape it takes: beside a hold, beside an incomplete or out-of-date plan, and when its status cannot be read. Beside a hold or a missing plan, when a write is armed, it says the write still stands, instead of that nothing will be charged. A status that has not loaded after 15 seconds shows the unavailable card, with its Cancel, instead of "Loading…".
+- A restore not yet confirmed after a cancel is shown as a warning.
+
+**API**
+
+- `POST /api/night-charge/cancel` takes an optional body `{ "leg": "cost" | "backup" }`; with none it cancels the charge, as before. `GET /api/night-charge/status` lists the charge cycle's legs (`legs`); every cycle armed in this release has the one overnight leg.
+
+**Updating**
+
+- No options change. The night-charge ledger gains columns for the charge cycle and the preview, added on the first start. A night already armed when the update installs keeps the timing it was armed with. Updating restarts the add-on.
+
 ## 1.188.1
 
 ### Only fresh readings are saved; while a battery reports nothing of its own, the Energy dashboard and the energy flow read the panel's meters
