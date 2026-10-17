@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -69,5 +69,30 @@ test('★★★ an old-schema ledger gains every charge-cycle column with its ty
     assert.deepEqual([r.window_kind, r.backup_actuated, r.backup_applied_at_ms, r.backup_reverted_at_ms, r.actuated, r.actuation_applied_at_ms, r.actuation_reverted_at_ms],
       ['overnight', 1, 10, 20, 1, 30, null], 'the legs do not overwrite each other');
     for (const c of Object.values(BACKUP_LEDGER_COLUMN)) assert.ok(types.has(c), `${c} exists`);
+    // A two-leg cycle superseded by a later evening, and one stale-cancelled: the active backup leg's
+    // disposition and the pending cost leg's keep their own columns (index.ts routes both stamps by
+    // the leg, chargeCycle.legLedgerFields — a direct arm_disposition write would be overwritten).
+    rec.recordNightPlan({ plan_date: '2026-11-21', issued_at_ms: 3, buy_kwh: 30, window_kind: 'super_off_peak' } as never);
+    rec.recordNightOutcome('2026-11-21', legLedgerFields('backup', { arm_disposition: 'superseded by the 2026-11-22 plan — Sat/Sun share one Monday window, so only the later arm writes' }) as never);
+    rec.recordNightOutcome('2026-11-21', legLedgerFields('cost', { arm_disposition: 'superseded by the 2026-11-22 plan' }) as never);
+    const sup = at('2026-11-21');
+    assert.match(String(sup.backup_arm_disposition), /^superseded by the 2026-11-22 plan — Sat\/Sun share/);
+    assert.equal(sup.arm_disposition, 'superseded by the 2026-11-22 plan');
+    rec.recordNightPlan({ plan_date: '2026-11-22', issued_at_ms: 4, buy_kwh: 30, window_kind: 'super_off_peak' } as never);
+    rec.recordNightOutcome('2026-11-22', legLedgerFields('backup', { arm_disposition: 'cancelled by the 2026-11-23 plan — hold' }) as never);
+    rec.recordNightOutcome('2026-11-22', legLedgerFields('cost', { arm_disposition: 'cancelled by the 2026-11-23 plan — hold' }) as never);
+    const can = at('2026-11-22');
+    assert.deepEqual([can.backup_arm_disposition, can.arm_disposition], ['cancelled by the 2026-11-23 plan — hold', 'cancelled by the 2026-11-23 plan — hold']);
   } finally { rec.close(); rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('★★★ SOURCE PIN: the supersede and stale-cancel stamps of the active leg go through its leg mapping, with their own messages', () => {
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const stale = idx.slice(idx.indexOf('function cancelStalePriorArm('), idx.indexOf('async function runNightChargeEveningJobInner('));
+  assert.ok(stale.includes('recorder.recordNightOutcome(stale, legLedgerFields(legRoleOf(s), {\n      arm_disposition: `cancelled by the ${today} plan — ${reason}`,\n    }) as Partial<NightLedgerRow>);'));
+  assert.ok(stale.includes('app.log.warn(`night-charge: cancel stamp failed for ${stale} (${e?.message ?? e})`);'), 'its own message');
+  assert.ok(idx.includes('recorder.recordNightOutcome(nightActuationMem.day, legLedgerFields(legRoleOf(nightActuationMem), {\n              arm_disposition: `superseded by the ${today} plan — Sat/Sun share one Monday window, so only the later arm writes`,\n            }) as Partial<NightLedgerRow>);'));
+  assert.ok(idx.includes('app.log.warn(`night-charge: supersede stamp failed for ${nightActuationMem.day} (${e?.message ?? e})`);'));
+  // No other arm_disposition is written to the recorder directly.
+  assert.equal((idx.match(/recorder\.recordNightOutcome\([^)]*\{\s*arm_disposition/g) ?? []).length, 0);
 });

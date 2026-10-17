@@ -1243,7 +1243,10 @@ then reads "near the reserve". While a write of ours is past its restore with th
 read back (`chargeWriteHold`, published by the actuator) and the panel still reads exactly its
 target, `moneyDetectorReservePct` hands this detector and the idle-pool detector below the
 prior floor, and each alert names the reserve the panel reads and the one to restore
-(`heldByChargeWriteText`). The runway and below-reserve alarms keep the live value.
+(`heldByChargeWriteText`). It applies only once the restore has had its readback grace
+(`heldFromMs`: 5 minutes after the restore was accepted, or after it fell due while none has
+been), so a restore that goes to plan, whose panel echoes the old value for a minute after
+05:00, never engages it. The runway and below-reserve alarms keep the live value.
 
 **Tuning** (env, all with defaults — no add-on config option):
 

@@ -42,7 +42,7 @@ press a button or make an API request.
 
 | Writer | When it writes | Limits | Off switch |
 |---|---|---|---|
-| **Backup-reserve setpoint** (night charge) | `NIGHT_CHARGE_MODE` is `supervised` or `auto`, and that evening's notice reached you. Once, at the charge window's open (or up to 30 minutes after), it raises the panel's backup reserve to the plan's setpoint. It restores the earlier value at the window close (an hour before on-peak at the latest), or at once on a cancel or a grid loss; a reserve you set yourself during the night is left as you set it. | 10–50 %, whole numbers, and only above the current reserve. Not while the alarm host is under critical pressure, nor within an hour of on-peak. Read back after each write and re-issued up to twice; a restore that does not take, or is not confirmed 30 minutes after the close, is announced as critical. | `advisory` (the default). **Cancel tonight** on the night-charge card. A reserve already raised is still restored. |
+| **Backup-reserve setpoint** (night charge) | `NIGHT_CHARGE_MODE` is `supervised` or `auto`, and that evening's notice reached you. Once, at the charge window's open (or up to 30 minutes after), it raises the panel's backup reserve to the plan's setpoint. It restores the earlier value at the window close (an hour before on-peak at the latest), or at once on a cancel or a grid loss; a reserve you set yourself during the night is left as you set it. | 10–50 %, whole numbers, and only above the current reserve. Not while the alarm host is under critical pressure, nor within an hour of on-peak. Read back after each write and re-issued up to twice; a restore that does not take, or is not confirmed 30 minutes after the close, is announced as critical, and no later night's write is armed while the panel still reads the raised reserve. | `advisory` (the default). **Cancel tonight** on the night-charge card. A reserve already raised is still restored. |
 | **Force charge ON/OFF per Core slot** and the panel's **force-charge ceiling** (night charge) | As above, plus `ARB_OBJECTIVE` `cost` and `ARB_COST_MAX_SOC_PCT` above 50, on a night whose reserve write has read back. The ceiling is set to the night's target and restored afterwards. Force charge switches on late in the window, just in time to reach the target, and off at the target, the window close, a cancel or a grid loss. | Panel slots 1–3; ceiling 80–100 %. On only with the grid known present and no slot already on. ON and OFF are read back; a slot that stays on is announced as critical and sent OFF again every 15 minutes. | `ARB_COST_MAX_SOC_PCT` 50, `ARB_OBJECTIVE` `resilience`, or `advisory`. The OFF side keeps running. |
 | **Force charge OFF** (Charge Now responder) | `CHARGE_NOW_RESPONSE` is `supervised`, and a Core's Charge Now has been buying grid power on-peak (800 W or more for 10 minutes) with the pool more than 10 points above the reserve. | OFF only, never ON. Once per episode, at most twice a day, read back with one retry. Stands down while a storm pre-charge advisory is active. | `advisory` (the default: a notification only) or `off`. |
 | **Reserve floor** (your request) | `POST /api/reserve-floor?pct=N`, through the write gate. | 10–50 %, whole numbers. Refused while a night-charge write holds the reserve up; the refusal says when it is restored. At most 10 an hour. | Do not call it. |
@@ -215,9 +215,9 @@ advises; it informs `auto` only and does not hold back `supervised`. Planning in
 would make instead in the next day's 10am–3pm super off-peak window, with an outage backup
 overnight before it and a re-check on the morning forecast. It is computed only: nothing is armed,
 written, pushed or spoken for it, and the overnight charge runs as described above. The Mid-day
-Charge entities (`ecoflow_midday_charge_recommended` stays off) and a read-only section of the
-night-charge card show it, with the title of the notice it would have sent; the log shows the full
-notice, tagged `night-charge[midday-shadow]:`.
+Charge entities (`ecoflow_midday_charge_recommended` stays off; each figure's `basis` attribute
+reads `shadow`) and a read-only section of the night-charge card show it, with the title of the
+notice it would have sent; the log shows the full notice, tagged `night-charge[midday-shadow]:`.
 
 **Load shedding.** With `LOAD_SHEDDING_SHED_ENTITIES` listing your sheddable loads, Power
 recommends which to switch off when the runway alarm stands at Medium or above and the runway
@@ -264,7 +264,7 @@ Until `TARIFF_APS_RATES_CONFIRMED` is on, the cost and savings figures use a fla
 
 ## Entities and Energy Dashboard
 
-With MQTT discovery on, Power publishes about 90 sensors and binary sensors under one device,
+With MQTT discovery on, Power publishes about 100 sensors and binary sensors under one device,
 **EcoFlow Panel**, plus an energy and a power sensor for each panel circuit and four
 alarm-priority switches.
 Every entity, its unique_id, meaning and unit:

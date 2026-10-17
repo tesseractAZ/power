@@ -120,7 +120,7 @@ export function middayRevertDeadlineFromLeg(
     windowStartMs: number | null; windowEndMs: number | null; nextOnPeakStartMs?: number | null;
     forceChargeOnAtMs: number | null; forceChargeOffVerifiedAtMs: number | null;
   },
-  o: { stage: 'deadline' | 'onPeak'; unknown: boolean; targetPct: number; restorePct: number | null; nowMs: number },
+  o: { stage: 'deadline' | 'onPeak'; unknown: boolean; targetPct: number; restorePct: number | null; nowMs: number; retrying: boolean },
 ): MiddayRevertDeadlineText {
   return {
     windowStartMs: leg.windowStartMs ?? o.nowMs,
@@ -131,5 +131,6 @@ export function middayRevertDeadlineFromLeg(
     restorePct: o.restorePct,
     onPeakStartMs: leg.nextOnPeakStartMs ?? null,
     forceChargeOffOpen: leg.forceChargeOnAtMs != null && leg.forceChargeOffVerifiedAtMs == null,
+    retrying: o.retrying,
   };
 }

@@ -25,7 +25,7 @@
  */
 import type { NotifyMessage } from './notify.js';
 import type { ForceChargeNightOutcome } from './nightForceCharge.js';
-import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH } from './nightChargeActuator.js';
+import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, revertRetryText } from './nightChargeActuator.js';
 
 const TZ = 'America/Phoenix';
 
@@ -677,6 +677,9 @@ export interface MiddayRevertDeadlineText {
   onPeakStartMs: number | null;
   /** Charge Now was switched on and its OFF has not read back: the page asks for it too. */
   forceChargeOffOpen: boolean;
+  /** A restore of ours will still be sent (nightChargeActuator.revertRetryPending): the push says
+   *  the add-on keeps retrying only then. */
+  retrying: boolean;
 }
 
 /**
@@ -766,6 +769,6 @@ export function buildMiddayRevertDeadline(o: MiddayRevertDeadlineText): NotifyMe
     title: o.unknown ? `Charge (${label}): reserve restore not confirmed` : `Charge (${label}): reserve still raised`,
     body: `The restore of the backup reserve to ${to} after the ${label} charge ${state}${peak} `
       + 'While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. '
-      + `Set the backup reserve to ${to}${o.forceChargeOffOpen ? ' and switch Charge Now off' : ''} in the EcoFlow app. The add-on keeps retrying the restore.`,
+      + `Set the backup reserve to ${to}${o.forceChargeOffOpen ? ' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(o.retrying)}`,
   };
 }

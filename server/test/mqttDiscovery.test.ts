@@ -13,7 +13,10 @@ import {
   parseAlertSwitchCommand,
   alertSwitchCommandTopic,
   alertSwitchStateTopic,
+  sensorDiscoveryConfig,
+  MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE,
 } from '../src/mqttDiscovery.js';
+import { middayChargeStateFields } from '../src/middayShadow.js';
 import { ALARM_PRIORITY_ORDER } from '../src/alertPriority.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -694,4 +697,40 @@ test('planCircuitDiscovery: the latch signature covers the PUBLISHED name, not a
   for (const p of plan.publish) {
     assert.ok(!/^EcoFlow\b/i.test(String(p.cfg.name)), `circuit name must not re-prefix the device: ${p.cfg.name}`);
   }
+});
+
+/**
+ * v1.189.0 — the mid-day figures say what they are. Until the mid-day switch they are a shadow
+ * computation, and the HA surface — the one dashboards and automations read — carried no mark of
+ * it: "Midday-Charge Target SoC 90 %" beside a "Window Start tomorrow 10:00" for a charge that will
+ * not happen, and after the switch the same entities would carry live figures with nothing in the
+ * recorder's history to tell the two apart. Each figure now carries a `basis` attribute, from the
+ * state topic, with the unique_ids (and so the entity ids) unchanged; every other sensor's config is
+ * byte-identical.
+ */
+test('★★★ mqtt-discovery: every mid-day figure carries a basis attribute; no other sensor changes', () => {
+  const ids = ['ecoflow_midday_charge_target_soc', 'ecoflow_midday_charge_reserve_hold', 'ecoflow_midday_charge_expected_buy_kwh',
+    'ecoflow_midday_charge_buy_kwh', 'ecoflow_midday_charge_window_start_at', 'ecoflow_midday_charge_window_end_at', 'ecoflow_midday_charge_refresh'];
+  const withAttrs = SENSORS.filter((x) => x.json_attributes_template != null).map((x) => x.unique_id).sort();
+  assert.deepEqual(withAttrs, [...ids].sort(), 'exactly the mid-day figures');
+  for (const id of ids) {
+    const cfg = sensorDiscoveryConfig(SENSORS.find((x) => x.unique_id === id)!);
+    assert.equal(cfg.json_attributes_topic, 'ecoflow_panel/state', `${id}: attributes from the state topic`);
+    assert.equal(cfg.json_attributes_template, MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE);
+    assert.equal(cfg.unique_id, id, 'the unique_id is unchanged');
+    assert.equal('object_id' in cfg, false, 'no object_id: HA keeps the entity id it minted');
+  }
+  assert.equal(MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE, '{{ {"basis": value_json.midday_charge_basis | default(none)} | tojson }}');
+  // Every other sensor's config is what it was: no attribute keys at all.
+  for (const x of SENSORS.filter((y) => !ids.includes(y.unique_id))) {
+    const cfg = sensorDiscoveryConfig(x);
+    assert.equal('json_attributes_topic' in cfg, false, x.unique_id);
+    assert.equal('json_attributes_template' in cfg, false, x.unique_id);
+  }
+  // The state publishes the basis whether or not a mid-day leg is current.
+  assert.equal(middayChargeStateFields(null).midday_charge_basis, 'shadow');
+  // The recommendation stays the live decision: no basis on it, and strictly off.
+  const rec = BINARY_SENSORS.find((x) => x.unique_id === 'ecoflow_midday_charge_recommended')!;
+  assert.equal('json_attributes_template' in rec, false);
+  assert.equal(middayChargeStateFields(null).midday_charge_recommended, false);
 });

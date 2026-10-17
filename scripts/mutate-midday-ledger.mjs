@@ -19,6 +19,8 @@
  *                             the latch, the stale panel, the re-read, the order, the status)
  *   Shadow     S-xiv..S-xxii (the refresh never raises, the tag, the backup's one walk and option A,
  *                             the hold, advisory, the served record)
+ *   Basis      B-i..B-v      (every mid-day figure carries basis=shadow; the backup's line says
+ *                             "Shadow only"; the card's not-comparable line)
  *
  *   node scripts/mutate-midday-ledger.mjs [--only <id prefix>]
  */
@@ -34,6 +36,7 @@ const AN = resolve(REPO, 'server/src/analytics.ts');
 const REC = resolve(REPO, 'server/src/recorder.ts');
 const MS = resolve(REPO, 'server/src/middayShadow.ts');
 const MQ = resolve(REPO, 'server/src/mqttDiscovery.ts');
+const WEBTXT = resolve(REPO, 'web/src/cards/nightChargeText.ts');
 const SUBSET = [
   'test/middayShadow.test.ts',
   'test/ledgerMiddayShadow.test.ts',
@@ -394,6 +397,42 @@ const MUTANTS = [
     find: "  if (mode === 'advisory') return { wouldArm: false, disposition: 'not armed — the night-charge mode is advisory' };",
     to: '  /* MUTANT */',
     why: 'The shadow reports a write the configured mode never makes.',
+  },
+  /* ── what the mid-day figures are (fix round 1) ── */
+  {
+    id: 'B-i. ★★★ the mid-day figures publish no attributes',
+    file: MQ,
+    find: '    ...(s.json_attributes_template != null ? { json_attributes_topic: STATE_TOPIC } : {}),',
+    to: '    /* MUTANT */',
+    why: 'The basis attribute is templated but never read: the HA surface carries no shadow mark.',
+  },
+  {
+    id: 'B-ii. ★★★ the mid-day figures say they are live',
+    file: MS,
+    find: "export const MIDDAY_CHARGE_BASIS: MiddayChargeBasis = 'shadow';",
+    to: "export const MIDDAY_CHARGE_BASIS: MiddayChargeBasis = 'live'; /* MUTANT */",
+    why: 'A preview is presented to dashboards and automations as a charge that runs.',
+  },
+  {
+    id: 'B-iii. ★★ one mid-day figure loses its basis',
+    file: MQ,
+    find: "value_template: '{{ value_json.midday_charge_refresh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },",
+    to: "value_template: '{{ value_json.midday_charge_refresh }}' }, /* MUTANT */",
+    why: 'The refresh entity reads "lowered" with nothing to say it is a preview.',
+  },
+  {
+    id: 'B-iv. ★★ the backup leg\'s "would arm" line does not say "Shadow only"',
+    file: MS,
+    find: " troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line. Shadow only: nothing is armed, written or announced for it.`);",
+    to: " troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.`); /* MUTANT */",
+    why: 'A log search for "Shadow only" misses the backup\'s "would arm".',
+  },
+  {
+    id: 'B-v. ★★ the card shows a not-comparable refresh as figures',
+    file: WEBTXT,
+    find: "      : r.disposition === 'not-comparable' ? 'not comparable'",
+    to: "      : (false as boolean) ? 'not comparable' /* MUTANT */",
+    why: 'The card reads "not-comparable, ~—" as if the refresh had sized nothing.',
   },
 ];
 

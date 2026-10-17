@@ -43,6 +43,9 @@ test('★★★ the section states each leg, whether it would arm, and that noth
   assert.equal(r.lines[2], 'Morning refresh 09:31: lowered, ~80%, ~12 kWh expected — lowered to ~80% (announced 89.5%)');
   const c = middayShadowView(shadow({ refresh: { atMs: phx(10, 15, 9, 31), disposition: 'cancelled', levelPct: null, reservePct: null, expectedBuyKwh: 0, reason: 'the refreshed plan holds: no charge is needed' } }), hhmm)!;
   assert.equal(c.lines[2], 'Morning refresh 09:31: cancelled — the refreshed plan holds: no charge is needed');
+  // Not comparable (the live overnight charge wrote to the panel): no re-sized figures to show.
+  const nc = middayShadowView(shadow({ refresh: { atMs: phx(10, 15, 9, 30), disposition: 'not-comparable', levelPct: null, reservePct: null, expectedBuyKwh: null, reason: 'the live overnight charge wrote to the panel' } }), hhmm)!;
+  assert.equal(nc.lines[2], 'Morning refresh 09:30: not comparable — the live overnight charge wrote to the panel');
   const hold = middayShadowView(shadow({ cost: leg('cost', phx(10, 15, 10), phx(10, 15, 15), { chargeTonight: false, disposition: 'not armed — the plan holds (no buy needed)' }) }), hhmm)!;
   assert.equal(hold.lines[1], 'Mid-day charge 10:00–15:00: no charge needed · not armed — the plan holds (no buy needed)');
   assert.equal(hold.lines.length, 2, 'nothing to refresh');

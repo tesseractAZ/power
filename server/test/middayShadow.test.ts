@@ -19,6 +19,7 @@ import {
   runMiddayShadowEvening, shadowCycleConfig, backupLegSizing, costLegSizing, refreshLeg, shadowRefreshDue, standingRefresh,
   refreshFromSized, refreshSizing, middayChargeStateFields, middayShadowLedgerColumns, middayShadowRefreshLedgerColumns,
   middayShadowLogLines, middayShadowRefreshLogLine, coerceMiddayShadowRecord, windowP50Kwh, shadowServed,
+  liveOvernightWrote, notComparableRefresh, refreshResized, middayShadowRefreshPreview, NOT_COMPARABLE_REASON, MIDDAY_CHARGE_BASIS,
   MIDDAY_SHADOW_LOG_TAG, MIDDAY_SHADOW_FRESH_MS, REFRESH_LEAD_MS, REFRESH_DEADLINE_MS,
   type MiddayShadowRecord, type ShadowLegSizing, type ShadowSized, type ShadowArmCandidate, type ShadowArmVerdict,
 } from '../src/middayShadow.js';
@@ -207,6 +208,23 @@ test('★★ a backup the arm probe refuses gives the cost leg no hold, and says
   assert.match(r.cost!.disposition, /^would not arm/);
 });
 
+test('★★★ a cost leg the re-entry line holds is recorded as held for it — not as "no buy needed" — and a refresh that holds on it says so', async () => {
+  // The engine's re-entry hold (nightChargeAdvisor: a write under floor + 25), as the cost leg's sizing.
+  const held = { ...livePlan(), chargeTonight: false, middayReentryHold: { arrivalPct: 38, linePct: 41 } } as NightChargePlan;
+  const sizer = engineSizer([]);
+  const r = await runMiddayShadowEvening({
+    nowMs: NOW, day: DAY, model: MODEL, cfg: CFG, mode: 'supervised', chgMaxSocPcts: [100],
+    sizeLeg: async (sz) => (sz.spec.role === 'cost' ? { plan: held, windowPvP50Kwh: null, windowLoadP50Kwh: null } : sizer(sz)),
+    armProbe: probeOn(emptyCycle()),
+  }) as MiddayShadowRecord;
+  assert.equal(r.cost!.wouldArm, false);
+  assert.equal(r.cost!.disposition, 'not armed — the plan holds: the charge would take the pool only to ~38%, under the 41% re-entry line');
+  const rf = refreshLeg({ announced: ANN, refreshed: fresh({ chargeTonight: false, reentryHold: { arrivalPct: 38, linePct: 41 } }) });
+  assert.equal(rf.disposition, 'cancelled');
+  assert.equal(rf.reason, 'the refreshed plan holds: the charge would take the pool only to ~38%, under the 41% re-entry line');
+  assert.equal(refreshLeg({ announced: ANN, refreshed: fresh({ chargeTonight: false }) }).reason, 'the refreshed plan holds: no charge is needed');
+});
+
 test('★★ a stale panel defers the whole evening (no half record)', async () => {
   let n = 0;
   const r = await runMiddayShadowEvening({
@@ -336,13 +354,55 @@ test('★★★ the 21:30 job and the 10:00/15:00 ticks on a winter weekday: zer
   assert.deepEqual(withShadow.pushes, [], 'no missed-apply push: no mid-day leg was ever armed');
   assert.equal(a.cycle.pendingLegs.length, 0);
 
-  // The 09:30 refresh, computed: still nothing reaches the cycle.
+  // The 09:30 refresh. The live overnight leg wrote at 23:00 (a write mode, the cost objective), so
+  // the 09:30 pool is not the one a mid-day cycle would have had: the refresh is recorded as not
+  // comparable, never re-sized on it (index.ts runMiddayShadowTickInner, step 2).
   const due = shadowRefreshDue(rec, phx(10, 15, 9, 30));
   assert.equal(due, 'run');
+  assert.equal(liveOvernightWrote(rec, a.cycle.active), true, 'the live overnight leg wrote');
+  // Re-sized on the post-charge pool it would read the cost leg as nearly done — the defect.
   const sz = refreshSizing(MODEL, rec, CFG, [100])!;
+  const postCharge = refreshFromSized(rec, await engineSizer([], { nowMs: phx(10, 15, 9, 30), socNowPct: 70 })(sz), phx(10, 15, 9, 30));
+  assert.ok(postCharge.expectedBuyKwh == null || postCharge.expectedBuyKwh < rec.cost!.expectedBuyKwh! / 2,
+    `${postCharge.expectedBuyKwh} against the evening's ${rec.cost!.expectedBuyKwh}: not the mid-day cycle's refresh`);
+  // A night the live leg wrote nothing (advisory, or a hold): comparable, re-sized on the pool as it is.
+  const unwritten = { day: DAY, appliedAtMs: null, forceChargeOnAtMs: null };
+  assert.equal(liveOvernightWrote(rec, unwritten), false);
   const refreshed = refreshFromSized(rec, await engineSizer([], { nowMs: phx(10, 15, 9, 30), socNowPct: 30 })(sz), phx(10, 15, 9, 30));
   assert.ok(['unchanged', 'lowered', 'capped', 'cancelled'].includes(refreshed.disposition));
   assert.equal(JSON.stringify(liveCycle), frozen);
+});
+
+test('★★★ a shadow refresh after the live overnight charge wrote is not comparable: not re-sized, the evening figures stand, nothing pushed', () => {
+  const r = record();
+  const at = phx(10, 15, 9, 30);
+  assert.equal(liveOvernightWrote(r, { day: DAY, appliedAtMs: phx(10, 14, 23), forceChargeOnAtMs: null }), true, 'the reserve raise');
+  assert.equal(liveOvernightWrote(r, { day: DAY, appliedAtMs: null, forceChargeOnAtMs: phx(10, 15, 3) }), true, 'a force-charge alone');
+  assert.equal(liveOvernightWrote(r, { day: '2026-10-13', appliedAtMs: phx(10, 13, 23), forceChargeOnAtMs: null }), false, 'another evening\'s leg');
+  assert.equal(liveOvernightWrote(r, { day: null, appliedAtMs: null, forceChargeOnAtMs: null }), false);
+  const nc = notComparableRefresh(at);
+  assert.equal(nc.disposition, 'not-comparable');
+  assert.equal(nc.wouldPush, false);
+  assert.equal(nc.reason, NOT_COMPARABLE_REASON);
+  assert.match(nc.reason, /^the live overnight charge wrote to the panel, so the 09:30 pool is not the one a mid-day cycle would have had/);
+  assert.deepEqual([nc.levelPct, nc.reservePct, nc.buyKwh, nc.expectedBuyKwh], [null, null, null, null], 'no re-sized figures');
+  assert.equal(refreshResized(nc), false);
+  const withNc = { ...r, refresh: nc };
+  // The entities keep the evening's figures and say what the refresh was.
+  const f = middayChargeStateFields(withNc, at + M);
+  assert.equal(f.midday_charge_target_soc_percent, 89.5);
+  assert.equal(f.midday_charge_expected_buy_kwh, 34);
+  assert.equal(f.midday_charge_refresh, 'not-comparable');
+  assert.equal(f.midday_charge_basis, 'shadow');
+  // The ledger: the disposition and no refreshed figures; the log line states the basis; no push preview.
+  const cols = middayShadowRefreshLedgerColumns(nc);
+  assert.equal(cols.shadow_refresh_disposition, 'not-comparable');
+  assert.equal(cols.shadow_refreshed_level_pct, null);
+  assert.equal(cols.shadow_refreshed_expected_buy_kwh, null);
+  assert.match(middayShadowRefreshLogLine(withNc, nc), /refresh — not-comparable: the live overnight charge wrote to the panel/);
+  assert.equal(middayShadowRefreshPreview(withNc, nc), null);
+  // It round-trips through the file.
+  assert.deepEqual(coerceMiddayShadowRecord(JSON.parse(JSON.stringify(withNc))), withNc);
 });
 
 /* ══ the morning refresh ════════════════════════════════════════════════════ */
@@ -432,6 +492,7 @@ test('★★★ the mid-day entities: never recommended; the refreshed figures o
   const r = record();
   const f = middayChargeStateFields(r, NOW + H);
   assert.deepEqual(f, {
+    midday_charge_basis: 'shadow',
     midday_charge_recommended: false,
     midday_charge_target_soc_percent: 89.5,
     midday_charge_reserve_hold_percent: 50,
@@ -455,6 +516,7 @@ test('★★★ the mid-day entities: never recommended; the refreshed figures o
     assert.equal(g.midday_charge_recommended, false);
     assert.equal(g.midday_charge_target_soc_percent, null);
     assert.equal(g.midday_charge_window_start_at, null);
+    assert.equal(g.midday_charge_basis, 'shadow', 'every mid-day figure is a shadow computation in this release');
     assert.equal(shadowServed(rec, t), false);
   }
   // Even a "would arm" mid-day leg in a write mode is not a recommendation.
@@ -486,6 +548,8 @@ test('★★ every log line carries the shadow tag and says nothing was written'
   assert.equal(lines.length, 2);
   for (const l of lines) assert.ok(l.startsWith(`${MIDDAY_SHADOW_LOG_TAG} ${DAY} `), l);
   assert.match(lines[1], /Shadow only: nothing is armed, written or announced for it\.$/);
+  assert.match(lines[0], /^night-charge\[midday-shadow\]: 2026-10-14 backup .* — would arm: .*Shadow only: nothing is armed, written or announced for it\.$/, 'the backup\'s "would arm" says so too');
+  assert.equal(MIDDAY_CHARGE_BASIS, 'shadow');
   assert.match(lines[0], /worst-case sizing 47\.8 kWh/, 'the worst case is labelled as the sizing basis');
   const rl = middayShadowRefreshLogLine(r, standingRefresh(r, phx(10, 15, 9, 55)));
   assert.ok(rl.startsWith(MIDDAY_SHADOW_LOG_TAG));
@@ -589,6 +653,8 @@ test('★★★ index.ts: the shadow block writes nothing — no panel writer, n
   assert.match(blk, /if \(readNightChargeLatch\(\)\.lastNotifyDay === today && cur\?\.day !== today && nowMin >= fireMin && nowMin < 23 \* 60\) \{/);
   // The refresh needs a fresh panel, is re-read after the await, and is persisted before it is logged.
   assert.match(blk, /const sized = await sizeShadowLeg\(sizing, false\);/);
+  // A night the live overnight leg wrote is not re-sized (liveOvernightWrote), before any sizing.
+  assert.match(blk, /let refresh = liveOvernightWrote\(cur, nightActuationMem\) \? notComparableRefresh\(nowMs\)\n\s+: due === 'stand' \? standingRefresh\(cur, nowMs\) : null;/);
   assert.match(blk, /if \(live == null \|\| live\.day !== cur\.day \|\| live\.computedAtMs !== cur\.computedAtMs \|\| live\.refresh != null\) return;/);
   assert.ok(blk.indexOf('persistMiddayShadow(next);') < blk.indexOf('app.log.info(middayShadowRefreshLogLine(next, refresh));'));
   // The tick is registered beside the actuator tick, on its own single-flight.

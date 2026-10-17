@@ -530,6 +530,9 @@ export interface NightChargePlan {
   /** R2 — a mid-day (super off-peak) leg only: which term of T_mid set the reserve it writes
    *  (middayReserveTargetPct). Absent on every overnight plan. */
   reserveTargetBasis?: MiddayReserveBasis;
+  /** A mid-day cost leg the re-entry hold held (plan §3.3): the level its write would take the pool
+   *  to, and the line it had to reach (floor + MIDDAY_REENTRY_MARGIN_PCT). Absent otherwise. */
+  middayReentryHold?: { arrivalPct: number; linePct: number };
   rationale: string;
 }
 
@@ -1902,6 +1905,29 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       window: { hours: horizon, fromMs: effChargeStartMs, windowEndMs: windowEnd, dischargeEff, chargeCapKw, envelopeKw, acceptKw },
     })
     : { buyKwh: 0, levelPct: null };
+  // R2 — THE RE-ENTRY HOLD (plan §3.3), a mid-day cost leg only (middayReentryLinePct): a write whose
+  // level is under floor + 25 leaves the pool, at the restore, where the panel holds it instead of
+  // discharging, and the grid carries the house into on-peak. Such a leg holds.
+  if (midday && !backupLeg && chargeTonight) {
+    const arrivalPct = expected.levelPct;
+    const linePct = middayReentryLinePct(arrivalPct, reserveFloorPct);
+    if (arrivalPct != null && linePct != null) {
+      return {
+        ...holdPlan(
+          `Hold — the mid-day charge's write takes the pool only to ~${round1(arrivalPct)}%, under the ${linePct}% re-entry line `
+          + `(the ${round1(reserveFloorPct)}% reserve + ${MIDDAY_REENTRY_MARGIN_PCT}): after the restore the panel resumes discharging only `
+          + 'once the pool is about 20 points above the reserve, so below the line it would hold the pool and buy from the grid into on-peak.'
+          + `${preWindowNote}`,
+          costMode ? {
+            costCeilingBasis, costCeilingSocPct, longGapAhead: longGap,
+            costCeilingSurplusKwh: costHeadroomKwh != null ? round2(costHeadroomKwh) : null,
+            costCeilingSurplusBasis: costSurplusBasis, ...costHeadroomFields,
+          } : undefined,
+        ),
+        middayReentryHold: { arrivalPct: round1(arrivalPct), linePct },
+      };
+    }
+  }
   // v1.187.22 — the headline is the CHARGE the write arms: the level it drives the pool to, the
   // window, the expected draw (no kWh with no P50 basis). The worst case follows once, in its own
   // sentence labelled as the sizing basis (sizingNote), the de-bias disclosure beside it.
@@ -2030,6 +2056,31 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     ...(middayReserve != null ? { reserveTargetBasis: middayReserve.basis } : {}),
     rationale,
   };
+}
+
+/**
+ * R2 — the re-entry margin (plan §3.3). After the pool stops at its reserve the panel resumes
+ * discharging only once it has climbed back roughly 20 points above it (measured 2026-09-13/14/27/28:
+ * 36–38% against a 16% reserve; peakGridDraw.ts, the idle-pool notice). A mid-day charge restores
+ * the reserve at 15:00, an hour before on-peak: a pool that ends the window under floor + this
+ * margin sits in that band, the panel holds it, and the grid carries the house through on-peak.
+ * 25 points is the measured 20 and 5 of margin. Whether the re-entry is measured from the restored
+ * reserve or from the stop point is what the attended test before the switch measures.
+ */
+export const MIDDAY_REENTRY_MARGIN_PCT = 25;
+
+/**
+ * R2 — the re-entry hold's test (plan §3.3). PURE. The figure is the level a mid-day cost leg's write
+ * drives the pool to (expectedBuyFromPlan's levelPct, armedWriteLevelPct: the reserve T_mid, or the
+ * force-charge stop when force-charge rides the leg) — a fact about the write, known with or without
+ * a P50 basis. A window that cannot deliver all of it ends below it, and the window's PV beyond the
+ * write is not counted: a level under the line cannot be lifted over it by the write. Returns the
+ * line (floor + MIDDAY_REENTRY_MARGIN_PCT) when the level is under it — the leg holds — else null.
+ */
+export function middayReentryLinePct(levelPct: number | null, floorPct: number): number | null {
+  if (levelPct == null || !Number.isFinite(levelPct) || !Number.isFinite(floorPct)) return null;
+  const linePct = round1(floorPct + MIDDAY_REENTRY_MARGIN_PCT);
+  return levelPct < linePct ? linePct : null;
 }
 
 /** R2 — which term of T_mid set a mid-day leg's reserve write (middayReserveTargetPct). */

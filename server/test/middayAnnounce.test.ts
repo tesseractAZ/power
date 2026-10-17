@@ -248,7 +248,7 @@ test('★★★ the spoken notice never speaks a placeholder, names a far window
 test('★★★ the critical page fits whatever the figures, and always says the reserve to set', () => {
   const p = middayRevertDeadlineFromLeg(
     { windowStartMs: phx(10, 15, 10), windowEndMs: phx(10, 15, 15), nextOnPeakStartMs: phx(10, 15, 16), forceChargeOnAtMs: phx(10, 15, 13), forceChargeOffVerifiedAtMs: null },
-    { stage: 'onPeak', unknown: false, targetPct: 1e15, restorePct: 1e15, nowMs: phx(10, 15, 16) },
+    { stage: 'onPeak', unknown: false, targetPct: 1e15, restorePct: 1e15, nowMs: phx(10, 15, 16), retrying: true },
   );
   for (const stage of ['deadline', 'onPeak'] as const) for (const unknown of [true, false]) {
     const t = middayRevertDeadlineSpoken({ ...p, stage, unknown });
@@ -339,13 +339,17 @@ test('★★★ the summary at the restore: what the leg did, its restore time b
 
 test('★★★ the critical page: the window, the on-peak start, the reserve to set — and Charge Now when its OFF has not read back; within 560', () => {
   const leg = { windowStartMs: phx(10, 15, 10), windowEndMs: phx(10, 15, 15), nextOnPeakStartMs: phx(10, 15, 16), forceChargeOnAtMs: phx(10, 15, 13), forceChargeOffVerifiedAtMs: null };
-  const p = middayRevertDeadlineFromLeg(leg, { stage: 'deadline', unknown: true, targetPct: 50, restorePct: 16, nowMs: phx(10, 15, 15, 30) });
+  const p = middayRevertDeadlineFromLeg(leg, { stage: 'deadline', unknown: true, targetPct: 50, restorePct: 16, nowMs: phx(10, 15, 15, 30), retrying: false });
   assert.equal(p.forceChargeOffOpen, true);
   const t = middayRevertDeadlineSpoken(p);
   assert.equal(t.en, 'Critical. The 10 AM to 3 PM charge could not be confirmed stopped: the panel is not reporting its reserve, and on-peak pricing starts at 4 PM. '
     + 'Set the backup reserve to 16 percent and switch Charge Now off in the EcoFlow app.');
   assert.ok(t.es.startsWith('Alarma crítica. Alarma crítica. '), 'the bilingual second pass');
-  const off = middayRevertDeadlineFromLeg({ ...leg, forceChargeOffVerifiedAtMs: phx(10, 15, 15) }, { stage: 'deadline', unknown: false, targetPct: 50, restorePct: 16, nowMs: phx(10, 15, 15, 30) });
+  const off = middayRevertDeadlineFromLeg({ ...leg, forceChargeOffVerifiedAtMs: phx(10, 15, 15) }, { stage: 'deadline', unknown: false, targetPct: 50, restorePct: 16, nowMs: phx(10, 15, 15, 30), retrying: true });
+  // The push says the restore is retried only while one will still be sent (revertRetryPending).
+  assert.match(buildMiddayRevertDeadline(off).body, /in the EcoFlow app\. The add-on keeps retrying the restore\.$/);
+  assert.match(buildMiddayRevertDeadline(p).body, /in the EcoFlow app\. The add-on is not re-sending the restore\.$/);
+  assert.doesNotMatch(buildMiddayRevertDeadline(p).body, /retrying/);
   assert.equal(off.forceChargeOffOpen, false);
   assert.ok(!middayRevertDeadlineSpoken(off).en.includes('Charge Now'));
   assert.match(middayRevertDeadlineSpoken(off).en, /still reads 50 percent instead of 16 percent/);

@@ -231,7 +231,15 @@ export interface SensorConfig {
   // v1.187.10 — with state_class 'total': the template HA reads the cycle start from (the
   // state topic's JSON), so a re-estimated daily figure is a revisable total, not a meter.
   last_reset_value_template?: string;
+  // v1.189.0 — the entity's attributes, rendered from the state topic's JSON (sensorDiscoveryConfig
+  // adds the json_attributes_topic). Only the mid-day figures carry one: their `basis`.
+  json_attributes_template?: string;
 }
+
+/** v1.189.0 — the `basis` attribute of every ecoflow_midday_charge_* figure: 'shadow' while the
+ *  mid-day charge is computed only (middayShadow.MIDDAY_CHARGE_BASIS), so a dashboard, an automation
+ *  or the recorder's history tells the preview from a charge that runs, on the same entity ids. */
+export const MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE = '{{ {"basis": value_json.midday_charge_basis | default(none)} | tojson }}';
 
 export const SENSORS: SensorConfig[] = [
   // Power flow
@@ -448,13 +456,14 @@ export const SENSORS: SensorConfig[] = [
   // mid-day switch it is a SHADOW: nothing is written, armed or announced for it, and
   // ecoflow_midday_charge_recommended stays off. Same shape as the night-charge entities: no
   // device_class on the figures, the ~25 h expiry, null → 'unknown' with no current mid-day leg.
-  { unique_id: 'ecoflow_midday_charge_target_soc', name: 'Midday-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_target_soc_percent }}' },
-  { unique_id: 'ecoflow_midday_charge_reserve_hold', name: 'Midday-Charge Reserve Hold', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:shield-half-full', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_reserve_hold_percent }}' },
-  { unique_id: 'ecoflow_midday_charge_expected_buy_kwh', name: 'Midday-Charge Expected Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_expected_buy_kwh }}' },
-  { unique_id: 'ecoflow_midday_charge_buy_kwh', name: 'Midday-Charge Buy (Worst Case)', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_buy_kwh }}' },
-  { unique_id: 'ecoflow_midday_charge_window_start_at', name: 'Midday-Charge Window Start', device_class: 'timestamp', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_window_start_at }}' },
-  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', device_class: 'timestamp', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_window_end_at }}' },
-  { unique_id: 'ecoflow_midday_charge_refresh', name: 'Midday-Charge Refresh', icon: 'mdi:refresh', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_refresh }}' },
+  // Each figure carries a `basis` attribute ('shadow' until the switch; MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE).
+  { unique_id: 'ecoflow_midday_charge_target_soc', name: 'Midday-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_target_soc_percent }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_reserve_hold', name: 'Midday-Charge Reserve Hold', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:shield-half-full', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_reserve_hold_percent }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_expected_buy_kwh', name: 'Midday-Charge Expected Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_expected_buy_kwh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_buy_kwh', name: 'Midday-Charge Buy (Worst Case)', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_buy_kwh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_window_start_at', name: 'Midday-Charge Window Start', device_class: 'timestamp', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_window_start_at }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', device_class: 'timestamp', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_window_end_at }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_refresh', name: 'Midday-Charge Refresh', icon: 'mdi:refresh', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_refresh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
 
   // ─── v0.15.19 lighting energy posture (publish-only; HA automations actuate) ─
   // One runway-derived enum (surplus|normal|conserve|amber|red|critical) the
@@ -690,6 +699,9 @@ export function sensorDiscoveryConfig(s: SensorConfig): Record<string, unknown> 
   return {
     ...s,
     state_topic: STATE_TOPIC,
+    // v1.189.0 — attributes come from the same JSON state topic (the mid-day figures' basis); every
+    // other sensor's config is unchanged.
+    ...(s.json_attributes_template != null ? { json_attributes_topic: STATE_TOPIC } : {}),
     ...AVAILABILITY_BASE,
     // v0.13.7 — expire live measurements, but never the total_increasing
     // energy sources (would gap HA Energy history).

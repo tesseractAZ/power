@@ -29,6 +29,9 @@ import {
   writeWindowEndMs, revertDueMs, onPeakGuardStartMs, onPeakGuardActive,
   ON_PEAK_RAISE_GUARD_MS, ON_PEAK_PAGE_LEAD_MS, REVERT_DEADLINE_AFTER_WINDOW_MS, FOREIGN_RESERVE_SETTLE_MS,
   APPLY_VERIFY_AFTER_MS, APPLY_LATE_MS, REVERT_READBACK_GRACE_MS, MAX_SPOKEN_ADVISORY_CHARS,
+  REVERT_VERIFY_AFTER_MS, REVERT_MAX_RETRIES, REVERT_PAGE_STAGE_SPAN_MS,
+  attemptProvedUnlanded, attemptNeverLanded, armOpenItem, restoreUnconfirmed, revertRetryPending, revertDeadlineStageDue,
+  chargeWriteHeldFromMs, isOwnReserveValue, ceilingMovedPct,
   decideRevertDeadline, revertDeadlineMs, revertDeadlineSpoken, revertOutstanding, restoreTargetPct,
   foreignStep, isForeignReserveReading, isReserveArbitrageRaised, ownerReserveFloorPct,
   chargeWriteHold, moneyDetectorReservePct, reserveRestoreNote,
@@ -50,6 +53,7 @@ import {
 } from '../src/peakGridDraw.js';
 import { idlePoolInputsFrom } from '../src/alertMonitor.js';
 import { buildNightChargeRevertDeadline, buildNightChargeForeignReserve } from '../src/notify.js';
+import { armCycle, asChargeLeg, legResolved } from '../src/chargeCycle.js';
 
 const MIN = 60_000;
 const HOUR = 3_600_000;
@@ -389,7 +393,8 @@ test('★★★ revertDeadline pages only on our target or no reading: any other
   const s = { ...applied(arm(NIGHT)), revertedAtMs: NIGHT.endMs };
   const at = NIGHT.endMs + REVERT_DEADLINE_AFTER_WINDOW_MS;
   for (const owner of [10, 16, 20, 30, 49]) {
-    assert.deepEqual(decideRevertDeadline(s, at, owner), { kind: 'none' }, `${owner}% is not ours`);
+    // Decided at its moment, with no page: stamped as passed, never paged later.
+    assert.deepEqual(decideRevertDeadline(s, at, owner), { kind: 'pass', stage: 'deadline', pct: owner }, `${owner}% is not ours`);
   }
   assert.deepEqual(decideRevertDeadline({ ...s, revertVerifiedAtMs: NIGHT.endMs + MIN }, at, 50), { kind: 'none' }, 'restored');
   assert.deepEqual(decideRevertDeadline({ ...s, foreignSettledAtMs: NIGHT.endMs + MIN }, at, 50), { kind: 'none' }, 'someone else\'s');
@@ -399,7 +404,7 @@ test('★★★ revertDeadline pages only on our target or no reading: any other
   // An attempt never confirmed either way, with no reading: it may stand.
   const attempted = { ...arm(NIGHT), applyAttemptedAtMs: NIGHT.startMs, attemptBaselinePct: 16 };
   assert.deepEqual(decideRevertDeadline(attempted, at, null), { kind: 'page', stage: 'deadline', unknown: true });
-  assert.deepEqual(decideRevertDeadline(attempted, at, 16), { kind: 'none' }, 'still the baseline: it never landed');
+  assert.deepEqual(decideRevertDeadline(attempted, at, 16), { kind: 'pass', stage: 'deadline', pct: 16 }, 'still the baseline: it never landed');
   assert.equal(revertOutstanding(attempted), true);
   assert.equal(revertOutstanding({ ...attempted, revertedAtMs: NIGHT.endMs }), false);
   assert.equal(restoreTargetPct(attempted), 16, 'the attempt baseline when no prior was read');
@@ -428,13 +433,13 @@ test('★★ the spoken page: bilingual, our figures only, "could not confirm" w
   const noStamp = revertDeadlineSpoken({ stage: 'deadline', unknown: false, targetPct: 50, restorePct: null, onPeakClock: null });
   assert.doesNotMatch(noStamp.en, /on-peak/);
   assert.match(noStamp.en, /its usual level/);
-  const push = buildNightChargeRevertDeadline({ day: '2026-10-13', stage: 'deadline', unknown: true, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM' });
+  const push = buildNightChargeRevertDeadline({ day: '2026-10-13', stage: 'deadline', unknown: true, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', retrying: true });
   assert.equal(push.severity, 'critical');
   assert.equal(push.dedupId, 'night_charge_revert_deadline');
   assert.match(push.body, /could not be confirmed/);
   assert.doesNotMatch(push.body, /still reads/);
   assert.match(push.body, /On-peak pricing starts at 4:00 PM/);
-  const stuck = buildNightChargeRevertDeadline({ day: '2026-10-13', stage: 'onPeak', unknown: false, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM' });
+  const stuck = buildNightChargeRevertDeadline({ day: '2026-10-13', stage: 'onPeak', unknown: false, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', retrying: true });
   assert.match(stuck.title, /still raised/);
   assert.match(stuck.body, /still reads 50%/);
   assert.match(stuck.body, /started at 4:00 PM/);
@@ -528,9 +533,11 @@ test('★★ a settled foreign reserve switches our force-charge OFF and never s
 test('★★★ heldByChargeWrite: past the restore, with the panel still reading our target, the money detectors use the prior floor', () => {
   const stuck = { ...applied(arm(NIGHT)), revertedAtMs: NIGHT.endMs };
   const hold = chargeWriteHold(stuck);
-  assert.deepEqual(hold, { targetPct: 50, priorPct: 16, restoreDueMs: NIGHT.endMs });
+  assert.deepEqual(hold, { targetPct: 50, priorPct: 16, restoreDueMs: NIGHT.endMs, heldFromMs: NIGHT.endMs + REVERT_VERIFY_AFTER_MS });
   assert.deepEqual(moneyDetectorReservePct(50, hold, NIGHT_PEAK), { reservePct: 16, heldByChargeWrite: true });
   assert.deepEqual(moneyDetectorReservePct(50, hold, NIGHT.endMs - 1), { reservePct: 50, heldByChargeWrite: false }, 'inside the window it is ours by design');
+  assert.deepEqual(moneyDetectorReservePct(50, hold, NIGHT.endMs + REVERT_VERIFY_AFTER_MS - 1), { reservePct: 50, heldByChargeWrite: false }, 'inside the restore\'s readback grace it has not failed');
+  assert.deepEqual(moneyDetectorReservePct(50, hold, NIGHT.endMs + REVERT_VERIFY_AFTER_MS), { reservePct: 16, heldByChargeWrite: true });
   assert.deepEqual(moneyDetectorReservePct(30, hold, NIGHT_PEAK), { reservePct: 30, heldByChargeWrite: false }, 'another value is the panel\'s');
   assert.deepEqual(moneyDetectorReservePct(null, hold, NIGHT_PEAK), { reservePct: null, heldByChargeWrite: false });
   assert.deepEqual(moneyDetectorReservePct(50, null, NIGHT_PEAK), { reservePct: 50, heldByChargeWrite: false });
@@ -538,8 +545,8 @@ test('★★★ heldByChargeWrite: past the restore, with the panel still readin
   assert.equal(chargeWriteHold({ ...stuck, foreignSettledAtMs: NIGHT.endMs + MIN }), null, 'someone else\'s');
   assert.equal(chargeWriteHold(arm(NIGHT)), null, 'never applied');
   assert.equal(chargeWriteHold({ ...stuck, priorReservePct: 50 }), null, 'nothing raised');
-  // The restore never sent at all (its PUT kept failing): held the same way.
-  assert.deepEqual(chargeWriteHold(applied(arm(NIGHT))), { targetPct: 50, priorPct: 16, restoreDueMs: NIGHT.endMs });
+  // The restore never sent at all (its PUT kept failing): held the same way, from the due moment's grace.
+  assert.deepEqual(chargeWriteHold(applied(arm(NIGHT))), { targetPct: 50, priorPct: 16, restoreDueMs: NIGHT.endMs, heldFromMs: NIGHT.endMs + REVERT_VERIFY_AFTER_MS });
   // The runway and below-reserve alarms are untouched: past the settling grace they read the live 50.
   assert.equal(ownerReserveFloorPct(stuck, 50, NIGHT.endMs + REVERT_READBACK_GRACE_MS + 1), 50);
 });
@@ -630,7 +637,12 @@ test('★★★ index.ts: revertDeadline is decided ahead of the reserve decisio
   assert.ok(page > 0);
   assert.ok(page < body.indexOf('const action = decideActuation(state, nowMs, {'));
   assert.ok(page < body.indexOf("if (action.kind === 'none' || !shp2) return;"));
-  assert.ok(body.includes("if (revertPage.kind === 'page') {\n    pageRevertDeadline(state, revertPage, nowMs);"));
+  assert.ok(body.includes("if (revertPage.kind === 'page') {\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));"));
+  // A stage decided with no page is stamped as passed — it is never paged later.
+  assert.ok(body.includes("} else if (revertPage.kind === 'pass') {\n    persistNightActuation(revertPage.stage === 'onPeak'\n      ? { ...state, revertDeadlineOnPeakPassedAtMs: nowMs }\n      : { ...state, revertDeadlinePassedAtMs: nowMs });"));
+  // A never-landed attempt is proven on a live reading, ahead of the page.
+  const proof = body.indexOf('if (attemptProvedUnlanded(state, currentReservePct, nowMs)) {\n    persistNightActuation({ ...state, attemptUnlandedAtMs: nowMs });');
+  assert.ok(proof > 0 && proof < page, 'the proof is stamped before the page is decided');
   assert.ok(body.includes('state = nightActuationMem; // the stamp is on the record every write below spreads'));
   const pg = idx.slice(idx.indexOf('function pageRevertDeadline('), fn);
   assert.ok(pg.indexOf('persistNightActuation({') < pg.indexOf("broadcast.announce('critical', spoken.en, spoken.es)"), 'stamped first');
@@ -642,6 +654,12 @@ test('★★★ index.ts: revertDeadline is decided ahead of the reserve decisio
 
 test('★★ index.ts: the foreign decisions are recorded, and the settle pushes', () => {
   const idx = SRC('index.ts');
+  // A partly granted write the panel moved within its request is adopted as the target, and the
+  // pending sighting it ends is cleared (nightChargeActuator.ceilingMovedPct).
+  const moved = idx.slice(idx.indexOf("if (action.kind === 'ceilingMoved') {"), idx.indexOf("if (action.kind === 'retryApply') {"));
+  assert.ok(moved.length > 0 && moved.length < 2000, 'the ceilingMoved handler is found');
+  assert.ok(moved.includes('persistNightActuation({ ...state, targetPct: action.pct, foreignReservePct: null, foreignSeenAtMs: null, lastError: null });'));
+  assert.ok(moved.includes('return;'));
   assert.ok(idx.includes("persistNightActuation({ ...state, foreignReservePct: action.pct, foreignSeenAtMs: nowMs });"));
   assert.ok(idx.includes("persistNightActuation({ ...state, foreignReservePct: null, foreignSeenAtMs: null });"));
   assert.ok(idx.includes("persistNightActuation({ ...state, foreignSettledAtMs: nowMs, foreignReservePct: action.pct, lastError: null });"));
@@ -673,4 +691,244 @@ test('★★★ the alert monitor: both money detectors read the reserve through
   assert.ok(m.includes('reserveSocPct: peakReserve.reservePct,'));
   assert.ok(m.includes('idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow, chargeHold)'));
   assert.ok(m.includes('const reserve = moneyDetectorReservePct(p?.strategy?.backupReserveSoc ?? null, chargeHold ?? null, nowMs);'));
+});
+
+/* ══ the failure paths, reviewed: a night that goes to plan says nothing, a failure says only what is true ══ */
+
+
+/**
+ * One applied night's close, tick by tick: the actuator ticks every 60 s (`tickOffsetMs` into each
+ * minute), the alert monitor evaluates every 20 s, and the panel reads the restored 16% `lagMs`
+ * after the restore's ACK when the restore takes. `rejectUntilMs`: the cloud rejects every restore
+ * PUT before it. Returns the record and the evaluations that read heldByChargeWrite.
+ */
+function simulateClose(o: { tickOffsetMs: number; lagMs: number; takes: boolean; rejectUntilMs?: number; untilMs?: number }) {
+  let s = applied(arm(NIGHT));
+  const until = o.untilMs ?? NIGHT.endMs + 40 * MIN;
+  const reading = (t: number): number =>
+    o.takes && s.revertedAtMs != null && t >= s.revertedAtMs + o.lagMs ? 16 : 50;
+  const events: Array<{ t: number; k: 'tick' | 'eval' }> = [];
+  for (let t = NIGHT.endMs - MIN + o.tickOffsetMs; t <= until; t += MIN) events.push({ t, k: 'tick' });
+  for (let t = NIGHT.endMs - MIN + 3_000; t <= until; t += 20_000) events.push({ t, k: 'eval' });
+  events.sort((a, b) => a.t - b.t || (a.k === 'tick' ? -1 : 1));
+  const held: number[] = [];
+  for (const e of events) {
+    if (e.k === 'eval') {
+      if (moneyDetectorReservePct(reading(e.t), chargeWriteHold(s), e.t).heldByChargeWrite) held.push(e.t);
+      continue;
+    }
+    const a = decideActuation(s, e.t, ropts({ currentReservePct: reading(e.t) }));
+    if (a.kind === 'revert') {
+      if (o.rejectUntilMs == null || e.t >= o.rejectUntilMs) s = { ...s, revertedAtMs: e.t };
+      else s = { ...s, revertAttempts: s.revertAttempts + 1 };
+    } else if (a.kind === 'revertVerified') s = { ...s, revertVerifiedAtMs: e.t };
+    else if (a.kind === 'retryRevert') s = { ...s, revertRetries: s.revertRetries + 1, revertLastAttemptMs: e.t };
+    else if (a.kind === 'revertFailed') s = { ...s, revertReadbackEscalated: true };
+  }
+  return { s, held };
+}
+
+test('★★★ heldByChargeWrite: a 05:00 restore that goes to plan never engages it — not inside its readback lag', () => {
+  // The restore is sent on the first tick after 05:00 and the panel echoes 50% until the readback
+  // lands: held from the due moment, almost every armed night logged "heldByChargeWrite — … past its
+  // restore" and then "cleared" about a restore that was fine.
+  for (const tickOffsetMs of [1_000, 23_000, 37_000, 59_000]) {
+    for (const lagMs of [20_000, 40_000, 60_000, 90_000, 4 * MIN]) {
+      const r = simulateClose({ tickOffsetMs, lagMs, takes: true });
+      assert.deepEqual(r.held, [], `tick +${tickOffsetMs / 1000}s, readback ${lagMs / 1000}s: never held`);
+      assert.ok(r.s.revertVerifiedAtMs != null, 'and the restore read back');
+    }
+  }
+  // A restore the cloud accepted late (rejected for three minutes) that then reads back: never held.
+  const late = simulateClose({ tickOffsetMs: 37_000, lagMs: 60_000, takes: true, rejectUntilMs: NIGHT.endMs + 3 * MIN });
+  assert.deepEqual(late.held, []);
+});
+
+test('★★★ heldByChargeWrite: a stuck restore engages it once its readback grace has run, and it never lapses through the re-issues', () => {
+  const stuck = simulateClose({ tickOffsetMs: 37_000, lagMs: 0, takes: false });
+  const sent = NIGHT.endMs + 37_000;
+  assert.equal(stuck.s.revertReadbackEscalated, true, 'the re-issues are spent');
+  assert.ok(stuck.held.length > 0);
+  assert.ok(stuck.held[0] >= sent + REVERT_VERIFY_AFTER_MS && stuck.held[0] < sent + REVERT_VERIFY_AFTER_MS + 20_000, 'from the ACK + the readback grace');
+  // Continuous from then on: every evaluation after the first held one is held too.
+  const first = stuck.held[0];
+  const evals = Math.floor((NIGHT.endMs + 40 * MIN - first) / 20_000) + 1;
+  assert.equal(stuck.held.length, evals, 'no lapse while the re-issues go out');
+  // Restores rejected for ten minutes, then one accepted that does not take: held from the due
+  // moment's grace, and the late ACK does not lapse it for a fresh grace.
+  const rejected = simulateClose({ tickOffsetMs: 37_000, lagMs: 0, takes: false, rejectUntilMs: NIGHT.endMs + 10 * MIN });
+  assert.ok(rejected.held[0] >= NIGHT.endMs + REVERT_VERIFY_AFTER_MS && rejected.held[0] < NIGHT.endMs + REVERT_VERIFY_AFTER_MS + 20_000);
+  assert.equal(rejected.held.length, Math.floor((NIGHT.endMs + 40 * MIN - rejected.held[0]) / 20_000) + 1, 'continuous across the late ACK');
+  // The rule itself.
+  const due = NIGHT.endMs;
+  assert.equal(chargeWriteHeldFromMs(due, null), due + REVERT_VERIFY_AFTER_MS, 'nothing accepted yet: the due moment\'s grace');
+  assert.equal(chargeWriteHeldFromMs(due, due + 37_000), due + 37_000 + REVERT_VERIFY_AFTER_MS, 'the ACK\'s own grace');
+  assert.equal(chargeWriteHeldFromMs(due, due - 6 * HOUR), due + REVERT_VERIFY_AFTER_MS, 'a cancel\'s early restore: from the due moment');
+  assert.equal(chargeWriteHeldFromMs(due, due + 10 * MIN), due + REVERT_VERIFY_AFTER_MS, 'an ACK after the hold applied does not move it');
+});
+
+test('★★★ revertDeadline: a write the cloud rejected all night pages nothing — not at the deadline, not on a stale reading hours or days later', () => {
+  // Every apply PUT in the window rejected (the attempt recorded each time, baseline 16); the panel
+  // reads 16 except on the stale ticks listed. Three days of minute ticks, as the integrator runs them.
+  const stale = new Set([phx(2026, 10, 14, 10, 7), phx(2026, 10, 14, 16, 0), phx(2026, 10, 14, 16, 5), phx(2026, 10, 16, 9, 0)]);
+  let s = arm(NIGHT);
+  let pages = 0;
+  for (let t = NIGHT.startMs; t <= NIGHT.startMs + 3 * 24 * HOUR; t += MIN) {
+    const reading = stale.has(t) ? null : 16;
+    if (attemptProvedUnlanded(s, reading, t)) s = { ...s, attemptUnlandedAtMs: t };
+    const d = decideRevertDeadline(s, t, reading);
+    if (d.kind === 'page') pages++;
+    if (d.kind === 'pass') s = d.stage === 'onPeak' ? { ...s, revertDeadlineOnPeakPassedAtMs: t } : { ...s, revertDeadlinePassedAtMs: t };
+    const a = decideActuation(s, t, ropts({ currentReservePct: reading }));
+    if (a.kind === 'apply') s = { ...s, applyAttemptedAtMs: t, attemptBaselinePct: reading };
+  }
+  assert.equal(pages, 0, 'nothing of ours was ever on the panel');
+  assert.ok(s.attemptUnlandedAtMs != null && s.attemptUnlandedAtMs > NIGHT.startMs + APPLY_LATE_MS, 'proven never landed, after the apply window');
+  assert.equal(revertOutstanding(s), false);
+  assert.equal(armOpenItem(s, null), null, 'the next evening arms even on a stale reading');
+  assert.equal(attemptNeverLanded(s, null), true);
+});
+
+test('★★★ attemptProvedUnlanded: only a live baseline reading, once the apply ladder is over and the last attempt\'s readback grace has run', () => {
+  const lastTry = NIGHT.startMs + 29 * MIN;
+  const s = { ...arm(NIGHT), applyAttemptedAtMs: lastTry, attemptBaselinePct: 16 };
+  assert.equal(attemptProvedUnlanded(s, 16, NIGHT.startMs + 20 * MIN), false, 'the apply window is still open');
+  // An attempt made at the open, past its readback grace, but with the apply window still open: a
+  // re-attempt may still come, so nothing is proven yet.
+  const early = { ...s, applyAttemptedAtMs: NIGHT.startMs };
+  assert.equal(attemptProvedUnlanded(early, 16, NIGHT.startMs + 10 * MIN), false, 'the apply ladder is not over');
+  assert.equal(attemptProvedUnlanded(early, 16, NIGHT.startMs + APPLY_LATE_MS + 1), true);
+  assert.equal(attemptProvedUnlanded(s, 16, NIGHT.startMs + APPLY_LATE_MS + 1), false, 'the last attempt is still inside its readback grace');
+  assert.equal(attemptProvedUnlanded(s, 16, lastTry + APPLY_VERIFY_AFTER_MS), true);
+  assert.equal(attemptProvedUnlanded(s, null, lastTry + HOUR), false, 'no reading proves nothing');
+  assert.equal(attemptProvedUnlanded(s, 50, lastTry + HOUR), false, 'our target: it landed (ADOPT takes it)');
+  assert.equal(attemptProvedUnlanded(s, 30, lastTry + HOUR), false, 'another value is not the baseline');
+  assert.equal(attemptProvedUnlanded({ ...s, attemptUnlandedAtMs: lastTry + 10 * MIN }, 16, lastTry + HOUR), false, 'stamped once');
+  assert.equal(attemptProvedUnlanded({ ...s, appliedAtMs: lastTry }, 16, lastTry + HOUR), false, 'a success was recorded');
+  const cancelled = { ...s, applyAttemptedAtMs: NIGHT.startMs, cancelled: true };
+  assert.equal(attemptProvedUnlanded(cancelled, 16, NIGHT.startMs + APPLY_VERIFY_AFTER_MS), true, 'a cancel ends the ladder too');
+  // Proven, a later adoption still takes it: the write that landed after all is outstanding again.
+  const proven = { ...s, attemptUnlandedAtMs: lastTry + 10 * MIN };
+  assert.deepEqual(decideActuation(proven, lastTry + HOUR, ropts({ currentReservePct: 50 })), { kind: 'adopt', priorPct: 16 });
+  assert.equal(revertOutstanding({ ...proven, appliedAtMs: lastTry }), true);
+});
+
+test('★★★ revertDeadline: each stage is decided once, at its moment, and a stage past its span is dropped', () => {
+  const s = { ...applied(arm(NIGHT)), revertedAtMs: NIGHT.endMs };
+  const deadline = revertDeadlineMs(s)!;
+  // Passed at the deadline on the restored value: a stale reading later in the day pages nothing.
+  const passed = { ...s, revertDeadlinePassedAtMs: deadline };
+  assert.deepEqual(decideRevertDeadline(passed, deadline + 8 * HOUR, null), { kind: 'none' });
+  assert.equal(revertDeadlineStageDue(passed, deadline + HOUR), null);
+  // The on-peak stage is its own moment: a stuck reading then still pages.
+  assert.deepEqual(decideRevertDeadline(passed, NIGHT_PEAK, 50), { kind: 'page', stage: 'onPeak', unknown: false });
+  assert.deepEqual(decideRevertDeadline({ ...passed, revertDeadlineOnPeakPassedAtMs: NIGHT_PEAK }, NIGHT_PEAK + HOUR, null), { kind: 'none' });
+  // The spans: the deadline stage until the on-peak start; the on-peak stage for its period.
+  assert.equal(revertDeadlineStageDue(s, NIGHT_PEAK - 1), 'deadline', 'a process back before on-peak still decides the deadline stage');
+  assert.equal(revertDeadlineStageDue(s, NIGHT_PEAK), 'onPeak');
+  assert.equal(revertDeadlineStageDue(s, NIGHT_PEAK + REVERT_PAGE_STAGE_SPAN_MS - 1), 'onPeak');
+  assert.equal(revertDeadlineStageDue(s, NIGHT_PEAK + REVERT_PAGE_STAGE_SPAN_MS), null, 'the on-peak period is over');
+  assert.deepEqual(decideRevertDeadline(s, NIGHT_PEAK + 7 * 24 * HOUR, null), { kind: 'none' }, 'a week later: nothing');
+  // No on-peak stamp: the deadline stage alone, for its span.
+  const legacy = { ...applied(arm(NIGHT, false)), revertedAtMs: NIGHT.endMs };
+  const d = revertDeadlineMs(legacy)!;
+  assert.equal(revertDeadlineStageDue(legacy, d + REVERT_PAGE_STAGE_SPAN_MS - 1), 'deadline');
+  assert.equal(revertDeadlineStageDue(legacy, d + REVERT_PAGE_STAGE_SPAN_MS), null);
+  assert.equal(REVERT_PAGE_STAGE_SPAN_MS, 3 * HOUR, 'the R-EV on-peak period');
+});
+
+test('★★★ revertRetryPending: the page says the restore is retried only while one will still be sent', () => {
+  const ap = applied(arm(NIGHT));
+  assert.equal(revertRetryPending(ap, null, true), true, 'not accepted yet: re-sent every tick, blind');
+  assert.equal(revertRetryPending({ ...ap, priorReservePct: 7 }, 50, true), false, 'no valid value to restore: nothing is sent');
+  assert.equal(revertRetryPending(ap, 50, false), false, 'the panel is not in the device list: nothing is sent');
+  const acked = { ...ap, revertedAtMs: NIGHT.endMs };
+  assert.equal(revertRetryPending(acked, 50, true), true, 'accepted, still raised, re-issues left');
+  assert.equal(revertRetryPending({ ...acked, revertRetries: REVERT_MAX_RETRIES }, 50, true), false, 'the re-issues are spent');
+  assert.equal(revertRetryPending({ ...acked, revertReadbackEscalated: true }, 50, true), false);
+  assert.equal(revertRetryPending(acked, null, true), false, 'no reading: a re-issue needs our target read back');
+  assert.equal(revertRetryPending({ ...acked, revertVerifiedAtMs: NIGHT.endMs + MIN }, 50, true), false);
+  assert.equal(revertRetryPending({ ...acked, foreignSettledAtMs: NIGHT.endMs + MIN }, 50, true), false);
+  const attempted = { ...arm(NIGHT), applyAttemptedAtMs: NIGHT.startMs, attemptBaselinePct: 16 };
+  assert.equal(revertRetryPending(attempted, 50, true), true, 'it reads our target: adopted, then restored');
+  assert.equal(revertRetryPending(attempted, null, true), false);
+  // The stuck restore's own close: by the 05:30 page the re-issues are spent, and the push says so.
+  const stuck = simulateClose({ tickOffsetMs: 37_000, lagMs: 0, takes: false });
+  assert.equal(revertRetryPending(stuck.s, 50, true), false);
+  const push = buildNightChargeRevertDeadline({ day: '2026-10-13', stage: 'deadline', unknown: false, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', retrying: false });
+  assert.match(push.body, /The add-on is not re-sending the restore\.$/);
+  assert.doesNotMatch(push.body, /keeps retrying/);
+  assert.match(buildNightChargeRevertDeadline({ day: '2026-10-13', stage: 'deadline', unknown: false, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', retrying: true }).body, /keeps retrying the restore\.$/);
+});
+
+test('★★★ a partly granted write: the night\'s own request read back later is ours — adopted as the target and restored at the close', () => {
+  const s = applied(arm(NIGHT), { applyVerifiedAtMs: null });
+  const verifyAt = NIGHT.startMs + APPLY_VERIFY_AFTER_MS;
+  assert.deepEqual(decideActuation(s, verifyAt, ropts({ currentReservePct: 30 })), { kind: 'applyCeiling', achievedPct: 30 });
+  const ceiling = { ...s, targetPct: 30, requestedPct: 50, applyVerifiedAtMs: verifyAt };
+  // 01:00: the panel now reads the 50% the night asked for — not someone else's.
+  const t1 = NIGHT.startMs + 2 * HOUR;
+  assert.equal(isForeignReserveReading(ceiling, 50), false);
+  assert.deepEqual(decideActuation(ceiling, t1, ropts({ currentReservePct: 50 })), { kind: 'ceilingMoved', pct: 50 });
+  const moved = { ...ceiling, targetPct: 50 };
+  assert.equal(decideActuation(moved, t1 + 10 * MIN, ropts({ currentReservePct: 50 })).kind, 'none');
+  assert.deepEqual(decideActuation(moved, NIGHT.endMs, ropts({ currentReservePct: 50 })), { kind: 'revert', restorePct: 16 }, 'restored at the close');
+  // A stuck restore of it pages and holds against what the panel holds.
+  const stuck = { ...moved, revertedAtMs: NIGHT.endMs };
+  assert.deepEqual(decideRevertDeadline(stuck, revertDeadlineMs(stuck)!, 50), { kind: 'page', stage: 'deadline', unknown: false });
+  assert.equal(chargeWriteHold(stuck)?.targetPct, 50);
+  // Inside the request: ours; outside it: still someone else's on two readings.
+  for (const v of [17, 30, 40, 50]) assert.equal(isOwnReserveValue(ceiling, v), true, `${v}% is within what was asked`);
+  for (const v of [10, 12, 15]) assert.equal(isOwnReserveValue(ceiling, v), false, `${v}% is below the baseline`);
+  assert.deepEqual(decideActuation(ceiling, t1, ropts({ currentReservePct: 12 })), { kind: 'foreignSeen', pct: 12 });
+  assert.equal(ceilingMovedPct(ceiling, 40), 40);
+  assert.equal(ceilingMovedPct(ceiling, 30), null, 'the adopted target');
+  assert.equal(ceilingMovedPct(ceiling, null), null);
+  assert.equal(ceilingMovedPct({ ...ceiling, requestedPct: null }, 40), null, 'a write taken in full has no band');
+  assert.equal(isOwnReserveValue({ ...ceiling, requestedPct: null }, 40), false);
+  // A pending sighting is cleared by a value within the request.
+  assert.deepEqual(foreignStep({ ...ceiling, foreignReservePct: 12, foreignSeenAtMs: t1 }, 40, t1 + MIN), { kind: 'foreignCleared' });
+});
+
+test('★★ after a restore of a write that never read back, a short reading is the panel\'s partial answer, not someone else\'s', () => {
+  // Applied, the panel took it only part way (35, not yet adopted), cancelled at 23:02.
+  const s = { ...applied(arm(NIGHT), { applyVerifiedAtMs: null }), cancelled: true, revertedAtMs: NIGHT.startMs + 3 * MIN };
+  assert.equal(decideActuation(s, NIGHT.startMs + 4 * MIN, ropts({ currentReservePct: 35 })).kind, 'none');
+  assert.equal(decideActuation({ ...s, foreignReservePct: 35, foreignSeenAtMs: NIGHT.startMs + 4 * MIN }, NIGHT.startMs + 10 * MIN, ropts({ currentReservePct: 35 })).kind, 'none', 'never settles foreign');
+  // Once the write had read back, the rule applies after the restore as before it.
+  assert.deepEqual(decideActuation({ ...s, applyVerifiedAtMs: NIGHT.startMs + MIN }, NIGHT.startMs + 4 * MIN, ropts({ currentReservePct: 35 })), { kind: 'foreignSeen', pct: 35 });
+});
+
+test('★★★ a Friday window\'s stuck restore survives Saturday\'s arm: Monday\'s on-peak page and the money detectors\' hold stay', () => {
+  // Friday 23:00 → Saturday 00:00, its on-peak start Monday 16:00. Applied, restore ACK'd at the
+  // close, the panel still reads 50, the re-issues spent.
+  const FRI = { startMs: phx(2026, 10, 16, 23), endMs: phx(2026, 10, 17, 0) };
+  const MON_PEAK = phx(2026, 10, 19, 16);
+  const fri = applied(arm(FRI));
+  assert.equal(fri.nextOnPeakStartMs, MON_PEAK);
+  const stuck = { ...fri, revertedAtMs: FRI.endMs, revertRetries: REVERT_MAX_RETRIES, revertReadbackEscalated: true, revertDeadlinePagedAtMs: FRI.endMs + 30 * MIN };
+  assert.equal(restoreUnconfirmed(stuck, 50), true);
+  assert.equal(restoreUnconfirmed(stuck, null), true, 'no reading: it may still stand');
+  assert.equal(restoreUnconfirmed(stuck, 16), false, 'the restore');
+  assert.equal(restoreUnconfirmed(stuck, 30), false, 'someone else\'s value (the foreign rule settles it)');
+  assert.equal(restoreUnconfirmed({ ...stuck, revertVerifiedAtMs: FRI.endMs + MIN }, 50), false);
+  // Saturday 21:30: the plan for the shared Monday 00:00–05:00 window is refused, with the words.
+  const SAT_ARM = phx(2026, 10, 17, 21, 30);
+  const MON = { startMs: phx(2026, 10, 19, 0), endMs: phx(2026, 10, 19, 5) };
+  const why = /^the 2026-10-13 reserve restore was sent and has not read back \(the panel still reads 50%\)$/;
+  assert.match(armOpenItem(stuck, 50) ?? '', why);
+  assert.equal(armFromPlan(stuck, '2026-10-17', plan(MON), SAT_ARM, 50, true, MON_PEAK), null);
+  assert.match(armRefusalReason(stuck, plan(MON), SAT_ARM, 50) ?? '', why);
+  const cyc = armCycle({ active: asChargeLeg(stuck), pendingLegs: [], trailing: null }, '2026-10-17',
+    [{ role: 'cost', kind: 'overnight', plan: plan(MON), forceChargeEnabled: true, nextOnPeakStartMs: MON_PEAK }], SAT_ARM, 50);
+  assert.equal(cyc.cycle, null);
+  assert.match(cyc.refused[0]?.reason ?? '', why);
+  assert.equal(legResolved(stuck, SAT_ARM, 50), false, 'the cycle\'s own predicate agrees');
+  assert.match(armOpenItem(stuck, null) ?? '', /has not read back \(the panel is not reporting its reserve\)$/);
+  // The record stays, so Monday's on-peak start pages and the money detectors measure past it.
+  assert.deepEqual(decideRevertDeadline(stuck, MON_PEAK, 50), { kind: 'page', stage: 'onPeak', unknown: false });
+  assert.deepEqual(moneyDetectorReservePct(50, chargeWriteHold(stuck), MON_PEAK + 30 * MIN), { reservePct: 16, heldByChargeWrite: true });
+  // Corrected in the app (the panel reads 16): the restore reads back, and the next evening arms.
+  assert.equal(armOpenItem(stuck, 16), null);
+  assert.deepEqual(decideActuation(stuck, SAT_ARM + 5 * MIN, ropts({ currentReservePct: 16 })), { kind: 'revertVerified' });
 });

@@ -10,7 +10,7 @@ It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST polled every
 **~40 analytics engines** in a worker thread, and serves the results four ways:
 a **web dashboard** (React + Tailwind CSS 4, also in the Home Assistant sidebar
 through Ingress), a **control-room TUI** (telnet, and the same console in the
-browser), **Home Assistant MQTT-discovery entities** (about 90 sensors, binary
+browser), **Home Assistant MQTT-discovery entities** (about 100 sensors, binary
 sensors and alarm-priority switches, plus a power and an energy sensor for every
 Smart Home Panel 2 circuit; the energy counters feed the Energy Dashboard), and
 opt-in **Home Assistant notifications** with companion-app push.

@@ -23,6 +23,9 @@
  *   Route      A-i..A-vi      (overnight legs keep the overnight words; the summary and the page; the
  *                              missed-apply push's words through the formatter's clocks)
  *   Shadow     S-i..S-vi      (nothing of the preview is sent or spoken; the weather age; what it names)
+ *   Basis      Q-i..Q-iv      (a refresh after the live overnight charge wrote is not comparable: not
+ *                              re-sized, the evening figures stand)
+ *   Page       T-xx           (the mid-day push says the restore is retried only while it is)
  *
  *   node scripts/mutate-midday-refresh.mjs [--only <id prefix>]
  */
@@ -569,6 +572,42 @@ const MUTANTS = [
     find: '  const refused = !advisory && c.basisComplete && c.chargeTonight && !c.wouldArm',
     to: '  const refused = rec.computedAtMs < 0 && !advisory && c.basisComplete && c.chargeTonight && !c.wouldArm /* MUTANT */',
     why: 'The preview reads a charge nothing would arm.',
+  },
+  /* ── the shadow refresh's basis (fix round 1) ── */
+  {
+    id: 'Q-i. ★★★ the shadow refresh is re-sized after the live overnight charge wrote',
+    file: IDX,
+    find: '  let refresh = liveOvernightWrote(cur, nightActuationMem) ? notComparableRefresh(nowMs)',
+    to: '  let refresh = (false as boolean) ? notComparableRefresh(nowMs) /* MUTANT */',
+    why: 'The refresh sizes on a pool the live overnight leg filled and reads the mid-day leg as nearly done.',
+  },
+  {
+    id: 'Q-ii. ★★ a force-charge alone does not count as a live write',
+    file: MS,
+    find: '  return live.day != null && live.day === rec.day && (live.appliedAtMs != null || live.forceChargeOnAtMs != null);',
+    to: '  return live.day != null && live.day === rec.day && live.appliedAtMs != null; /* MUTANT */',
+    why: 'A night whose force-charge filled the pool is re-sized on it.',
+  },
+  {
+    id: 'Q-iii. ★★ another evening\'s leg counts as a live write',
+    file: MS,
+    find: '  return live.day != null && live.day === rec.day && (live.appliedAtMs != null || live.forceChargeOnAtMs != null);',
+    to: '  return live.day != null && (live.appliedAtMs != null || live.forceChargeOnAtMs != null); /* MUTANT */',
+    why: 'Yesterday\'s write makes today\'s refresh not comparable.',
+  },
+  {
+    id: 'Q-iv. ★★ the entities show the not-comparable refresh\'s (empty) figures',
+    file: MS,
+    find: "  return r != null && r.disposition !== 'stood' && r.disposition !== 'not-comparable';",
+    to: "  return r != null && r.disposition !== 'stood'; /* MUTANT */",
+    why: 'The mid-day entities go unknown on every write night instead of keeping the evening plan.',
+  },
+  {
+    id: 'T-xx. ★★★ the mid-day page always says the restore keeps being retried',
+    file: TXT,
+    find: "' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(o.retrying)}`,",
+    to: "' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(true)}`, /* MUTANT */",
+    why: 'After the re-issues are spent the push still tells the owner a retry is coming.',
   },
 ];
 

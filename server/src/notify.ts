@@ -10,7 +10,7 @@ import {
   noChargeExpected, statedBuyKwh,
 } from './nightChargeAdvisor.js';
 import { forceChargeStopPct, partialForceChargeOnFailureSlots, type ForceChargeNightOutcome } from './nightForceCharge.js';
-import { isNoChargeKwh, RESERVE_WRITE_MAX_PCT, type NightChargeMode } from './nightChargeActuator.js';
+import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, type NightChargeMode } from './nightChargeActuator.js';
 // R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
 import { phxParts, phxShortClock } from './chargeText.js';
 
@@ -722,6 +722,10 @@ export function buildNightChargeRevertDeadline(o: {
   targetPct: number;
   restorePct: number | null;
   onPeakClock: string | null;
+  /** A restore of ours will still be sent (nightChargeActuator.revertRetryPending). The push says
+   *  the add-on keeps retrying only then: a stuck restore whose re-issues are spent, or one the
+   *  panel cannot be read for, is not re-sent, and saying otherwise tells the owner to wait. */
+  retrying: boolean;
 }): NotifyMessage {
   const to = o.restorePct != null ? `${o.restorePct}%` : 'its usual level';
   const peak = o.onPeakClock == null ? ''
@@ -736,7 +740,7 @@ export function buildNightChargeRevertDeadline(o: {
     body:
       `The restore of the backup reserve to ${to} after the ${o.day ?? '—'} night charge ${state}${peak} `
       + `While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. `
-      + `Set the backup reserve to ${to} in the EcoFlow app. The add-on keeps retrying the restore.`,
+      + `Set the backup reserve to ${to} in the EcoFlow app. ${revertRetryText(o.retrying)}`,
   };
 }
 

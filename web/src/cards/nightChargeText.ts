@@ -487,8 +487,10 @@ export function middayShadowView(
   lines.push(`Mid-day charge ${span(c)}: ${cWhat} · ${c.disposition}`);
   const r = s.refresh;
   if (r != null) {
+    // 'not-comparable': the live overnight charge wrote to the panel, so no re-sized figures exist.
     const fig = r.disposition === 'cancelled' ? 'cancelled'
-      : [r.disposition, `~${fmtPct(r.levelPct)}`, fmtKwh(r.expectedBuyKwh)].filter(Boolean).join(', ');
+      : r.disposition === 'not-comparable' ? 'not comparable'
+        : [r.disposition, `~${fmtPct(r.levelPct)}`, fmtKwh(r.expectedBuyKwh)].filter(Boolean).join(', ');
     lines.push(`Morning refresh ${hhmm(r.atMs) ?? '—'}: ${fig} — ${r.reason}`);
   } else if (c.basisComplete && c.chargeTonight) {
     lines.push(`Morning refresh: due 30 minutes before ${hhmm(c.windowStartMs) ?? 'the open'}`);

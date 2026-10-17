@@ -87,6 +87,21 @@ test('★★★ the morning summary and the revert-deadline page: the golden wor
   });
 });
 
+test('★★★ the revert-deadline push says the restore is retried only while one will still be sent', () => {
+  // The golden page was captured with a restore still being re-sent. With none pending (a stuck
+  // restore whose re-issues are spent, or one the panel cannot be read for), the push is the same
+  // words with that one sentence stated as it is; the spoken page never carried it.
+  const RETRYING = 'The add-on keeps retrying the restore.';
+  overnightRevertDeadlineCases().forEach((c, i) => {
+    const g = GOLDEN.revertDeadline[i].push as { body: string };
+    assert.ok(g.body.endsWith(RETRYING), `${c.name}: the golden ends with the retry sentence`);
+    const stopped = buildNightChargeRevertDeadline({ ...c.input, retrying: false });
+    assert.deepEqual(stopped, { ...g, body: g.body.slice(0, -RETRYING.length) + 'The add-on is not re-sending the restore.' }, c.name);
+    assert.ok(!stopped.body.includes('retrying'), `${c.name}: no retry is claimed`);
+    assert.doesNotMatch(revertDeadlineSpoken(c.input).en, /retr/i, `${c.name}: speech names no retry`);
+  });
+});
+
 test('★★★ the missed-apply push: the golden words, through the formatter\'s clocks', () => {
   missedApplyCases().forEach((c, i) => {
     assert.deepEqual(buildNightChargeMissedApply(c.input), GOLDEN.missedApply[i].push, c.name);
@@ -135,9 +150,9 @@ test('★★★ index.ts: the summary and the revert page branch to the mid-day 
   assert.ok(mid > 0 && night > mid, 'the mid-day branch comes first and returns');
   assert.match(revert.slice(mid, night), /\n {6}return;\n {4}\}\n/);
   const page = INDEX.slice(INDEX.indexOf('function pageRevertDeadline('), INDEX.indexOf('async function runNightActuationTickInner('));
-  assert.match(page, /const midday = isMiddayLeg\(state as Partial<ChargeLegState>\)\n\s+\? middayRevertDeadlineFromLeg\(state, \{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, nowMs \}\) : null;/);
+  assert.match(page, /const midday = isMiddayLeg\(state as Partial<ChargeLegState>\)\n\s+\? middayRevertDeadlineFromLeg\(state, \{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, nowMs, retrying \}\) : null;/);
   assert.match(page, /const spoken = midday != null \? middayRevertDeadlineSpoken\(midday\) : revertDeadlineSpoken\(\{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock \}\);/);
-  assert.match(page, /midday != null \? buildMiddayRevertDeadline\(midday\) : buildNightChargeRevertDeadline\(\{\n\s+day: state\.day, stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock,\n/);
+  assert.match(page, /midday != null \? buildMiddayRevertDeadline\(midday\) : buildNightChargeRevertDeadline\(\{\n\s+day: state\.day, stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock, retrying,\n/);
   // The evening job arms the overnight leg alone in this release: no mid-day words reach it.
   const job = INDEX.slice(INDEX.indexOf('async function runNightChargeEveningJobInner('), INDEX.indexOf('R4 (v1.189.0) — THE WINTER MID-DAY CYCLE IN SHADOW'));
   assert.ok(job.length > 1000);

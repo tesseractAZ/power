@@ -11,7 +11,8 @@
  * Covered here: coerce and round trip; rollback against the v1.188.0 code (a vendored copy);
  * legResolved, promotion and `trailing`; armCycle against armFromPlan / armRefusalReason (one leg:
  * identical); the owner's cancel by leg at 22:00, 05:02 and 08:00; status legs[]; drift
- * attribution per leg (one leg: identical to the v1.188 rule); the missed-apply push; the ledger's
+ * attribution per leg (one leg: the v1.188 rule, but for R1's foreign-settled night, which is the
+ * owner's again; a leg that left the cycle keeps its drift tail); the missed-apply push; the ledger's
  * per-leg columns; and the index.ts wiring (source pins: index.ts is not reachable from a unit test).
  * Nothing here can produce a second leg in the live add-on until the mid-day switch: every cycle it
  * arms is the one-leg overnight cycle, and the one-leg sections pin that it behaves as before.
@@ -21,6 +22,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   armCycle, asChargeLeg, cancelLeg, carryCeilingPrior, coerceCycle, coerceLegState, cycleDriftLeg, cycleLegsStatus,
+  departedAfterStep, forceChargeDriftLeg, recentlyDeparted, type DepartedLeg,
   emptyCycle, emptyLegState, legDriftActive, legFinished, legLedgerFields, legResolved, legStatusState, missedApplyDue,
   missedApplyReason, nextForceChargeOpenMs, onlyForceChargeOffOpen, parseCancelLeg, promoteCycle, serializeCycle, supersededLegs,
   trailingResolved, withLiveTrailing,
@@ -347,6 +349,11 @@ test('★★★ legResolved: finished, nothing of ours left on the device, and t
   assert.equal(legResolved(b, SUN_2130, 16), false, 'armed, before its window');
   assert.equal(legResolved(applied(b), at(1), 50), false, 'applied');
   assert.equal(legResolved(reverted(applied(b), at(5), false), at(5, 2), 50), false, 'restored, not read back');
+  // Not read back, and the panel reads a value of no one's yet (a foreign sighting not settled):
+  // nothing of ours provably holds it (armOpenItem), but the restore has not read back either.
+  const pending = { ...reverted(applied(b), at(5), false), foreignReservePct: 30, foreignSeenAtMs: at(5, 1) };
+  assert.equal(armOpenItem(pending, 30), null);
+  assert.equal(legResolved(pending, at(5, 2), 30), false, 'restored, not read back, the reading not settled');
   assert.equal(legResolved(reverted(applied(b)), at(5, 2), 16), true, 'restored and read back');
   assert.equal(legResolved({ ...b, cancelled: true }, SUN_2130 + H, 16), true, 'cancelled before any write');
   assert.equal(legResolved(b, BACKUP.startMs + APPLY_LATE_MS, 16), false, 'the apply window still open');
@@ -571,15 +578,16 @@ test('★★ status legs[]: trailing, active, pending, each with its state', () 
 
 /* ══ settings-drift attribution, per leg (plan §4.6) ═════════════════════════════════════════ */
 
-/** The rule settings-drift applied in v1.188.0 (index.ts driftActuatorContext), verbatim. */
+/** The rule settings-drift applied in v1.188.0 (index.ts driftActuatorContext at 111247f), verbatim:
+ *  it has no foreign-settled term — R1 added that night shape, and its exclusion. */
 function v1188NightActive(act: NightActuationState, nowMs: number): boolean {
   return act.day != null &&
-    ((act.appliedAtMs != null && act.revertedAtMs == null && act.foreignSettledAtMs == null) ||
+    ((act.appliedAtMs != null && act.revertedAtMs == null) ||
      (act.announcedAtMs != null && act.appliedAtMs == null && act.cancelled !== true) ||
      (act.revertedAtMs != null && nowMs - act.revertedAtMs < 15 * 60_000));
 }
 
-test('★★★ ONE LEG: the overnight leg is attributed exactly as v1.188 attributed it, through a night of every shape', () => {
+test('★★★ ONE LEG: the overnight leg is attributed exactly as v1.188 attributed it, through a night of every shape — but a foreign-settled night, which R1 makes the owner\'s', () => {
   const ws = phx(2026, 10, 13, 23);
   const we = phx(2026, 10, 14, 5);
   const armed = asChargeLeg({ ...emptyActuationState(), day: '2026-10-13', announcedAtMs: phx(2026, 10, 13, 21, 30), targetPct: 50, windowStartMs: ws, windowEndMs: we });
@@ -590,15 +598,25 @@ test('★★★ ONE LEG: the overnight leg is attributed exactly as v1.188 attri
     emptyLegState(),
   ];
   let n = 0;
+  let differs = 0;
   for (const s of shapes) {
     for (let t = phx(2026, 10, 13, 21); t <= phx(2026, 10, 14, 12); t += 5 * MIN) {
       const c: ChargeCycleState = { ...emptyCycle(), active: s };
-      assert.equal(cycleDriftLeg(c, t) != null, v1188NightActive(s, t), `${new Date(t).toISOString()}`);
-      if (cycleDriftLeg(c, t) != null) assert.equal(cycleDriftLeg(c, t), s, 'the target and restore come from the same record');
+      const head = cycleDriftLeg(c, t) != null;
+      if (s.foreignSettledAtMs != null) {
+        // ★ The one intended difference (R1): a reserve someone else set is theirs, so a later change
+        // of it is theirs too — v1.188 (which had no foreign rule) would still have called it ours.
+        if (v1188NightActive(s, t) && !head) differs++;
+        assert.equal(head, s.revertedAtMs != null && t - s.revertedAtMs < DRIFT_TAIL_MS, `${new Date(t).toISOString()}: foreign-settled`);
+      } else {
+        assert.equal(head, v1188NightActive(s, t), `${new Date(t).toISOString()}`);
+      }
+      if (head) assert.equal(cycleDriftLeg(c, t), s, 'the target and restore come from the same record');
       n++;
     }
   }
   assert.ok(n > 1500);
+  assert.ok(differs > 100, 'the foreign-settled night really is attributed differently from v1.188');
 });
 
 test('★★★ the mid-day leg drops the armed 21:30 → 10:00 span: only its apply window and its write to 15 min after the last restore', () => {
@@ -627,6 +645,42 @@ test('★★★ the mid-day leg drops the armed 21:30 → 10:00 span: only its a
   assert.equal(cycleDriftLeg(night, at(5, 5)), night.active);
   assert.equal(cycleDriftLeg(night, at(8)), null, 'nothing of ours between the legs');
   assert.equal(cycleDriftLeg(night, at(10, 5)), night.pendingLegs[0]);
+});
+
+test('★★★ a leg that left the cycle keeps its drift tail: the backup\'s restore and a trailing leg\'s OFF, confirmed after they left, are ours', () => {
+  const at = (h: number, mi = 0) => phx(2026, 11, 16, h, mi);
+  // (2) The backup's restore verifies at 05:01 and the next tick promotes the cost leg.
+  const c = twoLeg();
+  const night: ChargeCycleState = { ...c, active: reverted(applied(c.active), at(5)) };
+  const step = promoteCycle(night, at(5, 2), 16)!;
+  assert.ok(step.promoted, 'promoted');
+  const left = departedAfterStep([], step, at(5, 2));
+  assert.deepEqual(left.map((d) => [d.leg.leg, d.leftAtMs]), [['backup', at(5, 2)]]);
+  // Settings-drift confirms the 50 → 16 a drift tick later: without the tail, nothing of ours.
+  assert.equal(cycleDriftLeg(step.cycle, at(5, 3)), null, 'the leg is gone from the cycle');
+  assert.equal(cycleDriftLeg(step.cycle, at(5, 3), left), night.active, 'the departed backup still owns its restore');
+  assert.equal(cycleDriftLeg(step.cycle, at(5, 14), left), night.active);
+  assert.equal(cycleDriftLeg(step.cycle, at(5, 2) + DRIFT_TAIL_MS, left), null, 'no longer than the drift tail');
+  assert.deepEqual(recentlyDeparted(left, at(5, 2) + DRIFT_TAIL_MS), []);
+  assert.deepEqual(departedAfterStep(left, null, at(5, 2) + DRIFT_TAIL_MS), [], 'pruned');
+  // (1) A trailing leg whose OFF reads back leaves on that tick; its OFF is confirmed a tick later.
+  const fcOff = forceChargeOffOpen(reverted(applied(asChargeLeg({ ...c.pendingLegs[0], day: '2026-11-14' }))));
+  const done = { ...fcOff, forceChargeOffVerifiedAtMs: at(15, 3), forceChargeCeilingRestoredAtMs: at(15, 3) };
+  const trailing: ChargeCycleState = { ...c, trailing: done };
+  const tstep = promoteCycle(trailing, at(15, 3), 16)!;
+  assert.equal(tstep.trailingDone, done);
+  const gone = departedAfterStep([], tstep, at(15, 3));
+  const fcActive = (l: NightActuationState) => l.forceChargeOffVerifiedAtMs != null && at(15, 4) - l.forceChargeOffVerifiedAtMs < 15 * MIN;
+  assert.equal(forceChargeDriftLeg(tstep.cycle, [], at(15, 4), fcActive), tstep.cycle.active, 'without the tail: the active leg, which commanded nothing');
+  assert.equal(forceChargeDriftLeg(tstep.cycle, gone, at(15, 4), fcActive), done, 'with it: the leg that sent the OFF');
+  // The trailing leg still in the cycle, and an active leg of its own, keep their precedence.
+  assert.equal(forceChargeDriftLeg(trailing, gone, at(15, 4), fcActive), done);
+  const busy: ChargeCycleState = { ...tstep.cycle, active: { ...tstep.cycle.active, forceChargeOffVerifiedAtMs: at(15, 3) } };
+  assert.equal(forceChargeDriftLeg(busy, gone, at(15, 4), fcActive), busy.active);
+  // ONE LEG: nothing departs — the active leg, as before.
+  const one: ChargeCycleState = { ...emptyCycle(), active: night.active };
+  assert.equal(forceChargeDriftLeg(one, [], at(5, 3), () => false), one.active);
+  assert.equal(cycleDriftLeg(one, at(5, 3), []), cycleDriftLeg(one, at(5, 3)));
 });
 
 /* ══ the missed apply (plan §4.8) ════════════════════════════════════════════════════════════ */
@@ -824,10 +878,13 @@ test('★★★ SOURCE PIN: the cancel route takes { leg }, the status route ser
   const status = idx.slice(idx.indexOf("app.get('/api/night-charge/status'"), idx.indexOf("app.post('/api/night-charge/cancel'"));
   assert.ok(status.includes('legs: cycleLegsStatus(nightCycleView(), Date.now()),'));
   const drift = idx.slice(idx.indexOf('function driftActuatorContext('), idx.indexOf('function forceChargeDriftActive('));
-  assert.ok(drift.includes('const own = cycleDriftLeg(nightCycleView(), nowMs);'));
+  assert.ok(drift.includes('const own = cycleDriftLeg(nightCycleView(), nowMs, nightCycleDeparted);'));
   assert.ok(drift.includes('const nightActive = own != null;'));
   assert.ok(drift.includes('targetPct: reserveLeg.targetPct, priorReservePct: reserveLeg.priorReservePct, nightActive,'));
-  assert.ok(drift.includes('const act = nightCycleTrailing != null && forceChargeDriftActive(nightCycleTrailing, nowMs) ? nightCycleTrailing : nightActuationMem;'));
+  assert.ok(drift.includes('const act = forceChargeDriftLeg(nightCycleView(), nightCycleDeparted, nowMs, (l) => forceChargeDriftActive(l, nowMs));'));
+  // The legs a cycle step takes out are kept for the drift tail.
+  const step = idx.slice(idx.indexOf('function runCycleStep('), idx.indexOf('function runCycleStep(') + 1200);
+  assert.ok(step.includes('persistCycle(step.cycle);\n  nightCycleDeparted = departedAfterStep(nightCycleDeparted, step, nowMs);'));
   // Every reserve-tick ledger stamp goes through the leg (a backup leg's to backup_*).
   const inner = idx.slice(idx.indexOf('async function runNightActuationTickInner('), idx.indexOf('function runCycleStep('));
   assert.ok(!inner.includes('recorder.recordNightOutcome('), 'no direct stamp');

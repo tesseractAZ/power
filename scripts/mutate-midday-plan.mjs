@@ -12,6 +12,8 @@
  *   PV credit       M-xiv..M-xx
  *   C_mid / taper   M-xxi..M-xxvii
  *   Backup anchors  M-xxviii..M-xxxii
+ *   Re-entry hold   M-xxxiii..M-xxxvii (a write under floor + 25 holds; the shadow says why)
+ *   Arming          M-xxxviii (a leg arms on the worst case, not on the expected figure alone)
  *
  *   node scripts/mutate-midday-plan.mjs
  */
@@ -21,6 +23,8 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const NCA = resolve(REPO, 'server/src/nightChargeAdvisor.ts');
 const CT = resolve(REPO, 'server/src/chargeTaper.ts');
+const ACT = resolve(REPO, 'server/src/nightChargeActuator.ts');
+const SHADOW = resolve(REPO, 'server/src/middayShadow.ts');
 const SUBSET = [
   'test/middayPlan.test.ts',
   'test/chargeTaper.test.ts',
@@ -28,6 +32,9 @@ const SUBSET = [
   'test/curtailment.test.ts',
   'test/nightChargeExpectedBuy.test.ts',
   'test/costCeilingLoadDebias.test.ts',
+  'test/middayShadow.test.ts',
+  'test/chargeCycle.test.ts',
+  'test/onPeakGuard.test.ts',
 ];
 
 const MUTANTS = [
@@ -263,6 +270,50 @@ const MUTANTS = [
     find: '    && spec.backupHold.untilMs > nowMs',
     to: '    && true /* MUTANT */',
     why: 'A 06:00 recompute sizes from 50% when the pool really reads 30%.',
+  },
+  /* ── the re-entry hold (plan §3.3) ── */
+  {
+    id: 'M-xxxiii. ★★★ no re-entry hold',
+    file: NCA,
+    find: '    if (arrivalPct != null && linePct != null) {',
+    to: '    if ((false as boolean) && arrivalPct != null && linePct != null) { /* MUTANT */',
+    why: 'A 38% mid-day write leaves the pool where the panel holds it, and the grid carries the house into on-peak.',
+  },
+  {
+    id: 'M-xxxiv. ★★ the re-entry margin is the measured 20 alone',
+    file: NCA,
+    find: 'export const MIDDAY_REENTRY_MARGIN_PCT = 25;',
+    to: 'export const MIDDAY_REENTRY_MARGIN_PCT = 20; /* MUTANT */',
+    why: 'A write at the measured re-entry point, with no margin, is armed.',
+  },
+  {
+    id: 'M-xxxv. ★★ a write at the line holds',
+    file: NCA,
+    find: '  return levelPct < linePct ? linePct : null;',
+    to: '  return levelPct <= linePct ? linePct : null; /* MUTANT */',
+    why: 'A write that reaches the line is held for nothing.',
+  },
+  {
+    id: 'M-xxxvi. ★★★ the line ignores the owner\'s floor',
+    file: NCA,
+    find: '  const linePct = round1(floorPct + MIDDAY_REENTRY_MARGIN_PCT);',
+    to: '  const linePct = round1(16 + MIDDAY_REENTRY_MARGIN_PCT); /* MUTANT */',
+    why: 'An owner floor of 30 still arms a 50% write the panel would hold at.',
+  },
+  {
+    id: 'M-xxxvii. ★★ the shadow records a re-entry hold as "no buy needed"',
+    file: SHADOW,
+    find: '    const re = plan.middayReentryHold;',
+    to: '    const re = null as { arrivalPct: number; linePct: number } | null; /* MUTANT */',
+    why: 'The five-weekday review reads a re-entry hold as a day with nothing to buy.',
+  },
+  /* ── arming on the worst case ── */
+  {
+    id: 'M-xxxviii. ★★★ a leg arms on the expected figure only',
+    file: ACT,
+    find: '  if (plan.buyKwh == null || plan.buyKwh <= 0) return null;',
+    to: '  { const e = (plan as unknown as { expectedBuyKwh?: number | null }).expectedBuyKwh; if (e != null ? e <= 0 : (plan.buyKwh == null || plan.buyKwh <= 0)) return null; } /* MUTANT */',
+    why: 'A leg the median says needs nothing, but the islanded worst case needs, never arms: the resilience lift is lost.',
   },
 ];
 

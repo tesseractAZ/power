@@ -174,10 +174,14 @@ export interface ShadowLegSummary {
 
 /** What the morning refresh decided (refreshLeg). */
 export type RefreshDisposition = 'unchanged' | 'lowered' | 'capped' | 'cancelled' | 'stood';
+/** What the SHADOW refresh recorded: refreshLeg's decision, or that it was not made —
+ *  'not-comparable' when the live overnight leg of the same evening wrote to the panel
+ *  (liveOvernightWrote): the pool it would size on is not the one a mid-day cycle would have had. */
+export type ShadowRefreshDisposition = RefreshDisposition | 'not-comparable';
 
 export interface ShadowRefresh {
   atMs: number;
-  disposition: RefreshDisposition;
+  disposition: ShadowRefreshDisposition;
   /** What the leg would run on after the refresh (the announced figures when it stood). */
   levelPct: number | null;
   reservePct: number | null;
@@ -287,7 +291,15 @@ function armVerdictFor(
 ): { wouldArm: boolean; disposition: string } {
   if (plan == null) return { wouldArm: false, disposition: 'not sized — the planner had no inputs' };
   if (!plan.basisComplete) return { wouldArm: false, disposition: `not armed — the plan basis is incomplete${plan.basisBlockedBy ? ` (${plan.basisBlockedBy})` : ''}` };
-  if (!plan.chargeTonight) return { wouldArm: false, disposition: 'not armed — the plan holds (no buy needed)' };
+  if (!plan.chargeTonight) {
+    const re = plan.middayReentryHold;
+    return {
+      wouldArm: false,
+      disposition: re != null
+        ? `not armed — the plan holds: the charge would take the pool only to ~${re.arrivalPct}%, under the ${re.linePct}% re-entry line`
+        : 'not armed — the plan holds (no buy needed)',
+    };
+  }
   if (mode === 'advisory') return { wouldArm: false, disposition: 'not armed — the night-charge mode is advisory' };
   if (verdict?.armed.includes(role)) return { wouldArm: true, disposition: 'would arm' };
   const why = verdict?.refused.find((r) => r.role === role)?.reason;
@@ -354,6 +366,8 @@ export interface RefreshInputs {
   refreshed: {
     basisComplete: boolean; chargeTonight: boolean;
     levelPct: number | null; reservePct: number | null; expectedBuyKwh: number | null; buyKwh: number | null;
+    /** The refreshed plan held on the re-entry line (NightChargePlan.middayReentryHold). */
+    reentryHold?: { arrivalPct: number; linePct: number } | null;
   } | null;
 }
 
@@ -370,7 +384,7 @@ export interface RefreshInputs {
  * `wouldPush` (step 5): a cancel, a changed written value, a cap, or an expected draw that moved by
  * more than REFRESH_PUSH_MOVE_FRAC of the announced one either way.
  */
-export function refreshLeg(i: RefreshInputs): Omit<ShadowRefresh, 'atMs'> {
+export function refreshLeg(i: RefreshInputs): Omit<ShadowRefresh, 'atMs' | 'disposition'> & { disposition: RefreshDisposition } {
   const a = i.announced;
   const r = i.refreshed;
   if (r == null || !r.basisComplete) {
@@ -380,7 +394,13 @@ export function refreshLeg(i: RefreshInputs): Omit<ShadowRefresh, 'atMs'> {
     };
   }
   if (!r.chargeTonight) {
-    return { disposition: 'cancelled', levelPct: null, reservePct: null, buyKwh: 0, expectedBuyKwh: 0, wouldPush: true, reason: 'the refreshed plan holds: no charge is needed' };
+    const re = r.reentryHold;
+    return {
+      disposition: 'cancelled', levelPct: null, reservePct: null, buyKwh: 0, expectedBuyKwh: 0, wouldPush: true,
+      reason: re != null
+        ? `the refreshed plan holds: the charge would take the pool only to ~${re.arrivalPct}%, under the ${re.linePct}% re-entry line`
+        : 'the refreshed plan holds: no charge is needed',
+    };
   }
   const ceil = a.levelPct;
   const min = (...xs: Array<number | null>): number | null => {
@@ -438,6 +458,7 @@ export function refreshFromSized(rec: MiddayShadowRecord, sized: ShadowSized | n
       levelPct: fin(chargeLevelPct(p)),
       reservePct: p.setpointSocPct != null && Number.isFinite(p.setpointSocPct) ? clampReserveTarget(p.setpointSocPct) : null,
       expectedBuyKwh: statedBuyKwh(p), buyKwh: fin(p.buyKwh),
+      reentryHold: p.middayReentryHold ?? null,
     },
   });
   return {
@@ -451,6 +472,44 @@ export function refreshFromSized(rec: MiddayShadowRecord, sized: ShadowSized | n
 /** The age of the weather a refresh was sized on, whole seconds; null when unknown. PURE. */
 export function weatherAgeSeconds(fetchedAtMs: number | null | undefined, nowMs: number): number | null {
   return fetchedAtMs != null && Number.isFinite(fetchedAtMs) ? Math.max(0, Math.round((nowMs - fetchedAtMs) / 1000)) : null;
+}
+
+/**
+ * The live overnight leg of the shadow's evening wrote to the panel: a reserve raise applied, or a
+ * force-charge switched on. PURE. The shadow refresh sizes on the live pool at 09:30 (the backup's
+ * hold has closed by then), and in a write mode with the cost objective — the only configuration
+ * the shadow sizes in outside advisory — the live overnight cost leg has by then filled the pool
+ * toward its own ceiling, often 30 points or more above what a mid-day cycle's 10:00 open would
+ * find. A refresh re-sized on that pool reads the cost leg as nearly done or cancelled. It is
+ * therefore not made (notComparableRefresh). The evening's own sizing is unaffected: nothing is
+ * written before 21:30.
+ */
+export function liveOvernightWrote(
+  rec: Pick<MiddayShadowRecord, 'day'>,
+  live: { day: string | null; appliedAtMs: number | null; forceChargeOnAtMs: number | null },
+): boolean {
+  return live.day != null && live.day === rec.day && (live.appliedAtMs != null || live.forceChargeOnAtMs != null);
+}
+
+/** Why a shadow refresh was not made, for the record and the log. */
+export const NOT_COMPARABLE_REASON =
+  'the live overnight charge wrote to the panel, so the 09:30 pool is not the one a mid-day cycle would have had; '
+  + 'not re-sized — the evening plan stands as the shadow\'s figures';
+
+/** The refresh recorded when it cannot be compared (liveOvernightWrote): no re-sized figures, no
+ *  push. The surfaces keep the evening's figures. PURE. */
+export function notComparableRefresh(nowMs: number): ShadowRefresh {
+  return {
+    atMs: nowMs, disposition: 'not-comparable',
+    levelPct: null, reservePct: null, buyKwh: null, expectedBuyKwh: null,
+    wouldPush: false, reason: NOT_COMPARABLE_REASON, weatherAgeS: null, neededLevelPct: null, windowPvP50Kwh: null,
+  };
+}
+
+/** The refresh's figures are re-sized ones the surfaces show in place of the evening's: not when the
+ *  evening plan stood, nor when the refresh could not be compared. PURE. */
+export function refreshResized(r: Pick<ShadowRefresh, 'disposition'> | null): boolean {
+  return r != null && r.disposition !== 'stood' && r.disposition !== 'not-comparable';
 }
 
 /** The cost leg's sizing for its morning refresh: the evening's, with the backup's hold (already
@@ -477,11 +536,20 @@ export function shadowServed(rec: MiddayShadowRecord | null, nowMs: number): boo
 /** The ISO instant an entity publishes (HA timestamp sensors), or null. */
 const iso = (ms: number | null | undefined): string | null => (ms != null && Number.isFinite(ms) ? new Date(ms).toISOString() : null);
 
+/** What the ecoflow_midday_charge_* figures are: 'shadow' — computed, never armed — until the mid-day
+ *  switch arms a live mid-day leg ('live'). Published beside them (`midday_charge_basis`) and carried
+ *  on each figure entity as its `basis` attribute, so a dashboard, an automation or the recorder's
+ *  history can tell a preview from a charge that runs. */
+export type MiddayChargeBasis = 'shadow' | 'live';
+/** Every mid-day figure this release publishes is a shadow computation. */
+export const MIDDAY_CHARGE_BASIS: MiddayChargeBasis = 'shadow';
+
 /**
  * The ecoflow_midday_charge_* fields of the HA state payload (MQTT and /api/ha-state alike). PURE.
  *  - `midday_charge_recommended` is the LIVE mid-day leg's charge decision. Nothing arms a mid-day
  *    leg before the switch, so it is strictly false: a shadow computation is never a recommendation
  *    an automation may act on.
+ *  - `midday_charge_basis`: MIDDAY_CHARGE_BASIS, with or without a current record.
  *  - the figures are the mid-day leg as computed — the refreshed figures once the morning refresh
  *    ran (a cancelled refresh nulls them) — null when there is no current record (shadowServed).
  *  - `midday_charge_refresh`: 'pending' before the refresh, then its disposition.
@@ -495,6 +563,7 @@ export function middayChargeStateFields(rec: MiddayShadowRecord | null, nowMs: n
   midday_charge_window_start_at: string | null;
   midday_charge_window_end_at: string | null;
   midday_charge_refresh: string | null;
+  midday_charge_basis: MiddayChargeBasis;
 } {
   if (!shadowServed(rec, nowMs)) {
     return {
@@ -502,6 +571,7 @@ export function middayChargeStateFields(rec: MiddayShadowRecord | null, nowMs: n
       midday_charge_target_soc_percent: null, midday_charge_reserve_hold_percent: null,
       midday_charge_expected_buy_kwh: null, midday_charge_buy_kwh: null,
       midday_charge_window_start_at: null, midday_charge_window_end_at: null, midday_charge_refresh: null,
+      midday_charge_basis: MIDDAY_CHARGE_BASIS,
     };
   }
   const c = rec!.cost!;
@@ -510,7 +580,7 @@ export function middayChargeStateFields(rec: MiddayShadowRecord | null, nowMs: n
   const cancelled = r?.disposition === 'cancelled';
   const pick = <K extends 'levelPct' | 'reservePct' | 'expectedBuyKwh' | 'buyKwh'>(k: K): number | null => {
     if (!c.basisComplete || cancelled) return null;
-    return r != null && r.disposition !== 'stood' ? r[k] : c[k];
+    return refreshResized(r) ? r![k] : c[k];
   };
   return {
     midday_charge_recommended: false,
@@ -521,6 +591,7 @@ export function middayChargeStateFields(rec: MiddayShadowRecord | null, nowMs: n
     midday_charge_window_start_at: iso(c.windowStartMs),
     midday_charge_window_end_at: iso(c.windowEndMs),
     midday_charge_refresh: r?.disposition ?? (charges ? 'pending' : null),
+    midday_charge_basis: MIDDAY_CHARGE_BASIS,
   };
 }
 
@@ -595,7 +666,7 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
   const b = rec.backup;
   if (b != null) {
     out.push(`${t} ${rec.day} backup ${at(b.windowStartMs)}→${at(b.windowEndMs)} — ${b.disposition}: reserve ${pct(b.reservePct)}, `
-      + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); the islanded walk it is sized on, to the next overnight open, troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.`);
+      + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); the islanded walk it is sized on, to the next overnight open, troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line. Shadow only: nothing is armed, written or announced for it.`);
   }
   const c = rec.cost;
   out.push(`${t} ${rec.day} cost ${at(c.windowStartMs)}→${at(c.windowEndMs)} — ${c.disposition}: reserve ${pct(c.reservePct)} (T_mid: ${c.reserveBasis ?? '—'}), `
@@ -682,7 +753,7 @@ export function middayShadowPreviewLogLines(rec: MiddayShadowRecord, model: Tari
 /** The refresh push a live refresh would send (null when it would send none). Never sent. PURE. */
 export function middayShadowRefreshPreview(rec: MiddayShadowRecord, r: ShadowRefresh): NotifyMessage | null {
   const c = rec.cost;
-  if (c == null) return null;
+  if (c == null || r.disposition === 'not-comparable') return null;
   return buildMiddayRefreshMessage({
     nowMs: r.atMs,
     windowStartMs: c.windowStartMs, windowEndMs: c.windowEndMs,
@@ -731,7 +802,7 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
   };
 };
 
-const DISPOSITIONS: readonly RefreshDisposition[] = ['unchanged', 'lowered', 'capped', 'cancelled', 'stood'];
+const DISPOSITIONS: readonly ShadowRefreshDisposition[] = ['unchanged', 'lowered', 'capped', 'cancelled', 'stood', 'not-comparable'];
 const WHYS: readonly ChargeCycleWhy[] = Object.keys(SHADOW_WHY_TEXT) as ChargeCycleWhy[];
 
 /** A persisted shadow record read back (restart path): anything malformed is no record. PURE. */
@@ -742,9 +813,9 @@ export function coerceMiddayShadowRecord(raw: unknown): MiddayShadowRecord | nul
   if (o.version !== MIDDAY_SHADOW_VERSION || typeof o.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.day) || computedAtMs == null) return null;
   if (!WHYS.includes(o.why as ChargeCycleWhy)) return null;
   const r = o.refresh != null && typeof o.refresh === 'object' ? o.refresh as Record<string, unknown> : null;
-  const refresh: ShadowRefresh | null = r != null && fin(r.atMs) != null && DISPOSITIONS.includes(r.disposition as RefreshDisposition)
+  const refresh: ShadowRefresh | null = r != null && fin(r.atMs) != null && DISPOSITIONS.includes(r.disposition as ShadowRefreshDisposition)
     ? {
-      atMs: fin(r.atMs)!, disposition: r.disposition as RefreshDisposition,
+      atMs: fin(r.atMs)!, disposition: r.disposition as ShadowRefreshDisposition,
       levelPct: fin(r.levelPct), reservePct: fin(r.reservePct), buyKwh: fin(r.buyKwh), expectedBuyKwh: fin(r.expectedBuyKwh),
       wouldPush: r.wouldPush === true, reason: typeof r.reason === 'string' ? r.reason : '',
       ...('weatherAgeS' in r ? { weatherAgeS: fin(r.weatherAgeS) } : {}),

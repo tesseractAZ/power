@@ -39,9 +39,11 @@
  *                         the trailing leg as the ticks left it; supersede after the persist)
  *   Resend  N-i..N-iii   (blind OFF re-sends stop at the next cost leg's open; one leg: R1's bound)
  *   Cancel  C-i..C-v     (by leg; the pending legs before any 409)
- *   Drift   D-i..D-vi    (per leg; the overnight rule unchanged; the mid-day armed span dropped)
+ *   Drift   D-i..D-xiii  (per leg; the overnight rule, R1's foreign night apart; the mid-day armed
+ *                         span dropped; a leg that left the cycle keeps its drift tail)
  *   Missed  M-i..M-v     (one push for a new leg; never for the overnight cost leg)
- *   Ledger  L-i..L-iv    (a leg's own columns; the lockstep migration)
+ *   Ledger  L-i..L-vi    (a leg's own columns, the supersede and stale-cancel stamps included;
+ *                         the lockstep migration)
  *
  *   node scripts/mutate-charge-cycle.mjs
  */
@@ -467,16 +469,65 @@ const MUTANTS = [
   {
     id: 'D-v. ★★ index.ts attributes the active leg only',
     file: IDX,
-    find: '  const own = cycleDriftLeg(nightCycleView(), nowMs);',
-    to: '  const own = cycleDriftLeg({ ...nightCycleView(), pendingLegs: [], trailing: null }, nowMs); /* MUTANT */',
+    find: '  const own = cycleDriftLeg(nightCycleView(), nowMs, nightCycleDeparted);',
+    to: '  const own = cycleDriftLeg({ ...nightCycleView(), pendingLegs: [], trailing: null }, nowMs, nightCycleDeparted); /* MUTANT */',
     why: 'The pending leg\'s and the trailing leg\'s writes are pushed as external changes.',
   },
   {
     id: 'D-vi. ★★ the trailing leg\'s OFF re-sends are not ours',
     file: IDX,
-    find: '  const act = nightCycleTrailing != null && forceChargeDriftActive(nightCycleTrailing, nowMs) ? nightCycleTrailing : nightActuationMem;',
+    find: '  const act = forceChargeDriftLeg(nightCycleView(), nightCycleDeparted, nowMs, (l) => forceChargeDriftActive(l, nowMs));',
     to: '  const act = nightActuationMem; /* MUTANT */',
     why: 'Each OFF the trailing leg sends is pushed as "Setting changed externally".',
+  },
+  {
+    id: 'D-vii. ★★★ a leg that left the cycle is dropped from the reserve attribution at once',
+    file: CYC,
+    find: '  for (const l of [c.trailing, c.active, ...c.pendingLegs, ...recentlyDeparted(departed, nowMs)]) {',
+    to: '  for (const l of [c.trailing, c.active, ...c.pendingLegs]) { /* MUTANT */',
+    why: 'The backup leg\'s own 05:00 restore, confirmed after the promotion, is pushed as an external change.',
+  },
+  {
+    id: 'D-viii. ★★★ index.ts never records the legs a step takes out',
+    file: IDX,
+    find: '  nightCycleDeparted = departedAfterStep(nightCycleDeparted, step, nowMs);',
+    to: '  /* MUTANT */',
+    why: 'The drift tail is wired in the pure core and never reached in production.',
+  },
+  {
+    id: 'D-ix. ★★ the departed tail never expires',
+    file: CYC,
+    find: '  return departed.filter((d) => nowMs - d.leftAtMs < DRIFT_TAIL_MS && nowMs >= d.leftAtMs)',
+    to: '  return departed.filter(() => true) /* MUTANT */',
+    why: 'A leg that left hours ago still claims the owner\'s later changes.',
+  },
+  {
+    id: 'D-x. ★★★ the force-charge attribution ignores a departed leg',
+    file: CYC,
+    find: '  return recentlyDeparted(departed, nowMs).find(active) ?? c.active;',
+    to: '  return c.active; /* MUTANT */',
+    why: 'A trailing leg\'s OFF, confirmed a tick after it left, is pushed as "Setting changed externally".',
+  },
+  {
+    id: 'D-xi. ★★ a finished trailing leg is not kept',
+    file: CYC,
+    find: '  if (step?.trailingDone != null) out.push({ leg: step.trailingDone, leftAtMs: nowMs });',
+    to: '  /* MUTANT */',
+    why: 'Every trailing leg\'s own OFF is pushed as an external change.',
+  },
+  {
+    id: 'D-xii. ★★ the leg promoted from is not kept',
+    file: CYC,
+    find: '  if (step?.promoted != null) out.push({ leg: step.promoted.from, leftAtMs: nowMs });',
+    to: '  /* MUTANT */',
+    why: 'About half of the backup legs\' own restores are pushed as external changes.',
+  },
+  {
+    id: 'D-xiii. ★★ the overnight rule forgets R1\'s foreign night',
+    file: CYC,
+    find: '    return (leg.appliedAtMs != null && leg.revertedAtMs == null && leg.foreignSettledAtMs == null) ||',
+    to: '    return (leg.appliedAtMs != null && leg.revertedAtMs == null) || /* MUTANT */',
+    why: 'An owner\'s later change of the reserve they set is attributed to the add-on.',
   },
   // ── the missed apply ──
   {
@@ -607,6 +658,20 @@ const MUTANTS = [
     find: '      stampLegOutcome(state, { actuated: 1, actuation_applied_at_ms: nowMs });',
     to: '      try { recorder.recordNightOutcome(state.day, { actuated: 1, actuation_applied_at_ms: nowMs }); } catch { /* MUTANT */ }',
     why: 'A backup leg\'s apply is recorded in the cost leg\'s columns.',
+  },
+  {
+    id: 'L-v. ★★ the stale-cancel stamp of the active leg goes to the cost leg\'s column',
+    file: IDX,
+    find: '    recorder.recordNightOutcome(stale, legLedgerFields(legRoleOf(s), {',
+    to: '    recorder.recordNightOutcome(stale, legLedgerFields(\'cost\', { /* MUTANT */',
+    why: 'A cancelled backup leg\'s disposition is overwritten by its cost leg\'s.',
+  },
+  {
+    id: 'L-vi. ★★ the supersede stamp of the active leg goes to the cost leg\'s column',
+    file: IDX,
+    find: '            recorder.recordNightOutcome(nightActuationMem.day, legLedgerFields(legRoleOf(nightActuationMem), {',
+    to: '            recorder.recordNightOutcome(nightActuationMem.day, legLedgerFields(\'cost\', { /* MUTANT */',
+    why: 'A superseded backup leg leaves backup_arm_disposition NULL and one generic text.',
   },
 ];
 

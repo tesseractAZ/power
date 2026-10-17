@@ -149,14 +149,14 @@ export function overnightSummaryCases(): Array<{ name: string; input: SummaryCas
  *  nightChargeActuator.revertDeadlineSpoken take the same fields). */
 export function overnightRevertDeadlineCases(): Array<{
   name: string;
-  input: { day: string | null; stage: 'deadline' | 'onPeak'; unknown: boolean; targetPct: number; restorePct: number | null; onPeakClock: string | null };
+  input: { day: string | null; stage: 'deadline' | 'onPeak'; unknown: boolean; targetPct: number; restorePct: number | null; onPeakClock: string | null; retrying: boolean };
 }> {
   const out: ReturnType<typeof overnightRevertDeadlineCases> = [];
   for (const stage of ['deadline', 'onPeak'] as const) {
     for (const unknown of [true, false]) {
       for (const restorePct of [16, null]) {
         for (const onPeakClock of ['4:00 PM', null]) {
-          out.push({ name: `${stage}/${unknown ? 'unknown' : 'reads'}/${restorePct ?? 'no prior'}/${onPeakClock ?? 'no on-peak'}`, input: { day: '2026-10-12', stage, unknown, targetPct: 50, restorePct, onPeakClock } });
+          out.push({ name: `${stage}/${unknown ? 'unknown' : 'reads'}/${restorePct ?? 'no prior'}/${onPeakClock ?? 'no on-peak'}`, input: { day: '2026-10-12', stage, unknown, targetPct: 50, restorePct, onPeakClock, retrying: true } });
         }
       }
     }

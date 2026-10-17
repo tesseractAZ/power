@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import {
   buildNightChargeInputs, computeNightChargePlan, middayReserveTargetPct, costCeilingKwh, gridGainKw,
   expectedWindowLiftKwh, expectedBuyFromPlan, expectedPvChargeWalk, OVERNIGHT_WINDOW_SPEC,
+  middayReentryLinePct, MIDDAY_REENTRY_MARGIN_PCT,
   type NightChargeInputDeps, type NightForecastHour, type NightChargePlan, type NightChargeHour, type WindowSpec,
 } from '../src/nightChargeAdvisor.js';
 import { chooseChargeCycle, nextChargeableOpenMs, nextOnPeakStartMs, type ChargeCycleConfig } from '../src/chargeWindows.js';
 import { pvSurplusFromBand, surplusSpanEndMs, saturationThresholdPct } from '../src/chargeTaper.js';
 import { buildApsREvModel, rateAt } from '../src/tariff.js';
 import { forceChargeStopPct, forceChargeStartAtMs, FORCE_CHARGE_MIN_RUN_MS } from '../src/nightForceCharge.js';
+import { armCycle, emptyCycle } from '../src/chargeCycle.js';
 
 /**
  * R2 — THE MID-DAY LEG, SIZED BY THE SAME ENGINE (WindowSpec). Nothing live plans it yet; these
@@ -448,4 +450,54 @@ test('★★ R4 — option B (the walk ends at the 10:00 open) arms less often t
   for (const soc of [30, 50, 60, 70, 80, 90]) {
     assert.ok(!backupPlan(soc, B).chargeTonight || backupPlan(soc, A).chargeTonight, `${soc}%: B arms only where A does`);
   }
+});
+
+/* ══ the re-entry hold (plan §3.3), and arming on the worst case ═══════════════════════════════ */
+
+test('★★★ re-entry hold: a mid-day write that takes the pool only under floor + 25 holds — the panel would hold the pool into on-peak', () => {
+  assert.equal(MIDDAY_REENTRY_MARGIN_PCT, 25);
+  // No force-charge riding, a light day: T_mid is 38%, under the 41% line (16 + 25).
+  const light = plan({ socNowPct: 30, postLoadW: 500, over: { forceChargeEligible: false } });
+  assert.equal(light.chargeTonight, false);
+  assert.deepEqual(light.middayReentryHold, { arrivalPct: 38, linePct: 41 });
+  assert.equal(light.objective, 'none');
+  assert.equal(light.expectedBuyKwh, 0, 'a hold arms nothing');
+  assert.match(light.rationale, /^Hold — the mid-day charge's write takes the pool only to ~38%, under the 41% re-entry line \(the 16% reserve \+ 25\)/);
+  // A higher owner floor raises the line: the 50% write is under 55%.
+  const floor30 = plan({ socNowPct: 30, over: { forceChargeEligible: false, reserveFloorPct: 30 } });
+  assert.deepEqual(floor30.middayReentryHold, { arrivalPct: 50, linePct: 55 });
+  // The cost fill to C_mid clears the line: no hold.
+  const full = plan({ socNowPct: 30 });
+  assert.equal(full.chargeTonight, true);
+  assert.equal(full.middayReentryHold, undefined);
+  assert.ok((full.expectedWriteLevelPct ?? 0) >= 41);
+  // A 50% write against the 16% floor clears the 41% line.
+  const fifty = plan({ socNowPct: 60, over: { forceChargeEligible: false } });
+  assert.equal(fifty.chargeTonight, true);
+  assert.equal(fifty.middayReentryHold, undefined);
+  // Not the backup leg, and not an overnight plan.
+  const backup = plan({ socNowPct: 30, postLoadW: 500, spec: { kind: 'overnight', role: 'backup', window: { startMs: BACKUP.startMs, endMs: BACKUP.endMs } }, over: { forceChargeEligible: false } });
+  assert.equal(backup.middayReentryHold, undefined);
+  const night = plan({ socNowPct: 30, postLoadW: 500, spec: OVERNIGHT_WINDOW_SPEC, over: { forceChargeEligible: false } });
+  assert.equal(night.middayReentryHold, undefined);
+  // The test itself.
+  assert.equal(middayReentryLinePct(38, 16), 41);
+  assert.equal(middayReentryLinePct(41, 16), null, 'at the line: it resumes');
+  assert.equal(middayReentryLinePct(89.5, 16), null);
+  assert.equal(middayReentryLinePct(null, 16), null);
+  assert.equal(middayReentryLinePct(Number.NaN, 16), null);
+});
+
+test('★★★ a P50 hold with a P10 requirement still arms: the leg arms on the worst case, not on the expected figure', () => {
+  // The pool opens the window above T_mid on the median (no charge expected), but the islanded
+  // worst case still needs a buy: the leg charges, and armCycle arms it.
+  const p = plan({ socNowPct: 80, over: { forceChargeEligible: false } });
+  assert.equal(p.chargeTonight, true);
+  assert.equal(p.expectedBuyKwh, 0, 'P50: no charge expected');
+  assert.ok((p.buyKwh ?? 0) > 1, `P10: ${p.buyKwh} kWh of worst case`);
+  assert.equal(p.middayReentryHold, undefined);
+  const r = armCycle(emptyCycle(), '2026-10-14', [{ role: 'cost', kind: 'super_off_peak', plan: p, forceChargeEnabled: false }], NOW, 16);
+  assert.ok(r.cycle, `it arms (${r.refused[0]?.reason ?? ''})`);
+  assert.equal(r.cycle!.active.targetPct, 50);
+  assert.equal(r.cycle!.active.buyKwh, p.buyKwh, 'armed on the worst case it is sized on');
 });

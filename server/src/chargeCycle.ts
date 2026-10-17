@@ -33,7 +33,8 @@
  * With one leg — every cycle the add-on arms until the mid-day switch — the record is the per-night
  * record it always was: armCycle arms exactly what armFromPlan arms and refuses exactly what it
  * refuses, nothing is pending or trailing, and the drift attribution of the overnight leg is the
- * one it always had (legDriftActive).
+ * one it always had (legDriftActive), but for a night whose reserve settled as someone else's (the
+ * foreign rule, R1): a change of their value is theirs.
  */
 import {
   APPLY_LATE_MS, RESERVE_WRITE_MAX_PCT, RESERVE_WRITE_MIN_PCT,
@@ -522,9 +523,10 @@ export const DRIFT_LEAD_MS = 10 * 60_000;
 
 /**
  * Whether a reserve change to this leg's target or restore value is the add-on's own write. PURE.
- *  - The OVERNIGHT leg keeps the rule settings-drift has used since v1.83.0, unchanged: its write
- *    applied and unrestored (and not someone else's), armed and uncancelled, or restored within
- *    DRIFT_TAIL_MS. A one-leg night is attributed exactly as before.
+ *  - The OVERNIGHT leg keeps the rule settings-drift has used since v1.83.0: its write applied and
+ *    unrestored, armed and uncancelled, or restored within DRIFT_TAIL_MS — with one exception R1
+ *    adds, a write whose reserve settled as someone else's (foreignSettledAtMs), whose later changes
+ *    are theirs. A one-leg night is otherwise attributed exactly as before.
  *  - A MID-DAY leg is armed at 21:30 for a 10:00 write, and a change to its 50% target overnight is
  *    not ours: its write spans are [window open − DRIFT_LEAD_MS, open + APPLY_LATE_MS] (the apply
  *    window, unless cancelled before any attempt) and from its attempt to DRIFT_TAIL_MS after the
@@ -549,13 +551,58 @@ export function legDriftActive(leg: ChargeLegState, nowMs: number): boolean {
   return false;
 }
 
+/**
+ * A leg that has LEFT the cycle — the leg a promotion moved on from, or a trailing leg done — and
+ * when. promoteCycle drops a leg the moment it resolves, which is the tick its restore (or its
+ * force-charge OFF) reads back; settings-drift confirms a change only on its second sighting, a
+ * drift tick or two later, by when the leg was gone, and the add-on's own restore or OFF was pushed
+ * as an external change. A departed leg stays in the drift attribution for DRIFT_TAIL_MS after it
+ * left (in memory: a restart in that minute costs at most one such push).
+ */
+export interface DepartedLeg {
+  leg: ChargeLegState;
+  leftAtMs: number;
+}
+
+/** The departed legs after a cycle step: those still within DRIFT_TAIL_MS of leaving, plus the
+ *  legs this step took out (its finished trailing leg, the leg it promoted from). PURE. */
+export function departedAfterStep(prev: readonly DepartedLeg[], step: CycleStep | null, nowMs: number): DepartedLeg[] {
+  const out = prev.filter((d) => nowMs - d.leftAtMs < DRIFT_TAIL_MS);
+  if (step?.trailingDone != null) out.push({ leg: step.trailingDone, leftAtMs: nowMs });
+  if (step?.promoted != null) out.push({ leg: step.promoted.from, leftAtMs: nowMs });
+  return out;
+}
+
+/** The legs that left the cycle less than DRIFT_TAIL_MS ago, latest first. PURE. */
+export function recentlyDeparted(departed: readonly DepartedLeg[], nowMs: number): ChargeLegState[] {
+  return departed.filter((d) => nowMs - d.leftAtMs < DRIFT_TAIL_MS && nowMs >= d.leftAtMs)
+    .sort((a, b) => b.leftAtMs - a.leftAtMs).map((d) => d.leg);
+}
+
 /** The leg whose write a reserve change now could be: the first of trailing, active and pending
- *  legs whose drift span is open (legDriftActive); null when none is. PURE. */
-export function cycleDriftLeg(c: ChargeCycleState, nowMs: number): ChargeLegState | null {
-  for (const l of [c.trailing, c.active, ...c.pendingLegs]) {
+ *  legs whose drift span is open (legDriftActive), then the legs that left the cycle within
+ *  DRIFT_TAIL_MS (recentlyDeparted) whose span is still open; null when none is. With one leg
+ *  nothing departs, and this is the overnight leg's rule alone. PURE. */
+export function cycleDriftLeg(c: ChargeCycleState, nowMs: number, departed: readonly DepartedLeg[] = []): ChargeLegState | null {
+  for (const l of [c.trailing, c.active, ...c.pendingLegs, ...recentlyDeparted(departed, nowMs)]) {
     if (l != null && legDriftActive(l, nowMs)) return l;
   }
   return null;
+}
+
+/** The record whose force-charge writes a force-charge change now could be: the trailing leg while
+ *  its writes are in flight or recent (`active`, index.ts forceChargeDriftActive), else the active
+ *  leg when its are, else a leg that left the cycle within DRIFT_TAIL_MS whose are (the trailing
+ *  leg whose OFF read back on the tick it left), else the active leg. PURE. */
+export function forceChargeDriftLeg(
+  c: ChargeCycleState,
+  departed: readonly DepartedLeg[],
+  nowMs: number,
+  active: (l: NightActuationState) => boolean,
+): NightActuationState {
+  if (c.trailing != null && active(c.trailing)) return c.trailing;
+  if (active(c.active)) return c.active;
+  return recentlyDeparted(departed, nowMs).find(active) ?? c.active;
 }
 
 /* ── the missed apply (plan §4.8) ─────────────────────────────────────────── */
