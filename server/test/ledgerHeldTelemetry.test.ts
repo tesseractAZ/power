@@ -407,6 +407,69 @@ test('★★ a row refused for a hold whose span was restored is re-captured fro
     'reset — the PV actual had been left empty for a hold whose readings were since restored to the history; the load actual had been integrated from held readings (load — Smart Home Panel 2 2.0 h with no fresh readings, found after it was captured); re-captured by the backfill sweep.');
 });
 
+/* ══ review round 6: the restored-side rule, as the incident lays it out ═══════ */
+
+/** A row issued at `issued` 21:30, captured 10 min after its 24 h span, stating `v` as held. */
+const capturedRow = (issued: number, v: ReturnType<typeof heldLedgerVerdict>, coreSns: readonly string[]) => ({
+  plan_date: new Date(issued - 7 * H).toISOString().slice(0, 10), issued_at_ms: issued, window_start_ms: issued + 1.5 * H, window_end_ms: issued + 7.5 * H,
+  outcome_captured_at_ms: issued + FORECAST_SPAN_MS + 10 * MIN as number | null, pv_model_sns: coreSns.join(','),
+  delivered_kwh: null as number | null, delivered_basis: null as string | null, actual_pv_kwh: null as number | null, actual_load_kwh: 21.4 as number | null,
+  score_notes: `${heldLedgerNote(v!, name)} On-peak: none.` as string | null,
+});
+/** Each Core's incident hold: from the last fresh reading (before the 10-15 row's issue) to the deploy. */
+const holdOf = (sn: string): LedgerHeldSpan => ({ sn, startMs: LAST_FRESH, endMs: DEPLOY - 2 * MIN });
+
+test('★★ two Cores held, the owner restores ONE: the PV side is still held — nothing owed, and 48 sweeps reset nothing', () => {
+  // Mutant L1 (review round 6): the restored side read from the restore alone, not from what is
+  // still held. Every 30-min tick, the evening job and each boot then reset and re-captured the
+  // row for the whole horizon, each re-capture stating PV held again (Core 2).
+  const two = [CORES[0], CORES[1]];
+  const I15 = phx(2026, 10, 15, 21, 30);
+  const span = { startMs: I15, endMs: I15 + FORECAST_SPAN_MS };
+  const v = heldLedgerVerdict({ spans: two.map(holdOf), coreSns: two, panelSn: PANEL, span });
+  let row = capturedRow(I15, v, two);
+  const now0 = I15 + 3 * DAY;
+  let resets = 0;
+  for (let tick = 0; tick < 48; tick++) {
+    const at = now0 + tick * 30 * MIN;
+    const r = heldLedgerRepair(row, { spans: [holdOf(CORES[1])], coreSns: two, panelSn: PANEL, nowMs: at, horizonMs: HORIZON, restored: [holdOf(CORES[0])] });
+    if (r) { resets++; row = { ...row, ...heldRepairColumns(row, r, name) } as typeof row; }
+    if (row.outcome_captured_at_ms == null) {
+      // The sweep's re-capture: the scorer's verdict over the spans still held.
+      const again = heldLedgerVerdict({ spans: [holdOf(CORES[1])], coreSns: two, panelSn: PANEL, span })!;
+      row = { ...row, outcome_captured_at_ms: at, score_notes: `${heldLedgerNote(again, name)} On-peak: none.` };
+    }
+  }
+  assert.equal(resets, 0, `★★ Core 2 still holds the PV side: reset ${resets} times in 24 h of sweeps`);
+  // And with Core 2 restored too, the side is owed its re-capture, once.
+  const r = heldLedgerRepair(row, { spans: [], coreSns: two, panelSn: PANEL, nowMs: now0 + DAY, horizonMs: HORIZON, restored: two.map(holdOf) });
+  assert.deepEqual([r?.action, r?.restored], ['recapture', ['PV']], 'precondition: the rule restores a side once nothing holds it');
+});
+
+test('★★ a restored hold that began before the row\'s issue and ran past its span restores the side (the 10-14 and 10-15 rows)', () => {
+  // Mutants L3/L4 (review round 6): counted only when the restored span lies inside the row's span,
+  // or starts inside it. The incident's hold (10-14 23:53 → 10-16 20:28) does neither for 10-15.
+  for (const [day, label] of [[15, '10-15: the hold covers its whole span'], [14, '10-14: the hold starts inside it and runs past its end']] as const) {
+    const I = phx(2026, 10, day, 21, 30);
+    const span = { startMs: I, endMs: I + FORECAST_SPAN_MS };
+    const v = heldLedgerVerdict({ spans: [holdOf(CORES[0])], coreSns: [CORES[0]], panelSn: PANEL, span });
+    assert.ok(v != null && v.pv.length === 1, `precondition (${label}): held`);
+    const r = heldLedgerRepair(capturedRow(I, v, [CORES[0]]), { spans: [], coreSns: [CORES[0]], panelSn: PANEL, nowMs: I + 3 * DAY, horizonMs: HORIZON, restored: [holdOf(CORES[0])] });
+    assert.deepEqual([r?.action, r?.restored], ['recapture', ['PV']], `★★ ${label}`);
+  }
+});
+
+test('★ the panel\'s restored span does not restore a PV side (a Core no longer on the panel is not held by today\'s roster either)', () => {
+  // Mutant L2 (review round 6): the PV side matched against the panel's span as well.
+  const I = phx(2026, 10, 20, 21, 30);
+  const span = { startMs: I, endMs: I + FORECAST_SPAN_MS };
+  const v = heldLedgerVerdict({ spans: [{ sn: CORES[0], startMs: I + 3 * H, endMs: I + 9 * H }], coreSns: [CORES[0]], panelSn: PANEL, span });
+  const i = { spans: [] as LedgerHeldSpan[], coreSns: [CORES[1]], panelSn: PANEL, nowMs: I + 3 * DAY, horizonMs: HORIZON };
+  const row = capturedRow(I, v, [CORES[0]]);
+  assert.equal(heldLedgerRepair(row, { ...i, restored: [{ sn: PANEL, startMs: I + 2 * H, endMs: I + 4 * H }] }), null, '★ no restored span of a Core: nothing owed');
+  assert.equal(heldLedgerRepair(row, { ...i, restored: [{ sn: CORES[1], startMs: I + 2 * H, endMs: I + 4 * H }] })?.restored.join(), 'PV', 'precondition: a Core\'s restored span restores it');
+});
+
 test('★ a degenerate stored window (end at or before its start) is no window: no repair', () => {
   const i = { spans: SPANS, coreSns: CORES, panelSn: PANEL, nowMs: DEPLOY + 5 * MIN, horizonMs: HORIZON };
   assert.equal(heldLedgerRepair({ ...ROW_1014, window_end_ms: ROW_1014.window_start_ms }, i), null);
@@ -447,6 +510,15 @@ test('★★ SOURCE PIN: the sweep waits for the first held-sample scan, then re
   assert.ok(fix.includes('side.some((p) => recorder.heldRowsWithin?.(p.sn, metric, r.span.startMs, r.span.endMs) ?? true)'), 'over the span the verdict measured');
   assert.ok(!fix.includes('actuals were integrated from held readings'), 'the tag line does not claim an integration');
   assert.ok(fix.includes('const coreSns = [...shp2ConnectedDpuSns(store.get().devices)];'), 'the same Cores the capture reads');
+  // v1.188.1 (review 6) — a reset says so (the caller then reads the ledger again before it
+  // captures): the flag is set after the tag's early continue, for a reset only, and returned.
+  // Without it the reset row waited a whole 30-min tick, uncaptured, and the evening job's
+  // readiness recompute right after the sweep read the ledger without it (mutant I1).
+  const tagContinue = fix.indexOf("if (r.action === 'tag') {");
+  const flag = fix.indexOf('\n      reset = true;\n');
+  const resetLog = fix.indexOf('night-charge: reset ${y.plan_date} for re-capture');
+  assert.ok(tagContinue > 0 && flag > tagContinue && resetLog > flag, `★★ the reset flag, for a reset only: ${tagContinue} < ${flag} < ${resetLog}`);
+  assert.ok(fix.includes('  let reset = false;') && fix.trimEnd().endsWith('return reset;'), '★ returned to the caller');
 });
 
 test('★★ SOURCE PIN: the scorer withholds a held actual and states the reason before any coverage reason', () => {

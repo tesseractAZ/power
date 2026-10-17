@@ -365,7 +365,12 @@ was planned (the scan reads every device before its first move, minutes on the P
 every write of the device since `heldThroughMs` restated the stretch's values (`onMoved`'s
 `heldValues`: no write in which a value changed, even back again, and each metric's last write equal
 to its held value) within an hour of it (v1.188.1, fifth review: a heartbeat in that window left a
-replayed Core unheld, and its record came at the next hourly scan, or never).
+replayed Core unheld, and its record came at the next hourly scan, or never). That test reads only
+this process's writes, so it holds only a clock this process wrote: a seeded clock is a persisted
+row the scan read (it is planned after the boot), and past the stretch's last restated row it is a
+fresh reading or a later hold's start (v1.188.1, sixth review: a Core back fresh for 15 min after a
+40 h hold, dark again 25 min at the restart, was held from the hold's start and pushed as dark for
+41 h).
 
 **Readers that memoise.** Every move and restore advances the samples generation
 (`held_generation`) in its own transaction; both recorders read it (`samplesGeneration()`). The
@@ -390,9 +395,16 @@ restored end, so a later replay of the same readings is a new hold (the restore'
 v1.188.1, fifth review: it promised the rest of the hold without that limit). (Matched on overlap
 alone, a restore held for about four hours: once the 3 h re-read started after the restored end,
 each hourly scan's anchor was a restated row of the same hold, and the rest of it was moved as a new span with a second `HELD SAMPLES` line, while a boot
-scan after a stop left the same rows. v1.188.1, fourth review.) A per-device gap record the
-move had re-dated to the span's start goes back to the start it was filed with, and a gap clock
-the move had set back into that span goes forward again (4.7). In SQL, in one transaction:
+scan after a stop left the same rows. v1.188.1, fourth review.) A restore can land while a scan runs: the SQL below needs no
+restart, and a scan runs one step per timer tick, so it may have read the device's spans before the
+SQL. Each move slice therefore reads the device's restored spans again in its own transaction
+(`BEGIN IMMEDIATE`, so no other connection commits between that read and the move; a write lock
+held elsewhere fails that slice, which the next scan retries), and a stretch that continues a span
+restored since the scan was planned is left in `samples` like any other
+(v1.188.1, sixth review: the scan moved the rest of the hold under the span just marked restored,
+and those rows stayed in `held_samples` for good, under a span no reader treats as held). A
+per-device gap record the move had re-dated to the span's start goes back to the start it was filed
+with, and a gap clock the move had set back into that span goes forward again (4.7). In SQL, in one transaction:
 copy the span's rows (`sn = ? AND ts > start_ts AND ts <= end_ts`) from `held_samples` to `samples`,
 delete them from `held_samples`, set `restored_at_ms` on the span, and advance the samples
 generation with `UPDATE held_generation SET gen = gen + 1 WHERE id = 1`. Without that last step the
@@ -401,13 +413,20 @@ restored rows until the next restart: the generation is the only signal that `sa
 other than by appending. A gap record re-dated from the span is returned to its filed start at the
 next boot while the device is still dark (its seed reads that row again, 4.7), and a record filed at
 the span's start after the move is extended by that boot and keeps its start (the seed lies inside
-its window, 4.7); `telemetry-gaps.json` needs no edit. The SQL does not extend `end_ts` over the rest
-of a running hold: the next scan does (above). A device the move held from the span's start (4.7)
+its window, or inside the restored span from its start, which can run past the record's end: 4.7);
+`telemetry-gaps.json` needs no edit. The SQL does not extend `end_ts` over the rest
+of a running hold: the next scan does (above). A device whose gap clock is the span's start (4.7)
 is released when the per-device sweep would file a record from that start: it looks the span up
 first (`restoredSpanFrom`), and a restored span gets the restore's treatment instead (the clock to
 the device's last restated write, the hold ended, a re-dated record returned), so the add-on need
 not be restarted after the SQL (v1.188.1, fifth review: a Core that went on restating the restored
-readings, every row in `samples`, was filed and pushed as dark 6 h after the span's start). A
+readings, every row in `samples`, was filed and pushed as dark 6 h after the span's start). That
+holds whichever process moved the span: a boot after the move seeds the span's start (the newest
+row then left in `samples`), with no hold and no clock of its own to give back, and the restore then
+moves the clock to the device's newest row back in `samples`, what the next boot would seed
+(v1.188.1, sixth review: the record was filed from the span's start 6 h after it, "no data for
+372 min (09:00 → 15:12)" for a Core whose restored rows ran to 12:00). A clock the restore cannot
+move (nothing of the span back in `samples`) is filed from where it is. A
 night-ledger row refused for the span's hours is re-captured by the next sweep while its telemetry
 is retained (chapter 15, section 7).
 
@@ -498,7 +517,13 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   seeded clock only once its first scan has finished (`heldSamplesReady`): on the upgrade boot the
   seed is a held row the scan sets back, and a record filed before it was dispatched about a minute
   after the boot with that row's start and a duration short by the whole hold, under the id the
-  re-date then kept, so the corrected figures were never pushed (v1.188.1, fifth review). A device
+  re-date then kept, so the corrected figures were never pushed (v1.188.1, fifth review). A seeded
+  device that writes before then is remembered with the clock that write ended (`returnedDuringScan`;
+  set back to the span's start when the scan moves the row it was) and judged once the scan has
+  finished, as the sweep would have judged it at that write; a record filed then ends at the write,
+  since the device is back (v1.188.1, sixth review: waiting, the sweep saw such a device only after
+  the write had moved its clock on, and a Core back during the first scan after a 40 h hold got no
+  record and no warning). A device
   still on its seeded clock is charged only with dark time the
   add-on could observe (`seededDeviceDarkMs`): how far its last sample trails the
   fleet's newest before the outage, plus monotonic time since this process's first home write, less every fleet-dark window already in the gap ledger between those two points (so an intervening short boot cannot charge a silent device with an earlier outage). The outage itself is the restart-spanning fleet gap, not every
@@ -535,7 +560,14 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   replayed write reset the clock and re-armed the sweep, and the clock was always newer than any
   moved range (the scan never moves a row younger than 15 min): no warning while the replay lasted,
   none at all when it ended with a fresh reading, and one a whole replay late when it ended in
-  silence.
+  silence. A write that only restates such a hold is not a home insert: it neither moves the fleet
+  clock nor runs the sweeps. When the move holds a device, the fleet clock goes back to the newest
+  gap clock of any home device, not before this process's first home write (`pullFleetClockBack`),
+  and a restore that moves a device's clock past it moves it forward again. So with every home device
+  held (the panel behind its shadow latch, the Cores replayed with fresh clocks) no device is filed,
+  and the fleet gap is filed when a fresh home reading comes, from the last fresh one (v1.188.1, sixth
+  review: the replayed writes kept the fleet clock current, no fleet silence was seen, and at 6 h each
+  device got a per-device warning saying that other home devices kept reporting).
 - **One blackout, one record (v1.188.1).** A per-device record filed from a held row (the seed
   before the scan moved it, by this boot or by an earlier version) is re-dated when that row is
   moved: its start becomes the span's start, the newest row of the device left in `samples` (its
@@ -560,7 +592,11 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   which keeps the start it was filed with. A device that wrote after a record's end starts its next
   gap past it, so only rows moved back to `samples` can put a seed inside a record. Matched by none
   of the other rules, that boot filed a second record with a new id: a second pushed warning for the
-  same darkness (v1.188.1, fourth review). Any other record of the device that starts at or after
+  same darkness (v1.188.1, fourth review). The record's window reaches to the end of a restored span
+  that starts where the record does: the record of a replayed Core is filed 6 h into the replay,
+  while it is still being written, and the hourly scans move the replay on past the record's end
+  (its detection time), so a restore puts the next boot's seed, the replay's last row, past that end
+  (v1.188.1, sixth review: the boot filed a second record with a new id). Any other record of the device that starts at or after
   the span's start, up to the moved end, is the same darkness, inside the re-dated record's window,
   and is merged into it (dropped; the re-dated record keeps its id). The case is a record filed at
   the last fresh reading during a first silence, then a replay of that reading, then a second
@@ -577,7 +613,10 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   then names what was held instead of an MQTT/broker stall. A home device those evaluations read
   with fresh content and nothing measurable (an SHP2 body with no channel and no grid reading), never
   held in the silence, is carried beside it (`unmeasured`), so the alert names it instead of saying
-  that every home device it had a reading for was held. Before the gate a held projection was
+  that every home device it had a reading for was held. A device held from a moved span's start
+  (`heldReplayFrom`) whose readings only restate that hold is carried too, as `replayed` (written,
+  then moved by the scan), unless the gate held it in the silence; such an evaluation is not one with
+  a recordable home reading. Before the gate a held projection was
   restated every 5 min, so a fleet gap meant that no change event reached the recorder at all; with
   it, a panel shadowed or stale for 15 min while no Core has a projection files one. (The first
   version took the set from every evaluation that wrote no home row: a panel reading the dedupe

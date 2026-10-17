@@ -2757,8 +2757,10 @@ export type TelemetryGapRecord = {
    *  first filed with. */
   alertStartMs?: number;
   /** v1.188.1 (dry run) — an in-process fleet gap the freshness gate explains: the home devices
-   *  it held while the recorder kept evaluating the fleet (`shadow`: the panel's cloud shadow). */
-  held?: Array<{ sn: string; shadow: boolean }>;
+   *  it held while the recorder kept evaluating the fleet (`shadow`: the panel's cloud shadow).
+   *  v1.188.1 (review 6) — `replayed`: a device written while it only restated readings the
+   *  held-sample scan had moved out of samples (a replayed Core body passes the gate). */
+  held?: Array<{ sn: string; shadow: boolean; replayed?: boolean }>;
   /** v1.188.1 (review 3) — with `held`: the home devices those evaluations found fresh with
    *  nothing measurable, never held in the silence (recorder.ts TelemetryGap.unmeasured). */
   unmeasured?: string[];
@@ -2878,17 +2880,20 @@ function deviceGapAlert(g: TelemetryGapRecord, sn: string, mins: number, name: s
  *  v1.188.1 (review 3) — and the devices read fresh with nothing measurable (`unmeasured`): with
  *  any, the phrase no longer says that every home device it read was held. */
 export function heldGapPhrase(
-  held: ReadonlyArray<{ sn: string; shadow: boolean }>,
+  held: ReadonlyArray<{ sn: string; shadow: boolean; replayed?: boolean }>,
   deviceName?: (sn: string) => string | null | undefined,
   unmeasured: readonly string[] = [],
 ): string {
   const nameOf = (sn: string) => { const n = deviceName?.(sn); return n != null && n.trim() !== '' ? n : sn; };
   const list = (xs: string[]) => (xs.length <= 2 ? xs.join(' and ') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
   const shadow = held.filter((h) => h.shadow).map((h) => nameOf(h.sn));
-  const stale = held.filter((h) => !h.shadow).map((h) => nameOf(h.sn));
+  const stale = held.filter((h) => !h.shadow && h.replayed !== true).map((h) => nameOf(h.sn));
+  // v1.188.1 (review 6) — written, restating readings the held-sample scan had moved out of the history.
+  const replayed = held.filter((h) => !h.shadow && h.replayed === true).map((h) => nameOf(h.sn));
   const parts: string[] = [];
   if (shadow.length > 0) parts.push(`the EcoFlow cloud replayed the last payload of ${list(shadow)} (cloud shadow)`);
   if (stale.length > 0) parts.push(`${list(stale)} sent no new readings`);
+  if (replayed.length > 0) parts.push(`${list(replayed)} only restated ${replayed.length > 1 ? 'their' : 'its'} last readings, which the hourly check moved out of the history as held samples`);
   if (unmeasured.length === 0) return `every home device it had a reading for was held — ${parts.join('; ')}`;
   parts.push(`${list(unmeasured.map(nameOf))} reported nothing measurable`);
   return `no home device it had a reading for gave one to record — ${parts.join('; ')}`;
@@ -2968,7 +2973,7 @@ export function outageAlerts(
         : restart
           ? `No home telemetry was recorded for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}), spanning a restart — the Pi lost power or the add-on stopped, so the alarm system was OFFLINE for that stretch and this window of history is unrecoverable. If this recurs, the Pi needs an always-on power source (UPS / dedicated circuit).`
           : held
-            ? `${g.unmeasured != null && g.unmeasured.length > 0 ? 'No home-device reading could be recorded' : 'No fresh home-device readings reached the recorder'} for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}): the add-on kept checking the fleet, but ${heldGapPhrase(held, deviceName, g.unmeasured ?? [])}, so nothing was recorded (only fresh readings are saved). Writes have since resumed. History in that window is missing but the process stayed up.`
+            ? `${g.unmeasured != null && g.unmeasured.length > 0 ? 'No home-device reading could be recorded' : 'No fresh home-device readings reached the recorder'} for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}): the add-on kept checking the fleet, but ${heldGapPhrase(held, deviceName, g.unmeasured ?? [])}, so ${held.some((h) => !h.shadow && h.replayed === true) ? 'no fresh reading was recorded (only fresh readings are kept)' : 'nothing was recorded (only fresh readings are saved)'}. Writes have since resumed. History in that window is missing but the process stayed up.`
             : `No home-device samples reached the recorder for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}) — an MQTT/broker stall; writes have since resumed. History in that window is missing but the process stayed up.`,
       facts: [
         { label: 'Duration', value: `${mins} min` },

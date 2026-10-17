@@ -12,9 +12,12 @@
  *     ran during the silence at all (a true stall). The gate explains a silence now only when the
  *     evaluations with no recordable home reading went on through it, none more than
  *     RECORD_FRESH_MS apart.
- * Sections 3-5 hold the later review rounds; round 5: a SQL restore made while the add-on runs, a
+ * Sections 3-6 hold the later review rounds; round 5: a SQL restore made while the add-on runs, a
  * replayed Core written between the scan's plan and its move or first after a restart, the upgrade
- * boot's record waiting for the first scan, one record per darkness, and the round-4 survivors.
+ * boot's record waiting for the first scan, one record per darkness, and the round-4 survivors;
+ * round 6: a seeded clock past the stretch, a Core back during the first scan, a restore in a
+ * process booted after the move, a restored replay that ran past its record, a fleet-wide replay,
+ * and a write lock held during a move.
  * Fake serials throughout.
  */
 import { test, type TestContext } from 'node:test';
@@ -1207,4 +1210,351 @@ test('★ a record extended from a seed inside its window states its own duratio
     const [a] = outageAlerts(JSON.parse(JSON.stringify(g)), now, OPTS, nameOf);
     assert.ok(a.title.includes(`no data for ${Math.round((g[0].endMs - g[0].startMs) / MIN)} min`), a.title);
   } finally { rec.close(); }
+});
+
+/* ══ 6. review round 6 ═════════════════════════════════════════════════════ */
+
+/** The add-on's recorder: the held-sample scan scheduled (RECORDER_HELD_SCAN=on). */
+function addonRecorder(lines?: string[]) {
+  process.env.RECORDER_HELD_SCAN = 'on';
+  try { return createRecorder(makeStore(), (m) => lines?.push(m)); } finally { delete process.env.RECORDER_HELD_SCAN; }
+}
+
+for (const quiet of ['silent', 'restated by v1.188.0'] as const) {
+  test(`★★★ the upgrade boot, a seeded Core back fresh for 15 min after a 40 h hold, then ${quiet} 25 min: not held from the hold's start — no 41 h warning`, (t) => {
+    // The scan reads the seed (it plans after the boot): past the stretch's last restated row, the
+    // seed is a fresh reading or a later hold's start, never one of the stretch's restatements.
+    const T0 = phx(2026, 10, 14, 20, 0);
+    const lastFresh = T0 + 2 * H;
+    const a1 = live(CORE_A, T0, lastFresh);
+    const heldA = held(CORE_A, a1, lastFresh + 5 * MIN, lastFresh + 40 * H);
+    const lastHeldRow = Math.max(...heldA.map((r) => r[0]));
+    const back = live(CORE_A, lastHeldRow + 5 * MIN, lastHeldRow + 20 * MIN, 7);
+    const lastBack = Math.max(...back.map((r) => r[0]));
+    const held2 = quiet === 'silent' ? [] : held(CORE_A, back, lastBack + 5 * MIN, lastBack + 25 * MIN);
+    const newest = held2.length > 0 ? Math.max(...held2.map((r) => r[0])) : lastBack;
+    const BOOT = lastBack + 27 * MIN;
+    reset([...a1, ...heldA, ...back, ...held2, ...panelRows(T0, BOOT - MIN)]);
+    let now = BOOT;
+    t.mock.method(Date, 'now', () => now);
+    t.mock.method(performance, 'now', () => now - BOOT + 1_000);
+    const rec = addonRecorder();
+    try {
+      now = BOOT + 30_000;
+      panelReads(rec, now);
+      now = BOOT + MIN;
+      assert.equal(rec.scanHeldSamples!(now).rowsMoved, heldA.length, 'precondition: the 40 h hold is moved, the fresh return and the 25 min after it are not');
+      let filedAt: number | null = null;
+      for (let m = 2; m <= 7 * 60; m += 5) {
+        now = BOOT + m * MIN;
+        panelReads(rec, now);
+        if (filedAt == null && coreRecords(rec).length > 0) filedAt = now;
+      }
+      const g = coreRecords(rec);
+      assert.equal(g.length, 1, JSON.stringify(rec.telemetryGaps()));
+      assert.equal(g[0].startMs, newest, `★★★ from its own newest row, not from the hold's start ${iso(lastFresh)}: ${iso(g[0].startMs)}`);
+      assert.ok(filedAt != null && filedAt - BOOT > 5 * H, `★★ filed only once its own silence passed 6 h: ${filedAt == null ? 'never' : iso(filedAt)}`);
+      const [a] = outageAlerts(JSON.parse(JSON.stringify(g)), now, OPTS, nameOf);
+      assert.ok(!a.detail.includes(fmtClock(lastFresh)), `★★ the pushed window is not the hold's: ${a.detail}`);
+      assert.ok(g[0].durationMs < 8 * H, `★★ not 41 h: ${Math.round(g[0].durationMs / MIN)} min`);
+    } finally { rec.close(); }
+  });
+}
+
+/** A Core's DPU projection sent with the panel's. */
+const sendBoth = (rec: ReturnType<typeof createRecorder>, now: number, soc: number) =>
+  rec.insertSnapshot({ generatedAt: now, devices: { [PANEL]: panel(now), [CORE_A]: dpu(CORE_A, now, soc) } } as any);
+
+for (const when of ['before the scan\'s first move', 'after its first move, before it finishes'] as const) {
+  test(`★★ the upgrade boot, a Core held 40 h comes back ${when}: filed once the scan has finished, from its last fresh reading to its return`, (t) => {
+    const { BOOT, rows, heldA, lastFresh } = heldCoreDown(20);
+    reset(rows);
+    let now = BOOT;
+    t.mock.method(Date, 'now', () => now);
+    t.mock.method(performance, 'now', () => now - BOOT + 1_000);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    const rec = addonRecorder();
+    let backAt = 0;
+    try {
+      now = BOOT + 30_000;
+      panelReads(rec, now);
+      if (when === 'before the scan\'s first move') {
+        now = BOOT + 40_000;
+        sendBoth(rec, now, 40);
+        backAt = now;
+        assert.deepEqual(coreRecords(rec), [], 'precondition: the sweep waits for the first scan');
+        now = BOOT + MIN;
+        assert.equal(rec.scanHeldSamples!(now).rowsMoved, heldA.length);
+      } else {
+        // The production scan: a minute after the boot, one step per timer tick.
+        now = BOOT + 60_000;
+        t.mock.timers.tick(60_000);
+        for (let k = 0; k < 10_000 && !rec.heldSamplesReady!(); k++) {
+          now += 1_000;
+          t.mock.timers.tick(5);
+          if (backAt === 0 && heldRowsOf(CORE_A) > 0) { sendBoth(rec, now, 40); backAt = now; }
+        }
+        assert.ok(rec.heldSamplesReady!() && backAt > 0, 'precondition: the Core wrote between the first move and the end of the scan');
+        assert.ok(heldRowsOf(CORE_A) === heldA.length, 'precondition: the scan moved the hold');
+      }
+      assert.deepEqual(coreRecords(rec), [], 'not before the scan has finished');
+      for (let m = 2; m <= 30; m++) { now = BOOT + m * MIN; sendBoth(rec, now, 40 + (m % 3)); }
+      const g = coreRecords(rec);
+      assert.equal(g.length, 1, `★★ one record for the 40 h hold: ${JSON.stringify(rec.telemetryGaps())}`);
+      assert.equal(g[0].startMs, lastFresh, `★★ from the last fresh reading: ${iso(g[0].startMs)}`);
+      assert.equal(g[0].endMs, backAt, `★ to its return: ${iso(g[0].endMs)}`);
+      const [a] = outageAlerts(JSON.parse(JSON.stringify(g)), now, OPTS, nameOf);
+      assert.ok(a.title.includes(`no data for ${Math.round((backAt - lastFresh) / MIN)} min`), a.title);
+      assert.ok(a.detail.includes(`(${fmtClock(lastFresh)} → ${fmtClock(backAt)})`), a.detail);
+    } finally { rec.close(); t.mock.timers.reset(); }
+  });
+}
+
+test('★ a Core back during the first scan after only 30 min without a reading: no record', (t) => {
+  const T0 = phx(2026, 10, 21, 0, 0);
+  const a1 = live(CORE_A, T0, T0 + 2 * H);
+  const BOOT = T0 + 2 * H + 30 * MIN;
+  reset([...a1, ...panelRows(T0, BOOT - MIN)]);
+  let now = BOOT;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(performance, 'now', () => now - BOOT + 1_000);
+  const rec = addonRecorder();
+  try {
+    now = BOOT + 30_000;
+    panelReads(rec, now);
+    now = BOOT + 40_000;
+    sendBoth(rec, now, 40);
+    now = BOOT + MIN;
+    rec.scanHeldSamples!(now);
+    for (let m = 2; m <= 30; m++) { now = BOOT + m * MIN; sendBoth(rec, now, 40 + (m % 3)); }
+    assert.deepEqual(coreRecords(rec), [], `★ judged from its own clock: ${JSON.stringify(coreRecords(rec))}`);
+  } finally { rec.close(); }
+});
+
+/** Core A: fresh to `lastFresh`, a 3 h replay moved by process 1, which runs on 30 min with the Core
+ *  silent; process 2 boots 5 min later (its seed for the Core: the span's start). */
+function replayMovedBeforeRestart(t: TestContext) {
+  const T0 = phx(2026, 10, 18, 0, 0);
+  const lastFresh = T0 + 2 * H;
+  const a1 = live(CORE_A, T0, lastFresh);
+  const heldA = held(CORE_A, a1, lastFresh + 5 * MIN, lastFresh + 3 * H);
+  const lastHeldRow = Math.max(...heldA.map((r) => r[0]));
+  const BOOT1 = lastFresh + 3 * H + 20 * MIN;
+  reset([...a1, ...heldA, ...panelRows(T0, BOOT1 - MIN)]);
+  const clk = clocked(t, BOOT1);
+  const rec1 = createRecorder(makeStore(), () => {});
+  try {
+    assert.equal(rec1.scanHeldSamples!(clk.now).rowsMoved, heldA.length, 'precondition: process 1 moved the replay');
+    for (let k = 1; k <= 30; k++) { clk.at(BOOT1 + k * MIN); panelReads(rec1, clk.now); }
+    assert.deepEqual(coreRecords(rec1), [], 'precondition: not filed by process 1');
+  } finally { rec1.close(); }
+  const BOOT2 = BOOT1 + 35 * MIN;
+  clk.at(BOOT2);
+  return { clk, lastFresh, lastHeldRow, heldA, BOOT2 };
+}
+
+for (const how of ['the SQL of architecture 4.4', 'restoreHeldSamples'] as const) {
+  test(`★★ a replay moved before a restart, restored by ${how} in the next process: filed 6 h after the last restored row, from it`, (t) => {
+    const { clk, lastFresh, lastHeldRow, heldA, BOOT2 } = replayMovedBeforeRestart(t);
+    const rec = createRecorder(makeStore(), () => {});
+    try {
+      clk.at(BOOT2 + MIN);
+      panelReads(rec, clk.now);
+      if (how === 'restoreHeldSamples') assert.equal(rec.restoreHeldSamples!(CORE_A, lastFresh), heldA.length);
+      else sqlRestore(CORE_A, lastFresh, clk.now);
+      let filedAt: number | null = null;
+      for (let k = 2; k <= 8 * 60; k += 5) {
+        clk.at(BOOT2 + k * MIN);
+        panelReads(rec, clk.now);
+        if (filedAt == null && coreRecords(rec).length > 0) filedAt = clk.now;
+      }
+      const g = coreRecords(rec);
+      assert.equal(g.length, 1, JSON.stringify(rec.telemetryGaps()));
+      assert.equal(g[0].startMs, lastHeldRow, `★★ from the last row back in samples, not the span's start ${iso(lastFresh)}: ${iso(g[0].startMs)}`);
+      assert.ok(filedAt != null && filedAt - lastHeldRow >= 6 * H, `★★ not before 6 h after it: ${filedAt == null ? 'never' : `${((filedAt - lastHeldRow) / H).toFixed(2)} h`}`);
+      const [a] = outageAlerts(JSON.parse(JSON.stringify(g)), clk.now, OPTS, nameOf);
+      assert.ok(a.detail.includes(`(${fmtClock(lastHeldRow)} → `), a.detail);
+    } finally { rec.close(); }
+  });
+}
+
+test('★★ a span restored in a process booted after its move, the Core dark: it is still filed (released once, then judged from the restored rows)', (t) => {
+  const { BOOT, rows, heldA, lastHeldRow, lastFresh } = heldCore();
+  reset(rows);
+  let now = BOOT;
+  t.mock.method(Date, 'now', () => now);
+  const rec = createRecorder(makeStore(), () => {});
+  try {
+    assert.equal(rec.scanHeldSamples!(now).rowsMoved, heldA.length, 'precondition: moved before any write ran the sweep');
+    assert.deepEqual(coreRecords(rec), [], 'precondition: no record yet');
+  } finally { rec.close(); }
+  now = BOOT + 4 * H;
+  const rec2 = createRecorder(makeStore(), () => {});
+  try {
+    assert.equal(rec2.restoreHeldSamples!(CORE_A, lastFresh), heldA.length);
+    for (let k = 1; k <= 3; k++) { now += MIN; panelReads(rec2, now); }
+    const g = coreRecords(rec2);
+    assert.equal(g.length, 1, `★★ the Core has written nothing for ${((now - lastHeldRow) / H).toFixed(1)} h: filed, not released on every sweep (${JSON.stringify(rec2.telemetryGaps())})`);
+    assert.equal(g[0].startMs, lastHeldRow, '★ from its last row back in samples');
+  } finally { rec2.close(); }
+});
+
+test('★ a span marked restored with none of its rows back in samples (the SQL\'s mark without its copy): the dark Core is filed from where its clock is', (t) => {
+  const { clk, lastFresh, BOOT2 } = replayMovedBeforeRestart(t);
+  withDb((db) => db.prepare("UPDATE held_spans SET restored_at_ms = ? WHERE sn = ? AND start_ts = ? AND reason = 'frozen'").run(clk.now, CORE_A, lastFresh));
+  const rec = createRecorder(makeStore(), () => {});
+  try {
+    for (let k = 1; k <= 8 * 60; k += 5) { clk.at(BOOT2 + k * MIN); panelReads(rec, clk.now); }
+    const g = coreRecords(rec);
+    assert.equal(g.length, 1, `★ the sweep releases a restored span's device only when the restore gives its clock somewhere to go: ${JSON.stringify(rec.telemetryGaps())}`);
+    assert.equal(g[0].startMs, lastFresh, 'its newest row in samples');
+  } finally { rec.close(); }
+});
+
+for (const how of ['restoreHeldSamples', 'the SQL of architecture 4.4'] as const) {
+  test(`★★ a replay restored by ${how} after it ran past its record (filed 6 h into it), then a restart with the Core still dark: one record, one alert id`, (t) => {
+    const r = runningReplay(t, 23, 30 + 10 * 60);
+    let ids: string[] = [];
+    try {
+      const g0 = coreRecords(r.rec);
+      assert.equal(g0.length, 1, 'precondition: filed during the replay');
+      assert.ok(g0[0].endMs < r.T0 + 630 * MIN, 'precondition: the replay ran past the record\'s end');
+      ids = deviceAlertIds(r.rec.telemetryGaps(), r.clk.now);
+      for (let m = 631; m <= 750; m++) r.minute(m, null);
+      assert.ok(heldRowsOf(CORE_A) > 0, 'precondition: moved');
+      if (how === 'restoreHeldSamples') assert.ok(r.rec.restoreHeldSamples!(CORE_A, r.lastFresh) > 0);
+      else sqlRestore(CORE_A, r.lastFresh, r.clk.now);
+      for (let m = 751; m <= 800; m++) r.minute(m, null);
+      assert.equal(heldRowsOf(CORE_A), 0, 'precondition: every replayed row is back in samples');
+      assert.equal(coreRecords(r.rec).length, 1, 'precondition: one record in this process');
+    } finally { r.rec.close(); }
+    r.clk.at(r.T0 + 802 * MIN);
+    const lines: string[] = [];
+    const rec2 = createRecorder(makeStore(), (m) => lines.push(m));
+    try {
+      for (let m = 803; m <= 800 + 8 * 60; m++) {
+        r.clk.at(r.T0 + m * MIN);
+        rec2.insertSnapshot({ generatedAt: r.clk.now, devices: { [PANEL]: panel(r.clk.now) } } as any);
+        if (m === 863) rec2.scanHeldSamples!(r.clk.now);
+      }
+      const gaps = rec2.telemetryGaps();
+      const g = gaps.filter((x) => x.sn === CORE_A);
+      assert.equal(g.length, 1, `★★★ one record for the one darkness, not a second from the restored replay's last row: ${JSON.stringify(g.map((x) => [iso(x.startMs), iso(x.endMs)]))}`);
+      assert.equal(g[0].startMs, r.lastFresh, '★★ it keeps the start it was filed with');
+      assert.ok(g[0].endMs > r.T0 + 802 * MIN, `and is extended by the boot: ${iso(g[0].endMs)}`);
+      assert.deepEqual(deviceAlertIds(gaps, r.clk.now), ids, '★★★ the same alert id: nothing is pushed again');
+      assert.equal(deviceGapCount(gaps, r.clk.now, 24 * H), 1, '★★ Device Telemetry Gaps 24h stays 1');
+      assert.ok(lines.some((l) => l.includes(`DEVICE TELEMETRY GAP — ${CORE_A}`) && l.includes(`its newest row, ${iso(r.T0 + 630 * MIN)}, is a held row moved back to samples, and the record keeps the start it was filed with`)), lines.filter((l) => l.includes('DEVICE TELEMETRY GAP')).join('\n'));
+    } finally { rec2.close(); }
+  });
+}
+
+for (const withPanel of [true, false]) {
+  test(`★★★ every home device held — ${withPanel ? 'the panel behind its shadow latch, ' : ''}both Cores replayed with fresh clocks: one fleet gap that names them, no per-device warning`, (t) => {
+    reset([]);
+    const T0 = phx(2026, 10, 24, 5, 0);
+    const clk = clocked(t, T0);
+    const lines: string[] = [];
+    const rec = createRecorder(makeStore(), (m) => lines.push(m));
+    const send = (devices: Snap[]) => rec.insertSnapshot({ generatedAt: clk.now, devices: Object.fromEntries(devices.map((d) => [d.sn, d])) } as any);
+    const S = T0 + 30 * MIN;
+    const thePanel = (fresh: boolean): Snap[] => (!withPanel ? [] : [fresh ? panel(clk.now) : panel(clk.now, { contentAt: S, shadowSince: S })]);
+    try {
+      for (let m = 1; m <= 30; m++) { clk.at(T0 + m * MIN); send([...thePanel(true), dpu(CORE_A, clk.now, 50 + m), dpu(CORE_B, clk.now, 20 + m)]); }
+      for (let m = 31; m <= 30 + 8 * 60; m++) {
+        clk.at(T0 + m * MIN);
+        send([...thePanel(false), dpu(CORE_A, clk.now, 80), dpu(CORE_B, clk.now, 50)]);
+        if (m % 60 === 0) rec.scanHeldSamples!(clk.now);
+      }
+      assert.ok(heldRowsOf(CORE_A) > 0 && heldRowsOf(CORE_B) > 0, 'precondition: both replays moved');
+      assert.deepEqual(rec.telemetryGaps(), [], `★★★ no per-device record while no home device had a fresh reading: ${JSON.stringify(rec.telemetryGaps())}`);
+      const R = T0 + (30 + 8 * 60 + 1) * MIN;
+      for (let m = 30 + 8 * 60 + 1; m <= 30 + 8 * 60 + 30; m++) { clk.at(T0 + m * MIN); send([...thePanel(true), dpu(CORE_A, clk.now, 81 + (m % 5)), dpu(CORE_B, clk.now, 51 + (m % 5))]); }
+      const gaps = rec.telemetryGaps();
+      assert.deepEqual(gaps.filter((g) => g.sn != null), [], '★★★ none when the fleet came back either');
+      const fleet = gaps.filter((g) => g.sn == null);
+      assert.equal(fleet.length, 1, JSON.stringify(gaps));
+      assert.equal(fleet[0].startMs, S, `★★ from the last fresh home reading: ${iso(fleet[0].startMs)}`);
+      assert.equal(fleet[0].endMs, R, 'to the first fresh one');
+      const cores = [{ sn: CORE_A, shadow: false, replayed: true }, { sn: CORE_B, shadow: false, replayed: true }];
+      assert.deepEqual(fleet[0].held, withPanel ? [...cores, { sn: PANEL, shadow: true }] : cores, '★★ what was held, each as it was held');
+      assert.equal(fleet[0].unmeasured, undefined, '★ a replayed Core is not "read with nothing measurable"');
+      assert.equal(deviceGapCount(gaps, clk.now, 24 * H), 0, '★★ Device Telemetry Gaps 24h: 0');
+      const [a] = outageAlerts(JSON.parse(JSON.stringify(gaps)), clk.now, OPTS, nameOf);
+      assert.equal(a.title, `Telemetry gap — no data for ${Math.round((R - S) / MIN)} min`);
+      assert.equal(a.facts?.find((f) => f.label === 'Type')?.value, 'in-process (held readings)');
+      const phrase = `every home device it had a reading for was held — ${withPanel ? 'the EcoFlow cloud replayed the last payload of Smart Home Panel 2 (cloud shadow); ' : ''}Core 1 and Core 2 only restated their last readings, which the hourly check moved out of the history as held samples, so no fresh reading was recorded (only fresh readings are kept).`;
+      assert.ok(a.detail.includes(phrase), `★★ the pushed text: ${a.detail}`);
+      const why = `held ${CORE_A} (restating readings the held-sample scan moved), ${CORE_B} (restating readings the held-sample scan moved)${withPanel ? `, ${PANEL} (cloud shadow)` : ''}`;
+      assert.ok(lines.some((l) => l.includes(why)), lines.filter((l) => l.includes('TELEMETRY GAP')).join('\n'));
+    } finally { rec.close(); }
+  });
+}
+
+test('★ a restart into a fleet-wide hold, the Core replayed: the in-process fleet gap starts at the first write after the boot, not inside the restart\'s own record', (t) => {
+  reset([]);
+  const T0 = phx(2026, 10, 26, 5, 0);
+  const clk = clocked(t, T0);
+  const S = T0 + 30 * MIN;
+  let rec = createRecorder(makeStore(), () => {});
+  const send = (devices: Snap[]) => rec.insertSnapshot({ generatedAt: clk.now, devices: Object.fromEntries(devices.map((d) => [d.sn, d])) } as any);
+  const heldMinute = (m: number) => { clk.at(T0 + m * MIN); send([panel(clk.now, { contentAt: S, shadowSince: S }), dpu(CORE_A, clk.now, 80)]); };
+  for (let m = 1; m <= 30; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), dpu(CORE_A, clk.now, 50 + m)]); }
+  for (let m = 31; m <= 120; m++) heldMinute(m); // no scan in this process
+  rec.close();
+  clk.at(T0 + 125 * MIN);
+  rec = createRecorder(makeStore(), () => {});
+  try {
+    for (let m = 126; m <= 300; m++) {
+      heldMinute(m);
+      if (m === 127 || m % 60 === 0) rec.scanHeldSamples!(clk.now);
+    }
+    assert.ok(heldRowsOf(CORE_A) > 0, 'precondition: the replay moved by the boot scan');
+    for (let m = 301; m <= 310; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), dpu(CORE_A, clk.now, 81 + (m % 5))]); }
+    const fleet = rec.telemetryGaps().filter((g) => g.sn == null).sort((a, b) => a.startMs - b.startMs);
+    assert.deepEqual(fleet.map((g) => [g.restartSpanning === true, g.startMs, g.endMs]), [[true, T0 + 120 * MIN, T0 + 125 * MIN], [false, T0 + 126 * MIN, T0 + 301 * MIN]],
+      `★ the restart's record, then the in-process one from this process's first home write — not from ${iso(S)}, inside the first: ${JSON.stringify(fleet.map((g) => [iso(g.startMs), iso(g.endMs)]))}`);
+    assert.deepEqual(rec.telemetryGaps().filter((g) => g.sn != null), [], 'no per-device record');
+  } finally { rec.close(); }
+});
+
+test('★ every home device held, then one Core\'s span restored while its replay goes on: its restored rows are readings — no fleet gap from the last fresh home reading', (t) => {
+  reset([]);
+  const T0 = phx(2026, 10, 25, 5, 0);
+  const clk = clocked(t, T0);
+  const rec = createRecorder(makeStore(), () => {});
+  const send = (devices: Snap[]) => rec.insertSnapshot({ generatedAt: clk.now, devices: Object.fromEntries(devices.map((d) => [d.sn, d])) } as any);
+  try {
+    for (let m = 1; m <= 30; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), dpu(CORE_A, clk.now, 50 + m), dpu(CORE_B, clk.now, 20 + m)]); }
+    const S = T0 + 30 * MIN;
+    const minute = (m: number) => {
+      clk.at(T0 + m * MIN);
+      send([panel(clk.now, { contentAt: S, shadowSince: S }), dpu(CORE_A, clk.now, 80), dpu(CORE_B, clk.now, 50)]);
+      if (m % 60 === 0) rec.scanHeldSamples!(clk.now);
+    };
+    for (let m = 31; m <= 200; m++) minute(m);
+    assert.ok(heldRowsOf(CORE_A) > 0 && heldRowsOf(CORE_B) > 0, 'precondition: both replays moved');
+    assert.ok(rec.restoreHeldSamples!(CORE_A, S) > 0, 'precondition: Core 1\'s span restored');
+    for (let m = 201; m <= 240; m++) minute(m);
+    assert.deepEqual(rec.telemetryGaps().filter((g) => g.sn == null), [], `★ Core 1 wrote readings throughout: ${JSON.stringify(rec.telemetryGaps())}`);
+  } finally { rec.close(); }
+});
+
+test('★ a write lock held on another connection (an SQL session mid-transaction) fails the move\'s slice, not the scan; the next scan moves it', (t) => {
+  const { BOOT, rows, heldA } = heldCore();
+  reset(rows);
+  let now = BOOT;
+  t.mock.method(Date, 'now', () => now);
+  const lines: string[] = [];
+  const rec = createRecorder(makeStore(), (m) => lines.push(m));
+  const other = new DatabaseSync(DB_PATH);
+  try {
+    other.exec('BEGIN IMMEDIATE');
+    const first = rec.scanHeldSamples!(now);
+    assert.equal(first.rowsMoved, 0, 'nothing moved while the lock is held');
+    assert.ok(lines.some((l) => l.includes(`held-sample move FAILED for ${CORE_A}`)), `★ the slice fails and says so: ${lines.filter((l) => l.includes('held-sample')).join('\n')}`);
+    other.exec('ROLLBACK');
+    now += H;
+    assert.equal(rec.scanHeldSamples!(now).rowsMoved, heldA.length, '★ the next scan moves the hold');
+  } finally { try { other.exec('ROLLBACK'); } catch { /* released */ } other.close(); rec.close(); }
 });

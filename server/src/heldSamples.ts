@@ -30,7 +30,8 @@
  *     span is never excluded again, nor (review 4) the rest of its hold while the device goes on
  *     restating the same readings — (review 5) until a metric changes, or until a return reading
  *     after a silence is followed by another silence (createFrozenScanner: a later replay is a
- *     hold from that reading). Every move is logged.
+ *     hold from that reading); (review 6) also when the restore lands while a scan runs, since each
+ *     move slice reads the restored spans again (moveStep). Every move is logged.
  *
  * WHAT IT DOES NOT DO. The alarms read the live store, never `samples`; nothing here touches the
  * store. The offline, stale and blind alarms and the SoC ladder are unchanged by construction.
@@ -589,12 +590,18 @@ interface MoveJob {
   rangeToMs: number;
   /** v1.188.1 (review 2) — the range extends a span an earlier scan moved (its last slice says so). */
   extension: boolean;
+  /** v1.188.1 (review 6) — the device's restored spans as the scan was planned (ScanJob.restored):
+   *  a span restored since then is looked for again at each slice (moveStep). */
+  plannedRestored: ReadonlyArray<{ startMs: number }>;
 }
 
 /** v1.188.1 (review 4) — is `startMs` (a stretch's anchor) one of the rows of a restored span,
  *  its start included? No metric of the device changed in it, so a stretch from there continues the
  *  hold the restore gave back. PURE. */
 const anchoredIn = (r: { startMs: number; endMs: number }, startMs: number): boolean => startMs >= r.startMs && startMs <= r.endMs;
+/** v1.188.1 (review 4) — does the stretch `s` continue the hold the restored span `r` gave back: it
+ *  overlaps the span, or its anchor is one of the span's rows? PURE. */
+const continuesRestored = (r: { startMs: number; endMs: number }, s: Pick<FrozenStretch, 'startMs' | 'endMs'>): boolean => overlapMs(r.startMs, r.endMs, s.startMs, s.endMs) > 0 || anchoredIn(r, s.startMs);
 
 export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   const now = o.now ?? Date.now;
@@ -787,6 +794,24 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     }
   }
 
+  /** v1.188.1 (review 4) — a stretch the restored span `r` gave back: left in samples, the span's
+   *  end follows its last restated row, and the continuation is logged once per process. */
+  function leaveRestored(sn: string, r: { startMs: number; endMs: number }, s: FrozenStretch): void {
+    if (s.endMs > r.endMs) {
+      try {
+        extendRestoredStmt.run(s.endMs, sn, r.startMs, s.endMs);
+        r.endMs = s.endMs;
+      } catch (e: any) {
+        o.log(`recorder: restored span of ${sn} from ${new Date(r.startMs).toISOString()} not extended (${e?.message ?? e})`);
+      }
+    }
+    const key = `${sn}|${r.startMs}`;
+    if (!restoredNoted.has(key)) {
+      restoredNoted.add(key);
+      o.log(`recorder: ${sn} held stretch ${new Date(s.startMs).toISOString()} → ${new Date(s.endMs).toISOString()} is part of the span from ${new Date(r.startMs).toISOString()} that was restored earlier — left in samples (the span now runs to ${new Date(r.endMs).toISOString()})`);
+    }
+  }
+
   /** One device-chunk of reading; when the device is done, its qualifying stretches are queued
    *  for moving (slice by slice). Returns false when there is nothing left to read. */
   function scanStep(): boolean {
@@ -829,21 +854,9 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       // anchor was a restated row of the same hold, and the rest of the hold was moved as a new span
       // (a second HELD SAMPLES line, the ledger refusing those hours again), while a boot scan after
       // a stop, re-reading from before it, left the same rows.
-      const r = job.restored.find((x) => overlapMs(x.startMs, x.endMs, s.startMs, s.endMs) > 0 || anchoredIn(x, s.startMs));
+      const r = job.restored.find((x) => continuesRestored(x, s));
       if (r) {
-        if (s.endMs > r.endMs) {
-          try {
-            extendRestoredStmt.run(s.endMs, job.sn, r.startMs, s.endMs);
-            r.endMs = s.endMs;
-          } catch (e: any) {
-            o.log(`recorder: restored span of ${job.sn} from ${new Date(r.startMs).toISOString()} not extended (${e?.message ?? e})`);
-          }
-        }
-        const key = `${job.sn}|${r.startMs}`;
-        if (!restoredNoted.has(key)) {
-          restoredNoted.add(key);
-          o.log(`recorder: ${job.sn} held stretch ${new Date(s.startMs).toISOString()} → ${new Date(s.endMs).toISOString()} is part of the span from ${new Date(r.startMs).toISOString()} that was restored earlier — left in samples (the span now runs to ${new Date(r.endMs).toISOString()})`);
-        }
+        leaveRestored(job.sn, r, s);
         continue;
       }
       const end = Math.min(s.endMs, moveUntil);
@@ -851,7 +864,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       if (end <= from) continue;
       scanSpans++;
       for (let a = from; a < end; a += HELD_MOVE_SLICE_MS) {
-        moveQueue.push({ sn: job.sn, spanStartMs: s.startMs, fromMs: a, toMs: Math.min(end, a + HELD_MOVE_SLICE_MS), stretch: s, announce: priorEnd == null && a === from, rangeFromMs: from, rangeToMs: end, extension: priorEnd != null });
+        moveQueue.push({ sn: job.sn, spanStartMs: s.startMs, fromMs: a, toMs: Math.min(end, a + HELD_MOVE_SLICE_MS), stretch: s, announce: priorEnd == null && a === from, rangeFromMs: from, rangeToMs: end, extension: priorEnd != null, plannedRestored: job.restored });
       }
     }
     return true;
@@ -878,8 +891,28 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     const job = moveQueue.shift();
     if (!job) return false;
     let moved = 0;
-    db.exec('BEGIN');
     try {
+      // v1.188.1 (review 6) — IMMEDIATE: the write lock first, so the restored spans read below are
+      // the ones the copy and delete run against (another connection cannot commit in between). A
+      // lock held elsewhere fails this slice like any other step of it (below).
+      db.exec('BEGIN IMMEDIATE');
+      // v1.188.1 (review 6) — a restore since the scan was planned. The SQL of architecture 4.4
+      // needs no restart, and a scan runs one step per timer tick: planned before the SQL, it went
+      // on to move the rest of the hold (and the slices it had queued) under the span the owner had
+      // just marked restored, and those rows stayed in held_samples for good, under a span that no
+      // reader treats as held any more. The device's restored spans are read again here, in the
+      // transaction, and a stretch that continues one is left in samples (leaveRestored).
+      // (A span already restored when the scan was planned was matched by scanStep.)
+      const r = (restoredOfStmt.all(job.sn) as Array<{ start_ts: number; end_ts: number }>)
+        .map((x) => ({ startMs: Number(x.start_ts), endMs: Number(x.end_ts) }))
+        .find((x) => !job.plannedRestored.some((p) => p.startMs === x.startMs) && continuesRestored(x, job.stretch));
+      if (r) {
+        db.exec('ROLLBACK');
+        // Each later slice of the stretch finds the same span and is left too.
+        if (job.fromMs === job.rangeFromMs) scanSpans--; // nothing of it moved: not a held stretch
+        leaveRestored(job.sn, r, job.stretch);
+        return true;
+      }
       const copied = Number(moveCopyStmt.run(job.fromMs, job.toMs, job.sn).changes);
       const deleted = Number(moveDeleteStmt.run(job.fromMs, job.toMs, job.sn).changes);
       if (copied !== deleted) throw new Error(`copied ${copied} rows but would delete ${deleted}`);

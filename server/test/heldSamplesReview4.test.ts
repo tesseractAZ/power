@@ -22,6 +22,8 @@
  *  6. (review round 5) Where a restored hold ends: a return reading after a silence that another
  *     silence follows starts a new stretch, and the restore's log line says so. The restored-span
  *     reads (restoredSpans, restoredSpanFrom).
+ *  7. (review round 6) A restore by SQL that lands while a scan runs (after its plan, or between two
+ *     move slices) leaves the rest of the hold in samples: each slice reads the restored spans again.
  * Fake serials throughout.
  */
 import { test } from 'node:test';
@@ -437,5 +439,68 @@ test('★ restoredSpans lists the restored spans over a window, and only those; 
   assert.equal(hs.restoredSpanFrom(SN, X + MIN), null, 'by its exact start');
   assert.deepEqual(hs.spans(X - DAY, X + DAY), [], 'and no longer held');
 });
+
+/* ══ review round 6: a restore made while a scan runs ═════════════════════════ */
+
+/** The SQL of architecture 4.4 on the store's own database (one transaction). Returns the end. */
+function sqlRestoreOn(db: DatabaseSync, startMs: number, atMs: number): number {
+  const end = Number((db.prepare("SELECT end_ts FROM held_spans WHERE sn = ? AND start_ts = ? AND reason = 'frozen'").get(SN, startMs) as { end_ts: number }).end_ts);
+  db.exec('BEGIN');
+  db.prepare('INSERT INTO samples (ts, sn, metric, value) SELECT ts, sn, metric, value FROM held_samples WHERE sn = ? AND ts > ? AND ts <= ?').run(SN, startMs, end);
+  db.prepare('DELETE FROM held_samples WHERE sn = ? AND ts > ? AND ts <= ?').run(SN, startMs, end);
+  db.prepare("UPDATE held_spans SET restored_at_ms = ? WHERE sn = ? AND start_ts = ? AND reason = 'frozen'").run(atMs, SN, startMs);
+  db.exec('UPDATE held_generation SET gen = gen + 1 WHERE id = 1');
+  db.exec('COMMIT');
+  return end;
+}
+const untilIdle = async (hs: { isRunning: () => boolean }) => { while (hs.isRunning()) await new Promise((r) => setTimeout(r, 1)); };
+
+for (const when of ['between the scan\'s plan and its read', 'between two move slices of the first scan', 'before the scan is planned (control)'] as const) {
+  test(`★★ the SQL restore of a running hold lands ${when}: nothing of the hold stays in held_samples, at any later cadence`, async () => {
+    // The production scan (scanInSteps) runs one step per timer tick, and the SQL needs no restart:
+    // it can land after the plan has read the device's spans. Planned before it, the scan moved the
+    // rest of the hold under the span just marked restored, and those rows stayed held for good.
+    const { X, rows, heldRows } = runningHold();
+    const db = memDb();
+    const clock = { now: X };
+    const lines: string[] = [];
+    let hook: (() => void) | null = null;
+    const hs = createHeldSamples(db, {
+      log: (m) => lines.push(m), retainMs: 400 * DAY, isExcludedSn: () => false, listSns: () => [SN], listMetrics: () => M12,
+      now: () => clock.now, onMoved: () => { if (hook) { const h = hook; hook = null; setImmediate(h); } },
+    });
+    let i = 0;
+    const land = (at: number) => { const b: Row[] = []; while (i < rows.length && rows[i][0] <= at) b.push(rows[i++]); insert(db, b); clock.now = at; };
+    let restoredRows = 0;
+    if (when === 'between two move slices of the first scan') {
+      land(X + 5 * H);
+      hook = () => { const end = sqlRestoreOn(db, X, clock.now); restoredRows = countIn(db, 'samples', X + 1, end); };
+      hs.scanInSteps(1);
+      await untilIdle(hs);
+      assert.ok(restoredRows > 0, 'precondition: the first slice was moved, then restored');
+    } else {
+      land(X + 3 * H);
+      assert.ok(hs.scanNow(clock.now).rowsMoved > 0, 'precondition: the X + 3 h scan moved the hold so far');
+      land(X + 4 * H);
+      if (when === 'before the scan is planned (control)') { sqlRestoreOn(db, X, clock.now); hs.scanInSteps(1); } else { hs.scanInSteps(1); sqlRestoreOn(db, X, clock.now); }
+      await untilIdle(hs);
+    }
+    assert.equal(total(db, 'held_samples'), 0, `★★ ${when}: the scan under way moved nothing under the restored span: ${JSON.stringify(frozenSpans(db).map((x) => [iso(x.startMs), iso(x.endMs), x.rows, x.restored]))}`);
+    const spans = frozenSpans(db);
+    assert.equal(spans.length, 1);
+    assert.ok(spans[0].restored, 'the span stays restored');
+    assert.ok(!lines.some((l) => l.includes(`the held span from ${iso(X)} continued from`)), `★ no line says the restored span went on being moved: ${lines.filter((l) => l.includes('continued from')).join('\n')}`);
+    assert.ok(!lines.some((l) => / 1 held stretch\(es\), 0 row\(s\) moved/.test(l)), `★ a stretch left for its restore is not counted as held: ${lines.filter((l) => l.includes('held stretch')).join('\n')}`);
+    if (when !== 'before the scan is planned (control)') {
+      assert.ok(lines.some((l) => l.includes(`is part of the span from ${iso(X)} that was restored earlier — left in samples`)), lines.join('\n'));
+    }
+    // Hourly scans to past the hold's end: the rest of the hold is the restored one.
+    for (let at = clock.now + H; at <= X + 12 * H; at += H) { land(at); hs.scanNow(at); }
+    assert.equal(total(db, 'held_samples'), 0, `★★ ${when}: the later scans leave it too`);
+    assert.equal(countIn(db, 'samples', X + 1, X + 10 * H), heldRows, 'every restated row is in samples');
+    assert.equal(frozenSpans(db)[0].endMs, X + 10 * H, 'the restored span follows the hold to its last restated row');
+    assert.deepEqual(hs.spans(X - DAY, X + DAY), [], 'no held span for the ledger');
+  });
+}
 
 void HELD_MOVE_MIN_AGE_MS;

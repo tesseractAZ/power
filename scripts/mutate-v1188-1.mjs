@@ -216,6 +216,41 @@
  *   H-xl    restoredSpans lists every frozen span, restored or not
  *   H-xli   the repair is handed no restored spans
  *
+ * Review round 6 (a restore while a scan runs; a seeded clock past the stretch; a Core back during
+ * the first scan; a restore after a restart; a restored replay past its record; a fleet-wide replay;
+ * the ledger's restored side):
+ *   J-i     a restore since the scan was planned is not looked for at the move
+ *   J-ii    a stretch left for its restore at the move is counted as a held stretch
+ *   J-iii   a seeded clock past the stretch is held whenever it lies within an hour of its end
+ *   J-iv    a seeded device's first write during the first scan is not remembered
+ *   J-v     a remembered return is judged before the first scan has finished
+ *   J-vi    a remembered return keeps the held row it was seeded with
+ *   J-vii   every remembered return is filed, however short its darkness
+ *   J-viii  a remembered return's record runs to when it was judged, not to the return
+ *   J-ix    the sweep looks a restored span up only for a device held from it in this process
+ *   J-x     the sweep releases a restored span's device even when its clock cannot move (survivor R3)
+ *   J-xi    a restore in a process booted after the move leaves the clock at the span's start
+ *   J-xii   the clock a restore gives back is one series' newest row, not the device's
+ *   J-xiii  a seed inside a restored span from a record's start does not match the record
+ *   J-xiv   a held restatement is a home insert
+ *   J-xv    the fleet clock is not set back when every home device is held
+ *   J-xvi   the fleet clock is set back past this process's first home write
+ *   J-xvii  a restore of one Core does not move the fleet clock forward
+ *   J-xviii an evaluation that only restated a hold resets the silence
+ *   J-xix   the replayed devices are not kept for what explains the silence
+ *   J-xx    with no device held by the gate, the replayed ones explain nothing
+ *   J-xxi   a replayed Core is named as read with nothing measurable
+ *   J-xxii  the gap line does not say a device restated readings the scan moved
+ *   J-xxiii the alert leaves out a replayed Core
+ *   J-xxiv  a replayed Core is also phrased as sending no new readings
+ *   J-xxv   the alert says nothing was recorded when replayed rows were
+ *   J-xxvi  the restored side ignores what is still held (survivor L1)
+ *   J-xxvii the PV side is matched against the panel's restored span too (survivor L2)
+ *   J-xxviii a restored span counts only when it lies inside the row's span (survivor L3)
+ *   J-xxix  a restored span counts only when it starts inside the row's span (survivor L4)
+ *   J-xxx   the repair does not say it reset a row (survivor I1)
+ *   J-xxxi  a write lock held elsewhere fails the whole scan, not the slice
+ *
  *   node scripts/mutate-v1188-1.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -343,8 +378,8 @@ const MUTANTS = [
   {
     id: 'S-iii. ★★ the gap clock is not moved back after a move',
     file: REC,
-    find: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) {',
-    to: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues)) && Date.now() < 0) { /* MUTANT */',
+    find: '      if (clock != null && clock > startMs && (clock <= through || (!seededNotYetWritten.has(sn) && restatedSince(sn, through, heldValues)))) {',
+    to: '      if (clock != null && clock > startMs && (clock <= through || (!seededNotYetWritten.has(sn) && restatedSince(sn, through, heldValues))) && Date.now() < 0) { /* MUTANT */',
     why: 'A Core still held at the deploy is measured from a held row that no longer exists: its gap is filed 6 h late, from the wrong start, and a later boot files a second record.',
   },
   {
@@ -413,7 +448,7 @@ const MUTANTS = [
   {
     id: 'M-iv. ★★ a restored span is moved again',
     file: HS,
-    find: '      const r = job.restored.find((x) => overlapMs(x.startMs, x.endMs, s.startMs, s.endMs) > 0 || anchoredIn(x, s.startMs));',
+    find: '      const r = job.restored.find((x) => continuesRestored(x, s));',
     to: '      const r = undefined as { startMs: number; endMs: number } | undefined; /* MUTANT */',
     why: 'A restore is undone by the next hourly scan: the exclusion is not reversible.',
   },
@@ -842,8 +877,8 @@ const MUTANTS = [
   {
     id: 'X-xi. an evaluation with a recordable home reading adds its held devices',
     file: REC,
-    find: '    if (samples.some((x) => !isBenchSpareSn(x.sn))) {\n      resetSilence(nowMs);\n    } else {',
-    to: '    if (samples.some((x) => !isBenchSpareSn(x.sn))) resetSilence(nowMs); /* MUTANT */\n    {',
+    find: '    if (samples.some((x) => !isBenchSpareSn(x.sn) && !heldReplayFrom.has(x.sn))) {\n      resetSilence(nowMs);\n    } else {',
+    to: '    if (samples.some((x) => !isBenchSpareSn(x.sn) && !heldReplayFrom.has(x.sn))) resetSilence(nowMs); /* MUTANT */\n    {',
     why: 'A Core held while the panel reports (a reading the dedupe skipped) is named in the next silence.',
   },
   // ── review round 2 ──
@@ -927,7 +962,7 @@ const MUTANTS = [
   {
     id: 'Q-ii. ★★ a boot after a restore by SQL does not match the start the record was filed with',
     file: REC,
-    find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs < startMs && startMs <= g.endMs)',
+    find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs < startMs && (startMs <= g.endMs || startMs <= restoredEndFrom(opts.sn!, g.startMs)))',
     to: '        /* MUTANT */',
     why: 'The documented SQL recipe leads to the same second record.',
   },
@@ -955,15 +990,15 @@ const MUTANTS = [
   {
     id: 'E-i. ★★ held evaluations explain a silence however far apart they were',
     file: REC,
-    find: '    silenceHeld.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS',
-    to: '    silenceHeld.size === 0 /* MUTANT */',
+    find: '    if (silenceHeld.size + silenceReplayed.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS) return undefined;',
+    to: '    if (silenceHeld.size + silenceReplayed.size === 0) return undefined; /* MUTANT */',
     why: 'A true stall after a few held evaluations is filed as "held readings", not an MQTT/broker stall.',
   },
   {
     id: 'E-ii. ★ the end of the silence is not checked',
     file: REC,
-    find: '    silenceHeld.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS',
-    to: '    silenceHeld.size === 0 || silenceEvalGapMs > SILENCE_EVAL_MAX_GAP_MS /* MUTANT */',
+    find: '    if (silenceHeld.size + silenceReplayed.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS) return undefined;',
+    to: '    if (silenceHeld.size + silenceReplayed.size === 0 || silenceEvalGapMs > SILENCE_EVAL_MAX_GAP_MS) return undefined; /* MUTANT */',
     why: 'Evaluations that stopped 18 min before the silence ended still explain it.',
   },
   {
@@ -1012,8 +1047,8 @@ const MUTANTS = [
   {
     id: 'A-iii. ★★★ the move sets back only a seeded gap clock',
     file: REC,
-    find: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) {',
-    to: '      if (seededNotYetWritten.has(sn) && clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) { /* MUTANT */',
+    find: '      if (clock != null && clock > startMs && (clock <= through || (!seededNotYetWritten.has(sn) && restatedSince(sn, through, heldValues)))) {',
+    to: '      if (seededNotYetWritten.has(sn) && clock != null && clock > startMs && clock <= through) { /* MUTANT */',
     why: 'A Core whose replayed body was written in this process is filed 6 h after its last held row, a hold late, with a start nothing measured.',
   },
   {
@@ -1026,15 +1061,15 @@ const MUTANTS = [
   {
     id: 'A-v. ★ a restore of any span forgets the clock the move set back',
     file: REC,
-    find: '      clockBeforeMove.delete(sn);\n    }\n    if (replayed) heldReplayFrom.delete(sn);',
-    to: '    }\n    clockBeforeMove.delete(sn); /* MUTANT */\n    if (replayed) heldReplayFrom.delete(sn);',
+    find: '    const before = clockBeforeMove.get(sn);\n    const replayed',
+    to: '    const before = clockBeforeMove.get(sn);\n    clockBeforeMove.delete(sn); /* MUTANT */\n    const replayed',
     why: 'Restoring an older span first loses the current span\'s clock: the next sweep re-dates the restored record again.',
   },
   {
     id: 'A-vi. ★ the move re-dates a record only when it set a clock back',
     file: REC,
-    find: '        heldReplayFrom.set(sn, { startMs, values: heldValues, throughMs: through });\n      }\n      redateDeviceGap(sn, startMs, endMs);',
-    to: '        heldReplayFrom.set(sn, { startMs, values: heldValues, throughMs: through });\n        redateDeviceGap(sn, startMs, endMs); /* MUTANT */\n      }',
+    find: '      }\n      redateDeviceGap(sn, startMs, endMs);\n    },',
+    to: '      }\n      if (lastInsertBySn.get(sn) === startMs) redateDeviceGap(sn, startMs, endMs); /* MUTANT */\n    },',
     why: 'A device back fresh before the first scan keeps its record\'s held-row start for good (the next boot\'s seed is newer).',
   },
   {
@@ -1089,8 +1124,8 @@ const MUTANTS = [
   {
     id: 'A-xiv. ★ a bench spare\'s fresh rows end a held silence',
     file: REC,
-    find: '    if (samples.some((x) => !isBenchSpareSn(x.sn))) {\n      resetSilence(nowMs);',
-    to: '    if (samples.length > 0) { /* MUTANT */\n      resetSilence(nowMs);',
+    find: '    if (samples.some((x) => !isBenchSpareSn(x.sn) && !heldReplayFrom.has(x.sn))) {\n      resetSilence(nowMs);',
+    to: '    if (samples.some((x) => !heldReplayFrom.has(x.sn))) { /* MUTANT */\n      resetSilence(nowMs);',
     why: 'A spare reporting through a held silence leaves it unexplained: pushed as an MQTT/broker stall.',
   },
   {
@@ -1103,7 +1138,7 @@ const MUTANTS = [
   {
     id: 'A-xvi. a device held in the silence is also named as read with nothing measurable',
     file: REC,
-    find: '[...silenceUnmeasured].filter((sn) => !silenceHeld.has(sn)).sort(bySn);',
+    find: '[...silenceUnmeasured].filter((sn) => !silenceHeld.has(sn) && !silenceReplayed.has(sn)).sort(bySn);',
     to: '[...silenceUnmeasured].sort(bySn); /* MUTANT */',
     why: 'A panel whose shadow released on an empty body is named both as held and as reporting nothing measurable.',
   },
@@ -1160,14 +1195,14 @@ const MUTANTS = [
   {
     id: 'B-i. ★★★ a restored span is matched on overlap alone',
     file: HS,
-    find: '      const r = job.restored.find((x) => overlapMs(x.startMs, x.endMs, s.startMs, s.endMs) > 0 || anchoredIn(x, s.startMs));',
-    to: '      const r = job.restored.find((x) => overlapMs(x.startMs, x.endMs, s.startMs, s.endMs) > 0); /* MUTANT */',
+    find: 'const continuesRestored = (r: { startMs: number; endMs: number }, s: Pick<FrozenStretch, \'startMs\' | \'endMs\'>): boolean => overlapMs(r.startMs, r.endMs, s.startMs, s.endMs) > 0 || anchoredIn(r, s.startMs);',
+    to: 'const continuesRestored = (r: { startMs: number; endMs: number }, s: Pick<FrozenStretch, \'startMs\' | \'endMs\'>): boolean => overlapMs(r.startMs, r.endMs, s.startMs, s.endMs) > 0; /* MUTANT */',
     why: 'A restore made while the device still restates its readings holds for about four hours: then the rest of the hold is moved as a new span, a second HELD SAMPLES line, and the ledger refuses those hours again.',
   },
   {
     id: 'B-ii. ★★ the restored span\'s end does not follow its hold',
     file: HS,
-    find: '            extendRestoredStmt.run(s.endMs, job.sn, r.startMs, s.endMs);\n            r.endMs = s.endMs;',
+    find: '        extendRestoredStmt.run(s.endMs, sn, r.startMs, s.endMs);\n        r.endMs = s.endMs;',
     to: '            /* MUTANT */',
     why: 'Once the 3 h re-read starts after the restored end, the scan\'s anchor is a restated row outside it: the same as matching on overlap alone.',
   },
@@ -1181,14 +1216,14 @@ const MUTANTS = [
   {
     id: 'B-iv. the continuation of a restored span is logged by every scan',
     file: HS,
-    find: '        if (!restoredNoted.has(key)) {',
+    find: '    if (!restoredNoted.has(key)) {',
     to: '        if (true) { /* MUTANT */',
     why: 'One line an hour for as long as a restored hold runs, in the log ring.',
   },
   {
     id: 'B-v. ★★★ a seed inside a device record\'s window is matched only on the start a re-dated record was filed with',
     file: REC,
-    find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs < startMs && startMs <= g.endMs)',
+    find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs < startMs && (startMs <= g.endMs || startMs <= restoredEndFrom(opts.sn!, g.startMs)))',
     to: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.alertStartMs === startMs) /* MUTANT */',
     why: 'After a restore of the span a record was filed at, the next boot files a second record with a new id: a second pushed warning for the same darkness.',
   },
@@ -1209,7 +1244,7 @@ const MUTANTS = [
   {
     id: 'B-viii. ★★★ the move sets a clock back only within the moved rows',
     file: REC,
-    find: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) {',
+    find: '      if (clock != null && clock > startMs && (clock <= through || (!seededNotYetWritten.has(sn) && restatedSince(sn, through, heldValues)))) {',
     to: '      if (clock != null && clock > startMs && clock <= endMs) { /* MUTANT */',
     why: 'A replay still being written has its clock past every moved range (rows younger than 15 min wait): no warning while it lasts, none if it ends with a fresh reading.',
   },
@@ -1343,8 +1378,8 @@ const MUTANTS = [
   {
     id: 'H-i. ★★ the sweep never looks a restored span up',
     file: REC,
-    find: '          const restored = hold != null && hold.startMs === lastMs ? heldStore.restoredSpanFrom(sn, lastMs) : null;',
-    to: '          const restored = null as { startMs: number; endMs: number } | null; void hold; /* MUTANT */',
+    find: '          const restored = heldStore.restoredSpanFrom(sn, lastMs);',
+    to: '          const restored = null as { startMs: number; endMs: number } | null; /* MUTANT */',
     why: 'After the documented SQL restore of a replay still running, the Core goes on restating the restored readings, every row in samples, and is pushed as dark 6 h after the span\'s start.',
   },
   {
@@ -1364,7 +1399,7 @@ const MUTANTS = [
   {
     id: 'H-iv. ★ the sweep skips a restored span\'s device without releasing it',
     file: REC,
-    find: '            restoredSpanBack(sn, restored.startMs, restored.endMs);\n            continue;',
+    find: '            restoredSpanBack(sn, restored.startMs, restored.endMs);\n            if ((lastInsertBySn.get(sn) ?? lastMs) > lastMs) continue;',
     to: '            continue; /* MUTANT */',
     why: 'The device stays held at the span\'s start: when it falls silent it is never filed.',
   },
@@ -1385,7 +1420,7 @@ const MUTANTS = [
   {
     id: 'H-vii. ★★★ the move holds a clock only up to the rows the scan read',
     file: REC,
-    find: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) {',
+    find: '      if (clock != null && clock > startMs && (clock <= through || (!seededNotYetWritten.has(sn) && restatedSince(sn, through, heldValues)))) {',
     to: '      if (clock != null && clock > startMs && clock <= through) { /* MUTANT */',
     why: 'A heartbeat between the scan\'s plan and its move leaves a replayed Core unheld: its warning comes at the next hourly scan, or never.',
   },
@@ -1626,6 +1661,224 @@ const MUTANTS = [
     find: '      const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs, restored });',
     to: '      const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs }); void restored; /* MUTANT */',
     why: 'A row refused for a restored span stays "not scored — telemetry held" for good.',
+  },
+  // ── review round 6 ──
+  {
+    id: 'J-i. ★★★ a restore since the scan was planned is not looked for at the move',
+    file: HS,
+    find: '        .find((x) => !job.plannedRestored.some((p) => p.startMs === x.startMs) && continuesRestored(x, job.stretch));',
+    to: '        .find(() => false); /* MUTANT */',
+    why: 'The SQL restore needs no restart and a scan runs one step per tick: planned before it, the scan moves the rest of the hold under the span just marked restored, and those rows stay held for good under a span no reader treats as held.',
+  },
+  {
+    id: 'J-ii. a stretch left for its restore at the move is counted as a held stretch',
+    file: HS,
+    find: '        if (job.fromMs === job.rangeFromMs) scanSpans--; // nothing of it moved: not a held stretch',
+    to: '        /* MUTANT */',
+    why: 'The scan\'s summary line says "1 held stretch(es), 0 row(s) moved" for a hold the owner had just restored.',
+  },
+  {
+    id: 'J-iii. ★★★ a seeded clock past the stretch is held whenever it lies within an hour of its end',
+    file: REC,
+    find: '      if (clock != null && clock > startMs && (clock <= through || (!seededNotYetWritten.has(sn) && restatedSince(sn, through, heldValues)))) {',
+    to: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) { /* MUTANT */',
+    why: 'A Core back fresh for 15 min after a 40 h hold, dark again 25 min at the upgrade, is held from the hold\'s start and pushed as dark for 41 h.',
+  },
+  {
+    id: 'J-iv. ★★ a seeded device\'s first write during the first scan is not remembered',
+    file: REC,
+    find: '          if (clockMs != null) returnedDuringScan.set(s.sn, { clockMs, atMs: now, mono: performance.now() });',
+    to: '          /* MUTANT */',
+    why: 'A Core back during the first scan after the upgrade gets no record and no warning for its 40 h hold: the sweep waited, and the write moved its clock on.',
+  },
+  {
+    id: 'J-v. ★★ a remembered return is judged before the first scan has finished',
+    file: REC,
+    find: '      if (returnedDuringScan.size > 0 && (!heldScanScheduled || heldStore.isReady())) {',
+    to: '      if (returnedDuringScan.size > 0) { /* MUTANT */',
+    why: 'Judged from the held row the boot seeded, before the scan sets it back: a minute of darkness, nothing filed, and the entry is gone.',
+  },
+  {
+    id: 'J-vi. ★ a remembered return keeps the held row it was seeded with',
+    file: REC,
+    find: '        if (back != null && back.clockMs > startMs && back.clockMs <= through) back.clockMs = startMs;',
+    to: '        /* MUTANT */',
+    why: 'A Core back before the scan\'s first move is judged from its last held row: nothing filed for the hold.',
+  },
+  {
+    id: 'J-vii. ★ every remembered return is filed, however short its darkness',
+    file: REC,
+    find: '          if (darkMs > PER_DEVICE_GAP_THRESHOLD_MS) recordTelemetryGap(back.clockMs, Math.max(back.atMs, back.clockMs + darkMs), { sn });',
+    to: '          recordTelemetryGap(back.clockMs, Math.max(back.atMs, back.clockMs + darkMs), { sn }); /* MUTANT */',
+    why: 'Every Core that answers within the first scan after any restart gets a "Device telemetry gap" warning.',
+  },
+  {
+    id: 'J-viii. a remembered return\'s record runs to when it was judged, not to the return',
+    file: REC,
+    find: '          if (darkMs > PER_DEVICE_GAP_THRESHOLD_MS) recordTelemetryGap(back.clockMs, Math.max(back.atMs, back.clockMs + darkMs), { sn });',
+    to: '          if (darkMs > PER_DEVICE_GAP_THRESHOLD_MS) recordTelemetryGap(back.clockMs, Date.now(), { sn }); /* MUTANT */',
+    why: 'The pushed window ends minutes after the Core was already back.',
+  },
+  {
+    id: 'J-ix. ★★ the sweep looks a restored span up only for a device held from it in this process',
+    file: REC,
+    find: '          const restored = heldStore.restoredSpanFrom(sn, lastMs);',
+    to: '          const restored = heldReplayFrom.get(sn)?.startMs === lastMs ? heldStore.restoredSpanFrom(sn, lastMs) : null; /* MUTANT */',
+    why: 'After a restart between the move and the SQL restore, the Core is pushed as dark 6 h after the span\'s start, from it, while its restored rows run hours later.',
+  },
+  {
+    id: 'J-x. ★★ the sweep releases a restored span\'s device even when its clock cannot move',
+    file: REC,
+    find: '            if ((lastInsertBySn.get(sn) ?? lastMs) > lastMs) continue;',
+    to: '            continue; /* MUTANT */',
+    why: 'A device whose span is marked restored with nothing back in samples is released on every sweep and never filed (survivor R3).',
+  },
+  {
+    id: 'J-xi. ★★ a restore in a process booted after the move leaves the clock at the span\'s start',
+    file: REC,
+    find: '      if (newest > startMs) lastInsertBySn.set(sn, newest);',
+    to: '      /* MUTANT */',
+    why: 'The record is filed from the span\'s start, 3 h early, with a duration nothing measured.',
+  },
+  {
+    id: 'J-xii. the clock a restore gives back is one series\' newest row, not the device\'s',
+    file: REC,
+    find: '      if (ts > newest) newest = ts;',
+    to: '      if (newest === 0) newest = ts; /* MUTANT */',
+    why: 'The record starts seconds before the device\'s last row in samples.',
+  },
+  {
+    id: 'J-xiii. ★★ a seed inside a restored span from a record\'s start does not match the record',
+    file: REC,
+    find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs < startMs && (startMs <= g.endMs || startMs <= restoredEndFrom(opts.sn!, g.startMs)))',
+    to: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs < startMs && startMs <= g.endMs) /* MUTANT */',
+    why: 'A replay restored after it ran past its record: the next boot files a second record with a new id, pushed, and Device Telemetry Gaps 24h reads 2.',
+  },
+  {
+    id: 'J-xiv. ★★★ a held restatement is a home insert',
+    file: REC,
+    find: '        seededNotYetWritten.delete(s.sn); // v1.154.0 — its clock is in-process now, not seeded',
+    to: '        seededNotYetWritten.delete(s.sn); if (!isBenchSpareSn(s.sn)) sawHomeInsert = true; /* MUTANT */',
+    why: 'Replayed Cores keep the fleet clock current: with every home device held, each gets a per-device warning saying "other home devices kept reporting", and no fleet gap is filed.',
+  },
+  {
+    id: 'J-xv. ★★ the fleet clock is not set back when every home device is held',
+    file: REC,
+    find: '    if (fleetClock < lastHomeInsertTs) lastHomeInsertTs = Math.max(fleetClock, firstHomeInsertWallMs);',
+    to: '    /* MUTANT */',
+    why: 'The fleet gap starts at the last replayed write before the scan, hours after the last fresh home reading.',
+  },
+  {
+    id: 'J-xvi. ★ the fleet clock is set back past this process\'s first home write',
+    file: REC,
+    find: '    if (fleetClock < lastHomeInsertTs) lastHomeInsertTs = Math.max(fleetClock, firstHomeInsertWallMs);',
+    to: '    if (fleetClock < lastHomeInsertTs) lastHomeInsertTs = fleetClock; /* MUTANT */',
+    why: 'After a restart the in-process fleet gap starts before the boot, inside the restart\'s own record: the outage counted twice.',
+  },
+  {
+    id: 'J-xvii. ★ a restore of one Core does not move the fleet clock forward',
+    file: REC,
+    find: '    if (lastHomeInsertTs > 0 && clock > lastHomeInsertTs && !isBenchSpareSn(sn)) lastHomeInsertTs = clock;',
+    to: '    /* MUTANT */',
+    why: 'Its restored rows are readings, yet its next write files a fleet gap from the last fresh home reading.',
+  },
+  {
+    id: 'J-xviii. ★★ an evaluation that only restated a hold resets the silence',
+    file: REC,
+    find: '    if (samples.some((x) => !isBenchSpareSn(x.sn) && !heldReplayFrom.has(x.sn))) {',
+    to: '    if (samples.some((x) => !isBenchSpareSn(x.sn))) { /* MUTANT */',
+    why: 'The fleet gap of a fleet-wide replay names nothing held and is pushed as an MQTT/broker stall.',
+  },
+  {
+    id: 'J-xix. ★ the replayed devices are not kept for what explains the silence',
+    file: REC,
+    find: '      for (const x of samples) if (!isBenchSpareSn(x.sn)) silenceReplayed.add(x.sn);',
+    to: '      /* MUTANT */',
+    why: 'The alert names the panel\'s shadow alone, or (no device held by the gate) blames a broker stall.',
+  },
+  {
+    id: 'J-xx. ★ with no device held by the gate, the replayed ones explain nothing',
+    file: REC,
+    find: '    if (silenceHeld.size + silenceReplayed.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS) return undefined;',
+    to: '    if (silenceHeld.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS) return undefined; /* MUTANT */',
+    why: 'Two replayed Cores with no panel: the fleet gap is pushed as an MQTT/broker stall.',
+  },
+  {
+    id: 'J-xxi. ★ a replayed Core is named as read with nothing measurable',
+    file: REC,
+    find: '[...silenceUnmeasured].filter((sn) => !silenceHeld.has(sn) && !silenceReplayed.has(sn)).sort(bySn);',
+    to: '[...silenceUnmeasured].filter((sn) => !silenceHeld.has(sn)).sort(bySn); /* MUTANT */',
+    why: 'The alert says "no home device it had a reading for gave one to record" and that the Cores reported nothing measurable.',
+  },
+  {
+    id: 'J-xxii. the gap line does not say a device restated readings the scan moved',
+    file: REC,
+    find: "h.shadow ? 'cloud shadow' : h.replayed ? 'restating readings the held-sample scan moved' : 'no fresh content'",
+    to: "h.shadow ? 'cloud shadow' : 'no fresh content' /* MUTANT */",
+    why: 'The log says a replayed Core had no fresh content, which its content clock contradicts.',
+  },
+  {
+    id: 'J-xxiii. ★ the alert leaves out a replayed Core',
+    file: AL,
+    find: "  if (replayed.length > 0) parts.push(`${list(replayed)} only restated ${replayed.length > 1 ? 'their' : 'its'} last readings, which the hourly check moved out of the history as held samples`);",
+    to: '  /* MUTANT */',
+    why: 'The pushed alert leaves out the Cores whose rows were written and then moved.',
+  },
+  {
+    id: 'J-xxiv. a replayed Core is also phrased as sending no new readings',
+    file: AL,
+    find: '  const stale = held.filter((h) => !h.shadow && h.replayed !== true).map((h) => nameOf(h.sn));',
+    to: '  const stale = held.filter((h) => !h.shadow).map((h) => nameOf(h.sn)); /* MUTANT */',
+    why: 'Each replayed Core is named twice, once as sending nothing.',
+  },
+  {
+    id: 'J-xxv. ★ the alert says nothing was recorded when replayed rows were',
+    file: AL,
+    find: "so ${held.some((h) => !h.shadow && h.replayed === true) ? 'no fresh reading was recorded (only fresh readings are kept)' : 'nothing was recorded (only fresh readings are saved)'}.",
+    to: "so ${'nothing was recorded (only fresh readings are saved)'}. /* MUTANT */",
+    why: 'The replayed rows were written and moved to held_samples: "nothing was recorded" is false.',
+  },
+  {
+    id: 'J-xxvi. ★★ the restored side ignores what is still held (survivor L1)',
+    file: NLS,
+    find: '  const restored = sidesWhere(noted.pv && !held.pv && restoredIn(i.coreSns), noted.load && !held.load && restoredIn([i.panelSn]));',
+    to: '  const restored = sidesWhere(noted.pv && restoredIn(i.coreSns), noted.load && restoredIn([i.panelSn])); /* MUTANT */',
+    why: 'One of two held Cores restored: the row is reset and re-captured on every sweep for the whole horizon, the other Core still holding PV.',
+  },
+  {
+    id: 'J-xxvii. ★ the PV side is matched against the panel\'s restored span too (survivor L2)',
+    file: NLS,
+    find: '  const restored = sidesWhere(noted.pv && !held.pv && restoredIn(i.coreSns), noted.load && !held.load && restoredIn([i.panelSn]));',
+    to: '  const restored = sidesWhere(noted.pv && !held.pv && restoredIn([...i.coreSns, i.panelSn]), noted.load && !held.load && restoredIn([i.panelSn])); /* MUTANT */',
+    why: 'A row refused for a Core no longer on the panel is reset once, its note saying the readings were restored.',
+  },
+  {
+    id: 'J-xxviii. ★★ a restored span counts only when it lies inside the row\'s span (survivor L3)',
+    file: NLS,
+    find: '  const restoredIn = (sns: readonly string[]) => (i.restored ?? []).some((r) => sns.includes(r.sn) && overlapOf(r, span) > 0);',
+    to: '  const restoredIn = (sns: readonly string[]) => (i.restored ?? []).some((r) => sns.includes(r.sn) && r.startMs >= span.startMs && r.endMs <= span.endMs); /* MUTANT */',
+    why: 'The incident\'s 10-14 and 10-15 rows stay "not scored — telemetry held" with PV empty after their Core\'s span is restored.',
+  },
+  {
+    id: 'J-xxix. ★★ a restored span counts only when it starts inside the row\'s span (survivor L4)',
+    file: NLS,
+    find: '  const restoredIn = (sns: readonly string[]) => (i.restored ?? []).some((r) => sns.includes(r.sn) && overlapOf(r, span) > 0);',
+    to: '  const restoredIn = (sns: readonly string[]) => (i.restored ?? []).some((r) => sns.includes(r.sn) && r.startMs >= span.startMs && r.startMs < span.endMs); /* MUTANT */',
+    why: 'The 10-15 row stays refused after the restore: the hold began the day before its issue.',
+  },
+  {
+    id: 'J-xxx. ★ the repair does not say it reset a row (survivor I1)',
+    file: IDX,
+    find: '      reset = true;\n',
+    to: '      /* MUTANT */\n',
+    why: 'The sweep captures from the ledger as it read it before the reset: the reset row waits a whole tick uncaptured, and the evening readiness recompute reads it so.',
+  },
+  {
+    id: 'J-xxxi. a write lock held elsewhere fails the whole scan, not the slice',
+    file: HS,
+    find: "    try {\n      // v1.188.1 (review 6) — IMMEDIATE: the write lock first, so the restored spans read below are\n      // the ones the copy and delete run against (another connection cannot commit in between). A\n      // lock held elsewhere fails this slice like any other step of it (below).\n      db.exec('BEGIN IMMEDIATE');",
+    to: "    db.exec('BEGIN IMMEDIATE'); /* MUTANT */\n    try {",
+    why: 'An SQL session left mid-transaction on the database aborts the scan (the rest of it, every other device, waits an hour) instead of failing one slice.',
   },
 ];
 
