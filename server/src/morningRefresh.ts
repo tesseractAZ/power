@@ -162,7 +162,8 @@ export function liveRefreshOutcome(leg: ChargeLegState, plan: NightChargePlan | 
   const written = !capped && ((armedReserve != null && reserve != null && reserve < armedReserve - 1e-9)
     || (level != null && level < leg.announcedLevelPct - 1e-9)
     || (armedCeiling != null && (ceiling == null || ceiling < armedCeiling - 1e-9)));
-  // A cap states no expected figure (refreshLeg): it was sized on values that will not be written.
+  // A cap states no expected figure and keeps the armed worst case (refreshLeg): the re-plan's were
+  // sized on values that will not be written.
   const expectedBuyKwh = r.expectedBuyKwh;
   const a = leg.announcedExpectedKwh;
   const moved = a != null && a > 0 && expectedBuyKwh != null && Math.abs(expectedBuyKwh - a) > REFRESH_PUSH_MOVE_FRAC * a;

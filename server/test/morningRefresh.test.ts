@@ -119,6 +119,8 @@ test('★★★ lower-only: a higher need is capped and writes nothing; a lower 
   assert.equal(cap.disposition, 'capped');
   assert.equal(cap.neededLevelPct, 95);
   assert.equal(cap.expectedBuyKwh, null, 'no figure is invented for the capped level');
+  assert.equal(liveRefreshOutcome(leg, plan({ costCeilingSocPct: 95, expectedWriteLevelPct: 95, buyKwh: 66 })).buyKwh, 58.2,
+    'the armed worst case, not the capped level\'s: refreshed_buy_kwh is the figure the leg ran on');
   assert.equal(cap.wouldPush, true);
   const capped = applyLiveRefresh(leg, cap, OPEN - 20 * M);
   assert.equal(capped.forceChargeCeilingPct, 89.6);
@@ -207,6 +209,9 @@ test('★★★ the announced reserve is a ceiling too: a re-plan asking for a h
   assert.equal(up.reservePct, 40);
   assert.equal(up.levelPct, 89.6);
   assert.equal(up.expectedBuyKwh, null, 'sized on a reserve that will not be written: no figure');
+  assert.equal(liveRefreshOutcome(leg, plan({ setpointSocPct: 50, buyKwh: 66 })).buyKwh, 58.2, 'nor its worst case');
+  assert.equal(liveRefreshLedgerColumns(liveRefreshOutcome(leg, plan({ setpointSocPct: 50, buyKwh: 66 })), OPEN - 20 * M, 60).refreshed_buy_kwh, 58.2,
+    'the de-bias learner reads refreshed_buy_kwh as the figure the leg ran on');
   assert.equal(up.wouldPush, true);
   assert.match(up.reason, /refreshed reserve \(50%\) is above the announced 40%/);
   assert.deepEqual(applyLiveRefresh(leg, up, OPEN - 20 * M), { ...leg, refreshedAtMs: OPEN - 20 * M });

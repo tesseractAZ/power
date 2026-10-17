@@ -3372,7 +3372,7 @@ export function startAlertMonitor(
     if (peakReserve.heldByChargeWrite !== moneyHeldLogged) {
       moneyHeldLogged = peakReserve.heldByChargeWrite;
       if (moneyHeldLogged) {
-        warn(`alert-monitor: heldByChargeWrite — the panel still reads the night charge's ${chargeHold?.targetPct ?? '?'}% reserve past its restore; the on-peak money detectors measure against the ${peakReserve.reservePct ?? '?'}% floor until it is restored.`);
+        warn(`alert-monitor: heldByChargeWrite — the panel still reads the night charge's ${peakShp2?.projection.strategy?.backupReserveSoc ?? chargeHold?.targetPct ?? '?'}% reserve past its restore; the on-peak money detectors measure against the ${peakReserve.reservePct ?? '?'}% floor until it is restored.`);
       } else {
         log('alert-monitor: heldByChargeWrite cleared — the on-peak money detectors measure against the panel\'s reserve again.');
       }

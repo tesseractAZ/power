@@ -382,8 +382,9 @@ export interface RefreshInputs {
  *  - no refreshed plan (no inputs, an incomplete basis): the evening plan stands ('stood');
  *  - a hold cancels the leg ('cancelled');
  *  - a refreshed level or reserve above the announced level, or a refreshed reserve above the
- *    announced reserve, is recorded 'capped': nothing is written, every figure stays as announced,
- *    and no expected draw is stated (it was sized on values that will not be written);
+ *    announced reserve, is recorded 'capped': nothing is written, every figure stays as announced
+ *    (the worst case too: the leg runs on the announced level and reserve), and no expected draw
+ *    is stated (it was sized on values that will not be written);
  *  - else the refreshed stop and reserve, at most the announced ones (a figure the re-plan does
  *    not give stays as announced; the reserve never above 50): 'lowered' when the stop or the
  *    reserve came down, 'unchanged' otherwise.
@@ -415,7 +416,7 @@ export function refreshLeg(i: RefreshInputs): Omit<ShadowRefresh, 'atMs' | 'disp
     || (a.reservePct != null && r.reservePct > a.reservePct + 1e-9));
   if (levelAbove || reserveAbove) {
     return {
-      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,
+      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: null, wouldPush: true,
       reason: levelAbove
         ? `the refreshed need (${r.levelPct}%) is above the announced ${ceil}%: held at it`
         : `the refreshed reserve (${r.reservePct}%) is above the announced ${a.reservePct ?? ceil}%: held at it`,

@@ -28,6 +28,8 @@
  *   Page       T-xx           (the mid-day push says the restore is retried only while it is)
  *   Fix 2      R-xxiv..R-xxviii, T-xxi..T-xxii, I-viii (one refresh rule for the shadow and the live
  *                             refresh: a reserve above the announced one is a cap, and is said so)
+ *   Fix 3      R-xxix (a cap keeps the announced worst case: the entity, the shadow ledger and the live
+ *                             refreshed_buy_kwh hold the figure the leg runs on)
  *
  *   node scripts/mutate-midday-refresh.mjs [--only <id prefix>]
  */
@@ -169,30 +171,37 @@ const MUTANTS = [
   {
     id: 'R-xxii. ★★★ a cap states the expected figure of a re-plan it will not write',
     file: MS,
-    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,",
-    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: r.expectedBuyKwh, wouldPush: true, /* MUTANT */",
+    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: null, wouldPush: true,",
+    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: r.expectedBuyKwh, wouldPush: true, /* MUTANT */",
     why: 'The capped push and the ledger state a draw sized on a reserve or a level that is not written.',
   },
   {
     id: 'R-xxiv. ★★★ a shadow cap records the re-plan\'s reserve',
     file: MS,
-    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,",
-    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: r.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true, /* MUTANT */",
+    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: null, wouldPush: true,",
+    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: r.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: null, wouldPush: true, /* MUTANT */",
     why: 'The ledger and the entity show a 45% reserve the live refresh would never write.',
   },
   {
     id: 'R-xxv. ★★ a shadow cap records the re-plan\'s lower level',
     file: MS,
-    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,",
-    to: "      disposition: 'capped', levelPct: r.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true, /* MUTANT */",
+    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: null, wouldPush: true,",
+    to: "      disposition: 'capped', levelPct: r.levelPct, reservePct: a.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: null, wouldPush: true, /* MUTANT */",
     why: 'A cap that writes nothing is shown with the stop it did not lower.',
   },
   {
     id: 'R-xxvi. ★★ a cap is not pushed',
     file: MS,
-    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,",
-    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: false, /* MUTANT */",
+    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: null, wouldPush: true,",
+    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: null, wouldPush: false, /* MUTANT */",
     why: 'The owner is not told the morning asked for more than was announced.',
+  },
+  {
+    id: 'R-xxix. ★★★ a cap publishes the re-plan\'s worst case',
+    file: MS,
+    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: a.buyKwh, expectedBuyKwh: null, wouldPush: true,",
+    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true, /* MUTANT */",
+    why: 'midday_charge_buy_kwh, shadow_refreshed_buy_kwh and the live refreshed_buy_kwh hold a worst case sized on a level and reserve that are not written; the de-bias learner reads it as the figure the leg ran on.',
   },
   {
     id: 'R-xxvii. ★★ the shadow forgets the reserve the re-plan asked for',

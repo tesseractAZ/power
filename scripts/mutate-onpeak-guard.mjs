@@ -19,6 +19,9 @@
  *   Fix round 2     V-i..V-v (no garbage reading decides a stage) · W-i..W-ix (a restart lets the
  *                   restore go first, bounded) · N-i..N-vii (an ACK'd write proven never to have
  *                   taken effect) · Y-i..Y-vi (the deadline page names the on-peak day)
+ *   Fix round 3     B-i..B-xiii (after the restore, a partly granted night's reading within what it
+ *                   asked for is the raise standing) · L-i..L-v (a write whose confirmation was lost,
+ *                   read at its target across the deadline, is adopted and restored before any page)
  *
  *   node scripts/mutate-onpeak-guard.mjs
  */
@@ -161,15 +164,15 @@ const MUTANTS = [
   {
     id: 'R-i. ★★★ a page on the owner\'s value',
     file: ACT,
-    find: "  if (reading != null && reading !== s.targetPct) return { kind: 'pass', stage, pct: reading };",
+    find: "  if (reading != null && !readsOwnRaise(s, reading)) return { kind: 'pass', stage, pct: reading };",
     to: '  /* MUTANT */',
     why: 'An owner who set the reserve themselves is woken by a critical about it.',
   },
   {
     id: 'R-ii. ★★★ a readback-dependent page (nothing on an unknown reading)',
     file: ACT,
-    find: "  if (reading != null && reading !== s.targetPct) return { kind: 'pass', stage, pct: reading };",
-    to: "  if (reading == null || reading !== s.targetPct) return { kind: 'pass', stage, pct: reading ?? -1 }; /* MUTANT */",
+    find: "  if (reading != null && !readsOwnRaise(s, reading)) return { kind: 'pass', stage, pct: reading };",
+    to: "  if (reading == null || !readsOwnRaise(s, reading)) return { kind: 'pass', stage, pct: reading ?? -1 }; /* MUTANT */",
     why: 'The cloud-dark panel, the case the page exists for, never pages.',
   },
   {
@@ -285,22 +288,22 @@ const MUTANTS = [
   {
     id: 'M-i. ★★★ the money detectors never measure past a stuck restore',
     file: ACT,
-    find: '  if (hold != null && liveReservePct != null && liveReservePct === hold.targetPct && nowMs >= hold.heldFromMs) {',
-    to: '  if (hold != null && (false as boolean)) { /* MUTANT */',
+    find: '  if (hold != null && liveReservePct != null && nowMs >= hold.heldFromMs && readsOwnRaise({',
+    to: '  if (hold != null && (false as boolean) && readsOwnRaise({ /* MUTANT */',
     why: 'A stuck 50% reserve refilling at the peak rate reads "near the reserve" and is silent.',
   },
   {
     id: 'M-ii. ★★ the hold applies before the restore was due',
     file: ACT,
-    find: '  if (hold != null && liveReservePct != null && liveReservePct === hold.targetPct && nowMs >= hold.heldFromMs) {',
-    to: '  if (hold != null && liveReservePct != null && liveReservePct === hold.targetPct) { /* MUTANT */',
+    find: '  if (hold != null && liveReservePct != null && nowMs >= hold.heldFromMs && readsOwnRaise({',
+    to: '  if (hold != null && liveReservePct != null && readsOwnRaise({ /* MUTANT */',
     why: 'The charge window itself reads as on-peak waste.',
   },
   {
     id: 'M-iii. ★★ the hold applies to any reading',
     file: ACT,
-    find: '  if (hold != null && liveReservePct != null && liveReservePct === hold.targetPct && nowMs >= hold.heldFromMs) {',
-    to: '  if (hold != null && liveReservePct != null && nowMs >= hold.heldFromMs) { /* MUTANT */',
+    find: '  if (hold != null && liveReservePct != null && nowMs >= hold.heldFromMs && readsOwnRaise({',
+    to: '  if (hold != null && liveReservePct != null && nowMs >= hold.heldFromMs && ((_h: unknown, _v: unknown) => true)({ /* MUTANT */',
     why: 'An owner\'s own reserve is replaced by the night\'s prior floor.',
   },
   {
@@ -364,8 +367,8 @@ const MUTANTS = [
   {
     id: 'R-xii. ★★★ a reading that is not ours leaves the stage undecided',
     file: ACT,
-    find: "  if (reading != null && reading !== s.targetPct) return { kind: 'pass', stage, pct: reading };",
-    to: "  if (reading != null && reading !== s.targetPct) return { kind: 'none' }; /* MUTANT */",
+    find: "  if (reading != null && !readsOwnRaise(s, reading)) return { kind: 'pass', stage, pct: reading };",
+    to: "  if (reading != null && !readsOwnRaise(s, reading)) return { kind: 'none' }; /* MUTANT */",
     why: 'The stage is never decided on the restored value, so the next stale reading pages.',
   },
   {
@@ -429,8 +432,8 @@ const MUTANTS = [
   {
     id: 'T-ii. ★★★ spent re-issues still count as a retry',
     file: ACT,
-    find: '    return readsTarget && s.targetPct !== s.priorReservePct && !s.revertReadbackEscalated && s.revertRetries < REVERT_MAX_RETRIES;',
-    to: '    return readsTarget; /* MUTANT */',
+    find: '    return readsOwnRaise(s, liveReservePct) && s.targetPct !== s.priorReservePct && !s.revertReadbackEscalated && s.revertRetries < REVERT_MAX_RETRIES;',
+    to: '    return readsOwnRaise(s, liveReservePct); /* MUTANT */',
     why: 'The 05:30 page after revertFailed claims a retry.',
   },
   {
@@ -489,8 +492,8 @@ const MUTANTS = [
   {
     id: 'M-viii. ★★★ the hold applies inside the restore\'s readback grace',
     file: ACT,
-    find: '  return { targetPct: target, priorPct: prior, restoreDueMs: due, heldFromMs: chargeWriteHeldFromMs(due, s.revertedAtMs) };',
-    to: '  return { targetPct: target, priorPct: prior, restoreDueMs: due, heldFromMs: due }; /* MUTANT */',
+    find: '  return { targetPct: target, priorPct: prior, restoreDueMs: due, heldFromMs: chargeWriteHeldFromMs(due, s.revertedAtMs), ...band };',
+    to: '  return { targetPct: target, priorPct: prior, restoreDueMs: due, heldFromMs: due, ...band }; /* MUTANT */',
     why: 'Almost every armed night logs a false "restore did not take" between 05:00 and the readback.',
   },
   {
@@ -519,7 +522,7 @@ const MUTANTS = [
   {
     id: 'O-ii. ★★ any reading keeps a sent restore open',
     file: ACT,
-    find: '    && (!isReserveSetting(liveReservePct) || liveReservePct === s.targetPct);',
+    find: '    && (!isReserveSetting(liveReservePct) || readsOwnRaise(s, liveReservePct));',
     to: '; /* MUTANT */',
     why: 'An owner who set the reserve to 60 in the app disarms the night charge for good.',
   },
@@ -564,14 +567,14 @@ const MUTANTS = [
   {
     id: 'V-iii. ★★★ a reconnect 0 releases the next arm',
     file: ACT,
-    find: '    && (!isReserveSetting(liveReservePct) || liveReservePct === s.targetPct);',
-    to: '    && (liveReservePct == null || liveReservePct === s.targetPct); /* MUTANT */',
+    find: '    && (!isReserveSetting(liveReservePct) || readsOwnRaise(s, liveReservePct));',
+    to: '    && (liveReservePct == null || readsOwnRaise(s, liveReservePct)); /* MUTANT */',
     why: 'A 21:30 reconnect 0 lets the next evening\'s arm replace a stuck restore\'s record.',
   },
   {
     id: 'V-iv. ★★ the arm refusal says the panel "still reads" a reconnect 0',
     file: ACT,
-    find: "      : liveReservePct === prev.targetPct ? `still reads ${liveReservePct}%` : `reads ${liveReservePct}, not a valid reserve`;",
+    find: "      : readsOwnRaise(prev, liveReservePct) ? `still reads ${liveReservePct}%` : `reads ${liveReservePct}, not a valid reserve`;",
     to: "      : `still reads ${liveReservePct}%`; /* MUTANT */",
     why: 'The evening notice tells the owner the reserve reads 0%.',
   },
@@ -587,7 +590,7 @@ const MUTANTS = [
   {
     id: 'W-i. ★★★ the deadline pages before the restore had its chance',
     file: ACT,
-    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage };",
+    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage };",
     to: '  /* MUTANT */',
     why: 'A process back at 05:31 pages "could not restore" before the restore is sent, seconds before it reads back.',
   },
@@ -629,8 +632,8 @@ const MUTANTS = [
   {
     id: 'W-vii. ★★★ the on-peak stage waits too',
     file: ACT,
-    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage };",
-    to: "  if (restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage: 'deadline' }; /* MUTANT */",
+    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage };",
+    to: "  if (restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage: 'deadline' }; /* MUTANT */",
     why: 'A process down through on-peak is paged late, while the panel buys at the peak rate.',
   },
   {
@@ -741,6 +744,135 @@ const MUTANTS = [
     find: '    if (full.en.length + full.es.length <= MAX_SPOKEN_ADVISORY_CHARS) return full;',
     to: '    return full; /* MUTANT */',
     why: 'The bilingual critical runs past 560 characters and the broadcast clips it.',
+  },
+  /* ── fix round 3: after the restore, the raise of a partly granted night is still the raise ── */
+  {
+    id: 'B-i. ★★★ the deadline passes on the night\'s own request read back after the restore',
+    file: ACT,
+    find: "  if (reading != null && !readsOwnRaise(s, reading)) return { kind: 'pass', stage, pct: reading };",
+    to: "  if (reading != null && reading !== s.targetPct) return { kind: 'pass', stage, pct: reading }; /* MUTANT */",
+    why: 'Asked 50, granted 40, restored, then reading 45: both pages pass and the raise stands into on-peak unsaid.',
+  },
+  {
+    id: 'B-ii. ★★★ a stuck restore reading the raise\'s other value releases the next arm',
+    file: ACT,
+    find: '    && (!isReserveSetting(liveReservePct) || readsOwnRaise(s, liveReservePct));',
+    to: '    && (!isReserveSetting(liveReservePct) || liveReservePct === s.targetPct); /* MUTANT */',
+    why: 'The next evening\'s arm replaces the record that pages and holds for a raise still standing.',
+  },
+  {
+    id: 'B-iii. ★★★ the readback never adopts the raise\'s other value after the restore',
+    file: ACT,
+    find: '    if (movedAfter != null) return { kind: \'ceilingMoved\', pct: movedAfter };',
+    to: '    if ((false as boolean) && movedAfter != null) return { kind: \'ceilingMoved\', pct: movedAfter }; /* MUTANT */',
+    why: 'The re-issue and its failure verdict compare against 40 while the panel holds 45: the restore is never re-sent.',
+  },
+  {
+    id: 'B-iv. ★★ the adoption after the restore needs no verified write',
+    file: ACT,
+    find: '    const movedAfter = state.applyVerifiedAtMs == null ? null : ceilingMovedPct(state, opts.currentReservePct);',
+    to: '    const movedAfter = ceilingMovedPct(state, opts.currentReservePct); /* MUTANT */',
+    why: 'A write that never read back has its partial answer adopted as the target after the restore.',
+  },
+  {
+    id: 'B-v. ★★★ the money detectors hold only on the exact target',
+    file: ACT,
+    find: '  if (hold != null && liveReservePct != null && nowMs >= hold.heldFromMs && readsOwnRaise({',
+    to: '  if (hold != null && liveReservePct != null && nowMs >= hold.heldFromMs && liveReservePct === hold.targetPct && readsOwnRaise({ /* MUTANT */',
+    why: 'The panel refilling to our 45% at the peak rate reads "near the reserve" and is silent.',
+  },
+  {
+    id: 'B-vi. ★★★ the hold drops the band',
+    file: ACT,
+    find: '  const band = s.requestedPct == null ? {}',
+    to: '  const band = s.requestedPct == null || (true as boolean) ? {} /* MUTANT */',
+    why: 'The alert monitor\'s copy of the hold cannot tell the raise\'s other value from the owner\'s.',
+  },
+  {
+    id: 'B-vii. ★★ the hold drops the band\'s baseline',
+    file: ACT,
+    find: '    : { requestedPct: s.requestedPct, ...(s.attemptBaselinePct != null ? { attemptBaselinePct: s.attemptBaselinePct } : {}) };',
+    to: '    : { requestedPct: s.requestedPct }; /* MUTANT */',
+    why: 'The band is measured from the prior, not from what the panel read before the write.',
+  },
+  {
+    id: 'B-viii. ★★ the arm refusal says the raise\'s other value is not a valid reserve',
+    file: ACT,
+    find: "      : readsOwnRaise(prev, liveReservePct) ? `still reads ${liveReservePct}%` : `reads ${liveReservePct}, not a valid reserve`;",
+    to: "      : liveReservePct === prev.targetPct ? `still reads ${liveReservePct}%` : `reads ${liveReservePct}, not a valid reserve`; /* MUTANT */",
+    why: 'The evening notice calls a standing 45% reserve "not a valid reserve".',
+  },
+  {
+    id: 'B-ix. ★★★ the page says the restore is not re-sent while it will be',
+    file: ACT,
+    find: '    return readsOwnRaise(s, liveReservePct) && s.targetPct !== s.priorReservePct && !s.revertReadbackEscalated && s.revertRetries < REVERT_MAX_RETRIES;',
+    to: '    return liveReservePct === s.targetPct && s.targetPct !== s.priorReservePct && !s.revertReadbackEscalated && s.revertRetries < REVERT_MAX_RETRIES; /* MUTANT */',
+    why: 'The 05:30 push says the add-on is not re-sending the restore on the tick before it adopts and re-sends it.',
+  },
+  {
+    id: 'B-x. ★★★ the value we restore reads as the raise',
+    file: ACT,
+    find: '  return v !== s.priorReservePct && isOwnReserveValue(s, v);',
+    to: '  return isOwnReserveValue(s, v); /* MUTANT */',
+    why: 'The restore reading back pages "still reads 16 percent" and holds the next arm for good.',
+  },
+  {
+    id: 'B-xi. ★★ a fraction reads as the raise',
+    file: ACT,
+    find: '  if (v == null || !Number.isInteger(v)) return false;\n  if (v === s.targetPct) return true;',
+    to: '  if (v == null) return false; /* MUTANT */\n  if (v === s.targetPct) return true;',
+    why: 'A garbage 45.5 reading holds the money detectors on the prior floor.',
+  },
+  {
+    id: 'B-xii. ★★ the page names the target, not what the panel reads',
+    file: ACT,
+    find: "  if (reading != null && reading !== s.targetPct) return { kind: 'page', stage, unknown: false, readsPct: reading };",
+    to: '  /* MUTANT */',
+    why: 'The critical says "still reads 40 percent" while the panel reads 45.',
+  },
+  {
+    id: 'B-xiii. ★★★ the tick pages the target, not the reading',
+    file: IDX,
+    find: '  const targetPct = d.readsPct ?? state.targetPct!;',
+    to: '  const targetPct = state.targetPct!; /* MUTANT */',
+    why: 'The pure decision carries the reading and the spoken and pushed page never use it.',
+  },
+
+  /* ── fix round 3: a lost confirmation across the deadline is adopted and restored before any page ── */
+  {
+    id: 'L-i. ★★★ an attempt read at its target never waits',
+    file: ACT,
+    find: '  if (s.appliedAtMs == null) return panelListed && attemptAdoptable(s, liveReservePct);',
+    to: '  if (s.appliedAtMs == null) return false; /* MUTANT */',
+    why: 'Back at 05:31 after a crash inside the write call: "could not restore … still reads 50 percent" before any restore was sent.',
+  },
+  {
+    id: 'L-ii. ★★ an attempt waits for a panel missing from the device list',
+    file: ACT,
+    find: '  if (s.appliedAtMs == null) return panelListed && attemptAdoptable(s, liveReservePct);',
+    to: '  if (s.appliedAtMs == null) return attemptAdoptable(s, liveReservePct); /* MUTANT */',
+    why: 'Nothing is adopted or sent to a panel that is not listed: its page waits ten minutes for nothing.',
+  },
+  {
+    id: 'L-iii. ★★★ the deadline is not told the reading',
+    file: ACT,
+    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage };",
+    to: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage }; /* MUTANT */",
+    why: 'The wait for an attempt to be adopted never applies in production.',
+  },
+  {
+    id: 'L-iv. ★★★ an attempt adopted on any reading',
+    file: ACT,
+    find: '    liveReservePct === state.targetPct &&\n    state.targetPct !== state.attemptBaselinePct &&',
+    to: '    /* MUTANT */\n    state.targetPct !== state.attemptBaselinePct &&',
+    why: 'A write the panel never took is adopted and restored, and a dark readback waits on it.',
+  },
+  {
+    id: 'L-v. ★★ an attempt from its own target is adopted',
+    file: ACT,
+    find: '    liveReservePct === state.targetPct &&\n    state.targetPct !== state.attemptBaselinePct &&',
+    to: '    liveReservePct === state.targetPct && /* MUTANT */',
+    why: 'Nothing was raised: the page waits for a restore that changes nothing.',
   },
 ];
 

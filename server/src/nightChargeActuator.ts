@@ -837,7 +837,8 @@ export function armFromPlan(
  * What a record still holds on the device, in words — the first of armFromPlan's unresolved
  * conditions, in its order; null when it holds nothing of ours. PURE.
  *  - a reserve write applied and not restored (unless the reserve settled as someone else's);
- *  - a restore sent and not read back while the panel still reads the raised target, or reads
+ *  - a restore sent and not read back while the panel still reads the raised target (or, on a
+ *    partly granted night, another value of the raise: readsOwnRaise), or reads
  *    nothing (restoreUnconfirmed): its record carries the restore's readback, the revertDeadline
  *    pages and the money detectors' hold, and a fresh record would bury all three — a Friday
  *    window's stuck restore was replaced by Saturday's arm, and Monday's on-peak page and hold
@@ -855,7 +856,7 @@ export function armOpenItem(prev: NightActuationState, liveReservePct: number | 
   }
   if (restoreUnconfirmed(prev, liveReservePct)) {
     const panel = liveReservePct == null ? 'is not reporting its reserve'
-      : liveReservePct === prev.targetPct ? `still reads ${liveReservePct}%` : `reads ${liveReservePct}, not a valid reserve`;
+      : readsOwnRaise(prev, liveReservePct) ? `still reads ${liveReservePct}%` : `reads ${liveReservePct}, not a valid reserve`;
     return `the ${night} reserve restore was sent and has not read back (the panel ${panel})`;
   }
   if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) {
@@ -878,18 +879,19 @@ export function isReserveSetting(v: number | null): v is number {
 }
 
 /** A restore of ours was sent (cloud-ACK'd) and has not read back, while the write may still hold
- *  the reserve (revertOutstanding), and the panel still reads the raised target or no reserve
- *  setting (isReserveSetting: nothing, or a reconnect 0): it may still stand. A reading of any
- *  other setting is the restore, or someone else's setting (the foreign rule), never ours to hold
- *  the next arm on. PURE. */
+ *  the reserve (revertOutstanding), and the panel still reads the raise (readsOwnRaise: the target,
+ *  or on a partly granted night another value inside what it asked for) or no reserve setting
+ *  (isReserveSetting: nothing, or a reconnect 0): it may still stand. A reading of any other
+ *  setting is the restore, or someone else's setting (the foreign rule), never ours to hold the
+ *  next arm on. PURE. */
 export function restoreUnconfirmed(
   s: Pick<NightActuationState, 'appliedAtMs' | 'applyAttemptedAtMs' | 'revertedAtMs' | 'revertVerifiedAtMs' | 'foreignSettledAtMs' | 'targetPct' | 'priorReservePct'>
-    & Partial<Pick<NightActuationState, 'applyVerifiedAtMs' | 'applyUnlandedAtMs' | 'attemptUnlandedAtMs'>>,
+    & Partial<Pick<NightActuationState, 'applyVerifiedAtMs' | 'applyUnlandedAtMs' | 'attemptUnlandedAtMs' | 'requestedPct' | 'attemptBaselinePct'>>,
   liveReservePct: number | null,
 ): boolean {
   return s.appliedAtMs != null && s.revertedAtMs != null && revertOutstanding(s)
     && s.targetPct !== s.priorReservePct
-    && (!isReserveSetting(liveReservePct) || liveReservePct === s.targetPct);
+    && (!isReserveSetting(liveReservePct) || readsOwnRaise(s, liveReservePct));
 }
 
 /** An attempted write is proven never to have landed: stamped so (attemptUnlandedAtMs), or the live
@@ -1126,16 +1128,8 @@ export function decideActuation(
   // would never revert. Strict equality: any other reading means either the
   // write truly failed (still at baseline → re-attempt/arm paths handle it)
   // or outside interference (never guess a revert target from it). ──
-  if (
-    state.applyAttemptedAtMs != null && state.appliedAtMs == null && state.revertedAtMs == null &&
-    state.targetPct != null && state.attemptBaselinePct != null &&
-    opts.currentReservePct === state.targetPct &&
-    state.targetPct !== state.attemptBaselinePct &&
-    Number.isInteger(state.attemptBaselinePct) &&
-    state.attemptBaselinePct >= RESERVE_WRITE_MIN_PCT &&
-    state.attemptBaselinePct <= RESERVE_WRITE_MAX_PCT
-  ) {
-    return { kind: 'adopt', priorPct: state.attemptBaselinePct };
+  if (attemptAdoptable(state, opts.currentReservePct)) {
+    return { kind: 'adopt', priorPct: state.attemptBaselinePct! };
   }
 
   // ── REVERT (checked next — always allowed, mode-independent: a raised
@@ -1236,6 +1230,14 @@ export function decideActuation(
     // the panel's partial answer to it, not someone else's setting.
     const foreign = state.applyVerifiedAtMs == null ? null : foreignStep(state, opts.currentReservePct, nowMs);
     if (foreign) return foreign;
+    // After the restore, as before it: a partly granted night's panel reading another value within
+    // what the night asked for (ceilingMovedPct) is the raise that has not come down, never the
+    // restore nor someone else's setting. Adopted as the target, so the re-issue and the failure
+    // verdict below, the revertDeadline pages, the next arm's refusal and the money detectors' hold
+    // compare against what the panel holds. Without it a reading of 45 after a restore of a night
+    // granted 40 of 50 passed both pages, lifted the hold and let the next arm replace the record.
+    const movedAfter = state.applyVerifiedAtMs == null ? null : ceilingMovedPct(state, opts.currentReservePct);
+    if (movedAfter != null) return { kind: 'ceilingMoved', pct: movedAfter };
     // Strict equality against the RAISED target for the failure verdict, the
     // same discipline as ADOPT: a reading that is neither value means the owner
     // (or the app) moved the floor themselves, and re-issuing our restore would
@@ -1286,6 +1288,40 @@ export function isOwnReserveValue(s: OwnReserveFields, v: number): boolean {
   const req = s.requestedPct;
   const lower = s.attemptBaselinePct ?? s.priorReservePct;
   return req != null && lower != null && req > lower && v > lower && v <= req;
+}
+
+/**
+ * The night's raise still stands on this reading. PURE. Our target; or, on a night the panel granted
+ * only in part, another whole value inside what the night asked for (isOwnReserveValue's band) that
+ * is not the value we restore — the reading the foreign rule and ceilingMoved take as the night's own
+ * write. A restore that has not read back is judged on both (decideRevertDeadline, restoreUnconfirmed,
+ * revertRetryPending, moneyDetectorReservePct): a reading of the raise is never the restore.
+ */
+export function readsOwnRaise(s: OwnReserveFields, v: number | null): boolean {
+  if (v == null || !Number.isInteger(v)) return false;
+  if (v === s.targetPct) return true;
+  return v !== s.priorReservePct && isOwnReserveValue(s, v);
+}
+
+/**
+ * An attempted write with no recorded success (and no restore) whose target the panel reads back,
+ * from a valid attempt-time baseline other than the target: it landed, and its confirmation was
+ * lost. decideActuation adopts it (then restores it); restoreAwaitingFirstChance lets the deadline
+ * stage wait for that restore. One definition for both. PURE.
+ */
+export function attemptAdoptable(
+  state: Pick<NightActuationState, 'applyAttemptedAtMs' | 'appliedAtMs' | 'revertedAtMs' | 'targetPct' | 'attemptBaselinePct'>,
+  liveReservePct: number | null,
+): boolean {
+  return (
+    state.applyAttemptedAtMs != null && state.appliedAtMs == null && state.revertedAtMs == null &&
+    state.targetPct != null && state.attemptBaselinePct != null &&
+    liveReservePct === state.targetPct &&
+    state.targetPct !== state.attemptBaselinePct &&
+    Number.isInteger(state.attemptBaselinePct) &&
+    state.attemptBaselinePct >= RESERVE_WRITE_MIN_PCT &&
+    state.attemptBaselinePct <= RESERVE_WRITE_MAX_PCT
+  );
 }
 
 /** The value a partly granted write now reads, when the panel moved within what the night asked
@@ -1377,9 +1413,13 @@ export type RevertDeadlineDecision =
   /** `stage`: the deadline (revertDeadlineMs), or the on-peak start itself. `unknown`: no reserve
    *  setting read (nothing, or a reading that is not one: isReserveSetting) — the words say the
    *  restore could not be CONFIRMED, never that it reads raised. */
-  | { kind: 'page'; stage: RevertDeadlineStage; unknown: boolean }
-  /** The stage's moment came with the panel reading `pct`, a reserve setting that is not our
-   *  target: the stage is decided, with no page (stamp revertDeadlinePassedAtMs / …OnPeakPassedAtMs). */
+  | { kind: 'page'; stage: RevertDeadlineStage; unknown: boolean;
+    /** The reading, when it is the raise at a value other than the target (readsOwnRaise: a partly
+     *  granted night's panel moved within what it asked for, not yet adopted): what the words say
+     *  the reserve still reads. Absent when the reading is the target, or unknown. */
+    readsPct?: number }
+  /** The stage's moment came with the panel reading `pct`, a reserve setting that is not the raise
+   *  (readsOwnRaise): the stage is decided, with no page (stamp revertDeadlinePassedAtMs / …OnPeakPassedAtMs). */
   | { kind: 'pass'; stage: RevertDeadlineStage; pct: number }
   /** The deadline stage came before the restore had its chance (restoreAwaitingFirstChance): it is
    *  left undecided this tick (stamp revertDeadlineHeldAtMs on the first). */
@@ -1399,15 +1439,26 @@ export const REVERT_DEADLINE_HOLD_MAX_MS = 2 * REVERT_VERIFY_AFTER_MS;
  * while an applied write's restore has not read back and either
  *  - it is due and was never attempted (neither accepted nor rejected), its prior is a valid
  *    reserve and the panel is in the device list: decideActuation sends it this tick; or
- *  - it was accepted less than REVERT_VERIFY_AFTER_MS ago: it is inside its readback grace.
+ *  - it was accepted less than REVERT_VERIFY_AFTER_MS ago: it is inside its readback grace;
+ * or while an attempted write whose confirmation was lost reads its target, with the panel listed
+ * (attemptAdoptable): decideActuation adopts it this tick and sends its restore on the next — a
+ * crash inside the write call, down past the deadline, paged "could not restore … still reads 50
+ * percent" before any restore had been sent.
  * The deadline stage's span lasts until the on-peak start, so it pages on a later tick when the
  * restore is rejected, does not read back, or the panel leaves the device list. A restore sent at
  * the window close is half an hour past its grace at the deadline: a night that goes to plan, and
  * a stuck restore, are decided as before.
  */
-export function restoreAwaitingFirstChance(s: NightActuationState, nowMs: number, panelListed: boolean): boolean {
-  if (s.appliedAtMs == null || s.revertVerifiedAtMs != null) return false;
+export function restoreAwaitingFirstChance(
+  s: NightActuationState,
+  nowMs: number,
+  panelListed: boolean,
+  /** The live reading, for an attempt whose confirmation was lost (attemptAdoptable); omitted: none. */
+  liveReservePct: number | null = null,
+): boolean {
+  if (s.revertVerifiedAtMs != null) return false;
   if (s.revertDeadlineHeldAtMs != null && nowMs - s.revertDeadlineHeldAtMs >= REVERT_DEADLINE_HOLD_MAX_MS) return false;
+  if (s.appliedAtMs == null) return panelListed && attemptAdoptable(s, liveReservePct);
   if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS;
   const dueAt = revertDueMs(s);
   const due = s.cancelled || (dueAt != null && nowMs >= dueAt);
@@ -1442,9 +1493,10 @@ export function revertDeadlineStageDue(s: NightActuationState, nowMs: number): R
  * neither, and the reserve could stand raised into the on-peak period with nothing said. This
  * needs only the clock: an audible critical (and a critical push) at revertDeadlineMs and at the
  * on-peak start, while a write of ours may still hold the reserve (revertOutstanding) and the live
- * reading is our target or unknown.
+ * reading is the raise (readsOwnRaise) or unknown.
  * Each stage is decided ONCE, at its moment (revertDeadlineStageDue): the first tick at or after
- * it pages on our target or no reserve setting (nothing, or a reading that is not a setting: a
+ * it pages on the raise (readsOwnRaise: our target, or a partly granted night's other value inside
+ * what it asked for) or no reserve setting (nothing, or a reading that is not a setting: a
  * reconnect 0 — isReserveSetting), and passes on any other setting — the restore itself (it reads
  * back on this tick), the attempt-time baseline of a write that never landed, or a value someone
  * else set. A stage passed is never paged later, so a stale reading hours after its moment pages
@@ -1467,8 +1519,9 @@ export function decideRevertDeadline(
   // outside the envelope is no evidence of the reserve (as for the foreign rule), so it counts
   // as no reading.
   const reading = isReserveSetting(liveReservePct) ? liveReservePct : null;
-  if (reading != null && reading !== s.targetPct) return { kind: 'pass', stage, pct: reading };
-  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage };
+  if (reading != null && !readsOwnRaise(s, reading)) return { kind: 'pass', stage, pct: reading };
+  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage };
+  if (reading != null && reading !== s.targetPct) return { kind: 'page', stage, unknown: false, readsPct: reading };
   return { kind: 'page', stage, unknown: reading == null };
 }
 
@@ -1477,7 +1530,8 @@ export function decideRevertDeadline(
  *  - an applied write whose restore the cloud has not accepted: decideActuation sends it on every
  *    tick from its due moment while its prior is a valid reserve;
  *  - an accepted restore whose readback re-issues are not spent (REVERT_MAX_RETRIES), with the
- *    panel reading our target (retryRevert re-issues only then);
+ *    panel reading the raise (readsOwnRaise: retryRevert re-issues only then, a partly granted
+ *    night's other value once decideActuation has adopted it);
  *  - an attempt never confirmed that the panel reads at our target (it is adopted, then restored).
  * Never with the panel missing from the device list (nothing is sent to it), nor once the restore
  * read back or the reserve settled as someone else's. A stuck restore whose re-issues are spent,
@@ -1491,7 +1545,7 @@ export function revertRetryPending(s: NightActuationState, liveReservePct: numbe
   }
   const readsTarget = liveReservePct != null && liveReservePct === s.targetPct;
   if (s.appliedAtMs != null) {
-    return readsTarget && s.targetPct !== s.priorReservePct && !s.revertReadbackEscalated && s.revertRetries < REVERT_MAX_RETRIES;
+    return readsOwnRaise(s, liveReservePct) && s.targetPct !== s.priorReservePct && !s.revertReadbackEscalated && s.revertRetries < REVERT_MAX_RETRIES;
   }
   return s.applyAttemptedAtMs != null && s.revertedAtMs == null && readsTarget;
 }
@@ -1591,7 +1645,8 @@ export function revertDeadlineSpoken(o: {
  * and has not settled as someone else's, with a valid prior that differs from the target, the
  * moment its restore fell due (revertDueMs), and the moment the hold applies (heldFromMs: past the
  * restore's readback grace). moneyDetectorReservePct is the reading's half: from heldFromMs, with
- * the panel still reading exactly our target, the prior; otherwise the live value.
+ * the panel still reading the raise (readsOwnRaise: exactly our target, or a partly granted night's
+ * other value inside what it asked for), the prior; otherwise the live value.
  *
  * THE READBACK GRACE. A restore that goes to plan is sent on the first actuator tick after it falls
  * due and the panel keeps reporting the raised value for ~20–60 s after the cloud ACK (the lag
@@ -1606,6 +1661,11 @@ export interface ChargeWriteHold {
   priorPct: number;
   restoreDueMs: number;
   heldFromMs: number;
+  /** On a night the panel granted only in part: what the night asked for, and the attempt-time
+   *  baseline its band starts above (isOwnReserveValue). A reading inside the band is the raise too
+   *  (readsOwnRaise), held as the target is. Absent on every other night. */
+  requestedPct?: number;
+  attemptBaselinePct?: number;
 }
 
 /**
@@ -1628,7 +1688,9 @@ export function chargeWriteHold(s: NightActuationState): ChargeWriteHold | null 
   const due = revertDueMs(s);
   if (prior == null || !Number.isInteger(prior) || prior < RESERVE_WRITE_MIN_PCT || prior > RESERVE_WRITE_MAX_PCT) return null;
   if (target == null || target === prior || due == null) return null;
-  return { targetPct: target, priorPct: prior, restoreDueMs: due, heldFromMs: chargeWriteHeldFromMs(due, s.revertedAtMs) };
+  const band = s.requestedPct == null ? {}
+    : { requestedPct: s.requestedPct, ...(s.attemptBaselinePct != null ? { attemptBaselinePct: s.attemptBaselinePct } : {}) };
+  return { targetPct: target, priorPct: prior, restoreDueMs: due, heldFromMs: chargeWriteHeldFromMs(due, s.revertedAtMs), ...band };
 }
 
 export function moneyDetectorReservePct(
@@ -1636,7 +1698,10 @@ export function moneyDetectorReservePct(
   hold: ChargeWriteHold | null,
   nowMs: number,
 ): { reservePct: number | null; heldByChargeWrite: boolean } {
-  if (hold != null && liveReservePct != null && liveReservePct === hold.targetPct && nowMs >= hold.heldFromMs) {
+  if (hold != null && liveReservePct != null && nowMs >= hold.heldFromMs && readsOwnRaise({
+    targetPct: hold.targetPct, priorReservePct: hold.priorPct,
+    requestedPct: hold.requestedPct ?? null, attemptBaselinePct: hold.attemptBaselinePct ?? null,
+  }, liveReservePct)) {
     return { reservePct: hold.priorPct, heldByChargeWrite: true };
   }
   return { reservePct: liveReservePct, heldByChargeWrite: false };

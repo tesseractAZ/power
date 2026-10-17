@@ -424,6 +424,7 @@ test('★★★ refreshLeg: lower-only — the announced level is the ceiling; a
   assert.equal(capped.disposition, 'capped');
   assert.equal(capped.levelPct, 89.5, 'held at the announced level');
   assert.equal(capped.expectedBuyKwh, null, 'the figure at the capped level is not invented');
+  assert.equal(refreshLeg({ announced: ANN, refreshed: fresh({ levelPct: 95, buyKwh: 55 }) }).buyKwh, 47.8, 'the announced worst case, not the capped level\'s');
   assert.equal(capped.wouldPush, true);
   // The reserve never above the announced level, nor 50.
   const lowAnn = { ...ANN, levelPct: 45, reservePct: 45 };
@@ -448,6 +449,13 @@ test('★★★ refreshLeg: a refreshed reserve above the announced one is "capp
   assert.deepEqual(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 70, reservePct: 45, expectedBuyKwh: 10, buyKwh: 20 }) }), held);
   // …and the level lowered (it read 'lowered' with a 45% reserve).
   assert.deepEqual(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 60, reservePct: 45, expectedBuyKwh: 8, buyKwh: 20 }) }), held);
+  // The worst case stays as announced too: the re-plan's 31 kWh was sized on a 45% reserve (and,
+  // on a level cap, a 78% stop) that will not be written. The leg runs on the announced 20.
+  assert.deepEqual(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 70, reservePct: 45, expectedBuyKwh: 18, buyKwh: 31 }) }), held);
+  assert.equal(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 78, reservePct: 45, expectedBuyKwh: 18, buyKwh: 31 }) }).buyKwh, 20,
+    'a level cap keeps the announced worst case');
+  assert.equal(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 60, reservePct: 25, expectedBuyKwh: 6, buyKwh: 14 }) }).buyKwh, 14,
+    'below a cap the re-plan\'s worst case is the leg\'s');
   // Up to the announced level itself.
   assert.equal(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 60, reservePct: 31 }) }).disposition, 'capped');
   // At or under the announced reserve: a lowering or no change, as before.
@@ -487,15 +495,18 @@ test('★★★ the shadow refresh of a raised reserve: the ledger, the entity a
     assert.equal(rf.reservePct, 30);
     assert.equal(rf.levelPct, 70);
     assert.equal(rf.expectedBuyKwh, null);
+    assert.equal(rf.buyKwh, 47.8, 'the announced worst case: the re-plan\'s 20 kWh was sized on a 45% reserve');
     assert.equal(rf.neededReservePct, 45);
     const cols = middayShadowRefreshLedgerColumns(rf);
     assert.equal(cols.shadow_refresh_disposition, 'capped');
     assert.equal(cols.shadow_refreshed_reserve_pct, 30, 'the ledger never records a reserve that would not be written');
     assert.equal(cols.shadow_refreshed_expected_buy_kwh, null);
+    assert.equal(cols.shadow_refreshed_buy_kwh, 47.8, 'nor a worst case sized on one');
     const f = middayChargeStateFields({ ...r, refresh: rf }, at + M);
     assert.equal(f.midday_charge_refresh, 'capped');
     assert.equal(f.midday_charge_reserve_hold_percent, 30);
     assert.equal(f.midday_charge_target_soc_percent, 70);
+    assert.equal(f.midday_charge_buy_kwh, 47.8, 'the entity: the grid energy the plan that runs is sized on');
     const m = middayShadowRefreshPreview(r, rf)!;
     assert.equal(m.title, 'Charge plan updated: held at the announced ~70% today 10am–3pm');
     assert.match(m.body, /^The morning re-plan calls for a higher reserve \(45%\), but a refresh never raises what was announced: today 10am–3pm stays at ~70%, with the reserve held at 30% from the open\. Cancel/);

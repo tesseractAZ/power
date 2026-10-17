@@ -6167,7 +6167,10 @@ function pageRevertDeadline(
   // v1.189.0 — the ledger keeps the first page (a backup leg's has no column: stampLegOutcome).
   if (state.revertDeadlinePagedAtMs == null) stampLegOutcome(state, { revert_deadline_paged_at_ms: nowMs });
   const restorePct = restoreTargetPct(state);
-  const targetPct = state.targetPct!; // decideRevertDeadline pages only a record with a target
+  // What the reserve still reads, for the words: the target, or the raise's other value on a partly
+  // granted night not yet adopted (decideRevertDeadline's readsPct). decideRevertDeadline pages only
+  // a record with a target.
+  const targetPct = d.readsPct ?? state.targetPct!;
   const onPeakClock = state.nextOnPeakStartMs != null ? fmtPhoenixClock(state.nextOnPeakStartMs) : null;
   // The deadline page names the on-peak start's day when it is not today's: a Friday window's page
   // at 12:30 AM Saturday is about Monday's on-peak (chargeText.onPeakDayWords).
@@ -6388,7 +6391,10 @@ async function runNightActuationTickInner(): Promise<void> {
     // setting. Adopted as the target, as applyCeiling adopts the first answer, so the restore's
     // readback, the revertDeadline pages and the money detectors' hold compare against it.
     persistNightActuation({ ...state, targetPct: action.pct, foreignReservePct: null, foreignSeenAtMs: null, lastError: null });
-    app.log.warn(`night-charge: the panel now reads backupReserveSoc ${action.pct}% for ${state.day} — within the ${state.requestedPct ?? '?'}% the night asked for (it had settled at ${state.targetPct}%). Taken as the night's own write, now its target; reverts to ${state.priorReservePct ?? '?'}% after the window.`);
+    app.log.warn(`night-charge: the panel now reads backupReserveSoc ${action.pct}% for ${state.day} — within the ${state.requestedPct ?? '?'}% the night asked for (it had settled at ${state.targetPct}%). Taken as the night's own write, now its target; `
+      + (state.revertedAtMs == null
+        ? `reverts to ${state.priorReservePct ?? '?'}% after the window.`
+        : `its restore to ${state.priorReservePct ?? '?'}% has not read back, and is judged against ${action.pct}%.`));
     return;
   }
 
