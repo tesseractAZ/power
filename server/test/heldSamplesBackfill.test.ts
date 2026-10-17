@@ -258,7 +258,12 @@ test('★★★ the deploy replay: a Core still held at boot is moved in two sca
     const tail = all('samples', CORE_A).filter((r) => r[0] > lastFresh);
     assert.ok(tail.length > 0 && tail.every((r) => r[0] > now - HELD_MOVE_MIN_AGE_MS), 'the newest 15 min wait for the next scan');
     panelReads();
-    assert.deepEqual(rec.telemetryGaps().filter((x) => x.sn === CORE_A), [], 'its seeded clock is still the last held row');
+    // v1.188.1 (review 4) — the clock goes back with the first scan already: the newest rows, which
+    // wait for the next one, restate the same readings (onMoved's heldThroughMs). Before, the
+    // seeded clock stayed on the last held row until the tail was moved an hour later.
+    const g1 = rec.telemetryGaps().filter((x) => x.sn === CORE_A);
+    assert.equal(g1.length, 1, '★★ ledgered at the first scan, not an hour later');
+    assert.equal(g1[0].startMs, lastFresh, 'from its last fresh sample');
     now = BOOT + H + MIN;
     rec.scanHeldSamples!(now);
     assert.deepEqual(all('samples', CORE_A).filter((r) => r[0] > lastFresh), [], '★★ the tail is moved as the same hold');
@@ -301,7 +306,10 @@ test('★★ in the add-on the scan starts by itself a minute after boot, one st
       let ticks = 0;
       while (!rec.heldSamplesReady!() && ticks < 1_000) { t.mock.timers.tick(5); ticks++; }
       assert.equal(rec.heldSamplesReady!(), true, lines.join('\n'));
-      assert.ok(ticks > 20, `one device-day or one move slice per tick (${ticks} ticks)`);
+      // Five devices, each read in two six-hour chunks from its OLDEST row (v1.188.1 dry run: not
+      // from the 30-day retention horizon, 120 chunks each), and CORE_A's hold in four one-hour
+      // slices: one per tick.
+      assert.ok(ticks >= 5 * 2 + 4, `one device-chunk or one move slice per tick (${ticks} ticks)`);
       assert.equal(all('held_samples').length, heldA.length);
     } finally { rec.close(); }
   } finally {
@@ -347,7 +355,17 @@ test('createFrozenScanner — a change closes a stretch; restatements, metrics a
   const s3 = createFrozenScanner(prev, 0, opts);
   s3.feed(rowsAt(10 * MIN, 1, 2));
   s3.feed(rowsAt(70 * MIN, 1, 2));
-  assert.deepEqual(s3.finish().map((x) => x.qualifies), [false], 'two restatements are not three');
+  // v1.188.1 (review 2) — an hour with no rows is a HOLE (up to HELD_RETURN_GAP_MS): one stretch
+  // across it, its observed time the 10 min before it only. (The dry run had split it in two.)
+  assert.deepEqual(s3.finish().map((x) => [x.startMs, x.firstHeldMs, x.endMs, x.restatements, x.observedMs, x.qualifies]),
+    [[0, 10 * MIN, 70 * MIN, 2, 10 * MIN, false]], 'a hole does not end a stretch; two restatements are not three');
+  // A minute longer is a SILENCE: the row after it is a return piece that never qualified on its
+  // own, a return reading, and the stretch ends at its last restated row before the silence.
+  const s3b = createFrozenScanner(prev, 0, opts);
+  s3b.feed(rowsAt(10 * MIN, 1, 2));
+  s3b.feed(rowsAt(71 * MIN, 1, 2));
+  assert.deepEqual(s3b.finish().map((x) => [x.startMs, x.firstHeldMs, x.endMs, x.restatements, x.qualifies]),
+    [[0, 10 * MIN, 10 * MIN, 1, false]], 'a silence ends it; the return reading is not a stretch');
   const s4 = createFrozenScanner(new Map(), null, opts);
   for (let k = 0; k <= 13; k++) s4.feed(rowsAt(k * 5 * MIN, 1, 2));
   const out4 = s4.finish();
@@ -376,7 +394,9 @@ test('★★ createFrozenScanner — a gap with no rows is not observed constanc
   // deliberately not caught until an hour of restatement has been observed.
   const s2 = createFrozenScanner(prev, 0, opts);
   for (let ts = 2 * H; ts <= 2 * H + 30 * MIN; ts += 5 * MIN) s2.feed(rowsAt(ts));
-  assert.equal(s2.finish()[0].qualifies, false, '30 min of restatement after a gap: not yet');
+  // v1.188.1 (review 2) — after a 2 h silence these rows are a return piece: not a stretch until it
+  // has qualified on its own, and left as return readings if it never does.
+  assert.deepEqual(s2.finish(), [], '30 min of restatement after a gap: not yet (return readings)');
   const s3 = createFrozenScanner(prev, 0, opts);
   for (let ts = 2 * H; ts <= 3 * H + 5 * MIN; ts += 5 * MIN) s3.feed(rowsAt(ts));
   const [g3] = s3.finish();
@@ -388,7 +408,16 @@ test('★★ createFrozenScanner — a gap with no rows is not observed constanc
   assert.equal(s4.finish()[0].qualifies, true, 'rows 10 min apart (exactly the bridge) are an observed hour');
   const s5 = createFrozenScanner(prev, 0, opts);
   for (const ts of [5, 10, 15, 20, 40, 45, 50, 55, 60, 65].map((m) => m * MIN)) s5.feed(rowsAt(ts));
-  assert.equal(s5.finish()[0].qualifies, false, 'a 20-min hole inside the stretch is not counted (65 − 20 = 45 min observed)');
+  assert.deepEqual(s5.finish().map((x) => [x.startMs, x.endMs, x.observedMs, x.qualifies]), [[0, 65 * MIN, 45 * MIN, false]],
+    'a 20-min hole inside the stretch is not counted (65 − 20 = 45 min observed), and does not end it');
+  // v1.188.1 (review 2) — the observed time on both sides of a hole adds up: 40 + 35 min is a hold.
+  const s5b = createFrozenScanner(prev, 0, opts);
+  for (let ts = 5 * MIN; ts <= 40 * MIN; ts += 5 * MIN) s5b.feed(rowsAt(ts));
+  for (let ts = 60 * MIN; ts <= 95 * MIN; ts += 5 * MIN) s5b.feed(rowsAt(ts));
+  const [g5b] = s5b.finish();
+  assert.deepEqual([g5b.startMs, g5b.firstHeldMs, g5b.endMs, g5b.observedMs, g5b.qualifies], [0, 5 * MIN, 95 * MIN, 75 * MIN, true],
+    '★★ two parts of one hold, neither an hour, add up across the 20-min hole');
+  assert.deepEqual(g5b.observed, [[0, 40 * MIN], [60 * MIN, 95 * MIN]], 'the observed runs, the hole between them');
   // An observed hour in which no metric is restated three times (each metric twice, in turn).
   const s6 = createFrozenScanner(new Map([['a', 1], ['b', 2], ['c', 3]]), 0, opts);
   ([['a', 1], ['a', 1], ['b', 2], ['b', 2], ['c', 3], ['c', 3]] as Array<[string, number]>)

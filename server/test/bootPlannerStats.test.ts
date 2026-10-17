@@ -224,9 +224,10 @@ const SHAPES: Shape[] = [
   })),
   // v1.188.1 — each held-sample statement: two (sn, metric, ts) seeks and two ts-range slices
   // pinned to the ts index (the composite index cannot bound ts without a metric).
+  // v1.188.1 (dry run) — and a series' oldest row, the first scan's start: the seed's MAX seek mirrored.
   ...Object.entries(HELD_SAMPLES_SQL).map(([name, sql]): Shape => ({
     name: `held ${name}`, sql,
-    params: name === 'prevValue' ? ['CORE_A', 'soc', T1] : name === 'chunkRows' ? ['CORE_A', 'soc', T0, T1] : [T0, T1, 'CORE_A'],
+    params: name === 'prevValue' ? ['CORE_A', 'soc', T1] : name === 'chunkRows' ? ['CORE_A', 'soc', T0, T1] : name === 'minTs' ? ['CORE_A', 'soc'] : [T0, T1, 'CORE_A'],
     sites: [[HS, `'${sql}'`]],
   })),
 ];

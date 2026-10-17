@@ -16,7 +16,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   heldMsWithin, heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldResetColumns, heldTagNote,
-  basisIncompleteNote, BASIS_INCOMPLETE_NOTE,
+  heldIntegratedActuals, heldCapturedClause, basisIncompleteNote, BASIS_INCOMPLETE_NOTE,
+  heldSides, heldSidesNoted, heldRepairColumns, heldRepairClause,
   forecastSpanResetColumns, forecastSpanRecaptureHorizonMs, coverageFrac, integrateWh,
   HELD_LEDGER_MIN_OVERLAP_MS, HELD_TELEMETRY_MARKER, FORECAST_SPAN_MS, type LedgerHeldSpan,
 } from '../src/nightLedgerScoring.js';
@@ -51,6 +52,9 @@ const ROW_1014 = {
   pv_model_sns: CORES.join(','),
   delivered_kwh: null as number | null,
   delivered_basis: null as string | null,
+  // As v1.188.0 captured them: PV integrated from the held 0 W, load from the held panel rows.
+  actual_pv_kwh: 0 as number | null,
+  actual_load_kwh: 45.61 as number | null,
 };
 const HORIZON = forecastSpanRecaptureHorizonMs(30, 60);
 /** index.ts PV_LEDGER_MIN_CORE_COVERAGE (pinned against the source below). */
@@ -120,17 +124,17 @@ test('★★★ the repair: the captured 10-14 row is reset for re-capture; the 
   const nowMs = DEPLOY + 5 * MIN;
   const r = heldLedgerRepair(ROW_1014, { spans: SPANS, coreSns: CORES, panelSn: PANEL, nowMs, horizonMs: HORIZON });
   assert.equal(r?.action, 'recapture');
-  const cols = heldResetColumns(r!.verdict, name);
+  const cols = heldResetColumns(r!.verdict!, name, ROW_1014);
   const { score_notes: a, ...resetA } = cols;
   const { score_notes: b, ...resetB } = forecastSpanResetColumns(0);
   assert.deepEqual(resetA, resetB, 'exactly the outcome columns the forecast-span reset clears (capture stamp first)');
   assert.equal(cols.outcome_captured_at_ms, null);
   assert.equal(cols.scored, 0);
-  assert.match(String(a), /^reset — the PV\/load actuals had been integrated from held readings \(/);
+  assert.match(String(a), /^reset — the PV and load actuals had been integrated from held readings \(PV — Core 1 /);
   assert.ok(!String(a).toLowerCase().includes(HELD_TELEMETRY_MARKER), 'the reset note is not the verdict');
   assert.ok(b);
   // After the re-capture the row carries the verdict: idempotent.
-  const recaptured = { ...ROW_1014, outcome_captured_at_ms: nowMs + 30 * MIN, score_notes: `${heldLedgerNote(r!.verdict, name)} on-peak: none.` };
+  const recaptured = { ...ROW_1014, outcome_captured_at_ms: nowMs + 30 * MIN, score_notes: `${heldLedgerNote(r!.verdict!, name)} on-peak: none.` };
   assert.equal(heldLedgerRepair(recaptured, { spans: SPANS, coreSns: CORES, panelSn: PANEL, nowMs, horizonMs: HORIZON }), null);
   assert.equal(heldLedgerRepair({ ...ROW_1014, outcome_captured_at_ms: null }, { spans: SPANS, coreSns: CORES, panelSn: PANEL, nowMs, horizonMs: HORIZON }), null,
     'an uncaptured row is the capture\'s, not the repair\'s');
@@ -176,7 +180,7 @@ test('★★★ an incomplete-basis row on held telemetry is reset once, not on 
       if (fix) {
         assert.equal(fix.action, 'recapture');
         resets++;
-        r = { ...r, ...heldResetColumns(fix.verdict, name) } as typeof noBasis;
+        r = { ...r, ...heldResetColumns(fix.verdict!, name, r) } as typeof noBasis;
       }
       if (r.outcome_captured_at_ms == null) r = { ...r, outcome_captured_at_ms: at, score_notes: `${capNote(verdict)} On-peak: none.` };
     }
@@ -199,15 +203,278 @@ test('★★ the span the repair reads is the one the row was captured over', ()
   assert.equal(heldLedgerRepair(early, { spans: SPANS, coreSns: CORES, panelSn: PANEL, nowMs: DEPLOY, horizonMs: HORIZON }), null);
 });
 
+/* ══ v1.188.1 dry run: the notes say what was integrated, and only that ═══════════ */
+
+test('★★ the reset note names only the actuals that were integrated over the hold (captured non-null, side held)', () => {
+  const both = heldLedgerVerdict({ spans: SPANS, coreSns: CORES, panelSn: PANEL, span: { startMs: ROW_1014.issued_at_ms, endMs: ROW_1014.issued_at_ms + FORECAST_SPAN_MS } })!;
+  assert.ok(both.pv.length === CORES.length && both.load.length === 1, 'precondition: PV and load both held');
+  assert.deepEqual(heldIntegratedActuals(both, { actual_pv_kwh: 0, actual_load_kwh: 45.61 }), ['PV', 'load']);
+  assert.deepEqual(heldIntegratedActuals(both, { actual_pv_kwh: null, actual_load_kwh: 45.61 }), ['load'], 'a PV captured empty was never integrated');
+  assert.deepEqual(heldIntegratedActuals(both, { actual_pv_kwh: 12.3, actual_load_kwh: null }), ['PV']);
+  // The 10-15 row: every Core held ~21 h, the panel not (its 2.4 h hold fell in the 10-14 span);
+  // PV captured null (the coverage gate refused it), load 55.42 kWh from fresh panel rows.
+  const pvOnly = { pv: both.pv, load: [] };
+  assert.deepEqual(heldIntegratedActuals(pvOnly, { actual_pv_kwh: null, actual_load_kwh: 55.42 }), [], '★★ nothing was integrated from held readings');
+  const note = String(heldResetColumns(pvOnly, name, { actual_pv_kwh: null, actual_load_kwh: 55.42 }).score_notes);
+  assert.match(note, /^reset — the held PV actual had been captured empty, so nothing had been integrated from held readings \(PV — Core 1 /, note);
+  assert.doesNotMatch(note, /actuals had been integrated/);
+  assert.doesNotMatch(note, /load actual/, 'the load was not held: it is not named');
+  assert.equal(heldCapturedClause(pvOnly, { actual_pv_kwh: 7.5, actual_load_kwh: 55.42 }), 'the PV actual had been integrated from held readings');
+  assert.equal(heldCapturedClause(both, { actual_pv_kwh: 0, actual_load_kwh: 45.61 }), 'the PV and load actuals had been integrated from held readings');
+  assert.equal(heldCapturedClause(both, { actual_pv_kwh: null, actual_load_kwh: null }), 'the held PV and load actuals had been captured empty, so nothing had been integrated from held readings');
+});
+
+test('★★ v1.188.1 review 3: an actual captured over only the SILENT hours of a frozen span is not said to be integrated from held readings', () => {
+  // A Core's values change every 5 min to F, it is silent 2 h, then it restates its last values to
+  // F + 22 h: one frozen span from F (its last change) through the replay that joined it. A row
+  // whose 24 h span ends 1.5 h into that silence overlaps the span by 1.5 h and holds no held row.
+  const F = phx(2026, 10, 13, 20, 0);
+  const span = { startMs: F + 1.5 * H - FORECAST_SPAN_MS, endMs: F + 1.5 * H };
+  const v = heldLedgerVerdict({ spans: [{ sn: CORES[0], startMs: F, endMs: F + 22 * H }], coreSns: [CORES[0]], panelSn: PANEL, span })!;
+  assert.deepEqual(v.pv, [{ sn: CORES[0], heldMs: 1.5 * H }], 'precondition: held by the verdict');
+  const captured = { actual_pv_kwh: 11.92, actual_load_kwh: 20.5 };
+  const repair = heldLedgerRepair({ ...ROW_1014, issued_at_ms: span.startMs, outcome_captured_at_ms: span.endMs + 6 * H, window_start_ms: span.startMs + 7 * H, window_end_ms: span.startMs + 13 * H },
+    { spans: [{ sn: CORES[0], startMs: F, endMs: F + 22 * H }], coreSns: [CORES[0]], panelSn: PANEL, nowMs: span.endMs + 7 * H, horizonMs: HORIZON });
+  assert.deepEqual(repair?.span, span, 'the repair hands back the span the verdict measured, where the held rows are looked up');
+  const none = { pv: false, load: false };
+  assert.deepEqual(heldIntegratedActuals(v, captured, none), [], '★★ no held row inside the span: nothing integrated from held readings');
+  assert.deepEqual(heldIntegratedActuals(v, captured, { pv: true }), ['PV'], 'a held row inside it: named');
+  assert.deepEqual(heldIntegratedActuals(v, captured), ['PV'], 'unknown: as before the check');
+  const clause = heldCapturedClause(v, captured, none);
+  assert.equal(clause, 'the PV actual had been integrated over hours with no readings at all, and no held reading lay inside its span');
+  const note = String(heldResetColumns(v, name, captured, none).score_notes);
+  assert.equal(note, `reset — ${clause} (PV — Core 1 1.5 h with no fresh readings, found after it was captured); re-captured by the backfill sweep.`);
+  assert.doesNotMatch(note, /from held readings/, note);
+  // Both kinds in one row: each actual is described by what its own span held.
+  const both = { pv: v.pv, load: [{ sn: PANEL, heldMs: 2 * H }] };
+  assert.equal(heldCapturedClause(both, captured, { pv: false, load: true }),
+    'the load actual had been integrated from held readings; the PV actual had been integrated over hours with no readings at all, and no held reading lay inside its span');
+  assert.equal(heldCapturedClause(both, { actual_pv_kwh: null, actual_load_kwh: null }, none), 'the held PV and load actuals had been captured empty, so nothing had been integrated from held readings');
+});
+
+test('★ v1.188.1 review 4: a LOAD actual captured over only the silent hours of a held panel span is described as such, never as captured empty', () => {
+  // The review-3 test above holds only PV: the load side of the same rule, on its own.
+  const v = { pv: [], load: [{ sn: PANEL, heldMs: 2 * H }] };
+  const captured = { actual_pv_kwh: 12.1, actual_load_kwh: 20.5 };
+  assert.deepEqual(heldIntegratedActuals(v, captured, { load: false }), [], '★ no held panel row inside the span: nothing integrated from held readings');
+  assert.deepEqual(heldIntegratedActuals(v, captured, { load: true }), ['load'], 'a held panel row inside it: named');
+  const clause = heldCapturedClause(v, captured, { load: false });
+  assert.equal(clause, 'the load actual had been integrated over hours with no readings at all, and no held reading lay inside its span');
+  assert.doesNotMatch(clause, /captured empty|from held readings/, '★ a 20.5 kWh load was not captured empty');
+});
+
+test('★ v1.188.1 review 4: the repair hands back the span as captured, clipped at a capture short of issue + 24 h', () => {
+  // A weekday row captured 20 min short of the 24 h span (left as captured by v1.187.10): its held
+  // rows are looked up up to the capture, not past it.
+  const issued = phx(2026, 10, 10, 21, 30);
+  const cap = issued + FORECAST_SPAN_MS - 20 * MIN;
+  const r = heldLedgerRepair({ ...ROW_1014, issued_at_ms: issued, outcome_captured_at_ms: cap, window_start_ms: issued + 2 * H, window_end_ms: issued + 8 * H, pv_model_sns: CORES[0] },
+    { spans: [{ sn: CORES[0], startMs: issued + 10 * H, endMs: issued + 30 * H }], coreSns: [CORES[0]], panelSn: PANEL, nowMs: cap + DAY, horizonMs: HORIZON });
+  assert.ok(r != null, 'precondition: a repair');
+  assert.deepEqual(r.span, { startMs: issued, endMs: cap }, '★ [issue, capture]');
+});
+
+test('★★ the tag note says the span had no fresh readings (held or missing), never that the actuals were integrated from held readings', () => {
+  // The 08-18 / 08-19 rows: Core 2 wrote NO rows at all on those days (a 9.8-day silence), so
+  // nothing held was integrated into their actuals.
+  const v = { pv: [{ sn: CORES[1], heldMs: 23.5 * H }], load: [] };
+  const note = heldTagNote(v, name);
+  assert.equal(note, 'Telemetry held: PV — Core 2 23.5 h of the 24 h span had no fresh readings (held or missing); '
+    + 'the raw telemetry is past the re-capture horizon, so the row is kept as captured.');
+  assert.doesNotMatch(note, /integrated/);
+  assert.ok(note.toLowerCase().includes(HELD_TELEMETRY_MARKER), 'still the marker: the repair stays idempotent');
+});
+
 test('★★ past the horizon, or not re-capturable on today\'s devices: tagged, once', () => {
   const old = { ...ROW_1014, issued_at_ms: ROW_1014.issued_at_ms - 29 * DAY, outcome_captured_at_ms: ROW_1014.outcome_captured_at_ms! - 29 * DAY };
   const shifted = SPANS.map((s) => ({ ...s, startMs: s.startMs - 29 * DAY, endMs: s.endMs - 29 * DAY }));
   const r = heldLedgerRepair(old, { spans: shifted, coreSns: CORES, panelSn: PANEL, nowMs: DEPLOY, horizonMs: HORIZON });
   assert.equal(r?.action, 'tag');
-  const tagged = { ...old, score_notes: `${old.score_notes} ${heldTagNote(r!.verdict, name)}` };
+  const tagged = { ...old, score_notes: `${old.score_notes} ${heldTagNote(r!.verdict!, name)}` };
   assert.equal(heldLedgerRepair(tagged, { spans: shifted, coreSns: CORES, panelSn: PANEL, nowMs: DEPLOY, horizonMs: HORIZON }), null, 'the tag carries the marker');
   const noModel = heldLedgerRepair({ ...ROW_1014, pv_model_sns: '' }, { spans: SPANS, coreSns: CORES, panelSn: PANEL, nowMs: DEPLOY, horizonMs: HORIZON });
   assert.equal(noModel?.action, 'tag', 'no recorded model Cores: the forecast-span repair\'s own rule');
+});
+
+/* ══ v1.188.1 review 5: per side, not per row ═══════════════════════════════════ */
+
+const CORE_SPAN_2H = { sn: CORES[0], heldMs: 2 * H };
+const PANEL_SPAN_2H = { sn: PANEL, heldMs: 2 * H };
+
+test('★★★ heldSides: PV is withheld over a held home Core only, load over the held panel only', () => {
+  assert.deepEqual(heldSides(null), { pv: false, load: false });
+  assert.deepEqual(heldSides({ pv: [CORE_SPAN_2H], load: [] }), { pv: true, load: false });
+  assert.deepEqual(heldSides({ pv: [], load: [PANEL_SPAN_2H] }), { pv: false, load: true }, '★★★ the panel held alone withholds no PV');
+  assert.deepEqual(heldSides({ pv: [CORE_SPAN_2H], load: [PANEL_SPAN_2H] }), { pv: true, load: true });
+});
+
+test('★★ heldSidesNoted reads the sides of every held clause in a row\'s notes', () => {
+  const pvOnly = { pv: [CORE_SPAN_2H], load: [] };
+  const loadOnly = { pv: [], load: [PANEL_SPAN_2H] };
+  const both = { pv: [CORE_SPAN_2H], load: [PANEL_SPAN_2H] };
+  assert.deepEqual(heldSidesNoted(heldLedgerNote(pvOnly, name)), { pv: true, load: false });
+  assert.deepEqual(heldSidesNoted(heldLedgerNote(loadOnly, name)), { pv: false, load: true });
+  assert.deepEqual(heldSidesNoted(`${basisIncompleteNote(both, name)} On-peak: none.`), { pv: true, load: true });
+  assert.deepEqual(heldSidesNoted(`not scored — x. ${heldTagNote(loadOnly, name)}`), { pv: false, load: true });
+  assert.deepEqual(heldSidesNoted(`${heldLedgerNote(loadOnly, name)} ${heldTagNote(pvOnly, name)}`), { pv: true, load: true }, 'a clause appended later counts too');
+  for (const n of [null, undefined, '', 'scored — planner-sizing basis (algo v3): net forecast miss 1 kWh (PV 3→4, load 5→6); advisory night.']) {
+    assert.deepEqual(heldSidesNoted(n), { pv: false, load: false }, String(n));
+  }
+});
+
+/** A row issued 2026-10-20 21:30, captured at the first sweep after issue + 24 h, a held panel
+ *  span inside it: the capture states the load side only. */
+const I_20 = phx(2026, 10, 20, 21, 30);
+const LOAD_ROW = {
+  ...ROW_1014,
+  plan_date: '2026-10-20',
+  issued_at_ms: I_20,
+  window_start_ms: I_20 + 1.5 * H,
+  window_end_ms: I_20 + 7.5 * H,
+  outcome_captured_at_ms: I_20 + FORECAST_SPAN_MS + 10 * MIN as number | null,
+  pv_model_sns: CORES[0],
+  actual_pv_kwh: 0.4 as number | null,
+  actual_load_kwh: null as number | null,
+};
+const PANEL_SPAN: LedgerHeldSpan = { sn: PANEL, startMs: I_20 + 10 * H, endMs: I_20 + 12 * H };
+/** A replayed Core's span the hourly scan found after the capture: 1.5 h of the row's span. */
+const LATE_CORE_SPAN: LedgerHeldSpan = { sn: CORES[0], startMs: I_20 + 22.5 * H, endMs: I_20 + 24.75 * H };
+
+test('★★ a side found held after the capture is repaired though the notes state the other side', () => {
+  const span = { startMs: I_20, endMs: I_20 + FORECAST_SPAN_MS };
+  const atCapture = heldLedgerVerdict({ spans: [PANEL_SPAN], coreSns: [CORES[0]], panelSn: PANEL, span })!;
+  const row = { ...LOAD_ROW, score_notes: `${heldLedgerNote(atCapture, name)} On-peak: none.` };
+  const spans = [PANEL_SPAN, LATE_CORE_SPAN];
+  const i = { spans, coreSns: [CORES[0]], panelSn: PANEL, nowMs: I_20 + 26 * H, horizonMs: HORIZON };
+  const r = heldLedgerRepair(row, i);
+  assert.ok(r != null, '★★ the PV side is held now and the notes do not say so: a repair');
+  assert.equal(r.action, 'recapture');
+  assert.deepEqual([r.added, r.restored], [['PV'], []]);
+  const cols = heldRepairColumns(row, r, name, { pv: true });
+  assert.equal(cols.outcome_captured_at_ms, null, 'reset for the re-capture');
+  assert.equal(cols.score_notes, 'reset — the PV actual had been integrated from held readings (PV — Core 1 1.5 h with no fresh readings, found after it was captured); re-captured by the backfill sweep.');
+  assert.equal(heldRepairClause(r, row, { pv: true }), 'the PV actual had been integrated from held readings', 'the log line\'s clause');
+  assert.equal(heldRepairClause(r, { ...row, actual_pv_kwh: null }, { pv: true }), 'the held PV actual had been captured empty, so nothing had been integrated from held readings',
+    '★ only the side found is described: the load side was already stated and left empty');
+  // Re-captured with the verdict over both sides: nothing more owed.
+  const v = heldLedgerVerdict({ spans, coreSns: [CORES[0]], panelSn: PANEL, span })!;
+  assert.equal(heldLedgerRepair({ ...row, score_notes: heldLedgerNote(v, name) }, i), null, 'idempotent');
+  // Past the horizon: tagged with the side found, the notes as captured kept first; then nothing.
+  const old = { ...i, nowMs: I_20 + HORIZON + 2 * DAY };
+  const t = heldLedgerRepair(row, old);
+  assert.equal(t?.action, 'tag');
+  const tagged = heldRepairColumns(row, t!, name);
+  assert.deepEqual(Object.keys(tagged), ['score_notes'], 'a tag writes the notes only');
+  assert.equal(tagged.score_notes, `${row.score_notes} ${heldTagNote({ pv: v.pv, load: [] }, name)}`, '★ the notes as captured, then the clause for the side found');
+  assert.equal(heldLedgerRepair({ ...row, score_notes: tagged.score_notes }, old), null, 'tagged once');
+});
+
+test('★★ a row refused for a hold whose span was restored is re-captured from the readings moved back', () => {
+  const span = { startMs: I_20, endMs: I_20 + FORECAST_SPAN_MS };
+  const coreSpan: LedgerHeldSpan = { sn: CORES[0], startMs: I_20 + 9 * H, endMs: I_20 + 14 * H };
+  const v = heldLedgerVerdict({ spans: [coreSpan], coreSns: [CORES[0]], panelSn: PANEL, span })!;
+  const row = { ...LOAD_ROW, actual_pv_kwh: null, actual_load_kwh: 21.4, score_notes: `${heldLedgerNote(v, name)} On-peak: none.` };
+  const i = { spans: [] as LedgerHeldSpan[], coreSns: [CORES[0]], panelSn: PANEL, nowMs: I_20 + 3 * DAY, horizonMs: HORIZON, restored: [coreSpan] };
+  const r = heldLedgerRepair(row, i);
+  assert.ok(r != null, '★★ the span is restored (no longer held): the refusal is owed a re-capture');
+  assert.equal(r.action, 'recapture');
+  assert.equal(r.verdict, null);
+  assert.deepEqual([r.added, r.restored], [[], ['PV']]);
+  const cols = heldRepairColumns(row, r, name);
+  const { score_notes: note, ...reset } = cols;
+  const { score_notes: _x, ...expected } = forecastSpanResetColumns(0);
+  assert.deepEqual(reset, expected, 'the outcome columns the forecast-span reset clears');
+  assert.equal(note, 'reset — the PV actual had been left empty for a hold whose readings were since restored to the history; re-captured by the backfill sweep.');
+  assert.equal(heldLedgerRepair({ ...row, score_notes: 'scored — planner-sizing basis (algo v3): net forecast miss 1 kWh (PV 3→4, load 21.4→20); advisory night.' }, i), null, 'the re-capture owes nothing');
+  assert.equal(heldLedgerRepair(row, { ...i, nowMs: I_20 + HORIZON + 2 * DAY }), null, '★ past the horizon it is kept as captured: nothing to re-capture from');
+  // No longer held with no restore behind it (the Core is no longer on the panel: today's roster
+  // does not hold it either): not called restored, not reset.
+  assert.equal(heldLedgerRepair(row, { ...i, restored: [] }), null, '★ no restored span: nothing owed');
+  assert.equal(heldLedgerRepair(row, { ...i, restored: [{ ...coreSpan, sn: CORES[1] }] }), null, '★ a restored span of another device: nothing owed');
+  assert.equal(heldLedgerRepair(row, { ...i, restored: [{ ...coreSpan, startMs: I_20 + 25 * H, endMs: I_20 + 30 * H }] }), null, '★ a restored span outside the row\'s span: nothing owed');
+  assert.equal(heldLedgerRepair({ ...row, score_notes: heldLedgerNote({ pv: [], load: [PANEL_SPAN_2H] }, name) }, { ...i, restored: [{ ...coreSpan, sn: PANEL }] })?.restored.join(), 'load',
+    'the panel\'s restored span restores the load side');
+  // One side restored, the other still held: only the restored side is owed.
+  const both = heldLedgerVerdict({ spans: [coreSpan, PANEL_SPAN], coreSns: [CORES[0]], panelSn: PANEL, span })!;
+  const rowBoth = { ...row, actual_load_kwh: null, score_notes: heldLedgerNote(both, name) };
+  const r2 = heldLedgerRepair(rowBoth, { ...i, spans: [PANEL_SPAN] });
+  assert.deepEqual([r2?.added, r2?.restored], [[], ['PV']]);
+  // A side restored and a side found held in one repair: both stated.
+  const rowPv = { ...row, actual_load_kwh: 21.4 };
+  const r3 = heldLedgerRepair(rowPv, { ...i, spans: [PANEL_SPAN] })!;
+  assert.deepEqual([r3.added, r3.restored], [['load'], ['PV']]);
+  assert.equal(heldRepairColumns(rowPv, r3, name, { load: true }).score_notes,
+    'reset — the PV actual had been left empty for a hold whose readings were since restored to the history; the load actual had been integrated from held readings (load — Smart Home Panel 2 2.0 h with no fresh readings, found after it was captured); re-captured by the backfill sweep.');
+});
+
+/* ══ review round 6: the restored-side rule, as the incident lays it out ═══════ */
+
+/** A row issued at `issued` 21:30, captured 10 min after its 24 h span, stating `v` as held. */
+const capturedRow = (issued: number, v: ReturnType<typeof heldLedgerVerdict>, coreSns: readonly string[]) => ({
+  plan_date: new Date(issued - 7 * H).toISOString().slice(0, 10), issued_at_ms: issued, window_start_ms: issued + 1.5 * H, window_end_ms: issued + 7.5 * H,
+  outcome_captured_at_ms: issued + FORECAST_SPAN_MS + 10 * MIN as number | null, pv_model_sns: coreSns.join(','),
+  delivered_kwh: null as number | null, delivered_basis: null as string | null, actual_pv_kwh: null as number | null, actual_load_kwh: 21.4 as number | null,
+  score_notes: `${heldLedgerNote(v!, name)} On-peak: none.` as string | null,
+});
+/** Each Core's incident hold: from the last fresh reading (before the 10-15 row's issue) to the deploy. */
+const holdOf = (sn: string): LedgerHeldSpan => ({ sn, startMs: LAST_FRESH, endMs: DEPLOY - 2 * MIN });
+
+test('★★ two Cores held, the owner restores ONE: the PV side is still held — nothing owed, and 48 sweeps reset nothing', () => {
+  // Mutant L1 (review round 6): the restored side read from the restore alone, not from what is
+  // still held. Every 30-min tick, the evening job and each boot then reset and re-captured the
+  // row for the whole horizon, each re-capture stating PV held again (Core 2).
+  const two = [CORES[0], CORES[1]];
+  const I15 = phx(2026, 10, 15, 21, 30);
+  const span = { startMs: I15, endMs: I15 + FORECAST_SPAN_MS };
+  const v = heldLedgerVerdict({ spans: two.map(holdOf), coreSns: two, panelSn: PANEL, span });
+  let row = capturedRow(I15, v, two);
+  const now0 = I15 + 3 * DAY;
+  let resets = 0;
+  for (let tick = 0; tick < 48; tick++) {
+    const at = now0 + tick * 30 * MIN;
+    const r = heldLedgerRepair(row, { spans: [holdOf(CORES[1])], coreSns: two, panelSn: PANEL, nowMs: at, horizonMs: HORIZON, restored: [holdOf(CORES[0])] });
+    if (r) { resets++; row = { ...row, ...heldRepairColumns(row, r, name) } as typeof row; }
+    if (row.outcome_captured_at_ms == null) {
+      // The sweep's re-capture: the scorer's verdict over the spans still held.
+      const again = heldLedgerVerdict({ spans: [holdOf(CORES[1])], coreSns: two, panelSn: PANEL, span })!;
+      row = { ...row, outcome_captured_at_ms: at, score_notes: `${heldLedgerNote(again, name)} On-peak: none.` };
+    }
+  }
+  assert.equal(resets, 0, `★★ Core 2 still holds the PV side: reset ${resets} times in 24 h of sweeps`);
+  // And with Core 2 restored too, the side is owed its re-capture, once.
+  const r = heldLedgerRepair(row, { spans: [], coreSns: two, panelSn: PANEL, nowMs: now0 + DAY, horizonMs: HORIZON, restored: two.map(holdOf) });
+  assert.deepEqual([r?.action, r?.restored], ['recapture', ['PV']], 'precondition: the rule restores a side once nothing holds it');
+});
+
+test('★★ a restored hold that began before the row\'s issue and ran past its span restores the side (the 10-14 and 10-15 rows)', () => {
+  // Mutants L3/L4 (review round 6): counted only when the restored span lies inside the row's span,
+  // or starts inside it. The incident's hold (10-14 23:53 → 10-16 20:28) does neither for 10-15.
+  for (const [day, label] of [[15, '10-15: the hold covers its whole span'], [14, '10-14: the hold starts inside it and runs past its end']] as const) {
+    const I = phx(2026, 10, day, 21, 30);
+    const span = { startMs: I, endMs: I + FORECAST_SPAN_MS };
+    const v = heldLedgerVerdict({ spans: [holdOf(CORES[0])], coreSns: [CORES[0]], panelSn: PANEL, span });
+    assert.ok(v != null && v.pv.length === 1, `precondition (${label}): held`);
+    const r = heldLedgerRepair(capturedRow(I, v, [CORES[0]]), { spans: [], coreSns: [CORES[0]], panelSn: PANEL, nowMs: I + 3 * DAY, horizonMs: HORIZON, restored: [holdOf(CORES[0])] });
+    assert.deepEqual([r?.action, r?.restored], ['recapture', ['PV']], `★★ ${label}`);
+  }
+});
+
+test('★ the panel\'s restored span does not restore a PV side (a Core no longer on the panel is not held by today\'s roster either)', () => {
+  // Mutant L2 (review round 6): the PV side matched against the panel's span as well.
+  const I = phx(2026, 10, 20, 21, 30);
+  const span = { startMs: I, endMs: I + FORECAST_SPAN_MS };
+  const v = heldLedgerVerdict({ spans: [{ sn: CORES[0], startMs: I + 3 * H, endMs: I + 9 * H }], coreSns: [CORES[0]], panelSn: PANEL, span });
+  const i = { spans: [] as LedgerHeldSpan[], coreSns: [CORES[1]], panelSn: PANEL, nowMs: I + 3 * DAY, horizonMs: HORIZON };
+  const row = capturedRow(I, v, [CORES[0]]);
+  assert.equal(heldLedgerRepair(row, { ...i, restored: [{ sn: PANEL, startMs: I + 2 * H, endMs: I + 4 * H }] }), null, '★ no restored span of a Core: nothing owed');
+  assert.equal(heldLedgerRepair(row, { ...i, restored: [{ sn: CORES[1], startMs: I + 2 * H, endMs: I + 4 * H }] })?.restored.join(), 'PV', 'precondition: a Core\'s restored span restores it');
+});
+
+test('★ a degenerate stored window (end at or before its start) is no window: no repair', () => {
+  const i = { spans: SPANS, coreSns: CORES, panelSn: PANEL, nowMs: DEPLOY + 5 * MIN, horizonMs: HORIZON };
+  assert.equal(heldLedgerRepair({ ...ROW_1014, window_end_ms: ROW_1014.window_start_ms }, i), null);
+  assert.equal(heldLedgerRepair({ ...ROW_1014, window_end_ms: ROW_1014.window_start_ms - MIN }, i), null);
+  assert.equal(heldLedgerRepair(ROW_1014, i)?.action, 'recapture', 'precondition: the same row with its window is repaired');
 });
 
 /* ══ wiring pins (index.ts has no seam a unit test can drive) ════════════════
@@ -227,9 +494,31 @@ test('★★ SOURCE PIN: the sweep waits for the first held-sample scan, then re
   const capture = sweep.indexOf('for (const { row: y, spans: s } of ledgerRowsDueForCapture(rows, nowMs, nightSpansForRow)) {');
   assert.ok(wait > 0 && repair > wait && capture > repair, `${wait} < ${repair} < ${capture}`);
   const fix = fnBody('function repairHeldNightOutcomes(');
-  assert.ok(fix.includes('const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs });'));
-  assert.ok(fix.includes('recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf));'));
+  assert.ok(fix.includes('const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs, restored });'));
+  assert.ok(fix.includes('const restored = recorder.restoredHeldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs) ?? [];'), '★ the restored spans over the same days');
+  // v1.188.1 (review 5) — one write for a reset and a tag (heldRepairColumns, tested above).
+  assert.ok(fix.includes('recorder.recordNightOutcome(String(y.plan_date), heldRepairColumns(y, r, nameOf, heldRows));'), 'the row as captured names its own actuals');
+  assert.ok(fix.indexOf('heldRepairColumns(y, r, nameOf, heldRows)') < fix.indexOf("if (r.action === 'tag') {"), '★ written for both actions, before the tag line returns');
+  assert.ok(fix.includes('night-charge: reset ${y.plan_date} for re-capture — ${heldRepairClause(r, y, heldRows)} ('), 'and the log line says the same');
+  // v1.188.1 (review 3) — and only those a held row inside the span as captured fed, per side.
+  assert.ok(fix.includes("const heldRows = r.action === 'recapture' && r.verdict != null ? { pv: heldIn(r.verdict.pv, 'pv_total'), load: heldIn(r.verdict.load, 'panel_load') } : {};"), 'the held rows are looked up per side, on the metric each actual integrates');
+  // v1.188.1 (review 5) — the spans the repair reads: back past the oldest row the sweep reads
+  // (LEDGER_BACKFILL_SWEEP_DAYS) and its 24 h span, and no early return when none is left (a
+  // restore of every span still owes the rows refused for them a re-capture).
+  assert.ok(fix.includes('const spans = recorder.heldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs);'), '★ the span window');
+  assert.ok(fix.includes('if (spans == null) return false;') && !fix.includes('spans.length === 0'), '★ only a recorder with no span log returns early');
+  assert.ok(fix.includes('side.some((p) => recorder.heldRowsWithin?.(p.sn, metric, r.span.startMs, r.span.endMs) ?? true)'), 'over the span the verdict measured');
+  assert.ok(!fix.includes('actuals were integrated from held readings'), 'the tag line does not claim an integration');
   assert.ok(fix.includes('const coreSns = [...shp2ConnectedDpuSns(store.get().devices)];'), 'the same Cores the capture reads');
+  // v1.188.1 (review 6) — a reset says so (the caller then reads the ledger again before it
+  // captures): the flag is set after the tag's early continue, for a reset only, and returned.
+  // Without it the reset row waited a whole 30-min tick, uncaptured, and the evening job's
+  // readiness recompute right after the sweep read the ledger without it (mutant I1).
+  const tagContinue = fix.indexOf("if (r.action === 'tag') {");
+  const flag = fix.indexOf('\n      reset = true;\n');
+  const resetLog = fix.indexOf('night-charge: reset ${y.plan_date} for re-capture');
+  assert.ok(tagContinue > 0 && flag > tagContinue && resetLog > flag, `★★ the reset flag, for a reset only: ${tagContinue} < ${flag} < ${resetLog}`);
+  assert.ok(fix.includes('  let reset = false;') && fix.trimEnd().endsWith('return reset;'), '★ returned to the caller');
 });
 
 test('★★ SOURCE PIN: the scorer withholds a held actual and states the reason before any coverage reason', () => {
@@ -237,7 +526,10 @@ test('★★ SOURCE PIN: the scorer withholds a held actual and states the reaso
   assert.ok(score.includes('spans: recorder.heldSpans?.(fcSpanStart, fcSpanEnd) ?? [],'));
   assert.ok(score.includes('coreSns: [...homeSns], panelSn: shp2Sn, span: { startMs: fcSpanStart, endMs: fcSpanEnd },'));
   assert.ok(score.includes('actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld ? round2(pvWh / 1000) : null;'));
-  assert.ok(score.includes('const actualLoadKwh = loadPts.length && !(heldVerdict != null && heldVerdict.load.length > 0) ? round2(integrateWh(loadPts, false) / 1000) : null;'));
+  // v1.188.1 (review 5) — each side from heldSides (tested above), PV from the PV side.
+  assert.ok(score.includes('const heldSide = heldSides(heldVerdict);'));
+  assert.ok(score.includes('const pvHeld = heldSide.pv;'), '★★ PV is withheld on the PV side');
+  assert.ok(score.includes('const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;'), 'load on the load side');
   const basis = score.indexOf('    scoreNotes = basisIncompleteNote(heldVerdict, deviceNameOf);\n  } else if (heldVerdict != null) {');
   const held = score.indexOf('} else if (heldVerdict != null) {\n    scoreNotes = heldLedgerNote(heldVerdict, deviceNameOf);');
   const cov = score.indexOf('} else if (!covOk) {');

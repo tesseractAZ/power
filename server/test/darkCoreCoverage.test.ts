@@ -144,7 +144,8 @@ test('★ SOURCE PIN: the recorder sweeps for per-device silence, not just fleet
   // here and this loop is necessary.
   const i = src.indexOf('for (const [sn, lastMs] of lastInsertBySn)');
   assert.ok(i > 0, 'the per-device staleness sweep must be present');
-  const sweep = src.slice(i, i + 1400);
+  // Bounded on the block itself (v1.188.1 review 5: a fixed window stopped reaching its end).
+  const sweep = src.slice(i, src.indexOf('perDeviceGapOpen.add(sn);', i) + 'perDeviceGapOpen.add(sn);'.length);
   assert.match(sweep, /if \(isBenchSpareSn\(sn\)\) continue;/, 'a bench spare is dark by design and must be exempt');
   // v1.154.0 — the threshold applies to darkMs, which leaves out the add-on's own
   // downtime for a device still on its seeded clock (driven in seedAndBootPhases.test.ts).
