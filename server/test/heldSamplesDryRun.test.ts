@@ -374,12 +374,14 @@ test('★★★ the August shape: ~23 h held, 9.8 silent days, one equal return 
   } finally { rec.close(); }
 });
 
-test('★★ a hold split by a gap, each part an hour or more, is one span from its last fresh reading, announced once', (t) => {
-  // A replayed body restated for two hours after a two-hour silence still qualifies on its own,
-  // from the last change before it (createFrozenScanner); the gap ends the first part.
+test('★★ a hold split by a gap, each part an hour or more, is one span from its last fresh reading, announced once with both parts', (t) => {
+  // A replayed body restated for two hours after a two-hour silence qualifies on its own, so it
+  // joins the hold from the last change before the silence (createFrozenScanner). v1.188.1
+  // (review 2) — one stretch: the HELD SAMPLES line states the second part's end and counts both
+  // parts' held flow (the dry run's chain announced the first part's end and flow only).
   const T0 = phx(2026, 10, 10, 0, 0);
   const lastFresh = T0 + H;
-  const a1 = live(CORE_A, T0, lastFresh);
+  const a1 = live(CORE_A, T0, lastFresh).map((r): Row => (r[0] === lastFresh && r[2] === 'pv_total' ? [r[0], r[1], r[2], 6_000] : r));
   const part1 = held(CORE_A, a1, lastFresh + 5 * MIN, lastFresh + 3 * H);
   const part2 = held(CORE_A, a1, lastFresh + 5 * H, lastFresh + 7 * H);
   reset([...a1, ...part1, ...part2, ...live(CORE_A, lastFresh + 7 * H + 5 * MIN, lastFresh + 8 * H, 500)]);
@@ -389,10 +391,18 @@ test('★★ a hold split by a gap, each part an hour or more, is one span from 
   const rec = createRecorder(makeStore(), (m) => lines.push(m));
   try {
     const sum = rec.scanHeldSamples!(NOW);
-    assert.equal(sum.candidates, 2, 'two qualifying stretches from one last fresh reading');
+    assert.equal(sum.candidates, 1, 'one stretch from one last fresh reading');
     assert.deepEqual([sum.spans, sum.rowsMoved], [1, part1.length + part2.length]);
-    assert.deepEqual(rec.heldSpans!(T0, NOW).map((s) => [s.startMs, s.endMs]), [[lastFresh, Math.max(...part2.map((r) => r[0]))]]);
-    assert.equal(lines.filter((l) => l.includes('HELD SAMPLES')).length, 1, `★★ announced once: ${lines.filter((l) => l.includes('HELD SAMPLES')).join('\n')}`);
+    const end2 = Math.max(...part2.map((r) => r[0]));
+    assert.deepEqual(rec.heldSpans!(T0, NOW).map((s) => [s.startMs, s.endMs]), [[lastFresh, end2]]);
+    const announced = lines.filter((l) => l.includes('HELD SAMPLES'));
+    assert.equal(announced.length, 1, `★★ announced once: ${announced.join('\n')}`);
+    assert.ok(announced[0].includes(`from ${new Date(lastFresh).toISOString()} to ${new Date(end2).toISOString()}`), `★★ the second part's end: ${announced[0]}`);
+    // Observed: the first part from the last fresh reading (its first interval is a heartbeat) and
+    // the second from its first row (the silence before it is not observed).
+    const observed = (Math.max(...part1.map((r) => r[0])) - lastFresh) + (end2 - (lastFresh + 5 * H));
+    assert.ok(announced[0].includes(` ${(6_000 * observed / H / 1000).toFixed(1)} kWh of pv_total`), `★★ both parts' held flow: ${announced[0]}`);
+    assert.equal((6_000 * observed / H / 1000).toFixed(1), '30.0', 'about 5 h at 6 kW (the dry run said 18.0, the first part only)');
     assert.equal(lines.filter((l) => l.includes('moved to held_samples') && l.includes('held samples of')).length, 1);
   } finally { rec.close(); }
 });

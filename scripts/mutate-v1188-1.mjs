@@ -79,10 +79,10 @@
  *   Y-vii   the re-date ignores the moved slice's end (an older span re-dates a current record)
  *   Z-i     the held spans are read once per stretch again
  *   Z-ii    the scanner keeps every non-qualifying stretch
- *   Z-iii   a gap with no rows does not end a stretch (the August return row is moved)
- *   Z-iv    a span's tail is extended across any gap
- *   Z-v     an interval of exactly the bridge ends a stretch
- *   Z-vi    two stretches of one scan sharing a start are not chained
+ *   Z-iii   a return piece joins the hold before it has qualified on its own (the August return row is moved)
+ *   Z-iv    a span's tail is extended across any silence
+ *   Z-v     a gap of exactly an hour is a silence, not a hole
+ *   Z-vi    a span an earlier scan moved is extended as a new one (announced again)
  *   Z-vii   the first scan starts at the retention horizon again
  *   X-i     the held-flow estimate is the stretch's length again
  *   X-ii    the tag note says the actuals were integrated from held readings
@@ -93,8 +93,31 @@
  *   X-vii   the dark-device count is not by overlap
  *   X-viii  a fleet silence the gate explains blames a broker stall again
  *   X-ix    the recorder does not keep what the gate held
- *   X-x     what the gate held is never cleared by a home write
- *   X-xi    an evaluation that wrote home rows adds its held devices
+ *   X-x     what the gate held is never cleared by a recordable home reading
+ *   X-xi    an evaluation with a recordable home reading adds its held devices
+ *
+ * Review round 2 (holes, silences, cadence; restores; what explains a silence):
+ *   V-i     the return gap is the bridge again (a restart's hole leaves a hold's tail in samples)
+ *   V-ii    a stretch too short to be a hold is joined across a silence (cadence decides)
+ *   V-iii   a return reading does not become the anchor (cadence decides)
+ *   V-iv    the tail of a moved span is measured from the fresh reading
+ *   V-v     the held-flow estimate counts the whole stretch, not the range moved
+ *   V-vi    an extension of a span states nothing
+ *   V-vii   the announcement states the stretch's end, not the move's
+ *   V-viii  no observed run is recorded (every estimate 0.0 kWh)
+ *   V-ix    a joined return piece's observed runs are dropped
+ *   V-x     a joined return piece's observed time is dropped (the incident never qualifies)
+ *   Q-i     a restore leaves the gap record re-dated (a second record, the same id)
+ *   Q-ii    a boot after a restore by SQL does not match the start the record was filed with
+ *   Q-iii   the matched record keeps its re-dated start
+ *   Q-iv    a restore does not put the seeded clock back
+ *   Q-v     the move does not remember the seed it set back
+ *   E-i     held evaluations explain a silence however far apart they were
+ *   E-ii    the end of the silence is not checked
+ *   E-iii   a stall inside the silence is not seen
+ *   E-iv    a held device's shadow flag is its last one
+ *   E-v     bench spares are named in what the gate held
+ *   E-vi    the post-boot silence never carries what the gate held
  *
  *   node scripts/mutate-v1188-1.mjs
  */
@@ -121,6 +144,8 @@ const SUBSET = [
   'test/trendMergeGaps.test.ts',
   'test/heldSamplesDryRun.test.ts',
   'test/deviceGapAlerts.test.ts',
+  'test/heldSamplesHoles.test.ts',
+  'test/heldGapRecords.test.ts',
 ];
 
 const MUTANTS = [
@@ -218,22 +243,22 @@ const MUTANTS = [
   {
     id: 'S-iii. ★★ the seeded gap clock is not moved back after a move',
     file: REC,
-    find: '      if (seededNotYetWritten.has(sn) && seed != null && seed > startMs && seed <= endMs) lastInsertBySn.set(sn, startMs);',
-    to: '      void seed; /* MUTANT */',
+    find: '      if (seededNotYetWritten.has(sn) && seed != null && seed > startMs && seed <= endMs) {',
+    to: '      if (seededNotYetWritten.has(sn) && seed != null && seed > startMs && seed <= endMs && Date.now() < 0) { /* MUTANT */',
     why: 'A Core still held at the deploy is measured from a held row that no longer exists: its gap is filed 6 h late, from the wrong start, and a later boot files a second record.',
   },
   {
     id: 'F-i. ★ the scanner needs no restatements',
     file: HS,
-    find: '      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;',
-    to: '      const qualifies = observedMs >= opts.minSpanMs && counts.size >= opts.minMetrics; /* MUTANT */',
+    find: '  const qualifies = (a: StretchAcc) => a.observedMs >= opts.minSpanMs && restatementsOf(a) >= opts.minRestatements && a.counts.size >= opts.minMetrics;',
+    to: '  const qualifies = (a: StretchAcc) => a.observedMs >= opts.minSpanMs && a.counts.size >= opts.minMetrics; /* MUTANT */',
     why: 'Two identical rows an hour apart — a restart after an hour down — read as a hold.',
   },
   {
     id: 'F-ii. ★★ the scanner needs no metric count',
     file: HS,
-    find: '      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;',
-    to: '      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements; /* MUTANT */',
+    find: '  const qualifies = (a: StretchAcc) => a.observedMs >= opts.minSpanMs && restatementsOf(a) >= opts.minRestatements && a.counts.size >= opts.minMetrics;',
+    to: '  const qualifies = (a: StretchAcc) => a.observedMs >= opts.minSpanMs && restatementsOf(a) >= opts.minRestatements; /* MUTANT */',
     why: 'A generic device that legitimately sat idle for an hour has its real rows moved.',
   },
   {
@@ -246,21 +271,21 @@ const MUTANTS = [
   {
     id: 'F-iv. ★★ the scanner\'s minimum length is dropped',
     file: HS,
-    find: '      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;',
-    to: '      const qualifies = restatements >= opts.minRestatements && counts.size >= opts.minMetrics; /* MUTANT */',
+    find: '  const qualifies = (a: StretchAcc) => a.observedMs >= opts.minSpanMs && restatementsOf(a) >= opts.minRestatements && a.counts.size >= opts.minMetrics;',
+    to: '  const qualifies = (a: StretchAcc) => restatementsOf(a) >= opts.minRestatements && a.counts.size >= opts.minMetrics; /* MUTANT */',
     why: 'Forty quiet minutes of a live Core are moved out of samples.',
   },
   {
     id: 'F-v. ★★ a known span\'s tail must qualify on its own',
     file: HS,
-    find: '          return end != null && firstHeldMs - end <= HELD_ROW_BRIDGE_MS;',
-    to: '          return end != null && firstHeldMs - end < -HELD_ROW_BRIDGE_MS; /* MUTANT */',
+    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs),',
+    to: '        keepUnqualified: () => false, /* MUTANT */',
     why: 'The newest 15 min of a hold, left by the first scan after the deploy, restate each metric only once or twice: they stay in samples, and the held Core\'s gap clock stays on a held row.',
   },
   {
     id: 'F-vi. ★★ every stretch is moved, qualifying or not',
     file: HS,
-    find: '      if (qualifies || keep(anchor, firstHeldTs)) {',
+    find: '      if (q || keep(anchor, cur.firstHeldTs)) {',
     to: '      if (true) { /* MUTANT */',
     why: 'Any two identical rows — a quiet live Core between two changes — are moved out of samples.',
   },
@@ -422,22 +447,22 @@ const MUTANTS = [
   {
     id: 'O-i. ★★★ a gap with no rows counts toward a frozen stretch',
     file: HS,
-    find: '          if (prevRowTs != null && ts - prevRowTs <= bridgeMs) observedMs += ts - prevRowTs;',
-    to: '          if (prevRowTs != null) observedMs += ts - prevRowTs; /* MUTANT */',
+    find: '          if (prevRowTs != null && ts - prevRowTs <= bridgeMs) {',
+    to: '          if (prevRowTs != null) { /* MUTANT */',
     why: 'A constant Core back from a 55-min gap has its fresh rows moved after 10 min of observation, and its night refused.',
   },
   {
     id: 'O-ii. an interval of exactly the bridge is not observed constancy',
     file: HS,
-    find: '          if (prevRowTs != null && ts - prevRowTs <= bridgeMs) observedMs += ts - prevRowTs;',
-    to: '          if (prevRowTs != null && ts - prevRowTs < bridgeMs) observedMs += ts - prevRowTs; /* MUTANT */',
+    find: '          if (prevRowTs != null && ts - prevRowTs <= bridgeMs) {',
+    to: '          if (prevRowTs != null && ts - prevRowTs < bridgeMs) { /* MUTANT */',
     why: 'Rows two heartbeats apart (integrateWh\'s own bridge) read as a gap.',
   },
   {
     id: 'O-iii. ★ observed constancy carries over from the previous stretch',
     file: HS,
-    find: '    lastHeldTs = Number.NEGATIVE_INFINITY;\n    observedMs = 0;\n  };',
-    to: '    lastHeldTs = Number.NEGATIVE_INFINITY;\n    /* MUTANT */\n  };',
+    find: '    cur = newStretchAcc();\n  };',
+    to: '    cur = { ...newStretchAcc(), observedMs: cur.observedMs }; /* MUTANT */\n  };',
     why: 'Two short quiet stretches split by one change add up to an hour, and a live Core is moved.',
   },
   {
@@ -550,7 +575,7 @@ const MUTANTS = [
     id: 'Y-i. ★★★ a later, overlapping record of the device is not extended',
     file: REC,
     find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && startMs < g.startMs && g.startMs <= endMs)',
-    to: '        ?? undefined /* MUTANT */',
+    to: '        /* MUTANT */',
     why: 'The restart after the move files a second record for every Core still dark: a second pushed warning each, and Device Telemetry Gaps 24h doubles.',
   },
   {
@@ -598,44 +623,44 @@ const MUTANTS = [
   {
     id: 'Z-i. ★★ the held spans are read once per stretch again',
     file: HS,
-    find: '          const end = frozenEnds.get(startMs);',
-    to: '          const end = readFrozenEnds(sn).get(startMs); /* MUTANT */',
+    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs),',
+    to: '        keepUnqualified: (startMs) => readFrozenEnds(sn).has(startMs), /* MUTANT */',
     why: 'Hundreds of thousands of lookups per device in one step of the alarm thread (1.6–5.4 s per Core on the Pi).',
   },
   {
     id: 'Z-ii. ★★ the scanner keeps every non-qualifying stretch',
     file: HS,
-    find: '          return end != null && firstHeldMs - end <= HELD_ROW_BRIDGE_MS;',
-    to: '          return end == null || firstHeldMs - end <= Number.POSITIVE_INFINITY; /* MUTANT */',
+    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs),',
+    to: '        keepUnqualified: () => true, /* MUTANT */',
     why: 'Every stretch of a live device is kept until it finishes (+190–360 MB) — and moved.',
   },
   {
-    id: 'Z-iii. ★★★ a gap with no rows does not end a stretch',
+    id: 'Z-iii. ★★★ a return piece joins the hold before it has qualified on its own',
     file: HS,
-    find: '          if (prevRowTs != null && ts - prevRowTs > bridgeMs && heldRows > 0) close();',
-    to: '          /* MUTANT */',
+    find: '          if (ret != null && qualifies(ret)) {',
+    to: '          if (ret != null) { /* MUTANT */',
     why: 'A Core back after 9.8 silent days with one group equal to its held values has that return reading moved, and the span claims the silence.',
   },
   {
     id: 'Z-iv. ★★★ a span\'s tail is extended across any gap',
     file: HS,
-    find: '          return end != null && firstHeldMs - end <= HELD_ROW_BRIDGE_MS;',
-    to: '          return end != null; /* MUTANT */',
+    find: '          if (prevRowTs != null && ts - prevRowTs > returnGapMs) {',
+    to: '          if (prevRowTs != null && ts - prevRowTs > returnGapMs && (anchor == null || movedThrough(anchor) == null)) { /* MUTANT */',
     why: 'When the Cores reconnect with a first group equal to their held values, the hourly scan moves their fresh return readings.',
   },
   {
-    id: 'Z-v. an interval of exactly the bridge ends a stretch',
+    id: 'Z-v. a gap of exactly an hour is a silence, not a hole',
     file: HS,
-    find: '          if (prevRowTs != null && ts - prevRowTs > bridgeMs && heldRows > 0) close();',
-    to: '          if (prevRowTs != null && ts - prevRowTs >= bridgeMs && heldRows > 0) close(); /* MUTANT */',
-    why: 'Rows two heartbeats apart (integrateWh\'s own bridge) split a hold into pieces too short to qualify.',
+    find: '          if (prevRowTs != null && ts - prevRowTs > returnGapMs) {',
+    to: '          if (prevRowTs != null && ts - prevRowTs >= returnGapMs) { /* MUTANT */',
+    why: 'A hold whose rows resume an hour after a restart (the night ledger\'s own bridge) is split, its tail a return piece that must qualify again.',
   },
   {
-    id: 'Z-vi. two stretches of one scan sharing a start are not chained',
+    id: 'Z-vi. a span an earlier scan moved is extended as a new one',
     file: HS,
-    find: '      ends.set(s.startMs, end);',
-    to: '      /* MUTANT */',
-    why: 'A hold split by a gap is announced twice and its second part re-moved from the span\'s start.',
+    find: '      const priorEnd = job.frozenEnds.get(s.startMs);',
+    to: '      const priorEnd = undefined as number | undefined; /* MUTANT */',
+    why: 'A hold is announced again by every scan that extends it, and each re-moves it from the span\'s start.',
   },
   {
     id: 'Z-vii. ★★ the first scan starts at the retention horizon again',
@@ -647,8 +672,8 @@ const MUTANTS = [
   {
     id: 'X-i. ★★ the held-flow estimate is the stretch\'s length again',
     file: HS,
-    find: '${(v * s.observedMs / HOUR_MS / 1000).toFixed(1)}',
-    to: '${(v * (s.endMs - s.firstHeldMs) / HOUR_MS / 1000).toFixed(1)}',
+    find: '${(v * ms / HOUR_MS / 1000).toFixed(1)}',
+    to: '${(v * (job.stretch.endMs - job.stretch.firstHeldMs) / HOUR_MS / 1000).toFixed(1)}',
     why: 'The log overstates what the lifetime counters took in (400.8 kWh where the held rows covered about 36 kWh).',
   },
   {
@@ -708,18 +733,166 @@ const MUTANTS = [
     why: 'The same: the record carries nothing for the alert to name.',
   },
   {
-    id: 'X-x. what the gate held is never cleared by a home write',
+    id: 'X-x. what the gate held is never cleared by a recordable home reading',
     file: REC,
-    find: '      silenceHeld.clear();',
-    to: '      /* MUTANT */',
-    why: 'A later true stall is blamed on a shadow that ended hours before.',
+    find: '      resetSilence(nowMs);\n    } else {',
+    to: '      /* MUTANT */\n    } else {',
+    why: 'A later true stall is blamed on a shadow that ended hours before; the evaluations are timed from the boot.',
   },
   {
-    id: 'X-xi. an evaluation that wrote home rows adds its held devices',
+    id: 'X-xi. an evaluation with a recordable home reading adds its held devices',
     file: REC,
-    find: '    if (!wroteHome) {',
-    to: '    if (true) { /* MUTANT */',
-    why: 'A Core held while the panel reports is named in the next true stall.',
+    find: '    if (samples.some((x) => !isBenchSpareSn(x.sn))) {\n      resetSilence(nowMs);\n    } else {',
+    to: '    if (samples.some((x) => !isBenchSpareSn(x.sn))) resetSilence(nowMs); /* MUTANT */\n    {',
+    why: 'A Core held while the panel reports (a reading the dedupe skipped) is named in the next silence.',
+  },
+  // ── review round 2 ──
+  {
+    id: 'V-i. ★★★ the return gap is the bridge again',
+    file: HS,
+    find: 'export const HELD_RETURN_GAP_MS = HELD_SPAN_MIN_MS;',
+    to: 'export const HELD_RETURN_GAP_MS = HELD_ROW_BRIDGE_MS; /* MUTANT */',
+    why: 'A restart\'s 20-min hole leaves a running hold\'s tail in samples for good, and two 40-min parts of one hold never add up.',
+  },
+  {
+    id: 'V-ii. ★★★ a stretch too short to be a hold is joined across a silence',
+    file: HS,
+    find: '            } else if (cur.heldRows > 0 && !qualifies(cur) && !(anchor != null && keep(anchor, cur.firstHeldTs))) {',
+    to: '            } else if (false) { /* MUTANT */',
+    why: 'A scan of the whole history moves it with the replay after the silence; an hourly scan no longer reads its fresh start and leaves it.',
+  },
+  {
+    id: 'V-iii. ★★★ a return reading does not become the anchor',
+    file: HS,
+    find: '              const kept = ret.lastHeldTs;\n              close();\n              setAnchor(kept);',
+    to: '              close(); /* MUTANT */',
+    why: 'A replay after the return reading is a hold from the fresh reading before it in one pass and from the return reading hourly.',
+  },
+  {
+    id: 'V-iv. ★★★ the tail of a moved span is measured from the fresh reading',
+    file: HS,
+    find: '        movedThroughMs: (anchorMs) => frozenEnds.get(anchorMs),',
+    to: '        /* MUTANT */',
+    why: 'The hourly scan reads the hours the earlier scan moved as a silence, and the running hold\'s tail must qualify again.',
+  },
+  {
+    id: 'V-v. ★★ the held-flow estimate counts the whole stretch, not the range moved',
+    file: HS,
+    find: '    const ms = observedWithinMs(job.stretch, job.rangeFromMs, job.rangeToMs);',
+    to: '    const ms = job.stretch.observedMs; /* MUTANT */',
+    why: 'Each extension of a span re-counts the held flow of the hours already moved.',
+  },
+  {
+    id: 'V-vi. ★★ an extension of a span states nothing',
+    file: HS,
+    find: '      const ext = job.extension ? ` — the held span from',
+    to: '      const ext = job.extension && Date.now() < 0 /* MUTANT */ ? ` — the held span from',
+    why: 'The held flow of every hour a later scan moves appears in no estimate.',
+  },
+  {
+    id: 'V-vii. ★ the announcement states the stretch\'s end, not the move\'s',
+    file: HS,
+    find: 'to ${new Date(job.rangeToMs).toISOString()} (${s.metrics} metrics',
+    to: 'to ${new Date(job.stretch.endMs).toISOString()} (${s.metrics} metrics',
+    why: 'The line claims rows the scan left for the next one, which then states them again.',
+  },
+  {
+    id: 'V-viii. ★★ no observed run is recorded',
+    file: HS,
+    find: '            else acc.observed.push([prevRowTs, ts]);',
+    to: '            /* MUTANT */',
+    why: 'Every held-flow estimate reads 0.0 kWh.',
+  },
+  {
+    id: 'V-ix. ★★ a joined return piece\'s observed runs are dropped',
+    file: HS,
+    find: '            cur.observed.push(...ret.observed);',
+    to: '            /* MUTANT */',
+    why: 'A hold split by a silence is announced with the first part\'s held flow only.',
+  },
+  {
+    id: 'V-x. ★★★ a joined return piece\'s observed time is dropped',
+    file: HS,
+    find: '            cur.observedMs += ret.observedMs;',
+    to: '            /* MUTANT */',
+    why: 'The incident\'s Cores (a 2 h outage, then 20 h restated) never qualify.',
+  },
+  {
+    id: 'Q-i. ★★★ a restore leaves the gap record re-dated',
+    file: REC,
+    find: '      undateDeviceGap(sn, startMs, endMs);',
+    to: '      /* MUTANT */',
+    why: 'The next boot files a second record with the same alert id: two alerts with one id, Device Telemetry Gaps 24h doubled.',
+  },
+  {
+    id: 'Q-ii. ★★ a boot after a restore by SQL does not match the start the record was filed with',
+    file: REC,
+    find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.alertStartMs === startMs)',
+    to: '        /* MUTANT */',
+    why: 'The documented SQL recipe leads to the same second record.',
+  },
+  {
+    id: 'Q-iii. ★★ the matched record keeps its re-dated start',
+    file: REC,
+    find: '      if (prior.alertStartMs === startMs && startMs > prior.startMs) {',
+    to: '      if (prior.alertStartMs === startMs && startMs > prior.startMs && Date.now() < 0) { /* MUTANT */',
+    why: 'The record states a start the restore declared a held span no longer.',
+  },
+  {
+    id: 'Q-iv. ★★ a restore does not put the seeded clock back',
+    file: REC,
+    find: '      if (seededNotYetWritten.has(sn) && seed != null && lastInsertBySn.get(sn) === startMs && seed > startMs && seed <= endMs) lastInsertBySn.set(sn, seed);',
+    to: '      void seed; /* MUTANT */',
+    why: 'The sweep measures the device from the span\'s start and re-dates the restored record again.',
+  },
+  {
+    id: 'Q-v. the move does not remember the seed it set back',
+    file: REC,
+    find: '        if (!seedBeforeMove.has(sn)) seedBeforeMove.set(sn, seed);',
+    to: '        /* MUTANT */',
+    why: 'The same: nothing to put back.',
+  },
+  {
+    id: 'E-i. ★★ held evaluations explain a silence however far apart they were',
+    file: REC,
+    find: '    silenceHeld.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS',
+    to: '    silenceHeld.size === 0 /* MUTANT */',
+    why: 'A true stall after a few held evaluations is filed as "held readings", not an MQTT/broker stall.',
+  },
+  {
+    id: 'E-ii. ★ the end of the silence is not checked',
+    file: REC,
+    find: '    silenceHeld.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS',
+    to: '    silenceHeld.size === 0 || silenceEvalGapMs > SILENCE_EVAL_MAX_GAP_MS /* MUTANT */',
+    why: 'Evaluations that stopped 18 min before the silence ended still explain it.',
+  },
+  {
+    id: 'E-iii. ★ a stall inside the silence is not seen',
+    file: REC,
+    find: '      silenceEvalGapMs = Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs);',
+    to: '      /* MUTANT */',
+    why: 'A 10-min stall between held evaluations is filed as "held readings".',
+  },
+  {
+    id: 'E-iv. a held device\'s shadow flag is its last one',
+    file: REC,
+    find: '        silenceHeld.set(sn, (silenceHeld.get(sn) ?? false) || h.shadow);',
+    to: '        silenceHeld.set(sn, h.shadow); /* MUTANT */',
+    why: 'A panel shadowed for most of the silence is named as merely stale.',
+  },
+  {
+    id: 'E-v. ★ bench spares are named in what the gate held',
+    file: REC,
+    find: '        if (SYNTHETIC_SNS.has(sn) || isBenchSpareSn(sn)) continue;\n        silenceHeld.set(',
+    to: '        silenceHeld.set( /* MUTANT */',
+    why: 'A spare, dark by design, is named in every in-process fleet gap after it reported once.',
+  },
+  {
+    id: 'E-vi. the post-boot silence never carries what the gate held',
+    file: REC,
+    find: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now) });',
+    to: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now); /* MUTANT */',
+    why: 'A boot whose first 20 min the gate held is pushed as an MQTT/broker stall.',
   },
 ];
 

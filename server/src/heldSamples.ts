@@ -122,7 +122,9 @@ export type HeldReason = 'gate-stale' | 'gate-shadow' | 'frozen';
 
 export interface HeldSpan {
   sn: string;
-  /** The last fresh instant: rows with startMs < ts ≤ endMs are held. */
+  /** The last fresh instant: rows with startMs < ts ≤ endMs are held. For a frozen span it is the
+   *  newest row kept in `samples` before them: a reading in which some metric changed, or (v1.188.1
+   *  review 2) a row left there because it did not continue a hold (createFrozenScanner). */
   startMs: number;
   endMs: number;
   /** gate-stale / gate-shadow — the recorder wrote nothing (the gate); frozen — held rows that
@@ -159,6 +161,9 @@ export interface FrozenStretch {
    *  no more than the bridge apart (the length `qualifies` tests). The lifetime counters integrate
    *  the held flow over exactly these intervals (integrateWh bridges up to 10 min). */
   observedMs: number;
+  /** v1.188.1 (review 2) — those intervals, merged into runs [from, to] in ts order (a hole or a
+   *  silence starts a new run): what a part of the stretch observed (observedWithinMs). */
+  observed: ReadonlyArray<readonly [number, number]>;
   /** Each restated metric's value (identical throughout, by construction). */
   heldValues: Map<string, number>;
   /** Meets the length, restatement and metric thresholds on its own. A stretch that does not
@@ -175,12 +180,20 @@ export interface FrozenScanOptions {
    *  `minSpanMs`; a longer one is a gap with no rows, observed as nothing. Optional (default
    *  HELD_ROW_BRIDGE_MS) so a caller's options from before it keep their meaning. */
   bridgeMs?: number;
+  /** v1.188.1 (review 2) — the longest gap with no rows that is a HOLE inside a stretch (default
+   *  HELD_RETURN_GAP_MS); a longer one is a SILENCE, after which the device's rows are a return
+   *  (createFrozenScanner). */
+  returnGapMs?: number;
   /** v1.188.1 (dry run) — which stretches that do NOT qualify are returned, by their last fresh
    *  instant and first restated row. Omitted, every stretch is returned (flagged). The held-sample
    *  scan keeps only the tail of a span an earlier scan moved: a live device produces a stretch
    *  between every two changes, hundreds of thousands per device over the retention window, and
    *  kept until the device finished each held its own Map (+190–360 MB in the dry run). */
   keepUnqualified?: (startMs: number, firstHeldMs: number) => boolean;
+  /** v1.188.1 (review 2) — where the rows an earlier scan moved from this last fresh instant end
+   *  (its span's end), or undefined: those rows were there, so the next row is measured from that
+   *  end, not from the fresh reading hours before it. Omitted, nothing was moved. */
+  movedThroughMs?: (anchorMs: number) => number | undefined;
 }
 
 /**
@@ -190,12 +203,43 @@ export interface FrozenScanOptions {
  */
 export const HELD_ROW_BRIDGE_MS = 10 * MIN_MS;
 
+/**
+ * v1.188.1 (review 2) — the longest gap with no rows that is a HOLE inside a hold (an add-on
+ * restart, a Pi reboot, a poll or WAN outage of up to an hour) rather than a SILENCE the device
+ * comes back from. The night-charge ledger's trapezoid bridges a gap of up to an hour between two
+ * readings, so for the integrals an hour or less is still one series.
+ */
+export const HELD_RETURN_GAP_MS = HELD_SPAN_MIN_MS;
+
 export const FROZEN_DEFAULTS: FrozenScanOptions = {
   minSpanMs: HELD_SPAN_MIN_MS,
   minRestatements: HELD_MIN_RESTATEMENTS,
   minMetrics: HELD_MIN_METRICS,
   bridgeMs: HELD_ROW_BRIDGE_MS,
+  returnGapMs: HELD_RETURN_GAP_MS,
 };
+
+/** v1.188.1 (review 2) — how much of a stretch's observed constancy lies in (fromMs, toMs]. PURE. */
+export function observedWithinMs(s: Pick<FrozenStretch, 'observed'>, fromMs: number, toMs: number): number {
+  let ms = 0;
+  for (const [a, b] of s.observed) ms += overlapMs(a, b, fromMs, toMs);
+  return ms;
+}
+
+/** The running totals of one stretch, or of one return piece not yet joined to it. */
+interface StretchAcc {
+  counts: Map<string, number>;
+  values: Map<string, number>;
+  heldRows: number;
+  firstHeldTs: number;
+  lastHeldTs: number;
+  observedMs: number;
+  observed: Array<[number, number]>;
+}
+const newStretchAcc = (): StretchAcc => ({
+  counts: new Map(), values: new Map(), heldRows: 0,
+  firstHeldTs: Number.POSITIVE_INFINITY, lastHeldTs: Number.NEGATIVE_INFINITY, observedMs: 0, observed: [],
+});
 
 /**
  * v1.188.1 — the frozen-stretch detector for ONE device, fed its rows in ts order. PURE.
@@ -216,14 +260,27 @@ export const FROZEN_DEFAULTS: FrozenScanOptions = {
  * Every stretch with restated rows is returned, flagged `qualifies` when it meets the thresholds
  * (or, with `keepUnqualified`, every qualifying one and the non-qualifying ones it keeps).
  *
- * v1.188.1 (dry run) — a restated group that follows a gap longer than `bridgeMs` ENDS the
- * stretch at its last restated row before the gap, and starts another from the same last fresh
- * instant. The gap was already not counted as observed time, but the stretch's end moved onto the
- * first row after it: on the live database a Core held for ~23 h, silent for 9.8 days, came back
- * with one group equal to its held values, and that return reading was moved with the span, which
- * then claimed 257.9 h across the silence (and the night-ledger rows of days it had no rows). A
- * replayed body restated for an hour after a gap still qualifies on its own, from the last change
- * before it (a hold, as above); a single equal return group does not.
+ * v1.188.1 (review 2) — what a gap with no rows does to a stretch depends on its length:
+ *  - up to `returnGapMs` (an hour) it is a HOLE: the stretch goes on across it, and the observed
+ *    time on both sides adds up. A restart's 20-min hole inside a running hold no longer leaves
+ *    the hold's tail in `samples`, and two 40-min parts of one hold are one 80-min hold.
+ *  - longer, it is a SILENCE, and the restated rows after it are a RETURN PIECE. It joins the
+ *    stretch only once it qualifies on its own (an hour of observed constancy after the silence:
+ *    a replayed body, as above), and the stretch then runs from the last change before the silence
+ *    (the incident's Cores: a 2 h outage, then 20 h of restatements). A return piece that ends
+ *    (a change, another silence, the scan's end) before that is a RETURN READING: it stays in
+ *    `samples`, and the stretch before it ends at its last restated row. On the live database a
+ *    Core held for ~23 h, silent for 9.8 days, came back with one group equal to its held values;
+ *    the scan of v1.188.1 before its dry run moved that return reading with the span, which then
+ *    claimed 257.9 h. After a return reading that another silence follows, the stretch starts again
+ *    from it (it is the newest row kept), so a later replay is a hold from there.
+ *  - a stretch that does NOT qualify (and is not kept) when a silence begins is over: its rows
+ *    stay, and the next stretch starts from its last row. Joined to a part after the silence, it
+ *    would be moved by a scan that reads both and left by an hourly scan that no longer reads it.
+ * So whether a row is moved, where a span starts and where it ends do not depend on how often the
+ * scan runs: the anchor of every stretch is the newest row kept in `samples` before it, which is
+ * what an hourly scan reads as its anchor (`movedThroughMs` tells it where the rows an earlier
+ * scan moved from that anchor end).
  *
  * `prev` is each metric's value before the first fed row and `anchorMs` the ts of the newest such
  * row (the last fresh instant before the scan, when the scan starts mid-hold); both empty/null on
@@ -232,33 +289,39 @@ export const FROZEN_DEFAULTS: FrozenScanOptions = {
 export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs: number | null, opts: FrozenScanOptions = FROZEN_DEFAULTS) {
   const last = new Map(prev);
   const bridgeMs = opts.bridgeMs ?? HELD_ROW_BRIDGE_MS;
-  let anchor = anchorMs;
-  let counts = new Map<string, number>();
-  let values = new Map<string, number>();
-  let heldRows = 0;
-  let firstHeldTs = Number.POSITIVE_INFINITY;
-  let lastHeldTs = Number.NEGATIVE_INFINITY;
-  /** The ts of the previous row (fresh or restated): the start of the interval the next one ends. */
-  let prevRowTs: number | null = anchorMs;
-  /** Observed constancy: the intervals of the stretch no longer than bridgeMs. */
-  let observedMs = 0;
-  const out: FrozenStretch[] = [];
+  const returnGapMs = opts.returnGapMs ?? HELD_RETURN_GAP_MS;
   const keep = opts.keepUnqualified ?? (() => true);
+  const movedThrough = opts.movedThroughMs ?? (() => undefined);
+  let anchor: number | null = null;
+  /** The ts of the previous row (fresh or restated): the start of the interval the next one ends.
+   *  For an anchor with moved rows after it, the end of those rows. */
+  let prevRowTs: number | null = null;
+  /** The stretch from `anchor`. */
+  let cur = newStretchAcc();
+  /** A return piece (after a silence) that has not qualified on its own yet. */
+  let ret: StretchAcc | null = null;
+  const out: FrozenStretch[] = [];
+  const setAnchor = (ts: number) => {
+    anchor = ts;
+    const movedEnd = movedThrough(ts);
+    prevRowTs = movedEnd != null && movedEnd > ts ? movedEnd : ts;
+  };
+  if (anchorMs != null) setAnchor(anchorMs);
+  const restatementsOf = (a: StretchAcc) => {
+    let n = 0;
+    for (const c of a.counts.values()) if (c > n) n = c;
+    return n;
+  };
+  const qualifies = (a: StretchAcc) => a.observedMs >= opts.minSpanMs && restatementsOf(a) >= opts.minRestatements && a.counts.size >= opts.minMetrics;
   const close = () => {
-    if (anchor != null && heldRows > 0) {
-      let restatements = 0;
-      for (const n of counts.values()) if (n > restatements) restatements = n;
-      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;
-      if (qualifies || keep(anchor, firstHeldTs)) {
-        out.push({ startMs: anchor, endMs: lastHeldTs, firstHeldMs: firstHeldTs, restatements, metrics: counts.size, heldRows, observedMs, heldValues: values, qualifies });
+    ret = null; // a return piece that never qualified: return readings, left in samples
+    if (anchor != null && cur.heldRows > 0) {
+      const q = qualifies(cur);
+      if (q || keep(anchor, cur.firstHeldTs)) {
+        out.push({ startMs: anchor, endMs: cur.lastHeldTs, firstHeldMs: cur.firstHeldTs, restatements: restatementsOf(cur), metrics: cur.counts.size, heldRows: cur.heldRows, observedMs: cur.observedMs, observed: cur.observed, heldValues: cur.values, qualifies: q });
       }
     }
-    counts = new Map();
-    values = new Map();
-    heldRows = 0;
-    firstHeldTs = Number.POSITIVE_INFINITY;
-    lastHeldTs = Number.NEGATIVE_INFINITY;
-    observedMs = 0;
+    cur = newStretchAcc();
   };
   return {
     /** Rows in ts order (ties in any order). May be called once per chunk. */
@@ -274,28 +337,58 @@ export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs:
         }
         if (changed) {
           close();
-          anchor = ts;
+          setAnchor(ts);
         } else {
-          // v1.188.1 (dry run) — after a gap with no rows the stretch before it is over: its end
-          // is its last restated row, not the first row after the silence (the anchor is kept).
-          if (prevRowTs != null && ts - prevRowTs > bridgeMs && heldRows > 0) close();
+          if (prevRowTs != null && ts - prevRowTs > returnGapMs) {
+            // A silence. What came before it that cannot become part of a hold any more stays in
+            // samples, and the stretch starts again from its last row: a return piece that did not
+            // qualify on its own, or a stretch that neither qualifies nor extends a moved span.
+            if (ret != null) {
+              const kept = ret.lastHeldTs;
+              close();
+              setAnchor(kept);
+            } else if (cur.heldRows > 0 && !qualifies(cur) && !(anchor != null && keep(anchor, cur.firstHeldTs))) {
+              const kept = cur.lastHeldTs;
+              close();
+              setAnchor(kept);
+            }
+            ret = newStretchAcc();
+          }
+          const acc = ret ?? cur;
           for (let k = i; k < j; k++) {
             const m = rows[k].metric;
-            counts.set(m, (counts.get(m) ?? 0) + 1);
-            values.set(m, rows[k].value);
+            acc.counts.set(m, (acc.counts.get(m) ?? 0) + 1);
+            acc.values.set(m, rows[k].value);
           }
-          heldRows += j - i;
-          if (ts < firstHeldTs) firstHeldTs = ts;
-          lastHeldTs = ts;
+          acc.heldRows += j - i;
+          if (ts < acc.firstHeldTs) acc.firstHeldTs = ts;
+          acc.lastHeldTs = ts;
           // Only an interval between two rows a heartbeat or two apart is observed constancy.
-          if (prevRowTs != null && ts - prevRowTs <= bridgeMs) observedMs += ts - prevRowTs;
+          if (prevRowTs != null && ts - prevRowTs <= bridgeMs) {
+            acc.observedMs += ts - prevRowTs;
+            const run = acc.observed[acc.observed.length - 1];
+            if (run != null && run[1] === prevRowTs) run[1] = ts;
+            else acc.observed.push([prevRowTs, ts]);
+          }
+          // A return piece that has qualified on its own is a hold: it joins the stretch.
+          if (ret != null && qualifies(ret)) {
+            for (const [m, n] of ret.counts) cur.counts.set(m, (cur.counts.get(m) ?? 0) + n);
+            for (const [m, v] of ret.values) cur.values.set(m, v);
+            cur.heldRows += ret.heldRows;
+            if (ret.firstHeldTs < cur.firstHeldTs) cur.firstHeldTs = ret.firstHeldTs;
+            cur.lastHeldTs = ret.lastHeldTs;
+            cur.observedMs += ret.observedMs;
+            cur.observed.push(...ret.observed);
+            ret = null;
+          }
+          prevRowTs = ts;
         }
-        prevRowTs = ts;
         for (let k = i; k < j; k++) last.set(rows[k].metric, rows[k].value);
         i = j;
       }
     },
-    /** Close the trailing stretch (a hold still running at the scan's end) and return them all. */
+    /** Close the trailing stretch (a hold still running at the scan's end) and return them all. A
+     *  return piece still too short is left for a later scan (it re-reads it). */
     finish(): FrozenStretch[] {
       close();
       return out;
@@ -392,8 +485,9 @@ export const HELD_SAMPLES_SQL = {
 
 /** v1.188.1 (dry run) — the held-span reads of the scan: exported so a test can count them. */
 export const HELD_SPANS_SQL = {
-  /** A device's frozen spans, read ONCE per device per scan (planScan). */
-  frozenOf: "SELECT start_ts, end_ts FROM held_spans WHERE sn = ? AND reason = 'frozen'",
+  /** A device's frozen spans, read ONCE per device per scan (planScan). v1.188.1 (review 2) — not
+   *  the restored ones: their rows are back in samples, and a scan reads them like any other. */
+  frozenOf: "SELECT start_ts, end_ts FROM held_spans WHERE sn = ? AND reason = 'frozen' AND restored_at_ms IS NULL",
 } as const;
 
 export interface HeldScanSummary {
@@ -420,6 +514,9 @@ export interface HeldSamplesOptions {
   /** Called after a slice of a span was moved: no row of `sn` in (spanStartMs, endMs] is left in
    *  `samples`, and spanStartMs is the stretch's last fresh reading. */
   onMoved?: (sn: string, startMs: number, endMs: number) => void;
+  /** v1.188.1 (review 2) — called after a span was restored: the rows of `sn` in (startMs, endMs]
+   *  are back in `samples`, so whatever onMoved re-dated from them goes back too. */
+  onRestored?: (sn: string, startMs: number, endMs: number) => void;
   now?: () => number;
 }
 
@@ -442,6 +539,12 @@ interface MoveJob {
   stretch: FrozenStretch;
   /** First slice of a span no earlier scan had found: the span is logged once, here. */
   announce: boolean;
+  /** v1.188.1 (review 2) — the whole range this scan moves for the stretch, (rangeFromMs,
+   *  rangeToMs]: what its log lines state, and what the held-flow estimate covers. */
+  rangeFromMs: number;
+  rangeToMs: number;
+  /** v1.188.1 (review 2) — the range extends a span an earlier scan moved (its last slice says so). */
+  extension: boolean;
 }
 
 export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
@@ -601,17 +704,20 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       // v1.188.1 (dry run) — the frozen spans are read once here, not once per stretch: the
       // finishing step looked one up for every stretch the device had (100 k–486 k per device over
       // the retention window, 1.6–5.4 s of the alarm thread per device on the Pi). A stretch that
-      // does not qualify is kept only to extend a span an earlier scan moved, when its first
-      // restated row is within one bridge of where that span ends: a hold still running, whose
-      // first remaining row follows the moved ones by a heartbeat. A device back after a gap with
-      // a first group equal to its held values is a fresh reading and is not moved.
+      // does not qualify is kept only to extend a span an earlier scan moved: a hold still running,
+      // from the same last fresh reading.
+      //
+      // v1.188.1 (review 2) — the scanner measures the first row after such a span from where the
+      // span ends (movedThroughMs), so a hole of up to an hour inside the hold (a restart) extends
+      // it, and a device back after a longer silence is a return piece, moved only once it has
+      // qualified on its own (createFrozenScanner). The dry run's rule — extend only when the first
+      // row is within one bridge of the span's end — left the tail of a running hold in samples
+      // after any hole longer than two heartbeats.
       const frozenEnds = readFrozenEnds(sn);
       const scanner = createFrozenScanner(prev, anchor, {
         ...FROZEN_DEFAULTS,
-        keepUnqualified: (startMs, firstHeldMs) => {
-          const end = frozenEnds.get(startMs);
-          return end != null && firstHeldMs - end <= HELD_ROW_BRIDGE_MS;
-        },
+        keepUnqualified: (startMs) => frozenEnds.has(startMs),
+        movedThroughMs: (anchorMs) => frozenEnds.get(anchorMs),
       });
       scanQueue.push({ sn, metrics, fromMs, toMs: atMs, cursorMs: fromMs, frozenEnds, scanner });
     }
@@ -643,15 +749,13 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     const restored = (restoredOfStmt.all(job.sn) as Array<{ start_ts: number; end_ts: number }>)
       .map((r) => ({ startMs: Number(r.start_ts), endMs: Number(r.end_ts) }));
     const moveUntil = scanToMs - HELD_MOVE_MIN_AGE_MS;
-    // Where each span's moves end: an earlier scan's, then this scan's. Two stretches of one scan
-    // share a start when a gap split a hold (createFrozenScanner): the second continues the first.
-    const ends = new Map(job.frozenEnds);
-    const counted = new Set<number>();
+    // v1.188.1 (review 2) — one stretch per last fresh reading per scan: a hole inside a hold no
+    // longer splits it (createFrozenScanner), so nothing is chained here any more.
     for (const s of stretches) {
       // A span an earlier scan already moved is extended from where that move stopped. Its tail
       // alone may restate each metric only once or twice (the rows before it are gone): it is
       // still the same hold, from the same last fresh reading.
-      const priorEnd = ends.get(s.startMs);
+      const priorEnd = job.frozenEnds.get(s.startMs);
       if (restored.some((r) => overlapMs(r.startMs, r.endMs, s.startMs, s.endMs) > 0)) {
         o.log(`recorder: ${job.sn} held stretch ${new Date(s.startMs).toISOString()} → ${new Date(s.endMs).toISOString()} was restored earlier — left in samples`);
         continue;
@@ -659,14 +763,28 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       const end = Math.min(s.endMs, moveUntil);
       const from = priorEnd == null ? s.startMs : Math.max(s.startMs, priorEnd);
       if (end <= from) continue;
-      if (!counted.has(s.startMs)) scanSpans++;
-      counted.add(s.startMs);
-      ends.set(s.startMs, end);
+      scanSpans++;
       for (let a = from; a < end; a += HELD_MOVE_SLICE_MS) {
-        moveQueue.push({ sn: job.sn, spanStartMs: s.startMs, fromMs: a, toMs: Math.min(end, a + HELD_MOVE_SLICE_MS), stretch: s, announce: priorEnd == null && a === from });
+        moveQueue.push({ sn: job.sn, spanStartMs: s.startMs, fromMs: a, toMs: Math.min(end, a + HELD_MOVE_SLICE_MS), stretch: s, announce: priorEnd == null && a === from, rangeFromMs: from, rangeToMs: end, extension: priorEnd != null });
       }
     }
     return true;
+  }
+
+  /**
+   * The held flow the lifetime counters had integrated over the rows a move range covers. The
+   * counters integrate across the 5-min heartbeats (aggregator.integrateWh bridges up to 10 min)
+   * but not across a longer gap: the held flow ran for the stretch's OBSERVED time. v1.188.1 (dry
+   * run) — not endMs − firstHeldMs: a stretch with a gap inside it (rows on both sides) overstated
+   * it, 400.8 kWh of pv_total on the live database where its held rows covered about 23 h (about
+   * 36 kWh). v1.188.1 (review 2) — and only the observed time inside the range moved, so the ranges
+   * of one span (its first scan, then each extension) add up to its held flow, each part once.
+   */
+  function heldFlowEstimate(job: MoveJob): string {
+    const flows = [...job.stretch.heldValues].filter(([m, v]) => LIFETIME_FLOW_METRIC.test(m) && v > 0);
+    if (flows.length === 0) return '';
+    const ms = observedWithinMs(job.stretch, job.rangeFromMs, job.rangeToMs);
+    return `; the lifetime energy counters had integrated about ${flows.map(([m, v]) => `${(v * ms / HOUR_MS / 1000).toFixed(1)} kWh of ${m}`).join(', ')} from these held readings, which are not rewritten (Home Assistant reads a decrease as a meter reset)`;
   }
 
   /** One slice moved: copy, delete, check the counts agree, log the span — one transaction. */
@@ -701,17 +819,13 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     const lastSlice = !moveQueue.some((m) => m.sn === job.sn && m.spanStartMs === job.spanStartMs);
     if (job.announce) {
       const s = job.stretch;
-      const flows = [...s.heldValues].filter(([m, v]) => LIFETIME_FLOW_METRIC.test(m) && v > 0);
-      // The counters integrate across the 5-min heartbeats (aggregator.integrateWh bridges up to
-      // 10 min) but not across a longer gap: the held flow ran for the stretch's OBSERVED time.
-      // v1.188.1 (dry run) — not endMs − firstHeldMs: a stretch with a gap inside it (rows on both
-      // sides) overstated it, 400.8 kWh of pv_total on the live database where its held rows
-      // covered about 23 h (about 36 kWh).
-      const est = flows.length === 0 ? '' : `; the lifetime energy counters had integrated about ${flows.map(([m, v]) => `${(v * s.observedMs / HOUR_MS / 1000).toFixed(1)} kWh of ${m}`).join(', ')} from these held readings, which are not rewritten (Home Assistant reads a decrease as a meter reset)`;
-      o.log(`recorder: ⚠ HELD SAMPLES — ${job.sn} restated its last reading from ${new Date(s.startMs).toISOString()} to ${new Date(s.endMs).toISOString()} (${s.metrics} metrics, up to ${s.restatements} restatements each, no value changed); those rows are being moved from samples to held_samples — kept, not deleted, and restorable${est}`);
+      o.log(`recorder: ⚠ HELD SAMPLES — ${job.sn} restated its last reading from ${new Date(s.startMs).toISOString()} to ${new Date(job.rangeToMs).toISOString()} (${s.metrics} metrics, up to ${s.restatements} restatements each, no value changed); those rows are being moved from samples to held_samples — kept, not deleted, and restorable${heldFlowEstimate(job)}`);
     }
     if (lastSlice) {
-      o.log(`recorder: held samples of ${job.sn} up to ${new Date(job.toMs).toISOString()} moved to held_samples`);
+      // v1.188.1 (review 2) — a span an earlier scan moved, extended: its range and its held flow
+      // are stated here (the HELD SAMPLES line covered only what that scan moved).
+      const ext = job.extension ? ` — the held span from ${new Date(job.spanStartMs).toISOString()} continued from ${new Date(job.rangeFromMs).toISOString()}${heldFlowEstimate(job)}` : '';
+      o.log(`recorder: held samples of ${job.sn} up to ${new Date(job.toMs).toISOString()} moved to held_samples${ext}`);
     }
     return true;
   }
@@ -802,6 +916,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       throw e;
     }
     o.log(`recorder: restored ${n} held sample(s) of ${sn} (${new Date(startMs).toISOString()} → ${new Date(Number(span.end_ts)).toISOString()}) to samples; this span will not be excluded again`);
+    o.onRestored?.(sn, startMs, Number(span.end_ts));
     return n;
   }
 
