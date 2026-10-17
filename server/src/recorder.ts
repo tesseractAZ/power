@@ -80,6 +80,16 @@ export interface TelemetryGap {
    *  writing. The silence was found six weeks later, by reading a forecast
    *  table, only because it had corrupted the night-charge basis gate. */
   sn?: string;
+  /** v1.188.1 (dry run) — on a per-device record whose start was moved EARLIER, the start it was
+   *  first filed with. Its alert id (alerts.ts deviceGapAlertId) stays keyed on this one, so the
+   *  push and digest dedupe hold for the same blackout; `startMs` is then the device's last fresh
+   *  reading. Absent while the start never moved. See recordTelemetryGap. */
+  alertStartMs?: number;
+  /** v1.188.1 (dry run) — on an in-process FLEET gap: the home devices the freshness gate held
+   *  while the recorder kept evaluating the fleet and wrote no home row (`shadow`: the panel's
+   *  cloud-shadow latch; otherwise content older than RECORD_FRESH_MS). Present only when the
+   *  gate explains the silence, so the alert does not blame a broker stall. */
+  held?: Array<{ sn: string; shadow: boolean }>;
 }
 
 /**
@@ -1170,11 +1180,21 @@ export function createRecorder(
     },
     // A device still on its SEEDED gap clock whose newest persisted sample was a held row now
     // moved: its clock goes back to the last fresh sample, so the per-device sweep measures the
-    // silence from where it really began (and a later boot's seed, which reads the same row,
-    // extends the same record instead of opening a second one).
+    // silence from where it really began.
+    //
+    // v1.188.1 (dry run) — and a per-device gap record already filed from that held row (by this
+    // boot's sweep before the scan, or by an earlier version: the record was filed from the
+    // pre-move seed) is re-dated to the same last fresh sample, keeping its alert id
+    // (redateDeviceGap). Before, this comment said a later boot's seed "extends the same record":
+    // it did not. That seed reads the kept last fresh row, earlier than the record's start, and
+    // recordTelemetryGap matched a device record only on its exact start, so the next restart
+    // filed a SECOND record with a new id for every Core still dark: four more warnings pushed at
+    // once and Device Telemetry Gaps 24h doubled. recordTelemetryGap now also extends an
+    // overlapping record that starts later (for a record this process never re-dated).
     onMoved: (sn, startMs, endMs) => {
       const seed = lastInsertBySn.get(sn);
       if (seededNotYetWritten.has(sn) && seed != null && seed > startMs && seed <= endMs) lastInsertBySn.set(sn, startMs);
+      redateDeviceGap(sn, startMs, endMs);
     },
   });
   // The scan runs on its own timer in the add-on (one step per tick) and only on request
@@ -1292,7 +1312,45 @@ export function createRecorder(
     } catch { return []; }
   })();
 
-  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean; graceful?: boolean; sn?: string }) {
+  const persistTelemetryGaps = () => {
+    if (telemetryGapsLog.length > GAPS_MAX) telemetryGapsLog.splice(0, telemetryGapsLog.length - GAPS_MAX);
+    try {
+      writeFileSync(gapsPath, JSON.stringify(telemetryGapsLog), { mode: 0o644 });
+    } catch (e: any) {
+      log(`recorder: failed to persist telemetry gap (${e?.message ?? e})`);
+    }
+  };
+
+  /**
+   * v1.188.1 (dry run) — move a per-device record's start EARLIER, to the device's true last fresh
+   * reading, keeping its alert id. Moved, not left: every row after that reading, from which the
+   * record had been filed, was a held restatement (now in held_samples, or never written behind the
+   * gate), so the device has delivered no fresh reading since `toStartMs`. A record left at the
+   * later start understates the blackout by the whole hold, and its alert would push "no data for
+   * N min (<the last held row> → …)", a start nothing measured. The id stays on the start the
+   * record was first filed with (`alertStartMs`): the id is the push and digest dedupe key, so a
+   * re-keyed id would push the same blackout again. Per-device records are always in the ≥ 6 h
+   * duration tier (the sweep's own threshold), so the longer duration keeps the tier too.
+   */
+  function moveDeviceGapStart(g: TelemetryGap, toStartMs: number): void {
+    if (!(toStartMs < g.startMs)) return;
+    g.alertStartMs ??= g.startMs;
+    g.startMs = toStartMs;
+    g.durationMs = g.endMs - toStartMs;
+  }
+
+  /** v1.188.1 (dry run) — onMoved: the per-device record of `sn` whose start was one of the rows
+   *  just moved (in (spanStartMs, movedToMs]) starts at the span's last fresh reading instead. */
+  function redateDeviceGap(sn: string, spanStartMs: number, movedToMs: number): void {
+    const g = telemetryGapsLog.find((x) => x.sn === sn && x.startMs > spanStartMs && x.startMs <= movedToMs);
+    if (!g) return;
+    const from = g.startMs;
+    moveDeviceGapStart(g, spanStartMs);
+    persistTelemetryGaps();
+    log(`recorder: device telemetry gap of ${sn} re-dated from ${new Date(from).toISOString()} to its last fresh reading ${new Date(spanStartMs).toISOString()} (the rows between were held restatements, moved to held_samples) — ${Math.round(g.durationMs / 60_000)} min, the same record`);
+  }
+
+  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean; graceful?: boolean; sn?: string; held?: TelemetryGap['held'] }) {
     // v0.80.0 — an ONGOING blackout re-detects at EVERY boot with the same
     // startMs (no home sample landed in between), e.g. consecutive restarts
     // inside one multi-hour power outage. Extend the existing record in place
@@ -1304,26 +1362,33 @@ export function createRecorder(
       // would share the fleet record's identity and a device blackout could
       // silently extend an unrelated restart-spanning gap.
       ? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs === startMs)
+        // v1.188.1 (dry run) — or on an OVERLAPPING record of that device that starts later: the
+        // same blackout, filed from a later instant. Its start was a held row that has since been
+        // moved, and this boot's seed reads the kept last fresh row, earlier. Matched only on the
+        // exact start, the next restart filed a second record (a new id: one more pushed warning
+        // per Core still dark, and system_device_gap_count_24h doubled). The record is extended
+        // and its start moved to this one (moveDeviceGapStart), its id kept. A device that wrote
+        // since that record starts its next gap after the record's end, so it never matches.
+        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && startMs < g.startMs && g.startMs <= endMs)
       : opts?.restartSpanning
         ? telemetryGapsLog.find((g) => g.restartSpanning === true && g.startMs === startMs)
         : undefined;
     const gap: TelemetryGap = prior ?? { startMs, endMs, durationMs: endMs - startMs, detectedAt: endMs };
+    let movedFrom: number | null = null;
     if (prior) {
+      if (startMs < prior.startMs) movedFrom = prior.startMs;
       prior.endMs = endMs;
-      prior.durationMs = endMs - startMs;
+      prior.durationMs = endMs - prior.startMs;
       prior.detectedAt = endMs;
+      moveDeviceGapStart(prior, startMs);
     } else {
       if (opts?.restartSpanning) gap.restartSpanning = true;
       if (opts?.graceful) gap.graceful = true;
       if (opts?.sn) gap.sn = opts.sn;
+      if (opts?.held && opts.held.length > 0) gap.held = opts.held;
       telemetryGapsLog.push(gap);
     }
-    if (telemetryGapsLog.length > GAPS_MAX) telemetryGapsLog.splice(0, telemetryGapsLog.length - GAPS_MAX);
-    try {
-      writeFileSync(gapsPath, JSON.stringify(telemetryGapsLog), { mode: 0o644 });
-    } catch (e: any) {
-      log(`recorder: failed to persist telemetry gap (${e?.message ?? e})`);
-    }
+    persistTelemetryGaps();
     const mins = Math.round(gap.durationMs / 60_000);
     const range = `${new Date(startMs).toISOString()} → ${new Date(endMs).toISOString()}`;
     // Both variants share the "TELEMETRY GAP — no home-device samples for N min"
@@ -1333,12 +1398,15 @@ export function createRecorder(
       // v1.150.0 — a SINGLE device went dark while the rest of the fleet kept
       // writing. Named separately because the fleet stem would be a lie: home
       // samples were arriving the whole time, just not from this SN.
-      log(`recorder: ⚠ DEVICE TELEMETRY GAP — ${opts.sn} wrote no samples for ${mins} min (${range}) while other home devices kept reporting; anything summed over the fleet in that window UNDER-COUNTS`);
+      const redated = movedFrom == null ? '' : ` (the same record, re-dated from ${new Date(movedFrom).toISOString()} to its last fresh sample)`;
+      log(`recorder: ⚠ DEVICE TELEMETRY GAP — ${opts.sn} wrote no samples for ${mins} min (${range}) while other home devices kept reporting${redated}; anything summed over the fleet in that window UNDER-COUNTS`);
     } else if (opts?.restartSpanning) {
       const cause = opts?.graceful ? 'a deliberate add-on stop/update' : 'host down or add-on stopped';
       log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}) spanning a restart (${cause}); history in that window is unrecoverable`);
     } else {
-      log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}); writes resumed`);
+      // v1.188.1 (dry run) — when the gate held every home device it saw, say so.
+      const why = gap.held == null ? '' : ` — the recorder kept evaluating the fleet but held ${gap.held.map((h) => `${h.sn} (${h.shadow ? 'cloud shadow' : 'no fresh content'})`).join(', ')}`;
+      log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range})${why}; writes resumed`);
     }
   }
 
@@ -1489,8 +1557,23 @@ export function createRecorder(
     }
   };
 
-  function record(samples: MetricSample[]) {
-    if (samples.length === 0) return;
+  /**
+   * v1.188.1 (dry run) — the home devices the freshness gate held in an evaluation that wrote no
+   * home row, since the last home write (`shadow` once any of them was the panel's cloud shadow).
+   * Before the gate a held projection was restated every 5 min, so a fleet gap meant no change
+   * event reached the recorder at all; the in-process alert named that an MQTT/broker stall. With
+   * the gate, a silence in which the recorder kept evaluating the fleet and found every home device
+   * held (the panel shadowed or stale while no Core has a projection, say) files the same 15-min
+   * gap, and the alert says what was measured instead (alerts.ts outageAlerts). Cleared by every
+   * home write.
+   */
+  const silenceHeld = new Map<string, boolean>();
+  const silenceHeldList = (): TelemetryGap['held'] =>
+    [...silenceHeld].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([sn, shadow]) => ({ sn, shadow }));
+
+  /** Returns true when a home-device row was written. */
+  function record(samples: MetricSample[]): boolean {
+    if (samples.length === 0) return false;
     const now = Date.now();
     const tx = db.prepare('BEGIN');
     tx.run();
@@ -1595,11 +1678,12 @@ export function createRecorder(
         lastHomeInsertTs = now;
       } else {
         if (detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
-          recordTelemetryGap(lastHomeInsertTs, now);
+          recordTelemetryGap(lastHomeInsertTs, now, { held: silenceHeldList() });
         }
         lastHomeInsertTs = now;
       }
-      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now);
+      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList() });
+      silenceHeld.clear();
     }
     // v0.9.74 — silence per-tick chatter. The previous "wrote N samples"
     // line fired every 10 s under normal load (~44 lines/min, ~88 % of
@@ -1645,6 +1729,7 @@ export function createRecorder(
       recordedSamplesPeak = 0;
       lastSampleLogAt = tickNowMs;
     }
+    return sawHomeInsert;
   }
   /** v1.150.0 — one summary per 30 one-minute windows: ~2/h instead of ~59.4/h,
    *  a 30x cut on the largest single log source. 30 min is well inside the ring's
@@ -1800,7 +1885,14 @@ export function createRecorder(
   function recordSnapshot(snap: FleetSnapshot): void {
     const nowMs = Date.now();
     const held = new Map<string, { sinceMs: number | null; shadow: boolean }>();
-    record(extract(snap, nowMs, held));
+    const wroteHome = record(extract(snap, nowMs, held));
+    // v1.188.1 (dry run) — what explains a silence, if one is under way (silenceHeld).
+    if (!wroteHome) {
+      for (const [sn, h] of held) {
+        if (SYNTHETIC_SNS.has(sn) || isBenchSpareSn(sn)) continue;
+        silenceHeld.set(sn, (silenceHeld.get(sn) ?? false) || h.shadow);
+      }
+    }
     try {
       heldStore.noteGate(held, nowMs);
     } catch (e: any) {

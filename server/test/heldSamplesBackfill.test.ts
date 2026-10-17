@@ -301,7 +301,10 @@ test('★★ in the add-on the scan starts by itself a minute after boot, one st
       let ticks = 0;
       while (!rec.heldSamplesReady!() && ticks < 1_000) { t.mock.timers.tick(5); ticks++; }
       assert.equal(rec.heldSamplesReady!(), true, lines.join('\n'));
-      assert.ok(ticks > 20, `one device-day or one move slice per tick (${ticks} ticks)`);
+      // Five devices, each read in two six-hour chunks from its OLDEST row (v1.188.1 dry run: not
+      // from the 30-day retention horizon, 120 chunks each), and CORE_A's hold in four one-hour
+      // slices: one per tick.
+      assert.ok(ticks >= 5 * 2 + 4, `one device-chunk or one move slice per tick (${ticks} ticks)`);
       assert.equal(all('held_samples').length, heldA.length);
     } finally { rec.close(); }
   } finally {
@@ -347,7 +350,10 @@ test('createFrozenScanner — a change closes a stretch; restatements, metrics a
   const s3 = createFrozenScanner(prev, 0, opts);
   s3.feed(rowsAt(10 * MIN, 1, 2));
   s3.feed(rowsAt(70 * MIN, 1, 2));
-  assert.deepEqual(s3.finish().map((x) => x.qualifies), [false], 'two restatements are not three');
+  // v1.188.1 (dry run) — the hour with no rows between them splits them: two one-row stretches
+  // from the same last change (before, one stretch whose end moved onto the row after the gap).
+  assert.deepEqual(s3.finish().map((x) => [x.startMs, x.firstHeldMs, x.endMs, x.restatements, x.qualifies]),
+    [[0, 10 * MIN, 10 * MIN, 1, false], [0, 70 * MIN, 70 * MIN, 1, false]], 'a gap ends a stretch; neither restates three times');
   const s4 = createFrozenScanner(new Map(), null, opts);
   for (let k = 0; k <= 13; k++) s4.feed(rowsAt(k * 5 * MIN, 1, 2));
   const out4 = s4.finish();

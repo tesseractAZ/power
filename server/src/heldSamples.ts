@@ -155,6 +155,10 @@ export interface FrozenStretch {
   metrics: number;
   /** Restated rows. */
   heldRows: number;
+  /** v1.188.1 (dry run) — the observed constancy: the intervals of the stretch between two rows
+   *  no more than the bridge apart (the length `qualifies` tests). The lifetime counters integrate
+   *  the held flow over exactly these intervals (integrateWh bridges up to 10 min). */
+  observedMs: number;
   /** Each restated metric's value (identical throughout, by construction). */
   heldValues: Map<string, number>;
   /** Meets the length, restatement and metric thresholds on its own. A stretch that does not
@@ -171,6 +175,12 @@ export interface FrozenScanOptions {
    *  `minSpanMs`; a longer one is a gap with no rows, observed as nothing. Optional (default
    *  HELD_ROW_BRIDGE_MS) so a caller's options from before it keep their meaning. */
   bridgeMs?: number;
+  /** v1.188.1 (dry run) — which stretches that do NOT qualify are returned, by their last fresh
+   *  instant and first restated row. Omitted, every stretch is returned (flagged). The held-sample
+   *  scan keeps only the tail of a span an earlier scan moved: a live device produces a stretch
+   *  between every two changes, hundreds of thousands per device over the retention window, and
+   *  kept until the device finished each held its own Map (+190–360 MB in the dry run). */
+  keepUnqualified?: (startMs: number, firstHeldMs: number) => boolean;
 }
 
 /**
@@ -203,7 +213,17 @@ export const FROZEN_DEFAULTS: FrozenScanOptions = {
  * the gate (v1.188.1) makes such gaps whenever a device's content is more than 3 min old. The
  * cost is deliberate: a replayed body after a long gap is caught once it has been restated for
  * an hour, not before (the gate's own span over the gap still refuses the night-ledger row).
- * Every stretch with restated rows is returned, flagged `qualifies` when it meets the thresholds.
+ * Every stretch with restated rows is returned, flagged `qualifies` when it meets the thresholds
+ * (or, with `keepUnqualified`, every qualifying one and the non-qualifying ones it keeps).
+ *
+ * v1.188.1 (dry run) — a restated group that follows a gap longer than `bridgeMs` ENDS the
+ * stretch at its last restated row before the gap, and starts another from the same last fresh
+ * instant. The gap was already not counted as observed time, but the stretch's end moved onto the
+ * first row after it: on the live database a Core held for ~23 h, silent for 9.8 days, came back
+ * with one group equal to its held values, and that return reading was moved with the span, which
+ * then claimed 257.9 h across the silence (and the night-ledger rows of days it had no rows). A
+ * replayed body restated for an hour after a gap still qualifies on its own, from the last change
+ * before it (a hold, as above); a single equal return group does not.
  *
  * `prev` is each metric's value before the first fed row and `anchorMs` the ts of the newest such
  * row (the last fresh instant before the scan, when the scan starts mid-hold); both empty/null on
@@ -223,12 +243,15 @@ export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs:
   /** Observed constancy: the intervals of the stretch no longer than bridgeMs. */
   let observedMs = 0;
   const out: FrozenStretch[] = [];
+  const keep = opts.keepUnqualified ?? (() => true);
   const close = () => {
     if (anchor != null && heldRows > 0) {
       let restatements = 0;
       for (const n of counts.values()) if (n > restatements) restatements = n;
       const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;
-      out.push({ startMs: anchor, endMs: lastHeldTs, firstHeldMs: firstHeldTs, restatements, metrics: counts.size, heldRows, heldValues: values, qualifies });
+      if (qualifies || keep(anchor, firstHeldTs)) {
+        out.push({ startMs: anchor, endMs: lastHeldTs, firstHeldMs: firstHeldTs, restatements, metrics: counts.size, heldRows, observedMs, heldValues: values, qualifies });
+      }
     }
     counts = new Map();
     values = new Map();
@@ -253,6 +276,9 @@ export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs:
           close();
           anchor = ts;
         } else {
+          // v1.188.1 (dry run) — after a gap with no rows the stretch before it is over: its end
+          // is its last restated row, not the first row after the silence (the anchor is kept).
+          if (prevRowTs != null && ts - prevRowTs > bridgeMs && heldRows > 0) close();
           for (let k = i; k < j; k++) {
             const m = rows[k].metric;
             counts.set(m, (counts.get(m) ?? 0) + 1);
@@ -356,9 +382,18 @@ export function samplesGenerationReader(db: DatabaseSync): () => number {
  */
 export const HELD_SAMPLES_SQL = {
   prevValue: 'SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts <= ? ORDER BY ts DESC LIMIT 1',
+  /** v1.188.1 (dry run) — a series' oldest row (the first full scan starts each device there), the
+   *  boot seed's MAX(ts) seek mirrored: one index SEARCH per (sn, metric). */
+  minTs: 'SELECT MIN(ts) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts WHERE sn = ? AND metric = ?',
   chunkRows: 'SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts > ? AND ts <= ? ORDER BY ts ASC',
   moveCopy: 'INSERT INTO held_samples (ts, sn, metric, value) SELECT ts, sn, metric, value FROM samples INDEXED BY idx_samples_ts WHERE ts > ? AND ts <= ? AND sn = ?',
   moveDelete: 'DELETE FROM samples INDEXED BY idx_samples_ts WHERE ts > ? AND ts <= ? AND sn = ?',
+} as const;
+
+/** v1.188.1 (dry run) — the held-span reads of the scan: exported so a test can count them. */
+export const HELD_SPANS_SQL = {
+  /** A device's frozen spans, read ONCE per device per scan (planScan). */
+  frozenOf: "SELECT start_ts, end_ts FROM held_spans WHERE sn = ? AND reason = 'frozen'",
 } as const;
 
 export interface HeldScanSummary {
@@ -367,6 +402,9 @@ export interface HeldScanSummary {
   /** Rows moved to held_samples by this scan. */
   rowsMoved: number;
   full: boolean;
+  /** v1.188.1 (dry run) — stretches the scanner kept for the move decision: those that qualify
+   *  and the tails of spans an earlier scan moved. Bounded by the holds, not by the rows. */
+  candidates: number;
 }
 
 export interface HeldSamplesOptions {
@@ -391,6 +429,8 @@ interface ScanJob {
   fromMs: number;
   toMs: number;
   cursorMs: number;
+  /** v1.188.1 (dry run) — the device's frozen spans as the scan began: start_ts → end_ts. */
+  frozenEnds: ReadonlyMap<number, number>;
   scanner: ReturnType<typeof createFrozenScanner>;
 }
 
@@ -408,6 +448,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   const now = o.now ?? Date.now;
   db.exec(HELD_SCHEMA_SQL);
   const prevValueStmt = db.prepare(HELD_SAMPLES_SQL.prevValue);
+  const minTsStmt = db.prepare(HELD_SAMPLES_SQL.minTs);
   const chunkRowsStmt = db.prepare(HELD_SAMPLES_SQL.chunkRows);
   const moveCopyStmt = db.prepare(HELD_SAMPLES_SQL.moveCopy);
   const moveDeleteStmt = db.prepare(HELD_SAMPLES_SQL.moveDelete);
@@ -423,7 +464,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   );
   const restoredOfStmt = db.prepare('SELECT start_ts, end_ts FROM held_spans WHERE sn = ? AND restored_at_ms IS NOT NULL');
   const markRestoredStmt = db.prepare('UPDATE held_spans SET restored_at_ms = ? WHERE sn = ? AND start_ts = ? AND reason = ?');
-  const spanOfStmt = db.prepare('SELECT end_ts FROM held_spans WHERE sn = ? AND start_ts = ? AND reason = ?');
+  const frozenOfStmt = db.prepare(HELD_SPANS_SQL.frozenOf);
   const scanStateStmt = db.prepare('SELECT scanned_to_ts, full_scan_at_ms FROM held_scan WHERE id = 1');
   const scanStateUpsertStmt = db.prepare(
     `INSERT INTO held_scan (id, scanned_to_ts, full_scan_at_ms) VALUES (1, ?, ?)
@@ -501,6 +542,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   const moveQueue: MoveJob[] = [];
   let scanSpans = 0;
   let scanRows = 0;
+  let scanCandidates = 0;
   let scanFull = false;
   let scanToMs = 0;
   let scanStartedAt = 0;
@@ -508,22 +550,43 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
    *  (+Infinity when none): the watermark is not saved past it, so the next scan re-reads it. */
   let failedFromMs = Number.POSITIVE_INFINITY;
 
+  /** v1.188.1 (dry run) — a device's frozen spans, start_ts → end_ts: one read per device per scan. */
+  function readFrozenEnds(sn: string): Map<number, number> {
+    const m = new Map<number, number>();
+    for (const r of frozenOfStmt.all(sn) as Array<{ start_ts: number; end_ts: number }>) m.set(Number(r.start_ts), Number(r.end_ts));
+    return m;
+  }
+
   /** Plan a scan: every device in `samples`, from the watermark (less the overlap) or, the first
-   *  time, from the retention horizon. */
+   *  time, from the retention horizon — or from the device's oldest row, when that is later. */
   function planScan(atMs: number): void {
     const st = scanStateStmt.get() as { scanned_to_ts: number; full_scan_at_ms: number | null } | undefined;
     const horizon = atMs - o.retainMs;
     scanFull = st?.full_scan_at_ms == null;
-    const fromMs = scanFull ? horizon : Math.max(horizon, Number(st!.scanned_to_ts) - HELD_RESCAN_OVERLAP_MS);
+    const scanFromMs = scanFull ? horizon : Math.max(horizon, Number(st!.scanned_to_ts) - HELD_RESCAN_OVERLAP_MS);
     scanToMs = atMs;
     scanStartedAt = atMs;
     scanSpans = 0;
     scanRows = 0;
+    scanCandidates = 0;
     failedFromMs = Number.POSITIVE_INFINITY;
     for (const sn of o.listSns()) {
       if (o.isExcludedSn(sn)) continue;
       const metrics = o.listMetrics(sn);
       if (metrics.length < HELD_MIN_METRICS) continue; // cannot qualify; never scanned
+      // v1.188.1 (dry run) — the first scan starts each device at its oldest row, not at the
+      // retention horizon: on the live database (1,825-day retention, data from 2025) 34,666 of
+      // its 36,500 six-hour steps read nothing, about half its wall time on the Pi. Nothing lies
+      // between the horizon and that row, so the scan reads exactly the same rows.
+      let fromMs = scanFromMs;
+      if (scanFull) {
+        let oldest = Number.POSITIVE_INFINITY;
+        for (const m of metrics) {
+          const v = (minTsStmt.get(sn, m) as { v: number | bigint | null } | undefined)?.v;
+          if (v != null && Number(v) < oldest) oldest = Number(v);
+        }
+        if (Number.isFinite(oldest)) fromMs = Math.max(scanFromMs, oldest - 1);
+      }
       // Each metric's value before the scan, and the newest such row: the last instant before the
       // scan. On an hourly scan that starts inside a hold whose earlier rows were already moved,
       // that row IS the hold's last fresh reading, so the stretch keeps its true start.
@@ -535,7 +598,22 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
         prev.set(m, r.value);
         if (anchor == null || r.ts > anchor) anchor = Number(r.ts);
       }
-      scanQueue.push({ sn, metrics, fromMs, toMs: atMs, cursorMs: fromMs, scanner: createFrozenScanner(prev, anchor) });
+      // v1.188.1 (dry run) — the frozen spans are read once here, not once per stretch: the
+      // finishing step looked one up for every stretch the device had (100 k–486 k per device over
+      // the retention window, 1.6–5.4 s of the alarm thread per device on the Pi). A stretch that
+      // does not qualify is kept only to extend a span an earlier scan moved, when its first
+      // restated row is within one bridge of where that span ends: a hold still running, whose
+      // first remaining row follows the moved ones by a heartbeat. A device back after a gap with
+      // a first group equal to its held values is a fresh reading and is not moved.
+      const frozenEnds = readFrozenEnds(sn);
+      const scanner = createFrozenScanner(prev, anchor, {
+        ...FROZEN_DEFAULTS,
+        keepUnqualified: (startMs, firstHeldMs) => {
+          const end = frozenEnds.get(startMs);
+          return end != null && firstHeldMs - end <= HELD_ROW_BRIDGE_MS;
+        },
+      });
+      scanQueue.push({ sn, metrics, fromMs, toMs: atMs, cursorMs: fromMs, frozenEnds, scanner });
     }
   }
 
@@ -556,28 +634,36 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     job.cursorMs = to;
     if (to < job.toMs) return true;
     scanQueue.shift();
+    // The scanner kept only the stretches that qualify and the tails of spans an earlier scan
+    // moved (planScan's keepUnqualified): every one returned here is a candidate.
     const stretches = job.scanner.finish();
+    scanCandidates += stretches.length;
     if (stretches.length === 0) return true;
     // (Restored spans are read once per device, only when it has a stretch.)
     const restored = (restoredOfStmt.all(job.sn) as Array<{ start_ts: number; end_ts: number }>)
       .map((r) => ({ startMs: Number(r.start_ts), endMs: Number(r.end_ts) }));
     const moveUntil = scanToMs - HELD_MOVE_MIN_AGE_MS;
+    // Where each span's moves end: an earlier scan's, then this scan's. Two stretches of one scan
+    // share a start when a gap split a hold (createFrozenScanner): the second continues the first.
+    const ends = new Map(job.frozenEnds);
+    const counted = new Set<number>();
     for (const s of stretches) {
       // A span an earlier scan already moved is extended from where that move stopped. Its tail
       // alone may restate each metric only once or twice (the rows before it are gone): it is
       // still the same hold, from the same last fresh reading.
-      const prior = spanOfStmt.get(job.sn, s.startMs, 'frozen') as { end_ts: number } | undefined;
-      if (!s.qualifies && prior == null) continue;
+      const priorEnd = ends.get(s.startMs);
       if (restored.some((r) => overlapMs(r.startMs, r.endMs, s.startMs, s.endMs) > 0)) {
         o.log(`recorder: ${job.sn} held stretch ${new Date(s.startMs).toISOString()} → ${new Date(s.endMs).toISOString()} was restored earlier — left in samples`);
         continue;
       }
       const end = Math.min(s.endMs, moveUntil);
-      const from = prior == null ? s.startMs : Math.max(s.startMs, Number(prior.end_ts));
+      const from = priorEnd == null ? s.startMs : Math.max(s.startMs, priorEnd);
       if (end <= from) continue;
-      scanSpans++;
+      if (!counted.has(s.startMs)) scanSpans++;
+      counted.add(s.startMs);
+      ends.set(s.startMs, end);
       for (let a = from; a < end; a += HELD_MOVE_SLICE_MS) {
-        moveQueue.push({ sn: job.sn, spanStartMs: s.startMs, fromMs: a, toMs: Math.min(end, a + HELD_MOVE_SLICE_MS), stretch: s, announce: prior == null && a === from });
+        moveQueue.push({ sn: job.sn, spanStartMs: s.startMs, fromMs: a, toMs: Math.min(end, a + HELD_MOVE_SLICE_MS), stretch: s, announce: priorEnd == null && a === from });
       }
     }
     return true;
@@ -617,8 +703,11 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       const s = job.stretch;
       const flows = [...s.heldValues].filter(([m, v]) => LIFETIME_FLOW_METRIC.test(m) && v > 0);
       // The counters integrate across the 5-min heartbeats (aggregator.integrateWh bridges up to
-      // 10 min) but not across a longer gap, so the held flow ran from the first restatement.
-      const est = flows.length === 0 ? '' : `; the lifetime energy counters had integrated about ${flows.map(([m, v]) => `${(v * (s.endMs - s.firstHeldMs) / HOUR_MS / 1000).toFixed(1)} kWh of ${m}`).join(', ')} from these held readings, which are not rewritten (Home Assistant reads a decrease as a meter reset)`;
+      // 10 min) but not across a longer gap: the held flow ran for the stretch's OBSERVED time.
+      // v1.188.1 (dry run) — not endMs − firstHeldMs: a stretch with a gap inside it (rows on both
+      // sides) overstated it, 400.8 kWh of pv_total on the live database where its held rows
+      // covered about 23 h (about 36 kWh).
+      const est = flows.length === 0 ? '' : `; the lifetime energy counters had integrated about ${flows.map(([m, v]) => `${(v * s.observedMs / HOUR_MS / 1000).toFixed(1)} kWh of ${m}`).join(', ')} from these held readings, which are not rewritten (Home Assistant reads a decrease as a meter reset)`;
       o.log(`recorder: ⚠ HELD SAMPLES — ${job.sn} restated its last reading from ${new Date(s.startMs).toISOString()} to ${new Date(s.endMs).toISOString()} (${s.metrics} metrics, up to ${s.restatements} restatements each, no value changed); those rows are being moved from samples to held_samples — kept, not deleted, and restorable${est}`);
     }
     if (lastSlice) {
@@ -641,7 +730,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     }
     ready = true;
     running = false;
-    return { spans: scanSpans, rowsMoved: scanRows, full: scanFull };
+    return { spans: scanSpans, rowsMoved: scanRows, full: scanFull, candidates: scanCandidates };
   }
 
   function failScan(e: any): void {
@@ -652,7 +741,8 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     o.log(`recorder: held-sample scan FAILED (${e?.message ?? e}) — rows written while a device was held may still be read as measurements until the next scan`);
   }
 
-  /** Run a whole scan synchronously (tests; never on the main thread in production). */
+  /** Run a whole scan synchronously, in one call (tests). Production runs scanInSteps instead, on
+   *  the same main thread — the alarm engine's — one step per timer tick. */
   function scanNow(atMs: number = now()): HeldScanSummary {
     if (running) throw new Error('a held-sample scan is already running');
     running = true;
@@ -666,7 +756,8 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     }
   }
 
-  /** Production: one step per timer tick, so no tick holds the event loop for long. */
+  /** Production: one step per timer tick, on the main thread (the recorder has no worker), so no
+   *  tick holds the event loop — and with it alarm evaluation — for long. */
   function scanInSteps(stepDelayMs = 5): void {
     if (running || stopped) return;
     running = true;

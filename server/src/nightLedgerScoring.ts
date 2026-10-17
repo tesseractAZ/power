@@ -643,10 +643,38 @@ export function basisIncompleteNote(v: HeldLedgerVerdict | null, name: (sn: stri
     + `${v.pv.length > 0 && v.load.length > 0 ? 'PV and load actuals are' : v.pv.length > 0 ? 'PV actual is' : 'load actual is'} left empty rather than integrated from held readings.`;
 }
 
-/** v1.188.1 — the clause appended to a row past the re-capture horizon. Carries the marker. PURE. */
+/** v1.188.1 — the clause appended to a row past the re-capture horizon. Carries the marker. PURE.
+ *  v1.188.1 (dry run) — it does not say the actuals were integrated from held readings: a hold
+ *  can cover hours with no rows at all (a device silent for days, then held), which the actuals
+ *  did not integrate, and the raw telemetry to tell the two apart is gone. */
 export function heldTagNote(v: HeldLedgerVerdict, name: (sn: string) => string): string {
-  return `Telemetry held: ${heldParts(v, name)} of the 24 h span had no fresh readings and the actuals were `
-    + 'integrated from held readings; the raw telemetry is past the re-capture horizon, so the row is kept as captured.';
+  return `Telemetry held: ${heldParts(v, name)} of the 24 h span had no fresh readings (held or missing); `
+    + 'the raw telemetry is past the re-capture horizon, so the row is kept as captured.';
+}
+
+/** v1.188.1 (dry run) — the actuals of a CAPTURED row that were integrated over held telemetry:
+ *  an actual is named only when its side was held (PV — a home Core; load — the panel) and it was
+ *  captured non-null. A null actual was never integrated, and an unheld side was not held. PURE. */
+export function heldIntegratedActuals(
+  v: HeldLedgerVerdict,
+  captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+): Array<'PV' | 'load'> {
+  const out: Array<'PV' | 'load'> = [];
+  if (v.pv.length > 0 && captured.actual_pv_kwh != null) out.push('PV');
+  if (v.load.length > 0 && captured.actual_load_kwh != null) out.push('load');
+  return out;
+}
+
+/** v1.188.1 (dry run) — what a held-telemetry reset says about the actuals as captured. PURE. */
+export function heldCapturedClause(
+  v: HeldLedgerVerdict,
+  captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+): string {
+  const named = heldIntegratedActuals(v, captured);
+  if (named.length > 0) return `the ${named.join(' and ')} actual${named.length > 1 ? 's' : ''} had been integrated from held readings`;
+  // Nothing integrated: every held side was captured empty.
+  const sides = [...(v.pv.length > 0 ? ['PV'] : []), ...(v.load.length > 0 ? ['load'] : [])];
+  return `the held ${sides.join(' and ')} actual${sides.length > 1 ? 's' : ''} had been captured empty, so nothing had been integrated from held readings`;
 }
 
 export interface HeldLedgerRepair {
@@ -684,11 +712,18 @@ export function heldLedgerRepair(
 }
 
 /** v1.188.1 — the columns a held-telemetry re-capture resets: exactly the forecast-span reset's
- *  columns, with its own note (no marker: the re-capture writes the verdict). PURE. */
-export function heldResetColumns(v: HeldLedgerVerdict, name: (sn: string) => string): Partial<NightLedgerRow> {
+ *  columns, with its own note (no marker: the re-capture writes the verdict). PURE.
+ *  v1.188.1 (dry run) — the note names only the actuals that were integrated over the hold
+ *  (heldIntegratedActuals): the 10-15 row's PV had been captured empty and its load came from
+ *  fresh panel rows, and the note said both had been integrated from held readings. */
+export function heldResetColumns(
+  v: HeldLedgerVerdict,
+  name: (sn: string) => string,
+  captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+): Partial<NightLedgerRow> {
   return {
     ...forecastSpanResetColumns(0),
-    score_notes: `reset — the PV/load actuals had been integrated from held readings (${heldParts(v, name)} with no fresh `
+    score_notes: `reset — ${heldCapturedClause(v, captured)} (${heldParts(v, name)} with no fresh `
       + 'readings, before v1.188.1); re-captured by the backfill sweep.',
   };
 }

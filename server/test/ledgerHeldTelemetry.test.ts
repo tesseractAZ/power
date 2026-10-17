@@ -16,7 +16,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   heldMsWithin, heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldResetColumns, heldTagNote,
-  basisIncompleteNote, BASIS_INCOMPLETE_NOTE,
+  heldIntegratedActuals, heldCapturedClause, basisIncompleteNote, BASIS_INCOMPLETE_NOTE,
   forecastSpanResetColumns, forecastSpanRecaptureHorizonMs, coverageFrac, integrateWh,
   HELD_LEDGER_MIN_OVERLAP_MS, HELD_TELEMETRY_MARKER, FORECAST_SPAN_MS, type LedgerHeldSpan,
 } from '../src/nightLedgerScoring.js';
@@ -51,6 +51,9 @@ const ROW_1014 = {
   pv_model_sns: CORES.join(','),
   delivered_kwh: null as number | null,
   delivered_basis: null as string | null,
+  // As v1.188.0 captured them: PV integrated from the held 0 W, load from the held panel rows.
+  actual_pv_kwh: 0 as number | null,
+  actual_load_kwh: 45.61 as number | null,
 };
 const HORIZON = forecastSpanRecaptureHorizonMs(30, 60);
 /** index.ts PV_LEDGER_MIN_CORE_COVERAGE (pinned against the source below). */
@@ -120,13 +123,13 @@ test('★★★ the repair: the captured 10-14 row is reset for re-capture; the 
   const nowMs = DEPLOY + 5 * MIN;
   const r = heldLedgerRepair(ROW_1014, { spans: SPANS, coreSns: CORES, panelSn: PANEL, nowMs, horizonMs: HORIZON });
   assert.equal(r?.action, 'recapture');
-  const cols = heldResetColumns(r!.verdict, name);
+  const cols = heldResetColumns(r!.verdict, name, ROW_1014);
   const { score_notes: a, ...resetA } = cols;
   const { score_notes: b, ...resetB } = forecastSpanResetColumns(0);
   assert.deepEqual(resetA, resetB, 'exactly the outcome columns the forecast-span reset clears (capture stamp first)');
   assert.equal(cols.outcome_captured_at_ms, null);
   assert.equal(cols.scored, 0);
-  assert.match(String(a), /^reset — the PV\/load actuals had been integrated from held readings \(/);
+  assert.match(String(a), /^reset — the PV and load actuals had been integrated from held readings \(PV — Core 1 /);
   assert.ok(!String(a).toLowerCase().includes(HELD_TELEMETRY_MARKER), 'the reset note is not the verdict');
   assert.ok(b);
   // After the re-capture the row carries the verdict: idempotent.
@@ -176,7 +179,7 @@ test('★★★ an incomplete-basis row on held telemetry is reset once, not on 
       if (fix) {
         assert.equal(fix.action, 'recapture');
         resets++;
-        r = { ...r, ...heldResetColumns(fix.verdict, name) } as typeof noBasis;
+        r = { ...r, ...heldResetColumns(fix.verdict, name, r) } as typeof noBasis;
       }
       if (r.outcome_captured_at_ms == null) r = { ...r, outcome_captured_at_ms: at, score_notes: `${capNote(verdict)} On-peak: none.` };
     }
@@ -197,6 +200,38 @@ test('★★ the span the repair reads is the one the row was captured over', ()
   // a hold starting after the capture is not in its actuals.
   const early = { ...ROW_1014, outcome_captured_at_ms: ROW_1014.issued_at_ms + 2 * H };
   assert.equal(heldLedgerRepair(early, { spans: SPANS, coreSns: CORES, panelSn: PANEL, nowMs: DEPLOY, horizonMs: HORIZON }), null);
+});
+
+/* ══ v1.188.1 dry run: the notes say what was integrated, and only that ═══════════ */
+
+test('★★ the reset note names only the actuals that were integrated over the hold (captured non-null, side held)', () => {
+  const both = heldLedgerVerdict({ spans: SPANS, coreSns: CORES, panelSn: PANEL, span: { startMs: ROW_1014.issued_at_ms, endMs: ROW_1014.issued_at_ms + FORECAST_SPAN_MS } })!;
+  assert.ok(both.pv.length === CORES.length && both.load.length === 1, 'precondition: PV and load both held');
+  assert.deepEqual(heldIntegratedActuals(both, { actual_pv_kwh: 0, actual_load_kwh: 45.61 }), ['PV', 'load']);
+  assert.deepEqual(heldIntegratedActuals(both, { actual_pv_kwh: null, actual_load_kwh: 45.61 }), ['load'], 'a PV captured empty was never integrated');
+  assert.deepEqual(heldIntegratedActuals(both, { actual_pv_kwh: 12.3, actual_load_kwh: null }), ['PV']);
+  // The 10-15 row: every Core held ~21 h, the panel not (its 2.4 h hold fell in the 10-14 span);
+  // PV captured null (the coverage gate refused it), load 55.42 kWh from fresh panel rows.
+  const pvOnly = { pv: both.pv, load: [] };
+  assert.deepEqual(heldIntegratedActuals(pvOnly, { actual_pv_kwh: null, actual_load_kwh: 55.42 }), [], '★★ nothing was integrated from held readings');
+  const note = String(heldResetColumns(pvOnly, name, { actual_pv_kwh: null, actual_load_kwh: 55.42 }).score_notes);
+  assert.match(note, /^reset — the held PV actual had been captured empty, so nothing had been integrated from held readings \(PV — Core 1 /, note);
+  assert.doesNotMatch(note, /actuals had been integrated/);
+  assert.doesNotMatch(note, /load actual/, 'the load was not held: it is not named');
+  assert.equal(heldCapturedClause(pvOnly, { actual_pv_kwh: 7.5, actual_load_kwh: 55.42 }), 'the PV actual had been integrated from held readings');
+  assert.equal(heldCapturedClause(both, { actual_pv_kwh: 0, actual_load_kwh: 45.61 }), 'the PV and load actuals had been integrated from held readings');
+  assert.equal(heldCapturedClause(both, { actual_pv_kwh: null, actual_load_kwh: null }), 'the held PV and load actuals had been captured empty, so nothing had been integrated from held readings');
+});
+
+test('★★ the tag note says the span had no fresh readings (held or missing), never that the actuals were integrated from held readings', () => {
+  // The 08-18 / 08-19 rows: Core 2 wrote NO rows at all on those days (a 9.8-day silence), so
+  // nothing held was integrated into their actuals.
+  const v = { pv: [{ sn: CORES[1], heldMs: 23.5 * H }], load: [] };
+  const note = heldTagNote(v, name);
+  assert.equal(note, 'Telemetry held: PV — Core 2 23.5 h of the 24 h span had no fresh readings (held or missing); '
+    + 'the raw telemetry is past the re-capture horizon, so the row is kept as captured.');
+  assert.doesNotMatch(note, /integrated/);
+  assert.ok(note.toLowerCase().includes(HELD_TELEMETRY_MARKER), 'still the marker: the repair stays idempotent');
 });
 
 test('★★ past the horizon, or not re-capturable on today\'s devices: tagged, once', () => {
@@ -228,7 +263,9 @@ test('★★ SOURCE PIN: the sweep waits for the first held-sample scan, then re
   assert.ok(wait > 0 && repair > wait && capture > repair, `${wait} < ${repair} < ${capture}`);
   const fix = fnBody('function repairHeldNightOutcomes(');
   assert.ok(fix.includes('const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs });'));
-  assert.ok(fix.includes('recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf));'));
+  assert.ok(fix.includes('recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf, y));'), 'the row as captured names its own actuals');
+  assert.ok(fix.includes('night-charge: reset ${y.plan_date} for re-capture — ${heldCapturedClause(r.verdict, y)} ('), 'and the log line says the same');
+  assert.ok(!fix.includes('actuals were integrated from held readings'), 'the tag line does not claim an integration');
   assert.ok(fix.includes('const coreSns = [...shp2ConnectedDpuSns(store.get().devices)];'), 'the same Cores the capture reads');
 });
 

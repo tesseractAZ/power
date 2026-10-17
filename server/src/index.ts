@@ -246,7 +246,7 @@ import {
   ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
   // v1.188.1 — held telemetry: a row on held readings is not scored; one captured on them is repaired.
-  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldResetColumns, heldTagNote, basisIncompleteNote,
+  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldResetColumns, heldTagNote, heldCapturedClause, basisIncompleteNote,
 } from './nightLedgerScoring.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -4718,12 +4718,12 @@ function repairHeldNightOutcomes(rows: NightLedgerRow[], shp2Sn: string, nowMs: 
         recorder.recordNightOutcome(String(y.plan_date), {
           score_notes: `${y.score_notes ?? ''} ${heldTagNote(r.verdict, nameOf)}`.trim(),
         });
-        app.log.info(`night-charge: tagged ${y.plan_date} — its PV/load actuals were integrated from held readings and it is past the re-capture horizon; kept as captured.`);
+        app.log.info(`night-charge: tagged ${y.plan_date} — its PV/load span had an hour or more with no fresh readings (held or missing) and it is past the re-capture horizon; kept as captured.`);
         continue;
       }
-      recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf));
+      recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf, y));
       reset = true;
-      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — its PV/load actuals had been integrated from held readings (pv ${y.actual_pv_kwh ?? 'null'} kWh, load ${y.actual_load_kwh ?? 'null'} kWh, buy_err ${y.buy_err_kwh ?? 'null'} kWh as captured).`);
+      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — ${heldCapturedClause(r.verdict, y)} (pv ${y.actual_pv_kwh ?? 'null'} kWh, load ${y.actual_load_kwh ?? 'null'} kWh, buy_err ${y.buy_err_kwh ?? 'null'} kWh as captured).`);
     }
   } catch (e: any) {
     app.log.debug(`night-charge: held-telemetry repair skipped (${e?.message ?? e})`);
