@@ -417,6 +417,20 @@ export interface Shp2EnergySource {
    *  on-peak grid-draw incident was this setting; until the PD303 doc named
    *  `ch{n}ForceCharge` the alert could only infer it from power flow. */
   forceCharge: string | null;
+  /** v1.188.1 — the panel's own per-source power fields (pd303_mc.backupIncreInfo.Energy{n}Info,
+   *  REST-only, ~60 s), read by the energy bridge (energyBridge.ts) while this slot's Core is
+   *  cloud-offline. null when the payload omits them; optional so older fixtures stay valid.
+   *  pvWatts = pvChargeWatts, pvHighWatts = pvHeightChargeWatts, pvLowWatts = pvLowChargeWatts,
+   *  inputWatts = lcdInputWatts, outputWatts = outputPower (the magnitude of the slot's chWatt
+   *  while the Core supplies the panel, checked live 2026-10-16). Whether the three PV fields
+   *  populate in daylight was unverified when they were added: the bridge uses them only for a
+   *  slot whose field has passed its check against the inferred lower bound (energyBridge.ts,
+   *  pvFieldVerdict, the 'measured' basis). */
+  pvWatts?: number | null;
+  pvHighWatts?: number | null;
+  pvLowWatts?: number | null;
+  inputWatts?: number | null;
+  outputWatts?: number | null;
   /** v0.40.1 — OBSERVABILITY ONLY (set by snapshotForClient / read inline by the
    *  TUI via isSourceDpuStale): the SHP2 still counts this slot's battery in the
    *  backup pool, but the slot's underlying DPU is itself cloud-offline (its own
@@ -664,6 +678,12 @@ export function projectShp2(q: Quota): Shp2Projection {
       hwConnect: num(q, `${base}hwConnect`) === 1,
       errorCodeNum: num(q, `${base}errorCodeNum`),
       forceCharge: str(q, `ch${i}ForceCharge`) ?? str(q, `pd303_mc.ch${i}ForceCharge`),
+      // v1.188.1 — the energy bridge's per-source fields (Shp2EnergySource above).
+      pvWatts: num(q, `${base}pvChargeWatts`),
+      pvHighWatts: num(q, `${base}pvHeightChargeWatts`),
+      pvLowWatts: num(q, `${base}pvLowChargeWatts`),
+      inputWatts: num(q, `${base}lcdInputWatts`),
+      outputWatts: num(q, `${base}outputPower`),
     });
   }
   const sourceWatts = Array.isArray(q['backupInfo.chWatt'])

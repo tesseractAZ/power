@@ -88,7 +88,13 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
 dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). Selected groups:
 
 - **Power flow:** `fleet_pv_watts`, `panel_load_watts`, `ac_import_watts`,
-  `fleet_battery_net_watts`, `grid_home_watts` (SHP2 `gridWatt`).
+  `fleet_battery_net_watts`, `grid_home_watts` (SHP2 `gridWatt`). Fleet PV and Battery
+  Net add every dark home slot (its Core cloud-offline for at least 3 min) metered at the
+  panel (the energy bridge,
+  `Recorder.bridgedFleetFlow`; [chapter 7, path (c)](07-energy-and-cost.md#22-the-two-accumulation-paths))
+  and have their own readiness flag, `flowBridged`: null while a dark slot on an online
+  panel cannot be bridged, never a partial sum. A dark slot whose panel is itself
+  cloud-offline is left out of both, as an offline Core always was.
 - **Backup pool:** `backup_pool` (%), `backup_remaining_kwh`, `backup_full_capacity_kwh`
   (both `energy_storage`).
 - **Forecast/degradation/runway/RTE/clipping/curtailment/self-consumption** — one sensor
@@ -385,7 +391,8 @@ online but its content has not changed for `SHP2_READBACK_STALE_MS`) and the pan
 
 Power flow from `aggregateFleetFlow` (rounded): `fleet_pv_watts`,
 `fleet_total_in_watts`, `fleet_total_out_watts`, `fleet_battery_net_watts` (positive =
-discharging), `panel_load_watts`, `ac_import_watts`, `off_grid` (via `liveGridBackstop`,
+discharging; Fleet PV and Battery Net plus the dark home slots metered at the panel,
+`recorder.bridgedFleetFlow`, the same figures as the MQTT payload), `panel_load_watts`, `ac_import_watts`, `off_grid` (via `liveGridBackstop`,
 **not** `acIn < 5` — DPU `ac_in` is structurally ~0 on a solar home). Backup:
 `backup_pool_percent`, `backup_reserve_percent`, `backup_full_capacity_kwh`,
 `backup_remaining_kwh`, and `backup_charge_minutes`/`backup_discharge_minutes` gated on
