@@ -37,7 +37,7 @@ export function EnergyFlow({ devices, grid }: Props) {
   // v1.175.0 — every number on this card comes from energyFlowModel (pure, and run by the
   // test suite); this component only lays them out.
   const {
-    dpuCount, spareCount, membershipUnknown, viaPanelCount, pv, pvUnreported, batNet, soc, load, panelState, liveCircuits,
+    dpuCount, spareCount, membershipUnknown, viaPanelCount, pv, pvUnreported, pvViaPanel, batNet, soc, load, panelState, liveCircuits,
     gridState, gridSupplyW, gridToCoresW, gridToHouseW, coresToHouseW,
   } = energyFlowModel(devices, grid);
 
@@ -111,7 +111,7 @@ export function EnergyFlow({ devices, grid }: Props) {
 
         {/* Solar node. v1.188.1 — "—" with no Core's own PV meter reporting; the subtitle says which
             Cores the figure covers (solarSubtitle). */}
-        <Node {...Solar} title="Solar" subtitle={solarSubtitle({ pv, dpuCount, pvUnreported })} value={fmtW(pv)} icon="☀" accent={HUES.solar} dim={pv == null} />
+        <Node {...Solar} title="Solar" subtitle={solarSubtitle({ pv, dpuCount, pvUnreported, pvViaPanel })} value={fmtW(pv)} icon="☀" accent={HUES.solar} dim={pv == null} />
         {/* Grid node — 3-state subtitle + value:
             active → live kW into the home; standby → "available as backup"
             (v1.186.3 — plain words; the old label read as the grid powering the house);
@@ -131,7 +131,7 @@ export function EnergyFlow({ devices, grid }: Props) {
         <Node
           {...Battery}
           title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown })}
-          subtitle={batteriesSubtitle({ batNet, viaPanelCount })}
+          subtitle={batteriesSubtitle({ batNet, viaPanelCount, pvViaPanel })}
           value={fmtPct(soc, 1)}
           big
           accent={socAccent(soc)}

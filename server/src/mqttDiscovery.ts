@@ -1344,7 +1344,9 @@ export async function startMqttDiscovery(
     const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
     // v1.188.1 — Fleet PV and Battery Net add every DARK home slot, metered at the panel
     // (energyBridge.ts); null while one cannot be bridged (publishReadiness `flowBridged`).
-    const bridged = recorder.bridgedFleetFlow({ fleetPv, fleetBatteryNet }, snap.devices, Date.now());
+    // v1.188.1 (review) — and AC Import on the same notion (a frozen Core's held ac_in out, a dark
+    // Core's slot input in: energyBridge.ts BridgedFleetFlow.acIn).
+    const bridged = recorder.bridgedFleetFlow({ fleetPv, fleetBatteryNet, acIn, fleetIn, fleetOut }, snap.devices, Date.now());
     const lifetime = recorder.getLifetimeTotals();
     const lifetimeKwh = makeLifetimeKwh(lifetime);
     // v1.186.0 — any report below may be null (settleStateReports); its fields publish null.
@@ -1392,7 +1394,7 @@ export async function startMqttDiscovery(
       lighting_posture_reason: posture?.reason ?? null,
       fleet_pv_watts: bridged.fleetPv == null ? null : Math.round(bridged.fleetPv),
       panel_load_watts: Math.round(panelLoad),
-      ac_import_watts: Math.round(acIn),
+      ac_import_watts: bridged.acIn == null ? null : Math.round(bridged.acIn),
       fleet_battery_net_watts: bridged.fleetBatteryNet == null ? null : Math.round(bridged.fleetBatteryNet),
       // v0.48.0 — whole-home grid POWER at the SHP2 main (wattInfo.gridWatt), the
       // power complement of the grid_to_home lifetime energy sensor. Null-safe: the

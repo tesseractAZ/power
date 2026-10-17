@@ -17,6 +17,11 @@
  *   G-ix    heldSinceMs ignores the shadow onset
  *   G-x     the gate ignores a Core's content clock (a REST 200 replaying a Core's cached body is written)
  *   G-xi    heldSinceMs ignores a Core's content clock (a replay's held span restarts with every 200)
+ *
+ * Fix round 3 (review):
+ *   G-xii   a panel counter with no row in a window does not hold its watermark (a window inside a
+ *           panel shadow or a quota stall is lost from Panel Load, Grid Import (Home), the circuits)
+ *   G-xiii  the hold is applied to the counters the energy bridge adds to (its share for the window is dropped)
  *   R-i     the restart probe's graceful test is two-sided again (a deploy in a hold reads as power)
  *   R-ii    the restart probe never reads the marker
  *   S-i     a gate span is logged however short
@@ -93,6 +98,8 @@ const SUBSET = [
   'test/heldSamplesWorkerMemo.test.ts',
   'test/curtailmentHeldPanel.test.ts',
   'test/trendMergeGaps.test.ts',
+  'test/panelGapLifetime.test.ts',
+  'test/energyBridgeSeams.test.ts',
 ];
 
 const MUTANTS = [
@@ -530,6 +537,20 @@ const MUTANTS = [
     find: "  if (d.projection?.kind === 'dpu' && ok(d.contentChangedAtMs)) c.push(d.contentChangedAtMs);",
     to: '  /* MUTANT */',
     why: 'A replaying Core\'s hold starts at its last arrival, which moves with every 200: the held span is never an hour long and is never logged.',
+  },
+  {
+    id: 'G-xii. ★★★ a panel counter with no row in a window does not hold its watermark',
+    file: REC,
+    find: '      if (!bridgeShare && inWindow === 0 && now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS) continue;',
+    to: '      /* MUTANT */',
+    why: 'The review defect: the gate writes no row while the panel is held, and every 5-min window inside a cloud shadow or a quota stall integrates to 0 Wh for good (292 Wh of load and 667 Wh of grid import in an 8 kW night-charge hour).',
+  },
+  {
+    id: 'G-xiii. ★★ the hold is applied to the counters the energy bridge adds to',
+    file: REC,
+    find: '      if (!bridgeShare && inWindow === 0 && now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS) continue;',
+    to: '      if (inWindow === 0 && now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS) continue; /* MUTANT */',
+    why: 'PV Production and Grid to Battery Charge skip writing a window in which the bridge booked energy: the bridge\'s share is added only when the counter writes, so it is lost.',
   },
 ];
 

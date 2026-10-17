@@ -266,7 +266,7 @@ test('EnergyFlow.tsx renders the Batteries labels from the model helpers', () =>
   const card = readFileSync(resolve(here, '../../web/src/cards/EnergyFlow.tsx'), 'utf8');
   for (const pin of [
     'title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown })}',
-    'subtitle={batteriesSubtitle({ batNet, viaPanelCount })}',
+    'subtitle={batteriesSubtitle({ batNet, viaPanelCount, pvViaPanel })}',
   ]) assert.ok(card.includes(pin), `the card must render from the model: missing ${pin}`);
   assert.ok(!card.includes('discharging`'), 'the card no longer builds the battery wording itself');
 });
@@ -429,7 +429,7 @@ test('EnergyFlow.tsx renders the Solar node from the model helper and draws no P
   const here = dirname(fileURLToPath(import.meta.url));
   const card = readFileSync(resolve(here, '../../web/src/cards/EnergyFlow.tsx'), 'utf8');
   for (const pin of [
-    'subtitle={solarSubtitle({ pv, dpuCount, pvUnreported })} value={fmtW(pv)}',
+    'subtitle={solarSubtitle({ pv, dpuCount, pvUnreported, pvViaPanel })} value={fmtW(pv)}',
     'watts={pv ?? 0} color={HUES.solar}',
   ]) assert.ok(card.includes(pin), `missing ${pin}`);
   assert.ok(!card.includes('subtitle="42 panels"'), 'the card no longer hard-codes the Solar subtitle');
@@ -616,4 +616,50 @@ test('★★★ Cores frozen mid-charge (acIn 5.3 kW each), the charge since end
   assert.equal(live.gridToCoresW, 15900, 'not 31 800 W (the frozen figure and the slot both)');
   assert.equal(live.gridToHouseW, 2000);
   assert.equal(live.gridSupplyW, 17900);
+});
+
+/* ══ v1.188.1 review round 2 — the server's per-slot verdicts from the energy bridge ══ */
+
+test('★★★ a slot whose PV the server reads as MEASURED (pvMeasuredW): its PV joins Solar and its pack net is separated, as Home Assistant’s Fleet PV and Battery Net are', () => {
+  // Noon, every Core dark: 2 kW of PV per Core, 500 W of it delivered to the panel, the packs charging 1.5 kW.
+  const slots = [
+    { sn: 'CORE-A', w: -500, pct: 60, dpuStale: true }, { sn: 'CORE-B', w: -500, pct: 60, dpuStale: true }, { sn: 'CORE-C', w: -500, pct: 60, dpuStale: true },
+  ];
+  const p = panel(slots, 1500);
+  for (const s of p.projection.sources) Object.assign(s, { ownReading: false, pvMeasuredW: 2000 });
+  const m = energyFlowModel(devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), p), grid(0, 0));
+  assert.equal(m.pv, 6000, 'was null ("Cores not reporting") beside a Fleet PV of 6 kW');
+  assert.equal(m.batNet, -4500, 'was +1500 ("▼ 1.50 kW out") beside a Battery Net charging 4.5 kW');
+  assert.equal(m.pvViaPanel, 3);
+  assert.equal(m.pvUnreported, 0);
+  assert.equal(batteriesSubtitle(m), '▲ 4.50 kW charging', 'the packs’ own net: "charging", not "in"');
+  assert.equal(solarSubtitle(m), '42 panels');
+  assert.equal(m.acOut, 1500, 'the AC exchange is unchanged');
+  // One of three measured: Solar covers it, the subtitle says how many, and the battery figure is an exchange again.
+  const q = panel(slots, 1500);
+  q.projection.sources.forEach((s: Any, i: number) => Object.assign(s, { ownReading: false, pvMeasuredW: i === 0 ? 2000 : null }));
+  const n = energyFlowModel(devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), q), grid(0, 0));
+  assert.deepEqual([n.pv, n.pvViaPanel, n.pvUnreported, n.batNet], [2000, 1, 2, 1500 - 2000]);
+  assert.equal(solarSubtitle(n), '1 of 3 Cores');
+  assert.equal(batteriesSubtitle(n), '▲ 500 W in', 'two slots still carry their PV unseparated');
+});
+
+test('★★★ the server’s ownReading verdict: a Core the cloud lists OFFLINE whose stream still arrives is drawn on its own meter; a Core the bridge still meters is drawn via the panel', () => {
+  const own = (sn: string): Any => ({ ...core(sn, { pv: 2000, acOut: 500, packNet: -1500 }), online: false });
+  const slots = [{ sn: 'CORE-A', w: -500, pct: 60 }, { sn: 'CORE-B', w: -500, pct: 60 }, { sn: 'CORE-C', w: -500, pct: 60 }];
+  const p = panel(slots, 1500);
+  p.projection.sources.forEach((s: Any) => Object.assign(s, { ownReading: true, pvMeasuredW: null }));
+  const m = energyFlowModel(devs(own('CORE-A'), own('CORE-B'), own('CORE-C'), p), grid(0, 0));
+  // Before: "Cores not reporting", "▼ 1.50 kW out", three via the panel.
+  assert.deepEqual([m.dpuCount, m.viaPanelCount, m.pv, m.batNet], [3, 0, 6000, -4500]);
+  assert.equal(batteriesSubtitle(m), '▲ 4.50 kW charging');
+  // A Core listed online with fresh figures that the bridge still meters at its slot (not handed back);
+  // the other two on their own meters, their slots agreeing with them (0 W).
+  const q = panel([{ sn: 'CORE-A', w: -500, pct: 60 }, { sn: 'CORE-B', w: 0, pct: 60 }, { sn: 'CORE-C', w: 0, pct: 60 }], 1500);
+  q.projection.sources.forEach((s: Any, i: number) => Object.assign(s, { ownReading: i !== 0, pvMeasuredW: null }));
+  const n = energyFlowModel(devs(core('CORE-A', { packNet: -3000 }), core('CORE-B'), core('CORE-C'), q), grid(0, 0));
+  assert.deepEqual([n.dpuCount, n.viaPanelCount, n.batNet], [2, 1, 500], 'CORE-A via its slot, not its 3 kW held charge');
+  // No verdict sent (an older server, a cold boot): the card's own rule, unchanged.
+  const r = energyFlowModel(devs(core('CORE-A', { packNet: -3000 }), core('CORE-B'), core('CORE-C'), panel(slots, 1500)), grid(0, 0));
+  assert.equal(r.dpuCount, 3);
 });

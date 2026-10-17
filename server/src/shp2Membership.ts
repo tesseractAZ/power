@@ -423,6 +423,7 @@ export function panelForClient(
   p: DeviceSnapshot & { projection: Shp2Projection },
   devices: Record<string, DeviceSnapshot>,
   nowMs: number,
+  verdicts?: BridgeVerdicts,
 ): DeviceSnapshot & { projection: Shp2Projection } {
   return {
     ...p,
@@ -433,6 +434,14 @@ export function panelForClient(
         ...src,
         dpuStale: isSourceDpuStale(src, devices),
         dpuFrozen: isSourceDpuFrozen(src, devices, nowMs),
+        // v1.188.1 (review) — the bridge's verdicts, so the card counts each Core as the two power
+        // sensors do: `ownReading` (its own meter: a Core the cloud lists offline whose MQTT data
+        // still arrives included), and `pvMeasuredW` (the slot's PV where the bridge reads the
+        // panel's PV field as measured; null otherwise).
+        ...(verdicts && src.isConnected && src.sn ? {
+          ownReading: verdicts.own.has(src.sn),
+          pvMeasuredW: verdicts.measuredPvW.get(slotKey(p.sn, src.slot)) ?? null,
+        } : {}),
       })),
     },
   };
@@ -515,6 +524,34 @@ export function houseSnOf(devices: Record<string, DeviceSnapshot>): string | und
     if (d.housePanelMissing != null) missing = d.housePanelMissing;
   }
   return missing ?? findShp2(devices)?.sn;
+}
+
+/**
+ * v1.188.1 (review) — each connected home Core ONCE, at the one panel listing that reads it. A Core
+ * listed connected by two panels (one panel's source list is stale) is read at the listing on an
+ * online panel whose reading is fresh (shp2ReadbackFresh), else on an online panel, else the first;
+ * a tie goes to the house panel (houseSnOf), then the lower panel serial — never the device map's
+ * order, which could keep the stale listing and drop the live one. Shared by the energy bridge (its
+ * dark slots, the power sensors) and the backup timers' bound, so each counts a Core once, at the
+ * same slot. `index` is the slot's position in the panel's sourceWatts.
+ */
+export function connectedSourceListings(
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number,
+): Array<{ panel: DeviceSnapshot & { projection: Shp2Projection }; src: Shp2Projection['sources'][number]; index: number }> {
+  type Listing = { panel: DeviceSnapshot & { projection: Shp2Projection }; src: Shp2Projection['sources'][number]; index: number };
+  const house = houseSnOf(devices);
+  const rank = (p: DeviceSnapshot): number => (p.online === true ? (shp2ReadbackFresh(p, nowMs) ? 2 : 1) : 0);
+  const panels = [...allShp2s(devices)].sort((a, b) =>
+    rank(b) - rank(a) || (b.sn === house ? 1 : 0) - (a.sn === house ? 1 : 0) || (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
+  const chosen = new Map<string, Listing>();
+  for (const panel of panels) {
+    (panel.projection.sources ?? []).forEach((src, index) => {
+      if (!src.isConnected || !src.sn || chosen.has(src.sn)) return;
+      chosen.set(src.sn, { panel, src, index });
+    });
+  }
+  return [...chosen.values()];
 }
 
 /** v1.185.0 — every panel by identity (projected or not), sorted by serial. */
@@ -628,6 +665,13 @@ export function onlineDpus(
 export function homeCoreCoverage(
   devices: Record<string, DeviceSnapshot>,
   lastKnownRoster?: ReadonlySet<string> | null,
+  /** v1.188.1 (review) — with a clock, a Core counts as reporting only on a FRESH meter
+   *  (dpuContentFresh): one listed online whose readings stopped changing (a quota that keeps
+   *  failing, a cloud replaying its cached body, the first list cycle after an online flip) holds
+   *  its last pack figures, which cannot disprove a drain. The at-floor guard passes it (gridState
+   *  resolveGridBackstop), as the backup timers (poolNetUpperBound), the energy bridge and the
+   *  power sensors already read such a Core as dark. Without one, the roster-only answer. */
+  nowMs?: number,
 ): {
   connected: number;
   reporting: number;
@@ -650,7 +694,7 @@ export function homeCoreCoverage(
           .filter((d) => d.projection?.kind === 'dpu' && !SPARE_DPU_SNS.has(d.sn))
           .map((d) => d.sn);
   if (roster.length === 0) return { connected: 0, reporting: 0, complete: true };
-  const online = new Set(onlineDpus(devices).map((d) => d.sn));
+  const online = new Set(onlineDpus(devices).filter((d) => nowMs == null || dpuContentFresh(d, nowMs)).map((d) => d.sn));
   const reporting = roster.filter((sn) => online.has(sn)).length;
   return { connected: roster.length, reporting, complete: reporting === roster.length };
 }
@@ -865,6 +909,25 @@ export const BACKUP_TIMER_DEADBAND_W = 50;
 export const SLOT_UNMETERED_DRAW_W = 100;
 
 /**
+ * v1.188.1 (review) — the energy bridge's verdicts (energyBridge.ts slotVerdicts, from the same
+ * computation the two power sensors publish), handed to the surfaces that must agree with Fleet PV
+ * and Battery Net: the backup timers' bound (poolNetUpperBound) and the dashboard card
+ * (panelForClient). Optional: without it each keeps its own rule (a Core listed online on a fresh
+ * meter is on its own meter; no slot's PV is known).
+ */
+export interface BridgeVerdicts {
+  /** Connected home Cores the power sensors count at their own reading (energyBridge coreReports;
+   *  a marked Core only once it hands back). */
+  own: ReadonlySet<string>;
+  /** A dark slot's panel PV figure (W) where the bridge reads it as measured (its field trusted and
+   *  the sun up: the 'measured' basis), keyed slotKey(panelSn, slot). */
+  measuredPvW: ReadonlyMap<string, number>;
+}
+
+/** The key of one panel's source slot (1-based, as the panel numbers its sources). */
+export const slotKey = (panelSn: string, slot: number): string => `${panelSn}#${slot}`;
+
+/**
  * v1.188.1 — an UPPER BOUND on the home pool's battery net (W, > 0 = discharging), for the backup
  * timers' direction gate (backupTimerGate); +Infinity when nothing bounds it.
  *
@@ -888,34 +951,56 @@ export const SLOT_UNMETERED_DRAW_W = 100;
  *   · else +Infinity, basis 'unmeasured'.
  * As in gridState's at-floor guard (v1.3.0), a partial roster can prove one direction and never
  * disprove the other, and the unknown resolves toward discharging.
+ *
+ * v1.188.1 (review) — with the energy bridge's `verdicts` (both state publishers and the console
+ * pass them), a Core is on its own meter exactly when the two power sensors count it at its own
+ * reading (a Core the cloud lists offline whose MQTT data still arrives is; a marked Core not yet
+ * handed back is not), and a dark slot whose panel PV field the bridge reads as measured takes that
+ * PV out (−slot − PV + draw): by day the bound otherwise stayed positive while the published Battery
+ * Net read a charge, so the time to empty was published and the time to full withheld. Each Core is
+ * read once, at the listing the bridge meters it at (connectedSourceListings).
  */
 export function poolNetUpperBound(
   devices: Record<string, DeviceSnapshot>,
   nowMs: number,
+  verdicts?: BridgeVerdicts,
 ): { watts: number; basis: 'cores' | 'panel' | 'unmeasured' } {
   const connected = shp2ConnectedDpuSns(devices);
   const frozen = [...connected].some((sn) => isSourceDpuFrozen({ isConnected: true, sn }, devices, nowMs));
-  if (homeCoreCoverage(devices).complete && !frozen) {
+  const listings = connectedSourceListings(devices, nowMs);
+  // v1.188.1 (review) — with the bridge's verdicts, a Core is on its own meter exactly when the two
+  // power sensors count it at its own reading (a Core the cloud lists offline whose MQTT data still
+  // arrives included; a marked Core that has not handed back excluded), so the timers and Battery
+  // Net never take one Core two ways.
+  const ownReading = (sn: string): boolean => {
+    const d = devices[sn];
+    if (d?.projection?.kind !== 'dpu') return false;
+    return verdicts ? verdicts.own.has(sn) : d.online === true && dpuContentFresh(d, nowMs);
+  };
+  if (homeCoreCoverage(devices).complete && !frozen && (!verdicts || listings.every((l) => verdicts.own.has(l.src.sn as string)))) {
     return { watts: aggregateFleetFlow(devices).fleetBatteryNetDisplay, basis: 'cores' };
   }
   let watts = 0;
-  const seen = new Set<string>();
-  for (const p of allShp2s(devices)) {
-    const panelFresh = shp2ReadbackFresh(p, nowMs);
-    (p.projection.sources ?? []).forEach((s, i) => {
-      if (!s.isConnected || !s.sn || seen.has(s.sn)) return;
-      seen.add(s.sn);
-      const d = devices[s.sn];
-      if (d?.online === true && d.projection?.kind === 'dpu' && dpuContentFresh(d, nowMs)) {
-        for (const pk of d.projection.packs ?? []) { const f = pk.liveFlow ?? pk; watts += (f.outputWatts ?? 0) - (f.inputWatts ?? 0); }
-        return;
-      }
-      const w = p.projection.sourceWatts?.[i];
-      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : Infinity;
-    });
+  // v1.188.1 (review) — each connected Core once, at the listing the energy bridge reads it at
+  // (connectedSourceListings), never by the device map's order.
+  for (const { panel: p, src: s, index: i } of listings) {
+    const d = devices[s.sn as string];
+    if (ownReading(s.sn as string) && d?.projection?.kind === 'dpu') {
+      for (const pk of d.projection.packs ?? []) { const f = pk.liveFlow ?? pk; watts += (f.outputWatts ?? 0) - (f.inputWatts ?? 0); }
+      continue;
+    }
+    const w = p.projection.sourceWatts?.[i];
+    // v1.188.1 (review) — the slot's PV, where the energy bridge reads the panel's PV field as
+    // measured (trusted, the sun up): Battery Net publishes −slot − PV for that slot, so the bound
+    // takes the same PV out (pack net ≤ −slot − PV + draw). The field's check catches a field that
+    // reads LOW only: a field reading high would show the time to full early, beside a Battery Net
+    // reading the same charge. Without a trusted field the bound has no PV term (delivery through
+    // the slot can be PV passing through, so it never proves a discharge by itself).
+    const pv = verdicts?.measuredPvW.get(slotKey(p.sn, s.slot)) ?? 0;
+    watts += shp2ReadbackFresh(p, nowMs) && typeof w === 'number' && Number.isFinite(w) ? -w - pv + SLOT_UNMETERED_DRAW_W : Infinity;
   }
   // No slot to read: the roster is a remembered or fallback one (no connection table).
-  if (seen.size === 0) watts = Infinity;
+  if (listings.length === 0) watts = Infinity;
   return { watts, basis: Number.isFinite(watts) ? 'panel' : 'unmeasured' };
 }
 
@@ -930,7 +1015,8 @@ export function poolNetUpperBound(
 export function backupTimerGate(
   devices: Record<string, DeviceSnapshot>,
   nowMs: number,
+  verdicts?: BridgeVerdicts,
 ): { charge: boolean; discharge: boolean; basis: 'cores' | 'panel' | 'unmeasured' } {
-  const { watts, basis } = poolNetUpperBound(devices, nowMs);
+  const { watts, basis } = poolNetUpperBound(devices, nowMs, verdicts);
   return { charge: watts <= BACKUP_TIMER_DEADBAND_W, discharge: watts >= -BACKUP_TIMER_DEADBAND_W, basis };
 }

@@ -64,6 +64,9 @@ export interface EnergyFlowModel {
   pv: number | null;
   /** v1.188.1 — connected Cores whose PV is not in `pv` (no reading of their own). */
   pvUnreported: number;
+  /** v1.188.1 (review) — Cores drawn via the panel whose PV is in `pv`: the server reads their slot's
+   *  PV field as measured (pvMeasuredW), so their pack net is separated from it in `batNet`. */
+  pvViaPanel: number;
   /** The Cores' AC output: their own inverters' meters, plus the panel's slot meter for a
    *  Core drawn via the panel. */
   acOut: number;
@@ -114,7 +117,17 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     panels.flatMap((p) => p.projection.sources ?? []).filter((s) => s.isConnected && s.dpuFrozen === true)
       .map((s) => s.sn).filter((sn): sn is string => !!sn),
   );
-  const metered = dpus.filter((d) => !frozenSns.has(d.sn));
+  // v1.188.1 (review) — when the server sends the energy bridge's verdict (`ownReading` on each
+  // connected slot), the Cores on their own meters are exactly the ones Home Assistant's power sensors
+  // count at their own reading: a Core the cloud lists OFFLINE whose live stream still arrives is one
+  // (it read "Cores not reporting" and "via panel" beside a Fleet PV of 6 kW), and a Core the bridge
+  // still meters at its slot is not. Without a verdict (a cold boot, no panel), the card's own rule.
+  const connectedSlots = panels.flatMap((p) => p.projection.sources ?? []).filter((s) => s.isConnected && !!s.sn);
+  const verdictSent = connectedSlots.length > 0 && connectedSlots.every((s) => typeof s.ownReading === 'boolean');
+  const ownVerdict = new Set(connectedSlots.filter((s) => s.ownReading === true).map((s) => s.sn as string));
+  const metered = verdictSent
+    ? list.filter((d): d is Dpu => d.projection?.kind === 'dpu' && ownVerdict.has(d.sn))
+    : dpus.filter((d) => !frozenSns.has(d.sn));
 
   const ownPv = metered.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
   // acIn from the SHP2's sources (by definition the home-connected DPUs) — kept as a
@@ -210,9 +223,18 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     return Math.abs(w - own) > Math.max(FRAME_LAG_MIN_W, FRAME_LAG_FRACTION * Math.max(Math.abs(w), Math.abs(own)));
   })));
   const viaFlow = viaPanel.filter((x) => !behindPanels.has(x.p));
+  // v1.188.1 (review) — a slot whose PV the server reads as MEASURED (the panel's PV field checked
+  // and trusted, the sun up: `pvMeasuredW`) separates that Core's PV from its packs, as Home
+  // Assistant's Fleet PV and Battery Net do: its PV joins the Solar node and its pack net is
+  // −slot − PV. The card had drawn "Solar —" and "▼ 1.50 kW out" beside a Fleet PV of 6 kW and a
+  // Battery Net charging 4.5 kW.
+  const measuredPv = (x: { s: Shp2EnergySource }): number | null =>
+    typeof x.s.pvMeasuredW === 'number' && Number.isFinite(x.s.pvMeasuredW) ? Math.max(0, x.s.pvMeasuredW) : null;
+  const viaPv = viaFlow.filter((x) => measuredPv(x) != null);
+  const slotPv = viaPv.reduce((t, x) => t + (measuredPv(x) as number), 0);
   const acIn = ownAcIn + viaFlow.reduce((t, x) => t + Math.max(0, x.w), 0);
   const acOut = ownAcOut + viaFlow.reduce((t, x) => t + Math.max(0, -x.w), 0);
-  const batNet = ownBatNet - viaFlow.reduce((t, x) => t + x.w, 0);
+  const batNet = ownBatNet - viaFlow.reduce((t, x) => t + x.w, 0) - slotPv;
   const socVals = [...ownSocVals, ...viaPanel.map((x) => x.s.batteryPercentage)]
     .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
   const soc = socVals.length === 0 ? null : socVals.reduce((a, b) => a + b, 0) / socVals.length;
@@ -224,7 +246,8 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // v1.188.1 — the Solar node is the Cores' own PV meters. With none of them reporting, "0 W" would be
   // a missing meter drawn as a reading — beside an "out" figure that carries those Cores' PV — so it
   // is null ("—"). With some reporting it is their PV, and pvUnreported says how many it leaves out.
-  const pv: number | null = ownMeter.size === 0 && silentSlots.length > 0 ? null : ownPv;
+  // v1.188.1 (review) — a slot's measured PV (viaPv) counts as a reading of that Core's PV.
+  const pv: number | null = ownMeter.size === 0 && viaPv.length === 0 && silentSlots.length > 0 ? null : ownPv + slotPv;
 
   const load: number | null = panelState === 'ok'
     ? measured.reduce((s, c) => s + (c.watts as number), 0)
@@ -345,8 +368,9 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     membershipUnknown: connected.size === 0
       && list.some((d) => (d.productName ?? '').toLowerCase().includes('smart home panel')),
     viaPanelCount: viaPanel.length,
+    pvViaPanel: viaPv.length,
     pv,
-    pvUnreported: silentSlots.length,
+    pvUnreported: silentSlots.length - viaPv.length,
     acOut,
     batNet,
     soc,
@@ -373,17 +397,19 @@ export function batteriesTitle(m: Pick<EnergyFlowModel, 'dpuCount' | 'viaPanelCo
 
 /** v1.188.1 — the Solar node's subtitle: the plant's array, or which Cores the figure covers when
  *  some have no reading of their own ("2 of 3 Cores"), or "Cores not reporting" when none has. */
-export function solarSubtitle(m: Pick<EnergyFlowModel, 'pv' | 'dpuCount' | 'pvUnreported'>): string {
+export function solarSubtitle(m: Pick<EnergyFlowModel, 'pv' | 'dpuCount' | 'pvUnreported'> & { pvViaPanel?: number }): string {
   if (m.pv == null) return 'Cores not reporting';
-  if (m.pvUnreported > 0) return `${m.dpuCount} of ${m.dpuCount + m.pvUnreported} Cores`;
+  const covered = m.dpuCount + (m.pvViaPanel ?? 0);
+  if (m.pvUnreported > 0) return `${covered} of ${covered + m.pvUnreported} Cores`;
   return '42 panels';
 }
 
 /** v1.188.1 — the Batteries node's subtitle. A slot meters the Core's AC exchange with the panel,
  *  which carries the Core's PV as well as its packs, so a figure that includes a Core drawn via
- *  the panel reads "out" / "in", never "discharging" / "charging". */
-export function batteriesSubtitle(m: Pick<EnergyFlowModel, 'batNet' | 'viaPanelCount'>): string {
-  const acExchange = m.viaPanelCount > 0;
+ *  the panel reads "out" / "in", never "discharging" / "charging". v1.188.1 (review) — unless every
+ *  such slot's PV is measured (pvViaPanel), which makes the figure the packs' own net. */
+export function batteriesSubtitle(m: Pick<EnergyFlowModel, 'batNet' | 'viaPanelCount'> & { pvViaPanel?: number }): string {
+  const acExchange = m.viaPanelCount > (m.pvViaPanel ?? 0);
   if (m.batNet > 5) return `▼ ${fmtW(m.batNet)} ${acExchange ? 'out' : 'discharging'}`;
   if (m.batNet < -5) return `▲ ${fmtW(-m.batNet)} ${acExchange ? 'in' : 'charging'}`;
   return 'idle';

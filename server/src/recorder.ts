@@ -23,8 +23,9 @@ export { projectionRecordable, RECORD_FRESH_MS } from './heldSamples.js';
 export type { HeldSpan, HeldScanSummary } from './heldSamples.js';
 // v1.188.1 — battery and solar energy metered at the panel's source slots while a home Core is dark.
 import {
-  createEnergyBridge, ownEnergyUntil, handsBack, coreReports, slotPvWatts, bridgeSite,
-  type BridgedFleetFlow, type BridgeRollupResult, type EnergyBridgeDebug,
+  createEnergyBridge, ownEnergyUntil, handsBack, slotPvWatts, bridgeSite,
+  projectedPackKeys, projectionPacksComplete,
+  type BridgedFleetFlow, type BridgeRollupResult, type EnergyBridgeDebug, type OnlineFlow,
 } from './energyBridge.js';
 
 interface MetricSample {
@@ -534,7 +535,7 @@ export interface Recorder {
    *  Both publishers read the two power sensors from it; a dark slot that cannot be bridged
    *  right now makes both null (publishReadiness `flowBridged`). */
   bridgedFleetFlow: (
-    online: { fleetPv: number; fleetBatteryNet: number },
+    online: OnlineFlow,
     devices: Record<string, DeviceSnapshot>,
     nowMs: number,
   ) => BridgedFleetFlow;
@@ -2030,6 +2031,13 @@ export function createRecorder(
   // with aggregateFleetFlow / the live sensors about which Cores are "the home fleet".
   // (Live today: all 3 slots report isConnected=true, so this is a no-op hardening.)
   const sourceSnsOf = (snap: FleetSnapshot): Set<string> => shp2ConnectedDpuSns(snap.devices);
+  /** v1.188.1 (review) — the BMS sum's members: the live source set, plus the accepted set's Cores
+   *  while a change to it is pending (MEMBERSHIP_SUSTAINED_ROLLUPS). */
+  const bmsMembersOf = (snap: FleetSnapshot): Set<string> => {
+    const live = sourceSnsOf(snap);
+    if (pendingMembership == null || !bmsMembershipFp) return live;
+    return new Set([...live, ...bmsMembershipFp.split(',').filter((sn) => sn !== '')]);
+  };
 
   /** One integrated series of a lifetime key. `untilMs` (v1.188.1): it counts only up to that
    *  instant; null: not at all (a home Core handed to the energy bridge, ownEnergyUntil). */
@@ -2316,7 +2324,10 @@ export function createRecorder(
     // filter the HA Energy Dashboard "battery charged / discharged" tile was
     // ~67% overstated for setups with spare cores.
     const devices = Object.values(snap.devices);
-    const sourceSns = sourceSnsOf(snap);
+    // v1.188.1 (review) — while a changed source set is not yet sustained (bmsMembersOf), the Cores
+    // of the accepted set stay members, so a one-poll isConnect flicker does not drop a Core's held
+    // packs from the live sum.
+    const sourceSns = bmsMembersOf(snap);
     // v0.45.0 — "is this pack a home-fleet member?" uses the EXACT same predicate
     // as the live sum: a DPU passing the sourceSns filter. The empty-set fallback
     // (DPU-only setups / SHP2 not yet seen) matches the live sum's behavior. A
@@ -2504,6 +2515,20 @@ export function createRecorder(
           });
         }
       }
+      // v1.188.1 (review) — a marker of a pack the Core no longer reports is spent when the Core
+      // hands back with its whole pack list (the pack count met): no register of it can move, so
+      // the hand-over above never spends it, and one marker left kept the Core "marked" for good
+      // (bridged at once on any later dark moment, with no dwell). A row a pack left when it moved
+      // or was replaced, or a slot the store hides, is the case: the bridge marks only the packs the
+      // projection carries (heldPackKeysOf), but a Core dark since a restart has no projection.
+      if (opts.mutate && energyBridge.markersOf(d.sn).length > 0 && handsBack(d, Date.now()) && projectionPacksComplete(d)) {
+        const present = projectedPackKeys(d) ?? new Set<string>();
+        const gone = energyBridge.markersOf(d.sn).filter((k) => !present.has(k));
+        for (const k of gone) energyBridge.clearMarker(k);
+        if (gone.length > 0) {
+          log(`recorder: v1.188.1 energy-bridge hand-over sn=${d.sn}: ${gone.length} marker(s) spent for pack(s) the Core no longer reports (${gone.join(', ')}) — no register of them can move`);
+        }
+      }
     }
 
     // v0.48.0 — offline-at-deploy backfill (MUTATE PATH ONLY). When v0.45.0
@@ -2666,7 +2691,8 @@ export function createRecorder(
 
 
     // v1.188.1 — one line per Core handed over on this pass: what its BMS counted while dark
-    // (absorbed) against what the panel bridge counted for it (published, AC basis). The bridge's
+    // (absorbed) against what the panel bridge counted for it (published: AC basis at the slot, or the
+    // Core's own pack meters for a window its slot could not be read, v1.188.1 review). The bridge's
     // own rollup clears the per-Core rows once every marker of the Core is handed over, after its
     // "no longer bridged" line has read them (a read usually runs this pass first).
     for (const [sn, h] of handedOver) {
@@ -2677,7 +2703,7 @@ export function createRecorder(
       log(
         `recorder: v1.188.1 energy-bridge hand-over sn=${sn}: ${h.packs} pack(s) re-baselined on return${left > 0 ? ` (${left} still marked)` : ''} — ` +
         `the BMS counted ${(h.chgWh / 1000).toFixed(2)} kWh in / ${(h.dsgWh / 1000).toFixed(2)} kWh out while dark (absorbed, not published); ` +
-        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis, already published)`,
+        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis at the slot, or the Core's own pack meters where the slot could not be read; already published)`,
       );
     }
 
@@ -2825,6 +2851,18 @@ export function createRecorder(
       return typeof raw?.fp === 'string' ? raw.fp : null;
     } catch { return null; }
   })();
+  /**
+   * v1.188.1 (review) — a changed source set must persist this many consecutive rollups before the
+   * battery floors are re-seeded (the v1.98.0 gap check's RESEED_SUSTAINED_ROLLUPS idea). The source
+   * set is the panel's per-slot isConnect flag, read straight from each quota, and a home Core's
+   * flag can read 0 for one poll (a Core power-cycled while it is reconnected; the off-panel alert
+   * demotion is debounced for the same reason). One rollup with a slot disconnected re-seeded the
+   * floors without that Core's held packs (~1/3 of each published battery counter: Home Assistant's
+   * meter reset), and the next re-seeded them back up. Until the change is sustained, the accepted
+   * set's Cores stay members of the BMS sum (bmsMembersOf), so the v1.98.0 gap check sees no gap.
+   */
+  const MEMBERSHIP_SUSTAINED_ROLLUPS = Number(process.env.BMS_MEMBERSHIP_SUSTAINED_ROLLUPS ?? 3);
+  let pendingMembership: { fp: string; rollups: number } | null = null;
   // Seed the floors from whatever was last persisted (a fresh process must
   // not regress the persisted Wh number; HA reads that with state_class:
   // total_increasing and would treat a step-down as a reset).
@@ -2863,12 +2901,17 @@ export function createRecorder(
     // v1.188.1 (review) — a dark Core whose own readings arrive again before it hands back (a marked
     // Core the cloud still lists offline, its MQTT data back) is cut at its dark instant so the
     // bridge's slot figure stands for it. Where the bridge could book nothing for its slot this
-    // window (the panel reading not fresh, no slot coverage), its own measured pv_total / ac_in
-    // rows count instead: the gate wrote them as readings, and nothing else counts the window.
+    // window (no slot row: the panel reading not fresh), its own measured pv_total / ac_in rows count
+    // instead (the bridge books its own pack meters: BridgeSlotWindow.own): the gate wrote them as
+    // readings, and nothing else counts the window.
     const ownInstead = new Set<string>();
     for (const w of br?.slots ?? []) {
-      if (w.basis === 'unbridgeable' && coreReports(snap.devices[w.sn], now)) ownInstead.add(w.sn);
+      if (w.own === true) ownInstead.add(w.sn);
     }
+    /** v1.188.1 (review) — the bridge held its window (a dark slot's rows are in a gap the next
+     *  window can bridge): the two counters it adds to hold with it, so the next rollup integrates
+     *  the Cores' own rows and the bridge's slots over the same span. */
+    const bridgeHeld = br?.held === true;
 
     // Watt-integrated metrics — fleet + per-circuit keys.
     const wattKeys = Object.keys(contributors); // fleet_pv/load/grid + circuit_<N>
@@ -2878,7 +2921,11 @@ export function createRecorder(
       // to integrate the whole history (which would be huge and rotational).
       const since = prev.ts === 0 ? Math.max(now - 60_000, 0) : prev.ts;
       if (since >= now) continue;
+      const bridgeShare = key === 'fleet_pv_wh' || key === 'fleet_grid_import_wh';
+      if (bridgeHeld && bridgeShare) continue;
       let addedWh = 0;
+      let inWindow = 0;
+      let lastBefore = -Infinity;
       for (const c of contributors[key] ?? []) {
         // v1.188.1 — a Core handed to the energy bridge counts only up to the hand-off instant
         // (unless the bridge booked nothing for it this window and its own readings arrive).
@@ -2889,7 +2936,18 @@ export function createRecorder(
         const pts = queryStmt.all(c.sn, c.metric, since - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>;
         const r = integrateWh(pts, since, until);
         addedWh += r.wh;
+        inWindow += r.samples;
+        for (const p of pts) if (p.ts < since && p.ts > lastBefore) lastBefore = p.ts;
       }
+      // v1.188.1 (review) — a panel counter (Panel Load, Grid Import (Home), each circuit) whose
+      // series has NO row in this window while its last row is less than the look-back old HOLDS
+      // its watermark: the recorder writes no row while the panel's reading is held (a cloud shadow,
+      // a quota stall: heldSamples.projectionRecordable), and integrateWh gives a window with no row
+      // 0 Wh, so every 5-min window inside such a gap was lost for good from a total_increasing
+      // counter (an 8 kW night charge: ~0.67 kWh of grid import per window). Held, the next window
+      // integrates across the gap from the rows on both sides, exactly as integrateWh bridges a gap
+      // of up to 10 min inside one window. A longer gap is not bridged (the same 10-min rule).
+      if (!bridgeShare && inWindow === 0 && now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS) continue;
       // v1.188.1 — the bridged dark Cores' share, metered at the panel (never negative).
       if (br && key === 'fleet_pv_wh') addedWh += br.pvWh;
       if (br && key === 'fleet_grid_import_wh') addedWh += br.gridImportWh;
@@ -2903,7 +2961,14 @@ export function createRecorder(
     // BMS-sourced battery counters — store max(BMS, persistedFloor). rollup:true so
     // the v0.81.0 reconnect re-baseline advances its suspect streak on THIS periodic
     // cadence only (getLifetimeTotals mutates on reads but must NOT drive the streak).
-    const bms = computeBmsBatteryTotals(snap, { rollup: true });
+    // v1.96.0 — MEMBERSHIP ROLLOVER RE-SEED (below). v1.188.1 (review) — the change is judged before
+    // the BMS pass, so a change not yet sustained keeps the accepted set's Cores in it (bmsMembersOf).
+    const membershipFp = [...sourceSnsOf(snap)].sort().join(',');
+    const membershipChanged = membershipFp !== '' && bmsMembershipFp !== null && membershipFp !== bmsMembershipFp;
+    pendingMembership = membershipChanged
+      ? { fp: membershipFp, rollups: pendingMembership?.fp === membershipFp ? pendingMembership.rollups + 1 : 1 }
+      : null;
+    let bms = computeBmsBatteryTotals(snap, { rollup: true });
     // v1.96.0 — MEMBERSHIP ROLLOVER RE-SEED.
     //
     // The emitted counters are a monotone high-water floor, which is right while
@@ -2919,7 +2984,6 @@ export function createRecorder(
     // HA's `state_class: total_increasing` treats the resulting step DOWN as a
     // meter reset, which is the honest reading: the series is now measuring a
     // different set of batteries.
-    const membershipFp = [...sourceSnsOf(snap)].sort().join(',');
     // v1.103.0 — append to the timestamped history on EVERY rollup, not only on
     // a detected change. `recordMembership` is idempotent (it no-ops when the
     // fingerprint matches the newest entry), and recording the STATE rather than
@@ -2928,8 +2992,19 @@ export function createRecorder(
     if (recordMembership(membershipHistory, membershipFp, now)) {
       saveMembershipHistory(MEMBERSHIP_HISTORY_PATH, membershipHistory);
     }
-    if (membershipFp !== '' && membershipFp !== bmsMembershipFp) {
+    const sustained = pendingMembership != null && pendingMembership.rollups >= MEMBERSHIP_SUSTAINED_ROLLUPS;
+    if (membershipChanged && !sustained && pendingMembership?.rollups === 1) {
+      log(
+        `recorder: v1.188.1 SHP2 pool membership reads ${membershipFp} (was ${bmsMembershipFp}) — the lifetime battery floors ` +
+        `are re-seeded only once the change holds for ${MEMBERSHIP_SUSTAINED_ROLLUPS} rollups; until then the Cores that left stay in the battery sum`,
+      );
+    }
+    if (membershipFp !== '' && membershipFp !== bmsMembershipFp && (bmsMembershipFp === null || sustained)) {
       if (bmsMembershipFp !== null) {
+        // The change is sustained: the live sum over the NEW set (the pass above still carried the
+        // Cores that left).
+        pendingMembership = null;
+        bms = computeBmsBatteryTotals(snap);
         log(
           `recorder: v1.96.0 SHP2 pool membership changed (${bmsMembershipFp || '(none)'} -> ${membershipFp}) — ` +
           `re-seeding lifetime battery floors from the new live sum ` +

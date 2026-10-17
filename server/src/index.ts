@@ -20,6 +20,8 @@ import {
 } from './reconnectAudit.js';
 import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder, resolveRetentionDays } from './recorder.js';
+// v1.188.1 (review) — the bridge's verdicts, for the backup timers and the card (shp2Membership.ts BridgeVerdicts).
+import { slotVerdicts } from './energyBridge.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import { setClockRejectLogger, ecoflow,
@@ -572,16 +574,20 @@ function snapshotForClient(): FleetSnapshot {
   // untouched. The TUI computes the same flag inline via isSourceDpuStale.
   // v1.188.1 — panelForClient: and `dpuFrozen` (the Core listed online on a frozen meter) on each
   // slot, and the panel's own `readbackFresh` verdict; the Energy flow card keys on all three.
+  // v1.188.1 (review) — and the energy bridge's verdicts on each slot (`ownReading`, `pvMeasuredW`), from
+  // the computation the two power sensors publish, so the card counts each Core as they do.
   const nowMs = Date.now();
+  const agg = aggregateFleetFlow(s.devices);
+  const verdicts = slotVerdicts(recorder.bridgedFleetFlow({ fleetPv: agg.fleetPv, fleetBatteryNet: agg.fleetBatteryNetDisplay }, s.devices, nowMs));
   const shp2Enriched =
     shp2 && shp2.projection?.kind === 'shp2'
-      ? { ...panelForClient(shp2, s.devices, nowMs), grid, off_grid }
+      ? { ...panelForClient(shp2, s.devices, nowMs, verdicts), grid, off_grid }
       : shp2
         ? { ...shp2, grid, off_grid }
         : undefined;
   const devices: typeof s.devices = shp2Enriched ? { ...s.devices, [shp2!.sn]: shp2Enriched } : { ...s.devices };
   // v1.185.0 — every other panel's source slots get the same observability flag.
-  for (const p of secondaryShp2s(s.devices)) devices[p.sn] = panelForClient(p, s.devices, nowMs);
+  for (const p of secondaryShp2s(s.devices)) devices[p.sn] = panelForClient(p, s.devices, nowMs, verdicts);
   // v1.185.0 — which panel is the house panel, and whether one must be pinned (the dashboard's
   // prompt reads this).
   return { ...s, devices, grid, off_grid, housePanel: store.housePanelState() };
@@ -1575,7 +1581,9 @@ app.get('/api/ha-state', async (req, reply) => {
   const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
   // v1.188.1 — Fleet PV and Battery Net add every DARK home slot, metered at the panel
   // (energyBridge.ts); null while one cannot be bridged (publishReadiness `flowBridged`).
-  const bridged = recorder.bridgedFleetFlow({ fleetPv, fleetBatteryNet }, snap.devices, Date.now());
+  // v1.188.1 (review) — and AC Import / Fleet Total In / Out on the same notion: a frozen Core's held
+  // figures are taken out, a dark Core counts at its slot (energyBridge.ts BridgedFleetFlow.acIn).
+  const bridged = recorder.bridgedFleetFlow({ fleetPv, fleetBatteryNet, acIn, fleetIn, fleetOut }, snap.devices, Date.now());
 
   // v1.125.1 — cache the REPRESENTATIVE islanded load for the outage cushion.
   //
@@ -1608,20 +1616,22 @@ app.get('/api/ha-state', async (req, reply) => {
   const alerts = snap.alerts ?? [];
   const cnt = makeAlertCounter(alerts);
   // v1.188.1 — which backup timer applies: the Cores' battery net while every home Core reports,
-  // else a bound through the panel's slots (shp2Membership.ts backupTimerGate).
-  const timers = backupTimerGate(snap.devices, Date.now());
+  // else a bound through the panel's slots (shp2Membership.ts backupTimerGate). v1.188.1 (review) — on
+  // the bridge's verdicts, so the timers count each Core as Battery Net does (its own reading, or its
+  // slot less the PV the bridge reads as measured there).
+  const timers = backupTimerGate(snap.devices, Date.now(), slotVerdicts(bridged));
 
   const payload = {
     generated_at: snap.generatedAt,
 
     // Power flow (watts, integers)
     fleet_pv_watts: bridged.fleetPv == null ? null : Math.round(bridged.fleetPv),
-    fleet_total_in_watts: Math.round(fleetIn),
-    fleet_total_out_watts: Math.round(fleetOut),
+    fleet_total_in_watts: bridged.fleetIn == null ? null : Math.round(bridged.fleetIn),
+    fleet_total_out_watts: bridged.fleetOut == null ? null : Math.round(bridged.fleetOut),
     // v0.10.4 per-pack; positive = discharging. v1.188.1 — plus the bridged dark slots.
     fleet_battery_net_watts: bridged.fleetBatteryNet == null ? null : Math.round(bridged.fleetBatteryNet),
     panel_load_watts: Math.round(panelLoad),
-    ac_import_watts: Math.round(acIn),
+    ac_import_watts: bridged.acIn == null ? null : Math.round(bridged.acIn),
     // v0.40.0 — resolve via the grid-presence resolver, not `acIn < 5` (DPU ac_in is ~0 on
     // a PV/battery-covered home → falsely pinned off-grid 24/7). Matches /api/snapshot's
     // off_grid (snapshotForClient) and the alarm engine's grid-presence view.

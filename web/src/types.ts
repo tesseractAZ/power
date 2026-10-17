@@ -107,6 +107,13 @@ export interface Shp2EnergySource {
   /** v1.188.1 — the server's verdict: the slot's Core is listed ONLINE but its own meter is frozen
    *  (content unchanged for 5 min). The Energy flow card reads it from this slot instead. */
   dpuFrozen?: boolean;
+  /** v1.188.1 (review) — the server's verdict, from the energy bridge: Home Assistant's power
+   *  sensors count this slot's Core at its OWN reading (a Core the cloud lists offline whose live
+   *  stream still arrives included). Absent: no verdict was sent (the card keeps its own rule). */
+  ownReading?: boolean;
+  /** v1.188.1 (review) — this dark slot's PV (W) where the server reads the panel's PV field as
+   *  measured (checked and trusted, the sun up), else null. */
+  pvMeasuredW?: number | null;
 }
 
 export interface Shp2Projection {

@@ -244,7 +244,7 @@ for (const [label, jumpWh, bms] of [
         assert.ok(hand, sn);
         // The figures the statistics repair reads: what the BMS counted while dark, and what the bridge published.
         assert.ok(hand.includes(`re-baselined on return — ${bms} (absorbed, not published)`), hand);
-        assert.ok(hand.includes(`the panel bridge counted ${panelFig} (AC basis, already published)`), hand);
+        assert.ok(hand.includes(`the panel bridge counted ${panelFig} (AC basis at the slot, or the Core's own pack meters where the slot could not be read; already published)`), hand);
         // ★★ The "no longer bridged" line follows the hand-over (a read ran it first) and still has them.
         const gone = p.logs.find((l) => l.includes(`Core ${sn} is no longer bridged`));
         assert.ok(gone, sn);

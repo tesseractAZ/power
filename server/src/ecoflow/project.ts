@@ -440,6 +440,13 @@ export interface Shp2EnergySource {
    *  listed ONLINE but its own meter is frozen (content unchanged for SHP2_READBACK_STALE_MS). The
    *  Energy flow card reads such a Core from this slot, as it does a dpuStale one. */
   dpuFrozen?: boolean;
+  /** v1.188.1 (review) — set by snapshotForClient from the energy bridge (shp2Membership.ts
+   *  BridgeVerdicts): the two power sensors count this slot's Core at its OWN reading (a Core the
+   *  cloud lists offline whose MQTT data still arrives included). Absent: no verdict was sent. */
+  ownReading?: boolean;
+  /** v1.188.1 (review) — set with ownReading: this dark slot's PV (W) where the bridge reads the
+   *  panel's PV field as measured (trusted, the sun up), else null. */
+  pvMeasuredW?: number | null;
 }
 
 export interface Shp2ChargeWindow {

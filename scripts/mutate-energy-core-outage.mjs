@@ -20,7 +20,7 @@
  *   B-ix    the bridge is folded into the BMS discharge floor
  *   B-x     an untrusted panel PV field is used as measured (rollup)
  *   B-xi    an untrusted panel PV field is used for the power sensors
- *   B-xii   the panel-freshness gate is dropped (rollup)
+ *   B-xii   the rollup judges a window on the panel's reading at the instant again (round 2: the rows that exist are booked)
  *   B-xiii  the panel-freshness gate is dropped (power sensors)
  *   B-xiv   battery out/in book the gross slot flows (PV that passed through a Core as battery out)
  *   B-xv    flowBridged is ready while a slot is unbridgeable (readiness)
@@ -86,6 +86,30 @@
  *   B-lxxv  where the bridge books nothing, a marked Core's own measured readings are still cut
  *   B-lxxvi handsBack ignores whether the Core has a reading of its own (a frozen marked Core is handed back)
  *
+ * Review round 2 (v1.188.1):
+ *   B-lxxvii where the bridge books nothing, a marked Core's own pack meters are not booked (its battery by nobody)
+ *   B-lxxviii a window whose only slot row is its start books the slot's held value, not the Core's own readings
+ *   B-lxxix a dark slot's gap is never held (each window inside a panel shadow books nothing)
+ *   B-lxxx  a held bridge window does not hold the two counters it adds to
+ *   B-lxxxi the clamp ignores the slot rows recorded after the watermark (a crash's span is dropped)
+ *   B-lxxxii a Core listed by two panels is metered at both slots
+ *   B-lxxxiii two listings of a Core are ranked by serial alone (a stale panel's listing is read)
+ *   B-lxxxiv every held row of a Core is marked, a pack it no longer carries included
+ *   B-lxxxv the rollup marks without the device map
+ *   B-lxxxvi with no projection, a pack another chassis carries now is marked too
+ *   B-lxxxvii the hand-back does not spend a marker of a pack the Core no longer reports
+ *   B-lxxxviii a pack list not yet complete counts as complete (a pack still to report loses its marker)
+ *   B-lxxxix the flow sensors keep a frozen Core's held figures (AC Import publishes its held input)
+ *   B-xc    a dark slot's AC input is not added to AC Import
+ *   B-xci   a dark slot's delivery is not added to Fleet Total Out
+ *   B-xcii  a dark slot with no fresh meter does not withhold the flow sensors
+ *   B-xciii the MQTT publisher publishes AC Import from the Cores' sums again
+ *   B-xciv  /api/ha-state publishes Fleet Total In from the Cores' sums again
+ *   B-xcv   a source-set change re-seeds the battery floors at once (a one-poll isConnect flicker resets the counters)
+ *   B-xcvi  the Cores that left drop out of the battery sum while the change is pending
+ *   B-xcvii the sustained re-seed takes the sum that still carried the Cores that left
+ *   B-xcviii the BMS pass reads the live source set only (the pending change is ignored)
+ *
  *   node scripts/mutate-energy-core-outage.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -95,6 +119,9 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EB = resolve(REPO, 'server/src/energyBridge.ts');
 const RC = resolve(REPO, 'server/src/recorder.ts');
 const PR = resolve(REPO, 'server/src/publishReadiness.ts');
+const MEMB = resolve(REPO, 'server/src/shp2Membership.ts');
+const MQ = resolve(REPO, 'server/src/mqttDiscovery.ts');
+const IDX = resolve(REPO, 'server/src/index.ts');
 const SUBSET = [
   'test/energyBridge.test.ts',
   'test/recorderEnergyBridge.test.ts',
@@ -103,6 +130,9 @@ const SUBSET = [
   'test/publishReadiness.test.ts',
   'test/lifetimeDipClamp.test.ts',
   'test/energyBridgeOwnReading.test.ts',
+  'test/energyBridgeSeams.test.ts',
+  'test/panelGapLifetime.test.ts',
+  'test/recorderMembershipRollover.test.ts',
 ];
 
 const MUTANTS = [
@@ -184,11 +214,11 @@ const MUTANTS = [
     why: 'Fleet PV publishes a made-up 0 W at noon and Battery Net the slots\' whole output.',
   },
   {
-    id: 'B-xii. ★★★ the panel-freshness gate is dropped (rollup)',
+    id: 'B-xii. ★★★ the rollup judges a window on the panel\'s reading at the instant again',
     file: EB,
-    find: '      if (!s.panelFresh) {',
-    to: '      if (false) { /* MUTANT */',
-    why: 'A frozen or replayed panel reading is integrated as battery energy.',
+    find: '        const wPts = slotPts.get(s) ?? [];\n',
+    to: "        if (!s.panelFresh) { win.reason = 'the panel reading is not fresh'; return; } /* MUTANT */\n        const wPts = slotPts.get(s) ?? [];\n",
+    why: 'The review defect (round 2): a cloud shadow that latches just before a rollup drops that whole window, the slot rows written before the latch included (3.10 of 3.38 kWh of battery out booked in the hour). A frozen or replayed panel body writes no row (the recorder\'s gate), so every row is a reading.',
   },
   {
     id: 'B-xiii. ★★ the panel-freshness gate is dropped (power sensors)',
@@ -291,8 +321,8 @@ const MUTANTS = [
   {
     id: 'B-xxvii. ★★★ the bridge\'s window ignores the hand-off instant',
     file: EB,
-    find: '      const start = Math.max(since, s.darkSinceMs ?? since);',
-    to: '      const start = since; /* MUTANT */',
+    find: '      const start = Math.max(since, s.darkSinceMs ?? since);\n      const win: BridgeSlotWindow',
+    to: '      const start = since; /* MUTANT */\n      const win: BridgeSlotWindow',
     why: 'An outage that starts mid-window books the part before the flip twice: the BMS / pv_total counted it, and the bridge books it again.',
   },
   {
@@ -347,7 +377,7 @@ const MUTANTS = [
   {
     id: 'B-xxxv. ★★ the 15-min window clamp is removed',
     file: EB,
-    find: '    since = Math.max(since, nowMs - BRIDGE_MAX_WINDOW_MS);',
+    find: '    if (since < cutoff && !dark.some(recordedAfter)) since = cutoff;',
     to: '    /* MUTANT */',
     why: 'The first window after a restart spans the downtime: one judged on daylight at its start books nothing for the night it covers.',
   },
@@ -375,8 +405,8 @@ const MUTANTS = [
   {
     id: 'B-xxxix. ★★ the hand-over clears the per-Core figures',
     file: RC,
-    find: "        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis, already published)`,\n      );\n",
-    to: "        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis, already published)`,\n      );\n      if (energyBridge.markersOf(sn).length === 0) energyBridge.clearCore(sn); /* MUTANT */\n",
+    find: "        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis at the slot, or the Core\'s own pack meters where the slot could not be read; already published)`,\n      );\n",
+    to: "        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis at the slot, or the Core\'s own pack meters where the slot could not be read; already published)`,\n      );\n      if (energyBridge.markersOf(sn).length === 0) energyBridge.clearCore(sn); /* MUTANT */\n",
     why: 'The review defect: the "no longer bridged" line that follows reads 0.00 kWh in / 0.00 kWh out.',
   },
   {
@@ -529,8 +559,8 @@ const MUTANTS = [
   {
     id: 'B-lxi. ★★★ the bridge\'s window ignores the persisted instant',
     file: EB,
-    find: '    for (const s of darkHomeSlots(snap.devices, nowMs, known, isMarked)) {',
-    to: '    for (const s of darkHomeSlots(snap.devices, nowMs, undefined, isMarked)) { /* MUTANT */',
+    find: '    const dark = darkHomeSlots(snap.devices, nowMs, known, isMarked);',
+    to: '    const dark = darkHomeSlots(snap.devices, nowMs, undefined, isMarked); /* MUTANT */',
     why: 'The review defect: after a crash restart the first bridged window starts at the watermark and books again the battery energy the BMS counted before the flip (125-375 Wh).',
   },
   {
@@ -599,22 +629,22 @@ const MUTANTS = [
   {
     id: 'B-lxxi. ★★★ the power sensors sum a frozen projection listed online as live',
     file: EB,
-    find: '      if (summed) { const f = ownFlow(d); pv -= f.pv; net -= f.net; }',
+    find: '    if (summed) { const f = ownFlow(d); pv -= f.pv; net -= f.net; acIn -= f.acIn; fleetIn -= f.fleetIn; fleetOut -= f.fleetOut; }',
     to: '      /* MUTANT */',
     why: 'The review defect: Battery Net and Fleet PV publish a frozen Core\'s held pack flows beside its slot (HA disagrees with the card and the timers).',
   },
   {
     id: 'B-lxxii. ★★ the power sensors leave out a Core the cloud lists offline whose own data arrives',
     file: EB,
-    find: '        if (!summed) { const f = ownFlow(d); pv += f.pv; net += f.net; }',
+    find: '      if (!summed) { const f = ownFlow(d); pv += f.pv; net += f.net; acIn += f.acIn; fleetIn += f.fleetIn; fleetOut += f.fleetOut; }',
     to: '        /* MUTANT */',
     why: 'Fleet PV drops a Core that is measured, because the cloud lists it offline: a partial sum.',
   },
   {
     id: 'B-lxxiii. ★★★ a Core inside its dwell does not withhold the power figures',
     file: EB,
-    find: '      if (!o.bridged && panel.online === true) { pending.push(src.sn); ready = false; }',
-    to: '      if (!o.bridged && panel.online === true) { pending.push(src.sn); } /* MUTANT */',
+    find: '    if (!o.bridged && panel.online === true) { pending.push(src.sn as string); ready = false; meterReady = false; }',
+    to: '    if (!o.bridged && panel.online === true) { pending.push(src.sn as string); meterReady = false; } /* MUTANT */',
     why: 'The review defect: a Core flipped online by /status before its first quota, or offline inside the dwell, is in neither figure and Battery Net publishes a partial sum as a reading.',
   },
   {
@@ -627,7 +657,7 @@ const MUTANTS = [
   {
     id: 'B-lxxv. ★★ where the bridge books nothing, a marked Core\'s own measured readings are still cut',
     file: RC,
-    find: "      if (w.basis === 'unbridgeable' && coreReports(snap.devices[w.sn], now)) ownInstead.add(w.sn);",
+    find: '      if (w.own === true) ownInstead.add(w.sn);',
     to: '      /* MUTANT */',
     why: 'The review defect: with the panel reading not fresh, a dark Core\'s measured pv_total / ac_in rows are discarded and nothing is booked in their place.',
   },
@@ -637,6 +667,161 @@ const MUTANTS = [
     find: '  return reportsSinceReturn(d) && coreReports(d, nowMs);',
     to: '  return reportsSinceReturn(d); /* MUTANT */',
     why: 'A frozen marked Core counts as handed back: the bridge stops metering it, and register movement without a content change spends the markers and is counted beside the bridge.',
+  },
+  // ── review round 2 ────────────────────────────────────────────────────────
+  {
+    id: 'B-lxxvii. ★★★ where the bridge books nothing, a marked Core\'s own pack meters are not booked',
+    file: EB,
+    find: '      result.chargeWh += inWh;\n      result.dischargeWh += outWh;\n',
+    to: '      /* MUTANT */\n',
+    why: 'The review defect: a marked Core listed offline with its MQTT data back and the panel reading stale counts its PV, and its battery energy is absorbed and booked by nobody (3.4 kWh an hour at night).',
+  },
+  {
+    id: 'B-lxxviii. ★★ a window whose only slot row is its start books the slot\'s held value, not the Core\'s own readings',
+    file: EB,
+    find: '        if (ownReading(s) && !wPts.some((p) => p.ts > start)) {',
+    to: '        if (false) { /* MUTANT */',
+    why: 'By day the first window after the panel goes stale is booked from one held slot row on the inferred basis: the Core\'s own 500 Wh of measured solar is replaced by 125 Wh.',
+  },
+  {
+    id: 'B-lxxix. ★★★ a dark slot\'s gap is never held',
+    file: EB,
+    find: '      if (!pts.some((p) => p.ts >= start) && !ownReading(s) && last != null && nowMs - last < INTEGRATE_HEAD_LOOKBACK_MS) {',
+    to: '      if (false) { /* MUTANT */',
+    why: 'Every 5-min window inside a panel cloud shadow books nothing at the slots: the dark Cores\' battery out loses the window for good.',
+  },
+  {
+    id: 'B-lxxx. ★★ a held bridge window does not hold the two counters it adds to',
+    file: RC,
+    find: '      if (bridgeHeld && bridgeShare) continue;',
+    to: '      /* MUTANT */',
+    why: 'Grid to Battery Charge and PV Production move on without the window the bridge held: a marked Core whose own readings count next keeps only the second half of the span.',
+  },
+  {
+    id: 'B-lxxxi. ★★★ the clamp ignores the slot rows recorded after the watermark',
+    file: EB,
+    find: '    if (since < cutoff && !dark.some(recordedAfter)) since = cutoff;',
+    to: '    if (since < cutoff) since = cutoff; /* MUTANT */',
+    why: 'The review defect: after a crash and 11 min or more of downtime the slot rows from the last rollup to the crash are never booked (226 Wh of load against 0 Wh bridged).',
+  },
+  {
+    id: 'B-lxxxii. ★★★ a Core listed by two panels is metered at both slots',
+    file: EB,
+    find: '  for (const { panel, src } of connectedSourceListings(devices, nowMs)) {\n    const o = offlineState(src, devices, nowMs, known, marked);\n    if (!o?.bridged) continue;',
+    to: '  for (const { panel, src } of allShp2s(devices).flatMap((panel) => (panel.projection.sources ?? []).filter((src) => src.isConnected && !!src.sn).map((src) => ({ panel, src })))) { /* MUTANT */\n    const o = offlineState(src, devices, nowMs, known, marked);\n    if (!o?.bridged) continue;',
+    why: 'The review defect: Battery Net reads 2000 W for one Core delivering 1000 W, and the rollup books both windows into the lifetime rows.',
+  },
+  {
+    id: 'B-lxxxiii. ★★ two listings of a Core are ranked by serial alone',
+    file: MEMB,
+    find: '    rank(b) - rank(a) || (b.sn === house ? 1 : 0) - (a.sn === house ? 1 : 0) || (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));',
+    to: '    (b.sn === house ? 1 : 0) - (a.sn === house ? 1 : 0) || (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0)); /* MUTANT */',
+    why: 'The stale panel\'s listing is read and the live one dropped: the Core is unbridgeable and both power figures read unknown.',
+  },
+  {
+    id: 'B-lxxxiv. ★★★ every held row of a Core is marked, a pack it no longer carries included',
+    file: EB,
+    find: '  if (present) return out.filter((k) => present.has(k));',
+    to: '  if (present) return out; /* MUTANT */',
+    why: 'The review defect: a replaced pack\'s row gets a marker no register can spend; the Core stays marked for good and a 6 s blip is bridged at once.',
+  },
+  {
+    id: 'B-lxxxv. ★★ the rollup marks without the device map',
+    file: EB,
+    find: '      for (const pk of heldPackKeysOf(s.sn, lifetimeKeys, snap.devices)) {',
+    to: '      for (const pk of heldPackKeysOf(s.sn, lifetimeKeys)) { /* MUTANT */',
+    why: 'The marking ignores the packs the projection carries: the replaced pack\'s row is marked again.',
+  },
+  {
+    id: 'B-lxxxvi. ★★ with no projection, a pack another chassis carries now is marked too',
+    file: EB,
+    find: '    return c < 0 || !elsewhere.has(k.slice(c + 1));',
+    to: '    return true; /* MUTANT */',
+    why: 'After a restart while dark, the stale row of a pack that moved to another Core is marked and its marker kept.',
+  },
+  {
+    id: 'B-lxxxvii. ★★★ the hand-back does not spend a marker of a pack the Core no longer reports',
+    file: RC,
+    find: '        for (const k of gone) energyBridge.clearMarker(k);',
+    to: '        /* MUTANT */',
+    why: 'A Core dark since a restart (every held row marked) keeps the stale row\'s marker after it hands back.',
+  },
+  {
+    id: 'B-lxxxviii. ★★ a pack list not yet complete counts as complete',
+    file: EB,
+    find: "  return typeof n === 'number' && Number.isFinite(n) && n > 0 && (d.projection.packs ?? []).length >= n;",
+    to: '  return n !== -1; /* MUTANT */',
+    why: 'A Core that comes back showing one of its two packs loses the other\'s marker: its jump, when it lands, is counted beside the bridge.',
+  },
+  {
+    id: 'B-lxxxix. ★★★ the flow sensors keep a frozen Core\'s held figures',
+    file: EB,
+    find: '    if (summed) { const f = ownFlow(d); pv -= f.pv; net -= f.net; acIn -= f.acIn; fleetIn -= f.fleetIn; fleetOut -= f.fleetOut; }',
+    to: '    if (summed) { const f = ownFlow(d); pv -= f.pv; net -= f.net; } /* MUTANT */',
+    why: 'The review defect: every Core frozen online mid grid-charge keeps AC Import at its held 15 kW while the slots read 0 W.',
+  },
+  {
+    id: 'B-xc. ★★★ a dark slot\'s AC input is not added to AC Import',
+    file: EB,
+    find: '      acIn += Math.max(0, s.chW);',
+    to: '      /* MUTANT */',
+    why: 'A force charge through the slots of dark Cores publishes 0 W of AC import.',
+  },
+  {
+    id: 'B-xci. ★★ a dark slot\'s delivery is not added to Fleet Total Out',
+    file: EB,
+    find: '      fleetOut += Math.max(0, -s.chW);',
+    to: '      /* MUTANT */',
+    why: 'The dark Cores carrying the house publish 0 W out.',
+  },
+  {
+    id: 'B-xcii. ★★ a dark slot with no fresh meter does not withhold the flow sensors',
+    file: EB,
+    find: '    } else {\n      meterReady = false;\n    }',
+    to: '    } else {\n      /* MUTANT */\n    }',
+    why: 'A stale panel publishes a partial sum as AC Import.',
+  },
+  {
+    id: 'B-xciii. ★★★ the MQTT publisher publishes AC Import from the Cores\' sums again',
+    file: MQ,
+    find: '      ac_import_watts: bridged.acIn == null ? null : Math.round(bridged.acIn),',
+    to: '      ac_import_watts: Math.round(acIn), /* MUTANT */',
+    why: 'The bridged figure is computed and the sensor ignores it: 15 kW of held AC input.',
+  },
+  {
+    id: 'B-xciv. ★★ /api/ha-state publishes Fleet Total In from the Cores\' sums again',
+    file: IDX,
+    find: '    fleet_total_in_watts: bridged.fleetIn == null ? null : Math.round(bridged.fleetIn),',
+    to: '    fleet_total_in_watts: Math.round(fleetIn), /* MUTANT */',
+    why: 'A frozen Core\'s held input is published as live.',
+  },
+  {
+    id: 'B-xcv. ★★★ a source-set change re-seeds the battery floors at once',
+    file: RC,
+    find: '    const sustained = pendingMembership != null && pendingMembership.rollups >= MEMBERSHIP_SUSTAINED_ROLLUPS;',
+    to: '    const sustained = pendingMembership != null; /* MUTANT */',
+    why: 'The review defect (pre-existing since v1.96.0): one rollup with a dark Core\'s slot reading isConnect = 0 steps Battery Energy In and Out down by a third (a meter reset), then back up.',
+  },
+  {
+    id: 'B-xcvi. ★★★ the Cores that left drop out of the battery sum while the change is pending',
+    file: RC,
+    find: '    if (pendingMembership == null || !bmsMembershipFp) return live;',
+    to: '    if (pendingMembership == null || !bmsMembershipFp || (true as boolean)) return live; /* MUTANT */',
+    why: 'A two-rollup flicker after hours of discharge opens a gap over the v1.98.0 threshold: that re-seed steps the counters down instead.',
+  },
+  {
+    id: 'B-xcvii. ★★ the sustained re-seed takes the sum that still carried the Cores that left',
+    file: RC,
+    find: '        pendingMembership = null;\n        bms = computeBmsBatteryTotals(snap);',
+    to: '        pendingMembership = null; /* MUTANT */',
+    why: 'A real rollover re-seeds to the old pool\'s sum: the counters stay pinned above the new pool, the v1.96.0 freeze.',
+  },
+  {
+    id: 'B-xcviii. ★★ the BMS pass reads the live source set only',
+    file: RC,
+    find: '    const sourceSns = bmsMembersOf(snap);',
+    to: '    const sourceSns = sourceSnsOf(snap); /* MUTANT */',
+    why: 'The pending change is ignored where it matters: a two-rollup flicker trips the v1.98.0 floor-gap re-seed.',
   },
 ];
 

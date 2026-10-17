@@ -77,6 +77,27 @@
  *   V-ii    the console's BATT.P.NET reads IDLE while the sensors are unknown
  *   V-iii   the console's mimic draws the battery idle while the sensors are unknown
  *
+ * Review round 3 (v1.188.1): one verdict per Core across the alarm guard, the timers, the card
+ * and the sensors
+ *   W-i     the at-floor guard counts a frozen-online Core as reporting again
+ *   W-ii    coverage with a clock ignores the content clock
+ *   W-iii   the bound takes no PV out of a slot the bridge reads as measured
+ *   W-iv    the bound's own-meter test ignores the bridge's verdict
+ *   W-v     the 'cores' basis ignores the verdict (a marked Core's held net is summed)
+ *   W-vi    /api/ha-state's timers ignore the verdicts
+ *   W-vii   the console's RUN line ignores the verdicts
+ *   W-viii  the console's flow carries no verdicts
+ *   W-ix    panelForClient drops the bridge's verdicts
+ *   W-x     snapshotForClient sends the house panel without the verdicts
+ *   W-xi    the card ignores the ownReading verdict
+ *   W-xii   the card ignores a slot's measured PV
+ *   W-xiii  the Solar node stays "—" with only measured slot PV
+ *   W-xiv   pvUnreported counts the measured slots
+ *   W-xv    the Solar subtitle leaves out the measured slots
+ *   W-xvi   the card passes no pvViaPanel to the Solar subtitle
+ *   W-xvii  a measured slot's pack net keeps its PV in
+ *   W-xviii the subtitle reads "in" / "out" with every via-panel slot measured
+ *
  *   node scripts/mutate-energyflow-offline.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -89,10 +110,13 @@ const MEMB = resolve(REPO, 'server/src/shp2Membership.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const CONSOLE = resolve(REPO, 'server/src/telnet/plant/console.ts');
 const TYPES = resolve(REPO, 'server/src/telnet/plant/types.ts');
+const GRID = resolve(REPO, 'server/src/gridState.ts');
 const SUBSET = [
   'test/energyFlowCoresOffline.test.ts',
   'test/energyFlowModel.test.ts',
   'test/coresDarkServerVerdicts.test.ts',
+  'test/poolCoverageGate.test.ts',
+  'test/energyBridge.test.ts',
 ];
 
 const MUTANTS = [
@@ -141,8 +165,8 @@ const MUTANTS = [
   {
     id: 'O-vii. ★★ the Batteries node’s net ignores the panel-metered Cores',
     file: MODEL,
-    find: '  const batNet = ownBatNet - viaFlow.reduce((t, x) => t + x.w, 0);',
-    to: '  const batNet = ownBatNet; /* MUTANT */',
+    find: '  const batNet = ownBatNet - viaFlow.reduce((t, x) => t + x.w, 0) - slotPv;',
+    to: '  const batNet = ownBatNet - slotPv; /* MUTANT */',
     why: '"Batteries — idle" beside a 3.4 kW Batteries → Loads edge (the 10-16 dashboard).',
   },
   {
@@ -211,7 +235,7 @@ const MUTANTS = [
   {
     id: 'O-xv. ★ the subtitle says "discharging" for a panel figure that carries PV',
     file: MODEL,
-    find: '  const acExchange = m.viaPanelCount > 0;',
+    find: '  const acExchange = m.viaPanelCount > (m.pvViaPanel ?? 0);',
     to: '  const acExchange = false; /* MUTANT */',
     why: 'By day a Core passing PV to the house while its packs charge reads as discharging.',
   },
@@ -225,7 +249,7 @@ const MUTANTS = [
   {
     id: 'O-xvii. ★★ the card builds its own subtitle, not the model’s',
     file: CARD,
-    find: '          subtitle={batteriesSubtitle({ batNet, viaPanelCount })}',
+    find: '          subtitle={batteriesSubtitle({ batNet, viaPanelCount, pvViaPanel })}',
     to: "          subtitle={batNet > 5 ? `▼ ${fmtW(batNet)} discharging` : batNet < -5 ? `▲ ${fmtW(-batNet)} charging` : 'idle'} /* MUTANT */",
     why: 'The card says "discharging" for a figure the model reports as the Cores’ AC exchange.',
   },
@@ -233,8 +257,8 @@ const MUTANTS = [
   {
     id: 'F-i. ★★★ a Core listed online on a frozen meter is read on its own meter again',
     file: MODEL,
-    find: '  const metered = dpus.filter((d) => !frozenSns.has(d.sn));',
-    to: '  const metered = dpus; /* MUTANT */',
+    find: '    : dpus.filter((d) => !frozenSns.has(d.sn));',
+    to: '    : dpus; /* MUTANT */',
     why: 'Three Cores frozen at 0 W read as "the Cores deliver nothing": the 10-16 false grid import through the stale half of the rule.',
   },
   {
@@ -261,8 +285,8 @@ const MUTANTS = [
   {
     id: 'F-v. ★ the content clock’s window is exclusive',
     file: MEMB,
-    find: "  return typeof t === 'number' && Number.isFinite(t) && t > 0 && nowMs - t <= SHP2_READBACK_STALE_MS;",
-    to: "  return typeof t === 'number' && Number.isFinite(t) && t > 0 && nowMs - t < SHP2_READBACK_STALE_MS; /* MUTANT */",
+    find: "  const t = d?.contentChangedAtMs;\n  return typeof t === 'number' && Number.isFinite(t) && t > 0 && nowMs - t <= SHP2_READBACK_STALE_MS;",
+    to: "  const t = d?.contentChangedAtMs;\n  return typeof t === 'number' && Number.isFinite(t) && t > 0 && nowMs - t < SHP2_READBACK_STALE_MS; /* MUTANT */",
     why: 'The window disagrees with the grid resolver’s (gridState coreContentFresh) at its edge.',
   },
   {
@@ -289,7 +313,7 @@ const MUTANTS = [
   {
     id: 'P-iii. ★★ snapshotForClient sends the second panel without the verdicts',
     file: IDX,
-    find: '  for (const p of secondaryShp2s(s.devices)) devices[p.sn] = panelForClient(p, s.devices, nowMs);',
+    find: '  for (const p of secondaryShp2s(s.devices)) devices[p.sn] = panelForClient(p, s.devices, nowMs, verdicts);',
     to: '  for (const p of secondaryShp2s(s.devices)) devices[p.sn] = p; /* MUTANT */',
     why: 'The pure helper is tested and the production path skips it for every panel but the house one.',
   },
@@ -324,84 +348,84 @@ const MUTANTS = [
   {
     id: 'S-i. ★★ no Core reporting reads "0 W" of PV again',
     file: MODEL,
-    find: '  const pv: number | null = ownMeter.size === 0 && silentSlots.length > 0 ? null : ownPv;',
-    to: '  const pv: number | null = ownPv; /* MUTANT */',
+    find: '  const pv: number | null = ownMeter.size === 0 && viaPv.length === 0 && silentSlots.length > 0 ? null : ownPv + slotPv;',
+    to: '  const pv: number | null = ownPv + slotPv; /* MUTANT */',
     why: 'A missing PV meter is drawn as a reading beside an "out" figure that carries that PV.',
   },
   {
     id: 'S-ii. ★ any Core via the panel hides the reporting Cores’ PV',
     file: MODEL,
-    find: '  const pv: number | null = ownMeter.size === 0 && silentSlots.length > 0 ? null : ownPv;',
-    to: '  const pv: number | null = silentSlots.length > 0 ? null : ownPv; /* MUTANT */',
+    find: '  const pv: number | null = ownMeter.size === 0 && viaPv.length === 0 && silentSlots.length > 0 ? null : ownPv + slotPv;',
+    to: '  const pv: number | null = silentSlots.length > 0 ? null : ownPv + slotPv; /* MUTANT */',
     why: 'The PV two reporting Cores measured is thrown away because a third is dark.',
   },
   {
     id: 'S-iii. ★ pvUnreported is not reported',
     file: MODEL,
-    find: '    pvUnreported: silentSlots.length,',
+    find: '    pvUnreported: silentSlots.length - viaPv.length,',
     to: '    pvUnreported: 0, /* MUTANT */',
     why: 'Two Cores’ PV is labelled as the whole array.',
   },
   {
     id: 'S-iv. ★ the Solar subtitle drops "N of M Cores"',
     file: MODEL,
-    find: '  if (m.pvUnreported > 0) return `${m.dpuCount} of ${m.dpuCount + m.pvUnreported} Cores`;',
+    find: '  if (m.pvUnreported > 0) return `${covered} of ${covered + m.pvUnreported} Cores`;',
     to: '  /* MUTANT */',
     why: 'A partial PV figure reads "42 panels".',
   },
   {
     id: 'S-v. ★ the card hard-codes the Solar subtitle',
     file: CARD,
-    find: 'subtitle={solarSubtitle({ pv, dpuCount, pvUnreported })}',
+    find: 'subtitle={solarSubtitle({ pv, dpuCount, pvUnreported, pvViaPanel })}',
     to: 'subtitle="42 panels" /* MUTANT */',
     why: 'The model is tested and the card ignores it.',
   },
   {
     id: 'T-i. ★★★ the timers trust the Cores’ sum with a home Core dark',
     file: MEMB,
-    find: '  if (homeCoreCoverage(devices).complete && !frozen) {',
-    to: '  if (!frozen) { /* MUTANT */',
+    find: '  if (homeCoreCoverage(devices).complete && !frozen && (!verdicts || listings.every((l) => verdicts.own.has(l.src.sn as string)))) {',
+    to: '  if (!frozen && (!verdicts || listings.every((l) => verdicts.own.has(l.src.sn as string)))) { /* MUTANT */',
     why: 'Every Core offline sums to 0 W, and "38 min to full" is published during a 3.4 kW drain (10-16 20:04).',
   },
   {
     id: 'T-ii. ★★ the timers trust a frozen Core’s sum',
     file: MEMB,
-    find: '  if (homeCoreCoverage(devices).complete && !frozen) {',
-    to: '  if (homeCoreCoverage(devices).complete) { /* MUTANT */',
+    find: '  if (homeCoreCoverage(devices).complete && !frozen && (!verdicts || listings.every((l) => verdicts.own.has(l.src.sn as string)))) {',
+    to: '  if (homeCoreCoverage(devices).complete && (!verdicts || listings.every((l) => verdicts.own.has(l.src.sn as string)))) { /* MUTANT */',
     why: 'A Core listed online on a frozen 0 W reads as "not discharging" while its slot delivers.',
   },
   {
     id: 'T-iii. ★★★ the slot sign is not negated in the bound',
     file: MEMB,
-    find: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : Infinity;",
-    to: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? w + SLOT_UNMETERED_DRAW_W : Infinity; /* MUTANT */",
+    find: "    watts += shp2ReadbackFresh(p, nowMs) && typeof w === 'number' && Number.isFinite(w) ? -w - pv + SLOT_UNMETERED_DRAW_W : Infinity;",
+    to: "    watts += shp2ReadbackFresh(p, nowMs) && typeof w === 'number' && Number.isFinite(w) ? w - pv + SLOT_UNMETERED_DRAW_W : Infinity; /* MUTANT */",
     why: 'A drain through the slots reads as a charge: the charge timer during the drain, the discharge timer hidden.',
   },
   {
     id: 'T-iv. ★★ a stale panel’s slots bound the pool',
     file: MEMB,
-    find: '    const panelFresh = shp2ReadbackFresh(p, nowMs);',
-    to: '    const panelFresh = true; /* MUTANT */',
+    find: "    watts += shp2ReadbackFresh(p, nowMs) && typeof w === 'number' && Number.isFinite(w) ? -w - pv + SLOT_UNMETERED_DRAW_W : Infinity;",
+    to: "    watts += typeof w === 'number' && Number.isFinite(w) ? -w - pv + SLOT_UNMETERED_DRAW_W : Infinity; /* MUTANT */",
     why: 'A frozen frame’s force charge keeps proving a charge after it ended.',
   },
   {
     id: 'T-v. ★★ a slot with no figure counts as 0 W',
     file: MEMB,
-    find: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : Infinity;",
-    to: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : 0; /* MUTANT */",
+    find: "    watts += shp2ReadbackFresh(p, nowMs) && typeof w === 'number' && Number.isFinite(w) ? -w - pv + SLOT_UNMETERED_DRAW_W : Infinity;",
+    to: "    watts += shp2ReadbackFresh(p, nowMs) && typeof w === 'number' && Number.isFinite(w) ? -w - pv + SLOT_UNMETERED_DRAW_W : 0; /* MUTANT */",
     why: 'An unmeasured Core reads as idle: the absence this release removes.',
   },
   {
     id: 'T-vi. ★★ a reporting Core’s slot is read instead of its own meter',
     file: MEMB,
-    find: "      if (d?.online === true && d.projection?.kind === 'dpu' && dpuContentFresh(d, nowMs)) {",
-    to: "      if (d?.online === true && d.projection?.kind === 'dpu' && dpuContentFresh(d, Infinity)) { /* MUTANT */",
+    find: '    return verdicts ? verdicts.own.has(sn) : d.online === true && dpuContentFresh(d, nowMs);',
+    to: '    return verdicts ? verdicts.own.has(sn) : d.online === true && dpuContentFresh(d, Infinity); /* MUTANT */',
     why: 'The slower slot meter replaces a Core’s exact pack net (and its PV pass-through hides a charge).',
   },
   {
     id: 'T-vii. ★★ no slot to read is a 0 W bound',
     file: MEMB,
-    find: '  if (seen.size === 0) watts = Infinity;',
+    find: '  if (listings.length === 0) watts = Infinity;',
     to: '  /* MUTANT */',
     why: 'With no panel projected and a Core offline, nothing measured reads as "not discharging".',
   },
@@ -509,29 +533,29 @@ const MUTANTS = [
   {
     id: 'T-xii. ★★★ a disconnected slot’s Core bounds the pool',
     file: MEMB,
-    find: '      if (!s.isConnected || !s.sn || seen.has(s.sn)) return;',
-    to: '      if (!s.sn || seen.has(s.sn)) return; /* MUTANT */',
+    find: '      if (!src.isConnected || !src.sn || chosen.has(src.sn)) return;',
+    to: '      if (!src.sn || chosen.has(src.sn)) return; /* MUTANT */',
     why: 'A bench spare charging from the wall publishes a time to full and hides the time to reserve during a 2 kW drain.',
   },
   {
     id: 'T-xiii. ★ a Core listed by two panels is counted twice',
     file: MEMB,
-    find: '      if (!s.isConnected || !s.sn || seen.has(s.sn)) return;',
-    to: '      if (!s.isConnected || !s.sn) return; /* MUTANT */',
+    find: '  const listings = connectedSourceListings(devices, nowMs);\n  // v1.188.1 (review) — with the bridge',
+    to: '  const listings = allShp2s(devices).flatMap((panel) => (panel.projection.sources ?? []).map((src, index) => ({ panel, src, index }))).filter((l) => l.src.isConnected && !!l.src.sn); /* MUTANT */\n  // v1.188.1 (review) — with the bridge',
     why: 'One Core’s exchange is added once per panel that lists it.',
   },
   {
     id: 'T-xiv. ★★ the bound reads the poll’s pack flow, not the stream’s',
     file: MEMB,
-    find: '        for (const pk of d.projection.packs ?? []) { const f = pk.liveFlow ?? pk; watts +=',
-    to: '        for (const pk of d.projection.packs ?? []) { const f = pk; /* MUTANT */ watts +=',
+    find: '      for (const pk of d.projection.packs ?? []) { const f = pk.liveFlow ?? pk; watts +=',
+    to: '      for (const pk of d.projection.packs ?? []) { const f = pk; /* MUTANT */ watts +=',
     why: 'The poll’s replayed 3 kW charge outweighs the stream’s 2 kW discharge: a time to full during a drain (v1.186.2).',
   },
   {
     id: 'T-xv. ★★★ an offline Core with a recent projection is read on its own meter',
     file: MEMB,
-    find: "      if (d?.online === true && d.projection?.kind === 'dpu' && dpuContentFresh(d, nowMs)) {",
-    to: "      if (d?.projection?.kind === 'dpu' && dpuContentFresh(d, nowMs)) { /* MUTANT */",
+    find: '    return verdicts ? verdicts.own.has(sn) : d.online === true && dpuContentFresh(d, nowMs);',
+    to: '    return verdicts ? verdicts.own.has(sn) : dpuContentFresh(d, nowMs); /* MUTANT */',
     why: 'The packs’ last charge, carried across the offline flip, publishes a time to full while the slots deliver 3 kW.',
   },
   // ── review round 2 recheck: the house shared while a Core's delivery is unmeasured ──────────
@@ -566,15 +590,15 @@ const MUTANTS = [
   {
     id: 'T-xvi. ★★ the bound leaves out each dark Core\'s own draw',
     file: MEMB,
-    find: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w + SLOT_UNMETERED_DRAW_W : Infinity;",
-    to: "      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w : Infinity; /* MUTANT */",
+    find: "    watts += shp2ReadbackFresh(p, nowMs) && typeof w === 'number' && Number.isFinite(w) ? -w - pv + SLOT_UNMETERED_DRAW_W : Infinity;",
+    to: "    watts += shp2ReadbackFresh(p, nowMs) && typeof w === 'number' && Number.isFinite(w) ? -w - pv : Infinity; /* MUTANT */",
     why: 'The review defect: at the reserve hold the slots read about 0 W while the packs supply the Cores\' standby, and the time to full is published; 30 W of standby intake reads as a proven charge and hides the time to empty.',
   },
   {
     id: 'V-i. ★★★ the console reads the Cores-only sums again',
     file: TYPES,
-    find: '  return { fleetPv: b.fleetPv, fleetBatteryNet: b.fleetBatteryNet };',
-    to: '  return { fleetPv, fleetBatteryNet }; /* MUTANT */',
+    find: '  return { fleetPv: b.fleetPv, fleetBatteryNet: b.fleetBatteryNet, verdicts: slotVerdicts(b) };',
+    to: '  return { fleetPv, fleetBatteryNet, verdicts: slotVerdicts(b) }; /* MUTANT */',
     why: 'The review defect: with every Core cloud-offline the console reads "BATT.P.NET 0 W IDLE" and "BATT idle" beside a 3.4 kW drain the HA sensors publish.',
   },
   {
@@ -590,6 +614,133 @@ const MUTANTS = [
     find: "    (batNet == null ? c.grey('—') : batNet > 5 ? c.yellow('▼ DCH') : batNet < -5 ? c.green('▲ CHG') : c.grey('idle'));",
     to: "    (batNet == null ? c.grey('idle') : batNet > 5 ? c.yellow('▼ DCH') : batNet < -5 ? c.green('▲ CHG') : c.grey('idle')); /* MUTANT */",
     why: 'An unknown battery net is drawn as an idle pool beside the house load.',
+  },
+  // ── review round 3 ────────────────────────────────────────────────────────
+  {
+    id: 'W-i. ★★★ the at-floor guard counts a frozen-online Core as reporting again',
+    file: GRID,
+    find: '  const poolCoverage = homeCoreCoverage(input.devices, undefined, nowMs);',
+    to: '  const poolCoverage = homeCoreCoverage(input.devices); /* MUTANT */',
+    why: 'The review defect: at the floor with gridSta = Grid OK and a frozen Core\'s held 0 W, the guard backstops and the critical SoC-ladder and runway alarms drop to a low advisory while the slot delivers 1.1 kW.',
+  },
+  {
+    id: 'W-ii. ★★ coverage with a clock ignores the content clock',
+    file: MEMB,
+    find: '  const online = new Set(onlineDpus(devices).filter((d) => nowMs == null || dpuContentFresh(d, nowMs)).map((d) => d.sn));',
+    to: '  const online = new Set(onlineDpus(devices).map((d) => d.sn)); /* MUTANT */',
+    why: 'The guard is passed a clock and still counts the frozen Core.',
+  },
+  {
+    id: 'W-iii. ★★★ the bound takes no PV out of a slot the bridge reads as measured',
+    file: MEMB,
+    find: '    const pv = verdicts?.measuredPvW.get(slotKey(p.sn, s.slot)) ?? 0;',
+    to: '    const pv = 0; /* MUTANT */',
+    why: 'The review defect: by day with a trusted PV field the time to empty is published and the time to full withheld beside a Battery Net charging 4.5 kW.',
+  },
+  {
+    id: 'W-iv. ★★★ the bound\'s own-meter test ignores the bridge\'s verdict',
+    file: MEMB,
+    find: '    return verdicts ? verdicts.own.has(sn) : d.online === true && dpuContentFresh(d, nowMs);',
+    to: '    return d.online === true && dpuContentFresh(d, nowMs); /* MUTANT */',
+    why: 'The review defect: a Core the cloud lists offline whose MQTT data still arrives is read from its slot (+1.8 kW) while the sensors publish its own 4.5 kW charge.',
+  },
+  {
+    id: 'W-v. ★★ the \'cores\' basis ignores the verdict',
+    file: MEMB,
+    find: '  if (homeCoreCoverage(devices).complete && !frozen && (!verdicts || listings.every((l) => verdicts.own.has(l.src.sn as string)))) {',
+    to: '  if (homeCoreCoverage(devices).complete && !frozen) { /* MUTANT */',
+    why: 'A marked Core the bridge still meters at its slot has its held 3 kW charge summed: a time to full while its slot delivers 1.5 kW.',
+  },
+  {
+    id: 'W-vi. ★★ /api/ha-state\'s timers ignore the verdicts',
+    file: IDX,
+    find: '  const timers = backupTimerGate(snap.devices, Date.now(), slotVerdicts(bridged));',
+    to: '  const timers = backupTimerGate(snap.devices, Date.now()); /* MUTANT */',
+    why: 'The shared gate is fixed and the REST sensors never pass the verdicts to it.',
+  },
+  {
+    id: 'W-vii. ★★★ the console\'s RUN line ignores the verdicts',
+    file: CONSOLE,
+    find: '    const timers = backupTimerGate(data.snap.devices, Date.now(), data.flow?.verdicts);',
+    to: '    const timers = backupTimerGate(data.snap.devices, Date.now()); /* MUTANT */',
+    why: 'The review defect: "BATT.P.NET 4.50 kW CHG" beside "RUN ▼ DCH 18h 20m ▲ CHG —" on one screen.',
+  },
+  {
+    id: 'W-viii. ★★ the console\'s flow carries no verdicts',
+    file: TYPES,
+    find: '  return { fleetPv: b.fleetPv, fleetBatteryNet: b.fleetBatteryNet, verdicts: slotVerdicts(b) };',
+    to: '  return { fleetPv: b.fleetPv, fleetBatteryNet: b.fleetBatteryNet }; /* MUTANT */',
+    why: 'The RUN line reads the verdicts from the flow, and the flow never carries them.',
+  },
+  {
+    id: 'W-ix. ★★★ panelForClient drops the bridge\'s verdicts',
+    file: MEMB,
+    find: '        ...(verdicts && src.isConnected && src.sn ? {',
+    to: '        ...((false as boolean) && verdicts && src.isConnected && src.sn ? { /* MUTANT */',
+    why: 'The card never sees ownReading or pvMeasuredW: "Cores not reporting" beside a Fleet PV of 6 kW.',
+  },
+  {
+    id: 'W-x. ★★ snapshotForClient sends the house panel without the verdicts',
+    file: IDX,
+    find: '      ? { ...panelForClient(shp2, s.devices, nowMs, verdicts), grid, off_grid }',
+    to: '      ? { ...panelForClient(shp2, s.devices, nowMs), grid, off_grid } /* MUTANT */',
+    why: 'The helper is tested and the production path skips the verdicts for the house panel.',
+  },
+  {
+    id: 'W-xi. ★★★ the card ignores the ownReading verdict',
+    file: MODEL,
+    find: "  const verdictSent = connectedSlots.length > 0 && connectedSlots.every((s) => typeof s.ownReading === 'boolean');",
+    to: '  const verdictSent = false; /* MUTANT */',
+    why: 'The review defect: three Cores listed offline streaming their own data are drawn "via panel", "▼ 1.50 kW out", Solar "—", while the sensors count them at their own 6 kW of PV.',
+  },
+  {
+    id: 'W-xii. ★★★ the card ignores a slot\'s measured PV',
+    file: MODEL,
+    find: '  const slotPv = viaPv.reduce((t, x) => t + (measuredPv(x) as number), 0);',
+    to: '  const slotPv = 0; /* MUTANT */',
+    why: 'The review defect: Solar "—" and "▼ 1.50 kW out" beside a Fleet PV of 6 kW and a Battery Net charging 4.5 kW.',
+  },
+  {
+    id: 'W-xiii. ★★ the Solar node stays "—" with only measured slot PV',
+    file: MODEL,
+    find: '  const pv: number | null = ownMeter.size === 0 && viaPv.length === 0 && silentSlots.length > 0 ? null : ownPv + slotPv;',
+    to: '  const pv: number | null = ownMeter.size === 0 && silentSlots.length > 0 ? null : ownPv + slotPv; /* MUTANT */',
+    why: 'Every Core dark: the measured slot PV is computed and the Solar node reads "Cores not reporting".',
+  },
+  {
+    id: 'W-xiv. ★★ pvUnreported counts the measured slots',
+    file: MODEL,
+    find: '    pvUnreported: silentSlots.length - viaPv.length,',
+    to: '    pvUnreported: silentSlots.length, /* MUTANT */',
+    why: 'Solar reads "0 of 3 Cores" beside the 6 kW it covers.',
+  },
+  {
+    id: 'W-xv. ★★ the Solar subtitle leaves out the measured slots',
+    file: MODEL,
+    find: '  const covered = m.dpuCount + (m.pvViaPanel ?? 0);',
+    to: '  const covered = m.dpuCount; /* MUTANT */',
+    why: 'One measured slot of three reads "0 of 2 Cores".',
+  },
+  {
+    id: 'W-xvi. ★ the card passes no pvViaPanel to the Solar subtitle',
+    file: CARD,
+    find: 'subtitle={solarSubtitle({ pv, dpuCount, pvUnreported, pvViaPanel })}',
+    to: 'subtitle={solarSubtitle({ pv, dpuCount, pvUnreported })} /* MUTANT */',
+    why: 'The model counts the measured slots and the card drops them from the subtitle.',
+  },
+  {
+    id: 'W-xvii. ★★★ a measured slot\'s pack net keeps its PV in',
+    file: MODEL,
+    find: '  const batNet = ownBatNet - viaFlow.reduce((t, x) => t + x.w, 0) - slotPv;',
+    to: '  const batNet = ownBatNet - viaFlow.reduce((t, x) => t + x.w, 0); /* MUTANT */',
+    why: 'Solar shows the 6 kW and the Batteries box still reads it as "1.50 kW out": the PV counted twice.',
+  },
+  {
+    id: 'W-xviii. ★ the subtitle reads "in" / "out" with every via-panel slot measured',
+    file: MODEL,
+    find: '  const acExchange = m.viaPanelCount > (m.pvViaPanel ?? 0);',
+    to: '  const acExchange = m.viaPanelCount > 0; /* MUTANT */',
+    why: 'The packs\' own net reads "in" beside a Battery Net that says charging.',
   },
 ];
 

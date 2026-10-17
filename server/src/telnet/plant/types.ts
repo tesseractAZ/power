@@ -6,7 +6,8 @@ import type { DeviceSnapshot, FleetSnapshot } from '../../snapshot.js';
 import type { FleetEnergyTotals } from '../../aggregator.js';
 import type { DayForecast, FleetDegradation } from '../../analytics.js';
 import type { Recorder } from '../../recorder.js';
-import { aggregateFleetFlow } from '../../shp2Membership.js';
+import { aggregateFleetFlow, type BridgeVerdicts } from '../../shp2Membership.js';
+import { slotVerdicts } from '../../energyBridge.js';
 
 /** The Plant Operator's sub-screens (small set, each densely-packed). */
 export const PLANT_SCREENS = ['console', 'gen', 'bus', 'pv', 'alm', 'trd'] as const;
@@ -40,6 +41,9 @@ export interface PlantView {
 export interface PlantFlow {
   fleetPv: number | null;
   fleetBatteryNet: number | null;
+  /** v1.188.1 (review) — the bridge's verdicts the RUN line's timers take, as /api/ha-state does
+   *  (shp2Membership.ts BridgeVerdicts). Absent: the timers' own rule. */
+  verdicts?: BridgeVerdicts;
 }
 
 /**
@@ -52,7 +56,7 @@ export interface PlantFlow {
 export function plantFlow(recorder: Pick<Recorder, 'bridgedFleetFlow'>, devices: Record<string, DeviceSnapshot>, nowMs: number): PlantFlow {
   const { fleetPv, fleetBatteryNetDisplay: fleetBatteryNet } = aggregateFleetFlow(devices);
   const b = recorder.bridgedFleetFlow({ fleetPv, fleetBatteryNet }, devices, nowMs);
-  return { fleetPv: b.fleetPv, fleetBatteryNet: b.fleetBatteryNet };
+  return { fleetPv: b.fleetPv, fleetBatteryNet: b.fleetBatteryNet, verdicts: slotVerdicts(b) };
 }
 
 export interface PlantData {

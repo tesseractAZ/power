@@ -289,7 +289,15 @@ store: the offline, stale and blind alarms and the SoC ladder read the same proj
 - The heartbeat restates only fresh content. The freshness gate (4.3) is shorter than
   `MAX_INTERVAL_MS`, so a device that stops reporting gets no restated row at all, and a held
   stretch is a gap, which every consumer already handles: the coverage gates, `integrateWh`'s
-  `maxGapMs`, the night ledger's per-Core coverage and the per-device gap sweep (4.7).
+  `maxGapMs`, the night ledger's per-Core coverage and the per-device gap sweep (4.7). The
+  lifetime rollup integrates each 5-min window on its own, and `integrateWh` gives a window
+  with no row 0 Wh, so a panel counter (Panel Load, Grid Import (Home), each circuit) whose
+  series has no row in a window while its last row is less than 10 min old holds its watermark
+  instead: the next window integrates across the gap from the rows on both sides, as
+  `integrateWh` bridges a gap of up to 10 min inside one window. The energy bridge holds its
+  window the same way (energy chapter, the bridge). Before, every 5-min window inside a cloud
+  shadow or a quota stall was lost from those counters for good. A gap over 10 min is not
+  bridged.
 
 **Held rows already written.** Rows written before v1.188.1 while a device was held are found by a
 scan and moved, unchanged, from `samples` to `held_samples`, so no consumer reads them as

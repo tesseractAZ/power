@@ -99,6 +99,11 @@ test('membership rollover — the lifetime floors RE-SEED instead of freezing wh
   // B leaves the panel entirely (physically re-wired). The live sum is now A only.
   store.snap.devices.SHP2 = shp2Device(['DPU_A']);
   delete store.snap.devices.DPU_B;
+  // v1.188.1 (review) — the change must hold for three rollups (a one-poll isConnect flicker is not
+  // a rollover): until then the floor holds and B's held packs stay in the sum.
+  rec.rollupLifetime();
+  rec.rollupLifetime();
+  assert.ok(Math.abs(total(rec.getLifetimeTotals(), 'fleet_battery_charge_wh') - highWater) < 1e-6, 'not re-seeded before the change is sustained');
   rec.rollupLifetime();
 
   const after = total(rec.getLifetimeTotals(), 'fleet_battery_charge_wh');
@@ -111,6 +116,10 @@ test('membership rollover — a STABLE roster still ratchets monotonically (no s
   store.snap.devices.SHP2 = shp2Device(['DPU_C']);
   store.snap.devices.DPU_C = dpuDevice('DPU_C', [{ num: 1, packSn: 'PC1', chg: 1_000_000, dsg: 1_000_000 }]);
   const rec = createRecorder(store as any, () => {});
+  // The previous test's roster is persisted (bms-membership.json): three rollups settle the change
+  // to this roster (v1.188.1 review: a change is re-seeded only once it holds for three).
+  rec.rollupLifetime();
+  rec.rollupLifetime();
   rec.rollupLifetime();
 
   store.snap.devices.DPU_C = dpuDevice('DPU_C', [{ num: 1, packSn: 'PC1', chg: 1_040_000, dsg: 1_040_000 }]);

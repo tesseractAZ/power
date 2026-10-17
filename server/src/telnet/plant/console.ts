@@ -286,7 +286,9 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
     // v1.188.1 — both timers on the shared backupTimerGate, as /api/ha-state publishes them: with a
     // home Core dark the Cores' net is not the pool's (10-16 20:04: "▲ CHG 38m" beside a 0 W
     // BATT.P.NET while every Core was offline and the pool drained 3.4 kW through the panel).
-    const timers = backupTimerGate(data.snap.devices, Date.now());
+    // v1.188.1 (review) — on the bridge's verdicts (PlantData.flow), as /api/ha-state: the RUN line
+    // and BATT.P.NET count each Core the same way.
+    const timers = backupTimerGate(data.snap.devices, Date.now(), data.flow?.verdicts);
     const dchMin = timers.discharge ? p.backupDischargeTimeMin : null;
     const chMin = timers.charge ? p.backupChargeTimeMin : null;
     out.push(padEnd(

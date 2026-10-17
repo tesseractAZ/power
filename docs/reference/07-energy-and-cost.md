@@ -275,9 +275,14 @@ and the recorder counts the Core's own `pv_total` / `ac_in` only up to it
 and in a rollup once the dwell has passed. A rollup that falls inside the dwell still
 counts the Core itself, and the bridge then starts at that rollup. So a Core that goes
 dark between rollups keeps the energy the read path already showed, and no stretch is
-counted twice. In a window where the bridge can book nothing for a dark slot (the panel
-reading not fresh, no slot coverage), a marked Core whose own readings arrive again counts
-its own measured `pv_total` / `ac_in` for that window instead.
+counted twice. In a window where the bridge can book nothing for a dark slot (no slot
+reading inside it: the recorder writes none while the panel's reading is not fresh), a
+marked Core whose own readings arrive again counts them for that window instead: the
+recorder its measured `pv_total` / `ac_in`, the bridge its own pack meters for battery in
+and out (Σ ∫ `pack<N>_in` / `pack<N>_out`, the rows the gate wrote; `own` on the window in
+`bridge.lastRollup`). Its BMS movement is still absorbed, the marker kept. Before, its PV
+counted and its battery energy was booked by nobody for as long as that lasted (a REST
+problem that keeps the panel's quota failing while the Cores' MQTT stream has resumed).
 
 The instant is persisted (`bridge_offline_<sn>`, the row's ts). It is written when the Core
 goes dark, kept through an online flip while the Core is marked, and deleted once the Core
@@ -309,15 +314,39 @@ charges a Core never crosses it, and the Cores' own conversion and standby draw 
 invisible to it. The panel balance closes at AC (10-15: grid 2.22 + slot out 45.60 kWh
 against a panel load of 47.95), and the split keeps grid + PV + out − in equal to the
 panel load. `pv` comes from one of the bases in the table below. The window is clamped to
-15 min (`BRIDGE_MAX_WINDOW_MS`), so the first rollup after a restart never spans the
-downtime.
+15 min (`BRIDGE_MAX_WINDOW_MS`), so the first rollup after a graceful restart never spans
+the downtime (its final rollup leaves nothing pending). After a **crash** the rows from the
+last rollup to the crash are in `samples`, so when slot rows were recorded in the 15 min
+after the watermark the window starts at the watermark instead: the downtime itself has
+no rows, and `integrateWh` does not integrate across a gap over 10 min. Clamping past them
+had dropped up to one rollup window of every dark Core's battery and solar energy (about
+0.28 kWh at a 3.4 kW drain) while Panel Load and the grid counters booked the same minutes.
+
+**Which rows.** A window books the slot rows that exist, whatever the panel's reading is at
+the rollup instant: the recorder writes a panel row only while the panel's reading is fresh
+(`projectionRecordable`), so each row is a reading. Judging the whole window on the instant
+had dropped the minutes that had rows whenever a rollup landed in a cloud shadow or a quota
+stall (an hour with a quota stall across one rollup instant booked 3.10 of 3.39 kWh of
+battery out). A dark slot
+with no row in the window while its last row is less than 10 min old
+(`INTEGRATE_HEAD_LOOKBACK_MS`) **holds** the window: nothing is booked or written, the
+watermark stays, and the next window integrates across the gap from the rows on both sides,
+as `integrateWh` bridges a gap of up to 10 min inside one window (`bridge.lastRollup.held`).
+The recorder holds `fleet_pv_wh` and `fleet_grid_import_wh` with it, so the Cores' own rows
+and the slots cover the same span. A gap over 10 min is not bridged. A Core whose own
+readings arrive (above) is not held: its own meters count instead.
+
+A Core listed connected by two panels (one panel's source list is stale) is metered once,
+at one listing (`connectedSourceListings`): on an online panel whose reading is fresh, else
+online, then the house panel, then the lower serial, never the device map's order. Battery
+Net and the rollup had counted both slots. The backup timers' bound reads the same listing.
 
 | Basis | When | PV over the window |
 |---|---|---|
 | `night` | sun below the horizon at both ends of the window (`solarPosition` at the configured install site, `FORECAST_LAT` / `FORECAST_LON`, read by `bridgeSite`; Phoenix, the options' default, when the option is not a coordinate) | 0 — physics, not a reading |
 | `measured` | daylight, and this slot's panel PV field has passed its check against the inferred bound (persisted `bridge_pvseen_<panel>_<slot>`) | ∫ `src<n>_pv_w` (the panel's `pvHeightChargeWatts + pvLowChargeWatts`, else `pvChargeWatts`) |
 | `inferred` | daylight, the field not trusted (not yet checked, or below the bound) | monotone envelope `max(prev, Σ(acOut − acIn) + (pct − pct₀) × capWh)` from the slot's first daylight window of its dark span that day |
-| `unbridgeable` | the panel reading is not fresh (`shp2ReadbackFresh`), no slot reading in the window, or an inferred window the meter did not cover (re-anchored) | nothing booked |
+| `unbridgeable` | no slot reading in the window (the panel reading was not fresh), or an inferred window the meter did not cover (re-anchored); for the power sensors, the panel reading is not fresh now (`shp2ReadbackFresh`) | nothing booked at the slot (a marked Core's own readings count instead, above) |
 
 The site matters on any install outside Phoenix: judged on Phoenix's clock, a Berlin
 morning (10:00 CEST is 01:00 MST) would take the night basis and book the solar a dark
@@ -374,7 +403,14 @@ Where the energy goes:
   is far larger and still passes through.
 
 **Hand-over.** For every held pack of a bridged Core the bridge writes a marker
-`bridge_dark_<pack>`. A marked pack reports its held value, and any movement of its
+`bridge_dark_<pack>`: the packs the Core's projection carries, or, with no projection (dark
+since a restart), every held row except a pack another chassis carries now
+(`heldPackKeysOf`). A row a pack left when it moved or was replaced, or a slot the store
+hides, can never move, so its marker was never spent and the Core stayed marked for good:
+bridged at once on any later dark moment, a 6 s `/status` blip included, with no dwell, its
+whole rollup window booked at the slot beside what the BMS had counted. A Core that hands
+back with its whole pack list (its pack count met) also spends the marker of any pack it no
+longer reports, logged (`marker(s) spent for pack(s) the Core no longer reports`). A marked pack reports its held value, and any movement of its
 registers off it is absorbed as `computeBmsBatteryDetail` sees it: the pack is re-baselined
 (`base := register − held`), so that pass reports exactly the held value and counting
 resumes from it. The marker is spent (the hand-over) only once the Core **hands back** (`handsBack`). It
@@ -398,7 +434,8 @@ and the energy kept in `bridge_absorbed_<pack>_chg` / `_dsg`:
 
 At the hand-over the marker and the absorbed rows are deleted, and one line per Core logs
 what the BMS counted while dark (the absorbed rows plus this pass: absorbed) against what
-the bridge counted (published). The jump is absorbed whatever its size, below or above one
+the bridge counted (published: at the slot on the AC basis, or the Core's own pack meters
+for a window its slot could not be read). The jump is absorbed whatever its size, below or above one
 pack's capacity. A pack whose registers have not moved since the return keeps its marker
 until they do; that pass's line then says `(N still marked)`, and the pack's own line
 follows with its figures. A read-only (debug) pass reports held and writes nothing. A gap
@@ -429,8 +466,9 @@ run of the add-on saw the flip, there is no instant to persist: the Core went of
 the add-on was down, or within one publish (30 s) before a crash. After a graceful stop
 nothing is lost (the final rollup leaves nothing pending). After a crash while the Core
 was reporting, the first publish drops the PV and AC input pending since the last rollup.
-The bridge's first window books that span back, so Home Assistant sees a dip of up to one
-rollup window's energy, then the rise. That span's battery energy is counted by the BMS
+The bridge's first window books that span back (it starts at the watermark when slot rows
+were recorded after it, however long the downtime), so Home Assistant sees a dip of up to
+one rollup window's energy, then the rise. That span's battery energy is counted by the BMS
 and again by the bridge (at most one rollup window). Nothing can be bridged while the
 panel itself is dark; and there is no backfill: a bridge that starts mid-outage counts
 from its first window (the energy before it is absorbed at the hand-over; the vendor's

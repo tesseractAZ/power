@@ -139,8 +139,10 @@ test('★★★ the card on the server’s output: a Core listed online on a fro
 test('snapshotForClient sends every panel through panelForClient', () => {
   const idx = src('src/index.ts');
   for (const pin of [
-    '? { ...panelForClient(shp2, s.devices, nowMs), grid, off_grid }',
-    'for (const p of secondaryShp2s(s.devices)) devices[p.sn] = panelForClient(p, s.devices, nowMs);',
+    '? { ...panelForClient(shp2, s.devices, nowMs, verdicts), grid, off_grid }',
+    'for (const p of secondaryShp2s(s.devices)) devices[p.sn] = panelForClient(p, s.devices, nowMs, verdicts);',
+    // v1.188.1 (review) — the verdicts come from the computation the two power sensors publish.
+    'const verdicts = slotVerdicts(recorder.bridgedFleetFlow({ fleetPv: agg.fleetPv, fleetBatteryNet: agg.fleetBatteryNetDisplay }, s.devices, nowMs));',
   ]) assert.ok(idx.includes(pin), `index.ts: missing ${pin}`);
 });
 
@@ -218,13 +220,13 @@ test('★★★ a Core listed online on a FROZEN meter counts as dark: its froze
 test('★★★ /api/ha-state and the console both gate the timers on backupTimerGate', () => {
   const idx = src('src/index.ts');
   for (const pin of [
-    'const timers = backupTimerGate(snap.devices, Date.now());',
+    'const timers = backupTimerGate(snap.devices, Date.now(), slotVerdicts(bridged));',
     'backup_charge_minutes: timers.charge ? (shp2?.projection.backupChargeTimeMin ?? null) : null,',
     'backup_discharge_minutes: timers.discharge ? (shp2?.projection.backupDischargeTimeMin ?? null) : null,',
   ]) assert.ok(idx.includes(pin), `index.ts: missing ${pin}`);
   assert.ok(!idx.includes('fleetBatteryNet > 50 ? null'), 'the Cores-only gate is gone from index.ts');
   const con = src('src/telnet/plant/console.ts');
-  assert.ok(con.includes('const timers = backupTimerGate(data.snap.devices, Date.now());'), 'console.ts: the shared gate');
+  assert.ok(con.includes('const timers = backupTimerGate(data.snap.devices, Date.now(), data.flow?.verdicts);'), 'console.ts: the shared gate, on the bridge\u2019s verdicts');
   assert.ok(!con.includes('batNet > 50 ? null'), 'the Cores-only gate is gone from the console');
 });
 
@@ -328,7 +330,7 @@ test('★★★ the console\u2019s PV.ARRAY.P, BATT.P.NET and mimic are the HA s
 
 test('★★ while the sensors are unknown (a dark slot not bridgeable, a Core inside its dwell), the console shows "—", never a Cores-only sum', () => {
   const ds = live2004();
-  const unknown = { fleetPv: null, fleetBatteryNet: null, bridgedSlots: 0, ownCores: 0, ready: false, pending: [], slots: [] };
+  const unknown = { fleetPv: null, fleetBatteryNet: null, bridgedSlots: 0, ownCores: 0, ownSns: [], ready: false, pending: [], slots: [], acIn: null, fleetIn: null, fleetOut: null };
   const lines = consoleFrame(ds, makeRecorderStub({ bridgedFleetFlow: () => unknown }));
   const net = lines.find((l) => l.includes('BATT.P.NET'));
   const pv = lines.find((l) => l.includes('PV.ARRAY.P'));
@@ -336,4 +338,86 @@ test('★★ while the sensors are unknown (a dark slot not bridgeable, a Core i
   assert.ok(pv && pv.includes('—') && !/\b0\s*W/.test(pv), `PV.ARRAY.P: ${pv}`);
   const mimic = lines.find((l) => l.includes('BATT ') && l.includes('%') && !l.includes('BATT.'));
   assert.ok(mimic && !mimic.includes('idle') && !mimic.includes('DCH'), `the mimic: ${mimic}`);
+});
+
+/* ══ v1.188.1 review round 2 — the timers, the card and the sensors take one verdict per Core ══ */
+
+/** A site where the sun is up at `ms` (one of four equatorial points 90° apart always is). */
+const daySite = (ms: number) => [{ lat: 0, lon: 0 }, { lat: 0, lon: 90 }, { lat: 0, lon: 180 }, { lat: 0, lon: -90 }].find((s) => sunUp(ms, s))!;
+/** The panel with each slot's PV field reading `pvW` (pvHighWatts: the MPPT field the bridge reads). */
+function pvPanel(sourceWatts: number[], pvW: number): Any {
+  const p = panel(SNS, sourceWatts);
+  for (const s of p.projection.sources) Object.assign(s, { pvWatts: null, pvHighWatts: pvW, pvLowWatts: 0 });
+  return p;
+}
+/** What both publishers and the console compute: the bridged flow over aggregateFleetFlow's sums. */
+function bridged(ds: Any, trusted: boolean, site = daySite(NOW)) {
+  const { fleetPv, fleetBatteryNetDisplay } = aggregateFleetFlow(ds);
+  return bridgeFleetFlow({ fleetPv, fleetBatteryNet: fleetBatteryNetDisplay }, ds, NOW, () => trusted, site);
+}
+
+test('★★★ by day with every Core dark and the panel’s PV field trusted (the measured basis): the timers, the card and the console agree with Battery Net — a charge, not "▼ out" and a time to empty', async () => {
+  // The review case: 2 kW of PV per Core, 500 W of it delivered to the panel, the packs charging 1.5 kW each.
+  const { slotVerdicts } = await import('../src/energyBridge.js');
+  const ds = devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), pvPanel([-500, -500, -500], 2000));
+  const f = bridged(ds, true);
+  assert.deepEqual([f.fleetPv, f.fleetBatteryNet], [6000, -4500], 'precondition: HA publishes 6 kW of PV and a 4.5 kW charge');
+  const v = slotVerdicts(f);
+  // The timers: the slot less the PV the bridge reads as measured, plus each Core's own draw.
+  assert.deepEqual(backupTimerGate(ds, NOW, v), { charge: true, discharge: false, basis: 'panel' }, 'was time to empty during the charge');
+  assert.equal(poolNetUpperBound(ds, NOW, v).watts, 3 * (500 - 2000 + SLOT_UNMETERED_DRAW_W));
+  // Without a trusted field the slots cannot separate PV from the packs: the documented bound stays.
+  assert.deepEqual(backupTimerGate(ds, NOW, slotVerdicts(bridged(ds, false))), { charge: false, discharge: true, basis: 'panel' });
+  // The card on the server's output.
+  const client = { ...ds, 'PANEL-TEST-01': panelForClient(ds['PANEL-TEST-01'], ds, NOW, v) };
+  const grid: Any = { present: true, declared: true, importWatts: 0, homeGridWatts: 0, panelFresh: true };
+  const m = energyFlowModel(client, grid);
+  assert.equal(m.pv, 6000, 'Solar: the measured slot PV, not "—"');
+  assert.equal(m.batNet, -4500, 'Batteries: the packs’ charge, not "1.50 kW out"');
+  const { batteriesSubtitle, solarSubtitle } = await import('../../web/src/cards/energyFlowModel.js');
+  assert.equal(batteriesSubtitle(m), '▲ 4.50 kW charging');
+  assert.equal(solarSubtitle(m), '42 panels');
+});
+
+test('★★★ every Core listed OFFLINE whose MQTT data keeps arriving (its own reading): the card and the timers count each at its own meter, as the sensors do', async () => {
+  const { slotVerdicts } = await import('../src/energyBridge.js');
+  // Noon: 2 kW of PV per Core, the packs taking 1.5 kW (750 W each of two), 500 W to the panel each.
+  const own = (sn: string): Any => ({
+    sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: false, onlineChangedAtMs: NOW - 10 * 60_000, lastUpdated: NOW,
+    lastTelemetryAtMs: NOW - 5_000, contentChangedAtMs: NOW - 5_000,
+    projection: { kind: 'dpu', soc: 60, pvTotalWatts: 2000, acInWatts: 0, acOutWatts: 500, totalInWatts: 2000, totalOutWatts: 500,
+      packs: [{ num: 1, outputWatts: 0, inputWatts: 750 }, { num: 2, outputWatts: 0, inputWatts: 750 }] },
+  });
+  const ds = devs(own('CORE-A'), own('CORE-B'), own('CORE-C'), panel(SNS, [-500, -500, -500]));
+  const f = bridged(ds, false);
+  assert.deepEqual([f.fleetPv, f.fleetBatteryNet, f.ownCores], [6000, -4500, 3], 'precondition: the sensors count each at its own reading');
+  const v = slotVerdicts(f);
+  // Before: the slot bound (+1.8 kW): time to full withheld and time to empty published beside a 4.5 kW charge.
+  assert.deepEqual(backupTimerGate(ds, NOW, v), { charge: true, discharge: false, basis: 'panel' });
+  assert.equal(poolNetUpperBound(ds, NOW, v).watts, -4500);
+  const client = { ...ds, 'PANEL-TEST-01': panelForClient(ds['PANEL-TEST-01'], ds, NOW, v) };
+  assert.deepEqual(client['PANEL-TEST-01'].projection.sources.map((s: Any) => s.ownReading), [true, true, true]);
+  const grid: Any = { present: true, declared: true, importWatts: 0, homeGridWatts: 0, panelFresh: true };
+  const m = energyFlowModel(client, grid);
+  // Before: "Cores not reporting", "▼ 1.50 kW out", three via the panel.
+  assert.deepEqual([m.dpuCount, m.viaPanelCount, m.pv, m.batNet], [3, 0, 6000, -4500]);
+});
+
+test('★★ a marked Core the bridge still meters at its slot is not on its own meter for the timers, whatever the store’s clocks say', () => {
+  // CORE-A listed online with fresh content, but the bridge keeps it dark (not handed back yet).
+  const ds = devs(core('CORE-A', { packNet: -3000 }), core('CORE-B'), core('CORE-C'), panel(SNS, [-1500, 0, 0]));
+  const verdicts = { own: new Set(['CORE-B', 'CORE-C']), measuredPvW: new Map<string, number>() };
+  assert.deepEqual(backupTimerGate(ds, NOW), { charge: true, discharge: false, basis: 'cores' }, 'precondition: on the clocks alone, its held 3 kW charge');
+  assert.deepEqual(backupTimerGate(ds, NOW, verdicts), { charge: false, discharge: true, basis: 'panel' }, 'on the verdict, its slot delivering 1.5 kW');
+});
+
+test('★★★ the console’s RUN line on the bridge’s verdicts: with a trusted PV field by day, "▲ CHG" beside "BATT.P.NET … CHG", not "▼ DCH"', () => {
+  const ds = devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), pvPanel([-500, -500, -500], 2000));
+  const site = daySite(NOW);
+  const recorder = makeRecorderStub({ bridgedFleetFlow: (o, d, n) => bridgeFleetFlow(o, d, n, () => true, site) });
+  const lines = consoleFrame(ds, recorder);
+  const net = lines.find((l) => l.includes('BATT.P.NET'));
+  assert.ok(net && /4\.50\s*kW/.test(net) && net.includes('CHG'), `BATT.P.NET: ${net}`);
+  const run = lines.find((l) => l.includes('RUN '));
+  assert.ok(run && run.includes('▲ CHG 38m') && run.includes('▼ DCH —'), `RUN: ${run}`);
 });

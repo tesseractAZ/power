@@ -98,7 +98,13 @@ dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). S
   have their own readiness flag, `flowBridged`. They are null, never a partial sum, while a
   dark slot on an online panel cannot be bridged, or while a Core is inside its 3-min dwell
   and so in neither figure. A dark slot whose panel is itself cloud-offline is left out of
-  both, as an offline Core always was.
+  both, as an offline Core always was. `ac_import_watts` (and the REST twin's Fleet Total In /
+  Out) count each Core the same way (v1.188.1): a frozen projection listed online is taken out
+  of the online sums, and a dark Core counts at its slot's AC exchange (in: `max(0, chW)`; out:
+  `max(0, −chW)`; Fleet Total In also the slot's PV on the night or measured basis). Before,
+  every Core frozen online mid grid-charge kept AC Import at their held 15 kW while the slots
+  read 0 W. They are null while a Core is inside its dwell or a dark slot on an online panel has
+  no fresh meter (Fleet Total In also while its PV is unknown).
 - **Backup pool:** `backup_pool` (%), `backup_remaining_kwh`, `backup_full_capacity_kwh`
   (both `energy_storage`).
 - **Forecast/degradation/runway/RTE/clipping/curtailment/self-consumption** — one sensor
@@ -390,6 +396,10 @@ read raw `store.get()` and must stay byte-identical. Since v1.188.1 every panel 
 `panelForClient` (`shp2Membership.ts`): each source also carries `dpuFrozen` (its Core is listed
 online but its content has not changed for `SHP2_READBACK_STALE_MS`) and the panel carries
 `readbackFresh` (`shp2ReadbackFresh`). The Energy flow card has no clock and keys on both.
+v1.188.1 (review) — each connected source also carries the energy bridge's verdicts, from the
+computation the two power sensors publish (`slotVerdicts`): `ownReading` (the sensors count its
+Core at its own reading) and `pvMeasuredW` (its PV where the bridge reads the panel's PV field as
+measured, else null).
 
 #### `/api/ha-state` (selected fields)
 
@@ -402,7 +412,8 @@ discharging; Fleet PV and Battery Net plus the dark home slots metered at the pa
 `backup_remaining_kwh`, and `backup_charge_minutes`/`backup_discharge_minutes` gated on
 the ±50 W deadband (both timers are always reported by the SHP2 regardless of direction).
 The gate (`backupTimerGate`, shared with the console's RUN line) reads the Cores' battery net
-while every home Core reports on a fresh meter. Otherwise that sum is not the pool's (0 W with
+while every home Core reports on a fresh meter (v1.188.1: and the energy bridge counts each at its
+own reading; the gate takes the bridge's verdicts, `BridgeVerdicts`). Otherwise that sum is not the pool's (0 W with
 every Core dark), so it reads an upper bound through the panel instead: each dark or frozen Core
 contributes its slot's delivery (`−sourceWatts`) plus `SLOT_UNMETERED_DRAW_W` (100 W) while that
 panel is fresh. The slot sees neither the Core's PV nor its own standby and conversion draw, which
@@ -410,7 +421,14 @@ comes out of its packs (65-85 W per Core, measured by the energy bridge), so pac
 draw. A slot proves a charge only while it takes in more AC than that draw: at the reserve hold the
 slots read about 0 W while the packs still supply the Cores' standby, and no time to full is
 published. A slot delivering never proves a discharge, since it can be the Core's PV passing
-through. With nothing to bound it, only the discharge timer is published.
+through. With nothing to bound it, only the discharge timer is published. Where the bridge reads
+a dark slot's panel PV field as measured (checked and trusted, the sun up), that PV comes out of
+the bound (`−slot − PV + draw`), so by day the timers follow the Battery Net sensor, which
+publishes `−slot − PV` for that slot: before, the bound stayed positive while Battery Net read a
+charge, and the time to empty was published beside it. The field's check catches a field that
+reads low, not high, so a field reading high would show the time to full early, beside a Battery
+Net reading the same charge. A Core the cloud lists offline whose MQTT data still arrives counts
+at its own pack net, as the sensors count it.
 Then forecast, degradation, alert counts (split by engine source × severity), runway,
 RTE, clipping, curtailment, and self-consumption blocks. Internally the analytics reports
 are cached (~30 min) on the worker.

@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import {
   darkHomeSlots, offlineHomeCores, ownEnergyUntil, sunUp, slotPvWatts, windowSplit, slotAcEnergy, valueAt, inferPvStep,
   bridgeFleetFlow, heldPackKeysOf, slotPowerBasis, pvFieldVerdict, bridgeSite, reportsSinceReturn, BRIDGE_DWELL_MS,
-  BRIDGE_PV_EVIDENCE_STEPS, createEnergyBridge, bridgeOfflineKey,
+  BRIDGE_PV_EVIDENCE_STEPS, createEnergyBridge, bridgeOfflineKey, slotVerdicts, projectionPacksComplete,
 } from '../src/energyBridge.js';
 import { aggregateFleetFlow } from '../src/shp2Membership.js';
 import { publishReadiness } from '../src/publishReadiness.js';
@@ -401,4 +401,101 @@ test('★★ every home Core listed offline but its own MQTT data arriving after
   // Data from BEFORE the flip is its last report, not a reading after it: dark at the flip.
   const stale: Any = { ...devices, [C1]: { ...off(C1), onlineChangedAtMs: NIGHT + 1 } };
   assert.deepEqual(offlineHomeCores(stale, NIGHT + 2).get(C1), { offlineSinceMs: NIGHT + 1, bridged: false });
+});
+
+/* ══ v1.188.1 review round 2 ════════════════════════════════════════════════ */
+
+test('★★★ the flow sensors (AC Import, Fleet Total In / Out) on the same notion as Battery Net: every Core frozen online mid grid-charge, the slots at 0 W — not 15 kW of held AC input', () => {
+  // Each Core's quota began failing during a 5 kW grid charge; the charge has ended and the slots read 0 W.
+  const frozen = (sn: string): Any => ({
+    ...core(sn, true), lastTelemetryAtMs: NIGHT - 30 * 60_000, contentChangedAtMs: NIGHT - 30 * 60_000,
+    projection: { kind: 'dpu', soc: 80, pvTotalWatts: 0, totalInWatts: 5000, totalOutWatts: 0, acInWatts: 5000, packs: [{ outputWatts: 0, inputWatts: 4800 }] },
+  });
+  const devices: Any = { [PANEL]: panel(NIGHT, [0, 0, 0]), [C1]: frozen(C1), [C2]: frozen(C2), [C3]: frozen(C3) };
+  const agg = aggregateFleetFlow(devices);
+  assert.equal(agg.acIn, 15000, 'precondition: the online sums carry the held figures');
+  const f = bridgeFleetFlow({ fleetPv: agg.fleetPv, fleetBatteryNet: agg.fleetBatteryNetDisplay, acIn: agg.acIn, fleetIn: agg.fleetIn, fleetOut: agg.fleetOut }, devices, NIGHT, () => false, PHX);
+  assert.equal(f.bridgedSlots, 3);
+  assert.deepEqual([f.acIn, f.fleetIn, f.fleetOut, f.fleetBatteryNet], [0, 0, 0, 0], 'the slots: no AC exchange, nothing held');
+  // Cores dark delivering through their slots at night: AC out and no input.
+  const dark: Any = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: core(C1, false, false), [C2]: core(C2, false, false), [C3]: core(C3, false, false) };
+  const g = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0, acIn: 0, fleetIn: 0, fleetOut: 0 }, dark, NIGHT, () => false, PHX);
+  assert.deepEqual([g.acIn, g.fleetIn, g.fleetOut], [0, 0, 3409]);
+  // A force charge through the slots: AC input, which Fleet Total In carries too.
+  const charging: Any = { ...dark, [PANEL]: panel(NIGHT, [5300, 5300, 5300]) };
+  const h = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0, acIn: 0, fleetIn: 0, fleetOut: 0 }, charging, NIGHT, () => false, PHX);
+  assert.deepEqual([h.acIn, h.fleetIn, h.fleetOut], [15900, 15900, 0]);
+});
+
+test('★★ the flow sensors: a dark slot on a stale panel withholds them (unknown, never a partial sum); in daylight with no trusted PV field Fleet Total In is unknown, AC Import and Fleet Total Out are the slots', () => {
+  const dark = (p: Any): Any => ({ [PANEL]: p, [C1]: core(C1, false, false), [C2]: core(C2, false, false), [C3]: core(C3, false, false) });
+  const online = { fleetPv: 0, fleetBatteryNet: 0, acIn: 0, fleetIn: 0, fleetOut: 0 };
+  const stale = bridgeFleetFlow(online, dark(panel(NIGHT, [-1000, -1000, -1000], { lastQuotaAtMs: NIGHT - 400_000 })), NIGHT, () => false, PHX);
+  assert.deepEqual([stale.acIn, stale.fleetIn, stale.fleetOut], [null, null, null]);
+  const day = bridgeFleetFlow(online, dark(panel(NOON, [-500, -500, 200])), NOON, () => false, PHX);
+  assert.deepEqual([day.acIn, day.fleetIn, day.fleetOut, day.fleetPv], [200, null, 1000, null]);
+  // No such input given (a caller that passes only the two power figures): null, never a 0.
+  const bare = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, dark(panel(NIGHT, [-1000, -1000, -1000])), NIGHT, () => false, PHX);
+  assert.deepEqual([bare.acIn, bare.fleetIn, bare.fleetOut], [null, null, null]);
+});
+
+test('★★★ a dark Core listed connected by two panels (one panel\u2019s source list stale) is metered once, at one slot: Battery Net and the rollup count it once', () => {
+  const P2 = 'HD31XXX00XXX0002';
+  const twoPanels = (staleFirst: boolean): Any => {
+    const a = panel(NIGHT, [-1000, 0, 0]);
+    const b = { ...panel(NIGHT, [-1000, 0, 0]), sn: P2, ...(staleFirst ? {} : { lastQuotaAtMs: NIGHT - 400_000 }) };
+    if (staleFirst) a.lastQuotaAtMs = NIGHT - 400_000;
+    for (const p of [a, b]) for (const s of p.projection.sources) if (s.sn !== C1) s.isConnected = false;
+    return { [PANEL]: a, [P2]: b, [C1]: core(C1, false, false) };
+  };
+  const fresh = twoPanels(false);
+  fresh[P2].lastQuotaAtMs = NIGHT - 30_000;
+  assert.equal(darkHomeSlots(fresh, NIGHT).length, 1, 'one slot, not two');
+  const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, fresh, NIGHT, () => false, PHX);
+  assert.deepEqual([f.fleetBatteryNet, f.bridgedSlots], [1000, 1], 'not 2000 W');
+  // The listing on the panel whose reading is fresh is the one read, whatever the device map's order.
+  for (const staleFirst of [true, false]) {
+    const ds = twoPanels(staleFirst);
+    const slots = darkHomeSlots(ds, NIGHT);
+    assert.equal(slots.length, 1);
+    assert.equal(slots[0].panelSn, staleFirst ? P2 : PANEL, 'the fresh panel\u2019s listing');
+    assert.equal(slots[0].panelFresh, true);
+    assert.deepEqual(bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, ds, NIGHT, () => false, PHX).fleetBatteryNet, 1000, 'bridgeable at the fresh listing');
+  }
+  // The rollup books one window: 10 min at 1 kW out.
+  const rows = new Map<string, { wh: number; ts: number }>();
+  const samples = (sn: string, metric: string, since: number, until: number) =>
+    metric === 'src1_w' && (sn === PANEL || sn === P2) ? Array.from({ length: 11 }, (_, i) => ({ ts: NIGHT - 10 * 60_000 + i * 60_000, value: -1000 })).filter((p) => p.ts >= since && p.ts <= until) : [];
+  rows.set('bridge_battery_charge_wh', { wh: 0, ts: NIGHT - 10 * 60_000 });
+  const b = createEnergyBridge({
+    readLifetime: (k) => rows.get(k) ?? { wh: 0, ts: 0 }, writeLifetime: (k, wh, ts) => { rows.set(k, { wh, ts }); }, deleteLifetime: (k) => { rows.delete(k); },
+    listLifetimeKeys: () => [...rows.keys()], query: samples, coreCapacityWh: () => null, site: () => PHX, log: () => {},
+  });
+  const r = b.rollup({ generatedAt: NIGHT, devices: fresh }, NIGHT);
+  assert.equal(r.slots.length, 1);
+  assert.ok(Math.abs(r.dischargeWh - 1000 * 10 / 60) < 0.5, `one window booked: ${r.dischargeWh.toFixed(1)} Wh`);
+});
+
+test('★★ slotVerdicts: the Cores counted at their own reading, and the PV of each slot on the measured basis', () => {
+  const devices: Any = { [PANEL]: panel(NOON, [-500, -500, -500], {}, [{ pvHighWatts: 2000 }, { pvHighWatts: 2000 }, {}]), [C1]: core(C1, false, false), [C2]: core(C2, false, false), [C3]: live(C3, NOON) };
+  const f = bridgeFleetFlow({ fleetPv: 1500, fleetBatteryNet: 900 }, devices, NOON, (_p, slot) => slot === 1, PHX);
+  const v = slotVerdicts(f);
+  assert.deepEqual([...v.own], [C3]);
+  assert.deepEqual([...v.measuredPvW.entries()], [[`${PANEL}#1`, 2000]], 'slot 1 trusted; slot 2 not, so not measured');
+});
+
+test('projectionPacksComplete: the pack count is known and met', () => {
+  const d = (packs: number, count: number | null): Any => ({ sn: C1, projection: { kind: 'dpu', packCount: count, packs: Array.from({ length: packs }, (_, i) => ({ num: i + 1 })) } });
+  assert.equal(projectionPacksComplete(d(2, 2)), true);
+  assert.equal(projectionPacksComplete(d(1, 2)), false, 'a pack not reported yet');
+  assert.equal(projectionPacksComplete(d(2, null)), false, 'the count unknown');
+  assert.equal(projectionPacksComplete({ sn: C1 } as Any), false, 'no projection');
+});
+
+test('★★ held pack keys with the device map: the packs the projection carries; with none, every row but a pack another chassis carries now', () => {
+  const keys = [`pack_lastwhid_${C1}:${C1}-P1_chg`, `pack_lastwhid_${C1}:${C1}-POLD_chg`, `pack_lastwhid_${C1}:MOVED_chg`, `pack_lastwh_${C1}_3_chg`];
+  const withProj: Any = { [C1]: { sn: C1, projection: { kind: 'dpu', packs: [{ num: 1, packSn: `${C1}-P1` }, { num: 3, packSn: null }] } } };
+  assert.deepEqual(heldPackKeysOf(C1, keys, withProj), [`${C1}:${C1}-P1`, `${C1}|3`]);
+  const noProj: Any = { [C1]: { sn: C1 }, [C2]: { sn: C2, projection: { kind: 'dpu', packs: [{ num: 1, packSn: 'MOVED' }] } } };
+  assert.deepEqual(heldPackKeysOf(C1, keys, noProj), [`${C1}:${C1}-P1`, `${C1}:${C1}-POLD`, `${C1}|3`], 'the pack now in another chassis is not marked');
 });

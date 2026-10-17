@@ -770,7 +770,20 @@ Cores 3 and 4 (§12l). Every fleet aggregation must exclude spares.
   device map count as not reporting, the conservative direction. `complete` = all roster cores
   reporting. Core principle: *we can PROVE discharge from a partial sum; we can never
   DISPROVE it.* An empty roster means no home cores exist at all → `complete` is vacuously
-  true.
+  true. With a clock (`homeCoreCoverage(devices, roster, nowMs)`, v1.188.1), a Core counts as
+  reporting only on a fresh meter (`dpuContentFresh`): one listed online whose readings stopped
+  changing holds its last pack figures, which cannot disprove a drain. The grid resolver's
+  at-floor guard passes the clock; the console's quality flag does not.
+- **`connectedSourceListings(devices, nowMs)`** (v1.188.1): each connected home Core once, at
+  one panel listing: an online panel whose reading is fresh, else an online one, then the
+  house panel, then the lower serial. A Core listed connected by two panels (one panel's
+  source list stale) is read there by the energy bridge and the backup timers' bound alike.
+- **`BridgeVerdicts`** (v1.188.1, `energyBridge.slotVerdicts`): the Cores the two power sensors
+  count at their own reading (`own`) and each dark slot's PV where the bridge reads the panel's
+  PV field as measured (`measuredPvW`). `poolNetUpperBound` / `backupTimerGate` and
+  `panelForClient` take them, so the timers and the card count each Core as Fleet PV and
+  Battery Net do; `panelForClient` puts them on each connected slot as `ownReading` and
+  `pvMeasuredW`.
 - **`isHomePoolDpu(sn, connectedOrDevices)`** — v1.92.0; is this DPU wired into the backup pool right now (SHP2 roster, literal only as the unknown-roster fallback).
 - **`homeFleetMeanSoc(devices)`** — reserve-alarm SHP2-blind fallback: mean SoC of home
   cores still reporting (spares + offline cores excluded). Used when the SHP2 nulls

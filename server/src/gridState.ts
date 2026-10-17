@@ -421,7 +421,13 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // DISPROVE it. So an incomplete roster resolves toward "discharging" — the direction that
   // keeps a real at-floor emergency audible. The effect stays floor-scoped (below), so a
   // wedged Core away from the floor changes nothing.
-  const poolCoverage = homeCoreCoverage(input.devices);
+  // v1.188.1 (review) — and a Core listed online on a FROZEN meter (its readings unchanged for
+  // SHP2_READBACK_STALE_MS: a quota that keeps failing, a cloud replaying its cached body, the first
+  // list cycle after an online flip) is not reporting either: its held pack figures are summed
+  // below, and a frozen 0 W cannot disprove a drain. The backup timers, the energy bridge and the
+  // Battery Net sensor already read such a Core from its panel slot; at the floor with gridSta=1
+  // this guard read "every Core reporting, 0 W" and downgraded the critical to a low advisory.
+  const poolCoverage = homeCoreCoverage(input.devices, undefined, nowMs);
   const poolDischargingObserved = aggregateFleetFlow(input.devices).fleetBatteryNet > POOL_DISCHARGE_WATTS;
   const poolDischarging = poolDischargingObserved || !poolCoverage.complete;
   // FLOOR-SCOPED effect (matches this module's header intent): only DISTRUST a declared /

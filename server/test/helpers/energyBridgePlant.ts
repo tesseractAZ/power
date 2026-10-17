@@ -13,7 +13,7 @@
  * a content change without pack data (`touch`); a restart clears it (the store's first body after
  * one only seeds the witness). Its arrival clock (`lastTelemetryAtMs`) moves with it, and also each
  * minute for a Core whose cloud `replay`s its cached body (content unchanged). A Core that reports
- * records its own pv_total / ac_in each minute (what the recorder's gate writes: a `frozen` Core,
+ * records its own pv_total / ac_in and pack power each minute (what the recorder's gate writes: a `frozen` Core,
  * listed online with its quota failing, records nothing, and neither does a replay once its
  * content is older than the gate's window); its BMS registers move with `coreBatW` and freeze while
  * it does not report, then jump to the true count when it reports again.
@@ -237,9 +237,24 @@ export async function loadPlant(prefix: string) {
       }
       this.sample(PANEL, 'grid_home_w', 0, t);
     }
-    /** One minute of the plant: the panel's series, each reporting Core's own series, the registers. */
+    /** A Core's own rows at `t`, as the recorder's gate writes them for a Core that reports: pv_total,
+     *  ac_in and each pack's in / out power (`coreBatW` split over its packs, + = discharging). */
+    ownRows(sn: string, t: number): void {
+      const i = CORES.indexOf(sn);
+      this.sample(sn, 'pv_total', this.corePv[i], t);
+      this.sample(sn, 'ac_in', this.coreAcIn[i], t);
+      if (this.coreBatW) {
+        const w = this.coreBatW[i] / PACKS;
+        for (let n = 1; n <= PACKS; n++) {
+          this.sample(sn, `pack${n}_out`, Math.max(0, w), t);
+          this.sample(sn, `pack${n}_in`, Math.max(0, -w), t);
+        }
+      }
+    }
+    /** One minute of the plant: the panel's series (none while `panelStale`: the gate writes no row
+     *  for a panel whose reading is not fresh), each reporting Core's own series, the registers. */
     minute(t: number): void {
-      this.panelSamples(t);
+      if (!this.panelStale) this.panelSamples(t);
       CORES.forEach((sn, i) => {
         const reports = this.online[sn] && !this.frozen.has(sn) && !this.replay.has(sn);
         if (this.coreBatW) {
@@ -255,16 +270,12 @@ export async function loadPlant(prefix: string) {
           // only while that content is within its window.
           this.telemetryAt[sn] = t;
           const c = this.contentAt[sn];
-          if (c != null && t - c <= 5 * MIN) {
-            this.sample(sn, 'pv_total', this.corePv[i], t);
-            this.sample(sn, 'ac_in', this.coreAcIn[i], t);
-          }
+          if (c != null && t - c <= 5 * MIN) this.ownRows(sn, t);
           return;
         }
         if (!reports) return;
         this.contentAt[sn] = t;
-        this.sample(sn, 'pv_total', this.corePv[i], t);
-        this.sample(sn, 'ac_in', this.coreAcIn[i], t);
+        this.ownRows(sn, t);
       });
     }
     /** Advance the clock minute by minute; a lifetime rollup every 5 minutes, each followed by a

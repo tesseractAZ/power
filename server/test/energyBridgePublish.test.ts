@@ -126,11 +126,31 @@ const src = (f: string) => readFileSync(resolve(here, '../src/', f), 'utf8');
 test('★★ both publishers read the two power sensors from the bridged flow and hand it to readiness', () => {
   for (const f of ['mqttDiscovery.ts', 'index.ts']) {
     const s = src(f);
-    assert.match(s, /const bridged = recorder\.bridgedFleetFlow\(\{ fleetPv, fleetBatteryNet \}, snap\.devices, Date\.now\(\)\);/, f);
+    assert.match(s, /const bridged = recorder\.bridgedFleetFlow\(\{ fleetPv, fleetBatteryNet, acIn, fleetIn, fleetOut \}, snap\.devices, Date\.now\(\)\);/, f);
+    // v1.188.1 (review) — AC Import on the same notion (a frozen Core's held ac_in is not published).
+    assert.match(s, /ac_import_watts: bridged\.acIn == null \? null : Math\.round\(bridged\.acIn\),/, f);
     assert.match(s, /fleet_pv_watts: bridged\.fleetPv == null \? null : Math\.round\(bridged\.fleetPv\),/, f);
     assert.match(s, /fleet_battery_net_watts: bridged\.fleetBatteryNet == null \? null : Math\.round\(bridged\.fleetBatteryNet\),/, f);
     assert.match(s, /flowBridge: bridged, \/\/ v1\.188\.1/, f);
   }
+  // v1.188.1 (review) — /api/ha-state's Fleet Total In / Out on the same notion.
+  const idx = src('index.ts');
+  assert.ok(idx.includes('fleet_total_in_watts: bridged.fleetIn == null ? null : Math.round(bridged.fleetIn),'), 'index.ts: Fleet Total In');
+  assert.ok(idx.includes('fleet_total_out_watts: bridged.fleetOut == null ? null : Math.round(bridged.fleetOut),'), 'index.ts: Fleet Total Out');
   assert.deepEqual([...READINESS_FIELDS.flowBridged], ['fleet_pv_watts', 'fleet_battery_net_watts']);
   assert.ok(!READINESS_FIELDS.flow.includes('fleet_pv_watts') && !READINESS_FIELDS.flow.includes('fleet_battery_net_watts'));
+});
+
+test('★★★ every home Core listed online on a FROZEN meter (its quota failing since a 5 kW grid charge), the slots at 0 W: AC Import publishes the slots (0 W), not 15 kW of held AC input', async () => {
+  const d = devices(NIGHT, true);
+  d[PANEL].projection.sourceWatts = [0, 0, 0];
+  d[PANEL].projection.gridWatt = 400;
+  for (const sn of CORES) {
+    Object.assign(d[sn], { lastTelemetryAtMs: NIGHT - 30 * 60_000, contentChangedAtMs: NIGHT - 30 * 60_000 });
+    Object.assign(d[sn].projection, { acInWatts: 5000, totalInWatts: 5000, totalOutWatts: 0, packs: [{ outputWatts: 0, inputWatts: 4800 }] });
+  }
+  const s = await build(d, NIGHT);
+  assert.equal(s.ac_import_watts, 0, 'was 15000 beside a 400 W main');
+  assert.equal(s.fleet_battery_net_watts, 0, 'Battery Net: the slots, as before');
+  assert.equal(s.fleet_pv_watts, 0);
 });

@@ -44,11 +44,24 @@
  *                 of the measured PV, short by a near-constant 4.7-6.1 kWh/day (the Cores' own
  *                 draw), and up to one SoC step (~290 Wh) per Core per anchor either way.
  *                 Energy-only: it has no instantaneous power, so the power sensors stay unknown.
- *  - 'unbridgeable' the panel reading is not fresh (shp2ReadbackFresh), or the inferred basis has
- *                 no SoC reading or a window the slot meter did not cover: nothing is booked. The
- *                 power sensors withhold both figures for such a slot on an ONLINE panel, and leave
- *                 a slot on a cloud-offline panel out of both (bridgeFleetFlow).
- *                 Never PV that passed through a Core booked as battery out.
+ *  - 'unbridgeable' no slot row in the window (the recorder writes none while the panel's reading
+ *                 is not fresh), or the inferred basis has no SoC reading or a window the slot meter
+ *                 did not cover: nothing is booked at the slot. The power sensors withhold both
+ *                 figures for a slot on an ONLINE panel whose reading is not fresh NOW
+ *                 (shp2ReadbackFresh), and leave a slot on a cloud-offline panel out of both
+ *                 (bridgeFleetFlow). Never PV that passed through a Core booked as battery out.
+ *
+ * WHICH ROWS (v1.188.1 review). A window books the slot rows that exist, whatever the panel's
+ * reading is at the rollup instant: the recorder writes a panel row only while the panel's reading
+ * is fresh, so each row is a reading (judging the whole window on the instant dropped the minutes
+ * that had rows whenever a rollup landed in a cloud shadow or a quota stall). A dark slot with no
+ * row in the window while its last row is under INTEGRATE_HEAD_LOOKBACK_MS old HOLDS the window:
+ * nothing is booked or written, the watermark stays, and the next window integrates across the gap
+ * from the rows on both sides (integrateWh bridges up to 10 min), as the recorder's panel counters
+ * do; the recorder holds fleet_pv_wh and fleet_grid_import_wh with it. A longer gap is not bridged.
+ * A Core listed connected by two panels (one panel's source list stale) is metered once, at the
+ * listing on an online, fresh panel, then the house panel (shp2Membership connectedSourceListings,
+ * the listing the backup timers' bound reads).
  *
  * WHEN A CORE IS DARK. v1.188.1 (review) — when it delivers no reading of its OWN, whatever the
  * cloud's online flag says (coreReports): the recorder writes exactly the Cores that do (its
@@ -87,8 +100,10 @@
  * since the flip, and the bridge booked again the battery energy the BMS counted before it. The
  * recorder applies the same cut to a Core with no projection (none is fetched for a device listed
  * offline), so a crash restart publishes what the uninterrupted process would have. Where the
- * bridge can book nothing for a dark slot in a window (the panel reading not fresh, no slot
- * coverage), a marked Core whose own readings arrive again counts them for that window instead.
+ * bridge can book nothing for a dark slot in a window (no slot reading inside it), a marked Core
+ * whose own readings arrive again counts them for that window instead: the recorder its pv_total /
+ * ac_in, the bridge its own pack meters (Σ ∫ pack<N>_in / _out, BridgeSlotWindow.own) for battery
+ * in and out (v1.188.1 review: its PV counted and its battery energy was booked by nobody).
  *
  * PERSISTENCE AND HAND-OVER (recorder.ts). The bridged energy accumulates in its own rows
  * (`bridge_battery_charge_wh` / `_discharge_wh`, watermark = their ts), added to the emitted
@@ -102,6 +117,10 @@
  * `bridge_dark_<pack>` is written; when that Core reports again and its registers move, the
  * recorder re-baselines the pack so its BMS sum carries on from the held value: the counter jump
  * the dark days built is absorbed (the bridge already counted that energy), whatever its size.
+ * v1.188.1 (review) — only the packs the Core's projection carries are marked (a row a pack left
+ * when it moved or was replaced can never move again; heldPackKeysOf), and a Core that hands back
+ * with its whole pack list spends the marker of any pack it no longer reports (a Core dark since a
+ * restart has no projection to choose from), so no marker outlives the dark span.
  * The marker is spent only once the Core hands back (handsBack: it has REPORTED since it came back —
  * reportsSinceReturn, its content changed at or after its online flip — and delivers a reading of
  * its own now), the instant the bridge stops metering it. Register movement before that — MQTT
@@ -120,22 +139,24 @@
  * ~2 kWh/day of the DC counters and read battery out 5-8 kWh/day low); at the return, the span from
  * the bridge's last rollup to the Core's hand-back (at most one rollup window) is booked by neither
  * (the hand-over absorbs it), however long the Core stays listed online without a reading of its
- * own before that; at an outage start, the battery flow from the Core's last register reading to
+ * own before that; a slot row gap over 10 min is not bridged (the integrator's rule); at an outage
+ * start, the battery flow from the Core's last register reading to
  * the bridge's window start (the cloud's offline detection or the content window, and a rollup that
  * fell inside the dwell) is absorbed unbridged; a Core whose flip no run saw (it went offline while
  * the add-on was down, or within one publish before a crash) is cut at the watermark — harmless
  * after a graceful stop (its final rollup leaves nothing pending), but after a crash while it
  * reported, the first publish drops the PV / AC input pending since the last rollup until the
- * bridge's first window books that span back, and the BMS and the bridge both count that span's
- * battery energy (at most one rollup window); nothing can be bridged while the panel itself is
- * dark; and there is no backfill — a bridge that starts mid-outage counts from its first window.
+ * bridge's first window books that span back (the window starts at the watermark when slot rows
+ * were recorded after it, however long the downtime), and the BMS and the bridge both count that
+ * span's battery energy (at most one rollup window); nothing can be bridged while the panel itself
+ * is dark; and there is no backfill — a bridge that starts mid-outage counts from its first window.
  *
  * Pure functions plus a small factory (createEnergyBridge) that the recorder hands its lifetime
  * table and sample queries.
  */
 import type { DeviceSnapshot, FleetSnapshot } from './snapshot.js';
 import type { Shp2EnergySource } from './ecoflow/project.js';
-import { allShp2s, shp2ReadbackFresh } from './shp2Membership.js';
+import { allShp2s, shp2ReadbackFresh, connectedSourceListings, slotKey, type BridgeVerdicts } from './shp2Membership.js';
 import { projectionRecordable } from './heldSamples.js';
 import { integrateWh, INTEGRATE_HEAD_LOOKBACK_MS } from './aggregator.js';
 import { solarPosition, PHOENIX_SITE } from './physics/clearSky.js';
@@ -170,9 +191,11 @@ export type KnownOfflineSince = (sn: string) => number | null;
 /** Does the Core still hold a hand-over marker (the bridge booked it and it has not handed over)? */
 export type MarkedCore = (sn: string) => boolean;
 
-/** A rollup window is never longer than this. Normal windows are 5 min; the first rollup after a
- *  restart would otherwise span the downtime (no samples: nothing lost by clamping), and a long
- *  window's sun test would not describe the part the samples cover. */
+/** A rollup window is never longer than this, unless slot rows were recorded after the watermark.
+ *  Normal windows are 5 min; the first rollup after a restart would otherwise span the downtime, and
+ *  a long window's sun test would not describe the part the samples cover. After a graceful stop
+ *  (a final rollup) the downtime holds no rows, so clamping loses nothing. After a crash the span
+ *  from the last rollup to the crash has rows, and the window keeps it (v1.188.1 review). */
 export const BRIDGE_MAX_WINDOW_MS = 15 * 60 * 1000;
 /** The inferred basis needs the slot meter to cover this share of the window. */
 export const BRIDGE_MIN_COVERAGE = 0.8;
@@ -379,27 +402,27 @@ export function ownEnergyUntil(o: OfflineHomeCore | undefined, phase: 'read' | '
   return o.offlineSinceMs;
 }
 
+/** The bridged dark slots, one per Core. v1.188.1 (review) — a Core listed connected by two panels
+ *  (one panel's source list stale) is metered once, at the listing connectedSourceListings picks
+ *  (an online, fresh panel first; then the house panel), as the backup timers' bound reads it: two
+ *  listings had added both slots to Battery Net and booked both windows into the lifetime rows. */
 export function darkHomeSlots(devices: Record<string, DeviceSnapshot>, nowMs: number, known?: KnownOfflineSince, marked?: MarkedCore): DarkSlot[] {
   const out: DarkSlot[] = [];
-  for (const panel of allShp2s(devices)) {
-    const fresh = shp2ReadbackFresh(panel, nowMs);
-    const watts = panel.projection.sourceWatts ?? [];
-    for (const src of panel.projection.sources ?? []) {
-      const o = offlineState(src, devices, nowMs, known, marked);
-      if (!o?.bridged) continue;
-      out.push({
-        panelSn: panel.sn,
-        slot: src.slot,
-        sn: src.sn as string,
-        darkSinceMs: o.offlineSinceMs,
-        listedOnline: devices[src.sn as string]?.online === true,
-        source: src,
-        chW: finite(watts[src.slot - 1]),
-        pvW: slotPvWatts(src),
-        panelFresh: fresh,
-        panelOnline: panel.online === true,
-      });
-    }
+  for (const { panel, src } of connectedSourceListings(devices, nowMs)) {
+    const o = offlineState(src, devices, nowMs, known, marked);
+    if (!o?.bridged) continue;
+    out.push({
+      panelSn: panel.sn,
+      slot: src.slot,
+      sn: src.sn as string,
+      darkSinceMs: o.offlineSinceMs,
+      listedOnline: devices[src.sn as string]?.online === true,
+      source: src,
+      chW: finite((panel.projection.sourceWatts ?? [])[src.slot - 1]),
+      pvW: slotPvWatts(src),
+      panelFresh: shp2ReadbackFresh(panel, nowMs),
+      panelOnline: panel.online === true,
+    });
   }
   return out;
 }
@@ -419,6 +442,16 @@ export function slotAcEnergy(
   const out = integrateWh(pts.map((p) => ({ ts: p.ts, value: Math.max(0, -p.value) })), sinceMs, untilMs);
   const inn = integrateWh(pts.map((p) => ({ ts: p.ts, value: Math.max(0, p.value) })), sinceMs, untilMs);
   return { acOutWh: Math.max(0, out.wh), acInWh: Math.max(0, inn.wh), coverageMs: out.coverageMs };
+}
+
+/** The time of the last sample strictly before `t`, or null. */
+export function lastTsBefore(pts: ReadonlyArray<{ ts: number }>, t: number): number | null {
+  let v: number | null = null;
+  for (const p of pts) {
+    if (p.ts < t) v = p.ts;
+    else break;
+  }
+  return v;
 }
 
 /** The value in force at `t`: the last sample at or before it. */
@@ -495,6 +528,17 @@ export interface BridgedFleetFlow {
   bridgedSlots: number;
   /** Connected home Cores counted at their own reading (coreReports). */
   ownCores: number;
+  /** v1.188.1 (review) — which Cores those are (the card's and the timers' own-meter set). */
+  ownSns: string[];
+  /** v1.188.1 (review) — the `flow` sensors on the same notion (AC Import, Fleet Total In / Out):
+   *  each connected home Core at its own reading or, dark, at its slot's AC exchange (in: max(0,
+   *  chW); out: max(0, −chW); Fleet Total In adds the slot's PV on the 'night' / 'measured' basis).
+   *  A frozen projection listed online is taken out of the online sums, as for the two power
+   *  sensors. null when that input was not given, or while a Core is inside the dwell or a dark
+   *  slot on an online panel has no fresh meter (Fleet Total In also while its PV is unknown). */
+  acIn: number | null;
+  fleetIn: number | null;
+  fleetOut: number | null;
   /** false while a connected home Core on an online panel is neither a reading of its own nor
    *  bridged (inside the dwell), or a dark slot on an online panel cannot be bridged right now
    *  (publishReadiness `flowBridged`). */
@@ -507,15 +551,26 @@ export interface BridgedFleetFlow {
   slots: Array<{ panelSn: string; slot: number; sn: string; basis: BridgeBasis; chW: number | null; pvW: number | null; leftOut: boolean }>;
 }
 
-/** A Core's own contribution to aggregateFleetFlow's fleetPv / fleetBatteryNetDisplay. */
-function ownFlow(d: DeviceSnapshot): { pv: number; net: number } {
-  if (d.projection?.kind !== 'dpu') return { pv: 0, net: 0 };
+/** A Core's own contribution to aggregateFleetFlow's fleetPv / fleetBatteryNetDisplay, and to its
+ *  acIn / fleetIn / fleetOut. */
+function ownFlow(d: DeviceSnapshot): { pv: number; net: number; acIn: number; fleetIn: number; fleetOut: number } {
+  if (d.projection?.kind !== 'dpu') return { pv: 0, net: 0, acIn: 0, fleetIn: 0, fleetOut: 0 };
   let net = 0;
   for (const pk of d.projection.packs ?? []) {
     const f = pk.liveFlow ?? pk;
     net += (f.outputWatts ?? 0) - (f.inputWatts ?? 0);
   }
-  return { pv: d.projection.pvTotalWatts ?? 0, net };
+  const p = d.projection;
+  return { pv: p.pvTotalWatts ?? 0, net, acIn: p.acInWatts ?? 0, fleetIn: p.totalInWatts ?? 0, fleetOut: p.totalOutWatts ?? 0 };
+}
+
+/** The online sums bridgeFleetFlow starts from (aggregateFleetFlow's; the last three optional). */
+export interface OnlineFlow {
+  fleetPv: number;
+  fleetBatteryNet: number;
+  acIn?: number;
+  fleetIn?: number;
+  fleetOut?: number;
 }
 
 /**
@@ -534,7 +589,7 @@ function ownFlow(d: DeviceSnapshot): { pv: number; net: number } {
  * panel's Cores. Pure.
  */
 export function bridgeFleetFlow(
-  online: { fleetPv: number; fleetBatteryNet: number },
+  online: OnlineFlow,
   devices: Record<string, DeviceSnapshot>,
   nowMs: number,
   isTrusted: (panelSn: string, slot: number) => boolean,
@@ -544,29 +599,33 @@ export function bridgeFleetFlow(
 ): BridgedFleetFlow {
   let pv = online.fleetPv;
   let net = online.fleetBatteryNet;
+  let acIn = online.acIn ?? 0;
+  let fleetIn = online.fleetIn ?? 0;
+  let fleetOut = online.fleetOut ?? 0;
   let ready = true;
+  /** v1.188.1 (review) — the AC exchange is known (acIn, fleetOut): no Core inside the dwell, and
+   *  every dark slot on an online panel has a fresh meter. The PV terms need `ready` as well. */
+  let meterReady = true;
   let bridgedSlots = 0;
   let ownCores = 0;
+  const ownSns: string[] = [];
   const pending: string[] = [];
   const slots: BridgedFleetFlow['slots'] = [];
-  const seen = new Set<string>();
-  for (const panel of allShp2s(devices)) {
-    for (const src of panel.projection.sources ?? []) {
-      if (!src.isConnected || !src.sn || seen.has(src.sn)) continue;
-      seen.add(src.sn);
-      const d = devices[src.sn];
-      if (d == null) continue;
-      // In aggregateFleetFlow's sums (online, a Core projection, a connected source).
-      const summed = !!d.online && d.projection?.kind === 'dpu';
-      const o = offlineState(src, devices, nowMs, known, marked);
-      if (o == null) {
-        ownCores += 1;
-        if (!summed) { const f = ownFlow(d); pv += f.pv; net += f.net; }
-        continue;
-      }
-      if (summed) { const f = ownFlow(d); pv -= f.pv; net -= f.net; }
-      if (!o.bridged && panel.online === true) { pending.push(src.sn); ready = false; }
+  // v1.188.1 (review) — each connected Core once, at the listing darkHomeSlots meters it at.
+  for (const { panel, src } of connectedSourceListings(devices, nowMs)) {
+    const d = devices[src.sn as string];
+    if (d == null) continue;
+    // In aggregateFleetFlow's sums (online, a Core projection, a connected source).
+    const summed = !!d.online && d.projection?.kind === 'dpu';
+    const o = offlineState(src, devices, nowMs, known, marked);
+    if (o == null) {
+      ownCores += 1;
+      ownSns.push(src.sn as string);
+      if (!summed) { const f = ownFlow(d); pv += f.pv; net += f.net; acIn += f.acIn; fleetIn += f.fleetIn; fleetOut += f.fleetOut; }
+      continue;
     }
+    if (summed) { const f = ownFlow(d); pv -= f.pv; net -= f.net; acIn -= f.acIn; fleetIn -= f.fleetIn; fleetOut -= f.fleetOut; }
+    if (!o.bridged && panel.online === true) { pending.push(src.sn as string); ready = false; meterReady = false; }
   }
   for (const s of darkHomeSlots(devices, nowMs, known, marked)) {
     if (!s.panelOnline) {
@@ -575,17 +634,61 @@ export function bridgeFleetFlow(
     }
     const basis = slotPowerBasis(s, nowMs, isTrusted(s.panelSn, s.slot), site);
     slots.push({ panelSn: s.panelSn, slot: s.slot, sn: s.sn, basis, chW: s.chW, pvW: s.pvW, leftOut: false });
+    if (s.panelFresh && s.chW != null) {
+      acIn += Math.max(0, s.chW);
+      fleetIn += Math.max(0, s.chW);
+      fleetOut += Math.max(0, -s.chW);
+    } else {
+      meterReady = false;
+    }
     if (basis === 'unbridgeable') { ready = false; continue; }
     const p = basis === 'measured' ? (s.pvW as number) : 0;
     pv += p;
+    fleetIn += p;
     net += -(s.chW as number) - p;
     bridgedSlots += 1;
   }
-  return { fleetPv: ready ? pv : null, fleetBatteryNet: ready ? net : null, bridgedSlots, ownCores, ready, pending, slots };
+  const given = (v: number | undefined, ok: boolean, x: number): number | null => (v == null || !ok ? null : x);
+  return {
+    fleetPv: ready ? pv : null, fleetBatteryNet: ready ? net : null, bridgedSlots, ownCores, ownSns, ready, pending, slots,
+    acIn: given(online.acIn, meterReady, acIn),
+    fleetIn: given(online.fleetIn, meterReady && ready, fleetIn),
+    fleetOut: given(online.fleetOut, meterReady, fleetOut),
+  };
 }
 
-/** The pack cache keys (recorder packCacheKey) of every held pack row of Core `sn`. */
-export function heldPackKeysOf(sn: string, lifetimeKeys: readonly string[]): string[] {
+/** v1.188.1 (review) — the verdicts the backup timers' bound and the dashboard card take from the
+ *  same computation the two power sensors publish (shp2Membership.ts BridgeVerdicts). */
+export function slotVerdicts(flow: Pick<BridgedFleetFlow, 'ownSns' | 'slots'>): BridgeVerdicts {
+  const measuredPvW = new Map<string, number>();
+  for (const s of flow.slots) if (s.basis === 'measured' && s.pvW != null) measuredPvW.set(slotKey(s.panelSn, s.slot), s.pvW);
+  return { own: new Set(flow.ownSns), measuredPvW };
+}
+
+/** A pack's cache key, as the recorder builds it (recorder.ts packCacheKey): `<sn>:<packSn>`, or
+ *  `<sn>|<num>` while the pack has not reported its serial. */
+export function packKeyOf(sn: string, pk: { packSn?: string | null; num: number }): string {
+  return pk.packSn ? `${sn}:${pk.packSn}` : `${sn}|${pk.num}`;
+}
+
+/** The pack cache keys of the packs Core `d`'s projection carries now; null without a projection. */
+export function projectedPackKeys(d: DeviceSnapshot | undefined): Set<string> | null {
+  if (d?.projection?.kind !== 'dpu') return null;
+  return new Set((d.projection.packs ?? []).map((pk) => packKeyOf(d.sn, pk)));
+}
+
+/**
+ * The pack cache keys (recorder packCacheKey) of every held pack row of Core `sn`.
+ *
+ * v1.188.1 (review) — with `devices`, only the packs whose registers can come back: the packs the
+ * Core's projection carries, when it has one; without one (a restart while it is dark), every held
+ * row except a pack seen in ANOTHER chassis now (the v1.96.0 orphan guard: the row is stale). A row
+ * left by a pack that was moved or replaced, or by a phantom slot the store hides, had been marked
+ * too, and its marker was never spent (only a present pack whose registers move spends one): the
+ * Core stayed "marked" for good, bridged at once on any later dark moment with no dwell, its whole
+ * rollup window booked at the slot beside what the BMS had counted.
+ */
+export function heldPackKeysOf(sn: string, lifetimeKeys: readonly string[], devices?: Record<string, DeviceSnapshot>): string[] {
   const out: string[] = [];
   const stable = `pack_lastwhid_${sn}:`;
   const legacy = `pack_lastwh_${sn}_`;
@@ -598,7 +701,27 @@ export function heldPackKeysOf(sn: string, lifetimeKeys: readonly string[]): str
       if (/^\d+$/.test(num)) out.push(`${sn}|${Number(num)}`);
     }
   }
-  return out;
+  if (!devices) return out;
+  const present = projectedPackKeys(devices[sn]);
+  if (present) return out.filter((k) => present.has(k));
+  // No projection: drop a pack another chassis carries now.
+  const elsewhere = new Set<string>();
+  for (const d of Object.values(devices)) {
+    if (d.sn === sn || d.projection?.kind !== 'dpu') continue;
+    for (const pk of d.projection.packs ?? []) if (pk.packSn) elsewhere.add(pk.packSn);
+  }
+  return out.filter((k) => {
+    const c = k.lastIndexOf(':');
+    return c < 0 || !elsewhere.has(k.slice(c + 1));
+  });
+}
+
+/** v1.188.1 (review) — a Core's projection lists every pack it has (its pack count is known and
+ *  met), so a marker for a pack it does not carry is for a pack that is gone. */
+export function projectionPacksComplete(d: DeviceSnapshot | undefined): boolean {
+  if (d?.projection?.kind !== 'dpu') return false;
+  const n = d.projection.packCount;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 && (d.projection.packs ?? []).length >= n;
 }
 
 export interface BridgeSlotWindow {
@@ -610,6 +733,10 @@ export interface BridgeSlotWindow {
   basis: BridgeBasis;
   /** Why a window was not booked. */
   reason?: string;
+  /** v1.188.1 (review) — nothing was booked at the slot and the Core delivers a reading of its own:
+   *  its own pack meters are booked for the window (inWh / outWh), and the recorder counts its own
+   *  pv_total / ac_in rows (ownInstead). */
+  own?: boolean;
   acOutWh: number;
   acInWh: number;
   pvWh: number;
@@ -627,6 +754,10 @@ export interface BridgeRollupResult {
   chargeWh: number;
   dischargeWh: number;
   slots: BridgeSlotWindow[];
+  /** v1.188.1 (review) — the window was HELD: a dark slot's rows stopped inside a gap the next
+   *  window can still bridge, so nothing was booked or written and the watermark stays. The
+   *  recorder holds the two counters the bridge adds to with it. */
+  held?: boolean;
 }
 
 export interface EnergyBridgeDeps {
@@ -686,7 +817,7 @@ export interface EnergyBridge {
   markersOf(sn: string): string[];
   coreBridged(sn: string): { chargeWh: number; dischargeWh: number };
   clearCore(sn: string): void;
-  flow(online: { fleetPv: number; fleetBatteryNet: number }, devices: Record<string, DeviceSnapshot>, nowMs: number): BridgedFleetFlow;
+  flow(online: OnlineFlow, devices: Record<string, DeviceSnapshot>, nowMs: number): BridgedFleetFlow;
   debug(devices: Record<string, DeviceSnapshot>, nowMs: number): EnergyBridgeDebug;
 }
 
@@ -857,20 +988,87 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     const own = deps.readLifetime(BRIDGE_CHARGE_KEY);
     const pvWm = deps.readLifetime('fleet_pv_wh');
     let since = own.ts > 0 ? own.ts : pvWm.ts > 0 ? pvWm.ts : nowMs - 60_000;
-    since = Math.max(since, nowMs - BRIDGE_MAX_WINDOW_MS);
+    // `known` holds the instants the recorder's contributor cut recorded (offlineHomeCores, which
+    // rollupLifetime runs before this): in this process the store's clocks are read directly;
+    // after a restart they stand in for the ones the store no longer has, and a marked Core keeps
+    // the instant its dark span began.
+    const dark = darkHomeSlots(snap.devices, nowMs, known, isMarked);
+    // v1.188.1 (review) — the 15-min clamp applies only where nothing was recorded after the
+    // watermark: after a graceful stop (its final rollup leaves nothing pending) the downtime holds no
+    // slot rows. After a CRASH the rows from the last rollup to the crash are in samples (at most one
+    // rollup window past the watermark), and clamping past them lost every dark Core's battery and
+    // solar energy over that span while Panel Load and the grid counters booked the same minutes. The
+    // window then starts at the watermark; the downtime itself has no rows, and integrateWh never
+    // integrates across a gap over 10 min.
+    const cutoff = nowMs - BRIDGE_MAX_WINDOW_MS;
+    const recordedAfter = (s: DarkSlot): boolean => deps.query(s.panelSn, `src${s.slot}_w`, since + 1, Math.min(nowMs, since + BRIDGE_MAX_WINDOW_MS)).length > 0;
+    if (since < cutoff && !dark.some(recordedAfter)) since = cutoff;
     const result: BridgeRollupResult = { sinceMs: since, untilMs: nowMs, pvWh: 0, gridImportWh: 0, chargeWh: 0, dischargeWh: 0, slots: [] };
     if (since >= nowMs) return result;
+    // v1.188.1 (review) — a dark slot whose rows stopped inside a gap the integrator can still bridge
+    // (no row in the window, the last one less than INTEGRATE_HEAD_LOOKBACK_MS old: a panel cloud
+    // shadow, a short quota stall; the recorder writes no row while the panel's reading is held) HOLDS
+    // the window: nothing is booked or written and the watermark stays, so the next window integrates
+    // across the gap from the rows on both sides (integrateWh bridges up to 10 min), as the recorder's
+    // panel counters do. The recorder holds fleet_pv_wh and fleet_grid_import_wh with it and counts
+    // no Core's own readings instead (`held`). Before, every shadow episode lost the windows inside it.
+    const slotPts = new Map<DarkSlot, Array<{ ts: number; value: number }>>();
+    /** The Core delivers a reading of its own (a marked Core the cloud still lists offline, its MQTT
+     *  data back): where its slot has no reading inside the window, its own meters count instead
+     *  (bookOwn) — no hold, and no slot value held across the window. */
+    const ownReading = (s: DarkSlot): boolean => {
+      const d = snap.devices[s.sn];
+      return d?.projection?.kind === 'dpu' && coreReports(d, nowMs);
+    };
+    for (const s of dark) {
+      const start = Math.max(since, s.darkSinceMs ?? since);
+      if (start >= nowMs) continue;
+      const pts = deps.query(s.panelSn, `src${s.slot}_w`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs);
+      slotPts.set(s, pts);
+      const last = lastTsBefore(pts, start);
+      if (!pts.some((p) => p.ts >= start) && !ownReading(s) && last != null && nowMs - last < INTEGRATE_HEAD_LOOKBACK_MS) {
+        result.held = true;
+        result.slots.push({ panelSn: s.panelSn, slot: s.slot, sn: s.sn, sinceMs: start, basis: 'unbridgeable', reason: 'held: no slot row yet in a gap the next window can bridge', acOutWh: 0, acInWh: 0, pvWh: 0, outWh: 0, inWh: 0 });
+      }
+    }
+    if (result.held) {
+      lastRollup = result;
+      return result;
+    }
     const lifetimeKeys = deps.listLifetimeKeys();
     const nowBridging = new Map<string, DarkSlot>();
     /** The inferred / check state still in use: a slot not dark in daylight now keeps none. */
     const live = new Set<string>();
     const coreAdd = new Map<string, { chg: number; dsg: number }>();
     const site = deps.site();
-    // `known` holds the instants the recorder's contributor cut recorded (offlineHomeCores, which
-    // rollupLifetime runs before this): in this process the store's clocks are read directly;
-    // after a restart they stand in for the ones the store no longer has, and a marked Core keeps
-    // the instant its dark span began.
-    for (const s of darkHomeSlots(snap.devices, nowMs, known, isMarked)) {
+    /** v1.188.1 (review) — where the bridge books nothing for a dark slot and its Core delivers a
+     *  reading of its own (a marked Core the cloud still lists offline, its MQTT data back), that
+     *  Core's own pack meters count for the window: Σ ∫ pack<N>_in / pack<N>_out, the rows the
+     *  recorder's gate wrote as readings, the basis the Battery Net sensor reads. The recorder
+     *  counts its own pv_total / ac_in for the same window (ownInstead). Its BMS movement is still
+     *  absorbed (the marker kept): before, its PV counted and its battery energy was booked by
+     *  nobody, for as long as the condition held. */
+    const bookOwn = (s: DarkSlot, win: BridgeSlotWindow, start: number): void => {
+      const d = snap.devices[s.sn];
+      if (d?.projection?.kind !== 'dpu' || !ownReading(s)) return;
+      win.own = true;
+      if (start >= nowMs) return;
+      let inWh = 0;
+      let outWh = 0;
+      for (const pk of d.projection.packs ?? []) {
+        inWh += Math.max(0, integrateWh(deps.query(s.sn, `pack${pk.num}_in`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs), start, nowMs).wh);
+        outWh += Math.max(0, integrateWh(deps.query(s.sn, `pack${pk.num}_out`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs), start, nowMs).wh);
+      }
+      win.inWh = inWh;
+      win.outWh = outWh;
+      result.chargeWh += inWh;
+      result.dischargeWh += outWh;
+      const c = coreAdd.get(s.sn) ?? { chg: 0, dsg: 0 };
+      c.chg += inWh;
+      c.dsg += outWh;
+      coreAdd.set(s.sn, c);
+    };
+    for (const s of dark) {
       nowBridging.set(s.sn, s);
       const inferKey = `${s.panelSn}#${s.slot}#${s.sn}`;
       // The bridge takes the Core over at the instant it went offline: before it the Core's own
@@ -878,75 +1076,85 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
       const start = Math.max(since, s.darkSinceMs ?? since);
       const win: BridgeSlotWindow = { panelSn: s.panelSn, slot: s.slot, sn: s.sn, sinceMs: start, basis: 'unbridgeable', acOutWh: 0, acInWh: 0, pvWh: 0, outWh: 0, inWh: 0 };
       result.slots.push(win);
-      if (start >= nowMs) {
-        win.reason = 'no time in the window since the Core went offline';
-        continue;
-      }
-      if (!s.panelFresh) {
-        win.reason = 'the panel reading is not fresh';
-        continue;
-      }
-      const wPts = deps.query(s.panelSn, `src${s.slot}_w`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs);
-      const ac = slotAcEnergy(wPts, start, nowMs);
-      win.acOutWh = ac.acOutWh;
-      win.acInWh = ac.acInWh;
-      if (ac.coverageMs <= 0) {
-        // No slot reading in the window: nothing measured, and a PV figure alone would book as charge.
-        win.reason = 'no slot reading in the window';
-        continue;
-      }
-      let pvWh: number | null = null;
-      if (!sunUp(start, site) && !sunUp(nowMs, site)) {
-        win.basis = 'night';
-        pvWh = 0;
-      } else {
-        live.add(inferKey);
-        // The inferred lower bound runs in every daylight window, whatever the basis: it is the
-        // basis when the field is not trusted, and the check on the field when it is.
-        const pctPts = deps.query(s.panelSn, `src${s.slot}_pct`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs);
-        const capWh = capacityWh(s, nowMs);
-        const prior = infer.get(inferKey);
-        const step = inferPvStep(prior, {
-          pctStart: valueAt(pctPts, start),
-          pctEnd: valueAt(pctPts, nowMs),
-          acNetWh: ac.acOutWh - ac.acInWh,
-          capWh: capWh ?? 0,
-          covered: ac.coverageMs >= BRIDGE_MIN_COVERAGE * (nowMs - start),
-        });
-        if (step.state) infer.set(inferKey, step.state);
-        else infer.delete(inferKey);
-        const pvPts = deps.query(s.panelSn, `src${s.slot}_pv_w`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs);
-        const field = integrateWh(pvPts, start, nowMs);
-        const fieldWh = field.coverageMs >= BRIDGE_MIN_COVERAGE * Math.max(1, ac.coverageMs) ? Math.max(0, field.wh) : null;
-        checkField(s, inferKey, prior?.envWh ?? 0, step, fieldWh, capWh, start, nowMs);
-        if (fieldWh != null && isTrusted(s.panelSn, s.slot)) {
-          win.basis = 'measured';
-          pvWh = fieldWh;
-        } else if (step.pvWh != null) {
-          win.basis = 'inferred';
-          pvWh = step.pvWh;
-        } else {
-          win.reason = capWh == null ? 'no capacity for the slot' : 'the window cannot be inferred (re-anchored)';
+      const book = (): void => {
+        if (start >= nowMs) {
+          win.reason = 'no time in the window since the Core went offline';
+          return;
         }
-      }
-      if (pvWh == null) continue;
-      const split = windowSplit(ac.acOutWh, ac.acInWh, pvWh);
-      win.pvWh = pvWh;
-      win.outWh = split.outWh;
-      win.inWh = split.inWh;
-      result.pvWh += pvWh;
-      result.gridImportWh += ac.acInWh;
-      result.chargeWh += split.inWh;
-      result.dischargeWh += split.outWh;
-      const c = coreAdd.get(s.sn) ?? { chg: 0, dsg: 0 };
-      c.chg += split.inWh;
-      c.dsg += split.outWh;
-      coreAdd.set(s.sn, c);
-      for (const pk of heldPackKeysOf(s.sn, lifetimeKeys)) {
-        if (markers.has(pk)) continue;
-        markers.add(pk);
-        deps.writeLifetime(bridgeDarkKey(pk), 1, nowMs);
-      }
+        // v1.188.1 (review) — the slot rows that exist are booked, whatever the panel's reading is at
+        // this instant: the recorder writes a panel row only while the panel's reading is fresh
+        // (heldSamples.projectionRecordable), so each row is a reading. Judging the whole window on
+        // the instant dropped the minutes that had rows whenever a rollup landed in a shadow or a stall.
+        const wPts = slotPts.get(s) ?? [];
+        if (ownReading(s) && !wPts.some((p) => p.ts > start)) {
+          // No slot reading inside the window, and the Core's own readings arrive: they count
+          // (bookOwn), rather than the slot's last value held across the window.
+          win.reason = s.panelFresh ? 'no slot reading in the window' : 'the panel reading is not fresh';
+          return;
+        }
+        const ac = slotAcEnergy(wPts, start, nowMs);
+        win.acOutWh = ac.acOutWh;
+        win.acInWh = ac.acInWh;
+        if (ac.coverageMs <= 0) {
+          // No slot reading in the window: nothing measured, and a PV figure alone would book as charge.
+          win.reason = s.panelFresh ? 'no slot reading in the window' : 'the panel reading is not fresh';
+          return;
+        }
+        let pvWh: number | null = null;
+        if (!sunUp(start, site) && !sunUp(nowMs, site)) {
+          win.basis = 'night';
+          pvWh = 0;
+        } else {
+          live.add(inferKey);
+          // The inferred lower bound runs in every daylight window, whatever the basis: it is the
+          // basis when the field is not trusted, and the check on the field when it is.
+          const pctPts = deps.query(s.panelSn, `src${s.slot}_pct`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs);
+          const capWh = capacityWh(s, nowMs);
+          const prior = infer.get(inferKey);
+          const step = inferPvStep(prior, {
+            pctStart: valueAt(pctPts, start),
+            pctEnd: valueAt(pctPts, nowMs),
+            acNetWh: ac.acOutWh - ac.acInWh,
+            capWh: capWh ?? 0,
+            covered: ac.coverageMs >= BRIDGE_MIN_COVERAGE * (nowMs - start),
+          });
+          if (step.state) infer.set(inferKey, step.state);
+          else infer.delete(inferKey);
+          const pvPts = deps.query(s.panelSn, `src${s.slot}_pv_w`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs);
+          const field = integrateWh(pvPts, start, nowMs);
+          const fieldWh = field.coverageMs >= BRIDGE_MIN_COVERAGE * Math.max(1, ac.coverageMs) ? Math.max(0, field.wh) : null;
+          checkField(s, inferKey, prior?.envWh ?? 0, step, fieldWh, capWh, start, nowMs);
+          if (fieldWh != null && isTrusted(s.panelSn, s.slot)) {
+            win.basis = 'measured';
+            pvWh = fieldWh;
+          } else if (step.pvWh != null) {
+            win.basis = 'inferred';
+            pvWh = step.pvWh;
+          } else {
+            win.reason = capWh == null ? 'no capacity for the slot' : 'the window cannot be inferred (re-anchored)';
+          }
+        }
+        if (pvWh == null) return;
+        const split = windowSplit(ac.acOutWh, ac.acInWh, pvWh);
+        win.pvWh = pvWh;
+        win.outWh = split.outWh;
+        win.inWh = split.inWh;
+        result.pvWh += pvWh;
+        result.gridImportWh += ac.acInWh;
+        result.chargeWh += split.inWh;
+        result.dischargeWh += split.outWh;
+        const c = coreAdd.get(s.sn) ?? { chg: 0, dsg: 0 };
+        c.chg += split.inWh;
+        c.dsg += split.outWh;
+        coreAdd.set(s.sn, c);
+        for (const pk of heldPackKeysOf(s.sn, lifetimeKeys, snap.devices)) {
+          if (markers.has(pk)) continue;
+          markers.add(pk);
+          deps.writeLifetime(bridgeDarkKey(pk), 1, nowMs);
+        }
+      };
+      book();
+      if (win.basis === 'unbridgeable') bookOwn(s, win, start);
     }
     // A slot that is not dark in daylight now keeps no inferred state and no field check, so a
     // later dark span starts both afresh (a stale anchor would land the whole SoC change since).
