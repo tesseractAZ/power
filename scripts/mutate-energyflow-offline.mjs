@@ -527,6 +527,35 @@ const MUTANTS = [
     to: "      if (d?.projection?.kind === 'dpu' && dpuContentFresh(d, nowMs)) { /* MUTANT */",
     why: 'The packs’ last charge, carried across the offline flip, publishes a time to full while the slots deliver 3 kW.',
   },
+  // ── review round 2 recheck: the house shared while a Core's delivery is unmeasured ──────────
+  {
+    id: 'U-i. ★★★ the grid takes the rest of the house with a Core unmeasured',
+    file: MODEL,
+    find: '    gridToHouseW = coresShareUnmeasured ? Math.min(rest, Math.max(0, homeGridW - coresAcIn)) : rest;',
+    to: '    gridToHouseW = rest; /* MUTANT */',
+    why: 'One Core at 1145 W, two dark with no figure, main 500 W: 2245 W of grid → Loads nothing measured.',
+  },
+  {
+    id: 'U-ii. ★★ a dark Core on a behind frame counts as measured',
+    file: MODEL,
+    find: '  const coresShareUnmeasured = unmeteredCores > 0 || viaFlow.length < viaPanel.length;',
+    to: '  const coresShareUnmeasured = unmeteredCores > 0; /* MUTANT */',
+    why: 'The dark Core’s stale share goes to the grid: 1400 W of grid → Loads against a 400 W main.',
+  },
+  {
+    id: 'U-iii. ★★ a Core with no figure from either meter counts as measured',
+    file: MODEL,
+    find: '  const coresShareUnmeasured = unmeteredCores > 0 || viaFlow.length < viaPanel.length;',
+    to: '  const coresShareUnmeasured = viaFlow.length < viaPanel.length; /* MUTANT */',
+    why: 'Two Cores with no figure have their share drawn as grid import.',
+  },
+  {
+    id: 'U-iv. ★★ the capped grid edge keeps the Cores’ own draw',
+    file: MODEL,
+    find: '    gridToHouseW = coresShareUnmeasured ? Math.min(rest, Math.max(0, homeGridW - coresAcIn)) : rest;',
+    to: '    gridToHouseW = coresShareUnmeasured ? Math.min(rest, homeGridW) : rest; /* MUTANT */',
+    why: 'A dark Core’s 2 kW charge through the main is drawn a second time, as the house on the grid.',
+  },
 ];
 
 // Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs).

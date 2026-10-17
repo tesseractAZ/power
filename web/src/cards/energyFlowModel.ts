@@ -218,6 +218,9 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   const soc = socVals.length === 0 ? null : socVals.reduce((a, b) => a + b, 0) / socVals.length;
   // A connected Core with no figure from either meter: its delivery is unknown, not zero.
   const unmeteredCores = silentSlots.length - viaPanel.length;
+  // ...and a dark Core on a frame behind the Cores has a figure but no current flow: either way a
+  // connected Core's delivery is missing from acOut.
+  const coresShareUnmeasured = unmeteredCores > 0 || viaFlow.length < viaPanel.length;
   // v1.188.1 — the Solar node is the Cores' own PV meters. With none of them reporting, "0 W" would be
   // a missing meter drawn as a reading — beside an "out" figure that carries those Cores' PV — so it
   // is null ("—"). With some reporting it is their PV, and pvUnreported says how many it leaves out.
@@ -316,7 +319,12 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     coresToHouseW = load;
   } else {
     coresToHouseW = Math.min(acOut, load);
-    gridToHouseW = load - coresToHouseW;
+    // v1.188.1 review — the grid takes the rest of the house only when every connected Core's
+    // delivery is in acOut. Otherwise the rest may be a Core nothing measured, and the grid edge is
+    // the measured main less the Cores' draw: one Core on its own meter at 1145 W, two dark with no
+    // slot figure, main 500 W, house 3390 W drew 2245 W of grid → Loads.
+    const rest = load - coresToHouseW;
+    gridToHouseW = coresShareUnmeasured ? Math.min(rest, Math.max(0, homeGridW - coresAcIn)) : rest;
   }
   if (coresToHouseW < FLOW_EDGE_MIN_W) coresToHouseW = 0;
   if (gridToHouseW < FLOW_EDGE_MIN_W) gridToHouseW = 0;

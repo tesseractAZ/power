@@ -493,6 +493,45 @@ test('★★ the main less the Cores’ draw: a dark Core charging through its s
   assert.equal(m.gridSupplyW, 2500);
 });
 
+test('★★★ one Core delivering on its own meter, two dark with no slot figure, main 500 W: the grid edge is the main', () => {
+  const p = panel([{ sn: 'CORE-A' }, { sn: 'CORE-B', dpuStale: true }, { sn: 'CORE-C', dpuStale: true }], 3390, { sourceWatts: [] });
+  const m = energyFlowModel(devs(core('CORE-A', { acOut: 1145, packNet: 1145 }), darkCore('CORE-B'), darkCore('CORE-C'), p), grid(MAIN_BELOW, 0));
+  assert.equal(m.gridState, 'active');
+  assert.equal(m.coresToHouseW, 1145);
+  assert.equal(m.gridToHouseW, MAIN_BELOW, 'was 2245 W: the two unmeasured Cores’ share was given to the grid');
+  assert.equal(m.gridSupplyW, MAIN_BELOW, 'the Grid node is the measured main (was 2245 W)');
+  // The same with CORE-B and CORE-C listed online on frozen meters.
+  const frozen = panel([{ sn: 'CORE-A' }, { sn: 'CORE-B', dpuFrozen: true }, { sn: 'CORE-C', dpuFrozen: true }], 3390, { sourceWatts: [] });
+  const f = energyFlowModel(devs(core('CORE-A', { acOut: 1145, packNet: 1145 }), core('CORE-B'), core('CORE-C'), frozen), grid(MAIN_BELOW, 0));
+  assert.equal(f.coresToHouseW, 1145);
+  assert.equal(f.gridToHouseW, MAIN_BELOW);
+  // ...and once every Core is measured, the grid takes the rest of the house again (09-22).
+  const all = energyFlowModel(devs(core('CORE-A', { acOut: 1145 }), core('CORE-B', { acOut: 1145 }), core('CORE-C'), panel(
+    [{ sn: 'CORE-A', w: -1145 }, { sn: 'CORE-B', w: -1145 }, { sn: 'CORE-C', w: 0 }], 3390)), grid(MAIN_BELOW, 0));
+  assert.equal(all.coresToHouseW, 2290);
+  assert.equal(all.gridToHouseW, 1100, 'the fresher meters win over the main');
+});
+
+test('★★ a dark Core on a frame behind the Cores, the house shared: its stale share is not given to the grid', () => {
+  // CORE-A now 2000 W out on its own meter; the frame still shows it at −1500 W (behind) and dark CORE-B at −1500 W.
+  const p = panel([{ sn: 'CORE-A', w: -1500 }, { sn: 'CORE-B', w: -1500, dpuStale: true }], 3400);
+  const m = energyFlowModel(devs(core('CORE-A', { acOut: 2000, packNet: 2000 }), darkCore('CORE-B'), p), grid(400, 0));
+  assert.equal(m.acOut, 2000, 'the dark Core’s stale flow waits for the next frame');
+  assert.equal(m.coresToHouseW, 2000);
+  assert.equal(m.gridToHouseW, 400, 'was 1400 W against a measured 400 W main');
+  assert.equal(m.gridSupplyW, 400);
+});
+
+test('★★ the house shared with a dark Core charging through its slot and one unmeasured: the main less that draw', () => {
+  // CORE-A 1000 W out (its slot agrees); dark CORE-B charging +2000 W through its slot; CORE-C dark, no figure.
+  const p = panel([{ sn: 'CORE-A' }, { sn: 'CORE-B', dpuStale: true }, { sn: 'CORE-C', dpuStale: true }], 3390, { sourceWatts: [-1000, 2000] });
+  const m = energyFlowModel(devs(core('CORE-A', { acOut: 1000, packNet: 1000 }), darkCore('CORE-B'), darkCore('CORE-C'), p), grid(2500, 0));
+  assert.equal(m.gridToCoresW, 2000);
+  assert.equal(m.coresToHouseW, 1000);
+  assert.equal(m.gridToHouseW, 500, 'the main’s 2.5 kW less the 2 kW into CORE-B (was 2390 W)');
+  assert.equal(m.gridSupplyW, 2500);
+});
+
 /* ══ v1.188.1 review — a panel frame BEHIND the Cores' own meters, mixed fleet ══ */
 
 test('★★★ 09-21 hand-over with one Core dark: the frame is behind, so the dark slot’s stale delivery is not drawn', () => {
