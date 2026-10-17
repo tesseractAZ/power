@@ -441,6 +441,15 @@ export interface MiddayShadowStatus {
   } | null;
 }
 
+/** v1.189.0 (R5) — what the 21:30 notice would have pushed and spoken for the shadow's cycle
+ *  (/api/night-charge/status → middayShadowPreview; server: middayShadow.middayShadowPreview). It
+ *  was never sent. */
+export interface MiddayShadowPreviewStatus {
+  push: { title: string; body: string };
+  spoken: { en: string; es: string } | null;
+  spokenChars: number | null;
+}
+
 /** The section's closing words: what the shadow is, and that it has no control. */
 export const MIDDAY_SHADOW_NOTE =
   'Shadow only: computed to judge the mid-day charge before it is switched on. Nothing is armed, written or announced for it, and there is nothing to cancel.';
@@ -458,6 +467,8 @@ const fmtPct = (v: number | null): string => (v == null || !Number.isFinite(v) ?
 export function middayShadowView(
   s: MiddayShadowStatus | null | undefined,
   hhmm: (ms: number) => string | null,
+  /** R5 — the evening notice it would have sent; its title closes the lines ("not sent"). */
+  preview?: MiddayShadowPreviewStatus | null,
 ): { title: string; lines: string[]; note: string } | null {
   if (s == null || s.cost == null) return null;
   const span = (l: MiddayShadowLeg): string => `${hhmm(l.windowStartMs) ?? '—'}–${hhmm(l.windowEndMs) ?? '—'}`;
@@ -482,5 +493,6 @@ export function middayShadowView(
   } else if (c.basisComplete && c.chargeTonight) {
     lines.push(`Morning refresh: due 30 minutes before ${hhmm(c.windowStartMs) ?? 'the open'}`);
   }
+  if (preview?.push?.title) lines.push(`Its evening notice would read (not sent): “${preview.push.title}”`);
   return { title: 'Mid-day charge (shadow)', lines, note: MIDDAY_SHADOW_NOTE };
 }

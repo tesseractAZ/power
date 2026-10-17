@@ -873,6 +873,9 @@ export interface NightLedgerRow {
   shadow_refreshed_reserve_pct: number | null;
   shadow_refreshed_buy_kwh: number | null;
   shadow_refreshed_expected_buy_kwh: number | null;
+  /** R5 — how old the weather the shadow refresh was sized on was, seconds (the shadow asks the
+   *  worker for no particular age; a live refresh asks for at most 45 minutes). */
+  shadow_refresh_weather_age_s: number | null;
 
   // ── SCORE (NULL until scored) ──
   pv_err_frac: number | null;
@@ -965,6 +968,8 @@ export const MIDDAY_SHADOW_LEDGER_SCHEMA: ReadonlyArray<readonly [keyof NightLed
   ['shadow_window_pv_kwh', 'REAL'], ['shadow_window_load_kwh', 'REAL'],
   ['shadow_refreshed_at_ms', 'INTEGER'], ['shadow_refresh_disposition', 'TEXT'], ['shadow_refreshed_level_pct', 'REAL'],
   ['shadow_refreshed_reserve_pct', 'REAL'], ['shadow_refreshed_buy_kwh', 'REAL'], ['shadow_refreshed_expected_buy_kwh', 'REAL'],
+  // R5 — the weather age the shadow refresh was sized on.
+  ['shadow_refresh_weather_age_s', 'REAL'],
 ];
 const CHARGE_CYCLE_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   ...CHARGE_CYCLE_LEDGER_SCHEMA.map(([c]) => c),

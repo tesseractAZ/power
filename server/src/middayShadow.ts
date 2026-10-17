@@ -29,12 +29,17 @@
  * taper (curtailFromPct) and its PV surplus over [close, on-peak).
  */
 import {
-  chooseChargeCycle, nextChargeableOpenMs, nextOnPeakStartMs, OVERNIGHT_CYCLE,
+  chooseChargeCycle, nextChargeableOpenMs, nextOnPeakStartMs, onPeakEndMs, OVERNIGHT_CYCLE,
   type ChargeCycleConfig, type ChargeCycleWhy, type ChargeLeg, type ChargeLegRole, type ChargeWindowKind,
 } from './chargeWindows.js';
 import { saturationThresholdPct, meanChargeCeilingPct, surplusSpanEndMs } from './chargeTaper.js';
-import { chargeLevelPct, statedBuyKwh, type NightChargePlan, type WindowSpec, type MiddayReserveBasis } from './nightChargeAdvisor.js';
-import { clampReserveTarget, type NightChargeMode } from './nightChargeActuator.js';
+import {
+  chargeIsWindowBound, chargeLevelPct, statedBuyKwh, type NightChargePlan, type WindowSpec, type MiddayReserveBasis,
+} from './nightChargeAdvisor.js';
+import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, revertDueMs, type NightChargeMode } from './nightChargeActuator.js';
+import { eveningAnnouncement } from './chargeAnnounce.js';
+import { buildMiddayRefreshMessage, type MiddayAnnounceInput } from './chargeText.js';
+import type { NotifyMessage } from './notify.js';
 import type { TariffModel } from './tariff.js';
 import type { NightLedgerRow } from './recorder.js';
 
@@ -161,6 +166,10 @@ export interface ShadowLegSummary {
   /** The P50 PV and load the plan expects over the window, kWh (the cost leg). */
   windowPvP50Kwh: number | null;
   windowLoadP50Kwh: number | null;
+  /** R5 — the window closes before the level is reached (chargeIsWindowBound), and the leg cannot
+   *  hold the cushion: what the evening's words say of it. Absent on a record from before R5. */
+  toward?: boolean;
+  cushionShortfall?: boolean;
 }
 
 /** What the morning refresh decided (refreshLeg). */
@@ -177,6 +186,14 @@ export interface ShadowRefresh {
   /** A live refresh would push (plan §3.4 step 5). The shadow never sends it. */
   wouldPush: boolean;
   reason: string;
+  /** R5 — how old the weather the refresh was sized on was, seconds (null: unknown). The shadow
+   *  asks the worker for no particular age (the plumbing is inert until the switch); a live refresh
+   *  asks for weather at most REFRESH_MAX_WEATHER_AGE_MS old and defers on older. */
+  weatherAgeS?: number | null;
+  /** R5 — the level the re-plan asked for (above the announced one when capped), and the window's
+   *  P50 PV it was sized on, kWh: what the refresh push says of a cap and a moved figure. */
+  neededLevelPct?: number | null;
+  windowPvP50Kwh?: number | null;
 }
 
 export interface MiddayShadowRecord {
@@ -199,6 +216,9 @@ export interface ShadowSized {
   plan: NightChargePlan;
   windowPvP50Kwh: number | null;
   windowLoadP50Kwh: number | null;
+  /** R5 — when the weather the plan's forecast was built on was fetched (the band's
+   *  weatherFetchedAtMs); null/absent when unknown. */
+  weatherFetchedAtMs?: number | null;
 }
 
 /** The arm probe's answer: the roles armCycle armed, and the ones it refused with its words. */
@@ -240,6 +260,7 @@ export function summariseLeg(
     disposition: arm.disposition,
     windowPvP50Kwh: fin(sized?.windowPvP50Kwh),
     windowLoadP50Kwh: fin(sized?.windowLoadP50Kwh),
+    ...(p != null ? { toward: chargeIsWindowBound(p) === true, cushionShortfall: p.cushionShortfall === true } : {}),
   };
 }
 
@@ -405,7 +426,8 @@ export function standingRefresh(rec: MiddayShadowRecord, nowMs: number): ShadowR
   };
 }
 
-/** The refresh from a re-sized cost leg (null: the planner had no inputs). PURE. */
+/** The refresh from a re-sized cost leg (null: the planner had no inputs). R5: the age of the
+ *  weather it was sized on is recorded, with the level it asked for and the window's P50 PV. PURE. */
 export function refreshFromSized(rec: MiddayShadowRecord, sized: ShadowSized | null, nowMs: number): ShadowRefresh {
   const c = rec.cost!;
   const p = sized?.plan ?? null;
@@ -418,7 +440,17 @@ export function refreshFromSized(rec: MiddayShadowRecord, sized: ShadowSized | n
       expectedBuyKwh: statedBuyKwh(p), buyKwh: fin(p.buyKwh),
     },
   });
-  return { atMs: nowMs, ...r };
+  return {
+    atMs: nowMs, ...r,
+    weatherAgeS: weatherAgeSeconds(sized?.weatherFetchedAtMs, nowMs),
+    neededLevelPct: p != null ? fin(chargeLevelPct(p)) : null,
+    windowPvP50Kwh: fin(sized?.windowPvP50Kwh),
+  };
+}
+
+/** The age of the weather a refresh was sized on, whole seconds; null when unknown. PURE. */
+export function weatherAgeSeconds(fetchedAtMs: number | null | undefined, nowMs: number): number | null {
+  return fetchedAtMs != null && Number.isFinite(fetchedAtMs) ? Math.max(0, Math.round((nowMs - fetchedAtMs) / 1000)) : null;
 }
 
 /** The cost leg's sizing for its morning refresh: the evening's, with the backup's hold (already
@@ -528,6 +560,7 @@ export function middayShadowLedgerColumns(rec: MiddayShadowRecord): Partial<Nigh
 /** The refresh's shadow columns. PURE. */
 export function middayShadowRefreshLedgerColumns(r: ShadowRefresh): Partial<NightLedgerRow> {
   return {
+    shadow_refresh_weather_age_s: r.weatherAgeS ?? null,
     shadow_refreshed_at_ms: r.atMs,
     shadow_refresh_disposition: r.disposition,
     shadow_refreshed_level_pct: r.levelPct,
@@ -573,8 +606,102 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
 
 /** The refresh's log line. PURE. */
 export function middayShadowRefreshLogLine(rec: MiddayShadowRecord, r: ShadowRefresh): string {
+  const age = r.weatherAgeS != null ? `; sized on weather ${Math.round(r.weatherAgeS / 60)} min old` : '';
   return `${MIDDAY_SHADOW_LOG_TAG} ${rec.day} refresh — ${r.disposition}: ${r.reason}; level ~${pct(r.levelPct)}, reserve ${pct(r.reservePct)}, `
-    + `expected ${kwh(r.expectedBuyKwh)}${r.wouldPush ? '; a live refresh would push this' : ''}. Shadow only: nothing is written or pushed.`;
+    + `expected ${kwh(r.expectedBuyKwh)}${age}${r.wouldPush ? '; a live refresh would push this' : ''}. Shadow only: nothing is written or pushed.`;
+}
+
+/* ── the words (R5): what the evening and the refresh would say — never sent ──────── */
+
+/** The evening notice's inputs for the shadow's cycle, as the evening job would build them once the
+ *  switch arms it (chargeText.MiddayAnnounceInput); null with no mid-day leg. PURE. */
+export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: TariffModel): MiddayAnnounceInput | null {
+  const c = rec.cost;
+  if (c == null) return null;
+  const b = rec.backup;
+  const advisory = rec.mode === 'advisory';
+  const onPeakStart = nextOnPeakStartMs(model, c.windowStartMs);
+  const onPeak = onPeakStart != null ? { startMs: onPeakStart, endMs: onPeakEndMs(model, onPeakStart) } : null;
+  // A write mode that would not arm a cost leg that charges: the cycle is refused, with the probe's words.
+  const refusedPrefix = 'would not arm — ';
+  const refused = !advisory && c.basisComplete && c.chargeTonight && !c.wouldArm
+    ? (c.disposition.startsWith(refusedPrefix) ? c.disposition.slice(refusedPrefix.length) : c.disposition) : null;
+  // The backup the notice names: the one that would arm; in advisory mode the one the plan calls for;
+  // in a refused cycle the one the plan called for ("no outage backup tonight because …").
+  const backupNamed = b != null && b.basisComplete && b.chargeTonight && (advisory || refused != null || b.wouldArm);
+  const forceCharge = c.levelPct != null && c.reservePct != null && c.levelPct > c.reservePct + 0.05;
+  return {
+    nowMs: rec.computedAtMs,
+    mode: rec.mode,
+    cost: {
+      windowStartMs: c.windowStartMs, windowEndMs: c.windowEndMs,
+      levelPct: c.levelPct, reservePct: c.reservePct, expectedKwh: c.expectedBuyKwh, buyKwh: c.buyKwh,
+      toward: c.toward === true, forceCharge, charges: c.chargeTonight, basisComplete: c.basisComplete,
+      cushionShortfall: c.cushionShortfall === true,
+    },
+    backup: backupNamed && b != null ? {
+      windowStartMs: b.windowStartMs, windowEndMs: b.windowEndMs, reservePct: b.reservePct,
+      expectedKwh: b.expectedBuyKwh, buyKwh: b.buyKwh, cushionShortfall: b.cushionShortfall === true,
+    } : null,
+    onPeak,
+    refreshAtMs: c.windowStartMs - REFRESH_LEAD_MS,
+    costApplyAtMs: c.windowStartMs - APPLY_LEAD_MS,
+    backupApplyAtMs: b != null ? b.windowStartMs - APPLY_LEAD_MS : null,
+    costRestoreAtMs: revertDueMs({ windowEndMs: c.windowEndMs, nextOnPeakStartMs: onPeakStart }) ?? c.windowEndMs,
+    refused,
+  };
+}
+
+/** What the evening would have said for the shadow's cycle: its push, its spoken pair (null when
+ *  nothing would be spoken) and that pair's length. Never sent. PURE. */
+export interface MiddayShadowPreview {
+  push: NotifyMessage;
+  spoken: { en: string; es: string } | null;
+  spokenChars: number | null;
+}
+
+export function middayShadowPreview(rec: MiddayShadowRecord | null, model: TariffModel): MiddayShadowPreview | null {
+  const i = rec != null ? middayShadowAnnounceInput(rec, model) : null;
+  if (i == null) return null;
+  const a = eveningAnnouncement({ cycle: 'midday', midday: i });
+  return { push: a.push, spoken: a.spoken, spokenChars: a.spoken != null ? a.spoken.en.length + a.spoken.es.length : null };
+}
+
+/** The preview's log lines — each tagged, each saying it was not sent. PURE. */
+export function middayShadowPreviewLogLines(rec: MiddayShadowRecord, model: TariffModel): string[] {
+  const p = middayShadowPreview(rec, model);
+  if (p == null) return [];
+  const t = MIDDAY_SHADOW_LOG_TAG;
+  const out = [`${t} ${rec.day} the 21:30 push would read (not sent): "${p.push.title}" — ${p.push.body}`];
+  if (p.spoken != null) {
+    out.push(`${t} ${rec.day} the notice would be spoken (not spoken; ${p.spokenChars} of ${MAX_SPOKEN_ADVISORY_CHARS} characters): "${p.spoken.en}" / "${p.spoken.es}"`);
+  }
+  return out;
+}
+
+/** The refresh push a live refresh would send (null when it would send none). Never sent. PURE. */
+export function middayShadowRefreshPreview(rec: MiddayShadowRecord, r: ShadowRefresh): NotifyMessage | null {
+  const c = rec.cost;
+  if (c == null) return null;
+  return buildMiddayRefreshMessage({
+    nowMs: r.atMs,
+    windowStartMs: c.windowStartMs, windowEndMs: c.windowEndMs,
+    announcedAtMs: rec.computedAtMs,
+    disposition: r.disposition,
+    announced: { levelPct: c.levelPct, expectedKwh: c.expectedBuyKwh },
+    refreshed: { levelPct: r.levelPct, reservePct: r.reservePct, expectedKwh: r.expectedBuyKwh },
+    neededLevelPct: r.neededLevelPct ?? null,
+    windowPvKwh: { announced: c.windowPvP50Kwh, refreshed: r.windowPvP50Kwh ?? null },
+    reservePct: null,
+    applyAtMs: c.windowStartMs - APPLY_LEAD_MS,
+    wouldPush: r.wouldPush,
+  });
+}
+
+/** The refresh preview's log line, or null when a live refresh would push nothing. PURE. */
+export function middayShadowRefreshPreviewLogLine(rec: MiddayShadowRecord, r: ShadowRefresh): string | null {
+  const m = middayShadowRefreshPreview(rec, r);
+  return m == null ? null : `${MIDDAY_SHADOW_LOG_TAG} ${rec.day} the refresh push would read (not sent): "${m.title}" — ${m.body}`;
 }
 
 /* ── the file ─────────────────────────────────────────────────────────────── */
@@ -599,6 +726,8 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     wouldArm: o.wouldArm === true,
     disposition: typeof o.disposition === 'string' ? o.disposition : '',
     windowPvP50Kwh: fin(o.windowPvP50Kwh), windowLoadP50Kwh: fin(o.windowLoadP50Kwh),
+    ...(typeof o.toward === 'boolean' ? { toward: o.toward } : {}),
+    ...(typeof o.cushionShortfall === 'boolean' ? { cushionShortfall: o.cushionShortfall } : {}),
   };
 };
 
@@ -618,6 +747,9 @@ export function coerceMiddayShadowRecord(raw: unknown): MiddayShadowRecord | nul
       atMs: fin(r.atMs)!, disposition: r.disposition as RefreshDisposition,
       levelPct: fin(r.levelPct), reservePct: fin(r.reservePct), buyKwh: fin(r.buyKwh), expectedBuyKwh: fin(r.expectedBuyKwh),
       wouldPush: r.wouldPush === true, reason: typeof r.reason === 'string' ? r.reason : '',
+      ...('weatherAgeS' in r ? { weatherAgeS: fin(r.weatherAgeS) } : {}),
+      ...('neededLevelPct' in r ? { neededLevelPct: fin(r.neededLevelPct) } : {}),
+      ...('windowPvP50Kwh' in r ? { windowPvP50Kwh: fin(r.windowPvP50Kwh) } : {}),
     }
     : null;
   return {

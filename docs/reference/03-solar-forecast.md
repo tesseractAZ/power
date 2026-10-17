@@ -179,6 +179,13 @@ battery SoC%. This is the object every downstream forecast/alarm consumer reads.
   home Cores its solar model was fitted on) equals the current map's home Cores
   (`dayForecastCacheUsable`, v1.186.5). A forecast fitted on a boot-time map that had not
   yet seen every Core is rebuilt instead of standing for the full 30-min TTL.
+- Every forecast records when the weather it was built on was fetched (`weatherFetchedAtMs`,
+  carried onto the probabilistic band). A caller may ask for weather at most so old
+  (`maxWeatherAgeMs`, the `forecast` and `probabilisticForecast` reports' argument): the 2 h
+  weather cache is re-fetched when older (`getWeather`'s `maxAgeMs`), and a cached or in-flight
+  forecast built on other weather is rebuilt; a failed fetch leaves the stale weather, and the
+  forecast says so. Only the night-charge morning refresh asks (chapter 15 part 2, "The morning
+  refresh"); every other caller is served as before.
 
 #### Inputs
 

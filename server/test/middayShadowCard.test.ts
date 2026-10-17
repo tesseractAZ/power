@@ -48,6 +48,12 @@ test('★★★ the section states each leg, whether it would arm, and that noth
   assert.equal(hold.lines.length, 2, 'nothing to refresh');
   const nb = middayShadowView(shadow({ backup: leg('backup', phx(10, 14, 23), phx(10, 15, 5), { chargeTonight: false, wouldArm: false, disposition: 'not armed — the plan holds (no buy needed)' }) }), hhmm)!;
   assert.equal(nb.lines[0], 'Outage backup 23:00–05:00: not needed — the pool holds the line without it · not armed — the plan holds (no buy needed)');
+  // R5 — with the evening notice it would have sent: its title closes the lines, marked not sent.
+  const pv = middayShadowView(shadow(), hhmm, {
+    push: { title: 'Charge plan: charging to ~89.5% tomorrow 10am–3pm, about 19 kWh', body: '…' }, spoken: null, spokenChars: null,
+  })!;
+  assert.equal(pv.lines[pv.lines.length - 1], 'Its evening notice would read (not sent): “Charge plan: charging to ~89.5% tomorrow 10am–3pm, about 19 kWh”');
+  assert.equal(middayShadowView(shadow(), hhmm, null)!.lines.length, 3, 'no preview, no line');
   // No mid-day leg (or no record): nothing.
   assert.equal(middayShadowView(shadow({ cost: null }), hhmm), null);
   assert.equal(middayShadowView(null, hhmm), null);
@@ -61,9 +67,10 @@ test('★★★ the card: a read-only section, in every shape whose status is kn
   for (const banned of ['<button', 'Cancel', 'postCancel', 'onClick', 'fetch(', 'useState']) {
     assert.ok(!fn.includes(banned), `${banned} in the shadow section`);
   }
-  assert.match(fn, /const view = middayShadowView\(shadow, phoenixHHMM\);\n\s+if \(view == null\) return null;/);
+  // R5 — with the evening notice it would have sent (its title, "not sent").
+  assert.match(fn, /const view = middayShadowView\(shadow, phoenixHHMM, preview\);\n\s+if \(view == null\) return null;/);
   const body = card.slice(card.indexOf('export const NightChargeCard = memo('), card.indexOf('\n});\n'));
-  assert.equal(body.split('<MiddayShadowSection shadow={status.middayShadow} />').length - 1, 3, 'the no-plan, hold and charge shapes');
+  assert.equal(body.split('<MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />').length - 1, 3, 'the no-plan, hold and charge shapes');
   // The status-blind shape (no status) has none: there is no record to show.
   const unavailable = body.slice(body.indexOf('if (!status) {'), body.indexOf('const actuation = withConfirmedCancel('));
   assert.ok(!unavailable.includes('MiddayShadowSection'));

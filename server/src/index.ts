@@ -235,13 +235,28 @@ import {
   chargeWriteHold, setChargeWriteHold, FOREIGN_RESERVE_SETTLE_MS,
   type RevertDeadlineDecision,
 } from './nightChargeActuator.js';
-import { nextOnPeakStartMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, planDateOwningCycle, type ChargeLegRole } from './chargeWindows.js';
+import { nextOnPeakStartMs, onPeakEndMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, planDateOwningCycle, type ChargeLegRole } from './chargeWindows.js';
 // R4 — the winter mid-day cycle computed in SHADOW: sized, probed and recorded, never armed,
 // written or announced (middayShadow.ts).
+// R5 (v1.189.0) — the day-aware words of a charge cycle (chargeText.ts) and their route by the leg's
+// window (chargeAnnounce.ts): the overnight words are unchanged; the mid-day ones are reached only
+// by a super off-peak leg, which nothing arms before the mid-day switch.
+import { isMiddayLeg, middaySummaryFromLeg, middayRevertDeadlineFromLeg } from './chargeAnnounce.js';
+import {
+  buildMiddayChargeSummary, buildMiddayRevertDeadline, middayRevertDeadlineSpoken, buildMiddayRefreshMessage,
+} from './chargeText.js';
+// R5 — the live morning refresh of an armed mid-day cost leg (morningRefresh.ts): inert until the
+// switch (liveRefreshDue finds no leg while nothing arms a super off-peak leg).
+import {
+  liveRefreshDue, refreshPastDeadline, refreshWeatherFresh, refreshAborted, liveRefreshOutcome, standingLiveRefresh, applyLiveRefresh,
+  liveRefreshLedgerColumns, REFRESH_MAX_WEATHER_AGE_MS,
+} from './morningRefresh.js';
 import {
   runMiddayShadowEvening, shadowCycleConfig, shadowRefreshDue, standingRefresh, refreshFromSized, refreshSizing,
   middayShadowLedgerColumns, middayShadowRefreshLedgerColumns, middayShadowLogLines, middayShadowRefreshLogLine,
   coerceMiddayShadowRecord, getMiddayShadow, setMiddayShadow, middayChargeStateFields, shadowServed, windowP50Kwh, MIDDAY_SHADOW_LOG_TAG,
+  middayShadowPreview, middayShadowPreviewLogLines, middayShadowRefreshPreviewLogLine, weatherAgeSeconds,
+  costLegSizing, REFRESH_DEADLINE_MS,
   type MiddayShadowRecord, type ShadowLegSizing, type ShadowSized, type ShadowArmCandidate, type ShadowArmVerdict,
 } from './middayShadow.js';
 import { pvSurplusFromBand, surplusSpanEndMs } from './chargeTaper.js';
@@ -3479,6 +3494,9 @@ interface NightPlanExtras {
    *  the band covers every hour of it). Absent on every live plan. */
   windowPvP50Kwh?: number | null;
   windowLoadP50Kwh?: number | null;
+  /** R5 — a pinned leg only (the shadow, the morning refresh): when the weather its band was built
+   *  on was fetched; null when unknown. Absent on every evening and tick plan. */
+  weatherFetchedAtMs?: number | null;
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
@@ -3492,7 +3510,7 @@ function round1(n: number): number { return Math.round(n * 10) / 10; }
  * update() — buildInputs there is synchronous, but we need awaited analytics).
  */
 async function recomputeNightChargePlan(
-  opts: { allowStalePanel?: boolean; role?: ChargeLegRole; shadowLeg?: ShadowLegSizing } = {},
+  opts: { allowStalePanel?: boolean; role?: ChargeLegRole; shadowLeg?: ShadowLegSizing; maxWeatherAgeMs?: number } = {},
 ): Promise<{ plan: NightChargePlan; extras: NightPlanExtras } | 'panelStale' | null> {
   const nowMs = Date.now();
   // R4 — a mid-day cycle's leg sized in SHADOW (middayShadow.ts): its window, horizon end and PV
@@ -3630,10 +3648,18 @@ async function recomputeNightChargePlan(
 
   // Live analytics reports (each best-effort — a missing report degrades the
   // basis to null, never a fabricated number).
+  // R5 — the morning refresh asks for a forecast on weather at most `maxWeatherAgeMs` old (the
+  // worker re-fetches older weather; the band says when its weather was fetched). Every other
+  // caller passes none: the two reports are requested exactly as before.
+  const wxAge = opts.maxWeatherAgeMs;
   const [prob, multiDay, dayAhead, evReport] = await Promise.all([
-    analytics.report<ProbabilisticForecast>('probabilisticForecast').catch(() => null),
+    (wxAge != null
+      ? analytics.report<ProbabilisticForecast>('probabilisticForecast', { maxWeatherAgeMs: wxAge })
+      : analytics.report<ProbabilisticForecast>('probabilisticForecast')).catch(() => null),
     analytics.report<MultiDayForecast>('multiDayForecast', { days: 4 }).catch(() => null),
-    analytics.report<DayForecast>('forecast').catch(() => null),
+    (wxAge != null
+      ? analytics.report<DayForecast>('forecast', { maxWeatherAgeMs: wxAge })
+      : analytics.report<DayForecast>('forecast')).catch(() => null),
     analytics.report<EvWindowPrediction>('evWindowPrediction').catch(() => null),
   ]);
 
@@ -3911,6 +3937,8 @@ async function recomputeNightChargePlan(
       ? [...prob!.solarModelSns].sort().join(',') : null,
     // R4 — a shadow leg's planned window PV and load (the forecast skill its ledger columns grade).
     ...(shadowLeg && window ? windowP50Kwh(bandHours, window) : {}),
+    // R5 — and when the weather its band was built on was fetched (the refresh's freshness test).
+    ...(shadowLeg ? { weatherFetchedAtMs: prob?.weatherFetchedAtMs ?? dayAhead?.weatherFetchedAtMs ?? null } : {}),
   };
 
   // v1.40.0: persist the freshest PRE-WINDOW plan to disk. The evening job's
@@ -4951,7 +4979,10 @@ function homeChgMaxSocPcts(): Array<number | null> {
 async function sizeShadowLeg(sizing: ShadowLegSizing, allowStalePanel: boolean): Promise<ShadowSized | null | 'panelStale'> {
   const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing });
   if (r === 'panelStale' || r == null) return r;
-  return { plan: r.plan, windowPvP50Kwh: r.extras.windowPvP50Kwh ?? null, windowLoadP50Kwh: r.extras.windowLoadP50Kwh ?? null };
+  return {
+    plan: r.plan, windowPvP50Kwh: r.extras.windowPvP50Kwh ?? null, windowLoadP50Kwh: r.extras.windowLoadP50Kwh ?? null,
+    weatherFetchedAtMs: r.extras.weatherFetchedAtMs ?? null,
+  };
 }
 
 /** Would these legs arm against the cycle in place? armCycle is pure: its cycle is DROPPED here —
@@ -5021,6 +5052,9 @@ async function runMiddayShadowTickInner(nowMs: number): Promise<void> {
     }
     persistMiddayShadow(rec);
     for (const line of middayShadowLogLines(rec)) app.log.info(line);
+    // R5 — what the evening would have pushed and spoken for the mid-day cycle (chargeText.ts):
+    // logged, never sent.
+    for (const line of middayShadowPreviewLogLines(rec, model)) app.log.info(line);
     stampShadowLedger(today, middayShadowLedgerColumns(rec));
     return;
   }
@@ -5044,6 +5078,9 @@ async function runMiddayShadowTickInner(nowMs: number): Promise<void> {
   const next: MiddayShadowRecord = { ...live, refresh };
   persistMiddayShadow(next); // stamped before anything is said about it (plan §3.4 step 4)
   app.log.info(middayShadowRefreshLogLine(next, refresh));
+  // R5 — and the push a live refresh would send (never sent, never spoken).
+  const refreshPreview = middayShadowRefreshPreviewLogLine(next, refresh);
+  if (refreshPreview != null) app.log.info(refreshPreview);
   stampShadowLedger(next.day, middayShadowRefreshLedgerColumns(refresh));
 }
 
@@ -6124,7 +6161,13 @@ function pageRevertDeadline(
       : ` by its deadline (${deadlineMs != null ? new Date(deadlineMs).toISOString() : '?'})`)
     + '. Paging: critical, spoken and pushed. The restore keeps being retried.',
   );
-  const spoken = revertDeadlineSpoken({ stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock });
+  // R5 — a winter mid-day leg is paged in the mid-day words (chargeText.ts: the window, the on-peak
+  // start, and Charge Now when its OFF has not read back); nothing arms one before the mid-day
+  // switch. The overnight leg's page is unchanged.
+  // (The record is the active leg, spread from nightActuationMem: it carries its window kind.)
+  const midday = isMiddayLeg(state as Partial<ChargeLegState>)
+    ? middayRevertDeadlineFromLeg(state, { stage: d.stage, unknown: d.unknown, targetPct, restorePct, nowMs }) : null;
+  const spoken = midday != null ? middayRevertDeadlineSpoken(midday) : revertDeadlineSpoken({ stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock });
   void (async () => {
     try {
       const heard = await broadcast.announce('critical', spoken.en, spoken.es);
@@ -6135,7 +6178,7 @@ function pageRevertDeadline(
       app.log.warn(`night-charge: revertDeadline announce failed (${e?.message ?? e})`);
     }
     try {
-      await sendNotification(loadNotifyConfig(), buildNightChargeRevertDeadline({
+      await sendNotification(loadNotifyConfig(), midday != null ? buildMiddayRevertDeadline(midday) : buildNightChargeRevertDeadline({
         day: state.day, stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock,
       }));
     } catch (e: any) {
@@ -6401,6 +6444,22 @@ async function runNightActuationTickInner(): Promise<void> {
     // What the force-charge did comes from this record (forceChargeNightOutcome: ran, switched
     // ON but unconfirmed or failed, never started); a cancel or a grid-loss abort ended the night
     // early and is said so, with no figure.
+    // R5 — a winter mid-day leg gets the mid-day summary (chargeText.ts, the window named from its
+    // record); nothing arms one before the mid-day switch. The overnight leg's summary is below,
+    // unchanged.
+    if (isMiddayLeg(state)) {
+      const onPeakAt = state.nextOnPeakStartMs ?? null;
+      const endedBy = action.gridLossAbort ? 'gridLoss' as const : state.cancelled ? 'cancelled' as const : 'window' as const;
+      void sendNotification(loadNotifyConfig(), buildMiddayChargeSummary(middaySummaryFromLeg(state, {
+        restorePct: action.restorePct, restoredAtMs: nowMs, expectedKwh: armedExpectedBuyKwh(state.day),
+        forceCharge: forceChargeNightOutcome(state, forceChargeOn(state.leg)),
+        onPeak: onPeakAt != null ? { startMs: onPeakAt, endMs: onPeakEndMs(apsREvModelFromEnv(), onPeakAt) } : null,
+        ended: endedBy,
+      }))).catch((e: any) => {
+        app.log.debug(`night-charge: mid-day summary notify failed (${e?.message ?? e})`);
+      });
+      return;
+    }
     void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({
       day: state.day, targetPct: state.targetPct, restorePct: action.restorePct,
       expectedKwh: armedExpectedBuyKwh(state.day),
@@ -6625,6 +6684,106 @@ async function runMissedApplyStep(): Promise<void> {
   });
 }
 
+/**
+ * R5 (v1.189.0) — THE LIVE MORNING REFRESH of an armed winter mid-day cost leg (morningRefresh.ts,
+ * plan §3.4). INERT UNTIL THE MID-DAY SWITCH: liveRefreshDue finds a leg only when the ACTIVE leg is
+ * a super off-peak cost leg, and the evening job arms the overnight leg alone — every tick returns
+ * at its first test. When the switch arms one:
+ *  1. from 30 to 5 min before the open, the leg is re-planned on its own window (the planner's pinned
+ *     leg: the plan is returned only), a fresh panel, and a forecast on weather at most
+ *     REFRESH_MAX_WEATHER_AGE_MS old — the worker is asked for it (the reports' maxWeatherAgeMs, never
+ *     the main thread's cached answer); older weather (a failed fetch) defers to the next minute;
+ *  2. the leg is re-read after the await (refreshAborted), and an answer that arrives at or after
+ *     open − 5 min is dropped unwritten (refreshPastDeadline: the next tick stamps the arm standing);
+ *  3. refreshLeg against what the evening announced: lower or cancel, never raise;
+ *  4. refreshedAtMs — with a lowered reserve and force-charge ceiling, or the cancel — is persisted
+ *     BEFORE anything is pushed;
+ *  5. it pushes, and never speaks, on a cancel, a changed written value, a cap or a ±25% move.
+ * At 5 min before the open with no refresh made, the evening's arm stands (stamped once).
+ * Every judgement after the await (the deadline, the weather's age, the stamps) reads the clock
+ * after it: the planner's await can outlast the minute it started in.
+ */
+let morningRefreshInFlight = false;
+let morningRefreshDeferLoggedFor: string | null = null;
+async function runMorningRefreshTick(): Promise<void> {
+  if (morningRefreshInFlight) return;
+  morningRefreshInFlight = true;
+  try {
+    await runMorningRefreshTickInner(Date.now());
+  } catch (e: any) {
+    app.log.warn(`night-charge: morning refresh failed (${e?.message ?? e}); the evening arm stands until the next minute`);
+  } finally {
+    morningRefreshInFlight = false;
+  }
+}
+
+async function runMorningRefreshTickInner(nowMs: number): Promise<void> {
+  const due = liveRefreshDue(nightCycleView(), nowMs);
+  if (due == null) return; // every tick until the mid-day switch arms a super off-peak cost leg
+  const leg = nightActuationMem;
+  const key = `${leg.day}@${leg.windowStartMs}`;
+  if (due === 'stand') {
+    const o = standingLiveRefresh(leg, `no refresh completed by ${REFRESH_DEADLINE_MS / 60_000} minutes before the window; the evening arm stands`);
+    persistNightActuation(applyLiveRefresh(leg, o, nowMs));
+    stampLegOutcome(leg, liveRefreshLedgerColumns(o, nowMs, null));
+    app.log.info(`night-charge: morning refresh for ${leg.day} — stood: ${o.reason}.`);
+    return;
+  }
+  const model = apsREvModelFromEnv();
+  const sizing = costLegSizing(model, { role: 'cost', kind: 'super_off_peak', startMs: leg.windowStartMs!, endMs: leg.windowEndMs! },
+    shadowCycleConfig(FORCE_CHARGE_OBJECTIVE, FORCE_CHARGE_COST_MAX_SOC_PCT), { chgMaxSocPcts: homeChgMaxSocPcts(), backupHold: null });
+  const r = await recomputeNightChargePlan({ shadowLeg: sizing, maxWeatherAgeMs: REFRESH_MAX_WEATHER_AGE_MS });
+  const at = Date.now();
+  if (refreshPastDeadline(leg, at)) {
+    app.log.info(`night-charge: morning refresh for ${leg.day} dropped — its answer came ${REFRESH_DEADLINE_MS / 60_000} minutes or less before the window; the evening arm stands.`);
+    return;
+  }
+  if (r === 'panelStale' || r == null) {
+    if (morningRefreshDeferLoggedFor !== key) {
+      morningRefreshDeferLoggedFor = key;
+      app.log.info(`night-charge: morning refresh for ${leg.day} deferred — ${r === 'panelStale' ? 'the panel reading is stale' : 'the planner had no inputs'}; retrying each minute until ${REFRESH_DEADLINE_MS / 60_000} minutes before the window.`);
+    }
+    return;
+  }
+  const wxAt = r.extras.weatherFetchedAtMs ?? null;
+  if (!refreshWeatherFresh(wxAt, at)) {
+    if (morningRefreshDeferLoggedFor !== key) {
+      morningRefreshDeferLoggedFor = key;
+      const age = weatherAgeSeconds(wxAt, at);
+      app.log.info(`night-charge: morning refresh for ${leg.day} deferred — the forecast's weather is ${age != null ? `${Math.round(age / 60)} min` : 'of unknown age'} old (at most ${REFRESH_MAX_WEATHER_AGE_MS / 60_000} min); retrying each minute.`);
+    }
+    return;
+  }
+  // Re-read after the await: a leg re-armed, cancelled, attempted or refreshed meanwhile is not this refresh's.
+  const live = nightActuationMem;
+  const aborted = refreshAborted(leg, live);
+  if (aborted != null) {
+    app.log.info(`night-charge: morning refresh for ${leg.day} dropped — ${aborted}.`);
+    return;
+  }
+  const o = liveRefreshOutcome(live, r.plan);
+  persistNightActuation(applyLiveRefresh(live, o, at)); // stamped before anything is pushed (plan §3.4 step 4)
+  stampLegOutcome(live, liveRefreshLedgerColumns(o, at, weatherAgeSeconds(wxAt, at)));
+  app.log.info(`night-charge: morning refresh for ${live.day} — ${o.disposition}: ${o.reason}; reserve ${o.reservePct ?? '—'}%, level ~${o.levelPct ?? '—'}%, expected ${o.expectedBuyKwh ?? '—'} kWh.`);
+  const msg = buildMiddayRefreshMessage({
+    nowMs: at, windowStartMs: live.windowStartMs!, windowEndMs: live.windowEndMs!, announcedAtMs: live.announcedAtMs,
+    disposition: o.disposition,
+    announced: { levelPct: live.announcedLevelPct, expectedKwh: live.announcedExpectedKwh },
+    refreshed: { levelPct: o.levelPct, reservePct: o.reservePct, expectedKwh: o.expectedBuyKwh },
+    neededLevelPct: o.neededLevelPct,
+    windowPvKwh: { announced: null, refreshed: r.extras.windowPvP50Kwh ?? null },
+    reservePct: freshReserveReadingPct(at),
+    applyAtMs: live.windowStartMs! - APPLY_LEAD_MS,
+    wouldPush: o.wouldPush,
+  });
+  // A push, never speech (plan §3.4 step 5); not awaited.
+  if (msg != null) {
+    void sendNotification(loadNotifyConfig(), msg).catch((e: any) => {
+      app.log.debug(`night-charge: morning refresh notify failed (${e?.message ?? e})`);
+    });
+  }
+}
+
 if (nightChargeEnabled) {
   // Periodic recompute (30 min, unref'd) so /api/ha-state + status always have a
   // ≤12 h-fresh plan even on days the evening job hasn't fired yet. Best-effort.
@@ -6729,6 +6888,10 @@ if (nightChargeEnabled) {
   // R4 — the winter mid-day cycle in shadow: computed and recorded, never written (middayShadow.ts).
   const nightMiddayShadowTick = setInterval(() => { void runMiddayShadowTick(); }, 60 * 1000);
   nightMiddayShadowTick.unref();
+  // R5 — the live morning refresh of an armed mid-day cost leg: inert until the mid-day switch
+  // (morningRefresh.liveRefreshDue finds no leg while nothing arms one).
+  const nightMorningRefreshTick = setInterval(() => { void runMorningRefreshTick(); }, 60 * 1000);
+  nightMorningRefreshTick.unref();
 }
 
 // v1.165.0 — the force-charge OFF side must OUTLIVE the master switch. The actuation
@@ -6805,6 +6968,9 @@ app.get('/api/night-charge/status', async () => {
     // v1.189.0 (R4) — the winter mid-day cycle computed in shadow (middayShadow.ts), while it is the
     // current one (shadowServed); null otherwise. Read-only: the card shows it with no control.
     middayShadow: shadowServed(getMiddayShadow(), Date.now()) ? getMiddayShadow() : null,
+    // R5 — what the 21:30 notice would have pushed and spoken for it (chargeText.ts): never sent; the
+    // card shows its title read-only.
+    middayShadowPreview: shadowServed(getMiddayShadow(), Date.now()) ? middayShadowPreview(getMiddayShadow(), apsREvModelFromEnv()) : null,
     // In-memory cache refreshed by the recompute tick / evening job — the route
     // must NOT read the ledger (DB/filesystem) inline (CWE-770).
     recentOutcomes: nightRecentOutcomesMem,

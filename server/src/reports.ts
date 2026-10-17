@@ -129,7 +129,16 @@ export interface ReportArgs {
    *  predictor; when present the backtest uses curve[hourOfDay] instead of the
    *  flat typicalWhPerHour scalar (fixes the R²≈0 flat-constant baseline). */
   typicalPvCurveWhPerHour?: number[];
+  /** R5 (v1.189.0) — forecast, probabilisticForecast: the forecast is built on weather at most this
+   *  old (getDayForecast's `maxWeatherAgeMs`; the morning refresh, plan §3.4). Absent: the worker's
+   *  own caches, as before. */
+  maxWeatherAgeMs?: number;
 }
+
+/** R5 — the day forecast's weather-age option from a report's args (absent ⇒ none: the call is
+ *  exactly the pre-R5 one). */
+const weatherAgeOpts = (a: ReportArgs): { maxWeatherAgeMs: number } | undefined =>
+  (a.maxWeatherAgeMs != null && Number.isFinite(a.maxWeatherAgeMs) ? { maxWeatherAgeMs: a.maxWeatherAgeMs } : undefined);
 
 const devicesOf = (ctx: ReportCtx): Record<string, DeviceSnapshot> => ctx.snapshot.devices;
 
@@ -140,7 +149,7 @@ const shimStore = (ctx: ReportCtx): SnapshotStore =>
 type Builder = (ctx: ReportCtx, args: ReportArgs) => unknown | Promise<unknown>;
 
 const BUILDERS: Record<string, Builder> = {
-  forecast: (ctx) => getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log),
+  forecast: (ctx, a) => getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log, weatherAgeOpts(a)),
   degradation: (ctx) => computeDegradation(devicesOf(ctx), ctx.recorder),
   runway: async (ctx) => {
     const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
@@ -180,8 +189,8 @@ const BUILDERS: Record<string, Builder> = {
     return computeForecastSkill(devicesOf(ctx), ctx.recorder, fc, a.days ?? 7, 'realized');
   },
   ambientThermal: (ctx) => computeAmbientThermalForecast(devicesOf(ctx), ctx.recorder),
-  probabilisticForecast: async (ctx) => {
-    const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
+  probabilisticForecast: async (ctx, a) => {
+    const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log, weatherAgeOpts(a));
     // v1.30.0 — feed the band a 30-day skill window (PV_BAND_CAL_WINDOW_DAYS),
     // not the 7-day default: the F30 calibration gate needs ≥14 SCORED days,
     // which a 7-day report can never contain (bandSigmaCal sat pinned at 1 in

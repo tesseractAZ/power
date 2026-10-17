@@ -1,0 +1,147 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import {
+  overnightTextCases, overnightSummaryCases, overnightRevertDeadlineCases, missedApplyCases,
+} from './fixtures/overnightTextCases.js';
+import {
+  buildNightChargeMessage, buildNightChargeMorningSummary, buildNightChargeRevertDeadline, buildNightChargeMissedApply,
+} from '../src/notify.js';
+import { revertDeadlineSpoken } from '../src/nightChargeActuator.js';
+import { eveningAnnouncement, isMiddayLeg } from '../src/chargeAnnounce.js';
+import { emptyLegState, LEGACY_LEG_FIELDS, type ChargeLegState } from '../src/chargeCycle.js';
+
+/**
+ * R5 (v1.189.0) — THE OVERNIGHT WORDS ARE BYTE-IDENTICAL (plan §5: "Overnight-only cycles keep
+ * today's text byte-identical (golden test)").
+ *
+ * overnightTextGolden.json is what the release before the day-aware formatter said (captured at
+ * d42b556, before any R5 source change) for every overnight shape in overnightTextCases.ts: the
+ * 21:30 push and spoken notice (charge — force-charge riding, reserve only, toward, the cushion
+ * short —, a night that charges nothing, the three holds, no plan, advisory, refused in both write
+ * modes), the morning summary (every force-charge outcome, cancelled, grid lost) and the
+ * revert-deadline page (both stages, read and unknown, with and without a prior and an on-peak
+ * clock) — and the missed-apply push, whose clocks R5 moved onto the formatter's (backup and cost,
+ * tonight, today and another day, with and without a reading). Each is checked three ways: the builders produce it; the day-aware route
+ * (chargeAnnounce.eveningAnnouncement) gives an overnight cycle exactly it; and every overnight leg
+ * record is routed to the overnight words (isMiddayLeg).
+ */
+
+const GOLDEN = JSON.parse(readFileSync(new URL('./fixtures/overnightTextGolden.json', import.meta.url), 'utf8')) as {
+  capturedAt: string;
+  evening: Array<{ name: string; push: unknown; spoken: { en: string; es: string } | null }>;
+  summary: Array<{ name: string; push: unknown }>;
+  revertDeadline: Array<{ name: string; push: unknown; spoken: { en: string; es: string } }>;
+  missedApply: Array<{ name: string; push: unknown }>;
+};
+
+test('★★★ the golden was captured before R5 and covers every shape', () => {
+  assert.equal(GOLDEN.capturedAt, 'd42b556');
+  const cases = overnightTextCases();
+  assert.equal(GOLDEN.evening.length, cases.length);
+  assert.deepEqual(GOLDEN.evening.map((g) => g.name), cases.map((c) => c.name));
+  // The shapes the fixture is meant to reach, from the golden words themselves.
+  const titles = GOLDEN.evening.map((g) => (g.push as { title: string }).title);
+  for (const re of [
+    /^Night-charge: charging to ~80% tonight \(~34\.9 kWh\)$/, /^Night-charge: charging to ~50% tonight/, /^Night-charge: charging toward ~80% tonight/,
+    /^Night-charge: charging toward ~50% tonight/, /^Night-charge: reserve held at 50% tonight — no charge expected$/,
+    /^Night-charge: hold \(no charge needed\)$/, /^Night-charge: hold \(the need is under the minimum buy\)$/,
+    /^Night-charge: no charge tonight \(the window cannot cover the cushion\)$/, /recommended tonight/,
+    /^Night-charge: planned charge NOT armed tonight$/, /^Night-charge: planned reserve hold NOT armed tonight$/,
+    /^Night-charge: no plan tonight$/,
+  ]) assert.ok(titles.some((t) => re.test(t)), `no case reaches ${re}`);
+  const spoken = GOLDEN.evening.filter((g) => g.spoken != null);
+  assert.ok(spoken.length >= 7, `${spoken.length} spoken cases`);
+  assert.ok(spoken.some((g) => g.spoken!.en.includes('toward')) && spoken.some((g) => g.spoken!.en.includes('Outage cushion not fully met.')));
+  assert.ok(spoken.some((g) => g.spoken!.en.includes('no charge is expected')));
+  assert.equal(GOLDEN.summary.length, overnightSummaryCases().length);
+  assert.equal(GOLDEN.revertDeadline.length, overnightRevertDeadlineCases().length);
+  assert.deepEqual(GOLDEN.missedApply.map((g) => g.name), missedApplyCases().map((c) => c.name));
+  const missed = GOLDEN.missedApply.map((g) => (g.push as { title: string }).title);
+  for (const t of ["Charge plan: tonight's outage backup did not start", "Charge plan: today's charge did not start", "Charge plan: Thursday's charge did not start"]) {
+    assert.ok(missed.includes(t), `no case reaches ${t}`);
+  }
+});
+
+test('★★★ the 21:30 push and spoken notice: the builders and the day-aware route give the golden words, case for case', () => {
+  const cases = overnightTextCases();
+  cases.forEach((c, i) => {
+    const g = GOLDEN.evening[i];
+    // The builders, as the evening job calls them.
+    assert.deepEqual(buildNightChargeMessage(c.plan, c.shape, c.supervised, c.armRefused, c.mode), g.push, `${c.name}: push`);
+    // The route an overnight cycle takes.
+    const a = eveningAnnouncement({ cycle: 'overnight', plan: c.plan, shape: c.shape, supervised: c.supervised, armRefused: c.armRefused, mode: c.mode });
+    assert.deepEqual(a.push, g.push, `${c.name}: routed push`);
+    assert.deepEqual(a.spoken, g.spoken, `${c.name}: routed speech`);
+  });
+});
+
+test('★★★ the morning summary and the revert-deadline page: the golden words', () => {
+  overnightSummaryCases().forEach((c, i) => {
+    assert.deepEqual(buildNightChargeMorningSummary(c.input), GOLDEN.summary[i].push, c.name);
+  });
+  overnightRevertDeadlineCases().forEach((c, i) => {
+    const g = GOLDEN.revertDeadline[i];
+    assert.deepEqual(buildNightChargeRevertDeadline(c.input), g.push, `${c.name}: push`);
+    assert.deepEqual(revertDeadlineSpoken(c.input), g.spoken, `${c.name}: speech`);
+  });
+});
+
+test('★★★ the missed-apply push: the golden words, through the formatter\'s clocks', () => {
+  missedApplyCases().forEach((c, i) => {
+    assert.deepEqual(buildNightChargeMissedApply(c.input), GOLDEN.missedApply[i].push, c.name);
+  });
+});
+
+test('★★★ every overnight leg record takes the overnight words', () => {
+  // A record from before the cycle record (no window kind), the legacy cost leg, an overnight backup.
+  assert.equal(isMiddayLeg({}), false);
+  assert.equal(isMiddayLeg({ windowKind: null }), false);
+  assert.equal(isMiddayLeg(emptyLegState()), false);
+  assert.equal(isMiddayLeg({ ...emptyLegState(), ...LEGACY_LEG_FIELDS }), false);
+  const backup: ChargeLegState = { ...emptyLegState(), leg: 'backup', windowKind: 'overnight' };
+  const midday: ChargeLegState = { ...emptyLegState(), leg: 'cost', windowKind: 'super_off_peak' };
+  assert.equal(isMiddayLeg(backup), false);
+  assert.equal(isMiddayLeg(midday), true);
+});
+
+/* ── the wiring (index.ts is not importable: its source is checked) ── */
+
+const INDEX = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+const ROUTE = readFileSync(new URL('../src/chargeAnnounce.ts', import.meta.url), 'utf8');
+
+test('★★★ index.ts: the evening job\'s overnight calls are the route\'s overnight branch, argument for argument', () => {
+  // The push.
+  assert.match(INDEX, /\n {4}const msg = buildNightChargeMessage\(plan, shape, supervisedCtx, armRefused, NIGHT_CHARGE_MODE\);\n/);
+  assert.match(ROUTE, /\n {2}const push = buildNightChargeMessage\(plan, shape, supervised, armRefused, mode\);\n/);
+  // The speech: the same six arguments, in the same order, from the same sources.
+  const args = (src: string, ctx: string): string[] => {
+    const at = src.indexOf('nightChargeSpokenNotice({');
+    assert.ok(at > 0);
+    const body = src.slice(at, src.indexOf('})', at));
+    return body.split('\n').slice(1).map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith('//')).map((l) => l.split(ctx).join('CTX'));
+  };
+  assert.equal(args(ROUTE, 'supervised.').length, 7, 'the seven arguments are read');
+  assert.deepEqual(args(INDEX, 'supervisedCtx.'), args(ROUTE, 'supervised.'));
+  // Spoken only beside an armed write, in both.
+  assert.match(INDEX, /if \(supervisedCtx && plan\) \{\n/);
+  assert.match(ROUTE, /if \(!supervised \|\| !plan\) return \{ push, spoken: null \};/);
+});
+
+test('★★★ index.ts: the summary and the revert page branch to the mid-day words only for a super off-peak leg, ahead of the overnight calls', () => {
+  const revert = INDEX.slice(INDEX.indexOf("persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null });"));
+  const mid = revert.indexOf('if (isMiddayLeg(state)) {');
+  const night = revert.indexOf('void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({');
+  assert.ok(mid > 0 && night > mid, 'the mid-day branch comes first and returns');
+  assert.match(revert.slice(mid, night), /\n {6}return;\n {4}\}\n/);
+  const page = INDEX.slice(INDEX.indexOf('function pageRevertDeadline('), INDEX.indexOf('async function runNightActuationTickInner('));
+  assert.match(page, /const midday = isMiddayLeg\(state as Partial<ChargeLegState>\)\n\s+\? middayRevertDeadlineFromLeg\(state, \{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, nowMs \}\) : null;/);
+  assert.match(page, /const spoken = midday != null \? middayRevertDeadlineSpoken\(midday\) : revertDeadlineSpoken\(\{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock \}\);/);
+  assert.match(page, /midday != null \? buildMiddayRevertDeadline\(midday\) : buildNightChargeRevertDeadline\(\{\n\s+day: state\.day, stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock,\n/);
+  // The evening job arms the overnight leg alone in this release: no mid-day words reach it.
+  const job = INDEX.slice(INDEX.indexOf('async function runNightChargeEveningJobInner('), INDEX.indexOf('R4 (v1.189.0) — THE WINTER MID-DAY CYCLE IN SHADOW'));
+  assert.ok(job.length > 1000);
+  for (const banned of ['buildMiddayPlanMessage', 'middaySpokenNotice', 'eveningAnnouncement', "kind: 'super_off_peak'"]) {
+    assert.ok(!job.includes(banned), `${banned} in the evening job`);
+  }
+});

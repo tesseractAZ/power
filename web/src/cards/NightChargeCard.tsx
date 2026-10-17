@@ -2,7 +2,7 @@ import { memo, useEffect, useState } from 'react';
 import {
   actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
   holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, withConfirmedCancel, writeStands,
-  writtenReservePct, middayShadowView, type MiddayShadowStatus,
+  writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus,
 } from './nightChargeText';
 import { apiUrl } from '../api';
 
@@ -125,6 +125,8 @@ interface NightChargeStatus {
   actuation?: NightActuation | null;
   /** v1.189.0 (R4) — the winter mid-day cycle computed in shadow; null/absent with none current. */
   middayShadow?: MiddayShadowStatus | null;
+  /** v1.189.0 (R5) — what its evening notice would have said (never sent); null/absent with none. */
+  middayShadowPreview?: MiddayShadowPreviewStatus | null;
   recentOutcomes?: unknown;
 }
 
@@ -246,7 +248,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
         <div className="card-title">Tonight's night-charge plan</div>
         <div className={stands ? 'text-warn' : 'text-muted'}>{noPlanText(plan != null && !plan.basisComplete, stands)}</div>
         {banner('mt-3')}
-        <MiddayShadowSection shadow={status.middayShadow} />
+        <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />
       </div>
     );
   }
@@ -276,7 +278,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
         <div className="text-muted mt-1 leading-relaxed">{hold.detail}</div>
         {banner('mt-3')}
         <AdvisoryNote mode={status.mode} />
-        <MiddayShadowSection shadow={status.middayShadow} />
+        <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />
       </div>
     );
   }
@@ -388,7 +390,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
       </div>
 
       <AdvisoryNote mode={status.mode} />
-      <MiddayShadowSection shadow={status.middayShadow} />
+      <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />
     </div>
   );
 });
@@ -484,8 +486,11 @@ async function postCancel(leg: 'cost' | 'backup' | null = null): Promise<{ ok: b
  * v1.189.0 (R4) — the winter mid-day cycle computed in shadow (middayShadowView): read-only. It has
  * no Cancel and no other control — nothing of it is armed — and renders nothing with no mid-day leg.
  */
-function MiddayShadowSection({ shadow }: { shadow: MiddayShadowStatus | null | undefined }) {
-  const view = middayShadowView(shadow, phoenixHHMM);
+function MiddayShadowSection({ shadow, preview }: {
+  shadow: MiddayShadowStatus | null | undefined;
+  preview?: MiddayShadowPreviewStatus | null;
+}) {
+  const view = middayShadowView(shadow, phoenixHHMM, preview);
   if (view == null) return null;
   return (
     <div className="mt-3 border-t border-line pt-2 text-xs">

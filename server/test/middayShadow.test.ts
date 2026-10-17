@@ -537,10 +537,24 @@ const SHADOW = src('../src/middayShadow.ts');
 
 test('★★★ middayShadow.ts has no device, push, speech or persistence path', () => {
   const imports = [...SHADOW.matchAll(/^import [^;]+ from '([^']+)';$/gm)].map((m) => m[1]);
-  assert.deepEqual(imports.sort(), ['./chargeTaper.js', './chargeWindows.js', './nightChargeActuator.js', './nightChargeAdvisor.js', './recorder.js', './tariff.js'].sort());
-  // Only types and pure helpers from the actuator and the recorder.
-  assert.match(SHADOW, /^import \{ clampReserveTarget, type NightChargeMode \} from '\.\/nightChargeActuator\.js';$/m);
+  // R5 — and the words (chargeAnnounce.ts, chargeText.ts: pure builders, checked below) and the
+  // NotifyMessage type.
+  assert.deepEqual(imports.sort(), [
+    './chargeAnnounce.js', './chargeTaper.js', './chargeText.js', './chargeWindows.js', './nightChargeActuator.js',
+    './nightChargeAdvisor.js', './notify.js', './recorder.js', './tariff.js',
+  ].sort());
+  // Only types and pure helpers from the actuator, the recorder and notify.
+  assert.match(SHADOW, /^import \{ APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, revertDueMs, type NightChargeMode \} from '\.\/nightChargeActuator\.js';$/m);
   assert.match(SHADOW, /^import type \{ NightLedgerRow \} from '\.\/recorder\.js';$/m);
+  assert.match(SHADOW, /^import type \{ NotifyMessage \} from '\.\/notify\.js';$/m);
+  assert.match(SHADOW, /^import \{ eveningAnnouncement \} from '\.\/chargeAnnounce\.js';$/m);
+  // The word builders send and speak nothing: they import notify.ts's builders, never its senders.
+  for (const f of ['../src/chargeText.ts', '../src/chargeAnnounce.ts']) {
+    const t = src(f);
+    for (const banned of ['sendNotification', 'broadcast', '.announce(', 'writeFileSync', 'atomicWrite', 'setBackupReserveSoc', 'commands']) {
+      assert.ok(!t.includes(banned), `${banned} in ${f}`);
+    }
+  }
   for (const banned of ['commands', 'sendNotification', 'broadcast', 'announce(', 'writeFileSync', 'atomicWrite', 'persist']) {
     assert.ok(!SHADOW.includes(banned) || banned === 'persist' && !/\bpersist[A-Z(]/.test(SHADOW), `${banned} in middayShadow.ts`);
   }

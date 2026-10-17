@@ -136,8 +136,13 @@ test('★★ wiring — index.ts plans the overnight leg: the overnight cycle, t
   assert.ok(index.includes("const morningEndMs = shadowLeg ? shadowLeg.surplusEndMs : surplusSpanEndMs('overnight', windowEndMs, null);"));
   assert.ok(index.includes("windowSpec: shadowLeg ? shadowLeg.spec : legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },"));
   assert.ok(index.includes('const window = shadowLeg ? (shadowLeg.spec.window ?? null) : resolveCheapWindow(periodIdAt, nowMs, NIGHT_CHEAP_PERIOD_ID, 30);'));
-  // The one shadow caller passes a shadow leg; no other caller does.
-  assert.equal(index.split('shadowLeg: sizing').length - 1, 1, 'only sizeShadowLeg sizes a shadow leg');
+  // The shadow passes a pinned leg, and so does the live morning refresh (R5, inert until the switch:
+  // it plans only an armed super off-peak leg); no other caller does.
+  assert.equal(index.split('shadowLeg: sizing').length - 1, 2, 'sizeShadowLeg and the morning refresh pin a leg');
+  assert.ok(index.includes('const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing });'));
+  const refresh = index.slice(index.indexOf('async function runMorningRefreshTickInner('), index.indexOf('\n}\n', index.indexOf('async function runMorningRefreshTickInner(')));
+  assert.ok(refresh.includes('const r = await recomputeNightChargePlan({ shadowLeg: sizing, maxWeatherAgeMs: REFRESH_MAX_WEATHER_AGE_MS });'));
+  assert.match(refresh, /^async function runMorningRefreshTickInner\(nowMs: number\): Promise<void> \{\n {2}const due = liveRefreshDue\(nightCycleView\(\), nowMs\);\n {2}if \(due == null\) return;/);
   assert.ok(index.includes('const NIGHT_CHEAP_PERIOD_ID = APS_PERIOD.OVERNIGHT;'));
   // Per leg: the force-charge gate and the objective follow the leg's role.
   assert.ok(index.includes("const forceChargeOn = (role: ChargeLegRole = 'cost'): boolean => legForceChargeEligible(role, forceChargeEnabled({"));

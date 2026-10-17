@@ -11,6 +11,8 @@ import {
 } from './nightChargeAdvisor.js';
 import { forceChargeStopPct, partialForceChargeOnFailureSlots, type ForceChargeNightOutcome } from './nightForceCharge.js';
 import { isNoChargeKwh, RESERVE_WRITE_MAX_PCT, type NightChargeMode } from './nightChargeActuator.js';
+// R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
+import { phxParts, phxShortClock } from './chargeText.js';
 
 /**
  * v1.120.0 — NOTIFY HTTP BUDGETS.
@@ -738,25 +740,6 @@ export function buildNightChargeRevertDeadline(o: {
   };
 }
 
-/** "10am", "3pm", "12am", "10:30am" in America/Phoenix (the add-on's tariff clock). */
-function phxShortClock(ms: number): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit', hour12: true,
-  }).formatToParts(new Date(ms));
-  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-  const minute = get('minute');
-  return `${get('hour')}${minute === '' || minute === '00' ? '' : `:${minute}`}${get('dayPeriod').toLowerCase()}`;
-}
-
-/** The Phoenix calendar date, weekday and hour of an instant. */
-function phxDayParts(ms: number): { ymd: string; weekday: string; hour: number } {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Phoenix', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long', hour: '2-digit', hourCycle: 'h23',
-  }).formatToParts(new Date(ms));
-  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-  return { ymd: `${get('year')}-${get('month')}-${get('day')}`, weekday: get('weekday'), hour: Number(get('hour')) };
-}
-
 /**
  * v1.189.0 — the missed apply (chargeCycle.missedApplyDue): a leg of a charge cycle passed its apply
  * window (30 min after its window opens) with no write — the reason, and the reserve in force. An
@@ -775,8 +758,8 @@ export function buildNightChargeMissedApply(o: {
   reservePct: number | null;
   nowMs: number;
 }): NotifyMessage {
-  const start = phxDayParts(o.windowStartMs);
-  const sameDay = start.ymd === phxDayParts(o.nowMs).ymd;
+  const start = phxParts(o.windowStartMs);
+  const sameDay = start.ymd === phxParts(o.nowMs).ymd;
   // A window opening in the evening or before dawn (the overnight backup's 12am) is tonight's.
   const when = sameDay ? (start.hour >= 18 || start.hour < 6 ? 'Tonight\'s' : 'Today\'s') : `${start.weekday}'s`;
   const what = o.role === 'backup' ? 'outage backup' : 'charge';

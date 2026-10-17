@@ -1261,6 +1261,10 @@ export interface DayForecast {
    *  probabilistic band inverts and seeds with the same figure; a forecast without it (hand-built)
    *  is read as 0, the pre-v1.187.19 drain it was built with. */
   poolOverheadW?: number;
+  /** R5 (v1.189.0) — when the weather this forecast was built on was fetched (weather.ts
+   *  `fetchedAt`); null with no weather. The morning refresh judges the forecast's freshness by it
+   *  (getDayForecast's `maxWeatherAgeMs`). Absent on hand-built forecasts. */
+  weatherFetchedAtMs?: number | null;
   /** v1.178.0 — true when the published (display) basis has NO PV history to project from:
    *  neither a projected home Core nor a connected-but-unprojected one has recorded pv_total
    *  (before the first poll, or a cold recorder). The PV figures are then a
@@ -2064,12 +2068,21 @@ function dayForecastCacheUsable(devices: Record<string, DeviceSnapshot>, now: nu
   return sns == null || sns.join(',') === homeModelSns(devices).join(',');
 }
 
-/** Phase 4: equipment-tuned day-ahead PV / load / SoC forecast. Cached ~30 min. */
+/** Phase 4: equipment-tuned day-ahead PV / load / SoC forecast. Cached ~30 min.
+ *
+ *  R5 (v1.189.0) — `maxWeatherAgeMs`: a caller that needs the forecast built on weather at most that
+ *  old (the morning refresh, plan §3.4). The weather is re-fetched first when it is older
+ *  (getWeather's own cache is 2 h), and a cached or in-flight forecast is served only when it was
+ *  built on that same weather; otherwise the forecast is rebuilt on it. A failed fetch leaves the
+ *  stale weather in place, and the forecast says so (`weatherFetchedAtMs`): the caller judges it.
+ *  Absent — every caller but the morning refresh — the path is exactly as before. */
 export async function getDayForecast(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
   log: (m: string) => void = () => {},
+  opts: { maxWeatherAgeMs?: number } = {},
 ): Promise<DayForecast> {
+  if (opts.maxWeatherAgeMs != null) return getDayForecastOnWeather(devices, recorder, log, opts.maxWeatherAgeMs);
   if (dayForecastCacheUsable(devices, Date.now())) {
     return dayForecastCache!.value;
   }
@@ -2088,12 +2101,40 @@ export async function getDayForecast(
   return p;
 }
 
+/** R5 — the forecast built on the weather a `maxWeatherAgeMs` caller accepts (getDayForecast). */
+async function getDayForecastOnWeather(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  log: (m: string) => void,
+  maxWeatherAgeMs: number,
+): Promise<DayForecast> {
+  const wx = await getWeather(log, { maxAgeMs: maxWeatherAgeMs });
+  const wxAt = wx?.fetchedAt ?? null;
+  const onIt = (f: DayForecast): boolean => (f.weatherFetchedAtMs ?? null) === wxAt;
+  if (dayForecastCacheUsable(devices, Date.now()) && onIt(dayForecastCache!.value)) return dayForecastCache!.value;
+  // A flight in progress is joined, and kept only when it was built on that weather.
+  const flightKey = reportBasisKey(devices);
+  const joined = dayForecastFlights.get(flightKey);
+  if (joined) {
+    const v = await joined;
+    if (onIt(v)) return v;
+  }
+  const p: Promise<DayForecast> = computeDayForecastUncached(devices, recorder, log, wxAt)
+    .finally(() => { if (dayForecastFlights.get(flightKey) === p) dayForecastFlights.delete(flightKey); });
+  dayForecastFlights.set(flightKey, p);
+  return p;
+}
+
 async function computeDayForecastUncached(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
   log: (m: string) => void,
+  /** R5 — a cached forecast is reused only when built on the weather fetched at this instant
+   *  (getDayForecastOnWeather); undefined: any cached forecast, as before. */
+  onWeatherAtMs?: number | null,
 ): Promise<DayForecast> {
-  if (dayForecastCacheUsable(devices, Date.now())) {
+  if (dayForecastCacheUsable(devices, Date.now())
+    && (onWeatherAtMs === undefined || (dayForecastCache!.value.weatherFetchedAtMs ?? null) === onWeatherAtMs)) {
     return dayForecastCache!.value; // a prior flight may have populated it while we queued
   }
   const now = Date.now();
@@ -2594,6 +2635,8 @@ async function computeDayForecastUncached(
   // TTL before). Set before caching so the cached value carries it too.
   value.structurallyIncomplete = structurallyIncomplete;
   value.homeBasisPending = basisPending;
+  // R5 — the weather the forecast was built on (the morning refresh's freshness test).
+  value.weatherFetchedAtMs = weather?.fetchedAt ?? null;
   // On the PUBLISHED basis: the display figures are built on the restored curve, which
   // re-adds each connected-but-unprojected Core's own recorded PV — real figures even when
   // no home Core is projected (all wedged cloud-offline at a restart).
@@ -9138,6 +9181,10 @@ export interface ForecastBand {
 export interface ProbabilisticForecast {
   generatedAt: number;
   hours: ForecastBand[];
+  /** R5 (v1.189.0) — when the weather the band's forecast was built on was fetched
+   *  (DayForecast.weatherFetchedAtMs); null with none. The morning refresh judges its forecast's
+   *  age by it. Absent on a band built from a hand-built forecast. */
+  weatherFetchedAtMs?: number | null;
   // Confidence summary.
   // v1.16.0 (engine-review F23) — pAboveReservePct is a min-over-path event
   // probability: the share of the coherent trajectory ensemble whose SoC never
@@ -9645,6 +9692,8 @@ export async function computeProbabilisticForecast(
     uncertaintyKwhStdev: Math.round(stdevAccum * 100) / 100, // already kWh (Σ per-hour sigmaNetKwh)
     // v1.187.0 — which Cores this band describes (the forecast it was built on).
     solarModelSns: forecast.solarModelSns ?? null,
+    // R5 — and the weather that forecast was built on.
+    weatherFetchedAtMs: forecast.weatherFetchedAtMs ?? null,
     bandSigmaCal: Math.round(bandCal * 100) / 100,
     bandSigmaCalBasis: bandCalBasis,
     realizedDailyErrHalfFrac: realizedHalfFrac != null ? Math.round(realizedHalfFrac * 1000) / 1000 : null,

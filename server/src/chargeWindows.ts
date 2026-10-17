@@ -337,3 +337,17 @@ export function nextOnPeakStartMs(model: TariffModel, fromMs: number, scanHours 
   }
   return null;
 }
+
+/**
+ * R5 (v1.189.0) — the end of the on-peak period that starts at `startMs` (nextOnPeakStartMs): the
+ * first hour after it that is not on-peak, within a day; null when `startMs` is not on-peak, or the
+ * period runs a whole day. The mid-day texts name the on-peak period by its span ("4–7pm"). PURE.
+ */
+export function onPeakEndMs(model: TariffModel, startMs: number): number | null {
+  if (!Number.isFinite(startMs) || !rateAt(model, startMs).isOnPeak) return null;
+  for (let i = 1; i <= 24; i++) {
+    const t = startMs + i * HOUR_MS;
+    if (!rateAt(model, t).isOnPeak) return t;
+  }
+  return null;
+}

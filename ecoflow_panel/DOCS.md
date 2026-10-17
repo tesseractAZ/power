@@ -211,6 +211,14 @@ itself raised the reserve. It needs at least 21, so it never graduates in an ins
 advises; it informs `auto` only and does not hold back `supervised`. Planning in full:
 [night-charge planning](https://github.com/tesseractAZ/power/blob/main/docs/reference/15-1-night-charge-planning.md).
 
+**Winter mid-day charge (shadow).** On winter weekday evenings Power also works out the charge it
+would make instead in the next day's 10am–3pm super off-peak window, with an outage backup
+overnight before it and a re-check on the morning forecast. It is computed only: nothing is armed,
+written, pushed or spoken for it, and the overnight charge runs as described above. The Mid-day
+Charge entities (`ecoflow_midday_charge_recommended` stays off) and a read-only section of the
+night-charge card show it, with the title of the notice it would have sent; the log shows the full
+notice, tagged `night-charge[midday-shadow]:`.
+
 **Load shedding.** With `LOAD_SHEDDING_SHED_ENTITIES` listing your sheddable loads, Power
 recommends which to switch off when the runway alarm stands at Medium or above and the runway
 falls under `LOAD_SHEDDING_RUNWAY_THRESHOLD_H`, and how much runway that buys. It never switches

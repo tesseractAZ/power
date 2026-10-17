@@ -69,7 +69,8 @@ test('★★★ an old-schema ledger gains every shadow column with its type; an
   try {
     const info = new DatabaseSync(DB).prepare('PRAGMA table_info(night_charge_ledger)').all() as Array<{ name: string; type: string }>;
     const types = new Map(info.map((c) => [c.name, c.type]));
-    assert.equal(MIDDAY_SHADOW_LEDGER_SCHEMA.length, 31);
+    // R5 — 32: the shadow refresh's weather age.
+    assert.equal(MIDDAY_SHADOW_LEDGER_SCHEMA.length, 32);
     for (const [c, t] of MIDDAY_SHADOW_LEDGER_SCHEMA) {
       assert.equal(types.get(c), t, `${c} ${t}`);
       assert.match(c, /^shadow_/, 'a shadow column never shares a name with a live one');
