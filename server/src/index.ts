@@ -1584,6 +1584,9 @@ app.get('/api/ha-state', async (req, reply) => {
   // judges below (see buildState): sums taken before it were a boot-time sum over nothing.
   // v1.186.2 — the published battery net is the DISPLAY sum (stream-preferred, see snapshot.ts).
   const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
+  // v1.188.1 — Fleet PV and Battery Net add every DARK home slot, metered at the panel
+  // (energyBridge.ts); null while one cannot be bridged (publishReadiness `flowBridged`).
+  const bridged = recorder.bridgedFleetFlow({ fleetPv, fleetBatteryNet }, snap.devices, Date.now());
 
   // v1.125.1 — cache the REPRESENTATIVE islanded load for the outage cushion.
   //
@@ -1620,10 +1623,11 @@ app.get('/api/ha-state', async (req, reply) => {
     generated_at: snap.generatedAt,
 
     // Power flow (watts, integers)
-    fleet_pv_watts: Math.round(fleetPv),
+    fleet_pv_watts: bridged.fleetPv == null ? null : Math.round(bridged.fleetPv),
     fleet_total_in_watts: Math.round(fleetIn),
     fleet_total_out_watts: Math.round(fleetOut),
-    fleet_battery_net_watts: Math.round(fleetBatteryNet), // v0.10.4 per-pack; positive = discharging
+    // v0.10.4 per-pack; positive = discharging. v1.188.1 — plus the bridged dark slots.
+    fleet_battery_net_watts: bridged.fleetBatteryNet == null ? null : Math.round(bridged.fleetBatteryNet),
     panel_load_watts: Math.round(panelLoad),
     ac_import_watts: Math.round(acIn),
     // v0.40.0 — resolve via the grid-presence resolver, not `acIn < 5` (DPU ac_in is ~0 on
@@ -1841,6 +1845,7 @@ app.get('/api/ha-state', async (req, reply) => {
     carbon,
     tariff,
     degradation: deg, // v1.187.18
+    flowBridge: bridged, // v1.188.1
   }));
   return cached(req, reply, payload, 25);
 });

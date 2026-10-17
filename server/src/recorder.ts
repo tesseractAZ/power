@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
-import { SnapshotStore, FleetSnapshot } from './snapshot.js';
+import { SnapshotStore, FleetSnapshot, type DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
 import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns, findShp2 } from './shp2Membership.js';
@@ -14,6 +14,11 @@ import { localParts } from './tariff.js';
 import { resolveRetentionDays } from './retention.js';
 // v1.187.20 — the backup window (checkpoints held still while a Home Assistant backup copies /data).
 import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './backupWindow.js';
+// v1.188.1 — battery and solar energy metered at the panel's source slots while a home Core is dark.
+import {
+  createEnergyBridge, darkCoreSns, slotPvWatts,
+  type BridgedFleetFlow, type BridgeRollupResult, type EnergyBridgeDebug,
+} from './energyBridge.js';
 
 interface MetricSample {
   sn: string;
@@ -453,6 +458,15 @@ export interface Recorder {
    *  being carried while their packs are absent from the current snapshot. Performs ZERO
    *  writes and ZERO mutation of the emitted counters. Surfaced at /api/debug/battery-lifetime. */
   batteryLifetimeDebug: () => BatteryLifetimeDebug;
+  /** v1.188.1 — Fleet PV and Battery Net with every DARK home slot metered at the panel
+   *  (energyBridge.bridgeFleetFlow): `online` is aggregateFleetFlow's sums over the online Cores.
+   *  Both publishers read the two power sensors from it; a dark slot that cannot be bridged
+   *  right now makes both null (publishReadiness `flowBridged`). */
+  bridgedFleetFlow: (
+    online: { fleetPv: number; fleetBatteryNet: number },
+    devices: Record<string, DeviceSnapshot>,
+    nowMs: number,
+  ) => BridgedFleetFlow;
 }
 
 /** v0.45.0 — per-pack lifetime in/out detail, shared by batteryLifetimeDebug()
@@ -487,6 +501,10 @@ export interface BatteryLifetimeDebug {
   packs: PackLifetimeDetail[];
   /** sourceSns members whose packs are absent this snapshot but carried via held last-known. */
   offlineHeldMembers: string[];
+  /** v1.188.1 — the energy bridge (energyBridge.ts): the bridged totals the emitted figures above
+   *  include, the packs whose jump will be absorbed on return, the trusted PV fields, per-Core
+   *  bridged energy, each dark slot's power basis, and the last rollup window. */
+  bridge: EnergyBridgeDebug;
 }
 
 /**
@@ -1650,6 +1668,13 @@ export function createRecorder(
         for (const s of shp.sources) {
           push(`src${s.slot}_pct`, s.batteryPercentage);
           push(`src${s.slot}_temp`, s.emsBatTemp);
+          // v1.188.1 — the panel's per-source PV and input fields, for the energy bridge
+          // (energyBridge.ts) and for checking them against the Cores' own pv_total once those
+          // report: `_pv_w` is the figure the bridge integrates (slotPvWatts), the rest raw.
+          push(`src${s.slot}_pv_w`, slotPvWatts(s));
+          push(`src${s.slot}_pv_hv_w`, s.pvHighWatts);
+          push(`src${s.slot}_pv_lv_w`, s.pvLowWatts);
+          push(`src${s.slot}_in_w`, s.inputWatts);
         }
         for (let i = 0; i < shp.sourceWatts.length; i++) {
           push(`src${i + 1}_w`, shp.sourceWatts[i]);
@@ -1857,6 +1882,10 @@ export function createRecorder(
     };
     const devices = Object.values(snap.devices);
     const sourceSns = sourceSnsOf(snap);
+    // v1.188.1 — a DARK home Core (its panel slot connected, the Core cloud-offline) contributes
+    // through the energy bridge, metered at its panel slot (energyBridge.ts); its own pv_total /
+    // ac_in rows over the dark span are held values, not readings, and would double-count.
+    const bridgedSns = darkCoreSns(snap.devices);
     for (const d of devices) {
       const p = d.projection;
       if (!p) continue;
@@ -1868,7 +1897,7 @@ export function createRecorder(
         // production but it isn't "the home's PV" until it's wired in.
         // (Same gating logic as fleet_grid_import_wh below — the
         // sourceSns.size === 0 fallback keeps DPU-only setups working.)
-        if (sourceSns.size === 0 || sourceSns.has(d.sn)) {
+        if ((sourceSns.size === 0 || sourceSns.has(d.sn)) && !bridgedSns.has(d.sn)) {
           out.fleet_pv_wh.push({ sn: d.sn, metric: 'pv_total' });
           out.fleet_grid_import_wh.push({ sn: d.sn, metric: 'ac_in' });
         }
@@ -1911,6 +1940,31 @@ export function createRecorder(
   // Each pack is 32S1P (~104 V nominal; 32 series cells whose mV sum to packVoltageMv).
   // fullCap is single-string mAh; Wh = mAh × (32 × 3.2 V) / 1000 = mAh × 0.1024.
   const PACK_MAH_TO_WH = (32 * 3.2) / 1_000;   // = 0.1024 Wh/mAh (was (51.2 * 2)/1_000, same value)
+
+  // v1.188.1 — the energy bridge (energyBridge.ts). It keeps its state in this lifetime table
+  // under `bridge_*` keys, which no ^pack_* / ^circuit_* discovery and no surfaced key set
+  // matches. Its capacity input is each Core's measured full-charge capacity from the recorded
+  // pack{N}_full_cap_mah series (the basis the panel's per-source percent is a fraction of).
+  const CORE_CAPACITY_LOOKBACK_MS = 45 * 24 * 60 * 60 * 1000;
+  const energyBridge = createEnergyBridge({
+    readLifetime,
+    writeLifetime,
+    deleteLifetime: (key) => { lifetimeDeleteStmt.run(key); },
+    listLifetimeKeys,
+    query: (sn, metric, sinceMs, untilMs) => queryStmt.all(sn, metric, sinceMs, untilMs) as Array<{ ts: number; value: number }>,
+    coreCapacityWh: (sn, nowMs) => {
+      let mah = 0;
+      let packs = 0;
+      for (let k = 1; k <= 15; k++) {
+        const r = queryLastStmt.get(sn, `pack${k}_full_cap_mah`, nowMs - CORE_CAPACITY_LOOKBACK_MS, nowMs) as { ts: number; value: number } | undefined;
+        if (r && Number.isFinite(r.value) && r.value > 0) { mah += r.value; packs += 1; }
+      }
+      return packs > 0 ? mah * PACK_MAH_TO_WH : null;
+    },
+    log,
+  });
+  /** One line per distinct bridge failure: the rollup's other counters must keep advancing. */
+  let lastBridgeError: string | null = null;
 
   // v0.13.0 — per-pack baseline capture. The accu* registers are FACTORY-
   // lifetime counters: packs ship with accuDsgMah > accuChgMah from bench
@@ -2092,6 +2146,8 @@ export function createRecorder(
     // Keys passing the filter THIS snapshot (fresh delta path) — used to avoid
     // double-counting them via the held-offline carry below.
     const passedThisSnapshot = new Set<string>();
+    /** v1.188.1 — per Core: packs handed over from the energy bridge on this pass. */
+    const handedOver = new Map<string, { packs: number; chgWh: number; dsgWh: number }>();
     let chargeWh = 0;
     let dischargeWh = 0;
 
@@ -2115,13 +2171,44 @@ export function createRecorder(
         // AND sourceSns membership AND non-null register AND a captured baseline.
         const hasRegister = pk.accuChgMah != null || pk.accuDsgMah != null;
         const passesFilter = member && hasRegister && !!base;
-        const fresh = passesFilter ? packDeltaWh(pk, base, PACK_MAH_TO_WH) : { chgWh: 0, dsgWh: 0 };
+        let fresh = passesFilter ? packDeltaWh(pk, base, PACK_MAH_TO_WH) : { chgWh: 0, dsgWh: 0 };
 
         if (passesFilter) {
           passedThisSnapshot.add(cacheKey);
           // v0.45.0 corrupt-read guard: a single rollup may not advance a pack's
           // contribution past its held value by more than one full pack capacity.
           const held = bmsLastPackWh.get(cacheKey) ?? loadPackLastWh(d.sn, pk, opts.mutate);
+          // v1.188.1 — ENERGY-BRIDGE HAND-OVER. While this pack's Core was dark the panel bridge
+          // metered its energy at the slot (energyBridge.ts) and left a marker on the pack. The
+          // registers the Core brings back include that same energy, so the jump is ABSORBED,
+          // whatever its size: re-baseline base := register − held, so this pass reports exactly
+          // `held` and counting resumes from it. Only once the Core reports again (online) AND its
+          // registers have moved off the held value — a dark Core keeps its frozen projection
+          // (setDeviceList preserves it), and an online flip can land before the first fresh quota;
+          // re-baselining on either would clear the marker and let the real jump through. Until
+          // then a marked pack reports `held`. A read-only (debug) pass reports `held` and writes
+          // nothing. The v0.45.0 guard and v0.81.0 re-baseline below still cover a gap no bridge
+          // counted (no marker).
+          if (held && energyBridge.hasMarker(cacheKey)) {
+            const moved = fresh.chgWh > held.chgWh || fresh.dsgWh > held.dsgWh;
+            if (opts.mutate && d.online === true && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {
+              const rebased: PackBaseline = {
+                chgMah: pk.accuChgMah - held.chgWh / PACK_MAH_TO_WH,
+                dsgMah: pk.accuDsgMah - held.dsgWh / PACK_MAH_TO_WH,
+              };
+              savePackBaseline(d.sn, pk, rebased);
+              base = rebased;
+              energyBridge.clearMarker(cacheKey);
+              bmsSuspectStreak.delete(cacheKey);
+              bmsCorruptWarned.delete(cacheKey);
+              const h = handedOver.get(d.sn) ?? { packs: 0, chgWh: 0, dsgWh: 0 };
+              h.packs += 1;
+              h.chgWh += Math.max(0, fresh.chgWh - held.chgWh);
+              h.dsgWh += Math.max(0, fresh.dsgWh - held.dsgWh);
+              handedOver.set(d.sn, h);
+            }
+            fresh = { chgWh: held.chgWh, dsgWh: held.dsgWh };
+          }
           const capWh = (pk.fullCapMah != null ? pk.fullCapMah * PACK_MAH_TO_WH : FALLBACK_FULL_PACK_WH);
           let useChg = fresh.chgWh;
           let useDsg = fresh.dsgWh;
@@ -2385,6 +2472,18 @@ export function createRecorder(
     }
 
 
+    // v1.188.1 — one line per Core handed over on this pass: what its BMS counted while dark
+    // (absorbed) against what the panel bridge counted for it (published, AC basis).
+    for (const [sn, h] of handedOver) {
+      const b = energyBridge.coreBridged(sn);
+      log(
+        `recorder: v1.188.1 energy-bridge hand-over sn=${sn}: ${h.packs} pack(s) re-baselined on return — ` +
+        `the BMS counted ${(h.chgWh / 1000).toFixed(2)} kWh in / ${(h.dsgWh / 1000).toFixed(2)} kWh out while dark (absorbed, not published); ` +
+        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis, already published)`,
+      );
+      if (energyBridge.markersOf(sn).length === 0) energyBridge.clearCore(sn);
+    }
+
     return { chargeWh, dischargeWh, packs, offlineHeldMembers };
   };
 
@@ -2550,6 +2649,21 @@ export function createRecorder(
     const snap = store.get();
     const contributors = buildContributors(snap);
 
+    // v1.188.1 — the energy bridge's window first (energyBridge.ts): its PV joins fleet_pv_wh and
+    // its slot AC input joins fleet_grid_import_wh below (the dark Cores' own contributors are
+    // skipped by buildContributors), its battery energy accumulates in its own rows, and it marks
+    // the dark Cores' held packs before the BMS pass further down reads the markers. Isolated: a
+    // bridge failure is logged and every other counter still advances.
+    let br: BridgeRollupResult | null = null;
+    try {
+      br = energyBridge.rollup(snap, now);
+      lastBridgeError = null;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg !== lastBridgeError) log(`recorder: energy bridge rollup failed (${msg}) — the other lifetime counters advance without it`);
+      lastBridgeError = msg;
+    }
+
     // Watt-integrated metrics — fleet + per-circuit keys.
     const wattKeys = Object.keys(contributors); // fleet_pv/load/grid + circuit_<N>
     for (const key of wattKeys) {
@@ -2566,6 +2680,9 @@ export function createRecorder(
         const r = integrateWh(pts, since, now);
         addedWh += r.wh;
       }
+      // v1.188.1 — the bridged dark Cores' share, metered at the panel (never negative).
+      if (br && key === 'fleet_pv_wh') addedWh += br.pvWh;
+      if (br && key === 'fleet_grid_import_wh') addedWh += br.gridImportWh;
       // Negative values are physically impossible for the metrics we track
       // (PV / load / grid-in / circuits); clamp to zero so a transient sign
       // flip from a bad sample can't decrement the lifetime counter.
@@ -2714,10 +2831,19 @@ export function createRecorder(
     // pass (computeBmsBatteryTotals → computeBmsBatteryDetail) runs at most
     // ONCE per getLifetimeTotals() call instead of once per battery key.
     let bmsBatteryTotals: { chargeWh: number; dischargeWh: number } | undefined;
+    // v1.188.1 — the energy bridge's battery rows ride on top of the BMS floors (see below).
+    const bridgeTotals = energyBridge.totals();
     for (const key of allKeys) {
       const prev = readLifetime(key);
       const watermark = prev.ts === 0 ? now : prev.ts;
       let pendingWh = 0;
+      // v1.188.1 — what the emitted total starts from: the persisted row, plus (battery keys) the
+      // energy the panel bridge metered while a Core was dark. The bridge is NOT in the floors
+      // or the fleet_battery_* rows: the v1.98.0 floor-gap check would read a bridged total over
+      // 50 kWh as a floor for a pool that no longer exists, and step Home Assistant down.
+      let persistedWh = prev.wh;
+      if (key === 'fleet_battery_charge_wh') persistedWh += bridgeTotals.chargeWh;
+      if (key === 'fleet_battery_discharge_wh') persistedWh += bridgeTotals.dischargeWh;
       if (key === 'fleet_battery_charge_wh' || key === 'fleet_battery_discharge_wh') {
         // v0.45.0 — each battery counter emits persistedWh + max(0, liveBmsWh −
         // persisted), UNCLAMPED. The persisted value reflects the most-recent
@@ -2752,11 +2878,11 @@ export function createRecorder(
       // (v0.13.0 re-zero) and must pass through unclamped.
       pendingWh = clampLifetimeDip(
         lifetimeEmitHighWater.get(key),
-        prev.wh,
+        persistedWh,
         pendingWh,
       );
-      lifetimeEmitHighWater.set(key, prev.wh + pendingWh);
-      out[key] = { persistedWh: prev.wh, pendingWh, watermarkMs: watermark };
+      lifetimeEmitHighWater.set(key, persistedWh + pendingWh);
+      out[key] = { persistedWh, pendingWh, watermarkMs: watermark };
     }
     // v0.45.0 — REMOVED the emit-path discharge≤charge clamp. The two battery
     // counters are surfaced independently (each = persistedWh + max(0, liveBmsWh
@@ -2779,11 +2905,15 @@ export function createRecorder(
   const batteryLifetimeDebug = (): BatteryLifetimeDebug => {
     const snap = store.get();
     const detail = computeBmsBatteryDetail(snap, { mutate: false });
-    const chargePersisted = readLifetime('fleet_battery_charge_wh').wh;
-    const dischargePersisted = readLifetime('fleet_battery_discharge_wh').wh;
-    // Emitted = persisted + max(0, liveBms − persisted), matching getLifetimeTotals.
-    const chargePending = Math.max(0, detail.chargeWh - chargePersisted);
-    const dischargePending = Math.max(0, detail.dischargeWh - dischargePersisted);
+    const chargeRow = readLifetime('fleet_battery_charge_wh').wh;
+    const dischargeRow = readLifetime('fleet_battery_discharge_wh').wh;
+    // v1.188.1 — the emitted totals include the energy bridge's rows, as getLifetimeTotals does.
+    const bridge = energyBridge.debug(snap.devices, Date.now());
+    const chargePersisted = chargeRow + bridge.chargeWh;
+    const dischargePersisted = dischargeRow + bridge.dischargeWh;
+    // Emitted = persisted + max(0, liveBms − row), matching getLifetimeTotals.
+    const chargePending = Math.max(0, detail.chargeWh - chargeRow);
+    const dischargePending = Math.max(0, detail.dischargeWh - dischargeRow);
     // Raw unclamped floors: the in-memory floors advanced by rollups, lifted to
     // the live reading if the snapshot currently reads higher (never persisted here).
     const rawChargeFloorWh = Math.max(bmsChargeFloor, detail.chargeWh);
@@ -2798,6 +2928,7 @@ export function createRecorder(
       deficitWh: Math.max(0, rawDischargeFloorWh - rawChargeFloorWh),
       packs: detail.packs,
       offlineHeldMembers: detail.offlineHeldMembers,
+      bridge,
     };
   };
 
@@ -3113,6 +3244,7 @@ export function createRecorder(
     getLifetimeTotals,
     listLifetimeKeys,
     batteryLifetimeDebug,
+    bridgedFleetFlow: (online, devices, nowMs) => energyBridge.flow(online, devices, nowMs),
     // v1.187.20 — this connection is the only one that commits, so it is the one whose
     // checkpoints the backup window holds still (backupWindow.ts).
     walControl: walControlFor(db, dbPath),
