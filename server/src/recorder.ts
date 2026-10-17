@@ -506,6 +506,10 @@ export interface Recorder {
    *  untilMs: a held reading a capture of that window had integrated. Main thread only; OPTIONAL
    *  like heldSpans (absent ⇒ unknown). */
   heldRowsWithin?: (sn: string, metric: string, sinceMs: number, untilMs: number) => boolean;
+  /** v1.188.1 (review 5) — the RESTORED frozen spans overlapping [sinceMs, untilMs]: rows moved
+   *  back to `samples` (the night ledger re-captures a row refused for one). OPTIONAL like
+   *  heldSpans (absent ⇒ none). */
+  restoredHeldSpans?: (sinceMs: number, untilMs: number) => HeldSpan[];
   /** v1.188.1 — false until the first scan for held rows has finished (or failed), in a
    *  process that scans; the night-charge capture waits for it. Absent ⇒ ready. */
   heldSamplesReady?: () => boolean;
@@ -1217,12 +1221,19 @@ export function createRecorder(
     // (the scan never moves a row younger than 15 min), and each write reset the clock and re-armed
     // the sweep: no "Device telemetry gap" while the replay lasted, none at all when it ended with
     // a fresh reading, and one a whole replay late when it ended in silence.
-    onMoved: (sn, startMs, endMs, heldThroughMs) => {
+    //
+    // v1.188.1 (review 5) — and when the clock is a row the scan never read, written after its plan
+    // (the reading phase runs minutes on the Pi before the first move) that only restated the held
+    // values (restatedSince). Held only up to the last restated row the scan read, a heartbeat in
+    // that window left the Core unheld, and its record came at the next hourly scan, or never when
+    // it read fresh before it.
+    onMoved: (sn, startMs, endMs, heldThroughMs, heldValues) => {
       const clock = lastInsertBySn.get(sn);
-      if (clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs)) {
+      const through = Math.max(endMs, heldThroughMs);
+      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) {
         lastInsertBySn.set(sn, startMs);
         clockBeforeMove.set(sn, clock);
-        heldReplayFrom.set(sn, startMs);
+        heldReplayFrom.set(sn, { startMs, values: heldValues, throughMs: through });
       }
       redateDeviceGap(sn, startMs, endMs);
     },
@@ -1241,16 +1252,7 @@ export function createRecorder(
     // v1.188.1 (review 4) — a device held from this span's start (heldReplayFrom) is not held any
     // more: the restore gave its readings back, and the scan leaves the rest of the hold in samples.
     // Its remembered clock is then its last restated write, which may lie past the restored end.
-    onRestored: (sn, startMs, endMs) => {
-      const before = clockBeforeMove.get(sn);
-      const replayed = heldReplayFrom.get(sn) === startMs;
-      if (before != null && before > startMs && (before <= endMs || replayed)) {
-        if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);
-        clockBeforeMove.delete(sn);
-      }
-      if (replayed) heldReplayFrom.delete(sn);
-      undateDeviceGap(sn, startMs, endMs);
-    },
+    onRestored: (sn, startMs, endMs) => restoredSpanBack(sn, startMs, endMs),
   });
   // The scan runs on its own timer in the add-on (one step per tick) and only on request
   // elsewhere, so a test process never has its seeded rows moved behind its back.
@@ -1327,8 +1329,18 @@ export function createRecorder(
    *  newest row (onMoved): the span's start, where its gap clock stays while each write only
    *  restates the same readings (record()). Cleared by a write in which a metric changed, by a write
    *  after a silence of more than HELD_RETURN_GAP_MS (a return, which the scan keeps as a reading
-   *  until it has been restated for an hour), and by a restore of that span. */
-  const heldReplayFrom = new Map<string, number>();
+   *  until it has been restated for an hour), and by a restore of that span — (review 5) one made
+   *  by SQL too, which the sweep finds before it files a record from the span's start.
+   *
+   *  v1.188.1 (review 5) — with the stretch's held values and its last restated row (`throughMs`):
+   *  a metric with no write in this process (the dedupe map `last` is empty after a restart, and the
+   *  boot scan holds a Core from its seeded clock) restates the hold when it carries the held value
+   *  within a hole of that row. Compared with nothing, the Core's first write after the boot scan
+   *  ended the hold: its record came at the next hourly scan, or never. */
+  const heldReplayFrom = new Map<string, { startMs: number; values: ReadonlyMap<string, number>; throughMs: number }>();
+  /** v1.188.1 (review 5) — each device's last write in which a metric differed from its previous
+   *  write in this process (onMoved's restatedSince). */
+  const lastChangeBySn = new Map<string, number>();
   /** v1.154.0 — the restart probe's MAX(ts) over home SNs; seededDeviceDarkMs's reference. */
   let bootFleetAnchorMs: number | null = null;
   /** v1.154.0 — monotonic instant of this process's first home-device write; -1 until then. */
@@ -1409,14 +1421,62 @@ export function createRecorder(
 
   /** v1.188.1 (dry run) — onMoved: the per-device record of `sn` whose start was one of the rows
    *  just moved (in (spanStartMs, movedToMs]) starts at the span's start instead. v1.188.1 (review
-   *  3) — logged as the newest row kept in samples: it is not always the last fresh reading. */
+   *  3) — logged as the newest row kept in samples: it is not always the last fresh reading.
+   *
+   *  v1.188.1 (review 5) — and any OTHER record of the device that starts in [spanStartMs,
+   *  movedToMs] is the same darkness (every row of the device after the span's start, up to the
+   *  moved end, was a held restatement), inside this one's window, so it is merged into this one
+   *  (dropped). The case is a record filed at the last fresh reading during a first silence, then a
+   *  replay of that reading, then a second silence filed from the last replayed row, with no scan in
+   *  between (scans off or failing, or an upgrade over such a pair): the scan joins the replay to
+   *  the hold, and re-dated alone the second record took the first one's start, two alerts for one
+   *  darkness and Device Telemetry Gaps 24h at 2. The record kept is the one re-dated, filed last
+   *  (the moves run in time order, so an earlier one of the hold is re-dated first), and its id is
+   *  kept (alertStartMs), so nothing is pushed again. */
   function redateDeviceGap(sn: string, spanStartMs: number, movedToMs: number): void {
     const g = telemetryGapsLog.find((x) => x.sn === sn && x.startMs > spanStartMs && x.startMs <= movedToMs);
     if (!g) return;
     const from = g.startMs;
     moveDeviceGapStart(g, spanStartMs);
+    let merged = 0;
+    for (let i = telemetryGapsLog.length - 1; i >= 0; i--) {
+      const x = telemetryGapsLog[i];
+      if (x !== g && x.sn === sn && x.startMs >= spanStartMs && x.startMs <= movedToMs) {
+        telemetryGapsLog.splice(i, 1);
+        merged++;
+      }
+    }
     persistTelemetryGaps();
-    log(`recorder: device telemetry gap of ${sn} re-dated from ${new Date(from).toISOString()} to ${new Date(spanStartMs).toISOString()}, its newest row left in samples (the rows after it were held restatements, moved to held_samples) — ${Math.round(g.durationMs / 60_000)} min, the same record`);
+    log(`recorder: device telemetry gap of ${sn} re-dated from ${new Date(from).toISOString()} to ${new Date(spanStartMs).toISOString()}, its newest row left in samples (the rows after it were held restatements, moved to held_samples) — ${Math.round(g.durationMs / 60_000)} min, the same record${merged > 0 ? `; ${merged} other record(s) of the device from that darkness merged into it` : ''}`);
+  }
+
+  /** v1.188.1 (review 5) — onMoved: has every write of `sn` this process made after `throughMs`
+   *  (the last restated row the scan read) restated the held values, the last within a hole of it?
+   *  `lastChangeBySn` catches a value that changed and changed back; the last write of each metric
+   *  catches a first write in this process that did not carry its held value. */
+  function restatedSince(sn: string, throughMs: number, values: ReadonlyMap<string, number>): boolean {
+    if ((lastChangeBySn.get(sn) ?? Number.NEGATIVE_INFINITY) > throughMs) return false;
+    if ((lastInsertBySn.get(sn) ?? Number.POSITIVE_INFINITY) - throughMs > HELD_RETURN_GAP_MS) return false;
+    const prefix = `${sn}|`;
+    for (const [k, w] of last) {
+      if (w.ts > throughMs && k.startsWith(prefix) && values.get(k.slice(prefix.length)) !== w.value) return false;
+    }
+    return true;
+  }
+
+  /** v1.188.1 (review 2/4) — onRestored, and (review 5) the sweep when it finds a span restored by
+   *  SQL: the rows of `sn` in (startMs, endMs] are back in samples, so the gap clock the move set
+   *  back goes forward again, the device is no longer held from the span's start, and a gap record
+   *  re-dated to it returns to the start it was filed with. */
+  function restoredSpanBack(sn: string, startMs: number, endMs: number): void {
+    const before = clockBeforeMove.get(sn);
+    const replayed = heldReplayFrom.get(sn)?.startMs === startMs;
+    if (before != null && before > startMs && (before <= endMs || replayed)) {
+      if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);
+      clockBeforeMove.delete(sn);
+    }
+    if (replayed) heldReplayFrom.delete(sn);
+    undateDeviceGap(sn, startMs, endMs);
   }
 
   /** v1.188.1 (review 2) — onRestored: the per-device record of `sn` re-dated to the span's start
@@ -1733,11 +1793,16 @@ export function createRecorder(
         // restates its metric's previous value within a hole of it is the same hold: its clock stays
         // at that start and its record open. (Exactly the scanner's rule: a row equal to its metric's
         // previous row is a restatement, and a gap of up to HELD_RETURN_GAP_MS inside a hold is a hole.)
-        if (heldReplayFrom.has(s.sn) && prevWrite != null && prevWrite.value === s.value && now - prevWrite.ts <= HELD_RETURN_GAP_MS) {
+        // v1.188.1 (review 5) — a metric not written yet in this process is compared with its held
+        // value and the stretch's last restated row (heldReplayFrom).
+        const hold = heldReplayFrom.get(s.sn);
+        const prevRow = prevWrite ?? (hold == null ? undefined : { ts: hold.throughMs, value: hold.values.get(s.metric) });
+        if (hold != null && prevRow != null && prevRow.value === s.value && now - prevRow.ts <= HELD_RETURN_GAP_MS) {
           clockBeforeMove.set(s.sn, now);
           continue;
         }
         heldReplayFrom.delete(s.sn);
+        if (prevWrite != null && prevWrite.value !== s.value) lastChangeBySn.set(s.sn, now);
         // v1.150.0 — per-SN clock for the staleness sweep above. Stamped for
         // every SN including synthetics; the sweep filters what it reports.
         lastInsertBySn.set(s.sn, now);
@@ -1777,6 +1842,23 @@ export function createRecorder(
           ? seededDeviceDarkMs(lastMs, bootFleetAnchorMs, performance.now() - firstHomeInsertMono, fleetDark)
           : inProcessDeviceDarkMs(lastMs, now, fleetDark);
         if (darkMs > PER_DEVICE_GAP_THRESHOLD_MS) {
+          // v1.188.1 (review 5) — not from a SEEDED clock before the first held-sample scan has
+          // finished: the seed is the device's newest row, a held row on the upgrade boot, and the
+          // scan sets it back to the span's start (onMoved). Filed or extended before it, the
+          // warning was dispatched a minute after the boot with that row's start and a duration short
+          // by the whole hold, and the re-date kept the alert id, so the corrected figures were
+          // never pushed (nor the digest's queued title).
+          if (seededNotYetWritten.has(sn) && heldScanScheduled && !heldStore.isReady()) continue;
+          // v1.188.1 (review 5) — a device held from a moved span's start whose span has since been
+          // restored by SQL (architecture 4.4) while this process ran: onRestored never ran, so it
+          // was still held, and a Core that went on restating the restored readings, every row in
+          // samples, was filed 6 h after the span's start and pushed as dark.
+          const hold = heldReplayFrom.get(sn);
+          const restored = hold != null && hold.startMs === lastMs ? heldStore.restoredSpanFrom(sn, lastMs) : null;
+          if (restored != null) {
+            restoredSpanBack(sn, restored.startMs, restored.endMs);
+            continue;
+          }
           // endMs is clamped so a boot clock still BEHIND the seed (RTC-less Pi before
           // NTP — the restart probe's `defer` case) cannot write a gap ending before it starts.
           recordTelemetryGap(lastMs, Math.max(now, lastMs + darkMs), { sn });
@@ -3500,6 +3582,7 @@ export function createRecorder(
     upsertNightCalibration,
     heldSpans: (sinceMs, untilMs) => heldStore.spans(sinceMs, untilMs),
     heldRowsWithin: (sn, metric, sinceMs, untilMs) => heldStore.heldRowsWithin(sn, metric, sinceMs, untilMs),
+    restoredHeldSpans: (sinceMs, untilMs) => heldStore.restoredSpans(sinceMs, untilMs),
     heldSamplesReady: () => !heldScanScheduled || heldStore.isReady(),
     scanHeldSamples: (nowMs) => heldStore.scanNow(nowMs),
     restoreHeldSamples: (sn, startMs) => heldStore.restore(sn, startMs),

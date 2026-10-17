@@ -246,7 +246,7 @@ import {
   ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
   // v1.188.1 — held telemetry: a row on held readings is not scored; one captured on them is repaired.
-  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldResetColumns, heldTagNote, heldCapturedClause, basisIncompleteNote,
+  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldRepairColumns, heldRepairClause, heldSides, basisIncompleteNote,
 } from './nightLedgerScoring.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -4128,6 +4128,8 @@ function scoreNightRow(
     spans: recorder.heldSpans?.(fcSpanStart, fcSpanEnd) ?? [],
     coreSns: [...homeSns], panelSn: shp2Sn, span: { startMs: fcSpanStart, endMs: fcSpanEnd },
   });
+  // v1.188.1 (review 5) — each actual is withheld on its own side only (nightLedgerScoring.heldSides).
+  const heldSide = heldSides(heldVerdict);
   const deviceNameOf = (sn: string) => store.get().devices[sn]?.deviceName ?? sn;
   let actualPvKwh: number | null = null;
   let actualPvCoverage: number | null = null;
@@ -4143,15 +4145,15 @@ function scoreNightRow(
       worstCov = Math.min(worstCov, coverageFrac(pts, fcSpanStart, fcSpanEnd));
     }
     actualPvCoverage = round2(worstCov);
-    const pvHeld = heldVerdict != null && heldVerdict.pv.length > 0;
+    const pvHeld = heldSide.pv;
     actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld ? round2(pvWh / 1000) : null;
-    if (pvHeld) {
+    if (pvHeld && heldVerdict != null) {
       app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD for ${yDate} — ${heldVerdict.pv.map((p) => `${deviceNameOf(p.sn)} ${(p.heldMs / 3_600_000).toFixed(1)} h`).join(', ')} of the span had no fresh readings (held telemetry)`);
     } else if (actualPvKwh == null) {
       app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD — worst per-core PV coverage ${worstCov.toFixed(2)} < ${PV_LEDGER_MIN_CORE_COVERAGE} over the scored span; a fleet sum across a dark core under-counts and this column is durable`);
     }
   }
-  const actualLoadKwh = loadPts.length && !(heldVerdict != null && heldVerdict.load.length > 0) ? round2(integrateWh(loadPts, false) / 1000) : null;
+  const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;
 
   // Actual min SoC over the scored trajectory span (raw telemetry; used only for
   // soc_min_err, NOT the floor verdict — §3.3).
@@ -4704,32 +4706,33 @@ async function runNightChargeEveningJobInner(): Promise<void> {
 function repairHeldNightOutcomes(rows: NightLedgerRow[], shp2Sn: string, nowMs: number): boolean {
   let reset = false;
   try {
-    const spans = recorder.heldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs) ?? [];
-    if (spans.length === 0) return false;
+    // v1.188.1 (review 5) — also with no span left: a row stated as held whose span was restored
+    // owes a re-capture (heldLedgerRepair), and with every span restored this returned first.
+    const spans = recorder.heldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs);
+    if (spans == null) return false;
     const horizonMs = forecastSpanRecaptureHorizonMs(
       resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS), LEDGER_BACKFILL_SWEEP_DAYS,
     );
     const coreSns = [...shp2ConnectedDpuSns(store.get().devices)];
     const nameOf = (sn: string) => store.get().devices[sn]?.deviceName ?? sn;
+    const restored = recorder.restoredHeldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs) ?? [];
     for (const y of rows) {
-      const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs });
+      const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs, restored });
       if (!r) continue;
-      if (r.action === 'tag') {
-        recorder.recordNightOutcome(String(y.plan_date), {
-          score_notes: `${y.score_notes ?? ''} ${heldTagNote(r.verdict, nameOf)}`.trim(),
-        });
-        app.log.info(`night-charge: tagged ${y.plan_date} — its PV/load span had an hour or more with no fresh readings (held or missing) and it is past the re-capture horizon; kept as captured.`);
-        continue;
-      }
       // v1.188.1 (review 3) — whether a held row lies inside the span as captured, per side: the
       // verdict also counts the silent hours of a frozen span (no rows at all), and an actual
       // integrated across those alone had integrated no held reading.
       const heldIn = (side: Array<{ sn: string }>, metric: string) =>
         side.some((p) => recorder.heldRowsWithin?.(p.sn, metric, r.span.startMs, r.span.endMs) ?? true);
-      const heldRows = { pv: heldIn(r.verdict.pv, 'pv_total'), load: heldIn(r.verdict.load, 'panel_load') };
-      recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf, y, heldRows));
+      const heldRows = r.action === 'recapture' && r.verdict != null ? { pv: heldIn(r.verdict.pv, 'pv_total'), load: heldIn(r.verdict.load, 'panel_load') } : {};
+      // v1.188.1 (review 5) — one write for both actions (nightLedgerScoring.heldRepairColumns).
+      recorder.recordNightOutcome(String(y.plan_date), heldRepairColumns(y, r, nameOf, heldRows));
+      if (r.action === 'tag') {
+        app.log.info(`night-charge: tagged ${y.plan_date} — its PV/load span had an hour or more with no fresh readings (held or missing) and it is past the re-capture horizon; kept as captured.`);
+        continue;
+      }
       reset = true;
-      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — ${heldCapturedClause(r.verdict, y, heldRows)} (pv ${y.actual_pv_kwh ?? 'null'} kWh, load ${y.actual_load_kwh ?? 'null'} kWh, buy_err ${y.buy_err_kwh ?? 'null'} kWh as captured).`);
+      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — ${heldRepairClause(r, y, heldRows)} (pv ${y.actual_pv_kwh ?? 'null'} kWh, load ${y.actual_load_kwh ?? 'null'} kWh, buy_err ${y.buy_err_kwh ?? 'null'} kWh as captured).`);
     }
   } catch (e: any) {
     app.log.debug(`night-charge: held-telemetry repair skipped (${e?.message ?? e})`);

@@ -172,6 +172,50 @@
  *   B-xxv   a restore sets back a clock the device has written since (survivor RC-2)
  *   B-xxvi  a record that begins as another ends is dark at the same time (survivor D2-1)
  *
+ * Review round 5 (a restore by SQL; the plan-to-move window and the restart; the upgrade push; one
+ * record per darkness; the ledger per side):
+ *   H-i     the sweep never looks a restored span up (a SQL restore leaves the Core held: a false push)
+ *   H-ii    the restored-span lookup finds nothing
+ *   H-iii   the lookup reads any frozen span, restored or not (every running replay released)
+ *   H-iv    the sweep skips a restored span's device without releasing it (never filed again)
+ *   H-v     a seeded record does not wait for the first scan (the upgrade push states a held row)
+ *   H-vi    the wait ignores whether the scan runs here (never filed outside the add-on)
+ *   H-vii   the move holds a clock only up to the rows the scan read (a heartbeat after the plan)
+ *   H-viii  a value that changed and changed back after the plan is a restatement
+ *   H-ix    a first write after the plan is not compared with its held value
+ *   H-x     a write after the plan more than an hour after the last restated row is still the hold
+ *   H-xi    a first write after a restart is compared with nothing (the hold ends at the boot scan)
+ *   H-xii   … with its own value (a changed first write stays held)
+ *   H-xiii  … with no hole bound (a return after a silence stays held)
+ *   H-xiv   the hold remembers the moved end, not the last restated row
+ *   H-xv    the re-date merges nothing (two records, one darkness)
+ *   H-xvi   the merge reaches a record before the span
+ *   H-xvii  the merge reaches a record of a later darkness
+ *   H-xviii the merge drops the re-dated record too
+ *   H-xix   the move keeps a clock remembered by an earlier move (round-4 survivor)
+ *   H-xx    a record extended from a seed inside its window states the seed's duration
+ *   H-xxi   the move hands the recorder no held values
+ *   H-xxii  heldSides reads PV from the load side
+ *   H-xxiii heldSides holds PV whenever anything is held
+ *   H-xxiv  the scorer withholds PV on the load side
+ *   H-xxv   the scorer withholds load on the PV side
+ *   H-xxvi  the repair reads the marker per row again (a side found after the capture is never repaired)
+ *   H-xxvii a side whose span was restored is never repaired (refused for good)
+ *   H-xxviii a restored side past the horizon is tagged (a crash, or a tag on every sweep)
+ *   H-xxix  heldSidesNoted reads only the first held clause
+ *   H-xxx   heldSidesNoted never reads a load part
+ *   H-xxxi  the tag drops the notes as captured (survivor N13)
+ *   H-xxxii the tag names every held side, not the one found
+ *   H-xxxiii the reset clause describes every held side, not the one found
+ *   H-xxxiv a degenerate stored window is a window (survivor N5)
+ *   H-xxxv  the repair reads two days of spans (survivor N14)
+ *   H-xxxvi the repair returns when no span is left (a restore of every span is never repaired)
+ *   H-xxxvii the repair writes nothing (survivor N12)
+ *   H-xxxviii the restore line does not say where the hold it gives back ends
+ *   H-xxxix a side no longer held counts as restored without a restored span (a roster change resets rows)
+ *   H-xl    restoredSpans lists every frozen span, restored or not
+ *   H-xli   the repair is handed no restored spans
+ *
  *   node scripts/mutate-v1188-1.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -299,8 +343,8 @@ const MUTANTS = [
   {
     id: 'S-iii. ★★ the gap clock is not moved back after a move',
     file: REC,
-    find: '      if (clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs)) {',
-    to: '      if (clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs) && Date.now() < 0) { /* MUTANT */',
+    find: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) {',
+    to: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues)) && Date.now() < 0) { /* MUTANT */',
     why: 'A Core still held at the deploy is measured from a held row that no longer exists: its gap is filed 6 h late, from the wrong start, and a later boot files a second record.',
   },
   {
@@ -411,8 +455,8 @@ const MUTANTS = [
   {
     id: 'L-iii. ★★ the repair ignores the marker',
     file: NLS,
-    find: "  if (String(row.score_notes ?? '').toLowerCase().includes(HELD_TELEMETRY_MARKER)) return null;",
-    to: '  /* MUTANT */',
+    find: '  const noted = heldSidesNoted(row.score_notes);',
+    to: '  const noted = { pv: false, load: false }; /* MUTANT */',
     why: 'A re-captured row is reset again on every sweep: it never stays captured.',
   },
   {
@@ -439,7 +483,7 @@ const MUTANTS = [
   {
     id: 'W-ii. ★★ the scorer integrates load over a held panel',
     file: IDX,
-    find: '  const actualLoadKwh = loadPts.length && !(heldVerdict != null && heldVerdict.load.length > 0) ? round2(integrateWh(loadPts, false) / 1000) : null;',
+    find: '  const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;',
     to: '  const actualLoadKwh = loadPts.length ? round2(integrateWh(loadPts, false) / 1000) : null; /* MUTANT */',
     why: 'The load band calibration learns from a load the panel did not report.',
   },
@@ -756,8 +800,8 @@ const MUTANTS = [
   {
     id: 'X-v. the sweep does not hand the reset the row as captured',
     file: IDX,
-    find: 'heldResetColumns(r.verdict, nameOf, y, heldRows));',
-    to: 'heldResetColumns(r.verdict, nameOf, {}, heldRows)); /* MUTANT */',
+    find: 'heldRepairColumns(y, r, nameOf, heldRows));',
+    to: 'heldRepairColumns({}, r, nameOf, heldRows)); /* MUTANT */',
     why: 'Every reset says nothing had been integrated from held readings.',
   },
   {
@@ -876,8 +920,8 @@ const MUTANTS = [
   {
     id: 'Q-i. ★★★ a restore leaves the gap record re-dated',
     file: REC,
-    find: '      undateDeviceGap(sn, startMs, endMs);',
-    to: '      /* MUTANT */',
+    find: '    undateDeviceGap(sn, startMs, endMs);',
+    to: '    /* MUTANT */',
     why: 'The next boot files a second record with the same alert id: two alerts with one id, Device Telemetry Gaps 24h doubled.',
   },
   {
@@ -897,8 +941,8 @@ const MUTANTS = [
   {
     id: 'Q-iv. ★★ a restore does not put the gap clock back',
     file: REC,
-    find: '        if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);',
-    to: '        /* MUTANT */',
+    find: '      if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);',
+    to: '      /* MUTANT */',
     why: 'The sweep measures the device from the span\'s start and re-dates the restored record again.',
   },
   {
@@ -968,29 +1012,29 @@ const MUTANTS = [
   {
     id: 'A-iii. ★★★ the move sets back only a seeded gap clock',
     file: REC,
-    find: '      if (clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs)) {',
-    to: '      if (seededNotYetWritten.has(sn) && clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs)) { /* MUTANT */',
+    find: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) {',
+    to: '      if (seededNotYetWritten.has(sn) && clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) { /* MUTANT */',
     why: 'A Core whose replayed body was written in this process is filed 6 h after its last held row, a hold late, with a start nothing measured.',
   },
   {
     id: 'A-iv. ★ a restore puts back only a seeded gap clock',
     file: REC,
-    find: '        if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);',
-    to: '        if (seededNotYetWritten.has(sn) && lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before); /* MUTANT */',
+    find: '      if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);',
+    to: '      if (seededNotYetWritten.has(sn) && lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before); /* MUTANT */',
     why: 'An in-process clock stays on the span\'s start after its rows are back in samples.',
   },
   {
     id: 'A-v. ★ a restore of any span forgets the clock the move set back',
     file: REC,
-    find: '        clockBeforeMove.delete(sn);\n      }\n      if (replayed) heldReplayFrom.delete(sn);',
-    to: '      }\n      clockBeforeMove.delete(sn); /* MUTANT */\n      if (replayed) heldReplayFrom.delete(sn);',
+    find: '      clockBeforeMove.delete(sn);\n    }\n    if (replayed) heldReplayFrom.delete(sn);',
+    to: '    }\n    clockBeforeMove.delete(sn); /* MUTANT */\n    if (replayed) heldReplayFrom.delete(sn);',
     why: 'Restoring an older span first loses the current span\'s clock: the next sweep re-dates the restored record again.',
   },
   {
     id: 'A-vi. ★ the move re-dates a record only when it set a clock back',
     file: REC,
-    find: '        heldReplayFrom.set(sn, startMs);\n      }\n      redateDeviceGap(sn, startMs, endMs);',
-    to: '        heldReplayFrom.set(sn, startMs);\n        redateDeviceGap(sn, startMs, endMs); /* MUTANT */\n      }',
+    find: '        heldReplayFrom.set(sn, { startMs, values: heldValues, throughMs: through });\n      }\n      redateDeviceGap(sn, startMs, endMs);',
+    to: '        heldReplayFrom.set(sn, { startMs, values: heldValues, throughMs: through });\n        redateDeviceGap(sn, startMs, endMs); /* MUTANT */\n      }',
     why: 'A device back fresh before the first scan keeps its record\'s held-row start for good (the next boot\'s seed is newer).',
   },
   {
@@ -1094,7 +1138,7 @@ const MUTANTS = [
   {
     id: 'A-xxi. the sweep does not look the held rows up',
     file: IDX,
-    find: "      const heldRows = { pv: heldIn(r.verdict.pv, 'pv_total'), load: heldIn(r.verdict.load, 'panel_load') };",
+    find: "      const heldRows = r.action === 'recapture' && r.verdict != null ? { pv: heldIn(r.verdict.pv, 'pv_total'), load: heldIn(r.verdict.load, 'panel_load') } : {};",
     to: '      const heldRows = {}; /* MUTANT */',
     why: 'The same, from the sweep.',
   },
@@ -1165,50 +1209,50 @@ const MUTANTS = [
   {
     id: 'B-viii. ★★★ the move sets a clock back only within the moved rows',
     file: REC,
-    find: '      if (clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs)) {',
+    find: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) {',
     to: '      if (clock != null && clock > startMs && clock <= endMs) { /* MUTANT */',
     why: 'A replay still being written has its clock past every moved range (rows younger than 15 min wait): no warning while it lasts, none if it ends with a fresh reading.',
   },
   {
     id: 'B-ix. ★★ the scan does not say where the stretch\'s restatements end',
     file: HS,
-    find: '    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, Math.max(job.toMs, job.stretch.endMs));',
-    to: '    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, job.toMs); /* MUTANT */',
+    find: '    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, Math.max(job.toMs, job.stretch.endMs), job.stretch.heldValues);',
+    to: '    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, job.toMs, job.stretch.heldValues); /* MUTANT */',
     why: 'The same, from the store.',
   },
   {
     id: 'B-x. ★★★ a restated write of a held Core resets its clock',
     file: REC,
-    find: '        if (heldReplayFrom.has(s.sn) && prevWrite != null && prevWrite.value === s.value && now - prevWrite.ts <= HELD_RETURN_GAP_MS) {',
+    find: '        if (hold != null && prevRow != null && prevRow.value === s.value && now - prevRow.ts <= HELD_RETURN_GAP_MS) {',
     to: '        if (false) { /* MUTANT */',
     why: 'Each replayed write re-arms the sweep and resets the clock: the replay is never filed while it runs.',
   },
   {
     id: 'B-xi. ★★ a write after more than an hour without one stays held',
     file: REC,
-    find: '        if (heldReplayFrom.has(s.sn) && prevWrite != null && prevWrite.value === s.value && now - prevWrite.ts <= HELD_RETURN_GAP_MS) {',
-    to: '        if (heldReplayFrom.has(s.sn) && prevWrite != null && prevWrite.value === s.value) { /* MUTANT */',
+    find: '        if (hold != null && prevRow != null && prevRow.value === s.value && now - prevRow.ts <= HELD_RETURN_GAP_MS) {',
+    to: '        if (hold != null && prevRow != null && prevRow.value === s.value) { /* MUTANT */',
     why: 'A Core back after a silence with its last readings (a return the scan keeps) is still counted dark from the hold\'s start: a gap filed while it reports.',
   },
   {
     id: 'B-xii. ★★ a changed write does not end the hold',
     file: REC,
-    find: '        heldReplayFrom.delete(s.sn);\n        // v1.150.0 — per-SN clock',
-    to: '        // MUTANT\n        // v1.150.0 — per-SN clock',
+    find: '        heldReplayFrom.delete(s.sn);\n        if (prevWrite != null',
+    to: '        // MUTANT\n        if (prevWrite != null',
     why: 'After a fresh reading every steady heartbeat leaves the clock at it: the next gap is filed early, from the change.',
   },
   {
     id: 'B-xiii. ★★ a restore does not end the hold',
     file: REC,
-    find: '      if (replayed) heldReplayFrom.delete(sn);',
-    to: '      /* MUTANT */',
+    find: '    if (replayed) heldReplayFrom.delete(sn);',
+    to: '    /* MUTANT */',
     why: 'A replay whose span was restored is still held: a gap is filed while its readings are back in samples.',
   },
   {
     id: 'B-xiv. ★ a restore of a running replay leaves the clock at the span\'s start',
     file: REC,
-    find: '      if (before != null && before > startMs && (before <= endMs || replayed)) {',
-    to: '      if (before != null && before > startMs && before <= endMs) { /* MUTANT */',
+    find: '    if (before != null && before > startMs && (before <= endMs || replayed)) {',
+    to: '    if (before != null && before > startMs && before <= endMs) { /* MUTANT */',
     why: 'Its last restated write lies past the restored end: a silence after the restore is measured from the span\'s start, hours early.',
   },
   {
@@ -1256,8 +1300,8 @@ const MUTANTS = [
   {
     id: 'B-xxi. ★ the repair hands back the 24 h span, not the span as captured',
     file: NLS,
-    find: "  return { action: inside ? 'recapture' : 'tag', verdict, span };",
-    to: "  return { action: inside ? 'recapture' : 'tag', verdict, span: { startMs: issued, endMs: issued + FORECAST_SPAN_MS } }; /* MUTANT */",
+    find: "  if (inside) return { action: 'recapture', verdict, span, added, restored };",
+    to: "  if (inside) return { action: 'recapture', verdict, span: { startMs: issued, endMs: issued + FORECAST_SPAN_MS }, added, restored }; /* MUTANT */",
     why: 'A row captured short of 24 h has its held rows looked up after its capture.',
   },
   {
@@ -1284,8 +1328,8 @@ const MUTANTS = [
   {
     id: 'B-xxv. ★ a restore sets back a clock the device has written since',
     file: REC,
-    find: '        if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);',
-    to: '        lastInsertBySn.set(sn, before); /* MUTANT */',
+    find: '      if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);',
+    to: '      lastInsertBySn.set(sn, before); /* MUTANT */',
     why: 'A Core back fresh after the move is measured from an old restated row: a gap filed early.',
   },
   {
@@ -1294,6 +1338,294 @@ const MUTANTS = [
     find: '    && x.startMs < g.endMs && g.startMs < x.endMs);',
     to: '    && x.startMs <= g.endMs && g.startMs < x.endMs); /* MUTANT */',
     why: '"2 home devices were dark at the same time" for two devices dark one after the other.',
+  },
+  // ── review round 5 ──
+  {
+    id: 'H-i. ★★ the sweep never looks a restored span up',
+    file: REC,
+    find: '          const restored = hold != null && hold.startMs === lastMs ? heldStore.restoredSpanFrom(sn, lastMs) : null;',
+    to: '          const restored = null as { startMs: number; endMs: number } | null; void hold; /* MUTANT */',
+    why: 'After the documented SQL restore of a replay still running, the Core goes on restating the restored readings, every row in samples, and is pushed as dark 6 h after the span\'s start.',
+  },
+  {
+    id: 'H-ii. ★ the restored-span lookup finds nothing',
+    file: HS,
+    find: '      return r == null ? null : { startMs, endMs: Number(r.end_ts) };',
+    to: '      void r; return null; /* MUTANT */',
+    why: 'The same, from the store.',
+  },
+  {
+    id: 'H-iii. ★★ the restored-span lookup reads any frozen span',
+    file: HS,
+    find: "  restoredFrom: \"SELECT end_ts FROM held_spans WHERE sn = ? AND start_ts = ? AND reason = 'frozen' AND restored_at_ms IS NOT NULL\",",
+    to: "  restoredFrom: \"SELECT end_ts FROM held_spans WHERE sn = ? AND start_ts = ? AND reason = 'frozen'\", // MUTANT",
+    why: 'Every replay still being written is released 6 h after its start instead of filed: no warning while it lasts.',
+  },
+  {
+    id: 'H-iv. ★ the sweep skips a restored span\'s device without releasing it',
+    file: REC,
+    find: '            restoredSpanBack(sn, restored.startMs, restored.endMs);\n            continue;',
+    to: '            continue; /* MUTANT */',
+    why: 'The device stays held at the span\'s start: when it falls silent it is never filed.',
+  },
+  {
+    id: 'H-v. ★★★ a record is filed from a seeded clock before the first scan',
+    file: REC,
+    find: '          if (seededNotYetWritten.has(sn) && heldScanScheduled && !heldStore.isReady()) continue;',
+    to: '          /* MUTANT */',
+    why: 'The upgrade boot pushes "no data for 420 min" from the last held row; the scan re-dates the record under the same id, so the 2820 min is never pushed.',
+  },
+  {
+    id: 'H-vi. ★★ the wait ignores whether the scan runs here',
+    file: REC,
+    find: '          if (seededNotYetWritten.has(sn) && heldScanScheduled && !heldStore.isReady()) continue;',
+    to: '          if (seededNotYetWritten.has(sn) && !heldStore.isReady()) continue; /* MUTANT */',
+    why: 'Outside the add-on (no scan) a device dark at a boot is never filed.',
+  },
+  {
+    id: 'H-vii. ★★★ the move holds a clock only up to the rows the scan read',
+    file: REC,
+    find: '      if (clock != null && clock > startMs && (clock <= through || restatedSince(sn, through, heldValues))) {',
+    to: '      if (clock != null && clock > startMs && clock <= through) { /* MUTANT */',
+    why: 'A heartbeat between the scan\'s plan and its move leaves a replayed Core unheld: its warning comes at the next hourly scan, or never.',
+  },
+  {
+    id: 'H-viii. ★★ a value that changed and changed back after the plan is a restatement',
+    file: REC,
+    find: '    if ((lastChangeBySn.get(sn) ?? Number.NEGATIVE_INFINITY) > throughMs) return false;',
+    to: '    /* MUTANT */',
+    why: 'A Core that read fresh in that window is held from the old span\'s start: a warning filed early.',
+  },
+  {
+    id: 'H-ix. ★★ a first write after the plan is not compared with its held value',
+    file: REC,
+    find: '      if (w.ts > throughMs && k.startsWith(prefix) && values.get(k.slice(prefix.length)) !== w.value) return false;',
+    to: '      void k; void w; /* MUTANT */',
+    why: 'A Core whose first reading after a restart changed is held from the span\'s start: a warning filed while it reports.',
+  },
+  {
+    id: 'H-x. ★★ a write after the plan more than an hour after the last restated row is still the hold',
+    file: REC,
+    find: '    if ((lastInsertBySn.get(sn) ?? Number.POSITIVE_INFINITY) - throughMs > HELD_RETURN_GAP_MS) return false;',
+    to: '    /* MUTANT */',
+    why: 'A Core back after a silence with its last readings (a return the scan keeps) is counted dark from the hold\'s start.',
+  },
+  {
+    id: 'H-xi. ★★★ a first write after a restart is compared with nothing',
+    file: REC,
+    find: '        const prevRow = prevWrite ?? (hold == null ? undefined : { ts: hold.throughMs, value: hold.values.get(s.metric) });',
+    to: '        const prevRow = prevWrite; /* MUTANT */',
+    why: 'The boot scan holds a replayed Core and its first write after it ends the hold: the warning comes at the next hourly scan, or never.',
+  },
+  {
+    id: 'H-xii. ★★ a first write after a restart is compared with its own value',
+    file: REC,
+    find: '        const prevRow = prevWrite ?? (hold == null ? undefined : { ts: hold.throughMs, value: hold.values.get(s.metric) });',
+    to: '        const prevRow = prevWrite ?? (hold == null ? undefined : { ts: hold.throughMs, value: s.value }); /* MUTANT */',
+    why: 'A Core whose first reading after the restart changed stays held: a warning filed while it reports.',
+  },
+  {
+    id: 'H-xiii. ★★ a first write after a restart is held across any silence',
+    file: REC,
+    find: '        const prevRow = prevWrite ?? (hold == null ? undefined : { ts: hold.throughMs, value: hold.values.get(s.metric) });',
+    to: '        const prevRow = prevWrite ?? (hold == null ? undefined : { ts: now, value: hold.values.get(s.metric) }); /* MUTANT */',
+    why: 'A Core back after a 70-min silence with its last readings is counted dark from the hold\'s start.',
+  },
+  {
+    id: 'H-xiv. ★ the hold remembers the moved end, not the last restated row',
+    file: REC,
+    find: '        heldReplayFrom.set(sn, { startMs, values: heldValues, throughMs: through });',
+    to: '        heldReplayFrom.set(sn, { startMs, values: heldValues, throughMs: endMs }); /* MUTANT */',
+    why: 'The rows under 15 min old the scan left are not counted: a Core back within the hour after a restart reads as a return.',
+  },
+  {
+    id: 'H-xv. ★★ the re-date merges nothing',
+    file: REC,
+    find: '        telemetryGapsLog.splice(i, 1);\n        merged++;',
+    to: '        merged += 0; /* MUTANT */',
+    why: 'Two records claim one darkness from one start, under two ids; Device Telemetry Gaps 24h at 2.',
+  },
+  {
+    id: 'H-xvi. ★ the merge reaches a record before the span',
+    file: REC,
+    find: '      if (x !== g && x.sn === sn && x.startMs >= spanStartMs && x.startMs <= movedToMs) {',
+    to: '      if (x !== g && x.sn === sn && x.startMs <= movedToMs) { /* MUTANT */',
+    why: 'An older, closed blackout of the device disappears from the record.',
+  },
+  {
+    id: 'H-xvii. ★ the merge reaches a record of a later darkness',
+    file: REC,
+    find: '      if (x !== g && x.sn === sn && x.startMs >= spanStartMs && x.startMs <= movedToMs) {',
+    to: '      if (x !== g && x.sn === sn && x.startMs >= spanStartMs) { /* MUTANT */',
+    why: 'The first scan after an upgrade drops the record of the device\'s current darkness while it moves an old hold.',
+  },
+  {
+    id: 'H-xviii. ★★ the merge drops the re-dated record too',
+    file: REC,
+    find: '      if (x !== g && x.sn === sn && x.startMs >= spanStartMs && x.startMs <= movedToMs) {',
+    to: '      if (x.sn === sn && x.startMs >= spanStartMs && x.startMs <= movedToMs) { /* MUTANT */',
+    why: 'The darkness loses every record.',
+  },
+  {
+    id: 'H-xix. ★ the move keeps a clock remembered by an earlier move',
+    file: REC,
+    find: '        clockBeforeMove.set(sn, clock);',
+    to: '        if (!clockBeforeMove.has(sn)) clockBeforeMove.set(sn, clock); /* MUTANT */',
+    why: 'A restore of a second replay\'s span measures the silence after it from the span\'s start: a warning filed 100 min early, from a row back in samples.',
+  },
+  {
+    id: 'H-xx. ★ a record extended from a seed inside its window states the seed\'s duration',
+    file: REC,
+    find: '      prior.durationMs = endMs - prior.startMs;',
+    to: '      prior.durationMs = endMs - startMs; /* MUTANT */',
+    why: '"no data for 503 min" over a window of 48 h.',
+  },
+  {
+    id: 'H-xxi. ★★ the move hands the recorder no held values',
+    file: HS,
+    find: '    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, Math.max(job.toMs, job.stretch.endMs), job.stretch.heldValues);',
+    to: '    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, Math.max(job.toMs, job.stretch.endMs), new Map()); /* MUTANT */',
+    why: 'A heartbeat after the plan, and the first write after a restart, never restate the hold.',
+  },
+  {
+    id: 'H-xxii. ★★★ heldSides reads PV from the load side',
+    file: NLS,
+    find: '  return { pv: v != null && v.pv.length > 0, load: v != null && v.load.length > 0 };',
+    to: '  return { pv: v != null && v.load.length > 0, load: v != null && v.load.length > 0 }; /* MUTANT */',
+    why: 'A row with a Core held for an hour or more integrates its PV over the replay into pv_in_band and pv_err_frac (survivor W1).',
+  },
+  {
+    id: 'H-xxiii. ★★ heldSides holds PV whenever anything is held',
+    file: NLS,
+    find: '  return { pv: v != null && v.pv.length > 0, load: v != null && v.load.length > 0 };',
+    to: '  return { pv: v != null, load: v != null && v.load.length > 0 }; /* MUTANT */',
+    why: 'PV is withheld whenever only the panel was held (survivor W2).',
+  },
+  {
+    id: 'H-xxiv. ★★ the scorer withholds PV on the load side',
+    file: IDX,
+    find: '    const pvHeld = heldSide.pv;',
+    to: '    const pvHeld = heldSide.load; /* MUTANT */',
+    why: 'The same, from the scorer.',
+  },
+  {
+    id: 'H-xxv. ★ the scorer withholds load on the PV side',
+    file: IDX,
+    find: '  const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;',
+    to: '  const actualLoadKwh = loadPts.length && !heldSide.pv ? round2(integrateWh(loadPts, false) / 1000) : null; /* MUTANT */',
+    why: 'A load the panel did not report is integrated when only the panel was held.',
+  },
+  {
+    id: 'H-xxvi. ★★ the repair reads the marker per row again',
+    file: NLS,
+    find: '  const added = sidesWhere(held.pv && !noted.pv, held.load && !noted.load);',
+    to: '  const added = sidesWhere(held.pv && !(noted.pv || noted.load), held.load && !(noted.pv || noted.load)); /* MUTANT */',
+    why: 'A row captured with the panel\'s hold stated and a replayed Core found after the capture keeps its PV integrated from the replay.',
+  },
+  {
+    id: 'H-xxvii. ★★ a side whose span was restored is never repaired',
+    file: NLS,
+    find: '  const restored = sidesWhere(noted.pv && !held.pv && restoredIn(i.coreSns), noted.load && !held.load && restoredIn([i.panelSn]));',
+    to: '  const restored = sidesWhere(false, false); /* MUTANT */',
+    why: 'After a restore the row says "not scored — telemetry held" with its actual empty for good, against history that says the readings were real.',
+  },
+  {
+    id: 'H-xxviii. ★ a restored side past the horizon is tagged',
+    file: NLS,
+    find: "  return added.length === 0 ? null : { action: 'tag', verdict, span, added, restored: [] };",
+    to: "  return { action: 'tag', verdict, span, added, restored: [] }; /* MUTANT */",
+    why: 'A tag with no side to name, on every sweep.',
+  },
+  {
+    id: 'H-xxix. ★ heldSidesNoted reads only the first held clause',
+    file: NLS,
+    find: '  for (let i = lower.indexOf(head); i >= 0; i = lower.indexOf(head, i + head.length)) {',
+    to: '  for (let i = lower.indexOf(head); i >= 0; i = -1) { /* MUTANT */',
+    why: 'A side tagged after the capture is found owing a repair again: tagged on every sweep.',
+  },
+  {
+    id: 'H-xxx. ★ heldSidesNoted never reads a load part',
+    file: NLS,
+    find: "      if (part.startsWith('load — ')) out.load = true;",
+    to: '      /* MUTANT */',
+    why: 'Every row refused for a held panel is reset on every sweep.',
+  },
+  {
+    id: 'H-xxxi. ★ the tag drops the notes as captured',
+    file: NLS,
+    find: "  if (r.action === 'tag') return { score_notes: `${row.score_notes ?? ''} ${heldTagNote(found!, name)}`.trim() };",
+    to: "  if (r.action === 'tag') return { score_notes: heldTagNote(found!, name) }; /* MUTANT */",
+    why: 'A row past the horizon loses its captured notes, the reason it was scored or not (survivor N13).',
+  },
+  {
+    id: 'H-xxxii. the tag names every held side, not the one found',
+    file: NLS,
+    find: "  if (r.action === 'tag') return { score_notes: `${row.score_notes ?? ''} ${heldTagNote(found!, name)}`.trim() };",
+    to: "  if (r.action === 'tag') return { score_notes: `${row.score_notes ?? ''} ${heldTagNote(r.verdict!, name)}`.trim() }; /* MUTANT */",
+    why: 'The side already stated is stated twice.',
+  },
+  {
+    id: 'H-xxxiii. the reset clause describes every held side, not the one found',
+    file: NLS,
+    find: '  if (r.verdict != null && r.added.length > 0) parts.push(heldCapturedClause(verdictOf(r.verdict, r.added), captured, heldRows));',
+    to: '  if (r.verdict != null && r.added.length > 0) parts.push(heldCapturedClause(r.verdict, captured, heldRows)); /* MUTANT */',
+    why: 'The reset line says the load side, already stated and left empty, "had been captured empty".',
+  },
+  {
+    id: 'H-xxxiv. ★ a degenerate stored window is a window',
+    file: NLS,
+    find: "  if (typeof ws !== 'number' || typeof we !== 'number' || !(we > ws)) return null; // no window: nothing was integrated",
+    to: "  if (typeof ws !== 'number' || typeof we !== 'number') return null; /* MUTANT */",
+    why: 'A row the windowless branch captured with no marker is reset on every sweep (survivor N5).',
+  },
+  {
+    id: 'H-xxxv. ★ the repair reads two days of spans',
+    file: IDX,
+    find: '    const spans = recorder.heldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs);',
+    to: '    const spans = recorder.heldSpans?.(nowMs - 2 * 86_400_000, nowMs); /* MUTANT */',
+    why: 'A row whose hold ended more than two days ago keeps a score on held readings (survivor N14).',
+  },
+  {
+    id: 'H-xxxvi. ★★ the repair returns when no span is left',
+    file: IDX,
+    find: '    if (spans == null) return false;',
+    to: '    if (spans == null || spans.length === 0) return false; /* MUTANT */',
+    why: 'With every span restored, the rows refused for them are never re-captured.',
+  },
+  {
+    id: 'H-xxxvii. ★★ the repair writes nothing',
+    file: IDX,
+    find: '      recorder.recordNightOutcome(String(y.plan_date), heldRepairColumns(y, r, nameOf, heldRows));',
+    to: '      /* MUTANT */',
+    why: 'A row past the horizon gets no clause and is logged as tagged on every sweep; a reset never resets (survivor N12).',
+  },
+  {
+    id: 'H-xxxviii. the restore line does not say where the hold it gives back ends',
+    file: HS,
+    find: ' — the hold ends when a reading changes, or when the device comes back from a silence of more than an hour with a return reading and falls silent again (a later replay is then a new hold)`);',
+    to: '`); /* MUTANT */',
+    why: 'An owner told that the rest of the hold will not be excluded again sees a later replay moved after one return reading.',
+  },
+  {
+    id: 'H-xxxix. ★ a side no longer held counts as restored without a restored span',
+    file: NLS,
+    find: '  const restoredIn = (sns: readonly string[]) => (i.restored ?? []).some((r) => sns.includes(r.sn) && overlapOf(r, span) > 0);',
+    to: '  const restoredIn = (sns: readonly string[]) => sns.length >= 0; /* MUTANT */',
+    why: 'A Core no longer on the panel makes every row refused for it re-captured, its note saying the readings were restored.',
+  },
+  {
+    id: 'H-xl. ★ restoredSpans lists every frozen span, restored or not',
+    file: HS,
+    find: '      WHERE end_ts >= ? AND start_ts <= ? AND restored_at_ms IS NOT NULL ORDER BY start_ts ASC, sn ASC`,',
+    to: '      WHERE end_ts >= ? AND start_ts <= ? ORDER BY start_ts ASC, sn ASC`, // MUTANT',
+    why: 'A held span counts as restored: rows refused for a hold that a gate span also covers are re-captured.',
+  },
+  {
+    id: 'H-xli. ★★ the repair is handed no restored spans',
+    file: IDX,
+    find: '      const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs, restored });',
+    to: '      const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs }); void restored; /* MUTANT */',
+    why: 'A row refused for a restored span stays "not scored — telemetry held" for good.',
   },
 ];
 

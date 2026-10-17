@@ -360,7 +360,12 @@ meter reset. If a device's gap clock (4.7), seeded at boot or written in this pr
 the moved rows, or a restatement of the same stretch that the scan read and has not moved yet
 (younger than 15 min, or in a later slice: `onMoved`'s `heldThroughMs`), the clock goes back to the
 span's start, and a per-device gap record whose start was one of them is re-dated to it, keeping
-its alert id (4.7).
+its alert id (4.7). So it does when the clock is a row the scan never read, written after the scan
+was planned (the scan reads every device before its first move, minutes on the Pi), as long as
+every write of the device since `heldThroughMs` restated the stretch's values (`onMoved`'s
+`heldValues`: no write in which a value changed, even back again, and each metric's last write equal
+to its held value) within an hour of it (v1.188.1, fifth review: a heartbeat in that window left a
+replayed Core unheld, and its record came at the next hourly scan, or never).
 
 **Readers that memoise.** Every move and restore advances the samples generation
 (`held_generation`) in its own transaction; both recorders read it (`samplesGeneration()`). The
@@ -379,9 +384,12 @@ A stretch that overlaps a restored span, or whose anchor is one of its rows (no 
 changed since its start), is left in `samples`, qualifying in that scan's window or not, and the
 span's `end_ts` follows the stretch's last row, so a restore made while the device still restates
 its readings holds to the end of the hold at any scan cadence. A change ends it: the stretch from
-the change is a new hold. (Matched on overlap alone, a restore held for about four hours: once the
-3 h re-read started after the restored end, each hourly scan's anchor was a restated row of the same
-hold, and the rest of it was moved as a new span with a second `HELD SAMPLES` line, while a boot
+the change is a new hold. So does a return reading after a silence of more than an hour that another
+silence follows: as for any device, the stretch starts again from that reading, which lies after the
+restored end, so a later replay of the same readings is a new hold (the restore's log line says so;
+v1.188.1, fifth review: it promised the rest of the hold without that limit). (Matched on overlap
+alone, a restore held for about four hours: once the 3 h re-read started after the restored end,
+each hourly scan's anchor was a restated row of the same hold, and the rest of it was moved as a new span with a second `HELD SAMPLES` line, while a boot
 scan after a stop left the same rows. v1.188.1, fourth review.) A per-device gap record the
 move had re-dated to the span's start goes back to the start it was filed with, and a gap clock
 the move had set back into that span goes forward again (4.7). In SQL, in one transaction:
@@ -394,7 +402,14 @@ other than by appending. A gap record re-dated from the span is returned to its 
 next boot while the device is still dark (its seed reads that row again, 4.7), and a record filed at
 the span's start after the move is extended by that boot and keeps its start (the seed lies inside
 its window, 4.7); `telemetry-gaps.json` needs no edit. The SQL does not extend `end_ts` over the rest
-of a running hold: the next scan does (above).
+of a running hold: the next scan does (above). A device the move held from the span's start (4.7)
+is released when the per-device sweep would file a record from that start: it looks the span up
+first (`restoredSpanFrom`), and a restored span gets the restore's treatment instead (the clock to
+the device's last restated write, the hold ended, a re-dated record returned), so the add-on need
+not be restarted after the SQL (v1.188.1, fifth review: a Core that went on restating the restored
+readings, every row in `samples`, was filed and pushed as dark 6 h after the span's start). A
+night-ledger row refused for the span's hours is re-captured by the next sweep while its telemetry
+is retained (chapter 15, section 7).
 
 #### 4.5 Retention
 
@@ -479,7 +494,12 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   blackout spanning a restart is still seen. The seed is an exact index skip-scan
   (distinct SN → distinct metric → `MAX(ts)`, every statement an index SEARCH) that
   skips only the synthetic SNs; bench spares are filtered at sweep time against the
-  live roster. A device still on its seeded clock is charged only with dark time the
+  live roster. Where the held-sample scan runs (4.4), a record is filed or extended from a
+  seeded clock only once its first scan has finished (`heldSamplesReady`): on the upgrade boot the
+  seed is a held row the scan sets back, and a record filed before it was dispatched about a minute
+  after the boot with that row's start and a duration short by the whole hold, under the id the
+  re-date then kept, so the corrected figures were never pushed (v1.188.1, fifth review). A device
+  still on its seeded clock is charged only with dark time the
   add-on could observe (`seededDeviceDarkMs`): how far its last sample trails the
   fleet's newest before the outage, plus monotonic time since this process's first home write, less every fleet-dark window already in the gap ledger between those two points (so an intervening short boot cannot charge a silent device with an earlier outage). The outage itself is the restart-spanning fleet gap, not every
   device's.
@@ -506,7 +526,12 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   there and its record open, so a replay still being written is filed 6 h after the span's start,
   once. A write in which a metric changes ends the hold and re-arms the sweep; so does a write after
   more than an hour without one (a return, which the scan keeps as a reading until it has been
-  restated for an hour), and a restore of the span (4.4). Before (v1.188.1, fourth review), each
+  restated for an hour), and a restore of the span (4.4), by SQL too (the sweep looks the span up
+  before it files a record from its start). A metric with no write in this process yet is compared
+  with the stretch's held value and its last restated row (`heldValues`, `heldThroughMs`): the dedupe
+  map is empty after a restart and the boot scan holds a Core from its seeded clock, and compared
+  with nothing, its first write after that scan ended the hold, so the record came at the next
+  hourly scan, or never (v1.188.1, fifth review). Before (v1.188.1, fourth review), each
   replayed write reset the clock and re-armed the sweep, and the clock was always newer than any
   moved range (the scan never moves a row younger than 15 min): no warning while the replay lasted,
   none at all when it ended with a fresh reading, and one a whole replay late when it ended in
@@ -535,7 +560,14 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   which keeps the start it was filed with. A device that wrote after a record's end starts its next
   gap past it, so only rows moved back to `samples` can put a seed inside a record. Matched by none
   of the other rules, that boot filed a second record with a new id: a second pushed warning for the
-  same darkness (v1.188.1, fourth review).
+  same darkness (v1.188.1, fourth review). Any other record of the device that starts at or after
+  the span's start, up to the moved end, is the same darkness, inside the re-dated record's window,
+  and is merged into it (dropped; the re-dated record keeps its id). The case is a record filed at
+  the last fresh reading during a first silence, then a replay of that reading, then a second
+  silence filed from the last replayed row, with no scan in between (scans off or failing, or an
+  upgrade over such a pair). The scan joins the replay to the hold, and re-dated alone the second
+  record took the first one's start: two alerts for one darkness, `system_device_gap_count_24h` at
+  2 (v1.188.1, fifth review).
 - **Silences the gate explains (v1.188.1).** The recorder keeps the home devices the gate held in
   the evaluations since the last one with a recordable home reading (written, or skipped by the
   dedupe, which happens only within one heartbeat of the last home write), and the time between

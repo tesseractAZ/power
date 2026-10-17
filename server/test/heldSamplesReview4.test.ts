@@ -19,6 +19,9 @@
  *     are a new stretch, not its continuation.
  *  5. The held-flow estimate: a joined return piece carries its held values, and a flow held at
  *     0 W integrates nothing.
+ *  6. (review round 5) Where a restored hold ends: a return reading after a silence that another
+ *     silence follows starts a new stretch, and the restore's log line says so. The restored-span
+ *     reads (restoredSpans, restoredSpanFrom).
  * Fake serials throughout.
  */
 import { test } from 'node:test';
@@ -372,6 +375,67 @@ test('★ a flow held at 0 W is not stated as integrated energy', () => {
   const line = lines.find((l) => l.includes('HELD SAMPLES')) ?? '';
   assert.match(line, /kWh of ac_in/, `precondition: a held flow above 0 is stated: ${line}`);
   assert.doesNotMatch(line, /kWh of pv_total/, `★ 0 W held is no energy: ${line}`);
+});
+
+/* ══ review round 5: where a restored hold ends ═══════════════════════════════ */
+
+test('★ a restored hold, a silence, one return reading equal to it, another silence, a replay: the replay is a new hold at any cadence, and the restore says so', () => {
+  // The scanner's own rule (createFrozenScanner): after a return reading that another silence
+  // follows, the stretch starts again from that reading. A restore gives back the hold up to there,
+  // not past it; its log line promised more ("the rest of its hold … will not be excluded again").
+  const T0 = phx(2026, 10, 11, 20, 0);
+  const val = new Map<string, number>();
+  const fresh = liveGroups(T0, T0 + H, val);
+  const X = T0 + H;
+  const hold = restated(every5(X + 5 * MIN, X + 3 * H), val);
+  const ret = restated([X + 5 * H], val);
+  const replay = restated(every5(X + 7 * H + 30 * MIN, X + 9 * H + 30 * MIN), val);
+  const after = liveGroups(X + 9 * H + 35 * MIN, X + 9 * H + 50 * MIN, val);
+  const rows = [...fresh, ...hold, ...ret, ...replay, ...after].sort((a, b) => a[0] - b[0]);
+  for (const scans of [Array.from({ length: 10 }, (_, k) => X + (k + 3) * H), [X + 3 * H, X + 11 * H, X + 12 * H]]) {
+    const db = memDb();
+    const clock = { now: scans[0] };
+    const { hs, lines } = store(db, clock);
+    let i = 0;
+    for (const at of scans) {
+      const batch: Row[] = [];
+      while (i < rows.length && rows[i][0] <= at) batch.push(rows[i++]);
+      insert(db, batch);
+      clock.now = at;
+      hs.scanNow(at);
+      if (at === X + 3 * H) assert.ok(hs.restore(SN, X) > 0, 'precondition: restored');
+    }
+    const label = scans.length > 3 ? 'hourly' : 'a stop';
+    const spans = frozenSpans(db);
+    assert.deepEqual(spans.map((x) => [x.startMs, x.restored]), [[X, true], [X + 5 * H, false]], `${label}: ${JSON.stringify(spans.map((x) => [iso(x.startMs), iso(x.endMs), x.rows]))}`);
+    assert.equal(total(db, 'held_samples'), replay.length, `${label}: the replay is moved, the return reading stays`);
+    const line = lines.find((l) => l.includes('restored') && l.includes('held sample(s)')) ?? '';
+    assert.ok(line.includes('the hold ends when a reading changes, or when the device comes back from a silence of more than an hour with a return reading and falls silent again (a later replay is then a new hold)'),
+      `★ ${label}: the restore states where the hold it gives back ends: ${line}`);
+  }
+});
+
+test('★ restoredSpans lists the restored spans over a window, and only those; restoredSpanFrom finds one by its start', () => {
+  const T0 = phx(2026, 10, 13, 8, 0);
+  const val = new Map<string, number>();
+  const fresh = liveGroups(T0, T0 + H, val);
+  const X = T0 + H;
+  const hold = restated(every5(X + 5 * MIN, X + 3 * H), val);
+  const after = liveGroups(X + 3 * H + 5 * MIN, X + 3 * H + 20 * MIN, val);
+  const db = memDb([...fresh, ...hold, ...after]);
+  const clock = { now: X + 5 * H };
+  const { hs } = store(db, clock);
+  assert.equal(hs.scanNow(clock.now).rowsMoved, hold.length, 'precondition: moved');
+  assert.deepEqual(hs.restoredSpans(X - DAY, X + DAY), [], 'nothing restored yet');
+  assert.equal(hs.restoredSpanFrom(SN, X), null);
+  assert.equal(hs.spans(X - DAY, X + DAY).length, 1, 'precondition: held');
+  assert.ok(hs.restore(SN, X) > 0);
+  const r = hs.restoredSpans(X - DAY, X + DAY);
+  assert.deepEqual(r.map((x) => [x.sn, x.startMs, x.reason, x.restoredAtMs != null]), [[SN, X, 'frozen', true]], '★ the restored span');
+  assert.deepEqual(hs.restoredSpans(X + 4 * H, X + DAY), [], 'outside the window: none');
+  assert.deepEqual(hs.restoredSpanFrom(SN, X), { startMs: X, endMs: r[0].endMs });
+  assert.equal(hs.restoredSpanFrom(SN, X + MIN), null, 'by its exact start');
+  assert.deepEqual(hs.spans(X - DAY, X + DAY), [], 'and no longer held');
 });
 
 void HELD_MOVE_MIN_AGE_MS;

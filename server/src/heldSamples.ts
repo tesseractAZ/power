@@ -28,7 +28,9 @@
  *     metrics, is moved — unchanged, in one transaction per slice — from `samples` to
  *     `held_samples`. Nothing is deleted: `restoreHeldSamples` moves a span back, and a restored
  *     span is never excluded again, nor (review 4) the rest of its hold while the device goes on
- *     restating the same readings. Every move is logged.
+ *     restating the same readings — (review 5) until a metric changes, or until a return reading
+ *     after a silence is followed by another silence (createFrozenScanner: a later replay is a
+ *     hold from that reading). Every move is logged.
  *
  * WHAT IT DOES NOT DO. The alarms read the live store, never `samples`; nothing here touches the
  * store. The offline, stale and blind alarms and the SoC ladder are unchanged by construction.
@@ -512,6 +514,9 @@ export const HELD_SPANS_SQL = {
   /** v1.188.1 (review 4) — a restored span's end follows the hold it restored while the device goes
    *  on restating the same readings (scanStep): its rows were never moved, and are not. */
   extendRestored: "UPDATE held_spans SET end_ts = ? WHERE sn = ? AND start_ts = ? AND reason = 'frozen' AND restored_at_ms IS NOT NULL AND end_ts < ?",
+  /** v1.188.1 (review 5) — the restored span of a device that starts at a given instant, if any
+   *  (restoredSpanFrom: a restore by SQL the recorder was not told about). */
+  restoredFrom: "SELECT end_ts FROM held_spans WHERE sn = ? AND start_ts = ? AND reason = 'frozen' AND restored_at_ms IS NOT NULL",
 } as const;
 
 export interface HeldScanSummary {
@@ -544,8 +549,12 @@ export interface HeldSamplesOptions {
    *  v1.188.1 (review 4) — `heldThroughMs` (≥ endMs) is the stretch's last restated row as the scan
    *  read it: every row of `sn` in (startMs, heldThroughMs] restates the same readings, those after
    *  endMs not moved yet (younger than HELD_MOVE_MIN_AGE_MS, or in a later slice). A device whose
-   *  replayed body is still being written has its newest row there. */
-  onMoved?: (sn: string, startMs: number, endMs: number, heldThroughMs: number) => void;
+   *  replayed body is still being written has its newest row there.
+   *
+   *  v1.188.1 (review 5) — `heldValues` is each restated metric's value in the stretch: a row the
+   *  scan did not read (written after its plan, or the first write of a new process) restates the
+   *  hold when it carries that value (recorder.ts restatedSince, record()). */
+  onMoved?: (sn: string, startMs: number, endMs: number, heldThroughMs: number, heldValues: ReadonlyMap<string, number>) => void;
   /** v1.188.1 (review 2) — called after a span was restored: the rows of `sn` in (startMs, endMs]
    *  are back in `samples`, so whatever onMoved re-dated from them goes back too. */
   onRestored?: (sn: string, startMs: number, endMs: number) => void;
@@ -608,6 +617,11 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   const restoredOfStmt = db.prepare(HELD_SPANS_SQL.restoredOf);
   const extendRestoredStmt = db.prepare(HELD_SPANS_SQL.extendRestored);
   const markRestoredStmt = db.prepare('UPDATE held_spans SET restored_at_ms = ? WHERE sn = ? AND start_ts = ? AND reason = ?');
+  const restoredFromStmt = db.prepare(HELD_SPANS_SQL.restoredFrom);
+  const restoredInStmt = db.prepare(
+    `SELECT sn, start_ts, end_ts, reason, rows, detected_at_ms, restored_at_ms FROM held_spans
+      WHERE end_ts >= ? AND start_ts <= ? AND restored_at_ms IS NOT NULL ORDER BY start_ts ASC, sn ASC`,
+  );
   const frozenOfStmt = db.prepare(HELD_SPANS_SQL.frozenOf);
   const scanStateStmt = db.prepare('SELECT scanned_to_ts, full_scan_at_ms FROM held_scan WHERE id = 1');
   const scanStateUpsertStmt = db.prepare(
@@ -806,6 +820,10 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       // v1.188.1 (review 4) — a restored span gives back the HOLD, not only the rows an earlier scan
       // had moved: a stretch that overlaps it, or whose anchor is one of its rows (no metric changed
       // since its start), is left in samples, and the span's end follows the stretch's last row.
+      // v1.188.1 (review 5) — a stretch anchored on a return reading after the restored end is not
+      // one: after a silence, a return reading and another silence, the scanner starts the stretch
+      // again from that reading (createFrozenScanner), as for any device, so a later replay of the
+      // same readings is a new hold. What restore() logs says so.
       // Matched on overlap alone, a restore made while the device still restated its readings held
       // only until the 3 h re-read started after the restored end: from there each hourly scan's
       // anchor was a restated row of the same hold, and the rest of the hold was moved as a new span
@@ -885,7 +903,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       return true;
     }
     scanRows += moved;
-    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, Math.max(job.toMs, job.stretch.endMs));
+    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, Math.max(job.toMs, job.stretch.endMs), job.stretch.heldValues);
     const lastSlice = !moveQueue.some((m) => m.sn === job.sn && m.spanStartMs === job.spanStartMs);
     if (job.announce) {
       const s = job.stretch;
@@ -986,9 +1004,22 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
       throw e;
     }
-    o.log(`recorder: restored ${n} held sample(s) of ${sn} (${new Date(startMs).toISOString()} → ${new Date(Number(span.end_ts)).toISOString()}) to samples; neither this span nor the rest of its hold, while the device goes on restating the same readings, will be excluded again`);
+    o.log(`recorder: restored ${n} held sample(s) of ${sn} (${new Date(startMs).toISOString()} → ${new Date(Number(span.end_ts)).toISOString()}) to samples; neither this span nor the rest of its hold, while the device goes on restating the same readings, will be excluded again — the hold ends when a reading changes, or when the device comes back from a silence of more than an hour with a return reading and falls silent again (a later replay is then a new hold)`);
     o.onRestored?.(sn, startMs, Number(span.end_ts));
     return n;
+  }
+
+  /** v1.188.1 (review 5) — the restored frozen span of `sn` that starts at `startMs`, or null (also
+   *  when it cannot be read). The recorder asks before it files a gap record from a held start: a
+   *  restore by SQL (architecture 4.4) made while the add-on runs never reaches onRestored. */
+  function restoredSpanFrom(sn: string, startMs: number): { startMs: number; endMs: number } | null {
+    try {
+      const r = restoredFromStmt.get(sn, startMs) as { end_ts: number } | undefined;
+      return r == null ? null : { startMs, endMs: Number(r.end_ts) };
+    } catch (e: any) {
+      o.log(`recorder: restored-span lookup failed for ${sn} (${e?.message ?? e})`);
+      return null;
+    }
   }
 
   /** Spans overlapping [sinceMs, untilMs] that are not restored, oldest first. */
@@ -1001,6 +1032,12 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       if (g && g.persistedAtMs > 0 && g.startMs === s.startMs && g.reason === s.reason) s.endMs = Math.max(s.endMs, g.endMs);
     }
     return out;
+  }
+
+  /** v1.188.1 (review 5) — restored spans overlapping [sinceMs, untilMs], oldest first: the night
+   *  ledger re-captures a row refused for one (nightLedgerScoring.heldLedgerRepair). */
+  function restoredSpans(sinceMs: number, untilMs: number): HeldSpan[] {
+    return (restoredInStmt.all(sinceMs, untilMs) as Array<Record<string, unknown>>).map(toSpan);
   }
 
   /** v1.188.1 (review 3) — is a held row of (sn, metric) in [sinceMs, untilMs]? The night ledger's
@@ -1033,7 +1070,9 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     isReady: () => ready,
     isRunning: () => running,
     restore,
+    restoredSpanFrom,
     spans,
+    restoredSpans,
     heldRowsWithin,
     prune,
     samplesGeneration: readGeneration,
