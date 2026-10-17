@@ -125,6 +125,9 @@ export interface DeviceSnapshot {
   // inline-imported to avoid a snapshot.ts ↔ gridState.ts top-level cycle.
   grid?: import('./gridState.js').GridBackstop;
   off_grid?: boolean;
+  /** v1.188.1 — set on every panel by snapshotForClient (shp2Membership.ts panelForClient): the
+   *  server's verdict on that panel's reading (shp2ReadbackFresh). The card keys on it. */
+  readbackFresh?: boolean;
 }
 
 export interface FleetSnapshot {

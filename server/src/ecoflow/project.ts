@@ -422,6 +422,10 @@ export interface Shp2EnergySource {
    *  backup pool, but the slot's underlying DPU is itself cloud-offline (its own
    *  telemetry is stale). Does NOT affect backup-capacity or the floor alarm. */
   dpuStale?: boolean;
+  /** v1.188.1 — set by snapshotForClient (shp2Membership.ts isSourceDpuFrozen): the slot's Core is
+   *  listed ONLINE but its own meter is frozen (content unchanged for SHP2_READBACK_STALE_MS). The
+   *  Energy flow card reads such a Core from this slot, as it does a dpuStale one. */
+  dpuFrozen?: boolean;
 }
 
 export interface Shp2ChargeWindow {

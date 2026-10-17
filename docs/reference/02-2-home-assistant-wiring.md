@@ -359,7 +359,7 @@ first); surfaced at **`GET /api/writes/log`**.
 
 | Endpoint | Method | Auth | Returns |
 |---|---|---|---|
-| `/api/snapshot` | GET | none (read-only) | `snapshotForClient()` — full `FleetSnapshot` + grid/off_grid, with each SHP2 source annotated `dpuStale` |
+| `/api/snapshot` | GET | none (read-only) | `snapshotForClient()` — full `FleetSnapshot` + grid/off_grid, with each SHP2 source annotated `dpuStale` / `dpuFrozen` and each panel `readbackFresh` |
 | `/api/ha-state` | GET | none | flat HA-facing payload (power flow, backup pool, forecast, degradation, alerts, runway, RTE, clipping, curtailment, self-consumption, lifetime) |
 | `/api/panel-info` | GET | none | `{ writeAuthRequired:true, sameOriginOk:true, ingressOk:true, tokenHeader:'X-Panel-Write-Token', tokenPath }` |
 | `/api/debug/raw?sn=` | GET | none | `{ sn, raw, mqtt (by cmdId), mqttFlat, source, lastMqttAt, mqttMsgCount }` |
@@ -376,7 +376,10 @@ Wraps `store.get()` with the live grid backstop (`liveGridBackstop(devices)` →
 `off_grid = !grid.present`), and **immutably** enriches the SHP2 device: shallow-copies
 the devices map + SHP2 device, attaches `grid`/`off_grid`, and maps each source to add
 `dpuStale`. The immutability is load-bearing — `/api/ha-state` and the broadcast path
-read raw `store.get()` and must stay byte-identical.
+read raw `store.get()` and must stay byte-identical. Since v1.188.1 every panel goes through
+`panelForClient` (`shp2Membership.ts`): each source also carries `dpuFrozen` (its Core is listed
+online but its content has not changed for `SHP2_READBACK_STALE_MS`) and the panel carries
+`readbackFresh` (`shp2ReadbackFresh`). The Energy flow card has no clock and keys on both.
 
 #### `/api/ha-state` (selected fields)
 
@@ -387,6 +390,12 @@ discharging), `panel_load_watts`, `ac_import_watts`, `off_grid` (via `liveGridBa
 `backup_pool_percent`, `backup_reserve_percent`, `backup_full_capacity_kwh`,
 `backup_remaining_kwh`, and `backup_charge_minutes`/`backup_discharge_minutes` gated on
 the ±50 W deadband (both timers are always reported by the SHP2 regardless of direction).
+The gate (`backupTimerGate`, shared with the console's RUN line) reads the Cores' battery net
+while every home Core reports on a fresh meter. Otherwise that sum is not the pool's (0 W with
+every Core dark), so it reads an upper bound through the panel instead: each dark or frozen Core
+contributes its slot's delivery (`−sourceWatts`) while that panel is fresh. A slot taking AC
+proves a charge; a slot delivering never proves a discharge, since it can be the Core's PV passing
+through. With nothing to bound it, only the discharge timer is published.
 Then forecast, degradation, alert counts (split by engine source × severity), runway,
 RTE, clipping, curtailment, and self-consumption blocks. Internally the analytics reports
 are cached (~30 min) on the worker.
