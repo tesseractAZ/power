@@ -1,6 +1,6 @@
 import type { DeviceSnapshot, GridBackstop } from '../types';
 import { fmtPct, fmtW } from '../format';
-import { energyFlowModel, FLOW_EDGE_MIN_W } from './energyFlowModel';
+import { energyFlowModel, batteriesSubtitle, batteriesTitle, FLOW_EDGE_MIN_W } from './energyFlowModel';
 import { HUES, UI } from '../theme';
 
 /**
@@ -37,7 +37,7 @@ export function EnergyFlow({ devices, grid }: Props) {
   // v1.175.0 — every number on this card comes from energyFlowModel (pure, and run by the
   // test suite); this component only lays them out.
   const {
-    dpuCount, spareCount, membershipUnknown, pv, batNet, soc, load, panelState, liveCircuits,
+    dpuCount, spareCount, membershipUnknown, viaPanelCount, pv, batNet, soc, load, panelState, liveCircuits,
     gridState, gridSupplyW, gridToCoresW, gridToHouseW, coresToHouseW,
   } = energyFlowModel(devices, grid);
 
@@ -125,11 +125,12 @@ export function EnergyFlow({ devices, grid }: Props) {
           accent={gridState === 'active' ? HUES.battery : HUES.grid}
           dim={gridState !== 'active'}
         />
-        {/* Battery node (big) */}
+        {/* Battery node (big). v1.188.1 — a Core with no reading of its own is drawn from the
+            panel's meter of its slot, and the title and subtitle say so ("via panel", out / in). */}
         <Node
           {...Battery}
-          title={`Batteries (${dpuCount} DPU${spareCount > 0 ? `, +${spareCount} spare` : membershipUnknown ? ', spares not yet identified' : ''})`}
-          subtitle={batNet > 5 ? `▼ ${fmtW(batNet)} discharging` : batNet < -5 ? `▲ ${fmtW(-batNet)} charging` : 'idle'}
+          title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown })}
+          subtitle={batteriesSubtitle({ batNet, viaPanelCount })}
           value={fmtPct(soc, 1)}
           big
           accent={socAccent(soc)}

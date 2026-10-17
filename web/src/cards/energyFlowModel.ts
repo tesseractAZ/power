@@ -1,5 +1,6 @@
-import type { DeviceSnapshot, DpuProjection, GridBackstop, Shp2Projection } from '../types';
+import type { DeviceSnapshot, DpuProjection, GridBackstop, Shp2EnergySource, Shp2Projection } from '../types';
 import { shp2ConnectedDpuSns, isShp2Connected, allPanels } from '../shp2Membership';
+import { fmtW } from '../format';
 
 /**
  * v1.175.0 — the Energy flow card's numbers, as a pure function of the snapshot.
@@ -19,6 +20,12 @@ import { shp2ConnectedDpuSns, isShp2Connected, allPanels } from '../shp2Membersh
  * takes the rest of the house. The Solar and Batteries
  * nodes are NOT balanced against them: PV is metered on the DC side and the house on the
  * AC side, and the MPPT, charger and inverter losses between them are not drawn.
+ *
+ * v1.188.1 — a Core with no reading of its own is metered at the PANEL. The panel measures each
+ * source slot itself, so a connected Core whose telemetry is absent (cloud-offline, or listed
+ * without a projection) still has an AC output, an AC input and a battery percentage on the
+ * panel's side while the panel's reading is live; the Batteries node then says "via panel". The
+ * house-on-grid inference is drawn only on the Cores' own meters (see houseOnGrid).
  */
 
 /** Below this an edge is not drawn (and an active grid with no qualifying edge keeps
@@ -38,9 +45,15 @@ export interface EnergyFlowModel {
   /** v1.182.0 — a panel is present but its source list is not known, so every online DPU is
    *  drawn as home — bench spares included — and spareCount cannot say how many. */
   membershipUnknown: boolean;
+  /** v1.188.1 — connected Cores drawn from the PANEL's meter of their source slot because
+   *  they have no reading of their own (0 while every Core reports). */
+  viaPanelCount: number;
   pv: number;
+  /** The Cores' AC output: their own inverters' meters, plus the panel's slot meter for a
+   *  Core drawn via the panel. */
   acOut: number;
-  /** > 0 = discharging, from per-pack flow. */
+  /** > 0 = discharging, from per-pack flow; a Core drawn via the panel adds its slot's net
+   *  AC output (the panel cannot see its packs, so that share includes the Core's PV). */
   batNet: number;
   soc: number | null;
   /** The house total (SHP2 circuits), or NULL when the panel is silent or frozen. */
@@ -84,18 +97,18 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     panels.flatMap((p) => p.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
   );
   const gridDpus = sourceSns.size > 0 ? dpus.filter((d) => sourceSns.has(d.sn)) : dpus;
-  const acIn = gridDpus.reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
-  const acOut = dpus.reduce((s, d) => s + (d.projection.acOutWatts ?? 0), 0);
+  // The Cores' own meters. A Core drawn via the panel adds its slot's figures below (v1.188.1).
+  const ownAcIn = gridDpus.reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
+  const ownAcOut = dpus.reduce((s, d) => s + (d.projection.acOutWatts ?? 0), 0);
   // v0.46.0 — battery net from PER-PACK flow, not DPU throughput, mirroring the server's
   // fleet_battery_net_watts. Pack out = discharge, pack in = charge; net > 0 = discharging.
-  const batNet = dpus.reduce(
+  const ownBatNet = dpus.reduce(
     // v1.186.2 — prefer the stream's fresh flow over the poll's last-non-zero replay (server snapshot.ts).
     (s, d) => s + d.projection.packs.reduce((p, pk) => { const f = pk.liveFlow ?? pk; return p + ((f.outputWatts ?? 0) - (f.inputWatts ?? 0)); }, 0),
     0,
   );
   // v1.145.0 — average only the packs that REPORTED; a silent DPU is not a 0% pack.
-  const socVals = dpus.map((d) => d.projection.soc).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
-  const soc = socVals.length === 0 ? null : socVals.reduce((a, b) => a + b, 0) / socVals.length;
+  const ownSocVals = dpus.map((d) => d.projection.soc);
 
   // v1.175.0 — the house load, and NULL when the panel's figure cannot be trusted.
   //
@@ -124,6 +137,37 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
       : measured.length === 0
         ? 'silent'
         : 'ok';
+
+  // ── v1.188.1 — Cores the panel meters for them ───────────────────────────
+  // Live 2026-10-16 20:04 MST: every Core cloud-offline since 10-14 23:52 (none projected), the
+  // panel fresh: main 0 W, its three source slots −1145, −1145 and −1119 W, the house 3.39 kW and
+  // the pool falling 92 → 86 %. With no Core reporting, the AC output summed to 0, the
+  // house-on-grid rule read that as "the Cores deliver nothing", and the card drew "GRID 3.39 kW
+  // importing" with a 3390 W grid → Loads edge beside "Batteries (0 DPU) — idle".
+  // The panel meters every source slot itself (sourceWatts = backupInfo.chWatt, from the same
+  // frame as its main and its circuits): negative = the Core delivering into the panel, positive
+  // = the Core charging from it (the sign App.tsx and Shp2Card flip for display). A CONNECTED
+  // slot (isConnected: the membership every flow here uses) whose Core has no reading of its own
+  // in this snapshot — offline (the server marks the slot dpuStale) or listed without a
+  // projection — is drawn from that figure, and only while the panel's own reading is live
+  // (panelState 'ok'). A Core that reports keeps its own meter: it is the faster one (~10 s
+  // against the panel's ~60 s frame), and its slot is never counted twice.
+  const ownMeter = new Set(dpus.map((d) => d.sn));
+  const silentSlots = panels
+    .flatMap((p) => (p.projection.sources ?? []).map((s, i) => ({ s, w: p.projection.sourceWatts?.[i] })))
+    .filter(({ s }) => s.isConnected && !!s.sn && !ownMeter.has(s.sn));
+  const viaPanel = panelState === 'ok'
+    ? silentSlots.filter((x): x is { s: Shp2EnergySource; w: number } => typeof x.w === 'number' && Number.isFinite(x.w))
+    : [];
+  const acIn = ownAcIn + viaPanel.reduce((t, x) => t + Math.max(0, x.w), 0);
+  const acOut = ownAcOut + viaPanel.reduce((t, x) => t + Math.max(0, -x.w), 0);
+  const batNet = ownBatNet - viaPanel.reduce((t, x) => t + x.w, 0);
+  const socVals = [...ownSocVals, ...viaPanel.map((x) => x.s.batteryPercentage)]
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  const soc = socVals.length === 0 ? null : socVals.reduce((a, b) => a + b, 0) / socVals.length;
+  // A connected Core with no figure from either meter: its delivery is unknown, not zero.
+  const unmeteredCores = silentSlots.length - viaPanel.length;
+
   const load: number | null = panelState === 'ok'
     ? measured.reduce((s, c) => s + (c.watts as number), 0)
     : panelState === 'absent'
@@ -169,7 +213,14 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // the panel shows the house drawing: the grid is the only other source. This covers the
   // up-to-60 s after the Cores stop, before the panel's next frame shows the main rising
   // (recorded 09-21 22:55:37-22:56:27: house 5137 W, Cores 0 W, main still 0).
-  const houseOnGrid = gridPresent && !coresDelivering && load != null && load >= FLOW_EDGE_MIN_W;
+  // v1.188.1 — and only on the Cores' OWN evidence. "The Cores deliver nothing" is a reading when
+  // at least one Core reports on its own meter and every connected Core has a figure (its own, or
+  // its slot's via the panel); a Core with neither is unknown, not idle. With no Core's own meter
+  // every figure comes from the panel's one frame, whose main measured the grid directly, so the
+  // main is drawn and nothing is inferred (10-16 20:04: no Core reporting, main 0 W, the house
+  // drawn as 3.39 kW of grid import).
+  const coresSeenIdle = !coresDelivering && dpus.length > 0 && unmeteredCores === 0;
+  const houseOnGrid = gridPresent && coresSeenIdle && load != null && load >= FLOW_EDGE_MIN_W;
   const gridActive = grid
     ? homeGridW > 0 || coresAcIn >= FLOW_EDGE_MIN_W || houseOnGrid
     : acIn >= FLOW_EDGE_MIN_W;
@@ -186,6 +237,8 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   //     the grid takes the rest. When a charge ends the panel's frame still shows the main
   //     carrying everything for up to a minute (09-22 04:53:41: main 3331 W, house 3335 W,
   //     Cores already outputting 3298 W); the fresh meter keeps their delivery on screen.
+  //     A Core drawn via the panel (v1.188.1) brings its slot's figure from the same frame as
+  //     the main, so the two agree to within the panel's own metering.
   //   · a silent or frozen panel (load null) → each edge from its own meter.
   let gridToHouseW: number;
   let coresToHouseW: number;
@@ -220,6 +273,7 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     spareCount: connected.size > 0 ? allDpus.length - dpus.length : 0,
     membershipUnknown: connected.size === 0
       && list.some((d) => (d.productName ?? '').toLowerCase().includes('smart home panel')),
+    viaPanelCount: viaPanel.length,
     pv,
     acOut,
     batNet,
@@ -233,4 +287,24 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     gridToHouseW,
     coresToHouseW,
   };
+}
+
+/** v1.188.1 — the Batteries node's title: the DPUs drawn on their own meters, the Cores drawn
+ *  through the panel, and the spares left out. With every Core drawn through the panel it reads
+ *  "Batteries (3 via panel)", not "0 DPU, 3 via panel" (the node holds three Cores, not none). */
+export function batteriesTitle(m: Pick<EnergyFlowModel, 'dpuCount' | 'viaPanelCount' | 'spareCount' | 'membershipUnknown'>): string {
+  const own = m.dpuCount > 0 || m.viaPanelCount === 0 ? [`${m.dpuCount} DPU`] : [];
+  const panelPart = m.viaPanelCount > 0 ? [`${m.viaPanelCount} via panel`] : [];
+  const spares = m.spareCount > 0 ? [`+${m.spareCount} spare`] : m.membershipUnknown ? ['spares not yet identified'] : [];
+  return `Batteries (${[...own, ...panelPart, ...spares].join(', ')})`;
+}
+
+/** v1.188.1 — the Batteries node's subtitle. A slot meters the Core's AC exchange with the panel,
+ *  which carries the Core's PV as well as its packs, so a figure that includes a Core drawn via
+ *  the panel reads "out" / "in", never "discharging" / "charging". */
+export function batteriesSubtitle(m: Pick<EnergyFlowModel, 'batNet' | 'viaPanelCount'>): string {
+  const acExchange = m.viaPanelCount > 0;
+  if (m.batNet > 5) return `▼ ${fmtW(m.batNet)} ${acExchange ? 'out' : 'discharging'}`;
+  if (m.batNet < -5) return `▲ ${fmtW(-m.batNet)} ${acExchange ? 'in' : 'charging'}`;
+  return 'idle';
 }
