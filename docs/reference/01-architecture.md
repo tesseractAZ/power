@@ -207,6 +207,14 @@ The same database also holds the durable night-charge tables `night_charge_ledge
 hardware serials, `samples.sn` carries three synthetic series: `weather` (GHI/cloud),
 `forecast` (day-ahead archive) and `night_charge` (disposable chart overlay).
 
+Three tables hold what the recorder knows about held readings (`heldSamples.ts`, v1.188.1).
+`held_samples` has the same four columns as `samples` and holds rows moved out of it because
+they restated a held reading (see 4.4); nothing in it is read as a measurement. `held_spans`
+(`sn`, `start_ts`, `end_ts`, `reason`, `rows`, `detected_at_ms`, `restored_at_ms`) logs each hold
+of an hour or more: `gate-stale` or `gate-shadow` when the recorder wrote nothing (4.3), `frozen`
+when held rows were moved, with `start_ts` the device's last fresh reading (exclusive) and `rows`
+the rows moved. `held_scan` keeps the scan's watermark.
+
 The composite `(sn, metric, ts)` index serves `query()`/`queryMulti()`; the
 dedicated single-column `idx_samples_ts` lets the hourly retention `DELETE WHERE
 ts < ?` seek instead of full-scanning under the write lock.
@@ -244,6 +252,25 @@ pushing only finite numbers. Metrics emitted per projection kind:
 - **Generic**: `soc`, `in_watts`, `out_watts`, `pv_watts`, `ac_in`, `ac_out`,
   `temp`.
 
+**Freshness gate (v1.188.1).** `extract()` writes a device's projection only while
+`projectionRecordable(d, now)` holds: its `lastTelemetryAtMs` is within `RECORD_FRESH_MS`
+(3 min, the 'Telemetry stale' alarm's figure) of now in either direction, and the panel's
+cloud-shadow latch (`contentStaleSinceMs`) is clear. `lastTelemetryAtMs` is stamped only when
+telemetry content lands, by `setDeviceQuota` (a REST quota) or `mergeDeviceQuota` (a translated
+MQTT delta), the only writers of a projection; a device without it is not recorded. The store keeps
+a device's last projection across `/device/list` polls (the alarms read it) and fetches quota only
+for a device listed online, so before v1.188.1 every change event after a device went offline in
+the cloud restated its last reading: after the 2026-10-14 internet outage, about 1,300 rows per
+Core per hour with no value changing for 20 h. The key is content, not `online` (a Core streaming
+MQTT while listed offline keeps recording, and a device absent from the list keeps its last flag),
+not `lastUpdated` (a bare `/status` flip bumps it) and not `lastQuotaAtMs` (REST only). A device's
+own content arrival emits `change`, so it is recorded at age 0 and the poll cadence and dedupe are
+unchanged; the gate bites only on rows written on another device's event. A latched panel shadow
+releases with hysteresis, so the first few moving readings after a shadow are not recorded either.
+A hold of an hour or more is logged in `held_spans` from the device's last fresh content, with one
+log line when it reaches an hour and one when the device reports again. The gate never writes the
+store: the offline, stale and blind alarms and the SoC ladder read the same projection as before.
+
 #### 4.4 Dedupe / heartbeat
 
 `shouldRecord(sn, metric, value, now)` (constants top of file):
@@ -253,6 +280,33 @@ pushing only finite numbers. Metrics emitted per projection kind:
   if unchanged.
 - `VALUE_EPSILON = 0.5` — between those bounds, write only if the value moved
   ≥ 0.5 (W or %).
+- The heartbeat restates only fresh content. The freshness gate (4.3) is shorter than
+  `MAX_INTERVAL_MS`, so a device that stops reporting gets no restated row at all, and a held
+  stretch is a gap, which every consumer already handles: the coverage gates, `integrateWh`'s
+  `maxGapMs`, the night ledger's per-Core coverage and the per-device gap sweep (4.7).
+
+**Held rows already written.** Rows written before v1.188.1 while a device was held are found by a
+scan and moved, unchanged, from `samples` to `held_samples`, so no consumer reads them as
+measurements. A stretch qualifies when, from the device's last changed value (a fresh reading,
+kept) to its last restated row, at least an hour passed with no metric of the device changing,
+some metric was restated at least three times and at least eight metrics were restated
+(`createFrozenScanner`). A gap with no rows is never a hold. Synthetic series and bench spares are
+never scanned. Each hour of a stretch moves in one transaction: copy, delete, the two counts
+compared (a mismatch rolls back), the span logged. Rows younger than 15 min wait for the next scan,
+because the lifetime rollup re-reads its last 10 min. The scan runs a minute after boot, then
+hourly, six hours of one device's rows read, or one hour of them moved, per timer tick. The first covers the
+retention window, and the night-charge capture waits for it (section 7 of chapter 15); later scans
+re-read 3 h before their watermark, so a hold still running is extended from where its last move
+stopped. It runs in the add-on (`SUPERVISOR_TOKEN` set) unless `RECORDER_HELD_SCAN=off`, and
+elsewhere only with `RECORDER_HELD_SCAN=on`. Each span logs one `HELD SAMPLES` line with an
+estimate of the held flow the lifetime counters had integrated; the counters are not rewritten,
+because Home Assistant reads a decrease as a meter reset. If a device's seeded gap clock (4.7) was
+one of the moved rows, the clock goes back to the last fresh reading.
+
+**Restoring.** `restoreHeldSamples(sn, start)` moves one span back unchanged and sets
+`held_spans.restored_at_ms`; no later scan moves a restored span again. In SQL: copy the span's rows
+(`sn = ? AND ts > start_ts AND ts <= end_ts`) from `held_samples` to `samples`, delete them from
+`held_samples`, and set `restored_at_ms` on the span.
 
 #### 4.5 Retention
 
@@ -260,7 +314,9 @@ Hourly `setInterval` runs `DELETE FROM samples WHERE ts < now − RETAIN_MS`.
 `RETAIN_MS` derives from the `RECORDER_RETENTION_DAYS` option (v1.51.0 —
 default 30 days, clamped [7, 3650] (cap raised from 730 in v1.108.0); malformed values fall back to the default
 so a config typo can never become a delete-everything retention). The
-effective value is logged at startup. Timer is `.unref()`'d.
+effective value is logged at startup. Timer is `.unref()`'d. The same sweep ages
+`held_samples` off at the same cutoff; `held_spans` rows are kept for the retention or
+61 days, whichever is longer (past the night ledger's 60-day sweep).
 
 #### 4.6 Lifetime accumulators — `rollupLifetime()`
 
@@ -339,6 +395,17 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   add-on could observe (`seededDeviceDarkMs`): how far its last sample trails the
   fleet's newest before the outage, plus monotonic time since this process's first home write, less every fleet-dark window already in the gap ledger between those two points (so an intervening short boot cannot charge a silent device with an earlier outage). The outage itself is the restart-spanning fleet gap, not every
   device's.
+- **Held devices (v1.188.1).** With the freshness gate (4.3) a held device writes nothing, so
+  the per-device sweep files a gap for a device the EcoFlow cloud lists offline for more than
+  6 h while another home device writes; before, its restated rows reset its clock. The fleet
+  gap of a fleet-wide hold ends at the first FRESH home write. A Core still held at a restart
+  is measured from its last fresh sample once the scan has moved its held rows (4.4).
+- **Clean-shutdown marker.** A restart-spanning gap is graceful (a deploy, not a power loss)
+  when the marker `close()` wrote is no older than one heartbeat before the newest persisted
+  home sample (`cleanShutdownWasGraceful`). Before v1.188.1 it had to be within a heartbeat on
+  either side, which assumed the newest sample was always near the stop; with the gate, a
+  deploy made while every home device was held finds its newest sample hours earlier. An older
+  marker, or none, is not graceful.
 - **Boot phases.** `createRecorder` blocks the whole add-on (no HTTP listener, MQTT
   ingest, poll or alarm evaluation), so it ends with one line on the monotonic clock:
   `open`, `schema+migrations`, `analyze` (the planner-statistics refresh — normally no

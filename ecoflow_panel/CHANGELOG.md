@@ -1,3 +1,26 @@
+## 1.188.1
+
+### Only fresh readings are saved; the stretch an outage froze is kept out of learning and scoring
+
+**History**
+
+- After an internet outage left the batteries offline in the EcoFlow cloud, Power kept saving each battery's last reading as if it were new, every five minutes, for as long as the cloud listed it offline. After the outage of 14–15 October that was about 1,300 rows per battery per hour in which nothing changed, with solar at 0 W through a sunny day. Power now saves a device's readings only while they are fresh. A device that is offline in the cloud, or whose last payload the cloud keeps replaying, leaves a gap in the history instead of a flat line, and recording resumes with its first fresh reading.
+- The readings saved that way are moved to a separate table in the same database, so the solar forecast, the typical-day curves, the soiling, health and energy figures, the history charts and the night-charge scoring no longer read them. Nothing was deleted: the rows are kept unchanged and can be moved back. The lifetime energy totals are not rewritten, because Home Assistant would read a decrease as a meter reset; the log states how much they took in from the frozen readings.
+
+**Night charge**
+
+- A night whose solar or house-load figures include an hour or more with no fresh readings is not scored, and its note says so. Nights already recorded on frozen readings (14 October, and 15 October if it was recorded before this update) are recorded again from what was measured.
+
+**Alerts**
+
+- A device that stays offline in the EcoFlow cloud for more than six hours now raises the "Device telemetry gap" warning; the repeated readings had kept it from firing. If the batteries are still offline when this update is installed, the warning is raised for each of them within about an hour. It is pushed, never spoken.
+- A restart made while every device was offline in the cloud, or while the internet was down, is reported as an add-on restart, not as a power outage.
+- The offline, stale and blind alarms and the battery-level alarms are unchanged.
+
+**Updating**
+
+- A minute after the update Power checks the stored history for frozen stretches, and the night-charge scoring waits for that check. Updating restarts the add-on.
+
 ## 1.188.0
 
 ### The Documentation tab opens a short operator guide

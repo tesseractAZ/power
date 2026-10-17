@@ -41,7 +41,7 @@ integrated) is what the coverage gates below compare against.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `maxGapMs` (default) | `10 min` | recorder heartbeats every 5 min; > 10 min = lost coverage, do not extrapolate |
+| `maxGapMs` (default) | `10 min` | recorder heartbeats every 5 min while a device reports fresh content; a held device writes nothing (architecture chapter, section 4.3), so its stretch is a gap; > 10 min = lost coverage, do not extrapolate |
 | `INTEGRATE_HEAD_LOOKBACK_MS` | `10 min` | how far callers widen the query lower bound so the pre-window boundary sample is available |
 
 > **F9 correctness note (v1.14.0):** the head-hold is conditioned on the *real*

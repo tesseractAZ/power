@@ -14,6 +14,13 @@ import { localParts } from './tariff.js';
 import { resolveRetentionDays } from './retention.js';
 // v1.187.20 — the backup window (checkpoints held still while a Home Assistant backup copies /data).
 import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './backupWindow.js';
+// v1.188.1 — held readings: the write gate, the held-span log and the exclusion of held rows.
+import {
+  createHeldSamples, projectionRecordable, heldSinceMs, HELD_SCAN_EVERY_MS,
+  type HeldSpan, type HeldScanSummary,
+} from './heldSamples.js';
+export { projectionRecordable, RECORD_FRESH_MS } from './heldSamples.js';
+export type { HeldSpan, HeldScanSummary } from './heldSamples.js';
 
 interface MetricSample {
   sn: string;
@@ -236,6 +243,24 @@ export function resolveDeferredRestartGap(inputs: {
   return { action: 'hold' };
 }
 
+/**
+ * v1.188.1 — was the stop before this boot deliberate? PURE. `markerTs` is the clean-shutdown
+ * marker close() wrote (null when the last exit was not clean); `maxTs` the newest persisted
+ * home sample (the restart gap's start).
+ *
+ * v1.14.0 required the marker within one heartbeat of that sample, on EITHER side, which assumed
+ * the newest sample was always within a heartbeat of the stop. That held only because the
+ * recorder restated a held device's last reading every 5 minutes: with the freshness gate, a
+ * deploy made while every home device was offline in the cloud (or the internet was down) finds
+ * its newest sample hours before the stop, and the deliberate stop would be ledgered as a power
+ * loss ("System outage — the Pi lost power", the power-outage count). A marker written AFTER the
+ * last fresh sample means the process stopped deliberately while it was up and seeing nothing.
+ * A marker older than that sample, by more than a heartbeat, predates it and proves nothing.
+ */
+export function cleanShutdownWasGraceful(markerTs: number | null, maxTs: number | null): boolean {
+  return markerTs != null && maxTs != null && markerTs >= maxTs - MAX_INTERVAL_MS;
+}
+
 // v0.13.1 — pseudo-device + metric names for the persisted weather-irradiance
 // series (the durable GHI backfill, see recordWeatherGhi). Stored under SN
 // "weather" so it shares the samples table + query() path with real devices
@@ -434,6 +459,19 @@ export interface Recorder {
   readNightCalibration: () => NightCalibration | null;
   /** v1.38.0 (WS2) — upsert the singleton calibration row (id forced to 1). */
   upsertNightCalibration: (c: NightCalibration) => void;
+  /** v1.188.1 — the held spans (heldSamples.ts) overlapping [sinceMs, untilMs] that are not
+   *  restored, oldest first: holds of an hour or more the gate did not record, and stretches of
+   *  held rows moved out of `samples`. Main thread only; OPTIONAL so test stubs and the
+   *  read-only worker keep compiling — a caller treats an absent method as "none". */
+  heldSpans?: (sinceMs: number, untilMs: number) => HeldSpan[];
+  /** v1.188.1 — false until the first scan for held rows has finished (or failed), in a
+   *  process that scans; the night-charge capture waits for it. Absent ⇒ ready. */
+  heldSamplesReady?: () => boolean;
+  /** v1.188.1 — run one scan for held rows to completion, synchronously (tests). */
+  scanHeldSamples?: (nowMs?: number) => HeldScanSummary;
+  /** v1.188.1 — move one excluded span's rows back to `samples`, unchanged; returns the rows
+   *  restored. The span is marked restored and never excluded again. */
+  restoreHeldSamples?: (sn: string, startMs: number) => number;
   close: () => void;
   /** Force a lifetime-rollup tick (used by tests / on shutdown). */
   rollupLifetime: () => void;
@@ -1077,6 +1115,48 @@ export function createRecorder(
 
   const insert = db.prepare(`INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)`);
 
+  // v1.188.1 — held readings (heldSamples.ts): the held-span log, and `held_samples`, where rows
+  // written while a device's readings were held are moved — kept, never deleted — so no consumer
+  // of `samples` reads them as measurements. The callbacks run only after createRecorder returns.
+  // Created AFTER the planner-statistics refresh, like every other prepared statement here: a
+  // statement on `samples` prepared before PRAGMA optimize marks the table as used, and optimize
+  // then re-analyzes it whenever its statistics are 10x off — the full-index ANALYZE on the boot
+  // path that v1.163.0 removed.
+  const retainMsForHeld = resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS) * 24 * 60 * 60 * 1000;
+  const heldSnFirst = db.prepare(SEED_SQL.firstSn);
+  const heldSnNext = db.prepare(SEED_SQL.nextSn);
+  const heldMetricFirst = db.prepare(SEED_SQL.firstMetric);
+  const heldMetricNext = db.prepare(SEED_SQL.nextMetric);
+  type HeldOne = { v: string | null } | undefined;
+  const heldStore = createHeldSamples(db, {
+    log,
+    retainMs: retainMsForHeld,
+    isExcludedSn: (sn) => SYNTHETIC_SNS.has(sn) || isBenchSpareSn(sn),
+    listSns: () => {
+      const out: string[] = [];
+      for (let sn = (heldSnFirst.get() as HeldOne)?.v ?? null; sn != null; sn = (heldSnNext.get(sn) as HeldOne)?.v ?? null) out.push(sn);
+      return out;
+    },
+    listMetrics: (sn) => {
+      const out: string[] = [];
+      for (let m = (heldMetricFirst.get(sn) as HeldOne)?.v ?? null; m != null; m = (heldMetricNext.get(sn, m) as HeldOne)?.v ?? null) out.push(m);
+      return out;
+    },
+    // A device still on its SEEDED gap clock whose newest persisted sample was a held row now
+    // moved: its clock goes back to the last fresh sample, so the per-device sweep measures the
+    // silence from where it really began (and a later boot's seed, which reads the same row,
+    // extends the same record instead of opening a second one).
+    onMoved: (sn, startMs, endMs) => {
+      const seed = lastInsertBySn.get(sn);
+      if (seededNotYetWritten.has(sn) && seed != null && seed > startMs && seed <= endMs) lastInsertBySn.set(sn, startMs);
+    },
+  });
+  // The scan runs on its own timer in the add-on (one step per tick) and only on request
+  // elsewhere, so a test process never has its seeded rows moved behind its back.
+  // RECORDER_HELD_SCAN=off stops it; =on schedules it outside the add-on.
+  const heldScanScheduled = process.env.RECORDER_HELD_SCAN !== 'off'
+    && (process.env.SUPERVISOR_TOKEN != null || process.env.RECORDER_HELD_SCAN === 'on');
+
   // Last-recorded state per (sn,metric) for dedupe
   type Last = { ts: number; value: number };
   const last: Map<string, Last> = new Map();
@@ -1328,10 +1408,10 @@ export function createRecorder(
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
     const maxTs = row?.maxTs == null ? null : Number(row.maxTs);
     bootFleetAnchorMs = maxTs;
-    // v1.14.0 — a clean-shutdown marker within a heartbeat of the pre-boot anchor
-    // means the preceding stop was deliberate (deploy/update), not a power loss.
+    // v1.14.0 — a clean-shutdown marker means the preceding stop was deliberate
+    // (deploy/update), not a power loss. v1.188.1 — one-sided: see cleanShutdownWasGraceful.
     const markerTs = readCleanShutdownMarker();
-    const graceful = markerTs != null && maxTs != null && Math.abs(markerTs - maxTs) <= MAX_INTERVAL_MS;
+    const graceful = cleanShutdownWasGraceful(markerTs, maxTs);
     const decision = classifyRestartGap(maxTs, Date.now(), RESTART_GAP_FLOOR_MS);
     if (decision.kind === 'record') {
       recordTelemetryGap(decision.startMs, decision.endMs, { restartSpanning: true, graceful });
@@ -1549,11 +1629,26 @@ export function createRecorder(
   let recordedSamplesPeak = 0;
   let lastSampleLogAt = Date.now();
 
-  function extract(snap: FleetSnapshot): MetricSample[] {
+  function extract(
+    snap: FleetSnapshot,
+    nowMs: number = Date.now(),
+    held?: Map<string, { sinceMs: number | null; shadow: boolean }>,
+  ): MetricSample[] {
     const out: MetricSample[] = [];
     for (const d of Object.values(snap.devices)) {
       const p = d.projection;
       if (!p) continue;
+      // v1.188.1 — THE FRESHNESS GATE. setDeviceList carries a device's projection across every
+      // /device/list poll (the alarms read it), and quota is fetched only for a device listed
+      // online, so a Core the cloud lists offline keeps its last reading in memory. Every later
+      // change event reached this loop and the 5-min heartbeat re-wrote that reading at `now`:
+      // after the 2026-10-14 outage, ~1,300 rows per Core per hour with nothing changing. A
+      // projection is written only while its content is fresh (projectionRecordable); a held
+      // device leaves a gap, which every consumer of samples already handles.
+      if (!projectionRecordable(d, nowMs)) {
+        held?.set(d.sn, { sinceMs: heldSinceMs(d), shadow: d.contentStaleSinceMs != null });
+        continue;
+      }
       const push = (metric: string, v: number | null | undefined) => {
         if (v == null || !Number.isFinite(v)) return;
         out.push({ sn: d.sn, metric, value: v });
@@ -1668,6 +1763,18 @@ export function createRecorder(
     return out;
   }
 
+  /** v1.188.1 — one evaluation of the fleet: write what is fresh, log what is held. */
+  function recordSnapshot(snap: FleetSnapshot): void {
+    const nowMs = Date.now();
+    const held = new Map<string, { sinceMs: number | null; shadow: boolean }>();
+    record(extract(snap, nowMs, held));
+    try {
+      heldStore.noteGate(held, nowMs);
+    } catch (e: any) {
+      log(`recorder: held-span log failed (${e?.message ?? e})`);
+    }
+  }
+
   // Subscribe to store changes, but coalesce: bursts of MQTT messages → one extract per tick.
   let pending = false;
   store.on('change', () => {
@@ -1676,12 +1783,20 @@ export function createRecorder(
     setImmediate(() => {
       pending = false;
       try {
-        record(extract(store.get()));
+        recordSnapshot(store.get());
       } catch (e: any) {
         log(`recorder: record failed ${e?.message ?? e}`);
       }
     });
   });
+
+  // v1.188.1 — the scan for held rows already written: first a minute after boot (the device
+  // roster is published by then, so bench spares are recognised), then hourly. One step per timer
+  // tick (heldSamples.ts scanInSteps), so the alarm loop is never held for long.
+  const heldScanFirst = heldScanScheduled ? setTimeout(() => heldStore.scanInSteps(), 60_000) : null;
+  heldScanFirst?.unref();
+  const heldScanTimer = heldScanScheduled ? setInterval(() => heldStore.scanInSteps(), HELD_SCAN_EVERY_MS) : null;
+  heldScanTimer?.unref();
 
   // Retention sweep every hour: drop samples older than the configured
   // retention (v1.51.0 — RECORDER_RETENTION_DAYS, default 30). The durable
@@ -1696,6 +1811,9 @@ export function createRecorder(
       const cutoff = Date.now() - RETAIN_MS;
       const res = prune.run(cutoff);
       if (res.changes && Number(res.changes) > 0) log(`recorder: pruned ${res.changes} old samples`);
+      // v1.188.1 — held rows age off with the samples they were part of.
+      const h = heldStore.prune(Date.now());
+      if (h.rows > 0) log(`recorder: pruned ${h.rows} old held samples`);
     } catch (e: any) {
       log(`recorder: prune failed ${e?.message ?? e}`);
     }
@@ -3050,7 +3168,7 @@ export function createRecorder(
   log(`recorder: boot phases — ${tOpen}, ${tSchema}, ${tAnalyze}, ${tSetup}, ${tSeed}, ${tProbe}, ${tRest} (total ${Math.round(performance.now() - bootT0)}ms, db ${dbPath})`);
 
   return {
-    insertSnapshot: (snap) => record(extract(snap)),
+    insertSnapshot: (snap) => recordSnapshot(snap),
     query: (sn, metric, sinceMs, untilMs, bucketSec) => {
       if (!bucketSec || bucketSec <= 0) {
         return queryStmt.all(sn, metric, sinceMs, untilMs) as Array<{ ts: number; value: number }>;
@@ -3095,8 +3213,15 @@ export function createRecorder(
     readNightLedger,
     readNightCalibration,
     upsertNightCalibration,
+    heldSpans: (sinceMs, untilMs) => heldStore.spans(sinceMs, untilMs),
+    heldSamplesReady: () => !heldScanScheduled || heldStore.isReady(),
+    scanHeldSamples: (nowMs) => heldStore.scanNow(nowMs),
+    restoreHeldSamples: (sn, startMs) => heldStore.restore(sn, startMs),
     close: () => {
       clearInterval(lifetimeTimer);
+      if (heldScanFirst) clearTimeout(heldScanFirst);
+      if (heldScanTimer) clearInterval(heldScanTimer);
+      heldStore.stop();
       // Final rollup so we don't lose the trailing minute of energy on shutdown.
       // rollupLifetime persists the emit high-water itself; if it throws before
       // reaching that, persist once more directly so the sidecar reflects the

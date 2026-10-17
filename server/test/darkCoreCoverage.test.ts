@@ -123,7 +123,8 @@ test('★ SOURCE PIN: the night-charge ledger PV sum is gated on WORST per-core 
   );
   assert.match(
     block,
-    /actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE \? round2\(pvWh \/ 1000\) : null;/,
+    // v1.188.1 — the same gate, now beside the held-telemetry clause (ledgerHeldTelemetry.test.ts).
+    /actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld \? round2\(pvWh \/ 1000\) : null;/,
     'below the floor the ledger must record NULL, never a deflated fleet sum',
   );
 });

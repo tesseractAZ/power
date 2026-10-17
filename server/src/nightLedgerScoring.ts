@@ -529,6 +529,150 @@ export function forecastSpanTagNote(shortMs: number): string {
     + 'load_err_frac reads low and buy_err_kwh high; the raw telemetry is past the re-capture horizon, so the row is kept as captured.';
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * v1.188.1 — HELD TELEMETRY.
+ *
+ * After the 2026-10-14 internet outage every Core stayed offline in the EcoFlow cloud for
+ * about 20 h and the recorder restated each one's last reading every 5 minutes (heldSamples.ts):
+ * PV 0 W all day while the pool charged to ~96 % on solar. The PV coverage gate counted those
+ * rows as coverage, so a row whose 24 h span lay inside the hold would have been SCORED on an
+ * actual PV of ~0 kWh: pv_err_frac near −1, pv_in_band 0 and, through the planner-sizing basis,
+ * a buy_err_kwh the readiness gate reads as its HARD under-buy evidence.
+ *
+ * The recorder no longer writes held readings and moves the ones it had written out of
+ * `samples`, and it logs each hold of an hour or more (`held_spans`). A row whose PV/load span
+ * overlaps a hold of a home Core or the house panel by HELD_LEDGER_MIN_OVERLAP_MS or more is
+ * not scored, with the reason: its PV (a Core held) or load (the panel held) actual is left
+ * empty — never integrated from held readings, and never from a span with a held hour cut out
+ * of it, which the trapezoid would drop and under-count. A row captured on held readings
+ * before this release is reset and re-captured while its telemetry is retained (the
+ * forecast-span repair's horizon and roster rules), else tagged.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** A hold this long inside the span is refused: the trapezoid (integrateWh above) bridges a gap
+ *  of up to an hour between two real readings and drops a longer one. */
+export const HELD_LEDGER_MIN_OVERLAP_MS = HOUR_MS;
+/** In `score_notes` of a row whose verdict already accounts for held telemetry (lower-cased
+ *  match): it makes the repair idempotent. */
+export const HELD_TELEMETRY_MARKER = 'telemetry held';
+
+/** A held span as the ledger reads it (heldSamples.ts HeldSpan). */
+export interface LedgerHeldSpan { sn: string; startMs: number; endMs: number }
+
+export interface HeldLedgerVerdict {
+  /** Home Cores held for HELD_LEDGER_MIN_OVERLAP_MS or more inside the span: no PV actual. */
+  pv: Array<{ sn: string; heldMs: number }>;
+  /** The house panel held for that long: no load actual. */
+  load: Array<{ sn: string; heldMs: number }>;
+}
+
+/** Length of the UNION of `sn`'s held spans, clipped to [fromMs, toMs] (a gate span and a moved
+ *  stretch can overlap). PURE. */
+export function heldMsWithin(spans: ReadonlyArray<LedgerHeldSpan>, sn: string, fromMs: number, toMs: number): number {
+  const parts = spans
+    .filter((s) => s.sn === sn)
+    .map((s) => [Math.max(fromMs, s.startMs), Math.min(toMs, s.endMs)] as [number, number])
+    .filter(([a, b]) => b > a)
+    .sort((x, y) => x[0] - y[0]);
+  let total = 0;
+  let curA = 0;
+  let curB = Number.NEGATIVE_INFINITY;
+  for (const [a, b] of parts) {
+    if (a > curB) {
+      if (curB > Number.NEGATIVE_INFINITY) total += curB - curA;
+      curA = a;
+      curB = b;
+    } else if (b > curB) {
+      curB = b;
+    }
+  }
+  if (curB > Number.NEGATIVE_INFINITY) total += curB - curA;
+  return total;
+}
+
+/** v1.188.1 — which of a row's PV/load actuals were held, over `span` (the [issue, +24 h] the
+ *  actuals are integrated over). Null when neither was. PURE. */
+export function heldLedgerVerdict(i: {
+  spans: ReadonlyArray<LedgerHeldSpan>;
+  coreSns: readonly string[];
+  panelSn: string;
+  span: TimeSpan;
+  minMs?: number;
+}): HeldLedgerVerdict | null {
+  const min = i.minMs ?? HELD_LEDGER_MIN_OVERLAP_MS;
+  const pv: HeldLedgerVerdict['pv'] = [];
+  for (const sn of [...i.coreSns].sort()) {
+    const heldMs = heldMsWithin(i.spans, sn, i.span.startMs, i.span.endMs);
+    if (heldMs >= min) pv.push({ sn, heldMs });
+  }
+  const load: HeldLedgerVerdict['load'] = [];
+  const panelHeld = heldMsWithin(i.spans, i.panelSn, i.span.startMs, i.span.endMs);
+  if (panelHeld >= min) load.push({ sn: i.panelSn, heldMs: panelHeld });
+  return pv.length === 0 && load.length === 0 ? null : { pv, load };
+}
+
+const heldParts = (v: HeldLedgerVerdict, name: (sn: string) => string): string => [
+  ...v.pv.map((p) => `PV — ${name(p.sn)} ${(p.heldMs / HOUR_MS).toFixed(1)} h`),
+  ...v.load.map((p) => `load — ${name(p.sn)} ${(p.heldMs / HOUR_MS).toFixed(1)} h`),
+].join(', ');
+
+/** v1.188.1 — the score note of a row not scored for held telemetry. PURE. */
+export function heldLedgerNote(v: HeldLedgerVerdict, name: (sn: string) => string): string {
+  return `not scored — ${HELD_TELEMETRY_MARKER}: ${heldParts(v, name)} of the 24 h span had no fresh readings `
+    + '(the EcoFlow cloud listed the device offline or replayed its last reading); the '
+    + `${v.pv.length > 0 && v.load.length > 0 ? 'PV and load actuals are' : v.pv.length > 0 ? 'PV actual is' : 'load actual is'} left empty rather than integrated from held readings.`;
+}
+
+/** v1.188.1 — the clause appended to a row past the re-capture horizon. Carries the marker. PURE. */
+export function heldTagNote(v: HeldLedgerVerdict, name: (sn: string) => string): string {
+  return `Telemetry held: ${heldParts(v, name)} of the 24 h span had no fresh readings and the actuals were `
+    + 'integrated from held readings; the raw telemetry is past the re-capture horizon, so the row is kept as captured.';
+}
+
+export interface HeldLedgerRepair {
+  action: 'recapture' | 'tag';
+  verdict: HeldLedgerVerdict;
+}
+
+/**
+ * v1.188.1 — the repair a CAPTURED row owes for held telemetry, or null. PURE.
+ * A row with a stored window whose PV/load span — [issue, min(capture, issue + 24 h)], the
+ * span its actuals were integrated over — overlaps a hold (heldLedgerVerdict), and whose notes
+ * do not already account for it. Inside the forecast-span repair's horizon, and re-capturable
+ * on today's devices (forecastSpanRecapturable), it is re-captured; otherwise tagged.
+ * Idempotent: a re-capture writes heldLedgerNote (the marker) and a tag carries it.
+ */
+export function heldLedgerRepair(
+  row: Pick<NightLedgerRow, 'outcome_captured_at_ms' | 'issued_at_ms' | 'window_start_ms' | 'window_end_ms' | 'score_notes'>
+    & Partial<Pick<NightLedgerRow, 'pv_model_sns' | 'delivered_kwh' | 'delivered_basis'>>,
+  i: { spans: ReadonlyArray<LedgerHeldSpan>; coreSns: readonly string[]; panelSn: string; nowMs: number; horizonMs: number },
+): HeldLedgerRepair | null {
+  const cap = row.outcome_captured_at_ms;
+  const issued = row.issued_at_ms;
+  if (typeof cap !== 'number' || typeof issued !== 'number' || !Number.isFinite(issued)) return null;
+  const ws = row.window_start_ms;
+  const we = row.window_end_ms;
+  if (typeof ws !== 'number' || typeof we !== 'number' || !(we > ws)) return null; // no window: nothing was integrated
+  if (String(row.score_notes ?? '').toLowerCase().includes(HELD_TELEMETRY_MARKER)) return null;
+  const verdict = heldLedgerVerdict({
+    spans: i.spans, coreSns: i.coreSns, panelSn: i.panelSn,
+    span: { startMs: issued, endMs: Math.min(cap, issued + FORECAST_SPAN_MS) },
+  });
+  if (!verdict) return null;
+  const inside = i.nowMs - issued <= i.horizonMs && forecastSpanRecapturable(row);
+  return { action: inside ? 'recapture' : 'tag', verdict };
+}
+
+/** v1.188.1 — the columns a held-telemetry re-capture resets: exactly the forecast-span reset's
+ *  columns, with its own note (no marker: the re-capture writes the verdict). PURE. */
+export function heldResetColumns(v: HeldLedgerVerdict, name: (sn: string) => string): Partial<NightLedgerRow> {
+  return {
+    ...forecastSpanResetColumns(0),
+    score_notes: `reset — the PV/load actuals had been integrated from held readings (${heldParts(v, name)} with no fresh `
+      + 'readings, before v1.188.1); re-captured by the backfill sweep.',
+  };
+}
+
 /** The actuator's tick (index.ts `nightActuationTick`): a restore due at the close lands
  *  on the first tick after it. */
 export const ACTUATOR_TICK_MS = 60_000;

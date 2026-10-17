@@ -324,7 +324,10 @@ Power keeps its history in SQLite at `/data/ecoflow.db`. `RECORDER_RETENTION_DAY
 pruned. Home Assistant backups include it while Power keeps running: just before the copy Power
 pauses the database's background tidy-up, and resumes after (on its own after 10 minutes if the
 backup never reports back). **Refresh snapshot** on the Strategy page writes a consistent copy
-to `/share/ecoflow-panel/` for an outside SQLite viewer.
+to `/share/ecoflow-panel/` for an outside SQLite viewer. Power records a device only while it
+reports fresh readings. Readings that earlier versions saved while a device was offline in the
+EcoFlow cloud, its last reading repeated as if new, are moved to a separate table in the same
+database: kept, not deleted, and not used for history, learning or scoring.
 
 ## Troubleshooting
 
@@ -339,6 +342,7 @@ to `/share/ecoflow-panel/` for an outside SQLite viewer.
 | No Home Assistant entities | MQTT discovery is off or cannot reach the broker. | Set `MQTT_DISCOVERY_ENABLED` and the broker options; check the log. |
 | Entities read unavailable | The add-on is stopped or its state messages stopped. | Check the add-on and broker logs. |
 | Circuit entities missing | They appear once the first poll lists the circuits. | Wait a minute after start. |
+| History shows a gap for a device | The EcoFlow cloud listed it offline, so Power had no fresh reading and recorded nothing. After 6 hours a "Device telemetry gap" warning is pushed. | Check the device's Wi-Fi and the EcoFlow app; recording resumes with its first reading. |
 | The supervised night charge was not armed | The notice reached no channel, or arming was refused. | Set `NOTIFY_CHANNEL` to `ha`; the card and the notice name the reason. |
 | Cost figures look flat | The tariff is not confirmed. | Enter the rates, then `TARIFF_APS_RATES_CONFIRMED`. |
 | "Setting changed" notification | A setting was changed outside Power, usually in the EcoFlow app. | Confirm the change was yours. |

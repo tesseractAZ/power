@@ -245,6 +245,8 @@ import {
   // v1.187.10 — the forecast span: capture waits for issue + 24 h; the one-time repair.
   ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
+  // v1.188.1 — held telemetry: a row on held readings is not scored; one captured on them is repaired.
+  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldResetColumns, heldTagNote,
 } from './nightLedgerScoring.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -3989,6 +3991,13 @@ function scoreCompletedNights(nowMs: number): void {
   const shp2 = findShp2(store.get().devices);
   if (!shp2 || shp2.projection?.kind !== 'shp2') return; // can't source actuals
   const shp2Sn = shp2.sn;
+  // v1.188.1 — not before the first scan for held rows has finished: until then a row could be
+  // captured on readings the recorder had restated, not measured (heldSamples.ts). The 30-min
+  // tick and the evening job retry.
+  if (!(recorder.heldSamplesReady?.() ?? true)) {
+    app.log.debug('night-charge: outcome capture waits for the first held-sample scan');
+    return;
+  }
   // v1.39.0: BACKFILL, not exactly-yesterday. The old scorer targeted only
   // localParts(now−24h) — a night left uncaptured across SHP2-wedge / downtime
   // days was orphaned FOREVER once the date advanced (an uncounted MNAR
@@ -3996,7 +4005,9 @@ function scoreCompletedNights(nowMs: number): void {
   // a night whose raw telemetry (~30 d retention) has aged out captures
   // HONESTLY as scored=0 with null actuals via the guards in scoreNightRow —
   // it does not stay uncaptured forever.
-  const rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
+  let rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
+  // v1.188.1 — a row captured on held readings is reset first, so the loop below re-captures it.
+  if (repairHeldNightOutcomes(rows, shp2Sn, nowMs)) rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
   // ★ THE v1.39.0 COMPLETION GATE (review HIGH ×2): a night may be captured
   // only once its FULL scored span has elapsed — 16 h past its REAL window
   // close. The pre-fix midnight tick captured yesterday's row while its
@@ -4110,6 +4121,14 @@ function scoreNightRow(
   //
   // Null over a deflated total, the same rule the rest of this file follows.
   const homeSns = shp2ConnectedDpuSns(store.get().devices);
+  // v1.188.1 — HELD TELEMETRY (nightLedgerScoring.heldLedgerVerdict): a home Core or the house
+  // panel with an hour or more of the span held — offline in the cloud with its last reading
+  // restated, or not recorded at all — leaves its actual empty, and the row is not scored.
+  const heldVerdict = heldLedgerVerdict({
+    spans: recorder.heldSpans?.(fcSpanStart, fcSpanEnd) ?? [],
+    coreSns: [...homeSns], panelSn: shp2Sn, span: { startMs: fcSpanStart, endMs: fcSpanEnd },
+  });
+  const deviceNameOf = (sn: string) => store.get().devices[sn]?.deviceName ?? sn;
   let actualPvKwh: number | null = null;
   let actualPvCoverage: number | null = null;
   if (homeSns.size) {
@@ -4124,12 +4143,15 @@ function scoreNightRow(
       worstCov = Math.min(worstCov, coverageFrac(pts, fcSpanStart, fcSpanEnd));
     }
     actualPvCoverage = round2(worstCov);
-    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE ? round2(pvWh / 1000) : null;
-    if (actualPvKwh == null) {
+    const pvHeld = heldVerdict != null && heldVerdict.pv.length > 0;
+    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld ? round2(pvWh / 1000) : null;
+    if (pvHeld) {
+      app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD for ${yDate} — ${heldVerdict.pv.map((p) => `${deviceNameOf(p.sn)} ${(p.heldMs / 3_600_000).toFixed(1)} h`).join(', ')} of the span had no fresh readings (held telemetry)`);
+    } else if (actualPvKwh == null) {
       app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD — worst per-core PV coverage ${worstCov.toFixed(2)} < ${PV_LEDGER_MIN_CORE_COVERAGE} over the scored span; a fleet sum across a dark core under-counts and this column is durable`);
     }
   }
-  const actualLoadKwh = loadPts.length ? round2(integrateWh(loadPts, false) / 1000) : null;
+  const actualLoadKwh = loadPts.length && !(heldVerdict != null && heldVerdict.load.length > 0) ? round2(integrateWh(loadPts, false) / 1000) : null;
 
   // Actual min SoC over the scored trajectory span (raw telemetry; used only for
   // soc_min_err, NOT the floor verdict — §3.3).
@@ -4212,6 +4234,8 @@ function scoreNightRow(
   const fcLoad = y.load_p50_kwh ?? null;
   if (!hadBasis) {
     scoreNotes = 'not scored — plan basis was incomplete (no trajectory to score).';
+  } else if (heldVerdict != null) {
+    scoreNotes = heldLedgerNote(heldVerdict, deviceNameOf);
   } else if (!covOk) {
     scoreNotes = `not scored — overnight grid_home_w coverage ${(winCoverage * 100).toFixed(0)}% < 90% (MNAR-excluded).`;
   } else if (actualMinSocPct == null) {
@@ -4666,6 +4690,43 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // Do NOT latch on failure — retry next minute-tick within the window.
     app.log.warn(`night-charge: evening job failed, will retry within the window (${e?.message ?? e})`);
   }
+}
+
+/**
+ * v1.188.1 — the rows captured on HELD readings (nightLedgerScoring.heldLedgerRepair): reset for
+ * the sweep to re-capture while their telemetry is retained, else tagged. Run by the sweep itself
+ * (scoreCompletedNights), with the same Cores and panel the capture then uses, so a re-captured
+ * row always carries the verdict and is not reset again. Rows are corrected in place, never
+ * deleted. Returns true when it reset one.
+ */
+function repairHeldNightOutcomes(rows: NightLedgerRow[], shp2Sn: string, nowMs: number): boolean {
+  let reset = false;
+  try {
+    const spans = recorder.heldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs) ?? [];
+    if (spans.length === 0) return false;
+    const horizonMs = forecastSpanRecaptureHorizonMs(
+      resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS), LEDGER_BACKFILL_SWEEP_DAYS,
+    );
+    const coreSns = [...shp2ConnectedDpuSns(store.get().devices)];
+    const nameOf = (sn: string) => store.get().devices[sn]?.deviceName ?? sn;
+    for (const y of rows) {
+      const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs });
+      if (!r) continue;
+      if (r.action === 'tag') {
+        recorder.recordNightOutcome(String(y.plan_date), {
+          score_notes: `${y.score_notes ?? ''} ${heldTagNote(r.verdict, nameOf)}`.trim(),
+        });
+        app.log.info(`night-charge: tagged ${y.plan_date} — its PV/load actuals were integrated from held readings and it is past the re-capture horizon; kept as captured.`);
+        continue;
+      }
+      recorder.recordNightOutcome(String(y.plan_date), heldResetColumns(r.verdict, nameOf));
+      reset = true;
+      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — its PV/load actuals had been integrated from held readings (pv ${y.actual_pv_kwh ?? 'null'} kWh, load ${y.actual_load_kwh ?? 'null'} kWh, buy_err ${y.buy_err_kwh ?? 'null'} kWh as captured).`);
+    }
+  } catch (e: any) {
+    app.log.debug(`night-charge: held-telemetry repair skipped (${e?.message ?? e})`);
+  }
+  return reset;
 }
 
 /**

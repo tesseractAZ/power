@@ -83,8 +83,8 @@ const MUTANTS = [
   {
     id: 'vii. ★ the durable ledger PV sum loses its coverage gate',
     file: INDEX,
-    find: '    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE ? round2(pvWh / 1000) : null;',
-    to: '    actualPvKwh = round2(pvWh / 1000); /* MUTANT */',
+    find: '    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld ? round2(pvWh / 1000) : null;',
+    to: '    actualPvKwh = !pvHeld ? round2(pvWh / 1000) : null; /* MUTANT */',
     why: 'A deflated fleet sum is written PERMANENTLY into the never-pruned ledger, feeding readiness band coverage and the HARD under-buy safety criterion. A bad ledger row does not age out.',
   },
   {
@@ -186,8 +186,8 @@ const MUTANTS = [
   {
     id: 'xxiv. ★ work runs after the boot-phases line',
     file: RECORDER,
-    find: '\n\n  return {\n    insertSnapshot: (snap) => record(extract(snap)),',
-    to: '\n  for (let i = 0; i < 1; i++) void i; /* MUTANT: work after the phases line */\n\n  return {\n    insertSnapshot: (snap) => record(extract(snap)),',
+    find: '\n\n  return {\n    insertSnapshot: (snap) => recordSnapshot(snap),',
+    to: '\n  for (let i = 0; i < 1; i++) void i; /* MUTANT: work after the phases line */\n\n  return {\n    insertSnapshot: (snap) => recordSnapshot(snap),',
     why: 'Anything placed between the line and the return blocks boot outside the measurement, and the phases still sum to the total the line reports.',
   },
   {

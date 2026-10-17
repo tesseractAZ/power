@@ -29,7 +29,8 @@ function makeStore(snap: any) {
 }
 function dpu(sn: string, batVol: number | null, minMv: number | null, maxMv: number | null) {
   return {
-    sn, deviceName: sn, productName: 'DPU', online: true, lastUpdated: Date.now(),
+    // v1.188.1 — a content clock: the recorder writes a projection only while it is fresh.
+    sn, deviceName: sn, productName: 'DPU', online: true, lastUpdated: Date.now(), lastTelemetryAtMs: Date.now(),
     projection: {
       kind: 'dpu', soc: 99, packCount: 0, packs: [],
       pvHighWatts: null, pvLowWatts: null, pvTotalWatts: 0, pvHighVolts: null, pvHighAmps: null,

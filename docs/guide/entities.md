@@ -142,7 +142,7 @@ Counts are of alerts active now.
 | `sensor.ecoflow_panel_system_outages_24h` | `ecoflow_system_outage_count_24h` | Data gaps and outages in the last 24 hours, all causes (diagnostic) | count |
 | `sensor.ecoflow_panel_power_outages_24h` | `ecoflow_system_power_outage_count_24h` | Times the add-on or host was down, not by a deliberate restart, in the last 24 hours (diagnostic) | count |
 | `sensor.ecoflow_panel_telemetry_gaps_24h` | `ecoflow_system_telemetry_gap_count_24h` | Cloud or MQTT stalls while the add-on stayed up, last 24 hours (diagnostic) | count |
-| `sensor.ecoflow_panel_device_telemetry_gaps_24h` | `ecoflow_system_device_gap_count_24h` | Times one device went silent while the others kept reporting, last 24 hours (diagnostic) | count |
+| `sensor.ecoflow_panel_device_telemetry_gaps_24h` | `ecoflow_system_device_gap_count_24h` | Times one device went silent for 6 hours or more while the others kept reporting, last 24 hours, including a device offline in the EcoFlow cloud that long (diagnostic) | count |
 | `sensor.ecoflow_panel_system_outage_minutes_24h` | `ecoflow_system_outage_minutes_24h` | Total minutes of gaps and outages in the last 24 hours (diagnostic) | min |
 | `sensor.ecoflow_panel_audible_alarm_channel` | `ecoflow_audible_channel_status` | Health of the spoken-alarm channel: reachable, UNREACHABLE, disabled or unknown (diagnostic) | text |
 | `sensor.ecoflow_panel_audible_speakers_reachable` | `ecoflow_audible_speakers_reachable` | Speakers that answered the last probe (diagnostic) | count |
