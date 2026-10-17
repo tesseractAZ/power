@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import {
   darkHomeSlots, offlineHomeCores, ownEnergyUntil, sunUp, slotPvWatts, windowSplit, slotAcEnergy, valueAt, inferPvStep,
   bridgeFleetFlow, heldPackKeysOf, slotPowerBasis, pvFieldVerdict, bridgeSite, reportsSinceReturn, BRIDGE_DWELL_MS,
-  BRIDGE_PV_EVIDENCE_STEPS,
+  BRIDGE_PV_EVIDENCE_STEPS, createEnergyBridge, bridgeOfflineKey,
 } from '../src/energyBridge.js';
 import { aggregateFleetFlow } from '../src/shp2Membership.js';
 import { publishReadiness } from '../src/publishReadiness.js';
@@ -91,6 +91,59 @@ test('★★★ a Core is bridged only once it has been offline for the dwell; i
   // The power sensors inside the dwell: the Core is not a dark slot, so nothing is withheld for it.
   const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 1200 }, devs(30_000), NIGHT, () => false, PHX);
   assert.deepEqual([f.ready, f.bridgedSlots, f.fleetBatteryNet], [true, 0, 1200]);
+});
+
+test('★★★ after a restart a Core listed offline with no transition time takes the persisted hand-off instant; the store\'s own transition time wins', () => {
+  const devs = (c1: Any): Any => ({ [PANEL]: panel(NOON, [-1145, -1145, -1119]), [C1]: c1, [C2]: core(C2, true), [C3]: core(C3, true) });
+  const persisted = NOON - 4 * 60_000;
+  const known = (sn: string): number | null => (sn === C1 ? persisted : null);
+  // First sight after a restart: no transition time. Without the lookup it reads as offline since
+  // before any run saw it (null); with it, the instant the crashed process saw.
+  assert.deepEqual(offlineHomeCores(devs(core(C1, false, false)), NOON).get(C1), { offlineSinceMs: null, bridged: true });
+  assert.deepEqual(offlineHomeCores(devs(core(C1, false, false)), NOON, known).get(C1), { offlineSinceMs: persisted, bridged: true });
+  assert.deepEqual(darkHomeSlots(devs(core(C1, false, false)), NOON, known).map((d) => [d.sn, d.darkSinceMs]), [[C1, persisted]]);
+  // A persisted instant inside the dwell is inside the dwell after the restart too.
+  const recent = (sn: string): number | null => (sn === C1 ? NOON - 60_000 : null);
+  assert.deepEqual(offlineHomeCores(devs(core(C1, false, false)), NOON, recent).get(C1), { offlineSinceMs: NOON - 60_000, bridged: false });
+  assert.deepEqual(darkHomeSlots(devs(core(C1, false, false)), NOON, recent), []);
+  // The store's transition time (this process saw the flip) wins over a persisted one.
+  assert.deepEqual(offlineHomeCores(devs({ ...core(C1, false), onlineChangedAtMs: NOON - 10 * 60_000 }), NOON, known).get(C1), { offlineSinceMs: NOON - 10 * 60_000, bridged: true });
+  // An online Core is not offline whatever was persisted for it.
+  assert.equal(offlineHomeCores(devs(core(C1, true)), NOON, known).has(C1), false);
+  // The power sensors read the same instant (a slot inside the dwell is not withheld).
+  const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, devs(core(C1, false, false)), NOON, () => false, PHX, recent);
+  assert.deepEqual([f.ready, f.bridgedSlots], [true, 0]);
+});
+
+test('★★★ the bridge persists each hand-off instant once, reads it back in a new process, and deletes it once the Core is listed online', () => {
+  const rows = new Map<string, { wh: number; ts: number }>();
+  const writes: string[] = [];
+  const deps: Any = {
+    readLifetime: (k: string) => rows.get(k) ?? { wh: 0, ts: 0 },
+    writeLifetime: (k: string, wh: number, ts: number) => { rows.set(k, { wh, ts }); writes.push(k); },
+    deleteLifetime: (k: string) => { rows.delete(k); },
+    listLifetimeKeys: () => [...rows.keys()],
+    query: () => [],
+    coreCapacityWh: () => null,
+    site: () => PHX,
+    log: () => {},
+  };
+  const flip = NOON - 5 * 60_000;
+  const devs = (c1: Any): Any => ({ [PANEL]: panel(NOON, [-1145, -1145, -1119]), [C1]: c1, [C2]: core(C2, true), [C3]: core(C3, true) });
+  const a = createEnergyBridge(deps);
+  assert.deepEqual(a.offlineHomeCores(devs({ ...core(C1, false), onlineChangedAtMs: flip }), NOON).get(C1), { offlineSinceMs: flip, bridged: true });
+  assert.deepEqual(rows.get(bridgeOfflineKey(C1)), { wh: 1, ts: flip });
+  a.offlineHomeCores(devs({ ...core(C1, false), onlineChangedAtMs: flip }), NOON + 30_000);
+  assert.deepEqual(writes, [bridgeOfflineKey(C1)], 'written once, not on every read');
+  // A new process (a crash restart): the store lists C1 offline with no transition time.
+  const b = createEnergyBridge(deps);
+  assert.deepEqual(b.offlineHomeCores(devs(core(C1, false, false)), NOON + 60_000).get(C1), { offlineSinceMs: flip, bridged: true });
+  assert.deepEqual(b.debug(devs(core(C1, false, false)), NOON + 60_000).offlineSince, [{ sn: C1, sinceMs: flip }]);
+  // Listed online again: deleted, so a later first sight offline does not reuse it.
+  b.offlineHomeCores(devs({ ...core(C1, true), onlineChangedAtMs: NOON + 90_000 }), NOON + 90_000);
+  assert.equal(rows.has(bridgeOfflineKey(C1)), false);
+  assert.deepEqual(b.offlineHomeCores(devs(core(C1, false, false)), NOON + 120_000).get(C1), { offlineSinceMs: null, bridged: true });
+  assert.equal(rows.has(bridgeOfflineKey(C1)), false, 'no transition time, nothing persisted');
 });
 
 test('★★★ how far a Core\'s own pv_total / ac_in count: a read cuts at the instant it went offline at once, a rollup only once it is bridged', () => {

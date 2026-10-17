@@ -6,7 +6,8 @@
  * at the configured site; the panel's PV field is used only once checked against the inferred
  * lower bound; a slot on a cloud-offline panel is left out of the power sensors; register
  * movement while the Core has not reported since its return is absorbed, and when it has, its BMS
- * counter jump is absorbed; nothing published ever steps down.
+ * counter jump is absorbed; the hand-off instant is persisted, so a restart (a crash included)
+ * hands a dark Core over where the previous process did; nothing published steps down.
  *
  *   B-i     the slot meter's direction is flipped (the Cores supplying the panel read as charging)
  *   B-ii    the night gate is removed (a dark night is inferred, its outflow booked as PV)
@@ -63,6 +64,13 @@
  *   B-liii  a slot on an online but stale panel is left out instead of withholding
  *   B-liv   the rollup's day/night test ignores the configured site
  *   B-lv    the power sensors' day/night test ignores the configured site
+ *   B-lvi   a restart ignores the persisted hand-off instant (a Core first seen offline is cut at the watermark)
+ *   B-lvii  the hand-off instant is never persisted
+ *   B-lviii the hand-off instant outlives the Core's return
+ *   B-lix   a dark Core with no projection is left out of the contributors (its pending PV drops at a crash restart)
+ *   B-lx    a dark Core with no projection is not cut (its last reading is held past the flip)
+ *   B-lxi   the bridge's window ignores the persisted instant (a crash restart re-books what the BMS counted)
+ *   B-lxii  the recorder's cut ignores the persisted instant (PV Production steps down at a crash restart)
  *
  *   node scripts/mutate-energy-core-outage.mjs
  */
@@ -464,9 +472,58 @@ const MUTANTS = [
   {
     id: 'B-lv. ★★ the power sensors\' day/night test ignores the configured site',
     file: EB,
-    find: '    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site()),',
-    to: '    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, PHOENIX_SITE), /* MUTANT */',
+    find: '    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site(), known),',
+    to: '    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, PHOENIX_SITE, known), /* MUTANT */',
     why: 'Outside Phoenix Fleet PV and Battery Net read unknown through the local night of a Core outage (Phoenix daylight, no trusted field).',
+  },
+  {
+    id: 'B-lvi. ★★★ a restart ignores the persisted hand-off instant',
+    file: EB,
+    find: '  const t = finite(dpu.onlineChangedAtMs) ?? (known ? finite(known(src.sn)) : null);',
+    to: '  const t = finite(dpu.onlineChangedAtMs); /* MUTANT */',
+    why: 'The review defect: a crash within one rollup of a daylight dark flip steps PV Production down at the first publish after the restart (150-525 Wh), and the bridge books again the battery energy the BMS counted before the flip.',
+  },
+  {
+    id: 'B-lvii. ★★★ the hand-off instant is never persisted',
+    file: EB,
+    find: '        deps.writeLifetime(bridgeOfflineKey(src.sn), 1, t);',
+    to: '        /* MUTANT */',
+    why: 'Nothing survives a crash: the restarted process cuts the dark Cores at the watermark (the same step down and double count).',
+  },
+  {
+    id: 'B-lviii. ★★ the hand-off instant outlives the Core\'s return',
+    file: EB,
+    find: '      offlineAt.delete(sn);\n      deps.deleteLifetime(bridgeOfflineKey(sn));',
+    to: '      /* MUTANT */',
+    why: 'A Core that came back keeps the instant of an outage that ended; a later outage the add-on did not see starts from it.',
+  },
+  {
+    id: 'B-lix. ★★★ a dark Core with no projection is left out of the contributors',
+    file: RC,
+    find: '        const o = offline.get(d.sn);\n        if (o) {',
+    to: '        const o = offline.get(d.sn);\n        if (o && false) { /* MUTANT */',
+    why: 'After a crash restart a dark Core has no projection (no quota is fetched for a device listed offline): the PV it delivered between the last rollup and the flip drops out of the read, and out of the counter for good.',
+  },
+  {
+    id: 'B-lx. ★★ a dark Core with no projection is not cut',
+    file: RC,
+    find: '          const untilMs = ownEnergyUntil(o, phase);',
+    to: '          const untilMs = undefined as number | null | undefined; /* MUTANT */',
+    why: 'Its last reading before the flip is held up to 10 min past it (integrateWh\'s tail hold) beside the bridge: counted twice.',
+  },
+  {
+    id: 'B-lxi. ★★★ the bridge\'s window ignores the persisted instant',
+    file: EB,
+    find: '    for (const s of darkHomeSlots(snap.devices, nowMs, known)) {',
+    to: '    for (const s of darkHomeSlots(snap.devices, nowMs)) { /* MUTANT */',
+    why: 'The review defect: after a crash restart the first bridged window starts at the watermark and books again the battery energy the BMS counted before the flip (125-375 Wh).',
+  },
+  {
+    id: 'B-lxii. ★★★ the recorder\'s cut ignores the persisted instant',
+    file: EB,
+    find: '      return offlineHomeCores(devices, nowMs, known);',
+    to: '      return offlineHomeCores(devices, nowMs); /* MUTANT */',
+    why: 'The review defect: the first publish after a crash restart drops the PV and AC input the crashed process had shown since the flip (PV Production steps down).',
   },
 ];
 

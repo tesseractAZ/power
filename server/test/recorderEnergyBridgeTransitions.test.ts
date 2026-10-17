@@ -120,6 +120,136 @@ test('★★★ a daylight grid charge, every Core dark mid-window: Grid to Batt
   } finally { p.close(); }
 });
 
+/* ── a crash restart within one rollup of a dark flip ───────────────────────── */
+
+type Totals = ReturnType<P['read']>;
+
+/**
+ * Minute by minute from a rollup: a rollup every 5 min, a published read every minute (asserted
+ * never to decrease, across the crash too), the published totals collected. `each` runs before
+ * each minute's readings. Just after minute `crashAfter`'s read comes a second read: with `crash`
+ * the recorder crashes between the two (Plant.crash: no close(), so no final rollup and the emit
+ * high-water of the last rollup), and that second read is the restarted process's first publish
+ * (the MQTT connect publish, before its first rollup 30 s after boot).
+ */
+function replay(p: P, o: { minutes: number; each: (t: number, m: number) => void; crashAfter: number; crash: boolean; keepProjection?: boolean }): Totals[] {
+  const series: Totals[] = [];
+  p.rec.rollupLifetime();
+  for (let m = 1; m <= o.minutes; m++) {
+    const t = p.clock + MIN;
+    o.each(t, m);
+    p.minute(t);
+    p.clock = t;
+    if (m % 5 === 0) p.rec.rollupLifetime();
+    series.push(p.read());
+    if (m === o.crashAfter) {
+      if (o.crash) p.crash({ keepProjection: o.keepProjection });
+      series.push(p.read());
+    }
+  }
+  return series;
+}
+
+const CRASH_CASES: Array<{ name: string; make: () => P; each: (p: P, stored: { wh: number }) => (t: number, m: number) => void; flipM: number; flipBackMs: number; crashAfter: number; keepProjection?: boolean; truth?: (minutes: number) => Partial<Totals> }> = [
+  {
+    name: 'daylight (trusted field), dark 1 min after a rollup, a crash 3 min later',
+    make: () => sunnyOnline(NOON, { pvW: 3000, outW: 500, fieldW: 3000, trusted: true }),
+    each: (p, stored) => riseSoc(p, 2500, stored),
+    flipM: 12, flipBackMs: MIN, crashAfter: 14,
+    truth: (min) => ({ pv: 3 * 3000 * min / 60, chg: 3 * 2500 * min / 60 }),
+  },
+  {
+    name: 'daylight (trusted field), dark 3½ min into a window, a crash before the rollup (inside the dwell)',
+    make: () => sunnyOnline(NOON, { pvW: 3000, outW: 500, fieldW: 3000, trusted: true }),
+    each: (p, stored) => riseSoc(p, 2500, stored),
+    flipM: 14, flipBackMs: 30_000, crashAfter: 14,
+  },
+  {
+    name: 'daylight (trusted field), dark 1 min after a rollup, a crash 3 min later, MQTT still delivering after the restart',
+    make: () => sunnyOnline(NOON, { pvW: 3000, outW: 500, fieldW: 3000, trusted: true }),
+    each: (p, stored) => riseSoc(p, 2500, stored),
+    flipM: 12, flipBackMs: MIN, crashAfter: 14, keepProjection: true,
+    truth: (min) => ({ pv: 3 * 3000 * min / 60, chg: 3 * 2500 * min / 60 }),
+  },
+  {
+    name: 'night, the Cores discharging 6 kW, dark 2 min into a window, a crash 2 min later',
+    make: () => {
+      const p = new Plant(NIGHT);
+      p.sourceWatts = [-2000, -2000, -2000];
+      p.coreBatW = [2000, 2000, 2000];
+      return p;
+    },
+    each: () => () => {},
+    flipM: 13, flipBackMs: MIN, crashAfter: 14,
+    truth: (min) => ({ dsg: 3 * 2000 * min / 60 }),
+  },
+];
+
+for (const c of CRASH_CASES) {
+  test(`★★★ a crash restart, ${c.name}: every read matches the uninterrupted process's (none steps down) and nothing is counted twice`, () => {
+    let flipAt = 0;
+    const run = (crash: boolean): { series: Totals[]; logs: string[] } => {
+      const p = c.make();
+      flipAt = p.clock + c.flipM * MIN - c.flipBackMs;
+      try {
+        const stored = { wh: 0 };
+        const each = c.each(p, stored);
+        const series = replay(p, {
+          minutes: 45,
+          each: (t, m) => { each(t, m); if (m === c.flipM) p.setOnline(false, CORES, t - c.flipBackMs); },
+          crashAfter: c.crashAfter,
+          crash,
+          keepProjection: c.keepProjection,
+        });
+        return { series, logs: p.logs };
+      } finally { p.close(); }
+    };
+    const ref = run(false);
+    const got = run(true);
+    assert.equal(got.series.length, ref.series.length);
+    for (let i = 0; i < ref.series.length; i++) {
+      for (const k of ['pv', 'chg', 'dsg', 'gridImport'] as const) {
+        near(got.series[i][k], ref.series[i][k], 0.01, `read ${i + 1} ${k}: after the crash against the uninterrupted process`);
+      }
+    }
+    if (c.truth) {
+      // Against the plant's truth from the rollup at minute 10 to the end (35 min).
+      const want = c.truth(35);
+      const last = got.series[got.series.length - 1];
+      for (const [k, v] of Object.entries(want) as Array<[keyof Totals, number]>) {
+        near(last[k] - got.series[9][k], v, 3, `${k} over the 35 min across the crash`);
+      }
+    }
+    // The restarted process bridged each Core from the hand-off instant the crashed one saw.
+    const since = `is cloud-offline since ${new Date(flipAt).toISOString()}`;
+    assert.equal(got.logs.filter((l) => l.includes(since)).length, CORES.length, got.logs.filter((l) => l.startsWith('energy bridge:')).join('\n'));
+  });
+}
+
+test('★★★ the hand-off instant is persisted at the flip, survives a crash, and is cleared once the Core is listed online again; none is invented for a Core dark since first sight', () => {
+  const p = new Plant(NIGHT);
+  try {
+    const key = `bridge_offline_${CORES[0]}`;
+    p.rec.rollupLifetime();
+    p.run(5);
+    const flip = p.clock - 20_000;
+    p.setOnline(false, [CORES[0]], flip);
+    p.read();
+    assert.ok(p.lifetimeKeys().includes(key), 'written by the first read after the flip');
+    p.crash();
+    p.run(5);
+    assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.offlineSince, [{ sn: CORES[0], sinceMs: flip }]);
+    assert.ok(p.logs.some((l) => l.includes(`Core ${CORES[0]} is cloud-offline since ${new Date(flip).toISOString()}`)), 'the restarted process bridges it from the persisted instant');
+    p.setOnline(true, [CORES[0]]);
+    p.read();
+    assert.ok(!p.lifetimeKeys().includes(key), 'cleared once the Core is listed online');
+    assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.offlineSince, []);
+    p.darkAtFirstSight();
+    p.run(5);
+    assert.ok(!p.lifetimeKeys().some((k) => k.startsWith('bridge_offline_')), 'no transition seen, no instant written');
+  } finally { p.close(); }
+});
+
 /* ── blips: inside the dwell nothing is bridged ──────────────────────────────── */
 
 for (const [label, sns] of [['one Core', [CORES[0]]], ['all three Cores', CORES]] as const) {

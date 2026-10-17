@@ -16,7 +16,7 @@ import { resolveRetentionDays } from './retention.js';
 import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './backupWindow.js';
 // v1.188.1 — battery and solar energy metered at the panel's source slots while a home Core is dark.
 import {
-  createEnergyBridge, offlineHomeCores, ownEnergyUntil, reportsSinceReturn, slotPvWatts, bridgeSite,
+  createEnergyBridge, ownEnergyUntil, reportsSinceReturn, slotPvWatts, bridgeSite,
   type BridgedFleetFlow, type BridgeRollupResult, type EnergyBridgeDebug,
 } from './energyBridge.js';
 
@@ -1897,11 +1897,23 @@ export function createRecorder(
     // offline: its own pv_total / ac_in count up to that instant and no further (rows past it are
     // held values, not readings, and the bridge counts that span). A read cuts at once, so a dark
     // flip between rollups keeps what it already showed; a rollup inside the dwell still counts
-    // the Core itself (ownEnergyUntil).
-    const offline = offlineHomeCores(snap.devices, nowMs);
+    // the Core itself (ownEnergyUntil). The instant is persisted (energyBridge.offlineHomeCores),
+    // so after a restart, a crash included, the cut falls where it fell before it.
+    const offline = energyBridge.offlineHomeCores(snap.devices, nowMs);
     for (const d of devices) {
       const p = d.projection;
-      if (!p) continue;
+      if (!p) {
+        // v1.188.1 — an offline home Core with no projection (a restart while it is dark: no quota
+        // is fetched for a device listed offline) keeps its recorded series up to the same cut, so
+        // a crash restart neither drops what the reads showed nor leaves a span to nobody.
+        const o = offline.get(d.sn);
+        if (o) {
+          const untilMs = ownEnergyUntil(o, phase);
+          out.fleet_pv_wh.push({ sn: d.sn, metric: 'pv_total', untilMs });
+          out.fleet_grid_import_wh.push({ sn: d.sn, metric: 'ac_in', untilMs });
+        }
+        continue;
+      }
       if (p.kind === 'dpu') {
         // v0.9.74 — fleet_pv_wh is the HA Energy Dashboard "lifetime PV
         // production" counter. Only SHP2-connected DPUs deliver power

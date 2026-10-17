@@ -236,7 +236,8 @@ batteries (the vendor ledger for 10-15: solar 48.8, battery out 49.0 kWh).
 
 A slot is **dark** when the panel lists it connected, names its Core, and that Core
 is listed on the account and has been cloud-offline for `BRIDGE_DWELL_MS` (3 min, from
-its `onlineChangedAtMs`), or since before this process saw it (no transition time).
+its `onlineChangedAtMs`, or after a restart from the instant persisted for it), or since
+before any run of the add-on saw it go offline (no transition time and none persisted).
 A `/status` flip lasts seconds and the 2026-10-03 `/device/list` blip flagged three
 Cores offline for about 92 s: inside the dwell nothing is bridged and no marker or log
 line is written, and the Core is neither summed by `aggregateFleetFlow` nor bridged.
@@ -250,6 +251,22 @@ and in a rollup once the dwell has passed. A rollup that falls inside the dwell 
 counts the Core itself, and the bridge then starts at that rollup. So a Core that goes
 dark between rollups keeps the energy the read path already showed, and no stretch is
 counted twice.
+
+The instant is persisted (`bridge_offline_<sn>`, the row's ts; written when the store sees
+the flip, deleted once the Core is listed online again; `/api/debug/battery-lifetime` →
+`bridge.offlineSince`). A restart reads it back: the store then lists the Core offline with
+no transition time, and the persisted instant stands in for it. That matters after a
+**crash** (a power cut, an OOM kill, an uncaught exception), which runs no final rollup:
+the watermark is the last rollup's, up to 5 min before the crash, and the emit high-water
+sidecar is the one that rollup persisted. Without the instant the cut and the bridge's
+window would both fall at the watermark. The first publish after the restart would then
+drop the PV and AC input the crashed process had shown since the flip (PV Production
+stepped down 150-525 Wh in the replays), and the bridge would book again the battery
+energy the BMS had counted before the flip (125-375 Wh). The Core's recorded series also
+count up to the cut when it has no projection: no quota is fetched for a device listed
+offline, so after a restart a dark Core usually has none. A crash restart therefore
+publishes what the uninterrupted process would have (`recorderEnergyBridgeTransitions`:
+read for read, every minute).
 
 Each rollup window, for each dark slot, the bridge reads the slot meter
 (`src<n>_w`, the panel's `backupInfo.chWatt`; negative = the Core supplies the panel):
@@ -378,10 +395,17 @@ poll otherwise). At an outage start, the battery flow from the
 Core's last register reading to the bridge's window start (the cloud's offline detection,
 and a rollup that fell inside the dwell: at most 3 min) is absorbed at the hand-over
 without being bridged; register data that MQTT still delivers before the bridge's first
-marker is counted by the BMS and again by the bridge (at most one rollup window). Nothing can be bridged while the panel itself is dark; and there is
-no backfill: a bridge that starts mid-outage counts from its first window (the energy
-before it is absorbed at the hand-over; the vendor's `ecoflow_panel:vendor_*` statistics
-cover those days).
+marker is counted by the BMS and again by the bridge (at most one rollup window). When no
+run of the add-on saw the flip, there is no instant to persist: the Core went offline while
+the add-on was down, or within one publish (30 s) before a crash. After a graceful stop
+nothing is lost (the final rollup leaves nothing pending). After a crash while the Core
+was reporting, the first publish drops the PV and AC input pending since the last rollup.
+The bridge's first window books that span back, so Home Assistant sees a dip of up to one
+rollup window's energy, then the rise. That span's battery energy is counted by the BMS
+and again by the bridge (at most one rollup window). Nothing can be bridged while the
+panel itself is dark; and there is no backfill: a bridge that starts mid-outage counts
+from its first window (the energy before it is absorbed at the hand-over; the vendor's
+`ecoflow_panel:vendor_*` statistics cover those days).
 
 > **Anti-footgun — no rollback past the bridge while it holds energy.** The bridged battery
 > energy lives only in the `bridge_battery_*` rows, which a release without the bridge does not
@@ -480,7 +504,8 @@ totals (`chargeWh`, `dischargeWh`, `pvWh`, `gridImportWh`, `watermarkMs`), the p
 `markers` whose jump will be absorbed on return, the BMS energy of marked packs already
 absorbed before their hand-over (`absorbed`), the `trustedSlots` (PV field passed its
 check), the running field checks (`pvChecks`: `fieldWh`, `inferredWh`, `stepWh`, `verdict`
-per dark slot in daylight), per-Core bridged energy since it went dark (`cores`), each dark slot's power
+per dark slot in daylight), per-Core bridged energy since it went dark (`cores`), the persisted
+hand-off instant of each home Core listed offline (`offlineSince`), each dark slot's power
 basis now (`slots`; `leftOut` when its panel is cloud-offline), and the last rollup window
 per slot with its basis and the reason a window was not booked (`lastRollup`). The emitted battery totals (and the battery
 `details.persistedWh` of `/api/lifetime-energy`) include the bridge rows.

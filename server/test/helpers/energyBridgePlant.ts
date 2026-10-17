@@ -13,6 +13,7 @@
  * (`touch`); a restart clears it (the store's first body after one only seeds the witness). A Core
  * that reports records its own pv_total / ac_in each minute; its BMS registers move with
  * `coreBatW` and freeze while it is offline, then jump to the true count when it reports again.
+ * `restart` is a graceful stop (close(): a final rollup); `crash` is not.
  * Test serials are placeholders.
  *
  * DB_PATH must name a fresh file before the recorder is imported: `loadPlant` sets it.
@@ -181,6 +182,16 @@ export async function loadPlant(prefix: string) {
       this.db.close();
       for (const sn of CORES) { this.changedAt[sn] = undefined; this.contentAt[sn] = undefined; }
       this.open();
+    }
+    /** A CRASH (a power cut, an OOM kill, an uncaught exception): a new recorder over the same
+     *  database while the old one is never closed, so no final rollup runs and the emit high-water
+     *  is the one the last rollup persisted. The store sees every Core afresh (no transition times,
+     *  no content clock); a Core listed offline then has no projection (no quota is fetched for a
+     *  device listed offline) unless `keepProjection` (MQTT still delivers its data). */
+    crash(opts: { keepProjection?: boolean } = {}): void {
+      for (const sn of CORES) { this.changedAt[sn] = undefined; this.contentAt[sn] = undefined; }
+      this.frozenProjection = opts.keepProjection === true;
+      this.rec = createRecorder(this.store, (m) => this.logs.push(m));
     }
     close(): void {
       this.rec.close();
