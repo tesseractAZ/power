@@ -305,6 +305,24 @@ test('★★★ the refresh push: a moved figure, a lowered level, a cap, a canc
   assert.equal(buildMiddayRefreshMessage(refreshText({ disposition: 'stood' })), null);
   // It never states a figure it was not given.
   assert.ok(!capped.body.includes('kWh'));
+  // A cap from the reserve alone — the re-plan's level at or under the announced one — names the
+  // reserve it asked for and the one held, never "more" than a level it did not ask above.
+  const reserveCap = buildMiddayRefreshMessage(refreshText({
+    disposition: 'capped', neededLevelPct: 80, neededReservePct: 50, refreshed: { levelPct: 89.6, reservePct: 40, expectedKwh: null },
+  }))!;
+  assert.equal(reserveCap.title, 'Charge plan updated: held at the announced ~89.6% today 10am–3pm');
+  assert.equal(reserveCap.body, 'The morning re-plan calls for a higher reserve (50%), but a refresh never raises what was announced: '
+    + 'today 10am–3pm stays at ~89.6%, with the reserve held at 40% from the open. Cancel from the charge card before 10:00 AM.');
+  // A level cap keeps its words with a reserve figure beside it; a reserve cap with no figures
+  // still says it is the reserve.
+  assert.match(buildMiddayRefreshMessage(refreshText({
+    disposition: 'capped', neededLevelPct: 95, neededReservePct: 50, refreshed: { levelPct: 89.6, reservePct: 40, expectedKwh: null },
+  }))!.body, /calls for more \(~95%\)/);
+  const bare = buildMiddayRefreshMessage(refreshText({
+    disposition: 'capped', neededLevelPct: 89.6, refreshed: { levelPct: 89.6, reservePct: null, expectedKwh: null },
+  }))!.body;
+  assert.match(bare, /^The morning re-plan calls for a higher reserve, but a refresh never raises what was announced: today 10am–3pm stays at ~89\.6%\. Cancel/);
+  assert.doesNotMatch(bare, /calls for more/);
 });
 
 /* ══ the summary and the critical ═══════════════════════════════════════════ */

@@ -437,6 +437,75 @@ test('★★★ refreshLeg: lower-only — the announced level is the ceiling; a
   assert.equal(refreshLeg({ announced: ANN, refreshed: null }).wouldPush, false);
 });
 
+test('★★★ refreshLeg: a refreshed reserve above the announced one is "capped", at or under the announced level too — nothing is written, every figure as announced', () => {
+  // The 21:30 push named the reserve held from the open: the evening's T_mid (here 30%) caps it as
+  // the level caps the stop. A T_mid under 50 is a planner outcome (middayPlan.test.ts: the
+  // resilience and pool bases), and the pool term climbs when the 09:30 pool beats the evening's.
+  const ann = { levelPct: 70, reservePct: 30, expectedBuyKwh: 10, buyKwh: 20 };
+  const held = { disposition: 'capped', levelPct: 70, reservePct: 30, buyKwh: 20, expectedBuyKwh: null, wouldPush: true,
+    reason: 'the refreshed reserve (45%) is above the announced 30%: held at it' };
+  // The level as announced (it read 'unchanged' with a 45% reserve)…
+  assert.deepEqual(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 70, reservePct: 45, expectedBuyKwh: 10, buyKwh: 20 }) }), held);
+  // …and the level lowered (it read 'lowered' with a 45% reserve).
+  assert.deepEqual(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 60, reservePct: 45, expectedBuyKwh: 8, buyKwh: 20 }) }), held);
+  // Up to the announced level itself.
+  assert.equal(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 60, reservePct: 31 }) }).disposition, 'capped');
+  // At or under the announced reserve: a lowering or no change, as before.
+  const lower = refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 60, reservePct: 30, expectedBuyKwh: 8 }) });
+  assert.equal(lower.disposition, 'lowered');
+  assert.equal(lower.reservePct, 30);
+  assert.equal(lower.expectedBuyKwh, 8);
+  assert.equal(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 70, reservePct: 25, expectedBuyKwh: 10 }) }).reservePct, 25);
+  assert.equal(refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 70, reservePct: 30, expectedBuyKwh: 10 }) }).disposition, 'unchanged');
+  // A level cap holds the reserve as announced too, never the re-plan's lower one (the live rule).
+  const levelCap = refreshLeg({ announced: ann, refreshed: fresh({ levelPct: 80, reservePct: 20 }) });
+  assert.equal(levelCap.disposition, 'capped');
+  assert.equal(levelCap.reservePct, 30);
+  assert.equal(levelCap.levelPct, 70);
+  assert.match(levelCap.reason, /refreshed need \(80%\) is above the announced 70%/);
+  // No announced reserve: the announced level bounds it.
+  assert.equal(refreshLeg({ announced: { ...ann, reservePct: null }, refreshed: fresh({ levelPct: 70, reservePct: 45 }) }).disposition, 'unchanged');
+  const noRes = refreshLeg({ announced: { ...ann, levelPct: 45, reservePct: null }, refreshed: fresh({ levelPct: 45, reservePct: 50 }) });
+  assert.equal(noRes.disposition, 'capped', 'a reserve above the announced level');
+  assert.equal(noRes.reservePct, null);
+  // A figure the re-plan does not give stays as announced — never raised to the level or to 50.
+  const noFig = refreshLeg({ announced: ann, refreshed: fresh({ levelPct: null, reservePct: null, expectedBuyKwh: 10 }) });
+  assert.equal(noFig.disposition, 'unchanged');
+  assert.equal(noFig.levelPct, 70);
+  assert.equal(noFig.reservePct, 30);
+  assert.equal(refreshLeg({ announced: { ...ann, reservePct: null, levelPct: null }, refreshed: fresh({ levelPct: 80, reservePct: 60 }) }).reservePct, 50, 'never above the panel\'s 50');
+});
+
+test('★★★ the shadow refresh of a raised reserve: the ledger, the entity and the preview push say what the live refresh would do', () => {
+  const r = record({ cost: { ...record().cost!, levelPct: 70, reservePct: 30, expectedBuyKwh: 10, costCeilingSocPct: 70 } });
+  const at = phx(10, 15, 9, 31);
+  const p = { basisComplete: true, chargeTonight: true, setpointSocPct: 45, expectedWriteLevelPct: 70, costCeilingSocPct: 70,
+    expectedForceChargeStartMs: phx(10, 15, 12), expectedBuyKwh: 10, buyKwh: 20 };
+  for (const lvl of [70, 60]) {
+    const rf = refreshFromSized(r, { plan: { ...p, expectedWriteLevelPct: lvl } as never, windowPvP50Kwh: 27, windowLoadP50Kwh: 15 }, at);
+    assert.equal(rf.disposition, 'capped', `level ${lvl}`);
+    assert.equal(rf.reservePct, 30);
+    assert.equal(rf.levelPct, 70);
+    assert.equal(rf.expectedBuyKwh, null);
+    assert.equal(rf.neededReservePct, 45);
+    const cols = middayShadowRefreshLedgerColumns(rf);
+    assert.equal(cols.shadow_refresh_disposition, 'capped');
+    assert.equal(cols.shadow_refreshed_reserve_pct, 30, 'the ledger never records a reserve that would not be written');
+    assert.equal(cols.shadow_refreshed_expected_buy_kwh, null);
+    const f = middayChargeStateFields({ ...r, refresh: rf }, at + M);
+    assert.equal(f.midday_charge_refresh, 'capped');
+    assert.equal(f.midday_charge_reserve_hold_percent, 30);
+    assert.equal(f.midday_charge_target_soc_percent, 70);
+    const m = middayShadowRefreshPreview(r, rf)!;
+    assert.equal(m.title, 'Charge plan updated: held at the announced ~70% today 10am–3pm');
+    assert.match(m.body, /^The morning re-plan calls for a higher reserve \(45%\), but a refresh never raises what was announced: today 10am–3pm stays at ~70%, with the reserve held at 30% from the open\. Cancel/);
+    assert.doesNotMatch(m.body, /kWh|45% from the open/);
+    assert.match(middayShadowRefreshLogLine(r, rf), /refresh — capped: the refreshed reserve \(45%\) is above the announced 30%: held at it; level ~70%, reserve 30%, expected —/);
+    // It round-trips through the file with the reserve the re-plan asked for.
+    assert.equal(coerceMiddayShadowRecord(JSON.parse(JSON.stringify({ ...r, refresh: rf })))!.refresh!.neededReservePct, 45);
+  }
+});
+
 test('★★ refreshLeg: an expected-kWh move above 25% either way pushes; 25% or less does not', () => {
   assert.equal(refreshLeg({ announced: ANN, refreshed: fresh({ expectedBuyKwh: 34 * 1.25 }) }).wouldPush, false);
   assert.equal(refreshLeg({ announced: ANN, refreshed: fresh({ expectedBuyKwh: 34 * 1.26 }) }).wouldPush, true);

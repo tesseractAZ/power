@@ -193,7 +193,7 @@ In winter, APS charges its lowest rate from 10 AM to 3 PM on weekdays. On each w
 | `sensor.ecoflow_panel_midday_charge_buy_worst_case` | `ecoflow_midday_charge_buy_kwh` | Buy (Worst Case): the grid energy the daytime plan is sized on, assuming the islanded worst case | kWh |
 | `sensor.ecoflow_panel_midday_charge_window_start` | `ecoflow_midday_charge_window_start_at` | When the daytime window opens | timestamp |
 | `sensor.ecoflow_panel_midday_charge_window_end` | `ecoflow_midday_charge_window_end_at` | When it closes | timestamp |
-| `sensor.ecoflow_panel_midday_charge_refresh` | `ecoflow_midday_charge_refresh` | The morning re-check: `pending`, then `unchanged`, `lowered`, `capped` (the new forecast asked for more than the evening plan, which stays the limit), `cancelled`, `stood` (no re-check finished in time, so the evening plan stands) or `not-comparable` (the night's own overnight charge already filled the pool, so the re-check was not made and the evening figures stand) | text |
+| `sensor.ecoflow_panel_midday_charge_refresh` | `ecoflow_midday_charge_refresh` | The morning re-check: `pending`, then `unchanged`, `lowered`, `capped` (the new forecast asked for a higher level or reserve than the evening plan, which stays the limit), `cancelled`, `stood` (no re-check finished in time, so the evening plan stands) or `not-comparable` (the night's own overnight charge already filled the pool, so the re-check was not made and the evening figures stand) | text |
 
 ## Load shedding and lighting
 

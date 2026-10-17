@@ -92,6 +92,8 @@ export interface LiveRefreshOutcome {
   expectedBuyKwh: number | null;
   /** The level the re-plan asked for (above the announced one when capped). */
   neededLevelPct: number | null;
+  /** The reserve the re-plan asked for (above the armed one when that capped it). */
+  neededReservePct: number | null;
   wouldPush: boolean;
   reason: string;
 }
@@ -102,7 +104,7 @@ const fin = (v: unknown): number | null => (typeof v === 'number' && Number.isFi
 export function standingLiveRefresh(leg: ChargeLegState, reason: string): LiveRefreshOutcome {
   return {
     disposition: 'stood', levelPct: leg.announcedLevelPct, reservePct: leg.targetPct, forceChargeCeilingPct: leg.forceChargeCeilingPct,
-    buyKwh: leg.buyKwh, expectedBuyKwh: leg.announcedExpectedKwh, neededLevelPct: null, wouldPush: false, reason,
+    buyKwh: leg.buyKwh, expectedBuyKwh: leg.announcedExpectedKwh, neededLevelPct: null, neededReservePct: null, wouldPush: false, reason,
   };
 }
 
@@ -116,9 +118,10 @@ export function standingLiveRefresh(leg: ChargeLegState, reason: string): LiveRe
  * said "at 10:00 AM the backup reserve is held at N%", so the written reserve is the lower of the
  * armed one and the re-plan's, and a re-plan that asks for a higher reserve is recorded `capped`
  * (as a higher level is) and writes nothing — its expected figure is not stated, since it was sized
- * on a reserve that will not be written. The force-charge ceiling is lowered to the re-plan's when
- * that is lower, and dropped when the re-plan needs none; it is never raised. Whether a live refresh
- * pushes is judged on the values it will actually write.
+ * on a reserve that will not be written. That rule is refreshLeg's, the one the shadow records. The
+ * force-charge ceiling is lowered to the re-plan's when that is lower, and dropped when the re-plan
+ * needs none; it is never raised. Whether a live refresh pushes is judged on the values it will
+ * actually write.
  */
 export function liveRefreshOutcome(leg: ChargeLegState, plan: NightChargePlan | null): LiveRefreshOutcome {
   if (leg.announcedLevelPct == null || !Number.isFinite(leg.announcedLevelPct)) {
@@ -136,19 +139,19 @@ export function liveRefreshOutcome(leg: ChargeLegState, plan: NightChargePlan | 
     },
   });
   const neededLevelPct = plan != null ? fin(chargeLevelPct(plan)) : null;
+  const neededReservePct = refreshedReserve;
   if (r.disposition === 'stood' || r.disposition === 'cancelled') {
     return {
       disposition: r.disposition,
       levelPct: r.levelPct,
       reservePct: r.disposition === 'cancelled' ? null : leg.targetPct,
       forceChargeCeilingPct: r.disposition === 'cancelled' ? null : leg.forceChargeCeilingPct,
-      buyKwh: r.buyKwh, expectedBuyKwh: r.expectedBuyKwh, neededLevelPct, wouldPush: r.wouldPush, reason: r.reason,
+      buyKwh: r.buyKwh, expectedBuyKwh: r.expectedBuyKwh, neededLevelPct, neededReservePct, wouldPush: r.wouldPush, reason: r.reason,
     };
   }
   const armedReserve = leg.targetPct;
-  // A higher reserve than the one announced is a higher need, as a higher level is.
-  const reserveCapped = armedReserve != null && refreshedReserve != null && refreshedReserve > armedReserve + 1e-9;
-  const capped = r.disposition === 'capped' || reserveCapped;
+  // refreshLeg caps a higher level, and a higher reserve than the armed (announced) one.
+  const capped = r.disposition === 'capped';
   // A cap writes nothing at all: the reserve, the stop and the ceiling stay as armed. Below a cap
   // the re-plan's reserve is at most the armed one already; the min holds it there regardless.
   const reserve = armedReserve == null || capped ? armedReserve : Math.min(armedReserve, r.reservePct ?? armedReserve);
@@ -159,14 +162,11 @@ export function liveRefreshOutcome(leg: ChargeLegState, plan: NightChargePlan | 
   const written = !capped && ((armedReserve != null && reserve != null && reserve < armedReserve - 1e-9)
     || (level != null && level < leg.announcedLevelPct - 1e-9)
     || (armedCeiling != null && (ceiling == null || ceiling < armedCeiling - 1e-9)));
-  const expectedBuyKwh = capped ? null : r.expectedBuyKwh;
+  // A cap states no expected figure (refreshLeg): it was sized on values that will not be written.
+  const expectedBuyKwh = r.expectedBuyKwh;
   const a = leg.announcedExpectedKwh;
   const moved = a != null && a > 0 && expectedBuyKwh != null && Math.abs(expectedBuyKwh - a) > REFRESH_PUSH_MOVE_FRAC * a;
   const disposition: RefreshDisposition = capped ? 'capped' : written ? 'lowered' : 'unchanged';
-  const reason = !capped ? r.reason
-    : reserveCapped && r.disposition !== 'capped'
-      ? `the refreshed reserve (${refreshedReserve}%) is above the announced ${armedReserve}%: held at it`
-      : r.reason;
   return {
     disposition,
     levelPct: level,
@@ -175,8 +175,9 @@ export function liveRefreshOutcome(leg: ChargeLegState, plan: NightChargePlan | 
     buyKwh: r.buyKwh,
     expectedBuyKwh,
     neededLevelPct,
+    neededReservePct,
     wouldPush: capped || written || moved,
-    reason,
+    reason: r.reason,
   };
 }
 

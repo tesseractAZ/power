@@ -604,6 +604,15 @@ export interface NightActuationState {
    *  apply window, and the last attempt's readback grace, the panel still read the attempt-time
    *  baseline. Nothing of ours holds the reserve then, whatever later readings are missing. */
   attemptUnlandedAtMs: number | null;
+  /** When a live reading proved an ACK'd write never took effect (applyProvedUnlanded): its apply
+   *  ladder ended in applyFailed with the panel still reading the attempt-time baseline, the last
+   *  attempt's readback grace run. Its restore is a no-op and nothing of ours holds the reserve —
+   *  until a later reading verifies the write (applyVerifiedAtMs), which outranks it. */
+  applyUnlandedAtMs: number | null;
+  /** When the deadline stage first waited for a restore that had not had its chance
+   *  (restoreAwaitingFirstChance: a process down across the deadline). It waits at most
+   *  REVERT_DEADLINE_HOLD_MAX_MS from here. */
+  revertDeadlineHeldAtMs: number | null;
   lastError: string | null;
 }
 
@@ -634,6 +643,8 @@ export function emptyActuationState(): NightActuationState {
     revertDeadlinePagedAtMs: null, revertDeadlineOnPeakPagedAtMs: null,
     revertDeadlinePassedAtMs: null, revertDeadlineOnPeakPassedAtMs: null,
     attemptUnlandedAtMs: null,
+    applyUnlandedAtMs: null,
+    revertDeadlineHeldAtMs: null,
     lastError: null,
   };
 }
@@ -720,6 +731,8 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     revertDeadlinePassedAtMs: num(o.revertDeadlinePassedAtMs),
     revertDeadlineOnPeakPassedAtMs: num(o.revertDeadlineOnPeakPassedAtMs),
     attemptUnlandedAtMs: num(o.attemptUnlandedAtMs),
+    applyUnlandedAtMs: num(o.applyUnlandedAtMs),
+    revertDeadlineHeldAtMs: num(o.revertDeadlineHeldAtMs),
     lastError: str(o.lastError),
   };
 }
@@ -841,7 +854,9 @@ export function armOpenItem(prev: NightActuationState, liveReservePct: number | 
     return `the ${night} reserve write is still applied and not yet restored`;
   }
   if (restoreUnconfirmed(prev, liveReservePct)) {
-    return `the ${night} reserve restore was sent and has not read back (the panel ${liveReservePct == null ? 'is not reporting its reserve' : `still reads ${liveReservePct}%`})`;
+    const panel = liveReservePct == null ? 'is not reporting its reserve'
+      : liveReservePct === prev.targetPct ? `still reads ${liveReservePct}%` : `reads ${liveReservePct}, not a valid reserve`;
+    return `the ${night} reserve restore was sent and has not read back (the panel ${panel})`;
   }
   if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) {
     return `the ${night} force-charge was switched ON and its OFF has not verified`;
@@ -855,16 +870,26 @@ export function armOpenItem(prev: NightActuationState, liveReservePct: number | 
   return null;
 }
 
-/** A restore of ours was sent (cloud-ACK'd) and has not read back, and the panel still reads the
- *  raised target or nothing: it may still stand. A reading of any other value is the restore, or
- *  someone else's setting (the foreign rule), never ours to hold the next arm on. PURE. */
+/** A reading that is a reserve setting: a whole number inside the write envelope
+ *  [RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT]. A null, fractional or out-of-envelope reading —
+ *  a reconnect 0 above all — is no evidence of what the reserve is. PURE. */
+export function isReserveSetting(v: number | null): v is number {
+  return v != null && Number.isInteger(v) && v >= RESERVE_WRITE_MIN_PCT && v <= RESERVE_WRITE_MAX_PCT;
+}
+
+/** A restore of ours was sent (cloud-ACK'd) and has not read back, while the write may still hold
+ *  the reserve (revertOutstanding), and the panel still reads the raised target or no reserve
+ *  setting (isReserveSetting: nothing, or a reconnect 0): it may still stand. A reading of any
+ *  other setting is the restore, or someone else's setting (the foreign rule), never ours to hold
+ *  the next arm on. PURE. */
 export function restoreUnconfirmed(
-  s: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs' | 'revertVerifiedAtMs' | 'foreignSettledAtMs' | 'targetPct' | 'priorReservePct'>,
+  s: Pick<NightActuationState, 'appliedAtMs' | 'applyAttemptedAtMs' | 'revertedAtMs' | 'revertVerifiedAtMs' | 'foreignSettledAtMs' | 'targetPct' | 'priorReservePct'>
+    & Partial<Pick<NightActuationState, 'applyVerifiedAtMs' | 'applyUnlandedAtMs' | 'attemptUnlandedAtMs'>>,
   liveReservePct: number | null,
 ): boolean {
-  return s.appliedAtMs != null && s.revertedAtMs != null && s.revertVerifiedAtMs == null && s.foreignSettledAtMs == null
-    && s.targetPct != null && s.targetPct !== s.priorReservePct
-    && (liveReservePct == null || liveReservePct === s.targetPct);
+  return s.appliedAtMs != null && s.revertedAtMs != null && revertOutstanding(s)
+    && s.targetPct !== s.priorReservePct
+    && (!isReserveSetting(liveReservePct) || liveReservePct === s.targetPct);
 }
 
 /** An attempted write is proven never to have landed: stamped so (attemptUnlandedAtMs), or the live
@@ -893,6 +918,26 @@ export function attemptProvedUnlanded(s: NightActuationState, liveReservePct: nu
   if (s.targetPct != null && s.targetPct === s.attemptBaselinePct) return false;
   const ladderOver = s.cancelled || (s.windowStartMs != null && nowMs > s.windowStartMs + APPLY_LATE_MS);
   return ladderOver && nowMs - s.applyAttemptedAtMs >= APPLY_VERIFY_AFTER_MS;
+}
+
+/**
+ * The proof applyUnlandedAtMs stamps, decided on a live reading. PURE. The ACK'd-write half of
+ * attemptProvedUnlanded: a write the cloud accepted whose apply ladder has ended in applyFailed
+ * (applyEscalated: its re-issues spent, or none could be sent before the window's end) without its
+ * readback ever showing the target (applyVerifiedAtMs null), with no restore sent yet, the last
+ * attempt's readback grace run (APPLY_VERIFY_AFTER_MS), and the panel still reading the
+ * attempt-time baseline, never took effect. Its restore is a no-op; before this the restore of a
+ * write the add-on had itself reported "NEVER TOOK EFFECT" was paged critical twice whenever the
+ * readback went dark at the close. A later reading of the target verifies the write
+ * (applyVerified) and makes it outstanding again (revertOutstanding).
+ */
+export function applyProvedUnlanded(s: NightActuationState, liveReservePct: number | null, nowMs: number): boolean {
+  if (s.day == null || s.applyUnlandedAtMs != null) return false;
+  if (s.appliedAtMs == null || s.applyVerifiedAtMs != null || !s.applyEscalated || s.revertedAtMs != null) return false;
+  // The baseline, read live: no reading proves nothing, and our target is a write that landed.
+  if (liveReservePct == null || s.attemptBaselinePct == null || liveReservePct !== s.attemptBaselinePct) return false;
+  if (s.targetPct === s.attemptBaselinePct) return false;
+  return nowMs - (s.applyLastAttemptMs ?? s.appliedAtMs) >= APPLY_VERIFY_AFTER_MS;
 }
 
 /**
@@ -1294,16 +1339,18 @@ export function foreignStep(
 }
 
 /**
- * A write of ours may still hold the reserve. PURE. One was applied — or attempted and never
- * confirmed either way, and not proven never to have landed (attemptUnlandedAtMs) — its restore
- * has not read back, and the reserve has not settled as someone else's.
+ * A write of ours may still hold the reserve. PURE. One was applied — unless proven never to have
+ * taken effect (applyUnlandedAtMs) and not verified since — or attempted and never confirmed either
+ * way, and not proven never to have landed (attemptUnlandedAtMs); its restore has not read back,
+ * and the reserve has not settled as someone else's.
  */
 export function revertOutstanding(
   s: Pick<NightActuationState, 'targetPct' | 'appliedAtMs' | 'applyAttemptedAtMs' | 'revertedAtMs'
-    | 'revertVerifiedAtMs' | 'foreignSettledAtMs'> & Partial<Pick<NightActuationState, 'attemptUnlandedAtMs'>>,
+    | 'revertVerifiedAtMs' | 'foreignSettledAtMs'>
+    & Partial<Pick<NightActuationState, 'attemptUnlandedAtMs' | 'applyUnlandedAtMs' | 'applyVerifiedAtMs'>>,
 ): boolean {
   if (s.targetPct == null || s.revertVerifiedAtMs != null || s.foreignSettledAtMs != null) return false;
-  if (s.appliedAtMs != null) return true;
+  if (s.appliedAtMs != null) return s.applyUnlandedAtMs == null || s.applyVerifiedAtMs != null;
   return s.applyAttemptedAtMs != null && s.revertedAtMs == null && s.attemptUnlandedAtMs == null;
 }
 
@@ -1327,12 +1374,45 @@ export type RevertDeadlineStage = 'deadline' | 'onPeak';
 
 export type RevertDeadlineDecision =
   | { kind: 'none' }
-  /** `stage`: the deadline (revertDeadlineMs), or the on-peak start itself. `unknown`: no live
-   *  reading — the words say the restore could not be CONFIRMED, never that it reads raised. */
+  /** `stage`: the deadline (revertDeadlineMs), or the on-peak start itself. `unknown`: no reserve
+   *  setting read (nothing, or a reading that is not one: isReserveSetting) — the words say the
+   *  restore could not be CONFIRMED, never that it reads raised. */
   | { kind: 'page'; stage: RevertDeadlineStage; unknown: boolean }
-  /** The stage's moment came with the panel reading `pct`, neither our target nor nothing: the
-   *  stage is decided, with no page (stamp revertDeadlinePassedAtMs / …OnPeakPassedAtMs). */
-  | { kind: 'pass'; stage: RevertDeadlineStage; pct: number };
+  /** The stage's moment came with the panel reading `pct`, a reserve setting that is not our
+   *  target: the stage is decided, with no page (stamp revertDeadlinePassedAtMs / …OnPeakPassedAtMs). */
+  | { kind: 'pass'; stage: RevertDeadlineStage; pct: number }
+  /** The deadline stage came before the restore had its chance (restoreAwaitingFirstChance): it is
+   *  left undecided this tick (stamp revertDeadlineHeldAtMs on the first). */
+  | { kind: 'hold'; stage: 'deadline' };
+
+/** The longest the deadline stage waits for a restore that had not had its chance when the stage
+ *  fell due (from revertDeadlineHeldAtMs): ten minutes — one reserve-write cooldown (5 min:
+ *  ecoflow/commands NIGHT_RESERVE_COOLDOWN_MS) for its send, and its readback grace
+ *  (REVERT_VERIFY_AFTER_MS). */
+export const REVERT_DEADLINE_HOLD_MAX_MS = 2 * REVERT_VERIFY_AFTER_MS;
+
+/**
+ * The restore has not yet had its chance at the deadline stage. PURE. A process down across the
+ * deadline comes back with the restore never sent: decideActuation sends it on the tick the
+ * deadline stage is decided, and the page went out first, saying the restore had failed. True,
+ * from the first tick that waits (revertDeadlineHeldAtMs) for less than REVERT_DEADLINE_HOLD_MAX_MS,
+ * while an applied write's restore has not read back and either
+ *  - it is due and was never attempted (neither accepted nor rejected), its prior is a valid
+ *    reserve and the panel is in the device list: decideActuation sends it this tick; or
+ *  - it was accepted less than REVERT_VERIFY_AFTER_MS ago: it is inside its readback grace.
+ * The deadline stage's span lasts until the on-peak start, so it pages on a later tick when the
+ * restore is rejected, does not read back, or the panel leaves the device list. A restore sent at
+ * the window close is half an hour past its grace at the deadline: a night that goes to plan, and
+ * a stuck restore, are decided as before.
+ */
+export function restoreAwaitingFirstChance(s: NightActuationState, nowMs: number, panelListed: boolean): boolean {
+  if (s.appliedAtMs == null || s.revertVerifiedAtMs != null) return false;
+  if (s.revertDeadlineHeldAtMs != null && nowMs - s.revertDeadlineHeldAtMs >= REVERT_DEADLINE_HOLD_MAX_MS) return false;
+  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS;
+  const dueAt = revertDueMs(s);
+  const due = s.cancelled || (dueAt != null && nowMs >= dueAt);
+  return panelListed && due && s.revertAttempts === 0 && isReserveSetting(s.priorReservePct);
+}
 
 /**
  * The revertDeadline stage whose moment has come and that is still undecided, or null. PURE.
@@ -1364,22 +1444,32 @@ export function revertDeadlineStageDue(s: NightActuationState, nowMs: number): R
  * on-peak start, while a write of ours may still hold the reserve (revertOutstanding) and the live
  * reading is our target or unknown.
  * Each stage is decided ONCE, at its moment (revertDeadlineStageDue): the first tick at or after
- * it pages on our target or no reading, and passes on any other reading — the restore itself (it
- * reads back on this tick), the attempt-time baseline of a write that never landed, or a value
- * someone else set. A stage passed is never paged later, so a stale reading hours after its moment
- * pages nothing; nor is a stage whose moment is more than its span past. Broadcast quiet hours
- * apply as to every critical announce; the push always goes.
+ * it pages on our target or no reserve setting (nothing, or a reading that is not a setting: a
+ * reconnect 0 — isReserveSetting), and passes on any other setting — the restore itself (it reads
+ * back on this tick), the attempt-time baseline of a write that never landed, or a value someone
+ * else set. A stage passed is never paged later, so a stale reading hours after its moment pages
+ * nothing; nor is a stage whose moment is more than its span past. The deadline stage waits, a
+ * bounded while, for a restore that has not had its chance (restoreAwaitingFirstChance). Broadcast
+ * quiet hours apply as to every critical announce; the push always goes.
  */
 export function decideRevertDeadline(
   s: NightActuationState,
   nowMs: number,
   liveReservePct: number | null,
+  /** The panel is in the device list (what restoreAwaitingFirstChance needs to know the restore is
+   *  sent this tick); false, the default, never waits. */
+  panelListed = false,
 ): RevertDeadlineDecision {
   if (s.day == null || !revertOutstanding(s)) return { kind: 'none' };
   const stage = revertDeadlineStageDue(s, nowMs);
   if (stage == null) return { kind: 'none' };
-  if (liveReservePct != null && liveReservePct !== s.targetPct) return { kind: 'pass', stage, pct: liveReservePct };
-  return { kind: 'page', stage, unknown: liveReservePct == null };
+  // Only a reserve setting decides a stage without a page: a reconnect 0, a fraction or a value
+  // outside the envelope is no evidence of the reserve (as for the foreign rule), so it counts
+  // as no reading.
+  const reading = isReserveSetting(liveReservePct) ? liveReservePct : null;
+  if (reading != null && reading !== s.targetPct) return { kind: 'pass', stage, pct: reading };
+  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage };
+  return { kind: 'page', stage, unknown: reading == null };
 }
 
 /**
@@ -1423,9 +1513,11 @@ export function revertRetryText(retrying: boolean): string {
 
 /**
  * The spoken revertDeadline page, English and Spanish. PURE. `onPeakClock` is the on-peak start
- * as a clock ("4:00 PM"), null when the night has no stamp. With no live reading it says the
- * restore could not be confirmed; with our target still read back it says the reserve still
- * reads it. A restore value that is not known is "its usual level".
+ * as a clock ("4:00 PM"), null when the night has no stamp; `onPeakDay` names its day when that is
+ * not the page's own date (chargeText.onPeakDayWords: "on Monday" — a Friday window's page
+ * at 12:30 AM Saturday is about Monday's on-peak). With no live reading it says the restore could
+ * not be confirmed; with our target still read back it says the reserve still reads it. A restore
+ * value that is not known is "its usual level".
  */
 export function revertDeadlineSpoken(o: {
   stage: 'deadline' | 'onPeak';
@@ -1434,14 +1526,18 @@ export function revertDeadlineSpoken(o: {
   targetPct: number;
   restorePct: number | null;
   onPeakClock: string | null;
+  /** The on-peak start's day, at the deadline stage, when it is not the page's day; absent or
+   *  null: the same day (the bare clock). */
+  onPeakDay?: { en: string; es: string } | null;
 }): { en: string; es: string } {
   const r = o.restorePct;
   const toEn = r != null ? `${r} percent` : 'its usual level';
   const insteadEs = r != null ? `en lugar del ${r} por ciento` : 'en lugar de su nivel habitual';
   const toEs = r != null ? `al ${r} por ciento` : 'a su nivel habitual';
   const t = o.targetPct;
-  const peakEn = o.onPeakClock != null ? `, and on-peak pricing starts at ${o.onPeakClock}` : '';
-  const peakEs = o.onPeakClock != null ? `, y la tarifa punta comienza a las ${o.onPeakClock}` : '';
+  const day = o.onPeakDay ?? null;
+  const peakEn = o.onPeakClock != null ? `, and on-peak pricing starts ${day != null ? `${day.en} ` : ''}at ${o.onPeakClock}` : '';
+  const peakEs = o.onPeakClock != null ? `, y la tarifa punta comienza ${day != null ? `${day.es} ` : ''}a las ${o.onPeakClock}` : '';
   if (o.stage === 'onPeak') {
     return o.unknown
       ? {
@@ -1457,19 +1553,29 @@ export function revertDeadlineSpoken(o: {
           + `La casa está comprando energía de la red a la tarifa punta para mantenerla. Ajuste la reserva de respaldo ${toEs} en la aplicación EcoFlow.`,
       };
   }
-  return o.unknown
-    ? {
+  if (o.unknown) {
+    const full = {
       en: `Critical. The night charge system could not confirm that the backup reserve was restored to ${toEn}: `
         + `the panel is not reporting it${peakEn}. Check the backup reserve in the EcoFlow app and set it to ${toEn}.`,
       es: 'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo confirmar que la reserva de respaldo se restableció '
         + `${toEs}: el panel no la está informando${peakEs}. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela ${toEs}.`,
-    }
-    : {
-      en: `Critical. The night charge system could not restore the backup reserve. It still reads ${t} percent instead of ${toEn}${peakEn}. `
-        + `Set the backup reserve to ${toEn} in the EcoFlow app.`,
-      es: 'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo restablecer la reserva de respaldo. '
-        + `Sigue en el ${t} por ciento ${insteadEs}${peakEs}. Ajuste la reserva de respaldo ${toEs} en la aplicación EcoFlow.`,
     };
+    if (full.en.length + full.es.length <= MAX_SPOKEN_ADVISORY_CHARS) return full;
+    // The on-peak day named (a Friday window's page): what to do, said compactly, keeps it within
+    // the bound; the day, the reserve to set and the clock never drop.
+    return {
+      en: `Critical. The night charge system could not confirm that the backup reserve was restored to ${toEn}: `
+        + `the panel is not reporting it${peakEn}. Set the backup reserve to ${toEn} in the EcoFlow app.`,
+      es: 'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo confirmar que la reserva de respaldo se restableció '
+        + `${toEs}: el panel no la está informando${peakEs}. Ajuste la reserva de respaldo ${toEs} en la aplicación EcoFlow.`,
+    };
+  }
+  return {
+    en: `Critical. The night charge system could not restore the backup reserve. It still reads ${t} percent instead of ${toEn}${peakEn}. `
+      + `Set the backup reserve to ${toEn} in the EcoFlow app.`,
+    es: 'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo restablecer la reserva de respaldo. '
+      + `Sigue en el ${t} por ciento ${insteadEs}${peakEs}. Ajuste la reserva de respaldo ${toEs} en la aplicación EcoFlow.`,
+  };
 }
 
 /**

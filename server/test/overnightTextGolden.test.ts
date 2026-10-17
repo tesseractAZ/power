@@ -7,7 +7,7 @@ import {
 import {
   buildNightChargeMessage, buildNightChargeMorningSummary, buildNightChargeRevertDeadline, buildNightChargeMissedApply,
 } from '../src/notify.js';
-import { revertDeadlineSpoken } from '../src/nightChargeActuator.js';
+import { revertDeadlineSpoken, MAX_SPOKEN_ADVISORY_CHARS } from '../src/nightChargeActuator.js';
 import { eveningAnnouncement, isMiddayLeg } from '../src/chargeAnnounce.js';
 import { emptyLegState, LEGACY_LEG_FIELDS, type ChargeLegState } from '../src/chargeCycle.js';
 
@@ -87,6 +87,46 @@ test('★★★ the morning summary and the revert-deadline page: the golden wor
   });
 });
 
+test('★★★ the revert-deadline page of a Friday window or a holiday eve names the on-peak day: the golden words with that one clause, nothing else', () => {
+  // A Friday window closes at 12:00 AM Saturday and on-peak is next on Monday; the Wednesday window
+  // before Thanksgiving closes at 12:00 AM Thursday and on-peak is next on Friday. Their deadline
+  // page is heard at 12:30 AM: a bare "starts at 4:00 PM" reads as that afternoon. The day is named
+  // (chargeText.onPeakDayWords); with no day — the page's own date — the words are the golden ones.
+  for (const day of [{ en: 'on Monday', es: 'el lunes' }, { en: 'on Friday', es: 'el viernes' }]) {
+    overnightRevertDeadlineCases().forEach((c, i) => {
+      const g = GOLDEN.revertDeadline[i];
+      assert.deepEqual(buildNightChargeRevertDeadline({ ...c.input, onPeakDay: null }), g.push, `${c.name}: no day`);
+      assert.deepEqual(revertDeadlineSpoken({ ...c.input, onPeakDay: null }), g.spoken, `${c.name}: no day`);
+      const push = buildNightChargeRevertDeadline({ ...c.input, onPeakDay: day }) as { title: string; body: string };
+      const spoken = revertDeadlineSpoken({ ...c.input, onPeakDay: day });
+      const gp = g.push as { title: string; body: string };
+      if (c.input.stage === 'deadline' && c.input.onPeakClock != null) {
+        assert.equal(push.body, gp.body.replace(' On-peak pricing starts at ', ` On-peak pricing starts ${day.en} at `), c.name);
+        const dayed = {
+          en: g.spoken.en.replace(', and on-peak pricing starts at ', `, and on-peak pricing starts ${day.en} at `),
+          es: g.spoken.es.replace(', y la tarifa punta comienza a las ', `, y la tarifa punta comienza ${day.es} a las `),
+        };
+        // Within the spoken bound, the golden words with the day; past it (the unconfirmed page with
+        // no prior), the same with what to do said compactly — the day, the reserve and the clock kept.
+        const to = c.input.restorePct != null ? `${c.input.restorePct} percent` : 'its usual level';
+        const toEs = c.input.restorePct != null ? `al ${c.input.restorePct} por ciento` : 'a su nivel habitual';
+        const expected = dayed.en.length + dayed.es.length <= MAX_SPOKEN_ADVISORY_CHARS ? dayed : {
+          en: dayed.en.replace(`Check the backup reserve in the EcoFlow app and set it to ${to}.`, `Set the backup reserve to ${to} in the EcoFlow app.`),
+          es: dayed.es.replace(`Revise la reserva de respaldo en la aplicación EcoFlow y ajústela ${toEs}.`, `Ajuste la reserva de respaldo ${toEs} en la aplicación EcoFlow.`),
+        };
+        assert.deepEqual(spoken, expected, c.name);
+        assert.ok(spoken.en.length + spoken.es.length <= MAX_SPOKEN_ADVISORY_CHARS, `${c.name}: within the bound`);
+        assert.notEqual(spoken.en, g.spoken.en);
+      } else {
+        // The on-peak stage says it has started; with no on-peak stamp there is no clause.
+        assert.deepEqual(push, gp, c.name);
+        assert.deepEqual(spoken, g.spoken, c.name);
+      }
+      assert.equal(push.title, gp.title);
+    });
+  }
+});
+
 test('★★★ the revert-deadline push says the restore is retried only while one will still be sent', () => {
   // The golden page was captured with a restore still being re-sent. With none pending (a stuck
   // restore whose re-issues are spent, or one the panel cannot be read for), the push is the same
@@ -151,8 +191,10 @@ test('★★★ index.ts: the summary and the revert page branch to the mid-day 
   assert.match(revert.slice(mid, night), /\n {6}return;\n {4}\}\n/);
   const page = INDEX.slice(INDEX.indexOf('function pageRevertDeadline('), INDEX.indexOf('async function runNightActuationTickInner('));
   assert.match(page, /const midday = isMiddayLeg\(state as Partial<ChargeLegState>\)\n\s+\? middayRevertDeadlineFromLeg\(state, \{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, nowMs, retrying \}\) : null;/);
-  assert.match(page, /const spoken = midday != null \? middayRevertDeadlineSpoken\(midday\) : revertDeadlineSpoken\(\{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock \}\);/);
-  assert.match(page, /midday != null \? buildMiddayRevertDeadline\(midday\) : buildNightChargeRevertDeadline\(\{\n\s+day: state\.day, stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock, retrying,\n/);
+  assert.match(page, /const spoken = midday != null \? middayRevertDeadlineSpoken\(midday\) : revertDeadlineSpoken\(\{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock, onPeakDay \}\);/);
+  assert.match(page, /midday != null \? buildMiddayRevertDeadline\(midday\) : buildNightChargeRevertDeadline\(\{\n\s+day: state\.day, stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock, onPeakDay, retrying,\n/);
+  // The on-peak day is named at the deadline stage only, from the page's own moment.
+  assert.ok(page.includes("const onPeakDay = d.stage === 'deadline' && state.nextOnPeakStartMs != null ? onPeakDayWords(state.nextOnPeakStartMs, nowMs) : null;"));
   // The evening job arms the overnight leg alone in this release: no mid-day words reach it.
   const job = INDEX.slice(INDEX.indexOf('async function runNightChargeEveningJobInner('), INDEX.indexOf('R4 (v1.189.0) — THE WINTER MID-DAY CYCLE IN SHADOW'));
   assert.ok(job.length > 1000);

@@ -198,6 +198,9 @@ export interface ShadowRefresh {
    *  P50 PV it was sized on, kWh: what the refresh push says of a cap and a moved figure. */
   neededLevelPct?: number | null;
   windowPvP50Kwh?: number | null;
+  /** The reserve the re-plan asked for (above the announced one when that capped it): what the
+   *  refresh push says of a reserve cap. */
+  neededReservePct?: number | null;
 }
 
 export interface MiddayShadowRecord {
@@ -372,15 +375,18 @@ export interface RefreshInputs {
 }
 
 /**
- * refreshLeg — the morning refresh's rule (plan §3.4 step 3). PURE. The announced level is the
- * consent ceiling: the refresh may lower or cancel the charge, never raise it.
+ * refreshLeg — the morning refresh's rule (plan §3.4 step 3), for the shadow and the live refresh
+ * alike (morningRefresh.liveRefreshOutcome). PURE. What the evening announced is the consent
+ * ceiling of every written value: the 21:30 push named the level and the reserve held from the
+ * open, so the refresh may lower or cancel the charge, never raise either.
  *  - no refreshed plan (no inputs, an incomplete basis): the evening plan stands ('stood');
  *  - a hold cancels the leg ('cancelled');
- *  - stop = min(announced level, refreshed level); reserve = min(50, announced level, refreshed
- *    reserve) — never above the announced level;
- *  - a refreshed need above the announced level is recorded 'capped' (the figure at the capped
- *    level is not re-derived: the expected draw is stated only when nothing was capped);
- *  - else 'lowered' when the stop or the reserve came down, 'unchanged' otherwise.
+ *  - a refreshed level or reserve above the announced level, or a refreshed reserve above the
+ *    announced reserve, is recorded 'capped': nothing is written, every figure stays as announced,
+ *    and no expected draw is stated (it was sized on values that will not be written);
+ *  - else the refreshed stop and reserve, at most the announced ones (a figure the re-plan does
+ *    not give stays as announced; the reserve never above 50): 'lowered' when the stop or the
+ *    reserve came down, 'unchanged' otherwise.
  * `wouldPush` (step 5): a cancel, a changed written value, a cap, or an expected draw that moved by
  * more than REFRESH_PUSH_MOVE_FRAC of the announced one either way.
  */
@@ -403,25 +409,32 @@ export function refreshLeg(i: RefreshInputs): Omit<ShadowRefresh, 'atMs' | 'disp
     };
   }
   const ceil = a.levelPct;
-  const min = (...xs: Array<number | null>): number | null => {
-    const v = xs.filter((x): x is number => x != null && Number.isFinite(x));
-    return v.length > 0 ? Math.min(...v) : null;
-  };
-  const levelPct = min(ceil, r.levelPct);
-  const reservePct = min(50, ceil, r.reservePct);
-  const capped = ceil != null && ((r.levelPct != null && r.levelPct > ceil + 1e-9) || (r.reservePct != null && r.reservePct > ceil + 1e-9));
+  const levelAbove = ceil != null && r.levelPct != null && r.levelPct > ceil + 1e-9;
+  // A higher reserve than the one announced is a higher need, as a higher level is.
+  const reserveAbove = r.reservePct != null && ((ceil != null && r.reservePct > ceil + 1e-9)
+    || (a.reservePct != null && r.reservePct > a.reservePct + 1e-9));
+  if (levelAbove || reserveAbove) {
+    return {
+      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,
+      reason: levelAbove
+        ? `the refreshed need (${r.levelPct}%) is above the announced ${ceil}%: held at it`
+        : `the refreshed reserve (${r.reservePct}%) is above the announced ${a.reservePct ?? ceil}%: held at it`,
+    };
+  }
+  // Below a cap the re-plan is at most what was announced: its figures are the leg's (a figure it
+  // does not give stays as announced), the reserve never above the panel's 50.
+  const levelPct = r.levelPct ?? a.levelPct;
+  const reservePct = r.reservePct != null ? Math.min(50, r.reservePct) : a.reservePct;
   const lowered = (a.levelPct != null && levelPct != null && levelPct < a.levelPct - 1e-9)
     || (a.reservePct != null && reservePct != null && reservePct < a.reservePct - 1e-9);
-  const disposition: RefreshDisposition = capped ? 'capped' : lowered ? 'lowered' : 'unchanged';
-  const expectedBuyKwh = capped ? null : r.expectedBuyKwh;
+  const disposition: RefreshDisposition = lowered ? 'lowered' : 'unchanged';
+  const expectedBuyKwh = r.expectedBuyKwh;
   const moved = a.expectedBuyKwh != null && a.expectedBuyKwh > 0 && expectedBuyKwh != null
     && Math.abs(expectedBuyKwh - a.expectedBuyKwh) > REFRESH_PUSH_MOVE_FRAC * a.expectedBuyKwh;
   const written = (a.reservePct != null && reservePct != null && reservePct !== a.reservePct)
     || (a.levelPct != null && levelPct != null && levelPct !== a.levelPct);
-  const reason = capped
-    ? `the refreshed need (${r.levelPct ?? '—'}%) is above the announced ${ceil}%: held at it`
-    : lowered ? `lowered to ~${levelPct ?? '—'}% (announced ${a.levelPct ?? '—'}%)` : 'the evening plan holds as announced';
-  return { disposition, levelPct, reservePct, buyKwh: r.buyKwh, expectedBuyKwh, wouldPush: capped || written || moved, reason };
+  const reason = lowered ? `lowered to ~${levelPct ?? '—'}% (announced ${a.levelPct ?? '—'}%)` : 'the evening plan holds as announced';
+  return { disposition, levelPct, reservePct, buyKwh: r.buyKwh, expectedBuyKwh, wouldPush: written || moved, reason };
 }
 
 /** Whether the shadow refresh is due now: 'run' inside [open − REFRESH_LEAD_MS, open −
@@ -451,12 +464,13 @@ export function standingRefresh(rec: MiddayShadowRecord, nowMs: number): ShadowR
 export function refreshFromSized(rec: MiddayShadowRecord, sized: ShadowSized | null, nowMs: number): ShadowRefresh {
   const c = rec.cost!;
   const p = sized?.plan ?? null;
+  const refreshedReserve = p != null && p.setpointSocPct != null && Number.isFinite(p.setpointSocPct) ? clampReserveTarget(p.setpointSocPct) : null;
   const r = refreshLeg({
     announced: { levelPct: c.levelPct, reservePct: c.reservePct, expectedBuyKwh: c.expectedBuyKwh, buyKwh: c.buyKwh },
     refreshed: p == null ? null : {
       basisComplete: p.basisComplete, chargeTonight: p.chargeTonight,
       levelPct: fin(chargeLevelPct(p)),
-      reservePct: p.setpointSocPct != null && Number.isFinite(p.setpointSocPct) ? clampReserveTarget(p.setpointSocPct) : null,
+      reservePct: refreshedReserve,
       expectedBuyKwh: statedBuyKwh(p), buyKwh: fin(p.buyKwh),
       reentryHold: p.middayReentryHold ?? null,
     },
@@ -466,6 +480,7 @@ export function refreshFromSized(rec: MiddayShadowRecord, sized: ShadowSized | n
     weatherAgeS: weatherAgeSeconds(sized?.weatherFetchedAtMs, nowMs),
     neededLevelPct: p != null ? fin(chargeLevelPct(p)) : null,
     windowPvP50Kwh: fin(sized?.windowPvP50Kwh),
+    neededReservePct: refreshedReserve,
   };
 }
 
@@ -502,7 +517,7 @@ export function notComparableRefresh(nowMs: number): ShadowRefresh {
   return {
     atMs: nowMs, disposition: 'not-comparable',
     levelPct: null, reservePct: null, buyKwh: null, expectedBuyKwh: null,
-    wouldPush: false, reason: NOT_COMPARABLE_REASON, weatherAgeS: null, neededLevelPct: null, windowPvP50Kwh: null,
+    wouldPush: false, reason: NOT_COMPARABLE_REASON, weatherAgeS: null, neededLevelPct: null, windowPvP50Kwh: null, neededReservePct: null,
   };
 }
 
@@ -762,6 +777,7 @@ export function middayShadowRefreshPreview(rec: MiddayShadowRecord, r: ShadowRef
     announced: { levelPct: c.levelPct, expectedKwh: c.expectedBuyKwh },
     refreshed: { levelPct: r.levelPct, reservePct: r.reservePct, expectedKwh: r.expectedBuyKwh },
     neededLevelPct: r.neededLevelPct ?? null,
+    neededReservePct: r.neededReservePct ?? null,
     windowPvKwh: { announced: c.windowPvP50Kwh, refreshed: r.windowPvP50Kwh ?? null },
     reservePct: null,
     applyAtMs: c.windowStartMs - APPLY_LEAD_MS,
@@ -821,6 +837,7 @@ export function coerceMiddayShadowRecord(raw: unknown): MiddayShadowRecord | nul
       ...('weatherAgeS' in r ? { weatherAgeS: fin(r.weatherAgeS) } : {}),
       ...('neededLevelPct' in r ? { neededLevelPct: fin(r.neededLevelPct) } : {}),
       ...('windowPvP50Kwh' in r ? { windowPvP50Kwh: fin(r.windowPvP50Kwh) } : {}),
+      ...('neededReservePct' in r ? { neededReservePct: fin(r.neededReservePct) } : {}),
     }
     : null;
   return {

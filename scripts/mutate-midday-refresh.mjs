@@ -26,6 +26,8 @@
  *   Basis      Q-i..Q-iv      (a refresh after the live overnight charge wrote is not comparable: not
  *                              re-sized, the evening figures stand)
  *   Page       T-xx           (the mid-day push says the restore is retried only while it is)
+ *   Fix 2      R-xxiv..R-xxviii, T-xxi..T-xxii, I-viii (one refresh rule for the shadow and the live
+ *                             refresh: a reserve above the announced one is a cap, and is said so)
  *
  *   node scripts/mutate-midday-refresh.mjs [--only <id prefix>]
  */
@@ -152,10 +154,10 @@ const MUTANTS = [
   },
   {
     id: 'R-xx. ★★★ a higher reserve than announced is not a cap',
-    file: MR,
-    find: '  const reserveCapped = armedReserve != null && refreshedReserve != null && refreshedReserve > armedReserve + 1e-9;',
-    to: '  const reserveCapped = false; /* MUTANT */',
-    why: 'The morning asks for more reserve than the push announced: the refresh reads it as a lowering and states a figure sized on a reserve it will not write.',
+    file: MS,
+    find: '    || (a.reservePct != null && r.reservePct > a.reservePct + 1e-9));',
+    to: '    || false); /* MUTANT */',
+    why: 'The morning asks for more reserve than the push announced: the refresh — live, and the shadow it is judged on — reads it as a lowering and states a figure sized on a reserve it will not write.',
   },
   {
     id: 'R-xxi. ★★ the push is judged on the re-plan, not on what is written',
@@ -166,10 +168,45 @@ const MUTANTS = [
   },
   {
     id: 'R-xxii. ★★★ a cap states the expected figure of a re-plan it will not write',
-    file: MR,
-    find: '  const expectedBuyKwh = capped ? null : r.expectedBuyKwh;\n  const a = leg.announcedExpectedKwh;',
-    to: '  const expectedBuyKwh = r.expectedBuyKwh; /* MUTANT */\n  const a = leg.announcedExpectedKwh;',
+    file: MS,
+    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,",
+    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: r.expectedBuyKwh, wouldPush: true, /* MUTANT */",
     why: 'The capped push and the ledger state a draw sized on a reserve or a level that is not written.',
+  },
+  {
+    id: 'R-xxiv. ★★★ a shadow cap records the re-plan\'s reserve',
+    file: MS,
+    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,",
+    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: r.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true, /* MUTANT */",
+    why: 'The ledger and the entity show a 45% reserve the live refresh would never write.',
+  },
+  {
+    id: 'R-xxv. ★★ a shadow cap records the re-plan\'s lower level',
+    file: MS,
+    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,",
+    to: "      disposition: 'capped', levelPct: r.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true, /* MUTANT */",
+    why: 'A cap that writes nothing is shown with the stop it did not lower.',
+  },
+  {
+    id: 'R-xxvi. ★★ a cap is not pushed',
+    file: MS,
+    find: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: true,",
+    to: "      disposition: 'capped', levelPct: a.levelPct, reservePct: a.reservePct, buyKwh: r.buyKwh, expectedBuyKwh: null, wouldPush: false, /* MUTANT */",
+    why: 'The owner is not told the morning asked for more than was announced.',
+  },
+  {
+    id: 'R-xxvii. ★★ the shadow forgets the reserve the re-plan asked for',
+    file: MS,
+    find: '    neededReservePct: refreshedReserve,',
+    to: '    neededReservePct: null, /* MUTANT */',
+    why: 'The preview of a reserve cap cannot say what the morning called for.',
+  },
+  {
+    id: 'R-xxviii. ★★ the live outcome drops the reserve the re-plan asked for',
+    file: MR,
+    find: '  const neededReservePct = refreshedReserve;',
+    to: '  const neededReservePct = null; /* MUTANT */',
+    why: 'The live push of a reserve cap cannot say what the morning called for.',
   },
   {
     id: 'R-xxiii. ★★★ the refresh has no deadline after its await',
@@ -601,6 +638,27 @@ const MUTANTS = [
     find: "  return r != null && r.disposition !== 'stood' && r.disposition !== 'not-comparable';",
     to: "  return r != null && r.disposition !== 'stood'; /* MUTANT */",
     why: 'The mid-day entities go unknown on every write night instead of keeping the evening plan.',
+  },
+  {
+    id: 'T-xxi. ★★★ a reserve cap is pushed as "calls for more" than a level it did not ask above',
+    file: TXT,
+    find: '    if (!levelAsked) {',
+    to: '    if ((false as boolean) && !levelAsked) { /* MUTANT */',
+    why: '"The morning re-plan calls for more (~70%) … stays at ~70%": a push that is not true.',
+  },
+  {
+    id: 'T-xxii. ★★★ the reserve-cap push names the asked reserve as the one held',
+    file: TXT,
+    find: "          + `${when} stays at ${aLevel}${held != null ? `, with the reserve held at ${held}% from the open` : ''}.${cancel}`,",
+    to: "          + `${when} stays at ${aLevel}${needR != null ? `, with the reserve held at ${needR}% from the open` : ''}.${cancel}`, /* MUTANT */",
+    why: 'The push says the reserve is held at 45% when 30% is what is written.',
+  },
+  {
+    id: 'I-viii. ★★ the live refresh push is not told the reserve the re-plan asked for',
+    file: IDX,
+    find: '    neededReservePct: o.neededReservePct,',
+    to: '    neededReservePct: null, /* MUTANT */',
+    why: 'The live push of a reserve cap loses the figure the outcome carries.',
   },
   {
     id: 'T-xx. ★★★ the mid-day page always says the restore keeps being retried',

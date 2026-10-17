@@ -35,8 +35,10 @@ import {
   decideRevertDeadline, revertDeadlineMs, revertDeadlineSpoken, revertOutstanding, restoreTargetPct,
   foreignStep, isForeignReserveReading, isReserveArbitrageRaised, ownerReserveFloorPct,
   chargeWriteHold, moneyDetectorReservePct, reserveRestoreNote,
+  isReserveSetting, applyProvedUnlanded, restoreAwaitingFirstChance, REVERT_DEADLINE_HOLD_MAX_MS, APPLY_MAX_RETRIES,
   type ArmablePlan, type ActuationTickOpts, type NightActuationState,
 } from '../src/nightChargeActuator.js';
+import { onPeakDayWords } from '../src/chargeText.js';
 import {
   decideForceCharge, forceChargeOffDueNow, forceChargeOffDeadlineMs, actuationStepOrder, blindResendStopMs,
   FORCE_CHARGE_MIN_RUN_MS, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, FORCE_CHARGE_ON_VERIFY_AFTER_MS,
@@ -154,7 +156,7 @@ function replayNight(armed: NightActuationState, fcEnabled: boolean): string[] {
     dev.pend = dev.pend.filter((x) => t < x.at);
     dev.pool = dev.slots.length > 0 || dev.reserve > dev.pool ? Math.min(100, dev.pool + 0.25) : Math.max(0, dev.pool - 0.02);
     const a = decideActuation(s, t, ropts({ currentReservePct: dev.reserve }));
-    const d = decideRevertDeadline(s, t, dev.reserve);
+    const d = decideRevertDeadline(s, t, dev.reserve, true);
     out.push(`${t} reserve ${JSON.stringify(a)} deadline ${JSON.stringify(d)}`);
     switch (a.kind) {
       case 'none': break;
@@ -223,6 +225,7 @@ test('★★★ a year of overnight nights that go to plan: every decision is th
       const text = a.join('\n');
       assert.ok(text.includes('"kind":"apply"') && text.includes('"kind":"revert"') && text.includes('"kind":"revertVerified"'));
       assert.ok(!text.includes('"kind":"page"'), 'no revertDeadline page on a night that goes to plan');
+      assert.ok(!text.includes('"kind":"hold"'), 'nor a wait: the 05:00 restore read back long before the deadline');
       if (fc && text.includes('"kind":"on"')) {
         forceCharged++;
         assert.ok(text.includes('"kind":"off"') && text.includes('"kind":"offVerified"') && text.includes('"kind":"ceilingRestored"'));
@@ -380,7 +383,7 @@ test('★★★ revertDeadline: min(close + 30, on-peak − 30) — 15:30 for a 
   assert.equal(revertDeadlineMs(s), MIDDAY_PEAK - ON_PEAK_PAGE_LEAD_MS);
   assert.equal(revertDeadlineMs(applied(arm(LATE))), MIDDAY_PEAK - ON_PEAK_PAGE_LEAD_MS, 'the window close + 30 would be on-peak itself');
   // Applied, the restore never sent (its PUT kept failing): paged at 15:30 too.
-  assert.deepEqual(decideRevertDeadline(s, MIDDAY_PEAK - ON_PEAK_PAGE_LEAD_MS, 50), { kind: 'page', stage: 'deadline', unknown: false });
+  assert.deepEqual(decideRevertDeadline({ ...s, revertAttempts: 3 }, MIDDAY_PEAK - ON_PEAK_PAGE_LEAD_MS, 50, true), { kind: 'page', stage: 'deadline', unknown: false });
   // A record without the stamp: the close + 30 alone, and no on-peak page.
   const legacy = { ...applied(arm(NIGHT, false)), revertedAtMs: NIGHT.endMs };
   assert.equal(revertDeadlineMs(legacy), NIGHT.endMs + REVERT_DEADLINE_AFTER_WINDOW_MS);
@@ -633,7 +636,7 @@ test('★★★ index.ts: revertDeadline is decided ahead of the reserve decisio
   const idx = SRC('index.ts');
   const fn = idx.indexOf('async function runNightActuationTickInner(');
   const body = idx.slice(fn, idx.indexOf('\nif (nightChargeEnabled) {', fn));
-  const page = body.indexOf('const revertPage = decideRevertDeadline(state, nowMs, currentReservePct);');
+  const page = body.indexOf('const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null);');
   assert.ok(page > 0);
   assert.ok(page < body.indexOf('const action = decideActuation(state, nowMs, {'));
   assert.ok(page < body.indexOf("if (action.kind === 'none' || !shp2) return;"));
@@ -643,6 +646,11 @@ test('★★★ index.ts: revertDeadline is decided ahead of the reserve decisio
   // A never-landed attempt is proven on a live reading, ahead of the page.
   const proof = body.indexOf('if (attemptProvedUnlanded(state, currentReservePct, nowMs)) {\n    persistNightActuation({ ...state, attemptUnlandedAtMs: nowMs });');
   assert.ok(proof > 0 && proof < page, 'the proof is stamped before the page is decided');
+  // So is the proof for an ACK'd write that never took effect.
+  const applied2 = body.indexOf('if (applyProvedUnlanded(state, currentReservePct, nowMs)) {\n    persistNightActuation({ ...state, applyUnlandedAtMs: nowMs });');
+  assert.ok(applied2 > proof && applied2 < page, 'the applied-write proof too');
+  // A deadline that waits for its restore is stamped on its first tick — the wait's bound runs from it.
+  assert.ok(body.includes("if (revertPage.kind === 'hold') {\n    if (state.revertDeadlineHeldAtMs == null) {\n      persistNightActuation({ ...state, revertDeadlineHeldAtMs: nowMs });"));
   assert.ok(body.includes('state = nightActuationMem; // the stamp is on the record every write below spreads'));
   const pg = idx.slice(idx.indexOf('function pageRevertDeadline('), fn);
   assert.ok(pg.indexOf('persistNightActuation({') < pg.indexOf("broadcast.announce('critical', spoken.en, spoken.es)"), 'stamped first');
@@ -931,4 +939,231 @@ test('★★★ a Friday window\'s stuck restore survives Saturday\'s arm: Monda
   // Corrected in the app (the panel reads 16): the restore reads back, and the next evening arms.
   assert.equal(armOpenItem(stuck, 16), null);
   assert.deepEqual(decideActuation(stuck, SAT_ARM + 5 * MIN, ropts({ currentReservePct: 16 })), { kind: 'revertVerified' });
+});
+
+/* ══ the failure paths, reviewed again: no garbage reading decides a page, a restart lets the restore go first, the words name the day ══ */
+
+test('★★★ revertDeadline: a reading that is not a reserve setting — a reconnect 0, a fraction, out of the envelope — is no reading, at both stages and at the arm', () => {
+  // Applied and read back, the restore ACK'd at 05:00:20 and never read back.
+  const s = { ...applied(arm(NIGHT)), revertedAtMs: NIGHT.endMs + 20_000 };
+  const deadline = revertDeadlineMs(s)!;
+  const paged = { ...s, revertDeadlinePagedAtMs: deadline };
+  const next = { startMs: phx(2026, 10, 14, 23), endMs: phx(2026, 10, 15, 5) };
+  for (const v of [0, 0.5, 5, 9, 51, 100, -1, 30.5]) {
+    assert.equal(isReserveSetting(v), false, `${v}`);
+    assert.deepEqual(decideRevertDeadline(s, deadline, v), { kind: 'page', stage: 'deadline', unknown: true }, `${v}: the deadline pages, unconfirmed`);
+    assert.deepEqual(decideRevertDeadline(paged, NIGHT_PEAK, v), { kind: 'page', stage: 'onPeak', unknown: true }, `${v}: the on-peak start pages`);
+    assert.equal(restoreUnconfirmed(s, v), true, `${v}: the restore is still unconfirmed`);
+    assert.equal(armOpenItem(s, v), `the 2026-10-13 reserve restore was sent and has not read back (the panel reads ${v}, not a valid reserve)`);
+    assert.equal(armFromPlan(s, '2026-10-14', plan(next), next.startMs - 90 * MIN, v, true, nextOnPeakStartMs(REV, next.startMs)), null, `${v}: the next arm does not bury the record`);
+  }
+  // A setting decides as before: the restore read back, or a value someone else set.
+  assert.deepEqual(decideRevertDeadline(s, deadline, 16), { kind: 'pass', stage: 'deadline', pct: 16 });
+  assert.deepEqual(decideRevertDeadline(s, deadline, 30), { kind: 'pass', stage: 'deadline', pct: 30 });
+  assert.deepEqual(decideRevertDeadline(s, deadline, 50), { kind: 'page', stage: 'deadline', unknown: false });
+  assert.equal(restoreUnconfirmed(s, 30), false);
+  assert.equal(restoreUnconfirmed(s, 50), true);
+  assert.equal(armOpenItem(s, 50), 'the 2026-10-13 reserve restore was sent and has not read back (the panel still reads 50%)');
+  assert.equal(armOpenItem(s, null), 'the 2026-10-13 reserve restore was sent and has not read back (the panel is not reporting its reserve)');
+  for (const v of [10, 16, 50]) assert.equal(isReserveSetting(v), true);
+  assert.equal(isReserveSetting(null), false);
+  // A reconnect 0 at both moments, then dark: both pages still go out (before, the 0 passed both stages).
+  let r = s;
+  let pages = 0;
+  for (let t = NIGHT.endMs; t <= NIGHT_PEAK + HOUR; t += MIN) {
+    const reading = t === deadline || t === NIGHT_PEAK ? 0 : null;
+    const d = decideRevertDeadline(r, t, reading);
+    if (d.kind === 'page') {
+      pages++;
+      r = { ...r, revertDeadlinePagedAtMs: r.revertDeadlinePagedAtMs ?? t, revertDeadlineOnPeakPagedAtMs: d.stage === 'onPeak' ? t : r.revertDeadlineOnPeakPagedAtMs };
+    }
+    assert.notEqual(d.kind, 'pass', `${new Date(t).toISOString()}: nothing decides a stage without a page`);
+  }
+  assert.equal(pages, 2);
+});
+
+test('★★★ revertDeadline after a restart across the deadline: the restore goes first; the deadline pages only if it is rejected, does not read back, or cannot be sent', () => {
+  // Applied 23:00 and read back (prior 16); the process went down at 04:50 and its first tick is at 05:31.
+  const s = applied(arm(NIGHT));
+  const deadline = revertDeadlineMs(s)!;
+  const t1 = deadline + MIN;
+  assert.equal(restoreAwaitingFirstChance(s, t1, true), true);
+  assert.deepEqual(decideRevertDeadline(s, t1, 50, true), { kind: 'hold', stage: 'deadline' });
+  assert.deepEqual(decideRevertDeadline(s, t1, null, true), { kind: 'hold', stage: 'deadline' });
+  assert.deepEqual(decideActuation(s, t1, ropts({ currentReservePct: 50 })), { kind: 'revert', restorePct: 16 }, 'sent on that same tick');
+  // Nothing will be sent: the panel missing from the device list, or no valid value to restore — paged at once, as before.
+  assert.deepEqual(decideRevertDeadline(s, t1, null, false), { kind: 'page', stage: 'deadline', unknown: true });
+  assert.deepEqual(decideRevertDeadline(s, t1, null), { kind: 'page', stage: 'deadline', unknown: true }, 'the default never waits');
+  assert.deepEqual(decideRevertDeadline({ ...s, priorReservePct: 7 }, t1, 50, true), { kind: 'page', stage: 'deadline', unknown: false });
+  // Rejected: paged on the next tick.
+  assert.deepEqual(decideRevertDeadline({ ...s, revertAttempts: 1, revertDeadlineHeldAtMs: t1 }, t1 + MIN, 50, true), { kind: 'page', stage: 'deadline', unknown: false });
+  // Accepted: it waits out the restore's readback grace, then pages if the panel still reads 50.
+  const sent = { ...s, revertedAtMs: t1, revertDeadlineHeldAtMs: t1 };
+  assert.deepEqual(decideRevertDeadline(sent, t1 + MIN, 50, true), { kind: 'hold', stage: 'deadline' });
+  assert.deepEqual(decideRevertDeadline(sent, t1 + REVERT_VERIFY_AFTER_MS - 1, 50, true), { kind: 'hold', stage: 'deadline' });
+  assert.deepEqual(decideRevertDeadline(sent, t1 + REVERT_VERIFY_AFTER_MS, 50, true), { kind: 'page', stage: 'deadline', unknown: false });
+  assert.deepEqual(decideRevertDeadline(sent, t1 + 2 * MIN, 16, true), { kind: 'pass', stage: 'deadline', pct: 16 }, 'read back');
+  // Bounded: a restore that never gets sent (rate-limited every tick) waits REVERT_DEADLINE_HOLD_MAX_MS at most.
+  const held = { ...s, revertDeadlineHeldAtMs: t1 };
+  assert.equal(REVERT_DEADLINE_HOLD_MAX_MS, 10 * MIN);
+  assert.deepEqual(decideRevertDeadline(held, t1 + REVERT_DEADLINE_HOLD_MAX_MS - 1, 50, true), { kind: 'hold', stage: 'deadline' });
+  assert.deepEqual(decideRevertDeadline(held, t1 + REVERT_DEADLINE_HOLD_MAX_MS, 50, true), { kind: 'page', stage: 'deadline', unknown: false });
+  assert.deepEqual(decideRevertDeadline({ ...sent, revertDeadlineHeldAtMs: t1 - REVERT_DEADLINE_HOLD_MAX_MS }, t1 + MIN, 50, true), { kind: 'page', stage: 'deadline', unknown: false }, 'the bound outranks the grace');
+  // The on-peak stage never waits: a process down through on-peak is paged at once.
+  assert.deepEqual(decideRevertDeadline(s, NIGHT_PEAK + MIN, 50, true), { kind: 'page', stage: 'onPeak', unknown: false });
+  // A restore sent at the close is long past its grace at the deadline: a stuck one pages as before.
+  assert.deepEqual(decideRevertDeadline({ ...s, revertedAtMs: NIGHT.endMs + 20_000 }, deadline, 50, true), { kind: 'page', stage: 'deadline', unknown: false });
+  assert.equal(restoreAwaitingFirstChance({ ...s, revertVerifiedAtMs: t1 }, t1, true), false);
+  assert.equal(restoreAwaitingFirstChance(arm(NIGHT), t1, true), false, 'nothing applied');
+});
+
+/** A process back at `backMs` on an applied night whose restore was never sent, ticking each minute
+ *  as the integrator does: the page decision first (its stamps), then the reserve decision. The
+ *  panel reads 16 `lagMs` after an accepted restore when it takes. Returns the pages, with their
+ *  moment and the record at it. */
+function simulateRestart(o: { backMs: number; takes: boolean; lagMs?: number; rejectFirst?: number; untilMs?: number }) {
+  let s = applied(arm(NIGHT));
+  let rejects = o.rejectFirst ?? 0;
+  const pages: Array<{ t: number; d: RevertDeadlineDecisionLike; s: NightActuationState }> = [];
+  const reading = (t: number): number => (o.takes && s.revertedAtMs != null && t >= s.revertedAtMs + (o.lagMs ?? 40_000) ? 16 : 50);
+  for (let t = o.backMs; t <= (o.untilMs ?? o.backMs + 2 * HOUR); t += MIN) {
+    const d = decideRevertDeadline(s, t, reading(t), true);
+    if (d.kind === 'hold' && s.revertDeadlineHeldAtMs == null) s = { ...s, revertDeadlineHeldAtMs: t };
+    if (d.kind === 'page') {
+      pages.push({ t, d, s });
+      s = { ...s, revertDeadlinePagedAtMs: s.revertDeadlinePagedAtMs ?? t, revertDeadlineOnPeakPagedAtMs: d.stage === 'onPeak' ? t : s.revertDeadlineOnPeakPagedAtMs };
+    }
+    if (d.kind === 'pass') s = d.stage === 'onPeak' ? { ...s, revertDeadlineOnPeakPassedAtMs: t } : { ...s, revertDeadlinePassedAtMs: t };
+    const a = decideActuation(s, t, ropts({ currentReservePct: reading(t) }));
+    if (a.kind === 'revert') {
+      if (rejects > 0) { rejects--; s = { ...s, revertAttempts: s.revertAttempts + 1 }; } else s = { ...s, revertedAtMs: t };
+    } else if (a.kind === 'revertVerified') s = { ...s, revertVerifiedAtMs: t };
+    else if (a.kind === 'retryRevert') s = { ...s, revertRetries: s.revertRetries + 1, revertLastAttemptMs: t };
+    else if (a.kind === 'revertFailed') s = { ...s, revertReadbackEscalated: true };
+  }
+  return { s, pages };
+}
+type RevertDeadlineDecisionLike = ReturnType<typeof decideRevertDeadline>;
+
+test('★★★ a restart across the deadline, tick by tick: no page when the restore then takes; one, after its readback grace, when it does not', () => {
+  const deadline = NIGHT.endMs + REVERT_DEADLINE_AFTER_WINDOW_MS;
+  for (const back of [deadline, deadline + 37_000, deadline + HOUR, phx(2026, 10, 14, 8), NIGHT_PEAK - 20 * MIN]) {
+    for (const lagMs of [20_000, 60_000, 4 * MIN]) {
+      const ok = simulateRestart({ backMs: back, takes: true, lagMs });
+      assert.deepEqual(ok.pages, [], `back at ${new Date(back).toISOString()}, readback ${lagMs / 1000}s: nothing paged`);
+      assert.ok(ok.s.revertVerifiedAtMs != null);
+    }
+    if (back > NIGHT_PEAK - REVERT_DEADLINE_HOLD_MAX_MS) continue; // the on-peak stage takes over
+    const stuck = simulateRestart({ backMs: back, takes: false });
+    const first = stuck.pages[0];
+    assert.ok(first != null && first.d.kind === 'page' && first.d.stage === 'deadline' && first.d.unknown === false, `back at ${new Date(back).toISOString()}: the stuck restore is paged`);
+    assert.ok(first.s.revertedAtMs != null && first.t >= first.s.revertedAtMs + REVERT_VERIFY_AFTER_MS, 'only after the restore was sent and had its readback grace');
+    assert.ok(first.t - back <= REVERT_DEADLINE_HOLD_MAX_MS, 'within the bound');
+    // Rejected once, then accepted and stuck: paged on the rejection — the restore had its chance.
+    const rejected = simulateRestart({ backMs: back, takes: false, rejectFirst: 1 });
+    assert.equal(rejected.pages[0]?.t, back + MIN, 'the tick after the rejection');
+  }
+});
+
+test('★★★ an ACK\'d write the apply ladder proved never took effect is not paged when the readback goes dark at the close', () => {
+  // Cloud-ACK'd at 23:00; both re-issues read the 16% baseline; applyFailed; the panel reads 16.
+  let s: NightActuationState = { ...applied(arm(NIGHT)), applyVerifiedAtMs: null };
+  let stampedAt: number | null = null;
+  for (let t = NIGHT.startMs + MIN; t <= NIGHT.startMs + HOUR; t += MIN) {
+    if (applyProvedUnlanded(s, 16, t)) { s = { ...s, applyUnlandedAtMs: t }; stampedAt ??= t; }
+    const a = decideActuation(s, t, ropts({ currentReservePct: 16 }));
+    if (a.kind === 'retryApply') s = { ...s, applyRetries: s.applyRetries + 1, applyLastAttemptMs: t };
+    else if (a.kind === 'applyFailed') s = { ...s, applyEscalated: true };
+    else assert.ok(a.kind === 'none', `${a.kind}`);
+  }
+  assert.equal(s.applyRetries, APPLY_MAX_RETRIES);
+  assert.equal(s.applyEscalated, true);
+  assert.ok(stampedAt != null && stampedAt >= s.applyLastAttemptMs! + APPLY_VERIFY_AFTER_MS, 'proven after the ladder, on the baseline');
+  assert.equal(revertOutstanding(s), false);
+  // The 05:00 restore is still sent (a no-op), ACK'd — or not — and the readback goes dark: no page, no hold on the next arm.
+  assert.deepEqual(decideActuation(s, NIGHT.endMs, ropts({ currentReservePct: null })), { kind: 'revert', restorePct: 16 });
+  for (const r of [{ ...s, revertedAtMs: NIGHT.endMs }, s]) {
+    assert.deepEqual(decideRevertDeadline(r, revertDeadlineMs(r)!, null), { kind: 'none' });
+    assert.deepEqual(decideRevertDeadline(r, NIGHT_PEAK, null), { kind: 'none' });
+    assert.equal(restoreUnconfirmed(r, null), false);
+    assert.equal(chargeWriteHold(r), null, 'the money detectors are not held');
+  }
+  // The proof needs the ladder over, the grace run, the baseline read live — and no verification, no restore.
+  const ladder = { ...applied(arm(NIGHT)), applyVerifiedAtMs: null, applyRetries: 2, applyLastAttemptMs: NIGHT.startMs + 10 * MIN, applyEscalated: true };
+  const after = NIGHT.startMs + 10 * MIN + APPLY_VERIFY_AFTER_MS;
+  assert.equal(applyProvedUnlanded(ladder, 16, after), true);
+  assert.equal(applyProvedUnlanded(ladder, 16, after - 1), false, 'inside the last attempt\'s readback grace');
+  assert.equal(applyProvedUnlanded({ ...ladder, applyEscalated: false }, 16, after), false, 'the ladder is not over');
+  assert.equal(applyProvedUnlanded(ladder, null, after), false, 'no reading proves nothing');
+  assert.equal(applyProvedUnlanded(ladder, 50, after), false, 'our target: it landed');
+  assert.equal(applyProvedUnlanded(ladder, 30, after), false, 'not the baseline');
+  assert.equal(applyProvedUnlanded({ ...ladder, applyVerifiedAtMs: NIGHT.startMs + MIN }, 16, after), false, 'verified');
+  assert.equal(applyProvedUnlanded({ ...ladder, revertedAtMs: NIGHT.endMs }, 16, NIGHT.endMs + HOUR), false, 'restored');
+  assert.equal(applyProvedUnlanded({ ...ladder, applyUnlandedAtMs: after }, 16, after + MIN), false, 'stamped once');
+  assert.equal(applyProvedUnlanded({ ...arm(NIGHT), applyAttemptedAtMs: NIGHT.startMs, attemptBaselinePct: 16, applyEscalated: true }, 16, after), false, 'an unconfirmed attempt is attemptProvedUnlanded\'s');
+  // A late landing outranks the proof: verified, it is outstanding again, restored, and paged if stuck.
+  const proven = { ...ladder, applyUnlandedAtMs: after };
+  assert.deepEqual(decideActuation(proven, NIGHT.startMs + 2 * HOUR, ropts({ currentReservePct: 50 })), { kind: 'applyVerified' });
+  const late = { ...proven, applyVerifiedAtMs: NIGHT.startMs + 2 * HOUR };
+  assert.equal(revertOutstanding(late), true);
+  const lateStuck = { ...late, revertedAtMs: NIGHT.endMs };
+  assert.deepEqual(decideRevertDeadline(lateStuck, revertDeadlineMs(lateStuck)!, null), { kind: 'page', stage: 'deadline', unknown: true });
+  assert.equal(restoreUnconfirmed(lateStuck, null), true);
+  assert.ok(chargeWriteHold(late) != null);
+  // It round-trips through the file.
+  assert.equal(coerceActuationState(JSON.parse(JSON.stringify(proven))).applyUnlandedAtMs, after);
+  assert.equal(coerceActuationState(JSON.parse(JSON.stringify({ ...proven, revertDeadlineHeldAtMs: after }))).revertDeadlineHeldAtMs, after);
+  assert.equal(coerceActuationState({ day: '2026-10-13' }).applyUnlandedAtMs, null);
+});
+
+test('★★★ the deadline page names the on-peak day when it is not the page\'s: a Friday window, a holiday eve — and the bare clock on the same day', () => {
+  const periodId = (t: number) => rateAt(REV, t).periodId;
+  const cases: Array<{ name: string; armAt: number; en: string | null; es: string | null }> = [
+    { name: 'Friday 2026-12-04', armAt: phx(2026, 12, 4, 21, 30), en: 'on Monday', es: 'el lunes' },
+    { name: 'the eve of Thanksgiving 2026-11-25', armAt: phx(2026, 11, 25, 21, 30), en: 'on Friday', es: 'el viernes' },
+    { name: 'Tuesday 2026-10-13', armAt: phx(2026, 10, 13, 21, 30), en: null, es: null },
+    { name: 'Thursday 2026-12-03', armAt: phx(2026, 12, 3, 21, 30), en: null, es: null },
+  ];
+  for (const c of cases) {
+    const w = resolveCheapWindow(periodId, c.armAt, 'overnight', 30)!;
+    assert.ok(w != null, c.name);
+    const s = { ...applied(arm(w, true, c.armAt)), revertedAtMs: w.endMs };
+    const at = revertDeadlineMs(s)! + MIN;
+    assert.deepEqual(decideRevertDeadline(s, at, 50), { kind: 'page', stage: 'deadline', unknown: false }, c.name);
+    const day = onPeakDayWords(s.nextOnPeakStartMs!, at);
+    assert.deepEqual(day, c.en == null ? null : { en: c.en, es: c.es }, c.name);
+    const spoken = revertDeadlineSpoken({ stage: 'deadline', unknown: false, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', onPeakDay: day });
+    const push = buildNightChargeRevertDeadline({ day: s.day, stage: 'deadline', unknown: false, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', onPeakDay: day, retrying: true });
+    if (c.en == null) {
+      assert.match(spoken.en, /, and on-peak pricing starts at 4:00 PM\. /, c.name);
+      assert.match(spoken.es, /, y la tarifa punta comienza a las 4:00 PM\. /, c.name);
+      assert.match(push.body, / On-peak pricing starts at 4:00 PM\. /, c.name);
+    } else {
+      assert.ok(spoken.en.includes(`, and on-peak pricing starts ${c.en} at 4:00 PM. `), `${c.name}: ${spoken.en}`);
+      assert.ok(spoken.es.includes(`, y la tarifa punta comienza ${c.es} a las 4:00 PM. `), `${c.name}: ${spoken.es}`);
+      assert.ok(push.body.includes(` On-peak pricing starts ${c.en} at 4:00 PM. `), `${c.name}: ${push.body}`);
+    }
+    assert.ok(spoken.en.length + spoken.es.length <= MAX_SPOKEN_ADVISORY_CHARS, `${c.name}: ${spoken.en.length + spoken.es.length}`);
+    // The unknown page too, and the on-peak stage keeps "has started" / "started at".
+    const unk = revertDeadlineSpoken({ stage: 'deadline', unknown: true, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', onPeakDay: day });
+    assert.ok(unk.en.includes(`on-peak pricing starts ${c.en != null ? `${c.en} ` : ''}at 4:00 PM.`), unk.en);
+    assert.ok(unk.en.length + unk.es.length <= MAX_SPOKEN_ADVISORY_CHARS);
+  }
+  // The next date is named by its weekday too, never "tomorrow" (heard at 12:30 AM as the day just
+  // begun); the same date keeps the bare clock.
+  assert.deepEqual(onPeakDayWords(phx(2026, 10, 15, 16), phx(2026, 10, 14, 17)), { en: 'on Thursday', es: 'el jueves' });
+  assert.deepEqual(onPeakDayWords(phx(2026, 10, 15, 16), phx(2026, 10, 14, 23, 59)), { en: 'on Thursday', es: 'el jueves' });
+  assert.equal(onPeakDayWords(phx(2026, 10, 14, 16), phx(2026, 10, 14, 0, 30)), null);
+  assert.equal(onPeakDayWords(phx(2026, 10, 14, 16), phx(2026, 10, 14, 15, 59)), null);
+  // Every weekday, every shape: within the spoken bound.
+  for (const wd of ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']) {
+    const ms = [...Array(7).keys()].map((k) => phx(2026, 10, 19 + k, 16)).find((t) => onPeakDayWords(t, phx(2026, 10, 18, 1))?.en === `on ${wd}`)!;
+    const day = onPeakDayWords(ms, phx(2026, 10, 18, 1))!;
+    for (const unknown of [true, false]) for (const restorePct of [16, null]) {
+      const t = revertDeadlineSpoken({ stage: 'deadline', unknown, targetPct: 50, restorePct, onPeakClock: '4:00 PM', onPeakDay: day });
+      assert.ok(t.en.length + t.es.length <= MAX_SPOKEN_ADVISORY_CHARS, `${wd}/${unknown}/${restorePct}: ${t.en.length + t.es.length}`);
+    }
+  }
+  const onPeak = buildNightChargeRevertDeadline({ day: '2026-12-04', stage: 'onPeak', unknown: false, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', onPeakDay: { en: 'on Monday', es: 'el lunes' }, retrying: true });
+  assert.match(onPeak.body, / On-peak pricing started at 4:00 PM\. /, 'the on-peak stage is said when it starts');
 });

@@ -713,7 +713,8 @@ export function buildNightChargeMorningSummary(o: {
  * decideRevertDeadline): a restore of the night's reserve write that has not read back by its
  * deadline, or by the on-peak start. `unknown` = no live reading: the words say the restore could
  * not be CONFIRMED, never that the reserve reads raised. `onPeakClock` names the on-peak start
- * ("4:00 PM"); null when the night has none on record. PURE.
+ * ("4:00 PM"); null when the night has none on record. `onPeakDay` names its day at the deadline
+ * stage when it is not the page's ("on Monday": chargeText.onPeakDayWords). PURE.
  */
 export function buildNightChargeRevertDeadline(o: {
   day: string | null;
@@ -722,6 +723,8 @@ export function buildNightChargeRevertDeadline(o: {
   targetPct: number;
   restorePct: number | null;
   onPeakClock: string | null;
+  /** The on-peak start's day when it is not the page's own; absent or null: the bare clock. */
+  onPeakDay?: { en: string; es: string } | null;
   /** A restore of ours will still be sent (nightChargeActuator.revertRetryPending). The push says
    *  the add-on keeps retrying only then: a stuck restore whose re-issues are spent, or one the
    *  panel cannot be read for, is not re-sent, and saying otherwise tells the owner to wait. */
@@ -729,7 +732,8 @@ export function buildNightChargeRevertDeadline(o: {
 }): NotifyMessage {
   const to = o.restorePct != null ? `${o.restorePct}%` : 'its usual level';
   const peak = o.onPeakClock == null ? ''
-    : o.stage === 'onPeak' ? ` On-peak pricing started at ${o.onPeakClock}.` : ` On-peak pricing starts at ${o.onPeakClock}.`;
+    : o.stage === 'onPeak' ? ` On-peak pricing started at ${o.onPeakClock}.`
+      : ` On-peak pricing starts ${o.onPeakDay != null ? `${o.onPeakDay.en} ` : ''}at ${o.onPeakClock}.`;
   const state = o.unknown
     ? `could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's ${o.targetPct}% may still stand.`
     : `has not taken effect: the Smart Home Panel 2 still reads ${o.targetPct}%.`;

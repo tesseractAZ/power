@@ -8,7 +8,7 @@ import {
 import {
   armCycle, coerceCycle, emptyCycle, emptyLegState, serializeCycle, type ChargeCycleState, type ChargeLegState,
 } from '../src/chargeCycle.js';
-import { REFRESH_LEAD_MS, REFRESH_DEADLINE_MS, weatherAgeSeconds } from '../src/middayShadow.js';
+import { REFRESH_LEAD_MS, REFRESH_DEADLINE_MS, weatherAgeSeconds, refreshFromSized, type MiddayShadowRecord } from '../src/middayShadow.js';
 import type { NightChargePlan } from '../src/nightChargeAdvisor.js';
 import { weatherMaxAgeMs, getWeather, clearWeatherTestOverride, setWeatherCacheForTesting } from '../src/weather.js';
 import { getDayForecast, computeProbabilisticForecast, resetForecastCachesForTesting } from '../src/analytics.js';
@@ -233,6 +233,44 @@ test('★★★ the announced reserve is a ceiling too: a re-plan asking for a h
   assert.equal(applyLiveRefresh(midday(), noCeiling, OPEN - 20 * M).forceChargeCeilingPct, null);
 });
 
+test('★★★ one rule: the shadow refresh records what this live refresh would do, on the same leg and re-plan', () => {
+  // The shadow's record of an evening and the live leg the switch would arm from it.
+  const shadowOf = (lvl: number, res: number): MiddayShadowRecord => ({
+    version: 1, day: '2026-10-14', computedAtMs: phx(10, 14, 21, 30), why: 'midday', mode: 'supervised', backup: null, refresh: null, note: null,
+    cost: {
+      role: 'cost', kind: 'super_off_peak', windowStartMs: OPEN, windowEndMs: phx(10, 15, 15), basisComplete: true, chargeTonight: true,
+      reservePct: res, reserveBasis: 'pool', levelPct: lvl, costCeilingSocPct: 89.6, buyKwh: 58.2, expectedBuyKwh: 34, expectedStartSocPct: 40,
+      cushionTroughSocPct: null, cushionLineSocPct: null, wouldArm: true, disposition: 'would arm', windowPvP50Kwh: 20, windowLoadP50Kwh: 14,
+    },
+  });
+  let caps = 0;
+  for (const annLvl of [50, 70, 89.6]) for (const annRes of [20, 30, 45, 50]) {
+    if (annRes > annLvl) continue;
+    const leg = midday({ announcedLevelPct: annLvl, targetPct: annRes });
+    for (const lvl of [50, 60, 70, 80, 95]) for (const sp of [10, 25, 30, 40, 45, 50]) {
+      const p = plan({ setpointSocPct: sp, expectedWriteLevelPct: lvl });
+      const live = liveRefreshOutcome(leg, p);
+      const shadow = refreshFromSized(shadowOf(annLvl, annRes), { plan: p, windowPvP50Kwh: 20, windowLoadP50Kwh: 14 }, OPEN - 30 * M);
+      const at = `announced ${annLvl}%/${annRes}%, re-plan ${lvl}%/${sp}%`;
+      assert.equal(shadow.disposition, live.disposition, at);
+      assert.equal(shadow.reservePct, live.reservePct, at);
+      assert.equal(shadow.levelPct, live.levelPct, at);
+      assert.equal(shadow.expectedBuyKwh, live.expectedBuyKwh, at);
+      assert.equal(shadow.reason, live.reason, at);
+      assert.ok(shadow.reservePct == null || shadow.reservePct <= annRes, `${at}: never above the announced reserve`);
+      if (live.disposition === 'capped') caps++;
+    }
+  }
+  assert.ok(caps > 20, `${caps} caps reached`);
+});
+
+test('★★ a leg with no armed reserve is given none by the refresh', () => {
+  const o = liveRefreshOutcome(midday({ targetPct: null }), plan({ setpointSocPct: 35, expectedWriteLevelPct: 80 }));
+  assert.equal(o.disposition, 'lowered');
+  assert.equal(o.reservePct, null, 'the outcome states no reserve the leg was never armed with');
+  assert.equal(o.neededReservePct, 35);
+});
+
 test('★★★ a cap writes nothing, whatever its outcome states', () => {
   const leg = midday({ targetPct: 45, forceChargeCeilingPct: 85 });
   const forged = { ...liveRefreshOutcome(leg, plan({ setpointSocPct: 50 })), reservePct: 30, forceChargeCeilingPct: 60 };
@@ -399,6 +437,8 @@ test('★★★ index.ts: the refresh asks the worker for fresh weather, defers 
   assert.match(blk.slice(late), /^if \(refreshPastDeadline\(leg, at\)\) \{\n[^\n]*\n\s+return;\n/);
   assert.match(blk, /stampLegOutcome\(live, liveRefreshLedgerColumns\(o, at, weatherAgeSeconds\(wxAt, at\)\)\);/);
   assert.match(blk.slice(reread), /^const aborted = refreshAborted\(leg, live\);\n\s+if \(aborted != null\) \{/);
+  // The push is told the outcome's figures, the reserve a cap came from among them.
+  assert.ok(blk.includes('    neededLevelPct: o.neededLevelPct,\n    neededReservePct: o.neededReservePct,\n'), 'what a reserve cap was asked for');
   assert.match(blk, /const live = nightActuationMem;\n/);
   // A push, never speech; nothing re-arms.
   for (const banned of ['broadcast.', 'announce(', 'armFromPlan(', 'armCycle(', 'setBackupReserveSoc', 'setChannelForceCharge']) {

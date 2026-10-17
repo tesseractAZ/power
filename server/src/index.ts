@@ -233,7 +233,7 @@ import {
   // The on-peak guard, the foreign rule, revertDeadline and heldByChargeWrite.
   decideRevertDeadline, revertDeadlineSpoken, restoreTargetPct, revertDeadlineMs, reserveRestoreNote,
   chargeWriteHold, setChargeWriteHold, FOREIGN_RESERVE_SETTLE_MS,
-  attemptProvedUnlanded, revertRetryPending, revertRetryText,
+  attemptProvedUnlanded, applyProvedUnlanded, revertRetryPending, revertRetryText, REVERT_DEADLINE_HOLD_MAX_MS,
   type RevertDeadlineDecision,
 } from './nightChargeActuator.js';
 import { nextOnPeakStartMs, onPeakEndMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, planDateOwningCycle, type ChargeLegRole } from './chargeWindows.js';
@@ -244,7 +244,7 @@ import { nextOnPeakStartMs, onPeakEndMs, nextChargeableOpenMs, legObjective, leg
 // by a super off-peak leg, which nothing arms before the mid-day switch.
 import { isMiddayLeg, middaySummaryFromLeg, middayRevertDeadlineFromLeg } from './chargeAnnounce.js';
 import {
-  buildMiddayChargeSummary, buildMiddayRevertDeadline, middayRevertDeadlineSpoken, buildMiddayRefreshMessage,
+  buildMiddayChargeSummary, buildMiddayRevertDeadline, middayRevertDeadlineSpoken, buildMiddayRefreshMessage, onPeakDayWords,
 } from './chargeText.js';
 // R5 — the live morning refresh of an armed mid-day cost leg (morningRefresh.ts): inert until the
 // switch (liveRefreshDue finds no leg while nothing arms a super off-peak leg).
@@ -6169,10 +6169,13 @@ function pageRevertDeadline(
   const restorePct = restoreTargetPct(state);
   const targetPct = state.targetPct!; // decideRevertDeadline pages only a record with a target
   const onPeakClock = state.nextOnPeakStartMs != null ? fmtPhoenixClock(state.nextOnPeakStartMs) : null;
+  // The deadline page names the on-peak start's day when it is not today's: a Friday window's page
+  // at 12:30 AM Saturday is about Monday's on-peak (chargeText.onPeakDayWords).
+  const onPeakDay = d.stage === 'deadline' && state.nextOnPeakStartMs != null ? onPeakDayWords(state.nextOnPeakStartMs, nowMs) : null;
   const deadlineMs = revertDeadlineMs(state);
   app.log.error(
     `night-charge: revertDeadline — the restore of the backup reserve to ${restorePct ?? '?'}% for ${state.day} `
-    + (d.unknown ? 'could not be confirmed (no live panel reading)' : `has not taken effect (the panel still reads ${targetPct}%)`)
+    + (d.unknown ? 'could not be confirmed (no valid live panel reading)' : `has not taken effect (the panel still reads ${targetPct}%)`)
     + (d.stage === 'onPeak'
       ? `, and on-peak pricing has started (${new Date(state.nextOnPeakStartMs!).toISOString()})`
       : ` by its deadline (${deadlineMs != null ? new Date(deadlineMs).toISOString() : '?'})`)
@@ -6184,7 +6187,7 @@ function pageRevertDeadline(
   // (The record is the active leg, spread from nightActuationMem: it carries its window kind.)
   const midday = isMiddayLeg(state as Partial<ChargeLegState>)
     ? middayRevertDeadlineFromLeg(state, { stage: d.stage, unknown: d.unknown, targetPct, restorePct, nowMs, retrying }) : null;
-  const spoken = midday != null ? middayRevertDeadlineSpoken(midday) : revertDeadlineSpoken({ stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock });
+  const spoken = midday != null ? middayRevertDeadlineSpoken(midday) : revertDeadlineSpoken({ stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock, onPeakDay });
   void (async () => {
     try {
       const heard = await broadcast.announce('critical', spoken.en, spoken.es);
@@ -6196,7 +6199,7 @@ function pageRevertDeadline(
     }
     try {
       await sendNotification(loadNotifyConfig(), midday != null ? buildMiddayRevertDeadline(midday) : buildNightChargeRevertDeadline({
-        day: state.day, stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock, retrying,
+        day: state.day, stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock, onPeakDay, retrying,
       }));
     } catch (e: any) {
       app.log.error(`night-charge: revertDeadline push FAILED — ${e?.message ?? e}.`);
@@ -6241,12 +6244,30 @@ async function runNightActuationTickInner(): Promise<void> {
     state = nightActuationMem;
     if (state.day == null) return;
   }
+  // The same proof for a write the cloud ACK'd: its apply ladder ended in applyFailed and the panel
+  // still reads the baseline (applyProvedUnlanded). Its restore is a no-op; nothing of ours holds
+  // the reserve unless a later reading verifies the write.
+  if (applyProvedUnlanded(state, currentReservePct, nowMs)) {
+    persistNightActuation({ ...state, applyUnlandedAtMs: nowMs });
+    app.log.info(`night-charge: the ${state.day} write never took effect — after its re-issues the panel still reads the ${state.attemptBaselinePct}% it read before the write; its restore is a no-op and nothing of ours holds the reserve.`);
+    state = nightActuationMem;
+    if (state.day == null) return;
+  }
 
   // revertDeadline — ahead of the decision, and of the `!shp2` return below: a panel missing
   // from the device list, or not reporting, is exactly the unconfirmed restore it pages about.
   // Each stage is decided once, at its moment: a page, or a pass on a reading that is not ours.
-  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct);
-  if (revertPage.kind === 'page') {
+  // The deadline stage waits, a bounded while, for a restore that has not had its chance (a
+  // process down across the deadline: the restore is sent by decideActuation below on this tick).
+  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null);
+  if (revertPage.kind === 'hold') {
+    if (state.revertDeadlineHeldAtMs == null) {
+      persistNightActuation({ ...state, revertDeadlineHeldAtMs: nowMs });
+      app.log.info(`night-charge: revertDeadline — the deadline for ${state.day} came with its restore ${state.revertedAtMs == null ? 'not yet sent' : 'only just sent'}; the page waits up to ${REVERT_DEADLINE_HOLD_MAX_MS / 60_000} min for it to be sent and read back.`);
+      state = nightActuationMem;
+      if (state.day == null) return;
+    }
+  } else if (revertPage.kind === 'page') {
     pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));
     state = nightActuationMem; // the stamp is on the record every write below spreads
     if (state.day == null) return;
@@ -6817,6 +6838,7 @@ async function runMorningRefreshTickInner(nowMs: number): Promise<void> {
     announced: { levelPct: live.announcedLevelPct, expectedKwh: live.announcedExpectedKwh },
     refreshed: { levelPct: o.levelPct, reservePct: o.reservePct, expectedKwh: o.expectedBuyKwh },
     neededLevelPct: o.neededLevelPct,
+    neededReservePct: o.neededReservePct,
     windowPvKwh: { announced: null, refreshed: r.extras.windowPvP50Kwh ?? null },
     reservePct: freshReserveReadingPct(at),
     applyAtMs: live.windowStartMs! - APPLY_LEAD_MS,

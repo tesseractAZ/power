@@ -16,6 +16,9 @@
  *   Money           M-i..M-x (the restore's readback grace)
  *   Open restore    O-i..O-iii (a stuck restore refuses the next arm)
  *   Reserve floor   P-i..P-ii
+ *   Fix round 2     V-i..V-v (no garbage reading decides a stage) · W-i..W-ix (a restart lets the
+ *                   restore go first, bounded) · N-i..N-vii (an ACK'd write proven never to have
+ *                   taken effect) · Y-i..Y-vi (the deadline page names the on-peak day)
  *
  *   node scripts/mutate-onpeak-guard.mjs
  */
@@ -28,6 +31,8 @@ const FC = resolve(REPO, 'server/src/nightForceCharge.ts');
 const CW = resolve(REPO, 'server/src/chargeWindows.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const AM = resolve(REPO, 'server/src/alertMonitor.ts');
+const TXT = resolve(REPO, 'server/src/chargeText.ts');
+const NTF = resolve(REPO, 'server/src/notify.ts');
 const SUBSET = [
   'test/onPeakGuard.test.ts',
   'test/overnightTextGolden.test.ts',
@@ -156,15 +161,15 @@ const MUTANTS = [
   {
     id: 'R-i. ★★★ a page on the owner\'s value',
     file: ACT,
-    find: "  if (liveReservePct != null && liveReservePct !== s.targetPct) return { kind: 'pass', stage, pct: liveReservePct };",
+    find: "  if (reading != null && reading !== s.targetPct) return { kind: 'pass', stage, pct: reading };",
     to: '  /* MUTANT */',
     why: 'An owner who set the reserve themselves is woken by a critical about it.',
   },
   {
     id: 'R-ii. ★★★ a readback-dependent page (nothing on an unknown reading)',
     file: ACT,
-    find: "  if (liveReservePct != null && liveReservePct !== s.targetPct) return { kind: 'pass', stage, pct: liveReservePct };",
-    to: "  if (liveReservePct == null || liveReservePct !== s.targetPct) return { kind: 'pass', stage, pct: liveReservePct ?? -1 }; /* MUTANT */",
+    find: "  if (reading != null && reading !== s.targetPct) return { kind: 'pass', stage, pct: reading };",
+    to: "  if (reading == null || reading !== s.targetPct) return { kind: 'pass', stage, pct: reading ?? -1 }; /* MUTANT */",
     why: 'The cloud-dark panel, the case the page exists for, never pages.',
   },
   {
@@ -198,8 +203,8 @@ const MUTANTS = [
   {
     id: 'R-vii. ★★★ the tick never pages',
     file: IDX,
-    find: "  if (revertPage.kind === 'page') {\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));",
-    to: "  if (revertPage.kind === 'page' && (false as boolean)) { /* MUTANT */\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));",
+    find: "  } else if (revertPage.kind === 'page') {\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));",
+    to: "  } else if (revertPage.kind === 'page' && (false as boolean)) { /* MUTANT */\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));",
     why: 'The pure decision is never acted on in production.',
   },
 
@@ -359,8 +364,8 @@ const MUTANTS = [
   {
     id: 'R-xii. ★★★ a reading that is not ours leaves the stage undecided',
     file: ACT,
-    find: "  if (liveReservePct != null && liveReservePct !== s.targetPct) return { kind: 'pass', stage, pct: liveReservePct };",
-    to: "  if (liveReservePct != null && liveReservePct !== s.targetPct) return { kind: 'none' }; /* MUTANT */",
+    find: "  if (reading != null && reading !== s.targetPct) return { kind: 'pass', stage, pct: reading };",
+    to: "  if (reading != null && reading !== s.targetPct) return { kind: 'none' }; /* MUTANT */",
     why: 'The stage is never decided on the restored value, so the next stale reading pages.',
   },
   {
@@ -514,14 +519,14 @@ const MUTANTS = [
   {
     id: 'O-ii. ★★ any reading keeps a sent restore open',
     file: ACT,
-    find: '    && (liveReservePct == null || liveReservePct === s.targetPct);',
+    find: '    && (!isReserveSetting(liveReservePct) || liveReservePct === s.targetPct);',
     to: '; /* MUTANT */',
     why: 'An owner who set the reserve to 60 in the app disarms the night charge for good.',
   },
   {
     id: 'O-iii. ★★ a restore read back still refuses the next arm',
     file: ACT,
-    find: '  return s.appliedAtMs != null && s.revertedAtMs != null && s.revertVerifiedAtMs == null && s.foreignSettledAtMs == null',
+    find: '  return s.appliedAtMs != null && s.revertedAtMs != null && revertOutstanding(s)',
     to: '  return s.appliedAtMs != null && s.revertedAtMs != null && s.foreignSettledAtMs == null /* MUTANT */',
     why: 'Every night after a restore refuses the next arm.',
   },
@@ -540,6 +545,202 @@ const MUTANTS = [
     find: '        error: `a night-charge write is currently holding the reserve up; ${restore.text}`,',
     to: "        error: 'a night-charge write is currently holding the reserve up; it would revert to the old floor at window close', /* MUTANT */",
     why: 'The owner cannot tell when to retry.',
+  },
+  /* ── fix round 2: a reading that is not a reserve setting decides nothing ── */
+  {
+    id: 'V-i. ★★★ a reconnect 0 passes the deadline stage',
+    file: ACT,
+    find: '  const reading = isReserveSetting(liveReservePct) ? liveReservePct : null;',
+    to: '  const reading = liveReservePct; /* MUTANT */',
+    why: 'One reconnect 0 at 05:30 removes the deadline page, a second at 16:00 the on-peak page.',
+  },
+  {
+    id: 'V-ii. ★★★ any number is a reserve setting',
+    file: ACT,
+    find: '  return v != null && Number.isInteger(v) && v >= RESERVE_WRITE_MIN_PCT && v <= RESERVE_WRITE_MAX_PCT;',
+    to: '  return v != null; /* MUTANT */',
+    why: 'A 0, a 0.5 or a 100 is read as the owner\'s reserve: the pages pass and the next arm buries the record.',
+  },
+  {
+    id: 'V-iii. ★★★ a reconnect 0 releases the next arm',
+    file: ACT,
+    find: '    && (!isReserveSetting(liveReservePct) || liveReservePct === s.targetPct);',
+    to: '    && (liveReservePct == null || liveReservePct === s.targetPct); /* MUTANT */',
+    why: 'A 21:30 reconnect 0 lets the next evening\'s arm replace a stuck restore\'s record.',
+  },
+  {
+    id: 'V-iv. ★★ the arm refusal says the panel "still reads" a reconnect 0',
+    file: ACT,
+    find: "      : liveReservePct === prev.targetPct ? `still reads ${liveReservePct}%` : `reads ${liveReservePct}, not a valid reserve`;",
+    to: "      : `still reads ${liveReservePct}%`; /* MUTANT */",
+    why: 'The evening notice tells the owner the reserve reads 0%.',
+  },
+  {
+    id: 'V-v. ★★ a reserve setting is not read as one',
+    file: ACT,
+    find: '  return v != null && Number.isInteger(v) && v >= RESERVE_WRITE_MIN_PCT && v <= RESERVE_WRITE_MAX_PCT;',
+    to: '  return v != null && Number.isInteger(v) && v > RESERVE_WRITE_MIN_PCT && v < RESERVE_WRITE_MAX_PCT; /* MUTANT */',
+    why: 'The owner\'s 10% or the night\'s own 50% is paged as unread.',
+  },
+
+  /* ── fix round 2: a restart across the deadline lets the restore go first ── */
+  {
+    id: 'W-i. ★★★ the deadline pages before the restore had its chance',
+    file: ACT,
+    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage };",
+    to: '  /* MUTANT */',
+    why: 'A process back at 05:31 pages "could not restore" before the restore is sent, seconds before it reads back.',
+  },
+  {
+    id: 'W-ii. ★★★ the wait has no bound',
+    file: ACT,
+    find: '  if (s.revertDeadlineHeldAtMs != null && nowMs - s.revertDeadlineHeldAtMs >= REVERT_DEADLINE_HOLD_MAX_MS) return false;',
+    to: '  /* MUTANT */',
+    why: 'A restore rate-limited or stuck unsent holds the deadline page until on-peak.',
+  },
+  {
+    id: 'W-iii. ★★★ the deadline waits for a panel missing from the device list',
+    file: ACT,
+    find: '  return panelListed && due && s.revertAttempts === 0 && isReserveSetting(s.priorReservePct);',
+    to: '  return due && s.revertAttempts === 0 && isReserveSetting(s.priorReservePct); /* MUTANT */',
+    why: 'Nothing is sent to a panel that is not listed: its page waits ten minutes for nothing.',
+  },
+  {
+    id: 'W-iv. ★★ the deadline waits after a rejected restore',
+    file: ACT,
+    find: '  return panelListed && due && s.revertAttempts === 0 && isReserveSetting(s.priorReservePct);',
+    to: '  return panelListed && due && isReserveSetting(s.priorReservePct); /* MUTANT */',
+    why: 'A restore the cloud refused is not paged until the wait runs out.',
+  },
+  {
+    id: 'W-v. ★★ the deadline waits for a restore with no valid value to send',
+    file: ACT,
+    find: '  return panelListed && due && s.revertAttempts === 0 && isReserveSetting(s.priorReservePct);',
+    to: '  return panelListed && due && s.revertAttempts === 0; /* MUTANT */',
+    why: 'decideActuation sends nothing without a valid prior: the page waits for a restore that never comes.',
+  },
+  {
+    id: 'W-vi. ★★ the readback grace never ends',
+    file: ACT,
+    find: '  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS;',
+    to: '  if (s.revertedAtMs != null) return true; /* MUTANT */',
+    why: 'A 05:00 restore stuck at 50 waits ten more minutes at 05:30 before it is paged.',
+  },
+  {
+    id: 'W-vii. ★★★ the on-peak stage waits too',
+    file: ACT,
+    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage };",
+    to: "  if (restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage: 'deadline' }; /* MUTANT */",
+    why: 'A process down through on-peak is paged late, while the panel buys at the peak rate.',
+  },
+  {
+    id: 'W-viii. ★★★ the tick never says the panel is listed',
+    file: IDX,
+    find: '  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null);',
+    to: '  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct); /* MUTANT */',
+    why: 'The wait never applies in production: the restart page goes out before the restore.',
+  },
+  {
+    id: 'W-ix. ★★★ the tick never stamps the wait',
+    file: IDX,
+    find: '      persistNightActuation({ ...state, revertDeadlineHeldAtMs: nowMs });',
+    to: '      /* MUTANT */',
+    why: 'The bound never starts: an unsent restore holds the page until on-peak.',
+  },
+
+  /* ── fix round 2: an ACK'd write the apply ladder proved never took effect ── */
+  {
+    id: 'N-i. ★★★ an ACK\'d write proven never to have taken effect is still outstanding',
+    file: ACT,
+    find: '  if (s.appliedAtMs != null) return s.applyUnlandedAtMs == null || s.applyVerifiedAtMs != null;',
+    to: '  if (s.appliedAtMs != null) return true; /* MUTANT */',
+    why: 'Two critical "restore not confirmed" pages about a write the add-on itself reported never took effect.',
+  },
+  {
+    id: 'N-ii. ★★★ the proof outranks a later landing',
+    file: ACT,
+    find: '  if (s.appliedAtMs != null) return s.applyUnlandedAtMs == null || s.applyVerifiedAtMs != null;',
+    to: '  if (s.appliedAtMs != null) return s.applyUnlandedAtMs == null; /* MUTANT */',
+    why: 'A write that landed late stands at 50% into on-peak with no page and no hold.',
+  },
+  {
+    id: 'N-iii. ★★★ the proof before the apply ladder is over',
+    file: ACT,
+    find: '  if (s.appliedAtMs == null || s.applyVerifiedAtMs != null || !s.applyEscalated || s.revertedAtMs != null) return false;',
+    to: '  if (s.appliedAtMs == null || s.applyVerifiedAtMs != null || s.revertedAtMs != null) return false; /* MUTANT */',
+    why: 'An ACK\'d write still inside its readback lag is declared never landed.',
+  },
+  {
+    id: 'N-iv. ★★★ the proof on a missing or other reading',
+    file: ACT,
+    find: '  if (liveReservePct == null || s.attemptBaselinePct == null || liveReservePct !== s.attemptBaselinePct) return false;',
+    to: '  if (s.attemptBaselinePct == null) return false; /* MUTANT */',
+    why: 'A dark panel, or one reading our 50%, proves the write never took effect.',
+  },
+  {
+    id: 'N-v. ★★ the proof inside the last re-issue\'s readback grace',
+    file: ACT,
+    find: '  return nowMs - (s.applyLastAttemptMs ?? s.appliedAtMs) >= APPLY_VERIFY_AFTER_MS;',
+    to: '  return true; /* MUTANT */',
+    why: 'A re-issue that landed 40 s ago, still echoing the baseline, is declared never landed.',
+  },
+  {
+    id: 'N-vi. ★★ the proof after the restore was sent',
+    file: ACT,
+    find: '  if (s.appliedAtMs == null || s.applyVerifiedAtMs != null || !s.applyEscalated || s.revertedAtMs != null) return false;',
+    to: '  if (s.appliedAtMs == null || s.applyVerifiedAtMs != null || !s.applyEscalated) return false; /* MUTANT */',
+    why: 'The restore reading back is taken as the write never having taken effect.',
+  },
+  {
+    id: 'N-vii. ★★★ the tick never stamps the proof',
+    file: IDX,
+    find: '  if (applyProvedUnlanded(state, currentReservePct, nowMs)) {',
+    to: '  if ((false as boolean) && applyProvedUnlanded(state, currentReservePct, nowMs)) { /* MUTANT */',
+    why: 'The pure proof is never acted on in production.',
+  },
+
+  /* ── fix round 2: the deadline page names the on-peak day ── */
+  {
+    id: 'Y-i. ★★★ the tick names no day',
+    file: IDX,
+    find: "  const onPeakDay = d.stage === 'deadline' && state.nextOnPeakStartMs != null ? onPeakDayWords(state.nextOnPeakStartMs, nowMs) : null;",
+    to: '  const onPeakDay = null; /* MUTANT */',
+    why: 'A Friday window\'s 12:30 AM Saturday page says on-peak starts at 4:00 PM — that afternoon.',
+  },
+  {
+    id: 'Y-ii. ★★★ the spoken page drops the day',
+    file: ACT,
+    find: "  const peakEn = o.onPeakClock != null ? `, and on-peak pricing starts ${day != null ? `${day.en} ` : ''}at ${o.onPeakClock}` : '';",
+    to: "  const peakEn = o.onPeakClock != null ? `, and on-peak pricing starts at ${o.onPeakClock}` : ''; /* MUTANT */",
+    why: 'The critical heard at 12:30 AM Saturday names a time that is not that day\'s.',
+  },
+  {
+    id: 'Y-iii. ★★ the Spanish pass drops the day',
+    file: ACT,
+    find: "  const peakEs = o.onPeakClock != null ? `, y la tarifa punta comienza ${day != null ? `${day.es} ` : ''}a las ${o.onPeakClock}` : '';",
+    to: "  const peakEs = o.onPeakClock != null ? `, y la tarifa punta comienza a las ${o.onPeakClock}` : ''; /* MUTANT */",
+    why: 'The Spanish page says on-peak starts that afternoon.',
+  },
+  {
+    id: 'Y-iv. ★★★ the push drops the day',
+    file: NTF,
+    find: "      : ` On-peak pricing starts ${o.onPeakDay != null ? `${o.onPeakDay.en} ` : ''}at ${o.onPeakClock}.`;",
+    to: "      : ` On-peak pricing starts at ${o.onPeakClock}.`; /* MUTANT */",
+    why: 'The critical push, which always goes, names Saturday afternoon for Monday\'s on-peak.',
+  },
+  {
+    id: 'Y-v. ★★ the day is named only beyond 24 hours',
+    file: TXT,
+    find: '  if (phxParts(onPeakStartMs).ymd === phxParts(nowMs).ymd) return null;',
+    to: '  if (onPeakStartMs - nowMs < 24 * 3_600_000) return null; /* MUTANT */',
+    why: 'A page late on Sunday says "at 4:00 PM" for Monday\'s on-peak.',
+  },
+  {
+    id: 'Y-vi. ★★★ the unconfirmed page with a day runs over the spoken bound',
+    file: ACT,
+    find: '    if (full.en.length + full.es.length <= MAX_SPOKEN_ADVISORY_CHARS) return full;',
+    to: '    return full; /* MUTANT */',
+    why: 'The bilingual critical runs past 560 characters and the broadcast clips it.',
   },
 ];
 

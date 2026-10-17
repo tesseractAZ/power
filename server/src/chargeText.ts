@@ -145,6 +145,20 @@ export function dayTextEsCap(w: DayWord): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/**
+ * The day an on-peak start is named by in a text written at `nowMs`, when it is not that text's own
+ * (Phoenix calendar): its weekday, "on Monday" / "el lunes"; null on the same date, where the bare
+ * clock is the next one. A Friday window's revert-deadline page, at 12:30 AM Saturday, is about
+ * Monday's on-peak, and a holiday eve's about the day after the holiday: a bare "starts at 4:00 PM"
+ * read as that afternoon. Never "tomorrow": said in the small hours, as these pages are, it is
+ * heard as the day that has just begun. PURE.
+ */
+export function onPeakDayWords(onPeakStartMs: number, nowMs: number): { en: string; es: string } | null {
+  if (phxParts(onPeakStartMs).ymd === phxParts(nowMs).ymd) return null;
+  const w: DayWord = { weekday: phxParts(onPeakStartMs).weekday };
+  return { en: `on ${dayText(w)}`, es: dayTextEs(w) };
+}
+
 /** "tomorrow 10am–3pm" — a window named from `nowMs`. PURE. */
 export function windowText(startMs: number, endMs: number, nowMs: number): string {
   return `${dayText(dayWord(startMs, nowMs))} ${spanText(startMs, endMs)}`;
@@ -522,6 +536,9 @@ export interface MiddayRefreshText {
   refreshed: { levelPct: number | null; reservePct: number | null; expectedKwh: number | null };
   /** The level the re-plan asked for when it was capped (above the announced one). */
   neededLevelPct: number | null;
+  /** The reserve the re-plan asked for: on a cap that came from the reserve alone (a level at or
+   *  under the announced one), what the push says the re-plan called for. Absent: unknown. */
+  neededReservePct?: number | null;
   /** The window's P50 PV, last evening and now, kWh (the reason a figure moved, when it did). */
   windowPvKwh: { announced: number | null; refreshed: number | null };
   /** The reserve the panel holds now (a cancel leaves it). */
@@ -558,6 +575,19 @@ export function buildMiddayRefreshMessage(r: MiddayRefreshText): NotifyMessage |
   }
   const aLevel = r.announced.levelPct != null ? pctText(r.announced.levelPct) : '—';
   if (r.disposition === 'capped') {
+    // A cap from the reserve alone — the re-plan's level at or under the announced one, its reserve
+    // above the one held — says so: "calls for more (~70%)" beside an announced ~70% is not true.
+    const levelAsked = r.neededLevelPct == null || r.announced.levelPct == null || r.neededLevelPct > r.announced.levelPct + 1e-9;
+    if (!levelAsked) {
+      const held = r.refreshed.reservePct;
+      const needR = r.neededReservePct ?? null;
+      return {
+        ...base,
+        title: `Charge plan updated: held at the announced ${aLevel} ${when}`,
+        body: `The morning re-plan calls for a higher reserve${needR != null ? ` (${needR}%)` : ''}, but a refresh never raises what was announced: `
+          + `${when} stays at ${aLevel}${held != null ? `, with the reserve held at ${held}% from the open` : ''}.${cancel}`,
+      };
+    }
     return {
       ...base,
       title: `Charge plan updated: held at the announced ${aLevel} ${when}`,
