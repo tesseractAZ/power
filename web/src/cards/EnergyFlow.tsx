@@ -1,6 +1,6 @@
 import type { DeviceSnapshot, GridBackstop } from '../types';
 import { fmtPct, fmtW } from '../format';
-import { energyFlowModel, FLOW_EDGE_MIN_W } from './energyFlowModel';
+import { energyFlowModel, batteriesSubtitle, batteriesTitle, solarSubtitle, FLOW_EDGE_MIN_W } from './energyFlowModel';
 import { HUES, UI } from '../theme';
 
 /**
@@ -37,7 +37,7 @@ export function EnergyFlow({ devices, grid }: Props) {
   // v1.175.0 — every number on this card comes from energyFlowModel (pure, and run by the
   // test suite); this component only lays them out.
   const {
-    dpuCount, spareCount, membershipUnknown, pv, batNet, soc, load, panelState, liveCircuits,
+    dpuCount, spareCount, membershipUnknown, viaPanelCount, pv, pvUnreported, batNet, soc, load, panelState, liveCircuits,
     gridState, gridSupplyW, gridToCoresW, gridToHouseW, coresToHouseW,
   } = energyFlowModel(devices, grid);
 
@@ -79,8 +79,8 @@ export function EnergyFlow({ devices, grid }: Props) {
           `}</style>
         </defs>
 
-        {/* PV → Battery */}
-        <FlowLine from={[Solar.x + Solar.w, Solar.y + Solar.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={pv} color={HUES.solar} period={period(pv)} strokeW={strokeW(pv)} label="solar" />
+        {/* PV → Battery. v1.188.1 — no PV meter reporting (pv null) draws no flow. */}
+        <FlowLine from={[Solar.x + Solar.w, Solar.y + Solar.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={pv ?? 0} color={HUES.solar} period={period(pv ?? 0)} strokeW={strokeW(pv ?? 0)} label="solar" />
         {/* Grid → Home (backstop). v0.36.0 — three states:
             (1) ACTIVE: animated grid→battery flow labelled with the live kW the
                 SHP2 is pulling to carry the home (homeGridWatts) or to charge
@@ -109,8 +109,9 @@ export function EnergyFlow({ devices, grid }: Props) {
             was drawn flowing out of idle packs. */}
         <FlowLine from={[Battery.x + Battery.w, Battery.y + Battery.h / 2]} to={[Loads.x, Loads.y + Loads.h / 2]} watts={coresToHouseW} color={HUES.soc} period={period(coresToHouseW)} strokeW={strokeW(coresToHouseW)} label="cores-to-house" />
 
-        {/* Solar node */}
-        <Node {...Solar} title="Solar" subtitle="42 panels" value={fmtW(pv)} icon="☀" accent={HUES.solar} />
+        {/* Solar node. v1.188.1 — "—" with no Core's own PV meter reporting; the subtitle says which
+            Cores the figure covers (solarSubtitle). */}
+        <Node {...Solar} title="Solar" subtitle={solarSubtitle({ pv, dpuCount, pvUnreported })} value={fmtW(pv)} icon="☀" accent={HUES.solar} dim={pv == null} />
         {/* Grid node — 3-state subtitle + value:
             active → live kW into the home; standby → "available as backup"
             (v1.186.3 — plain words; the old label read as the grid powering the house);
@@ -125,11 +126,12 @@ export function EnergyFlow({ devices, grid }: Props) {
           accent={gridState === 'active' ? HUES.battery : HUES.grid}
           dim={gridState !== 'active'}
         />
-        {/* Battery node (big) */}
+        {/* Battery node (big). v1.188.1 — a Core with no reading of its own is drawn from the
+            panel's meter of its slot, and the title and subtitle say so ("via panel", out / in). */}
         <Node
           {...Battery}
-          title={`Batteries (${dpuCount} DPU${spareCount > 0 ? `, +${spareCount} spare` : membershipUnknown ? ', spares not yet identified' : ''})`}
-          subtitle={batNet > 5 ? `▼ ${fmtW(batNet)} discharging` : batNet < -5 ? `▲ ${fmtW(-batNet)} charging` : 'idle'}
+          title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown })}
+          subtitle={batteriesSubtitle({ batNet, viaPanelCount })}
           value={fmtPct(soc, 1)}
           big
           accent={socAccent(soc)}

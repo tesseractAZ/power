@@ -748,6 +748,11 @@ Cores 3 and 4 (§12l). Every fleet aggregation must exclude spares.
 - **`isSourceDpuStale(source, devices)`** (observability only): a connected slot whose
   underlying DPU is itself cloud-offline. Surfaced as `dpuStale` on the source (set by
   `snapshotForClient`); does **not** change backup-pool capacity or the floor alarm.
+- **`isSourceDpuFrozen(source, devices, nowMs)`** (v1.188.1): a connected slot whose Core is
+  listed online with a projection but whose content has not changed within
+  `SHP2_READBACK_STALE_MS` (`dpuContentFresh`, the clock the grid resolver's Core-import gate
+  reads). Surfaced as `dpuFrozen` by `panelForClient`, which also puts `readbackFresh` on each
+  panel.
 - **`homeCoreCoverage(devices)`** → `{ connected, reporting, complete }`. Roster = SHP2
   connected sources (the union across panels), else the persisted last-known home roster
   (v1.121.0), else every DPU not in the `SPARE_DPU_SNS` literal. Roster SNs absent from the
@@ -769,8 +774,9 @@ Cores 3 and 4 (§12l). Every fleet aggregation must exclude spares.
   the raw evidence the at-floor discharge guard (`gridState` `poolDischargingObserved`)
   reads. `fleetBatteryNetDisplay` prefers each pack's fresh MQTT `liveFlow`; the Battery Net
   sensor, `/api/ha-state` `fleet_battery_net_watts` and the ±50 W charge/discharge timer
-  gates read it. `panelLoad` sums every panel's circuits (v1.185.0). Guarded with
-  `?? []` on `sources`/`packs`/`circuits` so a partial projection can't throw.
+  gate (`backupTimerGate`, while every home Core reports) read it. `panelLoad` sums every
+  panel's circuits (v1.185.0). Guarded with `?? []` on `sources`/`packs`/`circuits` so a
+  partial projection can't throw.
 
 Roster since the 2026-08-20 reconfiguration: Cores 1/2/5 wired into the SHP2; Cores 3/4 on
 the bench. `SPARE_DPU_SNS` still names Cores 4 and 5, and the roster-aware predicates above

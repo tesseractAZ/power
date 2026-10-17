@@ -12,7 +12,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, houseSnOf } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, aggregateFleetFlow, findShp2, onlineDpus, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, houseSnOf, panelForClient, backupTimerGate } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -570,31 +570,18 @@ function snapshotForClient(): FleetSnapshot {
   // does NOT touch backup-pool capacity (SHP2-aggregate, stays authoritative) or the
   // floor alarm. Immutable, so the raw store the HA-state/broadcast paths read is
   // untouched. The TUI computes the same flag inline via isSourceDpuStale.
+  // v1.188.1 — panelForClient: and `dpuFrozen` (the Core listed online on a frozen meter) on each
+  // slot, and the panel's own `readbackFresh` verdict; the Energy flow card keys on all three.
+  const nowMs = Date.now();
   const shp2Enriched =
     shp2 && shp2.projection?.kind === 'shp2'
-      ? {
-          ...shp2,
-          grid,
-          off_grid,
-          projection: {
-            ...shp2.projection,
-            sources: shp2.projection.sources.map((src) => ({
-              ...src,
-              dpuStale: isSourceDpuStale(src, s.devices),
-            })),
-          },
-        }
+      ? { ...panelForClient(shp2, s.devices, nowMs), grid, off_grid }
       : shp2
         ? { ...shp2, grid, off_grid }
         : undefined;
   const devices: typeof s.devices = shp2Enriched ? { ...s.devices, [shp2!.sn]: shp2Enriched } : { ...s.devices };
   // v1.185.0 — every other panel's source slots get the same observability flag.
-  for (const p of secondaryShp2s(s.devices)) {
-    devices[p.sn] = {
-      ...p,
-      projection: { ...p.projection, sources: p.projection.sources.map((src) => ({ ...src, dpuStale: isSourceDpuStale(src, s.devices) })) },
-    };
-  }
+  for (const p of secondaryShp2s(s.devices)) devices[p.sn] = panelForClient(p, s.devices, nowMs);
   // v1.185.0 — which panel is the house panel, and whether one must be pinned (the dashboard's
   // prompt reads this).
   return { ...s, devices, grid, off_grid, housePanel: store.housePanelState() };
@@ -1617,6 +1604,9 @@ app.get('/api/ha-state', async (req, reply) => {
   // Alert counts split by source × severity.
   const alerts = snap.alerts ?? [];
   const cnt = makeAlertCounter(alerts);
+  // v1.188.1 — which backup timer applies: the Cores' battery net while every home Core reports,
+  // else a bound through the panel's slots (shp2Membership.ts backupTimerGate).
+  const timers = backupTimerGate(snap.devices, Date.now());
 
   const payload = {
     generated_at: snap.generatedAt,
@@ -1643,8 +1633,10 @@ app.get('/api/ha-state', async (req, reply) => {
     // Gate each on the (now correctly-signed) per-pack battery net: >+50 W =
     // discharging → charge timer inapplicable; <−50 W = charging → discharge
     // timer inapplicable; the ±50 W deadband publishes both (idle/ambiguous).
-    backup_charge_minutes: fleetBatteryNet > 50 ? null : (shp2?.projection.backupChargeTimeMin ?? null),
-    backup_discharge_minutes: fleetBatteryNet < -50 ? null : (shp2?.projection.backupDischargeTimeMin ?? null),
+    // v1.188.1 — on backupTimerGate: with a home Core dark the Cores' net is not the pool's
+    // (10-16 20:04: every Core offline, 0 W summed, "38 min" to full during a 3.4 kW drain).
+    backup_charge_minutes: timers.charge ? (shp2?.projection.backupChargeTimeMin ?? null) : null,
+    backup_discharge_minutes: timers.discharge ? (shp2?.projection.backupDischargeTimeMin ?? null) : null,
 
     // Forecast (cached ~30min)
     // v0.78.0 — publish the RESTORED display basis (all SHP2-connected Cores, wedged

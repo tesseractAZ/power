@@ -411,7 +411,8 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // SHP2-connected sources. Replaces `chargeWattPower < -POOL_DISCHARGE_WATTS`, which was
   // PERMANENTLY FALSE (chargeWattPower is the non-negative configured AC charge-rate LIMIT,
   // ~7.2 kW even while idle) — so this re-escalation guard was DEAD. index.ts already uses
-  // the same `fleetBatteryNet > 50` discharge threshold for backup_charge_minutes.
+  // the same `fleetBatteryNet > 50` discharge threshold for backup_charge_minutes (v1.188.1:
+  // shp2Membership.ts backupTimerGate, which bounds the pool through the panel when a Core is dark).
   // v1.3.0 (audit rank 3) — COVERAGE-GATE the "not discharging" conclusion. fleetBatteryNet
   // sums only cloud-ONLINE, SHP2-connected DPUs, so a wedged home Core's real drain is
   // invisible: the sum can read under the 50 W threshold while the pool is genuinely

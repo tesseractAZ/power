@@ -372,6 +372,71 @@ export function isSourceDpuStale(
 }
 
 /**
+ * v1.188.1 — a Core's OWN meter is fresh: its telemetry content CHANGED (contentChangedAtMs,
+ * snapshot.ts dpuContentWitness) within SHP2_READBACK_STALE_MS. The clock the grid resolver's
+ * Core-import gate reads (gridState.ts coreContentFresh, v1.179.0/v1.181.0): arrival is not
+ * enough, since a REST 200 replaying a Core's cached body still bumps lastTelemetryAtMs. The
+ * witness carries battery volts and amps, which move with every real reading, so a live Core's
+ * clock moves within seconds (MQTT) or one poll (REST). Unknown (no change seen since a restart) =
+ * not fresh.
+ */
+export function dpuContentFresh(
+  d: { contentChangedAtMs?: number } | undefined | null,
+  nowMs: number,
+): boolean {
+  const t = d?.contentChangedAtMs;
+  return typeof t === 'number' && Number.isFinite(t) && t > 0 && nowMs - t <= SHP2_READBACK_STALE_MS;
+}
+
+/**
+ * v1.188.1 — the slot's Core is listed ONLINE with a projection, but its own meter is not fresh
+ * (dpuContentFresh): every figure it shows is a frozen one. Reached when its quota fetch keeps
+ * failing while /device/list still lists it (setDeviceError: "device still listed online,
+ * projection frozen"), when the cloud replays its cached body (v1.181.0: its own connection lost,
+ * the panel's still up), and for one list cycle after an OFFLINE→ONLINE /status flip. The Energy
+ * flow card reads such a Core from the panel's meter of its slot, as it does an offline one
+ * (dpuStale), and the backup timers do the same (poolNetUpperBound). An offline Core is dpuStale,
+ * not frozen; a Core with no projection has no figures to freeze.
+ */
+export function isSourceDpuFrozen(
+  source: { isConnected: boolean; sn: string | null },
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number,
+): boolean {
+  if (!source.isConnected || !source.sn) return false;
+  const dpu = devices[source.sn];
+  return dpu != null && dpu.online === true && dpu.projection?.kind === 'dpu' && !dpuContentFresh(dpu, nowMs);
+}
+
+/**
+ * v1.188.1 — a panel as the dashboard receives it (index.ts snapshotForClient). PURE: returns a
+ * copy, never mutates the store's device. Each source slot carries `dpuStale` (v0.40.1, the Core is
+ * offline) and `dpuFrozen` (the Core is listed online on a frozen meter), and the panel carries the
+ * server's verdict on its own reading, `readbackFresh` (shp2ReadbackFresh). The card has no clock and
+ * keys on these verdicts: `grid.panelFresh` judges only the house panel, so a second panel whose
+ * quota keeps failing while it stays listed online read as live, and its frozen slot figures would
+ * be drawn as the Cores delivering now.
+ */
+export function panelForClient(
+  p: DeviceSnapshot & { projection: Shp2Projection },
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number,
+): DeviceSnapshot & { projection: Shp2Projection } {
+  return {
+    ...p,
+    readbackFresh: shp2ReadbackFresh(p, nowMs),
+    projection: {
+      ...p.projection,
+      sources: p.projection.sources.map((src) => ({
+        ...src,
+        dpuStale: isSourceDpuStale(src, devices),
+        dpuFrozen: isSourceDpuFrozen(src, devices, nowMs),
+      })),
+    },
+  };
+}
+
+/**
  * v0.52.0 — the SHP2 device (the home's grid interconnect), or undefined.
  * VERBATIM `Object.values(devices).find((d) => d.projection?.kind === 'shp2')`
  * that was repeated at ~5 index.ts call sites. Callers keep any post-find
@@ -784,4 +849,74 @@ export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
   for (const p of allShp2s(devices)) for (const c of p.projection.circuits ?? []) panelLoad += c.watts ?? 0;
 
   return { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, fleetBatteryNetDisplay, panelLoad };
+}
+
+/** v1.188.1 — the backup timers' direction deadband (W), v0.15.12's ±50 W. */
+export const BACKUP_TIMER_DEADBAND_W = 50;
+
+/**
+ * v1.188.1 — an UPPER BOUND on the home pool's battery net (W, > 0 = discharging), for the backup
+ * timers' direction gate (backupTimerGate); +Infinity when nothing bounds it.
+ *
+ * With every connected home Core reporting on a fresh meter (homeCoreCoverage complete, none
+ * frozen: isSourceDpuFrozen) it is the exact display sum the gate has always read
+ * (aggregateFleetFlow fleetBatteryNetDisplay), basis 'cores'. Otherwise that sum does not measure
+ * the pool: with every Core dark it is 0 W, and the gate read that as "not discharging" — live
+ * 2026-10-16 20:04 MST every Core was cloud-offline and the pool drained ~3.4 kW through the panel
+ * while /api/ha-state published 38 min to full and the console showed "▲ CHG 38m" beside a 0 W
+ * battery net. Each connected slot then contributes:
+ *   · its Core's own pack net, when that Core reports on a fresh meter;
+ *   · else, while that panel's reading is fresh (shp2ReadbackFresh), the negated slot meter
+ *     (−sourceWatts: the AC the Core delivers into the panel). The panel cannot see the Core's PV,
+ *     which only adds to its charge, so this bounds its pack net from ABOVE: a slot taking AC
+ *     proves a charge, a slot delivering does not prove a discharge (by day that can be the Core's
+ *     PV passing through while its packs charge);
+ *   · else +Infinity, basis 'unmeasured'.
+ * As in gridState's at-floor guard (v1.3.0), a partial roster can prove one direction and never
+ * disprove the other, and the unknown resolves toward discharging.
+ */
+export function poolNetUpperBound(
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number,
+): { watts: number; basis: 'cores' | 'panel' | 'unmeasured' } {
+  const connected = shp2ConnectedDpuSns(devices);
+  const frozen = [...connected].some((sn) => isSourceDpuFrozen({ isConnected: true, sn }, devices, nowMs));
+  if (homeCoreCoverage(devices).complete && !frozen) {
+    return { watts: aggregateFleetFlow(devices).fleetBatteryNetDisplay, basis: 'cores' };
+  }
+  let watts = 0;
+  const seen = new Set<string>();
+  for (const p of allShp2s(devices)) {
+    const panelFresh = shp2ReadbackFresh(p, nowMs);
+    (p.projection.sources ?? []).forEach((s, i) => {
+      if (!s.isConnected || !s.sn || seen.has(s.sn)) return;
+      seen.add(s.sn);
+      const d = devices[s.sn];
+      if (d?.online === true && d.projection?.kind === 'dpu' && dpuContentFresh(d, nowMs)) {
+        for (const pk of d.projection.packs ?? []) { const f = pk.liveFlow ?? pk; watts += (f.outputWatts ?? 0) - (f.inputWatts ?? 0); }
+        return;
+      }
+      const w = p.projection.sourceWatts?.[i];
+      watts += panelFresh && typeof w === 'number' && Number.isFinite(w) ? -w : Infinity;
+    });
+  }
+  // No slot to read: the roster is a remembered or fallback one (no connection table).
+  if (seen.size === 0) watts = Infinity;
+  return { watts, basis: Number.isFinite(watts) ? 'panel' : 'unmeasured' };
+}
+
+/**
+ * v1.188.1 — which of the panel's two backup timers applies. The SHP2 reports both regardless of
+ * direction (v0.15.12: "1.7 h to full" while discharging), so each is published only while the
+ * pool is not proven to run the other way: the charge timer while the pool's net is at most
+ * +50 W, the discharge timer while it is at least −50 W — on poolNetUpperBound, which is the
+ * Cores' exact sum while every home Core reports and a bound through the panel otherwise. Shared
+ * by /api/ha-state (backup_charge_minutes / backup_discharge_minutes) and the console's RUN line.
+ */
+export function backupTimerGate(
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number,
+): { charge: boolean; discharge: boolean; basis: 'cores' | 'panel' | 'unmeasured' } {
+  const { watts, basis } = poolNetUpperBound(devices, nowMs);
+  return { charge: watts <= BACKUP_TIMER_DEADBAND_W, discharge: watts >= -BACKUP_TIMER_DEADBAND_W, basis };
 }

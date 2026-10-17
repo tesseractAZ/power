@@ -69,7 +69,7 @@ const MUTANTS = [
   {
     id: 'v. \u2605\u2605 with the Cores idle, the grid is not taken as the house\u2019s only source',
     file: MODEL,
-    find: "    gridToHouseW = gridState === 'active' ? load : 0;",
+    find: "    gridToHouseW = gridState !== 'active' ? 0 : coresSeenIdle ? load : Math.min(load, Math.max(0, homeGridW - coresAcIn));",
     to: '    gridToHouseW = Math.min(Math.max(0, homeGridW - acIn), load); /* MUTANT */',
     why: 'At a charge ramp the main still reads its pre-ramp value, so the grid \u2192 house edge drops to 0 while the house is plainly on the grid.',
   },

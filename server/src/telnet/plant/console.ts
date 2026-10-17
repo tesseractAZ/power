@@ -44,7 +44,7 @@ import { priorityOf, comparePriority, type AlarmPriority } from '../../alertPrio
 import { liveGridBackstop } from '../../gridState.js';
 // v1.0.0 — the authoritative fleet aggregate + SHP2 membership, shared with the
 // fleet_pv_watts / fleet_battery_net_watts HA sensors and the summary TUI.
-import { aggregateFleetFlow, shp2ConnectedDpuSns, isShp2Connected, homeCoreCoverage } from '../../shp2Membership.js';
+import { aggregateFleetFlow, shp2ConnectedDpuSns, isShp2Connected, homeCoreCoverage, backupTimerGate } from '../../shp2Membership.js';
 
 /** v0.36.0 — the three operator-facing grid states (see import note above). */
 type GridState = 'active' | 'standby' | 'islanded';
@@ -279,8 +279,12 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
     // `backup_charge_minutes` (fleetBatteryNet > 50 W discharge, audit rank 16): SHP2's own
     // backupChargeTimeMin field can hold a stale / PV-forecast ETA while the pool is actively
     // discharging, which would show a charge-completion time during a real drawdown.
-    const dchMin = p.backupDischargeTimeMin;
-    const chMin = batNet > 50 ? null : p.backupChargeTimeMin;
+    // v1.188.1 — both timers on the shared backupTimerGate, as /api/ha-state publishes them: with a
+    // home Core dark the Cores' net is not the pool's (10-16 20:04: "▲ CHG 38m" beside a 0 W
+    // BATT.P.NET while every Core was offline and the pool drained 3.4 kW through the panel).
+    const timers = backupTimerGate(data.snap.devices, Date.now());
+    const dchMin = timers.discharge ? p.backupDischargeTimeMin : null;
+    const chMin = timers.charge ? p.backupChargeTimeMin : null;
     out.push(padEnd(
       '  ' + c.grey('RUN ') + (dchMin != null
         ? c.yellow(`▼ DCH ${fmtMinutes(dchMin)}`)
