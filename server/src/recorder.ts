@@ -16,7 +16,7 @@ import { resolveRetentionDays } from './retention.js';
 import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './backupWindow.js';
 // v1.188.1 — battery and solar energy metered at the panel's source slots while a home Core is dark.
 import {
-  createEnergyBridge, darkCoreSns, slotPvWatts,
+  createEnergyBridge, offlineHomeCores, ownEnergyUntil, slotPvWatts,
   type BridgedFleetFlow, type BridgeRollupResult, type EnergyBridgeDebug,
 } from './energyBridge.js';
 
@@ -308,6 +308,13 @@ export function clampLifetimeDip(
   if (dip > 0 && dip <= maxDipWh) return prevEmittedTotalWh - persistedWh;
   return pendingWh;
 }
+
+/** v1.188.1 — the lifetime counters whose contributors the energy bridge changes (a home Core
+ *  handed to it, or back) hold a dip up to this, not 50 Wh. Their rows only grow, so a lower
+ *  total between rollups is pending energy the read path no longer sees, never a reset; a genuine
+ *  re-zero (a replaced database) is far larger and still passes through. */
+export const LIFETIME_HOLD_KEYS: ReadonlySet<string> = new Set(['fleet_pv_wh', 'fleet_grid_import_wh']);
+export const LIFETIME_HOLD_DIP_WH = 5_000;
 
 // v0.13.0 — per-pack lifetime baseline (absolute factory-register snapshot
 // captured the first time a (sn, packNum) pair is seen). Home totals use
@@ -1873,8 +1880,11 @@ export function createRecorder(
   // (Live today: all 3 slots report isConnected=true, so this is a no-op hardening.)
   const sourceSnsOf = (snap: FleetSnapshot): Set<string> => shp2ConnectedDpuSns(snap.devices);
 
-  const buildContributors = (snap: FleetSnapshot): Record<string, Array<{ sn: string; metric: string }>> => {
-    const out: Record<string, Array<{ sn: string; metric: string }>> = {
+  /** One integrated series of a lifetime key. `untilMs` (v1.188.1): it counts only up to that
+   *  instant; null: not at all (a home Core handed to the energy bridge, ownEnergyUntil). */
+  type Contributor = { sn: string; metric: string; untilMs?: number | null };
+  const buildContributors = (snap: FleetSnapshot, phase: 'read' | 'rollup', nowMs: number): Record<string, Contributor[]> => {
+    const out: Record<string, Contributor[]> = {
       fleet_pv_wh: [],
       fleet_load_wh: [],
       fleet_grid_import_wh: [],
@@ -1882,10 +1892,13 @@ export function createRecorder(
     };
     const devices = Object.values(snap.devices);
     const sourceSns = sourceSnsOf(snap);
-    // v1.188.1 — a DARK home Core (its panel slot connected, the Core cloud-offline) contributes
-    // through the energy bridge, metered at its panel slot (energyBridge.ts); its own pv_total /
-    // ac_in rows over the dark span are held values, not readings, and would double-count.
-    const bridgedSns = darkCoreSns(snap.devices);
+    // v1.188.1 — an OFFLINE home Core (its panel slot connected, the Core cloud-offline) is handed
+    // to the energy bridge, metered at its panel slot (energyBridge.ts), at the instant it went
+    // offline: its own pv_total / ac_in count up to that instant and no further (rows past it are
+    // held values, not readings, and the bridge counts that span). A read cuts at once, so a dark
+    // flip between rollups keeps what it already showed; a rollup inside the dwell still counts
+    // the Core itself (ownEnergyUntil).
+    const offline = offlineHomeCores(snap.devices, nowMs);
     for (const d of devices) {
       const p = d.projection;
       if (!p) continue;
@@ -1897,9 +1910,10 @@ export function createRecorder(
         // production but it isn't "the home's PV" until it's wired in.
         // (Same gating logic as fleet_grid_import_wh below — the
         // sourceSns.size === 0 fallback keeps DPU-only setups working.)
-        if ((sourceSns.size === 0 || sourceSns.has(d.sn)) && !bridgedSns.has(d.sn)) {
-          out.fleet_pv_wh.push({ sn: d.sn, metric: 'pv_total' });
-          out.fleet_grid_import_wh.push({ sn: d.sn, metric: 'ac_in' });
+        if (sourceSns.size === 0 || sourceSns.has(d.sn)) {
+          const untilMs = ownEnergyUntil(offline.get(d.sn), phase);
+          out.fleet_pv_wh.push({ sn: d.sn, metric: 'pv_total', untilMs });
+          out.fleet_grid_import_wh.push({ sn: d.sn, metric: 'ac_in', untilMs });
         }
       } else if (p.kind === 'shp2') {
         out.fleet_load_wh.push({ sn: d.sn, metric: 'panel_load' });
@@ -2473,7 +2487,9 @@ export function createRecorder(
 
 
     // v1.188.1 — one line per Core handed over on this pass: what its BMS counted while dark
-    // (absorbed) against what the panel bridge counted for it (published, AC basis).
+    // (absorbed) against what the panel bridge counted for it (published, AC basis). The bridge's
+    // own rollup clears the per-Core rows once every marker of the Core is handed over, after its
+    // "no longer bridged" line has read them (a read usually runs this pass first).
     for (const [sn, h] of handedOver) {
       const b = energyBridge.coreBridged(sn);
       log(
@@ -2481,7 +2497,6 @@ export function createRecorder(
         `the BMS counted ${(h.chgWh / 1000).toFixed(2)} kWh in / ${(h.dsgWh / 1000).toFixed(2)} kWh out while dark (absorbed, not published); ` +
         `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis, already published)`,
       );
-      if (energyBridge.markersOf(sn).length === 0) energyBridge.clearCore(sn);
     }
 
     return { chargeWh, dischargeWh, packs, offlineHeldMembers };
@@ -2647,13 +2662,13 @@ export function createRecorder(
   const rollupLifetime = () => {
     const now = Date.now();
     const snap = store.get();
-    const contributors = buildContributors(snap);
+    const contributors = buildContributors(snap, 'rollup', now);
 
     // v1.188.1 — the energy bridge's window first (energyBridge.ts): its PV joins fleet_pv_wh and
-    // its slot AC input joins fleet_grid_import_wh below (the dark Cores' own contributors are
-    // skipped by buildContributors), its battery energy accumulates in its own rows, and it marks
-    // the dark Cores' held packs before the BMS pass further down reads the markers. Isolated: a
-    // bridge failure is logged and every other counter still advances.
+    // its slot AC input joins fleet_grid_import_wh below (the dark Cores' own contributors count
+    // only up to the instant each went offline, buildContributors), its battery energy accumulates
+    // in its own rows, and it marks the dark Cores' held packs before the BMS pass further down
+    // reads the markers. Isolated: a bridge failure is logged and every other counter still advances.
     let br: BridgeRollupResult | null = null;
     try {
       br = energyBridge.rollup(snap, now);
@@ -2674,10 +2689,13 @@ export function createRecorder(
       if (since >= now) continue;
       let addedWh = 0;
       for (const c of contributors[key] ?? []) {
+        // v1.188.1 — a Core handed to the energy bridge counts only up to the hand-off instant.
+        const until = c.untilMs === undefined ? now : c.untilMs === null ? since : Math.min(now, c.untilMs);
+        if (until <= since) continue;
         // v1.12.0 (review F9) — fetch from `since - lookback` so integrateWh gets the
-        // pre-window boundary sample; it still integrates only [since, now].
+        // pre-window boundary sample; it still integrates only [since, until].
         const pts = queryStmt.all(c.sn, c.metric, since - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>;
-        const r = integrateWh(pts, since, now);
+        const r = integrateWh(pts, since, until);
         addedWh += r.wh;
       }
       // v1.188.1 — the bridged dark Cores' share, metered at the panel (never negative).
@@ -2824,7 +2842,7 @@ export function createRecorder(
   const getLifetimeTotals = (): Record<string, LifetimeTotals> => {
     const now = Date.now();
     const snap = store.get();
-    const contributors = buildContributors(snap);
+    const contributors = buildContributors(snap, 'read', now);
     const out: Record<string, LifetimeTotals> = {};
     const allKeys = allLifetimeKeys(snap);
     // Finding #29 — memoized across the loop below so the mutating BMS pack
@@ -2861,10 +2879,13 @@ export function createRecorder(
         pendingWh = Math.max(0, liveBmsWh - persisted);
       } else if (watermark < now) {
         for (const c of contributors[key] ?? []) {
+          // v1.188.1 — the same hand-off cut as rollupLifetime, applied at once (ownEnergyUntil).
+          const until = c.untilMs === undefined ? now : c.untilMs === null ? watermark : Math.min(now, c.untilMs);
+          if (until <= watermark) continue;
           // v1.12.0 (review F9) — same head-segment fix as rollupLifetime: fetch the
           // pre-watermark boundary sample so integrateWh's value-hold engages.
           const pts = queryStmt.all(c.sn, c.metric, watermark - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>;
-          pendingWh += integrateWh(pts, watermark, now).wh;
+          pendingWh += integrateWh(pts, watermark, until).wh;
         }
         if (pendingWh < 0) pendingWh = 0;
       }
@@ -2876,10 +2897,15 @@ export function createRecorder(
       // not strictly increasing", 21× in the HA core log). Hold the previous
       // total across small dips; a LARGE drop is a genuine operator reset
       // (v0.13.0 re-zero) and must pass through unclamped.
+      // v1.188.1 — the two counters the energy bridge changes the contributors of hold a dip up to
+      // LIFETIME_HOLD_DIP_WH: their persisted rows only grow, so a lower total between rollups is
+      // never a reset, only pending energy the read path no longer sees (the backstop behind the
+      // hand-off cut in buildContributors).
       pendingWh = clampLifetimeDip(
         lifetimeEmitHighWater.get(key),
         persistedWh,
         pendingWh,
+        LIFETIME_HOLD_KEYS.has(key) ? LIFETIME_HOLD_DIP_WH : undefined,
       );
       lifetimeEmitHighWater.set(key, persistedWh + pendingWh);
       out[key] = { persistedWh, pendingWh, watermarkMs: watermark };

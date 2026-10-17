@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
  * mutate-energy-core-outage.mjs — v1.188.1: while a home Core is cloud-offline, its battery and
- * solar energy (and the two power sensors) come from the Smart Home Panel 2's source slot; when it
- * reports again its BMS counter jump is absorbed; nothing published ever steps down.
+ * solar energy (and the two power sensors) come from the Smart Home Panel 2's source slot, from
+ * the instant it went offline (a blip inside the dwell is not bridged); the panel's PV field is
+ * used only once checked against the inferred lower bound; when the Core reports again its BMS
+ * counter jump is absorbed; nothing published ever steps down.
  *
  *   B-i     the slot meter's direction is flipped (the Cores supplying the panel read as charging)
  *   B-ii    the night gate is removed (a dark night is inferred, its outflow booked as PV)
@@ -27,6 +29,24 @@
  *   B-xxi   an uncovered window is inferred anyway
  *   B-xxii  the inferred basis ignores the Cores' measured capacity (nameplate instead)
  *   B-xxiii the power sensors' battery sign is flipped
+ *   B-xxiv  a read drops an offline Core's own energy up to its flip (PV steps DOWN at a daylight flip)
+ *   B-xxv   a read ignores the hand-off cut (shows energy past the flip the next rollup will not keep)
+ *   B-xxvi  the dwell is removed (a 6 s blip activates the bridge, writes markers, double-counts)
+ *   B-xxvii the bridge's window ignores the hand-off instant (re-books what the BMS / pv_total counted)
+ *   B-xxviii a rollup inside the dwell cuts the Core too (its energy over the blip is lost)
+ *   B-xxix  a slot's inferred state outlives its dark span (a later span lands the SoC rise as solar)
+ *   B-xxx   the panel PV field is trusted on its first daylight reading (no corroboration)
+ *   B-xxxi  a trusted panel PV field is never revoked
+ *   B-xxxii the field verdict needs no evidence
+ *   B-xxxiii the field verdict allows no SoC step
+ *   B-xxxiv the field trust is not reloaded at a restart
+ *   B-xxxv  the 15-min window clamp is removed (the first window after a restart spans the downtime)
+ *   B-xxxvi a handed-over marker's row is never deleted (re-absorbed after every restart)
+ *   B-xxxvii the hand-over line's BMS discharge figure is zeroed
+ *   B-xxxviii the hand-over line's BMS charge figure is zeroed
+ *   B-xxxix the hand-over clears the per-Core figures (the "no longer bridged" line reads 0.00)
+ *   B-xl    the per-Core figures are never cleared
+ *   B-xli   the PV / Grid to Battery Charge dip backstop is removed
  *
  *   node scripts/mutate-energy-core-outage.mjs
  */
@@ -40,8 +60,10 @@ const PR = resolve(REPO, 'server/src/publishReadiness.ts');
 const SUBSET = [
   'test/energyBridge.test.ts',
   'test/recorderEnergyBridge.test.ts',
+  'test/recorderEnergyBridgeTransitions.test.ts',
   'test/energyBridgePublish.test.ts',
   'test/publishReadiness.test.ts',
+  'test/lifetimeDipClamp.test.ts',
 ];
 
 const MUTANTS = [
@@ -55,8 +77,8 @@ const MUTANTS = [
   {
     id: 'B-ii. ★★★ the night gate is removed',
     file: EB,
-    find: '    const night = !sunUp(since) && !sunUp(nowMs);',
-    to: '    const night = false; /* MUTANT */',
+    find: '      if (!sunUp(start) && !sunUp(nowMs)) {',
+    to: '      if (false) { /* MUTANT */',
     why: 'A dark night is inferred: the slots\' outflow rises the envelope and is booked as solar, not battery out.',
   },
   {
@@ -67,10 +89,10 @@ const MUTANTS = [
     why: 'Home Assistant\'s solar reads 0.0 kWh on a dark-Core day again (10-15, 10-16).',
   },
   {
-    id: 'B-iv. ★★★ the dark Cores\' own contributors are no longer skipped',
+    id: 'B-iv. ★★★ the dark Cores\' own contributors are no longer cut at the hand-off',
     file: RC,
-    find: '        if ((sourceSns.size === 0 || sourceSns.has(d.sn)) && !bridgedSns.has(d.sn)) {',
-    to: '        if (sourceSns.size === 0 || sourceSns.has(d.sn)) { /* MUTANT */',
+    find: '          const untilMs = ownEnergyUntil(offline.get(d.sn), phase);',
+    to: '          const untilMs = undefined as number | null | undefined; /* MUTANT */',
     why: 'A frozen projection\'s held pv_total / ac_in heartbeat rows are integrated beside the bridge (double count).',
   },
   {
@@ -111,9 +133,9 @@ const MUTANTS = [
   {
     id: 'B-x. ★★★ an untrusted panel PV field is used as measured (rollup)',
     file: EB,
-    find: '        if (isTrusted(s.panelSn, s.slot)) {',
-    to: '        if (true) { /* MUTANT */',
-    why: 'A field never seen above 0 W reads 0 in daylight: the day\'s solar books as nothing and the Cores\' output as battery out.',
+    find: '        if (fieldWh != null && isTrusted(s.panelSn, s.slot)) {',
+    to: '        if (fieldWh != null) { /* MUTANT */',
+    why: 'A field never checked reads 0 in daylight: the day\'s solar books as nothing and the Cores\' output as battery out.',
   },
   {
     id: 'B-xi. ★★ an untrusted panel PV field is used for the power sensors',
@@ -205,6 +227,132 @@ const MUTANTS = [
     find: '    net += -(s.chW as number) - p;',
     to: '    net += (s.chW as number) - p; /* MUTANT */',
     why: 'Battery Net reads charging while the Cores supply the house (the Now view\'s consumption inverts).',
+  },
+  {
+    id: 'B-xxiv. ★★★ a read drops an offline Core\'s own energy up to its flip',
+    file: RC,
+    find: '          const until = c.untilMs === undefined ? now : c.untilMs === null ? watermark : Math.min(now, c.untilMs);',
+    to: '          const until = c.untilMs === undefined ? now : watermark; /* MUTANT */',
+    why: 'The v1.188.1 review defect: a Core going dark between rollups in daylight takes its pending PV / ac_in with it — PV Production steps DOWN (here held flat by the backstop, and no longer rising with the Cores that report).',
+  },
+  {
+    id: 'B-xxv. ★★ a read ignores the hand-off cut',
+    file: RC,
+    find: "    const contributors = buildContributors(snap, 'read', now);",
+    to: "    const contributors = buildContributors(snap, 'rollup', now); /* MUTANT */",
+    why: 'Inside the dwell a read shows the offline Core\'s held / extrapolated PV past its flip, which the rollup that hands it to the bridge does not keep.',
+  },
+  {
+    id: 'B-xxvi. ★★★ the dwell is removed',
+    file: EB,
+    find: '  return { offlineSinceMs, bridged: offlineSinceMs == null || nowMs - offlineSinceMs >= BRIDGE_DWELL_MS };',
+    to: '  return { offlineSinceMs, bridged: true }; /* MUTANT */',
+    why: 'A 6 s /status blip at a rollup activates the bridge: markers, three log lines, and the window\'s battery energy booked beside the BMS.',
+  },
+  {
+    id: 'B-xxvii. ★★★ the bridge\'s window ignores the hand-off instant',
+    file: EB,
+    find: '      const start = Math.max(since, s.darkSinceMs ?? since);',
+    to: '      const start = since; /* MUTANT */',
+    why: 'An outage that starts mid-window books the part before the flip twice: the BMS / pv_total counted it, and the bridge books it again.',
+  },
+  {
+    id: 'B-xxviii. ★★ a rollup inside the dwell cuts the Core too',
+    file: EB,
+    find: "  if (phase === 'rollup' && !o.bridged) return undefined;",
+    to: '  /* MUTANT */',
+    why: 'A blip shorter than the dwell that straddles a rollup loses the Core\'s own PV from its flip to that rollup; the bridge never counts it.',
+  },
+  {
+    id: 'B-xxix. ★★★ a slot\'s inferred state outlives its dark span',
+    file: EB,
+    find: '    for (const k of [...infer.keys()]) if (!live.has(k)) infer.delete(k);',
+    to: '    /* MUTANT */',
+    why: 'A second dark span hours later reuses the old anchor: the whole charge gained since lands in one window as solar (+10 kWh per Core).',
+  },
+  {
+    id: 'B-xxx. ★★★ the panel PV field is trusted on its first daylight reading',
+    file: EB,
+    find: '    const v = pvFieldVerdict(c.fieldWh, c.inferredWh, c.stepWh);',
+    to: "    const v = c.fieldWh > 0 ? 'consistent' as const : pvFieldVerdict(c.fieldWh, c.inferredWh, c.stepWh); /* MUTANT */",
+    why: 'The review defect: a field reading only part of the solar is trusted for good; pass-through PV books as battery out.',
+  },
+  {
+    id: 'B-xxxi. ★★★ a trusted panel PV field is never revoked',
+    file: EB,
+    find: '    if (trusted.delete(tk)) {\n      deps.deleteLifetime(tk);',
+    to: '    if (trusted.has(tk)) return; /* MUTANT */\n    if (trusted.delete(tk)) {\n      deps.deleteLifetime(tk);',
+    why: 'A field that stops reading the pass-through PV keeps the measured basis: solar under-counted for the rest of the outage.',
+  },
+  {
+    id: 'B-xxxii. ★★ the field verdict needs no evidence',
+    file: EB,
+    find: "  if (!(stepWh > 0) || inferredWh < BRIDGE_PV_EVIDENCE_STEPS * stepWh) return 'pending';",
+    to: "  if (!(stepWh > 0)) return 'pending'; /* MUTANT */",
+    why: 'The first daylight window decides: within the bound\'s one-step error any field passes.',
+  },
+  {
+    id: 'B-xxxiii. ★★ the field verdict allows no SoC step',
+    file: EB,
+    find: "  return fieldWh >= inferredWh - stepWh ? 'consistent' : 'below';",
+    to: "  return fieldWh >= inferredWh ? 'consistent' : 'below'; /* MUTANT */",
+    why: 'The integer percent makes the bound good to one step; a true field one step short of it is rejected.',
+  },
+  {
+    id: 'B-xxxiv. ★★ the field trust is not reloaded at a restart',
+    file: EB,
+    find: '  const trusted = new Set<string>(keys.filter((k) => k.startsWith(PVSEEN_PREFIX)));',
+    to: '  const trusted = new Set<string>(); /* MUTANT */',
+    why: 'After every restart Fleet PV and Battery Net read unknown in daylight until the check passes again.',
+  },
+  {
+    id: 'B-xxxv. ★★ the 15-min window clamp is removed',
+    file: EB,
+    find: '    since = Math.max(since, nowMs - BRIDGE_MAX_WINDOW_MS);',
+    to: '    /* MUTANT */',
+    why: 'The first window after a restart spans the downtime: one judged on daylight at its start books nothing for the night it covers.',
+  },
+  {
+    id: 'B-xxxvi. ★★★ a handed-over marker\'s row is never deleted',
+    file: EB,
+    find: '      if (!markers.delete(k)) return;\n      deps.deleteLifetime(bridgeDarkKey(k));',
+    to: '      if (!markers.delete(k)) return; /* MUTANT */',
+    why: 'Every restart reloads the marker: the pack\'s next register movement is absorbed again, forever.',
+  },
+  {
+    id: 'B-xxxvii. ★★ the hand-over line\'s BMS discharge figure is zeroed',
+    file: RC,
+    find: '              h.dsgWh += Math.max(0, fresh.dsgWh - held.dsgWh);',
+    to: '              h.dsgWh += 0; /* MUTANT */',
+    why: 'The statistics repair reads its preferred battery-out target from this line: it would book 0 kWh.',
+  },
+  {
+    id: 'B-xxxviii. ★★ the hand-over line\'s BMS charge figure is zeroed',
+    file: RC,
+    find: '              h.chgWh += Math.max(0, fresh.chgWh - held.chgWh);',
+    to: '              h.chgWh += 0; /* MUTANT */',
+    why: 'The same for battery in.',
+  },
+  {
+    id: 'B-xxxix. ★★ the hand-over clears the per-Core figures',
+    file: RC,
+    find: "        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis, already published)`,\n      );\n",
+    to: "        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis, already published)`,\n      );\n      if (energyBridge.markersOf(sn).length === 0) energyBridge.clearCore(sn); /* MUTANT */\n",
+    why: 'The review defect: the "no longer bridged" line that follows reads 0.00 kWh in / 0.00 kWh out.',
+  },
+  {
+    id: 'B-xl. ★ the per-Core figures are never cleared',
+    file: EB,
+    find: '      if (m && !bridging.has(m[1]) && markersOf(m[1]).length === 0) clearCore(m[1]);',
+    to: '      /* MUTANT */',
+    why: 'A later outage of the same Core starts its hand-over figures from the old ones.',
+  },
+  {
+    id: 'B-xli. ★★ the PV / Grid to Battery Charge dip backstop is removed',
+    file: RC,
+    find: '        LIFETIME_HOLD_KEYS.has(key) ? LIFETIME_HOLD_DIP_WH : undefined,',
+    to: '        undefined, /* MUTANT */',
+    why: 'A Core whose slot leaves the panel mid-window steps PV Production down by its pending share (above the 50 Wh micro-dip clamp).',
   },
 ];
 

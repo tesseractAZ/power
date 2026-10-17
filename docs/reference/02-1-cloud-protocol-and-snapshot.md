@@ -629,8 +629,9 @@ Core supplies the panel), each null when omitted. They are REST-only (`pd303_mc.
 poll) and recorded per slot as `src<n>_pv_w` (the PV figure the energy bridge integrates:
 the two MPPT fields when either is reported, else `pvChargeWatts`), `src<n>_pv_hv_w`,
 `src<n>_pv_lv_w` and `src<n>_in_w`. The PV fields read 0 at night on 2026-10-16; whether they
-populate in daylight had not been observed, so the bridge reads them only for a slot that has
-shown a reading above 0 W with the sun up. `sourceWatts[k]` (`backupInfo.chWatt`) pairs with
+populate in daylight had not been observed, so the bridge reads them only for a slot whose
+field has passed its check against the inferred lower bound ([chapter 7, path
+(c)](07-energy-and-cost.md#22-the-two-accumulation-paths)). `sourceWatts[k]` (`backupInfo.chWatt`) pairs with
 `Energy{k+1}Info`, checked live against `outputPower`. Panel-level
 v1.80.0 fields: `forceChargeCeilingSoc` (`foceChargeHight`, sic), `stormWatchEnabled`
 (`stormIsEnable`), `epsMode` (`epsModeInfo`). The `sn` here is the Core↔SHP2 connector

@@ -59,7 +59,10 @@ const totalOf = (t: Record<string, { persistedWh: number; pendingWh: number }>, 
 // shared db/sidecar can't cross-contaminate assertions.
 const KEY_HOLD = 'fleet_pv_wh';
 const KEY_NOSIDE = 'fleet_load_wh';
-const KEY_RESET = 'fleet_grid_import_wh';
+// v1.188.1 — fleet_pv_wh and fleet_grid_import_wh (LIFETIME_HOLD_KEYS) hold a dip up to 5 kWh, so
+// the >50 Wh reset scenario runs on Home Consumption (its floor is set explicitly at the start).
+const KEY_RESET = 'fleet_load_wh';
+const KEY_BRIDGED = 'fleet_grid_import_wh';
 
 test('WITHOUT a sidecar (missing) the same dip passes through — proves the sidecar is what fixes the bug', () => {
   rmSync(SIDECAR, { force: true }); // ensure no high-water baseline exists
@@ -111,6 +114,23 @@ test('a genuine reset (>50 Wh drop) still passes through across a restart', () =
   const t = rec2.getLifetimeTotals();
   assert.equal(totalOf(t, KEY_RESET), LAST_EMITTED_WH - 538,
     'a >50 Wh drop is a genuine reset and must pass through unclamped even with a restored high-water');
+  rec2.close();
+});
+
+test('v1.188.1 — Grid to Battery Charge (an energy-bridge counter) holds a dip up to 5 kWh across a restart; a larger drop still passes', () => {
+  {
+    const rec = createRecorder(new SnapshotStore(), () => {});
+    setPersistedFloor(KEY_BRIDGED, LAST_EMITTED_WH);
+    rec.getLifetimeTotals();
+    rec.close();
+  }
+  setPersistedFloor(KEY_BRIDGED, LAST_EMITTED_WH - 538);
+  let rec2 = createRecorder(new SnapshotStore(), () => {});
+  assert.equal(totalOf(rec2.getLifetimeTotals(), KEY_BRIDGED), LAST_EMITTED_WH, 'a 538 Wh dip is held');
+  rec2.close();
+  setPersistedFloor(KEY_BRIDGED, 100); // a replaced database
+  rec2 = createRecorder(new SnapshotStore(), () => {});
+  assert.equal(totalOf(rec2.getLifetimeTotals(), KEY_BRIDGED), 100, 'a re-zero passes through');
   rec2.close();
 });
 

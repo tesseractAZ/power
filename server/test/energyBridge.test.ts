@@ -11,8 +11,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  darkHomeSlots, darkCoreSns, sunUp, slotPvWatts, windowSplit, slotAcEnergy, valueAt, inferPvStep,
-  bridgeFleetFlow, heldPackKeysOf, slotPowerBasis,
+  darkHomeSlots, offlineHomeCores, ownEnergyUntil, sunUp, slotPvWatts, windowSplit, slotAcEnergy, valueAt, inferPvStep,
+  bridgeFleetFlow, heldPackKeysOf, slotPowerBasis, pvFieldVerdict, BRIDGE_DWELL_MS, BRIDGE_PV_EVIDENCE_STEPS,
 } from '../src/energyBridge.js';
 import { aggregateFleetFlow } from '../src/shp2Membership.js';
 
@@ -50,8 +50,8 @@ const core = (sn: string, online: boolean, projected = online): Any => ({
 test('★★★ a dark slot is exactly the complement of the Cores aggregateFleetFlow sums', () => {
   const devices = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: core(C1, false, false), [C2]: core(C2, true), [C3]: core(C3, false, true) };
   const dark = darkHomeSlots(devices, NIGHT);
-  assert.deepEqual(dark.map((d) => [d.slot, d.sn, d.chW]), [[1, C1, -1145], [3, C3, -1119]]);
-  assert.deepEqual([...darkCoreSns(devices)].sort(), [C1, C3]);
+  assert.deepEqual(dark.map((d) => [d.slot, d.sn, d.chW, d.darkSinceMs]), [[1, C1, -1145, null], [3, C3, -1119, null]]);
+  assert.deepEqual([...offlineHomeCores(devices, NIGHT).keys()].sort(), [C1, C3]);
   // The summed Core is not dark; aggregateFleetFlow sums exactly it.
   assert.equal(aggregateFleetFlow(devices).fleetPv, 1500);
 });
@@ -69,6 +69,50 @@ test('★★ the panel reading must be fresh for a slot to be bridged', () => {
   const shadow = { [PANEL]: panel(NIGHT, [-1000, 0, 0], { contentStaleSinceMs: NIGHT - 60_000 }), [C1]: core(C1, false) };
   assert.equal(darkHomeSlots(shadow, NIGHT)[0].panelFresh, false);
   assert.equal(darkHomeSlots({ [PANEL]: panel(NIGHT, [-1000, 0, 0]), [C1]: core(C1, false) }, NIGHT)[0].panelFresh, true);
+});
+
+test('★★★ a Core is bridged only once it has been offline for the dwell; inside it, it is neither summed nor bridged', () => {
+  const at = (ago: number): Any => ({ ...core(C1, false), onlineChangedAtMs: NIGHT - ago });
+  const devs = (ago: number): Any => ({ [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: at(ago), [C2]: core(C2, true), [C3]: core(C3, true) });
+  // A 6 s /status flip and the 2026-10-03 ~92 s /device/list blip are not outages.
+  for (const ago of [6_000, 92_000, BRIDGE_DWELL_MS - 1]) {
+    assert.deepEqual(darkHomeSlots(devs(ago), NIGHT), [], `offline ${ago} ms`);
+    assert.deepEqual(offlineHomeCores(devs(ago), NIGHT).get(C1), { offlineSinceMs: NIGHT - ago, bridged: false });
+  }
+  const dark = darkHomeSlots(devs(BRIDGE_DWELL_MS), NIGHT);
+  assert.deepEqual(dark.map((d) => [d.sn, d.darkSinceMs]), [[C1, NIGHT - BRIDGE_DWELL_MS]], 'from the instant it went offline');
+  // A flip stamped in the future (clock skew) is read as now: inside the dwell.
+  assert.deepEqual(offlineHomeCores(devs(-60_000), NIGHT).get(C1), { offlineSinceMs: NIGHT, bridged: false });
+  // The power sensors inside the dwell: the Core is not a dark slot, so nothing is withheld for it.
+  const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 1200 }, devs(30_000), NIGHT, () => false);
+  assert.deepEqual([f.ready, f.bridgedSlots, f.fleetBatteryNet], [true, 0, 1200]);
+});
+
+test('★★★ how far a Core\'s own pv_total / ac_in count: a read cuts at the instant it went offline at once, a rollup only once it is bridged', () => {
+  const inDwell = { offlineSinceMs: NIGHT - 60_000, bridged: false };
+  const bridged = { offlineSinceMs: NIGHT - 600_000, bridged: true };
+  const sinceBoot = { offlineSinceMs: null, bridged: true };
+  assert.equal(ownEnergyUntil(undefined, 'read'), undefined, 'a Core that reports: no limit');
+  assert.equal(ownEnergyUntil(undefined, 'rollup'), undefined);
+  assert.equal(ownEnergyUntil(inDwell, 'read'), NIGHT - 60_000, 'a read never shows what the next rollup may not keep');
+  assert.equal(ownEnergyUntil(inDwell, 'rollup'), undefined, 'a rollup inside the dwell still counts the Core itself');
+  assert.equal(ownEnergyUntil(bridged, 'rollup'), NIGHT - 600_000, 'the bridge\'s window starts there');
+  assert.equal(ownEnergyUntil(bridged, 'read'), NIGHT - 600_000);
+  assert.equal(ownEnergyUntil(sinceBoot, 'read'), null, 'offline since before this process: not at all');
+  assert.equal(ownEnergyUntil(sinceBoot, 'rollup'), null);
+});
+
+test('★★★ the panel PV field against the inferred lower bound: pending until the bound has risen enough, then at least the bound less one step', () => {
+  const step = 286.72;
+  const evidence = BRIDGE_PV_EVIDENCE_STEPS * step;
+  assert.equal(pvFieldVerdict(5_000, evidence - 1, step), 'pending', 'one reading, or a little sun, proves nothing');
+  assert.equal(pvFieldVerdict(evidence, evidence, step), 'consistent');
+  assert.equal(pvFieldVerdict(evidence - step, evidence, step), 'consistent', 'the bound is good to one SoC step');
+  assert.equal(pvFieldVerdict(evidence - step - 1, evidence, step), 'below');
+  assert.equal(pvFieldVerdict(0, evidence, step), 'below', 'a field reading 0 under a rising charge');
+  assert.equal(pvFieldVerdict(evidence / 2, evidence, step), 'below', 'half the solar (the battery-charging share alone)');
+  assert.equal(pvFieldVerdict(3 * evidence, evidence, step), 'consistent', 'a field reading high is not caught (the bound is a lower one)');
+  assert.equal(pvFieldVerdict(10, 10_000, 0), 'pending', 'no capacity: no verdict');
 });
 
 /* ── the pieces ──────────────────────────────────────────────────────────── */

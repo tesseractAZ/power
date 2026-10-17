@@ -424,7 +424,8 @@ export interface Shp2EnergySource {
    *  inputWatts = lcdInputWatts, outputWatts = outputPower (the magnitude of the slot's chWatt
    *  while the Core supplies the panel, checked live 2026-10-16). Whether the three PV fields
    *  populate in daylight was unverified when they were added: the bridge uses them only for a
-   *  slot that has read above 0 W with the sun up (energyBridge.ts, the 'measured' basis). */
+   *  slot whose field has passed its check against the inferred lower bound (energyBridge.ts,
+   *  pvFieldVerdict, the 'measured' basis). */
   pvWatts?: number | null;
   pvHighWatts?: number | null;
   pvLowWatts?: number | null;

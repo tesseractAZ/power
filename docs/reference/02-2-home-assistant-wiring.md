@@ -89,7 +89,8 @@ dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). S
 
 - **Power flow:** `fleet_pv_watts`, `panel_load_watts`, `ac_import_watts`,
   `fleet_battery_net_watts`, `grid_home_watts` (SHP2 `gridWatt`). Fleet PV and Battery
-  Net add every dark home slot metered at the panel (the energy bridge,
+  Net add every dark home slot (its Core cloud-offline for at least 3 min) metered at the
+  panel (the energy bridge,
   `Recorder.bridgedFleetFlow`; [chapter 7, path (c)](07-energy-and-cost.md#22-the-two-accumulation-paths))
   and have their own readiness flag, `flowBridged`: null while a dark slot cannot be
   bridged, never a partial sum.

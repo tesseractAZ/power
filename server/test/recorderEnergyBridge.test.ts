@@ -1,6 +1,7 @@
 /**
  * v1.188.1 — the energy bridge, driven through the REAL recorder (lifetime rollup, emitted totals,
- * BMS hand-over, restart).
+ * BMS hand-over, restart). The transitions themselves (a dark flip between rollups, a blip, a
+ * second dark span) are in recorderEnergyBridgeTransitions.test.ts.
  *
  * Live shape, 2026-10-14 23:52 → 10-16 MST: all home Cores cloud-offline, the Smart Home Panel 2
  * fresh, its three source slots metering ≈ −1145 / −1145 / −1119 W (the Cores supplying ~3.4 kW).
@@ -9,7 +10,7 @@
  *    never solar;
  *  - in daylight the PV that charges the Cores is inferred from the slots' net output plus the
  *    stored-energy rise (an unverified 0 W panel PV field is not "no PV"), or read from the field
- *    once it has shown a reading with the sun up;
+ *    once it has been checked against that inferred lower bound (and dropped when it falls below);
  *  - when the Cores report again, their BMS counters jump by the dark days' throughput; the
  *    published totals do not jump (the bridge already counted it) and never step down;
  *  - a restart mid-outage keeps all of it.
@@ -17,181 +18,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { EventEmitter } from 'node:events';
-import { DatabaseSync } from 'node:sqlite';
+import {
+  loadPlant, near, MIN, H, PANEL, CORES, PACKS, PACK_MAH_TO_WH, FULL_CAP_MAH, NAMEPLATE_WH, DISCHARGE_W,
+} from './helpers/energyBridgePlant.js';
 
-const tmp = mkdtempSync(join(tmpdir(), 'ef-energy-bridge-'));
-const DB_PATH = join(tmp, 'ecoflow.db');
-process.env.DB_PATH = DB_PATH;
-// The v1.98.0 floor-gap re-seed at 5 kWh, so a few bridged hours already cross it.
-process.env.BMS_RESEED_MIN_GAP_WH = '5000';
-process.env.BMS_RESEED_SUSTAINED_ROLLUPS = '2';
-
-const { createRecorder } = await import('../src/recorder.js');
-type Rec = ReturnType<typeof createRecorder>;
-
-const MIN = 60_000;
-const H = 60 * MIN;
-const PANEL = 'HD31XXX00XXX0001';
-const CORES = ['Y711XXX00XXX0001', 'Y711XXX00XXX0002', 'Y711XXX00XXX0003'];
-const PACK_MAH_TO_WH = 0.1024;
-const FULL_CAP_MAH = 56_000; // per pack: 5,734 Wh
-const PACKS = 2;
-/** The 10-15 slot meters (W): the Cores supplying the panel. */
-const DISCHARGE_W = [-1145, -1145, -1119];
-
-const realNow = Date.now;
-test.after(() => { Date.now = realNow; try { rmSync(tmp, { recursive: true, force: true }); } catch { /* */ } });
-
-type Any = any;
-
-function dpu(sn: string, online: boolean, regs: { chg: number; dsg: number } | null): Any {
-  return {
-    sn, deviceName: sn, productName: 'DELTA Pro Ultra', online, lastUpdated: 0,
-    ...(regs ? {
-      projection: {
-        kind: 'dpu', soc: 60, packCount: PACKS, pvTotalWatts: 0, totalInWatts: 0, totalOutWatts: 0, acInWatts: 0, acOutWatts: 0,
-        packs: Array.from({ length: PACKS }, (_, i) => ({
-          num: i + 1, packSn: `${sn}-P${i + 1}`, soc: 60, inputWatts: 0, outputWatts: 0,
-          designCapMah: 60_000, fullCapMah: FULL_CAP_MAH, remainCapMah: 30_000,
-          accuChgMah: regs.chg, accuDsgMah: regs.dsg,
-        })),
-      },
-    } : {}),
-  };
-}
-
-function panelDev(t: number, sourceWatts: number[], pct: number[], pvW: number[] = [0, 0, 0]): Any {
-  return {
-    sn: PANEL, deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2', online: true,
-    lastUpdated: t, lastQuotaAtMs: t, contentStaleSinceMs: null,
-    projection: {
-      kind: 'shp2', backupBatPercent: 60, backupFullCapWh: 92_160, backupRemainWh: 55_000, backupReserveSoc: 10,
-      circuits: [{ ch: 1, watts: 3400, name: 'Main' }], pairedCircuits: [], gridWatt: 0, gridSta: 1, gridConnected: true,
-      sourceWatts,
-      sources: CORES.map((sn, i) => ({
-        slot: i + 1, sn, isConnected: true, isAcOpen: true, batteryPercentage: pct[i], fullCap: 30_720,
-        ratePower: null, emsBatTemp: null, hwConnect: true, errorCodeNum: null, forceCharge: null,
-        pvWatts: pvW[i], pvHighWatts: null, pvLowWatts: null, inputWatts: 0, outputWatts: 0,
-      })),
-      strategy: {},
-    },
-  };
-}
-
-/** One simulated plant: the real recorder, a store it reads, and a second connection that writes
- *  the samples the recorder would have recorded (the store emits no 'change', so nothing else does). */
-class Plant {
-  clock: number;
-  rec!: Rec;
-  store: Any;
-  db!: DatabaseSync;
-  ins!: ReturnType<DatabaseSync['prepare']>;
-  logs: string[] = [];
-  last: Record<string, number> = {};
-  sourceWatts = [0, 0, 0];
-  pct = [60, 60, 60];
-  pvW = [0, 0, 0];
-  coresOnline = true;
-  regs: { chg: number; dsg: number } | null = { chg: 1_000_000, dsg: 1_000_000 };
-  /** Keep the dark Cores' projection (the store preserves it across an offline flip); false = a
-   *  restart while dark (no projection at all). */
-  frozenProjection = true;
-  panelStale = false;
-
-  constructor(t0: number, opts: { reuse?: boolean } = {}) {
-    if (!opts.reuse) for (const f of readdirSync(tmp)) rmSync(join(tmp, f), { recursive: true, force: true });
-    this.clock = t0;
-    Date.now = () => this.clock;
-    const ee = new EventEmitter() as Any;
-    ee.get = () => ({ generatedAt: this.clock, devices: this.devices() });
-    this.store = ee;
-    this.open();
-  }
-  open(): void {
-    this.rec = createRecorder(this.store, (m) => this.logs.push(m));
-    this.db = new DatabaseSync(DB_PATH);
-    this.ins = this.db.prepare('INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)');
-  }
-  restart(): void {
-    this.rec.close();
-    this.db.close();
-    this.open();
-  }
-  close(): void {
-    this.rec.close();
-    this.db.close();
-    Date.now = realNow;
-  }
-  devices(): Record<string, Any> {
-    const p = panelDev(this.panelStale ? this.clock - 600_000 : this.clock, this.sourceWatts, this.pct, this.pvW);
-    const out: Record<string, Any> = { [PANEL]: p };
-    for (const sn of CORES) {
-      const projected = this.coresOnline || this.frozenProjection;
-      out[sn] = dpu(sn, this.coresOnline, projected ? this.regs : null);
-    }
-    return out;
-  }
-  sample(sn: string, metric: string, value: number, ts = this.clock): void {
-    this.ins.run(ts, sn, metric, value);
-  }
-  /** Record the panel's slot series at `t` (what extract() writes). */
-  panelSamples(t: number): void {
-    for (let i = 0; i < 3; i++) {
-      this.sample(PANEL, `src${i + 1}_w`, this.sourceWatts[i], t);
-      this.sample(PANEL, `src${i + 1}_pct`, this.pct[i], t);
-      this.sample(PANEL, `src${i + 1}_pv_w`, this.pvW[i], t);
-    }
-    this.sample(PANEL, 'grid_home_w', 0, t);
-  }
-  /** Advance the clock minute by minute, recording samples; a lifetime rollup every 5 minutes,
-   *  each followed by a published read (asserted never to decrease). */
-  run(minutes: number, each: (t: number, m: number) => void = () => {}): void {
-    for (let m = 1; m <= minutes; m++) {
-      const t = this.clock + MIN;
-      each(t, m);
-      this.panelSamples(t);
-      this.clock = t;
-      if (m % 5 === 0) {
-        this.rec.rollupLifetime();
-        this.read();
-      }
-    }
-  }
-  totals(): { chg: number; dsg: number; pv: number; gridImport: number } {
-    const t = this.rec.getLifetimeTotals();
-    const v = (k: string) => (t[k] ? t[k].persistedWh + t[k].pendingWh : 0);
-    return { chg: v('fleet_battery_charge_wh'), dsg: v('fleet_battery_discharge_wh'), pv: v('fleet_pv_wh'), gridImport: v('fleet_grid_import_wh') };
-  }
-  /** A published read: every emitted total is non-decreasing. */
-  read(): { chg: number; dsg: number; pv: number; gridImport: number } {
-    const t = this.totals();
-    for (const [k, v] of Object.entries(t)) {
-      const prev = this.last[k];
-      if (prev != null) assert.ok(v >= prev - 1e-6, `${k} stepped DOWN ${prev.toFixed(1)} → ${v.toFixed(1)} Wh at ${new Date(this.clock).toISOString()}`);
-      this.last[k] = v;
-    }
-    return t;
-  }
-  /** The Cores report, capture baselines, then move a little: a held value exists per pack. */
-  establishHeld(): void {
-    this.rec.rollupLifetime();
-    this.regs = { chg: 1_010_000, dsg: 1_008_000 };
-    this.run(5);
-  }
-  goDark(sourceWatts: number[]): void {
-    this.coresOnline = false;
-    this.sourceWatts = sourceWatts;
-  }
-  rows(): string {
-    return JSON.stringify(this.db.prepare('SELECT metric_key, wh, last_integrated_ts FROM lifetime_totals ORDER BY metric_key').all());
-  }
-}
-
-const near = (a: number, b: number, tol: number, msg: string) => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a.toFixed(1)} vs ${b.toFixed(1)} (±${tol})`);
+const { Plant, cleanup } = await loadPlant('ef-energy-bridge-');
+const { BRIDGE_MAX_WINDOW_MS, BRIDGE_PV_EVIDENCE_STEPS, bridgePvSeenKey } = await import('../src/energyBridge.js');
+test.after(cleanup);
 
 /* ── the 10-15 shape ─────────────────────────────────────────────────────── */
 
@@ -210,7 +43,7 @@ test('★★★ Cores dark at night, slots discharging 3.4 kW for 4 h → batter
     const dbg = p.rec.batteryLifetimeDebug();
     near(dbg.bridge.dischargeWh, expected, expected * 0.01, 'the bridge row');
     assert.equal(dbg.bridge.markers.length, CORES.length * PACKS, 'every held pack is marked for the hand-over');
-    assert.ok(p.logs.some((l) => l.includes('metering its battery and solar at the panel slot')), 'one line per Core');
+    assert.equal(p.logs.filter((l) => l.includes('metering its battery and solar at panel')).length, CORES.length, 'one line per Core');
   } finally { p.close(); }
 });
 
@@ -220,7 +53,7 @@ test('★★★ daylight, grid 0, the Cores supplying 300 W each while PV charge
   try {
     // The Cores' measured full-charge capacity, recorded while they reported: 5 packs × 56,000 mAh.
     for (const sn of CORES) for (let k = 1; k <= 5; k++) p.sample(sn, `pack${k}_full_cap_mah`, FULL_CAP_MAH, t0 - H);
-    p.coresOnline = false;
+    p.darkAtFirstSight();
     p.frozenProjection = false; // the live case: dark since before the restart, no projection
     p.sourceWatts = [-300, -300, -300];
     p.pct = [40, 40, 40];
@@ -237,31 +70,116 @@ test('★★★ daylight, grid 0, the Cores supplying 300 W each while PV charge
     near(after.dsg - before.dsg, 0, 1, 'battery out: the 300 W the Cores supplied came from PV');
     assert.ok(after.pv - before.pv > 20_000, 'a 0 W reading from a field never seen working was not taken as PV = 0');
     const dbg = p.rec.batteryLifetimeDebug().bridge;
-    assert.deepEqual(dbg.trustedSlots, [], 'the field never read above 0 W');
+    assert.deepEqual(dbg.trustedSlots, [], 'a field reading 0 W under a rising charge is below the bound');
     assert.equal(dbg.lastRollup?.slots[0].basis, 'inferred');
+    const verdicts = p.logs.filter((l) => l.includes('the field is not trusted (the inferred basis stays)'));
+    assert.equal(verdicts.length, CORES.length, 'one verdict line per slot, with both figures');
+    assert.match(verdicts[0], /PV field read 0\.00 kWh since \S+ against the inferred lower bound [\d.]+ kWh \(one SoC step 0\.29 kWh\)/);
   } finally { p.close(); }
 });
 
-test('★★★ daylight with the panel PV field reading: it is trusted from its first sun-up reading and battery = slot net − PV', () => {
-  const p = new Plant(Date.parse('2026-10-15T11:00:00-07:00'));
+/* ── the panel's PV field: checked against the inferred lower bound ─────────── */
+
+/** Daylight, Cores dark since before the restart; each slot: PV `pvW` W, of which `outW` crosses
+ *  to the panel and the rest charges the Core (its percent rising on the nameplate basis). */
+function sunnyPlant(t0: number): InstanceType<typeof Plant> {
+  const p = new Plant(t0);
+  p.darkAtFirstSight();
+  p.frozenProjection = false;
+  p.pct = [40, 40, 40];
+  return p;
+}
+const STEP_WH = NAMEPLATE_WH / 100; // 307.2 Wh, no pack capacity recorded
+function sunny(p: InstanceType<typeof Plant>, minutes: number, slot: { outW: number; pvW: number; fieldW: number }, stored: { wh: number }): void {
+  p.sourceWatts = [-slot.outW, -slot.outW, -slot.outW];
+  p.pvW = [slot.fieldW, slot.fieldW, slot.fieldW];
+  p.run(minutes, () => {
+    stored.wh += (slot.pvW - slot.outW) / 60;
+    p.pct = CORES.map(() => 40 + Math.floor(stored.wh / STEP_WH));
+  });
+}
+
+test('★★★ a panel PV field that reads the solar the Cores take in is trusted once the inferred bound has risen enough, logged with both figures; then battery = slot net − PV', () => {
+  const p = sunnyPlant(Date.parse('2026-10-15T11:00:00-07:00'));
   try {
-    p.coresOnline = false;
-    p.frozenProjection = false;
-    p.sourceWatts = [-500, -500, -500];
-    p.pvW = [2500, 2500, 2500];
     p.panelSamples(p.clock);
     const before = p.read();
-    p.run(60);
+    const stored = { wh: 0 };
+    sunny(p, 5, { outW: 500, pvW: 2500, fieldW: 2500 }, stored);
+    assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.trustedSlots, [], 'one reading proves nothing: inferred while the check is pending');
+    assert.equal(p.rec.batteryLifetimeDebug().bridge.pvChecks[0].verdict, 'pending');
+    sunny(p, 115, { outW: 500, pvW: 2500, fieldW: 2500 }, stored);
     const after = p.read();
-    near(after.pv - before.pv, 3 * 2500, 5, 'PV = the field');
-    near(after.chg - before.chg, 3 * 2000, 5, 'battery in = PV − slot output');
-    near(after.dsg - before.dsg, 0, 1, 'battery out');
     const dbg = p.rec.batteryLifetimeDebug().bridge;
     assert.deepEqual(dbg.trustedSlots, [`${PANEL}_1`, `${PANEL}_2`, `${PANEL}_3`]);
-    assert.ok(p.logs.some((l) => l.includes('its PV field is trusted from now on')));
+    const lines = p.logs.filter((l) => l.includes('the field is trusted from now on'));
+    assert.equal(lines.length, CORES.length);
+    const m = /PV field read ([\d.]+) kWh since \S+ against the inferred lower bound ([\d.]+) kWh \(one SoC step 0\.31 kWh\)/.exec(lines[0]);
+    assert.ok(m, lines[0]);
+    assert.ok(Number(m[2]) >= BRIDGE_PV_EVIDENCE_STEPS * STEP_WH / 1000 - 0.005, `trusted only after ${BRIDGE_PV_EVIDENCE_STEPS} steps of evidence: ${m[2]}`);
+    assert.ok(Number(m[1]) >= Number(m[2]) - STEP_WH / 1000, 'the field read at least the bound less one step');
+    assert.equal(dbg.lastRollup?.slots[0].basis, 'measured');
+    // Two hours: the early windows inferred (a lower bound, one step either way), the rest the field.
+    near(after.pv - before.pv, 3 * 2500 * 2, 3 * STEP_WH + 30, 'PV');
+    near(after.chg - before.chg, 3 * 2000 * 2, 3 * STEP_WH + 30, 'battery in = PV − slot output');
+    near(after.dsg - before.dsg, 0, 1, 'battery out');
     // The power sensors follow the slots and the field.
     const f = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
     assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet], [true, 7500, 3 * 500 - 7500]);
+    // ★★ The trust is saved: after a restart the power sensors read the field at once.
+    p.restart();
+    assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.trustedSlots, [`${PANEL}_1`, `${PANEL}_2`, `${PANEL}_3`], 'trust survives the restart');
+    const g = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.deepEqual([g.ready, g.fleetPv, g.fleetBatteryNet], [true, 7500, 3 * 500 - 7500]);
+  } finally { p.close(); }
+});
+
+test('★★★ a panel PV field that reads half the solar (e.g. only the battery-charging share) is never trusted: the inferred basis stays', () => {
+  const p = sunnyPlant(Date.parse('2026-10-15T11:00:00-07:00'));
+  try {
+    p.panelSamples(p.clock);
+    const before = p.read();
+    const stored = { wh: 0 };
+    sunny(p, 120, { outW: 500, pvW: 2500, fieldW: 1250 }, stored);
+    const after = p.read();
+    const dbg = p.rec.batteryLifetimeDebug().bridge;
+    assert.deepEqual(dbg.trustedSlots, []);
+    assert.equal(dbg.lastRollup?.slots[0].basis, 'inferred');
+    assert.equal(p.logs.filter((l) => l.includes('the field is not trusted (the inferred basis stays)')).length, CORES.length);
+    // The inferred lower bound, not the half-reading field: PV within a step of the truth per slot.
+    near(after.pv - before.pv, 3 * 2500 * 2, 3 * STEP_WH + 30, 'PV');
+    const f = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet], [false, null, null], 'no instantaneous figure without a trusted field');
+  } finally { p.close(); }
+});
+
+test('★★★ a trusted field that falls below the bound (PV passing through to the house is missing from it) is revoked, logged with both figures', () => {
+  const p = sunnyPlant(Date.parse('2026-10-15T10:00:00-07:00'));
+  try {
+    // Trusted by an earlier day's check (the persisted row a previous process left).
+    for (let s = 1; s <= 3; s++) p.putLifetime(bridgePvSeenKey(PANEL, s), 2000, p.clock - 24 * H);
+    p.restart();
+    assert.equal(p.rec.batteryLifetimeDebug().bridge.trustedSlots.length, 3);
+    p.panelSamples(p.clock);
+    const stored = { wh: 0 };
+    sunny(p, 60, { outW: 500, pvW: 2500, fieldW: 2500 }, stored);
+    assert.equal(p.rec.batteryLifetimeDebug().bridge.pvChecks[0].verdict, 'consistent');
+    assert.ok(!p.logs.some((l) => l.includes('no longer trusted')));
+    // The house draws 1500 W through each Core; the field now reads only the 1000 W into the battery.
+    const before = p.read();
+    sunny(p, 60, { outW: 1500, pvW: 2500, fieldW: 1000 }, stored);
+    const after = p.read();
+    const revoked = p.logs.filter((l) => l.includes('the field is no longer trusted (back to the inferred basis)'));
+    assert.equal(revoked.length, CORES.length);
+    assert.match(revoked[0], /PV field read [\d.]+ kWh since \S+ against the inferred lower bound [\d.]+ kWh \(one SoC step 0\.31 kWh\) — below it by more than one SoC step/);
+    const dbg = p.rec.batteryLifetimeDebug().bridge;
+    assert.deepEqual(dbg.trustedSlots, []);
+    assert.ok(!p.lifetimeKeys().some((k) => k.startsWith('bridge_pvseen_')), 'the persisted trust is deleted');
+    assert.equal(dbg.lastRollup?.slots[0].basis, 'inferred');
+    // What the field missed before the revocation is bounded: about a step per slot, not the hour.
+    assert.ok(after.pv - before.pv > 3 * 2500 - 3 * 2 * STEP_WH - 60, `PV over the hour ${(after.pv - before.pv).toFixed(0)} Wh`);
+    const f = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.equal(f.ready, false, 'the power sensors no longer read the field');
   } finally { p.close(); }
 });
 
@@ -283,14 +201,18 @@ test('★★★ a night grid charge: battery in rises with the slot inflow, PV p
 
 /* ── the return ──────────────────────────────────────────────────────────── */
 
-for (const [label, jumpWh] of [['under one pack\'s capacity', 3_000], ['over one pack\'s capacity', 20_000]] as const) {
-  test(`★★★ the Cores report again with their counters ${label} ahead: the published totals do not jump, then count on`, () => {
+for (const [label, jumpWh, bms] of [
+  ['under one pack\'s capacity', 3_000, 'the BMS counted 2.00 kWh in / 6.00 kWh out while dark'],
+  ['over one pack\'s capacity', 20_000, 'the BMS counted 13.33 kWh in / 40.00 kWh out while dark'],
+] as const) {
+  test(`★★★ the Cores report again with their counters ${label} ahead: the published totals do not jump, then count on; both return lines state the figures`, () => {
     const p = new Plant(Date.parse('2026-10-15T00:00:00-07:00'));
     try {
       p.establishHeld();
       p.goDark(DISCHARGE_W);
       p.run(120);
       const beforeReturn = p.read();
+      const bridgedCores = p.rec.batteryLifetimeDebug().bridge.cores;
       // Back: each pack's discharge register is `jumpWh` ahead, charge a third of it.
       const dMah = jumpWh / PACK_MAH_TO_WH;
       p.coresOnline = true;
@@ -308,13 +230,73 @@ for (const [label, jumpWh] of [['under one pack\'s capacity', 3_000], ['over one
       near(resumed.dsg - settled.dsg, CORES.length * PACKS * 500 * PACK_MAH_TO_WH, 0.01, 'live counting resumed');
       const dbg = p.rec.batteryLifetimeDebug().bridge;
       assert.deepEqual(dbg.markers, [], 'every marker cleared');
-      assert.deepEqual(dbg.cores, {}, 'the per-Core accumulators are cleared once handed over');
+      assert.deepEqual(dbg.cores, {}, 'the per-Core accumulators are cleared once handed over and logged');
       const lines = p.logs.filter((l) => l.includes('energy-bridge hand-over'));
       assert.equal(lines.length, CORES.length, 'one hand-over line per Core');
-      assert.match(lines[0], /re-baselined on return — the BMS counted [\d.]+ kWh in \/ [\d.]+ kWh out while dark \(absorbed, not published\)/);
+      for (const sn of CORES) {
+        const b = bridgedCores[sn];
+        assert.ok(b && b.dischargeWh > 2_000, `${sn} was bridged: ${JSON.stringify(b)}`);
+        const panelFig = `${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out`;
+        const hand = lines.find((l) => l.includes(`sn=${sn}:`));
+        assert.ok(hand, sn);
+        // The figures the statistics repair reads: what the BMS counted while dark, and what the bridge published.
+        assert.ok(hand.includes(`re-baselined on return — ${bms} (absorbed, not published)`), hand);
+        assert.ok(hand.includes(`the panel bridge counted ${panelFig} (AC basis, already published)`), hand);
+        // ★★ The "no longer bridged" line follows the hand-over (a read ran it first) and still has them.
+        const gone = p.logs.find((l) => l.includes(`Core ${sn} is no longer bridged`));
+        assert.ok(gone, sn);
+        assert.ok(gone.endsWith(`— bridged ${panelFig} while dark`), gone);
+      }
     } finally { p.close(); }
   });
 }
+
+test('★★ the first pass after the return is a rollup: the "no longer bridged" line comes first, with the same figures as the hand-over line', () => {
+  const p = new Plant(Date.parse('2026-10-15T00:00:00-07:00'));
+  try {
+    p.establishHeld();
+    p.goDark(DISCHARGE_W);
+    p.run(60);
+    const before = p.read();
+    p.coresOnline = true;
+    p.regs = { chg: p.regs!.chg + 9_000, dsg: p.regs!.dsg + 27_000 };
+    p.clock += MIN;
+    p.rec.rollupLifetime();
+    near(p.read().dsg, before.dsg, 1, 'absorbed');
+    for (const sn of CORES) {
+      const gone = p.logs.findIndex((l) => l.includes(`Core ${sn} is no longer bridged`));
+      const hand = p.logs.findIndex((l) => l.includes(`hand-over sn=${sn}:`));
+      assert.ok(gone >= 0 && hand > gone, `${sn}: ${gone} then ${hand}`);
+      const fig = /bridged ([\d.]+ kWh in \/ [\d.]+ kWh out) while dark/.exec(p.logs[gone])![1];
+      assert.ok(p.logs[hand].includes(`the panel bridge counted ${fig}`), p.logs[hand]);
+      assert.ok(!fig.startsWith('0.00 kWh in / 0.00'), fig);
+    }
+    p.run(5);
+    assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.cores, {}, 'cleared at the next rollup');
+  } finally { p.close(); }
+});
+
+test('★★★ after the hand-over and a restart no marker row is left: the next movement is counted, not absorbed again', () => {
+  const p = new Plant(Date.parse('2026-10-15T00:00:00-07:00'));
+  try {
+    p.establishHeld();
+    p.goDark(DISCHARGE_W);
+    p.run(30);
+    p.coresOnline = true;
+    p.regs = { chg: p.regs!.chg + 9_000, dsg: p.regs!.dsg + 27_000 };
+    p.read();
+    p.run(10);
+    assert.equal(p.logs.filter((l) => l.includes('energy-bridge hand-over')).length, CORES.length);
+    p.restart();
+    assert.deepEqual(p.lifetimeKeys().filter((k) => k.startsWith('bridge_dark_')), [], 'the marker rows went with the markers');
+    assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.markers, []);
+    const before = p.read();
+    p.regs = { chg: p.regs.chg, dsg: p.regs.dsg + 500 };
+    p.run(5);
+    near(p.read().dsg - before.dsg, CORES.length * PACKS * 500 * PACK_MAH_TO_WH, 0.01, 'counted');
+    assert.equal(p.logs.filter((l) => l.includes('energy-bridge hand-over')).length, CORES.length, 'no second hand-over');
+  } finally { p.close(); }
+});
 
 test('★★★ an online flip before the first fresh quota does not spend the marker: the jump is still absorbed when it lands', () => {
   const p = new Plant(Date.parse('2026-10-15T00:00:00-07:00'));
@@ -331,6 +313,8 @@ test('★★★ an online flip before the first fresh quota does not spend the m
     near(after.dsg, before.dsg, 1, 'absorbed');
   } finally { p.close(); }
 });
+
+/* ── restarts ───────────────────────────────────────────────────────────── */
 
 test('★★★ a restart mid-outage: the bridged totals, the markers and the watermark persist; nothing steps down; the return is absorbed', () => {
   const p = new Plant(Date.parse('2026-10-15T00:00:00-07:00'));
@@ -369,6 +353,28 @@ test('★★★ the Cores come back while the add-on is down: the persisted mark
     p.regs = { chg: p.regs!.chg + 9_000, dsg: p.regs!.dsg + 27_000 };
     p.open();
     near(p.read().dsg, beforeRestart.dsg, 60, 'no jump at the first read after boot (no bridge rollup has run yet)');
+  } finally { p.close(); }
+});
+
+test('★★★ a restart across dusk: the first window after boot spans at most 15 min, so it is judged on the part the samples cover (night)', () => {
+  const p = new Plant(Date.parse('2026-10-15T16:00:00-07:00'));
+  try {
+    p.darkAtFirstSight();
+    p.frozenProjection = false;
+    p.sourceWatts = [-1000, -1000, -1000];
+    p.run(60);
+    // Stopped at 17:00 (sun up), started at 19:00 (dark).
+    p.rec.close();
+    p.db.close();
+    p.clock += 2 * H;
+    p.open();
+    const before = p.read();
+    p.run(5);
+    const r = p.rec.batteryLifetimeDebug().bridge.lastRollup!;
+    assert.ok(r.untilMs - r.sinceMs <= BRIDGE_MAX_WINDOW_MS, `window ${(r.untilMs - r.sinceMs) / MIN} min`);
+    assert.equal(r.slots[0].basis, 'night');
+    // Samples from 19:01: four minutes of 3 kW out of the slots.
+    near(p.read().dsg - before.dsg, 3000 * 4 / 60, 5, 'battery out on the night basis');
   } finally { p.close(); }
 });
 
@@ -439,7 +445,7 @@ test('★★ the power sensors at night follow the slots while bridged; the read
   const { publishReadiness } = await import('../src/publishReadiness.js');
   const p = new Plant(Date.parse('2026-10-16T20:15:00-07:00'));
   try {
-    p.coresOnline = false;
+    p.darkAtFirstSight();
     p.frozenProjection = false;
     p.sourceWatts = [-627, -623, -625];
     const devices = p.store.get().devices;
