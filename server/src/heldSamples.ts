@@ -27,7 +27,8 @@
  *     in which NO metric of a device changed, restated at least three times over at least eight
  *     metrics, is moved — unchanged, in one transaction per slice — from `samples` to
  *     `held_samples`. Nothing is deleted: `restoreHeldSamples` moves a span back, and a restored
- *     span is never excluded again. Every move is logged.
+ *     span is never excluded again, nor (review 4) the rest of its hold while the device goes on
+ *     restating the same readings. Every move is logged.
  *
  * WHAT IT DOES NOT DO. The alarms read the live store, never `samples`; nothing here touches the
  * store. The offline, stale and blind alarms and the SoC ladder are unchanged by construction.
@@ -133,7 +134,8 @@ export interface HeldSpan {
   /** Rows moved to held_samples (0 for a gate span). */
   rows: number;
   detectedAtMs: number;
-  /** Set when the span was moved back by restoreHeldSamples; a restored span is not excluded. */
+  /** Set when the span was moved back by restoreHeldSamples; a restored span is not excluded, and
+   *  (v1.188.1 review 4) its end follows the rest of its hold, which is not excluded either. */
   restoredAtMs: number | null;
 }
 
@@ -286,6 +288,9 @@ const newStretchAcc = (): StretchAcc => ({
  * too). The one exception is a hold whose observed hour takes longer than the rescan overlap to
  * build up (restatements more than a bridge apart add nothing to it): the hourly scans leave its
  * first restated rows in samples as its anchor, and only a scan that reads it whole moves them.
+ * v1.188.1 (review 4) — or ALL of it: when its restatements stay that far apart throughout, no
+ * hourly re-read holds an observed hour, and only the first scan (it reads the whole history)
+ * moves any of it.
  *
  * `prev` is each metric's value before the first fed row and `anchorMs` the ts of the newest such
  * row (the last fresh instant before the scan, when the scan starts mid-hold); both empty/null on
@@ -502,6 +507,11 @@ export const HELD_SPANS_SQL = {
   /** A device's frozen spans, read ONCE per device per scan (planScan). v1.188.1 (review 2) — not
    *  the restored ones: their rows are back in samples, and a scan reads them like any other. */
   frozenOf: "SELECT start_ts, end_ts FROM held_spans WHERE sn = ? AND reason = 'frozen' AND restored_at_ms IS NULL",
+  /** v1.188.1 (review 4) — a device's restored spans, read once per device per scan (planScan). */
+  restoredOf: "SELECT start_ts, end_ts FROM held_spans WHERE sn = ? AND reason = 'frozen' AND restored_at_ms IS NOT NULL",
+  /** v1.188.1 (review 4) — a restored span's end follows the hold it restored while the device goes
+   *  on restating the same readings (scanStep): its rows were never moved, and are not. */
+  extendRestored: "UPDATE held_spans SET end_ts = ? WHERE sn = ? AND start_ts = ? AND reason = 'frozen' AND restored_at_ms IS NOT NULL AND end_ts < ?",
 } as const;
 
 export interface HeldScanSummary {
@@ -529,8 +539,13 @@ export interface HeldSamplesOptions {
    *  `samples`, and spanStartMs is the stretch's anchor, the newest row of `sn` kept there before
    *  them (FrozenStretch.startMs): its last fresh reading, or (v1.188.1 review 2) a restated row
    *  left there. v1.188.1 (review 3) — not always the last fresh reading, so a caller states it as
-   *  the newest row kept, not as the moment the device went quiet. */
-  onMoved?: (sn: string, startMs: number, endMs: number) => void;
+   *  the newest row kept, not as the moment the device went quiet.
+   *
+   *  v1.188.1 (review 4) — `heldThroughMs` (≥ endMs) is the stretch's last restated row as the scan
+   *  read it: every row of `sn` in (startMs, heldThroughMs] restates the same readings, those after
+   *  endMs not moved yet (younger than HELD_MOVE_MIN_AGE_MS, or in a later slice). A device whose
+   *  replayed body is still being written has its newest row there. */
+  onMoved?: (sn: string, startMs: number, endMs: number, heldThroughMs: number) => void;
   /** v1.188.1 (review 2) — called after a span was restored: the rows of `sn` in (startMs, endMs]
    *  are back in `samples`, so whatever onMoved re-dated from them goes back too. */
   onRestored?: (sn: string, startMs: number, endMs: number) => void;
@@ -545,6 +560,9 @@ interface ScanJob {
   cursorMs: number;
   /** v1.188.1 (dry run) — the device's frozen spans as the scan began: start_ts → end_ts. */
   frozenEnds: ReadonlyMap<number, number>;
+  /** v1.188.1 (review 4) — the device's restored spans as the scan began (an end is advanced in
+   *  place when a stretch continues one: scanStep). */
+  restored: Array<{ startMs: number; endMs: number }>;
   scanner: ReturnType<typeof createFrozenScanner>;
 }
 
@@ -564,6 +582,11 @@ interface MoveJob {
   extension: boolean;
 }
 
+/** v1.188.1 (review 4) — is `startMs` (a stretch's anchor) one of the rows of a restored span,
+ *  its start included? No metric of the device changed in it, so a stretch from there continues the
+ *  hold the restore gave back. PURE. */
+const anchoredIn = (r: { startMs: number; endMs: number }, startMs: number): boolean => startMs >= r.startMs && startMs <= r.endMs;
+
 export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   const now = o.now ?? Date.now;
   db.exec(HELD_SCHEMA_SQL);
@@ -582,7 +605,8 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     `SELECT sn, start_ts, end_ts, reason, rows, detected_at_ms, restored_at_ms FROM held_spans
       WHERE end_ts >= ? AND start_ts <= ? AND restored_at_ms IS NULL ORDER BY start_ts ASC, sn ASC`,
   );
-  const restoredOfStmt = db.prepare('SELECT start_ts, end_ts FROM held_spans WHERE sn = ? AND restored_at_ms IS NOT NULL');
+  const restoredOfStmt = db.prepare(HELD_SPANS_SQL.restoredOf);
+  const extendRestoredStmt = db.prepare(HELD_SPANS_SQL.extendRestored);
   const markRestoredStmt = db.prepare('UPDATE held_spans SET restored_at_ms = ? WHERE sn = ? AND start_ts = ? AND reason = ?');
   const frozenOfStmt = db.prepare(HELD_SPANS_SQL.frozenOf);
   const scanStateStmt = db.prepare('SELECT scanned_to_ts, full_scan_at_ms FROM held_scan WHERE id = 1');
@@ -670,6 +694,9 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   /** v1.188.1 (review) — the start of the earliest span a move slice of this scan failed on
    *  (+Infinity when none): the watermark is not saved past it, so the next scan re-reads it. */
   let failedFromMs = Number.POSITIVE_INFINITY;
+  /** v1.188.1 (review 4) — the restored spans whose continuation this process has logged
+   *  (`sn|start`): an hourly scan re-reads a running hold every hour, and one line says it. */
+  const restoredNoted = new Set<string>();
 
   /** v1.188.1 (dry run) — a device's frozen spans, start_ts → end_ts: one read per device per scan. */
   function readFrozenEnds(sn: string): Map<number, number> {
@@ -732,12 +759,17 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       // row is within one bridge of the span's end — left the tail of a running hold in samples
       // after any hole longer than two heartbeats.
       const frozenEnds = readFrozenEnds(sn);
+      // v1.188.1 (review 4) — and its restored spans: a stretch from an anchor inside one continues
+      // the hold the restore gave back, whether it qualifies in this scan's window or not, and is
+      // kept so the span's end follows it (scanStep).
+      const restored = (restoredOfStmt.all(sn) as Array<{ start_ts: number; end_ts: number }>)
+        .map((r) => ({ startMs: Number(r.start_ts), endMs: Number(r.end_ts) }));
       const scanner = createFrozenScanner(prev, anchor, {
         ...FROZEN_DEFAULTS,
-        keepUnqualified: (startMs) => frozenEnds.has(startMs),
+        keepUnqualified: (startMs) => frozenEnds.has(startMs) || restored.some((r) => anchoredIn(r, startMs)),
         movedThroughMs: (anchorMs) => frozenEnds.get(anchorMs),
       });
-      scanQueue.push({ sn, metrics, fromMs, toMs: atMs, cursorMs: fromMs, frozenEnds, scanner });
+      scanQueue.push({ sn, metrics, fromMs, toMs: atMs, cursorMs: fromMs, frozenEnds, restored, scanner });
     }
   }
 
@@ -763,9 +795,6 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     const stretches = job.scanner.finish();
     scanCandidates += stretches.length;
     if (stretches.length === 0) return true;
-    // (Restored spans are read once per device, only when it has a stretch.)
-    const restored = (restoredOfStmt.all(job.sn) as Array<{ start_ts: number; end_ts: number }>)
-      .map((r) => ({ startMs: Number(r.start_ts), endMs: Number(r.end_ts) }));
     const moveUntil = scanToMs - HELD_MOVE_MIN_AGE_MS;
     // v1.188.1 (review 2) — one stretch per last fresh reading per scan: a hole inside a hold no
     // longer splits it (createFrozenScanner), so nothing is chained here any more.
@@ -774,8 +803,29 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       // alone may restate each metric only once or twice (the rows before it are gone): it is
       // still the same hold, from the same last fresh reading.
       const priorEnd = job.frozenEnds.get(s.startMs);
-      if (restored.some((r) => overlapMs(r.startMs, r.endMs, s.startMs, s.endMs) > 0)) {
-        o.log(`recorder: ${job.sn} held stretch ${new Date(s.startMs).toISOString()} → ${new Date(s.endMs).toISOString()} was restored earlier — left in samples`);
+      // v1.188.1 (review 4) — a restored span gives back the HOLD, not only the rows an earlier scan
+      // had moved: a stretch that overlaps it, or whose anchor is one of its rows (no metric changed
+      // since its start), is left in samples, and the span's end follows the stretch's last row.
+      // Matched on overlap alone, a restore made while the device still restated its readings held
+      // only until the 3 h re-read started after the restored end: from there each hourly scan's
+      // anchor was a restated row of the same hold, and the rest of the hold was moved as a new span
+      // (a second HELD SAMPLES line, the ledger refusing those hours again), while a boot scan after
+      // a stop, re-reading from before it, left the same rows.
+      const r = job.restored.find((x) => overlapMs(x.startMs, x.endMs, s.startMs, s.endMs) > 0 || anchoredIn(x, s.startMs));
+      if (r) {
+        if (s.endMs > r.endMs) {
+          try {
+            extendRestoredStmt.run(s.endMs, job.sn, r.startMs, s.endMs);
+            r.endMs = s.endMs;
+          } catch (e: any) {
+            o.log(`recorder: restored span of ${job.sn} from ${new Date(r.startMs).toISOString()} not extended (${e?.message ?? e})`);
+          }
+        }
+        const key = `${job.sn}|${r.startMs}`;
+        if (!restoredNoted.has(key)) {
+          restoredNoted.add(key);
+          o.log(`recorder: ${job.sn} held stretch ${new Date(s.startMs).toISOString()} → ${new Date(s.endMs).toISOString()} is part of the span from ${new Date(r.startMs).toISOString()} that was restored earlier — left in samples (the span now runs to ${new Date(r.endMs).toISOString()})`);
+        }
         continue;
       }
       const end = Math.min(s.endMs, moveUntil);
@@ -835,7 +885,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       return true;
     }
     scanRows += moved;
-    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs);
+    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, Math.max(job.toMs, job.stretch.endMs));
     const lastSlice = !moveQueue.some((m) => m.sn === job.sn && m.spanStartMs === job.spanStartMs);
     if (job.announce) {
       const s = job.stretch;
@@ -917,7 +967,8 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   }
 
   /** Reverse one exclusion: the span's rows go back to samples, unchanged, and the span is marked
-   *  restored so no later scan moves it again. Returns the rows restored. */
+   *  restored so no later scan moves it again (review 4: nor the rest of the same hold, scanStep).
+   *  Returns the rows restored. */
   function restore(sn: string, startMs: number): number {
     const span = (db.prepare('SELECT end_ts FROM held_spans WHERE sn = ? AND start_ts = ? AND reason = ?').get(sn, startMs, 'frozen') as { end_ts: number } | undefined);
     if (!span) return 0;
@@ -935,7 +986,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
       throw e;
     }
-    o.log(`recorder: restored ${n} held sample(s) of ${sn} (${new Date(startMs).toISOString()} → ${new Date(Number(span.end_ts)).toISOString()}) to samples; this span will not be excluded again`);
+    o.log(`recorder: restored ${n} held sample(s) of ${sn} (${new Date(startMs).toISOString()} → ${new Date(Number(span.end_ts)).toISOString()}) to samples; neither this span nor the rest of its hold, while the device goes on restating the same readings, will be excluded again`);
     o.onRestored?.(sn, startMs, Number(span.end_ts));
     return n;
   }

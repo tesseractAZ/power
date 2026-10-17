@@ -144,6 +144,34 @@
  *   A-xxii  heldRowsWithin finds a held row everywhere
  *   A-xxiii the documented SQL restore drops the samples-generation step
  *
+ * Review round 4 (a restore gives back the hold; a replayed Core's gap clock; a record inside its window):
+ *   B-i     a restored span is matched on overlap alone (the rest of a running hold is moved again)
+ *   B-ii    the restored span's end does not follow its hold
+ *   B-iii   the scanner does not keep a stretch anchored in a restored span (a sparse continuation)
+ *   B-iv    the continuation of a restored span is logged by every scan
+ *   B-v     a seed inside a device record's window is matched only on a re-dated record's filed start
+ *   B-vi    the record matched inside its window takes the seed's start
+ *   B-vii   the gap line states the seed's start, not the record's window
+ *   B-viii  the move sets a clock back only within the moved rows (a running replay is never filed)
+ *   B-ix    the scan does not say where the stretch's restatements end
+ *   B-x     a restated write of a held Core resets its clock (re-arms the sweep)
+ *   B-xi    a write after more than an hour without one stays held (a return)
+ *   B-xii   a changed write does not end the hold
+ *   B-xiii  a restore does not end the hold
+ *   B-xiv   a restore of a running replay leaves the clock at the span's start
+ *   B-xv    a moved span's tail is re-anchored at its own last row across a silence (survivor S2-10)
+ *   B-xvi   a return piece that never qualified carries across a fresh change (survivor S2-3)
+ *   B-xvii  a joined return piece's values are dropped (survivor HS-3)
+ *   B-xviii a flow held at 0 W is stated as integrated energy (survivor R3-4)
+ *   B-xix   the load side ignores whether a held row lay inside the span (survivor NL-1)
+ *   B-xx    the load side is never described as integrated over hours with no readings (survivor NL-2)
+ *   B-xxi   the repair hands back the 24 h span, not the span as captured (survivor NL-5)
+ *   B-xxii  a device listed with no projection is named as read with nothing measurable (survivor RC-5)
+ *   B-xxiii the re-date has no lower bound (an older record is found first: survivor RC-8)
+ *   B-xxiv  a record re-dated twice takes its second start as its id (survivor RC-4)
+ *   B-xxv   a restore sets back a clock the device has written since (survivor RC-2)
+ *   B-xxvi  a record that begins as another ends is dark at the same time (survivor D2-1)
+ *
  *   node scripts/mutate-v1188-1.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -173,6 +201,7 @@ const SUBSET = [
   'test/heldSamplesHoles.test.ts',
   'test/heldGapRecords.test.ts',
   'test/heldSamplesAnchors.test.ts',
+  'test/heldSamplesReview4.test.ts',
 ];
 
 const MUTANTS = [
@@ -270,8 +299,8 @@ const MUTANTS = [
   {
     id: 'S-iii. ★★ the gap clock is not moved back after a move',
     file: REC,
-    find: '      if (clock != null && clock > startMs && clock <= endMs) {',
-    to: '      if (clock != null && clock > startMs && clock <= endMs && Date.now() < 0) { /* MUTANT */',
+    find: '      if (clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs)) {',
+    to: '      if (clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs) && Date.now() < 0) { /* MUTANT */',
     why: 'A Core still held at the deploy is measured from a held row that no longer exists: its gap is filed 6 h late, from the wrong start, and a later boot files a second record.',
   },
   {
@@ -305,7 +334,7 @@ const MUTANTS = [
   {
     id: 'F-v. ★★ a known span\'s tail must qualify on its own',
     file: HS,
-    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs),',
+    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs) || restored.some((r) => anchoredIn(r, startMs)),',
     to: '        keepUnqualified: () => false, /* MUTANT */',
     why: 'The newest 15 min of a hold, left by the first scan after the deploy, restate each metric only once or twice: they stay in samples, and the held Core\'s gap clock stays on a held row.',
   },
@@ -340,8 +369,8 @@ const MUTANTS = [
   {
     id: 'M-iv. ★★ a restored span is moved again',
     file: HS,
-    find: '      if (restored.some((r) => overlapMs(r.startMs, r.endMs, s.startMs, s.endMs) > 0)) {',
-    to: '      if (false) { /* MUTANT */',
+    find: '      const r = job.restored.find((x) => overlapMs(x.startMs, x.endMs, s.startMs, s.endMs) > 0 || anchoredIn(x, s.startMs));',
+    to: '      const r = undefined as { startMs: number; endMs: number } | undefined; /* MUTANT */',
     why: 'A restore is undone by the next hourly scan: the exclusion is not reversible.',
   },
   {
@@ -650,14 +679,14 @@ const MUTANTS = [
   {
     id: 'Z-i. ★★ the held spans are read once per stretch again',
     file: HS,
-    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs),',
-    to: '        keepUnqualified: (startMs) => readFrozenEnds(sn).has(startMs), /* MUTANT */',
+    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs) || restored.some((r) => anchoredIn(r, startMs)),',
+    to: '        keepUnqualified: (startMs) => readFrozenEnds(sn).has(startMs) || restored.some((r) => anchoredIn(r, startMs)), /* MUTANT */',
     why: 'Hundreds of thousands of lookups per device in one step of the alarm thread (1.6–5.4 s per Core on the Pi).',
   },
   {
     id: 'Z-ii. ★★ the scanner keeps every non-qualifying stretch',
     file: HS,
-    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs),',
+    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs) || restored.some((r) => anchoredIn(r, startMs)),',
     to: '        keepUnqualified: () => true, /* MUTANT */',
     why: 'Every stretch of a live device is kept until it finishes (+190–360 MB) — and moved.',
   },
@@ -854,7 +883,7 @@ const MUTANTS = [
   {
     id: 'Q-ii. ★★ a boot after a restore by SQL does not match the start the record was filed with',
     file: REC,
-    find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.alertStartMs === startMs)',
+    find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs < startMs && startMs <= g.endMs)',
     to: '        /* MUTANT */',
     why: 'The documented SQL recipe leads to the same second record.',
   },
@@ -939,8 +968,8 @@ const MUTANTS = [
   {
     id: 'A-iii. ★★★ the move sets back only a seeded gap clock',
     file: REC,
-    find: '      if (clock != null && clock > startMs && clock <= endMs) {',
-    to: '      if (seededNotYetWritten.has(sn) && clock != null && clock > startMs && clock <= endMs) { /* MUTANT */',
+    find: '      if (clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs)) {',
+    to: '      if (seededNotYetWritten.has(sn) && clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs)) { /* MUTANT */',
     why: 'A Core whose replayed body was written in this process is filed 6 h after its last held row, a hold late, with a start nothing measured.',
   },
   {
@@ -953,15 +982,15 @@ const MUTANTS = [
   {
     id: 'A-v. ★ a restore of any span forgets the clock the move set back',
     file: REC,
-    find: '        clockBeforeMove.delete(sn);\n      }\n      undateDeviceGap(sn, startMs, endMs);',
-    to: '      }\n      clockBeforeMove.delete(sn); /* MUTANT */\n      undateDeviceGap(sn, startMs, endMs);',
+    find: '        clockBeforeMove.delete(sn);\n      }\n      if (replayed) heldReplayFrom.delete(sn);',
+    to: '      }\n      clockBeforeMove.delete(sn); /* MUTANT */\n      if (replayed) heldReplayFrom.delete(sn);',
     why: 'Restoring an older span first loses the current span\'s clock: the next sweep re-dates the restored record again.',
   },
   {
     id: 'A-vi. ★ the move re-dates a record only when it set a clock back',
     file: REC,
-    find: '        clockBeforeMove.set(sn, clock);\n      }\n      redateDeviceGap(sn, startMs, endMs);',
-    to: '        clockBeforeMove.set(sn, clock);\n        redateDeviceGap(sn, startMs, endMs); /* MUTANT */\n      }',
+    find: '        heldReplayFrom.set(sn, startMs);\n      }\n      redateDeviceGap(sn, startMs, endMs);',
+    to: '        heldReplayFrom.set(sn, startMs);\n        redateDeviceGap(sn, startMs, endMs); /* MUTANT */\n      }',
     why: 'A device back fresh before the first scan keeps its record\'s held-row start for good (the next boot\'s seed is newer).',
   },
   {
@@ -1082,6 +1111,189 @@ const MUTANTS = [
     find: ', and advance the samples\ngeneration with `UPDATE held_generation SET gen = gen + 1 WHERE id = 1`. Without that last step the\nanalytics worker\'s closed-day memos and report caches (above) keep serving the days without the\nrestored rows until the next restart: the generation is the only signal that `samples` changed\nother than by appending.',
     to: '. <!-- MUTANT -->',
     why: 'A restore by SQL leaves the worker serving the days without the restored rows until the next restart.',
+  },
+  // ── review round 4 ──
+  {
+    id: 'B-i. ★★★ a restored span is matched on overlap alone',
+    file: HS,
+    find: '      const r = job.restored.find((x) => overlapMs(x.startMs, x.endMs, s.startMs, s.endMs) > 0 || anchoredIn(x, s.startMs));',
+    to: '      const r = job.restored.find((x) => overlapMs(x.startMs, x.endMs, s.startMs, s.endMs) > 0); /* MUTANT */',
+    why: 'A restore made while the device still restates its readings holds for about four hours: then the rest of the hold is moved as a new span, a second HELD SAMPLES line, and the ledger refuses those hours again.',
+  },
+  {
+    id: 'B-ii. ★★ the restored span\'s end does not follow its hold',
+    file: HS,
+    find: '            extendRestoredStmt.run(s.endMs, job.sn, r.startMs, s.endMs);\n            r.endMs = s.endMs;',
+    to: '            /* MUTANT */',
+    why: 'Once the 3 h re-read starts after the restored end, the scan\'s anchor is a restated row outside it: the same as matching on overlap alone.',
+  },
+  {
+    id: 'B-iii. ★★ the scanner does not keep a stretch anchored in a restored span',
+    file: HS,
+    find: '        keepUnqualified: (startMs) => frozenEnds.has(startMs) || restored.some((r) => anchoredIn(r, startMs)),',
+    to: '        keepUnqualified: (startMs) => frozenEnds.has(startMs), /* MUTANT */',
+    why: 'A sparse continuation that no hourly re-read qualifies never moves the restored end: a boot scan after a stop, which reads more of it, moves it as a new span.',
+  },
+  {
+    id: 'B-iv. the continuation of a restored span is logged by every scan',
+    file: HS,
+    find: '        if (!restoredNoted.has(key)) {',
+    to: '        if (true) { /* MUTANT */',
+    why: 'One line an hour for as long as a restored hold runs, in the log ring.',
+  },
+  {
+    id: 'B-v. ★★★ a seed inside a device record\'s window is matched only on the start a re-dated record was filed with',
+    file: REC,
+    find: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs < startMs && startMs <= g.endMs)',
+    to: '        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.alertStartMs === startMs) /* MUTANT */',
+    why: 'After a restore of the span a record was filed at, the next boot files a second record with a new id: a second pushed warning for the same darkness.',
+  },
+  {
+    id: 'B-vi. ★★ the record matched inside its window takes the seed\'s start',
+    file: REC,
+    find: '      if (opts?.sn && startMs > prior.startMs && prior.alertStartMs !== startMs) keptFrom = startMs;',
+    to: '      if (opts?.sn && startMs > prior.startMs && prior.alertStartMs !== startMs) { keptFrom = startMs; prior.startMs = startMs; } /* MUTANT */',
+    why: 'The warning\'s time and its id move to the restored row: pushed again.',
+  },
+  {
+    id: 'B-vii. the gap line states the seed\'s start, not the record\'s window',
+    file: REC,
+    find: '    const range = `${new Date(gap.startMs).toISOString()} → ${new Date(gap.endMs).toISOString()}`;',
+    to: '    const range = `${new Date(startMs).toISOString()} → ${new Date(endMs).toISOString()}`; /* MUTANT */',
+    why: 'The DEVICE TELEMETRY GAP line gives a start the record does not have.',
+  },
+  {
+    id: 'B-viii. ★★★ the move sets a clock back only within the moved rows',
+    file: REC,
+    find: '      if (clock != null && clock > startMs && clock <= Math.max(endMs, heldThroughMs)) {',
+    to: '      if (clock != null && clock > startMs && clock <= endMs) { /* MUTANT */',
+    why: 'A replay still being written has its clock past every moved range (rows younger than 15 min wait): no warning while it lasts, none if it ends with a fresh reading.',
+  },
+  {
+    id: 'B-ix. ★★ the scan does not say where the stretch\'s restatements end',
+    file: HS,
+    find: '    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, Math.max(job.toMs, job.stretch.endMs));',
+    to: '    if (moved > 0) o.onMoved?.(job.sn, job.spanStartMs, job.toMs, job.toMs); /* MUTANT */',
+    why: 'The same, from the store.',
+  },
+  {
+    id: 'B-x. ★★★ a restated write of a held Core resets its clock',
+    file: REC,
+    find: '        if (heldReplayFrom.has(s.sn) && prevWrite != null && prevWrite.value === s.value && now - prevWrite.ts <= HELD_RETURN_GAP_MS) {',
+    to: '        if (false) { /* MUTANT */',
+    why: 'Each replayed write re-arms the sweep and resets the clock: the replay is never filed while it runs.',
+  },
+  {
+    id: 'B-xi. ★★ a write after more than an hour without one stays held',
+    file: REC,
+    find: '        if (heldReplayFrom.has(s.sn) && prevWrite != null && prevWrite.value === s.value && now - prevWrite.ts <= HELD_RETURN_GAP_MS) {',
+    to: '        if (heldReplayFrom.has(s.sn) && prevWrite != null && prevWrite.value === s.value) { /* MUTANT */',
+    why: 'A Core back after a silence with its last readings (a return the scan keeps) is still counted dark from the hold\'s start: a gap filed while it reports.',
+  },
+  {
+    id: 'B-xii. ★★ a changed write does not end the hold',
+    file: REC,
+    find: '        heldReplayFrom.delete(s.sn);\n        // v1.150.0 — per-SN clock',
+    to: '        // MUTANT\n        // v1.150.0 — per-SN clock',
+    why: 'After a fresh reading every steady heartbeat leaves the clock at it: the next gap is filed early, from the change.',
+  },
+  {
+    id: 'B-xiii. ★★ a restore does not end the hold',
+    file: REC,
+    find: '      if (replayed) heldReplayFrom.delete(sn);',
+    to: '      /* MUTANT */',
+    why: 'A replay whose span was restored is still held: a gap is filed while its readings are back in samples.',
+  },
+  {
+    id: 'B-xiv. ★ a restore of a running replay leaves the clock at the span\'s start',
+    file: REC,
+    find: '      if (before != null && before > startMs && (before <= endMs || replayed)) {',
+    to: '      if (before != null && before > startMs && before <= endMs) { /* MUTANT */',
+    why: 'Its last restated write lies past the restored end: a silence after the restore is measured from the span\'s start, hours early.',
+  },
+  {
+    id: 'B-xv. ★★ a moved span\'s tail is re-anchored at its own last row across a silence',
+    file: HS,
+    find: '            } else if (cur.heldRows > 0 && !qualifies(cur) && !(anchor != null && keep(anchor, cur.firstHeldTs))) {',
+    to: '            } else if (cur.heldRows > 0 && !qualifies(cur)) { /* MUTANT */',
+    why: 'A replay after the silence becomes a second span from a moved row: onMoved sets the gap clock to a row not in samples, and the warning comes a hold late.',
+  },
+  {
+    id: 'B-xvi. ★★ a return piece that never qualified carries across a fresh change',
+    file: HS,
+    find: '    ret = null; // a return piece that never qualified: return readings, left in samples',
+    to: '    /* MUTANT */',
+    why: 'Quiet rows of a live device after a change add to the return piece\'s observed time and are moved out of samples.',
+  },
+  {
+    id: 'B-xvii. ★ a joined return piece\'s values are dropped',
+    file: HS,
+    find: '            for (const [m, v] of ret.values) cur.values.set(m, v);',
+    to: '            /* MUTANT */',
+    why: 'The HELD SAMPLES line of a replay after an outage gives no held-flow estimate.',
+  },
+  {
+    id: 'B-xviii. a flow held at 0 W is stated as integrated energy',
+    file: HS,
+    find: '    const flows = [...job.stretch.heldValues].filter(([m, v]) => LIFETIME_FLOW_METRIC.test(m) && v > 0);',
+    to: '    const flows = [...job.stretch.heldValues].filter(([m]) => LIFETIME_FLOW_METRIC.test(m)); /* MUTANT */',
+    why: '"0.0 kWh of pv_total" in the HELD SAMPLES line.',
+  },
+  {
+    id: 'B-xix. ★ the load side ignores whether a held row lay inside the span',
+    file: NLS,
+    find: "  if (v.load.length > 0 && captured.actual_load_kwh != null && heldRows.load !== false) out.push('load');",
+    to: "  if (v.load.length > 0 && captured.actual_load_kwh != null) out.push('load'); /* MUTANT */",
+    why: 'A load actual captured over only a held panel span\'s silent hours is said to be integrated from held readings, and over hours with none, in one note.',
+  },
+  {
+    id: 'B-xx. ★ the load side is never described as integrated over hours with no readings',
+    file: NLS,
+    find: "  if (v.load.length > 0 && captured.actual_load_kwh != null && heldRows.load === false) across.push('load');",
+    to: '  /* MUTANT */',
+    why: 'A 20.5 kWh load actual is described as "captured empty".',
+  },
+  {
+    id: 'B-xxi. ★ the repair hands back the 24 h span, not the span as captured',
+    file: NLS,
+    find: "  return { action: inside ? 'recapture' : 'tag', verdict, span };",
+    to: "  return { action: inside ? 'recapture' : 'tag', verdict, span: { startMs: issued, endMs: issued + FORECAST_SPAN_MS } }; /* MUTANT */",
+    why: 'A row captured short of 24 h has its held rows looked up after its capture.',
+  },
+  {
+    id: 'B-xxii. ★ a device listed with no projection is named as read with nothing measurable',
+    file: REC,
+    find: '        if (!d.projection || held.has(d.sn) || SYNTHETIC_SNS.has(d.sn) || isBenchSpareSn(d.sn)) continue;',
+    to: '        if (held.has(d.sn) || SYNTHETIC_SNS.has(d.sn) || isBenchSpareSn(d.sn)) continue; /* MUTANT */',
+    why: 'After a restart with the Cores offline in the cloud, the push says Cores that were never read "reported nothing measurable".',
+  },
+  {
+    id: 'B-xxiii. ★ the re-date has no lower bound',
+    file: REC,
+    find: '    const g = telemetryGapsLog.find((x) => x.sn === sn && x.startMs > spanStartMs && x.startMs <= movedToMs);',
+    to: '    const g = telemetryGapsLog.find((x) => x.sn === sn && x.startMs <= movedToMs); /* MUTANT */',
+    why: 'An older, closed record of the device is found first: the current one keeps its held-row start.',
+  },
+  {
+    id: 'B-xxiv. ★ a record re-dated twice takes its second start as its id',
+    file: REC,
+    find: '    g.alertStartMs ??= g.startMs;',
+    to: '    g.alertStartMs = g.startMs; /* MUTANT */',
+    why: 'Its alert id changes: the same blackout is pushed again.',
+  },
+  {
+    id: 'B-xxv. ★ a restore sets back a clock the device has written since',
+    file: REC,
+    find: '        if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);',
+    to: '        lastInsertBySn.set(sn, before); /* MUTANT */',
+    why: 'A Core back fresh after the move is measured from an old restated row: a gap filed early.',
+  },
+  {
+    id: 'B-xxvi. a record that begins as another ends is dark at the same time',
+    file: AL,
+    find: '    && x.startMs < g.endMs && g.startMs < x.endMs);',
+    to: '    && x.startMs <= g.endMs && g.startMs < x.endMs); /* MUTANT */',
+    why: '"2 home devices were dark at the same time" for two devices dark one after the other.',
   },
 ];
 

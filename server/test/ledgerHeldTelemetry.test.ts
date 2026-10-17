@@ -251,6 +251,28 @@ test('★★ v1.188.1 review 3: an actual captured over only the SILENT hours of
   assert.equal(heldCapturedClause(both, { actual_pv_kwh: null, actual_load_kwh: null }, none), 'the held PV and load actuals had been captured empty, so nothing had been integrated from held readings');
 });
 
+test('★ v1.188.1 review 4: a LOAD actual captured over only the silent hours of a held panel span is described as such, never as captured empty', () => {
+  // The review-3 test above holds only PV: the load side of the same rule, on its own.
+  const v = { pv: [], load: [{ sn: PANEL, heldMs: 2 * H }] };
+  const captured = { actual_pv_kwh: 12.1, actual_load_kwh: 20.5 };
+  assert.deepEqual(heldIntegratedActuals(v, captured, { load: false }), [], '★ no held panel row inside the span: nothing integrated from held readings');
+  assert.deepEqual(heldIntegratedActuals(v, captured, { load: true }), ['load'], 'a held panel row inside it: named');
+  const clause = heldCapturedClause(v, captured, { load: false });
+  assert.equal(clause, 'the load actual had been integrated over hours with no readings at all, and no held reading lay inside its span');
+  assert.doesNotMatch(clause, /captured empty|from held readings/, '★ a 20.5 kWh load was not captured empty');
+});
+
+test('★ v1.188.1 review 4: the repair hands back the span as captured, clipped at a capture short of issue + 24 h', () => {
+  // A weekday row captured 20 min short of the 24 h span (left as captured by v1.187.10): its held
+  // rows are looked up up to the capture, not past it.
+  const issued = phx(2026, 10, 10, 21, 30);
+  const cap = issued + FORECAST_SPAN_MS - 20 * MIN;
+  const r = heldLedgerRepair({ ...ROW_1014, issued_at_ms: issued, outcome_captured_at_ms: cap, window_start_ms: issued + 2 * H, window_end_ms: issued + 8 * H, pv_model_sns: CORES[0] },
+    { spans: [{ sn: CORES[0], startMs: issued + 10 * H, endMs: issued + 30 * H }], coreSns: [CORES[0]], panelSn: PANEL, nowMs: cap + DAY, horizonMs: HORIZON });
+  assert.ok(r != null, 'precondition: a repair');
+  assert.deepEqual(r.span, { startMs: issued, endMs: cap }, '★ [issue, capture]');
+});
+
 test('★★ the tag note says the span had no fresh readings (held or missing), never that the actuals were integrated from held readings', () => {
   // The 08-18 / 08-19 rows: Core 2 wrote NO rows at all on those days (a 9.8-day silence), so
   // nothing held was integrated into their actuals.

@@ -258,7 +258,12 @@ test('★★★ the deploy replay: a Core still held at boot is moved in two sca
     const tail = all('samples', CORE_A).filter((r) => r[0] > lastFresh);
     assert.ok(tail.length > 0 && tail.every((r) => r[0] > now - HELD_MOVE_MIN_AGE_MS), 'the newest 15 min wait for the next scan');
     panelReads();
-    assert.deepEqual(rec.telemetryGaps().filter((x) => x.sn === CORE_A), [], 'its seeded clock is still the last held row');
+    // v1.188.1 (review 4) — the clock goes back with the first scan already: the newest rows, which
+    // wait for the next one, restate the same readings (onMoved's heldThroughMs). Before, the
+    // seeded clock stayed on the last held row until the tail was moved an hour later.
+    const g1 = rec.telemetryGaps().filter((x) => x.sn === CORE_A);
+    assert.equal(g1.length, 1, '★★ ledgered at the first scan, not an hour later');
+    assert.equal(g1[0].startMs, lastFresh, 'from its last fresh sample');
     now = BOOT + H + MIN;
     rec.scanHeldSamples!(now);
     assert.deepEqual(all('samples', CORE_A).filter((r) => r[0] > lastFresh), [], '★★ the tail is moved as the same hold');

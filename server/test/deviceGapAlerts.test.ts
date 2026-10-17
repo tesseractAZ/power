@@ -283,6 +283,11 @@ test('★★ v1.188.1 review 3: "N home devices were dark at the same time" coun
   assert.equal(devicesDarkAlongside(y, [x, y, z, w]), 3, 'Y, Z and W at 10 h ago');
   const touching = span(CORE3, 40, 30);
   assert.equal(devicesDarkAlongside(x, [x, touching]), 1, 'a record that ends as another begins');
+  // v1.188.1 (review 4) — and the other way round: one that BEGINS as this one ends.
+  const after = span(CORE3, 20, 10);
+  assert.equal(devicesDarkAlongside(x, [x, after]), 1, '★ a record that begins as this one ends is not at the same time');
+  const [ax] = outageAlerts([x, after], now, OPTS, nameOf).filter((a) => a.id.includes(CORE1));
+  assert.match(ax.detail, /— this device went dark, not the whole feed\./, ax.detail);
   assert.equal(devicesDarkAlongside(y, [y, span(CORE3, 30, 21), span(CORE5, 21, 15)]), 2, 'two in turn, each with Y');
 });
 
