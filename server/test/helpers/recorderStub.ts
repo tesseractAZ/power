@@ -102,8 +102,10 @@ export function makeRecorderStub(overrides: Partial<Recorder> = {}): Recorder {
     listLifetimeKeys: (): string[] => [],
     batteryLifetimeDebug: emptyBatteryLifetimeDebug,
     // v1.188.1 — the real pure bridge with no trusted PV field: an online-only device map is
-    // unchanged by it, and a dark Core is bridged at night exactly as in production.
-    bridgedFleetFlow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, () => false),
+    // unchanged by it, and a dark Core is bridged at night exactly as in production. The site is
+    // the options' default (Phoenix) as a literal: this helper is imported statically, before the
+    // env that config.ts reads at import, so it must not import config.
+    bridgedFleetFlow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, () => false, { lat: 33.4484, lon: -112.074 }),
   };
   return { ...base, ...overrides };
 }

@@ -16,7 +16,7 @@ import { resolveRetentionDays } from './retention.js';
 import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './backupWindow.js';
 // v1.188.1 — battery and solar energy metered at the panel's source slots while a home Core is dark.
 import {
-  createEnergyBridge, offlineHomeCores, ownEnergyUntil, slotPvWatts,
+  createEnergyBridge, offlineHomeCores, ownEnergyUntil, reportsSinceReturn, slotPvWatts, bridgeSite,
   type BridgedFleetFlow, type BridgeRollupResult, type EnergyBridgeDebug,
 } from './energyBridge.js';
 
@@ -1975,6 +1975,8 @@ export function createRecorder(
       }
       return packs > 0 ? mah * PACK_MAH_TO_WH : null;
     },
+    // The install site for the day/night test, read at each use (FORECAST_LAT / FORECAST_LON).
+    site: () => bridgeSite(config),
     log,
   });
   /** One line per distinct bridge failure: the rollup's other counters must keep advancing. */
@@ -2196,30 +2198,40 @@ export function createRecorder(
           // metered its energy at the slot (energyBridge.ts) and left a marker on the pack. The
           // registers the Core brings back include that same energy, so the jump is ABSORBED,
           // whatever its size: re-baseline base := register − held, so this pass reports exactly
-          // `held` and counting resumes from it. Only once the Core reports again (online) AND its
-          // registers have moved off the held value — a dark Core keeps its frozen projection
-          // (setDeviceList preserves it), and an online flip can land before the first fresh quota;
-          // re-baselining on either would clear the marker and let the real jump through. Until
-          // then a marked pack reports `held`. A read-only (debug) pass reports `held` and writes
-          // nothing. The v0.45.0 guard and v0.81.0 re-baseline below still cover a gap no bridge
-          // counted (no marker).
+          // `held` and counting resumes from it. Any register movement of a marked pack is
+          // absorbed as it is seen; the marker is spent (the hand-over) only once the Core has
+          // REPORTED since its return (reportsSinceReturn: content changed at or after its online
+          // flip). Before that the movement is dark-span energy the bridge counts — MQTT data still
+          // arriving while the cloud lists the Core offline, a frozen projection at an online flip
+          // that lands before the first fresh reading — so it is absorbed with the marker kept:
+          // the held value never trails the projection, and re-baselining on a stale register
+          // cannot spend the marker and let the real jump through later. A marked pack reports
+          // `held` until then. A read-only (debug) pass reports `held` and writes nothing. The
+          // v0.45.0 guard and v0.81.0 re-baseline below still cover a gap no bridge counted (no
+          // marker).
           if (held && energyBridge.hasMarker(cacheKey)) {
             const moved = fresh.chgWh > held.chgWh || fresh.dsgWh > held.dsgWh;
-            if (opts.mutate && d.online === true && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {
+            if (opts.mutate && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {
               const rebased: PackBaseline = {
                 chgMah: pk.accuChgMah - held.chgWh / PACK_MAH_TO_WH,
                 dsgMah: pk.accuDsgMah - held.dsgWh / PACK_MAH_TO_WH,
               };
               savePackBaseline(d.sn, pk, rebased);
               base = rebased;
-              energyBridge.clearMarker(cacheKey);
               bmsSuspectStreak.delete(cacheKey);
               bmsCorruptWarned.delete(cacheKey);
-              const h = handedOver.get(d.sn) ?? { packs: 0, chgWh: 0, dsgWh: 0 };
-              h.packs += 1;
-              h.chgWh += Math.max(0, fresh.chgWh - held.chgWh);
-              h.dsgWh += Math.max(0, fresh.dsgWh - held.dsgWh);
-              handedOver.set(d.sn, h);
+              const chgWh = Math.max(0, fresh.chgWh - held.chgWh);
+              const dsgWh = Math.max(0, fresh.dsgWh - held.dsgWh);
+              if (reportsSinceReturn(d)) {
+                const before = energyBridge.clearMarker(cacheKey);
+                const h = handedOver.get(d.sn) ?? { packs: 0, chgWh: 0, dsgWh: 0 };
+                h.packs += 1;
+                h.chgWh += before.chgWh + chgWh;
+                h.dsgWh += before.dsgWh + dsgWh;
+                handedOver.set(d.sn, h);
+              } else {
+                energyBridge.absorb(cacheKey, chgWh, dsgWh);
+              }
             }
             fresh = { chgWh: held.chgWh, dsgWh: held.dsgWh };
           }
@@ -2492,8 +2504,11 @@ export function createRecorder(
     // "no longer bridged" line has read them (a read usually runs this pass first).
     for (const [sn, h] of handedOver) {
       const b = energyBridge.coreBridged(sn);
+      // A pack whose registers have not moved since the return keeps its marker until they do:
+      // the line says so, and its own line follows with that pack's figures.
+      const left = energyBridge.markersOf(sn).length;
       log(
-        `recorder: v1.188.1 energy-bridge hand-over sn=${sn}: ${h.packs} pack(s) re-baselined on return — ` +
+        `recorder: v1.188.1 energy-bridge hand-over sn=${sn}: ${h.packs} pack(s) re-baselined on return${left > 0 ? ` (${left} still marked)` : ''} — ` +
         `the BMS counted ${(h.chgWh / 1000).toFixed(2)} kWh in / ${(h.dsgWh / 1000).toFixed(2)} kWh out while dark (absorbed, not published); ` +
         `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis, already published)`,
       );

@@ -4,7 +4,8 @@ import type { Recorder, LifetimeTotals, NightLedgerRow, NightCalibration } from 
 // v1.38.0 (WS2) — Phoenix calendar-date resolution for the ledger read cutoff.
 // tariff.ts is pure/import-free (no circular dependency).
 import { localParts } from './tariff.js';
-import { bridgeFleetFlow, emptyBridgeDebug } from './energyBridge.js';
+import { bridgeFleetFlow, bridgeSite, emptyBridgeDebug } from './energyBridge.js';
+import { config } from './config.js';
 
 /**
  * v0.10.0 — read-only Recorder for the analytics worker thread.
@@ -177,7 +178,7 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     }),
     // v1.188.1 — the worker never publishes the power sensors; its bridge trusts no PV field
     // (the write-path recorder holds that state), so it bridges only the night basis.
-    bridgedFleetFlow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, () => false),
+    bridgedFleetFlow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, () => false, bridgeSite(config)),
     recordWeatherGhi: () => {}, // v0.13.1 — write path; the read-only worker never writes
     telemetryGaps: () => [],    // v0.30.0 — gaps are detected on the write path; /api/telemetry-gaps uses the main recorder
     // ── read path: real ──

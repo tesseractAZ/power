@@ -92,8 +92,9 @@ dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). S
   Net add every dark home slot (its Core cloud-offline for at least 3 min) metered at the
   panel (the energy bridge,
   `Recorder.bridgedFleetFlow`; [chapter 7, path (c)](07-energy-and-cost.md#22-the-two-accumulation-paths))
-  and have their own readiness flag, `flowBridged`: null while a dark slot cannot be
-  bridged, never a partial sum.
+  and have their own readiness flag, `flowBridged`: null while a dark slot on an online
+  panel cannot be bridged, never a partial sum. A dark slot whose panel is itself
+  cloud-offline is left out of both, as an offline Core always was.
 - **Backup pool:** `backup_pool` (%), `backup_remaining_kwh`, `backup_full_capacity_kwh`
   (both `energy_storage`).
 - **Forecast/degradation/runway/RTE/clipping/curtailment/self-consumption** — one sensor

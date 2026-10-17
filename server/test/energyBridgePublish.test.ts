@@ -86,7 +86,7 @@ async function build(devs: Any, at: number, trusted = false): Promise<Record<str
   const rec = makeRecorderStub({
     listLifetimeKeys: () => ['circuit_1_wh'],
     // The production recorder's bridge (energyBridge.flow) at the pinned clock.
-    bridgedFleetFlow: (online, d) => bridgeFleetFlow(online, d, at, () => trusted),
+    bridgedFleetFlow: (online, d) => bridgeFleetFlow(online, d, at, () => trusted, { lat: 33.4484, lon: -112.074 }),
   });
   const handle = await mqttDiscovery.startMqttDiscovery(store, rec, () => {});
   try {

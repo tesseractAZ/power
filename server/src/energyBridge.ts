@@ -24,8 +24,9 @@
  *
  * which keeps grid + PV + battery out − battery in equal to the panel load, on the AC basis.
  * `pv` comes from one of three bases (BridgeBasis):
- *  - 'night'      the sun is down at both ends of the window (solar geometry, PHOENIX_SITE):
- *                 pv = 0. Physics, not a reading.
+ *  - 'night'      the sun is down at both ends of the window (solar geometry at the configured
+ *                 install site, FORECAST_LAT / FORECAST_LON: bridgeSite, which the recorder hands
+ *                 in as deps.site): pv = 0. Physics, not a reading.
  *  - 'measured'   the panel's own per-source PV field (slotPvWatts), integrated — used only for a
  *                 slot whose field has been CHECKED against the inferred lower bound below
  *                 (persisted `bridge_pvseen_<panel>_<slot>`). The field was unverified when this
@@ -44,7 +45,9 @@
  *                 draw), and up to one SoC step (~290 Wh) per Core per anchor either way.
  *                 Energy-only: it has no instantaneous power, so the power sensors stay unknown.
  *  - 'unbridgeable' the panel reading is not fresh (shp2ReadbackFresh), or the inferred basis has
- *                 no SoC reading or a window the slot meter did not cover: nothing is booked.
+ *                 no SoC reading or a window the slot meter did not cover: nothing is booked. The
+ *                 power sensors withhold both figures for such a slot on an ONLINE panel, and leave
+ *                 a slot on a cloud-offline panel out of both (bridgeFleetFlow).
  *                 Never PV that passed through a Core booked as battery out.
  *
  * WHEN A CORE IS DARK. A /status flip lasts seconds (setDeviceOnline) and a /device/list blip
@@ -62,13 +65,19 @@
  * (`bridge_battery_charge_wh` / `_discharge_wh`, watermark = their ts), added to the emitted
  * battery totals on top of the BMS floors — never folded into the floors or the persisted
  * fleet_battery_* rows, whose v1.98.0 floor-gap check would read a bridged total above 50 kWh
- * as a floor for a pool that no longer exists and step Home Assistant DOWN (the phantom-kWh
- * failure). Bridged PV is added to `fleet_pv_wh` at each rollup (`bridge_pv_wh` keeps the
+ * as a floor for a pool that no longer exists and step Home Assistant DOWN (a negative hour while
+ * the step is under 10 % of the counter, a meter reset — the phantom-kWh failure — at 10 % or
+ * more). Bridged PV is added to `fleet_pv_wh` at each rollup (`bridge_pv_wh` keeps the
  * bridged share), and the dark Cores' own pv_total/ac_in count only up to the hand-off instant,
  * so held samples cannot double-count. For every held pack of a bridged Core a marker
  * `bridge_dark_<pack>` is written; when that Core reports again and its registers move, the
  * recorder re-baselines the pack so its BMS sum carries on from the held value: the counter jump
  * the dark days built is absorbed (the bridge already counted that energy), whatever its size.
+ * The marker is spent only once the Core has REPORTED since it came back (reportsSinceReturn: its
+ * content changed at or after its online flip). Register movement before that — MQTT data that
+ * still arrives while the cloud lists the Core offline, or a frozen projection at an online flip
+ * that lands before the first fresh reading — is absorbed as it is seen (re-baselined, the marker
+ * kept), so the held value never trails the projection and the real jump cannot pass later.
  * Every term only grows, so nothing published steps down; as a backstop, the two counters whose
  * contributors change here (fleet_pv_wh, fleet_grid_import_wh) hold a dip between rollups up to
  * LIFETIME_HOLD_DIP_WH (recorder.ts). The per-Core rows
@@ -78,11 +87,14 @@
  *
  * LIMITS. AC basis at the panel (on the online days the inferred split kept battery in within
  * ~2 kWh/day of the DC counters and read battery out 5-8 kWh/day low); up to one rollup window
- * misattributed at the return; at an outage start, the battery flow from the Core's last register
- * reading to the bridge's window start (the cloud's offline detection, and a rollup that fell
- * inside the dwell: at most BRIDGE_DWELL_MS) is absorbed unbridged; nothing can be bridged while
- * the panel itself is dark; and there is no backfill — a bridge that starts mid-outage counts
- * from its first window.
+ * misattributed at the return, and the BMS energy from the online flip to the Core's first fresh
+ * reading is absorbed (seconds for a Core streaming MQTT); at an outage start, the battery flow
+ * from the Core's last register reading to the bridge's window start (the cloud's offline
+ * detection, and a rollup that fell inside the dwell: at most BRIDGE_DWELL_MS) is absorbed
+ * unbridged, while register data that MQTT still delivers before the bridge's first marker is
+ * counted by the BMS and again by the bridge (at most one rollup window); nothing can be bridged
+ * while the panel itself is dark; and there is no backfill — a bridge that starts mid-outage
+ * counts from its first window.
  *
  * Pure functions plus a small factory (createEnergyBridge) that the recorder hands its lifetime
  * table and sample queries.
@@ -98,10 +110,14 @@ export const BRIDGE_DISCHARGE_KEY = 'bridge_battery_discharge_wh';
 export const BRIDGE_PV_KEY = 'bridge_pv_wh';
 export const BRIDGE_GRID_IMPORT_KEY = 'bridge_grid_import_wh';
 const DARK_PREFIX = 'bridge_dark_';
+const ABSORBED_PREFIX = 'bridge_absorbed_';
 const PVSEEN_PREFIX = 'bridge_pvseen_';
 const CORE_PREFIX = 'bridge_core_';
 /** The hand-over marker for one held pack (its recorder cache key: `<sn>:<packSn>` or `<sn>|<num>`). */
 export const bridgeDarkKey = (packCacheKey: string): string => `${DARK_PREFIX}${packCacheKey}`;
+/** BMS energy of a marked pack absorbed before its hand-over (register movement while its Core had
+ *  not reported since its return), for the hand-over line. Deleted with the marker. */
+export const bridgeAbsorbedKey = (packCacheKey: string, kind: 'chg' | 'dsg'): string => `${ABSORBED_PREFIX}${packCacheKey}_${kind}`;
 /** The persisted "this slot's PV field passed its check against the inferred lower bound" flag
  *  (deleted when a later check finds the field below the bound). */
 export const bridgePvSeenKey = (panelSn: string, slot: number): string => `${PVSEEN_PREFIX}${panelSn}_${slot}`;
@@ -129,9 +145,40 @@ export type BridgeBasis = 'night' | 'measured' | 'inferred' | 'unbridgeable';
 
 const finite = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
+/** Where the bridge's day/night test is judged. */
+export interface BridgeSite { lat: number; lon: number }
+
+/** The site the bridge's day/night test is judged at, from the configured install location
+ *  (`config.forecastLat` / `forecastLon`: FORECAST_LAT / FORECAST_LON, the solar forecast's); the
+ *  options' default (Phoenix) when it is not a usable coordinate. The recorder reads it at each
+ *  use (deps.site). This module does not import config itself: test helpers import it statically,
+ *  before the env their app imports read. */
+export function bridgeSite(cfg: { forecastLat: number; forecastLon: number }): BridgeSite {
+  const lat = cfg.forecastLat;
+  const lon = cfg.forecastLon;
+  if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return { lat, lon };
+  return { lat: PHOENIX_SITE.lat, lon: PHOENIX_SITE.lon };
+}
+
 /** Is the sun above the horizon at the site? (Spencer solar geometry, the PV model's own.) */
-export function sunUp(ms: number): boolean {
-  return solarPosition(new Date(ms), PHOENIX_SITE.lat, PHOENIX_SITE.lon).elevation > 0;
+export function sunUp(ms: number, site: BridgeSite): boolean {
+  return solarPosition(new Date(ms), site.lat, site.lon).elevation > 0;
+}
+
+/**
+ * Has Core `d` reported since it last came back online? It is online, and its content
+ * (dpuContentWitness, v1.181.0) changed at or after its online flip — or, online since before this
+ * process saw it (no transition time), changed at all (the store's first body after a restart only
+ * seeds the witness: it may be a replay). A frozen projection, MQTT data that arrived while the
+ * cloud listed the Core offline, and a REST body replaying a cached one do not count. The
+ * hand-over (recorder.computeBmsBatteryDetail) waits for it.
+ */
+export function reportsSinceReturn(d: Pick<DeviceSnapshot, 'online' | 'onlineChangedAtMs' | 'contentChangedAtMs'>): boolean {
+  if (d.online !== true) return false;
+  const c = finite(d.contentChangedAtMs);
+  if (c == null) return false;
+  const o = finite(d.onlineChangedAtMs);
+  return o == null || c >= o;
 }
 
 /** The panel's PV figure for one source slot, W: the two MPPT fields when either is reported
@@ -161,6 +208,10 @@ export interface DarkSlot {
   pvW: number | null;
   /** The panel reading is a reading (shp2ReadbackFresh). */
   panelFresh: boolean;
+  /** The panel itself is listed online. A slot on a cloud-offline panel (a second panel that dropped
+   *  off the cloud with its Cores) cannot be read at all, so the power sensors leave it out of their
+   *  sums, as an offline Core always was, rather than withholding the whole plant's figures. */
+  panelOnline: boolean;
 }
 
 /** A home Core the panel lists connected that is listed on the account and cloud-offline. */
@@ -229,6 +280,7 @@ export function darkHomeSlots(devices: Record<string, DeviceSnapshot>, nowMs: nu
         chW: finite(watts[src.slot - 1]),
         pvW: slotPvWatts(src),
         panelFresh: fresh,
+        panelOnline: panel.online === true,
       });
     }
   }
@@ -308,9 +360,9 @@ export function pvFieldVerdict(fieldWh: number, inferredWh: number, stepWh: numb
 }
 
 /** The power-sensor basis for one dark slot NOW (the inferred basis has no power figure). */
-export function slotPowerBasis(s: DarkSlot, nowMs: number, trusted: boolean): BridgeBasis {
+export function slotPowerBasis(s: DarkSlot, nowMs: number, trusted: boolean, site: BridgeSite): BridgeBasis {
   if (!s.panelFresh || s.chW == null) return 'unbridgeable';
-  if (!sunUp(nowMs)) return 'night';
+  if (!sunUp(nowMs, site)) return 'night';
   if (trusted && s.pvW != null) return 'measured';
   return 'unbridgeable';
 }
@@ -322,22 +374,29 @@ export interface BridgedFleetFlow {
   fleetBatteryNet: number | null;
   /** Dark slots counted into the two figures. */
   bridgedSlots: number;
-  /** false while any dark slot cannot be bridged right now (publishReadiness `flowBridged`). */
+  /** false while any dark slot on an online panel cannot be bridged right now (publishReadiness
+   *  `flowBridged`). */
   ready: boolean;
-  slots: Array<{ panelSn: string; slot: number; sn: string; basis: BridgeBasis; chW: number | null; pvW: number | null }>;
+  /** `leftOut`: the slot's panel is cloud-offline, so the slot is in neither figure and withholds
+   *  neither (its basis reads 'unbridgeable'). */
+  slots: Array<{ panelSn: string; slot: number; sn: string; basis: BridgeBasis; chW: number | null; pvW: number | null; leftOut: boolean }>;
 }
 
 /**
  * The two power sensors the Energy dashboard's Now view rates on (Fleet PV, Battery Net), with
  * the dark slots metered at the panel: battery = −chW − pv per dark slot, pv from the panel field
  * ('measured') or 0 ('night'). `online` is aggregateFleetFlow's sums over the online Cores
- * (fleetPv and the display battery net). Pure.
+ * (fleetPv and the display battery net). A dark slot on an online panel that cannot be bridged
+ * right now withholds both figures (unknown, never a partial sum); one on a cloud-offline panel is
+ * left out of both, as an offline Core was before the bridge: nothing of it can be read until that
+ * panel returns, and on a two-panel plant it must not blank the other panel's Cores. Pure.
  */
 export function bridgeFleetFlow(
   online: { fleetPv: number; fleetBatteryNet: number },
   devices: Record<string, DeviceSnapshot>,
   nowMs: number,
   isTrusted: (panelSn: string, slot: number) => boolean,
+  site: BridgeSite,
 ): BridgedFleetFlow {
   let pv = online.fleetPv;
   let net = online.fleetBatteryNet;
@@ -345,8 +404,12 @@ export function bridgeFleetFlow(
   let bridgedSlots = 0;
   const slots: BridgedFleetFlow['slots'] = [];
   for (const s of darkHomeSlots(devices, nowMs)) {
-    const basis = slotPowerBasis(s, nowMs, isTrusted(s.panelSn, s.slot));
-    slots.push({ panelSn: s.panelSn, slot: s.slot, sn: s.sn, basis, chW: s.chW, pvW: s.pvW });
+    if (!s.panelOnline) {
+      slots.push({ panelSn: s.panelSn, slot: s.slot, sn: s.sn, basis: 'unbridgeable', chW: s.chW, pvW: s.pvW, leftOut: true });
+      continue;
+    }
+    const basis = slotPowerBasis(s, nowMs, isTrusted(s.panelSn, s.slot), site);
+    slots.push({ panelSn: s.panelSn, slot: s.slot, sn: s.sn, basis, chW: s.chW, pvW: s.pvW, leftOut: false });
     if (basis === 'unbridgeable') { ready = false; continue; }
     const p = basis === 'measured' ? (s.pvW as number) : 0;
     pv += p;
@@ -410,6 +473,8 @@ export interface EnergyBridgeDeps {
   query: (sn: string, metric: string, sinceMs: number, untilMs: number) => Array<{ ts: number; value: number }>;
   /** A Core's measured full-charge capacity (Σ its packs' fullCapMah × 0.1024 Wh/mAh), or null. */
   coreCapacityWh: (sn: string, nowMs: number) => number | null;
+  /** The install site for the day/night test (bridgeSite of the configured location), read at each use. */
+  site: () => BridgeSite;
   log: (m: string) => void;
 }
 
@@ -421,6 +486,9 @@ export interface EnergyBridgeDebug {
   watermarkMs: number;
   /** Packs whose BMS jump will be absorbed when their Core reports again. */
   markers: string[];
+  /** BMS energy of marked packs already absorbed before their hand-over (register movement while
+   *  the Core had not reported since its return), per pack. */
+  absorbed: Array<{ pack: string; chargeWh: number; dischargeWh: number }>;
   /** Slots whose PV field passed its check against the inferred lower bound (the 'measured' basis). */
   trustedSlots: string[];
   /** The running check of each dark slot's PV field against the inferred lower bound (Wh). */
@@ -437,7 +505,11 @@ export interface EnergyBridge {
   isTrusted(panelSn: string, slot: number): boolean;
   totals(): { chargeWh: number; dischargeWh: number; pvWh: number; gridImportWh: number };
   hasMarker(packCacheKey: string): boolean;
-  clearMarker(packCacheKey: string): void;
+  /** Register movement of a marked pack before its hand-over: absorbed (the caller re-baselines),
+   *  the marker kept, the energy kept for the hand-over line. */
+  absorb(packCacheKey: string, chgWh: number, dsgWh: number): void;
+  /** The hand-over: deletes the marker and returns the energy absorbed before it (deleted too). */
+  clearMarker(packCacheKey: string): { chgWh: number; dsgWh: number };
   markersOf(sn: string): string[];
   coreBridged(sn: string): { chargeWh: number; dischargeWh: number };
   clearCore(sn: string): void;
@@ -447,7 +519,7 @@ export interface EnergyBridge {
 
 /** The debug block at its empty identity (the read-only worker recorder, test stubs). */
 export function emptyBridgeDebug(): EnergyBridgeDebug {
-  return { chargeWh: 0, dischargeWh: 0, pvWh: 0, gridImportWh: 0, watermarkMs: 0, markers: [], trustedSlots: [], pvChecks: [], cores: {}, slots: [], lastRollup: null };
+  return { chargeWh: 0, dischargeWh: 0, pvWh: 0, gridImportWh: 0, watermarkMs: 0, markers: [], absorbed: [], trustedSlots: [], pvChecks: [], cores: {}, slots: [], lastRollup: null };
 }
 
 const markerSn = (packCacheKey: string): string => {
@@ -565,6 +637,7 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     /** The inferred / check state still in use: a slot not dark in daylight now keeps none. */
     const live = new Set<string>();
     const coreAdd = new Map<string, { chg: number; dsg: number }>();
+    const site = deps.site();
     for (const s of darkHomeSlots(snap.devices, nowMs)) {
       nowBridging.set(s.sn, s);
       const inferKey = `${s.panelSn}#${s.slot}#${s.sn}`;
@@ -591,7 +664,7 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
         continue;
       }
       let pvWh: number | null = null;
-      if (!sunUp(start) && !sunUp(nowMs)) {
+      if (!sunUp(start, site) && !sunUp(nowMs, site)) {
         win.basis = 'night';
         pvWh = 0;
       } else {
@@ -690,14 +763,23 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     isTrusted,
     totals,
     hasMarker: (k) => markers.has(k),
+    absorb: (k, chgWh, dsgWh) => {
+      if (!markers.has(k)) return;
+      if (chgWh > 0) add(bridgeAbsorbedKey(k, 'chg'), chgWh, Date.now());
+      if (dsgWh > 0) add(bridgeAbsorbedKey(k, 'dsg'), dsgWh, Date.now());
+    },
     clearMarker: (k) => {
-      if (!markers.delete(k)) return;
+      const absorbed = { chgWh: deps.readLifetime(bridgeAbsorbedKey(k, 'chg')).wh, dsgWh: deps.readLifetime(bridgeAbsorbedKey(k, 'dsg')).wh };
+      if (!markers.delete(k)) return { chgWh: 0, dsgWh: 0 };
       deps.deleteLifetime(bridgeDarkKey(k));
+      deps.deleteLifetime(bridgeAbsorbedKey(k, 'chg'));
+      deps.deleteLifetime(bridgeAbsorbedKey(k, 'dsg'));
+      return absorbed;
     },
     markersOf,
     coreBridged,
     clearCore,
-    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted),
+    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site()),
     debug: (devices, nowMs) => {
       const t = totals();
       const cores: Record<string, { chargeWh: number; dischargeWh: number }> = {};
@@ -709,13 +791,18 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
         ...t,
         watermarkMs: deps.readLifetime(BRIDGE_CHARGE_KEY).ts,
         markers: [...markers].sort(),
+        absorbed: [...markers].sort().map((k) => ({
+          pack: k,
+          chargeWh: deps.readLifetime(bridgeAbsorbedKey(k, 'chg')).wh,
+          dischargeWh: deps.readLifetime(bridgeAbsorbedKey(k, 'dsg')).wh,
+        })).filter((a) => a.chargeWh > 0 || a.dischargeWh > 0),
         trustedSlots: [...trusted].map((k) => k.slice(PVSEEN_PREFIX.length)).sort(),
         pvChecks: [...checks.entries()].map(([k, c]) => {
           const [panelSn, slot] = k.split('#');
           return { slot: `${panelSn}_${slot}`, sinceMs: c.sinceMs, fieldWh: c.fieldWh, inferredWh: c.inferredWh, stepWh: c.stepWh, verdict: c.verdict };
         }).sort((a, b) => a.slot.localeCompare(b.slot)),
         cores,
-        slots: bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, devices, nowMs, isTrusted).slots,
+        slots: bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, devices, nowMs, isTrusted, deps.site()).slots,
         lastRollup,
       };
     },

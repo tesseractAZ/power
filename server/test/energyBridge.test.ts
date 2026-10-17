@@ -12,9 +12,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   darkHomeSlots, offlineHomeCores, ownEnergyUntil, sunUp, slotPvWatts, windowSplit, slotAcEnergy, valueAt, inferPvStep,
-  bridgeFleetFlow, heldPackKeysOf, slotPowerBasis, pvFieldVerdict, BRIDGE_DWELL_MS, BRIDGE_PV_EVIDENCE_STEPS,
+  bridgeFleetFlow, heldPackKeysOf, slotPowerBasis, pvFieldVerdict, bridgeSite, reportsSinceReturn, BRIDGE_DWELL_MS,
+  BRIDGE_PV_EVIDENCE_STEPS,
 } from '../src/energyBridge.js';
 import { aggregateFleetFlow } from '../src/shp2Membership.js';
+import { publishReadiness } from '../src/publishReadiness.js';
+import { config } from '../src/config.js';
 
 type Any = any;
 
@@ -25,6 +28,8 @@ const C3 = 'Y711XXX00XXX0003';
 /** 2026-10-15 01:00 MST (night) and 12:00 MST (noon), Phoenix. */
 const NIGHT = Date.parse('2026-10-15T01:00:00-07:00');
 const NOON = Date.parse('2026-10-15T12:00:00-07:00');
+/** The options' default site (FORECAST_LAT / FORECAST_LON). */
+const PHX = { lat: 33.4484, lon: -112.074 };
 
 function panel(nowMs: number, sourceWatts: number[], over: Record<string, unknown> = {}, src: Array<Record<string, unknown>> = []): Any {
   return {
@@ -84,7 +89,7 @@ test('★★★ a Core is bridged only once it has been offline for the dwell; i
   // A flip stamped in the future (clock skew) is read as now: inside the dwell.
   assert.deepEqual(offlineHomeCores(devs(-60_000), NIGHT).get(C1), { offlineSinceMs: NIGHT, bridged: false });
   // The power sensors inside the dwell: the Core is not a dark slot, so nothing is withheld for it.
-  const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 1200 }, devs(30_000), NIGHT, () => false);
+  const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 1200 }, devs(30_000), NIGHT, () => false, PHX);
   assert.deepEqual([f.ready, f.bridgedSlots, f.fleetBatteryNet], [true, 0, 1200]);
 });
 
@@ -118,10 +123,48 @@ test('★★★ the panel PV field against the inferred lower bound: pending unt
 /* ── the pieces ──────────────────────────────────────────────────────────── */
 
 test('sun geometry: Phoenix at 01:00 MST is night, at noon it is day', () => {
-  assert.equal(sunUp(NIGHT), false);
-  assert.equal(sunUp(NOON), true);
-  assert.equal(sunUp(Date.parse('2026-10-15T05:30:00-07:00')), false, 'before sunrise');
-  assert.equal(sunUp(Date.parse('2026-10-15T18:45:00-07:00')), false, 'after sunset');
+  assert.equal(sunUp(NIGHT, PHX), false);
+  assert.equal(sunUp(NOON, PHX), true);
+  assert.equal(sunUp(Date.parse('2026-10-15T05:30:00-07:00'), PHX), false, 'before sunrise');
+  assert.equal(sunUp(Date.parse('2026-10-15T18:45:00-07:00'), PHX), false, 'after sunset');
+});
+
+const BERLIN = { lat: 52.52, lon: 13.405 };
+const SYDNEY = { lat: -33.8688, lon: 151.2093 };
+
+test('★★★ the sun test is judged at the given site, not Phoenix\'s clock', () => {
+  const berlin10 = Date.parse('2026-10-15T10:00:00+02:00'); // 01:00 in Phoenix
+  const berlin02 = Date.parse('2026-10-15T02:00:00+02:00'); // 17:00 in Phoenix (sun up there)
+  const sydney13 = Date.parse('2026-10-15T13:00:00+11:00'); // 19:00 in Phoenix
+  assert.equal(sunUp(berlin10, BERLIN), true, '10:00 in Berlin is daylight');
+  assert.equal(sunUp(berlin02, BERLIN), false, '02:00 in Berlin is night');
+  assert.equal(sunUp(sydney13, SYDNEY), true, '13:00 in Sydney is daylight');
+  assert.equal(sunUp(berlin10, { lat: 33.4484, lon: -112.074 }), false, 'the same instant is night in Phoenix');
+});
+
+test('★★★ the bridge\'s site is the configured location (FORECAST_LAT / FORECAST_LON); Phoenix when it is not a coordinate', () => {
+  assert.deepEqual(bridgeSite({ forecastLat: BERLIN.lat, forecastLon: BERLIN.lon }), BERLIN);
+  assert.deepEqual(bridgeSite(config), { lat: config.forecastLat, lon: config.forecastLon }, 'the options\' value as configured');
+  const devices = { [PANEL]: panel(NOON, [-1000, -1000, -1000]), [C1]: core(C1, false), [C2]: core(C2, false), [C3]: core(C3, false) };
+  // 12:00 in Phoenix is 21:00 in Berlin: night at the site, so the power sensors read the slots.
+  const f = bridgeFleetFlow(ONLINE, devices, NOON, () => false, BERLIN);
+  assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet], [true, 0, 3000]);
+  assert.deepEqual(f.slots.map((s) => s.basis), ['night', 'night', 'night']);
+  assert.equal(bridgeFleetFlow(ONLINE, devices, NOON, () => false, PHX).ready, false, 'noon in Phoenix: no trusted field, no figure');
+  for (const [lat, lon] of [[Number.NaN, 13.4], [52.5, Number.NaN], [91, 0], [0, 181]]) {
+    assert.deepEqual(bridgeSite({ forecastLat: lat, forecastLon: lon }), PHX, `${lat},${lon}`);
+  }
+});
+
+test('★★★ a Core has reported since its return only when its content changed at or after its online flip (or at all, online since first sight)', () => {
+  const t = NIGHT;
+  assert.equal(reportsSinceReturn({ online: true, onlineChangedAtMs: t, contentChangedAtMs: t + 1 }), true, 'fresh data after the flip');
+  assert.equal(reportsSinceReturn({ online: true, onlineChangedAtMs: t, contentChangedAtMs: t }), true, 'data landing with the flip');
+  assert.equal(reportsSinceReturn({ online: true, onlineChangedAtMs: t, contentChangedAtMs: t - 1 }), false, 'MQTT data from before the flip; a frozen projection');
+  assert.equal(reportsSinceReturn({ online: true, onlineChangedAtMs: t }), false, 'no content change seen');
+  assert.equal(reportsSinceReturn({ online: false, onlineChangedAtMs: t, contentChangedAtMs: t + 1 }), false, 'listed offline: MQTT data while dark');
+  assert.equal(reportsSinceReturn({ online: true, contentChangedAtMs: t }), true, 'online since first sight, its content changed since');
+  assert.equal(reportsSinceReturn({ online: true }), false, 'after a restart the first body only seeds the witness: it may be a replay');
 });
 
 test('the panel PV figure: the two MPPT fields when either is reported, else pvChargeWatts, else unknown', () => {
@@ -185,7 +228,7 @@ const ONLINE = { fleetPv: 0, fleetBatteryNet: 0 };
 
 test('★★★ at night every dark slot is bridged: Battery Net = Σ −chW, Fleet PV = 0, ready', () => {
   const devices = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: core(C1, false), [C2]: core(C2, false), [C3]: core(C3, false) };
-  const f = bridgeFleetFlow(ONLINE, devices, NIGHT, () => false);
+  const f = bridgeFleetFlow(ONLINE, devices, NIGHT, () => false, PHX);
   assert.equal(f.ready, true);
   assert.equal(f.bridgedSlots, 3);
   assert.equal(f.fleetBatteryNet, 3409);
@@ -196,27 +239,63 @@ test('★★★ at night every dark slot is bridged: Battery Net = Σ −chW, Fl
 test('★★★ in daylight a trusted PV field is the solar figure and battery = −chW − pv; an untrusted one is no figure at all', () => {
   const src = [{ pvHighWatts: 2000, pvLowWatts: 500 }, { pvHighWatts: 0, pvLowWatts: 0 }, { pvHighWatts: 1000, pvLowWatts: 0 }];
   const devices = { [PANEL]: panel(NOON, [-500, -800, 300], {}, src), [C1]: core(C1, false), [C2]: core(C2, false), [C3]: core(C3, false) };
-  const trusted = bridgeFleetFlow({ fleetPv: 100, fleetBatteryNet: 50 }, devices, NOON, () => true);
+  const trusted = bridgeFleetFlow({ fleetPv: 100, fleetBatteryNet: 50 }, devices, NOON, () => true, PHX);
   assert.equal(trusted.ready, true);
   assert.equal(trusted.fleetPv, 100 + 2500 + 0 + 1000);
   // battery: 50 + (500 − 2500) + (800 − 0) + (−300 − 1000) = −2450 (charging)
   assert.equal(trusted.fleetBatteryNet, 50 - 2000 + 800 - 1300);
-  const untrusted = bridgeFleetFlow(ONLINE, devices, NOON, () => false);
+  const untrusted = bridgeFleetFlow(ONLINE, devices, NOON, () => false, PHX);
   assert.equal(untrusted.ready, false, 'a 0 W reading from a field never seen working is not "no PV"');
   assert.equal(untrusted.fleetPv, null);
   assert.equal(untrusted.fleetBatteryNet, null);
-  const oneTrusted = bridgeFleetFlow(ONLINE, devices, NOON, (_p, slot) => slot !== 2);
+  const oneTrusted = bridgeFleetFlow(ONLINE, devices, NOON, (_p, slot) => slot !== 2, PHX);
   assert.equal(oneTrusted.ready, false, 'one unbridgeable slot withholds both figures');
+});
+
+test('★★★ two panels: a second panel that drops off the cloud with its Core leaves that slot out; the house figures still publish', () => {
+  const GARAGE = 'HD31XXX00XXX0002';
+  const CG = 'Y711XXX00XXX0009';
+  const garage: Any = {
+    ...panel(NOON, [-300]), sn: GARAGE, online: false, lastQuotaAtMs: NIGHT - 60 * 60_000,
+  };
+  garage.projection = { ...garage.projection, sources: [{ slot: 1, sn: CG, isConnected: true, batteryPercentage: 50, fullCap: 30_720, pvWatts: null, pvHighWatts: null, pvLowWatts: null }] };
+  const house = panel(NOON, [-500, -500, 0]);
+  house.projection.sources = house.projection.sources.slice(0, 2);
+  const devices: Any = {
+    [PANEL]: house, [GARAGE]: garage,
+    [C1]: { ...core(C1, true), lastQuotaAtMs: NOON },
+    [C2]: { ...core(C2, true), lastQuotaAtMs: NOON },
+    [CG]: { ...core(CG, false, true), onlineChangedAtMs: NIGHT - 60 * 60_000 },
+  };
+  devices[C1].projection = { ...devices[C1].projection, pvTotalWatts: 2000 };
+  devices[C2].projection = { ...devices[C2].projection, pvTotalWatts: 1500 };
+  const agg = aggregateFleetFlow(devices);
+  assert.equal(agg.fleetPv, 3500, 'the two house Cores');
+  for (const at of [NOON, NIGHT]) {
+    const f = bridgeFleetFlow({ fleetPv: agg.fleetPv, fleetBatteryNet: agg.fleetBatteryNetDisplay }, devices, at, () => true, PHX);
+    assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet, f.bridgedSlots], [true, 3500, agg.fleetBatteryNetDisplay, 0], new Date(at).toISOString());
+    assert.deepEqual(f.slots.map((s) => [s.panelSn, s.sn, s.basis, s.leftOut]), [[GARAGE, CG, 'unbridgeable', true]]);
+    const r = publishReadiness({ devices, alerts: [], alertsComplete: true, speakerLastProbeAt: 1, forecast: null, runway: null, clipping: null,
+      curtailment: null, carbon: null, tariff: null, degradation: null, nowMs: at, flowBridge: f } as Any);
+    assert.equal(r.flowBridged, true, 'Fleet PV and Battery Net publish the house Cores');
+  }
+  // A single panel that is itself cloud-offline with every Core dark: nothing is summed, both withheld (as before the bridge).
+  const alone: Any = { [GARAGE]: garage, [CG]: devices[CG] };
+  const g = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, alone, NIGHT, () => true, PHX);
+  assert.deepEqual([g.ready, g.bridgedSlots], [true, 0]);
+  const r = publishReadiness({ devices: alone, alerts: [], alertsComplete: true, speakerLastProbeAt: 1, forecast: null, runway: null, clipping: null,
+    curtailment: null, carbon: null, tariff: null, degradation: null, nowMs: NIGHT, flowBridge: g } as Any);
+  assert.equal(r.flowBridged, false);
 });
 
 test('★★ a stale panel bridges nothing; an all-online fleet is unchanged by the bridge', () => {
   const stale = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119], { lastQuotaAtMs: NIGHT - 400_000 }), [C1]: core(C1, false), [C2]: core(C2, true), [C3]: core(C3, true) };
-  const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 1800 }, stale, NIGHT, () => true);
+  const f = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 1800 }, stale, NIGHT, () => true, PHX);
   assert.equal(f.ready, false);
   assert.equal(f.fleetBatteryNet, null);
-  assert.equal(slotPowerBasis(darkHomeSlots(stale, NIGHT)[0], NIGHT, true), 'unbridgeable');
+  assert.equal(slotPowerBasis(darkHomeSlots(stale, NIGHT)[0], NIGHT, true, PHX), 'unbridgeable');
   const online = { [PANEL]: panel(NIGHT, [-1145, -1145, -1119]), [C1]: core(C1, true), [C2]: core(C2, true), [C3]: core(C3, true) };
-  const g = bridgeFleetFlow({ fleetPv: 4500, fleetBatteryNet: 2700 }, online, NIGHT, () => false);
+  const g = bridgeFleetFlow({ fleetPv: 4500, fleetBatteryNet: 2700 }, online, NIGHT, () => false, PHX);
   assert.deepEqual([g.fleetPv, g.fleetBatteryNet, g.bridgedSlots, g.ready], [4500, 2700, 0, true]);
 });
 

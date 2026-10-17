@@ -2,17 +2,19 @@
 /**
  * mutate-energy-core-outage.mjs — v1.188.1: while a home Core is cloud-offline, its battery and
  * solar energy (and the two power sensors) come from the Smart Home Panel 2's source slot, from
- * the instant it went offline (a blip inside the dwell is not bridged); the panel's PV field is
- * used only once checked against the inferred lower bound; when the Core reports again its BMS
+ * the instant it went offline (a blip inside the dwell is not bridged); day and night are judged
+ * at the configured site; the panel's PV field is used only once checked against the inferred
+ * lower bound; a slot on a cloud-offline panel is left out of the power sensors; register
+ * movement while the Core has not reported since its return is absorbed, and when it has, its BMS
  * counter jump is absorbed; nothing published ever steps down.
  *
  *   B-i     the slot meter's direction is flipped (the Cores supplying the panel read as charging)
  *   B-ii    the night gate is removed (a dark night is inferred, its outflow booked as PV)
  *   B-iii   the bridged PV never reaches fleet_pv_wh
  *   B-iv    the dark Cores' own pv_total / ac_in contributors are no longer skipped
- *   B-v     the hand-over clears the marker without re-baselining the pack
- *   B-vi    the hand-over fires on every mutating pass (online gate and register movement dropped)
- *   B-vii   the hand-over ignores whether the registers moved (an online flip spends the marker)
+ *   B-v     the hand-over / absorption does not re-baseline the pack
+ *   B-vi    the hand-over fires on any online flag (not only once the Core reported since its return)
+ *   B-vii   the hand-over ignores whether the registers moved (a content change spends the marker)
  *   B-viii  the read-only debug pass re-baselines too
  *   B-ix    the bridge is folded into the BMS discharge floor
  *   B-x     an untrusted panel PV field is used as measured (rollup)
@@ -47,6 +49,20 @@
  *   B-xxxix the hand-over clears the per-Core figures (the "no longer bridged" line reads 0.00)
  *   B-xl    the per-Core figures are never cleared
  *   B-xli   the PV / Grid to Battery Charge dip backstop is removed
+ *   B-xlii  register movement of a marked pack is not absorbed while its Core is listed offline
+ *   B-xliii the energy absorbed before the hand-over is left out of the hand-over line
+ *   B-xliv  the absorbed rows outlive the hand-over
+ *   B-xlv   the absorption is not recorded at all
+ *   B-xlvi  reportsSinceReturn ignores the online flip (data from before it counts as the return)
+ *   B-xlvii reportsSinceReturn takes a Core online since first sight as reported (a replayed first body)
+ *   B-xlviii reportsSinceReturn ignores the online flag (MQTT data while dark spends the marker)
+ *   B-xlix  the sun test ignores the site it is given (Phoenix's clock everywhere)
+ *   B-l     the bridge's site ignores the configured location
+ *   B-li    the configured site is not validated (NaN / out of range)
+ *   B-lii   a slot on a cloud-offline panel withholds the whole plant's power figures again
+ *   B-liii  a slot on an online but stale panel is left out instead of withholding
+ *   B-liv   the rollup's day/night test ignores the configured site
+ *   B-lv    the power sensors' day/night test ignores the configured site
  *
  *   node scripts/mutate-energy-core-outage.mjs
  */
@@ -77,7 +93,7 @@ const MUTANTS = [
   {
     id: 'B-ii. ★★★ the night gate is removed',
     file: EB,
-    find: '      if (!sunUp(start) && !sunUp(nowMs)) {',
+    find: '      if (!sunUp(start, site) && !sunUp(nowMs, site)) {',
     to: '      if (false) { /* MUTANT */',
     why: 'A dark night is inferred: the slots\' outflow rises the envelope and is booked as solar, not battery out.',
   },
@@ -96,31 +112,31 @@ const MUTANTS = [
     why: 'A frozen projection\'s held pv_total / ac_in heartbeat rows are integrated beside the bridge (double count).',
   },
   {
-    id: 'B-v. ★★★ the hand-over clears the marker without re-baselining',
+    id: 'B-v. ★★★ the hand-over / absorption does not re-baseline the pack',
     file: RC,
-    find: '              savePackBaseline(d.sn, pk, rebased);\n              base = rebased;\n              energyBridge.clearMarker(cacheKey);',
-    to: '              energyBridge.clearMarker(cacheKey); /* MUTANT */',
+    find: '              savePackBaseline(d.sn, pk, rebased);\n              base = rebased;\n              bmsSuspectStreak.delete(cacheKey);',
+    to: '              /* MUTANT */\n              bmsSuspectStreak.delete(cacheKey);',
     why: 'The returning Cores\' dark-day counter jump lands in one rollup on top of the bridged energy.',
   },
   {
-    id: 'B-vi. ★★★ the hand-over fires on every mutating pass',
+    id: 'B-vi. ★★★ the hand-over fires on any online flag',
     file: RC,
-    find: '            if (opts.mutate && d.online === true && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {',
-    to: '            if (opts.mutate && pk.accuChgMah != null && pk.accuDsgMah != null) { /* MUTANT */',
-    why: 'A dark Core\'s frozen projection spends its marker on every read; the real jump on return lands unabsorbed.',
+    find: '              if (reportsSinceReturn(d)) {',
+    to: '              if (d.online === true) { /* MUTANT */',
+    why: 'The review defect: a reconnect burst of queued MQTT data from early in the dark span, just before the online flip, spends the marker; the fresh data\'s jump then lands on top of the bridged energy.',
   },
   {
     id: 'B-vii. ★★ the hand-over ignores whether the registers moved',
     file: RC,
-    find: '            if (opts.mutate && d.online === true && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {',
-    to: '            if (opts.mutate && d.online === true && pk.accuChgMah != null && pk.accuDsgMah != null) { /* MUTANT */',
-    why: 'An online flip that lands before the first fresh quota spends the marker; the quota\'s jump then lands.',
+    find: '            if (opts.mutate && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {',
+    to: '            if (opts.mutate && pk.accuChgMah != null && pk.accuDsgMah != null) { /* MUTANT */',
+    why: 'A content change without pack data after the online flip spends the marker; the real jump then lands.',
   },
   {
     id: 'B-viii. ★★ the read-only debug pass re-baselines too',
     file: RC,
-    find: '            if (opts.mutate && d.online === true && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {',
-    to: '            if (d.online === true && moved && pk.accuChgMah != null && pk.accuDsgMah != null) { /* MUTANT */',
+    find: '            if (opts.mutate && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {',
+    to: '            if (moved && pk.accuChgMah != null && pk.accuDsgMah != null) { /* MUTANT */',
     why: '/api/debug/battery-lifetime writes baselines and clears markers — a diagnostic that changes what it reports.',
   },
   {
@@ -315,22 +331,22 @@ const MUTANTS = [
   {
     id: 'B-xxxvi. ★★★ a handed-over marker\'s row is never deleted',
     file: EB,
-    find: '      if (!markers.delete(k)) return;\n      deps.deleteLifetime(bridgeDarkKey(k));',
-    to: '      if (!markers.delete(k)) return; /* MUTANT */',
+    find: '      if (!markers.delete(k)) return { chgWh: 0, dsgWh: 0 };\n      deps.deleteLifetime(bridgeDarkKey(k));',
+    to: '      if (!markers.delete(k)) return { chgWh: 0, dsgWh: 0 }; /* MUTANT */',
     why: 'Every restart reloads the marker: the pack\'s next register movement is absorbed again, forever.',
   },
   {
     id: 'B-xxxvii. ★★ the hand-over line\'s BMS discharge figure is zeroed',
     file: RC,
-    find: '              h.dsgWh += Math.max(0, fresh.dsgWh - held.dsgWh);',
-    to: '              h.dsgWh += 0; /* MUTANT */',
+    find: '                h.dsgWh += before.dsgWh + dsgWh;',
+    to: '                h.dsgWh += 0; /* MUTANT */',
     why: 'The statistics repair reads its preferred battery-out target from this line: it would book 0 kWh.',
   },
   {
     id: 'B-xxxviii. ★★ the hand-over line\'s BMS charge figure is zeroed',
     file: RC,
-    find: '              h.chgWh += Math.max(0, fresh.chgWh - held.chgWh);',
-    to: '              h.chgWh += 0; /* MUTANT */',
+    find: '                h.chgWh += before.chgWh + chgWh;',
+    to: '                h.chgWh += 0; /* MUTANT */',
     why: 'The same for battery in.',
   },
   {
@@ -353,6 +369,104 @@ const MUTANTS = [
     find: '        LIFETIME_HOLD_KEYS.has(key) ? LIFETIME_HOLD_DIP_WH : undefined,',
     to: '        undefined, /* MUTANT */',
     why: 'A Core whose slot leaves the panel mid-window steps PV Production down by its pending share (above the 50 Wh micro-dip clamp).',
+  },
+  {
+    id: 'B-xlii. ★★★ register movement of a marked pack is not absorbed while its Core is listed offline',
+    file: RC,
+    find: '            if (opts.mutate && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {',
+    to: '            if (opts.mutate && d.online === true && moved && pk.accuChgMah != null && pk.accuDsgMah != null) { /* MUTANT */',
+    why: 'The review defect: MQTT data that still arrives while the cloud lists the Cores offline leaves the held value behind the projection; a content change after the flip then hands over on that stale register, and the dark-span jump lands on top of the bridged energy (double).',
+  },
+  {
+    id: 'B-xliii. ★★ the energy absorbed before the hand-over is left out of the hand-over line',
+    file: RC,
+    find: '                h.dsgWh += before.dsgWh + dsgWh;',
+    to: '                h.dsgWh += dsgWh; /* MUTANT */',
+    why: 'The line under-states what the BMS counted while dark by the part MQTT delivered before the return.',
+  },
+  {
+    id: 'B-xliv. ★★ the absorbed rows outlive the hand-over',
+    file: EB,
+    find: "      deps.deleteLifetime(bridgeAbsorbedKey(k, 'chg'));\n      deps.deleteLifetime(bridgeAbsorbedKey(k, 'dsg'));",
+    to: '      /* MUTANT */',
+    why: 'A later outage of the same pack starts its hand-over figure from the old absorbed energy.',
+  },
+  {
+    id: 'B-xlv. ★★ the absorption is not recorded',
+    file: EB,
+    find: '    absorb: (k, chgWh, dsgWh) => {\n      if (!markers.has(k)) return;',
+    to: '    absorb: (k, chgWh, dsgWh) => {\n      if (!markers.has(k) || k.length > 0) return; /* MUTANT */',
+    why: 'The debug block and the hand-over line lose what was absorbed while the Core was listed offline.',
+  },
+  {
+    id: 'B-xlvi. ★★★ reportsSinceReturn ignores the online flip',
+    file: EB,
+    find: '  return o == null || c >= o;',
+    to: '  return o == null || c >= 0; /* MUTANT */',
+    why: 'Data from before the flip (a reconnect burst of queued MQTT data) counts as the return: the marker is spent on an early register.',
+  },
+  {
+    id: 'B-xlvii. ★★ reportsSinceReturn takes a Core online since first sight as reported without a content change',
+    file: EB,
+    find: '  if (c == null) return false;',
+    to: '  if (c == null) return finite(d.onlineChangedAtMs) == null; /* MUTANT */',
+    why: 'After a restart the first body (it may be a replay) spends the marker; the rest of the dark span lands when the Core streams.',
+  },
+  {
+    id: 'B-xlviii. ★★★ reportsSinceReturn ignores the online flag',
+    file: EB,
+    find: '  if (d.online !== true) return false;',
+    to: '  /* MUTANT */',
+    why: 'MQTT data while the Core is listed offline spends the marker mid-outage; the return\'s jump then lands.',
+  },
+  {
+    id: 'B-xlix. ★★★ the sun test ignores the site it is given',
+    file: EB,
+    find: '  return solarPosition(new Date(ms), site.lat, site.lon).elevation > 0;',
+    to: '  return solarPosition(new Date(ms), PHOENIX_SITE.lat, PHOENIX_SITE.lon).elevation > 0; /* MUTANT */',
+    why: 'The review defect: outside Phoenix a local morning takes the night basis (solar booked as battery out) and a local night the inferred one (both power sensors unknown all night).',
+  },
+  {
+    id: 'B-l. ★★★ the bridge\'s site ignores the configured location',
+    file: RC,
+    find: '    site: () => bridgeSite(config),',
+    to: '    site: () => bridgeSite({ forecastLat: 33.4484, forecastLon: -112.074 }), /* MUTANT */',
+    why: 'FORECAST_LAT / FORECAST_LON are set to the install, but the bridge keeps judging day and night on Phoenix\'s clock.',
+  },
+  {
+    id: 'B-li. ★ the configured site is not validated',
+    file: EB,
+    find: '  if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return { lat, lon };',
+    to: '  if (lat === lat || lon === lon) return { lat, lon }; /* MUTANT */',
+    why: 'An option read as NaN makes every window night (elevation NaN): solar books as battery out.',
+  },
+  {
+    id: 'B-lii. ★★★ a slot on a cloud-offline panel withholds the whole plant\'s power figures again',
+    file: EB,
+    find: '    if (!s.panelOnline) {',
+    to: '    if (false) { /* MUTANT */',
+    why: 'The review defect: on a two-panel plant a garage panel that drops off the cloud with its Core blanks the house\'s Fleet PV and Battery Net for the whole outage.',
+  },
+  {
+    id: 'B-liii. ★★ a slot on an online but stale panel is left out instead of withholding',
+    file: EB,
+    find: '    if (!s.panelOnline) {',
+    to: '    if (!s.panelFresh) { /* MUTANT */',
+    why: 'A panel listed online whose reading is momentarily stale publishes a partial sum as the fleet\'s.',
+  },
+  {
+    id: 'B-liv. ★★ the rollup\'s day/night test ignores the configured site',
+    file: EB,
+    find: '    const site = deps.site();',
+    to: '    const site = PHOENIX_SITE; /* MUTANT */',
+    why: 'Outside Phoenix a local morning\'s dark-Core windows take the night basis: the solar they pass to the house books as battery out.',
+  },
+  {
+    id: 'B-lv. ★★ the power sensors\' day/night test ignores the configured site',
+    file: EB,
+    find: '    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site()),',
+    to: '    flow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, isTrusted, PHOENIX_SITE), /* MUTANT */',
+    why: 'Outside Phoenix Fleet PV and Battery Net read unknown through the local night of a Core outage (Phoenix daylight, no trusted field).',
   },
 ];
 

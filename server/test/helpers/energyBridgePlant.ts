@@ -6,9 +6,14 @@
  * Time moves a minute at a time (`run`), with a lifetime rollup every 5 minutes, each followed by a
  * published read asserted never to decrease. Each Core's online flag carries the transition time the
  * store stamps (`onlineChangedAtMs`): `setOnline` stamps it, `darkAtFirstSight` (a Core offline
- * since before the add-on saw it) and a restart do not. A Core that reports records its own
- * pv_total / ac_in each minute; its BMS registers move with `coreBatW` and freeze while it is
- * offline, then jump to the true count when it reports again. Test serials are placeholders.
+ * since before the add-on saw it) and a restart do not. Each Core's content clock
+ * (`contentChangedAtMs`, the store's v1.181.0 witness) moves when it delivers data: fresh registers
+ * while online (`regs` set, `coreBatW` moving them, the jump landing at `setOnline`), MQTT data
+ * while the cloud lists it offline (`mqttWhileOffline`), a content change without pack data
+ * (`touch`); a restart clears it (the store's first body after one only seeds the witness). A Core
+ * that reports records its own pv_total / ac_in each minute; its BMS registers move with
+ * `coreBatW` and freeze while it is offline, then jump to the true count when it reports again.
+ * Test serials are placeholders.
  *
  * DB_PATH must name a fresh file before the recorder is imported: `loadPlant` sets it.
  */
@@ -50,10 +55,11 @@ export async function loadPlant(prefix: string) {
   type Rec = ReturnType<typeof createRecorder>;
   const realNow = Date.now;
 
-  function dpu(sn: string, online: boolean, regs: Regs | null, changedAt: number | undefined): Any {
+  function dpu(sn: string, online: boolean, regs: Regs | null, changedAt: number | undefined, contentAt: number | undefined): Any {
     return {
       sn, deviceName: sn, productName: 'DELTA Pro Ultra', online, lastUpdated: 0,
       ...(changedAt != null ? { onlineChangedAtMs: changedAt } : {}),
+      ...(contentAt != null ? { contentChangedAtMs: contentAt } : {}),
       ...(regs ? {
         projection: {
           kind: 'dpu', soc: 60, packCount: PACKS, pvTotalWatts: 0, totalInWatts: 0, totalOutWatts: 0, acInWatts: 0, acOutWatts: 0,
@@ -104,8 +110,16 @@ export async function loadPlant(prefix: string) {
     coreBatW: number[] | null = null;
     online: Record<string, boolean> = Object.fromEntries(CORES.map((sn) => [sn, true]));
     changedAt: Record<string, number | undefined> = {};
-    /** The registers every Core shows (tests that move all Cores together set this). */
-    regs: Regs | null = { chg: 1_000_000, dsg: 1_000_000 };
+    /** Each Core's content clock (the store's contentChangedAtMs). */
+    contentAt: Record<string, number | undefined> = {};
+    private _regs: Regs | null = { chg: 1_000_000, dsg: 1_000_000 };
+    /** The registers every Core shows (tests that move all Cores together set this): setting them is
+     *  fresh data from every online Core. */
+    get regs(): Regs | null { return this._regs; }
+    set regs(v: Regs | null) {
+      this._regs = v;
+      for (const sn of CORES) if (this.online[sn]) this.contentAt[sn] = this.clock;
+    }
     /** Per-Core TRUE registers once `coreBatW` moves them; `shown` is what each Core reports. */
     trueRegs: Record<string, Regs> = {};
     shown: Record<string, Regs> = {};
@@ -125,14 +139,32 @@ export async function loadPlant(prefix: string) {
     }
     get coresOnline(): boolean { return CORES.every((sn) => this.online[sn]); }
     set coresOnline(v: boolean) { this.setOnline(v); }
-    /** Flip Cores online/offline at `at` (the store's onlineChangedAtMs). */
-    setOnline(v: boolean, sns: string[] = CORES, at: number = this.clock): void {
+    /** Flip Cores online/offline at `at` (the store's onlineChangedAtMs). Online with `land` (the
+     *  default), a Core moved by `coreBatW` delivers its true registers at the flip (the jump lands);
+     *  without it the flip comes before any fresh data (the projection stays the frozen one). */
+    setOnline(v: boolean, sns: string[] = CORES, at: number = this.clock, land = true): void {
       for (const sn of sns) {
         if (this.online[sn] === v) continue;
         this.online[sn] = v;
         this.changedAt[sn] = at;
-        if (v && this.trueRegs[sn]) this.shown[sn] = { ...this.trueRegs[sn] }; // the jump lands
+        if (v && land && this.trueRegs[sn]) { this.shown[sn] = { ...this.trueRegs[sn] }; this.contentAt[sn] = at; }
       }
+    }
+    /** The true registers arrive (fresh data): from every Core moved by `coreBatW`. */
+    land(sns: string[] = CORES): void {
+      for (const sn of sns) if (this.trueRegs[sn]) { this.shown[sn] = { ...this.trueRegs[sn] }; this.contentAt[sn] = this.clock; }
+    }
+    /** MQTT still delivers the packs' registers while the cloud lists the Cores offline (the store
+     *  translates them whatever the online flag): `regs` (default: the true ones) and the content clock. */
+    mqttWhileOffline(sns: string[] = CORES, regs?: Record<string, Regs>): void {
+      for (const sn of sns) {
+        const r = regs?.[sn] ?? this.trueRegs[sn];
+        if (r) { this.shown[sn] = { ...r }; this.contentAt[sn] = this.clock; }
+      }
+    }
+    /** A content change without pack data (the witness moves; the registers do not). */
+    touch(sns: string[] = CORES): void {
+      for (const sn of sns) this.contentAt[sn] = this.clock;
     }
     /** Offline since before the add-on saw them: the device list's first sight carries no transition. */
     darkAtFirstSight(): void {
@@ -143,11 +175,11 @@ export async function loadPlant(prefix: string) {
       this.db = new DatabaseSync(DB_PATH);
       this.ins = this.db.prepare('INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)');
     }
-    /** A restart: the store sees every Core afresh (no transition times). */
+    /** A restart: the store sees every Core afresh (no transition times, no content clock). */
     restart(): void {
       this.rec.close();
       this.db.close();
-      for (const sn of CORES) this.changedAt[sn] = undefined;
+      for (const sn of CORES) { this.changedAt[sn] = undefined; this.contentAt[sn] = undefined; }
       this.open();
     }
     close(): void {
@@ -162,7 +194,7 @@ export async function loadPlant(prefix: string) {
       const out: Record<string, Any> = { [PANEL]: panelDev(this.panelStale ? this.clock - 600_000 : this.clock, this) };
       for (const sn of CORES) {
         const projected = this.online[sn] || this.frozenProjection;
-        out[sn] = dpu(sn, this.online[sn], projected ? this.regsOf(sn) : null, this.changedAt[sn]);
+        out[sn] = dpu(sn, this.online[sn], projected ? this.regsOf(sn) : null, this.changedAt[sn], this.contentAt[sn]);
       }
       return out;
     }
@@ -187,7 +219,7 @@ export async function loadPlant(prefix: string) {
           const mah = Math.abs(this.coreBatW[i]) / 60 / PACK_MAH_TO_WH / PACKS;
           if (this.coreBatW[i] > 0) tr.dsg += mah; else tr.chg += mah;
           this.trueRegs[sn] = tr;
-          if (this.online[sn]) this.shown[sn] = { ...tr };
+          if (this.online[sn]) { this.shown[sn] = { ...tr }; this.contentAt[sn] = t; }
           else this.shown[sn] ??= { ...(this.regs ?? tr) };
         }
         if (!this.online[sn]) return;

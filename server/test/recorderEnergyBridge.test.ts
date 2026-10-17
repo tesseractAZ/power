@@ -12,7 +12,10 @@
  *    stored-energy rise (an unverified 0 W panel PV field is not "no PV"), or read from the field
  *    once it has been checked against that inferred lower bound (and dropped when it falls below);
  *  - when the Cores report again, their BMS counters jump by the dark days' throughput; the
- *    published totals do not jump (the bridge already counted it) and never step down;
+ *    published totals do not jump (the bridge already counted it) and never step down — also when
+ *    MQTT battery data still arrives while the cloud lists them offline, or arrives just before the
+ *    online flip from early in the dark span;
+ *  - the day/night test is judged at the configured install site;
  *  - a restart mid-outage keeps all of it.
  * Test serials are placeholders.
  */
@@ -312,6 +315,152 @@ test('★★★ an online flip before the first fresh quota does not spend the m
     const after = p.read();
     near(after.dsg, before.dsg, 1, 'absorbed');
   } finally { p.close(); }
+});
+
+type Regs = { chg: number; dsg: number };
+const copyRegs = (p: InstanceType<typeof Plant>): Record<string, Regs> =>
+  Object.fromEntries(CORES.map((sn) => [sn, { ...p.trueRegs[sn] }]));
+/** Night, every Core discharging into its slot (the 10-15 shape), the BMS registers moving with it. */
+function dischargingNight(): { p: InstanceType<typeof Plant>; before: ReturnType<InstanceType<typeof Plant>['read']>; atDark: Record<string, Regs> } {
+  const p = new Plant(Date.parse('2026-10-15T00:00:00-07:00'));
+  p.establishHeld();
+  p.coreBatW = DISCHARGE_W.map((w) => -w);
+  p.run(5);
+  const before = p.read();
+  const atDark = copyRegs(p);
+  p.goDark(DISCHARGE_W);
+  return { p, before, atDark };
+}
+const TRUE_4H = 3409 * 4;
+
+test('★★★ MQTT battery data still arriving after the Cores are listed offline is absorbed as it arrives: an online flip on that projection, then the fresh data, count the dark span once', () => {
+  const { p, before, atDark } = dischargingNight();
+  try {
+    // The store translates DPU battery data whatever the online flag: 10 min of it after the
+    // offline flag, past the dwell and the first marker.
+    p.run(10, () => p.mqttWhileOffline());
+    const mid = p.rec.batteryLifetimeDebug().bridge;
+    assert.equal(mid.markers.length, CORES.length * PACKS);
+    assert.equal(mid.absorbed.length, CORES.length * PACKS, 'the movement is absorbed while dark, the markers kept');
+    assert.ok(p.lifetimeKeys().some((k) => k.startsWith('bridge_absorbed_')), 'and persisted for the hand-over line');
+    p.run(230);
+    // Online again before any fresh data: the projection is still the one MQTT left.
+    p.setOnline(true, CORES, p.clock, false);
+    p.clock += 30_000;
+    p.read();
+    assert.equal(p.rec.batteryLifetimeDebug().bridge.markers.length, CORES.length * PACKS, 'the flip does not spend the markers');
+    p.clock += 30_000;
+    p.land();
+    const after = p.read();
+    near(after.dsg - before.dsg, TRUE_4H, TRUE_4H * 0.01, 'battery out over the 4-h dark span: the bridge, not the BMS again');
+    near(after.chg - before.chg, 0, 1, 'battery in');
+    assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.markers, []);
+    assert.ok(!p.lifetimeKeys().some((k) => k.startsWith('bridge_absorbed_')), 'the absorbed rows go with the markers');
+    // The hand-over line states everything the BMS counted while dark, the part absorbed before the return included.
+    CORES.forEach((sn, i) => {
+      const line = p.logs.find((l) => l.includes(`hand-over sn=${sn}:`));
+      assert.ok(line, sn);
+      const m = /the BMS counted ([\d.]+) kWh in \/ ([\d.]+) kWh out while dark/.exec(line)!;
+      const dsgKwh = (p.trueRegs[sn].dsg - atDark[sn].dsg) * PACKS * PACK_MAH_TO_WH / 1000;
+      near(Number(m[2]), dsgKwh, 0.015, `${sn} BMS discharge while dark (kWh)`);
+      near(Number(m[1]), 0, 0.005, `${sn} BMS charge while dark (kWh)`);
+      assert.ok(dsgKwh > -DISCHARGE_W[i] * 4 / 1000 - 0.1, `${sn}: ${dsgKwh}`);
+    });
+  } finally { p.close(); }
+});
+
+test('★★★ a reconnect burst of queued MQTT data from early in the dark span, just before the online flip, is not the return: the marker waits for data after the flip', () => {
+  const { p, before } = dischargingNight();
+  try {
+    let early: Record<string, Regs> = {};
+    p.run(240, (_t, m) => { if (m === 20) early = copyRegs(p); });
+    // The Cores reconnect: the broker delivers battery data queued 20 min into the outage, and
+    // seconds later the cloud lists them online. No read runs in between.
+    p.mqttWhileOffline(CORES, early);
+    p.clock += 5_000;
+    p.setOnline(true, CORES, p.clock, false);
+    p.clock += 10_000;
+    p.read();
+    assert.equal(p.rec.batteryLifetimeDebug().bridge.markers.length, CORES.length * PACKS, 'not spent on data from before the flip');
+    p.clock += 20_000;
+    p.land();
+    near(p.read().dsg - before.dsg, TRUE_4H, TRUE_4H * 0.01, 'battery out: the dark span once');
+    assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.markers, []);
+  } finally { p.close(); }
+});
+
+test('★★★ a content change without pack data right after the online flip: what MQTT moved while the Cores were listed offline was absorbed then, so the markers wait for the real jump', () => {
+  const { p, before } = dischargingNight();
+  try {
+    p.run(10, () => p.mqttWhileOffline());
+    p.run(230);
+    p.setOnline(true, CORES, p.clock, false);
+    p.clock += 5_000;
+    p.touch(); // e.g. an output-power message: the content witness moves, the packs' registers do not
+    p.clock += 25_000;
+    p.read();
+    assert.equal(p.rec.batteryLifetimeDebug().bridge.markers.length, CORES.length * PACKS, 'nothing moved since the return');
+    p.clock += 30_000;
+    p.land();
+    near(p.read().dsg - before.dsg, TRUE_4H, TRUE_4H * 0.01, 'battery out: the dark span once');
+    assert.equal(p.logs.filter((l) => l.includes('energy-bridge hand-over')).length, CORES.length);
+  } finally { p.close(); }
+});
+
+test('★★★ after a restart a Core listed online at first sight hands over only once its content changes: a first body that replays one from the dark span does not spend the marker', () => {
+  const { p, before } = dischargingNight();
+  try {
+    let early: Record<string, Regs> = {};
+    p.run(120, (_t, m) => { if (m === 30) early = copyRegs(p); });
+    const bridged = p.read();
+    // The add-on restarts while the Cores come back: online at first sight (no transition time, the
+    // content witness only seeded), the cloud's first body a cached one from 30 min into the outage.
+    p.restart();
+    for (const sn of CORES) { p.online[sn] = true; p.shown[sn] = { ...early[sn] }; }
+    p.clock += 30_000;
+    near(p.read().dsg, bridged.dsg, 60, 'absorbed (the final rollup at the stop may add its minute)');
+    assert.equal(p.rec.batteryLifetimeDebug().bridge.markers.length, CORES.length * PACKS, 'kept: no content change seen yet');
+    p.clock += 30_000;
+    p.land(); // the Cores stream: their content changes, with their current registers
+    const after = p.read();
+    near(after.dsg, bridged.dsg, 60, 'the rest of the dark span is absorbed too');
+    assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.markers, []);
+    near(after.dsg - before.dsg, 3409 * 2, 3409 * 2 * 0.02, 'battery out: the two bridged hours');
+  } finally { p.close(); }
+});
+
+/* ── the install site ───────────────────────────────────────────────────── */
+
+test('★★★ the day/night test is judged at the configured site: 10:00 in Berlin is daylight (the solar the Cores pass on is PV, not battery out); 23:00 there is night for the power sensors', async () => {
+  const { config } = await import('../src/config.js');
+  const saved = [config.forecastLat, config.forecastLon];
+  config.forecastLat = 52.52;
+  config.forecastLon = 13.405;
+  const t0 = Date.parse('2026-10-15T10:00:00+02:00'); // 01:00 in Phoenix
+  const p = new Plant(t0);
+  try {
+    for (const sn of CORES) for (let k = 1; k <= 5; k++) p.sample(sn, `pack${k}_full_cap_mah`, FULL_CAP_MAH, t0 - H);
+    p.darkAtFirstSight();
+    p.frozenProjection = false;
+    p.sourceWatts = [-300, -300, -300];
+    p.pct = [40, 40, 40];
+    p.panelSamples(t0);
+    const before = p.read();
+    p.run(120, (_t, m) => { p.pct = CORES.map(() => 40 + Math.floor(m / 8)); });
+    const after = p.read();
+    assert.equal(p.rec.batteryLifetimeDebug().bridge.lastRollup?.slots[0].basis, 'inferred');
+    assert.ok(after.pv - before.pv > 3 * 300 * 2, `solar booked: ${(after.pv - before.pv).toFixed(0)} Wh`);
+    near(after.dsg - before.dsg, 0, 1, 'the 300 W the Cores supplied came from PV, not the battery');
+    // 23:00 in Berlin is 14:00 in Phoenix.
+    p.clock = Date.parse('2026-10-15T23:00:00+02:00');
+    p.sourceWatts = [-1000, -1000, -1000];
+    const f = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet], [true, 0, 3000]);
+  } finally {
+    p.close();
+    config.forecastLat = saved[0];
+    config.forecastLon = saved[1];
+  }
 });
 
 /* ── restarts ───────────────────────────────────────────────────────────── */
