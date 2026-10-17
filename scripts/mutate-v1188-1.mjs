@@ -258,6 +258,10 @@
  *   J-xxx   the repair does not say it reset a row (survivor I1)
  *   J-xxxi  a write lock held elsewhere fails the whole scan, not the slice
  *
+ * Merge (the Core content-clock gate and the held-sample machinery):
+ *   U-i     a later start re-opens the gate span (a replay after a restart is never logged)
+ *   U-ii    an earlier start continues the open span (another hold's start is lost)
+ *
  *   node scripts/mutate-v1188-1.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -290,6 +294,7 @@ const SUBSET = [
   'test/heldGapRecords.test.ts',
   'test/heldSamplesAnchors.test.ts',
   'test/heldSamplesReview4.test.ts',
+  'test/heldReplayContentGate.test.ts',
 ];
 
 const MUTANTS = [
@@ -1916,6 +1921,21 @@ const MUTANTS = [
     find: "    try {\n      // v1.188.1 (review 6) — IMMEDIATE: the write lock first, so the restored spans read below are\n      // the ones the copy and delete run against (another connection cannot commit in between). A\n      // lock held elsewhere fails this slice like any other step of it (below).\n      db.exec('BEGIN IMMEDIATE');",
     to: "    db.exec('BEGIN IMMEDIATE'); /* MUTANT */\n    try {",
     why: 'An SQL session left mid-transaction on the database aborts the scan (the rest of it, every other device, waits an hour) instead of failing one slice.',
+  },
+  // ── merge: the Core content-clock gate and the held-sample machinery ──
+  {
+    id: 'U-i. ★★ a later start re-opens the gate span',
+    file: HS,
+    find: '      if (g && (h.sinceMs < g.startMs || g.reason !== reason)) {',
+    to: '      if (g && (g.startMs !== h.sinceMs || g.reason !== reason)) { /* MUTANT */',
+    why: 'After a restart a Core has no content clock, so a replay of its cached body is held from its last arrival, which moves with every poll: the span is re-opened at each, never an hour long, never logged, and the night ledger reads the replay as missing rather than held.',
+  },
+  {
+    id: 'U-ii. ★ an earlier start continues the open span',
+    file: HS,
+    find: '      if (g && (h.sinceMs < g.startMs || g.reason !== reason)) {',
+    to: '      if (g && g.reason !== reason) { /* MUTANT */',
+    why: 'A hold found to have started earlier (a shadow onset) is folded into the open span, which keeps the later start: the earlier held time is never logged.',
   },
 ];
 

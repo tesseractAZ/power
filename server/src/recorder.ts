@@ -1226,9 +1226,13 @@ export function createRecorder(
     // so the per-device sweep measures the silence from where it really began.
     //
     // v1.188.1 (review 3) — and so does a clock this process wrote, the device's last written
-    // row, when that row is one of those moved: a Core has no shadow latch, so a replayed Core
-    // body passes the gate and is written every 5 min, which is what the hourly scan exists to
-    // catch. Left on the moved row, the sweep filed the record 6 h after it, a hold late, and from
+    // row, when that row is one of those moved: held rows that passed the gate are what the hourly
+    // scan exists to catch. (The content-clock gate holds a Core whose cached body is replayed
+    // unchanged once its content clock is more than five minutes old, projectionRecordable, so in
+    // this process such a replay writes its first minutes at most: the held rows the scan finds are
+    // those written before v1.188.1, the upgrade boot's, and any that reach samples anyway, while a
+    // marker the gate reads moves with the recorded readings repeating.) Left on the moved row, the
+    // sweep filed the record 6 h after it, a hold late, and from
     // it: a start at the last held row and a duration short by the whole hold, pushed so, with no
     // later move to re-date it (redateDeviceGap only edits a record already filed).
     //
@@ -1245,7 +1249,7 @@ export function createRecorder(
     // v1.188.1 (review 4) — the clock goes back also when its row is a restatement the scan read
     // but has not moved yet (in (endMs, heldThroughMs]), and the device is then HELD from the span's
     // start (heldReplayFrom): while its writes only restate the same readings, they leave the clock
-    // there and the sweep's record open (record()). A Core whose cloud body is still being replayed
+    // there and the sweep's record open (record()). A device whose held body is still being written
     // writes a fresh-stamped row every 5 min, so its clock was always newer than any moved range
     // (the scan never moves a row younger than 15 min), and each write reset the clock and re-armed
     // the sweep: no "Device telemetry gap" while the replay lasted, none at all when it ended with
@@ -1561,8 +1565,9 @@ export function createRecorder(
    * v1.188.1 (review 6) — onMoved held a device from a span's start: the fleet clock
    * (`lastHomeInsertTs`) goes back to the newest gap clock of any home device, not before this
    * process's first home write, when that is earlier. Every home write after it restated a reading
-   * the scan has now found held (record() no longer counts such a write as a home insert). A Core
-   * has no shadow latch, so a replayed Core body passes the gate and is written: with the panel
+   * the scan has now found held (record() no longer counts such a write as a home insert). Held
+   * rows that passed the gate (onMoved: a Core's replay the content-clock gate holds after its first
+   * minutes, so as a rule rows written before v1.188.1) are such writes: with the panel
    * held behind its shadow latch, those writes kept the fleet clock current, no fleet silence was
    * ever seen, and at 6 h each device got a per-device warning saying that "other home devices
    * kept reporting" while none had a fresh reading. The fleet gap is then filed when a fresh home

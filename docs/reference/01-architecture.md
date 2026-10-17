@@ -275,7 +275,11 @@ own content arrival emits `change`, so it is recorded at age 0 and the poll cade
 unchanged; the gate bites only on rows written on another device's event. A latched panel shadow
 releases with hysteresis, so the first few moving readings after a shadow are not recorded either.
 A hold of an hour or more is logged in `held_spans` from the device's last fresh content, with one
-log line when it reaches an hour and one when the device reports again. The gate never writes the
+log line when it reaches an hour and one when the device reports again. A later start for a device
+held at every evaluation since its span opened is the same hold (`noteGate`): a Core with no content
+clock yet, after a restart, is held from its last arrival, which moves with every poll, so its span
+runs from the first instant the process held it, never from before the restart (re-opened at each
+new start, a replay after a restart was never an hour long and never logged). The gate never writes the
 store: the offline, stale and blind alarms and the SoC ladder read the same projection as before.
 
 #### 4.4 Dedupe / heartbeat
@@ -560,9 +564,13 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   6 h after the panel's first fresh reading (04:16 → about 10:16), not 6 h after it went quiet.
   A Core still held at a restart is measured from the start of its held span (as a rule its last
   fresh sample) once the scan has moved its held rows, or read the newest of them as restatements of
-  that stretch (4.4). So is a Core whose replayed body was written in this process (a Core has no
-  shadow latch, so the gate passes a replay with a fresh clock): when the scan moves the stretch the
-  row its clock reads belongs to, the clock goes back to the span's start. Left on the moved row,
+  that stretch (4.4). So is a device whose held body was written in this process: when the scan
+  moves the stretch the row its clock reads belongs to, the clock goes back to the span's start.
+  (The content-clock gate, 4.3, holds a Core whose cached body is replayed unchanged once its content
+  clock is more than 5 min old, so in this process such a replay writes its first minutes at most;
+  the held rows the scan finds are those written before v1.188.1, as on the upgrade boot, and any
+  that reach `samples` anyway, while a marker the gate reads moves with the recorded readings
+  repeating.) Left on the moved row,
   the sweep filed the record a hold late, with a start at the last held row and a duration short by
   the whole hold, and no later move re-dated it. The device is then held from that start
   (`heldReplayFrom`): while its writes only restate the same readings (each metric equal to its
@@ -583,7 +591,7 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   clock nor runs the sweeps. When the move holds a device, the fleet clock goes back to the newest
   gap clock of any home device, not before this process's first home write (`pullFleetClockBack`),
   and a restore that moves a device's clock past it moves it forward again. So with every home device
-  held (the panel behind its shadow latch, the Cores replayed with fresh clocks) no device is filed,
+  held (the panel behind its shadow latch, the Cores' held rows written with fresh clocks) no device is filed,
   and the fleet gap is filed when a fresh home reading comes, from the last fresh one (v1.188.1, sixth
   review: the replayed writes kept the fleet clock current, no fleet silence was seen, and at 6 h each
   device got a per-device warning saying that other home devices kept reporting).

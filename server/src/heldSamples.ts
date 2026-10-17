@@ -689,13 +689,22 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
    * v1.188.1 — the gate's evaluation of one change event: `held` maps each device the gate did NOT
    * record to its heldSinceMs. A hold of HELD_SPAN_MIN_MS or more is persisted (and its end kept
    * current at most once a minute); it closes on the device's first recordable evaluation.
+   *
+   * v1.188.1 (merge) — a LATER start for a device held at every evaluation since the span opened is
+   * the same hold: no fresh reading came in between (one would have closed it). The case is a Core
+   * with no content clock yet, after a restart: the store's first body only seeds its witness, so a
+   * Core whose cloud replays its cached body is held from its last arrival, which moves with every
+   * poll. Re-opened at each new start, its span never reached an hour and was never logged, so the
+   * night ledger read the replay as missing rather than held; in this process (a content clock) the
+   * same replay is one span from its last change. The span runs from the first instant this process
+   * held it, never earlier: the downtime of a restart is not charged as a hold.
    */
   function noteGate(held: ReadonlyMap<string, { sinceMs: number | null; shadow: boolean }>, atMs: number): void {
     for (const [sn, h] of held) {
       if (h.sinceMs == null || o.isExcludedSn(sn)) continue;
       const reason: HeldReason = h.shadow ? 'gate-shadow' : 'gate-stale';
       let g = gateOpen.get(sn);
-      if (g && (g.startMs !== h.sinceMs || g.reason !== reason)) {
+      if (g && (h.sinceMs < g.startMs || g.reason !== reason)) {
         if (g.persistedAtMs > 0) persistGate(sn, g, atMs);
         g = undefined;
       }

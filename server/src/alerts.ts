@@ -2759,7 +2759,7 @@ export type TelemetryGapRecord = {
   /** v1.188.1 (dry run) — an in-process fleet gap the freshness gate explains: the home devices
    *  it held while the recorder kept evaluating the fleet (`shadow`: the panel's cloud shadow).
    *  v1.188.1 (review 6) — `replayed`: a device written while it only restated readings the
-   *  held-sample scan had moved out of samples (a replayed Core body passes the gate). */
+   *  held-sample scan had moved out of samples (held rows that passed the gate: recorder.ts onMoved). */
   held?: Array<{ sn: string; shadow: boolean; replayed?: boolean }>;
   /** v1.188.1 (review 3) — with `held`: the home devices those evaluations found fresh with
    *  nothing measurable, never held in the silence (recorder.ts TelemetryGap.unmeasured). */

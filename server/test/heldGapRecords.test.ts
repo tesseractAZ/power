@@ -400,18 +400,24 @@ test('★★ the post-boot silence carries what the gate held through it, and no
 
 const iso = (ms: number) => new Date(ms).toISOString();
 const fmtClock = (ms: number) => new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-/** A Core's DPU projection with a fresh content clock (14 metrics written). */
+/** A Core's DPU projection with a fresh content clock (14 metrics written): its content arrived and
+ *  (v1.188.1, the content-clock gate) CHANGED at `contentAt`, so the gate passes it whatever its
+ *  readings. A Core whose cached body the cloud replays unchanged keeps its content clock still and
+ *  is held by the gate itself, writing nothing past five minutes (heldReplayContentGate.test.ts):
+ *  the replays below stand for held rows that reach samples anyway (rows written before v1.188.1,
+ *  as on the upgrade boot, or a body whose content clock moves while its recorded readings repeat),
+ *  which the scan and the replay hold still catch. */
 const dpu = (sn: string, contentAt: number, soc: number): Snap => ({
-  sn, deviceName: names[sn] ?? sn, lastTelemetryAtMs: contentAt,
+  sn, deviceName: names[sn] ?? sn, lastTelemetryAtMs: contentAt, contentChangedAtMs: contentAt,
   projection: {
     kind: 'dpu', soc, pvTotalWatts: 0, pvHighWatts: 0, pvLowWatts: 0, pvHighVolts: 1, pvHighAmps: 1, pvLowVolts: 1, pvLowAmps: 1,
     acInWatts: 0, acOutWatts: 300, totalInWatts: 0, totalOutWatts: 300, batVol: 52, batAmp: -6, packs: [],
   },
 });
 
-/** In this process: a Core changes to T0 + 30 min, then the cloud replays its body with a fresh
- *  clock for 2 h (a Core has no shadow latch: the gate passes it, the heartbeat writes it), then it
- *  stops while the panel reports; the hourly scan moves the replay. */
+/** In this process: a Core changes to T0 + 30 min, then its body is replayed with a fresh content
+ *  clock for 2 h (the gate passes it, the heartbeat writes it: held rows that reach samples anyway,
+ *  see `dpu`), then it stops while the panel reports; the hourly scan moves the replay. */
 function replayedCore(t: TestContext, day: number) {
   reset([]);
   const T0 = phx(2026, 10, day, 5, 0);
@@ -718,9 +724,10 @@ for (const how of ['in the same process', 'after a restart', 'by the SQL of arch
   });
 }
 
-/** In this process: a Core changes to T0 + 30 min, then the cloud replays its body with a fresh
- *  clock (the gate passes it; the heartbeat writes it every 5 min) to T0 + `replayMin`, with an
- *  hourly scan; the panel reports every minute throughout. */
+/** In this process: a Core changes to T0 + 30 min, then its body is replayed with a fresh content
+ *  clock (the gate passes it: held rows that reach samples anyway, see `dpu`; the heartbeat writes
+ *  it every 5 min) to T0 + `replayMin`, with an hourly scan; the panel reports every minute
+ *  throughout. */
 function runningReplay(t: TestContext, day: number, replayMin: number) {
   reset([]);
   const T0 = phx(2026, 10, day, 5, 0);
@@ -1082,7 +1089,7 @@ test('★★ a record filed at the last fresh reading, a replay, then a second r
   const send = (devices: Snap[]) => rec.insertSnapshot({ generatedAt: clk.now, devices: Object.fromEntries(devices.map((d) => [d.sn, d])) } as any);
   try {
     // No scan (scans off, failing, or an earlier version): fresh to S, silent 7 h (record 1, at S),
-    // the cloud replays S's body for 2 h (written: it passes the gate), silent 7 h (record 2).
+    // S's body is replayed for 2 h (written: its content clock is fresh, see `dpu`), silent 7 h (record 2).
     for (let m = 1; m <= 60; m++) { clk.at(T0 + m * MIN); send([panel(clk.now), dpu(CORE_A, clk.now, 40 + m)]); }
     const S = T0 + 60 * MIN;
     for (let m = 61; m <= 480; m++) { clk.at(T0 + m * MIN); send([panel(clk.now)]); }
