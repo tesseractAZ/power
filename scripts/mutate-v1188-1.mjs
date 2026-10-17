@@ -44,6 +44,31 @@
  *   W-iv    the sweep does not wait for the first scan
  *   W-v     the sweep does not repair before it captures
  *
+ * Fix round 1 (review):
+ *   D-i     the in-process sweep measures now − last again (a fleet outage files every device)
+ *   D-ii    inProcessDeviceDarkMs ignores the fleet-dark windows
+ *   D-iii   the silence the batch is ending is not counted (filed before the fleet record exists)
+ *   B-i     the incomplete-basis note drops the held verdict (no marker)
+ *   B-ii    the scorer writes the bare basis note on a held row
+ *   O-i     a gap with no rows counts toward a frozen stretch's length
+ *   O-ii    an interval of exactly the bridge is not observed constancy
+ *   O-iii   observed constancy carries over from the previous stretch
+ *   K-i     the watermark is saved past a failed slice
+ *   K-ii    a failed slice is not remembered
+ *   K-iii   a failure is remembered by every later scan (the watermark never advances again)
+ *   P-i     a move does not advance the samples generation
+ *   P-ii    a restore does not advance the samples generation
+ *   P-iii   the chokepoint resets the result caches only, not the closed-day memos
+ *   P-iv    buildReport never reads the samples generation
+ *   P-v     the closed-day energy memo survives a move
+ *   P-vi    the equipment-health series survives a move
+ *   C-i     a curtailment hour with no panel_load is 0 W of load again
+ *   T-i     a series is carried across its own gap
+ *   T-ii    a series is carried without bound after its newest point
+ *   T-iii   no break row inside a gap (a one-series chart runs straight across)
+ *   T-iv    the trend chart connects nulls again
+ *   T-v     the trend chart ignores its bucket in the gap
+ *
  *   node scripts/mutate-v1188-1.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -54,11 +79,18 @@ const HS = resolve(REPO, 'server/src/heldSamples.ts');
 const REC = resolve(REPO, 'server/src/recorder.ts');
 const NLS = resolve(REPO, 'server/src/nightLedgerScoring.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
+const AN = resolve(REPO, 'server/src/analytics.ts');
+const REP = resolve(REPO, 'server/src/reports.ts');
+const TM = resolve(REPO, 'web/src/charts/trendMerge.ts');
+const TC = resolve(REPO, 'web/src/charts/TrendChart.tsx');
 const SUBSET = [
   'test/recorderHeldReadings.test.ts',
   'test/heldSamplesBackfill.test.ts',
   'test/ledgerHeldTelemetry.test.ts',
   'test/recorderRestartGap.test.ts',
+  'test/heldSamplesWorkerMemo.test.ts',
+  'test/curtailmentHeldPanel.test.ts',
+  'test/trendMergeGaps.test.ts',
 ];
 
 const MUTANTS = [
@@ -163,15 +195,15 @@ const MUTANTS = [
   {
     id: 'F-i. ★ the scanner needs no restatements',
     file: HS,
-    find: '      const qualifies = lastHeldTs - anchor >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;',
-    to: '      const qualifies = lastHeldTs - anchor >= opts.minSpanMs && counts.size >= opts.minMetrics; /* MUTANT */',
+    find: '      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;',
+    to: '      const qualifies = observedMs >= opts.minSpanMs && counts.size >= opts.minMetrics; /* MUTANT */',
     why: 'Two identical rows an hour apart — a restart after an hour down — read as a hold.',
   },
   {
     id: 'F-ii. ★★ the scanner needs no metric count',
     file: HS,
-    find: '      const qualifies = lastHeldTs - anchor >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;',
-    to: '      const qualifies = lastHeldTs - anchor >= opts.minSpanMs && restatements >= opts.minRestatements; /* MUTANT */',
+    find: '      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;',
+    to: '      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements; /* MUTANT */',
     why: 'A generic device that legitimately sat idle for an hour has its real rows moved.',
   },
   {
@@ -184,7 +216,7 @@ const MUTANTS = [
   {
     id: 'F-iv. ★★ the scanner\'s minimum length is dropped',
     file: HS,
-    find: '      const qualifies = lastHeldTs - anchor >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;',
+    find: '      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;',
     to: '      const qualifies = restatements >= opts.minRestatements && counts.size >= opts.minMetrics; /* MUTANT */',
     why: 'Forty quiet minutes of a live Core are moved out of samples.',
   },
@@ -320,6 +352,168 @@ const MUTANTS = [
     find: '  if (repairHeldNightOutcomes(rows, shp2Sn, nowMs)) rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);',
     to: '  /* MUTANT */',
     why: 'The 10-14 row captured on held PV (and the 10-15 row, if captured before the deploy) keep their fabricated verdicts.',
+  },
+  // ── fix round 1 (review) ──
+  {
+    id: 'D-i. ★★★ the in-process sweep measures now − last again',
+    file: REC,
+    find: '          : inProcessDeviceDarkMs(lastMs, now, fleetDark);',
+    to: '          : now - lastMs; /* MUTANT */',
+    why: 'After a 7 h internet outage every device but the first to answer is filed as dark for 7 h: three false pushed "Device telemetry gap" WARNINGs.',
+  },
+  {
+    id: 'D-ii. ★★ inProcessDeviceDarkMs ignores the fleet-dark windows',
+    file: REC,
+    find: '  return Math.max(0, nowMs - lastMs - fleetDarkOverlapMs(fleetDarkWindows, lastMs, nowMs));',
+    to: '  return Math.max(0, nowMs - lastMs); /* MUTANT */',
+    why: 'A fleet-wide silence is charged to each device.',
+  },
+  {
+    id: 'D-iii. ★★ the silence the batch is ending is not counted',
+    file: REC,
+    find: '        fleetDark.push({ startMs: lastHomeInsertTs, endMs: now });',
+    to: '        /* MUTANT */',
+    why: 'The fleet record is written after the sweep, so the first batch back files every other device for the whole outage.',
+  },
+  {
+    id: 'B-i. ★★★ the incomplete-basis note drops the held verdict',
+    file: NLS,
+    find: '  if (v == null) return BASIS_INCOMPLETE_NOTE;',
+    to: '  if (v == null || Date.now() > 0) return BASIS_INCOMPLETE_NOTE; /* MUTANT */',
+    why: 'No marker: the held repair resets and re-captures the row on every sweep for 28 days.',
+  },
+  {
+    id: 'B-ii. ★★ the scorer writes the bare basis note on a held row',
+    file: IDX,
+    find: '    scoreNotes = basisIncompleteNote(heldVerdict, deviceNameOf);',
+    to: '    scoreNotes = basisIncompleteNote(null, deviceNameOf); /* MUTANT */',
+    why: 'The same endless reset, from the scorer.',
+  },
+  {
+    id: 'O-i. ★★★ a gap with no rows counts toward a frozen stretch',
+    file: HS,
+    find: '          if (prevRowTs != null && ts - prevRowTs <= bridgeMs) observedMs += ts - prevRowTs;',
+    to: '          if (prevRowTs != null) observedMs += ts - prevRowTs; /* MUTANT */',
+    why: 'A constant Core back from a 55-min gap has its fresh rows moved after 10 min of observation, and its night refused.',
+  },
+  {
+    id: 'O-ii. an interval of exactly the bridge is not observed constancy',
+    file: HS,
+    find: '          if (prevRowTs != null && ts - prevRowTs <= bridgeMs) observedMs += ts - prevRowTs;',
+    to: '          if (prevRowTs != null && ts - prevRowTs < bridgeMs) observedMs += ts - prevRowTs; /* MUTANT */',
+    why: 'Rows two heartbeats apart (integrateWh\'s own bridge) read as a gap.',
+  },
+  {
+    id: 'O-iii. ★ observed constancy carries over from the previous stretch',
+    file: HS,
+    find: '    lastHeldTs = Number.NEGATIVE_INFINITY;\n    observedMs = 0;\n  };',
+    to: '    lastHeldTs = Number.NEGATIVE_INFINITY;\n    /* MUTANT */\n  };',
+    why: 'Two short quiet stretches split by one change add up to an hour, and a live Core is moved.',
+  },
+  {
+    id: 'K-i. ★★★ the watermark is saved past a failed slice',
+    file: HS,
+    find: '      scanStateUpsertStmt.run(Math.min(scanToMs, failedFromMs), scanFull ? now() : null);',
+    to: '      scanStateUpsertStmt.run(scanToMs, scanFull ? now() : null); /* MUTANT */',
+    why: 'An old span whose move failed is never read again: its held rows stay in samples for good.',
+  },
+  {
+    id: 'K-ii. ★★ a failed slice is not remembered',
+    file: HS,
+    find: '      if (job.spanStartMs < failedFromMs) failedFromMs = job.spanStartMs;',
+    to: '      /* MUTANT */',
+    why: 'The same: the log promises a retry that never happens.',
+  },
+  {
+    id: 'K-iii. a failure is remembered by every later scan',
+    file: HS,
+    find: '    scanRows = 0;\n    failedFromMs = Number.POSITIVE_INFINITY;',
+    to: '    scanRows = 0;\n    /* MUTANT */',
+    why: 'After one fault the watermark never advances again: every hourly scan re-reads days of rows.',
+  },
+  {
+    id: 'P-i. ★★★ a move does not advance the samples generation',
+    file: HS,
+    find: '      if (moved > 0) bumpGenerationStmt.run();',
+    to: '      /* MUTANT */',
+    why: 'The worker keeps serving the closed day it memoised with the held flows until the next restart.',
+  },
+  {
+    id: 'P-ii. ★ a restore does not advance the samples generation',
+    file: HS,
+    find: '      if (n > 0) bumpGenerationStmt.run();',
+    to: '      /* MUTANT */',
+    why: 'Restored rows stay invisible to the worker\'s memos.',
+  },
+  {
+    id: 'P-iii. ★★ the chokepoint resets the result caches only',
+    file: REP,
+    find: '  advanceBasisGeneration();\n  resetWorkerSampleCaches();',
+    to: '  advanceBasisGeneration();\n  resetWorkerReportCaches(); /* MUTANT */',
+    why: 'The results are rebuilt on the same stale closed-day memo.',
+  },
+  {
+    id: 'P-iv. ★★ buildReport never reads the samples generation',
+    file: REP,
+    find: '  noteSamplesGeneration(sgen, ctx.log);',
+    to: '  void noteSamplesGeneration; /* MUTANT */',
+    why: 'Nothing in the worker notices the move.',
+  },
+  {
+    id: 'P-v. ★ the closed-day energy memo survives a move',
+    file: AN,
+    find: '  resetWorkerReportCaches();\n  dailyEnergyWhCache.clear();\n  eqSeriesCache.clear();',
+    to: '  resetWorkerReportCaches();\n  /* MUTANT */\n  eqSeriesCache.clear();',
+    why: 'The 7-day self-consumption and carbon KPIs keep the incident day\'s held flows.',
+  },
+  {
+    id: 'P-vi. ★ the equipment-health series survives a move',
+    file: AN,
+    find: '  dailyEnergyWhCache.clear();\n  eqSeriesCache.clear();\n}',
+    to: '  dailyEnergyWhCache.clear();\n  /* MUTANT */\n}',
+    why: 'The inverter-standby idle-floor trend keeps the held ac_out buckets.',
+  },
+  {
+    id: 'C-i. ★★ a curtailment hour with no panel_load is 0 W of load again',
+    file: AN,
+    find: "  const loadW = meanInWindow(shp2.sn, 'panel_load');\n  if (loadW == null) return null;",
+    to: "  const loadW = meanInWindow(shp2.sn, 'panel_load') ?? 0; /* MUTANT */\n  if (loadW == null) return null;",
+    why: 'An hour of a full pool and a held panel is counted as curtailed: the "PV exceeds load" disqualifier cannot fire on a missing load.',
+  },
+  {
+    id: 'T-i. ★★★ a series is carried across its own gap',
+    file: TM,
+    find: '      const carried = next != null ? next.ts - at.ts <= gapMs : ts - at.ts <= gapMs;',
+    to: '      const carried = next != null ? true : ts - at.ts <= gapMs; /* MUTANT */',
+    why: 'A held Core is painted flat at its last reading while its sibling reports.',
+  },
+  {
+    id: 'T-ii. ★★ a series is carried without bound after its newest point',
+    file: TM,
+    find: '      const carried = next != null ? next.ts - at.ts <= gapMs : ts - at.ts <= gapMs;',
+    to: '      const carried = next != null ? next.ts - at.ts <= gapMs : true; /* MUTANT */',
+    why: 'A Core still held is drawn flat to the right edge of the chart.',
+  },
+  {
+    id: 'T-iii. ★ no break row inside a gap',
+    file: TM,
+    find: '      if (i + 1 < pts.length && pts[i + 1].ts - pts[i].ts > gapMs) all.add(pts[i].ts + 1);',
+    to: '      /* MUTANT */',
+    why: 'A one-device chart has no row inside the gap and runs one straight segment across it.',
+  },
+  {
+    id: 'T-iv. ★ the trend chart connects nulls again',
+    file: TC,
+    find: '                isAnimationActive={false}\n              />',
+    to: '                isAnimationActive={false}\n                connectNulls /* MUTANT */\n              />',
+    why: 'The nulls the merge emits are drawn through: the gap is a line again.',
+  },
+  {
+    id: 'T-v. the trend chart ignores its bucket in the gap',
+    file: TC,
+    find: 'dataBySeries, trendGapMs(bucketSec)),',
+    to: 'dataBySeries, 10 * 60_000), /* MUTANT */',
+    why: 'A chart bucketed coarser than 5 min breaks between every two buckets.',
   },
 ];
 

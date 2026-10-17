@@ -167,12 +167,24 @@ export interface FrozenScanOptions {
   minSpanMs: number;
   minRestatements: number;
   minMetrics: number;
+  /** v1.188.1 (review) — the longest interval between two consecutive rows that counts toward
+   *  `minSpanMs`; a longer one is a gap with no rows, observed as nothing. Optional (default
+   *  HELD_ROW_BRIDGE_MS) so a caller's options from before it keep their meaning. */
+  bridgeMs?: number;
 }
+
+/**
+ * v1.188.1 (review) — two heartbeats: the longest interval between two rows of a device that is
+ * still OBSERVED constancy (integrateWh's own 10-min bridge). The recorder restates an unchanged
+ * metric every 5 min while the device reports, so a longer interval means nothing was written.
+ */
+export const HELD_ROW_BRIDGE_MS = 10 * MIN_MS;
 
 export const FROZEN_DEFAULTS: FrozenScanOptions = {
   minSpanMs: HELD_SPAN_MIN_MS,
   minRestatements: HELD_MIN_RESTATEMENTS,
   minMetrics: HELD_MIN_METRICS,
+  bridgeMs: HELD_ROW_BRIDGE_MS,
 };
 
 /**
@@ -180,12 +192,18 @@ export const FROZEN_DEFAULTS: FrozenScanOptions = {
  *
  * A row whose value differs from the previous row of its metric (or whose metric has no previous
  * row) is new content: every row at that ts is a fresh reading and closes the stretch. A row equal
- * to its metric's previous value is a restatement. A stretch qualifies when, from its last fresh
- * instant to its last restatement, at least `minSpanMs` passed with no metric changing, some
- * metric was restated at least `minRestatements` times and at least `minMetrics` metrics were
- * restated. A GAP is not a hold: a stretch needs restated rows, so a span with no rows at all is
- * never reported. Every stretch with restated rows is returned, flagged `qualifies` when it meets
- * the thresholds.
+ * to its metric's previous value is a restatement. A stretch qualifies when at least `minSpanMs`
+ * of OBSERVED constancy passed — rows no further apart than `bridgeMs`, from its last fresh
+ * instant to its last restatement — with no metric changing, some metric was restated at least
+ * `minRestatements` times and at least `minMetrics` metrics were restated. A GAP is not a hold: a
+ * stretch needs restated rows, so a span with no rows at all is never reported, and (v1.188.1
+ * review) a gap inside a stretch does not count toward its length. Measured from the last change
+ * to the last restatement, a genuinely constant Core back from a 55-min gap with three identical
+ * heartbeats qualified after 10 min of observation, its fresh rows moved and its night refused;
+ * the gate (v1.188.1) makes such gaps whenever a device's content is more than 3 min old. The
+ * cost is deliberate: a replayed body after a long gap is caught once it has been restated for
+ * an hour, not before (the gate's own span over the gap still refuses the night-ledger row).
+ * Every stretch with restated rows is returned, flagged `qualifies` when it meets the thresholds.
  *
  * `prev` is each metric's value before the first fed row and `anchorMs` the ts of the newest such
  * row (the last fresh instant before the scan, when the scan starts mid-hold); both empty/null on
@@ -193,18 +211,23 @@ export const FROZEN_DEFAULTS: FrozenScanOptions = {
  */
 export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs: number | null, opts: FrozenScanOptions = FROZEN_DEFAULTS) {
   const last = new Map(prev);
+  const bridgeMs = opts.bridgeMs ?? HELD_ROW_BRIDGE_MS;
   let anchor = anchorMs;
   let counts = new Map<string, number>();
   let values = new Map<string, number>();
   let heldRows = 0;
   let firstHeldTs = Number.POSITIVE_INFINITY;
   let lastHeldTs = Number.NEGATIVE_INFINITY;
+  /** The ts of the previous row (fresh or restated): the start of the interval the next one ends. */
+  let prevRowTs: number | null = anchorMs;
+  /** Observed constancy: the intervals of the stretch no longer than bridgeMs. */
+  let observedMs = 0;
   const out: FrozenStretch[] = [];
   const close = () => {
     if (anchor != null && heldRows > 0) {
       let restatements = 0;
       for (const n of counts.values()) if (n > restatements) restatements = n;
-      const qualifies = lastHeldTs - anchor >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;
+      const qualifies = observedMs >= opts.minSpanMs && restatements >= opts.minRestatements && counts.size >= opts.minMetrics;
       out.push({ startMs: anchor, endMs: lastHeldTs, firstHeldMs: firstHeldTs, restatements, metrics: counts.size, heldRows, heldValues: values, qualifies });
     }
     counts = new Map();
@@ -212,6 +235,7 @@ export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs:
     heldRows = 0;
     firstHeldTs = Number.POSITIVE_INFINITY;
     lastHeldTs = Number.NEGATIVE_INFINITY;
+    observedMs = 0;
   };
   return {
     /** Rows in ts order (ties in any order). May be called once per chunk. */
@@ -237,7 +261,10 @@ export function createFrozenScanner(prev: ReadonlyMap<string, number>, anchorMs:
           heldRows += j - i;
           if (ts < firstHeldTs) firstHeldTs = ts;
           lastHeldTs = ts;
+          // Only an interval between two rows a heartbeat or two apart is observed constancy.
+          if (prevRowTs != null && ts - prevRowTs <= bridgeMs) observedMs += ts - prevRowTs;
         }
+        prevRowTs = ts;
         for (let k = i; k < j; k++) last.set(rows[k].metric, rows[k].value);
         i = j;
       }
@@ -282,7 +309,44 @@ export const HELD_SCHEMA_SQL = `
     scanned_to_ts INTEGER NOT NULL,
     full_scan_at_ms INTEGER
   );
+  CREATE TABLE IF NOT EXISTS held_generation (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    gen INTEGER NOT NULL
+  );
 `;
+
+/**
+ * v1.188.1 (review) — the SAMPLES GENERATION: a counter that moves, in the same transaction, every
+ * time rows leave `samples` (a move to held_samples) or come back (a restore). Every other change
+ * to `samples` appends (or prunes past the retention), and the analytics worker's closed-day
+ * memos (analytics.ts dailyEnergyWhCache, eqSeriesCache) assume exactly that: a closed day's
+ * integral is computed once and kept for the life of the process. Its first warm pass runs
+ * seconds after a boot, the first scan a minute later, so on the upgrade boot the incident's
+ * closed day was memoised with its held flows and served until the next restart. The worker's
+ * report chokepoint reads this before every report (reports.ts noteSamplesGeneration) and resets
+ * the memos and the results built on them when it has moved.
+ */
+export const SAMPLES_GENERATION_SQL = {
+  read: 'SELECT gen FROM held_generation WHERE id = 1',
+  bump: 'INSERT INTO held_generation (id, gen) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET gen = gen + 1',
+} as const;
+
+/** v1.188.1 (review) — a reader of the samples generation on any connection to the database
+ *  (the worker's read-only one included): 0 before the first move, and 0 — retried on the next
+ *  call — while the table does not exist yet. Never throws. */
+export function samplesGenerationReader(db: DatabaseSync): () => number {
+  let stmt: StatementSync | null = null;
+  return () => {
+    try {
+      stmt ??= db.prepare(SAMPLES_GENERATION_SQL.read);
+      const r = stmt.get() as { gen: number | bigint } | undefined;
+      return r == null ? 0 : Number(r.gen);
+    } catch {
+      stmt = null;
+      return 0;
+    }
+  };
+}
 
 /**
  * The statements that read `samples`. Exported so their query PLANS can be asserted
@@ -367,6 +431,8 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   );
   const pruneHeldStmt = db.prepare('DELETE FROM held_samples WHERE ts < ?');
   const pruneSpansStmt = db.prepare('DELETE FROM held_spans WHERE end_ts < ?');
+  const bumpGenerationStmt = db.prepare(SAMPLES_GENERATION_SQL.bump);
+  const readGeneration = samplesGenerationReader(db);
 
   const toSpan = (r: Record<string, unknown>): HeldSpan => ({
     sn: String(r.sn),
@@ -438,6 +504,9 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
   let scanFull = false;
   let scanToMs = 0;
   let scanStartedAt = 0;
+  /** v1.188.1 (review) — the start of the earliest span a move slice of this scan failed on
+   *  (+Infinity when none): the watermark is not saved past it, so the next scan re-reads it. */
+  let failedFromMs = Number.POSITIVE_INFINITY;
 
   /** Plan a scan: every device in `samples`, from the watermark (less the overlap) or, the first
    *  time, from the retention horizon. */
@@ -450,6 +519,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     scanStartedAt = atMs;
     scanSpans = 0;
     scanRows = 0;
+    failedFromMs = Number.POSITIVE_INFINITY;
     for (const sn of o.listSns()) {
       if (o.isExcludedSn(sn)) continue;
       const metrics = o.listMetrics(sn);
@@ -525,11 +595,18 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       if (copied !== deleted) throw new Error(`copied ${copied} rows but would delete ${deleted}`);
       moved = copied;
       spanUpsertStmt.run(job.sn, job.spanStartMs, job.toMs, 'frozen', moved, now());
+      // v1.188.1 (review) — rows left samples: the readers' closed-day memos are stale.
+      if (moved > 0) bumpGenerationStmt.run();
       db.exec('COMMIT');
     } catch (e: any) {
       try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
-      o.log(`recorder: held-sample move FAILED for ${job.sn} (${new Date(job.fromMs).toISOString()} → ${new Date(job.toMs).toISOString()}): ${e?.message ?? e} — nothing was moved; the next scan retries`);
-      // Drop the rest of this span's slices: a partial span is re-found by the next scan.
+      // v1.188.1 (review) — the retry the log promises. The watermark is saved no later than this
+      // span's last fresh reading (finishScan), so the next scan re-reads the span from before it:
+      // its anchor is that fresh reading again, not one of the held rows left in place, and the
+      // slices already moved are extended from where they stopped (the span's prior end).
+      if (job.spanStartMs < failedFromMs) failedFromMs = job.spanStartMs;
+      o.log(`recorder: held-sample move FAILED for ${job.sn} (${new Date(job.fromMs).toISOString()} → ${new Date(job.toMs).toISOString()}): ${e?.message ?? e} — this slice was rolled back and the rest of the span left in samples; the next scan re-reads ${job.sn} from ${new Date(job.spanStartMs).toISOString()}`);
+      // Drop the rest of this span's slices: the next scan re-reads the span.
       for (let i = moveQueue.length - 1; i >= 0; i--) if (moveQueue[i].sn === job.sn && moveQueue[i].spanStartMs === job.spanStartMs) moveQueue.splice(i, 1);
       return true;
     }
@@ -552,7 +629,10 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
 
   function finishScan(): HeldScanSummary {
     try {
-      scanStateUpsertStmt.run(scanToMs, scanFull ? now() : null);
+      // v1.188.1 (review) — not past a span a move failed on (moveStep). The later scans are
+      // incremental from the watermark, so a span behind it would never be read again: its held
+      // rows would stay in samples, and the ledger would see only the part moved before the fault.
+      scanStateUpsertStmt.run(Math.min(scanToMs, failedFromMs), scanFull ? now() : null);
     } catch (e: any) {
       o.log(`recorder: held-sample scan watermark not saved (${e?.message ?? e})`);
     }
@@ -623,6 +703,8 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
       const d = Number(restoreDeleteStmt.run(sn, startMs, Number(span.end_ts)).changes);
       if (d !== n) throw new Error(`restored ${n} rows but would delete ${d} from held_samples`);
       markRestoredStmt.run(now(), sn, startMs, 'frozen');
+      // v1.188.1 (review) — rows came back to samples: the same invalidation as a move.
+      if (n > 0) bumpGenerationStmt.run();
       db.exec('COMMIT');
     } catch (e) {
       try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
@@ -669,6 +751,7 @@ export function createHeldSamples(db: DatabaseSync, o: HeldSamplesOptions) {
     restore,
     spans,
     prune,
+    samplesGeneration: readGeneration,
   };
 }
 

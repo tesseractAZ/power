@@ -104,7 +104,9 @@ physically impossible `solarFractionOfLoadPct = 127%`.
    *completed calendar day*'s integral (immutable) keyed by
    `${dayStart}|${sn}|${sortedMetrics}` and only re-integrates today + the
    window's leading partial (7.4× faster warm; identical to whole-window to
-   ~0.011 %). Cache retains ~10 days, pruned at 256 entries.
+   ~0.011 %). Cache retains ~10 days, pruned at 256 entries. It is cleared, with the
+   report caches, when rows leave `samples` (a held-sample move, v1.188.1: the samples
+   generation, architecture chapter section 4.4).
 3. **Restore cloud-wedged cores (v0.78.0):** a SHP2-connected SN that's absent
    from the live device map (cloud-wedged) is added back by enumerating the
    `pack{N}_in/out` metrics that *actually exist* in the recorder via
@@ -784,6 +786,13 @@ the current hour, **all** hold:
 | daylight | `CURTAIL_MIN_GHI_WM2 = 100` |
 | posterior support | `CURTAIL_MIN_BAYES_SAMPLES = 3` |
 | PV matched to load (not bulk-charge) | PV ≤ load·`CURTAIL_PV_MATCH_LOAD_FACTOR(2.0)` |
+| load measured (v1.188.1) | the hour has a `panel_load` sample |
+
+**A missing load is unknown, not 0 W (v1.188.1).** `sampleCurtailmentHour` does not count an hour
+with no `panel_load` sample. Since the freshness gate (architecture chapter, section 4.3) a panel the
+EcoFlow cloud lists offline, or whose shadow is latched, writes no rows while the Cores keep
+streaming. Read as 0 W, the missing load skipped the weather-verified PV-exceeds-load disqualifier,
+so an hour of a full pool and a held panel was counted as curtailed and could be frozen into its day.
 
 > **v0.9.78/79 taper insight:** the "battery full" threshold is **not** a fixed
 > 96 %. DPUs charge to a *configured* `chgMaxSoc` (Storm Guard raises it to 100),

@@ -16,6 +16,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   heldMsWithin, heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldResetColumns, heldTagNote,
+  basisIncompleteNote, BASIS_INCOMPLETE_NOTE,
   forecastSpanResetColumns, forecastSpanRecaptureHorizonMs, coverageFrac, integrateWh,
   HELD_LEDGER_MIN_OVERLAP_MS, HELD_TELEMETRY_MARKER, FORECAST_SPAN_MS, type LedgerHeldSpan,
 } from '../src/nightLedgerScoring.js';
@@ -138,6 +139,59 @@ test('★★★ the repair: the captured 10-14 row is reset for re-capture; the 
   assert.equal(heldLedgerRepair(ROW_1014, { spans: [], coreSns: CORES, panelSn: PANEL, nowMs, horizonMs: HORIZON }), null, 'no hold, no repair');
 });
 
+test('★★★ an incomplete-basis row on held telemetry is reset once, not on every sweep', () => {
+  // A plan recorded with no trajectory (SoC unavailable, climatology only: the outage at plan time
+  // causes both) still keeps its window and its model Cores, so its PV/load actuals are captured
+  // and the repair reads it. The scorer states the basis reason first; before v1.188.1's review it
+  // stated ONLY that, without the marker, and the repair found the re-captured row owing a repair
+  // again: reset and re-captured on every 30-min tick for the 28-day horizon.
+  const issued = phx(2026, 10, 15, 22, 45);
+  const noBasis = {
+    ...ROW_1014,
+    plan_date: '2026-10-15',
+    issued_at_ms: issued,
+    window_start_ms: phx(2026, 10, 15, 23),
+    window_end_ms: phx(2026, 10, 16, 5),
+    outcome_captured_at_ms: null as number | null,
+    score_notes: null as string | null,
+  };
+  const spans: LedgerHeldSpan[] = CORES.map((sn) => ({ sn, startMs: LAST_FRESH, endMs: issued + 18 * H }));
+  const verdict = heldLedgerVerdict({ spans, coreSns: CORES, panelSn: PANEL, span: { startMs: issued, endMs: issued + FORECAST_SPAN_MS } });
+  assert.ok(verdict && verdict.pv.length === CORES.length && verdict.load.length === 0);
+  const note = basisIncompleteNote(verdict, name);
+  assert.ok(note.startsWith(BASIS_INCOMPLETE_NOTE), '★ the basis reason still comes first');
+  assert.ok(note.toLowerCase().includes(HELD_TELEMETRY_MARKER), '★★★ and the held verdict carries the marker');
+  assert.match(note, /PV — Core 1 18\.0 h/);
+  assert.match(note, /the PV actual is left empty rather than integrated from held readings\.$/);
+  assert.equal(basisIncompleteNote(null, name), BASIS_INCOMPLETE_NOTE, 'no hold: the note is unchanged');
+  assert.ok(!BASIS_INCOMPLETE_NOTE.toLowerCase().includes(HELD_TELEMETRY_MARKER));
+
+  // The sweep, tick by tick: repair (reset) → capture (the scorer's note) → the next tick.
+  const sweep = (row: typeof noBasis, nowMs: number, capNote: (v: typeof verdict) => string) => {
+    let resets = 0;
+    let r = row;
+    for (let tick = 0; tick < 6; tick++) {
+      const at = nowMs + tick * 30 * MIN;
+      const fix = heldLedgerRepair(r, { spans, coreSns: CORES, panelSn: PANEL, nowMs: at, horizonMs: HORIZON });
+      if (fix) {
+        assert.equal(fix.action, 'recapture');
+        resets++;
+        r = { ...r, ...heldResetColumns(fix.verdict, name) } as typeof noBasis;
+      }
+      if (r.outcome_captured_at_ms == null) r = { ...r, outcome_captured_at_ms: at, score_notes: `${capNote(verdict)} On-peak: none.` };
+    }
+    return resets;
+  };
+  const due = issued + FORECAST_SPAN_MS + 10 * MIN;
+  // A row v1.188.0 captured on the held rows: reset once, then re-captured with the marker.
+  const v1880 = { ...noBasis, outcome_captured_at_ms: due, score_notes: `${BASIS_INCOMPLETE_NOTE} On-peak: none.` };
+  assert.equal(sweep(v1880, due + H, (v) => basisIncompleteNote(v, name)), 1, '★★★ reset exactly once');
+  // A row first captured by v1.188.1 is never reset.
+  assert.equal(sweep(noBasis, due, (v) => basisIncompleteNote(v, name)), 0, '★★ captured with the marker: never reset');
+  // The defect, for the record: the basis note alone resets the row on every tick but the first.
+  assert.equal(sweep(noBasis, due, () => BASIS_INCOMPLETE_NOTE), 5, 'without the marker: a reset every 30 min');
+});
+
 test('★★ the span the repair reads is the one the row was captured over', () => {
   // Captured 2 h after issue (a capture can never be this early now; the clip is what matters):
   // a hold starting after the capture is not in its actuals.
@@ -184,7 +238,7 @@ test('★★ SOURCE PIN: the scorer withholds a held actual and states the reaso
   assert.ok(score.includes('coreSns: [...homeSns], panelSn: shp2Sn, span: { startMs: fcSpanStart, endMs: fcSpanEnd },'));
   assert.ok(score.includes('actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld ? round2(pvWh / 1000) : null;'));
   assert.ok(score.includes('const actualLoadKwh = loadPts.length && !(heldVerdict != null && heldVerdict.load.length > 0) ? round2(integrateWh(loadPts, false) / 1000) : null;'));
-  const basis = score.indexOf("scoreNotes = 'not scored — plan basis was incomplete (no trajectory to score).';");
+  const basis = score.indexOf('    scoreNotes = basisIncompleteNote(heldVerdict, deviceNameOf);\n  } else if (heldVerdict != null) {');
   const held = score.indexOf('} else if (heldVerdict != null) {\n    scoreNotes = heldLedgerNote(heldVerdict, deviceNameOf);');
   const cov = score.indexOf('} else if (!covOk) {');
   assert.ok(basis > 0 && held > basis && cov > held, `${basis} < ${held} < ${cov}`);

@@ -18,8 +18,8 @@ const SRC = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../sr
 /** Caches the basis reset deliberately leaves alone, each with its reason. */
 const NOT_RESET: Record<string, string> = {
   stormPrepCache: 'the NWS feed only (no device input), and read on the main thread by the alert monitor',
-  dailyEnergyWhCache: 'closed-day energy integrals keyed by (day, SN, metrics): immutable once the day has ended',
-  eqSeriesCache: 'bucketed recorder series keyed by (SN, metrics), topped up by tail: raw history, not a result',
+  dailyEnergyWhCache: 'closed-day energy integrals keyed by (day, SN, metrics): immutable once the day has ended, unless rows leave samples (v1.188.1: resetWorkerSampleCaches clears it then)',
+  eqSeriesCache: 'bucketed recorder series keyed by (SN, metrics), topped up by tail: raw history, not a result (cleared by resetWorkerSampleCaches when rows leave samples)',
   dispatchCache: 'main thread (index.ts /api/dispatch-plan): keyed on the forecast\'s generatedAt instead',
   riskCache: 'main thread (index.ts /api/pack-risk): keyed on the generatedAt of its four input reports instead',
 };

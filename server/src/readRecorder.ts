@@ -4,6 +4,8 @@ import type { Recorder, LifetimeTotals, NightLedgerRow, NightCalibration } from 
 // v1.38.0 (WS2) — Phoenix calendar-date resolution for the ledger read cutoff.
 // tariff.ts is pure/import-free (no circular dependency).
 import { localParts } from './tariff.js';
+// v1.188.1 (review) — the samples generation reader (no schema, no writes: a SELECT on its table).
+import { samplesGenerationReader } from './heldSamples.js';
 
 /**
  * v0.10.0 — read-only Recorder for the analytics worker thread.
@@ -210,6 +212,9 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     // v1.38.0 (WS2) — real ledger reads (the worker/reports path reduces over these).
     readNightLedger,
     readNightCalibration,
+    // v1.188.1 (review) — the samples generation the main thread's held-sample moves advance: the
+    // worker's report chokepoint resets its closed-day memos when it moves (reports.ts).
+    samplesGeneration: samplesGenerationReader(db),
     close: () => db.close(),
   };
 }

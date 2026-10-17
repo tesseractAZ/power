@@ -246,7 +246,7 @@ import {
   ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
   // v1.188.1 — held telemetry: a row on held readings is not scored; one captured on them is repaired.
-  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldResetColumns, heldTagNote,
+  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldResetColumns, heldTagNote, basisIncompleteNote,
 } from './nightLedgerScoring.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -4233,7 +4233,9 @@ function scoreNightRow(
   const fcPv = y.pv_p50_kwh ?? null;
   const fcLoad = y.load_p50_kwh ?? null;
   if (!hadBasis) {
-    scoreNotes = 'not scored — plan basis was incomplete (no trajectory to score).';
+    // v1.188.1 (review) — with the held verdict when there is one: the marker keeps the held
+    // repair from resetting this row on every sweep (basisIncompleteNote).
+    scoreNotes = basisIncompleteNote(heldVerdict, deviceNameOf);
   } else if (heldVerdict != null) {
     scoreNotes = heldLedgerNote(heldVerdict, deviceNameOf);
   } else if (!covOk) {

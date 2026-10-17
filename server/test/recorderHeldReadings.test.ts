@@ -25,7 +25,7 @@ process.env.SHADOW_WITNESS_PATH = join(tmp, 'shadow-witness.json');
 const DB_PATH = join(tmp, 'ecoflow.db');
 const GAPS_PATH = join(tmp, 'telemetry-gaps.json');
 
-const { createRecorder, cleanShutdownWasGraceful } = await import('../src/recorder.js');
+const { createRecorder, cleanShutdownWasGraceful, inProcessDeviceDarkMs } = await import('../src/recorder.js');
 const { projectionRecordable, heldSinceMs, RECORD_FRESH_MS, HELD_SPAN_MIN_MS } = await import('../src/heldSamples.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
 const { computeAlerts, outageAlerts } = await import('../src/alerts.js');
@@ -136,8 +136,14 @@ test('★★★ the 2026-10-14 incident: held Cores write nothing, the panel kee
     // 01:55 → 04:16: the list polls again, every device listed OFFLINE.
     while (c.wall < phx(2026, 10, 15, 4, 16)) { await poll(new Set()); advance(MIN); }
     const panelBack = c.wall;
-    // 04:16 → 06:30: the panel is back; the Cores stay offline.
+    // 04:16 → 10:30: the panel is back; the Cores stay offline.
     while (c.wall < phx(2026, 10, 15, 6, 30)) { await poll(new Set([PANEL])); advance(MIN); }
+    // v1.188.1 (review) — 6 h 37 min after each Core's last fresh sample, but 4 h 23 min of that
+    // (23:53 → 04:16) every home device was dark: that is the fleet gap's, not a Core's. A Core is
+    // charged only with time another home device wrote, so none is filed yet.
+    assert.deepEqual(rec.telemetryGaps().filter((g) => g.sn != null), [],
+      '★★★ not filed at 05:53: the fleet-wide hours count toward no device');
+    while (c.wall < phx(2026, 10, 15, 10, 30)) { await poll(new Set([PANEL])); advance(MIN); }
 
     // The alarm still sees every Core offline: it reads the store, which the recorder never changed.
     const devices = store.get().devices;
@@ -167,7 +173,8 @@ test('★★★ the 2026-10-14 incident: held Cores write nothing, the panel kee
       const d = gaps.filter((g) => g.sn === sn);
       assert.equal(d.length, 1, `★★★ ${sn}: the per-device sweep now sees the held Core (one record): ${JSON.stringify(d)}`);
       assert.ok(Math.abs(d[0].startMs - lastFresh) < MIN, 'from its last fresh sample');
-      assert.ok(d[0].endMs - d[0].startMs > 6 * H, 'filed once it passed 6 h, while the panel kept writing');
+      assert.ok(Math.abs(d[0].endMs - (panelBack + 6 * H)) <= 2 * MIN,
+        `★★ filed once it had been dark 6 h while the panel wrote (≈ 10:16), not 6 h after it went quiet: ${new Date(d[0].endMs).toISOString()}`);
     }
     const oa = outageAlerts(gaps, c.wall, { recentWindowMs: 24 * H, minDurationMs: 15 * MIN, restartMinDurationMs: 5 * MIN, enabled: true });
     assert.equal(oa.filter((a) => a.id.startsWith('system-outage-device-') && a.id.endsWith('-3')).length, CORES.length, oa.map((a) => a.id).join(' '));
@@ -200,6 +207,70 @@ test('★★★ the 2026-10-14 incident: held Cores write nothing, the panel kee
   } finally {
     rec.close();
   }
+});
+
+/* ══ v1.188.1 review: a fleet-wide silence is no one device's darkness ══════════ */
+
+test('inProcessDeviceDarkMs — the time since the last sample in which another home device could report', () => {
+  assert.equal(inProcessDeviceDarkMs(0, 7 * H), 7 * H, 'no fleet-dark window: all of it');
+  assert.equal(inProcessDeviceDarkMs(0, 7 * H, [{ startMs: 0, endMs: 7 * H }]), 0, '★★ the whole silence was fleet-wide');
+  assert.equal(inProcessDeviceDarkMs(H, 10 * H, [{ startMs: 0, endMs: 3 * H }]), 7 * H, 'only the part after its last sample counts');
+  assert.equal(inProcessDeviceDarkMs(0, 10 * H, [{ startMs: H, endMs: 3 * H }, { startMs: 2 * H, endMs: 4 * H }]), 7 * H, 'overlapping windows count once');
+  assert.equal(inProcessDeviceDarkMs(5 * H, 4 * H), 0, 'never negative');
+});
+
+async function fleetOutage(t: TestContext, outageMs: number, coresLagMs: number) {
+  resetDb();
+  const { c, advance } = clocks(t, phx(2026, 10, 16, 6, 0));
+  const store = new SnapshotStore();
+  store.setClock(() => Date.now());
+  store.setLogger(() => {});
+  const rec = createRecorder(store, () => {});
+  const cores = CORES.slice(0, 3);
+  const all = [PANEL, ...cores];
+  let k = 0;
+  // The poll refreshAll makes: the list, then each quota in its own I/O callback (a Promise.all of
+  // separate HTTP calls), so each device's content lands in its own recorder batch.
+  const poll = async (sns: readonly string[]) => {
+    store.setDeviceList(all.map((sn) => listItem(sn, true)));
+    await flush();
+    for (const sn of sns) { store.setDeviceQuota(sn, sn === PANEL ? panelQuota(k) : coreQuota(k)); await flush(); }
+    k++;
+  };
+  for (let i = 0; i < 30; i++) { await poll(all); advance(MIN); }
+  const before = rec.telemetryGaps().length;
+  advance(outageMs); // the internet is down: no list, no quota, no MQTT
+  if (coresLagMs > 0) {
+    await poll([PANEL]); // the panel answers first …
+    advance(coresLagMs);
+    await poll(all);     // … the Cores a few minutes later
+  } else {
+    await poll(all);
+  }
+  for (let i = 0; i < 10; i++) { advance(MIN); await poll(all); }
+  const gaps = rec.telemetryGaps().slice(before);
+  return { rec, gaps, c };
+}
+
+test('★★★ a fleet-wide outage of more than 6 h files the fleet gap only, though the devices answer one by one', async (t) => {
+  const { rec, gaps } = await fleetOutage(t, 7 * H, 0);
+  try {
+    assert.deepEqual(gaps.filter((g) => g.sn != null).map((g) => g.sn), [],
+      '★★★ v1.188.1 before review: three "Device telemetry gap — no data for 421 min" WARNINGs, every Core having answered in the same poll');
+    const fleet = gaps.filter((g) => g.sn == null);
+    assert.equal(fleet.length, 1);
+    assert.ok(Math.abs(fleet[0].durationMs - 7 * H) <= 2 * MIN, `the outage is the fleet's: ${fleet[0].durationMs / MIN} min`);
+    const oa = outageAlerts(gaps, Date.now(), { recentWindowMs: 24 * H, minDurationMs: 15 * MIN, restartMinDurationMs: 5 * MIN, enabled: true });
+    assert.equal(oa.filter((a) => a.id.startsWith('system-outage-device-')).length, 0, oa.map((a) => a.title).join(' | '));
+  } finally { rec.close(); }
+});
+
+test('★★ devices that come back minutes after the first are charged with those minutes only', async (t) => {
+  const { rec, gaps } = await fleetOutage(t, 7 * H, 4 * MIN);
+  try {
+    assert.deepEqual(gaps.filter((g) => g.sn != null), [], 'four minutes while the panel wrote is not six hours');
+    assert.equal(gaps.filter((g) => g.sn == null).length, 1);
+  } finally { rec.close(); }
 });
 
 /* ══ what is, and is not, fresh content ═════════════════════════════════════ */

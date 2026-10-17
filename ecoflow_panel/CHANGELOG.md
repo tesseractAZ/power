@@ -4,18 +4,23 @@
 
 **History**
 
-- After an internet outage left the batteries offline in the EcoFlow cloud, Power kept saving each battery's last reading as if it were new, every five minutes, for as long as the cloud listed it offline. After the outage of 14–15 October that was about 1,300 rows per battery per hour in which nothing changed, with solar at 0 W through a sunny day. Power now saves a device's readings only while they are fresh. A device that is offline in the cloud, or whose last payload the cloud keeps replaying, leaves a gap in the history instead of a flat line, and recording resumes with its first fresh reading.
-- The readings saved that way are moved to a separate table in the same database, so the solar forecast, the typical-day curves, the soiling, health and energy figures, the history charts and the night-charge scoring no longer read them. Nothing was deleted: the rows are kept unchanged and can be moved back. The lifetime energy totals are not rewritten, because Home Assistant would read a decrease as a meter reset; the log states how much they took in from the frozen readings.
+- After an internet outage left the batteries offline in the EcoFlow cloud, Power kept saving each battery's last reading as if it were new, every five minutes, for as long as the cloud listed it offline. After the outage of 14–15 October that was about 1,300 rows per battery per hour in which nothing changed, with solar at 0 W through a sunny day. Power now saves a device's readings only while they are fresh. A device that is offline in the cloud, or whose last payload the cloud keeps replaying, leaves a gap in the history, and recording resumes with its first fresh reading. The two 24-hour charts on the Overview page break the line across such a gap instead of drawing the last reading flat.
+- The readings saved that way are moved to a separate table in the same database, so the solar forecast, the typical-day curves, the soiling, health and energy figures, the history charts and the night-charge scoring no longer read them. The 7-day energy and carbon figures and the equipment-health trends are recalculated once the rows have moved. Nothing was deleted: the rows are kept unchanged and can be moved back. The lifetime energy totals are not rewritten, because Home Assistant would read a decrease as a meter reset; the log states how much they took in from the frozen readings.
+- A battery that holds the same readings for a while after a gap is not mistaken for a frozen one: only an hour of unchanged readings that were actually saved counts. If moving the rows fails partway, the next hourly check finishes the job.
 
 **Night charge**
 
-- A night whose solar or house-load figures include an hour or more with no fresh readings is not scored, and its note says so. Nights already recorded on frozen readings (14 October, and 15 October if it was recorded before this update) are recorded again from what was measured.
+- A night whose solar or house-load figures include an hour or more with no fresh readings is not scored, and its note says so. Nights already recorded on frozen readings (14 October, and 15 October if it was recorded before this update) are recorded again from what was measured, once.
 
 **Alerts**
 
-- A device that stays offline in the EcoFlow cloud for more than six hours now raises the "Device telemetry gap" warning; the repeated readings had kept it from firing. If the batteries are still offline when this update is installed, the warning is raised for each of them within about an hour. It is pushed, never spoken.
+- A device that stays offline in the EcoFlow cloud for more than six hours while the other devices keep reporting now raises the "Device telemetry gap" warning; the repeated readings had kept it from firing. Time in which every device was silent, such as the internet outage itself, counts as a system outage and not toward any one device, so an outage of the whole system raises no warning for each device as it comes back. If the batteries are still offline when this update is installed, the warning is raised for each of them within about an hour. It is pushed, never spoken.
 - A restart made while every device was offline in the cloud, or while the internet was down, is reported as an add-on restart, not as a power outage.
 - The offline, stale and blind alarms and the battery-level alarms are unchanged.
+
+**Solar**
+
+- An hour in which the panel reported no house load is no longer counted as lost solar. With the panel offline in the cloud, its missing load had been read as 0 W.
 
 **Updating**
 

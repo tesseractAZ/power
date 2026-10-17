@@ -207,8 +207,8 @@ const MUTANTS = [
   {
     id: "xxvii. ★ a device's own per-device gaps are discounted as if the fleet were dark",
     file: RECORDER,
-    find: '      const fleetDark = telemetryGapsLog.filter((g) => g.sn == null);',
-    to: '      const fleetDark = telemetryGapsLog.slice(); /* MUTANT */',
+    find: '      const fleetDark: Array<{ startMs: number; endMs: number }> = telemetryGapsLog.filter((g) => g.sn == null);',
+    to: '      const fleetDark: Array<{ startMs: number; endMs: number }> = telemetryGapsLog.slice(); /* MUTANT */',
     why: 'A Core already recorded as dark subtracts its OWN blackout, drops under the threshold, and its record stops being extended across restarts.',
   },
   {

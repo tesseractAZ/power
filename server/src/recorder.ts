@@ -127,6 +127,28 @@ export function seededDeviceDarkMs(
   return beforeOutage + Math.max(0, sinceFirstHomeInsertMs);
 }
 
+/**
+ * v1.188.1 (review) — how long a device that HAS written in this process has been dark: the time
+ * since its last sample less every fleet-dark window in it. PURE.
+ *
+ * The same rule as seededDeviceDarkMs: a device is charged only with time in which another home
+ * device could report. Before the freshness gate the in-process branch never needed it: the
+ * first fresh write after a fleet-wide silence came with every device that had a projection
+ * (each restated because its heartbeat was due), so every clock was reset before the sweep ran.
+ * With the gate a device is in the batch only once its OWN content lands, and quota and MQTT
+ * deltas arrive device by device. Measured as now − last, a 7 h internet outage filed every
+ * device but the first to answer as dark for 7 h, the moment the first one answered.
+ * `fleetDarkWindows` are the gap ledger's fleet records plus the silence the current batch is
+ * ending (record() files that one only after the sweep).
+ */
+export function inProcessDeviceDarkMs(
+  lastMs: number,
+  nowMs: number,
+  fleetDarkWindows: ReadonlyArray<{ startMs: number; endMs: number }> = [],
+): number {
+  return Math.max(0, nowMs - lastMs - fleetDarkOverlapMs(fleetDarkWindows, lastMs, nowMs));
+}
+
 /** v1.154.0 review — length of the UNION of `windows`, clipped to [fromMs, toMs]. PURE. */
 export function fleetDarkOverlapMs(windows: ReadonlyArray<{ startMs: number; endMs: number }>, fromMs: number, toMs: number): number {
   const clipped = windows
@@ -472,6 +494,10 @@ export interface Recorder {
   /** v1.188.1 — move one excluded span's rows back to `samples`, unchanged; returns the rows
    *  restored. The span is marked restored and never excluded again. */
   restoreHeldSamples?: (sn: string, startMs: number) => number;
+  /** v1.188.1 (review) — the samples generation (heldSamples.ts SAMPLES_GENERATION_SQL): it moves
+   *  whenever rows leave `samples` or come back, so a reader's memo of a closed day is stale.
+   *  Both recorders implement it; OPTIONAL so test stubs keep compiling (absent ⇒ never moves). */
+  samplesGeneration?: () => number;
   close: () => void;
   /** Force a lifetime-rollup tick (used by tests / on shutdown). */
   rollupLifetime: () => void;
@@ -1501,15 +1527,22 @@ export function createRecorder(
     if (sawHomeInsert) {
       if (firstHomeInsertMono < 0) firstHomeInsertMono = performance.now();
       // v1.154.0 review — the windows in which NO home device could report.
-      const fleetDark = telemetryGapsLog.filter((g) => g.sn == null);
+      const fleetDark: Array<{ startMs: number; endMs: number }> = telemetryGapsLog.filter((g) => g.sn == null);
+      // v1.188.1 (review) — and the fleet silence THIS batch ends: the block below files it only
+      // after the sweep, and every device not yet back in this poll would be charged with it.
+      // (While a deferred restart gap is armed the in-process detector is suspended, as below.)
+      if (!pendingRestartGap && detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
+        fleetDark.push({ startMs: lastHomeInsertTs, endMs: now });
+      }
       for (const [sn, lastMs] of lastInsertBySn) {
         if (isBenchSpareSn(sn)) continue;            // a bench spare is dark BY DESIGN
         if (perDeviceGapOpen.has(sn)) continue;      // already recorded; do not re-report every batch
         // v1.154.0 — a device still on its SEEDED clock is not charged with the
-        // add-on's own downtime; one that has written since boot is measured as before.
+        // add-on's own downtime. v1.188.1 (review) — one that has written since boot is not
+        // charged with a fleet-wide silence either (inProcessDeviceDarkMs).
         const darkMs = seededNotYetWritten.has(sn)
           ? seededDeviceDarkMs(lastMs, bootFleetAnchorMs, performance.now() - firstHomeInsertMono, fleetDark)
-          : now - lastMs;
+          : inProcessDeviceDarkMs(lastMs, now, fleetDark);
         if (darkMs > PER_DEVICE_GAP_THRESHOLD_MS) {
           // endMs is clamped so a boot clock still BEHIND the seed (RTC-less Pi before
           // NTP — the restart probe's `defer` case) cannot write a gap ending before it starts.
@@ -3217,6 +3250,7 @@ export function createRecorder(
     heldSamplesReady: () => !heldScanScheduled || heldStore.isReady(),
     scanHeldSamples: (nowMs) => heldStore.scanNow(nowMs),
     restoreHeldSamples: (sn, startMs) => heldStore.restore(sn, startMs),
+    samplesGeneration: () => heldStore.samplesGeneration(),
     close: () => {
       clearInterval(lifetimeTimer);
       if (heldScanFirst) clearTimeout(heldScanFirst);

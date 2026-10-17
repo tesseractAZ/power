@@ -623,6 +623,26 @@ export function heldLedgerNote(v: HeldLedgerVerdict, name: (sn: string) => strin
     + `${v.pv.length > 0 && v.load.length > 0 ? 'PV and load actuals are' : v.pv.length > 0 ? 'PV actual is' : 'load actual is'} left empty rather than integrated from held readings.`;
 }
 
+/** The scorer's note for a row whose plan basis was incomplete (no trajectory to score). */
+export const BASIS_INCOMPLETE_NOTE = 'not scored — plan basis was incomplete (no trajectory to score).';
+
+/**
+ * v1.188.1 (review) — the note of a row the scorer leaves unscored because its plan basis was
+ * incomplete, with the held verdict when there is one. PURE.
+ *
+ * The basis reason comes first (the row could not be scored on any telemetry), but its PV/load
+ * actuals are still captured, so a hold over its span is stated too, with the marker. Without the
+ * marker heldLedgerRepair, whose only idempotence test is the marker, found the re-captured row
+ * owing a repair again: every sweep (the 30-min tick, the evening job, the boot warm-up) reset it
+ * and the same sweep re-captured it, for the whole 28-day horizon. Incomplete-basis plans and
+ * held telemetry coincide by nature: an internet or cloud outage at plan time causes both.
+ */
+export function basisIncompleteNote(v: HeldLedgerVerdict | null, name: (sn: string) => string): string {
+  if (v == null) return BASIS_INCOMPLETE_NOTE;
+  return `${BASIS_INCOMPLETE_NOTE} Also ${HELD_TELEMETRY_MARKER}: ${heldParts(v, name)} of the 24 h span had no fresh readings; the `
+    + `${v.pv.length > 0 && v.load.length > 0 ? 'PV and load actuals are' : v.pv.length > 0 ? 'PV actual is' : 'load actual is'} left empty rather than integrated from held readings.`;
+}
+
 /** v1.188.1 — the clause appended to a row past the re-capture horizon. Carries the marker. PURE. */
 export function heldTagNote(v: HeldLedgerVerdict, name: (sn: string) => string): string {
   return `Telemetry held: ${heldParts(v, name)} of the 24 h span had no fresh readings and the actuals were `
