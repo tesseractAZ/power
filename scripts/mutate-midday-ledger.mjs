@@ -15,6 +15,8 @@
  *   Learners   L-xix..L-xxii (the de-bias stratum, NULL as overnight, the refreshed figure, the call site)
  *   Gate       L-xxiii
  *   Recorder   L-xxiv..L-xxv (the shadow columns: the ALTER pass and the allowlist)
+ *   Held       L-xxvi..L-xxx (on v1.188.1: the shadow's window on the held verdict, per side, over
+ *                             the window; the held reset clears its measured window; the call site)
  *   No write   S-i..S-xiii   (the plan holder, the snapshot, the arm probe, the entities, the stamp,
  *                             the latch, the stale panel, the re-read, the order, the status)
  *   Shadow     S-xiv..S-xxii (the refresh never raises, the tag, the backup's one walk and option A,
@@ -49,6 +51,7 @@ const SUBSET = [
   'test/ledgerOnPeakGoverned.test.ts',
   'test/nightChargeMqtt.test.ts',
   'test/mqttDiscovery.test.ts',
+  'test/ledgerHeldMiddayShadow.test.ts',
 ];
 
 const MUTANTS = [
@@ -239,6 +242,43 @@ const MUTANTS = [
     find: '  ...MIDDAY_SHADOW_LEDGER_SCHEMA.map(([c]) => c),',
     to: '  /* MUTANT */',
     why: 'Every shadow write is dropped silently.',
+  },
+
+  /* ── on v1.188.1: held telemetry ── */
+  {
+    id: 'L-xxvi. ★★★ the shadow\'s window integrates a held Core',
+    file: NLS,
+    find: '    if (held.pv) pvKwh = null;',
+    to: '    /* MUTANT */',
+    why: 'Hours of a replayed reading are recorded as the mid-day window\'s forecast skill.',
+  },
+  {
+    id: 'L-xxvii. ★★★ the shadow\'s window integrates a held panel',
+    file: NLS,
+    find: '  const loadKwh = !held.load && load.length > 0 && coverageFrac(load, a, b) >= LEDGER_SPAN_MIN_COVERAGE',
+    to: '  const loadKwh = load.length > 0 && coverageFrac(load, a, b) >= LEDGER_SPAN_MIN_COVERAGE /* MUTANT */',
+    why: 'The house load the panel replayed is graded as measured.',
+  },
+  {
+    id: 'L-xxviii. ★★ the held verdict is taken over an instant, not the window',
+    file: NLS,
+    find: '    spans: i.held.spans(a, b), coreSns: i.homeSns, panelSn: i.held.panelSn, span: { startMs: a, endMs: b },',
+    to: '    spans: i.held.spans(a, b), coreSns: i.homeSns, panelSn: i.held.panelSn, span: { startMs: a, endMs: a + 1 }, /* MUTANT */',
+    why: 'No hold inside the window ever reaches the verdict.',
+  },
+  {
+    id: 'L-xxix. ★★★ the held reset keeps the shadow\'s measured window',
+    file: NLS,
+    find: '    shadow_window_pv_kwh: null,\n    shadow_window_load_kwh: null,\n',
+    to: '    /* MUTANT */\n',
+    why: 'A row reset for held telemetry keeps the window figures measured on the held readings.',
+  },
+  {
+    id: 'L-xxx. ★★★ the scorer measures the shadow\'s window with no held spans',
+    file: IDX,
+    find: '    held: { spans: (a, b) => recorder.heldSpans?.(a, b) ?? [], panelSn: shp2Sn },',
+    to: '    /* MUTANT */',
+    why: 'The verdict is never given a span: every held hour reaches the window\'s figures.',
   },
 
   /* ── nothing is written for the mid-day leg ── */

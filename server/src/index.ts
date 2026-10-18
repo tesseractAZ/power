@@ -4561,10 +4561,13 @@ function scoreNightRow(
   // R4 — the mid-day shadow's window, measured: the PV and load the shadow was planned on, graded
   // (shadowWindowActuals). Only a row the shadow ran a mid-day leg for; written apart from the
   // outcome above, which it leaves as it was.
+  // v1.189.0 on v1.188.1 — on the held verdict over the window itself, the rule the actuals above
+  // are withheld by (the held repair resets these two with the outcome, forecastSpanResetColumns).
   const shadowActuals = shadowWindowActuals({
     row: y, nowMs, homeSns: [...homeSns],
     queryPv: (sn, a, b) => recorder.query(sn, 'pv_total', a, b),
     queryLoad: (a, b) => recorder.query(shp2Sn, 'panel_load', a, b),
+    held: { spans: (a, b) => recorder.heldSpans?.(a, b) ?? [], panelSn: shp2Sn },
   });
   if (shadowActuals != null) {
     recorder.recordNightOutcome(yDate, { shadow_window_pv_kwh: shadowActuals.pvKwh, shadow_window_load_kwh: shadowActuals.loadKwh });

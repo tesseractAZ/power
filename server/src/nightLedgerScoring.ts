@@ -223,17 +223,30 @@ export function minOverSpans(
 /** The measured PV (the home Cores' pv_total, each at least LEDGER_SPAN_MIN_COVERAGE covered —
  *  the ledger's per-Core rule) and house load (the panel's panel_load, the same coverage) over the
  *  shadow's mid-day window, kWh; null for a figure the coverage does not support. null altogether
- *  when the row has no shadow window or it has not closed. PURE. */
+ *  when the row has no shadow window or it has not closed. PURE.
+ *
+ *  v1.189.0 on v1.188.1 — and null for a side HELD over the window (`held`: the recorder's held
+ *  spans and the house panel): a home Core held for HELD_LEDGER_MIN_OVERLAP_MS or more of it leaves
+ *  the PV empty, the panel held that long the load — heldLedgerVerdict over the window itself, the
+ *  rule the row's own PV/load actuals are withheld by over [issue, +24 h]. The recorder keeps held
+ *  readings out of `samples`, so the 90% coverage of a 5 h window already refuses such an hour;
+ *  the verdict states the refusal on the rule the scorer uses, not on the window's length. */
 export function shadowWindowActuals(i: {
   row: Partial<Pick<NightLedgerRow, 'shadow_cost_window_start_ms' | 'shadow_cost_window_end_ms'>>;
   nowMs: number;
   homeSns: readonly string[];
   queryPv: (sn: string, startMs: number, endMs: number) => ReadonlyArray<Sample>;
   queryLoad: (startMs: number, endMs: number) => ReadonlyArray<Sample>;
+  /** The held spans over [startMs, endMs] (recorder.heldSpans) and the house panel. Absent: no
+   *  side is held. */
+  held?: { spans: (startMs: number, endMs: number) => ReadonlyArray<LedgerHeldSpan>; panelSn: string };
 }): { pvKwh: number | null; loadKwh: number | null } | null {
   const a = i.row.shadow_cost_window_start_ms;
   const b = i.row.shadow_cost_window_end_ms;
   if (typeof a !== 'number' || typeof b !== 'number' || !(b > a) || i.nowMs < b) return null;
+  const held = i.held == null ? { pv: false, load: false } : heldSides(heldLedgerVerdict({
+    spans: i.held.spans(a, b), coreSns: i.homeSns, panelSn: i.held.panelSn, span: { startMs: a, endMs: b },
+  }));
   let pvKwh: number | null = null;
   if (i.homeSns.length > 0) {
     let pvEnergyWh = 0;
@@ -244,9 +257,10 @@ export function shadowWindowActuals(i: {
       worst = Math.min(worst, coverageFrac(pts, a, b));
     }
     pvKwh = worst >= LEDGER_SPAN_MIN_COVERAGE ? round2(pvEnergyWh / 1000) : null;
+    if (held.pv) pvKwh = null;
   }
   const load = i.queryLoad(a, b);
-  const loadKwh = load.length > 0 && coverageFrac(load, a, b) >= LEDGER_SPAN_MIN_COVERAGE
+  const loadKwh = !held.load && load.length > 0 && coverageFrac(load, a, b) >= LEDGER_SPAN_MIN_COVERAGE
     ? round2(integrateWh(load, false) / 1000) : null;
   return { pvKwh, loadKwh };
 }
@@ -640,7 +654,11 @@ export function forecastSpanRepair(
 /** v1.187.10 — the columns a forecast-span re-capture resets: the outcome columns
  *  repairPrematureNightOutcomes resets (the capture stamp first — it is what lets the sweep
  *  capture the row again), `scored` 0 and a note saying why. The re-capture rewrites all
- *  of them. PURE. */
+ *  of them. PURE.
+ *  v1.189.0 on v1.188.1 — and the mid-day shadow's measured window (`shadow_window_pv_kwh` /
+ *  `_load_kwh`), which the capture writes beside the outcome (shadowWindowActuals): a row reset
+ *  for held telemetry (heldResetColumns) keeps no figure measured on the readings the reset is
+ *  for. The shadow's own columns, what the evening computed, are not outcome columns and stay. */
 export function forecastSpanResetColumns(shortMs: number): Partial<NightLedgerRow> {
   const shortH = (shortMs / HOUR_MS).toFixed(1);
   return {
@@ -670,6 +688,8 @@ export function forecastSpanResetColumns(shortMs: number): Partial<NightLedgerRo
     load_in_band: null,
     buy_err_kwh: null,
     soc_min_err_pct: null,
+    shadow_window_pv_kwh: null,
+    shadow_window_load_kwh: null,
   };
 }
 
