@@ -409,6 +409,8 @@ export class TuiSession {
       // is exactly why it would have been believed the first time something did.
       degradation: d.degradation() ?? { generatedAt: 0, eolSoh: 80, packs: [] },
       serverStartedAt: d.serverStartedAt,
+      // The OPR seat names the user who signed in; with the login off there is none.
+      ...(this.auth ? { operator: this.auth.username } : {}),
       // v1.188.1 (review) — Fleet PV and Battery Net as the HA sensors publish them.
       flow: plantFlow(d.recorder, snap.devices, Date.now()),
     }, { recorder: d.recorder });

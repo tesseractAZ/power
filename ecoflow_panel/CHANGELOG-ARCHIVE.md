@@ -3746,8 +3746,8 @@ would reintroduce exactly the mispricing the entity exists to remove.
 
 **The tariff rates were also wrong, and the September bill says how wrong.** APS
 prints a per-tier base rate that is not what you pay: a uniform Adjustors line
-($56.87 / 2,012 kWh = 2.827 c/kWh, **20.5% of the energy cost**) and then Taxes
-and Fees at 11.457% on top. All-in marginal rates, reconciled against the bill to
+(the month's adjustor dollars spread over its kWh, a large share of the energy cost) and then Taxes
+and Fees as a percentage on top. All-in marginal rates, reconciled against the bill to
 within one cent:
 
 | tier | all-in | was configured | |
