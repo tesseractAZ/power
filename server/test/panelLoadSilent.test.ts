@@ -21,7 +21,8 @@ const { createRecorder } = await import('../src/recorder.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
 
 const shp2 = (watts: Array<number | null>, gridWatt: number) => ({
-  sn: 'SHP2', deviceName: 'SHP2', productName: 'Smart Home Panel 2', online: true, lastUpdated: 0,
+  // v1.188.1 — a content clock: the recorder writes a projection only while it is fresh.
+  sn: 'SHP2', deviceName: 'SHP2', productName: 'Smart Home Panel 2', online: true, lastUpdated: 0, lastTelemetryAtMs: Date.now(),
   projection: {
     kind: 'shp2',
     circuits: watts.map((w, i) => ({ ch: i + 1, name: `Circuit ${i + 1}`, watts: w, setAmp: null, linkCh: null, linkMark: false, loadPriority: null, loadIsEnable: null })),

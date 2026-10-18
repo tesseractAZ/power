@@ -79,8 +79,8 @@ const MUTANTS = [
   {
     id: 'B-ii. ★★★ the basis is missing from the flight key',
     file: REP,
-    find: 'reportFlights.run(`${buildFlightKey(name, args)} @${key}`,',
-    to: 'reportFlights.run(buildFlightKey(name, args) /* MUTANT */,',
+    find: 'reportFlights.run(`${buildFlightKey(name, args)} @${key} #${sgen}`,',
+    to: 'reportFlights.run(`${buildFlightKey(name, args)} #${sgen}` /* MUTANT */,',
     why: 'A request on the full map joins a flight that started on the partial one (4/4/4 packs).',
   },
   {

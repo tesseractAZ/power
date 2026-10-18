@@ -7,7 +7,7 @@ import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolH
 import { shp2Panels, resolveHousePanel } from './shp2Membership.js';
 import { prunePhantomPacks, freshPackSlotHistory, parsePackGhosts, packFrozenPhrase, type PackSlotHistory, type PackGhost } from './packPresence.js';
 import { mpptProducing } from './mppt.js';
-import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceShadowLatch, SHP2_SHADOW_CLEAR_DISTINCT } from './shp2Shadow.js';
+import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceShadowLatch, advanceBodySeen, SHP2_SHADOW_CLEAR_DISTINCT } from './shp2Shadow.js';
 import type { Alert } from './alerts.js';
 import { notePollOk, notePollFailed, notePollHealth } from './telemetryBlind.js';
 import { config } from './config.js';
@@ -118,6 +118,17 @@ export interface DeviceSnapshot {
    * fetch-keyed gate.
    */
   contentStaleSinceMs?: number | null;
+  /**
+   * v1.188.1 — SHP2 only: when this panel's REST body last brought NEW content, stamped with the
+   * same instant as lastTelemetryAtMs. Unlatched, every body whose witness differs from the one
+   * before is new; while the cloud-shadow latch is set, only a body whose witness has not been
+   * seen since the content froze (neither the frozen one nor one already seen). The recorder's
+   * freshness gate (heldSamples.projectionRecordable) writes a latched panel's reading while its
+   * newest body is new: the latch releases only after SHP2_SHADOW_CLEAR_DISTINCT distinct new
+   * bodies (its hysteresis), and the first of them is a reading. No alarm path reads this: the
+   * latch itself is unchanged.
+   */
+  contentNewAtMs?: number;
   projection?: Projection;
   raw?: Record<string, unknown>; // included only if SNAPSHOT_INCLUDE_RAW=1
   // v0.37.0 — the SHP2 device carries its own grid backstop + off_grid flag for
@@ -125,6 +136,9 @@ export interface DeviceSnapshot {
   // inline-imported to avoid a snapshot.ts ↔ gridState.ts top-level cycle.
   grid?: import('./gridState.js').GridBackstop;
   off_grid?: boolean;
+  /** v1.188.1 — set on every panel by snapshotForClient (shp2Membership.ts panelForClient): the
+   *  server's verdict on that panel's reading (shp2ReadbackFresh). The card keys on it. */
+  readbackFresh?: boolean;
 }
 
 export interface FleetSnapshot {
@@ -616,6 +630,7 @@ export class SnapshotStore extends EventEmitter {
         lastTelemetryAtMs: existing?.lastTelemetryAtMs, // v1.176.0 — same trap, same carry
         contentChangedAtMs: existing?.contentChangedAtMs, // v1.181.0 — same trap, same carry
         contentStaleSinceMs: existing?.contentStaleSinceMs,
+        contentNewAtMs: existing?.contentNewAtMs, // v1.188.1 — same trap, same carry
         onlineChangedAtMs: existing?.onlineChangedAtMs,
         onlineChangedVia: existing?.onlineChangedVia,
         lastGridReading: existing?.lastGridReading, // v1.178.0 — same trap, same carry
@@ -1095,6 +1110,13 @@ export class SnapshotStore extends EventEmitter {
     if (latch) this.shadowLatch.set(sn, latch); else this.shadowLatch.delete(sn);
     const latched = latch != null;
     cur.contentStaleSinceMs = latch ? latch.sinceMs : null;
+    // v1.188.1 — the panel's content clock for the recorder's gate (shp2Shadow.ts advanceBodySeen):
+    // a body not seen since the content froze is new content, whatever the latch's release.
+    if (cur.projection?.kind === 'shp2') {
+      const body = advanceBodySeen(this.bodySeen.get(sn), witness, latched);
+      this.bodySeen.set(sn, body.seen);
+      if (body.isNew) cur.contentNewAtMs = nowQ;
+    }
     if (latched !== wasStale) {
       // v1.187.10 (log review) — the latch SETTING is the root condition (grid presence UNKNOWN, the
       // telemetry-blind verdict) and goes to the warn sink; its parallel symptoms (msg-rate-floor,
@@ -1152,6 +1174,9 @@ export class SnapshotStore extends EventEmitter {
    * restart already re-arms the latch side from scratch (see the note below).
    */
   private shadowLatch = new Map<string, import('./shp2Shadow.js').ShadowLatch>();
+  /** v1.188.1 — each panel's previous body and the bodies since its content froze (advanceBodySeen),
+   *  for `contentNewAtMs`. In memory only, like the latch. */
+  private bodySeen = new Map<string, import('./shp2Shadow.js').BodySeen>();
   private contentFreshnessPath: string | null = null;
 
   /**

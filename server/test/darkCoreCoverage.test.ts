@@ -123,7 +123,8 @@ test('★ SOURCE PIN: the night-charge ledger PV sum is gated on WORST per-core 
   );
   assert.match(
     block,
-    /actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE \? round2\(pvWh \/ 1000\) : null;/,
+    // v1.188.1 — the same gate, now beside the held-telemetry clause (ledgerHeldTelemetry.test.ts).
+    /actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld \? round2\(pvWh \/ 1000\) : null;/,
     'below the floor the ledger must record NULL, never a deflated fleet sum',
   );
 });
@@ -143,7 +144,8 @@ test('★ SOURCE PIN: the recorder sweeps for per-device silence, not just fleet
   // here and this loop is necessary.
   const i = src.indexOf('for (const [sn, lastMs] of lastInsertBySn)');
   assert.ok(i > 0, 'the per-device staleness sweep must be present');
-  const sweep = src.slice(i, i + 1400);
+  // Bounded on the block itself (v1.188.1 review 5: a fixed window stopped reaching its end).
+  const sweep = src.slice(i, src.indexOf('perDeviceGapOpen.add(sn);', i) + 'perDeviceGapOpen.add(sn);'.length);
   assert.match(sweep, /if \(isBenchSpareSn\(sn\)\) continue;/, 'a bench spare is dark by design and must be exempt');
   // v1.154.0 — the threshold applies to darkMs, which leaves out the add-on's own
   // downtime for a device still on its seeded clock (driven in seedAndBootPhases.test.ts).

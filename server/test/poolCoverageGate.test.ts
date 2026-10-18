@@ -119,3 +119,65 @@ test('a live measured import overrides everything — a wedged Core cannot fake 
   assert.equal(g.importLive, true);
   assert.equal(g.backstopping, true, 'proven grid flow is proof; coverage cannot veto it');
 });
+
+/* ── v1.188.1 review: a Core listed online on a FROZEN meter is not reporting ── */
+
+/** A Core listed online whose readings stopped changing `agoMs` ago (its quota keeps failing, or
+ *  the cloud replays its cached body): its pack figures are the held ones. */
+function frozenDpu(sn: string, packNetW = 0, agoMs = 30 * 60_000): any {
+  const d = dpu(sn, true, packNetW);
+  d.lastTelemetryAtMs = Date.now() - agoMs;
+  d.contentChangedAtMs = Date.now() - agoMs;
+  return d;
+}
+
+test('★★★ coverage with a clock: a Core listed online on a frozen meter is NOT reporting (the timers, the bridge and the sensors already read it so)', () => {
+  const f = fleet(shp2(['A', 'B', 'C']), frozenDpu('A'), dpu('B', true), dpu('C', true));
+  assert.deepEqual(homeCoreCoverage(f, undefined, Date.now()), { connected: 3, reporting: 2, complete: false });
+  // A Core whose content has not changed since a restart is not vouched for either.
+  const boot = dpu('A', true);
+  delete boot.contentChangedAtMs;
+  assert.equal(homeCoreCoverage(fleet(shp2(['A']), boot), undefined, Date.now()).complete, false);
+  // Without a clock the roster-only answer is unchanged (the console's quality flag).
+  assert.deepEqual(homeCoreCoverage(f), { connected: 3, reporting: 3, complete: true });
+});
+
+test('★★★ gridSta=OK at the floor with a home Core listed online on a FROZEN meter (held pack net 0 W) → NOT backstopping', () => {
+  // The review case: 23:00, the reserve floor, the panel fresh with gridSta=1 and its main at 0 W,
+  // CORE A frozen for 30 min with a held pack net of 0 W while its slot delivers 1.1 kW. The timers
+  // and the Battery Net sensor read that Core from its slot (a 1.2 kW drain); the guard read "every
+  // Core reporting, 0 W" and downgraded the at-floor critical to a low advisory.
+  const g = resolveGridBackstop({
+    devices: fleet(shp2(['A', 'B', 'C']), frozenDpu('A', 0), dpu('B', true, 0), dpu('C', true, 0)),
+    ...NO_DECL, atReserveFloor: true,
+  });
+  assert.equal(g.backstopping, false, 'the frozen 0 W does not disprove the drain');
+  assert.match(g.reason, /only 2\/3 home Cores are reporting at the reserve floor/);
+});
+
+test('★★★ every home Core frozen online at the floor (the reconnection’s first list cycle) → NOT backstopping, as with them offline', () => {
+  const frozen = resolveGridBackstop({
+    devices: fleet(shp2(['A', 'B', 'C']), frozenDpu('A'), frozenDpu('B'), frozenDpu('C')),
+    ...NO_DECL, atReserveFloor: true,
+  });
+  const offline = resolveGridBackstop({
+    devices: fleet(shp2(['A', 'B', 'C']), dpu('A', false), dpu('B', false), dpu('C', false)),
+    ...NO_DECL, atReserveFloor: true,
+  });
+  assert.equal(offline.backstopping, false, 'control: the same Cores offline');
+  assert.equal(frozen.backstopping, false, 'frozen online reads the same as offline');
+  // Away from the floor nothing changes (normal cycling with a frozen Core does not escalate).
+  const away = resolveGridBackstop({
+    devices: fleet(shp2(['A', 'B', 'C']), frozenDpu('A'), dpu('B', true), dpu('C', true)),
+    ...NO_DECL, atReserveFloor: false,
+  });
+  assert.equal(away.backstopping, true);
+});
+
+test('a Core that changed 4 min ago is on a fresh meter: full coverage, the v0.89.0 burst-gap backstop holds', () => {
+  const g = resolveGridBackstop({
+    devices: fleet(shp2(['A', 'B']), frozenDpu('A', 0, 4 * 60_000), dpu('B', true, 0)),
+    ...NO_DECL, atReserveFloor: true,
+  });
+  assert.equal(g.backstopping, true);
+});

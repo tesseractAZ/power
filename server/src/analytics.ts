@@ -8413,7 +8413,14 @@ async function sampleCurtailmentHour(
   if (pvActualW < CURTAIL_MIN_PV_W) return null;
 
   // Load: panel_load from the SHP2 over the hour.
-  const loadW = meanInWindow(shp2.sn, 'panel_load') ?? 0;
+  // v1.188.1 (review) — a panel that wrote no panel_load this hour is UNKNOWN load, not 0 W. Since
+  // the freshness gate a panel the cloud lists offline (or whose shadow is latched) writes no rows
+  // while the Cores keep streaming, and `?? 0` then skipped the weather-verified "PV exceeds load"
+  // disqualifier below: an hour of a full pool and a held panel counted as curtailed. Before the
+  // gate the held panel's heartbeat restated its last panel_load, so the mean was always present.
+  // Not counted, like the heuristic path's own low-load rule.
+  const loadW = meanInWindow(shp2.sn, 'panel_load');
+  if (loadW == null) return null;
 
   // Weather-verified path?
   // v1.186.2 — the hour [H, H + 1) pairs with the value labelled H + 1 (weather.ts
@@ -10816,13 +10823,16 @@ export function setBayesianModelForTesting(value: BayesianSolarModel | null): vo
  *
  * Deliberately NOT reset (test/workerCacheInventory.test.ts fails on a cache in neither list):
  *   stormPrepCache     — the NWS feed only, read on the main thread (alertMonitor);
- *   dailyEnergyWhCache — closed-day integrals keyed by (day, SN, metrics), immutable once the day ends;
- *   eqSeriesCache      — bucketed recorder series keyed by (SN, metrics), topped up by tail;
+ *   dailyEnergyWhCache — closed-day integrals keyed by (day, SN, metrics), immutable once the day ends
+ *                        while samples only grows (v1.188.1: cleared when rows leave it, by
+ *                        resetWorkerSampleCaches);
+ *   eqSeriesCache      — bucketed recorder series keyed by (SN, metrics), topped up by tail (the same);
  *   dispatchCache, riskCache — main-thread caches (index.ts), keyed on the generatedAt of their inputs;
  *   curtailmentFreeze.ts's frozen days (another module) — closed-day results, persisted, and
  *     frozen only on a sound membership (curtailmentMembershipSound: every roster Core walked).
  */
 export function resetWorkerReportCaches(): void {
+  // (resetWorkerSampleCaches, below, clears the two memos this leaves alone when rows leave samples.)
   baselineCache = null;
   forecastCache = null;
   dayForecastCache = null;
@@ -10847,4 +10857,22 @@ export function resetWorkerReportCaches(): void {
   probabilisticCache = null;
   multiDayCache = null;
   bayesCache = null;
+}
+
+/**
+ * v1.188.1 (review) — rows LEFT `samples` or came back (a held-sample move or a restore,
+ * heldSamples.ts): the two memos resetWorkerReportCaches leaves alone assume samples only ever
+ * grows, so both are cleared, with every result cache (each may have been built on them).
+ *   dailyEnergyWhCache — a closed day's integral, computed once for the life of the process;
+ *   eqSeriesCache      — the 60-day equipment-health series, of which only the tail is re-read.
+ * On the upgrade boot the worker's first warm pass (seconds after boot) memoised the incident's
+ * closed day with its held pack, ac_in and PV flows, and the health series with its held
+ * buckets; the scan moved those rows a minute later, and the 7-day energy KPIs and the
+ * inverter-standby trend kept serving them until the next restart. Called by the report
+ * chokepoint when the recorder's samples generation moves (reports.ts noteSamplesGeneration).
+ */
+export function resetWorkerSampleCaches(): void {
+  resetWorkerReportCaches();
+  dailyEnergyWhCache.clear();
+  eqSeriesCache.clear();
 }

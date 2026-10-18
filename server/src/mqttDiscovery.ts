@@ -1342,6 +1342,11 @@ export async function startMqttDiscovery(
     // X → 0 → X at the v1.178.0 deploy. Sums and readiness must see the same device map.
     // v1.186.2 — the Battery Net sensor publishes the DISPLAY sum (stream-preferred, snapshot.ts).
     const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
+    // v1.188.1 — Fleet PV and Battery Net add every DARK home slot, metered at the panel
+    // (energyBridge.ts); null while one cannot be bridged (publishReadiness `flowBridged`).
+    // v1.188.1 (review) — and AC Import on the same notion (a frozen Core's held ac_in out, a dark
+    // Core's slot input in: energyBridge.ts BridgedFleetFlow.acIn).
+    const bridged = recorder.bridgedFleetFlow({ fleetPv, fleetBatteryNet, acIn, fleetIn, fleetOut }, snap.devices, Date.now());
     const lifetime = recorder.getLifetimeTotals();
     const lifetimeKwh = makeLifetimeKwh(lifetime);
     // v1.186.0 — any report below may be null (settleStateReports); its fields publish null.
@@ -1387,10 +1392,10 @@ export async function startMqttDiscovery(
     const state: Record<string, unknown> = {
       lighting_posture: posture?.posture ?? null,
       lighting_posture_reason: posture?.reason ?? null,
-      fleet_pv_watts: Math.round(fleetPv),
+      fleet_pv_watts: bridged.fleetPv == null ? null : Math.round(bridged.fleetPv),
       panel_load_watts: Math.round(panelLoad),
-      ac_import_watts: Math.round(acIn),
-      fleet_battery_net_watts: Math.round(fleetBatteryNet),
+      ac_import_watts: bridged.acIn == null ? null : Math.round(bridged.acIn),
+      fleet_battery_net_watts: bridged.fleetBatteryNet == null ? null : Math.round(bridged.fleetBatteryNet),
       // v0.48.0 — whole-home grid POWER at the SHP2 main (wattInfo.gridWatt), the
       // power complement of the grid_to_home lifetime energy sensor. Null-safe: the
       // sensor reads HA 'unknown' when the SHP2 projection has no gridWatt yet.
@@ -1559,6 +1564,7 @@ export async function startMqttDiscovery(
       carbon,
       tariff,
       degradation: deg as { basisPending?: boolean } | null, // v1.187.18
+      flowBridge: bridged, // v1.188.1
     }));
   };
 

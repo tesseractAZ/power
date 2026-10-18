@@ -2752,6 +2752,18 @@ export type TelemetryGapRecord = {
   restartSpanning?: boolean;
   graceful?: boolean;
   sn?: string;
+  /** v1.188.1 (dry run) — a per-device record whose start moved EARLIER (to the start of the
+   *  device's held span, its newest row kept in samples) keeps its alert id on the start it was
+   *  first filed with. */
+  alertStartMs?: number;
+  /** v1.188.1 (dry run) — an in-process fleet gap the freshness gate explains: the home devices
+   *  it held while the recorder kept evaluating the fleet (`shadow`: the panel's cloud shadow).
+   *  v1.188.1 (review 6) — `replayed`: a device written while it only restated readings the
+   *  held-sample scan had moved out of samples (held rows that passed the gate: recorder.ts onMoved). */
+  held?: Array<{ sn: string; shadow: boolean; replayed?: boolean }>;
+  /** v1.188.1 (review 3) — with `held`: the home devices those evaluations found fresh with
+   *  nothing measurable, never held in the silence (recorder.ts TelemetryGap.unmeasured). */
+  unmeasured?: string[];
 };
 
 /** v1.155.0 — id for a PER-DEVICE gap alert. It stays inside the `system-outage-`
@@ -2814,20 +2826,45 @@ export function resolveOutageAlertOptions(env: Record<string, string | undefined
 const fmtClock = (ms: number): string =>
   new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
+/** v1.188.1 (dry run) — the devices dark at the same time as this one, this one included: the
+ *  most distinct devices whose per-device records cover one instant of this record's window. PURE.
+ *  v1.188.1 (review 3) — at ONE instant: counted by overlap with this window, two devices dark at
+ *  either end of a long record that were never dark together made "3 home devices were dark at the
+ *  same time" (re-dating lengthens a window by the whole hold). The most is reached at the start of
+ *  some record (windows are [start, end): one that ends as another begins is not at the same time). */
+export function devicesDarkAlongside(g: TelemetryGapRecord, gaps: readonly TelemetryGapRecord[]): number {
+  const others = gaps.filter((x) => x.sn && x.sn !== g.sn && Number.isFinite(x.startMs) && Number.isFinite(x.endMs)
+    && x.startMs < g.endMs && g.startMs < x.endMs);
+  let most = 0;
+  for (const at of [g.startMs, ...others.map((x) => Math.max(g.startMs, x.startMs))]) {
+    const sns = new Set<string>();
+    for (const x of others) if (x.startMs <= at && at < x.endMs) sns.add(x.sn!);
+    if (sns.size > most) most = sns.size;
+  }
+  return most + (g.sn ? 1 : 0);
+}
+
 /** v1.155.0 — the alert for a PER-DEVICE gap record. `device` carries the name, as on
  *  every device-scoped alert: notifyLocator appends it to the push title and the alerts
- *  panel shows it beside the title, so the title does not repeat it. */
-function deviceGapAlert(g: TelemetryGapRecord, sn: string, mins: number, name: string | null | undefined): Alert {
+ *  panel shows it beside the title, so the title does not repeat it.
+ *  v1.188.1 (dry run) — the id is keyed on the start the record was first filed with
+ *  (`alertStartMs`), the text on its current start (the device's newest row in samples: its last
+ *  fresh reading, or, review 3, a restated row a scan left there), and with several devices dark
+ *  at once (`darkAlongside`) the text says how many, not "one device". */
+function deviceGapAlert(g: TelemetryGapRecord, sn: string, mins: number, name: string | null | undefined, darkAlongside = 1): Alert {
   const label = name != null && name.trim() !== '' ? name : sn;
   const who = label === sn ? sn : `${label} (${sn})`;
+  const scope = darkAlongside > 1
+    ? `${darkAlongside} home devices were dark at the same time, not the whole feed`
+    : 'this device went dark, not the whole feed';
   return {
-    id: deviceGapAlertId(sn, g.startMs, g.durationMs),
+    id: deviceGapAlertId(sn, g.alertStartMs ?? g.startMs, g.durationMs),
     severity: 'warning',
     category: 'Connectivity',
     device: label,
     priority: 'medium',
     title: `Device telemetry gap — no data for ${mins} min`,
-    detail: `${who} wrote no samples for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}) while other home devices kept reporting — one device went dark, not the whole feed. The gap is measured to when it was detected, so the device may still be silent. Anything summed across the fleet in that window (production, load, forecast inputs) under-counts.`,
+    detail: `${who} wrote no samples for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}) while other home devices kept reporting — ${scope}. The gap is measured to when it was detected, so the device may still be silent. Anything summed across the fleet in that window (production, load, forecast inputs) under-counts.`,
     facts: [
       { label: 'Device', value: who },
       { label: 'Duration', value: `${mins} min` },
@@ -2836,6 +2873,30 @@ function deviceGapAlert(g: TelemetryGapRecord, sn: string, mins: number, name: s
       { label: 'Type', value: 'per-device (other home devices kept reporting)' },
     ],
   };
+}
+
+/** v1.188.1 (dry run) — the held devices of an in-process fleet gap, as the alert names them:
+ *  a cloud shadow is a replayed payload; otherwise the device sent no new content. PURE.
+ *  v1.188.1 (review 3) — and the devices read fresh with nothing measurable (`unmeasured`): with
+ *  any, the phrase no longer says that every home device it read was held. */
+export function heldGapPhrase(
+  held: ReadonlyArray<{ sn: string; shadow: boolean; replayed?: boolean }>,
+  deviceName?: (sn: string) => string | null | undefined,
+  unmeasured: readonly string[] = [],
+): string {
+  const nameOf = (sn: string) => { const n = deviceName?.(sn); return n != null && n.trim() !== '' ? n : sn; };
+  const list = (xs: string[]) => (xs.length <= 2 ? xs.join(' and ') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+  const shadow = held.filter((h) => h.shadow).map((h) => nameOf(h.sn));
+  const stale = held.filter((h) => !h.shadow && h.replayed !== true).map((h) => nameOf(h.sn));
+  // v1.188.1 (review 6) — written, restating readings the held-sample scan had moved out of the history.
+  const replayed = held.filter((h) => !h.shadow && h.replayed === true).map((h) => nameOf(h.sn));
+  const parts: string[] = [];
+  if (shadow.length > 0) parts.push(`the EcoFlow cloud replayed the last payload of ${list(shadow)} (cloud shadow)`);
+  if (stale.length > 0) parts.push(`${list(stale)} sent no new readings`);
+  if (replayed.length > 0) parts.push(`${list(replayed)} only restated ${replayed.length > 1 ? 'their' : 'its'} last readings, which the hourly check moved out of the history as held samples`);
+  if (unmeasured.length === 0) return `every home device it had a reading for was held — ${parts.join('; ')}`;
+  parts.push(`${list(unmeasured.map(nameOf))} reported nothing measurable`);
+  return `no home device it had a reading for gave one to record — ${parts.join('; ')}`;
 }
 
 /**
@@ -2872,7 +2933,7 @@ export function outageAlerts(
     // devices were writing, the broker was fine, and the record is written at
     // DETECTION, while the device is still dark.
     if (g.sn) {
-      const alert = deviceGapAlert(g, g.sn, mins, deviceName?.(g.sn));
+      const alert = deviceGapAlert(g, g.sn, mins, deviceName?.(g.sn), devicesDarkAlongside(g, gaps));
       startOf.set(alert.id, g.startMs);
       out.push(alert);
       continue;
@@ -2884,6 +2945,11 @@ export function outageAlerts(
     // "get a UPS" remediation — at this project's release cadence that push
     // would otherwise fire on every deploy and poison the power-outage trend.
     const graceful = restart && g.graceful === true;
+    // v1.188.1 (dry run) — an in-process gap the freshness gate explains: the recorder kept
+    // evaluating the fleet and every home device it had a reading for was held (or, review 3, read
+    // fresh with nothing measurable), so nothing was written. It is not "an MQTT/broker stall":
+    // name what was held, as measured.
+    const held = !restart && g.held != null && g.held.length > 0 ? g.held : null;
     const fleetId = outageAlertId(g.startMs, g.durationMs);
     startOf.set(fleetId, g.startMs);
     out.push({
@@ -2906,12 +2972,14 @@ export function outageAlerts(
         ? `The add-on was deliberately stopped/updated (deploy or restart) and telemetry was dark for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}). Expected downtime for a deploy; history in that window is unrecoverable.`
         : restart
           ? `No home telemetry was recorded for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}), spanning a restart — the Pi lost power or the add-on stopped, so the alarm system was OFFLINE for that stretch and this window of history is unrecoverable. If this recurs, the Pi needs an always-on power source (UPS / dedicated circuit).`
-          : `No home-device samples reached the recorder for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}) — an MQTT/broker stall; writes have since resumed. History in that window is missing but the process stayed up.`,
+          : held
+            ? `${g.unmeasured != null && g.unmeasured.length > 0 ? 'No home-device reading could be recorded' : 'No fresh home-device readings reached the recorder'} for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}): the add-on kept checking the fleet, but ${heldGapPhrase(held, deviceName, g.unmeasured ?? [])}, so ${held.some((h) => !h.shadow && h.replayed === true) ? 'no fresh reading was recorded (only fresh readings are kept)' : 'nothing was recorded (only fresh readings are saved)'}. Writes have since resumed. History in that window is missing but the process stayed up.`
+            : `No home-device samples reached the recorder for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}) — an MQTT/broker stall; writes have since resumed. History in that window is missing but the process stayed up.`,
       facts: [
         { label: 'Duration', value: `${mins} min` },
         { label: 'Started', value: fmtClock(g.startMs) },
         { label: 'Ended', value: fmtClock(g.endMs) },
-        { label: 'Type', value: graceful ? 'deliberate stop (deploy/update)' : restart ? 'restart-spanning (power/host)' : 'in-process (MQTT stall)' },
+        { label: 'Type', value: graceful ? 'deliberate stop (deploy/update)' : restart ? 'restart-spanning (power/host)' : held ? 'in-process (held readings)' : 'in-process (MQTT stall)' },
       ],
     });
   }

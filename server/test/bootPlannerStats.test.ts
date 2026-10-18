@@ -28,6 +28,7 @@ const DB_PATH = join(tmp, 'ecoflow.db');
 const __dir = dirname(fileURLToPath(import.meta.url));
 
 const { createRecorder, SEED_SQL } = await import('../src/recorder.js');
+const { HELD_SAMPLES_SQL } = await import('../src/heldSamples.js');
 
 const ROWS = 5_000;
 const SNS = ['CORE_A', 'CORE_B'];
@@ -172,6 +173,8 @@ test('★ a refresh that fails while LISTING is a failure — never "planned no 
 
 const R = 'recorder.ts';
 const RR = 'readRecorder.ts';
+// v1.188.1 — the held-sample scan and move (heldSamples.ts) read samples too.
+const HS = 'heldSamples.ts';
 const RANGE = 'WHERE sn = ? AND metric = ? AND ts >= ? AND ts <= ?';
 const MULTI = 'WHERE sn = ? AND metric IN (${placeholders}) AND ts >= ? AND ts <= ?';
 type Shape = { name: string; sql: string; params: Array<string | number>; sites: Array<[file: string, fragment: string]> };
@@ -219,13 +222,21 @@ const SHAPES: Shape[] = [
   ...Object.entries(SEED_SQL).map(([name, sql]): Shape => ({
     name: `seed ${name}`, sql, params: (sql.match(/\?/g) ?? []).map(() => 'x'), sites: [[R, `'${sql}'`]],
   })),
+  // v1.188.1 — each held-sample statement: two (sn, metric, ts) seeks and two ts-range slices
+  // pinned to the ts index (the composite index cannot bound ts without a metric).
+  // v1.188.1 (dry run) — and a series' oldest row, the first scan's start: the seed's MAX seek mirrored.
+  ...Object.entries(HELD_SAMPLES_SQL).map(([name, sql]): Shape => ({
+    name: `held ${name}`, sql,
+    params: name === 'prevValue' ? ['CORE_A', 'soc', T1] : name === 'chunkRows' ? ['CORE_A', 'soc', T0, T1] : name === 'minTs' ? ['CORE_A', 'soc'] : [T0, T1, 'CORE_A'],
+    sites: [[HS, `'${sql}'`]],
+  })),
 ];
 
 const squash = (s: string) => s.replace(/\s+/g, ' ');
 const source = (file: string) => readFileSync(resolve(__dir, '../src', file), 'utf8');
 
 test('the plan test below covers every statement that reads samples', () => {
-  for (const file of [R, RR]) {
+  for (const file of [R, RR, HS]) {
     const code = source(file).split('\n').filter((l) => !/^\s*(\/\/|\*|--)/.test(l)).join('\n');
     const inCode = code.split('FROM samples').length - 1;
     const listed = SHAPES.flatMap((s) => s.sites).filter(([f]) => f === file);

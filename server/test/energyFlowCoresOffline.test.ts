@@ -1,0 +1,665 @@
+/**
+ * v1.188.1 — the Energy flow card with the Cores' own meters absent and the panel fresh.
+ *
+ * Live 2026-10-16 20:04 MST: every Core had been cloud-offline since 10-14 23:52 (no DPU
+ * projection in the snapshot). The panel was fresh: main (gridWatt) 0 W, snapshot.grid
+ * {importWatts 0, homeGridWatts 0, importLive false, present true, panelFresh true}, its three
+ * source slots −1145, −1145 and −1119 W (delivering; isConnected, dpuStale), the house 3.39 kW
+ * and the pool falling 92 → 86 % since 18:30. The card drew "GRID 3.39 kW importing" and a
+ * 3390 W grid → Loads edge beside "Batteries (0 DPU) — idle": with no Core reporting, the
+ * Cores' AC output summed to 0 and the house-on-grid rule took that as "the Cores deliver
+ * nothing", so the grid was given the whole house.
+ *
+ * Fixtures carry fake serials and only the fields the model reads.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { energyFlowModel, batteriesTitle, batteriesSubtitle, solarSubtitle } from '../../web/src/cards/energyFlowModel.js';
+import { fmtW } from '../../web/src/format.js';
+
+type Any = any; // fixtures carry only the fields the model reads
+
+/** A Core that reports on its own meter. */
+function core(sn: string, o: { acIn?: number; acOut?: number; packNet?: number; soc?: number; pv?: number } = {}): Any {
+  const net = o.packNet ?? 0; // > 0 discharging
+  return {
+    sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: true, lastUpdated: Date.now(),
+    projection: {
+      kind: 'dpu', soc: o.soc ?? 60, pvTotalWatts: o.pv ?? 0, acInWatts: o.acIn ?? 0, acOutWatts: o.acOut ?? 0,
+      packs: [{ num: 1, outputWatts: Math.max(0, net), inputWatts: Math.max(0, -net) }],
+    },
+  };
+}
+
+/** A cloud-offline Core as the snapshot carries it: listed, offline, no projection. */
+const darkCore = (sn: string): Any => ({ sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: false, lastUpdated: Date.now() - 45 * 3600_000 });
+
+interface Slot { sn: string; w?: number; pct?: number; connected?: boolean; dpuStale?: boolean; dpuFrozen?: boolean }
+
+/** A six-circuit panel whose source slots carry the panel's own per-slot meter (sourceWatts).
+ *  `silent`: every channel watts null. `readbackFresh`: the server's verdict on the panel. */
+function panel(
+  slots: Slot[], houseW: number,
+  o: { sourceWatts?: number[]; sn?: string; silent?: boolean; readbackFresh?: boolean; housePanel?: boolean } = {},
+): Any {
+  // Three loaded channels in exact thirds of a whole-watt house (no floating-point residue).
+  const third = Math.floor(houseW / 3);
+  const legs = [houseW - 2 * third, third, third];
+  const circuits = Array.from({ length: 12 }, (_, i) => ({ ch: i + 1, name: `Circuit ${i + 1}`, watts: o.silent ? null : legs[i] ?? 0 }));
+  return {
+    sn: o.sn ?? 'PANEL-TEST-01', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2', online: true, lastUpdated: Date.now(),
+    contentStaleSinceMs: null,
+    ...(o.readbackFresh != null ? { readbackFresh: o.readbackFresh } : {}),
+    ...(o.housePanel ? { housePanel: true } : {}),
+    projection: {
+      kind: 'shp2', circuits, pairedCircuits: [],
+      sources: slots.map((s, i) => ({
+        slot: i + 1, sn: s.sn, isConnected: s.connected ?? true, batteryPercentage: s.pct ?? null,
+        ...(s.dpuStale != null ? { dpuStale: s.dpuStale } : {}),
+        ...(s.dpuFrozen != null ? { dpuFrozen: s.dpuFrozen } : {}),
+      })),
+      sourceWatts: o.sourceWatts ?? slots.map((s) => s.w ?? 0),
+    },
+  };
+}
+
+/** snapshot.grid as the server sent it at 20:04 (main and Core import both 0). */
+const grid = (homeGridWatts = 0, importWatts = 0): Any => ({
+  present: true, backstopping: true, importLive: homeGridWatts >= 100, declared: true,
+  importWatts, homeGridWatts, shp2GridConnected: true, presenceUnknown: false, panelFresh: true, vetoClearable: false,
+});
+
+const devs = (...ds: Any[]) => Object.fromEntries(ds.map((d) => [d.sn, d]));
+
+/** The 20:04 plant: five Cores dark, three of them in the panel's slots. */
+const LIVE_SLOTS: Slot[] = [
+  { sn: 'CORE-A', w: -1145, pct: 86, dpuStale: true },
+  { sn: 'CORE-B', w: -1145, pct: 86, dpuStale: true },
+  { sn: 'CORE-C', w: -1119, pct: 85, dpuStale: true },
+];
+const liveDevices = (slots = LIVE_SLOTS, houseW = 3390, o: { sourceWatts?: number[] } = {}) => devs(
+  darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), darkCore('CORE-D'), darkCore('CORE-E'),
+  panel(slots, houseW, o),
+);
+
+/* ══ the 10-16 20:04 shape ════════════════════════════════════════════════ */
+
+test('★★★ 10-16 20:04: no Core reporting, panel fresh, main 0 W — no grid import; the batteries carry the house', () => {
+  const m = energyFlowModel(liveDevices(), grid(0, 0));
+  assert.equal(m.panelState, 'ok');
+  assert.equal(m.gridState, 'standby', 'the main measured 0 W: the grid is available, not importing (was "GRID 3.39 kW importing")');
+  assert.equal(m.gridToHouseW, 0, 'no grid → Loads edge (was 3390 W)');
+  assert.equal(m.gridToCoresW, 0);
+  assert.equal(m.gridSupplyW, 0);
+  assert.ok(Math.abs(m.coresToHouseW - 3390) < 0.01, `batteries → Loads carries the house (got ${m.coresToHouseW})`);
+  assert.equal(m.gridToHouseW + m.coresToHouseW, m.load, 'the arrows into Loads sum to the box');
+  assert.equal(m.acOut, 3409, 'the Cores’ AC output is the panel’s meter of their three slots');
+  assert.equal(m.batNet, 3409, 'and the Batteries node shows it leaving them (was "idle")');
+  assert.equal(m.viaPanelCount, 3);
+  assert.equal(m.dpuCount, 0);
+  assert.ok(m.soc != null && Math.abs(m.soc - (86 + 86 + 85) / 3) < 1e-9, `the slots’ battery percentages (got ${m.soc})`);
+  assert.equal(batteriesTitle(m), 'Batteries (3 via panel)', 'three Cores in the node, seen through the panel (was "Batteries (0 DPU)")');
+  assert.equal(batteriesSubtitle(m), '▼ 3.41 kW out');
+});
+
+test('★★★ the same shape with no slot figures in the frame: still no grid import — the measured main is drawn, nothing is inferred', () => {
+  const m = energyFlowModel(liveDevices(LIVE_SLOTS, 3390, { sourceWatts: [] }), grid(0, 0));
+  assert.equal(m.viaPanelCount, 0);
+  assert.equal(m.gridState, 'standby', 'no Core’s own meter says it delivers nothing, and the main reads 0 W');
+  assert.equal(m.gridToHouseW, 0);
+  assert.equal(m.coresToHouseW, 0, 'nothing measured the Cores either: no edge is invented for them');
+  assert.equal(m.load, 3390, 'the Loads node still shows what the panel measured');
+  assert.equal(batteriesTitle(m), 'Batteries (0 DPU)');
+  assert.equal(batteriesSubtitle(m), 'idle');
+});
+
+test('★★ a slot whose Core is absent from the account entirely is drawn via the panel too', () => {
+  const m = energyFlowModel(devs(panel(LIVE_SLOTS.map((s) => ({ ...s, dpuStale: false })), 3390)), grid(0, 0));
+  assert.equal(m.viaPanelCount, 3);
+  assert.equal(m.gridToHouseW, 0);
+  assert.ok(Math.abs(m.coresToHouseW - 3390) < 0.01);
+});
+
+/* ══ grid import with the Cores offline ═══════════════════════════════════ */
+
+test('★★★ real grid import with the Cores offline: main 3 kW, slots idle — the grid carries the house', () => {
+  const slots = LIVE_SLOTS.map((s) => ({ ...s, w: 0 }));
+  const m = energyFlowModel(liveDevices(slots, 3000), grid(3000, 0));
+  assert.equal(m.gridState, 'active');
+  assert.equal(m.gridToHouseW, 3000);
+  assert.equal(m.coresToHouseW, 0);
+  assert.equal(m.gridSupplyW, 3000, 'the Grid node is the measured main');
+  assert.equal(m.viaPanelCount, 3);
+  assert.equal(batteriesSubtitle(m), 'idle');
+});
+
+test('★★ grid and panel-metered Cores share the house: the slots’ share, the grid the rest', () => {
+  const slots = LIVE_SLOTS.map((s) => ({ ...s, w: -400 }));
+  const m = energyFlowModel(liveDevices(slots, 2600), grid(1400, 0));
+  assert.equal(m.gridState, 'active');
+  assert.equal(m.coresToHouseW, 1200);
+  assert.equal(m.gridToHouseW, 1400);
+  assert.equal(m.gridSupplyW, 1400);
+});
+
+test('★★ a force charge with the Cores offline: the slots’ input is the grid → Batteries edge', () => {
+  const slots = LIVE_SLOTS.map((s) => ({ ...s, w: 5300 }));
+  const m = energyFlowModel(liveDevices(slots, 2000), grid(19053, 0));
+  assert.equal(m.gridToCoresW, 15900, 'the panel meters 5.3 kW into each Core');
+  assert.equal(m.gridToHouseW, 2000);
+  assert.equal(m.coresToHouseW, 0);
+  assert.equal(m.gridSupplyW, 19053, 'main and edges agree within tolerance: the node keeps the main');
+  assert.equal(m.batNet, -15900);
+  assert.equal(batteriesSubtitle(m), '▲ 15.90 kW in');
+});
+
+test('★★★ every Core via the panel, slots idle, main 0 W: the frame measured no grid, so none is drawn', () => {
+  // An incoherent frame (3 kW of house, nothing measured feeding it). The pre-fix rule put the
+  // house on the grid; with no Core's own meter the inference has nothing to stand on.
+  const slots = LIVE_SLOTS.map((s) => ({ ...s, w: 0 }));
+  const m = energyFlowModel(liveDevices(slots, 3000), grid(0, 0));
+  assert.equal(m.viaPanelCount, 3);
+  assert.equal(m.gridState, 'standby');
+  assert.equal(m.gridToHouseW, 0);
+  assert.equal(m.coresToHouseW, 0);
+});
+
+/* ══ mixed: some Cores on their own meters ════════════════════════════════ */
+
+test('★★ two Cores report idle, the third is offline delivering through the panel — the house is not put on the grid', () => {
+  const p = panel([{ sn: 'CORE-A', w: 0 }, { sn: 'CORE-B', w: 0 }, { sn: 'CORE-C', w: -1500, pct: 70, dpuStale: true }], 1500);
+  const m = energyFlowModel(devs(core('CORE-A', { soc: 60 }), core('CORE-B', { soc: 60 }), darkCore('CORE-C'), p), grid(0, 0));
+  assert.equal(m.dpuCount, 2);
+  assert.equal(m.viaPanelCount, 1);
+  assert.equal(m.gridState, 'standby');
+  assert.equal(m.gridToHouseW, 0, 'was 1500 W: the two idle Cores read as the whole fleet');
+  assert.equal(m.coresToHouseW, 1500);
+  assert.ok(m.soc != null && Math.abs(m.soc - (60 + 60 + 70) / 3) < 1e-9, 'one value per Core: two own, one from its slot');
+  assert.equal(batteriesTitle(m), 'Batteries (2 DPU, 1 via panel)');
+  assert.equal(batteriesSubtitle(m), '▼ 1.50 kW out');
+});
+
+test('★★ a Core that reports keeps its own meter: its slot is not counted again', () => {
+  // The panel's frame lags the Cores' ~10 s meters; here it still shows each slot at −2500 W.
+  const p = panel([{ sn: 'CORE-A', w: -2500 }, { sn: 'CORE-B', w: -2500 }, { sn: 'CORE-C', w: -2500 }], 4000);
+  const m = energyFlowModel(
+    devs(core('CORE-A', { acOut: 1000, packNet: 1000 }), core('CORE-B', { acOut: 1000, packNet: 1000 }), core('CORE-C', { acOut: 1000, packNet: 1000 }), p),
+    grid(1000, 0),
+  );
+  assert.equal(m.viaPanelCount, 0);
+  assert.equal(m.acOut, 3000);
+  assert.equal(m.batNet, 3000);
+  assert.equal(m.coresToHouseW, 3000);
+  assert.equal(m.gridToHouseW, 1000);
+  assert.equal(batteriesSubtitle(m), '▼ 3.00 kW discharging', 'every Core on its own meter: the pack wording is unchanged');
+});
+
+test('★★ 09-21 22:55 hand-over with the panel frame still showing the Cores delivering: the fresher meter still wins', () => {
+  // The Cores' own meters already read 0; the panel's frame (slots still −1712 W) is a minute old.
+  const p = panel([{ sn: 'CORE-A', w: -1712 }, { sn: 'CORE-B', w: -1712 }, { sn: 'CORE-C', w: -1713 }], 5137);
+  const m = energyFlowModel(devs(core('CORE-A'), core('CORE-B'), core('CORE-C'), p), grid(0, 0));
+  assert.equal(m.gridState, 'active', 'the Cores deliver nothing on their own meters and the house draws 5 kW: it is on the grid');
+  assert.equal(m.gridToHouseW, m.load);
+  assert.equal(m.coresToHouseW, 0);
+});
+
+test('★★ a connected Core with no figure from either meter is unknown, not idle: the house is not inferred onto the grid', () => {
+  // CORE-C is offline and the frame carries no figure for its slot.
+  const p = panel([{ sn: 'CORE-A' }, { sn: 'CORE-B' }, { sn: 'CORE-C', dpuStale: true }], 3000, { sourceWatts: [0, 0] });
+  const m = energyFlowModel(devs(core('CORE-A'), core('CORE-B'), darkCore('CORE-C'), p), grid(0, 0));
+  assert.equal(m.viaPanelCount, 0);
+  assert.equal(m.gridState, 'standby');
+  assert.equal(m.gridToHouseW, 0, 'was 3000 W');
+  // ...and once the slot has a figure, the inference stands on the Cores again.
+  const p2 = panel([{ sn: 'CORE-A' }, { sn: 'CORE-B' }, { sn: 'CORE-C', w: 0, dpuStale: true }], 3000);
+  const m2 = energyFlowModel(devs(core('CORE-A'), core('CORE-B'), darkCore('CORE-C'), p2), grid(0, 0));
+  assert.equal(m2.gridState, 'active');
+  assert.equal(m2.gridToHouseW, 3000);
+});
+
+/* ══ what is not read ═════════════════════════════════════════════════════ */
+
+test('★ a DISCONNECTED slot is not drawn via the panel', () => {
+  const p = panel([{ sn: 'CORE-A', w: -1000 }, { sn: 'CORE-B', w: -1000 }, { sn: 'CORE-X', w: -3000, connected: false }], 2000);
+  const m = energyFlowModel(devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-X'), p), grid(0, 0));
+  assert.equal(m.viaPanelCount, 2);
+  assert.equal(m.acOut, 2000);
+  assert.equal(m.batNet, 2000);
+});
+
+test('★★★ a FROZEN panel’s slots are not read: its figures are not a reading', () => {
+  const frozen = liveDevices();
+  (frozen['PANEL-TEST-01'] as Any).contentStaleSinceMs = Date.now() - 6 * 60_000;
+  const m = energyFlowModel(frozen, grid(0, 0));
+  assert.equal(m.panelState, 'frozen');
+  assert.equal(m.viaPanelCount, 0);
+  assert.equal(m.coresToHouseW, 0);
+  assert.equal(m.batNet, 0);
+  assert.equal(m.soc, null);
+  // ...and the server's panelFresh:false verdict freezes them the same way.
+  const stale = energyFlowModel(liveDevices(), { ...grid(0, 0), panelFresh: false });
+  assert.equal(stale.panelState, 'frozen');
+  assert.equal(stale.viaPanelCount, 0);
+  assert.equal(stale.coresToHouseW, 0);
+});
+
+/* ══ labels and wiring ════════════════════════════════════════════════════ */
+
+test('the Batteries labels keep their wording while every Core reports', () => {
+  assert.equal(batteriesTitle({ dpuCount: 3, viaPanelCount: 0, spareCount: 1, membershipUnknown: false }), 'Batteries (3 DPU, +1 spare)');
+  assert.equal(batteriesTitle({ dpuCount: 2, viaPanelCount: 0, spareCount: 0, membershipUnknown: true }), 'Batteries (2 DPU, spares not yet identified)');
+  assert.equal(batteriesTitle({ dpuCount: 2, viaPanelCount: 1, spareCount: 1, membershipUnknown: false }), 'Batteries (2 DPU, 1 via panel, +1 spare)');
+  assert.equal(batteriesTitle({ dpuCount: 0, viaPanelCount: 3, spareCount: 1, membershipUnknown: false }), 'Batteries (3 via panel, +1 spare)');
+  assert.equal(batteriesTitle({ dpuCount: 0, viaPanelCount: 0, spareCount: 0, membershipUnknown: false }), 'Batteries (0 DPU)');
+  assert.equal(batteriesSubtitle({ batNet: 1200, viaPanelCount: 0 }), '▼ 1.20 kW discharging');
+  assert.equal(batteriesSubtitle({ batNet: -800, viaPanelCount: 0 }), '▲ 800 W charging');
+  assert.equal(batteriesSubtitle({ batNet: 3, viaPanelCount: 0 }), 'idle');
+  assert.equal(batteriesSubtitle({ batNet: -800, viaPanelCount: 2 }), '▲ 800 W in');
+});
+
+test('EnergyFlow.tsx renders the Batteries labels from the model helpers', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const card = readFileSync(resolve(here, '../../web/src/cards/EnergyFlow.tsx'), 'utf8');
+  for (const pin of [
+    'title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown })}',
+    'subtitle={batteriesSubtitle({ batNet, viaPanelCount, pvViaPanel })}',
+  ]) assert.ok(card.includes(pin), `the card must render from the model: missing ${pin}`);
+  assert.ok(!card.includes('discharging`'), 'the card no longer builds the battery wording itself');
+});
+
+/* ══ v1.188.1 review — a Core listed online on a FROZEN meter ═══════════════ */
+
+/** The 20:04 slots, their Cores listed online on a frozen meter (the server's dpuFrozen verdict). */
+const FROZEN_SLOTS: Slot[] = LIVE_SLOTS.map((s) => ({ ...s, dpuStale: false, dpuFrozen: true }));
+
+test('★★★ the 20:04 shape with the Cores listed ONLINE on frozen meters (acOut 0): still no grid import', () => {
+  // A quota fetch that keeps failing (setDeviceError keeps the Core listed online, its projection
+  // frozen), or the cloud replaying its cached body: its frozen acOut of 0 W read as "the Cores
+  // deliver nothing", and the card drew the 10-16 picture again.
+  const m = energyFlowModel(
+    devs(core('CORE-A'), core('CORE-B'), core('CORE-C'), darkCore('CORE-D'), darkCore('CORE-E'), panel(FROZEN_SLOTS, 3390)),
+    grid(0, 0),
+  );
+  assert.equal(m.gridState, 'standby', 'was "GRID 3.39 kW importing"');
+  assert.equal(m.gridToHouseW, 0, 'was 3390 W');
+  assert.equal(m.gridSupplyW, 0);
+  assert.ok(Math.abs(m.coresToHouseW - 3390) < 0.01, `batteries → Loads carries the house (got ${m.coresToHouseW})`);
+  assert.equal(m.acOut, 3409, 'the frozen Cores are read from their slots');
+  assert.equal(m.batNet, 3409);
+  assert.equal(m.dpuCount, 0, 'no Core is on its own meter');
+  assert.equal(m.viaPanelCount, 3);
+  assert.ok(m.soc != null && Math.abs(m.soc - (86 + 86 + 85) / 3) < 1e-9, `the slots’ percentages, not the frozen 60 % (got ${m.soc})`);
+  assert.equal(batteriesTitle(m), 'Batteries (3 via panel)', 'was "Batteries (3 DPU)"');
+  assert.equal(batteriesSubtitle(m), '▼ 3.41 kW out', 'was "idle"');
+});
+
+test('★★★ Cores frozen while DELIVERING after the house moved to the grid: the main carries the house, not their old output', () => {
+  // Frozen at 1145/1145/1119 W of output; the panel's live frame: slots 0, main 3390, house 3390.
+  const m = energyFlowModel(
+    devs(
+      core('CORE-A', { acOut: 1145, packNet: 1145 }), core('CORE-B', { acOut: 1145, packNet: 1145 }), core('CORE-C', { acOut: 1119, packNet: 1119 }),
+      panel(FROZEN_SLOTS.map((s) => ({ ...s, w: 0 })), 3390),
+    ),
+    grid(3390, 0),
+  );
+  assert.equal(m.gridState, 'active');
+  assert.equal(m.gridToHouseW, 3390, 'was 0 W');
+  assert.equal(m.coresToHouseW, 0, 'was 3390 W from the frozen acOut');
+  assert.equal(m.gridSupplyW, 3390, 'the Grid node is the measured main (was 0 W)');
+  assert.equal(m.acOut, 0);
+  assert.equal(m.batNet, 0);
+  assert.equal(batteriesSubtitle(m), 'idle', 'was "▼ 3.41 kW discharging"');
+});
+
+test('★★ one Core frozen beside two that report idle: it is read from its slot, and the house is not put on the grid', () => {
+  const p = panel([{ sn: 'CORE-A', w: 0 }, { sn: 'CORE-B', w: 0 }, { sn: 'CORE-C', w: -1500, pct: 70, dpuFrozen: true }], 1500);
+  const m = energyFlowModel(devs(core('CORE-A', { pv: 300 }), core('CORE-B', { pv: 200 }), core('CORE-C', { pv: 900 }), p), grid(0, 0));
+  assert.equal(m.dpuCount, 2);
+  assert.equal(m.viaPanelCount, 1);
+  assert.equal(m.gridState, 'standby');
+  assert.equal(m.gridToHouseW, 0, 'was 1500 W: the frozen Core’s 0 W read as idle');
+  assert.equal(m.coresToHouseW, 1500);
+  assert.equal(batteriesTitle(m), 'Batteries (2 DPU, 1 via panel)');
+  assert.equal(m.pv, 500, 'the frozen Core’s 900 W of PV is not a reading');
+  assert.equal(m.pvUnreported, 1);
+  assert.equal(solarSubtitle(m), '2 of 3 Cores');
+});
+
+test('★★★ every Core frozen, its slot idle, main 0 W: no Core’s own meter, so the house is not inferred onto the grid', () => {
+  // The panel-only frame of 'every Core via the panel, slots idle' above, reached through frozen
+  // Cores that are still listed online and projected: the inference keys on the Cores read on their
+  // own meters, not on the Cores the account lists.
+  const m = energyFlowModel(
+    devs(core('CORE-A'), core('CORE-B'), core('CORE-C'), panel(FROZEN_SLOTS.map((s) => ({ ...s, w: 0 })), 3000)),
+    grid(0, 0),
+  );
+  assert.equal(m.viaPanelCount, 3);
+  assert.equal(m.gridState, 'standby');
+  assert.equal(m.gridToHouseW, 0);
+});
+
+test('★★ frozen Cores behind a frozen panel: nothing is drawn from either, their frozen figures included', () => {
+  const ds = devs(core('CORE-A', { acOut: 1145, packNet: 1145, soc: 60 }), core('CORE-B'), core('CORE-C'), panel(FROZEN_SLOTS, 3390));
+  (ds['PANEL-TEST-01'] as Any).contentStaleSinceMs = Date.now() - 6 * 60_000;
+  const m = energyFlowModel(ds, grid(0, 0));
+  assert.equal(m.panelState, 'frozen');
+  assert.equal(m.viaPanelCount, 0);
+  assert.equal(m.dpuCount, 0);
+  assert.equal(m.acOut, 0, 'the frozen 1145 W is not drawn');
+  assert.equal(m.coresToHouseW, 0);
+  assert.equal(m.batNet, 0);
+  assert.equal(m.soc, null);
+  assert.equal(m.gridState, 'standby', 'and no grid import is inferred from Cores that are not reporting');
+});
+
+/* ══ v1.188.1 review — a SECOND panel whose reading is not fresh ════════════ */
+
+test('★★★ a second panel listed online with a stale quota freezes the card: its slots are not drawn as live delivery', () => {
+  // The house panel is fresh (its Core reports 0 W, main 1500 W, house 1500 W). The second panel is
+  // online and unshadowed, but its quota stopped refreshing 3 h ago (server: readbackFresh false);
+  // its slot still reads −2000 W from then, for a Core that is cloud-offline.
+  const house = panel([{ sn: 'CORE-A', w: 0 }], 1500, { housePanel: true, readbackFresh: true });
+  const second = panel([{ sn: 'CORE-X', w: -2000, pct: 88, dpuStale: true }], 2000, { sn: 'PANEL-TEST-02', readbackFresh: false });
+  const m = energyFlowModel(devs(core('CORE-A'), darkCore('CORE-X'), house, second), grid(1500, 0));
+  assert.equal(m.panelState, 'frozen', 'was ok: grid.panelFresh judges only the house panel');
+  assert.equal(m.viaPanelCount, 0, 'was 1');
+  assert.equal(m.acOut, 0, 'was 2000');
+  assert.equal(m.coresToHouseW, 0, 'was 2000');
+  assert.equal(m.load, null, 'a load half live, half frozen is neither');
+  assert.equal(m.soc, 60, 'the 3-hour-old 88 % is not averaged in');
+  // ...and the same panel, fresh, is read.
+  const fresh = energyFlowModel(devs(core('CORE-A'), darkCore('CORE-X'), house, { ...second, readbackFresh: true }), grid(1500, 0));
+  assert.equal(fresh.panelState, 'ok');
+  assert.equal(fresh.viaPanelCount, 1);
+  assert.equal(fresh.coresToHouseW, 2000);
+});
+
+/* ══ v1.188.1 review — a SILENT panel's slots ═══════════════════════════════ */
+
+test('★★ a SILENT panel (every channel null) with slot figures: its slots are not read either', () => {
+  const ds = devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'),
+    panel(LIVE_SLOTS.map((s) => ({ ...s, w: -1000 })), 3000, { silent: true }));
+  const m = energyFlowModel(ds, grid(0, 0));
+  assert.equal(m.panelState, 'silent');
+  assert.equal(m.load, null);
+  assert.equal(m.viaPanelCount, 0, 'a frame without the house reading is not a live panel reading');
+  assert.equal(m.acOut, 0);
+  assert.equal(m.coresToHouseW, 0, 'no 3 kW Batteries → Loads edge into a Loads node reading "—"');
+  assert.equal(m.batNet, 0);
+  assert.equal(m.soc, null);
+  assert.equal(batteriesSubtitle(m), 'idle');
+});
+
+/* ══ v1.188.1 review — slots of OPPOSITE sign ═══════════════════════════════ */
+
+test('★★ one Core charging and one delivering through the panel: each slot counts on its own side', () => {
+  // A per-channel force charge (chNForceCharge) on slot 1 while slot 2 carries the house.
+  const slots: Slot[] = [{ sn: 'CORE-A', w: 3000, pct: 40 }, { sn: 'CORE-B', w: -1500, pct: 70 }, { sn: 'CORE-C', w: 0, pct: 70 }];
+  const m = energyFlowModel(devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), panel(slots, 4000)), grid(5500, 0));
+  assert.equal(m.acOut, 1500, 'only the delivering slot is AC output');
+  assert.equal(m.gridToCoresW, 3000, 'only the charging slot is grid → Batteries');
+  assert.equal(m.coresToHouseW, 1500);
+  assert.equal(m.gridToHouseW, 2500);
+  assert.equal(m.gridSupplyW, 5500, 'main and edges agree: the node keeps the main');
+  assert.equal(m.batNet, -1500, 'the node’s net is the slots’ net');
+  assert.equal(batteriesSubtitle(m), '▲ 1.50 kW in');
+});
+
+/* ══ v1.188.1 review — the Solar node with no Core's own PV meter ═══════════ */
+
+test('★★ no Core reporting: the Solar node reads "—", not a confident 0 W', () => {
+  const m = energyFlowModel(liveDevices(), grid(0, 0));
+  assert.equal(m.pv, null, 'was 0');
+  assert.equal(fmtW(m.pv), '—');
+  assert.equal(solarSubtitle(m), 'Cores not reporting');
+  // Every Core on its own meter: the plant's array, as before.
+  const all = energyFlowModel(devs(core('CORE-A', { pv: 800 }), core('CORE-B', { pv: 700 }), panel(LIVE_SLOTS.slice(0, 2), 1000)), grid(0, 0));
+  assert.equal(all.pv, 1500);
+  assert.equal(all.pvUnreported, 0);
+  assert.equal(solarSubtitle(all), '42 panels');
+  // No panel and no Core at all (an empty account): 0 W, as before.
+  assert.equal(energyFlowModel({}, undefined).pv, 0);
+});
+
+test('EnergyFlow.tsx renders the Solar node from the model helper and draws no PV flow without a figure', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const card = readFileSync(resolve(here, '../../web/src/cards/EnergyFlow.tsx'), 'utf8');
+  for (const pin of [
+    'subtitle={solarSubtitle({ pv, dpuCount, pvUnreported, pvViaPanel })} value={fmtW(pv)}',
+    'watts={pv ?? 0} color={HUES.solar}',
+  ]) assert.ok(card.includes(pin), `missing ${pin}`);
+  assert.ok(!card.includes('subtitle="42 panels"'), 'the card no longer hard-codes the Solar subtitle');
+});
+
+/* ══ v1.188.1 review — a fresh main below the house, the Cores' delivery unmeasured ══ */
+
+/** grid(500): the panel's main measured 500 W while the house drew 3390 W. */
+const MAIN_BELOW = 500;
+
+test('★★★ 20:04 shape, no slot figures in the frame, main 500 W: the grid edge is the main, not the house', () => {
+  const m = energyFlowModel(liveDevices(LIVE_SLOTS, 3390, { sourceWatts: [] }), grid(MAIN_BELOW, 0));
+  assert.equal(m.viaPanelCount, 0);
+  assert.equal(m.gridState, 'active');
+  assert.equal(m.gridToHouseW, MAIN_BELOW, 'was 3390 W: no Core is seen idle, so the house is not given to the grid');
+  assert.equal(m.gridSupplyW, MAIN_BELOW, 'the Grid node is the measured main (was 3390 W)');
+  assert.equal(m.coresToHouseW, 0, 'nothing measured the Cores: their share is not drawn');
+  assert.equal(m.load, 3390);
+});
+
+test('★★★ the panel’s sources subtree missing (no connection table), main 500 W: the main is drawn', () => {
+  // A partial /quota reply without pd303_mc: the slots carry no Core and no connection, the circuits and main are live.
+  const ds = liveDevices(LIVE_SLOTS, 3390, { sourceWatts: [] });
+  (ds['PANEL-TEST-01'] as Any).projection.sources = LIVE_SLOTS.map((_, i) => ({ slot: i + 1, sn: null, isConnected: false, batteryPercentage: null }));
+  const m = energyFlowModel(ds, grid(MAIN_BELOW, 0));
+  assert.equal(m.panelState, 'ok');
+  assert.equal(m.membershipUnknown, true);
+  assert.equal(m.gridToHouseW, MAIN_BELOW, 'was 3390 W');
+  assert.equal(m.gridSupplyW, MAIN_BELOW);
+  assert.equal(m.coresToHouseW, 0);
+});
+
+test('★★ Cores listed online on frozen meters, no slot figures, main 500 W: the main is drawn', () => {
+  const m = energyFlowModel(
+    devs(core('CORE-A'), core('CORE-B'), core('CORE-C'), panel(FROZEN_SLOTS, 3390, { sourceWatts: [] })),
+    grid(MAIN_BELOW, 0),
+  );
+  assert.equal(m.dpuCount, 0);
+  assert.equal(m.gridToHouseW, MAIN_BELOW, 'was 3390 W');
+  assert.equal(m.gridSupplyW, MAIN_BELOW);
+});
+
+test('★★ one Core idle on its own meter, two dark with no slot figure, main 500 W: the main is drawn', () => {
+  const p = panel([{ sn: 'CORE-A' }, { sn: 'CORE-B', dpuStale: true }, { sn: 'CORE-C', dpuStale: true }], 3390, { sourceWatts: [0] });
+  const m = energyFlowModel(devs(core('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), p), grid(MAIN_BELOW, 0));
+  assert.equal(m.dpuCount, 1);
+  assert.equal(m.gridToHouseW, MAIN_BELOW, 'was 3390 W: two unmeasured Cores are not idle ones');
+  assert.equal(m.gridSupplyW, MAIN_BELOW);
+  // ...and once every Core has a figure and is seen idle, the house is on the grid again (09-21).
+  const seen = panel([{ sn: 'CORE-A', w: 0 }, { sn: 'CORE-B', w: 0, dpuStale: true }, { sn: 'CORE-C', w: 0, dpuStale: true }], 3390);
+  const m2 = energyFlowModel(devs(core('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), seen), grid(MAIN_BELOW, 0));
+  assert.equal(m2.gridToHouseW, 3390);
+});
+
+test('★★ the main less the Cores’ draw: a dark Core charging through its slot, the others unmeasured', () => {
+  // Slot 1 +2000 W (into CORE-A), slots 2 and 3 carry no figure; main 2500 W, house 3390 W.
+  const p = panel([{ sn: 'CORE-A', dpuStale: true }, { sn: 'CORE-B', dpuStale: true }, { sn: 'CORE-C', dpuStale: true }], 3390, { sourceWatts: [2000] });
+  const m = energyFlowModel(devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), p), grid(2500, 0));
+  assert.equal(m.gridToCoresW, 2000);
+  assert.equal(m.gridToHouseW, 500, 'the main carries the Core’s 2 kW draw; the house gets the rest of it');
+  assert.equal(m.gridSupplyW, 2500);
+});
+
+test('★★★ one Core delivering on its own meter, two dark with no slot figure, main 500 W: the grid edge is the main', () => {
+  const p = panel([{ sn: 'CORE-A' }, { sn: 'CORE-B', dpuStale: true }, { sn: 'CORE-C', dpuStale: true }], 3390, { sourceWatts: [] });
+  const m = energyFlowModel(devs(core('CORE-A', { acOut: 1145, packNet: 1145 }), darkCore('CORE-B'), darkCore('CORE-C'), p), grid(MAIN_BELOW, 0));
+  assert.equal(m.gridState, 'active');
+  assert.equal(m.coresToHouseW, 1145);
+  assert.equal(m.gridToHouseW, MAIN_BELOW, 'was 2245 W: the two unmeasured Cores’ share was given to the grid');
+  assert.equal(m.gridSupplyW, MAIN_BELOW, 'the Grid node is the measured main (was 2245 W)');
+  // The same with CORE-B and CORE-C listed online on frozen meters.
+  const frozen = panel([{ sn: 'CORE-A' }, { sn: 'CORE-B', dpuFrozen: true }, { sn: 'CORE-C', dpuFrozen: true }], 3390, { sourceWatts: [] });
+  const f = energyFlowModel(devs(core('CORE-A', { acOut: 1145, packNet: 1145 }), core('CORE-B'), core('CORE-C'), frozen), grid(MAIN_BELOW, 0));
+  assert.equal(f.coresToHouseW, 1145);
+  assert.equal(f.gridToHouseW, MAIN_BELOW);
+  // ...and once every Core is measured, the grid takes the rest of the house again (09-22).
+  const all = energyFlowModel(devs(core('CORE-A', { acOut: 1145 }), core('CORE-B', { acOut: 1145 }), core('CORE-C'), panel(
+    [{ sn: 'CORE-A', w: -1145 }, { sn: 'CORE-B', w: -1145 }, { sn: 'CORE-C', w: 0 }], 3390)), grid(MAIN_BELOW, 0));
+  assert.equal(all.coresToHouseW, 2290);
+  assert.equal(all.gridToHouseW, 1100, 'the fresher meters win over the main');
+});
+
+test('★★ a dark Core on a frame behind the Cores, the house shared: its stale share is not given to the grid', () => {
+  // CORE-A now 2000 W out on its own meter; the frame still shows it at −1500 W (behind) and dark CORE-B at −1500 W.
+  const p = panel([{ sn: 'CORE-A', w: -1500 }, { sn: 'CORE-B', w: -1500, dpuStale: true }], 3400);
+  const m = energyFlowModel(devs(core('CORE-A', { acOut: 2000, packNet: 2000 }), darkCore('CORE-B'), p), grid(400, 0));
+  assert.equal(m.acOut, 2000, 'the dark Core’s stale flow waits for the next frame');
+  assert.equal(m.coresToHouseW, 2000);
+  assert.equal(m.gridToHouseW, 400, 'was 1400 W against a measured 400 W main');
+  assert.equal(m.gridSupplyW, 400);
+});
+
+test('★★ the house shared with a dark Core charging through its slot and one unmeasured: the main less that draw', () => {
+  // CORE-A 1000 W out (its slot agrees); dark CORE-B charging +2000 W through its slot; CORE-C dark, no figure.
+  const p = panel([{ sn: 'CORE-A' }, { sn: 'CORE-B', dpuStale: true }, { sn: 'CORE-C', dpuStale: true }], 3390, { sourceWatts: [-1000, 2000] });
+  const m = energyFlowModel(devs(core('CORE-A', { acOut: 1000, packNet: 1000 }), darkCore('CORE-B'), darkCore('CORE-C'), p), grid(2500, 0));
+  assert.equal(m.gridToCoresW, 2000);
+  assert.equal(m.coresToHouseW, 1000);
+  assert.equal(m.gridToHouseW, 500, 'the main’s 2.5 kW less the 2 kW into CORE-B (was 2390 W)');
+  assert.equal(m.gridSupplyW, 2500);
+});
+
+/* ══ v1.188.1 review — a panel frame BEHIND the Cores' own meters, mixed fleet ══ */
+
+test('★★★ 09-21 hand-over with one Core dark: the frame is behind, so the dark slot’s stale delivery is not drawn', () => {
+  // CORE-A and CORE-B read 0 W on their own meters; the frame (main 0, house 5137) still shows every slot at −1712 W.
+  const p = panel([{ sn: 'CORE-A', w: -1712 }, { sn: 'CORE-B', w: -1712 }, { sn: 'CORE-C', w: -1713, pct: 70, dpuStale: true }], 5137);
+  const m = energyFlowModel(devs(core('CORE-A', { soc: 60 }), core('CORE-B', { soc: 60 }), darkCore('CORE-C'), p), grid(0, 0));
+  assert.equal(m.gridState, 'active', 'was standby: the dark Core’s stale −1713 W read as the Cores still delivering');
+  assert.equal(m.gridToHouseW, 5137, 'the 09-21 rule: the Cores stopped on their own meters, the house is on the grid');
+  assert.equal(m.coresToHouseW, 0, 'was 5137 W, three times any meter');
+  assert.equal(m.gridSupplyW, 5137);
+  assert.equal(m.acOut, 0);
+  assert.equal(m.batNet, 0);
+  assert.equal(m.viaPanelCount, 1, 'the dark Core stays in the node');
+  assert.ok(m.soc != null && Math.abs(m.soc - (60 + 60 + 70) / 3) < 1e-9, 'its percentage stays');
+  assert.equal(batteriesTitle(m), 'Batteries (2 DPU, 1 via panel)');
+  assert.equal(batteriesSubtitle(m), 'idle', 'was "▼ 1.71 kW out"');
+  // The next frame (slots 0, main 5137) agrees with the Cores: the dark slot is read again, and the picture holds.
+  const next = panel([{ sn: 'CORE-A', w: 0 }, { sn: 'CORE-B', w: 0 }, { sn: 'CORE-C', w: 0, pct: 70, dpuStale: true }], 5137);
+  const n = energyFlowModel(devs(core('CORE-A'), core('CORE-B'), darkCore('CORE-C'), next), grid(5137, 0));
+  assert.equal(n.gridToHouseW, 5137);
+  assert.equal(n.coresToHouseW, 0);
+  assert.equal(n.gridSupplyW, 5137);
+  assert.equal(n.viaPanelCount, 1);
+});
+
+test('★★★ 09-22 charge end with one Core dark: the dark slot’s stale +5.3 kW is not drawn as grid → Batteries', () => {
+  // CORE-A and CORE-B already output 1100 W each; the frame (main 19053, house 3335) still shows every slot charging 5300 W.
+  const p = panel([{ sn: 'CORE-A', w: 5300 }, { sn: 'CORE-B', w: 5300 }, { sn: 'CORE-C', w: 5300, dpuStale: true }], 3335);
+  const m = energyFlowModel(
+    devs(core('CORE-A', { acOut: 1100, packNet: 1100 }), core('CORE-B', { acOut: 1100, packNet: 1100 }), darkCore('CORE-C'), p),
+    grid(19053, 0),
+  );
+  assert.equal(m.gridToCoresW, 0, 'was 5300 W after the charge had ended');
+  assert.equal(m.acOut, 2200);
+  assert.equal(m.coresToHouseW, 2200, 'the reporting Cores’ fresh delivery');
+  assert.equal(m.gridToHouseW, 1135);
+  assert.equal(m.gridSupplyW, 1135, 'the main is a frame behind: the node shows its edges (was 6435 W)');
+  assert.equal(m.batNet, 2200, 'was −3100 W');
+  assert.equal(batteriesSubtitle(m), '▼ 2.20 kW out');
+});
+
+test('★★ a reporting Core within the meters’ tolerance of its slot: the frame is current and the dark slot is read', () => {
+  // 100 W of disagreement at idle (under the 150 W floor): CORE-C's delivery is read.
+  const idle = panel([{ sn: 'CORE-A', w: -100 }, { sn: 'CORE-B', w: 0 }, { sn: 'CORE-C', w: -1500, dpuStale: true }], 1600);
+  const m = energyFlowModel(devs(core('CORE-A'), core('CORE-B'), darkCore('CORE-C'), idle), grid(0, 0));
+  assert.equal(m.acOut, 1500);
+  assert.equal(m.gridState, 'standby', 'not the house on the grid against a main that measured 0 W');
+  assert.equal(m.gridToHouseW, 0);
+  assert.equal(m.coresToHouseW, 1600);
+  // 300 W of disagreement during a 5.3 kW charge (under 20 %): CORE-C's charge is read.
+  const charging = panel([{ sn: 'CORE-A', w: 5000 }, { sn: 'CORE-B', w: 5300 }, { sn: 'CORE-C', w: 5300, dpuStale: true }], 2000);
+  const c = energyFlowModel(devs(core('CORE-A', { acIn: 5300 }), core('CORE-B', { acIn: 5300 }), darkCore('CORE-C'), charging), grid(17900, 0));
+  assert.equal(c.gridToCoresW, 15900, 'two Cores on their own meters, the third from its slot');
+  assert.equal(c.gridToHouseW, 2000);
+  assert.equal(c.gridSupplyW, 17900);
+});
+
+test('★★ each panel’s frame is judged alone: a second panel’s dark slot is read while the house panel is behind', () => {
+  // House panel: CORE-A at 0 W on its own meter, its slot still −1712 W (behind); CORE-C dark at a stale −1713 W.
+  // Second panel: CORE-X dark, its slot charging 3000 W in a frame no reporting Core contradicts.
+  const house = panel([{ sn: 'CORE-A', w: -1712 }, { sn: 'CORE-C', w: -1713, dpuStale: true }], 3425, { housePanel: true, readbackFresh: true });
+  const second = panel([{ sn: 'CORE-X', w: 3000, dpuStale: true }], 0, { sn: 'PANEL-TEST-02', readbackFresh: true });
+  const m = energyFlowModel(devs(core('CORE-A'), darkCore('CORE-C'), darkCore('CORE-X'), house, second), grid(3000, 0));
+  assert.equal(m.viaPanelCount, 2);
+  assert.equal(m.acOut, 0, 'the house panel’s stale −1713 W is not drawn');
+  assert.equal(m.gridToCoresW, 3000, 'the second panel’s slot is read');
+  assert.equal(m.gridToHouseW, 3425);
+  assert.equal(m.coresToHouseW, 0);
+});
+
+/* ══ v1.188.1 review — a frozen Core's own AC INPUT ═════════════════════════ */
+
+test('★★★ Cores frozen mid-charge (acIn 5.3 kW each), the charge since ended: no grid → Batteries edge', () => {
+  // Frozen at 5300 W of AC input; the panel's live frame: slots 0, main 2000, house 2000.
+  const frozenCharging = () => [core('CORE-A', { acIn: 5300 }), core('CORE-B', { acIn: 5300 }), core('CORE-C', { acIn: 5300 })];
+  const m = energyFlowModel(devs(...frozenCharging(), panel(FROZEN_SLOTS.map((s) => ({ ...s, w: 0 })), 2000)), grid(2000, 0));
+  assert.equal(m.gridToCoresW, 0, 'the frozen 15.9 kW is not a reading');
+  assert.equal(m.gridToHouseW, 2000);
+  assert.equal(m.gridSupplyW, 2000);
+  // ...and while the charge runs, the slot figure is the Cores' draw, counted once.
+  const live = energyFlowModel(devs(...frozenCharging(), panel(FROZEN_SLOTS.map((s) => ({ ...s, w: 5300 })), 2000)), grid(17900, 0));
+  assert.equal(live.gridToCoresW, 15900, 'not 31 800 W (the frozen figure and the slot both)');
+  assert.equal(live.gridToHouseW, 2000);
+  assert.equal(live.gridSupplyW, 17900);
+});
+
+/* ══ v1.188.1 review round 2 — the server's per-slot verdicts from the energy bridge ══ */
+
+test('★★★ a slot whose PV the server reads as MEASURED (pvMeasuredW): its PV joins Solar and its pack net is separated, as Home Assistant’s Fleet PV and Battery Net are', () => {
+  // Noon, every Core dark: 2 kW of PV per Core, 500 W of it delivered to the panel, the packs charging 1.5 kW.
+  const slots = [
+    { sn: 'CORE-A', w: -500, pct: 60, dpuStale: true }, { sn: 'CORE-B', w: -500, pct: 60, dpuStale: true }, { sn: 'CORE-C', w: -500, pct: 60, dpuStale: true },
+  ];
+  const p = panel(slots, 1500);
+  for (const s of p.projection.sources) Object.assign(s, { ownReading: false, pvMeasuredW: 2000 });
+  const m = energyFlowModel(devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), p), grid(0, 0));
+  assert.equal(m.pv, 6000, 'was null ("Cores not reporting") beside a Fleet PV of 6 kW');
+  assert.equal(m.batNet, -4500, 'was +1500 ("▼ 1.50 kW out") beside a Battery Net charging 4.5 kW');
+  assert.equal(m.pvViaPanel, 3);
+  assert.equal(m.pvUnreported, 0);
+  assert.equal(batteriesSubtitle(m), '▲ 4.50 kW charging', 'the packs’ own net: "charging", not "in"');
+  assert.equal(solarSubtitle(m), '42 panels');
+  assert.equal(m.acOut, 1500, 'the AC exchange is unchanged');
+  // One of three measured: Solar covers it, the subtitle says how many, and the battery figure is an exchange again.
+  const q = panel(slots, 1500);
+  q.projection.sources.forEach((s: Any, i: number) => Object.assign(s, { ownReading: false, pvMeasuredW: i === 0 ? 2000 : null }));
+  const n = energyFlowModel(devs(darkCore('CORE-A'), darkCore('CORE-B'), darkCore('CORE-C'), q), grid(0, 0));
+  assert.deepEqual([n.pv, n.pvViaPanel, n.pvUnreported, n.batNet], [2000, 1, 2, 1500 - 2000]);
+  assert.equal(solarSubtitle(n), '1 of 3 Cores');
+  assert.equal(batteriesSubtitle(n), '▲ 500 W in', 'two slots still carry their PV unseparated');
+});
+
+test('★★★ the server’s ownReading verdict: a Core the cloud lists OFFLINE whose stream still arrives is drawn on its own meter; a Core the bridge still meters is drawn via the panel', () => {
+  const own = (sn: string): Any => ({ ...core(sn, { pv: 2000, acOut: 500, packNet: -1500 }), online: false });
+  const slots = [{ sn: 'CORE-A', w: -500, pct: 60 }, { sn: 'CORE-B', w: -500, pct: 60 }, { sn: 'CORE-C', w: -500, pct: 60 }];
+  const p = panel(slots, 1500);
+  p.projection.sources.forEach((s: Any) => Object.assign(s, { ownReading: true, pvMeasuredW: null }));
+  const m = energyFlowModel(devs(own('CORE-A'), own('CORE-B'), own('CORE-C'), p), grid(0, 0));
+  // Before: "Cores not reporting", "▼ 1.50 kW out", three via the panel.
+  assert.deepEqual([m.dpuCount, m.viaPanelCount, m.pv, m.batNet], [3, 0, 6000, -4500]);
+  assert.equal(batteriesSubtitle(m), '▲ 4.50 kW charging');
+  // A Core listed online with fresh figures that the bridge still meters at its slot (not handed back);
+  // the other two on their own meters, their slots agreeing with them (0 W).
+  const q = panel([{ sn: 'CORE-A', w: -500, pct: 60 }, { sn: 'CORE-B', w: 0, pct: 60 }, { sn: 'CORE-C', w: 0, pct: 60 }], 1500);
+  q.projection.sources.forEach((s: Any, i: number) => Object.assign(s, { ownReading: i !== 0, pvMeasuredW: null }));
+  const n = energyFlowModel(devs(core('CORE-A', { packNet: -3000 }), core('CORE-B'), core('CORE-C'), q), grid(0, 0));
+  assert.deepEqual([n.dpuCount, n.viaPanelCount, n.batNet], [2, 1, 500], 'CORE-A via its slot, not its 3 kW held charge');
+  // No verdict sent (an older server, a cold boot): the card's own rule, unchanged.
+  const r = energyFlowModel(devs(core('CORE-A', { packNet: -3000 }), core('CORE-B'), core('CORE-C'), panel(slots, 1500)), grid(0, 0));
+  assert.equal(r.dpuCount, 3);
+});

@@ -47,6 +47,7 @@ import type {
   NightCalibration,
   BatteryLifetimeDebug,
 } from '../../src/recorder.js';
+import { bridgeFleetFlow, emptyBridgeDebug } from '../../src/energyBridge.js';
 
 /** Read-only diagnostics shape with every field at its empty/zero identity. */
 function emptyBatteryLifetimeDebug(): BatteryLifetimeDebug {
@@ -60,6 +61,7 @@ function emptyBatteryLifetimeDebug(): BatteryLifetimeDebug {
     deficitWh: 0,
     packs: [],
     offlineHeldMembers: [],
+    bridge: emptyBridgeDebug(),
   };
 }
 
@@ -99,6 +101,11 @@ export function makeRecorderStub(overrides: Partial<Recorder> = {}): Recorder {
     getLifetimeTotals: (): Record<string, LifetimeTotals> => ({}),
     listLifetimeKeys: (): string[] => [],
     batteryLifetimeDebug: emptyBatteryLifetimeDebug,
+    // v1.188.1 — the real pure bridge with no trusted PV field: an online-only device map is
+    // unchanged by it, and a dark Core is bridged at night exactly as in production. The site is
+    // the options' default (Phoenix) as a literal: this helper is imported statically, before the
+    // env that config.ts reads at import, so it must not import config.
+    bridgedFleetFlow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, () => false, { lat: 33.4484, lon: -112.074 }),
   };
   return { ...base, ...overrides };
 }

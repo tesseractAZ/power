@@ -417,11 +417,36 @@ export interface Shp2EnergySource {
    *  on-peak grid-draw incident was this setting; until the PD303 doc named
    *  `ch{n}ForceCharge` the alert could only infer it from power flow. */
   forceCharge: string | null;
+  /** v1.188.1 — the panel's own per-source power fields (pd303_mc.backupIncreInfo.Energy{n}Info,
+   *  REST-only, ~60 s), read by the energy bridge (energyBridge.ts) while this slot's Core is
+   *  cloud-offline. null when the payload omits them; optional so older fixtures stay valid.
+   *  pvWatts = pvChargeWatts, pvHighWatts = pvHeightChargeWatts, pvLowWatts = pvLowChargeWatts,
+   *  inputWatts = lcdInputWatts, outputWatts = outputPower (the magnitude of the slot's chWatt
+   *  while the Core supplies the panel, checked live 2026-10-16). Whether the three PV fields
+   *  populate in daylight was unverified when they were added: the bridge uses them only for a
+   *  slot whose field has passed its check against the inferred lower bound (energyBridge.ts,
+   *  pvFieldVerdict, the 'measured' basis). */
+  pvWatts?: number | null;
+  pvHighWatts?: number | null;
+  pvLowWatts?: number | null;
+  inputWatts?: number | null;
+  outputWatts?: number | null;
   /** v0.40.1 — OBSERVABILITY ONLY (set by snapshotForClient / read inline by the
    *  TUI via isSourceDpuStale): the SHP2 still counts this slot's battery in the
    *  backup pool, but the slot's underlying DPU is itself cloud-offline (its own
    *  telemetry is stale). Does NOT affect backup-capacity or the floor alarm. */
   dpuStale?: boolean;
+  /** v1.188.1 — set by snapshotForClient (shp2Membership.ts isSourceDpuFrozen): the slot's Core is
+   *  listed ONLINE but its own meter is frozen (content unchanged for SHP2_READBACK_STALE_MS). The
+   *  Energy flow card reads such a Core from this slot, as it does a dpuStale one. */
+  dpuFrozen?: boolean;
+  /** v1.188.1 (review) — set by snapshotForClient from the energy bridge (shp2Membership.ts
+   *  BridgeVerdicts): the two power sensors count this slot's Core at its OWN reading (a Core the
+   *  cloud lists offline whose MQTT data still arrives included). Absent: no verdict was sent. */
+  ownReading?: boolean;
+  /** v1.188.1 (review) — set with ownReading: this dark slot's PV (W) where the bridge reads the
+   *  panel's PV field as measured (trusted, the sun up), else null. */
+  pvMeasuredW?: number | null;
 }
 
 export interface Shp2ChargeWindow {
@@ -660,6 +685,12 @@ export function projectShp2(q: Quota): Shp2Projection {
       hwConnect: num(q, `${base}hwConnect`) === 1,
       errorCodeNum: num(q, `${base}errorCodeNum`),
       forceCharge: str(q, `ch${i}ForceCharge`) ?? str(q, `pd303_mc.ch${i}ForceCharge`),
+      // v1.188.1 — the energy bridge's per-source fields (Shp2EnergySource above).
+      pvWatts: num(q, `${base}pvChargeWatts`),
+      pvHighWatts: num(q, `${base}pvHeightChargeWatts`),
+      pvLowWatts: num(q, `${base}pvLowChargeWatts`),
+      inputWatts: num(q, `${base}lcdInputWatts`),
+      outputWatts: num(q, `${base}outputPower`),
     });
   }
   const sourceWatts = Array.isArray(q['backupInfo.chWatt'])
