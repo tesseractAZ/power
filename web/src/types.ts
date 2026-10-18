@@ -104,6 +104,16 @@ export interface Shp2EnergySource {
   /** v0.40.1 — observability only: SHP2 still counts this slot's battery, but its
    *  underlying DPU is itself cloud-offline (stale telemetry). Capacity unaffected. */
   dpuStale?: boolean;
+  /** v1.188.1 — the server's verdict: the slot's Core is listed ONLINE but its own meter is frozen
+   *  (content unchanged for 5 min). The Energy flow card reads it from this slot instead. */
+  dpuFrozen?: boolean;
+  /** v1.188.1 (review) — the server's verdict, from the energy bridge: Home Assistant's power
+   *  sensors count this slot's Core at its OWN reading (a Core the cloud lists offline whose live
+   *  stream still arrives included). Absent: no verdict was sent (the card keeps its own rule). */
+  ownReading?: boolean;
+  /** v1.188.1 (review) — this dark slot's PV (W) where the server reads the panel's PV field as
+   *  measured (checked and trusted, the sun up), else null. */
+  pvMeasuredW?: number | null;
 }
 
 export interface Shp2Projection {
@@ -196,6 +206,9 @@ export interface DeviceSnapshot {
   // attached server-side by snapshotForClient(). GridBackstop is defined below.
   grid?: GridBackstop;
   off_grid?: boolean;
+  /** v1.188.1 — set on every panel by the server (shp2ReadbackFresh): false while that panel's
+   *  reading is not fresh. `grid.panelFresh` judges only the house panel. */
+  readbackFresh?: boolean;
 }
 
 export type Severity = 'critical' | 'warning' | 'info';

@@ -33,6 +33,7 @@ function plantData(operator?: string): PlantData {
     forecast: null,
     degradation: { generatedAt: 0, eolSoh: 80, packs: [] },
     serverStartedAt: Date.now() - 60_000,
+    flow: { fleetPv: null, fleetBatteryNet: null },
     ...(operator !== undefined ? { operator } : {}),
   };
 }

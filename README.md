@@ -36,7 +36,7 @@ spares: they are monitored, but are not part of the backup pool.
 > and what to do, what Power writes to your devices, options by goal, and troubleshooting.
 > Every option is in [`docs/guide/options.md`](docs/guide/options.md) and every Home
 > Assistant entity in [`docs/guide/entities.md`](docs/guide/entities.md). The
-> [engineering reference](docs/reference/README.md) (~11,300 lines in 19 reference files)
+> [engineering reference](docs/reference/README.md) (~11,700 lines in 19 reference files)
 > documents **every** feature and engine — what each does, the exact algorithm and math it
 > computes, how data traces through the pipeline, its endpoints/sensors, config knobs, and
 > edge-case guards. This README is the tour; the reference is the manual.
@@ -288,7 +288,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 4,559 tests
+cd server && npm install && npm test     # 4,954 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -345,7 +345,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **107 harnesses** (`scripts/mutate-*.mjs`) holding **2529
+regression. There are **110 harnesses** (`scripts/mutate-*.mjs`) holding **2977
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that

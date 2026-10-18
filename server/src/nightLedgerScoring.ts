@@ -529,6 +529,326 @@ export function forecastSpanTagNote(shortMs: number): string {
     + 'load_err_frac reads low and buy_err_kwh high; the raw telemetry is past the re-capture horizon, so the row is kept as captured.';
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * v1.188.1 — HELD TELEMETRY.
+ *
+ * After the 2026-10-14 internet outage every Core stayed offline in the EcoFlow cloud for
+ * about 20 h and the recorder restated each one's last reading every 5 minutes (heldSamples.ts):
+ * PV 0 W all day while the pool charged to ~96 % on solar. The PV coverage gate counted those
+ * rows as coverage, so a row whose 24 h span lay inside the hold would have been SCORED on an
+ * actual PV of ~0 kWh: pv_err_frac near −1, pv_in_band 0 and, through the planner-sizing basis,
+ * a buy_err_kwh the readiness gate reads as its HARD under-buy evidence.
+ *
+ * The recorder no longer writes held readings and moves the ones it had written out of
+ * `samples`, and it logs each hold of an hour or more (`held_spans`). A row whose PV/load span
+ * overlaps a hold of a home Core or the house panel by HELD_LEDGER_MIN_OVERLAP_MS or more is
+ * not scored, with the reason: its PV (a Core held) or load (the panel held) actual is left
+ * empty — never integrated from held readings, and never from a span with a held hour cut out
+ * of it, which the trapezoid would drop and under-count. A row captured on held readings
+ * before this release is reset and re-captured while its telemetry is retained (the
+ * forecast-span repair's horizon and roster rules), else tagged.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** A hold this long inside the span is refused: the trapezoid (integrateWh above) bridges a gap
+ *  of up to an hour between two real readings and drops a longer one. */
+export const HELD_LEDGER_MIN_OVERLAP_MS = HOUR_MS;
+/** In `score_notes` of a row whose verdict already accounts for held telemetry (lower-cased
+ *  match): it makes the repair idempotent. */
+export const HELD_TELEMETRY_MARKER = 'telemetry held';
+
+/** A held span as the ledger reads it (heldSamples.ts HeldSpan). */
+export interface LedgerHeldSpan { sn: string; startMs: number; endMs: number }
+
+export interface HeldLedgerVerdict {
+  /** Home Cores held for HELD_LEDGER_MIN_OVERLAP_MS or more inside the span: no PV actual. */
+  pv: Array<{ sn: string; heldMs: number }>;
+  /** The house panel held for that long: no load actual. */
+  load: Array<{ sn: string; heldMs: number }>;
+}
+
+/** Length of the UNION of `sn`'s held spans, clipped to [fromMs, toMs] (a gate span and a moved
+ *  stretch can overlap). PURE. */
+export function heldMsWithin(spans: ReadonlyArray<LedgerHeldSpan>, sn: string, fromMs: number, toMs: number): number {
+  const parts = spans
+    .filter((s) => s.sn === sn)
+    .map((s) => [Math.max(fromMs, s.startMs), Math.min(toMs, s.endMs)] as [number, number])
+    .filter(([a, b]) => b > a)
+    .sort((x, y) => x[0] - y[0]);
+  let total = 0;
+  let curA = 0;
+  let curB = Number.NEGATIVE_INFINITY;
+  for (const [a, b] of parts) {
+    if (a > curB) {
+      if (curB > Number.NEGATIVE_INFINITY) total += curB - curA;
+      curA = a;
+      curB = b;
+    } else if (b > curB) {
+      curB = b;
+    }
+  }
+  if (curB > Number.NEGATIVE_INFINITY) total += curB - curA;
+  return total;
+}
+
+/** v1.188.1 — which of a row's PV/load actuals were held, over `span` (the [issue, +24 h] the
+ *  actuals are integrated over). Null when neither was. PURE. */
+export function heldLedgerVerdict(i: {
+  spans: ReadonlyArray<LedgerHeldSpan>;
+  coreSns: readonly string[];
+  panelSn: string;
+  span: TimeSpan;
+  minMs?: number;
+}): HeldLedgerVerdict | null {
+  const min = i.minMs ?? HELD_LEDGER_MIN_OVERLAP_MS;
+  const pv: HeldLedgerVerdict['pv'] = [];
+  for (const sn of [...i.coreSns].sort()) {
+    const heldMs = heldMsWithin(i.spans, sn, i.span.startMs, i.span.endMs);
+    if (heldMs >= min) pv.push({ sn, heldMs });
+  }
+  const load: HeldLedgerVerdict['load'] = [];
+  const panelHeld = heldMsWithin(i.spans, i.panelSn, i.span.startMs, i.span.endMs);
+  if (panelHeld >= min) load.push({ sn: i.panelSn, heldMs: panelHeld });
+  return pv.length === 0 && load.length === 0 ? null : { pv, load };
+}
+
+/** v1.188.1 (review 5) — which actuals a held verdict withholds: PV over a held home Core, load
+ *  over the held house panel. The scorer withholds each on its own side only (index.ts
+ *  scoreNightRow), and the repair compares these with the sides a row's notes state. PURE. */
+export interface HeldSides { pv: boolean; load: boolean }
+export function heldSides(v: HeldLedgerVerdict | null): HeldSides {
+  return { pv: v != null && v.pv.length > 0, load: v != null && v.load.length > 0 };
+}
+
+/** v1.188.1 (review 5) — the sides a row's notes already state as held: the parts of every held
+ *  clause in them (heldLedgerNote, basisIncompleteNote and heldTagNote all write `telemetry held:
+ *  <parts> of the 24 h span`, each part `PV — <device> N h` or `load — <device> N h`). PURE. */
+export function heldSidesNoted(notes: string | null | undefined): HeldSides {
+  const s = String(notes ?? '');
+  const lower = s.toLowerCase();
+  const head = `${HELD_TELEMETRY_MARKER}: `;
+  const out: HeldSides = { pv: false, load: false };
+  for (let i = lower.indexOf(head); i >= 0; i = lower.indexOf(head, i + head.length)) {
+    const from = i + head.length;
+    const end = s.indexOf(' of the 24 h span', from);
+    for (const part of s.slice(from, end < 0 ? undefined : end).split(', ')) {
+      if (part.startsWith('PV — ')) out.pv = true;
+      if (part.startsWith('load — ')) out.load = true;
+    }
+  }
+  return out;
+}
+
+/** Length of a span inside another. PURE. */
+const overlapOf = (a: { startMs: number; endMs: number }, b: { startMs: number; endMs: number }): number =>
+  Math.max(0, Math.min(a.endMs, b.endMs) - Math.max(a.startMs, b.startMs));
+/** The verdict with only the sides named. PURE. */
+const verdictOf = (v: HeldLedgerVerdict, sides: ReadonlyArray<'PV' | 'load'>): HeldLedgerVerdict =>
+  ({ pv: sides.includes('PV') ? v.pv : [], load: sides.includes('load') ? v.load : [] });
+const sidesWhere = (pv: boolean, load: boolean): Array<'PV' | 'load'> => [...(pv ? ['PV' as const] : []), ...(load ? ['load' as const] : [])];
+
+const heldParts = (v: HeldLedgerVerdict, name: (sn: string) => string): string => [
+  ...v.pv.map((p) => `PV — ${name(p.sn)} ${(p.heldMs / HOUR_MS).toFixed(1)} h`),
+  ...v.load.map((p) => `load — ${name(p.sn)} ${(p.heldMs / HOUR_MS).toFixed(1)} h`),
+].join(', ');
+
+/** v1.188.1 — the score note of a row not scored for held telemetry. PURE. */
+export function heldLedgerNote(v: HeldLedgerVerdict, name: (sn: string) => string): string {
+  return `not scored — ${HELD_TELEMETRY_MARKER}: ${heldParts(v, name)} of the 24 h span had no fresh readings `
+    + '(the EcoFlow cloud listed the device offline or replayed its last reading); the '
+    + `${v.pv.length > 0 && v.load.length > 0 ? 'PV and load actuals are' : v.pv.length > 0 ? 'PV actual is' : 'load actual is'} left empty rather than integrated from held readings.`;
+}
+
+/** The scorer's note for a row whose plan basis was incomplete (no trajectory to score). */
+export const BASIS_INCOMPLETE_NOTE = 'not scored — plan basis was incomplete (no trajectory to score).';
+
+/**
+ * v1.188.1 (review) — the note of a row the scorer leaves unscored because its plan basis was
+ * incomplete, with the held verdict when there is one. PURE.
+ *
+ * The basis reason comes first (the row could not be scored on any telemetry), but its PV/load
+ * actuals are still captured, so a hold over its span is stated too, with the marker. Without the
+ * marker heldLedgerRepair, whose only idempotence test is the marker, found the re-captured row
+ * owing a repair again: every sweep (the 30-min tick, the evening job, the boot warm-up) reset it
+ * and the same sweep re-captured it, for the whole 28-day horizon. Incomplete-basis plans and
+ * held telemetry coincide by nature: an internet or cloud outage at plan time causes both.
+ */
+export function basisIncompleteNote(v: HeldLedgerVerdict | null, name: (sn: string) => string): string {
+  if (v == null) return BASIS_INCOMPLETE_NOTE;
+  return `${BASIS_INCOMPLETE_NOTE} Also ${HELD_TELEMETRY_MARKER}: ${heldParts(v, name)} of the 24 h span had no fresh readings; the `
+    + `${v.pv.length > 0 && v.load.length > 0 ? 'PV and load actuals are' : v.pv.length > 0 ? 'PV actual is' : 'load actual is'} left empty rather than integrated from held readings.`;
+}
+
+/** v1.188.1 — the clause appended to a row past the re-capture horizon. Carries the marker. PURE.
+ *  v1.188.1 (dry run) — it does not say the actuals were integrated from held readings: a hold
+ *  can cover hours with no rows at all (a device silent for days, then held), which the actuals
+ *  did not integrate, and the raw telemetry to tell the two apart is gone. */
+export function heldTagNote(v: HeldLedgerVerdict, name: (sn: string) => string): string {
+  return `Telemetry held: ${heldParts(v, name)} of the 24 h span had no fresh readings (held or missing); `
+    + 'the raw telemetry is past the re-capture horizon, so the row is kept as captured.';
+}
+
+/** v1.188.1 (review 3) — per side, whether a held row (`held_samples`) of a held device lies
+ *  inside the span the row was captured over: PV — `pv_total` of a held Core, load — `panel_load`
+ *  of the panel (recorder.heldRowsWithin). Absent (or a side absent), the side is taken as having
+ *  them: the reading before this check. */
+export interface HeldRowsInSpan { pv?: boolean; load?: boolean }
+
+/** v1.188.1 (dry run) — the actuals of a CAPTURED row that were integrated over held telemetry:
+ *  an actual is named only when its side was held (PV — a home Core; load — the panel) and it was
+ *  captured non-null. A null actual was never integrated, and an unheld side was not held. PURE.
+ *  v1.188.1 (review 3) — and only when a held row lies inside its span (`heldRows`): a frozen span
+ *  runs from the last change before a silence of more than an hour, so a row whose span overlaps
+ *  only that silence (an hour or more of it, no rows at all) is held by the verdict and had
+ *  integrated no held reading. */
+export function heldIntegratedActuals(
+  v: HeldLedgerVerdict,
+  captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+  heldRows: HeldRowsInSpan = {},
+): Array<'PV' | 'load'> {
+  const out: Array<'PV' | 'load'> = [];
+  if (v.pv.length > 0 && captured.actual_pv_kwh != null && heldRows.pv !== false) out.push('PV');
+  if (v.load.length > 0 && captured.actual_load_kwh != null && heldRows.load !== false) out.push('load');
+  return out;
+}
+
+/** v1.188.1 (dry run) — what a held-telemetry reset says about the actuals as captured. PURE.
+ *  v1.188.1 (review 3) — an actual captured non-null with no held row inside its span is said to
+ *  have been integrated over hours with no readings, not from held readings. */
+export function heldCapturedClause(
+  v: HeldLedgerVerdict,
+  captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+  heldRows: HeldRowsInSpan = {},
+): string {
+  const actuals = (xs: string[]) => `${xs.join(' and ')} actual${xs.length > 1 ? 's' : ''}`;
+  const named = heldIntegratedActuals(v, captured, heldRows);
+  const across: string[] = [];
+  if (v.pv.length > 0 && captured.actual_pv_kwh != null && heldRows.pv === false) across.push('PV');
+  if (v.load.length > 0 && captured.actual_load_kwh != null && heldRows.load === false) across.push('load');
+  const clauses: string[] = [];
+  if (named.length > 0) clauses.push(`the ${actuals(named)} had been integrated from held readings`);
+  if (across.length > 0) clauses.push(`the ${actuals(across)} had been integrated over hours with no readings at all, and no held reading lay inside ${across.length > 1 ? 'their' : 'its'} span`);
+  if (clauses.length > 0) return clauses.join('; ');
+  // Nothing integrated: every held side was captured empty.
+  const sides = [...(v.pv.length > 0 ? ['PV'] : []), ...(v.load.length > 0 ? ['load'] : [])];
+  return `the held ${actuals(sides)} had been captured empty, so nothing had been integrated from held readings`;
+}
+
+export interface HeldLedgerRepair {
+  action: 'recapture' | 'tag';
+  /** The held verdict over the span as captured; (review 5) null when no side is held any more. */
+  verdict: HeldLedgerVerdict | null;
+  /** v1.188.1 (review 3) — the PV/load span as captured, the one the verdict measured: where the
+   *  reset looks for held rows (HeldRowsInSpan). */
+  span: TimeSpan;
+  /** v1.188.1 (review 5) — the held sides the notes do not state: found after the capture. */
+  added: Array<'PV' | 'load'>;
+  /** v1.188.1 (review 5) — the sides the notes state as held that no span holds any more: their
+   *  span was restored (restoreHeldSamples, or the SQL of architecture 4.4). */
+  restored: Array<'PV' | 'load'>;
+}
+
+/**
+ * v1.188.1 — the repair a CAPTURED row owes for held telemetry, or null. PURE.
+ * A row with a stored window whose PV/load span — [issue, min(capture, issue + 24 h)], the
+ * span its actuals were integrated over — overlaps a hold (heldLedgerVerdict), and whose notes
+ * do not already account for it. Inside the forecast-span repair's horizon, and re-capturable
+ * on today's devices (forecastSpanRecapturable), it is re-captured; otherwise tagged.
+ * Idempotent: a re-capture writes heldLedgerNote (the marker) and a tag carries it.
+ *
+ * v1.188.1 (review 5) — per side, not per row: the notes' sides (heldSidesNoted) are compared
+ * with the verdict's (heldSides). A side held but not stated (the hourly scan found a replayed
+ * Core's rows after the capture, which had stated only the panel) is re-captured, or tagged past
+ * the horizon; with one marker for the whole row, its PV actual stayed integrated from the replay.
+ * A side stated but no longer held, with a restored span of its devices inside the span
+ * (`restored`), is re-captured from the readings moved back, and kept as captured past the
+ * horizon; before, the row stayed `not scored — telemetry held` with that actual empty for good.
+ * Each side changes at most twice (a span only grows, and a restored span is never held again), so
+ * a row is reset at most a few times.
+ */
+export function heldLedgerRepair(
+  row: Pick<NightLedgerRow, 'outcome_captured_at_ms' | 'issued_at_ms' | 'window_start_ms' | 'window_end_ms' | 'score_notes'>
+    & Partial<Pick<NightLedgerRow, 'pv_model_sns' | 'delivered_kwh' | 'delivered_basis'>>,
+  i: {
+    spans: ReadonlyArray<LedgerHeldSpan>; coreSns: readonly string[]; panelSn: string; nowMs: number; horizonMs: number;
+    /** v1.188.1 (review 5) — the restored spans over the same days (recorder.restoredHeldSpans). */
+    restored?: ReadonlyArray<LedgerHeldSpan>;
+  },
+): HeldLedgerRepair | null {
+  const cap = row.outcome_captured_at_ms;
+  const issued = row.issued_at_ms;
+  if (typeof cap !== 'number' || typeof issued !== 'number' || !Number.isFinite(issued)) return null;
+  const ws = row.window_start_ms;
+  const we = row.window_end_ms;
+  if (typeof ws !== 'number' || typeof we !== 'number' || !(we > ws)) return null; // no window: nothing was integrated
+  const span = { startMs: issued, endMs: Math.min(cap, issued + FORECAST_SPAN_MS) };
+  const verdict = heldLedgerVerdict({ spans: i.spans, coreSns: i.coreSns, panelSn: i.panelSn, span });
+  const held = heldSides(verdict);
+  const noted = heldSidesNoted(row.score_notes);
+  const added = sidesWhere(held.pv && !noted.pv, held.load && !noted.load);
+  // A side stated but no longer held counts as restored only when a restored span of one of its
+  // devices lies in the span: a Core no longer on the panel is not held by today's roster either.
+  const restoredIn = (sns: readonly string[]) => (i.restored ?? []).some((r) => sns.includes(r.sn) && overlapOf(r, span) > 0);
+  const restored = sidesWhere(noted.pv && !held.pv && restoredIn(i.coreSns), noted.load && !held.load && restoredIn([i.panelSn]));
+  if (added.length === 0 && restored.length === 0) return null;
+  const inside = i.nowMs - issued <= i.horizonMs && forecastSpanRecapturable(row);
+  if (inside) return { action: 'recapture', verdict, span, added, restored };
+  // Past the horizon a restored side is kept as captured: there is nothing to re-capture it from.
+  return added.length === 0 ? null : { action: 'tag', verdict, span, added, restored: [] };
+}
+
+/** v1.188.1 (review 5) — what a repair's reset says about the row as captured: the actuals left
+ *  empty for a hold whose span has since been restored, and (heldCapturedClause) the actuals of
+ *  the sides found held after the capture. PURE. */
+export function heldRepairClause(
+  r: HeldLedgerRepair,
+  captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+  heldRows: HeldRowsInSpan = {},
+): string {
+  const parts: string[] = [];
+  if (r.restored.length > 0) {
+    parts.push(`the ${r.restored.join(' and ')} actual${r.restored.length > 1 ? 's' : ''} had been left empty for a hold whose readings were since restored to the history`);
+  }
+  if (r.verdict != null && r.added.length > 0) parts.push(heldCapturedClause(verdictOf(r.verdict, r.added), captured, heldRows));
+  return parts.join('; ');
+}
+
+/** v1.188.1 (review 5) — the columns the sweep writes for a repair. A tag keeps the notes as
+ *  captured and appends the clause for the sides found held (heldTagNote); a re-capture resets the
+ *  outcome columns (forecastSpanResetColumns) with a note that says why. PURE. */
+export function heldRepairColumns(
+  row: { score_notes?: string | null; actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+  r: HeldLedgerRepair,
+  name: (sn: string) => string,
+  heldRows: HeldRowsInSpan = {},
+): Partial<NightLedgerRow> {
+  const found = r.verdict != null && r.added.length > 0 ? verdictOf(r.verdict, r.added) : null;
+  // A tag, and a reset with no restored side, always have a side found held (heldLedgerRepair).
+  if (r.action === 'tag') return { score_notes: `${row.score_notes ?? ''} ${heldTagNote(found!, name)}`.trim() };
+  if (r.restored.length === 0) return heldResetColumns(found!, name, row, heldRows);
+  return {
+    ...forecastSpanResetColumns(0),
+    score_notes: `reset — ${heldRepairClause(r, row, heldRows)}${found == null ? '' : ` (${heldParts(found, name)} with no fresh readings, found after it was captured)`}; re-captured by the backfill sweep.`,
+  };
+}
+
+/** v1.188.1 — the columns a held-telemetry re-capture resets: exactly the forecast-span reset's
+ *  columns, with its own note (no marker: the re-capture writes the verdict). PURE.
+ *  v1.188.1 (dry run) — the note names only the actuals that were integrated over the hold
+ *  (heldIntegratedActuals): the 10-15 row's PV had been captured empty and its load came from
+ *  fresh panel rows, and the note said both had been integrated from held readings. */
+export function heldResetColumns(
+  v: HeldLedgerVerdict,
+  name: (sn: string) => string,
+  captured: { actual_pv_kwh?: number | null; actual_load_kwh?: number | null },
+  heldRows: HeldRowsInSpan = {},
+): Partial<NightLedgerRow> {
+  return {
+    ...forecastSpanResetColumns(0),
+    score_notes: `reset — ${heldCapturedClause(v, captured, heldRows)} (${heldParts(v, name)} with no fresh `
+      + 'readings, found after it was captured); re-captured by the backfill sweep.',
+  };
+}
+
 /** The actuator's tick (index.ts `nightActuationTick`): a restore due at the close lands
  *  on the first tick after it. */
 export const ACTUATOR_TICK_MS = 60_000;

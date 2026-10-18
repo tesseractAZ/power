@@ -83,8 +83,8 @@ const MUTANTS = [
   {
     id: 'vii. ★ the durable ledger PV sum loses its coverage gate',
     file: INDEX,
-    find: '    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE ? round2(pvWh / 1000) : null;',
-    to: '    actualPvKwh = round2(pvWh / 1000); /* MUTANT */',
+    find: '    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld ? round2(pvWh / 1000) : null;',
+    to: '    actualPvKwh = !pvHeld ? round2(pvWh / 1000) : null; /* MUTANT */',
     why: 'A deflated fleet sum is written PERMANENTLY into the never-pruned ledger, feeding readiness band coverage and the HARD under-buy safety criterion. A bad ledger row does not age out.',
   },
   {
@@ -186,8 +186,8 @@ const MUTANTS = [
   {
     id: 'xxiv. ★ work runs after the boot-phases line',
     file: RECORDER,
-    find: '\n\n  return {\n    insertSnapshot: (snap) => record(extract(snap)),',
-    to: '\n  for (let i = 0; i < 1; i++) void i; /* MUTANT: work after the phases line */\n\n  return {\n    insertSnapshot: (snap) => record(extract(snap)),',
+    find: '\n\n  return {\n    insertSnapshot: (snap) => recordSnapshot(snap),',
+    to: '\n  for (let i = 0; i < 1; i++) void i; /* MUTANT: work after the phases line */\n\n  return {\n    insertSnapshot: (snap) => recordSnapshot(snap),',
     why: 'Anything placed between the line and the return blocks boot outside the measurement, and the phases still sum to the total the line reports.',
   },
   {
@@ -207,8 +207,8 @@ const MUTANTS = [
   {
     id: "xxvii. ★ a device's own per-device gaps are discounted as if the fleet were dark",
     file: RECORDER,
-    find: '      const fleetDark = telemetryGapsLog.filter((g) => g.sn == null);',
-    to: '      const fleetDark = telemetryGapsLog.slice(); /* MUTANT */',
+    find: '      const fleetDark: Array<{ startMs: number; endMs: number }> = telemetryGapsLog.filter((g) => g.sn == null);',
+    to: '      const fleetDark: Array<{ startMs: number; endMs: number }> = telemetryGapsLog.slice(); /* MUTANT */',
     why: 'A Core already recorded as dark subtracts its OWN blackout, drops under the threshold, and its record stops being extended across restarts.',
   },
   {
@@ -242,8 +242,8 @@ const MUTANTS = [
   {
     id: 'xxxii. ★ the post-boot silence is ledgered on the non-defer path only',
     file: RECORDER,
-    find: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now);',
-    to: '      if (postBootSilence && !restartGapAnchorMs) recordTelemetryGap(now - Math.round(sinceBootMs), now); /* MUTANT: non-defer boots only */',
+    find: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now), unmeasured: silenceUnmeasuredList() });',
+    to: '      if (postBootSilence && !restartGapAnchorMs) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now), unmeasured: silenceUnmeasuredList() }); /* MUTANT: non-defer boots only */',
     why: 'The round-2 shape: an RTC-less boot whose clock starts behind the newest sample waits hours for its first write, and the next boot files a silent device as dark for the wait.',
   },
   {

@@ -32,6 +32,7 @@ import type { Recorder } from '../recorder.js';
 import type { FleetEnergyTotals } from '../aggregator.js';
 import type { DayForecast, FleetDegradation } from '../analytics.js';
 import { renderPlant, PLANT_SCREENS } from './plant/index.js';
+import { plantFlow } from './plant/types.js';
 import type { PlantScreenId, PlantView } from './plant/index.js';
 import { getDpus } from './plant/data.js';
 import { renderLogin } from './login.js';
@@ -393,8 +394,9 @@ export class TuiSession {
       almScroll: this.plantAlmScroll,
       connectedAt: this.plantConnectedAt,
     };
+    const snap = d.store.get();
     return renderPlant(pv, {
-      snap: d.store.get(),
+      snap,
       totals: d.totals(),
       forecast: d.forecast(),
       // v0.9.50 — read from the timer-refreshed cache instead of calling the
@@ -409,6 +411,8 @@ export class TuiSession {
       serverStartedAt: d.serverStartedAt,
       // The OPR seat names the user who signed in; with the login off there is none.
       ...(this.auth ? { operator: this.auth.username } : {}),
+      // v1.188.1 (review) — Fleet PV and Battery Net as the HA sensors publish them.
+      flow: plantFlow(d.recorder, snap.devices, Date.now()),
     }, { recorder: d.recorder });
   }
 

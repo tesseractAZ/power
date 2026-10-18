@@ -4,6 +4,10 @@ import type { Recorder, LifetimeTotals, NightLedgerRow, NightCalibration } from 
 // v1.38.0 (WS2) — Phoenix calendar-date resolution for the ledger read cutoff.
 // tariff.ts is pure/import-free (no circular dependency).
 import { localParts } from './tariff.js';
+// v1.188.1 (review) — the samples generation reader (no schema, no writes: a SELECT on its table).
+import { samplesGenerationReader } from './heldSamples.js';
+import { bridgeFleetFlow, bridgeSite, emptyBridgeDebug } from './energyBridge.js';
+import { config } from './config.js';
 
 /**
  * v0.10.0 — read-only Recorder for the analytics worker thread.
@@ -88,7 +92,8 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
   // The worker can't reproduce the main thread's live `pendingWh` integral
   // (it has no snapshot store), but the persisted watermark lags by at most
   // one rollup interval — negligible against a forever-accumulating total —
-  // so report persistedWh and let pendingWh be 0.
+  // so report persistedWh and let pendingWh be 0. (v1.188.1 — up to
+  // HELD_ENERGY_BRIDGE_MAX_MS while the recorder waits out a held panel's gap.)
   // Prepared lazily: on a brand-new DB the writer hasn't created the table
   // yet, and an eager prepare() would throw at construction.
   let lifetimeStmt: ReturnType<typeof db.prepare> | null = null;
@@ -172,7 +177,11 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
       deficitWh: 0,
       packs: [],
       offlineHeldMembers: [],
+      bridge: emptyBridgeDebug(),
     }),
+    // v1.188.1 — the worker never publishes the power sensors; its bridge trusts no PV field
+    // (the write-path recorder holds that state), so it bridges only the night basis.
+    bridgedFleetFlow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, () => false, bridgeSite(config)),
     recordWeatherGhi: () => {}, // v0.13.1 — write path; the read-only worker never writes
     telemetryGaps: () => [],    // v0.30.0 — gaps are detected on the write path; /api/telemetry-gaps uses the main recorder
     // ── read path: real ──
@@ -210,6 +219,9 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     // v1.38.0 (WS2) — real ledger reads (the worker/reports path reduces over these).
     readNightLedger,
     readNightCalibration,
+    // v1.188.1 (review) — the samples generation the main thread's held-sample moves advance: the
+    // worker's report chokepoint resets its closed-day memos when it moves (reports.ts).
+    samplesGeneration: samplesGenerationReader(db),
     close: () => db.close(),
   };
 }

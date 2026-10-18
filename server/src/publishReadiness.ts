@@ -48,6 +48,14 @@ export interface PublishReadiness {
    *  not a DPU-only install: membership is unknown, so the flows wait for it (the same line
    *  the tariff report's basisComplete draws). */
   flow: boolean;
+  /** v1.188.1 — Fleet PV and Battery Net: the `flow` condition, with a home Core that is dark
+   *  (cloud-offline, its panel slot connected) counted through the energy bridge, which meters it
+   *  at the panel (energyBridge.bridgeFleetFlow). Ready when membership is known, something is
+   *  summed (an online home Core, or a bridged slot), and NO dark slot is unbridgeable right now
+   *  (a panel reading that is not fresh, or daylight without a trusted PV field). Before v1.188.1
+   *  both were withheld while every home Core was dark: Home Assistant's Now view read 0 W of
+   *  power usage for two days (2026-10-15/16) while the house drew ~3.4 kW from those Cores. */
+  flowBridged: boolean;
   /** The panel has a projection with at least one reported channel. v1.187.10 — and EVERY
    *  projected panel's reading is fresh (shp2ReadbackFresh): the load sums every panel's
    *  channels, and a sum that is half live, half frozen is neither (the dashboard's rule). */
@@ -88,7 +96,9 @@ export interface PublishReadiness {
  *  simply skipped). Lifetime counters are deliberately absent: they come from the recorder's
  *  persisted accumulators and are real at boot. */
 export const READINESS_FIELDS: { readonly [K in keyof PublishReadiness]: readonly string[] } = {
-  flow: ['fleet_pv_watts', 'fleet_total_in_watts', 'fleet_total_out_watts', 'fleet_battery_net_watts', 'ac_import_watts'],
+  flow: ['fleet_total_in_watts', 'fleet_total_out_watts', 'ac_import_watts'],
+  // v1.188.1 — the two power sensors the Energy dashboard's Now view rates solar and battery on.
+  flowBridged: ['fleet_pv_watts', 'fleet_battery_net_watts'],
   panel: ['panel_load_watts'],
   // v1.187.10 — the house panel's live figures. `circuit_<ch>_watts` keys are dynamic: see
   // READINESS_PATTERNS. Not backup_full_capacity_kwh / backup_reserve_percent (settings, not
@@ -149,6 +159,10 @@ export interface ReadinessInputs {
   degradation: { basisPending?: boolean } | null | undefined;
   /** v1.187.10 — the clock the panel's freshness is judged on (default: now). */
   nowMs?: number;
+  /** v1.188.1 — the publisher's bridged flow (Recorder.bridgedFleetFlow), precomputed so this
+   *  stays pure. Absent: `flowBridged` reads exactly as `flow`. `ownCores`: home Cores counted at
+   *  their own reading (a Core the cloud lists offline whose MQTT data still arrives among them). */
+  flowBridge?: { bridgedSlots: number; ownCores?: number; ready: boolean } | null;
 }
 
 export function publishReadiness(i: ReadinessInputs): PublishReadiness {
@@ -160,8 +174,9 @@ export function publishReadiness(i: ReadinessInputs): PublishReadiness {
   const connected = shp2ConnectedDpuSns(asSnapshots);
   const membershipKnown = shp2Panels(asSnapshots).sns.every((sn) => asSnapshots[sn]?.projection?.kind === 'shp2');
   const nowMs = i.nowMs ?? Date.now();
-  return {
+  const r: PublishReadiness = {
     flow: membershipKnown && Object.entries(i.devices).some(([sn, d]) => d.online && d.projection?.kind === 'dpu' && isShp2Connected(d.sn ?? sn, connected)),
+    flowBridged: false, // below: it builds on `flow`
     panel: !!panel && (panel.projection?.circuits ?? []).some((c) => c.watts != null)
       && allShp2s(asSnapshots).every((p) => shp2ReadbackFresh(p, nowMs)),
     panelLive: !!panel && shp2ReadbackFresh(panel, nowMs),
@@ -175,6 +190,12 @@ export function publishReadiness(i: ReadinessInputs): PublishReadiness {
     tariff: !!i.tariff && i.tariff.basisComplete !== false,
     degradation: !!i.degradation && i.degradation.basisPending !== true,
   };
+  // v1.188.1 — something is summed (an online home Core, a home Core at its own reading, or a slot
+  // the bridge meters), membership is known, and every connected home Core is counted right now:
+  // none inside the dwell, no dark slot unbridgeable (fb.ready).
+  const fb = i.flowBridge;
+  r.flowBridged = fb == null ? r.flow : (r.flow || (membershipKnown && (fb.bridgedSlots > 0 || (fb.ownCores ?? 0) > 0))) && fb.ready;
+  return r;
 }
 
 /** Null every governed field whose readiness flag is false. Mutates and returns `state`. */

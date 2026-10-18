@@ -12,7 +12,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, houseSnOf } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, aggregateFleetFlow, findShp2, onlineDpus, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, houseSnOf, panelForClient, backupTimerGate } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -20,6 +20,8 @@ import {
 } from './reconnectAudit.js';
 import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder, resolveRetentionDays } from './recorder.js';
+// v1.188.1 (review) — the bridge's verdicts, for the backup timers and the card (shp2Membership.ts BridgeVerdicts).
+import { slotVerdicts } from './energyBridge.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import { setClockRejectLogger, ecoflow,
@@ -245,6 +247,8 @@ import {
   // v1.187.10 — the forecast span: capture waits for issue + 24 h; the one-time repair.
   ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
+  // v1.188.1 — held telemetry: a row on held readings is not scored; one captured on them is repaired.
+  heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldRepairColumns, heldRepairClause, heldSides, basisIncompleteNote,
 } from './nightLedgerScoring.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -568,31 +572,22 @@ function snapshotForClient(): FleetSnapshot {
   // does NOT touch backup-pool capacity (SHP2-aggregate, stays authoritative) or the
   // floor alarm. Immutable, so the raw store the HA-state/broadcast paths read is
   // untouched. The TUI computes the same flag inline via isSourceDpuStale.
+  // v1.188.1 — panelForClient: and `dpuFrozen` (the Core listed online on a frozen meter) on each
+  // slot, and the panel's own `readbackFresh` verdict; the Energy flow card keys on all three.
+  // v1.188.1 (review) — and the energy bridge's verdicts on each slot (`ownReading`, `pvMeasuredW`), from
+  // the computation the two power sensors publish, so the card counts each Core as they do.
+  const nowMs = Date.now();
+  const agg = aggregateFleetFlow(s.devices);
+  const verdicts = slotVerdicts(recorder.bridgedFleetFlow({ fleetPv: agg.fleetPv, fleetBatteryNet: agg.fleetBatteryNetDisplay }, s.devices, nowMs));
   const shp2Enriched =
     shp2 && shp2.projection?.kind === 'shp2'
-      ? {
-          ...shp2,
-          grid,
-          off_grid,
-          projection: {
-            ...shp2.projection,
-            sources: shp2.projection.sources.map((src) => ({
-              ...src,
-              dpuStale: isSourceDpuStale(src, s.devices),
-            })),
-          },
-        }
+      ? { ...panelForClient(shp2, s.devices, nowMs, verdicts), grid, off_grid }
       : shp2
         ? { ...shp2, grid, off_grid }
         : undefined;
   const devices: typeof s.devices = shp2Enriched ? { ...s.devices, [shp2!.sn]: shp2Enriched } : { ...s.devices };
   // v1.185.0 — every other panel's source slots get the same observability flag.
-  for (const p of secondaryShp2s(s.devices)) {
-    devices[p.sn] = {
-      ...p,
-      projection: { ...p.projection, sources: p.projection.sources.map((src) => ({ ...src, dpuStale: isSourceDpuStale(src, s.devices) })) },
-    };
-  }
+  for (const p of secondaryShp2s(s.devices)) devices[p.sn] = panelForClient(p, s.devices, nowMs, verdicts);
   // v1.185.0 — which panel is the house panel, and whether one must be pinned (the dashboard's
   // prompt reads this).
   return { ...s, devices, grid, off_grid, housePanel: store.housePanelState() };
@@ -1584,6 +1579,11 @@ app.get('/api/ha-state', async (req, reply) => {
   // judges below (see buildState): sums taken before it were a boot-time sum over nothing.
   // v1.186.2 — the published battery net is the DISPLAY sum (stream-preferred, see snapshot.ts).
   const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
+  // v1.188.1 — Fleet PV and Battery Net add every DARK home slot, metered at the panel
+  // (energyBridge.ts); null while one cannot be bridged (publishReadiness `flowBridged`).
+  // v1.188.1 (review) — and AC Import / Fleet Total In / Out on the same notion: a frozen Core's held
+  // figures are taken out, a dark Core counts at its slot (energyBridge.ts BridgedFleetFlow.acIn).
+  const bridged = recorder.bridgedFleetFlow({ fleetPv, fleetBatteryNet, acIn, fleetIn, fleetOut }, snap.devices, Date.now());
 
   // v1.125.1 — cache the REPRESENTATIVE islanded load for the outage cushion.
   //
@@ -1615,17 +1615,23 @@ app.get('/api/ha-state', async (req, reply) => {
   // Alert counts split by source × severity.
   const alerts = snap.alerts ?? [];
   const cnt = makeAlertCounter(alerts);
+  // v1.188.1 — which backup timer applies: the Cores' battery net while every home Core reports,
+  // else a bound through the panel's slots (shp2Membership.ts backupTimerGate). v1.188.1 (review) — on
+  // the bridge's verdicts, so the timers count each Core as Battery Net does (its own reading, or its
+  // slot less the PV the bridge reads as measured there).
+  const timers = backupTimerGate(snap.devices, Date.now(), slotVerdicts(bridged));
 
   const payload = {
     generated_at: snap.generatedAt,
 
     // Power flow (watts, integers)
-    fleet_pv_watts: Math.round(fleetPv),
-    fleet_total_in_watts: Math.round(fleetIn),
-    fleet_total_out_watts: Math.round(fleetOut),
-    fleet_battery_net_watts: Math.round(fleetBatteryNet), // v0.10.4 per-pack; positive = discharging
+    fleet_pv_watts: bridged.fleetPv == null ? null : Math.round(bridged.fleetPv),
+    fleet_total_in_watts: bridged.fleetIn == null ? null : Math.round(bridged.fleetIn),
+    fleet_total_out_watts: bridged.fleetOut == null ? null : Math.round(bridged.fleetOut),
+    // v0.10.4 per-pack; positive = discharging. v1.188.1 — plus the bridged dark slots.
+    fleet_battery_net_watts: bridged.fleetBatteryNet == null ? null : Math.round(bridged.fleetBatteryNet),
     panel_load_watts: Math.round(panelLoad),
-    ac_import_watts: Math.round(acIn),
+    ac_import_watts: bridged.acIn == null ? null : Math.round(bridged.acIn),
     // v0.40.0 — resolve via the grid-presence resolver, not `acIn < 5` (DPU ac_in is ~0 on
     // a PV/battery-covered home → falsely pinned off-grid 24/7). Matches /api/snapshot's
     // off_grid (snapshotForClient) and the alarm engine's grid-presence view.
@@ -1641,8 +1647,10 @@ app.get('/api/ha-state', async (req, reply) => {
     // Gate each on the (now correctly-signed) per-pack battery net: >+50 W =
     // discharging → charge timer inapplicable; <−50 W = charging → discharge
     // timer inapplicable; the ±50 W deadband publishes both (idle/ambiguous).
-    backup_charge_minutes: fleetBatteryNet > 50 ? null : (shp2?.projection.backupChargeTimeMin ?? null),
-    backup_discharge_minutes: fleetBatteryNet < -50 ? null : (shp2?.projection.backupDischargeTimeMin ?? null),
+    // v1.188.1 — on backupTimerGate: with a home Core dark the Cores' net is not the pool's
+    // (10-16 20:04: every Core offline, 0 W summed, "38 min" to full during a 3.4 kW drain).
+    backup_charge_minutes: timers.charge ? (shp2?.projection.backupChargeTimeMin ?? null) : null,
+    backup_discharge_minutes: timers.discharge ? (shp2?.projection.backupDischargeTimeMin ?? null) : null,
 
     // Forecast (cached ~30min)
     // v0.78.0 — publish the RESTORED display basis (all SHP2-connected Cores, wedged
@@ -1841,6 +1849,7 @@ app.get('/api/ha-state', async (req, reply) => {
     carbon,
     tariff,
     degradation: deg, // v1.187.18
+    flowBridge: bridged, // v1.188.1
   }));
   return cached(req, reply, payload, 25);
 });
@@ -3989,6 +3998,13 @@ function scoreCompletedNights(nowMs: number): void {
   const shp2 = findShp2(store.get().devices);
   if (!shp2 || shp2.projection?.kind !== 'shp2') return; // can't source actuals
   const shp2Sn = shp2.sn;
+  // v1.188.1 — not before the first scan for held rows has finished: until then a row could be
+  // captured on readings the recorder had restated, not measured (heldSamples.ts). The 30-min
+  // tick and the evening job retry.
+  if (!(recorder.heldSamplesReady?.() ?? true)) {
+    app.log.debug('night-charge: outcome capture waits for the first held-sample scan');
+    return;
+  }
   // v1.39.0: BACKFILL, not exactly-yesterday. The old scorer targeted only
   // localParts(now−24h) — a night left uncaptured across SHP2-wedge / downtime
   // days was orphaned FOREVER once the date advanced (an uncounted MNAR
@@ -3996,7 +4012,9 @@ function scoreCompletedNights(nowMs: number): void {
   // a night whose raw telemetry (~30 d retention) has aged out captures
   // HONESTLY as scored=0 with null actuals via the guards in scoreNightRow —
   // it does not stay uncaptured forever.
-  const rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
+  let rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
+  // v1.188.1 — a row captured on held readings is reset first, so the loop below re-captures it.
+  if (repairHeldNightOutcomes(rows, shp2Sn, nowMs)) rows = recorder.readNightLedger(LEDGER_BACKFILL_SWEEP_DAYS);
   // ★ THE v1.39.0 COMPLETION GATE (review HIGH ×2): a night may be captured
   // only once its FULL scored span has elapsed — 16 h past its REAL window
   // close. The pre-fix midnight tick captured yesterday's row while its
@@ -4110,6 +4128,16 @@ function scoreNightRow(
   //
   // Null over a deflated total, the same rule the rest of this file follows.
   const homeSns = shp2ConnectedDpuSns(store.get().devices);
+  // v1.188.1 — HELD TELEMETRY (nightLedgerScoring.heldLedgerVerdict): a home Core or the house
+  // panel with an hour or more of the span held — offline in the cloud with its last reading
+  // restated, or not recorded at all — leaves its actual empty, and the row is not scored.
+  const heldVerdict = heldLedgerVerdict({
+    spans: recorder.heldSpans?.(fcSpanStart, fcSpanEnd) ?? [],
+    coreSns: [...homeSns], panelSn: shp2Sn, span: { startMs: fcSpanStart, endMs: fcSpanEnd },
+  });
+  // v1.188.1 (review 5) — each actual is withheld on its own side only (nightLedgerScoring.heldSides).
+  const heldSide = heldSides(heldVerdict);
+  const deviceNameOf = (sn: string) => store.get().devices[sn]?.deviceName ?? sn;
   let actualPvKwh: number | null = null;
   let actualPvCoverage: number | null = null;
   if (homeSns.size) {
@@ -4124,12 +4152,15 @@ function scoreNightRow(
       worstCov = Math.min(worstCov, coverageFrac(pts, fcSpanStart, fcSpanEnd));
     }
     actualPvCoverage = round2(worstCov);
-    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE ? round2(pvWh / 1000) : null;
-    if (actualPvKwh == null) {
+    const pvHeld = heldSide.pv;
+    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld ? round2(pvWh / 1000) : null;
+    if (pvHeld && heldVerdict != null) {
+      app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD for ${yDate} — ${heldVerdict.pv.map((p) => `${deviceNameOf(p.sn)} ${(p.heldMs / 3_600_000).toFixed(1)} h`).join(', ')} of the span had no fresh readings (held telemetry)`);
+    } else if (actualPvKwh == null) {
       app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD — worst per-core PV coverage ${worstCov.toFixed(2)} < ${PV_LEDGER_MIN_CORE_COVERAGE} over the scored span; a fleet sum across a dark core under-counts and this column is durable`);
     }
   }
-  const actualLoadKwh = loadPts.length ? round2(integrateWh(loadPts, false) / 1000) : null;
+  const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;
 
   // Actual min SoC over the scored trajectory span (raw telemetry; used only for
   // soc_min_err, NOT the floor verdict — §3.3).
@@ -4211,7 +4242,11 @@ function scoreNightRow(
   const fcPv = y.pv_p50_kwh ?? null;
   const fcLoad = y.load_p50_kwh ?? null;
   if (!hadBasis) {
-    scoreNotes = 'not scored — plan basis was incomplete (no trajectory to score).';
+    // v1.188.1 (review) — with the held verdict when there is one: the marker keeps the held
+    // repair from resetting this row on every sweep (basisIncompleteNote).
+    scoreNotes = basisIncompleteNote(heldVerdict, deviceNameOf);
+  } else if (heldVerdict != null) {
+    scoreNotes = heldLedgerNote(heldVerdict, deviceNameOf);
   } else if (!covOk) {
     scoreNotes = `not scored — overnight grid_home_w coverage ${(winCoverage * 100).toFixed(0)}% < 90% (MNAR-excluded).`;
   } else if (actualMinSocPct == null) {
@@ -4666,6 +4701,50 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // Do NOT latch on failure — retry next minute-tick within the window.
     app.log.warn(`night-charge: evening job failed, will retry within the window (${e?.message ?? e})`);
   }
+}
+
+/**
+ * v1.188.1 — the rows captured on HELD readings (nightLedgerScoring.heldLedgerRepair): reset for
+ * the sweep to re-capture while their telemetry is retained, else tagged. Run by the sweep itself
+ * (scoreCompletedNights), with the same Cores and panel the capture then uses, so a re-captured
+ * row always carries the verdict and is not reset again. Rows are corrected in place, never
+ * deleted. Returns true when it reset one.
+ */
+function repairHeldNightOutcomes(rows: NightLedgerRow[], shp2Sn: string, nowMs: number): boolean {
+  let reset = false;
+  try {
+    // v1.188.1 (review 5) — also with no span left: a row stated as held whose span was restored
+    // owes a re-capture (heldLedgerRepair), and with every span restored this returned first.
+    const spans = recorder.heldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs);
+    if (spans == null) return false;
+    const horizonMs = forecastSpanRecaptureHorizonMs(
+      resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS), LEDGER_BACKFILL_SWEEP_DAYS,
+    );
+    const coreSns = [...shp2ConnectedDpuSns(store.get().devices)];
+    const nameOf = (sn: string) => store.get().devices[sn]?.deviceName ?? sn;
+    const restored = recorder.restoredHeldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs) ?? [];
+    for (const y of rows) {
+      const r = heldLedgerRepair(y, { spans, coreSns, panelSn: shp2Sn, nowMs, horizonMs, restored });
+      if (!r) continue;
+      // v1.188.1 (review 3) — whether a held row lies inside the span as captured, per side: the
+      // verdict also counts the silent hours of a frozen span (no rows at all), and an actual
+      // integrated across those alone had integrated no held reading.
+      const heldIn = (side: Array<{ sn: string }>, metric: string) =>
+        side.some((p) => recorder.heldRowsWithin?.(p.sn, metric, r.span.startMs, r.span.endMs) ?? true);
+      const heldRows = r.action === 'recapture' && r.verdict != null ? { pv: heldIn(r.verdict.pv, 'pv_total'), load: heldIn(r.verdict.load, 'panel_load') } : {};
+      // v1.188.1 (review 5) — one write for both actions (nightLedgerScoring.heldRepairColumns).
+      recorder.recordNightOutcome(String(y.plan_date), heldRepairColumns(y, r, nameOf, heldRows));
+      if (r.action === 'tag') {
+        app.log.info(`night-charge: tagged ${y.plan_date} — its PV/load span had an hour or more with no fresh readings (held or missing) and it is past the re-capture horizon; kept as captured.`);
+        continue;
+      }
+      reset = true;
+      app.log.info(`night-charge: reset ${y.plan_date} for re-capture — ${heldRepairClause(r, y, heldRows)} (pv ${y.actual_pv_kwh ?? 'null'} kWh, load ${y.actual_load_kwh ?? 'null'} kWh, buy_err ${y.buy_err_kwh ?? 'null'} kWh as captured).`);
+    }
+  } catch (e: any) {
+    app.log.debug(`night-charge: held-telemetry repair skipped (${e?.message ?? e})`);
+  }
+  return reset;
 }
 
 /**

@@ -28,6 +28,7 @@ import type { FleetSnapshot, DeviceSnapshot } from '../src/snapshot.js';
 import type { DpuProjection, Shp2Projection } from '../src/ecoflow/project.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
+import { plantFlow } from '../src/telnet/plant/types.js';
 
 /* ── fixture ───────────────────────────────────────────────────────────── */
 
@@ -164,6 +165,7 @@ function makePlantData(snap: FleetSnapshot): PlantData {
     forecast: null,
     degradation: mockDegradation(),
     serverStartedAt: Date.now() - 3_600_000,
+    flow: plantFlow(mockRecorder(), snap.devices, Date.now()),
   };
 }
 
