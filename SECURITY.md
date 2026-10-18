@@ -159,14 +159,16 @@ never blocked).
   as a credential and is never logged.
 - Phone pushes shorten device serial numbers to their last six characters.
 - CI runs `scripts/check-no-secrets.py` on every push and pull request. It fails
-  on the home network ranges, personal email addresses, VoIP identifiers and any
-  token shaped like an EcoFlow serial number that is not a placeholder. The
-  serial rule is shape-based and lists no real serial; three runtime files that
-  still hold one are pinned to an exact count, so a new serial — or a fix that
-  forgets its exemption — fails the build.
+  on private LAN addresses outside the example subnets, email addresses outside
+  the documentation and placeholder domains, phone numbers outside the fictional
+  555-01xx range, VoIP credential shapes and any token shaped like an EcoFlow
+  serial number that is not a placeholder. Every rule is shape-based and lists
+  no real value; three runtime files that still hold a serial are pinned to an
+  exact count, so a new serial — or a fix that forgets its exemption — fails the
+  build.
 - A maintainer-side pre-push check compares outgoing commits against the real
-  serial numbers, which are kept outside the repository so that the detector does
-  not publish what it guards.
+  serial numbers and personal values, which are kept outside the repository so
+  that the detector does not publish what it guards.
 
 ### Supply chain
 

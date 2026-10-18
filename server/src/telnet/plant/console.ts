@@ -49,6 +49,21 @@ import { aggregateFleetFlow, shp2ConnectedDpuSns, isShp2Connected, homeCoreCover
 /** v0.36.0 — the three operator-facing grid states (see import note above). */
 type GridState = 'active' | 'standby' | 'islanded';
 
+/** Longest TUI user name shown in the header's OPR seat before it is shortened. */
+export const OPERATOR_SEAT_MAX = 16;
+
+/**
+ * The CONSOLE header's OPR seat, as `<name>@local`: the signed-in TUI user
+ * (`TUI_USERNAME`) when the login is on, otherwise the neutral `operator`.
+ * Only printable ASCII is kept and the name is capped at OPERATOR_SEAT_MAX, so
+ * an unusual user name cannot inject escapes or crowd the MODE value.
+ */
+export function operatorSeat(user?: string | null): string {
+  const clean = (user ?? '').replace(/[^\x20-\x7e]/g, '').trim();
+  const name = clean.length > OPERATOR_SEAT_MAX ? `${clean.slice(0, OPERATOR_SEAT_MAX - 1)}…` : clean;
+  return `${name || 'operator'}@local`;
+}
+
 export function renderConsole(view: PlantView, data: PlantData): string[] {
   const W = view.width;
   const out: string[] = [];
@@ -117,7 +132,7 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
     mode: modeText,
     modeState,
     uptime: uptime(data.serverStartedAt),
-    operator: 'eric@local',
+    operator: operatorSeat(data.operator),
   }, W));
 
   /* ── 2. alarm banner ──────────────────────────────────────────────── */

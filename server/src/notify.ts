@@ -57,9 +57,9 @@ export const NOTIFY_BODY_TIMEOUT_MS = 10_000;
  *      documented critical payload so a life-safety alert can break through Do Not
  *      Disturb and the ringer switch.
  *
- * Discovered live on this system: notify.mobile_app_iphone, .mobile_app_ipad,
- * .mobile_app_ipad2, .mobile_app_erics_macbook_air, and notify.notify (all
- * registered devices at once).
+ * Companion-app services are named after the device, e.g. notify.mobile_app_iphone,
+ * .mobile_app_ipad or .mobile_app_<device_name>; notify.notify reaches all
+ * registered devices at once.
  */
 
 export type NotifyChannel = 'ha' | 'none';
