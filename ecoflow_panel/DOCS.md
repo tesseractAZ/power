@@ -194,6 +194,8 @@ night expected to draw nothing says the reserve is held and no charge is expecte
 says why; a night without a plan says so. The worst case appears once, on the night-charge card,
 labelled as the basis the target is sized on, and as the "(Worst Case)" sensors. When the reserve
 is restored, a morning summary says what the night did, including whether the force charge ran.
+It says "restored" once the panel reports the restored reserve; if the panel has not reported it
+5 minutes after the restore was accepted, it says the restore was sent and not yet confirmed.
 
 | Mode (`NIGHT_CHARGE_MODE`) | What happens |
 |---|---|

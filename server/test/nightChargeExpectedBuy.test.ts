@@ -827,7 +827,10 @@ test('★★ wiring (index.ts is not reachable from a unit test): the spoken lin
   assert.match(idx, /function armedExpectedBuyKwh\(day: string \| null\): number \| null \{\n\s+try \{\n\s+return ledgerExpectedBuyKwh\(recorder\.readNightLedger\(14\), day\);/);
   assert.match(idx, /const expectedKwh = armedExpectedBuyKwh\(state\.day\);\n/);
   assert.match(idx, /sendNotification\(loadNotifyConfig\(\), buildNightChargeApplyFailure\(\{\n\s+day: state\.day, currentReservePct, targetPct: state\.targetPct, applyRetries: state\.applyRetries, expectedKwh,\n/);
-  assert.match(idx, /sendNotification\(loadNotifyConfig\(\), buildNightChargeMorningSummary\(\{\n\s+day: state\.day, targetPct: state\.targetPct, restorePct: action\.restorePct,\n\s+expectedKwh: armedExpectedBuyKwh\(state\.day\),\n/);
+  // v1.189.0 (review) — sent from sendRestoreSummary (the restore read back, or its grace ran), the
+  // value restored being the record's prior.
+  assert.match(idx, /sendNotification\(loadNotifyConfig\(\), buildNightChargeMorningSummary\(\{\n\s+day: state\.day, targetPct: state\.targetPct, restorePct,\n\s+expectedKwh: armedExpectedBuyKwh\(state\.day\),\n/);
+  assert.match(idx, /\n  const restorePct = state\.priorReservePct;\n  if \(restorePct == null \|\| state\.revertedAtMs == null\) return;\n/);
   // The ARMED log keeps both figures, labelled.
   assert.match(idx, /\(\$\{buyFiguresLogText\(plan\?\.expectedBuyKwh, plan\?\.buyKwhDebiased \?\? plan\?\.buyKwh\)\}\); announced via/);
   // The armed record's buyKwh (the worst case) reaches index.ts's text only in labelled log lines.
@@ -1179,7 +1182,10 @@ test('★★ wiring (index.ts is not reachable from a unit test): the refused ar
   assert.match(idx, /const arm = armCycle\(nightCycleView\(\), today, \[\{\n\s+role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn\(\), nextOnPeakStartMs: armOnPeakStartMs,\n[^\n]*\n\s+\}\], nowMs, plan\.reserveFloorPct\);\n\s+armedCycle = arm\.cycle;\n\s+armedCandidate = arm\.cycle\?\.active \?\? null;\n\s+if \(!armedCandidate\) armRefused = arm\.refused\[0\]\?\.reason \?\? null;/);
   assert.match(idx, /const msg = buildNightChargeMessage\(plan, shape, supervisedCtx, armRefused, NIGHT_CHARGE_MODE\);/);
   assert.match(idx, /\n\s+expectedKwh: statedBuyKwh\(plan\),\n\s+toward: chargeIsWindowBound\(plan\),\n/);
-  assert.match(idx, /\n\s+expectedKwh: armedExpectedBuyKwh\(state\.day\),\n\s+forceCharge: forceChargeNightOutcome\(state, forceChargeOn\(\)\),\n\s+ended: action\.gridLossAbort \? 'gridLoss' : state\.cancelled \? 'cancelled' : 'window',\n/);
+  // v1.189.0 (review) — the summary goes after the ACK: the grid-loss abort is kept on the record with it.
+  assert.match(idx, /\n\s+expectedKwh: armedExpectedBuyKwh\(state\.day\),\n\s+forceCharge: forceChargeNightOutcome\(state, forceChargeOn\(\)\),\n\s+ended: endedBy, restore,\n/);
+  assert.match(idx, /\n  const endedBy = state\.revertGridLossAbort \? 'gridLoss' as const : state\.cancelled \? 'cancelled' as const : 'window' as const;\n/);
+  assert.match(idx, /persistNightActuation\(\{ \.\.\.state, revertedAtMs: nowMs, lastError: null, revertGridLossAbort: action\.gridLossAbort === true \}\);/);
   // What the force-charge did is read from the record, never from the armed ceiling and the option alone.
   assert.doesNotMatch(idx, /armedForceChargeStopPct\(/);
 });

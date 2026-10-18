@@ -763,8 +763,10 @@ const MUTANTS = [
   {
     id: 'C-xci. ★★ the revert never says why the night ended',
     file: IDX,
-    find: "      ended: action.gridLossAbort ? 'gridLoss' : state.cancelled ? 'cancelled' : 'window',",
-    to: "      ended: 'window', /* MUTANT */",
+    // v1.189.0 (review) — re-pointed: the summary goes after the ACK (sendRestoreSummary), from the
+    // grid-loss abort kept on the record.
+    find: "  const endedBy = state.revertGridLossAbort ? 'gridLoss' as const : state.cancelled ? 'cancelled' as const : 'window' as const;",
+    to: "  const endedBy = 'window' as const; /* MUTANT */",
     why: 'A cancel or a grid-loss abort is pushed as a completed night with its full expected purchase.',
   },
   {

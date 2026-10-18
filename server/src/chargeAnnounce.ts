@@ -17,7 +17,7 @@
  * it.
  */
 import { buildNightChargeMessage, type NotifyMessage } from './notify.js';
-import { nightChargeSpokenNotice, type NightChargeMode } from './nightChargeActuator.js';
+import { nightChargeSpokenNotice, type NightChargeMode, type RevertResendOnReport } from './nightChargeActuator.js';
 import { chargeIsWindowBound, chargeLevelPct, statedBuyKwh, type NightChargePlan } from './nightChargeAdvisor.js';
 import {
   buildMiddayPlanMessage, middaySpokenNotice,
@@ -93,6 +93,8 @@ export function middaySummaryFromLeg(
     restorePct: number; restoredAtMs: number; expectedKwh: number | null;
     forceCharge: MiddaySummaryText['forceCharge']; onPeak: MiddaySummaryText['onPeak'];
     ended: MiddaySummaryText['ended'];
+    /** v1.189.0 (review) — the restore read back, or was only sent and acknowledged. */
+    restore?: MiddaySummaryText['restore'];
   },
 ): MiddaySummaryText {
   return {
@@ -107,6 +109,7 @@ export function middaySummaryFromLeg(
     forceChargeOffReason: leg.forceChargeOffReason,
     onPeak: o.onPeak,
     ended: o.ended,
+    restore: o.restore ?? 'readBack',
   };
 }
 
@@ -120,7 +123,10 @@ export function middayRevertDeadlineFromLeg(
     windowStartMs: number | null; windowEndMs: number | null; nextOnPeakStartMs?: number | null;
     forceChargeOnAtMs: number | null; forceChargeOffVerifiedAtMs: number | null;
   },
-  o: { stage: 'deadline' | 'onPeak'; unknown: boolean; targetPct: number; restorePct: number | null; nowMs: number; retrying: boolean },
+  o: {
+    stage: 'deadline' | 'onPeak'; unknown: boolean; targetPct: number; restorePct: number | null; nowMs: number; retrying: boolean;
+    resendOnReport?: RevertResendOnReport | null;
+  },
 ): MiddayRevertDeadlineText {
   return {
     windowStartMs: leg.windowStartMs ?? o.nowMs,
@@ -132,5 +138,6 @@ export function middayRevertDeadlineFromLeg(
     onPeakStartMs: leg.nextOnPeakStartMs ?? null,
     forceChargeOffOpen: leg.forceChargeOnAtMs != null && leg.forceChargeOffVerifiedAtMs == null,
     retrying: o.retrying,
+    resendOnReport: o.resendOnReport ?? null,
   };
 }

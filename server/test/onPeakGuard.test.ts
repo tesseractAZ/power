@@ -36,10 +36,10 @@ import {
   foreignStep, isForeignReserveReading, isReserveArbitrageRaised, ownerReserveFloorPct,
   chargeWriteHold, moneyDetectorReservePct, reserveRestoreNote,
   isReserveSetting, applyProvedUnlanded, restoreAwaitingFirstChance, REVERT_DEADLINE_HOLD_MAX_MS, APPLY_MAX_RETRIES,
-  readsOwnRaise, attemptAdoptable,
+  readsOwnRaise, attemptAdoptable, revertResendOnReport, revertRetryText, restoreSummaryDue,
   type ArmablePlan, type ActuationTickOpts, type NightActuationState,
 } from '../src/nightChargeActuator.js';
-import { onPeakDayWords } from '../src/chargeText.js';
+import { onPeakDayWords, buildMiddayRevertDeadline, buildMiddayChargeSummary } from '../src/chargeText.js';
 import {
   decideForceCharge, forceChargeOffDueNow, forceChargeOffDeadlineMs, actuationStepOrder, blindResendStopMs,
   FORCE_CHARGE_MIN_RUN_MS, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, FORCE_CHARGE_ON_VERIFY_AFTER_MS,
@@ -55,7 +55,8 @@ import {
   type PeakDrawInputs,
 } from '../src/peakGridDraw.js';
 import { idlePoolInputsFrom } from '../src/alertMonitor.js';
-import { buildNightChargeRevertDeadline, buildNightChargeForeignReserve } from '../src/notify.js';
+import { buildNightChargeRevertDeadline, buildNightChargeForeignReserve, buildNightChargeMorningSummary } from '../src/notify.js';
+import { middayRevertDeadlineFromLeg, middaySummaryFromLeg } from '../src/chargeAnnounce.js';
 import { armCycle, asChargeLeg, legResolved } from '../src/chargeCycle.js';
 
 const MIN = 60_000;
@@ -637,11 +638,11 @@ test('★★★ index.ts: revertDeadline is decided ahead of the reserve decisio
   const idx = SRC('index.ts');
   const fn = idx.indexOf('async function runNightActuationTickInner(');
   const body = idx.slice(fn, idx.indexOf('\nif (nightChargeEnabled) {', fn));
-  const page = body.indexOf('const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null);');
+  const page = body.indexOf('const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null, nightReserveReadSinceBoot);');
   assert.ok(page > 0);
   assert.ok(page < body.indexOf('const action = decideActuation(state, nowMs, {'));
   assert.ok(page < body.indexOf("if (action.kind === 'none' || !shp2) return;"));
-  assert.ok(body.includes("if (revertPage.kind === 'page') {\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));"));
+  assert.ok(body.includes("if (revertPage.kind === 'page') {\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null),\n      revertResendOnReport(state, currentReservePct, shp2 != null));"));
   // A stage decided with no page is stamped as passed — it is never paged later.
   assert.ok(body.includes("} else if (revertPage.kind === 'pass') {\n    persistNightActuation(revertPage.stage === 'onPeak'\n      ? { ...state, revertDeadlineOnPeakPassedAtMs: nowMs }\n      : { ...state, revertDeadlinePassedAtMs: nowMs });"));
   // A never-landed attempt is proven on a live reading, ahead of the page.
@@ -870,6 +871,238 @@ test('★★★ revertRetryPending: the page says the restore is retried only wh
   assert.match(buildNightChargeRevertDeadline({ day: '2026-10-13', stage: 'deadline', unknown: false, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', retrying: true }).body, /keeps retrying the restore\.$/);
 });
 
+/**
+ * v1.189.0 (review) — the page says what will happen to a restore it cannot see. A restore the cloud
+ * accepted, its readback dark at the deadline: revertRetryPending is false (a re-issue needs our
+ * target read back), and the push said "The add-on is not re-sending the restore." — and then the
+ * first readback of the raise re-issued it (retryRevert). With no reading, a restore that will be
+ * sent once the panel reports again is said so: on a reading of the raise (an accepted restore with
+ * re-issues left, an attempt never confirmed), or once a panel missing from the device list is
+ * listed again (a restore never accepted).
+ */
+test('★★★ revertResendOnReport: a dark readback\'s page says the restore is sent once the panel reports — and it then is', () => {
+  const ap = applied(arm(NIGHT));
+  const acked = { ...ap, revertedAtMs: NIGHT.endMs };
+  // An accepted restore, no reading: not being sent, and sent on a reading of the raise.
+  assert.equal(revertRetryPending(acked, null, true), false);
+  assert.equal(revertResendOnReport(acked, null, true), 'raise');
+  assert.equal(revertResendOnReport(acked, null, false), 'raise', 'listed or not: it waits on a reading');
+  assert.equal(revertResendOnReport(acked, 0, true), 'raise', 'a reconnect 0 is no reading');
+  // Its re-issues spent, or escalated: nothing more is sent.
+  assert.equal(revertResendOnReport({ ...acked, revertRetries: REVERT_MAX_RETRIES }, null, true), null);
+  assert.equal(revertResendOnReport({ ...acked, revertReadbackEscalated: true }, null, true), null);
+  // A known reading is the page's own words, and revertRetryPending says what follows.
+  assert.equal(revertResendOnReport(acked, 50, true), null);
+  assert.equal(revertResendOnReport(acked, 16, true), null);
+  assert.equal(revertResendOnReport({ ...acked, revertVerifiedAtMs: NIGHT.endMs + MIN }, null, true), null);
+  assert.equal(revertResendOnReport({ ...acked, foreignSettledAtMs: NIGHT.endMs + MIN }, null, true), null);
+  // A restore never accepted: sent every tick while the panel is listed (retrying), and on the first
+  // tick it is listed again when it is not.
+  assert.equal(revertResendOnReport(ap, null, true), null, 'revertRetryPending: it keeps being sent');
+  assert.equal(revertResendOnReport(ap, null, false), 'listed');
+  assert.equal(revertResendOnReport({ ...ap, priorReservePct: 7 }, null, false), null, 'no valid value to restore');
+  const due = revertDueMs(ap)!;
+  assert.deepEqual(decideActuation(ap, due + HOUR, ropts({ currentReservePct: null })), { kind: 'revert', restorePct: 16 }, 'listed again: sent, whatever it reads');
+  // An attempt never confirmed: adopted, then restored, on a reading of its target.
+  const attempted = { ...arm(NIGHT), applyAttemptedAtMs: NIGHT.startMs, attemptBaselinePct: 16 };
+  assert.equal(revertResendOnReport(attempted, null, true), 'raise');
+  assert.equal(revertResendOnReport({ ...attempted, attemptUnlandedAtMs: NIGHT.startMs + HOUR }, null, true), null);
+  // The words.
+  const push = (o: { retrying: boolean; resendOnReport?: 'listed' | 'raise' | null }) => buildNightChargeRevertDeadline({
+    day: '2026-10-13', stage: 'deadline', unknown: true, targetPct: 50, restorePct: 16, onPeakClock: '4:00 PM', ...o,
+  }).body;
+  assert.match(push({ retrying: false, resendOnReport: 'raise' }), /in the EcoFlow app\. The add-on sends the restore if the panel still reads the raised reserve once it reports again\.$/);
+  assert.match(push({ retrying: false, resendOnReport: 'listed' }), /in the EcoFlow app\. The add-on sends the restore once the panel reports again\.$/);
+  for (const body of [push({ retrying: false, resendOnReport: 'raise' }), push({ retrying: false, resendOnReport: 'listed' })]) {
+    assert.doesNotMatch(body, /not re-sending/);
+  }
+  // Unchanged where it was true: retrying, and nothing more to send.
+  assert.match(push({ retrying: true, resendOnReport: null }), /The add-on keeps retrying the restore\.$/);
+  assert.match(push({ retrying: false }), /The add-on is not re-sending the restore\.$/);
+  assert.equal(revertRetryText(true, 'raise'), 'The add-on keeps retrying the restore.', 'retrying outranks');
+  // The mid-day page says the same.
+  const leg = { windowStartMs: MIDDAY.startMs, windowEndMs: MIDDAY.endMs, nextOnPeakStartMs: MIDDAY_PEAK, forceChargeOnAtMs: null, forceChargeOffVerifiedAtMs: null };
+  const md = middayRevertDeadlineFromLeg(leg, { stage: 'deadline', unknown: true, targetPct: 50, restorePct: 16, nowMs: MIDDAY.endMs + 30 * MIN, retrying: false, resendOnReport: 'raise' });
+  assert.match(buildMiddayRevertDeadline(md).body, /The add-on sends the restore if the panel still reads the raised reserve once it reports again\.$/);
+});
+
+test('★★★ a restore the panel ignored, its readback dark across the 05:30 page: the page says it is sent once the panel reports, and it is', () => {
+  // Accepted at 05:00, ignored by the panel; the panel is not fresh 04:50–06:10, then reads 50.
+  let s = applied(arm(NIGHT));
+  const darkFrom = phx(2026, 10, 14, 4, 50);
+  const darkTo = phx(2026, 10, 14, 6, 10);
+  const reading = (t: number): number | null => (t >= darkFrom && t < darkTo ? null : s.revertedAtMs != null && s.revertRetries > 0 && t >= (s.revertLastAttemptMs ?? 0) + 40_000 ? 16 : 50);
+  const said: string[] = [];
+  const sent: number[] = [];
+  for (let t = NIGHT.endMs - 30 * MIN; t <= phx(2026, 10, 14, 7); t += MIN) {
+    const cur = reading(t);
+    const d = decideRevertDeadline(s, t, cur, true);
+    if (d.kind === 'page') {
+      said.push(buildNightChargeRevertDeadline({
+        day: s.day, stage: d.stage, unknown: d.unknown, targetPct: d.readsPct ?? s.targetPct!, restorePct: 16, onPeakClock: '4:00 PM',
+        retrying: revertRetryPending(s, cur, true), resendOnReport: revertResendOnReport(s, cur, true),
+      }).body);
+      s = { ...s, revertDeadlinePagedAtMs: s.revertDeadlinePagedAtMs ?? t };
+    }
+    const a = decideActuation(s, t, ropts({ currentReservePct: cur }));
+    if (a.kind === 'revert') s = { ...s, revertedAtMs: t };
+    else if (a.kind === 'retryRevert') { sent.push(t); s = { ...s, revertRetries: s.revertRetries + 1, revertLastAttemptMs: t }; }
+    else if (a.kind === 'revertVerified') s = { ...s, revertVerifiedAtMs: t };
+  }
+  assert.equal(said.length, 1, 'one page, at the deadline');
+  assert.match(said[0], /could not be confirmed/);
+  assert.match(said[0], /The add-on sends the restore if the panel still reads the raised reserve once it reports again\.$/);
+  assert.equal(sent[0], darkTo, 'and on the first readback of the raise it is sent');
+  assert.ok(s.revertVerifiedAtMs != null);
+});
+
+/**
+ * v1.189.0 (review) — the morning summary says "restored" only on a readback. It went on the
+ * restore's cloud ACK ("Night-charge: reserve restored to 16%"), and a restore that then did not
+ * read back was paged critical half an hour later ("reserve restore not confirmed"), both cards
+ * standing. It now goes once: when the restore reads back, in the words it always had, or when the
+ * restore's readback grace runs with none, saying the restore was sent and acknowledged and has not
+ * read back.
+ */
+test('★★★ restoreSummaryDue: the summary goes on the readback ("restored"), or after the grace saying the restore was sent', () => {
+  const ap = applied(arm(NIGHT));
+  const ack = NIGHT.endMs + 20_000;
+  const acked = { ...ap, revertedAtMs: ack };
+  assert.equal(restoreSummaryDue(ap, ack), null, 'no restore accepted');
+  assert.equal(restoreSummaryDue(acked, ack), null, 'not on the ACK');
+  assert.equal(restoreSummaryDue(acked, ack + REVERT_VERIFY_AFTER_MS - 1), null, 'inside the readback grace');
+  assert.equal(restoreSummaryDue({ ...acked, revertVerifiedAtMs: ack + 40_000 }, ack + 40_000), 'readBack');
+  assert.equal(restoreSummaryDue(acked, ack + REVERT_VERIFY_AFTER_MS), 'acknowledged');
+  assert.equal(restoreSummaryDue(acked, ack + REVERT_VERIFY_AFTER_MS, 50), 'acknowledged', 'the raise still read');
+  assert.equal(restoreSummaryDue(acked, ack + REVERT_VERIFY_AFTER_MS, 16), null,
+    'a reading of the restore is its readback: verified on this tick, and summarised then as restored');
+  assert.equal(decideActuation(acked, ack + REVERT_VERIFY_AFTER_MS, ropts({ currentReservePct: 16 })).kind, 'revertVerified');
+  assert.equal(restoreSummaryDue({ ...acked, restoreSummaryAtMs: ack + REVERT_VERIFY_AFTER_MS }, ack + HOUR), null, 'once');
+  assert.equal(restoreSummaryDue({ ...acked, revertVerifiedAtMs: ack + HOUR, restoreSummaryAtMs: ack + REVERT_VERIFY_AFTER_MS }, ack + HOUR), null,
+    'a restore that reads back after the summary went sends nothing more');
+  assert.equal(restoreSummaryDue(emptyActuationState(), ack), null);
+  // A record from before the field had its summary on the ACK: an update never sends a second one.
+  const legacy = JSON.parse(JSON.stringify(acked));
+  delete legacy.restoreSummaryAtMs;
+  delete legacy.revertGridLossAbort;
+  assert.equal(coerceActuationState(legacy).restoreSummaryAtMs, ack);
+  assert.equal(coerceActuationState(legacy).revertGridLossAbort, false);
+  assert.equal(restoreSummaryDue(coerceActuationState(legacy), ack + HOUR), null);
+  assert.equal(coerceActuationState(JSON.parse(JSON.stringify({ ...ap, revertedAtMs: null }))).restoreSummaryAtMs, null);
+  // One written by this release keeps its null across a restart: still owed.
+  const owed = coerceActuationState(JSON.parse(JSON.stringify(acked)));
+  assert.equal(owed.restoreSummaryAtMs, null);
+  assert.equal(restoreSummaryDue(owed, ack + REVERT_VERIFY_AFTER_MS), 'acknowledged');
+  assert.equal(coerceActuationState(JSON.parse(JSON.stringify({ ...acked, revertGridLossAbort: true }))).revertGridLossAbort, true);
+  assert.equal(emptyActuationState().restoreSummaryAtMs, null);
+  assert.equal(emptyActuationState().revertGridLossAbort, false);
+});
+
+test('★★★ the morning summary: "restored" only on a readback; acknowledged and not read back otherwise', () => {
+  const base = { day: '2026-10-13', targetPct: 50, restorePct: 16, expectedKwh: 34.88 } as const;
+  const read = buildNightChargeMorningSummary({ ...base, restore: 'readBack' });
+  assert.deepEqual(read, buildNightChargeMorningSummary(base), 'read back: the words it always had');
+  assert.equal(read.title, 'Night-charge: reserve restored to 16%');
+  const shapes: Array<Parameters<typeof buildNightChargeMorningSummary>[0]> = [
+    base,
+    { ...base, expectedKwh: 0 },
+    { ...base, forceCharge: { kind: 'ran', stopPct: 80, expectedLeg: true } },
+    { ...base, forceCharge: { kind: 'neverStarted', stopPct: 80, expectedLeg: true } },
+    { ...base, forceCharge: { kind: 'failed', stopPct: 80, expectedLeg: true, partialSlots: [2] } },
+    { ...base, forceCharge: { kind: 'unconfirmed', stopPct: 80, expectedLeg: true } },
+    { ...base, ended: 'cancelled' },
+    { ...base, ended: 'gridLoss' },
+  ];
+  for (const sh of shapes) {
+    const m = buildNightChargeMorningSummary({ ...sh, restore: 'acknowledged' });
+    assert.doesNotMatch(`${m.title} ${m.body}`, /restored/, `${m.title}: nothing says restored`);
+    assert.match(m.body, /the restore to 16% was sent \(the EcoFlow cloud acknowledged it\), and the panel has not read it back yet\./, m.body);
+    assert.match(m.title, /reserve restore to 16% sent$/);
+    assert.equal(m.severity, 'info');
+    assert.equal(m.dedupId, 'night_charge_actuation');
+    const r = buildNightChargeMorningSummary({ ...sh, restore: 'readBack' });
+    assert.match(`${r.title} ${r.body}`, /restored to 16%/);
+  }
+  assert.equal(buildNightChargeMorningSummary({ ...base, restore: 'acknowledged' }).body,
+    'Supervised night charge for 2026-10-13 completed: reserve raised to 50% (~34.9 kWh expected); the restore to 16% was sent (the EcoFlow cloud '
+    + "acknowledged it), and the panel has not read it back yet. Delivery vs plan scores in the ledger at tomorrow evening's update.");
+  assert.equal(buildNightChargeMorningSummary({ ...base, ended: 'cancelled', restore: 'acknowledged' }).body,
+    'Supervised night charge for 2026-10-13 was cancelled after the write: the reserve was raised to 50%; the restore to 16% was sent (the EcoFlow '
+    + 'cloud acknowledged it), and the panel has not read it back yet. Nothing more is charged tonight.');
+  // The mid-day summary says the same.
+  const leg = { windowStartMs: MIDDAY.startMs, windowEndMs: MIDDAY.endMs, targetPct: 50, forceChargeOffAtMs: null, forceChargeOffReason: null };
+  const mo = { restorePct: 16, restoredAtMs: MIDDAY.endMs + 20_000, expectedKwh: 20, forceCharge: null, onPeak: { startMs: MIDDAY_PEAK, endMs: MIDDAY_PEAK + 3 * HOUR }, ended: 'window' as const };
+  const mRead = buildMiddayChargeSummary(middaySummaryFromLeg(leg, mo));
+  assert.deepEqual(buildMiddayChargeSummary(middaySummaryFromLeg(leg, { ...mo, restore: 'readBack' })), mRead);
+  assert.match(mRead.body, /the reserve was restored to 16% at 3:00 PM, before the/);
+  for (const ended of ['window', 'cancelled', 'gridLoss'] as const) {
+    const m = buildMiddayChargeSummary(middaySummaryFromLeg(leg, { ...mo, ended, restore: 'acknowledged' }));
+    assert.doesNotMatch(`${m.title} ${m.body}`, /restored/, m.body);
+    assert.match(m.body, /the restore to 16% was sent .*\(the EcoFlow cloud acknowledged it\), and the panel has not read it back yet\./, m.body);
+    assert.match(m.title, /reserve restore to 16% sent$/);
+  }
+});
+
+test('★★★ a night tick by tick: the summary goes on the readback when the restore takes, and says "sent" when it does not', () => {
+  const run = (takes: boolean) => {
+    let s = applied(arm(NIGHT));
+    const summaries: Array<{ t: number; kind: string }> = [];
+    const pages: number[] = [];
+    const reading = (t: number) => (takes && s.revertedAtMs != null && t >= s.revertedAtMs + 40_000 ? 16 : 50);
+    for (let t = NIGHT.endMs - 5 * MIN + 7_000; t <= NIGHT.endMs + HOUR; t += MIN) {
+      const cur = reading(t);
+      const d = decideRevertDeadline(s, t, cur, true, true);
+      if (d.kind === 'page') { pages.push(t); s = { ...s, revertDeadlinePagedAtMs: s.revertDeadlinePagedAtMs ?? t }; }
+      // The integrator's order: the summary step, then the reserve decision (its revertVerified sends one too).
+      const due = restoreSummaryDue(s, t, cur);
+      if (due != null) { summaries.push({ t, kind: due }); s = { ...s, restoreSummaryAtMs: t }; }
+      const a = decideActuation(s, t, ropts({ currentReservePct: cur }));
+      if (a.kind === 'revert') s = { ...s, revertedAtMs: t };
+      else if (a.kind === 'revertVerified') {
+        s = { ...s, revertVerifiedAtMs: t };
+        const now = restoreSummaryDue(s, t);
+        if (now != null) { summaries.push({ t, kind: now }); s = { ...s, restoreSummaryAtMs: t }; }
+      } else if (a.kind === 'retryRevert') s = { ...s, revertRetries: s.revertRetries + 1, revertLastAttemptMs: t };
+      else if (a.kind === 'revertFailed') s = { ...s, revertReadbackEscalated: true };
+    }
+    return { s, summaries, pages };
+  };
+  const ok = run(true);
+  assert.equal(ok.summaries.length, 1);
+  assert.equal(ok.summaries[0].kind, 'readBack');
+  assert.equal(ok.summaries[0].t, ok.s.revertVerifiedAtMs, 'on the tick the restore read back');
+  assert.deepEqual(ok.pages, []);
+  const stuck = run(false);
+  assert.equal(stuck.summaries.length, 1);
+  assert.equal(stuck.summaries[0].kind, 'acknowledged', 'never "restored"');
+  assert.equal(stuck.summaries[0].t - stuck.s.revertedAtMs!, REVERT_VERIFY_AFTER_MS, 'when the readback grace ends');
+  assert.ok(stuck.pages.length === 1 && stuck.pages[0] > stuck.summaries[0].t, 'and the page follows it, as before');
+});
+
+test('★★★ index.ts: the summary is not sent on the ACK; it goes from the tick when it is owed, and on the readback tick', () => {
+  const idx = SRC('index.ts');
+  const tick = idx.slice(idx.indexOf('async function runNightActuationTickInner('), idx.indexOf('\nif (nightChargeEnabled) {'));
+  const ackAt = tick.indexOf("persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null, revertGridLossAbort: action.gridLossAbort === true });");
+  assert.ok(ackAt > 0);
+  const ackBranch = tick.slice(ackAt, tick.indexOf('\n    return;\n  }', ackAt));
+  assert.doesNotMatch(ackBranch, /sendNotification\(|sendRestoreSummary\(|buildNightChargeMorningSummary\(|buildMiddayChargeSummary\(/, 'nothing is pushed on the ACK');
+  // The step: after the revertDeadline decision, ahead of the reserve decision and its no-panel return.
+  const step = tick.indexOf('const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct);\n  if (summaryOwed != null) {\n    sendRestoreSummary(state, summaryOwed, nowMs);');
+  assert.ok(step > tick.indexOf('const revertPage = decideRevertDeadline('));
+  assert.ok(step < tick.indexOf('const action = decideActuation(state, nowMs, {'));
+  // The readback tick sends it at once.
+  const ver = tick.indexOf("persistNightActuation({ ...state, revertVerifiedAtMs: nowMs, lastError: null });");
+  assert.ok(ver > 0);
+  assert.ok(tick.slice(ver, tick.indexOf('\n    return;\n  }', ver)).includes('const owed = restoreSummaryDue(nightActuationMem, nowMs);\n    if (owed != null) sendRestoreSummary(nightActuationMem, owed, nowMs);'));
+  // The summary stamps itself before it is sent, and is never awaited.
+  const fn = idx.slice(idx.indexOf('function sendRestoreSummary('), idx.indexOf('let nightReserveReadSinceBoot'));
+  assert.ok(fn.indexOf('persistNightActuation({ ...state, restoreSummaryAtMs: nowMs });') > 0);
+  assert.ok(fn.indexOf('persistNightActuation({ ...state, restoreSummaryAtMs: nowMs });') < fn.indexOf('sendNotification('));
+  assert.doesNotMatch(fn, /await /);
+  assert.ok(fn.includes("  const endedBy = state.revertGridLossAbort ? 'gridLoss' as const : state.cancelled ? 'cancelled' as const : 'window' as const;"));
+  assert.equal(fn.split('ended: endedBy, restore,').length - 1, 2, 'both summaries say what ended the night and what the restore read');
+});
+
 test('★★★ a partly granted write: the night\'s own request read back later is ours — adopted as the target and restored at the close', () => {
   const s = applied(arm(NIGHT), { applyVerifiedAtMs: null });
   const verifyAt = NIGHT.startMs + APPLY_VERIFY_AFTER_MS;
@@ -1016,6 +1249,71 @@ test('★★★ revertDeadline after a restart across the deadline: the restore 
   assert.deepEqual(decideRevertDeadline({ ...s, revertedAtMs: NIGHT.endMs + 20_000 }, deadline, 50, true), { kind: 'page', stage: 'deadline', unknown: false });
   assert.equal(restoreAwaitingFirstChance({ ...s, revertVerifiedAtMs: t1 }, t1, true), false);
   assert.equal(restoreAwaitingFirstChance(arm(NIGHT), t1, true), false, 'nothing applied');
+});
+
+/**
+ * v1.189.0 (review) — a restart across the deadline just after the restore was accepted. The restore
+ * is sent and ACK'd at 05:00, the process dies before its readback tick (the 04:58–05:02 load window)
+ * and is back after 05:30, its first readback not yet fresh: the readback grace ran from the ACK, so
+ * the deadline paged "could not be confirmed … the night's 50% may still stand" at once, and a tick
+ * later the panel read 16. The deadline stage now waits for one reading after a start, at most
+ * REVERT_DEADLINE_HOLD_MAX_MS: a readback that stays dark is paged then.
+ */
+test('★★★ a restart just after the restore was accepted: the deadline waits for one reading after the start, bounded', () => {
+  const ackAt = NIGHT.endMs + 20_000;
+  const s = { ...applied(arm(NIGHT)), revertedAtMs: ackAt };
+  const back = phx(2026, 10, 14, 5, 40);
+  // Back with no reading yet: it waits.
+  assert.equal(restoreAwaitingFirstChance(s, back, true, null, false), true);
+  assert.deepEqual(decideRevertDeadline(s, back, null, true, false), { kind: 'hold', stage: 'deadline' });
+  assert.deepEqual(decideRevertDeadline(s, back, 0, true, false), { kind: 'hold', stage: 'deadline' }, 'a reconnect 0 is no reading');
+  assert.equal(restoreAwaitingFirstChance(s, back, false, null, false), true, 'listed or not: it waits on a reading');
+  // A process up all along (it has read the reserve): an unknown reading pages, as before.
+  assert.deepEqual(decideRevertDeadline(s, back, null, true, true), { kind: 'page', stage: 'deadline', unknown: true });
+  assert.deepEqual(decideRevertDeadline(s, back, null, true), { kind: 'page', stage: 'deadline', unknown: true }, 'the default never waits for one');
+  // The first reading decides it: the restore read back, or the raise standing.
+  assert.deepEqual(decideRevertDeadline({ ...s, revertDeadlineHeldAtMs: back }, back + MIN, 16, true, false), { kind: 'pass', stage: 'deadline', pct: 16 });
+  assert.deepEqual(decideRevertDeadline({ ...s, revertDeadlineHeldAtMs: back }, back + MIN, 50, true, false), { kind: 'page', stage: 'deadline', unknown: false });
+  // Bounded: a readback that stays dark is paged REVERT_DEADLINE_HOLD_MAX_MS after the wait began.
+  const held = { ...s, revertDeadlineHeldAtMs: back };
+  assert.deepEqual(decideRevertDeadline(held, back + REVERT_DEADLINE_HOLD_MAX_MS - 1, null, true, false), { kind: 'hold', stage: 'deadline' });
+  assert.deepEqual(decideRevertDeadline(held, back + REVERT_DEADLINE_HOLD_MAX_MS, null, true, false), { kind: 'page', stage: 'deadline', unknown: true });
+  // The on-peak stage never waits.
+  assert.deepEqual(decideRevertDeadline(s, NIGHT_PEAK + MIN, null, true, false), { kind: 'page', stage: 'onPeak', unknown: true });
+  // A restore never accepted, or an attempt, is decided as before.
+  assert.equal(restoreAwaitingFirstChance({ ...s, revertedAtMs: null, revertAttempts: 1 }, back, true, null, false), false);
+
+  // Tick by tick: down 05:01–05:40, the panel not fresh until 05:42, then it reads 16 (or, stuck, 50; or dark).
+  const run = (after: number | null) => {
+    let r: NightActuationState = s;
+    let readSinceBoot = false;
+    const pages: string[] = [];
+    for (let t = back; t <= back + HOUR; t += MIN) {
+      const cur = t < back + 2 * MIN ? null : after;
+      if (isReserveSetting(cur)) readSinceBoot = true;
+      const d = decideRevertDeadline(r, t, cur, true, readSinceBoot);
+      if (d.kind === 'hold' && r.revertDeadlineHeldAtMs == null) r = { ...r, revertDeadlineHeldAtMs: t };
+      if (d.kind === 'page') { pages.push(`${(t - back) / MIN} ${d.unknown ? 'unknown' : 'reads'}`); r = { ...r, revertDeadlinePagedAtMs: r.revertDeadlinePagedAtMs ?? t }; }
+      if (d.kind === 'pass') r = { ...r, revertDeadlinePassedAtMs: t };
+      const a = decideActuation(r, t, ropts({ currentReservePct: cur }));
+      if (a.kind === 'revertVerified') r = { ...r, revertVerifiedAtMs: t };
+    }
+    return { pages, r };
+  };
+  const ok = run(16);
+  assert.deepEqual(ok.pages, [], 'the restore had taken: nothing paged');
+  assert.ok(ok.r.revertVerifiedAtMs != null);
+  assert.deepEqual(run(50).pages, ['2 reads'], 'the raise standing: paged on the first reading');
+  assert.deepEqual(run(null).pages, [`${REVERT_DEADLINE_HOLD_MAX_MS / MIN} unknown`], 'dark: paged when the wait ends');
+  // The tick: the flag starts false with the process, is set by the first reserve setting read, and
+  // is what the decision is told.
+  const idx = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8');
+  assert.ok(idx.includes('\nlet nightReserveReadSinceBoot = false;\n'));
+  const body = idx.slice(idx.indexOf('async function runNightActuationTickInner('), idx.indexOf('\nif (nightChargeEnabled) {'));
+  const set = body.indexOf('  if (isReserveSetting(currentReservePct)) nightReserveReadSinceBoot = true;\n');
+  assert.ok(set > 0 && set > body.indexOf('const currentReservePct: number | null ='));
+  assert.ok(set < body.indexOf('const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null, nightReserveReadSinceBoot);'));
+  assert.equal(idx.split('nightReserveReadSinceBoot = true').length - 1, 1, 'set in one place');
 });
 
 /** A process back at `backMs` on an applied night whose restore was never sent, ticking each minute

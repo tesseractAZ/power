@@ -79,6 +79,9 @@ test('★★★ the 21:30 push and spoken notice: the builders and the day-aware
 test('★★★ the morning summary and the revert-deadline page: the golden words', () => {
   overnightSummaryCases().forEach((c, i) => {
     assert.deepEqual(buildNightChargeMorningSummary(c.input), GOLDEN.summary[i].push, c.name);
+    // v1.189.0 (review) — the summary says "restored" once the restore has read back: those are the
+    // golden words, byte for byte.
+    assert.deepEqual(buildNightChargeMorningSummary({ ...c.input, restore: 'readBack' }), GOLDEN.summary[i].push, `${c.name}: read back`);
   });
   overnightRevertDeadlineCases().forEach((c, i) => {
     const g = GOLDEN.revertDeadline[i];
@@ -184,15 +187,16 @@ test('★★★ index.ts: the evening job\'s overnight calls are the route\'s ov
 });
 
 test('★★★ index.ts: the summary and the revert page branch to the mid-day words only for a super off-peak leg, ahead of the overnight calls', () => {
-  const revert = INDEX.slice(INDEX.indexOf("persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null });"));
+  // v1.189.0 (review) — the summary goes from sendRestoreSummary (the restore read back, or its grace ran).
+  const revert = INDEX.slice(INDEX.indexOf('function sendRestoreSummary('), INDEX.indexOf('let nightReserveReadSinceBoot'));
   const mid = revert.indexOf('if (isMiddayLeg(state)) {');
   const night = revert.indexOf('void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({');
-  assert.ok(mid > 0 && night > mid, 'the mid-day branch comes first and returns');
-  assert.match(revert.slice(mid, night), /\n {6}return;\n {4}\}\n/);
+  assert.ok(mid > 0 && night > mid, 'the mid-day branch comes first, the overnight summary in its else');
+  assert.match(revert.slice(mid, night), /\n {2}\} else \{\n {4}$/);
   const page = INDEX.slice(INDEX.indexOf('function pageRevertDeadline('), INDEX.indexOf('async function runNightActuationTickInner('));
-  assert.match(page, /const midday = isMiddayLeg\(state as Partial<ChargeLegState>\)\n\s+\? middayRevertDeadlineFromLeg\(state, \{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, nowMs, retrying \}\) : null;/);
+  assert.match(page, /const midday = isMiddayLeg\(state as Partial<ChargeLegState>\)\n\s+\? middayRevertDeadlineFromLeg\(state, \{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, nowMs, retrying, resendOnReport \}\) : null;/);
   assert.match(page, /const spoken = midday != null \? middayRevertDeadlineSpoken\(midday\) : revertDeadlineSpoken\(\{ stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock, onPeakDay \}\);/);
-  assert.match(page, /midday != null \? buildMiddayRevertDeadline\(midday\) : buildNightChargeRevertDeadline\(\{\n\s+day: state\.day, stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock, onPeakDay, retrying,\n/);
+  assert.match(page, /midday != null \? buildMiddayRevertDeadline\(midday\) : buildNightChargeRevertDeadline\(\{\n\s+day: state\.day, stage: d\.stage, unknown: d\.unknown, targetPct, restorePct, onPeakClock, onPeakDay, retrying, resendOnReport,\n/);
   // The on-peak day is named at the deadline stage only, from the page's own moment.
   assert.ok(page.includes("const onPeakDay = d.stage === 'deadline' && state.nextOnPeakStartMs != null ? onPeakDayWords(state.nextOnPeakStartMs, nowMs) : null;"));
   // The evening job arms the overnight leg alone in this release: no mid-day words reach it.

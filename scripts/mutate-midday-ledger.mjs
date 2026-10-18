@@ -23,6 +23,8 @@
  *                             the hold, advisory, the served record)
  *   Basis      B-i..B-v      (every mid-day figure carries basis=shadow; the backup's line says
  *                             "Shadow only"; the card's not-comparable line)
+ *   Review     U-i..U-iv     (the text sensors render a null as "unknown"; no timestamp sensor)
+ *              L-xxxi..xxxii (no measured shadow PV on a row whose PV verdict is set aside)
  *
  *   node scripts/mutate-midday-ledger.mjs [--only <id prefix>]
  */
@@ -463,8 +465,8 @@ const MUTANTS = [
   {
     id: 'B-iii. ★★ one mid-day figure loses its basis',
     file: MQ,
-    find: "value_template: '{{ value_json.midday_charge_refresh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },",
-    to: "value_template: '{{ value_json.midday_charge_refresh }}' }, /* MUTANT */",
+    find: "value_template: '{{ \"unknown\" if value_json.midday_charge_refresh is none else value_json.midday_charge_refresh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },",
+    to: "value_template: '{{ \"unknown\" if value_json.midday_charge_refresh is none else value_json.midday_charge_refresh }}' }, /* MUTANT */",
     why: 'The refresh entity reads "lowered" with nothing to say it is a preview.',
   },
   {
@@ -480,6 +482,50 @@ const MUTANTS = [
     find: "      : r.disposition === 'not-comparable' ? 'not comparable'",
     to: "      : (false as boolean) ? 'not comparable' /* MUTANT */",
     why: 'The card reads "not-comparable, ~—" as if the refresh had sized nothing.',
+  },
+
+  /* ── review lows: a null reads unknown, with no HA warning (a); the set-aside PV (f) ── */
+  {
+    id: 'U-i. ★★★ the window start renders a null as "None"',
+    file: MQ,
+    find: `'{{ "unknown" if value_json.midday_charge_window_start_at is none else value_json.midday_charge_window_start_at }}'`,
+    to: `'{{ value_json.midday_charge_window_start_at }}' /* MUTANT */`,
+    why: 'HA shows the literal state "None" on every weekend, weekday afternoon and summer day.',
+  },
+  {
+    id: 'U-ii. ★★★ the window end is a timestamp sensor again',
+    file: MQ,
+    find: "  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', icon: 'mdi:clock-end',",
+    to: "  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', device_class: 'timestamp', /* MUTANT */ icon: 'mdi:clock-end',",
+    why: 'HA cannot parse "unknown" as a time: a warning carrying the whole state payload every 30 s.',
+  },
+  {
+    id: 'U-iii. ★★ the refresh renders a null as "None"',
+    file: MQ,
+    find: `'{{ "unknown" if value_json.midday_charge_refresh is none else value_json.midday_charge_refresh }}'`,
+    to: `'{{ value_json.midday_charge_refresh }}' /* MUTANT */`,
+    why: 'The guide says unknown; HA shows "None".',
+  },
+  {
+    id: 'U-iv. ★★ the role renders a null as "None"',
+    file: MQ,
+    find: `'{{ "unknown" if value_json.night_charge_role is none else value_json.night_charge_role }}'`,
+    to: `'{{ value_json.night_charge_role }}' /* MUTANT */`,
+    why: 'On every night with no current plan the role reads "None".',
+  },
+  {
+    id: 'L-xxxi. ★★★ the shadow\'s PV is kept on a set-aside row',
+    file: NLS,
+    find: '  if (i.pvSetAside != null) pvKwh = null;',
+    to: '  /* MUTANT */',
+    why: 'A three-Core window sum is graded against a one-Core P50 as forecast-skill evidence.',
+  },
+  {
+    id: 'L-xxxii. ★★★ the scorer never passes the set-aside',
+    file: IDX,
+    find: '    pvSetAside: cols.pvSetAside,\n',
+    to: '    pvSetAside: null, /* MUTANT */\n',
+    why: 'The rule is wired in the pure core and never reached in production.',
   },
 ];
 

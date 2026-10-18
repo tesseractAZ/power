@@ -557,8 +557,9 @@ const MUTANTS = [
   {
     id: 'A-iv. ★★★ every restore sends the mid-day summary',
     file: IDX,
-    find: '    if (isMiddayLeg(state)) {\n      const onPeakAt = state.nextOnPeakStartMs ?? null;',
-    to: '    if (isMiddayLeg(state) || state.day != null) { /* MUTANT */\n      const onPeakAt = state.nextOnPeakStartMs ?? null;',
+    // v1.189.0 (review) — re-pointed: the summary goes from sendRestoreSummary (index.ts).
+    find: '  if (isMiddayLeg(state)) {\n    const onPeakAt = state.nextOnPeakStartMs ?? null;',
+    to: '  if (isMiddayLeg(state) || state.day != null) { /* MUTANT */\n    const onPeakAt = state.nextOnPeakStartMs ?? null;',
     why: 'The overnight morning summary is replaced.',
   },
   {
@@ -672,7 +673,7 @@ const MUTANTS = [
   {
     id: 'T-xx. ★★★ the mid-day page always says the restore keeps being retried',
     file: TXT,
-    find: "' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(o.retrying)}`,",
+    find: "' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(o.retrying, o.resendOnReport ?? null)}`,",
     to: "' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(true)}`, /* MUTANT */",
     why: 'After the re-issues are spent the push still tells the owner a retry is coming.',
   },

@@ -22,6 +22,9 @@
  *   Fix round 3     B-i..B-xiii (after the restore, a partly granted night's reading within what it
  *                   asked for is the raise standing) · L-i..L-v (a write whose confirmation was lost,
  *                   read at its target across the deadline, is adopted and restored before any page)
+ *   Review lows     X-i..X-ix (a dark readback's page says the restore is sent once the panel reports)
+ *                   · Z-i..Z-vii (a restart just after the ACK waits for one reading, bounded)
+ *                   · K-i..K-xi (the summary says "restored" only on a readback)
  *
  *   node scripts/mutate-onpeak-guard.mjs
  */
@@ -36,6 +39,7 @@ const IDX = resolve(REPO, 'server/src/index.ts');
 const AM = resolve(REPO, 'server/src/alertMonitor.ts');
 const TXT = resolve(REPO, 'server/src/chargeText.ts');
 const NTF = resolve(REPO, 'server/src/notify.ts');
+const ANN = resolve(REPO, 'server/src/chargeAnnounce.ts');
 const SUBSET = [
   'test/onPeakGuard.test.ts',
   'test/overnightTextGolden.test.ts',
@@ -206,8 +210,8 @@ const MUTANTS = [
   {
     id: 'R-vii. ★★★ the tick never pages',
     file: IDX,
-    find: "  } else if (revertPage.kind === 'page') {\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));",
-    to: "  } else if (revertPage.kind === 'page' && (false as boolean)) { /* MUTANT */\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));",
+    find: "  } else if (revertPage.kind === 'page') {\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null),",
+    to: "  } else if (revertPage.kind === 'page' && (false as boolean)) { /* MUTANT */\n    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null),",
     why: 'The pure decision is never acted on in production.',
   },
 
@@ -425,8 +429,8 @@ const MUTANTS = [
   {
     id: 'T-i. ★★★ the page always says the restore keeps being retried',
     file: IDX,
-    find: '    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));',
-    to: '    pageRevertDeadline(state, revertPage, nowMs, true); /* MUTANT */',
+    find: '    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null),',
+    to: '    pageRevertDeadline(state, revertPage, nowMs, true, /* MUTANT */',
     why: 'The owner waits for a re-send that is never coming while the panel buys on-peak.',
   },
   {
@@ -439,8 +443,8 @@ const MUTANTS = [
   {
     id: 'T-iii. ★★★ the push text claims retries whatever it is told',
     file: ACT,
-    find: "  return retrying ? 'The add-on keeps retrying the restore.' : 'The add-on is not re-sending the restore.';",
-    to: "  return 'The add-on keeps retrying the restore.'; /* MUTANT */",
+    find: "  if (retrying) return 'The add-on keeps retrying the restore.';",
+    to: "  if (retrying || !retrying) return 'The add-on keeps retrying the restore.'; /* MUTANT */",
     why: 'The not-retrying page is worded as a retrying one.',
   },
   {
@@ -590,7 +594,7 @@ const MUTANTS = [
   {
     id: 'W-i. ★★★ the deadline pages before the restore had its chance',
     file: ACT,
-    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage };",
+    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading, readSinceBoot)) return { kind: 'hold', stage };",
     to: '  /* MUTANT */',
     why: 'A process back at 05:31 pages "could not restore" before the restore is sent, seconds before it reads back.',
   },
@@ -625,22 +629,22 @@ const MUTANTS = [
   {
     id: 'W-vi. ★★ the readback grace never ends',
     file: ACT,
-    find: '  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS;',
+    find: '  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS || (!readSinceBoot && !isReserveSetting(liveReservePct));',
     to: '  if (s.revertedAtMs != null) return true; /* MUTANT */',
     why: 'A 05:00 restore stuck at 50 waits ten more minutes at 05:30 before it is paged.',
   },
   {
     id: 'W-vii. ★★★ the on-peak stage waits too',
     file: ACT,
-    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage };",
-    to: "  if (restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage: 'deadline' }; /* MUTANT */",
+    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading, readSinceBoot)) return { kind: 'hold', stage };",
+    to: "  if (restoreAwaitingFirstChance(s, nowMs, panelListed, reading, readSinceBoot)) return { kind: 'hold', stage: 'deadline' }; /* MUTANT */",
     why: 'A process down through on-peak is paged late, while the panel buys at the peak rate.',
   },
   {
     id: 'W-viii. ★★★ the tick never says the panel is listed',
     file: IDX,
-    find: '  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null);',
-    to: '  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct); /* MUTANT */',
+    find: '  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null, nightReserveReadSinceBoot);',
+    to: '  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, false, nightReserveReadSinceBoot); /* MUTANT */',
     why: 'The wait never applies in production: the restart page goes out before the restore.',
   },
   {
@@ -856,8 +860,8 @@ const MUTANTS = [
   {
     id: 'L-iii. ★★★ the deadline is not told the reading',
     file: ACT,
-    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage };",
-    to: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed)) return { kind: 'hold', stage }; /* MUTANT */",
+    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading, readSinceBoot)) return { kind: 'hold', stage };",
+    to: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, null, readSinceBoot)) return { kind: 'hold', stage }; /* MUTANT */",
     why: 'The wait for an attempt to be adopted never applies in production.',
   },
   {
@@ -873,6 +877,215 @@ const MUTANTS = [
     find: '    liveReservePct === state.targetPct &&\n    state.targetPct !== state.attemptBaselinePct &&',
     to: '    liveReservePct === state.targetPct && /* MUTANT */',
     why: 'Nothing was raised: the page waits for a restore that changes nothing.',
+  },
+
+  /* ── review lows: a dark readback's page says what will happen to the restore ── */
+  {
+    id: 'X-i. ★★★ the tick never says what a dark restore waits on',
+    file: IDX,
+    find: '      revertResendOnReport(state, currentReservePct, shp2 != null));',
+    to: '      null); /* MUTANT */',
+    why: 'The 05:30 push says "not re-sending" for a dark readback, and the add-on then re-sends the restore.',
+  },
+  {
+    id: 'X-ii. ★★★ an accepted restore\'s re-send on a reading is not said',
+    file: ACT,
+    find: "      && !s.revertReadbackEscalated && s.revertRetries < REVERT_MAX_RETRIES ? 'raise' : null;",
+    to: "      && !s.revertReadbackEscalated && s.revertRetries < 0 ? 'raise' : null; /* MUTANT */",
+    why: 'The page says nothing more is tried while one or two re-issues wait on the next readback.',
+  },
+  {
+    id: 'X-iii. ★★ spent re-issues still wait on a reading',
+    file: ACT,
+    find: "      && !s.revertReadbackEscalated && s.revertRetries < REVERT_MAX_RETRIES ? 'raise' : null;",
+    to: "      && !s.revertReadbackEscalated ? 'raise' : null; /* MUTANT */",
+    why: 'After revertFailed the page promises a re-send that never comes.',
+  },
+  {
+    id: 'X-iv. ★★ a restore never accepted, the panel unlisted, is not said to follow',
+    file: ACT,
+    find: "  if (s.appliedAtMs != null && s.revertedAtMs == null) return isReserveSetting(s.priorReservePct) ? 'listed' : null;",
+    to: "  if (s.appliedAtMs != null && s.revertedAtMs == null) return null; /* MUTANT */",
+    why: 'The page says "not re-sending", and the restore goes on the first tick the panel is listed.',
+  },
+  {
+    id: 'X-v. ★★★ a known reading waits on a report',
+    file: ACT,
+    find: '  if (isReserveSetting(liveReservePct) || revertRetryPending(s, liveReservePct, panelListed)) return null;',
+    to: '  if (revertRetryPending(s, liveReservePct, panelListed)) return null; /* MUTANT */',
+    why: 'A panel that reads the restore is said to be awaited.',
+  },
+  {
+    id: 'X-vi. ★★★ the push drops the wait',
+    file: NTF,
+    find: '      + `Set the backup reserve to ${to} in the EcoFlow app. ${revertRetryText(o.retrying, o.resendOnReport ?? null)}`,',
+    to: '      + `Set the backup reserve to ${to} in the EcoFlow app. ${revertRetryText(o.retrying)}`, /* MUTANT */',
+    why: 'The overnight push still says "not re-sending" for a restore that will be re-sent.',
+  },
+  {
+    id: 'X-vii. ★★ the mid-day push drops the wait',
+    file: TXT,
+    find: "o.forceChargeOffOpen ? ' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(o.retrying, o.resendOnReport ?? null)}`,",
+    to: "o.forceChargeOffOpen ? ' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(o.retrying)}`, /* MUTANT */",
+    why: 'The mid-day page says what the overnight page no longer does.',
+  },
+  {
+    id: 'X-viii. ★★ the words for a re-send on a reading are the not-re-sending words',
+    file: ACT,
+    find: "  if (onReport === 'raise') return 'The add-on sends the restore if the panel still reads the raised reserve once it reports again.';",
+    to: "  if ((false as boolean) && onReport === 'raise') return 'The add-on sends the restore if the panel still reads the raised reserve once it reports again.'; /* MUTANT */",
+    why: 'The decision is right and the push still says the opposite.',
+  },
+  {
+    id: 'X-ix. ★★ the mid-day page is not told the wait',
+    file: ANN,
+    find: '    resendOnReport: o.resendOnReport ?? null,',
+    to: '    resendOnReport: null, /* MUTANT */',
+    why: 'The mid-day leg says "not re-sending" where the overnight leg says what follows.',
+  },
+
+  /* ── review lows: a restart just after the ACK waits for one reading ── */
+  {
+    id: 'Z-i. ★★★ the restart wait never applies',
+    file: ACT,
+    find: '  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS || (!readSinceBoot && !isReserveSetting(liveReservePct));',
+    to: '  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS; /* MUTANT */',
+    why: 'Back at 05:40 with the readback not yet fresh: an immediate false critical, a tick before the restore reads back.',
+  },
+  {
+    id: 'Z-ii. ★★★ the wait after a start ignores the reading',
+    file: ACT,
+    find: '  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS || (!readSinceBoot && !isReserveSetting(liveReservePct));',
+    to: '  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS || !readSinceBoot; /* MUTANT */',
+    why: 'A first reading of the raise after a start waits ten minutes before it is paged.',
+  },
+  {
+    id: 'Z-iii. ★★★ every dark readback waits, restart or not',
+    file: ACT,
+    find: '  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS || (!readSinceBoot && !isReserveSetting(liveReservePct));',
+    to: '  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS || !isReserveSetting(liveReservePct); /* MUTANT */',
+    why: 'A process up all night delays the 05:30 page of a dark readback by ten minutes.',
+  },
+  {
+    id: 'Z-iv. ★★★ the deadline is not told whether the process has read the reserve',
+    file: ACT,
+    find: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading, readSinceBoot)) return { kind: 'hold', stage };",
+    to: "  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage }; /* MUTANT */",
+    why: 'The wait is defined and never reached.',
+  },
+  {
+    id: 'Z-v. ★★★ the tick never passes the flag',
+    file: IDX,
+    find: '  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null, nightReserveReadSinceBoot);',
+    to: '  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null); /* MUTANT */',
+    why: 'The wait never applies in production.',
+  },
+  {
+    id: 'Z-vi. ★★★ the tick never sets the flag',
+    file: IDX,
+    find: '  if (isReserveSetting(currentReservePct)) nightReserveReadSinceBoot = true;',
+    to: '  /* MUTANT */',
+    why: 'Every dark readback waits ten minutes before its page, all night, every night.',
+  },
+  {
+    id: 'Z-vii. ★★ the flag starts set',
+    file: IDX,
+    find: 'let nightReserveReadSinceBoot = false;',
+    to: 'let nightReserveReadSinceBoot = true; /* MUTANT */',
+    why: 'A start is never seen: the false critical after a restart is back.',
+  },
+
+  /* ── review lows: the summary says "restored" only on a readback ── */
+  {
+    id: 'K-i. ★★★ the summary is owed on the ACK',
+    file: ACT,
+    find: "  return nowMs - s.revertedAtMs >= REVERT_VERIFY_AFTER_MS ? 'acknowledged' : null;",
+    to: "  return 'acknowledged'; /* MUTANT */",
+    why: 'Every morning reads "sent, not yet confirmed" about a restore that reads back a minute later.',
+  },
+  {
+    id: 'K-ii. ★★★ a summary with no readback says restored',
+    file: ACT,
+    find: "  return nowMs - s.revertedAtMs >= REVERT_VERIFY_AFTER_MS ? 'acknowledged' : null;",
+    to: "  return nowMs - s.revertedAtMs >= REVERT_VERIFY_AFTER_MS ? 'readBack' : null; /* MUTANT */",
+    why: '"Reserve restored" at 05:05, and "reserve restore not confirmed" (critical) at 05:30.',
+  },
+  {
+    id: 'K-iii. ★★★ the summary goes again',
+    file: ACT,
+    find: '  if (s.day == null || s.revertedAtMs == null || s.restoreSummaryAtMs != null) return null;',
+    to: '  if (s.day == null || s.revertedAtMs == null) return null; /* MUTANT */',
+    why: 'A summary every minute from 05:05 until the next night arms.',
+  },
+  {
+    id: 'K-iv. ★★★ an update sends the last night\'s summary again',
+    file: ACT,
+    find: '    restoreSummaryAtMs: o.restoreSummaryAtMs === undefined ? num(o.revertedAtMs) : num(o.restoreSummaryAtMs),',
+    to: '    restoreSummaryAtMs: num(o.restoreSummaryAtMs), /* MUTANT */',
+    why: 'Installing the release in the afternoon pushes the morning summary a second time.',
+  },
+  {
+    id: 'K-iv-b. ★★ a reading of the restore is summarised as not read back',
+    file: ACT,
+    find: '  if (liveReservePct != null && liveReservePct === s.priorReservePct) return null;',
+    to: '  /* MUTANT */',
+    why: '"Not read back yet" on the very tick the panel reports the restored reserve.',
+  },
+  {
+    id: 'K-iv-c. ★★ the tick does not tell the summary the reading',
+    file: IDX,
+    find: '  const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct);',
+    to: '  const summaryOwed = restoreSummaryDue(state, nowMs); /* MUTANT */',
+    why: 'The rule is defined and never reached.',
+  },
+  {
+    id: 'K-v. ★★★ the tick never sends the owed summary',
+    file: IDX,
+    find: '  if (summaryOwed != null) {\n    sendRestoreSummary(state, summaryOwed, nowMs);',
+    to: '  if (summaryOwed != null && (false as boolean)) { /* MUTANT */\n    sendRestoreSummary(state, summaryOwed, nowMs);',
+    why: 'A restore that does not read back gets no summary at all.',
+  },
+  {
+    id: 'K-vi. ★★★ the readback tick does not send it',
+    file: IDX,
+    find: '    if (owed != null) sendRestoreSummary(nightActuationMem, owed, nowMs);',
+    to: '    /* MUTANT */',
+    why: 'The "restored" summary waits a tick, past the hand-over to the next leg of a two-leg cycle.',
+  },
+  {
+    id: 'K-vii. ★★★ the overnight summary says restored with no readback',
+    file: NTF,
+    find: "  const acked = o.restore === 'acknowledged';\n  const sent = ",
+    to: "  const acked = false; /* MUTANT */\n  const sent = ",
+    why: 'The words before: "restored" on a restore that has not read back.',
+  },
+  {
+    id: 'K-viii. ★★ the mid-day summary says restored with no readback',
+    file: TXT,
+    find: "  const acked = o.restore === 'acknowledged';\n  const ackedText = ",
+    to: "  const acked = false; /* MUTANT */\n  const ackedText = ",
+    why: 'The mid-day leg says what the overnight leg no longer does.',
+  },
+  {
+    id: 'K-ix. ★★ the mid-day summary is not told the readback',
+    file: ANN,
+    find: "    restore: o.restore ?? 'readBack',",
+    to: "    restore: 'readBack', /* MUTANT */",
+    why: 'Every mid-day summary says restored.',
+  },
+  {
+    id: 'K-x. ★★★ the summary is not stamped before it is sent',
+    file: IDX,
+    find: '  persistNightActuation({ ...state, restoreSummaryAtMs: nowMs });',
+    to: '  /* MUTANT */',
+    why: 'The summary goes on every tick, and again after every restart.',
+  },
+  {
+    id: 'K-xi. ★★ the grid-loss abort is not kept with the restore',
+    file: IDX,
+    find: '    persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null, revertGridLossAbort: action.gridLossAbort === true });',
+    to: '    persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null }); /* MUTANT */',
+    why: 'A night the grid loss stopped is summarised as completed, with its full expected figure.',
   },
 ];
 

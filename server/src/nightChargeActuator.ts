@@ -613,6 +613,14 @@ export interface NightActuationState {
    *  (restoreAwaitingFirstChance: a process down across the deadline). It waits at most
    *  REVERT_DEADLINE_HOLD_MAX_MS from here. */
   revertDeadlineHeldAtMs: number | null;
+  /** v1.189.0 (review) — the restore was decideActuation's grid-loss abort (gridLossAbort): what
+   *  the summary says ended the night, when it goes after the restore's ACK (restoreSummaryDue). */
+  revertGridLossAbort: boolean;
+  /** v1.189.0 (review) — when the summary of the restore went (the morning summary, or a mid-day
+   *  leg's own): once the restore read back, or once its readback grace ran with none
+   *  (restoreSummaryDue). A record from before the field had its summary sent on the ACK, and reads
+   *  back with revertedAtMs here (coerceActuationState), so an update never sends it again. */
+  restoreSummaryAtMs: number | null;
   lastError: string | null;
 }
 
@@ -645,6 +653,8 @@ export function emptyActuationState(): NightActuationState {
     attemptUnlandedAtMs: null,
     applyUnlandedAtMs: null,
     revertDeadlineHeldAtMs: null,
+    revertGridLossAbort: false,
+    restoreSummaryAtMs: null,
     lastError: null,
   };
 }
@@ -733,6 +743,10 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     attemptUnlandedAtMs: num(o.attemptUnlandedAtMs),
     applyUnlandedAtMs: num(o.applyUnlandedAtMs),
     revertDeadlineHeldAtMs: num(o.revertDeadlineHeldAtMs),
+    revertGridLossAbort: o.revertGridLossAbort === true,
+    // A record written before the field (v1.189.0 review) sent its summary on the restore's ACK:
+    // absent, it reads as sent then, so the update never sends a second one.
+    restoreSummaryAtMs: o.restoreSummaryAtMs === undefined ? num(o.revertedAtMs) : num(o.restoreSummaryAtMs),
     lastError: str(o.lastError),
   };
 }
@@ -1448,6 +1462,13 @@ export const REVERT_DEADLINE_HOLD_MAX_MS = 2 * REVERT_VERIFY_AFTER_MS;
  * restore is rejected, does not read back, or the panel leaves the device list. A restore sent at
  * the window close is half an hour past its grace at the deadline: a night that goes to plan, and
  * a stuck restore, are decided as before.
+ *
+ * v1.189.0 (review) — and while an accepted restore has no reading (no reserve setting) and this
+ * process has read none since it started (`readSinceBoot` false): a process down from just after
+ * the 05:00 ACK to past the deadline comes back with the restore's readback grace spent and its
+ * first readback not yet fresh, and paged "could not be confirmed" a tick before the restore read
+ * back. The wait is for one reading, at most REVERT_DEADLINE_HOLD_MAX_MS: a readback that stays dark
+ * is paged then, and the on-peak stage never waits.
  */
 export function restoreAwaitingFirstChance(
   s: NightActuationState,
@@ -1455,11 +1476,13 @@ export function restoreAwaitingFirstChance(
   panelListed: boolean,
   /** The live reading, for an attempt whose confirmation was lost (attemptAdoptable); omitted: none. */
   liveReservePct: number | null = null,
+  /** This process has read a reserve setting since it started; omitted: it has (nothing waits on it). */
+  readSinceBoot = true,
 ): boolean {
   if (s.revertVerifiedAtMs != null) return false;
   if (s.revertDeadlineHeldAtMs != null && nowMs - s.revertDeadlineHeldAtMs >= REVERT_DEADLINE_HOLD_MAX_MS) return false;
   if (s.appliedAtMs == null) return panelListed && attemptAdoptable(s, liveReservePct);
-  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS;
+  if (s.revertedAtMs != null) return nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS || (!readSinceBoot && !isReserveSetting(liveReservePct));
   const dueAt = revertDueMs(s);
   const due = s.cancelled || (dueAt != null && nowMs >= dueAt);
   return panelListed && due && s.revertAttempts === 0 && isReserveSetting(s.priorReservePct);
@@ -1511,6 +1534,9 @@ export function decideRevertDeadline(
   /** The panel is in the device list (what restoreAwaitingFirstChance needs to know the restore is
    *  sent this tick); false, the default, never waits. */
   panelListed = false,
+  /** This process has read a reserve setting since it started (restoreAwaitingFirstChance); true,
+   *  the default, never waits for one. */
+  readSinceBoot = true,
 ): RevertDeadlineDecision {
   if (s.day == null || !revertOutstanding(s)) return { kind: 'none' };
   const stage = revertDeadlineStageDue(s, nowMs);
@@ -1520,7 +1546,7 @@ export function decideRevertDeadline(
   // as no reading.
   const reading = isReserveSetting(liveReservePct) ? liveReservePct : null;
   if (reading != null && !readsOwnRaise(s, reading)) return { kind: 'pass', stage, pct: reading };
-  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading)) return { kind: 'hold', stage };
+  if (stage === 'deadline' && restoreAwaitingFirstChance(s, nowMs, panelListed, reading, readSinceBoot)) return { kind: 'hold', stage };
   if (reading != null && reading !== s.targetPct) return { kind: 'page', stage, unknown: false, readsPct: reading };
   return { kind: 'page', stage, unknown: reading == null };
 }
@@ -1550,6 +1576,39 @@ export function revertRetryPending(s: NightActuationState, liveReservePct: numbe
   return s.applyAttemptedAtMs != null && s.revertedAtMs == null && readsTarget;
 }
 
+/** What a restore of ours that is not being sent waits on, when one will be sent once the panel
+ *  reports its reserve again (revertResendOnReport). */
+export type RevertResendOnReport = 'listed' | 'raise';
+
+/**
+ * v1.189.0 (review) — a restore of ours that is NOT being sent (revertRetryPending is false) and
+ * will be once the panel reports its reserve again, for what a revertDeadline page says of it.
+ * PURE. Only with no reserve setting read (nothing, or a reading that is not one: isReserveSetting)
+ * — a dark readback, or a panel missing from the device list; a known reading is the page's own
+ * words, and revertRetryPending says what follows it.
+ *  - 'listed': an applied write whose restore the cloud has not accepted, its prior a valid reserve,
+ *    with the panel missing from the device list: decideActuation sends it on the first tick the
+ *    panel is listed again, whatever it reads then;
+ *  - 'raise': an accepted restore whose readback re-issues are not spent (retryRevert re-issues it on
+ *    a reading of our target), or an attempt never confirmed (adopted on a reading of its target,
+ *    then restored): sent only if the panel reads the raise once it reports.
+ * null otherwise: one is being sent (revertRetryPending), the reading is known, the restore read
+ * back or the reserve settled as someone else's, or none will be sent. The page said "not
+ * re-sending" for a dark readback, and then the add-on re-sent the restore on the first readback of
+ * the raise.
+ */
+export function revertResendOnReport(s: NightActuationState, liveReservePct: number | null, panelListed: boolean): RevertResendOnReport | null {
+  if (s.revertVerifiedAtMs != null || s.foreignSettledAtMs != null) return null;
+  if (isReserveSetting(liveReservePct) || revertRetryPending(s, liveReservePct, panelListed)) return null;
+  if (s.appliedAtMs != null && s.revertedAtMs == null) return isReserveSetting(s.priorReservePct) ? 'listed' : null;
+  if (s.appliedAtMs != null) {
+    return s.targetPct != null && s.priorReservePct != null && s.targetPct !== s.priorReservePct
+      && !s.revertReadbackEscalated && s.revertRetries < REVERT_MAX_RETRIES ? 'raise' : null;
+  }
+  return s.applyAttemptedAtMs != null && s.revertedAtMs == null && s.attemptUnlandedAtMs == null
+    && s.targetPct != null && isReserveSetting(s.attemptBaselinePct) && s.targetPct !== s.attemptBaselinePct ? 'raise' : null;
+}
+
 /** The value an outstanding write restores: the prior read before the write, else (an attempt
  *  never confirmed) the attempt-time baseline; null when neither is a valid reserve. PURE. */
 export function restoreTargetPct(s: Pick<NightActuationState, 'priorReservePct' | 'attemptBaselinePct'>): number | null {
@@ -1560,9 +1619,42 @@ export function restoreTargetPct(s: Pick<NightActuationState, 'priorReservePct' 
 }
 
 /** What a revertDeadline push (and its log line) says of the restore: retried only while one will
- *  still be sent (revertRetryPending). PURE. */
-export function revertRetryText(retrying: boolean): string {
-  return retrying ? 'The add-on keeps retrying the restore.' : 'The add-on is not re-sending the restore.';
+ *  still be sent (revertRetryPending); with none being sent, what it waits on when one will be once
+ *  the panel reports again (revertResendOnReport: "the raised reserve" — on a partly granted night
+ *  any value within what it asked for is the raise); otherwise that it is not re-sent. PURE. */
+export function revertRetryText(retrying: boolean, onReport: RevertResendOnReport | null = null): string {
+  if (retrying) return 'The add-on keeps retrying the restore.';
+  if (onReport === 'listed') return 'The add-on sends the restore once the panel reports again.';
+  if (onReport === 'raise') return 'The add-on sends the restore if the panel still reads the raised reserve once it reports again.';
+  return 'The add-on is not re-sending the restore.';
+}
+
+/** What the summary of a restore says of it (restoreSummaryDue): read back ("restored to 16%"), or
+ *  sent and acknowledged with no readback yet. */
+export type RestoreSummaryKind = 'readBack' | 'acknowledged';
+
+/**
+ * v1.189.0 (review) — the summary of a restore is owed, and what it says. PURE. The morning summary
+ * (and a mid-day leg's own) went on the restore's cloud ACK saying "reserve restored to 16%", and a
+ * restore that then did not read back was paged critical half an hour later, both cards standing.
+ *  - 'readBack': the restore read back (revertVerifiedAtMs) — "restored", what the panel reported;
+ *  - 'acknowledged': its readback grace (REVERT_VERIFY_AFTER_MS from the ACK) ran with no readback —
+ *    the restore was SENT and acknowledged, and the panel has not read it back;
+ *  - null: no restore accepted yet, inside its grace with no readback, or the summary already went
+ *    (restoreSummaryAtMs). Once per record. Nor while the live reading is the restored value: that
+ *    is the readback, which decideActuation stamps on this same tick (revertVerified), and the
+ *    summary goes then saying "restored".
+ */
+export function restoreSummaryDue(
+  s: Pick<NightActuationState, 'day' | 'revertedAtMs' | 'revertVerifiedAtMs' | 'restoreSummaryAtMs' | 'priorReservePct'>,
+  nowMs: number,
+  /** The live reading this tick (null: none); omitted, none. */
+  liveReservePct: number | null = null,
+): RestoreSummaryKind | null {
+  if (s.day == null || s.revertedAtMs == null || s.restoreSummaryAtMs != null) return null;
+  if (s.revertVerifiedAtMs != null) return 'readBack';
+  if (liveReservePct != null && liveReservePct === s.priorReservePct) return null;
+  return nowMs - s.revertedAtMs >= REVERT_VERIFY_AFTER_MS ? 'acknowledged' : null;
 }
 
 /**

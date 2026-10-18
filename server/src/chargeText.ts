@@ -25,7 +25,7 @@
  */
 import type { NotifyMessage } from './notify.js';
 import type { ForceChargeNightOutcome } from './nightForceCharge.js';
-import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, revertRetryText } from './nightChargeActuator.js';
+import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, revertRetryText, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 
 const TZ = 'America/Phoenix';
 
@@ -637,6 +637,9 @@ export interface MiddaySummaryText {
   forceChargeOffReason: string | null;
   onPeak: { startMs: number; endMs: number | null } | null;
   ended: 'window' | 'cancelled' | 'gridLoss';
+  /** v1.189.0 (review) — the restore read back (default: "restored"), or was sent and acknowledged
+   *  with no readback yet (nightChargeActuator.restoreSummaryDue). */
+  restore?: RestoreSummaryKind;
 }
 
 /**
@@ -650,17 +653,25 @@ export function buildMiddayChargeSummary(o: MiddaySummaryText): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_actuation' };
   const label = `Charge (${phxParts(o.windowStartMs).weekdayShort} ${spanText(o.windowStartMs, o.windowEndMs)})`;
   const raised = `${o.targetPct ?? '—'}%`;
+  // v1.189.0 (review) — "restored" only once the restore read back; before it, sent and acknowledged.
+  const acked = o.restore === 'acknowledged';
+  const ackedText = '(the EcoFlow cloud acknowledged it), and the panel has not read it back yet';
+  const titleRestore = acked ? `reserve restore to ${o.restorePct}% sent` : `reserve restored to ${o.restorePct}%`;
   if (o.ended !== 'window') {
     const cancelled = o.ended === 'cancelled';
     return {
       ...base,
-      title: `${label}: ${cancelled ? 'cancelled' : 'stopped (grid lost)'} — reserve restored to ${o.restorePct}%`,
+      title: `${label}: ${cancelled ? 'cancelled' : 'stopped (grid lost)'} — ${titleRestore}`,
       body: `${label} ${cancelled ? 'was cancelled after the write' : 'stopped: the grid was lost during the window'}: `
-        + `the reserve, held at ${raised}, is restored to ${o.restorePct}% and nothing more is charged today.`,
+        + (acked
+          ? `the reserve was held at ${raised}; the restore to ${o.restorePct}% was sent ${ackedText}. Nothing more is charged today.`
+          : `the reserve, held at ${raised}, is restored to ${o.restorePct}% and nothing more is charged today.`),
     };
   }
   const before = o.onPeak != null && o.onPeak.endMs != null ? `, before the ${onPeakSpanText(o.onPeak.startMs, o.onPeak.endMs)} on-peak` : '';
-  const restored = `the reserve was restored to ${o.restorePct}% at ${phxClock(o.restoredAtMs)}${before}.`;
+  const restored = acked
+    ? `the restore to ${o.restorePct}% was sent at ${phxClock(o.restoredAtMs)}${before} ${ackedText}.`
+    : `the reserve was restored to ${o.restorePct}% at ${phxClock(o.restoredAtMs)}${before}.`;
   const held = isHeld(o.expectedKwh);
   const fc: ForceChargeNightOutcome = o.forceCharge ?? { kind: 'none', expectedLeg: false };
   const figureFits = fc.kind === 'none' ? fc.expectedLeg === false : fc.kind === 'ran' && fc.expectedLeg === true;
@@ -688,7 +699,7 @@ export function buildMiddayChargeSummary(o: MiddaySummaryText): NotifyMessage {
   }
   return {
     ...base,
-    title: `${label}: reserve restored to ${o.restorePct}%`,
+    title: `${label}: ${titleRestore}`,
     body: `${label} completed: ${what} Delivery vs plan scores in the ledger after the cycle ends.`,
   };
 }
@@ -710,6 +721,9 @@ export interface MiddayRevertDeadlineText {
   /** A restore of ours will still be sent (nightChargeActuator.revertRetryPending): the push says
    *  the add-on keeps retrying only then. */
   retrying: boolean;
+  /** v1.189.0 (review) — none is being sent and one will be once the panel reports again
+   *  (nightChargeActuator.revertResendOnReport): the push says what it waits on. */
+  resendOnReport?: RevertResendOnReport | null;
 }
 
 /**
@@ -799,6 +813,6 @@ export function buildMiddayRevertDeadline(o: MiddayRevertDeadlineText): NotifyMe
     title: o.unknown ? `Charge (${label}): reserve restore not confirmed` : `Charge (${label}): reserve still raised`,
     body: `The restore of the backup reserve to ${to} after the ${label} charge ${state}${peak} `
       + 'While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. '
-      + `Set the backup reserve to ${to}${o.forceChargeOffOpen ? ' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(o.retrying)}`,
+      + `Set the backup reserve to ${to}${o.forceChargeOffOpen ? ' and switch Charge Now off' : ''} in the EcoFlow app. ${revertRetryText(o.retrying, o.resendOnReport ?? null)}`,
   };
 }

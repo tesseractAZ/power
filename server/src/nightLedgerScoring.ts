@@ -230,7 +230,14 @@ export function minOverSpans(
  *  the PV empty, the panel held that long the load — heldLedgerVerdict over the window itself, the
  *  rule the row's own PV/load actuals are withheld by over [issue, +24 h]. The recorder keeps held
  *  readings out of `samples`, so the 90% coverage of a 5 h window already refuses such an hour;
- *  the verdict states the refusal on the rule the scorer uses, not on the window's length. */
+ *  the verdict states the refusal on the rule the scorer uses, not on the window's length.
+ *
+ *  v1.189.0 (review) — and the PV null on a row whose PV verdict is set aside (`pvSetAside`: the
+ *  row's own pvVerdictSetAside / knownFleetMismatchReason, NightLedgerColumns.pvSetAside). The
+ *  shadow's window P50 comes from the same evening band as the row's, so a band built on a solar
+ *  model fitted on other Cores than the actuals says nothing about forecast skill over the window
+ *  either: the measured PV would be graded against it. The load is not a Core-set figure and is
+ *  kept. */
 export function shadowWindowActuals(i: {
   row: Partial<Pick<NightLedgerRow, 'shadow_cost_window_start_ms' | 'shadow_cost_window_end_ms'>>;
   nowMs: number;
@@ -240,6 +247,9 @@ export function shadowWindowActuals(i: {
   /** The held spans over [startMs, endMs] (recorder.heldSpans) and the house panel. Absent: no
    *  side is held. */
   held?: { spans: (startMs: number, endMs: number) => ReadonlyArray<LedgerHeldSpan>; panelSn: string };
+  /** The row's PV set-aside reason (NightLedgerColumns.pvSetAside); null or absent: the band is
+   *  evidence and the PV is measured. */
+  pvSetAside?: string | null;
 }): { pvKwh: number | null; loadKwh: number | null } | null {
   const a = i.row.shadow_cost_window_start_ms;
   const b = i.row.shadow_cost_window_end_ms;
@@ -259,6 +269,7 @@ export function shadowWindowActuals(i: {
     pvKwh = worst >= LEDGER_SPAN_MIN_COVERAGE ? round2(pvEnergyWh / 1000) : null;
     if (held.pv) pvKwh = null;
   }
+  if (i.pvSetAside != null) pvKwh = null;
   const load = i.queryLoad(a, b);
   const loadKwh = !held.load && load.length > 0 && coverageFrac(load, a, b) >= LEDGER_SPAN_MIN_COVERAGE
     ? round2(integrateWh(load, false) / 1000) : null;

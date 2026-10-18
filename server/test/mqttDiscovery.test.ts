@@ -734,3 +734,40 @@ test('★★★ mqtt-discovery: every mid-day figure carries a basis attribute; 
   assert.equal('json_attributes_template' in rec, false);
   assert.equal(middayChargeStateFields(null).midday_charge_recommended, false);
 });
+
+/**
+ * v1.189.0 (review) — a null the v1.189.0 text sensors publish reads unknown in Home Assistant,
+ * with no warning. Jinja renders a JSON null as the string "None". HA's MQTT sensor shows a text
+ * sensor's rendered value as its state (the literal "None", not unknown), and a device_class
+ * 'timestamp' sensor parses it as a date and logs "Invalid state message" with the whole state
+ * payload when it cannot: every 30 s publish, on every weekend, every weekday after 15:00 and all
+ * summer, the mid-day window bounds are null. Each of these templates renders a null as "unknown",
+ * the null pattern ecoflow_backup_reserve_enabled set, and no sensor is a timestamp (or a date)
+ * sensor: the window bounds carry their ISO instant as text.
+ */
+test('★★★ mqtt-discovery: the v1.189.0 text sensors render a null as "unknown", and no sensor is a timestamp sensor', () => {
+  const nullable: Array<[string, string]> = [
+    ['ecoflow_midday_charge_window_start_at', 'midday_charge_window_start_at'],
+    ['ecoflow_midday_charge_window_end_at', 'midday_charge_window_end_at'],
+    ['ecoflow_midday_charge_refresh', 'midday_charge_refresh'],
+    ['ecoflow_night_charge_role', 'night_charge_role'],
+  ];
+  for (const [id, key] of nullable) {
+    const s = SENSORS.find((x) => x.unique_id === id);
+    assert.ok(s, id);
+    assert.equal(s!.value_template, `{{ "unknown" if value_json.${key} is none else value_json.${key} }}`, `${id}: a null reads unknown`);
+    assert.equal(s!.device_class, undefined, `${id}: a text sensor`);
+    assert.equal(s!.state_class, undefined, `${id}: not numeric`);
+  }
+  // The established null pattern these follow.
+  assert.match(SENSORS.find((x) => x.unique_id === 'ecoflow_backup_reserve_enabled')!.value_template, /^\{\{ "unknown" if value_json\.backup_reserve_enabled is none else /);
+  // Every one of them is null with no current mid-day leg or plan.
+  const empty = middayChargeStateFields(null);
+  assert.equal(empty.midday_charge_window_start_at, null);
+  assert.equal(empty.midday_charge_window_end_at, null);
+  assert.equal(empty.midday_charge_refresh, null);
+  // HA parses a timestamp or date sensor's state and warns on anything else, "None" and "unknown"
+  // alike: no sensor here may be one unless its value can never be null.
+  const dated = SENSORS.filter((x) => x.device_class === 'timestamp' || x.device_class === 'date').map((x) => x.unique_id);
+  assert.deepEqual(dated, []);
+});

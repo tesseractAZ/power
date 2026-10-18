@@ -226,6 +226,41 @@ test('★★★ shadowWindowActuals: the home Cores\' PV and the panel\'s load o
   assert.deepEqual(shadowWindowActuals({ row, nowMs: b + H, homeSns: [], queryPv: () => flat(1), queryLoad: () => flat(3000) }), { pvKwh: null, loadKwh: 15 });
 });
 
+/**
+ * v1.189.0 (review) — the shadow's measured window PV is forecast-skill evidence only where the
+ * row's own PV verdict is: the shadow's window P50 comes from the same evening band. A band built
+ * on a solar model fitted on other Cores than the actuals (pvVerdictSetAside: the 2026-09-27
+ * partial-device-map class, or a roster change between plan and capture) sets the row's verdict
+ * aside — and the window's three-Core sum was still written beside a one-Core P50 as a graded pair.
+ */
+test('★★★ shadowWindowActuals: no measured PV on a row whose PV verdict is set aside; the load is kept', async () => {
+  const { pvVerdictSetAside } = await import('../src/nightLedgerScoring.js');
+  const a = phx(10, 15, 10);
+  const b = phx(10, 15, 15);
+  const flat = (w: number) => {
+    const out: Array<{ ts: number; value: number }> = [];
+    for (let t = a; t <= b; t += 5 * 60_000) out.push({ ts: t, value: w });
+    return out;
+  };
+  const row = { shadow_cost_window_start_ms: a, shadow_cost_window_end_ms: b };
+  const homeSns = ['A', 'B', 'C'];
+  const base = { row, nowMs: b + H, homeSns, queryPv: () => flat(2000), queryLoad: () => flat(3000) };
+  // The band was fitted on one Core, the actuals sum three: the row's verdict is set aside.
+  const aside = pvVerdictSetAside('A', homeSns);
+  assert.ok(aside != null && /set aside/.test(aside));
+  assert.deepEqual(shadowWindowActuals({ ...base, pvSetAside: aside }), { pvKwh: null, loadKwh: 15 });
+  // The same Cores: the verdict stands, and so does the measured PV.
+  assert.equal(pvVerdictSetAside('A,B,C', homeSns), null);
+  assert.deepEqual(shadowWindowActuals({ ...base, pvSetAside: pvVerdictSetAside('A,B,C', homeSns) }), { pvKwh: 30, loadKwh: 15 });
+  assert.deepEqual(shadowWindowActuals(base), { pvKwh: 30, loadKwh: 15 }, 'no set-aside given: measured');
+  // The scorer passes the row's own set-aside, the one written to pv_verdict_set_aside.
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const score = idx.slice(idx.indexOf('function scoreNightRow('), idx.indexOf('The single ~21:30 America/Phoenix evening job'));
+  const call = score.slice(score.indexOf('const shadowActuals = shadowWindowActuals({'), score.indexOf('if (shadowActuals != null) {'));
+  assert.ok(call.includes('    pvSetAside: cols.pvSetAside,\n'), call);
+  assert.ok(score.includes('    pv_verdict_set_aside: cols.pvSetAside,\n'));
+});
+
 /* ══ the learners (plan §3.3) ══════════════════════════════════════════════ */
 
 test('★★★ the buy de-bias reads one stratum per window kind; a NULL window kind is overnight; the refreshed worst case is the planned figure', () => {

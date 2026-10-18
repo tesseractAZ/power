@@ -234,6 +234,7 @@ import {
   decideRevertDeadline, revertDeadlineSpoken, restoreTargetPct, revertDeadlineMs, reserveRestoreNote,
   chargeWriteHold, setChargeWriteHold, FOREIGN_RESERVE_SETTLE_MS,
   attemptProvedUnlanded, applyProvedUnlanded, revertRetryPending, revertRetryText, REVERT_DEADLINE_HOLD_MAX_MS,
+  revertResendOnReport, type RevertResendOnReport, isReserveSetting, restoreSummaryDue, type RestoreSummaryKind,
   type RevertDeadlineDecision,
 } from './nightChargeActuator.js';
 import { nextOnPeakStartMs, onPeakEndMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, planDateOwningCycle, type ChargeLegRole } from './chargeWindows.js';
@@ -4568,6 +4569,8 @@ function scoreNightRow(
     queryPv: (sn, a, b) => recorder.query(sn, 'pv_total', a, b),
     queryLoad: (a, b) => recorder.query(shp2Sn, 'panel_load', a, b),
     held: { spans: (a, b) => recorder.heldSpans?.(a, b) ?? [], panelSn: shp2Sn },
+    // v1.189.0 (review) — the shadow's window P50 is from the row's own band: set aside with it.
+    pvSetAside: cols.pvSetAside,
   });
   if (shadowActuals != null) {
     recorder.recordNightOutcome(yDate, { shadow_window_pv_kwh: shadowActuals.pvKwh, shadow_window_load_kwh: shadowActuals.loadKwh });
@@ -6161,6 +6164,8 @@ function pageRevertDeadline(
   nowMs: number,
   /** A restore of ours will still be sent (revertRetryPending): what the push and the log say of it. */
   retrying: boolean,
+  /** None is being sent and one will be once the panel reports again (revertResendOnReport). */
+  resendOnReport: RevertResendOnReport | null,
 ): void {
   persistNightActuation({
     ...state,
@@ -6185,14 +6190,14 @@ function pageRevertDeadline(
     + (d.stage === 'onPeak'
       ? `, and on-peak pricing has started (${new Date(state.nextOnPeakStartMs!).toISOString()})`
       : ` by its deadline (${deadlineMs != null ? new Date(deadlineMs).toISOString() : '?'})`)
-    + `. Paging: critical, spoken and pushed. ${revertRetryText(retrying)}`,
+    + `. Paging: critical, spoken and pushed. ${revertRetryText(retrying, resendOnReport)}`,
   );
   // R5 — a winter mid-day leg is paged in the mid-day words (chargeText.ts: the window, the on-peak
   // start, and Charge Now when its OFF has not read back); nothing arms one before the mid-day
   // switch. The overnight leg's page is unchanged.
   // (The record is the active leg, spread from nightActuationMem: it carries its window kind.)
   const midday = isMiddayLeg(state as Partial<ChargeLegState>)
-    ? middayRevertDeadlineFromLeg(state, { stage: d.stage, unknown: d.unknown, targetPct, restorePct, nowMs, retrying }) : null;
+    ? middayRevertDeadlineFromLeg(state, { stage: d.stage, unknown: d.unknown, targetPct, restorePct, nowMs, retrying, resendOnReport }) : null;
   const spoken = midday != null ? middayRevertDeadlineSpoken(midday) : revertDeadlineSpoken({ stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock, onPeakDay });
   void (async () => {
     try {
@@ -6205,13 +6210,62 @@ function pageRevertDeadline(
     }
     try {
       await sendNotification(loadNotifyConfig(), midday != null ? buildMiddayRevertDeadline(midday) : buildNightChargeRevertDeadline({
-        day: state.day, stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock, onPeakDay, retrying,
+        day: state.day, stage: d.stage, unknown: d.unknown, targetPct, restorePct, onPeakClock, onPeakDay, retrying, resendOnReport,
       }));
     } catch (e: any) {
       app.log.error(`night-charge: revertDeadline push FAILED — ${e?.message ?? e}.`);
     }
   })();
 }
+
+/**
+ * v1.189.0 (review) — the summary of a restore (nightChargeActuator.restoreSummaryDue): the morning
+ * summary, or a winter mid-day leg's own. It went on the restore's cloud ACK saying "reserve restored
+ * to 16%", and a restore that then did not read back was paged critical half an hour later, both
+ * cards standing. It now goes once: when the restore reads back ('readBack': restored, the words
+ * before), or when its readback grace runs with none ('acknowledged': the restore was sent and
+ * acknowledged, and the panel has not read it back). Stamped before it is sent, so a restart never
+ * sends it twice. NOT awaited (v1.187.0 review): an info push (5 s headers + 10 s body per target)
+ * must never hold the tick, and with it any force-charge step still to run.
+ * v1.187.22 — the armed day's EXPECTED figure, or none: state.buyKwh is the worst case. What the
+ * force-charge did comes from this record (forceChargeNightOutcome: ran, switched ON but unconfirmed
+ * or failed, never started); a cancel or a grid-loss abort ended the night early and is said so,
+ * with no figure.
+ */
+function sendRestoreSummary(state: ChargeLegState, restore: RestoreSummaryKind, nowMs: number): void {
+  persistNightActuation({ ...state, restoreSummaryAtMs: nowMs });
+  const restorePct = state.priorReservePct;
+  if (restorePct == null || state.revertedAtMs == null) return;
+  const endedBy = state.revertGridLossAbort ? 'gridLoss' as const : state.cancelled ? 'cancelled' as const : 'window' as const;
+  // R5 — a winter mid-day leg gets the mid-day summary (chargeText.ts, the window named from its
+  // record); nothing arms one before the mid-day switch. The overnight leg's summary is the other branch.
+  if (isMiddayLeg(state)) {
+    const onPeakAt = state.nextOnPeakStartMs ?? null;
+    void sendNotification(loadNotifyConfig(), buildMiddayChargeSummary(middaySummaryFromLeg(state, {
+      restorePct, restoredAtMs: state.revertedAtMs, expectedKwh: armedExpectedBuyKwh(state.day),
+      forceCharge: forceChargeNightOutcome(state, forceChargeOn(state.leg)),
+      onPeak: onPeakAt != null ? { startMs: onPeakAt, endMs: onPeakEndMs(apsREvModelFromEnv(), onPeakAt) } : null,
+      ended: endedBy, restore,
+    }))).catch((e: any) => {
+      app.log.debug(`night-charge: mid-day summary notify failed (${e?.message ?? e})`);
+    });
+  } else {
+    void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({
+      day: state.day, targetPct: state.targetPct, restorePct,
+      expectedKwh: armedExpectedBuyKwh(state.day),
+      forceCharge: forceChargeNightOutcome(state, forceChargeOn()),
+      ended: endedBy, restore,
+    })).catch((e: any) => {
+      app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
+    });
+  }
+  app.log.info(`night-charge: summary for ${state.day} sent — the restore to ${restorePct}% ${restore === 'readBack' ? 'read back' : `has not read back ${Math.round((nowMs - state.revertedAtMs) / 60_000)} min after it was acknowledged`}.`);
+}
+
+/** v1.189.0 (review) — this process has read a reserve setting from a fresh panel readback since it
+ *  started (runNightActuationTickInner): what the revertDeadline's deadline stage waits on after a
+ *  restart across it (restoreAwaitingFirstChance). */
+let nightReserveReadSinceBoot = false;
 
 async function runNightActuationTickInner(): Promise<void> {
   let state = nightActuationMem;
@@ -6240,6 +6294,10 @@ async function runNightActuationTickInner(): Promise<void> {
     Math.abs((remainWh / fullWh) * 100 - socNowPct) <= 8;
   const currentReservePct: number | null =
     typeof sp?.backupReserveSoc === 'number' ? sp.backupReserveSoc : null;
+  // v1.189.0 (review) — the first reserve setting this process reads: until it, an accepted
+  // restore's deadline stage waits (bounded) instead of paging an unknown reading
+  // (decideRevertDeadline's readSinceBoot).
+  if (isReserveSetting(currentReservePct)) nightReserveReadSinceBoot = true;
 
   // An attempted write the cloud never confirmed, still reading its attempt-time baseline once its
   // apply ladder is over, never landed (attemptProvedUnlanded): stamped, so no later missing
@@ -6265,7 +6323,7 @@ async function runNightActuationTickInner(): Promise<void> {
   // Each stage is decided once, at its moment: a page, or a pass on a reading that is not ours.
   // The deadline stage waits, a bounded while, for a restore that has not had its chance (a
   // process down across the deadline: the restore is sent by decideActuation below on this tick).
-  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null);
+  const revertPage = decideRevertDeadline(state, nowMs, currentReservePct, shp2 != null, nightReserveReadSinceBoot);
   if (revertPage.kind === 'hold') {
     if (state.revertDeadlineHeldAtMs == null) {
       persistNightActuation({ ...state, revertDeadlineHeldAtMs: nowMs });
@@ -6274,7 +6332,8 @@ async function runNightActuationTickInner(): Promise<void> {
       if (state.day == null) return;
     }
   } else if (revertPage.kind === 'page') {
-    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null));
+    pageRevertDeadline(state, revertPage, nowMs, revertRetryPending(state, currentReservePct, shp2 != null),
+      revertResendOnReport(state, currentReservePct, shp2 != null));
     state = nightActuationMem; // the stamp is on the record every write below spreads
     if (state.day == null) return;
   } else if (revertPage.kind === 'pass') {
@@ -6282,6 +6341,15 @@ async function runNightActuationTickInner(): Promise<void> {
       ? { ...state, revertDeadlineOnPeakPassedAtMs: nowMs }
       : { ...state, revertDeadlinePassedAtMs: nowMs });
     app.log.info(`night-charge: revertDeadline — ${revertPage.stage === 'onPeak' ? 'the on-peak start' : 'the deadline'} for ${state.day} passed without a page: the panel reads ${revertPage.pct}%, not the ${state.targetPct}% set${revertPage.pct === restoreTargetPct(state) ? ' (the restore has read back)' : ''}.`);
+    state = nightActuationMem;
+    if (state.day == null) return;
+  }
+
+  // v1.189.0 (review) — the summary of the restore, once it is owed (restoreSummaryDue): its readback
+  // grace ran with no readback (a restore that read back sends it on its revertVerified tick).
+  const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct);
+  if (summaryOwed != null) {
+    sendRestoreSummary(state, summaryOwed, nowMs);
     state = nightActuationMem;
     if (state.day == null) return;
   }
@@ -6441,6 +6509,10 @@ async function runNightActuationTickInner(): Promise<void> {
     // closed, not merely cloud-ACK'd. One line, stamped once.
     persistNightActuation({ ...state, revertVerifiedAtMs: nowMs, lastError: null });
     app.log.info(`night-charge: revert VERIFIED by device readback — backupReserveSoc reads ${state.priorReservePct}% for ${state.day}.`);
+    // v1.189.0 (review) — the summary says "restored" now that the panel reported it (on this tick:
+    // a resolved leg may hand over to the next before the next tick's step).
+    const owed = restoreSummaryDue(nightActuationMem, nowMs);
+    if (owed != null) sendRestoreSummary(nightActuationMem, owed, nowMs);
     return;
   }
 
@@ -6504,7 +6576,9 @@ async function runNightActuationTickInner(): Promise<void> {
     sn: shp2.sn, targetPct: action.restorePct, source: { ua: 'night-charge-supervised-revert' },
   });
   if (r.outcome === 'success') {
-    persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null });
+    // v1.189.0 (review) — a grid-loss abort is kept with the restore: the summary goes after the
+    // ACK (restoreSummaryDue) and says what ended the night.
+    persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null, revertGridLossAbort: action.gridLossAbort === true });
     // v1.187.0 (review) — where the hold ended, for the delivered-energy span
     // (nightLedgerScoring.deliveredHoldSpan): the restore lands on the first tick after
     // the close, and the pack charges until it does.
@@ -6513,36 +6587,8 @@ async function runNightActuationTickInner(): Promise<void> {
     app.log.info(
       `night-charge: reserve REVERTED to ${action.restorePct}% for ${state.day}${state.cancelled ? ' (owner cancel)' : ''}.`,
     );
-    // v1.187.0 (review) — NOT awaited: an info push (5 s headers + 10 s body per target)
-    // must never hold the tick, and with it any force-charge step still to run.
-    // v1.187.22 — the armed day's EXPECTED figure, or none: state.buyKwh is the worst case.
-    // What the force-charge did comes from this record (forceChargeNightOutcome: ran, switched
-    // ON but unconfirmed or failed, never started); a cancel or a grid-loss abort ended the night
-    // early and is said so, with no figure.
-    // R5 — a winter mid-day leg gets the mid-day summary (chargeText.ts, the window named from its
-    // record); nothing arms one before the mid-day switch. The overnight leg's summary is below,
-    // unchanged.
-    if (isMiddayLeg(state)) {
-      const onPeakAt = state.nextOnPeakStartMs ?? null;
-      const endedBy = action.gridLossAbort ? 'gridLoss' as const : state.cancelled ? 'cancelled' as const : 'window' as const;
-      void sendNotification(loadNotifyConfig(), buildMiddayChargeSummary(middaySummaryFromLeg(state, {
-        restorePct: action.restorePct, restoredAtMs: nowMs, expectedKwh: armedExpectedBuyKwh(state.day),
-        forceCharge: forceChargeNightOutcome(state, forceChargeOn(state.leg)),
-        onPeak: onPeakAt != null ? { startMs: onPeakAt, endMs: onPeakEndMs(apsREvModelFromEnv(), onPeakAt) } : null,
-        ended: endedBy,
-      }))).catch((e: any) => {
-        app.log.debug(`night-charge: mid-day summary notify failed (${e?.message ?? e})`);
-      });
-      return;
-    }
-    void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({
-      day: state.day, targetPct: state.targetPct, restorePct: action.restorePct,
-      expectedKwh: armedExpectedBuyKwh(state.day),
-      forceCharge: forceChargeNightOutcome(state, forceChargeOn()),
-      ended: action.gridLossAbort ? 'gridLoss' : state.cancelled ? 'cancelled' : 'window',
-    })).catch((e: any) => {
-      app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
-    });
+    // v1.189.0 (review) — the summary waits for the restore's readback (sendRestoreSummary): it went
+    // here, on the cloud ACK, saying "reserve restored".
     return;
   }
   if (!r.rateLimited) {
