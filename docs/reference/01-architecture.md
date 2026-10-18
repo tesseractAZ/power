@@ -691,8 +691,8 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   deploy made while every home device was held finds its newest sample hours earlier. An older
   marker, or none, is not graceful.
 - **Held-evaluation marker.** Behind the gate a hold writes nothing, so the newest home sample
-  can predate the stop by the whole hold. While no evaluation has a recordable home reading and
-  the gate holds a home device, the recorder writes the evaluation's time to
+  can predate the stop by the whole hold. When an evaluation has no recordable home reading and
+  the gate held a home device in it, the recorder writes that evaluation's time to
   `/data/.held-evaluation`, at most once a minute. The restart probe starts the dark window at
   that time when it is later than the newest home sample: up to it the recorder was evaluating
   the held devices, as the restated rows of earlier releases showed. A crash 19 min into a panel
