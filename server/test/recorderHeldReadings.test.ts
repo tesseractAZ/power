@@ -69,6 +69,7 @@ const flush = () => new Promise<void>((r) => setImmediate(r));
 function resetDb() {
   if (existsSync(GAPS_PATH)) unlinkSync(GAPS_PATH);
   if (existsSync(join(tmp, '.clean-shutdown'))) unlinkSync(join(tmp, '.clean-shutdown'));
+  if (existsSync(join(tmp, '.held-evaluation'))) unlinkSync(join(tmp, '.held-evaluation'));
   if (!existsSync(DB_PATH)) return;
   const db = new DatabaseSync(DB_PATH);
   try {
@@ -451,6 +452,64 @@ test('★★ a deploy made 2 h into a fleet-wide hold is an add-on restart, not 
     assert.equal(g[0].startMs, anchor);
     assert.equal(g[0].graceful, true, '★★ the two-sided v1.14.0 test read this as "the Pi lost power"');
   } finally { rec.close(); }
+});
+
+/** The panel alone (every Core dark, none projected): 11 min live, then `quiet` with the recorder
+ *  either evaluating the held panel every minute (a quota stall: listed, its quota failing) or
+ *  receiving nothing at all (the internet down: no list, no MQTT); then a stop and a boot 70 s later. */
+async function panelHoldThenRestart(t: TestContext, quiet: 'stall' | 'silent', graceful: boolean, olderHeldEvalMs = 0) {
+  resetDb();
+  const { c, advance } = clocks(t, phx(2026, 10, 17, 20, 0));
+  const store = new SnapshotStore();
+  store.setClock(() => Date.now());
+  store.setLogger(() => {});
+  const rec = createRecorder(store, () => {});
+  let lastFresh = 0;
+  try {
+    for (let i = 0; i < 11; i++) {
+      store.setDeviceList([listItem(PANEL, true)]);
+      store.setDeviceQuota(PANEL, panelQuota(i));
+      await flush();
+      lastFresh = c.wall;
+      advance(MIN);
+    }
+    for (let i = 0; i < 19; i++) {
+      if (quiet === 'stall') {
+        store.setDeviceList([listItem(PANEL, true)]);
+        store.setDeviceError(PANEL, 'getQuotaAll ETIMEDOUT');
+        await flush();
+      }
+      advance(MIN);
+    }
+    assert.equal(countRows(PANEL, lastFresh, c.wall), 0, 'precondition: nothing written after the last fresh reading');
+  } finally { rec.close(); }
+  if (!graceful) unlinkSync(join(tmp, '.clean-shutdown')); // a crash leaves no marker
+  // A held-evaluation marker left by an earlier hold, older than the newest home row.
+  if (olderHeldEvalMs > 0) writeFileSync(join(tmp, '.held-evaluation'), String(lastFresh - olderHeldEvalMs));
+  advance(70_000);
+  const rec2 = createRecorder(new SnapshotStore(), () => {});
+  try {
+    return { lastFresh, bootMs: c.wall, restart: rec2.telemetryGaps().filter((g) => g.restartSpanning) };
+  } finally { rec2.close(); }
+}
+
+test('★★★ a crash 19 min into a panel quota stall, every Core dark, is a 70 s stop: not "alarm was dark 20 min" from the panel\'s last fresh row', async (t) => {
+  const { restart } = await panelHoldThenRestart(t, 'stall', false);
+  assert.deepEqual(restart, [],
+    '★★★ the recorder evaluated the held panel up to the stop; v1.188.0 restated it, so its newest row was minutes old and no restart record was filed');
+});
+
+test('★★ a graceful restart inside the same stall files nothing either', async (t) => {
+  const { restart } = await panelHoldThenRestart(t, 'stall', true);
+  assert.deepEqual(restart, [], '★★ not "Add-on restart — alarm was dark 20 min"');
+});
+
+test('★★ with nothing reaching the recorder (the internet down) the restart record still runs from the last row', async (t) => {
+  const { restart, lastFresh, bootMs } = await panelHoldThenRestart(t, 'silent', false, 30 * MIN);
+  assert.equal(restart.length, 1, JSON.stringify(restart));
+  assert.equal(restart[0].startMs, lastFresh, '★★ no evaluation held anything: the dark window starts at the newest home row, not at an older hold\'s marker');
+  assert.equal(restart[0].endMs, bootMs);
+  assert.ok(!restart[0].graceful, 'a crash');
 });
 
 test('★ a gate span shorter than an hour is not logged', async (t) => {

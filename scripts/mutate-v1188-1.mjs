@@ -280,6 +280,12 @@
  *   U-i     a later start re-opens the gate span (a replay after a restart is never logged)
  *   U-ii    an earlier start continues the open span (another hold's start is lost)
  *
+ * Integration round 3 (a restart inside a panel hold, every Core dark):
+ *   R-iii   the restart probe ignores the held-evaluation marker (a 70 s crash is "dark 20 min")
+ *   R-iv    the marker wins when it is older than the newest home row
+ *   R-v     the marker is written once, not kept current through the hold
+ *   R-vi    the marker is never written
+ *
  *   node scripts/mutate-v1188-1.mjs
  */
 import { resolve, dirname } from 'node:path';
@@ -392,8 +398,8 @@ const MUTANTS = [
   {
     id: 'R-ii. the restart probe never reads the marker',
     file: REC,
-    find: '    const graceful = cleanShutdownWasGraceful(markerTs, maxTs);',
-    to: '    const graceful = false && cleanShutdownWasGraceful(markerTs, maxTs); /* MUTANT */',
+    find: '    const graceful = cleanShutdownWasGraceful(markerTs, anchorTs);',
+    to: '    const graceful = false && cleanShutdownWasGraceful(markerTs, anchorTs); /* MUTANT */',
     why: 'Every deliberate restart reads as a power loss.',
   },
   {
@@ -2070,6 +2076,35 @@ const MUTANTS = [
     find: '      if (g && (h.sinceMs < g.startMs || g.reason !== reason)) {',
     to: '      if (g && g.reason !== reason) { /* MUTANT */',
     why: 'A hold found to have started earlier (a shadow onset) is folded into the open span, which keeps the later start: the earlier held time is never logged.',
+  },
+  // ── integration round 3: a restart inside a panel hold, every Core dark ──
+  {
+    id: 'R-iii. ★★★ the restart probe ignores the held-evaluation marker',
+    file: REC,
+    find: '    const anchorTs = maxTs != null && heldEvalTs != null && heldEvalTs > maxTs ? heldEvalTs : maxTs;',
+    to: '    const anchorTs = maxTs; /* MUTANT */',
+    why: 'A crash 19 min into a panel quota stall is filed from the panel\'s last fresh row: "System outage — alarm was dark 20 min ... the Pi lost power" for a 70 s stop.',
+  },
+  {
+    id: 'R-iv. ★★ the marker wins when it is older than the newest home row',
+    file: REC,
+    find: '    const anchorTs = maxTs != null && heldEvalTs != null && heldEvalTs > maxTs ? heldEvalTs : maxTs;',
+    to: '    const anchorTs = maxTs != null && heldEvalTs != null ? heldEvalTs : maxTs; /* MUTANT */',
+    why: 'A hold that ended long before a later outage moves that outage\'s start back to the hold: the record overstates the dark time.',
+  },
+  {
+    id: 'R-v. ★★ the marker is written once, not kept current through the hold',
+    file: REC,
+    find: '      if (heldHome && nowMs - heldEvalWrittenAtMs >= HELD_GATE_PERSIST_EVERY_MS) {',
+    to: '      if (heldHome && heldEvalWrittenAtMs === 0) { /* MUTANT */',
+    why: 'The dark window starts at the hold\'s first minutes: the 70 s crash is filed as 17 min dark.',
+  },
+  {
+    id: 'R-vi. the marker is never written',
+    file: REC,
+    find: '        heldHome = true;\n',
+    to: '        /* MUTANT */\n',
+    why: 'As R-iii.',
   },
 ];
 

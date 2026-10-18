@@ -17,7 +17,7 @@ import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './b
 // v1.188.1 — held readings: the write gate, the held-span log and the exclusion of held rows.
 import {
   createHeldSamples, projectionRecordable, heldSinceMs, HELD_SCAN_EVERY_MS, RECORD_FRESH_MS, HELD_RETURN_GAP_MS,
-  createHeldGapLog, HELD_ENERGY_BRIDGE_MAX_MS,
+  createHeldGapLog, HELD_ENERGY_BRIDGE_MAX_MS, HELD_GATE_PERSIST_EVERY_MS,
   type HeldSpan, type HeldScanSummary,
 } from './heldSamples.js';
 export { projectionRecordable, RECORD_FRESH_MS } from './heldSamples.js';
@@ -292,8 +292,9 @@ export function resolveDeferredRestartGap(inputs: {
 
 /**
  * v1.188.1 — was the stop before this boot deliberate? PURE. `markerTs` is the clean-shutdown
- * marker close() wrote (null when the last exit was not clean); `maxTs` the newest persisted
- * home sample (the restart gap's start).
+ * marker close() wrote (null when the last exit was not clean); `maxTs` the restart gap's start: the
+ * newest persisted home sample, or the last evaluation that held the home devices when that is
+ * later (the held-evaluation marker, createRecorder).
  *
  * v1.14.0 required the marker within one heartbeat of that sample, on EITHER side, which assumed
  * the newest sample was always within a heartbeat of the stop. That held only because the
@@ -1444,6 +1445,22 @@ export function createRecorder(
     } catch { return null; }
   }
   let pendingRestartGraceful = false;
+  // v1.188.1 (integration) — the last evaluation in which the gate held a home device's reading with
+  // no recordable home reading beside it (recordSnapshot), kept across a stop for the restart probe.
+  // Before the gate a held reading was restated every heartbeat, so the newest home row was within
+  // minutes of any stop. Behind it a hold writes nothing: a crash 19 min into a panel quota stall,
+  // every Core dark, was filed from the panel's last fresh row ("System outage — alarm was dark
+  // 20 min", a power outage in the count) for a 70 s stop the recorder had evaluated up to. Written at
+  // most once a minute while such a silence lasts. Never deleted: it proves the process was up at that
+  // instant, and the probe takes it only when it is later than the newest home row.
+  const heldEvalPath = resolve(dirname(dbPath), '.held-evaluation');
+  let heldEvalWrittenAtMs = 0;
+  function readHeldEvalMarker(): number | null {
+    try {
+      const ts = Number(readFileSync(heldEvalPath, 'utf8').trim());
+      return Number.isFinite(ts) && ts > 0 ? ts : null;
+    } catch { return null; }
+  }
   const telemetryGapsLog: TelemetryGap[] = (() => {
     try {
       const arr = JSON.parse(readFileSync(gapsPath, 'utf8'));
@@ -1785,11 +1802,16 @@ export function createRecorder(
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
     const maxTs = row?.maxTs == null ? null : Number(row.maxTs);
     bootFleetAnchorMs = maxTs;
+    // v1.188.1 (integration) — the dark window starts at the last evaluation that held the home
+    // devices when that is later than the newest home row (heldEvalPath): up to it the recorder was
+    // evaluating them, as v1.188.0's restated rows showed.
+    const heldEvalTs = readHeldEvalMarker();
+    const anchorTs = maxTs != null && heldEvalTs != null && heldEvalTs > maxTs ? heldEvalTs : maxTs;
     // v1.14.0 — a clean-shutdown marker means the preceding stop was deliberate
     // (deploy/update), not a power loss. v1.188.1 — one-sided: see cleanShutdownWasGraceful.
     const markerTs = readCleanShutdownMarker();
-    const graceful = cleanShutdownWasGraceful(markerTs, maxTs);
-    const decision = classifyRestartGap(maxTs, Date.now(), RESTART_GAP_FLOOR_MS);
+    const graceful = cleanShutdownWasGraceful(markerTs, anchorTs);
+    const decision = classifyRestartGap(anchorTs, Date.now(), RESTART_GAP_FLOOR_MS);
     if (decision.kind === 'record') {
       recordTelemetryGap(decision.startMs, decision.endMs, { restartSpanning: true, graceful });
     } else if (decision.kind === 'defer') {
@@ -2283,9 +2305,18 @@ export function createRecorder(
     } else {
       silenceEvalGapMs = Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs);
       silenceEvalAtMs = nowMs;
+      let heldHome = false;
       for (const [sn, h] of held) {
         if (SYNTHETIC_SNS.has(sn) || isBenchSpareSn(sn)) continue;
         silenceHeld.set(sn, (silenceHeld.get(sn) ?? false) || h.shadow);
+        heldHome = true;
+      }
+      // v1.188.1 (integration) — for the restart probe (heldEvalPath).
+      if (heldHome && nowMs - heldEvalWrittenAtMs >= HELD_GATE_PERSIST_EVERY_MS) {
+        try {
+          writeFileSync(heldEvalPath, String(nowMs), { mode: 0o644 });
+          heldEvalWrittenAtMs = nowMs;
+        } catch { /* advisory: the probe falls back to the newest home row */ }
       }
       // v1.188.1 (review 6) — every home sample here restated a hold (the test above).
       for (const x of samples) if (!isBenchSpareSn(x.sn)) silenceReplayed.add(x.sn);
@@ -2511,11 +2542,22 @@ export function createRecorder(
   // (Live today: all 3 slots report isConnected=true, so this is a no-op hardening.)
   const sourceSnsOf = (snap: FleetSnapshot): Set<string> => shp2ConnectedDpuSns(snap.devices);
   /** v1.188.1 (review) — the BMS sum's members: the live source set, plus the accepted set's Cores
-   *  while a change to it is pending (MEMBERSHIP_SUSTAINED_ROLLUPS). */
+   *  while a change to it is pending (MEMBERSHIP_SUSTAINED_ROLLUPS).
+   *
+   *  v1.188.1 (integration) — and the accepted set alone while the panel reads NO source set (a boot
+   *  with the cloud unreachable or the panel's quota failing: no projection until its first quota
+   *  lands). The empty set is the fallback for a plant with no panel, under which every persisted held
+   *  pack row is a member, the rows a former member left for packs moved to a bench spare included,
+   *  and the orphan guard skips one only while its pack is projected elsewhere: on the live data
+   *  +938.8 kWh Battery Energy In on the first publish after such a boot, stepped back down by the
+   *  v1.98.0 re-seed once the panel returned. The rollup already reads an empty set as no change. */
   const bmsMembersOf = (snap: FleetSnapshot): Set<string> => {
     const live = sourceSnsOf(snap);
-    if (pendingMembership == null || !bmsMembershipFp) return live;
-    return new Set([...live, ...bmsMembershipFp.split(',').filter((sn) => sn !== '')]);
+    if (!bmsMembershipFp) return live;
+    const accepted = bmsMembershipFp.split(',').filter((sn) => sn !== '');
+    if (live.size === 0) return new Set(accepted);
+    if (pendingMembership == null) return live;
+    return new Set([...live, ...accepted]);
   };
 
   /** One integrated series of a lifetime key. `untilMs` (v1.188.1): it counts only up to that

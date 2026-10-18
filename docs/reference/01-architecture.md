@@ -535,7 +535,15 @@ Two kinds of lifetime keys:
    only while that chassis is off-panel — re-wiring it would re-add all five in
    ONE 5-minute rollup, ~520x the fleet's physical charge ceiling, with no rate
    guard. A `packSn` observed in a DIFFERENT chassis this snapshot proves the row
-   is stale, so it is never carried; the skip logs once per change.
+   is stale, so it is never carried; the skip logs once per change. The guard
+   needs that chassis to be projected, so the member set must not fall back to
+   "every row" when the panel reads no source set: on a boot with the cloud
+   unreachable, or with the panel's quota failing, the panel has no projection
+   until its first quota lands, and the empty set (the fallback for a plant with
+   no panel) carried those five rows (+938.8 kWh in, +965.9 kWh out on the first
+   publish, then a re-seed step down once the panel returned). With an accepted
+   roster on file (`bms-membership.json`), the members are that roster while the
+   panel reads no source set; the rollup already reads an empty set as no change.
 
 The read-only worker reproduces these via the persisted table only
 (`getLifetimeTotals`), reporting `persistedWh` with `pendingWh = 0` — it lags by
@@ -682,6 +690,16 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   either side, which assumed the newest sample was always near the stop; with the gate, a
   deploy made while every home device was held finds its newest sample hours earlier. An older
   marker, or none, is not graceful.
+- **Held-evaluation marker.** Behind the gate a hold writes nothing, so the newest home sample
+  can predate the stop by the whole hold. While no evaluation has a recordable home reading and
+  the gate holds a home device, the recorder writes the evaluation's time to
+  `/data/.held-evaluation`, at most once a minute. The restart probe starts the dark window at
+  that time when it is later than the newest home sample: up to it the recorder was evaluating
+  the held devices, as the restated rows of earlier releases showed. A crash 19 min into a panel
+  quota stall with every Core dark is then a 70 s stop (no record) instead of "System outage —
+  alarm was dark 20 min". With nothing reaching the recorder (the internet down: no list, no
+  MQTT) no evaluation runs, and the window starts at the newest home sample as before. The
+  marker is never deleted; an older one loses to a newer sample.
 - **Boot phases.** `createRecorder` blocks the whole add-on (no HTTP listener, MQTT
   ingest, poll or alarm evaluation), so it ends with one line on the monotonic clock:
   `open`, `schema+migrations`, `analyze` (the planner-statistics refresh — normally no

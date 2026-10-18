@@ -113,6 +113,9 @@
  *   B-c     the 15-min clamp does not wait for a held panel (a long stall's windows are skipped)
  *   B-ci    the bridge reads the rows only (a held panel's reading is not restated across its gap)
  *   B-cii   the bridge is not told which gaps the gate explains
+ *   B-ciii  the accepted roster is not the member set while the panel reads no source set (a boot
+ *           with the cloud unreachable carries a former member's orphan rows: +938.8 kWh)
+ *   B-civ   the accepted roster is used only while a change is pending (the same)
  *
  *   node scripts/mutate-energy-core-outage.mjs
  */
@@ -138,6 +141,7 @@ const SUBSET = [
   'test/panelGapLifetime.test.ts',
   'test/recorderMembershipRollover.test.ts',
   'test/heldGapEnergy.test.ts',
+  'test/recorderBootWithoutPanel.test.ts',
 ];
 
 const MUTANTS = [
@@ -810,8 +814,8 @@ const MUTANTS = [
   {
     id: 'B-xcvi. ★★★ the Cores that left drop out of the battery sum while the change is pending',
     file: RC,
-    find: '    if (pendingMembership == null || !bmsMembershipFp) return live;',
-    to: '    if (pendingMembership == null || !bmsMembershipFp || (true as boolean)) return live; /* MUTANT */',
+    find: '    if (pendingMembership == null) return live;',
+    to: '    if (pendingMembership == null || (true as boolean)) return live; /* MUTANT */',
     why: 'A two-rollup flicker after hours of discharge opens a gap over the v1.98.0 threshold: that re-seed steps the counters down instead.',
   },
   {
@@ -856,6 +860,21 @@ const MUTANTS = [
     find: '    heldOpen: (sn, fromMs, nowMs) => heldGaps.open(sn, fromMs, nowMs),',
     to: '    /* MUTANT */',
     why: 'Past 10 min the bridge books a window inside the panel\'s gap as empty before the gap ends.',
+  },
+  // ── integration round 3: a boot while the panel reads no source set ──
+  {
+    id: 'B-ciii. ★★★ the accepted roster is not the member set while the panel reads no source set',
+    file: RC,
+    find: '    if (live.size === 0) return new Set(accepted);\n',
+    to: '    /* MUTANT */\n',
+    why: 'A boot with the cloud unreachable (or the panel quota failing) carries every persisted held pack row, a former member\'s orphans included: +938.8 kWh Battery Energy In on the first publish, then the v1.98.0 re-seed steps it back down (a meter reset in Home Assistant).',
+  },
+  {
+    id: 'B-civ. ★★ the accepted roster joins the live set only while a change is pending, as before',
+    file: RC,
+    find: '    if (live.size === 0) return new Set(accepted);\n',
+    to: '    if (live.size === 0 && pendingMembership != null) return new Set(accepted); /* MUTANT */\n',
+    why: 'An empty source set is never a pending change (the rollup reads it as no change), so the same boot carries the orphans.',
   },
 ];
 
