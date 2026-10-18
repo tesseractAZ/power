@@ -22,7 +22,7 @@ common ones by goal.
 
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
-| `FORECAST_LAT` | `33.4484` | `float(-90,90)` | Latitude for the day-ahead solar forecast (Open-Meteo). The default is a placeholder: replace it with your site's. |
+| `FORECAST_LAT` | `33.4484` | `float(-90,90)` | Latitude for the day-ahead solar forecast (Open-Meteo), and where day is told from night while a Core is offline and its solar is counted at the panel. The default is a placeholder: replace it with your site's. |
 | `FORECAST_LON` | `-112.074` | `float(-180,180)` | Longitude for the forecast. |
 
 #### Push notifications

@@ -68,6 +68,10 @@ test('(a) fresh/empty DB — no restart-spanning gap logged', () => {
 
 test('(b) stale home max ts — exactly one gap logged + appended to the sidecar', () => {
   const STALE_MS = 100 * 60_000; // 100 min — well past the 15-min threshold
+  // v1.188.1 — test isolation: (a)'s close() left a clean-shutdown marker newer than the stale
+  // sample, which (one-sided, cleanShutdownWasGraceful) would make this restart a deliberate one.
+  // The scenario here is a stop with no marker.
+  if (existsSync(join(tmp, '.clean-shutdown'))) unlinkSync(join(tmp, '.clean-shutdown'));
   const beforeBoot = Date.now();
   const staleTs = beforeBoot - STALE_MS;
   withRawDb((db) => {

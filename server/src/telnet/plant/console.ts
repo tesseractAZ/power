@@ -44,7 +44,7 @@ import { priorityOf, comparePriority, type AlarmPriority } from '../../alertPrio
 import { liveGridBackstop } from '../../gridState.js';
 // v1.0.0 — the authoritative fleet aggregate + SHP2 membership, shared with the
 // fleet_pv_watts / fleet_battery_net_watts HA sensors and the summary TUI.
-import { aggregateFleetFlow, shp2ConnectedDpuSns, isShp2Connected, homeCoreCoverage } from '../../shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, homeCoreCoverage, backupTimerGate } from '../../shp2Membership.js';
 
 /** v0.36.0 — the three operator-facing grid states (see import note above). */
 type GridState = 'active' | 'standby' | 'islanded';
@@ -85,7 +85,11 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   // Result: the SCADA console can no longer disagree with the HA sensors for one instant.
   // v1.186.2 — the DISPLAY battery sum, like the HA sensor and the Energy-flow card, so a cloud-poll
   // replay at a grid handover shows here as it does there (the alarm path keeps the raw sum).
-  const { fleetPv: pv, fleetBatteryNetDisplay: batNet } = aggregateFleetFlow(data.snap.devices);
+  // v1.188.1 (review) — and the SAME bridged figures the sensors publish (PlantData.flow, plantFlow:
+  // each home Core at its own reading or, dark, at its panel slot; null = unknown, shown "—"). The
+  // Cores-only sum read "BATT.P.NET 0 W IDLE" and "BATT idle" beside a 3.4 kW drain through the
+  // panel while every Core was cloud-offline (2026-10-16), when the sensors published the slots.
+  const { fleetPv: pv, fleetBatteryNet: batNet } = data.flow;
   const connectedSns = shp2ConnectedDpuSns(data.snap.devices);
   const dpus = getDpus(data).filter((d) => d.online && isShp2Connected(d.sn, connectedSns));
   const acIn = gridAcInWatts(data);
@@ -205,9 +209,9 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
     renderTagRow({
       tag: 'PV.ARRAY.P',
       ...fmtW(pv),
-      state: pv > 100 ? 'normal' : 'oos',
-      quality: dpuQual,
-      flags: pv > 100 ? 'A/L/N' : 'A/L/N',
+      state: pv == null ? 'comm' : pv > 100 ? 'normal' : 'oos',
+      quality: pv == null ? 'bad' : dpuQual,
+      flags: 'A/L/N',
     }, W),
     renderTagRow({
       tag: 'BATT.SOC',
@@ -221,12 +225,12 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
     }, W),
     renderTagRow({
       tag: 'BATT.P.NET',
-      ...fmtW(Math.abs(batNet)),
-      state: 'normal',
-      quality: dpuQual,
+      ...fmtW(batNet == null ? null : Math.abs(batNet)),
+      state: batNet == null ? 'comm' : 'normal',
+      quality: batNet == null ? 'bad' : dpuQual,
       // v0.9.33 — flags column is 8 chars wide; previous 'A/L/N · DCH' (11)
       // was silently truncated mid-word ('A/L/N · D'). Just show direction.
-      flags: batNet > 5 ? 'DCH' : batNet < -5 ? 'CHG' : 'IDLE',
+      flags: batNet == null ? '—' : batNet > 5 ? 'DCH' : batNet < -5 ? 'CHG' : 'IDLE',
     }, W),
     // GRID.HOME.P — SHP2 main grid into the home (wattInfo.gridWatt): the
     // authoritative whole-home backstop path, previously invisible to the TUI.
@@ -279,8 +283,14 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
     // `backup_charge_minutes` (fleetBatteryNet > 50 W discharge, audit rank 16): SHP2's own
     // backupChargeTimeMin field can hold a stale / PV-forecast ETA while the pool is actively
     // discharging, which would show a charge-completion time during a real drawdown.
-    const dchMin = p.backupDischargeTimeMin;
-    const chMin = batNet > 50 ? null : p.backupChargeTimeMin;
+    // v1.188.1 — both timers on the shared backupTimerGate, as /api/ha-state publishes them: with a
+    // home Core dark the Cores' net is not the pool's (10-16 20:04: "▲ CHG 38m" beside a 0 W
+    // BATT.P.NET while every Core was offline and the pool drained 3.4 kW through the panel).
+    // v1.188.1 (review) — on the bridge's verdicts (PlantData.flow), as /api/ha-state: the RUN line
+    // and BATT.P.NET count each Core the same way.
+    const timers = backupTimerGate(data.snap.devices, Date.now(), data.flow?.verdicts);
+    const dchMin = timers.discharge ? p.backupDischargeTimeMin : null;
+    const chMin = timers.charge ? p.backupChargeTimeMin : null;
     out.push(padEnd(
       '  ' + c.grey('RUN ') + (dchMin != null
         ? c.yellow(`▼ DCH ${fmtMinutes(dchMin)}`)
@@ -326,7 +336,8 @@ function socColor(soc: number | null | undefined): (s: string) => string {
 
 /** kW figure for the big font: one decimal below 10 kW, whole kW above —
  *  bounds the glyph run so three figures always fit a 96-col band. */
-function fmtBigKw(w: number): string {
+function fmtBigKw(w: number | null): string {
+  if (w == null) return '--';
   const kw = w / 1000;
   return Math.abs(kw) < 10 ? `${kw.toFixed(1)}kW` : `${Math.round(kw)}kW`;
 }
@@ -342,7 +353,7 @@ function fmtBigKw(w: number): string {
  */
 function renderHeadlineBand(
   soc: number | null | undefined,
-  pvW: number,
+  pvW: number | null,
   loadW: number,
   width: number,
 ): string[] {
@@ -400,8 +411,8 @@ function renderPoolGauge(soc: number | null | undefined, width: number): string 
  *                 ╚══════════╝
  */
 function renderMimic(
-  pv: number,
-  batNet: number,
+  pv: number | null,
+  batNet: number | null,
   gridWatts: number,
   load: number,
   soc: number | null | undefined,
@@ -411,11 +422,11 @@ function renderMimic(
   const out: string[] = [];
   const colW = Math.max(18, Math.floor((width - 6) / 3));
   // ─ row 1: PV ─────────────────────────────────────────────────────
-  const pvLabel = `${MIMIC.solar} ${c.yellow('PV')}  ${c.whiteB(formatPower(pv))}`;
+  const pvLabel = `${MIMIC.solar} ${c.yellow('PV')}  ${pv == null ? c.grey('—') : c.whiteB(formatPower(pv))}`;
   const busTop = c.cyanB(MIMIC.dtl + MIMIC.dh.repeat(colW - 2) + MIMIC.dtr);
   const battLabel =
     `${MIMIC.battery} ${c.cyan('BATT')}  ${c.whiteB(((soc ?? 0)).toFixed(0) + '%')}  ` +
-    (batNet > 5 ? c.yellow('▼ DCH') : batNet < -5 ? c.green('▲ CHG') : c.grey('idle'));
+    (batNet == null ? c.grey('—') : batNet > 5 ? c.yellow('▼ DCH') : batNet < -5 ? c.green('▲ CHG') : c.grey('idle'));
   out.push(padEnd(pvLabel, colW) + '  ' + busTop + '  ' + battLabel);
 
   // ─ row 2: flow arrow → BUS ← flow arrow ──────────────────────────
@@ -429,7 +440,8 @@ function renderMimic(
   const busLeftLabel = 'MAIN BUS';
   const busLeft = c.cyanB(MIMIC.dv) + ' ' + c.whiteB(busLeftLabel) +
     ' '.repeat(Math.max(0, colW - 3 - busLeftLabel.length)) + c.cyanB(MIMIC.dv);
-  const arrowBatt = batNet > 5 ? c.yellow(MIMIC.arrowL + MIMIC.h.repeat(2)) :
+  const arrowBatt = batNet == null ? c.grey('───') :
+                    batNet > 5 ? c.yellow(MIMIC.arrowL + MIMIC.h.repeat(2)) :
                     batNet < -5 ? c.green(MIMIC.arrowR + MIMIC.h.repeat(2)) :
                     c.grey('═══');
   out.push(padEnd('  ' + arrowPv + '─' + MIMIC.tDown, colW) + '  ' + busLeft + '  ' + arrowBatt + '─' + MIMIC.tDown);

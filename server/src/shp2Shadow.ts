@@ -172,3 +172,45 @@ export function advanceShadowLatch(
   const moved = [...prev.moved, fresh.witness];
   return moved.length >= minDistinct ? undefined : { ...prev, moved };
 }
+
+/*
+ * v1.188.1 — which bodies are NEW content, for the recorder's freshness gate (heldSamples.ts
+ * projectionRecordable). The latch above holds its release until SHP2_SHADOW_CLEAR_DISTINCT
+ * distinct new bodies have arrived, so a cloud that serves one refreshed body and then replays it
+ * stays latched; but that first refreshed body is a reading. A gate keyed on the latch alone did not
+ * write it: a 9-poll replay then left a row gap past the 10-minute integration bridge, and Panel Load,
+ * Grid Import (Home) and the circuits lost the energy of the windows inside it.
+ *
+ * Unlatched, a body is new when its witness differs from the one before. While latched, when it has
+ * not been seen since the content froze (the frozen body, a refreshed body replayed, a cloud
+ * alternating between cached bodies: none of them new); a live panel's next twelve-channel vector
+ * always is. An unmeasurable poll (no witness) is never new.
+ */
+
+/** The most witnesses remembered since a latch set (a day of 60 s polls); the oldest go first. */
+export const SHP2_LATCH_SEEN_MAX = 1440;
+
+export interface BodySeen {
+  /** The previous poll's witness (null: none, or unmeasurable). */
+  last: string | null;
+  /** Every witness since the content froze (the frozen one first), or null while unlatched. */
+  sinceLatch: Set<string> | null;
+}
+
+/** Fold one poll's witness into the memory; `latched` is the latch AFTER this poll (advanceShadowLatch). PURE. */
+export function advanceBodySeen(
+  prev: BodySeen | undefined,
+  witness: string | null,
+  latched: boolean,
+): { seen: BodySeen; isNew: boolean } {
+  const last = prev?.last ?? null;
+  // A latch sets on a poll that repeats the frozen body, so the set starts with it (added below).
+  const sinceLatch: Set<string> | null = latched ? new Set(prev?.sinceLatch ?? []) : null;
+  if (witness == null) return { seen: { last: null, sinceLatch }, isNew: false };
+  const isNew = witness !== last && !(sinceLatch?.has(witness) ?? false);
+  if (sinceLatch) {
+    sinceLatch.add(witness);
+    while (sinceLatch.size > SHP2_LATCH_SEEN_MAX) sinceLatch.delete(sinceLatch.values().next().value as string);
+  }
+  return { seen: { last: witness, sinceLatch }, isNew };
+}

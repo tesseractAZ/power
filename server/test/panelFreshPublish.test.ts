@@ -56,7 +56,8 @@ function panel(sn: string, over: Record<string, unknown> = {}, house = true): An
 }
 function core(): Any {
   return {
-    sn: CORE, deviceName: 'Core 1', productName: 'DELTA Pro Ultra', online: true, lastUpdated: NOW,
+    // v1.188.1 — reporting: its content landed and changed (a Core's own reading).
+    sn: CORE, deviceName: 'Core 1', productName: 'DELTA Pro Ultra', online: true, lastUpdated: NOW, lastTelemetryAtMs: NOW, contentChangedAtMs: NOW - 2_000,
     projection: { kind: 'dpu', soc: 60, pvTotalWatts: 0, totalInWatts: 0, totalOutWatts: 4100, acInWatts: 0, packs: [{ outputWatts: 4100, inputWatts: 0 }] },
   };
 }

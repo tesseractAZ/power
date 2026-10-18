@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clampLifetimeDip } from '../src/recorder.js';
+import { clampLifetimeDip, LIFETIME_HOLD_KEYS, LIFETIME_HOLD_DIP_WH } from '../src/recorder.js';
 
 /**
  * v0.15.14 — lifetime micro-dip clamp (from the 20h log analysis).
@@ -41,4 +41,14 @@ test('clampLifetimeDip — a genuine reset (large drop) passes through', () => {
   // Operator re-zeroed the accumulator: 92 kWh → 100 Wh. Must NOT be held,
   // so HA's total_increasing reset semantics engage as designed.
   assert.equal(clampLifetimeDip(92_047, 0, 100), 100);
+});
+
+test('v1.188.1 — the two counters the energy bridge changes the contributors of hold a dip up to LIFETIME_HOLD_DIP_WH; a re-zero still passes', () => {
+  assert.ok(LIFETIME_HOLD_KEYS.has('fleet_pv_wh') && LIFETIME_HOLD_KEYS.has('fleet_grid_import_wh'));
+  assert.equal(LIFETIME_HOLD_KEYS.has('fleet_battery_charge_wh'), false, 'the battery floors keep their own re-seed semantics');
+  // PV Production at 7,613 kWh: a 600 Wh pending share that left the read path is held.
+  assert.equal(clampLifetimeDip(7_613_000, 7_612_400, 0, LIFETIME_HOLD_DIP_WH), 600);
+  assert.equal(clampLifetimeDip(7_613_000, 7_612_400, 0), 0, 'the 50 Wh default would let it through');
+  // A replaced database (the total from zero) is a genuine reset.
+  assert.equal(clampLifetimeDip(7_613_000, 0, 100, LIFETIME_HOLD_DIP_WH), 100);
 });

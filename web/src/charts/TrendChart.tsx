@@ -11,6 +11,7 @@ import {
   Legend,
 } from 'recharts';
 import { apiUrl } from '../api';
+import { mergeTrendSeries, trendGapMs } from './trendMerge';
 import { CHART } from '../theme';
 
 interface Series {
@@ -81,40 +82,13 @@ export function TrendChart({
     };
   }, [JSON.stringify(series), windowMs, refreshMs, bucketSec]);
 
-  // Merge series onto a shared timeline, taking the per-series last-known value.
-  const merged = useMemo(() => {
-    // v0.22.0 — pre-index each series by ts so the row build is O(rows × series)
-    // instead of O(rows × series × points): the old `pts.find(p => p.ts === ts)`
-    // was a fresh linear scan for every cell. First-write-wins on a duplicate ts
-    // mirrors Array.find exactly (it returns the first match), and probing by
-    // key PRESENCE — `idx.has(ts)`, not the value — reproduces `if (pt)` even for
-    // a hypothetical undefined value. So the merged rows are byte-for-byte the
-    // same and the rendered chart is unchanged.
-    const all = new Set<number>();
-    const indexBySeries: Record<string, Map<number, number>> = {};
-    for (const s of series) {
-      const key = `${s.sn}|${s.metric}`;
-      const idx = new Map<number, number>();
-      for (const p of dataBySeries[key] ?? []) {
-        all.add(p.ts);
-        if (!idx.has(p.ts)) idx.set(p.ts, p.value);
-      }
-      indexBySeries[key] = idx;
-    }
-    const sortedTs = Array.from(all).sort((a, b) => a - b);
-    const lastBy: Record<string, number | null> = {};
-    for (const s of series) lastBy[`${s.sn}|${s.metric}`] = null;
-    return sortedTs.map((ts) => {
-      const row: Record<string, number | string | null> = { ts };
-      for (const s of series) {
-        const key = `${s.sn}|${s.metric}`;
-        const idx = indexBySeries[key];
-        if (idx.has(ts)) lastBy[key] = idx.get(ts)!;
-        row[s.label] = lastBy[key];
-      }
-      return row;
-    });
-  }, [series, dataBySeries]);
+  // Merge series onto a shared timeline. v1.188.1 (review) — a series' last value is carried only
+  // inside a stretch with no gap (trendMerge.ts): a device with no rows for longer (offline in the
+  // EcoFlow cloud, so nothing was recorded) shows a break, not its last reading painted flat.
+  const merged = useMemo(
+    () => mergeTrendSeries(series.map((s) => ({ key: `${s.sn}|${s.metric}`, label: s.label })), dataBySeries, trendGapMs(bucketSec)),
+    [series, dataBySeries, bucketSec],
+  );
 
   // v0.24.2 — dual-axis support: any series tagged axis:'right' gets its own
   // right-hand Y axis so a small-magnitude series (e.g. 0–100 %) isn't flattened
@@ -184,7 +158,6 @@ export function TrendChart({
                 fillOpacity={s.dashed ? 0.3 : 0.7}
                 strokeWidth={1.6}
                 isAnimationActive={false}
-                connectNulls
               />
             ))}
           </AreaChart>

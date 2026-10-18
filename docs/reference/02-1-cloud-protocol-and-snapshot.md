@@ -480,7 +480,7 @@ full twelve-channel vector never held identical for even one minute. Staleness
 requires **both** a repeat count and an elapsed duration; an unmeasurable poll
 resets rather than accumulating. Release has hysteresis (v1.154.0): once latched,
 the panel must show `SHP2_SHADOW_CLEAR_DISTINCT` (2) distinct new witnesses before it
-reads live again (`advanceShadowLatch`), so one refreshed body that the cloud then replays stays one latch with its original onset; the frozen body reappearing starts the count over. `computeHomeGridWatts` and
+reads live again (`advanceShadowLatch`), so one refreshed body that the cloud then replays stays one latch with its original onset; the frozen body reappearing starts the count over. The recorder does not wait for the release (v1.188.1): `contentNewAtMs` stamps the arrival of a body not seen since the content froze (`advanceBodySeen`), and the freshness gate writes that body as a reading (`latchedBodyNew`), while the alarm path still reads the latch. `computeHomeGridWatts` and
 `computeShp2GridConnected` then treat a shadowed panel exactly as v0.88.0 already
 treats an offline one. `sensor.ecoflow_panel_shp2_payload_frozen` publishes the
 held duration.
@@ -621,7 +621,18 @@ primary = smaller channel (carries name + breaker rating), watts = sum of both l
 `batteryPercentage`, `isConnect`, `isAcOpen`, `devInfo.fullCap`, `devInfo.ratePower`,
 `emsBatTemp`, `hwConnect`, `errorCodeNum`, plus each slot's `ch{i}ForceCharge` (the flat key,
 else the `pd303_mc.`-prefixed one; v1.80.0) as `forceCharge`. That is the EcoFlow app's "Charge
-Now" switch, which the Charge Now responder and the house-panel pin guard read. Panel-level
+Now" switch, which the Charge Now responder and the house-panel pin guard read. The same
+subtree's power fields project as `pvWatts` (`pvChargeWatts`), `pvHighWatts`
+(`pvHeightChargeWatts`), `pvLowWatts` (`pvLowChargeWatts`), `inputWatts` (`lcdInputWatts`)
+and `outputWatts` (`outputPower`, the magnitude of the slot's `backupInfo.chWatt` while the
+Core supplies the panel), each null when omitted. They are REST-only (`pd303_mc.*`, the ~60 s
+poll) and recorded per slot as `src<n>_pv_w` (the PV figure the energy bridge integrates:
+the two MPPT fields when either is reported, else `pvChargeWatts`), `src<n>_pv_hv_w`,
+`src<n>_pv_lv_w` and `src<n>_in_w`. The PV fields read 0 at night on 2026-10-16; whether they
+populate in daylight had not been observed, so the bridge reads them only for a slot whose
+field has passed its check against the inferred lower bound ([chapter 7, path
+(c)](07-energy-and-cost.md#22-the-two-accumulation-paths)). `sourceWatts[k]` (`backupInfo.chWatt`) pairs with
+`Energy{k+1}Info`, checked live against `outputPower`. Panel-level
 v1.80.0 fields: `forceChargeCeilingSoc` (`foceChargeHight`, sic), `stormWatchEnabled`
 (`stormIsEnable`), `epsMode` (`epsModeInfo`). The `sn` here is the Core↔SHP2 connector
 mapping — **positional to slot but the SN is read from the slot's own `devInfo`, not
@@ -748,13 +759,31 @@ Cores 3 and 4 (§12l). Every fleet aggregation must exclude spares.
 - **`isSourceDpuStale(source, devices)`** (observability only): a connected slot whose
   underlying DPU is itself cloud-offline. Surfaced as `dpuStale` on the source (set by
   `snapshotForClient`); does **not** change backup-pool capacity or the floor alarm.
+- **`isSourceDpuFrozen(source, devices, nowMs)`** (v1.188.1): a connected slot whose Core is
+  listed online with a projection but whose content has not changed within
+  `SHP2_READBACK_STALE_MS` (`dpuContentFresh`, the clock the grid resolver's Core-import gate
+  reads). Surfaced as `dpuFrozen` by `panelForClient`, which also puts `readbackFresh` on each
+  panel.
 - **`homeCoreCoverage(devices)`** → `{ connected, reporting, complete }`. Roster = SHP2
   connected sources (the union across panels), else the persisted last-known home roster
   (v1.121.0), else every DPU not in the `SPARE_DPU_SNS` literal. Roster SNs absent from the
   device map count as not reporting, the conservative direction. `complete` = all roster cores
   reporting. Core principle: *we can PROVE discharge from a partial sum; we can never
   DISPROVE it.* An empty roster means no home cores exist at all → `complete` is vacuously
-  true.
+  true. With a clock (`homeCoreCoverage(devices, roster, nowMs)`, v1.188.1), a Core counts as
+  reporting only on a fresh meter (`dpuContentFresh`): one listed online whose readings stopped
+  changing holds its last pack figures, which cannot disprove a drain. The grid resolver's
+  at-floor guard passes the clock; the console's quality flag does not.
+- **`connectedSourceListings(devices, nowMs)`** (v1.188.1): each connected home Core once, at
+  one panel listing: an online panel whose reading is fresh, else an online one, then the
+  house panel, then the lower serial. A Core listed connected by two panels (one panel's
+  source list stale) is read there by the energy bridge and the backup timers' bound alike.
+- **`BridgeVerdicts`** (v1.188.1, `energyBridge.slotVerdicts`): the Cores the two power sensors
+  count at their own reading (`own`) and each dark slot's PV where the bridge reads the panel's
+  PV field as measured (`measuredPvW`). `poolNetUpperBound` / `backupTimerGate` and
+  `panelForClient` take them, so the timers and the card count each Core as Fleet PV and
+  Battery Net do; `panelForClient` puts them on each connected slot as `ownReading` and
+  `pvMeasuredW`.
 - **`isHomePoolDpu(sn, connectedOrDevices)`** — v1.92.0; is this DPU wired into the backup pool right now (SHP2 roster, literal only as the unknown-roster fallback).
 - **`homeFleetMeanSoc(devices)`** — reserve-alarm SHP2-blind fallback: mean SoC of home
   cores still reporting (spares + offline cores excluded). Used when the SHP2 nulls
@@ -767,10 +796,15 @@ Cores 3 and 4 (§12l). Every fleet aggregation must exclude spares.
   Σ SHP2 circuit watts. Returns raw un-rounded sums (each caller rounds at emission). There are two
   battery-net sums (v1.186.2). `fleetBatteryNet` is built from the polled pack fields and is
   the raw evidence the at-floor discharge guard (`gridState` `poolDischargingObserved`)
-  reads. `fleetBatteryNetDisplay` prefers each pack's fresh MQTT `liveFlow`; the Battery Net
-  sensor, `/api/ha-state` `fleet_battery_net_watts` and the ±50 W charge/discharge timer
-  gates read it. `panelLoad` sums every panel's circuits (v1.185.0). Guarded with
-  `?? []` on `sources`/`packs`/`circuits` so a partial projection can't throw.
+  reads. `fleetBatteryNetDisplay` prefers each pack's fresh MQTT `liveFlow`. The Battery Net
+  sensor and `/api/ha-state` `fleet_battery_net_watts` read it with each home Core counted
+  once by what it delivers (`Recorder.bridgedFleetFlow`, [chapter 7, path
+  (c)](07-energy-and-cost.md#22-the-two-accumulation-paths)): a frozen projection listed
+  online is taken out, a Core the cloud lists offline whose own data still arrives is added,
+  and every dark home slot is metered at the panel. The ±50 W charge/discharge timer gate
+  (`backupTimerGate`, while every home Core reports) reads it alone. `panelLoad` sums every
+  panel's circuits (v1.185.0). Guarded with `?? []` on `sources`/`packs`/`circuits` so a
+  partial projection can't throw.
 
 Roster since the 2026-08-20 reconfiguration: Cores 1/2/5 wired into the SHP2; Cores 3/4 on
 the bench. `SPARE_DPU_SNS` still names Cores 4 and 5, and the roster-aware predicates above

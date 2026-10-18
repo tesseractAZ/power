@@ -33,6 +33,7 @@ import {
   preferRealizedGhiRows,
   queryRealizedGhi,
   resetWorkerReportCaches,
+  resetWorkerSampleCaches,
 } from './analytics.js';
 import { reportBasisKey } from './analytics/fleet.js';
 import { advanceBasisGeneration, basisGeneration, runInBasisGeneration, resetBasisGenerationForTesting } from './analytics/flightBasis.js';
@@ -397,17 +398,50 @@ export function noteReportBasis(key: string, nowMs: number = Date.now(), log: (m
   return basisGeneration();
 }
 
+/**
+ * v1.188.1 (review) — the samples generation this worker last built on (null before its first
+ * report). heldSamples.ts SAMPLES_GENERATION_SQL: it moves whenever rows leave `samples` (a
+ * held-sample move) or come back (a restore).
+ */
+let samplesGen: number | null = null;
+
+/**
+ * v1.188.1 (review) — note the samples generation a request runs on. When it has moved since the
+ * last request, the rows some cached figure was built on are gone (or back): the closed-day memos
+ * and every result cache are reset (resetWorkerSampleCaches) and the basis generation moves on, so
+ * a flight still running on the old rows writes no cache (cacheWritable). The first request only
+ * records it (a fresh worker's caches are empty). Returns true when it reset. Exported for tests.
+ */
+export function noteSamplesGeneration(gen: number, log: (m: string) => void = () => {}): boolean {
+  if (samplesGen === null || gen === samplesGen) {
+    samplesGen = gen;
+    return false;
+  }
+  const prev = samplesGen;
+  samplesGen = gen;
+  advanceBasisGeneration();
+  resetWorkerSampleCaches();
+  log(`analytics-worker: rows were moved out of (or back into) samples (generation ${prev} → ${gen}): closed-day memos and report caches reset (generation ${basisGeneration()})`);
+  return true;
+}
+
 /** Test seam: forget the basis (a fresh worker's state). */
-export function resetReportBasisForTesting(): void { basis = freshBasis(); resetBasisGenerationForTesting(); }
+export function resetReportBasisForTesting(): void { basis = freshBasis(); samplesGen = null; resetBasisGenerationForTesting(); }
 
 export async function buildReport(name: string, ctx: ReportCtx, args: ReportArgs = {}): Promise<unknown> {
   const b = BUILDERS[name];
   if (!b) throw new Error(`unknown report '${name}'`);
   const key = reportBasisKey(devicesOf(ctx));
+  // v1.188.1 (review) — read BEFORE the report runs: a move that commits while it runs is seen by
+  // the next request, which then clears whatever this one memoised.
+  const sgen = ctx.recorder.samplesGeneration?.() ?? 0;
+  noteSamplesGeneration(sgen, ctx.log);
   // The generation is fixed when the report is ASKED: a flight scheduled before a reset in the
   // same turn still belongs to the basis it was asked on.
   const gen = noteReportBasis(key, Date.now(), ctx.log);
-  return reportFlights.run(`${buildFlightKey(name, args)} @${key}`, () => runInBasisGeneration(gen, () => b(ctx, args)));
+  // The samples generation is part of the flight key too: a request after a move never joins a
+  // flight that started on the rows it removed.
+  return reportFlights.run(`${buildFlightKey(name, args)} @${key} #${sgen}`, () => runInBasisGeneration(gen, () => b(ctx, args)));
 }
 
 /** v1.186.0 — give queued macrotasks (the worker's 'message' events) a turn. Awaiting a

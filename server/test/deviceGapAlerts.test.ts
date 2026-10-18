@@ -5,7 +5,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   outageAlerts, outageTracking, systemOutageFields, deviceGapCount, telemetryGapLedgerSummary,
-  outageAlertId, deviceGapAlertId, isDeviceGapAlertId, isOutageEventFamily,
+  outageAlertId, deviceGapAlertId, isDeviceGapAlertId, isOutageEventFamily, devicesDarkAlongside, heldGapPhrase,
 } from '../src/alerts.js';
 import {
   shouldSendResolve, bootSeedNotified, notifyLocator,
@@ -45,7 +45,10 @@ const names: Record<string, string> = { [CORE2]: 'Core 2', [CORE3]: 'Core 3' };
 const nameOf = (sn: string) => names[sn];
 const __dir = dirname(fileURLToPath(import.meta.url));
 
-type Gap = { startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean; graceful?: boolean; sn?: string };
+type Gap = {
+  startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean; graceful?: boolean; sn?: string;
+  alertStartMs?: number; held?: Array<{ sn: string; shadow: boolean }>; unmeasured?: string[];
+};
 /** Silent from 7 h ago, detected 10 min ago: 410 min. */
 const deviceGap = (sn: string, over: Partial<Gap> = {}): Gap => ({
   startMs: now - 7 * H, endMs: now - 10 * MIN, durationMs: 7 * H - 10 * MIN, detectedAt: now - 10 * MIN, sn, ...over,
@@ -236,4 +239,99 @@ test('★ BRIDGE: /api/telemetry-gaps serves the split rollups, not a mixed one 
   const route = idx.slice(i, idx.indexOf('}, 30);', i));
   assert.match(route, /\.\.\.telemetryGapLedgerSummary\(gaps\),/);
   assert.doesNotMatch(route, /longest_gap_min:/, 'the route must not re-derive a mixed rollup');
+});
+
+/* ── v1.188.1 dry run: the text states what was measured ───────────────── */
+
+const CORE1 = 'TESTCORE00000001';
+const CORE5 = 'TESTCORE00000005';
+const PANEL = 'TESTPANEL0000001';
+const fmt = (ms: number) => new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+test('★★ several devices dark at once: the detail says how many, not "one device went dark"', () => {
+  // The 10-17 deploy: four Cores' records, all from the same instant.
+  const four = [CORE1, CORE2, CORE3, CORE5].map((sn) => deviceGap(sn));
+  const alerts = outageAlerts(four, now, OPTS, nameOf);
+  assert.equal(alerts.length, 4);
+  for (const a of alerts) {
+    assert.match(a.detail, /while other home devices kept reporting — 4 home devices were dark at the same time, not the whole feed\./, a.detail);
+    assert.doesNotMatch(a.detail, /one device went dark/);
+  }
+  const [one] = outageAlerts([deviceGap(CORE2)], now, OPTS, nameOf);
+  assert.match(one.detail, /while other home devices kept reporting — this device went dark, not the whole feed\./);
+  // Overlap, not identity: a record that ended before another began is not "at the same time".
+  const earlier = deviceGap(CORE3, { startMs: now - 20 * H, endMs: now - 12 * H, durationMs: 8 * H, detectedAt: now - 12 * H });
+  assert.equal(devicesDarkAlongside(deviceGap(CORE2), [deviceGap(CORE2), earlier]), 1);
+  assert.equal(devicesDarkAlongside(deviceGap(CORE2), [deviceGap(CORE2), deviceGap(CORE3), fleetGap()]), 2, 'a fleet record is no device');
+  assert.equal(devicesDarkAlongside(deviceGap(CORE2), [deviceGap(CORE2), deviceGap(CORE2, { startMs: now - 6.5 * H })]), 1, 'one device, however many records');
+});
+
+test('★★ v1.188.1 review 3: "N home devices were dark at the same time" counts the devices dark at ONE instant, not every record overlapping the window', () => {
+  // X dark 30 h → 20 h ago; Y 22 h → 1 h ago; Z 12 h → 6 h ago. Y overlaps both, but X had ended
+  // 8 h before Z began: at most two were dark at any instant.
+  const span = (sn: string, fromH: number, toH: number) => deviceGap(sn, { startMs: now - fromH * H, endMs: now - toH * H, durationMs: (fromH - toH) * H, detectedAt: now - toH * H });
+  const x = span(CORE1, 30, 20);
+  const y = span(CORE2, 22, 1);
+  const z = span(CORE3, 12, 6);
+  assert.equal(devicesDarkAlongside(y, [x, y, z]), 2, '★★ two at once, never three');
+  assert.equal(devicesDarkAlongside(x, [x, y, z]), 2);
+  assert.equal(devicesDarkAlongside(z, [x, y, z]), 2);
+  const [ay] = outageAlerts([x, y, z], now, OPTS, nameOf).filter((a) => a.id.includes(CORE2));
+  assert.match(ay.detail, /— 2 home devices were dark at the same time, not the whole feed\./, ay.detail);
+  // Three that are dark together are three; one that ends as another begins is not at the same time.
+  const w = span(CORE5, 14, 8);
+  assert.equal(devicesDarkAlongside(y, [x, y, z, w]), 3, 'Y, Z and W at 10 h ago');
+  const touching = span(CORE3, 40, 30);
+  assert.equal(devicesDarkAlongside(x, [x, touching]), 1, 'a record that ends as another begins');
+  // v1.188.1 (review 4) — and the other way round: one that BEGINS as this one ends.
+  const after = span(CORE3, 20, 10);
+  assert.equal(devicesDarkAlongside(x, [x, after]), 1, '★ a record that begins as this one ends is not at the same time');
+  const [ax] = outageAlerts([x, after], now, OPTS, nameOf).filter((a) => a.id.includes(CORE1));
+  assert.match(ax.detail, /— this device went dark, not the whole feed\./, ax.detail);
+  assert.equal(devicesDarkAlongside(y, [y, span(CORE3, 30, 21), span(CORE5, 21, 15)]), 2, 'two in turn, each with Y');
+});
+
+test('★★★ a re-dated record keeps the id it was first filed with; its text and facts give the true start', () => {
+  const firstFiled = now - 7 * H;
+  const lastFresh = now - 47 * H;
+  const g = deviceGap(CORE2, { startMs: lastFresh, durationMs: now - 10 * MIN - lastFresh, alertStartMs: firstFiled });
+  const [a] = outageAlerts([g], now, OPTS, nameOf);
+  assert.equal(a.id, deviceGapAlertId(CORE2, firstFiled, 7 * H), '★★★ the id already delivered: no second push');
+  assert.equal(a.title, `Device telemetry gap — no data for ${Math.round(g.durationMs / MIN)} min`);
+  assert.ok(a.detail.includes(`(${fmt(lastFresh)} → ${fmt(g.endMs)})`), a.detail);
+  assert.equal(a.facts?.find((f) => f.label === 'Started')?.value, fmt(lastFresh));
+  const [plain] = outageAlerts([deviceGap(CORE2)], now, OPTS, nameOf);
+  assert.equal(plain.id, deviceGapAlertId(CORE2, now - 7 * H, 7 * H - 10 * MIN), 'never re-dated: keyed on its start as before');
+});
+
+test('★★ an in-process fleet gap the gate explains names what was held, not an MQTT/broker stall', () => {
+  const pname = (sn: string) => ({ [PANEL]: 'Smart Home Panel 2', ...names } as Record<string, string>)[sn];
+  const shadowed = fleetGap({ held: [{ sn: PANEL, shadow: true }] });
+  const [a] = outageAlerts([shadowed], now, OPTS, pname);
+  assert.equal(a.title, 'Telemetry gap — no data for 90 min', 'the same title and id as any in-process gap');
+  assert.equal(a.id, outageAlertId(shadowed.startMs, shadowed.durationMs));
+  assert.equal(a.detail, `No fresh home-device readings reached the recorder for 90 min (${fmt(shadowed.startMs)} → ${fmt(shadowed.endMs)}): `
+    + 'the add-on kept checking the fleet, but every home device it had a reading for was held — the EcoFlow cloud replayed the last payload of Smart Home Panel 2 (cloud shadow), '
+    + 'so nothing was recorded (only fresh readings are saved). Writes have since resumed. History in that window is missing but the process stayed up.');
+  assert.equal(a.facts?.find((f) => f.label === 'Type')?.value, 'in-process (held readings)');
+  assert.equal(heldGapPhrase([{ sn: PANEL, shadow: false }, { sn: CORE2, shadow: false }, { sn: CORE3, shadow: false }], pname),
+    'every home device it had a reading for was held — Smart Home Panel 2, Core 2 and Core 3 sent no new readings');
+  assert.equal(heldGapPhrase([{ sn: PANEL, shadow: true }, { sn: CORE2, shadow: false }], () => null),
+    `every home device it had a reading for was held — the EcoFlow cloud replayed the last payload of ${PANEL} (cloud shadow); ${CORE2} sent no new readings`, 'by serial when unnamed');
+  // v1.188.1 review 3 — a device read fresh with nothing measurable is named, and the phrase does
+  // not say that every home device it read was held.
+  assert.equal(heldGapPhrase([{ sn: CORE2, shadow: false }], pname, [PANEL, CORE3]),
+    'no home device it had a reading for gave one to record — Core 2 sent no new readings; Smart Home Panel 2 and Core 3 reported nothing measurable');
+  const mixed = fleetGap({ held: [{ sn: CORE2, shadow: false }], unmeasured: [PANEL] });
+  const [m] = outageAlerts([mixed], now, OPTS, pname);
+  assert.equal(m.detail, `No home-device reading could be recorded for 90 min (${fmt(mixed.startMs)} → ${fmt(mixed.endMs)}): `
+    + 'the add-on kept checking the fleet, but no home device it had a reading for gave one to record — Core 2 sent no new readings; Smart Home Panel 2 reported nothing measurable, '
+    + 'so nothing was recorded (only fresh readings are saved). Writes have since resumed. History in that window is missing but the process stayed up.');
+  assert.equal(m.facts?.find((f) => f.label === 'Type')?.value, 'in-process (held readings)');
+  assert.equal(m.id, outageAlertId(mixed.startMs, mixed.durationMs), 'the same id');
+  // Without a held set (no evaluation found anything held), and on a restart gap, the text is unchanged.
+  assert.match(outageAlerts([fleetGap()], now, OPTS)[0].detail, /— an MQTT\/broker stall; writes have since resumed\./);
+  assert.match(outageAlerts([fleetGap({ held: [] })], now, OPTS)[0].detail, /— an MQTT\/broker stall;/);
+  const restart = fleetGap({ restartSpanning: true, held: [{ sn: PANEL, shadow: true }] });
+  assert.match(outageAlerts([restart], now, OPTS)[0].detail, /spanning a restart/);
 });

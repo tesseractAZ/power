@@ -68,7 +68,8 @@ EcoFlow's own daily energy record. The night-charge writes in full:
    (`developer.ecoflow.com`). On the add-on's **Configuration** tab, enter them as
    `ECOFLOW_ACCESS_KEY` and `ECOFLOW_SECRET_KEY`. Power does not start without both.
 3. Set `FORECAST_LAT` and `FORECAST_LON` to your site. The defaults are a placeholder; every
-   solar forecast, and so the runway and the night-charge plan, is fetched for these coordinates.
+   solar forecast, and so the runway and the night-charge plan, is fetched for these coordinates,
+   and day is told from night there while a Core's solar is counted at the panel.
 4. Tell Power whether you have a grid connection: `GRID_AVAILABLE` on if you do. Better still,
    name a Home Assistant entity that turns off when the grid drops in `GRID_PRESENCE_ENTITY`. A
    low battery is an emergency only when no grid can carry the house, and the alarms are graded
@@ -266,6 +267,14 @@ Every entity, its unique_id, meaning and unit:
   `ecoflow_battery_discharge_lifetime_kwh` (out). Give each source its power sensor too, or the
   dashboard's Now view gets consumption wrong. Each circuit's energy sensor can be an individual
   device.
+- **A Core with no reading of its own** (offline in the cloud, or its readings stopped). Its
+  battery and solar energy, and its share of Fleet PV and Battery Net, are counted from the
+  panel's meter on its slot, so the counters keep rising. In daylight the two power sensors read
+  unknown until the panel's solar reading has been checked against the Core's charge; the log
+  states each check. When the Core reports again, the jump in its own counters is absorbed, not
+  booked in one hour. Once energy has been counted this way, do not go back to a release that
+  does not count it: Home Assistant would book the battery energy it drops as a negative hour, or
+  as a meter reset ([the energy bridge](https://github.com/tesseractAZ/power/blob/main/docs/reference/07-energy-and-cost.md#22-the-two-accumulation-paths)).
 - **Gap-free history.** Each morning Power imports EcoFlow's own daily energy record into Home
   Assistant's statistics as series named "(EcoFlow ledger)"; pick those for history without the
   gaps restarts leave.
@@ -324,7 +333,10 @@ Power keeps its history in SQLite at `/data/ecoflow.db`. `RECORDER_RETENTION_DAY
 pruned. Home Assistant backups include it while Power keeps running: just before the copy Power
 pauses the database's background tidy-up, and resumes after (on its own after 10 minutes if the
 backup never reports back). **Refresh snapshot** on the Strategy page writes a consistent copy
-to `/share/ecoflow-panel/` for an outside SQLite viewer.
+to `/share/ecoflow-panel/` for an outside SQLite viewer. Power records a device only while it
+reports fresh readings. Readings that earlier versions saved while a device was offline in the
+EcoFlow cloud, its last reading repeated as if new, are moved to a separate table in the same
+database: kept, not deleted, and not used for history, learning or scoring.
 
 ## Troubleshooting
 
@@ -339,6 +351,7 @@ to `/share/ecoflow-panel/` for an outside SQLite viewer.
 | No Home Assistant entities | MQTT discovery is off or cannot reach the broker. | Set `MQTT_DISCOVERY_ENABLED` and the broker options; check the log. |
 | Entities read unavailable | The add-on is stopped or its state messages stopped. | Check the add-on and broker logs. |
 | Circuit entities missing | They appear once the first poll lists the circuits. | Wait a minute after start. |
+| History shows a gap for a device | The EcoFlow cloud listed it offline, so Power had no fresh reading and recorded nothing. After 6 hours in which the other devices kept reporting, a "Device telemetry gap" warning is pushed. | Check the device's Wi-Fi and the EcoFlow app; recording resumes with its first reading. |
 | The supervised night charge was not armed | The notice reached no channel, or arming was refused. | Set `NOTIFY_CHANNEL` to `ha`; the card and the notice name the reason. |
 | Cost figures look flat | The tariff is not confirmed. | Enter the rates, then `TARIFF_APS_RATES_CONFIRMED`. |
 | "Setting changed" notification | A setting was changed outside Power, usually in the EcoFlow app. | Confirm the change was yours. |

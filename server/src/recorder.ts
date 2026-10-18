@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
-import { SnapshotStore, FleetSnapshot } from './snapshot.js';
+import { SnapshotStore, FleetSnapshot, type DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
 import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns, findShp2 } from './shp2Membership.js';
@@ -14,6 +14,20 @@ import { localParts } from './tariff.js';
 import { resolveRetentionDays } from './retention.js';
 // v1.187.20 — the backup window (checkpoints held still while a Home Assistant backup copies /data).
 import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './backupWindow.js';
+// v1.188.1 — held readings: the write gate, the held-span log and the exclusion of held rows.
+import {
+  createHeldSamples, projectionRecordable, heldSinceMs, HELD_SCAN_EVERY_MS, RECORD_FRESH_MS, HELD_RETURN_GAP_MS,
+  createHeldGapLog, HELD_ENERGY_BRIDGE_MAX_MS, HELD_GATE_PERSIST_EVERY_MS,
+  type HeldSpan, type HeldScanSummary,
+} from './heldSamples.js';
+export { projectionRecordable, RECORD_FRESH_MS } from './heldSamples.js';
+export type { HeldSpan, HeldScanSummary } from './heldSamples.js';
+// v1.188.1 — battery and solar energy metered at the panel's source slots while a home Core is dark.
+import {
+  createEnergyBridge, ownEnergyUntil, handsBack, slotPvWatts, bridgeSite,
+  projectedPackKeys, projectionPacksComplete,
+  type BridgedFleetFlow, type BridgeRollupResult, type EnergyBridgeDebug, type OnlineFlow,
+} from './energyBridge.js';
 
 interface MetricSample {
   sn: string;
@@ -73,6 +87,24 @@ export interface TelemetryGap {
    *  writing. The silence was found six weeks later, by reading a forecast
    *  table, only because it had corrupted the night-charge basis gate. */
   sn?: string;
+  /** v1.188.1 (dry run) — on a per-device record whose start was moved EARLIER, the start it was
+   *  first filed with. Its alert id (alerts.ts deviceGapAlertId) stays keyed on this one, so the
+   *  push and digest dedupe hold for the same blackout; `startMs` is then the start of the device's
+   *  held span, its newest row kept in samples (v1.188.1 review 3: its last fresh reading, or a
+   *  restated row left there). Absent while the start never moved. See recordTelemetryGap. */
+  alertStartMs?: number;
+  /** v1.188.1 (dry run) — on an in-process FLEET gap: the home devices the freshness gate held
+   *  while the recorder kept evaluating the fleet and found no recordable home reading (`shadow`:
+   *  the panel's cloud-shadow latch; otherwise content older than RECORD_FRESH_MS). Present only
+   *  when the gate explains the silence — evaluations ran through it, none more than
+   *  RECORD_FRESH_MS apart (v1.188.1 review 2) — so the alert does not blame a broker stall.
+   *  v1.188.1 (review 6) — `replayed` (present only when true): not held by the gate, but written
+   *  restating a reading the held-sample scan had moved (record()'s heldReplayFrom). */
+  held?: Array<{ sn: string; shadow: boolean; replayed?: boolean }>;
+  /** v1.188.1 (review 3) — with `held`: the home devices those evaluations found with FRESH
+   *  content and nothing measurable (no row to write), never held in the silence. Present only when
+   *  there are some, so the alert does not say that every home device it read was held. */
+  unmeasured?: string[];
 }
 
 /**
@@ -118,6 +150,28 @@ export function seededDeviceDarkMs(
   const span = fleetAnchorMs == null ? 0 : Math.max(0, fleetAnchorMs - seedMs);
   const beforeOutage = fleetAnchorMs == null ? 0 : Math.max(0, span - fleetDarkOverlapMs(fleetDarkWindows, seedMs, fleetAnchorMs));
   return beforeOutage + Math.max(0, sinceFirstHomeInsertMs);
+}
+
+/**
+ * v1.188.1 (review) — how long a device that HAS written in this process has been dark: the time
+ * since its last sample less every fleet-dark window in it. PURE.
+ *
+ * The same rule as seededDeviceDarkMs: a device is charged only with time in which another home
+ * device could report. Before the freshness gate the in-process branch never needed it: the
+ * first fresh write after a fleet-wide silence came with every device that had a projection
+ * (each restated because its heartbeat was due), so every clock was reset before the sweep ran.
+ * With the gate a device is in the batch only once its OWN content lands, and quota and MQTT
+ * deltas arrive device by device. Measured as now − last, a 7 h internet outage filed every
+ * device but the first to answer as dark for 7 h, the moment the first one answered.
+ * `fleetDarkWindows` are the gap ledger's fleet records plus the silence the current batch is
+ * ending (record() files that one only after the sweep).
+ */
+export function inProcessDeviceDarkMs(
+  lastMs: number,
+  nowMs: number,
+  fleetDarkWindows: ReadonlyArray<{ startMs: number; endMs: number }> = [],
+): number {
+  return Math.max(0, nowMs - lastMs - fleetDarkOverlapMs(fleetDarkWindows, lastMs, nowMs));
 }
 
 /** v1.154.0 review — length of the UNION of `windows`, clipped to [fromMs, toMs]. PURE. */
@@ -236,6 +290,25 @@ export function resolveDeferredRestartGap(inputs: {
   return { action: 'hold' };
 }
 
+/**
+ * v1.188.1 — was the stop before this boot deliberate? PURE. `markerTs` is the clean-shutdown
+ * marker close() wrote (null when the last exit was not clean); `maxTs` the restart gap's start: the
+ * newest persisted home sample, or the last evaluation that held the home devices when that is
+ * later (the held-evaluation marker, createRecorder).
+ *
+ * v1.14.0 required the marker within one heartbeat of that sample, on EITHER side, which assumed
+ * the newest sample was always within a heartbeat of the stop. That held only because the
+ * recorder restated a held device's last reading every 5 minutes: with the freshness gate, a
+ * deploy made while every home device was offline in the cloud (or the internet was down) finds
+ * its newest sample hours before the stop, and the deliberate stop would be ledgered as a power
+ * loss ("System outage — the Pi lost power", the power-outage count). A marker written AFTER the
+ * last fresh sample means the process stopped deliberately while it was up and seeing nothing.
+ * A marker older than that sample, by more than a heartbeat, predates it and proves nothing.
+ */
+export function cleanShutdownWasGraceful(markerTs: number | null, maxTs: number | null): boolean {
+  return markerTs != null && maxTs != null && markerTs >= maxTs - MAX_INTERVAL_MS;
+}
+
 // v0.13.1 — pseudo-device + metric names for the persisted weather-irradiance
 // series (the durable GHI backfill, see recordWeatherGhi). Stored under SN
 // "weather" so it shares the samples table + query() path with real devices
@@ -303,6 +376,13 @@ export function clampLifetimeDip(
   if (dip > 0 && dip <= maxDipWh) return prevEmittedTotalWh - persistedWh;
   return pendingWh;
 }
+
+/** v1.188.1 — the lifetime counters whose contributors the energy bridge changes (a home Core
+ *  handed to it, or back) hold a dip up to this, not 50 Wh. Their rows only grow, so a lower
+ *  total between rollups is pending energy the read path no longer sees, never a reset; a genuine
+ *  re-zero (a replaced database) is far larger and still passes through. */
+export const LIFETIME_HOLD_KEYS: ReadonlySet<string> = new Set(['fleet_pv_wh', 'fleet_grid_import_wh']);
+export const LIFETIME_HOLD_DIP_WH = 5_000;
 
 // v0.13.0 — per-pack lifetime baseline (absolute factory-register snapshot
 // captured the first time a (sn, packNum) pair is seen). Home totals use
@@ -434,6 +514,31 @@ export interface Recorder {
   readNightCalibration: () => NightCalibration | null;
   /** v1.38.0 (WS2) — upsert the singleton calibration row (id forced to 1). */
   upsertNightCalibration: (c: NightCalibration) => void;
+  /** v1.188.1 — the held spans (heldSamples.ts) overlapping [sinceMs, untilMs] that are not
+   *  restored, oldest first: holds of an hour or more the gate did not record, and stretches of
+   *  held rows moved out of `samples`. Main thread only; OPTIONAL so test stubs and the
+   *  read-only worker keep compiling — a caller treats an absent method as "none". */
+  heldSpans?: (sinceMs: number, untilMs: number) => HeldSpan[];
+  /** v1.188.1 (review 3) — whether `held_samples` holds a row of (sn, metric) with sinceMs ≤ ts ≤
+   *  untilMs: a held reading a capture of that window had integrated. Main thread only; OPTIONAL
+   *  like heldSpans (absent ⇒ unknown). */
+  heldRowsWithin?: (sn: string, metric: string, sinceMs: number, untilMs: number) => boolean;
+  /** v1.188.1 (review 5) — the RESTORED frozen spans overlapping [sinceMs, untilMs]: rows moved
+   *  back to `samples` (the night ledger re-captures a row refused for one). OPTIONAL like
+   *  heldSpans (absent ⇒ none). */
+  restoredHeldSpans?: (sinceMs: number, untilMs: number) => HeldSpan[];
+  /** v1.188.1 — false until the first scan for held rows has finished (or failed), in a
+   *  process that scans; the night-charge capture waits for it. Absent ⇒ ready. */
+  heldSamplesReady?: () => boolean;
+  /** v1.188.1 — run one scan for held rows to completion, synchronously (tests). */
+  scanHeldSamples?: (nowMs?: number) => HeldScanSummary;
+  /** v1.188.1 — move one excluded span's rows back to `samples`, unchanged; returns the rows
+   *  restored. The span is marked restored and never excluded again. */
+  restoreHeldSamples?: (sn: string, startMs: number) => number;
+  /** v1.188.1 (review) — the samples generation (heldSamples.ts SAMPLES_GENERATION_SQL): it moves
+   *  whenever rows leave `samples` or come back, so a reader's memo of a closed day is stale.
+   *  Both recorders implement it; OPTIONAL so test stubs keep compiling (absent ⇒ never moves). */
+  samplesGeneration?: () => number;
   close: () => void;
   /** Force a lifetime-rollup tick (used by tests / on shutdown). */
   rollupLifetime: () => void;
@@ -453,6 +558,15 @@ export interface Recorder {
    *  being carried while their packs are absent from the current snapshot. Performs ZERO
    *  writes and ZERO mutation of the emitted counters. Surfaced at /api/debug/battery-lifetime. */
   batteryLifetimeDebug: () => BatteryLifetimeDebug;
+  /** v1.188.1 — Fleet PV and Battery Net with every DARK home slot metered at the panel
+   *  (energyBridge.bridgeFleetFlow): `online` is aggregateFleetFlow's sums over the online Cores.
+   *  Both publishers read the two power sensors from it; a dark slot that cannot be bridged
+   *  right now makes both null (publishReadiness `flowBridged`). */
+  bridgedFleetFlow: (
+    online: OnlineFlow,
+    devices: Record<string, DeviceSnapshot>,
+    nowMs: number,
+  ) => BridgedFleetFlow;
 }
 
 /** v0.45.0 — per-pack lifetime in/out detail, shared by batteryLifetimeDebug()
@@ -487,6 +601,10 @@ export interface BatteryLifetimeDebug {
   packs: PackLifetimeDetail[];
   /** sourceSns members whose packs are absent this snapshot but carried via held last-known. */
   offlineHeldMembers: string[];
+  /** v1.188.1 — the energy bridge (energyBridge.ts): the bridged totals the emitted figures above
+   *  include, the packs whose jump will be absorbed on return, the trusted PV fields, per-Core
+   *  bridged energy, each dark slot's power basis, and the last rollup window. */
+  bridge: EnergyBridgeDebug;
 }
 
 /**
@@ -1077,6 +1195,123 @@ export function createRecorder(
 
   const insert = db.prepare(`INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)`);
 
+  // v1.188.1 — held readings (heldSamples.ts): the held-span log, and `held_samples`, where rows
+  // written while a device's readings were held are moved — kept, never deleted — so no consumer
+  // of `samples` reads them as measurements. The callbacks run only after createRecorder returns.
+  // Created AFTER the planner-statistics refresh, like every other prepared statement here: a
+  // statement on `samples` prepared before PRAGMA optimize marks the table as used, and optimize
+  // then re-analyzes it whenever its statistics are 10x off — the full-index ANALYZE on the boot
+  // path that v1.163.0 removed.
+  const retainMsForHeld = resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS) * 24 * 60 * 60 * 1000;
+  const heldSnFirst = db.prepare(SEED_SQL.firstSn);
+  const heldSnNext = db.prepare(SEED_SQL.nextSn);
+  const heldMetricFirst = db.prepare(SEED_SQL.firstMetric);
+  const heldMetricNext = db.prepare(SEED_SQL.nextMetric);
+  const heldNewestOf = db.prepare(SEED_SQL.maxTsOf);
+  type HeldOne = { v: string | null } | undefined;
+  // v1.188.1 — the panels' evaluations, held or fresh, for the lifetime counters (energyPoints).
+  const heldGaps = createHeldGapLog();
+  const heldStore = createHeldSamples(db, {
+    log,
+    retainMs: retainMsForHeld,
+    isExcludedSn: (sn) => SYNTHETIC_SNS.has(sn) || isBenchSpareSn(sn),
+    listSns: () => {
+      const out: string[] = [];
+      for (let sn = (heldSnFirst.get() as HeldOne)?.v ?? null; sn != null; sn = (heldSnNext.get(sn) as HeldOne)?.v ?? null) out.push(sn);
+      return out;
+    },
+    listMetrics: (sn) => {
+      const out: string[] = [];
+      for (let m = (heldMetricFirst.get(sn) as HeldOne)?.v ?? null; m != null; m = (heldMetricNext.get(sn, m) as HeldOne)?.v ?? null) out.push(m);
+      return out;
+    },
+    // A device still on its SEEDED gap clock whose newest persisted sample was a held row now
+    // moved: its clock goes back to the span's start, the newest row of the device kept in samples,
+    // so the per-device sweep measures the silence from where it really began.
+    //
+    // v1.188.1 (review 3) — and so does a clock this process wrote, the device's last written
+    // row, when that row is one of those moved: held rows that passed the gate are what the hourly
+    // scan exists to catch. (The content-clock gate holds a Core whose cached body is replayed
+    // unchanged once its content clock is more than five minutes old, projectionRecordable, so in
+    // this process such a replay writes its first minutes at most: the held rows the scan finds are
+    // those written before v1.188.1, the upgrade boot's, and any that reach samples anyway, while a
+    // marker the gate reads moves with the recorded readings repeating.) Left on the moved row, the
+    // sweep filed the record 6 h after it, a hold late, and from
+    // it: a start at the last held row and a duration short by the whole hold, pushed so, with no
+    // later move to re-date it (redateDeviceGap only edits a record already filed).
+    //
+    // v1.188.1 (dry run) — and a per-device gap record already filed from that held row (by this
+    // boot's sweep before the scan, or by an earlier version: the record was filed from the
+    // pre-move seed) is re-dated to the same last fresh sample, keeping its alert id
+    // (redateDeviceGap). Before, this comment said a later boot's seed "extends the same record":
+    // it did not. That seed reads the kept last fresh row, earlier than the record's start, and
+    // recordTelemetryGap matched a device record only on its exact start, so the next restart
+    // filed a SECOND record with a new id for every Core still dark: four more warnings pushed at
+    // once and Device Telemetry Gaps 24h doubled. recordTelemetryGap now also extends an
+    // overlapping record that starts later (for a record this process never re-dated).
+    //
+    // v1.188.1 (review 4) — the clock goes back also when its row is a restatement the scan read
+    // but has not moved yet (in (endMs, heldThroughMs]), and the device is then HELD from the span's
+    // start (heldReplayFrom): while its writes only restate the same readings, they leave the clock
+    // there and the sweep's record open (record()). A device whose held body is still being written
+    // writes a fresh-stamped row every 5 min, so its clock was always newer than any moved range
+    // (the scan never moves a row younger than 15 min), and each write reset the clock and re-armed
+    // the sweep: no "Device telemetry gap" while the replay lasted, none at all when it ended with
+    // a fresh reading, and one a whole replay late when it ended in silence.
+    //
+    // v1.188.1 (review 5) — and when the clock is a row the scan never read, written after its plan
+    // (the reading phase runs minutes on the Pi before the first move) that only restated the held
+    // values (restatedSince). Held only up to the last restated row the scan read, a heartbeat in
+    // that window left the Core unheld, and its record came at the next hourly scan, or never when
+    // it read fresh before it.
+    //
+    // v1.188.1 (review 6) — restatedSince only for a clock this process wrote. A SEEDED clock is a
+    // persisted row, and the scan (planned after the boot) read it: past the stretch's last restated
+    // row it is not one of its restatements, it is a fresh reading or a later hold's start. The check
+    // reads only this process's writes, so for a seeded device it passed whenever the seed lay within
+    // an hour of the stretch's end: a Core back for 15 min after a 40 h hold, dark again 25 min at
+    // the restart, was held from the hold's start and pushed as dark for 41 h.
+    onMoved: (sn, startMs, endMs, heldThroughMs, heldValues) => {
+      const clock = lastInsertBySn.get(sn);
+      const through = Math.max(endMs, heldThroughMs);
+      if (clock != null && clock > startMs && (clock <= through || (!seededNotYetWritten.has(sn) && restatedSince(sn, through, heldValues)))) {
+        lastInsertBySn.set(sn, startMs);
+        clockBeforeMove.set(sn, clock);
+        heldReplayFrom.set(sn, { startMs, values: heldValues, throughMs: through });
+        returnedDuringScan.delete(sn); // held again: the sweep files it from the span's start
+        pullFleetClockBack();
+      } else {
+        // v1.188.1 (review 6) — a device whose first write came while the sweep waited for the
+        // first scan (returnedDuringScan), from a clock that was one of the rows just moved: its
+        // darkness began at the span's start.
+        const back = returnedDuringScan.get(sn);
+        if (back != null && back.clockMs > startMs && back.clockMs <= through) back.clockMs = startMs;
+      }
+      redateDeviceGap(sn, startMs, endMs);
+    },
+    // v1.188.1 (review 2) — a restored span's rows are back in samples, so what the move re-dated
+    // goes back too: the gap clock to the row it read (when nothing was written since), and the
+    // device's gap record to the start it was filed with (undateDeviceGap). Left re-dated, the
+    // next boot's seed — that row again — matched neither the record's start nor its overlap (the
+    // record now starts earlier), and a second record with the same alert id was filed: two
+    // alerts with one id and system_device_gap_count_24h doubled.
+    //
+    // v1.188.1 (review 3) — the remembered clock is this span's only when it lies in it. Forgotten
+    // on the restore of ANY span, restoring an older span of the device first lost the clock the
+    // move of its current span had set back: the restore of that span then left the clock at the
+    // span's start, and the next sweep re-dated the restored record to it again.
+    //
+    // v1.188.1 (review 4) — a device held from this span's start (heldReplayFrom) is not held any
+    // more: the restore gave its readings back, and the scan leaves the rest of the hold in samples.
+    // Its remembered clock is then its last restated write, which may lie past the restored end.
+    onRestored: (sn, startMs, endMs) => restoredSpanBack(sn, startMs, endMs),
+  });
+  // The scan runs on its own timer in the add-on (one step per tick) and only on request
+  // elsewhere, so a test process never has its seeded rows moved behind its back.
+  // RECORDER_HELD_SCAN=off stops it; =on schedules it outside the add-on.
+  const heldScanScheduled = process.env.RECORDER_HELD_SCAN !== 'off'
+    && (process.env.SUPERVISOR_TOKEN != null || process.env.RECORDER_HELD_SCAN === 'on');
+
   // Last-recorded state per (sn,metric) for dedupe
   type Last = { ts: number; value: number };
   const last: Map<string, Last> = new Map();
@@ -1138,10 +1373,41 @@ export function createRecorder(
   const perDeviceGapOpen = new Set<string>();
   /** v1.154.0 — SNs whose clock is still the SEEDED one (no write since boot). */
   const seededNotYetWritten = new Set<string>();
+  /** v1.188.1 (review 6) — each device's seeded clock as the boot read it (restoredSpanBack). */
+  const bootSeedBySn = new Map<string, number>();
+  /** v1.188.1 (review 2) — a gap clock the held-sample move set back (onMoved): the row it had
+   *  read, so a restore of that span can set it forward again (onRestored). v1.188.1 (review 3) —
+   *  any clock in the moved rows, seeded or written in this process. */
+  const clockBeforeMove = new Map<string, number>();
+  /** v1.188.1 (review 4) — a device the held-sample move found restating its readings up to its
+   *  newest row (onMoved): the span's start, where its gap clock stays while each write only
+   *  restates the same readings (record()). Cleared by a write in which a metric changed, by a write
+   *  after a silence of more than HELD_RETURN_GAP_MS (a return, which the scan keeps as a reading
+   *  until it has been restated for an hour), and by a restore of that span — (review 5) one made
+   *  by SQL too, which the sweep finds before it files a record from the span's start.
+   *
+   *  v1.188.1 (review 5) — with the stretch's held values and its last restated row (`throughMs`):
+   *  a metric with no write in this process (the dedupe map `last` is empty after a restart, and the
+   *  boot scan holds a Core from its seeded clock) restates the hold when it carries the held value
+   *  within a hole of that row. Compared with nothing, the Core's first write after the boot scan
+   *  ended the hold: its record came at the next hourly scan, or never. */
+  const heldReplayFrom = new Map<string, { startMs: number; values: ReadonlyMap<string, number>; throughMs: number }>();
+  /** v1.188.1 (review 5) — each device's last write in which a metric differed from its previous
+   *  write in this process (onMoved's restatedSince). */
+  const lastChangeBySn = new Map<string, number>();
+  /** v1.188.1 (review 6) — a SEEDED home device's first write in this process while the per-device
+   *  sweep waited for the first held-sample scan (record()): the clock it ended (`clockMs`, set back
+   *  to a span's start by onMoved when it was one of the rows moved), when (`atMs`, wall; `mono`,
+   *  monotonic). The sweep judges it once the scan has finished, as it would have at that write:
+   *  waiting, it saw the device only after the write had moved its clock on, and a Core back
+   *  during the first scan after a 40 h hold got no record and no warning. */
+  const returnedDuringScan = new Map<string, { clockMs: number; atMs: number; mono: number }>();
   /** v1.154.0 — the restart probe's MAX(ts) over home SNs; seededDeviceDarkMs's reference. */
   let bootFleetAnchorMs: number | null = null;
   /** v1.154.0 — monotonic instant of this process's first home-device write; -1 until then. */
   let firstHomeInsertMono = -1;
+  /** v1.188.1 (review 6) — the same instant on the wall clock; 0 until then. */
+  let firstHomeInsertWallMs = 0;
   /** v1.154.0 — SNs written by the recorder's own ticks, never by a device feed. */
   const SYNTHETIC_SNS: ReadonlySet<string> = new Set([WEATHER_SN, FORECAST_SN, NIGHT_CHARGE_SN]);
   // v1.13.0 (review F10 + F22) — the RESTART path uses a tighter floor: a restart
@@ -1179,6 +1445,22 @@ export function createRecorder(
     } catch { return null; }
   }
   let pendingRestartGraceful = false;
+  // v1.188.1 (integration) — the last evaluation in which the gate held a home device's reading with
+  // no recordable home reading beside it (recordSnapshot), kept across a stop for the restart probe.
+  // Before the gate a held reading was restated every heartbeat, so the newest home row was within
+  // minutes of any stop. Behind it a hold writes nothing: a crash 19 min into a panel quota stall,
+  // every Core dark, was filed from the panel's last fresh row ("System outage — alarm was dark
+  // 20 min", a power outage in the count) for a 70 s stop the recorder had evaluated up to. Written at
+  // most once a minute while such a silence lasts. Never deleted: it proves the process was up at that
+  // instant, and the probe takes it only when it is later than the newest home row.
+  const heldEvalPath = resolve(dirname(dbPath), '.held-evaluation');
+  let heldEvalWrittenAtMs = 0;
+  function readHeldEvalMarker(): number | null {
+    try {
+      const ts = Number(readFileSync(heldEvalPath, 'utf8').trim());
+      return Number.isFinite(ts) && ts > 0 ? ts : null;
+    } catch { return null; }
+  }
   const telemetryGapsLog: TelemetryGap[] = (() => {
     try {
       const arr = JSON.parse(readFileSync(gapsPath, 'utf8'));
@@ -1186,7 +1468,155 @@ export function createRecorder(
     } catch { return []; }
   })();
 
-  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean; graceful?: boolean; sn?: string }) {
+  const persistTelemetryGaps = () => {
+    if (telemetryGapsLog.length > GAPS_MAX) telemetryGapsLog.splice(0, telemetryGapsLog.length - GAPS_MAX);
+    try {
+      writeFileSync(gapsPath, JSON.stringify(telemetryGapsLog), { mode: 0o644 });
+    } catch (e: any) {
+      log(`recorder: failed to persist telemetry gap (${e?.message ?? e})`);
+    }
+  };
+
+  /**
+   * v1.188.1 (dry run) — move a per-device record's start EARLIER, to the start of the device's
+   * held span (the newest row of the device kept in samples), keeping its alert id. Moved, not
+   * left: every row after that one, from which the record had been filed, was a held restatement
+   * (now in held_samples, or never written behind the gate). v1.188.1 (review 3) — that row is the
+   * device's last fresh reading, or a restated row left in samples because what it ended did not
+   * continue a hold (heldSamples.ts createFrozenScanner): the newest row in samples either way, so
+   * the next boot's seed reads it and matches the record. A record left at the
+   * later start understates the blackout by the whole hold, and its alert would push "no data for
+   * N min (<the last held row> → …)", a start nothing measured. The id stays on the start the
+   * record was first filed with (`alertStartMs`): the id is the push and digest dedupe key, so a
+   * re-keyed id would push the same blackout again. Per-device records are always in the ≥ 6 h
+   * duration tier (the sweep's own threshold), so the longer duration keeps the tier too.
+   */
+  function moveDeviceGapStart(g: TelemetryGap, toStartMs: number): void {
+    if (!(toStartMs < g.startMs)) return;
+    g.alertStartMs ??= g.startMs;
+    g.startMs = toStartMs;
+    g.durationMs = g.endMs - toStartMs;
+  }
+
+  /** v1.188.1 (dry run) — onMoved: the per-device record of `sn` whose start was one of the rows
+   *  just moved (in (spanStartMs, movedToMs]) starts at the span's start instead. v1.188.1 (review
+   *  3) — logged as the newest row kept in samples: it is not always the last fresh reading.
+   *
+   *  v1.188.1 (review 5) — and any OTHER record of the device that starts in [spanStartMs,
+   *  movedToMs] is the same darkness (every row of the device after the span's start, up to the
+   *  moved end, was a held restatement), inside this one's window, so it is merged into this one
+   *  (dropped). The case is a record filed at the last fresh reading during a first silence, then a
+   *  replay of that reading, then a second silence filed from the last replayed row, with no scan in
+   *  between (scans off or failing, or an upgrade over such a pair): the scan joins the replay to
+   *  the hold, and re-dated alone the second record took the first one's start, two alerts for one
+   *  darkness and Device Telemetry Gaps 24h at 2. The record kept is the one re-dated, filed last
+   *  (the moves run in time order, so an earlier one of the hold is re-dated first), and its id is
+   *  kept (alertStartMs), so nothing is pushed again. */
+  function redateDeviceGap(sn: string, spanStartMs: number, movedToMs: number): void {
+    const g = telemetryGapsLog.find((x) => x.sn === sn && x.startMs > spanStartMs && x.startMs <= movedToMs);
+    if (!g) return;
+    const from = g.startMs;
+    moveDeviceGapStart(g, spanStartMs);
+    let merged = 0;
+    for (let i = telemetryGapsLog.length - 1; i >= 0; i--) {
+      const x = telemetryGapsLog[i];
+      if (x !== g && x.sn === sn && x.startMs >= spanStartMs && x.startMs <= movedToMs) {
+        telemetryGapsLog.splice(i, 1);
+        merged++;
+      }
+    }
+    persistTelemetryGaps();
+    log(`recorder: device telemetry gap of ${sn} re-dated from ${new Date(from).toISOString()} to ${new Date(spanStartMs).toISOString()}, its newest row left in samples (the rows after it were held restatements, moved to held_samples) — ${Math.round(g.durationMs / 60_000)} min, the same record${merged > 0 ? `; ${merged} other record(s) of the device from that darkness merged into it` : ''}`);
+  }
+
+  /** v1.188.1 (review 5) — onMoved: has every write of `sn` this process made after `throughMs`
+   *  (the last restated row the scan read) restated the held values, the last within a hole of it?
+   *  `lastChangeBySn` catches a value that changed and changed back; the last write of each metric
+   *  catches a first write in this process that did not carry its held value. */
+  function restatedSince(sn: string, throughMs: number, values: ReadonlyMap<string, number>): boolean {
+    if ((lastChangeBySn.get(sn) ?? Number.NEGATIVE_INFINITY) > throughMs) return false;
+    if ((lastInsertBySn.get(sn) ?? Number.POSITIVE_INFINITY) - throughMs > HELD_RETURN_GAP_MS) return false;
+    const prefix = `${sn}|`;
+    for (const [k, w] of last) {
+      if (w.ts > throughMs && k.startsWith(prefix) && values.get(k.slice(prefix.length)) !== w.value) return false;
+    }
+    return true;
+  }
+
+  /** v1.188.1 (review 2/4) — onRestored, and (review 5) the sweep when it finds a span restored by
+   *  SQL: the rows of `sn` in (startMs, endMs] are back in samples, so the gap clock the move set
+   *  back goes forward again, the device is no longer held from the span's start, and a gap record
+   *  re-dated to it returns to the start it was filed with. */
+  function restoredSpanBack(sn: string, startMs: number, endMs: number): void {
+    const before = clockBeforeMove.get(sn);
+    const replayed = heldReplayFrom.get(sn)?.startMs === startMs;
+    if (before != null && before > startMs && (before <= endMs || replayed)) {
+      if (lastInsertBySn.get(sn) === startMs) lastInsertBySn.set(sn, before);
+      clockBeforeMove.delete(sn);
+    } else if (lastInsertBySn.get(sn) === startMs && bootSeedBySn.get(sn) === startMs) {
+      // v1.188.1 (review 6) — a clock no move of this process set back: the span was moved before a
+      // restart, so the boot seeded the span's start (the newest row then left in samples), and the
+      // device has not written since. The newest row now (what the next boot would seed) is the last
+      // row moved back. Left at the span's start, the sweep filed the record from there once it was
+      // 6 h old: "no data for 372 min (09:00 → 15:12)" for a Core whose restored rows ran to 12:00.
+      const newest = newestRowOf(sn);
+      if (newest > startMs) lastInsertBySn.set(sn, newest);
+    }
+    // v1.188.1 (review 6) — and the fleet clock, when this device's restored rows are newer than
+    // the last fresh home write (pullFleetClockBack set it back while every home device was held).
+    const clock = lastInsertBySn.get(sn) ?? 0;
+    if (lastHomeInsertTs > 0 && clock > lastHomeInsertTs && !isBenchSpareSn(sn)) lastHomeInsertTs = clock;
+    if (replayed) heldReplayFrom.delete(sn);
+    undateDeviceGap(sn, startMs, endMs);
+  }
+
+  /** v1.188.1 (review 6) — the newest row of `sn` in samples, 0 when it has none: the boot seed's
+   *  MAX(ts) per (sn, metric), one index SEARCH per series. */
+  function newestRowOf(sn: string): number {
+    let newest = 0;
+    for (let m = (heldMetricFirst.get(sn) as HeldOne)?.v ?? null; m != null; m = (heldMetricNext.get(sn, m) as HeldOne)?.v ?? null) {
+      const ts = Number((heldNewestOf.get(sn, m) as { v: number | bigint | null } | undefined)?.v ?? 0);
+      if (ts > newest) newest = ts;
+    }
+    return newest;
+  }
+
+  /**
+   * v1.188.1 (review 6) — onMoved held a device from a span's start: the fleet clock
+   * (`lastHomeInsertTs`) goes back to the newest gap clock of any home device, not before this
+   * process's first home write, when that is earlier. Every home write after it restated a reading
+   * the scan has now found held (record() no longer counts such a write as a home insert). Held
+   * rows that passed the gate (onMoved: a Core's replay the content-clock gate holds after its first
+   * minutes, so as a rule rows written before v1.188.1) are such writes: with the panel
+   * held behind its shadow latch, those writes kept the fleet clock current, no fleet silence was
+   * ever seen, and at 6 h each device got a per-device warning saying that "other home devices
+   * kept reporting" while none had a fresh reading. The fleet gap is then filed when a fresh home
+   * reading comes, from that clock (the time no device could report is charged to none of them).
+   */
+  function pullFleetClockBack(): void {
+    if (lastHomeInsertTs <= 0) return;
+    let fleetClock = 0;
+    for (const [x, ms] of lastInsertBySn) if (!SYNTHETIC_SNS.has(x) && !isBenchSpareSn(x) && ms > fleetClock) fleetClock = ms;
+    if (fleetClock < lastHomeInsertTs) lastHomeInsertTs = Math.max(fleetClock, firstHomeInsertWallMs);
+  }
+
+  /** v1.188.1 (review 2) — onRestored: the per-device record of `sn` re-dated to the span's start
+   *  goes back to the start it was filed with, a row in (spanStartMs, restoredToMs] that is back in
+   *  samples. Its id never changed (alertStartMs keyed it), so nothing is pushed again. */
+  function undateDeviceGap(sn: string, spanStartMs: number, restoredToMs: number): void {
+    const g = telemetryGapsLog.find((x) => x.sn === sn && x.startMs === spanStartMs && x.alertStartMs != null && x.alertStartMs > spanStartMs && x.alertStartMs <= restoredToMs);
+    if (!g) return;
+    g.startMs = g.alertStartMs!;
+    delete g.alertStartMs;
+    g.durationMs = g.endMs - g.startMs;
+    persistTelemetryGaps();
+    log(`recorder: device telemetry gap of ${sn} returned to ${new Date(g.startMs).toISOString()}, the start it was filed with (its held span was restored to samples) — ${Math.round(g.durationMs / 60_000)} min, the same record`);
+  }
+
+  /** v1.188.1 (review 6) — the end of the restored span of `sn` that starts at `startMs`, or −∞. */
+  const restoredEndFrom = (sn: string, startMs: number): number => heldStore.restoredSpanFrom(sn, startMs)?.endMs ?? Number.NEGATIVE_INFINITY;
+
+  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean; graceful?: boolean; sn?: string; held?: TelemetryGap['held']; unmeasured?: TelemetryGap['unmeasured'] }) {
     // v0.80.0 — an ONGOING blackout re-detects at EVERY boot with the same
     // startMs (no home sample landed in between), e.g. consecutive restarts
     // inside one multi-hour power outage. Extend the existing record in place
@@ -1198,28 +1628,64 @@ export function createRecorder(
       // would share the fleet record's identity and a device blackout could
       // silently extend an unrelated restart-spanning gap.
       ? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs === startMs)
+        // v1.188.1 (dry run) — or on an OVERLAPPING record of that device that starts later: the
+        // same blackout, filed from a later instant. Its start was a held row that has since been
+        // moved, and this boot's seed reads the kept last fresh row, earlier. Matched only on the
+        // exact start, the next restart filed a second record (a new id: one more pushed warning
+        // per Core still dark, and system_device_gap_count_24h doubled). The record is extended
+        // and its start moved to this one (moveDeviceGapStart), its id kept. A device that wrote
+        // since that record starts its next gap after the record's end, so it never matches.
+        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && startMs < g.startMs && g.startMs <= endMs)
+        // v1.188.1 (review 4) — or on a record of that device whose window holds this start: rows
+        // after the record's start are in samples again (a restore), so the seed reads one of them,
+        // and the device wrote nothing after the record's end (its next gap would start past it).
+        //  - a re-dated record whose start it was FILED with is that row (review 2: a restore by SQL,
+        //    which onRestored never sees): the record returns to it, its id unchanged (below);
+        //  - a record filed at a moved span's start — no alertStartMs, nothing re-dated — keeps the
+        //    start it was filed with (the warning's original time) and is extended. Matched only on
+        //    the start a re-dated record was filed with (review 2's rule), the next boot after a
+        //    restore of its span filed a second record with a new id: a second pushed warning for
+        //    the same darkness, and system_device_gap_count_24h doubled.
+        // v1.188.1 (review 6) — the window reaches to the end of a restored span that starts where
+        // the record does (restoredEndFrom): the record of a replayed Core is filed 6 h into the
+        // replay, while the replay is still being written, and the hourly scans move the replay on
+        // past the record's end (its detection time). Restored, the replay's last row is the next
+        // boot's seed, past that end, and the boot filed a second record with a new id.
+        ?? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs < startMs && (startMs <= g.endMs || startMs <= restoredEndFrom(opts.sn!, g.startMs)))
       : opts?.restartSpanning
         ? telemetryGapsLog.find((g) => g.restartSpanning === true && g.startMs === startMs)
         : undefined;
     const gap: TelemetryGap = prior ?? { startMs, endMs, durationMs: endMs - startMs, detectedAt: endMs };
+    let movedFrom: number | null = null;
+    let returnedFrom: number | null = null;
+    /** v1.188.1 (review 4) — matched on a start inside the record's window: it keeps its own start. */
+    let keptFrom: number | null = null;
     if (prior) {
+      if (startMs < prior.startMs) movedFrom = prior.startMs;
+      if (opts?.sn && startMs > prior.startMs && prior.alertStartMs !== startMs) keptFrom = startMs;
+      if (prior.alertStartMs === startMs && startMs > prior.startMs) {
+        returnedFrom = prior.startMs;
+        prior.startMs = startMs;
+        delete prior.alertStartMs;
+      }
       prior.endMs = endMs;
-      prior.durationMs = endMs - startMs;
+      prior.durationMs = endMs - prior.startMs;
       prior.detectedAt = endMs;
+      moveDeviceGapStart(prior, startMs);
     } else {
       if (opts?.restartSpanning) gap.restartSpanning = true;
       if (opts?.graceful) gap.graceful = true;
       if (opts?.sn) gap.sn = opts.sn;
+      if (opts?.held && opts.held.length > 0) {
+        gap.held = opts.held;
+        if (opts.unmeasured && opts.unmeasured.length > 0) gap.unmeasured = opts.unmeasured;
+      }
       telemetryGapsLog.push(gap);
     }
-    if (telemetryGapsLog.length > GAPS_MAX) telemetryGapsLog.splice(0, telemetryGapsLog.length - GAPS_MAX);
-    try {
-      writeFileSync(gapsPath, JSON.stringify(telemetryGapsLog), { mode: 0o644 });
-    } catch (e: any) {
-      log(`recorder: failed to persist telemetry gap (${e?.message ?? e})`);
-    }
+    persistTelemetryGaps();
     const mins = Math.round(gap.durationMs / 60_000);
-    const range = `${new Date(startMs).toISOString()} → ${new Date(endMs).toISOString()}`;
+    // v1.188.1 (review 4) — the record's own window (the seed's start can lie inside it).
+    const range = `${new Date(gap.startMs).toISOString()} → ${new Date(gap.endMs).toISOString()}`;
     // Both variants share the "TELEMETRY GAP — no home-device samples for N min"
     // stem so log scanners bucket them together; only the tail distinguishes a
     // restart-spanning blackout (v0.80.0) from an in-process stall (v0.30.0).
@@ -1227,12 +1693,19 @@ export function createRecorder(
       // v1.150.0 — a SINGLE device went dark while the rest of the fleet kept
       // writing. Named separately because the fleet stem would be a lie: home
       // samples were arriving the whole time, just not from this SN.
-      log(`recorder: ⚠ DEVICE TELEMETRY GAP — ${opts.sn} wrote no samples for ${mins} min (${range}) while other home devices kept reporting; anything summed over the fleet in that window UNDER-COUNTS`);
+      const redated = movedFrom != null
+        ? ` (the same record, re-dated from ${new Date(movedFrom).toISOString()} to its newest row left in samples)`
+        : returnedFrom != null ? ` (the same record, returned from ${new Date(returnedFrom).toISOString()} to the start it was filed with: its held rows are back in samples)`
+          : keptFrom != null ? ` (the same record: its newest row, ${new Date(keptFrom).toISOString()}, is a held row moved back to samples, and the record keeps the start it was filed with)` : '';
+      log(`recorder: ⚠ DEVICE TELEMETRY GAP — ${opts.sn} wrote no samples for ${mins} min (${range}) while other home devices kept reporting${redated}; anything summed over the fleet in that window UNDER-COUNTS`);
     } else if (opts?.restartSpanning) {
       const cause = opts?.graceful ? 'a deliberate add-on stop/update' : 'host down or add-on stopped';
       log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}) spanning a restart (${cause}); history in that window is unrecoverable`);
     } else {
-      log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}); writes resumed`);
+      // v1.188.1 (dry run) — when the gate held every home device it read, say so; (review 3) and
+      // name a device read fresh with nothing measurable.
+      const why = gap.held == null ? '' : ` — the recorder kept evaluating the fleet but held ${gap.held.map((h) => `${h.sn} (${h.shadow ? 'cloud shadow' : h.replayed ? 'restating readings the held-sample scan moved' : 'no fresh content'})`).join(', ')}${gap.unmeasured == null ? '' : `, and ${gap.unmeasured.join(', ')} reported nothing measurable`}`;
+      log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range})${why}; writes resumed`);
     }
   }
 
@@ -1289,6 +1762,7 @@ export function createRecorder(
       }
       if (lastTs <= 0) continue;                      // a corrupt ts=0 row must not seed a decades-long gap
       lastInsertBySn.set(sn, lastTs);
+      bootSeedBySn.set(sn, lastTs);
       seededNotYetWritten.add(sn);
       seeded++;
     }
@@ -1328,11 +1802,16 @@ export function createRecorder(
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
     const maxTs = row?.maxTs == null ? null : Number(row.maxTs);
     bootFleetAnchorMs = maxTs;
-    // v1.14.0 — a clean-shutdown marker within a heartbeat of the pre-boot anchor
-    // means the preceding stop was deliberate (deploy/update), not a power loss.
+    // v1.188.1 (integration) — the dark window starts at the last evaluation that held the home
+    // devices when that is later than the newest home row (heldEvalPath): up to it the recorder was
+    // evaluating them, as v1.188.0's restated rows showed.
+    const heldEvalTs = readHeldEvalMarker();
+    const anchorTs = maxTs != null && heldEvalTs != null && heldEvalTs > maxTs ? heldEvalTs : maxTs;
+    // v1.14.0 — a clean-shutdown marker means the preceding stop was deliberate
+    // (deploy/update), not a power loss. v1.188.1 — one-sided: see cleanShutdownWasGraceful.
     const markerTs = readCleanShutdownMarker();
-    const graceful = markerTs != null && maxTs != null && Math.abs(markerTs - maxTs) <= MAX_INTERVAL_MS;
-    const decision = classifyRestartGap(maxTs, Date.now(), RESTART_GAP_FLOOR_MS);
+    const graceful = cleanShutdownWasGraceful(markerTs, anchorTs);
+    const decision = classifyRestartGap(anchorTs, Date.now(), RESTART_GAP_FLOOR_MS);
     if (decision.kind === 'record') {
       recordTelemetryGap(decision.startMs, decision.endMs, { restartSpanning: true, graceful });
     } else if (decision.kind === 'defer') {
@@ -1383,7 +1862,60 @@ export function createRecorder(
     }
   };
 
-  function record(samples: MetricSample[]) {
+  /**
+   * v1.188.1 (dry run) — what explains a fleet silence. Before the gate a held projection was
+   * restated every 5 min, so a fleet gap meant no change event reached the recorder at all; the
+   * in-process alert named that an MQTT/broker stall. With the gate, a silence in which the
+   * recorder kept evaluating the fleet and found every home device held (the panel shadowed or
+   * stale while no Core has a projection, say) files the same 15-min gap, and the alert says what
+   * was measured instead (alerts.ts outageAlerts).
+   *
+   * v1.188.1 (review 2) — `silenceHeld` is the home devices the gate held in the evaluations since
+   * the last one with a RECORDABLE home reading (written, or skipped by the dedupe, which happens
+   * only within one 5-min heartbeat of the last home write), `shadow` once any of them was the
+   * panel's cloud shadow. `silenceEvalAtMs` is the last evaluation and `silenceEvalGapMs` the
+   * longest interval between two since then. It explains a gap only when the evaluations went on
+   * through it, none more than SILENCE_EVAL_MAX_GAP_MS apart and the last that close to its end
+   * (silenceHeldList). Filled from every evaluation that WROTE no home row, a panel reading the
+   * dedupe skipped added every held Core, and a true stall minutes later, with no evaluation at
+   * all, was then filed as "held readings".
+   *
+   * v1.188.1 (review 3) — `silenceUnmeasured` is the home devices those evaluations read with fresh
+   * content and nothing measurable (an SHP2 body with no channel and no grid reading: the v1.175.0
+   * "panel that reported nothing"). They were read and not held, so the alert names them instead
+   * of saying that every home device it read was held (silenceUnmeasuredList). A device held at
+   * any point of the silence is named as held only.
+   */
+  const SILENCE_EVAL_MAX_GAP_MS = RECORD_FRESH_MS;
+  const silenceHeld = new Map<string, boolean>();
+  const silenceUnmeasured = new Set<string>();
+  /** v1.188.1 (review 6) — the home devices those evaluations read and found held from a moved
+   *  span's start (heldReplayFrom): written, restating what the scan had moved. */
+  const silenceReplayed = new Set<string>();
+  let silenceEvalAtMs = Date.now();
+  let silenceEvalGapMs = 0;
+  const resetSilence = (atMs: number) => {
+    silenceHeld.clear();
+    silenceUnmeasured.clear();
+    silenceReplayed.clear();
+    silenceEvalAtMs = atMs;
+    silenceEvalGapMs = 0;
+  };
+  const bySn = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  /** What the gate held through a silence that ends now, or undefined when that does not explain it.
+   *  v1.188.1 (review 6) — with the devices held from a moved span's start (`replayed`), named so only
+   *  when the gate never held them in the silence. */
+  const silenceHeldList = (nowMs: number): TelemetryGap['held'] => {
+    if (silenceHeld.size + silenceReplayed.size === 0 || Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs) > SILENCE_EVAL_MAX_GAP_MS) return undefined;
+    const out: NonNullable<TelemetryGap['held']> = [...silenceHeld].map(([sn, shadow]) => ({ sn, shadow }));
+    for (const sn of silenceReplayed) if (!silenceHeld.has(sn)) out.push({ sn, shadow: false, replayed: true });
+    return out.sort((a, b) => bySn(a.sn, b.sn));
+  };
+  /** v1.188.1 (review 3) — the home devices read fresh with nothing measurable and never held in
+   *  the silence (recorded only beside silenceHeldList). */
+  const silenceUnmeasuredList = (): string[] => [...silenceUnmeasured].filter((sn) => !silenceHeld.has(sn) && !silenceReplayed.has(sn)).sort(bySn);
+
+  function record(samples: MetricSample[]): void {
     if (samples.length === 0) return;
     const now = Date.now();
     const tx = db.prepare('BEGIN');
@@ -1395,14 +1927,37 @@ export function createRecorder(
         if (typeof s.value !== 'number' || !Number.isFinite(s.value)) continue;
         if (!shouldRecord(s.sn, s.metric, s.value, now)) continue;
         insert.run(now, s.sn, s.metric, s.value);
+        const prevWrite = last.get(`${s.sn}|${s.metric}`);
         last.set(`${s.sn}|${s.metric}`, { ts: now, value: s.value });
         written++;
+        // v1.188.1 (review 6) — a seeded device's first write while the sweep waits for the first
+        // scan (below): judged once the scan has finished, from the clock this write ends.
+        if (seededNotYetWritten.has(s.sn) && heldScanScheduled && !heldStore.isReady() && !isBenchSpareSn(s.sn)) {
+          const clockMs = lastInsertBySn.get(s.sn);
+          if (clockMs != null) returnedDuringScan.set(s.sn, { clockMs, atMs: now, mono: performance.now() });
+        }
+        seededNotYetWritten.delete(s.sn); // v1.154.0 — its clock is in-process now, not seeded
+        // v1.188.1 (review 4) — a device held from a moved span's start (heldReplayFrom) whose write
+        // restates its metric's previous value within a hole of it is the same hold: its clock stays
+        // at that start and its record open. (Exactly the scanner's rule: a row equal to its metric's
+        // previous row is a restatement, and a gap of up to HELD_RETURN_GAP_MS inside a hold is a hole.)
+        // v1.188.1 (review 5) — a metric not written yet in this process is compared with its held
+        // value and the stretch's last restated row (heldReplayFrom).
+        const hold = heldReplayFrom.get(s.sn);
+        const prevRow = prevWrite ?? (hold == null ? undefined : { ts: hold.throughMs, value: hold.values.get(s.metric) });
+        if (hold != null && prevRow != null && prevRow.value === s.value && now - prevRow.ts <= HELD_RETURN_GAP_MS) {
+          clockBeforeMove.set(s.sn, now);
+          continue;
+        }
+        // v1.188.1 (review 6) — only a write that is not a held restatement is a home insert for
+        // the fleet clock and the sweeps below (pullFleetClockBack).
         if (!isBenchSpareSn(s.sn)) sawHomeInsert = true;
+        heldReplayFrom.delete(s.sn);
+        if (prevWrite != null && prevWrite.value !== s.value) lastChangeBySn.set(s.sn, now);
         // v1.150.0 — per-SN clock for the staleness sweep above. Stamped for
         // every SN including synthetics; the sweep filters what it reports.
         lastInsertBySn.set(s.sn, now);
         perDeviceGapOpen.delete(s.sn);   // it is writing again — re-arm
-        seededNotYetWritten.delete(s.sn); // v1.154.0 — its clock is in-process now, not seeded
       }
       db.prepare('COMMIT').run();
     } catch (e) {
@@ -1420,17 +1975,57 @@ export function createRecorder(
     // fleet clock useless here and this loop necessary.
     if (sawHomeInsert) {
       if (firstHomeInsertMono < 0) firstHomeInsertMono = performance.now();
+      if (firstHomeInsertWallMs === 0) firstHomeInsertWallMs = now;
       // v1.154.0 review — the windows in which NO home device could report.
-      const fleetDark = telemetryGapsLog.filter((g) => g.sn == null);
+      const fleetDark: Array<{ startMs: number; endMs: number }> = telemetryGapsLog.filter((g) => g.sn == null);
+      // v1.188.1 (review) — and the fleet silence THIS batch ends: the block below files it only
+      // after the sweep, and every device not yet back in this poll would be charged with it.
+      // (While a deferred restart gap is armed the in-process detector is suspended, as below.)
+      if (!pendingRestartGap && detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
+        fleetDark.push({ startMs: lastHomeInsertTs, endMs: now });
+      }
+      // v1.188.1 (review 6) — the seeded devices that wrote while this sweep waited for the first
+      // scan, judged now as at their first write (seededDeviceDarkMs at that instant), once each. A
+      // record filed here ends at that write: the device is back, so the sweep does not hold it open.
+      if (returnedDuringScan.size > 0 && (!heldScanScheduled || heldStore.isReady())) {
+        for (const [sn, back] of returnedDuringScan) {
+          if (perDeviceGapOpen.has(sn) || heldReplayFrom.has(sn)) continue; // filed, or held again: the sweep below has it
+          const darkMs = seededDeviceDarkMs(back.clockMs, bootFleetAnchorMs, back.mono - firstHomeInsertMono, fleetDark);
+          if (darkMs > PER_DEVICE_GAP_THRESHOLD_MS) recordTelemetryGap(back.clockMs, Math.max(back.atMs, back.clockMs + darkMs), { sn });
+        }
+        returnedDuringScan.clear();
+      }
       for (const [sn, lastMs] of lastInsertBySn) {
         if (isBenchSpareSn(sn)) continue;            // a bench spare is dark BY DESIGN
         if (perDeviceGapOpen.has(sn)) continue;      // already recorded; do not re-report every batch
         // v1.154.0 — a device still on its SEEDED clock is not charged with the
-        // add-on's own downtime; one that has written since boot is measured as before.
+        // add-on's own downtime. v1.188.1 (review) — one that has written since boot is not
+        // charged with a fleet-wide silence either (inProcessDeviceDarkMs).
         const darkMs = seededNotYetWritten.has(sn)
           ? seededDeviceDarkMs(lastMs, bootFleetAnchorMs, performance.now() - firstHomeInsertMono, fleetDark)
-          : now - lastMs;
+          : inProcessDeviceDarkMs(lastMs, now, fleetDark);
         if (darkMs > PER_DEVICE_GAP_THRESHOLD_MS) {
+          // v1.188.1 (review 5) — not from a SEEDED clock before the first held-sample scan has
+          // finished: the seed is the device's newest row, a held row on the upgrade boot, and the
+          // scan sets it back to the span's start (onMoved). Filed or extended before it, the
+          // warning was dispatched a minute after the boot with that row's start and a duration short
+          // by the whole hold, and the re-date kept the alert id, so the corrected figures were
+          // never pushed (nor the digest's queued title).
+          if (seededNotYetWritten.has(sn) && heldScanScheduled && !heldStore.isReady()) continue;
+          // v1.188.1 (review 5) — a device held from a moved span's start whose span has since been
+          // restored by SQL (architecture 4.4) while this process ran: onRestored never ran, so it
+          // was still held, and a Core that went on restating the restored readings, every row in
+          // samples, was filed 6 h after the span's start and pushed as dark.
+          // v1.188.1 (review 6) — any clock at a restored span's start, whichever process moved the
+          // span: a boot after the move seeds that start (the newest row then left in samples), with
+          // no hold and no clock to give back, and the SQL never reaches onRestored. restoredSpanBack
+          // moves the clock to the newest row back in samples, and the device is judged again from
+          // there; a clock it cannot move (nothing back in samples) is filed from where it is.
+          const restored = heldStore.restoredSpanFrom(sn, lastMs);
+          if (restored != null) {
+            restoredSpanBack(sn, restored.startMs, restored.endMs);
+            if ((lastInsertBySn.get(sn) ?? lastMs) > lastMs) continue;
+          }
           // endMs is clamped so a boot clock still BEHIND the seed (RTC-less Pi before
           // NTP — the restart probe's `defer` case) cannot write a gap ending before it starts.
           recordTelemetryGap(lastMs, Math.max(now, lastMs + darkMs), { sn });
@@ -1482,11 +2077,11 @@ export function createRecorder(
         lastHomeInsertTs = now;
       } else {
         if (detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
-          recordTelemetryGap(lastHomeInsertTs, now);
+          recordTelemetryGap(lastHomeInsertTs, now, { held: silenceHeldList(now), unmeasured: silenceUnmeasuredList() });
         }
         lastHomeInsertTs = now;
       }
-      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now);
+      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now, { held: silenceHeldList(now), unmeasured: silenceUnmeasuredList() });
     }
     // v0.9.74 — silence per-tick chatter. The previous "wrote N samples"
     // line fired every 10 s under normal load (~44 lines/min, ~88 % of
@@ -1549,11 +2144,26 @@ export function createRecorder(
   let recordedSamplesPeak = 0;
   let lastSampleLogAt = Date.now();
 
-  function extract(snap: FleetSnapshot): MetricSample[] {
+  function extract(
+    snap: FleetSnapshot,
+    nowMs: number = Date.now(),
+    held?: Map<string, { sinceMs: number | null; shadow: boolean }>,
+  ): MetricSample[] {
     const out: MetricSample[] = [];
     for (const d of Object.values(snap.devices)) {
       const p = d.projection;
       if (!p) continue;
+      // v1.188.1 — THE FRESHNESS GATE. setDeviceList carries a device's projection across every
+      // /device/list poll (the alarms read it), and quota is fetched only for a device listed
+      // online, so a Core the cloud lists offline keeps its last reading in memory. Every later
+      // change event reached this loop and the 5-min heartbeat re-wrote that reading at `now`:
+      // after the 2026-10-14 outage, ~1,300 rows per Core per hour with nothing changing. A
+      // projection is written only while its content is fresh (projectionRecordable); a held
+      // device leaves a gap, which every consumer of samples already handles.
+      if (!projectionRecordable(d, nowMs)) {
+        held?.set(d.sn, { sinceMs: heldSinceMs(d), shadow: d.contentStaleSinceMs != null });
+        continue;
+      }
       const push = (metric: string, v: number | null | undefined) => {
         if (v == null || !Number.isFinite(v)) return;
         out.push({ sn: d.sn, metric, value: v });
@@ -1650,6 +2260,13 @@ export function createRecorder(
         for (const s of shp.sources) {
           push(`src${s.slot}_pct`, s.batteryPercentage);
           push(`src${s.slot}_temp`, s.emsBatTemp);
+          // v1.188.1 — the panel's per-source PV and input fields, for the energy bridge
+          // (energyBridge.ts) and for checking them against the Cores' own pv_total once those
+          // report: `_pv_w` is the figure the bridge integrates (slotPvWatts), the rest raw.
+          push(`src${s.slot}_pv_w`, slotPvWatts(s));
+          push(`src${s.slot}_pv_hv_w`, s.pvHighWatts);
+          push(`src${s.slot}_pv_lv_w`, s.pvLowWatts);
+          push(`src${s.slot}_in_w`, s.inputWatts);
         }
         for (let i = 0; i < shp.sourceWatts.length; i++) {
           push(`src${i + 1}_w`, shp.sourceWatts[i]);
@@ -1668,6 +2285,56 @@ export function createRecorder(
     return out;
   }
 
+  /** v1.188.1 — one evaluation of the fleet: write what is fresh, log what is held. */
+  function recordSnapshot(snap: FleetSnapshot): void {
+    const nowMs = Date.now();
+    const held = new Map<string, { sinceMs: number | null; shadow: boolean }>();
+    const samples = extract(snap, nowMs, held);
+    // v1.188.1 — each panel this evaluation read, held or fresh, for the lifetime counters' bridge
+    // across a held panel's row gap (heldGaps, energyPoints).
+    for (const d of Object.values(snap.devices)) {
+      if (d.projection?.kind === 'shp2') heldGaps.note(d.sn, held.has(d.sn), nowMs);
+    }
+    record(samples);
+    // v1.188.1 (dry run; review 2) — what explains a silence, if one is under way (silenceHeld). A
+    // recordable home reading, written or not, means the gate held nothing that explains one yet.
+    // v1.188.1 (review 6) — nor does the reading of a device held from a moved span's start
+    // (heldReplayFrom, as record() left it): it restated what the scan found held.
+    if (samples.some((x) => !isBenchSpareSn(x.sn) && !heldReplayFrom.has(x.sn))) {
+      resetSilence(nowMs);
+    } else {
+      silenceEvalGapMs = Math.max(silenceEvalGapMs, nowMs - silenceEvalAtMs);
+      silenceEvalAtMs = nowMs;
+      let heldHome = false;
+      for (const [sn, h] of held) {
+        if (SYNTHETIC_SNS.has(sn) || isBenchSpareSn(sn)) continue;
+        silenceHeld.set(sn, (silenceHeld.get(sn) ?? false) || h.shadow);
+        heldHome = true;
+      }
+      // v1.188.1 (integration) — for the restart probe (heldEvalPath).
+      if (heldHome && nowMs - heldEvalWrittenAtMs >= HELD_GATE_PERSIST_EVERY_MS) {
+        try {
+          writeFileSync(heldEvalPath, String(nowMs), { mode: 0o644 });
+          heldEvalWrittenAtMs = nowMs;
+        } catch { /* advisory: the probe falls back to the newest home row */ }
+      }
+      // v1.188.1 (review 6) — every home sample here restated a hold (the test above).
+      for (const x of samples) if (!isBenchSpareSn(x.sn)) silenceReplayed.add(x.sn);
+      // v1.188.1 (review 3) — read and not held, with nothing to write: fresh content, nothing
+      // measurable (no home sample came from this evaluation at all; review 6: or only a held
+      // restatement, and silenceUnmeasuredList names such a device as held only).
+      for (const d of Object.values(snap.devices)) {
+        if (!d.projection || held.has(d.sn) || SYNTHETIC_SNS.has(d.sn) || isBenchSpareSn(d.sn)) continue;
+        silenceUnmeasured.add(d.sn);
+      }
+    }
+    try {
+      heldStore.noteGate(held, nowMs);
+    } catch (e: any) {
+      log(`recorder: held-span log failed (${e?.message ?? e})`);
+    }
+  }
+
   // Subscribe to store changes, but coalesce: bursts of MQTT messages → one extract per tick.
   let pending = false;
   store.on('change', () => {
@@ -1676,12 +2343,20 @@ export function createRecorder(
     setImmediate(() => {
       pending = false;
       try {
-        record(extract(store.get()));
+        recordSnapshot(store.get());
       } catch (e: any) {
         log(`recorder: record failed ${e?.message ?? e}`);
       }
     });
   });
+
+  // v1.188.1 — the scan for held rows already written: first a minute after boot (the device
+  // roster is published by then, so bench spares are recognised), then hourly. One step per timer
+  // tick (heldSamples.ts scanInSteps), so the alarm loop is never held for long.
+  const heldScanFirst = heldScanScheduled ? setTimeout(() => heldStore.scanInSteps(), 60_000) : null;
+  heldScanFirst?.unref();
+  const heldScanTimer = heldScanScheduled ? setInterval(() => heldStore.scanInSteps(), HELD_SCAN_EVERY_MS) : null;
+  heldScanTimer?.unref();
 
   // Retention sweep every hour: drop samples older than the configured
   // retention (v1.51.0 — RECORDER_RETENTION_DAYS, default 30). The durable
@@ -1696,6 +2371,9 @@ export function createRecorder(
       const cutoff = Date.now() - RETAIN_MS;
       const res = prune.run(cutoff);
       if (res.changes && Number(res.changes) > 0) log(`recorder: pruned ${res.changes} old samples`);
+      // v1.188.1 — held rows age off with the samples they were part of.
+      const h = heldStore.prune(Date.now());
+      if (h.rows > 0) log(`recorder: pruned ${h.rows} old held samples`);
     } catch (e: any) {
       log(`recorder: prune failed ${e?.message ?? e}`);
     }
@@ -1704,6 +2382,22 @@ export function createRecorder(
   const queryStmt = db.prepare(
     `SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
   );
+  /**
+   * v1.188.1 — one series as the LIFETIME ENERGY counters read it: the rows of `samples` in
+   * [fromMs, toMs], with a held panel's reading restated every 5 min across each row gap of at most
+   * HELD_ENERGY_BRIDGE_MAX_MS that the gate explains (heldSamples.ts createHeldGapLog): the rows
+   * v1.188.0 wrote at its heartbeat, which the freshness gate no longer writes. Never written to
+   * samples: every other consumer still sees the gap. Read by the watt counters (rollupLifetime,
+   * getLifetimeTotals) and the energy bridge. A series with no held evaluation near the range reads
+   * exactly the rows.
+   */
+  const energyPoints = (sn: string, metric: string, fromMs: number, toMs: number): Array<{ ts: number; value: number }> => {
+    if (!heldGaps.heldWithin(sn, fromMs - HELD_ENERGY_BRIDGE_MAX_MS, toMs)) {
+      return queryStmt.all(sn, metric, fromMs, toMs) as Array<{ ts: number; value: number }>;
+    }
+    const rows = queryStmt.all(sn, metric, fromMs - HELD_ENERGY_BRIDGE_MAX_MS, toMs) as Array<{ ts: number; value: number }>;
+    return heldGaps.restate(sn, rows).filter((p) => p.ts >= fromMs);
+  };
   // v1.19.0 (F17 perf) — window-edge seeks; both ride the (sn, metric, ts)
   // composite index, O(log n) each vs the full-window scan.
   const queryFirstStmt = db.prepare(
@@ -1847,9 +2541,30 @@ export function createRecorder(
   // with aggregateFleetFlow / the live sensors about which Cores are "the home fleet".
   // (Live today: all 3 slots report isConnected=true, so this is a no-op hardening.)
   const sourceSnsOf = (snap: FleetSnapshot): Set<string> => shp2ConnectedDpuSns(snap.devices);
+  /** v1.188.1 (review) — the BMS sum's members: the live source set, plus the accepted set's Cores
+   *  while a change to it is pending (MEMBERSHIP_SUSTAINED_ROLLUPS).
+   *
+   *  v1.188.1 (integration) — and the accepted set alone while the panel reads NO source set (a boot
+   *  with the cloud unreachable or the panel's quota failing: no projection until its first quota
+   *  lands). The empty set is the fallback for a plant with no panel, under which every persisted held
+   *  pack row is a member, the rows a former member left for packs moved to a bench spare included,
+   *  and the orphan guard skips one only while its pack is projected elsewhere: on the live data
+   *  +938.8 kWh Battery Energy In on the first publish after such a boot, stepped back down by the
+   *  v1.98.0 re-seed once the panel returned. The rollup already reads an empty set as no change. */
+  const bmsMembersOf = (snap: FleetSnapshot): Set<string> => {
+    const live = sourceSnsOf(snap);
+    if (!bmsMembershipFp) return live;
+    const accepted = bmsMembershipFp.split(',').filter((sn) => sn !== '');
+    if (live.size === 0) return new Set(accepted);
+    if (pendingMembership == null) return live;
+    return new Set([...live, ...accepted]);
+  };
 
-  const buildContributors = (snap: FleetSnapshot): Record<string, Array<{ sn: string; metric: string }>> => {
-    const out: Record<string, Array<{ sn: string; metric: string }>> = {
+  /** One integrated series of a lifetime key. `untilMs` (v1.188.1): it counts only up to that
+   *  instant; null: not at all (a home Core handed to the energy bridge, ownEnergyUntil). */
+  type Contributor = { sn: string; metric: string; untilMs?: number | null };
+  const buildContributors = (snap: FleetSnapshot, phase: 'read' | 'rollup', nowMs: number): Record<string, Contributor[]> => {
+    const out: Record<string, Contributor[]> = {
       fleet_pv_wh: [],
       fleet_load_wh: [],
       fleet_grid_import_wh: [],
@@ -1857,9 +2572,30 @@ export function createRecorder(
     };
     const devices = Object.values(snap.devices);
     const sourceSns = sourceSnsOf(snap);
+    // v1.188.1 — a DARK home Core (its panel slot connected, the Core with no reading of its own:
+    // cloud-offline, or listed online on a frozen meter or with no reading yet; energyBridge.ts
+    // coreReports) is handed to the energy bridge, metered at its panel slot, at the instant its own
+    // reading stopped: its own pv_total / ac_in count up to that instant and no further (rows past
+    // it are held values, not readings, and the bridge counts that span). A read cuts at once, so a
+    // dark flip between rollups keeps what it already showed; a rollup inside the dwell still counts
+    // the Core itself (ownEnergyUntil). The instant is persisted (energyBridge.offlineHomeCores),
+    // so after a restart, a crash included, the cut falls where it fell before it.
+    const offline = energyBridge.offlineHomeCores(snap.devices, nowMs);
     for (const d of devices) {
       const p = d.projection;
-      if (!p) continue;
+      if (!p) {
+        // v1.188.1 — a dark home Core with no projection (a restart while it is dark: no quota is
+        // fetched for a device listed offline; an online flip before its first quota) keeps its
+        // recorded series up to the same cut, so a crash restart neither drops what the reads
+        // showed nor leaves a span to nobody.
+        const o = offline.get(d.sn);
+        if (o) {
+          const untilMs = ownEnergyUntil(o, phase);
+          out.fleet_pv_wh.push({ sn: d.sn, metric: 'pv_total', untilMs });
+          out.fleet_grid_import_wh.push({ sn: d.sn, metric: 'ac_in', untilMs });
+        }
+        continue;
+      }
       if (p.kind === 'dpu') {
         // v0.9.74 — fleet_pv_wh is the HA Energy Dashboard "lifetime PV
         // production" counter. Only SHP2-connected DPUs deliver power
@@ -1869,8 +2605,9 @@ export function createRecorder(
         // (Same gating logic as fleet_grid_import_wh below — the
         // sourceSns.size === 0 fallback keeps DPU-only setups working.)
         if (sourceSns.size === 0 || sourceSns.has(d.sn)) {
-          out.fleet_pv_wh.push({ sn: d.sn, metric: 'pv_total' });
-          out.fleet_grid_import_wh.push({ sn: d.sn, metric: 'ac_in' });
+          const untilMs = ownEnergyUntil(offline.get(d.sn), phase);
+          out.fleet_pv_wh.push({ sn: d.sn, metric: 'pv_total', untilMs });
+          out.fleet_grid_import_wh.push({ sn: d.sn, metric: 'ac_in', untilMs });
         }
       } else if (p.kind === 'shp2') {
         out.fleet_load_wh.push({ sn: d.sn, metric: 'panel_load' });
@@ -1911,6 +2648,37 @@ export function createRecorder(
   // Each pack is 32S1P (~104 V nominal; 32 series cells whose mV sum to packVoltageMv).
   // fullCap is single-string mAh; Wh = mAh × (32 × 3.2 V) / 1000 = mAh × 0.1024.
   const PACK_MAH_TO_WH = (32 * 3.2) / 1_000;   // = 0.1024 Wh/mAh (was (51.2 * 2)/1_000, same value)
+
+  // v1.188.1 — the energy bridge (energyBridge.ts). It keeps its state in this lifetime table
+  // under `bridge_*` keys, which no ^pack_* / ^circuit_* discovery and no surfaced key set
+  // matches. Its capacity input is each Core's measured full-charge capacity from the recorded
+  // pack{N}_full_cap_mah series (the basis the panel's per-source percent is a fraction of).
+  const CORE_CAPACITY_LOOKBACK_MS = 45 * 24 * 60 * 60 * 1000;
+  const energyBridge = createEnergyBridge({
+    readLifetime,
+    writeLifetime,
+    deleteLifetime: (key) => { lifetimeDeleteStmt.run(key); },
+    listLifetimeKeys,
+    // v1.188.1 — the series as the lifetime counters read them: a held panel's gap that the gate
+    // explains carries its held reading, up to HELD_ENERGY_BRIDGE_MAX_MS (energyPoints), and a gap
+    // still open within that bound holds the bridge's window as it holds the panel counters.
+    query: energyPoints,
+    heldOpen: (sn, fromMs, nowMs) => heldGaps.open(sn, fromMs, nowMs),
+    coreCapacityWh: (sn, nowMs) => {
+      let mah = 0;
+      let packs = 0;
+      for (let k = 1; k <= 15; k++) {
+        const r = queryLastStmt.get(sn, `pack${k}_full_cap_mah`, nowMs - CORE_CAPACITY_LOOKBACK_MS, nowMs) as { ts: number; value: number } | undefined;
+        if (r && Number.isFinite(r.value) && r.value > 0) { mah += r.value; packs += 1; }
+      }
+      return packs > 0 ? mah * PACK_MAH_TO_WH : null;
+    },
+    // The install site for the day/night test, read at each use (FORECAST_LAT / FORECAST_LON).
+    site: () => bridgeSite(config),
+    log,
+  });
+  /** One line per distinct bridge failure: the rollup's other counters must keep advancing. */
+  let lastBridgeError: string | null = null;
 
   // v0.13.0 — per-pack baseline capture. The accu* registers are FACTORY-
   // lifetime counters: packs ship with accuDsgMah > accuChgMah from bench
@@ -2081,7 +2849,10 @@ export function createRecorder(
     // filter the HA Energy Dashboard "battery charged / discharged" tile was
     // ~67% overstated for setups with spare cores.
     const devices = Object.values(snap.devices);
-    const sourceSns = sourceSnsOf(snap);
+    // v1.188.1 (review) — while a changed source set is not yet sustained (bmsMembersOf), the Cores
+    // of the accepted set stay members, so a one-poll isConnect flicker does not drop a Core's held
+    // packs from the live sum.
+    const sourceSns = bmsMembersOf(snap);
     // v0.45.0 — "is this pack a home-fleet member?" uses the EXACT same predicate
     // as the live sum: a DPU passing the sourceSns filter. The empty-set fallback
     // (DPU-only setups / SHP2 not yet seen) matches the live sum's behavior. A
@@ -2092,6 +2863,8 @@ export function createRecorder(
     // Keys passing the filter THIS snapshot (fresh delta path) — used to avoid
     // double-counting them via the held-offline carry below.
     const passedThisSnapshot = new Set<string>();
+    /** v1.188.1 — per Core: packs handed over from the energy bridge on this pass. */
+    const handedOver = new Map<string, { packs: number; chgWh: number; dsgWh: number }>();
     let chargeWh = 0;
     let dischargeWh = 0;
 
@@ -2115,13 +2888,56 @@ export function createRecorder(
         // AND sourceSns membership AND non-null register AND a captured baseline.
         const hasRegister = pk.accuChgMah != null || pk.accuDsgMah != null;
         const passesFilter = member && hasRegister && !!base;
-        const fresh = passesFilter ? packDeltaWh(pk, base, PACK_MAH_TO_WH) : { chgWh: 0, dsgWh: 0 };
+        let fresh = passesFilter ? packDeltaWh(pk, base, PACK_MAH_TO_WH) : { chgWh: 0, dsgWh: 0 };
 
         if (passesFilter) {
           passedThisSnapshot.add(cacheKey);
           // v0.45.0 corrupt-read guard: a single rollup may not advance a pack's
           // contribution past its held value by more than one full pack capacity.
           const held = bmsLastPackWh.get(cacheKey) ?? loadPackLastWh(d.sn, pk, opts.mutate);
+          // v1.188.1 — ENERGY-BRIDGE HAND-OVER. While this pack's Core was dark the panel bridge
+          // metered its energy at the slot (energyBridge.ts) and left a marker on the pack. The
+          // registers the Core brings back include that same energy, so the jump is ABSORBED,
+          // whatever its size: re-baseline base := register − held, so this pass reports exactly
+          // `held` and counting resumes from it. Any register movement of a marked pack is
+          // absorbed as it is seen; the marker is spent (the hand-over) only once the Core has
+          // REPORTED since its return (reportsSinceReturn: content changed at or after its online
+          // flip). Before that the movement is dark-span energy the bridge counts — MQTT data still
+          // arriving while the cloud lists the Core offline, a frozen projection at an online flip
+          // that lands before the first fresh reading — so it is absorbed with the marker kept:
+          // the held value never trails the projection, and re-baselining on a stale register
+          // cannot spend the marker and let the real jump through later. The marker is spent on the
+          // bridge's own test (handsBack: reported since the return AND a reading of its own now,
+          // coreReports), so the bridge meters the slot until the instant the hand-over absorbs.
+          // A marked pack reports `held` until then. A read-only (debug) pass reports `held` and
+          // writes nothing. The v0.45.0 guard and v0.81.0 re-baseline below still cover a gap no
+          // bridge counted (no marker).
+          if (held && energyBridge.hasMarker(cacheKey)) {
+            const moved = fresh.chgWh > held.chgWh || fresh.dsgWh > held.dsgWh;
+            if (opts.mutate && moved && pk.accuChgMah != null && pk.accuDsgMah != null) {
+              const rebased: PackBaseline = {
+                chgMah: pk.accuChgMah - held.chgWh / PACK_MAH_TO_WH,
+                dsgMah: pk.accuDsgMah - held.dsgWh / PACK_MAH_TO_WH,
+              };
+              savePackBaseline(d.sn, pk, rebased);
+              base = rebased;
+              bmsSuspectStreak.delete(cacheKey);
+              bmsCorruptWarned.delete(cacheKey);
+              const chgWh = Math.max(0, fresh.chgWh - held.chgWh);
+              const dsgWh = Math.max(0, fresh.dsgWh - held.dsgWh);
+              if (handsBack(d, Date.now())) {
+                const before = energyBridge.clearMarker(cacheKey);
+                const h = handedOver.get(d.sn) ?? { packs: 0, chgWh: 0, dsgWh: 0 };
+                h.packs += 1;
+                h.chgWh += before.chgWh + chgWh;
+                h.dsgWh += before.dsgWh + dsgWh;
+                handedOver.set(d.sn, h);
+              } else {
+                energyBridge.absorb(cacheKey, chgWh, dsgWh);
+              }
+            }
+            fresh = { chgWh: held.chgWh, dsgWh: held.dsgWh };
+          }
           const capWh = (pk.fullCapMah != null ? pk.fullCapMah * PACK_MAH_TO_WH : FALLBACK_FULL_PACK_WH);
           let useChg = fresh.chgWh;
           let useDsg = fresh.dsgWh;
@@ -2222,6 +3038,20 @@ export function createRecorder(
             heldFromLastKnown: false,
             backfilledFromHistory: false,
           });
+        }
+      }
+      // v1.188.1 (review) — a marker of a pack the Core no longer reports is spent when the Core
+      // hands back with its whole pack list (the pack count met): no register of it can move, so
+      // the hand-over above never spends it, and one marker left kept the Core "marked" for good
+      // (bridged at once on any later dark moment, with no dwell). A row a pack left when it moved
+      // or was replaced, or a slot the store hides, is the case: the bridge marks only the packs the
+      // projection carries (heldPackKeysOf), but a Core dark since a restart has no projection.
+      if (opts.mutate && energyBridge.markersOf(d.sn).length > 0 && handsBack(d, Date.now()) && projectionPacksComplete(d)) {
+        const present = projectedPackKeys(d) ?? new Set<string>();
+        const gone = energyBridge.markersOf(d.sn).filter((k) => !present.has(k));
+        for (const k of gone) energyBridge.clearMarker(k);
+        if (gone.length > 0) {
+          log(`recorder: v1.188.1 energy-bridge hand-over sn=${d.sn}: ${gone.length} marker(s) spent for pack(s) the Core no longer reports (${gone.join(', ')}) — no register of them can move`);
         }
       }
     }
@@ -2385,6 +3215,23 @@ export function createRecorder(
     }
 
 
+    // v1.188.1 — one line per Core handed over on this pass: what its BMS counted while dark
+    // (absorbed) against what the panel bridge counted for it (published: AC basis at the slot, or the
+    // Core's own pack meters for a window its slot could not be read, v1.188.1 review). The bridge's
+    // own rollup clears the per-Core rows once every marker of the Core is handed over, after its
+    // "no longer bridged" line has read them (a read usually runs this pass first).
+    for (const [sn, h] of handedOver) {
+      const b = energyBridge.coreBridged(sn);
+      // A pack whose registers have not moved since the return keeps its marker until they do:
+      // the line says so, and its own line follows with that pack's figures.
+      const left = energyBridge.markersOf(sn).length;
+      log(
+        `recorder: v1.188.1 energy-bridge hand-over sn=${sn}: ${h.packs} pack(s) re-baselined on return${left > 0 ? ` (${left} still marked)` : ''} — ` +
+        `the BMS counted ${(h.chgWh / 1000).toFixed(2)} kWh in / ${(h.dsgWh / 1000).toFixed(2)} kWh out while dark (absorbed, not published); ` +
+        `the panel bridge counted ${(b.chargeWh / 1000).toFixed(2)} kWh in / ${(b.dischargeWh / 1000).toFixed(2)} kWh out (AC basis at the slot, or the Core's own pack meters where the slot could not be read; already published)`,
+      );
+    }
+
     return { chargeWh, dischargeWh, packs, offlineHeldMembers };
   };
 
@@ -2529,6 +3376,18 @@ export function createRecorder(
       return typeof raw?.fp === 'string' ? raw.fp : null;
     } catch { return null; }
   })();
+  /**
+   * v1.188.1 (review) — a changed source set must persist this many consecutive rollups before the
+   * battery floors are re-seeded (the v1.98.0 gap check's RESEED_SUSTAINED_ROLLUPS idea). The source
+   * set is the panel's per-slot isConnect flag, read straight from each quota, and a home Core's
+   * flag can read 0 for one poll (a Core power-cycled while it is reconnected; the off-panel alert
+   * demotion is debounced for the same reason). One rollup with a slot disconnected re-seeded the
+   * floors without that Core's held packs (~1/3 of each published battery counter: Home Assistant's
+   * meter reset), and the next re-seeded them back up. Until the change is sustained, the accepted
+   * set's Cores stay members of the BMS sum (bmsMembersOf), so the v1.98.0 gap check sees no gap.
+   */
+  const MEMBERSHIP_SUSTAINED_ROLLUPS = Number(process.env.BMS_MEMBERSHIP_SUSTAINED_ROLLUPS ?? 3);
+  let pendingMembership: { fp: string; rollups: number } | null = null;
   // Seed the floors from whatever was last persisted (a fresh process must
   // not regress the persisted Wh number; HA reads that with state_class:
   // total_increasing and would treat a step-down as a reset).
@@ -2548,7 +3407,36 @@ export function createRecorder(
   const rollupLifetime = () => {
     const now = Date.now();
     const snap = store.get();
-    const contributors = buildContributors(snap);
+    const contributors = buildContributors(snap, 'rollup', now);
+
+    // v1.188.1 — the energy bridge's window first (energyBridge.ts): its PV joins fleet_pv_wh and
+    // its slot AC input joins fleet_grid_import_wh below (the dark Cores' own contributors count
+    // only up to the instant each went offline, buildContributors), its battery energy accumulates
+    // in its own rows, and it marks the dark Cores' held packs before the BMS pass further down
+    // reads the markers. Isolated: a bridge failure is logged and every other counter still advances.
+    let br: BridgeRollupResult | null = null;
+    try {
+      br = energyBridge.rollup(snap, now);
+      lastBridgeError = null;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg !== lastBridgeError) log(`recorder: energy bridge rollup failed (${msg}) — the other lifetime counters advance without it`);
+      lastBridgeError = msg;
+    }
+    // v1.188.1 (review) — a dark Core whose own readings arrive again before it hands back (a marked
+    // Core the cloud still lists offline, its MQTT data back) is cut at its dark instant so the
+    // bridge's slot figure stands for it. Where the bridge could book nothing for its slot this
+    // window (no slot row: the panel reading not fresh), its own measured pv_total / ac_in rows count
+    // instead (the bridge books its own pack meters: BridgeSlotWindow.own): the gate wrote them as
+    // readings, and nothing else counts the window.
+    const ownInstead = new Set<string>();
+    for (const w of br?.slots ?? []) {
+      if (w.own === true) ownInstead.add(w.sn);
+    }
+    /** v1.188.1 (review) — the bridge held its window (a dark slot's rows are in a gap the next
+     *  window can bridge): the two counters it adds to hold with it, so the next rollup integrates
+     *  the Cores' own rows and the bridge's slots over the same span. */
+    const bridgeHeld = br?.held === true;
 
     // Watt-integrated metrics — fleet + per-circuit keys.
     const wattKeys = Object.keys(contributors); // fleet_pv/load/grid + circuit_<N>
@@ -2558,14 +3446,42 @@ export function createRecorder(
       // to integrate the whole history (which would be huge and rotational).
       const since = prev.ts === 0 ? Math.max(now - 60_000, 0) : prev.ts;
       if (since >= now) continue;
+      const bridgeShare = key === 'fleet_pv_wh' || key === 'fleet_grid_import_wh';
+      if (bridgeHeld && bridgeShare) continue;
       let addedWh = 0;
+      let holdWindow = false;
       for (const c of contributors[key] ?? []) {
+        // v1.188.1 — a Core handed to the energy bridge counts only up to the hand-off instant
+        // (unless the bridge booked nothing for it this window and its own readings arrive).
+        const until = c.untilMs === undefined || ownInstead.has(c.sn) ? now : c.untilMs === null ? since : Math.min(now, c.untilMs);
+        if (until <= since) continue;
         // v1.12.0 (review F9) — fetch from `since - lookback` so integrateWh gets the
-        // pre-window boundary sample; it still integrates only [since, now].
-        const pts = queryStmt.all(c.sn, c.metric, since - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>;
-        const r = integrateWh(pts, since, now);
+        // pre-window boundary sample; it still integrates only [since, until].
+        // v1.188.1 — with a held panel's reading restated across a gap the gate explains (energyPoints).
+        const pts = energyPoints(c.sn, c.metric, since - LIFETIME_ROLLUP_LOOKBACK_MS, now);
+        const r = integrateWh(pts, since, until);
         addedWh += r.wh;
+        // v1.188.1 (review) — a panel counter (Panel Load, Grid Import (Home), each circuit) whose
+        // series has NO row in this window HOLDS its watermark while the gap can still be bridged:
+        // the recorder writes no row while the panel's reading is held (a cloud shadow, a quota
+        // stall: heldSamples.projectionRecordable), and integrateWh gives a window with no row 0 Wh,
+        // so every 5-min window inside such a gap was lost for good from a total_increasing counter
+        // (an 8 kW night charge: ~0.67 kWh of grid import per window). Held, the next window
+        // integrates across the gap: a gap of up to 10 min from the rows on both sides (integrateWh's
+        // rule), and one the gate explains — the panel watched through it and held, not absent — of
+        // up to HELD_ENERGY_BRIDGE_MAX_MS with the held reading restated (energyPoints), as v1.188.0
+        // booked it. A longer gap is not bridged: the next window books 0 for it. Judged per
+        // contributor (each panel), so a live second panel's rows do not release a held one's window.
+        if (!bridgeShare && r.samples === 0) {
+          let lastBefore = -Infinity;
+          for (const p of pts) if (p.ts < since && p.ts > lastBefore) lastBefore = p.ts;
+          if (lastBefore > -Infinity && (now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS || heldGaps.open(c.sn, lastBefore, now))) holdWindow = true;
+        }
       }
+      if (holdWindow) continue;
+      // v1.188.1 — the bridged dark Cores' share, metered at the panel (never negative).
+      if (br && key === 'fleet_pv_wh') addedWh += br.pvWh;
+      if (br && key === 'fleet_grid_import_wh') addedWh += br.gridImportWh;
       // Negative values are physically impossible for the metrics we track
       // (PV / load / grid-in / circuits); clamp to zero so a transient sign
       // flip from a bad sample can't decrement the lifetime counter.
@@ -2576,7 +3492,14 @@ export function createRecorder(
     // BMS-sourced battery counters — store max(BMS, persistedFloor). rollup:true so
     // the v0.81.0 reconnect re-baseline advances its suspect streak on THIS periodic
     // cadence only (getLifetimeTotals mutates on reads but must NOT drive the streak).
-    const bms = computeBmsBatteryTotals(snap, { rollup: true });
+    // v1.96.0 — MEMBERSHIP ROLLOVER RE-SEED (below). v1.188.1 (review) — the change is judged before
+    // the BMS pass, so a change not yet sustained keeps the accepted set's Cores in it (bmsMembersOf).
+    const membershipFp = [...sourceSnsOf(snap)].sort().join(',');
+    const membershipChanged = membershipFp !== '' && bmsMembershipFp !== null && membershipFp !== bmsMembershipFp;
+    pendingMembership = membershipChanged
+      ? { fp: membershipFp, rollups: pendingMembership?.fp === membershipFp ? pendingMembership.rollups + 1 : 1 }
+      : null;
+    let bms = computeBmsBatteryTotals(snap, { rollup: true });
     // v1.96.0 — MEMBERSHIP ROLLOVER RE-SEED.
     //
     // The emitted counters are a monotone high-water floor, which is right while
@@ -2592,7 +3515,6 @@ export function createRecorder(
     // HA's `state_class: total_increasing` treats the resulting step DOWN as a
     // meter reset, which is the honest reading: the series is now measuring a
     // different set of batteries.
-    const membershipFp = [...sourceSnsOf(snap)].sort().join(',');
     // v1.103.0 — append to the timestamped history on EVERY rollup, not only on
     // a detected change. `recordMembership` is idempotent (it no-ops when the
     // fingerprint matches the newest entry), and recording the STATE rather than
@@ -2601,8 +3523,19 @@ export function createRecorder(
     if (recordMembership(membershipHistory, membershipFp, now)) {
       saveMembershipHistory(MEMBERSHIP_HISTORY_PATH, membershipHistory);
     }
-    if (membershipFp !== '' && membershipFp !== bmsMembershipFp) {
+    const sustained = pendingMembership != null && pendingMembership.rollups >= MEMBERSHIP_SUSTAINED_ROLLUPS;
+    if (membershipChanged && !sustained && pendingMembership?.rollups === 1) {
+      log(
+        `recorder: v1.188.1 SHP2 pool membership reads ${membershipFp} (was ${bmsMembershipFp}) — the lifetime battery floors ` +
+        `are re-seeded only once the change holds for ${MEMBERSHIP_SUSTAINED_ROLLUPS} rollups; until then the Cores that left stay in the battery sum`,
+      );
+    }
+    if (membershipFp !== '' && membershipFp !== bmsMembershipFp && (bmsMembershipFp === null || sustained)) {
       if (bmsMembershipFp !== null) {
+        // The change is sustained: the live sum over the NEW set (the pass above still carried the
+        // Cores that left).
+        pendingMembership = null;
+        bms = computeBmsBatteryTotals(snap);
         log(
           `recorder: v1.96.0 SHP2 pool membership changed (${bmsMembershipFp || '(none)'} -> ${membershipFp}) — ` +
           `re-seeding lifetime battery floors from the new live sum ` +
@@ -2707,17 +3640,26 @@ export function createRecorder(
   const getLifetimeTotals = (): Record<string, LifetimeTotals> => {
     const now = Date.now();
     const snap = store.get();
-    const contributors = buildContributors(snap);
+    const contributors = buildContributors(snap, 'read', now);
     const out: Record<string, LifetimeTotals> = {};
     const allKeys = allLifetimeKeys(snap);
     // Finding #29 — memoized across the loop below so the mutating BMS pack
     // pass (computeBmsBatteryTotals → computeBmsBatteryDetail) runs at most
     // ONCE per getLifetimeTotals() call instead of once per battery key.
     let bmsBatteryTotals: { chargeWh: number; dischargeWh: number } | undefined;
+    // v1.188.1 — the energy bridge's battery rows ride on top of the BMS floors (see below).
+    const bridgeTotals = energyBridge.totals();
     for (const key of allKeys) {
       const prev = readLifetime(key);
       const watermark = prev.ts === 0 ? now : prev.ts;
       let pendingWh = 0;
+      // v1.188.1 — what the emitted total starts from: the persisted row, plus (battery keys) the
+      // energy the panel bridge metered while a Core was dark. The bridge is NOT in the floors
+      // or the fleet_battery_* rows: the v1.98.0 floor-gap check would read a bridged total over
+      // 50 kWh as a floor for a pool that no longer exists, and step Home Assistant down.
+      let persistedWh = prev.wh;
+      if (key === 'fleet_battery_charge_wh') persistedWh += bridgeTotals.chargeWh;
+      if (key === 'fleet_battery_discharge_wh') persistedWh += bridgeTotals.dischargeWh;
       if (key === 'fleet_battery_charge_wh' || key === 'fleet_battery_discharge_wh') {
         // v0.45.0 — each battery counter emits persistedWh + max(0, liveBmsWh −
         // persisted), UNCLAMPED. The persisted value reflects the most-recent
@@ -2735,10 +3677,14 @@ export function createRecorder(
         pendingWh = Math.max(0, liveBmsWh - persisted);
       } else if (watermark < now) {
         for (const c of contributors[key] ?? []) {
+          // v1.188.1 — the same hand-off cut as rollupLifetime, applied at once (ownEnergyUntil).
+          const until = c.untilMs === undefined ? now : c.untilMs === null ? watermark : Math.min(now, c.untilMs);
+          if (until <= watermark) continue;
           // v1.12.0 (review F9) — same head-segment fix as rollupLifetime: fetch the
           // pre-watermark boundary sample so integrateWh's value-hold engages.
-          const pts = queryStmt.all(c.sn, c.metric, watermark - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>;
-          pendingWh += integrateWh(pts, watermark, now).wh;
+          // v1.188.1 — and the same series (energyPoints), so a read never shows what the rollup drops.
+          const pts = energyPoints(c.sn, c.metric, watermark - LIFETIME_ROLLUP_LOOKBACK_MS, now);
+          pendingWh += integrateWh(pts, watermark, until).wh;
         }
         if (pendingWh < 0) pendingWh = 0;
       }
@@ -2750,13 +3696,18 @@ export function createRecorder(
       // not strictly increasing", 21× in the HA core log). Hold the previous
       // total across small dips; a LARGE drop is a genuine operator reset
       // (v0.13.0 re-zero) and must pass through unclamped.
+      // v1.188.1 — the two counters the energy bridge changes the contributors of hold a dip up to
+      // LIFETIME_HOLD_DIP_WH: their persisted rows only grow, so a lower total between rollups is
+      // never a reset, only pending energy the read path no longer sees (the backstop behind the
+      // hand-off cut in buildContributors).
       pendingWh = clampLifetimeDip(
         lifetimeEmitHighWater.get(key),
-        prev.wh,
+        persistedWh,
         pendingWh,
+        LIFETIME_HOLD_KEYS.has(key) ? LIFETIME_HOLD_DIP_WH : undefined,
       );
-      lifetimeEmitHighWater.set(key, prev.wh + pendingWh);
-      out[key] = { persistedWh: prev.wh, pendingWh, watermarkMs: watermark };
+      lifetimeEmitHighWater.set(key, persistedWh + pendingWh);
+      out[key] = { persistedWh, pendingWh, watermarkMs: watermark };
     }
     // v0.45.0 — REMOVED the emit-path discharge≤charge clamp. The two battery
     // counters are surfaced independently (each = persistedWh + max(0, liveBmsWh
@@ -2779,11 +3730,15 @@ export function createRecorder(
   const batteryLifetimeDebug = (): BatteryLifetimeDebug => {
     const snap = store.get();
     const detail = computeBmsBatteryDetail(snap, { mutate: false });
-    const chargePersisted = readLifetime('fleet_battery_charge_wh').wh;
-    const dischargePersisted = readLifetime('fleet_battery_discharge_wh').wh;
-    // Emitted = persisted + max(0, liveBms − persisted), matching getLifetimeTotals.
-    const chargePending = Math.max(0, detail.chargeWh - chargePersisted);
-    const dischargePending = Math.max(0, detail.dischargeWh - dischargePersisted);
+    const chargeRow = readLifetime('fleet_battery_charge_wh').wh;
+    const dischargeRow = readLifetime('fleet_battery_discharge_wh').wh;
+    // v1.188.1 — the emitted totals include the energy bridge's rows, as getLifetimeTotals does.
+    const bridge = energyBridge.debug(snap.devices, Date.now());
+    const chargePersisted = chargeRow + bridge.chargeWh;
+    const dischargePersisted = dischargeRow + bridge.dischargeWh;
+    // Emitted = persisted + max(0, liveBms − row), matching getLifetimeTotals.
+    const chargePending = Math.max(0, detail.chargeWh - chargeRow);
+    const dischargePending = Math.max(0, detail.dischargeWh - dischargeRow);
     // Raw unclamped floors: the in-memory floors advanced by rollups, lifted to
     // the live reading if the snapshot currently reads higher (never persisted here).
     const rawChargeFloorWh = Math.max(bmsChargeFloor, detail.chargeWh);
@@ -2798,6 +3753,7 @@ export function createRecorder(
       deficitWh: Math.max(0, rawDischargeFloorWh - rawChargeFloorWh),
       packs: detail.packs,
       offlineHeldMembers: detail.offlineHeldMembers,
+      bridge,
     };
   };
 
@@ -3050,7 +4006,7 @@ export function createRecorder(
   log(`recorder: boot phases — ${tOpen}, ${tSchema}, ${tAnalyze}, ${tSetup}, ${tSeed}, ${tProbe}, ${tRest} (total ${Math.round(performance.now() - bootT0)}ms, db ${dbPath})`);
 
   return {
-    insertSnapshot: (snap) => record(extract(snap)),
+    insertSnapshot: (snap) => recordSnapshot(snap),
     query: (sn, metric, sinceMs, untilMs, bucketSec) => {
       if (!bucketSec || bucketSec <= 0) {
         return queryStmt.all(sn, metric, sinceMs, untilMs) as Array<{ ts: number; value: number }>;
@@ -3095,8 +4051,18 @@ export function createRecorder(
     readNightLedger,
     readNightCalibration,
     upsertNightCalibration,
+    heldSpans: (sinceMs, untilMs) => heldStore.spans(sinceMs, untilMs),
+    heldRowsWithin: (sn, metric, sinceMs, untilMs) => heldStore.heldRowsWithin(sn, metric, sinceMs, untilMs),
+    restoredHeldSpans: (sinceMs, untilMs) => heldStore.restoredSpans(sinceMs, untilMs),
+    heldSamplesReady: () => !heldScanScheduled || heldStore.isReady(),
+    scanHeldSamples: (nowMs) => heldStore.scanNow(nowMs),
+    restoreHeldSamples: (sn, startMs) => heldStore.restore(sn, startMs),
+    samplesGeneration: () => heldStore.samplesGeneration(),
     close: () => {
       clearInterval(lifetimeTimer);
+      if (heldScanFirst) clearTimeout(heldScanFirst);
+      if (heldScanTimer) clearInterval(heldScanTimer);
+      heldStore.stop();
       // Final rollup so we don't lose the trailing minute of energy on shutdown.
       // rollupLifetime persists the emit high-water itself; if it throws before
       // reaching that, persist once more directly so the sidecar reflects the
@@ -3113,6 +4079,7 @@ export function createRecorder(
     getLifetimeTotals,
     listLifetimeKeys,
     batteryLifetimeDebug,
+    bridgedFleetFlow: (online, devices, nowMs) => energyBridge.flow(online, devices, nowMs),
     // v1.187.20 — this connection is the only one that commits, so it is the one whose
     // checkpoints the backup window holds still (backupWindow.ts).
     walControl: walControlFor(db, dbPath),
