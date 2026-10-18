@@ -66,6 +66,8 @@ export interface PlantData {
   degradation: FleetDegradation;
   /** Server start time, for SYS.UPTIME. */
   serverStartedAt: number;
+  /** The signed-in TUI user (`TUI_USERNAME`) for the CONSOLE header's OPR seat; absent while the login is off. */
+  operator?: string;
   /** v1.188.1 (review) — Fleet PV and Battery Net as published (plantFlow). */
   flow: PlantFlow;
 }

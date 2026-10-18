@@ -30,7 +30,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 |---|---|---|---|---|
 | REST client + HMAC signing | `ecoflow/sign.ts` HMAC-SHA256 request signing (§2) | Cloud credentials (env) | Poll loop | measured-and-active |
 | MQTT client (`param`-not-`params` fix) | Per-device quota/status subscription; corrected payload key (§2) | Broker frames | Ingest | measured-and-active |
-| SHP2 membership + spare roster | Core↔SHP2 from `backupIncreInfo.Energy{1,2,3}Info`, not positional; explicit spare-SN allowlist (§2, §8.8) | SHP2 energy-info slots; `SPARE_DPU_SNS` env | Zombie gate, selfConsumption scope, degradation peer baselines | measured-and-active |
+| SHP2 membership + spare roster | Core↔SHP2 from `backupIncreInfo.Energy{1,2,3}Info`, not positional; explicit spare-SN allowlist (§2, §8.8) | SHP2 energy-info slots; the `SPARE_DPU_SNS` source literal in `shp2Membership.ts` (not an option) | Zombie gate, selfConsumption scope, degradation peer baselines | measured-and-active |
 | Cloud-wedge vs outage classifier | `deviceLink.ts` pure classifier: LAN-reachable + cloud-silent = wedge, both-dark = outage (§2) | LAN ICMP ping, MQTT/REST freshness | Offline alerts, HA `ecoflow_cloud_wedge_count` | measured-and-active |
 | HA service layer | `haService.ts` `callHaService` — total, never throws (§2, §10.10) | HA supervisor API | Broadcast, shed registry, hostPower, haStateCache | measured-and-active |
 | MQTT discovery entity set | 78 sensors + 10 binary sensors in the static tables, plus two per-circuit sensors (energy and power) and the four per-priority alarm switches, availability + expiry, honest-null templating (§2) | `buildState()` composition | Home Assistant | measured-and-active |
