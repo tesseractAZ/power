@@ -13,8 +13,10 @@
  *
  * Now a window with no row while the series' last row is less than the look-back old HOLDS its
  * watermark (the counters' and the bridge's), and the next window integrates across the gap from the
- * rows on both sides, as integrateWh bridges a gap of up to 10 min inside one window. A longer gap is
- * still not bridged: the 10-min rule is unchanged.
+ * rows on both sides, as integrateWh bridges a gap of up to 10 min inside one window. v1.188.1
+ * (integration review) — and a longer gap the gate explains (the panel watched through it and held,
+ * not absent) is held for and bridged with the held reading up to HELD_ENERGY_BRIDGE_MAX_MS (30 min),
+ * as v1.188.0 booked it; a longer one stays a gap (heldGapEnergy.test.ts).
  *
  * End to end through a real SnapshotStore and createRecorder; quotas every minute, a rollup every
  * 5 min. Test serials are placeholders.
@@ -158,10 +160,12 @@ test('★★★ a panel quota stall of 8 polls whose row gap swallows a whole ro
   within(rise.fleet_grid_home_wh, truth.grid, 0.012, 'Grid Import (Home)');
 });
 
-test('★★ a gap over 10 min is still not bridged (the integrator’s rule, unchanged): a 16-poll stall drops its middle', async (t) => {
+test('★★★ a 16-poll quota stall (a gap over 10 min that the gate explains, under the 30-min bound) is bridged with the held reading', async (t) => {
+  // Before (integration review): it dropped the middle of the stall, ~1.3 kWh of grid import.
+  // `truth` here holds the next real reading; the counter books the held one, as v1.188.0 did.
   const { rise, truth } = await hour(t, 22, (m) => (m >= 19 && m <= 34 ? 'fail' : 'ok'));
-  assert.ok(rise.fleet_grid_home_wh < truth.grid * 0.9, `no extrapolation across a long gap: ${rise.fleet_grid_home_wh.toFixed(0)} of ${truth.grid.toFixed(0)} Wh`);
-  assert.ok(rise.fleet_grid_home_wh > truth.grid * 0.6, 'the rest of the hour is booked');
+  within(rise.fleet_grid_home_wh, truth.grid, 0.012, 'Grid Import (Home)');
+  within(rise.fleet_load_wh, truth.load, 0.012, 'Panel Load');
 });
 
 test('★★★ every Core dark, the bridge metering the slots: a panel cloud shadow does not drop the battery out of the windows inside it', async (t) => {

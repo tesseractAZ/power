@@ -12,7 +12,7 @@
  * If the contract changes, update both files in lock-step.
  */
 
-import type { DeviceSnapshot, Shp2Projection } from './types';
+import type { DeviceSnapshot, Shp2EnergySource, Shp2Projection } from './types';
 
 export function shp2ConnectedDpuSns(devices: Record<string, DeviceSnapshot>): Set<string> {
   // v1.146.0 — UNION ACROSS EVERY PANEL, matching the server since v1.129.0.
@@ -72,4 +72,42 @@ export function allPanels(devices: Record<string, DeviceSnapshot>): Panel[] {
     .filter((d): d is Panel => d.projection?.kind === 'shp2' && d !== house)
     .sort((a, b) => (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
   return house ? [house, ...rest] : rest;
+}
+
+/** v1.188.1 — the serial the house role belongs to, mirroring the server's houseSnOf: the flagged
+ *  panel, else the MISSING pinned serial, else the lowest-serial projected panel. */
+function houseSnOf(devices: Record<string, DeviceSnapshot>): string | undefined {
+  let missing: string | undefined;
+  let lowest: string | undefined;
+  for (const d of Object.values(devices)) {
+    if (d.housePanel === true) return d.sn;
+    if (d.housePanelMissing != null) missing = d.housePanelMissing;
+    if (d.projection?.kind === 'shp2' && (lowest == null || d.sn < lowest)) lowest = d.sn;
+  }
+  return missing ?? lowest;
+}
+
+/**
+ * v1.188.1 — each connected home Core ONCE, at the one panel listing that reads it: the mirror of the
+ * server's connectedSourceListings (shp2Membership.ts), the listing the energy bridge, Home
+ * Assistant's two power sensors and the backup timers' bound read. A Core listed connected by two
+ * panels (one panel's source list stale) is read at the listing on an online panel whose reading the
+ * server judged fresh (`readbackFresh`, stamped on every panel the client receives), else on an
+ * online panel, else the first; a tie goes to the house panel, then the lower panel serial. `index`
+ * is the slot's position in the panel's sourceWatts.
+ */
+export function connectedSourceListings(devices: Record<string, DeviceSnapshot>): Array<{ panel: Panel; src: Shp2EnergySource; index: number }> {
+  const house = houseSnOf(devices);
+  const fresh = (p: Panel): boolean => p.readbackFresh === true || (p.readbackFresh == null && p.contentStaleSinceMs == null);
+  const rank = (p: Panel): number => (p.online === true ? (fresh(p) ? 2 : 1) : 0);
+  const panels = Object.values(devices)
+    .filter((d): d is Panel => d.projection?.kind === 'shp2')
+    .sort((a, b) => rank(b) - rank(a) || (b.sn === house ? 1 : 0) - (a.sn === house ? 1 : 0) || (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
+  const chosen = new Map<string, { panel: Panel; src: Shp2EnergySource; index: number }>();
+  for (const panel of panels) {
+    (panel.projection.sources ?? []).forEach((src, index) => {
+      if (src.isConnected && src.sn && !chosen.has(src.sn)) chosen.set(src.sn, { panel, src, index });
+    });
+  }
+  return [...chosen.values()];
 }

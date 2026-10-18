@@ -1,5 +1,5 @@
 import type { DeviceSnapshot, DpuProjection, GridBackstop, Shp2EnergySource, Shp2Projection } from '../types';
-import { shp2ConnectedDpuSns, isShp2Connected, allPanels } from '../shp2Membership';
+import { shp2ConnectedDpuSns, isShp2Connected, allPanels, connectedSourceListings } from '../shp2Membership';
 import { fmtW } from '../format';
 
 /**
@@ -196,10 +196,14 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // (panelState 'ok'). A Core that reports keeps its own meter: it is the faster one (~10 s
   // against the panel's ~60 s frame), and its slot is never counted twice. A Core the server
   // judges frozen (dpuFrozen) is not on its own meter, so its slot is read.
+  // v1.188.1 (review) — each connected Core once, at the listing the server's bridge, power sensors
+  // and backup timers read (connectedSourceListings): a Core listed connected by two panels (one
+  // panel's source list stale) was drawn from both slots, its delivery and its count doubled
+  // ("Batteries (2 via panel)", 2.00 kW out, against Battery Net 1.00 kW for one Core).
   const ownMeter = new Set(metered.map((d) => d.sn));
-  const silentSlots = panels
-    .flatMap((p) => (p.projection.sources ?? []).map((s, i) => ({ p, s, w: p.projection.sourceWatts?.[i] })))
-    .filter(({ s }) => s.isConnected && !!s.sn && !ownMeter.has(s.sn));
+  const silentSlots = connectedSourceListings(devices)
+    .map(({ panel: p, src: s, index: i }) => ({ p: p as Shp2, s, w: p.projection.sourceWatts?.[i] }))
+    .filter(({ s }) => !ownMeter.has(s.sn as string));
   const viaPanel = panelState === 'ok'
     ? silentSlots.filter((x): x is { p: Shp2; s: Shp2EnergySource; w: number } => typeof x.w === 'number' && Number.isFinite(x.w))
     : [];

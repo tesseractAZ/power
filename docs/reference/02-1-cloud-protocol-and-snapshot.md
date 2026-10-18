@@ -480,7 +480,7 @@ full twelve-channel vector never held identical for even one minute. Staleness
 requires **both** a repeat count and an elapsed duration; an unmeasurable poll
 resets rather than accumulating. Release has hysteresis (v1.154.0): once latched,
 the panel must show `SHP2_SHADOW_CLEAR_DISTINCT` (2) distinct new witnesses before it
-reads live again (`advanceShadowLatch`), so one refreshed body that the cloud then replays stays one latch with its original onset; the frozen body reappearing starts the count over. `computeHomeGridWatts` and
+reads live again (`advanceShadowLatch`), so one refreshed body that the cloud then replays stays one latch with its original onset; the frozen body reappearing starts the count over. The recorder does not wait for the release (v1.188.1): `contentNewAtMs` stamps the arrival of a body not seen since the content froze (`advanceBodySeen`), and the freshness gate writes that body as a reading (`latchedBodyNew`), while the alarm path still reads the latch. `computeHomeGridWatts` and
 `computeShp2GridConnected` then treat a shadowed panel exactly as v0.88.0 already
 treats an offline one. `sensor.ecoflow_panel_shp2_payload_frozen` publishes the
 held duration.

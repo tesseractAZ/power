@@ -19,10 +19,12 @@
  * WHAT THIS MODULE DOES.
  *  1. The gate (`projectionRecordable`): a projection is a READING only while its content is
  *     recent — `lastTelemetryAtMs`, stamped only when telemetry content lands (a REST quota or a
- *     translated MQTT delta) — and, for the panel, while its cloud-shadow latch is clear; for a
- *     Core, while its readings have CHANGED recently (its content clock: a cloud replaying a Core's
- *     cached body still lands content). A held device writes no rows, so every consumer sees a gap,
- *     which each of them already handles.
+ *     translated MQTT delta) — and, for the panel, while its cloud-shadow latch is clear or its
+ *     newest body is new content (one not seen since its content froze); for a Core, while its readings
+ *     have CHANGED recently (its content clock: a cloud replaying a Core's cached body still lands
+ *     content). A held device writes no rows, so every consumer sees a gap, which each of them
+ *     already handles; the lifetime energy counters bridge a held panel's gap of up to
+ *     HELD_ENERGY_BRIDGE_MAX_MS with its held reading (createHeldGapLog below).
  *  2. The held-span log (`held_spans`): a hold of an hour or more is recorded with its start
  *     (the last fresh content) and end, so the night-charge ledger can say why it did not score.
  *  3. The exclusion of held rows already written (`held_samples`): a stretch of an hour or more
@@ -63,6 +65,8 @@ export interface FreshnessFields {
   contentStaleSinceMs?: number | null;
   /** A Core's content clock (snapshot.ts dpuContentWitness): read for a 'dpu' projection only. */
   contentChangedAtMs?: number;
+  /** The panel's last NEW body (snapshot.ts contentNewAtMs): read while its latch is set. */
+  contentNewAtMs?: number;
   projection?: { kind: string } | null;
 }
 
@@ -81,7 +85,8 @@ export interface FreshnessFields {
  * (setDeviceQuota, mergeDeviceQuota) stamps it. `Math.abs` also refuses a clock stepped either way
  * by more than the window. A REST 200 that replays a cached body still bumps `lastTelemetryAtMs`,
  * so arrival alone does not make a reading. A latched panel cloud shadow (`contentStaleSinceMs`) is
- * the panel's marker of a replayed body. A Core has no latch: its marker is its content clock
+ * the panel's marker of a replayed body; a body that arrives NEW while it is set (latchedBodyNew,
+ * v1.188.1: the latch's release waits for a second one) is a reading. A Core has no latch: its marker is its content clock
  * (`contentChangedAtMs`, v1.181.0), which moves only when its readings change. A Core's projection is
  * a reading only while that clock is fresh (dpuContentFresh, the clock the grid resolver, the
  * Energy flow card and the backup timers read). Unknown is not fresh: after a restart the store's
@@ -92,21 +97,182 @@ export function projectionRecordable(d: FreshnessFields, nowMs: number, freshMs:
   const t = d.lastTelemetryAtMs;
   if (typeof t !== 'number' || !Number.isFinite(t) || t <= 0) return false;
   if (Math.abs(nowMs - t) > freshMs) return false;
-  if (d.contentStaleSinceMs != null) return false;
+  if (d.contentStaleSinceMs != null && !latchedBodyNew(d)) return false;
   return d.projection?.kind !== 'dpu' || dpuContentFresh(d, nowMs);
+}
+
+/**
+ * v1.188.1 — while a panel's cloud-shadow latch is set, is its newest body NEW content (a reading)?
+ * The latch releases only after SHP2_SHADOW_CLEAR_DISTINCT distinct new bodies (shp2Shadow.ts, its
+ * hysteresis), and the first of them is a reading: keyed on the latch alone, the gate dropped it, so
+ * a 9-poll replay left a row gap past the lifetime integrator's 10-min bridge and lost the energy of
+ * the windows inside it. New: the arrival that stamped lastTelemetryAtMs brought a body not seen
+ * since the content froze (snapshot.ts contentNewAtMs, the same instant), after the latch's onset. A
+ * replay of that body, the frozen one again, or a merged MQTT delta (which stamps lastTelemetryAtMs
+ * only) is not. PURE.
+ */
+export function latchedBodyNew(d: FreshnessFields): boolean {
+  const n = d.contentNewAtMs;
+  const since = d.contentStaleSinceMs;
+  return typeof n === 'number' && Number.isFinite(n) && n === d.lastTelemetryAtMs && (since == null || n > since);
 }
 
 /** v1.188.1 — the instant after which a held device's content was not fresh: the panel's shadow
  *  onset, a Core's last content change, or the last content arrival, whichever is earliest; null
  *  when it has none. A Core whose cloud replays its body keeps one start (its content clock) while
- *  the arrivals move. PURE. */
+ *  the arrivals move. A latched panel's new body after the onset (latchedBodyNew, written as a
+ *  reading) moves its start to that body. PURE. */
 export function heldSinceMs(d: FreshnessFields): number | null {
   const c: number[] = [];
   const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
-  if (ok(d.contentStaleSinceMs)) c.push(d.contentStaleSinceMs);
+  if (ok(d.contentStaleSinceMs)) c.push(ok(d.contentNewAtMs) && d.contentNewAtMs > d.contentStaleSinceMs ? d.contentNewAtMs : d.contentStaleSinceMs);
   if (d.projection?.kind === 'dpu' && ok(d.contentChangedAtMs)) c.push(d.contentChangedAtMs);
   if (ok(d.lastTelemetryAtMs)) c.push(d.lastTelemetryAtMs);
   return c.length === 0 ? null : Math.min(...c);
+}
+
+/* ──────────────────── the energy counters across a held panel ──────────────────── */
+
+/**
+ * v1.188.1 — the longest row gap of a held panel that the lifetime energy counters bridge with its
+ * held reading. The gate writes no row while the panel's reading is held (a cloud shadow, a quota
+ * stall), and the integrator (aggregator.ts integrateWh) bridges a row gap of at most 10 min, so a
+ * longer replay or stall lost the energy of every window inside it from Panel Load, Grid Import
+ * (Home), the circuits and the energy bridge's slots — energy that kept flowing, which v1.188.0
+ * booked because it restated the held reading at its 5-min heartbeat. Across a gap the gate itself
+ * explains (createHeldGapLog), of at most this length, the counters integrate the held reading as
+ * those restated rows would have; a longer gap stays a gap, so an outage is never booked at a value
+ * read before it.
+ *
+ * Chosen from the panel's whole recorded history (2026-07-02 → 10-16, 106 days, 2.75 M rows, written
+ * by recorders that restated a held reading): 703 restated runs of 5-180 min in which the recorder
+ * went on evaluating the panel, median 11.2 min, p90 15.0, p99 15.6, the longest common one 15.8 min
+ * (702 of the 703 at most 15.8 min); the next is the 2026-10-15 01:54-04:16 internet outage, 142 min.
+ * A metric written only at the heartbeat can start its gap up to 5 min before the content froze, so a
+ * 15.8-min run is a gap of up to ~21 min; 30 min covers every common episode with margin and stays far
+ * below the outage.
+ */
+export const HELD_ENERGY_BRIDGE_MAX_MS = 30 * MIN_MS;
+/** The recorder's heartbeat (recorder.ts MAX_INTERVAL_MS): a device read fresh writes every metric at
+ *  least this often, and the held reading is restated at this spacing across a bridged gap. */
+export const HELD_RESTATE_EVERY_MS = 5 * MIN_MS;
+/** Evaluations of a device further apart than this are a silence: the recorder did not watch it through
+ *  (the figure the recorder's silence rule uses, SILENCE_EVAL_MAX_GAP_MS). */
+export const HELD_EVAL_GAP_MS = RECORD_FRESH_MS;
+/** How long an evaluation is kept: the bound, the rollup's look-back and the windows it can hold. */
+export const HELD_GAP_LOG_KEEP_MS = HELD_ENERGY_BRIDGE_MAX_MS + HOUR_MS;
+/** A row is written a few ms after the evaluation that read it (recorder record()). */
+const EVAL_TOL_MS = 1_000;
+
+interface EvalSegment {
+  startMs: number;
+  endMs: number;
+  /** The gate held the device at these evaluations (not a reading), or read it fresh. */
+  held: boolean;
+  /** The evaluation before this segment was more than HELD_EVAL_GAP_MS earlier (or none). */
+  afterSilence: boolean;
+}
+
+export interface HeldGapLog {
+  /** One evaluation of a tracked device: held by the gate, or read fresh. */
+  note(sn: string, held: boolean, atMs: number): void;
+  /** Did the gate explain the row gap (fromMs, toMs) of one of `sn`'s metrics? */
+  explains(sn: string, fromMs: number, toMs: number): boolean;
+  /** Does the gate explain the stretch since `fromMs` (a row, or a window start inside the gap) so
+   *  far, with the panel still watched now and the stretch not yet over the bound? */
+  open(sn: string, fromMs: number, nowMs: number): boolean;
+  /** Was `sn` held at any evaluation inside [fromMs, toMs]? (Nothing to restate otherwise.) */
+  heldWithin(sn: string, fromMs: number, toMs: number): boolean;
+  /** `pts` (one metric of `sn`, ascending) with the held reading restated every
+   *  HELD_RESTATE_EVERY_MS across each gap of at most HELD_ENERGY_BRIDGE_MAX_MS the gate explains. */
+  restate(sn: string, pts: ReadonlyArray<{ ts: number; value: number }>): Array<{ ts: number; value: number }>;
+}
+
+/**
+ * v1.188.1 — the evaluations of each tracked device (the panels), kept in memory for the lifetime
+ * energy counters (recorder.ts energyPoints, the energy bridge's queries and holds). A row gap
+ * (a, b) of one metric is EXPLAINED by the gate when:
+ *  - the recorder watched the device from a through b, no two evaluations more than HELD_EVAL_GAP_MS
+ *    apart (a fleet silence, a process restart: not explained — the device was absent, not held);
+ *  - the gate held it at some evaluation inside the gap;
+ *  - no evaluation read it fresh later than one heartbeat after a: one that did would have written
+ *    the metric, so a metric with no value then was absent, not held.
+ * Read fresh within one heartbeat of a, the device restated nothing (the dedupe), so the reading at a
+ * is the held reading throughout. In memory only: a gap across a restart is not bridged.
+ */
+export function createHeldGapLog(opts: { maxMs?: number } = {}): HeldGapLog {
+  const maxMs = opts.maxMs ?? HELD_ENERGY_BRIDGE_MAX_MS;
+  const log = new Map<string, EvalSegment[]>();
+
+  const note = (sn: string, held: boolean, atMs: number): void => {
+    let segs = log.get(sn);
+    if (!segs) {
+      segs = [];
+      log.set(sn, segs);
+    }
+    const last = segs[segs.length - 1];
+    if (!last || atMs - last.endMs > HELD_EVAL_GAP_MS || atMs < last.endMs) {
+      segs.push({ startMs: atMs, endMs: atMs, held, afterSilence: true });
+    } else if (last.held === held) {
+      last.endMs = atMs;
+    } else {
+      segs.push({ startMs: atMs, endMs: atMs, held, afterSilence: false });
+    }
+    while (segs.length > 1 && segs[0].endMs < atMs - HELD_GAP_LOG_KEEP_MS) segs.shift();
+  };
+
+  /** The judgment of the stretch from `fromMs` to `toMs` (null: still open, judged up to `nowMs`). */
+  const judge = (sn: string, fromMs: number, toMs: number | null, nowMs: number): boolean => {
+    const segs = log.get(sn);
+    if (!segs || segs.length === 0) return false;
+    // The first segment of the run (no silence between its segments) that was under way at fromMs:
+    // the last run to start at or before it. It must reach the stretch's end without a silence.
+    let i0 = -1;
+    for (let i = 0; i < segs.length && segs[i].startMs - EVAL_TOL_MS <= fromMs; i++) {
+      if (i0 < 0 || segs[i].afterSilence) i0 = i;
+    }
+    if (i0 < 0) return false;
+    const endMs = toMs ?? nowMs;
+    let held = false;
+    let reached = false;
+    for (let i = i0; i < segs.length; i++) {
+      const s = segs[i];
+      if (s.startMs > endMs + EVAL_TOL_MS) break;
+      // A silence before the stretch ends: the panel was not watched through it (absent, not held).
+      if (i > i0 && s.afterSilence) return false;
+      if (s.held && s.endMs > fromMs && s.startMs < endMs) held = true;
+      // Read fresh past one heartbeat after fromMs and before the stretch ends: the metric would
+      // have been written, so its absence is not the gate's.
+      if (!s.held && s.endMs > fromMs + HELD_RESTATE_EVERY_MS + EVAL_TOL_MS && s.startMs < endMs - EVAL_TOL_MS) return false;
+      if (s.endMs >= endMs - (toMs == null ? HELD_EVAL_GAP_MS : EVAL_TOL_MS)) reached = true;
+    }
+    return held && reached;
+  };
+
+  const explains = (sn: string, fromMs: number, toMs: number): boolean =>
+    toMs > fromMs && toMs - fromMs <= maxMs && judge(sn, fromMs, toMs, toMs);
+
+  const open = (sn: string, fromMs: number, nowMs: number): boolean =>
+    nowMs > fromMs && nowMs - fromMs <= maxMs && judge(sn, fromMs, null, nowMs);
+
+  const heldWithin = (sn: string, fromMs: number, toMs: number): boolean =>
+    (log.get(sn) ?? []).some((s) => s.held && s.endMs >= fromMs && s.startMs <= toMs);
+
+  const restate = (sn: string, pts: ReadonlyArray<{ ts: number; value: number }>): Array<{ ts: number; value: number }> => {
+    const out: Array<{ ts: number; value: number }> = [];
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      out.push(p);
+      const q = pts[i + 1];
+      if (!q) break;
+      const gap = q.ts - p.ts;
+      if (gap <= HELD_RESTATE_EVERY_MS || !explains(sn, p.ts, q.ts)) continue;
+      for (let t = p.ts + HELD_RESTATE_EVERY_MS; t < q.ts; t += HELD_RESTATE_EVERY_MS) out.push({ ts: t, value: p.value });
+    }
+    return out;
+  };
+
+  return { note, explains, open, heldWithin, restate };
 }
 
 /* ─────────────────────────────── held spans ─────────────────────────────── */

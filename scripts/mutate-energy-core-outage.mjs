@@ -109,6 +109,10 @@
  *   B-xcvi  the Cores that left drop out of the battery sum while the change is pending
  *   B-xcvii the sustained re-seed takes the sum that still carried the Cores that left
  *   B-xcviii the BMS pass reads the live source set only (the pending change is ignored)
+ *   B-xcix  a dark slot's gap the gate explains is not held past 10 min (integration review F8)
+ *   B-c     the 15-min clamp does not wait for a held panel (a long stall's windows are skipped)
+ *   B-ci    the bridge reads the rows only (a held panel's reading is not restated across its gap)
+ *   B-cii   the bridge is not told which gaps the gate explains
  *
  *   node scripts/mutate-energy-core-outage.mjs
  */
@@ -133,6 +137,7 @@ const SUBSET = [
   'test/energyBridgeSeams.test.ts',
   'test/panelGapLifetime.test.ts',
   'test/recorderMembershipRollover.test.ts',
+  'test/heldGapEnergy.test.ts',
 ];
 
 const MUTANTS = [
@@ -377,7 +382,7 @@ const MUTANTS = [
   {
     id: 'B-xxxv. ★★ the 15-min window clamp is removed',
     file: EB,
-    find: '    if (since < cutoff && !dark.some(recordedAfter)) since = cutoff;',
+    find: '    if (since < cutoff && !dark.some(recordedAfter) && !dark.some(heldSince)) since = cutoff;',
     to: '    /* MUTANT */',
     why: 'The first window after a restart spans the downtime: one judged on daylight at its start books nothing for the night it covers.',
   },
@@ -686,7 +691,7 @@ const MUTANTS = [
   {
     id: 'B-lxxix. ★★★ a dark slot\'s gap is never held',
     file: EB,
-    find: '      if (!pts.some((p) => p.ts >= start) && !ownReading(s) && last != null && nowMs - last < INTEGRATE_HEAD_LOOKBACK_MS) {',
+    find: '      if (!pts.some((p) => p.ts >= start) && !ownReading(s) && last != null && (nowMs - last < INTEGRATE_HEAD_LOOKBACK_MS || deps.heldOpen?.(s.panelSn, last, nowMs) === true)) {',
     to: '      if (false) { /* MUTANT */',
     why: 'Every 5-min window inside a panel cloud shadow books nothing at the slots: the dark Cores\' battery out loses the window for good.',
   },
@@ -700,8 +705,8 @@ const MUTANTS = [
   {
     id: 'B-lxxxi. ★★★ the clamp ignores the slot rows recorded after the watermark',
     file: EB,
-    find: '    if (since < cutoff && !dark.some(recordedAfter)) since = cutoff;',
-    to: '    if (since < cutoff) since = cutoff; /* MUTANT */',
+    find: '    if (since < cutoff && !dark.some(recordedAfter) && !dark.some(heldSince)) since = cutoff;',
+    to: '    if (since < cutoff && !dark.some(heldSince)) since = cutoff; /* MUTANT */',
     why: 'The review defect: after a crash and 11 min or more of downtime the slot rows from the last rollup to the crash are never booked (226 Wh of load against 0 Wh bridged).',
   },
   {
@@ -822,6 +827,35 @@ const MUTANTS = [
     find: '    const sourceSns = bmsMembersOf(snap);',
     to: '    const sourceSns = sourceSnsOf(snap); /* MUTANT */',
     why: 'The pending change is ignored where it matters: a two-rollup flicker trips the v1.98.0 floor-gap re-seed.',
+  },
+  // ── integration review F8: a held panel's gap past 10 min ──
+  {
+    id: 'B-xcix. ★★★ a dark slot\'s gap the gate explains is not held past 10 min',
+    file: EB,
+    find: '      if (!pts.some((p) => p.ts >= start) && !ownReading(s) && last != null && (nowMs - last < INTEGRATE_HEAD_LOOKBACK_MS || deps.heldOpen?.(s.panelSn, last, nowMs) === true)) {',
+    to: '      if (!pts.some((p) => p.ts >= start) && !ownReading(s) && last != null && nowMs - last < INTEGRATE_HEAD_LOOKBACK_MS) { /* MUTANT */',
+    why: 'Every Core dark: a 12-poll replay books nothing at the slots for the windows inside it (about 0.5 kWh of battery out an hour at 3.4 kW).',
+  },
+  {
+    id: 'B-c. ★★ the 15-min clamp does not wait for a held panel',
+    file: EB,
+    find: '    if (since < cutoff && !dark.some(recordedAfter) && !dark.some(heldSince)) since = cutoff;',
+    to: '    if (since < cutoff && !dark.some(recordedAfter)) since = cutoff; /* MUTANT */',
+    why: 'A held window older than 15 min is clamped forward past the gap\'s start, and the battery out of a 25-poll stall is lost.',
+  },
+  {
+    id: 'B-ci. ★★★ the bridge reads the rows only',
+    file: RC,
+    find: '    query: energyPoints,',
+    to: '    query: (sn, metric, sinceMs, untilMs) => queryStmt.all(sn, metric, sinceMs, untilMs) as Array<{ ts: number; value: number }>, /* MUTANT */',
+    why: 'The bridge holds the window but the gap has no row to integrate across: the windows inside it book nothing at the slots.',
+  },
+  {
+    id: 'B-cii. ★★★ the bridge is not told which gaps the gate explains',
+    file: RC,
+    find: '    heldOpen: (sn, fromMs, nowMs) => heldGaps.open(sn, fromMs, nowMs),',
+    to: '    /* MUTANT */',
+    why: 'Past 10 min the bridge books a window inside the panel\'s gap as empty before the gap ends.',
   },
 ];
 

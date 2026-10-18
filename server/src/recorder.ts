@@ -17,6 +17,7 @@ import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './b
 // v1.188.1 — held readings: the write gate, the held-span log and the exclusion of held rows.
 import {
   createHeldSamples, projectionRecordable, heldSinceMs, HELD_SCAN_EVERY_MS, RECORD_FRESH_MS, HELD_RETURN_GAP_MS,
+  createHeldGapLog, HELD_ENERGY_BRIDGE_MAX_MS,
   type HeldSpan, type HeldScanSummary,
 } from './heldSamples.js';
 export { projectionRecordable, RECORD_FRESH_MS } from './heldSamples.js';
@@ -1207,6 +1208,8 @@ export function createRecorder(
   const heldMetricNext = db.prepare(SEED_SQL.nextMetric);
   const heldNewestOf = db.prepare(SEED_SQL.maxTsOf);
   type HeldOne = { v: string | null } | undefined;
+  // v1.188.1 — the panels' evaluations, held or fresh, for the lifetime counters (energyPoints).
+  const heldGaps = createHeldGapLog();
   const heldStore = createHeldSamples(db, {
     log,
     retainMs: retainMsForHeld,
@@ -2265,6 +2268,11 @@ export function createRecorder(
     const nowMs = Date.now();
     const held = new Map<string, { sinceMs: number | null; shadow: boolean }>();
     const samples = extract(snap, nowMs, held);
+    // v1.188.1 — each panel this evaluation read, held or fresh, for the lifetime counters' bridge
+    // across a held panel's row gap (heldGaps, energyPoints).
+    for (const d of Object.values(snap.devices)) {
+      if (d.projection?.kind === 'shp2') heldGaps.note(d.sn, held.has(d.sn), nowMs);
+    }
     record(samples);
     // v1.188.1 (dry run; review 2) — what explains a silence, if one is under way (silenceHeld). A
     // recordable home reading, written or not, means the gate held nothing that explains one yet.
@@ -2343,6 +2351,22 @@ export function createRecorder(
   const queryStmt = db.prepare(
     `SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
   );
+  /**
+   * v1.188.1 — one series as the LIFETIME ENERGY counters read it: the rows of `samples` in
+   * [fromMs, toMs], with a held panel's reading restated every 5 min across each row gap of at most
+   * HELD_ENERGY_BRIDGE_MAX_MS that the gate explains (heldSamples.ts createHeldGapLog): the rows
+   * v1.188.0 wrote at its heartbeat, which the freshness gate no longer writes. Never written to
+   * samples: every other consumer still sees the gap. Read by the watt counters (rollupLifetime,
+   * getLifetimeTotals) and the energy bridge. A series with no held evaluation near the range reads
+   * exactly the rows.
+   */
+  const energyPoints = (sn: string, metric: string, fromMs: number, toMs: number): Array<{ ts: number; value: number }> => {
+    if (!heldGaps.heldWithin(sn, fromMs - HELD_ENERGY_BRIDGE_MAX_MS, toMs)) {
+      return queryStmt.all(sn, metric, fromMs, toMs) as Array<{ ts: number; value: number }>;
+    }
+    const rows = queryStmt.all(sn, metric, fromMs - HELD_ENERGY_BRIDGE_MAX_MS, toMs) as Array<{ ts: number; value: number }>;
+    return heldGaps.restate(sn, rows).filter((p) => p.ts >= fromMs);
+  };
   // v1.19.0 (F17 perf) — window-edge seeks; both ride the (sn, metric, ts)
   // composite index, O(log n) each vs the full-window scan.
   const queryFirstStmt = db.prepare(
@@ -2593,7 +2617,11 @@ export function createRecorder(
     writeLifetime,
     deleteLifetime: (key) => { lifetimeDeleteStmt.run(key); },
     listLifetimeKeys,
-    query: (sn, metric, sinceMs, untilMs) => queryStmt.all(sn, metric, sinceMs, untilMs) as Array<{ ts: number; value: number }>,
+    // v1.188.1 — the series as the lifetime counters read them: a held panel's gap that the gate
+    // explains carries its held reading, up to HELD_ENERGY_BRIDGE_MAX_MS (energyPoints), and a gap
+    // still open within that bound holds the bridge's window as it holds the panel counters.
+    query: energyPoints,
+    heldOpen: (sn, fromMs, nowMs) => heldGaps.open(sn, fromMs, nowMs),
     coreCapacityWh: (sn, nowMs) => {
       let mah = 0;
       let packs = 0;
@@ -3379,8 +3407,7 @@ export function createRecorder(
       const bridgeShare = key === 'fleet_pv_wh' || key === 'fleet_grid_import_wh';
       if (bridgeHeld && bridgeShare) continue;
       let addedWh = 0;
-      let inWindow = 0;
-      let lastBefore = -Infinity;
+      let holdWindow = false;
       for (const c of contributors[key] ?? []) {
         // v1.188.1 — a Core handed to the energy bridge counts only up to the hand-off instant
         // (unless the bridge booked nothing for it this window and its own readings arrive).
@@ -3388,21 +3415,28 @@ export function createRecorder(
         if (until <= since) continue;
         // v1.12.0 (review F9) — fetch from `since - lookback` so integrateWh gets the
         // pre-window boundary sample; it still integrates only [since, until].
-        const pts = queryStmt.all(c.sn, c.metric, since - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>;
+        // v1.188.1 — with a held panel's reading restated across a gap the gate explains (energyPoints).
+        const pts = energyPoints(c.sn, c.metric, since - LIFETIME_ROLLUP_LOOKBACK_MS, now);
         const r = integrateWh(pts, since, until);
         addedWh += r.wh;
-        inWindow += r.samples;
-        for (const p of pts) if (p.ts < since && p.ts > lastBefore) lastBefore = p.ts;
+        // v1.188.1 (review) — a panel counter (Panel Load, Grid Import (Home), each circuit) whose
+        // series has NO row in this window HOLDS its watermark while the gap can still be bridged:
+        // the recorder writes no row while the panel's reading is held (a cloud shadow, a quota
+        // stall: heldSamples.projectionRecordable), and integrateWh gives a window with no row 0 Wh,
+        // so every 5-min window inside such a gap was lost for good from a total_increasing counter
+        // (an 8 kW night charge: ~0.67 kWh of grid import per window). Held, the next window
+        // integrates across the gap: a gap of up to 10 min from the rows on both sides (integrateWh's
+        // rule), and one the gate explains — the panel watched through it and held, not absent — of
+        // up to HELD_ENERGY_BRIDGE_MAX_MS with the held reading restated (energyPoints), as v1.188.0
+        // booked it. A longer gap is not bridged: the next window books 0 for it. Judged per
+        // contributor (each panel), so a live second panel's rows do not release a held one's window.
+        if (!bridgeShare && r.samples === 0) {
+          let lastBefore = -Infinity;
+          for (const p of pts) if (p.ts < since && p.ts > lastBefore) lastBefore = p.ts;
+          if (lastBefore > -Infinity && (now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS || heldGaps.open(c.sn, lastBefore, now))) holdWindow = true;
+        }
       }
-      // v1.188.1 (review) — a panel counter (Panel Load, Grid Import (Home), each circuit) whose
-      // series has NO row in this window while its last row is less than the look-back old HOLDS
-      // its watermark: the recorder writes no row while the panel's reading is held (a cloud shadow,
-      // a quota stall: heldSamples.projectionRecordable), and integrateWh gives a window with no row
-      // 0 Wh, so every 5-min window inside such a gap was lost for good from a total_increasing
-      // counter (an 8 kW night charge: ~0.67 kWh of grid import per window). Held, the next window
-      // integrates across the gap from the rows on both sides, exactly as integrateWh bridges a gap
-      // of up to 10 min inside one window. A longer gap is not bridged (the same 10-min rule).
-      if (!bridgeShare && inWindow === 0 && now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS) continue;
+      if (holdWindow) continue;
       // v1.188.1 — the bridged dark Cores' share, metered at the panel (never negative).
       if (br && key === 'fleet_pv_wh') addedWh += br.pvWh;
       if (br && key === 'fleet_grid_import_wh') addedWh += br.gridImportWh;
@@ -3606,7 +3640,8 @@ export function createRecorder(
           if (until <= watermark) continue;
           // v1.12.0 (review F9) — same head-segment fix as rollupLifetime: fetch the
           // pre-watermark boundary sample so integrateWh's value-hold engages.
-          const pts = queryStmt.all(c.sn, c.metric, watermark - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>;
+          // v1.188.1 — and the same series (energyPoints), so a read never shows what the rollup drops.
+          const pts = energyPoints(c.sn, c.metric, watermark - LIFETIME_ROLLUP_LOOKBACK_MS, now);
           pendingWh += integrateWh(pts, watermark, until).wh;
         }
         if (pendingWh < 0) pendingWh = 0;

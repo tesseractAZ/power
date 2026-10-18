@@ -97,6 +97,9 @@
  *   W-xvi   the card passes no pvViaPanel to the Solar subtitle
  *   W-xvii  a measured slot's pack net keeps its PV in
  *   W-xviii the subtitle reads "in" / "out" with every via-panel slot measured
+ *   W-xix   the card reads a Core at every panel that lists it (integration review: counted twice)
+ *   W-xx    the web listing ignores the server's freshness verdict (a stale panel's listing is read)
+ *   W-xxi   the web listing ignores the house panel
  *
  *   node scripts/mutate-energyflow-offline.mjs
  */
@@ -107,6 +110,7 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MODEL = resolve(REPO, 'web/src/cards/energyFlowModel.ts');
 const CARD = resolve(REPO, 'web/src/cards/EnergyFlow.tsx');
 const MEMB = resolve(REPO, 'server/src/shp2Membership.ts');
+const WMEMB = resolve(REPO, 'web/src/shp2Membership.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const CONSOLE = resolve(REPO, 'server/src/telnet/plant/console.ts');
 const TYPES = resolve(REPO, 'server/src/telnet/plant/types.ts');
@@ -117,6 +121,7 @@ const SUBSET = [
   'test/coresDarkServerVerdicts.test.ts',
   'test/poolCoverageGate.test.ts',
   'test/energyBridge.test.ts',
+  'test/heldGapEnergy.test.ts',
 ];
 
 const MUTANTS = [
@@ -186,15 +191,15 @@ const MUTANTS = [
   {
     id: 'O-x. ★★ a Core that reports is counted again from its slot',
     file: MODEL,
-    find: '    .filter(({ s }) => s.isConnected && !!s.sn && !ownMeter.has(s.sn));',
-    to: '    .filter(({ s }) => s.isConnected && !!s.sn); /* MUTANT */',
+    find: '    .filter(({ s }) => !ownMeter.has(s.sn as string));',
+    to: '    .filter(() => true); /* MUTANT */',
     why: 'A minute-old panel frame doubles the Cores’ delivery and hides the hand-over to the grid.',
   },
   {
     id: 'O-xi. ★ a disconnected slot is drawn',
-    file: MODEL,
-    find: '    .filter(({ s }) => s.isConnected && !!s.sn && !ownMeter.has(s.sn));',
-    to: '    .filter(({ s }) => !!s.sn && !ownMeter.has(s.sn)); /* MUTANT */',
+    file: WMEMB,
+    find: '      if (src.isConnected && src.sn && !chosen.has(src.sn)) chosen.set(src.sn, { panel, src, index });',
+    to: '      if (src.sn && !chosen.has(src.sn)) chosen.set(src.sn, { panel, src, index }); /* MUTANT */',
     why: 'A Core the panel does not count as a source is drawn in the home’s Batteries node.',
   },
   {
@@ -741,6 +746,28 @@ const MUTANTS = [
     find: '  const acExchange = m.viaPanelCount > (m.pvViaPanel ?? 0);',
     to: '  const acExchange = m.viaPanelCount > 0; /* MUTANT */',
     why: 'The packs\' own net reads "in" beside a Battery Net that says charging.',
+  },
+  // ── integration review: a Core listed by two panels ──
+  {
+    id: 'W-xix. ★★★ the card reads a Core at every panel that lists it',
+    file: WMEMB,
+    find: '      if (src.isConnected && src.sn && !chosen.has(src.sn)) chosen.set(src.sn, { panel, src, index });',
+    to: '      if (src.isConnected && src.sn) chosen.set(`${panel.sn}#${src.sn}`, { panel, src, index }); /* MUTANT */',
+    why: 'One dark Core listed by two panels reads "2 via panel" and twice its output, against a Battery Net of one.',
+  },
+  {
+    id: 'W-xx. ★★ the web listing ignores the server\'s freshness verdict',
+    file: WMEMB,
+    find: '  const rank = (p: Panel): number => (p.online === true ? (fresh(p) ? 2 : 1) : 0);',
+    to: '  const rank = (p: Panel): number => (p.online === true ? 1 : 0); /* MUTANT */',
+    why: 'The card reads a Core at the stale panel\'s listing while the bridge and the sensors read the fresh one.',
+  },
+  {
+    id: 'W-xxi. ★ the web listing ignores the house panel',
+    file: WMEMB,
+    find: '    .sort((a, b) => rank(b) - rank(a) || (b.sn === house ? 1 : 0) - (a.sn === house ? 1 : 0) || (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));',
+    to: '    .sort((a, b) => rank(b) - rank(a) || (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0)); /* MUTANT */',
+    why: 'Two fresh panels: the card reads the lower serial\'s listing, the server the house panel\'s.',
   },
 ];
 

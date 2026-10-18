@@ -76,6 +76,24 @@
  *   T-iv    the trend chart connects nulls again
  *   T-v     the trend chart ignores its bucket in the gap
  *
+ * Integration review F8 (a replay or a stall past the integrator's 10-min bridge; two panels):
+ *   I-i     the gate keys on the latch alone again (a new body is dropped until the latch releases)
+ *   I-ii    a latched panel is a reading for as long as its last new body is fresh (its replay is written)
+ *   I-iii   the new-body memory forgets what it saw since the content froze (a replayed refreshed body is new)
+ *   I-iv    the device list drops the new-body clock
+ *   I-v     a hold after a new body still starts at the latch onset
+ *   I-vi    the counters read the rows only (a gap the gate explains loses its windows)
+ *   I-vii   an open gap the gate explains does not hold the window
+ *   I-viii  the hold is released by any panel's rows (two panels)
+ *   I-ix    the bound is dropped from a closed gap (a pause past 30 min is booked at the held reading)
+ *   I-x     the bound is dropped from an open gap (the counters wait forever through an outage)
+ *   I-xi    a silence inside the gap is not checked
+ *   I-xii   a fresh read past a heartbeat after the row is not checked (an absent metric is bridged)
+ *   I-xiii  a gap with no held evaluation is explained
+ *   I-xiv   the held reading is restated at the next row's value
+ *   I-xv    only the held evaluations are logged
+ *   I-xvi   the read path reads the rows only (a read and the rollup at one instant disagree)
+ *
  * Dry-run follow-ups (a run of the real scan over a copy of the live database):
  *   Y-i     a later, overlapping record of the device is not extended (a second record at the restart)
  *   Y-ii    the move does not re-date the record it filed from a held row
@@ -277,6 +295,8 @@ const REP = resolve(REPO, 'server/src/reports.ts');
 const TM = resolve(REPO, 'web/src/charts/trendMerge.ts');
 const TC = resolve(REPO, 'web/src/charts/TrendChart.tsx');
 const AL = resolve(REPO, 'server/src/alerts.ts');
+const SH = resolve(REPO, 'server/src/shp2Shadow.ts');
+const SNAP = resolve(REPO, 'server/src/snapshot.ts');
 const ARCH = resolve(REPO, 'docs/reference/01-architecture.md');
 const SUBSET = [
   'test/recorderHeldReadings.test.ts',
@@ -295,6 +315,7 @@ const SUBSET = [
   'test/heldSamplesAnchors.test.ts',
   'test/heldSamplesReview4.test.ts',
   'test/heldReplayContentGate.test.ts',
+  'test/heldGapEnergy.test.ts',
 ];
 
 const MUTANTS = [
@@ -329,7 +350,7 @@ const MUTANTS = [
   {
     id: 'G-v. ★★ the cloud-shadow clause is dropped',
     file: HS,
-    find: "  if (d.contentStaleSinceMs != null) return false;\n  return d.projection?.kind !== 'dpu' || dpuContentFresh(d, nowMs);",
+    find: "  if (d.contentStaleSinceMs != null && !latchedBodyNew(d)) return false;\n  return d.projection?.kind !== 'dpu' || dpuContentFresh(d, nowMs);",
     to: "  return d.projection?.kind !== 'dpu' || dpuContentFresh(d, nowMs); /* MUTANT */",
     why: 'A panel body the cloud replays (every REST 200 bumps lastTelemetryAtMs) is written as fresh readings.',
   },
@@ -736,16 +757,129 @@ const MUTANTS = [
   {
     id: 'G-xii. ★★★ a panel counter with no row in a window does not hold its watermark',
     file: REC,
-    find: '      if (!bridgeShare && inWindow === 0 && now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS) continue;',
+    find: '      if (holdWindow) continue;',
     to: '      /* MUTANT */',
     why: 'The review defect: the gate writes no row while the panel is held, and every 5-min window inside a cloud shadow or a quota stall integrates to 0 Wh for good (292 Wh of load and 667 Wh of grid import in an 8 kW night-charge hour).',
   },
   {
     id: 'G-xiii. ★★ the hold is applied to the counters the energy bridge adds to',
     file: REC,
-    find: '      if (!bridgeShare && inWindow === 0 && now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS) continue;',
-    to: '      if (inWindow === 0 && now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS) continue; /* MUTANT */',
+    find: '        if (!bridgeShare && r.samples === 0) {',
+    to: '        if (r.samples === 0) { /* MUTANT */',
     why: 'PV Production and Grid to Battery Charge skip writing a window in which the bridge booked energy: the bridge\'s share is added only when the counter writes, so it is lost.',
+  },
+  // ── integration review F8: the gate keys on content; the counters across a held panel ──
+  {
+    id: 'I-i. ★★★ the gate keys on the latch alone again',
+    file: HS,
+    find: '  if (d.contentStaleSinceMs != null && !latchedBodyNew(d)) return false;',
+    to: '  if (d.contentStaleSinceMs != null) return false; /* MUTANT */',
+    why: 'The first new body after a replay is not written while the latch waits for a second: a 9-poll replay is an 11-min row gap.',
+  },
+  {
+    id: 'I-ii. ★★ a latched panel is a reading for as long as its last new body is fresh',
+    file: HS,
+    find: '  return typeof n === \'number\' && Number.isFinite(n) && n === d.lastTelemetryAtMs && (since == null || n > since);',
+    to: '  return typeof n === \'number\' && Number.isFinite(n) && (since == null || n > since); /* MUTANT */',
+    why: 'The cloud replaying a refreshed body is written as fresh readings at each poll for three minutes.',
+  },
+  {
+    id: 'I-iii. ★★ the new-body memory forgets what it saw since the content froze',
+    file: SH,
+    find: '  const isNew = witness !== last && !(sinceLatch?.has(witness) ?? false);',
+    to: '  const isNew = witness !== last; /* MUTANT */',
+    why: 'A cloud alternating between the frozen body and a refreshed one has the refreshed one written at every return.',
+  },
+  {
+    id: 'I-iv. ★ the device list drops the new-body clock',
+    file: SNAP,
+    find: '        contentNewAtMs: existing?.contentNewAtMs, // v1.188.1 — same trap, same carry',
+    to: '        /* MUTANT */',
+    why: 'Every /device/list poll forgets the clock: the latched panel\'s new body is not a reading for the evaluations after it.',
+  },
+  {
+    id: 'I-v. ★ a hold after a new body still starts at the latch onset',
+    file: HS,
+    find: '  if (ok(d.contentStaleSinceMs)) c.push(ok(d.contentNewAtMs) && d.contentNewAtMs > d.contentStaleSinceMs ? d.contentNewAtMs : d.contentStaleSinceMs);',
+    to: '  if (ok(d.contentStaleSinceMs)) c.push(d.contentStaleSinceMs); /* MUTANT */',
+    why: 'A held span covers the new body the recorder wrote as a reading.',
+  },
+  {
+    id: 'I-vi. ★★★ the counters read the rows only',
+    file: REC,
+    find: '    if (!heldGaps.heldWithin(sn, fromMs - HELD_ENERGY_BRIDGE_MAX_MS, toMs)) {',
+    to: '    if (true) { /* MUTANT */',
+    why: 'The review defect: every 5-min window inside a replay or a stall past 10 min is lost from Panel Load, Grid Import (Home), the circuits and the bridged battery out (v1.188.0 lost nothing).',
+  },
+  {
+    id: 'I-vii. ★★★ an open gap the gate explains does not hold the window',
+    file: REC,
+    find: '          if (lastBefore > -Infinity && (now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS || heldGaps.open(c.sn, lastBefore, now))) holdWindow = true;',
+    to: '          if (lastBefore > -Infinity && now - lastBefore < LIFETIME_ROLLUP_LOOKBACK_MS) holdWindow = true; /* MUTANT */',
+    why: 'A window advanced inside a held gap books 0 Wh before the gap ends, and the restated reading never reaches it.',
+  },
+  {
+    id: 'I-viii. ★★★ the hold is released by any panel\'s rows',
+    file: REC,
+    find: '      if (holdWindow) continue;',
+    to: '      if (holdWindow && addedWh === 0) continue; /* MUTANT */',
+    why: 'Two panels: a live second panel\'s rows release the held panel\'s window, and its share of the window is lost.',
+  },
+  {
+    id: 'I-ix. ★★★ the bound is dropped from a closed gap',
+    file: HS,
+    find: '    toMs > fromMs && toMs - fromMs <= maxMs && judge(sn, fromMs, toMs, toMs);',
+    to: '    toMs > fromMs && judge(sn, fromMs, toMs, toMs); /* MUTANT */',
+    why: 'A pause of any length the panel was watched through is booked at the reading before it (an outage at a reading from before it).',
+  },
+  {
+    id: 'I-x. ★★ the bound is dropped from an open gap',
+    file: HS,
+    find: '    nowMs > fromMs && nowMs - fromMs <= maxMs && judge(sn, fromMs, null, nowMs);',
+    to: '    nowMs > fromMs && judge(sn, fromMs, null, nowMs); /* MUTANT */',
+    why: 'Through an outage the panel stays listed in, its counters wait for hours and nothing is persisted.',
+  },
+  {
+    id: 'I-xi. ★★ a silence inside the gap is not checked',
+    file: HS,
+    find: '      if (i > i0 && s.afterSilence) return false;',
+    to: '      /* MUTANT */',
+    why: 'A fleet silence, in which nothing was evaluated, is booked at the held reading as if the gate had held the panel.',
+  },
+  {
+    id: 'I-xii. ★★ a fresh read past a heartbeat after the row is not checked',
+    file: HS,
+    find: '      if (!s.held && s.endMs > fromMs + HELD_RESTATE_EVERY_MS + EVAL_TOL_MS && s.startMs < endMs - EVAL_TOL_MS) return false;',
+    to: '      /* MUTANT */',
+    why: 'A metric the panel stopped reporting while it was read fresh is bridged at its last value.',
+  },
+  {
+    id: 'I-xiii. ★★ a gap with no held evaluation is explained',
+    file: HS,
+    find: '    return held && reached;',
+    to: '    return reached; /* MUTANT */',
+    why: 'A metric absent while the panel was fresh is bridged as if held.',
+  },
+  {
+    id: 'I-xiv. ★ the held reading is restated at the next row\'s value',
+    file: HS,
+    find: '      for (let t = p.ts + HELD_RESTATE_EVERY_MS; t < q.ts; t += HELD_RESTATE_EVERY_MS) out.push({ ts: t, value: p.value });',
+    to: '      for (let t = p.ts + HELD_RESTATE_EVERY_MS; t < q.ts; t += HELD_RESTATE_EVERY_MS) out.push({ ts: t, value: q.value }); /* MUTANT */',
+    why: 'The gap is booked at the reading after it, which nothing measured during the gap.',
+  },
+  {
+    id: 'I-xv. ★★ only the held evaluations are logged',
+    file: REC,
+    find: "      if (d.projection?.kind === 'shp2') heldGaps.note(d.sn, held.has(d.sn), nowMs);",
+    to: "      if (d.projection?.kind === 'shp2' && held.has(d.sn)) heldGaps.note(d.sn, true, nowMs); /* MUTANT */",
+    why: 'No gap is ever watched from its last row: every replay or stall past 10 min is lost again.',
+  },
+  {
+    id: 'I-xvi. ★ the read path reads the rows only',
+    file: REC,
+    find: '          const pts = energyPoints(c.sn, c.metric, watermark - LIFETIME_ROLLUP_LOOKBACK_MS, now);',
+    to: '          const pts = queryStmt.all(c.sn, c.metric, watermark - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>; /* MUTANT */',
+    why: 'Between rollups a published total is short of what the next rollup books across a held gap, then jumps.',
   },
   // ── dry-run follow-ups ──
   {

@@ -58,7 +58,12 @@
  * row in the window while its last row is under INTEGRATE_HEAD_LOOKBACK_MS old HOLDS the window:
  * nothing is booked or written, the watermark stays, and the next window integrates across the gap
  * from the rows on both sides (integrateWh bridges up to 10 min), as the recorder's panel counters
- * do; the recorder holds fleet_pv_wh and fleet_grid_import_wh with it. A longer gap is not bridged.
+ * do; the recorder holds fleet_pv_wh and fleet_grid_import_wh with it. v1.188.1 — a longer gap that
+ * the gate explains (the panel watched through it and held, not absent: heldSamples.ts
+ * createHeldGapLog) holds the window too while it is within HELD_ENERGY_BRIDGE_MAX_MS (30 min), and
+ * once it ends the panel's held reading is restated across it every 5 min (deps.query, the
+ * recorder's energyPoints), as v1.188.0's rows were; the 15-min clamp below waits for it as well. A
+ * gap past that bound, or one the gate does not explain, is not bridged.
  * A Core listed connected by two panels (one panel's source list stale) is metered once, at the
  * listing on an online, fresh panel, then the house panel (shp2Membership connectedSourceListings,
  * the listing the backup timers' bound reads).
@@ -139,7 +144,8 @@
  * ~2 kWh/day of the DC counters and read battery out 5-8 kWh/day low); at the return, the span from
  * the bridge's last rollup to the Core's hand-back (at most one rollup window) is booked by neither
  * (the hand-over absorbs it), however long the Core stays listed online without a reading of its
- * own before that; a slot row gap over 10 min is not bridged (the integrator's rule); at an outage
+ * own before that; a slot row gap over 10 min is not bridged (the integrator's rule) unless the gate
+ * explains it and it is within HELD_ENERGY_BRIDGE_MAX_MS (above); at an outage
  * start, the battery flow from the Core's last register reading to
  * the bridge's window start (the cloud's offline detection or the content window, and a rollup that
  * fell inside the dwell) is absorbed unbridged; a Core whose flip no run saw (it went offline while
@@ -149,7 +155,8 @@
  * bridge's first window books that span back (the window starts at the watermark when slot rows
  * were recorded after it, however long the downtime), and the BMS and the bridge both count that
  * span's battery energy (at most one rollup window); nothing can be bridged while the panel itself
- * is dark; and there is no backfill — a bridge that starts mid-outage counts from its first window.
+ * is dark, beyond a gap the gate explains of up to HELD_ENERGY_BRIDGE_MAX_MS (its held reading
+ * restated); and there is no backfill — a bridge that starts mid-outage counts from its first window.
  *
  * Pure functions plus a small factory (createEnergyBridge) that the recorder hands its lifetime
  * table and sample queries.
@@ -765,8 +772,13 @@ export interface EnergyBridgeDeps {
   writeLifetime: (key: string, wh: number, ts: number) => void;
   deleteLifetime: (key: string) => void;
   listLifetimeKeys: () => string[];
-  /** Raw samples, ascending. */
+  /** Samples, ascending: the recorder's energy series (recorder.ts energyPoints — the rows, and a held
+   *  panel's reading restated across a gap the gate explains). */
   query: (sn: string, metric: string, sinceMs: number, untilMs: number) => Array<{ ts: number; value: number }>;
+  /** v1.188.1 — the gate explains `sn`'s row gap since `fromMs` so far and it is still within the
+   *  held-reading bound (heldSamples.ts createHeldGapLog open). Optional: without it a gap is held
+   *  only while it is under the integrator's 10 min. */
+  heldOpen?: (sn: string, fromMs: number, nowMs: number) => boolean;
   /** A Core's measured full-charge capacity (Σ its packs' fullCapMah × 0.1024 Wh/mAh), or null. */
   coreCapacityWh: (sn: string, nowMs: number) => number | null;
   /** The install site for the day/night test (bridgeSite of the configured location), read at each use. */
@@ -1000,9 +1012,12 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     // solar energy over that span while Panel Load and the grid counters booked the same minutes. The
     // window then starts at the watermark; the downtime itself has no rows, and integrateWh never
     // integrates across a gap over 10 min.
+    // v1.188.1 — nor while a dark slot's panel is held by the gate since the watermark (a gap the
+    // held-reading bound can still bridge, deps.heldOpen): the window is being held for it (below).
     const cutoff = nowMs - BRIDGE_MAX_WINDOW_MS;
     const recordedAfter = (s: DarkSlot): boolean => deps.query(s.panelSn, `src${s.slot}_w`, since + 1, Math.min(nowMs, since + BRIDGE_MAX_WINDOW_MS)).length > 0;
-    if (since < cutoff && !dark.some(recordedAfter)) since = cutoff;
+    const heldSince = (s: DarkSlot): boolean => deps.heldOpen?.(s.panelSn, since, nowMs) === true;
+    if (since < cutoff && !dark.some(recordedAfter) && !dark.some(heldSince)) since = cutoff;
     const result: BridgeRollupResult = { sinceMs: since, untilMs: nowMs, pvWh: 0, gridImportWh: 0, chargeWh: 0, dischargeWh: 0, slots: [] };
     if (since >= nowMs) return result;
     // v1.188.1 (review) — a dark slot whose rows stopped inside a gap the integrator can still bridge
@@ -1012,6 +1027,9 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     // across the gap from the rows on both sides (integrateWh bridges up to 10 min), as the recorder's
     // panel counters do. The recorder holds fleet_pv_wh and fleet_grid_import_wh with it and counts
     // no Core's own readings instead (`held`). Before, every shadow episode lost the windows inside it.
+    // v1.188.1 — and so does a longer gap the gate explains while it is within the held-reading bound
+    // (deps.heldOpen): once it ends, the panel's held reading is restated across it (deps.query).
+    // Past the bound it is not held, and the window books nothing for the slot.
     const slotPts = new Map<DarkSlot, Array<{ ts: number; value: number }>>();
     /** The Core delivers a reading of its own (a marked Core the cloud still lists offline, its MQTT
      *  data back): where its slot has no reading inside the window, its own meters count instead
@@ -1026,7 +1044,7 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
       const pts = deps.query(s.panelSn, `src${s.slot}_w`, start - INTEGRATE_HEAD_LOOKBACK_MS, nowMs);
       slotPts.set(s, pts);
       const last = lastTsBefore(pts, start);
-      if (!pts.some((p) => p.ts >= start) && !ownReading(s) && last != null && nowMs - last < INTEGRATE_HEAD_LOOKBACK_MS) {
+      if (!pts.some((p) => p.ts >= start) && !ownReading(s) && last != null && (nowMs - last < INTEGRATE_HEAD_LOOKBACK_MS || deps.heldOpen?.(s.panelSn, last, nowMs) === true)) {
         result.held = true;
         result.slots.push({ panelSn: s.panelSn, slot: s.slot, sn: s.sn, sinceMs: start, basis: 'unbridgeable', reason: 'held: no slot row yet in a gap the next window can bridge', acOutWh: 0, acInWh: 0, pvWh: 0, outWh: 0, inWh: 0 });
       }

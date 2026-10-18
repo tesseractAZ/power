@@ -258,7 +258,9 @@ pushing only finite numbers. Metrics emitted per projection kind:
 **Freshness gate (v1.188.1).** `extract()` writes a device's projection only while
 `projectionRecordable(d, now)` holds: its `lastTelemetryAtMs` is within `RECORD_FRESH_MS`
 (3 min, the 'Telemetry stale' alarm's figure) of now in either direction, the panel's
-cloud-shadow latch (`contentStaleSinceMs`) is clear, and for a Core its content clock
+cloud-shadow latch (`contentStaleSinceMs`) is clear or the arrival that stamped
+`lastTelemetryAtMs` brought a NEW body (`latchedBodyNew`: `contentNewAtMs`, a body whose witness
+has not been seen since the content froze, `shp2Shadow.ts advanceBodySeen`), and for a Core its content clock
 (`contentChangedAtMs`, the v1.181.0 witness) moved within `SHP2_READBACK_STALE_MS` (5 min,
 `dpuContentFresh`): a REST 200 replaying a Core's cached body still lands content, so arrival
 alone is not a reading, and a Core's first body after a restart only seeds the witness (it is
@@ -273,7 +275,11 @@ MQTT while listed offline keeps recording, and a device absent from the list kee
 not `lastUpdated` (a bare `/status` flip bumps it) and not `lastQuotaAtMs` (REST only). A device's
 own content arrival emits `change`, so it is recorded at age 0 and the poll cadence and dedupe are
 unchanged; the gate bites only on rows written on another device's event. A latched panel shadow
-releases with hysteresis, so the first few moving readings after a shadow are not recorded either.
+releases with hysteresis (two distinct new bodies), but a body that arrives new is a reading at
+once, so the first moving reading after a replay is recorded while the latch still holds; its own
+replay, the frozen body again, or a cloud alternating between cached bodies is not. (Keyed on the
+latch alone, the gate had dropped that first reading: a 9-poll replay was an 11-min row gap.) A
+held panel's hold then starts at that body (`heldSinceMs`).
 A hold of an hour or more is logged in `held_spans` from the device's last fresh content, with one
 log line when it reaches an hour and one when the device reports again. A later start for a device
 held at every evaluation since its span opened is the same hold (`noteGate`): a Core with no content
@@ -301,8 +307,29 @@ store: the offline, stale and blind alarms and the SoC ladder read the same proj
   instead: the next window integrates across the gap from the rows on both sides, as
   `integrateWh` bridges a gap of up to 10 min inside one window. The energy bridge holds its
   window the same way (energy chapter, the bridge). Before, every 5-min window inside a cloud
-  shadow or a quota stall was lost from those counters for good. A gap over 10 min is not
-  bridged.
+  shadow or a quota stall was lost from those counters for good. The hold is judged per
+  contributor, so a live second panel's rows do not release a held panel's window.
+- **The lifetime counters across a held panel.** v1.188.0 lost nothing to a replay or a stall:
+  its heartbeat restated the held reading and the counters integrated it. For the lifetime
+  energy counters only (`samples` stay as written), a row gap the gate itself explains is
+  integrated with the held reading up to `HELD_ENERGY_BRIDGE_MAX_MS` (30 min): `createHeldGapLog`
+  (`heldSamples.ts`) keeps each panel's evaluations in memory, held or fresh, and a gap (a, b) of
+  one series is explained when the recorder watched the panel through it (no two evaluations more
+  than `HELD_EVAL_GAP_MS`, 3 min, apart), held it at some evaluation inside it, and read it fresh
+  no later than one heartbeat after a (a fresh evaluation after that would have written the metric,
+  so its absence is not the gate's). `energyPoints` (`recorder.ts`) then restates the reading at a
+  every 5 min across the gap, the rows v1.188.0 wrote, for the watt counters, their read path and
+  the energy bridge; a gap still open within the bound holds the window (`heldGaps.open`). Past the
+  bound a gap stays a gap: the next window books nothing for it, beyond `integrateWh`'s own tail of
+  up to 10 min after the last row. The bound comes from the panel's whole recorded history
+  (2026-07-02 → 10-16, 2.75 M rows, written by recorders that restated a held reading): 703 restated
+  runs of 5-180 min through which the recorder kept evaluating the panel, median 11.2 min, p90 15.0,
+  p99 15.6, 702 of them at most 15.8 min; the next is the 2026-10-15 01:54-04:16 internet outage,
+  142 min. A metric written only at the heartbeat starts its gap up to 5 min before the content
+  froze, so 30 min covers every common episode with margin and stays far below an outage. A gap
+  across a restart (the log is in memory), a fleet silence inside it, or a device with no
+  projection is not explained. Only the panels are logged: a Core held by the gate is the energy
+  bridge's after its 3-min dwell.
 
 **Held rows already written.** Rows written before v1.188.1 while a device was held are found by a
 scan and moved, unchanged, from `samples` to `held_samples`, so no consumer reads them as

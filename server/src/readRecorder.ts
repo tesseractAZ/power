@@ -92,7 +92,8 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
   // The worker can't reproduce the main thread's live `pendingWh` integral
   // (it has no snapshot store), but the persisted watermark lags by at most
   // one rollup interval — negligible against a forever-accumulating total —
-  // so report persistedWh and let pendingWh be 0.
+  // so report persistedWh and let pendingWh be 0. (v1.188.1 — up to
+  // HELD_ENERGY_BRIDGE_MAX_MS while the recorder waits out a held panel's gap.)
   // Prepared lazily: on a brand-new DB the writer hasn't created the table
   // yet, and an eager prepare() would throw at construction.
   let lifetimeStmt: ReturnType<typeof db.prepare> | null = null;

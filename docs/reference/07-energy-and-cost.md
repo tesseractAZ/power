@@ -41,7 +41,7 @@ integrated) is what the coverage gates below compare against.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `maxGapMs` (default) | `10 min` | recorder heartbeats every 5 min while a device reports fresh content; a held device writes nothing (architecture chapter, section 4.3), so its stretch is a gap; > 10 min = lost coverage, do not extrapolate |
+| `maxGapMs` (default) | `10 min` | recorder heartbeats every 5 min while a device reports fresh content; a held device writes nothing (architecture chapter, section 4.3), so its stretch is a gap; > 10 min = lost coverage, do not extrapolate. The lifetime counters alone restate a held panel's reading across a gap the gate explains, up to 30 min, before integrating (architecture chapter, 4.4) |
 | `INTEGRATE_HEAD_LOOKBACK_MS` | `10 min` | how far callers widen the query lower bound so the pre-window boundary sample is available |
 
 > **F9 correctness note (v1.14.0):** the head-hold is conditioned on the *real*
@@ -333,8 +333,13 @@ with no row in the window while its last row is less than 10 min old
 watermark stays, and the next window integrates across the gap from the rows on both sides,
 as `integrateWh` bridges a gap of up to 10 min inside one window (`bridge.lastRollup.held`).
 The recorder holds `fleet_pv_wh` and `fleet_grid_import_wh` with it, so the Cores' own rows
-and the slots cover the same span. A gap over 10 min is not bridged. A Core whose own
-readings arrive (above) is not held: its own meters count instead.
+and the slots cover the same span. A longer gap that the gate explains (the panel watched
+through it and held: architecture chapter, 4.4) is held too while it is within
+`HELD_ENERGY_BRIDGE_MAX_MS` (30 min), the 15-min clamp waiting for it as well, and once it ends
+the panel's held reading is restated across it every 5 min, as v1.188.0's rows were (a 10-poll
+replay had lost 0.52 of an hour's 3.39 kWh of battery out). A gap past the bound, or one the gate
+does not explain, is not bridged. A Core whose own readings arrive (above) is not held: its own
+meters count instead.
 
 A Core listed connected by two panels (one panel's source list is stale) is metered once,
 at one listing (`connectedSourceListings`): on an online panel whose reading is fresh, else
@@ -470,7 +475,8 @@ The bridge's first window books that span back (it starts at the watermark when 
 were recorded after it, however long the downtime), so Home Assistant sees a dip of up to
 one rollup window's energy, then the rise. That span's battery energy is counted by the BMS
 and again by the bridge (at most one rollup window). Nothing can be bridged while the
-panel itself is dark; and there is no backfill: a bridge that starts mid-outage counts
+panel itself is dark, beyond a gap the gate explains of up to `HELD_ENERGY_BRIDGE_MAX_MS` (its
+held reading restated, above); and there is no backfill: a bridge that starts mid-outage counts
 from its first window (the energy before it is absorbed at the hand-over; the vendor's
 `ecoflow_panel:vendor_*` statistics cover those days).
 
