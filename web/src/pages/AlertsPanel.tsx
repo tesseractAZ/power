@@ -1,5 +1,20 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
-import type { Alert, ClearedAlert } from '../types';
+import type { Alert, ClearedHistoryPage, ClearedHistoryRow } from '../types';
+import {
+  CLEARED_DEFAULT_RANGE,
+  CLEARED_PAGE_ROWS,
+  CLEARED_RANGES,
+  clearedCaption,
+  clearedEmptyText,
+  clearedHistoryQuery,
+  clearedRangeLabel,
+  deviceLabel,
+  isSevere,
+  newestFirst,
+  showMoreLabel,
+  visibleRows,
+  type ClearedRange,
+} from './clearedHistoryModel';
 import { fmtRel, fmtMins } from '../format';
 import { SubjectBoxes } from '../cards/AlertParts';
 // v0.11.0 — group + colour the alert list by ISA priority (Critical/High/Medium/Low).
@@ -296,20 +311,38 @@ function InsightCard({ alert }: { alert: Alert }) {
 
 type ClearedFilter = 'all' | 'severe';
 
+/**
+ * The Cleared view asks the server for a window of the ledger (7 days unless the operator picks
+ * 30 or 90 days, or All), newest first, each row reduced to what the table renders; the 30 s
+ * refresh re-fetches the current window only, and CLEARED_PAGE_ROWS rows are rendered before a
+ * "Show more". The view used to fetch the whole ledger (1,500 rows, 1.2 MB) and render every row.
+ * The pure parts live in clearedHistoryModel.ts (tested in server/test/clearedHistoryWeb.test.ts).
+ */
 function ClearedAlertsView() {
-  const [cleared, setCleared] = useState<ClearedAlert[]>([]);
+  const [range, setRange] = useState<ClearedRange>(CLEARED_DEFAULT_RANGE);
   const [filter, setFilter] = useState<ClearedFilter>('all');
+  const [limit, setLimit] = useState(CLEARED_PAGE_ROWS);
+  // The page and the range it answers: a page for another range is not shown under this one.
+  const [loaded, setLoaded] = useState<{ range: ClearedRange; page: ClearedHistoryPage } | null>(null);
+  const [failed, setFailed] = useState(false);
+
   useEffect(() => {
     let live = true;
     const load = async () => {
       try {
-        const r = await fetch(apiUrl('api/alerts/history'));
-        if (r.ok && live) {
-          const j = (await r.json()) as { cleared: ClearedAlert[] };
-          setCleared(j.cleared ?? []);
+        const r = await fetch(apiUrl(clearedHistoryQuery(range)));
+        if (!live) return;
+        if (!r.ok) {
+          setFailed(true);
+          return;
+        }
+        const j = (await r.json()) as ClearedHistoryPage;
+        if (live) {
+          setLoaded({ range, page: { ...j, cleared: j.cleared ?? [] } });
+          setFailed(false);
         }
       } catch {
-        /* ignore */
+        if (live) setFailed(true);
       }
     };
     load();
@@ -318,82 +351,101 @@ function ClearedAlertsView() {
       live = false;
       window.clearInterval(t);
     };
-  }, []);
+  }, [range]);
 
-  // Newest first. The server may already order it, but sort defensively so the
-  // view is deterministic regardless of insertion order.
-  const sorted = useMemo(
-    () => [...cleared].sort((a, b) => b.clearedAt - a.clearedAt),
-    [cleared],
-  );
-  const shown = useMemo(
-    () =>
-      filter === 'severe'
-        ? sorted.filter((ce) => {
-            const p = priorityOf(ce.alert);
-            return p === 'critical' || p === 'high';
-          })
-        : sorted,
-    [sorted, filter],
-  );
+  const page = loaded?.range === range ? loaded.page : null;
+  const sorted = useMemo(() => newestFirst(page?.cleared ?? []), [page]);
+  const filtered = useMemo(() => (filter === 'severe' ? sorted.filter(isSevere) : sorted), [sorted, filter]);
+  const { rows: visible, hidden } = visibleRows(filtered, limit);
+
+  const pickRange = (r: ClearedRange) => {
+    setRange(r);
+    setLimit(CLEARED_PAGE_ROWS);
+  };
 
   return (
     <div className="card">
       <div className="card-title flex items-center justify-between gap-2 flex-wrap">
         <span>Recently cleared</span>
-        <div className="flex items-center gap-2">
-          <SubNav<ClearedFilter>
-            aria-label="Cleared-alert filter"
-            value={filter}
-            onChange={setFilter}
-            tabs={[
-              { id: 'all', label: 'All' },
-              { id: 'severe', label: 'Critical + High' },
-            ]}
-          />
-          <span className="text-xs text-muted normal-case tracking-normal">{shown.length} shown</span>
-        </div>
+        {page && (
+          <span className="text-xs text-muted normal-case tracking-normal">
+            {clearedCaption({ shown: filtered.length, total: page.total, range, filtered: filter === 'severe' })}
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-2 flex-wrap mb-2">
+        <SubNav<ClearedRange>
+          aria-label="Cleared-alert window"
+          value={range}
+          onChange={pickRange}
+          tabs={CLEARED_RANGES.map((r) => ({ id: r, label: clearedRangeLabel(r) }))}
+        />
+        <SubNav<ClearedFilter>
+          aria-label="Cleared-alert filter"
+          value={filter}
+          onChange={setFilter}
+          tabs={[
+            { id: 'all', label: 'All' },
+            { id: 'severe', label: 'Critical + High' },
+          ]}
+        />
       </div>
 
       <HowItWorks>
         History persists across restarts — readable even when speakers are down. Each alert is logged
-        here when it clears, threshold and learned alike, with how long it lasted.
+        here when it clears, threshold and learned alike, with how long it lasted. The list shows the
+        last 7 days unless another window is picked; All is everything the add-on has kept.
       </HowItWorks>
 
-      {shown.length === 0 ? (
+      {page == null ? (
         <div className="text-sm text-muted leading-relaxed">
-          {cleared.length === 0
-            ? 'No cleared alerts recorded yet.'
-            : 'No Critical or High alerts in the cleared history.'}
+          {failed ? 'The cleared history could not be loaded.' : 'Loading…'}
+        </div>
+      ) : visible.length === 0 ? (
+        <div className="text-sm text-muted leading-relaxed">
+          {clearedEmptyText({ total: page.total, shown: page.shown, range })}
         </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-muted text-left text-[11px] uppercase tracking-wider">
-                <th className="font-medium py-1 pr-3">Severity</th>
-                <th className="font-medium py-1 pr-3">Alert</th>
-                <th className="font-medium py-1 pr-3 hidden sm:table-cell">Category</th>
-                <th className="font-medium py-1 pr-3 hidden md:table-cell">Device</th>
-                <th className="font-medium py-1 pr-3">Window</th>
-                <th className="font-medium py-1">Lasted</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((ce, i) => (
-                <ClearedRow key={`${ce.alert.id}-${ce.clearedAt}-${i}`} ce={ce} />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-muted text-left text-[11px] uppercase tracking-wider">
+                  <th className="font-medium py-1 pr-3">Severity</th>
+                  <th className="font-medium py-1 pr-3">Alert</th>
+                  <th className="font-medium py-1 pr-3 hidden sm:table-cell">Category</th>
+                  <th className="font-medium py-1 pr-3 hidden md:table-cell">Device</th>
+                  <th className="font-medium py-1 pr-3">Window</th>
+                  <th className="font-medium py-1">Lasted</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((row, i) => (
+                  <ClearedRow key={`${row.id}-${row.clearedAt}-${i}`} row={row} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {hidden > 0 && (
+            <div className="mt-3 flex items-center justify-between gap-2 flex-wrap text-xs text-muted">
+              <span>{hidden.toLocaleString('en-US')} more not shown</span>
+              <button
+                type="button"
+                onClick={() => setLimit((l) => l + CLEARED_PAGE_ROWS)}
+                className="px-3 py-1 rounded-sm border border-line bg-panel hover:bg-panel2 text-ink"
+              >
+                {showMoreLabel(hidden)}
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-function ClearedRow({ ce }: { ce: ClearedAlert }) {
-  const a = ce.alert;
-  const meta = PRIORITY_META[priorityOf(a)];
+function ClearedRow({ row }: { row: ClearedHistoryRow }) {
+  const meta = PRIORITY_META[priorityOf(row)];
   return (
     <tr className="border-t border-line/50 align-top">
       <td className="py-2 pr-3 whitespace-nowrap">
@@ -404,26 +456,24 @@ function ClearedRow({ ce }: { ce: ClearedAlert }) {
       </td>
       <td className="py-2 pr-3">
         <div className="flex items-baseline gap-1.5 flex-wrap">
-          <span className="font-medium text-ink">{a.title}</span>
-          {a.source === 'learned' && (
+          <span className="font-medium text-ink">{row.title}</span>
+          {row.source === 'learned' && (
             <span className="badge text-[9px] bg-accent/15 text-accent border-accent/30">learned</span>
           )}
         </div>
-        {a.detail && <div className="text-[11px] text-muted mt-0.5 leading-snug">{a.detail}</div>}
+        {row.detail && <div className="text-[11px] text-muted mt-0.5 leading-snug">{row.detail}</div>}
       </td>
       <td className="py-2 pr-3 hidden sm:table-cell">
-        <span className="badge badge-muted text-[10px]">{a.category}</span>
+        <span className="badge badge-muted text-[10px]">{row.category}</span>
       </td>
-      <td className="py-2 pr-3 hidden md:table-cell text-[11px] text-muted">
-        {a.coreNum != null ? `Core ${a.coreNum}${a.packNum != null ? ` · Pack ${a.packNum}` : ''}` : a.device}
-      </td>
+      <td className="py-2 pr-3 hidden md:table-cell text-[11px] text-muted">{deviceLabel(row)}</td>
       <td className="py-2 pr-3 text-[11px] text-muted whitespace-nowrap">
-        raised {fmtRel(ce.raisedAt)}
+        raised {fmtRel(row.raisedAt)}
         <br />
-        cleared {fmtRel(ce.clearedAt)}
+        cleared {fmtRel(row.clearedAt)}
       </td>
       <td className="py-2 text-[11px] font-mono tabular-nums text-ink whitespace-nowrap">
-        {fmtMins(ce.durationMs / 60000)}
+        {fmtMins(row.durationMs / 60000)}
       </td>
     </tr>
   );

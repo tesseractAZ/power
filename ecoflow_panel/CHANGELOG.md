@@ -1,3 +1,11 @@
+## 1.189.1
+
+### The Alerts page's Cleared list opens on the last 7 days
+
+**Alerts**
+
+- The Cleared list fetched the whole stored history when the page opened and again every 30 seconds — 1,500 cleared alerts, 1.2 MB, each with its full alert record — and drew every row in one table, so it took a moment to appear and ran very long. It now opens on the last 7 days, with 30 days, 90 days or All a tap away; the refresh fetches only the window shown; the caption says how many rows are listed of how many are kept; 200 rows are drawn before a "Show more" button; and each row carries only what the table shows. On the live history the 7-day window is 145 rows and 84 KB in place of 1,500 rows and 1.2 MB, and All is 730 KB. The Critical + High filter is unchanged. The stored history, how much of it is kept, and the warranty export are unchanged.
+
 ## 1.188.1
 
 ### Only fresh readings are saved; while a battery reports nothing of its own, the Energy dashboard and the energy flow read the panel's meters

@@ -293,7 +293,8 @@ Open **Power** in the Home Assistant sidebar. The dashboard has five pages:
 - **Battery**: every pack's state, and the battery projection and diagnostics.
 - **Strategy**: the night-charge card (with its cancel button), forecast and storm preparation,
   and maintenance, including the database snapshot.
-- **Alerts**: active, learned and cleared alerts, and **Alert Settings**: the broadcast switch,
+- **Alerts**: active, learned and cleared alerts (the cleared list opens on the last 7 days; 30 days,
+  90 days or everything kept can be picked), and **Alert Settings**: the broadcast switch,
   one card per priority with its switch, tone and spoken preview, and the tone library.
 
 On your LAN the dashboard is also at `http://<host>:8787`. The control-room console is in the

@@ -42,7 +42,7 @@ from `/api/snapshot`.
 | `/api/degradation`, `/api/round-trip-efficiency` | DegradationCard | capacity-fade report, RTE |
 | `/api/curtailment` | CurtailmentCard | curtailment diagnostics |
 | `/api/history`, `/api/circuit/history` | Sparkline/TrendChart, SolarPanel, CircuitModal | recorder time-series |
-| `/api/alerts/history`, `/api/alerts/outcome` | AlertsPanel, AlertOutcomeButtons | cleared-alert log, outcome tagging |
+| `/api/alerts/history` (`?days=`, `?since=`, `?all=1`), `/api/alerts/outcome` | AlertsPanel, AlertOutcomeButtons | a window of the cleared-alert log (slim rows, newest first), outcome tagging |
 | `/api/alert-settings`, `/api/chimes`, `/api/chime-config`, `/api/broadcast/config`, `/api/alert-preview` | Alert Console | alarm-audio administration |
 | `/api/night-charge/status`, `/api/night-charge/cancel` | NightChargeCard (Strategy tab) | tonight's plan; cancel (write) |
 | `/api/db-export` | DbExportButton (Strategy tab) | database-copy age; export (write) |
@@ -143,7 +143,7 @@ Uses a `SubNav` pill (`components/SubNav.tsx`) with four sub-views:
 |---|---|
 | **Active** | Live threshold alerts, grouped, with `SubjectBoxes` breakdown and a low/medium/high/critical count tile row. |
 | **Learned** | Model-driven detections (`source === 'learned'`): "Anomalies" (peer comparison & self-baseline) and "Forecasts" (runtime/degradation/day-ahead), each rendering the detection's statistical `facts`. Marked as *not* fixed-threshold rules. |
-| **Cleared** | Cleared-alert history from `/api/alerts/history`, with a `ClearedFilter` sub-nav (All / Critical+High) and `AlertOutcomeButtons` posting to `/api/alerts/outcome`. |
+| **Cleared** | Cleared-alert history from `/api/alerts/history`: a window of the ledger (the last 7 days unless the operator picks 30 or 90 days, or All), newest first, each row the fields the table renders (`ClearedHistoryRow`, mirrored from the server's `clearedHistory.ts`; the view's pure parts in `pages/clearedHistoryModel.ts`, tested beside the server module in `server/test/clearedHistoryWeb.test.ts`). The 30 s refresh re-fetches the current window only; the caption gives the rows listed against the ledger's total; `CLEARED_PAGE_ROWS` (200) rows render before a "Show more" button; a `ClearedFilter` sub-nav keeps All / Critical+High. |
 | **Alert Settings** | Hosts the **Alert Console** panel (see below). |
 
 Each active/learned alert row can carry a `PredictiveBadge`.
