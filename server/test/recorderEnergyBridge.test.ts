@@ -26,7 +26,7 @@ import {
 } from './helpers/energyBridgePlant.js';
 
 const { Plant, cleanup } = await loadPlant('ef-energy-bridge-');
-const { BRIDGE_MAX_WINDOW_MS, BRIDGE_PV_EVIDENCE_STEPS, bridgePvSeenKey } = await import('../src/energyBridge.js');
+const { BRIDGE_MAX_WINDOW_MS, BRIDGE_PV_EVIDENCE_STEPS, BRIDGE_PV_VERDICT_HOLD_MS, BRIDGE_PV_GENUINE_WH, bridgePvSeenKey, pvFieldTolerance } = await import('../src/energyBridge.js');
 test.after(cleanup);
 
 /* ── the 10-15 shape ─────────────────────────────────────────────────────── */
@@ -63,7 +63,16 @@ test('★★★ daylight, grid 0, the Cores supplying 300 W each while PV charge
     p.panelSamples(t0);
     const before = p.read();
     // SoC +1 % every 8 min for 4 h: 40 → 70 %. The panel's PV field reads 0 throughout.
-    p.run(240, (_t, m) => { p.pct = CORES.map(() => 40 + Math.floor(m / 8)); });
+    let mins = 0;
+    const rise = (): void => { mins += 1; p.pct = CORES.map(() => 40 + Math.floor(mins / 8)); };
+    p.run(70, rise);
+    // ★★ A field reading 0 against a bound past 2 kWh is a genuine shortfall (pvVerdictHolds): acted on
+    // at the first verdict, not after the hour; the power sensors then withhold the slot.
+    assert.equal(p.logs.filter((l) => l.includes('the field is not trusted (the inferred basis stays)')).length, CORES.length, 'the verdict within 70 min, on the 2 kWh margin');
+    const mid = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.deepEqual([mid.ready, mid.fleetPv, mid.fleetBatteryNet], [false, null, null], 'a field found short is withheld from the power sensors');
+    assert.deepEqual(mid.slots.map((s) => s.basis), ['unbridgeable', 'unbridgeable', 'unbridgeable']);
+    p.run(170, rise);
     const after = p.read();
     const capWh = 5 * FULL_CAP_MAH * PACK_MAH_TO_WH; // 28,672 Wh
     const storedWh = (p.pct[0] - 40) / 100 * capWh;
@@ -77,7 +86,7 @@ test('★★★ daylight, grid 0, the Cores supplying 300 W each while PV charge
     assert.equal(dbg.lastRollup?.slots[0].basis, 'inferred');
     const verdicts = p.logs.filter((l) => l.includes('the field is not trusted (the inferred basis stays)'));
     assert.equal(verdicts.length, CORES.length, 'one verdict line per slot, with both figures');
-    assert.match(verdicts[0], /PV field read 0\.00 kWh since \S+ against the inferred lower bound [\d.]+ kWh \(one SoC step 0\.29 kWh\)/);
+    assert.match(verdicts[0], /PV field read 0\.00 kWh since \S+ against the inferred lower bound [\d.]+ kWh \(one SoC step 0\.29 kWh, tolerance [\d.]+ kWh\) — below it by more than the tolerance since \S+: the field is not trusted \(the inferred basis stays\) — the power sensors withhold the slot/);
   } finally { p.close(); }
 });
 
@@ -111,20 +120,30 @@ test('★★★ a panel PV field that reads the solar the Cores take in is trust
     sunny(p, 5, { outW: 500, pvW: 2500, fieldW: 2500 }, stored);
     assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.trustedSlots, [], 'one reading proves nothing: inferred while the check is pending');
     assert.equal(p.rec.batteryLifetimeDebug().bridge.pvChecks[0].verdict, 'pending');
-    sunny(p, 115, { outW: 500, pvW: 2500, fieldW: 2500 }, stored);
+    assert.equal(p.rec.batteryLifetimeDebug().bridge.lastRollup?.slots[0].basis, 'inferred', 'the rollup books the inferred basis until the field is trusted');
+    // v1.189.1 — the power sensors read the present field at once, unchecked: PV + battery = the slot meter.
+    const early = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.deepEqual([early.ready, early.fleetPv, early.fleetBatteryNet], [true, 7500, 3 * 500 - 7500], 'published before the check, on the field');
+    assert.deepEqual(early.slots.map((s) => s.basis), ['unchecked', 'unchecked', 'unchecked']);
+    sunny(p, 145, { outW: 500, pvW: 2500, fieldW: 2500 }, stored);
     const after = p.read();
     const dbg = p.rec.batteryLifetimeDebug().bridge;
     assert.deepEqual(dbg.trustedSlots, [`${PANEL}_1`, `${PANEL}_2`, `${PANEL}_3`]);
     const lines = p.logs.filter((l) => l.includes('the field is trusted from now on'));
     assert.equal(lines.length, CORES.length);
-    const m = /PV field read ([\d.]+) kWh since \S+ against the inferred lower bound ([\d.]+) kWh \(one SoC step 0\.31 kWh\)/.exec(lines[0]);
+    const m = /PV field read ([\d.]+) kWh since \S+ against the inferred lower bound ([\d.]+) kWh \(one SoC step 0\.31 kWh, tolerance ([\d.]+) kWh\) — within the tolerance since (\S+): the field is trusted/.exec(lines[0]);
     assert.ok(m, lines[0]);
     assert.ok(Number(m[2]) >= BRIDGE_PV_EVIDENCE_STEPS * STEP_WH / 1000 - 0.005, `trusted only after ${BRIDGE_PV_EVIDENCE_STEPS} steps of evidence: ${m[2]}`);
-    assert.ok(Number(m[1]) >= Number(m[2]) - STEP_WH / 1000, 'the field read at least the bound less one step');
+    assert.ok(Number(m[1]) >= Number(m[2]) - Number(m[3]), 'the field read at least the bound less the tolerance');
+    near(Number(m[3]) * 1000, pvFieldTolerance(Number(m[2]) * 1000, STEP_WH), 6, 'the tolerance logged is max(two steps, 15 %)');
+    // ★★ The verdict held one hour before it acted (a transient within the hour changes nothing).
+    const heldSince = Date.parse(m[4]);
+    const actedAt = p.clock - (145 - 120) * MIN; // trusted at about 2 h: 8 steps of evidence (~1 h) + the hour
+    assert.ok(heldSince <= actedAt - BRIDGE_PV_VERDICT_HOLD_MS + MIN && heldSince >= p.clock - 150 * MIN, `held since ${m[4]}`);
     assert.equal(dbg.lastRollup?.slots[0].basis, 'measured');
-    // Two hours: the early windows inferred (a lower bound, one step either way), the rest the field.
-    near(after.pv - before.pv, 3 * 2500 * 2, 3 * STEP_WH + 30, 'PV');
-    near(after.chg - before.chg, 3 * 2000 * 2, 3 * STEP_WH + 30, 'battery in = PV − slot output');
+    // 2½ hours: the early windows inferred (a lower bound, one step either way), the rest the field.
+    near(after.pv - before.pv, 3 * 2500 * 2.5, 3 * STEP_WH + 30, 'PV');
+    near(after.chg - before.chg, 3 * 2000 * 2.5, 3 * STEP_WH + 30, 'battery in = PV − slot output');
     near(after.dsg - before.dsg, 0, 1, 'battery out');
     // The power sensors follow the slots and the field.
     const f = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
@@ -137,22 +156,34 @@ test('★★★ a panel PV field that reads the solar the Cores take in is trust
   } finally { p.close(); }
 });
 
-test('★★★ a panel PV field that reads half the solar (e.g. only the battery-charging share) is never trusted: the inferred basis stays', () => {
+test('★★★ a panel PV field that reads half the solar (e.g. only the battery-charging share) is never trusted: the inferred basis stays, and once the shortfall has held an hour the power sensors withhold it', () => {
   const p = sunnyPlant(Date.parse('2026-10-15T11:00:00-07:00'));
   try {
     p.panelSamples(p.clock);
     const before = p.read();
     const stored = { wh: 0 };
-    sunny(p, 120, { outW: 500, pvW: 2500, fieldW: 1250 }, stored);
+    sunny(p, 60, { outW: 500, pvW: 2500, fieldW: 1250 }, stored);
+    // One hour in: the bound has just reached its 8 steps of evidence; the shortfall (half of ~2.5 kWh)
+    // is over the tolerance but under the genuine 2 kWh, so the below verdict waits its hour. Until
+    // then the field is read unchecked: the dashboard's consumption is the slot meter's either way.
+    const hour = p.rec.batteryLifetimeDebug().bridge;
+    assert.deepEqual(hour.trustedSlots, []);
+    assert.ok(hour.pvChecks[0].verdict !== 'consistent', JSON.stringify(hour.pvChecks[0]));
+    assert.ok(!p.logs.some((l) => l.includes('the field is not trusted')), 'no verdict acted on yet');
+    const f1 = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.deepEqual([f1.ready, f1.fleetPv, f1.fleetBatteryNet], [true, 3 * 1250, 3 * (500 - 1250)], 'published unchecked while the check runs');
+    sunny(p, 90, { outW: 500, pvW: 2500, fieldW: 1250 }, stored);
     const after = p.read();
     const dbg = p.rec.batteryLifetimeDebug().bridge;
     assert.deepEqual(dbg.trustedSlots, []);
     assert.equal(dbg.lastRollup?.slots[0].basis, 'inferred');
+    assert.equal(dbg.pvChecks[0].verdict, 'below');
     assert.equal(p.logs.filter((l) => l.includes('the field is not trusted (the inferred basis stays)')).length, CORES.length);
     // The inferred lower bound, not the half-reading field: PV within a step of the truth per slot.
-    near(after.pv - before.pv, 3 * 2500 * 2, 3 * STEP_WH + 30, 'PV');
+    near(after.pv - before.pv, 3 * 2500 * 2.5, 3 * STEP_WH + 30, 'PV');
     const f = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
-    assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet], [false, null, null], 'no instantaneous figure without a trusted field');
+    assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet], [false, null, null], 'a field found short is no instantaneous figure');
+    assert.deepEqual(f.slots.map((s) => s.basis), ['unbridgeable', 'unbridgeable', 'unbridgeable']);
   } finally { p.close(); }
 });
 
@@ -166,23 +197,84 @@ test('★★★ a trusted field that falls below the bound (PV passing through t
     p.panelSamples(p.clock);
     const stored = { wh: 0 };
     sunny(p, 60, { outW: 500, pvW: 2500, fieldW: 2500 }, stored);
-    assert.equal(p.rec.batteryLifetimeDebug().bridge.pvChecks[0].verdict, 'consistent');
+    const hour = p.rec.batteryLifetimeDebug().bridge.pvChecks[0];
+    assert.ok(hour.verdict !== 'below' && hour.candidate !== 'below', `an honest hour: ${JSON.stringify(hour)}`);
     assert.ok(!p.logs.some((l) => l.includes('no longer trusted')));
     // The house draws 1500 W through each Core; the field now reads only the 1000 W into the battery.
     const before = p.read();
-    sunny(p, 60, { outW: 1500, pvW: 2500, fieldW: 1000 }, stored);
+    sunny(p, 120, { outW: 1500, pvW: 2500, fieldW: 1000 }, stored);
     const after = p.read();
     const revoked = p.logs.filter((l) => l.includes('the field is no longer trusted (back to the inferred basis)'));
     assert.equal(revoked.length, CORES.length);
-    assert.match(revoked[0], /PV field read [\d.]+ kWh since \S+ against the inferred lower bound [\d.]+ kWh \(one SoC step 0\.31 kWh\) — below it by more than one SoC step/);
+    assert.match(revoked[0], /PV field read [\d.]+ kWh since \S+ against the inferred lower bound [\d.]+ kWh \(one SoC step 0\.31 kWh, tolerance [\d.]+ kWh\) — below it by more than the tolerance since \S+: the field is no longer trusted \(back to the inferred basis\) — the power sensors withhold the slot/);
     const dbg = p.rec.batteryLifetimeDebug().bridge;
     assert.deepEqual(dbg.trustedSlots, []);
     assert.ok(!p.lifetimeKeys().some((k) => k.startsWith('bridge_pvseen_')), 'the persisted trust is deleted');
     assert.equal(dbg.lastRollup?.slots[0].basis, 'inferred');
-    // What the field missed before the revocation is bounded: about a step per slot, not the hour.
-    assert.ok(after.pv - before.pv > 3 * 2500 - 3 * 2 * STEP_WH - 60, `PV over the hour ${(after.pv - before.pv).toFixed(0)} Wh`);
+    // What the field missed before the revocation is bounded by the genuine shortfall that acts at
+    // once (2 kWh per slot) plus the inferred basis's step after it, not by the two hours.
+    assert.ok(after.pv - before.pv > 3 * (2 * 2500 - BRIDGE_PV_GENUINE_WH - 2 * STEP_WH) - 60, `PV over the two hours ${(after.pv - before.pv).toFixed(0)} Wh`);
     const f = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
     assert.equal(f.ready, false, 'the power sensors no longer read the field');
+    assert.deepEqual(f.slots.map((s) => s.basis), ['unbridgeable', 'unbridgeable', 'unbridgeable']);
+  } finally { p.close(); }
+});
+
+test('★★★ 2026-10-18 replayed: an honest field reading 8 % under the bound all day stays trusted and both power sensors publish through the afternoon (the one-step rule had revoked each slot by 0.29-0.32 kWh and blanked the Energy dashboard from 11:15 to dusk); no counter steps down', () => {
+  // Phoenix, 07:00 → 17:00 MST, every Core dark since before the restart. The field reads 92 % of the
+  // solar, as the three live slots did against the bound (0.90-0.97 over the day): with a one-step
+  // tolerance that is a shortfall once the bound passes ~3.8 kWh.
+  const p = sunnyPlant(Date.parse('2026-10-18T07:00:00-07:00'));
+  try {
+    p.panelSamples(p.clock);
+    const stored = { wh: 0 };
+    // Morning to mid-afternoon: 2.5 kW of PV per Core, 1 kW of it to the house (the pool rising).
+    sunny(p, 6 * 60, { outW: 1000, pvW: 2500, fieldW: 2300 }, stored);
+    const midday = p.rec.batteryLifetimeDebug().bridge;
+    assert.deepEqual(midday.trustedSlots, [`${PANEL}_1`, `${PANEL}_2`, `${PANEL}_3`], 'trusted by midday');
+    const f1 = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.deepEqual([f1.ready, f1.fleetPv, f1.fleetBatteryNet], [true, 3 * 2300, 3 * (1000 - 2300)]);
+    // Afternoon: the house draws 3 kW through each Core while the PV falls to 1.5 kW (the pool 44 → 17 %).
+    sunny(p, 4 * 60, { outW: 3000, pvW: 1500, fieldW: 1380 }, stored);
+    const dusk = p.rec.batteryLifetimeDebug().bridge;
+    assert.deepEqual(dusk.trustedSlots, [`${PANEL}_1`, `${PANEL}_2`, `${PANEL}_3`], 'still trusted at dusk');
+    assert.ok(!p.logs.some((l) => l.includes('no longer trusted')), 'no revocation all day');
+    assert.equal(dusk.lastRollup?.slots[0].basis, 'measured');
+    const f2 = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.deepEqual([f2.ready, f2.fleetPv, f2.fleetBatteryNet], [true, 3 * 1380, 3 * (3000 - 1380)], 'published through the afternoon');
+    // The check's figures: 8 % under a bound past 15 kWh is over two steps (the one-step rule's
+    // revocation) and within max(two steps, 15 %).
+    const c = dusk.pvChecks[0];
+    assert.equal(c.verdict, 'consistent');
+    assert.ok(c.inferredWh > 15_000 && c.fieldWh / c.inferredWh > 0.9 && c.fieldWh / c.inferredWh < 0.95, `${c.fieldWh.toFixed(0)} / ${c.inferredWh.toFixed(0)}`);
+    assert.ok(c.inferredWh - c.fieldWh > 2 * c.stepWh, 'the shortfall is over two steps: the fraction governs');
+    assert.ok(c.inferredWh - c.fieldWh < c.toleranceWh, 'and within the tolerance');
+  } finally { p.close(); }
+});
+
+test('★★★ a trusted field that lags the slot meter by ten minutes across a 1 → 5 kW ramp reads short of the tolerance for a while: a below CANDIDATE the growing tolerance absorbs within the hour — not revoked, the sensors keep publishing', () => {
+  const p = sunnyPlant(Date.parse('2026-10-15T09:00:00-07:00'));
+  try {
+    for (let s = 1; s <= 3; s++) p.putLifetime(bridgePvSeenKey(PANEL, s), 2000, p.clock - 24 * H);
+    p.restart();
+    p.panelSamples(p.clock);
+    const stored = { wh: 0 };
+    sunny(p, 60, { outW: 200, pvW: 1000, fieldW: 1000 }, stored);
+    // The ramp: 5 kW into each Core, 1 kW of it to the house; the field reports the old 1 kW for ten more minutes.
+    sunny(p, 10, { outW: 1000, pvW: 5000, fieldW: 1000 }, stored);
+    sunny(p, 20, { outW: 1000, pvW: 5000, fieldW: 5000 }, stored);
+    const mid = p.rec.batteryLifetimeDebug().bridge;
+    assert.equal(mid.pvChecks[0].candidate, 'below', `a candidate, not a verdict: ${JSON.stringify(mid.pvChecks[0])}`);
+    assert.notEqual(mid.pvChecks[0].verdict, 'below');
+    assert.deepEqual(mid.trustedSlots, [`${PANEL}_1`, `${PANEL}_2`, `${PANEL}_3`]);
+    const f1 = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
+    assert.deepEqual([f1.ready, f1.fleetPv], [true, 15_000], 'the sensors keep the field');
+    sunny(p, 60, { outW: 1000, pvW: 5000, fieldW: 5000 }, stored);
+    const later = p.rec.batteryLifetimeDebug().bridge;
+    assert.ok(!p.logs.some((l) => l.includes('no longer trusted')), 'the transient never revoked the field');
+    assert.deepEqual(later.trustedSlots, [`${PANEL}_1`, `${PANEL}_2`, `${PANEL}_3`]);
+    assert.notEqual(later.pvChecks[0].candidate, 'below', 'the candidate was dropped as the tolerance grew past the lag');
+    assert.equal(later.lastRollup?.slots[0].basis, 'measured');
   } finally { p.close(); }
 });
 
@@ -464,6 +556,7 @@ test('★★★ the day/night test is judged at the configured site: 10:00 in Be
     p.sourceWatts = [-1000, -1000, -1000];
     const f = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
     assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet], [true, 0, 3000]);
+    assert.deepEqual(f.slots.map((s) => s.basis), ['night', 'night', 'night'], 'night at the site, not Phoenix daylight (where the 0 W field, found short, would withhold)');
   } finally {
     p.close();
     config.forecastLat = saved[0];

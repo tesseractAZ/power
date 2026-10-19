@@ -14,6 +14,7 @@ import {
   darkHomeSlots, offlineHomeCores, ownEnergyUntil, sunUp, slotPvWatts, windowSplit, slotAcEnergy, valueAt, inferPvStep,
   bridgeFleetFlow, heldPackKeysOf, slotPowerBasis, pvFieldVerdict, bridgeSite, reportsSinceReturn, BRIDGE_DWELL_MS,
   BRIDGE_PV_EVIDENCE_STEPS, createEnergyBridge, bridgeOfflineKey, slotVerdicts, projectionPacksComplete,
+  pvFieldTolerance, pvVerdictHolds, BRIDGE_PV_TOLERANCE_STEPS, BRIDGE_PV_TOLERANCE_FRACTION, BRIDGE_PV_VERDICT_HOLD_MS, BRIDGE_PV_GENUINE_WH,
 } from '../src/energyBridge.js';
 import { aggregateFleetFlow } from '../src/shp2Membership.js';
 import { publishReadiness } from '../src/publishReadiness.js';
@@ -182,17 +183,73 @@ test('★★★ how far a Core\'s own pv_total / ac_in count: a read cuts at the
   assert.equal(ownEnergyUntil(sinceBoot, 'rollup'), null);
 });
 
-test('★★★ the panel PV field against the inferred lower bound: pending until the bound has risen enough, then at least the bound less one step', () => {
+test('★★★ the panel PV field against the inferred lower bound: pending until the bound has risen enough, then at least the bound less max(two steps, 15 %)', () => {
   const step = 286.72;
   const evidence = BRIDGE_PV_EVIDENCE_STEPS * step;
+  assert.equal(BRIDGE_PV_EVIDENCE_STEPS, 8);
+  assert.deepEqual([BRIDGE_PV_TOLERANCE_STEPS, BRIDGE_PV_TOLERANCE_FRACTION], [2, 0.15]);
+  assert.equal(pvFieldTolerance(evidence, step), 2 * step, 'at a small bound the two steps of quantization');
+  assert.equal(pvFieldTolerance(20_000, step), 3000, 'at a large one the fraction');
   assert.equal(pvFieldVerdict(5_000, evidence - 1, step), 'pending', 'one reading, or a little sun, proves nothing');
   assert.equal(pvFieldVerdict(evidence, evidence, step), 'consistent');
-  assert.equal(pvFieldVerdict(evidence - step, evidence, step), 'consistent', 'the bound is good to one SoC step');
-  assert.equal(pvFieldVerdict(evidence - step - 1, evidence, step), 'below');
+  assert.equal(pvFieldVerdict(evidence - 2 * step, evidence, step), 'consistent', 'the bound carries a step of quantization at each end');
+  assert.equal(pvFieldVerdict(evidence - 2 * step - 1, evidence, step), 'below');
   assert.equal(pvFieldVerdict(0, evidence, step), 'below', 'a field reading 0 under a rising charge');
-  assert.equal(pvFieldVerdict(evidence / 2, evidence, step), 'below', 'half the solar (the battery-charging share alone)');
+  assert.equal(pvFieldVerdict(evidence / 2, evidence, step), 'below', 'half the solar (the battery-charging share alone): 4 of 8 steps against 6');
+  assert.equal(pvFieldVerdict(0.75 * evidence, evidence, step), 'consistent', 'the first verdict passes r ≥ 0.75, as before');
   assert.equal(pvFieldVerdict(3 * evidence, evidence, step), 'consistent', 'a field reading high is not caught (the bound is a lower one)');
   assert.equal(pvFieldVerdict(10, 10_000, 0), 'pending', 'no capacity: no verdict');
+  // At a large bound the fraction governs: 16 % short is below, 14 % is not.
+  assert.equal(pvFieldVerdict(8_400, 10_000, step), 'below');
+  assert.equal(pvFieldVerdict(8_600, 10_000, step), 'consistent');
+});
+
+test('★★★ 2026-10-18 as logged: the three honest fields the one-step rule revoked (2.67 vs 2.99, 7.37 vs 7.66, 9.25 vs 9.54 kWh) are consistent, and so is the day\'s end (9.51 vs 10.53); a field half the solar is still below', () => {
+  // (field kWh, bound kWh, one SoC step kWh) from the add-on log and the replay of the recorded series.
+  const live: Array<[number, number, number, string]> = [
+    [2.67, 2.99, 0.30, 'slot 3 at 11:16 (1.05 steps short)'],
+    [7.37, 7.66, 0.29, 'slot 1 at 14:36 (1.00 step short)'],
+    [9.25, 9.54, 0.28, 'slot 2 at 17:51 (1.01 steps short)'],
+    [9.36, 10.14, 0.29, 'slot 1 at dusk (2.70 steps, 7.7 %)'],
+    [9.51, 10.53, 0.30, 'slot 3 at dusk (3.40 steps, 9.6 %)'],
+    [5.36, 5.98, 0.30, 'slot 3 at 13:26, one window at 10.4 %'],
+    [1.07, 1.20, 0.30, 'slot 3 at 09:46 (0.43 steps): pending now, 4 steps of evidence'],
+  ];
+  for (const [f, b, s, why] of live) {
+    const v = pvFieldVerdict(f * 1000, b * 1000, s * 1000);
+    assert.equal(v, b * 1000 < BRIDGE_PV_EVIDENCE_STEPS * s * 1000 ? 'pending' : 'consistent', why);
+  }
+  for (const [f, b, s, why] of live) {
+    if (b * 1000 < BRIDGE_PV_EVIDENCE_STEPS * s * 1000) continue;
+    assert.equal(pvFieldVerdict(f * 500, b * 1000, s * 1000), 'below', `half of ${why}`);
+  }
+});
+
+test('★★★ a verdict takes effect after one full hour, or at once on a genuine margin of 2 kWh in its direction — the same rule both ways', () => {
+  const t0 = NOON;
+  assert.equal(BRIDGE_PV_VERDICT_HOLD_MS, 60 * 60_000);
+  assert.equal(BRIDGE_PV_GENUINE_WH, 2000);
+  assert.equal(pvVerdictHolds('below', t0, t0 + 59 * 60_000, 4_000, 5_000), false, '1 kWh short for 59 min: not yet');
+  assert.equal(pvVerdictHolds('below', t0, t0 + 60 * 60_000, 4_000, 5_000), true, 'the hour');
+  assert.equal(pvVerdictHolds('below', t0, t0, 3_000, 5_000), true, '2 kWh short: at once');
+  assert.equal(pvVerdictHolds('below', t0, t0, 7_000, 5_000), false, 'a field ABOVE the bound never holds a below verdict early');
+  assert.equal(pvVerdictHolds('consistent', t0, t0 + 59 * 60_000, 5_000, 5_000), false);
+  assert.equal(pvVerdictHolds('consistent', t0, t0 + 60 * 60_000, 5_000, 5_000), true);
+  assert.equal(pvVerdictHolds('consistent', t0, t0, 7_000, 5_000), true, '2 kWh above the bound: at once');
+  assert.equal(pvVerdictHolds('consistent', t0, t0, 3_000, 5_000), false, 'a shortfall never holds a consistent verdict early');
+});
+
+test('★★★ the power-sensor basis of a dark slot in daylight: the field trusted is measured, present but unchecked is unchecked, found below or absent is unbridgeable', () => {
+  const src = [{ pvHighWatts: 2000, pvLowWatts: 500 }, { pvWatts: null, pvHighWatts: null, pvLowWatts: null }, { pvHighWatts: 0, pvLowWatts: 0 }];
+  const devices = { [PANEL]: panel(NOON, [-500, -800, 300], {}, src), [C1]: core(C1, false), [C2]: core(C2, false), [C3]: core(C3, false) };
+  const [s1, s2, s3] = darkHomeSlots(devices, NOON);
+  assert.equal(slotPowerBasis(s1, NOON, true, PHX), 'measured');
+  assert.equal(slotPowerBasis(s1, NOON, false, PHX), 'unchecked');
+  assert.equal(slotPowerBasis(s1, NOON, 'below', PHX), 'unbridgeable', 'a field found short of the bound today is withheld');
+  assert.equal(slotPowerBasis(s2, NOON, false, PHX), 'unbridgeable', 'no field at all');
+  assert.equal(slotPowerBasis(s2, NOON, true, PHX), 'unbridgeable', 'trusted or not, an absent field is no figure');
+  assert.equal(slotPowerBasis(s3, NOON, false, PHX), 'unchecked', 'a field reading 0 W is present');
+  assert.equal(slotPowerBasis(s1, NIGHT, 'below', PHX), 'night', 'at night the field does not matter');
 });
 
 /* ── the pieces ──────────────────────────────────────────────────────────── */
@@ -225,7 +282,8 @@ test('★★★ the bridge\'s site is the configured location (FORECAST_LAT / FO
   const f = bridgeFleetFlow(ONLINE, devices, NOON, () => false, BERLIN);
   assert.deepEqual([f.ready, f.fleetPv, f.fleetBatteryNet], [true, 0, 3000]);
   assert.deepEqual(f.slots.map((s) => s.basis), ['night', 'night', 'night']);
-  assert.equal(bridgeFleetFlow(ONLINE, devices, NOON, () => false, PHX).ready, false, 'noon in Phoenix: no trusted field, no figure');
+  assert.deepEqual(bridgeFleetFlow(ONLINE, devices, NOON, () => false, PHX).slots.map((s) => s.basis), ['unchecked', 'unchecked', 'unchecked'], 'noon in Phoenix: daylight, the field is read');
+  assert.equal(bridgeFleetFlow(ONLINE, devices, NOON, () => 'below', PHX).ready, false, 'noon in Phoenix with the field found short: no figure');
   for (const [lat, lon] of [[Number.NaN, 13.4], [52.5, Number.NaN], [91, 0], [0, 181]]) {
     assert.deepEqual(bridgeSite({ forecastLat: lat, forecastLon: lon }), PHX, `${lat},${lon}`);
   }
@@ -311,7 +369,7 @@ test('★★★ at night every dark slot is bridged: Battery Net = Σ −chW, Fl
   assert.deepEqual(f.slots.map((s) => s.basis), ['night', 'night', 'night']);
 });
 
-test('★★★ in daylight a trusted PV field is the solar figure and battery = −chW − pv; an untrusted one is no figure at all', () => {
+test('★★★ in daylight the PV field is the solar figure and battery = −chW − pv, trusted or unchecked; a field found below, or absent, is no figure at all', () => {
   const src = [{ pvHighWatts: 2000, pvLowWatts: 500 }, { pvHighWatts: 0, pvLowWatts: 0 }, { pvHighWatts: 1000, pvLowWatts: 0 }];
   const devices = { [PANEL]: panel(NOON, [-500, -800, 300], {}, src), [C1]: core(C1, false), [C2]: core(C2, false), [C3]: core(C3, false) };
   const trusted = bridgeFleetFlow({ fleetPv: 100, fleetBatteryNet: 50 }, devices, NOON, () => true, PHX);
@@ -319,12 +377,24 @@ test('★★★ in daylight a trusted PV field is the solar figure and battery =
   assert.equal(trusted.fleetPv, 100 + 2500 + 0 + 1000);
   // battery: 50 + (500 − 2500) + (800 − 0) + (−300 − 1000) = −2450 (charging)
   assert.equal(trusted.fleetBatteryNet, 50 - 2000 + 800 - 1300);
-  const untrusted = bridgeFleetFlow(ONLINE, devices, NOON, () => false, PHX);
-  assert.equal(untrusted.ready, false, 'a 0 W reading from a field never seen working is not "no PV"');
-  assert.equal(untrusted.fleetPv, null);
-  assert.equal(untrusted.fleetBatteryNet, null);
-  const oneTrusted = bridgeFleetFlow(ONLINE, devices, NOON, (_p, slot) => slot !== 2, PHX);
-  assert.equal(oneTrusted.ready, false, 'one unbridgeable slot withholds both figures');
+  assert.deepEqual(trusted.slots.map((s) => s.basis), ['measured', 'measured', 'measured']);
+  // Unchecked: the same figures (the two sum to the slot meter whatever the field reads).
+  const unchecked = bridgeFleetFlow({ fleetPv: 100, fleetBatteryNet: 50 }, devices, NOON, () => false, PHX);
+  assert.deepEqual([unchecked.ready, unchecked.fleetPv, unchecked.fleetBatteryNet], [true, 3600, -2450], 'a present field publishes before its check');
+  assert.deepEqual(unchecked.slots.map((s) => s.basis), ['unchecked', 'unchecked', 'unchecked']);
+  assert.equal((unchecked.fleetPv as number) + (unchecked.fleetBatteryNet as number), 150 + 500 + 800 - 300, 'PV + battery = Σ −chW + the online sums: the consumption the dashboard derives');
+  // Found below today: withheld.
+  const below = bridgeFleetFlow(ONLINE, devices, NOON, () => 'below', PHX);
+  assert.equal(below.ready, false, 'a field the check has found short is not published');
+  assert.equal(below.fleetPv, null);
+  assert.equal(below.fleetBatteryNet, null);
+  const oneBelow = bridgeFleetFlow(ONLINE, devices, NOON, (_p, slot) => (slot === 2 ? 'below' : slot === 1), PHX);
+  assert.equal(oneBelow.ready, false, 'one unbridgeable slot withholds both figures');
+  assert.deepEqual(oneBelow.slots.map((s) => s.basis), ['measured', 'unbridgeable', 'unchecked']);
+  // Absent: withheld, trusted or not.
+  const bare = panel(NOON, [-500, -800, 300], {}, [{ pvWatts: null, pvHighWatts: null, pvLowWatts: null }, {}, {}]);
+  const absent = bridgeFleetFlow(ONLINE, { ...devices, [PANEL]: bare }, NOON, () => true, PHX);
+  assert.deepEqual([absent.ready, absent.fleetPv, absent.fleetBatteryNet, absent.slots[0].basis], [false, null, null, 'unbridgeable'], 'no field: no figure, never a made-up 0');
 });
 
 test('★★★ two panels: a second panel that drops off the cloud with its Core leaves that slot out; the house figures still publish', () => {
@@ -427,13 +497,15 @@ test('★★★ the flow sensors (AC Import, Fleet Total In / Out) on the same n
   assert.deepEqual([h.acIn, h.fleetIn, h.fleetOut], [15900, 15900, 0]);
 });
 
-test('★★ the flow sensors: a dark slot on a stale panel withholds them (unknown, never a partial sum); in daylight with no trusted PV field Fleet Total In is unknown, AC Import and Fleet Total Out are the slots', () => {
+test('★★ the flow sensors: a dark slot on a stale panel withholds them (unknown, never a partial sum); in daylight with the PV field found short Fleet Total In is unknown, AC Import and Fleet Total Out are the slots', () => {
   const dark = (p: Any): Any => ({ [PANEL]: p, [C1]: core(C1, false, false), [C2]: core(C2, false, false), [C3]: core(C3, false, false) });
   const online = { fleetPv: 0, fleetBatteryNet: 0, acIn: 0, fleetIn: 0, fleetOut: 0 };
   const stale = bridgeFleetFlow(online, dark(panel(NIGHT, [-1000, -1000, -1000], { lastQuotaAtMs: NIGHT - 400_000 })), NIGHT, () => false, PHX);
   assert.deepEqual([stale.acIn, stale.fleetIn, stale.fleetOut], [null, null, null]);
-  const day = bridgeFleetFlow(online, dark(panel(NOON, [-500, -500, 200])), NOON, () => false, PHX);
+  const day = bridgeFleetFlow(online, dark(panel(NOON, [-500, -500, 200])), NOON, () => 'below', PHX);
   assert.deepEqual([day.acIn, day.fleetIn, day.fleetOut, day.fleetPv], [200, null, 1000, null]);
+  const unchecked = bridgeFleetFlow(online, dark(panel(NOON, [-500, -500, 200])), NOON, () => false, PHX);
+  assert.deepEqual([unchecked.acIn, unchecked.fleetIn, unchecked.fleetOut, unchecked.fleetPv], [200, 200, 1000, 0], 'the field present (0 W), unchecked: Fleet Total In adds it');
   // No such input given (a caller that passes only the two power figures): null, never a 0.
   const bare = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, dark(panel(NIGHT, [-1000, -1000, -1000])), NIGHT, () => false, PHX);
   assert.deepEqual([bare.acIn, bare.fleetIn, bare.fleetOut], [null, null, null]);
@@ -476,12 +548,14 @@ test('★★★ a dark Core listed connected by two panels (one panel\u2019s sou
   assert.ok(Math.abs(r.dischargeWh - 1000 * 10 / 60) < 0.5, `one window booked: ${r.dischargeWh.toFixed(1)} Wh`);
 });
 
-test('★★ slotVerdicts: the Cores counted at their own reading, and the PV of each slot on the measured basis', () => {
+test('★★ slotVerdicts: the Cores counted at their own reading, and the PV of each slot wherever the sensors read the field (trusted or unchecked), not where it was found short', () => {
   const devices: Any = { [PANEL]: panel(NOON, [-500, -500, -500], {}, [{ pvHighWatts: 2000 }, { pvHighWatts: 2000 }, {}]), [C1]: core(C1, false, false), [C2]: core(C2, false, false), [C3]: live(C3, NOON) };
-  const f = bridgeFleetFlow({ fleetPv: 1500, fleetBatteryNet: 900 }, devices, NOON, (_p, slot) => slot === 1, PHX);
+  const f = bridgeFleetFlow({ fleetPv: 1500, fleetBatteryNet: 900 }, devices, NOON, (_p, slot) => (slot === 1 ? true : 'below'), PHX);
   const v = slotVerdicts(f);
   assert.deepEqual([...v.own], [C3]);
-  assert.deepEqual([...v.measuredPvW.entries()], [[`${PANEL}#1`, 2000]], 'slot 1 trusted; slot 2 not, so not measured');
+  assert.deepEqual([...v.measuredPvW.entries()], [[`${PANEL}#1`, 2000]], 'slot 1 trusted; slot 2 found short, so not measured');
+  const g = bridgeFleetFlow({ fleetPv: 1500, fleetBatteryNet: 900 }, devices, NOON, (_p, slot) => slot === 1, PHX);
+  assert.deepEqual([...slotVerdicts(g).measuredPvW.entries()], [[`${PANEL}#1`, 2000], [`${PANEL}#2`, 2000]], 'slot 2 unchecked: the card and the timers read what the sensors publish');
 });
 
 test('projectionPacksComplete: the pack count is known and met', () => {

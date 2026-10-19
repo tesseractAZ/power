@@ -19,7 +19,7 @@
  *   B-viii  the read-only debug pass re-baselines too
  *   B-ix    the bridge is folded into the BMS discharge floor
  *   B-x     an untrusted panel PV field is used as measured (rollup)
- *   B-xi    an untrusted panel PV field is used for the power sensors
+ *   B-xi    a panel PV field the check has found short today is used for the power sensors
  *   B-xii   the rollup judges a window on the panel's reading at the instant again (round 2: the rows that exist are booked)
  *   B-xiii  the panel-freshness gate is dropped (power sensors)
  *   B-xiv   battery out/in book the gross slot flows (PV that passed through a Core as battery out)
@@ -41,7 +41,7 @@
  *   B-xxx   the panel PV field is trusted on its first daylight reading (no corroboration)
  *   B-xxxi  a trusted panel PV field is never revoked
  *   B-xxxii the field verdict needs no evidence
- *   B-xxxiii the field verdict allows no SoC step
+ *   B-xxxiii the field verdict's tolerance is one SoC step (2026-10-18: three honest fields revoked)
  *   B-xxxiv the field trust is not reloaded at a restart
  *   B-xxxv  the 15-min window clamp is removed (the first window after a restart spans the downtime)
  *   B-xxxvi a handed-over marker's row is never deleted (re-absorbed after every restart)
@@ -116,6 +116,16 @@
  *   B-ciii  the accepted roster is not the member set while the panel reads no source set (a boot
  *           with the cloud unreachable carries a former member's orphan rows: +938.8 kWh)
  *   B-civ   the accepted roster is used only while a change is pending (the same)
+ *
+ * v1.189.1 (the PV-field check on the 2026-10-18 evidence: max(two steps, 15 %), a verdict held an
+ * hour or a genuine 2 kWh margin; the power sensors read a present field unchecked):
+ *   B-cv    the tolerance has no fraction (two steps alone)
+ *   B-cvi   a verdict acts at once (no hold)
+ *   B-cvii  a genuine 2 kWh margin waits the hour
+ *   B-cviii an absent PV field is published as 0 W
+ *   B-cix   the power sensors ignore the verdict in force (a field found short today is read unchecked)
+ *   B-cx    slotVerdicts leaves an unchecked field out (the card and the timers disagree with the sensors)
+ *   B-cxi   the unchecked field is not added to the power figures
  *
  *   node scripts/mutate-energy-core-outage.mjs
  */
@@ -216,11 +226,11 @@ const MUTANTS = [
     why: 'A field never checked reads 0 in daylight: the day\'s solar books as nothing and the Cores\' output as battery out.',
   },
   {
-    id: 'B-xi. ★★ an untrusted panel PV field is used for the power sensors',
+    id: 'B-xi. ★★ a panel PV field the check has found short today is used for the power sensors',
     file: EB,
-    find: "  if (trusted && s.pvW != null) return 'measured';",
-    to: "  if (s.pvW != null) return 'measured'; /* MUTANT */",
-    why: 'Fleet PV publishes a made-up 0 W at noon and Battery Net the slots\' whole output.',
+    find: "  if (s.pvW == null || trust === 'below') return 'unbridgeable';",
+    to: "  if (s.pvW == null) return 'unbridgeable'; /* MUTANT */",
+    why: 'Fleet PV publishes a field demonstrably short of the solar the Core took in, and Battery Net the difference, after the check has said so.',
   },
   {
     id: 'B-xii. ★★★ the rollup judges a window on the panel\'s reading at the instant again',
@@ -370,11 +380,11 @@ const MUTANTS = [
     why: 'The first daylight window decides: within the bound\'s one-step error any field passes.',
   },
   {
-    id: 'B-xxxiii. ★★ the field verdict allows no SoC step',
+    id: 'B-xxxiii. ★★★ the field verdict\'s tolerance is one SoC step',
     file: EB,
-    find: "  return fieldWh >= inferredWh - stepWh ? 'consistent' : 'below';",
-    to: "  return fieldWh >= inferredWh ? 'consistent' : 'below'; /* MUTANT */",
-    why: 'The integer percent makes the bound good to one step; a true field one step short of it is rejected.',
+    find: "  return fieldWh >= inferredWh - pvFieldTolerance(inferredWh, stepWh) ? 'consistent' : 'below';",
+    to: "  return fieldWh >= inferredWh - stepWh ? 'consistent' : 'below'; /* MUTANT */",
+    why: 'The 2026-10-18 rule: the bound carries a step of quantization at each end, so an honest field one step short (2.67 vs 2.99 kWh) is revoked and the Now view blanks until dusk.',
   },
   {
     id: 'B-xxxiv. ★★ the field trust is not reloaded at a restart',
@@ -526,9 +536,9 @@ const MUTANTS = [
   {
     id: 'B-lv. ★★ the power sensors\' day/night test ignores the configured site',
     file: EB,
-    find: '      return bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site(), known, isMarked);',
-    to: '      return bridgeFleetFlow(online, devices, nowMs, isTrusted, PHOENIX_SITE, known, isMarked); /* MUTANT */',
-    why: 'Outside Phoenix Fleet PV and Battery Net read unknown through the local night of a Core outage (Phoenix daylight, no trusted field).',
+    find: '      return bridgeFleetFlow(online, devices, nowMs, fieldTrust, deps.site(), known, isMarked);',
+    to: '      return bridgeFleetFlow(online, devices, nowMs, fieldTrust, PHOENIX_SITE, known, isMarked); /* MUTANT */',
+    why: 'Outside Phoenix Fleet PV and Battery Net read the PV field through the local night of a Core outage (Phoenix daylight), or unknown where it is absent.',
   },
   {
     id: 'B-lvi. ★★★ a restart ignores the persisted hand-off instant',
@@ -875,6 +885,56 @@ const MUTANTS = [
     find: '    if (live.size === 0) return new Set(accepted);\n',
     to: '    if (live.size === 0 && pendingMembership != null) return new Set(accepted); /* MUTANT */\n',
     why: 'An empty source set is never a pending change (the rollup reads it as no change), so the same boot carries the orphans.',
+  },
+  // v1.189.1 — the PV-field check against the inferred bound, re-tuned on the 2026-10-18 evidence.
+  {
+    id: 'B-cv. ★★★ the tolerance has no fraction (two steps alone)',
+    file: EB,
+    find: '  return Math.max(BRIDGE_PV_TOLERANCE_STEPS * stepWh, BRIDGE_PV_TOLERANCE_FRACTION * inferredWh);',
+    to: '  return BRIDGE_PV_TOLERANCE_STEPS * stepWh; /* MUTANT */',
+    why: 'An honest field 8 % under a 10 kWh bound (2.7 steps on 2026-10-18) is revoked in the afternoon.',
+  },
+  {
+    id: 'B-cvi. ★★★ a verdict acts at once (no hold)',
+    file: EB,
+    find: '  if (nowMs - sinceMs >= BRIDGE_PV_VERDICT_HOLD_MS) return true;',
+    to: '  return true; /* MUTANT */',
+    why: 'A field that lags the meter across a ramp, or one window the bound jumps ahead of, revokes the trust and the sensors blank for the day.',
+  },
+  {
+    id: 'B-cvii. ★★ a genuine 2 kWh margin waits the hour',
+    file: EB,
+    find: "  return verdict === 'below' ? margin <= -BRIDGE_PV_GENUINE_WH : margin >= BRIDGE_PV_GENUINE_WH;",
+    to: '  return false; /* MUTANT */',
+    why: 'A field reading 0 W under a 2.3 kWh charge is published unchecked for an hour before it is refused.',
+  },
+  {
+    id: 'B-cviii. ★★★ an absent PV field is published as 0 W',
+    file: EB,
+    find: "  if (s.pvW == null || trust === 'below') return 'unbridgeable';\n  return trust === true ? 'measured' : 'unchecked';",
+    to: "  if (trust === 'below') return 'unbridgeable'; /* MUTANT */\n  return trust === true ? 'measured' : 'unchecked';",
+    why: 'With no field at all Fleet PV publishes a made-up figure and Battery Net the slot\'s whole output.',
+  },
+  {
+    id: 'B-cix. ★★ the power sensors ignore the verdict in force (a field found short today is read unchecked)',
+    file: EB,
+    find: "    for (const [k, c] of checks) if (k.startsWith(prefix) && c.verdict === 'below') return 'below';",
+    to: '    /* MUTANT */',
+    why: 'After the check has refused the field the sensors go on publishing it.',
+  },
+  {
+    id: 'B-cx. ★★ slotVerdicts leaves an unchecked field out',
+    file: EB,
+    find: "  for (const s of flow.slots) if ((s.basis === 'measured' || s.basis === 'unchecked') && s.pvW != null) measuredPvW.set(slotKey(s.panelSn, s.slot), s.pvW);",
+    to: "  for (const s of flow.slots) if (s.basis === 'measured' && s.pvW != null) measuredPvW.set(slotKey(s.panelSn, s.slot), s.pvW); /* MUTANT */",
+    why: 'Fleet PV publishes the slot\'s solar while the energy flow card reads Solar "—" and the timers show a time to empty beside a Battery Net charge.',
+  },
+  {
+    id: 'B-cxi. ★★★ the unchecked field is not added to the power figures',
+    file: EB,
+    find: "    const p = basis === 'measured' || basis === 'unchecked' ? (s.pvW as number) : 0;",
+    to: "    const p = basis === 'measured' ? (s.pvW as number) : 0; /* MUTANT */",
+    why: 'Before its check the field publishes as 0 W of solar and Battery Net as the slot\'s whole output — the made-up figure the unchecked basis must not be.',
   },
 ];
 

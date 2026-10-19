@@ -179,8 +179,8 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
       offlineHeldMembers: [],
       bridge: emptyBridgeDebug(),
     }),
-    // v1.188.1 — the worker never publishes the power sensors; its bridge trusts no PV field
-    // (the write-path recorder holds that state), so it bridges only the night basis.
+    // v1.188.1 — the worker never publishes the power sensors; its bridge holds no field verdicts
+    // (the write-path recorder does), so it reads a daylight PV field unchecked, 0 at night.
     bridgedFleetFlow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, () => false, bridgeSite(config)),
     recordWeatherGhi: () => {}, // v0.13.1 — write path; the read-only worker never writes
     telemetryGaps: () => [],    // v0.30.0 — gaps are detected on the write path; /api/telemetry-gaps uses the main recorder
