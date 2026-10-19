@@ -235,7 +235,7 @@ import {
   decideRevertDeadline, revertDeadlineSpoken, restoreTargetPct, revertDeadlineMs, reserveRestoreNote,
   chargeWriteHold, setChargeWriteHold, FOREIGN_RESERVE_SETTLE_MS,
   attemptProvedUnlanded, applyProvedUnlanded, revertRetryPending, revertRetryText, REVERT_DEADLINE_HOLD_MAX_MS,
-  revertResendOnReport, type RevertResendOnReport, isReserveSetting, restoreSummaryDue, type RestoreSummaryKind,
+  revertResendOnReport, type RevertResendOnReport, isReserveSetting, restoreSummaryDue, type RestoreSummaryKind, restoreSentWords,
   type RevertDeadlineDecision,
 } from './nightChargeActuator.js';
 import { nextOnPeakStartMs, onPeakEndMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, planDateOwningCycle, type ChargeLegRole } from './chargeWindows.js';
@@ -6298,7 +6298,7 @@ async function runNightActuationTickInner(): Promise<void> {
   if (revertPage.kind === 'hold') {
     if (state.revertDeadlineHeldAtMs == null) {
       persistNightActuation({ ...state, revertDeadlineHeldAtMs: nowMs });
-      app.log.info(`night-charge: revertDeadline — the deadline for ${state.day} came with its restore ${state.revertedAtMs == null ? 'not yet sent' : 'only just sent'}; the page waits up to ${REVERT_DEADLINE_HOLD_MAX_MS / 60_000} min for it to be sent and read back.`);
+      app.log.info(`night-charge: revertDeadline — the deadline for ${state.day} came with its restore ${restoreSentWords(state.revertedAtMs, PROCESS_BOOT_MS)}; the page waits up to ${REVERT_DEADLINE_HOLD_MAX_MS / 60_000} min for it to be sent and read back.`);
       state = nightActuationMem;
       if (state.day == null) return;
     }
@@ -6318,8 +6318,19 @@ async function runNightActuationTickInner(): Promise<void> {
 
   // v1.189.0 (review) — the summary of the restore, once it is owed (restoreSummaryDue): its readback
   // grace ran with no readback (a restore that read back sends it on its revertVerified tick).
-  const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct);
-  if (summaryOwed != null) {
+  // v1.189.1 — after a restart it waits for this process's first reading of the reserve, up to
+  // REVERT_DEADLINE_HOLD_MAX_MS from the first tick that waits (stamped once), so a readback on that
+  // reading is summarised as restored instead of a "sent" card followed by a "restored" one.
+  const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct, nightReserveReadSinceBoot);
+  if (summaryOwed === 'hold') {
+    if (state.restoreSummaryHeldAtMs == null) {
+      persistNightActuation({ ...state, restoreSummaryHeldAtMs: nowMs });
+      const sentAtMs = state.revertedAtMs ?? nowMs;
+      app.log.info(`night-charge: the summary of the ${state.day} restore waits up to ${REVERT_DEADLINE_HOLD_MAX_MS / 60_000} min for the panel's first reading since the add-on started: the restore was sent ${Math.round((nowMs - sentAtMs) / 60_000)} min ago${sentAtMs < PROCESS_BOOT_MS ? ', before the add-on last started' : ''}, and has not read back.`);
+      state = nightActuationMem;
+      if (state.day == null) return;
+    }
+  } else if (summaryOwed != null) {
     sendRestoreSummary(state, summaryOwed, nowMs);
     state = nightActuationMem;
     if (state.day == null) return;

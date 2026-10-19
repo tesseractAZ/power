@@ -191,8 +191,8 @@ In winter, APS charges its lowest rate from 10 AM to 3 PM on weekdays. On each w
 | `sensor.ecoflow_panel_midday_charge_reserve_hold` | `ecoflow_midday_charge_reserve_hold` | The backup reserve it would hold through the window, within the panel's 10–50 range | % |
 | `sensor.ecoflow_panel_midday_charge_expected_buy` | `ecoflow_midday_charge_expected_buy_kwh` | The grid energy the daytime charge is expected to draw | kWh |
 | `sensor.ecoflow_panel_midday_charge_buy_worst_case` | `ecoflow_midday_charge_buy_kwh` | Buy (Worst Case): the grid energy the daytime plan is sized on, assuming the islanded worst case | kWh |
-| `sensor.ecoflow_panel_midday_charge_window_start` | `ecoflow_midday_charge_window_start_at` | When the daytime window opens, as an ISO 8601 UTC time (`2026-11-16T17:00:00.000Z` is 10:00 AM Phoenix time) | text |
-| `sensor.ecoflow_panel_midday_charge_window_end` | `ecoflow_midday_charge_window_end_at` | When it closes, same format | text |
+| `sensor.ecoflow_panel_midday_charge_window_start` | `ecoflow_midday_charge_window_start_at` | When the daytime window opens. A timestamp sensor, shown as a time (the payload is ISO 8601 UTC: `2026-11-16T17:00:00.000Z` is 10:00 AM Phoenix time); unknown when no daytime charge is in view | timestamp |
+| `sensor.ecoflow_panel_midday_charge_window_end` | `ecoflow_midday_charge_window_end_at` | When it closes, the same way | timestamp |
 | `sensor.ecoflow_panel_midday_charge_refresh` | `ecoflow_midday_charge_refresh` | The morning re-check: `pending`, then `unchanged`, `lowered`, `capped` (the new forecast asked for a higher level or reserve than the evening plan, which stays the limit), `cancelled`, `stood` (no re-check finished in time, so the evening plan stands) or `not-comparable` (the night's own overnight charge already filled the pool, so the re-check was not made and the evening figures stand) | text |
 
 ## Load shedding and lighting
