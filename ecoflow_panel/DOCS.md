@@ -270,8 +270,8 @@ Every entity, its unique_id, meaning and unit:
 - **A Core with no reading of its own** (offline in the cloud, or its readings stopped). Its
   battery and solar energy, and its share of Fleet PV and Battery Net, are counted from the
   panel's meter on its slot, so the counters keep rising. In daylight the two power sensors read
-  unknown until the panel's solar reading has been checked against the Core's charge; the log
-  states each check. When the Core reports again, the jump in its own counters is absorbed, not
+  the panel's solar reading, which is checked through the day against the Core's charge, and read
+  unknown once it has fallen short of that check; the log states each check. When the Core reports again, the jump in its own counters is absorbed, not
   booked in one hour. Once energy has been counted this way, do not go back to a release that
   does not count it: Home Assistant would book the battery energy it drops as a negative hour, or
   as a meter reset ([the energy bridge](https://github.com/tesseractAZ/power/blob/main/docs/reference/07-energy-and-cost.md#22-the-two-accumulation-paths)).

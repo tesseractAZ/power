@@ -1,3 +1,14 @@
+## 1.189.1
+
+### The Energy dashboard shows the live solar and battery power through the day while a battery is offline
+
+**Energy dashboard**
+
+- While a Core reports nothing of its own, Fleet PV and Battery Net read the panel's per-slot solar reading as soon as it is present, and the check of that reading against the solar the Core demonstrably took in (its output plus the rise in its charge level) runs alongside. On 18 October that check had passed each slot's reading in the morning and withdrawn it again between late morning and dusk, each time by about a third of a kilowatt-hour — one step of the panel's whole-percent charge level — although the reading stayed within 4–10 % of the check's figure all day; from 11:15 until dusk the Now view then showed no solar, battery or consumption while the house ran on the batteries. The check's own figure is uncertain by one step at each end and by the batteries' measured capacity, so a reading now passes when it is within two steps or 15 % of it, whichever is larger, and a verdict takes effect only once it has held for an hour, or at once when the gap is 2 kWh or more. The same rule decides when a reading is trusted and when trust is withdrawn. Replayed on the 18 October readings, all three slots stay trusted through the day. A reading that is genuinely short — one that misses the solar passing straight through to the house, for example — is still refused, and once refused both sensors read unknown for the rest of the day, as they do while the panel reports no solar reading for the slot. The two sensors sum to what the panel's meter measures on the slot whatever the solar reading says, so the consumption the dashboard derives is right either way.
+- The energy counters are unchanged: until the slot's solar reading has passed its check, solar is counted from the Core's output and charge-level rise, so nothing already counted changes and no total steps down.
+- The energy flow card and the backup time to full and time to empty follow the sensors: the slot's solar reading is used wherever the sensors publish it.
+- The log line for each verdict states the tolerance and when the verdict first appeared; the battery-lifetime debug block lists a verdict that is still waiting its hour.
+
 ## 1.188.1
 
 ### Only fresh readings are saved; while a battery reports nothing of its own, the Energy dashboard and the energy flow read the panel's meters
