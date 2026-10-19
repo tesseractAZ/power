@@ -18,7 +18,7 @@ export function cleanText(v: unknown, max: number): string | undefined {
 
 /**
  * v1.7.0 (security #2, CWE-150) — sanitize a cloud/MQTT-sourced DISPLAY name
- * (device name, SHP2 breaker-circuit name) before it can reach the telnet/console
+ * (device name, SHP2 breaker-circuit name) before it can reach the TUI/console
  * ANSI render stream. Strips ALL C0 controls (incl. ESC 0x1b), DEL, and C1
  * (0x7f–0x9f, where 0x9b is an 8-bit CSI some terminals honor), so a name set in
  * the EcoFlow app / SHP2 config can't inject terminal escape sequences (OSC

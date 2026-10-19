@@ -1,5 +1,5 @@
 /**
- * Tests for the telnet TUI block-glyph big font (src/telnet/bigfont.ts).
+ * Tests for the TUI block-glyph big font (src/telnet/bigfont.ts).
  *
  * The invariants the layout code depends on:
  *

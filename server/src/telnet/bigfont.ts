@@ -1,5 +1,5 @@
 /**
- * Block-glyph "big font" — large numeric readouts for the telnet TUI.
+ * Block-glyph "big font" — large numeric readouts for the control-room TUI.
  *
  * Renders short numeric strings (SoC percentages, kW figures, clock times)
  * five terminal rows tall, in the same pseudo-LCD language as the brand

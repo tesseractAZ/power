@@ -4,11 +4,13 @@
  * v0.67.0 — extracted from `telnet/server.ts` so the per-session render/input
  * state machine can be reused by BOTH transports:
  *
- *   • the raw telnet TCP server (`server.ts`), which speaks telnet IAC
- *     negotiation + NAWS and feeds parsed `InputEvent`s in here; and
+ *   • the SSH server (`server.ts`), which authenticates at the protocol level
+ *     (TUI_USERNAME / TUI_PASSWORD, so the session opens `preAuthenticated`)
+ *     and feeds parsed `InputEvent`s in here; the window size arrives out of
+ *     band from the SSH client and is delivered as a `naws` event; and
  *   • a browser WebSocket transport (`wsConsole.ts`, served at /console),
- *     which runs xterm.js in character mode — NO telnet IAC — and feeds the
- *     same `InputEvent`s.
+ *     which runs xterm.js in character mode and feeds the same `InputEvent`s;
+ *     it keeps the in-session login card.
  *
  * The driver knows nothing about sockets. It takes:
  *   • a `write(data: string)` sink (the transport pipes this to the wire);
@@ -21,7 +23,7 @@
  * and the key→state-transition logic. The transports own: byte parsing,
  * connection lifecycle, and any protocol negotiation.
  *
- * Behaviour is byte-for-byte identical to the pre-extraction telnet server:
+ * Behaviour is byte-for-byte identical to the pre-extraction server:
  * the same `renderPlant`/`renderLogin` calls, the same frame
  * body assembly (HIDE_CURSOR + CURSOR_HOME + per-line CLEAR_EOL + CLEAR_BELOW),
  * the same FNV-1a frame hash, and the same BEGIN_SYNC/END_SYNC wrapping.
@@ -60,8 +62,8 @@ export type InputEvent =
  */
 type SessionMode = 'auth' | 'plant';
 
-/** Login attempts before the transport is told to disconnect. */
-const AUTH_MAX_ATTEMPTS = 3;
+/** Login attempts before the transport is told to disconnect (the login card and the SSH server alike). */
+export const AUTH_MAX_ATTEMPTS = 3;
 /** Input-length cap for either credential field. */
 const AUTH_FIELD_MAX = 64;
 
@@ -84,32 +86,112 @@ function credentialEqual(a: string, b: string): boolean {
 }
 
 /**
- * Cross-session failed-login throttle. The per-session 3-attempt limit does
- * not bound a reconnect loop (3 tries per connection, unlimited connections),
- * so failures are also counted globally in a sliding window; while the window
- * is saturated every submit is refused outright. Shared by both transports.
+ * Failed-login window, kept per peer address. The per-session 3-attempt limit
+ * does not bound a reconnect loop (3 tries per connection, unlimited
+ * connections), so failures are also counted in a sliding window; while an
+ * address's window is saturated, every login from that address is refused
+ * outright, the right password included (verifying it would hand the address
+ * an oracle the window exists to deny). The window is the ADDRESS's, not the
+ * server's: until 1.190.0 one window counted every connection, so ten failures
+ * from any one LAN host refused the operator's correct password from every
+ * other host for the rest of the ten minutes, and the host could repeat that as
+ * each window opened. One address's failures now bind that address alone, and a
+ * login that succeeds clears its address. Both transports count here, the login
+ * card under the socket's address (the browser console) and the SSH server
+ * under the connection's (consoleLoginThrottled / noteConsoleLoginFailure /
+ * noteConsoleLoginSuccess), so one host's failures over either transport spend
+ * one budget. The table is bounded: beyond AUTH_THROTTLE_MAX_PEERS addresses
+ * the one whose entry is oldest is dropped.
  */
-const AUTH_THROTTLE_WINDOW_MS = 10 * 60_000;
-const AUTH_THROTTLE_MAX_FAILURES = 10;
-let authFailureTimes: number[] = [];
-function authThrottled(now: number): boolean {
-  authFailureTimes = authFailureTimes.filter((t) => now - t < AUTH_THROTTLE_WINDOW_MS);
-  return authFailureTimes.length >= AUTH_THROTTLE_MAX_FAILURES;
+export const AUTH_THROTTLE_WINDOW_MS = 10 * 60_000;
+export const AUTH_THROTTLE_MAX_FAILURES = 10;
+export const AUTH_THROTTLE_MAX_PEERS = 4096;
+/** The address a session is counted under when its transport names none. */
+export const AUTH_PEER_UNKNOWN = 'unknown';
+/** Failure times inside the window, by address key; an address with none has no entry. */
+const authFailures = new Map<string, number[]>();
+
+/**
+ * The table key for a peer address. A dual-stack listener (the default `::`)
+ * reports an IPv4 peer as `::ffff:a.b.c.d`; the mapped form and the plain form
+ * are one host, so they share one window.
+ */
+function peerKey(peer: string): string {
+  return peer.startsWith('::ffff:') ? peer.slice('::ffff:'.length) : peer;
 }
-function noteAuthFailure(now: number): void {
-  authFailureTimes.push(now);
+/** The key's failures still inside the window; the entry goes when none are left. */
+function liveFailures(key: string, now: number): number[] {
+  const kept = (authFailures.get(key) ?? []).filter((t) => now - t < AUTH_THROTTLE_WINDOW_MS);
+  if (kept.length === 0) authFailures.delete(key);
+  else authFailures.set(key, kept);
+  return kept;
+}
+function authThrottled(peer: string, now: number): boolean {
+  return liveFailures(peerKey(peer), now).length >= AUTH_THROTTLE_MAX_FAILURES;
+}
+function noteAuthFailure(peer: string, now: number): void {
+  const key = peerKey(peer);
+  const kept = liveFailures(key, now);
+  kept.push(now);
+  authFailures.set(key, kept);
+  // A Map iterates in insertion order: the address whose entry is oldest goes first.
+  while (authFailures.size > AUTH_THROTTLE_MAX_PEERS) {
+    const oldest = authFailures.keys().next().value;
+    if (oldest === undefined) break;
+    authFailures.delete(oldest);
+  }
+}
+function noteAuthSuccess(peer: string): void {
+  authFailures.delete(peerKey(peer));
 }
 export function _resetAuthThrottleForTest(): void {
-  authFailureTimes = [];
+  authFailures.clear();
+}
+/** The number of addresses with failures in the table (the bound's test). */
+export function _authThrottlePeersForTest(): number {
+  return authFailures.size;
+}
+
+/** True while the address's failed-login window is saturated (the SSH server asks before verifying). */
+export function consoleLoginThrottled(peer: string, now: number = Date.now()): boolean {
+  return authThrottled(peer, now);
+}
+/** Count one failed login against the address's window (the SSH server's failures, as the card's). */
+export function noteConsoleLoginFailure(peer: string, now: number = Date.now()): void {
+  noteAuthFailure(peer, now);
+}
+/** A login from the address succeeded: its window is cleared (the SSH server's successes, as the card's). */
+export function noteConsoleLoginSuccess(peer: string): void {
+  noteAuthSuccess(peer);
+}
+
+/**
+ * Verify a username + password pair against the configured console credentials.
+ * BOTH compares are always evaluated (a short-circuit on the username would
+ * re-open the field-level timing oracle the fixed-length compare exists to
+ * prevent); `auth` null (no TUI_PASSWORD) never verifies.
+ */
+export function verifyConsoleCredentials(user: string, pass: string, auth: { username: string; password: string } | null): boolean {
+  const userOk = auth != null && credentialEqual(user, auth.username);
+  const passOk = auth != null && credentialEqual(pass, auth.password);
+  return userOk && passOk;
+}
+
+/**
+ * The authentication clause of the SSH startup line, as a function so the line is
+ * testable: with no console password every login is refused, and the line says so.
+ */
+export function describeSshAuth(auth: { username: string; password: string } | null): string {
+  return auth ? '(password login as the console user)' : '(every login refused — set TUI_PASSWORD)';
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 /**
  * Live, shared data the driver reads on each render. These are getters because
- * the telnet/WS transports both read from the SAME periodically-refreshed
- * caches owned by the telnet server (the energy integration + forecast +
- * degradation are too heavy to recompute on every 1 s frame).
+ * the SSH/WS transports both read from the SAME periodically-refreshed
+ * caches (the energy integration + forecast + degradation are too heavy to
+ * recompute on every 1 s frame).
  */
 export interface TuiDataProvider {
   store: SnapshotStore;
@@ -129,7 +211,7 @@ export interface TuiSessionOptions {
   write: (data: string) => void;
   /** Live data accessors shared across all sessions. */
   data: TuiDataProvider;
-  /** Initial terminal size. */
+  /** Initial terminal size, held to 60–200 × 16–80 as a resize is; 80×24 when absent. */
   width?: number;
   height?: number;
   /**
@@ -138,6 +220,18 @@ export interface TuiSessionOptions {
    * transports pass the add-on options via `authFromEnv()`.
    */
   auth?: { username: string; password: string } | null;
+  /**
+   * The transport verified TUI_USERNAME / TUI_PASSWORD itself (SSH): the session
+   * opens in the console with no login card, and `auth` still names the OPR seat.
+   * The browser console never sets it.
+   */
+  preAuthenticated?: boolean;
+  /**
+   * The peer address the login card's failures are counted under (the browser
+   * console passes its socket's remote address, never a header a client can set).
+   * Absent, the session is counted under AUTH_PEER_UNKNOWN.
+   */
+  peer?: string;
 }
 
 /** Resolve the login gate from the add-on options (env). Empty password ⇒ off. */
@@ -180,6 +274,8 @@ export class TuiSession {
 
   /** AUTH mode state (only meaningful while mode === 'auth'). */
   private readonly auth: { username: string; password: string } | null;
+  /** The address the card's failures bind (see `TuiSessionOptions.peer`). */
+  private readonly peer: string;
   private login: LoginViewState = { stage: 'username', user: '', passLen: 0, attemptsLeft: AUTH_MAX_ATTEMPTS, error: null };
   private loginPass = '';
 
@@ -206,10 +302,15 @@ export class TuiSession {
   constructor(opts: TuiSessionOptions) {
     this.write = opts.write;
     this.data = opts.data;
-    this.width = opts.width ?? 80;
-    this.height = opts.height ?? 24;
+    // Held to the same range as resize(): the SSH transport passes the client's pty
+    // request (cols and rows are 32-bit) straight in here, and the renderer allocates
+    // a line per row on every 1 Hz frame — 2^32-1 rows exhausted the heap and took the
+    // process down; a height in the hundreds of thousands stalled it for seconds a frame.
+    this.width = clamp(opts.width ?? 80, 60, 200);
+    this.height = clamp(opts.height ?? 24, 16, 80);
     this.auth = opts.auth ?? null;
-    this.mode = this.auth ? 'auth' : 'plant';
+    this.peer = opts.peer ?? AUTH_PEER_UNKNOWN;
+    this.mode = this.auth && !opts.preAuthenticated ? 'auth' : 'plant';
     this.plantConnectedAt = Date.now();
   }
 
@@ -237,8 +338,8 @@ export class TuiSession {
    *   • { redraw: true }   — state changed, the transport should `draw()`;
    *   • { quit: true }     — the user asked to disconnect (ctrl-c / q);
    *   • { }                — nothing to do.
-   * Resize events are applied here too (the telnet transport delivers window
-   * size via NAWS; the WS transport via a synthetic 'naws' event).
+   * Resize events are applied here too (the SSH transport maps the client's pty
+   * and window-change requests onto 'naws'; the WS transport sends a synthetic one).
    */
   feed(events: InputEvent[]): { redraw?: boolean; quit?: boolean } {
     let dirty = false;
@@ -329,18 +430,17 @@ export class TuiSession {
         return true;
       }
       const now = Date.now();
-      if (authThrottled(now)) {
-        // Saturated window: refuse outright — no oracle, no more attempts.
+      if (authThrottled(this.peer, now)) {
+        // The address's window is saturated: refuse outright — no oracle, no more attempts.
         return 'denied';
       }
       // v1.47.1 (full-pass) — evaluate BOTH compares unconditionally: the
       // short-circuit skipped the password compare on a wrong username,
       // re-opening exactly the field-level timing oracle the fixed-length
       // compare exists to prevent.
-      const userOk = this.auth != null && credentialEqual(st.user, this.auth.username);
-      const passOk = this.auth != null && credentialEqual(this.loginPass, this.auth.password);
-      const ok = userOk && passOk;
+      const ok = verifyConsoleCredentials(st.user, this.loginPass, this.auth);
       if (ok) {
+        noteAuthSuccess(this.peer);
         this.mode = 'plant';
         this.plantScreen = 'console';
         this.plantConnectedAt = Date.now();
@@ -348,7 +448,7 @@ export class TuiSession {
         this.lastFrameHash = ''; // force a full repaint into the console
         return true;
       }
-      noteAuthFailure(now);
+      noteAuthFailure(this.peer, now);
       st.attemptsLeft -= 1;
       if (st.attemptsLeft <= 0) return 'denied';
       st.error = 'ACCESS DENIED';

@@ -25,6 +25,13 @@ RUN npm run build
 
 
 # ─── Stage 2 — install server deps (tsx is runtime, not just dev) ────────────
+# ssh2 (the SSH console, v1.190.0) tries to build two native bindings at install:
+# its own crypto binding and the optional cpu-features package. node:22-alpine has
+# no compiler or python, so both fail: ssh2's install script exits 0 without its
+# binding and npm drops a failed optional dependency, so `npm ci` succeeds and ssh2
+# runs on its pure-JS paths (as the Z-Wave TUI add-on's image does). Do not add
+# `--omit=optional`: esbuild's platform binary, which tsx needs at runtime, is an
+# optional dependency too. CI's docker-smoke job builds this stage on every PR.
 FROM node:22-alpine AS serverdeps
 WORKDIR /build/server
 COPY server/package.json server/package-lock.json* ./
@@ -58,7 +65,7 @@ COPY --from=webbuilder /build/web/dist ./web/dist
 COPY rootfs/ /
 RUN chmod a+x /etc/services.d/ecoflow-panel/run /usr/bin/ecoflow-panel-backup-hook
 
-# Web + API; telnet TUI
+# Web + API; SSH TUI
 EXPOSE 8787 2323
 
 # Add-on metadata — re-declare the ARGs we need inside this stage so LABEL

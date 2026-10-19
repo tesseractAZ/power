@@ -5,7 +5,7 @@
  * day-ahead forecast, and the capacity-fade degradation report are all too
  * heavy to recompute on every 1 Hz frame, so they're refreshed on timers and
  * the latest cached value is handed to each render. Pulling this out lets the
- * telnet TCP server and the browser WebSocket console (`wsConsole.ts`) share
+ * SSH server and the browser WebSocket console (`wsConsole.ts`) share
  * ONE set of refresh timers instead of each spinning up its own.
  *
  * The refresh cadence / fast-retry / degraded-result-never-clobbers-good
@@ -94,7 +94,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     try {
       totals = await getAnalytics().report('totals', { sinceMs: startOfLocalDayMs(), untilMs: Date.now() });
     } catch (e: any) {
-      log(`telnet: totals refresh failed: ${e?.message ?? e}`);
+      log(`tui: totals refresh failed: ${e?.message ?? e}`);
     }
   };
 
@@ -109,7 +109,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
       if (f.historyDays > 0 || forecast == null) forecast = f;
       return f.historyDays > 0;
     } catch (e: any) {
-      log(`telnet: forecast refresh failed: ${e?.message ?? e}`);
+      log(`tui: forecast refresh failed: ${e?.message ?? e}`);
       return false;
     }
   };
@@ -131,7 +131,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
       degradation = await getAnalytics().report('degradation');
       return true;
     } catch (e: any) {
-      log(`telnet: degradation refresh failed: ${e?.message ?? e}`);
+      log(`tui: degradation refresh failed: ${e?.message ?? e}`);
       return false;
     }
   };
