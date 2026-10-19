@@ -43,6 +43,14 @@
  *                 one SoC step of quantization at each end and the capacity error: on 2026-10-18
  *                 an honest field read 0.90-0.97 of it over the day, and the one-step rule this
  *                 shipped with revoked all three slots by 0.29-0.32 kWh (the constants' comments).
+ *                 Until a revocation acts, a trusted field found short is still booked on this
+ *                 basis: the shortfall must first exceed the tolerance, then hold the hour or reach
+ *                 BRIDGE_PV_GENUINE_WH — up to about max(the tolerance, 2 kWh) of solar short of
+ *                 the bound per slot (plus a window's rise and a step), the battery split off by the
+ *                 same amount, an hour or more after a freeze (longer at a large bound or a slow
+ *                 charge; a field within the tolerance is never revoked). It is not booked back:
+ *                 the inferred basis resumes from the envelope, which rose through the held
+ *                 windows, so nothing steps down and the day's counters keep the shortfall.
  *  - 'unchecked'  the power sensors only (slotPowerBasis): the field is present in daylight, not
  *                 trusted and not found below today. Fleet PV and Battery Net publish it: the two
  *                 sum to the slot meter (−chW) whatever the field reads, so the house consumption

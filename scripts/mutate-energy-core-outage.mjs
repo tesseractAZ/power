@@ -126,6 +126,7 @@
  *   B-cix   the power sensors ignore the verdict in force (a field found short today is read unchecked)
  *   B-cx    slotVerdicts leaves an unchecked field out (the card and the timers disagree with the sensors)
  *   B-cxi   the unchecked field is not added to the power figures
+ *   B-cxii  a window with a below candidate pending against a trusted slot books nothing (the hold's energy lost)
  *
  *   node scripts/mutate-energy-core-outage.mjs
  */
@@ -935,6 +936,13 @@ const MUTANTS = [
     find: "    const p = basis === 'measured' || basis === 'unchecked' ? (s.pvW as number) : 0;",
     to: "    const p = basis === 'measured' ? (s.pvW as number) : 0; /* MUTANT */",
     why: 'Before its check the field publishes as 0 W of solar and Battery Net as the slot\'s whole output — the made-up figure the unchecked basis must not be.',
+  },
+  {
+    id: 'B-cxii. ★★ a window with a below candidate pending against a trusted slot books nothing',
+    file: EB,
+    find: "          if (fieldWh != null && isTrusted(s.panelSn, s.slot)) {\n            win.basis = 'measured';\n            pvWh = fieldWh;\n          } else if (step.pvWh != null) {",
+    to: "          if (fieldWh != null && isTrusted(s.panelSn, s.slot) && checks.get(inferKey)?.candidate?.verdict !== 'below') { /* MUTANT */\n            win.basis = 'measured';\n            pvWh = fieldWh;\n          } else if (step.pvWh != null && checks.get(inferKey)?.candidate?.verdict !== 'below') {",
+    why: 'A trusted field found short is booked on the measured basis until the verdict acts (documented: up to about max(the tolerance, 2 kWh) of shortfall per slot). Taking the window away from the field while the candidate is pending without booking the inferred basis instead leaves the slot unbridgeable for the hold: an hour of the house running on the Core, booked by nobody.',
   },
 ];
 

@@ -15,6 +15,7 @@ import {
   bridgeFleetFlow, heldPackKeysOf, slotPowerBasis, pvFieldVerdict, bridgeSite, reportsSinceReturn, BRIDGE_DWELL_MS,
   BRIDGE_PV_EVIDENCE_STEPS, createEnergyBridge, bridgeOfflineKey, slotVerdicts, projectionPacksComplete,
   pvFieldTolerance, pvVerdictHolds, BRIDGE_PV_TOLERANCE_STEPS, BRIDGE_PV_TOLERANCE_FRACTION, BRIDGE_PV_VERDICT_HOLD_MS, BRIDGE_PV_GENUINE_WH,
+  bridgePvSeenKey, BRIDGE_CHARGE_KEY,
 } from '../src/energyBridge.js';
 import { aggregateFleetFlow } from '../src/shp2Membership.js';
 import { publishReadiness } from '../src/publishReadiness.js';
@@ -237,6 +238,99 @@ test('★★★ a verdict takes effect after one full hour, or at once on a genu
   assert.equal(pvVerdictHolds('consistent', t0, t0 + 60 * 60_000, 5_000, 5_000), true);
   assert.equal(pvVerdictHolds('consistent', t0, t0, 7_000, 5_000), true, '2 kWh above the bound: at once');
   assert.equal(pvVerdictHolds('consistent', t0, t0, 3_000, 5_000), false, 'a shortfall never holds a consistent verdict early');
+});
+
+test('★★ a trusted field that freezes low is booked on the \'measured\' basis until the revocation acts — the shortfall past the tolerance, then the hour or 2 kWh — and is not booked back: the inferred basis resumes from the envelope, no total steps down', () => {
+  // One dark Core (28.9 kWh) on slot 1, its field trusted on an earlier day. 3 kW of solar, 1 kW to
+  // the house through the slot and 150 W of the Core's own draw, so the Core charges 1.85 kW and the
+  // bound rises 2.85 kW an hour. At `freezeAt` the panel's per-slot PV field freezes at 500 W while
+  // the Core keeps charging; 5-min rollups from 07:00 to 14:00.
+  const CAP_WH = 28_900;
+  const MIN = 60_000;
+  const START = Date.parse('2026-10-15T07:00:00-07:00');
+  const END = Date.parse('2026-10-15T14:00:00-07:00');
+  interface Win { at: number; basis: string; pvWh: number; inWh: number; outWh: number; fleetPv: number | null; candidate: string | null }
+  const replay = (freezeAt: number) => {
+    const pct = (t: number) => Math.floor(40 + ((3000 - 1000 - 150) / CAP_WH) * 100 * ((t - START) / 3_600_000));
+    const fieldW = (t: number) => (t < freezeAt ? 3000 : 500);
+    const rows: Record<string, Array<{ ts: number; value: number }>> = { src1_w: [], src1_pct: [], src1_pv_w: [] };
+    for (let t = START - 15 * MIN; t <= END; t += MIN) {
+      rows.src1_w.push({ ts: t, value: -1000 });
+      rows.src1_pct.push({ ts: t, value: pct(t) });
+      rows.src1_pv_w.push({ ts: t, value: fieldW(t) });
+    }
+    const store = new Map<string, { wh: number; ts: number }>([
+      [bridgePvSeenKey(PANEL, 1), { wh: 1, ts: START - 86_400_000 }],
+      [BRIDGE_CHARGE_KEY, { wh: 0, ts: START }],
+    ]);
+    const logs: string[] = [];
+    const b = createEnergyBridge({
+      readLifetime: (k) => store.get(k) ?? { wh: 0, ts: 0 },
+      writeLifetime: (k, wh, ts) => { store.set(k, { wh, ts }); },
+      deleteLifetime: (k) => { store.delete(k); },
+      listLifetimeKeys: () => [...store.keys()],
+      query: (sn, metric, since, until) => (sn === PANEL ? (rows[metric] ?? []).filter((p) => p.ts >= since && p.ts <= until) : []),
+      coreCapacityWh: () => CAP_WH,
+      site: () => PHX,
+      log: (m) => { logs.push(m); },
+    });
+    const windows: Win[] = [];
+    let revokedAt: number | null = null;
+    let prev = b.totals();
+    for (let now = START + 5 * MIN; now <= END; now += 5 * MIN) {
+      const src = [{ batteryPercentage: pct(now), pvHighWatts: fieldW(now), pvLowWatts: 0 }, { isConnected: false }, { isConnected: false }];
+      const devices = { [PANEL]: panel(now, [-1000, 0, 0], {}, src), [C1]: core(C1, false), [C2]: core(C2, false), [C3]: core(C3, false) };
+      const before = logs.length;
+      const r = b.rollup({ generatedAt: now, devices } as Any, now);
+      const f = b.flow({ fleetPv: 0, fleetBatteryNet: 0 } as Any, devices, now);
+      const w = r.slots[0];
+      windows.push({ at: now, basis: w.basis, pvWh: w.pvWh, inWh: w.inWh, outWh: w.outWh, fleetPv: f.fleetPv, candidate: b.debug(devices, now).pvChecks[0]?.candidate ?? null });
+      if (revokedAt == null && logs.slice(before).some((m) => m.includes('no longer trusted'))) revokedAt = now;
+      const t = b.totals();
+      for (const k of ['pvWh', 'chargeWh', 'dischargeWh', 'gridImportWh'] as const) assert.ok(t[k] >= prev[k], `${k} never steps down`);
+      prev = t;
+    }
+    assert.ok(revokedAt != null, 'the frozen field is revoked');
+    assert.equal(logs.filter((l) => l.includes('no longer trusted')).length, 1);
+    const at = revokedAt as number;
+    // Before the freeze every window books the honest field: 3 kW × 5 min, the Core charging.
+    for (const w of windows.filter((w) => w.at < freezeAt)) assert.ok(w.basis === 'measured' && Math.abs(w.pvWh - 250) < 1 && w.inWh > 160 && w.outWh === 0 && w.fleetPv === 3000, JSON.stringify(w));
+    // Until the verdict acts the frozen field is still booked on the 'measured' basis: 500 W × 5 min of
+    // solar, and the slot's 1 kW outflow less that read as battery OUT while the Core charged 1.85 kW.
+    const held = windows.filter((w) => w.at > freezeAt && w.at < at);
+    for (const w of held) assert.ok(w.basis === 'measured' && Math.abs(w.pvWh - 500 / 12) < 1 && w.outWh > 40 && w.inWh === 0 && w.fleetPv === 500, JSON.stringify(w));
+    // The revocation's figures: the shortfall is at least the tolerance (the candidate needed it) and at
+    // most the larger of the tolerance and the 2 kWh margin, plus a window's rise and a step of quantization.
+    const line = logs.find((m) => m.includes('the field is no longer trusted (back to the inferred basis)'));
+    const m = /PV field read ([\d.]+) kWh since \S+ against the inferred lower bound ([\d.]+) kWh \(one SoC step ([\d.]+) kWh, tolerance ([\d.]+) kWh\)/.exec(line ?? '');
+    assert.ok(m, line);
+    const short = Number(m![2]) - Number(m![1]);
+    const step = Number(m![3]);
+    const tol = Number(m![4]);
+    assert.ok(short >= tol - 0.01, `the shortfall ${short.toFixed(2)} kWh had to exceed the tolerance ${tol}`);
+    assert.ok(short <= Math.max(tol, BRIDGE_PV_GENUINE_WH / 1000) + 2 * step + 0.01, `the shortfall ${short.toFixed(2)} kWh against max(tolerance ${tol}, 2 kWh) + 2 × ${step}`);
+    // From the revocation on, the inferred basis; the sensors withhold the slot. Nothing is booked back:
+    // the envelope rose through the held windows, so each inferred window books its own rise (2.85 kW ×
+    // 5 min, a step of quantization either way), never the shortfall the field left.
+    const after = windows.filter((w) => w.at >= at);
+    assert.ok(after.length >= 12);
+    for (const w of after) assert.ok(w.basis === 'inferred' && w.fleetPv == null && w.pvWh < 1000, JSON.stringify(w));
+    const hourAfter = after.slice(0, 12).reduce((a, w) => a + w.pvWh, 0);
+    assert.ok(Math.abs(hourAfter - 2850) < 2 * 289, `the hour after the revocation books ${hourAfter.toFixed(0)} Wh, not the ${(short * 1000).toFixed(0)} Wh the field missed`);
+    return { held, minutes: (at - freezeAt) / MIN, short, tol, pending: held.filter((w) => w.candidate === 'below') };
+  };
+  // 08:30: the bound is 4.3 kWh, the tolerance two steps (0.6 kWh). The below candidate appears within
+  // half an hour and is HELD — those windows still book the frozen field — until the shortfall reaches
+  // the 2 kWh margin, before the hour is up.
+  const early = replay(Date.parse('2026-10-15T08:30:00-07:00'));
+  assert.ok(early.pending.length >= 4 && early.pending.length < 12, `${early.pending.length} windows with the candidate pending`);
+  assert.ok(early.tol < 2 && early.short >= 2 - 0.01, `the margin acted: ${early.short.toFixed(2)} kWh short, tolerance ${early.tol}`);
+  assert.ok(early.minutes >= 45 && early.minutes <= 75, `${early.minutes} min after the freeze`);
+  // 11:00: the bound is 11.4 kWh and the tolerance 15 % of it, past 2 kWh by the time the shortfall
+  // reaches it: the candidate appears only then, more than an hour after the freeze, and acts at once.
+  const late = replay(Date.parse('2026-10-15T11:00:00-07:00'));
+  assert.equal(late.pending.length, 0, 'no window carried a pending candidate: at a 2 kWh tolerance the margin acts as the candidate appears');
+  assert.ok(late.tol > 2 && late.minutes >= 60 && late.held.length >= 12, `${late.minutes} min after the freeze, ${late.held.length} windows booked on the frozen field, tolerance ${late.tol}`);
 });
 
 test('★★★ the power-sensor basis of a dark slot in daylight: the field trusted is measured, present but unchecked is unchecked, found below or absent is unbridgeable', () => {

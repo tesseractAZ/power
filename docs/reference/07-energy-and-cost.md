@@ -395,7 +395,22 @@ tolerance absorbs within the hour — the bound rising in whole steps while the 
 integrates smoothly, a field that lags the meter across a ramp — changes nothing. A
 consistent field is trusted from then on (persisted, so it survives restarts and later
 days). A below field is not trusted, and a trusted field that falls below is revoked (its
-row deleted). Every verdict acted on logs both figures, the tolerance and when the verdict
+row deleted). Until the revocation acts, a trusted field found short is still booked on the
+`measured` basis: the shortfall against the bound has first to exceed the tolerance (two
+steps, or 15 % of the day's bound so far), and the verdict then holds for an hour unless the
+shortfall reaches 2 kWh — so a slot whose trusted field freezes low books up to about the
+larger of the tolerance and 2 kWh of solar short of the bound, plus a window's rise and a
+step of quantization, before the field is revoked, and its battery in and out carry the same
+error the other way (the slot meter is preserved); the one-step rule's exposure was about one
+step. In time that is an hour or more after the freeze, longer when the day's bound is large
+or the Core charges slowly (a replay: 3 kW of solar, 1 kW to the house, a 28.9 kWh Core, the
+field frozen at 500 W at 11:00 — revoked 80 min later, 2.5 kWh short of a 15.2 kWh bound; the
+same freeze at 14:00, the bound past 20 kWh — 135 min, 4.2 kWh), and a field that stays
+within the tolerance is never revoked. The shortfall is not booked back: the inferred basis
+resumes from the envelope, which kept rising through the held windows, so nothing steps down
+and the day's counters keep the error. The power sensors publish the frozen field through
+the hold (Fleet PV low, Battery Net high by the same amount), as does the backup timers'
+bound. Every verdict acted on logs both figures, the tolerance and when the verdict
 first appeared (`energy bridge: panel … slot … PV field read X kWh since … against the
 inferred lower bound Y kWh (one SoC step Z kWh, tolerance T kWh) — … since …`), so the
 first sunny day of an outage can be checked from the log; the debug block's `pvChecks`
