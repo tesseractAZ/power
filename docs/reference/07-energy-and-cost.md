@@ -1077,7 +1077,7 @@ the current hour, **all** hold:
 
 | Guard | Constant |
 |---|---|
-| SoC ≥ saturation threshold | `saturationThresholdPct(ceiling)` = `(ceiling or 100) − CURTAIL_TAPER_BAND_PCT(10)` |
+| SoC ≥ saturation threshold | `saturationThresholdPct(ceiling)` = `(ceiling or 100) − CURTAIL_TAPER_BAND_PCT(10)` (`chargeTaper.ts`, shared with the mid-day charge ceiling) |
 | PV actually producing | `CURTAIL_MIN_PV_W = 200` |
 | meaningful gap (expected − actual) | `CURTAIL_MIN_SURPLUS_W = 300` |
 | daylight | `CURTAIL_MIN_GHI_WM2 = 100` |
@@ -1235,6 +1235,18 @@ same aggregation the dashboard renders — and SoC/reserve from `findShp2().proj
 > away outage margin for money. Removing this guard makes the detector strictly more
 > sensitive and is therefore invisible in review — it is covered by mutant `iii` of the
 > committed harness for exactly that reason.
+
+**Against the owner's floor while a night-charge restore has not taken (heldByChargeWrite).**
+The guard protects the owner's floor. A night-charge restore that did not take leaves the
+night's target (50%) as the panel's reserve, and a pool refilling to it at the on-peak rate
+then reads "near the reserve". While a write of ours is past its restore with the restore not
+read back (`chargeWriteHold`, published by the actuator) and the panel still reads exactly its
+target, `moneyDetectorReservePct` hands this detector and the idle-pool detector below the
+prior floor, and each alert names the reserve the panel reads and the one to restore
+(`heldByChargeWriteText`). It applies only once the restore has had its readback grace
+(`heldFromMs`: 5 minutes after the restore was accepted, or after it fell due while none has
+been), so a restore that goes to plan, whose panel echoes the old value for a minute after
+05:00, never engages it. The runway and below-reserve alarms keep the live value.
 
 **Tuning** (env, all with defaults — no add-on config option):
 

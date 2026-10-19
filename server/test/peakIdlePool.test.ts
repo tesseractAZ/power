@@ -242,7 +242,9 @@ test('★★ the monitor evaluates it on the house panel\'s readings (idlePoolIn
   const m = SRC('alertMonitor.ts');
   // v1.187.23 — with the forecast feed's pool capacity and its basis, the pair from one forecast
   // (pinned behaviourally through the real monitor in peakIdlePoolMeasuredCapacity.test.ts).
-  assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow), apsREvModelFromEnv());'));
+  // R1 (v1.189.0) — and the night-charge write hold (heldByChargeWrite; pinned behaviourally in
+  // onPeakGuard.test.ts).
+  assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow, chargeHold), apsREvModelFromEnv());'));
   assert.ok(m.includes('...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0'));
   assert.ok(m.includes("  'peak-idle-pool',\n];"), 'a device-derived family (hydration rules)');
   // v1.187.0 (log review) — the fired day's restore at start-up and persist on every tick are

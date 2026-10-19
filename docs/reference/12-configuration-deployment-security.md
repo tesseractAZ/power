@@ -210,7 +210,7 @@ The non-debug device writes all use the documented `PD303_APP_SET` shape and the
 - `setChannelForceCharge` (audit action `charge-now-ch{n}`, slot 1–3, 5-min cooldown; since v1.186.0 an OFF is limited only by earlier OFFs). Used by the Charge Now responder's OFF (`CHARGE_NOW_RESPONSE: supervised`, v1.84.0, §12c) and by the night force-charge ON/OFF (v1.165.0).
 - `setForceChargeCeiling` (audit action `force-charge-ceiling`, `foceChargeHight` 80–100, 5-min cooldown). Used by the night force-charge ceiling sync (v1.165.0).
 
-`POST /api/night-charge/cancel` (write-auth) disarms or reverts tonight's supervised write.
+`POST /api/night-charge/cancel` (write-auth) disarms or reverts tonight's supervised write: the cost leg by default, or the leg an optional `{ leg: 'cost' | 'backup' }` body names (400 for any other value).
 
 #### Audit log (`server/src/writeLog.ts`)
 
@@ -664,7 +664,9 @@ Read-only 60 s tick over the raw quota of the SHP2 + every DPU. Pure core:
 missing on either side is availability, never drift), `evaluateDrift`
 (2-observation debounce; confirmed baseline advances and persists),
 `classifyChange` (own-write = SHP2 `backupReserveSoc` moving to the actuator's
-target/restore while a night is in flight, or to the owner's pending
+target/restore while a night is in flight — judged per leg of the charge cycle,
+`legDriftActive`: the overnight leg by this rule, a mid-day leg only in its apply
+window and its write — or to the owner's pending
 `/api/reserve-floor` value — logged, not pushed; v1.165.0 adds the force-charge
 keys `ch{n}ForceCharge` / `foceChargeHight` inside our force-charge window and its
 15-min tails; everything else external). v1.187.10 — inside that window a
@@ -861,7 +863,10 @@ Consumers, each of which had the bug independently:
 through the add-on (write-auth, rate-limited, same audited helper and `[10,50]`
 envelope as the actuator). It **refuses with 409 while a night-charge write is
 in flight**: the actuator restores `priorReservePct` at window close, so a
-change made underneath a live write would be silently reverted hours later.
+change made underneath a live write would be silently reverted hours later. The
+refusal names when that is (`reserveRestoreNote`, `restoreAtMs`): the window
+close, or an hour before on-peak if that is sooner (`revertDueMs`); within a
+minute on a cancelled night; or that the restore was due and has not completed.
 `GET` is not provided — the device value is authoritative and already published.
 
 **Drift disclosure (v1.119.0).** A `backupReserveSoc` change carries its own

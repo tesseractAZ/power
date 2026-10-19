@@ -1,0 +1,602 @@
+{
+  "capturedAt": "d42b556",
+  "evening": [
+    {
+      "name": "charge, force-charge riding (10-12)",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: charging to ~80% tonight (~34.9 kWh)",
+        "body": "Charging the backup pool to ~80% overnight, ~34.9 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Then, at ~02:43, timed to finish by the window close, it switches the panel's force-charge ON just long enough to reach ~80%, and OFF when it gets there (or when the window closes). Cancel from the night-charge card on the panel before then."
+      },
+      "spoken": {
+        "en": "Night charge notice. Charging the backup pool to about 80 percent, about 35 kilowatt hours, in the charge window that opens at 12:00 AM. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 80 por ciento, unos 35 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Cancele en el panel Power antes de esa hora."
+      }
+    },
+    {
+      "name": "charge, reserve only (resilience)",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: charging to ~50% tonight (~27.9 kWh)",
+        "body": "Charging the backup pool to ~50% overnight, ~27.9 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+      },
+      "spoken": {
+        "en": "Night charge notice. Charging the backup pool to about 50 percent, about 28 kilowatt hours, in the charge window that opens at 12:00 AM. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 50 por ciento, unos 28 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Cancele en el panel Power antes de esa hora."
+      }
+    },
+    {
+      "name": "charge, reserve only, low pool",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: charging to ~50% tonight (~33.8 kWh)",
+        "body": "Charging the backup pool to ~50% overnight, ~33.8 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+      },
+      "spoken": {
+        "en": "Night charge notice. Charging the backup pool to about 50 percent, about 34 kilowatt hours, in the charge window that opens at 12:00 AM. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 50 por ciento, unos 34 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Cancele en el panel Power antes de esa hora."
+      }
+    },
+    {
+      "name": "charge, window-bound (toward)",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: charging toward ~80% tonight (~29 kWh)",
+        "body": "Charging the backup pool toward ~80% overnight, as far as the window can deliver, ~29 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Then it switches the panel's force-charge ON at ~00:00 and charges toward ~80%; the window is expected to close before it gets there, and force-charge switches OFF then. Cancel from the night-charge card on the panel before then."
+      },
+      "spoken": {
+        "en": "Night charge notice. Charging the backup pool toward 80 percent, about 29 kilowatt hours, in the charge window that opens at 12:00 AM, which ends before it gets there. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo rumbo al 80 por ciento, unos 29 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM y termina antes de alcanzar ese nivel. Cancele en el panel Power antes de esa hora."
+      }
+    },
+    {
+      "name": "charge, window-bound, the cushion short",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: charging toward ~80% tonight (~14 kWh)",
+        "body": "Charging the backup pool toward ~80% overnight, as far as the window can deliver, ~14 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Then it switches the panel's force-charge ON at ~00:00 and charges toward ~80%; the window is expected to close before it gets there, and force-charge switches OFF then. Cancel from the night-charge card on the panel before then."
+      },
+      "spoken": {
+        "en": "Night charge notice. Charging the backup pool toward 80 percent, about 14 kilowatt hours, in the charge window that opens at 12:00 AM, which ends before it gets there. Outage cushion not fully met. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo rumbo al 80 por ciento, unos 14 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM y termina antes de alcanzar ese nivel. Margen de respaldo no cubierto por completo. Cancele en el panel Power antes de esa hora."
+      }
+    },
+    {
+      "name": "charge, reserve only, the cushion short",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: charging toward ~50% tonight (~29 kWh)",
+        "body": "Charging the backup pool toward ~50% overnight, as far as the window can deliver, ~29 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+      },
+      "spoken": {
+        "en": "Night charge notice. Charging the backup pool toward 50 percent, about 29 kilowatt hours, in the charge window that opens at 12:00 AM, which ends before it gets there. Outage cushion not fully met. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo rumbo al 50 por ciento, unos 29 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM y termina antes de alcanzar ese nivel. Margen de respaldo no cubierto por completo. Cancele en el panel Power antes de esa hora."
+      }
+    },
+    {
+      "name": "charge, nothing expected (a reserve hold)",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: reserve held at 50% tonight — no charge expected",
+        "body": "Holding the backup reserve at 50% overnight as a floor; no charge is expected — the pool should open the window near ~61.9% and stay at or above 50%. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without tonight's write, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Cancel from the night-charge card on the panel before then."
+      },
+      "spoken": {
+        "en": "Night charge notice. The backup reserve will be held at 50 percent in the charge window that opens at 12:00 AM; no charge is expected. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. La reserva de respaldo se mantendrá en el 50 por ciento en la ventana de carga que comienza a las 12:00 AM; no se espera ninguna carga. Cancele en el panel Power antes de esa hora."
+      }
+    },
+    {
+      "name": "charge, cost mode from a full pool",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: charging to ~80% tonight (~12.8 kWh)",
+        "body": "Charging the backup pool to ~80% overnight, ~12.8 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. Resilience needs no buy tonight — the pack already covers the outage cushion; this buy is economic (cost mode). SUPERVISED: at 12:00 AM the add-on raises the backup reserve to 50% (bounded write; auto-restores after the charge window closes). Then, at ~03:52, timed to finish by the window close, it switches the panel's force-charge ON just long enough to reach ~80%, and OFF when it gets there (or when the window closes). Cancel from the night-charge card on the panel before then."
+      },
+      "spoken": {
+        "en": "Night charge notice. Charging the backup pool to about 80 percent, about 13 kilowatt hours, in the charge window that opens at 12:00 AM. Cancel on the Power panel before then.",
+        "es": "Aviso de carga nocturna. Se cargarán las baterías de respaldo hasta cerca del 80 por ciento, unos 13 kilovatios hora, en la ventana de carga que comienza a las 12:00 AM. Cancele en el panel Power antes de esa hora."
+      }
+    },
+    {
+      "name": "hold, the cushion holds",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: hold (no charge needed)",
+        "body": "No overnight charge needed — even if the grid were lost overnight, the pack would close the charge window at ~42.5%, at or above the 31.1% floor+cushion line. Nothing will be charged."
+      },
+      "spoken": null
+    },
+    {
+      "name": "hold, under the minimum buy",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: hold (the need is under the minimum buy)",
+        "body": "No overnight charge tonight — the islanded worst case the plan is sized on needs only a small top-up, under the minimum buy, so nothing will be charged."
+      },
+      "spoken": null
+    },
+    {
+      "name": "hold, the window cannot cover the cushion",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: no charge tonight (the window cannot cover the cushion)",
+        "body": "No overnight charge tonight — the outage cushion needs a charge, but this window cannot deliver enough to clear the minimum buy, so nothing will be charged. NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains."
+      },
+      "spoken": null
+    },
+    {
+      "name": "charge, advisory",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: charge to ~80% recommended tonight (~34.9 kWh)",
+        "body": "Recommended: charge the backup pool to ~80% overnight, ~34.9 kWh of grid energy expected. Whole-house island projection (if the grid were lost): tomorrow’s low SoC ~0% without this charge, ~0% with it; the floor+cushion line is 31.1%. Confidence: forecast. Advisory only — the add-on will NOT charge. Wire your HA automation to the night_charge_recommended (charge_tonight) entity, gated on night_charge_write_ready and the night_charge_window_start/_end sensors."
+      },
+      "spoken": null
+    },
+    {
+      "name": "charge, refused (supervised)",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: planned charge NOT armed tonight",
+        "body": "Tonight's plan calls for a charge, but the supervised write was not armed — a prior night's reserve write is unresolved. The add-on will not charge tonight."
+      },
+      "spoken": null
+    },
+    {
+      "name": "charge, refused (auto)",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: planned charge NOT armed tonight",
+        "body": "Tonight's plan calls for a charge, but the write was not armed — a prior night's reserve write is unresolved. The add-on will not charge tonight."
+      },
+      "spoken": null
+    },
+    {
+      "name": "charge, refused (a reserve hold)",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: planned reserve hold NOT armed tonight",
+        "body": "Tonight's plan holds the backup reserve at 50% overnight as a floor, with no charge expected, but the supervised write was not armed — the reserve reads 0%. The add-on will not raise the reserve tonight."
+      },
+      "spoken": null
+    },
+    {
+      "name": "no plan",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: no plan tonight",
+        "body": "No overnight charge plan tonight — the forecast/telemetry basis is incomplete, so nothing will be charged. (This confirms the evening job ran; the reserve floor is unchanged.)"
+      },
+      "spoken": null
+    },
+    {
+      "name": "incomplete basis",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_plan",
+        "title": "Night-charge: no plan tonight",
+        "body": "No overnight charge plan tonight — the forecast/telemetry basis is incomplete, so nothing will be charged. (This confirms the evening job ran; the reserve floor is unchanged.)"
+      },
+      "spoken": null
+    }
+  ],
+  "summary": [
+    {
+      "name": "reserve only",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 completed: reserve raised to 50% (~27.9 kWh expected) and restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update."
+      }
+    },
+    {
+      "name": "reserve only, no figure",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 completed: reserve raised to 50% and restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update."
+      }
+    },
+    {
+      "name": "a reserve hold",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 completed: the reserve was held at 50% overnight as a floor (no charge was expected) and is restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update."
+      }
+    },
+    {
+      "name": "force-charge ran",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 completed: reserve raised to 50%, and force-charge ran toward ~80% (~34.9 kWh expected); the reserve is restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update."
+      }
+    },
+    {
+      "name": "force-charge never started",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 completed: reserve raised to 50%; force-charge toward ~80% never started; the reserve is restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update."
+      }
+    },
+    {
+      "name": "force-charge failed on slot 2",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 completed: reserve raised to 50%; force-charge toward ~80% was switched ON but did not take effect on slot(s) 2 (the buy above the reserve did not happen on those slot(s)); the reserve is restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update."
+      }
+    },
+    {
+      "name": "force-charge failed",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 completed: reserve raised to 50%; force-charge toward ~80% was switched ON but did not take effect; the reserve is restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update."
+      }
+    },
+    {
+      "name": "force-charge unconfirmed",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 completed: reserve raised to 50%; force-charge toward ~80% was switched ON but the panel never confirmed it; the reserve is restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update."
+      }
+    },
+    {
+      "name": "cancelled after the write",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: cancelled — reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 was cancelled after the write: the reserve, raised to 50%, is restored to 16% and nothing more is charged tonight."
+      }
+    },
+    {
+      "name": "grid lost",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: stopped (grid lost) — reserve restored to 16%",
+        "body": "Supervised night charge for 2026-10-12 stopped: the grid was lost during the window: the reserve, raised to 50%, is restored to 16% and nothing more is charged tonight."
+      }
+    },
+    {
+      "name": "no day",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_actuation",
+        "title": "Night-charge: reserve restored to 16%",
+        "body": "Supervised night charge for — completed: reserve raised to —% and restored to 16%. Delivery vs plan scores in the ledger at tomorrow evening's update."
+      }
+    }
+  ],
+  "revertDeadline": [
+    {
+      "name": "deadline/unknown/16/4:00 PM",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve restore not confirmed",
+        "body": "The restore of the backup reserve to 16% after the 2026-10-12 night charge could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's 50% may still stand. On-peak pricing starts at 4:00 PM. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to 16% in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. The night charge system could not confirm that the backup reserve was restored to 16 percent: the panel is not reporting it, and on-peak pricing starts at 4:00 PM. Check the backup reserve in the EcoFlow app and set it to 16 percent.",
+        "es": "Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo confirmar que la reserva de respaldo se restableció al 16 por ciento: el panel no la está informando, y la tarifa punta comienza a las 4:00 PM. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela al 16 por ciento."
+      }
+    },
+    {
+      "name": "deadline/unknown/16/no on-peak",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve restore not confirmed",
+        "body": "The restore of the backup reserve to 16% after the 2026-10-12 night charge could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's 50% may still stand. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to 16% in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. The night charge system could not confirm that the backup reserve was restored to 16 percent: the panel is not reporting it. Check the backup reserve in the EcoFlow app and set it to 16 percent.",
+        "es": "Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo confirmar que la reserva de respaldo se restableció al 16 por ciento: el panel no la está informando. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela al 16 por ciento."
+      }
+    },
+    {
+      "name": "deadline/unknown/no prior/4:00 PM",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve restore not confirmed",
+        "body": "The restore of the backup reserve to its usual level after the 2026-10-12 night charge could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's 50% may still stand. On-peak pricing starts at 4:00 PM. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to its usual level in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. The night charge system could not confirm that the backup reserve was restored to its usual level: the panel is not reporting it, and on-peak pricing starts at 4:00 PM. Check the backup reserve in the EcoFlow app and set it to its usual level.",
+        "es": "Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo confirmar que la reserva de respaldo se restableció a su nivel habitual: el panel no la está informando, y la tarifa punta comienza a las 4:00 PM. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela a su nivel habitual."
+      }
+    },
+    {
+      "name": "deadline/unknown/no prior/no on-peak",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve restore not confirmed",
+        "body": "The restore of the backup reserve to its usual level after the 2026-10-12 night charge could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's 50% may still stand. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to its usual level in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. The night charge system could not confirm that the backup reserve was restored to its usual level: the panel is not reporting it. Check the backup reserve in the EcoFlow app and set it to its usual level.",
+        "es": "Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo confirmar que la reserva de respaldo se restableció a su nivel habitual: el panel no la está informando. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela a su nivel habitual."
+      }
+    },
+    {
+      "name": "deadline/reads/16/4:00 PM",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve still raised",
+        "body": "The restore of the backup reserve to 16% after the 2026-10-12 night charge has not taken effect: the Smart Home Panel 2 still reads 50%. On-peak pricing starts at 4:00 PM. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to 16% in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. The night charge system could not restore the backup reserve. It still reads 50 percent instead of 16 percent, and on-peak pricing starts at 4:00 PM. Set the backup reserve to 16 percent in the EcoFlow app.",
+        "es": "Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo restablecer la reserva de respaldo. Sigue en el 50 por ciento en lugar del 16 por ciento, y la tarifa punta comienza a las 4:00 PM. Ajuste la reserva de respaldo al 16 por ciento en la aplicación EcoFlow."
+      }
+    },
+    {
+      "name": "deadline/reads/16/no on-peak",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve still raised",
+        "body": "The restore of the backup reserve to 16% after the 2026-10-12 night charge has not taken effect: the Smart Home Panel 2 still reads 50%. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to 16% in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. The night charge system could not restore the backup reserve. It still reads 50 percent instead of 16 percent. Set the backup reserve to 16 percent in the EcoFlow app.",
+        "es": "Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo restablecer la reserva de respaldo. Sigue en el 50 por ciento en lugar del 16 por ciento. Ajuste la reserva de respaldo al 16 por ciento en la aplicación EcoFlow."
+      }
+    },
+    {
+      "name": "deadline/reads/no prior/4:00 PM",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve still raised",
+        "body": "The restore of the backup reserve to its usual level after the 2026-10-12 night charge has not taken effect: the Smart Home Panel 2 still reads 50%. On-peak pricing starts at 4:00 PM. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to its usual level in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. The night charge system could not restore the backup reserve. It still reads 50 percent instead of its usual level, and on-peak pricing starts at 4:00 PM. Set the backup reserve to its usual level in the EcoFlow app.",
+        "es": "Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo restablecer la reserva de respaldo. Sigue en el 50 por ciento en lugar de su nivel habitual, y la tarifa punta comienza a las 4:00 PM. Ajuste la reserva de respaldo a su nivel habitual en la aplicación EcoFlow."
+      }
+    },
+    {
+      "name": "deadline/reads/no prior/no on-peak",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve still raised",
+        "body": "The restore of the backup reserve to its usual level after the 2026-10-12 night charge has not taken effect: the Smart Home Panel 2 still reads 50%. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to its usual level in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. The night charge system could not restore the backup reserve. It still reads 50 percent instead of its usual level. Set the backup reserve to its usual level in the EcoFlow app.",
+        "es": "Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo restablecer la reserva de respaldo. Sigue en el 50 por ciento en lugar de su nivel habitual. Ajuste la reserva de respaldo a su nivel habitual en la aplicación EcoFlow."
+      }
+    },
+    {
+      "name": "onPeak/unknown/16/4:00 PM",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve restore not confirmed",
+        "body": "The restore of the backup reserve to 16% after the 2026-10-12 night charge could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's 50% may still stand. On-peak pricing started at 4:00 PM. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to 16% in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. On-peak pricing has started and the night charge system still cannot confirm that the backup reserve was restored to 16 percent. Check the backup reserve in the EcoFlow app and set it to 16 percent.",
+        "es": "Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y el sistema de carga nocturna sigue sin poder confirmar que la reserva de respaldo se restableció al 16 por ciento. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela al 16 por ciento."
+      }
+    },
+    {
+      "name": "onPeak/unknown/16/no on-peak",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve restore not confirmed",
+        "body": "The restore of the backup reserve to 16% after the 2026-10-12 night charge could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's 50% may still stand. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to 16% in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. On-peak pricing has started and the night charge system still cannot confirm that the backup reserve was restored to 16 percent. Check the backup reserve in the EcoFlow app and set it to 16 percent.",
+        "es": "Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y el sistema de carga nocturna sigue sin poder confirmar que la reserva de respaldo se restableció al 16 por ciento. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela al 16 por ciento."
+      }
+    },
+    {
+      "name": "onPeak/unknown/no prior/4:00 PM",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve restore not confirmed",
+        "body": "The restore of the backup reserve to its usual level after the 2026-10-12 night charge could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's 50% may still stand. On-peak pricing started at 4:00 PM. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to its usual level in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. On-peak pricing has started and the night charge system still cannot confirm that the backup reserve was restored to its usual level. Check the backup reserve in the EcoFlow app and set it to its usual level.",
+        "es": "Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y el sistema de carga nocturna sigue sin poder confirmar que la reserva de respaldo se restableció a su nivel habitual. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela a su nivel habitual."
+      }
+    },
+    {
+      "name": "onPeak/unknown/no prior/no on-peak",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve restore not confirmed",
+        "body": "The restore of the backup reserve to its usual level after the 2026-10-12 night charge could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's 50% may still stand. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to its usual level in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. On-peak pricing has started and the night charge system still cannot confirm that the backup reserve was restored to its usual level. Check the backup reserve in the EcoFlow app and set it to its usual level.",
+        "es": "Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y el sistema de carga nocturna sigue sin poder confirmar que la reserva de respaldo se restableció a su nivel habitual. Revise la reserva de respaldo en la aplicación EcoFlow y ajústela a su nivel habitual."
+      }
+    },
+    {
+      "name": "onPeak/reads/16/4:00 PM",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve still raised",
+        "body": "The restore of the backup reserve to 16% after the 2026-10-12 night charge has not taken effect: the Smart Home Panel 2 still reads 50%. On-peak pricing started at 4:00 PM. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to 16% in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. On-peak pricing has started and the backup reserve still reads 50 percent instead of 16 percent. The house is buying grid power at the peak rate to hold it. Set the backup reserve to 16 percent in the EcoFlow app.",
+        "es": "Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y la reserva de respaldo sigue en el 50 por ciento en lugar del 16 por ciento. La casa está comprando energía de la red a la tarifa punta para mantenerla. Ajuste la reserva de respaldo al 16 por ciento en la aplicación EcoFlow."
+      }
+    },
+    {
+      "name": "onPeak/reads/16/no on-peak",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve still raised",
+        "body": "The restore of the backup reserve to 16% after the 2026-10-12 night charge has not taken effect: the Smart Home Panel 2 still reads 50%. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to 16% in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. On-peak pricing has started and the backup reserve still reads 50 percent instead of 16 percent. The house is buying grid power at the peak rate to hold it. Set the backup reserve to 16 percent in the EcoFlow app.",
+        "es": "Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y la reserva de respaldo sigue en el 50 por ciento en lugar del 16 por ciento. La casa está comprando energía de la red a la tarifa punta para mantenerla. Ajuste la reserva de respaldo al 16 por ciento en la aplicación EcoFlow."
+      }
+    },
+    {
+      "name": "onPeak/reads/no prior/4:00 PM",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve still raised",
+        "body": "The restore of the backup reserve to its usual level after the 2026-10-12 night charge has not taken effect: the Smart Home Panel 2 still reads 50%. On-peak pricing started at 4:00 PM. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to its usual level in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. On-peak pricing has started and the backup reserve still reads 50 percent instead of its usual level. The house is buying grid power at the peak rate to hold it. Set the backup reserve to its usual level in the EcoFlow app.",
+        "es": "Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y la reserva de respaldo sigue en el 50 por ciento en lugar de su nivel habitual. La casa está comprando energía de la red a la tarifa punta para mantenerla. Ajuste la reserva de respaldo a su nivel habitual en la aplicación EcoFlow."
+      }
+    },
+    {
+      "name": "onPeak/reads/no prior/no on-peak",
+      "push": {
+        "severity": "critical",
+        "dedupId": "night_charge_revert_deadline",
+        "title": "Night-charge: reserve still raised",
+        "body": "The restore of the backup reserve to its usual level after the 2026-10-12 night charge has not taken effect: the Smart Home Panel 2 still reads 50%. While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. Set the backup reserve to its usual level in the EcoFlow app. The add-on keeps retrying the restore."
+      },
+      "spoken": {
+        "en": "Critical. On-peak pricing has started and the backup reserve still reads 50 percent instead of its usual level. The house is buying grid power at the peak rate to hold it. Set the backup reserve to its usual level in the EcoFlow app.",
+        "es": "Alarma crítica. Alarma crítica. La tarifa punta ya comenzó y la reserva de respaldo sigue en el 50 por ciento en lugar de su nivel habitual. La casa está comprando energía de la red a la tarifa punta para mantenerla. Ajuste la reserva de respaldo a su nivel habitual en la aplicación EcoFlow."
+      }
+    }
+  ],
+  "missedApply": [
+    {
+      "name": "backup, Monday 12am (Sunday evening plan)/16",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_backup",
+        "title": "Charge plan: tonight's outage backup did not start",
+        "body": "Tonight's 12am–5am outage backup did not start — the panel reading was stale. Nothing was written; the reserve stays at 16%."
+      }
+    },
+    {
+      "name": "backup, Monday 12am (Sunday evening plan)/no reading",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_backup",
+        "title": "Charge plan: tonight's outage backup did not start",
+        "body": "Tonight's 12am–5am outage backup did not start — the panel reading was stale. Nothing was written; the reserve was not changed."
+      }
+    },
+    {
+      "name": "backup, tonight 11pm/16",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_backup",
+        "title": "Charge plan: tonight's outage backup did not start",
+        "body": "Tonight's 11pm–5am outage backup did not start — the panel reading was stale. Nothing was written; the reserve stays at 16%."
+      }
+    },
+    {
+      "name": "backup, tonight 11pm/no reading",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_backup",
+        "title": "Charge plan: tonight's outage backup did not start",
+        "body": "Tonight's 11pm–5am outage backup did not start — the panel reading was stale. Nothing was written; the reserve was not changed."
+      }
+    },
+    {
+      "name": "cost, today 10am/16",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_cost",
+        "title": "Charge plan: today's charge did not start",
+        "body": "Today's 10am–3pm charge did not start — the panel reading was stale. Nothing was written; the reserve stays at 16%."
+      }
+    },
+    {
+      "name": "cost, today 10am/no reading",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_cost",
+        "title": "Charge plan: today's charge did not start",
+        "body": "Today's 10am–3pm charge did not start — the panel reading was stale. Nothing was written; the reserve was not changed."
+      }
+    },
+    {
+      "name": "cost, another day/16",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_cost",
+        "title": "Charge plan: Thursday's charge did not start",
+        "body": "Thursday's 10am–3pm charge did not start — the panel reading was stale. Nothing was written; the reserve stays at 16%."
+      }
+    },
+    {
+      "name": "cost, another day/no reading",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_cost",
+        "title": "Charge plan: Thursday's charge did not start",
+        "body": "Thursday's 10am–3pm charge did not start — the panel reading was stale. Nothing was written; the reserve was not changed."
+      }
+    },
+    {
+      "name": "cost, overnight 12am/16",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_cost",
+        "title": "Charge plan: tonight's charge did not start",
+        "body": "Tonight's 12am–5am charge did not start — the panel reading was stale. Nothing was written; the reserve stays at 16%."
+      }
+    },
+    {
+      "name": "cost, overnight 12am/no reading",
+      "push": {
+        "severity": "info",
+        "dedupId": "night_charge_missed_apply_cost",
+        "title": "Charge plan: tonight's charge did not start",
+        "body": "Tonight's 12am–5am charge did not start — the panel reading was stale. Nothing was written; the reserve was not changed."
+      }
+    }
+  ]
+}

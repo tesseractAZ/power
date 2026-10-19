@@ -98,8 +98,8 @@ const MUTANTS = [
   {
     id: 'C-ii. ★★★ the monitor tick passes no measured capacity',
     file: AM,
-    find: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow)',
-    to: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs) /* MUTANT */',
+    find: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow, chargeHold)',
+    to: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, null, chargeHold) /* MUTANT */',
     why: 'The fix is inert in production: the forecast feed holds the measured capacity and the detector never sees it.',
   },
   {
@@ -182,8 +182,8 @@ const MUTANTS = [
   {
     id: 'C-xiv. ★★★ the monitor tick passes the forecast\'s figure but not its basis',
     file: AM,
-    find: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow)',
-    to: "idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow == null ? null : { poolFullWh: forecastNow.poolFullWh, poolCapacityBasis: 'measured' }) /* MUTANT */",
+    find: 'idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow, chargeHold)',
+    to: "idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow == null ? null : { poolFullWh: forecastNow.poolFullWh, poolCapacityBasis: 'measured' }, chargeHold) /* MUTANT */",
     why: 'The review\'s finding: the tick drops the forecast\'s basis, so a nameplate-basis forecast is labelled measured in production.',
   },
 

@@ -784,6 +784,99 @@ export interface NightLedgerRow {
    *  graded against. NULL when no reading covers the lead-in, and on rows captured earlier. */
   window_open_soc_pct: number | null;
 
+  // ── v1.189.0 — THE CHARGE CYCLE (chargeCycle.ts). The row stays keyed by plan_date and its
+  // plan columns hold the cost leg; a mid-day cycle's overnight backup leg has its own
+  // backup_* columns. NULL on rows written before v1.189.0, and wherever a column's leg or
+  // step did not happen. ──
+  /** The cost leg's tariff window: 'overnight' | 'super_off_peak'. NULL = before v1.189.0
+   *  (every such row is overnight). */
+  window_kind: string | null;
+  /** The planner's horizon end: the next window a cycle can charge in after this one. */
+  next_recharge_ms: number | null;
+  /** The backup leg: its window, the reserve it sets, its expected draw, why it did or did not
+   *  arm or write, its write stamps, what it delivered, and the trough and line its sizing walk
+   *  graded. */
+  backup_window_start_ms: number | null;
+  backup_window_end_ms: number | null;
+  backup_setpoint_pct: number | null;
+  backup_expected_buy_kwh: number | null;
+  backup_arm_disposition: string | null;
+  backup_actuated: number | null; // 0/1
+  backup_applied_at_ms: number | null;
+  backup_reverted_at_ms: number | null;
+  backup_delivered_kwh: number | null;
+  backup_cushion_trough_soc_pct: number | null;
+  backup_cushion_line_soc_pct: number | null;
+  /** The morning refresh of a mid-day leg: when, what it re-planned (the plan columns stay frozen
+   *  at the evening's), what it decided, and how old its weather was. */
+  refreshed_at_ms: number | null;
+  refreshed_buy_kwh: number | null;
+  refreshed_level_pct: number | null;
+  refreshed_reserve_pct: number | null;
+  refresh_disposition: string | null;
+  refresh_weather_age_s: number | null;
+  /** The cost leg's force-charge: ON, the first OFF and why, and the OFF read back. */
+  force_charge_on_at_ms: number | null;
+  force_charge_off_at_ms: number | null;
+  force_charge_off_reason: string | null;
+  force_charge_off_verified_at_ms: number | null;
+  /** When an unconfirmed restore of the cost leg first paged (nightChargeActuator
+   *  decideRevertDeadline). */
+  revert_deadline_paged_at_ms: number | null;
+  /** A mid-day leg's sizing inputs: the Cores' charge ceiling and the packs' acceptance. */
+  chg_max_soc_pct: number | null;
+  pack_accept_kw: number | null;
+
+  // ── v1.189.0 (R4) — THE MID-DAY CYCLE IN SHADOW (middayShadow.ts). Until the mid-day switch the
+  // winter mid-day cycle is computed beside the live overnight plan and nothing of it is written,
+  // armed or announced; these columns keep what it would have done, so the shadow can be judged
+  // against the days that followed. NULL on every row the shadow did not run for, and the live
+  // columns above never hold a shadow figure. ──
+  /** Why the chooser picked the cycle it did (chargeWindows.ChargeCycleWhy); 'midday' when the
+   *  shadow sized both legs. */
+  shadow_cycle_why: string | null;
+  shadow_computed_at_ms: number | null;
+  /** The backup leg: its window, whether it would arm (0/1), the reserve it would write, its worst
+   *  case and expected draw, and the trough and line its walk graded. */
+  shadow_backup_window_start_ms: number | null;
+  shadow_backup_window_end_ms: number | null;
+  shadow_backup_arms: number | null;
+  shadow_backup_setpoint_pct: number | null;
+  shadow_backup_buy_kwh: number | null;
+  shadow_backup_expected_buy_kwh: number | null;
+  shadow_backup_cushion_trough_soc_pct: number | null;
+  shadow_backup_cushion_line_soc_pct: number | null;
+  /** The mid-day cost leg: its window, whether it would arm, T_mid and which term set it, the level
+   *  it would drive the pool to, C_mid, its worst case and expected draw, the expected pool at the
+   *  window open; why a leg would not arm. */
+  shadow_cost_window_start_ms: number | null;
+  shadow_cost_window_end_ms: number | null;
+  shadow_cost_arms: number | null;
+  shadow_cost_reserve_pct: number | null;
+  shadow_cost_reserve_basis: string | null;
+  shadow_cost_level_pct: number | null;
+  shadow_cost_ceiling_soc_pct: number | null;
+  shadow_cost_buy_kwh: number | null;
+  shadow_cost_expected_buy_kwh: number | null;
+  shadow_cost_expected_start_soc_pct: number | null;
+  shadow_arm_disposition: string | null;
+  /** The planned (P50) PV and load over the mid-day window, kWh, and what was measured there
+   *  (captured with the row): the forecast skill the shadow is judged on. */
+  shadow_window_pv_p50_kwh: number | null;
+  shadow_window_load_p50_kwh: number | null;
+  shadow_window_pv_kwh: number | null;
+  shadow_window_load_kwh: number | null;
+  /** The shadow morning refresh (a computation only): when, its disposition, and what it re-planned. */
+  shadow_refreshed_at_ms: number | null;
+  shadow_refresh_disposition: string | null;
+  shadow_refreshed_level_pct: number | null;
+  shadow_refreshed_reserve_pct: number | null;
+  shadow_refreshed_buy_kwh: number | null;
+  shadow_refreshed_expected_buy_kwh: number | null;
+  /** R5 — how old the weather the shadow refresh was sized on was, seconds (the shadow asks the
+   *  worker for no particular age; a live refresh asks for at most 45 minutes). */
+  shadow_refresh_weather_age_s: number | null;
+
   // ── SCORE (NULL until scored) ──
   pv_err_frac: number | null;
   pv_in_band: number | null; // 0/1
@@ -844,6 +937,45 @@ export interface NightCalibration {
 // sets (never from caller-supplied keys) — that is what makes the dynamic
 // INSERT..ON CONFLICT injection-safe. Keep in lockstep with the CREATE TABLE
 // statements and the interfaces above.
+/** v1.189.0 — the charge cycle's columns (NightLedgerRow.window_kind onward) with their SQL types.
+ *  ONE list feeds both the column allowlist and the ALTER pass below, so a column can be in
+ *  neither or both — never written to a table that lacks it, never added and then dropped from
+ *  every write. */
+export const CHARGE_CYCLE_LEDGER_SCHEMA: ReadonlyArray<readonly [keyof NightLedgerRow, 'INTEGER' | 'REAL' | 'TEXT']> = [
+  ['window_kind', 'TEXT'], ['next_recharge_ms', 'INTEGER'],
+  ['backup_window_start_ms', 'INTEGER'], ['backup_window_end_ms', 'INTEGER'], ['backup_setpoint_pct', 'REAL'],
+  ['backup_expected_buy_kwh', 'REAL'], ['backup_arm_disposition', 'TEXT'], ['backup_actuated', 'INTEGER'],
+  ['backup_applied_at_ms', 'INTEGER'], ['backup_reverted_at_ms', 'INTEGER'], ['backup_delivered_kwh', 'REAL'],
+  ['backup_cushion_trough_soc_pct', 'REAL'], ['backup_cushion_line_soc_pct', 'REAL'],
+  ['refreshed_at_ms', 'INTEGER'], ['refreshed_buy_kwh', 'REAL'], ['refreshed_level_pct', 'REAL'],
+  ['refreshed_reserve_pct', 'REAL'], ['refresh_disposition', 'TEXT'], ['refresh_weather_age_s', 'REAL'],
+  ['force_charge_on_at_ms', 'INTEGER'], ['force_charge_off_at_ms', 'INTEGER'], ['force_charge_off_reason', 'TEXT'],
+  ['force_charge_off_verified_at_ms', 'INTEGER'], ['revert_deadline_paged_at_ms', 'INTEGER'],
+  ['chg_max_soc_pct', 'REAL'], ['pack_accept_kw', 'REAL'],
+];
+/** v1.189.0 (R4) — the mid-day cycle in shadow (NightLedgerRow.shadow_cycle_why onward), in the same
+ *  form: one list for the allowlist and the ALTER pass. */
+export const MIDDAY_SHADOW_LEDGER_SCHEMA: ReadonlyArray<readonly [keyof NightLedgerRow, 'INTEGER' | 'REAL' | 'TEXT']> = [
+  ['shadow_cycle_why', 'TEXT'], ['shadow_computed_at_ms', 'INTEGER'],
+  ['shadow_backup_window_start_ms', 'INTEGER'], ['shadow_backup_window_end_ms', 'INTEGER'], ['shadow_backup_arms', 'INTEGER'],
+  ['shadow_backup_setpoint_pct', 'REAL'], ['shadow_backup_buy_kwh', 'REAL'], ['shadow_backup_expected_buy_kwh', 'REAL'],
+  ['shadow_backup_cushion_trough_soc_pct', 'REAL'], ['shadow_backup_cushion_line_soc_pct', 'REAL'],
+  ['shadow_cost_window_start_ms', 'INTEGER'], ['shadow_cost_window_end_ms', 'INTEGER'], ['shadow_cost_arms', 'INTEGER'],
+  ['shadow_cost_reserve_pct', 'REAL'], ['shadow_cost_reserve_basis', 'TEXT'], ['shadow_cost_level_pct', 'REAL'],
+  ['shadow_cost_ceiling_soc_pct', 'REAL'], ['shadow_cost_buy_kwh', 'REAL'], ['shadow_cost_expected_buy_kwh', 'REAL'],
+  ['shadow_cost_expected_start_soc_pct', 'REAL'], ['shadow_arm_disposition', 'TEXT'],
+  ['shadow_window_pv_p50_kwh', 'REAL'], ['shadow_window_load_p50_kwh', 'REAL'],
+  ['shadow_window_pv_kwh', 'REAL'], ['shadow_window_load_kwh', 'REAL'],
+  ['shadow_refreshed_at_ms', 'INTEGER'], ['shadow_refresh_disposition', 'TEXT'], ['shadow_refreshed_level_pct', 'REAL'],
+  ['shadow_refreshed_reserve_pct', 'REAL'], ['shadow_refreshed_buy_kwh', 'REAL'], ['shadow_refreshed_expected_buy_kwh', 'REAL'],
+  // R5 — the weather age the shadow refresh was sized on.
+  ['shadow_refresh_weather_age_s', 'REAL'],
+];
+const CHARGE_CYCLE_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
+  ...CHARGE_CYCLE_LEDGER_SCHEMA.map(([c]) => c),
+  ...MIDDAY_SHADOW_LEDGER_SCHEMA.map(([c]) => c),
+];
+
 const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'plan_date',
   'issued_at_ms', 'algo_version', 'posture', 'objective', 'rationale',
@@ -880,6 +1012,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'delivered_basis',
   // v1.187.22 — the expected buy and start beside the worst case, and the measured window-open SoC.
   'expected_buy_kwh', 'expected_start_soc_pct', 'window_open_soc_pct',
+  // v1.189.0 — the charge cycle (NightLedgerRow.window_kind).
+  ...CHARGE_CYCLE_LEDGER_COLUMNS,
 ];
 const NIGHT_LEDGER_COLUMN_SET = new Set<string>(NIGHT_LEDGER_COLUMNS as readonly string[]);
 
@@ -1106,6 +1240,10 @@ export function createRecorder(
     'delivered_basis TEXT',
     // v1.187.22 — see NightLedgerRow.expected_buy_kwh / window_open_soc_pct.
     'expected_buy_kwh REAL', 'expected_start_soc_pct REAL', 'window_open_soc_pct REAL',
+    // v1.189.0 — the charge cycle, from the list the allowlist reads (CHARGE_CYCLE_LEDGER_SCHEMA).
+    ...CHARGE_CYCLE_LEDGER_SCHEMA.map(([c, t]) => `${c} ${t}`),
+    // v1.189.0 (R4) — the mid-day cycle in shadow (MIDDAY_SHADOW_LEDGER_SCHEMA).
+    ...MIDDAY_SHADOW_LEDGER_SCHEMA.map(([c, t]) => `${c} ${t}`),
   ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);

@@ -325,7 +325,7 @@ Two things flow out of it into the automation layer:
 const CURTAIL_TTL_MS         = 5 * 60 * 1000;  // report cached 5 min
 const CURTAIL_MIN_SURPLUS_W  = 300;            // min gap before we call it curtailment
 const CURTAIL_MIN_BAYES_SAMPLES = 3;           // posterior support required
-const CURTAIL_TAPER_BAND_PCT = 10;             // SoC band below ceiling where shedding begins
+const CURTAIL_TAPER_BAND_PCT = 10;             // chargeTaper.ts: SoC band below ceiling where shedding begins
 ```
 
 - **Saturation threshold:** `saturationThresholdPct(ceiling) = max(0, (ceiling>0 ? ceiling

@@ -61,8 +61,8 @@ const MUTANTS = [
   {
     id: 'v. the disabled basis takes the whole-house trough',
     file: ADVISOR,
-    find: "    if (cushionBasis === 'legacy-pct') return houseTroughAtLift(lift);",
-    to: "    if (cushionBasis !== 'islanded-outage') return houseTroughAtLift(lift); /* MUTANT */",
+    find: "    if (cushionBasis === 'legacy-pct' || backupLeg) return houseTroughAtLift(lift);",
+    to: "    if (cushionBasis !== 'islanded-outage' || backupLeg) return houseTroughAtLift(lift); /* MUTANT */",
     why: 'Disabling the cushion would apply the HARSHER whole-house test, raising the requirement instead of lowering it.',
   },
   {

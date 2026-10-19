@@ -10,7 +10,9 @@ import {
   noChargeExpected, statedBuyKwh,
 } from './nightChargeAdvisor.js';
 import { forceChargeStopPct, partialForceChargeOnFailureSlots, type ForceChargeNightOutcome } from './nightForceCharge.js';
-import { isNoChargeKwh, RESERVE_WRITE_MAX_PCT, type NightChargeMode } from './nightChargeActuator.js';
+import { isNoChargeKwh, revertRetryText, RESERVE_WRITE_MAX_PCT, type NightChargeMode, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
+// R5 — the day-aware formatter's clocks (chargeText.ts), shared with the mid-day texts.
+import { phxParts, phxShortClock } from './chargeText.js';
 
 /**
  * v1.120.0 — NOTIFY HTTP BUDGETS.
@@ -640,6 +642,12 @@ export function buildNightChargeMessage(
  *    is never pushed.
  * A restore that ENDED the night early — an owner cancel after the write, or a grid-loss abort —
  * is not a completed charge: it says so, with no figure. PURE.
+ *
+ * v1.189.0 (review) — the restore as the panel reported it (`restore`, nightChargeActuator
+ * restoreSummaryDue): "restored to 16%" only once it read back ('readBack', the words before, byte
+ * for byte); sent and acknowledged with no readback yet ('acknowledged'), when the summary goes at
+ * the end of the restore's readback grace. It went on the cloud ACK saying "restored", and a restore
+ * that then did not read back was paged critical half an hour later.
  */
 export function buildNightChargeMorningSummary(o: {
   day: string | null;
@@ -651,18 +659,25 @@ export function buildNightChargeMorningSummary(o: {
   /** Why the reserve came down: the window closed (default), the owner cancelled after the
    *  write, or the grid was lost (decideActuation's gridLossAbort). */
   ended?: 'window' | 'cancelled' | 'gridLoss';
+  /** The restore read back (default), or was sent and acknowledged with no readback yet. */
+  restore?: RestoreSummaryKind;
 }): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_actuation' };
   const day = o.day ?? '—';
   const raised = `${o.targetPct ?? '—'}%`;
+  const acked = o.restore === 'acknowledged';
+  const sent = `the restore to ${o.restorePct}% was sent (the EcoFlow cloud acknowledged it), and the panel has not read it back yet`;
+  const titleRestore = acked ? `reserve restore to ${o.restorePct}% sent` : `reserve restored to ${o.restorePct}%`;
   if (o.ended === 'cancelled' || o.ended === 'gridLoss') {
     const cancelled = o.ended === 'cancelled';
     return {
       ...base,
-      title: `Night-charge: ${cancelled ? 'cancelled' : 'stopped (grid lost)'} — reserve restored to ${o.restorePct}%`,
+      title: `Night-charge: ${cancelled ? 'cancelled' : 'stopped (grid lost)'} — ${titleRestore}`,
       body:
         `Supervised night charge for ${day} ${cancelled ? 'was cancelled after the write' : 'stopped: the grid was lost during the window'}: `
-        + `the reserve, raised to ${raised}, is restored to ${o.restorePct}% and nothing more is charged tonight.`,
+        + (acked
+          ? `the reserve was raised to ${raised}; ${sent}. Nothing more is charged tonight.`
+          : `the reserve, raised to ${raised}, is restored to ${o.restorePct}% and nothing more is charged tonight.`),
     };
   }
   const held = isNoChargeKwh(o.expectedKwh);
@@ -675,12 +690,14 @@ export function buildNightChargeMorningSummary(o: {
   // beside a reserve-only figure, nor beside a leg that never started, failed or never confirmed.
   const figureFits = fc.kind === 'none' ? fc.expectedLeg === false : fc.kind === 'ran' && fc.expectedLeg === true;
   const note = expected && figureFits ? ` (${expected})` : '';
-  const restored = `the reserve is restored to ${o.restorePct}%. `;
+  const restored = acked ? `${sent}. ` : `the reserve is restored to ${o.restorePct}%. `;
   let night: string;
   if (fc.kind === 'none') {
-    night = held
-      ? `the reserve was held at ${raised} overnight as a floor (no charge was expected) and is restored to ${o.restorePct}%. `
-      : `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. `;
+    night = acked
+      ? `${held ? `the reserve was held at ${raised} overnight as a floor (no charge was expected)` : `reserve raised to ${raised}${note}`}; ${sent}. `
+      : held
+        ? `the reserve was held at ${raised} overnight as a floor (no charge was expected) and is restored to ${o.restorePct}%. `
+        : `reserve raised to ${raised}${note} and restored to ${o.restorePct}%. `;
   } else {
     const reserve = held ? `the reserve was held at ${raised} overnight as a floor (no charge was expected)` : `reserve raised to ${raised}`;
     const toward = fc.stopPct != null && Number.isFinite(fc.stopPct) ? ` toward ~${round1(fc.stopPct)}%` : '';
@@ -699,10 +716,109 @@ export function buildNightChargeMorningSummary(o: {
   }
   return {
     ...base,
-    title: `Night-charge: reserve restored to ${o.restorePct}%`,
+    title: `Night-charge: ${titleRestore}`,
     body:
       `Supervised night charge for ${day} completed: ${night}`
       + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
+  };
+}
+
+/**
+ * revertDeadline — the critical push beside the spoken page (nightChargeActuator
+ * decideRevertDeadline): a restore of the night's reserve write that has not read back by its
+ * deadline, or by the on-peak start. `unknown` = no live reading: the words say the restore could
+ * not be CONFIRMED, never that the reserve reads raised. `onPeakClock` names the on-peak start
+ * ("4:00 PM"); null when the night has none on record. `onPeakDay` names its day at the deadline
+ * stage when it is not the page's ("on Monday": chargeText.onPeakDayWords). PURE.
+ */
+export function buildNightChargeRevertDeadline(o: {
+  day: string | null;
+  stage: 'deadline' | 'onPeak';
+  unknown: boolean;
+  targetPct: number;
+  restorePct: number | null;
+  onPeakClock: string | null;
+  /** The on-peak start's day when it is not the page's own; absent or null: the bare clock. */
+  onPeakDay?: { en: string; es: string } | null;
+  /** A restore of ours will still be sent (nightChargeActuator.revertRetryPending). The push says
+   *  the add-on keeps retrying only then: a stuck restore whose re-issues are spent, or one the
+   *  panel cannot be read for, is not re-sent, and saying otherwise tells the owner to wait. */
+  retrying: boolean;
+  /** v1.189.0 (review) — none is being sent and one will be once the panel reports again
+   *  (nightChargeActuator.revertResendOnReport): the push says what it waits on. */
+  resendOnReport?: RevertResendOnReport | null;
+}): NotifyMessage {
+  const to = o.restorePct != null ? `${o.restorePct}%` : 'its usual level';
+  const peak = o.onPeakClock == null ? ''
+    : o.stage === 'onPeak' ? ` On-peak pricing started at ${o.onPeakClock}.`
+      : ` On-peak pricing starts ${o.onPeakDay != null ? `${o.onPeakDay.en} ` : ''}at ${o.onPeakClock}.`;
+  const state = o.unknown
+    ? `could not be confirmed: the Smart Home Panel 2 is not reporting its reserve, so the night's ${o.targetPct}% may still stand.`
+    : `has not taken effect: the Smart Home Panel 2 still reads ${o.targetPct}%.`;
+  return {
+    severity: 'critical',
+    dedupId: 'night_charge_revert_deadline',
+    title: o.unknown ? 'Night-charge: reserve restore not confirmed' : 'Night-charge: reserve still raised',
+    body:
+      `The restore of the backup reserve to ${to} after the ${o.day ?? '—'} night charge ${state}${peak} `
+      + `While the reserve stays raised the panel holds it as its floor and buys grid power to refill to it. `
+      + `Set the backup reserve to ${to} in the EcoFlow app. ${revertRetryText(o.retrying, o.resendOnReport ?? null)}`,
+  };
+}
+
+/**
+ * v1.189.0 — the missed apply (chargeCycle.missedApplyDue): a leg of a charge cycle passed its apply
+ * window (30 min after its window opens) with no write — the reason, and the reserve in force. An
+ * info push, once per leg. Only a leg the overnight-only cycle never had sends it (a mid-day leg, or
+ * the outage backup before one); the overnight leg keeps its own warning for a write that never took
+ * effect (buildNightChargeApplyFailure). PURE.
+ *   "Today's 10am–3pm charge did not start — <reason>. Nothing was written; the reserve stays at 16%."
+ */
+export function buildNightChargeMissedApply(o: {
+  day: string | null;
+  role: 'backup' | 'cost';
+  windowStartMs: number;
+  windowEndMs: number;
+  reason: string;
+  /** The reserve the panel reads now; null when it is not reporting. */
+  reservePct: number | null;
+  nowMs: number;
+}): NotifyMessage {
+  const start = phxParts(o.windowStartMs);
+  const sameDay = start.ymd === phxParts(o.nowMs).ymd;
+  // A window opening in the evening or before dawn (the overnight backup's 12am) is tonight's.
+  const when = sameDay ? (start.hour >= 18 || start.hour < 6 ? 'Tonight\'s' : 'Today\'s') : `${start.weekday}'s`;
+  const what = o.role === 'backup' ? 'outage backup' : 'charge';
+  const span = `${phxShortClock(o.windowStartMs)}–${phxShortClock(o.windowEndMs)}`;
+  const reserve = o.reservePct != null ? `the reserve stays at ${o.reservePct}%` : 'the reserve was not changed';
+  return {
+    severity: 'info',
+    dedupId: `night_charge_missed_apply_${o.role}`,
+    title: `Charge plan: ${sameDay ? when.toLowerCase() : when} ${what} did not start`,
+    body: `${when} ${span} ${what} did not start — ${o.reason}. Nothing was written; ${reserve}.`,
+  };
+}
+
+/**
+ * The info push sent when the reserve settled as someone else's (nightChargeActuator foreignStep):
+ * the same value, neither the night's target nor the value it restores, on two readings five or
+ * more minutes apart. Nothing more is written to the reserve for that night. PURE.
+ */
+export function buildNightChargeForeignReserve(o: {
+  day: string | null;
+  pct: number;
+  targetPct: number | null;
+  restorePct: number | null;
+}): NotifyMessage {
+  return {
+    severity: 'info',
+    dedupId: 'night_charge_actuation',
+    title: `Night-charge: reserve set to ${o.pct}% outside the add-on`,
+    body:
+      `The backup reserve reads ${o.pct}% — not the ${o.targetPct ?? '—'}% the ${o.day ?? '—'} night charge set, nor the `
+      + `${o.restorePct ?? '—'}% it would restore — on two readings five or more minutes apart. It was changed outside `
+      + `the add-on (the EcoFlow app, or the panel itself), so the night charge leaves it at ${o.pct}% and writes nothing `
+      + 'more to it for this charge.',
   };
 }
 

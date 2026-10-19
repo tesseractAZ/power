@@ -423,6 +423,12 @@ export function computeNightChargeReadiness(
   const metrics: Record<string, number | null> = {
     scoredDays: actuatedNights,
     actuatedNights,
+    // R4 (v1.189.0) — the graduation count per window kind (plan §6 "Readiness"). Every criterion
+    // and hard block above and below stays POOLED; these say how much of the evidence each kind of
+    // cycle contributed, so a mid-day stratum can be graduated on its own nights before 'auto' runs
+    // it unattended. A row written before the charge cycle record (no window_kind) is overnight.
+    actuatedNightsOvernight: actuated.filter((r) => r.window_kind !== 'super_off_peak').length,
+    actuatedNightsMidday: actuated.filter((r) => r.window_kind === 'super_off_peak').length,
     effectiveN: round(effectiveN, 2),
     activeStrikes,
     strikeFreeStreak,

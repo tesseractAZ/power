@@ -1,7 +1,8 @@
 import { memo, useEffect, useState } from 'react';
 import {
-  actuationBannerVisible, chargeFigureParts, floorCushionLinePct, fmtLinePct, holdSummary, noChargeExpected, refusedArmLead,
-  reserveWriteLabel, revertUnconfirmed, sizingLine, writtenReservePct,
+  actuationBannerState, actuationBannerVisible, actuationKey, cancelOutcome, cancelRequestInit, chargeFigureParts, floorCushionLinePct, fmtLinePct,
+  holdSummary, noChargeExpected, noPlanText, refusedArmLead, reserveWriteLabel, sizingLine, withConfirmedCancel, writeStands,
+  writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus,
 } from './nightChargeText';
 import { apiUrl } from '../api';
 
@@ -100,6 +101,11 @@ interface NightActuation {
   revertVerifiedAtMs?: number | null;
   revertRetries?: number;
   revertReadbackEscalated?: boolean;
+  /** v1.189.0 — the charge cycle's leg this record is (absent from an older server: the cost leg). */
+  leg?: 'cost' | 'backup';
+  /** v1.189.0 — the reserve settled as someone else's (the foreign rule): nothing left to cancel. */
+  foreignSettledAtMs?: number | null;
+  foreignReservePct?: number | null;
 }
 
 interface NightChargeStatus {
@@ -117,6 +123,10 @@ interface NightChargeStatus {
   armRefusal?: string | null;
   readiness: NightChargeReadiness | null;
   actuation?: NightActuation | null;
+  /** v1.189.0 (R4) — the winter mid-day cycle computed in shadow; null/absent with none current. */
+  middayShadow?: MiddayShadowStatus | null;
+  /** v1.189.0 (R5) — what its evening notice would have said (never sent); null/absent with none. */
+  middayShadowPreview?: MiddayShadowPreviewStatus | null;
   recentOutcomes?: unknown;
 }
 
@@ -124,6 +134,11 @@ interface NightChargeStatus {
  *  the web card and the HA entities never disagree about "is tonight's plan
  *  still live". */
 const STALE_MS = 12 * 60 * 60 * 1000;
+
+/** v1.189.0 — a status request that has not answered by now is a failure: the card leaves
+ *  "Loading…" for the unavailable shape, which still carries a Cancel (StatusBlindCancel). A hung
+ *  request would otherwise hold the card on "Loading…", with no Cancel, indefinitely. */
+const STATUS_TIMEOUT_MS = 15_000;
 
 /** HH:MM in America/Phoenix (never the host clock) for the charge window. */
 const phoenixHHMM = (ms: number | null | undefined): string | null => {
@@ -161,12 +176,16 @@ const BINDING_CAP_LABEL: Record<NonNullable<NightChargePlan['bindingCap']>, stri
 export const NightChargeCard = memo(function NightChargeCard() {
   const [status, setStatus] = useState<NightChargeStatus | null>(null);
   const [err, setErr] = useState(false);
+  // v1.189.0 — the write a Cancel was confirmed for (actuationKey), until the status poll carries it.
+  const [cancelledKey, setCancelledKey] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     const load = async () => {
+      const ctl = new AbortController();
+      const timer = window.setTimeout(() => ctl.abort(), STATUS_TIMEOUT_MS);
       try {
-        const r = await fetch(apiUrl('api/night-charge/status'));
+        const r = await fetch(apiUrl('api/night-charge/status'), { signal: ctl.signal });
         if (!live) return;
         if (r.ok) {
           setStatus(await r.json());
@@ -176,6 +195,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
         }
       } catch {
         if (live) setErr(true);
+      } finally {
+        window.clearTimeout(timer);
       }
     };
     load();
@@ -186,13 +207,31 @@ export const NightChargeCard = memo(function NightChargeCard() {
     };
   }, []);
 
+  // ★ v1.189.0 — every shape below carries the owner's Cancel: the banner wherever the status is
+  // known (it renders nothing unless a write is armed or applied, or has just settled), and a
+  // status-blind Cancel where it is not. A recompute that holds, an incomplete basis or a stale
+  // plan does not disarm the write the evening job armed (writeStands), so none of them may hide
+  // its Cancel.
   if (!status) {
     return (
-      <div className="card text-sm text-muted">
-        {err ? 'Night-charge advisory unavailable — see add-on log.' : 'Loading night-charge advisory…'}
+      <div className="card text-sm">
+        <div className="text-muted">
+          {err ? 'Night-charge advisory unavailable — see add-on log.' : 'Loading night-charge advisory…'}
+        </div>
+        {err && <StatusBlindCancel />}
       </div>
     );
   }
+
+  // v1.189.0 — a confirmed cancel shows at once, for the write it was made on only (a poll that
+  // left before it cannot undo it, and the next night's write keeps its Cancel); the 60 s poll
+  // converges the rest.
+  const actuation = withConfirmedCancel(status.actuation ?? null, cancelledKey);
+  const onCancelled = () => setCancelledKey(actuationKey(actuation));
+  const banner = (spacing: 'mt-3' | 'mb-3') => (
+    <ActuationBanner mode={status.mode} actuation={actuation} onCancelled={onCancelled} spacing={spacing} />
+  );
+  const stands = writeStands(actuation, status.mode, Date.now());
 
   const plan = status.plan;
   // Fail-safe: null / incomplete / stale plan → the grey "unavailable" shape,
@@ -207,11 +246,9 @@ export const NightChargeCard = memo(function NightChargeCard() {
     return (
       <div className="card text-sm">
         <div className="card-title">Tonight's night-charge plan</div>
-        <div className="text-muted">
-          {plan && !plan.basisComplete
-            ? 'No plan tonight — forecast/telemetry basis incomplete; nothing will be charged.'
-            : 'No night-charge plan available — advisor idle or plan stale.'}
-        </div>
+        <div className={stands ? 'text-warn' : 'text-muted'}>{noPlanText(plan != null && !plan.basisComplete, stands)}</div>
+        {banner('mt-3')}
+        <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />
       </div>
     );
   }
@@ -225,11 +262,12 @@ export const NightChargeCard = memo(function NightChargeCard() {
     </span>
   ) : null;
 
-  // HOLD — nothing is charged tonight. v1.187.22 — which hold, on the figure it was decided on
+  // HOLD — the plan charges nothing tonight (v1.189.0: a write the evening job armed from the
+  // announced plan still stands — writeStands — and is said so). v1.187.22 — which hold, on the figure it was decided on
   // (holdSummary, the evening push's hold shape): the islanded trough labelled as such, and a
   // window that cannot cover the cushion said so rather than "No overnight charge needed."
   if (!plan.chargeTonight) {
-    const hold = holdSummary(plan);
+    const hold = holdSummary(plan, { writeStands: stands });
     return (
       <div className="card text-sm">
         <div className="card-title flex items-center justify-between">
@@ -238,7 +276,9 @@ export const NightChargeCard = memo(function NightChargeCard() {
         </div>
         <div className={`${hold.tone === 'warn' ? 'text-warn' : hold.tone === 'ok' ? 'text-ok' : 'text-muted'} font-medium`}>{hold.headline}</div>
         <div className="text-muted mt-1 leading-relaxed">{hold.detail}</div>
+        {banner('mt-3')}
         <AdvisoryNote mode={status.mode} />
+        <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />
       </div>
     );
   }
@@ -319,7 +359,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
         </div>
       )}
 
-      <ActuationBanner mode={status.mode} actuation={status.actuation ?? null} />
+      {banner('mb-3')}
 
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -350,6 +390,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
       </div>
 
       <AdvisoryNote mode={status.mode} />
+      <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />
     </div>
   );
 });
@@ -357,65 +398,107 @@ export const NightChargeCard = memo(function NightChargeCard() {
 /**
  * v1.50.0 — tonight's supervised-write state + the owner cancel control.
  * Renders nothing in advisory mode or when nothing is armed for tonight. The
- * cancel POST is optimistic-after-confirm: on 2xx the banner flips locally to
- * "cancelled" immediately (the 60 s status poll converges the full card).
+ * cancel POST is optimistic-after-confirm: on 2xx the card marks that write
+ * cancelled at once (onCancelled; the 60 s status poll converges the full card).
+ * v1.189.0 — rendered in every card shape; its words and its Cancel come from
+ * actuationBannerState.
  */
-function ActuationBanner({ mode, actuation }: { mode: NightChargeStatus['mode']; actuation: NightActuation | null }) {
+function ActuationBanner({ mode, actuation, onCancelled, spacing }: {
+  mode: NightChargeStatus['mode'];
+  actuation: NightActuation | null;
+  onCancelled: () => void;
+  /** Its margin in the shape it sits in: above the stats (mb-3), or under the shape's text (mt-3). */
+  spacing: 'mt-3' | 'mb-3';
+}) {
   const [busy, setBusy] = useState(false);
-  const [localCancelled, setLocalCancelled] = useState(false);
   const [cancelErr, setCancelErr] = useState<string | null>(null);
   if (mode === 'advisory' || !actuation || !actuationBannerVisible(actuation, Date.now())) return null;
 
-  const cancelled = actuation.cancelled || localCancelled;
-  const deadline = phoenixHHMM(actuation.cancelDeadlineMs);
+  const state = actuationBannerState(actuation, phoenixHHMM(actuation.cancelDeadlineMs));
   const doCancel = async () => {
     setBusy(true);
     setCancelErr(null);
-    try {
-      const r = await fetch(apiUrl('api/night-charge/cancel'), { method: 'POST' });
-      if (r.ok) setLocalCancelled(true);
-      else setCancelErr(`cancel failed (HTTP ${r.status})`);
-    } catch {
-      setCancelErr('cancel failed — network error');
-    } finally {
-      setBusy(false);
-    }
+    const out = await postCancel(actuation.leg ?? null);
+    if (out.ok) onCancelled();
+    else setCancelErr(out.text);
+    setBusy(false);
   };
 
-  let text: string;
-  let showCancel = false;
-  if (revertUnconfirmed(actuation)) {
-    // v1.182.0 — the cloud ACKed the restore but the panel has not confirmed it: not "Completed".
-    text = `Restore not confirmed — the panel has not reported the reserve back at ${actuation.priorReservePct ?? '—'}%.`;
-  } else if (actuation.revertedAtMs != null) {
-    text = `Completed — reserve restored to ${actuation.priorReservePct ?? '—'}%.`;
-  } else if (cancelled) {
-    text = actuation.appliedAtMs != null
-      ? 'Cancelled — the applied write reverts within a minute.'
-      : 'Cancelled — no write tonight.';
-  } else if (actuation.appliedAtMs != null) {
-    text = `Reserve raised to ${actuation.targetPct}% (was ${actuation.priorReservePct ?? '—'}%); auto-restores after the window closes.`;
-    showCancel = true;
-  } else {
-    text = `Supervised write armed — reserve → ${actuation.targetPct}%${deadline ? ` at ${deadline}` : ''}.`;
-    showCancel = true;
-  }
-
   return (
-    <div className="flex items-center justify-between gap-3 bg-panel2 border border-line rounded-md p-2 mb-3 text-xs">
-      <span className={(actuation.revertedAtMs != null && !revertUnconfirmed(actuation)) || cancelled ? 'text-muted' : 'text-warn'}>{text}</span>
+    <div className={`flex items-center justify-between gap-3 bg-panel2 border border-line rounded-md p-2 ${spacing} text-xs`}>
+      <span className={state.settled ? 'text-muted' : 'text-warn'}>{state.text}</span>
       <span className="flex items-center gap-2">
         {cancelErr && <span className="text-crit">{cancelErr}</span>}
-        {showCancel && (
-          <button
-            className="px-2 py-1 rounded-sm border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50"
-            disabled={busy}
-            onClick={doCancel}
-          >
-            {actuation.appliedAtMs != null ? 'Cancel & revert' : 'Cancel tonight'}
-          </button>
-        )}
+        {state.cancel && <CancelButton label={state.cancel} busy={busy} onClick={doCancel} />}
       </span>
+    </div>
+  );
+}
+
+/**
+ * v1.189.0 — the Cancel for a card that could not read its status (an error, or a request that
+ * timed out): what is armed is unknown, so it says so and offers the same POST. The server
+ * answers 409 when nothing is armed or the write already reverted (cancelOutcome).
+ */
+function StatusBlindCancel() {
+  const [busy, setBusy] = useState(false);
+  const [out, setOut] = useState<{ done: boolean; text: string } | null>(null);
+  const doCancel = async () => {
+    setBusy(true);
+    setOut(await postCancel());
+    setBusy(false);
+  };
+  return (
+    <div className="flex items-center justify-between gap-3 bg-panel2 border border-line rounded-md p-2 mt-3 text-xs">
+      <span className="text-muted">{out?.text ?? 'What is armed tonight is unknown; a supervised write can still be cancelled.'}</span>
+      {!out?.done && <CancelButton label="Cancel tonight" busy={busy} onClick={doCancel} />}
+    </div>
+  );
+}
+
+function CancelButton({ label, busy, onClick }: { label: string; busy: boolean; onClick: () => void }) {
+  return (
+    <button
+      className="px-2 py-1 rounded-sm border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50"
+      disabled={busy}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** v1.50.0 — the owner's cancel (write-auth); v1.189.0 — its answer in the card's words (cancelOutcome),
+ *  for the leg named (cancelRequestInit): the banner's own leg; none from the status-blind Cancel,
+ *  which the server reads as the cost leg — tonight's, with one leg. */
+async function postCancel(leg: 'cost' | 'backup' | null = null): Promise<{ ok: boolean; done: boolean; text: string }> {
+  try {
+    const r = await fetch(apiUrl('api/night-charge/cancel'), cancelRequestInit(leg));
+    let body: unknown = null;
+    try { body = await r.json(); } catch { /* not JSON: judged on the status alone */ }
+    return cancelOutcome(r.status, body);
+  } catch {
+    return { ok: false, done: false, text: 'cancel failed — network error' };
+  }
+}
+
+/**
+ * v1.189.0 (R4) — the winter mid-day cycle computed in shadow (middayShadowView): read-only. It has
+ * no Cancel and no other control — nothing of it is armed — and renders nothing with no mid-day leg.
+ */
+function MiddayShadowSection({ shadow, preview }: {
+  shadow: MiddayShadowStatus | null | undefined;
+  preview?: MiddayShadowPreviewStatus | null;
+}) {
+  const view = middayShadowView(shadow, phoenixHHMM, preview);
+  if (view == null) return null;
+  return (
+    <div className="mt-3 border-t border-line pt-2 text-xs">
+      <div className="text-[10px] uppercase tracking-widest text-muted">{view.title}</div>
+      {view.lines.map((line) => (
+        <div key={line} className="text-muted mt-0.5 leading-relaxed">{line}</div>
+      ))}
+      <div className="text-[11px] text-muted mt-1 leading-relaxed">{view.note}</div>
     </div>
   );
 }
