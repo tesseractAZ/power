@@ -252,11 +252,41 @@ export interface Alert {
   facts?: AlertFact[];
 }
 
-export interface ClearedAlert {
-  alert: Alert;
+/**
+ * One row of the Cleared view, as `GET /api/alerts/history` serves it: the fields the table
+ * renders, flat, and nothing else of the alert. Mirrors the server's ClearedHistoryRow
+ * (server/src/clearedHistory.ts); server/test/clearedHistoryWeb.test.ts holds the two together
+ * through CLEARED_ROW_FIELDS in pages/clearedHistoryModel.ts.
+ */
+export interface ClearedHistoryRow {
+  id: string;
+  title: string;
+  detail: string;
+  severity: Severity;
+  priority?: Alert['priority'];
+  source?: Alert['source'];
+  category: Alert['category'];
+  device: string;
+  coreNum?: number | null;
+  packNum?: number | null;
   raisedAt: number;
   clearedAt: number;
   durationMs: number;
+  closedAs?: { title: string; severity: Severity };
+  pushed?: boolean;
+}
+
+/** `GET /api/alerts/history`: a window of the ledger, newest first (see ClearedHistoryRow). */
+export interface ClearedHistoryPage {
+  cleared: ClearedHistoryRow[];
+  /** Rows in the whole ledger, whatever the window. */
+  total: number;
+  /** Rows in `cleared`. */
+  shown: number;
+  /** The `days` window served; null for `since` and `all`. */
+  windowDays: number | null;
+  /** The window's lower bound (ms epoch, inclusive); null for `all`. */
+  since: number | null;
 }
 
 // v0.36.0 — mirrors the server's GridBackstop (server/src/gridState.ts),

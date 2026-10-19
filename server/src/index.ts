@@ -3,11 +3,12 @@ import websocket from '@fastify/websocket';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import compress from '@fastify/compress';
-import { createHash } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
+import { cached } from './cachedReply.js';
+import { clearedHistoryPage } from './clearedHistory.js';
 import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPORT_DIR, publishedSnapshotStatus } from './dbExport.js';
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
@@ -474,40 +475,7 @@ await app.register(compress, {
   threshold: 1024,
 });
 
-/**
- * v0.9.14 — cache helper for read-mostly endpoints.
- *
- * Adds a strong ETag (sha-1 of the payload), short Cache-Control max-age,
- * and short-circuits with 304 Not Modified when the client's
- * `If-None-Match` matches. Use on endpoints where the same response is
- * safely re-served for a few seconds (history, ha-state, summary/today).
- *
- * Does NOT mutate `body` — returns it for chaining: `return cached(req, reply, payload, 30)`.
- *
- * v0.9.27 — fixed Fastify lifecycle bug. When ETag matched, the code
- * called `reply.code(304).send()` AND returned `body`. Fastify then
- * tried to serialize + send `body` onto the already-closed stream,
- * producing 223+ "Reply was already sent" warnings in 2 hours of
- * normal traffic across 17 endpoints (every endpoint that uses this
- * helper). Fix: return `reply` itself when we manually send — Fastify
- * recognizes a returned FastifyReply as "already handled, skip
- * serialization". Cast through `unknown as T` because every call site
- * just hands the return value back to Fastify; nobody inspects it.
- */
-function cached<T>(req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply, body: T, maxAgeSec = 30): T {
-  const json = JSON.stringify(body);
-  const etag = `"${createHash('sha1').update(json).digest('base64').slice(0, 22)}"`;
-  reply.header('Cache-Control', `private, max-age=${maxAgeSec}`);
-  reply.header('ETag', etag);
-  const inm = req.headers['if-none-match'];
-  if (inm && inm === etag) {
-    // v0.9.27 — return the reply itself so Fastify treats this as
-    // already-handled and skips its own serialization step. The previous
-    // `return body` triggered the "Reply was already sent" warning storm.
-    return reply.code(304).send() as unknown as T;
-  }
-  return body;
-}
+// `cached` (ETag + private Cache-Control, 304 on a match; v0.9.14/v0.9.27) lives in cachedReply.ts.
 
 // Serve the built web UI at `/`, with SPA fallback. Present in production
 // (Home Assistant add-on, `npm run build` output); absent in dev, where Vite
@@ -1931,8 +1899,11 @@ app.post('/api/notify/test', { preHandler: requireWriteAuth }, async (_req, repl
   }
 });
 
-app.get('/api/alerts/history', async (req, reply) =>
-  cached(req, reply, { cleared: monitor.history() }, 30),
+// The Cleared view's history: a window of the ledger (`?days=N`, default 7; `?since=<ms>`;
+// `?all=1`), newest first, each row reduced to what the table renders (clearedHistory.ts). The
+// ledger and `monitor.history()` are unchanged for the warranty export.
+app.get<{ Querystring: { days?: string; since?: string; all?: string } }>('/api/alerts/history', async (req, reply) =>
+  cached(req, reply, clearedHistoryPage(monitor.history(), req.query ?? {}, Date.now()), 30),
 );
 
 /* v0.9.25 — feedback-loop endpoints.
