@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { hbar, vscale, braille, tile, fracLabel } from '../src/telnet/gauges.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * telnet TUI gauge primitives — pure string functions, so every case pins an
+ * TUI gauge primitives — pure string functions, so every case pins an
  * exact expected string. Two invariants dominate: (1) output width is always
  * exactly the requested width (layout code counts on it), and (2) no input —
  * NaN, ±Infinity, nulls, negative width — may throw or emit ANSI bytes.

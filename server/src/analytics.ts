@@ -2720,7 +2720,7 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
   // ("check for soiling, shading, or under-performing MPPT strings") instead of the
   // model recalibration. Put both sides on the SAME basis for this comparison by
   // applying the identical factor to the typical baseline here — typicalPvWhPerDay
-  // itself stays untouched for its other consumers (PV telnet/web tiles, the
+  // itself stays untouched for its other consumers (PV TUI/web tiles, the
   // backtest's diurnal baseline).
   const lowSolarBiasFactor = df.pvBiasFactor ?? 1;
   const typicalBiasAdjusted = df.typicalPvWhPerDay * lowSolarBiasFactor;
@@ -2863,7 +2863,7 @@ const EOL_MAX_YEARS = 40;                                     // beyond this, "E
 //   58804 × (32 × 3.2) / 1_000_000 = 6.02 kWh, matching the EcoFlow 6.144 kWh
 //   nameplate spec for a 99 %-SoH pack.
 // Identical constant exists at recorder.ts (`PACK_MAH_TO_WH = (32 * 3.2) / 1_000`) and
-// the former telnet summary console (`MAH_TO_WH`); same value, same derivation.
+// the former TUI summary console (`MAH_TO_WH`); same value, same derivation.
 const PACK_MAH_TO_KWH = (32 * 3.2) / 1_000_000;               // single-string mAh → pack kWh
 const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
 
@@ -3658,7 +3658,7 @@ export async function computeDegradation(
 
   // Pass 1 — regress and project every pack independently. Yield to the
   // event loop after each pack so concurrent work (other cache-warmer
-  // tasks, HTTP handlers, the telnet draw loop) isn't starved while we
+  // tasks, HTTP handlers, the TUI draw loop) isn't starved while we
   // grind through the full fleet.
   const packs: PackDegradation[] = [];
   for (const d of dpus) {

@@ -58,7 +58,7 @@ COPY --from=webbuilder /build/web/dist ./web/dist
 COPY rootfs/ /
 RUN chmod a+x /etc/services.d/ecoflow-panel/run /usr/bin/ecoflow-panel-backup-hook
 
-# Web + API; telnet TUI
+# Web + API; SSH TUI
 EXPOSE 8787 2323
 
 # Add-on metadata — re-declare the ARGs we need inside this stage so LABEL

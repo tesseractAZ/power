@@ -98,8 +98,8 @@ import {
 import type {
   ProbabilisticForecast, MultiDayForecast, DayForecast, EvWindowPrediction, ForecastHour,
 } from './analytics.js';
-import { startTelnetServer } from './telnet/server.js';
-import { authFromEnv, authConfigProblems } from './telnet/session.js';
+import { startSshServer, loadOrCreateHostKey } from './telnet/server.js';
+import { authFromEnv, authConfigProblems, describeSshAuth } from './telnet/session.js';
 import { createTuiDataProvider } from './telnet/dataProvider.js';
 import { registerWsConsole } from './telnet/wsConsole.js';
 import { startMqttDiscovery } from './mqttDiscovery.js';
@@ -2461,18 +2461,20 @@ app.log.info(
 
 // Control-room TUI — a menu-driven terminal view of the whole fleet, exposed
 // two ways over ONE shared set of refresh timers:
-//   • the raw telnet TCP server on :2323 (gated by TELNET_ENABLED); and
+//   • the SSH server on :2323 (SSH_ENABLED, or the deprecated TELNET_ENABLED
+//     alias; config.ssh), password login with the console credentials; and
 //   • a browser web terminal at /console on the web port :8787 (xterm.js over
 //     a WebSocket), reachable on the LAN + pointable from a HA panel_iframe.
 // v0.67.0 — the per-session render/input logic is transport-agnostic
-// (TuiSession), reused by both. The web console is read-only, same LAN
-// exposure as the already-unauthenticated telnet TUI.
-let stopTelnet: (() => void) | null = null;
+// (TuiSession), reused by both. The browser console shares the session driver
+// and keeps its in-session login card; the SSH session opens already
+// authenticated.
+let stopSsh: (() => void) | null = null;
 const stopTuiData = (() => {
   try {
     const tuiData = createTuiDataProvider({ store, recorder, log: (m) => app.log.info(m) });
     // Browser web terminal — always available on the web port (independent of
-    // the telnet TCP toggle). Registered before app.listen().
+    // the SSH toggle). Registered before app.listen().
     registerWsConsole({
       app,
       data: tuiData.provider,
@@ -2483,25 +2485,33 @@ const stopTuiData = (() => {
       isOriginAllowed: (origin) => (origin ? isAllowedOrigin(origin, auth.sameOrigins) : true),
     });
     app.log.info('console: web terminal available at /console');
-    // v1.47.2 — the untypeable-credential warning belongs to BOTH transports:
-    // /console is registered unconditionally (and the shipped default is
-    // telnet off), so emitting it only when telnet was enabled left the
-    // default configuration silent about a guaranteed lockout.
+    // v1.47.2 — the untypeable-credential warning is about the /console login
+    // card, which is registered unconditionally (an SSH client can send any
+    // password; the card cannot type one outside printable ASCII or over 64
+    // characters), so it is emitted whatever the SSH toggle says.
     for (const p of authConfigProblems(authFromEnv())) app.log.warn(`console: ${p}`);
-    if (config.telnet.enabled) {
-      stopTelnet = startTelnetServer({
+    // One boot notice per deprecated alias (TELNET_ENABLED / TELNET_PORT) that decided a value.
+    for (const n of config.ssh.deprecationNotes) app.log.warn(`ssh: ${n}`);
+    if (config.ssh.enabled) {
+      const hostKey = loadOrCreateHostKey(config.ssh.hostKeyPath, (m) => app.log.info(m), (m) => app.log.warn(m));
+      stopSsh = startSshServer({
         store,
         recorder,
-        host: config.telnet.host,
-        port: config.telnet.port,
+        host: config.ssh.host,
+        port: config.ssh.port,
+        hostKey: hostKey.key,
         log: (m) => app.log.info(m),
+        warn: (m) => app.log.warn(m),
         data: tuiData, // share the refresh timers
       }).stop;
-      app.log.info(`telnet: control-room TUI on telnet://${config.telnet.host}:${config.telnet.port}`);
+      // The fingerprint is on this line at EVERY start, to compare with what `ssh` shows on first connect.
+      app.log.info(`ssh: control-room TUI on ${config.ssh.host}:${config.ssh.port} ${describeSshAuth(authFromEnv())} — host key ${hostKey.fingerprint}`);
+    } else {
+      app.log.info('ssh: control-room TUI off (SSH_ENABLED and TELNET_ENABLED are both off) — /console only');
     }
     return tuiData.stop;
   } catch (e: any) {
-    app.log.error(`console/telnet: failed to start: ${e?.message ?? e}`);
+    app.log.error(`console/ssh: failed to start: ${e?.message ?? e}`);
     return () => {};
   }
 })();
@@ -8004,8 +8014,8 @@ const shutdown = async () => {
   stopMqtt?.();
   monitor.stop();
   socLadders.stop();
-  stopTelnet?.();
-  stopTuiData(); // shared TUI refresh timers (telnet + /console)
+  stopSsh?.();
+  stopTuiData(); // shared TUI refresh timers (SSH + /console)
   stopMqttDiscovery?.();
   analytics.stop();
   broadcast.stop();

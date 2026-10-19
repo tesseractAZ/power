@@ -183,7 +183,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 |---|---|---|---|---|
 | `/ws` snapshot spine | Full-snapshot frame on connect and on every store change (body serialized once per change) (§11, "The shared data spine") | SnapshotStore | Web dashboard, wsConsole | measured-and-active |
 | Web dashboard (React PWA) | Tabs: Dashboard/Solar/Battery/Strategy/Alerts/Console (§11.1) | `/ws` + 30+ `/api/*` | Operator | measured-and-active |
-| Telnet TUI | Plant Operator + Summary consoles, DoS-hardened, port 2323 (§11.2) | dataProvider (`totals`/`forecast`/`degradation`) + snapshot | Operator | measured-and-active |
+| SSH TUI | Plant Operator console over SSH (password login), DoS-hardened, port 2323 (§11.2) | dataProvider (`totals`/`forecast`/`degradation`) + snapshot | Operator | measured-and-active |
 | HACS Lovelace cards | REMOVED in v1.47.0 (duplicated the web dashboard; consumer had pinned a stale CDN snapshot) | — | — | removed |
 | Lighting posture | `rawPosture` ladder (critical/red ≤ 4 h/amber/conserve < 35 % dawn/surplus/normal) + asymmetric 15-min de-escalation hold + 10-min `normal↔surplus` dwell + restart persistence; null when its reports are missing (§14.1) | Runway, dawn-min SoC, reserve, curtailment, grid backstop | HA `lighting_posture`(+`_reason`) sensors → HA-side automations | measured-and-active |
 | Surplus / opportunistic loads | Curtailment surplus vs hardcoded load catalog (`fitsInSurplus = surplus ≥ estimatedW`) (§14.2) | Curtailment report | Curtailment endpoint/card fields | measured-and-active (catalog hardcoded; `haServiceHint` always `null` — Phase-2 actuation not implemented) |

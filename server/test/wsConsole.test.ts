@@ -1,9 +1,9 @@
 /**
  * Tests for the browser web-terminal transport (/console).
  *
- *   1. parseXtermData — the char-mode (NO telnet IAC) keyboard parser maps
- *      ESC arrows, CR/LF→enter, Ctrl-C, TAB and printable ASCII to the same
- *      transport-agnostic InputEvents the telnet parser produces.
+ *   1. parseXtermData — the char-mode keyboard parser maps ESC arrows,
+ *      CR/LF→enter, Ctrl-C, TAB and printable ASCII to the same
+ *      transport-agnostic InputEvents the SSH transport's parser produces.
  *   2. TuiSession — the extracted session driver renders frames to its write
  *      sink, applies key navigation, honors resize, suppresses byte-identical
  *      frames (anti-flicker), and reports quit on ctrl-c / q.
@@ -11,6 +11,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
 import WebSocket from 'ws';
@@ -187,6 +189,32 @@ test('TuiSession — auth: cross-session throttle refuses submits after 10 windo
   ]);
   assert.equal(r.quit, true, 'throttled submit disconnects');
   _resetAuthThrottleForTest();
+});
+
+test('TuiSession — preAuthenticated opens in the console and keeps the operator seat (the SSH transport); the browser console never sets it', () => {
+  _resetAuthThrottleForTest();
+  const writes: string[] = [];
+  const session = new TuiSession({
+    write: (d) => writes.push(d),
+    data: mockDataProvider(),
+    width: 160,
+    height: 40,
+    auth: { username: 'operator', password: 'hunter2' },
+    preAuthenticated: true,
+  });
+  assert.equal(session.isInteractive, true, 'no login card: the transport verified the password');
+  session.draw();
+  const frame = (writes.at(-1) ?? '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+  assert.ok(frame.includes('CONSOLE'), 'a console frame, not the login card');
+  assert.ok(!frame.includes('USERNAME'));
+  assert.match(frame, /OPR operator@local/, 'the OPR seat still names the signed-in user');
+  // The flag without credentials is the open console, as `auth: null` is.
+  const open = new TuiSession({ write: () => {}, data: mockDataProvider(), auth: null, preAuthenticated: true });
+  assert.equal(open.isInteractive, true);
+  // The browser console keeps its login card: it constructs the session without the flag.
+  const src = readFileSync(resolve(import.meta.dirname, '../src/telnet/wsConsole.ts'), 'utf8');
+  assert.doesNotMatch(src, /preAuthenticated/, '/console must keep the in-session login card');
+  assert.match(src, /new TuiSession\(\{\s*auth: authFromEnv\(\),/, '/console passes the configured credentials to the card');
 });
 
 test('TuiSession — ctrl-c and q report quit (console mode)', () => {

@@ -1,3 +1,27 @@
+## 1.190.0
+
+### The LAN console is served over SSH; telnet is no longer served
+
+**Console**
+
+- The control-room console on port 2323 is served over SSH: `ssh -p 2323 <console user>@<host>`, where the console user is `TUI_USERNAME` (`operator` when empty). Logins are password only, with `TUI_PASSWORD`; every login is refused until a password is set, and the add-on log says so once per connection. Telnet sent the login and everything on screen in clear text; a telnet client no longer connects.
+- Three failed attempts end the connection, and ten failures within ten minutes across all sessions refuse further logins, as the browser console's login card does. A connection that has not logged in within two minutes is ended. Usernames and passwords are never logged.
+- The host key (ed25519) is generated on the first start in `/data` and kept; its fingerprint is on the startup log line at every start, to compare with what `ssh` shows on the first connection. A host key file that does not parse is replaced, and the log says so.
+- One terminal per connection. The window size comes from the SSH client and follows resizes; exec, sftp and port forwarding are refused. 16 connections, 4 per address; a connection that receives nothing for 5 minutes is closed; TCP keep-alive on every connection. Accept and teardown are logged, teardown with the session duration.
+- The browser console at `/console` is unchanged and keeps its login card.
+
+**Configuration**
+
+- `SSH_ENABLED` (off by default) and `SSH_PORT` (2323) are added. `TELNET_ENABLED` and `TELNET_PORT` stay as deprecated aliases: an install with `TELNET_ENABLED` on comes up over SSH on the same port with no option change, and the log names the option that applied. Either enabled option serves SSH; `SSH_PORT` at its default defers to a changed `TELNET_PORT`. To close the port, turn both enabled options off.
+
+**Updating**
+
+- Use an SSH client in place of telnet: `ssh -p <port> <console user>@<host>`. The first connection shows the host key fingerprint, which is printed in the add-on log. Updating restarts the add-on.
+
+**Dependencies**
+
+- ssh2 1.17.0 (and @types/ssh2 for the type check).
+
 ## 1.189.0
 
 ### The winter mid-day charge, in preview; the night-charge write bounded against on-peak; Cancel always on the card

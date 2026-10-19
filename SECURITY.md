@@ -28,7 +28,7 @@ Report privately via GitHub Private Vulnerability Reporting — open
 Include:
 
 - affected version (`ref` SHA if known) and component (server API, MQTT ingest,
-  broadcast/TTS, config, telnet TUI, night-charge write path, …),
+  broadcast/TTS, config, SSH TUI, night-charge write path, …),
 - a description and, ideally, a minimal reproduction,
 - the impact you believe it has.
 
@@ -47,7 +47,7 @@ outside that boundary needs to reach it.
 | Port | Serves | Access control |
 |------|--------|----------------|
 | `8787/tcp` | Web dashboard, REST API, WebSocket, the browser console (`/console`), audio files for the speakers. Also the Ingress port. | Reads are open. Writes need write authorization (below). |
-| `2323/tcp` | Telnet control-room TUI | **Off by default** (`TELNET_ENABLED: false`). Optional operator login (`TUI_USERNAME` / `TUI_PASSWORD`). |
+| `2323/tcp` | SSH control-room TUI | **Off by default** (`SSH_ENABLED: false`; `TELNET_ENABLED` is a deprecated alias). Password login (`TUI_USERNAME` / `TUI_PASSWORD`); every login is refused until a password is set. |
 
 - **Reads are unauthenticated by design.** Home Assistant media players, Music
   Assistant and the SIP intercom fetch the alarm chime and speech files from the
@@ -64,13 +64,17 @@ outside that boundary needs to reach it.
   through a browser; it is not an identity check, and a program on the LAN can send
   any header. Port 8787 is a **trusted-LAN interface**. For remote access, use
   Home Assistant Ingress, which carries Home Assistant's own authentication.
-- **The console is display-only.** The telnet TUI and the browser console at
+- **The console is display-only.** The SSH TUI and the browser console at
   `/console` show the same screens and issue no commands. The browser console
   rejects cross-origin WebSocket upgrades, caps concurrent sessions at 16 and
-  closes idle sessions after 5 minutes. With a password set, both transports
+  closes idle sessions after 5 minutes; the SSH server caps connections at 16 (4 per
+  address), closes a connection that receives nothing for 5 minutes, and ends one
+  that has not logged in within 2 minutes. With a password set, both transports
   require a login: 3 attempts per connection and at most 10 failures in 10 minutes
-  across all sessions. Telnet carries that password in cleartext; on a shared LAN
-  prefer `/console` through Ingress.
+  across all sessions; without one, the SSH console refuses every login. Usernames
+  and passwords are never logged. The SSH host key is generated on first start in
+  `/data`, and its fingerprint is printed in the add-on log at every start, to
+  compare with what `ssh` shows on the first connection.
 - **CORS** lets the add-on's own origins, Home Assistant's, and private-network or
   loopback origins (`10.x`, `127.x`, `172.16–31.x`, `192.168.x`, single-label
   `<name>.local`; any port or none) read API responses; other origins get no
@@ -238,7 +242,7 @@ never blocked).
 ## Scope
 
 In scope: the add-on server (`server/`), the web UI (`web/`), the MQTT/EcoFlow
-ingest, the broadcast/TTS pipeline, the telnet TUI and browser console, the
+ingest, the broadcast/TTS pipeline, the SSH TUI and browser console, the
 night-charge write path, the AppArmor profile, and the configuration, build and
 release surface. Out of scope: vulnerabilities in Home Assistant itself, the
 EcoFlow cloud/IoT platform, third-party dependencies (report those upstream; they

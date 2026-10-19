@@ -374,7 +374,7 @@ function mpptErrDebounced(
  * limits, so these are our own (general LFP best practice). Where EcoFlow exposes
  * an operating limit (emsParaVol window) we use its numbers directly.
  *
- * v-r14 — exported so the telnet TUI (plant/gen.ts) can colour live
+ * v-r14 — exported so the TUI (plant/gen.ts) can colour live
  * temperature readouts against the SAME bands this engine alarms on, instead of
  * maintaining separate, drifted copies. One band per physically-distinct sensor:
  * a hot MPPT or MOSFET is normal where a hot LFP cell is not.

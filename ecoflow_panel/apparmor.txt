@@ -13,7 +13,7 @@
 # Permissive enough for the runtime:
 #   - Node 22 + s6-overlay init system; every process runs as root and no
 #     service switches user
-#   - Fastify HTTP + WebSocket on 8787, telnet on 2323 when enabled
+#   - Fastify HTTP + WebSocket on 8787, the SSH TUI on 2323 when enabled
 #   - SQLite database + JSONL writes under /data, the optional snapshot to /share
 #   - Outbound EcoFlow MQTT (8883), HA's MQTT broker (1883), HA/Supervisor
 #     (http://supervisor, 80), HTTPS (EcoFlow, Open-Meteo, NWS) and Wyoming TCP
@@ -202,7 +202,7 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # `w` blocks create (O_CREAT), truncate/overwrite (O_TRUNC/O_WRONLY), O_APPEND,
   # rename-into and unlink; `l` blocks planting a hardlink under a code dir.
   # m/r/i/x/k are untouched, so .so/.node executable-mmap load + exec still work.
-  # This shuts the dominant CWE-732 vector: a compromised Fastify/telnet/TTS
+  # This shuts the dominant CWE-732 vector: a compromised Fastify/SSH/TTS
   # process persisting a restart-surviving backdoor. chown is capability-mediated
   # (granted above), NOT `w`-mediated, so s6 fix-attrs is unaffected; fowner and
   # fsetid were dropped in v1.187.15 after profiling showed no use.

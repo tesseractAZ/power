@@ -4,11 +4,13 @@
  * v0.67.0 — extracted from `telnet/server.ts` so the per-session render/input
  * state machine can be reused by BOTH transports:
  *
- *   • the raw telnet TCP server (`server.ts`), which speaks telnet IAC
- *     negotiation + NAWS and feeds parsed `InputEvent`s in here; and
+ *   • the SSH server (`server.ts`), which authenticates at the protocol level
+ *     (TUI_USERNAME / TUI_PASSWORD, so the session opens `preAuthenticated`)
+ *     and feeds parsed `InputEvent`s in here; the window size arrives out of
+ *     band from the SSH client and is delivered as a `naws` event; and
  *   • a browser WebSocket transport (`wsConsole.ts`, served at /console),
- *     which runs xterm.js in character mode — NO telnet IAC — and feeds the
- *     same `InputEvent`s.
+ *     which runs xterm.js in character mode and feeds the same `InputEvent`s;
+ *     it keeps the in-session login card.
  *
  * The driver knows nothing about sockets. It takes:
  *   • a `write(data: string)` sink (the transport pipes this to the wire);
@@ -21,7 +23,7 @@
  * and the key→state-transition logic. The transports own: byte parsing,
  * connection lifecycle, and any protocol negotiation.
  *
- * Behaviour is byte-for-byte identical to the pre-extraction telnet server:
+ * Behaviour is byte-for-byte identical to the pre-extraction server:
  * the same `renderPlant`/`renderLogin` calls, the same frame
  * body assembly (HIDE_CURSOR + CURSOR_HOME + per-line CLEAR_EOL + CLEAR_BELOW),
  * the same FNV-1a frame hash, and the same BEGIN_SYNC/END_SYNC wrapping.
@@ -60,8 +62,8 @@ export type InputEvent =
  */
 type SessionMode = 'auth' | 'plant';
 
-/** Login attempts before the transport is told to disconnect. */
-const AUTH_MAX_ATTEMPTS = 3;
+/** Login attempts before the transport is told to disconnect (the login card and the SSH server alike). */
+export const AUTH_MAX_ATTEMPTS = 3;
 /** Input-length cap for either credential field. */
 const AUTH_FIELD_MAX = 64;
 
@@ -87,7 +89,9 @@ function credentialEqual(a: string, b: string): boolean {
  * Cross-session failed-login throttle. The per-session 3-attempt limit does
  * not bound a reconnect loop (3 tries per connection, unlimited connections),
  * so failures are also counted globally in a sliding window; while the window
- * is saturated every submit is refused outright. Shared by both transports.
+ * is saturated every submit is refused outright. Shared by both transports:
+ * the login card counts here, and so does the SSH server (consoleLoginThrottled
+ * / noteConsoleLoginFailure), so an SSH reconnect loop spends the same budget.
  */
 const AUTH_THROTTLE_WINDOW_MS = 10 * 60_000;
 const AUTH_THROTTLE_MAX_FAILURES = 10;
@@ -103,13 +107,42 @@ export function _resetAuthThrottleForTest(): void {
   authFailureTimes = [];
 }
 
+/** True while the cross-session failed-login window is saturated (the SSH server asks before verifying). */
+export function consoleLoginThrottled(now: number = Date.now()): boolean {
+  return authThrottled(now);
+}
+/** Count one failed login against the cross-session window (the SSH server's failures, as the card's). */
+export function noteConsoleLoginFailure(now: number = Date.now()): void {
+  noteAuthFailure(now);
+}
+
+/**
+ * Verify a username + password pair against the configured console credentials.
+ * BOTH compares are always evaluated (a short-circuit on the username would
+ * re-open the field-level timing oracle the fixed-length compare exists to
+ * prevent); `auth` null (no TUI_PASSWORD) never verifies.
+ */
+export function verifyConsoleCredentials(user: string, pass: string, auth: { username: string; password: string } | null): boolean {
+  const userOk = auth != null && credentialEqual(user, auth.username);
+  const passOk = auth != null && credentialEqual(pass, auth.password);
+  return userOk && passOk;
+}
+
+/**
+ * The authentication clause of the SSH startup line, as a function so the line is
+ * testable: with no console password every login is refused, and the line says so.
+ */
+export function describeSshAuth(auth: { username: string; password: string } | null): string {
+  return auth ? '(password login as the console user)' : '(every login refused — set TUI_PASSWORD)';
+}
+
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 /**
  * Live, shared data the driver reads on each render. These are getters because
- * the telnet/WS transports both read from the SAME periodically-refreshed
- * caches owned by the telnet server (the energy integration + forecast +
- * degradation are too heavy to recompute on every 1 s frame).
+ * the SSH/WS transports both read from the SAME periodically-refreshed
+ * caches (the energy integration + forecast + degradation are too heavy to
+ * recompute on every 1 s frame).
  */
 export interface TuiDataProvider {
   store: SnapshotStore;
@@ -138,6 +171,12 @@ export interface TuiSessionOptions {
    * transports pass the add-on options via `authFromEnv()`.
    */
   auth?: { username: string; password: string } | null;
+  /**
+   * The transport verified TUI_USERNAME / TUI_PASSWORD itself (SSH): the session
+   * opens in the console with no login card, and `auth` still names the OPR seat.
+   * The browser console never sets it.
+   */
+  preAuthenticated?: boolean;
 }
 
 /** Resolve the login gate from the add-on options (env). Empty password ⇒ off. */
@@ -209,7 +248,7 @@ export class TuiSession {
     this.width = opts.width ?? 80;
     this.height = opts.height ?? 24;
     this.auth = opts.auth ?? null;
-    this.mode = this.auth ? 'auth' : 'plant';
+    this.mode = this.auth && !opts.preAuthenticated ? 'auth' : 'plant';
     this.plantConnectedAt = Date.now();
   }
 
@@ -237,8 +276,8 @@ export class TuiSession {
    *   • { redraw: true }   — state changed, the transport should `draw()`;
    *   • { quit: true }     — the user asked to disconnect (ctrl-c / q);
    *   • { }                — nothing to do.
-   * Resize events are applied here too (the telnet transport delivers window
-   * size via NAWS; the WS transport via a synthetic 'naws' event).
+   * Resize events are applied here too (the SSH transport maps the client's pty
+   * and window-change requests onto 'naws'; the WS transport sends a synthetic one).
    */
   feed(events: InputEvent[]): { redraw?: boolean; quit?: boolean } {
     let dirty = false;
@@ -337,9 +376,7 @@ export class TuiSession {
       // short-circuit skipped the password compare on a wrong username,
       // re-opening exactly the field-level timing oracle the fixed-length
       // compare exists to prevent.
-      const userOk = this.auth != null && credentialEqual(st.user, this.auth.username);
-      const passOk = this.auth != null && credentialEqual(this.loginPass, this.auth.password);
-      const ok = userOk && passOk;
+      const ok = verifyConsoleCredentials(st.user, this.loginPass, this.auth);
       if (ok) {
         this.mode = 'plant';
         this.plantScreen = 'console';

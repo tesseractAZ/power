@@ -202,7 +202,7 @@ function PriorityRow({
   const active = (circuit.watts ?? 0) > 1;
   // The SHP2 can have a circuit disabled (loadIsEnable === false, e.g. Pool Pump
   // today). Keep it in the ranked list but clearly mark it — it is NOT an active
-  // shed participant despite carrying a loadPriority. Mirrors the telnet screen.
+  // shed participant despite carrying a loadPriority. Mirrors the TUI screen.
   const disabled = circuit.loadIsEnable === false;
   // v1.183.0 — loadIsEnable is the LOAD-STRATEGY flag, not the relay (cardText.strategyExclusion).
   const exclusion = strategyExclusion(circuit.loadIsEnable, circuit.watts);

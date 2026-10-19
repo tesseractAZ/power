@@ -1,5 +1,5 @@
 name: Power
-version: "1.189.0"
+version: "1.190.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -29,7 +29,7 @@ ports:
   2323/tcp: 2323
 ports_description:
   8787/tcp: Web dashboard + REST API + WebSocket
-  2323/tcp: Telnet "control-room" TUI (off by default; optional login — keep on a trusted LAN)
+  2323/tcp: SSH "control-room" TUI (off by default; password login with the Console Username and Console Password — every login is refused until a Console Password is set)
 # v0.9.5 — HA Ingress: makes the panel appear as a sidebar item inside
 # Home Assistant (visible in the HA mobile app), authenticated through
 # HA's normal session. Same server, same port — HA's hassio_ingress
@@ -170,10 +170,14 @@ options:
   MQTT_DISCOVERY_USER: ""
   MQTT_DISCOVERY_PASS: ""
   MQTT_DISCOVERY_PREFIX: homeassistant
-  # Telnet control-room TUI (LAN-only, unauthenticated interface)
-  # v1.7.0 (security #5, CWE-1188) — default OFF: an unauthenticated control-plane
-  # published on the host LAN shouldn't be on-by-default on a fresh install. Opt in
-  # by setting this true. (Existing installs keep their saved value on upgrade.)
+  # SSH control-room TUI (LAN; password login — every login is refused until TUI_PASSWORD is set)
+  # v1.7.0 (security #5, CWE-1188) — default OFF: a control plane published on the host
+  # LAN is not on by default on a fresh install. Opt in by setting this true.
+  SSH_ENABLED: false
+  SSH_PORT: 2323
+  # Deprecated aliases of SSH_ENABLED / SSH_PORT, kept so an existing install needs no
+  # change (an option key is never renamed): either enabled option serves SSH, and
+  # SSH_PORT at its default 2323 defers to TELNET_PORT. Telnet itself is no longer served.
   TELNET_ENABLED: false
   TELNET_PORT: 2323
   TUI_USERNAME: ""
@@ -275,7 +279,9 @@ schema:
   MQTT_DISCOVERY_USER: "str?"
   MQTT_DISCOVERY_PASS: "password?"
   MQTT_DISCOVERY_PREFIX: "str?"
-  # Telnet control-room TUI (LAN-only, unauthenticated interface)
+  # SSH control-room TUI (LAN; password login); TELNET_* are deprecated aliases
+  SSH_ENABLED: bool
+  SSH_PORT: port
   TELNET_ENABLED: bool
   TELNET_PORT: port
   TUI_USERNAME: str?
