@@ -1003,14 +1003,21 @@ on *when* the plan happened to run, and a quiet-hour sample would understate it
 threefold. `selfCons.loadKwh` is already the SHP2 `panel_load` energy over seven days;
 its mean is **4.47 kW** on this plant.
 
-**The defaults were calibrated against what the plant can actually reach.** The
-overnight charger delivers at most 7.2 kW × 6 h = 43.2 kWh, so from a 25 % evening SoC a
-clean night reaches about 72 %. Four hours at 1.25× needs ~42 % at window close:
-comfortably reachable on a clean night, missed when the EV contends for the grid input —
-which is exactly the discrimination that makes the flag informative again. Eight hours
-at 1.5× would have needed **78 %**, which is simply a different permanently-true flag.
-A test pins the default inside the reachable band in both directions, so a future change
-cannot quietly make it unreachable *or* trivially satisfiable.
+**The defaults were calibrated against what the plant can actually reach.** The panel's
+charge limit, `chargeWattPower`, is 7.2 kW for each connected battery (the Delta Pro Ultra's AC
+input ceiling; every source slot's `ratePower` reads the same), not for the pool. Measured on
+2026-09-16/18 and again on 2026-10-13/14, with three Cores connected the grid import pins at
+~19.1 kW and the pack takes (19.1 − house) × ~0.93, up to ~17 kW (the hardware charge envelope
+in [15-2, failure modes and known limitations](15-2-night-charge-writes.md#11-failure-modes--known-limitations)),
+so a clean six-hour night can fill the pool from any evening SoC. The figure the defaults were
+first checked against read that per-battery limit as the pool's (7.2 kW × 6 h = 43.2 kWh,
+about 72 % from a 25 % evening SoC) and under-stated the envelope by more than half; the
+reachable-band test keeps that 72 % as its upper bound, the stricter one. Four hours at 1.25×
+needs ~42 % at window close: comfortably reachable on a clean night, missed when the EV
+contends for the grid input — which is exactly the discrimination that makes the flag
+informative again. Eight hours at 1.5× would have needed **78 %**, which is simply a different
+permanently-true flag. A test pins the default inside the reachable band in both directions,
+so a future change cannot quietly make it unreachable *or* trivially satisfiable.
 
 Worth knowing plainly: this plant can carry its protected panel for roughly **four hours**
 at a typical post-charge state, not a day. Raising `ARB_OUTAGE_CUSHION_HOURS` will make
