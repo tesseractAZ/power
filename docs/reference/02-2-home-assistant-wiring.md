@@ -504,8 +504,8 @@ are cached (~30 min) on the worker.
 | `HOST` | `::` | dual-stack bind |
 | `DB_PATH` | `/data/ecoflow.db` (supervised) | recorder DB |
 | `LOG_LEVEL` | `info` | `debug`/`trace` adds the periodic poll-duration summary (p50/p95/max once per `POLL_SUMMARY_EVERY` polls, v1.148.0; there is no line per poll) and the DEBUG channel (e.g. the compact unchanged fleet-status line) |
-| `TELNET_ENABLED` / `TELNET_HOST` / `TELNET_PORT` | `false` (add-on option since v1.7.0; the server alone defaults on only when the env var is unset) / `::` / `2323` | telnet TUI |
-| `TUI_USERNAME` / `TUI_PASSWORD` | empty | console login (empty password = prompt disabled) |
+| `SSH_ENABLED` / `SSH_HOST` / `SSH_PORT` / `SSH_HOST_KEY` | `false` (add-on option; the server alone defaults on only when the env var is unset) / `::` / `2323` / `/data/ssh_host_ed25519_key` | SSH TUI; `TELNET_ENABLED` / `TELNET_PORT` are deprecated aliases (either enabled option serves SSH; `SSH_PORT` at its default defers to `TELNET_PORT`) |
+| `TUI_USERNAME` / `TUI_PASSWORD` | empty | console login (empty password: the browser console has no prompt and the SSH console refuses every login) |
 | `TUI_TRUSTED_ORIGINS` | empty | comma-separated extra origins accepted **verbatim, with no validation** — entries need not be private-range or `.local`; a public HTTPS origin is accepted, which is the point (remote HA Cloud access is the use case). The same set gates the write-auth origin check, the `/ws` and `/console/ws` upgrades, and CORS. Built-in LAN matching is separate and automatic. |
 
 ---

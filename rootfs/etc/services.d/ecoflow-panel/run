@@ -28,13 +28,22 @@ export LOG_LEVEL="$(bashio::config 'LOG_LEVEL')"
 export FORECAST_LAT="$(bashio::config 'FORECAST_LAT')"
 export FORECAST_LON="$(bashio::config 'FORECAST_LON')"
 
-# ── Telnet "control-room" TUI ────────────────────────────────────────────────
+# ── SSH "control-room" TUI ───────────────────────────────────────────────────
+# TELNET_ENABLED / TELNET_PORT are deprecated aliases of SSH_ENABLED / SSH_PORT (an
+# option key is never renamed); config.ts resolves them, so both pairs are exported.
+if bashio::config.true 'SSH_ENABLED'; then
+  export SSH_ENABLED=1
+else
+  export SSH_ENABLED=0
+fi
+export SSH_HOST=::
+export SSH_PORT="$(bashio::config 'SSH_PORT')"
+export SSH_HOST_KEY=/data/ssh_host_ed25519_key
 if bashio::config.true 'TELNET_ENABLED'; then
   export TELNET_ENABLED=1
 else
   export TELNET_ENABLED=0
 fi
-export TELNET_HOST=::
 export TELNET_PORT="$(bashio::config 'TELNET_PORT')"
 export TUI_USERNAME="$(bashio::config 'TUI_USERNAME')"
 export TUI_PASSWORD="$(bashio::config 'TUI_PASSWORD')"
@@ -232,7 +241,7 @@ fi
 # SUPERVISOR_TOKEN is provided automatically by the HA Supervisor —
 # no need to export it manually. The Node process inherits it.
 
-bashio::log.info "Starting Power (ecoflow_panel) on :${PORT} (telnet :${TELNET_PORT}, db ${DB_PATH})…"
+bashio::log.info "Starting Power (ecoflow_panel) on :${PORT} (ssh ${SSH_ENABLED}:${SSH_PORT}, telnet alias ${TELNET_ENABLED}:${TELNET_PORT}, db ${DB_PATH})…"
 
 cd /app/server
 exec npm start

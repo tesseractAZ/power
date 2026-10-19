@@ -1,5 +1,5 @@
 /**
- * High-resolution gauge primitives for the telnet TUI.
+ * High-resolution gauge primitives for the control-room TUI.
  *
  * Sub-cell rendering on top of the plain block meters in `ansi.ts` /
  * `plant/scada.ts`:

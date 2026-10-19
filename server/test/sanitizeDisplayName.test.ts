@@ -2,7 +2,7 @@
  * v1.7.0 (security #2, CWE-150) — sanitizeDisplayName regression tests.
  *
  * A device name (EcoFlow app) or SHP2 breaker-circuit name is cloud/MQTT
- * sourced and flows into the telnet/console ANSI render stream + the JSON
+ * sourced and flows into the TUI/console ANSI render stream + the JSON
  * snapshot. Without stripping, a name like "Kitchen\x1b]0;pwned\x07" would let
  * whoever can set it inject terminal escape sequences (OSC title-set, OSC 52
  * clipboard-write, cursor moves, screen clears) that EXECUTE in the operator's

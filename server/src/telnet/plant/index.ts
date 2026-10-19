@@ -29,7 +29,7 @@ export interface PlantContext {
 
 /**
  * Render one full Plant frame. Returns the array of lines, NOT including
- * the trailing newline — the caller (telnet server) joins + writes.
+ * the trailing newline — the caller (the session driver) joins + writes.
  */
 export function renderPlant(view: PlantView, data: PlantData, ctx: PlantContext): string[] {
   const W = view.width;
