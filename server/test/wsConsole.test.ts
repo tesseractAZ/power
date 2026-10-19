@@ -249,6 +249,27 @@ test('TuiSession — resize clamps to the supported range and flags change', () 
   assert.equal(session.resize(0, 0), false);
 });
 
+test('TuiSession — the constructor clamps the initial size as resize does: 2^32-1 × 2^32-1 opens 200×80, 1×1 opens 60×16, absent is 80×24', () => {
+  // The SSH transport passes the client's pty request (cols and rows are 32-bit) into
+  // the constructor; a window change went through resize() and its clamp, the pty
+  // request did not, and 2^32-1 rows exhausted the heap and took the process down.
+  const big = makeSession(4294967295, 4294967295);
+  assert.equal(big.session.width, 200);
+  assert.equal(big.session.height, 80);
+  big.session.draw();
+  // The frame is the clamped height: 80 lines, never a line per requested row.
+  assert.equal(big.writes.length, 1);
+  assert.equal(big.writes[0].split('\r\n').length, 80);
+  assert.match(big.writes[0], /─{200}/);
+  assert.doesNotMatch(big.writes[0], /─{201}/);
+  const small = makeSession(1, 1);
+  assert.equal(small.session.width, 60);
+  assert.equal(small.session.height, 16);
+  const absent = new TuiSession({ write: () => {}, data: mockDataProvider() });
+  assert.equal(absent.width, 80);
+  assert.equal(absent.height, 24);
+});
+
 test('TuiSession — resize via a naws InputEvent redraws', () => {
   const { session } = makeSession(100, 40);
   const r = session.feed([{ type: 'naws', w: 120, h: 50 }]);

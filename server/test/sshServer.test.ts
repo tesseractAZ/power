@@ -21,14 +21,20 @@
  *      file that does not parse is replaced with a warning.
  *   8. `parseInput` has no telnet IAC handling; a chunk-final CR still swallows
  *      the LF of the next chunk. `describeSshAuth` states the refusal.
+ *   9. The pty size is held to 60–200 × 16–80: a 1000×1000 pty opens a 200×80
+ *      console that still follows a window change; a 1×1 pty opens 60×16.
+ *  10. In a server of its own process: a pty of 2^32-1 rows opens an 80×80
+ *      console, one of 2^32-1 × 2^32-1 a 200×80 console, and the process stays
+ *      up — 2^32-1 rows exhausted the heap and aborted it (no exception to catch).
  */
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import ssh2 from 'ssh2';
 import { startSshServer, loadOrCreateHostKey, hostKeyFingerprint, parseInput } from '../src/telnet/server.js';
 import { _resetAuthThrottleForTest, describeSshAuth } from '../src/telnet/session.js';
@@ -36,6 +42,7 @@ import type { TuiDataProvider } from '../src/telnet/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
+import { BEGIN_SYNC, END_SYNC } from '../src/telnet/ansi.js';
 
 /* ── fixtures (mirrors sshCaps.test.ts / wsConsole.test.ts) ────────────── */
 
@@ -81,6 +88,14 @@ async function boot(opts: { host?: string } = {}) {
 
 /** Strip CSI escape sequences (colors, cursor, mode toggles) from a frame. */
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+/** The first frame on the wire (between the first sync pair), stripped: its lines are the console's rows. */
+const firstFrame = (out: string): string => {
+  const a = out.indexOf(BEGIN_SYNC);
+  const b = out.indexOf(END_SYNC, a + 1);
+  assert.ok(a >= 0 && b > a, 'a frame was drawn');
+  return stripAnsi(out.slice(a + BEGIN_SYNC.length, b));
+};
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface LoginResult {
   ok: boolean;
@@ -96,7 +111,7 @@ interface LoginResult {
  * Connect with a real ssh2 client; resolve with what happened (never throw).
  * `passwords` are tried in order on ONE connection (the client's auth-method list).
  */
-function login(port: number, passwords: string[], opts: { shell?: boolean; exec?: string; sftp?: boolean; sendAfter?: string; username?: string; noneOnly?: boolean; host?: string } = {}): Promise<LoginResult> {
+function login(port: number, passwords: string[], opts: { shell?: boolean; exec?: string; sftp?: boolean; sendAfter?: string; username?: string; noneOnly?: boolean; host?: string; pty?: { cols: number; rows: number } } = {}): Promise<LoginResult> {
   return new Promise((done) => {
     const c = new ssh2.Client();
     let out = '';
@@ -108,7 +123,7 @@ function login(port: number, passwords: string[], opts: { shell?: boolean; exec?
       if (opts.exec) { c.exec(opts.exec, (e) => fin({ ok: true, execOk: !e })); return; }
       if (opts.sftp) { c.sftp((e) => fin({ ok: true, sftpOk: !e })); return; }
       if (!opts.shell) { fin({ ok: true }); return; }
-      c.shell({ cols: 100, rows: 30, term: 'xterm-256color' }, (e, stream) => {
+      c.shell({ cols: opts.pty?.cols ?? 100, rows: opts.pty?.rows ?? 30, term: 'xterm-256color' }, (e, stream) => {
         if (e) { fin({ ok: true, err: e.message }); return; }
         stream.on('data', (d: Buffer) => { out += d.toString('utf8'); });
         stream.on('close', () => { streamClosed = true; if (opts.sendAfter) fin({ ok: true, streamClosed }); });
@@ -298,6 +313,88 @@ test('ssh — q in the console ends the connection and restores the primary scre
     assert.ok(r.out.includes('\x1b[?1049l'), 'server-side close exits the alt buffer');
     assert.ok(lines.some((l) => /^ssh: client 127\.0\.0\.1 disconnected after \d+s \(0 active\)$/.test(l)), lines.join(' | '));
   } finally { t.stop(); }
+});
+
+test('ssh — the pty size is held to 60–200 × 16–80: a 1000×1000 pty opens a 200×80 console that still follows a window change; a 1×1 pty opens 60×16', async () => {
+  const { t, port } = await boot();
+  try {
+    const big = await login(port, [CREDS.password], { shell: true, pty: { cols: 1000, rows: 1000 } });
+    assert.equal(big.ok, true, big.err);
+    const first = firstFrame(big.out);
+    assert.match(first, /─{200}/, 'the width is the ceiling, not the 1000 columns asked for');
+    assert.doesNotMatch(first, /─{201}/);
+    assert.equal(first.split('\r\n').length, 80, 'the height is the ceiling: 80 lines, not 1000');
+    assert.match(stripAnsi(big.resizeOut ?? ''), /─{140}/, 'a window change still applies');
+    const small = await login(port, [CREDS.password], { shell: true, pty: { cols: 1, rows: 1 } });
+    assert.equal(small.ok, true, small.err);
+    const sf = firstFrame(small.out);
+    assert.match(sf, /─{60}/, 'the width is the floor');
+    assert.doesNotMatch(sf, /─{61}/);
+    assert.equal(sf.split('\r\n').length, 16, 'the height is the floor');
+  } finally { t.stop(); }
+});
+
+test('ssh — a pty of 2^32-1 rows opens an 80×80 console, one of 2^32-1 × 2^32-1 a 200×80 console, and the server process stays up', async () => {
+  // The server runs in a process of its own: a heap exhaustion is an abort, not an
+  // exception, so whether the process survives cannot be observed in-process. The small
+  // heap only shortens the run should the clamp ever go.
+  const serverDir = resolve(import.meta.dirname, '..');
+  const child = spawn(process.execPath, ['--import', 'tsx', '--max-old-space-size=256', 'test/helpers/sshServerChild.ts'], {
+    cwd: serverDir, env: { ...process.env, TSX_DISABLE_CACHE: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (d: Buffer) => { stderr += d.toString('utf8'); });
+  const exited = new Promise<{ code: number | null; signal: string | null }>((d) => child.once('exit', (code, signal) => d({ code, signal })));
+  const clients: ssh2.Client[] = [];
+  /** The deadlines, cleared in the finally so a settled one never holds the process open. */
+  const timers: NodeJS.Timeout[] = [];
+  const deadline = (ms: number, fail: (e: Error) => void, why: () => string) => { timers.push(setTimeout(() => fail(new Error(why())), ms)); };
+  try {
+    const port = await new Promise<number>((done, fail) => {
+      let buf = '';
+      child.stdout.on('data', (d: Buffer) => {
+        buf += d.toString('utf8');
+        const line = buf.split('\n').find((l) => l.startsWith('{"port"'));
+        if (line) done(JSON.parse(line).port as number);
+      });
+      child.once('exit', (code) => fail(new Error(`the server process exited before listening (${code}): ${stderr}`)));
+      deadline(30_000, fail, () => `the server process never listened: ${stderr}`);
+    });
+    /** A logged-in client's shell at the given pty size: the first frame, or why there was none. */
+    const shellAt = (cols: number, rows: number): Promise<string> => new Promise((done, fail) => {
+      const c = new ssh2.Client();
+      clients.push(c);
+      c.on('error', (e) => fail(new Error(`client error: ${e.message}`)));
+      c.on('ready', () => {
+        c.shell({ cols, rows, term: 'xterm' }, (e, s) => {
+          if (e) { fail(new Error(`shell refused: ${e.message}`)); return; }
+          let out = '';
+          s.on('data', (d: Buffer) => { out += d.toString('utf8'); if (out.includes(END_SYNC)) done(out); });
+          s.on('close', () => fail(new Error(`the channel closed before a frame: ${stderr.slice(-400)}`)));
+        });
+      });
+      c.connect({ host: '127.0.0.1', port, username: CREDS.username, password: CREDS.password, readyTimeout: 5000 });
+      deadline(10_000, fail, () => `no frame within 10 s: ${stderr.slice(-400)}`);
+    });
+    const rows = firstFrame(await shellAt(80, 4294967295));
+    assert.match(rows, /─{80}/, 'the 80 columns asked for');
+    assert.doesNotMatch(rows, /─{81}/);
+    assert.equal(rows.split('\r\n').length, 80, 'the height is the ceiling');
+    const both = firstFrame(await shellAt(4294967295, 4294967295));
+    assert.match(both, /─{200}/);
+    assert.doesNotMatch(both, /─{201}/);
+    assert.equal(both.split('\r\n').length, 80);
+    // Two more 1 Hz frames for each console, then the process is still serving.
+    await sleep(2200);
+    assert.equal(child.exitCode, null, `the server process exited: ${stderr.slice(-400)}`);
+    assert.equal(child.signalCode, null);
+    assert.ok(/ssh: login from 127\.0\.0\.1 \(2 active\)/.test(stderr), 'both consoles were admitted');
+  } finally {
+    for (const tm of timers) clearTimeout(tm);
+    for (const c of clients) { try { c.end(); } catch { /* ignore */ } }
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await Promise.race([exited, sleep(5000)]);
+  }
 });
 
 test('ssh — the host key is generated once, kept 0600, reused, and a broken one is replaced with a warning', () => {

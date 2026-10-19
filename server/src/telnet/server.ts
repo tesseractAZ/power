@@ -22,8 +22,9 @@
  * The per-session render/input state machine is `session.ts` (`TuiSession`,
  * shared with the browser console at /console); the session opens
  * `preAuthenticated`, so the in-band login card is never drawn here. The
- * window size comes from the SSH client (pty request, window-change) and is
- * fed to the session as a `naws` event, the name the browser console uses too.
+ * window size comes from the SSH client (pty request, window-change); the
+ * session holds it to 60–200 × 16–80 whatever the client asks for, and a window
+ * change reaches it as a `naws` event, the name the browser console uses too.
  *
  * Gated at the call site (index.ts) by `config.ssh.enabled`: when off, this
  * server is never started and the browser console alone is served.
@@ -373,8 +374,9 @@ export function startSshServer(opts: SshServerOptions): { stop: () => void; serv
     ctx.reject(['password']);
   };
 
-  /** One terminal per connection: a pty (optional — 80×24 without one), then a
-   *  shell. exec, subsystems (sftp) and port forwarding are refused. */
+  /** One terminal per connection: a pty (optional — 80×24 without one; the session
+   *  clamps the size it asks for), then a shell. exec, subsystems (sftp) and port
+   *  forwarding are refused. */
   const onSession = (conn: SshConn, accept: () => import('ssh2').Session): void => {
     const sess = accept();
     let w = 80;

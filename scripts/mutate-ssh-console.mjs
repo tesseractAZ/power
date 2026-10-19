@@ -29,6 +29,9 @@
  *   S-vi    the session driver ignores preAuthenticated (the card is drawn whatever the transport says)
  *   S-vii   verifyConsoleCredentials checks the password only
  *   S-viii  describeSshAuth claims password login with no password set
+ *   S-ix    the initial width is not clamped (the pty request's cols reach the renderer as they are)
+ *   S-x     the initial height is not clamped (2^32-1 rows exhausted the heap and aborted the process)
+ *   S-xi    the initial height's ceiling is 100,000 rows (a frame that stalls the event loop for seconds)
  *   K-i     the host key is regenerated at every start (clients see a changed key)
  *   K-ii    the host key is written world-readable
  *   C-i     the global connection cap is 100 higher
@@ -235,6 +238,27 @@ const MUTANTS = [
     find: "  return auth ? '(password login as the console user)' : '(every login refused — set TUI_PASSWORD)';",
     to: "  return '(password login as the console user)'; /* MUTANT */",
     why: 'The startup line would tell an install with no password that logins work.',
+  },
+  {
+    id: 'S-ix. ★★ the initial width is not clamped',
+    file: SESS,
+    find: '    this.width = clamp(opts.width ?? 80, 60, 200);',
+    to: '    this.width = opts.width ?? 80; /* MUTANT */',
+    why: "The SSH transport passes the client's pty request (cols and rows are 32-bit) into the constructor; a window change was clamped by resize(), the pty request was not.",
+  },
+  {
+    id: 'S-x. ★★★ the initial height is not clamped',
+    file: SESS,
+    find: '    this.height = clamp(opts.height ?? 24, 16, 80);',
+    to: '    this.height = opts.height ?? 24; /* MUTANT */',
+    why: 'The renderer allocates a line per row on every 1 Hz frame: 2^32-1 rows from a logged-in client exhausted the heap and aborted the whole add-on process (no exception to catch).',
+  },
+  {
+    id: "S-xi. ★★ the initial height's ceiling is 100,000 rows",
+    file: SESS,
+    find: '    this.height = clamp(opts.height ?? 24, 16, 80);',
+    to: '    this.height = clamp(opts.height ?? 24, 16, 100_000); /* MUTANT */',
+    why: 'A height that allocates stalls the shared event loop for seconds on every frame for the life of the session.',
   },
   /* ── K. the host key ── */
   {

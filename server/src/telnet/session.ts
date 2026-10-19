@@ -211,7 +211,7 @@ export interface TuiSessionOptions {
   write: (data: string) => void;
   /** Live data accessors shared across all sessions. */
   data: TuiDataProvider;
-  /** Initial terminal size. */
+  /** Initial terminal size, held to 60–200 × 16–80 as a resize is; 80×24 when absent. */
   width?: number;
   height?: number;
   /**
@@ -302,8 +302,12 @@ export class TuiSession {
   constructor(opts: TuiSessionOptions) {
     this.write = opts.write;
     this.data = opts.data;
-    this.width = opts.width ?? 80;
-    this.height = opts.height ?? 24;
+    // Held to the same range as resize(): the SSH transport passes the client's pty
+    // request (cols and rows are 32-bit) straight in here, and the renderer allocates
+    // a line per row on every 1 Hz frame — 2^32-1 rows exhausted the heap and took the
+    // process down; a height in the hundreds of thousands stalled it for seconds a frame.
+    this.width = clamp(opts.width ?? 80, 60, 200);
+    this.height = clamp(opts.height ?? 24, 16, 80);
     this.auth = opts.auth ?? null;
     this.peer = opts.peer ?? AUTH_PEER_UNKNOWN;
     this.mode = this.auth && !opts.preAuthenticated ? 'auth' : 'plant';

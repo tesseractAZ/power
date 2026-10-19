@@ -68,8 +68,9 @@ outside that boundary needs to reach it.
   `/console` show the same screens and issue no commands. The browser console
   rejects cross-origin WebSocket upgrades, caps concurrent sessions at 16 and
   closes idle sessions after 5 minutes; the SSH server caps connections at 16 (4 per
-  address), closes a connection that receives nothing for 5 minutes, and ends one
-  that has not logged in within 2 minutes. With a password set, both transports
+  address), closes a connection that receives nothing for 5 minutes, ends one
+  that has not logged in within 2 minutes, and holds the terminal size a client
+  asks for to 60–200 columns by 16–80 rows. With a password set, both transports
   require a login: 3 attempts per connection and at most 10 failures in 10 minutes
   from one address, which refuse that address alone (a login that succeeds clears
   it); without one, the SSH console refuses every login. Usernames
