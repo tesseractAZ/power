@@ -411,7 +411,7 @@ discharging; Fleet PV and Battery Net plus the dark home slots metered at the pa
 `backup_pool_percent`, `backup_reserve_percent`, `backup_full_capacity_kwh`,
 `backup_remaining_kwh`, and `backup_charge_minutes`/`backup_discharge_minutes` gated on
 the ±50 W deadband (both timers are always reported by the SHP2 regardless of direction).
-The gate (`backupTimerGate`, shared with the console's RUN line) reads the Cores' battery net
+The gate (`backupTimerGate`, shared with the console's RUN line and, since v1.189.1, the dashboard's Smart Home Panel card through the per-panel `backupTimers` field `panelForClient` sends) reads the Cores' battery net
 while every home Core reports on a fresh meter (v1.188.1: and the energy bridge counts each at its
 own reading; the gate takes the bridge's verdicts, `BridgeVerdicts`). Otherwise that sum is not the pool's (0 W with
 every Core dark), so it reads an upper bound through the panel instead: each dark or frozen Core

@@ -151,8 +151,12 @@ export interface NightChargeInputs {
   dischargeEff: number;
 
   // ── Charge feasibility ──
-  /** Real SHP2 grid-charge power ceiling, kW (chChargeWatt live 7.2 kW). The
-   *  true hardware envelope is an OPEN datum; flagged in the design. */
+  /** The planner's grid-side charge-power ceiling, kW (planChargeCapKw: connected Cores ×
+   *  FORCE_CHARGE_PROVEN_KW_PER_SLOT ÷ the charge-leg efficiency, or the ARB_CHARGE_CAP_KW
+   *  override). The panel's `chChargeWatt` / `chargeWattPower` reads 7.2 kW, but that is the
+   *  limit for EACH connected battery, not the pool's: measured 2026-09-16/18 and 2026-10-13/14,
+   *  three Cores take ~17-18 kW together at a ~19.1 kW main (reference 15-2, hardware charge
+   *  envelope). */
   chargeCapKw: number;
   /** v1.60.0 — the SHARED grid-input envelope, kW: the total the service/SHP2
    *  input carries at once for house pass-through AND battery charging. The

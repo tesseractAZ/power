@@ -1,7 +1,9 @@
 import { lazy, memo, Suspense, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { DeviceSnapshot, GridBackstop, Shp2Circuit, Shp2PairedCircuit, Shp2Projection } from '../types';
-import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
+import { fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
+// v1.189.1 — the charge-limit and backup-timer wording (pure; server/test/shp2ChargeLabel.test.ts).
+import { backupTimerText, chargeLimitView, connectedSlotCount } from './shp2ChargeText';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
 import { LazySparkline as Sparkline } from '../charts/LazySparkline';
 import { RefreshCloudButton } from '../components/RefreshCloudButton';
@@ -211,12 +213,26 @@ export const Shp2Card = memo(function Shp2Card({
               <Sparkline sn={d.sn} metric="panel_load" color={HUES.soc} height={36} />
             </div>
 
+            {/* v1.189.1 — both timers on the server's backupTimers verdict (the gate HA's
+                backup_charge_minutes / backup_discharge_minutes use), and chargeWattPower labelled
+                as what it is: the per-battery charge LIMIT, with the connected fleet's envelope. */}
             <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-1">
-              <div className="kv"><span className="kv-k">Remain (disch, vendor)</span><span className="kv-v">{fmtMins(p.backupDischargeTimeMin)}</span></div>
-              <div className="kv"><span className="kv-k">Charge time</span><span className="kv-v">{(p.chargeWattPower ?? 0) > 50 ? fmtMins(p.backupChargeTimeMin) : '—'}</span></div>
+              <div className="kv"><span className="kv-k">Remain (disch, vendor)</span><span className="kv-v">{backupTimerText(p.backupDischargeTimeMin, d.backupTimers?.discharge)}</span></div>
+              <div className="kv"><span className="kv-k">Charge time</span><span className="kv-v">{backupTimerText(p.backupChargeTimeMin, d.backupTimers?.charge)}</span></div>
               <div className="kv"><span className="kv-k">Capacity (full)</span><span className="kv-v">{fmtWh(p.backupFullCapWh)}</span></div>
               <div className="kv"><span className="kv-k">Capacity (now)</span><span className="kv-v">{fmtWh(p.backupRemainWh)}</span></div>
-              <div className="kv"><span className="kv-k">Charge power</span><span className="kv-v">{fmtW(p.chargeWattPower)}</span></div>
+              {(() => {
+                const limit = chargeLimitView(p.chargeWattPower, connectedSlotCount(p.sources));
+                return (
+                  <div className="kv col-span-2" title={limit.title}>
+                    <span className="kv-k">{limit.label}</span>
+                    <span className="kv-v">
+                      {limit.value}
+                      {limit.envelope && <span className="text-muted font-normal"> {limit.envelope}</span>}
+                    </span>
+                  </div>
+                );
+              })()}
             </div>
           </div>
 

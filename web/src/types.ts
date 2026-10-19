@@ -209,6 +209,10 @@ export interface DeviceSnapshot {
   /** v1.188.1 — set on every panel by the server (shp2ReadbackFresh): false while that panel's
    *  reading is not fresh. `grid.panelFresh` judges only the house panel. */
   readbackFresh?: boolean;
+  /** v1.189.1 — set on every panel by the server (shp2Membership.ts backupTimerGate): which of the
+   *  panel's two backup timers applies, the gate /api/ha-state publishes backup_charge_minutes and
+   *  backup_discharge_minutes through. The card shows a timer only while its flag is true. */
+  backupTimers?: { charge: boolean; discharge: boolean };
 }
 
 export type Severity = 'critical' | 'warning' | 'info';

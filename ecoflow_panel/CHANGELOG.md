@@ -1,3 +1,14 @@
+## 1.189.1
+
+**Dashboard**
+
+- The Smart Home Panel card's "Charge power 7.20 kW" is now "Charge limit (per battery) 7.20 kW × 3 connected = 21.60 kW". The figure is the panel's configured charge-rate limit for each connected battery (the Delta Pro Ultra's AC input ceiling, the same figure as each battery slot's rating), not the rate the pool charges at and not a live power: on the night of 13–14 October each Core took up to 7.2 kW of its own, the three together 18.1 kW, and the grid main read 19.25 kW. The envelope beside it multiplies the limit by the batteries connected to the panel; it is left out while the panel reports no limit or no connected battery. The card shows no measured peak, since no per-charge summary exists yet to read one from.
+- The card's "Charge time" and "Remain (disch, vendor)" are shown only while the server says that timer applies, by the same rule that decides whether Home Assistant's backup charge and discharge minutes are published, so the card and the sensors agree; with no verdict from the server they read "—". The panel reports both timers whatever the direction, and the card had shown the charge time whenever the charge limit was above 50 W (always), so it read "38 min" to full while the batteries drained 3.4 kW through the panel on 16 October.
+
+**Documentation**
+
+- The configuration reference stated that the overnight charger delivers at most 7.2 kW × 6 h = 43.2 kWh. That read the per-battery limit as the pool's; it now states the measured envelope (about 17 kW into three Cores at a 19.1 kW main) and refers to the night-charge reference, which records the per-Core peaks of 13–14 October.
+
 ## 1.188.1
 
 ### Only fresh readings are saved; while a battery reports nothing of its own, the Energy dashboard and the energy flow read the panel's meters
