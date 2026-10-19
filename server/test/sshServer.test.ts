@@ -197,7 +197,7 @@ test('ssh — a wrong password is refused; the third failure ends the connection
     assert.ok(!lines.some((l) => /^ssh: login from/.test(l)), 'no login succeeded');
     assert.ok(lines.some((l) => /^ssh: client 127\.0\.0\.1 disconnected after \d+s \(\d+ active\)$/.test(l)), 'the teardown line');
 
-    // The budget is per connection (the cross-session throttle is at 10).
+    // The budget is per connection (the address's window is at 10).
     const fresh = await login(port, [CREDS.password]);
     assert.equal(fresh.ok, true, fresh.err);
     // The right password under the wrong username is refused too, and the username is not logged.

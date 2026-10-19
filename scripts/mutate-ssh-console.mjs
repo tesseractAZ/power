@@ -9,9 +9,9 @@
  *   A-i     no console password admits the connection (the refuse-all gate accepts)
  *   A-ii    the no-password refusal is logged on every attempt, not once per connection
  *   A-iii   the `none` method is accepted (a client without a password logs in)
- *   A-iv    the cross-session throttle is ignored
+ *   A-iv    the failed-login window is ignored
  *   A-v     every password verifies
- *   A-vi    a failed login is not counted against the cross-session window
+ *   A-vi    a failed login is not counted against the address's window
  *   A-vii   the per-connection attempt budget is 300, not 3
  *   P-i     every address shares one failed-login window (the table key is a constant)
  *   P-ii    an IPv4 peer of a dual-stack listener (::ffff:a.b.c.d) is not the plain address

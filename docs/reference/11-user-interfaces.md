@@ -235,7 +235,10 @@ address. Both transports count under the peer's socket address — the SSH serve
 connection's, the browser card the raw `remoteAddress` (never a forwarded header a
 client could choose) — and an IPv4 peer of the dual-stack listener (`::ffff:a.b.c.d`)
 shares the plain address's window, so one host spends one budget over either
-transport. At most `AUTH_THROTTLE_MAX_PEERS = 4096` addresses are kept; beyond that
+transport. Browser sessions that arrive through Home Assistant Ingress all reach the
+add-on from the Supervisor's address (`isSupervisorSource`, `auth.ts`), so they share one
+window among themselves, which no LAN host's failures can saturate. At most
+`AUTH_THROTTLE_MAX_PEERS = 4096` addresses are kept; beyond that
 the oldest entry is dropped. Until 1.190.0 the window was one for every connection
 (v1.46.0), so ten failures from one LAN host refused every other host's correct
 password for the rest of the ten minutes. Usernames are never

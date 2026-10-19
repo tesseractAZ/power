@@ -173,7 +173,7 @@ test('TuiSession — auth: backspace edits the active field', () => {
   assert.equal(session.isInteractive, true);
 });
 
-test('TuiSession — auth: cross-session throttle refuses submits after 10 window failures', () => {
+test('TuiSession — auth: the address\'s window refuses submits after 10 failures (sessions with no peer named share one address)', () => {
   _resetAuthThrottleForTest();
   const fail = () => {
     const { session } = makeSession(100, 40, { username: 'op', password: 'pw' });
@@ -182,7 +182,7 @@ test('TuiSession — auth: cross-session throttle refuses submits after 10 windo
       { type: 'key', key: 'y' }, { type: 'key', key: 'enter' },
     ]);
   };
-  // 10 failures across 10 fresh sessions saturate the sliding window …
+  // 10 failures across 10 fresh sessions (no peer named, so all one address) saturate its window …
   for (let i = 0; i < 10; i++) fail();
   // … so an 11th session is refused on its FIRST submit, even with the
   // correct credentials — no oracle while throttled.
