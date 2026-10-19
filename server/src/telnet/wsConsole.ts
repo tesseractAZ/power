@@ -18,8 +18,11 @@
  *
  * Auth posture: /console keeps the in-session login card (`TUI_PASSWORD`, see
  * session.ts); the SSH transport authenticates at the protocol level and skips
- * the card. This read-only browser view does NOT touch the existing write-auth
- * and does NOT add auth that would break `panel_iframe`.
+ * the card. The card's failed logins count under the socket's remote address
+ * (the raw peer, never a forwarded-for header a client could choose), so one
+ * address's failures refuse that address alone. This read-only browser view
+ * does NOT touch the existing write-auth and does NOT add auth that would break
+ * `panel_iframe`.
  *
  * v0.68.0 hardening — the /console/ws upgrade is still unauthenticated but no
  * longer unbounded: a cross-origin Origin is rejected (same-origin/LAN/missing
@@ -361,7 +364,7 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
       }
       done();
     },
-  }, (socket: WebSocket) => {
+  }, (socket: WebSocket, req: FastifyRequest) => {
     // Concurrency cap: admit-then-close-1013 beyond the limit. We accept the
     // upgrade first (the cap fires post-handshake) and immediately close with
     // "Try Again Later" so the browser sees a clean, well-coded rejection.
@@ -374,6 +377,8 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
 
     const session = new TuiSession({
       auth: authFromEnv(),
+      // The login card's failures bind this address (the socket's own, not a header).
+      peer: req.socket.remoteAddress,
       // xterm renders the bytes verbatim; no alt-buffer dance needed.
       write: (payload) => {
         if (socket.readyState === socket.OPEN) socket.send(payload);

@@ -8,8 +8,11 @@
  *      username or the password.
  *   2. A wrong password is refused; the third failure on one connection ends it,
  *      and a fresh connection with the right password still logs in.
- *   3. Ten failures across connections saturate the cross-session throttle, and
- *      a correct login is then refused outright.
+ *   3. Ten failures from one address (over IPv4 on a dual-stack listener) refuse
+ *      that address outright, the right password included, while another address
+ *      (IPv6 loopback) logs in: one address's failures bind that address alone.
+ *      A login that succeeds clears its address: nine failures, a login, nine
+ *      more, and the address is still admitted.
  *   4. With no console password every login is refused, and the log says why
  *      exactly once per connection.
  *   5. exec and the sftp subsystem are refused: the port serves the TUI only.
@@ -58,12 +61,12 @@ function mockData(): { provider: TuiDataProvider; stop: () => void } {
 /** One host key for the whole file: generating an ed25519 pair is cheap, but once is enough. */
 const KEY = ssh2.utils.generateKeyPairSync('ed25519').private;
 
-async function boot() {
+async function boot(opts: { host?: string } = {}) {
   const lines: string[] = [];
   const t = startSshServer({
     store: {} as never,
     recorder: mockRecorder(),
-    host: '127.0.0.1',
+    host: opts.host ?? '127.0.0.1',
     port: 0,
     hostKey: KEY,
     log: (m) => { lines.push(m); },
@@ -93,7 +96,7 @@ interface LoginResult {
  * Connect with a real ssh2 client; resolve with what happened (never throw).
  * `passwords` are tried in order on ONE connection (the client's auth-method list).
  */
-function login(port: number, passwords: string[], opts: { shell?: boolean; exec?: string; sftp?: boolean; sendAfter?: string; username?: string; noneOnly?: boolean } = {}): Promise<LoginResult> {
+function login(port: number, passwords: string[], opts: { shell?: boolean; exec?: string; sftp?: boolean; sendAfter?: string; username?: string; noneOnly?: boolean; host?: string } = {}): Promise<LoginResult> {
   return new Promise((done) => {
     const c = new ssh2.Client();
     let out = '';
@@ -118,7 +121,7 @@ function login(port: number, passwords: string[], opts: { shell?: boolean; exec?
       });
     });
     c.connect({
-      host: '127.0.0.1',
+      host: opts.host ?? '127.0.0.1',
       port,
       username: opts.username ?? 'operator',
       authHandler: opts.noneOnly
@@ -214,17 +217,48 @@ test('ssh — the none method is refused while a password is set: a client witho
   } finally { t.stop(); }
 });
 
-test('ssh — ten failures across connections saturate the cross-session throttle; a correct login is then refused', async () => {
-  const { t, port, lines } = await boot();
+test('ssh — ten failures from one address refuse that address, the right password included; another address still logs in', async () => {
+  // A dual-stack listener, the add-on's default `::`: the failing client connects over
+  // IPv4 (seen as ::ffff:127.0.0.1), the operator over IPv6 (::1) — two addresses, one host.
+  const { t, port, lines } = await boot({ host: '::' });
   try {
     for (let i = 0; i < 5; i++) {
       const r = await login(port, ['bad-a', 'bad-b']); // 2 failures per connection
       assert.equal(r.ok, false);
     }
-    const r = await login(port, [CREDS.password]);
-    assert.equal(r.ok, false, 'throttled: refused even with the right password');
-    assert.ok(lines.some((l) => /^ssh: login from 127\.0\.0\.1 refused — too many failed logins across sessions/.test(l)), lines.join(' | '));
-    assert.ok(!lines.some((l) => /^ssh: login from 127\.0\.0\.1 \(/.test(l)), 'no login succeeded');
+    assert.equal(lines.filter((l) => /^ssh: failed login from ::ffff:127\.0\.0\.1 \(/.test(l)).length, 10, lines.join(' | '));
+    const same = await login(port, [CREDS.password]);
+    assert.equal(same.ok, false, 'the address is refused even with the right password');
+    assert.ok(lines.some((l) => l === 'ssh: login from ::ffff:127.0.0.1 refused — too many failed logins from this address; try again in a few minutes'), lines.join(' | '));
+    // The operator at another address is not affected by that address's failures.
+    const other = await login(port, [CREDS.password], { host: '::1' });
+    assert.equal(other.ok, true, other.err);
+    assert.ok(lines.some((l) => /^ssh: login from ::1 \(1 active\)$/.test(l)), lines.join(' | '));
+    assert.ok(!lines.some((l) => /^ssh: login from ::ffff:127\.0\.0\.1 \(/.test(l)), 'nothing from the failing address was admitted');
+    // The operator's login clears the operator's address only: the failing address stays refused.
+    const still = await login(port, [CREDS.password]);
+    assert.equal(still.ok, false, 'still refused');
+    assert.equal(lines.filter((l) => /refused — too many failed logins from this address/.test(l)).length, 2);
+    assert.ok(!lines.some((l) => /bad-|hunter2|operator/.test(l)), 'never a credential in the log');
+  } finally { t.stop(); }
+});
+
+test('ssh — a login that succeeds clears its address: nine failures, a login, nine more, and the address is still admitted', async () => {
+  const { t, port, lines } = await boot();
+  try {
+    const nine = async () => {
+      for (let i = 0; i < 3; i++) assert.equal((await login(port, ['bad-1', 'bad-2', 'bad-3'])).ok, false); // 3 failures per connection
+    };
+    await nine();
+    const first = await login(port, [CREDS.password]);
+    assert.equal(first.ok, true, first.err);
+    // Without the clear these are the address's 10th to 18th failures, saturated at the 10th.
+    await nine();
+    const second = await login(port, [CREDS.password]);
+    assert.equal(second.ok, true, second.err);
+    assert.ok(!lines.some((l) => /too many failed logins/.test(l)), lines.join(' | '));
+    assert.equal(lines.filter((l) => /^ssh: login from 127\.0\.0\.1 \(1 active\)$/.test(l)).length, 2, 'both logins admitted');
+    assert.equal(lines.filter((l) => /^ssh: failed login from 127\.0\.0\.1 \(/.test(l)).length, 18, 'every failure was counted');
   } finally { t.stop(); }
 });
 

@@ -5,8 +5,9 @@
  * with ANSI, over an encrypted channel. Logins are password only, against the
  * console credentials in the add-on options (`TUI_USERNAME` / `TUI_PASSWORD`,
  * `authFromEnv()`), and spend the same budgets as the browser console's login
- * card: three attempts per connection, ten failures per ten minutes across all
- * sessions. With no console password set, every login is refused and the add-on
+ * card: three attempts per connection, ten failures per ten minutes from one
+ * address (that address alone is refused while its window is saturated; a login
+ * that succeeds clears it). With no console password set, every login is refused and the add-on
  * log says why once per connection: an SSH port that admits anyone would only
  * look safer than the telnet port it replaces. Usernames are never logged (a
  * password typed into that field would be).
@@ -40,7 +41,7 @@ import { createTuiDataProvider } from './dataProvider.js';
 import type { TuiDataProvider } from './session.js';
 import {
   TuiSession, authFromEnv, verifyConsoleCredentials, consoleLoginThrottled, noteConsoleLoginFailure,
-  AUTH_MAX_ATTEMPTS,
+  noteConsoleLoginSuccess, AUTH_MAX_ATTEMPTS,
 } from './session.js';
 import type { InputEvent } from './session.js';
 import {
@@ -331,7 +332,8 @@ export function startSshServer(opts: SshServerOptions): { stop: () => void; serv
   };
 
   /** Password only, against the console credentials, spending the login card's
-   *  budgets. Usernames are never logged: a password typed into that field would be. */
+   *  budgets under the connection's address. Usernames are never logged: a
+   *  password typed into that field would be. */
   const authenticate = (conn: SshConn, ctx: AuthContext): void => {
     if (conn.closed) return;
     // Read per connection: the credentials are add-on options, and the tests set them per case.
@@ -346,20 +348,21 @@ export function startSshServer(opts: SshServerOptions): { stop: () => void; serv
     }
     if (ctx.method !== 'password') { ctx.reject(['password']); return; }
     const now = Date.now();
-    if (consoleLoginThrottled(now)) {
-      // Saturated window: refuse outright and end the connection — no oracle, no more attempts.
-      log(`ssh: login from ${conn.ip} refused — too many failed logins across sessions; try again in a few minutes`);
+    if (consoleLoginThrottled(conn.ip, now)) {
+      // The address's window is saturated: refuse outright and end the connection — no oracle, no more attempts.
+      log(`ssh: login from ${conn.ip} refused — too many failed logins from this address; try again in a few minutes`);
       ctx.reject([]);
       endConn(conn);
       return;
     }
     if (verifyConsoleCredentials(ctx.username, ctx.password, auth)) {
+      noteConsoleLoginSuccess(conn.ip);
       conn.auth = auth;
       conn.authenticated = true;
       ctx.accept();
       return;
     }
-    noteConsoleLoginFailure(now);
+    noteConsoleLoginFailure(conn.ip, now);
     conn.attempts += 1;
     log(`ssh: failed login from ${conn.ip} (${conn.attempts} of ${AUTH_MAX_ATTEMPTS})`);
     if (conn.attempts >= AUTH_MAX_ATTEMPTS) {

@@ -228,8 +228,17 @@ advances username → password → verify. Credential comparison is constant-tim
 paths (`verifyConsoleCredentials`: fixed-length buffers through `timingSafeEqual`,
 both compares always evaluated, so neither content nor length nor which field was
 wrong leaks). Brute-force is bounded twice: three failed attempts end the connection,
-and a cross-session sliding-window throttle (10 failures per 10 minutes, shared by
-both transports) refuses further logins outright while saturated. Usernames are never
+and a per-address sliding-window throttle (10 failures per 10 minutes from one address)
+refuses that address's logins outright while saturated, the right password included
+(verifying it would hand the address an oracle); a login that succeeds clears its
+address. Both transports count under the peer's socket address — the SSH server its
+connection's, the browser card the raw `remoteAddress` (never a forwarded header a
+client could choose) — and an IPv4 peer of the dual-stack listener (`::ffff:a.b.c.d`)
+shares the plain address's window, so one host spends one budget over either
+transport. At most `AUTH_THROTTLE_MAX_PEERS = 4096` addresses are kept; beyond that
+the oldest entry is dropped. Until 1.190.0 the window was one for every connection
+(v1.46.0), so ten failures from one LAN host refused every other host's correct
+password for the rest of the ten minutes. Usernames are never
 logged. `q` does not quit at the card (it is a legitimate credential character);
 `Ctrl-C` always disconnects. With no password configured the browser session opens
 straight into the console — its login layer is opt-in, LAN-level access control —

@@ -71,7 +71,8 @@ outside that boundary needs to reach it.
   address), closes a connection that receives nothing for 5 minutes, and ends one
   that has not logged in within 2 minutes. With a password set, both transports
   require a login: 3 attempts per connection and at most 10 failures in 10 minutes
-  across all sessions; without one, the SSH console refuses every login. Usernames
+  from one address, which refuse that address alone (a login that succeeds clears
+  it); without one, the SSH console refuses every login. Usernames
   and passwords are never logged. The SSH host key is generated on first start in
   `/data`, and its fingerprint is printed in the add-on log at every start, to
   compare with what `ssh` shows on the first connection.

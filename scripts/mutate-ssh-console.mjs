@@ -2,9 +2,9 @@
 /**
  * mutate-ssh-console.mjs — v1.190.0: the LAN console is served over SSH (telnet until 1.189.x).
  * Password-only logins against TUI_USERNAME / TUI_PASSWORD, refuse-all without a password, the
- * login card's budgets reused at the protocol level, the host key generated once and kept, the
- * connection caps and reclaim on our own net server, the login card skipped for SSH sessions,
- * and the TELNET_ENABLED / TELNET_PORT aliases resolved in config.ts.
+ * login card's budgets reused at the protocol level under the connection's address, the host key
+ * generated once and kept, the connection caps and reclaim on our own net server, the login card
+ * skipped for SSH sessions, and the TELNET_ENABLED / TELNET_PORT aliases resolved in config.ts.
  *
  *   A-i     no console password admits the connection (the refuse-all gate accepts)
  *   A-ii    the no-password refusal is logged on every attempt, not once per connection
@@ -13,6 +13,14 @@
  *   A-v     every password verifies
  *   A-vi    a failed login is not counted against the cross-session window
  *   A-vii   the per-connection attempt budget is 300, not 3
+ *   P-i     every address shares one failed-login window (the table key is a constant)
+ *   P-ii    an IPv4 peer of a dual-stack listener (::ffff:a.b.c.d) is not the plain address
+ *   P-iii   the SSH server does not clear the address's failures on a login
+ *   P-iv    the login card does not clear the address's failures on a login
+ *   P-v     the login card counts every session under the unknown address
+ *   P-vi    the browser console names no peer (every /console session is the unknown address)
+ *   P-vii   failures never age out of the window
+ *   P-viii  the address table holds 100 more than its bound
  *   S-i     exec is accepted (the port runs commands)
  *   S-ii    the sftp subsystem is accepted
  *   S-iii   a window change is ignored (the frame keeps the pty's width)
@@ -49,6 +57,7 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SRV = resolve(REPO, 'server/src/telnet/server.ts');
 const SESS = resolve(REPO, 'server/src/telnet/session.ts');
+const WS = resolve(REPO, 'server/src/telnet/wsConsole.ts');
 const CFG = resolve(REPO, 'server/src/config.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const RUN = resolve(REPO, 'rootfs/etc/services.d/ecoflow-panel/run');
@@ -58,6 +67,7 @@ const SUBSET = [
   'test/sshCaps.test.ts',
   'test/sshConfig.test.ts',
   'test/wsConsole.test.ts',
+  'test/consoleLoginThrottle.test.ts',
   'test/optionsEnvBridge.test.ts',
 ];
 
@@ -85,9 +95,9 @@ const MUTANTS = [
     why: "The client's first attempt is method none; accepting it is a login with no password.",
   },
   {
-    id: 'A-iv. ★★ the cross-session throttle is ignored',
+    id: 'A-iv. ★★ the failed-login window is ignored',
     file: SRV,
-    find: '    if (consoleLoginThrottled(now)) {',
+    find: '    if (consoleLoginThrottled(conn.ip, now)) {',
     to: '    if (false) { /* MUTANT */',
     why: 'A reconnect loop gets 3 tries per connection, unlimited connections.',
   },
@@ -99,11 +109,68 @@ const MUTANTS = [
     why: 'The password is checked here and nowhere else on the SSH path.',
   },
   {
-    id: 'A-vi. ★★ a failed login is not counted against the cross-session window',
+    id: "A-vi. ★★ a failed login is not counted against the address's window",
     file: SRV,
-    find: '    noteConsoleLoginFailure(now);\n    conn.attempts += 1;',
+    find: '    noteConsoleLoginFailure(conn.ip, now);\n    conn.attempts += 1;',
     to: '    /* MUTANT */\n    conn.attempts += 1;',
-    why: 'The browser card and the SSH server share one budget; failures over SSH must spend it.',
+    why: 'The browser card and the SSH server share one budget per address; failures over SSH must spend it.',
+  },
+  /* ── P. the per-address window (1.190.0; one window for every connection until then) ── */
+  {
+    id: 'P-i. ★★★ every address shares one failed-login window',
+    file: SESS,
+    find: "  return peer.startsWith('::ffff:') ? peer.slice('::ffff:'.length) : peer;",
+    to: "  return '*'; /* MUTANT */",
+    why: "The 1.189.x lockout: ten failures from one LAN host refused the operator's correct password from every other host for the rest of the ten minutes.",
+  },
+  {
+    id: 'P-ii. ★ an IPv4 peer of a dual-stack listener is not the plain address',
+    file: SESS,
+    find: "  return peer.startsWith('::ffff:') ? peer.slice('::ffff:'.length) : peer;",
+    to: '  return peer; /* MUTANT */',
+    why: 'One host would hold two windows, one per listener form.',
+  },
+  {
+    id: "P-iii. ★★ the SSH server does not clear the address's failures on a login",
+    file: SRV,
+    find: '      noteConsoleLoginSuccess(conn.ip);\n',
+    to: '      /* MUTANT */\n',
+    why: "An operator's own mistyped passwords would add up across the day until the operator's address was refused.",
+  },
+  {
+    id: "P-iv. ★★ the login card does not clear the address's failures on a login",
+    file: SESS,
+    find: '        noteAuthSuccess(this.peer);\n',
+    to: '        /* MUTANT */\n',
+    why: 'As P-iii, for the browser console.',
+  },
+  {
+    id: 'P-v. ★★★ the login card counts every session under the unknown address',
+    file: SESS,
+    find: '    this.peer = opts.peer ?? AUTH_PEER_UNKNOWN;',
+    to: '    this.peer = AUTH_PEER_UNKNOWN; /* MUTANT */',
+    why: 'The browser console would be one window for every address again.',
+  },
+  {
+    id: 'P-vi. ★★★ the browser console names no peer',
+    file: WS,
+    find: '      peer: req.socket.remoteAddress,\n',
+    to: '      /* MUTANT */\n',
+    why: 'As P-v, from the transport side: every /console session would count under the unknown address.',
+  },
+  {
+    id: 'P-vii. ★★ failures never age out of the window',
+    file: SESS,
+    find: '  const kept = (authFailures.get(key) ?? []).filter((t) => now - t < AUTH_THROTTLE_WINDOW_MS);',
+    to: '  const kept = (authFailures.get(key) ?? []).filter(() => true); /* MUTANT */',
+    why: 'Ten failures would refuse the address until the add-on restarted, not for ten minutes.',
+  },
+  {
+    id: 'P-viii. ★ the address table holds 100 more than its bound',
+    file: SESS,
+    find: '  while (authFailures.size > AUTH_THROTTLE_MAX_PEERS) {',
+    to: '  while (authFailures.size > AUTH_THROTTLE_MAX_PEERS + 100) { /* MUTANT */',
+    why: 'The bound is the only thing between a flood of addresses and an entry per address for the life of the process.',
   },
   {
     id: 'A-vii. ★★ the per-connection attempt budget is 300',

@@ -7,6 +7,10 @@
  *   2. TuiSession — the extracted session driver renders frames to its write
  *      sink, applies key navigation, honors resize, suppresses byte-identical
  *      frames (anti-flicker), and reports quit on ctrl-c / q.
+ *   3. /console/ws — the origin gate, the session cap, the idle timeout, and the
+ *      login card counting its failures under the socket's address: ten from one
+ *      address (IPv4 on a dual-stack listener) refuse that address, the right
+ *      credentials included, while another address (IPv6 loopback) logs in.
  */
 
 import { test } from 'node:test';
@@ -17,7 +21,7 @@ import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
 import WebSocket from 'ws';
 import { parseXtermData, registerWsConsole, MAX_WS_SESSIONS, WS_IDLE_TIMEOUT_MS } from '../src/telnet/wsConsole.js';
-import { TuiSession, _resetAuthThrottleForTest } from '../src/telnet/session.js';
+import { TuiSession, _resetAuthThrottleForTest, consoleLoginThrottled } from '../src/telnet/session.js';
 import type { TuiDataProvider } from '../src/telnet/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import type { Recorder } from '../src/recorder.js';
@@ -271,6 +275,7 @@ async function bootConsoleApp(opts: {
   isOriginAllowed?: (o: string | undefined) => boolean;
   maxSessions?: number;
   idleTimeoutMs?: number;
+  host?: string;
 } = {}) {
   const app = Fastify({ logger: false });
   await app.register(websocket);
@@ -282,10 +287,61 @@ async function bootConsoleApp(opts: {
     maxSessions: opts.maxSessions,
     idleTimeoutMs: opts.idleTimeoutMs,
   });
-  await app.listen({ host: '127.0.0.1', port: 0 });
+  await app.listen({ host: opts.host ?? '127.0.0.1', port: 0 });
   const addr = app.server.address();
   const port = typeof addr === 'object' && addr ? addr.port : 0;
-  return { app, url: `ws://127.0.0.1:${port}/console/ws` };
+  return { app, port, url: `ws://127.0.0.1:${port}/console/ws` };
+}
+
+/** Strip CSI escape sequences (colors, cursor, mode toggles) from a frame. */
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+
+interface ConsoleClient {
+  ws: WebSocket;
+  /** The first frame (past or future) whose stripped text matches; rejects once the socket has closed. */
+  frame: (re: RegExp) => Promise<string>;
+  /** The close code, once the socket closes. */
+  closed: Promise<number>;
+}
+
+/**
+ * Open a ws client on the console and collect its frames from the first byte. The
+ * listener is attached BEFORE `open`: the server draws the card inside the upgrade
+ * handler, so the first frame can share a read with the 101 response, and `ws`
+ * emits it from a nextTick queued inside `emit('open')` — before a continuation
+ * awaiting `open` could attach anything. A wait for a frame therefore looks at the
+ * frames already collected, then at the ones to come; nothing sleeps.
+ */
+function openConsole(url: string): Promise<ConsoleClient> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const frames: string[] = [];
+    const waiters: Array<{ re: RegExp; ok: (t: string) => void; no: (e: Error) => void }> = [];
+    let closeCode: number | null = null;
+    const closed = new Promise<number>((r) => {
+      ws.once('close', (code: number) => {
+        closeCode = code;
+        for (const w of waiters.splice(0)) w.no(new Error(`closed (${code}) before a frame matched ${w.re}`));
+        r(code);
+      });
+    });
+    ws.on('message', (raw: Buffer) => {
+      const text = stripAnsi(raw.toString('utf8'));
+      frames.push(text);
+      for (const w of waiters.splice(0)) {
+        if (w.re.test(text)) w.ok(text);
+        else waiters.push(w);
+      }
+    });
+    const frame = (re: RegExp) => new Promise<string>((ok, no) => {
+      const hit = frames.find((t) => re.test(t));
+      if (hit !== undefined) { ok(hit); return; }
+      if (closeCode != null) { no(new Error(`closed (${closeCode}) before a frame matched ${re}`)); return; }
+      waiters.push({ re, ok, no });
+    });
+    ws.once('open', () => resolve({ ws, frame, closed }));
+    ws.once('error', reject);
+  });
 }
 
 /** Open a ws client and resolve once it's OPEN (or reject on close/error). */
@@ -412,4 +468,55 @@ test('parseXtermData — v1.47.2: Ctrl-Right (ESC[1;5C) is right, with no ;5C ta
 test('parseXtermData — v1.47.2: F5 (ESC[15~) emits no screen-hotkey digits', () => {
   const ev = parseXtermData('\x1b[15~');
   assert.equal(ev.some((e) => e.type === 'key' && /^[0-9]$/.test((e as any).key)), false, `leaked digits: ${JSON.stringify(ev)}`);
+});
+
+test('console/ws — the login card counts failures by the socket\'s address: ten from one address refuse that address, another address logs in', async () => {
+  const savedUser = process.env.TUI_USERNAME;
+  const savedPass = process.env.TUI_PASSWORD;
+  process.env.TUI_USERNAME = 'operator';
+  process.env.TUI_PASSWORD = 'hunter2';
+  _resetAuthThrottleForTest();
+  // A dual-stack listener, the add-on's default `::`: the failing sessions arrive over
+  // IPv4 (seen as ::ffff:127.0.0.1), the operator's over IPv6 (::1).
+  const { app, port } = await bootConsoleApp({ host: '::' });
+  const v4 = `ws://127.0.0.1:${port}/console/ws`;
+  const v6 = `ws://[::1]:${port}/console/ws`;
+  try {
+    // Ten failures, one per session (each session's card has three attempts; one is spent here).
+    for (let i = 0; i < 10; i++) {
+      const c = await openConsole(v4);
+      await c.frame(/USERNAME/);
+      c.ws.send('x\r');
+      c.ws.send('y\r');
+      const denied = await c.frame(/ACCESS DENIED/);
+      assert.match(denied, /2 attempt\(s\) remaining/);
+      c.ws.close();
+      await c.closed;
+    }
+    assert.equal(consoleLoginThrottled('127.0.0.1'), true, 'the IPv4 address is saturated (the mapped form shares its window)');
+    assert.equal(consoleLoginThrottled('::1'), false, 'the IPv6 address is not');
+    // The right credentials from the saturated address: the card refuses the submit and the socket is closed.
+    const same = await openConsole(v4);
+    await same.frame(/USERNAME/);
+    same.ws.send('operator\r');
+    same.ws.send('hunter2\r');
+    const code = await same.closed;
+    assert.ok(code >= 1000, `closed (${code})`);
+    assert.equal(consoleLoginThrottled('127.0.0.1'), true, 'a refused submit is not a counted failure, and nothing cleared the address');
+    // The same credentials from another address open the console.
+    const other = await openConsole(v6);
+    await other.frame(/USERNAME/);
+    other.ws.send('operator\r');
+    other.ws.send('hunter2\r');
+    const console_ = await other.frame(/CONSOLE/);
+    assert.ok(!console_.includes('USERNAME'), 'the console, not the card');
+    assert.equal(consoleLoginThrottled('127.0.0.1'), true, 'the other address\'s login clears only its own address');
+    other.ws.close();
+    await other.closed;
+  } finally {
+    await app.close();
+    if (savedUser === undefined) delete process.env.TUI_USERNAME; else process.env.TUI_USERNAME = savedUser;
+    if (savedPass === undefined) delete process.env.TUI_PASSWORD; else process.env.TUI_PASSWORD = savedPass;
+    _resetAuthThrottleForTest();
+  }
 });

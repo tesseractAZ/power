@@ -86,34 +86,83 @@ function credentialEqual(a: string, b: string): boolean {
 }
 
 /**
- * Cross-session failed-login throttle. The per-session 3-attempt limit does
- * not bound a reconnect loop (3 tries per connection, unlimited connections),
- * so failures are also counted globally in a sliding window; while the window
- * is saturated every submit is refused outright. Shared by both transports:
- * the login card counts here, and so does the SSH server (consoleLoginThrottled
- * / noteConsoleLoginFailure), so an SSH reconnect loop spends the same budget.
+ * Failed-login window, kept per peer address. The per-session 3-attempt limit
+ * does not bound a reconnect loop (3 tries per connection, unlimited
+ * connections), so failures are also counted in a sliding window; while an
+ * address's window is saturated, every login from that address is refused
+ * outright, the right password included (verifying it would hand the address
+ * an oracle the window exists to deny). The window is the ADDRESS's, not the
+ * server's: until 1.190.0 one window counted every connection, so ten failures
+ * from any one LAN host refused the operator's correct password from every
+ * other host for the rest of the ten minutes, and the host could repeat that as
+ * each window opened. One address's failures now bind that address alone, and a
+ * login that succeeds clears its address. Both transports count here, the login
+ * card under the socket's address (the browser console) and the SSH server
+ * under the connection's (consoleLoginThrottled / noteConsoleLoginFailure /
+ * noteConsoleLoginSuccess), so one host's failures over either transport spend
+ * one budget. The table is bounded: beyond AUTH_THROTTLE_MAX_PEERS addresses
+ * the one whose entry is oldest is dropped.
  */
-const AUTH_THROTTLE_WINDOW_MS = 10 * 60_000;
-const AUTH_THROTTLE_MAX_FAILURES = 10;
-let authFailureTimes: number[] = [];
-function authThrottled(now: number): boolean {
-  authFailureTimes = authFailureTimes.filter((t) => now - t < AUTH_THROTTLE_WINDOW_MS);
-  return authFailureTimes.length >= AUTH_THROTTLE_MAX_FAILURES;
+export const AUTH_THROTTLE_WINDOW_MS = 10 * 60_000;
+export const AUTH_THROTTLE_MAX_FAILURES = 10;
+export const AUTH_THROTTLE_MAX_PEERS = 4096;
+/** The address a session is counted under when its transport names none. */
+export const AUTH_PEER_UNKNOWN = 'unknown';
+/** Failure times inside the window, by address key; an address with none has no entry. */
+const authFailures = new Map<string, number[]>();
+
+/**
+ * The table key for a peer address. A dual-stack listener (the default `::`)
+ * reports an IPv4 peer as `::ffff:a.b.c.d`; the mapped form and the plain form
+ * are one host, so they share one window.
+ */
+function peerKey(peer: string): string {
+  return peer.startsWith('::ffff:') ? peer.slice('::ffff:'.length) : peer;
 }
-function noteAuthFailure(now: number): void {
-  authFailureTimes.push(now);
+/** The key's failures still inside the window; the entry goes when none are left. */
+function liveFailures(key: string, now: number): number[] {
+  const kept = (authFailures.get(key) ?? []).filter((t) => now - t < AUTH_THROTTLE_WINDOW_MS);
+  if (kept.length === 0) authFailures.delete(key);
+  else authFailures.set(key, kept);
+  return kept;
+}
+function authThrottled(peer: string, now: number): boolean {
+  return liveFailures(peerKey(peer), now).length >= AUTH_THROTTLE_MAX_FAILURES;
+}
+function noteAuthFailure(peer: string, now: number): void {
+  const key = peerKey(peer);
+  const kept = liveFailures(key, now);
+  kept.push(now);
+  authFailures.set(key, kept);
+  // A Map iterates in insertion order: the address whose entry is oldest goes first.
+  while (authFailures.size > AUTH_THROTTLE_MAX_PEERS) {
+    const oldest = authFailures.keys().next().value;
+    if (oldest === undefined) break;
+    authFailures.delete(oldest);
+  }
+}
+function noteAuthSuccess(peer: string): void {
+  authFailures.delete(peerKey(peer));
 }
 export function _resetAuthThrottleForTest(): void {
-  authFailureTimes = [];
+  authFailures.clear();
+}
+/** The number of addresses with failures in the table (the bound's test). */
+export function _authThrottlePeersForTest(): number {
+  return authFailures.size;
 }
 
-/** True while the cross-session failed-login window is saturated (the SSH server asks before verifying). */
-export function consoleLoginThrottled(now: number = Date.now()): boolean {
-  return authThrottled(now);
+/** True while the address's failed-login window is saturated (the SSH server asks before verifying). */
+export function consoleLoginThrottled(peer: string, now: number = Date.now()): boolean {
+  return authThrottled(peer, now);
 }
-/** Count one failed login against the cross-session window (the SSH server's failures, as the card's). */
-export function noteConsoleLoginFailure(now: number = Date.now()): void {
-  noteAuthFailure(now);
+/** Count one failed login against the address's window (the SSH server's failures, as the card's). */
+export function noteConsoleLoginFailure(peer: string, now: number = Date.now()): void {
+  noteAuthFailure(peer, now);
+}
+/** A login from the address succeeded: its window is cleared (the SSH server's successes, as the card's). */
+export function noteConsoleLoginSuccess(peer: string): void {
+  noteAuthSuccess(peer);
 }
 
 /**
@@ -177,6 +226,12 @@ export interface TuiSessionOptions {
    * The browser console never sets it.
    */
   preAuthenticated?: boolean;
+  /**
+   * The peer address the login card's failures are counted under (the browser
+   * console passes its socket's remote address, never a header a client can set).
+   * Absent, the session is counted under AUTH_PEER_UNKNOWN.
+   */
+  peer?: string;
 }
 
 /** Resolve the login gate from the add-on options (env). Empty password ⇒ off. */
@@ -219,6 +274,8 @@ export class TuiSession {
 
   /** AUTH mode state (only meaningful while mode === 'auth'). */
   private readonly auth: { username: string; password: string } | null;
+  /** The address the card's failures bind (see `TuiSessionOptions.peer`). */
+  private readonly peer: string;
   private login: LoginViewState = { stage: 'username', user: '', passLen: 0, attemptsLeft: AUTH_MAX_ATTEMPTS, error: null };
   private loginPass = '';
 
@@ -248,6 +305,7 @@ export class TuiSession {
     this.width = opts.width ?? 80;
     this.height = opts.height ?? 24;
     this.auth = opts.auth ?? null;
+    this.peer = opts.peer ?? AUTH_PEER_UNKNOWN;
     this.mode = this.auth && !opts.preAuthenticated ? 'auth' : 'plant';
     this.plantConnectedAt = Date.now();
   }
@@ -368,8 +426,8 @@ export class TuiSession {
         return true;
       }
       const now = Date.now();
-      if (authThrottled(now)) {
-        // Saturated window: refuse outright — no oracle, no more attempts.
+      if (authThrottled(this.peer, now)) {
+        // The address's window is saturated: refuse outright — no oracle, no more attempts.
         return 'denied';
       }
       // v1.47.1 (full-pass) — evaluate BOTH compares unconditionally: the
@@ -378,6 +436,7 @@ export class TuiSession {
       // compare exists to prevent.
       const ok = verifyConsoleCredentials(st.user, this.loginPass, this.auth);
       if (ok) {
+        noteAuthSuccess(this.peer);
         this.mode = 'plant';
         this.plantScreen = 'console';
         this.plantConnectedAt = Date.now();
@@ -385,7 +444,7 @@ export class TuiSession {
         this.lastFrameHash = ''; // force a full repaint into the console
         return true;
       }
-      noteAuthFailure(now);
+      noteAuthFailure(this.peer, now);
       st.attemptsLeft -= 1;
       if (st.attemptsLeft <= 0) return 'denied';
       st.error = 'ACCESS DENIED';
