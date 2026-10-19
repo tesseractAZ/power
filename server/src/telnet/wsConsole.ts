@@ -1,7 +1,7 @@
 /**
  * Browser web-terminal for the control-room TUI ("Power TUI").
  *
- * v0.67.0 — serves the same operator TUI that the telnet TCP server exposes,
+ * v0.67.0 — serves the same operator TUI that the SSH server exposes,
  * but over a WebSocket + xterm.js so it opens in a browser (and from the Home
  * Assistant sidebar via a `panel_iframe` pointing at
  * `http://<host>:8787/console`).
@@ -12,13 +12,17 @@
  *     served from node_modules (NO CDN — offline ethos). The HA add-on image
  *     copies server/node_modules wholesale, so these resolve in production.
  *   • GET /console/ws     — WebSocket transport. Drives a `TuiSession`:
- *       browser keystrokes (xterm `onData`, char mode, NO telnet IAC) →
+ *       browser keystrokes (xterm `onData`, char mode) →
  *       parsed `InputEvent`s; ANSI frames → ws text frames. A JSON control
  *       message `{type:'resize',cols,rows}` maps to the session size.
  *
- * Auth posture: the telnet TUI is already unauthenticated on the LAN, so this
- * read-only browser view is the SAME exposure. It does NOT touch the existing
- * write-auth and does NOT add auth that would break `panel_iframe`.
+ * Auth posture: /console keeps the in-session login card (`TUI_PASSWORD`, see
+ * session.ts); the SSH transport authenticates at the protocol level and skips
+ * the card. The card's failed logins count under the socket's remote address
+ * (the raw peer, never a forwarded-for header a client could choose), so one
+ * address's failures refuse that address alone. This read-only browser view
+ * does NOT touch the existing write-auth and does NOT add auth that would break
+ * `panel_iframe`.
  *
  * v0.68.0 hardening — the /console/ws upgrade is still unauthenticated but no
  * longer unbounded: a cross-origin Origin is rejected (same-origin/LAN/missing
@@ -70,12 +74,11 @@ export interface WsConsoleOptions {
 
 /**
  * Parse a chunk of xterm.js keyboard data (a JS string of raw terminal bytes,
- * char-at-a-time, with NO telnet IAC framing) into transport-agnostic input
- * events. This mirrors the non-IAC half of the telnet parser: ESC arrow
- * sequences, CR/LF → enter, Ctrl-C, TAB, and printable ASCII.
+ * char-at-a-time) into transport-agnostic input events. This mirrors the SSH
+ * transport's `parseInput`: ESC arrow sequences, CR/LF → enter, Ctrl-C, TAB,
+ * and printable ASCII.
  *
- * xterm's `onData` already delivers decoded key data — there are no IAC bytes
- * to strip — so this is simpler than the telnet `parseInput`. Window size
+ * xterm's `onData` already delivers decoded key data, and the window size
  * arrives out-of-band via the JSON resize control message, not here.
  */
 export function parseXtermData(s: string): InputEvent[] {
@@ -361,7 +364,7 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
       }
       done();
     },
-  }, (socket: WebSocket) => {
+  }, (socket: WebSocket, req: FastifyRequest) => {
     // Concurrency cap: admit-then-close-1013 beyond the limit. We accept the
     // upgrade first (the cap fires post-handshake) and immediately close with
     // "Try Again Later" so the browser sees a clean, well-coded rejection.
@@ -374,7 +377,9 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
 
     const session = new TuiSession({
       auth: authFromEnv(),
-      // xterm renders the bytes verbatim; no telnet alt-buffer dance needed.
+      // The login card's failures bind this address (the socket's own, not a header).
+      peer: req.socket.remoteAddress,
+      // xterm renders the bytes verbatim; no alt-buffer dance needed.
       write: (payload) => {
         if (socket.readyState === socket.OPEN) socket.send(payload);
       },
@@ -382,7 +387,7 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
     });
 
     let alive = true;
-    // 1 Hz redraw tick — same cadence as the telnet transport, so live data
+    // 1 Hz redraw tick — same cadence as the SSH transport, so live data
     // (which the frame-hash skips when unchanged) reaches the browser within
     // ~1 s of changing.
     const timer = setInterval(() => { if (alive) session.draw(); }, 1000);

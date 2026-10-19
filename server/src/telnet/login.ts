@@ -3,9 +3,9 @@
  *
  * The single console (see session.ts) is gated by an optional username +
  * password configured through the add-on options (`TUI_USERNAME` /
- * `TUI_PASSWORD`). This module renders the login card; the input state
- * machine lives in the session driver so BOTH transports (telnet TCP and the
- * /console browser terminal) share one implementation.
+ * `TUI_PASSWORD`). This module renders the login card for the /console browser
+ * terminal; the input state machine lives in the session driver. The SSH
+ * transport authenticates at the protocol level and never draws the card.
  *
  * Pure: (state, width, height) → frame lines. The brand block is the same
  * pseudo-LCD lettering the mode chooser used before consolidation.

@@ -308,8 +308,12 @@ Open **Power** in the Home Assistant sidebar. The dashboard has five pages:
   one card per priority with its switch, tone and spoken preview, and the tone library.
 
 On your LAN the dashboard is also at `http://<host>:8787`. The control-room console is in the
-browser at `http://<host>:8787/console`, and over telnet on `TELNET_PORT` (2323) once
-`TELNET_ENABLED` is on; it displays and writes nothing. Set `TUI_PASSWORD` to require a login.
+browser at `http://<host>:8787/console`, and over SSH on port 2323 (`SSH_PORT`) once
+`SSH_ENABLED` is on: `ssh -p 2323 <user>@<host>`, logging in with the Console Username and
+Console Password; it displays and writes nothing. The SSH console refuses every login until
+`TUI_PASSWORD` is set; the browser console asks for the login once it is set. The host key
+fingerprint is in the add-on log at every start, to compare with what `ssh` shows on the first
+connection.
 [User interfaces](https://github.com/tesseractAZ/power/blob/main/docs/reference/11-user-interfaces.md)
 describes both.
 
@@ -326,7 +330,9 @@ describes both.
   from outside it only through Home Assistant, which asks for its own login.
 - `TUI_TRUSTED_ORIGINS` adds exact browser origins to the dashboard's own; a listed origin
   passes the write gate without a token.
-- The telnet console is unencrypted and off by default.
+- The SSH console is off by default and refuses every login until `TUI_PASSWORD` is set.
+  `TELNET_ENABLED` and `TELNET_PORT` are deprecated aliases of `SSH_ENABLED` and `SSH_PORT`;
+  telnet itself is no longer served.
 - `WRITE_DEBUG_TOKEN` stays empty unless you are debugging a device command.
 - The add-on runs under an AppArmor profile and asks the Supervisor only for a read-only add-on
   list. Every device write is recorded in `/data/writes.log` (`GET /api/writes/log`, through the

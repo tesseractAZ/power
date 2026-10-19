@@ -832,7 +832,7 @@ A second SHP2 is supported. Its model:
   fallback); `secondaryPanels` lists every other panel by identity, projected or not;
   `panelRoster(panel)` is its live connected sources, else `lastRoster`. Every
   former inline `find(kind === 'shp2')` (analytics, MQTT discovery, recorder, calendar,
-  publish readiness, feature snapshot, telnet, web) now resolves through it or its web mirror
+  publish readiness, feature snapshot, the TUI, web) now resolves through it or its web mirror
   `findHousePanel`. **`secondaryShp2s`** lists every other projected panel by serial.
 - **Writes.** `multiPanelWriteBlock` refuses supervised apply writes while the pin is missing (any
   panel count) or two panels stand with none flagged; every write targets `findShp2`.

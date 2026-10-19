@@ -2,7 +2,7 @@
 
 This is the definitive technical reference for the **ecoflow-panel** Home Assistant add-on: a life-safety off-grid solar/battery monitor and depletion alarm for a Phoenix, AZ system (EcoFlow Smart Home Panel 2 + Delta Pro Ultra battery/inverter Cores + a 42-panel array + EVSE). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the endpoints and sensors it produces, the configuration knobs that tune it, and its edge-case guards.
 
-The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, and a telnet TUI (`:2323`). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and a SIP intercom) when the battery is projected to deplete.
+The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, and an SSH TUI (`:2323`). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and a SIP intercom) when the battery is projected to deplete.
 
 > Every constant, formula, endpoint path, and config key below was written directly from the source and independently completeness-/accuracy-checked against it. Where a value is a tunable default, that is noted. For install steps and a high-level tour, see `README.md`; for the full option list, the options→env bridge and the security posture, see chapter 12, **Configuration, Deployment, Security & Operations**.
 
@@ -42,7 +42,7 @@ split into parts, and their section numbers run on across the parts.
 - [8. Alerts, Anomaly Detection, Incidents & Learning Loop, part 2 — sections 4–14: the alert monitor, notification delivery, outcome capture, repair issues, resolve integrity](08-2-alert-monitor.md)
 - [9. The Online Learning Loop (shadow models, online regression, model health)](09-learning-loop.md)
 - [10. Audible Broadcast, Chimes & Text-to-Speech](10-audible-broadcast.md)
-- [11. User Interfaces: Web Dashboard & Telnet TUI](11-user-interfaces.md)
+- [11. User Interfaces: Web Dashboard & SSH TUI](11-user-interfaces.md)
 - [12. Configuration, Deployment, Security & Operations](12-configuration-deployment-security.md)
 - [13. Safety & Operational Plumbing](13-safety-plumbing.md)
 - [14. Intelligent Lighting & HVAC Posture (energy-aware automation)](14-lighting-and-hvac.md)
@@ -74,7 +74,7 @@ id is the same in its new file.
 | `#9-the-online-learning-loop-shadow-models-online-regression-model-health` | [09-learning-loop.md](09-learning-loop.md#9-the-online-learning-loop-shadow-models-online-regression-model-health) |
 | `#10-audible-broadcast-chimes--text-to-speech` | [10-audible-broadcast.md](10-audible-broadcast.md#10-audible-broadcast-chimes--text-to-speech) |
 | `#26-release-log-all-subsystems` | [history/engineering-release-log-1.md](../history/engineering-release-log-1.md#26-release-log-all-subsystems) |
-| `#11-user-interfaces-web-dashboard--telnet-tui` | [11-user-interfaces.md](11-user-interfaces.md#11-user-interfaces-web-dashboard--telnet-tui) |
+| `#11-user-interfaces-web-dashboard--ssh-tui` | [11-user-interfaces.md](11-user-interfaces.md#11-user-interfaces-web-dashboard--ssh-tui) |
 | `#3-hacs-lovelace-cards--removed-v1470` | [history/operations-audits.md](../history/operations-audits.md#3-hacs-lovelace-cards--removed-v1470) |
 | `#12-configuration-deployment-security--operations` | [12-configuration-deployment-security.md](12-configuration-deployment-security.md#12-configuration-deployment-security--operations) |
 | `#full-configyaml-option-reference` | [guide/options.md](../guide/options.md) |

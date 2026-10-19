@@ -391,7 +391,7 @@ export function createAnalyticsClient(
 /* ── Process-wide singleton ──────────────────────────────────────────────
  * The analytics client owns ONE worker thread per process. index.ts calls
  * initAnalyticsClient() at startup; every other consumer (alertMonitor,
- * featureSnapshot, mqttDiscovery, telnet) reaches it via getAnalytics()
+ * featureSnapshot, mqttDiscovery, the TUI) reaches it via getAnalytics()
  * instead of threading the handle through their constructors. Unit tests
  * never hit getAnalytics() (they call the compute* functions directly), so
  * the "not initialized" throw only ever fires on a genuine wiring mistake. */

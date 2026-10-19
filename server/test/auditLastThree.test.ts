@@ -43,7 +43,7 @@ test('★ DPU countdown: "to full" while charging, "to empty" while discharging 
   assert.equal(remainSuffix(0.2), 'remaining');
   assert.equal(remainSuffix(null), 'remaining');
   assert.match(web('cards/DpuCard.tsx'), /\$\{remainSuffix\(p\?\.batAmp\)\}/);
-  // The same countdown elsewhere: the Thermal page's pack readout and the telnet tag.
+  // The same countdown elsewhere: the Thermal page's pack readout and the TUI tag.
   assert.equal(packCountdownLabel(900, 0), 'To full');
   assert.equal(packCountdownLabel(0, 700), 'To empty');
   assert.equal(packCountdownLabel(null, null), 'Remaining');

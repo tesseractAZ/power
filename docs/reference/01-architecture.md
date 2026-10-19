@@ -1,7 +1,7 @@
 ## 1. System Architecture & Data Flow
 
 This is the reference for how `ecoflow-panel` moves data from the EcoFlow cloud
-to its outputs — HTTP endpoints, the Home Assistant MQTT sensors, the telnet
+to its outputs — HTTP endpoints, the Home Assistant MQTT sensors, the SSH
 control-room TUI, and the React web UI. It documents the ingest pipeline, the
 storage layer (SQLite time-series + lifetime accumulators), the off-main-thread
 analytics worker, the report registry, and the request-resolution path.
@@ -85,7 +85,7 @@ freshness clock (see §1.7, *The `lastUpdated` freshness contract*, below).
 | `analytics.ts` | worker | The ~560 KB compute engine (forecast, runway, degradation, …) |
 | `index.ts` | main | Fastify bootstrap, all HTTP routes, `/ws`, wiring of every subsystem |
 | `mqttDiscovery.ts` | main | HA MQTT discovery config + 30s state publish |
-| `telnet/server.ts` | main | Telnet control-room TUI (port 2323) |
+| `telnet/server.ts` | main | SSH control-room TUI (port 2323) |
 | `alertMonitor.ts` / `alerts.ts` | main | Alarm engine (life-safety path) |
 
 ---
@@ -937,19 +937,23 @@ and `total` energy sensors carry no expiry, and the night-charge sensors carry ~
 one publishes its last good value for no longer than `EXPIRE_AFTER_S`, then null
 (v1.186.0).
 
-#### 9.4 Telnet TUI
+#### 9.4 SSH TUI
 
-`startTelnetServer` on `config.telnet.port` default `2323`, host `::`. In bare env it is
-enabled unless `TELNET_ENABLED=0`, but the add-on ships `TELNET_ENABLED: false`, which the
-runner bridges to `0`, so the telnet transport is **off by default**. The same Plant
-Operator console is always served in a browser at `/console` on the web port (xterm.js
-over `/console/ws`), independent of `TELNET_ENABLED`. Both transports require the
-operator login when `TUI_PASSWORD` is set.
+`startSshServer` on `config.ssh.port` default `2323`, host `::`, with the host key from
+`config.ssh.hostKeyPath` (`loadOrCreateHostKey`; its fingerprint is on the startup line).
+In bare env it is enabled unless `SSH_ENABLED=0`, but the add-on ships `SSH_ENABLED: false`,
+which the runner bridges to `0`, so the SSH transport is **off by default**. `TELNET_ENABLED`
+and `TELNET_PORT` are deprecated aliases resolved by `resolveSshConfig` (either enabled
+option serves SSH; `SSH_PORT` at its default defers to a changed `TELNET_PORT`), each
+logging one boot notice. The same Plant Operator console is always served in a browser at
+`/console` on the web port (xterm.js over `/console/ws`), independent of the SSH toggle.
+SSH logins are password only against `TUI_USERNAME` / `TUI_PASSWORD` and are all refused
+until a password is set; the browser console shows its login card once one is set.
 
 #### 9.5 Web UI
 
 Built React bundle served by `@fastify/static` at `/` with SPA fallback
-(`WEB_DIST_PATH`), plus the telnet TUI. In dev, Vite is the front-end and
+(`WEB_DIST_PATH`), plus the SSH TUI. In dev, Vite is the front-end and
 proxies `/api` + `/ws` back to this process.
 
 ---
@@ -967,9 +971,10 @@ proxies `/api` + `/ws` back to this process.
 | `logLevel` | `LOG_LEVEL` | `info` | Pino level; `debug`/`trace` add the periodic poll-duration summary (every `POLL_SUMMARY_EVERY` polls) and the recorder's sample-count heartbeat |
 | `forecastLat` | `FORECAST_LAT` | `33.4484` | Solar forecast latitude (Phoenix) |
 | `forecastLon` | `FORECAST_LON` | `-112.074` | Solar forecast longitude |
-| `telnet.enabled` | `TELNET_ENABLED` | bare env: `true` (unless `0`); add-on option default `false` (bridged to `0`) | Telnet transport on/off (the `/console` browser terminal is always served) |
-| `telnet.host` | `TELNET_HOST` | `::` | TUI bind |
-| `telnet.port` | `TELNET_PORT` | `2323` | TUI port |
+| `ssh.enabled` | `SSH_ENABLED` (or the deprecated alias `TELNET_ENABLED`) | bare env: `true` (unless `0`); add-on option default `false` (bridged to `0`) | SSH transport on/off (the `/console` browser terminal is always served) |
+| `ssh.host` | `SSH_HOST` (fallback `TELNET_HOST`) | `::` | TUI bind |
+| `ssh.port` | `SSH_PORT` (the deprecated `TELNET_PORT` applies while `SSH_PORT` is `2323`) | `2323` | TUI port |
+| `ssh.hostKeyPath` | `SSH_HOST_KEY` | `/data/ssh_host_ed25519_key` | ed25519 host key, generated on first start |
 | — | `POLL_INTERVAL_MS` | `60_000` | REST poll cadence |
 | — | `ANALYTICS_REPORT_TTL_MS` | `20_000` | Default report cache TTL (main thread) |
 | — | `SNAPSHOT_INCLUDE_RAW` | `0` | Attach raw quota to snapshots (debug) |

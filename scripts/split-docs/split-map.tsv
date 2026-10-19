@@ -35,7 +35,7 @@ seg	docs/reference/08-1-alerts.md	"## 8. Alerts, Anomaly Detection, Incidents & 
 seg	docs/reference/08-2-alert-monitor.md	"### 4. The alert monitor — `startAlertMonitor()` (`alertMonitor.ts`)"	"8. Alerts, Anomaly Detection, Incidents & Learning Loop, part 2 — sections 4–14: the alert monitor, notification delivery, outcome capture, repair issues, resolve integrity"
 seg	docs/reference/09-learning-loop.md	"## 9. The Online Learning Loop (shadow models, online regression, model health)"	"9. The Online Learning Loop (shadow models, online regression, model health)"
 seg	docs/reference/10-audible-broadcast.md	"## 10. Audible Broadcast, Chimes & Text-to-Speech"	"10. Audible Broadcast, Chimes & Text-to-Speech"
-seg	docs/reference/11-user-interfaces.md	"## 11. User Interfaces: Web Dashboard & Telnet TUI"	"11. User Interfaces: Web Dashboard & Telnet TUI"
+seg	docs/reference/11-user-interfaces.md	"## 11. User Interfaces: Web Dashboard & SSH TUI"	"11. User Interfaces: Web Dashboard & SSH TUI"
 seg	docs/reference/12-configuration-deployment-security.md	"## 12. Configuration, Deployment, Security & Operations"	"12. Configuration, Deployment, Security & Operations"
 seg	docs/reference/13-safety-plumbing.md	"## 13. Safety & Operational Plumbing"	"13. Safety & Operational Plumbing"
 seg	docs/reference/14-lighting-and-hvac.md	"## 14. Intelligent Lighting & HVAC Posture (energy-aware automation)"	"14. Intelligent Lighting & HVAC Posture (energy-aware automation)"
@@ -73,7 +73,7 @@ anchor	8-alerts-anomaly-detection-incidents--learning-loop	08-1-alerts.md	8-aler
 anchor	9-the-online-learning-loop-shadow-models-online-regression-model-health	09-learning-loop.md	9-the-online-learning-loop-shadow-models-online-regression-model-health
 anchor	10-audible-broadcast-chimes--text-to-speech	10-audible-broadcast.md	10-audible-broadcast-chimes--text-to-speech
 anchor	26-release-log-all-subsystems	../history/engineering-release-log-1.md	26-release-log-all-subsystems
-anchor	11-user-interfaces-web-dashboard--telnet-tui	11-user-interfaces.md	11-user-interfaces-web-dashboard--telnet-tui
+anchor	11-user-interfaces-web-dashboard--ssh-tui	11-user-interfaces.md	11-user-interfaces-web-dashboard--ssh-tui
 anchor	3-hacs-lovelace-cards--removed-v1470	../history/operations-audits.md	3-hacs-lovelace-cards--removed-v1470
 anchor	12-configuration-deployment-security--operations	12-configuration-deployment-security.md	12-configuration-deployment-security--operations
 anchor	full-configyaml-option-reference	../guide/options.md	-

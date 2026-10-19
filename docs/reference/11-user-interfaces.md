@@ -1,20 +1,20 @@
-## 11. User Interfaces: Web Dashboard & Telnet TUI
+## 11. User Interfaces: Web Dashboard & SSH TUI
 
 The ecoflow-panel add-on exposes the same underlying fleet telemetry through **two independent front ends**, each aimed at a different consumption context:
 
 | UI | Transport | Where it runs | Auth posture |
 |---|---|---|---|
 | **React web dashboard (PWA)** | WebSocket `/ws` + REST `/api/*` | Browser at `:8787` or via HA Ingress sidebar | Same-origin; writes need ingress/same-origin/token |
-| **Control-room TUI** | Raw telnet TCP `:2323` **and** browser xterm.js at `/console` | `nc`/`telnet` client, or browser | LAN-trust by default; opt-in operator login via `TUI_PASSWORD` (§11 2.3) |
+| **Control-room TUI** | SSH `:2323` **and** browser xterm.js at `/console` | `ssh` client, or browser | SSH: password login with `TUI_USERNAME` / `TUI_PASSWORD`, every login refused until a password is set; browser: LAN-trust by default, opt-in login card via `TUI_PASSWORD` (§11 2.3) |
 
 Both read the **same `FleetSnapshot`** the server pushes over `/ws` on every snapshot change, plus the same analytics REST endpoints. This document is a features-and-navigation reference for each surface.
 
-The server that backs both is a single Fastify instance (`server/src/index.ts`) listening on port **8787** (web + REST + WS), with the raw telnet listener on **2323**. Both ports are declared in the add-on `config.yaml`:
+The server that backs both is a single Fastify instance (`server/src/index.ts`) listening on port **8787** (web + REST + WS), with the SSH listener on **2323**. Both ports are declared in the add-on `config.yaml`:
 
 ```yaml
 ports:
   8787/tcp: 8787         # Web dashboard + REST API + WebSocket
-  2323/tcp: 2323         # Telnet "control-room" TUI (off by default; optional login — keep on a trusted LAN)
+  2323/tcp: 2323         # SSH "control-room" TUI (off by default; password login — every login refused until a Console Password is set)
 ingress: true
 ingress_port: 8787
 panel_icon: mdi:home-battery
@@ -191,48 +191,61 @@ The palette itself lives in CSS variables under `[data-theme="..."]` selectors i
 
 ---
 
-### 2. Control-room TUI (telnet + browser)
+### 2. Control-room TUI (SSH + browser)
 
 A SCADA/power-plant-styled terminal UI. The per-session render/input state machine (`server/src/telnet/session.ts`, class `TuiSession`) is **transport-agnostic** and is driven by two front ends that share it plus the same refreshed data caches (`dataProvider.ts` — energy totals, day-ahead forecast, degradation):
 
-- **Raw telnet TCP** (`telnet/server.ts`) on **:2323** — speaks just enough telnet IAC to put a client in character-at-a-time mode + NAWS (window-size) negotiation, enters the alt-screen buffer, and renders at 1 Hz.
+- **SSH** (`telnet/server.ts`) on **:2323** — the `ssh2` library inside the Node process, behind a plain `node:net` server that owns TCP: it applies the connection caps, TCP keep-alive, the idle reclaim and the login grace, then hands each socket to ssh2 (`injectSocket`; ssh2 reports a connection only after the client's version line, so sockets are paired with connections by peer address and port). Logins are password only, against `TUI_USERNAME` / `TUI_PASSWORD` (`verifyConsoleCredentials`, the login card's constant-time compare); the session opens already authenticated (`preAuthenticated`), enters the alt-screen buffer and renders at 1 Hz. One terminal per connection: the pty request gives the initial size (80×24 without one) and `window-change` resizes it through the `naws` event the browser console uses; the session holds both to 60–200 columns × 16–80 rows whatever the request's 32-bit cols and rows say, since the renderer allocates a line per row on every 1 Hz frame; exec and subsystems (sftp) are refused. `parseInput()` turns the terminal's bytes into `InputEvent`s (arrows via CSI/SS3, CR/LF, Ctrl-C, Tab, Backspace/DEL, printable ASCII), holding back an incomplete trailing sequence; it strips no telnet IAC any more. The ed25519 host key is generated on first start at `/data/ssh_host_ed25519_key` (0600, written through a rename), reused afterwards and replaced with a warning if it does not parse; its SHA256 fingerprint is on the startup log line at every start. Accept and teardown are logged, teardown with the session duration and the remaining active count.
 - **Browser web terminal** (`telnet/wsConsole.ts`) at **`/console`** on `:8787` — serves a self-contained xterm.js page over a WebSocket (`/console/ws`), vendoring `xterm.js`/`xterm.css` from `node_modules` (no CDN). Suitable for an HA `panel_iframe` at `http://<host>:8787/console`.
 
 #### 2.1 How to connect
 
 ```
-nc <host> 2323          # or:  telnet <host> 2323
+ssh -p 2323 <user>@<host>       # <user> is TUI_USERNAME (operator when empty)
 ```
 
-Gated by `TELNET_ENABLED` (bare-env default on; the SHIPPED add-on options default is `TELNET_ENABLED: false` — enable it in the add-on configuration). Host defaults to `::`, port to `2323` (`config.ts`: `TELNET_HOST`, `TELNET_PORT`). The browser variant needs no client — open `/console`.
+Gated by `SSH_ENABLED` (bare-env default on; the SHIPPED add-on options default is `SSH_ENABLED: false` — enable it in the add-on configuration). `TELNET_ENABLED` and `TELNET_PORT` are kept as deprecated aliases (an option key is never renamed): either enabled option serves SSH, and `SSH_PORT` at its default `2323` defers to a changed `TELNET_PORT`; `resolveSshConfig` (`config.ts`) applies the aliases and the call site logs one boot notice per alias that decided a value. Host defaults to `::` (`SSH_HOST`), port to `2323` (`SSH_PORT`), the host key to `/data/ssh_host_ed25519_key` (`SSH_HOST_KEY`); the run script exports all four. The first connection shows the host key fingerprint, which is on the add-on's startup log line. The browser variant needs no client — open `/console`.
 
-By default the TUI is **unauthenticated** on both transports — read-only telemetry meant for a trusted LAN (the `ports_description` explicitly warns so); setting `TUI_PASSWORD` enables the operator login on both (§2.3). The `/console/ws` upgrade rejects a cross-origin `Origin`, accepting same-origin, LAN, and missing-Origin. The blanket `*.ui.nabu.casa` match was **removed in v1.47.3** as a CSWSH hole — a wildcard would let any HA Cloud tenant pass a gate that is not same-origin-protected. Remote access is via HA ingress (auth-gated) or an exact-match `TUI_TRUSTED_ORIGINS` entry.
+With no `TUI_PASSWORD` the SSH console **refuses every login**, and the log says why once per connection — an SSH port that admits anyone would only look safer than the telnet port it replaced — while the browser console opens straight in: read-only telemetry meant for a trusted LAN. Setting `TUI_PASSWORD` is the login on both (§2.3). The `/console/ws` upgrade rejects a cross-origin `Origin`, accepting same-origin, LAN, and missing-Origin. The blanket `*.ui.nabu.casa` match was **removed in v1.47.3** as a CSWSH hole — a wildcard would let any HA Cloud tenant pass a gate that is not same-origin-protected. Remote access is via HA ingress (auth-gated) or an exact-match `TUI_TRUSTED_ORIGINS` entry.
 
 #### 2.2 Hardening (DoS guards)
 
 Both transports cap concurrency and reap idle sessions so a LAN flood can't spawn unbounded 1 Hz render timers on the single-threaded event loop:
 
-- Telnet: `MAX_TELNET_CONNS = 16`, `TELNET_IDLE_TIMEOUT_MS = 5 min` (reset on any inbound byte; over-cap connections get a banner and close). Inbound buffer capped at 4096 bytes.
+- SSH: `MAX_SSH_CONNS = 16` and `MAX_SSH_CONNS_PER_IP = 4` (over-cap connections get a banner and close; a refused socket is destroyed after `REFUSE_LINGER_MS = 1 s` unless the peer closes first), `SSH_IDLE_TIMEOUT_MS = 5 min` of nothing RECEIVED (the 1 Hz redraw never keeps a dead peer alive), `SSH_KEEPALIVE_MS = 60 s` TCP keep-alive on every connection, and `SSH_AUTH_GRACE_MS = 2 min` for a connection that has not logged in (a client sending keep-alives cannot park at the password prompt). Inbound buffer capped at 4096 bytes.
 - WS console: parity `MAX_WS_SESSIONS` / `WS_IDLE_TIMEOUT_MS` + `maxPayload`-bounded frames.
 
 #### 2.3 Operator login (v1.46.0)
 
-When a console password is configured (`TUI_PASSWORD` option, non-empty), every
-session — telnet and `/console` alike — starts at a login prompt (`telnet/login.ts`)
-rendered in the same pseudo-LCD lettering as the console brand. `TUI_USERNAME`
-defaults to `operator` when left empty. The input state machine lives in the
-transport-agnostic session driver, so both transports share one implementation:
-printable keys type into the active field (password echoes masked), backspace
-edits, TAB switches fields, ENTER advances username → password → verify.
-Credential comparison is constant-time (fixed-length buffers through
-`timingSafeEqual`, so neither content nor length leaks). Brute-force is
-bounded twice: three failed attempts disconnect the session, and a
-cross-session sliding-window throttle (10 failures per 10 minutes, shared by
-both transports) refuses further submits outright while saturated. `q` does not quit at the prompt (it is a legitimate credential
-character); `Ctrl-C` always disconnects. With no password configured the
-session opens straight into the console — the login layer is opt-in, and
-classic telnet is unencrypted, so the prompt is LAN-level access control, not
-transport security.
+When a console password is configured (`TUI_PASSWORD` option, non-empty), the SSH
+transport checks it at the protocol level (password authentication; the `none`
+method is told to try a password) and every `/console` session starts at a login
+prompt (`telnet/login.ts`) rendered in the same pseudo-LCD lettering as the console
+brand. `TUI_USERNAME` defaults to `operator` when left empty. The card's input state
+machine lives in the transport-agnostic session driver: printable keys type into the
+active field (password echoes masked), backspace edits, TAB switches fields, ENTER
+advances username → password → verify. Credential comparison is constant-time on both
+paths (`verifyConsoleCredentials`: fixed-length buffers through `timingSafeEqual`,
+both compares always evaluated, so neither content nor length nor which field was
+wrong leaks). Brute-force is bounded twice: three failed attempts end the connection,
+and a per-address sliding-window throttle (10 failures per 10 minutes from one address)
+refuses that address's logins outright while saturated, the right password included
+(verifying it would hand the address an oracle); a login that succeeds clears its
+address. Both transports count under the peer's socket address — the SSH server its
+connection's, the browser card the raw `remoteAddress` (never a forwarded header a
+client could choose) — and an IPv4 peer of the dual-stack listener (`::ffff:a.b.c.d`)
+shares the plain address's window, so one host spends one budget over either
+transport. Browser sessions that arrive through Home Assistant Ingress all reach the
+add-on from the Supervisor's address (`isSupervisorSource`, `auth.ts`), so they share one
+window among themselves, which no LAN host's failures can saturate. At most
+`AUTH_THROTTLE_MAX_PEERS = 4096` addresses are kept; beyond that
+the oldest entry is dropped. Until 1.190.0 the window was one for every connection
+(v1.46.0), so ten failures from one LAN host refused every other host's correct
+password for the rest of the ten minutes. Usernames are never
+logged. `q` does not quit at the card (it is a legitimate credential character);
+`Ctrl-C` always disconnects. With no password configured the browser session opens
+straight into the console — its login layer is opt-in, LAN-level access control —
+and the SSH console refuses every login.
 
 #### 2.4 The console (`telnet/plant/`)
 

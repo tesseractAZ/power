@@ -600,7 +600,7 @@ export class SnapshotStore extends EventEmitter {
       // the bare serial (v0.75.0 — resolveDeviceName), then the raw serial.
       const name = deviceAliases[d.sn] ?? resolveDeviceName(d.deviceName, d.productName, d.sn);
       // v1.7.0 (security #2) — strip terminal control/ESC bytes from the
-      // cloud/alias-sourced display name before it can reach the telnet render.
+      // cloud/alias-sourced display name before it can reach the TUI render.
       const displayName = sanitizeDisplayName(name, 48, d.sn);
       if (existing != null && existing.online !== newOnline) {
         this.logger(`device-list: ${existing.deviceName} (${d.sn}) → ${newOnline ? 'ONLINE' : 'OFFLINE'} per EcoFlow Cloud`);

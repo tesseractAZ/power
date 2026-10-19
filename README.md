@@ -9,7 +9,7 @@ It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST polled every
 60 s, plus live MQTT), persists a per-metric SQLite time-series, runs
 **~40 analytics engines** in a worker thread, and serves the results four ways:
 a **web dashboard** (React + Tailwind CSS 4, also in the Home Assistant sidebar
-through Ingress), a **control-room TUI** (telnet, and the same console in the
+through Ingress), a **control-room TUI** (over SSH, and the same console in the
 browser), **Home Assistant MQTT-discovery entities** (about 100 sensors, binary
 sensors and alarm-priority switches, plus a power and an energy sensor for every
 Smart Home Panel 2 circuit; the energy counters feed the Energy Dashboard), and
@@ -210,8 +210,8 @@ exactly what the app renders.
   predictive sections live on their home pages, and the Alert Console is a
   sub-view of Alerts), built with React and Tailwind CSS 4, served on the LAN and
   through HA Ingress.
-- **Control-room TUI** (Plant-Operator console, display-only) over telnet — off by
-  default, with an optional operator login — and in the browser at `/console`.
+- **Control-room TUI** (Plant-Operator console, display-only) over SSH — off by
+  default, password login with the console credentials — and in the browser at `/console`.
 - **Data out:** a consistent SQLite snapshot published to `/share` for external
   viewers, the vendor's own daily energy ledger exported to HA long-term
   statistics, and a pack warranty evidence bundle.
@@ -229,7 +229,7 @@ EcoFlow cloud ────────▶ snapshot store ──▶ SQLite record
                                              lifetime accum.)        ├─▶ HTTP API  (:8787)
                                                                      ├─▶ HA MQTT-discovery entities
                                                                      ├─▶ React web UI
-                                                                     ├─▶ telnet TUI (:2323)
+                                                                     ├─▶ SSH TUI (:2323)
                                                                      └─▶ runway alarm ─▶ audible broadcast
 ```
 
@@ -261,9 +261,10 @@ For a Pi running Home Assistant OS or Supervised:
    `ECOFLOW_ACCESS_KEY` / `ECOFLOW_SECRET_KEY` and site location, then **Start**.
 5. Open the add-on's **Web UI** (HA ingress), or reach the trusted-LAN data API at
    `http://<host>:8787`. The control-room console is always available in a browser at
-   `http://<host>:8787/console`; its telnet transport (`nc <host> 2323`) is **off by default** —
-   set `TELNET_ENABLED: true` in Configuration first (and, on a shared LAN, set
-   `TUI_PASSWORD` to require an operator login).
+   `http://<host>:8787/console`; its SSH transport (`ssh -p 2323 <user>@<host>`) is **off by
+   default** — set `SSH_ENABLED: true` and a `TUI_PASSWORD` in Configuration first (every SSH
+   login is refused until a password is set; the first connection shows the host key
+   fingerprint, which is printed in the add-on log at every start).
 
 Every configuration option, with its default and allowed range, is in
 [`docs/guide/options.md`](docs/guide/options.md); the operator guide's
@@ -276,7 +277,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 
 | Path | What it is |
 |------|-----------|
-| `server/` | Node/TypeScript server — ingest, recorder, ~40 analytics engines, HTTP API, MQTT discovery, broadcast/TTS, telnet TUI |
+| `server/` | Node/TypeScript server — ingest, recorder, ~40 analytics engines, HTTP API, MQTT discovery, broadcast/TTS, SSH TUI |
 | `web/` | React dashboard (Vite) |
 | `ecoflow_panel/` | Add-on manifest (`config.yaml`), `translations/`, `DOCS.md` (the operator guide, on the Documentation tab), `README.md` (the Info-tab card), `CHANGELOG.md` (+ archive), AppArmor profile |
 | `rootfs/` | s6 service runner (`etc/services.d/ecoflow-panel/run`) — the options→env bridge that turns the add-on Configuration into the server's environment |
@@ -288,7 +289,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 5,227 tests
+cd server && npm install && npm test     # 5,257 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -345,7 +346,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **118 harnesses** (`scripts/mutate-*.mjs`) holding **3474
+regression. There are **119 harnesses** (`scripts/mutate-*.mjs`) holding **3521
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that
@@ -384,9 +385,9 @@ See [`SECURITY.md`](SECURITY.md) for the vulnerability-reporting policy and the
 security posture: an AppArmor profile narrowed to two capabilities and the socket
 types in use; device writes off by default (`NIGHT_CHARGE_MODE: advisory`) and,
 when enabled, bounded, announced and audit-logged; every write endpoint behind
-Ingress, same-origin or token authorization; the telnet TUI off by default (the
-same read-only console is served at `/console`, behind the `TUI_PASSWORD` login
-when one is set); secrets handled presence-only (never logged or echoed); and a
+Ingress, same-origin or token authorization; the SSH TUI off by default and
+refusing every login until a `TUI_PASSWORD` is set (the same read-only console is
+served at `/console`, behind that login once one is set); secrets handled presence-only (never logged or echoed); and a
 supply chain held by SHA-pinned actions, a digest-pinned base image, a
 dependency-advisory gate and a CodeQL gate.
 

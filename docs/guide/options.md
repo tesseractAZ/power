@@ -101,14 +101,16 @@ common ones by goal.
 | `MQTT_DISCOVERY_PASS` | `""` | `password?` | MQTT password. |
 | `MQTT_DISCOVERY_PREFIX` | `homeassistant` | `str?` | MQTT discovery topic prefix. |
 
-#### Telnet control-room TUI (LAN-only; unauthenticated unless a console password is set)
+#### SSH control-room TUI (LAN; password login)
 
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
-| `TELNET_ENABLED` | `false` | `bool` (→ `1`/`0`) | **Default OFF** (CWE-1188). An unauthenticated control-plane on the LAN shouldn't be on by default. Existing installs keep their saved value on upgrade. |
-| `TELNET_PORT` | `2323` | `port` | Telnet TUI port. |
+| `SSH_ENABLED` | `false` | `bool` (→ `1`/`0`) | **Default OFF** (CWE-1188). Serves the console over SSH on `SSH_PORT`: `ssh -p 2323 <user>@<host>`, logging in with `TUI_USERNAME` / `TUI_PASSWORD`; every login is refused until a password is set. The host key fingerprint is in the add-on log at every start. |
+| `SSH_PORT` | `2323` | `port` | SSH TUI port inside the container (the published port). While it is `2323` and `TELNET_PORT` is not, `TELNET_PORT` applies. |
+| `TELNET_ENABLED` | `false` | `bool` (→ `1`/`0`) | Deprecated alias of `SSH_ENABLED`: while on, the console is served over SSH exactly as if `SSH_ENABLED` were on (telnet is no longer served). Turn both off to close the port. |
+| `TELNET_PORT` | `2323` | `port` | Deprecated alias of `SSH_PORT`, applied only while `SSH_PORT` is at its default `2323`. |
 | `TUI_USERNAME` | empty | `str?` | Console login username (defaults to `operator` when empty and a password is set). |
-| `TUI_PASSWORD` | empty | `password?` | Console login password; empty disables the login prompt. Masked in the options UI. |
+| `TUI_PASSWORD` | empty | `password?` | Console login password; empty turns the browser console's login prompt off and makes the SSH console refuse every login. Masked in the options UI. |
 | `TUI_TRUSTED_ORIGINS` | empty | `str?` | Comma-separated EXACT browser origins (for example one specific Nabu Casa URL) added to the same-origin set. A listed origin can open `/console/ws` and `/ws`, **and it passes the write-auth gate with no token** ([write-auth gate](../reference/12-configuration-deployment-security.md#write-auth-gate-requirewriteauth-serversrcauthts), condition 2). Empty = LAN + ingress only. |
 
 #### Night-charge engine

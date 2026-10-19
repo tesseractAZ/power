@@ -1,5 +1,5 @@
 /**
- * ANSI terminal primitives for the telnet control-room TUI.
+ * ANSI terminal primitives for the control-room TUI.
  *
  * Everything here is "visible-width aware": colour escape codes do not count
  * toward layout width, so padding/truncation stays correct after styling.

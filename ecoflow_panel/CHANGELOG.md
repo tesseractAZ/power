@@ -1,4 +1,4 @@
-## 1.189.1
+## 1.190.1
 
 ### The panel card names the per-battery charge limit; the Cleared list opens on 7 days; the live solar reading stays trusted; the Midday-Charge window sensors are timestamps again
 
@@ -27,6 +27,30 @@
 
 - The configuration reference stated that the overnight charger delivers at most 7.2 kW × 6 h = 43.2 kWh. That read the per-battery limit as the pool's; it now states the measured envelope (about 17 kW into three Cores at a 19.1 kW main) and refers to the night-charge reference, which records the per-Core peaks of 13–14 October.
 - The night-charge reference and the entity table describe the Midday-Charge window sensors as timestamps, and state how Home Assistant's MQTT sensor reads an empty value.
+
+## 1.190.0
+
+### The LAN console is served over SSH; telnet is no longer served
+
+**Console**
+
+- The control-room console on port 2323 is served over SSH: `ssh -p 2323 <console user>@<host>`, where the console user is `TUI_USERNAME` (`operator` when empty). Logins are password only, with `TUI_PASSWORD`; every login is refused until a password is set, and the add-on log says so once per connection. Telnet sent the login and everything on screen in clear text; a telnet client no longer connects.
+- Three failed attempts end the connection, and ten failures within ten minutes from one address refuse that address's logins, the right password included, until the ten minutes are up; a login that succeeds clears its address, and other addresses are not affected. The browser console's login card counts the same way, under the address its connection comes from, so one host's failures over either transport spend one budget; browser sessions that arrive through Home Assistant Ingress all reach the add-on from the Supervisor's address and share one window among themselves. Until this release the ten-failure window was one for every connection, so ten failures from any one host on the LAN refused the operator's correct password from every other host for the rest of the ten minutes. A connection that has not logged in within two minutes is ended. Usernames and passwords are never logged.
+- The host key (ed25519) is generated on the first start in `/data` and kept; its fingerprint is on the startup log line at every start, to compare with what `ssh` shows on the first connection. A host key file that does not parse is replaced, and the log says so.
+- One terminal per connection. The window size comes from the SSH client and follows resizes, held to 60–200 columns by 16–80 rows whatever the client asks for; exec, sftp and port forwarding are refused. 16 connections, 4 per address; a connection that receives nothing for 5 minutes is closed; TCP keep-alive on every connection. Accept and teardown are logged, teardown with the session duration.
+- The browser console at `/console` is unchanged and keeps its login card.
+
+**Configuration**
+
+- `SSH_ENABLED` (off by default) and `SSH_PORT` (2323) are added. `TELNET_ENABLED` and `TELNET_PORT` stay as deprecated aliases: an install with `TELNET_ENABLED` on comes up over SSH on the same port with no option change, and the log names the option that applied. Either enabled option serves SSH; `SSH_PORT` at its default defers to a changed `TELNET_PORT`. To close the port, turn both enabled options off.
+
+**Updating**
+
+- Use an SSH client in place of telnet: `ssh -p <port> <console user>@<host>`. The first connection shows the host key fingerprint, which is printed in the add-on log. Updating restarts the add-on.
+
+**Dependencies**
+
+- ssh2 1.17.0 (and @types/ssh2 for the type check).
 
 ## 1.189.0
 
