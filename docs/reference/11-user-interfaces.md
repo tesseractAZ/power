@@ -130,7 +130,7 @@ Fleet thermal + per-pack detail. A **SummaryStrip** (Avg SoC, Avg SoH, hottest p
 
 SHP2 dispatch strategy of the house panel (`findHousePanel`, v1.185.0), read from its projection only while that panel is online; otherwise the tab shows a "SHP2 not available" card plus the predictive strip. With the panel online, top to bottom:
 
-- **NightChargeCard** — tonight's night-charge plan from `/api/night-charge/status`, with the cancel button (§15.9).
+- **NightChargeCard** — tonight's night-charge plan from `/api/night-charge/status`, with the cancel button in every shape the card takes (§15.9).
 - The predictive strip — `AdvancedInsightsCard` filtered to `['ev-window', 'nws']` (EV-charging window prediction + NWS weather alerts).
 - A **Maintenance** block (v1.135.0) with `DbExportButton`: the published database copy and its age (`/api/db-export`).
 - The live SHP2 state: tiles for mid-priority discharge floor SoC, backup reserve SoC (+enabled), solar backup reserve SoC, and raw SHP2 mode codes (smart-backup mode, backup mode, overload mode); a **circuit-priority ranking** (`PriorityRow` per paired circuit, ranked); a **charge time-task** panel (task type, repeat mode, charge ceiling/floor SoC, charge watts) with a **DayTimeline** of charge windows and a "now" marker.

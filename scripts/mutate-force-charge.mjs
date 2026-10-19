@@ -112,9 +112,11 @@ const MUTANTS = [
   {
     id: 'xii. ★★★ arming buries a force-charge whose OFF never verified',
     file: ACT,
-    find: '  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) return null;',
-    to: '  /* MUTANT */',
-    why: 'The next 21:30 arming returns a fresh record and erases the only record that knows to switch the stuck force-charge off.',
+    // v1.189.0 — re-pointed: armFromPlan refuses on armOpenItem (one definition, shared with the
+    // charge cycle's legResolved); here an OFF merely SENT counts as verified.
+    find: '  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) {\n    return `the ${night} force-charge was switched ON',
+    to: '  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffAtMs == null) { /* MUTANT */\n    return `the ${night} force-charge was switched ON',
+    why: 'The next 21:30 arming returns a fresh record over an OFF that never read back, and erases the only record that knows to switch the stuck force-charge off.',
   },
   {
     id: 'xiii. ★★★ the force-charge step is never called',
@@ -206,7 +208,7 @@ const MUTANTS = [
   {
     id: 'xv. ★★★ just-in-time is removed (starts at the window open, then the house drains it)',
     file: FC,
-    find: '  if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above',
+    find: '  if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above',
     to: '  if (false) { /* MUTANT */',
     why: 'Force-charge reaches the target at ~02:00 and the house draws the pack back toward the 50% reserve for three hours — ~57% at dawn instead of 64%.',
   },
@@ -268,15 +270,15 @@ const MUTANTS = [
   {
     id: 'xxxiii. ★★ the deadline takes the EARLIER bound',
     file: FC,
-    find: '  return fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
-    to: '  return fromOff != null ? Math.min(fromOff, fromWindow) : fromWindow; /* MUTANT */',
+    find: '  const later = fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
+    to: '  const later = fromOff != null ? Math.min(fromOff, fromWindow) : fromWindow; /* MUTANT */',
     why: 'A 03:00 target OFF slow to verify pages the house at 03:30 over a force-charge that costs nothing extra inside the cheap window.',
   },
   {
     id: 'xxxiv. ★★★ the deadline only counts from an OFF that was sent',
     file: FC,
-    find: '  return fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
-    to: '  return fromOff; /* MUTANT */',
+    find: '  const later = fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
+    to: '  if (fromOff == null) return null; /* MUTANT */\n  const later = fromOff;',
     why: 'A tick that never ran at 05:00 never sends the OFF, so the deadline never starts — the one case it exists for.',
   },
   {
@@ -392,7 +394,8 @@ const MUTANTS = [
   {
     id: 'l. ★★ the deadline page is never recorded',
     file: IDX,
-    find: '    forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,',
+    // v1.189.0 — re-pointed: the escalation writes through its leg slot (active or trailing).
+    find: '      forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : leg.get().forceChargeOffDeadlinePagedAtMs,',
     to: '    /* MUTANT */',
     why: 'The deadline re-pages audibly on every tick once it has passed.',
   },

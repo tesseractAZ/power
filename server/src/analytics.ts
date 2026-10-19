@@ -1,5 +1,6 @@
 import type { DeviceSnapshot } from './snapshot.js';
-import { rateAt, apsREvModelFromEnv, seasonAt, onPeakWindowStrings, type TariffModel } from './tariff.js';
+import { rateAt, apsREvModelFromEnv, seasonAt, onPeakWindowStrings, APS_PERIOD, type TariffModel } from './tariff.js';
+import { saturationThresholdPct, meanChargeCeilingPct } from './chargeTaper.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
@@ -16,6 +17,7 @@ import { allDpus, homeConnectedDpus, reportBasisKey } from './analytics/fleet.js
 import { cacheWritable, basisGeneration, runInBasisGeneration } from './analytics/flightBasis.js';
 import { WARM_INTERVAL_MS } from './analytics/warmCadence.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
+import { middayChargeHourEpochs, withoutHourEpochs } from './nightLedgerScoring.js';
 import { PoolEnergyBasisTracker, defaultPoolEnergyBasisPath, NAMEPLATE_BASIS, type PoolEnergyBasis, type CapacityBasis } from './poolEnergyBasis.js';
 import {
   curtailmentDaySettled, frozenCurtailmentDay, freezeCurtailmentDay, pruneFrozenCurtailmentDays, persistFrozenCurtailmentDays,
@@ -1259,6 +1261,10 @@ export interface DayForecast {
    *  probabilistic band inverts and seeds with the same figure; a forecast without it (hand-built)
    *  is read as 0, the pre-v1.187.19 drain it was built with. */
   poolOverheadW?: number;
+  /** R5 (v1.189.0) — when the weather this forecast was built on was fetched (weather.ts
+   *  `fetchedAt`); null with no weather. The morning refresh judges the forecast's freshness by it
+   *  (getDayForecast's `maxWeatherAgeMs`). Absent on hand-built forecasts. */
+  weatherFetchedAtMs?: number | null;
   /** v1.178.0 — true when the published (display) basis has NO PV history to project from:
    *  neither a projected home Core nor a connected-but-unprojected one has recorded pv_total
    *  (before the first poll, or a cold recorder). The PV figures are then a
@@ -1352,6 +1358,29 @@ function incompleteForecastTtlMs(): number {
   return Math.max(0, Number(process.env.INCOMPLETE_FORECAST_TTL_MS ?? 150 * 1000));
 }
 const TYPICAL_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** R4 (v1.189.0) — how far back the ledger is read for the mid-day charge hours: past the longest
+ *  learner window that drops them (the Bayesian posterior's 60 days). */
+const CHARGE_HOURS_LEDGER_DAYS = 62;
+/**
+ * R4 (v1.189.0) — plan §4 item 9, the accounting part: the hour epochs a mid-day charge of ours held
+ * the pool (nightLedgerScoring.middayChargeHourEpochs over the ledger). The soiling estimate, the
+ * Bayesian solar posterior and the PV bias hindcast drop them. Overnight rows contribute none, so
+ * the set is empty until the mid-day switch. A recorder without the ledger (a test double) or a
+ * failed read is an empty set: dropping nothing is what every learner did before.
+ */
+function middayChargeHoursFromLedger(recorder: Recorder): Set<number> {
+  try {
+    const read = (recorder as Partial<Recorder>).readNightLedger;
+    return typeof read === 'function' ? middayChargeHourEpochs(read.call(recorder, CHARGE_HOURS_LEDGER_DAYS)) : new Set<number>();
+  } catch {
+    return new Set<number>();
+  }
+}
+/** `pts` without the samples inside `drop`'s hour epochs; the same array when there is nothing to drop. */
+function withoutChargeHourPoints<P extends { ts: number }>(pts: P[], drop: ReadonlySet<number>): P[] {
+  return drop.size === 0 ? pts : pts.filter((p) => !drop.has(Math.floor(p.ts / 3_600_000)));
+}
 const MIN_RESPONSE_PAIRS = 2;   // min daylight (GHI,PV) pairs to fit an hour
 const DAYLIGHT_GHI = 20;        // W/m² — below this is night/near-night
 /* v1.20.0 (engine-review F21) — minimum slot MEAN GHI for the headline peak
@@ -2039,12 +2068,21 @@ function dayForecastCacheUsable(devices: Record<string, DeviceSnapshot>, now: nu
   return sns == null || sns.join(',') === homeModelSns(devices).join(',');
 }
 
-/** Phase 4: equipment-tuned day-ahead PV / load / SoC forecast. Cached ~30 min. */
+/** Phase 4: equipment-tuned day-ahead PV / load / SoC forecast. Cached ~30 min.
+ *
+ *  R5 (v1.189.0) — `maxWeatherAgeMs`: a caller that needs the forecast built on weather at most that
+ *  old (the morning refresh, plan §3.4). The weather is re-fetched first when it is older
+ *  (getWeather's own cache is 2 h), and a cached or in-flight forecast is served only when it was
+ *  built on that same weather; otherwise the forecast is rebuilt on it. A failed fetch leaves the
+ *  stale weather in place, and the forecast says so (`weatherFetchedAtMs`): the caller judges it.
+ *  Absent — every caller but the morning refresh — the path is exactly as before. */
 export async function getDayForecast(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
   log: (m: string) => void = () => {},
+  opts: { maxWeatherAgeMs?: number } = {},
 ): Promise<DayForecast> {
+  if (opts.maxWeatherAgeMs != null) return getDayForecastOnWeather(devices, recorder, log, opts.maxWeatherAgeMs);
   if (dayForecastCacheUsable(devices, Date.now())) {
     return dayForecastCache!.value;
   }
@@ -2063,12 +2101,40 @@ export async function getDayForecast(
   return p;
 }
 
+/** R5 — the forecast built on the weather a `maxWeatherAgeMs` caller accepts (getDayForecast). */
+async function getDayForecastOnWeather(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  log: (m: string) => void,
+  maxWeatherAgeMs: number,
+): Promise<DayForecast> {
+  const wx = await getWeather(log, { maxAgeMs: maxWeatherAgeMs });
+  const wxAt = wx?.fetchedAt ?? null;
+  const onIt = (f: DayForecast): boolean => (f.weatherFetchedAtMs ?? null) === wxAt;
+  if (dayForecastCacheUsable(devices, Date.now()) && onIt(dayForecastCache!.value)) return dayForecastCache!.value;
+  // A flight in progress is joined, and kept only when it was built on that weather.
+  const flightKey = reportBasisKey(devices);
+  const joined = dayForecastFlights.get(flightKey);
+  if (joined) {
+    const v = await joined;
+    if (onIt(v)) return v;
+  }
+  const p: Promise<DayForecast> = computeDayForecastUncached(devices, recorder, log, wxAt)
+    .finally(() => { if (dayForecastFlights.get(flightKey) === p) dayForecastFlights.delete(flightKey); });
+  dayForecastFlights.set(flightKey, p);
+  return p;
+}
+
 async function computeDayForecastUncached(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
   log: (m: string) => void,
+  /** R5 — a cached forecast is reused only when built on the weather fetched at this instant
+   *  (getDayForecastOnWeather); undefined: any cached forecast, as before. */
+  onWeatherAtMs?: number | null,
 ): Promise<DayForecast> {
-  if (dayForecastCacheUsable(devices, Date.now())) {
+  if (dayForecastCacheUsable(devices, Date.now())
+    && (onWeatherAtMs === undefined || (dayForecastCache!.value.weatherFetchedAtMs ?? null) === onWeatherAtMs)) {
     return dayForecastCache!.value; // a prior flight may have populated it while we queued
   }
   const now = Date.now();
@@ -2269,8 +2335,12 @@ async function computeDayForecastUncached(
   const biasTodayStart = startOfLocalDayMs();
   const biasWindowStart = biasTodayStart - 7 * 86_400_000;
   const pvBySnForBias = new Map<string, Array<{ ts: number; value: number }>>();
+  // R4 — §4 item 9: the hours a mid-day charge of ours held the pool are not array evidence — a
+  // grid charge beside the sun takes acceptance the PV would have had (middayChargeHoursFromLedger;
+  // empty until the mid-day switch, so nothing read here changes before it).
+  const chargeHours = middayChargeHoursFromLedger(recorder);
   for (const d of homeDpus) {
-    pvBySnForBias.set(d.sn, recorder.query(d.sn, 'pv_total', biasWindowStart, biasTodayStart));
+    pvBySnForBias.set(d.sn, withoutChargeHourPoints(recorder.query(d.sn, 'pv_total', biasWindowStart, biasTodayStart), chargeHours));
   }
   const pvBiasFactor = computePvBiasCorrection(solarModel, ghiByEpoch, pvBySnForBias, biasTodayStart, undefined, log);
 
@@ -2512,7 +2582,8 @@ async function computeDayForecastUncached(
     poolOverheadW: poolBasis.overheadW,
     deviceModels,
     // v1.187.1 — an hour pairs only once its covering label predates the cache's fetch.
-    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,
+    // R4 — not the hours a mid-day charge of ours held the pool (middayChargeHoursFromLedger).
+    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps.map((m) => withoutHourEpochs(m, chargeHours)), wxByHour, homeCoreTaperHours, now, soilingPairedUntil(now, weather)) : null,
     homeDpusConnected: forecastCoverage.homeDpusConnected,
     homeDpusReporting: forecastCoverage.homeDpusReporting,
     homeDpusCoveragePartial: forecastCoverage.coveragePartial,
@@ -2564,6 +2635,8 @@ async function computeDayForecastUncached(
   // TTL before). Set before caching so the cached value carries it too.
   value.structurallyIncomplete = structurallyIncomplete;
   value.homeBasisPending = basisPending;
+  // R5 — the weather the forecast was built on (the morning refresh's freshness test).
+  value.weatherFetchedAtMs = weather?.fetchedAt ?? null;
   // On the PUBLISHED basis: the display figures are built on the restored curve, which
   // re-adds each connected-but-unprojected Core's own recorded PV — real figures even when
   // no home Core is projected (all wedged cloud-offline at a restart).
@@ -8017,48 +8090,21 @@ const CURTAIL_HISTORY_DAYS = 7;
 // automatically track whatever mode is active without needing a separate
 // storm-guard flag.
 //
-// v0.9.79 — curtailment doesn't begin AT the ceiling, it begins in the
-// CV/absorption taper BELOW it. As the LFP packs approach full, charge
-// acceptance falls and the DPU backs off its MPPTs to match (load +
-// dwindling charge current) — shedding the LV string first. Live evidence
-// from the operator's Core 3 (ceiling 100): the LV MPPT held ~900-1060 W all day,
-// then collapsed 698 W → 0 W as SoC climbed 88 → 90 %, while HV only
-// throttled partially. So real PV rejection starts ~10 % below the
-// ceiling, not 2 %. The saturation threshold is therefore `ceiling − band`
-// with a 10-point taper band. The downstream guards still prevent false
-// positives: the expected-vs-actual gap must exceed MIN_SURPLUS_W (so we
-// only fire when PV is genuinely being rejected, not merely tapering into
-// a battery that's still absorbing), and the PV-matched-to-load check
-// rejects bulk-charge hours where PV >> load.
-const CURTAIL_TAPER_BAND_PCT = 10;   // SoC band below the ceiling where shedding begins
+// v0.9.79 — the charge-taper band and the saturation threshold (`ceiling − band`) live in
+// chargeTaper.ts (R2), shared with the mid-day charge ceiling. The downstream guards still
+// prevent false positives: the expected-vs-actual gap must exceed MIN_SURPLUS_W (so we only fire
+// when PV is genuinely being rejected, not merely tapering into a battery that's still
+// absorbing), and the PV-matched-to-load check rejects bulk-charge hours where PV >> load.
 
 /**
  * Effective charge ceiling (%) for the home pool: mean of the
- * SHP2-connected DPUs' configured `chgMaxSoc`. Returns null when no DPU
- * reports one. Mean (not min) is the physically correct pool aggregate —
- * we compare it against mean SoC, and the pool is "saturated" only when
- * the average has reached the average ceiling (i.e. every DPU is at its
- * own limit). In the common case all DPUs share one ceiling, so mean =
- * that value.
+ * SHP2-connected DPUs' configured `chgMaxSoc` (chargeTaper.ts meanChargeCeilingPct).
+ * Returns null when no DPU reports one.
  */
 function homeChargeCeilingPct(
   homeDpus: Array<DeviceSnapshot & { projection: DpuProjection }>,
 ): number | null {
-  const ceilings = homeDpus
-    .map((d) => d.projection.chgMaxSoc)
-    .filter((v): v is number => v != null && v > 0);
-  if (ceilings.length === 0) return null;
-  return ceilings.reduce((s, v) => s + v, 0) / ceilings.length;
-}
-
-/** The SoC at/above which the pool enters the charge-taper band where PV
- *  shedding begins (curtailment can occur): `ceiling − taper band`. When no
- *  ceiling is reported we assume 100 (the EcoFlow default), so the fallback
- *  threshold is 90 — consistent with the taper-aware model rather than the
- *  old fixed 96. */
-function saturationThresholdPct(ceiling: number | null): number {
-  const eff = ceiling != null && ceiling > 0 ? ceiling : 100;
-  return Math.max(0, eff - CURTAIL_TAPER_BAND_PCT);
+  return meanChargeCeilingPct(homeDpus.map((d) => d.projection.chgMaxSoc));
 }
 
 // Phoenix off-grid home opportunistic loads. Estimated wattages are
@@ -8922,8 +8968,8 @@ export function tariffPricingView(
   return {
     onPeakCents: onPeakPeriod?.centsBySeason[season] ?? fallback.onPeak,
     offPeakCents: model.offPeak.centsBySeason[season] ?? fallback.offPeak,
-    overnightCents: inSeason('overnight')?.centsBySeason[season] ?? null,
-    superOffPeakCents: inSeason('super_off_peak')?.centsBySeason[season] ?? null,
+    overnightCents: inSeason(APS_PERIOD.OVERNIGHT)?.centsBySeason[season] ?? null,
+    superOffPeakCents: inSeason(APS_PERIOD.SUPER_OFF_PEAK)?.centsBySeason[season] ?? null,
     // isOnPeakHour answers from the table's on-peak period on a confirmed install.
     onPeakHours: win?.hours ?? legacy.hours,
     onPeakDays: win?.days ?? legacy.days,
@@ -9135,6 +9181,10 @@ export interface ForecastBand {
 export interface ProbabilisticForecast {
   generatedAt: number;
   hours: ForecastBand[];
+  /** R5 (v1.189.0) — when the weather the band's forecast was built on was fetched
+   *  (DayForecast.weatherFetchedAtMs); null with none. The morning refresh judges its forecast's
+   *  age by it. Absent on a band built from a hand-built forecast. */
+  weatherFetchedAtMs?: number | null;
   // Confidence summary.
   // v1.16.0 (engine-review F23) — pAboveReservePct is a min-over-path event
   // probability: the share of the coherent trajectory ensemble whose SoC never
@@ -9642,6 +9692,8 @@ export async function computeProbabilisticForecast(
     uncertaintyKwhStdev: Math.round(stdevAccum * 100) / 100, // already kWh (Σ per-hour sigmaNetKwh)
     // v1.187.0 — which Cores this band describes (the forecast it was built on).
     solarModelSns: forecast.solarModelSns ?? null,
+    // R5 — and the weather that forecast was built on.
+    weatherFetchedAtMs: forecast.weatherFetchedAtMs ?? null,
     bandSigmaCal: Math.round(bandCal * 100) / 100,
     bandSigmaCalBasis: bandCalBasis,
     realizedDailyErrHalfFrac: realizedHalfFrac != null ? Math.round(realizedHalfFrac * 1000) / 1000 : null,
@@ -10288,8 +10340,11 @@ export async function computeBayesianSolarModel(
   const byHour: Array<{ mu: number; tau2: number; samples: number }> =
     Array.from({ length: 24 }, () => ({ mu: BAYES_PRIOR_MU, tau2: BAYES_PRIOR_TAU2, samples: 0 }));
 
+  // R4 — §4 item 9: not the hours a mid-day charge of ours held the pool (middayChargeHoursFromLedger).
+  const chargeHours = middayChargeHoursFromLedger(recorder);
   const entries = [...fleetPvByEpoch.entries()].sort((a, b) => a[0] - b[0]);
   for (const [he, pv] of entries) {
+    if (chargeHours.has(he)) continue;
     const wx = wxByHourEpoch.get(he);
     if (!wx || wx.radiationWm2 < DAYLIGHT_GHI) continue;
     const hod = new Date(he * 3_600_000).getHours();

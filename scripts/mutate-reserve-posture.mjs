@@ -55,14 +55,14 @@ const MUTANTS = [
   {
     id: 'v. ★ posture predicate ignores the revert (reserve looks raised forever)',
     file: ACT,
-    find: '  return state.appliedAtMs != null && state.revertedAtMs == null;',
-    to: '  return state.appliedAtMs != null; /* MUTANT */',
+    find: '  return state.appliedAtMs != null && state.revertedAtMs == null && state.foreignSettledAtMs == null;',
+    to: '  return state.appliedAtMs != null && state.foreignSettledAtMs == null; /* MUTANT */',
     why: 'After the first night-charge ever, every future floor breach is classified as arbitrage and never pages again.',
   },
   {
     id: 'vi. posture predicate always false',
     file: ACT,
-    find: '  return state.appliedAtMs != null && state.revertedAtMs == null;',
+    find: '  return state.appliedAtMs != null && state.revertedAtMs == null && state.foreignSettledAtMs == null;',
     to: '  return false; /* MUTANT */',
     why: 'The nightly charge window pages as a floor breach.',
   },

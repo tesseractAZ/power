@@ -31,7 +31,8 @@ import { advisoryStateFields, getLatestAdvisory } from './loadShedAdvisor.js';
 // charge_tonight strictly false on a null/stale plan); gate fields carry the
 // write-readiness enum + fail-closed write_ready. Both wired into buildState so
 // the HA night-charge entities have data (read-only; the add-on never charges).
-import { nightChargeStateFields, getLatestNightChargePlan } from './nightChargeAdvisor.js';
+import { nightChargeStateFields, nightChargeRoleFields, getLatestNightChargePlan } from './nightChargeAdvisor.js';
+import { middayChargeStateFields, getMiddayShadow } from './middayShadow.js';
 import { nightChargeGateFields, getLatestReadiness } from './nightChargeGate.js';
 // v0.15.19 — lighting energy posture (runway-driven; see lightingPosture.ts).
 import { lightingPostureTracker } from './lightingPosture.js';
@@ -230,7 +231,15 @@ export interface SensorConfig {
   // v1.187.10 — with state_class 'total': the template HA reads the cycle start from (the
   // state topic's JSON), so a re-estimated daily figure is a revisable total, not a meter.
   last_reset_value_template?: string;
+  // v1.189.0 — the entity's attributes, rendered from the state topic's JSON (sensorDiscoveryConfig
+  // adds the json_attributes_topic). Only the mid-day figures carry one: their `basis`.
+  json_attributes_template?: string;
 }
+
+/** v1.189.0 — the `basis` attribute of every ecoflow_midday_charge_* figure: 'shadow' while the
+ *  mid-day charge is computed only (middayShadow.MIDDAY_CHARGE_BASIS), so a dashboard, an automation
+ *  or the recorder's history tells the preview from a charge that runs, on the same entity ids. */
+export const MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE = '{{ {"basis": value_json.midday_charge_basis | default(none)} | tojson }}';
 
 export const SENSORS: SensorConfig[] = [
   // Power flow
@@ -438,6 +447,30 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_night_charge_readiness', name: 'Night-Charge Readiness', icon: 'mdi:clipboard-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_readiness }}' },
   { unique_id: 'ecoflow_night_charge_window_start', name: 'Night-Charge Window Start', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_start }}' },
   { unique_id: 'ecoflow_night_charge_window_end', name: 'Night-Charge Window End', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_end }}' },
+  // v1.189.0 (R4) — what tonight's overnight window is for in the charge cycle the add-on runs
+  // (nightChargeRoleFields): 'cost' (it carries the cost buy) or 'backup' (the outage backup ahead of
+  // a mid-day charge). The night-charge entities above stay bound to the overnight leg.
+  // A null role renders "unknown" (ecoflow_backup_reserve_enabled's null pattern): HA shows a text
+  // sensor's template result as its state, so a bare null would read the literal 'None'.
+  { unique_id: 'ecoflow_night_charge_role', name: 'Night-Charge Role', icon: 'mdi:swap-horizontal', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "unknown" if value_json.night_charge_role is none else value_json.night_charge_role }}' },
+  // v1.189.0 (R4) — the winter mid-day charge (APS super off-peak, 10:00–15:00 Mon–Fri) as
+  // middayShadow.ts computes it each winter weekday evening, the morning refresh included. Until the
+  // mid-day switch it is a SHADOW: nothing is written, armed or announced for it, and
+  // ecoflow_midday_charge_recommended stays off. Same shape as the night-charge entities: no
+  // device_class on the figures, the ~25 h expiry, null → 'unknown' with no current mid-day leg.
+  // Each figure carries a `basis` attribute ('shadow' until the switch; MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE).
+  // The window bounds and the refresh are text, and render a null as "unknown" (the null pattern of
+  // ecoflow_backup_reserve_enabled): a bare null renders "None", which a text sensor shows as the
+  // literal state and a timestamp sensor cannot parse (HA logs a warning carrying the whole state
+  // payload on every publish). The bounds are therefore not device_class 'timestamp': they carry the
+  // ISO 8601 instant as text.
+  { unique_id: 'ecoflow_midday_charge_target_soc', name: 'Midday-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_target_soc_percent }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_reserve_hold', name: 'Midday-Charge Reserve Hold', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:shield-half-full', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_reserve_hold_percent }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_expected_buy_kwh', name: 'Midday-Charge Expected Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_expected_buy_kwh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_buy_kwh', name: 'Midday-Charge Buy (Worst Case)', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_buy_kwh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_window_start_at', name: 'Midday-Charge Window Start', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "unknown" if value_json.midday_charge_window_start_at is none else value_json.midday_charge_window_start_at }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "unknown" if value_json.midday_charge_window_end_at is none else value_json.midday_charge_window_end_at }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_refresh', name: 'Midday-Charge Refresh', icon: 'mdi:refresh', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "unknown" if value_json.midday_charge_refresh is none else value_json.midday_charge_refresh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
 
   // ─── v0.15.19 lighting energy posture (publish-only; HA automations actuate) ─
   // One runway-derived enum (surplus|normal|conserve|amber|red|critical) the
@@ -673,6 +706,9 @@ export function sensorDiscoveryConfig(s: SensorConfig): Record<string, unknown> 
   return {
     ...s,
     state_topic: STATE_TOPIC,
+    // v1.189.0 — attributes come from the same JSON state topic (the mid-day figures' basis); every
+    // other sensor's config is unchanged.
+    ...(s.json_attributes_template != null ? { json_attributes_topic: STATE_TOPIC } : {}),
     ...AVAILABILITY_BASE,
     // v0.13.7 — expire live measurements, but never the total_increasing
     // energy sources (would gap HA Energy history).
@@ -821,6 +857,10 @@ export const BINARY_SENSORS: BinarySensorConfig[] = [
   // strictly false on a null readiness (never null-as-true) and always emits the
   // key, so a data gap reads OFF, not a stale retained ON. NO device_class.
   { unique_id: 'ecoflow_night_charge_write_ready', name: 'Night-Charge Write Ready', icon: 'mdi:shield-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "ON" if value_json.night_charge_write_ready else "OFF" }}' },
+  // v1.189.0 (R4) — ON only when a LIVE mid-day leg is armed to charge (middayChargeStateFields).
+  // Nothing arms one before the mid-day switch, so it stays OFF while the mid-day charge runs in
+  // shadow: a shadow computation is never a recommendation an automation may act on.
+  { unique_id: 'ecoflow_midday_charge_recommended', name: 'Midday-Charge Recommended', icon: 'mdi:white-balance-sunny', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "ON" if value_json.midday_charge_recommended else "OFF" }}' },
   // v0.69.0 — ON when a SHP2-wired home core's own telemetry is missing from the
   // self-consumption integral (cloud-offline / projection-less), so solar_fraction /
   // direct-use undercount. Diagnostic: discount those KPIs while this reads ON.
@@ -1534,6 +1574,10 @@ export async function startMqttDiscovery(
       host_data_disk_free_mb: liveVitals()?.dataDiskFreeMb ?? null,
       host_load_1m: liveVitals()?.load1 ?? null,
       ...nightChargeStateFields(getLatestNightChargePlan()),
+      // v1.189.0 (R4) — the overnight window's role, and the winter mid-day charge (shadow until the
+      // switch; midday_charge_recommended strictly false). In parity with /api/ha-state.
+      ...nightChargeRoleFields(getLatestNightChargePlan()),
+      ...middayChargeStateFields(getMiddayShadow()),
       ...nightChargeGateFields(getLatestReadiness()),
       // v0.89.0 — SHP2 operating-mode / reserve strategy diagnostics. Reserve floor
       // reads the CANONICAL projection.backupReserveSoc the floor alarm defends with

@@ -1,3 +1,40 @@
+## 1.189.0
+
+### The winter mid-day charge, in preview; the night-charge write bounded against on-peak; Cancel always on the card
+
+**Night charge: the winter mid-day charge, in preview**
+
+- On winter weekdays the APS super off-peak period, 10am–3pm, is cheaper than the overnight window. With the cost objective (`ARB_OBJECTIVE` `cost` and `ARB_COST_MAX_SOC_PCT` above 50), Power now works out, on the evening before each winter weekday (8 October to 31 March, holidays excepted), the charge it would make in that window instead of overnight: an outage backup on the overnight window before it when the worst case needs one, the daytime charge, and a re-check on the morning solar forecast that can lower or cancel the daytime charge but never raise it.
+- A daytime charge that would leave the pool under the reserve plus 25 points is held: after the 3pm restore the panel holds a pool that low instead of using it, and the grid would carry the house into on-peak. On a day the overnight charge already ran, the morning re-check is recorded as not comparable and the evening figures stand, since the pool it would see is not the one a daytime charge would start from.
+- This is a preview only. Nothing is armed, written to the panel, pushed or spoken for it, and the overnight charge runs as before. A later release turns the mid-day charge on, after at least five winter weekdays of preview have been checked against what those days did.
+- The preview is published on new Midday-Charge entities (the level, the reserve it would hold, the expected and worst-case buy, the window, and the morning re-check's outcome) and in a read-only section of the night-charge card, with the title of the notice it would have sent. Each Midday-Charge figure carries a `basis` attribute, `shadow` while the mid-day charge is a preview. Midday-Charge Recommended stays off while the mid-day charge is a preview. The log shows each preview in full, tagged `night-charge[midday-shadow]:`, and each evening's ledger row records it, to be scored against the day.
+- New sensor Night-Charge Role: what tonight's overnight window is for, `cost` (it carries the charge, as on every night in this release) or `backup` (an outage backup ahead of a mid-day charge).
+- The Midday-Charge Window Start and End sensors carry the time as text (ISO 8601, UTC). They, Midday-Charge Refresh and Night-Charge Role read unknown when there is nothing to show, with no warning in the Home Assistant log.
+- A preview day's measured solar is not kept as forecast evidence when that night's solar verdict is set aside because its forecast was built on a different set of Cores.
+
+**Night charge: the write never stands into on-peak**
+
+- No reserve raise or force-charge ON is sent from an hour before on-peak, and the reserve restore and the force-charge OFF fall due by then at the latest. The overnight window closes at 5am, eleven hours before on-peak, so a night that goes to plan is unchanged.
+- A restore the panel has not confirmed is paged as critical 30 minutes after the window closes (or 30 minutes before on-peak, if that comes first), and again when on-peak starts, when the panel then still reads the raised reserve or cannot be read (a reading that is not a valid reserve, such as the 0 a reconnecting panel reports, counts as unread). Each page is decided once, when it falls due, and none goes out after that on-peak period has ended; a write the panel never took (it still read its earlier reserve once the apply window, or the write's re-sends, had passed) is not paged. After a restart across that time, a restore the add-on can send (including that of a write whose confirmation was lost, when the panel reads it raised) is sent first and the page waits up to 10 minutes for it to read back. A page heard on another day than the on-peak it warns of names that day ("on-peak pricing starts on Monday at 4:00 PM"). The push always goes; the spoken page follows the broadcast quiet hours, as every critical announcement does. The push says the restore keeps being retried only while it still is; when the panel cannot be read, it says the restore is sent once the panel reports again (if it still reads the raised reserve). After a restart just after the restore was sent, the page also waits up to 10 minutes for the panel's first reading.
+- The morning summary says the reserve was restored only once the panel reports the restored reserve. If the panel has not reported it 5 minutes after the restore was accepted, the summary says the restore was sent and is not yet confirmed. It used to say "restored" as soon as the EcoFlow cloud accepted the restore.
+- While a restore has not read back and the panel still reads the raised reserve, or cannot be read, the next evening's charge is not armed, and its notice says why: the record that pages and measures for the stuck restore stays in place, so a Friday night's stuck restore is still paged when Monday's on-peak starts.
+- A backup reserve of 10–50 % set outside the add-on while the night's raise stands (the same value on two readings at least five minutes apart, so one set in the last minutes before the restore is restored over) is left as set: the night counts as finished, its force charge switches off, a notification says so, and the card no longer offers Cancel for it. On a night the panel granted only part of the raise, a later reading within what the night asked for is the night's own write: it is restored at the window close as usual, and a restore that leaves the panel reading it is paged and held as the raised reserve.
+- While a restore has not taken and the panel still reads the raised reserve, the on-peak "battery idle while the grid is used" and grid-charging notices measure against the reserve as it was before the raise, from five minutes after the restore was sent; a restore that reads back within that time, as one that goes to plan does, changes nothing. The runway and below-reserve alarms are unchanged.
+- A reserve-floor request refused while a night-charge write holds the reserve up now says when the reserve is restored.
+
+**Night-charge card**
+
+- The card offers Cancel in every shape it takes: beside a hold, beside an incomplete or out-of-date plan, and when its status cannot be read. Beside a hold or a missing plan, when a write is armed, it says the write still stands, instead of that nothing will be charged. A status that has not loaded after 15 seconds shows the unavailable card, with its Cancel, instead of "Loading…".
+- A restore not yet confirmed after a cancel is shown as a warning.
+
+**API**
+
+- `POST /api/night-charge/cancel` takes an optional body `{ "leg": "cost" | "backup" }`; with none it cancels the charge, as before. `GET /api/night-charge/status` lists the charge cycle's legs (`legs`); every cycle armed in this release has the one overnight leg.
+
+**Updating**
+
+- No options change. The night-charge ledger gains columns for the charge cycle and the preview, added on the first start. A night already armed when the update installs keeps the timing it was armed with. Updating restarts the add-on.
+
 ## 1.188.1
 
 ### Only fresh readings are saved; while a battery reports nothing of its own, the Energy dashboard and the energy flow read the panel's meters

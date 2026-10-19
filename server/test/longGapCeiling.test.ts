@@ -143,7 +143,9 @@ const INDEX = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../
   .split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
 test('★★★ index.ts computes the median surplus and the long gap, and hands BOTH to the planner', () => {
-  assert.ok(INDEX.includes('morningSurplusP50Kwh += Math.max(0, pb.p50W - fh.forecastLoadW) / 1000;'),
+  // R2 — both sums come from chargeTaper.ts pvSurplusFromBand over one span (legacyIdentity.test.ts
+  // checks it against the inline loop it replaced, on a year of plans).
+  assert.ok(INDEX.includes('const { p90Kwh: morningPvSurplusP90Kwh, p50Kwh: morningPvSurplusP50Kwh } = window'),
     'the median over the same hours as the P90');
   assert.ok(INDEX.includes('nextFullCheapWindow(periodIdAt, window.endMs, NIGHT_CHEAP_PERIOD_ID)'),
     'the long gap is read from the tariff calendar, after tonight\'s window');

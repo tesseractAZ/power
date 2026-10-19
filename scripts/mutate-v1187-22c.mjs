@@ -75,29 +75,29 @@ const MUTANTS = [
   {
     id: 'C-i. ★★★ the expected carry drains the P90 load',
     file: NCA,
-    find: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000));',
-    to: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP90W) / o.dischargeEff)) / 1000)); /* MUTANT */',
+    find: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000));',
+    to: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP90W) / o.dischargeEff)) / 1000)); /* MUTANT */',
     why: 'The "expected" start collapses onto the worst case again and the 10-12 plan says ~62 kWh expected.',
   },
   {
     id: 'C-ii. ★★ the expected carry is not floored at the reserve',
     file: NCA,
-    find: '  const floor = Math.min(Math.max(0, o.reserveKwh), pack);\n  const byHour = hoursByEpoch(o.hours);\n  for (let slot',
-    to: '  const floor = 0; /* MUTANT */\n  const byHour = hoursByEpoch(o.hours);\n  for (let slot',
+    find: '  const floor = Math.min(Math.max(0, o.reserveKwh), pack);\n  const hold = o.hold != null',
+    to: '  const floor = 0; /* MUTANT */\n  const hold = o.hold != null',
     why: 'A grid-present carry drains through the reserve the SHP2 holds, overstating the expected buy on a heavy evening.',
   },
   {
     id: 'C-iii. ★★ the expected carry counts the whole current hour',
     file: NCA,
-    find: '    : expectedCarryKwh({ startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: nowMs, toMs: windowStart });',
-    to: '    : expectedCarryKwh({ startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: simFromMs, toMs: windowStart }); /* MUTANT */',
+    find: '      startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: nowMs, toMs: windowStart,',
+    to: '      startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: simFromMs, toMs: windowStart, /* MUTANT */',
     why: 'The 21:00-21:30 drain the SoC reading already reflects is charged a second time (the sizing\'s conservative choice, wrong for an expectation).',
   },
   {
     id: 'C-iv. ★ the expected carry reads P10 PV',
     file: NCA,
-    find: '    const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;\n    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w *',
-    to: '    const pv = h.pvP10W; /* MUTANT */\n    pack = Math.max(floor, Math.min(o.fullKwh, pack + (w *',
+    find: '    const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;\n    const slotFloor',
+    to: '    const pv = h.pvP10W; /* MUTANT */\n    const slotFloor',
     why: 'An afternoon plan understates the sun the pool expects before the window and overstates the buy.',
   },
   {
@@ -242,7 +242,7 @@ const MUTANTS = [
   {
     id: 'C-xxiv. ★★ buildNightChargeInputs drops the force-charge gate',
     file: NCA,
-    find: '    // v1.187.22 — forwarded verbatim; see the destructure note above.\n    forceChargeEligible,\n',
+    find: '    // v1.187.22 — forwarded verbatim; see the destructure note above. R2 — never on a backup leg.\n    forceChargeEligible: forceChargeEligible === undefined ? undefined : legForceChargeEligible(legRole, forceChargeEligible),\n',
     to: '    /* MUTANT */\n',
     why: 'The flag index.ts passes arrives undefined and every force-charge night states the reserve leg only.',
   },
@@ -256,7 +256,7 @@ const MUTANTS = [
   {
     id: 'C-xxvi. ★★ index.ts tells the planner force-charge always rides',
     file: IDX,
-    find: '    forceChargeEligible: forceChargeOn(),\n',
+    find: '    forceChargeEligible: forceChargeOn(legRole),\n',
     to: '    forceChargeEligible: true, /* MUTANT */\n',
     why: 'Advisory mode (nothing written) states a force-charge draw.',
   },
@@ -380,8 +380,8 @@ const MUTANTS = [
   {
     id: 'C-xlii. ★★★ the force-charge leg starts from the window open again',
     file: NCA,
-    find: '    if (jit.startMs != null) liftKwh += Math.max(0, levelKwh - jit.packKwh);',
-    to: '    liftKwh += Math.max(0, levelKwh - Math.max(o.startKwh, reserveKwh)); /* MUTANT */',
+    find: '    if (jit.startMs != null) {\n      // R2 — the P50 PV that lands in the pack during the force-charge is not bought (0 with no PV).\n      const fcLiftKwh = Math.max(0, levelKwh - jit.packKwh);\n      liftKwh += fcLiftKwh - pvWalk(fcLiftKwh, jit.startMs).creditKwh;',
+    to: '    { /* MUTANT */\n      const fcLiftKwh = Math.max(0, levelKwh - Math.max(o.startKwh, reserveKwh));\n      liftKwh += fcLiftKwh - pvWalk(fcLiftKwh, jit.startMs ?? o.window.fromMs).creditKwh;',
     why: 'The drain the just-in-time start buys back is dropped: a 74% evening states ~14 kWh for a ~22 kWh night, a 96% one ~0 for ~3.5.',
   },
   {
@@ -458,8 +458,8 @@ const MUTANTS = [
   {
     id: 'C-liii. ★ the window bound skips a missing hour',
     file: NCA,
-    find: '    if (h == null) return null;\n    kwh += p50ChargeRateKw(',
-    to: '    if (h == null) continue; /* MUTANT */\n    kwh += p50ChargeRateKw(',
+    find: '    if (h == null) return null;\n    kwh += gridGainKw(p50ChargeRateKw(',
+    to: '    if (h == null) continue; /* MUTANT */\n    kwh += gridGainKw(p50ChargeRateKw(',
     why: 'A window hour with no basis silently shrinks the bound, capping the expected buy with no disclosure.',
   },
   // ── the after-the-fact pushes ──
@@ -763,8 +763,10 @@ const MUTANTS = [
   {
     id: 'C-xci. ★★ the revert never says why the night ended',
     file: IDX,
-    find: "      ended: action.gridLossAbort ? 'gridLoss' : state.cancelled ? 'cancelled' : 'window',",
-    to: "      ended: 'window', /* MUTANT */",
+    // v1.189.0 (review) — re-pointed: the summary goes after the ACK (sendRestoreSummary), from the
+    // grid-loss abort kept on the record.
+    find: "  const endedBy = state.revertGridLossAbort ? 'gridLoss' as const : state.cancelled ? 'cancelled' as const : 'window' as const;",
+    to: "  const endedBy = 'window' as const; /* MUTANT */",
     why: 'A cancel or a grid-loss abort is pushed as a completed night with its full expected purchase.',
   },
   {
@@ -1179,8 +1181,9 @@ const MUTANTS = [
   {
     id: 'C-cxlviii. ★★ index.ts arms without the force-charge gate',
     file: IDX,
-    find: '      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct, forceChargeOn());',
-    to: '      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct); /* MUTANT */',
+    // v1.189.0 — re-pointed: the arm goes through armCycle (chargeCycle.ts), the gate on its leg.
+    find: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,",
+    to: "        role: 'cost', kind: 'overnight', plan, forceChargeEnabled: undefined, nextOnPeakStartMs: armOnPeakStartMs, /* MUTANT */",
     why: 'Every armed record carries no stamp, so the morning reads the option at the restore.',
   },
   {

@@ -121,11 +121,16 @@ const INDEX = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../
 test('★★ the morning summary after a revert is not awaited, and the restore time is stamped for the ledger', () => {
   const fn = INDEX.indexOf('async function runNightActuationTickInner(');
   assert.ok(fn > 0);
-  const i = INDEX.indexOf("persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null });", fn);
+  const i = INDEX.indexOf("persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null, revertGridLossAbort: action.gridLossAbort === true });", fn);
   assert.ok(i > fn);
   const branch = INDEX.slice(i, INDEX.indexOf('\n    return;\n  }', i));
-  assert.ok(branch.includes('recorder.recordNightOutcome(state.day, { actuation_reverted_at_ms: nowMs });'));
+  // v1.189.0 — to the leg's own columns (stampLegOutcome; a backup leg's go to backup_*).
+  assert.ok(branch.includes('stampLegOutcome(state, { actuation_reverted_at_ms: nowMs });'));
   // v1.187.22 — the summary is built by buildNightChargeMorningSummary (notify.ts), where its text is tested.
-  assert.ok(branch.includes('void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({'), 'the info push is fire-and-forget');
+  // v1.189.0 (review) — it goes from sendRestoreSummary once the restore read back, or its readback
+  // grace ran (restoreSummaryDue), not on the ACK: still fire-and-forget.
+  const summary = INDEX.slice(INDEX.indexOf('function sendRestoreSummary('), INDEX.indexOf('let nightReserveReadSinceBoot'));
+  assert.ok(summary.includes('void sendNotification(loadNotifyConfig(), buildNightChargeMorningSummary({'), 'the info push is fire-and-forget');
+  assert.ok(!summary.includes('await sendNotification('), 'the summary waits on no push');
   assert.ok(!branch.includes('await sendNotification('), 'nothing in the revert branch waits on a push');
 });

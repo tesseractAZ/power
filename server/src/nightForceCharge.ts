@@ -89,7 +89,16 @@
  *    stop even if the feature is disabled mid-night), and fires on: window
  *    end, a cancelled night, the reserve revert, grid loss (either signal), the
  *    feature being disabled, or MAX_RUN elapsing (a corrupted window can never
- *    hold it on).
+ *    hold it on); and (R1) the on-peak guard, an hour before the on-peak period
+ *    after the window when that comes first, and a reserve that settled as someone
+ *    else's (nightChargeActuator.foreignStep).
+ *  - ★★ R1 — THE ON-PEAK GUARD. The ceiling sync, the ON and the ON re-issue are raises:
+ *    none is issued past writeWindowEndMs (the window close, or an hour before the
+ *    stamped on-peak start, whichever is sooner), and the just-in-time start counts back
+ *    from it. The wall-clock OFF deadline is capped ON_PEAK_PAGE_LEAD_MS before on-peak,
+ *    and blind OFF re-sends stop at the next charge window's open (blindResendStopMs).
+ *    The overnight window closes eleven hours before on-peak: none of this moves a night
+ *    that goes to plan.
  *  - OFF is readback-verified, re-issued, then escalated — and verification KEEPS
  *    RUNNING after the escalation, so the record resolves the moment the slots read
  *    OFF (fixed from the app) instead of wedging.
@@ -121,6 +130,7 @@
 
 import {
   RESERVE_WRITE_MAX_PCT, armedForceChargeCeilingPct, clampReserveTarget, type NightActuationState,
+  writeWindowEndMs, ON_PEAK_PAGE_LEAD_MS,
 } from './nightChargeActuator.js';
 import type { ForceChargeCommands } from './settingsDrift.js';
 
@@ -228,7 +238,13 @@ export const FORCE_CHARGE_DEADLINE_REPAGE_MS = 30 * 60_000;
 export const FORCE_CHARGE_DEADLINE_REPAGE_MAX = 16;
 
 export type ForceChargeOffReason =
-  | 'windowEnd' | 'cancelled' | 'reverted' | 'gridLoss' | 'disabled' | 'maxRun' | 'target';
+  | 'windowEnd' | 'cancelled' | 'reverted' | 'gridLoss' | 'disabled' | 'maxRun' | 'target'
+  /** The on-peak guard: an hour before the on-peak period that follows the window, when that
+   *  comes before the window close (nightChargeActuator.writeWindowEndMs). */
+  | 'onPeakGuard'
+  /** The reserve settled as someone else's (nightChargeActuator.foreignStep): the night's
+   *  write no longer holds it, so the force-charge riding it stops too. */
+  | 'foreign';
 
 export interface ForceChargeOpts {
   /** Feature gate — see forceChargeEnabled. Gates ONLY the start. */
@@ -268,6 +284,11 @@ export interface ForceChargeOpts {
    *  slot, from the SAME fresh readback as slotsOn. The ON verify exempts a slot whose Core
    *  already sits at the panel's ceiling. Absent/null/missing slot ⇒ no exemption. */
   slotSocPct?: Readonly<Record<number, number | null>> | null;
+  /** The open of the next charge window after this night's (the latest plan's window, when it
+   *  opens after this one closes). Blind OFF re-sends stop there at the latest
+   *  (blindResendStopMs): past it a force-charge reading ON may be the next window's own.
+   *  Absent/null ⇒ unknown: FORCE_CHARGE_BLIND_RESEND_MAX_MS alone bounds them. */
+  nextLegOpenMs?: number | null;
 }
 
 export type ForceChargeAction =
@@ -360,7 +381,8 @@ export function forceChargeCommandsOf(s: NightActuationState): ForceChargeComman
  */
 export function forceChargeOffDueNow(s: NightActuationState, nowMs: number): boolean {
   if (s.forceChargeOnAtMs == null || s.forceChargeOffAtMs != null) return false;
-  return s.cancelled || s.revertedAtMs != null || s.windowEndMs == null || nowMs >= s.windowEndMs;
+  return s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null
+    || s.windowEndMs == null || nowMs >= writeWindowEndMs(s)!;
 }
 
 /** The two steps of one actuation tick (index.ts `runNightActuationTick`). */
@@ -523,14 +545,31 @@ export function forceChargeOffDeadlineMs(s: NightActuationState): number | null 
   if (!forceChargeInFlight(s)) return null;
   const fromOff = s.forceChargeOffAtMs != null ? s.forceChargeOffAtMs + FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS : null;
   const fromWindow = (s.windowEndMs ?? s.forceChargeOnAtMs!) + FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS;
-  return fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;
+  const later = fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;
+  // Capped ON_PEAK_PAGE_LEAD_MS before the on-peak start the night was armed against: a
+  // force-charge still unconfirmed then is about to buy at the peak rate. The overnight window's
+  // deadline (06:00) is ten hours inside the cap.
+  const p = s.nextOnPeakStartMs;
+  return p != null && Number.isFinite(p) ? Math.min(later, p - ON_PEAK_PAGE_LEAD_MS) : later;
+}
+
+/** When blind OFF re-sends (no live readback, after the escalation) stop: the first OFF +
+ *  FORCE_CHARGE_BLIND_RESEND_MAX_MS, or the next charge window's open if that comes first and
+ *  after the first OFF. Null with no OFF yet. PURE. */
+export function blindResendStopMs(s: Pick<NightActuationState, 'forceChargeOffAtMs'>, nextLegOpenMs?: number | null): number | null {
+  if (s.forceChargeOffAtMs == null) return null;
+  const cap = s.forceChargeOffAtMs + FORCE_CHARGE_BLIND_RESEND_MAX_MS;
+  return nextLegOpenMs != null && Number.isFinite(nextLegOpenMs) && nextLegOpenMs > s.forceChargeOffAtMs
+    ? Math.min(cap, nextLegOpenMs) : cap;
 }
 
 function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): ForceChargeOffReason | null {
   if (s.cancelled) return 'cancelled';
   if (s.revertedAtMs != null) return 'reverted';
+  if (s.foreignSettledAtMs != null) return 'foreign';
   // A missing window can't say when to stop, so it stops now.
   if (s.windowEndMs == null || nowMs >= s.windowEndMs) return 'windowEnd';
+  if (nowMs >= writeWindowEndMs(s)!) return 'onPeakGuard';
   if (o.gridPresent === false || o.gridStaLost) return 'gridLoss';
   if (!o.enabled) return 'disabled';
   if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= FORCE_CHARGE_MAX_RUN_MS) return 'maxRun';
@@ -599,7 +638,9 @@ function verifyForceChargeOn(
     // v1.186.0 — too close to the window end for a re-issue: it would share the per-slot
     // cooldown with the window-end OFF (which then came back rate-limited and the slot kept
     // grid-charging past the close). Warn instead — the forfeit is reported, never silent.
-    if (s.windowEndMs == null || nowMs >= s.windowEndMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) {
+    // The re-issue is a raise: the cutoff runs from writeWindowEndMs — the window close, or an
+    // hour before on-peak if that is sooner.
+    if (s.windowEndMs == null || nowMs >= writeWindowEndMs(s)! - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) {
       return { kind: 'onFailed', slots: pending, noRetry: true };
     }
     // The re-issue starts a grid charge on those slots: the grid must be KNOWN present and
@@ -665,7 +706,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
       // the OFF blind on the persistence cadence (v1.168.0, review): an OFF is idempotent,
       // and a stale readback plus one rejected 05:00 OFF otherwise left it on all day.
       return s.forceChargeOffEscalated && since >= FORCE_CHARGE_OFF_PERSIST_EVERY_MS
-        && nowMs - s.forceChargeOffAtMs < FORCE_CHARGE_BLIND_RESEND_MAX_MS
+        && nowMs < blindResendStopMs(s, o.nextLegOpenMs)!
         ? { kind: 'offRetry', slots: ours, unconfirmed: true }
         : { kind: 'none' };
     }
@@ -696,7 +737,8 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   // Without this an operator's later storm-prep Charge Now silently stops at tonight's
   // 80-90 instead of the 100 the panel was set to. "Done" = our force-charge verified
   // OFF, or — if it never started — the night is over. ──
-  const nightOver = s.cancelled || s.revertedAtMs != null || s.windowEndMs == null || nowMs >= s.windowEndMs;
+  const nightOver = s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null
+    || s.windowEndMs == null || nowMs >= writeWindowEndMs(s)!;
   const forceDone = s.forceChargeOnAtMs != null ? s.forceChargeOffVerifiedAtMs != null : nightOver;
   if (forceDone && s.forceChargeCeilingPriorPct != null && s.forceChargeCeilingRestoredAtMs == null) {
     if (o.ceilingReadbackPct == null) return { kind: 'none' };
@@ -725,9 +767,17 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   }
   if (s.appliedAtMs == null || s.applyVerifiedAtMs == null) return { kind: 'none', why: 'waiting for the reserve write to be verified by readback' };
   if (s.cancelled || s.revertedAtMs != null) return { kind: 'none', why: s.cancelled ? 'the night was cancelled' : 'the reserve has already been reverted' };
+  if (s.foreignSettledAtMs != null) return { kind: 'none', why: 'the reserve was set outside the add-on — the night\'s write no longer holds it' };
   if (s.windowStartMs == null || s.windowEndMs == null) return { kind: 'none', why: 'the night has no charge window' };
   if (nowMs < s.windowStartMs) return { kind: 'none', why: 'the overnight window has not opened yet' };
-  if (nowMs >= s.windowEndMs - FORCE_CHARGE_MIN_RUN_MS) return { kind: 'none', why: `under ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min of window left — not worth starting` };
+  // The force-charge ends at the window close, or an hour before on-peak if that is sooner
+  // (writeWindowEndMs): the ceiling sync and the ON are raises, and stop there.
+  const endMs = writeWindowEndMs(s)!;
+  if (nowMs >= endMs - FORCE_CHARGE_MIN_RUN_MS) {
+    return { kind: 'none', why: endMs < s.windowEndMs
+      ? `under ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min left before the on-peak guard (an hour before on-peak) — not worth starting`
+      : `under ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min of window left — not worth starting` };
+  }
   if (o.vitalsRed) return { kind: 'none', why: 'host vitals are critical — no new device writes' };
   if (!o.socCoherent) return { kind: 'none', why: 'the pool SoC reading is incoherent' };
   if (o.gridPresent !== true || o.gridStaLost) { // unknown grid never starts a grid charge
@@ -757,7 +807,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     return { kind: 'none', why: 'no live pool reading to time the start from' };
   }
   if (o.poolSocPct >= forceChargeStopPct(target)) return { kind: 'none', why: `the pack is already at tonight's ${target}% target` };
-  if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above
+  if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above
     // A STABLE reason: the computed start moves with the SoC, and a reason that changes
     // every tick would log every tick.
     return { kind: 'none', why: `just in time — holding off so the pack reaches ${target}% as the window closes, not hours early (which would let the house draw it back toward the reserve)` };

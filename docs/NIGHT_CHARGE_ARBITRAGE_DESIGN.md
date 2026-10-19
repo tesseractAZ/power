@@ -80,11 +80,13 @@ The original design **banned** `backupReserveSoc` as the charge lever (Invariant
 
 | Period | Rate |
 |---|---|
-| Overnight super-off-peak (23:00–05:00, weekdays) | **13.1 ¢/kWh** |
+| Overnight (23:00–05:00, weekdays, year-round) | **13.1 ¢/kWh** |
 | Off-peak (default, **every weekend hour, and APS off-peak holidays**) | **17.0 ¢** |
 | On-peak summer (Mon–Fri 16:00–19:00) | **41.6 ¢** |
 | On-peak winter (Mon–Fri 16:00–19:00) | **39.5 ¢** |
-| Super-off-peak winter (10:00–15:00, weekdays) | **8.2 ¢** |
+| Super off-peak, winter (10:00–15:00, weekdays; winter billing cycles only) | **8.2 ¢** |
+
+The schedule's super off-peak period is the winter 10:00–15:00 one; the 23:00–05:00 period is its overnight period, the window every charge so far has used. A winter weekday cost buy in the super off-peak window, with an outage backup in the overnight window before it, is computed beside the live overnight cycle and writes nothing until it is switched on (reference chapter 15 part 2, "The mid-day cycle in shadow").
 
 Season (APS billing cycles): summer bills May–Oct, winter bills Nov–Apr — by usage month (each bill covers the usage since the early-month meter read) summer = Apr–Sep and winter = Oct–Mar (v1.187.10; the boundary is the 1st of the month, ± the meter-read day). Plan = APS **R-EV**, **no demand charge** — the ~40% of conditional machinery §0.3 of the original hinged on collapsed when that was confirmed. Tariff source is **manual**; the EcoFlow API exposes no rates, and there is **no expiry check** — a rate change would be silently stale.
 

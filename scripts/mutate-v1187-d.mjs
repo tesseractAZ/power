@@ -83,7 +83,7 @@ const MUTANTS = [
   {
     id: 'iv. ★★ any later plan supersedes, whatever its window',
     file: NLS,
-    find: '    if (o.window_start_ms !== row.window_start_ms || o.window_end_ms !== row.window_end_ms) continue;',
+    find: '    if (!sameWindow && !asBackup) continue;',
     to: '    /* MUTANT */',
     why: 'Every row but the newest loses its on-peak and its cost.',
   },
@@ -199,7 +199,7 @@ const MUTANTS = [
   {
     id: 'xx. ★ the overnight rate is left out',
     file: AN,
-    find: "    overnightCents: inSeason('overnight')?.centsBySeason[season] ?? null,",
+    find: '    overnightCents: inSeason(APS_PERIOD.OVERNIGHT)?.centsBySeason[season] ?? null,',
     to: '    overnightCents: null /* MUTANT */,',
     why: 'The rate that prices every overnight kWh appears nowhere.',
   },
@@ -285,8 +285,8 @@ const MUTANTS = [
   {
     id: 'xxxii. ★★ a cancelled night does not put the OFF first',
     file: NFC,
-    find: '  return s.cancelled || s.revertedAtMs != null || s.windowEndMs == null || nowMs >= s.windowEndMs;',
-    to: '  return s.revertedAtMs != null || s.windowEndMs == null || nowMs >= s.windowEndMs; /* MUTANT */',
+    find: '  return s.cancelled || s.revertedAtMs != null || s.foreignSettledAtMs != null\n    || s.windowEndMs == null || nowMs >= writeWindowEndMs(s)!;',
+    to: '  return s.revertedAtMs != null || s.foreignSettledAtMs != null\n    || s.windowEndMs == null || nowMs >= writeWindowEndMs(s)!; /* MUTANT */',
     why: 'The owner\'s cancel holds the OFF behind the immediate revert.',
   },
   {
@@ -315,8 +315,9 @@ const MUTANTS = [
   {
     id: 'xxxvi. ★★ the restore is never stamped on the ledger',
     file: IX,
-    find: '    try { recorder.recordNightOutcome(state.day, { actuation_reverted_at_ms: nowMs }); }',
-    to: '    try { /* MUTANT */ }',
+    // v1.189.0 — re-pointed: the stamp goes through stampLegOutcome (the leg's own columns).
+    find: '    stampLegOutcome(state, { actuation_reverted_at_ms: nowMs });',
+    to: '    /* MUTANT */',
     why: 'Every night falls back to the unstamped span; a late restore is never followed.',
   },
   {

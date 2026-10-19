@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { SENSORS, BINARY_SENSORS } from '../src/mqttDiscovery.js';
 // WS1 (nightChargeAdvisor.ts) + WS3 (nightChargeGate.ts) supply these at
 // integration; the interop names are frozen by the shared build contract.
-import { nightChargeStateFields } from '../src/nightChargeAdvisor.js';
+import { nightChargeStateFields, nightChargeRoleFields } from '../src/nightChargeAdvisor.js';
 import type { NightChargePlan } from '../src/nightChargeAdvisor.js';
 import { nightChargeGateFields } from '../src/nightChargeGate.js';
 import { buildNightChargeMessage } from '../src/notify.js';
@@ -29,7 +29,7 @@ function referencedKeys(value_template: string): string[] {
 const NIGHT_CHARGE_SENSORS = SENSORS.filter((s) => s.unique_id.startsWith('ecoflow_night_charge_'));
 const NIGHT_CHARGE_BINARY = BINARY_SENSORS.filter((s) => s.unique_id.startsWith('ecoflow_night_charge_'));
 
-test('night-charge: the expected 7 sensors + 2 binary_sensors are registered', () => {
+test('night-charge: the expected 8 sensors + 2 binary_sensors are registered', () => {
   const sensorIds = NIGHT_CHARGE_SENSORS.map((s) => s.unique_id).sort();
   assert.deepEqual(sensorIds, [
     'ecoflow_night_charge_buy_kwh',
@@ -39,6 +39,8 @@ test('night-charge: the expected 7 sensors + 2 binary_sensors are registered', (
     // the write setpoint on ..._target_soc so neither can shadow the other.
     'ecoflow_night_charge_expected_soc',
     'ecoflow_night_charge_readiness',
+    // v1.189.0 (R4) — what the overnight window is for in the cycle: 'cost' or 'backup'.
+    'ecoflow_night_charge_role',
     'ecoflow_night_charge_target_soc',
     'ecoflow_night_charge_window_end',
     'ecoflow_night_charge_window_start',
@@ -56,6 +58,7 @@ test('night-charge: every value_json key a discovery config references IS emitte
   // 'unknown'/OFF rather than referencing a missing key.
   const produced = {
     ...nightChargeStateFields(null),
+    ...nightChargeRoleFields(null),
     ...nightChargeGateFields(null),
   };
   const producedKeys = new Set(Object.keys(produced));

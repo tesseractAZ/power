@@ -13,7 +13,10 @@ import {
   parseAlertSwitchCommand,
   alertSwitchCommandTopic,
   alertSwitchStateTopic,
+  sensorDiscoveryConfig,
+  MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE,
 } from '../src/mqttDiscovery.js';
+import { middayChargeStateFields } from '../src/middayShadow.js';
 import { ALARM_PRIORITY_ORDER } from '../src/alertPriority.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -429,6 +432,23 @@ test('mqtt-discovery: every value_json key a sensor references is emitted by bui
     gStart = gateSrc.indexOf('return {', gEnd);
   }
 
+  // v1.189.0 (R4) — … plus nightChargeRoleFields() (nightChargeAdvisor.ts) and
+  // middayChargeStateFields() (middayShadow.ts): the overnight window's role and the winter mid-day
+  // charge, spread in beside the night-charge fields and in /api/ha-state alike.
+  const roleStart = ncSrc.indexOf('return {', ncSrc.indexOf('function nightChargeRoleFields'));
+  assert.ok(roleStart > 0, 'could not locate nightChargeRoleFields return block');
+  for (const m of ncSrc.slice(roleStart, ncSrc.indexOf('};', roleStart)).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+  assert.ok(src.includes('...nightChargeRoleFields(getLatestNightChargePlan()),'), 'buildState spreads the role field');
+  const mdSrc = readFileSync(resolve(__dir, '../src/middayShadow.ts'), 'utf8');
+  let mStart = mdSrc.indexOf('return {', mdSrc.indexOf('export function middayChargeStateFields'));
+  assert.ok(mStart > 0, 'could not locate middayChargeStateFields return block');
+  for (let i = 0; i < 2 && mStart > 0; i++) {
+    const mEnd = mdSrc.indexOf('};', mStart);
+    for (const m of mdSrc.slice(mStart, mEnd).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+    mStart = mdSrc.indexOf('return {', mEnd);
+  }
+  assert.ok(src.includes('...middayChargeStateFields(getMiddayShadow()),'), 'buildState spreads the mid-day fields');
+
   const missing = referenced.filter((k) => !emitted.has(k)).sort();
   assert.deepEqual(missing, [], `Sensors reference value_json keys buildState never emits: ${missing.join(', ')}`);
 });
@@ -677,4 +697,77 @@ test('planCircuitDiscovery: the latch signature covers the PUBLISHED name, not a
   for (const p of plan.publish) {
     assert.ok(!/^EcoFlow\b/i.test(String(p.cfg.name)), `circuit name must not re-prefix the device: ${p.cfg.name}`);
   }
+});
+
+/**
+ * v1.189.0 — the mid-day figures say what they are. Until the mid-day switch they are a shadow
+ * computation, and the HA surface — the one dashboards and automations read — carried no mark of
+ * it: "Midday-Charge Target SoC 90 %" beside a "Window Start tomorrow 10:00" for a charge that will
+ * not happen, and after the switch the same entities would carry live figures with nothing in the
+ * recorder's history to tell the two apart. Each figure now carries a `basis` attribute, from the
+ * state topic, with the unique_ids (and so the entity ids) unchanged; every other sensor's config is
+ * byte-identical.
+ */
+test('★★★ mqtt-discovery: every mid-day figure carries a basis attribute; no other sensor changes', () => {
+  const ids = ['ecoflow_midday_charge_target_soc', 'ecoflow_midday_charge_reserve_hold', 'ecoflow_midday_charge_expected_buy_kwh',
+    'ecoflow_midday_charge_buy_kwh', 'ecoflow_midday_charge_window_start_at', 'ecoflow_midday_charge_window_end_at', 'ecoflow_midday_charge_refresh'];
+  const withAttrs = SENSORS.filter((x) => x.json_attributes_template != null).map((x) => x.unique_id).sort();
+  assert.deepEqual(withAttrs, [...ids].sort(), 'exactly the mid-day figures');
+  for (const id of ids) {
+    const cfg = sensorDiscoveryConfig(SENSORS.find((x) => x.unique_id === id)!);
+    assert.equal(cfg.json_attributes_topic, 'ecoflow_panel/state', `${id}: attributes from the state topic`);
+    assert.equal(cfg.json_attributes_template, MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE);
+    assert.equal(cfg.unique_id, id, 'the unique_id is unchanged');
+    assert.equal('object_id' in cfg, false, 'no object_id: HA keeps the entity id it minted');
+  }
+  assert.equal(MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE, '{{ {"basis": value_json.midday_charge_basis | default(none)} | tojson }}');
+  // Every other sensor's config is what it was: no attribute keys at all.
+  for (const x of SENSORS.filter((y) => !ids.includes(y.unique_id))) {
+    const cfg = sensorDiscoveryConfig(x);
+    assert.equal('json_attributes_topic' in cfg, false, x.unique_id);
+    assert.equal('json_attributes_template' in cfg, false, x.unique_id);
+  }
+  // The state publishes the basis whether or not a mid-day leg is current.
+  assert.equal(middayChargeStateFields(null).midday_charge_basis, 'shadow');
+  // The recommendation stays the live decision: no basis on it, and strictly off.
+  const rec = BINARY_SENSORS.find((x) => x.unique_id === 'ecoflow_midday_charge_recommended')!;
+  assert.equal('json_attributes_template' in rec, false);
+  assert.equal(middayChargeStateFields(null).midday_charge_recommended, false);
+});
+
+/**
+ * v1.189.0 (review) — a null the v1.189.0 text sensors publish reads unknown in Home Assistant,
+ * with no warning. Jinja renders a JSON null as the string "None". HA's MQTT sensor shows a text
+ * sensor's rendered value as its state (the literal "None", not unknown), and a device_class
+ * 'timestamp' sensor parses it as a date and logs "Invalid state message" with the whole state
+ * payload when it cannot: every 30 s publish, on every weekend, every weekday after 15:00 and all
+ * summer, the mid-day window bounds are null. Each of these templates renders a null as "unknown",
+ * the null pattern ecoflow_backup_reserve_enabled set, and no sensor is a timestamp (or a date)
+ * sensor: the window bounds carry their ISO instant as text.
+ */
+test('★★★ mqtt-discovery: the v1.189.0 text sensors render a null as "unknown", and no sensor is a timestamp sensor', () => {
+  const nullable: Array<[string, string]> = [
+    ['ecoflow_midday_charge_window_start_at', 'midday_charge_window_start_at'],
+    ['ecoflow_midday_charge_window_end_at', 'midday_charge_window_end_at'],
+    ['ecoflow_midday_charge_refresh', 'midday_charge_refresh'],
+    ['ecoflow_night_charge_role', 'night_charge_role'],
+  ];
+  for (const [id, key] of nullable) {
+    const s = SENSORS.find((x) => x.unique_id === id);
+    assert.ok(s, id);
+    assert.equal(s!.value_template, `{{ "unknown" if value_json.${key} is none else value_json.${key} }}`, `${id}: a null reads unknown`);
+    assert.equal(s!.device_class, undefined, `${id}: a text sensor`);
+    assert.equal(s!.state_class, undefined, `${id}: not numeric`);
+  }
+  // The established null pattern these follow.
+  assert.match(SENSORS.find((x) => x.unique_id === 'ecoflow_backup_reserve_enabled')!.value_template, /^\{\{ "unknown" if value_json\.backup_reserve_enabled is none else /);
+  // Every one of them is null with no current mid-day leg or plan.
+  const empty = middayChargeStateFields(null);
+  assert.equal(empty.midday_charge_window_start_at, null);
+  assert.equal(empty.midday_charge_window_end_at, null);
+  assert.equal(empty.midday_charge_refresh, null);
+  // HA parses a timestamp or date sensor's state and warns on anything else, "None" and "unknown"
+  // alike: no sensor here may be one unless its value can never be null.
+  const dated = SENSORS.filter((x) => x.device_class === 'timestamp' || x.device_class === 'date').map((x) => x.unique_id);
+  assert.deepEqual(dated, []);
 });
