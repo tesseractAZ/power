@@ -4,13 +4,13 @@
 
 **Dashboard**
 
-- While a home Core reports nothing of its own, the Today card's Solar produced, AC output and Batteries (net) now count the energy the panel's meter on that Core's battery slot measured for it — the figures Home Assistant's Energy counters already add — in place of the Core's own readings, which are not recorded while it is dark. On 19 October, with every Core offline since 14 October and the house on the batteries, the card read 0 Wh for all three and "25% measured" while those counters read 41.3 kWh of solar, 34.5 kWh into the batteries and 9.4 kWh out of them since midnight. For each stretch a Core is measured at the panel, the card now reads exactly what the counters counted for it over the same day.
+- While a home Core reports nothing of its own, the Today card's Solar produced, AC output and Batteries (net) now count the energy the panel's meter on that Core's battery slot measured for it — the figures Home Assistant's Energy counters already add — in place of the Core's own readings, which are not recorded while it is dark. On 19 October, with every Core offline since 14 October and the house on the batteries, the card read 0 Wh for all three and "25% measured" while those counters read 41.3 kWh of solar, 34.5 kWh into the batteries and 9.4 kWh out of them since midnight. For each stretch a Core is measured at the panel after the update, the card reads what the counters counted for it over the same stretch.
 - A figure with a part measured at the panel says "via panel" under it. Solar the panel could only work out from the Core's output and the rise in its charge level — before the panel's own solar reading has passed its check — is a lower bound and says "via panel · lower bound" ("partly a lower bound" when only some of the day's is). No solar is counted for a dark Core at night, so an outage that is over by sunrise leaves Solar produced unmarked. Batteries (net) reads, for example, "charged · via panel".
-- "% measured" counts the time the panel's meter covered each dark Core: the same 19 October reads 100 % instead of 25 %.
+- "% measured" counts the time the panel's meter covered each dark Core, so an all-dark day measured at the panel reads close to 100 % instead of 25 %.
 - A Core that reports for part of the day counts its own readings for that part and the panel's for the rest, handing over at the same instants as the energy counters, so no stretch is counted twice — also when a Core's own readings come back while the panel is still measuring it (its data arriving before the cloud lists it online again).
 - The Solar tab's Today tile shows the same solar figure with the same note.
 - A day with every Core reporting reads exactly as before.
-- From the update onward: the panel-measured energy of a dark Core is recorded for the card at each 5-minute count, so on the day of the update the card counts it from the update on. The record is kept as long as the recorded readings.
+- From the update onward: the panel-measured energy of a dark Core is recorded for the card at each 5-minute count, so on the day of the update the card counts it only from the update on, and its figures and "% measured" stay below the counters' for that day. The record is kept as long as the recorded readings.
 
 **Documentation**
 
