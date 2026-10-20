@@ -1,3 +1,33 @@
+## 1.190.1
+
+### The panel card names the per-battery charge limit; the Cleared list opens on 7 days; the live solar reading stays trusted; the Midday-Charge window sensors are timestamps again
+
+**Dashboard**
+
+- The Smart Home Panel card's "Charge power 7.20 kW" is now "Charge limit (per battery) 7.20 kW × 3 connected = 21.60 kW". The figure is the panel's configured charge-rate limit for each connected battery (the Delta Pro Ultra's AC input ceiling, the same figure as each battery slot's rating), not the rate the pool charges at and not a live power: on the night of 13–14 October each Core took up to 7.2 kW of its own, the three together 18.1 kW, and the grid main read 19.25 kW. The envelope beside it multiplies the limit by the batteries connected to the panel; it is left out while the panel reports no limit or no connected battery. The card shows no measured peak, since no per-charge summary exists yet to read one from.
+- The card's "Charge time" and "Remain (disch, vendor)" are shown only while the server says that timer applies, by the same rule that decides whether Home Assistant's backup charge and discharge minutes are published, so the card and the sensors agree; with no verdict from the server they read "—". The panel reports both timers whatever the direction, and the card had shown the charge time whenever the charge limit was above 50 W (always), so it read "38 min" to full while the batteries drained 3.4 kW through the panel on 16 October.
+
+**Alerts**
+
+- The Cleared list fetched the whole stored history when the page opened and again every 30 seconds — 1,500 cleared alerts, 1.2 MB, each with its full alert record — and drew every row in one table, so it took a moment to appear and ran very long. It now opens on the last 7 days, with 30 days, 90 days or All a tap away; the refresh fetches only the window shown; the caption says how many rows are listed of how many are kept; 200 rows are drawn before a "Show more" button; and each row carries only what the table shows. On the live history the 7-day window is 145 rows and 84 KB in place of 1,500 rows and 1.2 MB, and All is 730 KB. The Critical + High filter is unchanged. The stored history, how much of it is kept, and the warranty export are unchanged.
+
+**Energy dashboard**
+
+- While a Core reports nothing of its own, Fleet PV and Battery Net read the panel's per-slot solar reading as soon as it is present, and the check of that reading against the solar the Core demonstrably took in (its output plus the rise in its charge level) runs alongside. On 18 October that check had passed each slot's reading in the morning and withdrawn it again between late morning and dusk, each time by about a third of a kilowatt-hour — one step of the panel's whole-percent charge level — although the reading stayed within 4–10 % of the check's figure all day; from 11:15 until dusk the Now view then showed no solar, battery or consumption while the house ran on the batteries. The check's own figure is uncertain by one step at each end and by the batteries' measured capacity, so a reading now passes when it is within two steps or 15 % of it, whichever is larger, and a verdict takes effect only once it has held for an hour, or at once when the gap is 2 kWh or more. The same rule decides when a reading is trusted and when trust is withdrawn. Replayed on the 18 October readings, all three slots stay trusted through the day. A reading that is genuinely short — one that misses the solar passing straight through to the house, for example — is still refused, and once refused both sensors read unknown for the rest of the day, as they do while the panel reports no solar reading for the slot. The two sensors sum to what the panel's meter measures on the slot whatever the solar reading says, so the consumption the dashboard derives is right either way.
+- The energy counters: until the slot's solar reading has passed its check, solar is counted from the Core's output and charge-level rise, as before. A reading already trusted that then falls short goes on being counted until the withdrawal takes effect — its shortfall has first to exceed the tolerance, and the verdict then holds for an hour unless the shortfall reaches 2 kWh — so a trusted reading that freezes low leaves up to about the larger of the tolerance and 2 kWh of that slot's solar uncounted for the day (replayed: 2.5 kWh after 80 minutes mid-morning, 4.2 kWh after 135 minutes in the afternoon; about one step, 0.3 kWh, under the one-step rule), with the slot's battery in and out off by the same amount the other way, and Fleet PV and Battery Net publishing the frozen reading meanwhile. The shortfall is not counted back once the reading is withdrawn: nothing already counted changes and no total steps down.
+- The energy flow card and the backup time to full and time to empty follow the sensors: the slot's solar reading is used wherever the sensors publish it.
+- The log line for each verdict states the tolerance and when the verdict first appeared; the battery-lifetime debug block lists a verdict that is still waiting its hour.
+
+**Night charge**
+
+- The Midday-Charge Window Start and End sensors are timestamp sensors again (`device_class: timestamp`), so Home Assistant shows them as times; 1.189.0 published them as text, and they showed raw ISO 8601 strings. They read unknown when there is nothing to show, as before, with no warning in the Home Assistant log: Home Assistant's MQTT sensor maps the empty value to unknown for every sensor type, which 1.189.0 had taken to produce a warning on a timestamp sensor. Midday-Charge Refresh and Night-Charge Role are unchanged.
+- After a restart across the restore of the night's reserve, the morning summary waits for the panel's first reading since the restart, up to 10 minutes, before saying the restore was sent and is not yet confirmed; a restore that first reading confirms is summarised as restored, in one card, instead of a "sent" card followed by a "restored" one. The log line for a deadline page held after a restart says the restore was sent before the restart when it was, instead of "only just sent".
+
+**Documentation**
+
+- The configuration reference stated that the overnight charger delivers at most 7.2 kW × 6 h = 43.2 kWh. That read the per-battery limit as the pool's; it now states the measured envelope (about 17 kW into three Cores at a 19.1 kW main) and refers to the night-charge reference, which records the per-Core peaks of 13–14 October.
+- The night-charge reference and the entity table describe the Midday-Charge window sensors as timestamps, and state how Home Assistant's MQTT sensor reads an empty value.
+
 ## 1.190.0
 
 ### The LAN console is served over SSH; telnet is no longer served

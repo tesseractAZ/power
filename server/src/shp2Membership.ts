@@ -428,6 +428,10 @@ export function panelForClient(
   return {
     ...p,
     readbackFresh: shp2ReadbackFresh(p, nowMs),
+    // v1.189.1 — which backup timer applies, as /api/ha-state publishes them: the card had gated
+    // its "Charge time" on chargeWattPower (a configured limit, never a direction) and showed a
+    // time to full during a drain.
+    backupTimers: (({ charge, discharge }) => ({ charge, discharge }))(backupTimerGate(devices, nowMs, verdicts)),
     projection: {
       ...p.projection,
       sources: p.projection.sources.map((src) => ({

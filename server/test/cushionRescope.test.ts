@@ -41,9 +41,11 @@ test('THE RE-SCOPE: the cushion is outage energy at ISLANDED load', () => {
 });
 
 test('the DEFAULTS are reachable on this plant — a cushion nothing can meet is the bug', () => {
-  // The overnight charger delivers at most 7.2 kW x 6 h = 43.2 kWh, so from a 25%
-  // evening SoC a clean night reaches ~72%. The default must sit below that or we
-  // have simply replaced one permanently-true flag with another.
+  // The 72% bound dates from reading the panel's 7.2 kW charge limit as the pool's (7.2 kW x
+  // 6 h = 43.2 kWh from a 25% evening SoC). The limit is per connected battery, and the pool
+  // measured ~17 kW across three Cores (2026-09-16/18, 2026-10-13/14), so a clean night
+  // reaches full; 72% is kept as the stricter upper bound. The default must sit below it or
+  // we have simply replaced one permanently-true flag with another.
   const cushion = outageCushionKwh({
     islandedLoadKw: ISLANDED_KW, outageHours: DEFAULT_OUTAGE_CUSHION_HOURS,
     safetyFactor: DEFAULT_ISLANDED_LOAD_SAFETY, dischargeEff: DISCHARGE_EFF,

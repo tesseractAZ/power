@@ -351,6 +351,7 @@ Net and the rollup had counted both slots. The backup timers' bound reads the sa
 | `night` | sun below the horizon at both ends of the window (`solarPosition` at the configured install site, `FORECAST_LAT` / `FORECAST_LON`, read by `bridgeSite`; Phoenix, the options' default, when the option is not a coordinate) | 0 — physics, not a reading |
 | `measured` | daylight, and this slot's panel PV field has passed its check against the inferred bound (persisted `bridge_pvseen_<panel>_<slot>`) | ∫ `src<n>_pv_w` (the panel's `pvHeightChargeWatts + pvLowChargeWatts`, else `pvChargeWatts`) |
 | `inferred` | daylight, the field not trusted (not yet checked, or below the bound) | monotone envelope `max(prev, Σ(acOut − acIn) + (pct − pct₀) × capWh)` from the slot's first daylight window of its dark span that day |
+| `unchecked` | the power sensors only (`slotPowerBasis`): daylight, the field present, not trusted and not found below today | the field as read, for Fleet PV and Battery Net; the rollup books the same window `inferred` |
 | `unbridgeable` | no slot reading in the window (the panel reading was not fresh), or an inferred window the meter did not cover (re-anchored); for the power sensors, the panel reading is not fresh now (`shp2ReadbackFresh`) | nothing booked at the slot (a marked Core's own readings count instead, above) |
 
 The site matters on any install outside Phoenix: judged on Phoenix's clock, a Berlin
@@ -367,20 +368,58 @@ at night on 2026-10-16 and had not been observed in daylight when the bridge shi
 **Checking the panel's PV field** (`pvFieldVerdict`). One reading proves nothing, so the
 inferred envelope runs in every daylight window of a dark slot whatever the basis, and
 the field's integral is summed over the same windows. Once the envelope has risen
-`BRIDGE_PV_EVIDENCE_STEPS` SoC steps (4; one step = 1 % of `capWh`, about 0.29 kWh), the
-field is **consistent** if it reads at least the bound less one step (the percent is an
-integer, so the bound is good to one step), and **below** otherwise: it reads less PV
-than the Core demonstrably took in. A consistent field is trusted from then on
-(persisted, so it survives restarts and later days). A below field is not trusted, and a
-trusted field that falls below is revoked (its row deleted). Every verdict logs both
-figures (`energy bridge: panel … slot … PV field read X kWh since … against the inferred
-lower bound Y kWh (one SoC step Z kWh)`), so the first sunny day of an outage can be
-checked from the log. The check restarts at night, when the field or the slot meter does
-not cover a window, and when a dark span begins; a below verdict holds until it restarts,
-so there is no trust/revoke churn within a day. A field that reads a fraction r of the
-solar passes the first verdict only when r ≥ 0.75, and is revoked once its shortfall
-exceeds a step, so what it can under-book is about two steps per slot. A field reading
-high is not caught: the bound is a lower one.
+`BRIDGE_PV_EVIDENCE_STEPS` SoC steps (8; one step = 1 % of `capWh`, 0.28-0.30 kWh on the
+live Cores), the field is **consistent** if it reads at least the bound less a tolerance of
+max(`BRIDGE_PV_TOLERANCE_STEPS` steps, `BRIDGE_PV_TOLERANCE_FRACTION` of the bound) — two
+steps or 15 %, `pvFieldTolerance` — and **below** otherwise: it reads less PV than the Core
+demonstrably took in, by more than the bound's own error. That error is one step of SoC
+quantization at each end (the percent is an integer) plus the capacity error of `capWh`.
+Measured on 2026-10-18 (one panel, three dark slots; the field replayed from the recorded
+`src<n>_pv_w` series against the bound, which reproduced the log's six verdicts to the
+minute): the honest field read 1.13 / 1.37 / 0.89 of the bound at 1 kWh, 1.05 / 1.16 /
+0.91 at 2 kWh, 0.99 / 1.07 / 0.93 at 5 kWh, 0.93 / — / 0.94 at 10 kWh and 0.92 / 0.97 /
+0.90 at dusk (28.1 vs 30.3 kWh over the three slots), its shortfall by dusk 2.7 / 1.2 /
+3.4 steps (7.7 / 3.5 / 9.6 %), one window at 10.4 %. With one step of tolerance and four
+steps of evidence, the rule as first shipped, all three slots were trusted at about 1 kWh
+and revoked at 2.99 / 7.66 / 9.54 kWh, each by 0.29-0.32 kWh — just over one step — and
+the Now view lost solar, battery and consumption from 11:15 until dusk. On the days the
+Cores reported (10-12, 10-13) the bound read 0.84-0.85 of their own `pv_total`, and
+0.79-0.94 of the vendor ledger's solar on 10-15..10-17; the field was not recorded before
+v1.188.1, so its ratio to the Cores' own figure is unmeasured.
+
+A verdict is acted on once it has held for `BRIDGE_PV_VERDICT_HOLD_MS` (one hour) of
+daylight check windows, or at once when the field differs from the bound by
+`BRIDGE_PV_GENUINE_WH` (2 kWh, about seven steps) in the verdict's direction
+(`pvVerdictHolds`): the same rule for trust and for revocation, so a transient the growing
+tolerance absorbs within the hour — the bound rising in whole steps while the field
+integrates smoothly, a field that lags the meter across a ramp — changes nothing. A
+consistent field is trusted from then on (persisted, so it survives restarts and later
+days). A below field is not trusted, and a trusted field that falls below is revoked (its
+row deleted). Until the revocation acts, a trusted field found short is still booked on the
+`measured` basis: the shortfall against the bound has first to exceed the tolerance (two
+steps, or 15 % of the day's bound so far), and the verdict then holds for an hour unless the
+shortfall reaches 2 kWh — so a slot whose trusted field freezes low books up to about the
+larger of the tolerance and 2 kWh of solar short of the bound, plus a window's rise and a
+step of quantization, before the field is revoked, and its battery in and out carry the same
+error the other way (the slot meter is preserved); the one-step rule's exposure was about one
+step. In time that is an hour or more after the freeze, longer when the day's bound is large
+or the Core charges slowly (a replay: 3 kW of solar, 1 kW to the house, a 28.9 kWh Core, the
+field frozen at 500 W at 11:00 — revoked 80 min later, 2.5 kWh short of a 15.2 kWh bound; the
+same freeze at 14:00, the bound past 20 kWh — 135 min, 4.2 kWh), and a field that stays
+within the tolerance is never revoked. The shortfall is not booked back: the inferred basis
+resumes from the envelope, which kept rising through the held windows, so nothing steps down
+and the day's counters keep the error. The power sensors publish the frozen field through
+the hold (Fleet PV low, Battery Net high by the same amount), as does the backup timers'
+bound. Every verdict acted on logs both figures, the tolerance and when the verdict
+first appeared (`energy bridge: panel … slot … PV field read X kWh since … against the
+inferred lower bound Y kWh (one SoC step Z kWh, tolerance T kWh) — … since …`), so the
+first sunny day of an outage can be checked from the log; the debug block's `pvChecks`
+carry a candidate verdict not yet acted on. The check restarts at night, when the field or
+the slot meter does not cover a window, and when a dark span begins; a below verdict holds
+until it restarts, so there is no trust/revoke churn within a day. A field that reads a
+fraction r of the solar passes the first verdict only when r ≥ 0.75 (as before), and at a
+large bound only when r ≥ 0.85. A field reading high is not caught: the bound is a lower
+one.
 
 Where the energy goes:
 
@@ -630,10 +669,17 @@ Complete mapping (all three sources must be rated):
 
 While a home Core is dark the two rated power sensors add its slot
 (`energyBridge.bridgeFleetFlow`): Battery Net adds `−chW − pv`, Fleet PV adds `pv`, with
-`pv` = 0 at night and the panel's PV field in daylight once it has passed its check against
-the inferred bound. The inferred basis has no power figure, so in daylight without a trusted
-field, or while an online panel's reading is not fresh, both sensors publish null (unknown)
-rather than a partial sum: their readiness flag is `flowBridged` (`publishReadiness.ts`), which the Cores'
+`pv` = 0 at night and, in daylight, the panel's PV field whenever it is present and today's
+check has not found it below the inferred bound — trusted (`measured`) or not yet checked
+(`unchecked`, `slotPowerBasis`). The two sum to the slot meter whatever the field reads, so
+the consumption the Energy dashboard derives is the measured one and only the solar/battery
+split carries the field's error, where an unknown loses all three (2026-10-18 13:30-17:45,
+the hours the one-step rule had revoked the field); the sensors cannot carry a quality flag
+(no attribute is published, and the dashboard reads the state), so a present field is either
+published or withheld. The rollup books an unchecked window on the inferred basis. The
+inferred basis has no power figure, so in daylight with no PV field for the slot, or one
+found below today, or while an online panel's reading is not fresh, both sensors publish
+null (unknown) rather than a partial sum: their readiness flag is `flowBridged` (`publishReadiness.ts`), which the Cores'
 own in/out/AC-import sums (`flow`) do not share. A dark slot whose panel is itself
 cloud-offline is left out of both sums instead (`leftOut` in the debug block), as an
 offline Core always was: nothing of it can be read or bridged until that panel returns,

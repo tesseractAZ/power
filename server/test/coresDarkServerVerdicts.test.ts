@@ -351,7 +351,7 @@ function pvPanel(sourceWatts: number[], pvW: number): Any {
   return p;
 }
 /** What both publishers and the console compute: the bridged flow over aggregateFleetFlow's sums. */
-function bridged(ds: Any, trusted: boolean, site = daySite(NOW)) {
+function bridged(ds: Any, trusted: boolean | 'below', site = daySite(NOW)) {
   const { fleetPv, fleetBatteryNetDisplay } = aggregateFleetFlow(ds);
   return bridgeFleetFlow({ fleetPv, fleetBatteryNet: fleetBatteryNetDisplay }, ds, NOW, () => trusted, site);
 }
@@ -366,8 +366,11 @@ test('★★★ by day with every Core dark and the panel’s PV field trusted (
   // The timers: the slot less the PV the bridge reads as measured, plus each Core's own draw.
   assert.deepEqual(backupTimerGate(ds, NOW, v), { charge: true, discharge: false, basis: 'panel' }, 'was time to empty during the charge');
   assert.equal(poolNetUpperBound(ds, NOW, v).watts, 3 * (500 - 2000 + SLOT_UNMETERED_DRAW_W));
-  // Without a trusted field the slots cannot separate PV from the packs: the documented bound stays.
-  assert.deepEqual(backupTimerGate(ds, NOW, slotVerdicts(bridged(ds, false))), { charge: false, discharge: true, basis: 'panel' });
+  // With the field found short of the inferred bound today the slots cannot separate PV from the
+  // packs: the documented bound stays. Unchecked (present, not yet checked) it is read as the
+  // sensors read it (v1.189.1).
+  assert.deepEqual(backupTimerGate(ds, NOW, slotVerdicts(bridged(ds, 'below'))), { charge: false, discharge: true, basis: 'panel' });
+  assert.deepEqual(backupTimerGate(ds, NOW, slotVerdicts(bridged(ds, false))), { charge: true, discharge: false, basis: 'panel' });
   // The card on the server's output.
   const client = { ...ds, 'PANEL-TEST-01': panelForClient(ds['PANEL-TEST-01'], ds, NOW, v) };
   const grid: Any = { present: true, declared: true, importWatts: 0, homeGridWatts: 0, panelFresh: true };

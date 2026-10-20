@@ -621,6 +621,11 @@ export interface NightActuationState {
    *  (restoreSummaryDue). A record from before the field had its summary sent on the ACK, and reads
    *  back with revertedAtMs here (coerceActuationState), so an update never sends it again. */
   restoreSummaryAtMs: number | null;
+  /** v1.189.1 — when the owed summary first waited for this process's first reading of the reserve
+   *  (restoreSummaryDue 'hold': a restart across the restore's readback grace). It waits at most
+   *  REVERT_DEADLINE_HOLD_MAX_MS from here; on the record, so a second restart inside the wait does
+   *  not start it over. */
+  restoreSummaryHeldAtMs: number | null;
   lastError: string | null;
 }
 
@@ -654,7 +659,7 @@ export function emptyActuationState(): NightActuationState {
     applyUnlandedAtMs: null,
     revertDeadlineHeldAtMs: null,
     revertGridLossAbort: false,
-    restoreSummaryAtMs: null,
+    restoreSummaryAtMs: null, restoreSummaryHeldAtMs: null,
     lastError: null,
   };
 }
@@ -747,6 +752,7 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     // A record written before the field (v1.189.0 review) sent its summary on the restore's ACK:
     // absent, it reads as sent then, so the update never sends a second one.
     restoreSummaryAtMs: o.restoreSummaryAtMs === undefined ? num(o.revertedAtMs) : num(o.restoreSummaryAtMs),
+    restoreSummaryHeldAtMs: num(o.restoreSummaryHeldAtMs),
     lastError: str(o.lastError),
   };
 }
@@ -1632,6 +1638,10 @@ export function revertRetryText(retrying: boolean, onReport: RevertResendOnRepor
 /** What the summary of a restore says of it (restoreSummaryDue): read back ("restored to 16%"), or
  *  sent and acknowledged with no readback yet. */
 export type RestoreSummaryKind = 'readBack' | 'acknowledged';
+/** restoreSummaryDue's step: a summary to send, or 'hold' — owed, and waiting for this process's first
+ *  reading of the reserve (v1.189.1, restoreSummaryAwaitsFirstReading; stamp restoreSummaryHeldAtMs
+ *  on the first tick that waits). */
+export type RestoreSummaryStep = RestoreSummaryKind | 'hold';
 
 /**
  * v1.189.0 (review) — the summary of a restore is owed, and what it says. PURE. The morning summary
@@ -1643,18 +1653,61 @@ export type RestoreSummaryKind = 'readBack' | 'acknowledged';
  *  - null: no restore accepted yet, inside its grace with no readback, or the summary already went
  *    (restoreSummaryAtMs). Once per record. Nor while the live reading is the restored value: that
  *    is the readback, which decideActuation stamps on this same tick (revertVerified), and the
- *    summary goes then saying "restored".
+ *    summary goes then saying "restored";
+ *  - 'hold' (v1.189.1): owed, and waiting for this process's first reading of the reserve
+ *    (restoreSummaryAwaitsFirstReading) — told `readSinceBoot`; a call that does not tell it
+ *    (the readback tick) never holds.
  */
+type RestoreSummaryRecord = Pick<NightActuationState, 'day' | 'revertedAtMs' | 'revertVerifiedAtMs' | 'restoreSummaryAtMs' | 'priorReservePct' | 'restoreSummaryHeldAtMs'>;
+export function restoreSummaryDue(s: RestoreSummaryRecord, nowMs: number, liveReservePct?: number | null): RestoreSummaryKind | null;
+export function restoreSummaryDue(s: RestoreSummaryRecord, nowMs: number, liveReservePct: number | null, readSinceBoot: boolean): RestoreSummaryStep | null;
 export function restoreSummaryDue(
-  s: Pick<NightActuationState, 'day' | 'revertedAtMs' | 'revertVerifiedAtMs' | 'restoreSummaryAtMs' | 'priorReservePct'>,
+  s: RestoreSummaryRecord,
   nowMs: number,
   /** The live reading this tick (null: none); omitted, none. */
   liveReservePct: number | null = null,
-): RestoreSummaryKind | null {
+  /** This process has read a reserve setting since it started (the tick's nightReserveReadSinceBoot);
+   *  omitted: it has (nothing waits on it — the readback tick). */
+  readSinceBoot = true,
+): RestoreSummaryStep | null {
   if (s.day == null || s.revertedAtMs == null || s.restoreSummaryAtMs != null) return null;
   if (s.revertVerifiedAtMs != null) return 'readBack';
   if (liveReservePct != null && liveReservePct === s.priorReservePct) return null;
+  if (restoreSummaryAwaitsFirstReading(s, nowMs, liveReservePct, readSinceBoot)) return 'hold';
   return nowMs - s.revertedAtMs >= REVERT_VERIFY_AFTER_MS ? 'acknowledged' : null;
+}
+
+/**
+ * v1.189.1 — the owed summary waits for this process's first reading of the reserve. PURE. A process
+ * down across the restore's readback grace came back with the summary owed and no reading yet, sent
+ * "the restore was sent and has not read back" on its first tick, and the readback a tick or two
+ * later added a "restored" card after it. True while the grace is spent, this process has read no
+ * reserve setting since it started and this tick reads none, for less than REVERT_DEADLINE_HOLD_MAX_MS
+ * from the first tick that waits (restoreSummaryHeldAtMs) — the bound the deadline stage's own
+ * restart wait has (restoreAwaitingFirstChance). A reading of the raise ends it (the summary says
+ * "sent"); a reading of the restore is the readback (restoreSummaryDue returns null, and the summary
+ * goes on the revertVerified tick saying "restored"); none, and the summary goes at the bound.
+ */
+export function restoreSummaryAwaitsFirstReading(
+  s: Pick<NightActuationState, 'revertedAtMs' | 'restoreSummaryHeldAtMs'>,
+  nowMs: number,
+  liveReservePct: number | null,
+  readSinceBoot: boolean,
+): boolean {
+  if (s.revertedAtMs == null || nowMs - s.revertedAtMs < REVERT_VERIFY_AFTER_MS) return false;
+  if (readSinceBoot || isReserveSetting(liveReservePct)) return false;
+  return s.restoreSummaryHeldAtMs == null || nowMs - s.restoreSummaryHeldAtMs < REVERT_DEADLINE_HOLD_MAX_MS;
+}
+
+/**
+ * v1.189.1 — how the restore stands, for the revertDeadline hold line (index.ts): not yet sent; sent
+ * before this process started (an ACK that predates a restart: the hold then waits for the first
+ * reading, not for a restore "only just" sent); or only just sent, by this process. PURE.
+ */
+export function restoreSentWords(revertedAtMs: number | null, bootMs: number): string {
+  if (revertedAtMs == null) return 'not yet sent';
+  if (revertedAtMs < bootMs) return 'sent before the add-on last started';
+  return 'only just sent';
 }
 
 /**
