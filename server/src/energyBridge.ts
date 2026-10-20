@@ -32,10 +32,33 @@
  *                 (persisted `bridge_pvseen_<panel>_<slot>`). The field was unverified when this
  *                 shipped (it read 0 at night), so one reading proves nothing: the inferred figure
  *                 runs alongside it in every daylight window of a dark slot, and once it has risen
- *                 BRIDGE_PV_EVIDENCE_STEPS SoC steps the field is trusted if it reads at least the
- *                 bound less one SoC step (pvFieldVerdict). Below that it is not trusted, and a
- *                 trusted field that falls below it is revoked — the check never stops. The bound
- *                 is a lower one, so a field reading HIGH is not caught.
+ *                 BRIDGE_PV_EVIDENCE_STEPS SoC steps the field is consistent if it reads at least
+ *                 the bound less a tolerance of max(BRIDGE_PV_TOLERANCE_STEPS SoC steps,
+ *                 BRIDGE_PV_TOLERANCE_FRACTION of the bound), else below (pvFieldVerdict). A
+ *                 verdict takes effect once it has held for BRIDGE_PV_VERDICT_HOLD_MS of daylight
+ *                 windows, or at once when the field differs from the bound by
+ *                 BRIDGE_PV_GENUINE_WH in its direction (pvVerdictHolds): consistent trusts the
+ *                 field, below leaves it untrusted or revokes it — the check never stops. The
+ *                 bound is a lower one, so a field reading HIGH is not caught. The bound carries
+ *                 one SoC step of quantization at each end and the capacity error: on 2026-10-18
+ *                 an honest field read 0.90-0.97 of it over the day, and the one-step rule this
+ *                 shipped with revoked all three slots by 0.29-0.32 kWh (the constants' comments).
+ *                 Until a revocation acts, a trusted field found short is still booked on this
+ *                 basis: the shortfall must first exceed the tolerance, then hold the hour or reach
+ *                 BRIDGE_PV_GENUINE_WH — up to about max(the tolerance, 2 kWh) of solar short of
+ *                 the bound per slot (plus a window's rise and a step), the battery split off by the
+ *                 same amount, an hour or more after a freeze (longer at a large bound or a slow
+ *                 charge; a field within the tolerance is never revoked). It is not booked back:
+ *                 the inferred basis resumes from the envelope, which rose through the held
+ *                 windows, so nothing steps down and the day's counters keep the shortfall.
+ *  - 'unchecked'  the power sensors only (slotPowerBasis): the field is present in daylight, not
+ *                 trusted and not found below today. Fleet PV and Battery Net publish it: the two
+ *                 sum to the slot meter (−chW) whatever the field reads, so the house consumption
+ *                 the Energy dashboard derives is the measured one and only the solar/battery
+ *                 split carries the field's error, while unknown loses all three (2026-10-18
+ *                 13:30-17:45, after the quantized check had revoked the field). The rollup books
+ *                 such a window on the inferred basis: nothing booked changes. A field found
+ *                 below (a genuine shortfall) or absent withholds both sensors.
  *  - 'inferred'   otherwise, in daylight: a monotone envelope of the slot's net AC output plus
  *                 the change in stored energy since the day's first daylight window,
  *                     cum(t) = max(prev, Σ(acOut − acIn) + (pct(t) − pct(anchor)) × capWh)
@@ -43,7 +66,8 @@
  *                 is a fraction of). A LOWER BOUND: replayed on 8 recorded days it read 0.83-0.90
  *                 of the measured PV, short by a near-constant 4.7-6.1 kWh/day (the Cores' own
  *                 draw), and up to one SoC step (~290 Wh) per Core per anchor either way.
- *                 Energy-only: it has no instantaneous power, so the power sensors stay unknown.
+ *                 Energy-only: it has no instantaneous power; the power sensors read the field
+ *                 unchecked (above), and withhold when it is absent or found below.
  *  - 'unbridgeable' no slot row in the window (the recorder writes none while the panel's reading
  *                 is not fresh), or the inferred basis has no SoC reading or a window the slot meter
  *                 did not cover: nothing is booked at the slot. The power sensors withhold both
@@ -212,12 +236,46 @@ const CAPACITY_CACHE_MS = 6 * 60 * 60 * 1000;
  *  and the 2026-10-03 /device/list blip (~92 s); short against an outage. */
 export const BRIDGE_DWELL_MS = 3 * 60 * 1000;
 /** The panel PV field is judged once the inferred lower bound has risen this many SoC steps
- *  (~1.1 kWh on a 28.7 kWh Core). The bound is good to one step, so a field reading a fraction r of
- *  the solar passes the first verdict only when r ≥ 1 − 1/steps (0.75 here), and is revoked once
- *  the shortfall exceeds a step. */
-export const BRIDGE_PV_EVIDENCE_STEPS = 4;
+ *  (~2.3 kWh on a 28.9 kWh Core; one step = 1 % of capWh, 0.28-0.30 kWh on the three live Cores).
+ *  With the two-step tolerance below, a field reading a fraction r of the solar passes the first
+ *  verdict only when r ≥ 1 − 2/steps (0.75 here, as with one step at 4). */
+export const BRIDGE_PV_EVIDENCE_STEPS = 8;
+/**
+ * pvFieldVerdict's tolerance: the field may read below the bound by up to
+ * max(BRIDGE_PV_TOLERANCE_STEPS × one SoC step, BRIDGE_PV_TOLERANCE_FRACTION × the bound).
+ *
+ * MEASURED 2026-10-18 (one panel ..0432, slots 1/2/3 = Cores ..0314/..0482/..0090, every Core
+ * cloud-dark; the field replayed from the recorded per-slot series against the bound, which
+ * reproduced the add-on log's six verdicts to the minute). Field / bound: 1.13 / 1.37 / 0.89 at a
+ * bound of 1 kWh, 1.05 / 1.16 / 0.91 at 2 kWh, 0.99 / 1.07 / 0.93 at 5 kWh, 0.93 / — / 0.94 at
+ * 10 kWh, and 0.92 / 0.97 / 0.90 at the end of the day (28.1 vs 30.3 kWh over the three slots);
+ * the shortfall by dusk 2.7 / 1.2 / 3.4 steps (7.7 / 3.5 / 9.6 % of the bound), one window at
+ * 10.4 %. The bound carries up to one step of SoC quantization at EACH end (two steps) plus the
+ * capacity error, so the one-step rule as shipped revoked all three honest fields, each by
+ * 0.29-0.32 kWh (2.67 vs 2.99, 7.37 vs 7.66, 9.25 vs 9.54 kWh), and the Energy dashboard's Now
+ * view lost solar, battery and consumption from 11:15 to dusk. Two steps cover the quantization
+ * while the bound is small; 15 % covers the measured 9.6 % with a margin while it is large. A
+ * field reading only the battery-charging share (about half the solar while the house runs on
+ * the Cores) is still refused at the first verdict: 0.5 × 8 steps against 8 − 2 steps.
+ */
+export const BRIDGE_PV_TOLERANCE_STEPS = 2;
+export const BRIDGE_PV_TOLERANCE_FRACTION = 0.15;
+/**
+ * A verdict takes effect once it has held for one full hour of daylight check windows, or at once
+ * when the field differs from the bound by BRIDGE_PV_GENUINE_WH or more in the verdict's direction
+ * (pvVerdictHolds): a shortfall of 2 kWh is about seven steps, which no quantization explains.
+ * The same rule for trust and for revocation. A field that lags the slot meter by ten minutes
+ * across a 5 kW ramp reads ~0.8 kWh short for the half hour the 15 % takes to grow past it; the
+ * hour absorbs that, and it absorbs the 10.4 % window above.
+ */
+export const BRIDGE_PV_VERDICT_HOLD_MS = 60 * 60 * 1000;
+export const BRIDGE_PV_GENUINE_WH = 2000;
 
-export type BridgeBasis = 'night' | 'measured' | 'inferred' | 'unbridgeable';
+/** `unchecked`: the power sensors only — the field is present and neither trusted nor found below. */
+export type BridgeBasis = 'night' | 'measured' | 'unchecked' | 'inferred' | 'unbridgeable';
+/** A slot's PV field for the power sensors: true = trusted (the 'measured' basis), false = present
+ *  but not checked yet today ('unchecked'), 'below' = found short of the bound today (withheld). */
+export type FieldTrust = boolean | 'below';
 
 const finite = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -506,27 +564,51 @@ export function inferPvStep(
 /**
  * Does the panel's PV field agree with the inferred lower bound over the same windows? `fieldWh`
  * is the field's integral, `inferredWh` the inferred envelope's rise, `stepWh` one SoC step (1 % of
- * the capacity: the percent is an integer, so the bound is good to one step). 'pending' until the
- * bound has risen BRIDGE_PV_EVIDENCE_STEPS steps; then 'consistent' when the field reads at least
- * the bound less one step, else 'below' (it reads less PV than the Core demonstrably took in). A
- * field reading high is not caught: the bound is a lower one.
+ * the capacity: the percent is an integer, so the bound carries a step of quantization at each
+ * end). 'pending' until the bound has risen BRIDGE_PV_EVIDENCE_STEPS steps; then 'consistent' when
+ * the field reads at least the bound less pvFieldTolerance, else 'below' (it reads less PV than
+ * the Core demonstrably took in, by more than the bound's own error). A field reading high is not
+ * caught: the bound is a lower one.
  */
 export function pvFieldVerdict(fieldWh: number, inferredWh: number, stepWh: number): 'pending' | 'consistent' | 'below' {
   if (!(stepWh > 0) || inferredWh < BRIDGE_PV_EVIDENCE_STEPS * stepWh) return 'pending';
-  return fieldWh >= inferredWh - stepWh ? 'consistent' : 'below';
+  return fieldWh >= inferredWh - pvFieldTolerance(inferredWh, stepWh) ? 'consistent' : 'below';
 }
 
-/** The power-sensor basis for one dark slot NOW (the inferred basis has no power figure). */
-export function slotPowerBasis(s: DarkSlot, nowMs: number, trusted: boolean, site: BridgeSite): BridgeBasis {
+/** How far below the bound an honest field may read: two SoC steps or 15 % of the bound, whichever
+ *  is larger (the measurements are at the constants). */
+export function pvFieldTolerance(inferredWh: number, stepWh: number): number {
+  return Math.max(BRIDGE_PV_TOLERANCE_STEPS * stepWh, BRIDGE_PV_TOLERANCE_FRACTION * inferredWh);
+}
+
+/**
+ * Does a verdict that first appeared at `sinceMs` take effect at `nowMs`? Once it has held for
+ * BRIDGE_PV_VERDICT_HOLD_MS, or at once when the field differs from the bound by
+ * BRIDGE_PV_GENUINE_WH or more in the verdict's direction (short by that much for 'below', above
+ * the bound by that much for 'consistent'). The same rule both ways, so a transient the growing
+ * tolerance absorbs within the hour neither trusts nor revokes.
+ */
+export function pvVerdictHolds(verdict: 'consistent' | 'below', sinceMs: number, nowMs: number, fieldWh: number, inferredWh: number): boolean {
+  if (nowMs - sinceMs >= BRIDGE_PV_VERDICT_HOLD_MS) return true;
+  const margin = fieldWh - inferredWh;
+  return verdict === 'below' ? margin <= -BRIDGE_PV_GENUINE_WH : margin >= BRIDGE_PV_GENUINE_WH;
+}
+
+/** The power-sensor basis for one dark slot NOW (the inferred basis has no power figure). In
+ *  daylight the field is read when it is present and not found below: 'measured' once trusted,
+ *  'unchecked' before (the sensors publish both; see the module comment). Absent, or found below
+ *  today, the slot is unbridgeable and withholds both sensors. */
+export function slotPowerBasis(s: DarkSlot, nowMs: number, trust: FieldTrust, site: BridgeSite): BridgeBasis {
   if (!s.panelFresh || s.chW == null) return 'unbridgeable';
   if (!sunUp(nowMs, site)) return 'night';
-  if (trusted && s.pvW != null) return 'measured';
-  return 'unbridgeable';
+  if (s.pvW == null || trust === 'below') return 'unbridgeable';
+  return trust === true ? 'measured' : 'unchecked';
 }
 
 export interface BridgedFleetFlow {
-  /** Fleet PV, W: the reporting Cores' own figures plus the dark slots' PV; null while a home Core
-   *  is neither (inside the dwell) or a dark slot cannot be bridged. */
+  /** Fleet PV, W: the reporting Cores' own figures plus the dark slots' PV (the panel field,
+   *  trusted or unchecked; 0 at night); null while a home Core is neither (inside the dwell) or a
+   *  dark slot cannot be bridged (no fresh meter; in daylight the field absent or found below). */
   fleetPv: number | null;
   /** Battery Net, W (positive = discharging): the reporting Cores' own pack net plus Σ(−chW − pv)
    *  over the dark slots; null as fleetPv. */
@@ -587,10 +669,13 @@ export interface OnlineFlow {
  *  - a reading of its own (coreReports): its own figures (a Core the cloud lists offline whose MQTT
  *    data still arrives is added; it is not in `online`);
  *  - dark (no reading of its own, bridged): metered at its slot, battery = −chW − pv, pv from the
- *    panel field ('measured') or 0 ('night'); a frozen projection listed online is taken OUT of
- *    `online` first, so its held figures are never published as live;
+ *    panel field ('measured' once trusted, 'unchecked' before — the two figures sum to −chW
+ *    whatever the field reads, so the consumption the dashboard derives is the slot meter's) or 0
+ *    ('night'); a frozen projection listed online is taken OUT of `online` first, so its held
+ *    figures are never published as live;
  *  - inside the dwell: neither, so both figures are withheld (unknown, never a partial sum).
- * A dark slot on an online panel that cannot be bridged right now withholds both figures; one on a
+ * A dark slot on an online panel that cannot be bridged right now (no fresh meter; in daylight no
+ * PV field, or one found below the inferred bound today) withholds both figures; one on a
  * cloud-offline panel is left out of both, as an offline Core was before the bridge: nothing of it
  * can be read until that panel returns, and on a two-panel plant it must not blank the other
  * panel's Cores. Pure.
@@ -599,7 +684,7 @@ export function bridgeFleetFlow(
   online: OnlineFlow,
   devices: Record<string, DeviceSnapshot>,
   nowMs: number,
-  isTrusted: (panelSn: string, slot: number) => boolean,
+  isTrusted: (panelSn: string, slot: number) => FieldTrust,
   site: BridgeSite,
   known?: KnownOfflineSince,
   marked?: MarkedCore,
@@ -649,7 +734,7 @@ export function bridgeFleetFlow(
       meterReady = false;
     }
     if (basis === 'unbridgeable') { ready = false; continue; }
-    const p = basis === 'measured' ? (s.pvW as number) : 0;
+    const p = basis === 'measured' || basis === 'unchecked' ? (s.pvW as number) : 0;
     pv += p;
     fleetIn += p;
     net += -(s.chW as number) - p;
@@ -665,10 +750,12 @@ export function bridgeFleetFlow(
 }
 
 /** v1.188.1 (review) — the verdicts the backup timers' bound and the dashboard card take from the
- *  same computation the two power sensors publish (shp2Membership.ts BridgeVerdicts). */
+ *  same computation the two power sensors publish (shp2Membership.ts BridgeVerdicts): a slot's PV
+ *  wherever the sensors read the field, trusted or unchecked, so the card and the timers agree with
+ *  them (a field reading low makes the timers' bound more conservative, never less). */
 export function slotVerdicts(flow: Pick<BridgedFleetFlow, 'ownSns' | 'slots'>): BridgeVerdicts {
   const measuredPvW = new Map<string, number>();
-  for (const s of flow.slots) if (s.basis === 'measured' && s.pvW != null) measuredPvW.set(slotKey(s.panelSn, s.slot), s.pvW);
+  for (const s of flow.slots) if ((s.basis === 'measured' || s.basis === 'unchecked') && s.pvW != null) measuredPvW.set(slotKey(s.panelSn, s.slot), s.pvW);
   return { own: new Set(flow.ownSns), measuredPvW };
 }
 
@@ -799,8 +886,10 @@ export interface EnergyBridgeDebug {
   absorbed: Array<{ pack: string; chargeWh: number; dischargeWh: number }>;
   /** Slots whose PV field passed its check against the inferred lower bound (the 'measured' basis). */
   trustedSlots: string[];
-  /** The running check of each dark slot's PV field against the inferred lower bound (Wh). */
-  pvChecks: Array<{ slot: string; sinceMs: number; fieldWh: number; inferredWh: number; stepWh: number; verdict: 'pending' | 'consistent' | 'below' }>;
+  /** The running check of each dark slot's PV field against the inferred lower bound (Wh):
+   *  `verdict` is the one in force (acted on), `candidate` a verdict not yet held long enough
+   *  (pvVerdictHolds) and when it first appeared. */
+  pvChecks: Array<{ slot: string; sinceMs: number; fieldWh: number; inferredWh: number; stepWh: number; toleranceWh: number; verdict: 'pending' | 'consistent' | 'below'; candidate: 'consistent' | 'below' | null; candidateSinceMs: number | null }>;
   /** Per-Core energy bridged since it went dark. */
   cores: Record<string, { chargeWh: number; dischargeWh: number }>;
   /** The persisted hand-off instant of each home Core listed offline (bridgeOfflineKey). */
@@ -852,7 +941,11 @@ interface FieldCheck {
   fieldWh: number;
   inferredWh: number;
   stepWh: number;
+  /** The verdict in force: acted on (trusted, revoked, or left untrusted and logged). */
   verdict: 'pending' | 'consistent' | 'below';
+  /** A verdict that differs from the one in force, and when it first appeared: acted on once
+   *  pvVerdictHolds (one hour, or a genuine margin); dropped when the windows read otherwise. */
+  candidate?: { verdict: 'consistent' | 'below'; sinceMs: number };
 }
 
 const kWh = (wh: number): string => (wh / 1000).toFixed(2);
@@ -935,6 +1028,14 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
   };
 
   const isTrusted = (panelSn: string, slot: number): boolean => trusted.has(bridgePvSeenKey(panelSn, slot));
+  /** The power sensors' view of a slot's field (FieldTrust): trusted; else 'below' while today's
+   *  check has found it short (the verdict in force, not a candidate); else unchecked. */
+  const fieldTrust = (panelSn: string, slot: number): FieldTrust => {
+    if (isTrusted(panelSn, slot)) return true;
+    const prefix = `${panelSn}#${slot}#`;
+    for (const [k, c] of checks) if (k.startsWith(prefix) && c.verdict === 'below') return 'below';
+    return false;
+  };
 
   const add = (key: string, wh: number, ts: number) => {
     const prev = deps.readLifetime(key);
@@ -957,7 +1058,9 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
    * One daylight window of a dark slot's PV-field check (pvFieldVerdict): the field's integral and
    * the inferred envelope's rise accumulate from the check's start; the check restarts whenever
    * either cannot be read for a window (the field uncovered, the inferred basis re-anchored), and at
-   * night. A 'below' verdict holds for the rest of the check: no trust/revoke churn within a day.
+   * night. A verdict is acted on only once it has held (pvVerdictHolds: one hour of windows, or a
+   * genuine margin) — a transient the growing tolerance absorbs within the hour changes nothing. A
+   * 'below' verdict in force holds for the rest of the check: no trust/revoke churn within a day.
    */
   const checkField = (
     s: DarkSlot, key: string, prevEnvWh: number, step: { state: InferState | undefined; pvWh: number | null },
@@ -977,22 +1080,32 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     c.stepWh = capWh / 100;
     if (c.verdict === 'below') return;
     const v = pvFieldVerdict(c.fieldWh, c.inferredWh, c.stepWh);
-    if (v === 'pending' || v === c.verdict) return;
+    if (v === 'pending' || v === c.verdict) { c.candidate = undefined; return; }
+    // A verdict that differs from the one in force must hold before it acts: one hour of daylight
+    // windows, or a genuine margin at once. The bound rises in whole SoC steps while the field
+    // integrates smoothly, so a window can read short by more than the tolerance and the next
+    // read within it again (2026-10-18 13:26, one window at 10.4 % against a 15 % tolerance that
+    // the 2-step floor had not yet reached).
+    if (c.candidate?.verdict !== v) c.candidate = { verdict: v, sinceMs: nowMs };
+    if (!pvVerdictHolds(v, c.candidate.sinceMs, nowMs, c.fieldWh, c.inferredWh)) return;
+    const heldSince = c.candidate.sinceMs;
     c.verdict = v;
+    c.candidate = undefined;
     const tk = bridgePvSeenKey(s.panelSn, s.slot);
-    const figures = `PV field read ${kWh(c.fieldWh)} kWh since ${new Date(c.sinceMs).toISOString()} against the inferred lower bound ${kWh(c.inferredWh)} kWh (one SoC step ${kWh(c.stepWh)} kWh)`;
+    const figures = `PV field read ${kWh(c.fieldWh)} kWh since ${new Date(c.sinceMs).toISOString()} against the inferred lower bound ${kWh(c.inferredWh)} kWh (one SoC step ${kWh(c.stepWh)} kWh, tolerance ${kWh(pvFieldTolerance(c.inferredWh, c.stepWh))} kWh)`;
+    const held = `since ${new Date(heldSince).toISOString()}`;
     if (v === 'consistent') {
       if (trusted.has(tk)) return;
       trusted.add(tk);
       deps.writeLifetime(tk, c.fieldWh, nowMs);
-      deps.log(`energy bridge: panel ${s.panelSn} slot ${s.slot} ${figures} — the field is trusted from now on (the 'measured' basis)`);
+      deps.log(`energy bridge: panel ${s.panelSn} slot ${s.slot} ${figures} — within the tolerance ${held}: the field is trusted from now on (the 'measured' basis)`);
       return;
     }
     if (trusted.delete(tk)) {
       deps.deleteLifetime(tk);
-      deps.log(`energy bridge: panel ${s.panelSn} slot ${s.slot} ${figures} — below it by more than one SoC step: the field is no longer trusted (back to the inferred basis)`);
+      deps.log(`energy bridge: panel ${s.panelSn} slot ${s.slot} ${figures} — below it by more than the tolerance ${held}: the field is no longer trusted (back to the inferred basis) — the power sensors withhold the slot`);
     } else {
-      deps.log(`energy bridge: panel ${s.panelSn} slot ${s.slot} ${figures} — below it by more than one SoC step: the field is not trusted (the inferred basis stays)`);
+      deps.log(`energy bridge: panel ${s.panelSn} slot ${s.slot} ${figures} — below it by more than the tolerance ${held}: the field is not trusted (the inferred basis stays) — the power sensors withhold the slot`);
     }
   };
 
@@ -1249,11 +1362,11 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
     clearCore,
     flow: (online, devices, nowMs) => {
       observe(devices, nowMs);
-      return bridgeFleetFlow(online, devices, nowMs, isTrusted, deps.site(), known, isMarked);
+      return bridgeFleetFlow(online, devices, nowMs, fieldTrust, deps.site(), known, isMarked);
     },
     debug: (devices, nowMs) => {
       const t = totals();
-      const now = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, devices, nowMs, isTrusted, deps.site(), known, isMarked);
+      const now = bridgeFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, devices, nowMs, fieldTrust, deps.site(), known, isMarked);
       const cores: Record<string, { chargeWh: number; dischargeWh: number }> = {};
       for (const k of deps.listLifetimeKeys()) {
         const m = /^bridge_core_(.+)_chg$/.exec(k);
@@ -1271,7 +1384,11 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
         trustedSlots: [...trusted].map((k) => k.slice(PVSEEN_PREFIX.length)).sort(),
         pvChecks: [...checks.entries()].map(([k, c]) => {
           const [panelSn, slot] = k.split('#');
-          return { slot: `${panelSn}_${slot}`, sinceMs: c.sinceMs, fieldWh: c.fieldWh, inferredWh: c.inferredWh, stepWh: c.stepWh, verdict: c.verdict };
+          return {
+            slot: `${panelSn}_${slot}`, sinceMs: c.sinceMs, fieldWh: c.fieldWh, inferredWh: c.inferredWh, stepWh: c.stepWh,
+            toleranceWh: pvFieldTolerance(c.inferredWh, c.stepWh), verdict: c.verdict,
+            candidate: c.candidate?.verdict ?? null, candidateSinceMs: c.candidate?.sinceMs ?? null,
+          };
         }).sort((a, b) => a.slot.localeCompare(b.slot)),
         cores,
         offlineSince: [...offlineAt.entries()].map(([sn, sinceMs]) => ({ sn, sinceMs })).sort((a, b) => a.sn.localeCompare(b.sn)),

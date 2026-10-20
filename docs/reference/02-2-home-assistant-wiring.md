@@ -95,13 +95,16 @@ dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). S
   whose MQTT data still arrives. A dark Core is metered at its panel slot: no reading of its
   own for at least 3 min, cloud-offline or listed online on a frozen meter or with no
   projection yet. A frozen projection listed online is never summed as live. The two figures
-  have their own readiness flag, `flowBridged`. They are null, never a partial sum, while a
-  dark slot on an online panel cannot be bridged, or while a Core is inside its 3-min dwell
-  and so in neither figure. A dark slot whose panel is itself cloud-offline is left out of
+  have their own readiness flag, `flowBridged`. By day a dark slot's PV is the panel's PV
+  field whenever it is present and the day's check has not found it short of the inferred
+  bound (trusted or not yet checked; chapter 7); the two sensors sum to the slot meter
+  whatever it reads. They are null, never a partial sum, while a dark slot on an online
+  panel cannot be bridged (no fresh meter; by day no PV field, or one found short today), or
+  while a Core is inside its 3-min dwell and so in neither figure. A dark slot whose panel is itself cloud-offline is left out of
   both, as an offline Core always was. `ac_import_watts` (and the REST twin's Fleet Total In /
   Out) count each Core the same way (v1.188.1): a frozen projection listed online is taken out
   of the online sums, and a dark Core counts at its slot's AC exchange (in: `max(0, chW)`; out:
-  `max(0, −chW)`; Fleet Total In also the slot's PV on the night or measured basis). Before,
+  `max(0, −chW)`; Fleet Total In also the slot's PV on the night, measured or unchecked basis). Before,
   every Core frozen online mid grid-charge kept AC Import at their held 15 kW while the slots
   read 0 W. They are null while a Core is inside its dwell or a dark slot on an online panel has
   no fresh meter (Fleet Total In also while its PV is unknown).
@@ -411,7 +414,7 @@ discharging; Fleet PV and Battery Net plus the dark home slots metered at the pa
 `backup_pool_percent`, `backup_reserve_percent`, `backup_full_capacity_kwh`,
 `backup_remaining_kwh`, and `backup_charge_minutes`/`backup_discharge_minutes` gated on
 the ±50 W deadband (both timers are always reported by the SHP2 regardless of direction).
-The gate (`backupTimerGate`, shared with the console's RUN line) reads the Cores' battery net
+The gate (`backupTimerGate`, shared with the console's RUN line and, since v1.189.1, the dashboard's Smart Home Panel card through the per-panel `backupTimers` field `panelForClient` sends) reads the Cores' battery net
 while every home Core reports on a fresh meter (v1.188.1: and the energy bridge counts each at its
 own reading; the gate takes the bridge's verdicts, `BridgeVerdicts`). Otherwise that sum is not the pool's (0 W with
 every Core dark), so it reads an upper bound through the panel instead: each dark or frozen Core
@@ -421,8 +424,9 @@ comes out of its packs (65-85 W per Core, measured by the energy bridge), so pac
 draw. A slot proves a charge only while it takes in more AC than that draw: at the reserve hold the
 slots read about 0 W while the packs still supply the Cores' standby, and no time to full is
 published. A slot delivering never proves a discharge, since it can be the Core's PV passing
-through. With nothing to bound it, only the discharge timer is published. Where the bridge reads
-a dark slot's panel PV field as measured (checked and trusted, the sun up), that PV comes out of
+through. With nothing to bound it, only the discharge timer is published. Where the power sensors
+read a dark slot's panel PV field (the sun up; trusted, or present and not found short of the
+inferred bound today), that PV comes out of
 the bound (`−slot − PV + draw`), so by day the timers follow the Battery Net sensor, which
 publishes `−slot − PV` for that slot: before, the bound stayed positive while Battery Net read a
 charge, and the time to empty was published beside it. The field's check catches a field that

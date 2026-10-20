@@ -79,7 +79,7 @@ function stubAnalytics(): AnalyticsClient {
   };
 }
 
-async function build(devs: Any, at: number, trusted = false): Promise<Record<string, unknown>> {
+async function build(devs: Any, at: number, trusted: boolean | 'below' = false): Promise<Record<string, unknown>> {
   setAnalyticsClientForTesting(stubAnalytics());
   const snap: FleetSnapshot = { generatedAt: at, devices: devs, alerts: [], alertsComplete: true };
   const store = { get: () => snap, on: () => {} } as unknown as SnapshotStore;
@@ -104,13 +104,21 @@ test('★★★ every home Core dark at night: Fleet PV 0 W and Battery Net = th
   assert.equal(s.ac_import_watts, null, 'the Cores\' AC import is their own reading: withheld while none reports');
 });
 
-test('★★★ in daylight with a PV field never seen working, both power sensors are unknown — never a made-up 0', async () => {
+test('★★★ in daylight both power sensors read a present PV field, checked or not; a field the check has found short today, or no field at all, leaves both unknown — never a made-up 0', async () => {
   const s = await build(devices(NOON, false), NOON);
-  assert.equal(s.fleet_pv_watts, null);
-  assert.equal(s.fleet_battery_net_watts, null);
+  assert.equal(s.fleet_pv_watts, 0, 'the field as read (0 W here), published before its check: the two sum to the slot meter whatever it reads');
+  assert.equal(s.fleet_battery_net_watts, 1875);
   const t = await build(devices(NOON, false), NOON, true);
   assert.equal(t.fleet_pv_watts, 0, 'a trusted field reading 0 W is a reading');
   assert.equal(t.fleet_battery_net_watts, 1875);
+  const b = await build(devices(NOON, false), NOON, 'below');
+  assert.equal(b.fleet_pv_watts, null, 'found short of the inferred bound today: withheld');
+  assert.equal(b.fleet_battery_net_watts, null);
+  const d = devices(NOON, false);
+  for (const src of d[PANEL].projection.sources) Object.assign(src, { pvWatts: null, pvHighWatts: null, pvLowWatts: null });
+  const a = await build(d, NOON, true);
+  assert.equal(a.fleet_pv_watts, null, 'no PV field at all: no figure');
+  assert.equal(a.fleet_battery_net_watts, null);
 });
 
 test('★★ an all-online fleet publishes exactly the Cores\' own sums (the bridge adds nothing)', async () => {

@@ -23,7 +23,8 @@
  *                             the hold, advisory, the served record)
  *   Basis      B-i..B-v      (every mid-day figure carries basis=shadow; the backup's line says
  *                             "Shadow only"; the card's not-comparable line)
- *   Review     U-i..U-iv     (the text sensors render a null as "unknown"; no timestamp sensor)
+ *   Review     U-i..U-iv     (v1.189.1: the window bounds are timestamp sensors whose null is the
+ *                             "None" payload; the text sensors render a null as "unknown")
  *              L-xxxi..xxxii (no measured shadow PV on a row whose PV verdict is set aside)
  *
  *   node scripts/mutate-midday-ledger.mjs [--only <id prefix>]
@@ -484,20 +485,21 @@ const MUTANTS = [
     why: 'The card reads "not-comparable, ~—" as if the refresh had sized nothing.',
   },
 
-  /* ── review lows: a null reads unknown, with no HA warning (a); the set-aside PV (f) ── */
+  /* ── review lows: a null reads unknown, with no HA warning (a; v1.189.1: the bounds are timestamp
+        sensors again, their null the "None" payload every sensor type reads as unknown); the set-aside PV (f) ── */
   {
-    id: 'U-i. ★★★ the window start renders a null as "None"',
+    id: 'U-i. ★★★ the window start renders a null as "unknown"',
     file: MQ,
-    find: `'{{ "unknown" if value_json.midday_charge_window_start_at is none else value_json.midday_charge_window_start_at }}'`,
-    to: `'{{ value_json.midday_charge_window_start_at }}' /* MUTANT */`,
-    why: 'HA shows the literal state "None" on every weekend, weekday afternoon and summer day.',
+    find: `'{{ "None" if value_json.midday_charge_window_start_at is none else value_json.midday_charge_window_start_at }}'`,
+    to: `'{{ "unknown" if value_json.midday_charge_window_start_at is none else value_json.midday_charge_window_start_at }}' /* MUTANT */`,
+    why: 'A timestamp sensor cannot parse "unknown": HA logs a warning carrying the whole state payload every 30 s on every weekend, weekday afternoon and summer day.',
   },
   {
-    id: 'U-ii. ★★★ the window end is a timestamp sensor again',
+    id: 'U-ii. ★★★ the window end is a text sensor again',
     file: MQ,
-    find: "  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', icon: 'mdi:clock-end',",
-    to: "  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', device_class: 'timestamp', /* MUTANT */ icon: 'mdi:clock-end',",
-    why: 'HA cannot parse "unknown" as a time: a warning carrying the whole state payload every 30 s.',
+    find: "  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', device_class: 'timestamp', icon: 'mdi:clock-end',",
+    to: "  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', /* MUTANT */ icon: 'mdi:clock-end',",
+    why: 'HA shows the raw ISO 8601 string in place of a time (the v1.189.0 regression).',
   },
   {
     id: 'U-iii. ★★ the refresh renders a null as "None"',

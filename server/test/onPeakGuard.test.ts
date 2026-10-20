@@ -36,7 +36,7 @@ import {
   foreignStep, isForeignReserveReading, isReserveArbitrageRaised, ownerReserveFloorPct,
   chargeWriteHold, moneyDetectorReservePct, reserveRestoreNote,
   isReserveSetting, applyProvedUnlanded, restoreAwaitingFirstChance, REVERT_DEADLINE_HOLD_MAX_MS, APPLY_MAX_RETRIES,
-  readsOwnRaise, attemptAdoptable, revertResendOnReport, revertRetryText, restoreSummaryDue,
+  readsOwnRaise, attemptAdoptable, revertResendOnReport, revertRetryText, restoreSummaryDue, restoreSentWords,
   type ArmablePlan, type ActuationTickOpts, type NightActuationState,
 } from '../src/nightChargeActuator.js';
 import { onPeakDayWords, buildMiddayRevertDeadline, buildMiddayChargeSummary } from '../src/chargeText.js';
@@ -1087,9 +1087,17 @@ test('★★★ index.ts: the summary is not sent on the ACK; it goes from the t
   const ackBranch = tick.slice(ackAt, tick.indexOf('\n    return;\n  }', ackAt));
   assert.doesNotMatch(ackBranch, /sendNotification\(|sendRestoreSummary\(|buildNightChargeMorningSummary\(|buildMiddayChargeSummary\(/, 'nothing is pushed on the ACK');
   // The step: after the revertDeadline decision, ahead of the reserve decision and its no-panel return.
-  const step = tick.indexOf('const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct);\n  if (summaryOwed != null) {\n    sendRestoreSummary(state, summaryOwed, nowMs);');
+  // v1.189.1 — told whether this process has read the reserve since it started; a wait is stamped
+  // once (restoreSummaryHeldAtMs) and sends nothing; an owed summary is sent.
+  const step = tick.indexOf('const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct, nightReserveReadSinceBoot);\n  if (summaryOwed === \'hold\') {\n    if (state.restoreSummaryHeldAtMs == null) {\n      persistNightActuation({ ...state, restoreSummaryHeldAtMs: nowMs });');
   assert.ok(step > tick.indexOf('const revertPage = decideRevertDeadline('));
   assert.ok(step < tick.indexOf('const action = decideActuation(state, nowMs, {'));
+  assert.ok(tick.indexOf('} else if (summaryOwed != null) {\n    sendRestoreSummary(state, summaryOwed, nowMs);') > step);
+  assert.equal(tick.split('restoreSummaryHeldAtMs: nowMs').length - 1, 1, 'stamped in one place');
+  // The revertDeadline hold line says how the restore stands by restoreSentWords: "only just sent" is
+  // not said of an ACK that predates the start.
+  assert.ok(tick.includes("came with its restore ${restoreSentWords(state.revertedAtMs, PROCESS_BOOT_MS)}; the page waits up to ${REVERT_DEADLINE_HOLD_MAX_MS / 60_000} min for it to be sent and read back."));
+  assert.doesNotMatch(tick, /only just/);
   // The readback tick sends it at once.
   const ver = tick.indexOf("persistNightActuation({ ...state, revertVerifiedAtMs: nowMs, lastError: null });");
   assert.ok(ver > 0);
@@ -1626,4 +1634,92 @@ test('★★★ a write whose confirmation was lost, read at its target after a 
       }
     }
   }
+});
+
+/* ══ v1.189.1 — after a restart, the summary of the restore waits for the panel's first reading ══ */
+
+/**
+ * v1.189.1 — a process down across the restore's readback grace came back with the summary owed
+ * (REVERT_VERIFY_AFTER_MS past the ACK) and no reading of the reserve yet: the "sent and acknowledged"
+ * summary went on the first tick, and the readback a tick or two later added a "restored" card after
+ * it. The summary now waits for the first reading this process gets, REVERT_DEADLINE_HOLD_MAX_MS at
+ * most from the first tick that waits (restoreSummaryHeldAtMs, on the record: a second restart inside
+ * the wait does not start it over), the bound the deadline stage's own restart wait has
+ * (restoreAwaitingFirstChance). A reading of the restore is its readback, summarised as restored; a
+ * reading of the raise is a reading, summarised as sent at once; no reading, and it goes at the bound.
+ */
+test('★★★ restoreSummaryDue: with no reading since the start, the owed summary waits for one, REVERT_DEADLINE_HOLD_MAX_MS at most', () => {
+  const ack = NIGHT.endMs + 20_000;
+  const acked = { ...applied(arm(NIGHT)), revertedAtMs: ack };
+  const owedAt = ack + REVERT_VERIFY_AFTER_MS;
+  assert.equal(restoreSummaryDue(acked, owedAt - 1, null, false), null, 'inside the grace nothing is owed, so nothing waits');
+  assert.equal(restoreSummaryDue(acked, owedAt, null, false), 'hold', 'owed with no reading since the start: it waits');
+  assert.equal(restoreSummaryDue(acked, owedAt + HOUR, null, false), 'hold', 'however long the grace has been spent');
+  assert.equal(restoreSummaryDue(acked, owedAt, null, true), 'acknowledged', 'a process that has read the reserve does not wait on a dark tick');
+  assert.equal(restoreSummaryDue(acked, owedAt, null), 'acknowledged', 'omitted: it has (the readback tick)');
+  assert.equal(restoreSummaryDue(acked, owedAt, 50, false), 'acknowledged', 'a reading of the raise is a reading: sent, not read back');
+  assert.equal(restoreSummaryDue(acked, owedAt, 0, false), 'hold', 'a reconnecting panel\'s 0 is not a reading');
+  assert.equal(restoreSummaryDue(acked, owedAt, 16, false), null, 'a reading of the restore is its readback, summarised then as restored');
+  assert.equal(restoreSummaryDue({ ...acked, revertVerifiedAtMs: owedAt }, owedAt, null, false), 'readBack');
+  const held = { ...acked, restoreSummaryHeldAtMs: owedAt };
+  assert.equal(restoreSummaryDue(held, owedAt + REVERT_DEADLINE_HOLD_MAX_MS - 1, null, false), 'hold');
+  assert.equal(restoreSummaryDue(held, owedAt + REVERT_DEADLINE_HOLD_MAX_MS, null, false), 'acknowledged', 'bounded, by the deadline stage\'s bound');
+  assert.equal(restoreSummaryDue(held, owedAt + REVERT_DEADLINE_HOLD_MAX_MS, 16, false), null, 'a readback at the bound is still the readback');
+  assert.equal(restoreSummaryDue({ ...held, restoreSummaryAtMs: owedAt + REVERT_DEADLINE_HOLD_MAX_MS }, owedAt + HOUR, null, false), null, 'once');
+  // The stamp rides the record, so a second restart inside the wait does not start it over; a record
+  // from before the field has none.
+  assert.equal(emptyActuationState().restoreSummaryHeldAtMs, null);
+  assert.equal(coerceActuationState(JSON.parse(JSON.stringify(held))).restoreSummaryHeldAtMs, owedAt);
+  const legacy = JSON.parse(JSON.stringify(acked));
+  delete legacy.restoreSummaryHeldAtMs;
+  assert.equal(coerceActuationState(legacy).restoreSummaryHeldAtMs, null);
+  assert.equal(restoreSummaryDue(coerceActuationState(legacy), owedAt, null, false), 'hold');
+});
+
+test('★★★ a restart across the restore, tick by tick: the summary says "restored" when the first reading is the readback, and never goes before a reading or the bound', () => {
+  const ack = NIGHT.endMs + 20_000;
+  const base: NightActuationState = { ...applied(arm(NIGHT)), revertedAtMs: ack };
+  // Down from inside the readback grace to past it: the summary is owed when the process comes back.
+  const bootAt = ack + 8 * MIN;
+  assert.equal(restoreSummaryDue(base, bootAt), 'acknowledged', 'not told of the start, it would go on the first tick');
+  const run = (firstReading: number | null, readAt = bootAt + 2 * MIN) => {
+    let s = base;
+    let readSinceBoot = false; // index.ts's nightReserveReadSinceBoot, false at every start
+    const summaries: Array<{ t: number; kind: string }> = [];
+    for (let t = bootAt; t <= bootAt + HOUR; t += MIN) {
+      const cur = firstReading != null && t >= readAt ? firstReading : null;
+      if (isReserveSetting(cur)) readSinceBoot = true;
+      // The tick's order: the summary step, then the reserve decision (its revertVerified sends one too).
+      const due = restoreSummaryDue(s, t, cur, readSinceBoot);
+      if (due === 'hold') { if (s.restoreSummaryHeldAtMs == null) s = { ...s, restoreSummaryHeldAtMs: t }; }
+      else if (due != null) { summaries.push({ t: t - bootAt, kind: due }); s = { ...s, restoreSummaryAtMs: t }; }
+      const a = decideActuation(s, t, ropts({ currentReservePct: cur }));
+      if (a.kind === 'revertVerified') {
+        s = { ...s, revertVerifiedAtMs: t };
+        const now = restoreSummaryDue(s, t);
+        if (now != null) { summaries.push({ t: t - bootAt, kind: now }); s = { ...s, restoreSummaryAtMs: t }; }
+      } else if (a.kind === 'retryRevert') s = { ...s, revertRetries: s.revertRetries + 1, revertLastAttemptMs: t };
+      else if (a.kind === 'revertFailed') s = { ...s, revertReadbackEscalated: true };
+    }
+    return { s, summaries };
+  };
+  const takes = run(16);
+  assert.deepEqual(takes.summaries, [{ t: 2 * MIN, kind: 'readBack' }], 'the first reading is the readback: one card, "restored"');
+  assert.equal(takes.s.restoreSummaryHeldAtMs, bootAt, 'the wait began on the first tick after the start');
+  assert.equal(takes.s.revertVerifiedAtMs, bootAt + 2 * MIN);
+  const raised = run(50);
+  assert.deepEqual(raised.summaries, [{ t: 2 * MIN, kind: 'acknowledged' }], 'the first reading shows the raise: "sent", on that tick, not before');
+  const dark = run(null);
+  assert.deepEqual(dark.summaries, [{ t: REVERT_DEADLINE_HOLD_MAX_MS, kind: 'acknowledged' }], 'no reading: "sent" when the bound runs out');
+  const late = run(16, bootAt + REVERT_DEADLINE_HOLD_MAX_MS + MIN);
+  assert.deepEqual(late.summaries, [{ t: REVERT_DEADLINE_HOLD_MAX_MS, kind: 'acknowledged' }], 'a readback after the bound adds no second card');
+});
+
+test('★★ restoreSentWords: the revertDeadline hold line says "only just sent" only of a restore this process sent', () => {
+  const boot = NIGHT.endMs + 8 * MIN;
+  assert.equal(restoreSentWords(null, boot), 'not yet sent');
+  assert.equal(restoreSentWords(boot - 7 * MIN, boot), 'sent before the add-on last started', 'the ACK predates the restart');
+  assert.equal(restoreSentWords(boot - 1, boot), 'sent before the add-on last started');
+  assert.equal(restoreSentWords(boot, boot), 'only just sent');
+  assert.equal(restoreSentWords(boot + 30_000, boot), 'only just sent', 'sent by this process, inside its grace');
 });

@@ -25,6 +25,8 @@
  *   Review lows     X-i..X-ix (a dark readback's page says the restore is sent once the panel reports)
  *                   · Z-i..Z-vii (a restart just after the ACK waits for one reading, bounded)
  *                   · K-i..K-xi (the summary says "restored" only on a readback)
+ *   v1.189.1       J-i..J-viii (after a restart the owed summary waits for the first reading, bounded;
+ *                   the hold line does not say "only just sent" of an ACK that predates the start)
  *
  *   node scripts/mutate-onpeak-guard.mjs
  */
@@ -1034,16 +1036,73 @@ const MUTANTS = [
   {
     id: 'K-iv-c. ★★ the tick does not tell the summary the reading',
     file: IDX,
-    find: '  const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct);',
-    to: '  const summaryOwed = restoreSummaryDue(state, nowMs); /* MUTANT */',
+    find: '  const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct, nightReserveReadSinceBoot);',
+    to: '  const summaryOwed = restoreSummaryDue(state, nowMs, null, nightReserveReadSinceBoot); /* MUTANT */',
     why: 'The rule is defined and never reached.',
   },
   {
     id: 'K-v. ★★★ the tick never sends the owed summary',
     file: IDX,
-    find: '  if (summaryOwed != null) {\n    sendRestoreSummary(state, summaryOwed, nowMs);',
-    to: '  if (summaryOwed != null && (false as boolean)) { /* MUTANT */\n    sendRestoreSummary(state, summaryOwed, nowMs);',
+    find: '  } else if (summaryOwed != null) {\n    sendRestoreSummary(state, summaryOwed, nowMs);',
+    to: '  } else if (summaryOwed != null && (false as boolean)) { /* MUTANT */\n    sendRestoreSummary(state, summaryOwed, nowMs);',
     why: 'A restore that does not read back gets no summary at all.',
+  },
+  /* ── v1.189.1: after a restart, the owed summary waits for this process's first reading ── */
+  {
+    id: 'J-i. ★★★ the summary never waits for the first reading',
+    file: ACT,
+    find: "  if (restoreSummaryAwaitsFirstReading(s, nowMs, liveReservePct, readSinceBoot)) return 'hold';",
+    to: '  /* MUTANT */',
+    why: 'A restart across the readback grace sends "the restore was sent and has not read back" on its first tick, and the readback a tick later adds a "restored" card after it.',
+  },
+  {
+    id: 'J-ii. ★★★ the wait is unbounded',
+    file: ACT,
+    find: '  return s.restoreSummaryHeldAtMs == null || nowMs - s.restoreSummaryHeldAtMs < REVERT_DEADLINE_HOLD_MAX_MS;',
+    to: '  return true; /* MUTANT */',
+    why: 'A panel that never reports again after a restart leaves the night with no summary at all.',
+  },
+  {
+    id: 'J-iii. ★★★ the wait ignores a reading of the raise',
+    file: ACT,
+    find: '  if (readSinceBoot || isReserveSetting(liveReservePct)) return false;',
+    to: '  if (readSinceBoot) return false; /* MUTANT */',
+    why: 'The first reading shows the raise standing, and the summary still waits instead of saying the restore was sent.',
+  },
+  {
+    id: 'J-iv. ★★★ every dark tick waits, restart or not',
+    file: ACT,
+    find: '  if (readSinceBoot || isReserveSetting(liveReservePct)) return false;',
+    to: '  if (isReserveSetting(liveReservePct)) return false; /* MUTANT */',
+    why: 'A panel dark through the readback grace delays every morning summary ten minutes, with no restart.',
+  },
+  {
+    id: 'J-v. ★★★ the tick does not tell the summary whether the reserve has been read since the start',
+    file: IDX,
+    find: '  const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct, nightReserveReadSinceBoot);',
+    to: '  const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct, true); /* MUTANT */',
+    why: 'The pure rule waits; the tick never asks it to.',
+  },
+  {
+    id: 'J-vi. ★★★ the tick never stamps the wait',
+    file: IDX,
+    find: '      persistNightActuation({ ...state, restoreSummaryHeldAtMs: nowMs });',
+    to: '      /* MUTANT */',
+    why: 'With no stamp the bound never starts: a panel that stays dark after a restart leaves the night with no summary.',
+  },
+  {
+    id: 'J-vii. ★★ the stamp does not survive a restart',
+    file: ACT,
+    find: '    restoreSummaryHeldAtMs: num(o.restoreSummaryHeldAtMs),',
+    to: '    restoreSummaryHeldAtMs: null, /* MUTANT */',
+    why: 'A restart loop inside the wait starts the ten minutes over each time.',
+  },
+  {
+    id: 'J-viii. ★★ the hold line says "only just sent" of a restore sent before the restart',
+    file: ACT,
+    find: "  if (revertedAtMs < bootMs) return 'sent before the add-on last started';",
+    to: '  /* MUTANT */',
+    why: 'The log claims a restore acknowledged before the restart was only just sent.',
   },
   {
     id: 'K-vi. ★★★ the readback tick does not send it',

@@ -450,8 +450,9 @@ export const SENSORS: SensorConfig[] = [
   // v1.189.0 (R4) — what tonight's overnight window is for in the charge cycle the add-on runs
   // (nightChargeRoleFields): 'cost' (it carries the cost buy) or 'backup' (the outage backup ahead of
   // a mid-day charge). The night-charge entities above stay bound to the overnight leg.
-  // A null role renders "unknown" (ecoflow_backup_reserve_enabled's null pattern): HA shows a text
-  // sensor's template result as its state, so a bare null would read the literal 'None'.
+  // A null role renders "unknown" (ecoflow_backup_reserve_enabled's null pattern), which HA reads as
+  // unknown. So would the "None" a bare null renders: HA's MQTT sensor maps that payload to unknown
+  // for every sensor type (the v1.189.1 note below); the text sensors keep the established pattern.
   { unique_id: 'ecoflow_night_charge_role', name: 'Night-Charge Role', icon: 'mdi:swap-horizontal', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "unknown" if value_json.night_charge_role is none else value_json.night_charge_role }}' },
   // v1.189.0 (R4) — the winter mid-day charge (APS super off-peak, 10:00–15:00 Mon–Fri) as
   // middayShadow.ts computes it each winter weekday evening, the morning refresh included. Until the
@@ -459,17 +460,20 @@ export const SENSORS: SensorConfig[] = [
   // ecoflow_midday_charge_recommended stays off. Same shape as the night-charge entities: no
   // device_class on the figures, the ~25 h expiry, null → 'unknown' with no current mid-day leg.
   // Each figure carries a `basis` attribute ('shadow' until the switch; MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE).
-  // The window bounds and the refresh are text, and render a null as "unknown" (the null pattern of
-  // ecoflow_backup_reserve_enabled): a bare null renders "None", which a text sensor shows as the
-  // literal state and a timestamp sensor cannot parse (HA logs a warning carrying the whole state
-  // payload on every publish). The bounds are therefore not device_class 'timestamp': they carry the
-  // ISO 8601 instant as text.
+  // v1.189.1 — the window bounds are device_class 'timestamp' (HA shows them as times; the payload is
+  // the ISO 8601 instant) and render a null as "None": HA's MQTT sensor maps the "None" payload to
+  // unknown for EVERY sensor type, ahead of any parsing and with no warning (core mqtt/sensor.py,
+  // PAYLOAD_NONE; read on 2026.10). v1.189.0 made them text on the premise that a timestamp sensor
+  // parses that payload as a date and logs a warning carrying the whole state payload on every
+  // publish; it does not, and the bounds showed raw ISO strings. A timestamp sensor would warn on
+  // "unknown", so the bounds do not take the text sensors' pattern. The refresh (and the role above)
+  // stay text and render a null as "unknown" (the null pattern of ecoflow_backup_reserve_enabled).
   { unique_id: 'ecoflow_midday_charge_target_soc', name: 'Midday-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_target_soc_percent }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
   { unique_id: 'ecoflow_midday_charge_reserve_hold', name: 'Midday-Charge Reserve Hold', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:shield-half-full', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_reserve_hold_percent }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
   { unique_id: 'ecoflow_midday_charge_expected_buy_kwh', name: 'Midday-Charge Expected Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_expected_buy_kwh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
   { unique_id: 'ecoflow_midday_charge_buy_kwh', name: 'Midday-Charge Buy (Worst Case)', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.midday_charge_buy_kwh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
-  { unique_id: 'ecoflow_midday_charge_window_start_at', name: 'Midday-Charge Window Start', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "unknown" if value_json.midday_charge_window_start_at is none else value_json.midday_charge_window_start_at }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
-  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "unknown" if value_json.midday_charge_window_end_at is none else value_json.midday_charge_window_end_at }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_window_start_at', name: 'Midday-Charge Window Start', device_class: 'timestamp', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "None" if value_json.midday_charge_window_start_at is none else value_json.midday_charge_window_start_at }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
+  { unique_id: 'ecoflow_midday_charge_window_end_at', name: 'Midday-Charge Window End', device_class: 'timestamp', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "None" if value_json.midday_charge_window_end_at is none else value_json.midday_charge_window_end_at }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
   { unique_id: 'ecoflow_midday_charge_refresh', name: 'Midday-Charge Refresh', icon: 'mdi:refresh', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "unknown" if value_json.midday_charge_refresh is none else value_json.midday_charge_refresh }}', json_attributes_template: MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE },
 
   // ─── v0.15.19 lighting energy posture (publish-only; HA automations actuate) ─
