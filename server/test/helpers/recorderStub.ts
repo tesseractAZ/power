@@ -106,6 +106,8 @@ export function makeRecorderStub(overrides: Partial<Recorder> = {}): Recorder {
     // the options' default (Phoenix) as a literal: this helper is imported statically, before the
     // env that config.ts reads at import, so it must not import config.
     bridgedFleetFlow: (online, devices, nowMs) => bridgeFleetFlow(online, devices, nowMs, () => false, { lat: 33.4484, lon: -112.074 }),
+    // v1.190.2 — no bridged window: the Today card's totals read the Cores' own samples only.
+    bridgeLedger: () => ({ rows: [], watermarkMs: 0 }),
   };
   return { ...base, ...overrides };
 }

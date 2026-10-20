@@ -30,7 +30,7 @@ const MUTANTS = [
   {
     id: 'i. \u2605\u2605 home coverage counts every device again (bench Cores dilute or inflate it)',
     file: AGG,
-    find: "    if (p.kind === 'shp2' || (p.kind === 'dpu' && isShp2Connected(d.sn, connected))) {",
+    find: "    if (p?.kind === 'shp2' || ((unprojectedHome || p?.kind === 'dpu') && isShp2Connected(d.sn, connected))) {",
     to: '    if (true) { /* MUTANT */',
     why: 'Today reads "100% measured" off bench series while a home figure is missing.',
   },

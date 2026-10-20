@@ -794,7 +794,10 @@ app.get<{ Querystring: { since?: string; until?: string } }>('/api/summary/today
   const end = new Date(since);
   end.setDate(end.getDate() + 1);
   end.setHours(0, 0, 0, 0);
-  const totals = await analytics.report('totals', { sinceMs: since, untilMs: until });
+  // v1.190.2 — `bridged`: a home Core the energy bridge metered at its panel slot counts the energy
+  // the bridge booked for it (the figures Home Assistant's Energy counters add), not its own absent
+  // samples; `fleet.bridged` says how much of each figure that is.
+  const totals = await analytics.report('totals', { sinceMs: since, untilMs: until, bridged: true });
   return cached(req, reply, { ...(totals as object), dayEndMs: end.getTime() }, 30);
 });
 

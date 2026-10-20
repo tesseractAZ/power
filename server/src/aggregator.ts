@@ -5,6 +5,7 @@
  */
 
 import { Recorder } from './recorder.js';
+import type { BridgeLedger } from './energyBridge.js';
 import { SnapshotStore } from './snapshot.js';
 import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
 
@@ -51,6 +52,12 @@ export interface FleetEnergyTotals {
     /** v1.182.0 — 0..1 coverage of the panels' `panel_load` (the lowest across panels); null with
      *  no panel. At 0 the Today card's Panel load tile reads "not measured" instead of 0 Wh. */
     panelLoadCoverage: number | null;
+    /** v1.190.2 — with TotalsOptions.bridged, when the energy bridge metered a home Core in the
+     *  window: its booked share, already included in pvWh / acOutWh / batteryNetWh and the two gross
+     *  flows (which then carry that AC-basis share beside the pack-DC one), and folded into
+     *  pvCoverage / homeCoverage (the slot meter's coverage of the spans it metered). Absent
+     *  otherwise, so the payload is the one it was before v1.190.2. */
+    bridged?: BridgedTotals;
   };
 }
 
@@ -253,15 +260,152 @@ export function circuitHistoryByDay(
   };
 }
 
+/** v1.190.2 — options of computeTotals. */
+export interface TotalsOptions {
+  /**
+   * The home's figures as the lifetime counters book them (the Today card, the Solar tab's Today
+   * tile: /api/summary/today). Each Core the energy bridge metered at its panel slot during the
+   * window (Recorder.bridgeLedger) counts the energy the bridge booked for those windows — Solar, AC
+   * output, battery in / out — in place of its own samples there, which the recorder does not write
+   * while the Core is dark; outside them its own samples count, as the lifetime rollup counts them
+   * (the bridge's windows are its hand-off instants, so no span is counted twice). A connected home
+   * Core with no projection keeps its recorded series (buildContributors does the same). Without it —
+   * the vendor-ledger comparison and the pack-DC round trip (energy-history), the reconnect report's
+   * PV coverage — the totals are the Cores' own meters only, exactly as before v1.190.2.
+   */
+  bridged?: boolean;
+}
+
+/** v1.190.2 — the energy bridge's share of a window's figures (computeTotals with `bridged`),
+ *  present only when the bridge metered a Core in the window. */
+export interface BridgedTotals {
+  /** Booked in the window, Wh: a bridge window counts at its rollup instant (its end), the instant
+   *  the lifetime counters stepped by it — one that straddles the window's start counts whole, one
+   *  still open at its end not yet. Already included in the fleet figures. */
+  pvWh: number;
+  /** The slots' AC output (∫ max(0, −chW)). */
+  acOutWh: number;
+  /** The slots' AC input (∫ max(0, chW)): fleet_grid_import_wh's bridged share. */
+  acInWh: number;
+  chargeWh: number;
+  dischargeWh: number;
+  /** The share of pvWh booked on the inferred basis: a lower bound (energyBridge.ts). */
+  pvInferredWh: number;
+  /** The bridge's windows booked in the window, by basis ('unbridgeable': metered at the slot,
+   *  nothing booked — the Core's own samples are left out there all the same). */
+  windows: { night: number; measured: number; inferred: number; unbridgeable: number };
+  /** The Cores the bridge metered, sorted. */
+  cores: string[];
+}
+
+/** v1.190.2 — integrateWh over [sinceMs, untilMs] outside `cut` (sorted, disjoint spans inside the
+ *  window): a Core's own samples where the energy bridge did not meter it. Each piece is integrated
+ *  under integrateWh's own rules (its head and tail holds, its 10-min gap). */
+export function integrateWhOutside(
+  points: Array<{ ts: number; value: number }>,
+  sinceMs: number,
+  untilMs: number,
+  cut: ReadonlyArray<readonly [number, number]>,
+): { wh: number; coverageMs: number } {
+  let wh = 0;
+  let coverageMs = 0;
+  let a = sinceMs;
+  const piece = (b: number): void => {
+    if (b <= a) return;
+    const r = integrateWh(points, a, b);
+    wh += r.wh;
+    coverageMs += r.coverageMs;
+  };
+  for (const [s, e] of cut) {
+    if (a >= untilMs) break;
+    piece(Math.min(s, untilMs));
+    a = Math.max(a, e);
+  }
+  piece(untilMs);
+  return { wh, coverageMs };
+}
+
+/** v1.190.2 — what the energy bridge's ledger says about [sinceMs, untilMs]. */
+export interface BridgedView {
+  /** Per Core, the spans the bridge metered it (its windows clipped to the window, merged; sorted). */
+  cuts: Map<string, Array<[number, number]>>;
+  /** Per Core, the slot meter's coverage of those spans, ms (each window's share by overlap). */
+  coveredMs: Map<string, number>;
+  totals: BridgedTotals;
+}
+
+/**
+ * v1.190.2 — the bridge's windows of [sinceMs, untilMs] (Recorder.bridgeLedger), per Core: the spans
+ * to take its own samples out of, the slot meter's coverage there, and the energy booked. A Core
+ * whose last window ends at the bridge's watermark is still metered (the next rollup books the span
+ * since; the lifetime read path cuts its own readings at once too): its span runs on to untilMs.
+ * null when no window falls in the range.
+ */
+export function bridgedView(ledger: BridgeLedger, sinceMs: number, untilMs: number): BridgedView | null {
+  const rows = ledger.rows.filter((r) => r.untilMs > r.sinceMs && r.untilMs > sinceMs && r.sinceMs < untilMs);
+  if (rows.length === 0) return null;
+  const totals: BridgedTotals = {
+    pvWh: 0, acOutWh: 0, acInWh: 0, chargeWh: 0, dischargeWh: 0, pvInferredWh: 0,
+    windows: { night: 0, measured: 0, inferred: 0, unbridgeable: 0 }, cores: [],
+  };
+  const spans = new Map<string, Array<[number, number]>>();
+  const coveredMs = new Map<string, number>();
+  const lastEnd = new Map<string, number>();
+  for (const r of rows) {
+    const s = Math.max(r.sinceMs, sinceMs);
+    const e = Math.min(r.untilMs, untilMs);
+    const list = spans.get(r.sn) ?? [];
+    list.push([s, e]);
+    spans.set(r.sn, list);
+    lastEnd.set(r.sn, Math.max(lastEnd.get(r.sn) ?? -Infinity, r.untilMs));
+    coveredMs.set(r.sn, (coveredMs.get(r.sn) ?? 0) + Math.max(0, r.coveredMs) * ((e - s) / (r.untilMs - r.sinceMs)));
+    if (r.untilMs > untilMs) continue; // booked after the window's end
+    totals.pvWh += r.pvWh;
+    totals.acOutWh += r.acOutWh;
+    totals.acInWh += r.acInWh;
+    totals.chargeWh += r.chargeWh;
+    totals.dischargeWh += r.dischargeWh;
+    if (r.basis === 'inferred') totals.pvInferredWh += r.pvWh;
+    const b = r.basis === 'night' || r.basis === 'measured' || r.basis === 'inferred' ? r.basis : 'unbridgeable';
+    totals.windows[b] += 1;
+  }
+  const cuts = new Map<string, Array<[number, number]>>();
+  for (const [sn, list] of spans) {
+    const end = lastEnd.get(sn) as number;
+    if (ledger.watermarkMs > 0 && end === ledger.watermarkMs && untilMs > end) list.push([Math.max(end, sinceMs), untilMs]);
+    list.sort((x, y) => x[0] - y[0]);
+    const merged: Array<[number, number]> = [];
+    for (const [s, e] of list) {
+      const prev = merged[merged.length - 1];
+      if (prev && s <= prev[1]) prev[1] = Math.max(prev[1], e);
+      else merged.push([s, e]);
+    }
+    cuts.set(sn, merged);
+  }
+  totals.cores = [...cuts.keys()].sort();
+  return { cuts, coveredMs, totals };
+}
+
+/** The pack numbers a Core with no projection recorded power for in the window (pack<N>_in / _out,
+ *  N = 1..15 as the recorder's capacity read probes them). */
+function recordedPackNums(recorder: Recorder, sn: string, fromMs: number, untilMs: number): number[] {
+  const out: number[] = [];
+  const has = (metric: string): boolean =>
+    (recorder.queryFirstLast ? recorder.queryFirstLast(sn, metric, fromMs, untilMs) : recorder.query(sn, metric, fromMs, untilMs)).length > 0;
+  for (let k = 1; k <= 15; k++) if (has(`pack${k}_in`) || has(`pack${k}_out`)) out.push(k);
+  return out;
+}
+
 export function computeTotals(
   store: SnapshotStore,
   recorder: Recorder,
   sinceMs: number,
   untilMs: number,
+  opts: TotalsOptions = {},
 ): FleetEnergyTotals {
   const snap = store.get();
   const devices: EnergyTotals[] = [];
-  const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, batteryChargeWh: 0, batteryDischargeWh: 0, coverage: 0, pvCoverage: 0, homeCoverage: 0, panelLoadCoverage: null as number | null };
+  const fleet: FleetEnergyTotals['fleet'] = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, batteryChargeWh: 0, batteryDischargeWh: 0, coverage: 0, pvCoverage: 0, homeCoverage: 0, panelLoadCoverage: null as number | null };
   const coverageAccum: number[] = [];
   const homeCoverageAccum: number[] = []; // v1.182.0
   // v0.44.0 — PV-only coverage for the Solar-page "% measured" tile. The fleet
@@ -292,11 +436,22 @@ export function computeTotals(
   // "% measured" tile read 100% while the vendor ledger proved ~20 kWh/day
   // (~1/3 of plant PV) invisible. Honest coverage counts that member as ZERO.
   const pvAccumulatedSns = new Set<string>();
+  // v1.190.2 — the energy bridge's windows in the range (TotalsOptions.bridged): per Core, the spans
+  // it was metered at its slot (its own samples are left out there) and the energy booked for them.
+  const bridged = opts.bridged === true ? bridgedView(recorder.bridgeLedger(sinceMs, untilMs), sinceMs, untilMs) : null;
 
   for (const d of Object.values(snap.devices)) {
     const p = d.projection;
-    if (!p) continue;
+    // v1.190.2 — with `bridged`, a connected home Core with no projection (dark since a restart: no
+    // quota is fetched for a device listed offline) keeps its recorded series, as the lifetime
+    // rollup counts them (recorder buildContributors), up to the bridge's spans.
+    const unprojectedHome = opts.bridged === true && !p && connected.has(d.sn);
+    if (!p && !unprojectedHome) continue;
     const metrics: Record<string, IntegrationResult> = {};
+    /** v1.190.2 — the spans the energy bridge metered this Core (none: it counts whole). */
+    const cut = bridged?.cuts.get(d.sn);
+    /** v1.190.2 — per metric, the own samples' coverage outside `cut`, ms. */
+    const ownCoverageMs: Record<string, number> = {};
 
     const ingest = (metric: string) => {
       // v1.14.0 (F9 sibling) — widen the fetch so the head segment is recovered;
@@ -310,10 +465,19 @@ export function computeTotals(
         // membership below (mirroring fleet.pvWh), so a bench spare's pv_total
         // can't dilute the Solar "% measured" tile.
       }
-      return r.wh;
+      if (!cut) return r.wh;
+      // v1.190.2 — the fleet figures take this Core's own samples only where the bridge did not
+      // meter it; the per-device metrics above stay the whole window's.
+      const own = integrateWhOutside(pts, sinceMs, untilMs, cut);
+      ownCoverageMs[metric] = own.coverageMs;
+      return own.wh;
     };
+    /** v1.190.2 — a home device's coverage of one metric: its own samples, plus the slot meter's
+     *  coverage of the spans the bridge metered it. */
+    const homeCoverageOf = (metric: string, r: IntegrationResult): number =>
+      cut ? Math.min(1, ((ownCoverageMs[metric] ?? 0) + (bridged?.coveredMs.get(d.sn) ?? 0)) / r.totalMs) : r.coverageMs / r.totalMs;
 
-    if (p.kind === 'dpu') {
+    if (unprojectedHome || p?.kind === 'dpu') {
       // Always populate per-device metrics (used by the per-device list).
       const pvWh = ingest('pv_total');
       const acOutWh = ingest('ac_out');
@@ -324,9 +488,10 @@ export function computeTotals(
       // overstated the home battery net ~1.7× on the "Today" card and made it
       // disagree with the live per-pack sensor. Pack in=charge, out=discharge.
       let packChargeWh = 0, packDischargeWh = 0;
-      for (const pk of p.packs) {
-        packChargeWh += ingest(`pack${pk.num}_in`);
-        packDischargeWh += ingest(`pack${pk.num}_out`);
+      const packNums = p?.kind === 'dpu' ? p.packs.map((pk) => pk.num) : recordedPackNums(recorder, d.sn, sinceMs - INTEGRATE_HEAD_LOOKBACK_MS, untilMs);
+      for (const num of packNums) {
+        packChargeWh += ingest(`pack${num}_in`);
+        packDischargeWh += ingest(`pack${num}_out`);
       }
       // Only home-connected DPUs contribute to the fleet rollup.
       if (isShp2Connected(d.sn, connected)) {
@@ -340,10 +505,10 @@ export function computeTotals(
         // samples) must not dilute the Solar "% measured" tile that annotates
         // the connected-only PV energy.
         const pvR = metrics['pv_total'];
-        if (pvR && pvR.totalMs > 0) pvCoverageAccum.push(pvR.coverageMs / pvR.totalMs);
+        if (pvR && pvR.totalMs > 0) pvCoverageAccum.push(homeCoverageOf('pv_total', pvR));
         pvAccumulatedSns.add(d.sn); // v1.87.0 — membership actually measured
       }
-    } else if (p.kind === 'shp2') {
+    } else if (p?.kind === 'shp2') {
       fleet.panelLoadWh += ingest('panel_load');
       const pl = metrics['panel_load'];
       const plCov = pl && pl.totalMs > 0 ? pl.coverageMs / pl.totalMs : 0; // v1.182.0
@@ -355,8 +520,8 @@ export function computeTotals(
     }
 
     // v1.182.0 — home coverage: only the devices behind the Today figures.
-    if (p.kind === 'shp2' || (p.kind === 'dpu' && isShp2Connected(d.sn, connected))) {
-      const own = Object.values(metrics).filter((r) => r.totalMs > 0).map((r) => r.coverageMs / r.totalMs);
+    if (p?.kind === 'shp2' || ((unprojectedHome || p?.kind === 'dpu') && isShp2Connected(d.sn, connected))) {
+      const own = Object.entries(metrics).filter(([, r]) => r.totalMs > 0).map(([m, r]) => homeCoverageOf(m, r));
       if (own.length > 0) homeCoverageAccum.push(own.reduce((s, v) => s + v, 0) / own.length); // one value per device
     }
     devices.push({
@@ -387,6 +552,16 @@ export function computeTotals(
     }
 
   }
+  // v1.190.2 — the bridged dark Cores' booked share (TotalsOptions.bridged), on the AC basis at the
+  // slot, as the lifetime counters add it (fleet_pv_wh; battery in / out on top of the BMS floors).
+  if (bridged) {
+    const b = bridged.totals;
+    fleet.pvWh += b.pvWh;
+    fleet.acOutWh += b.acOutWh;
+    fleet.batteryNetWh += b.dischargeWh - b.chargeWh;
+    fleet.batteryChargeWh += b.chargeWh;
+    fleet.batteryDischargeWh += b.dischargeWh;
+  }
   fleet.coverage = coverageAccum.length === 0 ? 0 : coverageAccum.reduce((s, v) => s + v, 0) / coverageAccum.length;
   // No PV metric / no expected PV samples → fall back to the all-metric coverage
   // (itself 0 in the fully-degenerate empty-window case) rather than emitting NaN.
@@ -394,5 +569,6 @@ export function computeTotals(
     ? fleet.coverage
     : pvCoverageAccum.reduce((s, v) => s + v, 0) / pvCoverageAccum.length;
   fleet.homeCoverage = homeCoverageAccum.length === 0 ? 0 : homeCoverageAccum.reduce((s, v) => s + v, 0) / homeCoverageAccum.length;
+  if (bridged) fleet.bridged = bridged.totals;
   return { sinceMs, untilMs, membershipBasis: [...connected].sort().join(','), devices, fleet };
 }
