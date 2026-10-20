@@ -203,7 +203,10 @@ CREATE TABLE IF NOT EXISTS lifetime_totals (
 ```
 
 The same database also holds the durable night-charge tables `night_charge_ledger` and
-`night_charge_calibration` (chapter 15 §6), which the retention sweep never touches. Besides
+`night_charge_calibration` (chapter 15 §6), which the retention sweep never touches, and
+`bridge_ledger`: one row per rollup window per home Core the energy bridge metered at its panel
+slot, with what that rollup booked for it, which the Today card reads (chapter 7, the energy
+bridge). It is pruned with the samples retention. Besides
 hardware serials, `samples.sn` carries three synthetic series: `weather` (GHI/cloud),
 `forecast` (day-ahead archive) and `night_charge` (disposable chart overlay).
 
@@ -727,11 +730,15 @@ trapezoidal integrator, gap-aware:
 Callers widen their fetch by `INTEGRATE_HEAD_LOOKBACK_MS = 10 min` so the head
 segment is recoverable, then integrate the exact window.
 
-- `computeTotals(store, recorder, sinceMs, untilMs)` → `FleetEnergyTotals`
+- `computeTotals(store, recorder, sinceMs, untilMs, { bridged? })` → `FleetEnergyTotals`
   (fleet `pvWh`/`acOutWh`/`panelLoadWh`/`batteryNetWh` + `coverage`/`pvCoverage`).
   Fleet PV/AC/battery rollups count **only SHP2-connected DPUs**
   (`shp2ConnectedDpuSns`); spares get per-device metrics but no fleet inclusion.
   Battery net is per-pack `in`/`out` (true battery flow), not `total_in/out`.
+  With `bridged` (`/api/summary/today` only), each home Core the energy bridge metered counts
+  the energy booked for it in `bridge_ledger` (`Recorder.bridgeLedger`) over those windows in
+  place of its own samples there, and `fleet.bridged` names that share (chapter 7, the energy
+  bridge); with no bridged window in the range the payload is the one without it.
 - `circuitHistoryByDay(recorder, sn, ch, days, metric?)` → per-day kWh/peakW/
   coverage for one SHP2 circuit, including the in-progress today.
 

@@ -26,7 +26,10 @@ export type { HeldSpan, HeldScanSummary } from './heldSamples.js';
 import {
   createEnergyBridge, ownEnergyUntil, handsBack, slotPvWatts, bridgeSite,
   projectedPackKeys, projectionPacksComplete,
+  // v1.190.2 — the bridge's windows, recorded for the Today card (bridge_ledger).
+  bridgeLedgerRows, bridgeLedgerRowOf, BRIDGE_LEDGER_SELECT_SQL, BRIDGE_CHARGE_KEY,
   type BridgedFleetFlow, type BridgeRollupResult, type EnergyBridgeDebug, type OnlineFlow,
+  type BridgeLedger, type BridgeLedgerRow, type BridgeLedgerSqlRow,
 } from './energyBridge.js';
 
 interface MetricSample {
@@ -567,6 +570,12 @@ export interface Recorder {
     devices: Record<string, DeviceSnapshot>,
     nowMs: number,
   ) => BridgedFleetFlow;
+  /** v1.190.2 — the energy bridge's windows overlapping (sinceMs, untilMs), oldest first (the
+   *  bridge_ledger table: one row per bridged Core per rollup, what that rollup booked for it), and
+   *  the bridge's watermark (its last rollup instant). Both recorders read it; the Today card's
+   *  totals (aggregator.computeTotals with `bridged`) add the booked energy in place of the dark
+   *  Cores' absent samples. */
+  bridgeLedger: (sinceMs: number, untilMs: number) => BridgeLedger;
 }
 
 /** v0.45.0 — per-pack lifetime in/out detail, shared by batteryLifetimeDebug()
@@ -1211,6 +1220,27 @@ export function createRecorder(
       algo_version TEXT,
       state_json TEXT
     );
+    -- v1.190.2 — the energy bridge's windows (energyBridge.ts bridgeLedgerRows): one row per dark
+    -- home Core the bridge metered at its panel slot, per rollup window [since_ts, until_ts], with
+    -- what that rollup booked for it (the PV, AC input and battery in / out it added to the lifetime
+    -- counters) and the slot's AC output. The Today card reads it for a dark day's figures. Pruned
+    -- with the samples retention.
+    CREATE TABLE IF NOT EXISTS bridge_ledger (
+      sn TEXT NOT NULL,
+      until_ts INTEGER NOT NULL,
+      since_ts INTEGER NOT NULL,
+      panel_sn TEXT NOT NULL,
+      slot INTEGER NOT NULL,
+      basis TEXT NOT NULL,
+      pv_wh REAL NOT NULL,
+      ac_out_wh REAL NOT NULL,
+      ac_in_wh REAL NOT NULL,
+      charge_wh REAL NOT NULL,
+      discharge_wh REAL NOT NULL,
+      covered_ms INTEGER NOT NULL,
+      PRIMARY KEY (sn, until_ts)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bridge_ledger_until ON bridge_ledger (until_ts);
   `);
 
   // v1.39.0 migration — CREATE TABLE IF NOT EXISTS does not evolve columns on
@@ -2501,6 +2531,7 @@ export function createRecorder(
   // night-charge ledger/calibration and lifetime tables are never touched by
   // this prune regardless of the setting.
   const prune = db.prepare(`DELETE FROM samples WHERE ts < ?`);
+  const bridgeLedgerPruneStmt = db.prepare(`DELETE FROM bridge_ledger WHERE until_ts < ?`); // v1.190.2
   const retentionDays = resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS);
   log(`recorder: samples retention ${retentionDays} days`);
   const RETAIN_MS = retentionDays * 24 * 60 * 60 * 1000;
@@ -2512,6 +2543,8 @@ export function createRecorder(
       // v1.188.1 — held rows age off with the samples they were part of.
       const h = heldStore.prune(Date.now());
       if (h.rows > 0) log(`recorder: pruned ${h.rows} old held samples`);
+      // v1.190.2 — and the energy bridge's windows with the samples they were integrated from.
+      bridgeLedgerPruneStmt.run(cutoff);
     } catch (e: any) {
       log(`recorder: prune failed ${e?.message ?? e}`);
     }
@@ -2633,6 +2666,22 @@ export function createRecorder(
   // has been copied forward under the new stable key, so it can never be
   // rediscovered later as a second, stale contributor (double-count risk).
   const lifetimeDeleteStmt = db.prepare(`DELETE FROM lifetime_totals WHERE metric_key = ?`);
+  // v1.190.2 — the energy bridge's windows (bridge_ledger, see the schema).
+  const bridgeLedgerInsertStmt = db.prepare(
+    `INSERT OR REPLACE INTO bridge_ledger (sn, until_ts, since_ts, panel_sn, slot, basis, pv_wh, ac_out_wh, ac_in_wh, charge_wh, discharge_wh, covered_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const bridgeLedgerSelectStmt = db.prepare(BRIDGE_LEDGER_SELECT_SQL);
+  const bridgeLedger = (sinceMs: number, untilMs: number): BridgeLedger => ({
+    rows: (bridgeLedgerSelectStmt.all(sinceMs, untilMs) as unknown as BridgeLedgerSqlRow[]).map(bridgeLedgerRowOf),
+    watermarkMs: readLifetime(BRIDGE_CHARGE_KEY).ts,
+  });
+  /** One rollup's windows (one row per bridged Core). */
+  const recordBridgeLedger = (rows: BridgeLedgerRow[]): void => {
+    for (const r of rows) {
+      bridgeLedgerInsertStmt.run(r.sn, r.untilMs, r.sinceMs, r.panelSn, r.slot, r.basis, r.pvWh, r.acOutWh, r.acInWh, r.chargeWh, r.dischargeWh, Math.round(r.coveredMs));
+    }
+  };
   /**
    * v1.4.4 — one-time migration for a lifetime_totals row moving from a legacy
    * key shape to a new one (used to re-key per-pack BMS lifetime state off the
@@ -2817,6 +2866,8 @@ export function createRecorder(
   });
   /** One line per distinct bridge failure: the rollup's other counters must keep advancing. */
   let lastBridgeError: string | null = null;
+  /** v1.190.2 — one line per distinct bridge_ledger write failure. */
+  let lastLedgerError: string | null = null;
 
   // v0.13.0 — per-pack baseline capture. The accu* registers are FACTORY-
   // lifetime counters: packs ship with accuDsgMah > accuChgMah from bench
@@ -3561,6 +3612,18 @@ export function createRecorder(
       if (msg !== lastBridgeError) log(`recorder: energy bridge rollup failed (${msg}) — the other lifetime counters advance without it`);
       lastBridgeError = msg;
     }
+    // v1.190.2 — the windows the bridge just booked, per Core, for the Today card (bridge_ledger).
+    // Isolated: a failed write costs the card those windows, never a counter.
+    if (br) {
+      try {
+        recordBridgeLedger(bridgeLedgerRows(br));
+        lastLedgerError = null;
+      } catch (e: any) {
+        const msg = String(e?.message ?? e);
+        if (msg !== lastLedgerError) log(`recorder: energy bridge ledger write failed (${msg}) — the Today card misses this window's bridged energy; the lifetime counters are unaffected`);
+        lastLedgerError = msg;
+      }
+    }
     // v1.188.1 (review) — a dark Core whose own readings arrive again before it hands back (a marked
     // Core the cloud still lists offline, its MQTT data back) is cut at its dark instant so the
     // bridge's slot figure stands for it. Where the bridge could book nothing for its slot this
@@ -4218,6 +4281,7 @@ export function createRecorder(
     listLifetimeKeys,
     batteryLifetimeDebug,
     bridgedFleetFlow: (online, devices, nowMs) => energyBridge.flow(online, devices, nowMs),
+    bridgeLedger,
     // v1.187.20 — this connection is the only one that commits, so it is the one whose
     // checkpoints the backup window holds still (backupWindow.ts).
     walControl: walControlFor(db, dbPath),

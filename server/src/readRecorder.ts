@@ -6,7 +6,10 @@ import type { Recorder, LifetimeTotals, NightLedgerRow, NightCalibration } from 
 import { localParts } from './tariff.js';
 // v1.188.1 (review) — the samples generation reader (no schema, no writes: a SELECT on its table).
 import { samplesGenerationReader } from './heldSamples.js';
-import { bridgeFleetFlow, bridgeSite, emptyBridgeDebug } from './energyBridge.js';
+import {
+  bridgeFleetFlow, bridgeSite, emptyBridgeDebug, BRIDGE_LEDGER_SELECT_SQL, bridgeLedgerRowOf, BRIDGE_CHARGE_KEY,
+  type BridgeLedger, type BridgeLedgerSqlRow,
+} from './energyBridge.js';
 import { config } from './config.js';
 
 /**
@@ -139,6 +142,22 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
       return [];
     }
   };
+  // v1.190.2 — the energy bridge's windows (the Today card's totals), the recorder's own read
+  // (BRIDGE_LEDGER_SELECT_SQL). Lazy and fail-safe like the reads above: before the writer has
+  // created the table, none.
+  let bridgeLedgerStmt: ReturnType<typeof db.prepare> | null = null;
+  let bridgeWatermarkStmt: ReturnType<typeof db.prepare> | null = null;
+  const bridgeLedger = (sinceMs: number, untilMs: number): BridgeLedger => {
+    try {
+      bridgeLedgerStmt ??= db.prepare(BRIDGE_LEDGER_SELECT_SQL);
+      bridgeWatermarkStmt ??= db.prepare(`SELECT last_integrated_ts FROM lifetime_totals WHERE metric_key = ?`);
+      const rows = (bridgeLedgerStmt.all(sinceMs, untilMs) as unknown as BridgeLedgerSqlRow[]).map(bridgeLedgerRowOf);
+      const wm = bridgeWatermarkStmt.get(BRIDGE_CHARGE_KEY) as { last_integrated_ts: number } | undefined;
+      return { rows, watermarkMs: wm?.last_integrated_ts ?? 0 };
+    } catch {
+      return { rows: [], watermarkMs: 0 };
+    }
+  };
   let nightCalStmt: ReturnType<typeof db.prepare> | null = null;
   const readNightCalibration = (): NightCalibration | null => {
     try {
@@ -219,6 +238,7 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     // v1.38.0 (WS2) — real ledger reads (the worker/reports path reduces over these).
     readNightLedger,
     readNightCalibration,
+    bridgeLedger,
     // v1.188.1 (review) — the samples generation the main thread's held-sample moves advance: the
     // worker's report chokepoint resets its closed-day memos when it moves (reports.ts).
     samplesGeneration: samplesGenerationReader(db),
