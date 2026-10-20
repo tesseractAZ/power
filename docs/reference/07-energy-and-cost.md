@@ -445,6 +445,37 @@ Where the energy goes:
   only grow, so a lower total is pending energy the read path no longer sees (a Core
   whose slot leaves the panel mid-window, for one), never a reset. A replaced database
   is far larger and still passes through.
+- **The Today card** (`/api/summary/today`, and the Solar tab's Today tile). Each rollup also
+  writes one row per bridged Core to the `bridge_ledger` table (`bridgeLedgerRows`): the window
+  `[since_ts, until_ts]`, its basis, what the rollup booked for that Core (PV, AC input, battery
+  in and out), the slot's AC output (∫ max(0, −chW), which no lifetime counter keeps) and the
+  slot meter's coverage of the window. A window the bridge metered but could not book (no slot
+  reading in it, no capacity, a re-anchored inferred window) is written with zeros; a held
+  rollup writes nothing; a window where the Core's own meters counted instead
+  (`BridgeSlotWindow.own`) is not a bridged window and is not written. The rows are pruned with
+  the samples retention. `computeTotals` with `bridged` adds, for each window that ended in the
+  range, the booked energy to Solar produced, AC output and the battery flows, and leaves the
+  Core's own samples out of the window (`integrateWhOutside`); outside the windows its own
+  samples count as before. The windows are the bridge's hand-off instants, the cut the lifetime
+  rollup makes, so the card's day is the change of `fleet_pv_wh` and of the two emitted battery
+  totals over the same day, and no stretch is counted twice across a hand-over, including an
+  hour in which a marked Core's own MQTT readings are recorded while the bridge still meters its
+  slot. A window counts at its rollup instant, when the counters stepped by it: one that
+  straddles midnight counts to the day it ended in, as Home Assistant's daily change does. While
+  the bridge still meters a Core (its last window ends at the bridge's watermark), the Core's own
+  samples since are left out as well, so a read between rollups never shows what the next one
+  takes back. A connected home Core with no projection (dark since a restart) keeps its recorded
+  series up to the windows, as `buildContributors` does. The slot meter's coverage of the
+  windows counts toward `pvCoverage` and `homeCoverage` (the card's "% measured"). `fleet.bridged`
+  carries the share (already in the figures, and in `batteryChargeWh` / `batteryDischargeWh`,
+  which then hold this AC-basis share beside the pack-DC one), the windows by basis, and
+  `pvInferredWh`, the solar booked on the inferred basis: a lower bound. The card notes "via
+  panel" under each figure with a panel-metered part and "lower bound" under inferred solar
+  (`web/src/cards/todayText.ts`); a bridged span that is all night leaves Solar unmarked (no
+  solar is booked at night). No other caller asks for the bridged totals: the vendor-ledger
+  comparison and the pack-DC round trip (energy history) and the reconnect report's PV coverage
+  keep the Cores' own meters. The ledger has no backfill: windows booked before it existed are
+  not in it, so on the day it first runs the card counts the bridged energy from then on.
 
 **Hand-over.** For every held pack of a bridged Core the bridge writes a marker
 `bridge_dark_<pack>`: the packs the Core's projection carries, or, with no projection (dark

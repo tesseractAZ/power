@@ -121,6 +121,9 @@ export interface ReportArgs {
   /** totals */
   sinceMs?: number;
   untilMs?: number;
+  /** v1.190.2 — totals: the home's figures as the lifetime counters book them, the energy bridge's
+   *  windows included (aggregator.TotalsOptions.bridged; the Today card). */
+  bridged?: boolean;
   /** backtest */
   dpuSns?: string[];
   hoursBack?: number;
@@ -216,7 +219,7 @@ const BUILDERS: Record<string, Builder> = {
     return computeMultiDayForecast(devicesOf(ctx), ctx.recorder, fc, a.days ?? 3);
   },
   bayesianSolar: (ctx) => computeBayesianSolarModel(devicesOf(ctx), ctx.recorder),
-  totals: (ctx, a) => computeTotals(shimStore(ctx), ctx.recorder, a.sinceMs ?? 0, a.untilMs ?? Date.now()),
+  totals: (ctx, a) => computeTotals(shimStore(ctx), ctx.recorder, a.sinceMs ?? 0, a.untilMs ?? Date.now(), { bridged: a.bridged === true }),
   circuitHistory: (ctx, a) => circuitHistoryByDay(ctx.recorder, a.sn ?? '', a.ch ?? 0, a.days ?? 7, a.metric),
   // v0.13.1 — we can't postMessage a function, so the worker reconstructs the
   // predictor from args: a 24-slot diurnal curve (curve[hourOfDay], night≈0 /

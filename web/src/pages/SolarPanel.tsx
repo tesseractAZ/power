@@ -31,6 +31,7 @@ import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
 import { SectionHeader } from '../components/sections';
 import { apiUrl } from '../api';
 import { dayWindowExpired } from '../freshness';
+import { todayNotes, type TodayBridged } from '../cards/todayText';
 import { CHART, HUES } from '../theme';
 
 const DPU_COLORS = [HUES.battery, HUES.soc, HUES.solar, HUES.violet];
@@ -44,6 +45,8 @@ interface SummaryResp {
     // temps, which the all-metric `coverage` averaged in. Optional so an older
     // server during dev falls back to `coverage` instead of breaking.
     pvCoverage?: number;
+    /** v1.190.2 — the energy bridge's share (already in pvWh); absent when none. */
+    bridged?: TodayBridged;
   };
   sinceMs?: number;
   untilMs?: number;
@@ -115,6 +118,8 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
     && dayWindowExpired(summaryState, summaryState.untilMs + (Date.now() - summaryAt))
     ? null
     : summaryState;
+  // v1.190.2 — the day's solar has a part metered at the panel (a dark Core, bridged): say so.
+  const solarNote = todayNotes(summary?.fleet.bridged).solar;
   const [peakToday, setPeakToday] = useState<{ value: number; ts: number } | null>(null);
   const [pvSeries, setPvSeries] = useState<Record<string, Point[]>>({});
 
@@ -242,7 +247,7 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
             label="Today"
             value={summary ? fmtWh(summary.fleet.pvWh) : '—'}
             accent="text-warn"
-            sub={summary ? `${((summary.fleet.pvCoverage ?? summary.fleet.coverage) * 100).toFixed(0)}% measured` : ''}
+            sub={summary ? `${((summary.fleet.pvCoverage ?? summary.fleet.coverage) * 100).toFixed(0)}% measured${solarNote ? ` · ${solarNote}` : ''}` : ''}
           />
           <SummaryTile
             label="Peak today"

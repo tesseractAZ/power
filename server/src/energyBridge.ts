@@ -836,6 +836,85 @@ export interface BridgeSlotWindow {
   pvWh: number;
   outWh: number;
   inWh: number;
+  /** v1.190.2 — the slot meter's coverage of the window (ms), once it was integrated (the
+   *  bridge_ledger row's `covered_ms` for a booked window: the Today card's "% measured"). */
+  coverageMs?: number;
+}
+
+/**
+ * v1.190.2 — one window of one bridged Core as the recorder's `bridge_ledger` table keeps it: what
+ * the rollup at `untilMs` booked for that Core over [sinceMs, untilMs] — the same figures it added
+ * to the lifetime counters (PV to fleet_pv_wh, AC input to fleet_grid_import_wh, battery in / out to
+ * the bridge rows) — plus the slot's AC output, which no lifetime counter keeps. The Today card
+ * (aggregator.computeTotals with `bridged`) adds these for each bridged Core in place of its own
+ * absent samples, and leaves out the Core's own samples inside [sinceMs, untilMs]: the windows are
+ * the bridge's own hand-off instants, so no span is counted twice.
+ */
+export interface BridgeLedgerRow {
+  sn: string;
+  panelSn: string;
+  slot: number;
+  sinceMs: number;
+  untilMs: number;
+  basis: BridgeBasis;
+  pvWh: number;
+  acOutWh: number;
+  acInWh: number;
+  chargeWh: number;
+  dischargeWh: number;
+  /** The slot meter's coverage of the window (ms) when the window was booked; 0 when it was not. */
+  coveredMs: number;
+}
+
+/** v1.190.2 — the ledger rows of the bridge's booked windows, the bridge_ledger table and the
+ *  watermark (the bridge's rollup instant, `bridge_battery_charge_wh`'s ts) at the time of the read. */
+export interface BridgeLedger {
+  rows: BridgeLedgerRow[];
+  watermarkMs: number;
+}
+
+/** v1.190.2 — the bridge_ledger windows overlapping (since, until) — bound in that order — oldest
+ *  first: the one read both recorders run (recorder.ts, readRecorder.ts). */
+export const BRIDGE_LEDGER_SELECT_SQL =
+  'SELECT sn, until_ts, since_ts, panel_sn, slot, basis, pv_wh, ac_out_wh, ac_in_wh, charge_wh, discharge_wh, covered_ms ' +
+  'FROM bridge_ledger WHERE until_ts > ? AND since_ts < ? ORDER BY until_ts ASC, sn ASC';
+
+/** A bridge_ledger row as SQLite returns it. */
+export interface BridgeLedgerSqlRow {
+  sn: string; until_ts: number; since_ts: number; panel_sn: string; slot: number; basis: string;
+  pv_wh: number; ac_out_wh: number; ac_in_wh: number; charge_wh: number; discharge_wh: number; covered_ms: number;
+}
+
+export const bridgeLedgerRowOf = (r: BridgeLedgerSqlRow): BridgeLedgerRow => ({
+  sn: r.sn, panelSn: r.panel_sn, slot: r.slot, sinceMs: r.since_ts, untilMs: r.until_ts, basis: r.basis as BridgeBasis,
+  pvWh: r.pv_wh, acOutWh: r.ac_out_wh, acInWh: r.ac_in_wh, chargeWh: r.charge_wh, dischargeWh: r.discharge_wh, coveredMs: r.covered_ms,
+});
+
+/**
+ * v1.190.2 — the bridge_ledger rows of one rollup: every window of a dark slot that the bridge
+ * metered at the slot, booked or not (a window that booked nothing still takes the Core's own
+ * samples out: the lifetime counters cut them there too). A held rollup books and writes nothing,
+ * and a window where the Core's own meters counted instead (BridgeSlotWindow.own: its pv_total /
+ * ac_in and its pack meters) is not a bridged window: the card reads that Core's own samples there.
+ * A window the bridge did not book carries zeros, its AC figures included (computed, not booked).
+ */
+export function bridgeLedgerRows(r: BridgeRollupResult): BridgeLedgerRow[] {
+  if (r.held === true) return [];
+  const out: BridgeLedgerRow[] = [];
+  for (const w of r.slots) {
+    if (w.own === true || !(w.sinceMs < r.untilMs)) continue;
+    const booked = w.basis !== 'unbridgeable';
+    out.push({
+      sn: w.sn, panelSn: w.panelSn, slot: w.slot, sinceMs: w.sinceMs, untilMs: r.untilMs, basis: w.basis,
+      pvWh: booked ? w.pvWh : 0,
+      acOutWh: booked ? w.acOutWh : 0,
+      acInWh: booked ? w.acInWh : 0,
+      chargeWh: booked ? w.inWh : 0,
+      dischargeWh: booked ? w.outWh : 0,
+      coveredMs: booked ? Math.max(0, w.coverageMs ?? 0) : 0,
+    });
+  }
+  return out;
 }
 
 export interface BridgeRollupResult {
@@ -1226,6 +1305,7 @@ export function createEnergyBridge(deps: EnergyBridgeDeps): EnergyBridge {
         const ac = slotAcEnergy(wPts, start, nowMs);
         win.acOutWh = ac.acOutWh;
         win.acInWh = ac.acInWh;
+        win.coverageMs = ac.coverageMs;
         if (ac.coverageMs <= 0) {
           // No slot reading in the window: nothing measured, and a PV figure alone would book as charge.
           win.reason = s.panelFresh ? 'no slot reading in the window' : 'the panel reading is not fresh';

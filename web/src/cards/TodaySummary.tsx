@@ -3,6 +3,7 @@ import { fmtWh } from '../format';
 import { usePolled, useNow } from '../usePolled';
 import { pollStale, dayWindowExpired } from '../freshness';
 import { StaleNote } from '../components/StaleNote';
+import { todayNotes, batterySub, type TodayBridged } from './todayText';
 
 const TODAY_POLL_MS = 60_000;
 
@@ -28,6 +29,8 @@ interface SummaryResp {
     /** v1.182.0 — home series only (see aggregator.ts); absent from older servers. */
     homeCoverage?: number;
     panelLoadCoverage?: number | null;
+    /** v1.190.2 — the energy bridge's share (already in the figures above); absent when none. */
+    bridged?: TodayBridged;
   };
 }
 
@@ -52,6 +55,8 @@ export const TodaySummary = memo(function TodaySummary() {
   // v1.182.0 — the series behind THESE figures (home Cores + the panel), not every device's.
   const coverage = data?.fleet.homeCoverage ?? data?.fleet.coverage ?? 0;
   const panelUnmeasured = data?.fleet.panelLoadCoverage === 0;
+  // v1.190.2 — a figure with a part metered at the panel (a dark Core, bridged) says so.
+  const notes = todayNotes(data?.fleet.bridged);
   return (
     <div className="card col-span-full">
       <div className="card-title flex items-center justify-between">
@@ -65,9 +70,9 @@ export const TodaySummary = memo(function TodaySummary() {
         )}
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Tile label="Solar produced" value={fmtWh(data?.fleet.pvWh)} accent="text-warn" />
-        <Tile label="AC output" value={fmtWh(data?.fleet.acOutWh)} accent="text-ok" />
-        <Tile label="Batteries (net)" value={fmtWh(data?.fleet.batteryNetWh)} accent={data && data.fleet.batteryNetWh > 0 ? 'text-bad' : 'text-ok'} sub={data ? (data.fleet.batteryNetWh > 0 ? 'discharged' : 'charged') : ''} />
+        <Tile label="Solar produced" value={fmtWh(data?.fleet.pvWh)} accent="text-warn" sub={notes.solar ?? undefined} />
+        <Tile label="AC output" value={fmtWh(data?.fleet.acOutWh)} accent="text-ok" sub={notes.acOut ?? undefined} />
+        <Tile label="Batteries (net)" value={fmtWh(data?.fleet.batteryNetWh)} accent={data && data.fleet.batteryNetWh > 0 ? 'text-bad' : 'text-ok'} sub={data ? batterySub(data.fleet.batteryNetWh, notes.battery) : ''} />
         <Tile label="Panel load" value={panelUnmeasured ? '—' : fmtWh(data?.fleet.panelLoadWh)} accent="text-accent" sub={panelUnmeasured ? 'not measured today' : undefined} />
       </div>
     </div>
