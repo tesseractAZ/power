@@ -107,14 +107,14 @@ While a Core connected to the panel has no reading of its own (it is cloud-offli
 
 ## Cost and carbon
 
-Dollar figures use the confirmed APS R-EV rates; while `TARIFF_APS_RATES_CONFIRMED` is off they use a flat 17 ¢/kWh default, and Grid Rate Now reads unknown.
+Money figures use the configured tariff's confirmed rates: the APS R-EV preset while `TARIFF_PLAN` is unset, confirmed by `TARIFF_APS_RATES_CONFIRMED`; another plan is confirmed by `TARIFF_RATES_CONFIRMED`. Until the rates are confirmed they use the flat rate, `TARIFF_FLAT_CENTS_PER_KWH` (17 ¢/kWh when unset), and Grid Rate Now reads unknown. The unit is `TARIFF_CURRENCY` (USD when unset); a cent is a hundredth of it. Changing the currency on a running install changes the unit of a long-term statistic, which Home Assistant then asks you to repair. CO2 avoided is the grid energy displaced times `GRID_CO2_INTENSITY_LB_PER_MWH` (when unset, 1100 lb/MWh, an Arizona grid average): enter your grid's figure. The miles figure is a fixed conversion of that mass.
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_grid_cost_today` | `ecoflow_tariff_today_cost` | Cost of today's grid import | USD |
-| `sensor.ecoflow_panel_solar_value_today` | `ecoflow_tariff_today_saved` | Value of today's solar used by the house | USD |
-| `sensor.ecoflow_panel_net_savings_7d` | `ecoflow_tariff_savings_7d` | Net savings over the last 7 days | USD |
-| `sensor.ecoflow_panel_grid_rate_now` | `ecoflow_grid_price_now` | Grid rate in force now; unknown until the rates are confirmed | USD/kWh |
+| `sensor.ecoflow_panel_grid_cost_today` | `ecoflow_tariff_today_cost` | Cost of today's grid import | currency |
+| `sensor.ecoflow_panel_solar_value_today` | `ecoflow_tariff_today_saved` | Value of today's solar used by the house | currency |
+| `sensor.ecoflow_panel_net_savings_7d` | `ecoflow_tariff_savings_7d` | Net savings over the last 7 days | currency |
+| `sensor.ecoflow_panel_grid_rate_now` | `ecoflow_grid_price_now` | Grid rate in force now; unknown until the rates are confirmed | currency/kWh |
 | `sensor.ecoflow_panel_co2_avoided_7d` | `ecoflow_carbon_kg_avoided_7d` | CO2 avoided over the last 7 days | kg |
 | `sensor.ecoflow_panel_co2_avoided_lifetime` | `ecoflow_carbon_lifetime_kg` | CO2 avoided, lifetime | kg |
 | `sensor.ecoflow_panel_equivalent_miles_not_driven` | `ecoflow_carbon_lifetime_miles` | Car miles not driven, lifetime equivalent | mi |
@@ -174,7 +174,7 @@ Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-ho
 | `sensor.ecoflow_panel_night_charge_arrival_soc_worst_case` | `ecoflow_night_charge_expected_soc` | Arrival SoC (Worst Case): the pool level at the window close projected on the islanded worst case the plan is sized on, not the charge the write is expected to make | % |
 | `sensor.ecoflow_panel_night_charge_buy_worst_case` | `ecoflow_night_charge_buy_kwh` | Buy (Worst Case): the grid energy the plan is sized on, assuming the islanded worst case | kWh |
 | `sensor.ecoflow_panel_night_charge_expected_buy` | `ecoflow_night_charge_expected_buy_kwh` | The grid energy the charge is expected to draw, from the expected pool level at the window open; unknown with no median basis | kWh |
-| `sensor.ecoflow_panel_night_charge_window_start` | `ecoflow_night_charge_window_start` | Charge window start, America/Phoenix (`23:00`, or `Mon 00:00` when more than a day away) | text |
+| `sensor.ecoflow_panel_night_charge_window_start` | `ecoflow_night_charge_window_start` | Charge window start, in site time (`23:00`, or `Mon 00:00` when more than a day away) | text |
 | `sensor.ecoflow_panel_night_charge_window_end` | `ecoflow_night_charge_window_end` | Charge window end, same format | text |
 | `sensor.ecoflow_panel_night_charge_readiness` | `ecoflow_night_charge_readiness` | `LEARNING`, `READY_TO_CONSIDER_WRITES` or `BLOCKED`: the write-readiness gate (diagnostic) | text |
 | `binary_sensor.ecoflow_panel_night_charge_write_ready` | `ecoflow_night_charge_write_ready` | On when the readiness gate has graduated; off when it has not or is unknown (diagnostic). Graduating takes at least 21 scored nights on which Power itself raised the reserve (`supervised` or `auto`), so it stays off in an install that only advises | on / off |
@@ -182,7 +182,7 @@ Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-ho
 
 ## Mid-day charge
 
-In winter, APS charges its lowest rate from 10 AM to 3 PM on weekdays. On each winter weekday evening Power works out the charge it would make in that window: an outage backup overnight, then a daytime charge, and a morning re-check against the latest solar forecast. **For now this runs in shadow:** Power computes and records it, and writes, arms and announces nothing for it. Your nights charge overnight as before, and the card shows the mid-day plan in a read-only section. These entities carry the same 25-hour expiry as the night-charge ones. They are unknown when there is no daytime charge to plan, for example on a weekend, in summer or after the window closes. Every mid-day sensor below carries a `basis` attribute, `shadow` while the mid-day charge is computed only; check it before you build a dashboard or an automation on these figures.
+On the APS R-EV preset, the lowest winter rate runs from 10 AM to 3 PM on weekdays (super off-peak). On each winter weekday evening Power works out the charge it would make in that window: an outage backup overnight, then a daytime charge, and a morning re-check against the latest solar forecast. **For now this runs in shadow:** Power computes and records it, and writes, arms and announces nothing for it. Your nights charge overnight as before, and the card shows the mid-day plan in a read-only section. These entities carry the same 25-hour expiry as the night-charge ones. They are unknown when there is no daytime charge to plan, for example on a weekend, in summer or after the window closes. Every mid-day sensor below carries a `basis` attribute, `shadow` while the mid-day charge is computed only; check it before you build a dashboard or an automation on these figures.
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
@@ -191,7 +191,7 @@ In winter, APS charges its lowest rate from 10 AM to 3 PM on weekdays. On each w
 | `sensor.ecoflow_panel_midday_charge_reserve_hold` | `ecoflow_midday_charge_reserve_hold` | The backup reserve it would hold through the window, within the panel's 10–50 range | % |
 | `sensor.ecoflow_panel_midday_charge_expected_buy` | `ecoflow_midday_charge_expected_buy_kwh` | The grid energy the daytime charge is expected to draw | kWh |
 | `sensor.ecoflow_panel_midday_charge_buy_worst_case` | `ecoflow_midday_charge_buy_kwh` | Buy (Worst Case): the grid energy the daytime plan is sized on, assuming the islanded worst case | kWh |
-| `sensor.ecoflow_panel_midday_charge_window_start` | `ecoflow_midday_charge_window_start_at` | When the daytime window opens. A timestamp sensor, shown as a time (the payload is ISO 8601 UTC: `2026-11-16T17:00:00.000Z` is 10:00 AM Phoenix time); unknown when no daytime charge is in view | timestamp |
+| `sensor.ecoflow_panel_midday_charge_window_start` | `ecoflow_midday_charge_window_start_at` | When the daytime window opens. A timestamp sensor, shown as a time (the payload is ISO 8601 UTC: `2026-11-16T17:00:00.000Z` is 10:00 AM at UTC−7); unknown when no daytime charge is in view | timestamp |
 | `sensor.ecoflow_panel_midday_charge_window_end` | `ecoflow_midday_charge_window_end_at` | When it closes, the same way | timestamp |
 | `sensor.ecoflow_panel_midday_charge_refresh` | `ecoflow_midday_charge_refresh` | The morning re-check: `pending`, then `unchanged`, `lowered`, `capped` (the new forecast asked for a higher level or reserve than the evening plan, which stays the limit), `cancelled`, `stood` (no re-check finished in time, so the evening plan stands) or `not-comparable` (the night's own overnight charge already filled the pool, so the re-check was not made and the evening figures stand) | text |
 
@@ -249,7 +249,7 @@ view needs: without one on every source, its consumption line is wrong by the ba
 | Battery | in `ecoflow_battery_charge_lifetime_kwh`, out `ecoflow_battery_discharge_lifetime_kwh` | `ecoflow_fleet_battery_net_watts` (positive is discharging) |
 | Individual devices | `ecoflow_circuit_<ch>_lifetime_kwh` per circuit | `ecoflow_circuit_<ch>_watts` |
 
-**Gap-free daily history.** Once a day, in the morning (America/Phoenix), Power fetches the
+**Gap-free daily history.** Once a day, in the morning (site time), Power fetches the
 panel's own daily energy record from EcoFlow and imports it into Home Assistant's long-term
 statistics as five external series: "Home load", "Solar production", "Grid import",
 "Battery grid-charge" and "Battery discharge", each named "(EcoFlow ledger)", with ids

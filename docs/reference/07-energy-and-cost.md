@@ -769,7 +769,7 @@ cycled through the battery.
 
 | Constant | Value |
 |---|---|
-| `DEFAULT_GRID_CO2_LB_PER_MWH` | `1100` (AZ avg; env `GRID_CO2_INTENSITY_LB_PER_MWH`) |
+| `DEFAULT_GRID_CO2_LB_PER_MWH` | `1100` (an Arizona average, the reference plant's grid; add-on option `GRID_CO2_INTENSITY_LB_PER_MWH`) |
 | `LB_PER_MWH_TO_KG_PER_KWH` | `0.4536 / 1000` |
 | `KG_CO2_PER_MILE` | `0.404` (EPA avg passenger car) |
 | `intensity` | `1100 · 0.0004536 ≈ 0.4990 kg/kWh` |
@@ -816,9 +816,9 @@ Estimates dollars actually spent on grid import **and** dollars saved (the price
 you'd have paid for the load served from solar+battery), over 7 days and today,
 at TOU rates.
 
-#### 4.2 Tariff constants (all env-overridable)
+#### 4.2 Tariff constants (add-on options)
 
-| Constant | Env | Default |
+| Constant | Env (add-on option, optional) | Default |
 |---|---|---|
 | `TARIFF_FLAT_CENTS` | `TARIFF_FLAT_CENTS_PER_KWH` | `17` (flat-rate default) |
 | `TARIFF_ON_PEAK_CENTS` | `TARIFF_ON_PEAK_CENTS` | = flat (17) |
@@ -827,11 +827,11 @@ at TOU rates.
 | `TARIFF_ON_PEAK_DAYS_ENV` | `TARIFF_ON_PEAK_DAYS` | `"1-5"` (Mon–Fri) |
 
 > **v0.9.58:** defaults to a **flat** rate — the prior 25¢/8¢ split implied a TOU
-> plan most APS customers lack and silently overstated both cost and solar value.
-> Note: `TARIFF_ON_PEAK_CENTS` / `TARIFF_OFF_PEAK_CENTS` (and the other variables in this
-> table) are environment variables, not add-on options; the add-on's run script does not
-> export them. In the add-on, a TOU plan is configured with the `TARIFF_APS_*_CENTS` options
-> and `TARIFF_APS_RATES_CONFIRMED` (§4.2b).
+> plan most utility customers lack and silently overstated both cost and solar value.
+> Note: the variables in this table are add-on options under their environment names,
+> optional and exported only when set, so an unset one keeps the default above. The tariff
+> model itself is chosen with `TARIFF_PLAN`; the built-in APS R-EV preset is priced with the
+> `TARIFF_APS_*_CENTS` options and `TARIFF_APS_RATES_CONFIRMED` (§4.2b).
 >
 > The table above pins the **unconfigured-install** contract. On an install that
 > has confirmed its utility's rate table, §4.2b supersedes it — do not read the
@@ -847,8 +847,8 @@ and picks the first tier that applies:
 
 > **Superseded in part by v1.136.0.** `resolveTariffCents` returns TWO tiers, and
 > both call sites used to price every hour as `onPeakAt(t) ? onPeak : offPeak`.
-> APS R-EV has **four** priced periods, so every overnight kWh was billed at the
-> off-peak rate — 16.91¢ instead of 12.59¢. The KPI tally and the dispatch planner
+> The APS R-EV preset has **four** priced periods, so every overnight kWh was billed at the
+> off-peak rate — 16.91¢ instead of 12.59¢ on the reference plant's rates. The KPI tally and the dispatch planner
 > now call `hourlyRateCents(tsMs, fallback)` and `isOnPeakHour(tsMs)`, which read
 > the confirmed rate table's period for that hour and fall back to the two-tier
 > answer only when no table is configured. `resolveTariffCents` remains correct
@@ -858,7 +858,7 @@ and picks the first tier that applies:
 | # | Tier | `basis` | Condition |
 |---|---|---|---|
 | 1 | Explicit override | `'explicit-override'` | `TARIFF_ON_PEAK_CENTS` / `TARIFF_OFF_PEAK_CENTS` set |
-| 2 | Confirmed seasonal utility table | `'aps_r_ev-summer'` / `'aps_r_ev-winter'` | `TARIFF_APS_RATES_CONFIRMED` true; season from `seasonAt` (tariff.ts §3) |
+| 2 | Confirmed seasonal utility table | `'aps_r_ev-summer'` / `'aps_r_ev-winter'` with the APS R-EV preset | The plan's rates confirmed (`TARIFF_APS_RATES_CONFIRMED` for the preset); season from `seasonAt` (tariff.ts §3) |
 | 3 | Flat default | `'flat-default'` | neither of the above |
 
 The resolved basis is published as `tariffBasis` on `/api/tariff` (§4.4) and is
@@ -868,7 +868,8 @@ about what a kWh costs.
 **Seasonality** is a usage-month test from the tariff model's own season
 (`apsSeasonIsSummer` → `seasonAt(apsREvModelFromEnv(), nowMs)`, tariff.ts §3): the
 summer table applies to usage in April through September, the winter table to
-October through March — the APS billing-cycle seasons (v1.187.10; it was a separate
+October through March — the APS billing-cycle seasons, which `TARIFF_SUMMER_MONTHS` replaces
+when set (v1.187.10; it was a separate
 calendar May–October test). A plan generated in one season for a window that opens
 in the next resolves at *generation* time.
 
@@ -919,7 +920,7 @@ Cache latched only when `dpus.length > 0 && shp2 != null` (v0.15.13 — `&&`, no
 **The stated window and rates are the ones that price (v1.187.0, `tariffPricingView`).**
 The window and cents fields come from the table the tally above is priced with, mirroring
 `hourlyRateCents` / `isOnPeakHour`. With `TARIFF_APS_RATES_CONFIRMED=true` (`pricingBasis:
-'rate-table'`) they are the confirmed APS R-EV model's: `onPeakHours` / `onPeakDays` from its
+'rate-table'`) they are the confirmed tariff model's (the APS R-EV preset's by default): `onPeakHours` / `onPeakDays` from its
 on-peak period (`onPeakWindowStrings`, tariff.ts: hours `start-end` local and end-exclusive,
 days on the 1=Mon…7=Sun scale — `16-19`, `1-5`), and the current season's `onPeakCents`,
 `offPeakCents`, `overnightCents` and (winter only) `superOffPeakCents`, each falling back to
@@ -996,7 +997,7 @@ off only when an on-peak hour lies later in the horizon, and only at the cheapes
 rate of the off-peak run before that on-peak hour (from the previous on-peak hour or
 the horizon start); a run with no on-peak after it inside the horizon never tops off.
 Before v1.187.10 every off-peak deficit hour below the 80% target imported. On a
-weekend — APS R-EV has no on-peak and no overnight tier — the 2026-10-03 plan
+weekend — the APS R-EV preset has no on-peak and no overnight tier — the reference plant's 2026-10-03 plan
 imported for 12 h at 16.91¢ with the pack at 76–79% ($6.55, "savings" $6.20) while
 Sunday PV later filled it to 100% and the night-charge engine bought nothing; a
 weekday evening imported 19:00–23:00 at 16.91¢ ahead of the 12.59¢ overnight tier.
@@ -1054,12 +1055,12 @@ function trading grid-import $, cycling-degradation $, and reserve-dip risk.
 
 #### 6.3 Constants (env-overridable)
 
-| Constant | Env | Default |
-|---|---|---|
-| `TARIFF_FALLBACK_CENTS` | `TARIFF_FLAT_CENTS_PER_KWH` | 17 |
-| `ROUND_TRIP_EFFICIENCY` | `MPC_ROUND_TRIP_EFFICIENCY` | 0.9 *(declared; surfaced in `notes` — the energy balance is modeled directly in `simulateHour`, not via this scalar)* |
-| `MAX_C_RATE` | `MPC_MAX_C_RATE` | 0.25 (frac of pool/hour) |
-| `EXPORT_TARIFF_CENTS` | `TARIFF_EXPORT_CENTS_PER_KWH` | 0 (no net-metering) |
+| Constant | Env | Set as | Default |
+|---|---|---|---|
+| `TARIFF_FALLBACK_CENTS` | `TARIFF_FLAT_CENTS_PER_KWH` | add-on (optional) | 17 |
+| `ROUND_TRIP_EFFICIENCY` | `MPC_ROUND_TRIP_EFFICIENCY` | env-only | 0.9 *(declared; surfaced in `notes` — the energy balance is modeled directly in `simulateHour`, not via this scalar)* |
+| `MAX_C_RATE` | `MPC_MAX_C_RATE` | env-only | 0.25 (frac of pool/hour) |
+| `EXPORT_TARIFF_CENTS` | `TARIFF_EXPORT_CENTS_PER_KWH` | add-on (optional) | 0 (no net-metering) |
 
 #### 6.4 Degrade detection
 
@@ -1076,11 +1077,11 @@ v1.187.18 the route substituted a 60 kWh pool at 50 % and served that plan with 
 assembled in `index.ts`: `currentSocPct` and `capacityKwh` from `mpcPoolBasis` (no substitute
 values), `reserveFloorPct = backupReserveSoc??20`, per-hour
 `pvP50`/`pvP10` (from forecast + probabilistic bands), `loadForecast`,
-`tariffByHour` (`hourlyRateCents` for each hour of the local America/Phoenix day, falling back to the two-tier pair `TARIFF_ON_PEAK_CENTS_PER_KWH` / `TARIFF_OFF_PEAK_CENTS_PER_KWH`, default the flat rate, when the rate table is unconfirmed; v1.136.0), and **`gridAvailable = process.env.GRID_AVAILABLE
+`tariffByHour` (`hourlyRateCents` for each hour of the local day in site time, falling back to the two-tier pair `TARIFF_ON_PEAK_CENTS_PER_KWH` / `TARIFF_OFF_PEAK_CENTS_PER_KWH`, default the flat rate, when the rate table is unconfirmed; v1.136.0; since v1.191.0 the pair is `mpcFallbackPair`, which with `TARIFF_PLAN` set is the cost figures' own pair, `resolveTariffCents`, so an unconfirmed `two_tier` plan's hours are priced at its two rates, not at the flat default), and **`gridAvailable = process.env.GRID_AVAILABLE
 === 'true'`** (default **false** — v0.15.2 off-grid honesty: a hardcoded `true`
 let the optimizer "assume away" reserve dips via imports that don't physically
 exist on an islanded site). `cyclingCostUsdPerKwh` is fed **live** from RTE:
-`baseWear (CYCLING_BASE_WEAR_USD_PER_KWH, 0.015) + (1−effFrac)·(flatCents/100)`,
+`baseWear (CYCLING_BASE_WEAR_USD_PER_KWH, an add-on option, 0.015) + (1−effFrac)·(flatCents/100)`,
 fallback 0.02. Response = `{ inputs, ...MpcResult }` where `MpcResult` carries
 `steps[]`, `totalCostUsd`, `costBreakdown`, `savingsVsBaselineUsd`,
 `expectedSavingsUsd`, `setpointSchedule[]`, `degradeReason`, `notes[]`.
@@ -1202,8 +1203,9 @@ midnight when the window slides. `CurtailmentReport` fields: `active`, `currentS
 `current{socAvg, pvActualW, pvExpectedW, loadW, ghiWm2, bayesianSamples,
 chargeCeilingPct, saturationThresholdPct}`, `inactiveReason`, `todayKwh`,
 `todayHours[]`, `recent7dKwh`, `recent7dHoursCount`, `recent7dSettledDays` (days read
-frozen), `hourlyHistogram[]` (hour-of-day siting for opportunistic loads), and `opportunisticLoads[]` (static
-Phoenix-home suggestions — pool pump 1800 W, dehumidifier 700 W, AC pre-cool
+frozen), `hourlyHistogram[]` (hour-of-day siting for opportunistic loads), and `opportunisticLoads[]` (the
+add-on option `OPPORTUNISTIC_LOADS`, `<id>:<watts>:<category>[:<label>]` comma-separated, or while
+it is unset the reference plant's suggestions — pool pump 1800 W, dehumidifier 700 W, AC pre-cool
 3500 W, water heater 4500 W, EV full-rate 7200 W — each with `fitsInSurplus`).
 `computeCurtailmentAlerts` wraps this for the alert monitor.
 
@@ -1295,7 +1297,7 @@ same aggregation the dashboard renders — and SoC/reserve from `findShp2().proj
 
 **Tariff source.** `apsREvModelFromEnv()` in `tariff.ts` — the single model shared with
 `index.ts`, so no second reader can drift on when on-peak begins. On-peak resolves via
-`rateAt(model, ts).isOnPeak` (APS R-EV: 16:00–19:00 local, Mon–Fri, year-round).
+`rateAt(model, ts).isOnPeak` (the APS R-EV preset: 16:00–19:00 site time, Mon–Fri, year-round).
 
 **Suppression conditions** (`PeakDrawVerdict.suppressed`), each a deliberate silence:
 

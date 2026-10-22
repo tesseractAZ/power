@@ -67,7 +67,7 @@ const MUTANTS = [
   {
     id: 'W-v. ★★ the chooser does not walk back into a run in progress',
     file: CW,
-    find: '  if (periodIdAt(h0) === cheapPeriodId) {\n    let s = h0;',
+    find: '  if (cheapAt(h0)) {\n    let s = h0;', // v1.191.0 (review) — cheapAt adds the night bound (null on the preset)
     to: '  if (false as boolean) { /* MUTANT */\n    let s = h0;',
     why: 'A recompute inside the window reports the next one; the leg loses its own window.',
   },
@@ -203,8 +203,9 @@ const MUTANTS = [
   {
     id: "W-xxiii. ★★ index.ts's objective ignores the leg",
     file: IDX,
-    find: "  const objectiveMode = legObjective(legRole, (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost'",
-    to: "  const objectiveMode = ((_r: ChargeLegRole, c: 'cost' | 'resilience') => c) /* MUTANT */(legRole, (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost'",
+    // v1.191.0 — the objective is read through its config.ts row (lane E), the same rule.
+    find: "  const objectiveMode = legObjective(legRole, option<'cost' | 'resilience'>('ARB_OBJECTIVE'));",
+    to: "  const objectiveMode = ((_r: ChargeLegRole, c: 'cost' | 'resilience') => c) /* MUTANT */(legRole, option<'cost' | 'resilience'>('ARB_OBJECTIVE'));",
     why: 'A backup leg planned by index.ts sizes a cost buy.',
   },
   {

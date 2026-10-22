@@ -4,7 +4,7 @@
  *
  * THE FORMATTER. Every time a mid-day text states is read from the leg's resolved window — the
  * tariff's, never a literal — and named from the moment the text is written: "tonight" for a window
- * that opens this evening or in the small hours after it, "today" and "tomorrow" by the Phoenix
+ * that opens this evening or in the small hours after it, "today" and "tomorrow" by the site
  * calendar, the weekday beyond. The on-peak period is named by its span ("4–7pm"), from the tariff.
  *
  * THE TEXTS. The winter mid-day cycle's 21:30 push and spoken notice (one or two legs), its morning
@@ -27,7 +27,8 @@ import type { NotifyMessage } from './notify.js';
 import type { ForceChargeNightOutcome } from './nightForceCharge.js';
 import { MAX_SPOKEN_ADVISORY_CHARS, NO_CHARGE_EXPECTED_KWH, revertRetryText, type RevertResendOnReport, type RestoreSummaryKind } from './nightChargeActuator.js';
 
-const TZ = 'America/Phoenix';
+// v1.191.0 (lane A, T18) — the site zone (siteTime.ts), read at call time; it was a literal here.
+import { siteTimeZone } from './siteTime.js';
 
 /* ── the formatter ────────────────────────────────────────────────────────── */
 
@@ -39,10 +40,10 @@ interface PhxParts {
   minute: number;
 }
 
-/** The Phoenix calendar date, weekday and clock of an instant. PURE. */
+/** The site calendar date, weekday and clock of an instant. PURE. */
 export function phxParts(ms: number): PhxParts {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    timeZone: siteTimeZone(), year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).formatToParts(new Date(ms));
   const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
   const weekday = get('weekday');
@@ -55,7 +56,7 @@ export function phxParts(ms: number): PhxParts {
 /** "10am", "3pm", "12am", "9:30am" — the push's compact clock. PURE. */
 export function phxShortClock(ms: number): string {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ, hour: 'numeric', minute: '2-digit', hour12: true,
+    timeZone: siteTimeZone(), hour: 'numeric', minute: '2-digit', hour12: true,
   }).formatToParts(new Date(ms));
   const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
   const minute = get('minute');
@@ -64,7 +65,7 @@ export function phxShortClock(ms: number): string {
 
 /** "10:00 AM", "9:30 AM" — the push's full clock (a deadline, a restore time). PURE. */
 export function phxClock(ms: number): string {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' }).formatToParts(new Date(ms));
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: siteTimeZone(), hour: 'numeric', minute: '2-digit' }).formatToParts(new Date(ms));
   const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
   const dp = get('dayPeriod');
   return `${get('hour')}:${get('minute')}${dp ? ' ' + dp : ''}`;
@@ -100,7 +101,7 @@ const ymdNext = (ymd: string): string => {
 };
 
 /**
- * The day an instant falls on, as a text written at `nowMs` names it (Phoenix calendar). PURE.
+ * The day an instant falls on, as a text written at `nowMs` names it (site calendar). PURE.
  *  - the same date: 'tonight' from 6 PM, else 'today';
  *  - the next date: 'tonight' before 6 AM when written in the evening or the afternoon (the small
  *    hours after this evening: the overnight window that opens at midnight), else 'tomorrow';
@@ -147,7 +148,7 @@ export function dayTextEsCap(w: DayWord): string {
 
 /**
  * The day an on-peak start is named by in a text written at `nowMs`, when it is not that text's own
- * (Phoenix calendar): its weekday, "on Monday" / "el lunes"; null on the same date, where the bare
+ * (site calendar): its weekday, "on Monday" / "el lunes"; null on the same date, where the bare
  * clock is the next one. A Friday window's revert-deadline page, at 12:30 AM Saturday, is about
  * Monday's on-peak, and a holiday eve's about the day after the holiday: a bare "starts at 4:00 PM"
  * read as that afternoon. Never "tomorrow": said in the small hours, as these pages are, it is

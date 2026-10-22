@@ -321,7 +321,8 @@ const MUTANTS = [
   {
     id: 'S-ii. ★★★ the two-tier basis keeps its own calendar May–October test',
     file: AN, tests: [T_SEASON],
-    find: "  return seasonAt(apsREvModelFromEnv(), nowMs) === 'summer';",
+    // v1.191.0 — re-pointed: the model of the plan in effect (tariffModelFromEnv; the APS preset while TARIFF_PLAN is unset).
+    find: "  return seasonAt(tariffModelFromEnv(), nowMs) === 'summer';",
     to: '  return [5, 6, 7, 8, 9, 10].includes(new Date(nowMs - 7 * 3_600_000).getUTCMonth() + 1); /* MUTANT */',
     why: '/api/tariff reads aps_r_ev-summer and the KPIs price October at the summer two-tier pair.',
   },

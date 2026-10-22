@@ -19,7 +19,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from 'undici';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 /* ── environment: set BEFORE any src module is loaded ── */
 const ROOT = mkdtempSync(join(tmpdir(), 'ef-nws-transitions-'));
@@ -52,6 +51,9 @@ agent.get('https://api.weather.gov')
   })
   .persist();
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const { getNwsAlerts, setNwsLog, TTL_MS } = await import('../src/nws.js');
 const { startAlertMonitor } = await import('../src/alertMonitor.js');
 const { SnapshotStore } = await import('../src/snapshot.js');

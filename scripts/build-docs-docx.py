@@ -11,8 +11,8 @@ Used two ways:
 
 WHAT IS PRINTED, IN ORDER
   1. README.md                                   (the tour)
-  2. GUIDE_PAGES: the operator guide (ecoflow_panel/DOCS.md), then docs/guide/options.md and
-     docs/guide/entities.md, each with its own level-1 heading
+  2. GUIDE_PAGES: the operator guide (ecoflow_panel/DOCS.md), then docs/guide/your-home.md,
+     docs/guide/options.md and docs/guide/entities.md, each with its own level-1 heading
   3. SECURITY.md
   4. a synthetic "# Engineering reference" heading and the reference index's preamble (the index
      text between its title and its chapter list)
@@ -79,7 +79,7 @@ PAGE_BREAK = '\n\n```{=openxml}\n<w:p><w:r><w:br w:type="page"/></w:r></w:p>\n``
 README = "README.md"
 SECURITY = "SECURITY.md"
 GUIDE_DIR = "docs/guide"
-GUIDE_PAGES = ("ecoflow_panel/DOCS.md", "docs/guide/options.md", "docs/guide/entities.md")
+GUIDE_PAGES = ("ecoflow_panel/DOCS.md", "docs/guide/your-home.md", "docs/guide/options.md", "docs/guide/entities.md")
 REFERENCE_DIR = "docs/reference"
 REFERENCE_INDEX = "docs/reference/README.md"
 HISTORY_DIR = "docs/history"

@@ -65,7 +65,9 @@ export interface ResponderInputs {
   slots: { slot: number; label: string; on: boolean }[] | null;
   stormPrepActive: boolean;
   nowMs: number;
-  phoenixDay: string;
+  /** The site-local calendar day (siteTime.ts siteYmd) the twice-a-day cap counts in. v1.191.0 — was
+   *  `phoenixDay`; an input, never persisted (the stored `day` is a plain YYYY-MM-DD). */
+  siteDay: string;
 }
 
 export type ResponderAction =
@@ -83,8 +85,8 @@ export type ResponderAction =
  * else carries state.
  */
 export function decideChargeNowResponse(state: ResponderState, i: ResponderInputs): ResponderAction {
-  if (state.day !== i.phoenixDay) {
-    state.day = i.phoenixDay;
+  if (state.day !== i.siteDay) {
+    state.day = i.siteDay;
     state.actionsToday = 0;
   }
 

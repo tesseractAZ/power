@@ -36,6 +36,7 @@ const GAPS_PATH = join(tmp, 'telemetry-gaps.json');
 const { createRecorder } = await import('../src/recorder.js');
 const { HELD_SAMPLES_SQL, HELD_SPANS_SQL, HELD_SCAN_CHUNK_MS } = await import('../src/heldSamples.js');
 const { outageAlerts, deviceGapCount } = await import('../src/alerts.js');
+const { siteTimeZone } = await import('../src/siteTime.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
 
 const MIN = 60_000;
@@ -149,7 +150,7 @@ test('★★★ a device-gap record filed from the pre-move seed is extended at 
     assert.deepEqual(deviceAlertIds(gaps, now), idsBefore, '★★★ the same alert ids: nothing new is pushed or digested');
     assert.equal(deviceGapCount(gaps, now, 24 * H), 2, '★★ Device Telemetry Gaps 24h stays 2 (it doubled)');
     const a = outageAlerts(JSON.parse(JSON.stringify(gaps)), now, OPTS, nameOf).find((x) => x.device === 'Core 1')!;
-    const startText = new Date(lastFresh).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const startText = new Date(lastFresh).toLocaleString('en-US', { timeZone: siteTimeZone(), month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     assert.ok(a.detail.includes(`(${startText} → `), `★★ the pushed start is the last fresh reading: ${a.detail}`);
     assert.ok(lines.some((l) => l.includes(`DEVICE TELEMETRY GAP — ${CORE_A}`) && l.includes(`re-dated from ${new Date(heldEnd).toISOString()}`)), lines.join('\n'));
   } finally { rec.close(); }

@@ -250,7 +250,7 @@ header and `mqttDiscovery.ts` comments, the intended HA-side consumers are:
 `input_boolean.lighting_postures_enabled`** — the add-on "only ever computes and
 publishes" and "never toggles a light". The escalation-edge-triggered nature of these
 consumers is exactly why the restart-persistence work (§1.3.3) matters: a flap would fire a
-spurious pulse at the family.
+spurious pulse at the household.
 
 #### 1.6 CONFIG knobs
 
@@ -372,10 +372,11 @@ curtailment fields are also folded into the big `/api/ha-state` payload
 
 #### 2.5 CONFIG knobs
 
-The opportunistic-load catalog is a **hardcoded** default sized for the operator's Phoenix
-off-grid home; the comment explicitly says *"Update via config in a later rev"* — i.e. it
-is **not yet config-driven**. The curtail constants above are compile-time. There is no
-env/config.yaml knob for the surplus thresholds or the load list.
+The opportunistic-load catalog below is the built-in default, sized for the reference plant's
+home. The add-on option `OPPORTUNISTIC_LOADS` replaces it (`<id>:<watts>:<category>[:<label>]`,
+comma-separated, the category one of pool, ev, water, hvac or other; `none` empties it); while
+it is unset the list below applies unchanged. The curtail constants above are compile-time, and
+there is no knob for the surplus thresholds.
 
 ---
 

@@ -1,8 +1,8 @@
 # EcoFlow Panel — Complete System & Engine Reference
 
-This is the definitive technical reference for the **ecoflow-panel** Home Assistant add-on: a life-safety off-grid solar/battery monitor and depletion alarm for a Phoenix, AZ system (EcoFlow Smart Home Panel 2 + Delta Pro Ultra battery/inverter Cores + a 42-panel array + EVSE). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the endpoints and sensors it produces, the configuration knobs that tune it, and its edge-case guards.
+This is the definitive technical reference for the **ecoflow-panel** Home Assistant add-on: a life-safety solar/battery monitor and depletion alarm for an EcoFlow Smart Home Panel 2 and its Delta Pro Ultra battery/inverter Cores. A figure labelled **reference plant** comes from the reference deployment (a grid-tied home in Phoenix, AZ with a 42-panel array and an EVSE) and is a built-in value that a home's own options replace; see [setting Power up for your home](../guide/your-home.md). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the endpoints and sensors it produces, the configuration knobs that tune it, and its edge-case guards.
 
-The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, and an SSH TUI (`:2323`). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and a SIP intercom) when the battery is projected to deplete.
+The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, and an SSH TUI (`:2323`). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and an optional announce-capable SIP phone) when the battery is projected to deplete.
 
 > Every constant, formula, endpoint path, and config key below was written directly from the source and independently completeness-/accuracy-checked against it. Where a value is a tunable default, that is noted. For install steps and a high-level tour, see `README.md`; for the full option list, the options→env bridge and the security posture, see chapter 12, **Configuration, Deployment, Security & Operations**.
 
@@ -111,6 +111,8 @@ Frozen, unedited and not part of the printable manual:
   that were section 2.6 of chapter 10.
 - [operations-audits.md](../history/operations-audits.md): sections 12i–12o of chapter 12 and the note on the
   removed HACS cards from chapter 11.
+- [reference-plant-notes.md](../history/reference-plant-notes.md): the reference plant's own Core roster and
+  its circuit 1 wiring note, from chapter 2 (a circuit name replaced by an example).
 
 What changed in each release is in the [CHANGELOG](../../ecoflow_panel/CHANGELOG.md) and on the
 [Releases](https://github.com/tesseractAZ/power/releases) page.

@@ -20,15 +20,15 @@ These are limits of the product, not settings:
 - **Hardware.** An EcoFlow Smart Home Panel 2 with Delta Pro Ultra Cores. Other EcoFlow devices
   on the account are listed, but only these two have dedicated logic. With two panels, the one on
   the account at first start is the house panel: alarms, sensors and night-charge writes follow
-  it, and the role never moves by itself.
+  it, and the role never moves by itself. The second gets only its own charge levels and runway.
 - **Connection.** Cloud only, through EcoFlow IoT-Open developer keys. Power polls the cloud
   every minute and follows its MQTT stream. There is no local (LAN) API: when the cloud stops
   answering, Power cannot see the system, and it raises an alarm saying so.
-- **Tariff.** The tariff model is APS Rate Schedule R-EV (its periods, seasons and holidays) and
-  nothing else. The night-charge planner and the cost figures are built on it.
-- **Clock.** Scheduling runs on America/Phoenix time, fixed in the code: the nightly notice, the
-  charge window, the tariff periods and the daily jobs. Quiet hours and the morning digest use
-  the host's local hour.
+- **Tariff.** Time-of-use tariffs described by `TARIFF_PLAN`; APS R-EV is built in and is the
+  default. The night-charge planner and the cost figures are built on it.
+- **Clock.** The site time zone, `SITE_TIMEZONE` (empty means Home Assistant's zone), runs the
+  nightly notice, the charge window, the tariff periods, quiet hours and the daily jobs.
+- **Language.** Alarms are spoken in English, and also in Spanish; no other language.
 - **Optional.** An MQTT broker (for the Home Assistant entities), Music Assistant speakers or
   announce-capable SIP targets (for spoken alarms), and Piper over Wyoming (the voice). Without
   speakers, alarms reach you only as notifications.
@@ -69,7 +69,9 @@ EcoFlow's own daily energy record. The night-charge writes in full:
    `ECOFLOW_ACCESS_KEY` and `ECOFLOW_SECRET_KEY`. Power does not start without both.
 3. Set `FORECAST_LAT` and `FORECAST_LON` to your site. The defaults are a placeholder; every
    solar forecast, and so the runway and the night-charge plan, is fetched for these coordinates,
-   and day is told from night there while a Core's solar is counted at the panel.
+   and day is told from night there while a Core's solar is counted at the panel. Then set what
+   else differs from the reference plant, such as the tariff, the solar array and bench spares:
+   [setting Power up for your home](https://github.com/tesseractAZ/power/blob/main/docs/guide/your-home.md).
 4. Tell Power whether you have a grid connection: `GRID_AVAILABLE` on if you do. Better still,
    name a Home Assistant entity that turns off when the grid drops in `GRID_PRESENCE_ENTITY`. A
    low battery is an emergency only when no grid can carry the house, and the alarms are graded
@@ -140,7 +142,7 @@ the speakers and Music Assistant.
 **The host.** Power watches the machine it runs on:
 
 - **Temperature.** "Alarm host running hot" at 78 °C and "overheating" (critical) at 84 °C,
-  read from the kernel. Improve airflow or move the host.
+  read from the kernel (lines tuned for a Raspberry Pi). Improve airflow or move the host.
 - **Pressure.** "Alarm host under pressure" when event-loop delay, free memory, free data disk
   or load average crosses its line, usually because another add-on is consuming the host. It is
   spoken only after 5 minutes, and becomes critical after 3 minutes at the critical line, when
@@ -180,22 +182,23 @@ Every alert family, its condition and its severity:
 ## Night charge and other advisories
 
 **Night charge.** Each evening at `NIGHT_CHARGE_NOTIFY_HOUR`:`NIGHT_CHARGE_NOTIFY_MINUTE`
-(21:30 America/Phoenix by default) the planner decides whether the next overnight window, 23:00
-to 05:00 on Monday to Friday nights, should charge the pool from the grid, and sends one notice. A
-Friday window ends at midnight, and a Sunday window starts at midnight. The plan is sized on a
-worst case: low solar and high load tomorrow, and the house cut off from the grid, so the pack
-still holds the reserve plus an outage cushion (`ARB_OUTAGE_CUSHION_HOURS` of the panel's own
-load).
+(21:30 site time by default) the planner decides whether the tariff's next cheap window should
+charge the pool from the grid, and sends one notice. With the APS R-EV preset that is 23:00 to
+05:00 on Monday to Friday nights; a Friday window ends at midnight, and a Sunday window starts
+at midnight. The plan is sized on a worst case: low solar and high load tomorrow, and the house
+cut off from the grid, so the pack still holds the reserve plus an outage cushion
+(`ARB_OUTAGE_CUSHION_HOURS` of the panel's own load).
 
 The notice states the charge itself, not the worst case: the level the charge drives the pool to
-and the grid energy it is expected to draw from the pool's expected level at the window open, for
-example "charging to ~80% tonight (~34.9 kWh)", or "toward" a level the window cannot reach. A
-night expected to draw nothing says the reserve is held and no charge is expected; a hold night
-says why; a night without a plan says so. The worst case appears once, on the night-charge card,
-labelled as the basis the target is sized on, and as the "(Worst Case)" sensors. When the reserve
-is restored, a morning summary says what the night did, including whether the force charge ran.
-It says "restored" once the panel reports the restored reserve; if the panel has not reported it
-5 minutes after the restore was accepted, it says the restore was sent and not yet confirmed.
+and the grid energy it is expected to draw from the pool's expected level at the window open,
+for example "charging to ~80% tonight (~34.9 kWh)" on the reference plant, or "toward" a level
+the window cannot reach. A night expected to draw nothing says the reserve is held and no charge
+is expected; a hold night says why; a night without a plan says so. The worst case appears once,
+on the night-charge card, labelled as the basis the target is sized on, and as the "(Worst
+Case)" sensors. When the reserve is restored, a morning summary says what the night did,
+including whether the force charge ran. It says "restored" once the panel reports the restored
+reserve; if the panel has not reported it 5 minutes after the restore was accepted, it says the
+restore was sent and not yet confirmed.
 
 | Mode (`NIGHT_CHARGE_MODE`) | What happens |
 |---|---|
@@ -213,13 +216,14 @@ itself raised the reserve. It needs at least 21, so it never graduates in an ins
 advises; it informs `auto` only and does not hold back `supervised`. Planning in full:
 [night-charge planning](https://github.com/tesseractAZ/power/blob/main/docs/reference/15-1-night-charge-planning.md).
 
-**Winter mid-day charge (shadow).** On winter weekday evenings Power also works out the charge it
-would make instead in the next day's 10am–3pm super off-peak window, with an outage backup
-overnight before it and a re-check on the morning forecast. It is computed only: nothing is armed,
-written, pushed or spoken for it, and the overnight charge runs as described above. The Mid-day
-Charge entities (`ecoflow_midday_charge_recommended` stays off; each figure's `basis` attribute
-reads `shadow`) and a read-only section of the night-charge card show it, with the title of the
-notice it would have sent; the log shows the full notice, tagged `night-charge[midday-shadow]:`.
+**Winter mid-day charge (shadow).** With the APS R-EV preset, on winter weekday evenings Power
+works out the charge it would make instead in the next day's 10am–3pm super off-peak window,
+with an outage backup overnight before it and a re-check on the morning forecast. It is computed
+only: nothing is armed, written, pushed or spoken for it, and the overnight charge runs as
+described above. The Mid-day Charge entities (`ecoflow_midday_charge_recommended` stays off;
+each figure's `basis` attribute reads `shadow`) and a read-only section of the night-charge card
+show it, with the title of the notice it would have sent; the log shows the full notice, tagged
+`night-charge[midday-shadow]:`.
 
 **Load shedding.** With `LOAD_SHEDDING_SHED_ENTITIES` listing your sheddable loads, Power
 recommends which to switch off when the runway alarm stands at Medium or above and the runway
@@ -249,20 +253,21 @@ Set them on the **Configuration** tab.
 | Goal | Options |
 |---|---|
 | Connect | `ECOFLOW_ACCESS_KEY`, `ECOFLOW_SECRET_KEY`; `ECOFLOW_API_HOST` (try the EU or US host on a 401) |
-| Accurate forecasts | `FORECAST_LAT`, `FORECAST_LON` |
+| Accurate forecasts | `FORECAST_LAT`, `FORECAST_LON`, `PV_*` |
 | Grid-aware alarms | `GRID_AVAILABLE`, `GRID_PRESENCE_ENTITY`, `GRID_FLOOR_SLACK_PCT` |
 | Phone alerts | `NOTIFY_CHANNEL`, `NOTIFY_HA_PUSH_TARGETS`, `NOTIFY_MIN_SEVERITY`, `NOTIFY_CRITICAL_BYPASS_DND`, `NOTIFY_RESOLVED` |
 | Spoken alarms | `BROADCAST_ENABLED`, `BROADCAST_TARGETS`, `BROADCAST_SIP_TARGETS`, `BROADCAST_MIN_SEVERITY`, `BROADCAST_VOLUME`, `BROADCAST_WYOMING_*`, `BROADCAST_BILINGUAL` |
 | Quiet nights | `NOTIFY_QUIET_HOURS`, `BROADCAST_QUIET_HOURS`, `NOTIFY_DIGEST_HOUR`, `CRITICAL_BREAKS_QUIET_HOURS` |
 | Alarm engines | `BATTERY_SOC_ALARM_ENABLED`, `BATTERY_RUNWAY_ALARM_ENABLED`, `BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN` |
 | Night charge | `NIGHT_CHARGE_MODE`, `ARB_OBJECTIVE`, `ARB_COST_MAX_SOC_PCT`, `ARB_OUTAGE_CUSHION_HOURS`, `ARB_GRID_INPUT_CAP_KW`, `NIGHT_CHARGE_NOTIFY_HOUR` |
-| Cost figures | `TARIFF_APS_*_CENTS`, then `TARIFF_APS_RATES_CONFIRMED` |
+| Cost figures | `TARIFF_PLAN` and its rates (`TARIFF_APS_*` for the preset), `TARIFF_CURRENCY`, then confirm the rates |
 | Out-of-band alarm | `HEARTBEAT_URL`, `HEARTBEAT_INTERVAL_S` |
 | Home Assistant entities | `MQTT_DISCOVERY_ENABLED`, `MQTT_DISCOVERY_HOST`, `MQTT_DISCOVERY_USER`, `MQTT_DISCOVERY_PASS` |
 | Charge Now on-peak | `CHARGE_NOW_RESPONSE` |
 | Host health | `HOST_POWER_ENTITY` |
 
-Until `TARIFF_APS_RATES_CONFIRMED` is on, the cost and savings figures use a flat 17 ¢/kWh.
+Until the rates are confirmed, the cost and savings figures use the flat rate,
+`TARIFF_FLAT_CENTS_PER_KWH` (17 ¢/kWh when unset).
 
 ## Entities and Energy Dashboard
 
@@ -370,7 +375,7 @@ database: kept, not deleted, and not used for history, learning or scoring.
 | Circuit entities missing | They appear once the first poll lists the circuits. | Wait a minute after start. |
 | History shows a gap for a device | The EcoFlow cloud listed it offline, so Power had no fresh reading and recorded nothing. After 6 hours in which the other devices kept reporting, a "Device telemetry gap" warning is pushed. | Check the device's Wi-Fi and the EcoFlow app; recording resumes with its first reading. |
 | The supervised night charge was not armed | The notice reached no channel, or arming was refused. | Set `NOTIFY_CHANNEL` to `ha`; the card and the notice name the reason. |
-| Cost figures look flat | The tariff is not confirmed. | Enter the rates, then `TARIFF_APS_RATES_CONFIRMED`. |
+| Cost figures look flat | The tariff is not confirmed. | Enter the rates, then `TARIFF_APS_RATES_CONFIRMED` (another plan: `TARIFF_RATES_CONFIRMED`). |
 | "Setting changed" notification | A setting was changed outside Power, usually in the EcoFlow app. | Confirm the change was yours. |
 | An API write returns 401 | The request has no write authority. | Use the sidebar, or send `X-Panel-Write-Token`. |
 | Heartbeat monitor reports down | Power stopped checking in. The host, the add-on or its power is down, so no alarm of Power's is running; or the internet link is down, so Power cannot reach the EcoFlow cloud either. Less often, a changed URL was rejected. | Check the batteries and the panel in the EcoFlow app now, then the host and the add-on. If Power is running, use an https URL; the log names a rejection. |

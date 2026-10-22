@@ -38,6 +38,7 @@ import {
 import { reportBasisKey } from './analytics/fleet.js';
 import { advanceBasisGeneration, basisGeneration, runInBasisGeneration, resetBasisGenerationForTesting } from './analytics/flightBasis.js';
 import { computeTotals, circuitHistoryByDay } from './aggregator.js';
+import { siteHour } from './siteTime.js';
 import { backtestPvForecast } from './backtest.js';
 
 /**
@@ -70,7 +71,7 @@ function alarmModelPredictor(
   const bias = fc.pvBiasFactor ?? 1;
   const curve = fc.typicalPvCurveWhPerHour ?? [];
   return (hourStartMs: number): number => {
-    const hod = new Date(hourStartMs).getHours();
+    const hod = siteHour(hourStartMs);
     const resp = fc.solarModel.hourly[hod];
     if (!resp) return 0;
     const he = Math.floor(hourStartMs / 3_600_000);

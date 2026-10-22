@@ -1,5 +1,5 @@
 name: Power
-version: "1.190.2"
+version: "1.191.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -116,7 +116,7 @@ options:
   BROADCAST_WYOMING_HOST: core-piper
   BROADCAST_WYOMING_PORT: 10200
   BROADCAST_WYOMING_VOICE: ""
-  BROADCAST_BILINGUAL: true
+  BROADCAST_BILINGUAL: false
   BROADCAST_WYOMING_VOICE_ES: ""
   # Battery & grid alarms
   BATTERY_SOC_ALARM_ENABLED: true
@@ -152,9 +152,11 @@ options:
   NIGHT_CHARGE_NOTIFY_HOUR: 21
   NIGHT_CHARGE_NOTIFY_MINUTE: 30
   NIGHT_CHARGE_NOTIFY_ON_HOLD: true
-  # APS R-EV effective ¢/kWh (enter from a bill; blank = unconfirmed → $ output null)
+  # Heartbeat (dead-man's switch): an outside https ping URL; blank = off
   HEARTBEAT_URL: ""
   HEARTBEAT_INTERVAL_S: 300
+  # APS R-EV preset (used when TARIFF_PLAN is unset or aps_r_ev): effective ¢/kWh from a bill;
+  # blank = unconfirmed → $ output null
   TARIFF_APS_ONPEAK_SUMMER_CENTS: ""
   TARIFF_APS_ONPEAK_WINTER_CENTS: ""
   TARIFF_APS_OFFPEAK_SUMMER_CENTS: ""
@@ -260,10 +262,12 @@ schema:
   NIGHT_CHARGE_NOTIFY_HOUR: int(0,23)
   NIGHT_CHARGE_NOTIFY_MINUTE: int(0,59)
   NIGHT_CHARGE_NOTIFY_ON_HOLD: bool
-  # APS R-EV effective ¢/kWh — str? (ships empty; runtime parses number-or-null,
-  # same "ship empty, validate at send time" pattern as the NOTIFY_* URLs above).
+  # Heartbeat (dead-man's switch)
   HEARTBEAT_URL: "str?"
   HEARTBEAT_INTERVAL_S: "int(60,3600)?"
+  # APS R-EV preset (used when TARIFF_PLAN is unset or aps_r_ev): effective ¢/kWh — str? (ships
+  # empty; runtime parses number-or-null, same "ship empty, validate at send time" pattern as the
+  # NOTIFY_* URLs above).
   TARIFF_APS_ONPEAK_SUMMER_CENTS: "str?"
   TARIFF_APS_ONPEAK_WINTER_CENTS: "str?"
   TARIFF_APS_OFFPEAK_SUMMER_CENTS: "str?"
@@ -291,3 +295,58 @@ schema:
   RECORDER_RETENTION_DAYS: int(7,3650)
   ECOFLOW_DEVICE_REACHABILITY: "str?"
   WRITE_DEBUG_TOKEN: "password?"
+  # New keys (v1.191.0 and later) are schema-only and optional (`?`): no `options:` default, exported by
+  # the run script only under `bashio::config.has_value`, so an unset key leaves the variable absent and
+  # the code takes its current path. Each lane appends its keys under its own heading.
+  # --- lane site --- (SITE_TIMEZONE, SITE_LOCATION_FROM_HA)
+  SITE_TIMEZONE: "str?"
+  # --- lane tariff --- (TARIFF_PLAN, TARIFF_PERIODS, TARIFF_RATES, TARIFF_RATES_CONFIRMED, TARIFF_FIXED_DAILY_CENTS, TARIFF_SUMMER_MONTHS, TARIFF_HOLIDAYS, TARIFF_CURRENCY, NIGHT_CHARGE_CHEAP_PERIOD, TARIFF_FLAT_CENTS_PER_KWH, TARIFF_ON_PEAK_CENTS, TARIFF_OFF_PEAK_CENTS, TARIFF_EXPORT_CENTS_PER_KWH, TARIFF_ON_PEAK_HOURS, TARIFF_ON_PEAK_DAYS)
+  # The tariff plan: unset is the built-in APS R-EV preset above. An unusable spec fails closed (prices
+  # unknown, night charge held, a repair issue), never the APS table.
+  TARIFF_PLAN: "list(aps_r_ev|flat|two_tier|custom)?"
+  TARIFF_PERIODS: "str?"
+  TARIFF_RATES: "str?"
+  TARIFF_RATES_CONFIRMED: "bool?"
+  TARIFF_FIXED_DAILY_CENTS: "float?"
+  TARIFF_SUMMER_MONTHS: "str?"
+  TARIFF_HOLIDAYS: "str?"
+  TARIFF_CURRENCY: "str?"
+  NIGHT_CHARGE_CHEAP_PERIOD: "str?"
+  # Tariff settings the code has read since before v1.191.0, now settable here (unset = as before)
+  TARIFF_FLAT_CENTS_PER_KWH: "float?"
+  TARIFF_ON_PEAK_CENTS: "float?"
+  TARIFF_OFF_PEAK_CENTS: "float?"
+  TARIFF_EXPORT_CENTS_PER_KWH: "float?"
+  TARIFF_ON_PEAK_HOURS: "str?"
+  TARIFF_ON_PEAK_DAYS: "str?"
+  # --- lane pv --- (PV_ARRAY_KWP, PV_TILT_DEG, PV_AZIMUTH_DEG, PV_STRINGS)
+  PV_ARRAY_KWP: "float(0.1,500)?"
+  PV_TILT_DEG: "float(0,90)?"
+  PV_AZIMUTH_DEG: "float(0,360)?"
+  PV_STRINGS: "str?"
+  # SITE_LOCATION_FROM_HA (OWNER DECISION 5) is set with the PV site, so it sits in this section.
+  SITE_LOCATION_FROM_HA: "bool?"
+  # --- lane ev --- (EV_MAX_LOAD_W, EV_CHARGER_COUNT, EV_PLATEAU_MIN_W, EV_CIRCUITS)
+  # Each range equals the code's clamp (plan 2.3, CA10): EV_MAX_LOAD_W and EV_PLATEAU_MIN_W are
+  # bounded below only.
+  EV_MAX_LOAD_W: "int(0,)?"
+  EV_CHARGER_COUNT: "int(0,4)?"
+  EV_PLATEAU_MIN_W: "int(0,)?"
+  EV_CIRCUITS: "str?"
+  # --- lane devices --- (BENCH_SPARE_SNS, DEVICE_ALIASES)
+  BENCH_SPARE_SNS: "str?"
+  DEVICE_ALIASES: "str?"
+  # --- lane limits --- (FORCE_CHARGE_KW_PER_CORE, RUNWAY_POOL_OVERHEAD_FLOOR_W, RUNWAY_CORE_OVERHEAD_W, BMS_RESEED_MIN_GAP_WH, CAPACITY_SCALE_MIN, FORECAST_NIGHT_START_HOUR, FORECAST_NIGHT_END_HOUR, GRID_CO2_INTENSITY_LB_PER_MWH, CYCLING_BASE_WEAR_USD_PER_KWH, OPPORTUNISTIC_LOADS, BATTERY_SOC_LADDER)
+  # RUNWAY_* accept decimals (float), clamped to the ranges below; CAPACITY_SCALE_MIN is clamped
+  # to 0.5..1; the night band hours are rounded and clamped to 0..23. The rest are not clamped.
+  FORCE_CHARGE_KW_PER_CORE: "float(0,)?"
+  RUNWAY_POOL_OVERHEAD_FLOOR_W: "float(0,1500)?"
+  RUNWAY_CORE_OVERHEAD_W: "float(0,500)?"
+  BMS_RESEED_MIN_GAP_WH: "int?"
+  CAPACITY_SCALE_MIN: "float(0.5,1)?"
+  FORECAST_NIGHT_START_HOUR: "int(0,23)?"
+  FORECAST_NIGHT_END_HOUR: "int(0,23)?"
+  GRID_CO2_INTENSITY_LB_PER_MWH: "float?"
+  CYCLING_BASE_WEAR_USD_PER_KWH: "float?"
+  OPPORTUNISTIC_LOADS: "str?"
+  BATTERY_SOC_LADDER: "str?"

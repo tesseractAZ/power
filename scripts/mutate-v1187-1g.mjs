@@ -725,8 +725,8 @@ const MUTANTS = [
   {
     id: 'lxxxix. ★★★ the quiescent emission formats the confirmation unguarded',
     file: AL,
-    find: '${isoOrRaw(dConfirmed.confirmedAtMs - 7 * 3_600_000).slice(0, 10)}',
-    to: '${new Date(dConfirmed.confirmedAtMs - 7 * 3_600_000).toISOString().slice(0, 10)} /* MUTANT */',
+    find: '${siteYmdOrRaw(dConfirmed.confirmedAtMs)}', // v1.191.0 (T11): the site date, guarded
+    to: '${new Date(dConfirmed.confirmedAtMs).toISOString().slice(0, 10)} /* MUTANT */',
     why: 'While the pack is present, every tick throws and no alert set is published.',
   },
   /* (log review 09-30, 2) a corrupt cleared row cannot throw into the tick */

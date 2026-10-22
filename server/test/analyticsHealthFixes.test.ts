@@ -13,6 +13,7 @@
  * P3-2 (novelty divide-by-maxDist) lives in src/ml.ts, which is outside this
  * change's file scope (analytics.ts only); it is tracked separately.
  */
+import './helpers/siteZoneIsHostZone.js'; // v1.191.0 — fixtures on the host clock: the site zone is the host's (first import)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

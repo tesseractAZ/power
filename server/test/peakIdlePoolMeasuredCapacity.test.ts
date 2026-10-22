@@ -20,7 +20,6 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 // The monitor's only pending timers are unref'd; keep the event loop alive for the test.
 const keepAlive = setInterval(() => {}, 1_000);
@@ -46,6 +45,9 @@ delete process.env.NOTIFY_CHANNEL;
 delete process.env.SUPERVISOR_TOKEN;
 delete process.env.NOTIFY_RESOLVED;
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const { startAlertMonitor } = await import('../src/alertMonitor.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
 const { resetIdlePoolState, IDLE_DWELL_MS } = await import('../src/peakGridDraw.js');

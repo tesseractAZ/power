@@ -67,8 +67,9 @@ const MUTANTS = [
   {
     id: 'D-i. ★★★ the window is a fixed 30 days again',
     file: AN,
-    find: '  const windowDays = degradationWindowDays(resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS));\n  const since = now - windowDays * 86_400_000;',
-    to: '  const windowDays = degradationWindowDays(resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS));\n  const since = now - 30 * 86_400_000; /* MUTANT */',
+    // v1.191.0 — the retention is read through config.retentionDays (lane E), the same rule.
+    find: '  const windowDays = degradationWindowDays(config.retentionDays);\n  const since = now - windowDays * 86_400_000;',
+    to: '  const windowDays = degradationWindowDays(config.retentionDays);\n  const since = now - 30 * 86_400_000; /* MUTANT */',
     why: 'THE DEFECT: no linear fade passes both the 1.5-pt floor and the 10 %/yr ceiling; the dated EOL is unknown for good.',
   },
   {

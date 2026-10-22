@@ -140,5 +140,7 @@ test('★★★ the quiescent pack-defective alert with a corrupt confirmedAtMs:
   assert.doesNotThrow(() => { alerts = computeAlerts(devices, undefined, { present: true, backstopping: true } as never); });
   const a = alerts.find((x) => x.id === `pack-defective-${CORE}-1`);
   assert.ok(a, 'the latched diagnosis still stands');
-  assert.match(a!.detail, /was confirmed defective on 9999999999: /, a!.detail);
+  // v1.191.0 (T11) — the date slot shows the raw value's text (it showed the raw value minus the fixed
+  // UTC−7 offset while the date was computed by that arithmetic).
+  assert.match(a!.detail, /was confirmed defective on 1000000000: /, a!.detail);
 });

@@ -126,6 +126,10 @@ test('★★★ every row before the switch keeps close + 16 h: an overnight row
   assert.deepEqual([...ledgerCheapPeriodIds('overnight')], ['overnight']);
   assert.deepEqual([...ledgerCheapPeriodIds(null)], ['overnight']);
   assert.deepEqual([...ledgerCheapPeriodIds('super_off_peak')], ['overnight', 'super_off_peak']);
+  // v1.191.0 (W1) — the overnight window is a run of the plan's own cheap period; a plan with none names none.
+  assert.deepEqual([...ledgerCheapPeriodIds('overnight', 'night')], ['night']);
+  assert.deepEqual([...ledgerCheapPeriodIds('super_off_peak', 'night')], ['night', 'super_off_peak']);
+  assert.deepEqual([...ledgerCheapPeriodIds('overnight', null)], []);
   // An overnight row's spans are the ones it always had.
   const s = ledgerSpansForWindow(phx(10, 15, 5), isOnPeak, cheapFor('overnight'));
   assert.equal(s.scoreSpanEndMs, phx(10, 15, 21));
@@ -332,10 +336,12 @@ test('★★★ the soiling estimate, the Bayesian posterior and the PV bias hin
 
 test('★★★ the scorer: a two-leg row\'s spans and trough; every other row exactly as before', () => {
   const fn = INDEX.slice(INDEX.indexOf('function nightSpansForRow('), INDEX.indexOf('const LEDGER_BACKFILL_SWEEP_DAYS'));
-  assert.match(fn, /const cheapIds = ledgerCheapPeriodIds\(y\.window_kind\);\n\s+const cycle = cycleLedgerSpans\(\n\s+y,\n\s+\(t\) => rateAt\(tariff, t\)\.isOnPeak,\n\s+\(t\) => cheapIds\.includes\(rateAt\(tariff, t\)\.periodId\),\n\s+\);/);
+  // v1.191.0 (W1) — both branches name the tariff's own cheap period ('overnight' on the APS preset).
+  assert.match(fn, /const cheapId = cheapPeriodIdOf\(tariff\);\n/);
+  assert.match(fn, /const cheapIds = ledgerCheapPeriodIds\(y\.window_kind, cheapId\);\n\s+const cycle = cycleLedgerSpans\(\n\s+y,\n\s+\(t\) => rateAt\(tariff, t\)\.isOnPeak,\n\s+\(t\) => cheapIds\.includes\(rateAt\(tariff, t\)\.periodId\),\n\s+\);/);
   assert.match(fn, /scoreSpanEnd: cycle\.scoreSpanEndMs, completeMs: cycle\.completeMs, windowKnown: true, troughSpans: cycle\.troughSpans,/);
   // The overnight branch is the one it always was.
-  assert.match(fn, /const spans = ledgerSpansForWindow\(\n\s+we,\n\s+\(t\) => rateAt\(tariff, t\)\.isOnPeak,\n\s+\(t\) => rateAt\(tariff, t\)\.periodId === NIGHT_CHEAP_PERIOD_ID,\n\s+\);/);
+  assert.match(fn, /const spans = ledgerSpansForWindow\(\n\s+we,\n\s+\(t\) => rateAt\(tariff, t\)\.isOnPeak,\n\s+\(t\) => cheapId != null && rateAt\(tariff, t\)\.periodId === cheapId,\n\s+\);/);
   const score = INDEX.slice(INDEX.indexOf('function scoreNightRow('), INDEX.indexOf('The single ~21:30 America/Phoenix evening job'));
   assert.match(score, /const socPts = s\.troughSpans == null \? recorder\.query\(shp2Sn, 'backup_pct', scoreFrom, spanEnd\) : \[\];/);
   assert.match(score, /if \(s\.troughSpans != null\) \{\n\s+const low = minOverSpans\(s\.troughSpans, \(a, b\) => recorder\.query\(shp2Sn, 'backup_pct', a, Math\.min\(nowMs, b\)\), medianFilter3\);/);

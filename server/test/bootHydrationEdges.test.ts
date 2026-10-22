@@ -20,7 +20,6 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 const ROOT = mkdtempSync(resolve(tmpdir(), 'ef-boothyd-'));
 process.env.DB_PATH = resolve(ROOT, 'ecoflow.db');
@@ -31,6 +30,9 @@ process.env.NOTIFY_QUIET_HOURS = '';
 delete process.env.NOTIFY_CHANNEL;
 delete process.env.GRID_PRESENCE_ENTITY;
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const { startAlertMonitor, createLastGoodFeed, isDeviceDerivedAlertId, ALERT_FEED_ID_PREFIXES } = await import('../src/alertMonitor.js');
 const { noteTtsRenderFailure, noteTtsRenderSuccess } = await import('../src/audioRenderer.js');
 const { SnapshotStore } = await import('../src/snapshot.js');

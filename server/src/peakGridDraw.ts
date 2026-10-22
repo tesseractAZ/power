@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import type { Alert } from './alerts.js';
 import { rateAt, localParts, type TariffModel } from './tariff.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
+import { fmtMoney } from './money.js';
 
 /**
  * v1.70.0 — ON-PEAK GRID-TO-BATTERY detection.
@@ -296,7 +297,7 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
   // overnight rate: the figure is the whole on-peak cost, not the premium over overnight.
   const costText = v.centsPerHour == null
     ? ' The tariff rates are not confirmed in config, so the cost is not estimated here.'
-    : ` At the current ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour.`;
+    : ` At the current ${v.periodLabel} rate that is about ${fmtMoney(v.centsPerHour / 100)} per hour.`;
   const whoText = v.coreAttribution == null ? '' : ` Drawing now: ${v.coreAttribution}.`;
   const held = v.heldByChargeWrite ?? null;
   return [{
@@ -319,7 +320,7 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
       { label: 'Drawing', value: v.coreAttribution ?? 'no single Core dominant' },
       { label: 'Charge Now (force charge)', value: v.forceChargeOn == null ? 'not reported' : (v.forceChargeOn.length ? `ON: ${v.forceChargeOn.join(', ')}` : 'off on all channels') },
       { label: 'Period', value: v.periodLabel },
-      { label: 'Cost rate', value: v.centsPerHour == null ? 'rates unconfirmed' : `$${(v.centsPerHour / 100).toFixed(2)}/h` },
+      { label: 'Cost rate', value: v.centsPerHour == null ? 'rates unconfirmed' : `${fmtMoney(v.centsPerHour / 100)}/h` },
       { label: 'Ongoing for', value: `${mins} min` },
       { label: 'Since', value: new Date(nowMs - v.heldForMs).toISOString() },
     ],
@@ -608,7 +609,7 @@ export function peakIdlePoolAlerts(v: IdlePoolVerdict, nowMs: number): Alert[] {
     : ` (about ${v.aboveReserveKwh.toFixed(1)} kWh above it${onNameplate ? ' on the nameplate capacity' : ''})`;
   const costText = v.centsPerHour == null
     ? ' The tariff rates are not confirmed in config, so the cost is not estimated here.'
-    : ` At the ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour.`;
+    : ` At the ${v.periodLabel} rate that is about ${fmtMoney(v.centsPerHour / 100)} per hour.`;
   const held = v.heldByChargeWrite ?? null;
   return [{
     id: PEAK_IDLE_POOL_ALERT_ID,
@@ -641,7 +642,7 @@ export function peakIdlePoolAlerts(v: IdlePoolVerdict, nowMs: number): Alert[] {
       { label: 'Pool flow', value: `${Math.round(v.poolFlowW)} W` },
       { label: 'Smart backup mode', value: v.smartBackupMode == null ? 'not reported' : String(v.smartBackupMode) },
       { label: 'Period', value: v.periodLabel },
-      { label: 'Cost rate', value: v.centsPerHour == null ? 'rates unconfirmed' : `$${(v.centsPerHour / 100).toFixed(2)}/h` },
+      { label: 'Cost rate', value: v.centsPerHour == null ? 'rates unconfirmed' : `${fmtMoney(v.centsPerHour / 100)}/h` },
       { label: 'Ongoing for', value: `${mins} min` },
       { label: 'Since', value: new Date(nowMs - v.heldForMs).toISOString() },
     ],

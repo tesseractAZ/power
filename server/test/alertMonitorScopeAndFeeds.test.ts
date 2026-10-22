@@ -25,7 +25,6 @@ import { join, resolve } from 'node:path';
 import type { Alert } from '../src/alerts.js';
 import type { AlertActionStats } from '../src/alertMonitor.js';
 import type { TelemetryEntry } from '../src/alertTelemetry.js';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 // v1.186.0 — these tests await work whose only pending timer is the monitor's unref'd feed budget
 // (a deliberately hung worker). Node 22's runner then ends the event loop mid-test and cancels the
@@ -44,6 +43,9 @@ process.env.NOTIFY_QUIET_HOURS = '';
 delete process.env.NOTIFY_CHANNEL;
 delete process.env.SUPERVISOR_TOKEN;
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const {
   applySilencingRules, autoTuneDispatchVerdict, autoTuneCounts, autoTuneClearCounts,
   replayTelemetryEvents, liftedAutoTuneVerdicts, createLastGoodFeed, bootRetrackDecision,

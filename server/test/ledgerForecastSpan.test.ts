@@ -243,7 +243,8 @@ test('★★ SOURCE PIN: the boot repair runs before the warm sweep and applies 
   const repair = fnBody('function repairShortForecastSpanOutcomes(');
   assert.ok(repair.includes('const r = forecastSpanRepair(y, nowMs, horizonMs);'));
   assert.ok(repair.includes('recorder.recordNightOutcome(String(y.plan_date), forecastSpanResetColumns(r.shortMs));'));
-  assert.ok(repair.includes('resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS), LEDGER_BACKFILL_SWEEP_DAYS,'));
+  // v1.191.0 — the retention is config.retentionDays (the same resolveRetentionDays rule).
+  assert.ok(repair.includes('config.retentionDays, LEDGER_BACKFILL_SWEEP_DAYS,'));
   const warm = INDEX.slice(INDEX.indexOf('const nightWarm = setTimeout('));
   const iRepair = warm.indexOf('repairShortForecastSpanOutcomes();');
   const iScore = warm.indexOf('scoreCompletedNights(Date.now());');

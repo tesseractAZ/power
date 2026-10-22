@@ -30,6 +30,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
+import { RESERVE_FALLBACK_PCT } from './limits.js';
 
 export type LightingPosture = 'surplus' | 'normal' | 'conserve' | 'amber' | 'red' | 'critical';
 
@@ -139,7 +140,7 @@ export function rawPosture(i: PostureInputs): PostureResult {
   if (i.hoursToReserve != null && i.hoursToReserve <= RED_HOURS_TO_RESERVE) {
     return { posture: 'red', reason: `reserve crossing in ${i.hoursToReserve.toFixed(1)}h` };
   }
-  const reserve = i.reservePct ?? 15;
+  const reserve = i.reservePct ?? RESERVE_FALLBACK_PCT;
   if (
     i.hoursToReserve != null ||
     (i.dawnMinSocPct != null && i.dawnMinSocPct < reserve + AMBER_DAWN_MARGIN_PCT)

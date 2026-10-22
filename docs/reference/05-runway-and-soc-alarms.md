@@ -132,7 +132,7 @@ the packs and already contains the Cores' overhead.
 **Drain.** `runwayDrainW(load, overheadW) = max(load/η, overheadW + load/η_m)`, with
 `overheadW = max(RUNWAY_POOL_OVERHEAD_FLOOR_W (270 W) while the panel reports a pool,
 RUNWAY_CORE_OVERHEAD_W (90 W) × connected Cores)` and `η_m = RUNWAY_DRAIN_MARGINAL_EFFICIENCY`
-(0.94). Fitted on the same 30 spans: on the measured capacity the pool's DC drain is ≈ 267 W +
+(0.94). Fitted on the same 30 spans of the reference plant: on the measured capacity the pool's DC drain is ≈ 267 W +
 load/0.94 (residual sd 40 W; a two-term fit, 245 W + 1.070 × load, is indistinguishable over
 2–8 kW). Every one of those spans had the same three Cores connected, so the fit is a POOL figure
 and cannot say how it splits. Each Core's own stream can: `Σ pack_out − ac_out/0.94` over the same
@@ -140,7 +140,9 @@ spans is 17–75 W on SHP2 slot 1, 21–82 W on slot 2 and 128–200 W on slot 3
 175 W, summing to 269 W). The overhead is therefore not even per Core, and the 270 W is a FLOOR
 while the pool is reported: a Core leaving the panel, or a partial reading that lists no
 connected source, keeps it (conservative by up to ~230 W when only a slot-1/2 Core remains), and
-90 W × Cores only raises it for a pool of more than three. The overhead is a constant, not a live
+90 W × Cores only raises it for a pool of more than three. Both are add-on options (optional,
+hidden until set): a plant with fewer than three Cores sets the floor to about 90 W per connected
+Core. The overhead is a constant, not a live
 measurement: the panel-side figure (pack drain − `panel_load`) mixes the Cores' 10 s stream with
 the panel's 60 s frame, and the single-stream per-Core figure works only while islanded —
 grid-tied, `ac_out` reads 0 because the Cores feed the house through the panel link. It applies
@@ -175,10 +177,10 @@ basis and requires the planner's inputs and its plan to be identical.
 | `RUNWAY_BLEND_HOURS` | 4 | Observed-load anchor decay length |
 | `LOAD_CURVE_MIN_PLAUSIBLE_KW` | 0.05 kW | Degenerate-curve threshold |
 | `RUNWAY_DISCHARGE_EFFICIENCY` | 0.94 (default) | DC→AC discharge efficiency η; `min(1, max(0.8, env ?? 0.94))`, env `RUNWAY_DISCHARGE_EFFICIENCY` |
-| `RUNWAY_POOL_OVERHEAD_FLOOR_W` | 270 (default, clamp 0–1500) | v1.187.19 — the pool overhead's floor while the panel reports a pool (§1.3a) |
-| `RUNWAY_CORE_OVERHEAD_W` | 90 (default, clamp 0–500) | v1.187.19 — the overhead is `max(floor, this × connected Cores)` (§1.3a) |
+| `RUNWAY_POOL_OVERHEAD_FLOOR_W` | 270 (default, clamp 0–1500) | v1.187.19 — the pool overhead's floor while the panel reports a pool (§1.3a); add-on option, the reference plant's three-Core fit |
+| `RUNWAY_CORE_OVERHEAD_W` | 90 (default, clamp 0–500) | v1.187.19 — the overhead is `max(floor, this × connected Cores)` (§1.3a); add-on option |
 | `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (default, clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m` |
-| `CAPACITY_SCALE_MIN` / `CAPACITY_SCALE_MAX` | 0.80 / 1.00 | v1.187.19 — the capacity-scale clamp |
+| `CAPACITY_SCALE_MIN` / `CAPACITY_SCALE_MAX` | 0.80 / 1.00 | v1.187.19 — the capacity-scale clamp; the minimum is the add-on option `CAPACITY_SCALE_MIN` |
 | `CAPACITY_INCREASE_HOLD_MS` / `HELD_RATIO_MAX_AGE_MS` | 24 h / 30 d | v1.187.19 — increase hold; validity of a held per-Core ratio |
 | `RUNWAY_EMPTY_CLEAR_SAMPLES` | 3 (default) | Empty-hysteresis latch length; env `RUNWAY_EMPTY_CLEAR_SAMPLES` |
 | `RUNWAY_NO_DEPLETION_SENTINEL_H` | 999 | Healthy-but-no-depletion publish sentinel |
@@ -321,6 +323,9 @@ The ladders and the store tick that feeds them live in `server/src/socLadders.ts
 
 #### 3.2 The SoC ladder — `BATTERY_SOC_THRESHOLDS`
 
+The built-in ladder below; the add-on option `BATTERY_SOC_LADDER` (`<percent>:<priority>`,
+comma-separated) replaces it when set.
+
 | SoC % | Priority |
 | --- | --- |
 | 50 | low |
@@ -418,7 +423,7 @@ regardless of `gridSta` while it flows, but does not clear the veto. Offline, cl
 `gridSta`, all keep vetoing on the last not-OK reading — across an add-on restart too
 (v1.180.0, "Surviving a restart" below). Every way of lifting the veto on silence that was
 tried republished "grid present" in the middle of an outage: a cloud-replay shadow latch (2–4
-a day on this plant, up to 16 min), a cloud-offline panel (an outage that also takes the ISP
+a day on the reference plant, up to 16 min), a cloud-offline panel (an outage that also takes the ISP
 down), a wall-clock age on an unrefreshed reading, and a 6 s `/status` blip. Each one dropped
 `off_grid`, dropped `load_shed_recommended` (so automations could restore shed loads) and
 re-gated the runway audible. The cost of stickiness is a stale "no grid" if the grid returns

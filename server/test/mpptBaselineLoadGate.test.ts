@@ -8,6 +8,7 @@
  * against idle nights) read "36 °F above its typical". Only an MPPT hotter than typical while
  * the Core carries no more load than the hour usually sees is an anomaly worth a warning.
  */
+import './helpers/siteZoneIsHostZone.js'; // v1.191.0 — fixtures on the host clock: the site zone is the host's (first import)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

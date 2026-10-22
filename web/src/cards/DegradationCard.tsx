@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { homePacks, benchNote } from './batteryScope';
+import { homePacks, benchNote, offPanelPackCount } from './batteryScope';
+import { useSite } from '../useSite';
+import { benchSpareFlag } from '../siteFacts';
 import type { FleetDegradation, PackDegradation, DegradeStatus, RoundTripEfficiency } from '../types';
 import { apiUrl } from '../api';
 import { PredictiveBadge } from '../components/PredictiveBadge';
@@ -57,6 +59,8 @@ export function DegradationCard() {
   const [deg, setDeg] = useState<FleetDegradation | null>(null);
   const [rte, setRte] = useState<RoundTripEfficiency | null>(null);
   const [err, setErr] = useState(false);
+  // v1.191.0 (plan 3.8 S3) — the server's per-DPU bench-spare flag names packs "not on a panel".
+  const site = useSite();
 
   useEffect(() => {
     let live = true;
@@ -106,6 +110,7 @@ export function DegradationCard() {
   // unreported. A ratio needs the same population on both sides.
   // v1.182.0 — fleet figures cover HOME packs only (batteryScope.ts); the table lists every pack.
   const { home: homeDegPacks, benchCount } = homePacks(deg.packs);
+  const excludedNote = benchNote(benchCount, offPanelPackCount(deg.packs, (sn) => benchSpareFlag(site, sn)));
   const capPairs = homeDegPacks.filter(
     (p) => p.currentCapacityKwh != null && p.designCapacityKwh != null,
   );
@@ -192,7 +197,7 @@ export function DegradationCard() {
           value={capPct != null ? `${capPct.toFixed(1)}%` : '—'}
           sub={
             capNow != null && capDesign != null
-              ? `${capNow.toFixed(1)} / ${capDesign.toFixed(1)} kWh of design${benchNote(benchCount) ? ` · ${benchNote(benchCount)}` : ''}`
+              ? `${capNow.toFixed(1)} / ${capDesign.toFixed(1)} kWh of design${excludedNote ? ` · ${excludedNote}` : ''}`
               : 'capacity not reported'
           }
           accent={capPct != null ? (capPct < 90 ? 'text-warn' : 'text-ok') : undefined}

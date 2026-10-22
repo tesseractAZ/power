@@ -46,7 +46,8 @@ test('★★★ ARB_CHARGE_CAP_KW 0 = AUTO: connected Cores × the proven per-Co
 });
 
 test('★★ the planner uses it, from the panel\'s connected slots', () => {
-  assert.ok(INDEX.includes("const chargeCapKw = planChargeCapKw(Number(process.env.ARB_CHARGE_CAP_KW ?? 0), planConnectedSlots, legEff);"));
+  // v1.191.0 — ARB_CHARGE_CAP_KW is read through its config.ts row (the same bare Number(raw ?? 0)).
+  assert.ok(INDEX.includes("const chargeCapKw = planChargeCapKw(option<number>('ARB_CHARGE_CAP_KW'), planConnectedSlots, legEff);"));
   assert.ok(INDEX.includes('c?.hwConnect === true'));
   const cfg = readFileSync(resolve(here, '../../ecoflow_panel/config.yaml'), 'utf8');
   assert.match(cfg, /^\s+ARB_CHARGE_CAP_KW: 0$/m, 'the shipped default is AUTO');

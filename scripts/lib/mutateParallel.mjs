@@ -11,6 +11,17 @@
  * subset, and on a subset pass the full suite (whose unmutated baseline is checked once). Only
  * the scheduling changes. A harness keeps its anchors, subset and summary semantics.
  *
+ * v1.191.0 (review) — A FULL-SUITE KILL IS CONFIRMED, NEVER TAKEN ON ONE RUN. At MUTATE_CONCURRENCY=4
+ * the full-suite step ran four whole suites at once (~36 test processes on 10 cores): timing-sensitive
+ * cases failed under that load and counted as kills, so an undeclared survivor was reported KILLED and
+ * the harness exited 0 (four comment-only mutants read "4/4 killed" at concurrency 4 and "0/4" at 1).
+ * Now: (1) at most one full suite runs at a time (other workers keep running their subsets); (2) it
+ * runs with the spec reporter, so the failing tests are named; (3) a failure in a known teardown
+ * flake (KNOWN_FLAKY_TEST_FILES) is never a kill signal; (4) the failing test files are re-run alone,
+ * still one at a time, and the kill counts only if they fail again — a failure that does not
+ * reproduce reports the mutant SURVIVED with the tests named, which the harness then shows (a false
+ * survivor is visible; a false kill hid the gap). The unmutated full baseline is judged the same way.
+ *
  * Concurrency: MUTATE_CONCURRENCY, else cores - 2 (at least 1). One per core (10 on a 10-core Mac)
  * made the timing-sensitive restart suites fail their all-workers baseline (v1187-3h/-4/-b, 2026-10-10);
  * cores - 2 passes them.
@@ -50,6 +61,67 @@ function runCapture(cmd, args, cwd) {
       rej(err);
     });
   });
+}
+
+/** Test files whose failures are known teardown flakes (ENOTEMPTY on a shared cache directory, a
+ *  timing-sensitive all-clear): a failure there is never a kill signal in the full-suite step. A
+ *  harness that wants them as a kill lists them in its subset. */
+export const KNOWN_FLAKY_TEST_FILES = Object.freeze([
+  'test/conditionRetryWords.test.ts',
+  'test/stormGateRepeatAndAllClear.test.ts',
+  'test/restartRecoverySettledSet.test.ts',
+]);
+
+/** The failing tests in a spec-reporter summary, each with the file the reporter names. PURE. */
+export function failingTestsWithFiles(out) {
+  const at = out.lastIndexOf('failing tests:');
+  if (at < 0) return [];
+  const res = [];
+  const seen = new Set();
+  let file = null;
+  for (const raw of out.slice(at).split('\n')) {
+    const line = raw.trim();
+    const loc = /^test at (.+?):\d+:\d+$/.exec(line);
+    if (loc) { file = loc[1]; continue; }
+    const m = /^✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(line);
+    if (m && m[1] !== 'failing tests:' && file != null) {
+      const key = `${file}\u0000${m[1]}`;
+      if (!seen.has(key)) { seen.add(key); res.push({ file, name: m[1] }); }
+      file = null;
+    }
+  }
+  return res;
+}
+
+/**
+ * The verdict of the full-suite step from its run(s); the re-runs are injected (no I/O of its own). `first` is the full suite's result;
+ * `confirm` re-runs the named files alone (and `rerunFull` the whole suite once when the first run
+ * named no test). Returns { killed, by, note }: killed only when the failure reproduces outside the
+ * known flakes.
+ */
+export async function fullSuiteVerdict(first, { confirm, rerunFull, flaky = KNOWN_FLAKY_TEST_FILES }) {
+  if (first.ok) return { killed: false, by: [], note: null };
+  const failed = failingTestsWithFiles(first.out);
+  const real = failed.filter((f) => !flaky.includes(f.file));
+  if (failed.length > 0 && real.length === 0) {
+    return { killed: false, by: [], note: `the full suite failed only in known flakes (${failed.map((f) => `${f.file}: ${f.name}`).join('; ')}) — not a kill` };
+  }
+  if (failed.length === 0) {
+    const again = await rerunFull();
+    if (again.ok) return { killed: false, by: [], note: 'the full suite failed once, named no test, and passed when re-run — not a kill' };
+    const named = failingTestsWithFiles(again.out).filter((f) => !flaky.includes(f.file));
+    if (named.length === 0 && failingTestsWithFiles(again.out).length > 0) {
+      return { killed: false, by: [], note: 'the re-run failed only in known flakes — not a kill' };
+    }
+    return { killed: true, by: named.length ? named.map((f) => `${f.name} (${f.file})`) : ['(the full suite failed twice; no test named)'], note: null };
+  }
+  const files = [...new Set(real.map((f) => f.file))];
+  const conf = await confirm(files);
+  const still = conf.ok ? [] : failingTestsWithFiles(conf.out).filter((f) => !flaky.includes(f.file));
+  if (!conf.ok && (still.length > 0 || failingTestsWithFiles(conf.out).length === 0)) {
+    return { killed: true, by: (still.length ? still : real).map((f) => `${f.name} (${f.file})`), note: null };
+  }
+  return { killed: false, by: [], note: `the full-suite failure did not reproduce in its own file(s): ${real.map((f) => `${f.name} (${f.file})`).join('; ')} — not a kill` };
 }
 
 /** The failing test names from the spec reporter's summary (deduplicated). */
@@ -120,11 +192,27 @@ export async function runMutantsParallel({ name, mutants, subset = [], root, per
     }
     console.log(`${name}: ${selected.length} mutants against ${perMutantTests ? 'their named tests' : subset.join(' + ')} — ${n} parallel worker(s)\n`);
 
+    // v1.191.0 (review) — one full suite at a time, with the spec reporter (the failing tests named).
+    let fullLock = Promise.resolve();
+    const serialFull = (fn) => { const run = fullLock.then(fn, fn); fullLock = run.then(() => {}, () => {}); return run; };
+    const FULL_ARGS = ['--import', 'tsx', '--test', '--test-reporter=spec', 'test/**/*.test.ts'];
+    const runFull = (dir) => serialFull(() => runCapture('node', FULL_ARGS, join(dir, 'server')));
+    const runFiles = (dir, files) => serialFull(() => runCapture('node', ['--import', 'tsx', '--test', '--test-reporter=spec', ...files], join(dir, 'server')));
+
     let fullBaseline = null; // Promise<boolean>, checked once, in its own copy
     const fullBaselineOk = () => {
       if (!fullBaseline) {
         const dir = makeWorkerTree(root);
-        fullBaseline = runOk('npm', ['test', '--silent'], join(dir, 'server')).finally(() => rmSync(dir, { recursive: true, force: true }));
+        // The unmutated suite is judged like a mutant: a failure only in a known flake, or one that does
+        // not reproduce in its own file, does not stop the harness.
+        fullBaseline = runFull(dir)
+          .then((first) => fullSuiteVerdict(first, { confirm: (files) => runFiles(dir, files), rerunFull: () => runFull(dir) }))
+          .then((v) => {
+            if (v.note) console.log(`  (unmutated full suite: ${v.note})`);
+            if (v.killed) console.error(`  unmutated full suite fails: ${v.by.join('; ')}`);
+            return !v.killed;
+          })
+          .finally(() => rmSync(dir, { recursive: true, force: true }));
       }
       return fullBaseline;
     };
@@ -147,6 +235,7 @@ export async function runMutantsParallel({ name, mutants, subset = [], root, per
           }
           let died;
           let by = [];
+          let note = null;
           if (perMutantTests) {
             const r = await runCapture('node', testArgs(m.tests), join(w, 'server'));
             died = !r.ok;
@@ -159,11 +248,15 @@ export async function runMutantsParallel({ name, mutants, subset = [], root, per
               if (!(await fullBaselineOk())) {
                 console.error('\nABORT: the full suite fails on the UNMUTATED tree, so it cannot count a kill.'); cleanup(); process.exit(2);
               }
-              died = !(await runOk('npm', ['test', '--silent'], join(w, 'server')));
+              const v = await fullSuiteVerdict(await runFull(w), { confirm: (files) => runFiles(w, files), rerunFull: () => runFull(w) });
+              died = v.killed;
+              by = v.by;
+              note = v.note;
             }
           }
           verdicts[i] = died;
           console.log(`  ${died ? 'KILLED  ' : 'SURVIVED'} ${m.id}${died ? '' : `\n           ↳ ${m.why}`}`);
+          if (note) console.log(`           ↳ ${note}`);
           for (const t of by.slice(0, 4)) console.log(`           ✖ ${t}`);
           if (by.length > 4) console.log(`           … and ${by.length - 4} more`);
         } finally {

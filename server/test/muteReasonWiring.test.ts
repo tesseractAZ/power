@@ -20,7 +20,6 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Alert } from '../src/alerts.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 // The monitor's only pending timers are unref'd; Node 22's runner would otherwise end the
 // event loop mid-test and cancel the file.
@@ -40,6 +39,9 @@ process.env.CLEARED_LOG_PATH = join(tmp, 'cleared.json');
 delete process.env.NOTIFY_CHANNEL;
 delete process.env.SUPERVISOR_TOKEN;
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const {
   computeAlerts, MUTE_REASON_BALANCING, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION,
 } = await import('../src/alerts.js');

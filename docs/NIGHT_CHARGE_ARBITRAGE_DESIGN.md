@@ -1,5 +1,13 @@
 # Night-Charge TOU Arbitrage — Design & As-Built
 
+> [!NOTE]
+> A record of the reference plant. This design and its amendments were written against one
+> deployment, a grid-tied home in Arizona on the APS R-EV tariff, and its rates, windows, loads
+> and measured dates are that plant's. The night-charge engine as it ships, for any tariff and
+> time zone, is described in the engineering reference:
+> [night-charge planning](reference/15-1-night-charge-planning.md) and
+> [the night-charge writes](reference/15-2-night-charge-writes.md).
+
 _Originated 2026-07-17 as a design plan (12-agent design dive + 4-agent APS-EV/EcoFlow verification), implemented v1.36.0–v1.51.0, amended 2026-07-31. **Rewritten 2026-09-06 against the shipped system at v1.133.1; amended 2026-09-11 for v1.148.0–v1.149.0** (see §I6 and the note below); **amended 2026-10-11 for v1.164.0–v1.187.15** (force-charge, billing-cycle seasons, off-peak holidays, apply/revert timing, the readiness-gate fix)._
 
 > **2026-09-11 — the basis gate is CLOSED on the live plant, and this is what that looks like.** `bandCoverageFrac` is **0.72** against the `BASIS_MIN_BAND_COVERAGE = 0.78` threshold, so I6 is binding and the advisor is returning a null plan every night. Three of the four basis conditions pass; the miss is six points on one. v1.148.0 added **`basisBlockedBy`**, which names *which* condition closed — “forecast/telemetry basis incomplete” was four conditions wearing one coat, and reconstructing which one had bitten took an hour of live probing. The rationale now reads `PV band coverage 72% < 78% (forecast present, tier=forecast, calDays 29/14)`, and that string reaches the 21:30 notification and the spoken broadcast, not just the API.

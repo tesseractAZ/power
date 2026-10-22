@@ -16,6 +16,7 @@ import type { PlantData, PlantView } from './types.js';
 // v0.11.0 — derive the 4-tier ISA-18.2 / IEC 62682 alarm priority for display.
 import { priorityOf, priorityMeta, type AlarmPriority } from '../../alertPriority.js';
 import { getAlertOnset } from '../../alertOnset.js';
+import { fmtSiteStamp } from '../../siteTime.js';
 
 /** ANSI colourizer for an ISA priority. No orange in the 16-colour palette, so
  *  High shares Critical's bright-red; Medium = bright-yellow; Low = cyan. */
@@ -162,10 +163,8 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   // v1.x — per-alarm TIMESTAMP formatter; each row stamps its own ONSET (see
   // the getAlertOnset() call inside the render loop below), not one shared
   // refresh-time string.
-  const fmtTs = (ms: number) => {
-    const d = new Date(ms);
-    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
-  };
+  // v1.191.0 (T15) — in the site zone (siteTime.ts), not the host clock.
+  const fmtTs = (ms: number) => fmtSiteStamp(ms, true);
 
   // v1.4.3 (audit rank 26) — WRAP the message instead of hard-truncating it. The MESSAGE
   // column starts at fixed offset 65 (2 indent + 19 TS + 1 + 6 PRIO + 1 + 12 CAT + 1 + 22 ID

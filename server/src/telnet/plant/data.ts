@@ -12,6 +12,8 @@ import type { DeviceSnapshot } from '../../snapshot.js';
 import type { DpuProjection, Shp2Projection } from '../../ecoflow/project.js';
 import type { PlantData } from './types.js';
 import { findShp2 } from '../../shp2Membership.js';
+import { coreNumber, coreNumberFromName, isDpuProduct } from '../../topology.js';
+import { MAINS_V } from '../../hwSpec.js';
 import type { AlarmState, Quality, TagRow } from './scada.js';
 
 type DpuDev = DeviceSnapshot & { projection: DpuProjection };
@@ -20,16 +22,19 @@ type Shp2Dev = DeviceSnapshot & { projection: Shp2Projection };
 const cToF = (x: number) => (x * 9) / 5 + 32;
 
 export function getDpus(data: PlantData): DpuDev[] {
-  return (Object.values(data.snap.devices) as DpuDev[])
-    .filter((d) => (d.productName ?? '').toLowerCase().includes('delta pro ultra') && d.projection)
-    .sort((a, b) => dpuNum(a.deviceName) - dpuNum(b.deviceName));
+  const devices = data.snap.devices;
+  // v1.191.0 (S8) — a DPU the owner never named sorts by its panel slot (topology.ts coreNumber, CA4).
+  const key = (d: DpuDev): number => (d.nameFallback === true ? coreNumber(d, devices) ?? 999 : dpuNum(d.deviceName));
+  return (Object.values(devices) as DpuDev[])
+    .filter((d) => isDpuProduct(d.productName) && d.projection)
+    .sort((a, b) => key(a) - key(b));
 }
 export function getShp2(data: PlantData): Shp2Dev | undefined {
   return findShp2(data.snap.devices) as Shp2Dev | undefined; // v1.185.0 — the house panel
 }
+/** The sort key from a display name: its Core number (topology.ts coreNumberFromName), 999 without one. */
 function dpuNum(name: string): number {
-  const m = name.match(/(\d+)/);
-  return m ? Number(m[1]) : 999;
+  return coreNumberFromName(name) ?? 999;
 }
 
 /** v1.0.1 — promoted from pv.ts: the physical generator number for a Core, parsed
@@ -38,8 +43,9 @@ function dpuNum(name: string): number {
  *  rows with this, never with the loop index — filtering compacts the array, so
  *  the index no longer equals the physical Core once any unit drops out. */
 export function generatorNumber(deviceName: string, fallbackIdx: number): number {
-  const m = deviceName?.match(/(\d+)/);
-  return m ? Number(m[1]) : fallbackIdx + 1;
+  // v1.191.0 (S8) — the shared name chain (topology.ts coreNumberFromName): identical for every
+  // "Core N" name, and a fallback-named DPU's slot disambiguator reads as its slot.
+  return coreNumberFromName(deviceName) ?? fallbackIdx + 1;
 }
 
 /** Age of the last telemetry for a device, in ms (or null if never seen). */
@@ -95,7 +101,7 @@ export function tempState(tC: number | null | undefined): AlarmState {
   return 'normal';
 }
 /** State for a circuit load as % of breaker. */
-export function circuitLoadState(loadW: number | null | undefined, breakerA: number | null | undefined, voltage = 120): AlarmState {
+export function circuitLoadState(loadW: number | null | undefined, breakerA: number | null | undefined, voltage: number = MAINS_V.line): AlarmState {
   if (loadW == null || breakerA == null || breakerA === 0) return 'oos';
   const pct = (Math.abs(loadW) / (breakerA * voltage)) * 100;
   if (pct >= CIRCUIT_LOAD_PCT_BANDS.red) return 'alarm';
@@ -136,7 +142,7 @@ export function fmtVolt(mv: number | null | undefined): { value: string; unit: s
   if (mv == null) return { value: '—', unit: '' };
   return { value: (mv / 1000).toFixed(mv > 10_000 ? 1 : 3), unit: 'V' };
 }
-export function fmtAmp(w: number | null | undefined, v = 120): { value: string; unit: string } {
+export function fmtAmp(w: number | null | undefined, v: number = MAINS_V.line): { value: string; unit: string } {
   if (w == null) return { value: '—', unit: '' };
   return { value: (w / v).toFixed(1), unit: 'A' };
 }

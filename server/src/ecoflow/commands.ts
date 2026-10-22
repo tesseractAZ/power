@@ -6,6 +6,7 @@ import { appendWriteLog, type WriteOutcome } from '../writeLog.js';
 // could have drifted apart; nightChargeActuator.ts is a dependency-free leaf
 // module, so importing it here costs nothing and cannot cycle.
 import { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT } from '../nightChargeActuator.js';
+import { SHP2_SOURCE_SLOTS, FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_CEILING_MAX_PCT } from '../hwSpec.js';
 
 /**
  * High-level write helpers.
@@ -224,10 +225,10 @@ export interface ForceChargeWriteRequest extends Omit<CommandRequest, 'body'> {
  * command path as the night-charge reserve write.
  */
 export async function setChannelForceCharge(req: ForceChargeWriteRequest): Promise<CommandResult> {
-  if (!Number.isInteger(req.slot) || req.slot < 1 || req.slot > 3) {
+  if (!Number.isInteger(req.slot) || req.slot < 1 || req.slot > SHP2_SOURCE_SLOTS) {
     return {
       outcome: 'failure', code: 'slot-out-of-range',
-      message: `Refused: SHP2 AC slot ${req.slot} outside [1, 3].`, durationMs: 0,
+      message: `Refused: SHP2 AC slot ${req.slot} outside [1, ${SHP2_SOURCE_SLOTS}].`, durationMs: 0,
     };
   }
   const action = `charge-now-ch${req.slot}`;
@@ -267,10 +268,10 @@ export const FORCE_CHARGE_CEILING_COOLDOWN_MS = 5 * 60 * 1000;
 export async function setForceChargeCeiling(
   req: Omit<CommandRequest, 'body'> & { pct: number },
 ): Promise<CommandResult> {
-  if (!Number.isInteger(req.pct) || req.pct < 80 || req.pct > 100) {
+  if (!Number.isInteger(req.pct) || req.pct < FORCE_CHARGE_CEILING_MIN_PCT || req.pct > FORCE_CHARGE_CEILING_MAX_PCT) {
     return {
       outcome: 'failure', code: 'ceiling-out-of-range',
-      message: `Refused: foceChargeHight ${req.pct} outside the documented [80, 100].`, durationMs: 0,
+      message: `Refused: foceChargeHight ${req.pct} outside the documented [${FORCE_CHARGE_CEILING_MIN_PCT}, ${FORCE_CHARGE_CEILING_MAX_PCT}].`, durationMs: 0,
     };
   }
   if (!checkAndReserve('force-charge-ceiling', req.sn, { cooldownMs: FORCE_CHARGE_CEILING_COOLDOWN_MS })) {

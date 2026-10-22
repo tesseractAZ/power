@@ -31,7 +31,8 @@ import type { DeviceSnapshot } from './snapshot.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import type { RunwayAlarmInput } from './runwayAlarm.js';
 import { shp2ReadbackFresh } from './shp2Membership.js';
-import { CAPACITY_SCALE_MIN, type CapacityBasis } from './poolEnergyBasis.js';
+import { CAPACITY_SCALE_MIN, CAPACITY_SCALE_MAX, type CapacityBasis } from './poolEnergyBasis.js';
+import { RESERVE_FALLBACK_PCT } from './limits.js';
 
 export const PANEL_DRAIN_WINDOW_MS = 30 * 60_000;
 /** The window must span at least this much before the mean is a drain rather than a moment. */
@@ -85,7 +86,7 @@ export function panelDrainRunway(
   basis?: { capacityScale: number; capacityBasis: CapacityBasis },
 ): PanelRunway {
   const scale = basis && Number.isFinite(basis.capacityScale)
-    ? Math.min(1, Math.max(CAPACITY_SCALE_MIN, basis.capacityScale)) : 1;
+    ? Math.min(CAPACITY_SCALE_MAX, Math.max(CAPACITY_SCALE_MIN, basis.capacityScale)) : 1;
   const base = {
     sn: panel.sn, name: panel.deviceName, generatedAt: nowMs, hoursToReserve: null, hoursToEmpty: null, drainW: null,
     ...(basis ? { capacityScale: scale, capacityBasis: basis.capacityBasis } : {}),
@@ -96,7 +97,7 @@ export function panelDrainRunway(
   const remainWh = remainWhPlate * scale;
   const fullWh = fullWhPlate * scale;
   if (!shp2ReadbackFresh(panel, nowMs)) return { ...base, unavailable: 'panel reading not fresh' };
-  const reserveWh = (fullWh * (panel.projection.backupReserveSoc ?? 15)) / 100;
+  const reserveWh = (fullWh * (panel.projection.backupReserveSoc ?? RESERVE_FALLBACK_PCT)) / 100;
   const floor = { backupRemainingKwh: remainWh / 1000, backupReserveKwh: reserveWh / 1000 };
   const recent = samples.filter((x) => nowMs - x.tMs <= PANEL_DRAIN_WINDOW_MS);
   if (recent.length < 2 || recent[recent.length - 1].tMs - recent[0].tMs < PANEL_DRAIN_MIN_SPAN_MS) {

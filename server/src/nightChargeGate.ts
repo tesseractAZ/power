@@ -40,24 +40,19 @@
 
 import type { NightLedgerRow } from './recorder.js';
 import { PLAN_TRAJ_BREACH_TOLERANCE_PCT } from './nightChargeAdvisor.js';
+import { siteYmd } from './siteTime.js';
 
 const DAY_MS = 86_400_000;
 
-// ── v1.39.0 pure Phoenix-date helpers for the expected-nights MNAR denominator ──
-/** YYYY-MM-DD of an instant in America/Phoenix. v1.39.1: built from en-US
- *  formatToParts — the house pattern (fmtPhoenixHm / phoenixMinuteOfDay /
- *  localParts) — NOT the en-CA format() shortcut: on a Node whose ICU lacks
- *  en-CA the locale silently falls back to a non-ISO date shape, addDaysYmd
- *  then builds an Invalid Date, and toISOString() THROWS — swallowed by the
- *  fail-safe catches, leaving readiness permanently null on the live Pi while
- *  every full-ICU dev machine passed. en-US parts are locale-fallback-proof. */
-export function phoenixYmd(ms: number): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Phoenix', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(new Date(ms));
-  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-  return `${get('year')}-${get('month')}-${get('day')}`;
-}
+// ── v1.39.0 pure site-date helpers for the expected-nights MNAR denominator ──
+/** YYYY-MM-DD of an instant in the site zone. v1.39.1: built from en-US formatToParts — the house
+ *  pattern — NOT the en-CA format() shortcut: on a Node whose ICU lacks en-CA the locale silently
+ *  falls back to a non-ISO date shape, addDaysYmd then builds an Invalid Date, and toISOString()
+ *  THROWS — swallowed by the fail-safe catches, leaving readiness permanently null on the live Pi
+ *  while every full-ICU dev machine passed. en-US parts are locale-fallback-proof.
+ *  v1.191.0 (T6) — the one implementation is siteTime.ts siteYmd (the third copy of this helper is
+ *  gone); `phoenixYmd` stays as a deprecated alias for its importers. */
+export { siteYmd as phoenixYmd } from './siteTime.js';
 function ymdToUtcMs(ymd: string): number {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
   if (!m) return NaN; // malformed — caller guards
@@ -153,6 +148,9 @@ export interface NightChargeReadinessOpts {
   /** Override the current algo version (rows with a different algo_version are
    *  excluded). Defaults to CURRENT_ALGO_VERSION. */
   algoVersion?: number;
+  /** v1.191.0 (S6) — how long after its local midnight a plan date's night is complete: the
+   *  schedule's fallbackNight.completeMin (nightSchedule.ts). Defaults to the APS R-EV 45 h. */
+  completeAfterMs?: number;
 }
 
 /* ── Defensive coercion — ledger booleans may persist as 0/1 or true/false ─── */
@@ -234,7 +232,7 @@ export function computeNightChargeReadiness(
 
   // ── MNAR exclusion diagnostic (§3.5): expected nights vs captured-and-scored
   // nights over the current-algo era (trailing 120 d, latest COMPLETE plan date
-  // = Phoenix date of now−45 h). Published as a diagnostic so a growing hole in
+  // = site date of now−45 h). Published as a diagnostic so a growing hole in
   // the record is visible; the v2 graduation criteria are the five approved
   // ones (2026-07-31), which do not include it. ──
   let exclusionFrac: number | null = null;
@@ -245,7 +243,7 @@ export function computeNightChargeReadiness(
       .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
       .sort();
     if (dates.length) {
-      const lastComplete = phoenixYmd(nowMs - 45 * 3_600_000);
+      const lastComplete = siteYmd(nowMs - (opts?.completeAfterMs ?? 45 * 3_600_000));
       const rangeStart = maxYmd(dates[0], addDaysYmd(lastComplete, -119));
       if (lastComplete >= rangeStart) {
         const expected = daysBetweenYmdInclusive(rangeStart, lastComplete);
@@ -396,7 +394,7 @@ export function computeNightChargeReadiness(
     const realizedStrike = truthy(r.actuated) && truthy(r.cushion_breached);
     return trajStrike || realizedStrike;
   });
-  const strikeWindowStart = phoenixYmd(nowMs - STRIKE_WINDOW_DAYS * DAY_MS);
+  const strikeWindowStart = siteYmd(nowMs - STRIKE_WINDOW_DAYS * DAY_MS);
   const windowStrikes = strikeRows.filter((r) => String(r.plan_date) >= strikeWindowStart);
   /** v1.186.0 — in-window trajectory flags set aside as graded on the disclosure trough. */
   // v1.186.0 — a stored flag the sizing columns overrule is set aside too, and counted.

@@ -3,6 +3,7 @@ import type { Shp2Projection, DpuProjection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { FleetDegradation, SoilingDecomposition, EquipmentHealth, ForecastSkillReport } from './analytics.js';
 import { isBenchSpareSn } from './shp2Membership.js';
+import { coreLabel, configuredBenchSpareSns, deviceAliases, isDpuProduct, isShp2Product } from './topology.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
@@ -92,8 +93,8 @@ function persistFirstSeen(): void {
 // alerts.ts is being edited in parallel; keep it in sync with the SOURCE OF TRUTH
 // in alerts.ts. The split is product-name based, exactly as alerts.ts does it.
 function isCoreOrShp2(productName: string): boolean {
-  const p = productName.toLowerCase();
-  return p.includes('delta pro ultra') || p.includes('smart home panel');
+  // v1.191.0 (S8) — topology.ts's two product predicates: the same substring tests.
+  return isDpuProduct(productName) || isShp2Product(productName);
 }
 
 /**
@@ -246,7 +247,8 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
       out.push({
         id,
         severity: 'warning',
-        title: `Pack wearing fast: Core ${p.coreNum} · Pack ${p.packNum}`,
+        // v1.191.0 (S8) — a pack whose Core has no number is named by its device ("Core null" before).
+        title: `Pack wearing fast: ${coreLabel(p.coreNum, p.device)} · Pack ${p.packNum}`,
         summary: `This pack is fading at ${(p.peerFadeRatio ?? 1).toFixed(1)}× the fleet-median rate — the fastest-wearing pack in its peer group. ${p.summary}`,
         fixSteps: [
           'Open the Core and inspect the pack for visible damage (swelling, leakage, scorch marks).',
@@ -277,7 +279,7 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
         out.push({
           id,
           severity: 'info',
-          title: `MPPT reading drift: Core ${s.coreNum} ${s.string} string`,
+          title: `MPPT reading drift: ${coreLabel(s.coreNum, s.device)} ${s.string} string`,
           summary: `The ratio of this string's reported input power to its reported voltage × current (W ÷ V·A) is ${Math.abs(s.driftPctPts)} points below its baseline (recent ${s.recentEffPct}% vs baseline ${s.baselineEffPct}%). All three are the MPPT's own input readings, so this is a reading-consistency ratio, not a measured conversion efficiency: cabling, connector or panel losses lower power and voltage × current together and do not move it. A sustained fall means the power reading and the voltage/current readings have drifted apart (a sensor or calibration effect) or something inside the MPPT changed.`,
           fixSteps: [
             `Measure the ${s.string} string's voltage and current at the DPU's MPPT input (a DC clamp meter and a multimeter) while it is producing, and compare them with the reported volts and amps.`,
@@ -309,6 +311,48 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
         ],
         category: 'Configuration',
         estimatedTimeMinutes: 10,
+        firstSeenAt: track(id, now),
+      });
+    }
+  }
+
+  // v1.191.0 (S8) — the device options, failing closed (plan P5): an unreadable DEVICE_ALIASES value or
+  // /data alias file is skipped (the layers below it still apply) and said so here; a BENCH_SPARE_SNS
+  // serial that names no device on the account mutes nothing, so a typo leaves the real spare alarming.
+  for (const e of deviceAliases().errors) {
+    const id = `device-aliases-unreadable-${e.source}`;
+    const where = e.source === 'option' ? 'The Device Aliases option (DEVICE_ALIASES)' : 'The alias file in the data folder (device-aliases.json)';
+    out.push({
+      id,
+      severity: 'warning',
+      title: e.source === 'option' ? 'Device aliases option is not readable' : 'Device alias file is not readable',
+      summary: `${where} is not a JSON object of serial → name (${e.message}), so it is ignored and the devices keep the names below it.`,
+      fixSteps: [
+        'Write the aliases as one JSON object, for example {"<serial>":"Core 5"}.',
+        'Save the add-on configuration and restart the add-on; aliases are read at start.',
+      ],
+      category: 'Configuration',
+      estimatedTimeMinutes: 5,
+      firstSeenAt: track(id, now),
+    });
+  }
+  const spares = configuredBenchSpareSns();
+  const dpuSns = Object.values(ctx.devices).filter((d) => isDpuProduct(d.productName)).map((d) => d.sn);
+  if (spares != null && dpuSns.length > 0) {
+    const unknown = [...spares].filter((sn) => ctx.devices[sn] == null).sort();
+    if (unknown.length > 0) {
+      const id = 'bench-spare-unknown';
+      out.push({
+        id,
+        severity: 'info',
+        title: `Bench spare not on this account (${unknown.length})`,
+        summary: `BENCH_SPARE_SNS names ${unknown.map((sn) => `…${sn.slice(-4)}`).join(', ')}, which no device on this EcoFlow account carries. A serial that matches no device marks nothing as a spare, so a mistyped entry leaves the real bench unit alarming as a home Core.`,
+        fixSteps: [
+          'Compare each serial in Bench Spare Serials (BENCH_SPARE_SNS) with the serial on the unit or in the EcoFlow app.',
+          'Correct or remove the entry, save the add-on configuration and restart the add-on.',
+        ],
+        category: 'Configuration',
+        estimatedTimeMinutes: 5,
         firstSeenAt: track(id, now),
       });
     }

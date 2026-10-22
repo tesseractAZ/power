@@ -27,6 +27,11 @@ import type { StandbyBlockedReason } from '../types';
  * own AC output port, so `ac_out` sits at 0 permanently and the inverter's idle
  * draw is not exposed on that register at all.
  */
+/** v1.191.0 (N2) — "Core 3", or the device's own name when the server has no Core number for it
+ *  (a unit the owner never named and that sits on no panel): never "Core null". */
+export const coreLabel = (coreNum: number | null | undefined, device: string): string =>
+  (coreNum != null ? `Core ${coreNum}` : device);
+
 const STANDBY_BLOCKED_TEXT: Record<StandbyBlockedReason, string> = {
   'no-ac-out-history': 'no AC-output history recorded',
   'ac-output-stage-idle': 'AC output unused (fed via SHP2) — standby not measurable here',
@@ -220,7 +225,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
           </div>
           <HowItWorks>
             High disagreement (&gt; 15%) widens P10/P90 forecast bands — sources don't agree, so the
-            point estimate has more uncertainty than usual. Phoenix monsoon clouds are where this
+            point estimate has more uncertainty than usual. Monsoon-season clouds are where this
             matters most.
           </HowItWorks>
         </Section>
@@ -257,7 +262,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
               .slice(0, 8)
               .map((p) => (
                 <div key={`${p.sn}-${p.packNum}`} className="bg-panel2/50 border border-line rounded-md p-2 text-sm flex items-baseline gap-3">
-                  <div className="font-semibold w-32 shrink-0">Core {p.coreNum} · Pk {p.packNum}</div>
+                  <div className="font-semibold w-32 shrink-0">{coreLabel(p.coreNum, p.device)} · Pk {p.packNum}</div>
                   <div className="text-xs text-muted flex-1">
                     {p.warmEvents}w / {p.hotEvents}h / {p.overheatEvents}o · {p.warmHours}h warm
                   </div>
@@ -275,7 +280,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
               <div className="text-[11px] uppercase tracking-wider text-muted mb-1">MPPT efficiency</div>
               {equip.mpptStrings.filter((s) => s.recentEffPct != null).map((s) => (
                 <div key={`${s.sn}-${s.string}`} className="text-xs flex items-baseline gap-2 py-0.5">
-                  <span className="w-24 shrink-0">Core {s.coreNum} {s.string}</span>
+                  <span className="w-24 shrink-0">{coreLabel(s.coreNum, s.device)} {s.string}</span>
                   <span className="font-mono tabular-nums">{s.recentEffPct}% / base {s.baselineEffPct}%</span>
                   {/* v0.41.0 — warn-color at the SAME threshold the repair-issue alert fires
                        (repairIssues.ts MPPT drift gate = −3 pp), not −1, so the color can't
@@ -290,7 +295,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
               <div className="text-[11px] uppercase tracking-wider text-muted mb-1">Inverter standby</div>
               {equip.inverterStandby.map((s) => (
                 <div key={s.sn} className="text-xs flex items-baseline gap-2 py-0.5">
-                  <span className="w-24 shrink-0">Core {s.coreNum}</span>
+                  <span className="w-24 shrink-0">{coreLabel(s.coreNum, s.device)}</span>
                   {/* v1.131.1 — a blank row reads as a healthy one. This detector
                        published nothing for its entire life and looked fine doing
                        it, so the empty state now says which empty it is. */}
@@ -450,7 +455,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
             {homePacks(charge.packs).home.filter((p) => p.meanDriftMv != null).slice(0, 10).map((p) => (
               <div key={`${p.sn}-${p.packNum}`} className="bg-panel2/50 border border-line rounded-md p-2 text-xs">
                 <div className="font-semibold flex items-baseline gap-2">
-                  <span>Core {p.coreNum} · Pack {p.packNum}</span>
+                  <span>{coreLabel(p.coreNum, p.device)} · Pack {p.packNum}</span>
                   <span className="text-[10px] text-muted ml-auto">mean drift ±{p.meanDriftMv} mV</span>
                 </div>
                 <div className="grid grid-cols-4 gap-1 mt-1">
@@ -485,7 +490,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {ir.devices.filter((d) => d.recentMilliohms != null).map((d) => (
               <div key={d.sn} className="bg-panel2/50 border border-line rounded-md p-2 text-xs flex items-baseline gap-2">
-                <span className="font-semibold w-20 shrink-0">Core {d.coreNum}</span>
+                <span className="font-semibold w-20 shrink-0">{coreLabel(d.coreNum, d.device)}</span>
                 <span className="font-mono tabular-nums">{d.recentMilliohms} mΩ</span>
                 {/* v1.22.0 (F27) — baseline can be null while recent is set
                     (fewer than 5 pre-recent samples); don't render "base null". */}
@@ -572,7 +577,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
               const tF = p.predictedPeak24hC != null ? Math.round(p.predictedPeak24hC * 1.8 + 32) : null;
               return (
                 <div key={`${p.sn}-${p.packNum}`} className="bg-panel2/50 border border-line rounded-md p-2 text-xs flex items-baseline gap-2">
-                  <span className="font-semibold w-32 shrink-0">Core {p.coreNum} · Pk {p.packNum}</span>
+                  <span className="font-semibold w-32 shrink-0">{coreLabel(p.coreNum, p.device)} · Pk {p.packNum}</span>
                   <span className="font-mono tabular-nums">{tF}°F</span>
                   <span className="text-[10px] text-muted">
                     {p.predictedPeakAtMs ? new Date(p.predictedPeakAtMs).toLocaleString([], { weekday: 'short', hour: 'numeric' }) : ''}

@@ -39,7 +39,8 @@ const MUTANTS = [
     id: 'ii. \u2605\u2605\u2605 the veto only looks at a PROJECTED panel',
     file: GRID,
     // v1.185.0 — the identity census now feeds every panel to the veto.
-    find: "    .filter((d) => d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel'))",
+    // v1.191.0 — the identity test is topology.ts isShp2Product (the same substring test).
+    find: "    .filter((d) => d.projection?.kind === 'shp2' || isShp2Product(d.productName))",
     to: "    .filter((d) => d.projection?.kind === 'shp2') /* MUTANT */",
     why: 'The rehydrated reading sits on a panel with no projection; the veto never sees it.',
   },

@@ -15,9 +15,9 @@ and the endpoint handlers in `server/src/index.ts`.
 
 > **A note on scope vs. the cluster brief.** `deviceLink.ts` is *not* an EVSE↔SHP2
 > circuit mapper — it is the **cloud-wedge-vs-real-outage classifier**. EVSE has no
-> dedicated device-link module; the single home EVSE is handled entirely by the
-> forecast/load engines in `analytics.ts` (a residential charger tops out near
-> ~11.5 kW = 48 A × 240 V), and by the generic projector. Split-phase / paired
+> dedicated device-link module; a home's EVSE is handled entirely by the
+> forecast/load engines in `analytics.ts` (`EV_MAX_LOAD_W`, 11.52 kW = 48 A × 240 V when
+> unset, and `EV_CHARGER_COUNT`), and by the generic projector. Split-phase / paired
 > circuits are an **SHP2** concept, decoded in `project.ts` (`Shp2PairedCircuit`).
 > This document describes what the code actually does.
 
@@ -657,7 +657,7 @@ does not over/under-count the pool, and why a stale slot is **not** subtracted (
 would falsely lower reserve % and false-escalate the floor alarm).
 
 `backupFullCap` is the sum of the sources' `fullCap` — the packs' **nameplate** (6,144 Wh per
-pack; 92,160 Wh at 15 packs) — and does not track pack health. At a 2026-10-11 reading
+pack; 92,160 Wh at 15 packs) — and does not track pack health. At a 2026-10-11 reading on the reference plant
 `backupDischargeRmainBatCap` equalled each source's `batteryPercentage` applied to its `fullCap`,
 exactly: both figures are nameplate-scaled Wh. The packs' own measured full-charge capacity is
 the per-pack `fullCapMah` (94.4 % of nameplate across the home packs on that date;
@@ -732,21 +732,22 @@ restarting the reserve-blind clock.
 
 ### SHP2 membership: home cores vs. spares (`shp2Membership.ts`)
 
-The fleet has **5 DPU cores on the account but only 3 wired into the home SHP2**. The
-other two are bench units that report telemetry but cannot deliver energy to the home bus.
-Which Cores those are comes from the SHP2's own connected-source roster: since the
-2026-08-20 reconfiguration the wired set is Cores 1, 2 and 5 and the bench units are
-Cores 3 and 4 (§12l). Every fleet aggregation must exclude spares.
+An account can hold more Cores than the panel's three source slots: a Core kept off the panel,
+a bench spare for example, reports telemetry but cannot deliver energy to the home bus. Which
+Cores are wired comes from the SHP2's own connected-source roster. Every fleet aggregation must
+exclude spares. (The reference plant's own roster is recorded in
+[the reference plant's notes](../history/reference-plant-notes.md).)
 
 - **`shp2ConnectedDpuSns(devices)`** → `Set<sn>` of connected sources = the SHP2's
   `sources[]` filtered on `isConnected && sn`. Empty when no SHP2 is present.
 - **`isShp2Connected(sn, connected)`** → **fallback semantics**: when `connected` is
   empty (no SHP2 observed / DPU-only setup) returns **true for every SN** (so a
   no-SHP2 user's tiles aren't zeroed). Otherwise membership is exact.
-- **`SPARE_DPU_SNS`** = the static allowlist of bench-spare serials as written (Core 4,
-  Core 5). It is a **floor, not the answer**: a DPU it does not name is never treated as a
-  spare. Since the 2026-08-20 reconfiguration it names a wired home Core (Core 5) and omits
-  the bench unit Core 3 (§12l). So `isBenchSpareSn(sn, lastKnownRoster?)` (v1.121.0) treats
+- **`SPARE_DPU_SNS`** = the static allowlist of bench-spare serials written in the source.
+  `BENCH_SPARE_SNS`, when set, replaces it at every site that reads it (`none` empties it);
+  the literal itself is never edited. It is a **floor, not the answer**: a DPU it does not name
+  is never treated as a spare. A literal goes stale when a plant is rewired, naming a wired
+  Core or missing a bench unit. So `isBenchSpareSn(sn, lastKnownRoster?)` (v1.121.0) treats
   an SN as a spare only when the literal names it AND the durable last-known SHP2 roster
   (`setLastKnownHomeRoster`, persisted by index.ts) does not list it. It can only remove
   spare status, never add it. A spare's
@@ -805,10 +806,6 @@ Cores 3 and 4 (§12l). Every fleet aggregation must exclude spares.
   (`backupTimerGate`, while every home Core reports) reads it alone. `panelLoad` sums every
   panel's circuits (v1.185.0). Guarded with `?? []` on `sources`/`packs`/`circuits` so a
   partial projection can't throw.
-
-Roster since the 2026-08-20 reconfiguration: Cores 1/2/5 wired into the SHP2; Cores 3/4 on
-the bench. `SPARE_DPU_SNS` still names Cores 4 and 5, and the roster-aware predicates above
-correct for it (§12l).
 
 #### Two panels (v1.185.0)
 

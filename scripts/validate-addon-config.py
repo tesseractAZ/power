@@ -20,7 +20,10 @@ on every pull request.
 
 Checks:
   1. both YAML files parse
-  2. every key in config.yaml `options:` has a translation entry, and vice versa
+  2. every key in config.yaml `schema:` has a translation entry, and vice versa
+     (v1.191.0 — schema keys, not options keys: a schema-only optional key has no
+     default but is still a field on the Configuration page, so it needs a label)
+  2b. every `options:` key has a schema entry
   3. every translation entry has a non-empty `name` and `description`
 """
 from __future__ import annotations
@@ -33,7 +36,8 @@ try:
 except ImportError:
     sys.exit("validate-addon-config: PyYAML is required (pip install pyyaml)")
 
-ROOT = Path(__file__).resolve().parent.parent
+# v1.191.0 — an explicit root (first argument) lets a test run this against a fixture tree.
+ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "ecoflow_panel" / "config.yaml"
 TRANS_DIR = ROOT / "ecoflow_panel" / "translations"
 
@@ -59,7 +63,15 @@ def load(path: Path) -> dict:
 def main() -> int:
     cfg = load(CONFIG)
     options = cfg.get("options") or {}
+    schema = cfg.get("schema") or {}
     problems: list[str] = []
+
+    # Every default needs a schema; a schema-only key is allowed when it is optional (`?`).
+    for key in sorted(set(options) - set(schema)):
+        problems.append(f"[config] {key} has an options: default but no schema entry")
+    for key in sorted(set(schema) - set(options)):
+        if not str(schema[key]).strip().endswith("?"):
+            problems.append(f"[config] {key} has a schema but no default; a schema-only key must be optional (end the schema with ?)")
 
     files = sorted(TRANS_DIR.glob("*.yaml"))
     if not files:
@@ -71,8 +83,8 @@ def main() -> int:
         lang = path.stem
         entries = (load(path).get("configuration") or {})
 
-        missing = sorted(set(options) - set(entries))
-        orphan = sorted(set(entries) - set(options))
+        missing = sorted(set(schema) - set(entries))
+        orphan = sorted(set(entries) - set(schema))
         if missing:
             problems.append(
                 f"[{lang}] options with no translation (HA shows the raw KEY as the label): "
@@ -103,7 +115,7 @@ def main() -> int:
 
     langs = ", ".join(f.stem for f in files)
     print(
-        f"validate-addon-config: OK — {len(options)} options, all named and described "
+        f"validate-addon-config: OK — {len(schema)} options ({len(schema) - len(options)} schema-only), all named and described "
         f"in {len(files)} language(s): {langs}"
     )
     return 0

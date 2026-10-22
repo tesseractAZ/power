@@ -30,7 +30,8 @@ const MUTANTS = [
     // `quorumMet` binding when the alarm-critical override was added; the old
     // anchor stopped matching and this harness aborted on its FIRST mutant,
     // silently uncovering all eight.
-    find: '  const quorumMet = starvedCount >= cfg.minStarvedDevices || opts?.alarmCriticalStarved === true;',
+    // v1.191.0 (Z5) — the setting bounded by the account's device count (effectiveQuorum).
+    find: '  const quorumMet = starvedCount >= quorum || opts?.alarmCriticalStarved === true;',
     to: '  const quorumMet = true; /* MUTANT */',
     why: 'One flaky device would trigger session rebuilds — churn on the healthiest fleet.',
   },

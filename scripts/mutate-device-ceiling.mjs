@@ -34,6 +34,8 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const ACT = resolve(SERVER, 'src/nightChargeActuator.ts');
+// v1.191.0 — the reserve write envelope is a hardware fact in hwSpec.ts (nightChargeActuator re-exports it).
+const HWSPEC = resolve(SERVER, 'src/hwSpec.ts');
 
 const SUBSET = ['test/nightChargeActuator.test.ts', 'test/reserveFloorPosture.test.ts'];
 
@@ -61,7 +63,7 @@ const MUTANTS = [
   },
   {
     id: 'iv. ★★ the envelope is widened past what the device accepts',
-    file: ACT,
+    file: HWSPEC,
     find: 'export const RESERVE_WRITE_MAX_PCT = 50;',
     to: 'export const RESERVE_WRITE_MAX_PCT = 90; /* MUTANT */',
     why: 'Proven live on 2026-09-16: the SHP2 takes a 90 write and settles at 50. Asking for more buys nothing and costs two false notifications a night — the 21:30 announcement promises a reserve the panel will not hold, and settingsDrift reads our own clamped write as an EXTERNAL change.',
