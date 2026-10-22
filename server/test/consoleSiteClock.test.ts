@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { consoleClocks, type ConsoleClocks } from './helpers/consoleClockProbe.js';
@@ -16,8 +17,10 @@ import { consoleClocks, type ConsoleClocks } from './helpers/consoleClockProbe.j
  * them: SITE_TIMEZONE=America/New_York on a Phoenix host read three hours behind, and a UTC host
  * with the default Phoenix site seven hours ahead. Identical where the site zone is the host's.
  *
- * The site zone is resolved once at load, so the split cases run in child processes
- * (helpers/consoleClockProbe.ts); the in-process case is judged on the runner's own zones.
+ * The probe also reads the console's other clocks off the screens they are drawn on: the alarm
+ * rows (ALARM), the alarm banner and the status header (CONSOLE). The site zone is resolved once
+ * at load, so the split cases run in child processes (helpers/consoleClockProbe.ts); the
+ * in-process case is judged on the runner's own zones.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -26,7 +29,9 @@ const PROBE = resolve(HERE, 'helpers/consoleClockProbe.ts');
 
 function probe(env: Record<string, string>): Promise<ConsoleClocks> {
   return new Promise((res, rej) => {
-    const childEnv = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', TSX_DISABLE_CACHE: process.env.TSX_DISABLE_CACHE ?? '', ...env };
+    // The listed alarm's onset is looked up in a sidecar that does not exist: its row carries the snapshot's time.
+    const noOnsets = resolve(tmpdir(), 'consoleClockProbe-no-such-dir', 'alert-onset.json');
+    const childEnv = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', TSX_DISABLE_CACHE: process.env.TSX_DISABLE_CACHE ?? '', ALERT_ONSET_PATH: noOnsets, ...env };
     execFile(process.execPath, ['--import', 'tsx', PROBE], { cwd: SERVER, env: childEnv, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) return rej(new Error(`probe failed: ${err.message}\n${stderr}`));
       try { res(JSON.parse(stdout) as ConsoleClocks); } catch (e) { rej(new Error(`probe wrote non-JSON: ${(e as Error).message}\n${stdout.slice(0, 400)}`)); }
@@ -66,20 +71,52 @@ test('the reference install reads 11:30:15 on both screens, as before', async ()
   assert.deepEqual([r.siteHms, r.alm, r.bus], ['11:30:15', '11:30:15', '11:30:15']);
 });
 
-test('in this process: both dividers carry the site clock the console\'s other stamps use', () => {
+test('★★ the alarm rows, the alarm banner and the status header read the site clock (New York site, Phoenix host)', async () => {
+  const r = await runs.nyOnPhoenixHost;
+  assert.equal(r.almRow, '2026-10-22 14:30:15', 'ALARM row: the site\'s 14:30:15, not the host\'s 11:30:15');
+  assert.equal(r.banner, '14:30:15', 'CONSOLE alarm banner: the site\'s 14:30:15');
+  assert.equal(r.header, '2026-10-22 14:30', 'CONSOLE status header: the site\'s 14:30');
+});
+
+test('★★ … and with a UTC host and a Phoenix site; the reference install reads the same', async () => {
+  for (const r of [await runs.phoenixOnUtcHost, await runs.reference]) {
+    assert.equal(r.almRow, '2026-10-22 11:30:15', `ALARM row (host ${r.hostZone}): not the UTC host's 18:30:15`);
+    assert.equal(r.banner, '11:30:15', `CONSOLE alarm banner (host ${r.hostZone})`);
+    assert.equal(r.header, '2026-10-22 11:30', `CONSOLE status header (host ${r.hostZone})`);
+  }
+});
+
+test('in this process: every console clock carries the site clock', () => {
   const r = consoleClocks();
   assert.ok(r.alm != null && r.bus != null, 'both dividers carry a clock');
   assert.equal(r.alm, r.siteHms, `ALARM LIST (site ${r.zone}, host ${r.hostZone})`);
   assert.equal(r.bus, r.siteHms, `MAIN BUS (site ${r.zone}, host ${r.hostZone})`);
+  assert.equal(r.almRow, r.siteStampS, `ALARM row (site ${r.zone}, host ${r.hostZone})`);
+  assert.equal(r.banner, r.siteHms, `CONSOLE alarm banner (site ${r.zone}, host ${r.hostZone})`);
+  assert.equal(r.header, r.siteStamp, `CONSOLE status header (site ${r.zone}, host ${r.hostZone})`);
 });
 
-test('no console source formats a time with the host clock', () => {
+test('no console source calls a host-clock date helper', () => {
+  // siteTime.ts is the console's only clock formatter. Any of these in src/telnet formats or reads a
+  // time on the host's clock (or the host's zone), with or without a locale and options: the
+  // toLocale*/toTime/toDate string forms, Intl.DateTimeFormat, the local get*/set* fields and the
+  // host's UTC offset. (The getUTC* fields are not matched: they read no zone.)
+  const HOST_CLOCK = /\.to(?:Locale(?:Time|Date)?|Time|Date)String\(|Intl\.DateTimeFormat\(|\.get(?:FullYear|Month|Date|Day|Hours|Minutes|Seconds)\(\)|\.set(?:FullYear|Month|Date|Hours|Minutes|Seconds)\(|\.getTimezoneOffset\(/;
+  // The pattern itself catches the forms it names (a pattern that matches nothing passes every tree).
+  for (const bad of [
+    "new Date(t).toTimeString().slice(0, 8)", "new Date(t).toLocaleTimeString('en-US', { hour12: false })",
+    "new Date().toLocaleString([], { hour12: false })", "d.toLocaleDateString()", "new Intl.DateTimeFormat('en-US', { hour: 'numeric' })",
+    "d.getHours()", "d.getFullYear()", "d.setHours(0, 0, 0, 0)", "d.getTimezoneOffset()",
+  ]) assert.ok(HOST_CLOCK.test(bad), `the scan catches ${bad}`);
+  for (const ok of ['fmtSiteHms(ms)', 'fmtSiteStamp(ms, true)', 'new Date(ms).getUTCSeconds()', 'Date.now()', 'new Date(ms).toISOString()']) {
+    assert.ok(!HOST_CLOCK.test(ok), `the scan passes ${ok}`);
+  }
   const telnet = resolve(SERVER, 'src/telnet');
   const files = readdirSync(telnet, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.ts'));
   assert.ok(files.includes('plant/alm.ts') || files.includes('plant\\alm.ts'), 'the walk reaches the plant screens');
   for (const f of files) {
     const s = readFileSync(resolve(telnet, f), 'utf8');
-    assert.ok(!/\.toTimeString\(|\.toDateString\(|\.toLocale(?:Time|Date)?String\(\)/.test(s), `${f} formats no time on the host clock`);
-    assert.ok(!/\.get(?:Hours|Minutes|Seconds|Date|Day)\(\)/.test(s), `${f} reads no host-clock field`);
+    const hit = s.split('\n').findIndex((l) => HOST_CLOCK.test(l));
+    assert.equal(hit, -1, `${f}:${hit + 1} uses a host-clock date helper; format with siteTime.ts`);
   }
 });
