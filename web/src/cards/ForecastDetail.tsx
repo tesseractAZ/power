@@ -6,6 +6,7 @@ import { PredictiveBadge } from '../components/PredictiveBadge';
 import { SectionHeader, Expander } from '../components/sections';
 import { useSite } from '../useSite';
 import { orientationText, benchSpareFlag, noPvDetail } from '../siteFacts';
+import { fmtHour, tsHourIn } from './forecastText';
 
 /**
  * Forecast detail for the Predictive Insights page — shows the full machinery
@@ -16,15 +17,8 @@ import { orientationText, benchSpareFlag, noPvDetail } from '../siteFacts';
 
 const kwh = (wh: number) => `${(wh / 1000).toFixed(1)} kWh`;
 
-function fmtHour(h: number): string {
-  const hr = ((h % 24) + 24) % 24;
-  if (hr === 0) return '12 AM';
-  if (hr === 12) return '12 PM';
-  return hr < 12 ? `${hr} AM` : `${hr - 12} PM`;
-}
-function tsHour(ts: number): string {
-  return fmtHour(new Date(ts).getHours());
-}
+// v1.191.1 — the hour labels (fmtHour, tsHourIn) live in forecastText.ts: an instant is labelled in the
+// site zone the payload names, the zone of the learned table's site hours, never the browser's.
 
 /** Hour-of-day with the strongest GATED (bright, sampled) learned response coefficient. */
 function peakResponse(m: SolarResponseModel): HourResponse | null {
@@ -104,6 +98,8 @@ export function ForecastDetail() {
 /* ── Card 1 — cloud prediction & hourly projection ── */
 
 function ForecastCard({ fc }: { fc: DayForecast }) {
+  // v1.191.1 — the site zone the server computed these hours in (GET /api/forecast `siteTimeZone`).
+  const zone = fc.siteTimeZone;
   const loadWh = fc.hours.reduce((s, h) => s + h.forecastLoadW, 0);
   // v1.177.0 — say what this load includes. It carries the predicted EV-charging layer; the
   // Dashboard's runway strips it (the alarm path is evidence-based), so the two "load over
@@ -119,8 +115,8 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
     fc.minProjectedSoc == null
       ? 'Battery SoC projection unavailable — not enough history yet.'
       : fc.minProjectedSoc < fc.reserveSoc
-        ? `Consumption outpaces solar — the backup pool is projected to fall to ${fc.minProjectedSoc}%, below the ${fc.reserveSoc}% reserve floor${fc.minProjectedSocTs != null ? `, around ${tsHour(fc.minProjectedSocTs)}` : ''}.`
-        : `The backup pool stays above the ${fc.reserveSoc}% reserve floor across the 24-hour window — projected low of ${fc.minProjectedSoc}%${fc.minProjectedSocTs != null ? ` around ${tsHour(fc.minProjectedSocTs)}` : ''}.`;
+        ? `Consumption outpaces solar — the backup pool is projected to fall to ${fc.minProjectedSoc}%, below the ${fc.reserveSoc}% reserve floor${fc.minProjectedSocTs != null ? `, around ${tsHourIn(fc.minProjectedSocTs, zone)}` : ''}.`
+        : `The backup pool stays above the ${fc.reserveSoc}% reserve floor across the 24-hour window — projected low of ${fc.minProjectedSoc}%${fc.minProjectedSocTs != null ? ` around ${tsHourIn(fc.minProjectedSocTs, zone)}` : ''}.`;
   return (
     <div className="card">
       <SectionHeader
@@ -157,7 +153,7 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
         <Tile
           label="Projected low SoC"
           value={fc.minProjectedSoc != null ? `${fc.minProjectedSoc}%` : '—'}
-          sub={fc.minProjectedSocTs != null ? `at ${tsHour(fc.minProjectedSocTs)}${evBeforeLowWh > 0 ? ' · incl. predicted EV' : ''}` : undefined}
+          sub={fc.minProjectedSocTs != null ? `at ${tsHourIn(fc.minProjectedSocTs, zone)}${evBeforeLowWh > 0 ? ' · incl. predicted EV' : ''}` : undefined}
         />
         <Tile label="History depth" value={`${fc.historyDays} days`} sub={`reserve floor ${fc.reserveSoc}%`} />
       </div>
@@ -184,7 +180,7 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
             </thead>
             <tbody>
               {fc.hours.map((h) => (
-                <HourRow key={h.ts} h={h} />
+                <HourRow key={h.ts} h={h} zone={zone} />
               ))}
             </tbody>
           </table>
@@ -194,10 +190,10 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
   );
 }
 
-function HourRow({ h }: { h: ForecastHour }) {
+function HourRow({ h, zone }: { h: ForecastHour; zone: string | undefined }) {
   return (
     <tr className="border-t border-line/50">
-      <td className="py-1 pr-4 text-ink font-medium">{tsHour(h.ts)}</td>
+      <td className="py-1 pr-4 text-ink font-medium">{tsHourIn(h.ts, zone)}</td>
       <td className="py-1 pr-4">{h.cloudCoverPct != null ? `${Math.round(h.cloudCoverPct)}%` : '—'}</td>
       <td className="py-1 pr-4">{h.ghiWm2 != null ? `${h.ghiWm2} W/m²` : '—'}</td>
       <td className="py-1 pr-4 font-semibold text-ink">{fmtW(h.forecastPvW)}</td>

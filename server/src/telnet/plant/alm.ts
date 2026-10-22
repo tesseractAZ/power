@@ -16,7 +16,7 @@ import type { PlantData, PlantView } from './types.js';
 // v0.11.0 — derive the 4-tier ISA-18.2 / IEC 62682 alarm priority for display.
 import { priorityOf, priorityMeta, type AlarmPriority } from '../../alertPriority.js';
 import { getAlertOnset } from '../../alertOnset.js';
-import { fmtSiteStamp } from '../../siteTime.js';
+import { fmtSiteHms, fmtSiteStamp } from '../../siteTime.js';
 
 /** ANSI colourizer for an ISA priority. No orange in the 16-colour palette, so
  *  High shares Critical's bright-red; Medium = bright-yellow; Low = cyan. */
@@ -130,7 +130,8 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   // frame (the anti-flicker hash then writes nothing), so a dead link and a
   // healthy quiet screen looked the same. The wall-clock in the banner gives
   // every ALM frame a 1 Hz liveness tick.
-  out.push(divider(`ALARM LIST — ${alerts.length} active  ·  ${new Date(stamp).toTimeString().slice(0, 8)}`, W));
+  // v1.191.1 — on the site clock (fmtSiteHms), as the rows under it are; it read the host's.
+  out.push(divider(`ALARM LIST — ${alerts.length} active  ·  ${fmtSiteHms(stamp)}`, W));
   out.push(padEnd(
     '  ' + prioColor('critical')(`CRIT ${pc.critical}`) + c.grey('  ·  ') +
     prioColor('high')(`HIGH ${pc.high}`) + c.grey('  ·  ') +

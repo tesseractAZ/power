@@ -20,6 +20,7 @@ import {
 } from '../src/analytics.js';
 import { setWeatherCacheForTesting, clearWeatherTestOverride, type WeatherHour } from '../src/weather.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
+import { addDaysYmd, siteTimeZone, siteYmd, zonedWallTimeMs } from '../src/siteTime.js';
 import type { Recorder } from '../src/recorder.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
@@ -168,8 +169,10 @@ function setSkillWeather(cacheGhiAtHour: number | null): void {
   setWeatherCacheForTesting({ fetchedAt: Date.now(), lat: 0, lon: 0, hours });
 }
 
-const yesterdayPredicted = async (rec: Recorder, basis?: 'first-write' | 'realized'): Promise<number> => {
-  const fc = skillForecast(solarModelAt(new Date(skillHourStart()).getHours(), 10));
+const yesterdayPredicted = async (
+  rec: Recorder, basis?: 'first-write' | 'realized',
+  fc: DayForecast = skillForecast(solarModelAt(new Date(skillHourStart()).getHours(), 10)),
+): Promise<number> => {
   const r = basis == null
     ? await computeForecastSkill(skillDevices, rec, fc, 7)
     : await computeForecastSkill(skillDevices, rec, fc, 7, basis);
@@ -200,10 +203,14 @@ test('★★ the skill cache is keyed by basis — a realized report is never se
   // window. A window-only key served whichever computed first to the other for the 1 h TTL.
   setSkillWeather(null);
   const rec = skillRecorder({ firstWrite: 300, realized: 600 });
-  const realized = await yesterdayPredicted(rec, 'realized');
-  const firstWrite = await yesterdayPredicted(rec, 'first-write'); // NO cache reset in between
+  // ONE forecast for every call: a hit is served only for the forecast it was scored against
+  // (v1.186.5, forecastTs === generatedAt), so a fresh forecast per call (generatedAt: Date.now())
+  // missed the cache whatever its key was, and a window-only key passed this test.
+  const fc = skillForecast(solarModelAt(new Date(skillHourStart()).getHours(), 10));
+  const realized = await yesterdayPredicted(rec, 'realized', fc);
+  const firstWrite = await yesterdayPredicted(rec, 'first-write', fc); // NO cache reset in between
   assert.deepEqual([realized, firstWrite], [6.0, 3.0]);
-  const again = await computeForecastSkill(skillDevices, rec, skillForecast(solarModelAt(new Date(skillHourStart()).getHours(), 10)), 7);
+  const again = await computeForecastSkill(skillDevices, rec, fc, 7);
   assert.equal(again.ghiBasis, 'first-write', 'the default reads the first-write slot');
   assert.equal(again.days[again.days.length - 1].predictedKwh, 3.0);
 });
@@ -324,10 +331,13 @@ test('★ solar-model training pairs PV with realized irradiance on days the liv
   const ghiR: Row[] = [];
   const pv: Row[] = [];
   for (let d = 8; d <= 20; d++) {
-    const at = new Date(now - d * DAY); at.setHours(12, 0, 0, 0);
-    ghiFw.push({ ts: at.getTime(), value: 300 });
-    ghiR.push({ ts: at.getTime(), value: 600 });
-    pv.push({ ts: at.getTime(), value: 6000 });
+    // The UTC hour holding local noon's site hour, as the recorder's hourly rows are keyed (the
+    // model labels each UTC-hour bucket with the site hour of its start). Local 12:00 itself is
+    // half past a UTC hour on a :30 zone, a bucket the model labels 11.
+    const at = Math.ceil(zonedWallTimeMs(addDaysYmd(siteYmd(now), -d), 12, 0, siteTimeZone()) / H) * H;
+    ghiFw.push({ ts: at, value: 300 });
+    ghiR.push({ ts: at, value: 600 });
+    pv.push({ ts: at, value: 6000 });
   }
   const rec = makeRecorderStub({
     query: (qsn, metric) => {

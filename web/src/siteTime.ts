@@ -87,6 +87,35 @@ export function fmtHHMMIn(ms: number | null | undefined, zone: string | null | u
   }
 }
 
+/** v1.191.1 — hour of the day (0–23) of an instant in `zone`; null without a zone, or for an invalid
+ *  instant or zone. */
+export function zonedHourIn(ms: number | null | undefined, zone: string | null | undefined): number | null {
+  if (ms == null || !Number.isFinite(ms) || !zone) return null;
+  try {
+    const h = zonedParts(ms, zone).hour;
+    return Number.isFinite(h) ? h : null;
+  } catch {
+    return null;
+  }
+}
+
+/** v1.191.1 — an instant as the browser's own locale writes it (the caller's fields, the default
+ *  locale), on the clock of `zone`: a label keeps the text it had where the browser is in the site
+ *  zone and reads the site's time everywhere else. null without a zone, or for an invalid instant
+ *  or zone. The one exception to the `en-US` rule above, so the reference text does not change. */
+export function fmtLocaleIn(
+  ms: number | null | undefined,
+  zone: string | null | undefined,
+  fields: Intl.DateTimeFormatOptions,
+): string | null {
+  if (ms == null || !Number.isFinite(ms) || !zone) return null;
+  try {
+    return new Date(ms).toLocaleString([], { ...fields, timeZone: zone });
+  } catch {
+    return null;
+  }
+}
+
 /** Whole calendar days from `fromYmd` to `toYmd` (positive when `toYmd` is later); NaN if malformed. */
 export function calendarDaysBetween(fromYmd: string, toYmd: string): number {
   const at = (ymd: string): number => {

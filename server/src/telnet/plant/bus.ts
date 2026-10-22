@@ -10,6 +10,7 @@ import { c, padEnd, padStart, truncate, BOX } from '../ansi.js';
 import { divider, gauge, stateGlyph } from './scada.js';
 import { getShp2, circuitLoadState, deviceQuality, fmtW, fmtAmp } from './data.js';
 import { MAINS_V } from '../../hwSpec.js';
+import { fmtSiteHms } from '../../siteTime.js';
 import type { PlantData, PlantView } from './types.js';
 import type { AlarmState } from './scada.js';
 
@@ -35,7 +36,8 @@ export function renderBus(view: PlantView, data: PlantData): string[] {
   // claim. Every number under this header comes from the SHP2 projection; if
   // that projection is stale the header must say so.
   const qualTag = qual === 'good' ? '' : `  ·  ${qual === 'stale' ? c.yellow('STALE') : c.red('NO DATA')}`;
-  out.push(divider(`MAIN BUS — SHP2 ${shp2.sn}  ·  ${shp2.deviceName}  ·  ${new Date(data.snap.generatedAt ?? Date.now()).toTimeString().slice(0, 8)}${qualTag}`, W));
+  // v1.191.1 — the tick is on the site clock (fmtSiteHms), the console's other stamps' clock; it read the host's.
+  out.push(divider(`MAIN BUS — SHP2 ${shp2.sn}  ·  ${shp2.deviceName}  ·  ${fmtSiteHms(data.snap.generatedAt ?? Date.now())}${qualTag}`, W));
   const totalLoad = p.circuits.reduce((s, ch) => s + (ch.watts ?? 0), 0);
   const reserveSoc = p.backupReserveSoc ?? 0;
   const poolSoc = p.backupBatPercent ?? 0;

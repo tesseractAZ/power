@@ -345,7 +345,7 @@ negative-cache TTL.
 
 #### Endpoint
 
-`GET /api/forecast` → `analytics.report('forecast')`, HTTP cache 60 s.
+`GET /api/forecast` → `analytics.report('forecast')`, HTTP cache 60 s. The route adds `siteTimeZone` (v1.191.1), the zone the hours were computed in; the web labels each hour in it, never in the browser's zone.
 
 ---
 

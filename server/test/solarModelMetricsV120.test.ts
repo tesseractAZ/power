@@ -33,8 +33,9 @@ function series(
 ) {
   const pvByEpoch = new Map<number, number>();
   const ghiByEpoch = new Map<number, number>();
-  // Anchor to a UTC-midnight-aligned epoch so hour-of-day mapping is exact
-  // under the local timezone used by buildSolarResponse (new Date().getHours()).
+  // Anchor to a UTC-midnight-aligned epoch so hour-of-day mapping is exact.
+  // buildSolarResponse labels hours with siteHour; this file sets the site zone to
+  // the host's (siteZoneIsHostZone), so the host getHours() below agrees with it.
   const baseEpoch = Math.floor(1_790_000_000_000 / HOUR_MS / DAY_HOURS) * DAY_HOURS;
   for (let d = 0; d < days; d++) {
     for (const h of hours) {

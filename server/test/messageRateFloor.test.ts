@@ -11,8 +11,9 @@ import { RateFloorTracker, isFlatProfile, type RateFloorConfig } from '../src/me
  * v1.66.0 — extended for the diurnal rewrite. The legacy tests below pin the GLOBAL
  * fallback path (minHourSamples is set unreachably high so hour buckets never mature),
  * which is what a cold-started device uses. The new tests pin the hour-of-day path and
- * both dwell edges. Timestamps are built with `new Date(y, m, d, HOUR, ...)` — LOCAL
- * time construction — so `getHours()` returns the intended hour in any CI timezone.
+ * both dwell edges. Timestamps are built with `new Date(y, m, d, HOUR, ...)` on the host
+ * clock; the tracker buckets by the site hour (siteHour), which this file sets to the host's
+ * zone (siteZoneIsHostZone, the first import), so each lands in HOUR's bucket in any CI timezone.
  */
 
 const CFG: RateFloorConfig = {

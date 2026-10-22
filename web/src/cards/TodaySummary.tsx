@@ -3,7 +3,7 @@ import { fmtWh } from '../format';
 import { usePolled, useNow } from '../usePolled';
 import { pollStale, dayWindowExpired } from '../freshness';
 import { StaleNote } from '../components/StaleNote';
-import { todayNotes, batterySub, type TodayBridged } from './todayText';
+import { todayNotes, batterySub, sinceLabel, type TodayBridged } from './todayText';
 
 const TODAY_POLL_MS = 60_000;
 
@@ -20,6 +20,9 @@ interface SummaryResp {
   untilMs: number;
   /** v1.176.0 — the local midnight that ends this payload's day (server clock). */
   dayEndMs?: number;
+  /** v1.191.1 — the site zone the server computed the day in (siteTime.ts); the "since" time is
+   *  written in it, never the browser's zone. Absent from an older server: no time shown. */
+  siteTimeZone?: string;
   fleet: {
     pvWh: number;
     acOutWh: number;
@@ -57,6 +60,8 @@ export const TodaySummary = memo(function TodaySummary() {
   const panelUnmeasured = data?.fleet.panelLoadCoverage === 0;
   // v1.190.2 — a figure with a part metered at the panel (a dark Core, bridged) says so.
   const notes = todayNotes(data?.fleet.bridged);
+  // v1.191.1 — "since" the site's midnight, on the site clock (todayText.ts sinceLabel).
+  const since = data ? sinceLabel(data.sinceMs, data.siteTimeZone) : null;
   return (
     <div className="card col-span-full">
       <div className="card-title flex items-center justify-between">
@@ -65,7 +70,7 @@ export const TodaySummary = memo(function TodaySummary() {
           <StaleNote lastOkAt={polled.lastOkAt} nowMs={now} />
         ) : (
           <span className="text-[10px] text-muted normal-case tracking-normal">
-            {data ? `${(coverage * 100).toFixed(0)}% measured · since ${new Date(data.sinceMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '—'}
+            {data ? `${(coverage * 100).toFixed(0)}% measured${since ? ` · ${since}` : ''}` : '—'}
           </span>
         )}
       </div>

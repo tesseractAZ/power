@@ -17,7 +17,7 @@ import {
 } from '../src/analytics.js';
 import { setWeatherCacheForTesting, clearWeatherTestOverride, type WeatherForecast, type WeatherHour } from '../src/weather.js';
 import { resetCurtailmentFreezeForTesting, setCurtailmentMembershipHistoryForTesting } from '../src/curtailmentFreeze.js';
-import { startOfLocalDayMs } from '../src/aggregator.js';
+import { siteHour, siteTimeZone, siteYmd, zonedWallTimeMs } from '../src/siteTime.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { Recorder } from '../src/recorder.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
@@ -222,16 +222,20 @@ test('★★★ the curtailment cap is the configured site\'s clear-sky noon cei
 });
 
 /* The curtailment estimator's no-weather hour: one Core at SoC 99 making 2000 W into a 1800 W load
- * with μ = 10 W per W/m². With the hour's radiation missing the estimate is μ × the cap. */
-const at = (day: number, hour = 0) => new Date(2026, 0, day, hour, 0, 0, 0).getTime();
+ * with μ = 10 W per W/m². With the hour's radiation missing the estimate is μ × the cap.
+ * The fixture is on the SITE clock, as computeCurtailment walks site hours: `at` is a site wall
+ * time and the stubs key on the site date and hour, so "now" is site noon and the surplus hour is
+ * site 11:00 whatever the host's offset (a half-hour host offset put both half an hour into a
+ * site hour and counted a different, half-elapsed hour). */
+const at = (day: number, hour = 0) => zonedWallTimeMs(`2026-01-${String(day).padStart(2, '0')}`, hour, 0, siteTimeZone());
+const isSurplusHour = (since: number) => siteYmd(since) === '2026-01-20' && siteHour(since) === 11;
 const curtailRecorder: Recorder = makeRecorderStub({
   queryMulti: (_sn, metrics, since) => new Map(metrics.map((m) => {
-    const h = new Date(since).getHours();
-    if (!(new Date(since).getDate() === 20 && h === 11)) return [m, []];
+    if (!isSurplusHour(since)) return [m, []];
     const v = m === 'soc' ? 99 : m === 'chg_max_soc' ? 100 : m === 'pv_total' ? 2000 : 0;
     return [m, [{ ts: since, value: v }]];
   })),
-  query: (_sn, metric, since) => (metric === 'panel_load' && new Date(since).getDate() === 20 && new Date(since).getHours() === 11 ? [{ ts: since, value: 1800 }] : []),
+  query: (_sn, metric, since) => (metric === 'panel_load' && isSurplusHour(since) ? [{ ts: since, value: 1800 }] : []),
 });
 function curtailDevices(): Record<string, DeviceSnapshot> {
   const dpu = {
@@ -256,12 +260,13 @@ function bayes(mu: number): BayesianSolarModel {
     totalSamples: 240, medianStdev: 0.5, agreementWithOls: 1,
   };
 }
-/** Weather for Jan 11..23 with the radiation of 11:00 on the 20th missing (the heuristic hour). */
+/** Weather for site Jan 11..23 with the radiation of site 11:00 on the 20th missing (the heuristic
+ *  hour). Labels sit on the UTC hour, as Open-Meteo's do; the daylight band is in site hours. */
 function weatherMissingAt11(fetchedAt: number): WeatherForecast {
   const hours: WeatherHour[] = [];
-  for (let ts = startOfLocalDayMs(new Date(2026, 0, 11, 12)); ts < startOfLocalDayMs(new Date(2026, 0, 24, 12)); ts += HOUR) {
+  for (let ts = Math.floor(at(11) / HOUR) * HOUR; ts < at(24); ts += HOUR) {
     const missing = Math.floor(ts / HOUR) === Math.floor(at(20, 12) / HOUR); // labelled H+1 covers [H, H+1)
-    const h = new Date(ts).getHours();
+    const h = siteHour(ts);
     hours.push({ ts, cloudCoverPct: 0, radiationWm2: missing ? 0 : (h >= 8 && h <= 16 ? 700 : 0), ...(missing ? { radiationMissing: true } : {}), tempC: 20, ensembleSources: 1 });
   }
   return { fetchedAt, lat: 0, lon: 0, hours };
@@ -283,6 +288,8 @@ test('★★★ the no-weather curtailment hour: μ × 900 on the legacy site, �
   delete process.env.CURTAILMENT_DAYS_PATH;
   delete process.env.SUPERVISOR_TOKEN;
   const legacy = await withEnv({}, curtailToday);
+  // one hour, the heuristic one, booked at site 11:00
+  assert.deepEqual(legacy.todayHours.map((r) => [r.hour, r.weatherVerified]), [[11, false]]);
   // expected 10 × 900 = 9000 W against 2000 W made: a 7000 W surplus for the hour
   assert.equal(legacy.todayKwh, 7);
   const north = await withEnv({ PV_ARRAY_KWP: '5', FORECAST_LAT: '60', FORECAST_LON: '10.75' }, curtailToday);
