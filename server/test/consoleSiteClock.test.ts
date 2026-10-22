@@ -13,9 +13,10 @@ import { consoleClocks, type ConsoleClocks } from './helpers/consoleClockProbe.j
  * The ALARM LIST and MAIN BUS dividers of the Plant console (SSH and the browser /console, one
  * renderer) printed `new Date(…).toTimeString().slice(0, 8)`: the host's clock. v1.191.0 moved the
  * console's other stamps (the alarm rows, the annunciator banner, the CONSOLE header) to the site
- * zone, so wherever the site zone is not the host's the two dividers disagreed with the rows under
- * them: SITE_TIMEZONE=America/New_York on a Phoenix host read three hours behind, and a UTC host
- * with the default Phoenix site seven hours ahead. Identical where the site zone is the host's.
+ * zone, so wherever the site zone is not the host's the two dividers disagreed with those stamps
+ * (the BUS screen has no timed rows of its own): SITE_TIMEZONE=America/New_York on a Phoenix host
+ * read three hours behind, and a UTC host with the default Phoenix site seven hours ahead.
+ * Identical where the site zone is the host's.
  *
  * The probe also reads the console's other clocks off the screens they are drawn on: the alarm
  * rows (ALARM), the alarm banner and the status header (CONSOLE). The site zone is resolved once
@@ -99,16 +100,22 @@ test('in this process: every console clock carries the site clock', () => {
 test('no console source calls a host-clock date helper', () => {
   // siteTime.ts is the console's only clock formatter. Any of these in src/telnet formats or reads a
   // time on the host's clock (or the host's zone), with or without a locale and options: the
-  // toLocale*/toTime/toDate string forms, Intl.DateTimeFormat, the local get*/set* fields and the
-  // host's UTC offset. (The getUTC* fields are not matched: they read no zone.)
-  const HOST_CLOCK = /\.to(?:Locale(?:Time|Date)?|Time|Date)String\(|Intl\.DateTimeFormat\(|\.get(?:FullYear|Month|Date|Day|Hours|Minutes|Seconds)\(\)|\.set(?:FullYear|Month|Date|Hours|Minutes|Seconds)\(|\.getTimezoneOffset\(/;
+  // toLocale*/toTime/toDate string forms, Intl.DateTimeFormat, the local get*/set* fields, the
+  // host's UTC offset, and a Date built from local fields (new Date(y, m, …), read in the host's
+  // zone). (The getUTC* fields, Date.UTC and new Date(ms) are not matched: they read no zone.)
+  const HOST_CLOCK = /\.to(?:Locale(?:Time|Date)?|Time|Date)String\(|Intl\.DateTimeFormat\(|\.get(?:FullYear|Year|Month|Date|Day|Hours|Minutes|Seconds|Milliseconds)\(\)|\.set(?:FullYear|Year|Month|Date|Hours|Minutes|Seconds|Milliseconds)\(|\.getTimezoneOffset\(|new Date\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*,/;
   // The pattern itself catches the forms it names (a pattern that matches nothing passes every tree).
   for (const bad of [
     "new Date(t).toTimeString().slice(0, 8)", "new Date(t).toLocaleTimeString('en-US', { hour12: false })",
-    "new Date().toLocaleString([], { hour12: false })", "d.toLocaleDateString()", "new Intl.DateTimeFormat('en-US', { hour: 'numeric' })",
-    "d.getHours()", "d.getFullYear()", "d.setHours(0, 0, 0, 0)", "d.getTimezoneOffset()",
+    "new Date().toLocaleString([], { hour12: false })", "d.toLocaleDateString()", "d.toDateString()", "new Intl.DateTimeFormat('en-US', { hour: 'numeric' })",
+    "d.getHours()", "d.getFullYear()", "d.getDay()", "d.getMilliseconds()", "d.setHours(0, 0, 0, 0)", "d.setDate(1)", "d.getTimezoneOffset()",
+    "new Date(y, m, d)", "new Date(2026, 9, 22, 0, 0, 0)", "new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())",
+    "new Date(Number(s.slice(0, 4)), 0, 1)",
   ]) assert.ok(HOST_CLOCK.test(bad), `the scan catches ${bad}`);
-  for (const ok of ['fmtSiteHms(ms)', 'fmtSiteStamp(ms, true)', 'new Date(ms).getUTCSeconds()', 'Date.now()', 'new Date(ms).toISOString()']) {
+  for (const ok of [
+    'fmtSiteHms(ms)', 'fmtSiteStamp(ms, true)', 'new Date(ms).getUTCSeconds()', 'Date.now()', 'new Date(ms).toISOString()',
+    'new Date(Date.UTC(2026, 9, 22))', 'new Date(Math.max(a, b))', 'new Date(Math.max(f(a), g(b)))', 'new Date(data.snap.generatedAt ?? Date.now())',
+  ]) {
     assert.ok(!HOST_CLOCK.test(ok), `the scan passes ${ok}`);
   }
   const telnet = resolve(SERVER, 'src/telnet');
