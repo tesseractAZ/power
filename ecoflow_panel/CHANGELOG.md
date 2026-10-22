@@ -1,3 +1,21 @@
+## 1.191.1
+
+### The console's two liveness clocks and the dashboard's Today and forecast times read the site clock
+
+**Console**
+
+- The 1 Hz clock in the ALARM LIST divider (ALARM screen) and in the MAIN BUS divider (BUS screen) is written in the site zone, the zone of the console's other stamps: the status header, the alarm banner and the alarm rows. Both read the host's clock, so with `SITE_TIMEZONE` set to another zone than the container's, or a container without `TZ` on the default zone, the two dividers disagreed with the rows under them by the difference (three hours behind for a New York site on a Phoenix host, seven hours ahead on a UTC host). The SSH console and the browser console share the screens. The `HH:MM:SS` form is unchanged.
+
+**Dashboard**
+
+- The Today card's "since" time is written in the site zone: the card's day starts at the site's midnight, but the time was formatted in the browser's zone, so a browser elsewhere read "since 03:00 AM" or "since 07:00 AM" over the site's day. `/api/summary/today` now carries `siteTimeZone`, as `/api/night-charge/status` does.
+- The Solar page's day-ahead forecast labels each hourly projection row, the projected-low tile and the runtime note with the site hour, the hour of the learned response table beside it and of the server's own forecast warning; it read the browser's clock. The Dashboard's 24-hour forecast card writes its projected-low time, axis and tooltip in the site zone too. `/api/forecast` now carries `siteTimeZone`.
+- The text keeps the browser's own locale and form, so a browser in the site zone reads exactly what it did. Without a zone (a server older than the page) no time is shown rather than the browser's.
+
+**Documentation**
+
+- The user-interface reference describes the console's clocks, the Today card's "since" time and the forecast cards' hour labels; the solar-forecast reference names the field `/api/forecast` adds.
+
 ## 1.191.0
 
 ### The site clock, the tariff, the PV array, the devices and the plant limits are options; unset keeps today's behaviour
