@@ -20,6 +20,7 @@ import {
 } from '../src/analytics.js';
 import { setWeatherCacheForTesting, clearWeatherTestOverride, type WeatherHour } from '../src/weather.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
+import { addDaysYmd, siteTimeZone, siteYmd, zonedWallTimeMs } from '../src/siteTime.js';
 import type { Recorder } from '../src/recorder.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
@@ -324,10 +325,13 @@ test('★ solar-model training pairs PV with realized irradiance on days the liv
   const ghiR: Row[] = [];
   const pv: Row[] = [];
   for (let d = 8; d <= 20; d++) {
-    const at = new Date(now - d * DAY); at.setHours(12, 0, 0, 0);
-    ghiFw.push({ ts: at.getTime(), value: 300 });
-    ghiR.push({ ts: at.getTime(), value: 600 });
-    pv.push({ ts: at.getTime(), value: 6000 });
+    // The UTC hour holding local noon's site hour, as the recorder's hourly rows are keyed (the
+    // model labels each UTC-hour bucket with the site hour of its start). Local 12:00 itself is
+    // half past a UTC hour on a :30 zone, a bucket the model labels 11.
+    const at = Math.ceil(zonedWallTimeMs(addDaysYmd(siteYmd(now), -d), 12, 0, siteTimeZone()) / H) * H;
+    ghiFw.push({ ts: at, value: 300 });
+    ghiR.push({ ts: at, value: 600 });
+    pv.push({ ts: at, value: 6000 });
   }
   const rec = makeRecorderStub({
     query: (qsn, metric) => {
