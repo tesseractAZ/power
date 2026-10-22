@@ -784,9 +784,10 @@ test('recommendDispatch — REGRESSION GUARD v0.9.59: action set includes the ne
     // the rt-efficiency loss + cycling cost combined.
     cyclingCostUsdPerKwh: 0.05,
     reserveDipPenaltyUsdPerKwh: 1.0,
-    // v0.9.67 — pin the wall-clock to today at 00:00 local. Both the test
-    // and the planner read getHours() in the runtime TZ, so this anchors
-    // startHour=0 in any TZ. Empirically, this is the startHour value
+    // v0.9.67 — pin the wall-clock to today at 00:00 local. The test reads
+    // the host clock (setHours) and the planner the site hour, which this file
+    // sets to the host's zone (siteZoneIsHostZone), so this anchors startHour=0
+    // in any TZ. Empirically, this is the startHour value
     // that produces `chargeFromGrid` cleanly in the DP — on-peak (hours
     // 15-19) maps to DP-hours 15-19, with 15 hours of off-peak ramp
     // before it (the planner's full forward window for arbitrage). Other
