@@ -12,6 +12,7 @@ import {
   type SolarResponseModel,
 } from '../src/analytics.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
+import { siteHour } from '../src/siteTime.js';
 import {
   setWeatherCacheForTesting,
   clearWeatherTestOverride,
@@ -449,7 +450,11 @@ test('computeClipping — a cloud-wedged connected Core is RESTORED into observe
   // longer flakes in the first ~30 min after LOCAL midnight (when NO hour has elapsed yet).
   const now = todayStart + 12 * HOUR;
   // Choose an elapsed hour to assert on (hour 0 is elapsed under the pinned mid-day clock).
-  const targetHod = new Date(todayStart).getHours(); // local hour-of-day of today's hour 0 slot
+  // computeClipping labels each perHour row with the SITE hour (siteHour(hourStart)), and
+  // todayStart is the site's midnight, so the target is site hour 0 — never the host clock's
+  // hour at that instant, which is 7 on a UTC host with a Phoenix site and 12 or later on a
+  // host far ahead of the site (no row would carry it once `now` stops at site noon).
+  const targetHod = siteHour(todayStart);
   const A_W = 4000;
   const B_W = 5000;
   // Recorder: A and B each return a constant pv_total across today's elapsed hours.
@@ -491,6 +496,8 @@ test('computeClipping — a cloud-wedged connected Core is RESTORED into observe
 
   // arrayPeak comes from the RESTORED model → covers A+B, not the deflated A-only model.
   assert.equal(c.arrayPeakW, ceilingW, 'arrayPeak must use the restored (full-fleet) solar model');
+  // The first elapsed slot starts at todayStart and carries that instant's site hour.
+  assert.equal(c.perHour[0]?.hour, targetHod, 'perHour rows are labelled with the site hour');
   const row = c.perHour.find((r) => r.hour === targetHod);
   assert.ok(row, 'the target elapsed hour must appear in perHour');
   // observedW must SUM A + B (both connected sources), not just the present Core A.
