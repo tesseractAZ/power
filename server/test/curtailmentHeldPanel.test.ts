@@ -10,6 +10,10 @@
  *
  * Driven through a real SnapshotStore and createRecorder (its freshness gate), then
  * computeCurtailment over the recorder, with fake serials. Control: the same hour with the panel live.
+ *
+ * The fixture is on the SITE clock (zonedWallTimeMs / siteHour), as computeCurtailment walks site
+ * hours: on a host-clock fixture a host/site split moved the held hour off site hour 11, and both
+ * negative checks passed whatever the code did.
  */
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,12 +33,14 @@ const { SnapshotStore } = await import('../src/snapshot.js');
 const { computeCurtailment, resetForecastCachesForTesting, setBayesianModelForTesting } = await import('../src/analytics.js');
 const { setWeatherCacheForTesting, clearWeatherTestOverride } = await import('../src/weather.js');
 const { resetCurtailmentFreezeForTesting, setCurtailmentMembershipHistoryForTesting } = await import('../src/curtailmentFreeze.js');
+const { siteHour, siteTimeZone, zonedWallTimeMs } = await import('../src/siteTime.js');
 
 const MIN = 60_000;
 const H = 60 * MIN;
 const CORE = 'COREXXX00XXX0001';
 const PANEL = 'PANEXXX00XXX0001';
-const at = (h: number, m = 0) => new Date(2026, 0, 20, h, m, 0, 0).getTime();
+/** A site wall time on 2026-01-20. */
+const at = (h: number, m = 0) => zonedWallTimeMs('2026-01-20', h, m, siteTimeZone());
 
 const listItem = (sn: string, online: boolean) => ({
   sn, deviceName: sn === PANEL ? 'Smart Home Panel 2' : 'Core 1',
@@ -75,12 +81,12 @@ const bayes = (mu: number) => ({
   hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, posteriorMean: mu, posteriorStdev: 0.5, ci95Low: mu - 1, ci95High: mu + 1, samples: 10 })),
   totalSamples: 240, medianStdev: 0.5, agreementWithOls: 1,
 });
-/** A clear day: 700 W/m² measured from 08:00 to 16:00. */
+/** A clear day: 700 W/m² measured from site 08:00 to 16:00 (labels on the UTC hour, as Open-Meteo's). */
 function weather(fetchedAt: number) {
   const hours: any[] = [];
-  const d0 = new Date(2026, 0, 19, 0).getTime();
+  const d0 = Math.floor(zonedWallTimeMs('2026-01-19', 0, 0, siteTimeZone()) / H) * H;
   for (let ts = d0; ts < d0 + 3 * 24 * H; ts += H) {
-    const h = new Date(ts).getHours();
+    const h = siteHour(ts);
     hours.push({ ts, cloudCoverPct: 0, radiationWm2: h >= 8 && h <= 16 ? 700 : 0, tempC: 20, ensembleSources: 1 });
   }
   return { fetchedAt, lat: 33.45, lon: -112.07, hours };
@@ -128,6 +134,7 @@ test('control: a live panel at ~1,800 W and 4 kW of PV — PV exceeds load, so h
   const { r, panelLoadRows } = await scenario(t, false);
   assert.ok(panelLoadRows > 0, 'precondition: panel_load recorded');
   assert.equal(r.todayHours.find((x) => x.hour === 11), undefined);
+  assert.deepEqual(r.todayHours, [], 'no hour of the window is curtailment');
 });
 
 test('★★ a held panel (no panel_load in the hour) is unknown load: the hour is not counted as curtailed', async (t) => {
@@ -135,6 +142,7 @@ test('★★ a held panel (no panel_load in the hour) is unknown load: the hour 
   assert.equal(panelLoadRows, 0, 'precondition: the gate wrote nothing for the held panel');
   assert.equal(r.todayHours.find((x) => x.hour === 11), undefined,
     `★★ v1.188.1 before review: hour 11 counted at loadW 0, weatherVerified, ~3 kWh: ${JSON.stringify(r.todayHours)}`);
+  assert.deepEqual(r.todayHours, [], 'no hour of the window is curtailment');
 });
 
 test('cleanup', () => {
