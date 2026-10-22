@@ -5,6 +5,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { consoleClocks, type ConsoleClocks } from './helpers/consoleClockProbe.js';
 
 /**
@@ -97,33 +98,96 @@ test('in this process: every console clock carries the site clock', () => {
   assert.equal(r.header, r.siteStamp, `CONSOLE status header (site ${r.zone}, host ${r.hostZone})`);
 });
 
+/** The Date methods that format or read a time on the host's clock, or set one in the host's zone. */
+const HOST_CLOCK_METHODS = new Set([
+  'toLocaleString', 'toLocaleTimeString', 'toLocaleDateString', 'toTimeString', 'toDateString',
+  'getFullYear', 'getYear', 'getMonth', 'getDate', 'getDay', 'getHours', 'getMinutes', 'getSeconds', 'getMilliseconds',
+  'setFullYear', 'setYear', 'setMonth', 'setDate', 'setHours', 'setMinutes', 'setSeconds', 'setMilliseconds',
+  'getTimezoneOffset',
+]);
+
+/**
+ * Every host-clock date helper `src` calls, as "line: call". The scan reads the parsed source, not
+ * its lines: a call written across lines, or nested at any depth inside another call's arguments,
+ * is one call, and a comment or a string that names one is not a call. Matched: a call of a
+ * HOST_CLOCK_METHODS method (a get… field only with no argument, as a Date's has none), any
+ * Intl.DateTimeFormat, and a Date built from local fields: `new Date(…)` with two or more
+ * arguments or a spread (a trailing comma after one argument is not a second). The getUTC… fields,
+ * Date.UTC and new Date(ms) read no zone and are not matched.
+ */
+function hostClockCalls(src: string): string[] {
+  const sf = ts.createSourceFile('scan.ts', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const unwrap = (e: ts.Expression): ts.Expression => (ts.isParenthesizedExpression(e) ? unwrap(e.expression) : e);
+  const nameOf = (e: ts.Expression): string | null => {
+    const u = unwrap(e);
+    if (ts.isIdentifier(u)) return u.text;
+    if (ts.isPropertyAccessExpression(u)) return u.name.text;
+    if (ts.isElementAccessExpression(u) && ts.isStringLiteralLike(u.argumentExpression)) return u.argumentExpression.text;
+    return null;
+  };
+  const member = (e: ts.Expression): ts.PropertyAccessExpression | ts.ElementAccessExpression | null => {
+    const u = unwrap(e);
+    return ts.isPropertyAccessExpression(u) || ts.isElementAccessExpression(u) ? u : null;
+  };
+  const isIntlDateTimeFormat = (e: ts.Expression): boolean => {
+    const m = member(e);
+    return m != null && nameOf(m) === 'DateTimeFormat' && nameOf(m.expression) === 'Intl';
+  };
+  const hits: string[] = [];
+  const visit = (n: ts.Node): void => {
+    let hit = false;
+    if (ts.isCallExpression(n)) {
+      const m = member(n.expression);
+      const name = m == null ? null : nameOf(m);
+      hit = isIntlDateTimeFormat(n.expression)
+        || (name != null && HOST_CLOCK_METHODS.has(name) && (!name.startsWith('get') || n.arguments.length === 0));
+    } else if (ts.isNewExpression(n)) {
+      const args = n.arguments ?? [];
+      hit = isIntlDateTimeFormat(n.expression)
+        || (nameOf(n.expression) === 'Date' && (args.length >= 2 || args.some(ts.isSpreadElement)));
+    }
+    if (hit) hits.push(`${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}: ${n.getText(sf).replace(/\s+/g, ' ')}`);
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return hits;
+}
+
 test('no console source calls a host-clock date helper', () => {
   // siteTime.ts is the console's only clock formatter. Any of these in src/telnet formats or reads a
   // time on the host's clock (or the host's zone), with or without a locale and options: the
   // toLocale*/toTime/toDate string forms, Intl.DateTimeFormat, the local get*/set* fields, the
   // host's UTC offset, and a Date built from local fields (new Date(y, m, …), read in the host's
-  // zone). (The getUTC* fields, Date.UTC and new Date(ms) are not matched: they read no zone.)
-  const HOST_CLOCK = /\.to(?:Locale(?:Time|Date)?|Time|Date)String\(|Intl\.DateTimeFormat\(|\.get(?:FullYear|Year|Month|Date|Day|Hours|Minutes|Seconds|Milliseconds)\(\)|\.set(?:FullYear|Year|Month|Date|Hours|Minutes|Seconds|Milliseconds)\(|\.getTimezoneOffset\(|new Date\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*,/;
-  // The pattern itself catches the forms it names (a pattern that matches nothing passes every tree).
+  // zone), on one line or across several and at any nesting depth (hostClockCalls parses the file).
+  // The scan itself catches the forms it names (a scan that matches nothing passes every tree).
   for (const bad of [
     "new Date(t).toTimeString().slice(0, 8)", "new Date(t).toLocaleTimeString('en-US', { hour12: false })",
     "new Date().toLocaleString([], { hour12: false })", "d.toLocaleDateString()", "d.toDateString()", "new Intl.DateTimeFormat('en-US', { hour: 'numeric' })",
+    "Intl.DateTimeFormat().resolvedOptions().timeZone",
     "d.getHours()", "d.getFullYear()", "d.getDay()", "d.getMilliseconds()", "d.setHours(0, 0, 0, 0)", "d.setDate(1)", "d.getTimezoneOffset()",
+    "d\n  .getHours()", "d?.getHours()", "d['getHours']()", "(d).getMinutes()",
     "new Date(y, m, d)", "new Date(2026, 9, 22, 0, 0, 0)", "new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())",
-    "new Date(Number(s.slice(0, 4)), 0, 1)",
-  ]) assert.ok(HOST_CLOCK.test(bad), `the scan catches ${bad}`);
+    "new Date(Number(s.slice(0, 4)), 0, 1)", "new Date(...parts)",
+    // Three calls deep in the first argument, and the arguments on lines of their own.
+    "new Date(Number(s.slice(0, s.indexOf('-'))), 0, 1)",
+    "void new Date(\n    2026, 9, 22,\n  );",
+    "new Date(\n  now.getUTCFullYear(),\n  now.getUTCMonth(),\n  now.getUTCDate(),\n)",
+  ]) assert.ok(hostClockCalls(bad).length > 0, `the scan catches ${JSON.stringify(bad)}`);
   for (const ok of [
     'fmtSiteHms(ms)', 'fmtSiteStamp(ms, true)', 'new Date(ms).getUTCSeconds()', 'Date.now()', 'new Date(ms).toISOString()',
     'new Date(Date.UTC(2026, 9, 22))', 'new Date(Math.max(a, b))', 'new Date(Math.max(f(a), g(b)))', 'new Date(data.snap.generatedAt ?? Date.now())',
+    'new Date(\n  ms,\n)', "new Date(s + ',')", 'new Date()', 'cache.getDate(key)',
+    "// was new Date(t).toTimeString(), then new Date(y, m, d)\nconst label = 'd.getHours()';",
   ]) {
-    assert.ok(!HOST_CLOCK.test(ok), `the scan passes ${ok}`);
+    assert.deepEqual(hostClockCalls(ok), [], `the scan passes ${JSON.stringify(ok)}`);
   }
+  // A hit names the line its call starts on.
+  assert.deepEqual(hostClockCalls('const a = 1;\nvoid new Date(\n  2026, 9, 22,\n);'), ['2: new Date( 2026, 9, 22, )']);
   const telnet = resolve(SERVER, 'src/telnet');
   const files = readdirSync(telnet, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.ts'));
   assert.ok(files.includes('plant/alm.ts') || files.includes('plant\\alm.ts'), 'the walk reaches the plant screens');
   for (const f of files) {
-    const s = readFileSync(resolve(telnet, f), 'utf8');
-    const hit = s.split('\n').findIndex((l) => HOST_CLOCK.test(l));
-    assert.equal(hit, -1, `${f}:${hit + 1} uses a host-clock date helper; format with siteTime.ts`);
+    const hits = hostClockCalls(readFileSync(resolve(telnet, f), 'utf8'));
+    assert.deepEqual(hits, [], `${f} uses a host-clock date helper (line: call); format with siteTime.ts`);
   }
 });

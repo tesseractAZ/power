@@ -23,13 +23,18 @@
  *   V1-xviii the shade report sums the home Cores into one fleet series again (the pre-v0.93.0 path)
  *   V1-xix   the shade report's clean reference is the median, not the 90th percentile
  *   V1-xx    the shade report's reference keeps a Core's zero (gap) hours
+ *   V1-xxi   the console's day totals start at a midnight built from local fields, across lines
+ *   V1-xxii  … and on one line, the first field three calls deep
  *
  * The console cases run the screens in child processes with a New York site on a Phoenix host and a
  * Phoenix site on a UTC host, so every mutant dies whatever the runner's own zone. V1-xv to V1-xvii
  * pass a locale and options, the forms the console's source scan let through before v1.191.1's
  * review; the probe of the screens and the widened scan each kill them. V1-xviii to V1-xx are the
  * shade fixture v1.191.1 rewrote: its two-Core gap case passed the summed fleet, and its 4/4
- * clean/shaded split could not tell the p90 from the median.
+ * clean/shaded split could not tell the p90 from the median. V1-xxi and V1-xxii put a Date built from
+ * local fields (the host's midnight of the UTC date) where no probe reads it: only the console's
+ * source scan sees them, and its per-line pattern let both through (a constructor whose arguments
+ * sit on their own lines, and a first argument nested past two levels) until the scan parsed the file.
  *
  *   cd server && node ../scripts/mutate-v1191-1.mjs      (or from the repo root)
  */
@@ -46,6 +51,7 @@ const DETAIL = resolve(REPO, 'web/src/cards/ForecastDetail.tsx');
 const CARD = resolve(REPO, 'web/src/cards/ForecastCard.tsx');
 const SCADA = resolve(REPO, 'server/src/telnet/plant/scada.ts');
 const ANALYTICS = resolve(REPO, 'server/src/analytics.ts');
+const PROVIDER = resolve(REPO, 'server/src/telnet/dataProvider.ts');
 const SUBSET = [
   'test/consoleSiteClock.test.ts',
   'test/webSiteTime.test.ts',
@@ -194,6 +200,20 @@ const MUTANTS = [
     find: "      if (!Number.isFinite(coeff) || coeff <= 0) continue; // drop this Core's gap hour",
     to: '      if (!Number.isFinite(coeff)) continue; /* MUTANT */',
     why: 'A Core dark on most days gets a reference from its few lit days and books its dark days as a phantom annual shortfall.',
+  },
+  {
+    id: 'V1-xxi. ★ the console\'s day totals start at a midnight built from local fields, across lines',
+    file: PROVIDER,
+    find: '{ sinceMs: startOfLocalDayMs(), untilMs: Date.now() }',
+    to: '{\n        sinceMs: new Date(\n          new Date().getUTCFullYear(),\n          new Date().getUTCMonth(),\n          new Date().getUTCDate(),\n        ).getTime() /* MUTANT */,\n        untilMs: Date.now(),\n      }',
+    why: 'The console\'s energy totals for the day start at the host\'s midnight of the UTC date, hours from the site\'s midnight; no screen probe reads it, and a scan that tests one line at a time never sees the comma.',
+  },
+  {
+    id: 'V1-xxii. ★ … and on one line, the first field three calls deep',
+    file: PROVIDER,
+    find: '{ sinceMs: startOfLocalDayMs(), untilMs: Date.now() }',
+    to: "{ sinceMs: ((iso: string) => new Date(Number(iso.slice(0, iso.indexOf('-'))), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10))).getTime())(new Date().toISOString()) /* MUTANT */, untilMs: Date.now() }",
+    why: 'The same host-zone day start; a pattern that balances only two levels of parentheses does not reach the comma after the first field.',
   },
 ];
 
