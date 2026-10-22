@@ -1037,9 +1037,12 @@ app.get<{ Querystring: { sn?: string } }>('/api/metrics', async (req, reply) => 
 // so the function call returns instantly. Adding HTTP-level caching (ETag +
 // short max-age) saves the JSON-serialization + network cost on repeat fetches
 // from the same browser tab.
-app.get('/api/forecast', async (req, reply) =>
-  cached(req, reply, await analytics.report('forecast'), 60),
-);
+// v1.191.1 — `siteTimeZone`: the zone the forecast's hours were computed in; the cards label an hour
+// in it, never in the browser's zone (as /api/night-charge/status does, T16).
+app.get('/api/forecast', async (req, reply) => {
+  const fc = await analytics.report<Record<string, unknown> | null>('forecast');
+  return cached(req, reply, fc && typeof fc === 'object' ? { ...fc, siteTimeZone: siteTimeZone() } : fc, 60);
+});
 
 app.get('/api/degradation', async (req, reply) =>
   cached(req, reply, await analytics.report('degradation'), 60),

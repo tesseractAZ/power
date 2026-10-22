@@ -16,6 +16,7 @@ import {
 import type { DayForecast } from '../types';
 import { fmtPct, fmtW } from '../format';
 import { apiUrl } from '../api';
+import { fmtLocaleIn } from '../siteTime';
 import { CHART, HUES, UI } from '../theme';
 
 // v1.183.0 — outlook tone → text colour (a neutral tone gets none).
@@ -49,6 +50,10 @@ export const ForecastCard = memo(function ForecastCard() {
   }, []);
 
   const ready = fc && fc.hours.length > 0 && fc.historyDays > 0;
+  // v1.191.1 — the times below are written in the site zone the payload names (GET /api/forecast
+  // `siteTimeZone`), the zone the server computed the hours in, never the browser's.
+  const zone = fc?.siteTimeZone;
+  const lowAt = fc?.minProjectedSocTs ? fmtLocaleIn(fc.minProjectedSocTs, zone, { weekday: 'short', hour: 'numeric' }) : null;
 
   return (
     <div className="card col-span-full">
@@ -85,7 +90,7 @@ export const ForecastCard = memo(function ForecastCard() {
               label="Projected low SoC"
               value={fc!.minProjectedSoc != null ? fmtPct(fc!.minProjectedSoc, 0) : '—'}
               accent={fc!.minProjectedSoc == null ? undefined : fc!.minProjectedSoc < fc!.reserveSoc ? 'text-bad' : 'text-ok'}
-              sub={fc!.minProjectedSocTs ? `at ${new Date(fc!.minProjectedSocTs).toLocaleString([], { weekday: 'short', hour: 'numeric' })}` : ''}
+              sub={lowAt ? `at ${lowAt}` : ''}
             />
             <Tile label="Reserve floor" value={fmtPct(fc!.reserveSoc, 0)} sub="SHP2 backup reserve" />
             <Tile
@@ -114,14 +119,14 @@ export const ForecastCard = memo(function ForecastCard() {
                   type="number"
                   domain={['dataMin', 'dataMax']}
                   tick={{ fill: CHART.axis, fontSize: 10 }}
-                  tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: 'numeric' })}
+                  tickFormatter={(t) => fmtLocaleIn(t, zone, { hour: 'numeric' }) ?? ''}
                 />
                 <YAxis yAxisId="w" tick={{ fill: CHART.axis, fontSize: 10 }} width={52} tickFormatter={kwTick} label={{ value: 'kW', angle: -90, position: 'insideLeft', fill: CHART.axis, fontSize: 10 }} />
                 <YAxis yAxisId="soc" orientation="right" domain={[0, 100]} tick={{ fill: CHART.axis, fontSize: 10 }} width={38} unit="%" />
                 <Tooltip
                   contentStyle={{ background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
                   labelStyle={{ color: CHART.axis }}
-                  labelFormatter={(t) => new Date(t as number).toLocaleString([], { weekday: 'short', hour: 'numeric' })}
+                  labelFormatter={(t) => fmtLocaleIn(t as number, zone, { weekday: 'short', hour: 'numeric' }) ?? ''}
                   formatter={(v, name) =>
                     name === 'Projected SoC'
                       ? `${typeof v === 'number' ? v.toFixed(0) : v}%`
