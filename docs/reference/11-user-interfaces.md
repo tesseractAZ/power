@@ -271,7 +271,7 @@ screen. `Q`/`Ctrl-C` disconnects.
 
 The grid state resolver (`gridState.liveGridBackstop`) drives the console's ACTIVE / AVAILABLE / OFF-GRID grid annunciation.
 
-Every time of day the console prints is on the site clock (`siteTime.ts`): the status header, the alarm banner, the alarm rows and the 1 Hz liveness clock in the ALARM LIST and MAIN BUS dividers (v1.191.1; the two dividers read the host's clock, so with the site zone not the host's they disagreed with the rows under them).
+Every time of day the console prints is on the site clock (`siteTime.ts`): the status header, the alarm banner, the alarm rows and the 1 Hz liveness clock in the ALARM LIST and MAIN BUS dividers (v1.191.1; the two dividers read the host's clock, so with the site zone not the host's they disagreed with the console's other stamps).
 
 The console's PV and battery figures (PV.ARRAY.P, BATT.P.NET, the headline PV figure and the
 mimic's PV and BATT columns) are the HA sensors' Fleet PV and Battery Net exactly as both

@@ -4,7 +4,7 @@
 
 **Console**
 
-- The 1 Hz clock in the ALARM LIST divider (ALARM screen) and in the MAIN BUS divider (BUS screen) is written in the site zone, the zone of the console's other stamps: the status header, the alarm banner and the alarm rows. Both read the host's clock, so with `SITE_TIMEZONE` set to another zone than the container's, or a container without `TZ` on the default zone, the two dividers disagreed with the rows under them by the difference (two or three hours behind for a New York site on a Phoenix host, by the season; seven hours ahead for a Phoenix site on a UTC host). The SSH console and the browser console share the screens. The `HH:MM:SS` form is unchanged.
+- The 1 Hz clock in the ALARM LIST divider (ALARM screen) and in the MAIN BUS divider (BUS screen) is written in the site zone, the zone of the console's other stamps: the status header, the alarm banner and the alarm rows. Both read the host's clock, so with `SITE_TIMEZONE` set to another zone than the container's, or a container without `TZ` on the default zone, the two dividers disagreed with those stamps by the difference (two or three hours behind for a New York site on a Phoenix host, by the season; seven hours ahead for a Phoenix site on a UTC host). The SSH console and the browser console share the screens. The `HH:MM:SS` form is unchanged.
 
 **Dashboard**
 
@@ -18,16 +18,17 @@
 
 **Tests**
 
-- The ALARM and BUS screens are rendered in child processes for a New York site on a Phoenix container, a Phoenix site on a UTC container and the reference install, against written-out times, and a scan of the console's source fails on any time formatted on the host's clock. The Today and forecast labels are checked against the server's site hour in five zones.
+- Every clock the console prints (the two dividers, the alarm rows, the alarm banner and the status header) is read off the rendered ALARM, BUS and CONSOLE screens in child processes for a New York site on a Phoenix container, a Phoenix site on a UTC container and the reference install, against written-out times. A scan of the console's source fails on a call to any of these host-clock date helpers, with or without a locale and options: the `toLocale…String`, `toTimeString` and `toDateString` forms, `Intl.DateTimeFormat`, the local `get…`/`set…` fields and `getTimezoneOffset`.
+- The Solar page's hour labels are checked against the server's site hour in five zones and the Today card's "since" time against the site's midnight in five; the Dashboard forecast card's times are compared across three zones. Source checks also pin where each card hands the zone on or shows the time: dropping the zone from the hour rows (every row "—"), the "since" text or the projected-low time each fails.
 - Fixtures in eight test files were built on the host's clock or on local hours. Each now places its instants on the site clock (or, where the code buckets by the UTC hour, on the UTC hour that holds the site hour), so it holds and keeps its meaning under any container zone:
   - The runway's PV-basis guard asserts on the site hour `computeClipping` labels its rows with; a row labelled on the host's clock fails on a UTC container and wherever host and site differ.
   - The no-weather curtailment case places its surplus hour at a site wall time and asserts that the one estimated hour is booked at site 11:00. On a Kolkata container with a Phoenix site it read 2.5 kWh instead of 7.
   - Both held-panel curtailment cases assert that no hour of the window is curtailment. On a UTC container they passed with a missing `panel_load` read as 0 W (the 1.188.1 fix reverted).
   - The daily-figure reset cases take their instants and their expected midnights from the site's dates, not from the function under test. A one-minute boundary slop and a reading of the publish clock now fail under every zone pairing; a day start on the host's clock fails wherever host and site differ.
   - The display-versus-alarm PV contract now exercises its bias-factor cause as well as the coverage gate: a display sum that drops the bias factor fails.
-  - The per-Core shade report places its clear hours on site wall-clock hours and holds on a site whose daylight saving ends inside the fixture (Auckland), where real uniform shade was no longer detected.
+  - The per-Core shade report places its clear hours in the first UTC hour that starts in each site hour, as the report labels them, and holds on a site whose daylight saving ends inside the fixture (Auckland, and Lord Howe Island, whose clock moves by half an hour), where real uniform shade was no longer detected. Two cases are added: one Core of three dark on most recent days fails the summed-fleet calculation the per-Core report replaced (the two-Core gap case passed it), and shade on most recent days fails a median reference in place of the 90th percentile.
   - The realized-irradiance training case and the soiling charge-taper cases key their rows on the UTC hour, as the recorder and the weather feed do, and hold on half- and quarter-hour zones (Kolkata, Kathmandu, Adelaide, St John's).
-- Test comments that said the code reads the host's clock now name the site clock (clipping, forecast, rate table, dispatch, solar-model metrics), and the forecast's band-check failure messages print the site hour.
+- Test comments that said the code reads the host's clock now name the site clock (clipping, forecast, rate table, dispatch, solar-model metrics, the golden capture), and the forecast's band-check failure messages print the site hour.
 
 **Documentation**
 

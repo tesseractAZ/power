@@ -352,7 +352,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **129 harnesses** (`scripts/mutate-*.mjs`) holding **3767
+regression. There are **129 harnesses** (`scripts/mutate-*.mjs`) holding **3776
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that
