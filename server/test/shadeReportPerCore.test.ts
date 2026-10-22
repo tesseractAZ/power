@@ -20,8 +20,11 @@ import { addDaysYmd, siteTimeZone, zonedWallTimeMs } from '../src/siteTime.js';
  * across a daylight-saving change too (the 8 days from 2025-04-01 cross the end of DST in
  * Auckland, Sydney, Santiago and Lord Howe Island on 04-06; Lord Howe's clock moves by half an
  * hour, so a site hour's bucket starts at h:00 before the change and at h:30 after it). Fixed
- * UTC epochs moved to the neighbouring site hour there, and the UTC hour that merely CONTAINS
- * site h:00 starts at (h-1):30 on a :30 offset; both left groups below the day minimum.
+ * UTC epochs moved to the neighbouring site hour at the change, splitting each hour's days
+ * between two groups, so the shade the two shade cases put on the recent days went unreported.
+ * The UTC hour that merely CONTAINS site h:00 starts at (h-1):30 on a :30 offset, which the
+ * report labels h-1: every group an hour early on a fixed :30 zone (Kolkata), and on Lord Howe
+ * Island only the days after the change, the same split.
  */
 
 const HR = 3_600_000;
@@ -60,20 +63,27 @@ test('shadeHoursFromCorePvMaps — two clean Cores → no shade, zero kWh', () =
 });
 
 test('shadeHoursFromCorePvMaps — one Core cloud-gap zeros do NOT create phantom shade', () => {
-  const { wx, epochs } = clearSkyGrid(8);
+  const { wx, epochs, dayOf } = clearSkyGrid(8);
   const full = 2 * CLEAR.radiationWm2;
   const coreA = new Map<number, number>(epochs.map((he) => [he, full]));
-  // Core B is a wedged Core: it reports 0 W on the FIRST 6 clear hours (the two oldest
-  // days: a cloud/telemetry gap), full production otherwise. Per-Core, B's zero hours fail
-  // coeff>0 and drop out of B's own p90 reference, and two zero days of eight do not move
-  // B's median observed; A shows none. (Two old gap days of eight also pass the summed-fleet
-  // path; the three-Core case below is the one that rules it out.)
-  const coreB = new Map<number, number>(
-    epochs.map((he, i) => [he, i < 6 ? 0 : full]),
-  );
-  const out = shadeHoursFromCorePvMaps([coreA, coreB], wx);
-  assert.equal(out.hours.length, 0, 'no phantom shaded hour from a Core gap');
-  assert.equal(out.estTotalKwhPerYear, 0, 'no phantom annual kWh shortfall');
+  // Core B is a wedged Core: it reports 0 W on every clear hour of some days (a cloud/telemetry
+  // gap), full production otherwise. Per-Core, B's zero hours fail coeff>0 and drop out of B's
+  // own p90 reference; A shows none.
+  //  - Gap on the two oldest days: two zero days of eight do not move B's median observed.
+  //    (This shape alone also passes the summed-fleet path.)
+  //  - Gap on the six most recent days: B keeps two clear hours a group, too few for its own
+  //    reference, and adds nothing. The pre-v0.93.0 summed fleet read 3200 W on the two old
+  //    days and 1600 W since: its p90 reference 3200 W against a median 1600 W, a phantom 50 %
+  //    shortfall on every clear hour and about 1750 kWh a year.
+  for (const [gap, dark] of [
+    ['the two oldest days', (d: number) => d < 2],
+    ['the six most recent days', (d: number) => d >= 2],
+  ] as const) {
+    const coreB = new Map<number, number>(epochs.map((he) => [he, dark(dayOf.get(he)!) ? 0 : full]));
+    const out = shadeHoursFromCorePvMaps([coreA, coreB], wx);
+    assert.deepEqual(out.hours, [], `no phantom shaded hour from a Core gap on ${gap}`);
+    assert.equal(out.estTotalKwhPerYear, 0, `no phantom annual kWh shortfall (gap on ${gap})`);
+  }
 });
 
 test('shadeHoursFromCorePvMaps — real uniform shade IS still detected', () => {
