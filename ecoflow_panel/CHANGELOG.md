@@ -28,7 +28,7 @@
   - The display-versus-alarm PV contract now exercises its bias-factor cause as well as the coverage gate: a display sum that drops the bias factor fails.
   - The per-Core shade report places its clear hours in the first UTC hour that starts in each site hour, as the report labels them, and holds on a site whose daylight saving ends inside the fixture (Auckland, and Lord Howe Island, whose clock moves by half an hour), where real uniform shade was no longer detected. The two-Core gap case passed the summed-fleet calculation the per-Core report replaced; it now also puts the gap on the six most recent days, and a case with one Core of three dark on those days is added: both fail the summed fleet (a phantom 50 % and 33 % shortfall on every clear hour). A case with shade on most recent days fails a median reference in place of the 90th percentile.
   - The realized-irradiance training case and the soiling charge-taper cases key their rows on the UTC hour, as the recorder and the weather feed do, and hold on half- and quarter-hour zones (Kolkata, Kathmandu, Adelaide, St John's).
-- Test comments that said the code reads the host's clock now name the site clock (clipping, forecast, rate table, dispatch, solar-model metrics, the golden capture), and the forecast's band-check failure messages print the site hour.
+- Test comments that said the code reads the host's clock now name the site clock (clipping, forecast, rate table, dispatch, solar-model metrics, the settings-drift quiet window, the message-rate floor, the diurnal backtest baseline, the golden capture), and the forecast's band-check failure messages print the site hour.
 
 **Documentation**
 

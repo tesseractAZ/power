@@ -41,7 +41,8 @@ const freshDir = (): string => {
 const QUIET = parseQuietHours('22-06')!;
 /** index.ts's predicate: `DRIFT_QUIET != null && inNotifyQuiet(now, DRIFT_QUIET)`. */
 const isQuiet = (now: Date) => QUIET != null && inQuietWindow(now, QUIET);
-/** Local wall-clock times on the night of 2026-10-10 → 10-11 (inQuietWindow reads getHours). */
+/** Host-clock wall times on the night of 2026-10-10 → 10-11. inQuietWindow reads the site hour (siteHour),
+ *  which this file sets to the host's zone (siteZoneIsHostZone, the first import). */
 const at = (day: number, h: number, m = 0) => new Date(2026, 9, day, h, m);
 /** Epoch ms, minutes after 23:00 on 10-10. */
 const T = (min: number) => at(10, 23, min).getTime();
