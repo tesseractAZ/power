@@ -13,6 +13,8 @@ import type { DayForecast, SolarResponseModel } from '../types';
 import { apiUrl } from '../api';
 import { CHART, HUES, UI } from '../theme';
 import { HowItWorks } from '../components/sections';
+import { useSite } from '../useSite';
+import { daylightBand } from '../siteFacts';
 
 const fmtHour = (h: number) => (h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`);
 const INV_COLORS = [HUES.battery, HUES.soc, HUES.solar, HUES.violet, HUES.pink];
@@ -33,6 +35,7 @@ interface Series {
 export function SolarResponseCard() {
   const [fc, setFc] = useState<DayForecast | null>(null);
   const [mode, setMode] = useState<'inverter' | 'string'>('inverter');
+  const site = useSite();
 
   useEffect(() => {
     let cancelled = false;
@@ -77,9 +80,11 @@ export function SolarResponseCard() {
     }
   }
 
-  // Daylight hour range.
+  // Daylight hour range. v1.191.0 (CA24) — today's 4..21 on the legacy site; on a configured site the
+  // hours the sun is up there over the year (GET /api/site), so a high-latitude summer is not cut.
   const daylight: number[] = [];
-  if (fleet) for (let h = 4; h <= 21; h++) if (fleet.hourly[h].coeff != null || fleet.hourly[h].observedMaxPvW > 0) daylight.push(h);
+  const [dayFrom, dayTo] = daylightBand(site);
+  if (fleet) for (let h = dayFrom; h <= dayTo; h++) if (fleet.hourly[h] && (fleet.hourly[h].coeff != null || fleet.hourly[h].observedMaxPvW > 0)) daylight.push(h);
 
   const data = daylight.map((h) => {
     const row: Record<string, number | string | null> = { label: fmtHour(h) };

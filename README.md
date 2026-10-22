@@ -17,19 +17,21 @@ opt-in **Home Assistant notifications** with companion-app push.
 When the pack is projected to reach its reserve floor — or a battery, cell, grid
 or telemetry condition turns critical — it raises an **audible alarm** on the
 speakers the owner configures: a chime and a spoken description (English, with an
-optional Spanish second pass) over Music Assistant and a SIP intercom, retried
-when delivery cannot be confirmed.
+optional Spanish second pass) over Music Assistant and an optional announce-capable
+SIP phone, retried when delivery cannot be confirmed.
 
-A **night-charge engine** sizes an overnight grid buy on the APS R-EV
-time-of-use rate. By default it only advises; when the owner opts in it performs
+A **night-charge engine** sizes a grid buy in the cheap window of a time-of-use
+tariff (APS R-EV built in; another tariff described by `TARIFF_PLAN`). By default it only advises; when the owner opts in it performs
 one announced, cancellable, bounded and auto-reverting charge per night.
 
-The reference deployment is a Phoenix, AZ off-grid home: an EcoFlow **Smart Home
+The reference deployment is a grid-tied home in Phoenix, AZ: an EcoFlow **Smart Home
 Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each:
 15 × 6.144 kWh = **92.16 kWh nameplate**, the pool the panel itself reports — the
 inverter units add no capacity), a **42-panel / ~16.8 kW** array, and an EVSE —
 on the APS R-EV time-of-use rate. Two further Cores sit off the panel as bench
-spares: they are monitored, but are not part of the backup pool.
+spares: they are monitored, but are not part of the backup pool. These are the
+built-in values; another home sets its own time zone, tariff, array and devices
+([setting Power up for your home](docs/guide/your-home.md)).
 
 > 📖 **Documentation.** The operator guide, [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md),
 > is what Home Assistant shows on the add-on's Documentation tab: setup, what an alarm means
@@ -125,16 +127,19 @@ exactly what the app renders.
   override, else a **confirmed** seasonal utility table, else a flat default.
   An unconfirmed table is refused rather than assumed, and the basis in force is
   published alongside the numbers.
-- **APS R-EV modelled as the bill states it:** on-peak 16:00–19:00 and overnight
+- **Tariffs as data:** `TARIFF_PLAN` picks a flat, two-tier or custom tariff (periods,
+  rates, seasons, holidays, currency), or the built-in **APS R-EV** preset, the default,
+  modelled as the bill states it: on-peak 16:00–19:00 and overnight
   23:00–05:00 Mon–Fri year-round, a 10:00–15:00 super-off-peak in winter, off-peak
   otherwise. Seasons follow **billing cycles** (by usage month, April–September
   summer and October–March winter), and the schedule's **off-peak holidays** are
   off-peak all day. Rates are owner-entered from a bill and stay null until
-  confirmed.
+  confirmed; a tariff that does not parse nulls the money figures and holds the
+  planner rather than falling back to the preset.
 - A **night-charge TOU-arbitrage engine** with an owner-selected write posture
   (`NIGHT_CHARGE_MODE`):
   - **`advisory`** (default) — never writes. Tonight's plan is published as HA
-    entities, an API, a 21:30 notification and dashboard/TUI panels.
+    entities, an API, a 21:30 site-time notification and dashboard/TUI panels.
   - **`supervised`** — one announced, cancellable, bounded reserve write per charge
     night: armed only after an announcement channel confirms delivery, clamped to
     the panel's 10–50% reserve range, readback-verified on both the apply and the
@@ -200,8 +205,8 @@ exactly what the app renders.
 - Audible **broadcast** pipeline: a chime followed by speech rendered locally by
   Piper over Wyoming (no cloud TTS) — English, then Spanish once a Spanish voice is
   set — played as
-  Music Assistant announcements with per-target volume pinning, plus a **SIP**
-  side-channel to an antique-phone intercom. A built-in tone library (+ uploads,
+  Music Assistant announcements with per-target volume pinning, plus an optional
+  **SIP** side-channel to an announce-capable phone. A built-in tone library (+ uploads,
   per-level assignment). An announcement whose delivery cannot be verified is
   retried at 30 s, 90 s and 3 min, and a retry re-checks which alarm it names
   before it plays; a failed speech render still plays the chime, and the words
@@ -240,9 +245,9 @@ dependency graph, and full data-flow are in
 
 ---
 
-## Install on Home Assistant (Raspberry Pi)
+## Install on Home Assistant (aarch64 or amd64)
 
-For a Pi running Home Assistant OS or Supervised:
+For a 64-bit host running Home Assistant OS or Supervised:
 
 1. In Home Assistant: **Settings → Add-ons → Add-on Store**, ⋮ menu → **Repositories**,
    and add `https://github.com/tesseractAZ/power`. **Power** appears in the store, and
@@ -258,7 +263,8 @@ For a Pi running Home Assistant OS or Supervised:
    **Power** appears under "Local add-ons".
 4. **Install** — the Supervisor pulls the pre-built multi-arch image from GHCR
    (seconds, not a local build). Open **Configuration**, paste your EcoFlow
-   `ECOFLOW_ACCESS_KEY` / `ECOFLOW_SECRET_KEY` and site location, then **Start**.
+   `ECOFLOW_ACCESS_KEY` / `ECOFLOW_SECRET_KEY` and site location, then **Start**. Then
+   set what differs from the reference plant: [your home](docs/guide/your-home.md).
 5. Open the add-on's **Web UI** (HA ingress), or reach the trusted-LAN data API at
    `http://<host>:8787`. The control-room console is always available in a browser at
    `http://<host>:8787/console`; its SSH transport (`ssh -p 2323 <user>@<host>`) is **off by
@@ -289,7 +295,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 5,266 tests
+cd server && npm install && npm test     # 5,560 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -346,12 +352,15 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **120 harnesses** (`scripts/mutate-*.mjs`) holding **3541
+regression. There are **128 harnesses** (`scripts/mutate-*.mjs`) holding **3756
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that
 reason — a harness whose anchors have drifted does not fail, it stops running, and
-an aborted harness reads identically to a clean one.
+an aborted harness reads identically to a clean one. A kill the full suite reports
+counts only when its failing tests fail again in their own files, one suite at a
+time: a failure under parallel load, or in a known teardown flake, never hides a
+survivor.
 
 Dependency advisories are gated by `scripts/check-npm-audit.mjs`, which fails on
 **high or critical in the production tree** and reports the rest. Waivers must carry a

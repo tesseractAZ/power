@@ -704,7 +704,8 @@ test('★★ (review) the Spanish words name from the same pool as the English',
         return { ok: true as const, wav: pcmToWav(Buffer.alloc(2 * 1100), 22050, 2, 1), durationMs: 1 };
       },
     } as any);
-    live.push({ mon, logs, has: (x) => logs.some((l) => l.includes(x)), count: () => 0, stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true }); } });
+    const r: Rig = { mon, logs, has: (x) => logs.some((l) => l.includes(x)), count: () => 0, stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true }); } };
+    live.push(r);
     await sleep(80);
     offset += 20 * MIN;
     alerts = [WARN_GRID, backupSoc(28)];
@@ -713,6 +714,10 @@ test('★★ (review) the Spanish words name from the same pool as the English',
     const es = texts.find((t) => t.voice === 'es_MX-test');
     assert.ok(es != null, 'a Spanish pass was rendered');
     assert.equal(es.text, buildAlertMessageEs('yellow', [WARN_GRID]), '★★ the Spanish names the warning that raised the yellow, not the band');
+    // v1.191.0 — and the broadcast that rendered it has ended: stop() does not cancel one in flight,
+    // and its render, still writing into cacheDir (fs/promises runs on the libuv pool, beside the
+    // synchronous remove), failed the next test's teardown with ENOTEMPTY on a loaded run.
+    await until(r, () => logs.some((l) => /yellow → (?:ok|\d+ error\(s\)) in \d+ms/.test(l)), 'the bilingual yellow to end');
   } finally {
     process.env.BROADCAST_BILINGUAL = prev.bi;
     process.env.BROADCAST_WYOMING_VOICE_ES = prev.es;

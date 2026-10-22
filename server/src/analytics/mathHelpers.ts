@@ -11,12 +11,14 @@
  * separate, higher-risk dedup and are NOT consolidated here.
  */
 
+import { coreNumberFromName } from '../topology.js';
+
 export const cToF = (c: number) => c * 1.8 + 32;
 
-/** Extract the Core (DPU) number from a device name like "Core 3". */
+/** Extract the Core (DPU) number from a device name like "Core 3". v1.191.0 (S8) — the one copy of the
+ *  chain lives in topology.ts (coreNumberFromName); this name is kept for analytics.ts's call sites. */
 export function dpuNum(name: string): number | null {
-  const m = name.match(/core\s*(\d+)/i) ?? name.match(/(\d+)/);
-  return m ? Number(m[1]) : null;
+  return coreNumberFromName(name);
 }
 /** Capitalize the first letter. */
 export function cap(s: string): string {

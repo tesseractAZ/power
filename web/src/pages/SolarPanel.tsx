@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AreaChart,
   Area,
@@ -9,15 +9,15 @@ import {
   ResponsiveContainer,
   Legend,
 } from 'recharts';
-import type { DeviceSnapshot, DpuProjection, Shp2Projection } from '../types';
+import type { DeviceSnapshot, DpuProjection, Shp2Projection, Site } from '../types';
 import { allPanels } from '../shp2Membership';
 
-// Array configuration: each equipped DPU has a 10-panel high-voltage string and
-// a 4-panel low-voltage string; all panels are 400 W. Spare DPUs have no array.
-const HV_PANELS = 10;
-const LV_PANELS = 4;
-const PANEL_W = 400;
-const PANELS_PER_DPU = HV_PANELS + LV_PANELS;
+// Array configuration — v1.191.0 (lane C): each Core's strings come from GET /api/site (PV_STRINGS,
+// with an override per panel slot or Core name, CA23); unset, and until the site answers, each
+// equipped DPU has today's 10-panel high-voltage and 4-panel low-voltage string of 400 W
+// (siteFacts.ts DEFAULT_PV_STRINGS). Spare DPUs have no array.
+import { useSite } from '../useSite';
+import { stringsFor, arrayCaption, flowCaption, offPanelNotSpare, zoneDayStartMs, type PvStrings } from '../siteFacts';
 import { fmtTemp, fmtW, fmtWh } from '../format';
 import { sortDevices } from '../sort';
 import { SolarResponseCard } from '../cards/SolarResponseCard';
@@ -60,15 +60,21 @@ interface Point {
 }
 
 export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot> }) {
+  const site = useSite();
   const list = sortDevices(Object.values(devices));
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<DeviceSnapshot & { projection: DpuProjection }>;
   const onlineDpus = dpus.filter((d) => d.online && d.projection);
 
   // DPUs with a solar array = the SHP2-bound Cores; the spares have none.
   // v1.185.0 — the Cores on EVERY panel.
-  const arraySns = new Set<string>(
+  // v1.191.0 — plus, once the server sends the per-DPU bench-spare flag (only while BENCH_SPARE_SNS
+  // is set), a DPU off every panel that it does NOT name a spare: "not on a panel", array kept (plan
+  // 3.8 S3). Without the flag every DPU off the panels is a spare, as before.
+  const panelSns = new Set<string>(
     allPanels(devices).flatMap((p) => (p.projection as Shp2Projection).sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
   );
+  const arraySns = new Set<string>(panelSns);
+  if (panelSns.size > 0) for (const d of dpus) if (offPanelNotSpare(site, d.sn)) arraySns.add(d.sn);
   // v0.43.0 — array TOPOLOGY (panel + HV/LV channel counts) is driven by the equipped
   // SHP2-bound Cores, NOT live connectivity: a cloud-offline-but-wired Core (e.g. Core 1)
   // still has its 10 HV + 4 LV strings physically installed. Same `|| onlineDpus.length`
@@ -78,7 +84,10 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
   // "· N offline" suffix isn't understated by an online bench spare (which is in
   // onlineDpus but not arraySns). When membership is unknown (no SHP2), all online count.
   const equippedOnline = arraySns.size > 0 ? onlineDpus.filter((d) => arraySns.has(d.sn)).length : onlineDpus.length;
-  const totalPanels = equippedCores * PANELS_PER_DPU;
+  // v1.191.0 — each equipped Core's own strings (today: 14 panels each); the captions total them.
+  const equippedLayouts: PvStrings[] = arraySns.size > 0
+    ? [...arraySns].map((sn) => stringsFor(site, sn))
+    : onlineDpus.map((d) => stringsFor(site, d.sn));
 
   // v0.9.75 — defensive log for the "Core 3 LV showed no data" report.
   // If SHP2 hasn't loaded into the snapshot yet (cold boot, brief
@@ -122,6 +131,11 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
   const solarNote = todayNotes(summary?.fleet.bridged).solar;
   const [peakToday, setPeakToday] = useState<{ value: number; ts: number } | null>(null);
   const [pvSeries, setPvSeries] = useState<Record<string, Point[]>>({});
+  // v1.191.0 (CA25) — "today" starts at the SITE's midnight (GET /api/site siteTimeZone), not the
+  // browser's: the start is sent to the server as the history query. Read through a ref so the
+  // refresh loop below keeps its cadence; before the site answers it is the browser's, as before.
+  const siteZoneRef = useRef<string | null>(null);
+  siteZoneRef.current = site?.siteTimeZone ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -142,9 +156,7 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
         }
 
         // 24h PV per DPU
-        const dayStart = new Date();
-        dayStart.setHours(0, 0, 0, 0);
-        const since = dayStart.getTime();
+        const since = zoneDayStartMs(Date.now(), siteZoneRef.current);
         const next: Record<string, Point[]> = {};
         let peakVal = 0;
         let peakTs = 0;
@@ -238,7 +250,7 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
         <div className="card-title flex items-center justify-between">
           <span>Solar overview</span>
           <span className="text-xs text-muted normal-case tracking-normal">
-            {totalPanels} panels · {PANEL_W} W each · {HV_PANELS} HV + {LV_PANELS} LV per DPU
+            {arrayCaption(equippedLayouts)}
           </span>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -260,7 +272,7 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
       </div>
 
       {/* Flow diagram */}
-      <FlowDiagram dpus={onlineDpus} arraySns={arraySns} totalPanels={totalPanels} />
+      <FlowDiagram dpus={onlineDpus} arraySns={arraySns} panelSns={panelSns} installed={equippedLayouts} site={site} />
 
       {/* Per-DPU detail */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -366,11 +378,17 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
 function FlowDiagram({
   dpus,
   arraySns,
-  totalPanels,
+  panelSns,
+  installed,
+  site,
 }: {
   dpus: Array<DeviceSnapshot & { projection: DpuProjection }>;
   arraySns: Set<string>;
-  totalPanels: number;
+  /** The panels' source DPUs (arraySns adds the off-panel Cores the server says are not spares). */
+  panelSns: Set<string>;
+  /** Every equipped Core's strings (the caption's installed count). */
+  installed: PvStrings[];
+  site: Site | null;
 }) {
   const W = 900;
   const ROW_H = 128;
@@ -401,9 +419,12 @@ function FlowDiagram({
   // string as a single row of 4, each grouped beside its MPPT channel line.
   const CELL_W = 13;
   const CELL_H = 9;
-  const HV_COLS = 5;
   const PANELS_X = 28;
   const LINE_START_X = 132;
+  // v1.191.0 — a string of up to 10 draws as today (HV 5 × 2, LV one row of 4); a longer one wraps
+  // at 8 glyphs a row (the room left of the channel line) and draws at most 24.
+  const MAX_GLYPHS = 24;
+  const colsFor = (n: number, short: number) => (n <= 10 ? short : 8);
 
   return (
     <div className="card">
@@ -446,15 +467,10 @@ function FlowDiagram({
         <use href="#sun" x={COL_PANELS - 32} y={26} width="30" height="30" />
         <text x={COL_PANELS + 6} y={36} fill={HUES.solar} fontSize="14" fontFamily="ui-sans-serif" fontWeight="700">
           {/* v0.43.0 — the diagram draws a row per ONLINE equipped Core, but the
-              installed nameplate (totalPanels) counts ALL equipped Cores incl. any
+              installed nameplate (installed) counts ALL equipped Cores incl. any
               cloud-offline one. When fewer are drawn than installed, say so explicitly
               instead of captioning "42 panels" above 28 glyphs. */}
-          {(() => {
-            const shown = drawn.length * PANELS_PER_DPU;
-            return shown < totalPanels
-              ? `${totalPanels} installed · ${shown} shown · ${PANEL_W} W each`
-              : `${totalPanels} panels · ${PANEL_W} W each`;
-          })()}
+          {flowCaption(installed, drawn.map((d) => stringsFor(site, d.sn)))}
         </text>
 
         {drawn.map((d, i) => {
@@ -464,29 +480,34 @@ function FlowDiagram({
           const lvW = p.pvLowWatts ?? 0;
           const totalW = p.pvTotalWatts ?? 0;
           const arrayed = hasArray(d.sn);
+          const strings = stringsFor(site, d.sn);
+          const hvCols = colsFor(strings.hv.count, 5);
+          const lvCols = 8;
+          // v1.191.0 — drawn with its array but off every panel (the server says it is not a spare).
+          const offPanel = panelSns.size > 0 && !panelSns.has(d.sn);
 
           return (
             <g key={d.sn}>
               {arrayed ? (
                 <>
                   {/* HV string — 10 panels in a 5 × 2 block straddling the HV line */}
-                  {Array.from({ length: HV_PANELS }).map((_, n) => (
+                  {Array.from({ length: Math.min(strings.hv.count, MAX_GLYPHS) }).map((_, n) => (
                     <use
                       key={`hv${n}`}
                       href="#panel"
-                      x={PANELS_X + (n % HV_COLS) * CELL_W}
-                      y={yMid - 32 + Math.floor(n / HV_COLS) * CELL_H}
+                      x={PANELS_X + (n % hvCols) * CELL_W}
+                      y={yMid - 32 + Math.floor(n / hvCols) * CELL_H}
                       width={CELL_W - 2}
                       height={CELL_H - 2}
                     />
                   ))}
                   {/* LV string — 4 panels in a single row on the LV line */}
-                  {Array.from({ length: LV_PANELS }).map((_, n) => (
+                  {Array.from({ length: Math.min(strings.lv.count, MAX_GLYPHS) }).map((_, n) => (
                     <use
                       key={`lv${n}`}
                       href="#panel"
-                      x={PANELS_X + n * CELL_W}
-                      y={yMid + 24 - (CELL_H - 2) / 2}
+                      x={PANELS_X + (n % lvCols) * CELL_W}
+                      y={yMid + 24 - (CELL_H - 2) / 2 + Math.floor(n / lvCols) * CELL_H}
                       width={CELL_W - 2}
                       height={CELL_H - 2}
                     />
@@ -507,7 +528,7 @@ function FlowDiagram({
                     HV: {fmtW(hvW)}
                   </text>
                   <text x={LINE_START_X + 22} y={yMid - 11} fill={CHART.axis} fontSize="11" fontFamily="ui-monospace">
-                    {p.pvHighVolts?.toFixed(0) ?? '—'} V · {p.pvHighAmps?.toFixed(1) ?? '—'} A · {fmtTemp(p.mpptHvTemp)} · {HV_PANELS} × {PANEL_W} W
+                    {p.pvHighVolts?.toFixed(0) ?? '—'} V · {p.pvHighAmps?.toFixed(1) ?? '—'} A · {fmtTemp(p.mpptHvTemp)} · {strings.hv.count} × {strings.hv.watts} W
                   </text>
 
                   {/* LV channel line */}
@@ -525,7 +546,7 @@ function FlowDiagram({
                     LV: {fmtW(lvW)}
                   </text>
                   <text x={LINE_START_X + 22} y={yMid + 53} fill={CHART.axis} fontSize="11" fontFamily="ui-monospace">
-                    {p.pvLowVolts?.toFixed(0) ?? '—'} V · {p.pvLowAmps?.toFixed(1) ?? '—'} A · {fmtTemp(p.mpptLvTemp)} · {LV_PANELS} × {PANEL_W} W
+                    {p.pvLowVolts?.toFixed(0) ?? '—'} V · {p.pvLowAmps?.toFixed(1) ?? '—'} A · {fmtTemp(p.mpptLvTemp)} · {strings.lv.count} × {strings.lv.watts} W
                   </text>
                 </>
               ) : (
@@ -541,7 +562,7 @@ function FlowDiagram({
               <text x={COL_DPU + 12} y={yMid + 9} fill={HUES.battery} fontSize="21" fontWeight="700" fontFamily="ui-monospace">
                 {fmtW(totalW)}
               </text>
-              <text x={COL_DPU + 12} y={yMid + 25} fill={CHART.axis} fontSize="10">total in</text>
+              <text x={COL_DPU + 12} y={yMid + 25} fill={CHART.axis} fontSize="10">{offPanel ? 'total in · not on a panel' : 'total in'}</text>
 
               {/* DPU → battery */}
               <FlowSegment

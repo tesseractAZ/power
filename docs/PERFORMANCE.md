@@ -1,5 +1,10 @@
 # System Performance Record (living document)
 
+> [!NOTE]
+> A record of the reference plant: every measurement here comes from the reference deployment,
+> one grid-tied home in Arizona with its own Cores, array, loads and tariff. It shows how the
+> engines perform there, not figures another home should expect.
+
 This document is the runtime-evidence companion to the [engineering reference](reference/README.md): where the engine reference specifies what the system does, this records **how it is doing** — measured event rates, realized forecast accuracy, learning-gate progress, and fleet health, taken from the production deployment's own durable ledgers. Each section carries its own as-of stamp; numbers are not projections and are never carried forward past that stamp. All figures are measured on a **single production deployment** (one SHP2, three wired Delta Pro Ultra Cores of five packs each, two bench spares) and generalize only as an existence proof, not a distribution. Timestamps are America/Phoenix (MST, UTC−7, no DST). Where a metric has no data yet, this document says so and states when accrual began — null over fabrication, the same rule the engines themselves follow.
 
 Evidence sources: the cleared-alert ledger (`/api/alerts/history`, cap `CLEARED_LOG_MAX = 1500`), the night-charge ledger (`night_charge_ledger` via `/api/night-charge/status`, which mirrors **every** ledger column), the write-readiness gate (`readiness.metrics` on the same route), the probabilistic-band diagnostics (`/api/forecast/probabilistic`), the confirmed-defect register (`/api/defective-packs`), the pack routes (`/api/degradation`, `/api/pack-risk`), the recorder, the add-on's own log, and the live snapshot. §1–§4 data-as-of: **2026-10-15 17:56 MST**, measured against the deployment running **v1.188.0** (`ref 111247f`, verified live on `/api/version`). The 2026-09-11 figures they replace are not carried forward; where an earlier number is shown it is labelled with its date, for trend only.

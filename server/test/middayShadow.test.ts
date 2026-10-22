@@ -730,7 +730,7 @@ test('★★★ index.ts: the shadow block writes nothing — no panel writer, n
   assert.match(blk, /if \(!recorder\.readNightLedger\(3\)\.some\(\(r\) => r\.plan_date === day\)\) \{/);
   assert.match(blk, /recorder\.recordNightOutcome\(day, cols\);/);
   // The evening runs only once the live job latched today, inside its window.
-  assert.match(blk, /if \(readNightChargeLatch\(\)\.lastNotifyDay === today && cur\?\.day !== today && nowMin >= fireMin && nowMin < 23 \* 60\) \{/);
+  assert.match(blk, /if \(readNightChargeLatch\(\)\.lastNotifyDay === today && cur\?\.day !== today && nowMin >= fireMin && nowMin < sched\.eveningCutoffMin\) \{/);
   // The refresh needs a fresh panel, is re-read after the await, and is persisted before it is logged.
   assert.match(blk, /const sized = await sizeShadowLeg\(sizing, false\);/);
   // A night the live overnight leg wrote is not re-sized (liveOvernightWrote), before any sizing.
@@ -754,7 +754,7 @@ test('★★★ index.ts: a shadow leg is returned only — no plan holder, no s
   assert.match(fn, /if \(!shadowLeg && loadBandCal\.basis === 'measured'/);
   assert.match(fn, /if \(costLoadBuilt && !shadowLeg\) \{/);
   // The live snapshot is keyed by the plan date that owns the cycle (an overnight plan: this evening).
-  assert.match(fn, /day: planDateOwningCycle\(\{\n\s+nowMs, firstLegStartMs: plan\.window\.startMs, timezone: 'America\/Phoenix',\n\s+notifyMinuteOfDay: NIGHT_CHARGE_NOTIFY_HOUR \* 60 \+ NIGHT_CHARGE_NOTIFY_MINUTE,\n\s+\}\),/);
+  assert.match(fn, /day: planDateOwningCycle\(\{\n\s+nowMs, firstLegStartMs: plan\.window\.startMs, timezone: siteTimeZone\(\),\n\s+notifyMinuteOfDay: nightSched\.notify\.fireMin,\n\s+\}\),/);
   // The evening job and its arm are the overnight leg's alone.
   const job = INDEX.slice(INDEX.indexOf('async function runNightChargeEveningJobInner('), INDEX.indexOf('R4 (v1.189.0) — THE WINTER MID-DAY CYCLE IN SHADOW'));
   assert.equal(job.split('runMiddayShadow').length - 1, 0, 'the evening job does not run the shadow');

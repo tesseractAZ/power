@@ -329,8 +329,8 @@ const MUTANTS = [
   {
     id: 'W-iii. ★★★ the fetch\'s re-check uses the 2 h TTL',
     file: WX,
-    find: '  if (cache && Date.now() - cache.fetchedAt < ttl) return cache;\n  const { forecastLat: lat, forecastLon: lon } = config;',
-    to: '  if (cache && Date.now() - cache.fetchedAt < TTL_MS) return cache; /* MUTANT */\n  const { forecastLat: lat, forecastLon: lon } = config;',
+    find: '  if (cache && Date.now() - cache.fetchedAt < ttl) return cache;\n  const { forecastLat: lat, forecastLon: lon } = siteCoordinates();',
+    to: '  if (cache && Date.now() - cache.fetchedAt < TTL_MS) return cache; /* MUTANT */\n  const { forecastLat: lat, forecastLon: lon } = siteCoordinates();',
     why: 'The refresh\'s own fetch returns the stale cache without fetching.',
   },
   {

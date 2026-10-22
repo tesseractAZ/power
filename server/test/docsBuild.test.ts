@@ -78,6 +78,7 @@ const P = {
   readme: 'README' + MD,
   security: 'SECURITY' + MD,
   guide: 'ecoflow_panel/DOCS' + MD,
+  yourHome: `${D}/guide/your-home${MD}`,
   options: `${D}/guide/options${MD}`,
   entities: `${D}/guide/entities${MD}`,
   index: `${D}/reference/README${MD}`,
@@ -127,6 +128,7 @@ function baseFiles(): Files {
       `See [the options](${GH}/blob/main/${P.options}), [the moved sections](${GH}/blob/main/${P.index}#moved-sections),`,
       `[section 1.1](${GH}/blob/main/${P.ref1}#11-first-section) and [the releases](${GH}/releases).`,
     ),
+    [P.yourHome]: lines('# Your home', '', '## Time zone', '', 'Leave it empty.'),
     [P.options]: lines('# Options', '', '## Tariff', '', 'Rates.'),
     [P.entities]: lines('# Entities', '', '## Sensors', '', 'Values.'),
     [P.security]: lines('# Security', '', '## Reporting', '', `See [the bridge](${P.ref22}#bridge-section).`),
@@ -267,6 +269,7 @@ test('--list-sources prints the print order: README, the guide pages, SECURITY, 
     assert.deepEqual(r.stdout.trim().split('\n').map((l) => l.split('\t')), [
       ['readme', P.readme],
       ['guide', P.guide],
+      ['guide', P.yourHome],
       ['guide', P.options],
       ['guide', P.entities],
       ['security', P.security],
@@ -281,14 +284,14 @@ test('--list-sources prints the print order: README, the guide pages, SECURITY, 
 
 test('the assembled fixture: parts in order under one synthetic "# Engineering reference", page breaks before each chapter start', () => {
   const md = assembleFixture();
-  const scan = checkAssembled(md, [P.readme, P.guide, P.options, P.entities, P.security, P.ref1, P.ref21, P.ref22, P.refA]);
-  const order = ['# Readme title', '# Guide', '# Options', '# Entities', '# Security', '# Engineering reference', '## 1. One', '## 2. Two', '### Bridge section', '## Appendix A'];
+  const scan = checkAssembled(md, [P.readme, P.guide, P.yourHome, P.options, P.entities, P.security, P.ref1, P.ref21, P.ref22, P.refA]);
+  const order = ['# Readme title', '# Guide', '# Your home', '# Options', '# Entities', '# Security', '# Engineering reference', '## 1. One', '## 2. Two', '### Bridge section', '## Appendix A'];
   const at = order.map((h) => (md.startsWith(h) ? 0 : md.indexOf(`\n${h}`)));
   for (let i = 0; i < at.length; i++) assert.ok(at[i] >= 0 && (i === 0 || at[i] > at[i - 1]), `${order[i]} is missing or out of order`);
   const h1 = scan.headings.filter((h) => h.level === 1).map((h) => h.raw.replace(ID_SUFFIX, ''));
-  assert.deepEqual(h1, ['Readme title', 'Guide', 'Options', 'Entities', 'Security', 'Engineering reference']);
-  // a page break before each of: guide, options, entities, security, the reference, chapters 1, 2, A
-  assert.equal(md.split(BREAK).length - 1, 8);
+  assert.deepEqual(h1, ['Readme title', 'Guide', 'Your home', 'Options', 'Entities', 'Security', 'Engineering reference']);
+  // a page break before each of: guide, your home, options, entities, security, the reference, chapters 1, 2, A
+  assert.equal(md.split(BREAK).length - 1, 9);
   const between = (a: string, b: string) => md.slice(md.indexOf(a), md.indexOf(b));
   assert.ok(!between('## 2. Two', '### Bridge section').includes(BREAK), 'a later part continues its chapter without a page break');
   assert.ok(between('# Engineering reference', '## 1. One').includes(BREAK), 'chapter 1 starts on a new page');
@@ -431,14 +434,14 @@ test('the repository: the printed sources are README, the guide pages, SECURITY,
   const r = build(['--list-sources']);
   assert.equal(r.status, 0, out(r));
   const rows = r.stdout.trim().split('\n').map((l) => l.split('\t'));
-  assert.deepEqual(rows.slice(0, 6), [
-    ['readme', P.readme], ['guide', P.guide], ['guide', P.options], ['guide', P.entities], ['security', P.security], ['preamble', P.index],
+  assert.deepEqual(rows.slice(0, 7), [
+    ['readme', P.readme], ['guide', P.guide], ['guide', P.yourHome], ['guide', P.options], ['guide', P.entities], ['security', P.security], ['preamble', P.index],
   ]);
-  const refs = rows.slice(6).map(([, rel]) => rel);
+  const refs = rows.slice(7).map(([, rel]) => rel);
   const onDisk = readdirSync(REFERENCE_DIR).filter((n) => n.endsWith(MD) && n !== 'README' + MD).sort().map((n) => `${D}/reference/${n}`);
   assert.equal(refs.length, 19);
   assert.deepEqual(refs, onDisk, 'the manifest is in file-name order and names every reference file');
-  for (const [role, rel] of rows.slice(6)) {
+  for (const [role, rel] of rows.slice(7)) {
     assert.equal(role, /\/\d\d-[2-9]-/.test(rel) ? 'part' : 'chapter', `${rel} is a ${role}`);
   }
   assert.ok(!rows.some(([, rel]) => rel.startsWith(`${D}/history/`)), 'the history is not printed');

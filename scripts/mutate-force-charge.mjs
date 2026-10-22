@@ -77,7 +77,8 @@ const MUTANTS = [
   {
     id: 'vii. ★★★ an empty slot list verifies as "nothing still on"',
     file: FC,
-    find: '  const ours = s.forceChargeSlots != null && s.forceChargeSlots.length > 0 ? s.forceChargeSlots : [1, 2, 3];',
+    // v1.191.0 — the default slot list comes from hwSpec (lane E), same three slots.
+    find: '  const ours = s.forceChargeSlots != null && s.forceChargeSlots.length > 0 ? s.forceChargeSlots : [...ALL_SOURCE_SLOTS];',
     to: '  const ours = s.forceChargeSlots ?? []; /* MUTANT */',
     why: 'A restart that loses the slot list switches NOTHING off and then verifies it — a force-charge left running with the record saying clean.',
   },
@@ -91,7 +92,7 @@ const MUTANTS = [
   {
     id: 'ix. ★★ no MAX_RUN backstop',
     file: FC,
-    find: '  if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= FORCE_CHARGE_MAX_RUN_MS) return \'maxRun\';',
+    find: '  if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= forceChargeRunCapMs(o)) return \'maxRun\';',
     to: '  /* MUTANT */',
     why: 'A corrupted window end holds force-charge on indefinitely.',
   },
@@ -208,7 +209,7 @@ const MUTANTS = [
   {
     id: 'xv. ★★★ just-in-time is removed (starts at the window open, then the house drains it)',
     file: FC,
-    find: '  if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above',
+    find: '  if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) { // window checked above',
     to: '  if (false) { /* MUTANT */',
     why: 'Force-charge reaches the target at ~02:00 and the house draws the pack back toward the 50% reserve for three hours — ~57% at dawn instead of 64%.',
   },
@@ -344,14 +345,14 @@ const MUTANTS = [
   {
     id: 'xliii. ★★ Friday\'s 1-hour window counts as a long-gap night',
     file: NCA,
-    find: '  if (!tonight || tonight.endMs - tonight.startMs < FULL_CHEAP_WINDOW_MIN_MS) return false;',
+    find: '  if (!tonight || tonight.endMs - tonight.startMs < minFullMs) return false;',
     to: '  if (!tonight) return false; /* MUTANT */',
     why: 'Friday 23:00-24:00 is sized to 90% as if it were a full night — a rule that was never measured.',
   },
   {
     id: 'xliv. ★★★ short windows are not stepped over',
     file: NCA,
-    find: '    if (w.endMs - w.startMs >= FULL_CHEAP_WINDOW_MIN_MS) return w;',
+    find: '    if (w.endMs - w.startMs >= minFullMs) return w;',
     to: '    return w; /* MUTANT */',
     why: 'Friday\'s 1-hour window reads as Thursday\'s next recharge, so the Thursday rule never fires.',
   },
@@ -439,8 +440,8 @@ const MUTANTS = [
   {
     id: 'lvi. ★★★ index.ts computes the rate and never passes it',
     file: IDX,
-    find: '    chargeRateKw,\n    evDisplacedKwh,\n  });',
-    to: '    evDisplacedKwh,\n  }); /* MUTANT */',
+    find: '    chargeRateKw,\n    evDisplacedKwh,\n    // v1.191.0 (S6, W5)',
+    to: '    evDisplacedKwh, /* MUTANT */\n    // v1.191.0 (S6, W5)',
     why: 'Every unit test passes while the live add-on keeps the fixed 10 kW.',
   },
   {
@@ -461,8 +462,8 @@ const MUTANTS = [
   {
     id: 'lix. ★★★ index.ts never passes the EV energy',
     file: IDX,
-    find: '    evDisplacedKwh,\n  });',
-    to: '  }); /* MUTANT */',
+    find: '    evDisplacedKwh,\n    // v1.191.0 (S6, W5) — the run backstop',
+    to: '    /* MUTANT */\n    // v1.191.0 (S6, W5) — the run backstop',
     why: 'The planner predicts the EV, the timing never hears of it.',
   },
   {
@@ -482,8 +483,9 @@ const MUTANTS = [
   {
     id: 'lxii. ★★ a rate under the floor falls back to the faster fixed rate',
     file: FC,
-    find: '    ? Math.max(FORCE_CHARGE_MIN_RATE_KW, rateKw) : FORCE_CHARGE_PLAN_RATE_KW;',
-    to: '    && rateKw >= FORCE_CHARGE_MIN_RATE_KW ? rateKw : FORCE_CHARGE_PLAN_RATE_KW; /* MUTANT */',
+    // v1.191.0 — the fallback is planRateFallbackKw (the fixed 10 kW while FORCE_CHARGE_KW_PER_CORE is unset).
+    find: '    ? Math.max(FORCE_CHARGE_MIN_RATE_KW, rateKw) : planRateFallbackKw(slotCount);',
+    to: '    && rateKw >= FORCE_CHARGE_MIN_RATE_KW ? rateKw : planRateFallbackKw(slotCount); /* MUTANT */',
     why: 'A near-zero known rate is swapped for 10 kW — the start comes late and the night ends short.',
   },
   {
@@ -504,14 +506,16 @@ const MUTANTS = [
   {
     id: 'lxv. ★★★ a Core out does not bound the rate',
     file: FC,
-    find: '    rate = Math.min(rate, i.slotCount * FORCE_CHARGE_PROVEN_KW_PER_SLOT);',
+    // v1.191.0 — the per-Core rate is forceChargeKwPerCore() (5.5 kW while FORCE_CHARGE_KW_PER_CORE is unset).
+    find: '    rate = Math.min(rate, i.slotCount * forceChargeKwPerCore());',
     to: '    rate = rate; /* MUTANT */',
     why: 'With one Core connected the start is timed for three — the night ends far short of the target.',
   },
   {
     id: 'lxvi. ★★ index.ts never passes the connected count',
     file: IDX,
-    find: '    slotCount: connectedSlots.filter((n) => n >= 1 && n <= 3).length,',
+    // v1.191.0 — the slot range is hwSpec's SHP2_SOURCE_SLOTS (lane E), the same three.
+    find: '    slotCount: connectedSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS).length,',
     to: '    /* MUTANT */',
     why: 'The bound exists and never runs.',
   },

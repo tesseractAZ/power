@@ -24,7 +24,6 @@ import { resolve, join } from 'node:path';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from 'undici';
 import type { Alert } from '../src/alerts.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 // The monitors' timers are unref'd; Node 22's runner would otherwise end the event loop mid-test.
 const keepAlive = setInterval(() => {}, 1_000);
@@ -59,6 +58,9 @@ process.env.BROADCAST_LEAD_SILENCE_MS = '0';
 process.env.BROADCAST_ANNOUNCE_RETRIES = '0';
 process.env.BROADCAST_HEALTH_PROBE_MS = '3600000';
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const { startAlertMonitor, alertSetTrusted, createLastGoodFeed } = await import('../src/alertMonitor.js');
 const { debouncedOnsetsPending, BOOT_RESET_ONSET_DEBOUNCE_MS } = await import('../src/alerts.js');
 const { SnapshotStore } = await import('../src/snapshot.js');

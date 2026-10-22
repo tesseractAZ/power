@@ -8,6 +8,7 @@ import { Recorder } from './recorder.js';
 import type { BridgeLedger } from './energyBridge.js';
 import { SnapshotStore } from './snapshot.js';
 import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
+import { siteDayStartOf, siteShiftDaysMs, siteYmd } from './siteTime.js';
 
 export interface EnergyTotals {
   sn: string;
@@ -139,10 +140,11 @@ export function integrateWh(
   };
 }
 
+/** The start of the local day containing `d`. v1.191.0 (lane A, T15) — the SITE day (siteTime.ts),
+ *  not the host's `setHours(0, 0, 0, 0)`: every "today" the totals, the Today card and the reports
+ *  compute now shares one clock with the tariff. Identical on a host whose zone is the site zone. */
 export function startOfLocalDayMs(d: Date = new Date()): number {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x.getTime();
+  return siteDayStartOf(d.getTime());
 }
 
 /* ─── Per-circuit kWh history ──────────────────────────────────────────── */
@@ -175,10 +177,7 @@ export interface CircuitHistory {
   };
 }
 
-const localDateStr = (ms: number): string => {
-  const d = new Date(ms);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-};
+const localDateStr = (ms: number): string => siteYmd(ms);
 
 /**
  * Per-day kWh totals (trapezoidal, gap-aware) for one SHP2 circuit over the
@@ -200,12 +199,12 @@ export function circuitHistoryByDay(
   const out: CircuitDayTotal[] = [];
   const now = Date.now();
   const todayStart = startOfLocalDayMs();
-  const ONE_DAY = 86_400_000;
   const seriesMetric = metric ?? `ch${ch}_w`;
 
   for (let i = days - 1; i >= 0; i--) {
-    const dayStart = todayStart - i * ONE_DAY;
-    const dayEndFull = dayStart + ONE_DAY;
+    // CA26 — calendar days in the site zone (a DST day is 23 or 25 h long).
+    const dayStart = siteShiftDaysMs(todayStart, -i);
+    const dayEndFull = siteShiftDaysMs(dayStart, 1);
     const dayEnd = i === 0 ? now : dayEndFull;
     // v1.14.0 (F9 sibling) — include the pre-window boundary sample so the day's
     // head segment isn't dropped (integrateWh clips to [dayStart, dayEnd]).

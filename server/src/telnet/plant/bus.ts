@@ -9,6 +9,7 @@
 import { c, padEnd, padStart, truncate, BOX } from '../ansi.js';
 import { divider, gauge, stateGlyph } from './scada.js';
 import { getShp2, circuitLoadState, deviceQuality, fmtW, fmtAmp } from './data.js';
+import { MAINS_V } from '../../hwSpec.js';
 import type { PlantData, PlantView } from './types.js';
 import type { AlarmState } from './scada.js';
 
@@ -88,9 +89,9 @@ export function renderBus(view: PlantView, data: PlantData): string[] {
       ch: pc.secondaryCh != null ? `${pc.primaryCh}+${pc.secondaryCh}` : String(pc.primaryCh),
       name: pc.name || `circuit ${pc.primaryCh}`,
       breaker: pc.breakerAmps,
-      v: pc.isSplitPhase ? 240 : 120,
+      v: pc.isSplitPhase ? MAINS_V.split : MAINS_V.line,
       w: pc.watts,
-      state: circuitLoadState(pc.watts, pc.breakerAmps, pc.isSplitPhase ? 240 : 120),
+      state: circuitLoadState(pc.watts, pc.breakerAmps, pc.isSplitPhase ? MAINS_V.split : MAINS_V.line),
       isSplit: pc.isSplitPhase,
     });
   }
@@ -100,9 +101,9 @@ export function renderBus(view: PlantView, data: PlantData): string[] {
       ch: String(ch.ch),
       name: ch.name || `circuit ${ch.ch}`,
       breaker: ch.setAmp,
-      v: 120,
+      v: MAINS_V.line,
       w: ch.watts,
-      state: circuitLoadState(ch.watts, ch.setAmp, 120),
+      state: circuitLoadState(ch.watts, ch.setAmp, MAINS_V.line),
       isSplit: false,
     });
   }

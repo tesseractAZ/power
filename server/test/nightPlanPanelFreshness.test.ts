@@ -60,7 +60,9 @@ test('★★★ recomputeNightChargePlan gates on the verdict BEFORE it reads th
 
 test('★★★ the evening job DEFERS a stale panel: no latch, no notify, no cancel, no row', () => {
   const b = fnBody('async function runNightChargeEveningJobInner(');
-  assert.ok(b.includes('await recomputeNightChargePlan({ allowStalePanel: nowMin >= NIGHT_PLAN_STALE_DEFER_UNTIL_MIN })'));
+  // v1.191.0 (S6) — the deferral end is the schedule's (NIGHT_PLAN_STALE_DEFER_UNTIL_MIN on the APS preset).
+  assert.ok(b.includes('const deferUntilMin = sched.staleDeferUntilMin;'));
+  assert.ok(b.includes('await recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin })'));
   const i = b.indexOf("if (result === 'panelStale') {");
   assert.ok(i > 0);
   const block = b.slice(i, b.indexOf('return;', i));
@@ -77,7 +79,7 @@ test('★★ the 30-min tick and the warm-up stay STRICT (they keep the previous
   // evening and a fresh panel only for the morning refresh; it plans nothing live.
   assert.equal((INDEX.match(/recomputeNightChargePlan\(\{ allowStalePanel/g) ?? []).length, 2, 'only the evening job (and its shadow) may use a stale panel');
   assert.ok(INDEX.includes('const r = await recomputeNightChargePlan({ allowStalePanel, shadowLeg: sizing });'));
-  assert.ok(INDEX.includes('sizeLeg: (sz) => sizeShadowLeg(sz, nowMin >= NIGHT_PLAN_STALE_DEFER_UNTIL_MIN),'));
+  assert.ok(INDEX.includes('sizeLeg: (sz) => sizeShadowLeg(sz, nowMin >= sched.staleDeferUntilMin),'));
   assert.ok(INDEX.includes('const sized = await sizeShadowLeg(sizing, false);'));
   assert.equal((INDEX.match(/sizeShadowLeg\(/g) ?? []).length, 3, 'defined once, called by the evening and the refresh');
 });

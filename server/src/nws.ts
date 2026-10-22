@@ -1,5 +1,5 @@
 import { request } from 'undici';
-import { config } from './config.js';
+import { siteCoordinates } from './site.js';
 import { singleFlight } from './singleFlight.js';
 
 /**
@@ -211,7 +211,7 @@ function eventsList(alerts: NwsAlert[]): string {
 }
 
 async function fetchNwsAlerts(log: (m: string) => void): Promise<NwsAlertFeed | null> {
-  const { forecastLat: lat, forecastLon: lon } = config;
+  const { forecastLat: lat, forecastLon: lon } = siteCoordinates();
   // v1.40.0: message_type MUST include `update` — NWS delivers upgrades
   // (Watch → Warning) and routine continuations as message_type=Update, and an
   // Update supersedes the original Alert message in the /alerts/active feed.
@@ -388,7 +388,7 @@ export async function getNwsHourlyCloud(log: (m: string) => void = () => {}): Pr
 
 async function fetchNwsHourlyCloud(log: (m: string) => void): Promise<NwsCloudCache | null> {
   if (cloudCache && Date.now() - cloudCache.fetchedAt < CLOUD_TTL_MS) return cloudCache;
-  const { forecastLat: lat, forecastLon: lon } = config;
+  const { forecastLat: lat, forecastLon: lon } = siteCoordinates();
   const grid = await resolveNwsGrid(lat, lon, log);
   if (!grid) return null;
   const url = `https://api.weather.gov/gridpoints/${grid.office}/${grid.gridX},${grid.gridY}`;

@@ -238,6 +238,63 @@ if bashio::config.true 'TARIFF_APS_RATES_CONFIRMED'; then
 else
   export TARIFF_APS_RATES_CONFIRMED=false
 fi
+# --- lane site --- v1.191.0 — schema-only optional keys: exported only while they have a value, so an
+# unset key leaves the variable absent and the server takes its unchanged path.
+# SITE_TIMEZONE: the site clock's zone; absent ⇒ TZ (the Supervisor sets it to HA's zone) ⇒ America/Phoenix.
+if bashio::config.has_value 'SITE_TIMEZONE'; then export SITE_TIMEZONE="$(bashio::config 'SITE_TIMEZONE')"; fi
+
+# --- lane tariff --- (v1.191.0) the tariff plan and the bridged tariff settings. Schema-only keys:
+# exported only when set, so an unset key leaves the variable absent and the server takes its
+# current path (the APS R-EV preset, the 17 ¢ flat fallback, the 15-20 / 1-5 legacy window).
+if bashio::config.has_value 'TARIFF_PLAN'; then export TARIFF_PLAN="$(bashio::config 'TARIFF_PLAN')"; fi
+if bashio::config.has_value 'TARIFF_PERIODS'; then export TARIFF_PERIODS="$(bashio::config 'TARIFF_PERIODS')"; fi
+if bashio::config.has_value 'TARIFF_RATES'; then export TARIFF_RATES="$(bashio::config 'TARIFF_RATES')"; fi
+if bashio::config.has_value 'TARIFF_RATES_CONFIRMED'; then export TARIFF_RATES_CONFIRMED="$(bashio::config 'TARIFF_RATES_CONFIRMED')"; fi
+if bashio::config.has_value 'TARIFF_FIXED_DAILY_CENTS'; then export TARIFF_FIXED_DAILY_CENTS="$(bashio::config 'TARIFF_FIXED_DAILY_CENTS')"; fi
+if bashio::config.has_value 'TARIFF_SUMMER_MONTHS'; then export TARIFF_SUMMER_MONTHS="$(bashio::config 'TARIFF_SUMMER_MONTHS')"; fi
+if bashio::config.has_value 'TARIFF_HOLIDAYS'; then export TARIFF_HOLIDAYS="$(bashio::config 'TARIFF_HOLIDAYS')"; fi
+if bashio::config.has_value 'TARIFF_CURRENCY'; then export TARIFF_CURRENCY="$(bashio::config 'TARIFF_CURRENCY')"; fi
+if bashio::config.has_value 'NIGHT_CHARGE_CHEAP_PERIOD'; then export NIGHT_CHARGE_CHEAP_PERIOD="$(bashio::config 'NIGHT_CHARGE_CHEAP_PERIOD')"; fi
+if bashio::config.has_value 'TARIFF_FLAT_CENTS_PER_KWH'; then export TARIFF_FLAT_CENTS_PER_KWH="$(bashio::config 'TARIFF_FLAT_CENTS_PER_KWH')"; fi
+if bashio::config.has_value 'TARIFF_ON_PEAK_CENTS'; then export TARIFF_ON_PEAK_CENTS="$(bashio::config 'TARIFF_ON_PEAK_CENTS')"; fi
+if bashio::config.has_value 'TARIFF_OFF_PEAK_CENTS'; then export TARIFF_OFF_PEAK_CENTS="$(bashio::config 'TARIFF_OFF_PEAK_CENTS')"; fi
+if bashio::config.has_value 'TARIFF_EXPORT_CENTS_PER_KWH'; then export TARIFF_EXPORT_CENTS_PER_KWH="$(bashio::config 'TARIFF_EXPORT_CENTS_PER_KWH')"; fi
+if bashio::config.has_value 'TARIFF_ON_PEAK_HOURS'; then export TARIFF_ON_PEAK_HOURS="$(bashio::config 'TARIFF_ON_PEAK_HOURS')"; fi
+if bashio::config.has_value 'TARIFF_ON_PEAK_DAYS'; then export TARIFF_ON_PEAK_DAYS="$(bashio::config 'TARIFF_ON_PEAK_DAYS')"; fi
+
+# --- lane pv --- (v1.191.0) schema-only optional keys: exported only when set, so an unset key
+# leaves the variable absent and the server keeps the reference array and FORECAST_LAT/LON.
+if bashio::config.has_value 'PV_ARRAY_KWP'; then export PV_ARRAY_KWP="$(bashio::config 'PV_ARRAY_KWP')"; fi
+if bashio::config.has_value 'PV_TILT_DEG'; then export PV_TILT_DEG="$(bashio::config 'PV_TILT_DEG')"; fi
+if bashio::config.has_value 'PV_AZIMUTH_DEG'; then export PV_AZIMUTH_DEG="$(bashio::config 'PV_AZIMUTH_DEG')"; fi
+if bashio::config.has_value 'PV_STRINGS'; then export PV_STRINGS="$(bashio::config 'PV_STRINGS')"; fi
+if bashio::config.has_value 'SITE_LOCATION_FROM_HA'; then export SITE_LOCATION_FROM_HA="$(bashio::config 'SITE_LOCATION_FROM_HA')"; fi
+
+# v1.191.0 — schema-only keys (no options: default): exported only when set, so an unset key
+# leaves the variable absent and the server takes its current path. A cleared field never
+# exports the string "null".
+# --- lane ev ---
+if bashio::config.has_value 'EV_MAX_LOAD_W'; then export EV_MAX_LOAD_W="$(bashio::config 'EV_MAX_LOAD_W')"; fi
+if bashio::config.has_value 'EV_CHARGER_COUNT'; then export EV_CHARGER_COUNT="$(bashio::config 'EV_CHARGER_COUNT')"; fi
+if bashio::config.has_value 'EV_PLATEAU_MIN_W'; then export EV_PLATEAU_MIN_W="$(bashio::config 'EV_PLATEAU_MIN_W')"; fi
+if bashio::config.has_value 'EV_CIRCUITS'; then export EV_CIRCUITS="$(bashio::config 'EV_CIRCUITS')"; fi
+# --- lane limits ---
+if bashio::config.has_value 'FORCE_CHARGE_KW_PER_CORE'; then export FORCE_CHARGE_KW_PER_CORE="$(bashio::config 'FORCE_CHARGE_KW_PER_CORE')"; fi
+if bashio::config.has_value 'RUNWAY_POOL_OVERHEAD_FLOOR_W'; then export RUNWAY_POOL_OVERHEAD_FLOOR_W="$(bashio::config 'RUNWAY_POOL_OVERHEAD_FLOOR_W')"; fi
+if bashio::config.has_value 'RUNWAY_CORE_OVERHEAD_W'; then export RUNWAY_CORE_OVERHEAD_W="$(bashio::config 'RUNWAY_CORE_OVERHEAD_W')"; fi
+if bashio::config.has_value 'BMS_RESEED_MIN_GAP_WH'; then export BMS_RESEED_MIN_GAP_WH="$(bashio::config 'BMS_RESEED_MIN_GAP_WH')"; fi
+if bashio::config.has_value 'CAPACITY_SCALE_MIN'; then export CAPACITY_SCALE_MIN="$(bashio::config 'CAPACITY_SCALE_MIN')"; fi
+if bashio::config.has_value 'FORECAST_NIGHT_START_HOUR'; then export FORECAST_NIGHT_START_HOUR="$(bashio::config 'FORECAST_NIGHT_START_HOUR')"; fi
+if bashio::config.has_value 'FORECAST_NIGHT_END_HOUR'; then export FORECAST_NIGHT_END_HOUR="$(bashio::config 'FORECAST_NIGHT_END_HOUR')"; fi
+if bashio::config.has_value 'GRID_CO2_INTENSITY_LB_PER_MWH'; then export GRID_CO2_INTENSITY_LB_PER_MWH="$(bashio::config 'GRID_CO2_INTENSITY_LB_PER_MWH')"; fi
+if bashio::config.has_value 'CYCLING_BASE_WEAR_USD_PER_KWH'; then export CYCLING_BASE_WEAR_USD_PER_KWH="$(bashio::config 'CYCLING_BASE_WEAR_USD_PER_KWH')"; fi
+if bashio::config.has_value 'OPPORTUNISTIC_LOADS'; then export OPPORTUNISTIC_LOADS="$(bashio::config 'OPPORTUNISTIC_LOADS')"; fi
+if bashio::config.has_value 'BATTERY_SOC_LADDER'; then export BATTERY_SOC_LADDER="$(bashio::config 'BATTERY_SOC_LADDER')"; fi
+
+# --- lane devices --- (v1.191.0) schema-only optional keys: exported only when set, so an unset key
+# leaves the variable absent and the server keeps the built-in spare list and the image's aliases.
+if bashio::config.has_value 'BENCH_SPARE_SNS'; then export BENCH_SPARE_SNS="$(bashio::config 'BENCH_SPARE_SNS')"; fi
+if bashio::config.has_value 'DEVICE_ALIASES'; then export DEVICE_ALIASES="$(bashio::config 'DEVICE_ALIASES')"; fi
 # SUPERVISOR_TOKEN is provided automatically by the HA Supervisor —
 # no need to export it manually. The Node process inherits it.
 

@@ -19,7 +19,7 @@ const ON = [{ slot: 1, label: 'Core 3', on: true }, { slot: 2, label: 'Core 1', 
 function inputs(over: Partial<ResponderInputs> = {}): ResponderInputs {
   return {
     mode: 'supervised', verdictActive: true, slots: ON,
-    stormPrepActive: false, nowMs: T0, phoenixDay: '2026-08-17', ...over,
+    stormPrepActive: false, nowMs: T0, siteDay: '2026-08-17', ...over,
   };
 }
 
@@ -89,7 +89,7 @@ test('daily cap: past CHARGE_NOW_DAILY_CAP supervised responses, it names but do
   // and the day rolling over resets the budget
   const b = decideChargeNowResponse(
     { ...freshResponderState(), day: '2026-08-17', actionsToday: CHARGE_NOW_DAILY_CAP },
-    inputs({ phoenixDay: '2026-08-18' }),
+    inputs({ siteDay: '2026-08-18' }),
   );
   assert.equal(b.kind, 'turnOff');
 });

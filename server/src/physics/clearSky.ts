@@ -21,10 +21,10 @@
  *   5. **Pmax** — η × A × G_poa × (1 - α(T_cell - 25))
  *      where α = -0.0035/°C for crystalline silicon (typical)
  *
- * the operator's array:
- *   - 42 panels × 400 W = 16.8 kWp nameplate
- *   - Phoenix, AZ (lat 33.4484, lon -112.074)
- *   - Mounted ~30° tilt south-ish (typical for the latitude)
+ * The array and its site are an input (SiteParams). v1.191.0 — site.ts `pvSite()` resolves them:
+ * with no PV_* option set it is exactly the reference array below (PHOENIX_SITE, the legacy site:
+ * 42 × 400 W = 16.8 kWp at the placeholder coordinates, 25° tilt, due south); with any PV_* option
+ * set it is the configured array at the configured site location.
  *
  * The OUTPUT of this module is interpretable: "at this exact moment,
  * physics says we should be making 14.2 kW given the array's nameplate;
@@ -32,9 +32,9 @@
  * signal than "we're making 12.8 kW today" because it's normalized
  * against everything that could change (time of day, season, weather).
  */
+import { DEFAULT_SITE_LAT, DEFAULT_SITE_LON } from '../siteDefaults.js';
 
-/** Site & array constants for the operator's plant. Override at call site if
- *  you ever ship this to someone else. */
+/** Site & array parameters for the clear-sky model (site.ts pvSite() resolves the install's). */
 export interface SiteParams {
   lat: number;
   lon: number;
@@ -52,9 +52,18 @@ export interface SiteParams {
   derate: number;
 }
 
+/**
+ * The legacy site: the reference home's array at the placeholder coordinates (siteDefaults.ts
+ * DEFAULT_SITE_LAT / DEFAULT_SITE_LON, the FORECAST_LAT / FORECAST_LON defaults). site.ts
+ * `pvSite()` returns this very object while no PV_* option is set, so the physics of an install
+ * that sets none is unchanged.
+ *
+ * @deprecated v1.191.0 — read the install's array through site.ts `pvSite()`; this name stays as
+ * the alias of the legacy site (golden G5 pins it).
+ */
 export const PHOENIX_SITE: SiteParams = {
-  lat: 33.4484,
-  lon: -112.074,
+  lat: DEFAULT_SITE_LAT,
+  lon: DEFAULT_SITE_LON,
   pNamplate: 16_800,  // 42 × 400 W
   tilt: 25,           // roof mount, approximate
   azimuth: 180,
@@ -74,8 +83,8 @@ function doy(d: Date): number {
   return Math.floor(diff / 86_400_000);
 }
 
-/** Equation of time (minutes). Spencer 1971 Fourier series. */
-function equationOfTime(d: Date): number {
+/** Equation of time (minutes). Spencer 1971 Fourier series. (Exported v1.191.0 for site.ts solar noon.) */
+export function equationOfTime(d: Date): number {
   const B = (2 * Math.PI * (doy(d) - 1)) / 365;
   return 229.18 * (
     0.000075 +
@@ -200,10 +209,11 @@ export interface PhysicsPmaxResult {
   notes: string;
 }
 
+/** v1.191.0 — `site` is required (it defaulted to the reference array): pass site.ts `pvSite()`. */
 export function physicsPmax(
   ts: number,
   ambientC: number,
-  site: SiteParams = PHOENIX_SITE,
+  site: SiteParams,
 ): PhysicsPmaxResult {
   const d = new Date(ts);
   const sp = solarPosition(d, site.lat, site.lon);

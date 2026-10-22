@@ -78,8 +78,8 @@ const MUTANTS = [
   {
     id: '2.iv ★ settlement checks the labels of the hours, not the values covering them',
     file: FREEZE,
-    find: '    if (!sent.has(coveringRadiationEpoch(Math.floor((dayStartMs + h * HOUR_MS) / HOUR_MS)))) return false;',
-    to: '    if (!sent.has(Math.floor((dayStartMs + h * HOUR_MS) / HOUR_MS))) return false; /* MUTANT */',
+    find: '    if (!sent.has(coveringRadiationEpoch(Math.floor(hourStart / HOUR_MS)))) return false;', // v1.191.0 (CA26)
+    to: '    if (!sent.has(Math.floor(hourStart / HOUR_MS))) return false; /* MUTANT */',
     why: 'A day freezes without the value for its last hour.',
   },
   {
@@ -106,7 +106,7 @@ const MUTANTS = [
   {
     id: '4.ii ★★ a membership change during the day is ignored',
     file: FREEZE,
-    find: "  if (membershipVerdict(o.history, o.dayStartMs, o.dayStartMs + DAY_MS) !== 'stable') return false;",
+    find: "  if (membershipVerdict(o.history, o.dayStartMs, siteShiftDaysMs(o.dayStartMs, 1)) !== 'stable') return false;", // v1.191.0 (CA26)
     to: '  /* MUTANT */',
     why: 'A day walked with an end-of-day roster freezes although its first hours had another.',
   },

@@ -17,7 +17,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BroadcastHealth } from '../src/broadcastHealth.js';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 // The only pending timers may be the monitor's unref'd ones; keep the loop alive for the file.
 const keepAlive = setInterval(() => {}, 1_000);
@@ -38,6 +37,9 @@ process.env.CLEARED_LOG_PATH = join(tmp, 'cleared.json');
 delete process.env.NOTIFY_CHANNEL;
 delete process.env.SUPERVISOR_TOKEN;
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const { startAlertMonitor } = await import('../src/alertMonitor.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
 const H = await import('../src/broadcastHealth.js');

@@ -19,14 +19,16 @@
  *    cumulative sums recomputed from the stored ledger — a backfilled older
  *    day simply shifts the sums and the re-import corrects every later row.
  *  - Daily granularity, honestly: HA statistics are hourly; a vendor day is
- *    one number. Each day becomes ONE hourly row at 12:00 Phoenix carrying
- *    the whole day's energy. Daily/monthly dashboard totals are exact; the
+ *    one number. Each day becomes ONE hourly row at local noon (site zone, floored
+ *    to the UTC hour — siteTime.ts siteNoonIso) carrying the whole day's energy. Daily/monthly dashboard totals are exact; the
  *    intra-day curve is deliberately not faked.
  *  - Pure payload builder, exported for tests; the WS call is a thin shell.
  */
 
 import WebSocket from 'ws';
 import type { VendorDayRecord } from './energyHistory.js';
+import { option } from './config.js';
+import { siteNoonIso } from './siteTime.js';
 
 export const HA_STATS_SOURCE = 'ecoflow_panel';
 
@@ -44,10 +46,11 @@ export const VENDOR_STAT_SERIES: ReadonlyArray<VendorStatSeries> = [
   { id: `${HA_STATS_SOURCE}:vendor_battery_out_energy`, name: 'Battery discharge (EcoFlow ledger)', field: (d) => d.batteryOutWh },
 ];
 
-/** Noon Phoenix (UTC-7, no DST) for a YYYY-MM-DD, as the ISO `start` HA wants. */
-export function noonPhoenixIso(ymd: string): string {
-  return `${ymd}T19:00:00+00:00`; // 12:00 MST == 19:00 UTC, year-round
-}
+/** v1.191.0 (T12) — the statistics `start` of a day is siteTime.ts siteNoonIso: local noon in the site
+ *  zone, floored to the UTC hour, as `YYYY-MM-DDTHH:00:00+00:00` (in America/Phoenix exactly the
+ *  `<day>T19:00:00+00:00` this wrote before). Rows already imported for past days are unchanged.
+ *  `noonPhoenixIso` stays as a deprecated alias. */
+export { siteNoonIso as noonPhoenixIso } from './siteTime.js';
 
 export interface ImportStatisticsMessage {
   type: 'recorder/import_statistics';
@@ -85,7 +88,7 @@ export function buildImportMessage(
     const wh = series.field(d);
     if (wh == null || !Number.isFinite(wh) || wh < 0) continue;
     sum += wh;
-    stats.push({ start: noonPhoenixIso(d.day), state: wh, sum });
+    stats.push({ start: siteNoonIso(d.day), state: wh, sum });
   }
   if (stats.length === 0) return null;
   return {
@@ -108,7 +111,7 @@ export async function exportVendorStatistics(
   days: ReadonlyArray<VendorDayRecord>,
   log: (m: string) => void,
 ): Promise<{ exported: string[]; failed: string[] }> {
-  const token = process.env.SUPERVISOR_TOKEN;
+  const token = option<string | undefined>('SUPERVISOR_TOKEN');
   if (!token) return { exported: [], failed: VENDOR_STAT_SERIES.map((s) => s.id) };
   const messages = VENDOR_STAT_SERIES
     .map((s) => ({ id: s.id, msg: buildImportMessage(s, days) }))

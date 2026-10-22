@@ -20,14 +20,15 @@
  *  - Vendor values are treated as claims, not truth: the record stores both
  *    sides and the drift, and drift is surfaced in the log — no alert, no
  *    alarm-path coupling, until a baseline of agreement is established.
- *  - Times sent to the endpoint are device-local (the SHP2 lives in
- *    America/Phoenix). Formatted manually — never Intl on the Pi image.
+ *  - Times sent to the endpoint are device-local. v1.191.0 (T14, CA18): the day is
+ *    chosen on the site clock (siteTime.ts), and the panel's own zone — which the
+ *    API does not expose — is assumed to match it (the setup guide asks the owner to
+ *    set the panel's zone in the EcoFlow app to the site's). Formatted manually.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
-import { config } from './config.js';
+import { config, option } from './config.js';
 import { ecoflow } from './ecoflow/rest.js';
 
 /* ─── vendor request codes (PD303 doc, verbatim) ──────────────────────────── */
@@ -241,8 +242,8 @@ export function latestVendorDay(state: VendorEnergyState | null | undefined): Ve
 /* ─── persistence sidecar (the actuator pattern; capped, atomic) ──────────── */
 
 const SIDECAR = () =>
-  process.env.VENDOR_ENERGY_STATE_PATH
-    ?? resolve(process.cwd(), config.dbPath, '..', 'vendor-energy-daily.json');
+  option<string | undefined>('VENDOR_ENERGY_STATE_PATH')
+    ?? config.dataFile('vendor-energy-daily.json');
 const KEEP_DAYS = 120;
 
 export interface VendorEnergyState {
@@ -275,8 +276,8 @@ export function saveVendorEnergyState(state: VendorEnergyState): void {
 
 /* ─── v1.85.0: backfill day selection (pure) ──────────────────────────────── */
 
-/** Previous Phoenix day of a YYYY-MM-DD string — pure date arithmetic, no
- *  Intl, DST-free (Phoenix). */
+/** The calendar day before a YYYY-MM-DD string — pure date arithmetic, no Intl and no zone
+ *  (a calendar date has the same predecessor in every zone). */
 export function prevYmd(ymd: string): string {
   const [y, m, d] = ymd.split('-').map(Number);
   const t = Date.UTC(y, m - 1, d) - 86_400_000;

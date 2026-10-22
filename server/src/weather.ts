@@ -1,5 +1,5 @@
 import { request } from 'undici';
-import { config } from './config.js';
+import { siteCoordinates } from './site.js';
 import { getNwsHourlyCloud, isNwsEnabled } from './nws.js';
 import { singleFlight } from './singleFlight.js';
 
@@ -143,7 +143,7 @@ export async function getWeather(
 async function fetchWeatherUncached(log: (m: string) => void, ttl: number = TTL_MS): Promise<WeatherForecast | null> {
   // A prior in-flight fetch may have populated the cache while this caller queued.
   if (cache && Date.now() - cache.fetchedAt < ttl) return cache;
-  const { forecastLat: lat, forecastLon: lon } = config;
+  const { forecastLat: lat, forecastLon: lon } = siteCoordinates();
   // v0.13.1 — past_days 3→7. The recorder now persists past+present GHI
   // (see index.ts → recordWeatherGhi), so one fetch backfills a full week
   // of irradiance into the recorder DB — immediately unblocking forecast-

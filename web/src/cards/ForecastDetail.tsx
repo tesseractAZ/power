@@ -1,9 +1,11 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import type { DayForecast, ForecastHour, HourResponse, SolarResponseModel, DeviceSolarModel } from '../types';
+import type { DayForecast, ForecastHour, HourResponse, SolarResponseModel, DeviceSolarModel, Site } from '../types';
 import { fmtW } from '../format';
 import { apiUrl } from '../api';
 import { PredictiveBadge } from '../components/PredictiveBadge';
 import { SectionHeader, Expander } from '../components/sections';
+import { useSite } from '../useSite';
+import { orientationText, benchSpareFlag, noPvDetail } from '../siteFacts';
 
 /**
  * Forecast detail for the Predictive Insights page — shows the full machinery
@@ -51,13 +53,11 @@ function productionCentroidHour(m: SolarResponseModel): number | null {
   return den > 0 ? num / den : null;
 }
 
-/** Plain-language array orientation implied by the peak-response hour. */
-function orientation(hour: number): string {
-  if (hour <= 8) return 'strongly morning-biased — east-facing, or shaded later in the day';
-  if (hour <= 10) return 'morning-biased — array faces east of south';
-  if (hour <= 13) return 'near solar noon — array faces close to true south';
-  if (hour <= 15) return 'afternoon-biased — array faces west of south';
-  return 'strongly afternoon-biased — west-facing, or shaded in the morning';
+/** Plain-language array orientation implied by the peak-response hour. v1.191.0 (CA24) — the bands
+ *  follow the site's solar noon and hemisphere (GET /api/site); today's clock-noon, south-facing bands
+ *  while the PV site is the legacy site (siteFacts.ts orientationText). */
+function orientation(hour: number, site: Site | null): string {
+  return orientationText(hour, site?.solar);
 }
 
 export function ForecastDetail() {
@@ -215,6 +215,7 @@ function HourRow({ h }: { h: ForecastHour }) {
 /* ── Card 2 — learned response model & panel inference ── */
 
 function ModelCard({ fc }: { fc: DayForecast }) {
+  const site = useSite();
   const m = fc.solarModel;
   const daylight = m.hourly.filter((h) => h.coeff != null || h.observedMaxPvW > 0);
   const fleetPeak = peakResponse(m);
@@ -290,7 +291,7 @@ function ModelCard({ fc }: { fc: DayForecast }) {
         {centroidHourRounded != null ? (
           <Inference
             label="Fleet"
-            detail={`Peak output around ${fmtHour(centroidHourRounded)} — ${orientation(centroidHourRounded)}${
+            detail={`Peak output around ${fmtHour(centroidHourRounded)} — ${orientation(centroidHourRounded, site)}${
               fleetPeak ? ` (strongest learned response ${fleetPeak.coeff!.toFixed(1)} W per W/m² at ${fmtHour(fleetPeak.hour)})` : ''
             }.`}
           />
@@ -298,7 +299,7 @@ function ModelCard({ fc }: { fc: DayForecast }) {
           <div className="text-muted">Not enough recorded PV yet to infer array orientation.</div>
         )}
         {fc.deviceModels.map((dm) => (
-          <DeviceInference key={dm.sn} dm={dm} />
+          <DeviceInference key={dm.sn} dm={dm} site={site} />
         ))}
       </div>
     </div>
@@ -327,7 +328,7 @@ function CoeffRow({ h, peakHour }: { h: HourResponse; peakHour: number | null })
   );
 }
 
-function DeviceInference({ dm }: { dm: DeviceSolarModel }) {
+function DeviceInference({ dm, site }: { dm: DeviceSolarModel; site: Site | null }) {
   const whole = peakResponse(dm.model);
   const hv = peakResponse(dm.hv);
   const lv = peakResponse(dm.lv);
@@ -343,7 +344,8 @@ function DeviceInference({ dm }: { dm: DeviceSolarModel }) {
         detail={
           hasPv
             ? 'PV recorded, but the GHI→PV response is still calibrating — not enough bright, well-sampled hours to infer orientation yet.'
-            : "No recorded PV — offline gaps or an unwired spare; orientation can't be inferred yet."
+            // v1.191.0 — today's line unless the server says what the unit is (plan 3.8 S3).
+            : noPvDetail(benchSpareFlag(site, dm.sn))
         }
         muted
       />

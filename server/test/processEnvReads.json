@@ -1,0 +1,675 @@
+{
+ "_how": "Regenerate: cd server && node --import tsx test/processEnvScan.ts --write. The diff may only remove (processEnvRatchet.test.ts).",
+ "alertMonitor.ts": {
+  "occurrences": 21,
+  "lines": 21,
+  "names": [
+   "ALERT_BOOT_HYDRATION_MAX_MS",
+   "ALERT_DEBOUNCE_MS",
+   "ALERT_EVAL_MS",
+   "ALERT_EVIDENCE_STALE_MS",
+   "ALERT_FEED_BUDGET_MS",
+   "ALERT_ORPHAN_HOLD_MAX_MS",
+   "BASELINE_LOAD_RESOLVE_DWELL_MS",
+   "BASELINE_LOAD_SUSTAIN_MS",
+   "CLEARED_LOG_MAX",
+   "CLEARED_LOG_PATH",
+   "DIGEST_STATE_PATH",
+   "FORECAST_DIP_RESOLVE_DWELL_MS",
+   "HOST_PRESSURE_STATE_PATH",
+   "IDLE_POOL_STATE_PATH",
+   "MSG_RATE_PUSH_DEBOUNCE_MS",
+   "NOTIFY_STATE_PATH",
+   "OFF_PANEL_DEMOTE_TICKS",
+   "SOC_RESOLVE_DWELL_MS",
+   "VDIFF_KNEE_STATE_PATH",
+   "VDIFF_RESOLVE_DWELL_MS"
+  ],
+  "bare": 1,
+  "dynamic": 0
+ },
+ "alertOnset.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "ALERT_ONSET_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "alertOutcomes.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "ALERT_OUTCOMES_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "alertSettings.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "ALERT_SETTINGS_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "alertTelemetry.ts": {
+  "occurrences": 2,
+  "lines": 2,
+  "names": [
+   "ALERT_FAMILY_META_PATH",
+   "ALERT_TELEMETRY_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "alerts.ts": {
+  "occurrences": 2,
+  "lines": 2,
+  "names": [
+   "HOST_PRESSURE_CRIT_DWELL_S",
+   "HOST_PRESSURE_WARN_DWELL_S",
+   "SYSTEM_OUTAGE_ALERT_ENABLED",
+   "SYSTEM_OUTAGE_MIN_MINUTES",
+   "SYSTEM_OUTAGE_RECENT_WINDOW_H",
+   "SYSTEM_OUTAGE_RESTART_MIN_MINUTES"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "analytics.ts": {
+  "occurrences": 12,
+  "lines": 12,
+  "names": [
+   "FORECAST_LOAD_HALF_LIFE_DAYS",
+   "FORECAST_NIGHT_BLEND",
+   "FORECAST_NIGHT_MAX_TRIM",
+   "FORECAST_NIGHT_OVERPREDICT_RATIO",
+   "FORECAST_RECENT_LOAD_WINDOW_MS",
+   "INCOMPLETE_FORECAST_TTL_MS",
+   "PEAK_RESPONSE_MIN_GHI_WM2",
+   "PROB_LOAD_SIGMA_FRAC",
+   "PV_BAND_SIGMA_CAL",
+   "RTE_EXTENDED_WINDOW_DAYS",
+   "RUNWAY_EMPTY_CLEAR_SAMPLES"
+  ],
+  "bare": 1,
+  "dynamic": 0
+ },
+ "analyticsClient.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "ANALYTICS_REPORT_TTL_MS"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "audioRenderer.ts": {
+  "occurrences": 2,
+  "lines": 2,
+  "names": [
+   "BROADCAST_TTS_PASS_TIMEOUT_MS",
+   "BROADCAST_TTS_TOTAL_BUDGET_MS"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "auth.ts": {
+  "occurrences": 3,
+  "lines": 3,
+  "names": [
+   "DATA_DIR",
+   "PANEL_WRITE_TOKEN",
+   "TUI_TRUSTED_ORIGINS"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "backupHook.mjs": {
+  "occurrences": 3,
+  "lines": 3,
+  "names": [
+   "BACKUP_HOOK_TIMEOUT_MS",
+   "BACKUP_WINDOW_LOG",
+   "PORT"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "backupWindow.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "BACKUP_WINDOW_LOG"
+  ],
+  "bare": 1,
+  "dynamic": 0
+ },
+ "batterySocAlarm.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "BATTERY_SOC_ALARM_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "broadcast.ts": {
+  "occurrences": 32,
+  "lines": 27,
+  "names": [
+   "BROADCAST_ANNOUNCE_RETRIES",
+   "BROADCAST_ANNOUNCE_VOLUME",
+   "BROADCAST_AUDIO_BASE",
+   "BROADCAST_BILINGUAL",
+   "BROADCAST_BOOT_WARMUP_MS",
+   "BROADCAST_CHIME_GAP_MS",
+   "BROADCAST_ENABLED",
+   "BROADCAST_END_OF_MESSAGE",
+   "BROADCAST_END_OF_MESSAGE_GAP_MS",
+   "BROADCAST_END_OF_MESSAGE_PHRASE",
+   "BROADCAST_END_OF_MESSAGE_PHRASE_ES",
+   "BROADCAST_HEALTH_PROBE_MS",
+   "BROADCAST_LEAD_SILENCE_MS",
+   "BROADCAST_MIN_SEVERITY",
+   "BROADCAST_QUIET_HOURS",
+   "BROADCAST_REPEAT",
+   "BROADCAST_REPEAT_GAP_MS",
+   "BROADCAST_SIP_TARGETS",
+   "BROADCAST_TARGETS",
+   "BROADCAST_UNREACHABLE_CONFIRM",
+   "BROADCAST_USE_PRE_ANNOUNCE",
+   "BROADCAST_VOLUME",
+   "BROADCAST_WYOMING_HOST",
+   "BROADCAST_WYOMING_PORT",
+   "BROADCAST_WYOMING_VOICE",
+   "BROADCAST_WYOMING_VOICE_ES",
+   "CRITICAL_BREAKS_QUIET_HOURS"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "broadcastRuntimeConfig.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "BROADCAST_RUNTIME_CONFIG_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "cellSpread.ts": {
+  "occurrences": 3,
+  "lines": 3,
+  "names": [
+   "VOL_DIFF_PLATEAU_CRIT_MV",
+   "VOL_DIFF_PLATEAU_QUIET_SOC_PCT",
+   "VOL_DIFF_PLATEAU_SOC_PCT"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "chimeConfig.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "CHIME_CONFIG_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "chimeStore.ts": {
+  "occurrences": 2,
+  "lines": 1,
+  "names": [
+   "CHIMES_DIR",
+   "DATA_DIR"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "dbExport.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "DB_EXPORT_DIR"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "defectivePackLatch.ts": {
+  "occurrences": 2,
+  "lines": 2,
+  "names": [
+   "DEFECTIVE_PACK_LATCH_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "deviceLink.ts": {
+  "occurrences": 2,
+  "lines": 2,
+  "names": [
+   "ECOFLOW_DEVICE_REACHABILITY",
+   "REACHABILITY_MAX_AGE_MS"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "dispatch/mpc.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "MPC_MAX_C_RATE"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "ecoflow/commands.ts": {
+  "occurrences": 3,
+  "lines": 2,
+  "names": [
+   "WRITE_DEBUG_TOKEN"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "ecoflow/mqtt.ts": {
+  "occurrences": 7,
+  "lines": 5,
+  "names": [
+   "ECOFLOW_TRACE_FILE",
+   "ECOFLOW_TRACE_SN",
+   "ECOFLOW_TRACE_TOPICS"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "ecoflow/project.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "BACKUP_POOL_GRACE_HOLD_MS"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "ecoflow/sign.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "ECOFLOW_DEBUG_SIGN"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "featureSnapshot.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "FEATURE_SNAPSHOTS_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "gridState.ts": {
+  "occurrences": 3,
+  "lines": 3,
+  "names": [
+   "GRID_AVAILABLE",
+   "GRID_FLOOR_SLACK_PCT",
+   "GRID_PRESENCE_ENTITY"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "haService.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "SUPERVISOR_TOKEN"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "haStateCache.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "HA_STATE_CACHE_TTL_MS"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "heartbeat.ts": {
+  "occurrences": 3,
+  "lines": 3,
+  "names": [
+   "HEARTBEAT_INTERVAL_S",
+   "HEARTBEAT_URL"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "hostPower.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "HOST_POWER_ENTITY"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "hostThermal.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "HOST_TEMP_CRIT_C",
+   "HOST_TEMP_WARN_C"
+  ],
+  "bare": 0,
+  "dynamic": 1
+ },
+ "index.ts": {
+  "occurrences": 41,
+  "lines": 36,
+  "names": [
+   "ARB_LOAD_P90_CAP",
+   "BATTERY_RUNWAY_ALARM_ENABLED",
+   "BATTERY_SOC_ALARM_ENABLED",
+   "BROADCAST_ANNOUNCE_VOLUME",
+   "BROADCAST_ENABLED",
+   "BROADCAST_QUIET_HOURS",
+   "BROADCAST_VOLUME",
+   "BUILD_DATE",
+   "BUILD_REF",
+   "BUILD_VERSION",
+   "CHARGE_NOW_RESPONSE",
+   "CRITICAL_BREAKS_QUIET_HOURS",
+   "DATA_DIR",
+   "GRID_AVAILABLE",
+   "LOAD_SHEDDING_ADVISORY_ENABLED",
+   "LOAD_SHEDDING_RESTORE_MARGIN_H",
+   "LOAD_SHEDDING_RUNWAY_THRESHOLD_H",
+   "MQTT_BOOT_GRACE_ATTEMPTS",
+   "MSG_RATE_FLOOR_STATE_PATH",
+   "NIGHT_CHARGE_ACTUATION_PATH",
+   "NIGHT_CHARGE_ADVISOR_ENABLED",
+   "NIGHT_CHARGE_LATCH_PATH",
+   "NIGHT_CHARGE_MODE",
+   "NIGHT_CHARGE_NOTIFY_HOUR",
+   "NIGHT_CHARGE_NOTIFY_MINUTE",
+   "NIGHT_CHARGE_NOTIFY_ON_HOLD",
+   "NIGHT_CHARGE_PLANSNAP_PATH",
+   "NOTIFY_QUIET_HOURS",
+   "POLL_INTERVAL_MS",
+   "SEND_CMD_COOLDOWN_MS",
+   "WEB_DIST_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "lightingPosture.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "LIGHTING_POSTURE_STATE_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "loadShedRegistry.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "LOAD_SHEDDING_SHED_ENTITIES"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "messageRateFloor.ts": {
+  "occurrences": 9,
+  "lines": 9,
+  "names": [
+   "MSG_RATE_FLOOR_COLLAPSE_MIN",
+   "MSG_RATE_FLOOR_FLATNESS_MAX_CV",
+   "MSG_RATE_FLOOR_FLATNESS_MIN_HOURS",
+   "MSG_RATE_FLOOR_FLAT_COLLAPSE_MIN",
+   "MSG_RATE_FLOOR_FRACTION",
+   "MSG_RATE_FLOOR_MIN_BASELINE",
+   "MSG_RATE_FLOOR_MIN_HOUR_SAMPLES",
+   "MSG_RATE_FLOOR_PEAK_HALFLIFE_DAYS",
+   "MSG_RATE_FLOOR_RECOVER_MIN"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "ml.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "PACK_RISK_DRIFT_THRESHOLD",
+   "PACK_RISK_MIN_DECIDED_OUTCOMES",
+   "PACK_RISK_MIN_PRECISION",
+   "PACK_RISK_MIN_TRAINING_SAMPLES"
+  ],
+  "bare": 0,
+  "dynamic": 1
+ },
+ "mqttDiscovery.ts": {
+  "occurrences": 10,
+  "lines": 9,
+  "names": [
+   "BUILD_VERSION",
+   "DATA_DIR",
+   "MQTT_DISCOVERY_ENABLED",
+   "MQTT_DISCOVERY_HOST",
+   "MQTT_DISCOVERY_PASS",
+   "MQTT_DISCOVERY_PORT",
+   "MQTT_DISCOVERY_PREFIX",
+   "MQTT_DISCOVERY_USER"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "notify.ts": {
+  "occurrences": 7,
+  "lines": 7,
+  "names": [
+   "NOTIFY_CHANNEL",
+   "NOTIFY_CRITICAL_BYPASS_DND",
+   "NOTIFY_HA_PUSH_TARGETS",
+   "NOTIFY_MIN_SEVERITY",
+   "NOTIFY_RESOLVED",
+   "SUPERVISOR_TOKEN"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "nws.ts": {
+  "occurrences": 3,
+  "lines": 2,
+  "names": [
+   "BUILD_VERSION",
+   "NWS_ENABLED"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "peakGridDraw.ts": {
+  "occurrences": 3,
+  "lines": 3,
+  "names": [
+   "PEAK_DRAW_DWELL_MS",
+   "PEAK_DRAW_MIN_CHARGE_W",
+   "PEAK_DRAW_RESERVE_HEADROOM_PCT"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "poolEnergyBasis.ts": {
+  "occurrences": 2,
+  "lines": 2,
+  "names": [
+   "POOL_ENERGY_BASIS_DIR",
+   "SUPERVISOR_TOKEN"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "reconnectAudit.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "RECONNECT_WATCH_STATE_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "recorder.ts": {
+  "occurrences": 5,
+  "lines": 4,
+  "names": [
+   "BMS_MEMBERSHIP_SUSTAINED_ROLLUPS",
+   "BMS_REBASELINE_SUSPECT_ROLLUPS",
+   "RECORDER_HELD_SCAN",
+   "SUPERVISOR_TOKEN"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "redReplayGate.ts": {
+  "occurrences": 3,
+  "lines": 3,
+  "names": [
+   "BROADCAST_RED_REPLAY_MIN_GAP_MS",
+   "BROADCAST_RED_REPLAY_STATE_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "repairIssues.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "REPAIR_FIRST_SEEN_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "runwayAlarm.ts": {
+  "occurrences": 2,
+  "lines": 2,
+  "names": [
+   "BATTERY_RUNWAY_ALARM_PATH",
+   "BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "selfVitals.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "VITALS_DISK_CRIT_MB",
+   "VITALS_DISK_WARN_MB",
+   "VITALS_LAG_CRIT_MS",
+   "VITALS_LAG_WARN_MS",
+   "VITALS_LOAD_CRIT",
+   "VITALS_LOAD_WARN",
+   "VITALS_MEM_CRIT_MB",
+   "VITALS_MEM_WARN_MB"
+  ],
+  "bare": 0,
+  "dynamic": 1
+ },
+ "sessionSelfHeal.ts": {
+  "occurrences": 4,
+  "lines": 4,
+  "names": [
+   "SELF_HEAL_AFTER_MS",
+   "SELF_HEAL_COOLDOWN_MS",
+   "SELF_HEAL_MAX_PER_DAY",
+   "SELF_HEAL_STATE_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "settingsDrift.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "SETTINGS_DRIFT_STATE_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "settingsDriftHold.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "SETTINGS_DRIFT_HELD_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "snapshot.ts": {
+  "occurrences": 11,
+  "lines": 11,
+  "names": [
+   "GRID_READING_PATH",
+   "HOUSE_PANEL_PATH",
+   "PACK_GHOSTS_PATH",
+   "POLL_SUMMARY_EVERY",
+   "POOL_UNKNOWN_PATH",
+   "SHADOW_WITNESS_PATH",
+   "SNAPSHOT_INCLUDE_RAW",
+   "SUPERVISOR_TOKEN"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "telemetryBlind.ts": {
+  "occurrences": 4,
+  "lines": 4,
+  "names": [
+   "TELEMETRY_AUTH_HEAL_AFTER",
+   "TELEMETRY_AUTH_HEAL_COOLDOWN_MS",
+   "TELEMETRY_BLIND_BOOT_GRACE_MS",
+   "TELEMETRY_BLIND_STALE_MS"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "telnet/session.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "TUI_PASSWORD",
+   "TUI_USERNAME"
+  ],
+  "bare": 1,
+  "dynamic": 0
+ },
+ "warrantyExport.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "CLEARED_LOG_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ },
+ "writeLog.ts": {
+  "occurrences": 1,
+  "lines": 1,
+  "names": [
+   "WRITE_LOG_PATH"
+  ],
+  "bare": 0,
+  "dynamic": 0
+ }
+}

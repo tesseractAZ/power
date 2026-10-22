@@ -71,11 +71,14 @@ import {
 // R2 — the window resolver and the per-leg rules live with the cycle chooser; the taper ceiling
 // with the curtailment engine's taper band. (chargeWindows.ts imports only tariff.ts;
 // chargeTaper.ts imports nothing — no cycle.)
-import { resolveCheapWindow, legObjective, legForceChargeEligible, type ChargeWindowKind, type ChargeLegRole } from './chargeWindows.js';
+import { resolveCheapWindow, legObjective, legForceChargeEligible, type ChargeWindowKind, type ChargeLegRole, type CheapNight } from './chargeWindows.js';
 import { taperCeilingKwh } from './chargeTaper.js';
+// v1.191.0 (lane A, T5/T10) — window text and plan-date bounds in the site zone.
+import { fmtSiteDayHm, siteDayStartMs } from './siteTime.js';
 export { resolveCheapWindow } from './chargeWindows.js';
 
 const HOUR_MS = 3_600_000;
+const MINUTE_MS = 60_000;
 
 /** One hour of the CONSERVATIVE forecast the planner sizes against. PV is the
  *  P10 (pessimistic-low) band; load is the P90 (pessimistic-high) band with any
@@ -1303,7 +1306,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       const gridHeldNote = gridHeldMinPct > preWindowMinSocPct
         ? ` With the grid present the SHP2 defends the ${round1(reserveFloorPct)}% reserve, so the pool should hold ~${gridHeldMinPct}% — the ${preWindowMinSocPct}% figure is the islanded worst case this plan is sized against.`
         : '';
-      preWindowNote = ` NOTE: before the charge window opens (${fmtPhoenixDayHm(windowStart, nowMs)}) the pack is projected to dip to ~${preWindowMinSocPct}% if islanded — a dip tonight's buy cannot prevent; the floor alarm owns that span.${gridHeldNote}`;
+      preWindowNote = ` NOTE: before the charge window opens (${fmtSiteDayHm(windowStart, nowMs)}) the pack is projected to dip to ~${preWindowMinSocPct}% if islanded — a dip tonight's buy cannot prevent; the floor alarm owns that span.${gridHeldNote}`;
     }
   }
   // v1.187.22 — the EXPECTED pack when the window's write lands, for the expected-buy disclosure
@@ -1938,7 +1941,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // A night expected to charge nothing (isNoChargeKwh) is headlined as the reserve it holds, not
   // as a charge of ~0 kWh to a level the pool already sits above. The level is the one the night is
   // expected to reach (chargeLevelPct): the reserve when no force-charge start is expected.
-  const windowText = `${fmtPhoenixDayHm(windowStart, nowMs)}–${fmtPhoenixDayHm(windowEnd, nowMs)} window`;
+  const windowText = `${fmtSiteDayHm(windowStart, nowMs)}–${fmtSiteDayHm(windowEnd, nowMs)} window`;
   const headlineLevelPct = chargeLevelPct({
     setpointSocPct, expectedWriteLevelPct: expected.levelPct, expectedForceChargeStartMs: expected.forceChargeStartMs,
   }) ?? writtenPct;
@@ -1963,7 +1966,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     if (fcAt === null) {
       return `${start < writtenPct ? `, and tonight's write charges it to the ${writtenPct}% reserve` : `, above the ${writtenPct}% reserve`}; the just-in-time force-charge to ${level}% is not expected to start`;
     }
-    const at = fmtPhoenixDayHm(fcAt, nowMs);
+    const at = fmtSiteDayHm(fcAt, nowMs);
     if (start < writtenPct) return `, and tonight's write charges it ${to} (the ${writtenPct}% reserve, then force-charge from ~${at})${asFar}`;
     return fcAt <= effChargeStartMs
       ? `, above the ${writtenPct}% reserve; the force-charge is due at once (~${at}) and charges it ${to}${asFar}`
@@ -2130,7 +2133,7 @@ function finiteOrNull(n: number | null | undefined): number | null {
   return typeof n === 'number' && Number.isFinite(n) ? Math.max(0, n) : null;
 }
 /** Hour-of-day hint for the rationale string (no TZ math — display only; the
- *  window bounds are already resolved in Phoenix upstream). */
+ *  window bounds are already resolved in the site zone upstream). */
 function fmtLocalHint(_ms: number): string { return 'the window close'; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -2160,34 +2163,12 @@ export function setLatestNightChargePlan(p: NightChargePlan): void {
  *  layer additionally sets expire_after so the retained topic goes UNAVAILABLE. */
 const PLAN_STALENESS_MS = 43_200_000; // 12 h
 
-/** Format a UTC instant as "HH:MM" in America/Phoenix (design: America/Phoenix
- *  via Intl, never the host clock; Phoenix has no DST but the resolver does not
- *  rely on that). */
-function fmtPhoenixHm(ms: number): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Phoenix',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(new Date(ms));
-  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-  const hh = get('hour') || '00';
-  const mm = get('minute') || '00';
-  return `${hh}:${mm}`;
-}
-
-/** v1.39.0 (§4 display honesty): "HH:MM" for instants within the next 24 h,
- *  "EEE HH:MM" (e.g. "Mon 00:00") beyond — a Saturday-evening plan resolving
- *  Monday's window must not present it as tonight's. Exported for the
- *  delivery surfaces (MQTT state / TUI / notify) so they agree. */
-export function fmtPhoenixDayHm(ms: number, nowMs: number): string {
-  const hm = fmtPhoenixHm(ms);
-  if (ms - nowMs < 24 * HOUR_MS) return hm;
-  const wd = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Phoenix', weekday: 'short' })
-    .formatToParts(new Date(ms))
-    .find((p) => p.type === 'weekday')?.value ?? '';
-  return wd ? `${wd} ${hm}` : hm;
-}
+/** v1.39.0 (§4 display honesty): "HH:MM" for instants within the next 24 h, "EEE HH:MM" (e.g.
+ *  "Mon 00:00") beyond — a Saturday-evening plan resolving Monday's window must not present it as
+ *  tonight's. The delivery surfaces (MQTT state / TUI / notify) read the same formatter so they agree.
+ *  v1.191.0 (T5) — the formatter is siteTime.ts fmtSiteDayHm (the site zone, never the host clock);
+ *  this name stays as a deprecated alias for its existing importers (notify.ts, the TUI). */
+export { fmtSiteDayHm as fmtPhoenixDayHm } from './siteTime.js';
 
 /**
  * Flat fields published into the MQTT state payload + /api/ha-state so the
@@ -2195,7 +2176,7 @@ export function fmtPhoenixDayHm(ms: number, nowMs: number): string {
  * model). 12 h staleness guard (design §4.1): numeric fields are null unless the
  * plan is fresh AND its basis is complete; charge_tonight is STRICTLY false
  * unless fresh && plan.chargeTonight (never null-as-true). window_start/_end are
- * "HH:MM" America/Phoenix from plan.window, null when there is no window.
+ * "HH:MM" in the site zone from plan.window, null when there is no window.
  */
 export function nightChargeStateFields(
   plan: NightChargePlan | null,
@@ -2237,8 +2218,8 @@ export function nightChargeStateFields(
     // no window / null plan. HA expire_after (§I12) covers the dead-advisor case.
     // v1.39.0: day-qualified beyond 24 h ("Mon 00:00") — a weekend plan resolving
     // Monday's window must not present a date-less HH:MM as tonight's window.
-    night_charge_window_start: win ? fmtPhoenixDayHm(win.startMs, nowMs) : null,
-    night_charge_window_end: win ? fmtPhoenixDayHm(win.endMs, nowMs) : null,
+    night_charge_window_start: win ? fmtSiteDayHm(win.startMs, nowMs) : null,
+    night_charge_window_end: win ? fmtSiteDayHm(win.endMs, nowMs) : null,
     charge_tonight: fresh ? plan!.chargeTonight === true : false,
   };
 }
@@ -2333,9 +2314,14 @@ export interface NightChargeInputDeps {
   gridInputCapKw: number | null;
 
   // Cheap-window resolution: a tariff period resolver (rateAt(...).periodId) and
-  // the id of the OVERNIGHT (23:00–05:00) cheap period. No tariff import here.
+  // the id of the tariff's cheap period (tariff.ts cheapPeriodIdOf: the APS preset's OVERNIGHT
+  // 23:00–05:00 period; a custom plan's `cheap` one). null — the plan has none — resolves no
+  // window (a null plan). No tariff import here.
   periodIdAt: (tsMs: number) => string;
-  cheapPeriodId: string;
+  cheapPeriodId: string | null;
+  /** v1.191.0 (review) — the night a window is bounded to (chargeWindows.ts cheapNightOf): one
+   *  night of a run longer than a night (a weekend of off-peak). null/absent — the APS preset — as before. */
+  cheapNight?: CheapNight | null;
   windowScanHours?: number;
 
   // Forecast basis.
@@ -2392,19 +2378,23 @@ export const LONG_GAP_MS = 24 * HOUR_MS;
 
 /** v1.168.0 — the next cheap window of at least FULL_CHEAP_WINDOW_MIN_MS starting at or
  *  after `fromMs` (short windows are stepped over), or null if none starts within
- *  `scanHours`. */
+ *  `scanHours`. v1.191.0 (CA15) — `minFullMs` is the schedule's (nightSchedule.ts
+ *  fullWindowMinMs): FULL_CHEAP_WINDOW_MIN_MS on the APS preset. */
 export function nextFullCheapWindow(
   periodIdAt: (tsMs: number) => string,
   fromMs: number,
   cheapPeriodId: string,
   scanHours = 120,
+  minFullMs: number = FULL_CHEAP_WINDOW_MIN_MS,
+  /** v1.191.0 (review) — the night bound (chargeWindows.ts cheapNightOf); null on the APS preset. */
+  night: CheapNight | null = null,
 ): { startMs: number; endMs: number } | null {
   const limitMs = fromMs + scanHours * HOUR_MS;
   let from = fromMs;
   for (let i = 0; i < 16 && from < limitMs; i++) {
-    const w = resolveCheapWindow(periodIdAt, from, cheapPeriodId, Math.max(1, Math.ceil((limitMs - from) / HOUR_MS)));
+    const w = resolveCheapWindow(periodIdAt, from, cheapPeriodId, Math.max(1, Math.ceil((limitMs - from) / HOUR_MS)), night);
     if (!w || w.startMs >= limitMs) return null;
-    if (w.endMs - w.startMs >= FULL_CHEAP_WINDOW_MIN_MS) return w;
+    if (w.endMs - w.startMs >= minFullMs) return w;
     from = w.endMs;
   }
   return null;
@@ -2421,8 +2411,10 @@ export function nextFullCheapWindow(
 export function longGapAhead(
   tonight: { startMs: number; endMs: number } | null,
   nextFull: { startMs: number; endMs: number } | null,
+  /** v1.191.0 (CA15) — the schedule's full-window minimum (FULL_CHEAP_WINDOW_MIN_MS on the APS preset). */
+  minFullMs: number = FULL_CHEAP_WINDOW_MIN_MS,
 ): boolean {
-  if (!tonight || tonight.endMs - tonight.startMs < FULL_CHEAP_WINDOW_MIN_MS) return false;
+  if (!tonight || tonight.endMs - tonight.startMs < minFullMs) return false;
   if (!nextFull) return true;
   return nextFull.startMs - tonight.endMs > LONG_GAP_MS;
 }
@@ -2487,7 +2479,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   const {
     nowMs, fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw,
-    periodIdAt, cheapPeriodId, windowScanHours = 30,
+    periodIdAt, cheapPeriodId, cheapNight = null, windowScanHours = 30,
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays, bandCoverageFrac,
@@ -2518,7 +2510,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   const window = windowSpec?.window !== undefined
     ? (windowSpec.window != null && Number.isFinite(windowSpec.window.startMs) && Number.isFinite(windowSpec.window.endMs)
       ? { startMs: windowSpec.window.startMs, endMs: windowSpec.window.endMs } : null)
-    : resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, windowScanHours);
+    : cheapPeriodId == null ? null : resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, windowScanHours, cheapNight);
   // R2 — per leg: the backup leg is resilience-only and never force-charges, whatever the
   // configuration says (chargeWindows.ts legObjective / legForceChargeEligible). The cost leg —
   // and a plan with no spec — keeps the configured values exactly as passed.
@@ -3077,7 +3069,7 @@ export function parsePersistedIslandedLoad(raw: unknown): { kw: number; atMs: nu
 
 export const DEFAULT_COST_MAX_SOC_PCT = 90;
 
-/** v1.174.0 — minute-of-day (America/Phoenix) until which the evening job DEFERS a plan
+/** v1.174.0 — minute-of-day (site zone) until which the evening job DEFERS a plan
  *  while the panel reading is stale. 22:30: an hour past the 21:30 fire (the longest
  *  stale latch measured was 22 min, 2026-09-14), and 30 min before a 23:00 window's
  *  write (v1.187.0: at the window open; it was 22:55), so the owner keeps a cancel
@@ -3099,11 +3091,14 @@ export const NIGHT_PLAN_STALE_DEFER_UNTIL_MIN = 22 * 60 + 30;
 export function eveningBasisDefers(
   plan: { basisComplete: boolean; basisTransient?: boolean } | null,
   nowMin: number,
+  /** v1.191.0 (W3) — the schedule's deferral end (nightSchedule.ts staleDeferUntilMin):
+   *  NIGHT_PLAN_STALE_DEFER_UNTIL_MIN on the APS preset. */
+  deferUntilMin: number = NIGHT_PLAN_STALE_DEFER_UNTIL_MIN,
 ): boolean {
   // Only a transient-shaped failure waits; a persistent one is announced at 21:30 so the
   // owner keeps the full evening to act on it.
   return (plan == null || (!plan.basisComplete && plan.basisTransient === true))
-    && nowMin < NIGHT_PLAN_STALE_DEFER_UNTIL_MIN;
+    && nowMin < deferUntilMin;
 }
 
 /**
@@ -3640,7 +3635,7 @@ export function createNightChargeAdvisor(deps: {
 }
 
 /**
- * v1.39.0: the fixed America/Phoenix (UTC-7, no DST) clock bounds of a plan
+ * v1.39.0: the site-clock bounds of a plan
  * date's night — the single source of truth for the SCORER's spans and for the
  * "may this night be scored yet?" completion boundary. Plan for day D covers
  * charge window [D 23:00, D+1 05:00); its plan-trajectory score span runs
@@ -3655,7 +3650,16 @@ export function createNightChargeAdvisor(deps: {
  * (weekends and holidays have none), so it is resolved from the tariff model by
  * nightLedgerScoring.governedOnPeakSpan, not from the clock.
  */
-export function nightWindowBounds(planDate: string): {
+/** v1.191.0 (W4) — the APS R-EV night, in minutes after the plan date's local midnight: the window
+ *  D 23:00 → D+1 05:00, complete at D+1 21:00 (the close + SCORE_SPAN_AFTER_CLOSE_MS). Another plan's
+ *  night is nightSchedule.ts fallbackNight. */
+export const APS_FALLBACK_NIGHT: Readonly<{ windowStartMin: number; windowEndMin: number; completeMin: number }> =
+  Object.freeze({ windowStartMin: 23 * 60, windowEndMin: 29 * 60, completeMin: 45 * 60 });
+
+export function nightWindowBounds(
+  planDate: string,
+  night: Readonly<{ windowStartMin: number; windowEndMin: number; completeMin: number }> = APS_FALLBACK_NIGHT,
+): {
   windowStartMs: number;
   windowEndMs: number;
   scoreSpanEndMs: number;
@@ -3664,11 +3668,14 @@ export function nightWindowBounds(planDate: string): {
 } | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(planDate ?? '');
   if (!m) return null;
-  const dayStartUtc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) + 7 * HOUR_MS; // Phoenix midnight
-  const scoreSpanEndMs = dayStartUtc + 45 * HOUR_MS; // D+1 21:00
+  // v1.191.0 (T10) — the plan date's local midnight in the site zone (in the default zone 07:00 UTC, the
+  // fixed UTC−7 this read before). (S6) — the offsets are the schedule's: 23 / 29 / 45 h on the APS
+  // preset (APS_FALLBACK_NIGHT), the plan's own nominal window otherwise.
+  const dayStartUtc = siteDayStartMs(planDate);
+  const scoreSpanEndMs = dayStartUtc + night.completeMin * MINUTE_MS; // APS: D+1 21:00
   return {
-    windowStartMs: dayStartUtc + 23 * HOUR_MS, // D 23:00
-    windowEndMs: dayStartUtc + 29 * HOUR_MS,   // D+1 05:00
+    windowStartMs: dayStartUtc + night.windowStartMin * MINUTE_MS, // APS: D 23:00
+    windowEndMs: dayStartUtc + night.windowEndMin * MINUTE_MS,     // APS: D+1 05:00
     scoreSpanEndMs,
     completeMs: scoreSpanEndMs,
   };

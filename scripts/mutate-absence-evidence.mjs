@@ -50,7 +50,8 @@ const MUTANTS = [
   {
     id: 'ii. R1: the identity match is tightened to equality',
     file: MEMB,
-    find: "    const byName = (d.productName ?? '').toLowerCase().includes('smart home panel');",
+    // v1.191.0 — the identity test is topology.ts isShp2Product (the same substring test).
+    find: "    const byName = isShp2Product(d.productName);",
     to: "    const byName = (d.productName ?? '').toLowerCase() === 'smart home panel'; /* MUTANT */",
     why: 'The live productName is "Smart Home Panel 2"; an equality test silently drops the only panel in the fleet.',
   },

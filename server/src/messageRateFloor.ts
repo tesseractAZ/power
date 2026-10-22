@@ -42,9 +42,9 @@
  *
  * So: the comparison baseline is a per-hour-of-day EWMA, matching the established
  * convention in analytics.ts (see BASELINE_MIN_SAMPLES, "hour-of-day … so daily cycles
- * don't false-alarm"). Hour is read from the injected clock via `new Date(ms).getHours()`
- * — process-local, exactly like every other hour-of-day consumer in this codebase; the
- * add-on container runs in plant-local time.
+ * don't false-alarm"). Hour is read from the injected clock in the site zone
+ * (v1.191.0: siteTime.ts siteHour, like every other hour-of-day consumer in this codebase;
+ * it was the host clock, which the add-on container sets to the same zone).
  * ---------------------------------------------------------------------------
  *
  * Design guards against false positives:
@@ -65,6 +65,7 @@
  *    silence inside the 08-04 episode and let a device emitting 5 messages once every
  *    <=19 min evade the detector entirely. Both edges are now dwelled.
  */
+import { siteHour } from './siteTime.js';
 
 export interface RateFloorConfig {
   /** Min learned baseline (msg/min) for a device to be eligible for the floor. */
@@ -381,7 +382,7 @@ export class RateFloorTracker {
       return { ...idle(prev.baseline), recovered: prev.fired };
     }
     const rate = Math.max(0, (cumulativeCount - prev.lastCount) / dtMin);
-    const hour = new Date(nowMs).getHours();
+    const hour = siteHour(nowMs);
 
     // Prefer this hour's learned bucket once it is mature; otherwise the global EWMA.
     const bucket = prev.hourly[hour];

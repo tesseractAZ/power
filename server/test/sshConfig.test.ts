@@ -194,7 +194,9 @@ test('ssh config — the translations name the new options and mark the old ones
 /* ── 4. options ⇄ translations parity ──────────────────────────────────── */
 
 test('ssh config — every option has a name and a description in every translations file, and no file names a key that is gone', () => {
-  const options = section('options');
+  // v1.191.0 — every SCHEMA key (a schema-only optional key has no `options:` default but is an option
+  // the form shows, so it needs its text too), as scripts/validate-addon-config.py checks.
+  const options = section('schema');
   assert.ok(options.size > 50, `parsed only ${options.size} options — parser drifted`);
   const dir = resolve(ROOT, 'ecoflow_panel/translations');
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.yaml'))) {

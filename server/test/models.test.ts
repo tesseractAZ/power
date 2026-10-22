@@ -31,14 +31,14 @@ test('clearSkyGHI — peaks at ~1000 W/m² with sun overhead', () => {
 test('physicsPmax — at solar noon produces a substantial fraction of nameplate', () => {
   // Solar noon-ish on a summer day in Phoenix at 35°C ambient
   const ts = Date.UTC(2026, 5, 21, 19, 30);
-  const r = physicsPmax(ts, 35);
+  const r = physicsPmax(ts, 35, PHOENIX_SITE); // v1.191.0 — the site is a required argument
   assert.ok(r.pMaxW > 8000, `expected pMax > 8 kW at noon, got ${r.pMaxW.toFixed(0)}`);
   assert.ok(r.pMaxW < PHOENIX_SITE.pNamplate, 'pMax should be below nameplate (derate + temp + non-noon optimal tilt)');
 });
 
 test('physicsPmax — at night is zero', () => {
   const ts = Date.UTC(2026, 5, 21, 8);  // 1 AM PT
-  const r = physicsPmax(ts, 20);
+  const r = physicsPmax(ts, 20, PHOENIX_SITE);
   assert.equal(r.pMaxW, 0);
 });
 

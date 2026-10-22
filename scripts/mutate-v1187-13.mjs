@@ -19,7 +19,8 @@ const MUTANTS = [
   {
     id: 'H-i. ★★★ the APS model has no holidays again',
     file: TF,
-    find: '    holidays: rates.holidays ?? [...APS_OFF_PEAK_HOLIDAYS],',
+    // v1.191.0 — re-pointed: apsHolidayList() is the same 2015-2045 table, carrying the rule past 2045.
+    find: '    holidays: rates.holidays ?? apsHolidayList(),',
     to: '    holidays: rates.holidays ?? [], /* MUTANT */',
     why: 'On an APS off-peak holiday the add-on prices 4-7 pm as on-peak and 11 pm-5 am as overnight: the night charge buys for an on-peak that does not exist and at a rate it is not billed.',
   },

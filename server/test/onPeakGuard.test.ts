@@ -629,7 +629,8 @@ const SRC = (f: string) => readFileSync(resolve(dirname(fileURLToPath(import.met
 
 test('★★★ index.ts: the arm stamps the on-peak start from the plan\'s window, from the tariff model the window comes from', () => {
   const idx = SRC('index.ts');
-  assert.ok(idx.includes('const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(apsREvModelFromEnv(), plan.window.startMs) : null;'));
+  // v1.191.0 — the tariff of the plan in effect (tariffModelFromEnv; the APS preset while TARIFF_PLAN is unset).
+  assert.ok(idx.includes('const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(tariffModelFromEnv(), plan.window.startMs) : null;'));
   // v1.189.0 — armed through armCycle (chargeCycle.ts), the stamp on the leg.
   assert.ok(idx.includes("role: 'cost', kind: 'overnight', plan, forceChargeEnabled: forceChargeOn(), nextOnPeakStartMs: armOnPeakStartMs,"));
 });

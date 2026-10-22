@@ -19,7 +19,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Alert } from '../src/alerts.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 // The monitor's only pending timers are unref'd; Node 22's runner would otherwise end the
 // event loop mid-test and cancel the file.
@@ -44,6 +43,9 @@ delete process.env.NOTIFY_CHANNEL;
 delete process.env.SUPERVISOR_TOKEN;
 delete process.env.NOTIFY_RESOLVED;
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const { computeAlerts, resetVdiffWarnHoldForTesting, CELL_OVP_CRIT_MV } = await import('../src/alerts.js');
 const { conditionFromAlerts, speakableAlerts } = await import('../src/broadcast.js');
 const { priorityOf } = await import('../src/alertPriority.js');

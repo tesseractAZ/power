@@ -7,6 +7,7 @@
  * by time alone, and the 21:30 night-charge plan read "PV band coverage 7%", latched "no
  * plan" and cancelled an armed 66 kWh charge. The same inputs re-scored to 97% at 22:14.
  */
+import './helpers/siteZoneIsHostZone.js'; // v1.191.0 — fixtures on the host clock: the site zone is the host's (first import)
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -203,7 +204,7 @@ test('★★ the evening job defers BEFORE it records a row, notifies, latches o
   const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8');
   const start = src.indexOf('async function runNightChargeEveningJobInner');
   const body = src.slice(start, src.indexOf('\nasync function ', start + 10) > 0 ? src.indexOf('\nasync function ', start + 10) : undefined);
-  const defer = body.indexOf('if (eveningBasisDefers(fresh?.plan ?? null, nowMin)) {');
+  const defer = body.indexOf('if (eveningBasisDefers(fresh?.plan ?? null, nowMin, deferUntilMin)) {'); // v1.191.0 (S6): the schedule's deferral end
   assert.ok(defer > 0, 'the evening job consults eveningBasisDefers');
   for (const later of [
     'recordNightPlanRow(today, fresh.plan, fresh.extras);',

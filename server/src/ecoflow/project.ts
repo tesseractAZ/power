@@ -3,6 +3,9 @@
  * Field names below come from probing the user's actual fleet (see /tmp/ecoflow-probe.log).
  */
 import { sanitizeDisplayName } from '../logSanitize.js';
+import { option } from '../config.js';
+import { DPU_MAX_PACKS, SHP2_CIRCUIT_COUNT, SHP2_SOURCE_SLOTS } from '../hwSpec.js';
+import { productKind } from '../topology.js';
 
 type Quota = Record<string, unknown>;
 
@@ -74,7 +77,8 @@ export interface BackupPoolHold {
  * (>= BACKUP_POOL_HEALTHY_BASELINE_PCT) baseline — never mask a low near the danger
  * zone; a RISE is rejected regardless of baseline health (holding the lower value
  * can only over-alarm, never mask a low). */
-export const BACKUP_POOL_MAX_SLEW_PCT = Number(process.env.BATTERY_SOC_MAX_DROP_PCT ?? 25);
+// v1.191.0 — read through the option table (config.ts BATTERY_SOC_MAX_DROP_PCT: bare Number, 25 when absent).
+export const BACKUP_POOL_MAX_SLEW_PCT = option<number>('BATTERY_SOC_MAX_DROP_PCT');
 const BACKUP_POOL_HEALTHY_BASELINE_PCT = 30;
 const BACKUP_POOL_SLEW_MAX_AGE_MS = 10 * 60 * 1000;
 
@@ -279,7 +283,7 @@ export interface DpuProjection {
 
 export function projectDpu(q: Quota): DpuProjection {
   const packs: DpuPack[] = [];
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= DPU_MAX_PACKS; i++) {
     const base = `hs_yj751_bms_slave_addr.${i}.`;
     if (q[`${base}soc`] === undefined && q[`${base}packSn`] === undefined) continue;
     const cellTempsRaw = q[`${base}cellTemp`];
@@ -611,7 +615,7 @@ export function projectShp2(q: Quota): Shp2Projection {
     ? (q['pd303_mc.LoadStrategyCfg.hall1ChInfo'] as Array<{ loadPriority?: number; loadIsEnable?: boolean }>)
     : [];
   const circuits: Shp2Circuit[] = [];
-  for (let i = 1; i <= 12; i++) {
+  for (let i = 1; i <= SHP2_CIRCUIT_COUNT; i++) {
     const base = `loadIncreInfo.hall1IncreInfo.ch${i}Info.`;
     const splitBase = `pd303_mc.loadIncreInfo.hall1IncreInfo.ch${i}Info.splitphase.`;
     const name = str(q, `${base}chName`) ?? `Circuit ${i}`;
@@ -671,7 +675,7 @@ export function projectShp2(q: Quota): Shp2Projection {
     }
   }
   const sources: Shp2EnergySource[] = [];
-  for (let i = 1; i <= 3; i++) {
+  for (let i = 1; i <= SHP2_SOURCE_SLOTS; i++) {
     const base = `pd303_mc.backupIncreInfo.Energy${i}Info.`;
     sources.push({
       slot: i,
@@ -779,8 +783,9 @@ export function projectGeneric(q: Quota): GenericProjection {
 export type Projection = DpuProjection | Shp2Projection | GenericProjection;
 
 export function projectByProduct(productName: string | null | undefined, q: Quota): Projection {
-  const p = (productName ?? '').toLowerCase();
-  if (p.includes('delta pro ultra')) return projectDpu(q);
-  if (p.includes('smart home panel')) return projectShp2(q);
+  // v1.191.0 (S8) — topology.ts productKind: the same two substring tests, in the same order.
+  const kind = productKind(productName);
+  if (kind === 'dpu') return projectDpu(q);
+  if (kind === 'shp2') return projectShp2(q);
   return projectGeneric(q);
 }

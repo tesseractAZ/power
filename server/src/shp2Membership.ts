@@ -38,6 +38,7 @@
 
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
+import { configuredBenchSpareSns, effectiveBenchSpareFloor, isShp2Product } from './topology.js';
 
 /**
  * Return the set of DPU SNs that are physically wired into the SHP2 —
@@ -192,7 +193,7 @@ export function shp2Panels(devices: Record<string, DeviceSnapshot>): {
   let identityCount = 0;
   for (const d of Object.values(devices)) {
     const projected = d.projection?.kind === 'shp2';
-    const byName = (d.productName ?? '').toLowerCase().includes('smart home panel');
+    const byName = isShp2Product(d.productName);
     if (!projected && !byName) continue;
     if (projected) projectedCount += 1;
     if (byName) identityCount += 1;
@@ -213,7 +214,10 @@ export function shp2Panels(devices: Record<string, DeviceSnapshot>): {
  * 1, 2 and 5 at 2026-10) and false for the bench Cores.
  */
 export function isShp2Connected(sn: string, connected: Set<string>): boolean {
-  if (connected.size === 0) return true;
+  // v1.191.0 (S8, plan 3.8 S2) — with no panel roster every DPU counts, spares included: a DPU-only
+  // home had no way to keep a bench unit out of its fleet totals. A unit BENCH_SPARE_SNS names (and the
+  // roster does not override) is left out. Unset, nothing changes: the built-in list is never applied here.
+  if (connected.size === 0) return !(configuredBenchSpareSns() != null && isBenchSpareSn(sn));
   return connected.has(sn);
 }
 
@@ -282,6 +286,19 @@ function rosterOf(explicit?: ReadonlySet<string> | null): ReadonlySet<string> | 
 }
 
 /**
+ * v1.191.0 (S8, OWNER DECISION 1) — the bench-spare SAFETY FLOOR in force: BENCH_SPARE_SNS when the
+ * option is set, REPLACING the literal above (never a union: the literal still names a wired home Core,
+ * and a union would keep it muted whenever the panel is cloud-dark), else the literal. Every place this
+ * module used to read the literal reads this instead (CA5): the mute floor (isBenchSpareSn,
+ * benchSpareSns) and the three last-resort home-pool fallbacks (homeCoreCoverage, isHomePoolDpu,
+ * housePoolFallbackCoverage), so a cold boot with no roster agrees with the mute floor. The roster
+ * override applies on top of either, as before.
+ */
+export function benchSpareFloor(): ReadonlySet<string> {
+  return effectiveBenchSpareFloor(SPARE_DPU_SNS);
+}
+
+/**
  * v1.121.0 — "is this SN a bench spare?", resolved WITHOUT needing the device map.
  *
  * The literal is the safety floor (a DPU it does not name is never a spare), and
@@ -291,7 +308,7 @@ function rosterOf(explicit?: ReadonlySet<string> | null): ReadonlySet<string> | 
  * this can only ever REMOVE spare status — monotone in the fail-loud direction.
  */
 export function isBenchSpareSn(sn: string, lastKnownRoster?: ReadonlySet<string> | null): boolean {
-  if (!SPARE_DPU_SNS.has(sn)) return false;
+  if (!benchSpareFloor().has(sn)) return false;
   const roster = rosterOf(lastKnownRoster);
   if (roster && roster.has(sn)) return false;
   return true;
@@ -299,7 +316,7 @@ export function isBenchSpareSn(sn: string, lastKnownRoster?: ReadonlySet<string>
 
 /** Every SN currently considered bench hardware (roster-aware). */
 export function benchSpareSns(lastKnownRoster?: ReadonlySet<string> | null): string[] {
-  return [...SPARE_DPU_SNS].filter((sn) => isBenchSpareSn(sn, lastKnownRoster));
+  return [...benchSpareFloor()].filter((sn) => isBenchSpareSn(sn, lastKnownRoster));
 }
 
 /**
@@ -307,7 +324,8 @@ export function benchSpareSns(lastKnownRoster?: ReadonlySet<string> | null): str
  * whose EcoFlow-offline state is the EXPECTED steady state" (so its
  * connectivity / learned / forecast alerts are emitted non-annunciating).
  *
- * True iff: the SN is in the SPARE_DPU_SNS safety floor AND it is NOT currently
+ * True iff: the SN is in the bench-spare safety floor (benchSpareFloor: BENCH_SPARE_SNS when set,
+ * else the SPARE_DPU_SNS literal) AND it is NOT currently
  * a connected SHP2 source. The positive connected-source check (the `!has`
  * below) is what re-arms a spare the instant it is wired into an SHP2 and starts
  * reporting as a connected source — exactly mirroring the gate that previously
@@ -561,7 +579,7 @@ export function connectedSourceListings(
 /** v1.185.0 — every panel by identity (projected or not), sorted by serial. */
 function identityPanels(devices: Record<string, DeviceSnapshot>): DeviceSnapshot[] {
   return Object.values(devices)
-    .filter((d) => d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel'))
+    .filter((d) => d.projection?.kind === 'shp2' || isShp2Product(d.productName))
     .sort((a, b) => (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
 }
 
@@ -695,7 +713,7 @@ export function homeCoreCoverage(
     : remembered
       ? [...remembered]
       : Object.values(devices)
-          .filter((d) => d.projection?.kind === 'dpu' && !SPARE_DPU_SNS.has(d.sn))
+          .filter((d) => d.projection?.kind === 'dpu' && !benchSpareFloor().has(d.sn))
           .map((d) => d.sn);
   if (roster.length === 0) return { connected: 0, reporting: 0, complete: true };
   const online = new Set(onlineDpus(devices).filter((d) => nowMs == null || dpuContentFresh(d, nowMs)).map((d) => d.sn));
@@ -750,7 +768,7 @@ export function isHomePoolDpu(
   // BOTH deploys. The roster is durable STATE, so remember it rather than
   // re-deriving a guess from a hardcoded list every time the panel goes quiet.
   if (lastKnownRoster && lastKnownRoster.size > 0) return lastKnownRoster.has(sn);
-  return !SPARE_DPU_SNS.has(sn);
+  return !benchSpareFloor().has(sn);
 }
 
 /**
@@ -841,7 +859,7 @@ export function housePoolFallbackCoverage(
       ? [...live]
       : lastKnownRoster && lastKnownRoster.size > 0
         ? [...lastKnownRoster]
-        : Object.values(devices).filter((d) => d.projection?.kind === 'dpu' && !SPARE_DPU_SNS.has(d.sn)).map((d) => d.sn);
+        : Object.values(devices).filter((d) => d.projection?.kind === 'dpu' && !benchSpareFloor().has(d.sn)).map((d) => d.sn);
   } else {
     const sn = houseSnOf(devices);
     const house = sn ? devices[sn] : undefined;

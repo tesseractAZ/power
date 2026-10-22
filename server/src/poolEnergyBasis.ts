@@ -50,10 +50,15 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 import type { DeviceSnapshot } from './snapshot.js';
 import type { Shp2Projection } from './ecoflow/project.js';
+import { DPU_PACK_NOMINAL_V } from './hwSpec.js';
+import { limits } from './limits.js';
 
-/** One pack's nominal string voltage: 32 LFP cells × 3.2 V. mAh × V / 1000 = Wh. */
-export const PACK_NOMINAL_V = 102.4;
-export const CAPACITY_SCALE_MIN = 0.8;
+/** One pack's nominal string voltage: 32 LFP cells × 3.2 V. mAh × V / 1000 = Wh (hwSpec.ts since v1.191.0). */
+export const PACK_NOMINAL_V = DPU_PACK_NOMINAL_V;
+/** v1.191.0 (Z1) — the CAPACITY_SCALE_MIN option (limits.ts; 0.8 while unset, clamped to 0.5..1): the
+ *  one floor of the measured scale, imported by panelRunway.ts and alertMonitor.ts as well. Read once,
+ *  at import, in each thread that loads this module. */
+export const CAPACITY_SCALE_MIN = limits.capacityScaleMin;
 export const CAPACITY_SCALE_MAX = 1;
 /** A pack reporting more than this × its design capacity is a bad reading, not a better pack. */
 export const PACK_FULL_CAP_MAX_OF_DESIGN = 1.1;

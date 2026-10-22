@@ -40,14 +40,14 @@
  * the days re-estimate live and freeze again once settled.
  */
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { config } from './config.js';
+import { config, option } from './config.js';
+// v1.191.0 (lane A, CA26) — a day ends at the next site midnight (23 or 25 h across a DST change).
+import { siteShiftDaysMs } from './siteTime.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { coveringRadiationEpoch, type WeatherForecast } from './weather.js';
 import { loadMembershipHistory, membershipAt, membershipVerdict, type MembershipHistory } from './membershipHistory.js';
 
 const HOUR_MS = 3_600_000;
-const DAY_MS = 24 * HOUR_MS;
 
 /**
  * How long after a day ends the weather must have been fetched before the day may freeze.
@@ -88,7 +88,7 @@ export function curtailmentDaySettled(
   dayStartMs: number,
 ): boolean {
   if (!weather || !hasPosterior) return false;
-  const dayEndMs = dayStartMs + DAY_MS;
+  const dayEndMs = siteShiftDaysMs(dayStartMs, 1);
   if (!(weather.fetchedAt >= dayEndMs + CURTAIL_SETTLE_LAG_MS)) return false;
   const sent = new Set<number>();
   for (const h of weather.hours) {
@@ -97,8 +97,8 @@ export function curtailmentDaySettled(
   // Matched the way sampleCurtailmentHour matches an hour to the cache: by hour epoch.
   // v1.186.2 — through coveringRadiationEpoch: hour h of the day is covered by the label h + 1,
   // so the day needs the labels 01:00 through the next midnight.
-  for (let h = 0; h < 24; h++) {
-    if (!sent.has(coveringRadiationEpoch(Math.floor((dayStartMs + h * HOUR_MS) / HOUR_MS)))) return false;
+  for (let hourStart = dayStartMs; hourStart < dayEndMs; hourStart += HOUR_MS) {
+    if (!sent.has(coveringRadiationEpoch(Math.floor(hourStart / HOUR_MS)))) return false;
   }
   return true;
 }
@@ -129,7 +129,7 @@ export function curtailmentMembershipSound(o: {
   dayStartMs: number;
 }): boolean {
   if (o.rosterSns.size === 0 || !o.history) return false;
-  if (membershipVerdict(o.history, o.dayStartMs, o.dayStartMs + DAY_MS) !== 'stable') return false;
+  if (membershipVerdict(o.history, o.dayStartMs, siteShiftDaysMs(o.dayStartMs, 1)) !== 'stable') return false;
   if (membershipAt(o.history, o.dayStartMs) !== [...o.rosterSns].sort().join(',')) return false;
   for (const sn of o.rosterSns) {
     if (!o.walkedSns.includes(sn) || !o.contributedSns.has(sn)) return false;
@@ -141,8 +141,8 @@ let membershipOverride: MembershipHistory | null | undefined;
 /** v1.186.2 — the recorder's membership record (read fresh each walk), or null outside the add-on. */
 export function curtailmentMembershipHistory(): MembershipHistory | null {
   if (membershipOverride !== undefined) return membershipOverride;
-  const path = process.env.CURTAIL_MEMBERSHIP_HISTORY_PATH
-    ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'membership-history.json') : '');
+  const path = option<string | undefined>('CURTAIL_MEMBERSHIP_HISTORY_PATH')
+    ?? (config.isAddon ? config.dataFile('membership-history.json') : '');
   if (!path) return null;
   try { return loadMembershipHistory(path); } catch { return null; }
 }
@@ -173,8 +173,8 @@ function validDay(v: unknown): FrozenCurtailmentDay | null {
 
 function ensureLoaded(): void {
   if (storePath != null) return;
-  storePath = process.env.CURTAILMENT_DAYS_PATH
-    ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'curtailment-days.json') : '');
+  storePath = option<string | undefined>('CURTAILMENT_DAYS_PATH')
+    ?? (config.isAddon ? config.dataFile('curtailment-days.json') : '');
   if (!storePath) return;
   try {
     const raw = JSON.parse(readFileSync(storePath, 'utf8')) as { v?: unknown; days?: unknown };

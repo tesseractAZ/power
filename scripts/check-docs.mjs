@@ -242,6 +242,11 @@ export function parseAddonConfig(text) {
   return out;
 }
 
+/** v1.191.0 — a schema is optional when it ends with `?` (quotes aside): `str?`, `"int(0,23)?"`. */
+export const isOptionalSchema = (schema) => String(schema ?? '').replace(/"/g, '').trim().endsWith('?');
+/** The Default cell of a schema-only key's row: it has no default, so it states what unset means. */
+export const SCHEMA_ONLY_DEFAULT = /^unset \(behaves as .+\)$/;
+
 /* ─────────────────────────────── helpers ─────────────────────────────── */
 
 const isUpperToken = (s) => /^[A-Z][A-Z0-9_*]+$/.test(s);
@@ -512,7 +517,8 @@ export function runChecks(root = REPO, { only = null } = {}) {
       else seen.set(p.id, p.line);
     }
     if (ent && patterns.length === 0) fail('D4', ENTITIES_PAGE, 0, 'no table with a unique_id column');
-    const keys = config ? [...config.options.keys()] : [];
+    // v1.191.0 — schema keys, not options keys: a schema-only key (optional, no default) is an option too.
+    const keys = config ? [...config.schema.keys()] : [];
     if (!config) fail('D4', CONFIG_YAML, 0, 'missing — option names cannot be checked');
     const allow = new Set(Array.isArray(baselines?.nameAllowlist) ? baselines.nameAllowlist : []);
     for (const rel of [...HA_SURFACES, ...mdFiles.filter(isGuidePage)]) {
@@ -687,7 +693,10 @@ export function runChecks(root = REPO, { only = null } = {}) {
     if (!config) fail('D7', CONFIG_YAML, 0, 'missing');
     if (d && config) {
       for (const k of config.options.keys()) if (!config.schema.has(k)) fail('D7', CONFIG_YAML, 0, `${k} has a default but no schema`);
-      for (const k of config.schema.keys()) if (!config.options.has(k)) fail('D7', CONFIG_YAML, 0, `${k} has a schema but no default`);
+      // v1.191.0 — a key may be schema-only when it is optional (`?`): no `options:` default, exported by
+      // the run script only when set (bashio::config.has_value), so an unset key leaves the variable absent.
+      // A non-optional schema-only key would still be a field with no default: that stays a failure.
+      for (const k of config.schema.keys()) if (!config.options.has(k) && !isOptionalSchema(config.schema.get(k))) fail('D7', CONFIG_YAML, 0, `${k} has a schema but no default (a schema-only key must be optional: end the schema with ?)`);
       const rows = new Map();
       for (const t of readTables(d.scan)) {
         const di = t.header.findIndex((h) => h.toLowerCase() === 'default');
@@ -702,7 +711,15 @@ export function runChecks(root = REPO, { only = null } = {}) {
         }
       }
       for (const [key, row] of rows) {
-        if (!config.options.has(key)) { fail('D7', OPTIONS_PAGE, row.line, `${key} is not an option in ${CONFIG_YAML}`); continue; }
+        if (!config.schema.has(key)) { fail('D7', OPTIONS_PAGE, row.line, `${key} is not an option in ${CONFIG_YAML}`); continue; }
+        if (!config.options.has(key)) {
+          // v1.191.0 — a schema-only key has no default to compare; its row states what unset means.
+          if (!SCHEMA_ONLY_DEFAULT.test(row.def.trim())) fail('D7', OPTIONS_PAGE, row.line, `${key} has no options: default, so its Default cell must read "unset (behaves as …)", not ${JSON.stringify(row.def)}`);
+          const rowSchema = normalizeSchema(row.schema);
+          const cfgOnlySchema = config.schema.get(key) ?? '';
+          if (rowSchema !== cfgOnlySchema) fail('D7', OPTIONS_PAGE, row.line, `${key} schema ${JSON.stringify(rowSchema)} ≠ config.yaml ${JSON.stringify(cfgOnlySchema)}`);
+          continue;
+        }
         const def = normalizeDefault(row.def);
         const cfgDef = config.options.get(key);
         if (!sameScalar(def, cfgDef)) fail('D7', OPTIONS_PAGE, row.line, `${key} default ${JSON.stringify(def)} ≠ config.yaml ${JSON.stringify(cfgDef)}`);
@@ -710,7 +727,7 @@ export function runChecks(root = REPO, { only = null } = {}) {
         const cfgSchema = config.schema.get(key) ?? '';
         if (schema !== cfgSchema) fail('D7', OPTIONS_PAGE, row.line, `${key} schema ${JSON.stringify(schema)} ≠ config.yaml ${JSON.stringify(cfgSchema)}`);
       }
-      for (const key of config.options.keys()) if (!rows.has(key)) fail('D7', OPTIONS_PAGE, 0, `${key} has no row`);
+      for (const key of config.schema.keys()) if (!rows.has(key)) fail('D7', OPTIONS_PAGE, 0, `${key} has no row`);
     }
   }
 

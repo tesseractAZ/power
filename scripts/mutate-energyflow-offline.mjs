@@ -247,7 +247,7 @@ const MUTANTS = [
   {
     id: 'O-xvi. ★★ the card builds its own title, not the model’s',
     file: CARD,
-    find: '          title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown })}',
+    find: '          title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown, offPanelCount })}',
     to: "          title={`Batteries (${dpuCount} DPU${spareCount > 0 ? `, +${spareCount} spare` : membershipUnknown ? ', spares not yet identified' : ''})`} /* MUTANT */",
     why: 'The model is tested and the card ignores it: "via panel" never reaches the screen.',
   },

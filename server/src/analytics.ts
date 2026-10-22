@@ -1,17 +1,26 @@
 import type { DeviceSnapshot } from './snapshot.js';
-import { rateAt, apsREvModelFromEnv, seasonAt, onPeakWindowStrings, APS_PERIOD, type TariffModel } from './tariff.js';
+import { rateAt, tariffModelFromEnv, resolveTariffFromEnv, seasonAt, onPeakWindowStrings, legacyTariffFromEnv, legacyOnPeakWindow, twoTierPairOf, positiveCents, APS_PERIOD, type TariffModel } from './tariff.js';
+import { DISPATCH_ROUND_TRIP_EFFICIENCY } from './limits.js';
 import { saturationThresholdPct, meanChargeCeilingPct } from './chargeTaper.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
-import { resolveRetentionDays } from './retention.js';
+import { config } from './config.js';
+import {
+  limits, evCircuitScanned, EV_SESSION_FALLBACK_KWH, EV_LIVE_MAX_REMAINING_H, RESERVE_FALLBACK_PCT,
+} from './limits.js';
+import { DPU_MAX_PACKS, DPU_PACK_NAMEPLATE_WH } from './hwSpec.js';
 import { getWeather, coveringRadiationEpoch, RADIATION_LABEL_LAG_HOURS, type WeatherHour, type WeatherForecast } from './weather.js';
 import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2, secondaryShp2s } from './shp2Membership.js';
 import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
+// v1.191.0 (lane A, T13/T15/CA26) — every local hour, weekday, date and day step in the site zone.
+import {
+  siteHour, siteDow, siteLocalParts, siteYmd, siteDayStartMs, siteShiftDaysMs, siteTimeZone, addDaysYmd, zonedWallTimeMs,
+} from './siteTime.js';
 import { getNwsAlerts, isNwsEnabled, nwsEventWindow, TTL_MS as NWS_ALERTS_TTL_MS, type NwsAlert } from './nws.js';
-import { PHOENIX_SITE } from './physics/clearSky.js';
+import { pvSite, curtailGhiCapWm2 } from './site.js';
 import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
 import { allDpus, homeConnectedDpus, reportBasisKey } from './analytics/fleet.js';
 import { cacheWritable, basisGeneration, runInBasisGeneration } from './analytics/flightBasis.js';
@@ -485,7 +494,7 @@ export function coreActivityContext(
     if (vin == null || !Number.isFinite(p.value)) continue;
     const w = Math.abs(vin) + Math.abs(p.value);
     activityByTs.set(p.ts, w);
-    if (windowHours.has(new Date(p.ts).getHours())) hourly.push(w);
+    if (windowHours.has(siteHour(p.ts))) hourly.push(w);
     if (p.ts + bucketMs > nowMs - MPPT_LOAD_RECENT_MS) recentMaxW = recentMaxW == null ? w : Math.max(recentMaxW, w);
   }
   const typicalW = hourly.length >= BASELINE_MIN_SAMPLES ? median(hourly) : null;
@@ -650,7 +659,7 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
   }
   const out: Alert[] = [];
   const now = Date.now();
-  const curHour = new Date().getHours();
+  const curHour = siteHour(now);
   const windowHours = new Set([(curHour + 23) % 24, curHour, (curHour + 1) % 24]);
 
   // v1.79.0 — suppress baseline anomalies on a starved feed (spot values minutes old against
@@ -686,7 +695,7 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
     // Samples within ±1 hour of the current hour-of-day (timestamps kept for
     // the v1.42.0 regime-shift check below).
     const bucketPts = pts
-      .filter((p) => windowHours.has(new Date(p.ts).getHours()))
+      .filter((p) => windowHours.has(siteHour(p.ts)))
       .map((p) => ({ ts: p.ts, v: t.transform(p.value) }))
       .filter((p) => Number.isFinite(p.v));
     const bucket = bucketPts.map((p) => p.v);
@@ -869,10 +878,11 @@ const SOH_DEGRADE_MIN_R2 = 0.5;                            // the decline must e
 // threshold alarm backstops the absolute level, and a >10 %/yr "fade" is settling/noise.
 const MAX_SOH_FADE_PCT_PER_YEAR = 10;
 
-/** v0.55.0 — physical ceiling on predicted EV-charging load per hour. The home has a SINGLE
- *  EVSE; a residential charger tops out near 11.5 kW (48 A × 240 V). Configurable for a
- *  different charger / a future second EVSE. */
-const EV_MAX_LOAD_W = Math.max(0, Number(process.env.EV_MAX_LOAD_W ?? 11520));
+/** v0.55.0 — physical ceiling on predicted EV-charging load per hour, per charger: a residential
+ *  charger tops out near 11.5 kW (48 A × 240 V). v1.191.0 — the EV_MAX_LOAD_W option (limits.ts),
+ *  11520 W while unset; EV_CHARGER_COUNT says how many chargers share the site (1 while unset). */
+const EV_MAX_LOAD_W = limits.evMaxLoadW;
+const EV_CHARGER_COUNT = limits.evChargerCount;
 
 /**
  * v0.55.0 — fold predicted EV-charging sessions into a per-hour watt map for the load forecast.
@@ -890,14 +900,19 @@ const EV_MAX_LOAD_W = Math.max(0, Number(process.env.EV_MAX_LOAD_W ?? 11520));
 export function evLoadByHour(
   sessions: Array<{ ts: number; durationHours: number; watts: number; probability?: number }>,
   maxW: number = EV_MAX_LOAD_W,
+  chargers: number = EV_CHARGER_COUNT,
 ): Map<number, number> {
+  // v1.191.0 (E2) — with two or more chargers, overlapping sessions can be two cars at once: each
+  // hour takes the SUM, capped at chargers × maxW. One charger (or none) keeps the MAX.
+  const sum = Number.isInteger(chargers) && chargers >= 2;
   const byHour = new Map<number, number>();
   for (const sess of sessions) {
     const wholeHours = Math.max(1, Math.ceil(sess.durationHours));
     const w = Math.min(sess.watts, maxW) * clamp01(sess.probability ?? 1);
     for (let i = 0; i < wholeHours; i++) {
       const heKey = Math.floor((sess.ts + i * 3_600_000) / 3_600_000);
-      byHour.set(heKey, Math.max(byHour.get(heKey) ?? 0, w));
+      const prev = byHour.get(heKey) ?? 0;
+      byHour.set(heKey, sum ? Math.min(chargers * maxW, prev + w) : Math.max(prev, w));
     }
   }
   return byHour;
@@ -935,7 +950,7 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
   // (flagged in the v0.41.0 Copilot review). We key on the gate BOOLEAN — not the raw
   // minProjectedSoc — so the cache still survives the per-cycle forecast jitter and only
   // invalidates when the depletion verdict actually flips.
-  const reserveForGate = shp2?.projection.backupReserveSoc ?? 15;
+  const reserveForGate = shp2?.projection.backupReserveSoc ?? RESERVE_FALLBACK_PCT;
   // v0.41.0 (Copilot follow-up) — compare against the forecast's OWN reserve floor when it
   // carries one: `minProjectedSoc` was projected relative to `forecast.reserveSoc` (see
   // getDayForecast, which sets reserveSoc = backupReserveSoc ?? 15). Falling back to the live
@@ -969,7 +984,7 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
     const fit = linregress(pts);
     if (fit) {
       const pctPerHour = fit.slopePerMs * 3_600_000;
-      const reserve = sp.backupReserveSoc ?? 15;
+      const reserve = sp.backupReserveSoc ?? RESERVE_FALLBACK_PCT;
       const cur = sp.backupBatPercent;
       // v0.41.0 — gate the trailing-3h runtime alert on the DEPLETION-AWARE diurnal
       // forecast (`diurnalConfirmsDepletion`, computed above so it can also key the
@@ -1040,6 +1055,7 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
               {
                 label: 'Reaches reserve at',
                 value: new Date(now + hoursToReserve * 3_600_000).toLocaleString([], {
+                  timeZone: siteTimeZone(),
                   weekday: 'short',
                   hour: 'numeric',
                   minute: '2-digit',
@@ -1419,7 +1435,7 @@ function hourCurve(
 ): { curve: number[]; spanMs: number } {
   const pts = recorder.query(sn, metric, sinceMs, nowMs, HOUR_CURVE_BUCKET_SEC);
   const buckets: number[][] = Array.from({ length: 24 }, () => []);
-  for (const p of pts) buckets[new Date(p.ts).getHours()].push(p.value);
+  for (const p of pts) buckets[siteHour(p.ts)].push(p.value);
   return {
     curve: buckets.map((b) => mean(b)),
     spanMs: pts.length > 1 ? pts[pts.length - 1].ts - pts[0].ts : 0,
@@ -1464,9 +1480,9 @@ export function weightedHourCurveByWeekday(
   let weekendSamples = 0;
   const add = (b: WB, w: number, v: number) => { b.wSum += w; b.wvSum += w * v; b.n++; };
   for (const p of pts) {
-    const d = new Date(p.ts);
-    const h = d.getHours();
-    const dow = d.getDay(); // 0 = Sun, 6 = Sat
+    const lp = siteLocalParts(p.ts);
+    const h = lp.hour;
+    const dow = lp.dow; // 0 = Sun, 6 = Sat
     const w = useWeights ? Math.pow(2, -Math.max(0, nowMs - p.ts) / halfLifeMs) : 1;
     add(combinedB[h], w, p.value);
     if (dow === 0 || dow === 6) {
@@ -1549,7 +1565,7 @@ export function buildSolarResponse( // exported v1.20.0 for the F21 gate tests
   for (const [he, pv] of pvByEpoch) {
     const ghi = ghiByEpoch.get(he);
     if (ghi == null) continue;
-    groups[new Date(he * 3_600_000).getHours()].push({ ghi, pv });
+    groups[siteHour(he * 3_600_000)].push({ ghi, pv });
     if (he < minEpoch) minEpoch = he;
     if (he > maxEpoch) maxEpoch = he;
   }
@@ -1726,7 +1742,7 @@ export function computeSoiling(
   for (const [he, pv] of pvByEpoch) {
     const wx = soilingClearSkyHour(wxByHour, he, pairedUntilMs);
     if (!wx || wx.radiationWm2 < 250) continue; // clear daytime only
-    const day = new Date(he * 3_600_000).toDateString();
+    const day = siteYmd(he * 3_600_000);
     if (taperHours.has(he)) { taperDays.add(day); taperCount++; continue; }
     const coeff = pv / wx.radiationWm2;
     if (!Number.isFinite(coeff) || coeff <= 0) continue;
@@ -1736,7 +1752,7 @@ export function computeSoiling(
   }
   const candidates = [...byDay.entries()]
     .filter(([, v]) => v.length >= 3) // ≥3 clear hours to trust the day
-    .map(([day, v]) => ({ day, t: new Date(day).getTime(), coeff: median(v), hours: v.length }))
+    .map(([day, v]) => ({ day, t: siteDayStartMs(day), coeff: median(v), hours: v.length }))
     .sort((a, b) => a.t - b.t);
   const covBar = Math.max(3, Math.round(Math.max(...candidates.map((d) => d.hours)) * 0.5));
   // v1.187.1 — a day that lost clear hours to the taper counts only if the rest reach covBar (the
@@ -1889,8 +1905,9 @@ const FORECAST_NIGHT_MAX_TRIM = Math.min(1, Math.max(0, Number(process.env.FOREC
 // it corrects is the idle floor; during the day a curve hour legitimately runs
 // >1.5x a brief recent dip (a cloud cutting AC), so applying the trim there would
 // under-predict the real afternoon peak. Overnight band = [START..23] ∪ [0..END].
-const FORECAST_NIGHT_START_HOUR = Math.min(23, Math.max(0, Math.round(Number(process.env.FORECAST_NIGHT_START_HOUR ?? 21))));
-const FORECAST_NIGHT_END_HOUR = Math.min(23, Math.max(0, Math.round(Number(process.env.FORECAST_NIGHT_END_HOUR ?? 5))));
+// v1.191.0 (Z2) — the FORECAST_NIGHT_START_HOUR / _END_HOUR options (limits.ts), 21 and 5 while unset.
+const FORECAST_NIGHT_START_HOUR = limits.forecastNightStartHour;
+const FORECAST_NIGHT_END_HOUR = limits.forecastNightEndHour;
 
 /** v0.59.0 — trim a stale-high forecast load-curve hour toward recent measured
  *  load. Only ever REDUCES load (an over-prediction); returns rawBase unchanged
@@ -2333,7 +2350,7 @@ async function computeDayForecastUncached(
   // Self-activating + no-op until ≥3 mature weather-covered days exist (see
   // computePvBiasCorrection): factor stays 1.0 (raw PV, unchanged behaviour) otherwise.
   const biasTodayStart = startOfLocalDayMs();
-  const biasWindowStart = biasTodayStart - 7 * 86_400_000;
+  const biasWindowStart = siteShiftDaysMs(biasTodayStart, -7);
   const pvBySnForBias = new Map<string, Array<{ ts: number; value: number }>>();
   // R4 — §4 item 9: the hours a mid-day charge of ours held the pool are not array evidence — a
   // grid charge beside the sun takes acceptance the PV would have had (middayChargeHoursFromLedger;
@@ -2360,7 +2377,7 @@ async function computeDayForecastUncached(
   const nameplateRemainWh = shp2?.projection.backupRemainWh ?? null;
   const fullWh = nameplateFullWh != null ? nameplateFullWh * poolBasis.capacityScale : null;
   let socWh = nameplateRemainWh != null ? nameplateRemainWh * poolBasis.capacityScale : null;
-  const reserveSoc = shp2?.projection.backupReserveSoc ?? 15;
+  const reserveSoc = shp2?.projection.backupReserveSoc ?? RESERVE_FALLBACK_PCT;
   const basisKey = `${poolBasis.capacityBasis}:${poolBasis.capacityScale.toFixed(4)}:${Math.round(poolBasis.overheadW)}`;
   if (shp2 && basisKey !== lastPoolBasisKey) {
     lastPoolBasisKey = basisKey;
@@ -2418,10 +2435,10 @@ async function computeDayForecastUncached(
     }
     const nightPairs: Array<{ predictedW: number; actualW: number }> = [];
     for (const [he, vs] of byHourEpoch) {
-      const d = new Date(he * 3_600_000);
-      const hClock = d.getHours();
+      const lp = siteLocalParts(he * 3_600_000);
+      const hClock = lp.hour;
       if (!isForecastNightHour(hClock)) continue;
-      const dw = d.getDay();
+      const dw = lp.dow;
       const wknd = dw === 0 || dw === 6;
       const predicted = useSplitLoad
         ? (wknd ? loadRes.weekend[hClock] : loadRes.weekday[hClock])
@@ -2434,11 +2451,11 @@ async function computeDayForecastUncached(
   // v1.9.0 (review F12) — the anchor is only night-representative when NOW is in
   // the night band; isSameNightTrimWindow additionally restricts the trim to
   // hours of THIS night (see the loop below).
-  const anchorClock = new Date(now).getHours();
+  const anchorClock = siteHour(now);
 
   for (let k = 0; k < 24; k++) {
     const ts = startHour + k * 3_600_000;
-    const clock = new Date(ts).getHours();
+    const clock = siteHour(ts);
     const wx = wxByHour.get(Math.floor(ts / 3_600_000)) ?? null;
     const cloud = wx ? wx.cloudCoverPct : null;
     const ghi = wx ? wx.radiationWm2 : null;
@@ -2463,7 +2480,7 @@ async function computeDayForecastUncached(
     if (hourCeil != null && hourCeil > pvCeilingW) pvCeilingW = hourCeil; // v0.14.1 — clear-sky ceiling for the P90 clamp
     // Day-of-week-aware load: pick weekday vs weekend curve for the projected
     // hour. Mon–Fri at 5pm looks nothing like Sat at 5pm in this house.
-    const projDow = new Date(ts).getDay();
+    const projDow = siteDow(ts);
     const isWeekend = projDow === 0 || projDow === 6;
     const rawBase = useSplitLoad
       ? (isWeekend ? loadRes.weekend[clock] : loadRes.weekday[clock])
@@ -2538,7 +2555,7 @@ async function computeDayForecastUncached(
   let restoredPvSum = 0;
   for (let k = 0; k < 24; k++) {
     const ts = startHour + k * 3_600_000;
-    const clock = new Date(ts).getHours();
+    const clock = siteHour(ts);
     const wx = wxByHour.get(Math.floor(ts / 3_600_000)) ?? null;
     const cloud = wx ? wx.cloudCoverPct : null;
     const ghi = wx ? wx.radiationWm2 : null;
@@ -2667,7 +2684,7 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
     0,
   ) / 1000;
   if (df.minProjectedSoc != null && df.minProjectedSocTs != null && df.minProjectedSoc < df.reserveSoc) {
-    const when = new Date(df.minProjectedSocTs).toLocaleString([], { weekday: 'short', hour: 'numeric' });
+    const when = new Date(df.minProjectedSocTs).toLocaleString([], { timeZone: siteTimeZone(), weekday: 'short', hour: 'numeric' });
     // v1.17.0 (engine-review F13) — discriminating power. The islanded-only dip
     // reads 0% every night on a home that rides the grid at the reserve floor
     // (82/82 valid HA samples over 7 days), so depth alone can't distinguish a
@@ -2677,7 +2694,7 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
       (h) => h.projectedSocPct != null && h.projectedSocPct < df.reserveSoc,
     ).length;
     const why = driverCloud > 50
-      ? `Driven primarily by tomorrow's high cloud cover (~${Math.round(driverCloud)}% avg). Under typical Phoenix-clear sky (~20% cloud) the projection would stay above reserve.`
+      ? `Driven primarily by tomorrow's high cloud cover (~${Math.round(driverCloud)}% avg). Under typical clear sky (~20% cloud) the projection would stay above reserve.`
       : driverCloud > 30
         ? `Driven by elevated cloud cover (~${Math.round(driverCloud)}% avg) AND typical-load curve. Sunny conditions would lift the projection ~${Math.round((clearDayKwh - df.forecastPvWhNext24 / 1000))} kWh.`
         : `Cloud cover is moderate (~${Math.round(driverCloud)}% avg); the dip is driven mostly by load pattern + current battery starting point.`;
@@ -3553,7 +3570,7 @@ function analysePack(
     kalmanFadeStdevPctPerYear,
     kalmanYearsToEol,
     kalmanEolDate,
-    summary: `SoH ${currentSoh.toFixed(1)}% fading ~${fadePctPerYear.toFixed(1)}%/yr — projected to reach the ${EOL_SOH}% end-of-life mark around ${new Date(eolDate).getFullYear()}, about ${round1(yearsToEol)} years out${rangeNote}.${arrheniusNote}`,
+    summary: `SoH ${currentSoh.toFixed(1)}% fading ~${fadePctPerYear.toFixed(1)}%/yr — projected to reach the ${EOL_SOH}% end-of-life mark around ${Number.isFinite(eolDate) ? siteLocalParts(eolDate).year : new Date(eolDate).getFullYear()}, about ${round1(yearsToEol)} years out${rangeNote}.${arrheniusNote}`,
   });
 }
 
@@ -3652,7 +3669,7 @@ export async function computeDegradation(
   }
   const now = Date.now();
   // v1.187.10 — from the configured retention (see DEGRADE_WINDOW_MIN_DAYS), not a fixed 30 days.
-  const windowDays = degradationWindowDays(resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS));
+  const windowDays = degradationWindowDays(config.retentionDays);
   const since = now - windowDays * 86_400_000;
   const dpus = allDpus(devices);
 
@@ -3777,16 +3794,7 @@ const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
 // runway, the day/multi-day SoC trajectories and the probabilistic band now drain
 // the pool through runwayDrainW below; this constant is unchanged and stays the
 // night-charge planner's and the load-shed advisor's discharge leg.
-export const RUNWAY_DISCHARGE_EFFICIENCY = Math.min(
-  1,
-  Math.max(0.8, Number(process.env.RUNWAY_DISCHARGE_EFFICIENCY ?? 0.94) || 0.94),
-);
-
-/** Clamp an env number into [lo, hi]; a missing or malformed value takes `dflt`. */
-function envClamped(raw: string | undefined, dflt: number, lo: number, hi: number): number {
-  const n = raw == null || raw.trim() === '' ? dflt : Number(raw);
-  return Math.min(hi, Math.max(lo, Number.isFinite(n) ? n : dflt));
-}
+export const RUNWAY_DISCHARGE_EFFICIENCY = limits.runwayDischargeEfficiency;
 // v1.187.19 — the measured pool drain. Fitted on 30 clean pack-only discharge spans
 // (2026-09-02..10-11, loads 2.1-7.7 kW, FCC ratios 0.981/0.970/0.959/0.944; the
 // aggregated spans are test/fixtures/runwayReplaySpans.json): on the measured
@@ -3805,10 +3813,13 @@ function envClamped(raw: string | undefined, dflt: number, lo: number, hi: numbe
 // stream with the panel's 60 s frame (the two-cadence trap), and the single-stream
 // per-Core figure above works only while islanded — grid-tied, ac_out reads 0 (the
 // Cores feed the house through the panel link). Clamps: floor [0, 1500] W, per-Core
-// [0, 500] W, marginal η [0.80, 1.0].
-export const RUNWAY_POOL_OVERHEAD_FLOOR_W = envClamped(process.env.RUNWAY_POOL_OVERHEAD_FLOOR_W, 270, 0, 1500);
-export const RUNWAY_CORE_OVERHEAD_W = envClamped(process.env.RUNWAY_CORE_OVERHEAD_W, 90, 0, 500);
-export const RUNWAY_DRAIN_MARGINAL_EFFICIENCY = envClamped(process.env.RUNWAY_DRAIN_MARGINAL_EFFICIENCY, 0.94, 0.8, 1);
+// [0, 500] W, marginal η [0.80, 1.0]. v1.191.0 (O1) — the floor and the per-Core figure are the
+// RUNWAY_POOL_OVERHEAD_FLOOR_W / RUNWAY_CORE_OVERHEAD_W options (limits.ts; schema ranges equal
+// these clamps). The overhead is deliberately NOT derived as 90 W × connected Cores: with fewer
+// than three Cores connected that would shed overhead the remaining Cores still burn.
+export const RUNWAY_POOL_OVERHEAD_FLOOR_W = limits.runwayPoolOverheadFloorW;
+export const RUNWAY_CORE_OVERHEAD_W = limits.runwayCoreOverheadW;
+export const RUNWAY_DRAIN_MARGINAL_EFFICIENCY = limits.runwayDrainMarginalEfficiency;
 
 /** v1.187.19 — the pool overhead (W): never below the fitted three-Core floor while the panel
  *  reports a pool (`poolReported`), whatever the connected count says — a Core leaving, or a
@@ -4036,7 +4047,7 @@ export function computeRunway(
   // and reading it here manufactured an "AT RESERVE FLOOR" posture for the
   // whole charge window, every night. Same fact v1.113.0 gave the below-reserve
   // alert, now shared (ownerReserveFloorPct); falls back to the live value.
-  const reservePct = getOwnerReserveFloorPct() ?? shp2.projection.backupReserveSoc ?? 15;
+  const reservePct = getOwnerReserveFloorPct() ?? shp2.projection.backupReserveSoc ?? RESERVE_FALLBACK_PCT;
   const backupReserveKwh = (backupFullKwh * reservePct) / 100;
 
   // Recent load — average SHP2 panel_load over the last hour. (Loads wired
@@ -4309,10 +4320,7 @@ export function computeRoundTripEfficiency(
   const todayStart = startOfLocalDayMs();
   const dpus = allDpus(devices);
 
-  const localDateStr = (ms: number): string => {
-    const d = new Date(ms);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  };
+  const localDateStr = (ms: number): string => siteYmd(ms);
 
   // v0.9.29 — query each metric ONCE for the full window instead of
   // windowDays separate per-day queries. Before this change, RTE made
@@ -4324,7 +4332,7 @@ export function computeRoundTripEfficiency(
   // internally and picks up the right "lastBefore" sample for each day,
   // which actually improves accuracy at day boundaries vs the old per-day
   // query path (where lastBefore couldn't see across the boundary).
-  const fullStart = todayStart - (windowDays - 1) * 86_400_000;
+  const fullStart = siteShiftDaysMs(todayStart, -(windowDays - 1));
   const fullEnd = now;
   // For each (sn, pack), pull in + out series once at 60 s bucketing.
   // batched queryMulti: one SQL call returns both metrics for the pack.
@@ -4385,8 +4393,8 @@ export function computeRoundTripEfficiency(
   let totalDischarged = 0;
   const packCount = homeDpus.reduce((n, d) => n + d.projection.packs.length, 0);
   for (let i = windowDays - 1; i >= 0; i--) {
-    const dayStart = todayStart - i * 86_400_000;
-    const dayEnd = i === 0 ? now : dayStart + 86_400_000;
+    const dayStart = siteShiftDaysMs(todayStart, -i);
+    const dayEnd = i === 0 ? now : siteShiftDaysMs(dayStart, 1);
     let chargedKwh = 0;
     let dischargedKwh = 0;
     let coverageMsSum = 0;
@@ -4552,7 +4560,7 @@ export function shadeHoursFromCorePvMaps(
       if (!wx || wx.cloudCoverPct > 20 || wx.radiationWm2 < 200) continue;
       const coeff = pv / wx.radiationWm2;
       if (!Number.isFinite(coeff) || coeff <= 0) continue; // drop this Core's gap hour
-      const hod = new Date(he * 3_600_000).getHours();
+      const hod = siteHour(he * 3_600_000);
       const arr = clearByHour.get(hod) ?? [];
       arr.push(coeff);
       clearByHour.set(hod, arr);
@@ -4567,10 +4575,10 @@ export function shadeHoursFromCorePvMaps(
     for (const [he, pv] of pvByEpoch) {
       const wx = wxByHourEpoch.get(he);
       if (!wx || wx.cloudCoverPct > 20 || wx.radiationWm2 < 200) continue;
-      const hod = new Date(he * 3_600_000).getHours();
+      const hod = siteHour(he * 3_600_000);
       const ref = refCoeffByHour.get(hod);
       if (ref == null) continue;
-      byHour[hod].push({ predicted: ref * wx.radiationWm2, observed: pv, day: new Date(he * 3_600_000).toDateString() });
+      byHour[hod].push({ predicted: ref * wx.radiationWm2, observed: pv, day: siteYmd(he * 3_600_000) });
     }
     const coreHours = new Map<number, CoreShadeAgg>();
     for (let h = 0; h < 24; h++) {
@@ -4799,7 +4807,7 @@ export async function computeSoilingDecomposition(
     const coeff = pv / wx.radiationWm2;
     if (!Number.isFinite(coeff) || coeff <= 0) continue;
     const ts = he * 3_600_000;
-    const hod = new Date(ts).getHours();
+    const hod = siteHour(ts);
     if (ts >= now - recentMs) byHour[hod].recent.push(coeff);
     else byHour[hod].baseline.push(coeff);
   }
@@ -4900,7 +4908,7 @@ export function computeStringMismatch(
     const buckets: number[][] = Array.from({ length: 24 }, () => []);
     for (const p of recorder.query(d.sn, 'pv_total', since, now, 300)) {
       // Only consider daytime samples — night samples are zero and would skew the median.
-      const h = new Date(p.ts).getHours();
+      const h = siteHour(p.ts);
       if (p.value < 100) continue;
       buckets[h].push(p.value);
     }
@@ -4999,11 +5007,9 @@ const EV_WINDOW_MIN_RECURRENCES = 3;  // need ≥3 weeks of the same pattern
 // well under any residential EVSE ≥ 25 A; env-tunable for smaller chargers.
 // NaN-safe (review): Math.max(0, NaN) is NaN, and `x < NaN` is false — a malformed
 // env value would silently disable BOTH the plateau filter (phantom AC patterns
-// return) and the live-session gate (any fresh sample becomes a "live EV").
-const EV_PLATEAU_MIN_W = (() => {
-  const n = Number(process.env.EV_PLATEAU_MIN_W);
-  return Number.isFinite(n) && n >= 0 ? n : 6000;
-})();
+// return) and the live-session gate (any fresh sample becomes a "live EV"). v1.191.0 — the
+// EV_PLATEAU_MIN_W option; its row (config.ts, nonNegativeOr) keeps that rule.
+const EV_PLATEAU_MIN_W = limits.evPlateauMinW;
 // v1.15.0 — live-session awareness (the alarm-relevant piece for a NON-recurrent
 // driver: scattered start times defeat any window prediction, but an ACTIVE
 // ~10.5 kW session is directly observable and its remaining energy is projectable).
@@ -5011,8 +5017,8 @@ const EV_LIVE_FRESH_MS = 10 * 60 * 1000;        // latest sample must be this fr
 const EV_LIVE_LOOKBACK_MS = 8 * 60 * 60 * 1000; // window to locate the active session's start
 const EV_LIVE_GAP_MS = 15 * 60 * 1000;          // sample-gap that terminates the backward session walk
 const EV_LIVE_MIN_SUSTAIN_MS = 5 * 60 * 1000;   // review: one glitched high sample must not fabricate a session
-const EV_SESSION_FALLBACK_KWH = 11;             // remaining-energy basis when no session history exists yet
-const EV_LIVE_MAX_REMAINING_H = 4;              // physical sanity cap (largest observed session ≈ 3 h)
+// EV_SESSION_FALLBACK_KWH (11 kWh, the remaining-energy basis with no session history) and
+// EV_LIVE_MAX_REMAINING_H (4 h, the physical sanity cap) are in limits.ts's EV group (v1.191.0).
 // review — a genuinely-EV-free site would otherwise re-mine 30 days × every paired
 // circuit on EVERY call (the v0.56.1 never-cache-empty rule assumed "empty" only
 // meant a cold post-boot recorder). Empty results now cache briefly: boot-cold
@@ -5139,6 +5145,13 @@ function extractEvSessions(points: Array<{ ts: number; value: number }>): EvSess
 }
 
 
+/** v1.191.0 (E3) — whether the EV detectors scan this circuit: never with EV_CHARGER_COUNT 0 (no
+ *  charger at the site), else every circuit or only the EV_CIRCUITS channels (either leg of a pair).
+ *  The charger count is read per call, like the channel list. */
+function evScanned(pc: { primaryCh: number; secondaryCh?: number | null }, circuits: ReadonlySet<number> | null): boolean {
+  return limits.evChargerCount !== 0 && evCircuitScanned(pc, circuits);
+}
+
 /** v1.185.0 — the panels whose circuits the EV detectors scan: the house panel, then the rest. */
 function evScanPanels(devices: Record<string, DeviceSnapshot>): Array<DeviceSnapshot & { projection: Shp2Projection }> {
   const house = findShp2(devices);
@@ -5160,8 +5173,11 @@ function computeMinedEvWindowPrediction(
   let earliestSampleTs: number | null = null;
   // v1.185.0 — EVERY panel's circuits, house panel first: the EV charger is planned for the
   // second panel, where a house-only scan would never see a session.
+  // v1.191.0 (E3) — only the EV_CIRCUITS channels when that is set; none with EV_CHARGER_COUNT 0.
+  const circuits = limits.evCircuits;
   for (const shp2 of evScanPanels(devices)) {
     for (const pc of shp2.projection.pairedCircuits) {
+      if (!evScanned(pc, circuits)) continue;
       const pts = recorder.query(shp2.sn, `pair${pc.primaryCh}_w`, since, now);
       // v1.99.0 — how far back the recorder actually goes, so the recurrence
       // denominator is CALENDAR days of real history, not a nominal 30.
@@ -5209,7 +5225,7 @@ function computeMinedEvWindowPrediction(
   // carried the identical defect.
   const observedDaysByDow = new Map<number, number>();
   for (let d = 0; d < calendarDays; d++) {
-    const dow = new Date(now - d * 86_400_000).getDay();
+    const dow = siteDow(siteShiftDaysMs(now, -d));
     observedDaysByDow.set(dow, (observedDaysByDow.get(dow) ?? 0) + 1);
   }
 
@@ -5217,9 +5233,8 @@ function computeMinedEvWindowPrediction(
   // both the weekday bucketing (below) and the v0.13.3 daily detector key off
   // it. (minutes >= 30 ⇒ +1 hour, else current hour.)
   const roundedHourOf = (startTs: number): { dow: number; hr: number } => {
-    const d = new Date(startTs);
-    const rd = new Date(startTs + (d.getMinutes() >= 30 ? 1 : 0) * 3_600_000);
-    return { dow: rd.getDay(), hr: rd.getHours() };
+    const rd = siteLocalParts(startTs + (siteLocalParts(startTs).minute >= 30 ? 1 : 0) * 3_600_000);
+    return { dow: rd.dow, hr: rd.hour };
   };
 
   // Bucket by (sn, circuit, dayOfWeek, startHour) and count recurrences.
@@ -5290,7 +5305,7 @@ function computeMinedEvWindowPrediction(
   const dailyHourKeys = new Set<string>();
   for (const [key, g] of hourGroups) {
     if (weekdayCovered.has(key)) continue; // already surfaced by the weekday path
-    const distinctDays = new Set(g.records.map((r) => new Date(r.startTs).toDateString())).size;
+    const distinctDays = new Set(g.records.map((r) => siteYmd(r.startTs))).size;
     // v0.13.3 — require the habit to recur on ≥MIN_RECURRENCES DISTINCT days. An
     // earlier "OR coverage ≥50% of observed days" shortcut false-fired on a sparse
     // window: with only 1–2 observed days, a single day's burst of sessions
@@ -5339,9 +5354,9 @@ function computeMinedEvWindowPrediction(
   const upcoming: EvWindowPrediction['upcomingNext24h'] = [];
   for (let h = 0; h < 24; h++) {
     const ts = now + h * 3_600_000;
-    const d = new Date(ts);
-    const dow = d.getDay();
-    const hr = d.getHours();
+    const lp = siteLocalParts(ts);
+    const dow = lp.dow;
+    const hr = lp.hour;
     let best: EvSessionPattern | null = null;
     for (const p of patterns) {
       if (p.startHour !== hr) continue;
@@ -5399,7 +5414,10 @@ export function detectLiveEvSession(
   p90SessionKwh: number | null = null,
 ): LiveEvSession | null {
   // v1.185.0 — every panel, house panel first (see computeMinedEvWindowPrediction).
+  // v1.191.0 (E3) — restricted as the mined scan is (EV_CIRCUITS, EV_CHARGER_COUNT 0).
+  const circuits = limits.evCircuits;
   for (const shp2 of evScanPanels(devices)) for (const pc of shp2.projection.pairedCircuits) {
+    if (!evScanned(pc, circuits)) continue;
     const pts = recorder.query(shp2.sn, `pair${pc.primaryCh}_w`, nowMs - EV_LIVE_LOOKBACK_MS, nowMs) ?? [];
     if (pts.length === 0) continue;
     const last = pts[pts.length - 1];
@@ -5489,7 +5507,7 @@ export function computeEvWindowPrediction(
     ts: hourStartMs,
     durationHours: (nowMs - hourStartMs) / 3_600_000 + live.projectedRemainingHours,
     watts: live.watts,
-    dayOfWeek: new Date(nowMs).getDay(),
+    dayOfWeek: siteDow(nowMs),
     probability: 1,
     live: true,
   };
@@ -6238,7 +6256,7 @@ export function diurnalBaselinePredictor(pvCurveWhPerHour: number[]): (hourStart
     const v = pvCurveWhPerHour[h];
     curve[h] = Number.isFinite(v) && v > 0 ? v : 0;
   }
-  return (hourStartMs: number) => curve[new Date(hourStartMs).getHours()];
+  return (hourStartMs: number) => curve[siteHour(hourStartMs)];
 }
 
 /**
@@ -6323,7 +6341,7 @@ export function coreCoverageByDay(
   // Bucket each SN's samples once into hour-epoch presence sets.
   const presentBySn = new Map<string, Set<number>>();
   const firstInWindowMs = new Map<string, number>();
-  const windowStartMs = todayStartMs - windowDays * 86_400_000;
+  const windowStartMs = siteShiftDaysMs(todayStartMs, -windowDays);
   for (const [sn, pts] of pvBySn) {
     const set = new Set<number>();
     let first: number | null = null;
@@ -6340,10 +6358,12 @@ export function coreCoverageByDay(
   }
   const out = new Map<number, { covered: boolean; daylightHours: number; worstSn: string | null; worstFrac: number | null }>();
   for (let i = windowDays; i >= 1; i--) {
-    const dayStart = todayStartMs - i * 86_400_000;
+    // CA26 — calendar days back in the site zone (a fixed 24 h step lands an hour off across DST).
+    const dayStart = siteShiftDaysMs(todayStartMs, -i);
+    const dayEnd = siteShiftDaysMs(dayStart, 1);
     const daylight: number[] = [];
-    for (let h = 0; h < 24; h++) {
-      const he = Math.floor((dayStart + h * 3_600_000) / 3_600_000);
+    for (let hourStart = dayStart; hourStart < dayEnd; hourStart += 3_600_000) {
+      const he = Math.floor(hourStart / 3_600_000);
       const ghi = ghiByEpoch.get(he);
       if (ghi != null && ghi > DAYLIGHT_GHI) daylight.push(he);
     }
@@ -6355,7 +6375,6 @@ export function coreCoverageByDay(
     let worstSn: string | null = null;
     let worstFrac: number | null = null;
     let evaluated = 0;
-    const dayEnd = dayStart + 86_400_000;
     for (const [sn, present] of presentBySn) {
       // v1.94.0 — a core that had not JOINED the fleet yet on this day cannot
       // make this day's actual wrong. Requiring it turns every pre-join day
@@ -6439,27 +6458,27 @@ export function computePvBiasCorrection(
   const coverage = coreCoverageByDay(ghiByEpoch, pvBySn, todayStartMs, windowDays);
   let totalPred = 0, totalAct = 0, matureDays = 0;
   for (let i = windowDays; i >= 1; i--) {
-    const dayStart = todayStartMs - i * 86_400_000;
+    const dayStart = siteShiftDaysMs(todayStartMs, -i); // CA26
+    const dayEnd = siteShiftDaysMs(dayStart, 1);
     // Same "day had ANY irradiance" coverage gate the skill hindcast uses.
     if (!dayHasGhiCoverage(ghiByEpoch, dayStart)) continue;
     const cov = coverage.get(dayStart);
     if (cov && !cov.covered) {
       // v1.88.0 — this fired on EVERY evaluation (96× per excluded day in the
       // 08-05 review, 7% of log bytes). One line per (day, core) is the fact.
-      const exclKey = `${new Date(dayStart).toISOString().slice(0, 10)}:${cov.worstSn}`;
+      const exclKey = `${siteYmd(dayStart)}:${cov.worstSn}`;
       if (!pvBiasExclusionLogged.has(exclKey)) {
         pvBiasExclusionLogged.add(exclKey);
         if (pvBiasExclusionLogged.size > 64) pvBiasExclusionLogged.delete(pvBiasExclusionLogged.values().next().value!);
-        log?.(`pv-bias: excluded ${new Date(dayStart).toISOString().slice(0, 10)} — core ${cov.worstSn} reported ${Math.round((cov.worstFrac ?? 0) * 100)}% of daylight hours (telemetry gap, not weather)`);
+        log?.(`pv-bias: excluded ${siteYmd(dayStart)} — core ${cov.worstSn} reported ${Math.round((cov.worstFrac ?? 0) * 100)}% of daylight hours (telemetry gap, not weather)`);
       }
       continue;
     }
     let predWh = 0, actWh = 0;
-    for (let h = 0; h < 24; h++) {
-      const hourStart = dayStart + h * 3_600_000;
+    for (let hourStart = dayStart; hourStart < dayEnd; hourStart += 3_600_000) {
       const he = Math.floor(hourStart / 3_600_000);
       const ghi = ghiByEpoch.get(he);
-      const resp = solarModel.hourly[new Date(hourStart).getHours()];
+      const resp = solarModel.hourly[siteHour(hourStart)];
       if (ghi != null && resp.coeff != null) predWh += resp.coeff * ghi;
       for (const pts of pvBySn.values()) {
         const slice = sliceByTsInclusive(pts, hourStart, hourStart + 3_600_000);
@@ -6544,7 +6563,7 @@ export async function computeForecastSkill(
   // ~3-4-day-lead forecast, not realized irradiance. 'first-write' is byte-identical to
   // before and is what the band calibrator scores on; only callers that opt in with
   // 'realized' score against realized > cache > first-write (buildRealizedGhiByEpoch).
-  const windowStart = todayStart - windowDays * 86_400_000;
+  const windowStart = siteShiftDaysMs(todayStart, -windowDays);
   const ghiRows = recorder.query('weather', 'ghi_wm2', windowStart, now, 3600);
   const ghiByEpoch = ghiBasis === 'realized'
     ? buildRealizedGhiByEpoch(ghiRows, queryRealizedGhi(recorder, windowStart, now), weather.hours)
@@ -6573,7 +6592,8 @@ export async function computeForecastSkill(
   const days: ForecastSkillDay[] = [];
   let totalPred = 0, totalAct = 0, errSum = 0, errCount = 0;
   for (let i = windowDays; i >= 1; i--) {
-    const dayStart = todayStart - i * 86_400_000;
+    const dayStart = siteShiftDaysMs(todayStart, -i); // CA26
+    const dayEnd = siteShiftDaysMs(dayStart, 1);
     // v0.13.1 — a day with no irradiance for ANY hour can't be hindcast.
     // Emit errorPct:null + weatherCovered:false instead of a predictedKwh=0 /
     // errorPct=-100 row, and keep it out of the MAE/bias stats (which were
@@ -6581,11 +6601,10 @@ export async function computeForecastSkill(
     const weatherCovered = dayHasGhiCoverage(ghiByEpoch, dayStart);
     const coverageGap = weatherCovered && dayCoverage.get(dayStart)?.covered === false;
     let predWh = 0, actWh = 0;
-    for (let h = 0; h < 24; h++) {
-      const hourStart = dayStart + h * 3_600_000;
+    for (let hourStart = dayStart; hourStart < dayEnd; hourStart += 3_600_000) {
       const he = Math.floor(hourStart / 3_600_000);
       const ghi = ghiByEpoch.get(he);
-      const hod = new Date(hourStart).getHours();
+      const hod = siteHour(hourStart);
       const resp = forecast.solarModel.hourly[hod];
       if (ghi != null && resp.coeff != null) predWh += resp.coeff * ghi;
       let act = 0;
@@ -6602,9 +6621,8 @@ export async function computeForecastSkill(
     // v1.10.0 (review F4) — a coverage-gap day's errorPct is null: the actual
     // is unmeasurable, so a percentage "miss" would be a fabrication.
     const errPct = weatherCovered && !coverageGap && actKwh > 0.5 ? Math.round((errKwh / actKwh) * 1000) / 10 : null;
-    const date = new Date(dayStart);
     days.push({
-      date: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
+      date: siteYmd(dayStart),
       predictedKwh: round2(predKwh),
       actualKwh: round2(actKwh),
       errorKwh: round2(errKwh),
@@ -7502,18 +7520,36 @@ export function idleFloorWatts(watts: number[]): number | null {
  * `minPerDay` samples are dropped rather than contributing a floor computed
  * from noise.
  *
- * Buckets are UTC days on purpose: the plant runs on MST (UTC-7, no DST), so a
- * local night of 19:00 -> 06:00 lands at 02:00 -> 13:00 UTC inside ONE UTC
- * date. A local-midnight bucket would split every night in half. Pure +
+ * A "day" here runs from 17:00 to 17:00 site-local (v1.191.0, T13), so a whole night — the idle
+ * window, local 19:00 -> 06:00 — lands in ONE bucket wherever the site is. A local-midnight bucket
+ * would split every night in half; a local-noon boundary would move winter-twilight and storm-dark
+ * daytime samples between buckets. In America/Phoenix 17:00 MST is 00:00 UTC, so these are exactly
+ * the UTC-day buckets this used before (the bucket's `ts` is its 17:00-local start). Pure +
  * exported for testing.
  */
+export const IDLE_FLOOR_DAY_START_HOUR = 17;
+const IDLE_SLOT_MS = 15 * 60_000;
+/** The start of the idle-floor day containing `ts`: the latest 17:00 site-local at or before it.
+ *  Every boundary and every zone transition falls on a quarter hour, so one lookup per 15-minute
+ *  slot serves every sample in it. */
+export function idleFloorDayStartMs(ts: number, slotCache?: Map<number, number>): number {
+  const slot = Math.floor(ts / IDLE_SLOT_MS);
+  const hit = slotCache?.get(slot);
+  if (hit !== undefined) return hit;
+  const lp = siteLocalParts(slot * IDLE_SLOT_MS);
+  const ymd = lp.hour >= IDLE_FLOOR_DAY_START_HOUR ? lp.ymd : addDaysYmd(lp.ymd, -1);
+  const start = zonedWallTimeMs(ymd, IDLE_FLOOR_DAY_START_HOUR, 0, siteTimeZone());
+  slotCache?.set(slot, start);
+  return start;
+}
 export function dailyIdleFloors(
   series: Array<{ ts: number; w: number }>,
   minPerDay = 3,
 ): Array<{ ts: number; value: number }> {
   const byDay = new Map<number, number[]>();
+  const slots = new Map<number, number>();
   for (const p of series) {
-    const day = Math.floor(p.ts / 86_400_000);
+    const day = idleFloorDayStartMs(p.ts, slots);
     const bucket = byDay.get(day);
     if (bucket) bucket.push(p.w);
     else byDay.set(day, [p.w]);
@@ -7522,7 +7558,7 @@ export function dailyIdleFloors(
   for (const [day, watts] of [...byDay.entries()].sort((a, b) => a[0] - b[0])) {
     if (watts.length < minPerDay) continue;
     const floor = idleFloorWatts(watts);
-    if (floor != null) out.push({ ts: day * 86_400_000, value: floor });
+    if (floor != null) out.push({ ts: day, value: floor });
   }
   return out;
 }
@@ -7905,7 +7941,7 @@ export async function computeClipping(
     }
     if (totalPts === 0) continue;
     const wx = wxByHour.get(Math.floor(hourStart / 3_600_000));
-    const hod = new Date(hourStart).getHours();
+    const hod = siteHour(hourStart);
     const resp = restoredModel.hourly[hod];
     let modelW: number | null = null;
     if (wx && resp.coeff != null && wx.radiationWm2 > DAYLIGHT_GHI) {
@@ -7987,9 +8023,8 @@ export async function computeClipping(
  * user could activate to absorb surplus. v0.9.77 ships an informational
  * list; future versions will hook into HA service calls (pool pump max
  * speed, EV charging trigger, etc.) so the panel can ACT on curtailment
- * instead of just naming it. The static list comes with sensible
- * Phoenix-home defaults; override planned via config.yaml in a later
- * release.
+ * instead of just naming it. The built-in list is the reference plant's;
+ * v1.191.0 — the OPPORTUNISTIC_LOADS option replaces it (limits.ts).
  * =================================================================== */
 
 export interface OpportunisticLoad {
@@ -8107,9 +8142,11 @@ function homeChargeCeilingPct(
   return meanChargeCeilingPct(homeDpus.map((d) => d.projection.chgMaxSoc));
 }
 
-// Phoenix off-grid home opportunistic loads. Estimated wattages are
-// based on the operator's setup (~16.8 kWp array, pool pump on a SHP2 circuit,
-// EVSE Level-2, electric tank heater). Update via config in a later rev.
+// The reference plant's opportunistic loads. Estimated wattages are based on its
+// setup (~16.8 kWp array, pool pump on a SHP2 circuit, EVSE Level-2, electric tank
+// heater). v1.191.0 — OPPORTUNISTIC_LOADS replaces the list when set; this one is kept
+// verbatim while it is unset (its 7200 W EV figure differs from EV_MAX_LOAD_W's 11520 W,
+// a duplicate listed in the plan's 4.1 register and deliberately left unchanged).
 const DEFAULT_OPPORTUNISTIC_LOADS: Omit<OpportunisticLoad, 'fitsInSurplus' | 'haServiceHint'>[] = [
   { id: 'pool_pump_high',
     name: 'Pool pump (max speed)',
@@ -8137,6 +8174,10 @@ const DEFAULT_OPPORTUNISTIC_LOADS: Omit<OpportunisticLoad, 'fitsInSurplus' | 'ha
     category: 'ev',
     description: 'Switch EVSE to max amperage. Largest single sink available and stores well for off-peak driving.' },
 ];
+/** v1.191.0 (Q1, CA22) — the OPPORTUNISTIC_LOADS option (limits.ts) when it parses to a list
+ *  (`none` is an empty one), else the built-in list above, unchanged. */
+const OPPORTUNISTIC_LOADS: readonly Omit<OpportunisticLoad, 'fitsInSurplus' | 'haServiceHint'>[] =
+  limits.opportunisticLoads ?? DEFAULT_OPPORTUNISTIC_LOADS;
 
 let curtailmentCache: { ts: number; value: CurtailmentReport } | null = null;
 
@@ -8192,7 +8233,7 @@ export async function computeCurtailment(
     recent7dHoursCount: 0,
     recent7dSettledDays: 0,
     hourlyHistogram: [],
-    opportunisticLoads: DEFAULT_OPPORTUNISTIC_LOADS.map((o) => ({
+    opportunisticLoads: OPPORTUNISTIC_LOADS.map((o) => ({
       ...o, fitsInSurplus: false, haServiceHint: null,
     })),
     basisComplete: false,
@@ -8221,7 +8262,7 @@ export async function computeCurtailment(
   const pvActualW = homeDpus.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
   const loadW = shp2.projection.circuits.reduce((s, c) => s + (c.watts ?? 0), 0);
   const ghi = currentHourGhi(weather, now);
-  const hod = new Date(now).getHours();
+  const hod = siteHour(now);
   const expected = ghi != null && ghi >= CURTAIL_MIN_GHI_WM2 ? predictExpectedPv(bayes, hod, ghi) : null;
   // v0.9.78 — saturation threshold tracks the live configured charge
   // ceiling, NOT a fixed 96%. A pool set to charge to 80% curtails at 80;
@@ -8281,9 +8322,9 @@ export async function computeCurtailment(
   let recent7dSettledDays = 0;
   const ONE_DAY = 24 * 3_600_000;
   const hasPosterior = bayes.hourly.length > 0;
-  pruneFrozenCurtailmentDays(todayStart - CURTAIL_HISTORY_DAYS * ONE_DAY);
+  pruneFrozenCurtailmentDays(siteShiftDaysMs(todayStart, -CURTAIL_HISTORY_DAYS));
   for (let d = 1; d <= CURTAIL_HISTORY_DAYS; d++) {
-    const dayStart = todayStart - d * ONE_DAY;
+    const dayStart = siteShiftDaysMs(todayStart, -d); // CA26
     const frozenDay = frozenCurtailmentDay(dayStart);
     if (frozenDay) {
       recent7dHours.push(...frozenDay.hours);
@@ -8341,7 +8382,7 @@ export async function computeCurtailment(
   }));
 
   // 5) Opportunistic-load suggestions sized against current surplus.
-  const opportunisticLoads: OpportunisticLoad[] = DEFAULT_OPPORTUNISTIC_LOADS.map((o) => ({
+  const opportunisticLoads: OpportunisticLoad[] = OPPORTUNISTIC_LOADS.map((o) => ({
     ...o,
     fitsInSurplus: currentSurplusW >= o.estimatedW,
     haServiceHint: null, // Phase 2 — wire to HA service.call here.
@@ -8503,7 +8544,9 @@ async function sampleCurtailmentHour(
     // v0.15.11 — was Math.min(μ*900, μ*1000), which for any positive μ is just
     // μ*900 (the *1000 operand was dead, leftover from a refactor). Write the
     // intent directly: the 900 W/m² hard cap.
-    expectedW = post.posteriorMean * 900;
+    // v1.191.0 — the cap is the site's (site.ts curtailGhiCapWm2): 900 on the legacy site; on a
+    // configured site its own clear-sky noon ceiling, never above 900.
+    expectedW = post.posteriorMean * curtailGhiCapWm2();
   }
 
   // Weather-verified disqualifier: PV meaningfully exceeds load → not curtailing.
@@ -8651,8 +8694,8 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
     // a non-null beginsDate — but keep an explicit guard for the type-checker.
     const inEffectNow = win.inEffectNow;
     const whenStr = inEffectNow || !beginsDate
-      ? (endsDate ? `now through ${endsDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })}` : 'now')
-      : `${beginsDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })}${endsDate ? ` through ${endsDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })}` : ''}`;
+      ? (endsDate ? `now through ${endsDate.toLocaleString([], { timeZone: siteTimeZone(), weekday: 'short', hour: 'numeric' })}` : 'now')
+      : `${beginsDate.toLocaleString([], { timeZone: siteTimeZone(), weekday: 'short', hour: 'numeric' })}${endsDate ? ` through ${endsDate.toLocaleString([], { timeZone: siteTimeZone(), weekday: 'short', hour: 'numeric' })}` : ''}`;
     out.push({
       // v1.40.0: id keys on the EVENT, not the NWS message URN — every NWS
       // update/upgrade mints a new URN, and a URN-keyed id made the panel
@@ -8676,8 +8719,8 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
         { label: 'Event', value: a.event },
         { label: 'Severity', value: a.severity },
         { label: 'Urgency', value: a.urgency },
-        { label: 'Begins', value: beginsDate ? (inEffectNow ? 'In effect now' : beginsDate.toLocaleString()) : '—' },
-        { label: 'Ends', value: endsDate ? endsDate.toLocaleString() : '—' },
+        { label: 'Begins', value: beginsDate ? (inEffectNow ? 'In effect now' : beginsDate.toLocaleString(undefined, { timeZone: siteTimeZone() })) : '—' },
+        { label: 'Ends', value: endsDate ? endsDate.toLocaleString(undefined, { timeZone: siteTimeZone() }) : '—' },
         { label: 'Area', value: a.areaDesc ?? '—' },
         // Traceability to the exact NWS product message (ids churn per update).
         { label: 'NWS message', value: a.id ? a.id.slice(-24) : '—' },
@@ -8706,12 +8749,12 @@ export async function getActiveNwsAlerts(): Promise<NwsAlert[]> {
  * of CO2 you avoided by NOT pulling those kWh from the grid.
  *
  * Lifetime: integrates over the whole self-consumption window plus
- * the lifetime PV counter from the recorder. Configurable via env
- * GRID_CO2_INTENSITY_LB_PER_MWH.
+ * the lifetime PV counter from the recorder. Configurable with the
+ * GRID_CO2_INTENSITY_LB_PER_MWH option.
  * =================================================================== */
 
 const CARBON_TTL_MS = 15 * 60 * 1000; // v0.9.82 — reuses self-consumption; staggered with it
-const DEFAULT_GRID_CO2_LB_PER_MWH = Number(process.env.GRID_CO2_INTENSITY_LB_PER_MWH ?? 1100);
+const DEFAULT_GRID_CO2_LB_PER_MWH = limits.gridCo2LbPerMwh; // v1.191.0 — the GRID_CO2_INTENSITY_LB_PER_MWH option (limits.ts)
 // 1 lb/MWh = 0.4536 kg / 1000 kWh = 0.0004536 kg/kWh
 const LB_PER_MWH_TO_KG_PER_KWH = 0.4536 / 1000;
 // EPA: avg US passenger car emits ~0.404 kg CO2 per mile.
@@ -8809,17 +8852,19 @@ export function computeCarbonReport(
  * Hour-of-day on-peak / off-peak windows from env. Defaults are a
  * common APS-Saver-style schedule (3 PM–8 PM on-peak Mon-Fri); set
  * TARIFF_ON_PEAK_HOURS=15-20 + TARIFF_ON_PEAK_DAYS=1-5 to match.
+ *
+ * v1.191.0 (S5) — every tariff setting here is read through tariff.ts: the model of the plan in
+ * effect (`tariffModelFromEnv`) and the legacy ladder (`legacyTariffFromEnv`), whose rules are the
+ * ones this file applied. The module-level snapshots below stay module-level.
  * =================================================================== */
 
 const TARIFF_TTL_MS = 15 * 60 * 1000; // v0.9.82 — staggered warm; 7-day cost aggregate
-// v0.9.58 — default to a FLAT rate (the operator's APS plan is flat $0.17/kWh — no TOU
-// split). The prior 25¢/8¢ split implied a TOU plan most APS customers don't
-// have, which silently overstated both grid-import cost and solar-load value
-// during on-peak hours. The on/off-peak logic below is preserved unchanged for
-// users who DO have a TOU plan: they can set TARIFF_ON_PEAK_CENTS and
-// TARIFF_OFF_PEAK_CENTS independently. For flat-rate users, the single override
-// `TARIFF_FLAT_CENTS_PER_KWH` sets both at once.
-const TARIFF_FLAT_CENTS = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
+// v0.9.58 — default to a FLAT rate. The prior 25¢/8¢ split overstated both grid-import cost and
+// solar-load value during on-peak hours on a plan that has no such split. (The v0.9.58 reading of the
+// reference plan as flat was wrong — it is APS R-EV, see v1.52.0 below — but the flat figure stays the
+// fallback while no confirmed rate prices an hour.) TARIFF_ON_PEAK_CENTS and TARIFF_OFF_PEAK_CENTS set a
+// two-tier pair; TARIFF_FLAT_CENTS_PER_KWH sets both at once (17 ¢ when absent: TARIFF_FLAT_DEFAULT_CENTS).
+const TARIFF_FLAT_CENTS = legacyTariffFromEnv().flatCents;
 
 /**
  * v1.52.0 — RESOLVE the cost basis, don't assume it.
@@ -8844,13 +8889,7 @@ export function apsSeasonIsSummer(nowMs: number): boolean {
   // v1.187.10 — the tariff model's own season (seasonAt): the APS billing-cycle seasons by
   // usage month. This was a separate calendar May–October test, so October was "summer"
   // here while APS bills it at winter rates.
-  return seasonAt(apsREvModelFromEnv(), nowMs) === 'summer';
-}
-function apsCent(name: string): number | null {
-  const raw = process.env[name];
-  if (raw == null || raw === '') return null;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : null;
+  return seasonAt(tariffModelFromEnv(), nowMs) === 'summer';
 }
 /**
  * v1.136.0 — the per-hour rate, from the FULL tariff table.
@@ -8877,7 +8916,7 @@ export function hourlyRateCents(
   tsMs: number,
   fallback: { onPeak: number; offPeak: number },
 ): number {
-  const slice = rateAt(apsREvModelFromEnv(), tsMs);
+  const slice = rateAt(tariffModelFromEnv(), tsMs);
   if (slice.centsPerKwh != null) return slice.centsPerKwh;
   return onPeakAt(tsMs) ? fallback.onPeak : fallback.offPeak;
 }
@@ -8892,22 +8931,32 @@ export function hourlyRateCents(
  * unconfirmed tariff, exactly as the pricing does, so the two never disagree.
  */
 export function isOnPeakHour(tsMs: number): boolean {
-  const slice = rateAt(apsREvModelFromEnv(), tsMs);
+  const slice = rateAt(tariffModelFromEnv(), tsMs);
   return slice.ratesConfirmed ? slice.isOnPeak : onPeakAt(tsMs);
 }
 
+/**
+ * v1.191.0 (R6) — step 2 reads the pair from the model of the plan in effect (`twoTierPairOf`: the
+ * season by `seasonAt`, the in-season on-peak period's cents and the off-peak cents) instead of a second
+ * reader of TARIFF_APS_*; the basis names the plan and season (`aps_r_ev-summer` on the APS preset, as
+ * before). The cost-figure path keeps its above-zero rule (`positiveCents`, OWNER DECISION 8): unifying
+ * it on "any finite value" would change golden G3's analytics reader for 0 and negative cents, so it is
+ * declared, not done; identical on any install whose rates are positive.
+ */
 export function resolveTariffCents(nowMs: number): { onPeak: number; offPeak: number; basis: string } {
-  const onOverride = apsCent('TARIFF_ON_PEAK_CENTS');
-  const offOverride = apsCent('TARIFF_OFF_PEAK_CENTS');
+  const legacy = legacyTariffFromEnv();
+  const onOverride = legacy.kpi.onPeak;
+  const offOverride = legacy.kpi.offPeak;
   if (onOverride != null && offOverride != null) {
     return { onPeak: onOverride, offPeak: offOverride, basis: 'explicit-override' };
   }
-  if (process.env.TARIFF_APS_RATES_CONFIRMED === 'true') {
-    const summer = apsSeasonIsSummer(nowMs);
-    const on = apsCent(summer ? 'TARIFF_APS_ONPEAK_SUMMER_CENTS' : 'TARIFF_APS_ONPEAK_WINTER_CENTS');
-    const off = apsCent(summer ? 'TARIFF_APS_OFFPEAK_SUMMER_CENTS' : 'TARIFF_APS_OFFPEAK_WINTER_CENTS');
+  const model = tariffModelFromEnv();
+  if (model.ratesConfirmed) {
+    const pair = twoTierPairOf(model, nowMs);
+    const on = positiveCents(pair.onPeak);
+    const off = positiveCents(pair.offPeak);
     if (on != null && off != null) {
-      return { onPeak: on, offPeak: off, basis: `aps_r_ev-${summer ? 'summer' : 'winter'}` };
+      return { onPeak: on, offPeak: off, basis: `${model.planId}-${pair.season}` };
     }
   }
   return {
@@ -8916,8 +8965,31 @@ export function resolveTariffCents(nowMs: number): { onPeak: number; offPeak: nu
     basis: 'flat-default',
   };
 }
-const TARIFF_ON_PEAK_HOURS_ENV = process.env.TARIFF_ON_PEAK_HOURS ?? '15-20';
-const TARIFF_ON_PEAK_DAYS_ENV = process.env.TARIFF_ON_PEAK_DAYS ?? '1-5';
+
+/**
+ * v1.191.0 (review 3) — the two-tier pair the MPC tariff vector (index.ts) falls back to while no
+ * confirmed rate prices an hour (hourlyRateCents). With TARIFF_PLAN set it is the cost figures' own
+ * pair (resolveTariffCents: TARIFF_ON_PEAK_CENTS / TARIFF_OFF_PEAK_CENTS when both are above zero, the
+ * flat rate otherwise), so the dispatch planner and the cost figures price an unconfirmed hour alike.
+ * The MPC read its environment-only …_CENTS_PER_KWH pair on every plan: an unconfirmed two_tier plan's
+ * cost figures used its own two rates while the MPC priced every hour, and valued every shifted kWh,
+ * at the 17 ¢ flat default, a rate the plan does not have. While TARIFF_PLAN is unset the pair stays
+ * the MPC's own (golden G2's twoTierAnalyticsNames / twoTierMpcNames: each path ignores the other's
+ * names), so the reference install is unchanged.
+ */
+export function mpcFallbackPair(nowMs: number): { onPeak: number; offPeak: number } {
+  if (!resolveTariffFromEnv().planSet) {
+    const { onPeak, offPeak } = legacyTariffFromEnv().mpc;
+    return { onPeak, offPeak };
+  }
+  const { onPeak, offPeak } = resolveTariffCents(nowMs);
+  return { onPeak, offPeak };
+}
+// v1.191.0 (F2) — the legacy window: TARIFF_ON_PEAK_HOURS / _DAYS ('15-20' / '1-5' when absent), or a
+// non-APS plan's own on-peak period (tariff.ts legacyOnPeakWindow). Module-level, as before.
+const LEGACY_ON_PEAK_WINDOW = legacyOnPeakWindow(tariffModelFromEnv());
+const TARIFF_ON_PEAK_HOURS_ENV = LEGACY_ON_PEAK_WINDOW.hours;
+const TARIFF_ON_PEAK_DAYS_ENV = LEGACY_ON_PEAK_WINDOW.days;
 
 /** v1.187.0 — the rates and window /api/tariff reports: the ones that PRICE the kWh. */
 export interface TariffPricingView {
@@ -8983,11 +9055,16 @@ export function parseRange(s: string): [number, number] | null {
   if (!m) return null;
   return [Number(m[1]), Number(m[2])];
 }
-/** Exported for tests. */
+/** Exported for tests.
+ *  v1.191.0 (review 3, plan F2) — the hour and the weekday are the site's (siteHour / siteDow), as the
+ *  table's own window is (rateAt, in the model's zone, which is the site zone). They were the host's
+ *  (getHours / getDay): with SITE_TIMEZONE set to another zone than the host's, the unconfirmed fallback
+ *  priced a two_tier plan's 14-19 window three hours late (New York on a Phoenix host), against its own
+ *  model's window. Identical wherever the site zone is the host's (the reference install). */
 export function onPeakAt(ts: number): boolean {
-  const d = new Date(ts);
-  const h = d.getHours();
-  const dow = d.getDay() === 0 ? 7 : d.getDay(); // 1=Mon..7=Sun
+  const h = siteHour(ts);
+  const day = siteDow(ts);
+  const dow = day === 0 ? 7 : day; // 1=Mon..7=Sun
   const hourRange = parseRange(TARIFF_ON_PEAK_HOURS_ENV);
   const dayRange = parseRange(TARIFF_ON_PEAK_DAYS_ENV);
   if (!hourRange || !dayRange) return false;
@@ -9118,7 +9195,7 @@ export function computeTariffReport(
   // v1.187.0 — report the window and rates that PRICE the tally above, not the legacy
   // two-tier strings (tariffPricingView). `tariffBasis` keeps naming the two-tier tier.
   const pricing = tariffPricingView(
-    apsREvModelFromEnv(), now, tariffCents,
+    tariffModelFromEnv(), now, tariffCents,
     { hours: TARIFF_ON_PEAK_HOURS_ENV, days: TARIFF_ON_PEAK_DAYS_ENV },
   );
   const value: TariffReport = {
@@ -9412,7 +9489,7 @@ export async function computeProbabilisticForecast(
   const cloudVarByHour: number[] = new Array(24).fill(0.25); // 25% baseline fallback
   if (weather && weather.hours.length > 0) {
     const cloudsByHour: number[][] = Array.from({ length: 24 }, () => []);
-    for (const wh of weather.hours) cloudsByHour[new Date(wh.ts).getHours()].push(wh.cloudCoverPct);
+    for (const wh of weather.hours) cloudsByHour[siteHour(wh.ts)].push(wh.cloudCoverPct);
     for (let h = 0; h < 24; h++) {
       const arr = cloudsByHour[h];
       if (arr.length < 3) continue;
@@ -9463,8 +9540,10 @@ export async function computeProbabilisticForecast(
   // deviceModels, bench Cores included (5 × 5 × 6.144 = 153.6 kWh against a 92.16 kWh
   // pool at 2026-10), which shrank the P10/P90 SoC offsets to ~0.6 of their size.
   // When projectedSocPct is null throughout, fullKwh is never read.
-  const PACK_KWH_NAMEPLATE = 6.144;
-  const PACKS_PER_DPU = 5;
+  // v1.191.0 — hwSpec (DECISION 11: the nameplate 6144 Wh). Z3 (the largest pack count observed per
+  // Core) is deferred: no persisted store holds it, and this release adds no new persisted format.
+  const PACK_KWH_NAMEPLATE = DPU_PACK_NAMEPLATE_WH / 1000;
+  const PACKS_PER_DPU = DPU_MAX_PACKS;
   // v1.187.19 — the trajectory's own drain: runwayDrainW with the overhead the forecast was
   // integrated with (a hand-built forecast carries none: 0, the drain it was built with). The
   // inversion, the hour-0 seed and every band step below use exactly this.
@@ -9556,7 +9635,7 @@ export async function computeProbabilisticForecast(
   let calSumP50 = 0;
   let calSumHalf = 0;
   for (const h of forecast.hours) {
-    const hod = new Date(h.ts).getHours();
+    const hod = siteHour(h.ts);
     const cloudStdev = cloudVarByHour[hod];
     const disagreementFrac = (disagreeByHourEpoch.get(Math.floor(h.ts / 3_600_000)) ?? 0) / 100;
     const baseSigmaFrac = Math.sqrt(
@@ -9857,7 +9936,7 @@ export async function computeMultiDayForecast(
   const loadByHod = new Array(24).fill(0);
   const loadHodFilled = new Array(24).fill(false);
   for (const fh of forecast.hours) {
-    const hod = new Date(fh.ts).getHours();
+    const hod = siteHour(fh.ts);
     if (!loadHodFilled[hod]) {
       loadByHod[hod] = fh.forecastLoadW;
       loadHodFilled[hod] = true;
@@ -9908,7 +9987,7 @@ export async function computeMultiDayForecast(
   const radClimoCount = new Array(24).fill(0);
   for (const wh of weather.hours) {
     if (wh.radiationWm2 > 0) {
-      const hod = new Date(wh.ts).getHours();
+      const hod = siteHour(wh.ts);
       radClimoSum[hod] += wh.radiationWm2;
       radClimoCount[hod]++;
     }
@@ -9918,8 +9997,8 @@ export async function computeMultiDayForecast(
   const days: DayRollup[] = [];
   const todayStart = startOfLocalDayMs();
   for (let dayIdx = 0; dayIdx < horizonDays; dayIdx++) {
-    const dayStart = todayStart + dayIdx * 86_400_000;
-    const dayEnd = dayStart + 86_400_000;
+    const dayStart = siteShiftDaysMs(todayStart, dayIdx); // CA26
+    const dayEnd = siteShiftDaysMs(dayStart, 1);
     let pvWh = 0;
     let loadWh = 0;
     let minSoc: number | null = null;
@@ -9928,7 +10007,7 @@ export async function computeMultiDayForecast(
     for (let t = dayStart; t < dayEnd; t += 3_600_000) {
       if (t < now && dayIdx === 0) continue; // skip past hours today
       const hourEpoch = Math.floor(t / 3_600_000);
-      const hod = new Date(t).getHours();
+      const hod = siteHour(t);
       const fh = forecastByHourEpoch.get(hourEpoch);
       let pv: number;
       let load: number;
@@ -9956,7 +10035,7 @@ export async function computeMultiDayForecast(
         // v1.4.4 (finding #50/#22) — prefer the live day-of-week-aware curve;
         // fall back to the v0.9.58 flat per-HoD mix (loadByHod above) only when
         // there isn't enough weekday/weekend history to trust the split.
-        const dow = new Date(t).getDay();
+        const dow = siteDow(t);
         const isWeekend = dow === 0 || dow === 6;
         const baseLoad = useSplitLoad
           ? (isWeekend ? loadRes.weekend[hod] : loadRes.weekday[hod])
@@ -9988,9 +10067,8 @@ export async function computeMultiDayForecast(
         socPct: socPctThisHour != null ? Math.round(socPctThisHour * 10) / 10 : null,
       });
     }
-    const date = new Date(dayStart);
     days.push({
-      date: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
+      date: siteYmd(dayStart),
       pvKwh: Math.round(pvWh / 100) / 10,
       loadKwh: Math.round(loadWh / 100) / 10,
       minProjectedSoc: minSoc != null ? Math.round(minSoc * 10) / 10 : null,
@@ -10072,11 +10150,10 @@ const DISPATCH_TTL_MS = 30 * 60 * 1000;
  * RUNWAY_DISCHARGE_EFFICIENCY — a round trip's per-leg efficiency can never
  * exceed the measured single discharge leg; the v1.27.0 constant violated this
  * (0.972 > 0.94), which is how the misinterpretation was caught. Advisory-only.
- * Env-overridable, clamped [0.80, 1.0]. */
-export const DISPATCH_ROUND_TRIP_EFFICIENCY = Math.min(
-  1,
-  Math.max(0.8, Number(process.env.DISPATCH_ROUND_TRIP_EFFICIENCY ?? 0.86) || 0.86),
-);
+ * Env-overridable, clamped [0.80, 1.0].
+ * v1.191.0 (DECISION 9) — named in limits.ts beside the MPC's 0.9 (values kept); re-exported here for
+ * the existing importers. */
+export { DISPATCH_ROUND_TRIP_EFFICIENCY };
 
 /**
  * v1.187.10 — which hours of a dispatch horizon may top the pack off from the grid. PURE.
@@ -10291,8 +10368,10 @@ const BAYES_PRIOR_TAU2 = 1000;   // huge prior variance → first obs dominates
 // Same g=500 W/m² update now contributes precision 500²/2.82e6 ≈ 0.089, so
 // the prior (1/1000 = 0.001) is overwritten over dozens of observations
 // rather than a single one. That's how the filter is meant to behave.
-export const BAYES_OBS_SIGMA2 = (0.10 * PHOENIX_SITE.pNamplate) ** 2;
-// ≈ 2.82e6 for the operator's ~16.8 kWp; σ ≈ 1 680 W (10% of peak PV output).
+// v1.191.0 — 10 % of the install's nameplate (site.ts pvSite(): the reference 16.8 kWp while no PV_*
+// option is set, so the value is unchanged there).
+export const BAYES_OBS_SIGMA2 = (0.10 * pvSite().pNamplate) ** 2;
+// ≈ 2.82e6 for the reference ~16.8 kWp; σ ≈ 1 680 W (10% of peak PV output).
 
 let bayesCache: { ts: number; value: BayesianSolarModel } | null = null;
 
@@ -10347,7 +10426,7 @@ export async function computeBayesianSolarModel(
     if (chargeHours.has(he)) continue;
     const wx = wxByHourEpoch.get(he);
     if (!wx || wx.radiationWm2 < DAYLIGHT_GHI) continue;
-    const hod = new Date(he * 3_600_000).getHours();
+    const hod = siteHour(he * 3_600_000);
     const s = byHour[hod];
     const updated = bayesUpdate(s.mu, s.tau2, wx.radiationWm2, pv, BAYES_OBS_SIGMA2);
     s.mu = updated.mu;

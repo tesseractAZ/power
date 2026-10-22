@@ -6,9 +6,19 @@ import compress from '@fastify/compress';
 import { existsSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { config } from './config.js';
+import { config, option } from './config.js';
 import { cached } from './cachedReply.js';
 import { clearedHistoryPage } from './clearedHistory.js';
+import { limits, MPC_RESERVE_FALLBACK_PCT } from './limits.js';
+import { SHP2_SOURCE_SLOTS, SHP2_CIRCUIT_COUNT } from './hwSpec.js';
+import { siteResponse, pvSite, isLegacyPvSite, physicsAmbientC, siteRepairIssues, siteBootNotices, checkHaHomeLocation } from './site.js';
+// v1.191.0 (lane A) — the site clock (siteTime.ts) and its main-thread side (boot log, HA comparison).
+import {
+  siteTimeZone, siteYmd, siteMinuteOfDay, siteDayStartMs, siteNextDayStartOf, addDaysYmd, zonedWallTimeMs,
+  fmtSiteClock, fmtSiteWeekday,
+} from './siteTime.js';
+import { siteTimeBootLines, checkHaTimeZone, siteTimeRepairIssues } from './siteTimeHa.js';
+import { productKind, warrantyChassis, configuredBenchSpareSns, deviceAliases } from './topology.js';
 import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPORT_DIR, publishedSnapshotStatus } from './dbExport.js';
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
@@ -20,7 +30,7 @@ import {
   renderReconnectReport, ARM_OFFLINE_MS as RECONNECT_ARM_MS, type DeviceObs as ReconnectDeviceObs,
 } from './reconnectAudit.js';
 import { startMqtt } from './ecoflow/mqtt.js';
-import { createRecorder, resolveRetentionDays } from './recorder.js';
+import { createRecorder } from './recorder.js';
 // v1.188.1 (review) — the bridge's verdicts, for the backup timers and the card (shp2Membership.ts BridgeVerdicts).
 import { slotVerdicts } from './energyBridge.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
@@ -39,9 +49,9 @@ import {
   FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, type ForceChargeAction,
   forceChargeRateKw, FORCE_CHARGE_PLAN_RATE_KW, shp2HouseLoadKw, FORCE_CHARGE_MIN_RATE_KW, planChargeCapKw,
   evDisplacedPackKwh,
-  FORCE_CHARGE_PROVEN_KW_PER_SLOT,
+  forceChargeKwPerCore, planRateFallbackKw,
   FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnReadbackStatus,
-  forceChargeNightOutcome, partialForceChargeOnFailureSlots,
+  forceChargeNightOutcome, partialForceChargeOnFailureSlots, FORCE_CHARGE_MAX_RUN_MS,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -73,7 +83,7 @@ import { getSnapshot, dropSnapshot } from './featureSnapshot.js';
 // v0.9.27 — multi-track model advance
 import { updateFromOutcome } from './models/onlineLR.js';
 import { computeModelHealth } from './models/modelHealth.js';
-import { physicsPmax, physicsScore, PHOENIX_SITE } from './physics/clearSky.js';
+import { physicsPmax, physicsScore } from './physics/clearSky.js';
 import { analyzePackLfp } from './physics/lfpOcv.js';
 import { packCurrentAmps, observePackRest, lastNonRestingAtMs, retainPacks, packRestKey } from './physics/restTracker.js';
 import { fitHierarchical, findOutliers, type HBPackObs } from './models/hierarchicalBayes.js';
@@ -95,6 +105,7 @@ import {
   DISPATCH_ROUND_TRIP_EFFICIENCY,
   RUNWAY_DISCHARGE_EFFICIENCY,
   hourlyRateCents,
+  mpcFallbackPair,
 } from './analytics.js';
 import type {
   ProbabilisticForecast, MultiDayForecast, DayForecast, EvWindowPrediction, ForecastHour,
@@ -238,7 +249,7 @@ import {
   revertResendOnReport, type RevertResendOnReport, isReserveSetting, restoreSummaryDue, type RestoreSummaryKind, restoreSentWords,
   type RevertDeadlineDecision,
 } from './nightChargeActuator.js';
-import { nextOnPeakStartMs, onPeakEndMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, planDateOwningCycle, type ChargeLegRole } from './chargeWindows.js';
+import { nextOnPeakStartMs, onPeakEndMs, nextChargeableOpenMs, legObjective, legForceChargeEligible, planDateOwningCycle, cheapNightOf, type ChargeLegRole } from './chargeWindows.js';
 // R4 — the winter mid-day cycle computed in SHADOW: sized, probed and recorded, never armed,
 // written or announced (middayShadow.ts).
 // R5 (v1.189.0) — the day-aware words of a charge cycle (chargeText.ts) and their route by the leg's
@@ -278,8 +289,11 @@ import {
   nextForceChargeOpenMs, withLiveTrailing, MISSED_APPLY_FALLBACK_REASON,
   type ChargeCycleState, type ChargeLegState,
 } from './chargeCycle.js';
-import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
-import { apsREvModelFromEnv, rateAt, localParts, seasonAt, APS_PERIOD } from './tariff.js';
+import { parsePersistedIslandedLoad, eveningBasisDefers } from './nightChargeAdvisor.js';
+// v1.191.0 (S6) — the night-charge schedule of the tariff in effect (the APS constants on the preset).
+import { nightScheduleOf, nightScheduleLogLine, nightScheduleRepairIssues, fmtMinuteOfDay, type NightSchedule } from './nightSchedule.js';
+import { tariffModelFromEnv, legacyTariffFromEnv, resolveTariffFromEnv, rateOptionsHint, tariffRepairIssues, rateAt, localParts, seasonAt, cheapPeriodIdOf, APS_PERIOD } from './tariff.js';
+import { tariffCurrency } from './money.js';
 // v1.187.0 — the scorer's span, cost and PV-evidence decisions, pure (nightLedgerScoring.ts).
 import {
   supersedingPlanDate, knownFleetMismatchReason, type TimeSpan,
@@ -657,9 +671,12 @@ setLastKnownHomeRoster(lastKnownRoster);
 export function noteLiveRoster(roster: ReadonlySet<string>): void {
   if (roster.size > 0) lastKnownRoster = new Set(roster);
   // v1.121.0 — publish it to the membership module so the OTHER consumers of the
-  // stale SPARE_DPU_SNS literal (the offline-spare mute and homeCoreCoverage's
-  // SHP2-blind fallback) share the same durable answer isHomePoolDpu already had.
+  // bench-spare floor (the offline-spare mute and homeCoreCoverage's SHP2-blind
+  // fallback; v1.191.0: BENCH_SPARE_SNS when set, else the stale SPARE_DPU_SNS
+  // literal) share the same durable answer isHomePoolDpu already had.
   setLastKnownHomeRoster(lastKnownRoster);
+  // v1.191.0 (S8, CA17) — and to the analytics worker, which has its own copy of the module.
+  analytics.pushHomeRoster?.([...lastKnownRoster]);
 }
 
 // v1.154.0 — timed from OUTSIDE as well as inside. v1.152.0's per-phase line was emitted
@@ -686,6 +703,20 @@ registerBackupWindowRoutes(app, backupWindow);
 // self-warms its report caches, so the old main-thread cache-warmer is gone.
 const analytics = initAnalyticsClient(resolve(process.cwd(), config.dbPath), (m) => app.log.info(m));
 store.on('change', (snap) => analytics.pushSnapshot(snap));
+// v1.191.0 (S8, CA17) — the seeded last-known roster, so the worker's spare floor honours it from boot.
+analytics.pushHomeRoster?.([...lastKnownRoster]);
+// v1.191.0 (S8) — name where the device topology comes from, once at boot (the feature, not the
+// version string): the bench-spare floor (BENCH_SPARE_SNS, or the built-in list) and the alias layers.
+{
+  const spares = configuredBenchSpareSns();
+  const al = deviceAliases();
+  const bySource = (src: string) => Object.values(al.sourceBySn).filter((x) => x === src).length;
+  app.log.info(
+    `devices: bench-spare floor ${spares == null ? 'the built-in list (BENCH_SPARE_SNS unset)' : `BENCH_SPARE_SNS (${spares.size} serial${spares.size === 1 ? '' : 's'})`}; `
+    + `display aliases: image ${bySource('image')}, data ${bySource('data')}, option ${bySource('option')}`
+    + (al.errors.length ? ` — ignored as unreadable: ${al.errors.map((e) => e.source).join(', ')}` : ''),
+  );
+}
 // v1.186.0 — the first poll settled: the worker gets the hydrated map before the alert monitor's
 // first reports (registered before startAlertMonitor, and a report posts in a later microtask).
 store.on('hydrated', () => analytics.flushSnapshot());
@@ -766,6 +797,11 @@ app.get('/api/panel-info', async () => ({
   tokenPath: WRITE_TOKEN_PATH,
 }));
 
+// v1.191.0 — the site facts the cards read from the server (plan 2.7; site.ts). A stub in S2: the
+// zone and its source, the coordinates, the currency, the PV strings and the per-DPU bench-spare flag
+// are today's values, and each lane fills in its own field.
+app.get('/api/site', async (req, reply) => cached(req, reply, siteResponse(store.get().devices, lastKnownRoster), 60));
+
 app.get<{ Querystring: { sn?: string; metric?: string; since?: string; until?: string; bucket?: string } }>(
   '/api/history',
   async (req, reply) => {
@@ -790,15 +826,14 @@ app.get<{ Querystring: { since?: string; until?: string } }>('/api/summary/today
   const until = req.query.until ? Number(req.query.until) : Date.now();
   // v1.176.0 — `dayEndMs`: the local midnight that ENDS the day this payload covers, so the
   // Today card can tell a payload from a finished day without assuming a day is 24 h (a
-  // daylight-saving fall-back day is 25). setDate(+1) walks the calendar in local time.
-  const end = new Date(since);
-  end.setDate(end.getDate() + 1);
-  end.setHours(0, 0, 0, 0);
+  // daylight-saving fall-back day is 25). v1.191.0 (CA25) — the SITE midnight (siteTime.ts), as the
+  // default `since` is (startOfLocalDayMs), not the host's.
+  const dayEndMs = siteNextDayStartOf(since);
   // v1.190.2 — `bridged`: a home Core the energy bridge metered at its panel slot counts the energy
   // the bridge booked for it (the figures Home Assistant's Energy counters add), not its own absent
   // samples; `fleet.bridged` says how much of each figure that is.
   const totals = await analytics.report('totals', { sinceMs: since, untilMs: until, bridged: true });
-  return cached(req, reply, { ...(totals as object), dayEndMs: end.getTime() }, 30);
+  return cached(req, reply, { ...(totals as object), dayEndMs }, 30);
 });
 
 /**
@@ -833,7 +868,7 @@ app.get<{ Querystring: { sn?: string; ch?: string; pair?: string; days?: string 
 
 /** v1.82.0 — the stored vendor energy ledger (see energyHistory.ts). */
 /**
- * v1.103.0 — "was pool membership stable across this Phoenix day?" for the
+ * v1.103.0 — "was pool membership stable across this site day?" for the
  * pack-DC RTE. A day that spans a reconfiguration measures its charge and
  * discharge legs over different batteries, so its ratio is meaningless; a day
  * predating the membership record is `unknown`, which we also refuse rather
@@ -844,9 +879,10 @@ function membershipStableOnDay(day: string): boolean {
     const h = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);
     const [y, m, d] = day.split('-').map(Number);
     if (!y || !m || !d) return false;
-    // Phoenix is UTC-7 year-round (no DST), so the local day is [07:00Z, 07:00Z).
-    const startMs = Date.UTC(y, m - 1, d, 7, 0, 0);
-    return membershipVerdict(h, startMs, startMs + 86_400_000) === 'stable';
+    // v1.191.0 (T8) — the site day [local midnight, next local midnight) (siteTime.ts); it was the
+    // fixed UTC−7 [07:00Z, 07:00Z), identical in the default zone.
+    const startMs = siteDayStartMs(day);
+    return membershipVerdict(h, startMs, siteDayStartMs(addDaysYmd(day, 1))) === 'stable';
   } catch {
     return false;
   }
@@ -871,18 +907,25 @@ app.get<{ Querystring: { day?: string } }>('/api/energy-history', async (req, re
  *  plus this serial's persisted alert history, as paste-ready markdown
  *  (?format=csv for the per-cell grid). READ-ONLY. */
 app.get<{ Querystring: { sn?: string; format?: string; packSn?: string } }>('/api/warranty-export', async (req, reply) => {
+  // v1.191.0 (S8, X1) — with no ?sn=, the legacy default chassis while it is on this account's device
+  // map (as before), else the chassis holding the one latched defective pack, else 400 with the last
+  // four characters of each Core's serial (topology.ts warrantyChassis). OWNER DECISION 2 keeps the
+  // default serial here for now; the alerts that point here carry ?sn= themselves.
   const sn = req.query.sn ?? 'Y711FAB59J234000';
-  const d: any = (store.get().devices as any)[sn];
-  if (!d?.projection) { reply.code(404); return { error: `no projection for ${sn}` }; }
+  const pick = warrantyChassis(req.query.sn, sn, store.get().devices, listConfirmedRecords().map((r) => r.deviceSn));
+  if ('error' in pick) { reply.code(400); return { error: pick.error, candidates: pick.candidates }; }
+  const chassis = pick.sn;
+  const d: any = (store.get().devices as any)[chassis];
+  if (!d?.projection) { reply.code(404); return { error: `no projection for ${chassis}` }; }
   // v1.102.0 — `?packSn=` follows ONE pack's history across every chassis it has
   // lived in; omitted, the bundle covers this chassis and the packs it holds now.
   const bundle = buildWarrantyBundle(d, loadClearedRecords() as any, new Date().toISOString(), req.query.packSn);
   if (req.query.format === 'csv') {
-    reply.type('text/csv').header('Content-Disposition', `attachment; filename="warranty-${sn}-cells.csv"`);
+    reply.type('text/csv').header('Content-Disposition', `attachment; filename="warranty-${chassis}-cells.csv"`);
     return renderWarrantyCsv(bundle);
   }
   if (req.query.format === 'json') return bundle;
-  reply.type('text/markdown').header('Content-Disposition', `attachment; filename="warranty-${sn}.md"`);
+  reply.type('text/markdown').header('Content-Disposition', `attachment; filename="warranty-${chassis}.md"`);
   return renderWarrantyMarkdown(bundle);
 });
 
@@ -892,10 +935,8 @@ app.get<{ Querystring: { sn?: string; format?: string; packSn?: string } }>('/ap
 app.get<{ Querystring: { month?: string } }>('/api/debug/vendor-history-probe', async (req, reply) => {
   const shp2 = findShp2(store.get().devices);
   if (!shp2) { reply.code(503); return { error: 'no SHP2' }; }
-  const m = req.query.month ?? (() => {
-    const d = new Date(Date.now() - 32 * 24 * 3_600_000);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  })();
+  // v1.191.0 (T15) — "last month" on the site calendar (the vendor reads device-local times, CA18).
+  const m = req.query.month ?? siteYmd(Date.now() - 32 * 24 * 3_600_000).slice(0, 7);
   if (!/^\d{4}-\d{2}$/.test(m)) { reply.code(400); return { error: 'month=YYYY-MM' }; }
   const [y, mo] = m.split('-').map(Number);
   const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate();
@@ -1549,14 +1590,24 @@ app.get('/api/repair-issues', async (req, reply) => {
     analytics.report('soilingDecomposition'),
     analytics.report('equipmentHealth'),
   ]);
-  return cached(req, reply, computeRepairIssues({
+  const report = computeRepairIssues({
     devices: store.get().devices,
     alerts: store.get().alerts ?? [],
     degradation,
     soiling,
     equipmentHealth,
     forecastSkill,
-  }), 60);
+  });
+  // v1.191.0 (lane A) — the site clock's issues: a configured zone that did not resolve, and a zone
+  // that differs from Home Assistant's (siteTimeHa.ts).
+  report.issues.push(...siteTimeRepairIssues());
+  // v1.191.0 (S5, P5) — an unusable tariff spec and an unknown currency, raised by tariff.ts.
+  report.issues.push(...tariffRepairIssues(report.generatedAt));
+  // v1.191.0 (S6) — a configured notify time the cheap window has already opened by (never on the APS preset).
+  report.issues.push(...nightScheduleRepairIssues(nightScheduleNow(), report.generatedAt));
+  // v1.191.0 — the site's own items (site.ts: the location check, the reference-home defaults, an
+  // unreadable PV_STRINGS), raised on this thread at boot and by the background location read.
+  return cached(req, reply, { ...report, issues: [...report.issues, ...siteRepairIssues()] }, 60);
 });
 
 /**
@@ -1982,11 +2033,14 @@ app.get('/api/models/health', async (req, reply) =>
  *  we're actually producing — normalizes away time-of-day + season. */
 app.get('/api/physics/pv-pmax', async (req, reply) => {
   const ts = Date.now();
-  // Ambient defaults to Phoenix typical for season; could plug NWS here later.
-  const ambient = 30;  // °C — placeholder; real call would use weather.ts
+  // v1.191.0 — the install's array (site.ts pvSite(): the reference array while no PV_* option is
+  // set). Ambient: 30 °C on that legacy site, as before; a configured site takes the weather cache's
+  // temperature_2m for the hour (physicsAmbientC), so the weather is read only then.
+  const site = pvSite();
+  const ambient = physicsAmbientC(ts, site, isLegacyPvSite(site) ? null : await getWeather((m) => app.log.debug(m)));
   const dpus = onlineDpus(store.get().devices);
   const realizedW = dpus.reduce((s, d) => s + ((d.projection as any).pvTotalWatts ?? 0), 0);
-  const result = physicsPmax(ts, ambient, PHOENIX_SITE);
+  const result = physicsPmax(ts, ambient, site);
   return cached(req, reply, {
     ...result,
     realizedW,
@@ -2112,32 +2166,32 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
       pvP10[i] = pvP50[i] * 0.7;
     }
   }
-  // Tariff: the operator's APS plan is flat $0.17/kWh (no TOU). Default both peak
-  // and off-peak to TARIFF_FLAT_CENTS_PER_KWH (17 ¢ default), but still
-  // honor the legacy TARIFF_ON_PEAK_CENTS_PER_KWH / TARIFF_OFF_PEAK_CENTS_PER_KWH
-  // overrides so a TOU-plan user can split them back out without code change.
-  // Canonical tariff constants live in analytics.ts; v0.9.58 keeps them in
-  // sync via the shared TARIFF_FLAT_CENTS_PER_KWH env var.
-  const flatCents = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
-  const onPeak = Number(process.env.TARIFF_ON_PEAK_CENTS_PER_KWH ?? flatCents);
-  const offPeak = Number(process.env.TARIFF_OFF_PEAK_CENTS_PER_KWH ?? flatCents);
+  // Tariff: the two-tier pair this vector falls back to while no confirmed rate prices an hour.
+  // Both default to TARIFF_FLAT_CENTS_PER_KWH (17 ¢ when absent); TARIFF_ON_PEAK_CENTS_PER_KWH /
+  // TARIFF_OFF_PEAK_CENTS_PER_KWH split them. (Until v1.191.0 this comment called the reference
+  // plan flat: it is APS R-EV, priced hour by hour through hourlyRateCents below once confirmed.)
+  // v1.191.0 — read through tariff.ts legacyTariffFromEnv, the one reader analytics.ts and
+  // dispatch/mpc.ts use too; the rules are this block's own (bare Number, the flat rate when absent).
+  // v1.191.0 (review 3) — the pair is analytics.ts mpcFallbackPair: with TARIFF_PLAN set, the cost
+  // figures' own pair (an unconfirmed two_tier plan's two rates, not the 17 ¢ flat default); while it is
+  // unset, the …_CENTS_PER_KWH pair above, as before (golden G2).
+  const legacyTariff = legacyTariffFromEnv();
+  const flatCents = legacyTariff.flatCents;
+  const { onPeak, offPeak } = mpcFallbackPair(Date.now());
   // v1.136.0 — THIRD copy of the on-peak window, now retired. This hardcoded
   // `h >= 15 && h < 20` was a two-tier ladder with no DOW gate at all, so it
   // priced weekend afternoons as on-peak and every overnight hour as off-peak,
   // on a plan whose on-peak is Mon-Fri 16:00-19:00 only. It also read the HOST
-  // clock. `hourlyRateCents` resolves the full table in America/Phoenix and falls
+  // clock. `hourlyRateCents` resolves the full table in the tariff's zone and falls
   // back to this same two-tier pair when rates are unconfirmed.
   //
-  // Local midnight is computed ARITHMETICALLY, not via Intl: Phoenix is a fixed
-  // UTC-7 with no DST, and this codebase has already been bitten once by an Intl
-  // locale behaving differently on the Pi than on a laptop. No formatter, no
-  // locale data, no divergence.
-  const HOUR_MS = 3_600_000;
-  const PHX_OFFSET_MS = 7 * HOUR_MS;
-  const phxMidnightUtcMs =
-    Math.floor((Date.now() - PHX_OFFSET_MS) / 86_400_000) * 86_400_000 + PHX_OFFSET_MS;
+  // v1.191.0 (T9) — the vector is built on the site clock (each entry is that local hour of
+  // today, siteTime.ts) and the MPC indexes it on the same clock (dispatch/mpc.ts siteHour). It
+  // was built on a fixed UTC−7 midnight and indexed by the host's getHours(): one vector, two
+  // clocks, which agreed only while the host's zone was the reference install's.
+  const todayYmd = siteYmd(Date.now());
   const tariffByHour: number[] = Array.from({ length: 24 }, (_, h) =>
-    hourlyRateCents(phxMidnightUtcMs + h * HOUR_MS, { onPeak, offPeak }));
+    hourlyRateCents(zonedWallTimeMs(todayYmd, h, 0, siteTimeZone()), { onPeak, offPeak }));
   // v0.15.2 — off-grid honesty fix. The hardcoded gridAvailable:true let the
   // optimizer "assume away" reserve dips via grid imports that physically don't
   // exist on this islanded site, producing dangerously optimistic plans. Default
@@ -2153,14 +2207,14 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
     const rte: any = await analytics.report('roundTripEfficiency');
     const effFrac = rte?.efficiencyPct != null ? rte.efficiencyPct / 100 : null;
     if (effFrac != null && effFrac > 0 && effFrac <= 1) {
-      const baseWear = Number(process.env.CYCLING_BASE_WEAR_USD_PER_KWH ?? 0.015);
+      const baseWear = limits.cyclingBaseWearUsdPerKwh; // CYCLING_BASE_WEAR_USD_PER_KWH (limits.ts; 0.015 while unset)
       cyclingCostUsdPerKwh =
         Math.round((baseWear + (1 - effFrac) * (flatCents / 100)) * 10_000) / 10_000;
     }
   } catch { /* RTE is optional — keep the legacy default */ }
   const inputs: MpcInputs = {
     currentSocPct: pool.currentSocPct,
-    reserveFloorPct: sp.backupReserveSoc ?? 20,
+    reserveFloorPct: sp.backupReserveSoc ?? MPC_RESERVE_FALLBACK_PCT,
     capacityKwh: pool.capacityKwh,
     pvForecastP50: pvP50,
     pvForecastP10: pvP10,
@@ -3091,8 +3145,10 @@ const rateFloorTick = setInterval(() => {
     for (const m of idleExclusionEdges(healIdleExcluded, healQuorum.idleExcluded)) {
       app.log.info(`self-heal: ${m.deviceName} no longer counts toward the heal quorum — it is electrically idle, so its held rate collapse no longer votes for a session rebuild; the alert stays until the rate recovers`);
     }
+    // v1.191.0 (Z5) — the quorum is bounded by the devices on the account (a one-device account can
+    // heal); on a plant with more devices than SELF_HEAL_MIN_DEVICES it is that setting, as before.
     const healVerdict = evaluateSelfHeal(
-      now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved },
+      now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved, accountDevices: Object.keys(devices).length },
     );
     // v1.78.0 — the daily-cap stand-down was computed and DISCARDED: on 08-14
     // the cap emptied at 04:44 with recovery 27 min later, and nothing in the
@@ -3148,7 +3204,7 @@ app.get('/api/load-shedding/status', async () => ({
  * (nightChargeAdvisor.ts + nightChargeGate.ts + recorder ledger) — it NEVER
  * issues a device write and NEVER touches the floor/runway/SoC alarm spine. It
  * (1) recomputes a fresh plan on a 30-min tick so HA/status always have a
- * ≤12 h-fresh plan; (2) runs ONE ~21:30 America/Phoenix evening job (day-keyed
+ * ≤12 h-fresh plan; (2) runs ONE ~21:30 site-time evening job (day-keyed
  * latch, persisted across add-on restarts) that records the plan row, scores yesterday's
  * outcome, recomputes readiness, and sends ONE notification; (3) serves
  * GET /api/night-charge/status. Every numeric emits null over a fabricated
@@ -3158,10 +3214,28 @@ app.get('/api/load-shedding/status', async () => ({
 const nightChargeEnabled = process.env.NIGHT_CHARGE_ADVISOR_ENABLED !== 'false';
 // v1.39.0: max 22, not 23 — the evening job's catch-up window is [fire, 23:00),
 // so hour=23 made the fire window the EMPTY SET: the advisory could never send
-// and every night logged a "missed window" that looked transient. config.yaml
-// clamps to int(0,22) too; this guard covers a stale/hand-set env.
+// and every night logged a "missed window" that looked transient. The schema is
+// int(0,23), so this clamp is the only one (v1.191.0, W6: it was said to be the
+// schema's too). (S6) — another plan's schedule clamps further, to the hour before
+// its cheap window opens (nightSchedule.ts notifyHourMax).
 const NIGHT_CHARGE_NOTIFY_HOUR = clampInt(Number(process.env.NIGHT_CHARGE_NOTIFY_HOUR ?? 21), 0, 22, 21);
 const NIGHT_CHARGE_NOTIFY_MINUTE = clampInt(Number(process.env.NIGHT_CHARGE_NOTIFY_MINUTE ?? 30), 0, 59, 30);
+/** v1.191.0 (S6, plan 3.4 W2–W6) — the night-charge schedule of the tariff in effect, for the configured
+ *  notify time (nightSchedule.ts): the APS R-EV preset's constants on the reference install, whatever
+ *  the notify time; the plan's own cheap window otherwise. The evening job, the shadow tick, the
+ *  status route, the scorer's fallback night and the force-charge backstop read it at call time. */
+function nightScheduleNow(model = tariffModelFromEnv()): NightSchedule {
+  return nightScheduleOf(model, { hour: NIGHT_CHARGE_NOTIFY_HOUR, minute: NIGHT_CHARGE_NOTIFY_MINUTE });
+}
+/** v1.191.0 (S6, W5) — the force-charge run backstop of the tariff in effect (7 h on the APS preset).
+ *  It never throws: a tariff read that fails gives the fixed 7 h, so no OFF decision waits on it. */
+function forceChargeMaxRunNow(): number {
+  try { return nightScheduleNow().forceChargeMaxRunMs; } catch { return FORCE_CHARGE_MAX_RUN_MS; }
+}
+/** The readiness options with the schedule's completion offset (45 h on the APS preset). */
+function nightReadinessOpts(): { algoVersion: number; completeAfterMs: number } {
+  return { algoVersion: CURRENT_ALGO_VERSION, completeAfterMs: nightScheduleNow().fallbackNight.completeMin * 60_000 };
+}
 const NIGHT_CHARGE_LATCH_PATH =
   process.env.NIGHT_CHARGE_LATCH_PATH ?? resolve(process.cwd(), config.dbPath, '..', '.night-charge-latch.json');
 // v1.40.0: the freshest pre-window plan, persisted so a restart during the
@@ -3174,9 +3248,9 @@ const NIGHT_CHARGE_PLANSNAP_PATH =
 const NIGHT_CHARGE_MODE = resolveNightChargeMode(process.env.NIGHT_CHARGE_MODE);
 // v1.165.0 — force-charge gate inputs (nightForceCharge.ts). The same options the
 // planner reads; the kill switch is ARB_COST_MAX_SOC_PCT <= RESERVE_WRITE_MAX_PCT.
-const FORCE_CHARGE_OBJECTIVE =
-  (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost' ? 'cost' as const : 'resilience' as const;
-const FORCE_CHARGE_COST_MAX_SOC_PCT = Number(process.env.ARB_COST_MAX_SOC_PCT ?? DEFAULT_COST_MAX_SOC_PCT);
+// v1.191.0 (S3b) — through their config.ts rows (the same rules: 'cost' in any case, a bare Number()).
+const FORCE_CHARGE_OBJECTIVE = option<'cost' | 'resilience'>('ARB_OBJECTIVE');
+const FORCE_CHARGE_COST_MAX_SOC_PCT = option<number>('ARB_COST_MAX_SOC_PCT');
 // R2 — per leg: a backup leg never force-charges (chargeWindows.ts legForceChargeEligible). Every
 // caller today arms the overnight cost leg, the default.
 const forceChargeOn = (role: ChargeLegRole = 'cost'): boolean => legForceChargeEligible(role, forceChargeEnabled({
@@ -3198,7 +3272,7 @@ function clampInt(v: number, lo: number, hi: number, dflt: number): number {
 
 /** Restart-persistent day-keyed latch. The add-on restarts whenever it is
  *  updated (and on host maintenance), so the latch must survive restarts for
- *  the evening job to fire at most ONCE per Phoenix calendar day. (v1.40.0:
+ *  the evening job to fire at most ONCE per site calendar day. (v1.40.0:
  *  the host itself is verified stable — the earlier "daily power-cycle"
  *  premise no longer holds; restart-resilience is still required.) */
 interface NightChargeLatch {
@@ -3380,22 +3454,9 @@ function freshReserveReadingPct(nowMs: number): number | null {
   return typeof sp?.backupReserveSoc === 'number' ? sp.backupReserveSoc : null;
 }
 
-/** Clock text ("10:55 PM") of an instant in America/Phoenix. */
-function fmtPhoenixClock(ms: number): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit',
-  }).formatToParts(new Date(ms));
-  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-  const dp = get('dayPeriod');
-  return `${get('hour')}:${get('minute')}${dp ? ' ' + dp : ''}`;
-}
-
-/** Phoenix weekday ("Sunday") of an instant. */
-function fmtPhoenixWeekday(ms: number): string {
-  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/Phoenix', weekday: 'long' })
-    .formatToParts(new Date(ms))
-    .find((p) => p.type === 'weekday')?.value ?? '';
-}
+// v1.191.0 (lane A, T2) — the clock text ("10:55 PM") and weekday of an instant are siteTime.ts
+// fmtSiteClock / fmtSiteWeekday (the site zone; en-US parts and a fixed Spanish map, never an `es`
+// locale). They were fmtPhoenixClock / fmtPhoenixWeekday here, pinned to the reference zone.
 
 /**
  * DAY-QUALIFIED deadline text for the supervised announcement (v1.51.2).
@@ -3405,29 +3466,25 @@ function fmtPhoenixWeekday(ms: number): string {
  * resolve a Saturday-evening plan's charge window to Monday 00:00 — the write
  * moment is then ~28 h out, and a bare "11:55 PM" reads as tonight. This is the
  * same failure v1.39.0 fixed for the published window entities via
- * `fmtPhoenixDayHm`; the announcement needs the identical discipline.
+ * `fmtSiteDayHm`; the announcement needs the identical discipline.
  *
  * Beyond 24 h the weekday is spelled out ("on Sunday at 11:55 PM"); inside 24 h
  * the bare clock time is unambiguous and reads naturally in speech.
  */
 function fmtDeadlineSpoken(ms: number, nowMs: number): string {
-  const hm = fmtPhoenixClock(ms);
+  const hm = fmtSiteClock(ms);
   if (ms - nowMs < 24 * HOUR_MS) return `at ${hm}`;
-  const wd = fmtPhoenixWeekday(ms);
+  const wd = fmtSiteWeekday(ms);
   return wd ? `on ${wd} at ${hm}` : `at ${hm}`;
 }
 
 /** v1.67.0 — Spanish counterpart of fmtDeadlineSpoken for the bilingual second
- *  pass. Same shape and the same clock string; only the framing is translated. */
-const WEEKDAY_ES: Record<string, string> = {
-  Sunday: 'domingo', Monday: 'lunes', Tuesday: 'martes', Wednesday: 'miércoles',
-  Thursday: 'jueves', Friday: 'viernes', Saturday: 'sábado',
-};
+ *  pass. Same shape and the same clock string; only the framing is translated
+ *  (the weekday through siteTime.ts's fixed Spanish map). */
 function fmtDeadlineSpokenEs(ms: number, nowMs: number): string {
-  const hm = fmtPhoenixClock(ms);
+  const hm = fmtSiteClock(ms);
   if (ms - nowMs < 24 * HOUR_MS) return `a las ${hm}`;
-  const wd = fmtPhoenixWeekday(ms);
-  const es = wd ? WEEKDAY_ES[wd] : null;
+  const es = fmtSiteWeekday(ms, 'es');
   return es ? `el ${es} a las ${hm}` : `a las ${hm}`;
 }
 
@@ -3442,21 +3499,16 @@ function refreshNightRecentOutcomes(): void {
   catch { /* keep the last cached value; the route must never touch the DB */ }
 }
 
-/** Minute-of-day in America/Phoenix (localParts is hour-granular; the ~21:30
- *  gate needs minutes). Explicit IANA resolution — never the host clock. */
-function phoenixMinuteOfDay(ms: number): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Phoenix', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-  }).formatToParts(new Date(ms));
-  const num = (t: string): number => Number(parts.find((p) => p.type === t)?.value ?? '0');
-  return num('hour') * 60 + num('minute');
-}
+// v1.191.0 (T3) — the minute of the day the ~21:30 gates read is siteTime.ts siteMinuteOfDay (the
+// site zone, never the host clock); it was phoenixMinuteOfDay here.
 
 // v1.70.0 — apsREvRatesFromEnv moved to tariff.ts so alertMonitor's on-peak
 // grid-draw detector reads the SAME tariff this file does. See tariff.ts.
 
-/** Cheap-period id the advisor sizes the buy against (the OVERNIGHT R-EV tier). */
-const NIGHT_CHEAP_PERIOD_ID = APS_PERIOD.OVERNIGHT;
+// v1.191.0 (W1) — the cheap period the advisor sizes the buy against is the tariff's own, read at
+// each evaluation: tariff.ts cheapPeriodIdOf (the APS preset's OVERNIGHT tier; the period a custom
+// plan flags `cheap`; NIGHT_CHARGE_CHEAP_PERIOD's; null when the plan has none, so no window). It
+// was the constant APS_PERIOD.OVERNIGHT here, which no other plan's period table names.
 /** N_MIN scored calibration days before the band is trusted (design §2.3). */
 const NIGHT_MIN_CAL_DAYS = 14;
 
@@ -3543,23 +3595,23 @@ async function recomputeNightChargePlan(
   const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY); // ≈ 0.927
   const dischargeEff = RUNWAY_DISCHARGE_EFFICIENCY;         // ≈ 0.94
 
-  // Operator knobs.
-  const cushionPct = Number(process.env.ARB_OUTAGE_CUSHION_PCT ?? 15);
+  // Operator knobs. v1.191.0 (S3b) — each through its config.ts row, with the rule it had here.
+  const cushionPct = option<number>('ARB_OUTAGE_CUSHION_PCT');
   // v1.125.0 — the outage the cushion is sized to survive, and the multiplier on
   // the observed islanded load. See outageCushionKwh for why the cushion is no
   // longer a flat share of pool measured against a whole-house forward sim.
-  const outageCushionHours = Number(process.env.ARB_OUTAGE_CUSHION_HOURS ?? DEFAULT_OUTAGE_CUSHION_HOURS);
+  const outageCushionHours = option<number>('ARB_OUTAGE_CUSHION_HOURS');
   // v1.127.0 — buy objective. 'cost' maximises arbitrage against the configured
   // tariff; 'resilience' (legacy) sizes only to hold floor+cushion. Cost mode is
   // bounded below by the resilience answer, so it can never buy less.
-  const objectiveMode = legObjective(legRole, (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost' ? 'cost' as const : 'resilience' as const);
-  const costMaxSocPct = Number(process.env.ARB_COST_MAX_SOC_PCT ?? DEFAULT_COST_MAX_SOC_PCT);
-  const islandedLoadSafety = Number(process.env.ARB_ISLANDED_LOAD_SAFETY ?? DEFAULT_ISLANDED_LOAD_SAFETY);
+  const objectiveMode = legObjective(legRole, option<'cost' | 'resilience'>('ARB_OBJECTIVE'));
+  const costMaxSocPct = option<number>('ARB_COST_MAX_SOC_PCT');
+  const islandedLoadSafety = option<number>('ARB_ISLANDED_LOAD_SAFETY');
   // v1.173.0 — 0 (default) = AUTO: connected Cores × the proven per-Core rate (planChargeCapKw).
   const planConnectedSlots = Array.isArray(sp.sources)
     ? sp.sources.filter((c: any) => c?.hwConnect === true && Number.isInteger(Number(c?.slot))).length
     : null;
-  const chargeCapKw = planChargeCapKw(Number(process.env.ARB_CHARGE_CAP_KW ?? 0), planConnectedSlots, legEff);
+  const chargeCapKw = planChargeCapKw(option<number>('ARB_CHARGE_CAP_KW'), planConnectedSlots, legEff);
   // v1.60.0 — the SHARED grid-input envelope the charger and the house both draw
   // from. Default 17 kW is the COEXISTENCE figure measured on 2026-08-02→03: at
   // 03:00 `panel_load` held 14.0 kW (EVSE ~11.5 kW + ~2.5 kW baseline) while the
@@ -3573,7 +3625,7 @@ async function recomputeNightChargePlan(
   // historical hand-set 1.15 so it can only widen. Only loadP90W feeds sizing,
   // and a wider P90 buys more — the safe direction for an asymmetric under-buy
   // miss. `basis` is surfaced on the plan so the number is auditable.
-  const loadBandFloor = Number(process.env.ARB_LOAD_P90_FACTOR ?? 1.15);
+  const loadBandFloor = option<number>('ARB_LOAD_P90_FACTOR');
   const loadBandCal = calibratedLoadBandFactor(
     (() => {
       try { return recorder.readNightLedger(120).map((r: any) => r.load_err_frac as number | null); }
@@ -3629,13 +3681,21 @@ async function recomputeNightChargePlan(
       );
     }
   }
-  const evMaxLoadW = Number(process.env.EV_MAX_LOAD_W ?? 11520);
-  const minBuyKwh = Number(process.env.ARB_MIN_BUY_KWH ?? 1);
+  // v1.191.0 — the one EV_MAX_LOAD_W reader (limits.ts; it was parsed here a second time, unclamped).
+  const evMaxLoadW = limits.evMaxLoadW;
+  const minBuyKwh = option<number>('ARB_MIN_BUY_KWH');
 
-  // Tariff period resolver (America/Phoenix, R-EV). Cents may be unconfirmed —
-  // periodId is structural and needs no confirmed rate.
-  const tariffModel = apsREvModelFromEnv();
+  // Tariff period resolver (the plan in effect on the site clock: R-EV while TARIFF_PLAN is unset).
+  // Cents may be unconfirmed — periodId is structural and needs no confirmed rate.
+  const tariffModel = tariffModelFromEnv();
   const periodIdAt = (ts: number): string => rateAt(tariffModel, ts).periodId;
+  // v1.191.0 (W1) — the plan's cheap period ('overnight' on the APS preset); null: no window.
+  const cheapPeriodId = cheapPeriodIdOf(tariffModel);
+  // v1.191.0 (review) — one night of it at a time: a weekend-long off-peak run is a window a night
+  // (chargeWindows.ts cheapNightOf; null on the APS preset, whose windows are unchanged).
+  const cheapNight = cheapNightOf(tariffModel);
+  // v1.191.0 (S6) — its schedule: the full-window minimum below, the snapshot's notify time.
+  const nightSched = nightScheduleNow(tariffModel);
 
   // Live analytics reports (each best-effort — a missing report degrades the
   // basis to null, never a fabricated number).
@@ -3695,7 +3755,8 @@ async function recomputeNightChargePlan(
   // Cheap window (needed here for nextRecharge + morning-surplus bounds; the
   // sizer resolves it again from the same resolver — identical result).
   // R4 — a shadow leg's window is the one the chooser pinned.
-  const window = shadowLeg ? (shadowLeg.spec.window ?? null) : resolveCheapWindow(periodIdAt, nowMs, NIGHT_CHEAP_PERIOD_ID, 30);
+  const window = shadowLeg ? (shadowLeg.spec.window ?? null)
+    : cheapPeriodId == null ? null : resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, 30, cheapNight);
   const windowEndMs = window?.endMs ?? nowMs;
 
   // nextRecharge = the START of the NEXT cheap charge window after tonight's —
@@ -3770,7 +3831,8 @@ async function recomputeNightChargePlan(
   // the same evening (the mid-day leg) or sized for resilience only (the backup).
   const nightLongGapAhead = shadowLeg ? false : longGapAhead(
     window,
-    window ? nextFullCheapWindow(periodIdAt, window.endMs, NIGHT_CHEAP_PERIOD_ID) : null,
+    window && cheapPeriodId != null ? nextFullCheapWindow(periodIdAt, window.endMs, cheapPeriodId, 120, nightSched.fullWindowMinMs, cheapNight) : null,
+    nightSched.fullWindowMinMs,
   );
   // v1.186.0 — the PESSIMISTIC (P10) surplus from window close to the evening on-peak
   // start: the headroom a long-gap night keeps (null ⇒ set aside, the full buy stands).
@@ -3834,7 +3896,7 @@ async function recomputeNightChargePlan(
     islandedLoadKw: islandedLoadKwNow(),
     outageCushionHours, islandedLoadSafety, objectiveMode, costMaxSocPct,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw,
-    periodIdAt, cheapPeriodId: NIGHT_CHEAP_PERIOD_ID, windowScanHours: 30,
+    periodIdAt, cheapPeriodId, cheapNight, windowScanHours: 30,
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, bandCoverageFrac,
@@ -3945,8 +4007,8 @@ async function recomputeNightChargePlan(
     try {
       atomicWriteFileSync(NIGHT_CHARGE_PLANSNAP_PATH, JSON.stringify({
         day: planDateOwningCycle({
-          nowMs, firstLegStartMs: plan.window.startMs, timezone: 'America/Phoenix',
-          notifyMinuteOfDay: NIGHT_CHARGE_NOTIFY_HOUR * 60 + NIGHT_CHARGE_NOTIFY_MINUTE,
+          nowMs, firstLegStartMs: plan.window.startMs, timezone: siteTimeZone(),
+          notifyMinuteOfDay: nightSched.notify.fireMin,
         }),
         plan, extras,
       }));
@@ -4115,7 +4177,8 @@ interface NightScoringSpans {
   troughSpans?: TimeSpan[];
 }
 function nightSpansForRow(y: NightLedgerRow): NightScoringSpans | null {
-  const b = nightWindowBounds(String(y.plan_date));
+  // v1.191.0 (S6, W4) — the schedule's night (D 23:00 → D+1 05:00, complete D+1 21:00 on the APS preset).
+  const b = nightWindowBounds(String(y.plan_date), nightScheduleNow().fallbackNight);
   if (!b) return null; // malformed plan_date
   const ws = typeof y.window_start_ms === 'number' ? y.window_start_ms : null;
   const we = typeof y.window_end_ms === 'number' ? y.window_end_ms : null;
@@ -4124,11 +4187,13 @@ function nightSpansForRow(y: NightLedgerRow): NightScoringSpans | null {
     // canonical 05:00→21:00 trough span). v1.187.0 — and the night completes only once its
     // governed on-peak has closed too (ledgerSpansForWindow). Structural only: period ids
     // and on-peak flags need no confirmed rate.
-    const tariff = apsREvModelFromEnv();
+    const tariff = tariffModelFromEnv();
+    // v1.191.0 (W1) — the plan's cheap period, not the APS id: the next window opening is a run of it.
+    const cheapId = cheapPeriodIdOf(tariff);
     // R4 — a two-leg (mid-day) row scores its backup, window and post spans and counts both cheap
     // periods for the on-peak attribution (cycleLedgerSpans, ledgerCheapPeriodIds). No row is
     // two-leg before the mid-day switch: every row takes the branch below, as before.
-    const cheapIds = ledgerCheapPeriodIds(y.window_kind);
+    const cheapIds = ledgerCheapPeriodIds(y.window_kind, cheapId);
     const cycle = cycleLedgerSpans(
       y,
       (t) => rateAt(tariff, t).isOnPeak,
@@ -4143,7 +4208,7 @@ function nightSpansForRow(y: NightLedgerRow): NightScoringSpans | null {
     const spans = ledgerSpansForWindow(
       we,
       (t) => rateAt(tariff, t).isOnPeak,
-      (t) => rateAt(tariff, t).periodId === NIGHT_CHEAP_PERIOD_ID,
+      (t) => cheapId != null && rateAt(tariff, t).periodId === cheapId,
     );
     return {
       windowStart: ws, windowEnd: we, onpeak: spans.onpeak,
@@ -4353,7 +4418,7 @@ function scoreNightRow(
   const hadBasis = y.min_proj_soc_pct != null; // null ⇒ plan had no trajectory
   // null import (no samples) is NOT clean — it is unknown; covOk=false already
   // forces scored=0 on such nights, this just keeps the flag honest too.
-  const cleanBaseline = windowImportKwh != null && windowImportKwh <= Number(process.env.ARB_MIN_BUY_KWH ?? 1);
+  const cleanBaseline = windowImportKwh != null && windowImportKwh <= limits.cleanBaselineMaxImportKwh; // ARB_MIN_BUY_KWH, second use
   const covOk = winCoverage >= 0.9;
 
   // v1.50.0 — actuated night: `actuated` was stamped by the actuator at write time, never
@@ -4378,7 +4443,7 @@ function scoreNightRow(
   //    (deliveredIntoCores), not import − house load, which under-counted every night the
   //    SHP2 ran the house from the pack;
   //  - the PV set-aside: a band built for other Cores than the actuals'.
-  const tariffNow = apsREvModelFromEnv();
+  const tariffNow = tariffModelFromEnv();
   const cols = assembleNightLedgerColumns({
     row: y,
     actuated: wasActuated,
@@ -4562,8 +4627,8 @@ function scoreNightRow(
 }
 
 /**
- * The single ~21:30 America/Phoenix evening job (design §3.2). Day-keyed +
- * restart-persistent latch so it fires at most once per Phoenix calendar day
+ * The single ~21:30 site-time evening job (design §3.2). Day-keyed +
+ * restart-persistent latch so it fires at most once per site calendar day
  * across add-on restarts (updates, host maintenance). In order: recompute fresh plan → record plan row
  * → score yesterday → recompute readiness → send ONE notification. Latches only
  * AFTER a successful send. Guarded end-to-end; a plan pushed after charging
@@ -4629,16 +4694,20 @@ function cancelStalePriorArm(today: string, nowMs: number, reason: string): bool
 
 async function runNightChargeEveningJobInner(): Promise<void> {
   const nowMs = Date.now();
-  const today = localParts(nowMs, 'America/Phoenix').ymd;
+  const today = siteYmd(nowMs);
   const latch = readNightChargeLatch();
   if (latch.lastNotifyDay === today) return; // already fired today (survives restart)
 
-  const nowMin = phoenixMinuteOfDay(nowMs);
-  const fireMin = NIGHT_CHARGE_NOTIFY_HOUR * 60 + NIGHT_CHARGE_NOTIFY_MINUTE;
-  const cutoffMin = 23 * 60; // catch-up window [fire, 23:00)
+  const nowMin = siteMinuteOfDay(nowMs);
+  // v1.191.0 (S6) — the schedule of the tariff in effect: on the APS preset fire = the configured
+  // time, cutoff 23:00 and deferral 22:30, as before; another plan's from its cheap window.
+  const sched = nightScheduleNow();
+  const fireMin = sched.notify.fireMin;
+  const cutoffMin = sched.eveningCutoffMin; // catch-up window [fire, cutoff): 23:00 on the APS preset
+  const deferUntilMin = sched.staleDeferUntilMin;
   if (nowMin < fireMin) return; // too early
   if (nowMin >= cutoffMin) {
-    app.log.warn(`night-charge: evening job missed today's ${NIGHT_CHARGE_NOTIFY_HOUR}:${String(NIGHT_CHARGE_NOTIFY_MINUTE).padStart(2, '0')}–23:00 window; skipping the notify + latching (a late plan is worse than none).`);
+    app.log.warn(`night-charge: evening job missed today's ${sched.notify.hour}:${String(sched.notify.minute).padStart(2, '0')}–${fmtMinuteOfDay(cutoffMin)} window; skipping the notify + latching (a late plan is worse than none).`);
     // v1.171.1 — no decision was reached tonight, so a prior arm is NOT cancelled (its
     // plan is the only one there is). Name it, because it will write on its own.
     if (nightActuationMem.day != null && nightActuationMem.day !== today
@@ -4670,7 +4739,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // biases the write-readiness reduction (the tick below also does this, but
     // do it here so a same-day miss is captured immediately).
     try { scoreCompletedNights(nowMs); } catch (e: any) { app.log.debug(`night-charge: cutoff scoring skipped (${e?.message ?? e})`); }
-    try { setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION })); } catch (e: any) { app.log.debug(`night-charge: cutoff readiness recompute failed (${e?.message ?? e})`); }
+    try { setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, nightReadinessOpts())); } catch (e: any) { app.log.debug(`night-charge: cutoff readiness recompute failed (${e?.message ?? e})`); }
     refreshNightRecentOutcomes(); // scoring may have updated rows the status route serves
     // v1.187.22 — no decision was reached tonight, so a refusal recorded on an earlier evening still
     // stands (Saturday's, for the window Sat and Sun share): keep it. servedArmRefusal serves it only
@@ -4682,25 +4751,25 @@ async function runNightChargeEveningJobInner(): Promise<void> {
   try {
     // (a) recompute fresh; (b) record the plan row (when a plan was produced).
     // v1.174.0 — a STALE panel DEFERS: no latch, no notification, no cancel of a prior
-    // arm — the 60 s tick retries. From NIGHT_PLAN_STALE_DEFER_UNTIL_MIN the plan is
+    // arm — the 60 s tick retries. From the schedule's deferral end (22:30 on the APS preset) the plan is
     // sized on the last reading instead (disclosed on the plan), so staleness alone
     // never costs the night. Only a genuinely missing basis (null) reaches
     // 'insufficient_basis' below.
-    const result = await recomputeNightChargePlan({ allowStalePanel: nowMin >= NIGHT_PLAN_STALE_DEFER_UNTIL_MIN });
+    const result = await recomputeNightChargePlan({ allowStalePanel: nowMin >= deferUntilMin });
     if (result === 'panelStale') {
       if (nightPlanStaleDeferLoggedDay !== today) {
         nightPlanStaleDeferLoggedDay = today;
-        app.log.info(`night-charge: evening plan DEFERRED for ${today} — the panel reading is stale; retrying every minute until ${Math.floor(NIGHT_PLAN_STALE_DEFER_UNTIL_MIN / 60)}:${String(NIGHT_PLAN_STALE_DEFER_UNTIL_MIN % 60).padStart(2, '0')}, then planning on the last reading (disclosed).`);
+        app.log.info(`night-charge: evening plan DEFERRED for ${today} — the panel reading is stale; retrying every minute until ${Math.floor(deferUntilMin / 60)}:${String(deferUntilMin % 60).padStart(2, '0')}, then planning on the last reading (disclosed).`);
       }
       return;
     }
     const fresh = result;
     // v1.186.5 — an incomplete basis DEFERS (no row, notify, latch or cancel) until
-    // NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, like a stale panel; see eveningBasisDefers.
-    if (eveningBasisDefers(fresh?.plan ?? null, nowMin)) {
+    // the schedule's deferral end, like a stale panel; see eveningBasisDefers.
+    if (eveningBasisDefers(fresh?.plan ?? null, nowMin, deferUntilMin)) {
       if (nightPlanBasisDeferLoggedDay !== today) {
         nightPlanBasisDeferLoggedDay = today;
-        app.log.info(`night-charge: evening plan DEFERRED for ${today} — ${fresh ? `the basis is incomplete (${fresh.plan.rationale})` : 'inputs unavailable'}; retrying every minute until ${Math.floor(NIGHT_PLAN_STALE_DEFER_UNTIL_MIN / 60)}:${String(NIGHT_PLAN_STALE_DEFER_UNTIL_MIN % 60).padStart(2, '0')}, then deciding on what is known.`);
+        app.log.info(`night-charge: evening plan DEFERRED for ${today} — ${fresh ? `the basis is incomplete (${fresh.plan.rationale})` : 'inputs unavailable'}; retrying every minute until ${Math.floor(deferUntilMin / 60)}:${String(deferUntilMin % 60).padStart(2, '0')}, then deciding on what is known.`);
       }
       return;
     }
@@ -4730,7 +4799,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
 
     // (d) recompute readiness over the full ledger (400 d ≫ the in-season window).
     try {
-      const readiness = computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION });
+      const readiness = computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, nightReadinessOpts());
       setLatestReadiness(readiness);
     } catch (e: any) { app.log.debug(`night-charge: readiness recompute skipped (${e?.message ?? e})`); }
 
@@ -4778,7 +4847,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       // plan's expected figure was made with, read back by the morning push.
       // The on-peak guard: the start of the on-peak period after the window open, stamped on the
       // arm (nextOnPeakStartMs) — raises stop, and the restore falls due, an hour before it.
-      const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(apsREvModelFromEnv(), plan.window.startMs) : null;
+      const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(tariffModelFromEnv(), plan.window.startMs) : null;
       // v1.189.0 — armed as a charge cycle (chargeCycle.armCycle). With one leg — tonight's
       // overnight cost leg, every cycle until the mid-day switch — it arms what armFromPlan arms
       // against the active leg, and refuses with armRefusalReason's words, unchanged.
@@ -4988,7 +5057,7 @@ async function sizeShadowLeg(sizing: ShadowLegSizing, allowStalePanel: boolean):
  *  only the verdict (which roles armed, which were refused and why) leaves this function. */
 function shadowArmProbe(day: string, nowMs: number): (cands: ShadowArmCandidate[]) => ShadowArmVerdict {
   return (cands) => {
-    const model = apsREvModelFromEnv();
+    const model = tariffModelFromEnv();
     const verdict = armCycle(nightCycleView(), day, cands.map((c) => ({
       role: c.role, kind: c.kind, plan: c.plan, forceChargeEnabled: forceChargeOn(c.role),
       nextOnPeakStartMs: c.plan.window != null ? nextOnPeakStartMs(model, c.plan.window.startMs) : null,
@@ -5028,18 +5097,20 @@ async function runMiddayShadowTick(): Promise<void> {
 }
 
 async function runMiddayShadowTickInner(nowMs: number): Promise<void> {
-  const today = localParts(nowMs, 'America/Phoenix').ymd;
-  const model = apsREvModelFromEnv();
+  const today = siteYmd(nowMs);
+  const model = tariffModelFromEnv();
   const cfg = shadowCycleConfig(FORCE_CHARGE_OBJECTIVE, FORCE_CHARGE_COST_MAX_SOC_PCT);
   const cur = getMiddayShadow();
-  const nowMin = phoenixMinuteOfDay(nowMs);
-  const fireMin = NIGHT_CHARGE_NOTIFY_HOUR * 60 + NIGHT_CHARGE_NOTIFY_MINUTE;
+  const nowMin = siteMinuteOfDay(nowMs);
+  // v1.191.0 (S6) — the live evening job's schedule (the APS constants on the preset).
+  const sched = nightScheduleNow(model);
+  const fireMin = sched.notify.fireMin;
 
-  // (1) The evening: after the live evening job latched today, inside its [fire, 23:00) window.
-  if (readNightChargeLatch().lastNotifyDay === today && cur?.day !== today && nowMin >= fireMin && nowMin < 23 * 60) {
+  // (1) The evening: after the live evening job latched today, inside its [fire, cutoff) window.
+  if (readNightChargeLatch().lastNotifyDay === today && cur?.day !== today && nowMin >= fireMin && nowMin < sched.eveningCutoffMin) {
     const rec = await runMiddayShadowEvening({
       nowMs, day: today, model, cfg, mode: NIGHT_CHARGE_MODE, chgMaxSocPcts: homeChgMaxSocPcts(),
-      sizeLeg: (sz) => sizeShadowLeg(sz, nowMin >= NIGHT_PLAN_STALE_DEFER_UNTIL_MIN),
+      sizeLeg: (sz) => sizeShadowLeg(sz, nowMin >= sched.staleDeferUntilMin),
       armProbe: shadowArmProbe(today, nowMs),
     });
     if (rec === 'panelStale') {
@@ -5101,7 +5172,7 @@ function repairHeldNightOutcomes(rows: NightLedgerRow[], shp2Sn: string, nowMs: 
     const spans = recorder.heldSpans?.(nowMs - (LEDGER_BACKFILL_SWEEP_DAYS + 2) * 86_400_000, nowMs);
     if (spans == null) return false;
     const horizonMs = forecastSpanRecaptureHorizonMs(
-      resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS), LEDGER_BACKFILL_SWEEP_DAYS,
+      config.retentionDays, LEDGER_BACKFILL_SWEEP_DAYS,
     );
     const coreSns = [...shp2ConnectedDpuSns(store.get().devices)];
     const nameOf = (sn: string) => store.get().devices[sn]?.deviceName ?? sn;
@@ -5209,7 +5280,7 @@ function repairShortForecastSpanOutcomes(): void {
   try {
     const nowMs = Date.now();
     const horizonMs = forecastSpanRecaptureHorizonMs(
-      resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS), LEDGER_BACKFILL_SWEEP_DAYS,
+      config.retentionDays, LEDGER_BACKFILL_SWEEP_DAYS,
     );
     const tagged: string[] = [];
     for (const y of recorder.readNightLedger(400)) {
@@ -5317,7 +5388,7 @@ async function runChargeNowTick(): Promise<void> {
       slots: obs.forceChargeSlots,
       stormPrepActive,
       nowMs,
-      phoenixDay: localParts(nowMs, 'America/Phoenix').ymd,
+      siteDay: siteYmd(nowMs),
     });
     if (action.kind === 'none') return;
     const shp2 = findShp2(snap.devices);
@@ -5527,9 +5598,7 @@ function reconnectObsDevices(): ReconnectDeviceObs[] {
     const pk = d?.projection?.kind;
     const kind: ReconnectDeviceObs['kind'] =
       pk === 'dpu' || pk === 'shp2' ? pk
-      : /delta pro ultra/i.test(d.productName ?? '') ? 'dpu'
-      : /smart home panel/i.test(d.productName ?? '') ? 'shp2'
-      : 'other';
+      : productKind(d.productName); // v1.191.0 (S8) — the same two tests, in the same order
     out.push({
       sn: d.sn, name: d.deviceName ?? d.sn, kind,
       online: d.online === true,
@@ -5581,7 +5650,7 @@ async function runReconnectWatchTick(): Promise<void> {
 }
 
 /**
- * v1.82.0 — vendor energy-history daily job. Fires once per Phoenix day in the
+ * v1.82.0 — vendor energy-history daily job. Fires once per site day in the
  * [06:35, 09:00) window (after the digest, before solar ramps the poll budget's
  * importance), fetching YESTERDAY's vendor ledger and reconciling the two
  * like-basis pairs (home ↔ panelLoadWh, solar ↔ pvWh). Day-keyed latch in the
@@ -5593,21 +5662,22 @@ async function runVendorEnergyJob(): Promise<void> {
   vendorEnergyJobInFlight = true;
   try {
     const nowMs = Date.now();
-    const today = localParts(nowMs, 'America/Phoenix').ymd;
+    const today = siteYmd(nowMs);
     const state = loadVendorEnergyState();
     if (state.lastRunDay === today) return;
-    const nowMin = phoenixMinuteOfDay(nowMs);
+    const nowMin = siteMinuteOfDay(nowMs);
     if (nowMin < 6 * 60 + 35 || nowMin >= 9 * 60) return;
     const shp2 = findShp2(store.get().devices);
     if (!shp2) return;
-    const yesterdayYmd = localParts(nowMs - 24 * 3_600_000, 'America/Phoenix').ymd;
+    const yesterdayYmd = addDaysYmd(today, -1); // T14/CA26 — the site calendar's previous day
     app.log.info(`energy-history: fetching the vendor ledger for ${yesterdayYmd}`);
     const vendor = await fetchVendorDay(shp2.sn, yesterdayYmd, (m) => app.log.warn(m));
-    // Like-basis local totals for the same Phoenix day.
+    // Like-basis local totals for the same site day (v1.191.0, T14: the day the vendor is asked for,
+    // on the same clock; it was the host's previous midnight + 24 h).
     let local: VendorDayRecord['local'] = null;
     try {
-      const dayStart = startOfLocalDayMs(new Date(nowMs - 24 * 3_600_000));
-      const t: any = await analytics.report('totals', { sinceMs: dayStart, untilMs: dayStart + 24 * 3_600_000 });
+      const dayStart = siteDayStartMs(yesterdayYmd);
+      const t: any = await analytics.report('totals', { sinceMs: dayStart, untilMs: siteDayStartMs(today) });
       local = {
         panelLoadWh: t?.fleet?.panelLoadWh ?? null, pvWh: t?.fleet?.pvWh ?? null, pvCoverage: t?.fleet?.pvCoverage ?? null,
         // v1.89.0 — gross pack-DC flows for the local round-trip ratio (B2).
@@ -5634,7 +5704,7 @@ async function runVendorEnergyJob(): Promise<void> {
       `energy-history: ${yesterdayYmd} vendor home ${kwh(rec.homeWh)} kWh (local ${kwh(local?.panelLoadWh ?? null)}, drift ${rec.driftHomePct ?? '—'}%), `
       + `solar ${kwh(rec.solarWh)} (local ${kwh(local?.pvWh ?? null)}, drift ${rec.driftSolarPct ?? '—'}%${rec.impliedDarkPvWh != null ? `, PARTIAL basis pvCoverage ${(local?.pvCoverage ?? 0).toFixed(2)} — dark-core production ≈ ${kwh(rec.impliedDarkPvWh)} kWh` : ''}), `
       + `grid ${kwh(rec.gridWh)}, battery in ${kwh(rec.batteryInWh)} / out ${kwh(rec.batteryOutWh)}, `
-      + `generator ${kwh(rec.generatorWh)}, ${rec.circuits.length}/12 circuits.`,
+      + `generator ${kwh(rec.generatorWh)}, ${rec.circuits.length}/${SHP2_CIRCUIT_COUNT} circuits.`,
     );
     // v1.85.0 — bounded backfill: up to 10 older missing days per morning,
     // converging on the 60-day horizon in about a week without ever competing
@@ -5678,7 +5748,7 @@ async function runVendorBackfill(cap: number): Promise<{ fetched: string[] }> {
     const shp2 = findShp2(store.get().devices);
     if (!shp2) return { fetched: [] };
     const state = loadVendorEnergyState();
-    const today = localParts(Date.now(), 'America/Phoenix').ymd;
+    const today = siteYmd(Date.now());
     const incomplete = new Set(Object.entries(state.days).filter(([, r]) => isIncompleteDay(r)).map(([d]) => d));
     const targets = missingDays(new Set(Object.keys(state.days)), today, 60, cap, incomplete);
     const fetched: string[] = [];
@@ -5736,8 +5806,8 @@ let forceChargeWhyLogged: { day: string | null; reasons: Set<string> } = { day: 
  *  17 kW): ≤0 or unparseable ⇒ null (contention not modelled). One reader for the planner
  *  and — v1.169.0 — the force-charge start, so the two can never disagree. */
 function gridInputCapKwFromEnv(): number | null {
-  const raw = Number(process.env.ARB_GRID_INPUT_CAP_KW ?? 17);
-  return Number.isFinite(raw) && raw > 0 ? raw : null;
+  // v1.191.0 (S3b) — the config.ts row keeps the rule: Number(raw ?? 17), ≤0 or unparseable ⇒ null.
+  return option<number | null>('ARB_GRID_INPUT_CAP_KW');
 }
 
 /** v1.166.0 — tonight's force-charge decision, stated on the 21:30 ARMED line. */
@@ -5767,6 +5837,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     const blind = decideForceCharge(state, nowMs, {
       enabled: false, gridPresent: null, gridStaLost: false, slotsOn: null, connectedSlots: [],
       vitalsRed: false, socCoherent: false, ceilingReadbackPct: null, poolSocPct: null, fullKwh: null,
+      maxRunMs: forceChargeMaxRunNow(), // v1.191.0 (S6, W5) — 7 h on the APS preset
     });
     if (blind.kind === 'offFailed') await escalateForceChargeStuck(state, blind);
     return;
@@ -5800,7 +5871,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   const chargeRateKw = forceChargeRateKw({
     gridCapKw, houseLoadKw, legEff: Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY),
     // v1.170.0 — fewer Cores connected ⇒ bounded by what each is proven to take.
-    slotCount: connectedSlots.filter((n) => n >= 1 && n <= 3).length,
+    slotCount: connectedSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS).length,
   });
   // …and the EV the live reading cannot see yet: the planner's predicted (P90) EV energy in
   // the rest of TONIGHT's window, which the pack will not get (review F1, 2026-09-18). Only
@@ -5846,6 +5917,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     nextLegOpenMs: nextForceChargeOpenMs(state, nightCyclePending, fcPlan?.window?.startMs),
     chargeRateKw,
     evDisplacedKwh,
+    // v1.191.0 (S6, W5) — the run backstop of the tariff in effect: 7 h on the APS preset.
+    maxRunMs: forceChargeMaxRunNow(),
   });
   if (action.kind === 'none') {
     // v1.166.0 — "chose not to" must never read like "broke". While a night is live
@@ -5918,13 +5991,16 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // from the stamp let the one re-issue land inside a later slot's cooldown, rate-limited.
     persistNightActuation({ ...nightActuationMem, forceChargeOnLastAttemptMs: Date.now() });
     stampLegOutcome(state, { force_charge_on_at_ms: nowMs }); // v1.189.0 — the ledger's force-charge stamps
-    const slotsNow = connectedSlots.filter((n) => n >= 1 && n <= 3).length;
+    const slotsNow = connectedSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS).length;
     const unboundedKw = gridCapKw != null ? (gridCapKw - Math.max(0, houseLoadKw ?? 0)) * Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY) : null;
     const rateNote = (chargeRateKw != null
       ? (unboundedKw != null && chargeRateKw < unboundedKw - 1e-9 && chargeRateKw > FORCE_CHARGE_MIN_RATE_KW
-        ? `timed at ~${chargeRateKw.toFixed(1)} kW (bounded by ${slotsNow} connected Core(s) × ${FORCE_CHARGE_PROVEN_KW_PER_SLOT} kW)`
+        ? `timed at ~${chargeRateKw.toFixed(1)} kW (bounded by ${slotsNow} connected Core(s) × ${forceChargeKwPerCore()} kW)`
         : `timed at ~${chargeRateKw.toFixed(1)} kW (grid cap ${gridCapKw} kW less the house's ${Math.max(0, houseLoadKw ?? 0).toFixed(1)} kW, through the charge leg, floored at 1 kW)`)
-      : `timed at the fixed ${FORCE_CHARGE_PLAN_RATE_KW} kW fallback (${gridCapKw == null ? 'no grid-input cap configured' : 'no live house load'})`)
+      : (planRateFallbackKw(slotsNow) === FORCE_CHARGE_PLAN_RATE_KW
+        ? `timed at the fixed ${FORCE_CHARGE_PLAN_RATE_KW} kW fallback (${gridCapKw == null ? 'no grid-input cap configured' : 'no live house load'})`
+        // v1.191.0 (H2) — FORCE_CHARGE_KW_PER_CORE set and the slots known: the fallback is slots × that rate.
+        : `timed at the ${planRateFallbackKw(slotsNow)} kW fallback (${slotsNow} connected Core(s) × ${forceChargeKwPerCore()} kW; ${gridCapKw == null ? 'no grid-input cap configured' : 'no live house load'})`))
       + (evDisplacedKwh != null && evDisplacedKwh > 0 ? `, plus ~${evDisplacedKwh.toFixed(1)} kWh the predicted EV will take` : '');
     // v1.186.0 — a rejected ON is no longer an info-level footnote: it is verified by
     // readback like an accepted one, re-issued once, then warned about.
@@ -6163,7 +6239,7 @@ function pageRevertDeadline(
   // granted night not yet adopted (decideRevertDeadline's readsPct). decideRevertDeadline pages only
   // a record with a target.
   const targetPct = d.readsPct ?? state.targetPct!;
-  const onPeakClock = state.nextOnPeakStartMs != null ? fmtPhoenixClock(state.nextOnPeakStartMs) : null;
+  const onPeakClock = state.nextOnPeakStartMs != null ? fmtSiteClock(state.nextOnPeakStartMs) : null;
   // The deadline page names the on-peak start's day when it is not today's: a Friday window's page
   // at 12:30 AM Saturday is about Monday's on-peak (chargeText.onPeakDayWords).
   const onPeakDay = d.stage === 'deadline' && state.nextOnPeakStartMs != null ? onPeakDayWords(state.nextOnPeakStartMs, nowMs) : null;
@@ -6228,7 +6304,7 @@ function sendRestoreSummary(state: ChargeLegState, restore: RestoreSummaryKind, 
     void sendNotification(loadNotifyConfig(), buildMiddayChargeSummary(middaySummaryFromLeg(state, {
       restorePct, restoredAtMs: state.revertedAtMs, expectedKwh: armedExpectedBuyKwh(state.day),
       forceCharge: forceChargeNightOutcome(state, forceChargeOn(state.leg)),
-      onPeak: onPeakAt != null ? { startMs: onPeakAt, endMs: onPeakEndMs(apsREvModelFromEnv(), onPeakAt) } : null,
+      onPeak: onPeakAt != null ? { startMs: onPeakAt, endMs: onPeakEndMs(tariffModelFromEnv(), onPeakAt) } : null,
       ended: endedBy, restore,
     }))).catch((e: any) => {
       app.log.debug(`night-charge: mid-day summary notify failed (${e?.message ?? e})`);
@@ -6673,6 +6749,7 @@ async function runTrailingLegTick(): Promise<void> {
     const blind = decideForceCharge(t, nowMs, {
       enabled: false, gridPresent: null, gridStaLost: false, slotsOn: null, connectedSlots: [],
       vitalsRed: false, socCoherent: false, ceilingReadbackPct: null, poolSocPct: null, fullKwh: null,
+      maxRunMs: forceChargeMaxRunNow(), // v1.191.0 (S6, W5)
     });
     if (blind.kind === 'offFailed') await escalateForceChargeStuck(t, blind, TRAILING_LEG);
     return;
@@ -6697,6 +6774,7 @@ async function runTrailingLegTick(): Promise<void> {
     // Blind re-sends stop at the next cost leg's open (a backup leg never force-charges, so an OFF
     // inside its window cuts nothing of ours), else the latest plan's (nextForceChargeOpenMs).
     nextLegOpenMs: nextForceChargeOpenMs(t, [nightActuationMem, ...nightCyclePending], getLatestNightChargePlan()?.window?.startMs),
+    maxRunMs: forceChargeMaxRunNow(), // v1.191.0 (S6, W5)
   });
   if (action.kind === 'off' || action.kind === 'offRetry') {
     const isRetry = action.kind === 'offRetry';
@@ -6846,7 +6924,7 @@ async function runMorningRefreshTickInner(nowMs: number): Promise<void> {
     app.log.info(`night-charge: morning refresh for ${leg.day} — stood: ${o.reason}.`);
     return;
   }
-  const model = apsREvModelFromEnv();
+  const model = tariffModelFromEnv();
   const sizing = costLegSizing(model, { role: 'cost', kind: 'super_off_peak', startMs: leg.windowStartMs!, endMs: leg.windowEndMs! },
     shadowCycleConfig(FORCE_CHARGE_OBJECTIVE, FORCE_CHARGE_COST_MAX_SOC_PCT), { chgMaxSocPcts: homeChgMaxSocPcts(), backupHold: null });
   const r = await recomputeNightChargePlan({ shadowLeg: sizing, maxWeatherAgeMs: REFRESH_MAX_WEATHER_AGE_MS });
@@ -6930,7 +7008,7 @@ if (nightChargeEnabled) {
         }
       } catch (e: any) { app.log.debug(`night-charge: islanded-load refresh skipped (${e?.message ?? e})`); }
       try {
-        setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
+        setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), nightReadinessOpts()));
       } catch (e: any) { app.log.debug(`night-charge: tick readiness recompute failed (${e?.message ?? e})`); }
       refreshNightRecentOutcomes(); // keep the status route's cache warm (DB read on a timer, not the handler)
     })();
@@ -6983,15 +7061,16 @@ if (nightChargeEnabled) {
     // v1.187.0 (review) — once per boot: a confirmed table that cannot price every period
     // leaves realized_cost_cents NULL on every night crossing it (each row's note says so).
     try {
-      const unpriced = unpricedTariffPeriods(apsREvModelFromEnv());
+      const tariffNowModel = tariffModelFromEnv();
+      const unpriced = unpricedTariffPeriods(tariffNowModel);
       if (unpriced.length > 0) {
-        app.log.warn(`night-charge: the confirmed tariff has no rate for ${unpriced.join(', ')} — realized_cost_cents stays NULL for any night whose scored span crosses one (score_notes names it). Set the matching TARIFF_APS_*_CENTS option to price it.`);
+        app.log.warn(`night-charge: the confirmed tariff has no rate for ${unpriced.join(', ')} — realized_cost_cents stays NULL for any night whose scored span crosses one (score_notes names it). Set the matching ${rateOptionsHint(tariffNowModel.planId)} option to price it.`);
       }
     } catch (e: any) { app.log.debug(`night-charge: tariff coverage check skipped (${e?.message ?? e})`); }
     void recomputeNightChargePlan().catch((e: any) => app.log.debug(`night-charge: warm recompute skipped (${e?.message ?? e})`));
     try { scoreCompletedNights(Date.now()); } catch (e: any) { app.log.debug(`night-charge: warm scoring skipped (${e?.message ?? e})`); }
     try {
-      setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
+      setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), nightReadinessOpts()));
     } catch (e: any) { app.log.debug(`night-charge: warm readiness recompute failed (${e?.message ?? e})`); }
     refreshNightRecentOutcomes();
   }, 60 * 1000);
@@ -7056,15 +7135,20 @@ app.get('/api/night-charge/status', async () => {
   const shp2 = findShp2(store.get().devices);
   const sp: any = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection : null;
   const latch = readNightChargeLatch();
+  const nightSchedNotify = nightScheduleNow().notify;
   return {
     enabled: nightChargeEnabled,
     mode: NIGHT_CHARGE_MODE,
+    // v1.191.0 (T16) — the zone every time in this payload was computed in; the card writes its
+    // clock times in it (never the browser's zone).
+    siteTimeZone: siteTimeZone(),
     // v1.182.0 — the panel's reserve maximum, so the card shows what will actually be written.
     reserveWriteMaxPct: RESERVE_WRITE_MAX_PCT,
     window: plan?.window ?? null,
     reserveFloorPercent: sp?.backupReserveSoc ?? null,
     confidence: plan?.confidenceTier ?? null,
-    notify: { hour: NIGHT_CHARGE_NOTIFY_HOUR, minute: NIGHT_CHARGE_NOTIFY_MINUTE, lastNotifyDay: latch.lastNotifyDay },
+    // v1.191.0 (S6) — the time the evening job fires (the configured one on the APS preset).
+    notify: { hour: nightSchedNotify.hour, minute: nightSchedNotify.minute, lastNotifyDay: latch.lastNotifyDay },
     plan,
     // v1.187.22 — why a write mode refused to arm this plan's window, until it closes; the card
     // leads with it instead of the plan's expected charge (servedArmRefusal). null = not refused.
@@ -7088,7 +7172,7 @@ app.get('/api/night-charge/status', async () => {
     middayShadow: shadowServed(getMiddayShadow(), Date.now()) ? getMiddayShadow() : null,
     // R5 — what the 21:30 notice would have pushed and spoken for it (chargeText.ts): never sent; the
     // card shows its title read-only.
-    middayShadowPreview: shadowServed(getMiddayShadow(), Date.now()) ? middayShadowPreview(getMiddayShadow(), apsREvModelFromEnv()) : null,
+    middayShadowPreview: shadowServed(getMiddayShadow(), Date.now()) ? middayShadowPreview(getMiddayShadow(), tariffModelFromEnv()) : null,
     // In-memory cache refreshed by the recompute tick / evening job — the route
     // must NOT read the ledger (DB/filesystem) inline (CWE-770).
     recentOutcomes: nightRecentOutcomesMem,
@@ -7959,6 +8043,49 @@ app.log.info(
   + `${process.env.BUILD_DATE ? ` built ${process.env.BUILD_DATE}` : ''}`
   + ` — node ${process.version}, pid ${process.pid}`,
 );
+// v1.191.0 (lane A, plan 2.4) — the site zone, resolved once when siteTime.ts loaded (SITE_TIMEZONE →
+// the container's TZ → the default), named with its source, then any configured value that did not
+// resolve. Main thread only (CA17). Home Assistant's own zone is compared in the background; a
+// difference warns and raises a repair issue, and the zone is never switched after boot.
+{
+  const st = siteTimeBootLines();
+  app.log.info(st.info);
+  for (const w of st.warnings) app.log.warn(`site time: ${w}`);
+  void checkHaTimeZone((m) => app.log.warn(`site time: ${m}`));
+}
+// v1.191.0 (S5) — the tariff in effect, named once at boot (main thread only, CA17). An unusable spec
+// is an error line: every price is null and the night charge holds; the R-EV table is NOT used instead.
+{
+  const t = resolveTariffFromEnv();
+  if (t.error != null) {
+    app.log.error(`tariff: ${t.error} — every price reads unknown and no night-charge window is planned; the built-in APS R-EV table is not used in its place (repair issue tariff-spec-invalid)`);
+  } else {
+    app.log.info(`tariff: plan ${t.model.planId}${t.planSet ? '' : ' (TARIFF_PLAN unset: the built-in APS R-EV preset)'}, rates ${t.model.ratesConfirmed ? 'confirmed' : 'unconfirmed'} (${t.confirmationKey}), currency ${tariffCurrency().code}`);
+  }
+  const currency = tariffCurrency();
+  if (currency.error != null) app.log.warn(`tariff: ${currency.error}`);
+  // v1.191.0 (S6) — the night-charge schedule another plan derives from its cheap window (silent on the
+  // APS preset, whose schedule is unchanged); a warning when the notify hour had to be clamped.
+  const sched = nightScheduleNow(t.model);
+  const schedLine = nightScheduleLogLine(sched);
+  if (schedLine != null) {
+    if (sched.notify.clampedFrom != null && sched.source === 'derived') app.log.warn(`${schedLine} (repair issue night-charge-notify-after-window)`);
+    else app.log.info(schedLine);
+  }
+  // CA20's tariff half (the site zone is not the reference zone while TARIFF_PLAN is unset) is part of
+  // the one reference-home-defaults notice and repair issue, which siteBootNotices raises below.
+}
+
+// v1.191.0 — the site notices (site.ts). The ones that need nothing from Home Assistant run now
+// (CA20's reference-home defaults, PV_STRINGS); Home Assistant's home location is read in the
+// background a little after boot, never awaited, and only ever raises a notice and a repair item
+// or saves the location for the next start (OWNER DECISION 5; the coordinates never change in-run).
+const siteLog = { info: (m: string) => app.log.info(m), warn: (m: string) => app.log.warn(m) };
+siteBootNotices(siteLog, { rosterSize: lastKnownRoster.size });
+const siteLocationCheck = setTimeout(() => {
+  checkHaHomeLocation({ log: siteLog }).catch((e: unknown) => app.log.debug(`site: Home Assistant location read failed: ${(e as Error)?.message ?? e}`));
+}, 30_000);
+siteLocationCheck.unref?.();
 
 // v1.152.0 — the v1.151.0 boot pre-warm was REMOVED, not repaired.
 //
@@ -7995,6 +8122,7 @@ const shutdown = async () => {
   app.log.info('shutting down');
   stopPoll();
   clearInterval(ghiPersistTick);
+  clearTimeout(siteLocationCheck);
   clearInterval(restTrackerTick);
   stopMqtt?.();
   monitor.stop();

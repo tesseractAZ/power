@@ -43,12 +43,17 @@ realized physics fraction, the forecast is mis-tuned.
 #### INPUTS
 
 - `ts` — the instant (epoch ms), taken as `Date.now()` at the endpoint.
-- `ambientC` — ambient air temperature (°C). The endpoint currently passes a
-  **placeholder constant `30`** (`// °C — placeholder; real call would use weather.ts`).
-- `site: SiteParams` — defaults to `PHOENIX_SITE` (the operator's plant).
+- `ambientC` — ambient air temperature (°C). With the built-in site the endpoint passes a
+  **placeholder constant `30`**; with a configured site, the weather cache's `temperature_2m`.
+- `site: SiteParams` — `pvSite()`: the configured array, else `PHOENIX_SITE` (the reference plant's).
 - `realizedW` — summed live `pvTotalWatts` across online DPUs (endpoint side).
 
-#### PHOENIX_SITE constants (the real, in-code values)
+#### PHOENIX_SITE constants (the reference plant's array, the built-in site)
+
+`pvSite()` returns this object unchanged while no `PV_*` option is set. Once one is set it
+returns `pNamplate` from `PV_ARRAY_KWP`, `tilt` from `PV_TILT_DEG`, `azimuth` from
+`PV_AZIMUTH_DEG` (each falling back to the value below), and the latitude and longitude of
+`FORECAST_LAT`/`FORECAST_LON`; `noct`, `tempCoeff` and `derate` stay the module defaults below.
 
 ```
 PHOENIX_SITE = {
@@ -151,8 +156,9 @@ clamp(realizedW / theoreticalW, 0, 1)   otherwise
 #### TRACE (inputs → outputs)
 
 - **In:** `realizedW = Σ (d.projection.pvTotalWatts)` over `onlineDpus(...)`;
-  `ambient = 30` (placeholder); `ts = Date.now()`.
-- **Compute:** `physicsPmax(ts, ambient, PHOENIX_SITE)` → `physicsScore(...)`.
+  `ambient = 30` (placeholder, built-in site) or the hour's `temperature_2m` (configured site);
+  `ts = Date.now()`.
+- **Compute:** `physicsPmax(ts, ambient, pvSite())` → `physicsScore(...)`.
 - **Out:** HTTP `GET /api/physics/pv-pmax`, cached 30 s.
 
 #### OUTPUT shape (`/api/physics/pv-pmax`)
@@ -173,10 +179,10 @@ clamp(realizedW / theoreticalW, 0, 1)   otherwise
 
 #### CONFIG knobs + defaults
 
-There are **no environment-variable knobs** for this module. Site parameters are
-the compile-time `PHOENIX_SITE` constant; `SiteParams` can be overridden at the
-call site if the add-on is ever shipped to another operator. The ambient
-temperature is a hardcoded `30 °C` placeholder in the endpoint.
+The site comes from the add-on options `PV_ARRAY_KWP`, `PV_TILT_DEG` and `PV_AZIMUTH_DEG`, with
+`FORECAST_LAT`/`FORECAST_LON`, through `pvSite()`; with none of the `PV_*` options set it is the
+reference plant's `PHOENIX_SITE`. With the built-in site the ambient temperature is the `30 °C`
+placeholder; with a configured site it is the weather cache's `temperature_2m` for the hour.
 
 #### EDGE CASES / guards / honest-null
 
@@ -567,8 +573,8 @@ observation noise is pinned to the **signal scale** (10% of nameplate), which is
 the whole reason the filter behaves like a filter:
 
 ```
-BAYES_OBS_SIGMA2 = (0.10 · PHOENIX_SITE.pNamplate)²
-                 = (0.10 · 16 800)² = 1 680² ≈ 2.82e6      (σ ≈ 1 680 W)
+BAYES_OBS_SIGMA2 = (0.10 · pvSite().pNamplate)²
+                 = (0.10 · 16 800)² = 1 680² ≈ 2.82e6      (σ ≈ 1 680 W, the reference plant's array)
 ```
 
 The in-code note (v0.9.59) explains why: the original placeholder σ² = 50 (σ ≈ 7 W)
@@ -659,8 +665,8 @@ DAYLIGHT_GHI     = 20 W/m²          // shared night gate
 No env knobs; all five `BAYES_*` constants (`BAYES_TTL_MS`, `BAYES_HISTORY_MS`,
 `BAYES_PRIOR_MU`, `BAYES_PRIOR_TAU2`, `BAYES_OBS_SIGMA2`) and `DAYLIGHT_GHI` are
 compile-time.
-`BAYES_OBS_SIGMA2` is *derived* from `PHOENIX_SITE.pNamplate`, so it automatically
-tracks the site nameplate.
+`BAYES_OBS_SIGMA2` is *derived* from `pvSite().pNamplate`: the reference plant's 16.8 kWp while
+no `PV_*` option is set, `PV_ARRAY_KWP` once the array is configured.
 
 #### EDGE CASES / guards / honest-null
 

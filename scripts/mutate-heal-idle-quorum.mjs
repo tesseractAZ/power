@@ -70,16 +70,17 @@ const MUTANTS = [
   {
     id: 'v. ★★ the panel exception is removed from the heal decision',
     file: HEAL,
-    find: '  const quorumMet = starvedCount >= cfg.minStarvedDevices || opts?.alarmCriticalStarved === true;',
-    to: '  const quorumMet = starvedCount >= cfg.minStarvedDevices; /* MUTANT */',
+    // v1.191.0 (Z5) — the setting bounded by the account's device count (effectiveQuorum).
+    find: '  const quorumMet = starvedCount >= quorum || opts?.alarmCriticalStarved === true;',
+    to: '  const quorumMet = starvedCount >= quorum; /* MUTANT */',
     why: 'With idle Cores no longer voting, a panel-only wedge (09-14 21:22) can never start the heal clock.',
   },
   // ── the production wiring ─────────────────────────────────────────────────
   {
     id: 'vi. ★★★ the tick passes every surfaced collapse again',
     file: INDEX,
-    find: '      now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved },',
-    to: '      now, collapses.length /* MUTANT */, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved },',
+    find: '      now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved, accountDevices: Object.keys(devices).length },',
+    to: '      now, collapses.length /* MUTANT */, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved, accountDevices: Object.keys(devices).length },',
     why: 'selfHealQuorum is computed, logged and ignored; production burns the budget exactly as before.',
   },
   {
@@ -113,8 +114,8 @@ const MUTANTS = [
   {
     id: 'xi. ★★ the call site drops the panel exception',
     file: INDEX,
-    find: '      now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved },',
-    to: '      now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, /* MUTANT: exception dropped */',
+    find: '      now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved, accountDevices: Object.keys(devices).length },',
+    to: '      now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { accountDevices: Object.keys(devices).length }, /* MUTANT: exception dropped */',
     why: 'The pure exception survives but production never passes it: a panel-only wedge (09-14 19:59, 21:42) can never start the heal clock.',
   },
   {

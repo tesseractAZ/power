@@ -450,7 +450,8 @@ test('★★★ index.ts: the refresh asks the worker for fresh weather, defers 
     assert.ok(!blk.includes(banned), `${banned} in the refresh`);
   }
   // The standing arm is stamped once, and pushes nothing.
-  const stand = blk.slice(blk.indexOf("if (due === 'stand') {"), blk.indexOf('const model = apsREvModelFromEnv();'));
+  // v1.191.0 — the tariff of the plan in effect (tariffModelFromEnv; the APS preset while TARIFF_PLAN is unset).
+  const stand = blk.slice(blk.indexOf("if (due === 'stand') {"), blk.indexOf('const model = tariffModelFromEnv();'));
   assert.ok(stand.includes('persistNightActuation(applyLiveRefresh(leg, o, nowMs));'));
   assert.ok(!stand.includes('sendNotification'));
   // Its own single-flight tick.

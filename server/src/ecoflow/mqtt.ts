@@ -6,6 +6,7 @@ import { ecoflow, type MqttCertification } from './rest.js'; // v0.10.4 — type
 import { SnapshotStore } from '../snapshot.js';
 import { config } from '../config.js';
 import { translateDpuMqtt } from './mqttTranslate.js';
+import { isDpuProduct } from '../topology.js';
 import { makeLogCoalescer } from '../logCoalesce.js';
 
 /**
@@ -242,8 +243,7 @@ export async function startMqtt(
       if (!param || typeof param !== 'object') return;
       // Only DPUs publish the cmdId schema we currently translate. For other
       // product families, the message is stored but no REST-schema translation.
-      const productName = store.get().devices[sn]?.productName?.toLowerCase() ?? '';
-      const translated = productName.includes('delta pro ultra')
+      const translated = isDpuProduct(store.get().devices[sn]?.productName)
         ? translateDpuMqtt(cmdId, param as Record<string, unknown>, store.getRaw(sn))
         : null;
       store.setMqttMessage(sn, cmdId, param as Record<string, unknown>, translated);

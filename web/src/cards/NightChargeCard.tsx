@@ -5,6 +5,7 @@ import {
   writtenReservePct, middayShadowView, type MiddayShadowStatus, type MiddayShadowPreviewStatus,
 } from './nightChargeText';
 import { apiUrl } from '../api';
+import { fmtHHMMIn } from '../siteTime';
 
 /**
  * Tonight's night-charge advisory — should the home buy grid energy in the
@@ -128,6 +129,9 @@ interface NightChargeStatus {
   /** v1.189.0 (R5) — what its evening notice would have said (never sent); null/absent with none. */
   middayShadowPreview?: MiddayShadowPreviewStatus | null;
   recentOutcomes?: unknown;
+  /** v1.191.0 (T16) — the site zone the server computed the plan in (siteTime.ts); the card's clock
+   *  times are written in it, never the browser's zone. Absent from an older server: no time shown. */
+  siteTimeZone?: string;
 }
 
 /** 12 h staleness horizon — matches the server's nightChargeStateFields guard so
@@ -140,20 +144,10 @@ const STALE_MS = 12 * 60 * 60 * 1000;
  *  request would otherwise hold the card on "Loading…", with no Cancel, indefinitely. */
 const STATUS_TIMEOUT_MS = 15_000;
 
-/** HH:MM in America/Phoenix (never the host clock) for the charge window. */
-const phoenixHHMM = (ms: number | null | undefined): string | null => {
-  if (ms == null || !Number.isFinite(ms)) return null;
-  try {
-    return new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Phoenix',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).format(new Date(ms));
-  } catch {
-    return null;
-  }
-};
+/** HH:MM for the charge window in the site zone the payload names (never the browser's clock).
+ *  v1.191.0 (T16) — it was pinned to the reference install's zone. */
+type ClockFmt = (ms: number | null | undefined) => string | null;
+const siteHHMM = (zone: string | null | undefined): ClockFmt => (ms) => fmtHHMMIn(ms, zone);
 
 const READINESS_LABEL: Record<NightChargeReadiness['state'], string> = {
   LEARNING: 'learning',
@@ -226,10 +220,11 @@ export const NightChargeCard = memo(function NightChargeCard() {
   // v1.189.0 — a confirmed cancel shows at once, for the write it was made on only (a poll that
   // left before it cannot undo it, and the next night's write keeps its Cancel); the 60 s poll
   // converges the rest.
+  const hhmm = siteHHMM(status.siteTimeZone);
   const actuation = withConfirmedCancel(status.actuation ?? null, cancelledKey);
   const onCancelled = () => setCancelledKey(actuationKey(actuation));
   const banner = (spacing: 'mt-3' | 'mb-3') => (
-    <ActuationBanner mode={status.mode} actuation={actuation} onCancelled={onCancelled} spacing={spacing} />
+    <ActuationBanner mode={status.mode} actuation={actuation} onCancelled={onCancelled} spacing={spacing} hhmm={hhmm} />
   );
   const stands = writeStands(actuation, status.mode, Date.now());
 
@@ -245,10 +240,10 @@ export const NightChargeCard = memo(function NightChargeCard() {
   if (!plan || !fresh) {
     return (
       <div className="card text-sm">
-        <div className="card-title">Tonight's night-charge plan</div>
+        <div className="card-title">Night-charge plan</div>
         <div className={stands ? 'text-warn' : 'text-muted'}>{noPlanText(plan != null && !plan.basisComplete, stands)}</div>
         {banner('mt-3')}
-        <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />
+        <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} hhmm={hhmm} />
       </div>
     );
   }
@@ -271,21 +266,21 @@ export const NightChargeCard = memo(function NightChargeCard() {
     return (
       <div className="card text-sm">
         <div className="card-title flex items-center justify-between">
-          <span>Tonight's night-charge plan</span>
+          <span>Night-charge plan</span>
           {readinessNote}
         </div>
         <div className={`${hold.tone === 'warn' ? 'text-warn' : hold.tone === 'ok' ? 'text-ok' : 'text-muted'} font-medium`}>{hold.headline}</div>
         <div className="text-muted mt-1 leading-relaxed">{hold.detail}</div>
         {banner('mt-3')}
         <AdvisoryNote mode={status.mode} />
-        <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />
+        <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} hhmm={hhmm} />
       </div>
     );
   }
 
   // CHARGE — surface buy, target SoC, baseline→plan trough, window, confidence.
-  const ws = phoenixHHMM(plan.window?.startMs);
-  const we = phoenixHHMM(plan.window?.endMs);
+  const ws = hhmm(plan.window?.startMs);
+  const we = hhmm(plan.window?.endMs);
   // v1.187.22 — the headline is the charge the write arms (the expected draw and the level it
   // drives to); the worst case appears once, in the labelled sizing line beneath.
   const fig = chargeFigureParts(plan, status.reserveWriteMaxPct ?? null);
@@ -301,7 +296,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
   return (
     <div className="card">
       <div className="card-title flex items-center justify-between">
-        <span>Tonight's night-charge plan</span>
+        <span>Night-charge plan</span>
         {readinessNote}
       </div>
 
@@ -390,7 +385,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
       </div>
 
       <AdvisoryNote mode={status.mode} />
-      <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />
+      <MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} hhmm={hhmm} />
     </div>
   );
 });
@@ -403,8 +398,10 @@ export const NightChargeCard = memo(function NightChargeCard() {
  * v1.189.0 — rendered in every card shape; its words and its Cancel come from
  * actuationBannerState.
  */
-function ActuationBanner({ mode, actuation, onCancelled, spacing }: {
+function ActuationBanner({ mode, actuation, onCancelled, spacing, hhmm }: {
   mode: NightChargeStatus['mode'];
+  /** The site-zone clock formatter (siteHHMM). */
+  hhmm: ClockFmt;
   actuation: NightActuation | null;
   onCancelled: () => void;
   /** Its margin in the shape it sits in: above the stats (mb-3), or under the shape's text (mt-3). */
@@ -414,7 +411,7 @@ function ActuationBanner({ mode, actuation, onCancelled, spacing }: {
   const [cancelErr, setCancelErr] = useState<string | null>(null);
   if (mode === 'advisory' || !actuation || !actuationBannerVisible(actuation, Date.now())) return null;
 
-  const state = actuationBannerState(actuation, phoenixHHMM(actuation.cancelDeadlineMs));
+  const state = actuationBannerState(actuation, hhmm(actuation.cancelDeadlineMs));
   const doCancel = async () => {
     setBusy(true);
     setCancelErr(null);
@@ -486,11 +483,12 @@ async function postCancel(leg: 'cost' | 'backup' | null = null): Promise<{ ok: b
  * v1.189.0 (R4) — the winter mid-day cycle computed in shadow (middayShadowView): read-only. It has
  * no Cancel and no other control — nothing of it is armed — and renders nothing with no mid-day leg.
  */
-function MiddayShadowSection({ shadow, preview }: {
+function MiddayShadowSection({ shadow, preview, hhmm }: {
   shadow: MiddayShadowStatus | null | undefined;
   preview?: MiddayShadowPreviewStatus | null;
+  hhmm: ClockFmt;
 }) {
-  const view = middayShadowView(shadow, phoenixHHMM, preview);
+  const view = middayShadowView(shadow, hhmm, preview);
   if (view == null) return null;
   return (
     <div className="mt-3 border-t border-line pt-2 text-xs">

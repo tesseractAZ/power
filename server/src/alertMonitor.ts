@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
-import { config } from './config.js';
+import { config, option } from './config.js';
 import { SnapshotStore, type DeviceSnapshot, type FleetSnapshot } from './snapshot.js';
 import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, CELL_SPREAD_MUTE_TEXT, packSnTail, MUTE_REASON_BENCH_SPARE, MUTE_REASON_OFF_PANEL, MUTE_REASON_REMEDIATION, restoreVdiffKneeSessions, persistVdiffKneeSessions, type ConnectivityContext, debouncedOnsetsPending, BOOT_RESET_ONSET_DEBOUNCE_MS, restoreHostPressureEpisode, persistHostPressureEpisode, hostPressureCarryPendingHeldAt } from './alerts.js';
 import { broadcastHealthAlert, broadcastDegradedAlert, getBroadcastHealth } from './broadcastHealth.js';
@@ -14,9 +14,9 @@ import { blindRemediationStep } from './blindRemediation.js';
 import { benchSpareSns, isOutsideHomePool, shp2ConnectedDpuSns, isExpectedOfflineSpare,
   aggregateFleetFlow, findShp2, shp2Panels, allShp2s } from './shp2Membership.js';
 // v1.70.0 — on-peak grid-to-battery detection. Reads the SAME tariff model as
-// index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
+// index.ts (tariffModelFromEnv, v1.191.0) so the two engines cannot disagree about when
 // on-peak starts, and the SAME fleet flow aggregation the dashboard shows.
-import { apsREvModelFromEnv } from './tariff.js';
+import { tariffModelFromEnv } from './tariff.js';
 import { evaluatePeakDraw, peakGridDrawAlerts, setLastPeakDrawObservation, evaluateIdlePool, peakIdlePoolAlerts, type IdlePoolInputs, PEAK_IDLE_POOL_ALERT_ID, loadIdlePoolFiredDay, restoreIdlePoolFiredDay, idlePoolFiredDay, persistIdlePoolFiredDay } from './peakGridDraw.js';
 import {
   computeLearnedAlerts,
@@ -65,6 +65,8 @@ import { liveGridBackstop, livePoolGridBackstop, gridPresenceEntityId } from './
 import { syncAlertOnsets, getAlertOnset, restampAlertOnset } from './alertOnset.js';
 // v1.187.10 — the restart-persistent "first seen listed offline" stamps (repair-first-seen.json).
 import { syncCloudOfflineFirstSeen, cloudOfflineFirstSeenAt } from './repairIssues.js';
+// v1.191.0 (lane A, T14/T15) — quiet hours, the digest hour and its day key on the site clock.
+import { siteHour, siteYmd, siteTimeZone } from './siteTime.js';
 
 /**
  * Watches the fleet, attaches computed alerts to the snapshot, and pushes a
@@ -2210,9 +2212,10 @@ export function parseQuietHours(s: string): [number, number] | null {
   return [start, end];
 }
 
-/** Exported for tests. */
+/** Exported for tests. v1.191.0 (T15) — the hour is the SITE hour (siteTime.ts), not the host's
+ *  `getHours()`: broadcast.ts judges its audible quiet hours through this same function. */
 export function inQuietWindow(now: Date, window: [number, number]): boolean {
-  const h = now.getHours();
+  const h = siteHour(now.getTime());
   const [start, end] = window;
   if (start === end) return false;
   if (start < end) return h >= start && h < end;
@@ -2658,13 +2661,15 @@ export function startAlertMonitor(
   }
   const persistClearedLog = () => saveClearedLog(clearedLogPath, clearedLog, CLEARED_LOG_MAX);
 
-  const QUIET_WINDOW = parseQuietHours(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
+  // v1.191.0 (S3a) — the three read through their config.ts rows, each with the rule it had here:
+  // NOTIFY_QUIET_HOURS parsed as HH-HH ('22-06' when absent, a malformed value is no window),
+  // CRITICAL_BREAKS_QUIET_HOURS true for 'true' or '1', NOTIFY_DIGEST_HOUR a bare Number() (7 when absent).
+  const QUIET_WINDOW = option<[number, number] | null>('NOTIFY_QUIET_HOURS');
   // v0.23.0 — opt-in: when true, critical alerts break through quiet hours and
   // push immediately (today's behaviour). Default false ⇒ critical is ALSO held
   // for the morning digest during quiet hours, so the night stays truly quiet.
-  const CRITICAL_BREAKS_QUIET =
-    process.env.CRITICAL_BREAKS_QUIET_HOURS === 'true' || process.env.CRITICAL_BREAKS_QUIET_HOURS === '1';
-  const DIGEST_HOUR = Number(process.env.NOTIFY_DIGEST_HOUR ?? 7);
+  const CRITICAL_BREAKS_QUIET = option<boolean>('CRITICAL_BREAKS_QUIET_HOURS');
+  const DIGEST_HOUR = option<number>('NOTIFY_DIGEST_HOUR');
   // Auto-silencing thresholds + the four rules now live at module scope as the
   // pure, exported applySilencingRules() so the boot-time replay pass and the
   // live-event path share one tested implementation (a panel restart must not
@@ -3023,7 +3028,7 @@ export function startAlertMonitor(
     });
     // v1.75.0 — the informational resolved-overnight section.
     const fmtClock = (ms: number) =>
-      new Date(ms).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+      new Date(ms).toLocaleTimeString('en-US', { timeZone: siteTimeZone(), hour: '2-digit', minute: '2-digit', hour12: false });
     const fmtDur = (ms: number) => {
       const m = Math.round(ms / 60_000);
       return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m` : `${m}m`;
@@ -3038,8 +3043,8 @@ export function startAlertMonitor(
       });
     try {
       // v1.90.0 (B7) — yesterday's vendor-ledger line, when a record exists.
-      const digestNow = new Date();
-      const digestTodayYmd = `${digestNow.getFullYear()}-${String(digestNow.getMonth() + 1).padStart(2, '0')}-${String(digestNow.getDate()).padStart(2, '0')}`;
+      // v1.191.0 (T14) — the site day, the same key the vendor ledger job stores its days under.
+      const digestTodayYmd = siteYmd(Date.now());
       const digestLedgerLine = (() => {
         // v1.100.0 — fall back to the newest stored day. The ledger job runs
         // AFTER the digest by design, so keying strictly on prevYmd(today) meant
@@ -3402,7 +3407,7 @@ export function startAlertMonitor(
       // on, instead of inferring the setting from power flow. (v1.84.0: built
       // as fcSlots above the call so the responder gets channel numbers too.)
       forceCharge: fcSlots?.map(({ label, on }) => ({ label, on })) ?? null,
-    }, apsREvModelFromEnv());
+    }, tariffModelFromEnv());
     // v1.84.0 — publish the observation (verdict + slot numbers) for the
     // Charge Now responder's tick in index.ts. Same set/get pattern as
     // messageRateFloorAlert.
@@ -3418,7 +3423,7 @@ export function startAlertMonitor(
     // from one forecast); read once here and again, unchanged, by the publish-first set below (no
     // await between them).
     const forecastNow = feedForecast.peek();
-    const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow, chargeHold), apsREvModelFromEnv());
+    const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow, chargeHold), tariffModelFromEnv());
     idlePoolFiredDayOnDisk = persistIdlePoolFiredDay(idlePoolStatePath, idlePoolFiredDayOnDisk);
 
     // v1.186.0 — the LIVE-SNAPSHOT alarms: everything computed from the snapshot and
@@ -4021,9 +4026,9 @@ export function startAlertMonitor(
       if (t != null && a.annunciate !== false && !rosterUnsettledSns.some((sn) => a.id.includes(sn))) t.annunciated = true;
     }
 
-    // Morning digest — fires once when the local hour rolls over to DIGEST_HOUR
+    // Morning digest — fires once when the local (site) hour rolls over to DIGEST_HOUR
     if (Number.isInteger(DIGEST_HOUR) && DIGEST_HOUR >= 0 && DIGEST_HOUR <= 23) {
-      const h = nowDate.getHours();
+      const h = siteHour(nowDate.getTime());
       if (h === DIGEST_HOUR && lastDigestHour !== h) {
         // v0.80.0 — latch the hour only when the digest SETTLED; a failed send
         // retries each tick within the hour rather than waiting until tomorrow.

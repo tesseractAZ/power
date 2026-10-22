@@ -453,8 +453,8 @@ const MUTANTS = [
   {
     id: 'C-iii. ★★★ an option with no row passes',
     file: CD,
-    find: "for (const key of config.options.keys()) if (!rows.has(key)) fail('D7',",
-    to: "for (const key of config.options.keys()) if (false) fail('D7', /* MUTANT */",
+    find: "for (const key of config.schema.keys()) if (!rows.has(key)) fail('D7',",
+    to: "for (const key of config.schema.keys()) if (false) fail('D7', /* MUTANT */",
     why: 'A new option ships undocumented.',
   },
   {

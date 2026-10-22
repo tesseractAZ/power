@@ -862,7 +862,7 @@ test('★★★ index.ts times the start with the live rate, from ONE grid-cap r
   assert.ok(body.includes('const gridCapKw = gridInputCapKwFromEnv();'));
   assert.ok(body.includes('const houseLoadKw = shp2HouseLoadKw(sp);'), 'the LIVE house load, from a fresh panel reading only');
   assert.ok(body.includes('gridCapKw, houseLoadKw, legEff: Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY),'));
-  assert.ok(body.includes('    chargeRateKw,\n    evDisplacedKwh,\n  });'), 'both reach the decision');
+  assert.ok(body.includes('    chargeRateKw,\n    evDisplacedKwh,\n'), 'both reach the decision');
   assert.ok(INDEX.includes('const gridInputCapKw = gridInputCapKwFromEnv();'), 'the planner reads the same cap');
   // The EV energy comes only from a plan for THIS window, through the charge leg.
   assert.ok(body.includes('fcPlan?.window != null && fcPlan.window.endMs === state.windowEndMs'));
@@ -907,5 +907,5 @@ test('★★★ v1.170.0 — with a Core out, the rate is bounded by what each c
     forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG }), 'no count ⇒ no bound (ON needs a slot anyway)');
   const fn = INDEX.indexOf('async function runForceChargeTick(');
   const body = INDEX.slice(fn, INDEX.indexOf('async function escalateForceChargeStuck(', fn));
-  assert.ok(body.includes('slotCount: connectedSlots.filter((n) => n >= 1 && n <= 3).length,'), 'index.ts passes the connected count');
+  assert.ok(body.includes('slotCount: connectedSlots.filter((n) => n >= 1 && n <= SHP2_SOURCE_SLOTS).length,'), 'index.ts passes the connected count (v1.191.0: hwSpec\'s three slots)');
 });

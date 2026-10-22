@@ -53,7 +53,7 @@ test('★★ ... and with a spec that pins the window the resolver finds, carrie
   // The PV terms are evaluated, not skipped: an explicit acceptance (the default value), a pinned
   // window, an explicit null hold. With no sun in the window they change nothing.
   const got = legacyIdentityDigests((c) => {
-    const w = resolveCheapWindow(c.deps.periodIdAt, c.deps.nowMs, c.deps.cheapPeriodId, c.deps.windowScanHours);
+    const w = resolveCheapWindow(c.deps.periodIdAt, c.deps.nowMs, c.deps.cheapPeriodId!, c.deps.windowScanHours);
     return {
       ...c.deps,
       windowSpec: { kind: 'overnight', role: 'cost', window: w, packAcceptKw: c.deps.chargeCapKw * c.deps.legEff, backupHold: null },
@@ -111,7 +111,7 @@ test('★★★ nextChargeableOpenMs under the overnight cycle is the 96 h overn
 
 test('★★★ the morning surplus helper is the loop index.ts ran inline, on every case', () => {
   for (const c of legacyIdentityCases()) {
-    const w = resolveCheapWindow(c.deps.periodIdAt, c.deps.nowMs, c.deps.cheapPeriodId, 30);
+    const w = resolveCheapWindow(c.deps.periodIdAt, c.deps.nowMs, c.deps.cheapPeriodId!, 30);
     const windowEndMs = w?.endMs ?? c.deps.nowMs;
     // The band the fixtures build, as the probabilistic forecast hours index.ts reads.
     const prob = c.deps.bandHours.map((h) => ({ ts: h.ts, p50W: h.pvP50W ?? 0, p90W: (h.pvP50W ?? 0) * 1.25, loadW: h.loadP50W ?? 0 }));
@@ -135,7 +135,7 @@ test('★★ wiring — index.ts plans the overnight leg: the overnight cycle, t
     'the horizon end is the overnight cycle\'s next open (no mid-day config passed until the switch)');
   assert.ok(index.includes("const morningEndMs = shadowLeg ? shadowLeg.surplusEndMs : surplusSpanEndMs('overnight', windowEndMs, null);"));
   assert.ok(index.includes("windowSpec: shadowLeg ? shadowLeg.spec : legRole === 'cost' ? OVERNIGHT_WINDOW_SPEC : { kind: 'overnight', role: legRole },"));
-  assert.ok(index.includes('const window = shadowLeg ? (shadowLeg.spec.window ?? null) : resolveCheapWindow(periodIdAt, nowMs, NIGHT_CHEAP_PERIOD_ID, 30);'));
+  assert.ok(index.includes('const window = shadowLeg ? (shadowLeg.spec.window ?? null)\n    : cheapPeriodId == null ? null : resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, 30, cheapNight);'));
   // The shadow passes a pinned leg, and so does the live morning refresh (R5, inert until the switch:
   // it plans only an armed super off-peak leg); no other caller does.
   assert.equal(index.split('shadowLeg: sizing').length - 1, 2, 'sizeShadowLeg and the morning refresh pin a leg');
@@ -143,10 +143,13 @@ test('★★ wiring — index.ts plans the overnight leg: the overnight cycle, t
   const refresh = index.slice(index.indexOf('async function runMorningRefreshTickInner('), index.indexOf('\n}\n', index.indexOf('async function runMorningRefreshTickInner(')));
   assert.ok(refresh.includes('const r = await recomputeNightChargePlan({ shadowLeg: sizing, maxWeatherAgeMs: REFRESH_MAX_WEATHER_AGE_MS });'));
   assert.match(refresh, /^async function runMorningRefreshTickInner\(nowMs: number\): Promise<void> \{\n {2}const due = liveRefreshDue\(nightCycleView\(\), nowMs\);\n {2}if \(due == null\) return;/);
-  assert.ok(index.includes('const NIGHT_CHEAP_PERIOD_ID = APS_PERIOD.OVERNIGHT;'));
+  // v1.191.0 (W1) — the cheap period is the tariff's own (cheapPeriodIdOf: 'overnight' on the APS preset).
+  assert.ok(index.includes('  const cheapPeriodId = cheapPeriodIdOf(tariffModel);'));
+  assert.ok(index.includes('    periodIdAt, cheapPeriodId, cheapNight, windowScanHours: 30,'));
   // Per leg: the force-charge gate and the objective follow the leg's role.
   assert.ok(index.includes("const forceChargeOn = (role: ChargeLegRole = 'cost'): boolean => legForceChargeEligible(role, forceChargeEnabled({"));
-  assert.ok(index.includes("const objectiveMode = legObjective(legRole, (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost'"));
+  // v1.191.0 — ARB_OBJECTIVE is read through its config.ts row (the same 'cost'-in-any-case rule).
+  assert.ok(index.includes("const objectiveMode = legObjective(legRole, option<'cost' | 'resilience'>('ARB_OBJECTIVE'));"));
   assert.equal(index.split('chooseChargeCycle(').length - 1, 0, 'the chooser is not wired to the actuator in this release');
   assert.equal(index.split('recomputeNightChargePlan({ role').length - 1, 0, 'every caller plans the overnight cost leg');
 });

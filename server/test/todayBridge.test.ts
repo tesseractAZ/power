@@ -23,12 +23,14 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPlant, near, MIN, H, PANEL, CORES, NAMEPLATE_WH } from './helpers/energyBridgePlant.js';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 import { goldenStore, goldenRows, goldenWindows, phx, GOLDEN_CORES, GOLDEN_PANEL } from './fixtures/todayBridgeFixtures.js';
 import { todayNotes, batterySub } from '../../web/src/cards/todayText.js';
 import type { BridgeLedgerRow, BridgeRollupResult } from '../src/energyBridge.js';
 
 const { Plant, cleanup } = await loadPlant('ef-today-bridge-');
+// recorderStub.js loads energyBridge.ts, whose graph reaches config.ts (aggregator.ts → siteTime.ts since
+// v1.191.0): imported after loadPlant has set DB_PATH, as the helper requires.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const { computeTotals, integrateWh, integrateWhOutside, bridgedView } = await import('../src/aggregator.js');
 const { bridgeLedgerRows, bridgePvSeenKey } = await import('../src/energyBridge.js');
 const { createReadRecorder } = await import('../src/readRecorder.js');
@@ -152,7 +154,8 @@ test('★★ the report registry and /api/summary/today ask for the bridged tota
   const idx = readFileSync(resolve(HERE, '../src/index.ts'), 'utf8');
   const handler = idx.slice(idx.indexOf("app.get<{ Querystring: { since?: string; until?: string } }>('/api/summary/today'"));
   assert.ok(handler.slice(0, 1200).includes("analytics.report('totals', { sinceMs: since, untilMs: until, bridged: true })"), 'the Today endpoint asks for the bridged totals');
-  assert.ok(idx.includes("analytics.report('totals', { sinceMs: dayStart, untilMs: dayStart + 24 * 3_600_000 })"), 'the vendor-ledger comparison keeps the Cores\' own meters');
+  // (v1.191.0 — the vendor ledger's day is the site day, [dayStart, the next site midnight).)
+  assert.ok(idx.includes("analytics.report('totals', { sinceMs: dayStart, untilMs: siteDayStartMs(today) })"), 'the vendor-ledger comparison keeps the Cores\' own meters');
   const tile = readFileSync(resolve(HERE, '../../web/src/cards/TodaySummary.tsx'), 'utf8');
   assert.ok(tile.includes('const notes = todayNotes(data?.fleet.bridged);'), 'the card reads the bridged share');
   assert.ok(tile.includes('sub={notes.solar ?? undefined}') && tile.includes('sub={notes.acOut ?? undefined}') && tile.includes('batterySub(data.fleet.batteryNetWh, notes.battery)'), 'and marks each figure');

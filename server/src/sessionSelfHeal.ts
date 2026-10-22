@@ -29,7 +29,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
-import { config } from './config.js';
+import { config, option } from './config.js';
 
 /**
  * v1.144.0 — F7 was investigated and DELIBERATELY NOT CHANGED. Recorded here so
@@ -84,7 +84,8 @@ export interface SelfHealConfig {
 }
 
 export const DEFAULT_SELF_HEAL_CONFIG: SelfHealConfig = {
-  minStarvedDevices: Number(process.env.SELF_HEAL_MIN_DEVICES ?? 2),
+  // v1.191.0 — through the option table (config.ts SELF_HEAL_MIN_DEVICES: bare Number, 2 when absent).
+  minStarvedDevices: option<number>('SELF_HEAL_MIN_DEVICES'),
   starvedForMs: Number(process.env.SELF_HEAL_AFTER_MS ?? 20 * 60_000),
   cooldownMs: Number(process.env.SELF_HEAL_COOLDOWN_MS ?? 60 * 60_000),
   maxPerDay: Number(process.env.SELF_HEAL_MAX_PER_DAY ?? 6),
@@ -261,6 +262,20 @@ export function recordRemediationHeal(state: SelfHealState, nowMs: number): void
 }
 
 /**
+ * v1.191.0 (Z5) — the quorum this account can reach: min(the setting, the devices ON THE ACCOUNT).
+ * A one-device account could never gather the default two starved devices, so its session was never
+ * rebuilt however long it starved. The count is every device on the account, not the eligible or
+ * online ones: on a plant with more devices than the setting the quorum is the setting in every
+ * degraded state (a dark half of the fleet does not lower it). No device count (none known yet, or a
+ * count below 1) leaves the setting as it is; a non-finite setting stays non-finite (as today, it is
+ * never met).
+ */
+export function effectiveQuorum(minStarvedDevices: number, accountDevices?: number | null): number {
+  if (accountDevices == null || !Number.isFinite(accountDevices) || accountDevices < 1) return minStarvedDevices;
+  return Math.min(minStarvedDevices, Math.floor(accountDevices));
+}
+
+/**
  * One evaluation tick. MUTATES `state` (onset tracking, day rollover, and — when
  * healing — the cooldown/day counters), so the caller only acts on `heal`.
  */
@@ -269,7 +284,7 @@ export function evaluateSelfHeal(
   starvedCount: number,
   state: SelfHealState,
   cfg: SelfHealConfig = DEFAULT_SELF_HEAL_CONFIG,
-  opts?: { alarmCriticalStarved?: boolean },
+  opts?: { alarmCriticalStarved?: boolean; accountDevices?: number | null },
 ): SelfHealVerdict {
   // v1.90.0 — prune the rolling window; the budget is heals within 24 h.
   state.healTimesMs = state.healTimesMs.filter((t) => nowMs - t < HEAL_BUDGET_WINDOW_MS);
@@ -290,10 +305,11 @@ export function evaluateSelfHeal(
   // 6-per-rolling-24h budget are untouched, so this cannot thrash. It only lets
   // the clock START. In the fleet-wide episodes actually observed, the SHP2 fired
   // 16 minutes before the Cores reached quorum; that head start was discarded.
-  const quorumMet = starvedCount >= cfg.minStarvedDevices || opts?.alarmCriticalStarved === true;
+  const quorum = effectiveQuorum(cfg.minStarvedDevices, opts?.accountDevices);
+  const quorumMet = starvedCount >= quorum || opts?.alarmCriticalStarved === true;
   if (!quorumMet) {
     state.starvedSinceMs = null;
-    return { heal: false, reason: `only ${starvedCount} device(s) starved (< ${cfg.minStarvedDevices})` };
+    return { heal: false, reason: `only ${starvedCount} device(s) starved (< ${quorum})` };
   }
   if (state.starvedSinceMs == null) state.starvedSinceMs = nowMs;
 

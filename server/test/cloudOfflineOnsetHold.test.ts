@@ -19,7 +19,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Alert, ConnectivityContext } from '../src/alerts.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 const keepAlive = setInterval(() => {}, 1_000);
 after(() => clearInterval(keepAlive));
@@ -41,6 +40,9 @@ delete process.env.NOTIFY_CHANNEL;
 delete process.env.SUPERVISOR_TOKEN;
 delete process.env.NOTIFY_RESOLVED;
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const {
   computeAlerts, cloudOfflineOnsetHeld, CLOUD_OFFLINE_ONSET_HOLD_MS, CLOUD_OFFLINE_MQTT_LIVE_MS,
   MUTE_REASON_CLOUD_OFFLINE_MQTT_LIVE, MUTE_REASON_BENCH_SPARE,

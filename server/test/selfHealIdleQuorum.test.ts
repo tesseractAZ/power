@@ -225,7 +225,8 @@ test('★★★ index.ts feeds the quorum count to evaluateSelfHeal and leaves t
   const code = src('index.ts').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
   assert.match(code,
-    /evaluateSelfHeal\(\s*now,\s*healQuorum\.count,\s*selfHealState,\s*DEFAULT_SELF_HEAL_CONFIG,\s*\{\s*alarmCriticalStarved\s*\},?\s*\)/,
+    // v1.191.0 (Z5) — and the account's device count, which bounds the quorum (selfHealAccountQuorum.test.ts).
+    /evaluateSelfHeal\(\s*now,\s*healQuorum\.count,\s*selfHealState,\s*DEFAULT_SELF_HEAL_CONFIG,\s*\{\s*alarmCriticalStarved,\s*accountDevices:\s*Object\.keys\(devices\)\.length\s*\},?\s*\)/,
     'the heal decision receives the quorum count AND the alarm-path exception, its only route to a panel-only wedge');
   assert.ok(!/evaluateSelfHeal\(\s*now,\s*collapses\.length/.test(code),
     'never every surfaced collapse');

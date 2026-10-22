@@ -34,6 +34,7 @@ import { c, padEnd, padStart, truncate, visLen, BOX } from '../ansi.js';
 // v0.11.0 — the alarm banner is keyed on the 4-tier ISA-18.2 / IEC 62682
 // priority (Critical/High/Medium/Low) instead of the raw severity.
 import { type AlarmPriority } from '../../alertPriority.js';
+import { fmtSiteHms, fmtSiteStamp } from '../../siteTime.js';
 
 /** ANSI colourizer for an ISA priority. No orange in the 16-colour palette, so
  *  High shares Critical's bright-red; Medium = bright-yellow; Low = cyan. */
@@ -274,8 +275,7 @@ export function alarmBanner(input: AlarmBannerInput, width: number): string {
   const { newest, counts, ackCount } = input;
   let leftCol: string;
   if (newest) {
-    const ts = new Date(newest.ts);
-    const tstr = `${String(ts.getHours()).padStart(2, '0')}:${String(ts.getMinutes()).padStart(2, '0')}:${String(ts.getSeconds()).padStart(2, '0')}`;
+    const tstr = fmtSiteHms(newest.ts); // v1.191.0 (T15) — site zone, not the host clock
     const tag = prioColor(newest.priority)(bannerTag(newest.priority));
     leftCol = `${c.redB('▌▌')} ${tag} ${c.grey(tstr)}  ${c.white(newest.text)}`;
   } else {
@@ -305,11 +305,10 @@ export interface StatusHeader {
 }
 
 export function statusHeader(h: StatusHeader, width: number): string {
-  const now = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
   // Compressed to date + HH:MM (was HH:MM:SS) — dropping seconds reclaims the
   // 3 cols that previously pushed the MODE value off the 80-col line.
-  const ts = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}`;
+  // v1.191.0 (T15) — in the site zone (siteTime.ts), not the host clock.
+  const ts = fmtSiteStamp(Date.now());
 
   // Tightened separators (was "  │  ", 5 cols → " │ ", 3 cols) and dropped the
   // redundant "TS " label so the full line fits in 80 with the MODE value intact.
