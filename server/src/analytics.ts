@@ -4527,7 +4527,8 @@ let shadeCache: { ts: number; value: ShadeReport } | null = null;
 // would per-Core) — it is merely counted ~1/N short and reads as a phantom fleet-wide
 // 58-91% "shortfall" (bogus kWh/yr) while every array was really fine. Deriving the
 // shortfall PER-CORE (each Core's own p90 refCoeff vs its own observed) makes each
-// Core's zero/gap hour drop out of its OWN pairs, so it can't deflate anyone else.
+// Core's zero/gap hour drop out of its OWN p90 reference (its observed pairs keep it),
+// so it can't deflate anyone else's.
 //
 // Fleet aggregation, per hour-of-day:
 //   - shortfallPct = MEDIAN of the per-Core shortfalls (real shade dims arrays
@@ -8903,8 +8904,10 @@ export function apsSeasonIsSummer(nowMs: number): boolean {
  * figure downstream of it. The winter 10:00-15:00 super-off-peak tier (8.2 c) had
  * no representation at all.
  *
- * `rateAt` also pins America/Phoenix, where `onPeakAt` read `new Date().getHours()`
- * — the HOST clock. Same answer on this Pi, wrong on any host in another zone.
+ * `rateAt` also resolves each hour in the model's zone (America/Phoenix when this was written;
+ * the site zone, siteTime.ts, since v1.191.0), where `onPeakAt` read `new Date().getHours()` —
+ * the HOST clock: the same answer on this Pi, wrong on any host in another zone. Since v1.191.0
+ * `onPeakAt` reads the site hour and weekday too (siteHour / siteDow).
  *
  * FALLBACK IS DELIBERATE AND EXPLICIT. `rateAt(...).centsPerKwh` is `number | null`
  * (null when rates are unconfirmed), and `null / 100 === 0` in JS — so a bare
