@@ -88,7 +88,7 @@ test('the cards that show or send site times read the server\'s zone (no literal
 
 test('★★ v1.191.1: the Today card\'s "since" is the site\'s midnight in the payload zone, whatever the browser\'s', () => {
   // The site midnight the server sends as sinceMs (its own zonedDayStartMs), with the zone it stamps.
-  const zones = ['America/Phoenix', 'America/New_York', 'Asia/Tokyo', 'UTC'];
+  const zones = ['America/Phoenix', 'America/New_York', 'Asia/Tokyo', 'Asia/Kolkata', 'UTC'];
   const midnight = new Date(Date.UTC(2026, 9, 22)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
   for (const zone of zones) {
     assert.equal(sinceLabel(serverDayStartMs('2026-10-22', zone), zone), `since ${midnight}`, `a ${zone} site reads its own midnight`);
@@ -114,6 +114,8 @@ test('v1.191.1: /api/summary/today stamps the site zone, and the Today card writ
   assert.ok(handler.slice(0, 1600).includes('{ ...(totals as object), dayEndMs, siteTimeZone: siteTimeZone() }'), 'the payload carries its zone');
   const card = readFileSync(new URL('../../web/src/cards/TodaySummary.tsx', import.meta.url), 'utf8');
   assert.match(card, /const since = data \? sinceLabel\(data\.sinceMs, data\.siteTimeZone\) : null;/);
+  // … and the header shows it (the definition alone passes with the text dropped).
+  assert.ok(card.includes("measured${since ? ` · ${since}` : ''}"), 'the header line prints the "since" time');
   assert.ok(!/toLocale(?:Time|Date)?String\(/.test(card), 'the card formats no time in the browser zone');
 });
 
@@ -154,10 +156,15 @@ test('v1.191.1: /api/forecast stamps the site zone, and both forecast cards labe
   const detail = readFileSync(new URL('../../web/src/cards/ForecastDetail.tsx', import.meta.url), 'utf8');
   assert.match(detail, /const zone = fc\.siteTimeZone;/);
   assert.equal((detail.match(/tsHourIn\([^,)]+, zone\)/g) ?? []).length, 4, 'the runtime note (twice), the low tile and each hour row');
+  // The hour rows get the zone as a prop: the call inside HourRow is counted above whatever it is passed.
+  assert.match(detail, /<HourRow key=\{h\.ts\} h=\{h\} zone=\{zone\} \/>/, 'each hour row is handed the payload zone');
+  assert.match(detail, /function HourRow\(\{ h, zone \}: \{ h: ForecastHour; zone: string \| undefined \}\)/);
   assert.ok(!/getHours\(\)|toLocale(?:Time|Date)?String\(/.test(detail), 'ForecastDetail reads no browser clock');
   const card = readFileSync(new URL('../../web/src/cards/ForecastCard.tsx', import.meta.url), 'utf8');
   assert.match(card, /const zone = fc\?\.siteTimeZone;/);
   assert.equal((card.match(/fmtLocaleIn\([^)]*, zone, /g) ?? []).length, 3, 'the low tile, the axis and the tooltip');
+  // … and the low tile shows the time it computed (the definition alone passes with the sub-line dropped).
+  assert.ok(card.includes("sub={lowAt ? `at ${lowAt}` : ''}"), 'the projected-low tile prints its time');
   assert.ok(!/getHours\(\)|toLocale(?:Time|Date)?String\(/.test(card), 'ForecastCard reads no browser clock');
 });
 
