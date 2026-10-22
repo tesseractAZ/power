@@ -7,8 +7,8 @@ import { addDaysYmd, siteTimeZone, zonedWallTimeMs } from '../src/siteTime.js';
 /*
  * v0.93.0 (audit #9) — shadeHoursFromCorePvMaps must derive the shade shortfall
  * PER-CORE (mirroring fleetSoilingFromDevices), so a single Core's cloud-gap zero
- * hour drops out of its OWN pairs and can NOT deflate the fleet reference — the
- * pre-v0.63.0 fleet-SUM path counted that hour ~1/N short (still positive) and
+ * hour drops out of its OWN p90 reference and can NOT deflate anyone else's — the
+ * summed-fleet path it replaced counted that hour ~1/N short (still positive) and
  * read a phantom 58-91% shortfall while every array was really fine.
  *
  * The tests are deterministic: hour-epochs and clear-sky weather are injected. The helper
