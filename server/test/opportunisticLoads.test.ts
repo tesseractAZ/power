@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseOpportunisticLoads, formatOpportunisticLoads } from '../src/limits.js';
 import { setWeatherCacheForTesting, clearWeatherTestOverride, type WeatherForecast } from '../src/weather.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
+import { siteHour } from '../src/siteTime.js';
 import { withEnv } from './golden/support/env.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
@@ -86,7 +87,7 @@ function saturatedHome(): Record<string, DeviceSnapshot> {
   return { [dpu.sn]: dpu, [shp2.sn]: shp2 } as never;
 }
 function bayes(wattsPerGhi: number) {
-  const hour = new Date().getHours();
+  const hour = siteHour(Date.now()); // the hour the curtailment code looks up (siteHour), not the host's
   return { generatedAt: Date.now(), hourly: [{ hour, posteriorMean: wattsPerGhi, posteriorStdev: 0.5, ci95Low: wattsPerGhi - 1, ci95High: wattsPerGhi + 1, samples: 10 }], totalSamples: 10, medianStdev: 0.5, agreementWithOls: 1 };
 }
 

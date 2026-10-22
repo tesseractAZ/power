@@ -20,6 +20,7 @@ import {
   type DayForecast,
 } from '../src/analytics.js';
 import type { WeatherHour } from '../src/weather.js';
+import { siteTimeZone, zonedWallTimeMs } from '../src/siteTime.js';
 import { integrateWh, startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
@@ -56,17 +57,21 @@ test('parseRange — invalid input → null', () => {
 });
 
 test('onPeakAt — APS-Saver-style (default 15-20, Mon-Fri)', () => {
+  // v1.191.0 — the cases are wall times in the SITE zone, which onPeakAt reads (siteHour / siteDow).
+  // They were host-local `new Date(y, m, d, h)`: identical only where the host zone is the site's, so a
+  // UTC CI runner (TZ unset, site zone the default) put Tuesday 16:00 UTC at 09:00 site time.
+  const at = (ymd: string, hour: number) => zonedWallTimeMs(ymd, hour, 0, siteTimeZone());
   // Tuesday 4pm = on-peak
-  const tuesday4pm = new Date(2026, 4, 19, 16, 0, 0).getTime();
+  const tuesday4pm = at('2026-05-19', 16);
   assert.equal(onPeakAt(tuesday4pm), true);
   // Tuesday 9am = off-peak (before window)
-  const tuesday9am = new Date(2026, 4, 19, 9, 0, 0).getTime();
+  const tuesday9am = at('2026-05-19', 9);
   assert.equal(onPeakAt(tuesday9am), false);
   // Tuesday 9pm = off-peak (after window: 15-20 means h<20 is in)
-  const tuesday9pm = new Date(2026, 4, 19, 21, 0, 0).getTime();
+  const tuesday9pm = at('2026-05-19', 21);
   assert.equal(onPeakAt(tuesday9pm), false);
   // Saturday 4pm = off-peak (weekend excluded by default 1-5)
-  const sat4pm = new Date(2026, 4, 23, 16, 0, 0).getTime();
+  const sat4pm = at('2026-05-23', 16);
   assert.equal(onPeakAt(sat4pm), false);
 });
 
