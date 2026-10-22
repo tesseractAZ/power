@@ -833,7 +833,9 @@ app.get<{ Querystring: { since?: string; until?: string } }>('/api/summary/today
   // the bridge booked for it (the figures Home Assistant's Energy counters add), not its own absent
   // samples; `fleet.bridged` says how much of each figure that is.
   const totals = await analytics.report('totals', { sinceMs: since, untilMs: until, bridged: true });
-  return cached(req, reply, { ...(totals as object), dayEndMs }, 30);
+  // v1.191.1 — `siteTimeZone`: the zone the day was computed in; the card writes its "since" time in
+  // it, never the browser's zone (as /api/night-charge/status does, T16).
+  return cached(req, reply, { ...(totals as object), dayEndMs, siteTimeZone: siteTimeZone() }, 30);
 });
 
 /**

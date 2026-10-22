@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  zonedParts, zonedDayStartMs, zonedTodayStartMs, zonedMinuteOfDay, fmtHHMMIn, calendarDaysBetween,
+  zonedParts, zonedDayStartMs, zonedTodayStartMs, zonedMinuteOfDay, fmtHHMMIn, calendarDaysBetween, fmtLocaleIn,
 } from '../../web/src/siteTime.js';
+import { sinceLabel } from '../../web/src/cards/todayText.js';
 import { dayLabel, siteTodayYmd, todayWhFrom } from '../../web/src/components/circuitDays.js';
 import { zonedDayStartMs as serverDayStartMs } from '../src/siteTime.js';
 import type { CircuitHistory } from '../../web/src/types.js';
@@ -83,3 +84,35 @@ test('the cards that show or send site times read the server\'s zone (no literal
   const modal = readFileSync(new URL('../../web/src/components/CircuitModal.tsx', import.meta.url), 'utf8');
   assert.ok(!/setHours\(0, 0, 0, 0\)/.test(modal), 'the circuit card sends and sums no browser midnight');
 });
+
+test('★★ v1.191.1: the Today card\'s "since" is the site\'s midnight in the payload zone, whatever the browser\'s', () => {
+  // The site midnight the server sends as sinceMs (its own zonedDayStartMs), with the zone it stamps.
+  const zones = ['America/Phoenix', 'America/New_York', 'Asia/Tokyo', 'UTC'];
+  const midnight = new Date(Date.UTC(2026, 9, 22)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
+  for (const zone of zones) {
+    assert.equal(sinceLabel(serverDayStartMs('2026-10-22', zone), zone), `since ${midnight}`, `a ${zone} site reads its own midnight`);
+  }
+  // Phoenix and New York midnights are three hours apart; written in one browser zone they cannot both read midnight.
+  assert.notEqual(
+    fmtLocaleIn(serverDayStartMs('2026-10-22', 'America/Phoenix'), 'America/New_York', { hour: '2-digit', minute: '2-digit' }),
+    fmtLocaleIn(serverDayStartMs('2026-10-22', 'America/Phoenix'), 'America/Phoenix', { hour: '2-digit', minute: '2-digit' }),
+    'the zone decides the clock',
+  );
+  assert.equal(sinceLabel(serverDayStartMs('2026-10-22', 'America/Phoenix'), undefined), null, 'no zone (an older server): no time, never the browser\'s');
+  assert.equal(sinceLabel(null, 'America/Phoenix'), null);
+  assert.equal(sinceLabel(Date.UTC(2026, 9, 22, 7), 'Not/AZone'), null);
+  // Where the browser is in the site zone (the reference install) the text is the one the card printed.
+  const host = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const hostMidnight = serverDayStartMs('2026-10-22', host);
+  assert.equal(sinceLabel(hostMidnight, host), `since ${new Date(hostMidnight).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+});
+
+test('v1.191.1: /api/summary/today stamps the site zone, and the Today card writes "since" in it', () => {
+  const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const handler = idx.slice(idx.indexOf("app.get<{ Querystring: { since?: string; until?: string } }>('/api/summary/today'"));
+  assert.ok(handler.slice(0, 1600).includes('{ ...(totals as object), dayEndMs, siteTimeZone: siteTimeZone() }'), 'the payload carries its zone');
+  const card = readFileSync(new URL('../../web/src/cards/TodaySummary.tsx', import.meta.url), 'utf8');
+  assert.match(card, /const since = data \? sinceLabel\(data\.sinceMs, data\.siteTimeZone\) : null;/);
+  assert.ok(!/toLocale(?:Time|Date)?String\(/.test(card), 'the card formats no time in the browser zone');
+});
+

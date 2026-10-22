@@ -11,6 +11,8 @@
  * figure unmarked. Pure, so the server suite runs it (server/test/todayBridge.test.ts).
  */
 
+import { fmtLocaleIn } from '../siteTime';
+
 /** The bridge's share of the day, as the server sends it (aggregator.ts BridgedTotals). */
 export interface TodayBridged {
   pvWh: number;
@@ -49,4 +51,13 @@ export function todayNotes(b: TodayBridged | undefined | null): TodayNotes {
 export function batterySub(netWh: number, note: string | null): string {
   const dir = netWh > 0 ? 'discharged' : 'charged';
   return note ? `${dir} · ${note}` : dir;
+}
+
+/** v1.191.1 — the Today card's "since …": the payload's start (the site's midnight) in the zone the
+ *  server computed it in (`siteTimeZone`), in the browser's own locale text ("since 12:00 AM"). It
+ *  was the browser's zone, so a viewer elsewhere read "since 03:00 AM" over the site's day. null
+ *  without a zone (an older server): no time rather than the browser's. */
+export function sinceLabel(sinceMs: number | null | undefined, zone: string | null | undefined): string | null {
+  const t = fmtLocaleIn(sinceMs, zone, { hour: '2-digit', minute: '2-digit' });
+  return t == null ? null : `since ${t}`;
 }
