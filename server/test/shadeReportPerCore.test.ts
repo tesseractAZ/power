@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shadeHoursFromCorePvMaps } from '../src/analytics.js';
 import type { WeatherHour } from '../src/weather.js';
+import { addDaysYmd, siteTimeZone, zonedWallTimeMs } from '../src/siteTime.js';
 
 /*
  * v0.93.0 (audit #9) — shadeHoursFromCorePvMaps must derive the shade shortfall
@@ -10,31 +11,36 @@ import type { WeatherHour } from '../src/weather.js';
  * pre-v0.63.0 fleet-SUM path counted that hour ~1/N short (still positive) and
  * read a phantom 58-91% shortfall while every array was really fine.
  *
- * The tests are deterministic: hour-epochs and clear-sky weather are injected, and
- * hour-of-day is derived by the SAME `new Date(he*3_600_000).getHours()` the helper
- * uses, so they are timezone-agnostic.
+ * The tests are deterministic: hour-epochs and clear-sky weather are injected. The helper
+ * groups by the SITE clock (siteHour / siteYmd of each hour-epoch), so the fixture places
+ * the epochs on fixed site wall-clock hours: each hour-of-day group holds one epoch per site
+ * day in every site zone, across a daylight-saving change too (the 8 days from 2025-04-01
+ * cross the end of DST in Auckland, Sydney and Santiago on 04-06). Fixed UTC epochs moved to
+ * the neighbouring site hour there and left each group below the day minimum.
  */
 
 const HR = 3_600_000;
 const CLEAR: Omit<WeatherHour, 'ts'> = { cloudCoverPct: 5, radiationWm2: 800, tempC: 25 };
 
 // Build a clear-sky weather map + N days × 3 clear hours-of-day of hour-epochs.
-// Returns { wx, epochs } where epochs are grouped so every hour-of-day used has
-// >= days distinct days (satisfies SHADE_MIN_CLEAR_DAYS=5 and the >=3-hour refCoeff).
-function clearSkyGrid(days: number): { wx: Map<number, WeatherHour>; epochs: number[] } {
+// Returns { wx, epochs, dayOf } where epochs are grouped so every hour-of-day used has
+// >= days distinct days (satisfies SHADE_MIN_CLEAR_DAYS=5 and the >=3-hour refCoeff),
+// and dayOf maps each epoch to its day index.
+function clearSkyGrid(days: number): { wx: Map<number, WeatherHour>; epochs: number[]; dayOf: Map<number, number> } {
   const wx = new Map<number, WeatherHour>();
   const epochs: number[] = [];
-  // A round epoch far from DST edges; step whole days (24h) so the same 3 local
-  // hours-of-day recur each day.
-  const baseHe = Math.floor(Date.UTC(2025, 3, 1, 18, 0, 0) / HR); // midday-ish UTC
+  const dayOf = new Map<number, number>();
   for (let d = 0; d < days; d++) {
-    for (const hOff of [0, 2, 4]) { // 3 distinct clear hours per day
-      const he = baseHe + d * 24 + hOff;
+    for (const hour of [11, 13, 15]) { // 3 distinct clear site hours per day
+      // The UTC hour-epoch holding this site wall time (a :30 zone's 11:00 is in the
+      // epoch that starts 10:30; it stays in the same site-hour group every day).
+      const he = Math.floor(zonedWallTimeMs(addDaysYmd('2025-04-01', d), hour, 0, siteTimeZone()) / HR);
       wx.set(he, { ts: he * HR, ...CLEAR });
       epochs.push(he);
+      dayOf.set(he, d);
     }
   }
-  return { wx, epochs };
+  return { wx, epochs, dayOf };
 }
 
 test('shadeHoursFromCorePvMaps — two clean Cores → no shade, zero kWh', () => {
@@ -64,15 +70,12 @@ test('shadeHoursFromCorePvMaps — one Core cloud-gap zeros do NOT create phanto
 });
 
 test('shadeHoursFromCorePvMaps — real uniform shade IS still detected', () => {
-  const { wx, epochs } = clearSkyGrid(8);
+  const { wx, epochs, dayOf } = clearSkyGrid(8);
   // Both Cores really under-produce ~40% vs their own clean p90 on the most recent
   // days. Model: first 4 days clean (coeff 2.0), last 4 days shaded (coeff 1.2) on
   // EVERY hour → per-Core p90 ~2.0, recent observed 1.2 → ~40% shortfall on shaded
   // days, well above the 18% threshold, and it shows up on BOTH Cores.
-  const coeffFor = (he: number): number => {
-    const dayIdx = Math.floor((he - epochs[0]) / 24);
-    return dayIdx >= 4 ? 1.2 : 2.0;
-  };
+  const coeffFor = (he: number): number => (dayOf.get(he)! >= 4 ? 1.2 : 2.0);
   const coreA = new Map<number, number>(epochs.map((he) => [he, coeffFor(he) * CLEAR.radiationWm2]));
   const coreB = new Map<number, number>(epochs.map((he) => [he, coeffFor(he) * CLEAR.radiationWm2]));
   const out = shadeHoursFromCorePvMaps([coreA, coreB], wx);
