@@ -134,12 +134,12 @@ test('the discharge gate and the price never disagree', async () => {
 
 test('an unconfirmed tariff leaves the discharge gate on the legacy window', async () => {
   // NOTE the first draft of this asserted `isOnPeakHour(15:30 Phoenix) === true`.
-  // It passed locally and FAILED in CI — because `onPeakAt` reads
-  // `new Date(ts).getHours()`, the HOST clock, and the runner is UTC while this
-  // machine is Phoenix. That failure is evidence for the very defect the
-  // production comment describes, so the fix is to assert the property that is
-  // actually true rather than to pick a timestamp that happens to work: on an
-  // unconfirmed tariff the gate DELEGATES to onPeakAt, whatever onPeakAt says.
+  // It passed on a Phoenix development host and FAILED in CI — because `onPeakAt`
+  // then read `new Date(ts).getHours()`, the HOST clock, and the runner is UTC.
+  // Since v1.191.0 `onPeakAt` reads the SITE clock (siteHour / siteDow), so the
+  // host's zone no longer moves it. The test asserts the property that holds
+  // whatever the clock: on an unconfirmed tariff the gate DELEGATES to onPeakAt,
+  // whatever onPeakAt says.
   await withEnv({ ...CONFIRMED, TARIFF_APS_RATES_CONFIRMED: 'false' }, async () => {
     const { isOnPeakHour, onPeakAt } = await import('../src/analytics.js');
     for (let h = 0; h < 24; h++) {
@@ -151,8 +151,10 @@ test('an unconfirmed tariff leaves the discharge gate on the legacy window', asy
 
 test('★ and with a CONFIRMED tariff the gate stops following the host clock', async () => {
   // The complement, and the point of the change: once rates are confirmed the
-  // gate comes from the Phoenix-pinned table, so it no longer varies with the
-  // machine's timezone. This assertion is host-independent by construction.
+  // gate comes from the rate table, which resolves in the tariff model's zone
+  // (siteTimeZone()), so it does not vary with the host's zone. The instants are
+  // Phoenix wall-clock times (phx), so the assertion assumes the site zone is
+  // America/Phoenix (the default when SITE_TIMEZONE and TZ are unset).
   await withEnv(CONFIRMED, async () => {
     const { isOnPeakHour } = await import('../src/analytics.js');
     const on = [16, 17, 18];
