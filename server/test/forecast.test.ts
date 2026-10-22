@@ -27,6 +27,7 @@ import {
   type WeatherHour,
 } from '../src/weather.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
+import { siteHour } from '../src/siteTime.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
@@ -93,9 +94,9 @@ function emptyForecast(overrides: Partial<DayForecast> = {}): DayForecast {
   };
 }
 
-/** Build N hourly forecast entries starting at local midnight tomorrow. The
- *  resulting timestamps span the hour-of-day axis predictably so tests can
- *  reason about `new Date(ts).getHours()`. */
+/** Build N hourly forecast entries starting at the site's midnight tomorrow
+ *  (tomorrowLocalMidnight). The resulting timestamps span the site's hour-of-day
+ *  axis predictably so tests can reason about `siteHour(ts)`. */
 function hourlyForecast(opts: {
   count: number;
   startTs: number;
@@ -280,8 +281,8 @@ test('computeProbabilisticForecast — happy path: p10 ≤ p50 ≤ p90 at every 
   const r = await computeProbabilisticForecast(fc, null);
   assert.equal(r.hours.length, 24);
   for (const b of r.hours) {
-    assert.ok(b.p10W <= b.p50W, `hour ${new Date(b.ts).getHours()}: p10 ${b.p10W} > p50 ${b.p50W}`);
-    assert.ok(b.p50W <= b.p90W, `hour ${new Date(b.ts).getHours()}: p50 ${b.p50W} > p90 ${b.p90W}`);
+    assert.ok(b.p10W <= b.p50W, `hour ${siteHour(b.ts)}: p10 ${b.p10W} > p50 ${b.p50W}`);
+    assert.ok(b.p50W <= b.p90W, `hour ${siteHour(b.ts)}: p50 ${b.p50W} > p90 ${b.p90W}`);
   }
 });
 

@@ -30,7 +30,7 @@ process.env.MQTT_DISCOVERY_PORT = '9';
 const mqttDiscovery = await import('../src/mqttDiscovery.js');
 const { SENSORS, BINARY_SENSORS, auditDiscoveryTables, sensorDiscoveryConfig } = mqttDiscovery;
 const { dailyFigureResetIso } = await import('../src/haPayloadFmt.js');
-const { startOfLocalDayMs } = await import('../src/aggregator.js');
+const { addDaysYmd, siteDayStartMs, siteTimeZone, siteYmd, zonedWallTimeMs } = await import('../src/siteTime.js');
 const { setAnalyticsClientForTesting } = await import('../src/analyticsClient.js');
 
 test.after(() => { try { rmSync(TMP, { recursive: true, force: true }); } catch { /* */ } });
@@ -74,28 +74,37 @@ test('★★★ the table audit: a daily figure that is total_increasing, or tot
   assert.deepEqual(rules({ ...base, state_class: 'total_increasing', value_template: '{{ value_json.probe_lifetime_kwh }}' }), [], 'a lifetime counter is not a daily figure');
 });
 
+/** The site midnight that starts `ymd`, as the ISO text a last_reset carries. */
+const siteMidnightIso = (ymd: string) => new Date(siteDayStartMs(ymd)).toISOString();
+
 test('★★ the reset is the local midnight of the REPORT\'s day, not the publish clock', () => {
-  const noonToday = new Date(); noonToday.setHours(12, 0, 0, 0);
-  const lateYesterday = new Date(noonToday.getTime() - 86_400_000); lateYesterday.setHours(23, 59, 30, 0);
-  assert.equal(dailyFigureResetIso(noonToday.getTime()), new Date(startOfLocalDayMs(noonToday)).toISOString());
+  // Site-clock instants: noon of the site's today, and 30 s before the site's midnight. Host-clock
+  // setHours placed "late yesterday" hours from the site's midnight on a host/site split, or on the
+  // site's today when the site is ahead of the host.
+  const today = siteYmd(Date.now());
+  const noonToday = zonedWallTimeMs(today, 12, 0, siteTimeZone());
+  const lateYesterday = siteDayStartMs(today) - 30_000;
+  assert.equal(dailyFigureResetIso(noonToday), siteMidnightIso(today));
   assert.equal(
-    dailyFigureResetIso(lateYesterday.getTime(), noonToday.getTime()),
-    new Date(startOfLocalDayMs(lateYesterday)).toISOString(),
+    dailyFigureResetIso(lateYesterday, noonToday),
+    siteMidnightIso(addDaysYmd(today, -1)),
     'a last-good report from before midnight keeps its own day: its figure is that day\'s',
   );
-  assert.equal(dailyFigureResetIso(null, noonToday.getTime()), new Date(startOfLocalDayMs(noonToday)).toISOString(), 'no report: today');
+  assert.equal(dailyFigureResetIso(null, noonToday), siteMidnightIso(today), 'no report: today');
   assert.ok(!Number.isNaN(Date.parse(dailyFigureResetIso(undefined))), 'always a parseable timestamp (HA warns on an invalid last_reset)');
 });
 
 test('★★★ buildState emits each figure with its day: the reset keys follow their own report', async () => {
   // Two different days, neither today: a reset taken from the publish clock, or from the other
-  // report, reads a different midnight for each.
-  const twoDaysAgo = new Date(); twoDaysAgo.setDate(twoDaysAgo.getDate() - 2); twoDaysAgo.setHours(23, 50, 0, 0);
-  const curtGen = twoDaysAgo.getTime();
-  const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1); yesterday.setHours(23, 58, 0, 0);
+  // report, reads a different midnight for each. Site-clock instants (late on the site's day before
+  // yesterday and yesterday): host-clock setHours put "yesterday" on the site's today when the site
+  // is ahead of the host, and on the publish clock's own site day early in a UTC host's day.
+  const today = siteYmd(Date.now());
+  const curtGen = zonedWallTimeMs(addDaysYmd(today, -2), 23, 50, siteTimeZone());
+  const clipGen = zonedWallTimeMs(addDaysYmd(today, -1), 23, 58, siteTimeZone());
   const reports: Record<string, unknown> = {
     curtailment: { active: false, currentSurplusW: 0, todayKwh: 3.03, recent7dKwh: 6.9, current: null, basisComplete: true, generatedAt: curtGen },
-    clipping: { todayKwh: 0.4, arrayPeakW: 9707, generatedAt: yesterday.getTime() },
+    clipping: { todayKwh: 0.4, arrayPeakW: 9707, generatedAt: clipGen },
   };
   const stub: AnalyticsClient = {
     report: async <T = any>(name: string): Promise<T> => structuredClone(reports[name] ?? null) as T,
@@ -108,8 +117,8 @@ test('★★★ buildState emits each figure with its day: the reset keys follow
   const handle = await mqttDiscovery.startMqttDiscovery(store, makeRecorderStub(), () => {});
   try {
     const s = await handle.buildState!(snap);
-    assert.equal(s.pv_curtailment_kwh_today_since, new Date(startOfLocalDayMs(new Date(curtGen))).toISOString());
-    assert.equal(s.pv_clipped_kwh_today_since, new Date(startOfLocalDayMs(yesterday)).toISOString());
+    assert.equal(s.pv_curtailment_kwh_today_since, siteMidnightIso(addDaysYmd(today, -2)));
+    assert.equal(s.pv_clipped_kwh_today_since, siteMidnightIso(addDaysYmd(today, -1)));
   } finally {
     handle.stop();
     setAnalyticsClientForTesting(null);

@@ -1,3 +1,40 @@
+## 1.191.1
+
+### The console's two liveness clocks and the dashboard's Today and forecast times read the site clock
+
+**Console**
+
+- The 1 Hz clock in the ALARM LIST divider (ALARM screen) and in the MAIN BUS divider (BUS screen) is written in the site zone, the zone of the console's other stamps: the status header, the alarm banner and the alarm rows. Both read the host's clock, so with `SITE_TIMEZONE` set to another zone than the container's, or a container without `TZ` on the default zone, the two dividers disagreed with those stamps by the difference (two or three hours behind for a New York site on a Phoenix host, by the season; seven hours ahead for a Phoenix site on a UTC host). The SSH console and the browser console share the screens. The `HH:MM:SS` form is unchanged.
+
+**Dashboard**
+
+- The Today card's "since" time is written in the site zone: the card's day starts at the site's midnight, but the time was formatted in the browser's zone, so a browser elsewhere read "since 03:00 AM" or "since 07:00 AM" over the site's day. `/api/summary/today` now carries `siteTimeZone`, as `/api/night-charge/status` does.
+- The Solar page's day-ahead forecast labels each hourly projection row, the projected-low tile and the runtime note with the site hour, the hour of the learned response table beside it and of the server's own forecast warning; it read the browser's clock. The Dashboard's 24-hour forecast card writes its projected-low time, axis and tooltip in the site zone too. `/api/forecast` now carries `siteTimeZone`.
+- The text keeps the browser's own locale and form, so a browser in the site zone reads exactly what it did. Without a zone (a server older than the page) no time is shown rather than the browser's.
+
+**Unchanged**
+
+- Where the site zone is the container's zone, as it is with `SITE_TIMEZONE` unset and `TZ` set by the Supervisor, the two console clocks read exactly what they did, and a browser in that zone reads the same Today and forecast text. Nothing else changes: the computed figures, the alarms and the Home Assistant payloads are those of 1.191.0.
+
+**Tests**
+
+- Every clock the console prints (the two dividers, the alarm rows, the alarm banner and the status header) is read off the rendered ALARM, BUS and CONSOLE screens in child processes for a New York site on a Phoenix container, a Phoenix site on a UTC container and the reference install, against written-out times. A scan of the console's source fails on a call to any of these host-clock date helpers, with or without a locale and options: the `toLocale…String`, `toTimeString` and `toDateString` forms, `Intl.DateTimeFormat`, the local `get…`/`set…` fields, `getTimezoneOffset` and a `Date` built from local fields (`new Date(y, m, …)`). The scan parses each file, so a call written across lines or nested at any depth inside another call is caught.
+- The Solar page's hour labels are checked against the server's site hour in five zones and the Today card's "since" time against the site's midnight in five; the Dashboard forecast card's times are compared across three zones. Source checks also pin where each card hands the zone on or shows the time: dropping the zone from the hour rows (every row "—"), the "since" text or the projected-low time each fails.
+- Fixtures in eight test files were built on the host's clock or on local hours. Each now places its instants on the site clock (or, where the code buckets by the UTC hour, on the first UTC hour that starts in the site hour, the bucket the code labels with it), so it holds and keeps its meaning under any container zone:
+  - The runway's PV-basis guard asserts on the site hour `computeClipping` labels its rows with; a row labelled on the host's clock fails on a UTC container and wherever host and site differ.
+  - The no-weather curtailment case places its surplus hour at a site wall time and asserts that the one estimated hour is booked at site 11:00. On a Kolkata container with a Phoenix site it read 2.5 kWh instead of 7.
+  - Both held-panel curtailment cases assert that no hour of the window is curtailment. On a UTC container they passed with a missing `panel_load` read as 0 W (the 1.188.1 fix reverted).
+  - The daily-figure reset cases take their instants and their expected midnights from the site's dates, not from the function under test. A one-minute boundary slop and a reading of the publish clock now fail under every zone pairing; a day start on the host's clock fails wherever host and site differ.
+  - The display-versus-alarm PV contract now exercises its bias-factor cause as well as the coverage gate: a display sum that drops the bias factor fails.
+  - The per-Core shade report places its clear hours in the first UTC hour that starts in each site hour, as the report labels them, and holds on a site whose daylight saving ends inside the fixture (Auckland, and Lord Howe Island, whose clock moves by half an hour), where real uniform shade was no longer detected. The two-Core gap case passed the summed-fleet calculation the per-Core report replaced; it now also puts the gap on the six most recent days, and a case with one Core of three dark on those days is added: both fail the summed fleet (a phantom 50 % and 33 % shortfall on every clear hour). A case with shade on most recent days fails a median reference in place of the 90th percentile.
+  - The realized-irradiance training case and the soiling charge-taper cases key their rows on the UTC hour, as the recorder and the weather feed do, and hold on half- and quarter-hour zones (Kolkata, Kathmandu, Adelaide, St John's).
+- The forecast-skill cache case scores the realized and the first-write reports against one forecast. A cached report is served only for the forecast it was scored against, so a fresh forecast for each call missed the cache whatever its key, and a cache keyed by the window alone (a realized report served to the band calibrator) passed the case; it now fails.
+- Test comments that said the code reads the host's clock now name the site clock (clipping, forecast, rate table, dispatch, solar-model metrics, the settings-drift quiet window, the message-rate floor, the diurnal backtest baseline, the golden capture), and the forecast's band-check failure messages print the site hour.
+
+**Documentation**
+
+- The user-interface reference describes the console's clocks, the Today card's "since" time and the forecast cards' hour labels; the solar-forecast reference names the field `/api/forecast` adds.
+
 ## 1.191.0
 
 ### The site clock, the tariff, the PV array, the devices and the plant limits are options; unset keeps today's behaviour

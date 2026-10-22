@@ -385,6 +385,10 @@ export interface DayForecast {
   homeDpusConnected?: number;
   homeDpusReporting?: number;
   homeDpusCoveragePartial?: boolean;
+  /** v1.191.1 — the site zone the server computed these hours in (siteTime.ts), stamped by GET
+   *  /api/forecast; the cards label an hour in it, never the browser's zone. Absent from an older
+   *  server: no hour shown. */
+  siteTimeZone?: string;
 }
 
 export type DegradeStatus = 'projecting' | 'stable' | 'learning' | 'no-data';

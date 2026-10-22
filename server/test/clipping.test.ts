@@ -24,9 +24,9 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * says the array *could* have produced more, so `clippedW > 0`.
  *
  * Determinism strategy:
- *   - `computeClipping` walks LOCAL hour-of-day (`new Date(hourStart)
- *     .getHours()`) from `startOfLocalDayMs()` up to `now`, so the test
- *     synthesises pv_total + weather relative to those same two anchors
+ *   - `computeClipping` walks the SITE hour-of-day (`siteHour(hourStart)`)
+ *     from `startOfLocalDayMs()` (the site's midnight) up to `now`, so the
+ *     test synthesises pv_total + weather relative to those same two anchors
  *     and only ever asserts on hours that are strictly elapsed.
  *   - The weather cache is pinned via `setWeatherCacheForTesting`; the
  *     short-lived clipping cache is cleared via

@@ -159,7 +159,8 @@ test('diurnalBaselinePredictor — night predicts ≈0, noon predicts ≈peak (n
   curve[12] = 5000; // midday peak Wh
   curve[2] = 0;     // 2am
   const predict = diurnalBaselinePredictor(curve);
-  // Use a fixed UTC day; getHours() is local, so assert via the same Date.
+  // A day on the host clock; the predictor reads the site hour (siteHour), which this file sets
+  // to the host's zone (siteZoneIsHostZone), so hourOfDay is the curve slot it reads.
   const at = (hourOfDay: number) => {
     const d = new Date(2026, 5, 1, hourOfDay, 0, 0);
     return predict(d.getTime());

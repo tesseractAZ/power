@@ -6,8 +6,9 @@
  *
  * The process environment is reduced to a fixed set first: every add-on option, every tariff and
  * limit knob and every state path is unset or pinned, so a developer's shell cannot leak into a
- * golden, and the host-clock functions (getHours, startOfLocalDayMs, onPeakAt) run in the zone this
- * install runs in.
+ * golden. SITE_TIMEZONE is cleared with the rest and TZ is pinned, so the site clock
+ * (startOfLocalDayMs, isOnPeakHour and its onPeakAt fallback) and the host clock the G1 table
+ * records beside it (getHours) both run in America/Phoenix, the zone this install runs in.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

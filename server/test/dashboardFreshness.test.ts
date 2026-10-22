@@ -213,7 +213,8 @@ test('the server stamps its clock on every frame at SEND time, and the day end o
   assert.ok(idx.includes('return `{"type":"snapshot","serverNowMs":${Date.now()},"data":${wsDataStr}}`;'),
     'the stamp is per send, not cached with the body');
   // v1.191.0 (CA25) — the day end is the next SITE midnight after the payload's start (siteTime.ts).
-  assert.ok(idx.includes('const dayEndMs = siteNextDayStartOf(since);') && idx.includes('{ ...(totals as object), dayEndMs }'), '/api/summary/today carries the day end');
+  // v1.191.1 — and the site zone the day was computed in (the card's "since" time, webSiteTime.test.ts).
+  assert.ok(idx.includes('const dayEndMs = siteNextDayStartOf(since);') && idx.includes('{ ...(totals as object), dayEndMs, siteTimeZone: siteTimeZone() }'), '/api/summary/today carries the day end');
   const hook = web('useSnapshot.ts');
   assert.ok(hook.includes('nextClockOffset(minOffset, Date.now() - m.serverNowMs)') && hook.includes('minOffset = null;'), 'min offset per socket, reset on reconnect');
 });
