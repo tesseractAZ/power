@@ -44,8 +44,15 @@ type Pt = { ts: number; value: number };
 
 /** Clear-sky radiation for the label L (local hour): the average of [L − 1, L), sun up rise → set. */
 const ghiAtLabel = (L: number, rise = 7, set = 19) => Math.max(0, Math.round(1000 * Math.sin((Math.PI * (L - 0.5 - rise)) / (set - rise))));
-/** Local wall-clock hour h on the local calendar day of `day`. */
-const at = (day: Date, h: number) => new Date(day.getFullYear(), day.getMonth(), day.getDate(), h).getTime();
+/**
+ * The hour-epoch start of local hour h on the local calendar day of `day`: the first UTC hour at or
+ * after local h:00. Recorder buckets and Open-Meteo labels sit on the UTC hour, and the code labels
+ * a bucket with the local hour of its start, so this is local h:00 itself on a whole-hour zone and
+ * h:30 / h:45 on a :30 / :45 zone (where local h:00 is inside the bucket labelled h − 1).
+ */
+const at = (day: Date, h: number) => Math.ceil(new Date(day.getFullYear(), day.getMonth(), day.getDate(), h).getTime() / H) * H;
+/** Half an hour into the local hour h of `day` (see `at`). */
+const midHour = (day: Date, h: number) => at(day, h) + 30 * 60_000;
 
 type Kind = 'clean' | 'cloudy' | 'taper';
 interface CoreSpec {
@@ -120,7 +127,7 @@ const septDays = (): Array<{ day: Date; kind: Kind }> =>
     return { day: new Date(2026, 8, d), kind: SEPT_TAPER.has(d) ? 'taper' : SEPT_CLOUDY.has(d) ? 'cloudy' : 'clean' };
   });
 /** 09-30 17:30 local: hours to 16:00 are complete. */
-const SEPT_30_1730 = new Date(2026, 8, 30, 17, 30).getTime();
+const SEPT_30_1730 = midHour(new Date(2026, 8, 30), 17);
 /** Midnight after 09-30: every September hour is complete. */
 const OCT_1 = new Date(2026, 9, 1).getTime();
 /** Cores 1 and 5 full by noon, Core 2 by 14:00 (09-30: Core 2 still at 97.6% at 13:00). */
@@ -312,13 +319,13 @@ test('★★ only completed hours pair: the label covering the hour in progress 
   assert.equal(soilingClearSkyHour(fx.wx, he, (he + 1) * H), fx.wx.get(he + 1), 'complete at its end');
   assert.equal(soilingClearSkyHour(fx.wx, he, (he + 1) * H - 1), null, 'one millisecond before, in progress');
   // 09-26 14:30: 08:00-13:00 are complete (6 hours); 14:00 is in progress.
-  const e = computeSoiling(fx.cores[0].pv, fx.wx, fx.cores[0].taper, new Date(2026, 8, 26, 14, 30).getTime())!;
+  const e = computeSoiling(fx.cores[0].pv, fx.wx, fx.cores[0].taper, midHour(new Date(2026, 8, 26), 14))!;
   assert.equal(e.dayHours![e.dayHours!.length - 1], 6);
 });
 
 /** 09-30 made a clean clear day (it was a full-pack day). */
 const sept30Clean = () => septDays().map((d) => (d.day.getDate() === 30 ? { ...d, kind: 'clean' as const } : d));
-const SEPT_30_NOON = new Date(2026, 8, 30, 12).getTime();
+const SEPT_30_NOON = at(new Date(2026, 8, 30), 12);
 
 test('★★★ soilingPairedUntil: the live cache\'s fetch when earlier than the clock, else the clock', () => {
   assert.equal(soilingPairedUntil(SEPT_30_NOON, null), SEPT_30_NOON, 'no cache: the clock');
