@@ -169,8 +169,10 @@ function setSkillWeather(cacheGhiAtHour: number | null): void {
   setWeatherCacheForTesting({ fetchedAt: Date.now(), lat: 0, lon: 0, hours });
 }
 
-const yesterdayPredicted = async (rec: Recorder, basis?: 'first-write' | 'realized'): Promise<number> => {
-  const fc = skillForecast(solarModelAt(new Date(skillHourStart()).getHours(), 10));
+const yesterdayPredicted = async (
+  rec: Recorder, basis?: 'first-write' | 'realized',
+  fc: DayForecast = skillForecast(solarModelAt(new Date(skillHourStart()).getHours(), 10)),
+): Promise<number> => {
   const r = basis == null
     ? await computeForecastSkill(skillDevices, rec, fc, 7)
     : await computeForecastSkill(skillDevices, rec, fc, 7, basis);
@@ -201,10 +203,14 @@ test('★★ the skill cache is keyed by basis — a realized report is never se
   // window. A window-only key served whichever computed first to the other for the 1 h TTL.
   setSkillWeather(null);
   const rec = skillRecorder({ firstWrite: 300, realized: 600 });
-  const realized = await yesterdayPredicted(rec, 'realized');
-  const firstWrite = await yesterdayPredicted(rec, 'first-write'); // NO cache reset in between
+  // ONE forecast for every call: a hit is served only for the forecast it was scored against
+  // (v1.186.5, forecastTs === generatedAt), so a fresh forecast per call (generatedAt: Date.now())
+  // missed the cache whatever its key was, and a window-only key passed this test.
+  const fc = skillForecast(solarModelAt(new Date(skillHourStart()).getHours(), 10));
+  const realized = await yesterdayPredicted(rec, 'realized', fc);
+  const firstWrite = await yesterdayPredicted(rec, 'first-write', fc); // NO cache reset in between
   assert.deepEqual([realized, firstWrite], [6.0, 3.0]);
-  const again = await computeForecastSkill(skillDevices, rec, skillForecast(solarModelAt(new Date(skillHourStart()).getHours(), 10)), 7);
+  const again = await computeForecastSkill(skillDevices, rec, fc, 7);
   assert.equal(again.ghiBasis, 'first-write', 'the default reads the first-write slot');
   assert.equal(again.days[again.days.length - 1].predictedKwh, 3.0);
 });
