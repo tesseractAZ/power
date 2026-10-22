@@ -753,8 +753,9 @@ test('recommendDispatch — REGRESSION GUARD v0.9.59: real TOU spread → degrad
 // MpcInputs now accepts `nowMs?: number`, and we pin it to today at 06:00
 // local. That puts the on-peak window (tariff hours 15-19) at DP-hours 9-13
 // (mid-horizon), giving 9 hours of off-peak ramp time for chargeFromGrid to
-// definitively win. Works the same in any TZ because both Date.setHours
-// and recommendDispatch's getHours use the SAME runtime TZ.
+// definitively win. Works the same in any TZ: the test sets host-clock hours
+// (Date.setHours) and the planner reads the site hour (siteHour), which this
+// file sets to the host's zone (siteZoneIsHostZone).
 test('recommendDispatch — REGRESSION GUARD v0.9.59: action set includes the new chargeFromGrid / dischargeMax actions', () => {
   // v0.9.59 expanded the MPC action set from 3 → 6 (added dischargeMax,
   // chargeFromGrid, idleHold). Verify the new actions are actually
