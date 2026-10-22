@@ -6,21 +6,30 @@
  * solarModel"). Two changes had broken it: v0.93.0 bias-corrected only the alarm series, and
  * the F11 gate fits the alarm model on full-coverage hours while the display model refit the
  * UNGATED map. After any partial-fleet day in the 30-day window the two diverged on a fully
- * reporting fleet (this fixture: 79.4 vs 76.7 kWh). Setup adapted from an adversarial
- * reviewer's reproduction.
+ * reporting fleet (79.4 vs 76.7 kWh in the original reproduction). Setup adapted from an
+ * adversarial reviewer's reproduction.
+ *
+ * The fixture arms BOTH causes: Core B's three missing days arm the F11 gate, and the last week
+ * produced 90 % of what the 30-day fit predicts, so the hindcast bias factor is clearly not 1
+ * (with a factor of exactly 1 a display sum that dropped it read the same number and passed).
+ * Hours are site hours (siteHour), as the solar model's are.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getDayForecast, resetForecastCachesForTesting, resetRunwayCache } from '../src/analytics.js';
 import { setWeatherCacheForTesting } from '../src/weather.js';
+import { siteHour } from '../src/siteTime.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 
 const H = 3_600_000;
 const now = Date.now();
 const since = now - 31 * 24 * H;
-const ghiAt = (ts: number) => { const h = new Date(ts).getHours(); return h >= 6 && h <= 18 ? Math.max(0, 1000 * Math.sin(Math.PI * (h - 5.5) / 14)) : 0; };
+const ghiAt = (ts: number) => { const h = siteHour(ts); return h >= 6 && h <= 18 ? Math.max(0, 1000 * Math.sin(Math.PI * (h - 5.5) / 14)) : 0; };
 const COEFF = 3;
+/** The last 8 days made 90 % of the array's longer-run response: the 7-day hindcast reads a bias. */
+const RECENT_SCALE = 0.9;
+const recentScale = (ts: number) => (ts >= now - 8 * 24 * H ? RECENT_SCALE : 1);
 /** Core B missed three days, 10-13 days ago — enough to arm the F11 full-coverage gate. */
 const missing = (sn: string, ts: number) => sn === 'B' && ts >= now - 13 * 24 * H && ts < now - 10 * 24 * H;
 const dpu = (sn: string): any => ({ sn, deviceName: sn, online: true, lastSeenMs: now, projection: { kind: 'dpu', soc: 80, pvTotalWatts: 0, acInWatts: 0, acOutWatts: 0, packs: [] } });
@@ -30,7 +39,7 @@ function series(fn: (ts: number) => number | null, from: number, to: number) {
   for (let t = Math.ceil(Math.max(from, since) / H) * H; t <= to; t += H) { const v = fn(t); if (v != null) out.push({ ts: t, value: v }); }
   return out;
 }
-const pvFn = (sn: string) => (ts: number) => (missing(sn, ts) ? null : COEFF * ghiAt(ts));
+const pvFn = (sn: string) => (ts: number) => (missing(sn, ts) ? null : COEFF * ghiAt(ts) * recentScale(ts));
 const rec = makeRecorderStub({
   query: (sn: string, metric: string, from: number, to: number) => {
     if (sn === 'weather' && metric === 'ghi_wm2') return series(ghiAt, from, to);
@@ -54,6 +63,7 @@ test('★★ every Core reporting, F11 gate active: Home Assistant’s figure eq
   const logs: string[] = [];
   const fc = await getDayForecast({ SHP2: shp2(['A', 'B', 'C']), A: dpu('A'), B: dpu('B'), C: dpu('C') } as any, rec, (m) => logs.push(m));
   assert.ok(logs.some((l) => /full-coverage hours \(F11 gate/.test(l)), 'the fixture really arms the F11 gate');
+  assert.ok(Math.abs((fc.pvBiasFactor ?? 1) - 1) > 0.02, `the fixture really reads a bias factor other than 1: ${fc.pvBiasFactor}`);
   assert.ok(fc.forecastPvWhNext24 > 0);
   assert.equal(fc.forecastPvWhNext24Display, fc.forecastPvWhNext24, 'HA (display) and the dashboard (alarm) publish one number');
   assert.equal(fc.restoredSolarModel, (fc as any).solarModel, 'with no Core missing, the display model IS the alarm model');
