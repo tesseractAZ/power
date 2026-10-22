@@ -11,22 +11,24 @@ import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceSha
 import type { Alert } from './alerts.js';
 import { notePollOk, notePollFailed, notePollHealth } from './telemetryBlind.js';
 import { config } from './config.js';
+import { deviceAliases as loadedDeviceAliases, disambiguateFallbackNames, slotOfDpu, isDpuProduct, isShp2Product } from './topology.js';
 
-/** Local SN→name overrides from device-aliases.json (optional file). */
-function loadDeviceAliases(): Record<string, string> {
-  try {
-    const path = resolve(process.cwd(), 'device-aliases.json');
-    const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    return parsed && typeof parsed.aliases === 'object' ? parsed.aliases : {};
-  } catch {
-    return {};
-  }
-}
-const deviceAliases = loadDeviceAliases();
+/**
+ * Local SN→name overrides. v1.191.0 (S8, 3.11) — topology.ts merges three layers: the DEVICE_ALIASES
+ * option over `<dataRoot>/device-aliases.json` over the image's device-aliases.json (the only layer
+ * before). Read once, when this module loads, as before.
+ */
+const deviceAliases = loadedDeviceAliases().aliases;
 
 export interface DeviceSnapshot {
   sn: string;
   deviceName: string;
+  /**
+   * v1.191.0 (S8, CA4) — set (true) on a DPU whose display name is the product-name or serial
+   * fallback: the owner never named it and no alias does. Its name then carries no Core number, so
+   * topology.ts coreNumber() numbers it by its panel slot instead. Absent on every named device.
+   */
+  nameFallback?: boolean;
   productName: string;
   online: boolean;
   lastUpdated: number; // ms epoch — last SUCCESSFUL data (fresh telemetry). The
@@ -589,6 +591,18 @@ export class SnapshotStore extends EventEmitter {
     if (this.housePanelPath == null) this.loadHousePanel(); // v1.185.0 — the rosters, before first sight
     this.lastDeviceListSuccessAt = now;
     const seenThisList = new Set<string>();
+    // v1.191.0 (S8, CA4) — the names first, so two devices the owner never named (both "DELTA Pro
+    // Ultra") are told apart: each such name another device also carries gets its panel slot, else
+    // its serial's last four characters (topology.ts disambiguateFallbackNames). An owner's name or an
+    // alias is never altered; a plant whose devices are all named keeps every name.
+    const resolvedNames = disambiguateFallbackNames(
+      devices.map((d) => ({
+        sn: d.sn,
+        name: deviceAliases[d.sn] ?? resolveDeviceName(d.deviceName, d.productName, d.sn),
+        fallback: deviceAliases[d.sn] == null && isFallbackName(d.deviceName, d.sn),
+      })),
+      (sn) => slotOfDpu(this.snap.devices, sn),
+    );
     for (const d of devices) {
       const existing = this.snap.devices[d.sn];
       const newOnline = d.online === 1;
@@ -598,7 +612,9 @@ export class SnapshotStore extends EventEmitter {
       // Local alias wins; else resolve a real display name from the cloud
       // deviceName, falling back to the product type when the cloud name is just
       // the bare serial (v0.75.0 — resolveDeviceName), then the raw serial.
-      const name = deviceAliases[d.sn] ?? resolveDeviceName(d.deviceName, d.productName, d.sn);
+      const baseName = deviceAliases[d.sn] ?? resolveDeviceName(d.deviceName, d.productName, d.sn);
+      const name = resolvedNames.get(d.sn) ?? baseName;
+      const productName = d.productName ?? guessProductFromName(baseName);
       // v1.7.0 (security #2) — strip terminal control/ESC bytes from the
       // cloud/alias-sourced display name before it can reach the TUI render.
       const displayName = sanitizeDisplayName(name, 48, d.sn);
@@ -614,7 +630,9 @@ export class SnapshotStore extends EventEmitter {
       this.snap.devices[d.sn] = {
         sn: d.sn,
         deviceName: displayName,
-        productName: d.productName ?? guessProductFromName(name),
+        // v1.191.0 (S8, CA4) — only on a fallback-named DPU; a named device's object is unchanged.
+        ...(deviceAliases[d.sn] == null && isFallbackName(d.deviceName, d.sn) && isDpuProduct(productName) ? { nameFallback: true } : {}),
+        productName,
         online: newOnline,
         lastUpdated: existing?.lastUpdated ?? 0,
         lastError: existing?.lastError,
@@ -681,7 +699,7 @@ export class SnapshotStore extends EventEmitter {
     // reading cannot veto a later restart made while the cloud is unreachable.
     for (const sn of seenThisList) this.unseenPersistedGrid.delete(sn);
     const listedPanels = devices
-      .filter((d) => (d.productName ?? this.snap.devices[d.sn]?.productName ?? '').toLowerCase().includes('smart home panel'))
+      .filter((d) => isShp2Product(d.productName ?? this.snap.devices[d.sn]?.productName))
       .map((d) => d.sn);
     if (listedPanels.length > 0) {
       let pruned = false;
@@ -783,7 +801,7 @@ export class SnapshotStore extends EventEmitter {
       else if (r.state === 'pinned' && this.housePanelStatus !== 'none') this.logger(`house-panel: resolved (${r.sn})`);
     }
     this.housePanelStatus = r.state;
-    const isPanel = (d: DeviceSnapshot) => d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel');
+    const isPanel = (d: DeviceSnapshot) => d.projection?.kind === 'shp2' || isShp2Product(d.productName);
     for (const d of Object.values(this.snap.devices)) {
       if (d.sn === r.sn) d.housePanel = true;
       else if (d.housePanel != null) delete d.housePanel;
@@ -1269,7 +1287,7 @@ export class SnapshotStore extends EventEmitter {
   clearGridVeto(nowMs: number = this.now()): number {
     let n = 0;
     for (const d of Object.values(this.snap.devices)) {
-      if (d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel')) {
+      if (d.projection?.kind === 'shp2' || isShp2Product(d.productName)) {
         d.gridVetoClearedAtMs = nowMs;
         // Reset the latch too: otherwise the panel's next "no grid" MATCHES it, counts as no
         // change, and is never saved again — a restart while the panel is dark would then lose it.
@@ -1424,6 +1442,16 @@ export function resolveDeviceName(
   const product = (productName ?? '').trim();
   if (product !== '') return product;
   return sn;
+}
+
+/**
+ * v1.191.0 (S8, CA4) — is this cloud name a placeholder the owner never replaced (missing, blank, or
+ * the bare serial)? Exactly the case in which resolveDeviceName falls back to the product name or the
+ * serial.
+ */
+export function isFallbackName(deviceName: string | null | undefined, sn: string): boolean {
+  const name = (deviceName ?? '').trim();
+  return name === '' || name === sn.trim();
 }
 
 function guessProductFromName(name: string): string {

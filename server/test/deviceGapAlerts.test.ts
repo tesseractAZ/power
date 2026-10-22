@@ -12,6 +12,7 @@ import {
   fallingEdgeFrozenByEvidence, isEvidenceExemptFamily,
 } from '../src/alertMonitor.js';
 import { conditionFromAlerts } from '../src/broadcast.js';
+import { siteTimeZone } from '../src/siteTime.js';
 import { familyOf } from '../src/alertOutcomes.js';
 import { SENSORS } from '../src/mqttDiscovery.js';
 
@@ -246,7 +247,8 @@ test('★ BRIDGE: /api/telemetry-gaps serves the split rollups, not a mixed one 
 const CORE1 = 'TESTCORE00000001';
 const CORE5 = 'TESTCORE00000005';
 const PANEL = 'TESTPANEL0000001';
-const fmt = (ms: number) => new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+// The alert text's clock is the site's (alerts.ts, v1.191.0), so the expected text is formatted in the site zone too.
+const fmt = (ms: number) => new Date(ms).toLocaleString('en-US', { timeZone: siteTimeZone(), month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 test('★★ several devices dark at once: the detail says how many, not "one device went dark"', () => {
   // The 10-17 deploy: four Cores' records, all from the same instant.

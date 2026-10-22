@@ -4,6 +4,7 @@ import type { Shp2Projection } from './ecoflow/project.js';
 import type { EvWindowPrediction } from './analytics.js';
 import type { NwsAlert } from './nws.js';
 import { findShp2 } from './shp2Membership.js';
+import { siteYmd, addDaysYmd, zonedWallTimeMs, siteTimeZone } from './siteTime.js';
 
 /**
  * RFC5545 iCalendar (.ics) feed for HA's `generic_ics_calendar`,
@@ -119,12 +120,12 @@ export function buildCalendarIcs(src: CalendarSources): string {
     const tt = shp2.projection.strategy.timeTask;
     for (const w of tt.windows) {
       // Project the recurring window onto the next 3 days for visibility.
+      // v1.191.0 (T15, CA18) — onto the SITE calendar (the panel's minutes are device-local, which
+      // the setup guide asks to match the site zone), not the host's midnight.
       for (let day = 0; day < 3; day++) {
-        const base = new Date();
-        base.setHours(0, 0, 0, 0);
-        base.setDate(base.getDate() + day);
-        const start = base.getTime() + w.startMinute * 60_000;
-        const end = base.getTime() + w.endMinute * 60_000;
+        const ymd = addDaysYmd(siteYmd(Date.now()), day);
+        const start = zonedWallTimeMs(ymd, Math.floor(w.startMinute / 60), w.startMinute % 60, siteTimeZone());
+        const end = zonedWallTimeMs(ymd, Math.floor(w.endMinute / 60), w.endMinute % 60, siteTimeZone());
         if (end <= Date.now()) continue;
         events.push({
           uid: `tou-${day}-${w.startMinute}`,

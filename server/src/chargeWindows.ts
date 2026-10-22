@@ -3,7 +3,10 @@
  * tariff's on-peak period. PURE: the tariff model is passed in, the clock is an argument.
  *
  * THE WINDOWS. A charge cycle is planned at ~21:30 and holds one or two legs, applied in order:
- *  - the OVERNIGHT window (APS R-EV 23:00–05:00 Mon–Fri) — today's only leg, the cost buy;
+ *  - the OVERNIGHT window — today's only leg, the cost buy: a run of the tariff's cheap period
+ *    (tariff.ts cheapPeriodIdOf — the APS R-EV preset's overnight period, 23:00–05:00 Mon–Fri; the
+ *    period a custom plan flags `cheap`; NIGHT_CHARGE_CHEAP_PERIOD's). A plan with none has no
+ *    overnight window (the planner holds). The kind keeps its name whatever the period is called;
  *  - in winter, the SUPER OFF-PEAK window (10:00–15:00 Mon–Fri) can take the cost buy instead,
  *    and the overnight window before it becomes an outage BACKUP leg (resilience only: it writes
  *    the reserve, never force-charges).
@@ -28,7 +31,7 @@
  * restore that does not take, a force-charge OFF that cannot be confirmed, a readback that
  * goes dark. The mid-day window ends one hour before on-peak.
  */
-import { rateAt, localParts, seasonOf, APS_PERIOD, type TariffModel } from './tariff.js';
+import { rateAt, localParts, seasonOf, cheapPeriodIdOf, APS_PERIOD, type TariffModel } from './tariff.js';
 
 const HOUR_MS = 3_600_000;
 const MINUTE_MS = 60_000;
@@ -47,25 +50,126 @@ export interface ChargeLeg {
   endMs: number;
 }
 
-/** The tariff period id each window kind is a run of. */
+/** The tariff period id each window kind is a run of on the APS R-EV preset. The overnight kind is a
+ *  run of the model's own cheap period on every plan (cheapWindowOf, tariff.ts cheapPeriodIdOf). */
 export const WINDOW_PERIOD_ID: Readonly<Record<ChargeWindowKind, string>> = Object.freeze({
   overnight: APS_PERIOD.OVERNIGHT,
   super_off_peak: APS_PERIOD.SUPER_OFF_PEAK,
 });
+
+/* ── the night a cheap window is bounded to ───────────────────────────────── */
+
+/** A plan's nominal cheap window: the hours its cheap period covers, ignoring days and seasons. */
+export interface NominalCheapWindow {
+  periodId: string;
+  /** Local hour the window opens, 0–23. */
+  startHour: number;
+  /** Its length, 1–24 hours. */
+  lengthHours: number;
+}
+
+/** Hours [start, end) end-exclusive; start > end wraps midnight; start === end (or 0-24) is a whole day. */
+function spanHours(startHour: number, endHour: number): number {
+  if (endHour > startHour) return endHour - startHour;
+  if (endHour < startHour) return endHour + 24 - startHour;
+  return 24;
+}
+
+/**
+ * The nominal window of the model's cheap period (tariff.ts cheapPeriodIdOf), or null when the plan
+ * has none. A listed period gives its own hours. off_peak (NIGHT_CHARGE_CHEAP_PERIOD on a two-tier
+ * plan) is every hour no period covers: the longest run of them, the one opening first after noon on
+ * a tie. PURE. (v1.191.0 — moved here from nightSchedule.ts, which re-exports it, so the window
+ * resolver below can bound a run by it without an import cycle.)
+ */
+export function nominalCheapWindow(model: Pick<TariffModel, 'periods' | 'offPeak' | 'cheapPeriodId'>): NominalCheapWindow | null {
+  const id = cheapPeriodIdOf(model);
+  if (id == null) return null;
+  const own = model.periods.find((p) => p.id === id);
+  if (own) return { periodId: id, startHour: own.startHour, lengthHours: spanHours(own.startHour, own.endHour) };
+  if (id !== model.offPeak.id) return null;
+  const covered = new Array<boolean>(24).fill(false);
+  for (const p of model.periods) {
+    const n = spanHours(p.startHour, p.endHour);
+    for (let i = 0; i < n; i++) covered[(p.startHour + i) % 24] = true;
+  }
+  if (covered.every((c) => !c)) return { periodId: id, startHour: 0, lengthHours: 24 };
+  const afterNoon = (h: number): number => (h - 12 + 24) % 24;
+  let best: NominalCheapWindow | null = null;
+  for (let h = 0; h < 24; h++) {
+    if (covered[h] || !covered[(h + 23) % 24]) continue; // a run starts where the hour before is covered
+    let n = 0;
+    while (n < 24 && !covered[(h + n) % 24]) n++;
+    if (!best || n > best.lengthHours || (n === best.lengthHours && afterNoon(h) < afterNoon(best.startHour))) {
+      best = { periodId: id, startHour: h, lengthHours: n };
+    }
+  }
+  return best;
+}
+
+/** True when the model is the APS R-EV preset planning its own overnight period (the reference install). */
+export function isApsOvernightSchedule(model: Pick<TariffModel, 'planId' | 'cheapPeriodId'>): boolean {
+  return model.planId === 'aps_r_ev' && cheapPeriodIdOf(model) === APS_PERIOD.OVERNIGHT;
+}
+
+/**
+ * v1.191.0 (review) — THE NIGHT A CHEAP WINDOW IS BOUNDED TO. A night's charge window is a run of the
+ * cheap period inside the plan's nominal cheap window (nominalCheapWindow), and it ends where the next
+ * night's window opens. Without the bound a run longer than a night is one window: with off_peak as
+ * the cheap period of a plan whose on-peak is Mon–Fri, the weekend is a single run from Friday 19:00
+ * to Monday 14:00, so Friday's window ended Saturday evening (the run end is looked for 24 h out),
+ * and Saturday's and Sunday's plans resolved a window that had opened a day or more earlier, which a
+ * write mode refuses (nightChargeActuator.ts armRefusalReason): nothing charged before Monday's
+ * on-peak. Bounded, every evening plans its own night (Friday 19:00–Saturday 14:00, then Saturday's,
+ * then Sunday 19:00–Monday 14:00), and the next window opens the next evening.
+ *
+ * `nightHourAt` is the hours since the nominal window last opened on the site's wall clock (0 = the
+ * opening hour); an hour at or past `lengthHours` lies outside every night. A run continues while
+ * that index does not fall back, so the repeated hour of a daylight-saving change stays inside its
+ * night and a skipped opening hour still starts the next one.
+ */
+export interface CheapNight {
+  nightHourAt: (tsMs: number) => number;
+  lengthHours: number;
+}
+
+/**
+ * The night bound of `model`'s cheap windows, or null: none on the APS R-EV preset planning its own
+ * overnight period (whose runs never exceed a night; the reference install resolves exactly what it
+ * did, golden G4) and none for a plan with no cheap period. PURE.
+ */
+export function cheapNightOf(
+  model: Pick<TariffModel, 'planId' | 'periods' | 'offPeak' | 'cheapPeriodId' | 'timezone'>,
+): CheapNight | null {
+  if (isApsOvernightSchedule(model)) return null;
+  const nominal = nominalCheapWindow(model);
+  if (nominal == null) return null;
+  const { startHour, lengthHours } = nominal;
+  return { lengthHours, nightHourAt: (t) => (localParts(t, model.timezone).hour - startHour + 24) % 24 };
+}
 
 /**
  * Resolve the next cheap charge window by scanning a period resolver forward for the next
  * contiguous run of `cheapPeriodId` (the overnight tier for today's cycle). Hour-aligned bounds.
  * Returns null if no cheap hour is found within `scanHours`. PURE — the resolver (rateAt-backed)
  * is injected. (Moved here from nightChargeAdvisor.ts, which re-exports it.)
+ * v1.191.0 (review) — `night` (cheapNightOf) bounds a run to one night; null, as before.
  */
 export function resolveCheapWindow(
   periodIdAt: (tsMs: number) => string,
   fromMs: number,
   cheapPeriodId: string,
   scanHours = 30,
+  night: CheapNight | null = null,
 ): { startMs: number; endMs: number } | null {
   const h0 = Math.floor(fromMs / HOUR_MS) * HOUR_MS;
+  /** A window hour: in the cheap period and, under a night bound, inside the nominal window. */
+  const cheapAt = (t: number): boolean => periodIdAt(t) === cheapPeriodId
+    && (night == null || night.nightHourAt(t) < night.lengthHours);
+  /** The hour `b` (= a + 1 h) continues the run holding `a`: both window hours, and under a night
+   *  bound not across the hour the next night opens. */
+  const linked = (a: number, b: number): boolean => cheapAt(a) && cheapAt(b)
+    && (night == null || night.nightHourAt(b) >= night.nightHourAt(a));
   // v1.39.0 review fix: the END of a found run is scanned up to 24 h past the
   // run's own start — a window START must lie within scanHours, but a run
   // straddling the scan edge must not have its end truncated to the horizon
@@ -74,25 +178,25 @@ export function resolveCheapWindow(
   const endOfRun = (runStartMs: number): number => {
     for (let i = 1; i <= 24; i++) {
       const t = runStartMs + i * HOUR_MS;
-      if (periodIdAt(t) !== cheapPeriodId) return t;
+      if (!linked(t - HOUR_MS, t)) return t;
     }
     return runStartMs + 25 * HOUR_MS; // pathological always-cheap resolver — bounded
   };
   // If `fromMs` is ALREADY inside a cheap window (a recompute running during the
   // 23:00–05:00 window), walk BACK to the window's true start so the reported
   // window_start isn't truncated to the live mid-window clock (display honesty).
-  if (periodIdAt(h0) === cheapPeriodId) {
+  if (cheapAt(h0)) {
     let s = h0;
     for (let i = 1; i <= scanHours; i++) {
       const t = h0 - i * HOUR_MS;
-      if (periodIdAt(t) === cheapPeriodId) s = t;
+      if (linked(t, s)) s = t;
       else break;
     }
     return { startMs: s, endMs: endOfRun(h0) };
   }
   for (let i = 0; i <= scanHours; i++) {
     const t = h0 + i * HOUR_MS;
-    if (periodIdAt(t) === cheapPeriodId) return { startMs: t, endMs: endOfRun(t) };
+    if (cheapAt(t)) return { startMs: t, endMs: endOfRun(t) };
   }
   return null;
 }
@@ -201,6 +305,16 @@ export interface ChargeCycle {
 
 const periodIdAtOf = (model: TariffModel) => (t: number): string => rateAt(model, t).periodId;
 
+/** v1.191.0 (W1) — the next run of the model's own cheap period (cheapPeriodIdOf: 'overnight' on the
+ *  APS preset, so the scan is the one it always was), or null when the plan has no cheap period. */
+function cheapWindowOf(
+  model: TariffModel, periodIdAt: (t: number) => string, fromMs: number, scanHours: number,
+): { startMs: number; endMs: number } | null {
+  const cheapId = cheapPeriodIdOf(model);
+  // v1.191.0 (review) — one night at a time (cheapNightOf; null on the APS preset).
+  return cheapId == null ? null : resolveCheapWindow(periodIdAt, fromMs, cheapId, scanHours, cheapNightOf(model));
+}
+
 /**
  * The cycle a plan at `nowMs` arms. PURE.
  *  - cost: the first super off-peak run within `scanHours` (the run in progress, mid-window),
@@ -214,7 +328,7 @@ export function chooseChargeCycle(
   model: TariffModel, nowMs: number, cfg: ChargeCycleConfig, scanHours = CHARGE_CYCLE_SCAN_HOURS,
 ): ChargeCycle {
   const periodIdAt = periodIdAtOf(model);
-  const overnight = resolveCheapWindow(periodIdAt, nowMs, APS_PERIOD.OVERNIGHT, scanHours);
+  const overnight = cheapWindowOf(model, periodIdAt, nowMs, scanHours);
   const overnightCycle = (why: ChargeCycleWhy): ChargeCycle => {
     const cost: ChargeLeg | null = overnight ? { role: 'cost', kind: 'overnight', ...overnight } : null;
     return { legs: cost ? [cost] : [], cost, backup: null, why };
@@ -242,7 +356,7 @@ export function nextChargeableOpenMs(
   model: TariffModel, fromMs: number, cfg: ChargeCycleConfig = OVERNIGHT_CYCLE, scanHours = NEXT_CHARGEABLE_SCAN_HOURS,
 ): number | null {
   const periodIdAt = periodIdAtOf(model);
-  const overnightMs = resolveCheapWindow(periodIdAt, fromMs, APS_PERIOD.OVERNIGHT, scanHours)?.startMs ?? null;
+  const overnightMs = cheapWindowOf(model, periodIdAt, fromMs, scanHours)?.startMs ?? null;
   if (middayConfigGate(cfg) != null) return overnightMs;
   const limitMs = Math.floor(fromMs / HOUR_MS) * HOUR_MS + scanHours * HOUR_MS;
   let middayMs: number | null = null;

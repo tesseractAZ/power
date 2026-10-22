@@ -209,11 +209,11 @@ export function previewMessageFor(p: AlarmPriority): string {
   const prefix = priorityAnnouncementPrefix(p);
   switch (p) {
     case 'critical':
-      return `${prefix} Battery system. Core 2 pack 3 over temperature. Acknowledge at console.`;
+      return `${prefix} Battery system. Core 1 pack 1 over temperature. Acknowledge at console.`;
     case 'high':
       return `${prefix} Solar system. String voltage out of range on Core 1. Prompt action required.`;
     case 'medium':
-      return `${prefix} Battery system. Core 3 pack 2 internal resistance trending high. Investigate.`;
+      return `${prefix} Battery system. Core 1 pack 2 internal resistance trending high. Investigate.`;
     case 'low':
       return `${prefix} Grid. The plant is off grid and running on stored energy. Noted for awareness.`;
   }

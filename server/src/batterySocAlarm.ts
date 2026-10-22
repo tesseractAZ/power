@@ -34,6 +34,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 import { type AlarmPriority, priorityAnnouncementPrefix } from './alertPriority.js';
 import { priorityAnnouncementPrefixEs } from './ttsService.js';
+import { limits, SOC_HEALTHY_BASELINE_PCT } from './limits.js';
 
 export interface SocThreshold {
   /** SoC percent at/below which (on the way down) this alarm fires. */
@@ -62,8 +63,11 @@ export interface SocThreshold {
  * from the 15 % default can still let this fixed ladder diverge from the floor
  * classifier at other pcts — this targets the concrete default-configuration,
  * off-grid disagreement, not a fully dynamic reserve-aware ladder.
+ *
+ * v1.191.0 (Z6) — the built-in ladder; the BATTERY_SOC_LADDER option replaces it when set
+ * (`pct:tier,…`, limits.ts parseSocLadder). A reserve-relative ladder is later work.
  */
-export const BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = [
+export const DEFAULT_BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = [
   { pct: 50, priority: 'low' },
   { pct: 40, priority: 'low' },
   { pct: 30, priority: 'low' },
@@ -74,6 +78,10 @@ export const BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = [
   { pct: 4, priority: 'critical' },
   { pct: 2, priority: 'critical' },
 ] as const;
+
+/** The ladder in force: BATTERY_SOC_LADDER when it parses to at least one rung, else the built-in
+ *  one. Read once at import (the alarm's persisted armed map is keyed by these percents). */
+export const BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = limits.batterySocLadder ?? DEFAULT_BATTERY_SOC_THRESHOLDS;
 
 /** Re-arm a crossed threshold only once SoC climbs this many points back above
  *  it — stops a value sitting exactly on a boundary from chattering. */
@@ -86,10 +94,10 @@ const REARM_MARGIN_PCT = 2;
  *  2026-06-21 18:12), not a real discharge. We ignore such a read rather than fire. This is
  *  the depth backstop for the (rare) perfectly-coherent zero the source coherence gate
  *  (ecoflow/project.ts coherentBackupPool) can't distinguish from a real empty pool. */
-const MAX_PLAUSIBLE_DROP_PCT = Number(process.env.BATTERY_SOC_MAX_DROP_PCT ?? 25);
+const MAX_PLAUSIBLE_DROP_PCT = limits.batterySocMaxDropPct; // BATTERY_SOC_MAX_DROP_PCT (config.ts; 25 while unset)
 /** Only guard collapses FROM a healthy pool — a real deep discharge reaches 0 from an
  *  already-low baseline, where the critical bands must still fire. */
-const HEALTHY_BASELINE_PCT = 30;
+const HEALTHY_BASELINE_PCT = SOC_HEALTHY_BASELINE_PCT;
 /** The slew check only applies against a RECENT baseline. After a long gap (restart, hours
  *  cloud-offline) the persisted lastSoc is stale and a large real change is plausible, so the
  *  first fresh read re-baselines instead of being wrongly rejected. */

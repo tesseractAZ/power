@@ -39,14 +39,17 @@ export function resetVdiffWarnHoldForTesting(): void {
 }
 import { VOL_DIFF_CRIT_MV, VOL_DIFF_PLATEAU_SOC_PCT, VOL_DIFF_PLATEAU_QUIET_SOC_PCT, vdiffCritMvFor, plateauQuietWarnSpread } from './cellSpread.js';
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, housePoolFallbackSoc, lastKnownHomeRoster, shp2Panels, findShp2, secondaryPanels, panelMeanSoc } from './shp2Membership.js';
+import { coreNumber, isDpuProduct, isShp2Product } from './topology.js';
+import { MAINS_V, SOH_WARN_PCT, SOH_CRIT_PCT } from './hwSpec.js';
 import { liveHostPower } from './hostPower.js';
 import { mpptProducing } from './mppt.js';
 import { getReserveArbitrageRaised } from './nightChargeActuator.js';
-import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks, isoOrRaw } from './defectivePackLatch.js';
+import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks } from './defectivePackLatch.js';
 import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
 import { getAlertOnset } from './alertOnset.js';
 import { currentAssessment } from './selfVitals.js';
 import { ttsRenderHealth } from './audioRenderer.js';
+import { siteYmdOrRaw, siteTimeZone } from './siteTime.js';
 
 // v1.42.0 — host-temp hysteresis level held across builds (module singleton,
 // same lifetime pattern as the vdiff warning hold set).
@@ -944,8 +947,7 @@ export function persistVdiffKneeSessions(path: string, onDisk: VdiffKneeSessions
  */
 export const CELL_OVP_CRIT_MV = 3600;
 export const CELL_OVP_IMPLAUSIBLE_MV = 5000;
-const SOH_WARN_PCT = 85;
-const SOH_CRIT_PCT = 75;
+// v1.191.0 — SOH_WARN_PCT (85) and SOH_CRIT_PCT (75) are hardware facts, imported from hwSpec.ts.
 const PACK_SOC_LOW_PCT = 10;
 const PACK_IMBALANCE_WARN_PCT = 15;
 const STALE_MS = 3 * 60 * 1000;
@@ -984,11 +986,8 @@ function tempAlert(opts: {
   };
 }
 
-/** Extract the Core (DPU) number from a device name like "Core 3". */
-function dpuNum(name: string): number | null {
-  const m = name.match(/core\s*(\d+)/i) ?? name.match(/(\d+)/);
-  return m ? Number(m[1]) : null;
-}
+// v1.191.0 (S8) — a Core's number comes from topology.ts coreNumber(): the same name chain this
+// file's dpuNum copy applied, and the panel slot for a DPU the owner never named (CA4).
 
 /**
  * Connectivity context for the alerts engine (v0.7.7) — lets the offline-
@@ -1547,7 +1546,7 @@ export function computeAlerts(
       category: 'Connectivity',
       device: 'System',
       title: 'Alarm host power — under-voltage',
-      detail: `The Raspberry Pi running this monitor reported under-voltage (${hostPower.entityId}). A marginal or failing power supply — or a sagging power circuit — can brown the host out and take the whole alarm dark. Check the Pi's supply and the circuit it's on before that happens.`,
+      detail: `The host running this monitor reported under-voltage (${hostPower.entityId}). A marginal or failing power supply — or a sagging power circuit — can brown the host out and take the whole alarm dark. Check the host's supply and the circuit it's on before that happens.`,
     });
   }
 
@@ -1656,11 +1655,11 @@ export function computeAlerts(
     isExpectedOfflineSpareShared(sn, shp2Connected);
 
   for (const d of list) {
-    const isCore = d.productName.toLowerCase().includes('delta pro ultra');
+    const isCore = isDpuProduct(d.productName);
     const spare = isCore && isExpectedOfflineSpare(d.sn);
-    const coreNum = isCore ? dpuNum(d.deviceName) : null;
+    const coreNum = isCore ? coreNumber(d, devices) : null;
     if (!d.online) {
-      const isPanel = d.productName.toLowerCase().includes('smart home panel');
+      const isPanel = isShp2Product(d.productName);
       // v0.7.7 — enrich the offline alert with WHEN we last actually heard
       // from the device and via which channel. A 47-min gap with last data
       // via MQTT looks very different from "never connected since boot".
@@ -1817,7 +1816,7 @@ export function computeAlerts(
   for (const d of dpus) {
     if (!isDpuEvaluable(d)) continue;
     const p = d.projection;
-    const coreNum = dpuNum(d.deviceName);
+    const coreNum = coreNumber(d, devices);
     const dpuStart = out.length;
 
     if ((p.sysErrCode ?? 0) !== 0) {
@@ -2188,17 +2187,16 @@ export function computeAlerts(
             + `exchanging ${dl.packAbsW} W while its siblings move ${dl.siblingMedianAbsW} W. Deviant cell #${dfx.deviantCell} `
             + `sits ${dfx.deltaMv > 0 ? '+' : ''}${dfx.deltaMv} mV from the pack median. The pack cannot recover on its own — `
             + `it is below the parallel-operation window, so it accepts no charge, so it cannot climb back into the window. `
-            + `Capture evidence with /api/warranty-export.${snNote}`,
+            + `Capture evidence with /api/warranty-export?sn=${d.sn}.${snNote}`,
           annunciate: true,
         });
       } else if (dConfirmed) {
         // Quiescent latch: the legs are not currently observable (typically the
         // bank is idle, so leg 3 cannot hold), but the diagnosis stands.
-        // Date below is Phoenix-local (fixed UTC−7, AZ has no DST — and never
-        // Intl on the Pi): the 08-24 23:01 MST confirmation rendered as "08-25"
-        // with a bare toISOString.
-        // v1.187.1 (review) — through isoOrRaw: a corrupt confirmedAtMs threw a RangeError here on
-        // every tick the pack was present, and computeAlerts has no catch.
+        // The date below is the site-local date: the 08-24 23:01 MST confirmation rendered as "08-25"
+        // with a bare toISOString. v1.191.0 (T11) — siteTime.ts siteYmd, which was fixed UTC−7 here.
+        // v1.187.1 (review) — a corrupt confirmedAtMs threw a RangeError here on every tick the pack
+        // was present, and computeAlerts has no catch: siteYmdOrRaw renders it as its raw text.
         out.push({
           id: `pack-defective-${d.sn}-${pk.num}`,
           severity: 'warning',
@@ -2206,12 +2204,12 @@ export function computeAlerts(
           device: d.deviceName,
           title: 'Pack confirmed defective — service required',
           detail:
-            `${tag} was confirmed defective on ${isoOrRaw(dConfirmed.confirmedAtMs - 7 * 3_600_000).slice(0, 10)}: `
+            `${tag} was confirmed defective on ${siteYmdOrRaw(dConfirmed.confirmedAtMs)}: `
             + `${dConfirmed.socPct}% SoC against a sibling median of ${dConfirmed.siblingMedianSocPct}%, exchanging `
             + `${dConfirmed.packAbsW} W while its siblings moved ${dConfirmed.siblingMedianAbsW} W; deviant cell `
             + `#${dConfirmed.deviantCell} at ${dConfirmed.deltaMv > 0 ? '+' : ''}${dConfirmed.deltaMv} mV from the pack median. `
             + `The bank is currently quiescent, so the live signature cannot re-verify — the diagnosis is latched until the `
-            + `pack is removed or explicitly cleared (POST /api/defective-packs/clear). Capture evidence with /api/warranty-export.${snNote}`,
+            + `pack is removed or explicitly cleared (POST /api/defective-packs/clear). Capture evidence with /api/warranty-export?sn=${d.sn}.${snNote}`,
           annunciate: true,
         });
       }
@@ -2445,7 +2443,7 @@ export function computeAlerts(
     }
     for (const pc of sp.pairedCircuits) {
       if (pc.watts == null || pc.breakerAmps == null) continue;
-      const v = pc.isSplitPhase ? 240 : 120;
+      const v = pc.isSplitPhase ? MAINS_V.split : MAINS_V.line;
       const capacity = pc.breakerAmps * v;
       if (pc.watts >= capacity * CIRCUIT_BREAKER_WARN_FRAC) {
         out.push({ id: `circuit-overload-${pc.primaryCh}`, severity: 'warning', category: 'SHP2', device: shp2.deviceName, title: 'Circuit near breaker limit', detail: `${pc.name} drawing ${Math.round(pc.watts)} W — over ${Math.round(CIRCUIT_BREAKER_WARN_FRAC * 100)}% of its ${pc.breakerAmps} A breaker.` });
@@ -2661,7 +2659,7 @@ function secondaryPanelAlerts(
     }
     for (const pc of sp.pairedCircuits ?? []) {
       if (pc.watts == null || pc.breakerAmps == null) continue;
-      const capacity = pc.breakerAmps * (pc.isSplitPhase ? 240 : 120);
+      const capacity = pc.breakerAmps * (pc.isSplitPhase ? MAINS_V.split : MAINS_V.line);
       if (pc.watts >= capacity * CIRCUIT_BREAKER_WARN_FRAC) {
         out.push({ id: `circuit-overload-${pc.primaryCh}${sfx}`, severity: 'warning', category: 'SHP2', device: name, title: 'Circuit near breaker limit', detail: `${name}: ${pc.name} drawing ${Math.round(pc.watts)} W — over ${Math.round(CIRCUIT_BREAKER_WARN_FRAC * 100)}% of its ${pc.breakerAmps} A breaker.` });
       }
@@ -2823,8 +2821,11 @@ export function resolveOutageAlertOptions(env: Record<string, string | undefined
   };
 }
 
-const fmtClock = (ms: number): string =>
-  new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+/** v1.191.0 (review 3) — on the site clock (SITE_TIMEZONE, else Home Assistant's): the gap and outage
+ *  texts and their Started / Detected / Ended fields read the host's zone, three hours off for a New York
+ *  site on a Phoenix host. Identical wherever the site zone is the host's (the reference install). */
+export const fmtClock = (ms: number): string =>
+  new Date(ms).toLocaleString('en-US', { timeZone: siteTimeZone(), month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 /** v1.188.1 (dry run) — the devices dark at the same time as this one, this one included: the
  *  most distinct devices whose per-device records cover one instant of this record's window. PURE.

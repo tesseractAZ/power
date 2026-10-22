@@ -147,7 +147,7 @@ test('★★★ index.ts computes the median surplus and the long gap, and hands
   // checks it against the inline loop it replaced, on a year of plans).
   assert.ok(INDEX.includes('const { p90Kwh: morningPvSurplusP90Kwh, p50Kwh: morningPvSurplusP50Kwh } = window'),
     'the median over the same hours as the P90');
-  assert.ok(INDEX.includes('nextFullCheapWindow(periodIdAt, window.endMs, NIGHT_CHEAP_PERIOD_ID)'),
+  assert.ok(INDEX.includes('nextFullCheapWindow(periodIdAt, window.endMs, cheapPeriodId, 120, nightSched.fullWindowMinMs, cheapNight)'),
     'the long gap is read from the tariff calendar, after tonight\'s window');
   assert.ok(INDEX.includes('morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead,'),
     'both reach the planner deps — an input computed and never passed is the v1.125.0 trap');

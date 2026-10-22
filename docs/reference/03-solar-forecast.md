@@ -77,7 +77,7 @@ r² = cov(ghi,pv)² / (var(ghi)·var(pv))    // only when day.length ≥ 3, vg>0
 ```
 
 > **r² is DIAGNOSTIC ONLY (v1.20.0, F21).** Within-slot r² tracks the *weather
-> regime*, not the array: in Phoenix's low-variance clear-sky climate per-slot
+> regime*, not the array: in a low-variance clear-sky climate (the reference plant's) per-slot
 > GHI is near-constant, so r² degenerates to ~0.00–0.15 even for an excellent
 > model (whose *day-level* replay scores r²≈0.94). **Nothing may gate on
 > within-slot r².**
@@ -651,7 +651,7 @@ skips deltas <0.05 pt, SoC within 0.5 of 0/100, kwhDelta <0.05, candidate outsid
 [5,1000] kWh). Last resort, when there is no pool value and no hour pair yields a usable
 inversion: `homeCores · PACKS_PER_DPU(5) · PACK_KWH_NAMEPLATE(6.144)`, with `homeCores =
 max(1, solarModelSns.length ?? deviceModels.length)` (before v1.187.18 it counted every DPU in
-`deviceModels`, bench Cores included: 153.6 kWh against the 92.16 kWh pool). With no pool value
+`deviceModels`, bench Cores included: on the reference plant, 153.6 kWh against its 92.16 kWh pool). With no pool value
 `projectedSocPct` is null throughout and `fullKwh` is never read.
 
 **Integration** — each path (and the low/mid/high band paths) steps per hour:
@@ -808,8 +808,8 @@ recovered from this endpoint.
 
 `WeatherHour = { ts, cloudCoverPct, radiationWm2, radiationMissing?, tempC, ensembleSources?, ensembleDisagreementPct? }`. When `radiationMissing` is true the provider sent no value for the hour and `radiationWm2` is a stand-in 0, not darkness.
 
-Lat/lon default to Phoenix: `FORECAST_LAT = 33.4484`, `FORECAST_LON = -112.074`
-(env `FORECAST_LAT` / `FORECAST_LON`).
+Lat/lon default to a placeholder, the reference plant's city (Phoenix): `FORECAST_LAT = 33.4484`,
+`FORECAST_LON = -112.074` (add-on options `FORECAST_LAT` / `FORECAST_LON`).
 
 #### NWS NDFD (opt-in — cloud ensemble)
 
@@ -833,24 +833,29 @@ persists GHI/cloud rows to the recorder.
 
 ### 9. Config knobs (env / config.yaml)
 
-| Env var | Default | Effect |
-|---|---|---|
-| `PEAK_RESPONSE_MIN_GHI_WM2` | 300 | brightness floor for `peakCoeff` headline |
-| `RUNWAY_DISCHARGE_EFFICIENCY` | 0.94 (clamp 0.80–1.0) | η in DC-bus SoC balance `load/η` |
-| `RUNWAY_POOL_OVERHEAD_FLOOR_W` | 270 (clamp 0–1500) | v1.187.19 — the pool overhead added to `load/η` never falls below this while the panel reports a pool (§5.1.3a) |
-| `RUNWAY_CORE_OVERHEAD_W` | 90 (clamp 0–500) | v1.187.19 — × connected Cores; raises the overhead above the floor for a pool of more than three Cores (§5.1.3a) |
-| `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m`; the `max()` keeps the drain ≥ `load/η` |
-| `INCOMPLETE_FORECAST_TTL_MS` | 150000 | negative-cache TTL for incomplete forecast |
-| `FORECAST_RECENT_LOAD_WINDOW_MS` | 3 h | recent-load trailing window |
-| `FORECAST_NIGHT_START_HOUR` | 21 | night-band start |
-| `FORECAST_NIGHT_END_HOUR` | 5 | night-band end |
-| `FORECAST_NIGHT_OVERPREDICT_RATIO` | 1.5 | night-trim trigger ratio |
-| `FORECAST_NIGHT_BLEND` | 0.6 | night-trim blend weight |
-| `FORECAST_NIGHT_MAX_TRIM` | 0.5 | night-trim floor cap |
-| `PROB_LOAD_SIGMA_FRAC` | 0.15 | load-side 1σ fraction in the ensemble |
-| `PV_BAND_SIGMA_CAL` | (auto) | manual band-cal override, clamp 0.1–2 |
-| `NWS_ENABLED` | off | enable NWS cloud ensemble |
-| `FORECAST_LAT` / `FORECAST_LON` | 33.4484 / -112.074 | weather location |
+"Set as" says how a knob is reached. **Add-on** is an option on the add-on's Configuration tab
+(the run script exports it; an optional key with no default is exported only when set).
+**Env-only** is an environment variable the add-on never exports, so on a Home Assistant install
+it always holds its default; only a standalone run can set it.
+
+| Env var | Set as | Default | Effect |
+|---|---|---|---|
+| `PEAK_RESPONSE_MIN_GHI_WM2` | env-only | 300 | brightness floor for `peakCoeff` headline |
+| `RUNWAY_DISCHARGE_EFFICIENCY` | env-only | 0.94 (clamp 0.80–1.0) | η in DC-bus SoC balance `load/η` |
+| `RUNWAY_POOL_OVERHEAD_FLOOR_W` | add-on (optional) | 270 (clamp 0–1500) | v1.187.19 — the pool overhead added to `load/η` never falls below this while the panel reports a pool (§5.1.3a); the reference plant's figure, fitted on three Cores |
+| `RUNWAY_CORE_OVERHEAD_W` | add-on (optional) | 90 (clamp 0–500) | v1.187.19 — × connected Cores; raises the overhead above the floor for a pool of more than three Cores (§5.1.3a) |
+| `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | env-only | 0.94 (clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m`; the `max()` keeps the drain ≥ `load/η` |
+| `INCOMPLETE_FORECAST_TTL_MS` | env-only | 150000 | negative-cache TTL for incomplete forecast |
+| `FORECAST_RECENT_LOAD_WINDOW_MS` | env-only | 3 h | recent-load trailing window |
+| `FORECAST_NIGHT_START_HOUR` | add-on (optional) | 21 | night-band start, site time |
+| `FORECAST_NIGHT_END_HOUR` | add-on (optional) | 5 | night-band end, site time |
+| `FORECAST_NIGHT_OVERPREDICT_RATIO` | env-only | 1.5 | night-trim trigger ratio |
+| `FORECAST_NIGHT_BLEND` | env-only | 0.6 | night-trim blend weight |
+| `FORECAST_NIGHT_MAX_TRIM` | env-only | 0.5 | night-trim floor cap |
+| `PROB_LOAD_SIGMA_FRAC` | env-only | 0.15 | load-side 1σ fraction in the ensemble |
+| `PV_BAND_SIGMA_CAL` | env-only | (auto) | manual band-cal override, clamp 0.1–2 |
+| `NWS_ENABLED` | add-on | off | enable NWS cloud ensemble |
+| `FORECAST_LAT` / `FORECAST_LON` | add-on | 33.4484 / -112.074 (a placeholder) | weather location |
 
 Hard-coded (non-env) constants: `DAYLIGHT_GHI=20`, `MIN_RESPONSE_PAIRS=2`,
 `HOUR_CURVE_BUCKET_SEC=300`, `TYPICAL_HISTORY_MS=30d`, `WEEKDAY_MIN_SAMPLES=24`,

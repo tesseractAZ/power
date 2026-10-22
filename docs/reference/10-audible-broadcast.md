@@ -52,7 +52,7 @@ alert condition transition (or a dedicated announce()/test()/preview() call)
  url = audioBase + /audio-render/<sha1>.wav
         │
         ├─► SIP side-channel  (fire-and-forget, BEFORE MA pre-flight)
-        │      media_player.play_media(announce=true) → antique-phone switchboard
+        │      media_player.play_media(announce=true) → an announce-capable SIP phone
         │
         ▼
  MA pre-flight: ≥1 target registered & not 'unavailable'? else defer+retry
@@ -70,10 +70,11 @@ alert condition transition (or a dedicated announce()/test()/preview() call)
 Two distinct output channels carry the **same rendered WAV**:
 
 1. **Music Assistant** (`music_assistant.play_announcement`) → the primary
-   speakers (the two ecobee thermostats exposed as MA AirPlay players). This is
-   the verified, retried, health-tracked path.
+   speakers, `BROADCAST_TARGETS` (on the reference plant, two ecobee thermostats
+   exposed as MA AirPlay players). This is the verified, retried, health-tracked path.
 2. **SIP / announce-only** (`media_player.play_media` with `announce: true`) →
-   the Switchboard cordless phone (an antique-phone PBX endpoint). MA cannot
+   `BROADCAST_SIP_TARGETS`, an optional announce-capable SIP phone exposed as a
+   media player (on the reference plant, a cordless handset on a home PBX). MA cannot
    drive a SIP phone, so this is a parallel, fire-and-forget side-channel.
 
 ---
@@ -322,7 +323,7 @@ volume that can silently drift low (~0.2 after re-provisioning).
 **v1.24.0 audit fix — per-target, not batched:** the volume_set is issued
 **one call per target in parallel** (`Promise.all(cfg.targets.map(...))`), not
 as one batched `entity_id` list. HA resolves a batched list before executing,
-so a single VOLUME_SET-incapable target (the cordless lacks the feature bit;
+so a single VOLUME_SET-incapable target (on the reference plant the cordless lacks the feature bit;
 the two ecobees have it) would make the whole call raise `ServiceNotSupported`
 and pin *nobody*. Per-target isolates the incapable one so capable speakers are
 always pinned. It is best-effort — a failure is logged and never blocks the
@@ -414,6 +415,10 @@ Timing knobs (all resolved once and folded into the cache key):
 | `endOfMessageGapMs` | 700 ms | Silence before the "End of message" terminator on the final block. |
 
 #### 4.2 TTS passes & the bilingual second language
+
+Spanish is the only second language: the verbalizers, the Spanish message builder and the
+title map exist for `es` alone, and the English verbalizer reads en_US. Another language would
+need its own builder and verbalizer; it is not configurable.
 
 By default there is **one pass** (`message`), repeated `announceRepeat` times.
 When `opts.messages` is supplied (bilingual active), each entry
@@ -859,7 +864,7 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_WYOMING_PORT` | `10200` | Wyoming/Piper TCP port. |
 | `BROADCAST_WYOMING_VOICE` | (Piper default) | Piper voice override (e.g. `en_US-amy-medium`). Folded into the cache key. |
 | `BROADCAST_WYOMING_VOICE_ES` | (empty) | Second-language (Spanish) Piper voice. Empty → bilingual inactive. |
-| `BROADCAST_BILINGUAL` | `true` | Enable the Spanish second pass (no-op until `_VOICE_ES` set). |
+| `BROADCAST_BILINGUAL` | `false` (the shipped default; absent in a bare environment reads as on) | Enable the Spanish second pass (no-op until `_VOICE_ES` set). |
 | `BROADCAST_LEAD_SILENCE_MS` | `1000` | Lead-in silence, clamped 0..5000 (1500 when the variable is unset). |
 | `BROADCAST_REPEAT` | `2` | Whole-block repeats, clamped 1..3. |
 | `BROADCAST_REPEAT_GAP_MS` | `1500` | Silence between repeats, clamped 0..5000. |

@@ -840,3 +840,30 @@ export interface Incident {
   detail: string;
 }
 
+/**
+ * GET /api/site — the site facts the cards read from the server (no second fetch, no browser-zone
+ * guess). v1.191.0: zone and its source (lane A), currency (lane B), PV strings (lane C) and the
+ * per-DPU bench-spare flag (lane D) are each filled by their lane; the server returns today's values.
+ */
+export interface Site {
+  /** v1.191.0 (lane A) — the IANA zone the server computes every local date and hour in, and its source. */
+  siteTimeZone: string;
+  source: 'SITE_TIMEZONE' | 'TZ' | 'default';
+  lat: number;
+  lon: number;
+  currency: string;
+  pvStrings: { hv: { count: number; watts: number }; lv: { count: number; watts: number } };
+  /** v1.191.0 (lane C) — where the coordinates come from (SITE_LOCATION_FROM_HA). */
+  locationSource?: 'FORECAST_LAT/LON' | 'home-assistant';
+  /** Whether `pvStrings` is PV_STRINGS or today's default layout. */
+  pvStringsSource?: 'default' | 'PV_STRINGS';
+  /** Each DPU's own strings (CA23: an override for its name or panel slot, else `pvStrings`). */
+  pvStringsPerDpu?: Record<string, { hv: { count: number; watts: number }; lv: { count: number; watts: number } }>;
+  /** The PV array the physics uses; `legacy` = no PV_* option set (the reference array). */
+  pv?: { source: 'legacy' | 'configured'; nameplateW: number; tiltDeg: number; azimuthDeg: number };
+  /** Solar assumptions (CA24): today's bands while `legacy`; otherwise hemisphere, solar noon and daylight from the site. */
+  solar?: { legacy: boolean; hemisphere: 'north' | 'south'; solarNoonHour: number; daylightHours: [number, number] };
+  /** Mains voltages (server hwSpec). */
+  mainsV?: { line: number; split: number };
+  perDpu: Record<string, { benchSpare: boolean }>;
+}

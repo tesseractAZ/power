@@ -19,6 +19,7 @@
  * (3) THE STATUS RECORD. That refusal became /api/broadcast/status's last broadcast, green,
  *     outcome 'partial', while lastSpokenMessage was the red. Suppressions are recorded apart.
  */
+import './helpers/siteZoneIsHostZone.js'; // v1.191.0 — fixtures on the host clock: the site zone is the host's (first import)
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
@@ -352,7 +353,7 @@ test('★★ the re-present honours the all-clear speech gate and quiet hours', 
 
   const r2 = await started();
   await redThenGatedGreen(r2);
-  const h = new Date().getHours(); // inQuiet reads the wall clock, not Date.now
+  const h = new Date().getHours(); // inQuiet reads the clock, not Date.now (v1.191.0: the site clock — the host's here, see the first import)
   process.env.BROADCAST_QUIET_HOURS = `${h}-${(h + 2) % 24}`;
   offset += 2 * MIN;
   await until(r2, () => r2.has('storm-gated green is not re-presented — quiet hours'), 'quiet hours');
@@ -451,7 +452,7 @@ test('★★ review: a DIFFERENT critical the same-level gap refused is re-prese
 });
 
 test('★★ review: a refused critical is re-presented in quiet hours when criticals break through (as the tick\'s own red)', async () => {
-  const h = new Date().getHours(); // inQuiet reads the wall clock, not Date.now
+  const h = new Date().getHours(); // inQuiet reads the clock, not Date.now (v1.191.0: the site clock — the host's here, see the first import)
   process.env.BROADCAST_QUIET_HOURS = `${h}-${(h + 2) % 24}`;
   process.env.CRITICAL_BREAKS_QUIET_HOURS = 'true';
   const r = await started();

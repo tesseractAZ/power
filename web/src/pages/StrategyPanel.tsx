@@ -13,6 +13,8 @@ import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
 import { NightChargeCard } from '../cards/NightChargeCard';
 import { SectionHeader } from '../components/sections';
 import { DbExportButton } from '../components/DbExportButton';
+import { zonedMinuteOfDay } from '../siteTime';
+import { useSiteTimeZone } from '../useSiteTimeZone';
 
 /**
  * SHP2 strategy view: per-circuit load-shed priorities and the time-of-use
@@ -262,9 +264,13 @@ function DayTimeline({ windows }: { windows: Shp2ChargeWindow[] }) {
   );
 }
 
+/** v1.191.0 (T16) — "now" on the SITE clock the panel's windows run on (GET /api/site), not the
+ *  browser's: a viewer in another zone saw the marker hours away from the schedule it is read against.
+ *  Hidden until the site zone is known. */
 function NowMarker() {
-  const now = new Date();
-  const minutes = now.getHours() * 60 + now.getMinutes();
+  const zone = useSiteTimeZone();
+  if (!zone) return null;
+  const minutes = zonedMinuteOfDay(Date.now(), zone);
   return (
     <div
       className="absolute top-0 bottom-0 w-px bg-bad"

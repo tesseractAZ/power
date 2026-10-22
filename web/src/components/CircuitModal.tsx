@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AreaChart,
   Area,
@@ -16,6 +16,7 @@ import { fmtW, fmtWh } from '../format';
 import type { Shp2Circuit, Shp2PairedCircuit, CircuitHistory, CircuitDayTotal } from '../types';
 import { apiUrl } from '../api';
 import { CHART, HUES } from '../theme';
+import { dayLabel, siteTodayYmd, todayWhFrom } from './circuitDays';
 
 interface Point {
   ts: number;
@@ -49,7 +50,6 @@ export function CircuitModal({
   onClose: () => void;
 }) {
   const [points, setPoints] = useState<Point[]>([]);
-  const [todayWh, setTodayWh] = useState<number | null>(null);
   const [history, setHistory] = useState<CircuitHistory | null>(null);
 
   // A paired *split-phase* tile is the only case where we want the combined
@@ -92,21 +92,6 @@ export function CircuitModal({
       if (j2 && Array.isArray(j2.days)) setHistory(j2);
       if (!j1 || !Array.isArray(j1.points)) return;
       setPoints(j1.points);
-
-      // Compute today's Wh via the same trapezoidal idea client-side. The
-      // server's /api/circuit/history also returns today's kWh, but this
-      // local pass keeps the "Today" tile fresh between 60s polls.
-      const dayStart = new Date();
-      dayStart.setHours(0, 0, 0, 0);
-      const todayPts = j1.points.filter((p) => p.ts >= dayStart.getTime());
-      let wh = 0;
-      const MAX_GAP = 10 * 60 * 1000;
-      for (let i = 1; i < todayPts.length; i++) {
-        const dt = todayPts[i].ts - todayPts[i - 1].ts;
-        if (dt <= 0 || dt > MAX_GAP) continue;
-        wh += ((todayPts[i].value + todayPts[i - 1].value) / 2) * (dt / 3_600_000);
-      }
-      setTodayWh(wh);
     };
     load();
     const t = window.setInterval(load, 60_000);
@@ -115,6 +100,11 @@ export function CircuitModal({
       window.clearInterval(t);
     };
   }, [sn, seriesMetric, histQuery]);
+
+  // Today's Wh via the same trapezoidal idea client-side, over the 24 h series. v1.191.0 (CA25) — "today"
+  // starts at the SITE midnight the server's own history reports (its isToday day, computed in the site
+  // zone), not the browser's: a viewer in another zone sent and summed a different day.
+  const todayWh = useMemo(() => todayWhFrom(points, history), [points, history]);
 
   const peak = points.length > 0 ? Math.max(...points.map((p) => p.value)) : null;
   const avg = points.length > 0 ? points.reduce((s, p) => s + p.value, 0) / points.length : null;
@@ -201,6 +191,7 @@ function HistorySection({ history }: { history: CircuitHistory | null }) {
     );
   }
   const peakDate = history.summary.peakDay?.date;
+  const todayYmd = siteTodayYmd(history);
   return (
     <div className="mt-5">
       <div className="flex items-baseline justify-between mb-1.5">
@@ -215,11 +206,11 @@ function HistorySection({ history }: { history: CircuitHistory | null }) {
             <XAxis
               dataKey="date"
               tick={{ fill: CHART.axis, fontSize: 10 }}
-              tickFormatter={(s: string) => dayLabel(s)}
+              tickFormatter={(s: string) => dayLabel(s, todayYmd)}
               interval={0}
             />
             <YAxis tick={{ fill: CHART.axis, fontSize: 10 }} width={48} unit=" kWh" />
-            <Tooltip content={<BarTooltip />} cursor={{ fill: 'rgba(154,163,176,0.1)' }} />
+            <Tooltip content={<BarTooltip todayYmd={todayYmd} />} cursor={{ fill: 'rgba(154,163,176,0.1)' }} />
             <Bar dataKey="kwh" isAnimationActive={false} radius={[3, 3, 0, 0]}>
               {history.days.map((d) => (
                 <Cell
@@ -256,7 +247,7 @@ function HistorySection({ history }: { history: CircuitHistory | null }) {
           value={history.summary.peakDay ? `${history.summary.peakDay.kwh.toFixed(2)} kWh` : '—'}
           sub={
             history.summary.peakDay
-              ? `${dayLabel(history.summary.peakDay.date)} · peak ${history.summary.peakDay.peakW} W`
+              ? `${dayLabel(history.summary.peakDay.date, todayYmd)} · peak ${history.summary.peakDay.peakW} W`
               : '—'
           }
           accent="text-warn"
@@ -264,7 +255,7 @@ function HistorySection({ history }: { history: CircuitHistory | null }) {
         <SmallStat
           label="Quietest"
           value={history.summary.minDay ? `${history.summary.minDay.kwh.toFixed(2)} kWh` : '—'}
-          sub={history.summary.minDay ? dayLabel(history.summary.minDay.date) : '—'}
+          sub={history.summary.minDay ? dayLabel(history.summary.minDay.date, todayYmd) : '—'}
         />
       </div>
     </div>
@@ -272,13 +263,13 @@ function HistorySection({ history }: { history: CircuitHistory | null }) {
 }
 
 /** Custom recharts tooltip — one-glance per-day summary. */
-function BarTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: CircuitDayTotal }> }) {
+function BarTooltip({ active, payload, todayYmd }: { active?: boolean; payload?: Array<{ payload: CircuitDayTotal }>; todayYmd?: string | null }) {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
   return (
     <div className="bg-panel border border-line rounded-md px-3 py-2 text-xs shadow-lg">
       <div className="font-semibold text-ink">
-        {dayLabel(d.date)} <span className="text-muted font-normal">· {d.date}</span>
+        {dayLabel(d.date, todayYmd ?? null)} <span className="text-muted font-normal">· {d.date}</span>
       </div>
       <div className="mt-1">
         Energy: <span className="font-mono tabular-nums text-ink">{d.kwh.toFixed(3)} kWh</span>
@@ -301,18 +292,6 @@ function BarTooltip({ active, payload }: { active?: boolean; payload?: Array<{ p
   );
 }
 
-/** "Today", "Yest", "Wed", "5/12" — context-sensitive day label. */
-function dayLabel(ymd: string): string {
-  const [y, m, d] = ymd.split('-').map(Number);
-  const date = new Date(y, m - 1, d);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const diffDays = Math.round((today.getTime() - date.getTime()) / 86_400_000);
-  if (diffDays === 0) return 'Today';
-  if (diffDays === 1) return 'Yest';
-  if (diffDays < 7) return date.toLocaleDateString([], { weekday: 'short' });
-  return `${m}/${d}`;
-}
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (

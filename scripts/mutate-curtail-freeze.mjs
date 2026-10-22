@@ -40,7 +40,7 @@ const MUTANTS = [
   {
     id: 'iii. ★★ an hour outside the cache does not block the freeze',
     file: FRZ,
-    find: '    if (!sent.has(coveringRadiationEpoch(Math.floor((dayStartMs + h * HOUR_MS) / HOUR_MS)))) return false;',
+    find: '    if (!sent.has(coveringRadiationEpoch(Math.floor(hourStart / HOUR_MS)))) return false;', // v1.191.0 (CA26): the hours of the site day
     to: '    if (false) return false; /* MUTANT */',
     why: 'The oldest day, half outside the past_days edge, freezes on heuristic-only hours.',
   },

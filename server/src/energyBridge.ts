@@ -190,7 +190,8 @@ import type { Shp2EnergySource } from './ecoflow/project.js';
 import { allShp2s, shp2ReadbackFresh, connectedSourceListings, slotKey, type BridgeVerdicts } from './shp2Membership.js';
 import { projectionRecordable } from './heldSamples.js';
 import { integrateWh, INTEGRATE_HEAD_LOOKBACK_MS } from './aggregator.js';
-import { solarPosition, PHOENIX_SITE } from './physics/clearSky.js';
+import { solarPosition } from './physics/clearSky.js';
+import { DEFAULT_SITE_LAT, DEFAULT_SITE_LON } from './siteDefaults.js';
 
 export const BRIDGE_CHARGE_KEY = 'bridge_battery_charge_wh';
 export const BRIDGE_DISCHARGE_KEY = 'bridge_battery_discharge_wh';
@@ -284,14 +285,16 @@ export interface BridgeSite { lat: number; lon: number }
 
 /** The site the bridge's day/night test is judged at, from the configured install location
  *  (`config.forecastLat` / `forecastLon`: FORECAST_LAT / FORECAST_LON, the solar forecast's); the
- *  options' default (Phoenix) when it is not a usable coordinate. The recorder reads it at each
- *  use (deps.site). This module does not import config itself: test helpers import it statically,
- *  before the env their app imports read. */
+ *  options' default (siteDefaults.ts DEFAULT_SITE_LAT / DEFAULT_SITE_LON, the placeholder) when it is not a
+ *  usable coordinate. The recorder reads it at each use (deps.site: site.ts siteCoordinates(), which
+ *  is FORECAST_LAT / FORECAST_LON unless SITE_LOCATION_FROM_HA is on). This module reads no option
+ *  itself and does not import config.ts: test helpers import it statically, before the env their app
+ *  imports read. */
 export function bridgeSite(cfg: { forecastLat: number; forecastLon: number }): BridgeSite {
   const lat = cfg.forecastLat;
   const lon = cfg.forecastLon;
   if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return { lat, lon };
-  return { lat: PHOENIX_SITE.lat, lon: PHOENIX_SITE.lon };
+  return { lat: DEFAULT_SITE_LAT, lon: DEFAULT_SITE_LON };
 }
 
 /** Is the sun above the horizon at the site? (Spencer solar geometry, the PV model's own.) */

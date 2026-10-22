@@ -2,16 +2,18 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
+import { siteCoordinates } from './site.js';
 import { SnapshotStore, FleetSnapshot, type DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
 import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns, findShp2 } from './shp2Membership.js';
 import { loadMembershipHistory, saveMembershipHistory, recordMembership } from './membershipHistory.js';
-// v1.38.0 (WS2) — Phoenix calendar-date resolution for the night-charge ledger
-// read cutoff. tariff.ts is a pure, import-free module (no circular dependency);
-// `.ymd` is the same America/Phoenix YYYY-MM-DD key the ledger stores plan_date as.
-import { localParts } from './tariff.js';
+// v1.38.0 (WS2) — site calendar-date resolution for the night-charge ledger read cutoff: the same
+// site-local YYYY-MM-DD key the ledger stores plan_date as (v1.191.0, T7: siteTime.ts, was a literal).
+import { siteYmd } from './siteTime.js';
 import { resolveRetentionDays } from './retention.js';
+import { limits } from './limits.js';
+import { DPU_PACK_NOMINAL_V, DPU_PACK_GUARD_WH } from './hwSpec.js';
 // v1.187.20 — the backup window (checkpoints held still while a Home Assistant backup copies /data).
 import { RECORDER_WAL_AUTOCHECKPOINT, walControlFor, type WalControl } from './backupWindow.js';
 // v1.188.1 — held readings: the write gate, the held-span log and the exclusion of held rows.
@@ -1370,7 +1372,7 @@ export function createRecorder(
   // statement on `samples` prepared before PRAGMA optimize marks the table as used, and optimize
   // then re-analyzes it whenever its statistics are 10x off — the full-index ANALYZE on the boot
   // path that v1.163.0 removed.
-  const retainMsForHeld = resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS) * 24 * 60 * 60 * 1000;
+  const retainMsForHeld = config.retentionDays * 24 * 60 * 60 * 1000;
   const heldSnFirst = db.prepare(SEED_SQL.firstSn);
   const heldSnNext = db.prepare(SEED_SQL.nextSn);
   const heldMetricFirst = db.prepare(SEED_SQL.firstMetric);
@@ -2532,7 +2534,7 @@ export function createRecorder(
   // this prune regardless of the setting.
   const prune = db.prepare(`DELETE FROM samples WHERE ts < ?`);
   const bridgeLedgerPruneStmt = db.prepare(`DELETE FROM bridge_ledger WHERE until_ts < ?`); // v1.190.2
-  const retentionDays = resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS);
+  const retentionDays = config.retentionDays;
   log(`recorder: samples retention ${retentionDays} days`);
   const RETAIN_MS = retentionDays * 24 * 60 * 60 * 1000;
   setInterval(() => {
@@ -2834,7 +2836,7 @@ export function createRecorder(
    */
   // Each pack is 32S1P (~104 V nominal; 32 series cells whose mV sum to packVoltageMv).
   // fullCap is single-string mAh; Wh = mAh × (32 × 3.2 V) / 1000 = mAh × 0.1024.
-  const PACK_MAH_TO_WH = (32 * 3.2) / 1_000;   // = 0.1024 Wh/mAh (was (51.2 * 2)/1_000, same value)
+  const PACK_MAH_TO_WH = DPU_PACK_NOMINAL_V / 1_000;   // = 0.1024 Wh/mAh: hwSpec's 32 × 3.2 V (was (51.2 * 2)/1_000, same value)
 
   // v1.188.1 — the energy bridge (energyBridge.ts). It keeps its state in this lifetime table
   // under `bridge_*` keys, which no ^pack_* / ^circuit_* discovery and no surfaced key set
@@ -2860,8 +2862,9 @@ export function createRecorder(
       }
       return packs > 0 ? mah * PACK_MAH_TO_WH : null;
     },
-    // The install site for the day/night test, read at each use (FORECAST_LAT / FORECAST_LON).
-    site: () => bridgeSite(config),
+    // The install site for the day/night test, read at each use (FORECAST_LAT / FORECAST_LON, or the
+    // saved Home Assistant home with SITE_LOCATION_FROM_HA: site.ts siteCoordinates).
+    site: () => bridgeSite(siteCoordinates()),
     log,
   });
   /** One line per distinct bridge failure: the rollup's other counters must keep advancing. */
@@ -2989,7 +2992,7 @@ export function createRecorder(
   // the old discharge≤charge invariant also removed its incidental protection
   // against such a read permanently inflating the floor, so this caps it. Once-
   // per-pack warn throttle keyed `${sn}|${num}` so a stuck read doesn't spew.
-  const FALLBACK_FULL_PACK_WH = 6200; // ~one DPU pack when fullCap is unavailable
+  const FALLBACK_FULL_PACK_WH = DPU_PACK_GUARD_WH; // 6200 Wh, ~one DPU pack when fullCap is unavailable (hwSpec; DECISION 11 keeps it beside the 6144 nameplate)
   const bmsCorruptWarned: Set<string> = new Set();
   // v0.81.0 — the v0.45.0 corrupt-read guard (above) can't tell a one-poll garbage
   // spike from a GENUINE multi-day reconnect: both look like fresh jumping > one
@@ -3546,12 +3549,14 @@ export function createRecorder(
    *  freeze until the new live sum climbs back over the old high-water mark. */
   /** v1.97.0 — a floor-vs-live gap this large cannot be a transient offline dip
    *  (the held-carry machinery smooths those); it means the floor was seeded
-   *  against a different set of batteries. 50 kWh is ~1.6x a single pack. */
-  const RESEED_MIN_GAP_WH = Number(process.env.BMS_RESEED_MIN_GAP_WH ?? 50_000);
+   *  against a different set of batteries. 50 kWh is ~1.6x a single pack.
+   *  v1.191.0 (Z4) — the BMS_RESEED_MIN_GAP_WH option (limits.ts; 50 000 while unset — about one
+   *  Core's capacity; deriving it from the pool would change this install, so it is not). */
+  const RESEED_MIN_GAP_WH = limits.bmsReseedMinGapWh;
   /** v1.98.0 — consecutive rollups the gap must persist before repairing. At the
    *  5-min rollup cadence this is ~10 min, long enough that no single rollup's
    *  timing can trigger it and short enough to repair within one boot. */
-  const RESEED_SUSTAINED_ROLLUPS = Number(process.env.BMS_RESEED_SUSTAINED_ROLLUPS ?? 2);
+  const RESEED_SUSTAINED_ROLLUPS = limits.bmsReseedSustainedRollups;
   let sustainedFloorGapRollups = 0;
   /** Repair at most once per process — a latch, not a loop. */
   let floorGapRepaired = false;
@@ -4175,10 +4180,10 @@ export function createRecorder(
     `SELECT * FROM night_charge_ledger WHERE plan_date >= ? ORDER BY plan_date ASC`,
   );
   const readNightLedger = (sinceDays: number): NightLedgerRow[] => {
-    // Lower-bound plan_date by the Phoenix calendar date `sinceDays` ago. ISO
+    // Lower-bound plan_date by the site calendar date `sinceDays` ago. ISO
     // YYYY-MM-DD sorts lexicographically, so a string compare is a date compare.
     const cutoffMs = Date.now() - Math.max(0, sinceDays) * 86_400_000;
-    const cutoff = localParts(cutoffMs, 'America/Phoenix').ymd;
+    const cutoff = siteYmd(cutoffMs);
     return nightLedgerReadStmt.all(cutoff) as unknown as NightLedgerRow[];
   };
 

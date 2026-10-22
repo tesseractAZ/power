@@ -133,10 +133,14 @@ import {
   writeWindowEndMs, ON_PEAK_PAGE_LEAD_MS,
 } from './nightChargeActuator.js';
 import type { ForceChargeCommands } from './settingsDrift.js';
+import { FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_CEILING_MAX_PCT, SHP2_SOURCE_SLOTS } from './hwSpec.js';
+import { limits } from './limits.js';
 
-/** The panel's documented force-charge ceiling range (`foceChargeHight`). */
-export const FORCE_CHARGE_CEILING_MIN_PCT = 80;
-export const FORCE_CHARGE_CEILING_MAX_PCT = 100;
+/** The panel's documented force-charge ceiling range (`foceChargeHight`): 80..100, a hardware fact
+ *  (hwSpec.ts since v1.191.0), re-exported here for the existing importers. */
+export { FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_CEILING_MAX_PCT };
+/** Every SHP2 source slot, 1..SHP2_SOURCE_SLOTS: the slots a force-charge of ours may have switched. */
+const ALL_SOURCE_SLOTS: readonly number[] = Array.from({ length: SHP2_SOURCE_SLOTS }, (_, i) => i + 1);
 /** Don't START a force-charge this close to the window end — it would buy
  *  nothing and cost two writes. */
 export const FORCE_CHARGE_MIN_RUN_MS = 20 * 60_000;
@@ -163,6 +167,11 @@ export const FORCE_CHARGE_MIN_RATE_KW = 1;
  *  live rate is bounded by slots × this, so the start comes earlier rather than the night
  *  ending short. With all three it never binds (17 × 0.927 = 15.8 < 16.5). */
 export const FORCE_CHARGE_PROVEN_KW_PER_SLOT = 5.5;
+/** v1.191.0 (H1) — the per-Core rate in use: FORCE_CHARGE_KW_PER_CORE when it is set above 0, else
+ *  the proven FORCE_CHARGE_PROVEN_KW_PER_SLOT. Read per call (limits.ts). */
+export function forceChargeKwPerCore(): number {
+  return limits.forceChargeKwPerCore ?? FORCE_CHARGE_PROVEN_KW_PER_SLOT;
+}
 /** v1.173.0 — the pre-v1.173 fixed grid-side charge cap, kept only as the fallback when the
  *  connected-Core count is unknown (the historical `chChargeWatt` reading). */
 export const LEGACY_CHARGE_CAP_KW = 7.2;
@@ -180,7 +189,18 @@ export function planChargeCapKw(optionKw: number, connectedSlots: number | null,
   if (Number.isFinite(optionKw) && optionKw > 0) return optionKw;
   if (connectedSlots == null || !Number.isInteger(connectedSlots) || connectedSlots < 1) return LEGACY_CHARGE_CAP_KW;
   if (!Number.isFinite(legEff) || !(legEff > 0)) return LEGACY_CHARGE_CAP_KW;
-  return (Math.min(3, connectedSlots) * FORCE_CHARGE_PROVEN_KW_PER_SLOT) / legEff;
+  return (Math.min(SHP2_SOURCE_SLOTS, connectedSlots) * forceChargeKwPerCore()) / legEff;
+}
+/**
+ * v1.191.0 (H2) — PURE apart from the option read. The rate the just-in-time start plans with when
+ * the live rate is unknown: the fixed FORCE_CHARGE_PLAN_RATE_KW while FORCE_CHARGE_KW_PER_CORE is
+ * unset or the connected-Core count is unknown (today's behaviour), else connected slots × that
+ * rate (pack side, as forceChargeRateKw's bound).
+ */
+export function planRateFallbackKw(slotCount?: number | null): number {
+  const perCore = limits.forceChargeKwPerCore;
+  if (perCore == null || slotCount == null || !Number.isInteger(slotCount) || slotCount < 1) return FORCE_CHARGE_PLAN_RATE_KW;
+  return Math.min(SHP2_SOURCE_SLOTS, slotCount) * perCore;
 }
 /** v1.167.0 — added to the computed lead: readback latency, the ramp, the first tick. */
 export const FORCE_CHARGE_JIT_BUFFER_MS = 15 * 60_000;
@@ -289,6 +309,11 @@ export interface ForceChargeOpts {
    *  (blindResendStopMs): past it a force-charge reading ON may be the next window's own.
    *  Absent/null ⇒ unknown: FORCE_CHARGE_BLIND_RESEND_MAX_MS alone bounds them. */
   nextLegOpenMs?: number | null;
+  /** v1.191.0 (S6, plan 3.4 W5) — the run backstop of the tariff in effect (nightSchedule.ts
+   *  forceChargeMaxRunMs: FORCE_CHARGE_MAX_RUN_MS on the APS preset, max(7 h, the plan's nominal
+   *  cheap window + 1 h) otherwise). It comes from the tariff, never from the armed window, so a
+   *  corrupted window still cannot hold a force-charge on. Absent/null ⇒ FORCE_CHARGE_MAX_RUN_MS. */
+  maxRunMs?: number | null;
 }
 
 export type ForceChargeAction =
@@ -362,7 +387,7 @@ export function forceChargeInFlight(s: NightActuationState): boolean {
  */
 export function forceChargeCommandsOf(s: NightActuationState): ForceChargeCommands {
   const onSlots = s.forceChargeOnAtMs == null ? null
-    : (s.forceChargeSlots != null && s.forceChargeSlots.length > 0 ? [...s.forceChargeSlots] : [1, 2, 3]);
+    : (s.forceChargeSlots != null && s.forceChargeSlots.length > 0 ? [...s.forceChargeSlots] : [...ALL_SOURCE_SLOTS]);
   const ceilingPcts: number[] = [];
   if (s.forceChargeCeilingAttemptedAtMs != null && s.forceChargeCeilingPct != null && Number.isFinite(s.forceChargeCeilingPct)) {
     ceilingPcts.push(desiredForceChargeCeilingPct(s.forceChargeCeilingPct));
@@ -563,6 +588,13 @@ export function blindResendStopMs(s: Pick<NightActuationState, 'forceChargeOffAt
     ? Math.min(cap, nextLegOpenMs) : cap;
 }
 
+/** v1.191.0 (S6, W5) — the run backstop in effect: the schedule's (ForceChargeOpts.maxRunMs), never
+ *  below FORCE_CHARGE_MAX_RUN_MS; anything unusable reads as FORCE_CHARGE_MAX_RUN_MS. PURE. */
+export function forceChargeRunCapMs(o: Pick<ForceChargeOpts, 'maxRunMs'>): number {
+  const v = o.maxRunMs;
+  return v != null && Number.isFinite(v) ? Math.max(FORCE_CHARGE_MAX_RUN_MS, v) : FORCE_CHARGE_MAX_RUN_MS;
+}
+
 function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): ForceChargeOffReason | null {
   if (s.cancelled) return 'cancelled';
   if (s.revertedAtMs != null) return 'reverted';
@@ -572,7 +604,7 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
   if (nowMs >= writeWindowEndMs(s)!) return 'onPeakGuard';
   if (o.gridPresent === false || o.gridStaLost) return 'gridLoss';
   if (!o.enabled) return 'disabled';
-  if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= FORCE_CHARGE_MAX_RUN_MS) return 'maxRun';
+  if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= forceChargeRunCapMs(o)) return 'maxRun';
   // v1.167.0 — stop once the desired percentage is reached. A stale or
   // incoherent SoC never ends it early; the window end and the panel's ceiling still do.
   // v1.170.0 — at EVERY target again (the 80+ coast is retired), against forceChargeStopPct.
@@ -670,7 +702,7 @@ export function forceChargeOnReadbackStatus(
 export function decideForceCharge(s: NightActuationState, nowMs: number, o: ForceChargeOpts): ForceChargeAction {
   // An ON is stamped but the slot list is gone (coerced away on a restart): switch
   // off and verify ALL three. An empty list must never verify as "nothing on".
-  const ours = s.forceChargeSlots != null && s.forceChargeSlots.length > 0 ? s.forceChargeSlots : [1, 2, 3];
+  const ours = s.forceChargeSlots != null && s.forceChargeSlots.length > 0 ? s.forceChargeSlots : [...ALL_SOURCE_SLOTS];
 
   // ── 0. WALL-CLOCK DEADLINE (v1.168.0). Ahead of every readback wait below: a readback
   // that never comes back, or an OFF the cloud keeps refusing, must not hold the alarm
@@ -785,7 +817,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   }
   if (o.slotsOn == null) return { kind: 'none', why: 'no live slot readback from the panel' }; // need a live readback to start
   if (o.slotsOn.length > 0) return { kind: 'none', why: `Charge Now is already ON for slot(s) ${o.slotsOn.join(', ')} — that is the operator's, never taken over` }; // someone else's Charge Now — never take ownership
-  const slots = o.connectedSlots.filter((n) => Number.isInteger(n) && n >= 1 && n <= 3);
+  const slots = o.connectedSlots.filter((n) => Number.isInteger(n) && n >= 1 && n <= SHP2_SOURCE_SLOTS);
   if (slots.length === 0) return { kind: 'none', why: 'no battery slots are connected' };
   // The panel must READ its backstop ceiling before ON. Issuing ON in the same tick as an
   // unverified ceiling write leaves a failed software stop to fill to whatever the panel
@@ -807,7 +839,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     return { kind: 'none', why: 'no live pool reading to time the start from' };
   }
   if (o.poolSocPct >= forceChargeStopPct(target)) return { kind: 'none', why: `the pack is already at tonight's ${target}% target` };
-  if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above
+  if (nowMs < forceChargeStartAtMs(endMs, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh, slots.length)) { // window checked above
     // A STABLE reason: the computed start moves with the SoC, and a reason that changes
     // every tick would log every tick.
     return { kind: 'none', why: `just in time — holding off so the pack reaches ${target}% as the window closes, not hours early (which would let the house draw it back toward the reserve)` };
@@ -823,11 +855,14 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
 export function forceChargeStartAtMs(
   windowEndMs: number, targetPct: number, poolSocPct: number, fullKwh: number,
   rateKw?: number | null, evDisplacedKwh?: number | null,
+  /** v1.191.0 (H2) — connected slots, for the fallback rate (planRateFallbackKw); omitted = unknown. */
+  slotCount?: number | null,
 ): number {
-  // Unknown ⇒ the fixed plan rate. A known rate under the floor is FLOORED (start sooner),
-  // never replaced by the faster fixed rate (which would start later and end short).
+  // Unknown ⇒ the fixed plan rate (or slots × FORCE_CHARGE_KW_PER_CORE when that is set). A known
+  // rate under the floor is FLOORED (start sooner), never replaced by the faster fixed rate (which
+  // would start later and end short).
   const rate = rateKw != null && Number.isFinite(rateKw)
-    ? Math.max(FORCE_CHARGE_MIN_RATE_KW, rateKw) : FORCE_CHARGE_PLAN_RATE_KW;
+    ? Math.max(FORCE_CHARGE_MIN_RATE_KW, rateKw) : planRateFallbackKw(slotCount);
   const evKwh = evDisplacedKwh != null && Number.isFinite(evDisplacedKwh) ? Math.max(0, evDisplacedKwh) : 0;
   const neededKwh = Math.max(0, ((targetPct - poolSocPct) / 100) * fullKwh) + evKwh;
   const leadMs = (neededKwh / rate) * 3_600_000 + FORCE_CHARGE_JIT_BUFFER_MS;
@@ -891,7 +926,7 @@ export function forceChargeRateKw(i: {
   if (!Number.isFinite(i.legEff) || !(i.legEff > 0)) return null;
   let rate = (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff;
   if (i.slotCount != null && Number.isInteger(i.slotCount) && i.slotCount > 0) {
-    rate = Math.min(rate, i.slotCount * FORCE_CHARGE_PROVEN_KW_PER_SLOT);
+    rate = Math.min(rate, i.slotCount * forceChargeKwPerCore());
   }
   return Math.max(FORCE_CHARGE_MIN_RATE_KW, rate);
 }

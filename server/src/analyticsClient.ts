@@ -39,6 +39,9 @@ export interface AnalyticsClient {
    *  null — so the runway alarm kept measuring against the actuator's raised
    *  50 and logged 5 h of phantom "AT RESERVE FLOOR" per charge window. */
   pushOwnerFloor(pct: number | null): void;
+  /** v1.191.0 (S8, CA17) — publish the last-known home roster (the bench-spare floor's override) to
+   *  the worker, for the same reason as the owner floor. Optional so test stubs need not model it. */
+  pushHomeRoster?(sns: readonly string[] | null): void;
   stop(): void;
 }
 
@@ -167,6 +170,7 @@ export function createAnalyticsClient(
   const inflightReport = new Map<string, Promise<unknown>>();
   let lastSnapshot: FleetSnapshot | null = null;
   let lastOwnerFloor: number | null = null;
+  let lastHomeRoster: string[] | null = null;
   let dirty = false;
   // v1.186.0 — the CURRENT worker holds a snapshot with devices (reset on every spawn).
   let workerFed = false;
@@ -237,6 +241,8 @@ export function createAnalyticsClient(
         // v1.119.0 — a respawned worker starts with no owner floor; replay it
         // or the runway alarm silently reverts to reading the device value.
         try { worker.postMessage({ kind: 'ownerFloor', pct: lastOwnerFloor }); } catch { /* */ }
+        // v1.191.0 — and the home roster, for the same reason (the spare floor's override).
+        if (lastHomeRoster) { try { worker.postMessage({ kind: 'homeRoster', sns: lastHomeRoster }); } catch { /* */ } }
         return;
       }
       if (msg?.kind === 'result') {
@@ -374,6 +380,12 @@ export function createAnalyticsClient(
       if (pct === lastOwnerFloor) return;      // idempotent; changes are rare
       lastOwnerFloor = pct;
       try { worker?.postMessage({ kind: 'ownerFloor', pct }); } catch { /* worker mid-respawn; replayed on ready */ }
+    },
+    pushHomeRoster: (sns) => {
+      const next = sns && sns.length > 0 ? [...sns].sort() : null;
+      if ((next?.join(',') ?? null) === (lastHomeRoster?.join(',') ?? null)) return; // idempotent: once per change
+      lastHomeRoster = next;
+      try { worker?.postMessage({ kind: 'homeRoster', sns: next }); } catch { /* worker mid-respawn; replayed on ready */ }
     },
     stop: () => {
       stopped = true;

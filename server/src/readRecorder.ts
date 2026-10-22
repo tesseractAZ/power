@@ -1,9 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import { resolve } from 'node:path';
 import type { Recorder, LifetimeTotals, NightLedgerRow, NightCalibration } from './recorder.js';
-// v1.38.0 (WS2) — Phoenix calendar-date resolution for the ledger read cutoff.
-// tariff.ts is pure/import-free (no circular dependency).
-import { localParts } from './tariff.js';
+// v1.38.0 (WS2) — site calendar-date resolution for the ledger read cutoff (v1.191.0, T7: the same
+// siteYmd the writer's reader uses, so the two copies cannot disagree about the zone).
+import { siteYmd } from './siteTime.js';
 // v1.188.1 (review) — the samples generation reader (no schema, no writes: a SELECT on its table).
 import { samplesGenerationReader } from './heldSamples.js';
 import {
@@ -34,7 +34,10 @@ import { config } from './config.js';
  * signatures without widening every one of them to a read-only interface.
  */
 export function createReadRecorder(dbPathInput?: string): Recorder {
-  const dbPath = resolve(process.cwd(), dbPathInput ?? process.env.DB_PATH ?? '/data/ecoflow.db');
+  // v1.191.0 (S3c, lane A) — the DB path default is config.ts's (DB_PATH, else /data/ecoflow.db inside the
+  // add-on). The analytics worker always passes the main thread's path; the fallback only matters to a
+  // caller that passes none.
+  const dbPath = resolve(process.cwd(), dbPathInput ?? config.dbPath);
   // Read-write capable handle (NOT readOnly: a readonly connection can't
   // create the WAL -shm shared-memory file, which breaks reads on a
   // WAL database that no writer has opened yet). We simply never write.
@@ -136,7 +139,7 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
         `SELECT * FROM night_charge_ledger WHERE plan_date >= ? ORDER BY plan_date ASC`,
       );
       const cutoffMs = Date.now() - Math.max(0, sinceDays) * 86_400_000;
-      const cutoff = localParts(cutoffMs, 'America/Phoenix').ymd;
+      const cutoff = siteYmd(cutoffMs);
       return nightLedgerStmt.all(cutoff) as unknown as NightLedgerRow[];
     } catch {
       return [];

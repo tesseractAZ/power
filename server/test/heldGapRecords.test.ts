@@ -37,6 +37,7 @@ const GAPS_PATH = join(tmp, 'telemetry-gaps.json');
 
 const { createRecorder } = await import('../src/recorder.js');
 const { outageAlerts, deviceGapCount } = await import('../src/alerts.js');
+const { siteTimeZone } = await import('../src/siteTime.js');
 const { benchSpareSns } = await import('../src/shp2Membership.js');
 
 const MIN = 60_000;
@@ -399,7 +400,9 @@ test('★★ the post-boot silence carries what the gate held through it, and no
 /* ══ 3. review round 3 ═════════════════════════════════════════════════════ */
 
 const iso = (ms: number) => new Date(ms).toISOString();
-const fmtClock = (ms: number) => new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+// Site zone, as the alert text is (v1.191.0): a host-zone oracle matched only where the host zone is the site's,
+// and made the negative check below (the pushed window is not the hold's) pass whatever the text said.
+const fmtClock = (ms: number) => new Date(ms).toLocaleString('en-US', { timeZone: siteTimeZone(), month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 /** A Core's DPU projection with a fresh content clock (14 metrics written): its content arrived and
  *  (v1.188.1, the content-clock gate) CHANGED at `contentAt`, so the gate passes it whatever its
  *  readings. A Core whose cached body the cloud replays unchanged keeps its content clock still and

@@ -1,6 +1,8 @@
 import type { DeviceSnapshot, GridBackstop } from '../types';
 import { fmtPct, fmtW } from '../format';
-import { energyFlowModel, batteriesSubtitle, batteriesTitle, solarSubtitle, FLOW_EDGE_MIN_W } from './energyFlowModel';
+import { energyFlowModel, batteriesSubtitle, batteriesTitle, solarSubtitle, offPanelSplit, FLOW_EDGE_MIN_W } from './energyFlowModel';
+import { useSite } from '../useSite';
+import { benchSpareFlag } from '../siteFacts';
 import { HUES, UI } from '../theme';
 
 /**
@@ -37,9 +39,13 @@ export function EnergyFlow({ devices, grid }: Props) {
   // v1.175.0 — every number on this card comes from energyFlowModel (pure, and run by the
   // test suite); this component only lays them out.
   const {
-    dpuCount, spareCount, membershipUnknown, viaPanelCount, pv, pvUnreported, pvViaPanel, batNet, soc, load, panelState, liveCircuits,
+    dpuCount, spareCount: listedSpareCount, nonHomeSns, membershipUnknown, viaPanelCount, pv, pvUnreported, pvViaPanel, batNet, soc, load, panelState, liveCircuits,
     gridState, gridSupplyW, gridToCoresW, gridToHouseW, coresToHouseW,
   } = energyFlowModel(devices, grid);
+  // v1.191.0 (plan 3.8 S3) — the server's bench-spare flag (GET /api/site; sent only while
+  // BENCH_SPARE_SNS is set) relabels a DPU off every panel that it does not name a spare.
+  const site = useSite();
+  const { spareCount, offPanelCount } = offPanelSplit({ spareCount: listedSpareCount, nonHomeSns }, (sn) => benchSpareFlag(site, sn));
 
   // SVG geometry
   const W = 720;
@@ -130,7 +136,7 @@ export function EnergyFlow({ devices, grid }: Props) {
             panel's meter of its slot, and the title and subtitle say so ("via panel", out / in). */}
         <Node
           {...Battery}
-          title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown })}
+          title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown, offPanelCount })}
           subtitle={batteriesSubtitle({ batNet, viaPanelCount, pvViaPanel })}
           value={fmtPct(soc, 1)}
           big

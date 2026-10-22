@@ -131,7 +131,8 @@ test('★★ nightSpansForRow resolves the spans from the tariff (completion is 
   const b = fnBody('function nightSpansForRow(');
   assert.ok(b.includes('const spans = ledgerSpansForWindow('));
   assert.ok(b.includes('(t) => rateAt(tariff, t).isOnPeak,'));
-  assert.ok(b.includes('(t) => rateAt(tariff, t).periodId === NIGHT_CHEAP_PERIOD_ID,'));
+  assert.ok(b.includes('(t) => cheapId != null && rateAt(tariff, t).periodId === cheapId,'), 'the plan\'s own cheap period (W1)');
+  assert.ok(b.includes('const cheapId = cheapPeriodIdOf(tariff);'));
   assert.ok(b.includes('scoreSpanEnd: spans.scoreSpanEndMs, completeMs: spans.completeMs, windowKnown: true,'));
   assert.ok(!b.includes('onpeakStartMs'), 'no plan-day anchor left');
 });

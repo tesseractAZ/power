@@ -1369,8 +1369,9 @@ const MUTANTS = [
   {
     id: 'C-clxxiv. ★★★ peak-grid-draw calls the on-peak spend a premium over overnight again',
     file: PGD,
-    find: '    : ` At the current ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour.`;',
-    to: '    : ` At the current ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour more than buying the same energy overnight.`; /* MUTANT */',
+    // v1.191.0 — re-pointed: the amount is formatted by money.ts fmtMoney (CA14; `$` when TARIFF_CURRENCY is unset).
+    find: '    : ` At the current ${v.periodLabel} rate that is about ${fmtMoney(v.centsPerHour / 100)} per hour.`;',
+    to: '    : ` At the current ${v.periodLabel} rate that is about ${fmtMoney(v.centsPerHour / 100)} per hour more than buying the same energy overnight.`; /* MUTANT */',
     why: 'The push states $2.19/h as the extra over overnight; the real premium at 34 c against 8 c is $1.68/h.',
   },
 ];

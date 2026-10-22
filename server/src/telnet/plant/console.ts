@@ -131,8 +131,9 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   // an active backstop is the noteworthy transfer; standby is nominal-manual.
   const modeText = gridState === 'islanded' ? 'ISLANDED' : gridState === 'active' ? 'GRID IMPORT' : 'GRID STANDBY';
   const modeState: AlarmState = gridState === 'islanded' ? 'normal' : gridState === 'active' ? 'warn' : 'manual';
+  // v1.191.0 — the station label follows the grid state (it read OFF-GRID PLANT on every plant).
   out.push(statusHeader({
-    station: 'POWER · SITE 01 · OFF-GRID PLANT',
+    station: `POWER · SITE 01 · ${offGrid ? 'OFF-GRID' : 'GRID-TIED'} PLANT`,
     mode: modeText,
     modeState,
     uptime: uptime(data.serverStartedAt),

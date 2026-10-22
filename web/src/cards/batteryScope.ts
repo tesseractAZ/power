@@ -14,7 +14,22 @@ export function homePacks<T extends ScopedPack>(packs: T[]): { home: T[]; benchC
   return { home, benchCount: packs.length - home.length };
 }
 
-/** "N bench pack(s) excluded", or null when there are none. */
-export function benchNote(benchCount: number): string | null {
-  return benchCount > 0 ? `${benchCount} bench pack${benchCount === 1 ? '' : 's'} excluded` : null;
+/** "N bench pack(s) excluded", or null when there are none. v1.191.0 — `offPanelCount` of them are
+ *  on a Core the server says is not a spare but is on no panel (plan 3.8 S3): "… not on a panel". */
+export function benchNote(benchCount: number, offPanelCount = 0): string | null {
+  const off = Math.min(Math.max(0, offPanelCount), benchCount);
+  const bench = benchCount - off;
+  const parts: string[] = [];
+  if (bench > 0) parts.push(`${bench} bench pack${bench === 1 ? '' : 's'}`);
+  if (off > 0) parts.push(`${off} pack${off === 1 ? '' : 's'} not on a panel`);
+  return parts.length > 0 ? `${parts.join(' and ')} excluded` : null;
+}
+
+/**
+ * v1.191.0 (plan 3.8 S3) — of the packs left out (`home === false`), how many sit on a DPU the server
+ * says is not a bench spare (GET /api/site `perDpu`, sent only while BENCH_SPARE_SNS is set). With no
+ * flag, none: every excluded pack stays a bench pack, as before.
+ */
+export function offPanelPackCount<T extends ScopedPack & { sn: string }>(packs: T[], benchSpare: (sn: string) => boolean | undefined): number {
+  return packs.filter((p) => p.home === false && benchSpare(p.sn) === false).length;
 }

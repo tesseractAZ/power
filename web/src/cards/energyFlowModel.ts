@@ -53,6 +53,9 @@ export interface EnergyFlowModel {
   dpuCount: number;
   /** Online DPUs NOT in the home set (bench spares). */
   spareCount: number;
+  /** v1.191.0 — the serials behind spareCount (offPanelSplit relabels them from the server's
+   *  bench-spare flag: one it does not name a spare is "not on a panel", plan 3.8 S3). */
+  nonHomeSns: string[];
   /** v1.182.0 — a panel is present but its source list is not known, so every online DPU is
    *  drawn as home — bench spares included — and spareCount cannot say how many. */
   membershipUnknown: boolean;
@@ -369,6 +372,7 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   return {
     dpuCount: metered.length,
     spareCount: connected.size > 0 ? allDpus.length - dpus.length : 0,
+    nonHomeSns: connected.size > 0 ? allDpus.filter((d) => !isShp2Connected(d.sn, connected)).map((d) => d.sn) : [],
     membershipUnknown: connected.size === 0
       && list.some((d) => (d.productName ?? '').toLowerCase().includes('smart home panel')),
     viaPanelCount: viaPanel.length,
@@ -392,11 +396,27 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
 /** v1.188.1 — the Batteries node's title: the DPUs drawn on their own meters, the Cores drawn
  *  through the panel, and the spares left out. With every Core drawn through the panel it reads
  *  "Batteries (3 via panel)", not "0 DPU, 3 via panel" (the node holds three Cores, not none). */
-export function batteriesTitle(m: Pick<EnergyFlowModel, 'dpuCount' | 'viaPanelCount' | 'spareCount' | 'membershipUnknown'>): string {
+export function batteriesTitle(m: Pick<EnergyFlowModel, 'dpuCount' | 'viaPanelCount' | 'spareCount' | 'membershipUnknown'> & { offPanelCount?: number }): string {
   const own = m.dpuCount > 0 || m.viaPanelCount === 0 ? [`${m.dpuCount} DPU`] : [];
   const panelPart = m.viaPanelCount > 0 ? [`${m.viaPanelCount} via panel`] : [];
-  const spares = m.spareCount > 0 ? [`+${m.spareCount} spare`] : m.membershipUnknown ? ['spares not yet identified'] : [];
-  return `Batteries (${[...own, ...panelPart, ...spares].join(', ')})`;
+  const spares = m.spareCount > 0 ? [`+${m.spareCount} spare`] : m.membershipUnknown && !(m.offPanelCount ?? 0) ? ['spares not yet identified'] : [];
+  // v1.191.0 (plan 3.8 S3) — an online DPU off every panel that the server does not name a spare.
+  const offPanel = (m.offPanelCount ?? 0) > 0 ? [`+${m.offPanelCount} not on a panel`] : [];
+  return `Batteries (${[...own, ...panelPart, ...spares, ...offPanel].join(', ')})`;
+}
+
+/**
+ * v1.191.0 (plan 3.8 S3) — the DPUs left out of the home set, split by the server's per-DPU
+ * bench-spare flag (GET /api/site, sent only while BENCH_SPARE_SNS is set): one it names a spare
+ * stays a spare, one it does not is "not on a panel". With no flag (undefined) every one stays a
+ * spare, exactly as before.
+ */
+export function offPanelSplit(
+  m: Pick<EnergyFlowModel, 'spareCount' | 'nonHomeSns'>,
+  benchSpare: (sn: string) => boolean | undefined,
+): { spareCount: number; offPanelCount: number } {
+  const offPanelCount = m.nonHomeSns.filter((sn) => benchSpare(sn) === false).length;
+  return { spareCount: Math.max(0, m.spareCount - offPanelCount), offPanelCount };
 }
 
 /** v1.188.1 — the Solar node's subtitle: the plant's array, or which Cores the figure covers when

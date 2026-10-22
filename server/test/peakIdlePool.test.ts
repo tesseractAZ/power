@@ -244,7 +244,8 @@ test('★★ the monitor evaluates it on the house panel\'s readings (idlePoolIn
   // (pinned behaviourally through the real monitor in peakIdlePoolMeasuredCapacity.test.ts).
   // R1 (v1.189.0) — and the night-charge write hold (heldByChargeWrite; pinned behaviourally in
   // onPeakGuard.test.ts).
-  assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow, chargeHold), apsREvModelFromEnv());'));
+  // v1.191.0 (S5) — the tariff of the plan in effect (tariffModelFromEnv; the APS preset while TARIFF_PLAN is unset).
+  assert.ok(m.includes('const idlePool = evaluateIdlePool(idlePoolInputsFrom(snap.devices, grid.present, idleNowMs, forecastNow, chargeHold), tariffModelFromEnv());'));
   assert.ok(m.includes('...peakIdlePoolAlerts(idlePool, idleNowMs), // v1.187.0'));
   assert.ok(m.includes("  'peak-idle-pool',\n];"), 'a device-derived family (hydration rules)');
   // v1.187.0 (log review) — the fired day's restore at start-up and persist on every tick are

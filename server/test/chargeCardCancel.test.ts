@@ -266,7 +266,8 @@ test('★★★ the banner shows its Cancel whenever its state offers one, gated
   const fn = card.slice(card.indexOf('function ActuationBanner('), card.indexOf('function StatusBlindCancel('));
   // Shown on writeStands' own conditions…
   assert.match(fn, /\n\s+if \(mode === 'advisory' \|\| !actuation \|\| !actuationBannerVisible\(actuation, Date\.now\(\)\)\) return null;\n/);
-  assert.match(fn, /const state = actuationBannerState\(actuation, phoenixHHMM\(actuation\.cancelDeadlineMs\)\);/);
+  // v1.191.0 (T16) — the deadline is formatted in the payload's site zone (hhmm = siteHHMM(status.siteTimeZone)).
+  assert.match(fn, /const state = actuationBannerState\(actuation, hhmm\(actuation\.cancelDeadlineMs\)\);/);
   // …with the button on `state.cancel` alone.
   assert.match(fn, /\n\s+\{state\.cancel && <CancelButton label=\{state\.cancel\} busy=\{busy\} onClick=\{doCancel\} \/>\}\n/);
   assert.match(fn, /<span className=\{state\.settled \? 'text-muted' : 'text-warn'\}>\{state\.text\}<\/span>/);

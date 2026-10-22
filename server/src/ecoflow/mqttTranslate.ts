@@ -13,6 +13,8 @@
  *   28 – per-pack BMS detail (identified by packSn lookup)
  */
 
+import { DPU_MAX_PACKS } from '../hwSpec.js';
+
 type Raw = Record<string, unknown>;
 
 export function translateDpuMqtt(
@@ -33,7 +35,7 @@ export function translateDpuMqtt(
     case 28: {
       if (typeof param.packSn !== 'string' || !currentRaw) return null;
       const target = param.packSn;
-      for (let i = 1; i <= 5; i++) {
+      for (let i = 1; i <= DPU_MAX_PACKS; i++) {
         if (currentRaw[`hs_yj751_bms_slave_addr.${i}.packSn`] === target) {
           return prefixKeys(param, `hs_yj751_bms_slave_addr.${i}.`);
         }

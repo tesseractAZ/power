@@ -9,7 +9,8 @@ import { getAnalytics } from './analyticsClient.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { aggregateFleetFlow, findShp2 } from './shp2Membership.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
-import { rateAt, apsREvModelFromEnv } from './tariff.js';
+import { rateAt, tariffModelFromEnv } from './tariff.js';
+import { CURRENCIES, tariffCurrency } from './money.js';
 import {
   getDayForecast,
   computeDegradation,
@@ -564,7 +565,7 @@ const DEVICE_CLASS_UNITS: Record<string, readonly string[]> = {
  * is must be stated, not inferred. `USD/kWh` is deliberately absent: that is a
  * PRICE, not an amount, and `monetary` does not apply to it.
  */
-const CURRENCY_UNITS: readonly string[] = ['USD', 'EUR', 'GBP', 'CAD', 'AUD'];
+const CURRENCY_UNITS: readonly string[] = CURRENCIES; // v1.191.0 — money.ts: also the TARIFF_CURRENCY codes accepted
 
 /**
  * Sensors that break a rule on purpose. Each needs a reason, and the reason is
@@ -706,7 +707,30 @@ export async function publishStateCycle(fx: StateCycleEffects): Promise<void> {
  * One sensor's retained discovery config. v1.187.10 — extracted verbatim from publishDiscovery (the
  * key order, and so the payload bytes, are unchanged) so the expire_after rule is testable.
  */
-export function sensorDiscoveryConfig(s: SensorConfig): Record<string, unknown> {
+/**
+ * v1.191.0 (S5c, C1) — a sensor's unit in the tariff currency: the money amounts ('USD') and the price
+ * ('USD/kWh') follow TARIFF_CURRENCY; every other unit, and every unit while the currency is USD (unset),
+ * is the table's own, so the discovery payloads are unchanged (golden G7). unique_ids never change.
+ */
+export function currencyUnit(unit: string | undefined, currency: string): string | undefined {
+  if (currency === 'USD' || unit == null) return unit;
+  if (unit === 'USD') return currency;
+  if (unit === 'USD/kWh') return `${currency}/kWh`;
+  return unit;
+}
+/** The sensor table with its money units in `currency` (the table itself when USD). */
+export function sensorsInCurrency(currency: string, sensors: readonly SensorConfig[] = SENSORS): SensorConfig[] {
+  if (currency === 'USD') return [...sensors];
+  return sensors.map((s) => (s.unit_of_measurement === 'USD' || s.unit_of_measurement === 'USD/kWh'
+    ? { ...s, unit_of_measurement: currencyUnit(s.unit_of_measurement, currency) }
+    : s));
+}
+
+export function sensorDiscoveryConfig(s: SensorConfig, currency: string = tariffCurrency().code): Record<string, unknown> {
+  // v1.191.0 — the unit follows TARIFF_CURRENCY; a USD install's object is built exactly as before.
+  if (currency !== 'USD' && (s.unit_of_measurement === 'USD' || s.unit_of_measurement === 'USD/kWh')) {
+    s = { ...s, unit_of_measurement: currencyUnit(s.unit_of_measurement, currency) };
+  }
   return {
     ...s,
     state_topic: STATE_TOPIC,
@@ -1523,7 +1547,7 @@ export async function startMqttDiscovery(
       // this entity exists to remove, and HA correctly declines to accrue cost
       // from an unavailable price rather than accruing a wrong one.
       tariff_rate_now_usd_per_kwh: (() => {
-        const cents = rateAt(apsREvModelFromEnv(), Date.now()).centsPerKwh;
+        const cents = rateAt(tariffModelFromEnv(), Date.now()).centsPerKwh;
         return cents == null ? null : Math.round((cents / 100) * 1e4) / 1e4;
       })(),
       alert_critical_count: cnt('threshold', 'critical'),

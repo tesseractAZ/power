@@ -23,11 +23,13 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { NightLedgerRow } from './recorder.js';
-import type { Season, TariffModel } from './tariff.js';
+import { tariffRatesConfirmation, type Season, type TariffModel } from './tariff.js';
+import { fmtMinor } from './money.js';
 import type { DeviceSnapshot } from './snapshot.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { DELIVERED_BASIS } from './nightChargeAdvisor.js';
 import { LEGACY_REVERT_LAG_MS } from './nightChargeActuator.js';
+import { SHP2_SOURCE_SLOTS } from './hwSpec.js';
 
 const HOUR_MS = 3_600_000;
 
@@ -87,7 +89,8 @@ export const ONPEAK_SPAN_SCAN_HOURS = 96;
  *
  * Returns null for "no on-peak period governed" — never a span that is scored as a
  * measured 0. `isOnPeakAt` / `isCheapAt` come from the ONE tariff model
- * (tariff.ts rateAt: `.isOnPeak`, `.periodId === 'overnight'`), so the weekday gate
+ * (tariff.ts rateAt: `.isOnPeak`, `.periodId` equal to the plan's cheap period — cheapPeriodIdOf,
+ * 'overnight' on the APS preset), so the weekday gate
  * and the holiday list are the tariff's own, not a second copy.
  */
 export function governedOnPeakSpan(
@@ -160,9 +163,14 @@ export function supersedingPlanDate(
 /** The tariff periods a row's cycle buys in, for the on-peak attribution (governedOnPeakSpan's
  *  isCheapAt: the next plan's window opening first ends this plan's claim). A mid-day row buys in
  *  the super off-peak window behind an overnight backup; every other row in the overnight window
- *  alone, as before. PURE. */
-export function ledgerCheapPeriodIds(windowKind: string | null | undefined): readonly string[] {
-  return windowKind === 'super_off_peak' ? ['overnight', 'super_off_peak'] : ['overnight'];
+ *  alone, as before. v1.191.0 (W1) — the overnight window is a run of the tariff's cheap period
+ *  (`cheapPeriodId`, tariff.ts cheapPeriodIdOf: 'overnight' on the APS preset, the default); null —
+ *  a plan with no cheap period — names none. PURE. */
+export function ledgerCheapPeriodIds(
+  windowKind: string | null | undefined, cheapPeriodId: string | null = 'overnight',
+): readonly string[] {
+  const own = cheapPeriodId == null ? [] : [cheapPeriodId];
+  return windowKind === 'super_off_peak' ? [...own, 'super_off_peak'] : own;
 }
 
 export interface CycleLedgerSpans extends LedgerWindowSpans {
@@ -1121,11 +1129,13 @@ export function realizedCostOutcome(i: {
   }
   const p = pricedImport(i.pts, i.rateAt);
   if (p.cents != null) {
-    return { cents: p.cents, note: `Cost: ${p.cents}¢ of metered import, window open to close + 16 h (energy only; rows do not tile, so not a bill)` };
+    // v1.191.0 (CA14) — in hundredths of TARIFF_CURRENCY (¢ when unset: the persisted note is unchanged).
+    return { cents: p.cents, note: `Cost: ${fmtMinor(p.cents)} of metered import, window open to close + 16 h (energy only; rows do not tile, so not a bill)` };
   }
   if (p.unpriced == null) return { cents: null, note: 'Cost: unmeasured (no grid_home_w samples)' };
   if (p.unpriced.ratesConfirmed === false) {
-    return { cents: null, note: 'Cost: not priced (tariff rates unconfirmed — TARIFF_APS_RATES_CONFIRMED)' };
+    // v1.191.0 (CA14) — names the confirmation option in effect (TARIFF_APS_RATES_CONFIRMED while TARIFF_RATES_CONFIRMED is unset).
+    return { cents: null, note: `Cost: not priced (tariff rates unconfirmed — ${tariffRatesConfirmation().key})` };
   }
   return {
     cents: null,
@@ -1143,7 +1153,7 @@ export type LedgerQuery = (metric: LedgerMetric, startMs: number, endMs: number)
 
 /** v1.187.3 (review) — the SHP2's source slots (Energy1Info..Energy3Info; project.ts), and
  *  so the `src{n}_w` channels deliveredIntoCores reads over every hold. */
-export const SOURCE_CHANNEL_SLOTS: readonly number[] = [1, 2, 3];
+export const SOURCE_CHANNEL_SLOTS: readonly number[] = Array.from({ length: SHP2_SOURCE_SLOTS }, (_, i) => i + 1); // v1.191.0 — hwSpec (1, 2, 3)
 
 /** v1.187.3 — a panel's connected source slots (Energy{n}Info slot n), sorted: connected AND
  *  carrying a serial, the live rule of shp2Membership.panelRoster WITHOUT its persisted

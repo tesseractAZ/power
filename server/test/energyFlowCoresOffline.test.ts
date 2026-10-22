@@ -265,7 +265,7 @@ test('EnergyFlow.tsx renders the Batteries labels from the model helpers', () =>
   const here = dirname(fileURLToPath(import.meta.url));
   const card = readFileSync(resolve(here, '../../web/src/cards/EnergyFlow.tsx'), 'utf8');
   for (const pin of [
-    'title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown })}',
+    'title={batteriesTitle({ dpuCount, viaPanelCount, spareCount, membershipUnknown, offPanelCount })}',
     'subtitle={batteriesSubtitle({ batNet, viaPanelCount, pvViaPanel })}',
   ]) assert.ok(card.includes(pin), `the card must render from the model: missing ${pin}`);
   assert.ok(!card.includes('discharging`'), 'the card no longer builds the battery wording itself');

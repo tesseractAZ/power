@@ -26,6 +26,8 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const ADVISOR = resolve(SERVER, 'src/nightChargeAdvisor.ts');
 const ACTUATOR = resolve(SERVER, 'src/nightChargeActuator.ts');
+// v1.191.0 — the reserve write envelope is a hardware fact in hwSpec.ts (nightChargeActuator re-exports it).
+const HWSPEC = resolve(SERVER, 'src/hwSpec.ts');
 
 const SUBSET = ['test/zeroCushion.test.ts', 'test/cushionRescope.test.ts', 'test/nightChargeEvContention.test.ts'];
 
@@ -81,7 +83,7 @@ const MUTANTS = [
   },
   {
     id: 'ix. the write envelope constant is widened',
-    file: ACTUATOR,
+    file: HWSPEC,
     find: 'export const RESERVE_WRITE_MAX_PCT = 50;',
     to: 'export const RESERVE_WRITE_MAX_PCT = 100; /* MUTANT */',
     why: 'The announced reserve would exceed what the panel accepts — proven on 2026-09-16, when a 90 write settled at 50 — so the 21:30 notification and the spoken broadcast would promise a reserve the device will not hold, and clampReserveTarget would stop clamping.',

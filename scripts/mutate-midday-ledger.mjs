@@ -76,8 +76,8 @@ const MUTANTS = [
   {
     id: 'L-iii. ★★★ the on-peak attribution counts the overnight period only on a two-leg row',
     file: NLS,
-    find: "  return windowKind === 'super_off_peak' ? ['overnight', 'super_off_peak'] : ['overnight'];",
-    to: "  return ['overnight']; /* MUTANT */",
+    find: "  return windowKind === 'super_off_peak' ? [...own, 'super_off_peak'] : own;",
+    to: "  return own; /* MUTANT */",
     why: 'A mid-day window does not end the claim of the plan before it.',
   },
   {
@@ -181,7 +181,7 @@ const MUTANTS = [
     id: 'L-xvii. ★★ the scorer counts the overnight period only for a two-leg row',
     file: IDX,
     find: '      (t) => cheapIds.includes(rateAt(tariff, t).periodId),',
-    to: '      (t) => rateAt(tariff, t).periodId === NIGHT_CHEAP_PERIOD_ID, /* MUTANT */',
+    to: '      (t) => cheapId != null && rateAt(tariff, t).periodId === cheapId, /* MUTANT */',
     why: 'As L-iii, at the scorer.',
   },
   {
@@ -337,8 +337,8 @@ const MUTANTS = [
   {
     id: 'S-viii. ★★ the shadow runs before the live evening job latched',
     file: IDX,
-    find: '  if (readNightChargeLatch().lastNotifyDay === today && cur?.day !== today && nowMin >= fireMin && nowMin < 23 * 60) {',
-    to: '  if (cur?.day !== today && nowMin >= fireMin && nowMin < 23 * 60) { /* MUTANT */',
+    find: '  if (readNightChargeLatch().lastNotifyDay === today && cur?.day !== today && nowMin >= fireMin && nowMin < sched.eveningCutoffMin) {',
+    to: '  if (cur?.day !== today && nowMin >= fireMin && nowMin < sched.eveningCutoffMin) { /* MUTANT */',
     why: 'The shadow competes with the live plan for the worker and the panel while the arm is pending.',
   },
   {

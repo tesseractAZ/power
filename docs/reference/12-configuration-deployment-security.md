@@ -28,8 +28,8 @@ runs the container.
 | `name` | `Power` | Store display name |
 | `version` | *(current release)* | Add-on version; the **release trigger** (see Release Pipeline). HA compares this to installed to surface the Update button. |
 | `slug` | `ecoflow_panel` | Stable identifier — used in the HA add-on API path (`.../addons/local_ecoflow_panel/...` for a local install, or the store slug). Never change it. |
-| `arch` | `aarch64`, `amd64` | Supported CPU arches (Pi = aarch64) |
-| `image` | `ghcr.io/tesseractaz/{arch}-ecoflow-panel` | **Pre-built GHCR image**; `{arch}` substituted by Supervisor. Presence of this key means Supervisor *pulls* the image rather than building on the Pi. |
+| `arch` | `aarch64`, `amd64` | Supported CPU arches (a Raspberry Pi is aarch64) |
+| `image` | `ghcr.io/tesseractaz/{arch}-ecoflow-panel` | **Pre-built GHCR image**; `{arch}` substituted by Supervisor. Presence of this key means Supervisor *pulls* the image rather than building on the host. |
 | `startup` | `services` | Start in the "services" phase of HA boot |
 | `boot` | `auto` | Auto-start on HA boot |
 | `stage` | `experimental` | Add-on maturity stage |
@@ -494,7 +494,7 @@ build to `gh release create`. Jobs:
    Release is marked Latest only when its tag is the highest strict `vX.Y.Z` tag, compared as
    numbers (`--latest=false` otherwise; GitHub decides if the lookup fails), so re-running an older
    version's release cannot demote a newer one, and a stray `v1.2.3-rc1` (which `sort -V` ranked
-   above `v1.2.3`) does not count. **The Release appearing = "go ahead and update the Pi."**
+   above `v1.2.3`) does not count. **The Release appearing = "go ahead and update the host."**
    Permissions: `contents: write`, `packages: write`. The printable documentation (.docx and
    .pdf) is built first and attached at creation; those steps are best-effort
    (`continue-on-error`) and **bounded** (v1.187.3): each has `timeout-minutes` (pandoc 6,
@@ -514,10 +514,10 @@ build to `gh release create`. Jobs:
 
 First-time-only: toggle the two new GHCR packages from Private → Public so HA can pull anonymously.
 
-#### Step 5 — deploy to the Pi
+#### Step 5 — deploy to the host
 
 Because `config.yaml`'s `image:` key points at GHCR, HA Supervisor **pulls** the prebuilt
-multi-arch image — it does **not** build on the Pi. Once the GitHub Release is out, in HA:
+multi-arch image — it does **not** build on the host. Once the GitHub Release is out, in HA:
 **Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, open **Power**, click **Update**
 (HA reads the bumped `version:` from `config.yaml` on `main` and drives the update-entity).
 
@@ -547,7 +547,8 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
 #### First-run setup
 
 1. Set `ECOFLOW_ACCESS_KEY` + `ECOFLOW_SECRET_KEY` in the **Configuration** tab → Save → Restart
-   (the runner exits without them). Set `FORECAST_LAT`/`LON` if not Phoenix.
+   (the runner exits without them). Set `FORECAST_LAT`/`LON` (the defaults are a placeholder),
+   then what else differs from the reference plant: [your home](../guide/your-home.md).
 2. Devices populate from the REST poll within ~15–60 s (MQTT warms up after).
 
 #### Common failure modes
@@ -572,7 +573,7 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
 - **Errored add-on after a bad boot**: updating an add-on that is already in the `error` state
   installs the new image but does not start it. Start it explicitly, with the add-on page's Start
   button or the Supervisor `POST /addons/<slug>/restart`.
-- **★ Physical power to the Pi:** the Pi's circuit has been observed losing power for
+- **★ Physical power to the host:** on the reference plant the host's circuit was observed losing power for
   84–187 min/day → the alarm goes dark and cannot report itself; only the out-of-band heartbeat
   (`HEARTBEAT_URL`, §13.0c) notices, from outside the house. The monitor must be on an always-on
   circuit. `HOST_POWER_ENTITY` (a `binary_sensor` device_class=problem) can warn on a
@@ -619,7 +620,7 @@ the sections above. Documented but **not used yet**:
 
 ### 12a. Vendor energy ledger (`energyHistory.ts`, v1.82.0)
 
-Daily job (06:35-09:00 Phoenix window, day-latched in the sidecar, restart
+Daily job (06:35-09:00 site-time window, day-latched in the sidecar, restart
 safe) fetching yesterday's SHP2 historical-data record: `homeWh`, `gridWh`,
 `solarWh`, `generatorWh`, `batteryInWh`/`batteryOutWh` (extra 1/2), and 12
 per-circuit rows split by source (`energy_hour_{grid,oil,bak}_ch{n}`).
@@ -627,7 +628,7 @@ per-circuit rows split by source (`energy_hour_{grid,oil,bak}_ch{n}`).
 Reconciliation scores LIKE BASES ONLY (`driftPct`, signed toward the vendor,
 null under 100 Wh on either side): vendor home ↔ local `fleet.panelLoadWh`,
 vendor solar ↔ local `fleet.pvWh` (both from the analytics `totals` report
-over the same Phoenix day). Grid/generator/battery are recorded unscored —
+over the same site-time day). Grid/generator/battery are recorded unscored —
 see the two-grid-quantities note in §7.0.2. No alert is emitted from this engine.
 
 State: `/data/vendor-energy-daily.json` (atomic writes, 120-day cap, corrupt
@@ -649,7 +650,7 @@ out / grid-charge, and the dark-core PV estimate when present. Null when the
 record is missing or empty — the digest never carries a hollow line.
 **v1.100.0**: the line had never rendered. The digest fires at
 `NOTIFY_DIGEST_HOUR` (default 7, so 07:00 local) while this job is gated to 06:35-09:00
-Phoenix, so `prevYmd(today)` is absent at digest time whenever the digest hour comes
+site time, so `prevYmd(today)` is absent at digest time whenever the digest hour comes
 before the job completes. That is every morning at a digest hour of 6 or earlier, or when the job runs late in its window. It now falls back to `latestVendorDay(state)` and NAMES the day:
 "Yesterday per the EcoFlow ledger: …" only when the record genuinely is
 yesterday, otherwise "Per the EcoFlow ledger (YYYY-MM-DD): …". Moving the job
@@ -705,8 +706,8 @@ Publishes the vendor ledger as EXTERNAL long-term statistics over the
 supervisor's Core WebSocket (`recorder/import_statistics`): five `Wh` series
 under source `ecoflow_panel` (`vendor_home_energy`, `vendor_solar_energy`,
 `vendor_grid_energy`, `vendor_battery_in_energy`, `vendor_battery_out_energy`).
-One hourly row per ledger day at 12:00 Phoenix (19:00 UTC — Arizona has no
-DST); `sum` cumulative in day order; null days skipped. Full idempotent
+One hourly row per ledger day at 12:00 site time, floored to the UTC hour (19:00 UTC on the
+reference plant, whose zone has no DST); `sum` cumulative in day order; null days skipped. Full idempotent
 re-import after each morning job + `POST /api/energy-history/export-ha`.
 Never writes `sensor.*` statistics — dashboard healing is by selecting the
 ledger series. Failures log and retry the next morning; a missing
@@ -752,7 +753,9 @@ device returned.
 
 ### 12f. Warranty evidence export (`warrantyExport.ts`, v1.90.0)
 
-`GET /api/warranty-export?sn=<SN>&format=md|csv|json` (default SN = Core 3,
+`GET /api/warranty-export?sn=<SN>&format=md|csv|json` (with no `sn`: the built-in serial while that device is on the account, Core 3 of the
+reference plant; else the one latched-defective chassis; else a 400 naming each serial's last
+four characters;
 default format = markdown) renders a paste-ready RMA evidence bundle from the
 live projection plus the persisted `cleared-alerts.json` history: device error
 code, EMS parallel-voltage window, a per-pack table (pack SN, SoC, SoH, pack
@@ -963,7 +966,7 @@ data, and dropping them from the schema leaves nothing stale behind.
 `ARB_OUTAGE_CUSHION_PCT` was a flat 15 % of pool, and the test asked whether a
 deliberately grid-blind forward simulation stayed above floor+cushion. That
 simulation runs the **whole house** off the battery for the entire remaining
-forecast horizon — 25 to 49 hours. On this plant that is P90 load of 156–185 kWh/day
+forecast horizon — 25 to 49 hours. On the reference plant that is P90 load of 156–185 kWh/day
 against a 92.16 kWh pool, so the trough hit zero 1–8 hours after window close on 7 of
 7 nights and `cushionShortfall` was pinned **true by arithmetic**.
 
@@ -998,16 +1001,16 @@ requirement harder and buys more. No PV is credited, deliberately: an outage can
 at dusk.
 
 **The load basis is the 7-day mean, not a spot reading.** Panel load swings roughly 3×
-across a day — measured 1,445 W at 00:50 MST and 3,971–4,038 W the same evening — so an
+across a day — measured on the reference plant, 1,445 W at 00:50 MST and 3,971–4,038 W the same evening — so an
 instantaneous sample would make the cushion, and therefore the nightly purchase, depend
 on *when* the plan happened to run, and a quiet-hour sample would understate it
 threefold. `selfCons.loadKwh` is already the SHP2 `panel_load` energy over seven days;
-its mean is **4.47 kW** on this plant.
+its mean is **4.47 kW** on the reference plant.
 
 **The defaults were calibrated against what the plant can actually reach.** The panel's
 charge limit, `chargeWattPower`, is 7.2 kW for each connected battery (the Delta Pro Ultra's AC
 input ceiling; every source slot's `ratePower` reads the same), not for the pool. Measured on
-2026-09-16/18 and again on 2026-10-13/14, with three Cores connected the grid import pins at
+the reference plant on 2026-09-16/18 and again on 2026-10-13/14, with three Cores connected the grid import pins at
 ~19.1 kW and the pack takes (19.1 − house) × ~0.93, up to ~17 kW (the hardware charge envelope
 in [15-2, failure modes and known limitations](15-2-night-charge-writes.md#11-failure-modes--known-limitations)),
 so a clean six-hour night can fill the pool from any evening SoC. The figure the defaults were
@@ -1020,7 +1023,7 @@ informative again. Eight hours at 1.5× would have needed **78 %**, which is sim
 permanently-true flag. A test pins the default inside the reachable band in both directions,
 so a future change cannot quietly make it unreachable *or* trivially satisfiable.
 
-Worth knowing plainly: this plant can carry its protected panel for roughly **four hours**
+Worth knowing plainly: the reference plant can carry its protected panel for roughly **four hours**
 at a typical post-charge state, not a day. Raising `ARB_OUTAGE_CUSHION_HOURS` will make
 the planner buy more, but it cannot exceed what the charger and the pack can hold.
 

@@ -1,6 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { createReadRecorder } from './readRecorder.js';
 import { setOwnerReserveFloorPct } from './nightChargeActuator.js';
+import { setLastKnownHomeRoster } from './shp2Membership.js';
 import { buildReport, warmReports } from './reports.js';
 import { WARM_INTERVAL_MS } from './analytics/warmCadence.js';
 import type { FleetSnapshot } from './snapshot.js';
@@ -19,6 +20,8 @@ import type { FleetSnapshot } from './snapshot.js';
  *               { kind:'report', id, name, args } — build a named report
  *               { kind:'query', id, ... }         — raw recorder.query
  *               { kind:'listMetrics', id, sn }    — recorder.listMetrics
+ *               { kind:'ownerFloor', pct }        — the owner reserve floor (v1.119.0)
+ *               { kind:'homeRoster', sns }        — the last-known home roster (v1.191.0)
  * Messages out: { kind:'ready' } | { kind:'log', message }
  *               { kind:'result', id, ok, result|error }
  */
@@ -49,6 +52,13 @@ port.on('message', async (msg: any) => {
       // not the reserve our own night-charge write temporarily raised.
       case 'ownerFloor':
         setOwnerReserveFloorPct(msg.pct ?? null);
+        return;
+      // v1.191.0 (S8, CA17) — the last-known home roster the bench-spare floor honours, published from
+      // the main thread (index.ts noteLiveRoster). A module-level publisher does not cross the worker
+      // boundary (the v1.119.0 owner-floor lesson), so without this the worker's spare answers would
+      // read the floor alone while the main thread's applied the roster override.
+      case 'homeRoster':
+        setLastKnownHomeRoster(Array.isArray(msg.sns) ? new Set(msg.sns.filter((s: unknown): s is string => typeof s === 'string')) : null);
         return;
       case 'report': {
         // v1.186.0 — buildReport single-flights by name + args: a request (or the client's

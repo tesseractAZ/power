@@ -375,16 +375,17 @@ median: on a night with three samples at the true ~45 W floor and seven on real
 load, a median publishes ~140 W of household draw as inverter overhead. The
 trend is likewise fitted to **one floor per day** (`dailyIdleFloors`, ≥ 3 samples
 per day) rather than to raw samples, so it tracks the inverter rather than how
-many small loads happened to land inside the window on a given night. Buckets
-are UTC days deliberately: the plant runs on MST (UTC−7, no DST), so a local
-19:00→06:00 night falls at 02:00→13:00 UTC inside one UTC date, while a
-local-midnight bucket would split every night in two. Guards are
+many small loads happened to land inside the window on a given night. A bucket
+runs from 17:00 to 17:00 site time, so a local 19:00→06:00 night falls inside one
+bucket in any zone, while a local-midnight bucket would split every night in two.
+On the reference plant (MST, UTC−7, no DST) that bucket is exactly the UTC day,
+as it was when the buckets were UTC days. Guards are
 mutation-proven load-bearing (`scripts/mutate-detector-honesty.mjs`, mutants
 i–v), including an exemplar that reproduces the shipped gate verbatim.
 
 **v1.131.1 — and the register carries no standby plateau.** Live-verifying
 v1.131.0 found every DPU still reporting `idleWatts: null`: `ac_out` reads **0 on
-all five Cores, with `acOutVol` also 0**, because the Delta Pro Ultras feed the
+all five Cores of the reference plant, with `acOutVol` also 0**, because the Delta Pro Ultras feed the
 house through the SHP2 link rather than their own AC output port, so in normal
 grid-tied operation that inverter stage is not energised. A second blocker,
 independent of the whole-house gate, and visible only by querying the device
@@ -392,7 +393,7 @@ rather than reasoning about the code.
 
 **The `blockedReason` field then corrected the first version of this paragraph,
 which is what it is for.** It was written asserting the register is *structurally*
-zero; the live classification disagreed. Over the 60-day window only **Core 4**
+zero; the live classification disagreed. Over the 60-day window only **Core 4** (reference plant)
 has an all-zero series (`ac-output-stage-idle`). The other four report
 `insufficient-idle-samples`, meaning at least one non-zero sample exists — the
 output stage has been energised, presumably while islanding — but fewer than ten

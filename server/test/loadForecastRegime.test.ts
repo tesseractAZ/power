@@ -18,6 +18,7 @@
  * the current regime.
  */
 
+import './helpers/siteZoneIsHostZone.js'; // v1.191.0 — fixtures on the host clock: the site zone is the host's (first import)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

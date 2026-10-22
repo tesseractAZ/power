@@ -347,7 +347,7 @@ cloud replays after a long gap is therefore moved once it has been restated for 
 before (the gate's own span over the gap still refuses the night-ledger row). What a gap does to a
 stretch depends on its length (`HELD_RETURN_GAP_MS`, an hour: the night ledger's own bridge):
 
-- A gap of up to an hour is a **hole** (an add-on restart, a Pi reboot, a poll outage): the
+- A gap of up to an hour is a **hole** (an add-on restart, a host reboot, a poll outage): the
   stretch goes on across it, and the observed time on both sides adds up.
 - A longer gap is a **silence**, and the restated rows after it are a **return piece**. It joins
   the stretch only once it qualifies on its own (an hour observed after the silence), and the
@@ -391,7 +391,7 @@ hourly, on the main thread (the alarm engine's): six hours of one device's rows 
 them moved, per timer tick. A device's frozen spans are read once per scan, before its rows, and the
 scanner keeps only the stretches that can be moved (those that qualify and the tails above); the
 finishing step had looked a span up for every stretch the device had, 100,000 to 486,000 per
-device over the live retention window (1.6 to 5.4 s of the alarm thread per device on the Pi), and
+device over the live retention window (1.6 to 5.4 s of the alarm thread per device on the reference plant's Raspberry Pi), and
 kept them all until the device finished (+190 to 360 MB). The first covers the
 retention window from each device's oldest row (one index seek per series), not from the horizon,
 where most of its six-hour steps read nothing; the night-charge capture waits for it (section 7 of chapter 15); later scans
@@ -408,7 +408,7 @@ the moved rows, or a restatement of the same stretch that the scan read and has 
 (younger than 15 min, or in a later slice: `onMoved`'s `heldThroughMs`), the clock goes back to the
 span's start, and a per-device gap record whose start was one of them is re-dated to it, keeping
 its alert id (4.7). So it does when the clock is a row the scan never read, written after the scan
-was planned (the scan reads every device before its first move, minutes on the Pi), as long as
+was planned (the scan reads every device before its first move, minutes on the reference plant's Raspberry Pi), as long as
 every write of the device since `heldThroughMs` restated the stretch's values (`onMoved`'s
 `heldValues`: no write in which a value changed, even back again, and each metric's last write equal
 to its held value) within an hour of it (v1.188.1, fifth review: a heartbeat in that window left a
@@ -563,7 +563,7 @@ resume after a silence, persists a durable marker (not synthetic samples) to
 - In-process stall threshold `GAP_THRESHOLD_MS = 3 × MAX_INTERVAL_MS = 15 min`.
 - Restart-spanning floor `RESTART_GAP_FLOOR_MS = MAX_INTERVAL_MS = 5 min`
   (one heartbeat) — a restart that lost even one interval is real dark time.
-- RTC-less-Pi hardening: if the boot clock is behind the newest persisted sample
+- RTC-less host hardening (a Raspberry Pi has no real-time clock): if the boot clock is behind the newest persisted sample
   (before NTP steps), the boot check is deferred and resolved in-process using
   monotonic `performance.now()` (`bootMonoMs`, `RESTART_GAP_SETTLE_MS = 10 min`).
 - **Per-device silence (v1.150.0, seed reworked v1.154.0).** One dark device is
@@ -976,7 +976,7 @@ proxies `/api` + `/ws` back to this process.
 | `host` | `HOST` | `::` | HTTP bind (dual-stack) |
 | `dbPath` | `DB_PATH` | `/data/ecoflow.db` (container) | SQLite WAL DB |
 | `logLevel` | `LOG_LEVEL` | `info` | Pino level; `debug`/`trace` add the periodic poll-duration summary (every `POLL_SUMMARY_EVERY` polls) and the recorder's sample-count heartbeat |
-| `forecastLat` | `FORECAST_LAT` | `33.4484` | Solar forecast latitude (Phoenix) |
+| `forecastLat` | `FORECAST_LAT` | `33.4484` | Solar forecast latitude; the default is a placeholder (Phoenix, the reference plant's city) |
 | `forecastLon` | `FORECAST_LON` | `-112.074` | Solar forecast longitude |
 | `ssh.enabled` | `SSH_ENABLED` (or the deprecated alias `TELNET_ENABLED`) | bare env: `true` (unless `0`); add-on option default `false` (bridged to `0`) | SSH transport on/off (the `/console` browser terminal is always served) |
 | `ssh.host` | `SSH_HOST` (fallback `TELNET_HOST`) | `::` | TUI bind |

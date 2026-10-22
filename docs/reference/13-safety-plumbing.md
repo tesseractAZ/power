@@ -5,7 +5,7 @@
 The add-on monitors the machine it runs on. `hostThermal.ts` samples the kernel thermal zones (`/sys/class/thermal/thermal_zone*/temp`, read-only in the container) every 60 s, takes the hottest valid zone (readings outside 5–130 °C are rejected), and holds the freshest sample with a 5-minute staleness bound. Surfaces:
 
 - `host_soc_temp_c` in `/api/ha-state` and the MQTT state payload; discovery sensor `ecoflow_host_soc_temp` (`device_class: temperature`, diagnostic). Trend history comes from the Home Assistant recorder — the add-on stores none.
-- Alerts `host-temp-warn` (warning, ≥ `HOST_TEMP_WARN_C`, default 78 °C) and `host-temp-crit` (critical, ≥ `HOST_TEMP_CRIT_C`, default 84 °C), with 3 °C rise/clear hysteresis (`hostTempLevel`, pure). The critical sits just below the host SoC's ~85 °C throttle point: thermal throttling slows the alarm pipeline precisely when extreme ambient heat makes it matter most.
+- Alerts `host-temp-warn` (warning, ≥ `HOST_TEMP_WARN_C`, default 78 °C) and `host-temp-crit` (critical, ≥ `HOST_TEMP_CRIT_C`, default 84 °C), with 3 °C rise/clear hysteresis (`hostTempLevel`, pure). The defaults are tuned for a Raspberry Pi, the reference plant's host: the critical sits just below its SoC's ~85 °C throttle point: thermal throttling slows the alarm pipeline precisely when extreme ambient heat makes it matter most.
 - Null-honest: a host with no readable thermal zone produces a null sensor and no alerts. Thresholds are env-overridable (`HOST_TEMP_WARN_C`, `HOST_TEMP_CRIT_C`), not add-on options.
 
 ### 13.0b Co-tenant degradation defense — self-vitals (v1.43.0)
@@ -47,7 +47,7 @@ In-band self-monitoring fails with the host, so the final layer lives outside th
 
 *Process guard, host-power self-monitor, HA state cache, onset persistence, message-rate floor, and log/format hygiene — the reliability layer that keeps a life-safety monitor alive and honest.*
 
-This cluster is not a feature the operator sees on a screen. It is the connective tissue that lets every other engine survive the real-world failure modes of an off-grid Raspberry Pi: a daily Supervisor maintenance bounce, a Pi that loses power almost every day, an EcoFlow cloud session that wedges without going fully silent, and a log stream that floods during outages. Three of these modules (`processGuard`, `hostPower`, `messageRateFloor`) are load-bearing safety components — a bug in them can either kill the alarm or blind it. The rest bound what lands on disk and in the log so a real signal stays greppable and a hostile device name can't hijack the operator's terminal.
+This cluster is not a feature the operator sees on a screen. It is the connective tissue that lets every other engine survive the real-world failure modes of a small always-on host, as seen on the reference plant's Raspberry Pi: a daily Supervisor maintenance bounce, a host that loses power almost every day, an EcoFlow cloud session that wedges without going fully silent, and a log stream that floods during outages. Three of these modules (`processGuard`, `hostPower`, `messageRateFloor`) are load-bearing safety components — a bug in them can either kill the alarm or blind it. The rest bound what lands on disk and in the log so a real signal stays greppable and a hostile device name can't hijack the operator's terminal.
 
 All file paths below are relative to `server/src/`. Line numbers cite main at v1.187.15; function and constant names are authoritative where they drift.
 
@@ -123,7 +123,7 @@ It covers the **post-boot steady state**, where a transient DNS error can escape
 
 #### What + why
 
-The alarm's own host — the Raspberry Pi — is the single point of failure for the entire monitor: if it loses power, every channel goes dark **at once**. HA's *"Raspberry Pi Power Supply Checker"* exposes the kernel under-voltage/throttling flag as a `binary_sensor` with `device_class: problem` (`on` = under-voltage/throttling detected, `off` = OK). A marginal supply — or a sagging power circuit — trips this flag *before* the Pi actually browns out, so surfacing it is an early warning to fix the supply while the alarm is still up. (Per operational memory, the Pi circuit has historically lost power daily for 84–187 min; this signal is the leading indicator for that class of failure.)
+The alarm's own host — a Raspberry Pi on the reference plant — is the single point of failure for the entire monitor: if it loses power, every channel goes dark **at once**. Any under-voltage `binary_sensor` serves; on a Raspberry Pi, HA's *"Raspberry Pi Power Supply Checker"* exposes the kernel under-voltage/throttling flag as a `binary_sensor` with `device_class: problem` (`on` = under-voltage/throttling detected, `off` = OK). A marginal supply — or a sagging power circuit — trips this flag *before* the Pi actually browns out, so surfacing it is an early warning to fix the supply while the alarm is still up. (On the reference plant the host's circuit has historically lost power daily for 84–187 min; this signal is the leading indicator for that class of failure.)
 
 #### Inputs
 
@@ -164,7 +164,7 @@ else                                → { configured:true, entityId,
 #### Trace / wire-in
 
 - **Cache warm-keeping:** `index.ts:2573` and `:2689` call `haStateCache.refreshIfStale()` whenever `gridPresenceEntityId() || hostPowerEntityId()` is set — the host-power entity rides the same TTL-gated refresh as the grid-presence classifier (ingestion mirrors `gridState.ts`).
-- **Alert emission:** `alerts.ts:1338` calls `liveHostPower()`; when `underVoltage === true` it pushes a **warning** alert `host-power-undervoltage` (category `Connectivity`, device `System`) advising the operator to check the Pi's supply and circuit before it browns out.
+- **Alert emission:** `alerts.ts:1338` calls `liveHostPower()`; when `underVoltage === true` it pushes a **warning** alert `host-power-undervoltage` (category `Connectivity`, device `System`) advising the operator to check the host's supply and circuit before it browns out.
 
 #### Output shape (the alert)
 
@@ -172,7 +172,7 @@ else                                → { configured:true, entityId,
 { "id": "host-power-undervoltage", "severity": "warning",
   "category": "Connectivity", "device": "System",
   "title": "Alarm host power — under-voltage",
-  "detail": "The Raspberry Pi running this monitor reported under-voltage (<entityId>). …" }
+  "detail": "The host running this monitor reported under-voltage (<entityId>). …" }
 ```
 
 #### Config knobs

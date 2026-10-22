@@ -166,6 +166,7 @@ function baseFiles(): Files {
       '  HEARTBEAT_URL: "str?"',
       '  HEARTBEAT_INTERVAL_S: "int(60,3600)?"',
       '  LOAD_SHEDDING_RUNWAY_THRESHOLD_H: float(0,168)',
+      '  SITE_TIMEZONE: "str?"',
     ),
     [P.guide]: guideText(),
     [P.card]: lines('# Power', '', `Monitors an EcoFlow home battery. The [operator guide](${GH}/blob/main/${P.guide}) is the Documentation tab.`),
@@ -180,6 +181,7 @@ function baseFiles(): Files {
       '| `HEARTBEAT_URL` | empty | `str?` | Dead-man receiver. |',
       '| `HEARTBEAT_INTERVAL_S` | `300` | `int(60,3600)?` (seconds) | Ping period. |',
       '| `LOAD_SHEDDING_RUNWAY_THRESHOLD_H` | `4` | `float(0,168)` | Runway threshold. |',
+      '| `SITE_TIMEZONE` | unset (behaves as the container zone) | `str?` | Site time zone. |',
     ),
     [P.entities]: lines(
       '# Entities',
@@ -565,6 +567,21 @@ test('D7: one row per option key, and its default and schema equal config.yaml',
   expectFail('D7', (f) => replace(f, P.options, '| `HEARTBEAT_URL` |', '| `HEARTBEAT_URL` / `HEARTBEAT_INTERVAL_S` |'), /is not one backticked option key/);
   expectFail('D7', (f) => { f[P.options] = null; }, /docs\/guide\/options\.md:0 missing/);
   expectFail('D7', (f) => replace(f, P.config, '  LOG_LEVEL: list(trace|debug|info)\n', ''), /LOG_LEVEL has a default but no schema/);
+});
+
+/* ── v1.191.0: schema-only keys (optional, no default; exported only when set) ─────────────── */
+
+test('D7: a schema-only key is allowed when optional, and its row states what unset means', () => {
+  expectPass(); // the fixture carries SITE_TIMEZONE as "str?" with no options: default
+  expectFail('D7', (f) => replace(f, P.config, '  SITE_TIMEZONE: "str?"', '  SITE_TIMEZONE: str'), /SITE_TIMEZONE has a schema but no default \(a schema-only key must be optional/);
+  expectFail('D7', (f) => replace(f, P.options, '| `SITE_TIMEZONE` | unset (behaves as the container zone) |', '| `SITE_TIMEZONE` | `""` |'), /SITE_TIMEZONE has no options: default, so its Default cell must read "unset \(behaves as …\)"/);
+  expectFail('D7', (f) => replace(f, P.options, '| `SITE_TIMEZONE` | unset (behaves as the container zone) | `str?` |', '| `SITE_TIMEZONE` | unset (behaves as the container zone) | `str` |'), /SITE_TIMEZONE schema "str" ≠ config\.yaml "str\?"/);
+  expectFail('D7', (f) => replace(f, P.options, '| `SITE_TIMEZONE` | unset (behaves as the container zone) | `str?` | Site time zone. |\n', ''), /SITE_TIMEZONE has no row/);
+});
+
+test('D4: a schema-only key is a known option name on the operator pages', () => {
+  expectPass((f) => append(f, P.guide, '\nLeave `SITE_TIMEZONE` empty.\n'));
+  expectFail('D4', (f) => append(f, P.guide, '\nSet `SITE_TIMEZONE_X`.\n'), /SITE_TIMEZONE_X/);
 });
 
 /* ── D8 ratchets and release headings ───────────────────────────────────── */

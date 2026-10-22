@@ -36,14 +36,21 @@
  *   5. New `degradeReason` output tells consumers when the planner cannot
  *      meaningfully optimize (flat forecast or no TOU spread).
  */
+// v1.191.0 (lane A, T9) — the hour-of-day index is the SITE hour, the clock index.ts builds the
+// tariff vector on.
+import { siteHour } from '../siteTime.js';
+
+import { legacyTariffFromEnv } from '../tariff.js';
+import { MPC_ROUND_TRIP_EFFICIENCY } from '../limits.js';
+import { fmtMoney, moneySymbol } from '../money.js';
 
 /**
  * Per-hour tariff fallback (¢/kWh) when `tariffOnPeakCentsByHour[h]` is missing
- * or undefined. Defaults to the operator's APS flat rate of 17 ¢/kWh; override with
- * `TARIFF_FLAT_CENTS_PER_KWH` to match the env-driven default used by
- * `index.ts` and the canonical tariff constants in `analytics.ts` (v0.9.58+).
+ * or undefined: the flat fallback rate, TARIFF_FLAT_CENTS_PER_KWH (17 ¢/kWh when
+ * absent). v1.191.0 — read through tariff.ts legacyTariffFromEnv, the one reader
+ * index.ts and analytics.ts use too (three copies of `?? 17` until then).
  */
-const TARIFF_FALLBACK_CENTS = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
+const TARIFF_FALLBACK_CENTS = legacyTariffFromEnv().flatCents;
 
 /**
  * Round-trip efficiency for grid→battery→load arbitrage. ~90% is a
@@ -51,8 +58,9 @@ const TARIFF_FALLBACK_CENTS = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17
  * Off-peak charge-from-grid only pays back when (on_peak − off_peak/η_rt)
  * × discharged_kWh > 0. With η_rt = 0.9, an 8 ¢ off-peak / 25 ¢ on-peak
  * spread leaves ~16 ¢/kWh of margin; a 17 ¢ flat tariff leaves nothing.
+ * v1.191.0 (OWNER DECISION 9) — named in limits.ts beside the night-charge 0.86; value kept.
  */
-const ROUND_TRIP_EFFICIENCY = Number(process.env.MPC_ROUND_TRIP_EFFICIENCY ?? 0.9);
+const ROUND_TRIP_EFFICIENCY = MPC_ROUND_TRIP_EFFICIENCY;
 
 /**
  * Maximum battery charge / discharge rate as a fraction of pool capacity
@@ -61,8 +69,8 @@ const ROUND_TRIP_EFFICIENCY = Number(process.env.MPC_ROUND_TRIP_EFFICIENCY ?? 0.
  */
 const MAX_C_RATE = Number(process.env.MPC_MAX_C_RATE ?? 0.25);
 
-/** Export tariff (¢/kWh) — defaults to 0 (no net-metering credit). */
-const EXPORT_TARIFF_CENTS = Number(process.env.TARIFF_EXPORT_CENTS_PER_KWH ?? 0);
+/** Export tariff (¢/kWh) — defaults to 0 (no net-metering credit). TARIFF_EXPORT_CENTS_PER_KWH, through tariff.ts. */
+const EXPORT_TARIFF_CENTS = legacyTariffFromEnv().exportCents;
 
 export type MpcAction =
   | 'lower'           // drop reserve floor (legacy)
@@ -102,9 +110,9 @@ export interface MpcInputs {
    * v0.9.67 — wall-clock anchor for tariff hour-of-day indexing. Defaults to
    * `Date.now()`. Inject a fixed ms timestamp for deterministic tests — the
    * planner's optimum shifts based on where on-peak hours fall in the 24-hour
-   * DP horizon, which is anchored at `new Date(nowMs).getHours()`. CI runs in
-   * UTC; local dev in user TZ; without this they pick different optima and
-   * regression tests flake (see dispatch.test.ts:570 history).
+   * DP horizon, which is anchored at the site hour of `nowMs` (v1.191.0: siteTime.ts
+   * siteHour; it was the host's `getHours()`, so CI in UTC and local dev in the
+   * user's zone picked different optima — see dispatch.test.ts:570 history).
    */
   nowMs?: number;
 }
@@ -377,7 +385,7 @@ export function recommendDispatch(inputs: MpcInputs): MpcResult {
   // straddle a wall-clock boundary mid-DP and silently mis-align tariff lookups
   // by one slot. Cache → reuse in both the forward pass and the reconstruction.
   // v0.9.67 — also accept `inputs.nowMs` to make this deterministic in tests.
-  const startHour = new Date(inputs.nowMs ?? Date.now()).getHours();
+  const startHour = siteHour(inputs.nowMs ?? Date.now());
 
   const exportTariffUsdPerKwh = EXPORT_TARIFF_CENTS / 100;
 
@@ -562,13 +570,14 @@ export function recommendDispatch(inputs: MpcInputs): MpcResult {
 
   const notes: string[] = [
     `Optimized 24 h schedule via dynamic programming (${SOC_BUCKETS.length} SoC buckets × ${ACTIONS.length} actions)`,
-    `Baseline (no MPC) projected cost: $${baselineCost.toFixed(2)}; optimized: $${bestEnd.cell.cost.toFixed(2)}`,
+    // v1.191.0 (CA14) — the currency of TARIFF_CURRENCY ($ when unset: the text is unchanged).
+    `Baseline (no MPC) projected cost: ${fmtMoney(baselineCost)}; optimized: ${fmtMoney(bestEnd.cell.cost)}`,
     `Round-trip efficiency assumed: ${(ROUND_TRIP_EFFICIENCY * 100).toFixed(0)}%; C-rate cap: ${(MAX_C_RATE * 100).toFixed(0)}%/h`,
   ];
   if (degradeReason === 'no-tou-spread') {
-    notes.push('No TOU spread detected — every hour has the same tariff, so charge/discharge arbitrage cannot save money. Reporting $0 expected savings.');
+    notes.push(`No TOU spread detected — every hour has the same tariff, so charge/discharge arbitrage cannot save money. Reporting ${moneySymbol()}0 expected savings.`);
   } else if (degradeReason === 'flat-forecast') {
-    notes.push('PV + load forecasts are effectively flat (no diurnal signal). Planner has no shape to optimize against; reporting $0 expected savings.');
+    notes.push(`PV + load forecasts are effectively flat (no diurnal signal). Planner has no shape to optimize against; reporting ${moneySymbol()}0 expected savings.`);
   }
 
   return {

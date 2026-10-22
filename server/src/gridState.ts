@@ -34,6 +34,7 @@ import { aggregateFleetFlow, homeCoreCoverage, shp2ReadbackFresh, SHP2_READBACK_
 import type { CachedEntity } from './haStateCache.js';
 import * as haStateCache from './haStateCache.js';
 import type { AlarmPriority } from './alertPriority.js';
+import { isShp2Product } from './topology.js';
 
 /** acIn at/above this (W) is positive proof the grid is energized AND drawing. */
 export const GRID_IMPORT_WATTS = 5;
@@ -495,7 +496,7 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
  *  panel), projected or not. v1.185.0 — all of them, sorted by serial. */
 function identityShp2s(devices: Record<string, DeviceSnapshot>): DeviceSnapshot[] {
   return Object.values(devices)
-    .filter((d) => d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel'))
+    .filter((d) => d.projection?.kind === 'shp2' || isShp2Product(d.productName))
     .sort((a, b) => (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
 }
 

@@ -19,12 +19,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
-import { makeRecorderStub } from './helpers/recorderStub.js';
 
 const tmp = mkdtempSync(join(tmpdir(), 'ef-held-memo-'));
 process.env.DB_PATH = join(tmp, 'ecoflow.db');
 const DB_PATH = join(tmp, 'ecoflow.db');
 
+// v1.191.0 — imported after the environment is set: the stub's import chain now reaches config.ts
+// (aggregator.ts → siteTime.ts), which reads DB_PATH once when it loads.
+const { makeRecorderStub } = await import('./helpers/recorderStub.js');
 const { createRecorder } = await import('../src/recorder.js');
 const { createReadRecorder } = await import('../src/readRecorder.js');
 const { windowedEnergyWh, eqQueryMulti, resetDailyEnergyCache, resetEquipmentHealthCaches } = await import('../src/analytics.js');

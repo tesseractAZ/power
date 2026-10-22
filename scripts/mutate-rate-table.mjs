@@ -28,7 +28,8 @@ const MUTANTS = [
   {
     id: 'i. ★ the two-tier ladder comes back (the shipped defect)',
     file: A,
-    find: '  const slice = rateAt(apsREvModelFromEnv(), tsMs);\n  if (slice.centsPerKwh != null) return slice.centsPerKwh;\n  return onPeakAt(tsMs) ? fallback.onPeak : fallback.offPeak;',
+    // v1.191.0 — re-pointed: the model of the plan in effect (tariffModelFromEnv; the APS preset while TARIFF_PLAN is unset).
+    find: '  const slice = rateAt(tariffModelFromEnv(), tsMs);\n  if (slice.centsPerKwh != null) return slice.centsPerKwh;\n  return onPeakAt(tsMs) ? fallback.onPeak : fallback.offPeak;',
     to: '  return onPeakAt(tsMs) ? fallback.onPeak : fallback.offPeak; /* MUTANT */',
     why: 'Every overnight kWh returns to the off-peak rate — $47.91/month over-stated, and nothing throws.',
   },

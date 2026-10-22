@@ -22,6 +22,7 @@
  * The fixtures mirror the September pattern: clean clear days, cloudy days, and clear days on
  * which the packs fill by noon (09-18, 09-21, 09-25, 09-30).
  */
+import './helpers/siteZoneIsHostZone.js'; // v1.191.0 — fixtures on the host clock: the site zone is the host's (first import)
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {

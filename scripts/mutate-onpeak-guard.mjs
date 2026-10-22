@@ -73,7 +73,8 @@ const MUTANTS = [
   {
     id: 'S-iii. ★★★ the evening job arms with no on-peak start',
     file: IDX,
-    find: '      const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(apsREvModelFromEnv(), plan.window.startMs) : null;',
+    // v1.191.0 — re-pointed: the tariff of the plan in effect (tariffModelFromEnv).
+    find: '      const armOnPeakStartMs = plan.window != null ? nextOnPeakStartMs(tariffModelFromEnv(), plan.window.startMs) : null;',
     to: '      const armOnPeakStartMs = null; /* MUTANT */',
     why: 'The guard is wired in the pure core and never reached in production.',
   },

@@ -59,14 +59,14 @@ const MUTANTS = [
   {
     id: 'v. ★★ an incomplete basis defers past the deadline',
     file: NCA,
-    find: '    && nowMin < NIGHT_PLAN_STALE_DEFER_UNTIL_MIN;',
+    find: '    && nowMin < deferUntilMin;',
     to: '    /* MUTANT */;',
     why: 'A genuinely incomplete night never decides: no notice, no cancel of a prior arm, until the 23:00 cutoff.',
   },
   {
     id: 'vi. ★★★ the evening job latches an incomplete basis at once',
     file: IX,
-    find: '    if (eveningBasisDefers(fresh?.plan ?? null, nowMin)) {',
+    find: '    if (eveningBasisDefers(fresh?.plan ?? null, nowMin, deferUntilMin)) {',
     to: '    if (false /* MUTANT */) {',
     why: 'A start-up transient at 21:30 latches "no plan" and cancels an armed charge (2026-09-27).',
   },

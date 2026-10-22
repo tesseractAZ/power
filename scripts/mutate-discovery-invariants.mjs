@@ -49,8 +49,9 @@ const MUTANTS = [
   {
     id: 'iii. USD/kWh is swept into the currency list',
     file: DISC,
-    find: "const CURRENCY_UNITS: readonly string[] = ['USD', 'EUR', 'GBP', 'CAD', 'AUD'];",
-    to: "const CURRENCY_UNITS: readonly string[] = ['USD', 'USD/kWh', 'EUR', 'GBP', 'CAD', 'AUD']; /* MUTANT */",
+    // v1.191.0 — re-pointed: the list is money.ts CURRENCIES (also the TARIFF_CURRENCY codes accepted).
+    find: "const CURRENCY_UNITS: readonly string[] = CURRENCIES; // v1.191.0 — money.ts: also the TARIFF_CURRENCY codes accepted",
+    to: "const CURRENCY_UNITS: readonly string[] = [...CURRENCIES, 'USD/kWh']; /* MUTANT */",
     why: 'A PRICE would be forced to device_class monetary, which describes an amount of money — and would break the one sensor HA mints its cost entity from.',
   },
   {

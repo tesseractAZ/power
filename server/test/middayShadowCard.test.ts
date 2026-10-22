@@ -71,9 +71,10 @@ test('★★★ the card: a read-only section, in every shape whose status is kn
     assert.ok(!fn.includes(banned), `${banned} in the shadow section`);
   }
   // R5 — with the evening notice it would have sent (its title, "not sent").
-  assert.match(fn, /const view = middayShadowView\(shadow, phoenixHHMM, preview\);\n\s+if \(view == null\) return null;/);
+  // v1.191.0 (T16) — the section's clock is the payload's site zone (hhmm), passed down from the card.
+  assert.match(fn, /const view = middayShadowView\(shadow, hhmm, preview\);\n\s+if \(view == null\) return null;/);
   const body = card.slice(card.indexOf('export const NightChargeCard = memo('), card.indexOf('\n});\n'));
-  assert.equal(body.split('<MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} />').length - 1, 3, 'the no-plan, hold and charge shapes');
+  assert.equal(body.split('<MiddayShadowSection shadow={status.middayShadow} preview={status.middayShadowPreview} hhmm={hhmm} />').length - 1, 3, 'the no-plan, hold and charge shapes');
   // The status-blind shape (no status) has none: there is no record to show.
   const unavailable = body.slice(body.indexOf('if (!status) {'), body.indexOf('const actuation = withConfirmedCancel('));
   assert.ok(!unavailable.includes('MiddayShadowSection'));

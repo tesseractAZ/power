@@ -176,13 +176,13 @@ total on the primary would make that entity mean two things at once.
 
 - **Entity ids are stable across renames — but not because of `object_id`.**
   v1.141.0 published one and it was inert: HA minted
-  `sensor.ecoflow_panel_east_wing_l1_power` (device slug + slugified name), so
+  `sensor.ecoflow_panel_kitchen_l1_power` (device slug + slugified name), so
   the key was removed in v1.141.1. Stability comes from HA persisting an
   entity_id against its `unique_id` at first discovery, which matters because the
-  energy prefs wire `stat_rate` **by string**. The proof is in this fleet: the
+  energy prefs wire `stat_rate` **by string**. The proof is on the reference plant: the
   energy entity_ids still read `…_circuit_3_energy` from before v1.65.0's
   pair-aware naming, while the power entity minted for the same channel reads
-  `…_east_wing_l2_power`.
+  `…_kitchen_l2_power`.
 - A missing reading is `null`, **never 0** — on a `measurement` sensor a zero is
   compiled into HA's mean as a positive claim the circuit drew nothing. A genuine
   measured 0 passes through.
@@ -194,18 +194,14 @@ total on the primary would make that entity mean two things at once.
   is the same filtered-subset shape as the v1.137.0 table-invariant defects (Table
   invariants + connect re-assertion, below).
 
-**Operator step, HA-side:** for each of the twelve `device_consumption` entries in the
-energy prefs, add a `"stat_rate"` naming that channel's power entity. Take the entity_id
-from HA's entity registry (unique_id `ecoflow_circuit_<ch>_watts`). HA mints it from the
-device and circuit name, e.g. `sensor.ecoflow_panel_east_wing_l1_power`, never
-`sensor.ecoflow_circuit_<ch>_power`.
-`stat_consumption` is untouched and the Energy tab is unaffected. All three
-`energy_sources` already carry `stat_rate`; the twelve devices carry none, and
-that is the whole gap.
-
-> Circuit 1 will publish a permanent **0 W** — the unresolved ch1 CT question
-> (0.147 kWh lifetime against ch3's 66.6 kWh on a pairing that should be
-> comparable), settleable only physically. Publishing pair sums would hide it.
+**Operator step, HA-side:** give each circuit's `device_consumption` entry in the energy
+prefs a `"stat_rate"` naming that channel's power entity. Take the entity_id from HA's
+entity registry (unique_id `ecoflow_circuit_<ch>_watts`): HA mints it from the device and
+circuit name, e.g. `sensor.ecoflow_panel_kitchen_l1_power`, never
+`sensor.ecoflow_circuit_<ch>_power`. `stat_consumption` is untouched and the Energy tab is
+unaffected. A circuit whose current transformer reads nothing publishes a steady 0 W; pair
+sums are not published, so such a circuit stays visible. (The reference plant's own wiring
+note is in [the reference plant's notes](../history/reference-plant-notes.md).)
 
 #### Alarm-priority switches (bidirectional)
 
@@ -528,9 +524,9 @@ are cached (~30 min) on the worker.
   cascades while never masking a real low near the danger zone (asymmetric drop/rise
   gating).
 - **Spares** are resolved from the SHP2's live connected-source roster, then the persisted
-  last-known roster, with the `SPARE_DPU_SNS` literal only as a floor (a DPU it does not name
-  is never a spare). The literal has been inverted since 2026-08-20 (it names wired Core 5
-  and not bench Core 3), so it is never consulted alone (§12l).
+  last-known roster, with the bench-spare list only as a floor (a DPU it does not name is never
+  a spare): `BENCH_SPARE_SNS` when set, else the `SPARE_DPU_SNS` literal. A literal goes stale
+  when a plant is rewired, so it is never consulted alone.
 - **Honest nulls everywhere:** null numeric fields emit `null` → HA `unknown`, never a
   fabricated 0/OFF; `gridSta` null stays null; `backup_reserve_enabled` reads `unknown`
   when the strategy object is absent.
@@ -641,7 +637,7 @@ vendor's degraded window produces uniformly slow responses and a 2×-median
 gate could starve recovery exactly when it is needed. Backdrop worth knowing:
 HAOS restarts systemd-timesyncd on every 2-hourly DHCP renewal, and each
 restart performs an "Initial clock synchronization" step — small host-clock
-steps are routine on this Pi, not exceptional.
+steps are routine on the reference plant's Raspberry Pi, not exceptional.
 
 ### 2.15 Telemetry-blind self-alert (`server/src/telemetryBlind.ts`) — v1.69.0
 

@@ -31,6 +31,8 @@
  *    and keeps its own protection throughout.
  * ═════════════════════════════════════════════════════════════════════════ */
 
+import { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT, SHP2_SOURCE_SLOTS } from './hwSpec.js';
+
 export type NightChargeMode = 'advisory' | 'supervised' | 'auto';
 
 /** Owner mode from the add-on option. Unknown/absent values fail closed to
@@ -303,9 +305,12 @@ export function resetReserveArbitrageRaised(): void { reserveArbitrageRaised = f
  * is its ceiling. The vendor's path to a fuller battery is force-charge
  * (`ch{n}ForceCharge` + `foceChargeHight`, documented range 80-100) — a separate command
  * with its own on-peak hazard. It is NOT reachable by widening this constant.
+ *
+ * v1.191.0 — both bounds are hardware facts in hwSpec.ts (values unchanged, re-exported here for
+ * the existing importers). The 10 % floor stays a safety rule and the 50 % ceiling the firmware's
+ * (P6): neither is an option.
  */
-export const RESERVE_WRITE_MIN_PCT = 10;
-export const RESERVE_WRITE_MAX_PCT = 50;
+export { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT };
 
 export function clampReserveTarget(targetSocPct: number): number {
   return Math.min(RESERVE_WRITE_MAX_PCT, Math.max(RESERVE_WRITE_MIN_PCT, Math.round(targetSocPct)));
@@ -706,7 +711,7 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     // whose slots are unreadable but whose ON is stamped still OFFs every slot —
     // see the integrator's fallback to all three.
     forceChargeSlots: Array.isArray(o.forceChargeSlots)
-      ? o.forceChargeSlots.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 3)
+      ? o.forceChargeSlots.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= SHP2_SOURCE_SLOTS)
       : null,
     // v1.186.0 — the ON-verify record resumes across a restart: no second warning, no
     // second re-issue, and a verified ON is not re-judged.
@@ -717,7 +722,7 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     // v1.187.22 — as the slots above: 1-3 integers, else no list (read as a whole-night failure,
     // as every failure before the list was kept).
     forceChargeOnFailedSlots: Array.isArray(o.forceChargeOnFailedSlots)
-      ? o.forceChargeOnFailedSlots.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 3)
+      ? o.forceChargeOnFailedSlots.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= SHP2_SOURCE_SLOTS)
       : null,
     forceChargeOffAtMs: num(o.forceChargeOffAtMs),
     forceChargeOffReason: str(o.forceChargeOffReason),
