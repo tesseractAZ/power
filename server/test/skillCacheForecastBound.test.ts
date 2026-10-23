@@ -151,6 +151,30 @@ test('★★★ a cached forecast whose Cores differ from the map is rebuilt, no
   assert.deepEqual(f2.solarModelSns, ['DPU-A', 'DPU-B']);
 });
 
+test('★★★ … and where the model\'s Cores alone move (no restored Core on either side), still rebuilt', async () => {
+  // v1.191.2 — the cache also compares the restored Cores (connected, unprojected). Above, the join
+  // moves both lists; here only the model moves, so the model check alone stands between the cached
+  // forecast and its TTL.
+  setWeatherCacheForTesting(null);
+  const r2 = pvRecorder();
+  // A projected home Core leaves the panel's source list: the model shrinks, nothing is restored.
+  const both = { 'SHP2-T': panel(['DPU-A', 'DPU-B']), 'DPU-A': dpu('DPU-A'), 'DPU-B': dpu('DPU-B') };
+  const f1 = await getDayForecast(both, r2, () => {});
+  assert.deepEqual(f1.solarModelSns, ['DPU-A', 'DPU-B']);
+  const left = { ...both, 'SHP2-T': panel(['DPU-A']) };
+  const f2 = await getDayForecast(left, r2, () => {});
+  assert.notEqual(f2, f1, 'a Core left the source list ⇒ rebuilt');
+  assert.deepEqual(f2.solarModelSns, ['DPU-A']);
+  // A home with no panel: every projected Core is the model, nothing is ever restored.
+  resetForecastCachesForTesting();
+  const one = { 'DPU-A': dpu('DPU-A') };
+  const g1 = await getDayForecast(one, r2, () => {});
+  assert.equal(await getDayForecast(one, r2, () => {}), g1, 'same Cores ⇒ the cache still serves');
+  const g2 = await getDayForecast({ ...one, 'DPU-B': dpu('DPU-B') }, r2, () => {});
+  assert.notEqual(g2, g1, 'a second Core projected ⇒ rebuilt');
+  assert.deepEqual(g2.solarModelSns, ['DPU-A', 'DPU-B']);
+});
+
 test('★★ the probabilistic band is reused only for its own forecast, and never cached on an incomplete one', async () => {
   const t = Date.now();
   const a = forecast(10, t);

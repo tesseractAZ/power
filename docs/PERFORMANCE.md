@@ -21,6 +21,8 @@ Evidence sources: the cleared-alert ledger (`/api/alerts/history`, cap `CLEARED_
 
 Not re-measured: §4b (2026-09-11), the §4a span table, §4's cell-spread norms, the §7.2 full sweep and every harness time but three, and each §6 item that names an earlier date. §5 adds the review cycles of 2026-10-11 → 10-14. ★ At the time of measurement all five Cores had been offline per the EcoFlow cloud since 10-15 01:55, after a 122-minute name-resolution outage, and the recorder kept writing their last values as fresh samples (§6); the SHP2 was offline with them until 04:16 and its series were held the same way. No measured figure here uses the Cores' recorder data after 10-15 01:55 or the SHP2's for 01:55 → 04:16, except these, each stated where it appears: §6, §3's account of the 10-14 night and §4c's recorder-intake figure use the held rows as evidence of the hold; §4c's database size counts them among its samples; §3 quotes the 10-14 night's scorer coverage, which counts them, beside its live coverage; and every figure computed from the current forecast model — §2's probabilistic diagnostics and the 10-15 plan's basis reading that uses them, the forecast-skill route, the hourly backtest route and its offline re-score, and §6 where it quotes them — rests on a 30-day solar-response fit that takes in the Cores' held 0-W daylight hours of 10-15, and is in-sample besides (§2). §2's night-charge ledger figures, graded from forecasts issued before the hold, carry neither. Read-back checks made at 18:45–19:32 (the held rows themselves, the backtest's actuals, the ledger's coverage column and the 10-14 row's PV coverage) cover fixed, elapsed windows, except the 10-14 row's PV coverage, which §6 dates.
 
+**Revision of 2026-10-22.** §4d is new (the live host and a replay, v1.191.1 → v1.191.2); §4c gains a note. Nothing else is re-measured.
+
 ---
 
 ## 1. Alarm engine — audible-event discipline
@@ -586,12 +588,57 @@ process is 291 MiB resident (peak 1.09 GiB since the 20:32 start, time unknown);
 reports 1.63–1.85 GiB for the container, most of it SQLite page cache (285 MB anonymous against
 2.13 GB file cache). For trend, §4b (2026-09-11): load 0.22, 98.8% idle, 3.7 GB used.
 
+★ *2026-10-22 (§4d): this process started before the Cores went dark; one started while they
+were dark held its worker at about 37% of a core until v1.191.2.*
+
 **Database size.** The live database is 3,350,618,112 B (write-ahead log 7.6 MB, about 18.9
 million samples; samples retention 1,825 days). The `/share` snapshot published by
 `VACUUM INTO` is 2,475,077,632 B and dated 2026-09-27: 14 days old at the 2026-10-11 boot and 18
 days old on 10-15. A 1,917,849,600-B `analyze-probe.db` dated 2026-09-12 sits beside it; if
 `/share` is in the Home Assistant backups, it adds 1.92 GB to each. (§4b's 1.72 GB is a
 September copy.)
+
+---
+
+## 4d. The day forecast rebuilt on every read while every Core was dark (measured 2026-10-22)
+
+The reference Pi (§4c) ran **v1.191.1** from 14:23 MST on 10-22, with all five Cores listed offline
+by the EcoFlow cloud since 10-15 01:55. Read-only: per-thread CPU time (`docker top` every 30 s,
+16:44:54 → 16:54:54), GETs one at a time (16:49:51 → 16:51:41), and the add-on log.
+
+- Analytics worker: **36.7% of a core** (220 s in 600 s; the main thread 2 s). §4c's 0.43% came
+  from a process started before the Cores went dark: projections survive a cloud-offline
+  transition, so it kept its cached forecast.
+- `/api/forecast`, `/api/forecast-skill`, `/api/confidence`, `/api/runway`: **1.60–1.62 s** each;
+  `/api/ha-state` 3.03 and 3.64 s; reads that need no forecast queued behind a rebuild for up to
+  2.97 s.
+- **84** `slow request` lines in 2 h 29 min (§4c: 50 in 47.8 h): a dashboard load at the start (23,
+  up to 5.2 s), then the dashboard's and Home Assistant's reads, `/api/ha-state` up to 5.2 s.
+
+**Cause.** `computeDayForecastUncached` cached only with a projected Core (`dpus.length > 0`).
+Projections live in memory and a Core the cloud lists offline is never polled, so a process started
+with every Core dark had none, although its forecast was complete (the panel's load and each
+connected Core's own recorded PV). Every forecast-dependent report paid a rebuild, about 13 a minute
+from the alarm monitor, MQTT, the runway ticks and the self-warm, and the caches keyed on its
+`generatedAt` never hit. Not a regression: v1.188.1 to v1.191.1 replay at 10.6–11.1% alike.
+
+**Replay**: the real worker and client on an APFS clone of the `/share` snapshot (data to 10-18
+19:01 MST), the live device snapshot moved to that clock, the production schedule, a 300-s window;
+Apple M5, Node 26.0.0, where a rebuild takes 0.48 s against the Pi's 1.6 s. The control projects
+the panel's Cores.
+
+| Replay | v1.191.1, dark | v1.191.2, dark | Control, before → after |
+|---|---|---|---|
+| Worker CPU | **10.63%** | **0.46%** | 0.15% → 0.15% |
+| `forecastAlerts` feed, mean / max (budget 2.5 s) | 943 / **1,496 ms** | 13 / 186 ms | 14 / 186 → 14 / 185 ms |
+| Slowest MQTT report, mean / max | 1,489 / 1,776 ms | 107 / 150 ms | 12 / 102 → 12 / 103 ms |
+| Eight forecast-dependent reports, one warm pass | **3,960 ms** | 40 ms | 38 → 38 ms |
+| One forecast build, warm | 480–486 ms | 267–273 ms | cached |
+
+v1.191.2 also caches on the projected house panel, keeps on the entry the dark Cores it re-added and
+the pending flag, and serves it only where both match; each dark Core's PV is read once per build.
+Built at a frozen instant, the dark and control forecasts are byte-identical to v1.191.1's. The Pi
+after the update is not measured here.
 
 ---
 

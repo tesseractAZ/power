@@ -101,8 +101,8 @@ const MUTANTS = [
   {
     id: 'xi. ★★★ a cached forecast fitted on other Cores is served for its TTL',
     file: AN,
-    find: "  return sns == null || sns.join(',') === homeModelSns(devices).join(',');",
-    to: '  return true; /* MUTANT */',
+    find: "  if (sns != null && sns.join(',') !== homeModelSns(devices).join(',')) return false;",
+    to: "  if ((false as boolean) && sns != null && sns.join(',') !== homeModelSns(devices).join(',')) return false; /* MUTANT */",
     why: 'A restart shortly before a 22:30 decision serves the partial forecast; the skill is empty and the night is cancelled.',
   },
   {
