@@ -179,6 +179,16 @@ battery SoC%. This is the object every downstream forecast/alarm consumer reads.
   home Cores its solar model was fitted on) equals the current map's home Cores
   (`dayForecastCacheUsable`, v1.186.5). A forecast fitted on a boot-time map that had not
   yet seen every Core is rebuilt instead of standing for the full 30-min TTL.
+- A forecast is cached only when the map gives it a basis: a projected Core or (v1.191.2) the
+  projected house panel; the boot device list, with neither, never latches. The panel clause
+  covers a process started while every home Core is cloud-dark: projections live in memory and an
+  offline Core is never polled, so no Core is projected, while the forecast, built on the panel's
+  load and each connected Core's own recorded PV, is complete. The entry records the connected but
+  unprojected Cores it re-added and whether a home Core's first reading was pending
+  (`homeBasisPending`); `dayForecastCacheUsable` rejects it when the first differs from the
+  current map's, or when the map is pending and the entry was not.
+- Each connected but unprojected Core's 30-day `pv_total` is read once per build, for both the
+  restored display curve and the restored fleet model (v1.191.2).
 - Every forecast records when the weather it was built on was fetched (`weatherFetchedAtMs`,
   carried onto the probabilistic band). A caller may ask for weather at most so old
   (`maxWeatherAgeMs`, the `forecast` and `probabilisticForecast` reports' argument): the 2 h
