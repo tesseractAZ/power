@@ -49,6 +49,28 @@ function firstLineDiff(a: string, b: string): string | null {
   return null;
 }
 
+/** The first path at which two JSON values differ. Numbers match within a relative 1e-12: the golden was
+ *  captured on one V8 and CI runs another, whose Math routines can differ in the last place (CI on Node 22
+ *  read 30.111348946933955 where the golden holds 30.11134894693396). Any real change in what the build
+ *  computes is far larger than that. */
+function firstValueDiff(a: unknown, b: unknown, path = '$'): string | null {
+  if (typeof a === 'number' && typeof b === 'number') {
+    if (a === b || Math.abs(a - b) <= 1e-12 * Math.max(Math.abs(a), Math.abs(b))) return null;
+    return `${path}: golden ${a} ≠ live ${b}`;
+  }
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') {
+    return a === b ? null : `${path}: golden ${JSON.stringify(a)} ≠ live ${JSON.stringify(b)}`;
+  }
+  if (Array.isArray(a) !== Array.isArray(b)) return `${path}: array vs object`;
+  const ka = Object.keys(a as object); const kb = Object.keys(b as object);
+  if (ka.join(',') !== kb.join(',')) return `${path}: keys ${ka.join(',')} ≠ ${kb.join(',')}`;
+  for (const k of ka) {
+    const d = firstValueDiff((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], `${path}.${k}`);
+    if (d) return d;
+  }
+  return null;
+}
+
 const live = capture();
 
 test('★★★ a dark-fleet build reads each connected Core\'s 30-day pv_total once', async () => {
@@ -63,7 +85,10 @@ test('★★★ … and the forecast is byte-identical to v1.191.1\'s on the sam
   const { forecast } = await live;
   const golden = readFileSync(GOLDEN, 'utf8');
   const text = JSON.stringify(forecast, null, 1) + '\n';
-  assert.ok(text === golden, firstLineDiff(golden, text) ?? 'differs');
+  if (text !== golden) {
+    const d = firstValueDiff(JSON.parse(golden), JSON.parse(text));
+    assert.equal(d, null, d ?? firstLineDiff(golden, text) ?? 'differs');
+  }
   // The control: the fixture exercises what the single read feeds.
   const f = forecast as { structurallyIncomplete: boolean; homeDpusConnected: number; homeDpusReporting: number; restoredSolarModel: { pairCount: number }; forecastPvWhNext24Display: number };
   assert.equal(f.structurallyIncomplete, false);
