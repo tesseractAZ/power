@@ -1859,7 +1859,11 @@ export function fleetSoilingFromDevices(
 // for the full FORECAST_DAY_TTL_MS; an incomplete one only for INCOMPLETE_FORECAST_TTL_MS,
 // so the cold re-scan is bounded to once per short window rather than every call, and a
 // complete forecast supersedes it the moment real data returns.
-let dayForecastCache: { ts: number; value: DayForecast; incomplete: boolean } | null = null;
+// v1.191.2 — `restoredSns` and `basisPending` are the dark-Core basis the entry was built on, kept
+// here rather than on the published forecast: the connected home Cores with no projection whose own
+// recorded PV the display figures re-add (homeRestoredSns), and whether a home Core's first reading
+// was pending (homeBasisPending). dayForecastCacheUsable compares both with the current map.
+let dayForecastCache: { ts: number; value: DayForecast; incomplete: boolean; restoredSns: string[]; basisPending: boolean } | null = null;
 // v0.73.0 — true while the current cache entry is still fresh for its TTL. A complete
 // entry uses the full 30-min TTL; an incomplete one decays after INCOMPLETE_FORECAST_TTL_MS
 // (a short negative-cache window). Centralising the rule keeps getDayForecast and the
@@ -2046,6 +2050,16 @@ export function homeModelSns(devices: Record<string, DeviceSnapshot>): string[] 
 }
 
 /**
+ * v1.191.2 — the home Cores (sorted SNs) a forecast built from `devices` restores from their own
+ * recorded PV: listed as connected by a panel, with no projection (computeDayForecastUncached's
+ * missingConnectedSns, as a set). ONE definition for the day-forecast cache entry and its check.
+ */
+function homeRestoredSns(devices: Record<string, DeviceSnapshot>): string[] {
+  const model = new Set(homeModelSns(devices));
+  return [...shp2ConnectedDpuSns(devices)].filter((sn) => !model.has(sn)).sort();
+}
+
+/**
  * v1.187.10 — the panel lists a home Core that the device list reports ONLINE but that has no
  * projection yet: its first quota has not landed. That is the boot race, not a cloud wedge (a
  * wedged Core is listed offline, and keeps its conservative figures). The analytics worker is
@@ -2078,11 +2092,22 @@ export function homeBasisPending(
 /** v1.186.5 — the cached forecast is usable only while its model covers the Cores the
  *  current map has: a forecast built on a boot-time map that had not yet seen every Core
  *  is not structurally incomplete while the SHP2 is present, and would otherwise stand
- *  for its full 30-min TTL (feeding runway, the band and a 22:30 night-charge decision). */
+ *  for its full 30-min TTL (feeding runway, the band and a 22:30 night-charge decision).
+ *
+ *  v1.191.2 — nor while the dark-Core basis it was built on has moved. With every home Core
+ *  cloud-dark the model is empty on both sides, so the check above cannot see a dark Core join or
+ *  leave the panel's source list (or return to it inside the chokepoint's re-arrival window, when
+ *  the reset is deferred): the restored Cores must match. And a map on which a home Core's first
+ *  reading is now pending (homeBasisPending) is never served an entry built while none was: built
+ *  now, the forecast would be structurally incomplete and withheld by the publishers. An entry
+ *  built pending is itself incomplete, so the short negative-cache TTL bounds the reverse. */
 function dayForecastCacheUsable(devices: Record<string, DeviceSnapshot>, now: number): boolean {
   if (!dayForecastCache || !dayForecastCacheFresh(now)) return false;
   const sns = dayForecastCache.value.solarModelSns;
-  return sns == null || sns.join(',') === homeModelSns(devices).join(',');
+  if (sns != null && sns.join(',') !== homeModelSns(devices).join(',')) return false;
+  if (dayForecastCache.restoredSns.join(',') !== homeRestoredSns(devices).join(',')) return false;
+  if (!dayForecastCache.basisPending && homeBasisPending(devices, now)) return false;
+  return true;
 }
 
 /** Phase 4: equipment-tuned day-ahead PV / load / SoC forecast. Cached ~30 min.
@@ -2661,7 +2686,17 @@ async function computeDayForecastUncached(
   // Cache whenever ≥1 DPU is present (so a totally-empty fleet still doesn't latch),
   // tagging the entry incomplete so the TTL fast-path uses the short negative-cache
   // window. A complete forecast overwrites it with incomplete:false + full TTL.
-  if (dpus.length > 0 && cacheWritable()) dayForecastCache = { ts: now, value, incomplete: structurallyIncomplete };
+  // v1.191.2 — or the house panel is projected. Projections live in memory only and a Core the
+  // cloud lists offline is never polled, so a process started while every home Core was cloud-dark
+  // (2026-10-22) had no projected DPU; the forecast it built on the panel's load and each connected
+  // Core's own recorded PV was complete, and rebuilt by every getDayForecast: about 1.6 s each on
+  // the Pi, about 13 a minute from the alarm feeds, MQTT, the runway ticks and the self-warm, a
+  // third of a core (replayed on a host about three times faster, the alarm engine's forecast
+  // feeds took up to 1.5 s of their 2.5 s budget).
+  // That basis (the restored Cores, the pending flag) rides on the entry for
+  // dayForecastCacheUsable. A fleet with no projection at all (the boot device list) still does
+  // not latch. One line: workerCacheInventory.test.ts reads each cache write with its gate.
+  if ((dpus.length > 0 || shp2 != null) && cacheWritable()) dayForecastCache = { ts: now, value, incomplete: structurallyIncomplete, restoredSns: homeRestoredSns(devices), basisPending };
   return value;
 }
 
