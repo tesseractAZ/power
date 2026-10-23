@@ -1,0 +1,697 @@
+{
+ "generatedAt": 1792375500000,
+ "hasWeather": true,
+ "historyDays": 30,
+ "reserveSoc": 16,
+ "hours": [
+  {
+   "ts": 1792378800000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2885,
+   "cloudCoverPct": 33,
+   "ghiWm2": 0,
+   "projectedSocPct": 60.3,
+   "modelled": false
+  },
+  {
+   "ts": 1792382400000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2976,
+   "cloudCoverPct": 33,
+   "ghiWm2": 0,
+   "projectedSocPct": 56.6,
+   "modelled": false
+  },
+  {
+   "ts": 1792386000000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2152,
+   "cloudCoverPct": 33,
+   "ghiWm2": 0,
+   "projectedSocPct": 53.8,
+   "modelled": false
+  },
+  {
+   "ts": 1792389600000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2007,
+   "cloudCoverPct": 33,
+   "ghiWm2": 0,
+   "projectedSocPct": 51.2,
+   "modelled": false
+  },
+  {
+   "ts": 1792393200000,
+   "forecastPvW": 0,
+   "forecastLoadW": 1878,
+   "cloudCoverPct": 20,
+   "ghiWm2": 0,
+   "projectedSocPct": 48.7,
+   "modelled": false
+  },
+  {
+   "ts": 1792396800000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2000,
+   "cloudCoverPct": 20,
+   "ghiWm2": 0,
+   "projectedSocPct": 46.1,
+   "modelled": false
+  },
+  {
+   "ts": 1792400400000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2114,
+   "cloudCoverPct": 20,
+   "ghiWm2": 0,
+   "projectedSocPct": 43.4,
+   "modelled": false
+  },
+  {
+   "ts": 1792404000000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2210,
+   "cloudCoverPct": 20,
+   "ghiWm2": 0,
+   "projectedSocPct": 40.5,
+   "modelled": false
+  },
+  {
+   "ts": 1792407600000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2276,
+   "cloudCoverPct": 20,
+   "ghiWm2": 0,
+   "projectedSocPct": 37.6,
+   "modelled": false
+  },
+  {
+   "ts": 1792411200000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2309,
+   "cloudCoverPct": 20,
+   "ghiWm2": 0,
+   "projectedSocPct": 34.7,
+   "modelled": false
+  },
+  {
+   "ts": 1792414800000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2309,
+   "cloudCoverPct": 20,
+   "ghiWm2": 0,
+   "projectedSocPct": 31.7,
+   "modelled": false
+  },
+  {
+   "ts": 1792418400000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2286,
+   "cloudCoverPct": 20,
+   "ghiWm2": 191,
+   "projectedSocPct": 28.8,
+   "modelled": false
+  },
+  {
+   "ts": 1792422000000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2213,
+   "cloudCoverPct": 20,
+   "ghiWm2": 370,
+   "projectedSocPct": 25.9,
+   "modelled": false
+  },
+  {
+   "ts": 1792425600000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2122,
+   "cloudCoverPct": 20,
+   "ghiWm2": 526,
+   "projectedSocPct": 23.2,
+   "modelled": false
+  },
+  {
+   "ts": 1792429200000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2014,
+   "cloudCoverPct": 20,
+   "ghiWm2": 649,
+   "projectedSocPct": 20.6,
+   "modelled": false
+  },
+  {
+   "ts": 1792432800000,
+   "forecastPvW": 0,
+   "forecastLoadW": 1886,
+   "cloudCoverPct": 20,
+   "ghiWm2": 731,
+   "projectedSocPct": 18.1,
+   "modelled": false
+  },
+  {
+   "ts": 1792436400000,
+   "forecastPvW": 0,
+   "forecastLoadW": 1754,
+   "cloudCoverPct": 20,
+   "ghiWm2": 767,
+   "projectedSocPct": 15.8,
+   "modelled": false
+  },
+  {
+   "ts": 1792440000000,
+   "forecastPvW": 0,
+   "forecastLoadW": 1630,
+   "cloudCoverPct": 20,
+   "ghiWm2": 755,
+   "projectedSocPct": 13.6,
+   "modelled": false
+  },
+  {
+   "ts": 1792443600000,
+   "forecastPvW": 0,
+   "forecastLoadW": 1519,
+   "cloudCoverPct": 20,
+   "ghiWm2": 695,
+   "projectedSocPct": 11.5,
+   "modelled": false
+  },
+  {
+   "ts": 1792447200000,
+   "forecastPvW": 0,
+   "forecastLoadW": 1424,
+   "cloudCoverPct": 20,
+   "ghiWm2": 592,
+   "projectedSocPct": 9.6,
+   "modelled": false
+  },
+  {
+   "ts": 1792450800000,
+   "forecastPvW": 0,
+   "forecastLoadW": 1358,
+   "cloudCoverPct": 20,
+   "ghiWm2": 452,
+   "projectedSocPct": 7.8,
+   "modelled": false
+  },
+  {
+   "ts": 1792454400000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2721,
+   "cloudCoverPct": 20,
+   "ghiWm2": 283,
+   "projectedSocPct": 4.3,
+   "modelled": false
+  },
+  {
+   "ts": 1792458000000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2722,
+   "cloudCoverPct": 20,
+   "ghiWm2": 96,
+   "projectedSocPct": 0.9,
+   "modelled": false
+  },
+  {
+   "ts": 1792461600000,
+   "forecastPvW": 0,
+   "forecastLoadW": 2752,
+   "cloudCoverPct": 20,
+   "ghiWm2": 0,
+   "projectedSocPct": 0,
+   "modelled": false
+  }
+ ],
+ "forecastPvWhNext24": 0,
+ "typicalPvWhPerDay": 0,
+ "pvBiasFactor": 1,
+ "typicalPvCurveWhPerHour": [
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0
+ ],
+ "forecastPvWhNext24Display": 128704,
+ "typicalPvWhPerDayDisplay": 134601,
+ "typicalPvCurveWhPerHourDisplay": [
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  1911,
+  6012,
+  9741,
+  12866,
+  15194,
+  16568,
+  16895,
+  16147,
+  14371,
+  11686,
+  8268,
+  4339,
+  605,
+  0,
+  0,
+  0,
+  0,
+  0
+ ],
+ "restoredSolarModel": {
+  "hourly": [
+   {
+    "hour": 0,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 1,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 2,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 3,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 4,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 5,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 6,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 2542,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 7,
+    "coeff": 30.11134894693396,
+    "r2": 0.503134567927091,
+    "samples": 30,
+    "observedMaxPvW": 7910,
+    "meanGhiWm2": 174
+   },
+   {
+    "hour": 8,
+    "coeff": 25.177140592974837,
+    "r2": 0.497087941765572,
+    "samples": 30,
+    "observedMaxPvW": 12730,
+    "meanGhiWm2": 337
+   },
+   {
+    "hour": 9,
+    "coeff": 23.387125189030485,
+    "r2": 0.48367063964333445,
+    "samples": 30,
+    "observedMaxPvW": 16796,
+    "meanGhiWm2": 478
+   },
+   {
+    "hour": 10,
+    "coeff": 22.37121227993324,
+    "r2": 0.4679964290512734,
+    "samples": 30,
+    "observedMaxPvW": 19932,
+    "meanGhiWm2": 590
+   },
+   {
+    "hour": 11,
+    "coeff": 21.63836730616783,
+    "r2": 0.4527362144612521,
+    "samples": 30,
+    "observedMaxPvW": 21966,
+    "meanGhiWm2": 665
+   },
+   {
+    "hour": 12,
+    "coeff": 21.01426090089174,
+    "r2": 0.4418580636777139,
+    "samples": 30,
+    "observedMaxPvW": 22674,
+    "meanGhiWm2": 697
+   },
+   {
+    "hour": 13,
+    "coeff": 20.402215777135254,
+    "r2": 0.437292207950048,
+    "samples": 30,
+    "observedMaxPvW": 21912,
+    "meanGhiWm2": 686
+   },
+   {
+    "hour": 14,
+    "coeff": 19.71746952149891,
+    "r2": 0.4399186376766018,
+    "samples": 30,
+    "observedMaxPvW": 19652,
+    "meanGhiWm2": 632
+   },
+   {
+    "hour": 15,
+    "coeff": 18.84068981185831,
+    "r2": 0.4498102179383007,
+    "samples": 30,
+    "observedMaxPvW": 16011,
+    "meanGhiWm2": 538
+   },
+   {
+    "hour": 16,
+    "coeff": 17.49029458268526,
+    "r2": 0.46494342276560896,
+    "samples": 30,
+    "observedMaxPvW": 11276,
+    "meanGhiWm2": 411
+   },
+   {
+    "hour": 17,
+    "coeff": 14.669175736352951,
+    "r2": 0.4827702334623166,
+    "samples": 30,
+    "observedMaxPvW": 5875,
+    "meanGhiWm2": 257
+   },
+   {
+    "hour": 18,
+    "coeff": 6.010955215642001,
+    "r2": 0.5015800617610363,
+    "samples": 30,
+    "observedMaxPvW": 814,
+    "meanGhiWm2": 88
+   },
+   {
+    "hour": 19,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 20,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 21,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 22,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 23,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   }
+  ],
+  "peakCoeff": 25.177140592974837,
+  "peakGateMinGhiWm2": 300,
+  "pairCount": 720,
+  "historyDays": 29.958333333333332
+ },
+ "minProjectedSoc": 0,
+ "minProjectedSocTs": 1792461600000,
+ "solarModel": {
+  "hourly": [
+   {
+    "hour": 0,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 1,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 2,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 3,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 4,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 5,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 6,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 7,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 8,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 9,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 10,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 11,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 12,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 13,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 14,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 15,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 16,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 17,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 18,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 19,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 20,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 21,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 22,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   },
+   {
+    "hour": 23,
+    "coeff": null,
+    "r2": 0,
+    "samples": 0,
+    "observedMaxPvW": 0,
+    "meanGhiWm2": 0
+   }
+  ],
+  "peakCoeff": 0,
+  "peakGateMinGhiWm2": 300,
+  "pairCount": 0,
+  "historyDays": 0
+ },
+ "solarModelSns": [],
+ "poolFullWh": 92160,
+ "poolCapacityScale": 1,
+ "poolCapacityBasis": "nameplate",
+ "poolOverheadW": 270,
+ "deviceModels": [],
+ "soiling": null,
+ "homeDpusConnected": 3,
+ "homeDpusReporting": 0,
+ "homeDpusCoveragePartial": true,
+ "structurallyIncomplete": false,
+ "homeBasisPending": false,
+ "weatherFetchedAtMs": 1792374900000,
+ "pvForecastUnavailable": false
+}

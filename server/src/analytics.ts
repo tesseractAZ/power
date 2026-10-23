@@ -1433,7 +1433,12 @@ function hourCurve(
   sinceMs: number,
   nowMs: number,
 ): { curve: number[]; spanMs: number } {
-  const pts = recorder.query(sn, metric, sinceMs, nowMs, HOUR_CURVE_BUCKET_SEC);
+  return hourCurveFromPts(recorder.query(sn, metric, sinceMs, nowMs, HOUR_CURVE_BUCKET_SEC));
+}
+
+/** v1.191.2 — hourCurve on an already-fetched bucketed series, so one read can serve the
+ *  restored display curve and the restored fleet model (pvHourlyFromPts) of the same build. */
+function hourCurveFromPts(pts: Array<{ ts: number; value: number }>): { curve: number[]; spanMs: number } {
   const buckets: number[][] = Array.from({ length: 24 }, () => []);
   for (const p of pts) buckets[siteHour(p.ts)].push(p.value);
   return {
@@ -2224,8 +2229,14 @@ async function computeDayForecastUncached(
   const missingConnectedSns = [...connected].filter((sn) => !presentHomeSns.has(sn));
   const restoredPvCurve = pvCurve.slice();
   let restoredPvSpan = pvSpan;
+  // v1.191.2 — each such Core's series is read ONCE per build and kept for the restored fleet
+  // model below, which read the identical (SN, pv_total, 30 days, 300 s) series a second time:
+  // with three home Cores cloud-dark, three of the build's six 30-day pv_total scans.
+  const restoredPvPts = new Map<string, Array<{ ts: number; value: number }>>();
   for (const sn of missingConnectedSns) {
-    const { curve, spanMs } = hourCurve(recorder, sn, 'pv_total', since, now);
+    const pts = recorder.query(sn, 'pv_total', since, now, HOUR_CURVE_BUCKET_SEC);
+    restoredPvPts.set(sn, pts);
+    const { curve, spanMs } = hourCurveFromPts(pts);
     for (let h = 0; h < 24; h++) restoredPvCurve[h] += curve[h];
     restoredPvSpan = Math.max(restoredPvSpan, spanMs);
   }
@@ -2354,7 +2365,7 @@ async function computeDayForecastUncached(
   // With no missing SNs this refits an identical map → equals solarModel.
   const restoredFleetPvByEpoch = new Map(fleetPvByEpoch);
   for (const sn of missingConnectedSns) {
-    const pvE = pvHourlyByEpoch(recorder, sn, 'pv_total', since, now);
+    const pvE = pvHourlyFromPts(restoredPvPts.get(sn) ?? []); // v1.191.2 — the series read above
     for (const [he, pv] of pvE) restoredFleetPvByEpoch.set(he, (restoredFleetPvByEpoch.get(he) ?? 0) + pv);
   }
   // v1.177.0 — with no missing SNs the restored model IS the alarm model. The comment above
