@@ -21,7 +21,7 @@ Evidence sources: the cleared-alert ledger (`/api/alerts/history`, cap `CLEARED_
 
 Not re-measured: §4b (2026-09-11), the §4a span table, §4's cell-spread norms, the §7.2 full sweep and every harness time but three, and each §6 item that names an earlier date. §5 adds the review cycles of 2026-10-11 → 10-14. ★ At the time of measurement all five Cores had been offline per the EcoFlow cloud since 10-15 01:55, after a 122-minute name-resolution outage, and the recorder kept writing their last values as fresh samples (§6); the SHP2 was offline with them until 04:16 and its series were held the same way. No measured figure here uses the Cores' recorder data after 10-15 01:55 or the SHP2's for 01:55 → 04:16, except these, each stated where it appears: §6, §3's account of the 10-14 night and §4c's recorder-intake figure use the held rows as evidence of the hold; §4c's database size counts them among its samples; §3 quotes the 10-14 night's scorer coverage, which counts them, beside its live coverage; and every figure computed from the current forecast model — §2's probabilistic diagnostics and the 10-15 plan's basis reading that uses them, the forecast-skill route, the hourly backtest route and its offline re-score, and §6 where it quotes them — rests on a 30-day solar-response fit that takes in the Cores' held 0-W daylight hours of 10-15, and is in-sample besides (§2). §2's night-charge ledger figures, graded from forecasts issued before the hold, carry neither. Read-back checks made at 18:45–19:32 (the held rows themselves, the backtest's actuals, the ledger's coverage column and the 10-14 row's PV coverage) cover fixed, elapsed windows, except the 10-14 row's PV coverage, which §6 dates.
 
-**Revision of 2026-10-22.** §4d is new (the live host and a replay, v1.191.1 → v1.191.2); §4c gains a note. Nothing else is re-measured.
+**Revision of 2026-10-23.** §4d gains the Pi after the update. **2026-10-22:** §4d is new (the live host and a replay, v1.191.1 → v1.191.2); §4c gains a note. Nothing else is re-measured.
 
 ---
 
@@ -637,8 +637,14 @@ the panel's Cores.
 
 v1.191.2 also caches on the projected house panel, keeps on the entry the dark Cores it re-added and
 the pending flag, and serves it only where both match; each dark Core's PV is read once per build.
-Built at a frozen instant, the dark and control forecasts are byte-identical to v1.191.1's. The Pi
-after the update is not measured here.
+Built at a frozen instant, the dark and control forecasts are byte-identical to v1.191.1's.
+
+**The Pi after the update** (v1.191.2 from 21:25 MST on 10-22, every Core still dark; read-only as above):
+
+- Analytics worker: **1.80% of a core** (21 min 50 s of CPU in 20 h 12 min, to 17:37 on 10-23); the
+  replay's 0.46% scales to about 1.5% on the Pi.
+- `/api/forecast`, `/api/forecast-skill`, `/api/confidence`, `/api/runway`: **10–15 ms**; `/api/ha-state` 17 ms.
+- **No** `slow request` line from the start to 17:37 on 10-23, against 84 in 2 h 29 min before.
 
 ---
 
