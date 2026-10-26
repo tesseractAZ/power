@@ -251,6 +251,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Prefer the main Ubuntu archive
+        # 2026-10-26: the runners' first apt mirror (azure.archive.ubuntu.com) served packages at
+        # ~39 kB/s on several runs, timing out the pandoc and LibreOffice installs; apt's fallback,
+        # archive.ubuntu.com, was fast. The first entry is dropped when another one is listed.
+        timeout-minutes: 1
+        run: |
+          f=/etc/apt/apt-mirrors.txt
+          if [ -f "$f" ] && grep -qv 'azure\.archive\.ubuntu\.com' "$f"; then
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' "$f"
+          fi
+          cat "$f" 2>/dev/null || true
+
       - name: Ensure pandoc
         # 2026-10-26: the runners' azure apt mirror trickled the 29 MB package at ~39 kB/s (7 min, then
         # killed mid-unpack, which left the dpkg lock held for the retry). The pinned upstream .deb from
