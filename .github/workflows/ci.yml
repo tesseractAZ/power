@@ -251,13 +251,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Ensure pandoc
-        timeout-minutes: 6
+        # 2026-10-26: the runners' apt mirror took over 180 s for the 29 MB package on four runs in
+        # a week; the same budget as LibreOffice below, and one retry.
+        timeout-minutes: 12
         env:
           APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
         run: |
           command -v pandoc >/dev/null || {
             sudo timeout -k 10 120 apt-get $APT_OPTS update &&
-            sudo timeout -k 10 180 apt-get $APT_OPTS install -y pandoc
+            { sudo timeout -k 10 420 apt-get $APT_OPTS install -y pandoc ||
+              sudo timeout -k 10 420 apt-get $APT_OPTS install -y pandoc; }
           }
           pandoc --version | head -1
 
