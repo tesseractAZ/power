@@ -319,13 +319,15 @@ jobs:
       - name: Ensure pandoc
         if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
-        timeout-minutes: 6
+        # 2026-10-26: as ci.yml — the apt mirror took over 180 s for pandoc on four runs in a week.
+        timeout-minutes: 12
         env:
           APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
         run: |
           command -v pandoc >/dev/null || {
             sudo timeout -k 10 120 apt-get $APT_OPTS update &&
-            sudo timeout -k 10 180 apt-get $APT_OPTS install -y pandoc
+            { sudo timeout -k 10 420 apt-get $APT_OPTS install -y pandoc ||
+              sudo timeout -k 10 420 apt-get $APT_OPTS install -y pandoc; }
           }
           pandoc --version | head -1
 
