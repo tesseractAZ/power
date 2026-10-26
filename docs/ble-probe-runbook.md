@@ -44,8 +44,8 @@ per-circuit channels, **not** the `backupIncreInfo` aggregate the floor/SoC/runw
    If it can't, SHP2 BLE stays diagnostic-only and never touches an alarm input.)
 
 ## Hardware
-- **DPU (start here):** a BLE radio within range of one DPU. Options: the HA Pi's built-in BLE if a DPU
-  is close enough, otherwise an **ESP32 BLE proxy** (ESPHome `bluetooth_proxy`) near the unit.
+- **DPU (start here):** a BLE radio within range of one DPU. Options: the Home Assistant host's built-in BLE
+  (a Raspberry Pi has one) if a DPU is close enough, otherwise an **ESP32 BLE proxy** (ESPHome `bluetooth_proxy`) near the unit.
 - **SHP2 (later, optional):** the SHP2 is a high-bandwidth BLE peer — plain ESPHome proxies drop
   packets; the `ha-ef-ble` maintainer recommends an **Ethernet-backed ESP32** (Waveshare
   ESP32-S3-ETH) proxy (`ha-ef-ble` issue #221). SHP2 BLE must also be manually enabled via the
