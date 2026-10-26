@@ -252,15 +252,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Ensure pandoc
-        # 2026-10-26: the runners' apt mirror took over 180 s for the 29 MB package on four runs in
-        # a week; the same budget as LibreOffice below, and one retry.
+        # 2026-10-26: the runners' azure apt mirror trickled the 29 MB package at ~39 kB/s (7 min, then
+        # killed mid-unpack, which left the dpkg lock held for the retry). The pinned upstream .deb from
+        # GitHub, checksummed, comes first; apt stays the fallback.
         timeout-minutes: 12
         env:
-          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+          APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60
+          PANDOC_DEB_URL: https://github.com/jgm/pandoc/releases/download/3.7.0.2/pandoc-3.7.0.2-1-amd64.deb
+          PANDOC_DEB_SHA256: 4db8bad3d9f8451a3d52171664f3c58b08af6450fbd54a28dd05f6b00b0bbb04
         run: |
           command -v pandoc >/dev/null || {
-            sudo timeout -k 10 120 apt-get $APT_OPTS update &&
-            { sudo timeout -k 10 420 apt-get $APT_OPTS install -y pandoc ||
+            { curl -fsSL --retry 3 --max-time 120 -o /tmp/pandoc.deb "$PANDOC_DEB_URL" &&
+              echo "$PANDOC_DEB_SHA256  /tmp/pandoc.deb" | sha256sum -c - &&
+              sudo timeout -k 10 120 dpkg -i /tmp/pandoc.deb; } ||
+            { sudo timeout -k 10 120 apt-get $APT_OPTS update &&
               sudo timeout -k 10 420 apt-get $APT_OPTS install -y pandoc; }
           }
           pandoc --version | head -1
