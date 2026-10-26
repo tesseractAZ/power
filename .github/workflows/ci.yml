@@ -246,7 +246,8 @@ jobs:
     # v1.187.3 — bounded, as images.yml's release job: the same unbounded apt-get stalled a
     # release run for the 6 h platform limit. On the PR this job is a hard gate, so a stall
     # now ends as a red check in minutes rather than a check held for six hours.
-    timeout-minutes: 30
+    # 2026-10-26: 40 — the job bound stays above its steps' bounds (12 + 5 + 10 + 5 min).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
