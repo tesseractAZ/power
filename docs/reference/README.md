@@ -2,9 +2,9 @@
 
 This is the definitive technical reference for the **ecoflow-panel** Home Assistant add-on: a life-safety solar/battery monitor and depletion alarm for an EcoFlow Smart Home Panel 2 and its Delta Pro Ultra battery/inverter Cores. A figure labelled **reference plant** comes from the reference deployment (a grid-tied home in Phoenix, AZ with a 42-panel array and an EVSE) and is a built-in value that a home's own options replace; see [setting Power up for your home](../guide/your-home.md). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the endpoints and sensors it produces, the configuration knobs that tune it, and its edge-case guards.
 
-The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, and an SSH TUI (`:2323`). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and an optional announce-capable SIP phone) when the battery is projected to deplete.
+The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, and a control-room console served in the browser at `/console` and, when enabled, over SSH (`:2323`, off by default). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and an optional announce-capable SIP phone) when the battery is projected to deplete.
 
-> Every constant, formula, endpoint path, and config key below was written directly from the source and independently completeness-/accuracy-checked against it. Where a value is a tunable default, that is noted. For install steps and a high-level tour, see `README.md`; for the full option list, the options→env bridge and the security posture, see chapter 12, **Configuration, Deployment, Security & Operations**.
+> Every constant, formula, endpoint path, and config key below was written from the source; how far each chapter has been checked against the code since is stated under **How this reference is organised**. Where a value is a tunable default, that is noted. For install steps and a high-level tour, see `README.md`; for the full option list, see [the option reference](../guide/options.md); for the options→env bridge and the security posture, see chapter 12, **Configuration, Deployment, Security & Operations**.
 
 
 ## How this reference is organised
@@ -16,12 +16,15 @@ options, entities, troubleshooting) is covered by the operator guide,
 Documentation tab.
 
 These chapters were one file, `ecoflow_panel/DOCS.md`, until it outgrew what Home Assistant renders quickly
-and what GitHub renders at all. They were moved here byte for byte. The only edits are this index in place
-of the old table of contents, pointers where content moved out (the engineering release log and the
-operations audits to [`docs/history/`](../history/), the option table to
+and what GitHub renders at all. They were moved here byte for byte. The only edits the move made are this
+index in place of the old table of contents, pointers where content moved out (the engineering release log
+and the operations audits to [`docs/history/`](../history/), the option table to
 [`docs/guide/options.md`](../guide/options.md)), three control bytes written out as text, and placeholders
-such as `<age>` put in code spans so that GitHub shows them. The chapters are as they stood in the
-single-file manual: the move did not re-check them against the code.
+such as `<age>` put in code spans so that GitHub shows them; the move did not re-check the chapters against
+the code. Later releases edit them in place where the code changed: figures measured on the reference
+deployment are labelled **reference plant**, and the passages on the site clock, the tariff, the PV array,
+the devices and the plant limits name the options that now set them. A passage no release has touched is as
+it stood in the single-file manual.
 
 Section numbers are chapter-local. A `§N` or `§N.M` inside a chapter means that chapter's own numbered
 heading unless it names another chapter (`§15.8b` is section 8b of chapter 15). Chapters 2, 8 and 15 are

@@ -65,7 +65,7 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
 
 - `AVAILABILITY_TOPIC` is republished `online` on **every** state cycle and first on
   every broker **reconnect** (v1.14.1) — a broker-side LWT `offline` must be overwritten on
-  reconnect or HA holds every entity (~116 on a 12-circuit panel) unavailable until an add-on restart.
+  reconnect or HA holds every entity (about 126 on a 12-circuit panel) unavailable until an add-on restart.
 - **v1.187.10 — the process's first connect** (every restart) does not publish `online`
   ahead of the state: the state cycle (`publishStateCycle`) publishes the per-circuit
   configs, then the fresh state payload, then `online`, and asserts `online` also when the
@@ -84,7 +84,7 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
 
 #### Entity categories
 
-`SENSORS[]` (78) and `BINARY_SENSORS[]` (10), plus the four alarm-priority switches and two
+`SENSORS[]` (87) and `BINARY_SENSORS[]` (11), plus the four alarm-priority switches and two
 dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). Selected groups:
 
 - **Power flow:** `fleet_pv_watts`, `panel_load_watts`, `ac_import_watts`,
@@ -119,7 +119,17 @@ dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). S
   hold), the same set the web dashboard's badges count. A non-zero count is therefore not
   a statement that anything was spoken or pushed; an automation that should follow the
   audible condition cannot key on these counts alone.
-- **Diagnostics** (`entity_category: 'diagnostic'`): `ecoflow_cloud_wedge_count`,
+- **Night charge and the mid-day charge:** the `night_charge_*` figures (target and arrival
+  SoC, worst-case and expected buy, readiness, the window start and end) and
+  `night_charge_role` (`cost`, or `backup` ahead of a mid-day charge), and the seven
+  `midday_charge_*` figures (target SoC, reserve hold, expected and worst-case buy, the window
+  start and end as `timestamp` sensors, the morning refresh), each with a `basis` attribute
+  that reads `shadow` while the mid-day charge is computed in shadow. All carry the ~25 h
+  `NIGHT_CHARGE_EXPIRE_AFTER_S`. Home Assistant's MQTT sensor reads an empty value as unknown,
+  for a timestamp sensor too.
+- **Diagnostics** (`entity_category: 'diagnostic'`): `ecoflow_cloud_wedge_count`, `poll_health`,
+  `shp2_content_frozen_s`, the host vitals (`host_evloop_lag`, `host_mem_available`,
+  `host_disk_free`, `host_load_1m`, `host_soc_temp`),
   `system_outage_24h` + count/minutes + `system_power_outage_count_24h` /
   `system_telemetry_gap_count_24h`, `system_device_gap_count_24h` (per-device gaps, not
   outages), `audible_channel_status` /
@@ -129,8 +139,9 @@ dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). S
   as **honest integers**, no fabricated labels).
 - **Binary sensors:** `off_grid`, `shp2_grid_connected`,
   `runway_projection_islanded_only`, `projected_low_soc_islanded_only`,
-  `pv_curtailment_active`, `load_shed_recommended`,
-  `self_consumption_coverage_partial`, `forecast_basis_incomplete`.
+  `pv_curtailment_active`, `load_shed_recommended`, `night_charge_recommended`,
+  `night_charge_write_ready` (diagnostic), `midday_charge_recommended` (always off while the
+  mid-day charge is a shadow), `self_consumption_coverage_partial`, `forecast_basis_incomplete`.
 
 **Honest-null discipline:** numeric-null fields emit `null` → HA renders `unknown`
 (never substituted with 0). `backup_reserve_enabled` uses
@@ -254,6 +265,7 @@ statistic. Rules enforced over the whole table:
 | `device-class-unit` | e.g. `power` carrying `kWh` |
 | `unit-without-state-class` | compiles **no** long-term statistics at all |
 | `total-increasing-without-unit` | a unitless sum the Energy Dashboard cannot consume |
+| `daily-figure-needs-total-with-reset` | a daily figure (value key ending `_today`) that accumulates statistics without `total` and a `last_reset_value_template`: `total_increasing` reads a revision of 10 % or more as a meter reset, and `total` with no reset books the midnight drop as a negative day (v1.187.10) |
 | `currency-needs-monetary-total` | a currency amount that is not `monetary` + `total`, so HA compiles a **mean** and it can never be an Energy-Dashboard cost source |
 | `duplicate-unique-id` | a collision silently drops one of the two entities |
 
@@ -261,6 +273,13 @@ statistic. Rules enforced over the whole table:
 amount of money, and `monetary` does not apply to it. `ecoflow_grid_price_now`
 ships exactly that shape, and HA mints its own `monetary`/`total` cost entity
 from it.
+
+The money units follow `TARIFF_CURRENCY` (v1.191.0; USD while unset, else EUR, GBP, CAD or
+AUD, the codes `money.ts` `CURRENCIES` accepts). The tables are written in USD, and
+`sensorDiscoveryConfig` publishes `USD` as the configured code and `USD/kWh` as
+`<code>/kWh` (`currencyUnit`); a USD install's payload is built exactly as before. The audit's
+currency rule recognises every accepted code, not only USD. The state payload's key names
+(`…_dollars`, `…_usd_per_kwh`) are unchanged.
 
 Deliberate departures live in `DISCOVERY_WAIVERS`, and **a waiver with an empty
 reason is not a waiver**. The reason text is the only place the intent is
@@ -280,7 +299,7 @@ all. So:
 |---|---|---|
 | availability `online` | **reconnects only**, first (v1.187.10) | a retained LWT `offline` holds every entity unavailable regardless of what follows (live: 9+ h, 2026-07-12). On the process's first connect it is asserted by the state cycle, right after the fresh payload (see Availability + expiry) |
 | `clearLegacyDiscovery()` | **no — once** | empty payloads to *retired* config topics need saying once; repeating them forever is traffic that never stops |
-| `publishDiscovery()` | yes | ~90 retained publishes of unchanged payloads; HA re-processes them as no-ops |
+| `publishDiscovery()` | yes | 102 retained publishes of unchanged payloads (87 sensors, 11 binary sensors, 4 switches); HA re-processes them as no-ops |
 | invalidate circuit signature | yes | the per-circuit configs are retained on the same broker and vanish with the same store |
 | `publishedCircuitChannels` | **never reset** | not a latch — it is the *orphan ledger*, the memory of which circuits to clear a config topic for. Reset it and a removed circuit's retained config sits on the broker forever with nothing left to remove it |
 | switch subscriptions | yes | MQTT subscriptions do not survive a clean-session reconnect |
@@ -410,7 +429,7 @@ discharging; Fleet PV and Battery Net plus the dark home slots metered at the pa
 `backup_pool_percent`, `backup_reserve_percent`, `backup_full_capacity_kwh`,
 `backup_remaining_kwh`, and `backup_charge_minutes`/`backup_discharge_minutes` gated on
 the ±50 W deadband (both timers are always reported by the SHP2 regardless of direction).
-The gate (`backupTimerGate`, shared with the console's RUN line and, since v1.189.1, the dashboard's Smart Home Panel card through the per-panel `backupTimers` field `panelForClient` sends) reads the Cores' battery net
+The gate (`backupTimerGate`, shared with the console's RUN line and, since v1.190.1, the dashboard's Smart Home Panel card through the per-panel `backupTimers` field `panelForClient` sends) reads the Cores' battery net
 while every home Core reports on a fresh meter (v1.188.1: and the energy bridge counts each at its
 own reading; the gate takes the bridge's verdicts, `BridgeVerdicts`). Otherwise that sum is not the pool's (0 W with
 every Core dark), so it reads an upper bound through the panel instead: each dark or frozen Core
@@ -500,12 +519,13 @@ are cached (~30 min) on the worker.
 | Key | Default | Effect |
 |---|---|---|
 | `SUPERVISOR_TOKEN` | injected by HA | enables `haService` Core calls; also flips `dbPath` to `/data/ecoflow.db` |
+| `SITE_TIMEZONE` / `TZ` | unset / Home Assistant's zone (set by the Supervisor) | the site clock: `SITE_TIMEZONE` when it resolves, else `TZ`, else `America/Phoenix`; resolved once at start. Home Assistant's own `time_zone` is read after boot and a different zone raises a repair issue (architecture chapter, section 12) |
 | `PORT` | `8787` | HTTP server |
 | `HOST` | `::` | dual-stack bind |
 | `DB_PATH` | `/data/ecoflow.db` (supervised) | recorder DB |
 | `LOG_LEVEL` | `info` | `debug`/`trace` adds the periodic poll-duration summary (p50/p95/max once per `POLL_SUMMARY_EVERY` polls, v1.148.0; there is no line per poll) and the DEBUG channel (e.g. the compact unchanged fleet-status line) |
-| `SSH_ENABLED` / `SSH_HOST` / `SSH_PORT` / `SSH_HOST_KEY` | `false` (add-on option; the server alone defaults on only when the env var is unset) / `::` / `2323` / `/data/ssh_host_ed25519_key` | SSH TUI; `TELNET_ENABLED` / `TELNET_PORT` are deprecated aliases (either enabled option serves SSH; `SSH_PORT` at its default defers to `TELNET_PORT`) |
-| `TUI_USERNAME` / `TUI_PASSWORD` | empty | console login (empty password: the browser console has no prompt and the SSH console refuses every login) |
+| `SSH_ENABLED` / `SSH_HOST` / `SSH_PORT` / `SSH_HOST_KEY` | `false` (add-on option, exported as `0`; the server alone turns it off only on `0`, so it is on when the variable is unset) / `::` / `2323` / `/data/ssh_host_ed25519_key` | SSH TUI; `TELNET_ENABLED` / `TELNET_PORT` are deprecated aliases (either enabled option serves SSH; `SSH_PORT` at its default defers to a changed `TELNET_PORT`; the log names the alias that applied) |
+| `TUI_USERNAME` / `TUI_PASSWORD` | empty | console login; an empty username logs in as `operator` (empty password: the browser console has no prompt and the SSH console refuses every login) |
 | `TUI_TRUSTED_ORIGINS` | empty | comma-separated extra origins accepted **verbatim, with no validation** — entries need not be private-range or `.local`; a public HTTPS origin is accepted, which is the point (remote HA Cloud access is the use case). The same set gates the write-auth origin check, the `/ws` and `/console/ws` upgrades, and CORS. Built-in LAN matching is separate and automatic. |
 
 ---
@@ -735,7 +755,7 @@ the life of the hold (9 h 30 m on 2026-09-13/14). Filtering it would resume rais
 whose feed genuinely is low-cadence; that needs evidence those raises are meaningful there.
 Harness: `scripts/mutate-push-dwell.mjs`.
 
-When ≥ `SELF_HEAL_MIN_DEVICES` (2) devices sit in a surfaced message-rate collapse that
+When the quorum of devices sits in a surfaced message-rate collapse that
 `selfHealQuorum` counts (not electrically idle this tick, or the alarm-path panel, which
 alone also satisfies the quorum — §12m)
 for `SELF_HEAL_AFTER_MS` (20 min), the add-on rebuilds its own MQTT session:
@@ -748,13 +768,19 @@ process-local, so the cap was really "6 per process lifetime"; with this add-on'
 restart cadence that yielded 10 rebuilds in 22 h against a nominal cap of 6.
 `lastHealMs` persists with it so the cooldown also survives a restart, while
 `starvedSinceMs` deliberately does not — the dwell is re-earned against live
-telemetry) (v1.90.0 — previously UTC-day-keyed, which reset to zero at exactly
-17:00 MST and granted a fresh burst mid-evening; the rolling window frees one
+telemetry) (v1.90.0 — previously UTC-day-keyed, which reset to zero at UTC midnight,
+17:00 at the reference plant, and granted a fresh burst mid-evening; the rolling window frees one
 slot as each heal ages past 24 h, so the cap is a true rate limit), and a
 post-heal onset reset. Read-path only — REST polling is untouched, and a failed rebuild
 falls back to the existing `startMqttWithRetry` backoff.
 
-**Measured verdict (maiden night, 2026-08-11).** The mechanism ran exactly to
+The quorum is `effectiveQuorum`: the smaller of `SELF_HEAL_MIN_DEVICES` (2 when unset) and
+the number of devices on the account (v1.191.0), so an account with a single device can still
+trigger a rebuild. The count is every device on the account, not the online or eligible ones,
+so on a plant with more devices than the setting a dark half of the fleet does not lower it;
+with no device known yet the setting stands.
+
+**Measured verdict (maiden night, 2026-08-11, reference plant).** The mechanism ran exactly to
 spec — five rebuilds, each mechanically perfect (~1.4 s, all subscriptions
 restored) — and **did not shorten the starvation**: message rates stayed pinned
 through every heal window, and recovery arrived at ~05:11 MST, the same
