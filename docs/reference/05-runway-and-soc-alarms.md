@@ -53,7 +53,7 @@ backupReserveKwh   = backupFullKwh * reservePct / 100
 ```
 If the SHP2 or either capacity field is missing → early return `emptyRunway(..., 'SHP2 backup-pool capacity not yet reported')` (all hours null, `unavailable` set).
 
-**Step 2 — recent load anchor.** Average `panel_load` over the last hour. If fewer than 2 recorded samples exist (sparse post-restart window), fall back in order to:
+**Step 2 — recent load anchor.** Average `panel_load` over the last hour. If fewer than 2 recorded samples exist (a sparse post-restart window, or a panel whose reading is held: since v1.188.1 the recorder writes only fresh readings), fall back in order to:
 1. Live SHP2 panel load = Σ circuit watts (available from MQTT immediately),
 2. a single recent recorded sample,
 3. the last good `runwayCache.value.recentLoadWatts`, but only while the last real panel reading (a recorded `panel_load` row or a live channel sum) is within `RUNWAY_LOAD_CARRY_MAX_MS` = 2 h (v1.175.0). The projection's `recentLoadBasis` names the source used (`hour-mean` | `live` | `single-sample` | `carried`),
@@ -179,8 +179,8 @@ basis and requires the planner's inputs and its plan to be identical.
 | `RUNWAY_DISCHARGE_EFFICIENCY` | 0.94 (default) | DC→AC discharge efficiency η; `min(1, max(0.8, env ?? 0.94))`, env `RUNWAY_DISCHARGE_EFFICIENCY` |
 | `RUNWAY_POOL_OVERHEAD_FLOOR_W` | 270 (default, clamp 0–1500) | v1.187.19 — the pool overhead's floor while the panel reports a pool (§1.3a); add-on option, the reference plant's three-Core fit |
 | `RUNWAY_CORE_OVERHEAD_W` | 90 (default, clamp 0–500) | v1.187.19 — the overhead is `max(floor, this × connected Cores)` (§1.3a); add-on option |
-| `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (default, clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m` |
-| `CAPACITY_SCALE_MIN` / `CAPACITY_SCALE_MAX` | 0.80 / 1.00 | v1.187.19 — the capacity-scale clamp; the minimum is the add-on option `CAPACITY_SCALE_MIN` |
+| `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (default, clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m`; environment only |
+| `CAPACITY_SCALE_MIN` / `CAPACITY_SCALE_MAX` | 0.80 / 1.00 | v1.187.19 — the capacity-scale clamp; the minimum is the add-on option `CAPACITY_SCALE_MIN` (clamped 0.5–1; 0.80 while unset or unreadable) |
 | `CAPACITY_INCREASE_HOLD_MS` / `HELD_RATIO_MAX_AGE_MS` | 24 h / 30 d | v1.187.19 — increase hold; validity of a held per-Core ratio |
 | `RUNWAY_EMPTY_CLEAR_SAMPLES` | 3 (default) | Empty-hysteresis latch length; env `RUNWAY_EMPTY_CLEAR_SAMPLES` |
 | `RUNWAY_NO_DEPLETION_SENTINEL_H` | 999 | Healthy-but-no-depletion publish sentinel |
@@ -323,8 +323,11 @@ The ladders and the store tick that feeds them live in `server/src/socLadders.ts
 
 #### 3.2 The SoC ladder — `BATTERY_SOC_THRESHOLDS`
 
-The built-in ladder below; the add-on option `BATTERY_SOC_LADDER` (`<percent>:<priority>`,
-comma-separated) replaces it when set.
+The built-in ladder below (`DEFAULT_BATTERY_SOC_THRESHOLDS`); the add-on option
+`BATTERY_SOC_LADDER` (`<percent>:<priority>`, comma-separated; percent 1–99, priority `low`,
+`medium`, `high` or `critical`, ordered highest percent first, a repeated percent keeping its
+first entry; `parseSocLadder`, limits.ts) replaces it when at least one rung parses. The
+audit-#24 reasoning below holds for the built-in ladder only.
 
 | SoC % | Priority |
 | --- | --- |
@@ -372,9 +375,9 @@ The guard **only** fires from a *fresh, healthy* baseline: a real deep discharge
 
 #### 3.7 SHP2-blind failover (`socLadders.ts`, v1.8.0/F3)
 
-The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the 30-day review found blackouts (42.2 h, 25.8 h) in which the pool crossed 50/40/30/20 % while the ladder sat dark for 17.8–20.8 h. When `backupBatPercent` is null, the ladder tick (`socLadders.ts`) falls back to `housePoolFallbackSoc(devices, lastKnownRoster)` (the pool *is* those batteries). With one panel that is `homeFleetMeanSoc`, whose membership comes from the live roster, then the persisted last-known roster, then the `SPARE_DPU_SNS` literal (v1.117.0). On a two-panel plant it is the house panel's own Cores only (v1.185.0). It returns null only when no Core is reporting, where `update(null)` is a safe no-op and the reserve-blind warning + offline alerts are the signal.
+The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the 30-day review found blackouts (42.2 h, 25.8 h) in which the pool crossed 50/40/30/20 % while the ladder sat dark for 17.8–20.8 h. When `backupBatPercent` is null, the ladder tick (`socLadders.ts`) falls back to `housePoolFallbackSoc(devices, lastKnownRoster)` (the pool *is* those batteries). With one panel that is `homeFleetMeanSoc`, whose membership comes from the live roster, then the persisted last-known roster (v1.117.0), then every Core off the bench-spare floor (`benchSpareFloor`: `BENCH_SPARE_SNS` when set, which replaces the built-in `SPARE_DPU_SNS` literal rather than adding to it, v1.191.0). On a two-panel plant it is the house panel's own Cores only (v1.185.0). It returns null only when no Core is reporting, where `update(null)` is a safe no-op and the reserve-blind warning + offline alerts are the signal.
 
-**v1.92.0 — pool membership is resolved from the SHP2's own connected-source roster, not from the static `SPARE_DPU_SNS` literal.** `isHomePoolDpu(sn, connectedOrDevices)` returns `connected.has(sn)` when the roster is known and falls back to `!SPARE_DPU_SNS.has(sn)` only when it is empty (the panel itself cloud-dark), which errs toward *including* a device. Motivating incident: a physical reconfiguration moved an allowlisted bench unit onto a panel slot and a home Core off it, inverting the literal. The allowlist-only filter then averaged the bench unit and dropped a live pool member — and because a bench unit charges independently, the reported mean acquired a hard floor of `benchSoc / 3`. Measured with the bench unit at 63 %, the fallback could not read below 21 %, so the 15/10/8/4/2 % rungs — the entire critical half of the ladder — were unreachable during exactly the SHP2-blind window the fallback exists to cover. Guards are mutation-proven load-bearing (`scripts/mutate-pool-membership.mjs`, 6/6), including an exemplar that reproduces the shipped defect verbatim. The same resolver now gates the reconnect auto-audit's device set (§12e), which previously exempted a live home Core while watching a bench unit.
+**v1.92.0 — pool membership is resolved from the SHP2's own connected-source roster, not from the static `SPARE_DPU_SNS` literal.** `isHomePoolDpu(sn, connectedOrDevices)` returns `connected.has(sn)` when the roster is known and falls back only when it is empty (the panel itself cloud-dark): to the last-known roster since v1.117.0, then to "not on the bench-spare floor" (the spare literal then; `BENCH_SPARE_SNS` when set since v1.191.0), which errs toward *including* a device. Motivating incident: a physical reconfiguration moved an allowlisted bench unit onto a panel slot and a home Core off it, inverting the literal. The allowlist-only filter then averaged the bench unit and dropped a live pool member — and because a bench unit charges independently, the reported mean acquired a hard floor of `benchSoc / 3`. Measured with the bench unit at 63 %, the fallback could not read below 21 %, so the 15/10/8/4/2 % rungs — the entire critical half of the ladder — were unreachable during exactly the SHP2-blind window the fallback exists to cover. Guards are mutation-proven load-bearing (`scripts/mutate-pool-membership.mjs`, 6/6), including an exemplar that reproduces the shipped defect verbatim. The same resolver now gates the reconnect auto-audit's device set (§12e), which previously exempted a live home Core while watching a bench unit.
 
 #### 3.8 Boot gate (`socLadders.ts`, v1.187.22)
 
@@ -594,9 +597,9 @@ The `/η` on the shed term is essential: since v1.26 `hours` is the η-corrected
 
 ### 6. Cross-cutting: the audible path
 
-All three alarms (runway, SoC, and the grid-drop re-escalation) converge on `broadcast.announce(priority, message, messageEs)` — a **dedicated** audible path bypassing the alert→condition pipeline so they annunciate even at a `critical` broadcast min-severity. Every announce is gated by `isPriorityEnabled(priority)` (per-priority Alert-Settings toggles) and, for runway, additionally by `shouldGateRunwayAudible` (mute while grid backstopping). Each message carries an English + Latin-American-Spanish second pass. The matching on-screen alerts (`forecast-runtime-*` for runway, the `alerts.ts` reserve band for SoC) are excluded from the broadcast condition so nothing double-chimes.
+All three alarms (runway, SoC, and the grid-drop re-escalation) converge on `broadcast.announce(priority, message, messageEs)` — a **dedicated** audible path bypassing the alert→condition pipeline so they annunciate even at a `critical` broadcast min-severity. Every announce is gated by `isPriorityEnabled(priority)` (per-priority Alert-Settings toggles) and, for runway, additionally by `shouldGateRunwayAudible` (mute while grid backstopping). Each message carries an English + Latin-American-Spanish second pass; the Spanish pass is spoken only while `BROADCAST_BILINGUAL` is on and a Spanish voice is named (`BROADCAST_BILINGUAL` ships off on a new install since v1.191.0; a saved configuration keeps its value). The matching on-screen alerts (`forecast-runtime-*` for runway, the `alerts.ts` reserve band for SoC) are excluded from the broadcast condition so nothing double-chimes.
 
-> **Quiet hours.** Inside `BROADCAST_QUIET_HOURS` (default `22-06`) the audible broadcast is silent — the condition broadcast and the dedicated `announce` path alike — unless `CRITICAL_BREAKS_QUIET_HOURS` is on (default off), in which case a red condition (or, for `announce`, a high or critical priority) still sounds. Pushes have their own window, `NOTIFY_QUIET_HOURS` (default `22-06`): warnings and info are held for the morning digest, and critical is held too unless the same option is on (§8, 4.2). On-screen alerts are unaffected. On an off-grid site with quiet hours set and that option off, the add-on logs a boot warning naming the trade-off.
+> **Quiet hours.** Inside `BROADCAST_QUIET_HOURS` (default `22-06`) the audible broadcast is silent — the condition broadcast and the dedicated `announce` path alike — unless `CRITICAL_BREAKS_QUIET_HOURS` is on (default off), in which case a red condition (or, for `announce`, a high or critical priority) still sounds. Pushes have their own window, `NOTIFY_QUIET_HOURS` (default `22-06`): warnings and info are held for the morning digest, and critical is held too unless the same option is on (§8, 4.2). Both windows are judged on the site's hour (`inQuietWindow` reads `siteHour`, v1.191.0). On-screen alerts are unaffected. On an off-grid site with quiet hours set and that option off, the add-on logs a boot warning naming the trade-off.
 
 
 ---
