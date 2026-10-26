@@ -43,21 +43,25 @@ realized physics fraction, the forecast is mis-tuned.
 #### INPUTS
 
 - `ts` — the instant (epoch ms), taken as `Date.now()` at the endpoint.
-- `ambientC` — ambient air temperature (°C). With the built-in site the endpoint passes a
-  **placeholder constant `30`**; with a configured site, the weather cache's `temperature_2m`.
+- `ambientC` — ambient air temperature (°C), `physicsAmbientC` in site.ts. With the built-in site
+  the endpoint passes a **placeholder constant `30`**; with a configured site, the weather cache's
+  `temperature_2m` for the hour holding `ts` (still 30 when the cache has no reading for it).
 - `site: SiteParams` — `pvSite()`: the configured array, else `PHOENIX_SITE` (the reference plant's).
 - `realizedW` — summed live `pvTotalWatts` across online DPUs (endpoint side).
 
 #### PHOENIX_SITE constants (the reference plant's array, the built-in site)
 
-`pvSite()` returns this object unchanged while no `PV_*` option is set. Once one is set it
-returns `pNamplate` from `PV_ARRAY_KWP`, `tilt` from `PV_TILT_DEG`, `azimuth` from
-`PV_AZIMUTH_DEG` (each falling back to the value below), and the latitude and longitude of
-`FORECAST_LAT`/`FORECAST_LON`; `noct`, `tempCoeff` and `derate` stay the module defaults below.
+`pvSite()` (site.ts) returns this very object while no `PV_*` option is set. Once any is set
+(`PV_STRINGS` included) it returns `pNamplate` from `PV_ARRAY_KWP`, `tilt` from `PV_TILT_DEG`,
+`azimuth` from `PV_AZIMUTH_DEG` (each falling back to the value below), and the site location
+(`siteLocation()`): `FORECAST_LAT`/`FORECAST_LON`, or with `SITE_LOCATION_FROM_HA` on Home
+Assistant's home as saved by an earlier run, the placeholder coordinates when that is not a usable
+coordinate. `noct`, `tempCoeff` and `derate` stay the module defaults below. The site never changes
+while the add-on runs.
 
 ```
 PHOENIX_SITE = {
-  lat:        33.4484,        // Phoenix, AZ
+  lat:        33.4484,        // DEFAULT_SITE_LAT / _LON: the placeholder (Phoenix, AZ)
   lon:       -112.074,
   pNamplate:  16_800 W,       // 42 panels × 400 W = 16.8 kWp nameplate
   tilt:       25°,            // roof mount, approximate
@@ -156,8 +160,8 @@ clamp(realizedW / theoreticalW, 0, 1)   otherwise
 #### TRACE (inputs → outputs)
 
 - **In:** `realizedW = Σ (d.projection.pvTotalWatts)` over `onlineDpus(...)`;
-  `ambient = 30` (placeholder, built-in site) or the hour's `temperature_2m` (configured site);
-  `ts = Date.now()`.
+  `ambient = 30` (placeholder, built-in site) or the hour's `temperature_2m` (configured site; the
+  endpoint reads the weather cache only then); `ts = Date.now()`.
 - **Compute:** `physicsPmax(ts, ambient, pvSite())` → `physicsScore(...)`.
 - **Out:** HTTP `GET /api/physics/pv-pmax`, cached 30 s.
 
@@ -179,10 +183,13 @@ clamp(realizedW / theoreticalW, 0, 1)   otherwise
 
 #### CONFIG knobs + defaults
 
-The site comes from the add-on options `PV_ARRAY_KWP`, `PV_TILT_DEG` and `PV_AZIMUTH_DEG`, with
-`FORECAST_LAT`/`FORECAST_LON`, through `pvSite()`; with none of the `PV_*` options set it is the
-reference plant's `PHOENIX_SITE`. With the built-in site the ambient temperature is the `30 °C`
-placeholder; with a configured site it is the weather cache's `temperature_2m` for the hour.
+The site comes from the add-on options `PV_ARRAY_KWP`, `PV_TILT_DEG` and `PV_AZIMUTH_DEG` (all
+optional, unset by default), at the site location (`FORECAST_LAT`/`FORECAST_LON`, or Home
+Assistant's home with `SITE_LOCATION_FROM_HA`), through `pvSite()`; with no `PV_*` option set it
+is the reference plant's `PHOENIX_SITE`. With the built-in site the ambient temperature is the
+`30 °C` placeholder; with a configured site it is the weather cache's `temperature_2m` for the hour.
+The same site sets the Bayesian noise scale (part 4) and the curtailment heuristic's irradiance cap
+(part 4, TRACE).
 
 #### EDGE CASES / guards / honest-null
 
@@ -193,8 +200,9 @@ placeholder; with a configured site it is the weather cache's `temperature_2m` f
 - **Horizon clipping** (`cosZ < 0.05`) → POA forced to 0 to avoid the
   `cosθ/cosZ` singularity near sunrise/sunset.
 - **`acos` domain safety** via `clamp(cosZ, −1, 1)`.
-- Ambient is a placeholder — cell-temp derate is approximate until `weather.ts`
-  is wired in.
+- On the built-in site the ambient is the 30 °C placeholder, so the cell-temperature derate is
+  approximate; a configured site reads the weather cache's hourly temperature (30 °C for an hour
+  the cache does not hold).
 
 ---
 
@@ -551,7 +559,7 @@ winsorization fraction are compile-time.
 #### WHAT + why
 
 A **recursive Bayesian** estimate of the array's GHI→PV response coefficient β
-(watts of PV per W/m² of irradiance), maintained **per hour-of-day**. It answers
+(watts of PV per W/m² of irradiance), maintained **per hour-of-day** (site hour). It answers
 the same question as the learned OLS solar-response model, but with a full
 posterior (mean + variance + 95% CI) instead of a point slope — and it
 explicitly reports how often it **agrees with OLS**, so a divergence between the
@@ -637,7 +645,9 @@ DAYLIGHT_GHI     = 20 W/m²          // shared night gate
 - **Out:** `GET /api/forecast/bayesian` → `analytics.report('bayesianSolar')`,
   HTTP-cached 60 s (module-level cache 30 min). Also consumed internally by the
   curtailment report (`computeCurtailment` in `analytics.ts`) to derive `pvExpectedW` /
-  `bayesianSamples`.
+  `bayesianSamples`. For an hour with no measured irradiance that report multiplies the hour's μ by
+  `curtailGhiCapWm2()` (site.ts): 900 W/m² on the built-in site; on a configured site the site's
+  own clear-sky noon GHI (Haurwitz at zenith |lat| − 23.44°), never above 900.
 
 #### OUTPUT shape (`/api/forecast/bayesian`)
 
@@ -665,8 +675,8 @@ DAYLIGHT_GHI     = 20 W/m²          // shared night gate
 No env knobs; all five `BAYES_*` constants (`BAYES_TTL_MS`, `BAYES_HISTORY_MS`,
 `BAYES_PRIOR_MU`, `BAYES_PRIOR_TAU2`, `BAYES_OBS_SIGMA2`) and `DAYLIGHT_GHI` are
 compile-time.
-`BAYES_OBS_SIGMA2` is *derived* from `pvSite().pNamplate`: the reference plant's 16.8 kWp while
-no `PV_*` option is set, `PV_ARRAY_KWP` once the array is configured.
+`BAYES_OBS_SIGMA2` is *derived* from `pvSite().pNamplate`, once at module load: `PV_ARRAY_KWP`
+when it is set, else the reference plant's 16.8 kWp.
 
 #### EDGE CASES / guards / honest-null
 
