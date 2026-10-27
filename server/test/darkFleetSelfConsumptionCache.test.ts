@@ -13,11 +13,16 @@
  * Each case asserts, after each transition, that what is served equals a fresh build on the same map.
  * Never cached, as before: a fleet with no projection, a DPU with no panel (v0.15.13), and, while no
  * Core is projected, a panel that lists no Core or a Core listed online before its first quota inside
- * HOME_BASIS_PENDING_MAX_MS of the worker's start.
+ * HOME_BASIS_PENDING_MAX_MS of the worker's start. Carbon and tariff themselves are unchanged: neither
+ * is cached without both a projected DPU and the projected panel (v0.15.13, "an incomplete snapshot may
+ * be returned, but never latched"), so each is rebuilt on every call with every Core dark (A2) and on
+ * the boot-partial, a polled DPU before the panel's first quota (A6).
  *
  * Two fleets: F-dark (the panel and three dark Cores) and F-spare (F-dark plus a projected bench spare
  * that the panel does not list), which v1.191.2 already cached under the key 'd7'. Red on v1.191.2:
- * A1, A2, A3, the F-spare halves of A7, A8 and A10, A9 and the F-spare half of A12. scripts/mutate-v1191-3.mjs.
+ * A1, A2, A3, A4, A9, both halves of A12, and the F-spare halves of A7, A8 and A10 (v1.191.2 never
+ * caches the dark map, which A4's last step and A12's same-pin step serve from the cache). A5, A6 and
+ * A11 pin what v1.191.2 already did. scripts/mutate-v1191-3.mjs.
  *
  * The clock is node:test's mocked Date, advanced by hand, so a fresh build on the same map is identical
  * to the last field. Test serials are placeholders.
@@ -28,7 +33,7 @@ import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { SelfConsumption } from '../src/analytics.js';
 
 const {
-  computeSelfConsumption, computeCarbonReport, resetSelfConsumptionCache, resetDailyEnergyCache,
+  computeSelfConsumption, computeCarbonReport, computeTariffReport, resetSelfConsumptionCache, resetDailyEnergyCache,
   resetForecastCachesForTesting, resetWorkerReportCaches, HOME_BASIS_PENDING_MAX_MS,
 } = await import('../src/analytics.js');
 const reports = await import('../src/reports.js');
@@ -150,7 +155,7 @@ test('★★★ A1 every home Core dark, the panel projected: self-consumption i
   assert.deepEqual(encode(third), freshBuild(dark), 'what is served equals a fresh build on the same map');
 });
 
-test('★★★ A2 through the report chokepoint: self-consumption is served with no read, and carbon reads no Core series', async (t) => {
+test('★★★ A2 through the report chokepoint: self-consumption is served with no read; carbon and tariff are rebuilt on every call', async (t) => {
   const tick = setup(t);
   const dark = darkFleet();
   const first = await viaReport(dark); // the first sight of every element resets the caches
@@ -161,10 +166,24 @@ test('★★★ A2 through the report chokepoint: self-consumption is served wit
   const carbon = await reports.buildReport('carbon', ctxOf(dark)) as Any;
   assert.equal(coreReads(), c0, 'carbon\'s own self-consumption read hits the cache: no Core series is read');
   assert.equal(carbon.basisComplete, false, 'carbon\'s published basis is unchanged: no Core projected');
+  // Carbon itself is not cached while no Core is projected (v0.15.13: a DPU and the panel). Its inputs are
+  // the cached self-consumption and the lifetime totals, so its rebuild shows as a new object only.
   tick();
   const c1 = coreReads();
-  computeCarbonReport(dark, history);
-  assert.equal(coreReads(), c1, 'and again: carbon itself is not cached while no Core is projected, its self-consumption read is');
+  const k1 = computeCarbonReport(dark, history);
+  tick();
+  const k2 = computeCarbonReport(dark, history);
+  assert.notEqual(k2, k1, 'carbon is rebuilt: not latched while no Core is projected');
+  assert.equal(k2.basisComplete, false);
+  assert.equal(coreReads(), c1, 'its self-consumption read is still a cache hit: no Core series is read');
+  // Neither is tariff: each call reads the panel's series again.
+  const t1 = computeTariffReport(dark, history);
+  tick();
+  const r2 = total();
+  const t2 = computeTariffReport(dark, history);
+  assert.notEqual(t2, t1, 'tariff is rebuilt: not latched while no Core is projected');
+  assert.ok(total() > r2, 'tariff\'s rebuild reads the recorder');
+  assert.equal(t2.basisComplete, false);
 });
 
 test('★★★ A3 a Core still listed online with no projection once HOME_BASIS_PENDING_MAX_MS has passed is known dark: cached', (t) => {
@@ -213,6 +232,40 @@ test('★★★ A5 a panel listing no Core, and a fleet with no projection at al
     assertRebuilt(second, first, r1, 'never latched', reads);
     assert.deepEqual(encode(second), freshBuild(map));
   }
+});
+
+test('★★★ A6 the v0.15.13 boot-partial (a polled DPU, the panel listed before its first quota): carbon and tariff are rebuilt on every call, then cached once the panel reports', (t) => {
+  const tick = setup(t);
+  const unprojected: Any = { sn: PANEL, deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2', online: true, lastUpdated: 0 };
+  const boot: Any = { [PANEL]: unprojected, [A]: core(A, true), [B]: core(B, false), [C]: core(C, false) };
+  assert.equal(sc(boot).loadKwh, 0, 'no panel quota: a model-less load of 0, the figure the rule keeps out of the cache');
+  const k1 = computeCarbonReport(boot, history);
+  tick();
+  let r = total();
+  const k2 = computeCarbonReport(boot, history);
+  assert.notEqual(k2, k1, 'carbon is rebuilt: the boot-partial is never latched');
+  assert.ok(total() > r, 'carbon\'s rebuild reads the recorder');
+  assert.equal(k2.basisComplete, false);
+  const t1 = computeTariffReport(boot, history);
+  assert.ok(t1.gridImportCostDollars > 0 && t1.solarLoadValueDollars === 0, 'grid cost with no solar value: the misleading boot figure');
+  tick();
+  r = total();
+  const t2 = computeTariffReport(boot, history);
+  assert.notEqual(t2, t1, 'tariff is rebuilt: the boot-partial is never latched');
+  assert.ok(total() > r, 'tariff\'s rebuild reads the recorder');
+  assert.equal(t2.basisComplete, false);
+  // The panel's first quota completes the basis: both are cached from then on.
+  const lit: Any = { ...boot, [PANEL]: panel(CORES) };
+  tick();
+  const k3 = computeCarbonReport(lit, history);
+  const t3 = computeTariffReport(lit, history);
+  assert.equal(k3.basisComplete, true);
+  assert.equal(t3.basisComplete, true);
+  tick();
+  r = total();
+  assert.equal(computeCarbonReport(lit, history), k3, 'carbon is cached on the complete basis');
+  assert.equal(computeTariffReport(lit, history), t3, 'tariff is cached on the complete basis');
+  assert.equal(total(), r, 'no recorder read');
 });
 
 for (const [name, fleet] of FLEETS) {

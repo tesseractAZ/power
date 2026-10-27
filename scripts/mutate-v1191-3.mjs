@@ -14,14 +14,24 @@
  *   V3-viii  the slice ends before a sample exactly at the window's end
  *   V3-ix    the whole-series fallback is removed (an out-of-order series is sliced)
  *   V3-xi    the order check reverts to `<` (a NaN timestamp hides the disorder)
+ *   V3-xii   the slice start is not clamped at the series head (a window before the first sample)
+ *   V3-xiii  carbon caches without a projected DPU (the dark fleet's carbon latches)
+ *   V3-xiv   carbon caches without the projected panel (the v0.15.13 boot-partial latches)
+ *   V3-xv    tariff caches without a projected DPU (the dark fleet's tariff latches)
+ *   V3-xvi   tariff caches without the projected panel (the v0.15.13 boot-partial latches)
  *
  * 2026-10-22 investigation: with every home Core cloud-dark after a restart, the self-consumption,
  * carbon and tariff reports were each rebuilt about 2.2 times a minute (self-consumption about 4.4
  * counting carbon's copy), about 1 % of the reference Pi's core after v1.191.2. V3-v, V3-vi and V3-x
- * are each killed by a case written for them (A7/A8 on the dark fleet, A9, A12); the case's other
- * fleet is red on v1.191.2, which cached under the key 'd7'. V3-vii and V3-viii are killed by
- * integrateWhSorted.test.ts and by the energy identity capture against v1.191.2's figures (its two
- * instants put an hour boundary on a sample and between two).
+ * are each killed by a case written for them (A7/A8 on the dark fleet, A9, A12). On v1.191.2, which
+ * cached under the key 'd7', the F-spare halves of A7 and A8 are red, and both halves of A12 (v1.191.2
+ * never caches the dark map, which A12's same-pin step serves from the cache). V3-vii, V3-viii and
+ * V3-xii are killed by integrateWhSorted.test.ts and by the energy identity capture against v1.191.2's
+ * figures (its two instants put an hour boundary on a sample and between two).
+ *
+ * V3-xiii to V3-xvi hold the carbon and tariff caches to v0.15.13 ("an incomplete snapshot may be
+ * returned, but never latched"), unchanged by this release: each half of each gate is reverted alone.
+ * Without the DPU half, A2's dark fleet latches; without the panel half, A6's boot-partial does.
  *
  * Deliberately absent: reverting the tariff's tally to whole-series integrateWh is a pure performance
  * revert that no output can observe; its evidence is the replay in docs/PERFORMANCE.md §4e.
@@ -120,6 +130,41 @@ const MUTANTS = [
     find: '    if (!(points[i].ts >= points[i - 1].ts)) return (sinceMs, untilMs) => integrateWh(points, sinceMs, untilMs);',
     to: '    if (points[i].ts < points[i - 1].ts) return (sinceMs, untilMs) => integrateWh(points, sinceMs, untilMs); /* MUTANT */',
     why: 'A NaN timestamp between two out-of-order points compares false both ways, the series is sliced, and a sample is lost.',
+  },
+  {
+    id: 'V3-xii. ★★ the slice start is not clamped at the series head',
+    file: AGGREGATOR,
+    find: '    integrateWh(points.slice(Math.max(0, firstAtOrAfter(sinceMs) - 1), firstAfter(untilMs)), sinceMs, untilMs);',
+    to: '    integrateWh(points.slice(firstAtOrAfter(sinceMs) - 1, firstAfter(untilMs)), sinceMs, untilMs); /* MUTANT */',
+    why: 'A window that starts at or before the first sample slices from -1: it gets the last point alone, or nothing.',
+  },
+  {
+    id: 'V3-xiii. ★★★ carbon caches without a projected DPU',
+    file: ANALYTICS,
+    find: '  if (fleetComplete && cacheWritable()) carbonCache = { ts: Date.now(), value };',
+    to: "  if (deviceList.some((d) => d.projection?.kind === 'shp2') && cacheWritable()) carbonCache = { ts: Date.now(), value }; /* MUTANT */",
+    why: 'With every home Core dark, the carbon figure built with no Core projected is latched for the TTL.',
+  },
+  {
+    id: 'V3-xiv. ★★★ carbon caches without the projected panel',
+    file: ANALYTICS,
+    find: '  if (fleetComplete && cacheWritable()) carbonCache = { ts: Date.now(), value };',
+    to: "  if (deviceList.some((d) => d.projection?.kind === 'dpu') && cacheWritable()) carbonCache = { ts: Date.now(), value }; /* MUTANT */",
+    why: 'The v0.15.13 boot-partial (one polled DPU, the panel not yet projected) latches a partial-fleet carbon figure for the TTL.',
+  },
+  {
+    id: 'V3-xv. ★★★ tariff caches without a projected DPU',
+    file: ANALYTICS,
+    find: '  if (dpus.length > 0 && shp2 != null && cacheWritable()) tariffCache = { ts: now, value };',
+    to: '  if (shp2 != null && cacheWritable()) tariffCache = { ts: now, value }; /* MUTANT */',
+    why: 'With every home Core dark, the tariff built with no Core projected is latched for the TTL.',
+  },
+  {
+    id: 'V3-xvi. ★★★ tariff caches without the projected panel',
+    file: ANALYTICS,
+    find: '  if (dpus.length > 0 && shp2 != null && cacheWritable()) tariffCache = { ts: now, value };',
+    to: '  if (dpus.length > 0 && cacheWritable()) tariffCache = { ts: now, value }; /* MUTANT */',
+    why: 'The v0.15.13 boot-partial (grid-import cost with no solar value, negative net savings) is latched for the TTL.',
   },
 ];
 
