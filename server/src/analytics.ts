@@ -6951,7 +6951,7 @@ export function computeConfidenceSnapshot(
  * breakdown: kWh-direct-to-load, kWh-to-battery, kWh-from-battery, and
  * grid-imported kWh — and the "solar fraction of load" (% of household
  * consumption that was met by solar, directly or via battery).
- * Rolling 7-day window by default. Cached 5 min.
+ * Rolling 7-day window by default. Cached 15 min (SELF_CONSUMPTION_TTL_MS).
  * =================================================================== */
 
 const SELF_CONSUMPTION_TTL_MS = 15 * 60 * 1000; // v0.9.82 — staggered warm; 7-day aggregate, 15-min freshness ample

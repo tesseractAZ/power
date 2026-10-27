@@ -46,8 +46,10 @@ export interface OptionRow<T = unknown> {
   /** The numeric range the parse clamps to. For an `option` row with a ranged schema it must equal the
    *  schema range, or the difference is listed in DECLARED_DIVERGENCES (kind 'clamp'). */
   readonly clamp?: { min?: number; max?: number };
-  /** The reader whose rule this row reproduces, as test/golden/support/g3.ts names it (a G3 probe id:
-   *  a line number in it is the line on the tree G3 was captured from, frozen with the golden). */
+  /** The reader whose rule this row reproduces. For a key golden G3 covers (test/golden/support/g3.ts),
+   *  the G3 probe id as g3.ts names it: a line number in it is the line on the tree G3 was captured
+   *  from, frozen with the golden (test/golden.test.ts matches it against the probes). For any other
+   *  key, free text naming the reader, with file:line on the current tree when it cites a line. */
   readonly canonicalReader: string;
   /** Readers of the same key that apply a different rule for some inputs, each with that rule. */
   readonly divergentReaders?: Readonly<Record<string, string>>;

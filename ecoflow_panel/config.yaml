@@ -67,8 +67,9 @@ homeassistant_api: true
 # (post-install Piper visibility checks). Its role is hassio_role below:
 # `homeassistant` since v1.7.0, no longer "manager". The Wyoming Protocol →
 # Piper TTS config-flow goes through the Core API (homeassistant_api above).
-# We do NOT install/uninstall add-ons in code without explicit user
-# action — every Supervisor call goes through a named endpoint.
+# The only Supervisor call is a read-only GET /addons (haService.ts
+# listAddons, behind /api/admin/addons); nothing installs, uninstalls or
+# reconfigures an add-on.
 hassio_api: true
 # v1.7.0 (security #4, CWE-250) — least privilege: the add-on's only Supervisor
 # call is a read-only GET /addons (Piper/speaker visibility survey). `manager`
