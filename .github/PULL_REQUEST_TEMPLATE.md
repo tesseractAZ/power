@@ -13,7 +13,7 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 - [ ] `server/` type-checks, **both projects**: `./node_modules/.bin/tsc --noEmit -p tsconfig.json` and `-p tsconfig.test.json`
 - [ ] `web/` type-checks: `cd web && ./node_modules/.bin/tsc --noEmit -p tsconfig.json`
 - [ ] `python3 scripts/check-no-secrets.py` — no home IPs, DIDs, VoIP credentials, personal email or device serials in tracked files
-- [ ] If `config.yaml` options/schema changed: `python3 scripts/validate-addon-config.py` — **every option needs `en` AND `es`** entries and a `config.yaml` default
+- [ ] If `config.yaml` options/schema changed: `python3 scripts/validate-addon-config.py` — **every schema key needs `en` AND `es`** entries; a new key is schema-only and optional (schema ending `?`, no `options:` default), exported by the run script only under `bashio::config.has_value`, with a row in the `OPTIONS` table of `server/src/config.ts` and in `docs/guide/options.md` (the server tests and `check-docs.mjs` hold all three), and in `server/.env.example`, which lists every option
 - [ ] `node scripts/check-mutant-anchors.mjs` — all mutation-harness anchors still resolve
 - [ ] `node scripts/check-docs.mjs --check` — documentation sizes, links and completeness (D1–D11); the operator guide `ecoflow_panel/DOCS.md` stays at or under 32 KiB (Home Assistant renders all of it on every open of the Documentation tab)
 - [ ] `node scripts/check-npm-audit.mjs` — no high/critical advisories in the production dependency tree, no expired waivers

@@ -121,6 +121,7 @@
 - `FORCE_CHARGE_KW_PER_CORE` (5.5 kW when unset) times the just-in-time force-charge start and sizes the planner's automatic charge cap; `ARB_CHARGE_CAP_KW` above 0 still sets the cap.
 - `RUNWAY_POOL_OVERHEAD_FLOOR_W`, `RUNWAY_CORE_OVERHEAD_W`, `BMS_RESEED_MIN_GAP_WH`, `CAPACITY_SCALE_MIN`, `FORECAST_NIGHT_START_HOUR`, `FORECAST_NIGHT_END_HOUR`, `GRID_CO2_INTENSITY_LB_PER_MWH` and `CYCLING_BASE_WEAR_USD_PER_KWH`, read until now from the environment only, are options; each schema range equals the clamp the code applies.
 - `OPPORTUNISTIC_LOADS` (`id:watts:category[:label]` entries, or `none`) replaces the built-in list of loads the surplus advisor suggests, and `BATTERY_SOC_LADDER` (`pct:tier` entries) the levels the SoC alarm speaks at. Unset, the built-in list and the 50/40/30/20/15/10/8/4/2 ladder apply (golden G8).
+
 **Wording that described one home**
 
 - The forecast-dip rationale compares with "typical clear sky", not one city's.

@@ -6,8 +6,8 @@
   },
   "ratchet": {
     "releaseParagraphs": 45,
-    "fileLineCitations": 51,
-    "sectionSigns": 329
+    "fileLineCitations": 49,
+    "sectionSigns": 328
   },
   "history": {
     "docs/history/engineering-release-log-1.md": "0b35a675203993257b364e8b3b9542e1db66809aa47a6ae8799586fd2faa68be",

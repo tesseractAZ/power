@@ -3,17 +3,17 @@
 Monitoring, forecasting and battery alarms for an EcoFlow off-grid system: a Smart Home Panel 2
 and its Delta Pro Ultra battery Cores.
 
-- A live dashboard in the Home Assistant sidebar, and a control-room console.
+- A live dashboard in the Home Assistant sidebar, and a control-room console in the browser
+  and over SSH.
 - Battery, grid and host alarms, spoken on your speakers and pushed to your phone, with a
   critical alert that sounds through Do Not Disturb.
 - A day-ahead solar and battery forecast, and the runway to your reserve.
 - Pack health: state of health, cell spread, end-of-life projection and a warranty export.
 - Home Assistant entities through MQTT discovery, including Energy Dashboard counters.
 - A night-charge planner for a time-of-use tariff (APS R-EV built in; others described by
-  `TARIFF_PLAN`). It only advises unless you set
-  `NIGHT_CHARGE_MODE` to let it raise the panel's backup reserve overnight and, with
-  `ARB_OBJECTIVE` set to `cost`, run a force charge. The Documentation tab lists every write
-  Power can make.
+  `TARIFF_PLAN`). It only advises unless you set `NIGHT_CHARGE_MODE` to let it raise the panel's
+  backup reserve in the tariff's cheap window and, with `ARB_OBJECTIVE` set to `cost`, run a
+  force charge. The Documentation tab lists every write Power can make.
 
 > [!WARNING]
 > Power can warn you only while its host, your network, the EcoFlow cloud and your speakers all
@@ -25,7 +25,9 @@ Scheduling runs in Home Assistant's time zone unless `SITE_TIMEZONE` names anoth
 need Music Assistant speakers and Piper; entities need an MQTT broker.
 
 **Start here.** Open the **Documentation** tab for setup, what each alarm means, what Power
-writes to your system and troubleshooting. Enter your keys on the **Configuration** tab.
+writes to your system and troubleshooting. Enter your keys on the **Configuration** tab, then set
+what differs from the reference home: the location, the tariff, the solar array and any bench
+spares.
 
 - [Setting Power up for your home](https://github.com/tesseractAZ/power/blob/main/docs/guide/your-home.md)
 - [Option reference](https://github.com/tesseractAZ/power/blob/main/docs/guide/options.md)

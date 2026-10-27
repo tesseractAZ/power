@@ -211,7 +211,8 @@ Data shape (fields of the MQTT state payload):
 ```
 
 These are **not** exposed on a dedicated REST endpoint — they are computed inside the MQTT
-`buildState` path (`mqttDiscovery.ts` ~line 1337) and delivered to HA via MQTT. (The
+`buildState` path (`mqttDiscovery.ts`) and delivered to HA via MQTT; `/api/ha-state` does not
+carry them. (The
 underlying inputs — `runway`, `forecast`, `curtailment` — each have their own `/api/*`
 endpoints; see §2 for curtailment.)
 
@@ -319,6 +320,11 @@ Two things flow out of it into the automation layer:
 - 7 days of recorder history for the today/7-day curtailment walk and hour-of-day
   histogram.
 
+Hours of day and days are the **site's** (v1.191.0: `SITE_TIMEZONE`, else `TZ`, else
+`America/Phoenix`), never the host's clock: the posterior is keyed on `siteHour`, the current
+hour is `siteHour(now)`, today starts at the site midnight (`startOfLocalDayMs`), the past days
+step back by site days (`siteShiftDaysMs`) and the histogram buckets on the same hours.
+
 #### 2.3 The CALCULATION (relevant constants)
 
 ```ts
@@ -374,8 +380,11 @@ curtailment fields are also folded into the big `/api/ha-state` payload
 
 The opportunistic-load catalog below is the built-in default, sized for the reference plant's
 home. The add-on option `OPPORTUNISTIC_LOADS` replaces it (`<id>:<watts>:<category>[:<label>]`,
-comma-separated, the category one of pool, ev, water, hvac or other; `none` empties it); while
-it is unset the list below applies unchanged. The curtail constants above are compile-time, and
+comma-separated, the category one of pool, ev, water, hvac or other, an unknown or missing one
+reading as other, the label defaulting to the id; `none` empties it; `parseOpportunisticLoads`,
+limits.ts). An entry that does not parse is skipped and a repeated id keeps its first entry;
+while the option is unset, or no entry parses, the list below applies unchanged. A configured
+entry carries no description. The curtail constants above are compile-time, and
 there is no knob for the surplus thresholds.
 
 ---
@@ -387,8 +396,9 @@ aspirational, not running code.**
 
 #### 3.1 What actually exists
 
-The only HVAC-related logic in the add-on is **two entries in the opportunistic-load
-catalog** (`DEFAULT_OPPORTUNISTIC_LOADS` in `analytics.ts`), both `category: 'hvac'`:
+The only HVAC-related logic in the add-on is **two entries in the built-in opportunistic-load
+catalog** (`DEFAULT_OPPORTUNISTIC_LOADS` in `analytics.ts`, in effect while `OPPORTUNISTIC_LOADS`
+is unset), both `category: 'hvac'`:
 
 ```ts
 { id: 'ac_precool',
@@ -416,7 +426,7 @@ of the computation.
   `cooling_posture` MQTT sensor or REST field anywhere in the code — grep confirms zero
   matches. The "posture" concept is implemented only for **lighting**.
 - **No ecobee / thermostat actuation from this layer.** The `ecobee` references in the
-  server (`broadcast.ts`, plus one comment in `haService.ts`) — and those are about the ecobee units' **speakers** as
+  server (`broadcast.ts`, plus one comment each in `haService.ts` and `audioRenderer.ts`) are about the ecobee units' **speakers** as
   audible-alert / TTS targets (`media_player.*`), **not** climate control. The add-on never
   calls `climate.set_temperature` or any thermostat service.
 - **`haServiceHint` is always `null`.** Every opportunistic load is built with

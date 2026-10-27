@@ -280,8 +280,12 @@ below.
 #### `DeviceSnapshot` shape
 
 ```ts
-{ sn, deviceName, productName, online, lastUpdated, lastError?, lastErrorAt?,
-  projection?, raw? /* only if SNAPSHOT_INCLUDE_RAW=1 */, grid?, off_grid? }
+{ sn, deviceName, nameFallback?, productName, online, lastUpdated, lastError?, lastErrorAt?,
+  lastQuotaAtMs?, lastTelemetryAtMs?, contentChangedAtMs?, contentStaleSinceMs?, contentNewAtMs?,
+  onlineChangedAtMs?, onlineChangedVia?, lastGridReading?, gridVetoClearedAtMs?,
+  housePanel?, housePanelMissing?, lastRoster?,
+  projection?, raw? /* only if SNAPSHOT_INCLUDE_RAW=1 */, grid?, off_grid?,
+  readbackFresh?, backupTimers? /* panels, on the client copy only (panelForClient) */ }
 ```
 
 `lastUpdated` = ms epoch of the last evidence of life. That is a REST quota or a translated
@@ -302,10 +306,15 @@ alarm keys on this (`STALE_MS = 3 min` in `alerts.ts`), so several guards protec
 
 #### Data ingest paths
 
-- `setDeviceList(devices)` — updates roster + `online`, resolves display name
-  (`resolveDeviceName`: cloud name unless it's blank or equals the SN → productName →
-  SN), sanitizes it (`sanitizeDisplayName`, 48 chars, strips ESC/control bytes), logs
-  online↔offline transitions.
+- `setDeviceList(devices)` — updates roster + `online`, resolves display name (an alias
+  first: the `DEVICE_ALIASES` option merged over `device-aliases.json` beside the database,
+  merged over the image's own file; a layer that cannot be read is skipped, and the option's or
+  the data file's raises a repair issue; else `resolveDeviceName`: cloud name unless it's blank or equals the SN → productName →
+  SN). Two devices left on the same fallback name are told apart by their panel slot, else
+  the serial's last four characters (`disambiguateFallbackNames`), and a fallback-named Core
+  carries `nameFallback`, so `coreNumber()` numbers it by its slot. The name is sanitized
+  (`sanitizeDisplayName`, 48 chars, strips ESC/control bytes), and online↔offline
+  transitions are logged.
 - `setDeviceQuota(sn, raw, source)` — REST full replace; re-projects via
   `projectByProduct`, applies grace-holds + onset trackers, bumps `lastUpdated`.
 - `mergeDeviceQuota(sn, partial, source)` — merges a delta **in place**
@@ -497,6 +506,16 @@ held duration.
 self-clearing stale alert) and deliberately does **not** bump `lastQuotaAtMs` (it
 never touches the projection). That is the third path into the defect v0.97.0 and
 v1.3.0 each fixed elsewhere.
+
+Beside them, three clocks record **content** rather than arrival. `lastTelemetryAtMs` moves when
+telemetry content lands (`setDeviceQuota` or `mergeDeviceQuota`, REST or translated MQTT, and
+nothing else); the dashboard's header age reads it, and so does the recorder's freshness gate
+(architecture chapter, 4.3). A REST 200 replaying a cached body still moves it, so two more
+clocks sit under it: `contentChangedAtMs` (a Core's content witness changed; the grid resolver's
+Core-import gate, `dpuContentFresh` and the recorder's gate for a Core read it) and, for the
+SHP2, `contentNewAtMs` (a body not seen since the content froze, `advanceBodySeen`), which lets
+the recorder write the first new body under a shadow latch that the alarm path still holds.
+`setDeviceList` carries all three across its rebuild of each device.
 
 > ★ `setDeviceList` rebuilds every device object from an explicit literal on each
 > 60 s poll and silently drops any field not named there. Every sticky clock must
@@ -767,7 +786,8 @@ exclude spares. (The reference plant's own roster is recorded in
   panel.
 - **`homeCoreCoverage(devices)`** → `{ connected, reporting, complete }`. Roster = SHP2
   connected sources (the union across panels), else the persisted last-known home roster
-  (v1.121.0), else every DPU not in the `SPARE_DPU_SNS` literal. Roster SNs absent from the
+  (v1.121.0), else every DPU not in the bench-spare floor (`benchSpareFloor()`:
+  `BENCH_SPARE_SNS` when set, else the `SPARE_DPU_SNS` literal). Roster SNs absent from the
   device map count as not reporting, the conservative direction. `complete` = all roster cores
   reporting. Core principle: *we can PROVE discharge from a partial sum; we can never
   DISPROVE it.* An empty roster means no home cores exist at all → `complete` is vacuously
@@ -785,7 +805,7 @@ exclude spares. (The reference plant's own roster is recorded in
   `panelForClient` take them, so the timers and the card count each Core as Fleet PV and
   Battery Net do; `panelForClient` puts them on each connected slot as `ownReading` and
   `pvMeasuredW`.
-- **`isHomePoolDpu(sn, connectedOrDevices)`** — v1.92.0; is this DPU wired into the backup pool right now (SHP2 roster, literal only as the unknown-roster fallback).
+- **`isHomePoolDpu(sn, connectedOrDevices)`** — v1.92.0; is this DPU wired into the backup pool right now (SHP2 roster, the bench-spare floor only as the unknown-roster fallback).
 - **`homeFleetMeanSoc(devices)`** — reserve-alarm SHP2-blind fallback: mean SoC of home
   cores still reporting (spares + offline cores excluded). Used when the SHP2 nulls
   `backupBatPercent` while cloud-offline, so the audible reserve ladder keeps firing on

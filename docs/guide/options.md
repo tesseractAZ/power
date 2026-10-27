@@ -20,11 +20,11 @@ common ones by goal.
 | `ECOFLOW_API_HOST` | `https://api-a.ecoflow.com` | `url` | EcoFlow cloud API base. Switch to `api-e.ecoflow.com` (EU) or `api-us.ecoflow.com` (US) on a `401`. |
 | `LOG_LEVEL` | `info` | `list(trace\|debug\|info\|warn\|error\|fatal)` | Pino log level for the server. |
 
-#### Site location (solar forecast only)
+#### Site location
 
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
-| `FORECAST_LAT` | `33.4484` | `float(-90,90)` | Latitude for the day-ahead solar forecast (Open-Meteo), and where day is told from night while a Core is offline and its solar is counted at the panel. The default is a placeholder: replace it with your site's. |
+| `FORECAST_LAT` | `33.4484` | `float(-90,90)` | Latitude for the day-ahead solar forecast (Open-Meteo), the NWS storm alerts, the PV model once a `PV_*` key is set, and where day is told from night while a Core is offline and its solar is counted at the panel. The default is a placeholder: replace it with your site's. With `SITE_LOCATION_FROM_HA` on, Home Assistant's home location replaces both coordinates from the start after it is read. |
 | `FORECAST_LON` | `-112.074` | `float(-180,180)` | Longitude for the forecast. The default is a placeholder too. |
 
 #### Push notifications
@@ -65,7 +65,8 @@ common ones by goal.
 | `BROADCAST_WYOMING_VOICE_ES` | `""` | `str?` | Piper voice for the Spanish pass. |
 
 > Note: an option reaches the server only through the runner's options→env bridge
-> (`rootfs/etc/services.d/ecoflow-panel/run`), which exports every option on this page. A new
+> (`rootfs/etc/services.d/ecoflow-panel/run`), which exports every option on this page (a key with
+> no default only while it is set). A new
 > option added to config.yaml is dead until the runner exports it (see
 > [the options→env bridge](../reference/12-configuration-deployment-security.md#the-optionsenv-bridge-run-script)).
 
@@ -73,7 +74,7 @@ common ones by goal.
 
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
-| `BATTERY_SOC_ALARM_ENABLED` | `true` | `bool` (→ `true`/`false`) | Enable the state-of-charge alarm engine. |
+| `BATTERY_SOC_ALARM_ENABLED` | `true` | `bool` (→ `true`/`false`) | Enable the state-of-charge alarm engine, at the levels `BATTERY_SOC_LADDER` sets. |
 | `BATTERY_RUNWAY_ALARM_ENABLED` | `true` | `bool` (→ `true`/`false`) | Enable the runway (time-to-reserve) alarm. |
 | `BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN` | `60` | `int(5,720)?` | Minutes between re-announcements of an active runway alarm. |
 | `GRID_AVAILABLE` | `false` | `bool` (→ `true`/`false`) | Must be `false` for an islanded/off-grid site — drives off-grid honesty + the grid-aware floor. |
@@ -129,11 +130,11 @@ clamp, its deferral of a stale panel and the force-charge run cap follow the pla
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
 | `NIGHT_CHARGE_ADVISOR_ENABLED` | `true` | `bool` (→ `true`/`false`) | Runs the night-charge planner: the plan recomputed every 30 minutes, the nightly notice and the write timers. Off: no plan is computed, the night-charge sensors carry none, no notice is sent and no write is armed. Change it outside a charge night: the timer that restores a raised reserve stops with it (the force-charge OFF keeps its own). |
-| `NIGHT_CHARGE_MODE` | `advisory` | `list(advisory\|supervised\|auto)` | What the engine may write. `advisory` writes nothing. `supervised` arms one announced, cancellable write per charge night: the backup reserve is raised at the window open to the plan's setpoint (clamped to 10–50), read back, and restored at the window close, or at once on a cancel or a grid loss. With `ARB_OBJECTIVE` set to `cost` and `ARB_COST_MAX_SOC_PCT` above 50 it adds a just-in-time force-charge toward the night's target. `auto` runs exactly as `supervised`. Unknown values fail closed to `advisory`. |
+| `NIGHT_CHARGE_MODE` | `advisory` | `list(advisory\|supervised\|auto)` | What the engine may write. `advisory` writes nothing. `supervised` arms one announced, cancellable write per charge night: the backup reserve is raised at the window open to the plan's setpoint (clamped to 10–50), read back, and restored at the window close (an hour before on-peak at the latest), or at once on a cancel or a grid loss. Nothing is raised or switched on within an hour of on-peak, and a restore the panel does not confirm is paged as critical. With `ARB_OBJECTIVE` set to `cost` and `ARB_COST_MAX_SOC_PCT` above 50 it adds a just-in-time force-charge toward the night's target. `auto` runs exactly as `supervised`. Unknown values fail closed to `advisory`. |
 | `ARB_OUTAGE_CUSHION_PCT` | `15` | `int(0,40)` | Legacy cushion, as a percent of the pool, used only while no islanded-load measurement exists; the primary cushion is `ARB_OUTAGE_CUSHION_HOURS` of the measured islanded load. Never changes the floor alarm. |
 | `ARB_OUTAGE_CUSHION_HOURS` | `4` | `float(0,72)` | Hours of outage the pack must carry the panel's own circuits after the window closes, above the reserve: hours × the 7-day mean panel load × `ARB_ISLANDED_LOAD_SAFETY` ÷ the discharge efficiency. `0` disables the cushion. Choose the hours an outage that starts as the window closes must be carried before you can act, for example by starting a generator. |
 | `ARB_ISLANDED_LOAD_SAFETY` | `1.25` | `float(1,5)` | Multiplier on the measured panel load in the cushion. Higher buys more. |
-| `ARB_OBJECTIVE` | `resilience` | `list(resilience\|cost)` | `resilience` buys only the reserve plus the cushion. `cost` treats that as a floor and fills further, toward a ceiling that leaves room for tomorrow morning's solar, capped at `ARB_COST_MAX_SOC_PCT`. It can buy more, never less. |
+| `ARB_OBJECTIVE` | `resilience` | `list(resilience\|cost)` | `resilience` buys only the reserve plus the cushion. `cost` treats that as a floor and fills further, toward a ceiling that leaves room for tomorrow morning's solar, capped at `ARB_COST_MAX_SOC_PCT`. It can buy more, never less. With `cost` and `ARB_COST_MAX_SOC_PCT` above 50, the evening before a winter weekday also works out the charge it would make in the tariff's `super_off_peak` period instead (10:00–15:00 with the APS R-EV preset), as a preview only: it is shown on the Midday-Charge entities and the night-charge card, and nothing is written for it. |
 | `ARB_COST_MAX_SOC_PCT` | `90` | `int(50,100)` | Cost-mode fill ceiling. The panel's backup reserve stops at 50, so above 50 the night's target is reached by force-charge; `50` turns force-charge off. |
 | `ARB_MIN_BUY_KWH` | `1` | `float(0,50)` | Below this recommended buy the night is a "hold". |
 | `ARB_CHARGE_CAP_KW` | `0` | `float(0,50)` | Grid-side charge-power ceiling the plan is sized against. `0` = automatic: the connected Cores × the rate each is measured to take (about 5.9 kW per Core at the grid on the reference plant). Above 0 is a fixed override; leave `0` unless that measured rate is wrong for your Cores. Sizing only; no device is set. |
@@ -191,7 +192,7 @@ measure for each, and where:
 
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
-| `SITE_TIMEZONE` | unset (behaves as Home Assistant's time zone) | `str?` | The IANA time zone the schedule runs in, for example `Europe/Berlin`: the nightly notice, the charge window, the tariff periods, quiet hours, the morning digest and the daily jobs. Empty uses the zone the Supervisor passes from Home Assistant, and `America/Phoenix` when there is none. An unknown name raises a repair issue and is ignored. Leave it empty unless the schedule must differ from Home Assistant's zone. The zone is read once at start; one that differs from Home Assistant's raises a warning and a repair issue. |
+| `SITE_TIMEZONE` | unset (behaves as Home Assistant's time zone) | `str?` | The IANA time zone the schedule runs in, for example `Europe/Berlin`: the nightly notice, the charge window, the tariff periods, quiet hours, the morning digest, the daily jobs, and the times shown on the console and on the night-charge, Today and forecast cards. Empty uses the zone the Supervisor passes from Home Assistant, and `America/Phoenix` when there is none. An unknown name raises a repair issue and is ignored. Leave it empty unless the schedule must differ from Home Assistant's zone. The zone is read once at start; one that differs from Home Assistant's raises a warning and a repair issue. |
 | `SITE_LOCATION_FROM_HA` | unset (behaves as off: `FORECAST_LAT` / `FORECAST_LON`) | `bool?` | Use Home Assistant's home latitude and longitude for the forecast, the storm alerts, the day/night test and the PV model. Read in the background after a start and saved, it applies from the next start. Off, a repair item warns when Home Assistant's home is more than 50 km from `FORECAST_LAT` / `FORECAST_LON`. |
 
 #### Tariff plan
@@ -257,7 +258,7 @@ Setting any `PV_*` key moves the PV model from the reference array onto `FORECAS
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
 | `BENCH_SPARE_SNS` | unset (behaves as the built-in spare list) | `str?` | Serials of the Cores kept off the panel as bench spares, comma-separated, or `none`. A spare's offline alarm is shown without a sound or a push, and the unit is left out of the pool. When set, it replaces the built-in list rather than adding to it. A unit the panel lists as a connected source is never a spare, and a missing unit is never taken for one. A serial that matches no device raises a repair item. |
-| `DEVICE_ALIASES` | unset (behaves as the image's alias file alone) | `str?` | Display names by serial, as JSON: `{"<serial>":"Core 5"}`. Merged over `/data/device-aliases.json`, which is merged over the image's own file; read at start. A value that is not a JSON object is ignored and raises a repair item. |
+| `DEVICE_ALIASES` | unset (behaves as the alias files alone) | `str?` | Display names by serial, as JSON: `{"<serial>":"Core 5"}`. Merged over `/data/device-aliases.json`, which is merged over the image's own file; read at start. A value that is not a JSON object is ignored and raises a repair item. |
 
 #### Plant limits and factors
 
@@ -273,6 +274,6 @@ The defaults were measured on a three-Core reference plant.
 | `FORECAST_NIGHT_START_HOUR` | unset (behaves as 21) | `int(0,23)?` | First hour of the overnight band in which the load forecast is trimmed toward the recently measured load. |
 | `FORECAST_NIGHT_END_HOUR` | unset (behaves as 5) | `int(0,23)?` | Last hour of that overnight band. |
 | `GRID_CO2_INTENSITY_LB_PER_MWH` | unset (behaves as 1100) | `float?` | Grid carbon intensity for the avoided-CO2 figures, in lb CO2 per MWh. The utility or grid operator publishes the figure for an area. |
-| `CYCLING_BASE_WEAR_USD_PER_KWH` | unset (behaves as 0.015) | `float?` | Base battery wear cost per kWh cycled that the MPC weighs against tariff savings, in USD. |
+| `CYCLING_BASE_WEAR_USD_PER_KWH` | unset (behaves as 0.015) | `float?` | Base battery wear cost per kWh cycled that the MPC weighs against tariff savings, in the tariff's currency (`TARIFF_CURRENCY`; the key keeps its USD name). |
 | `OPPORTUNISTIC_LOADS` | unset (behaves as the built-in examples) | `str?` | Loads to suggest when PV would be curtailed: `id:watts:category[:label]` entries, comma-separated, e.g. `pool_pump:1800:pool:Pool pump,water_heater:4500:water`. Category pool, ev, water, hvac or other (other when left out). `none` lists nothing; a value with no valid entry keeps the built-in examples. |
 | `BATTERY_SOC_LADDER` | unset (behaves as 50/40/30/20/15/10/8/4/2) | `str?` | SoC alarm levels announced on the way down: `pct:tier` entries, comma-separated, e.g. `50:low,30:medium,15:critical`; tier low, medium, high or critical. A value with no valid entry keeps the built-in ladder (50–30 low, 20–15 medium, 10–2 critical). |

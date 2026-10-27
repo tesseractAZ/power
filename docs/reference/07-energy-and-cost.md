@@ -14,6 +14,11 @@ accumulators live in `server/src/recorder.ts`; the MPC lives in
 `server/src/dispatch/mpc.ts`; the trapezoidal energy integrator lives in
 `server/src/aggregator.ts`.
 
+Every "local" day, hour, weekday and midnight below is the **site's** (`siteTime.ts`, v1.191.0):
+`SITE_TIMEZONE`, else the container's `TZ`, else `America/Phoenix`, resolved once at start.
+`startOfLocalDayMs` (aggregator.ts) is the site midnight, so the reports' "today", the Today card
+and the tariff share one clock with the rate table; the host's own clock is not read.
+
 ---
 
 ### 0. Foundations: the two grid quantities and the energy integrator
@@ -348,14 +353,14 @@ Net and the rollup had counted both slots. The backup timers' bound reads the sa
 
 | Basis | When | PV over the window |
 |---|---|---|
-| `night` | sun below the horizon at both ends of the window (`solarPosition` at the configured install site, `FORECAST_LAT` / `FORECAST_LON`, read by `bridgeSite`; Phoenix, the options' default, when the option is not a coordinate) | 0 — physics, not a reading |
+| `night` | sun below the horizon at both ends of the window (`solarPosition` at the install site: `bridgeSite` of the recorder's `siteCoordinates()`, which is `FORECAST_LAT` / `FORECAST_LON`, or, with `SITE_LOCATION_FROM_HA`, Home Assistant's home location as an earlier run saved it; the options' placeholder default, a Phoenix centroid, when that is not a coordinate) | 0 — physics, not a reading |
 | `measured` | daylight, and this slot's panel PV field has passed its check against the inferred bound (persisted `bridge_pvseen_<panel>_<slot>`) | ∫ `src<n>_pv_w` (the panel's `pvHeightChargeWatts + pvLowChargeWatts`, else `pvChargeWatts`) |
 | `inferred` | daylight, the field not trusted (not yet checked, or below the bound) | monotone envelope `max(prev, Σ(acOut − acIn) + (pct − pct₀) × capWh)` from the slot's first daylight window of its dark span that day |
 | `unchecked` | the power sensors only (`slotPowerBasis`): daylight, the field present, not trusted and not found below today | the field as read, for Fleet PV and Battery Net; the rollup books the same window `inferred` |
 | `unbridgeable` | no slot reading in the window (the panel reading was not fresh), or an inferred window the meter did not cover (re-anchored); for the power sensors, the panel reading is not fresh now (`shp2ReadbackFresh`) | nothing booked at the slot (a marked Core's own readings count instead, above) |
 
-The site matters on any install outside Phoenix: judged on Phoenix's clock, a Berlin
-morning (10:00 CEST is 01:00 MST) would take the night basis and book the solar a dark
+The site matters on any install away from the placeholder: judged at Phoenix's coordinates, a
+Berlin morning (10:00 CEST is 01:00 MST) would take the night basis and book the solar a dark
 Core passes to the house as battery out, and a Berlin night the inferred basis, with both
 power sensors unknown all night.
 
@@ -475,7 +480,10 @@ Where the energy goes:
   solar is booked at night). No other caller asks for the bridged totals: the vendor-ledger
   comparison and the pack-DC round trip (energy history) and the reconnect report's PV coverage
   keep the Cores' own meters. The ledger has no backfill: windows booked before it existed are
-  not in it, so on the day it first runs the card counts the bridged energy from then on.
+  not in it, so on the day it first runs the card counts the bridged energy from then on. The
+  card's day runs from the site's midnight (`startOfLocalDayMs`) to the next (`dayEndMs`), and the
+  payload carries `siteTimeZone` (v1.191.1), the zone the card writes its "since" time in rather
+  than the browser's.
 
 **Hand-over.** For every held pack of a bridged Core the bridge writes a marker
 `bridge_dark_<pack>`: the packs the Core's projection carries, or, with no projection (dark
@@ -599,7 +607,7 @@ into the deficit state (`deficitWh > 1000`), latched by `bmsClampActive`.
 > Marker-file fail-safety (`markerPresentProbe`, v0.79.0): the one-time markers
 > are probed by **reading** (not `existsSync`) to close a TOCTOU race; only a
 > confirmed-absent (`ENOENT`) marker counts as "not yet claimed". Any other read
-> error (EIO from a corrupt inode after unclean power-off — this host's dominant
+> error (EIO from a corrupt inode after unclean power-off — the reference host's dominant
 > reboot cause) is treated as **claimed**, so the destructive reset never re-runs
 > per boot. Writes use `wx` (exclusive create); `EEXIST` = a racing starter, = success.
 
@@ -818,20 +826,33 @@ at TOU rates.
 
 #### 4.2 Tariff constants (add-on options)
 
-| Constant | Env (add-on option, optional) | Default |
+All of these are read through `legacyTariffFromEnv` (tariff.ts), the one reader the cost
+figures, the dispatch planner and the MPC share since v1.191.0.
+
+| Reader | Add-on option (optional, exported only when set) | Unset |
 |---|---|---|
-| `TARIFF_FLAT_CENTS` | `TARIFF_FLAT_CENTS_PER_KWH` | `17` (flat-rate default) |
-| `TARIFF_ON_PEAK_CENTS` | `TARIFF_ON_PEAK_CENTS` | = flat (17) |
-| `TARIFF_OFF_PEAK_CENTS` | `TARIFF_OFF_PEAK_CENTS` | = flat (17) |
-| `TARIFF_ON_PEAK_HOURS_ENV` | `TARIFF_ON_PEAK_HOURS` | `"15-20"` |
-| `TARIFF_ON_PEAK_DAYS_ENV` | `TARIFF_ON_PEAK_DAYS` | `"1-5"` (Mon–Fri) |
+| `TARIFF_FLAT_CENTS` (`flatCents`) | `TARIFF_FLAT_CENTS_PER_KWH` | `17` (`TARIFF_FLAT_DEFAULT_CENTS`, config.ts) |
+| `kpi.onPeak` | `TARIFF_ON_PEAK_CENTS` | = flat (17); only a value above zero counts |
+| `kpi.offPeak` | `TARIFF_OFF_PEAK_CENTS` | = flat (17); only a value above zero counts |
+| `TARIFF_ON_PEAK_HOURS_ENV` | `TARIFF_ON_PEAK_HOURS` | `"15-20"`; with a plan other than `aps_r_ev` and neither window option set, the plan's own on-peak period (`legacyOnPeakWindow`) |
+| `TARIFF_ON_PEAK_DAYS_ENV` | `TARIFF_ON_PEAK_DAYS` | `"1-5"` (Mon–Fri); likewise |
 
 > **v0.9.58:** defaults to a **flat** rate — the prior 25¢/8¢ split implied a TOU
 > plan most utility customers lack and silently overstated both cost and solar value.
-> Note: the variables in this table are add-on options under their environment names,
-> optional and exported only when set, so an unset one keeps the default above. The tariff
-> model itself is chosen with `TARIFF_PLAN`; the built-in APS R-EV preset is priced with the
-> `TARIFF_APS_*_CENTS` options and `TARIFF_APS_RATES_CONFIRMED` (§4.2b).
+> The tariff model is chosen with `TARIFF_PLAN` (v1.191.0, `tariffModelFromEnv`; the old
+> `apsREvModelFromEnv` is an alias of it): unset or `aps_r_ev` is the built-in APS R-EV
+> preset, priced with the `TARIFF_APS_*_CENTS` options; `flat` is `TARIFF_FLAT_CENTS_PER_KWH`
+> every hour; `two_tier` is one on-peak period, `TARIFF_ON_PEAK_HOURS` on `TARIFF_ON_PEAK_DAYS`,
+> at `TARIFF_ON_PEAK_CENTS` / `TARIFF_OFF_PEAK_CENTS` (the MPC's `…_CENTS_PER_KWH` names are
+> accepted as aliases there only); `custom` is a period table in `TARIFF_PERIODS` with
+> `TARIFF_RATES`. Every plan takes `TARIFF_SUMMER_MONTHS` (`4-9` unset), `TARIFF_HOLIDAYS`
+> (unset: `aps` for the preset, `none` otherwise) and `TARIFF_FIXED_DAILY_CENTS`. Its rates
+> count as confirmed with `TARIFF_RATES_CONFIRMED`, or `TARIFF_APS_RATES_CONFIRMED` while that
+> is unset (`tariffRatesConfirmation`, §4.2b). A spec that does not parse fails closed
+> (`failClosedTariffModel`: no periods, no rates, nothing confirmed, no cheap window), so the
+> cost figures price at the flat fallback and a repair issue names the option; it never falls
+> back to the R-EV table. `TARIFF_CURRENCY` (USD unset; EUR, GBP, CAD or AUD) sets the unit of
+> the money sensors below.
 >
 > The table above pins the **unconfigured-install** contract. On an install that
 > has confirmed its utility's rate table, §4.2b supersedes it — do not read the
@@ -857,8 +878,8 @@ and picks the first tier that applies:
 
 | # | Tier | `basis` | Condition |
 |---|---|---|---|
-| 1 | Explicit override | `'explicit-override'` | `TARIFF_ON_PEAK_CENTS` / `TARIFF_OFF_PEAK_CENTS` set |
-| 2 | Confirmed seasonal utility table | `'aps_r_ev-summer'` / `'aps_r_ev-winter'` with the APS R-EV preset | The plan's rates confirmed (`TARIFF_APS_RATES_CONFIRMED` for the preset); season from `seasonAt` (tariff.ts §3) |
+| 1 | Explicit override | `'explicit-override'` | `TARIFF_ON_PEAK_CENTS` and `TARIFF_OFF_PEAK_CENTS` both set above zero |
+| 2 | Confirmed seasonal table of the plan in effect | `'<plan>-<season>'`: `'aps_r_ev-summer'` / `'aps_r_ev-winter'` with the APS R-EV preset, likewise `flat-…`, `two_tier-…`, `custom-…` | The plan's rates confirmed (`TARIFF_RATES_CONFIRMED`, else `TARIFF_APS_RATES_CONFIRMED`) and both cents of `twoTierPairOf` (the in-season on-peak period's, the off-peak's) above zero; season from `seasonAt` (tariff.ts §3) |
 | 3 | Flat default | `'flat-default'` | neither of the above |
 
 The resolved basis is published as `tariffBasis` on `/api/tariff` (§4.4) and is
@@ -866,21 +887,22 @@ shared by the dispatch planner (§5), so the two engines can no longer disagree
 about what a kWh costs.
 
 **Seasonality** is a usage-month test from the tariff model's own season
-(`apsSeasonIsSummer` → `seasonAt(apsREvModelFromEnv(), nowMs)`, tariff.ts §3): the
+(`apsSeasonIsSummer` → `seasonAt(tariffModelFromEnv(), nowMs)`, tariff.ts §3): the
 summer table applies to usage in April through September, the winter table to
 October through March — the APS billing-cycle seasons, which `TARIFF_SUMMER_MONTHS` replaces
 when set (v1.187.10; it was a separate
 calendar May–October test). A plan generated in one season for a window that opens
 in the next resolves at *generation* time.
 
-★ **Edge worth knowing:** tier 1 is evaluated **per side**, as
-`onOverride ?? <fallback>`. A half-set legacy override — one side configured,
-the other not — is therefore honoured for the side that is set while `basis`
-still reports `'flat-default'`, because the basis label is chosen by which tier
-supplied the pair, not by which values ultimately won.
+★ **Edge worth knowing:** a half-set legacy override — one side configured, the
+other not — does not make tier 1. Where tier 2 applies it is ignored; otherwise
+tier 3 takes `override ?? flat` per side, so the side that is set is honoured
+while `basis` reports `'flat-default'`: the label names the tier that supplied
+the pair, not the values that won.
 
-`onPeakAt(ts)`: `dow` mapped 1=Mon…7=Sun; both hour and day ranges support
-wrap-around (`hStart > hEnd`). Returns `dayOk && hourOk`.
+`onPeakAt(ts)`: the site's hour and weekday (`siteHour` / `siteDow`, v1.191.0;
+the host's `getHours` / `getDay` before), `dow` mapped 1=Mon…7=Sun; both hour and
+day ranges support wrap-around (`hStart > hEnd`). Returns `dayOk && hourOk`.
 
 #### 4.3 Calculation
 
@@ -912,22 +934,26 @@ test as self-consumption. `tally()` runs for `since` (window) and `todayStart`.
 `todaySolarLoadValueDollars`. → `/api/ha-state`:
 `tariff_net_savings_7d_dollars`, `tariff_today_grid_cost_dollars`,
 `tariff_today_solar_value_dollars`. MQTT: `ecoflow_tariff_today_cost`,
-`ecoflow_tariff_today_saved`, `ecoflow_tariff_savings_7d` (unit USD).
+`ecoflow_tariff_today_saved`, `ecoflow_tariff_savings_7d` (unit `USD`, or the
+`TARIFF_CURRENCY` code: `currencyUnit`, mqttDiscovery.ts; the `_dollars` field names stay).
 
 Cache latched only when `dpus.length > 0 && shp2 != null` (v0.15.13 — `&&`, not
 `||`; a boot-partial snapshot once produced net_savings −$4.36).
 
 **The stated window and rates are the ones that price (v1.187.0, `tariffPricingView`).**
 The window and cents fields come from the table the tally above is priced with, mirroring
-`hourlyRateCents` / `isOnPeakHour`. With `TARIFF_APS_RATES_CONFIRMED=true` (`pricingBasis:
-'rate-table'`) they are the confirmed tariff model's (the APS R-EV preset's by default): `onPeakHours` / `onPeakDays` from its
+`hourlyRateCents` / `isOnPeakHour`. With the plan's rates confirmed (`pricingBasis:
+'rate-table'`) they are the tariff model's (the APS R-EV preset's while `TARIFF_PLAN` is unset): `onPeakHours` / `onPeakDays` from its
 on-peak period (`onPeakWindowStrings`, tariff.ts: hours `start-end` local and end-exclusive,
-days on the 1=Mon…7=Sun scale — `16-19`, `1-5`), and the current season's `onPeakCents`,
-`offPeakCents`, `overnightCents` and (winter only) `superOffPeakCents`, each falling back to
+days on the 1=Mon…7=Sun scale — `16-19`, `1-5` on the preset; the legacy window for a plan with
+none), and the current season's `onPeakCents`,
+`offPeakCents`, `overnightCents` and `superOffPeakCents` (the in-season periods with the ids
+`overnight` / `super_off_peak`: winter only on the preset), each falling back to
 the two-tier figure exactly where `hourlyRateCents` does (a period with no rate this season;
 `overnightCents` null then). Otherwise (`pricingBasis: 'two-tier'`) the report carries the
 two-tier pair and the legacy `TARIFF_ON_PEAK_HOURS` / `TARIFF_ON_PEAK_DAYS` window it is priced
-with (defaults `15-20`, `1-5`), and `overnightCents` / `superOffPeakCents` are null. Before
+with (defaults `15-20`, `1-5`; a plan other than the preset with neither set, its own on-peak
+period), and `overnightCents` / `superOffPeakCents` are null. Before
 v1.187.0 the report printed the legacy `15-20` default on a confirmed install — two hours of
 "on-peak" nothing charged — and omitted the overnight rate. `tariffBasis` still names the
 two-tier tier (`resolveTariffCents`, §4.2). Observed holidays (all-day off-peak in the model)
@@ -1012,7 +1038,10 @@ off-peak hour ahead of an on-peak hour qualifies. The 80% target and the
 onPeak, action, flowW, hourlyCostDollars}`),
 `estimatedSavingsDollars = allGridCost − plannedCost`, `targetPrePeakSocPct`
 (80). Route: `computeDispatchPlan(store.get().devices, forecast)`. Returns
-`empty()` when no forecast or no SHP2 capacity.
+`empty()` when no forecast or no SHP2 capacity. The engine's 30-min cache is reused only
+for the forecast it was planned on (its `generatedAt`, v1.187.18), so it is reused for as
+long as the day forecast is cached — since v1.191.2 that includes a fleet whose every Core
+is cloud-dark while the panel reports.
 
 ---
 
@@ -1185,8 +1214,12 @@ so an hour of a full pool and a held panel was counted as curtailed and could be
 `today` walks past hours with weather and is always live; `recent7d`
 (`CURTAIL_HISTORY_DAYS = 7`) covers the 7 finished local days before today. An hour is
 weather-verified when the analytics worker's own Open-Meteo cache (`past_days=7`, UTC days)
-holds it with GHI ≥ `CURTAIL_MIN_GHI_WM2` and the posterior has support; any other hour takes
-the heuristic path. **Frozen days (v1.186.1, `curtailmentFreeze.ts`).** A finished day is
+holds a value the provider sent for it: below `CURTAIL_MIN_GHI_WM2` such an hour is dark or
+cloudy, never curtailment (v1.186.2), and otherwise it needs posterior support. Only an hour
+with no such value takes the heuristic path: load ≥ 100 W with PV ≤
+`CURTAIL_PV_MATCH_LOAD_FACTOR` × load, and expected PV = μ × `curtailGhiCapWm2()` (site.ts) —
+900 W/m² while no `PV_*` key is set, the site's own clear-sky noon GHI (never above 900) once
+one is (v1.191.0). **Frozen days (v1.186.1, `curtailmentFreeze.ts`).** A finished day is
 walked only until it *settles*: the weather in hand was fetched at least
 `CURTAIL_SETTLE_LAG_MS` (12 h) after the day ended, so none of its hours is a forecast value
 and the provider's past-hour revisions are done (past hours are stitched from each model run's
@@ -1295,9 +1328,12 @@ same aggregation the dashboard renders — and SoC/reserve from `findShp2().proj
 > This is a "several kW of deliberate charging" detector, **not** an energy-balance
 > instrument, and must not be repurposed as one.
 
-**Tariff source.** `apsREvModelFromEnv()` in `tariff.ts` — the single model shared with
-`index.ts`, so no second reader can drift on when on-peak begins. On-peak resolves via
-`rateAt(model, ts).isOnPeak` (the APS R-EV preset: 16:00–19:00 site time, Mon–Fri, year-round).
+**Tariff source.** `tariffModelFromEnv()` in `tariff.ts` (the plan `TARIFF_PLAN` names;
+v1.191.0, `apsREvModelFromEnv` before) — the single model shared with `index.ts`, so no
+second reader can drift on when on-peak begins. On-peak resolves via
+`rateAt(model, ts).isOnPeak` in the site zone (the APS R-EV preset: 16:00–19:00, Mon–Fri,
+year-round). A plan with no on-peak period (`flat`, or a spec that failed closed) is never
+on-peak, so this detector and the idle-pool one below stay `off-peak`.
 
 **Suppression conditions** (`PeakDrawVerdict.suppressed`), each a deliberate silence:
 
@@ -1346,7 +1382,7 @@ Deliberately below every physical-risk condition: this reports spend, not danger
 placing money in the critical tier devalues the tier that must never be discounted. Cost
 is emitted as `null` — never a guess — when `ratesConfirmed` is false. The cost is the
 on-peak spend rate, `centsPerHour` = kW into the pack × the current period's rate, and the
-detail states it as that ("about $X per hour"); until v1.187.22 it was worded as the premium
+detail states it as that ("about $X per hour", in the `TARIFF_CURRENCY` symbol: `fmtMoney`); until v1.187.22 it was worded as the premium
 over buying the same energy overnight, which nothing subtracts.
 
 **Causing setting: "Charge Now", which is PER-DPU.** Enabled on individual Delta Pro

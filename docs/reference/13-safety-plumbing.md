@@ -49,7 +49,7 @@ In-band self-monitoring fails with the host, so the final layer lives outside th
 
 This cluster is not a feature the operator sees on a screen. It is the connective tissue that lets every other engine survive the real-world failure modes of a small always-on host, as seen on the reference plant's Raspberry Pi: a daily Supervisor maintenance bounce, a host that loses power almost every day, an EcoFlow cloud session that wedges without going fully silent, and a log stream that floods during outages. Three of these modules (`processGuard`, `hostPower`, `messageRateFloor`) are load-bearing safety components — a bug in them can either kill the alarm or blind it. The rest bound what lands on disk and in the log so a real signal stays greppable and a hostile device name can't hijack the operator's terminal.
 
-All file paths below are relative to `server/src/`. Line numbers cite main at v1.187.15; function and constant names are authoritative where they drift.
+All file paths below are relative to `server/src/`. Line numbers cite main at v1.191.2; function and constant names are authoritative where they drift.
 
 ---
 
@@ -74,7 +74,7 @@ classifyTopLevelError(e):
     return isTransientNetworkError(e) ? 'survive' : 'fatal'
 ```
 
-`isTransientNetworkError` (shared with the MQTT cert-fetch retry in `ecoflow/mqtt.ts:53`) matches on two axes:
+`isTransientNetworkError` (shared with the MQTT cert-fetch retry in `ecoflow/mqtt.ts:54`) matches on two axes:
 
 | Axis | Pattern |
 |------|---------|
@@ -100,7 +100,7 @@ A match on **either** axis ⇒ transient ⇒ survive. Everything else ⇒ fatal.
 
 #### Trace / wire-in
 
-Installed once near the end of boot in **`index.ts:7032`**:
+Installed once near the end of boot in **`index.ts:8121`**:
 
 ```ts
 installProcessGuards({
@@ -119,15 +119,15 @@ It covers the **post-boot steady state**, where a transient DNS error can escape
 
 ---
 
-### 2. `hostPower.ts` — Pi under-voltage self-monitor (SAFETY-CRITICAL)
+### 2. `hostPower.ts` — host under-voltage self-monitor (SAFETY-CRITICAL)
 
 #### What + why
 
-The alarm's own host — a Raspberry Pi on the reference plant — is the single point of failure for the entire monitor: if it loses power, every channel goes dark **at once**. Any under-voltage `binary_sensor` serves; on a Raspberry Pi, HA's *"Raspberry Pi Power Supply Checker"* exposes the kernel under-voltage/throttling flag as a `binary_sensor` with `device_class: problem` (`on` = under-voltage/throttling detected, `off` = OK). A marginal supply — or a sagging power circuit — trips this flag *before* the Pi actually browns out, so surfacing it is an early warning to fix the supply while the alarm is still up. (On the reference plant the host's circuit has historically lost power daily for 84–187 min; this signal is the leading indicator for that class of failure.)
+The alarm's own host — a Raspberry Pi on the reference plant — is the single point of failure for the entire monitor: if it loses power, every channel goes dark **at once**. Any under-voltage `binary_sensor` serves; on a Raspberry Pi, HA's *"Raspberry Pi Power Supply Checker"* exposes the kernel under-voltage/throttling flag as a `binary_sensor` with `device_class: problem` (`on` = under-voltage/throttling detected, `off` = OK). A marginal supply — or a sagging power circuit — trips this flag *before* the host actually browns out, so surfacing it is an early warning to fix the supply while the alarm is still up. (On the reference plant the host's circuit has historically lost power daily for 84–187 min; this signal is the leading indicator for that class of failure.)
 
 #### Inputs
 
-- `HOST_POWER_ENTITY` env var — the configured binary_sensor entity id. Empty ⇒ the feature is dormant.
+- `HOST_POWER_ENTITY` add-on option (exported to the environment, trimmed) — the configured binary_sensor entity id. Empty ⇒ the feature is dormant.
 - The shared HA state cache (`haStateCache`), which `index.ts` keeps warm whenever a host/grid entity is configured.
 
 #### Key constant
@@ -163,8 +163,8 @@ else                                → { configured:true, entityId,
 
 #### Trace / wire-in
 
-- **Cache warm-keeping:** `index.ts:2573` and `:2689` call `haStateCache.refreshIfStale()` whenever `gridPresenceEntityId() || hostPowerEntityId()` is set — the host-power entity rides the same TTL-gated refresh as the grid-presence classifier (ingestion mirrors `gridState.ts`).
-- **Alert emission:** `alerts.ts:1338` calls `liveHostPower()`; when `underVoltage === true` it pushes a **warning** alert `host-power-undervoltage` (category `Connectivity`, device `System`) advising the operator to check the host's supply and circuit before it browns out.
+- **Cache warm-keeping:** `index.ts:2598` and `:2685` call `haStateCache.refreshIfStale()` whenever `gridPresenceEntityId() || hostPowerEntityId()` is set — the host-power entity rides the same TTL-gated refresh as the grid-presence classifier (ingestion mirrors `gridState.ts`).
+- **Alert emission:** `alerts.ts:1541` calls `liveHostPower()`; when `underVoltage === true` it pushes a **warning** alert `host-power-undervoltage` (category `Connectivity`, device `System`) advising the operator to check the host's supply and circuit before it browns out.
 
 #### Output shape (the alert)
 
@@ -177,7 +177,7 @@ else                                → { configured:true, entityId,
 
 #### Config knobs
 
-| Env var | Default | Meaning |
+| Add-on option | Default | Meaning |
 |---------|---------|---------|
 | `HOST_POWER_ENTITY` | *(empty)* | binary_sensor entity id; empty ⇒ dormant |
 
@@ -232,9 +232,9 @@ Read accessors:
 
 #### Trace / wire-in
 
-- Refreshed at `index.ts:2573/2689` before grid/host reads, and at `:2832` before the load-shed advisor tick (only when shed candidates are configured).
-- `haEntity: (id) => haStateCache.getCachedEntity(id)` supplied to the advisor (`index.ts:2814`).
-- Age surfaced on `/api/load-shedding/status` as `haStateCacheAgeMs` (`index.ts:3203`).
+- Refreshed at `index.ts:2598/2685` before grid/host reads, and at `:2828` before the load-shed advisor tick (only when shed candidates are configured).
+- `haEntity: (id) => haStateCache.getCachedEntity(id)` supplied to the advisor (`index.ts:2810`).
+- Age surfaced on `/api/load-shedding/status` as `haStateCacheAgeMs` (`index.ts:3201`).
 - Consumed by `hostPower.liveHostPower` and the grid classifier.
 
 #### Edge cases
@@ -248,7 +248,7 @@ Read accessors:
 
 #### What + why
 
-The `Alert` type is **stateless** — every field is recomputed fresh on each `alertMonitor.evaluate()` tick — so nothing on the alert records *when* it first became active. The ALM screen (`telnet/plant/alm.ts`) used to stamp every alarm row with `snapshot.generatedAt` (this refresh's clock), which is wrong for any alarm that's been active longer than one poll. `alertMonitor`'s in-memory `TrackedAlert.firstSeen` would be correct, but it lives only in the in-process `tracked` Map and resets to "now" on **every add-on restart — and this host restarts roughly daily**. This sidecar is the durable source of truth for first-seen time.
+The `Alert` type is **stateless** — every field is recomputed fresh on each `alertMonitor.evaluate()` tick — so nothing on the alert records *when* it first became active. The console's ALM screen (`telnet/plant/alm.ts`, the ALARM screen the SSH console and the browser console share) used to stamp every alarm row with `snapshot.generatedAt` (this refresh's clock), which is wrong for any alarm that's been active longer than one poll. `alertMonitor`'s in-memory `TrackedAlert.firstSeen` would be correct, but it lives only in the in-process `tracked` Map and resets to "now" on **every add-on restart — and this host restarts roughly daily**. This sidecar is the durable source of truth for first-seen time.
 
 #### Storage
 
@@ -277,9 +277,9 @@ Pruning an id once it has left the active set and its absence is evidence (above
 
 #### Trace / wire-in
 
-- **Write:** `alertMonitor.ts:4155` calls `syncAlertOnsets(new Set(tracked.keys()), now, { prune })` once per evaluate tick, alongside the falling-edge/dwell loop. `alertMonitor.ts:3724` calls `restampAlertOnset(id, now)` (v1.173.0) when the pack residency check finds a new subject under a still-active id.
-- **Read:** `telnet/plant/alm.ts:205` renders each row's timestamp as `fmtTs(getAlertOnset(a.id) ?? stamp)`: the onset if known, else the pre-existing `generatedAt` fallback. Two other readers:
-  - `alertMonitor`, for a cleared alert's true duration in its history record (`getAlertOnset(id) ?? t.firstSeen`, `:3651`) and for the boot re-track decision (`priorOnsetMs`, `:3761`).
+- **Write:** `alertMonitor.ts:4203` calls `syncAlertOnsets(new Set(tracked.keys()), now, { prune })` once per evaluate tick, alongside the falling-edge/dwell loop. `alertMonitor.ts:3772` calls `restampAlertOnset(id, now)` (v1.173.0) when the pack residency check finds a new subject under a still-active id.
+- **Read:** `telnet/plant/alm.ts:205` renders each row's timestamp as `fmtTs(getAlertOnset(a.id) ?? stamp)`: the onset if known, else the pre-existing `generatedAt` fallback, written on the site clock (`fmtTs` = `fmtSiteStamp`). Two other readers:
+  - `alertMonitor`, for a cleared alert's true duration in its history record (`getAlertOnset(id) ?? t.firstSeen`, `:3699`) and for the boot re-track decision (`priorOnsetMs`, `:3809`).
   - The broadcast pre-filter `speakableAlerts` (`broadcast.ts`), which passes it as `onsetOf` to the cell-imbalance speak hold (`heldForImbalanceConfirm`).
 
 #### Edge cases / honest-null
@@ -327,7 +327,7 @@ Per SN it holds `{lastCount, lastMs, baseline, peak, hourly[24], hourlyN[24], co
 3. **Counter reset guard:** if `cumulativeCount < lastCount` (a process restart re-zeroes the counter) ⇒ re-baseline instead of computing a negative/huge rate; clear the collapse; `recovered` reflects whether it had `fired`.
 4. `rate = max(0, (cumulativeCount - lastCount) / dtMin)`.
 5. **Eligibility from a high-water mark:** `peak = max(rate, peak × 0.5^(dt / peakHalfLife))`; `eligible = peak >= minBaselineRate`. The mark rises instantly and decays over days, so a collapse cannot disarm the detector. A device that does lose eligibility is logged `NO LONGER MONITORED` (`eligibilityLost`).
-6. **Comparison baseline:** `cmpBaseline` is this hour-of-day's bucket once it holds `minHourSamples` healthy samples, else the global EWMA (v1.66.0). Then `isCollapsed = eligible && rate < floorFraction * cmpBaseline`.
+6. **Comparison baseline:** `cmpBaseline` is this hour-of-day's bucket once it holds `minHourSamples` healthy samples, else the global EWMA (v1.66.0). The hour is the site hour of the injected clock (`siteHour`, v1.191.0; the host's `getHours()` before, the same hour wherever the container runs in the site zone). Then `isCollapsed = eligible && rate < floorFraction * cmpBaseline`.
 7. **Baseline update — each estimator gated on its own view:**
    - global: unless `eligible && rate < floorFraction × baseline`, `baseline = baseline == 0 ? rate : 0.2·rate + 0.8·baseline`. It is symmetric, so it follows the diurnal swing while buckets are immature.
    - hour bucket: unless the bucket is mature and `rate < floorFraction × bucket`, update at `baselineAlpha` (0.2) when `rate ≥ bucket` and at `baselineAlphaDown` (0.02) when below, and count the sample.
@@ -357,7 +357,7 @@ v0.92.0 only `app.log.warn`-ed a collapse — invisible to the operator. v0.93.0
 
 #### Trace / wire-in
 
-`index.ts:2855`: `const rateFloor = new RateFloorTracker()`, hydrated from `msg-rate-floor.json` at `:2933–2939`. It is driven by a 60 s `setInterval` (`.unref()`-ed) at `:3029–3195`:
+`index.ts:2851`: `const rateFloor = new RateFloorTracker()`, hydrated from `msg-rate-floor.json` at `:2932–2941`. It is driven by a 60 s `setInterval` (`.unref()`-ed) at `:3025–3194`:
 
 ```
 for {sn, count} of rateFloorSampleSet(Object.keys(devices), store.mqttMsgCountBySn):
@@ -388,7 +388,7 @@ silently drop a device out of monitoring. Mutation-proven load-bearing
 
 Errors in the tick are caught and logged at DEBUG (`tick skipped`). The tick raises only its own `msg-rate-floor-*` alerts, but its output acts elsewhere in two ways:
 - The published collapse set freezes learned `baseline-*` anomalies for a starved Core (`applyStarvedFeedFilter` / `starvedFeedSns` in `alertMonitor`, v1.79.0/v1.184.0). While the feed is starved they are neither raised nor resolved.
-- A sustained collapse quorum triggers the MQTT session self-heal (`rebuildMqttSession`, v1.76.0, with a cooldown and a 24 h budget).
+- A sustained collapse quorum triggers the MQTT session self-heal (`rebuildMqttSession`, v1.76.0, with a cooldown and a 24 h budget). The quorum is the smaller of `SELF_HEAL_MIN_DEVICES` (environment-only, 2) and the number of devices on the account (`effectiveQuorum`, v1.191.0), so an account with fewer devices than the setting can still reach it.
 
 It never touches the REST poll, which is the alarm data path.
 
@@ -416,7 +416,7 @@ These bound what lands on disk and in the log, and keep a real signal greppable 
 - `flush()` force-emits all pending summaries and clears state so the tail isn't lost and the next sighting logs fresh — call it on recovery (successful reconnect) or shutdown.
 - Clock is injectable (`now`) for testing; no module-global state.
 
-**Wire-in.** `ecoflow/mqtt.ts:161/165` — `stormLog` and `stormWarn` (flushed on recovery at `:168–169`) wrap the module's info/warn loggers around the reconnect loop. This is the logging analogue of the storm gate in `broadcast.ts`.
+**Wire-in.** `ecoflow/mqtt.ts:162/166` — `stormLog` and `stormWarn` (flushed on recovery at `:169–170`) wrap the module's info/warn loggers around the reconnect loop. This is the logging analogue of the storm gate in `broadcast.ts`.
 
 #### 6.2 `logSanitize.ts` — bound what's persisted / rendered
 
@@ -429,7 +429,7 @@ Shared sanitizers for request/network-derived values that are **intentionally** 
 | `cleanMultilineText(v, max)` | Like `cleanText` but **preserves `\n` and `\t`** (operator-typed multi-line notes). |
 | `finiteNumber(v)` | Finite number or `undefined` (so `JSON.stringify` drops it like an absent field). |
 
-**Wire-in.** `sanitizeDisplayName` guards every cloud/MQTT-sourced display name at the ingest boundary: `snapshot.ts:586` (`deviceName`, max 48, falls back to the SN) and `ecoflow/project.ts:617/630` (device + SHP2 circuit names).
+**Wire-in.** `sanitizeDisplayName` guards every cloud/MQTT-sourced display name at the ingest boundary: `snapshot.ts:620` (`deviceName`, max 48, falls back to the SN) and `ecoflow/project.ts:654/667` (device + SHP2 circuit names).
 
 #### 6.3 `mqttStartClassify.ts` — boot-grace log-level selection
 
@@ -447,7 +447,7 @@ classifyMqttStartFailure(attempt, message, graceAttempts):
 
 A failure recurring **past** the grace window, or **any other** error class at any attempt, logs at ERROR so it stands out instead of being buried under benign boot artifacts. Extracted from `index.ts` specifically so the v0.75.0 boot-grace behaviour is unit-tested (it had zero coverage and no post-deploy boot had hit a DNS race).
 
-**Wire-in.** `index.ts:2352` — `const transientBoot = classifyMqttStartFailure(attempt, msg, MQTT_BOOT_GRACE_ATTEMPTS) === 'warn'`.
+**Wire-in.** `index.ts:2477` — `const transientBoot = classifyMqttStartFailure(attempt, msg, MQTT_BOOT_GRACE_ATTEMPTS) === 'warn'`.
 
 #### 6.4 `haPayloadFmt.ts` — shared HA payload formatting
 
@@ -460,9 +460,9 @@ A failure recurring **past** the grace window, or **any other** error class at a
 | `makeAlertCounter(alerts)` | Returns `(src, sev) =>` count. `src === 'learned'` ⇒ `a.source === 'learned'`; `'threshold'` matches **every non-`learned`** source (`a.source !== 'learned'`) — verbatim. |
 | `soonestProjecting(packs)` | Returns `{ projecting, soonest }`: packs with `status === 'projecting'`, and the fewest-`yearsToEol` pack via a reduce using the `?? 1e9` sentinel so a `null` `yearsToEol` sorts **last** — verbatim. |
 
-A fifth helper, `dailyFigureResetIso(reportGeneratedAtMs)` (v1.187.10), returns the ISO local midnight that starts the day a re-estimated daily figure covers. It takes that day from the report's `generatedAt`, or uses today when there is no report. Its output is published as `pv_clipped_kwh_today_since` and `pv_curtailment_kwh_today_since`.
+A fifth helper, `dailyFigureResetIso(reportGeneratedAtMs)` (v1.187.10), returns, as ISO 8601, the site's midnight (`startOfLocalDayMs` → `siteDayStartOf`, on the site clock since v1.191.0) that starts the day a re-estimated daily figure covers. It takes that day from the report's `generatedAt`, or uses today when there is no report. Its output is published as `pv_clipped_kwh_today_since` and `pv_curtailment_kwh_today_since`.
 
-**Wire-in.** `index.ts:23` and `mqttDiscovery.ts:11` import all five. In the `/api/ha-state` handler: `:1573` (`lifetimeKwh`), `:1577` (`soonestProjecting`), `:1589` (`makeAlertCounter`), `:1609–1610` (`kwh1` for `backup_full_capacity_kwh` / `backup_remaining_kwh`), `:1681`/`:1692` (`dailyFigureResetIso`).
+**Wire-in.** `index.ts:36` and `mqttDiscovery.ts:11` import all five. In the `/api/ha-state` handler: `:1672` (`lifetimeKwh`), `:1676` (`soonestProjecting`), `:1688` (`makeAlertCounter`), `:1714–1715` (`kwh1` for `backup_full_capacity_kwh` / `backup_remaining_kwh`), `:1788`/`:1799` (`dailyFigureResetIso`).
 
 ---
 
