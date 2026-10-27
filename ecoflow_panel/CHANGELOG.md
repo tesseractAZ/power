@@ -18,13 +18,14 @@
 **Tests**
 
 - With every Core dark, self-consumption is built once and then served with no recorder read, also inside carbon. Each change above rebuilds it, and what is served equals a fresh build on the same map. With no Core's reading in memory, a Core online before its first reading and a panel listing no Core are never cached, nor a Core without a panel (0.15.13).
+- Carbon and tariff are rebuilt on every call with every Core dark, and after a restart while a Core has a reading and the panel does not yet; once the panel reports, both are cached (0.15.13). Until now no test failed when either cache was written without that basis.
 - A child-process capture builds the three reports at two instants; they match 1.191.2's capture to the byte. The hourly slices equal whole-week integration on random series, at their boundaries and on unsorted input.
-- `scripts/mutate-v1191-3.mjs`: 11 mutants, each killed by the case written for it.
+- `scripts/mutate-v1191-3.mjs`: 16 mutants, each killed by the case written for it; each half of the carbon and tariff cache conditions is reverted alone.
 
 **Documentation**
 
-- Source comments corrected, behaviour unchanged: 1.189.1, never released, reads 1.190.1; the mid-day preview runs on the evening before a winter weekday; costs are in the tariff currency, hours are the site's, and option rows cite their readers' current lines.
-- The energy, architecture and solar-forecast references and the performance record describe the change. The record's oldest runtime section (2026-09-11) moves, unedited, to `docs/history/` to keep the record under its size limit.
+- Source comments corrected, behaviour unchanged: 1.189.1, never released, reads 1.190.1; the mid-day preview runs on the evening before a winter weekday; costs are in the tariff currency, hours are the site's, the self-consumption cache lasts 15 minutes, and the add-on's only Supervisor call is a read-only list of add-ons. The option rows outside the frozen G3 golden cite their readers' current lines; the G3-pinned ones keep the captured tree's, as the golden test requires.
+- The energy, architecture and solar-forecast references and the performance record describe the change. The record's oldest runtime section (2026-09-11) moves, unedited, to `docs/history/` to keep the record under its size limit, and the reference's list of history files names it.
 
 ## 1.191.2
 
