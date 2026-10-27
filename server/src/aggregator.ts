@@ -140,6 +140,40 @@ export function integrateWh(
   };
 }
 
+/**
+ * v1.191.3 — integrateWh over many windows of ONE series, each window handed only the points
+ * integrateWh reads: the last sample before `sinceMs` and every sample in [sinceMs, untilMs]. On a
+ * series sorted by ts those are one contiguous run (from the first ts >= sinceMs, less one, to the
+ * last ts <= untilMs), found by binary search, so each call is identical to
+ * integrateWh(points, sinceMs, untilMs) on the whole series without filtering it twice.
+ * computeTariffReport prices a week hour by hour, 168 windows a tally over each 7-day series.
+ *
+ * Any other series (out of order, or a NaN or non-numeric ts, for which every comparison is false)
+ * is integrated whole, so the result is identical for every input. The recorder's reads come back
+ * ORDER BY ts (bucket_ts) ascending, so production takes the sliced path.
+ */
+export function windowIntegrator(
+  points: Array<{ ts: number; value: number }>,
+): (sinceMs: number, untilMs: number) => IntegrationResult {
+  for (let i = 1; i < points.length; i++) {
+    if (!(points[i].ts >= points[i - 1].ts)) return (sinceMs, untilMs) => integrateWh(points, sinceMs, untilMs);
+  }
+  const firstAtOrAfter = (x: number): number => {
+    let lo = 0;
+    let hi = points.length;
+    while (lo < hi) { const m = (lo + hi) >>> 1; if (points[m].ts < x) lo = m + 1; else hi = m; }
+    return lo;
+  };
+  const firstAfter = (x: number): number => {
+    let lo = 0;
+    let hi = points.length;
+    while (lo < hi) { const m = (lo + hi) >>> 1; if (points[m].ts <= x) lo = m + 1; else hi = m; }
+    return lo;
+  };
+  return (sinceMs, untilMs) =>
+    integrateWh(points.slice(Math.max(0, firstAtOrAfter(sinceMs) - 1), firstAfter(untilMs)), sinceMs, untilMs);
+}
+
 /** The start of the local day containing `d`. v1.191.0 (lane A, T15) — the SITE day (siteTime.ts),
  *  not the host's `setHours(0, 0, 0, 0)`: every "today" the totals, the Today card and the reports
  *  compute now shares one clock with the tariff. Identical on a host whose zone is the site zone. */

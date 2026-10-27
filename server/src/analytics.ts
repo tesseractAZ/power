@@ -14,7 +14,7 @@ import { DPU_MAX_PACKS, DPU_PACK_NAMEPLATE_WH } from './hwSpec.js';
 import { getWeather, coveringRadiationEpoch, RADIATION_LABEL_LAG_HOURS, type WeatherHour, type WeatherForecast } from './weather.js';
 import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2, secondaryShp2s } from './shp2Membership.js';
 import { sliceByTsInclusive } from './backtest.js';
-import { integrateWh, startOfLocalDayMs } from './aggregator.js';
+import { integrateWh, startOfLocalDayMs, windowIntegrator } from './aggregator.js';
 // v1.191.0 (lane A, T13/T15/CA26) — every local hour, weekday, date and day step in the site zone.
 import {
   siteHour, siteDow, siteLocalParts, siteYmd, siteDayStartMs, siteShiftDaysMs, siteTimeZone, addDaysYmd, zonedWallTimeMs,
@@ -9227,6 +9227,13 @@ export function computeTariffReport(
   // v1.52.0 — resolve the cost basis once per report from the CONFIRMED tariff
   // (APS R-EV when set), not the stale flat-rate assumption.
   const tariffCents = resolveTariffCents(now);
+  // v1.191.3 — one integrator per series: each hour below is handed only that hour's samples and the
+  // one before it (windowIntegrator), not the whole week's, with an identical result. The hourly
+  // integrateWh calls had filtered every 7-day series twice per hour, 168 hours a tally, and the
+  // report is rebuilt on every read while no Core is projected (PERFORMANCE.md §4e).
+  const acInByHour = homeDpus.map((d) => windowIntegrator(dpuAcInSeries.get(d.sn) ?? []));
+  const loadByHour = windowIntegrator(loadSeries);
+  const gridHomeByHour = windowIntegrator(gridHomeSeries);
   const tally = (sinceMs: number) => {
     let gridCost = 0;
     let loadValue = 0;
@@ -9235,18 +9242,18 @@ export function computeTariffReport(
       const rate = hourlyRateCents(t, tariffCents) / 100;
       let gridWh = 0;
       let loadWh = 0;
-      for (const d of homeDpus) {
-        gridWh += integrateWh(dpuAcInSeries.get(d.sn) ?? [], t, tEnd).wh;
+      for (const acInHour of acInByHour) {
+        gridWh += acInHour(t, tEnd).wh;
       }
       if (shp2) {
-        loadWh += integrateWh(loadSeries, t, tEnd).wh;
+        loadWh += loadByHour(t, tEnd).wh;
       }
       // v0.93.0 (audit #5) — take the whole-home grid superset when trusted (see the
       // gridHomeTrusted derivation above). max() keeps the DPU-charging ac_in if it ever
       // exceeds the SHP2 main for the hour; on a DPU-only install or the untrusted ramp
       // this branch never runs, so ac_in is used unchanged.
       if (shp2 && gridHomeTrusted) {
-        gridWh = Math.max(gridWh, integrateWh(gridHomeSeries, t, tEnd).wh);
+        gridWh = Math.max(gridWh, gridHomeByHour(t, tEnd).wh);
       }
       gridCost += (gridWh / 1000) * rate;
       // v0.10.4 — value only the solar+battery-served load (subtract grid),
