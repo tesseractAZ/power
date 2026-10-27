@@ -98,13 +98,14 @@ export interface MpcInputs {
   pvForecastP10: number[];
   /** Hourly load forecast (kWh) for the next 24 hours. */
   loadForecast: number[];
-  /** Tariff $/kWh by hour-of-day (0..23). */
+  /** Tariff ¢/kWh (hundredths of the TARIFF_CURRENCY unit) by site hour-of-day (0..23). */
   tariffOnPeakCentsByHour: number[];
   /** Are we currently grid-tied (import available)? */
   gridAvailable: boolean;
-  /** $/kWh cost of cycling — approximates lifetime cost per kWh charged. */
+  /** Cost of cycling per kWh, in the TARIFF_CURRENCY unit (the field keeps its Usd name) —
+   *  approximates lifetime cost per kWh charged. */
   cyclingCostUsdPerKwh: number;
-  /** Big penalty for reserve dip ($/kWh below reserve). */
+  /** Big penalty for reserve dip (per kWh below reserve, in the TARIFF_CURRENCY unit). */
   reserveDipPenaltyUsdPerKwh: number;
   /**
    * v0.9.67 — wall-clock anchor for tariff hour-of-day indexing. Defaults to
@@ -381,7 +382,7 @@ export function recommendDispatch(inputs: MpcInputs): MpcResult {
   const H = 24;
 
   // v0.9.59 — cache the wall-clock start hour ONCE. The DP runs in O(H × buckets ×
-  // actions) iterations; if we keep re-reading `new Date().getHours()` we can
+  // actions) iterations; if we keep re-reading the hour (`siteHour(Date.now())`) we can
   // straddle a wall-clock boundary mid-DP and silently mis-align tariff lookups
   // by one slot. Cache → reuse in both the forward pass and the reconstruction.
   // v0.9.67 — also accept `inputs.nowMs` to make this deterministic in tests.

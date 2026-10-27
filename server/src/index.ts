@@ -6412,7 +6412,7 @@ async function runNightActuationTickInner(): Promise<void> {
 
   // v1.189.0 (review) — the summary of the restore, once it is owed (restoreSummaryDue): its readback
   // grace ran with no readback (a restore that read back sends it on its revertVerified tick).
-  // v1.189.1 — after a restart it waits for this process's first reading of the reserve, up to
+  // v1.190.1 — after a restart it waits for this process's first reading of the reserve, up to
   // REVERT_DEADLINE_HOLD_MAX_MS from the first tick that waits (stamped once), so a readback on that
   // reading is summarised as restored instead of a "sent" card followed by a "restored" one.
   const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct, nightReserveReadSinceBoot);

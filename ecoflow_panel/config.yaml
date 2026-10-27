@@ -1,5 +1,5 @@
 name: Power
-version: "1.191.2"
+version: "1.191.3"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -63,13 +63,13 @@ backup_post: /usr/bin/ecoflow-panel-backup-hook post
 # is not granted access to /core/api/* endpoints — every broadcast
 # returns "SUPERVISOR_TOKEN missing or HA unreachable".
 homeassistant_api: true
-# v0.9.33 — Supervisor API access at "manager" role. Granted explicitly
-# by the user so we can:
-#   - List installed add-ons (POST-install Piper visibility checks)
-#   - Auto-bridge integrations via Core config-flow (Wyoming Protocol →
-#     Piper TTS without making the user click through Settings UI)
-# We do NOT install/uninstall add-ons in code without explicit user
-# action — every Supervisor call goes through a named endpoint.
+# v0.9.33 — Supervisor API access, so the add-on can list installed add-ons
+# (post-install Piper visibility checks). Its role is hassio_role below:
+# `homeassistant` since v1.7.0, no longer "manager". The Wyoming Protocol →
+# Piper TTS config-flow goes through the Core API (homeassistant_api above).
+# The only Supervisor call is a read-only GET /addons (haService.ts
+# listAddons, behind /api/admin/addons); nothing installs, uninstalls or
+# reconfigures an add-on.
 hassio_api: true
 # v1.7.0 (security #4, CWE-250) — least privilege: the add-on's only Supervisor
 # call is a read-only GET /addons (Piper/speaker visibility survey). `manager`

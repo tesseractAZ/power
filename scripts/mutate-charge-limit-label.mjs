@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * mutate-charge-limit-label.mjs — committed harness for v1.189.1: the Smart Home Panel card's
+ * mutate-charge-limit-label.mjs — committed harness for v1.190.1: the Smart Home Panel card's
  * charge limit (per battery, with the connected fleet's envelope) and its backup timers (on the
  * server's backupTimerGate verdict, the gate the HA sensors use).
  *

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
  * mutate-midday-ledger.mjs — R4 (v1.189.0): the winter mid-day cycle in SHADOW, and the ledger it
- * will be judged on (plan §6, §7). Both legs are computed on winter weekday evenings and at the
- * morning refresh, and NOTHING of them is written, armed, pushed or announced (middayShadow.ts,
- * index.ts's shadow block); the overnight leg runs as before. The ledger learns a two-leg row's
- * three spans, its cheap periods and its supersede; the buy de-bias one stratum per window kind;
- * the gate a graduation count per kind; and the hours a mid-day charge of ours held the pool leave
- * the array learners.
+ * will be judged on (plan §6, §7). Both legs are computed on the evenings before a winter weekday
+ * and at the morning refresh, and NOTHING of them is written, armed, pushed or announced
+ * (middayShadow.ts, index.ts's shadow block); the overnight leg runs as before. The ledger learns
+ * a two-leg row's three spans, its cheap periods and its supersede; the buy de-bias one stratum
+ * per window kind; the gate a graduation count per kind; and the hours a mid-day charge of ours
+ * held the pool leave the array learners.
  *
  *   Spans      L-i..L-vii    (cycleLedgerSpans, ledgerCheapPeriodIds, supersedingPlanDate, minOverSpans)
  *   Measured   L-viii..L-ix  (shadowWindowActuals)
@@ -23,7 +23,7 @@
  *                             the hold, advisory, the served record)
  *   Basis      B-i..B-v      (every mid-day figure carries basis=shadow; the backup's line says
  *                             "Shadow only"; the card's not-comparable line)
- *   Review     U-i..U-iv     (v1.189.1: the window bounds are timestamp sensors whose null is the
+ *   Review     U-i..U-iv     (v1.190.1: the window bounds are timestamp sensors whose null is the
  *                             "None" payload; the text sensors render a null as "unknown")
  *              L-xxxi..xxxii (no measured shadow PV on a row whose PV verdict is set aside)
  *
@@ -485,7 +485,7 @@ const MUTANTS = [
     why: 'The card reads "not-comparable, ~—" as if the refresh had sized nothing.',
   },
 
-  /* ── review lows: a null reads unknown, with no HA warning (a; v1.189.1: the bounds are timestamp
+  /* ── review lows: a null reads unknown, with no HA warning (a; v1.190.1: the bounds are timestamp
         sensors again, their null the "None" payload every sensor type reads as unknown); the set-aside PV (f) ── */
   {
     id: 'U-i. ★★★ the window start renders a null as "unknown"',

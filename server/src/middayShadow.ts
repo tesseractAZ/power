@@ -3,7 +3,7 @@
  * clock, the tariff model and the planner are arguments; nothing here reads a file, writes a
  * device, arms a leg, sends a push or speaks.
  *
- * WHAT THE SHADOW IS. On a winter weekday evening the cycle chooser (chargeWindows.ts
+ * WHAT THE SHADOW IS. On the evening before a winter weekday the cycle chooser (chargeWindows.ts
  * chooseChargeCycle) would put the cost buy in the next day's APS super off-peak window
  * (10:00–15:00) with the overnight window before it as a resilience-only outage BACKUP. Until the
  * mid-day switch the add-on runs the overnight cycle it always has, and computes the mid-day cycle

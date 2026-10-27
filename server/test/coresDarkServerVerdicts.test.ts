@@ -368,7 +368,7 @@ test('★★★ by day with every Core dark and the panel’s PV field trusted (
   assert.equal(poolNetUpperBound(ds, NOW, v).watts, 3 * (500 - 2000 + SLOT_UNMETERED_DRAW_W));
   // With the field found short of the inferred bound today the slots cannot separate PV from the
   // packs: the documented bound stays. Unchecked (present, not yet checked) it is read as the
-  // sensors read it (v1.189.1).
+  // sensors read it (v1.190.1).
   assert.deepEqual(backupTimerGate(ds, NOW, slotVerdicts(bridged(ds, 'below'))), { charge: false, discharge: true, basis: 'panel' });
   assert.deepEqual(backupTimerGate(ds, NOW, slotVerdicts(bridged(ds, false))), { charge: true, discharge: false, basis: 'panel' });
   // The card on the server's output.
