@@ -7118,14 +7118,22 @@ export function computeSelfConsumption(
   recorder: Recorder,
   windowDays = 7,
 ): SelfConsumption {
-  const key = `d${windowDays}`;
+  // v1.191.3 — the entry's basis: the house panel whose load and grid it reads, the home Cores it
+  // integrates live (homeModelSns) and those it restores from their own record (homeRestoredSns). With
+  // every home Core cloud-dark the model is empty, and only the restored Cores and the panel say what
+  // the value summed: a dark Core joining, leaving or returning to the source list (also inside the
+  // chokepoint's deferred re-arrival window), a Core's first projection, a projected Core leaving the
+  // list and a re-pinned house panel each move the key, and the value is rebuilt on the new map.
+  const shp2 = findShp2(devices);
+  const modelSns = homeModelSns(devices);
+  const restoredSns = homeRestoredSns(devices);
+  const key = `d${windowDays}|${shp2?.sn ?? ''}|${modelSns.join(',')}|${restoredSns.join(',')}`;
   if (selfConsumptionCache && selfConsumptionCache.key === key && Date.now() - selfConsumptionCache.ts < SELF_CONSUMPTION_TTL_MS) {
     return selfConsumptionCache.value;
   }
   const now = Date.now();
   const since = now - windowDays * 86_400_000;
   const list = Object.values(devices);
-  const shp2 = findShp2(devices);
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<
     DeviceSnapshot & { projection: DpuProjection }
   >;
@@ -7300,7 +7308,17 @@ export function computeSelfConsumption(
   // loadKwh=0 / partial pvKwh and served it for the full TTL (observed live
   // after the v0.15.12 update: loadKwh=0, pvKwh=184 of 527). An incomplete
   // snapshot may be returned, but never latched.
-  if (dpus.length > 0 && shp2 != null && cacheWritable()) selfConsumptionCache = { ts: now, key, value };
+  //
+  // v1.191.3 — or with every home Core known dark: no Core projected, the panel listing Cores that are
+  // restored from their own record (homeRestoredSns), none of them pending (homeBasisPending, the
+  // v1.191.2 basis of the day-forecast cache). The value then sums each connected Core's recorded
+  // energy and the panel's load, as it does for a Core dark beside a projected one, and the key above
+  // rebuilds it when that basis moves. Before, it was rebuilt on every read while the whole fleet was
+  // dark (and again inside carbon's). Still never latched: a fleet with no projection, a DPU with no
+  // panel (the v0.15.13 boot-partial), and, with no Core projected, a panel listing no Core or a Core
+  // listed online before its first quota inside HOME_BASIS_PENDING_MAX_MS of the worker's start.
+  const knownDark = restoredSns.length > 0 && !homeBasisPending(devices, now);
+  if ((dpus.length > 0 || knownDark) && shp2 != null && cacheWritable()) selfConsumptionCache = { ts: now, key, value };
   return value;
 }
 
