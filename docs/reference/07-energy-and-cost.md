@@ -203,8 +203,16 @@ diagnostic`).
 
 - **Honest null:** `solarFractionOfLoadPct` / `gridForKpiKwh` are `null` (→ HA
   "unknown") during the `grid_home_w` instrument ramp — by design.
-- **No poison-cache:** only latched when `dpus.length > 0 && shp2 != null`; a
-  boot-partial snapshot may be *returned* but never cached (v0.15.13).
+- **No poison-cache:** latched with a projected DPU and the panel (`dpus.length > 0 &&
+  shp2 != null`), or (v1.191.3) with no Core projected and every connected home Core known
+  dark: the panel lists restored Cores (`homeRestoredSns`), none pending (`homeBasisPending`,
+  10 min from the worker's start). A boot-partial snapshot (a DPU
+  without the panel) is *returned* but never cached (v0.15.13); nor, with no Core projected,
+  a panel listing no Core or a pending Core.
+- **Keyed on its basis (v1.191.3):** `d<days>|<house panel>|<homeModelSns>|<homeRestoredSns>`,
+  so a dark Core joining, leaving or returning (also inside the deferred re-arrival window),
+  a Core's first projection, a projected Core leaving the list and a re-pinned house panel
+  each rebuild it.
 
 ---
 
@@ -803,7 +811,8 @@ kWh avoided).
   fields are **null** during the `grid_home_w` ramp (mirrors the solar-fraction
   gate) rather than overstating ~1.7×. Lifetime fields stay populated.
 - Cache (`CARBON_TTL_MS = 15 min`) only latched when the fleet is **complete**
-  (≥1 DPU *and* an SHP2), else the uncached zero is returned (v0.15.13).
+  (≥1 DPU *and* an SHP2), else the uncached zero is returned (v0.15.13). With no DPU
+  projected it is rebuilt per read on a cached self-consumption (known dark, v1.191.3).
 
 #### 3.4 Outputs — `GET /api/carbon?days=<1..30>` (default 7, cached 60 s)
 
@@ -908,7 +917,9 @@ day ranges support wrap-around (`hStart > hEnd`). Returns `dayOk && hourOk`.
 
 Prefetch each metric once for the full window at 60 s bucket, then walk **hourly**
 calling `integrateWh` per hour (cuts ~960 SQL round-trips to ~5). Scope = SHP2
-home DPUs only. Per hour:
+home DPUs only. Since v1.191.3 each call gets only that hour's samples and the one before
+(`windowIntegrator`: binary search on a sorted series; one out of order or with a NaN `ts`
+is integrated whole), with an identical result. Per hour:
 
 ```
 rate  = hourlyRateCents(t, resolveTariffCents(now))/100   # v1.136.0 — the confirmed table's period for the hour; two-tier onPeakAt fallback when unconfirmed
@@ -938,7 +949,9 @@ test as self-consumption. `tally()` runs for `since` (window) and `todayStart`.
 `TARIFF_CURRENCY` code: `currencyUnit`, mqttDiscovery.ts; the `_dollars` field names stay).
 
 Cache latched only when `dpus.length > 0 && shp2 != null` (v0.15.13 — `&&`, not
-`||`; a boot-partial snapshot once produced net_savings −$4.36).
+`||`; a boot-partial snapshot once produced net_savings −$4.36). With no DPU projected (a
+bench spare counts) it is rebuilt per read: a dark Core has no restored `ac_in`. v1.191.3 cut
+the rebuild's cost.
 
 **The stated window and rates are the ones that price (v1.187.0, `tariffPricingView`).**
 The window and cents fields come from the table the tally above is priced with, mirroring
@@ -1284,7 +1297,9 @@ time, once (not verified against Home Assistant).
   dispatch/recommend 300 s).
 - **No poison-cache of zeros.** All device-integrating engines require a
   *structurally complete* fleet (≥1 DPU **and** the SHP2) before latching, so a
-  post-restart boot-partial snapshot is returned once but never cached.
+  post-restart boot-partial snapshot is returned once but never cached. Self-consumption
+  also latches with every home Core known dark (v1.191.3); carbon and tariff do not, so with
+  no DPU projected (a bench spare counts) their window figures stay withheld (below).
   Since v1.178.0 the carbon, tariff and curtailment reports also carry
   `basisComplete`:
   - carbon: a DPU and the panel are projected;

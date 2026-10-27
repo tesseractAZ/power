@@ -901,6 +901,13 @@ built on: the connected home Cores with no projection whose recorded PV it re-ad
 entry built with no pending Core to a map on which one is now pending. Each restored Core's
 30-day PV series is read once per build. The solar-forecast chapter describes the build.
 
+Self-consumption is cached on the same dark-Core basis (v1.191.3): its key records the house
+panel, `homeModelSns` and `homeRestoredSns`, and while no Core is projected an entry is written
+only when the panel lists restored Cores and none of them is pending (`homeBasisPending`).
+Carbon and tariff are not cached while no Core is projected, as their `basisComplete` says; a
+carbon rebuild then reads the cached self-consumption, and the tariff's hourly tally reads
+each hour's own samples (`windowIntegrator`). The energy chapter has the rules.
+
 #### Report registry (`reports.ts`)
 
 `BUILDERS` is the single source of truth for "what each report contains and what

@@ -13,6 +13,7 @@
     "docs/history/engineering-release-log-1.md": "0b35a675203993257b364e8b3b9542e1db66809aa47a6ae8799586fd2faa68be",
     "docs/history/engineering-release-log-2.md": "7939f035a6ea81ec728ec04037311eb02dc91a3d6ca60873d1afb97f8e100fa8",
     "docs/history/operations-audits.md": "d140f0fe5cd9d77850feb5e0e272622087f15f0fdc47f65ac7f89fbe0aac2e95",
+    "docs/history/performance-record-1.md": "ca567ab542adecd786fe7efd9f3ccbda98724db2210ed6792d3f7cf09b5e09e6",
     "docs/history/reference-plant-notes.md": "148767aecf3424aa9973b52e6b4f57854c288f5ff2783aa10d4046ab9ea8bad2"
   },
   "nameAllowlist": ["LEARNING", "READY_TO_CONSIDER_WRITES", "BLOCKED"]
