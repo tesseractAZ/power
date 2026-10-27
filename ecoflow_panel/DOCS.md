@@ -33,7 +33,7 @@ These are limits of the product, not settings:
   nightly notice, the charge window, the tariff periods, quiet hours and the daily jobs. A zone
   whose UTC offset is not a whole number of hours is not supported.
 - **Language.** Alarms are spoken in English, and also in Spanish with `BROADCAST_BILINGUAL`
-  on; no other language.
+  on and a Spanish voice in `BROADCAST_WYOMING_VOICE_ES`; no other language.
 - **Optional.** An MQTT broker (for the Home Assistant entities), Music Assistant speakers or
   announce-capable SIP targets (for spoken alarms), and Piper over Wyoming (the voice). Without
   speakers, alarms reach you only as notifications.
@@ -100,12 +100,12 @@ Saving any option restarts the add-on; its alarms are silent until it is back.
 
 ## When you hear an alarm
 
-Power speaks an alarm as a chime and then the words: in English and then Spanish with a Spanish
-voice (`BROADCAST_WYOMING_VOICE_ES`) and `BROADCAST_BILINGUAL` on, otherwise `BROADCAST_REPEAT`
-times (default 2). An announcement whose delivery cannot be confirmed is retried after 30
-seconds, 90 seconds and 3 minutes. The alert behind a charge level is pushed to your phone when
-it is a warning or a critical (see `NOTIFY_MIN_SEVERITY`); the Low levels are spoken and shown,
-never pushed. The runway's "Projected runtime … to reserve" alert is pushed only inside 6 hours.
+Power speaks an alarm as a chime and then the words: once in each language when Spanish is set
+up (above), otherwise `BROADCAST_REPEAT` times (default 2). An announcement whose delivery
+cannot be confirmed is retried after 30 seconds, 90 seconds and 3 minutes. The alert behind a
+charge level is pushed to your phone when it is a warning or a critical (see
+`NOTIFY_MIN_SEVERITY`); the Low levels are spoken and shown, never pushed. The runway's
+"Projected runtime … to reserve" alert is pushed only inside 6 hours.
 
 | You hear | It means | Do this |
 |---|---|---|
@@ -220,13 +220,14 @@ raised the reserve, so it never graduates in an install that only advises; it in
 only and does not hold back `supervised`. Planning in full:
 [night-charge planning](https://github.com/tesseractAZ/power/blob/main/docs/reference/15-1-night-charge-planning.md).
 
-**Winter mid-day charge (shadow).** With the APS R-EV preset and the cost objective
-(`ARB_OBJECTIVE` `cost`, `ARB_COST_MAX_SOC_PCT` above 50), on winter weekday evenings Power
-works out the charge it would make instead in the next day's 10am–3pm super off-peak window,
-with an outage backup overnight before it and a re-check on the morning forecast. Nothing is
-armed, written, pushed or spoken for it, and the overnight charge runs as above. The Mid-day
-Charge entities (`ecoflow_midday_charge_recommended` stays off), a read-only section of the
-night-charge card and the log (tagged `night-charge[midday-shadow]:`) show it.
+**Winter mid-day charge (shadow).** With the cost objective (`ARB_OBJECTIVE` `cost`,
+`ARB_COST_MAX_SOC_PCT` above 50) and a tariff with a `super_off_peak` period (10am–3pm in
+winter on APS R-EV), on the evening before each winter weekday Power works out the charge it
+would make instead in that period the next day, behind an overnight outage backup, re-checked
+on the morning forecast. Nothing is armed, written, pushed or spoken for it; the overnight
+charge runs as above. The Mid-day Charge entities (`ecoflow_midday_charge_recommended` stays
+off), a read-only part of the night-charge card and the log (`night-charge[midday-shadow]:`)
+show it.
 
 **Load shedding.** With `LOAD_SHEDDING_SHED_ENTITIES` listing your sheddable loads, Power
 recommends which to switch off when the runway alarm stands at Medium or above and the runway
@@ -342,8 +343,8 @@ describes both.
 - `TUI_TRUSTED_ORIGINS` adds exact browser origins to the dashboard's own; a listed origin
   passes the write gate without a token.
 - The SSH console is off by default and refuses every login until `TUI_PASSWORD` is set.
-  `TELNET_ENABLED` and `TELNET_PORT` are deprecated aliases of `SSH_ENABLED` and `SSH_PORT`;
-  telnet is no longer served.
+  Telnet is no longer served; `TELNET_ENABLED` and `TELNET_PORT` are deprecated aliases of
+  `SSH_*`.
 - `WRITE_DEBUG_TOKEN` stays empty unless you are debugging a device command.
 - The add-on runs under an AppArmor profile and asks the Supervisor only for a read-only add-on
   list. Every device write is recorded in `/data/writes.log` (`GET /api/writes/log`, through the

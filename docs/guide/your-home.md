@@ -152,9 +152,10 @@ second panel gets its own charge-level ladder and runway, and nothing else.
 - `ARB_GRID_INPUT_CAP_KW`: your grid-input breaker capacity, in kW (amps × volts ÷ 1000). The
   default is the reference plant's measured figure. The night-charge plan shares this between
   the house and the batteries; `0` turns that sharing off, so enter the real figure.
-- `FORCE_CHARGE_KW_PER_CORE`: the grid charge rate one Core takes under force charge, in kW
-  (5.5 when unset). Read it from the Core's input power during a force charge with the house
-  drawing little.
+- `FORCE_CHARGE_KW_PER_CORE`: the power one Core takes into its batteries during a force charge,
+  in kW (5.5 when unset). Read it from the Core's battery charge power during a force charge with
+  the house drawing little, or take about 0.93 × its AC input power: the AC input is the grid
+  side, before the charge losses.
 - `ARB_OUTAGE_CUSHION_HOURS`: how long the panel's circuits must run on the batteries in an
   outage that starts as the charge window closes, before you can act.
 

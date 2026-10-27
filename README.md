@@ -30,9 +30,11 @@ Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each:
 inverter units add no capacity), a **42-panel / ~16.8 kW** array, and an EVSE —
 on the APS R-EV time-of-use rate. Two further Cores sit off the panel as bench
 spares: they are monitored, but are not part of the backup pool. These are the
-built-in values; another home sets its own time zone, tariff, array, devices, EV
-charging and plant limits as options, each left unset keeping the built-in value
-([setting Power up for your home](docs/guide/your-home.md)), and `GET /api/site`
+built-in values; another home sets its own tariff, array, devices, EV charging and
+plant limits as options, each left unset keeping the built-in value, and the site
+clock follows Home Assistant's time zone unless `SITE_TIMEZONE` names another
+(America/Phoenix only when neither is set)
+([setting Power up for your home](docs/guide/your-home.md)). `GET /api/site`
 reports the site clock, coordinates, currency and PV array in force.
 
 > 📖 **Documentation.** The operator guide, [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md),
@@ -143,12 +145,17 @@ exactly what the app renders.
 - A **night-charge TOU-arbitrage engine** with an owner-selected write posture
   (`NIGHT_CHARGE_MODE`):
   - **`advisory`** (default) — never writes. Tonight's plan is published as HA
-    entities, an API, a 21:30 site-time notification and dashboard/TUI panels.
+    entities, an API, an evening notification (21:30 site time by default) and the
+    dashboard's night-charge card.
   - **`supervised`** — one announced, cancellable, bounded reserve write per charge
     night: armed only after an announcement channel confirms delivery, clamped to
     the panel's 10–50% reserve range, readback-verified on both the apply and the
-    revert, restored at the window close or at once on a grid loss, and
-    audit-logged. With the `cost` objective and `ARB_COST_MAX_SOC_PCT` above 50,
+    revert, restored at the window close (an hour before on-peak at the latest)
+    or at once on a cancel or a grid loss, and audit-logged. Nothing is raised
+    within an hour of on-peak or while the add-on's own host is under critical
+    pressure (a restore still runs); a restore the panel does not confirm is paged
+    as critical, and no later night is armed while the panel still reads the
+    raised reserve. With the `cost` objective and `ARB_COST_MAX_SOC_PCT` above 50,
     the panel's own per-channel force-charge then carries the pack past the reserve
     ceiling toward the night's target: it switches on just in time, in the last
     stretch of a night whose reserve write has read back, and off — verified off —
@@ -169,9 +176,11 @@ exactly what the app renders.
   safety margin can never shrink when the objective changes. Cost mode **fills
   further, it does not price** — it reads no tariff; see
   [`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`](docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md).
-- A **winter mid-day charge, in shadow**: with the APS R-EV preset and the `cost`
-  objective, each winter weekday evening the planner also sizes the charge it would
-  make in the next day's 10:00–15:00 super-off-peak window, behind an overnight
+- A **winter mid-day charge, in shadow**: with the `cost` objective
+  (`ARB_COST_MAX_SOC_PCT` above 50) and a tariff with a `super_off_peak` period
+  (the APS R-EV preset's 10:00–15:00 in winter), on the evening before each winter
+  weekday the planner also sizes the charge it would make in the next day's
+  super-off-peak window, behind an overnight
   outage backup, and re-checks it on the morning forecast. It is published
   (Midday-Charge entities, a read-only section of the night-charge card, the log)
   and stored on the night's ledger row to be scored against the day; nothing is
