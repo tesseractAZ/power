@@ -69,8 +69,9 @@ outside that boundary needs to reach it.
   rejects cross-origin WebSocket upgrades, caps concurrent sessions at 16 and
   closes idle sessions after 5 minutes; the SSH server caps connections at 16 (4 per
   address), closes a connection that receives nothing for 5 minutes, ends one
-  that has not logged in within 2 minutes, and holds the terminal size a client
-  asks for to 60–200 columns by 16–80 rows. With a password set, both transports
+  that has not logged in within 2 minutes, holds the terminal size a client
+  asks for to 60–200 columns by 16–80 rows, and refuses exec, sftp and port
+  forwarding: one terminal per connection. With a password set, both transports
   require a login: 3 attempts per connection and at most 10 failures in 10 minutes
   from one address, which refuse that address alone (a login that succeeds clears
   it); without one, the SSH console refuses every login. Usernames
@@ -154,8 +155,9 @@ never blocked).
   `homeassistant_api` is used for notifications and announcements, entity state,
   the statistics export and, on request, setting up the Piper (Wyoming)
   integration.
-- Storage: `/data` (private to the add-on) and `/share`, which is written only for
-  the optional database snapshot.
+- Storage: `/data` (private to the add-on, and the home of the SSH host key and the
+  write token) and `/share`, which is written only for the optional database snapshot
+  and the backup hook's journal.
 
 ### Secrets and personal data
 
@@ -194,7 +196,7 @@ never blocked).
   in `scripts/npm-audit-allowlist.json` needs a reason and an expiry date, an
   expired waiver fails the build, and a waiver whose advisory is gone is reported
   as stale. The gate fails closed when `npm audit` cannot run, and it tests its
-  own policy before auditing. The allowlist is empty at v1.187.16.
+  own policy before auditing. The allowlist holds no waiver.
 - **CodeQL** (`.github/workflows/codeql.yml`) analyses the workflows, the
   JavaScript/TypeScript and the Python scripts with the `security-extended`
   queries on every push and pull request and weekly. Results go to the Security
@@ -209,6 +211,9 @@ never blocked).
   CodeQL. `main` is
   branch-protected, and every one of those checks is a required status check
   (fifteen in all, since 2026-10-11).
+- **CI's documentation build** installs pandoc from the upstream release `.deb` at a
+  pinned version and checks it against a pinned SHA-256 before installing it; apt
+  is the fallback. The release job installs it with apt.
 
 ### Release integrity
 

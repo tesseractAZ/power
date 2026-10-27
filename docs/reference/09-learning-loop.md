@@ -136,8 +136,8 @@ announcement (before, the rising-edge loop awaited it).
   tick), using `Math.abs(record.ts − prev.ts)` so an NTP backward clock step
   can't be misread as "same rise."
 - **Compaction:** at boot, if the jsonl exceeds `COMPACT_BYTES = 512 KiB`, it is
-  atomically rewritten (temp+rename) from the retained cache — this host loses
-  power daily, so an in-place truncate could destroy the only copy.
+  atomically rewritten (temp+rename) from the retained cache — the host can lose
+  power mid-write (the reference plant's did daily), so an in-place truncate could destroy the only copy.
 
 ---
 
@@ -193,7 +193,7 @@ medianTimeToActionMs = median(ts − alertFiredAt)           // null for persist
 
 `PERSISTENT_FAMILIES = { 'offline', 'grid-offgrid' }` return `null` for
 time-to-action: their condition is continuously true, so `ts − alertFiredAt` is
-condition-age not response latency (the 7-day audit saw 9.44 d for `offline`,
+condition-age not response latency (a 7-day audit of the reference plant saw 9.44 d for `offline`,
 13.18 d for `grid-offgrid` — meaningless as response time). Families are sorted
 noisiest-first (lowest precision, then highest volume).
 
@@ -201,7 +201,8 @@ noisiest-first (lowest precision, then highest volume).
 
 ### Stage 3 — The online SGD step (`onlineLR.ts` → `updateFromOutcome`)
 
-Fired synchronously from the outcome endpoint (index.ts:1902) on every submission.
+Fired synchronously from the `POST /api/alerts/outcome` handler in index.ts, after the entry is
+appended, on every submission.
 
 #### Constants
 
@@ -220,7 +221,7 @@ the six names is copied if finite, else set to `0`; if **at least one** value is
 present, that vector is used. Only pre-v0.9.59 historical rows (no captured
 vector) fall to the **proxy** reconstruction from generic `features` — explicitly
 documented as known-bad (`rTrend` proxied off pack temperature would train "every
-Phoenix-summer pack = high risk"; `coulombicEffPct` had no source and defaulted to
+pack in a hot summer = high risk"; `coulombicEffPct` had no source and defaulted to
 0). Returns `null` when no usable vector can be built.
 
 #### Step 1 — guards (honest-null / no-op prevention)
@@ -314,8 +315,9 @@ single-sources the gate verdict so the two can never disagree.
 
 Three independent degrade conditions; any one benches the model.
 
-**Knobs** (env, parsed by `gateEnvNum` which rejects empty/NaN/negative so
-`Number('') === 0` can't silently zero a threshold):
+**Knobs** (environment-only: no add-on option sets them, so a Home Assistant install runs the
+defaults; parsed by `gateEnvNum`, which rejects empty/NaN/negative so `Number('') === 0` can't
+silently zero a threshold):
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
@@ -337,7 +339,7 @@ labels.csv batch fit is converged and legitimately has ~one sample per fleet pac
 (~20–25). Everything else — the online-SGD shadow, or any file with missing/
 unrecognized `source` (fail-safe: `undefined === 'labeled'` is false, and
 `undefined < 100` is false, so a corrupt file can't sneak through) — must show a
-finite `samples ≥ 100`. This gate catches the live incident where a 13-sample
+finite `samples ≥ 100`. This gate catches the reference plant's incident where a 13-sample
 one-class shadow (99.99% bias, "raise everyone's risk") inflated healthy-fleet
 composites 4–7×.
 
@@ -361,7 +363,7 @@ overallPrecision = (totalDismiss > 0 && totalDecided >= 3)
 precBad = overallPrecision != null && overallPrecision < 0.4
 ```
 A one-class all-`ack` stream pins precision at 1.0 forever, which is not a
-measurement — the live system's 33 batch-acks (median time-to-action 21.9 **days**)
+measurement — the reference plant's 33 batch-acks (median time-to-action 21.9 **days**)
 rendered a fake permanent 1.0. Requiring ≥1 dismissal fixes that; since every
 sub-0.4 stream necessarily contains dismissals, this guard can delay a genuine
 degrade by at most two outcomes, never block it.
@@ -392,7 +394,7 @@ fires:
 #### The report — `computeModelHealth()` → `GET /api/models/health`
 
 Endpoint: `app.get('/api/models/health', cached(..., computeModelHealth(), 60))`
-(index.ts:1915) — 60 s cache.
+in index.ts — 60 s cache.
 
 `computeModelHealth` (modelHealth.ts:69) resolves a **true** baseline via
 `loadBaselineModelOnly()` (falling back to in-code `DEFAULT_MODEL` when absent —

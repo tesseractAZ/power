@@ -8,8 +8,9 @@ and the operational runbook.
 
 Sources of truth cited throughout:
 - `ecoflow_panel/config.yaml` — add-on manifest + options + schema (`version:` is bumped every release; the file is authoritative)
+- `server/src/config.ts` — the option table (`OPTIONS`): every option, every environment knob and the deployment constants, each with its export form and the parse rule its reader applies
 - `ecoflow_panel/translations/en.yaml` — per-field labels/help on the HA Configuration page
-- `rootfs/etc/services.d/ecoflow-panel/run` — the s6 service runner (options→env bridge)
+- `rootfs/etc/services.d/ecoflow-panel/run` — the s6 service runner (options→env bridge); `rootfs/usr/bin/ecoflow-panel-backup-hook` — the backup hook
 - `server/src/auth.ts` — write-auth gate, CORS allow-list, token bootstrap
 - `server/src/ecoflow/commands.ts`, `server/src/writeLog.ts` — write-debug lockdown + audit log
 - `ecoflow_panel/apparmor.txt` — the LSM confinement profile
@@ -40,7 +41,9 @@ runs the container.
 | `panel_icon` | `mdi:home-battery` | Sidebar icon |
 | `panel_title` | `Power` | Sidebar label |
 | `panel_admin` | `false` | Non-admin HA users may see the sidebar panel |
-| `map` | `data:rw`, `share:rw` | `/data` read-write (persistence). `/share` read-write (v1.107.0) so the SQLite snapshot (`POST /api/db-export`, §12g) is published where other add-ons can read it; the add-on writes only that snapshot there. |
+| `map` | `data:rw`, `share:rw` | `/data` read-write (persistence). `/share` read-write (v1.107.0) so the SQLite snapshot (`POST /api/db-export`, §12g) is published where other add-ons can read it; the add-on writes only that snapshot and the backup hook's journal (`ecoflow-panel/backup-window.jsonl`) there. |
+| `backup` | `hot` | Home Assistant backs the add-on up while it runs (v1.187.20): a cold backup would stop the alarm engine for the whole copy. |
+| `backup_pre` / `backup_post` | `/usr/bin/ecoflow-panel-backup-hook pre` / `post` | Run by the Supervisor inside the container around the copy of `/data`: `pre` empties the SQLite WAL and holds checkpoints still, `post` restores them (`backupWindow.ts`, over the loopback-only routes below; a 10-minute dead-man restores them if `post` never comes). The hook always exits 0, since a non-zero exit drops the add-on from the backup. |
 | `homeassistant_api` | `true` | Grants `SUPERVISOR_TOKEN` access to Core `/core/api/*` — needed for `media_player.play_media` broadcasts and entity-state reads. Without it, broadcasts fail with "SUPERVISOR_TOKEN missing or HA unreachable". |
 | `hassio_api` | `true` | Grants Supervisor API access (read-only survey of installed add-ons for Piper/speaker visibility). |
 | `hassio_role` | `homeassistant` | **Least-privilege (v1.7.0, CWE-250).** Downgraded from `manager`. `homeassistant` keeps Core API + the read it needs but drops add-on start/stop/reconfigure that `manager` would grant a compromised process. Bump back to `manager` only if a feature needs true add-on management. |
@@ -97,7 +100,20 @@ if bashio::config.true 'SSH_ENABLED'; then export SSH_ENABLED=1; else export SSH
 if bashio::config.true 'BROADCAST_ENABLED'; then export BROADCAST_ENABLED=true; else export BROADCAST_ENABLED=false; fi
 ```
 
-All other options are exported verbatim as strings (`$(bashio::config 'KEY')`).
+All other options with a default are exported verbatim as strings (`$(bashio::config 'KEY')`).
+The schema-only keys (optional, with no `options:` default; every key added since v1.191.0
+takes this form) are exported only while they have a value
+(`if bashio::config.has_value 'KEY'; then export KEY=…; fi`), so an unset or cleared field
+leaves the variable absent, never the string `null`, and the server takes its unchanged path.
+`SITE_LOCATION_FROM_HA` and `TARIFF_RATES_CONFIRMED` among them pass `true`/`false` through
+verbatim, and their readers count only `true`.
+
+The run script and the code apply four truthiness conventions between them (`!== '0'`,
+`=== 'true' || === '1'`, `!== 'false'`, `!(=== 'false' || === '0')`). The option table in
+`server/src/config.ts` carries each key's export form and its reader's rule, and
+`server/test/optionsEnvBridge.test.ts` holds the run script, `config.yaml` and the table to
+each other: every schema key has a row, every option row is exported, a schema-only key only
+under `has_value`, and the script's boolean form matches the reader's rule.
 
 #### Startup guards in the runner
 
@@ -107,13 +123,18 @@ All other options are exported verbatim as strings (`$(bashio::config 'KEY')`).
 - **Write-debug warning:** if `WRITE_DEBUG_TOKEN` has a value, the runner logs a warning that
   `POST /api/device/send-command` is enabled.
 - **Broadcast confirmation:** if `BROADCAST_ENABLED`, logs `broadcast: enabled (targets: …)`.
+- **Start line:** `Starting Power (ecoflow_panel) on :8787 (ssh <1|0>:<port>, telnet alias <1|0>:<port>, db /data/ecoflow.db)…`, then `exec npm start`.
 
 ---
 
 ### Full config.yaml option reference
 
 The option table, one row per option with its default and schema, is
-[docs/guide/options.md](../guide/options.md).
+[docs/guide/options.md](../guide/options.md). It lists every `schema:` key: those with an
+`options:` default, and the schema-only optional keys, which have none and appear on the
+Configuration page under **Show unused optional configuration options**; each of those rows
+states what Power does while the key is unset. What a home other than the reference plant sets
+is listed in [your home](../guide/your-home.md).
 
 ---
 
@@ -308,7 +329,12 @@ unreferenced and harmless.
 | Port | Protocol | Purpose | Auth |
 |------|----------|---------|------|
 | `8787/tcp` | HTTP | Web dashboard + REST API + WebSocket (`/ws`) | Reads open; writes via `requireWriteAuth`. Also the `ingress_port`. |
-| `2323/tcp` | SSH | "Control-room" TUI | Password login with `TUI_USERNAME` / `TUI_PASSWORD` (§11 2.3); every login is refused until a password is set. Default OFF (`SSH_ENABLED=false`; `TELNET_ENABLED` is a deprecated alias that also turns it on). The browser console at `/console` on `:8787` uses the same credentials behind its login card. |
+| `2323/tcp` | SSH | "Control-room" TUI | Password login with `TUI_USERNAME` / `TUI_PASSWORD` (§11 2.3); every login is refused until a password is set. Default OFF (`SSH_ENABLED=false`; `TELNET_ENABLED` is a deprecated alias that also turns it on). The browser console at `/console` on `:8787` uses the same credentials behind its login card. The host key is `/data/ssh_host_ed25519_key`; its SHA256 fingerprint is on the startup log line. |
+
+The server listens on `SSH_PORT` inside the container, and the manifest publishes container port
+2323. A different `SSH_PORT` (or `TELNET_PORT`, while `SSH_PORT` is at 2323) therefore moves the
+listener off the published port; to reach the console on another host port, change the host side
+of `2323/tcp` in the add-on's **Network** tab and leave `SSH_PORT` at 2323.
 
 **Ingress:** with `ingress: true` / `ingress_port: 8787`, the Supervisor reverse-proxies the
 same server into the HA sidebar ("Power"), authenticated by HA's session (visible in the HA
@@ -326,7 +352,7 @@ works in parallel.
    just dev — the server runs TS directly).
 3. **runtime** (`FROM ${BUILD_FROM}` — the HA Alpine+s6+bashio base) — `apk add nodejs npm
    ca-certificates tzdata`, copy `server/`, the built `web/dist`,
-   and `rootfs/` (the s6 service). `chmod a+x` the run script. `EXPOSE 8787 2323`.
+   and `rootfs/` (the s6 service and the backup hook). `chmod a+x` the run script and the hook. `EXPOSE 8787 2323`.
 
 Runtime ENV baked in: `NODE_ENV=production`, `PORT=8787`, `HOST=0.0.0.0`, `DB_PATH=/data/ecoflow.db`,
 `WEB_DIST_PATH=/app/web/dist`. Build metadata (`BUILD_VERSION`, `BUILD_DATE`, `BUILD_REF`) is
@@ -396,7 +422,7 @@ since the previous tag if empty). It:
 - `Dependency advisories` (`scripts/check-npm-audit.mjs`).
 - `Validate add-on config + translations`.
 - `Dockerfile smoke build (amd64)`.
-- `Build documentation (.docx + .pdf)`.
+- `Build documentation (.docx + .pdf)` (bounded; see Step 4).
 
 `release-pr.yml` runs on every pull request to `main` (`opened`, `synchronize`, `reopened` and
 `edited`, so a title edit re-runs it): `Release PR declares the version it names`
@@ -509,8 +535,13 @@ build to `gh release create`. Jobs:
    a document is attached only when its build step's own `outcome` (before `continue-on-error`)
    is `success` and the file is non-empty, and the .pdf is rendered only from a .docx whose
    build succeeded: an immutable Release never seals a truncated asset. The images are pushed
-   by `build` before this job starts. CI's `docs-docx` job (a hard PR gate) carries the same bounds and a 30-min job
-   limit. `server/test/workflowTimeouts.test.ts` holds these properties.
+   by `build` before this job starts. CI's `docs-docx` job (a hard PR gate) is bounded the same way,
+   with a 40-min job limit above its steps' bounds. `server/test/workflowTimeouts.test.ts` holds
+   these bounds. The CI job also drops the runners' first apt mirror (`azure.archive.ubuntu.com`)
+   from `/etc/apt/apt-mirrors.txt` when another one is listed, and installs pandoc 3.7.0.2 from the
+   upstream release `.deb`, checked against a pinned SHA-256, with apt as the fallback (a 12-min
+   step): that mirror served the 29 MB package at about 39 kB/s on several runs. The release job
+   still installs pandoc with apt.
 
 First-time-only: toggle the two new GHCR packages from Private → Public so HA can pull anonymously.
 
@@ -538,11 +569,14 @@ multi-arch image — it does **not** build on the host. Once the GitHub Release 
 `/data` is the `data:rw`-mapped volume; it survives restarts/updates. Key files:
 - `ecoflow.db` — SQLite recorder (WAL mode → `.db-wal`/`.db-shm`).
 - `panel-write-token.txt` — mode-0600 write token.
+- `ssh_host_ed25519_key` — the SSH console's host key (mode 0600), generated on the first start with the console on.
+- `site-location.json` — Home Assistant's home location, saved by `SITE_LOCATION_FROM_HA` and applied from the next start.
+- `device-aliases.json` — optional display names by serial; `DEVICE_ALIASES` is merged over it, and it over the image's own file.
 - `writes.log` — JSONL audit log.
 - `audio/` — startup-generated klaxon WAVs (served at `/audio/*`).
 - `audio-render/` — on-demand rendered klaxon+TTS announcements (served at `/audio-render/*`, `wildcard:true`).
 - Operator-uploaded chimes dir (served at `/chimes/*`).
-- `.night-charge-latch.json` / `.night-charge-plan.json` / `.night-charge-actuation.json` — the evening-job day latch, the persisted pre-window plan snapshot, and the restart-surviving supervised-write actuation record (§15.8b; the actuation file is what lets a raised reserve be found and reverted across a restart).
+- `.night-charge-latch.json` / `.night-charge-plan.json` / `.night-charge-actuation.json` — the evening-job day latch, the persisted pre-window plan snapshot, and the restart-surviving supervised-write actuation record (§15.8b; the actuation file is what lets a raised reserve be found and reverted across a restart). `.night-charge-midday-shadow.json` holds the winter mid-day charge computed in preview.
 
 #### First-run setup
 
@@ -584,6 +618,8 @@ multi-arch image — it does **not** build on the host. Once the GitHub Release 
 - **Write token:** delete `/data/panel-write-token.txt`, restart. A fresh UUID is generated.
 - **Write-debug path:** clear `WRITE_DEBUG_TOKEN` in Configuration to disable
   `POST /api/device/send-command` entirely (default state).
+- **SSH host key:** delete `/data/ssh_host_ed25519_key`, restart. A fresh ed25519 key is generated
+  and its fingerprint logged; clients warn that the host key changed.
 
 
 ---
@@ -649,7 +685,7 @@ continues; a failed batch retries each tick inside the window.
 out / grid-charge, and the dark-core PV estimate when present. Null when the
 record is missing or empty — the digest never carries a hollow line.
 **v1.100.0**: the line had never rendered. The digest fires at
-`NOTIFY_DIGEST_HOUR` (default 7, so 07:00 local) while this job is gated to 06:35-09:00
+`NOTIFY_DIGEST_HOUR` (default 7, so 07:00 site time) while this job is gated to 06:35-09:00
 site time, so `prevYmd(today)` is absent at digest time whenever the digest hour comes
 before the job completes. That is every morning at a digest hour of 6 or earlier, or when the job runs late in its window. It now falls back to `latestVendorDay(state)` and NAMES the day:
 "Yesterday per the EcoFlow ledger: …" only when the record genuinely is
@@ -764,7 +800,7 @@ per-cell voltage grid (markdown lists or one-row-per-cell CSV), and up to 200
 alert-history rows for the serial (admitted by id-contains-SN **or**
 `sourceSn` — the v1.78.0 SN-less-id lesson). Spread is computed from the real
 cell grid when present (min/max), falling back to the projected
-`maxVolDiffMv`. Read-only; auth-gated like every `/api` route.
+`maxVolDiffMv`. Read-only and, like the other reads, open: it carries no write gate.
 
 **Discovery probe (same release):** `GET /api/debug/vendor-history-probe`
 (`?month=YYYY-MM`, default last month) asks the historical-data endpoint
@@ -777,8 +813,9 @@ on-demand only; results are recorded in the chapter-12 "Vendor API notes" once k
 The recorder database lives at `/data/ecoflow.db`. `/data` is **private per
 add-on** — no other add-on can open it, so a viewer such as sqlite-web has no
 path to point at. This publishes a point-in-time copy to `/share`, which every
-add-on can read; `share:rw` was added to the add-on `map:` in the same release
-and is used only to write the snapshot.
+add-on can read; `share:rw` was added to the add-on `map:` in the same release.
+The add-on writes only the snapshot there and, since v1.187.20, the backup hook's journal
+(`/share/ecoflow-panel/backup-window.jsonl`).
 
 `POST /api/db-export` (write-auth + rate-limited to 6/hour) produces the copy
 and returns `{path, bytes, sourceBytes, elapsedMs, generatedAt}`. Optional

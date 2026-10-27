@@ -69,13 +69,19 @@ freshness clock (see §1.7, *The `lastUpdated` freshness contract*, below).
 
 | Module | Thread | Responsibility |
 |---|---|---|
-| `config.ts` | main | Runtime config from env vars; lazy-throwing getters for EcoFlow secrets |
+| `config.ts` | both | The option table (`OPTIONS`, read through `option(name)`): every add-on option, environment knob and deployment constant with the parse rule its reader applies; the `config` object; lazy-throwing getters for EcoFlow secrets |
+| `siteTime.ts` | both | The site clock: one IANA zone resolved at module load, and every local date, hour and clock-text helper (section 12) |
+| `siteTimeHa.ts` | main | The site zone's boot log line and the background comparison with Home Assistant's zone |
+| `site.ts` | both | Site location, the PV array the physics uses (`pvSite`), the PV strings and the `GET /api/site` payload |
+| `limits.ts` / `topology.ts` | both | Plant limits (EV, per-Core charge rate, runway overhead, SoC ladder, opportunistic loads) and device topology (aliases, bench-spare floor, slot names), from the option table |
 | `ecoflow/rest.ts` | main | EcoFlow OpenAPI REST client (`listDevices`, `getQuotaAll`) |
 | `ecoflow/mqtt.ts` | main | EcoFlow MQTT client; subscribes per-device quota/status topics |
 | `ecoflow/mqttTranslate.ts` | main | `translateDpuMqtt()` — DPU cmdId schema → REST quota schema |
 | `ecoflow/project.ts` | main | `projectByProduct()` — raw quota → typed `Projection` (dpu/shp2/generic) |
 | `snapshot.ts` | main | `SnapshotStore` (live state), `startPollLoop`, `refreshAll` |
 | `recorder.ts` | main (write) | SQLite time-series writer, dedupe, lifetime rollup, retention, gap detection |
+| `heldSamples.ts` | main (the worker reads the samples generation) | The recorder's freshness gate, the held-span log and the scan that moves held rows to `held_samples` (4.3, 4.4) |
+| `energyBridge.ts` | main (the worker reads `bridge_ledger`) | Battery and solar energy of a dark home Core metered at its panel slot, and the per-window rows the Today card reads |
 | `readRecorder.ts` | worker (read) | Read-only twin of recorder's read path; parity maintained by convention (§6.1), its own read semantics pinned by `test/worker-offload.test.ts` |
 | `aggregator.ts` | worker | Trapezoidal Wh integration (`integrateWh`, `computeTotals`, `circuitHistoryByDay`) |
 | `analyticsWorker.ts` | worker | Worker entry: owns read recorder, runs `buildReport`, self-warms caches |
@@ -85,7 +91,7 @@ freshness clock (see §1.7, *The `lastUpdated` freshness contract*, below).
 | `analytics.ts` | worker | The ~560 KB compute engine (forecast, runway, degradation, …) |
 | `index.ts` | main | Fastify bootstrap, all HTTP routes, `/ws`, wiring of every subsystem |
 | `mqttDiscovery.ts` | main | HA MQTT discovery config + 30s state publish |
-| `telnet/server.ts` | main | SSH control-room TUI (port 2323) |
+| `telnet/server.ts` | main | SSH control-room TUI (`startSshServer`, port 2323; the directory keeps its telnet-era name) |
 | `alertMonitor.ts` / `alerts.ts` | main | Alarm engine (life-safety path) |
 
 ---
@@ -104,7 +110,10 @@ instead of stretching by the vendor's own latency.
 - `refreshAll`:
   1. `store.markDeviceListAttempt()` (records attempt time).
   2. `ecoflow.listDevices()` → `store.setDeviceList()` — upserts each device,
-     resolves display name (`resolveDeviceName`, alias file, product guess),
+     resolves display name (an alias, from `DEVICE_ALIASES` merged over
+     `device-aliases.json` beside the database and the image's own file; else
+     `resolveDeviceName`; two unnamed devices that share a fallback name get their
+     panel slot, else the serial's last four characters, `disambiguateFallbackNames`),
      sets `online = (d.online === 1)`, logs online/offline transitions.
   3. For each `online === 1` device, `ecoflow.getQuotaAll(sn)` →
      `store.setDeviceQuota(sn, quota)`; on error `store.setDeviceError(sn, msg)`.
@@ -766,7 +775,7 @@ on a SQLite scan.
 
 #### 6.2 Worker message protocol
 
-Messages **in**: `{kind:'snapshot', snapshot}`, `{kind:'ownerFloor', pct}` (v1.119.0 — the owner reserve floor the runway model measures against), `{kind:'report', id, name, args}` (single-flighted by name + args since v1.186.0),
+Messages **in**: `{kind:'snapshot', snapshot}`, `{kind:'ownerFloor', pct}` (v1.119.0 — the owner reserve floor the runway model measures against), `{kind:'homeRoster', sns}` (v1.191.0 — the last-known home roster the bench-spare floor honours, so the worker's spare answers match the main thread's), `{kind:'report', id, name, args}` (single-flighted by name + args since v1.186.0),
 `{kind:'query', id, …}`, `{kind:'listMetrics', id, sn}`.
 Messages **out**: `{kind:'ready'}`, `{kind:'log', message}`,
 `{kind:'result', id, ok, result|error}`.
@@ -795,7 +804,8 @@ bootstrap, correlates request/response by incrementing `id`, and:
 - **Respawn**: on worker `exit`, fails all in-flight requests, clears caches, and
   respawns after `RESPAWN_DELAY_MS = 1_000`; on `ready` it re-pushes `lastSnapshot` and
   replays the owner reserve floor (`{kind:'ownerFloor'}`, v1.119.0), without which a
-  respawned worker's runway model would read the device reserve instead.
+  respawned worker's runway model would read the device reserve instead, and the last
+  home roster (`{kind:'homeRoster'}`).
 - **First-snapshot gate (v1.186.0)**: a report request waits until the worker holds a
   snapshot with device projections. While no devices exist yet it waits up to
   `FIRST_SNAPSHOT_WAIT_MS = 5_000`, once per process, so a boot-time report is not
@@ -850,7 +860,8 @@ Using `/api/forecast` as the canonical example:
 ```
 HTTP GET /api/forecast
   → index.ts route handler
-      cached(req, reply, await analytics.report('forecast'), 60)
+      fc = await analytics.report('forecast')
+      cached(req, reply, { ...fc, siteTimeZone: siteTimeZone() }, 60)
                               │
         analyticsClient.report('forecast', {})
           1) TTL fresh?  → return structuredClone(cachedValue)         [no worker]
@@ -860,8 +871,8 @@ HTTP GET /api/forecast
                                  │
                   analyticsWorker on('message', {kind:'report'})
                     buildReport('forecast', ctx, {})
-                       reports.ts BUILDERS.forecast(ctx)
-                         = getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log)
+                       reports.ts BUILDERS.forecast(ctx, args)
+                         = getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log, weatherAgeOpts(args))
                               reads samples via read-only recorder (readRecorder.ts)
                                  │
                     postMessage({kind:'result', id, ok:true, result})
@@ -875,6 +886,20 @@ Two caching layers stack: the **HTTP** `cached()` helper (ETag + `max-age`, per
 browser tab) and the **analyticsClient** TTL/coalesce layer (per process). Under
 that, each heavy report carries its own 5–30 min internal TTL cache inside the
 worker.
+
+The day forecast's own cache (`dayForecastCache`, `analytics.ts`) holds a complete forecast
+for `FORECAST_DAY_TTL_MS` (30 min) and a structurally incomplete one for
+`INCOMPLETE_FORECAST_TTL_MS` (150 s, env-overridable). An entry is written while at least one
+Core is projected or the house panel is: a process started while every home Core is dark in
+the EcoFlow cloud builds a complete forecast on the panel's load and each connected Core's
+own recorded PV, and caches it (v1.191.2; before, every report that read it rebuilt it). A
+fleet with no projection at all caches nothing. The entry records the dark-Core basis it was
+built on: the connected home Cores with no projection whose recorded PV it re-adds
+(`homeRestoredSns`) and whether a home Core's first reading was pending
+(`homeBasisPending`). `dayForecastCacheUsable` serves it only while the projected home Cores
+(`solarModelSns`) and the restored Cores both match the current map, and never serves an
+entry built with no pending Core to a map on which one is now pending. Each restored Core's
+30-day PV series is read once per build. The solar-forecast chapter describes the build.
 
 #### Report registry (`reports.ts`)
 
@@ -908,11 +933,12 @@ macOS resolves `.local` to IPv6). Notable endpoints:
 | `/api/health` | blind assessment (`assessBlind`) + `pollHealth()`, `shp2ContentFrozenMs`, vitals, heartbeat — **HTTP 503** while the add-on cannot see telemetry (v1.69.0) | none |
 | `/api/version`, `/api/panel-info` | trivial (`{version, builtAt, ref}`; write-auth hints) | none |
 | `/api/history?sn&metric&since&until&bucket` | `analytics.query()` | 15 s |
-| `/api/summary/today` | `analytics.report('totals', …)` | 30 s |
+| `/api/summary/today` | `analytics.report('totals', { …, bridged: true })` (a dark home Core counts what the energy bridge booked for it) plus `dayEndMs` and `siteTimeZone`; the default `since` is the site's midnight | 30 s |
+| `/api/site` | `siteResponse()` (`site.ts`): site zone and its source, coordinates and their source, currency, PV strings (global and per Core), the PV array, the web's solar assumptions, mains voltages; per Core a `benchSpare` flag only while `BENCH_SPARE_SNS` is set | 60 s |
 | `/api/calendar.ics` | forecast + EV windows + active NWS alerts | `public, max-age=300` (5 min; honoured by HA's ics calendar) — a subscribable iCal feed; point a calendar client at it |
 | `/api/circuit/history?sn&(ch\|pair)&days` | `analytics.report('circuitHistory')` | none (worker-cached) |
 | `/api/metrics?sn` | `analytics.listMetrics(sn)` | none |
-| `/api/forecast`, `/api/runway`, `/api/degradation`, … | `analytics.report(name)` | 60 s (runway 30 s) |
+| `/api/forecast`, `/api/runway`, `/api/degradation`, … | `analytics.report(name)` (`/api/forecast` adds `siteTimeZone`, the zone its hours were computed in) | 60 s (runway 30 s) |
 | `/api/ha-state` | composed multi-report | short |
 | `/api/lifetime-energy`, `/api/telemetry-gaps`, `/api/debug/*` | recorder/store | varies |
 
@@ -955,7 +981,13 @@ option serves SSH; `SSH_PORT` at its default defers to a changed `TELNET_PORT`),
 logging one boot notice. The same Plant Operator console is always served in a browser at
 `/console` on the web port (xterm.js over `/console/ws`), independent of the SSH toggle.
 SSH logins are password only against `TUI_USERNAME` / `TUI_PASSWORD` and are all refused
-until a password is set; the browser console shows its login card once one is set.
+until a password is set; the browser console shows its login card once one is set. Both
+transports spend one failure budget per source address (`AUTH_MAX_ATTEMPTS` = 3 per
+connection; `AUTH_THROTTLE_MAX_FAILURES` = 10 per `AUTH_THROTTLE_WINDOW_MS` = 10 min refuse
+that address alone, and a successful login clears it). The TCP side is a plain `net` server
+that hands each socket to ssh2: `MAX_SSH_CONNS` = 16, `MAX_SSH_CONNS_PER_IP` = 4, a 2-min
+login grace (`SSH_AUTH_GRACE_MS`), a 5-min receive-idle close and TCP keep-alive. One
+terminal per connection; exec, sftp and port forwarding are refused.
 
 #### 9.5 Web UI
 
@@ -966,6 +998,15 @@ proxies `/api` + `/ws` back to this process.
 ---
 
 ### 10. Configuration reference (`config.ts` + env)
+
+`config.ts` holds the option table, `OPTIONS` (v1.191.0): a row for every `config.yaml` option
+(85 with a default and 38 schema-only, 123 in all), every environment knob and every
+deployment constant, each with the parse rule its reader applies (four truthiness conventions,
+the blank and `null` rules and the clamps are kept per key). `option(name)` reads a value
+through its row. A schema-only key has no default and the run script exports it only when it
+is set, so an unset key leaves the variable absent and the code takes the path it took before
+the key existed. The full option list is in [the option reference](../guide/options.md); the
+table below lists the `config` object's fields and the knobs this chapter uses.
 
 | Key | Env var | Default | Purpose |
 |---|---|---|---|
@@ -982,6 +1023,9 @@ proxies `/api` + `/ws` back to this process.
 | `ssh.host` | `SSH_HOST` (fallback `TELNET_HOST`) | `::` | TUI bind |
 | `ssh.port` | `SSH_PORT` (the deprecated `TELNET_PORT` applies while `SSH_PORT` is `2323`) | `2323` | TUI port |
 | `ssh.hostKeyPath` | `SSH_HOST_KEY` | `/data/ssh_host_ed25519_key` | ed25519 host key, generated on first start |
+| `retentionDays` | `RECORDER_RETENTION_DAYS` | `30` (clamped [7, 3650]) | `samples` retention (4.5), read at call time |
+| `dataRoot` / `dataFile(name, override)` | `DB_PATH` | the directory beside the database | Where the state files live; a `*_PATH` override wins |
+| `siteTimeZone()` (`siteTime.ts`) | `SITE_TIMEZONE`, else `TZ` | `America/Phoenix` (`DEFAULT_SITE_TIME_ZONE`) | The site clock (section 12) |
 | — | `POLL_INTERVAL_MS` | `60_000` | REST poll cadence |
 | — | `ANALYTICS_REPORT_TTL_MS` | `20_000` | Default report cache TTL (main thread) |
 | — | `SNAPSHOT_INCLUDE_RAW` | `0` | Attach raw quota to snapshots (debug) |
@@ -990,8 +1034,7 @@ proxies `/api` + `/ws` back to this process.
 | — | `BUILD_VERSION` / `BUILD_DATE` / `BUILD_REF` | `dev`/null/null | Version stamp for `/api/version` |
 | — | `ECOFLOW_TRACE_SN` | — | Env-gated MQTT topic/payload trace for one SN |
 | — | `BMS_REBASELINE_SUSPECT_ROLLUPS` | `3` | Rollups before a BMS reconnect re-baseline is trusted |
-| — | `BMS_RESEED_MIN_GAP_WH` / `BMS_RESEED_SUSTAINED_ROLLUPS` | `50_000` / `2` | Floor/live gap and dwell before a BMS-counter floor re-seeds (§4.6) |
-| — | `RECORDER_RETENTION_DAYS` | `30` (clamped [7, 3650]) | `samples` retention (§4.5) |
+| — | `BMS_RESEED_MIN_GAP_WH` (add-on option) / `BMS_RESEED_SUSTAINED_ROLLUPS` | `50_000` / `2` | Floor/live gap and dwell before a BMS-counter floor re-seeds (§4.6) |
 | — | `BACKUP_POOL_GRACE_HOLD_MS` | `180_000` | SHP2 backup-pool grace hold (§3.3) |
 | — | `POLL_SUMMARY_EVERY` | `30` | Polls per debug-level poll-duration summary (§3.1) |
 
@@ -1023,6 +1066,48 @@ scripts that never call the EcoFlow API can import `config.ts` safely.
   re-stringified per `frameSeq`, and the worker gets a `structuredClone` via
   `postMessage`. No consumer may retain a raw-map reference across merges.
 
+---
+
+### 12. The site clock (`siteTime.ts`)
+
+Every local calendar date, hour, weekday and clock text the add-on computes is in one IANA
+zone, the site zone (v1.191.0). Before, three sources disagreed: the host's clock, the
+literal `America/Phoenix` and fixed UTC−7 arithmetic, which agreed only on a host whose zone
+was the reference plant's.
+
+- **Resolution.** `resolveSiteTimeZone` runs once, when `siteTime.ts` loads, and the zone is
+  never switched while the process runs: `SITE_TIMEZONE` when the runtime resolves it, else
+  `TZ` (the container's zone, which the Supervisor sets to Home Assistant's; a leading `:` is
+  accepted), else `DEFAULT_SITE_TIME_ZONE` (`America/Phoenix`, the only copy of that literal
+  in `server/src`). `checkTimeZone` refuses a name `Intl` does not know, a name the runtime
+  answers with UTC because its zone data lacks it, and a zone it cannot format numeric parts
+  in; a refused value is recorded (`siteTimeZoneResolution().rejected`), raised as a repair
+  issue and the chain falls through. It never becomes UTC silently. Links of the legacy zone
+  (`US/Arizona`, `MST`, any letter case) read as `America/Phoenix` (`LEGACY_ZONE_LINKS`).
+- **Both threads.** The module resolves from the environment alone, so the analytics worker
+  computes the same zone as the main thread with no message between them. It logs nothing;
+  the main thread logs `site time zone <zone> (source: <source>)` at boot, and `siteTimeHa.ts`
+  reads Home Assistant's `/core/api/config` `time_zone` in the background after boot: a
+  different zone raises a warning and a repair issue, and the add-on keeps the zone it booted
+  with until it restarts.
+- **Helpers.** Zone-parameterised pure functions (`zonedWallParts`, `zonedWallTimeMs`, which
+  returns the first occurrence of a repeated fall-back time and the first instant after a
+  spring-forward gap, `zonedDayStartMs`, `zoneOffsetMs`) and their site-zone forms
+  (`siteYmd`, `siteHour`, `siteDow`, `siteMinuteOfDay`, `siteDayStartMs`, `siteDayStartOf`,
+  `siteNextDayStartOf`, `siteShiftDaysMs`, `siteNoonIso` for the statistics import, and the
+  `fmtSite…` text forms). Every formatter is an `en-US` `formatToParts`; Spanish weekday names
+  come from a fixed map (`WEEKDAY_ES`), never from an `es` locale.
+- **Readers.** The tariff periods and the MPC tariff vector, the night-charge window, its
+  evening notice and schedule, quiet hours and the morning digest, the daily totals and day
+  starts (`startOfLocalDayMs`), the Home Assistant statistics import, the telemetry-gap and
+  outage alert times, and the console's stamps and its two 1 Hz divider clocks.
+- **The web.** The browser never formats a site time in its own zone. The server reports the
+  zone as `siteTimeZone` on `/api/site`, `/api/summary/today`, `/api/forecast` and
+  `/api/night-charge/status`; `web/src/siteTime.ts` formats in it, and a card with no zone
+  shows no time rather than the browser's.
+
+In `America/Phoenix` the site clock equals the former fixed-offset arithmetic at every
+instant, so an install with `SITE_TIMEZONE` unset in that zone computes what it did before.
 
 ---
 

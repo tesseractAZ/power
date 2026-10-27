@@ -133,7 +133,7 @@ The monitor polls `store.get().alerts` on a **10 s `setInterval`** and fires on
 | `cfg.enabled` | Disabled → adopt level, no broadcast. |
 | **All-clear-vs-critical** | A `green` is adopted silently (no spoken all-clear) if any critical alert with `annunciate !== false` is still active, or the `telemetry-blind` critical is held silent by its remediate-first gate (`allClearSpeechBlocked`, v1.166.0: held is not cleared) — avoids a spoken "all clear" contradicting a runway-alarm critical on the same speakers. |
 | `minSeverity` | `yellow` is skipped when `cfg.minSeverity === 'critical'` (the default). |
-| **Quiet hours** | `yellow`/`green` always respect quiet hours. `red` breaks through ONLY when `criticalBreakThrough` is opted in; default OFF ⇒ red is also suppressed overnight (alert stays on-screen; push queues the morning digest). |
+| **Quiet hours** | `BROADCAST_QUIET_HOURS`, judged on the site hour (`inQuietWindow`, v1.191.0). `yellow`/`green` always respect quiet hours. `red` breaks through ONLY when `criticalBreakThrough` is opted in; default OFF ⇒ red is also suppressed overnight (alert stays on-screen; push queues the morning digest). |
 
 Only after all guards pass does `tick()` set `tickInFlight`, build the message
 (`messageFor` / `messageEsFor`), and call `runBroadcast`.
@@ -858,7 +858,7 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_VOLUME` | `0.5` | 0..1 master level, the only volume source (v1.57.0; applied on restart). Clamped. |
 | `BROADCAST_ANNOUNCE_VOLUME` | (empty → volume×100) | Pins announce volume: a `0..100` number, or `off`/`none`/`standing` to omit it. |
 | `BROADCAST_MIN_SEVERITY` | `critical` | `critical` or `warning` — the lowest level that broadcasts (`yellow` skipped when `critical`). |
-| `BROADCAST_QUIET_HOURS` | `22-06` | Whole local hours `HH-HH`, wrapping past midnight; empty = no quiet window. Suppresses non-critical (and critical unless break-through) in-window. |
+| `BROADCAST_QUIET_HOURS` | `22-06` | Whole site-clock hours `HH-HH` (`SITE_TIMEZONE`, else `TZ`, else `America/Phoenix`), wrapping past midnight; empty = no quiet window. Suppresses non-critical (and critical unless break-through) in-window. |
 | `CRITICAL_BREAKS_QUIET_HOURS` | `false` | When true, red/high/critical break through quiet hours; default OFF ⇒ everything held overnight. |
 | `BROADCAST_WYOMING_HOST` | `core-piper` | Wyoming/Piper TCP host. |
 | `BROADCAST_WYOMING_PORT` | `10200` | Wyoming/Piper TCP port. |
@@ -1018,7 +1018,7 @@ JSON endpoints:
 
 - **`test(level)`** — 10 s cooldown; bypasses storm gate + all annunciation gates; speaks an ISA-prefixed "Test broadcast. This is only a test." (bilingual when a Spanish voice is set).
 - **`preview(priority, target)`** — 2 s cooldown; renders via the identical `renderAnnouncement` call so it sounds exactly like a real alarm; `browser` never touches MA (works even when broadcasts are disabled / no targets).
-- **`announce(priority, message, messageEs, opts?)`** — the dedicated path (kind `dedicated`) for the SoC ladder, the runway alarm, and the night-charge and Charge Now notices. Returns at once when broadcasts are disabled; maps priority → level via `klaxonLevelForPriority`, reuses `runBroadcast`, applies the quiet-hours gate (high/critical break through only with `CRITICAL_BREAKS_QUIET_HOURS`) but **no cooldown** (the callers edge-limit). `opts.consentNotice` (the supervised night-charge arm/cancel, v1.122.0) bypasses the storm gates. A failed spoken render earns the one spoken retry with its own words. Never throws.
+- **`announce(priority, message, messageEs, opts?)`** — the dedicated path (kind `dedicated`) for the SoC ladder, the runway alarm, the Charge Now notice, and the night-charge notice and its critical pages (a force charge not switched off; a reserve restore that failed, did not take, or has not read back by its deadline or the on-peak start, v1.189.0). Returns at once when broadcasts are disabled; maps priority → level via `klaxonLevelForPriority`, reuses `runBroadcast`, applies the quiet-hours gate (high/critical break through only with `CRITICAL_BREAKS_QUIET_HOURS`) but **no cooldown** (the callers edge-limit). `opts.consentNotice` (the supervised night-charge arm/cancel, v1.122.0) bypasses the storm gates. A failed spoken render earns the one spoken retry with its own words. Never throws.
 
 ---
 

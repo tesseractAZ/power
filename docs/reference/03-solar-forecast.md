@@ -37,7 +37,8 @@ recorder pv_total / panel_load ─┴─► buildSolarResponse() ─► SolarRes
 
 The core physical model is a learned linear map from **Global Horizontal
 Irradiance** (GHI, W/m²) to **PV output** (watts), fit separately **for each
-hour-of-day (0–23)**. Splitting by hour-of-day captures the sun's changing
+hour-of-day (0–23)** of the site clock (`siteHour`: `SITE_TIMEZONE`, else the container's `TZ`,
+else `America/Phoenix`; every hour-of-day slot and weekday in this chapter is the site's). Splitting by hour-of-day captures the sun's changing
 angle-of-incidence and any per-hour shading, so a 9 AM W/m² and a 1 PM W/m²
 produce different watts even at equal irradiance. It is fit for the
 whole-inverter `pv_total` (the fleet-facing model) and, per DPU, for the two
@@ -106,7 +107,7 @@ the same threshold rather than hardcoding 300.
 
 ```ts
 interface HourResponse {
-  hour: number;            // 0-23
+  hour: number;            // 0-23, site hour
   coeff: number | null;    // β = W per W/m²; null = insufficient data
   r2: number;              // DIAGNOSTIC ONLY
   samples: number;
@@ -173,8 +174,9 @@ battery SoC%. This is the object every downstream forecast/alarm consumer reads.
   basis / cold load history). This short negative-cache window bounds the >30 s
   cold recorder rescan to once per ~150 s instead of every `/api/ha-state` poll
   (which previously cascaded to 30 s client timeout → retry → HTTP 500).
-- `dayForecastFlight = singleFlight<DayForecast>()` coalesces concurrent
-  cold-cache callers onto one computation (v0.69.0).
+- `dayForecastFlights` coalesces concurrent cold-cache callers onto one computation (v0.69.0),
+  one in-flight build per device basis (`reportBasisKey`, v1.187.18): a caller on another device
+  map never joins a build started on an older one.
 - A fresh cached forecast is reused only while its `solarModelSns` (the sorted SNs of the
   home Cores its solar model was fitted on) equals the current map's home Cores
   (`dayForecastCacheUsable`, v1.186.5). A forecast fitted on a boot-time map that had not
@@ -194,8 +196,9 @@ battery SoC%. This is the object every downstream forecast/alarm consumer reads.
   (`maxWeatherAgeMs`, the `forecast` and `probabilisticForecast` reports' argument): the 2 h
   weather cache is re-fetched when older (`getWeather`'s `maxAgeMs`), and a cached or in-flight
   forecast built on other weather is rebuilt; a failed fetch leaves the stale weather, and the
-  forecast says so. Only the night-charge morning refresh asks (chapter 15 part 2, "The morning
-  refresh"); every other caller is served as before.
+  forecast says so. Only the live morning refresh of an armed mid-day charge asks, and it is inert
+  while the mid-day charge is a preview (chapter 15 part 2, "The morning refresh"); every other
+  caller is served as before.
 
 #### Inputs
 
@@ -205,12 +208,13 @@ battery SoC%. This is the object every downstream forecast/alarm consumer reads.
 | SHP2 `panel_load` | recorder, weekday/weekend split via `hourCurveByWeekday` |
 | GHI / cloud | `getWeather()` (live) + recorder backfill: GHI realized-first (`ghi_wm2_realized`, else first-write `ghi_wm2`, v1.173.0); `cloud_pct` is still the first-write forecast |
 | Backup pool | `shp2.projection.backupFullCapWh` / `backupRemainWh` / `backupReserveSoc` |
-| EV load | `computeEvWindowPrediction` → `evLoadByHour` (expected-value watts) |
+| EV load | `computeEvWindowPrediction` → `evLoadByHour` (expected-value watts): each session capped at `EV_MAX_LOAD_W` (11 520 W unset) × its recurrence probability; overlapping sessions take the MAX with one charger (`EV_CHARGER_COUNT` unset), the SUM capped at count × `EV_MAX_LOAD_W` with 2–4 chargers; with 0 no circuit is classed as EV |
 | Recent load | recorder `panel_load` over `FORECAST_RECENT_LOAD_WINDOW_MS` (3 h) |
 
 #### The per-hour calculation
 
-Loop over `k = 0..23`, `ts = ceil(now/1h) + k·1h`, `clock = local hour`:
+Loop over `k = 0..23`, `ts = ceil(now/1h) + k·1h`, `clock = siteHour(ts)` (the weekday is
+`siteDow(ts)`):
 
 **(a) PV projection** — via `forecastHourPvW(resp, ghi, cloud, fallbackCurveW, clearnessHist)`:
 
@@ -352,6 +356,7 @@ negative-cache TTL.
 | `solarModelSns` | v1.186.5: sorted SNs of the home Cores the solar model was fitted on; gates cache reuse and forecast-skill scoring |
 | `poolFullWh` | v1.187.18: the backup pool's full capacity (Wh) the SoC trajectory was integrated against; null with no SHP2 or an untrusted pool; read by the probabilistic band. v1.187.19: `backupFullCapWh × poolCapacityScale`, the packs' measured capacity (was the nameplate sum) |
 | `poolCapacityScale` / `poolCapacityBasis` / `poolOverheadW` | v1.187.19 — the measured basis and the drain overhead the trajectory used (§5.1.3a); the probabilistic band reads `poolOverheadW` |
+| `weatherFetchedAtMs` | v1.189.0: when the weather the forecast was built on was fetched (null without weather); the `maxWeatherAgeMs` test above reads it |
 
 #### Endpoint
 
@@ -484,7 +489,7 @@ uses the `'first-write'` function default. The cache key includes the basis so t
 default-basis call can never be served a realized-basis score, or the reverse. Other readers of the stored series now take it
 realized-first, falling back to `ghi_wm2` hour by hour where no realized row exists:
 solar-model training, the soiling decomposition and the alarm-model backtest.
-Realized capture began 2026-09-06 17:00 MST, and `past_days=7` cannot backfill
+Realized capture began with v1.156.0 (on the reference plant, 2026-09-06 17:00 MST), and `past_days=7` cannot backfill
 earlier hours. Windows longer than about 15 days therefore mix the two bases until
 the older hours age out. `cloud_pct` remains first-write. Every reader goes through
 `queryRealizedGhi`, and a parser-based test pins the exact set of its callers.
@@ -727,7 +732,7 @@ for a pessimistic P10 PV envelope, and by the night-charge advisor (§15).
 #### What + why
 
 Extends the 24 h horizon to `horizonDays` (default 3, clamped 1–7 at route) with
-per-day rollups. Cached `MULTI_DAY_TTL_MS = 30 min`, keyed by `horizonDays` (v1.33.0:
+per-day rollups over site calendar days (`date` is the site date). Cached `MULTI_DAY_TTL_MS = 30 min`, keyed by `horizonDays` (v1.33.0:
 otherwise a `days=3` UI call answered the night-charge planner's `days=4` request and
 truncated its weekend lookahead).
 
@@ -818,8 +823,11 @@ recovered from this endpoint.
 
 `WeatherHour = { ts, cloudCoverPct, radiationWm2, radiationMissing?, tempC, ensembleSources?, ensembleDisagreementPct? }`. When `radiationMissing` is true the provider sent no value for the hour and `radiationWm2` is a stand-in 0, not darkness.
 
-Lat/lon default to a placeholder, the reference plant's city (Phoenix): `FORECAST_LAT = 33.4484`,
-`FORECAST_LON = -112.074` (add-on options `FORECAST_LAT` / `FORECAST_LON`).
+The coordinates, for Open-Meteo and NWS alike, are `siteCoordinates()` (site.ts): the add-on
+options `FORECAST_LAT` / `FORECAST_LON`, whose defaults are a placeholder city centroid (Phoenix:
+33.4484, -112.074), or, with `SITE_LOCATION_FROM_HA` on, Home Assistant's home location as saved
+by an earlier run. That location is read in the background after a start and applied from the next
+start, so the coordinates never change while the add-on runs.
 
 #### NWS NDFD (opt-in — cloud ensemble)
 
@@ -866,6 +874,13 @@ it always holds its default; only a standalone run can set it.
 | `PV_BAND_SIGMA_CAL` | env-only | (auto) | manual band-cal override, clamp 0.1–2 |
 | `NWS_ENABLED` | add-on | off | enable NWS cloud ensemble |
 | `FORECAST_LAT` / `FORECAST_LON` | add-on | 33.4484 / -112.074 (a placeholder) | weather location |
+| `SITE_LOCATION_FROM_HA` | add-on (optional) | off | weather location from Home Assistant's home, applied from the next start |
+| `SITE_TIMEZONE` | add-on (optional) | the container's `TZ`, else `America/Phoenix` | zone of every hour-of-day slot, weekday and site day; resolved once at start |
+| `EV_MAX_LOAD_W` / `EV_CHARGER_COUNT` | add-on (optional) | 11520 / 1 | per-charger cap and charger count for the predicted EV load (Inputs above) |
+
+No `PV_*` option reaches the forecast: the array enters only through its recorded PV. The `PV_*`
+options describe the array to the clear-sky physics model and the Bayesian noise scale (chapter 4)
+and to the Solar page (`/api/site`).
 
 Hard-coded (non-env) constants: `DAYLIGHT_GHI=20`, `MIN_RESPONSE_PAIRS=2`,
 `HOUR_CURVE_BUCKET_SEC=300`, `TYPICAL_HISTORY_MS=30d`, `WEEKDAY_MIN_SAMPLES=24`,
@@ -889,7 +904,10 @@ Hard-coded (non-env) constants: `DAYLIGHT_GHI=20`, `MIN_RESPONSE_PAIRS=2`,
 - **Missing telemetry ≠ darkness** — the pervasive guard. Bias correction, skill
   scoring, and the fleet fit all EXCLUDE days/hours where a wired Core reported
   <80% of daylight hours (`coreCoverageByDay`, `fullCoverageFleetPv`), and mark
-  their `errorPct`/`coverageGap` rather than scoring a phantom over-forecast.
+  their `errorPct`/`coverageGap` rather than scoring a phantom over-forecast. Since v1.188.1 the
+  recorder writes no rows for a device whose readings are held (`projectionRecordable` in
+  heldSamples.ts) and moves held stretches already written to `held_samples`, so a cloud-dark
+  Core is a gap these gates see, not its last reading restated as new.
 - **PV bias factor is a no-op (1.0) until mature** (≥3 mature covered days) and
   clamped `[0.5, 1.2]`; deflation is unclamped-safe, inflation is re-clamped to
   the physical ceiling.

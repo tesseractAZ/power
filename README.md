@@ -30,27 +30,31 @@ Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each:
 inverter units add no capacity), a **42-panel / ~16.8 kW** array, and an EVSE —
 on the APS R-EV time-of-use rate. Two further Cores sit off the panel as bench
 spares: they are monitored, but are not part of the backup pool. These are the
-built-in values; another home sets its own time zone, tariff, array and devices
-([setting Power up for your home](docs/guide/your-home.md)).
+built-in values; another home sets its own tariff, array, devices, EV charging and
+plant limits as options, each left unset keeping the built-in value, and the site
+clock follows Home Assistant's time zone unless `SITE_TIMEZONE` names another
+(America/Phoenix only when neither is set)
+([setting Power up for your home](docs/guide/your-home.md)). `GET /api/site`
+reports the site clock, coordinates, currency and PV array in force.
 
 > 📖 **Documentation.** The operator guide, [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md),
 > is what Home Assistant shows on the add-on's Documentation tab: setup, what an alarm means
 > and what to do, what Power writes to your devices, options by goal, and troubleshooting.
 > Every option is in [`docs/guide/options.md`](docs/guide/options.md) and every Home
 > Assistant entity in [`docs/guide/entities.md`](docs/guide/entities.md). The
-> [engineering reference](docs/reference/README.md) (~12,200 lines in 19 reference files)
+> [engineering reference](docs/reference/README.md) (~12,700 lines in 19 reference files)
 > documents **every** feature and engine — what each does, the exact algorithm and math it
 > computes, how data traces through the pipeline, its endpoints/sensors, config knobs, and
 > edge-case guards. This README is the tour; the reference is the manual.
 >
 > 🖨️ **Offline / printable:** a single-file **`.docx` and `.pdf`** build is attached to every
 > [GitHub Release](https://github.com/tesseractAZ/power/releases). It holds this README, the
-> operator guide with its option and entity pages, `SECURITY.md` and the whole engineering
-> reference, and a link between them jumps within the document. The frozen release log and
-> operations audits in [`docs/history/`](docs/history/) are not printed, and the PDF's
+> operator guide with its setup, option and entity pages, `SECURITY.md` and the whole engineering
+> reference, and a link between them jumps within the document. Nothing in the frozen
+> [`docs/history/`](docs/history/) is printed, and the PDF's
 > table-of-contents page is empty for now. Regenerate locally with
-> `python3 -I -B scripts/build-docs-docx.py` (needs `pandoc`; the PDF additionally needs
-> LibreOffice).
+> `python3 -I -B scripts/build-docs-docx.py` (needs `pandoc`, which CI installs from a pinned,
+> sha256-checked upstream release; the PDF additionally needs LibreOffice).
 
 ---
 
@@ -92,7 +96,8 @@ exactly what the app renders.
   last reading is detected and published as stale, a frozen panel reading reads
   `unknown` in Home Assistant rather than as live values, and a cloud "offline" flag
   on a Core whose own data is still arriving is held for at most 3 minutes before it
-  is announced.
+  is announced. A device's readings are recorded only while they are fresh, so a Core
+  left offline in the cloud leaves a gap in its history, not its last reading repeated.
 - SQLite time-series (adaptive interval + value-epsilon dedup; retention set by
   `RECORDER_RETENTION_DAYS`, default 30 days, 7–3,650 accepted) and monotonic
   lifetime-energy accumulators wired into the HA Energy Dashboard. The night-charge
@@ -134,24 +139,31 @@ exactly what the app renders.
   otherwise. Seasons follow **billing cycles** (by usage month, April–September
   summer and October–March winter), and the schedule's **off-peak holidays** are
   off-peak all day. Rates are owner-entered from a bill and stay null until
-  confirmed; a tariff that does not parse nulls the money figures and holds the
-  planner rather than falling back to the preset.
+  confirmed; a tariff that does not parse is never replaced by the preset: every
+  rate reads unknown, the cost figures fall back to the flat rate, the planner
+  holds and a repair issue names the option.
 - A **night-charge TOU-arbitrage engine** with an owner-selected write posture
   (`NIGHT_CHARGE_MODE`):
   - **`advisory`** (default) — never writes. Tonight's plan is published as HA
-    entities, an API, a 21:30 site-time notification and dashboard/TUI panels.
+    entities, an API, an evening notification (21:30 site time by default) and the
+    dashboard's night-charge card.
   - **`supervised`** — one announced, cancellable, bounded reserve write per charge
     night: armed only after an announcement channel confirms delivery, clamped to
     the panel's 10–50% reserve range, readback-verified on both the apply and the
-    revert, restored at the window close or at once on a grid loss, and
-    audit-logged. With the `cost` objective and `ARB_COST_MAX_SOC_PCT` above 50,
+    revert, restored at the window close (an hour before on-peak at the latest)
+    or at once on a cancel or a grid loss, and audit-logged. Nothing is raised
+    within an hour of on-peak or while the add-on's own host is under critical
+    pressure (a restore still runs); a restore the panel does not confirm is paged
+    as critical, and no later night is armed while the panel still reads the
+    raised reserve. With the `cost` objective and `ARB_COST_MAX_SOC_PCT` above 50,
     the panel's own per-channel force-charge then carries the pack past the reserve
     ceiling toward the night's target: it switches on just in time, in the last
     stretch of a night whose reserve write has read back, and off — verified off —
     at the target or the window close.
-  - **`auto`** — behaves exactly as `supervised` until a fail-closed readiness gate
-    graduates on actuated-night evidence (≥21 scored nights, under-buy ≤10%,
-    sizing bias in [0, 5] kWh, band coverage 78–92%, zero engine-fault strikes).
+  - **`auto`** — behaves exactly as `supervised`. Any behaviour of its own must
+    branch on a fail-closed readiness gate that graduates only on actuated-night
+    evidence (≥21 scored nights, under-buy ≤10%, sizing bias in [0, 5] kWh, band
+    coverage 78–92%, zero engine-fault strikes); none exists yet.
 
   Each night is sized worst-case (P10 solar / P90 load) so the pack holds
   `reserve + outage cushion`, where the **outage cushion is the energy to carry
@@ -164,6 +176,15 @@ exactly what the app renders.
   safety margin can never shrink when the objective changes. Cost mode **fills
   further, it does not price** — it reads no tariff; see
   [`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`](docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md).
+- A **winter mid-day charge, in shadow**: with the `cost` objective
+  (`ARB_COST_MAX_SOC_PCT` above 50) and a tariff with a `super_off_peak` period
+  (the APS R-EV preset's 10:00–15:00 in winter), on the evening before each winter
+  weekday the planner also sizes the charge it would make in the next day's
+  super-off-peak window, behind an overnight
+  outage backup, and re-checks it on the morning forecast. It is published
+  (Midday-Charge entities, a read-only section of the night-charge card, the log)
+  and stored on the night's ledger row to be scored against the day; nothing is
+  armed, written, pushed or spoken for it.
 - A **Charge Now responder** notices the app's force-charge buying grid power
   on-peak and advises (default) or, when set to `supervised`, switches it off.
 - Two advisory round-trip-aware dispatch planners (greedy + a model-predictive
@@ -267,10 +288,11 @@ For a 64-bit host running Home Assistant OS or Supervised:
    set what differs from the reference plant: [your home](docs/guide/your-home.md).
 5. Open the add-on's **Web UI** (HA ingress), or reach the trusted-LAN data API at
    `http://<host>:8787`. The control-room console is always available in a browser at
-   `http://<host>:8787/console`; its SSH transport (`ssh -p 2323 <user>@<host>`) is **off by
-   default** — set `SSH_ENABLED: true` and a `TUI_PASSWORD` in Configuration first (every SSH
-   login is refused until a password is set; the first connection shows the host key
-   fingerprint, which is printed in the add-on log at every start).
+   `http://<host>:8787/console`; its SSH transport (`ssh -p 2323 <user>@<host>`, where `<user>`
+   is `TUI_USERNAME`, `operator` when empty) is **off by default** — set `SSH_ENABLED: true` and
+   a `TUI_PASSWORD` in Configuration first (every SSH login is refused until a password is set;
+   the first connection shows the host key fingerprint, which is printed in the add-on log at
+   every start).
 
 Every configuration option, with its default and allowed range, is in
 [`docs/guide/options.md`](docs/guide/options.md); the operator guide's
@@ -288,8 +310,8 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 | `ecoflow_panel/` | Add-on manifest (`config.yaml`), `translations/`, `DOCS.md` (the operator guide, on the Documentation tab), `README.md` (the Info-tab card), `CHANGELOG.md` (+ archive), AppArmor profile |
 | `rootfs/` | s6 service runner (`etc/services.d/ecoflow-panel/run`) — the options→env bridge that turns the add-on Configuration into the server's environment |
 | `Dockerfile`, `build.yaml`, `repository.yaml` | Container build, digest-pinned per-arch base images, add-on repository manifest |
-| `scripts/` | Docs builder (`build-docs-docx.py`); CI gates (`check-docs.mjs`, `check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the mutation harnesses (`mutate-*.mjs`); device probes |
-| `docs/` | `guide/` (every option and every Home Assistant entity), `reference/` (the engineering reference: an index and one file per chapter or part), `history/` (the engineering release log and operations audits, frozen), `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
+| `scripts/` | Docs builder (`build-docs-docx.py`) and CHANGELOG roller (`roll-changelog.mjs`); CI gates (`check-docs.mjs`, `check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the golden-capture tool for the frozen characterisation goldens in `server/test/golden/` (`golden-capture.mts`); the mutation harnesses (`mutate-*.mjs`); device probes |
+| `docs/` | `guide/` (the setup checklist for another home, every option and every Home Assistant entity), `reference/` (the engineering reference: an index and one file per chapter or part), `history/` (the engineering release log, the operations audits and the reference plant's notes, frozen), `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
 | `.github/workflows/` | `ci.yml` (type-checks ×3, server tests + README-claim check, mutant-anchor check, personal-data scan, dependency advisories, add-on config/translation validation, Dockerfile smoke, docs `.docx`+`.pdf`) · `release-pr.yml` (release-PR version check, re-run on a title edit) · `tag-release.yml` (on every push to `main`: tags the version the add-on manifest declares, or fails when it cannot be published) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch) · `codeql.yml` (CodeQL analysis). Every job runs on a pinned runner image (`ubuntu-26.04`, `ubuntu-26.04-arm`; CodeQL on `ubuntu-24.04` until CodeQL supports 26.04). |
 
 ## Development

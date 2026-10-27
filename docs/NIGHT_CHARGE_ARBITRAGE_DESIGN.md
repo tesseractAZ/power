@@ -8,7 +8,7 @@
 > [night-charge planning](reference/15-1-night-charge-planning.md) and
 > [the night-charge writes](reference/15-2-night-charge-writes.md).
 
-_Originated 2026-07-17 as a design plan (12-agent design dive + 4-agent APS-EV/EcoFlow verification), implemented v1.36.0–v1.51.0, amended 2026-07-31. **Rewritten 2026-09-06 against the shipped system at v1.133.1; amended 2026-09-11 for v1.148.0–v1.149.0** (see §I6 and the note below); **amended 2026-10-11 for v1.164.0–v1.187.15** (force-charge, billing-cycle seasons, off-peak holidays, apply/revert timing, the readiness-gate fix)._
+_Originated 2026-07-17 as a design plan (12-agent design dive + 4-agent APS-EV/EcoFlow verification), implemented v1.36.0–v1.51.0, amended 2026-07-31. **Rewritten 2026-09-06 against the shipped system at v1.133.1; amended 2026-09-11 for v1.148.0–v1.149.0** (see §I6 and the note below); **amended 2026-10-11 for v1.164.0–v1.187.15** (force-charge, billing-cycle seasons, off-peak holidays, apply/revert timing, the readiness-gate fix); **amended 2026-10-26 for v1.187.22–v1.191.2** (what is announced, the on-peak bound and the revert-deadline pages, the foreign-reserve rule, the mid-day cycle in shadow, the site clock and the tariff from the options). Dated status lines below are the reference plant's at their dates; the reference chapters describe the code as it ships._
 
 > **2026-09-11 — the basis gate is CLOSED on the live plant, and this is what that looks like.** `bandCoverageFrac` is **0.72** against the `BASIS_MIN_BAND_COVERAGE = 0.78` threshold, so I6 is binding and the advisor is returning a null plan every night. Three of the four basis conditions pass; the miss is six points on one. v1.148.0 added **`basisBlockedBy`**, which names *which* condition closed — “forecast/telemetry basis incomplete” was four conditions wearing one coat, and reconstructing which one had bitten took an hour of live probing. The rationale now reads `PV band coverage 72% < 78% (forecast present, tier=forecast, calDays 29/14)`, and that string reaches the 21:30 notification and the spoken broadcast, not just the API.
 >
@@ -34,7 +34,7 @@ As of 2026-09-11; see `PERFORMANCE.md` §3 for the latest reading.
 | | |
 |---|---|
 | Posture | `NIGHT_CHARGE_MODE = supervised` (live). `advisory` is the default and writes nothing; `auto` is structurally demoted until the gate graduates |
-| Writes | `backupReserveSoc`, once per charge night, auto-reverted at the window close; since v1.165.0 also the per-channel force-charge (`ch{n}ForceCharge` ON/OFF + the `foceChargeHight` ceiling sync) when the cost ceiling is above 50 |
+| Writes | `backupReserveSoc`, once per charge night, auto-reverted at the window close (or an hour before on-peak, if sooner: v1.189.0); since v1.165.0 also the per-channel force-charge (`ch{n}ForceCharge` ON/OFF + the `foceChargeHight` ceiling sync) when the cost ceiling is above 50 |
 | Write envelope | **`[10, 50]` percent** — `RESERVE_WRITE_MIN_PCT` / `RESERVE_WRITE_MAX_PCT` |
 | Objective | `ARB_OBJECTIVE = cost` (live). **Cost mode is rate-blind** — see §3.1 |
 | Actuated nights | 11 scored (2026-09-06); 15 on 2026-09-11 |
@@ -96,9 +96,9 @@ The original design **banned** `backupReserveSoc` as the charge lever (Invariant
 
 The schedule's super off-peak period is the winter 10:00–15:00 one; the 23:00–05:00 period is its overnight period, the window every charge so far has used. A winter weekday cost buy in the super off-peak window, with an outage backup in the overnight window before it, is computed beside the live overnight cycle and writes nothing until it is switched on (reference chapter 15 part 2, "The mid-day cycle in shadow").
 
-Season (APS billing cycles): summer bills May–Oct, winter bills Nov–Apr — by usage month (each bill covers the usage since the early-month meter read) summer = Apr–Sep and winter = Oct–Mar (v1.187.10; the boundary is the 1st of the month, ± the meter-read day). Plan = APS **R-EV**, **no demand charge** — the ~40% of conditional machinery §0.3 of the original hinged on collapsed when that was confirmed. Tariff source is **manual**; the EcoFlow API exposes no rates, and there is **no expiry check** — a rate change would be silently stale.
+Season (APS billing cycles): summer bills May–Oct, winter bills Nov–Apr — by usage month (each bill covers the usage since the early-month meter read) summer = Apr–Sep and winter = Oct–Mar (v1.187.10; the boundary is the 1st of the month, ± the meter-read day). Plan = APS **R-EV**, **no demand charge** — the ~40% of conditional machinery §0.3 of the original hinged on collapsed when that was confirmed. Tariff source is **manual**; the EcoFlow API exposes no rates, and there is **no expiry check** — a rate change would be silently stale. Since v1.191.0 the plan is an option: `TARIFF_PLAN` unset is this R-EV preset; `flat`, `two_tier` and `custom` tables are built from their own options, and the night charge plans in the plan's cheap period (`NIGHT_CHARGE_CHEAP_PERIOD` overrides it).
 
-`rateAt(model, ts)` resolves month/dow/hour explicitly in America/Phoenix (no DST). At `DISPATCH_ROUND_TRIP_EFFICIENCY = 0.86` — charge leg `√0.86 = 0.9274`, discharge leg `0.94`, product **0.872** — **stored overnight energy delivers at 15.02 ¢/kWh.** Note this is *not* a flat 0.86: code that assumes it will be wrong by ~1.4%.
+`rateAt(model, ts)` resolves month/dow/hour explicitly in the model's time zone, the site clock (`SITE_TIMEZONE`, else the container's `TZ`, else America/Phoenix; v1.191.0) — America/Phoenix (no DST) on the reference plant. At `DISPATCH_ROUND_TRIP_EFFICIENCY = 0.86` — charge leg `√0.86 = 0.9274`, discharge leg `0.94`, product **0.872** — **stored overnight energy delivers at 15.02 ¢/kWh.** Note this is *not* a flat 0.86: code that assumes it will be wrong by ~1.4%.
 
 **Holidays (v1.187.13).** The R-EV schedule's off-peak holidays are off-peak all day — no on-peak, overnight or super-off-peak hours (`apsOffPeakHolidays`, `tariff.ts`): New Year's Day, Cesar Chavez Day, Juneteenth, Independence Day, Veterans Day and Christmas (observed on the Friday or Monday when they fall on a weekend), Martin Luther King Day, Presidents Day, Memorial Day, Labor Day, Indigenous Peoples' Day, Thanksgiving, and Christmas Eve and New Year's Eve on the day.
 
@@ -132,7 +132,7 @@ Pure `computeNightChargePlan(inputs)` → module holder → `nightChargeStateFie
 `ARB_OBJECTIVE` selects between two objectives:
 
 - **`resilience`** — buy exactly enough that the post-window trough holds reserve + cushion. The buy is a *requirement*; anything beyond it is waste.
-- **`cost`** (live) — the resilience answer becomes a **floor**, not a target. `costModeTargetKwh` raises the target toward `min(ARB_COST_MAX_SOC_PCT % of pool, pool − morning-PV-surplus P90)` and records which bound it in the ledger's `cost_ceiling_basis` (`'max-soc'` | `'pv-headroom'`). It is bounded below by the resilience target, so **the safety margin can never shrink when the objective changes**; the only direction cost mode moves a buy is up. Every physical cap downstream is re-applied unchanged.
+- **`cost`** (live) — the resilience answer becomes a **floor**, not a target. `costModeTargetKwh` raises the target toward `min(ARB_COST_MAX_SOC_PCT % of pool, pool − morning-PV surplus)` — the P50 surplus since v1.168.0 (the P90 stands in when it is unknown; a long-gap night uses the pre-peak P10), on a de-biased load since v1.187.1 — and records which bound it in the ledger's `cost_ceiling_basis` (`'max-soc'` | `'pv-headroom'`). It is bounded below by the resilience target, so **the safety margin can never shrink when the objective changes**; the only direction cost mode moves a buy is up. Every physical cap downstream is re-applied unchanged.
 
 ★ **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" means *fill further*, on the premise that overnight energy is the cheapest the day offers — **not** that the planner optimises against the rate table. §2's tariff model informs the *window*, not the *target*. This is a known gap, not a subtlety: cost mode that genuinely optimises against the rate table has been an open requirement since 2026-09-06 and is not yet built.
 
@@ -149,7 +149,7 @@ Pure `computeNightChargePlan(inputs)` → module holder → `nightChargeStateFie
 
 **Caps.** `bindingCap` reports which bound produced the answer: `requirement` · `chargePower` · `evContention` · `poolHeadroom` · `overBuy`.
 
-★ **EV contention is the routine limiter.** With `ARB_GRID_INPUT_CAP_KW = 17` and the EVSE drawing ~11.5 kW, the packs are left ~5.5 kW against the charge cap (`ARB_CHARGE_CAP_KW`, default 0 = auto since v1.173.0: connected Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` 5.5 kW ÷ the charge-leg efficiency, ≈ 17.8 kW with three Cores; the fixed 7.2 kW survives only as `LEGACY_CHARGE_CAP_KW` when the Core count is unknown). Measured: `binding_cap = 'evContention'` on **five consecutive nights**. `evContention` is a *more specific* `chargePower`, not a parallel vocabulary, and it is claimed **only** when an EVSE prediction actually covers the window — a missing prediction can never masquerade as a modelled one.
+★ **EV contention is the routine limiter.** With `ARB_GRID_INPUT_CAP_KW = 17` and the EVSE drawing ~11.5 kW, the packs are left ~5.5 kW against the charge cap (`ARB_CHARGE_CAP_KW`, default 0 = auto since v1.173.0: connected Cores × the per-Core rate (`FORCE_CHARGE_KW_PER_CORE`, 5.5 kW while unset, v1.191.0) ÷ the charge-leg efficiency, ≈ 17.8 kW with three Cores; the fixed 7.2 kW survives only as `LEGACY_CHARGE_CAP_KW` when the Core count is unknown). Measured: `binding_cap = 'evContention'` on **five consecutive nights**. `evContention` is a *more specific* `chargePower`, not a parallel vocabulary, and it is claimed **only** when an EVSE prediction actually covers the window — a missing prediction can never masquerade as a modelled one.
 
 **Under-buy remains classified as a safety miss**, not a cost miss (the original life-safety reclassification, still binding): P10 PV, P90 load, `p90SessionKwh` for a committed EV charge rather than the probability-weighted expected value, EV double-count guarded, and any thin/climatology-only basis resolving to null rather than a best-effort small buy the owner might trust as cushion.
 
@@ -177,7 +177,7 @@ Under `disabled`, `cushionShortfall` **changes meaning**: it fires only when the
 
 It is stated on the trough itself rather than through a window walk, because it is a property of the post-window trajectory alone and must not inherit the charge model's caps.
 
-★ **What is announced is what is written.** Until v1.133.1 the rationale printed `setpointSocPct` un-clamped, so a live plan announced *"the reserve is set to 100%"* — in the 21:30 notification **and the spoken broadcast** — while the panel was being told 50. The sentence now names three quantities for what each is: what the device is **told**, what the requirement **asked for** when the envelope truncated it, and what the window is expected to **reach**.
+★ **What is announced is what is written.** Until v1.133.1 the rationale printed `setpointSocPct` un-clamped, so a live plan announced *"the reserve is set to 100%"* — in the 21:30 notification **and the spoken broadcast** — while the panel was being told 50. The sentence then named three quantities for what each is: what the device is **told**, what the requirement **asked for** when the envelope truncated it, and what the window is expected to **reach**. ★ **Amended (v1.187.22):** the reserve sentence names the written reserve and the ask only. Every spoken or pushed line states the level the write drives the pool to and the energy it is expected to draw; the islanded worst-case buy and arrival appear once, in a labelled sizing sentence (reference chapter 15 part 1, "What is stated").
 
 ### 3.5 The three holds
 
@@ -201,13 +201,13 @@ Before v1.132.0 all three printed one string, which reported `buyKwh` — the *d
 
 ### 4.1 Arm
 
-The evening job announces the plan (notification + audible broadcast) with the intended buy, the reserve target and a cancel deadline. The armed state persists only after an announcement channel confirms delivery. Deadline phrasing is **day-qualified beyond 24 h** (e.g. "on Monday at 12:00 AM" — since v1.187.0 the write moment, and so the cancel deadline, is the window open: `APPLY_LEAD_MS = 0`), because weekend tariff semantics routinely resolve a Saturday-evening plan's window to Monday 00:00 — a bare clock time would read as tonight.
+The evening job announces the plan (notification + audible broadcast) with the level the write drives the pool to, its expected draw (since v1.187.22; the worst-case buy is never pushed) and a cancel deadline. The armed state persists only after an announcement channel confirms delivery. Arming is refused while a prior night's write is unresolved — since v1.189.0 also while its restore has not read back and the panel still reads the raise or nothing. Deadline phrasing is **day-qualified beyond 24 h** (e.g. "on Monday at 12:00 AM" — since v1.187.0 the write moment, and so the cancel deadline, is the window open: `APPLY_LEAD_MS = 0`), because weekend tariff semantics routinely resolve a Saturday-evening plan's window to Monday 00:00 — a bare clock time would read as tonight.
 
 **Sat + Sun share one window** (both resolve to Mon 00:00–05:00), so an earlier evening's never-applied arm being replaced is normal. **Friday does not share** — it has its own one-hour window. A comment claiming otherwise was corrected in v1.132.0.
 
 ### 4.2 Apply, and lost-confirmation adoption
 
-The attempt is a **write-ahead intent**: the state file records the attempt and its pre-write baseline *before* the device call. One write raises `backupReserveSoc` to `clampReserveTarget(setpointSocPct)`, audit-logged with a retry cooldown. Every apply guard fails closed — advisory mode, a cancelled night, a red alert condition, an incoherent SoC read, an unknown or out-of-range current reserve, a missed window, or a target at or below the current reserve all produce no write.
+The attempt is a **write-ahead intent**: the state file records the attempt and its pre-write baseline *before* the device call. One write raises `backupReserveSoc` to `clampReserveTarget(setpointSocPct)`, audit-logged with a retry cooldown. Every apply guard fails closed — advisory mode, a cancelled night, red host vitals (the add-on's own process struggling, not an alert condition), an incoherent SoC read, an unknown or out-of-range current reserve, a missed window, the on-peak guard (no raise from an hour before the on-peak start, v1.189.0), or a target at or below the current reserve all produce no write.
 
 **Adoption:** when an attempted write reports failure but the live reserve later reads back *exactly* the attempted target (and differs from the attempt-time baseline), the write is proven applied — the confirmation was lost, not the write. Strict equality: any other reading means either the write truly failed or something else moved the floor, and the actuator never guesses a revert target from it.
 
@@ -217,13 +217,15 @@ The attempt is a **write-ahead intent**: the state file records the attempt and 
 
 **v1.131.0 added the same to the revert leg**, which had kept the original bug. Because the revert branch is gated on `revertedAtMs == null`, stamping it on the cloud ACK also stopped the actuator looking at the panel at all. A restore the SHP2 accepted-then-ignored would leave the reserve pinned at the raised target with the ledger recording a clean, completed night — and that is the *expensive* end state, because the panel holds the raised value as its floor and buys grid at on-peak instead of discharging the pack the plan had just paid overnight rates to fill.
 
-Both legs now: verify → retry (capped) → escalate once. On the revert leg, a reading that is **neither** the restore target nor the raised target is treated as the owner moving their own floor, and the actuator falls through rather than overwriting it.
+Both legs now: verify → retry (capped) → escalate once. On the revert leg, a reading that is **neither** the restore target nor the raised target is treated as the owner moving their own floor, and the actuator falls through rather than overwriting it. Since v1.189.0 the same in-envelope value read twice at least 5 minutes apart, once the write has read back, settles the night as someone else's (the foreign-reserve rule): nothing more is written to the reserve, a riding force-charge switches OFF, and an info push says what the reserve reads.
 
 ### 4.4 Revert
 
-The prior value restores at window close (`REVERT_LAG_MS = 0` since v1.187.0; 5 min before, `LEGACY_REVERT_LAG_MS`), with force-charge's OFF run first on the same tick, or immediately on a post-apply cancel. Mode-independent — it runs even if the owner flips back to advisory mid-night — and it refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive **cloud-rejected** writes it annunciates a critical once and keeps retrying; the readback-failure path (§4.3) escalates separately. The floor/runway/SoC alarm spine is fully independent throughout.
+The prior value restores at window close (`REVERT_LAG_MS = 0` since v1.187.0; 5 min before, `LEGACY_REVERT_LAG_MS`) or an hour before the on-peak start if that is sooner (the on-peak guard, v1.189.0), with force-charge's OFF run first on the same tick, or immediately on a post-apply cancel. Mode-independent — it runs even if the owner flips back to advisory mid-night — and it refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive **cloud-rejected** writes it annunciates a critical once and keeps retrying; the readback-failure path (§4.3) escalates separately. The floor/runway/SoC alarm spine is fully independent throughout.
 
 **Revert settling.** The projection keeps reporting the raised reserve for ~20–60 s after the ACK. `isRevertSettling` holds the arbitrage posture true through a 5-minute grace window, because otherwise the alert engine sees `arbitrageRaised = false` against a still-raised reserve and classifies a normal pool as a floor breach — observed live as a false "[Medium] Backup at reserve" push followed by its own resolve ~40 s later. The readback verdict deliberately cannot be reached inside that same window.
+
+**The revert deadline (v1.189.0).** A panel whose readback goes dark at the close gives neither escalation its evidence. While a write may still hold the reserve, a critical page (push, and speech outside the broadcast quiet hours) goes 30 minutes after the window close (or 30 minutes before on-peak, if sooner) and again at the on-peak start, when the panel then reads the raise or no valid reserve; each stage is decided once, and none is paged after its on-peak period. The morning summary says "restored" only once the restore reads back. While a restore that has not read back leaves the panel reading the raise, the on-peak money detectors measure against the prior floor and the next night does not arm.
 
 ### 4.5 Grid-loss abort
 
@@ -235,7 +237,7 @@ With the grid gone the buy cannot happen, and a raised reserve only manufactures
 
 Two dedicated, **never-pruned** tables created alongside `lifetime_totals` and never referenced by the `samples` prune (retention `RECORDER_RETENTION_DAYS`, default 30 days, 7–3,650). The original analysis behind that decision stands: a gate reading a 30-day-truncated ledger as "N consecutive clean nights" could green-light writes on a record that only *looks* complete.
 
-One row per `plan_date` (America/Phoenix), in four column groups:
+One row per `plan_date` (the site date; America/Phoenix on the reference plant), in four column groups (v1.189.0 adds the charge-cycle and mid-day-shadow columns: reference chapter 15, [6. The learning ledger](reference/15-1-night-charge-planning.md#6-the-learning-ledger-night_charge_ledger-recorderts-v1380)):
 
 - **PLAN** (frozen the evening before): `algo_version`, `objective`, `rationale`, `confidence_tier`, `target_soc_pct`, `buy_kwh`, `required_extra_kwh`, `reserve_floor_pct`, `cushion_pct/_kwh`, `binding_cap`, the P10/P50/P90 bands, `min_proj_soc_pct`, `tariff_snapshot`, window bounds, `cushion_shortfall`.
 - **OUTCOME** (null until the night completes): `actual_pv/load/window_import/onpeak_import_kwh`, `actual_min_soc_pct`, `plan_traj_floor_breached`, `cushion_breached`, `actuated`, `actuation_applied_at_ms`, `delivered_kwh`, `grid_home_coverage_frac`, `scored`, `score_notes`.
@@ -246,19 +248,19 @@ One row per `plan_date` (America/Phoenix), in four column groups:
 
 **Scoring is completion-gated** (v1.39.0): a night is outcome-captured only after its full scored span elapses, paired to the plan's own frozen charge window. The pre-v1.39.0 scorer fired mid-window and froze truncated actuals, permanently starving the gate. A row with no stored window is unscoreable, and v1.132.0 distinguishes the two reasons — a *pre-v1.39.0* row (a data-vintage problem) from a current-version row that simply **had no cheap window to resolve that night**, which is normal on a tariff day that offers none.
 
-**`delivered_kwh` measures storage, not value.** On 2026-08-31 the write applied, 16.54 kWh was imported over the window at full measurement coverage, and `delivered_kwh` was **0** — the import served the house rather than charging the pack (pack minimum 48%). Not a failed actuation and not a measurement gap; the energy was bought at 13.1 ¢ and consumed, it simply was not *stored*. `actual_grid_to_battery_kwh` is a declared column that is never written, so the exact split cannot be recovered.
+**`delivered_kwh` measures storage, not value.** On 2026-08-31 the write applied, 16.54 kWh was imported over the window at full measurement coverage, and `delivered_kwh` was **0** — the import served the house rather than charging the pack (pack minimum 48%). Not a failed actuation and not a measurement gap; the energy was bought at 13.1 ¢ and consumed, it simply was not *stored*. `actual_grid_to_battery_kwh` is a declared column that is never written, so the exact split of that night cannot be recovered. ★ **Superseded basis (v1.187.3):** that figure was window import minus the concurrent house load. `delivered_kwh` is now the energy into the home Cores on the panel's source channels over the hold (`delivered_basis = 'source-charge'`), which measures the stored part directly; earlier rows are kept as recorded and are never de-bias samples.
 
 ---
 
 ## 6. Surfaces
 
-All surfaces read one holder. One HA namespace `night_charge_*`, one status endpoint.
+All surfaces read one holder. One HA namespace `night_charge_*` (beside it since v1.189.0 `midday_charge_*`, the mid-day cycle computed in shadow, with Midday-Charge Recommended strictly off), one status endpoint.
 
 - **HA entities** via `nightChargeStateFields` with a 12 h staleness guard: `charge_tonight` strictly `false` on null/incomplete/stale, numeric fields null unless fresh. Wired into **both** `mqttDiscovery.buildState()` and `/api/ha-state`.
 - **MQTT availability/LWT + `expire_after`** (Invariant I12): `charge_tonight` publishes to a *retained* topic, so without an availability topic a dead advisor's retained `ON` would be served by the broker forever.
 - **The ~21:30 notification** — direct `sendNotification`, severity `info`, one updating card. Three shapes: charge, hold, insufficient-basis. Sending the third makes the *absence* explicit so the operator never wonders whether the job died.
 - **Owner automation contract:** trigger on `charge_tonight ON` **AND** readiness **AND** availability online **AND** honour the window sensors. **Never gate on `charge_tonight` alone** — publishing the window is what stops an automation reading it as "charge NOW."
-- **Web + TUI:** `NightChargeCard`, and a `TONIGHT'S PLAN` block in the TUI strategy screen kept distinct from `CHARGE SCHEDULE` (which shows the SHP2's own native `timeTask` config — the two must not be confused).
+- **Web:** `NightChargeCard` on the Strategy panel, titled "Night-charge plan" since v1.191.0. The design's TUI `TONIGHT'S PLAN` block is not on any console screen: the console (SSH since v1.190.0) shows no night-charge plan, and only its freshness gate (`nightChargePlanIfFresh`, `telnet/dataProvider.ts`) remains, under test.
 - **`GET /api/night-charge/status`** — read-only, no auth, exposing the plan, the actuation record, readiness and the last 7 ledger days. `reserveFloorPercent` is sourced from the same field the floor alarm defends, never a divergent copy.
 
 ---
@@ -292,7 +294,7 @@ The v1 gate this replaced failed for a structural reason worth preserving: its e
 | **I5** | SHP2 offline / stale telemetry → advisory null, NO-WRITE | Binding |
 | **I6** | Forecast collapse / climatology-only / low coverage → null + NO-WRITE | Binding. Basis gate is `bandCoverageFrac ≥ BASIS_MIN_BAND_COVERAGE = 0.78` (`BASIS_MIN_BAND_COVERAGE`, `nightChargeAdvisor.ts`). **CLOSED on the live plant** at 0.72 as of 2026-09-11 — see the 2026-09-11 note at the top. `basisBlockedBy` (v1.148.0) names which of the four conditions failed. |
 | **I7** | EV clamped at `EV_MAX_LOAD_W`; sized from de-duplicated load | Binding |
-| **I8** | 16:00–19:00 M-F is an absolute blackout for any import-inducing action | Binding |
+| **I8** | 16:00–19:00 M-F (the tariff's on-peak period) is an absolute blackout for any import-inducing action | Binding — since v1.189.0 enforced by the on-peak guard: no raise or force-charge ON from an hour before the on-peak start, and the restore and the OFF fall due by then (§4.4) |
 | **I9** | Idempotency: one plan row per local date; restart-persistent latch | Binding |
 | **I10** | Time-sensitive delivery at ~21:30, never the 06:00 digest queue | Binding |
 | **I11** | SoC coherence guard before sizing; else null | Binding |
@@ -310,7 +312,7 @@ Listed so a quiet reading is not mistaken for a healthy one. Every entry here wa
 - **~~The cost question is never asked on a comfortable night~~ — RESOLVED v1.174.0** (§3.1): cost mode is asked before the no-shortfall hold.
 - **The readiness gate cannot open** (§7) — under-buy is structurally unmeasurable while `cushion_shortfall` is pinned.
 - **~~`activeStrikes: 0` means "cannot count"~~** — resolved 2026-09-11 (`strikesMeasurable` 1). The caution stands for `underBuyMeasurable`.
-- **`actual_grid_to_battery_kwh`** is declared and never written, so a `delivered_kwh` of 0 cannot be decomposed.
+- **`actual_grid_to_battery_kwh`** is declared and never written, so a `delivered_kwh` of 0 on the pre-v1.187.3 basis cannot be decomposed (since v1.187.3 `delivered_kwh` measures the energy into the Cores, §5).
 - **~~No force-charge path~~ — RESOLVED v1.165.0.** `setChannelForceCharge` is called with `on: true` by `nightForceCharge.ts`.
 - **The tariff has no expiry check** — a rate change would be silently stale.
 
@@ -327,3 +329,4 @@ Listed so a quiet reading is not mistaken for a healthy one. Every entry here wa
 **Not yet built:**
 
 4. **Make cost mode genuinely rate-optimising** (§3.1) — requested 2026-09-06. The marginal test is whether a bought kWh displaces something dearer than the 15.02 ¢ it delivers at: on-peak (+26.6 ¢), off-peak (+1.98 ¢), or morning PV, which is free and therefore a **negative** margin. Measured on-peak import is currently 0 kWh on every scored night, so the honest expectation is that a rate-aware objective buys little more than resilience on this plant until the Friday-window question (§2.1) is settled. ★ **Qualified (v1.187.0):** that column was measured on the pre-v1.187.0 **plan-day anchor** — each weekday row integrated the 16:00–19:00 *before* its own ~21:30 plan existed (the previous night's outcome), and Saturday/Sunday rows counted off-peak afternoons as zeros — so it never measured the on-peak each plan governed (Monday 2026-09-28 imported 4.27 kWh on-peak). It is not evidence that governed on-peak import is zero; the corrected measure is the rows with `onpeak_basis = 'governed'` (reference chapter 15, [6. The learning ledger](reference/15-1-night-charge-planning.md#6-the-learning-ledger-night_charge_ledger-recorderts-v1380)).
+5. **The mid-day switch.** Since v1.189.0 the winter weekday cycle — the cost buy in the 10:00–15:00 super off-peak window, an outage backup in the overnight window before it, and a morning refresh that can lower or cancel but never raise — is computed beside the live overnight cycle and recorded in the ledger's `shadow_*` columns; nothing of it is armed, written, pushed or spoken. A later release turns it on after at least five winter weekdays of preview have been checked against what those days did (reference chapter 15 part 2, "The mid-day cycle in shadow").
