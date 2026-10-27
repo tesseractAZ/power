@@ -46,7 +46,8 @@ export interface OptionRow<T = unknown> {
   /** The numeric range the parse clamps to. For an `option` row with a ranged schema it must equal the
    *  schema range, or the difference is listed in DECLARED_DIVERGENCES (kind 'clamp'). */
   readonly clamp?: { min?: number; max?: number };
-  /** The reader whose rule this row reproduces, as test/golden/support/g3.ts names it. */
+  /** The reader whose rule this row reproduces, as test/golden/support/g3.ts names it (a G3 probe id:
+   *  a line number in it is the line on the tree G3 was captured from, frozen with the golden). */
   readonly canonicalReader: string;
   /** Readers of the same key that apply a different rule for some inputs, each with that rule. */
   readonly divergentReaders?: Readonly<Record<string, string>>;
@@ -448,8 +449,8 @@ const ROWS: readonly OptionRow[] = [
   row({ name: 'TARIFF_FLAT_CENTS_PER_KWH', source: 'option', exportForm: 'has_value', canonicalReader: 'analytics.ts:TARIFF_FLAT_CENTS', doc: 'Flat ¢/kWh when the rates are unconfirmed (one constant, TARIFF_FLAT_DEFAULT_CENTS); the flat plan\'s rate. Bare Number().', parse: numOr(TARIFF_FLAT_DEFAULT_CENTS) }),
   row({ name: 'TARIFF_ON_PEAK_CENTS', source: 'option', exportForm: 'has_value', canonicalReader: 'analytics.ts:apsCent', doc: 'Two-tier on-peak ¢/kWh (KPI path); a value above zero only. The two_tier plan reads it raw.', parse: centPositive() }),
   row({ name: 'TARIFF_OFF_PEAK_CENTS', source: 'option', exportForm: 'has_value', canonicalReader: 'analytics.ts:apsCent', doc: 'Two-tier off-peak ¢/kWh (KPI path); a value above zero only. The two_tier plan reads it raw.', parse: centPositive() }),
-  row({ name: 'TARIFF_ON_PEAK_CENTS_PER_KWH', source: 'env-only', canonicalReader: 'index.ts:2100 onPeak', doc: 'Two-tier on-peak ¢/kWh (MPC path); absent follows TARIFF_FLAT_CENTS_PER_KWH. Bare Number(). The two_tier plan accepts it as an alias of TARIFF_ON_PEAK_CENTS.', parse: (raw, env) => Number(raw ?? Number(env.get('TARIFF_FLAT_CENTS_PER_KWH') ?? TARIFF_FLAT_DEFAULT_CENTS)) }),
-  row({ name: 'TARIFF_OFF_PEAK_CENTS_PER_KWH', source: 'env-only', canonicalReader: 'index.ts:2101 offPeak', doc: 'Two-tier off-peak ¢/kWh (MPC path); absent follows TARIFF_FLAT_CENTS_PER_KWH. Bare Number(). The two_tier plan accepts it as an alias of TARIFF_OFF_PEAK_CENTS.', parse: (raw, env) => Number(raw ?? Number(env.get('TARIFF_FLAT_CENTS_PER_KWH') ?? TARIFF_FLAT_DEFAULT_CENTS)) }),
+  row({ name: 'TARIFF_ON_PEAK_CENTS_PER_KWH', source: 'env-only', canonicalReader: 'index.ts:2185 onPeak', doc: 'Two-tier on-peak ¢/kWh (MPC path); absent follows TARIFF_FLAT_CENTS_PER_KWH. Bare Number(). The two_tier plan accepts it as an alias of TARIFF_ON_PEAK_CENTS.', parse: (raw, env) => Number(raw ?? Number(env.get('TARIFF_FLAT_CENTS_PER_KWH') ?? TARIFF_FLAT_DEFAULT_CENTS)) }),
+  row({ name: 'TARIFF_OFF_PEAK_CENTS_PER_KWH', source: 'env-only', canonicalReader: 'index.ts:2185 offPeak', doc: 'Two-tier off-peak ¢/kWh (MPC path); absent follows TARIFF_FLAT_CENTS_PER_KWH. Bare Number(). The two_tier plan accepts it as an alias of TARIFF_OFF_PEAK_CENTS.', parse: (raw, env) => Number(raw ?? Number(env.get('TARIFF_FLAT_CENTS_PER_KWH') ?? TARIFF_FLAT_DEFAULT_CENTS)) }),
   row({ name: 'TARIFF_EXPORT_CENTS_PER_KWH', source: 'option', exportForm: 'has_value', canonicalReader: 'dispatch/mpc.ts:EXPORT_TARIFF_CENTS', doc: 'Export ¢/kWh for the MPC. Bare Number().', parse: numOr(0) }),
   row({ name: 'TARIFF_ON_PEAK_HOURS', source: 'option', exportForm: 'has_value', canonicalReader: 'analytics.ts:TARIFF_ON_PEAK_HOURS_ENV', doc: 'Legacy on-peak hours "start-end" for the two-tier fallback; the two_tier plan\'s on-peak window.', parse: str('15-20') }),
   row({ name: 'TARIFF_ON_PEAK_DAYS', source: 'option', exportForm: 'has_value', canonicalReader: 'analytics.ts:TARIFF_ON_PEAK_DAYS_ENV', doc: 'Legacy on-peak days "first-last" (1=Mon..7=Sun) for the two-tier fallback; the two_tier plan\'s on-peak days.', parse: str('1-5') }),
@@ -494,10 +495,10 @@ const ROWS: readonly OptionRow[] = [
   row({ name: 'RUNWAY_DRAIN_MARGINAL_EFFICIENCY', source: 'env-only', canonicalReader: 'analytics.ts:RUNWAY_DRAIN_MARGINAL_EFFICIENCY', clamp: { min: 0.8, max: 1 }, doc: 'Marginal drain efficiency, clamped.', parse: numClamped(0.94, 0.8, 1) }),
   row({ name: 'RUNWAY_DISCHARGE_EFFICIENCY', source: 'env-only', canonicalReader: 'analytics.ts:RUNWAY_DISCHARGE_EFFICIENCY', clamp: { min: 0.8, max: 1 },
     doc: 'Discharge-leg efficiency, clamped to 0.8..1; blank or NaN reads as 0.94 through `|| 0.94`.', parse: (raw) => Math.min(1, Math.max(0.8, Number(raw ?? 0.94) || 0.94)) }),
-  row({ name: 'BMS_RESEED_MIN_GAP_WH', source: 'option', exportForm: 'has_value', canonicalReader: 'recorder.ts:3361 RESEED_MIN_GAP_WH', doc: 'Floor-vs-live gap that re-seeds the lifetime floors (about one Core\'s capacity). Bare Number(); schema int?.', parse: numOr(50_000) }),
-  row({ name: 'BMS_RESEED_SUSTAINED_ROLLUPS', source: 'env-only', canonicalReader: 'recorder.ts:3365 RESEED_SUSTAINED_ROLLUPS', doc: 'Rollups the gap must persist before repairing. Bare Number().', parse: numOr(2) }),
+  row({ name: 'BMS_RESEED_MIN_GAP_WH', source: 'option', exportForm: 'has_value', canonicalReader: 'recorder.ts:3555 RESEED_MIN_GAP_WH', doc: 'Floor-vs-live gap that re-seeds the lifetime floors (about one Core\'s capacity). Bare Number(); schema int?.', parse: numOr(50_000) }),
+  row({ name: 'BMS_RESEED_SUSTAINED_ROLLUPS', source: 'env-only', canonicalReader: 'recorder.ts:3559 RESEED_SUSTAINED_ROLLUPS', doc: 'Rollups the gap must persist before repairing. Bare Number().', parse: numOr(2) }),
   row({ name: 'GRID_CO2_INTENSITY_LB_PER_MWH', source: 'option', exportForm: 'has_value', canonicalReader: 'analytics.ts:DEFAULT_GRID_CO2_LB_PER_MWH', doc: 'Grid carbon intensity (lb CO2 per MWh) for the avoided-CO2 figures. Bare Number(); schema float?.', parse: numOr(1100) }),
-  row({ name: 'CYCLING_BASE_WEAR_USD_PER_KWH', source: 'option', exportForm: 'has_value', canonicalReader: 'index.ts:2134 baseWear', doc: 'Base cycling wear cost (USD per kWh) for the MPC. Bare Number(); schema float?.', parse: numOr(0.015) }),
+  row({ name: 'CYCLING_BASE_WEAR_USD_PER_KWH', source: 'option', exportForm: 'has_value', canonicalReader: 'index.ts:2215 baseWear', doc: 'Base cycling wear cost per kWh for the MPC, in the TARIFF_CURRENCY unit (the key keeps its USD name). Bare Number(); schema float?.', parse: numOr(0.015) }),
   row({ name: 'FORECAST_NIGHT_START_HOUR', source: 'option', exportForm: 'has_value', canonicalReader: 'analytics.ts:FORECAST_NIGHT_START_HOUR', clamp: { min: 0, max: 23 }, doc: 'First hour of the overnight blend band, rounded and clamped (a NaN propagates); schema int(0,23)?.', parse: (raw) => Math.min(23, Math.max(0, Math.round(Number(raw ?? 21)))) }),
   row({ name: 'FORECAST_NIGHT_END_HOUR', source: 'option', exportForm: 'has_value', canonicalReader: 'analytics.ts:FORECAST_NIGHT_END_HOUR', clamp: { min: 0, max: 23 }, doc: 'Last hour of the overnight blend band, rounded and clamped (a NaN propagates); schema int(0,23)?.', parse: (raw) => Math.min(23, Math.max(0, Math.round(Number(raw ?? 5)))) }),
   row({ name: 'SELF_HEAL_MIN_DEVICES', source: 'env-only', canonicalReader: 'sessionSelfHeal.ts:DEFAULT_SELF_HEAL_CONFIG', doc: 'Starved-device quorum for a session self-heal. Bare Number().', parse: numOr(2) }),
@@ -529,8 +530,8 @@ const ROWS: readonly OptionRow[] = [
   row({ name: 'DB_PATH', source: 'deploy', canonicalReader: 'config.ts:dbPath',
     doc: 'SQLite path; absent reads as /data/ecoflow.db inside the add-on (SUPERVISOR_TOKEN set) and ../data/ecoflow.db elsewhere.',
     parse: (raw, env) => raw ?? (env.get('SUPERVISOR_TOKEN') ? '/data/ecoflow.db' : '../data/ecoflow.db') }),
-  row({ name: 'DATA_DIR', source: 'deploy', canonicalReader: 'index.ts:501 DATA_DIR', doc: "The add-on's /data root for files not placed beside the database.", parse: str('/data') }),
-  row({ name: 'WEB_DIST_PATH', source: 'deploy', canonicalReader: 'index.ts:472 WEB_DIST_PATH', doc: 'Built web bundle; absent resolves ../../web/dist from the server source.', parse: (raw) => raw }),
+  row({ name: 'DATA_DIR', source: 'deploy', canonicalReader: 'index.ts:527 DATA_DIR', doc: "The add-on's /data root for files not placed beside the database.", parse: str('/data') }),
+  row({ name: 'WEB_DIST_PATH', source: 'deploy', canonicalReader: 'index.ts:498 WEB_DIST_PATH', doc: 'Built web bundle; absent resolves ../../web/dist from the server source.', parse: (raw) => raw }),
   row({ name: 'SSH_HOST', source: 'deploy', canonicalReader: 'config.ts:ssh.host', doc: "SSH console bind address (the run script exports the literal `::`, dual-stack); absent falls back to TELNET_HOST, then `::`.", parse: sshField('SSH_HOST', 'host') }),
   row({ name: 'TELNET_HOST', source: 'deploy', canonicalReader: 'config.ts:ssh.host', doc: "Deprecated bind-address fallback, read only while SSH_HOST is absent (the run script no longer exports it); '::' listens dual-stack.", parse: sshField('TELNET_HOST', 'host') }),
   row({ name: 'SSH_HOST_KEY', source: 'deploy', canonicalReader: 'config.ts:ssh.hostKeyPath', doc: 'Path of the ed25519 host key, generated on first start; the run script exports /data/ssh_host_ed25519_key.', parse: sshField('SSH_HOST_KEY', 'hostKeyPath') }),
@@ -538,9 +539,9 @@ const ROWS: readonly OptionRow[] = [
     doc: "The container's zone; the Supervisor sets it to Home Assistant's. The site clock's second source (after SITE_TIMEZONE, before the America/Phoenix default); trimmed, blank reads as unset.",
     parse: trimmedOrNull() }),
   row({ name: 'SUPERVISOR_TOKEN', source: 'deploy', canonicalReader: 'config.ts:isAddon', doc: 'Injected by the Supervisor; its presence means the process runs inside the add-on.', readerView: (v) => !!v, parse: (raw) => raw }),
-  row({ name: 'BUILD_VERSION', source: 'deploy', canonicalReader: 'index.ts:736 BUILD_VERSION', doc: "Image version; blank reads as 'dev'.", parse: strOr('dev') }),
-  row({ name: 'BUILD_DATE', source: 'deploy', canonicalReader: 'index.ts:737 BUILD_DATE', doc: 'Image build date, or null.', parse: (raw) => raw || null }),
-  row({ name: 'BUILD_REF', source: 'deploy', canonicalReader: 'index.ts:738 BUILD_REF', doc: 'Image git ref, or null.', parse: (raw) => raw || null }),
+  row({ name: 'BUILD_VERSION', source: 'deploy', canonicalReader: 'index.ts:779 BUILD_VERSION', doc: "Image version; blank reads as 'dev'.", parse: strOr('dev') }),
+  row({ name: 'BUILD_DATE', source: 'deploy', canonicalReader: 'index.ts:780 BUILD_DATE', doc: 'Image build date, or null.', parse: (raw) => raw || null }),
+  row({ name: 'BUILD_REF', source: 'deploy', canonicalReader: 'index.ts:781 BUILD_REF', doc: 'Image git ref, or null.', parse: (raw) => raw || null }),
 ];
 
 export const OPTIONS: Readonly<Record<string, OptionRow>> = Object.freeze(Object.fromEntries(ROWS.map((r) => [r.name, r])));
@@ -567,9 +568,9 @@ const NULL_LITERAL = "a cleared optional field reaches the process as the string
 export const DECLARED_DIVERGENCES: readonly DeclaredDivergence[] = [
   { key: 'SSH_ENABLED', kind: 'unset', code: 'on', yaml: 'false', reason: "`!== '0'`: absent reads as on (a bare development environment keeps the console on, as `TELNET_ENABLED !== '0'` did before v1.190.0); the run script always exports 1 or 0. The alignment to off-when-unset waits for CA8 (tests importing config without setting it)" },
   { key: 'BROADCAST_QUIET_HOURS', kind: 'unset', code: 'no window', yaml: '"22-06"', reason: "`?? ''`: absent reads as no quiet window; never reached on the add-on. Aligning it needs CA8 (31 broadcast-importing tests would start depending on the wall clock)" },
-  { key: 'BROADCAST_QUIET_HOURS', kind: 'blank', code: 'no window', yaml: '"22-06"', reason: 'a cleared field disables the audible quiet window; index.ts:2699 reads the same blank as "quiet hours not configured"' },
+  { key: 'BROADCAST_QUIET_HOURS', kind: 'blank', code: 'no window', yaml: '"22-06"', reason: 'a cleared field disables the audible quiet window; index.ts quietConfigured reads the same blank as "quiet hours not configured"' },
   { key: 'BROADCAST_QUIET_HOURS', kind: 'null', code: 'no window', yaml: '"22-06"', reason: "'null' is not HH-HH, so the window is off" },
-  { key: 'NOTIFY_QUIET_HOURS', kind: 'blank', code: 'no window', yaml: '"22-06"', reason: 'a cleared field disables the quiet window; index.ts:2699 reads the same blank as "quiet hours not configured"' },
+  { key: 'NOTIFY_QUIET_HOURS', kind: 'blank', code: 'no window', yaml: '"22-06"', reason: 'a cleared field disables the quiet window; index.ts quietConfigured reads the same blank as "quiet hours not configured"' },
   { key: 'NOTIFY_QUIET_HOURS', kind: 'null', code: 'no window', yaml: '"22-06"', reason: "'null' is not HH-HH, so the window is off" },
   { key: 'BROADCAST_BILINGUAL', kind: 'unset', code: 'on', yaml: 'false', reason: "OWNER DECISION 21: the shipped default is off, so a new install speaks English only until the Spanish pass is turned on; a stored configuration keeps its value. `notFalseNot0`: absent still reads as on (the run script always exports true or false). Aligning the unset value waits for CA8 (tests importing broadcast.ts without setting it)" },
   { key: 'BROADCAST_LEAD_SILENCE_MS', kind: 'unset', code: '1500', yaml: '1000', reason: 'raised in code when 1000 clipped chimes; OWNER DECISION 7 keeps 1500 in code and 1000 in the shipped default' },

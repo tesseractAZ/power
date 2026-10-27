@@ -63,11 +63,10 @@ backup_post: /usr/bin/ecoflow-panel-backup-hook post
 # is not granted access to /core/api/* endpoints — every broadcast
 # returns "SUPERVISOR_TOKEN missing or HA unreachable".
 homeassistant_api: true
-# v0.9.33 — Supervisor API access at "manager" role. Granted explicitly
-# by the user so we can:
-#   - List installed add-ons (POST-install Piper visibility checks)
-#   - Auto-bridge integrations via Core config-flow (Wyoming Protocol →
-#     Piper TTS without making the user click through Settings UI)
+# v0.9.33 — Supervisor API access, so the add-on can list installed add-ons
+# (post-install Piper visibility checks). Its role is hassio_role below:
+# `homeassistant` since v1.7.0, no longer "manager". The Wyoming Protocol →
+# Piper TTS config-flow goes through the Core API (homeassistant_api above).
 # We do NOT install/uninstall add-ons in code without explicit user
 # action — every Supervisor call goes through a named endpoint.
 hassio_api: true

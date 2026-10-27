@@ -626,7 +626,7 @@ export interface NightActuationState {
    *  (restoreSummaryDue). A record from before the field had its summary sent on the ACK, and reads
    *  back with revertedAtMs here (coerceActuationState), so an update never sends it again. */
   restoreSummaryAtMs: number | null;
-  /** v1.189.1 — when the owed summary first waited for this process's first reading of the reserve
+  /** v1.190.1 — when the owed summary first waited for this process's first reading of the reserve
    *  (restoreSummaryDue 'hold': a restart across the restore's readback grace). It waits at most
    *  REVERT_DEADLINE_HOLD_MAX_MS from here; on the record, so a second restart inside the wait does
    *  not start it over. */
@@ -1644,7 +1644,7 @@ export function revertRetryText(retrying: boolean, onReport: RevertResendOnRepor
  *  sent and acknowledged with no readback yet. */
 export type RestoreSummaryKind = 'readBack' | 'acknowledged';
 /** restoreSummaryDue's step: a summary to send, or 'hold' — owed, and waiting for this process's first
- *  reading of the reserve (v1.189.1, restoreSummaryAwaitsFirstReading; stamp restoreSummaryHeldAtMs
+ *  reading of the reserve (v1.190.1, restoreSummaryAwaitsFirstReading; stamp restoreSummaryHeldAtMs
  *  on the first tick that waits). */
 export type RestoreSummaryStep = RestoreSummaryKind | 'hold';
 
@@ -1659,7 +1659,7 @@ export type RestoreSummaryStep = RestoreSummaryKind | 'hold';
  *    (restoreSummaryAtMs). Once per record. Nor while the live reading is the restored value: that
  *    is the readback, which decideActuation stamps on this same tick (revertVerified), and the
  *    summary goes then saying "restored";
- *  - 'hold' (v1.189.1): owed, and waiting for this process's first reading of the reserve
+ *  - 'hold' (v1.190.1): owed, and waiting for this process's first reading of the reserve
  *    (restoreSummaryAwaitsFirstReading) — told `readSinceBoot`; a call that does not tell it
  *    (the readback tick) never holds.
  */
@@ -1683,7 +1683,7 @@ export function restoreSummaryDue(
 }
 
 /**
- * v1.189.1 — the owed summary waits for this process's first reading of the reserve. PURE. A process
+ * v1.190.1 — the owed summary waits for this process's first reading of the reserve. PURE. A process
  * down across the restore's readback grace came back with the summary owed and no reading yet, sent
  * "the restore was sent and has not read back" on its first tick, and the readback a tick or two
  * later added a "restored" card after it. True while the grace is spent, this process has read no
@@ -1705,7 +1705,7 @@ export function restoreSummaryAwaitsFirstReading(
 }
 
 /**
- * v1.189.1 — how the restore stands, for the revertDeadline hold line (index.ts): not yet sent; sent
+ * v1.190.1 — how the restore stands, for the revertDeadline hold line (index.ts): not yet sent; sent
  * before this process started (an ACK that predates a restart: the hold then waits for the first
  * reading, not for a restore "only just" sent); or only just sent, by this process. PURE.
  */

@@ -1088,7 +1088,7 @@ test('★★★ index.ts: the summary is not sent on the ACK; it goes from the t
   const ackBranch = tick.slice(ackAt, tick.indexOf('\n    return;\n  }', ackAt));
   assert.doesNotMatch(ackBranch, /sendNotification\(|sendRestoreSummary\(|buildNightChargeMorningSummary\(|buildMiddayChargeSummary\(/, 'nothing is pushed on the ACK');
   // The step: after the revertDeadline decision, ahead of the reserve decision and its no-panel return.
-  // v1.189.1 — told whether this process has read the reserve since it started; a wait is stamped
+  // v1.190.1 — told whether this process has read the reserve since it started; a wait is stamped
   // once (restoreSummaryHeldAtMs) and sends nothing; an owed summary is sent.
   const step = tick.indexOf('const summaryOwed = restoreSummaryDue(state, nowMs, currentReservePct, nightReserveReadSinceBoot);\n  if (summaryOwed === \'hold\') {\n    if (state.restoreSummaryHeldAtMs == null) {\n      persistNightActuation({ ...state, restoreSummaryHeldAtMs: nowMs });');
   assert.ok(step > tick.indexOf('const revertPage = decideRevertDeadline('));
@@ -1637,10 +1637,10 @@ test('★★★ a write whose confirmation was lost, read at its target after a 
   }
 });
 
-/* ══ v1.189.1 — after a restart, the summary of the restore waits for the panel's first reading ══ */
+/* ══ v1.190.1 — after a restart, the summary of the restore waits for the panel's first reading ══ */
 
 /**
- * v1.189.1 — a process down across the restore's readback grace came back with the summary owed
+ * v1.190.1 — a process down across the restore's readback grace came back with the summary owed
  * (REVERT_VERIFY_AFTER_MS past the ACK) and no reading of the reserve yet: the "sent and acknowledged"
  * summary went on the first tick, and the readback a tick or two later added a "restored" card after
  * it. The summary now waits for the first reading this process gets, REVERT_DEADLINE_HOLD_MAX_MS at

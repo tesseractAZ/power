@@ -2,7 +2,7 @@ import { lazy, memo, Suspense, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { DeviceSnapshot, GridBackstop, Shp2Circuit, Shp2PairedCircuit, Shp2Projection } from '../types';
 import { fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
-// v1.189.1 — the charge-limit and backup-timer wording (pure; server/test/shp2ChargeLabel.test.ts).
+// v1.190.1 — the charge-limit and backup-timer wording (pure; server/test/shp2ChargeLabel.test.ts).
 import { backupTimerText, chargeLimitView, connectedSlotCount } from './shp2ChargeText';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
 import { LazySparkline as Sparkline } from '../charts/LazySparkline';
@@ -213,7 +213,7 @@ export const Shp2Card = memo(function Shp2Card({
               <Sparkline sn={d.sn} metric="panel_load" color={HUES.soc} height={36} />
             </div>
 
-            {/* v1.189.1 — both timers on the server's backupTimers verdict (the gate HA's
+            {/* v1.190.1 — both timers on the server's backupTimers verdict (the gate HA's
                 backup_charge_minutes / backup_discharge_minutes use), and chargeWattPower labelled
                 as what it is: the per-battery charge LIMIT, with the connected fleet's envelope. */}
             <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-1">

@@ -1,5 +1,5 @@
 /**
- * v1.189.1 — the Smart Home Panel card's charge limit and backup timers.
+ * v1.190.1 — the Smart Home Panel card's charge limit and backup timers.
  *
  * `chargeWattPower` is the panel's configured AC charge-rate LIMIT for EACH connected battery
  * (7,200 W, the Delta Pro Ultra's AC input ceiling; every source slot's `ratePower` and the charge

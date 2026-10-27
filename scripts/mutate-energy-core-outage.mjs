@@ -117,7 +117,7 @@
  *           with the cloud unreachable carries a former member's orphan rows: +938.8 kWh)
  *   B-civ   the accepted roster is used only while a change is pending (the same)
  *
- * v1.189.1 (the PV-field check on the 2026-10-18 evidence: max(two steps, 15 %), a verdict held an
+ * v1.190.1 (the PV-field check on the 2026-10-18 evidence: max(two steps, 15 %), a verdict held an
  * hour or a genuine 2 kWh margin; the power sensors read a present field unchecked):
  *   B-cv    the tolerance has no fraction (two steps alone)
  *   B-cvi   a verdict acts at once (no hold)
@@ -887,7 +887,7 @@ const MUTANTS = [
     to: '    if (live.size === 0 && pendingMembership != null) return new Set(accepted); /* MUTANT */\n',
     why: 'An empty source set is never a pending change (the rollup reads it as no change), so the same boot carries the orphans.',
   },
-  // v1.189.1 — the PV-field check against the inferred bound, re-tuned on the 2026-10-18 evidence.
+  // v1.190.1 — the PV-field check against the inferred bound, re-tuned on the 2026-10-18 evidence.
   {
     id: 'B-cv. ★★★ the tolerance has no fraction (two steps alone)',
     file: EB,

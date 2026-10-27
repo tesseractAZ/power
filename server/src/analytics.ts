@@ -1194,7 +1194,7 @@ export interface ForecastHour {
 }
 
 export interface HourResponse {
-  hour: number;             // 0-23 local hour-of-day
+  hour: number;             // 0-23 hour-of-day in the site zone (siteHour)
   coeff: number | null;     // learned W of PV per W/m² of GHI; null = insufficient data
   /** Within-slot Pearson r². DIAGNOSTIC ONLY (v1.20.0, F21): in a low-variance
    *  climate this is degenerate by construction (near-constant per-slot GHI ⇒
@@ -4542,7 +4542,7 @@ const SHADE_DROP_THRESHOLD = 0.18;   // ≥ 18% under model = "shaded"
 const SHADE_OBSERVE_HISTORY_MS = 45 * 24 * 60 * 60 * 1000;
 
 export interface ShadeHour {
-  hour: number;             // 0-23 local
+  hour: number;             // 0-23 in the site zone (siteHour)
   observedW: number;        // median observed PV across clear-sky days
   expectedW: number;        // median predicted PV across the same days
   shortfallPct: number;     // (expected − observed) / expected × 100
@@ -5296,7 +5296,7 @@ function computeMinedEvWindowPrediction(
   // (minutes >= 30 ⇒ +1 hour, else current hour). Exactly :30 rounds UP to
   // the next hour, matching standard "round half up" semantics. When the
   // rounding pushes past 23:59, dayOfWeek advances too (handled by feeding
-  // the rounded timestamp back through Date).
+  // the rounded timestamp back through siteLocalParts).
   const groups = new Map<string, { records: typeof sessions; }>();
   for (const s of sessions) {
     const { dow, hr } = roundedHourOf(s.startTs);
@@ -7889,7 +7889,7 @@ export function computeEquipmentHealth(
  * =================================================================== */
 
 export interface ClippingHour {
-  hour: number;           // 0-23 local hour-of-day
+  hour: number;           // 0-23 hour-of-day in the site zone (siteHour)
   observedW: number;      // fleet-total average PV that hour
   modelW: number | null;  // what the learned model says the array could have made
   clippedW: number;       // modelW − observedW (when at peak and modelW > observedW)
@@ -8105,7 +8105,7 @@ export interface OpportunisticLoad {
 }
 
 export interface CurtailmentHour {
-  hour: number;           // 0-23 local hour-of-day
+  hour: number;           // 0-23 hours after the site day's midnight (startOfLocalDayMs)
   surplusW: number;       // mean curtailed power in this hour
   curtailedKwh: number;   // surplusW × hour fraction we walked
   socAvg: number;         // mean SoC across home DPUs during this hour
@@ -8969,7 +8969,7 @@ export function apsSeasonIsSummer(nowMs: number): boolean {
  * no representation at all.
  *
  * `rateAt` also resolves each hour in the model's zone (America/Phoenix when this was written;
- * the site zone, siteTime.ts, since v1.191.0), where `onPeakAt` read `new Date().getHours()` —
+ * the site zone, siteTime.ts, since v1.191.0), where `onPeakAt` read `new Date(ts).getHours()` —
  * the HOST clock: the same answer on this Pi, wrong on any host in another zone. Since v1.191.0
  * `onPeakAt` reads the site hour and weekday too (siteHour / siteDow).
  *

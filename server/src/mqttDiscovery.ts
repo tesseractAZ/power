@@ -453,15 +453,15 @@ export const SENSORS: SensorConfig[] = [
   // a mid-day charge). The night-charge entities above stay bound to the overnight leg.
   // A null role renders "unknown" (ecoflow_backup_reserve_enabled's null pattern), which HA reads as
   // unknown. So would the "None" a bare null renders: HA's MQTT sensor maps that payload to unknown
-  // for every sensor type (the v1.189.1 note below); the text sensors keep the established pattern.
+  // for every sensor type (the v1.190.1 note below); the text sensors keep the established pattern.
   { unique_id: 'ecoflow_night_charge_role', name: 'Night-Charge Role', icon: 'mdi:swap-horizontal', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "unknown" if value_json.night_charge_role is none else value_json.night_charge_role }}' },
   // v1.189.0 (R4) — the winter mid-day charge (APS super off-peak, 10:00–15:00 Mon–Fri) as
-  // middayShadow.ts computes it each winter weekday evening, the morning refresh included. Until the
-  // mid-day switch it is a SHADOW: nothing is written, armed or announced for it, and
+  // middayShadow.ts computes it each evening before a winter weekday, the morning refresh included.
+  // Until the mid-day switch it is a SHADOW: nothing is written, armed or announced for it, and
   // ecoflow_midday_charge_recommended stays off. Same shape as the night-charge entities: no
   // device_class on the figures, the ~25 h expiry, null → 'unknown' with no current mid-day leg.
   // Each figure carries a `basis` attribute ('shadow' until the switch; MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE).
-  // v1.189.1 — the window bounds are device_class 'timestamp' (HA shows them as times; the payload is
+  // v1.190.1 — the window bounds are device_class 'timestamp' (HA shows them as times; the payload is
   // the ISO 8601 instant) and render a null as "None": HA's MQTT sensor maps the "None" payload to
   // unknown for EVERY sensor type, ahead of any parsing and with no warning (core mqtt/sensor.py,
   // PAYLOAD_NONE; read on 2026.10). v1.189.0 made them text on the premise that a timestamp sensor
@@ -1541,7 +1541,7 @@ export async function startMqttDiscovery(
       tariff_today_grid_cost_dollars: tariff ? tariff.todayGridImportCostDollars : null,
       tariff_today_solar_value_dollars: tariff ? tariff.todaySolarLoadValueDollars : null,
       tariff_net_savings_7d_dollars: tariff ? tariff.netSavingsDollars : null,
-      // v1.134.0 — dollars per kWh, in force right now. NULL (never a fallback
+      // v1.134.0 — price per kWh (TARIFF_CURRENCY), in force right now. NULL (never a fallback
       // rate) when the tariff is unconfirmed or the matched period has no season
       // rate: a silent off-peak default would reintroduce exactly the mispricing
       // this entity exists to remove, and HA correctly declines to accrue cost

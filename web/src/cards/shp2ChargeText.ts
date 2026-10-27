@@ -1,5 +1,5 @@
 /**
- * v1.189.1 — the Smart Home Panel card's charge-limit and backup-timer wording. Pure (run by
+ * v1.190.1 — the Smart Home Panel card's charge-limit and backup-timer wording. Pure (run by
  * server/test/shp2ChargeLabel.test.ts).
  *
  * `chargeWattPower` is the panel's configured AC charge-rate LIMIT for EACH connected battery
