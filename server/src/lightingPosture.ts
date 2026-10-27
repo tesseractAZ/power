@@ -318,5 +318,6 @@ const STATE_PATH =
   process.env.LIGHTING_POSTURE_STATE_PATH ??
   resolve(process.cwd(), config.dbPath, '..', 'lighting-posture.json');
 
-/** Process-wide tracker — the MQTT publisher and /api/ha-state share one. */
+/** Process-wide tracker. The MQTT publisher (mqttDiscovery.ts buildState) is the only one that
+ *  advances it; /api/ha-state carries no posture. */
 export const lightingPostureTracker: PostureTracker = createPostureTracker(DEESCALATE_HOLD_MS, STATE_PATH);

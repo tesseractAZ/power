@@ -25,7 +25,7 @@
  *   Review lows     X-i..X-ix (a dark readback's page says the restore is sent once the panel reports)
  *                   · Z-i..Z-vii (a restart just after the ACK waits for one reading, bounded)
  *                   · K-i..K-xi (the summary says "restored" only on a readback)
- *   v1.189.1       J-i..J-viii (after a restart the owed summary waits for the first reading, bounded;
+ *   v1.190.1       J-i..J-viii (after a restart the owed summary waits for the first reading, bounded;
  *                   the hold line does not say "only just sent" of an ACK that predates the start)
  *
  *   node scripts/mutate-onpeak-guard.mjs
@@ -1048,7 +1048,7 @@ const MUTANTS = [
     to: '  } else if (summaryOwed != null && (false as boolean)) { /* MUTANT */\n    sendRestoreSummary(state, summaryOwed, nowMs);',
     why: 'A restore that does not read back gets no summary at all.',
   },
-  /* ── v1.189.1: after a restart, the owed summary waits for this process's first reading ── */
+  /* ── v1.190.1: after a restart, the owed summary waits for this process's first reading ── */
   {
     id: 'J-i. ★★★ the summary never waits for the first reading',
     file: ACT,

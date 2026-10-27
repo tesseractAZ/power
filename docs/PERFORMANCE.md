@@ -21,6 +21,8 @@ Evidence sources: the cleared-alert ledger (`/api/alerts/history`, cap `CLEARED_
 
 Not re-measured: §4b (2026-09-11), the §4a span table, §4's cell-spread norms, the §7.2 full sweep and every harness time but three, and each §6 item that names an earlier date. §5 adds the review cycles of 2026-10-11 → 10-14. ★ At the time of measurement all five Cores had been offline per the EcoFlow cloud since 10-15 01:55, after a 122-minute name-resolution outage, and the recorder kept writing their last values as fresh samples (§6); the SHP2 was offline with them until 04:16 and its series were held the same way. No measured figure here uses the Cores' recorder data after 10-15 01:55 or the SHP2's for 01:55 → 04:16, except these, each stated where it appears: §6, §3's account of the 10-14 night and §4c's recorder-intake figure use the held rows as evidence of the hold; §4c's database size counts them among its samples; §3 quotes the 10-14 night's scorer coverage, which counts them, beside its live coverage; and every figure computed from the current forecast model — §2's probabilistic diagnostics and the 10-15 plan's basis reading that uses them, the forecast-skill route, the hourly backtest route and its offline re-score, and §6 where it quotes them — rests on a 30-day solar-response fit that takes in the Cores' held 0-W daylight hours of 10-15, and is in-sample besides (§2). §2's night-charge ledger figures, graded from forecasts issued before the hold, carry neither. Read-back checks made at 18:45–19:32 (the held rows themselves, the backtest's actuals, the ledger's coverage column and the 10-14 row's PV coverage) cover fixed, elapsed windows, except the 10-14 row's PV coverage, which §6 dates.
 
+**Revision of 2026-10-26.** §4e is new (the remaining dark-fleet rebuilds, a replay on synthetic databases, v1.191.2 → v1.191.3); §4b moves, unedited, to `docs/history/` to make room. Nothing else is re-measured.
+
 **Revision of 2026-10-23.** §4d gains the Pi after the update. **2026-10-22:** §4d is new (the live host and a replay, v1.191.1 → v1.191.2); §4c gains a note. Nothing else is re-measured.
 
 ---
@@ -410,62 +412,11 @@ Hours are method A's mean step window. Pooled, the model gives 56.96 kWh against
 
 ## 4b. Runtime cost of the analytics path (measured 2026-09-11)
 
-The first end-to-end latency measurement of the analytics worker on the live
-deployment, prompted by a question about whether it should be multithreaded.
-
-**One report accounted for effectively all of it.** Cold/warm latency, measured
-against the live Pi with `curl`:
-
-| Endpoint | Cold | Warm |
-|---|---|---|
-| `/api/equipment-health` | **9,007 ms** | 14 ms |
-| every other analytics endpoint measured (10 of them) | **10–25 ms** | 10–25 ms |
-
-`computeEquipmentHealth` pulled a **60-day** window of three metrics per MPPT
-string per DPU, plus two more per DPU for inverter standby — **40 metric-series
-of 60 days each** — while `MPPT_EFF_TTL_MS` is **10 minutes**. It re-derived two
-months of history every ten minutes. The query was already indexed
-(`idx_samples_sn_metric_ts`) and already bucketed at 5 min; it was simply large.
-
-Because the analytics worker is single-threaded this is a **head-of-line block**:
-six concurrent requests were observed completing together at **~20.2 s**, on
-exactly the endpoints the dashboard fetches on load.
-
-★ **It is not a threading problem, and the measurement is what says so.** The
-host is a 4-core Pi at **load average 0.22** with **98.8% idle**. Threads address
-contention; there was none. The other five requests in that burst were not
-computing for 20 s — they were *waiting* on one slow one. A worker pool would
-have bought a SQLite connection per thread against a 1.72 GB database, duplicated
-heap on a host already at 3.7 GB used, and cross-thread cache coherence across the
-report dependency graph: new failure surface on a life-safety system, to route
-*around* one expensive query rather than remove it.
-
-**v1.151.0 result, measured the same way:**
-
-| | Before | After |
-|---|---|---|
-| Recompute after the 10-min TTL | **9,007 ms** | **96 ms** |
-| Span queried per recompute | 60 days | the new tail only (>100× less, in test) |
-| Worst latency over 259 polls / 13 min | — | **96 ms** (median 18, p95 24) |
-
-★ **The first number taken for this table was wrong, and the way it was wrong is
-the point.** A post-TTL call measured **12 ms**, which looked like a triumph. It
-was a cache hit: `generatedAt` showed a background consumer — `/api/ha-state` and
-`mqttDiscovery` poll `equipmentHealth` on a ~60 s cadence — had recomputed 18
-seconds earlier. Nothing about the 12 ms was false; it simply did not measure what
-it appeared to.
-
-The sound measurement uses the client's own single-flight coalescer as the
-instrument: if a recompute still cost 9 s, **any** caller arriving during that
-window blocks on it and returns ~9 s. Polling every 3 s therefore cannot miss one.
-Across 259 polls exactly one recompute was observed (18:19:02), the call that saw
-it took **96 ms**, and no call ever blocked near 9 s. *Absence of a slow reading is
-only evidence when the method guarantees a slow reading would have been seen.*
-
-★ *2026-10-15 (§4c): the head-of-line signature is still there in dashboard-load bursts —
-requests in a burst finish within 14–16 ms of each other — but the worst request in 47.8 h of log
-took 8,540 ms, against the ~20.2-s burst above. Probed one at a time, warm reads take 9.5–19.7 ms,
-`/api/equipment-health` among them.*
+Moved unedited to [`history/performance-record-1.md`](history/performance-record-1.md) on
+2026-10-26, to keep this record under its size limit: the first end-to-end latency measurement of
+the analytics worker on the live host. One report, `/api/equipment-health`, held the single-threaded
+worker for 9,007 ms per 10-min recompute (a head-of-line block, not a threading problem: load 0.22,
+98.8% idle), and v1.151.0 brought it to 96 ms.
 
 ---
 
@@ -645,6 +596,43 @@ Built at a frozen instant, the dark and control forecasts are byte-identical to 
   replay's 0.46% scales to about 1.5% on the Pi.
 - `/api/forecast`, `/api/forecast-skill`, `/api/confidence`, `/api/runway`: **10–15 ms**; `/api/ha-state` 17 ms.
 - **No** `slow request` line from the start to 17:37 on 10-23, against 84 in 2 h 29 min before.
+
+## 4e. Self-consumption, carbon and tariff while every Core is dark (measured 2026-10-26)
+
+After v1.191.2 (§4d) three reports were still rebuilt on every read with every Core dark, each
+about 2.2 times a minute: self-consumption (cached only with a projected Core, v0.15.13; read
+again inside carbon), carbon and tariff (cached only with one, as their `basisComplete` says).
+
+**Method.** No live read. Synthetic recorder databases, placeholder serials, read through the
+real read-only recorder and the worker's report chokepoint; a frozen clock stepped through 10
+min of the production schedule after one uncounted warm pass; Apple M5, Node 26, the Pi about
+3.3 times slower (§4d); replay figures are the mean of two runs. `dense11`: 45 days, 7.1 M
+samples at 10–30 s, the Cores silent for 11 days; `dense0`: the Cores recorded to the end;
+`dark11`: 120 days at the base cadence, silent for 11 days.
+
+| `dense11` / `dense0` / `dark11`, every Core dark | v1.191.2 | v1.191.3 |
+|---|---|---|
+| One tariff rebuild (median of 21) | 52.6 / 39.7 / 39.2 ms | 33.1 / 32.6 / 20.1 ms |
+| One self-consumption rebuild | 19.9 / 41.4 / 11.3 ms | cached |
+| Replay, worker ms a minute | **207** / 274 / 143 | **80** / 77 / 49 |
+| Replay with self-consumption cached, the tariff unchanged | — | 123 / 92 / 94 |
+
+The control (`dense11`, every Core projected) stays at 9.4 ms a minute. With one Core leaving
+and rejoining the source list every 30 s, a projected fleet goes from 767 to 807 ms a minute:
+the day forecast already rebuilt on each change (§4d), and self-consumption now does too
+(38 ms a minute) where v1.191.2 served the entry from before the change for up to 15 min; the
+same flapping on the dark fleet falls from 388 to 295. Self-consumption, carbon and tariff are
+byte-identical to v1.191.2's (`darkFleetEnergyIdentity.test.ts`).
+
+**Expected on the Pi**, scaled from `dense11`: 127 ms a minute less is about 0.7% of a Pi core,
+so with every Core still dark the worker's 1.80% (§4d) should fall to about 1.1%. The reading
+there is added once the release runs.
+
+**Reading a report's own cache before the forecast: declined.** The forecast read is a cache hit
+since v1.191.2, 0.45 µs over a bare await (M5); 300 random-phase 2-h runs of the schedule give
+4.00 forecast builds per 2 h in either order. Only a variant that serves a skill, band or
+multi-day entry scored on a superseded forecast (up to 4,380 s of 7,200 s in that simulation)
+saves a recompute, against the v1.186.5 rule.
 
 ---
 

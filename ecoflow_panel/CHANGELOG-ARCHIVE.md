@@ -4,6 +4,115 @@ _Older releases, moved out of the add-on `CHANGELOG.md` so Home Assistant's Chan
 
 _Restored 2026-09-06: the v1.131.2 release commit truncated `CHANGELOG.md` to a single entry (`open(p,'w')` truncates before the `open(p).read()` in the same expression runs), destroying 145 entries — v1.22.0 through v1.131.1. Recovered from git history and re-archived here. Nothing was lost; it was recoverable because every prior revision is in the commit history._
 
+## 1.190.2
+
+### The Today card counts the energy measured at the panel while the Cores are dark
+
+**Dashboard**
+
+- While a home Core reports nothing of its own, the Today card's Solar produced, AC output and Batteries (net) now count the energy the panel's meter on that Core's battery slot measured for it — the figures Home Assistant's Energy counters already add — in place of the Core's own readings, which are not recorded while it is dark. On 19 October, with every Core offline since 14 October and the house on the batteries, the card read 0 Wh for all three and "25% measured" while those counters read 41.3 kWh of solar, 34.5 kWh into the batteries and 9.4 kWh out of them since midnight. For each stretch a Core is measured at the panel after the update, the card reads what the counters counted for it over the same stretch.
+- A figure with a part measured at the panel says "via panel" under it. Solar the panel could only work out from the Core's output and the rise in its charge level — before the panel's own solar reading has passed its check — is a lower bound and says "via panel · lower bound" ("partly a lower bound" when only some of the day's is). No solar is counted for a dark Core at night, so an outage that is over by sunrise leaves Solar produced unmarked. Batteries (net) reads, for example, "charged · via panel".
+- "% measured" counts the time the panel's meter covered each dark Core, so an all-dark day measured at the panel reads close to 100 % instead of 25 %.
+- A Core that reports for part of the day counts its own readings for that part and the panel's for the rest, handing over at the same instants as the energy counters, so no stretch is counted twice — also when a Core's own readings come back while the panel is still measuring it (its data arriving before the cloud lists it online again).
+- The Solar tab's Today tile shows the same solar figure with the same note.
+- A day with every Core reporting reads exactly as before.
+- From the update onward: the panel-measured energy of a dark Core is recorded for the card at each 5-minute count, so on the day of the update the card counts it only from the update on, and its figures and "% measured" stay below the counters' for that day. The record is kept as long as the recorded readings.
+
+**Documentation**
+
+- The energy reference describes the record the card reads and how it meets the Cores' own readings; the user-interface reference describes the card's notes.
+
+## 1.190.1
+
+### The panel card names the per-battery charge limit; the Cleared list opens on 7 days; the live solar reading stays trusted; the Midday-Charge window sensors are timestamps again
+
+**Dashboard**
+
+- The Smart Home Panel card's "Charge power 7.20 kW" is now "Charge limit (per battery) 7.20 kW × 3 connected = 21.60 kW". The figure is the panel's configured charge-rate limit for each connected battery (the Delta Pro Ultra's AC input ceiling, the same figure as each battery slot's rating), not the rate the pool charges at and not a live power: on the night of 13–14 October each Core took up to 7.2 kW of its own, the three together 18.1 kW, and the grid main read 19.25 kW. The envelope beside it multiplies the limit by the batteries connected to the panel; it is left out while the panel reports no limit or no connected battery. The card shows no measured peak, since no per-charge summary exists yet to read one from.
+- The card's "Charge time" and "Remain (disch, vendor)" are shown only while the server says that timer applies, by the same rule that decides whether Home Assistant's backup charge and discharge minutes are published, so the card and the sensors agree; with no verdict from the server they read "—". The panel reports both timers whatever the direction, and the card had shown the charge time whenever the charge limit was above 50 W (always), so it read "38 min" to full while the batteries drained 3.4 kW through the panel on 16 October.
+
+**Alerts**
+
+- The Cleared list fetched the whole stored history when the page opened and again every 30 seconds — 1,500 cleared alerts, 1.2 MB, each with its full alert record — and drew every row in one table, so it took a moment to appear and ran very long. It now opens on the last 7 days, with 30 days, 90 days or All a tap away; the refresh fetches only the window shown; the caption says how many rows are listed of how many are kept; 200 rows are drawn before a "Show more" button; and each row carries only what the table shows. On the live history the 7-day window is 145 rows and 84 KB in place of 1,500 rows and 1.2 MB, and All is 730 KB. The Critical + High filter is unchanged. The stored history, how much of it is kept, and the warranty export are unchanged.
+
+**Energy dashboard**
+
+- While a Core reports nothing of its own, Fleet PV and Battery Net read the panel's per-slot solar reading as soon as it is present, and the check of that reading against the solar the Core demonstrably took in (its output plus the rise in its charge level) runs alongside. On 18 October that check had passed each slot's reading in the morning and withdrawn it again between late morning and dusk, each time by about a third of a kilowatt-hour — one step of the panel's whole-percent charge level — although the reading stayed within 4–10 % of the check's figure all day; from 11:15 until dusk the Now view then showed no solar, battery or consumption while the house ran on the batteries. The check's own figure is uncertain by one step at each end and by the batteries' measured capacity, so a reading now passes when it is within two steps or 15 % of it, whichever is larger, and a verdict takes effect only once it has held for an hour, or at once when the gap is 2 kWh or more. The same rule decides when a reading is trusted and when trust is withdrawn. Replayed on the 18 October readings, all three slots stay trusted through the day. A reading that is genuinely short — one that misses the solar passing straight through to the house, for example — is still refused, and once refused both sensors read unknown for the rest of the day, as they do while the panel reports no solar reading for the slot. The two sensors sum to what the panel's meter measures on the slot whatever the solar reading says, so the consumption the dashboard derives is right either way.
+- The energy counters: until the slot's solar reading has passed its check, solar is counted from the Core's output and charge-level rise, as before. A reading already trusted that then falls short goes on being counted until the withdrawal takes effect — its shortfall has first to exceed the tolerance, and the verdict then holds for an hour unless the shortfall reaches 2 kWh — so a trusted reading that freezes low leaves up to about the larger of the tolerance and 2 kWh of that slot's solar uncounted for the day (replayed: 2.5 kWh after 80 minutes mid-morning, 4.2 kWh after 135 minutes in the afternoon; about one step, 0.3 kWh, under the one-step rule), with the slot's battery in and out off by the same amount the other way, and Fleet PV and Battery Net publishing the frozen reading meanwhile. The shortfall is not counted back once the reading is withdrawn: nothing already counted changes and no total steps down.
+- The energy flow card and the backup time to full and time to empty follow the sensors: the slot's solar reading is used wherever the sensors publish it.
+- The log line for each verdict states the tolerance and when the verdict first appeared; the battery-lifetime debug block lists a verdict that is still waiting its hour.
+
+**Night charge**
+
+- The Midday-Charge Window Start and End sensors are timestamp sensors again (`device_class: timestamp`), so Home Assistant shows them as times; 1.189.0 published them as text, and they showed raw ISO 8601 strings. They read unknown when there is nothing to show, as before, with no warning in the Home Assistant log: Home Assistant's MQTT sensor maps the empty value to unknown for every sensor type, which 1.189.0 had taken to produce a warning on a timestamp sensor. Midday-Charge Refresh and Night-Charge Role are unchanged.
+- After a restart across the restore of the night's reserve, the morning summary waits for the panel's first reading since the restart, up to 10 minutes, before saying the restore was sent and is not yet confirmed; a restore that first reading confirms is summarised as restored, in one card, instead of a "sent" card followed by a "restored" one. The log line for a deadline page held after a restart says the restore was sent before the restart when it was, instead of "only just sent".
+
+**Documentation**
+
+- The configuration reference stated that the overnight charger delivers at most 7.2 kW × 6 h = 43.2 kWh. That read the per-battery limit as the pool's; it now states the measured envelope (about 17 kW into three Cores at a 19.1 kW main) and refers to the night-charge reference, which records the per-Core peaks of 13–14 October.
+- The night-charge reference and the entity table describe the Midday-Charge window sensors as timestamps, and state how Home Assistant's MQTT sensor reads an empty value.
+
+## 1.190.0
+
+### The LAN console is served over SSH; telnet is no longer served
+
+**Console**
+
+- The control-room console on port 2323 is served over SSH: `ssh -p 2323 <console user>@<host>`, where the console user is `TUI_USERNAME` (`operator` when empty). Logins are password only, with `TUI_PASSWORD`; every login is refused until a password is set, and the add-on log says so once per connection. Telnet sent the login and everything on screen in clear text; a telnet client no longer connects.
+- Three failed attempts end the connection, and ten failures within ten minutes from one address refuse that address's logins, the right password included, until the ten minutes are up; a login that succeeds clears its address, and other addresses are not affected. The browser console's login card counts the same way, under the address its connection comes from, so one host's failures over either transport spend one budget; browser sessions that arrive through Home Assistant Ingress all reach the add-on from the Supervisor's address and share one window among themselves. Until this release the ten-failure window was one for every connection, so ten failures from any one host on the LAN refused the operator's correct password from every other host for the rest of the ten minutes. A connection that has not logged in within two minutes is ended. Usernames and passwords are never logged.
+- The host key (ed25519) is generated on the first start in `/data` and kept; its fingerprint is on the startup log line at every start, to compare with what `ssh` shows on the first connection. A host key file that does not parse is replaced, and the log says so.
+- One terminal per connection. The window size comes from the SSH client and follows resizes, held to 60–200 columns by 16–80 rows whatever the client asks for; exec, sftp and port forwarding are refused. 16 connections, 4 per address; a connection that receives nothing for 5 minutes is closed; TCP keep-alive on every connection. Accept and teardown are logged, teardown with the session duration.
+- The browser console at `/console` is unchanged and keeps its login card.
+
+**Configuration**
+
+- `SSH_ENABLED` (off by default) and `SSH_PORT` (2323) are added. `TELNET_ENABLED` and `TELNET_PORT` stay as deprecated aliases: an install with `TELNET_ENABLED` on comes up over SSH on the same port with no option change, and the log names the option that applied. Either enabled option serves SSH; `SSH_PORT` at its default defers to a changed `TELNET_PORT`. To close the port, turn both enabled options off.
+
+**Updating**
+
+- Use an SSH client in place of telnet: `ssh -p <port> <console user>@<host>`. The first connection shows the host key fingerprint, which is printed in the add-on log. Updating restarts the add-on.
+
+**Dependencies**
+
+- ssh2 1.17.0 (and @types/ssh2 for the type check).
+
+## 1.189.0
+
+### The winter mid-day charge, in preview; the night-charge write bounded against on-peak; Cancel always on the card
+
+**Night charge: the winter mid-day charge, in preview**
+
+- On winter weekdays the APS super off-peak period, 10am–3pm, is cheaper than the overnight window. With the cost objective (`ARB_OBJECTIVE` `cost` and `ARB_COST_MAX_SOC_PCT` above 50), Power now works out, on the evening before each winter weekday (8 October to 31 March, holidays excepted), the charge it would make in that window instead of overnight: an outage backup on the overnight window before it when the worst case needs one, the daytime charge, and a re-check on the morning solar forecast that can lower or cancel the daytime charge but never raise it.
+- A daytime charge that would leave the pool under the reserve plus 25 points is held: after the 3pm restore the panel holds a pool that low instead of using it, and the grid would carry the house into on-peak. On a day the overnight charge already ran, the morning re-check is recorded as not comparable and the evening figures stand, since the pool it would see is not the one a daytime charge would start from.
+- This is a preview only. Nothing is armed, written to the panel, pushed or spoken for it, and the overnight charge runs as before. A later release turns the mid-day charge on, after at least five winter weekdays of preview have been checked against what those days did.
+- The preview is published on new Midday-Charge entities (the level, the reserve it would hold, the expected and worst-case buy, the window, and the morning re-check's outcome) and in a read-only section of the night-charge card, with the title of the notice it would have sent. Each Midday-Charge figure carries a `basis` attribute, `shadow` while the mid-day charge is a preview. Midday-Charge Recommended stays off while the mid-day charge is a preview. The log shows each preview in full, tagged `night-charge[midday-shadow]:`, and each evening's ledger row records it, to be scored against the day.
+- New sensor Night-Charge Role: what tonight's overnight window is for, `cost` (it carries the charge, as on every night in this release) or `backup` (an outage backup ahead of a mid-day charge).
+- The Midday-Charge Window Start and End sensors carry the time as text (ISO 8601, UTC). They, Midday-Charge Refresh and Night-Charge Role read unknown when there is nothing to show, with no warning in the Home Assistant log.
+- A preview day's measured solar is not kept as forecast evidence when that night's solar verdict is set aside because its forecast was built on a different set of Cores.
+
+**Night charge: the write never stands into on-peak**
+
+- No reserve raise or force-charge ON is sent from an hour before on-peak, and the reserve restore and the force-charge OFF fall due by then at the latest. The overnight window closes at 5am, eleven hours before on-peak, so a night that goes to plan is unchanged.
+- A restore the panel has not confirmed is paged as critical 30 minutes after the window closes (or 30 minutes before on-peak, if that comes first), and again when on-peak starts, when the panel then still reads the raised reserve or cannot be read (a reading that is not a valid reserve, such as the 0 a reconnecting panel reports, counts as unread). Each page is decided once, when it falls due, and none goes out after that on-peak period has ended; a write the panel never took (it still read its earlier reserve once the apply window, or the write's re-sends, had passed) is not paged. After a restart across that time, a restore the add-on can send (including that of a write whose confirmation was lost, when the panel reads it raised) is sent first and the page waits up to 10 minutes for it to read back. A page heard on another day than the on-peak it warns of names that day ("on-peak pricing starts on Monday at 4:00 PM"). The push always goes; the spoken page follows the broadcast quiet hours, as every critical announcement does. The push says the restore keeps being retried only while it still is; when the panel cannot be read, it says the restore is sent once the panel reports again (if it still reads the raised reserve). After a restart just after the restore was sent, the page also waits up to 10 minutes for the panel's first reading.
+- The morning summary says the reserve was restored only once the panel reports the restored reserve. If the panel has not reported it 5 minutes after the restore was accepted, the summary says the restore was sent and is not yet confirmed. It used to say "restored" as soon as the EcoFlow cloud accepted the restore.
+- While a restore has not read back and the panel still reads the raised reserve, or cannot be read, the next evening's charge is not armed, and its notice says why: the record that pages and measures for the stuck restore stays in place, so a Friday night's stuck restore is still paged when Monday's on-peak starts.
+- A backup reserve of 10–50 % set outside the add-on while the night's raise stands (the same value on two readings at least five minutes apart, so one set in the last minutes before the restore is restored over) is left as set: the night counts as finished, its force charge switches off, a notification says so, and the card no longer offers Cancel for it. On a night the panel granted only part of the raise, a later reading within what the night asked for is the night's own write: it is restored at the window close as usual, and a restore that leaves the panel reading it is paged and held as the raised reserve.
+- While a restore has not taken and the panel still reads the raised reserve, the on-peak "battery idle while the grid is used" and grid-charging notices measure against the reserve as it was before the raise, from five minutes after the restore was sent; a restore that reads back within that time, as one that goes to plan does, changes nothing. The runway and below-reserve alarms are unchanged.
+- A reserve-floor request refused while a night-charge write holds the reserve up now says when the reserve is restored.
+
+**Night-charge card**
+
+- The card offers Cancel in every shape it takes: beside a hold, beside an incomplete or out-of-date plan, and when its status cannot be read. Beside a hold or a missing plan, when a write is armed, it says the write still stands, instead of that nothing will be charged. A status that has not loaded after 15 seconds shows the unavailable card, with its Cancel, instead of "Loading…".
+- A restore not yet confirmed after a cancel is shown as a warning.
+
+**API**
+
+- `POST /api/night-charge/cancel` takes an optional body `{ "leg": "cost" | "backup" }`; with none it cancels the charge, as before. `GET /api/night-charge/status` lists the charge cycle's legs (`legs`); every cycle armed in this release has the one overnight leg.
+
+**Updating**
+
+- No options change. The night-charge ledger gains columns for the charge cycle and the preview, added on the first start. A night already armed when the update installs keeps the timing it was armed with. Updating restarts the add-on.
+
 ## 1.188.1
 
 ### Only fresh readings are saved; while a battery reports nothing of its own, the Energy dashboard and the energy flow read the panel's meters

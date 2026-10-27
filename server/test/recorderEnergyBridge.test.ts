@@ -121,7 +121,7 @@ test('★★★ a panel PV field that reads the solar the Cores take in is trust
     assert.deepEqual(p.rec.batteryLifetimeDebug().bridge.trustedSlots, [], 'one reading proves nothing: inferred while the check is pending');
     assert.equal(p.rec.batteryLifetimeDebug().bridge.pvChecks[0].verdict, 'pending');
     assert.equal(p.rec.batteryLifetimeDebug().bridge.lastRollup?.slots[0].basis, 'inferred', 'the rollup books the inferred basis until the field is trusted');
-    // v1.189.1 — the power sensors read the present field at once, unchecked: PV + battery = the slot meter.
+    // v1.190.1 — the power sensors read the present field at once, unchecked: PV + battery = the slot meter.
     const early = p.rec.bridgedFleetFlow({ fleetPv: 0, fleetBatteryNet: 0 }, p.store.get().devices, p.clock);
     assert.deepEqual([early.ready, early.fleetPv, early.fleetBatteryNet], [true, 7500, 3 * 500 - 7500], 'published before the check, on the field');
     assert.deepEqual(early.slots.map((s) => s.basis), ['unchecked', 'unchecked', 'unchecked']);

@@ -14,7 +14,7 @@ import { DPU_MAX_PACKS, DPU_PACK_NAMEPLATE_WH } from './hwSpec.js';
 import { getWeather, coveringRadiationEpoch, RADIATION_LABEL_LAG_HOURS, type WeatherHour, type WeatherForecast } from './weather.js';
 import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2, secondaryShp2s } from './shp2Membership.js';
 import { sliceByTsInclusive } from './backtest.js';
-import { integrateWh, startOfLocalDayMs } from './aggregator.js';
+import { integrateWh, startOfLocalDayMs, windowIntegrator } from './aggregator.js';
 // v1.191.0 (lane A, T13/T15/CA26) — every local hour, weekday, date and day step in the site zone.
 import {
   siteHour, siteDow, siteLocalParts, siteYmd, siteDayStartMs, siteShiftDaysMs, siteTimeZone, addDaysYmd, zonedWallTimeMs,
@@ -1194,7 +1194,7 @@ export interface ForecastHour {
 }
 
 export interface HourResponse {
-  hour: number;             // 0-23 local hour-of-day
+  hour: number;             // 0-23 hour-of-day in the site zone (siteHour)
   coeff: number | null;     // learned W of PV per W/m² of GHI; null = insufficient data
   /** Within-slot Pearson r². DIAGNOSTIC ONLY (v1.20.0, F21): in a low-variance
    *  climate this is degenerate by construction (near-constant per-slot GHI ⇒
@@ -4542,7 +4542,7 @@ const SHADE_DROP_THRESHOLD = 0.18;   // ≥ 18% under model = "shaded"
 const SHADE_OBSERVE_HISTORY_MS = 45 * 24 * 60 * 60 * 1000;
 
 export interface ShadeHour {
-  hour: number;             // 0-23 local
+  hour: number;             // 0-23 in the site zone (siteHour)
   observedW: number;        // median observed PV across clear-sky days
   expectedW: number;        // median predicted PV across the same days
   shortfallPct: number;     // (expected − observed) / expected × 100
@@ -5296,7 +5296,7 @@ function computeMinedEvWindowPrediction(
   // (minutes >= 30 ⇒ +1 hour, else current hour). Exactly :30 rounds UP to
   // the next hour, matching standard "round half up" semantics. When the
   // rounding pushes past 23:59, dayOfWeek advances too (handled by feeding
-  // the rounded timestamp back through Date).
+  // the rounded timestamp back through siteLocalParts).
   const groups = new Map<string, { records: typeof sessions; }>();
   for (const s of sessions) {
     const { dow, hr } = roundedHourOf(s.startTs);
@@ -6951,7 +6951,7 @@ export function computeConfidenceSnapshot(
  * breakdown: kWh-direct-to-load, kWh-to-battery, kWh-from-battery, and
  * grid-imported kWh — and the "solar fraction of load" (% of household
  * consumption that was met by solar, directly or via battery).
- * Rolling 7-day window by default. Cached 5 min.
+ * Rolling 7-day window by default. Cached 15 min (SELF_CONSUMPTION_TTL_MS).
  * =================================================================== */
 
 const SELF_CONSUMPTION_TTL_MS = 15 * 60 * 1000; // v0.9.82 — staggered warm; 7-day aggregate, 15-min freshness ample
@@ -7118,14 +7118,22 @@ export function computeSelfConsumption(
   recorder: Recorder,
   windowDays = 7,
 ): SelfConsumption {
-  const key = `d${windowDays}`;
+  // v1.191.3 — the entry's basis: the house panel whose load and grid it reads, the home Cores it
+  // integrates live (homeModelSns) and those it restores from their own record (homeRestoredSns). With
+  // every home Core cloud-dark the model is empty, and only the restored Cores and the panel say what
+  // the value summed: a dark Core joining, leaving or returning to the source list (also inside the
+  // chokepoint's deferred re-arrival window), a Core's first projection, a projected Core leaving the
+  // list and a re-pinned house panel each move the key, and the value is rebuilt on the new map.
+  const shp2 = findShp2(devices);
+  const modelSns = homeModelSns(devices);
+  const restoredSns = homeRestoredSns(devices);
+  const key = `d${windowDays}|${shp2?.sn ?? ''}|${modelSns.join(',')}|${restoredSns.join(',')}`;
   if (selfConsumptionCache && selfConsumptionCache.key === key && Date.now() - selfConsumptionCache.ts < SELF_CONSUMPTION_TTL_MS) {
     return selfConsumptionCache.value;
   }
   const now = Date.now();
   const since = now - windowDays * 86_400_000;
   const list = Object.values(devices);
-  const shp2 = findShp2(devices);
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<
     DeviceSnapshot & { projection: DpuProjection }
   >;
@@ -7300,7 +7308,17 @@ export function computeSelfConsumption(
   // loadKwh=0 / partial pvKwh and served it for the full TTL (observed live
   // after the v0.15.12 update: loadKwh=0, pvKwh=184 of 527). An incomplete
   // snapshot may be returned, but never latched.
-  if (dpus.length > 0 && shp2 != null && cacheWritable()) selfConsumptionCache = { ts: now, key, value };
+  //
+  // v1.191.3 — or with every home Core known dark: no Core projected, the panel listing Cores that are
+  // restored from their own record (homeRestoredSns), none of them pending (homeBasisPending, the
+  // v1.191.2 basis of the day-forecast cache). The value then sums each connected Core's recorded
+  // energy and the panel's load, as it does for a Core dark beside a projected one, and the key above
+  // rebuilds it when that basis moves. Before, it was rebuilt on every read while the whole fleet was
+  // dark (and again inside carbon's). Still never latched: a fleet with no projection, a DPU with no
+  // panel (the v0.15.13 boot-partial), and, with no Core projected, a panel listing no Core or a Core
+  // listed online before its first quota inside HOME_BASIS_PENDING_MAX_MS of the worker's start.
+  const knownDark = restoredSns.length > 0 && !homeBasisPending(devices, now);
+  if ((dpus.length > 0 || knownDark) && shp2 != null && cacheWritable()) selfConsumptionCache = { ts: now, key, value };
   return value;
 }
 
@@ -7871,7 +7889,7 @@ export function computeEquipmentHealth(
  * =================================================================== */
 
 export interface ClippingHour {
-  hour: number;           // 0-23 local hour-of-day
+  hour: number;           // 0-23 hour-of-day in the site zone (siteHour)
   observedW: number;      // fleet-total average PV that hour
   modelW: number | null;  // what the learned model says the array could have made
   clippedW: number;       // modelW − observedW (when at peak and modelW > observedW)
@@ -8087,7 +8105,7 @@ export interface OpportunisticLoad {
 }
 
 export interface CurtailmentHour {
-  hour: number;           // 0-23 local hour-of-day
+  hour: number;           // 0-23 hours after the site day's midnight (startOfLocalDayMs)
   surplusW: number;       // mean curtailed power in this hour
   curtailedKwh: number;   // surplusW × hour fraction we walked
   socAvg: number;         // mean SoC across home DPUs during this hour
@@ -8951,7 +8969,7 @@ export function apsSeasonIsSummer(nowMs: number): boolean {
  * no representation at all.
  *
  * `rateAt` also resolves each hour in the model's zone (America/Phoenix when this was written;
- * the site zone, siteTime.ts, since v1.191.0), where `onPeakAt` read `new Date().getHours()` —
+ * the site zone, siteTime.ts, since v1.191.0), where `onPeakAt` read `new Date(ts).getHours()` —
  * the HOST clock: the same answer on this Pi, wrong on any host in another zone. Since v1.191.0
  * `onPeakAt` reads the site hour and weekday too (siteHour / siteDow).
  *
@@ -9209,6 +9227,13 @@ export function computeTariffReport(
   // v1.52.0 — resolve the cost basis once per report from the CONFIRMED tariff
   // (APS R-EV when set), not the stale flat-rate assumption.
   const tariffCents = resolveTariffCents(now);
+  // v1.191.3 — one integrator per series: each hour below is handed only that hour's samples and the
+  // one before it (windowIntegrator), not the whole week's, with an identical result. The hourly
+  // integrateWh calls had filtered every 7-day series twice per hour, 168 hours a tally, and the
+  // report is rebuilt on every read while no Core is projected (PERFORMANCE.md §4e).
+  const acInByHour = homeDpus.map((d) => windowIntegrator(dpuAcInSeries.get(d.sn) ?? []));
+  const loadByHour = windowIntegrator(loadSeries);
+  const gridHomeByHour = windowIntegrator(gridHomeSeries);
   const tally = (sinceMs: number) => {
     let gridCost = 0;
     let loadValue = 0;
@@ -9217,18 +9242,18 @@ export function computeTariffReport(
       const rate = hourlyRateCents(t, tariffCents) / 100;
       let gridWh = 0;
       let loadWh = 0;
-      for (const d of homeDpus) {
-        gridWh += integrateWh(dpuAcInSeries.get(d.sn) ?? [], t, tEnd).wh;
+      for (const acInHour of acInByHour) {
+        gridWh += acInHour(t, tEnd).wh;
       }
       if (shp2) {
-        loadWh += integrateWh(loadSeries, t, tEnd).wh;
+        loadWh += loadByHour(t, tEnd).wh;
       }
       // v0.93.0 (audit #5) — take the whole-home grid superset when trusted (see the
       // gridHomeTrusted derivation above). max() keeps the DPU-charging ac_in if it ever
       // exceeds the SHP2 main for the hour; on a DPU-only install or the untrusted ramp
       // this branch never runs, so ac_in is used unchanged.
       if (shp2 && gridHomeTrusted) {
-        gridWh = Math.max(gridWh, integrateWh(gridHomeSeries, t, tEnd).wh);
+        gridWh = Math.max(gridWh, gridHomeByHour(t, tEnd).wh);
       }
       gridCost += (gridWh / 1000) * rate;
       // v0.10.4 — value only the solar+battery-served load (subtract grid),

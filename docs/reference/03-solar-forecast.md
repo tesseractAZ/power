@@ -469,6 +469,14 @@ predictor's training set. Cached `FORECAST_SKILL_TTL_MS = 1 h`, keyed by
 one whose model was fitted on other home Cores than the current map's
 (`DayForecast.solarModelSns`), is never scored (empty, uncached).
 
+Each report built on the forecast (skill, band, multi-day, runway, clipping, forecast alerts)
+reads the forecast before its own cache. Since v1.191.2 that read is a cache hit, about
+0.5 µs on the development machine, also with every home Core dark. Checking a builder's own
+TTL first was evaluated for v1.191.3 and declined: it saves no forecast build (their count is
+set by the 30-min forecast TTL and the alarm feed's requests) and, to save anything, it would
+serve a skill, band or multi-day entry scored on a superseded forecast (the dark-fleet
+rebuilds section of `docs/PERFORMANCE.md`).
+
 **Irradiance basis (v1.173.0, GHI stage 2).** `ghi(h)` depends on the `ghiBasis`
 argument. `'first-write'` is the default and matches the pre-v1.173.0 behaviour exactly:
 recorder `ghi_wm2` (the first value written for each hour, a ~3–4-day-lead forecast)

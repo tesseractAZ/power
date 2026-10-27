@@ -736,12 +736,12 @@ test('★★★ mqtt-discovery: every mid-day figure carries a basis attribute; 
 });
 
 /**
- * v1.189.0 (review) → v1.189.1 — a null these sensors publish reads unknown in Home Assistant, with
+ * v1.189.0 (review) → v1.190.1 — a null these sensors publish reads unknown in Home Assistant, with
  * no warning. Jinja renders a JSON null as the string "None", and HA's MQTT sensor maps the "None"
  * payload to unknown for EVERY sensor type, ahead of any parsing and with no warning (core
  * mqtt/sensor.py, PAYLOAD_NONE, 2026.10). v1.189.0 made the mid-day window bounds text sensors on
  * the premise that a timestamp sensor parses that payload as a date and logs "Invalid state message"
- * on every 30 s publish; it does not, and the bounds then showed raw ISO 8601 strings. v1.189.1
+ * on every 30 s publish; it does not, and the bounds then showed raw ISO 8601 strings. v1.190.1
  * restores device_class 'timestamp' on the two bounds, so HA shows them as times; their template
  * renders a null as "None", the one payload a timestamp sensor reads as unknown ("unknown" is no
  * datetime: a timestamp sensor warns on it). The refresh and the role stay text sensors and keep

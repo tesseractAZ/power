@@ -114,6 +114,8 @@ Frozen, unedited and not part of the printable manual:
   that were section 2.6 of chapter 10.
 - [operations-audits.md](../history/operations-audits.md): sections 12i–12o of chapter 12 and the note on the
   removed HACS cards from chapter 11.
+- [performance-record-1.md](../history/performance-record-1.md): section 4b of the
+  [performance record](../PERFORMANCE.md), the analytics path's first runtime measurement (2026-09-11).
 - [reference-plant-notes.md](../history/reference-plant-notes.md): the reference plant's own Core roster and
   its circuit 1 wiring note, from chapter 2 (a circuit name replaced by an example).
 

@@ -141,7 +141,7 @@ export interface DeviceSnapshot {
   /** v1.188.1 — set on every panel by snapshotForClient (shp2Membership.ts panelForClient): the
    *  server's verdict on that panel's reading (shp2ReadbackFresh). The card keys on it. */
   readbackFresh?: boolean;
-  /** v1.189.1 — set on every panel by panelForClient: which of the panel's two backup timers
+  /** v1.190.1 — set on every panel by panelForClient: which of the panel's two backup timers
    *  applies (backupTimerGate), the gate /api/ha-state publishes backup_charge_minutes and
    *  backup_discharge_minutes through, so the card and the sensors agree. */
   backupTimers?: { charge: boolean; discharge: boolean };
