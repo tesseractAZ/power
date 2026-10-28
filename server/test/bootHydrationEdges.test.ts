@@ -287,7 +287,7 @@ test('★★★ (c) storm-prep reads only NWS: during an unhydrated outage an en
   assert.equal(getAlertOnset(id), undefined, '★ the NWS answer is evidence: the ended storm\'s onset is pruned');
   offset += 11 * 60_000;
   await until(() => a.has('boot reconcile'), 'the boot reconcile', a.logs);
-  assert.ok(a.pushes.includes(`EcoFlow · Resolved: ${title}`), `★ the ended storm resolves at the sweep: ${a.pushes.join(' | ')}`);
+  assert.ok(a.pushes.includes(`Power · Resolved: ${title}`), `★ the ended storm resolves at the sweep: ${a.pushes.join(' | ')}`);
 
   offset += HOUR; // a NEW warning of the same event type
   storms = [{ id, severity: 'warning', category: 'Grid', source: 'learned', device: 'System', title, detail: 'in effect now' }];
@@ -338,7 +338,7 @@ test('★★★ (c) the alarm-host self-alerts are not held for hydration; offli
 
     offset += 6 * 60_000; // past the warm-up window, still unhydrated
     await until(() => a.has('boot reconcile'), 'the boot reconcile', a.logs);
-    assert.ok(a.pushes.includes('EcoFlow · Resolved: Alarm host power — under-voltage'), `★ the host alert resolves: ${a.pushes.join(' | ')}`);
+    assert.ok(a.pushes.includes('Power · Resolved: Alarm host power — under-voltage'), `★ the host alert resolves: ${a.pushes.join(' | ')}`);
     assert.equal(getAlertOnset(hp), undefined, '★ its onset is pruned at the window counted from boot');
     assert.equal(a.pushes.some((p) => p.includes('Resolved: Core 2 offline')), false, 'the device id is still held');
     assert.ok(a.has('HELD — "Core 2 offline" (no complete poll yet'));

@@ -1,6 +1,6 @@
 #!/usr/bin/with-contenv bashio
 # ==============================================================================
-# EcoFlow Panel — s6 service runner.
+# Power — s6 service runner.
 # Translates the add-on's Options (Configuration tab in HA) into the env vars
 # the Node server expects, then execs npm start.
 # ==============================================================================

@@ -157,7 +157,7 @@ export function reachesAPhone(cfg: NotifyConfig): boolean {
  * The drawer must show ACTIVE conditions. Previously a "Resolved:" send re-`create`d the
  * same card, so a cleared condition sat in HA's notification section forever until the
  * operator dismissed it by hand — observed live:
- *   `ecoflow_panel_baseline_pair6_w_...` → "EcoFlow · Resolved: West Air conditioner load
+ *   `ecoflow_panel_baseline_pair6_w_...` → "Power · Resolved: West Air conditioner load
  *    unusual for the hour … (condition cleared)"
  * A drawer full of resolved cards is worse than useless on an alarm system: it trains the
  * operator to ignore it. The resolve RECORD already lives in the app's cleared-anomalies log.

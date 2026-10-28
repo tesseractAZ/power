@@ -26,6 +26,7 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DayForecast } from '../src/analytics.js';
+import { forecastArchivable } from '../src/forecastArchiveGate.js';
 
 const { getDayForecast, resetForecastCachesForTesting, resetWorkerReportCaches, computeProbabilisticForecast } = await import('../src/analytics.js');
 const { setWeatherCacheForTesting, clearWeatherTestOverride } = await import('../src/weather.js');
@@ -103,6 +104,7 @@ test('★★★ every home Core dark, the panel projected: the complete forecast
   assert.equal(first.homeDpusConnected, 3);
   assert.deepEqual(first.solarModelSns, [], 'no Core is projected: the model check is empty on both sides');
   assert.equal(first.forecastPvWhNext24Display, 24 * (1500 + 1100 + 700), 'the display figures re-add each connected Core\'s own recorded PV');
+  assert.equal(forecastArchivable(first), false, 'v1.191.4: the dark-fleet forecast is short of the display figure and is not archived');
   const scans = pvScans;
   assert.ok(scans > scans0, 'the build read each connected Core\'s own recorded PV');
   tick(60_000);
@@ -126,6 +128,11 @@ test('★★★ a Core that gains a projection is rebuilt at once and never serv
   assert.ok(pvScans > scans, 'rebuilt');
   assert.deepEqual(third.solarModelSns, [A]);
   assert.deepEqual(encode(third), await freshBuild(back), 'what is served equals a fresh build on the same map');
+  assert.equal(forecastArchivable(third), false, 'v1.191.4: two Cores still dark, so the PV sum is short and not archived');
+  tick();
+  const all = await getDayForecast({ ...back, [B]: core(B, true), [C]: core(C, true) }, history, () => {});
+  assert.equal(all.forecastPvWhNext24, all.forecastPvWhNext24Display, 'every Core projected: the two sums agree by contract');
+  assert.equal(forecastArchivable(all), true, 'v1.191.4: and the forecast is archived');
 });
 
 test('★★ a fleet with no projection at all (the boot device list) still does not latch', async (t) => {

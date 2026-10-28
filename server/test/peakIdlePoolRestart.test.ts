@@ -101,7 +101,7 @@ function start(): Run {
 }
 const IDLE_TITLE = 'Buying grid power on-peak while the battery pool sits idle';
 const notices = () => sent.filter((s) => s.severity !== 'resolved' && s.title.includes(IDLE_TITLE));
-const resolves = () => sent.filter((s) => s.title.startsWith('EcoFlow · Resolved:') && s.title.includes(IDLE_TITLE));
+const resolves = () => sent.filter((s) => s.title.startsWith('Power · Resolved:') && s.title.includes(IDLE_TITLE));
 async function passes(r: Run, n: number): Promise<void> {
   const at = r.mon.stats().evalPasses;
   await until(() => r.mon.stats().evalPasses >= at + n, 5_000, `${n} evaluation passes`, r.logs);

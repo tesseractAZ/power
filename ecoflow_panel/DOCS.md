@@ -278,7 +278,7 @@ Until the rates are confirmed, the cost and savings figures use the flat rate,
 ## Entities and Energy Dashboard
 
 With MQTT discovery on, Power publishes about 100 sensors and binary sensors under one device,
-**EcoFlow Panel**, plus an energy and a power sensor for each panel circuit and four
+**Power**, plus an energy and a power sensor for each panel circuit and four
 alarm-priority switches.
 Every entity, its unique_id, meaning and unit:
 [the entity reference](https://github.com/tesseractAZ/power/blob/main/docs/guide/entities.md).

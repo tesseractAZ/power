@@ -625,8 +625,8 @@ same flapping on the dark fleet falls from 388 to 295. Self-consumption, carbon 
 byte-identical to v1.191.2's (`darkFleetEnergyIdentity.test.ts`).
 
 **Expected on the Pi**, scaled from `dense11`: 127 ms a minute less is about 0.7% of a Pi core,
-so with every Core still dark the worker's 1.80% (§4d) should fall to about 1.1%. The reading
-there is added once the release runs.
+so with every Core still dark the worker's 1.80% (§4d) should fall to about 1.1%. Measured
+there after the release: 0.73% (4:44 of CPU over 10 h 45 min, 2026-10-27), from 1.6–1.7%.
 
 **Reading a report's own cache before the forecast: declined.** The forecast read is a cache hit
 since v1.191.2, 0.45 µs over a bare await (M5); 300 random-phase 2-h runs of the schedule give

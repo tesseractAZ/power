@@ -118,6 +118,7 @@ import { startMqttDiscovery } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
 import { getWeather, createGhiTickLogger } from './weather.js';
+import { forecastArchivable } from './forecastArchiveGate.js';
 import type { WeatherForecast } from './weather.js';
 import { computePackRiskV2 } from './ml.js';
 import { initAnalyticsClient } from './analyticsClient.js';
@@ -2427,7 +2428,9 @@ const ghiPersistTick = setInterval(() => {
       if (recorder) {
         try {
           const fc = await analytics.report('forecast');
-          if (fc && Number.isFinite(fc.forecastPvWhNext24)) {
+          // v1.191.4 — only on a complete PV basis: with a Core dark the sum is short (0 with
+          // every Core dark), and the calibrator would score it as a missed forecast.
+          if (forecastArchivable(fc)) {
             recorder.recordForecastArchive(fc.forecastPvWhNext24, Date.now());
           }
         } catch (e: any) {
@@ -2550,7 +2553,7 @@ const stopTuiData = (() => {
 })();
 
 // HA MQTT Discovery — opt-in. When wired to the user's HA MQTT broker, every
-// sensor we expose auto-registers under the "EcoFlow Panel" device with no
+// sensor we expose auto-registers under the "Power" device with no
 // YAML edit required. Falls back silently when the feature is disabled.
 let stopMqttDiscovery: (() => void) | null = null;
 try {
@@ -8035,7 +8038,7 @@ function familyOf(entityId: string, attrs: Record<string, unknown>): string {
 }
 
 await app.listen({ host: config.host, port: config.port });
-app.log.info(`EcoFlow panel API listening on http://${config.host}:${config.port}`);
+app.log.info(`Power API listening on http://${config.host}:${config.port}`);
 // v1.130.0 — SAY WHICH BUILD THIS IS. The banner predates the release cadence and
 // never carried a version, so after 13 releases and 15 restarts on 2026-09-04 no
 // line in the add-on's own log could say which build produced any given behaviour.

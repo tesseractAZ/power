@@ -485,7 +485,7 @@ test('★★★ a worker that answers once and then hangs: its alert is CARRIED,
     assert.ok(mon.activeAlertIds().includes(carryId), '★ still tracked — a timed-out report is not a clear');
     assert.ok((st.get().alerts ?? []).some((a) => a.id === carryId), 'and still on screen');
     assert.ok(mon.history().every((c) => c.alert.id !== carryId), 'no cleared record');
-    assert.equal(sent.filter((s) => s.title.startsWith('EcoFlow · Resolved:')).length, 0, 'no false "Resolved:" push');
+    assert.equal(sent.filter((s) => s.title.startsWith('Power · Resolved:')).length, 0, 'no false "Resolved:" push');
     assert.equal(curtailCalls, 2, 'the hung request is joined by later ticks, not re-sent');
     assert.ok(logs.some((l) => /alert-feed: curtailmentAlerts still running after its \d+ ms budget — carrying its last good value/.test(l)));
     const feed = mon.stats().alertFeeds.find((f) => f.name === 'curtailmentAlerts')!;

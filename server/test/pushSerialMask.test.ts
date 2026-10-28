@@ -33,7 +33,7 @@ test('★★★ the per-device telemetry-gap push carries no serial in its title
   for (const name of [(_: string) => 'Core 2', (_: string) => null]) {
     const [alert] = outageAlerts([gap], now, opts, name);
     assert.ok(SERIAL.test(alert.detail) || SERIAL.test(alert.device ?? ''), 'the alert itself names the serial (it stays on the host)');
-    const msg = { title: `EcoFlow · [Medium] ${alert.title} — ${alert.device}`, body: alert.detail, severity: 'warning' as const, dedupId: alert.id };
+    const msg = { title: `Power · [Medium] ${alert.title} — ${alert.device}`, body: alert.detail, severity: 'warning' as const, dedupId: alert.id };
     const p = buildMobilePushPayload(msg, { criticalBypassDnd: true }) as { title: string; message: string; data: { tag: string } };
     assert.ok(!SERIAL.test(JSON.stringify(p)), `no serial leaves in the push: ${JSON.stringify(p)}`);
     assert.ok(p.message.includes('…XX0002'), 'the operator can still tell which device: its last six characters');

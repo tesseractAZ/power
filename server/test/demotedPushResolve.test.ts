@@ -118,10 +118,10 @@ async function demotedEpisode(fam: string, afterPush: () => void = () => {}) {
 test('★★★ 10-01 13:16: a push demoted to [Low] by auto-tune Rule 2 gets its "Resolved:" (the card dismissal) when it clears', { timeout: 20_000 }, async () => {
   const { sent, logs } = await demotedEpisode(FAM_A);
   assert.equal(sent.length, 2, JSON.stringify(sent));
-  assert.equal(sent[0].title, `EcoFlow · [Low] Noisy ${FAM_A} — Core 5`);
+  assert.equal(sent[0].title, `Power · [Low] Noisy ${FAM_A} — Core 5`);
   assert.equal(sent[0].severity, 'info', 'delivered at the demoted tier');
   assert.ok(logs.some((l) => l.includes(`(severity warning→info via auto-tune — Rule 2 (warning short-clears) on family "${FAM_A}"`)), 'the demotion is the precondition');
-  assert.equal(sent[1].title, `EcoFlow · Resolved: Noisy ${FAM_A} — Core 5`);
+  assert.equal(sent[1].title, `Power · Resolved: Noisy ${FAM_A} — Core 5`);
   assert.equal(sent[1].severity, 'resolved', 'the resolve carries persistent_notification.dismiss and the same-tag replacement');
 });
 
@@ -129,7 +129,7 @@ test('★★★ the priority-disabled exception is kept: a [Low] push whose ISA 
   try {
     const { sent, logs } = await demotedEpisode(FAM_B, () => { updateAlertSettings({ priorityEnabled: { high: false } }, 'test'); });
     assert.equal(sent.length, 1, JSON.stringify(sent));
-    assert.match(sent[0].title, /^EcoFlow · \[Low\] /);
+    assert.match(sent[0].title, /^Power · \[Low\] /);
     assert.ok(logs.some((l) => l.includes(`resolve suppressed "Noisy ${FAM_B} — Core 5" (warning) — its priority (High) is turned off in Alert Settings`)));
   } finally {
     updateAlertSettings({ priorityEnabled: { high: true } }, 'test');

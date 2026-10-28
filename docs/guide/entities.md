@@ -3,7 +3,7 @@
 Power publishes its readings to Home Assistant through MQTT discovery. Turn it on with
 `MQTT_DISCOVERY_ENABLED` and point `MQTT_DISCOVERY_HOST`, `MQTT_DISCOVERY_USER` and
 `MQTT_DISCOVERY_PASS` at your broker (for example the Mosquitto add-on). Every entity appears
-under one device, **EcoFlow Panel**. This page has one row per entity; `scripts/check-docs.mjs`
+under one device, **Power**. This page has one row per entity; `scripts/check-docs.mjs`
 and the test suite hold it to what the discovery code publishes.
 
 **How entities are named.** Home Assistant mints an entity_id once, the first time it discovers
@@ -27,11 +27,11 @@ While a Core connected to the panel has no reading of its own, Fleet PV and Batt
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_fleet_pv` | `ecoflow_fleet_pv_watts` | Solar power into the Cores (MPPT input, DC); a Core with no reading of its own counts from the panel | W |
-| `sensor.ecoflow_panel_panel_load` | `ecoflow_panel_load_watts` | Load on the panel's circuits, summed | W |
-| `sensor.ecoflow_panel_ac_import` | `ecoflow_ac_import_watts` | AC power into the Cores' inputs (grid charging); a Core with no reading of its own counts from the AC its panel slot takes in, never its last reading | W |
-| `sensor.ecoflow_panel_battery_net` | `ecoflow_fleet_battery_net_watts` | Net battery power across the packs; positive is discharging; a Core with no reading of its own counts from its panel slot | W |
-| `sensor.ecoflow_panel_grid_power_home` | `ecoflow_grid_home_watts` | Whole-home grid power at the panel's main | W |
+| `sensor.power_fleet_pv` | `ecoflow_fleet_pv_watts` | Solar power into the Cores (MPPT input, DC); a Core with no reading of its own counts from the panel | W |
+| `sensor.power_panel_load` | `ecoflow_panel_load_watts` | Load on the panel's circuits, summed | W |
+| `sensor.power_ac_import` | `ecoflow_ac_import_watts` | AC power into the Cores' inputs (grid charging); a Core with no reading of its own counts from the AC its panel slot takes in, never its last reading | W |
+| `sensor.power_battery_net` | `ecoflow_fleet_battery_net_watts` | Net battery power across the packs; positive is discharging; a Core with no reading of its own counts from its panel slot | W |
+| `sensor.power_grid_power_home` | `ecoflow_grid_home_watts` | Whole-home grid power at the panel's main | W |
 
 ## Battery pool and panel settings
 
@@ -39,15 +39,15 @@ The pool is the backup pool the panel reports. The reserve is the panel's own ba
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_backup_pool` | `ecoflow_backup_pool` | Backup pool charge | % |
-| `sensor.ecoflow_panel_backup_remaining` | `ecoflow_backup_remaining_kwh` | Energy left in the backup pool | kWh |
-| `sensor.ecoflow_panel_backup_capacity` | `ecoflow_backup_full_capacity_kwh` | Full capacity the panel reports for the pool (the packs' nameplate sum) | kWh |
-| `sensor.ecoflow_panel_backup_reserve_floor` | `ecoflow_backup_reserve_percent` | The panel's backup-reserve setting, read live; while a night-charge write holds the reserve up it shows the raised value (diagnostic) | % |
-| `sensor.ecoflow_panel_solar_backup_reserve` | `ecoflow_solar_backup_reserve_percent` | The panel's solar backup reserve setting (diagnostic) | % |
-| `sensor.ecoflow_panel_backup_reserve_enabled` | `ecoflow_backup_reserve_enabled` | Whether the panel's backup reserve is on; unknown while the panel's settings are unavailable (diagnostic) | on / off |
-| `sensor.ecoflow_panel_smart_backup_mode_code` | `ecoflow_smart_backup_mode_code` | The panel's smart-backup mode, as its raw code (diagnostic) | code |
-| `sensor.ecoflow_panel_backup_mode_code` | `ecoflow_backup_mode_code` | The panel's backup mode, as its raw code (diagnostic) | code |
-| `sensor.ecoflow_panel_overload_mode_code` | `ecoflow_overload_mode_code` | The panel's overload mode, as its raw code (diagnostic) | code |
+| `sensor.power_backup_pool` | `ecoflow_backup_pool` | Backup pool charge | % |
+| `sensor.power_backup_remaining` | `ecoflow_backup_remaining_kwh` | Energy left in the backup pool | kWh |
+| `sensor.power_backup_capacity` | `ecoflow_backup_full_capacity_kwh` | Full capacity the panel reports for the pool (the packs' nameplate sum) | kWh |
+| `sensor.power_backup_reserve_floor` | `ecoflow_backup_reserve_percent` | The panel's backup-reserve setting, read live; while a night-charge write holds the reserve up it shows the raised value (diagnostic) | % |
+| `sensor.power_solar_backup_reserve` | `ecoflow_solar_backup_reserve_percent` | The panel's solar backup reserve setting (diagnostic) | % |
+| `sensor.power_backup_reserve_enabled` | `ecoflow_backup_reserve_enabled` | Whether the panel's backup reserve is on; unknown while the panel's settings are unavailable (diagnostic) | on / off |
+| `sensor.power_smart_backup_mode_code` | `ecoflow_smart_backup_mode_code` | The panel's smart-backup mode, as its raw code (diagnostic) | code |
+| `sensor.power_backup_mode_code` | `ecoflow_backup_mode_code` | The panel's backup mode, as its raw code (diagnostic) | code |
+| `sensor.power_overload_mode_code` | `ecoflow_overload_mode_code` | The panel's overload mode, as its raw code (diagnostic) | code |
 
 ## Grid
 
@@ -55,9 +55,9 @@ Grid presence comes from one resolver shared with the alarms: the panel's own gr
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `binary_sensor.ecoflow_panel_off_grid` | `ecoflow_off_grid` | On when the grid is not present | on / off |
-| `binary_sensor.ecoflow_panel_shp2_grid_connected` | `ecoflow_shp2_grid_connected` | The panel's own grid-line flag; unknown while the panel is offline | on / off |
-| `sensor.ecoflow_panel_shp2_grid_status` | `ecoflow_shp2_grid_sta` | The panel's grid-status code, in words (diagnostic) | text |
+| `binary_sensor.power_off_grid` | `ecoflow_off_grid` | On when the grid is not present | on / off |
+| `binary_sensor.power_shp2_grid_connected` | `ecoflow_shp2_grid_connected` | The panel's own grid-line flag; unknown while the panel is offline | on / off |
+| `sensor.power_shp2_grid_status` | `ecoflow_shp2_grid_sta` | The panel's grid-status code, in words (diagnostic) | text |
 
 ## Runway and forecast
 
@@ -65,30 +65,30 @@ The runway is an hour-by-hour projection of the pool with the house islanded. Wh
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_runway_to_reserve` | `ecoflow_runway_to_reserve_hours` | Hours until the pool reaches its reserve; 999 when no crossing is projected | h |
-| `sensor.ecoflow_panel_runway_to_empty` | `ecoflow_runway_to_empty_hours` | Hours until the pool is empty; 999 when no crossing is projected | h |
-| `binary_sensor.ecoflow_panel_runway_projection_islanded_only` | `ecoflow_runway_projection_islanded_only` | On while the grid is carrying the house, so the runway is an outage projection | on / off |
-| `sensor.ecoflow_panel_forecast_pv_next_24h` | `ecoflow_forecast_pv_next_24h_kwh` | Forecast solar energy for the next 24 hours | kWh |
-| `sensor.ecoflow_panel_projected_low_soc` | `ecoflow_projected_low_soc` | Lowest pool charge in the forecast | % |
-| `binary_sensor.ecoflow_panel_projected_low_soc_islanded_only` | `ecoflow_projected_low_soc_islanded_only` | On while the grid is carrying the house, so the projected low is an outage projection | on / off |
-| `binary_sensor.ecoflow_panel_forecast_basis_incomplete` | `ecoflow_forecast_basis_incomplete` | On when the forecast is missing part of its basis (diagnostic) | on / off |
+| `sensor.power_runway_to_reserve` | `ecoflow_runway_to_reserve_hours` | Hours until the pool reaches its reserve; 999 when no crossing is projected | h |
+| `sensor.power_runway_to_empty` | `ecoflow_runway_to_empty_hours` | Hours until the pool is empty; 999 when no crossing is projected | h |
+| `binary_sensor.power_runway_projection_islanded_only` | `ecoflow_runway_projection_islanded_only` | On while the grid is carrying the house, so the runway is an outage projection | on / off |
+| `sensor.power_forecast_pv_next_24h` | `ecoflow_forecast_pv_next_24h_kwh` | Forecast solar energy for the next 24 hours | kWh |
+| `sensor.power_projected_low_soc` | `ecoflow_projected_low_soc` | Lowest pool charge in the forecast | % |
+| `binary_sensor.power_projected_low_soc_islanded_only` | `ecoflow_projected_low_soc_islanded_only` | On while the grid is carrying the house, so the projected low is an outage projection | on / off |
+| `binary_sensor.power_forecast_basis_incomplete` | `ecoflow_forecast_basis_incomplete` | On when the forecast is missing part of its basis (diagnostic) | on / off |
 
 ## Solar, curtailment and efficiency
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_pv_clipped_today` | `ecoflow_pv_clipped_kwh_today` | Solar energy clipped today (a daily total that restarts each day) | kWh |
-| `sensor.ecoflow_panel_pv_array_peak` | `ecoflow_pv_array_peak_watts` | Highest hourly solar power observed: the ceiling clipping is judged against (diagnostic) | W |
-| `binary_sensor.ecoflow_panel_pv_curtailment_active` | `ecoflow_pv_curtailment_active` | On while solar is being curtailed because the batteries are full | on / off |
-| `sensor.ecoflow_panel_pv_curtailment_surplus` | `ecoflow_pv_curtailment_surplus_watts` | Solar power going unharvested now | W |
-| `sensor.ecoflow_panel_pv_curtailed_today` | `ecoflow_pv_curtailment_kwh_today` | Solar energy curtailed today (a daily total that restarts each day) | kWh |
-| `sensor.ecoflow_panel_pv_curtailed_7d` | `ecoflow_pv_curtailment_kwh_7d` | Solar energy curtailed over the last 7 days | kWh |
-| `sensor.ecoflow_panel_charge_ceiling` | `ecoflow_charge_ceiling` | The Cores' configured maximum charge level, averaged: curtailment is judged against it (diagnostic) | % |
-| `sensor.ecoflow_panel_solar_soiling` | `ecoflow_soiling_drop_percent` | Estimated output loss from panel soiling | % |
-| `sensor.ecoflow_panel_solar_fraction_of_load` | `ecoflow_solar_fraction_of_load` | Share of household load met by solar | % |
-| `sensor.ecoflow_panel_pv_direct_use_ratio` | `ecoflow_direct_use_ratio` | Share of solar used directly by the house | % |
-| `binary_sensor.ecoflow_panel_self_consumption_coverage_partial` | `ecoflow_self_consumption_coverage_partial` | On when the self-consumption figures cover only some of the Cores (diagnostic) | on / off |
-| `sensor.ecoflow_panel_round_trip_efficiency` | `ecoflow_round_trip_efficiency` | Measured battery round-trip efficiency | % |
+| `sensor.power_pv_clipped_today` | `ecoflow_pv_clipped_kwh_today` | Solar energy clipped today (a daily total that restarts each day) | kWh |
+| `sensor.power_pv_array_peak` | `ecoflow_pv_array_peak_watts` | Highest hourly solar power observed: the ceiling clipping is judged against (diagnostic) | W |
+| `binary_sensor.power_pv_curtailment_active` | `ecoflow_pv_curtailment_active` | On while solar is being curtailed because the batteries are full | on / off |
+| `sensor.power_pv_curtailment_surplus` | `ecoflow_pv_curtailment_surplus_watts` | Solar power going unharvested now | W |
+| `sensor.power_pv_curtailed_today` | `ecoflow_pv_curtailment_kwh_today` | Solar energy curtailed today (a daily total that restarts each day) | kWh |
+| `sensor.power_pv_curtailed_7d` | `ecoflow_pv_curtailment_kwh_7d` | Solar energy curtailed over the last 7 days | kWh |
+| `sensor.power_charge_ceiling` | `ecoflow_charge_ceiling` | The Cores' configured maximum charge level, averaged: curtailment is judged against it (diagnostic) | % |
+| `sensor.power_solar_soiling` | `ecoflow_soiling_drop_percent` | Estimated output loss from panel soiling | % |
+| `sensor.power_solar_fraction_of_load` | `ecoflow_solar_fraction_of_load` | Share of household load met by solar | % |
+| `sensor.power_pv_direct_use_ratio` | `ecoflow_direct_use_ratio` | Share of solar used directly by the house | % |
+| `binary_sensor.power_self_consumption_coverage_partial` | `ecoflow_self_consumption_coverage_partial` | On when the self-consumption figures cover only some of the Cores (diagnostic) | on / off |
+| `sensor.power_round_trip_efficiency` | `ecoflow_round_trip_efficiency` | Measured battery round-trip efficiency | % |
 
 ## Energy counters
 
@@ -98,12 +98,12 @@ While a Core connected to the panel has no reading of its own (it is cloud-offli
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_pv_production` | `ecoflow_pv_lifetime_kwh` | Solar energy produced; while a Core has no reading of its own, its share counted at the panel | kWh |
-| `sensor.ecoflow_panel_home_consumption` | `ecoflow_load_lifetime_kwh` | Household energy consumed | kWh |
-| `sensor.ecoflow_panel_grid_import_home` | `ecoflow_grid_to_home_lifetime_kwh` | Grid energy imported by the home, at the panel's main | kWh |
-| `sensor.ecoflow_panel_grid_to_battery_charge` | `ecoflow_grid_import_lifetime_kwh` | Grid energy into the Cores' AC inputs, the battery-charging share; a Core with no reading of its own counts from its panel slot (diagnostic) | kWh |
-| `sensor.ecoflow_panel_battery_energy_in` | `ecoflow_battery_charge_lifetime_kwh` | Energy into the batteries; while a Core has no reading of its own, its share counted at the panel | kWh |
-| `sensor.ecoflow_panel_battery_energy_out` | `ecoflow_battery_discharge_lifetime_kwh` | Energy out of the batteries; while a Core has no reading of its own, its share counted at the panel | kWh |
+| `sensor.power_pv_production` | `ecoflow_pv_lifetime_kwh` | Solar energy produced; while a Core has no reading of its own, its share counted at the panel | kWh |
+| `sensor.power_home_consumption` | `ecoflow_load_lifetime_kwh` | Household energy consumed | kWh |
+| `sensor.power_grid_import_home` | `ecoflow_grid_to_home_lifetime_kwh` | Grid energy imported by the home, at the panel's main | kWh |
+| `sensor.power_grid_to_battery_charge` | `ecoflow_grid_import_lifetime_kwh` | Grid energy into the Cores' AC inputs, the battery-charging share; a Core with no reading of its own counts from its panel slot (diagnostic) | kWh |
+| `sensor.power_battery_energy_in` | `ecoflow_battery_charge_lifetime_kwh` | Energy into the batteries; while a Core has no reading of its own, its share counted at the panel | kWh |
+| `sensor.power_battery_energy_out` | `ecoflow_battery_discharge_lifetime_kwh` | Energy out of the batteries; while a Core has no reading of its own, its share counted at the panel | kWh |
 
 ## Cost and carbon
 
@@ -111,20 +111,20 @@ Money figures use the rates of the tariff `TARIFF_PLAN` names (the APS R-EV pres
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_grid_cost_today` | `ecoflow_tariff_today_cost` | Cost of today's grid import | currency |
-| `sensor.ecoflow_panel_solar_value_today` | `ecoflow_tariff_today_saved` | Value of today's solar used by the house | currency |
-| `sensor.ecoflow_panel_net_savings_7d` | `ecoflow_tariff_savings_7d` | Net savings over the last 7 days | currency |
-| `sensor.ecoflow_panel_grid_rate_now` | `ecoflow_grid_price_now` | Grid rate in force now; unknown until the rates are confirmed | currency/kWh |
-| `sensor.ecoflow_panel_co2_avoided_7d` | `ecoflow_carbon_kg_avoided_7d` | CO2 avoided over the last 7 days | kg |
-| `sensor.ecoflow_panel_co2_avoided_lifetime` | `ecoflow_carbon_lifetime_kg` | CO2 avoided, lifetime | kg |
-| `sensor.ecoflow_panel_equivalent_miles_not_driven` | `ecoflow_carbon_lifetime_miles` | Car miles not driven, lifetime equivalent | mi |
+| `sensor.power_grid_cost_today` | `ecoflow_tariff_today_cost` | Cost of today's grid import | currency |
+| `sensor.power_solar_value_today` | `ecoflow_tariff_today_saved` | Value of today's solar used by the house | currency |
+| `sensor.power_net_savings_7d` | `ecoflow_tariff_savings_7d` | Net savings over the last 7 days | currency |
+| `sensor.power_grid_rate_now` | `ecoflow_grid_price_now` | Grid rate in force now; unknown until the rates are confirmed | currency/kWh |
+| `sensor.power_co2_avoided_7d` | `ecoflow_carbon_kg_avoided_7d` | CO2 avoided over the last 7 days | kg |
+| `sensor.power_co2_avoided_lifetime` | `ecoflow_carbon_lifetime_kg` | CO2 avoided, lifetime | kg |
+| `sensor.power_equivalent_miles_not_driven` | `ecoflow_carbon_lifetime_miles` | Car miles not driven, lifetime equivalent | mi |
 
 ## Pack health
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_soonest_pack_eol` | `ecoflow_degradation_soonest_eol_years` | Years until the first pack is projected to reach end of life | yr |
-| `sensor.ecoflow_panel_peer_outlier_packs` | `ecoflow_degradation_peer_outliers` | Packs whose fade stands out from their peers | count |
+| `sensor.power_soonest_pack_eol` | `ecoflow_degradation_soonest_eol_years` | Years until the first pack is projected to reach end of life | yr |
+| `sensor.power_peer_outlier_packs` | `ecoflow_degradation_peer_outliers` | Packs whose fade stands out from their peers | count |
 
 ## Alarms and system health
 
@@ -132,24 +132,24 @@ Counts are of alerts active now.
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_critical_alerts` | `ecoflow_alert_critical_count` | Active threshold alerts at critical severity | count |
-| `sensor.ecoflow_panel_warning_alerts` | `ecoflow_alert_warning_count` | Active threshold alerts at warning severity | count |
-| `sensor.ecoflow_panel_learned_warnings` | `ecoflow_learned_warning_count` | Active learned warnings (peer comparison, self-baseline and forecast) | count |
-| `sensor.ecoflow_panel_high_priority_alarms_p2` | `ecoflow_alert_high_count` | Active alarms at High priority (P2) | count |
-| `sensor.ecoflow_panel_medium_priority_alarms_p3` | `ecoflow_alert_medium_count` | Active alarms at Medium priority (P3) | count |
-| `sensor.ecoflow_panel_low_priority_alarms_p4` | `ecoflow_alert_low_count` | Active alarms at Low priority (P4) | count |
-| `sensor.ecoflow_panel_fleet_devices_online` | `ecoflow_fleet_devices_online` | EcoFlow devices online | count |
-| `sensor.ecoflow_panel_cloud_wedged_devices` | `ecoflow_cloud_wedge_count` | Devices the cloud reports offline but the LAN can reach; 0 unless `ECOFLOW_DEVICE_REACHABILITY` is set (diagnostic) | count |
-| `sensor.ecoflow_panel_poll_health` | `ecoflow_poll_health` | `ok`, or why the last poll could not observe the alarm path (diagnostic) | text |
-| `sensor.ecoflow_panel_shp2_payload_frozen` | `ecoflow_shp2_content_frozen_s` | Seconds the panel's reading has repeated unchanged; 0 when it is live (diagnostic) | s |
-| `sensor.ecoflow_panel_system_outage_24h` | `ecoflow_system_outage_24h` | On if any data gap or outage occurred in the last 24 hours (diagnostic) | on / off |
-| `sensor.ecoflow_panel_system_outages_24h` | `ecoflow_system_outage_count_24h` | Data gaps and outages in the last 24 hours, all causes (diagnostic) | count |
-| `sensor.ecoflow_panel_power_outages_24h` | `ecoflow_system_power_outage_count_24h` | Times the add-on or host was down, not by a deliberate restart, in the last 24 hours (diagnostic) | count |
-| `sensor.ecoflow_panel_telemetry_gaps_24h` | `ecoflow_system_telemetry_gap_count_24h` | Cloud or MQTT stalls while the add-on stayed up, last 24 hours (diagnostic) | count |
-| `sensor.ecoflow_panel_device_telemetry_gaps_24h` | `ecoflow_system_device_gap_count_24h` | Times one device went silent for 6 hours or more while the others kept reporting, last 24 hours, including a device offline in the EcoFlow cloud that long (diagnostic) | count |
-| `sensor.ecoflow_panel_system_outage_minutes_24h` | `ecoflow_system_outage_minutes_24h` | Total minutes of gaps and outages in the last 24 hours (diagnostic) | min |
-| `sensor.ecoflow_panel_audible_alarm_channel` | `ecoflow_audible_channel_status` | Health of the spoken-alarm channel: reachable, UNREACHABLE, disabled or unknown (diagnostic) | text |
-| `sensor.ecoflow_panel_audible_speakers_reachable` | `ecoflow_audible_speakers_reachable` | Speakers that answered the last probe (diagnostic) | count |
+| `sensor.power_critical_alerts` | `ecoflow_alert_critical_count` | Active threshold alerts at critical severity | count |
+| `sensor.power_warning_alerts` | `ecoflow_alert_warning_count` | Active threshold alerts at warning severity | count |
+| `sensor.power_learned_warnings` | `ecoflow_learned_warning_count` | Active learned warnings (peer comparison, self-baseline and forecast) | count |
+| `sensor.power_high_priority_alarms_p2` | `ecoflow_alert_high_count` | Active alarms at High priority (P2) | count |
+| `sensor.power_medium_priority_alarms_p3` | `ecoflow_alert_medium_count` | Active alarms at Medium priority (P3) | count |
+| `sensor.power_low_priority_alarms_p4` | `ecoflow_alert_low_count` | Active alarms at Low priority (P4) | count |
+| `sensor.power_fleet_devices_online` | `ecoflow_fleet_devices_online` | EcoFlow devices online | count |
+| `sensor.power_cloud_wedged_devices` | `ecoflow_cloud_wedge_count` | Devices the cloud reports offline but the LAN can reach; 0 unless `ECOFLOW_DEVICE_REACHABILITY` is set (diagnostic) | count |
+| `sensor.power_poll_health` | `ecoflow_poll_health` | `ok`, or why the last poll could not observe the alarm path (diagnostic) | text |
+| `sensor.power_shp2_payload_frozen` | `ecoflow_shp2_content_frozen_s` | Seconds the panel's reading has repeated unchanged; 0 when it is live (diagnostic) | s |
+| `sensor.power_system_outage_24h` | `ecoflow_system_outage_24h` | On if any data gap or outage occurred in the last 24 hours (diagnostic) | on / off |
+| `sensor.power_system_outages_24h` | `ecoflow_system_outage_count_24h` | Data gaps and outages in the last 24 hours, all causes (diagnostic) | count |
+| `sensor.power_host_power_outages_24h` | `ecoflow_system_power_outage_count_24h` | Times the add-on or host was down, not by a deliberate restart, in the last 24 hours (diagnostic) | count |
+| `sensor.power_telemetry_gaps_24h` | `ecoflow_system_telemetry_gap_count_24h` | Cloud or MQTT stalls while the add-on stayed up, last 24 hours (diagnostic) | count |
+| `sensor.power_device_telemetry_gaps_24h` | `ecoflow_system_device_gap_count_24h` | Times one device went silent for 6 hours or more while the others kept reporting, last 24 hours, including a device offline in the EcoFlow cloud that long (diagnostic) | count |
+| `sensor.power_system_outage_minutes_24h` | `ecoflow_system_outage_minutes_24h` | Total minutes of gaps and outages in the last 24 hours (diagnostic) | min |
+| `sensor.power_audible_alarm_channel` | `ecoflow_audible_channel_status` | Health of the spoken-alarm channel: reachable, UNREACHABLE, disabled or unknown (diagnostic) | text |
+| `sensor.power_audible_speakers_reachable` | `ecoflow_audible_speakers_reachable` | Speakers that answered the last probe (diagnostic) | count |
 
 ## Host
 
@@ -157,11 +157,11 @@ The machine Power runs on, read from the kernel; each reads unknown where it can
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_host_soc_temperature` | `ecoflow_host_soc_temp` | Hottest thermal zone of the host (diagnostic) | °C |
-| `sensor.ecoflow_panel_host_event_loop_lag` | `ecoflow_host_evloop_lag` | How long the add-on's event loop is delayed (diagnostic) | ms |
-| `sensor.ecoflow_panel_host_memory_available` | `ecoflow_host_mem_available` | Host memory available (diagnostic) | MB |
-| `sensor.ecoflow_panel_host_data_disk_free` | `ecoflow_host_disk_free` | Free space on the data disk (diagnostic) | MB |
-| `sensor.ecoflow_panel_host_load_1m` | `ecoflow_host_load_1m` | Host load average, 1 minute (diagnostic) | — |
+| `sensor.power_host_soc_temperature` | `ecoflow_host_soc_temp` | Hottest thermal zone of the host (diagnostic) | °C |
+| `sensor.power_host_event_loop_lag` | `ecoflow_host_evloop_lag` | How long the add-on's event loop is delayed (diagnostic) | ms |
+| `sensor.power_host_memory_available` | `ecoflow_host_mem_available` | Host memory available (diagnostic) | MB |
+| `sensor.power_host_data_disk_free` | `ecoflow_host_disk_free` | Free space on the data disk (diagnostic) | MB |
+| `sensor.power_host_load_1m` | `ecoflow_host_load_1m` | Host load average, 1 minute (diagnostic) | — |
 
 ## Night charge
 
@@ -169,16 +169,16 @@ Refreshed from the latest plan, recomputed every 30 minutes. These carry a 25-ho
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `binary_sensor.ecoflow_panel_night_charge_recommended` | `ecoflow_night_charge_recommended` | Charge tonight: the flag your automation gates on | on / off |
-| `sensor.ecoflow_panel_night_charge_target_soc` | `ecoflow_night_charge_target_soc` | The reserve SETPOINT to write, clamped to the panel's 10–50 range; not a prediction of where the pool ends | % |
-| `sensor.ecoflow_panel_night_charge_arrival_soc_worst_case` | `ecoflow_night_charge_expected_soc` | Arrival SoC (Worst Case): the pool level at the window close projected on the islanded worst case the plan is sized on, not the charge the write is expected to make | % |
-| `sensor.ecoflow_panel_night_charge_buy_worst_case` | `ecoflow_night_charge_buy_kwh` | Buy (Worst Case): the grid energy the plan is sized on, assuming the islanded worst case | kWh |
-| `sensor.ecoflow_panel_night_charge_expected_buy` | `ecoflow_night_charge_expected_buy_kwh` | The grid energy the charge is expected to draw, from the expected pool level at the window open; unknown with no median basis | kWh |
-| `sensor.ecoflow_panel_night_charge_window_start` | `ecoflow_night_charge_window_start` | Charge window start, in site time (`23:00`, or `Mon 00:00` when more than a day away) | text |
-| `sensor.ecoflow_panel_night_charge_window_end` | `ecoflow_night_charge_window_end` | Charge window end, same format | text |
-| `sensor.ecoflow_panel_night_charge_readiness` | `ecoflow_night_charge_readiness` | `LEARNING`, `READY_TO_CONSIDER_WRITES` or `BLOCKED`: the write-readiness gate (diagnostic) | text |
-| `binary_sensor.ecoflow_panel_night_charge_write_ready` | `ecoflow_night_charge_write_ready` | On when the readiness gate has graduated; off when it has not or is unknown (diagnostic). Graduating takes at least 21 scored nights on which Power itself raised the reserve (`supervised` or `auto`), so it stays off in an install that only advises | on / off |
-| `sensor.ecoflow_panel_night_charge_role` | `ecoflow_night_charge_role` | What tonight's overnight window is for: `cost` (it carries the charge, as on every night while the mid-day charge runs in shadow) or `backup` (an outage backup ahead of a winter mid-day charge). The entities above always describe the overnight window; unknown with no current plan | text |
+| `binary_sensor.power_night_charge_recommended` | `ecoflow_night_charge_recommended` | Charge tonight: the flag your automation gates on | on / off |
+| `sensor.power_night_charge_target_soc` | `ecoflow_night_charge_target_soc` | The reserve SETPOINT to write, clamped to the panel's 10–50 range; not a prediction of where the pool ends | % |
+| `sensor.power_night_charge_arrival_soc_worst_case` | `ecoflow_night_charge_expected_soc` | Arrival SoC (Worst Case): the pool level at the window close projected on the islanded worst case the plan is sized on, not the charge the write is expected to make | % |
+| `sensor.power_night_charge_buy_worst_case` | `ecoflow_night_charge_buy_kwh` | Buy (Worst Case): the grid energy the plan is sized on, assuming the islanded worst case | kWh |
+| `sensor.power_night_charge_expected_buy` | `ecoflow_night_charge_expected_buy_kwh` | The grid energy the charge is expected to draw, from the expected pool level at the window open; unknown with no median basis | kWh |
+| `sensor.power_night_charge_window_start` | `ecoflow_night_charge_window_start` | Charge window start, in site time (`23:00`, or `Mon 00:00` when more than a day away) | text |
+| `sensor.power_night_charge_window_end` | `ecoflow_night_charge_window_end` | Charge window end, same format | text |
+| `sensor.power_night_charge_readiness` | `ecoflow_night_charge_readiness` | `LEARNING`, `READY_TO_CONSIDER_WRITES` or `BLOCKED`: the write-readiness gate (diagnostic) | text |
+| `binary_sensor.power_night_charge_write_ready` | `ecoflow_night_charge_write_ready` | On when the readiness gate has graduated; off when it has not or is unknown (diagnostic). Graduating takes at least 21 scored nights on which Power itself raised the reserve (`supervised` or `auto`), so it stays off in an install that only advises | on / off |
+| `sensor.power_night_charge_role` | `ecoflow_night_charge_role` | What tonight's overnight window is for: `cost` (it carries the charge, as on every night while the mid-day charge runs in shadow) or `backup` (an outage backup ahead of a winter mid-day charge). The entities above always describe the overnight window; unknown with no current plan | text |
 
 ## Mid-day charge
 
@@ -186,14 +186,14 @@ On the APS R-EV preset, the lowest winter rate runs from 10 AM to 3 PM on weekda
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `binary_sensor.ecoflow_panel_midday_charge_recommended` | `ecoflow_midday_charge_recommended` | On only when a daytime charge is actually armed. It stays off while the mid-day charge runs in shadow, so do not use it to start a charge yourself | on / off |
-| `sensor.ecoflow_panel_midday_charge_target_soc` | `ecoflow_midday_charge_target_soc` | The level the daytime charge would bring the pool to, after the morning re-check | % |
-| `sensor.ecoflow_panel_midday_charge_reserve_hold` | `ecoflow_midday_charge_reserve_hold` | The backup reserve it would hold through the window, within the panel's 10–50 range | % |
-| `sensor.ecoflow_panel_midday_charge_expected_buy` | `ecoflow_midday_charge_expected_buy_kwh` | The grid energy the daytime charge is expected to draw | kWh |
-| `sensor.ecoflow_panel_midday_charge_buy_worst_case` | `ecoflow_midday_charge_buy_kwh` | Buy (Worst Case): the grid energy the daytime plan is sized on, assuming the islanded worst case | kWh |
-| `sensor.ecoflow_panel_midday_charge_window_start` | `ecoflow_midday_charge_window_start_at` | When the daytime window opens. A timestamp sensor, shown as a time (the payload is ISO 8601 UTC: `2026-11-16T17:00:00.000Z` is 10:00 AM at UTC−7); unknown when no daytime charge is in view | timestamp |
-| `sensor.ecoflow_panel_midday_charge_window_end` | `ecoflow_midday_charge_window_end_at` | When it closes, the same way | timestamp |
-| `sensor.ecoflow_panel_midday_charge_refresh` | `ecoflow_midday_charge_refresh` | The morning re-check: `pending`, then `unchanged`, `lowered`, `capped` (the new forecast asked for a higher level or reserve than the evening plan, which stays the limit), `cancelled`, `stood` (no re-check finished in time, so the evening plan stands) or `not-comparable` (the night's own overnight charge already filled the pool, so the re-check was not made and the evening figures stand) | text |
+| `binary_sensor.power_midday_charge_recommended` | `ecoflow_midday_charge_recommended` | On only when a daytime charge is actually armed. It stays off while the mid-day charge runs in shadow, so do not use it to start a charge yourself | on / off |
+| `sensor.power_midday_charge_target_soc` | `ecoflow_midday_charge_target_soc` | The level the daytime charge would bring the pool to, after the morning re-check | % |
+| `sensor.power_midday_charge_reserve_hold` | `ecoflow_midday_charge_reserve_hold` | The backup reserve it would hold through the window, within the panel's 10–50 range | % |
+| `sensor.power_midday_charge_expected_buy` | `ecoflow_midday_charge_expected_buy_kwh` | The grid energy the daytime charge is expected to draw | kWh |
+| `sensor.power_midday_charge_buy_worst_case` | `ecoflow_midday_charge_buy_kwh` | Buy (Worst Case): the grid energy the daytime plan is sized on, assuming the islanded worst case | kWh |
+| `sensor.power_midday_charge_window_start` | `ecoflow_midday_charge_window_start_at` | When the daytime window opens. A timestamp sensor, shown as a time (the payload is ISO 8601 UTC: `2026-11-16T17:00:00.000Z` is 10:00 AM at UTC−7); unknown when no daytime charge is in view | timestamp |
+| `sensor.power_midday_charge_window_end` | `ecoflow_midday_charge_window_end_at` | When it closes, the same way | timestamp |
+| `sensor.power_midday_charge_refresh` | `ecoflow_midday_charge_refresh` | The morning re-check: `pending`, then `unchanged`, `lowered`, `capped` (the new forecast asked for a higher level or reserve than the evening plan, which stays the limit), `cancelled`, `stood` (no re-check finished in time, so the evening plan stands) or `not-comparable` (the night's own overnight charge already filled the pool, so the re-check was not made and the evening figures stand) | text |
 
 ## Load shedding and lighting
 
@@ -201,12 +201,12 @@ Advice only: Power never switches these loads. Your automations decide.
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `binary_sensor.ecoflow_panel_load_shed_recommended` | `ecoflow_load_shed_recommended` | On when shedding is recommended | on / off |
-| `sensor.ecoflow_panel_load_shed_recommended_count` | `ecoflow_load_shed_recommended_count` | Loads recommended for shedding | count |
-| `sensor.ecoflow_panel_load_shed_recommended_watts` | `ecoflow_load_shed_recommended_watts` | Power those loads draw | W |
-| `sensor.ecoflow_panel_runway_to_reserve_if_shed` | `ecoflow_runway_to_reserve_if_shed_hours` | Runway to the reserve if they were shed | h |
-| `sensor.ecoflow_panel_lighting_posture` | `ecoflow_lighting_posture` | Lighting posture: `surplus`, `normal`, `conserve`, `amber`, `red` or `critical` | text |
-| `sensor.ecoflow_panel_lighting_posture_reason` | `ecoflow_lighting_posture_reason` | Why the posture is what it is (diagnostic) | text |
+| `binary_sensor.power_load_shed_recommended` | `ecoflow_load_shed_recommended` | On when shedding is recommended | on / off |
+| `sensor.power_load_shed_recommended_count` | `ecoflow_load_shed_recommended_count` | Loads recommended for shedding | count |
+| `sensor.power_load_shed_recommended_watts` | `ecoflow_load_shed_recommended_watts` | Power those loads draw | W |
+| `sensor.power_runway_to_reserve_if_shed` | `ecoflow_runway_to_reserve_if_shed_hours` | Runway to the reserve if they were shed | h |
+| `sensor.power_lighting_posture` | `ecoflow_lighting_posture` | Lighting posture: `surplus`, `normal`, `conserve`, `amber`, `red` or `critical` | text |
+| `sensor.power_lighting_posture_reason` | `ecoflow_lighting_posture_reason` | Why the posture is what it is (diagnostic) | text |
 
 ## Panel circuits
 
@@ -216,8 +216,8 @@ are removed when a circuit leaves the panel.
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `sensor.ecoflow_panel_<circuit>_energy` | `ecoflow_circuit_<ch>_lifetime_kwh` | Lifetime energy of circuit `<ch>` (`total_increasing`) | kWh |
-| `sensor.ecoflow_panel_<circuit>_power` | `ecoflow_circuit_<ch>_watts` | Live power of circuit `<ch>`; unknown, never 0, when the panel does not report it | W |
+| `sensor.power_<circuit>_energy` | `ecoflow_circuit_<ch>_lifetime_kwh` | Lifetime energy of circuit `<ch>` (`total_increasing`) | kWh |
+| `sensor.power_<circuit>_power` | `ecoflow_circuit_<ch>_watts` | Live power of circuit `<ch>`; unknown, never 0, when the panel does not report it | W |
 
 ## Alarm-priority switches
 
@@ -231,10 +231,10 @@ while that key was honoured keeps the shorter ids; look the switches up by uniqu
 
 | entity_id (fresh install) | unique_id | Meaning | Unit |
 |---|---|---|---|
-| `switch.ecoflow_panel_alarms_critical_p1` | `ecoflow_alerts_critical` | Announce Critical (P1) alarms | on / off |
-| `switch.ecoflow_panel_alarms_high_p2` | `ecoflow_alerts_high` | Announce High (P2) alarms | on / off |
-| `switch.ecoflow_panel_alarms_medium_p3` | `ecoflow_alerts_medium` | Announce Medium (P3) alarms | on / off |
-| `switch.ecoflow_panel_alarms_low_p4` | `ecoflow_alerts_low` | Announce Low (P4) alarms | on / off |
+| `switch.power_alarms_critical_p1` | `ecoflow_alerts_critical` | Announce Critical (P1) alarms | on / off |
+| `switch.power_alarms_high_p2` | `ecoflow_alerts_high` | Announce High (P2) alarms | on / off |
+| `switch.power_alarms_medium_p3` | `ecoflow_alerts_medium` | Announce Medium (P3) alarms | on / off |
+| `switch.power_alarms_low_p4` | `ecoflow_alerts_low` | Announce Low (P4) alarms | on / off |
 
 ## Energy Dashboard wiring
 
@@ -270,4 +270,4 @@ Power computes and advises; these are the entities an automation of yours can ac
 | Dim or limit lighting | `ecoflow_lighting_posture` | Escalates at once; steps back down only after the calmer posture has held 15 minutes |
 | React to a grid loss | `ecoflow_off_grid` | Reads not present when the signal is missing |
 | React to any critical alarm | `ecoflow_alert_critical_count` above 0 | Counts active threshold criticals |
-| Mute a priority on a schedule | the four alarm-priority switches, unique_ids `ecoflow_alerts_critical` to `ecoflow_alerts_low` (entity_ids `switch.ecoflow_panel_alarms_*` on a fresh install) | Muting hides nothing from the dashboard |
+| Mute a priority on a schedule | the four alarm-priority switches, unique_ids `ecoflow_alerts_critical` to `ecoflow_alerts_low` (entity_ids `switch.power_alarms_*` on a fresh install) | Muting hides nothing from the dashboard |

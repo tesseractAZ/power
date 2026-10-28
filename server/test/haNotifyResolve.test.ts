@@ -9,7 +9,7 @@ import { haNotifyCall, haNotificationId, type NotifyMessage } from '../src/notif
  * HA's notification section forever. Observed live on the running system:
  *
  *   id      ecoflow_panel_baseline_pair6_w_hd31xxxxxx000019
- *   title   "EcoFlow · Resolved: West Air conditioner load unusual for the hour"
+ *   title   "Power · Resolved: West Air conditioner load unusual for the hour"
  *   message "... (condition cleared)"
  *
  * A drawer full of resolved cards trains the operator to ignore it. The resolve record
