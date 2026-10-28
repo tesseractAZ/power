@@ -2900,7 +2900,7 @@ export function startAlertMonitor(
         : `[${priorityMeta(notifyBracketPriority(alert, effectiveSeverity)).label}] ${titleBody}`;
     try {
       await send(cfg, {
-        title: `EcoFlow · ${title}`,
+        title: `Power · ${title}`,
         body: kind === 'resolved' ? `${alert.detail}\n\n(condition cleared)` : alert.detail,
         severity: kind === 'resolved' ? 'resolved' : effectiveSeverity,
         // v0.74.0 — per-subject card identity (same id for fire + its resolve)
@@ -3057,7 +3057,7 @@ export function startAlertMonitor(
         catch { return null; }
       })();
       await send(cfg, {
-        title: `EcoFlow · Morning digest (${pending.length} alert${pending.length === 1 ? '' : 's'}${resolvedLines.length ? ` + ${resolvedLines.length} resolved overnight` : ''})`,
+        title: `Power · Morning digest (${pending.length} alert${pending.length === 1 ? '' : 's'}${resolvedLines.length ? ` + ${resolvedLines.length} resolved overnight` : ''})`,
         body: `Held during overnight quiet hours:\n\n${lines.length ? lines.join('\n') : '(none still active)'}\n${
           digestLedgerLine ? `\n${digestLedgerLine}\n` : ''
         }${
@@ -4284,7 +4284,7 @@ export function startAlertMonitor(
         const title = rec.title ?? id;
         try {
           await send(cfg, {
-            title: `EcoFlow · Resolved: ${title}`,
+            title: `Power · Resolved: ${title}`,
             body: `${title}\n\n(condition cleared while the add-on was restarting)`,
             severity: 'resolved',
             dedupId: id, // === notifyDedupId(alert), so this dismisses the exact card it fired on
@@ -4341,8 +4341,8 @@ export function startAlertMonitor(
     sendTest: async () => {
       cfg = loadNotifyConfig();
       await send(cfg, {
-        title: 'EcoFlow · Test notification',
-        body: 'Notifications are working. This is a test from the EcoFlow panel.',
+        title: 'Power · Test notification',
+        body: 'Notifications are working. This is a test from Power.',
         severity: 'info',
         // v1.3.0 (audit rank 7) — distinct card identity; this used to collide with the
         // morning digest on the legacy `ecoflow_panel_info` id and overwrite it.

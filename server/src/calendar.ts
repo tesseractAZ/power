@@ -71,7 +71,7 @@ function emit(ev: CalEvent[]): string {
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
     'X-WR-CALNAME:Power',
-    'X-WR-CALDESC:Forecasted EcoFlow events',
+    'X-WR-CALDESC:Forecast events from Power',
   ];
   const tail = ['END:VCALENDAR'];
   const lines: string[] = [...head];

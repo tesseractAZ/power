@@ -6,6 +6,8 @@ more than 40 engines over live and recorded telemetry; its
 [engine index](https://github.com/tesseractAZ/power/blob/main/docs/reference/A-feature-inventory.md#a13-engine-index)
 states whether each one reports, advises or can act.
 
+*An independent open-source project, not affiliated with or endorsed by EcoFlow.*
+
 - **Time-of-use night-charge planning.** Every 30 minutes Power simulates your battery hour by
   hour through the coming cheap window to the start of the next, up to four days ahead, on
   worst-case inputs (P10 solar, P90 load and any predicted EV charge) and sizes the grid charge
@@ -29,8 +31,7 @@ states whether each one reports, advises or can act.
   on your speakers and pushed to your phone; a critical alert sounds through Do Not Disturb.
 - **Checked telemetry.** A replayed panel payload is caught and kept out of history; a collapsed
   message rate or a silent device raises an alert; a removed pack's stale slot is hidden.
-- **Home Assistant.** A sidebar dashboard, a control-room console in the browser (and over SSH
-  once enabled) and, with MQTT discovery on, about 100 entities plus per-circuit power and energy
+- **Home Assistant.** A sidebar dashboard, a control-room console in the browser and over SSH and, with MQTT discovery on, about 100 entities plus per-circuit power and energy
   sensors for the Energy Dashboard.
 
 > [!WARNING]
@@ -39,7 +40,7 @@ states whether each one reports, advises or can act.
 > checking in, and keep the host on an always-on circuit.
 
 **Requirements.** EcoFlow IoT-Open developer keys: Power is cloud-only, with no local API.
-Schedules follow Home Assistant's time zone unless `SITE_TIMEZONE` sets one. Spoken alarms need
+Spoken alarms need
 Music Assistant speakers and Piper; entities need an MQTT broker.
 
 **Start here.** Open the **Documentation** tab for setup, what each alarm means, every write

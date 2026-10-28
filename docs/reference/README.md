@@ -1,4 +1,4 @@
-# EcoFlow Panel — Complete System & Engine Reference
+# Power — Complete System & Engine Reference
 
 This is the technical reference for the **ecoflow-panel** Home Assistant add-on: a forecasting, time-of-use arbitrage planning, battery-health and life-safety depletion-alarm system for an EcoFlow Smart Home Panel 2 and its Delta Pro Ultra battery/inverter Cores. A figure labelled **reference plant** comes from the reference deployment (a grid-tied home in Phoenix, AZ with a 42-panel array and an EVSE) and is a built-in value that a home's own options replace; see [setting Power up for your home](../guide/your-home.md). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the endpoints and sensors it produces, the configuration knobs that tune it, and its edge-case guards.
 

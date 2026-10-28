@@ -104,7 +104,7 @@ test('★★★ a channel restored during the worker wait is not pushed as unrea
     H.setBroadcastHealth(DEAD);
     await until(() => sent.some((t) => t.includes(UNREACHABLE_TITLE)), 5_000, 'the push for a channel that stays dead');
     assert.equal(sent.filter((t) => t.includes(UNREACHABLE_TITLE)).length, 1);
-    assert.ok(!sent.some((t) => t.startsWith('EcoFlow · Resolved:')), sent.join('\n'));
+    assert.ok(!sent.some((t) => t.startsWith('Power · Resolved:')), sent.join('\n'));
   } finally {
     mon.stop();
     H.resetBroadcastHealth();
