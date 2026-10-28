@@ -28,6 +28,7 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 - [ ] If a mutant survived and you could not kill it, say so here and say why — a known survivor documented in the harness beats a silent gap.
 - [ ] The operator guide updated in the same PR, in the present tense, if this adds or changes an option, alarm, entity, device write or setup step: `ecoflow_panel/DOCS.md`, `docs/guide/options.md`, `docs/guide/entities.md`.
 - [ ] The owning chapter in `docs/reference/` updated in the same PR, in the present tense, if this adds or changes an engine or API surface. What changed and why goes in `CHANGELOG.md` and this PR, not in the reference.
+- [ ] If this adds, removes, renames or moves an engine: its row in the engine index (`docs/reference/A-feature-inventory.md`, A.13) and the index's count sentence are updated, and `node scripts/check-doc-claims.mjs --tests <N>` passes (each row's identifier must occur in its file; the README's floor and group counts must match the rows).
 - [ ] The harness runs on `scripts/lib/mutateParallel.mjs` and its baseline passes in every worker. A baseline ABORT is not a result: lower `MUTATE_CONCURRENCY` or fix the flaky case.
 - [ ] If this moves an existing guard, the harnesses that pin it were re-run — a moved guard can leave its mutant equivalent (2026-10-10: `mutate-analytics-worker` xi after v1.187.10).
 

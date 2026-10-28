@@ -417,7 +417,7 @@ since the previous tag if empty). It:
 - `Type-check server` / `Type-check web` (`tsc --noEmit`).
 - `Type-check server tests` (`tsconfig.test.json`, src + test).
 - `Mutant anchors resolve` (`scripts/check-mutant-anchors.mjs`).
-- `Server tests`: `npm test`, then `scripts/check-doc-claims.mjs` against the pass count. The suite has gated the PR since v1.58.0.
+- `Server tests`: `npm test`, then `scripts/check-doc-claims.mjs` against the pass count and the engine index ([Appendix A.13](A-feature-inventory.md#a13-engine-index)): each row's identifier must occur in its file, and every engine count in the prose must match the rows. The suite has gated the PR since v1.58.0.
 - `No personal data in the tree` (`scripts/check-no-secrets.py`).
 - `Dependency advisories` (`scripts/check-npm-audit.mjs`).
 - `Validate add-on config + translations`.

@@ -1,19 +1,39 @@
 # Power
 
-Monitoring, forecasting and battery alarms for an EcoFlow off-grid system: a Smart Home Panel 2
-and its Delta Pro Ultra battery Cores.
+Time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for an
+EcoFlow off-grid system: a Smart Home Panel 2 and its Delta Pro Ultra Cores. Power runs
+more than 40 engines over live and recorded telemetry; its
+[engine index](https://github.com/tesseractAZ/power/blob/main/docs/reference/A-feature-inventory.md#a13-engine-index)
+states whether each one reports, advises or can act.
 
-- A live dashboard in the Home Assistant sidebar, and a control-room console in the browser
-  and over SSH.
-- Battery, grid and host alarms, spoken on your speakers and pushed to your phone, with a
-  critical alert that sounds through Do Not Disturb.
-- A day-ahead solar and battery forecast, and the runway to your reserve.
-- Pack health: state of health, cell spread, end-of-life projection and a warranty export.
-- Home Assistant entities through MQTT discovery, including Energy Dashboard counters.
-- A night-charge planner for a time-of-use tariff (APS R-EV built in; others described by
-  `TARIFF_PLAN`). It only advises unless you set `NIGHT_CHARGE_MODE` to let it raise the panel's
-  backup reserve in the tariff's cheap window and, with `ARB_OBJECTIVE` set to `cost`, run a
-  force charge. The Documentation tab lists every write Power can make.
+- **Time-of-use night-charge planning.** Every 30 minutes Power simulates your battery hour by
+  hour to the next cheap window on worst-case inputs (P10 solar, P90 load and any predicted EV
+  charge) and sizes the grid charge that keeps your reserve plus an outage cushion: by default,
+  4 hours of your backup circuits' measured load × 1.25. APS R-EV is built in; `TARIFF_PLAN`
+  describes others.
+- **Writes only when you allow them.** By default Power only advises. With `NIGHT_CHARGE_MODE`
+  set to supervised it makes at most one announced, cancellable backup-reserve raise per charge
+  night, within 10–50%, read back and restored before on-peak; with `ARB_OBJECTIVE` set to cost
+  it can also run the panel's force charge, just in time. The Documentation tab lists every
+  write.
+- **Every night scored.** Each night's plan is recorded and scored against your meters; the
+  record tunes the next night's load margin within fixed bounds, and a readiness check grades it.
+- **Forecasts.** Solar learned from your own array, home load with predicted EV sessions, a
+  P10–P90 band narrowed to its own past errors, and the runway: how long your battery lasts if
+  the grid fails now.
+- **Battery and PV health.** State-of-health fade and end-of-life projection per pack, internal
+  resistance, coulombic and round-trip efficiency, charge-curve drift, cell spread,
+  defective-pack detection, soiling, shade and clipping, and a warranty export.
+- **Anomaly detection.** Pack, board and MPPT temperatures and each circuit's load against their
+  own typical for the hour, each pack against its siblings, each Core's solar against its peers.
+- **Alarms.** Battery, cell, grid, host and telemetry alarms on screen and, once enabled, spoken
+  on your speakers and pushed to your phone; a critical alert sounds through Do Not Disturb.
+- **Checked telemetry.** A replayed panel payload is caught within minutes and kept out of
+  history; a collapsed message rate or a silent device raises an alert; a removed pack's stale
+  slot is hidden.
+- **Home Assistant.** A sidebar dashboard, a control-room console in the browser (and over SSH
+  once enabled) and, with MQTT discovery on, about 100 entities plus per-circuit power and energy
+  sensors for the Energy Dashboard.
 
 > [!WARNING]
 > Power can warn you only while its host, your network, the EcoFlow cloud and your speakers all
@@ -21,7 +41,7 @@ and its Delta Pro Ultra battery Cores.
 > checking in, and keep the host on an always-on circuit.
 
 **Requirements.** EcoFlow IoT-Open developer keys: Power is cloud-only, with no local API.
-Scheduling runs in Home Assistant's time zone unless `SITE_TIMEZONE` names another. Spoken alarms
+Schedules use Home Assistant's time zone unless `SITE_TIMEZONE` names another. Spoken alarms
 need Music Assistant speakers and Piper; entities need an MQTT broker.
 
 **Start here.** Open the **Documentation** tab for setup, what each alarm means, what Power
