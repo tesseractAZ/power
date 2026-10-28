@@ -174,6 +174,24 @@ test('code is told from comments and literals the way the parser does', () => {
     assert.match(keep(src), /function after/, div);
     assert.equal(lib.declares(src, 'after'), true, div);
   }
+  // The same after a private name's `#`, after `of` used as a variable name, and after an
+  // identifier that ends in a keyword's letters behind a non-ASCII start.
+  for (const div of [
+    'class K { #in = 1; f() { return this.#in / 2; } } const u = `a/b`;',
+    'class K { #of = 1; f() { return this.#of / 2; } } const u = `a/b`;',
+    'const of = 4; const s = of / 2; const u = `a/b`;',
+    'const σin = 3; const z = σin / 2; const u = `a/b`;',
+  ]) {
+    const src = `${div}\nexport function after() {}\n`;
+    assert.equal(lib.declares(src, 'after'), true, div);
+    // Out of step, the template's text would read as code and its closing backtick would open one.
+    assert.equal(lib.declares(`${div}\nconst msg = \`function ghost() {}\`;\n`, 'ghost'), false, div);
+  }
+  // `of` straight after a for-of binding, and `default` after export, are keywords: a regular
+  // expression follows, and a backtick inside it opens nothing.
+  for (const re of ['for (const m of /[`]/g.exec(s) ?? []) {}', 'for (const [a] of /[`]/g.exec(s) ?? []) {}', 'export default /[`]/;']) {
+    assert.equal(lib.declares(`${re}\nexport function after() {}\n`, 'after'), true, re);
+  }
   // A prefix ++ after a keyword still leaves the slash after its operand a division.
   assert.match(keep('function f() { return ++n / 2; } const s = `${a}/${b}`; function after() {}'), /function after/);
   // After a keyword it opens a literal.
@@ -368,6 +386,22 @@ test('the sweep reads a count through Markdown emphasis, and a bold floor is sti
     assert.match(sweep(t), /approximately/, t);
   }
   assert.match(sweep('**forty** engines'), /in words/);
+  // Emphasis on the noun, around a suffix or a qualifier, italic or bold-italic, with * or _.
+  for (const t of ['It runs 61 **engines**.', 'It runs 61 **analytics engines**.', 'It runs 61 **analytics** engines.', 'It runs *61* engines.',
+    'It runs ***50*** engines.', 'It runs _50_ engines.']) {
+    assert.match(sweep(t), /neither the index total/, t);
+  }
+  for (const t of ['It runs more than 50 **engines**.', 'It runs more than ***50*** engines.', 'It runs more than *50* engines.',
+    'It runs **more than** 50 engines.']) {
+    assert.match(sweep(t), /"more than 50 engines" is not below the strict reading 44/, t);
+  }
+  for (const t of ['It runs ~40 **engines**.', 'It runs **about** 62 engines.', 'It runs *about* 62 engines.', 'It runs __about__ 62 engines.',
+    'It runs about *40* engines.', 'It runs **40**+ engines.', 'It runs **40**-plus engines.']) {
+    assert.match(sweep(t), /approximately/, t);
+  }
+  for (const t of ['It runs more than ***40*** engines.', 'It runs **more than** 40 engines.', 'It runs __more than 40 engines__.', 'It runs *62* analytics engines.']) {
+    assert.equal(sweep(t), '', t);
+  }
 });
 
 test('the sweep refuses counts in words or behind a qualifier, and a sentence that puts every engine on one thread', () => {
@@ -396,7 +430,8 @@ test('the sweep refuses counts in words or behind a qualifier, and a sentence th
     assert.match(sweep(t), /the engines run on both threads/, t);
   }
   // The old wording, with a verb or a mark between.
-  for (const t of ['engines in a worker thread', 'engines run in a worker thread', 'engines, in a worker thread', 'engines** in a worker thread']) {
+  for (const t of ['engines in a worker thread', 'engines run in a worker thread', 'engines, in a worker thread', 'engines** in a worker thread',
+    'Analytics engines running in a worker thread.']) {
     assert.match(sweep(t), /the engines run on both threads/, t);
   }
   // A subset, a split or a tag is not all of the engines on one thread.
@@ -413,6 +448,51 @@ test('the sweep refuses counts in words or behind a qualifier, and a sentence th
     'The engines in the worker read history.',
     'the engines on the main thread are listed in the index',
     'The engines run on schedules; the worker sets none of them.',
+    // A subject after "of", "not" or "not all" names some of the engines.
+    '27 of the engines run in the analytics worker and 35 on the main thread.',
+    'Most of the engines run on the main thread.',
+    'Some of the engines run in the worker.',
+    '35 of its engines run on the main thread.',
+    'Not all engines run in the worker.',
+    'Not all the engines run in the worker.',
+    'Not every engine runs in the worker.',
+    // The engines as a whole on both threads, named with both, either, and or or.
+    'The engines run on both the analytics worker and the main thread.',
+    'The engines run in two places: the analytics worker and the main thread.',
+    'All engines run in either the analytics worker or the main thread.',
+    'Every engine runs in exactly one place, the worker or the main thread.',
+    'Its engines run where the index says: the worker or the main thread.',
+    'The engines run in the worker and on the main thread.',
+    'The engines run on both the worker and the main thread.',
+    'The engines run in the worker\nand on the main thread.',
+  ]) {
+    assert.equal(sweep(t), '', t);
+  }
+});
+
+test('the sweep refuses a sentence that puts the engines as a whole on one thread as the object of its verb', () => {
+  const sweep = (text: string) => lib.sweepEngineCounts([{ path: 'x.md', text }], SUMMARY, 40).problems.join('\n');
+  for (const t of [
+    'It runs its engines in the analytics worker.',
+    'It runs all of its engines on the main thread.',
+    'Power hosts all engines in the analytics worker.',
+    'It runs all engines in the analytics worker.',
+    'It runs the engines on the main thread.',
+    'It runs all 62 engines in the analytics worker.',
+    'It runs **62 engines** in the analytics worker.',
+    'It runs more than 40 engines in a background worker.',
+    'Power executes every engine on the main thread.',
+  ]) {
+    assert.match(sweep(t), /the engines run on both threads/, t);
+  }
+  for (const t of [
+    'It runs more than 40 engines in six groups.',
+    'It runs **more than 40 engines** in six groups.',
+    'It runs its engines in both the worker and the main thread.',
+    'It runs the engines in the worker or on the main thread, as the index says.',
+    'It does not run all engines in the worker.',
+    'It runs the engine in the worker.',
+    'It runs most of its engines in the worker.',
   ]) {
     assert.equal(sweep(t), '', t);
   }

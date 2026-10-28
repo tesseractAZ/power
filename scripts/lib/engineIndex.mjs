@@ -8,9 +8,10 @@
  * concrete: one row per engine, each naming a file and an identifier that the file declares only
  * while the engine exists. These checks hold the index to the source and the prose to the index:
  *
- *   - every row's file declares its identifier in code: a function, class, const, let, var,
- *     interface, type, enum or namespace of that name outside every comment and literal, so a
- *     rename that leaves the old name in comments, or a removal that leaves a caller, fails;
+ *   - every row's file declares its identifier in code: a function, class, interface, type, enum
+ *     or namespace of that name, or the first name a const, let or var declares, outside every
+ *     comment and literal, so a rename that leaves the old name in comments, or a removal that
+ *     leaves a caller, fails;
  *   - every row has the header's cell count, a pipe inside a cell written as \|; a row that does
  *     not is a problem, and while one is dropped the numbering and count-sentence checks wait;
  *   - the rows are numbered 1..N without a gap, each engine and each file:identifier pair is unique,
@@ -24,17 +25,26 @@
  *     README (digits, or a word from zero to twelve; at least one is required) equals the
  *     write-capable-gated rows;
  *   - on every surface swept (the fixed list below plus every page in the listed directories), a
- *     count written directly before "engines" or "analytics engines", bold or not, must be in
- *     digits and be the index total or a floor ("more than N") equal to the README's; such a count
- *     with ~ or ≈, a trailing + or "-plus", or one of the qualifiers about, around, roughly,
- *     nearly, almost, approximately, some, over, upwards of or close to fails, as does one written
- *     in words (twenty to ninety-nine). A count elsewhere in a sentence is not read;
- *   - on the same surfaces, "engines in a worker thread" (also "engines run in", or up to four marks
- *     such as a comma between) fails, and so does a sentence that makes the engines as a whole
- *     (all, all of the, every, its or the engines, with or without a count) the subject of a
- *     placement verb (ALL_ON_ONE_THREAD lists them) followed within 60 characters by "worker" or
- *     "main thread". A narrowed subject ("the engines on the main thread") or another verb ("its
- *     engines split between …") is not read.
+ *     count written directly before "engines" or "analytics engines", plain or in Markdown
+ *     emphasis (one to three * or _), must be in digits and be the index total or a floor ("more
+ *     than N") equal to the README's; such a count with ~ or ≈, a trailing + or "-plus", or after
+ *     one of the qualifiers about, around, roughly, nearly, almost, approximately, some, over,
+ *     upwards of or close to fails, as does one written in words from twenty to ninety-nine. Any
+ *     other count (elsewhere in a sentence, or a word outside that range: "two engines") is not
+ *     read (COUNT);
+ *   - on the same surfaces, "engines in a worker thread" fails, also with run, runs or running, or
+ *     up to four marks such as a comma, between (IN_A_WORKER);
+ *   - so does a sentence that makes the engines as a whole (all, all of the, all the, every, its or
+ *     the engines, with or without a count in digits) the subject of run, live, sit, reside or
+ *     execute, or of is or are followed by in, on, run, hosted, computed or executed, and names the
+ *     worker or the main thread within the next 60 characters (ALL_ON_ONE_THREAD); and one that
+ *     makes them, or a count of them, the object of run, host, execute, put, place or keep (not
+ *     after "not", "never" or "n't") followed directly by in or on the worker or the main thread
+ *     (OBJECT_ON_ONE_THREAD). Neither reads a subject after "of", "not" or "not all" ("27 of the
+ *     engines", "not all engines"), a window that reaches "both" or "either" before a thread, or a
+ *     thread followed within 40 characters by "and" or "or" and a thread ("in the worker and on
+ *     the main thread"); a narrowed subject ("the engines on the main thread include …") or another
+ *     verb ("its engines split between …") does not match.
  *
  * Out of the tree, and so out of reach: the repository's About description on GitHub states the
  * floor too, and is changed by hand when the floor changes.
@@ -107,27 +117,33 @@ const unticked = (s) => s.replace(/^`|`$/g, '');
 
 /** Keywords after which a `/` starts a regular-expression literal rather than a division. */
 const REGEX_AFTER_WORD = new Set([
-  'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await',
+  'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'default', 'do', 'else', 'yield', 'await',
 ]);
+/** The characters that start and continue an identifier, Unicode letters included. */
+const ID_START = /[\p{ID_Start}$_]/u;
+const ID_PART = /[\p{ID_Continue}$\u200c\u200d]/u;
 
 /**
  * `text` (TypeScript or JavaScript source) with every comment and the contents of every string,
  * template and regular-expression literal replaced by spaces; line breaks are kept, so offsets
  * and line numbers hold. A template's `${…}` expressions stay code. The regular-expression test
  * is the usual previous-token heuristic: a `/` after an operand (an identifier that is not a
- * keyword, a keyword used as a property name after `.`, a number, `)`, `]`, a non-null `!` or a
- * postfix `++`/`--`) is a division, anywhere else it opens a literal. JSX is not lexed: a closing
- * tag reads as a literal and a text child as code, which is why CODE_CELL anchors only `.ts`,
- * `.mts` and `.mjs` files.
+ * keyword, a keyword used as a property name after `.`, `?.` or a private name's `#`, `of` used
+ * as a variable name, a number, `)`, `]`, a non-null `!` or a postfix `++`/`--`) is a division,
+ * anywhere else it opens a literal, so a literal straight after `if (…)` or `while (…)` reads as
+ * a division. JSX is not lexed: a closing tag reads as a literal and a text child as code, which
+ * is why CODE_CELL anchors only `.ts`, `.mts` and `.mjs` files.
  */
 export function codeOnly(text) {
   const out = [];
   const n = text.length;
   const keep = (k) => { out.push(text[k]); };
   const blank = (k) => { out.push(text[k] === '\n' ? '\n' : ' '); };
+  /** The code point at `k`, as a string of one or two UTF-16 units. */
+  const at = (k) => String.fromCodePoint(text.codePointAt(k));
   const templates = []; // per open `${`, the depth of `{` inside it
-  let prev = ''; // the last significant code character
-  let word = ''; // the identifier or keyword that ends at `prev`
+  let prev = ''; // the last significant code character; 'a' stands for the end of any identifier
+  let word = ''; // the identifier or keyword that ends at `prev`; '' for a property name or anything else
   let i = 0;
   /** Scan a template body from `i` (just past "`" or "}") to its closing "`" or its next "${". */
   const templateBody = () => {
@@ -177,15 +193,24 @@ export function codeOnly(text) {
       prev = ')'; word = '';
       continue;
     }
-    if (/[A-Za-z_$]/.test(c)) {
-      let j = i;
-      while (j < n && /[\w$]/.test(text[j])) j++;
+    const cp = at(i);
+    if (ID_START.test(cp)) {
+      let j = i + cp.length;
+      while (j < n) {
+        const part = at(j);
+        if (!ID_PART.test(part)) break;
+        j += part.length;
+      }
       const ident = text.slice(i, j);
-      // After `.` or `?.` a keyword is a property name, so the expression is an operand:
-      // `kwh.in / 2` and `pv.yield / 2` divide.
-      word = prev === '.' ? '' : ident;
+      // After `.`, `?.` or a private name's `#` a keyword is a property name, so the expression is
+      // an operand: `kwh.in / 2`, `pv.yield / 2` and `this.#in / 2` divide. `of` is the for-of
+      // keyword only straight after the loop's binding (an identifier, `]` or `}`); anywhere else
+      // it is a variable name, and `of / 2` divides.
+      const property = prev === '.' || prev === '#';
+      const ofIsName = ident === 'of' && !(/[\w$\]}]/.test(prev) && !REGEX_AFTER_WORD.has(word));
+      word = property || ofIsName ? '' : ident;
       for (; i < j; i++) keep(i);
-      prev = ident[ident.length - 1];
+      prev = 'a';
       continue;
     }
     if (c === '{' && templates.length) templates[templates.length - 1]++;
@@ -211,10 +236,12 @@ export function codeOnly(text) {
 }
 
 /**
- * True when `text` declares `identifier` in code: a function (or generator), class, const, let,
- * var, interface, type alias, enum or namespace of exactly that name, outside every comment and
- * literal. A mention in a comment, a string or a call does not count, so a rename that leaves the
- * old name in comments, or a removal that leaves a caller behind, fails.
+ * True when `text` declares `identifier` in code: a function (or generator), class, interface,
+ * type alias, enum or namespace of exactly that name, or the first name a const, let or var
+ * declares, outside every comment and literal. A mention in a comment, a string or a call does
+ * not count, so a rename that leaves the old name in comments, or a removal that leaves a caller
+ * behind, fails. A later declarator (`sxx` in `let sy = 0, sxx = 0`) or a destructured name is not
+ * read: such an anchor fails, and the row names another identifier.
  */
 export function declares(text, identifier) {
   const decl = new RegExp(
@@ -451,41 +478,80 @@ export function checkReadmeEngineClaims(readme, summary) {
 const NUMBER_WORD = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?';
 /** Words that make the count after them approximate. "more than" is the floor, not one of these. */
 const QUALIFIER = '(?:about|around|roughly|nearly|almost|approximately|some|over|upwards\\s+of|close\\s+to)';
-/** Optional Markdown emphasis, `**` or `__`, around a count or a noun. */
-const EM = '(?:\\*\\*|__)?';
+/** Optional Markdown emphasis: one to three `*` or `_` (italic, bold, or both). */
+const EM = '(?:\\*{1,3}|_{1,3})?';
+/** A word start that `\b` misses after `_` emphasis ("__about__"): no letter or digit before it. */
+const WB = '(?<![A-Za-z\\d])';
 /**
  * A number of engines, written directly before "engines" or "analytics engines": an optional
  * qualifier, ~ or ≈, digits or a written number from twenty to ninety-nine, an optional + or
- * -plus, with emphasis allowed around the ~ and the number ("about **40** engines",
- * "**~40** engines", "more than **50** engines"). A count anywhere else in the sentence is not read.
+ * -plus, with emphasis allowed after the qualifier, around the ~, the number and the suffix, and
+ * before either noun ("about **40** engines", "**40**+ engines", "more than ***50*** engines",
+ * "61 **engines**"). A count anywhere else in the sentence is not read.
  */
 const COUNT = new RegExp(
-  `(?:\\b(${QUALIFIER})\\s+)?${EM}([~≈]\\s*)?${EM}(\\d[\\d,]*|\\b${NUMBER_WORD})(\\+|-plus)?${EM}\\s+(?:analytics\\s+)?engines\\b`,
+  `(?:${WB}(${QUALIFIER})${EM}\\s+)?${EM}([~≈]\\s*)?${EM}(\\d[\\d,]*|${WB}${NUMBER_WORD})${EM}(\\+|-plus)?${EM}` +
+    `\\s+${EM}(?:analytics${EM}\\s+${EM})?engines(?![A-Za-z\\d])`,
   'gi',
 );
-/** The old wording: engines "in a worker thread", with or without "run" and up to four marks between. */
-const IN_A_WORKER = /engines\W{0,4}\s+(?:run\s+)?in a worker thread/gi;
+/** A floor: "more than" (emphasis allowed around it), then the count COUNT matched. */
+const FLOOR_BEFORE = new RegExp(`${WB}more\\s+than${EM}\\s+${EM}$`, 'i');
 /**
- * The engines as a whole placed on one thread: a subject naming all of them (all, all of the,
- * every, its or the engines, with or without a count in digits) followed, directly or after "all",
- * by a placement verb (run, live, sit, reside, execute, or is or are in, on, run, hosted, computed
- * or executed), then "worker" or "main thread" within 60 characters, stopping at a period or a
- * semicolon and crossing a wrapped line but not a blank one: "All 62 engines run in the analytics
- * worker", "The engines all run in the worker". A subject narrowed by a modifier ("the engines on
- * the main thread", "the engines in the index") or another verb ("its engines split between the
- * worker and the main thread") does not match.
+ * The old wording: "engines in a worker thread", with "run", "runs" or "running", or up to four
+ * marks such as a comma or `**`, between.
+ */
+const IN_A_WORKER = /engines\W{0,4}\s+(?:run(?:s|ning)?\s+)?in a worker thread/gi;
+/**
+ * The engines as a whole: all, every, its or the engines ("all of the", "all of its", "all the",
+ * a count in digits after the determiner, and "analytics" before the noun are allowed).
+ */
+const ENGINES_WHOLE =
+  `\\b(?:(?:all\\s+(?:of\\s+)?)?(?:its|the)\\s+(?:${EM}\\d[\\d,]*${EM}\\s+)?(?:analytics\\s+)?engines` +
+  `|all\\s+(?:${EM}\\d[\\d,]*${EM}\\s+)?(?:analytics\\s+)?engines|every\\s+(?:analytics\\s+)?engine)${EM}`;
+/** …not after "of", "not" or "not all": "27 of the engines", "not all engines", "not every engine". */
+const NOT_NARROWED = '(?<!\\b(?:of|not(?:\\s+all)?)\\s+)';
+/** "worker" or "main thread", the first one within 60 characters, crossing neither "both" nor "either". */
+const ONE_THREAD =
+  '(?:(?!\\b(?:both|either|worker|main\\s+thread)\\b)(?:[^.;\\n]|\\n(?![ \\t]*\\n))){0,60}?(?:\\bworker\\b|\\bmain\\s+thread\\b)';
+/** …unless "and" or "or" and a thread follow within 40 characters: a split is not one thread. */
+const NOT_A_SPLIT =
+  '(?!(?:[^.;\\n]|\\n(?![ \\t]*\\n)){0,40}?\\b(?:and|or)\\s+(?:(?:in|on)\\s+)?(?:the\\s+)?(?:analytics\\s+)?(?:worker|main\\s+thread)\\b)';
+/**
+ * The engines as a whole as the subject of a placement verb on one thread: NOT_NARROWED and
+ * ENGINES_WHOLE, then (directly or after "all") run, live, sit, reside or execute, or is or are
+ * (with an optional "all") followed by in, on, run, hosted, computed or executed; then ONE_THREAD
+ * and NOT_A_SPLIT. The window stops at a period or a semicolon and crosses a wrapped line but not
+ * a blank one. "All 62 engines run in the analytics worker" and "The engines all run in the
+ * worker" match; "the engines on the main thread include …", "its engines split between the
+ * worker and the main thread", "the engines run in the worker and on the main thread" and "the
+ * engines run on both threads" do not.
  */
 const ALL_ON_ONE_THREAD = new RegExp(
-  `\\b(?:(?:all|its|the)\\s+(?:of\\s+(?:the|its)\\s+)?(?:${EM}\\d[\\d,]*${EM}\\s+)?(?:analytics\\s+)?engines|every\\s+(?:analytics\\s+)?engine)${EM}` +
+  NOT_NARROWED + ENGINES_WHOLE +
     '\\s+(?:all\\s+)?(?:runs?|lives?|sits?|resides?|executes?|(?:are|is)\\s+(?:all\\s+)?(?:in|on|run|hosted|computed|executed))\\b' +
-    '(?:[^.;\\n]|\\n(?![ \\t]*\\n)){0,60}?(?:\\bworker\\b|\\bmain\\s+thread\\b)',
+    ONE_THREAD + NOT_A_SPLIT,
+  'gi',
+);
+/**
+ * The engines as a whole, or a count of them, as the object of run, host, execute, put, place or
+ * keep (not after "not", "never" or "n't"), followed directly by in or on, "the", "a", "an" or
+ * "one", an optional analytics, background, separate or single, and "worker" or "main thread",
+ * then NOT_A_SPLIT: "It runs all engines in the analytics worker", "It runs **62 engines** on the
+ * main thread". "It runs more than 40 engines in six groups" does not match.
+ */
+const OBJECT_ON_ONE_THREAD = new RegExp(
+  `(?<!(?:\\bnot|\\bnever|n't)\\s+)\\b(?:runs?|hosts?|executes?|puts?|places?|keeps?)\\s+` +
+    `(?:${ENGINES_WHOLE}|${EM}(?:more\\s+than\\s+)?${EM}\\d[\\d,]*${EM}\\s+${EM}(?:analytics\\s+)?engines${EM})` +
+    '\\s+(?:all\\s+)?(?:in|on)\\s+(?:the|an?|one)\\s+(?:(?:analytics|background|separate|single)\\s+)?(?:worker|main\\s+thread)\\b' +
+    NOT_A_SPLIT,
   'gi',
 );
 
 /**
  * Every engine count COUNT reads on the given surfaces must be written in digits, as the index
  * total or as a floor ("more than N") equal to the README's `floor` and below the strict reading;
- * never approximate, never in words. IN_A_WORKER and ALL_ON_ONE_THREAD must not match.
+ * never approximate, never in words. IN_A_WORKER, ALL_ON_ONE_THREAD and OBJECT_ON_ONE_THREAD must
+ * not match.
  * `surfaces` is [{ path, text }], text null when the file is missing (itself a problem: a surface
  * that moved must be re-pointed here). `floor` null means the README states none, and then the
  * floors cannot be compared: that is a problem too.
@@ -510,7 +576,7 @@ export function sweepEngineCounts(surfaces, summary, floor) {
         continue;
       }
       const n = Number(m[3].replace(/,/g, ''));
-      const isFloor = /\bmore than\s+(?:\*\*|__)?$/i.test(text.slice(Math.max(0, m.index - 20), m.index));
+      const isFloor = FLOOR_BEFORE.test(text.slice(Math.max(0, m.index - 24), m.index));
       if (!isFloor) {
         if (n !== summary.total) problems.push(`${at}: "${said}" is neither the index total (${summary.total}) nor a floor ("more than N engines")`);
         continue;
@@ -519,7 +585,7 @@ export function sweepEngineCounts(surfaces, summary, floor) {
       if (n >= summary.strict) problems.push(`${at}: "more than ${n} engines" is not below the strict reading ${summary.strict}`);
       else if (floor != null && n !== floor) problems.push(`${at}: "more than ${n} engines" differs from the README's floor, more than ${floor}; every surface states the same floor`);
     }
-    for (const re of [IN_A_WORKER, ALL_ON_ONE_THREAD]) {
+    for (const re of [IN_A_WORKER, ALL_ON_ONE_THREAD, OBJECT_ON_ONE_THREAD]) {
       for (const m of text.matchAll(re)) {
         problems.push(`${path}:${lineOf(text, m.index)}: "${m[0]}" — the engines run on both threads; the index gives each one's thread`);
       }

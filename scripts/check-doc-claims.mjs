@@ -39,9 +39,10 @@
  * README's floor ("more than N engines") must sit below the strict reading the index discloses,
  * each README group row must state its group's tally, the README's count of write-capable engines
  * must equal the index's, and on every surface swept a count written directly before "engines" is
- * the index total or the README's floor, in digits and never approximate, and no sentence makes
- * the engines as a whole the subject of a verb that places them in the worker or on the main thread
- * (the lib's docblock lists the exact wording read).
+ * the index total or the README's floor, in digits (a count in words from twenty to ninety-nine
+ * fails; other words are not read) and never approximate, and a sentence that puts the engines as
+ * a whole, as the subject or the object of its verb, in the worker or on the main thread alone
+ * fails in the wording the lib's docblock lists.
  *
  * Usage:  node scripts/check-doc-claims.mjs [--tests N]
  */

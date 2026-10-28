@@ -445,7 +445,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 5,632 tests
+cd server && npm install && npm test     # 5,633 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -520,16 +520,23 @@ index's count sentence (its total, thread tallies, strict reading and that readi
 waiting split), this README's per-group counts and its count of write-capable engines must equal
 the rows, and the engine floor must sit below the index's strict reading. On this README, the
 add-on's README, documentation and configuration, the image labels, the web manifest and every
-guide and reference page, a count written directly before "engines" or "analytics engines", bold
-or not, must be in digits and be the index total or the same floor this README states; such a
-count in words (twenty to ninety-nine), after ~ or ≈, after one of the qualifiers about, around,
-roughly, nearly, almost, approximately, some, over, upwards of or close to, or with a trailing +
-or "-plus", fails. So does a sentence that makes the engines as a whole (all, all of
-the, every, its or the engines, with or without a count) the subject of a verb such as run, live
-or execute that places them in the worker or on the main thread, and the old wording that put
-them in "a worker thread". A count elsewhere in a sentence, or a subject narrowed to some of the
-engines, is not read. The repository's About description on GitHub sits outside the tree and is
-updated by hand.
+guide and reference page, a count written directly before "engines" or "analytics engines",
+plain or in Markdown emphasis, must be in digits and be the index total or the same floor this
+README states; such a count in words (twenty to ninety-nine), after ~ or ≈, after one of the
+qualifiers about, around, roughly, nearly, almost, approximately, some, over, upwards of or close
+to, or with a trailing + or "-plus", fails. A sentence also fails when it makes the engines as a
+whole (all, all of the, all the, every, its or the engines, with or without a count) the subject
+of run, live, sit, reside or execute, or of is or are followed by in, on, run, hosted, computed
+or executed, and names the worker or the main thread within the next 60 characters; or when it
+makes them, or a count of them, the object of run, host, execute, put, place or keep followed
+directly by in or on the worker or the main thread. Neither reading applies to a subject after
+"of", "not" or "not all" ("27 of the engines"), to a verb after "not", "never" or "n't", or to a
+sentence that names the threads with "both" or "either" or joins them with "and" or "or" ("the
+engines run in the worker and on the main thread"). The old wording, "in a worker thread"
+straight after "engines" (or after run, runs or running there), fails. Any other count, such as
+one elsewhere in a sentence or a word outside twenty to ninety-nine, is not read;
+`scripts/lib/engineIndex.mjs` lists the exact wording. The repository's About description on
+GitHub sits outside the tree and is updated by hand.
 
 Dependency advisories are gated by `scripts/check-npm-audit.mjs`, which fails on
 **high or critical in the production tree** and reports the rest. Waivers must carry a
