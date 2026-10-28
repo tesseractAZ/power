@@ -33,7 +33,7 @@ runs the container.
 | `image` | `ghcr.io/tesseractaz/{arch}-ecoflow-panel` | **Pre-built GHCR image**; `{arch}` substituted by Supervisor. Presence of this key means Supervisor *pulls* the image rather than building on the host. |
 | `startup` | `services` | Start in the "services" phase of HA boot |
 | `boot` | `auto` | Auto-start on HA boot |
-| `stage` | `experimental` | Add-on maturity stage |
+| `stage` | `stable` | Add-on maturity stage (`stable`, `experimental` or `deprecated`; `stable` is the Supervisor's default) |
 | `init` | `false` | **Critical.** Disables Docker's tini so the HA base image's own s6-overlay `/init` runs as PID 1. With tini in front, `s6-overlay-suexec` refuses to start (`fatal: can only run as pid 1`) → crash loop. Do not flip to true. |
 | `ports` | `8787/tcp`, `2323/tcp` | Directly-published host ports (see Port Map) |
 | `ingress` | `true` | Panel appears as an HA sidebar item, authenticated through HA's session |
@@ -417,7 +417,7 @@ since the previous tag if empty). It:
 - `Type-check server` / `Type-check web` (`tsc --noEmit`).
 - `Type-check server tests` (`tsconfig.test.json`, src + test).
 - `Mutant anchors resolve` (`scripts/check-mutant-anchors.mjs`).
-- `Server tests`: `npm test`, then `scripts/check-doc-claims.mjs` against the pass count. The suite has gated the PR since v1.58.0.
+- `Server tests`: `npm test`, then `scripts/check-doc-claims.mjs` against the pass count and the engine index ([Appendix A.13](A-feature-inventory.md#a13-engine-index)): each row's file must declare its identifier in code (a mention in a comment or a string does not count), every row must have the header's cell count (a pipe inside a cell is written `\|`), the index's count sentence (total, thread tallies, strict reading and its live and waiting split), the README's group counts and its count of write-capable engines must equal the rows, the README's floor must sit below the strict reading, and the swept surfaces (the README, the add-on's README, documentation and configuration, the image labels, the web manifest, and every guide and reference page) are read for the wordings that drifted before: an engine count that is neither the index total nor the README's floor, an approximate one ("~40", "about 40", "40+") or one in words, and a sentence that puts the engines as a whole on one thread. The sweep reads those known wordings, not every possible sentence; [`scripts/lib/engineIndex.mjs`](../../scripts/lib/engineIndex.mjs) lists exactly what it reads and what it does not. The suite has gated the PR since v1.58.0.
 - `No personal data in the tree` (`scripts/check-no-secrets.py`).
 - `Dependency advisories` (`scripts/check-npm-audit.mjs`).
 - `Validate add-on config + translations`.

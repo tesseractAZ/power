@@ -71,7 +71,7 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
 TITLE = "Power (ecoflow-panel) — Complete Documentation"
-SUBTITLE_TMPL = "EcoFlow off-grid monitoring, forecasting & life-safety alarm — v{version}"
+SUBTITLE_TMPL = "Time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for EcoFlow off-grid homes — v{version}"
 
 # A Word hard page break, expressed as a Pandoc raw-openxml block.
 PAGE_BREAK = '\n\n```{=openxml}\n<w:p><w:r><w:br w:type="page"/></w:r></w:p>\n```\n\n'
