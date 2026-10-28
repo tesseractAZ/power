@@ -13,7 +13,10 @@ import { pathToFileURL } from 'node:url';
  */
 
 const ROOT = resolve(import.meta.dirname, '../..');
-interface Summary { total: number; worker: number; main: number; both: number; strict: number; groups: Record<string, number> }
+interface Summary {
+  total: number; worker: number; main: number; both: number; strict: number; live: number; gated: number;
+  groups: Record<string, number>; rejected: number;
+}
 const lib = (await import(pathToFileURL(resolve(ROOT, 'scripts/lib/engineIndex.mjs')).href)) as {
   ENGINE_INDEX_FILE: string;
   ENGINE_INDEX_HEADING: string;
@@ -50,9 +53,11 @@ function buildIndex(groups: Row[][], o: { sentence?: string; heading?: string; g
   const status = (r: Row) => r.status ?? 'live';
   const tier = (r: Row) => r.tier ?? 'core';
   const strict = flat.filter((r) => tier(r) === 'core' && status(r) !== 'advisory-only' && status(r) !== 'shadow').length;
+  const live = flat.filter((r) => tier(r) === 'core' && status(r) === 'live').length;
   const sentence = o.sentence
     ?? `**${flat.length} engines**: **${flat.filter((r) => (r.thread ?? 'main') === 'worker').length}** in the analytics worker, `
-      + `**${flat.filter((r) => (r.thread ?? 'main') === 'main').length}** on the main thread. Read strictly, the index holds **${strict}**.`;
+      + `**${flat.filter((r) => (r.thread ?? 'main') === 'main').length}** on the main thread. Read strictly, the index holds **${strict}**. `
+      + `Of those, ${live} are live; the other ${strict - live} wait on a channel or a write mode.`;
   const out = ['# Appendix', '', '### A.12 Earlier', '', o.heading ?? '### A.13 Engine index', '', 'An engine is a unit.', '', sentence, ''];
   groups.forEach((rows, g) => {
     out.push(`#### ${(o.groupNames ?? lib.ENGINE_GROUPS)[g]}`, '', HEADER, RULE);
@@ -77,10 +82,12 @@ const expectProblem = (text: string, re: RegExp, files?: Record<string, string>)
   assert.ok(problems.some((p) => re.test(p)), `expected a problem matching ${re}, got:\n${problems.join('\n') || '(none)'}`);
 };
 const SUMMARY: Summary = {
-  total: 62, worker: 27, main: 35, both: 0, strict: 45,
+  total: 62, worker: 27, main: 35, both: 0, strict: 44, live: 39, gated: 3,
   groups: Object.fromEntries(lib.ENGINE_GROUPS.map((g, k) => [g, [8, 17, 11, 11, 7, 8][k]])),
+  rejected: 0,
 };
-const README_GROUPS = lib.ENGINE_GROUPS.map((g) => `| ${g} | ${SUMMARY.groups[g]} | examples |`).join('\n');
+const README_GROUPS = lib.ENGINE_GROUPS.map((g) => `| ${g} | ${SUMMARY.groups[g]} | examples |`).join('\n')
+  + '\n\nThe three write-capable engines sit behind mode gates.';
 
 test('a well-formed index passes, and its tallies are read from the rows', () => {
   const groups = fixtureRows();
@@ -92,6 +99,9 @@ test('a well-formed index passes, and its tallies are read from the rows', () =>
   assert.equal(summary?.worker, 6);
   assert.equal(summary?.main, 6);
   assert.equal(summary?.strict, 10);
+  assert.equal(summary?.live, 10);
+  assert.equal(summary?.gated, 0);
+  assert.equal(summary?.rejected, 0);
   assert.deepEqual(Object.values(summary?.groups ?? {}), [2, 2, 2, 2, 2, 2]);
 });
 
@@ -150,6 +160,22 @@ test('code is told from comments and literals the way the parser does', () => {
   for (const div of ['rttMs! / 2', 'f(x) / 2', 'a[0] / 2', '10 / 2']) {
     assert.match(keep(`const v = ${div}; function after() {}`), /function after/, div);
   }
+  // A keyword used as a property name is an operand, and so is a postfix ++ or --. Read as a
+  // regular expression, each slash below would open a literal that closes inside the template, and
+  // the template's closing backtick would then open one that hides the declaration after it.
+  for (const div of [
+    'kwh.in / Math.max(p, 1); const s = `${a}/${b} packs`;',
+    'kwh?.in / 2; const s = `${a}/${b}`;',
+    'pv.yield / 2; const s = `${spec}/kWp`;',
+    'n++ / 2; const u = `http://h/${half}`;',
+    'n-- / 2; const u = `${a}/${b}`;',
+  ]) {
+    const src = `const v = ${div}\nexport function after() {}\n`;
+    assert.match(keep(src), /function after/, div);
+    assert.equal(lib.declares(src, 'after'), true, div);
+  }
+  // A prefix ++ after a keyword still leaves the slash after its operand a division.
+  assert.match(keep('function f() { return ++n / 2; } const s = `${a}/${b}`; function after() {}'), /function after/);
   // After a keyword it opens a literal.
   assert.match(keep('function f() { return /}/.test(s); } function after() {}'), /function after/);
   // A template's text is blanked; its expressions, braces and nested templates stay code.
@@ -212,10 +238,31 @@ test('a group with no rows fails', () => {
   expectProblem(buildIndex(groups, { sentence: '**10 engines**: **5** in the analytics worker, **5** on the main thread. It holds **10**.' }), /group "Telemetry integrity" has no rows/);
 });
 
-test('a stray pipe inside a cell fails', () => {
+test('a stray pipe inside a cell fails on its own, without misnumbering every later row', () => {
   const groups = fixtureRows();
   groups[0][0].engine = 'Solar | PV';
-  expectProblem(buildIndex(groups), /9 cells where the header has 8/);
+  const { problems, summary } = check(buildIndex(groups));
+  assert.match(problems.join('\n'), /9 cells where the header has 8/);
+  // One dropped row would shift every later row's number and leave every tally one short; those
+  // follow-on problems would bury the cause, so they wait until the row parses.
+  assert.equal(problems.length, 1, problems.join('\n'));
+  assert.equal(summary?.rejected, 1);
+});
+
+test('an escaped pipe inside a cell is one cell, unescaped', () => {
+  const groups = fixtureRows();
+  groups[0][0].engine = 'Solar \\| PV';
+  groups[2][1].engine = 'Gated on \\|innovation\\| < 3σ';
+  const { problems, summary } = check(buildIndex(groups));
+  assert.deepEqual(problems, []);
+  assert.equal(summary?.total, 12);
+  // A backslash escapes the character after it, so an escaped backslash before a pipe still splits.
+  const split = fixtureRows();
+  split[0][0].engine = 'Solar \\\\| PV';
+  expectProblem(buildIndex(split), /9 cells where the header has 8/);
+  // An escaped pipe at the end of the last cell is content, not the closing border.
+  const index = buildIndex(fixtureRows()).replace('| y |', '| y \\| |');
+  assert.deepEqual(check(index).problems, []);
 });
 
 test('a count sentence that disagrees with the rows fails, and so does a missing one', () => {
@@ -232,8 +279,30 @@ test('an "on both" clause is required when a row runs on both, and refused when 
   const groups = fixtureRows();
   groups[0][0].thread = 'both';
   expectProblem(buildIndex(groups, { sentence: '**12 engines**: **5** in the analytics worker, **6** on the main thread. It holds **12**.' }), /no longer states "\*\*N\*\* on both"/);
-  const ok = check(buildIndex(groups, { sentence: '**12 engines**: **5** in the analytics worker, **6** on the main thread, **1** on both. It holds **12**.' }));
+  const ok = check(buildIndex(groups, { sentence: '**12 engines**: **5** in the analytics worker, **6** on the main thread, **1** on both. It holds **12**. Of those, 12 are live; the other 0 wait.' }));
   assert.deepEqual(ok.problems, []);
+});
+
+test('the strict reading\'s live and waiting split is pinned to the rows', () => {
+  // Two core rows wait on an opt-in channel or a write mode: the strict reading stays 12, 10 are live.
+  const groups = fixtureRows();
+  groups[0][0].status = 'live-opt-in';
+  groups[3][1].status = 'write-capable-gated';
+  const base = '**12 engines**: **6** in the analytics worker, **6** on the main thread. It holds **12**.';
+  assert.deepEqual(check(buildIndex(groups, { sentence: `${base} Of those, 10 are live; the other 2 wait on a channel.` })).problems, []);
+  // A status flipped back to live leaves the sentence stale, and the check says so.
+  expectProblem(buildIndex(groups, { sentence: `${base} Of those, 11 are live; the other 2 wait.` }), /says 11 for "Of those, N are live"; its rows give 10/);
+  expectProblem(buildIndex(groups, { sentence: `${base} Of those, 10 are live; the other 1 wait.` }), /says 1 for "the other N wait"; its rows give 2/);
+  expectProblem(buildIndex(groups, { sentence: base }), /no longer states "Of those, N are live"/);
+  expectProblem(buildIndex(groups, { sentence: base }), /no longer states "the other N wait"/);
+  // A borderline row leaves the strict reading, and the split with it.
+  const borderline = fixtureRows();
+  borderline[0][0].status = 'live-opt-in';
+  borderline[0][0].tier = 'borderline';
+  const { problems, summary } = check(buildIndex(borderline));
+  assert.deepEqual(problems, []);
+  assert.equal(summary?.strict, 11);
+  assert.equal(summary?.live, 11);
 });
 
 test('a missing index heading fails as GONE, with no summary to check prose against', () => {
@@ -247,9 +316,20 @@ test('the README floor must sit below the strict reading and the total', () => {
   assert.deepEqual(claim('more than 40').problems, []);
   assert.equal(claim('more than 40').floor, 40);
   assert.equal(lib.checkReadmeEngineClaims(README_GROUPS, SUMMARY).floor, null);
-  assert.match(claim('more than 50').problems.join('\n'), /not below the strict reading 45/);
+  assert.match(claim('more than 44').problems.join('\n'), /not below the strict reading 44/);
+  assert.match(claim('more than 50').problems.join('\n'), /not below the strict reading 44/);
   assert.match(claim('more than 62').problems.join('\n'), /the index holds 62/);
   assert.match(lib.checkReadmeEngineClaims(README_GROUPS, SUMMARY).problems.join('\n'), /engine floor GONE/);
+});
+
+test('the README\'s count of write-capable engines must equal the index\'s write-capable-gated rows', () => {
+  const groupsOnly = README_GROUPS.split('\n\n')[0];
+  const claim = (sentence: string) => lib.checkReadmeEngineClaims(`**more than 40 engines**\n\n${groupsOnly}\n\n${sentence}\n`, SUMMARY).problems.join('\n');
+  assert.equal(claim('The three write-capable engines sit behind mode gates.'), '');
+  assert.equal(claim('The 3 write-capable\nengines sit behind mode gates.'), '');
+  assert.match(claim('The four write-capable engines sit behind mode gates.'), /README says "four write-capable engines", the index has 3/);
+  assert.match(claim('The two write-capable engines sit behind mode gates.'), /the index has 3 write-capable-gated row/);
+  assert.match(claim('Some engines can write, behind mode gates.'), /write-capable count GONE/);
 });
 
 test('each README group row must state its group\'s tally, once', () => {
@@ -270,9 +350,24 @@ test('the sweep refuses approximate, stale and worker-thread engine counts and a
   assert.match(sweep('analytics worker (≈40 engines)').join('\n'), /approximately/);
   assert.match(sweep('40+ engines').join('\n'), /approximately/);
   assert.match(sweep('runs 40 engines').join('\n'), /neither the index total/);
-  assert.match(sweep('more than 62 engines').join('\n'), /not below the strict reading 45/);
-  assert.match(sweep('more than 50 engines').join('\n'), /not below the strict reading 45/);
+  assert.match(sweep('more than 62 engines').join('\n'), /not below the strict reading 44/);
+  assert.match(sweep('more than 50 engines').join('\n'), /not below the strict reading 44/);
+  assert.match(sweep('more than 44 engines').join('\n'), /not below the strict reading 44/);
   assert.match(sweep(null).join('\n'), /does not exist/);
+});
+
+test('the sweep reads a count through Markdown emphasis, and a bold floor is still a floor', () => {
+  const sweep = (text: string) => lib.sweepEngineCounts([{ path: 'x.md', text }], SUMMARY, 40).problems.join('\n');
+  for (const t of ['It runs more than **40 engines**.', 'It runs more than **40** engines.', 'It runs more than __40__ engines.', '**more than 40 engines**']) {
+    assert.equal(sweep(t), '', t);
+  }
+  assert.match(sweep('It runs more than **50** engines.'), /"more than 50 engines" is not below the strict reading 44/);
+  assert.match(sweep('It runs more than **50 engines**.'), /not below the strict reading 44/);
+  assert.match(sweep('It runs **50** engines.'), /neither the index total/);
+  for (const t of ['about **40** engines', 'runs **~40** engines', '~**40** engines', 'some **62** analytics engines', '**40+** engines']) {
+    assert.match(sweep(t), /approximately/, t);
+  }
+  assert.match(sweep('**forty** engines'), /in words/);
 });
 
 test('the sweep refuses counts in words or behind a qualifier, and a sentence that puts every engine on one thread', () => {
@@ -281,6 +376,7 @@ test('the sweep refuses counts in words or behind a qualifier, and a sentence th
     assert.match(sweep(t), /approximately/, t);
   }
   for (const t of ['more than forty engines', 'sixty-two engines', 'forty engines']) assert.match(sweep(t), /in words/, t);
+  // The engines as a whole, with or without a count, as the subject of a verb that places them.
   for (const t of [
     'All engines run in the analytics worker.',
     'every engine runs on the main thread',
@@ -288,15 +384,35 @@ test('the sweep refuses counts in words or behind a qualifier, and a sentence th
     'Every engine runs in the analytics worker thread.',
     'All of the engines run on the main thread.',
     'The engines run\nin a background worker.',
+    'All 62 engines run in the analytics worker.',
+    'All 62 engines run on the main thread.',
+    'The 62 engines run on the main thread.',
+    'Its 62 engines all run in the analytics worker.',
+    'The engines all run in the worker.',
+    'All **62** engines run in the analytics worker.',
+    'The engines are all in the worker.',
+    'All engines run in the analytics worker, not the main thread.',
   ]) {
     assert.match(sweep(t), /the engines run on both threads/, t);
   }
+  // The old wording, with a verb or a mark between.
+  for (const t of ['engines in a worker thread', 'engines run in a worker thread', 'engines, in a worker thread', 'engines** in a worker thread']) {
+    assert.match(sweep(t), /the engines run on both threads/, t);
+  }
+  // A subset, a split or a tag is not all of the engines on one thread.
   for (const t of [
     'the three write-capable engines',
     'Most engines that scan recorder history run in an analytics worker; the night-charge stack runs on the main thread.',
     'The engines fall into six groups (forecasting, battery and PV health, energy economics and arbitrage, alarms); most run in an analytics worker.',
     'The engines are listed.\n\nThe worker runs most of them.',
     'more than\n40 engines',
+    'Its engines split between the analytics worker and the main thread.',
+    'Of the engines, 27 run in the analytics worker and 35 on the main thread.',
+    'The engines on the main thread include the night-charge stack.',
+    'The engines in the index are tagged worker or main.',
+    'The engines in the worker read history.',
+    'the engines on the main thread are listed in the index',
+    'The engines run on schedules; the worker sets none of them.',
   ]) {
     assert.equal(sweep(t), '', t);
   }
@@ -307,8 +423,8 @@ test('every surface states the same floor as the README', () => {
   const ok = lib.sweepEngineCounts(surfaces('**more than 40 engines**', 'built on\n  more than 40 engines: a plan'), SUMMARY, 40);
   assert.deepEqual(ok.problems, []);
   assert.equal(ok.floors, 2);
-  const drift = lib.sweepEngineCounts(surfaces('**more than 40 engines**', 'more than 44 engines'), SUMMARY, 40).problems.join('\n');
-  assert.match(drift, /config\.yaml:1: "more than 44 engines" differs from the README's floor, more than 40/);
+  const drift = lib.sweepEngineCounts(surfaces('**more than 40 engines**', 'more than 43 engines'), SUMMARY, 40).problems.join('\n');
+  assert.match(drift, /config\.yaml:1: "more than 43 engines" differs from the README's floor, more than 40/);
   assert.match(lib.sweepEngineCounts(surfaces('**more than 41 engines**', 'more than 40 engines'), SUMMARY, 41).problems.join('\n'), /differs from the README's floor, more than 41/);
   assert.match(lib.sweepEngineCounts(surfaces('no floor', 'more than 40 engines'), SUMMARY, null).problems.join('\n'), /cannot be compared: the README states no floor/);
 });

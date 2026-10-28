@@ -11,19 +11,30 @@
  *   - every row's file declares its identifier in code: a function, class, const, let, var,
  *     interface, type, enum or namespace of that name outside every comment and literal, so a
  *     rename that leaves the old name in comments, or a removal that leaves a caller, fails;
+ *   - every row has the header's cell count, a pipe inside a cell written as \|; a row that does
+ *     not is a problem, and while one is dropped the numbering and count-sentence checks wait;
  *   - the rows are numbered 1..N without a gap, each engine and each file:identifier pair is unique,
  *     and status, thread, tier and group come from fixed vocabularies;
- *   - the index's own count sentence equals its rows: the total, the per-thread tallies and the
- *     strict reading (core rows that are neither advisory-only nor shadow);
+ *   - the index's own count sentence equals its rows: the total, the per-thread tallies, the strict
+ *     reading (core rows that are neither advisory-only nor shadow), "Of those, N are live" (core
+ *     rows with status live) and "the other N wait" (the rest of the strict reading);
  *   - the README's engine floor ("more than N engines") sits below the total and below the strict
  *     reading, so the prose never claims more than the index's strict reading;
- *   - each README group row states that group's tally;
- *   - on every surface swept (the fixed list below plus every page in the listed directories),
- *     each count written in digits before "engines" is the index total or a floor equal to the
- *     README's; a count with ~, ≈, a trailing + or "-plus", or a qualifier such as about, around,
- *     roughly, nearly, almost, approximately, some or over, fails, as does a count in words
- *     (twenty to ninety-nine) and a sentence that puts all of the engines (all, every, its or the
- *     engines) in the worker or on the main thread.
+ *   - each README group row states that group's tally, and every "N write-capable engines" in the
+ *     README (digits, or a word from zero to twelve; at least one is required) equals the
+ *     write-capable-gated rows;
+ *   - on every surface swept (the fixed list below plus every page in the listed directories), a
+ *     count written directly before "engines" or "analytics engines", bold or not, must be in
+ *     digits and be the index total or a floor ("more than N") equal to the README's; such a count
+ *     with ~ or ≈, a trailing + or "-plus", or one of the qualifiers about, around, roughly,
+ *     nearly, almost, approximately, some, over, upwards of or close to fails, as does one written
+ *     in words (twenty to ninety-nine). A count elsewhere in a sentence is not read;
+ *   - on the same surfaces, "engines in a worker thread" (also "engines run in", or up to four marks
+ *     such as a comma between) fails, and so does a sentence that makes the engines as a whole
+ *     (all, all of the, every, its or the engines, with or without a count) the subject of a
+ *     placement verb (ALL_ON_ONE_THREAD lists them) followed within 60 characters by "worker" or
+ *     "main thread". A narrowed subject ("the engines on the main thread") or another verb ("its
+ *     engines split between …") is not read.
  *
  * Out of the tree, and so out of reach: the repository's About description on GitHub states the
  * floor too, and is changed by hand when the floor changes.
@@ -31,7 +42,8 @@
  * Every function here is pure: it takes text (and, for the anchors, a reader) and returns
  * problems. scripts/check-doc-claims.mjs does the file access and the reporting, in CI;
  * server/test/engineIndex.test.ts runs the fixtures that prove each check can fail. A check that
- * cannot be evaluated is a problem, never a pass: there is no skip path.
+ * cannot be evaluated is a problem, never a pass: a check that waits on a row that did not parse
+ * leaves that row's problem standing, so the run still fails.
  */
 
 export const ENGINE_INDEX_FILE = 'docs/reference/A-feature-inventory.md';
@@ -74,7 +86,23 @@ const CODE_CELL = /^`(server\/src\/[\w./-]+\.(?:ts|mts|mjs)):([A-Za-z_$][\w$]*)`
 const TABLE_RULE = /^\|\s*:?-{3,}/;
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const cells = (line) => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+/**
+ * A table row's cells, split the way GitHub's table extension splits them: on every `|` that no
+ * backslash escapes (a backslash escapes the character after it, so `\\|` ends a cell), with the
+ * outer border pipes dropped and `\|` unescaped to `|` inside a cell.
+ */
+const cells = (line) => {
+  const out = [''];
+  const t = line.trim();
+  for (let k = 0; k < t.length; k++) {
+    if (t[k] === '\\' && k + 1 < t.length) { out[out.length - 1] += t[k] + t[k + 1]; k++; continue; }
+    if (t[k] === '|') { out.push(''); continue; }
+    out[out.length - 1] += t[k];
+  }
+  if (t.startsWith('|')) out.shift();
+  if (out.length > 1 && out[out.length - 1].trim() === '') out.pop();
+  return out.map((c) => c.trim().replace(/\\\|/g, '|'));
+};
 const unticked = (s) => s.replace(/^`|`$/g, '');
 
 /** Keywords after which a `/` starts a regular-expression literal rather than a division. */
@@ -87,7 +115,10 @@ const REGEX_AFTER_WORD = new Set([
  * template and regular-expression literal replaced by spaces; line breaks are kept, so offsets
  * and line numbers hold. A template's `${…}` expressions stay code. The regular-expression test
  * is the usual previous-token heuristic: a `/` after an operand (an identifier that is not a
- * keyword, a number, `)` or `]`) is a division, anywhere else it opens a literal.
+ * keyword, a keyword used as a property name after `.`, a number, `)`, `]`, a non-null `!` or a
+ * postfix `++`/`--`) is a division, anywhere else it opens a literal. JSX is not lexed: a closing
+ * tag reads as a literal and a text child as code, which is why CODE_CELL anchors only `.ts`,
+ * `.mts` and `.mjs` files.
  */
 export function codeOnly(text) {
   const out = [];
@@ -149,9 +180,12 @@ export function codeOnly(text) {
     if (/[A-Za-z_$]/.test(c)) {
       let j = i;
       while (j < n && /[\w$]/.test(text[j])) j++;
-      word = text.slice(i, j);
+      const ident = text.slice(i, j);
+      // After `.` or `?.` a keyword is a property name, so the expression is an operand:
+      // `kwh.in / 2` and `pv.yield / 2` divide.
+      word = prev === '.' ? '' : ident;
       for (; i < j; i++) keep(i);
-      prev = word[word.length - 1];
+      prev = ident[ident.length - 1];
       continue;
     }
     if (c === '{' && templates.length) templates[templates.length - 1]++;
@@ -162,6 +196,13 @@ export function codeOnly(text) {
     // A `!` straight after an operand, not opening `!=`, is TypeScript's non-null assertion: the
     // expression is still an operand, so a `/` after it divides.
     const operand = /[\w$)\]]/.test(prev) && !REGEX_AFTER_WORD.has(word);
+    // A `++` or `--` straight after an operand is postfix: the expression is still an operand, so
+    // `n++ / 2` divides.
+    if ((c === '+' || c === '-') && d === c && operand) {
+      keep(i); keep(i + 1); i += 2;
+      prev = ')'; word = '';
+      continue;
+    }
     const nonNull = c === '!' && operand && text[i + 1] !== '=';
     keep(i); i++;
     if (!/\s/.test(c)) { prev = /\d/.test(c) || nonNull ? ')' : c; word = ''; }
@@ -184,7 +225,8 @@ export function declares(text, identifier) {
 
 /**
  * Parse the index section of `text` (the whole A-feature-inventory.md). Returns the rows, the
- * numbers the count sentences state (null when a sentence is absent), and structural problems.
+ * numbers the count sentences state (null when a sentence is absent), structural problems, and
+ * `rejected`, the number of rows dropped for a cell count that differs from the header's.
  * `rows` is null only when the section itself is missing.
  */
 export function parseEngineIndex(text) {
@@ -195,6 +237,7 @@ export function parseEngineIndex(text) {
     return {
       rows: null,
       stated: null,
+      rejected: 0,
       problems: [`engine index GONE: no "${ENGINE_INDEX_HEADING}" heading in ${ENGINE_INDEX_FILE}`],
     };
   }
@@ -205,6 +248,7 @@ export function parseEngineIndex(text) {
 
   const rows = [];
   const prose = [];
+  let rejected = 0;
   const groupsSeen = [];
   let group = null;
   let header = null; // { cols: Map<name, index>, width }
@@ -241,7 +285,11 @@ export function parseEngineIndex(text) {
     }
     const c = cells(line);
     if (c.length !== header.width) {
-      problems.push(`line ${lineNo}: ${c.length} cells where the header has ${header.width} (a stray or missing "|")`);
+      rejected++;
+      problems.push(
+        `line ${lineNo}: ${c.length} cells where the header has ${header.width} (a stray or missing "|"; write a pipe inside a cell as \\|) — ` +
+          'the row is dropped, and the numbering and count-sentence checks wait until every row parses',
+      );
       continue;
     }
     if (!header.ok) continue;
@@ -270,20 +318,25 @@ export function parseEngineIndex(text) {
     main: num(/\*\*(\d+)\*\* on the main thread/),
     both: num(/\*\*(\d+)\*\* on both/),
     strict: num(/holds \*\*(\d+)\*\*/),
+    live: num(/Of those, (\d+) are live\b/),
+    waiting: num(/the other (\d+) wait\b/),
   };
-  return { rows, stated, problems };
+  return { rows, stated, problems, rejected };
 }
 
 /**
  * Check the index against itself and the source. `readSource(path)` returns the file's text, or
  * null when it does not exist (the caller catches ENOENT; it never probes first). Returns the
- * problems and, whenever the rows could be read, a summary of the tallies.
+ * problems and, whenever the rows could be read, a summary of the tallies. A row dropped for its
+ * cell count is a problem of its own, and while one is dropped the numbering and the count
+ * sentence are not compared: every later row would read as misnumbered and every tally one short,
+ * burying the cause. The summary then carries `rejected` > 0, and its tallies are partial.
  */
 export function checkEngineIndex(text, readSource) {
   const parsed = parseEngineIndex(text);
   const problems = [...parsed.problems];
   if (parsed.rows == null) return { problems, summary: null };
-  const { rows, stated } = parsed;
+  const { rows, stated, rejected } = parsed;
   if (rows.length === 0) problems.push('the engine index has no rows');
 
   const names = new Set();
@@ -291,7 +344,7 @@ export function checkEngineIndex(text, readSource) {
   const sources = new Map();
   rows.forEach((r, k) => {
     const who = `row ${r.num} ${r.engine || '(unnamed)'}`;
-    if (r.num !== String(k + 1)) problems.push(`${who} (line ${r.line}): numbered "${r.num}", expected ${k + 1} — the rows run 1..N without a gap`);
+    if (!rejected && r.num !== String(k + 1)) problems.push(`${who} (line ${r.line}): numbered "${r.num}", expected ${k + 1} — the rows run 1..N without a gap`);
     if (!r.engine) problems.push(`row ${r.num} (line ${r.line}): the Engine cell is empty`);
     else if (names.has(r.engine)) problems.push(`${who}: the engine name appears twice`);
     names.add(r.engine);
@@ -321,8 +374,12 @@ export function checkEngineIndex(text, readSource) {
     main: count((r) => r.thread === 'main'),
     both: count((r) => r.thread === 'both'),
     strict: count((r) => r.tier === 'core' && !NON_ACTING_STATUSES.includes(r.status)),
+    live: count((r) => r.tier === 'core' && r.status === 'live'),
+    gated: count((r) => r.status === 'write-capable-gated'),
     groups: Object.fromEntries(ENGINE_GROUPS.map((g) => [g, count((r) => r.group === g)])),
+    rejected,
   };
+  if (rejected) return { problems, summary };
   const sentence = (label, claimed, actual) => {
     if (claimed == null) problems.push(`the index's count sentence no longer states "${label}" — it must state ${actual}`);
     else if (claimed !== actual) problems.push(`the index's count sentence says ${claimed} for "${label}"; its rows give ${actual}`);
@@ -333,13 +390,21 @@ export function checkEngineIndex(text, readSource) {
   if (summary.both > 0) sentence('**N** on both', stated.both, summary.both);
   else if (stated.both != null && stated.both !== 0) problems.push(`the index's count sentence says ${stated.both} on both, but no row runs on both`);
   sentence('holds **N**', stated.strict, summary.strict);
+  sentence('Of those, N are live', stated.live, summary.live);
+  sentence('the other N wait', stated.waiting, summary.strict - summary.live);
   return { problems, summary };
 }
 
+/** Zero to twelve written out; the index of a word is its value. */
+const SMALL_NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'];
+/** The README's count of write-capable engines, in digits or as a word from zero to twelve. */
+const WRITE_CAPABLE = new RegExp(`\\b(\\d+|${SMALL_NUMBER_WORDS.join('|')})\\s+write-capable\\s+engines?\\b`, 'gi');
+
 /**
- * The README's engine floor and its per-group rows, against the index summary. `floor` is the
- * number in the README's first "**more than N engines**" (null when there is none), the value every
- * other surface's floor must equal.
+ * The README's engine floor, its per-group rows and its count of write-capable engines, against the
+ * index summary. `floor` is the number in the README's first "**more than N engines**" (null when
+ * there is none), the value every other surface's floor must equal. Every "N write-capable engines"
+ * must equal the index's write-capable-gated rows, and at least one must be present.
  */
 export function checkReadmeEngineClaims(readme, summary) {
   const problems = [];
@@ -365,6 +430,20 @@ export function checkReadmeEngineClaims(readme, summary) {
     else stated.push(n);
   }
   if (stated.length === ENGINE_GROUPS.length) passes.push(`engine groups: ${stated.join('/')} match the index`);
+  const gated = [...readme.matchAll(WRITE_CAPABLE)];
+  if (gated.length === 0) {
+    problems.push('write-capable count GONE: README.md has no "N write-capable engines" claim');
+  }
+  for (const m of gated) {
+    const said = m[1].toLowerCase();
+    const n = /^\d+$/.test(said) ? Number(said) : SMALL_NUMBER_WORDS.indexOf(said);
+    if (n !== summary.gated) {
+      problems.push(`write-capable count: README says "${m[0]}", the index has ${summary.gated} write-capable-gated row(s)`);
+    }
+  }
+  if (gated.length && !problems.some((p) => p.startsWith('write-capable count'))) {
+    passes.push(`write-capable count: ${summary.gated} write-capable-gated row(s), as the README states`);
+  }
   return { problems, passes, floor };
 }
 
@@ -372,23 +451,41 @@ export function checkReadmeEngineClaims(readme, summary) {
 const NUMBER_WORD = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?';
 /** Words that make the count after them approximate. "more than" is the floor, not one of these. */
 const QUALIFIER = '(?:about|around|roughly|nearly|almost|approximately|some|over|upwards\\s+of|close\\s+to)';
-/** A number of engines: an optional qualifier, ~ or ≈, digits or a written number, an optional + or -plus. */
+/** Optional Markdown emphasis, `**` or `__`, around a count or a noun. */
+const EM = '(?:\\*\\*|__)?';
+/**
+ * A number of engines, written directly before "engines" or "analytics engines": an optional
+ * qualifier, ~ or ≈, digits or a written number from twenty to ninety-nine, an optional + or
+ * -plus, with emphasis allowed around the ~ and the number ("about **40** engines",
+ * "**~40** engines", "more than **50** engines"). A count anywhere else in the sentence is not read.
+ */
 const COUNT = new RegExp(
-  `(?:\\b(${QUALIFIER})\\s+)?([~≈]\\s*)?(\\d[\\d,]*|\\b${NUMBER_WORD})(\\+|-plus)?\\s+(?:analytics\\s+)?engines\\b`,
+  `(?:\\b(${QUALIFIER})\\s+)?${EM}([~≈]\\s*)?${EM}(\\d[\\d,]*|\\b${NUMBER_WORD})(\\+|-plus)?${EM}\\s+(?:analytics\\s+)?engines\\b`,
   'gi',
 );
-/** The old wording, a number of engines "in a worker thread". */
-const IN_A_WORKER = /engines\W{0,4}\s+in a worker thread/gi;
+/** The old wording: engines "in a worker thread", with or without "run" and up to four marks between. */
+const IN_A_WORKER = /engines\W{0,4}\s+(?:run\s+)?in a worker thread/gi;
 /**
- * All of the engines placed on one thread within 60 characters of one sentence, across a wrapped
- * line but not a blank one: "all engines … the worker", "its engines … main thread".
+ * The engines as a whole placed on one thread: a subject naming all of them (all, all of the,
+ * every, its or the engines, with or without a count in digits) followed, directly or after "all",
+ * by a placement verb (run, live, sit, reside, execute, or is or are in, on, run, hosted, computed
+ * or executed), then "worker" or "main thread" within 60 characters, stopping at a period or a
+ * semicolon and crossing a wrapped line but not a blank one: "All 62 engines run in the analytics
+ * worker", "The engines all run in the worker". A subject narrowed by a modifier ("the engines on
+ * the main thread", "the engines in the index") or another verb ("its engines split between the
+ * worker and the main thread") does not match.
  */
-const ALL_ON_ONE_THREAD = /\b(?:(?:all|its|the)\s+(?:of\s+(?:the|its)\s+)?(?:analytics\s+)?engines|every\s+(?:analytics\s+)?engine)\b(?:[^.\n]|\n(?![ \t]*\n)){0,60}?(?:\bworker\b|\bmain\s+thread\b)/gi;
+const ALL_ON_ONE_THREAD = new RegExp(
+  `\\b(?:(?:all|its|the)\\s+(?:of\\s+(?:the|its)\\s+)?(?:${EM}\\d[\\d,]*${EM}\\s+)?(?:analytics\\s+)?engines|every\\s+(?:analytics\\s+)?engine)${EM}` +
+    '\\s+(?:all\\s+)?(?:runs?|lives?|sits?|resides?|executes?|(?:are|is)\\s+(?:all\\s+)?(?:in|on|run|hosted|computed|executed))\\b' +
+    '(?:[^.;\\n]|\\n(?![ \\t]*\\n)){0,60}?(?:\\bworker\\b|\\bmain\\s+thread\\b)',
+  'gi',
+);
 
 /**
- * Every engine count on the given surfaces must be written in digits, as the index total or as a
- * floor ("more than N") equal to the README's `floor` and below the strict reading; never
- * approximate, never in words, and no sentence may put all of the engines on one thread.
+ * Every engine count COUNT reads on the given surfaces must be written in digits, as the index
+ * total or as a floor ("more than N") equal to the README's `floor` and below the strict reading;
+ * never approximate, never in words. IN_A_WORKER and ALL_ON_ONE_THREAD must not match.
  * `surfaces` is [{ path, text }], text null when the file is missing (itself a problem: a surface
  * that moved must be re-pointed here). `floor` null means the README states none, and then the
  * floors cannot be compared: that is a problem too.
@@ -413,7 +510,7 @@ export function sweepEngineCounts(surfaces, summary, floor) {
         continue;
       }
       const n = Number(m[3].replace(/,/g, ''));
-      const isFloor = /\bmore than\s+$/i.test(text.slice(Math.max(0, m.index - 20), m.index));
+      const isFloor = /\bmore than\s+(?:\*\*|__)?$/i.test(text.slice(Math.max(0, m.index - 20), m.index));
       if (!isFloor) {
         if (n !== summary.total) problems.push(`${at}: "${said}" is neither the index total (${summary.total}) nor a floor ("more than N engines")`);
         continue;

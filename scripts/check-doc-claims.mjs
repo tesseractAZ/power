@@ -34,11 +34,14 @@
  * thread": approximate, wrong about the thread for more than half of them, and held by nothing.
  * The engine index (docs/reference/A-feature-inventory.md, section A.13) is now the census, and
  * scripts/lib/engineIndex.mjs checks it: every row's file must declare its identifier in code (a
- * mention in a comment or a string does not count), the index's count sentence must equal its
- * rows, the README's floor ("more than N engines") must sit below the strict reading the index
- * discloses, each README group row must state its group's tally, and on every surface swept an
- * engine count is the index total or the README's floor, in digits and never approximate, and no
- * sentence puts all of the engines on one thread.
+ * mention in a comment or a string does not count), the index's count sentence (the total, the
+ * per-thread tallies, the strict reading and its live and waiting split) must equal its rows, the
+ * README's floor ("more than N engines") must sit below the strict reading the index discloses,
+ * each README group row must state its group's tally, the README's count of write-capable engines
+ * must equal the index's, and on every surface swept a count written directly before "engines" is
+ * the index total or the README's floor, in digits and never approximate, and no sentence makes
+ * the engines as a whole the subject of a verb that places them in the worker or on the main thread
+ * (the lib's docblock lists the exact wording read).
  *
  * Usage:  node scripts/check-doc-claims.mjs [--tests N]
  */
@@ -185,12 +188,18 @@ if (indexText == null) {
   for (const p of index.problems) failures.push(`engine index: ${p}`);
   if (index.summary == null) {
     failures.push('engine floor, group counts and count wording UNVERIFIABLE: the engine index could not be read.');
+  } else if (index.summary.rejected) {
+    failures.push(
+      `engine floor, group counts and count wording UNVERIFIABLE: ${index.summary.rejected} index row(s) did not parse, ` +
+        'so the tallies are partial; fix the row(s) named above.',
+    );
   } else {
     const s = index.summary;
     if (!index.problems.length) {
       passes.push(
         `engine index: ${s.total} rows, every anchor declared in code across ${sourceCache.size} source files; ` +
-          `${s.worker} worker / ${s.main} main${s.both ? ` / ${s.both} both` : ''}; strict reading ${s.strict}`,
+          `${s.worker} worker / ${s.main} main${s.both ? ` / ${s.both} both` : ''}; strict reading ${s.strict} ` +
+          `(${s.live} live, ${s.strict - s.live} waiting on an opt-in channel or a write mode)`,
       );
     }
     const readme = checkReadmeEngineClaims(README, s);
@@ -208,7 +217,7 @@ if (indexText == null) {
     if (!sweep.problems.length) {
       passes.push(
         `engine-count wording: ${sweep.counted} count(s) across ${sweep.surfaces} surfaces, none approximate, in words or stale; ` +
-          `${sweep.floors} floor(s), all more than ${readme.floor}; no sentence puts every engine on one thread`,
+          `${sweep.floors} floor(s), all more than ${readme.floor}; no sentence places the engines as a whole on one thread`,
       );
     }
   }

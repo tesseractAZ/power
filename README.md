@@ -13,8 +13,9 @@ anchor in the code.
 Solar is a per-hour-of-day least-squares response to forecast irradiance, learned from the home's
 own array, with a recursive Bayesian posterior of the same coefficient; load is a
 recency-weighted hour-of-day curve with mined EV sessions added; together they drive a
-P10/P50/P90 band of 21 quantile paths over solar and state of charge, whose width is checked
-against its own realized error and narrowed, never widened, once 14 days are scored. Pack health
+P10/P50/P90 band over solar and state of charge, whose width is checked against its own realized
+error and narrowed, never widened, once 14 days are scored; 21 equal-probability quantile paths
+give the chance of holding the reserve and of reaching full. Pack health
 is an OLS fade regression to end of life behind a recalibration-staircase detector, with
 internal-resistance trend, coulombic and round-trip efficiency, charge-curve drift and
 thermal-event counts beside it. Anomalies are scored as robust median/MAD z-scores: pack, board
@@ -118,7 +119,7 @@ anchored identifier in code; a mention left in a comment or a string does not co
 
 | Group | Engines | Examples |
 |---|---|---|
-| Forecasting | 8 | Per-hour least-squares irradiance→PV response with a recursive Bayesian posterior; recency-weighted load curves; a P10/P50/P90 band of 21 quantile paths, narrowed (never widened) to its realized error; a forecast-skill hindcast with PV bias correction; EV-session mining and live-session detection; an ambient-coupled pack thermal forecast; a clear-sky physics ceiling (API) |
+| Forecasting | 8 | Per-hour least-squares irradiance→PV response with a recursive Bayesian posterior; recency-weighted load curves; a P10/P50/P90 solar and SoC band, narrowed (never widened) to its realized error, with 21 quantile paths for the reserve and full-charge probabilities; a forecast-skill hindcast with PV bias correction; EV-session mining and live-session detection; an ambient-coupled pack thermal forecast; a clear-sky physics ceiling (API) |
 | Battery & PV health | 17 | OLS fade regression to end of life; a two-state Kalman SoH filter and hierarchical Bayesian shrinkage (API); self-validating coulombic efficiency; round-trip efficiency; charge-curve fingerprint; internal-resistance trend; thermal-event counting; soiling, shade, clipping and SoC-saturation curtailment; MPPT and standby-floor drift; LFP OCV→SoC (API); a pack-risk heuristic and an online-trained logistic regression (API) |
 | Energy economics & arbitrage | 11 | The night-charge planner, its outcome scorer and its write-readiness gate; a reserve writer, a just-in-time force-charge controller and a Charge Now responder, each write-capable only behind options whose defaults never write; on-peak grid-to-battery and idle-pool detectors; energy-flow attribution with time-of-use cost accounting; greedy and dynamic-programming dispatch planners (API) |
 | Alarms & safety | 11 | The islanded runway and projected-SoC simulator; the backup-pool SoC ladder; grid-backstop evidence fusion; threshold, cell-spread and defective-pack alarms; runtime and cell-imbalance trend alarms; host health; a second panel's runway; a load-shed advisor (advisory) |
@@ -444,7 +445,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 5,628 tests
+cd server && npm install && npm test     # 5,632 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -515,14 +516,20 @@ The counted claims in this README are held to the tree by `scripts/check-doc-cla
 the harness, mutant and test counts, the reference size, the workflow roster and the engine
 index. Every index row's file must declare the row's identifier in code (a function, class,
 constant, type or similar declaration; a mention in a comment or a string does not count), the
-index's stated totals and this README's per-group counts must equal its rows, and the engine
-floor must sit below the index's strict reading. On this README, the add-on's README,
-documentation and configuration, the image labels, the web manifest and every guide and
-reference page, an engine count must be written in digits as the index total or as the same floor
-this README states; a count in words, or after ~, ≈, about, around, some or over, or with a
-trailing + or "-plus", fails, and so does a sentence that names the worker, or the main thread,
-as the thread of all of the engines. The repository's About description on GitHub sits outside
-the tree and is updated by hand.
+index's count sentence (its total, thread tallies, strict reading and that reading's live and
+waiting split), this README's per-group counts and its count of write-capable engines must equal
+the rows, and the engine floor must sit below the index's strict reading. On this README, the
+add-on's README, documentation and configuration, the image labels, the web manifest and every
+guide and reference page, a count written directly before "engines" or "analytics engines", bold
+or not, must be in digits and be the index total or the same floor this README states; such a
+count in words (twenty to ninety-nine), after ~ or ≈, after one of the qualifiers about, around,
+roughly, nearly, almost, approximately, some, over, upwards of or close to, or with a trailing +
+or "-plus", fails. So does a sentence that makes the engines as a whole (all, all of
+the, every, its or the engines, with or without a count) the subject of a verb such as run, live
+or execute that places them in the worker or on the main thread, and the old wording that put
+them in "a worker thread". A count elsewhere in a sentence, or a subject narrowed to some of the
+engines, is not read. The repository's About description on GitHub sits outside the tree and is
+updated by hand.
 
 Dependency advisories are gated by `scripts/check-npm-audit.mjs`, which fails on
 **high or critical in the production tree** and reports the rest. Waivers must carry a
