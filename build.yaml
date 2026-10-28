@@ -12,7 +12,7 @@ args:
 
 labels:
   org.opencontainers.image.title: Power
-  org.opencontainers.image.description: Local dashboard + control-room TUI for an EcoFlow off-grid home
+  org.opencontainers.image.description: Time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for an EcoFlow off-grid home
   org.opencontainers.image.source: https://github.com/tesseractAZ/power
   org.opencontainers.image.licenses: MIT
 

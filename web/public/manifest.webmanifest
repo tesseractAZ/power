@@ -1,7 +1,7 @@
 {
   "name": "Power",
   "short_name": "Power",
-  "description": "Local control-room dashboard for an EcoFlow off-grid home — live telemetry, predictive insights, and HA Energy Dashboard integration.",
+  "description": "Time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for an EcoFlow off-grid home.",
   "start_url": "/",
   "display": "standalone",
   "orientation": "any",

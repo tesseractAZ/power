@@ -24,20 +24,20 @@ pack-SoH shrinkage, a Mahalanobis novelty score and an online-trained logistic p
 are published on the HTTP API as diagnostics; none of them acts.
 
 **Forecast → plan → scored ledger, with an opt-in guarded write.** Every 30 minutes a
-**night-charge planner** walks the battery pool hour by hour to the next cheap window of a
-time-of-use tariff (APS R-EV built in; another described by `TARIFF_PLAN`), up to four days
-ahead, on P10 solar, P90 load and any predicted EV session at its P90 energy. It solves the grid
-buy by bisection so the pool holds its reserve floor plus an outage cushion: by default, the
-energy to run the panel's backup circuits at 1.25 × their measured 7-day mean load through a
-4-hour outage. A `cost` objective fills further toward a solar-headroom or state-of-charge
-ceiling; it does not price. Every recompute is published, and each evening's plan of record is
-frozen in a never-pruned ledger and scored against metered PV, load, grid import and the energy
-delivered into the packs; bounded calibrations learn from that record, and a fail-closed
-readiness gate grades it. By default the night charge writes nothing to the devices. With
-`NIGHT_CHARGE_MODE` set to `supervised` the add-on performs at most one announced, cancellable
-reserve write per charge night, clamped to 10–50%, verified by readback and restored before
-on-peak, and with the `cost` objective a just-in-time force charge can carry the pack further;
-`auto` behaves exactly as `supervised`. Under the `cost` objective a winter mid-day
+**night-charge planner** walks the battery pool hour by hour through the coming cheap window of a
+time-of-use tariff (APS R-EV built in; another described by `TARIFF_PLAN`) to the start of the
+next one, up to four days ahead, on P10 solar, P90 load and any predicted EV session at its P90
+energy. It solves the grid buy by bisection so the pool holds its reserve floor plus an outage
+cushion: by default, the energy to run the panel's backup circuits at 1.25 × their measured 7-day
+mean load through a 4-hour outage. A `cost` objective fills further toward a solar-headroom or
+state-of-charge ceiling; it does not price. Every recompute is published, and each evening's plan
+of record is frozen in a never-pruned ledger and scored against metered PV, load, grid import and
+the energy delivered into the packs; bounded calibrations learn from that record, and a
+fail-closed readiness gate grades it. By default the night charge writes nothing to the devices.
+With `NIGHT_CHARGE_MODE` set to `supervised` the add-on performs at most one announced,
+cancellable reserve write per charge night, clamped to 10–50%, verified by readback and restored
+before on-peak, and with the `cost` objective a just-in-time force charge can carry the pack
+further; `auto` behaves exactly as `supervised`. Under the `cost` objective a winter mid-day
 super-off-peak charge is sized and scored in shadow only. Whatever the objective, a greedy and a
 dynamic-programming dispatch planner publish recommendations on the HTTP API that are never
 applied.
@@ -131,8 +131,8 @@ another engine. A few reach only a channel that is off by default (`BROADCAST_EN
 computed and published but never acted on by the add-on. The three write-capable engines sit
 behind mode gates; none of them starts a write under the shipped defaults, though a restore that
 undoes an earlier write of its own still runs. The counts follow the index's definition; the
-floor stated above, more than 40, holds even under the strictest reading the index discloses,
-which keeps only core engines and drops the advisory-only ones.
+floor stated above holds even under the index's strict reading, which keeps only core engines
+and drops the advisory-only ones.
 
 ---
 
@@ -145,7 +145,7 @@ exactly what the app renders.
 
 | | |
 |---|---|
-| [**Dashboard**](docs/screenshots/dashboard.png) — off-grid runway, energy-flow sankey, the SHP2 and every DPU Core with per-pack state, 24 h forecast, and the clustered-incident digest | [**Solar**](docs/screenshots/solar.png) — per-Core PV, the GHI→PV response model against its clear-sky ceiling, and weather-normalised soiling |
+| [**Dashboard**](docs/screenshots/dashboard.png) — off-grid runway, energy-flow sankey, the SHP2 and every DPU Core with per-pack state, 24 h forecast, and the clustered-incident digest | [**Solar**](docs/screenshots/solar.png) — per-Core PV, the learned GHI→PV response model, and weather-normalised soiling |
 | [**Battery**](docs/screenshots/battery.png) — per-pack state-of-health, end-of-life projection, internal-resistance trend and cell-spread | [**Strategy**](docs/screenshots/strategy.png) — tonight's night-charge plan, EV-window prediction, load-shed order and the TOU charge schedule |
 | [**Alerts**](docs/screenshots/alerts.png) — the alert console: standing conditions, severity, source engine and cleared history | |
 
@@ -187,14 +187,15 @@ exactly what the app renders.
 - Day-ahead PV + load + **projected state-of-charge** curve, a self-calibrating
   **P10/P90 probability band**, a multi-day horizon (3 days by default, up to 7),
   and a **forecast-skill** backtest (predicted-vs-actual daily kWh: MAE, bias, r²).
-- A **first-principles clear-sky** PV ceiling that cross-checks the learned model.
+- A **first-principles clear-sky** PV ceiling and a realized ÷ theoretical score (API); nothing
+  compares it with the learned model automatically.
 
 **Battery & PV health engines**
 - Per-pack **State-of-Health** fade regression (OLS, with a Kalman-filter track on the API),
   **end-of-life** projection (capped at a plausible fade rate to suppress false end-of-life
-  dates, regressed over the configured retention clamped to 120–365 days), a
-  **hierarchical-Bayesian** SoH cross-check with 2σ outlier detection, and an
-  **LFP open-circuit-voltage → SoC** estimate gated on pack rest.
+  dates, regressed over the configured retention clamped to 120–365 days),
+  **hierarchical-Bayesian** pack-SoH shrinkage with 2σ outlier detection (API), and an
+  **LFP open-circuit-voltage → SoC** estimate gated on pack rest (API).
 - **Pack-risk** scoring (a heuristic score, and an advisory v2 that adds an online-trained
   logistic regression and a Mahalanobis novelty track; both on the HTTP API only),
   **internal-resistance** trend, **round-trip** and **coulombic**
@@ -214,8 +215,9 @@ Every 30 minutes:
    Past 24 hours both are widened by the band's realized daily error × √(days ahead), and a
    predicted EV session is laid down at its P90 energy.
 2. **The pool is simulated hour by hour** on its DC bus (pack + PV − load ÷ discharge
-   efficiency, clamped to empty and full) from now to the next cheap window, up to four days
-   ahead, so a weekend or holiday gap is planned as one stretch. Each charging hour is capped by
+   efficiency, clamped to empty and full) from now, through the coming cheap window, to the
+   start of the next one, up to four days ahead, so the hours after the window closes, and a
+   weekend or holiday gap, are planned as one stretch. Each charging hour is capped by
    the Cores' charge rate and, where a grid-input limit is set, by that limit less the house
    load, so an overnight EV charge lowers the promised lift instead of being ignored.
 3. **The buy is solved, not estimated.** Each solve is a 48-step bisection against a
@@ -322,7 +324,8 @@ objectives, the ledger, and the planners that only advise.
   degradation/runtime forecast, solar/load forecast), an alert **monitor**
   (transition debounce, incident clustering, churn auto-silence, quiet hours),
   a **repair-issues** feed, opt-in NWS storm alerts, and an **online learning
-  loop** (feature snapshots → realized outcomes → shadow models).
+  loop** (feature snapshots → realized outcomes → an online-updated pack-risk model, advisory and
+  on the HTTP API only).
 - **Notifications are Home-Assistant-native** and opt-in: with `NOTIFY_CHANNEL: ha`
   (the shipped default, `none`, sends nothing) every alert becomes a card in the HA
   notification drawer (dedupe + morning digest, dismissed when the condition clears)
