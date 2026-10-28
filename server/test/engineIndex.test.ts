@@ -431,13 +431,14 @@ test('the sweep refuses counts in words or behind a qualifier, and a sentence th
     'The engines currently run in the analytics worker.',
     'The engines are now in the worker.',
     'Its engines still live on the main thread.',
+    'Every engine now runs in the analytics worker.',
   ]) {
     assert.match(sweep(t), /the engines run on both threads/, t);
   }
   // The old wording, with a verb or a mark between, or wrapped onto a second line.
   for (const t of ['engines in a worker thread', 'engines run in a worker thread', 'engines, in a worker thread', 'engines** in a worker thread',
     'Analytics engines running in a worker thread.', 'Analytics: 62 engines in a\nworker thread.', '62 engines run in\na worker thread.',
-    'engines in a worker\nthread']) {
+    'engines in a worker\nthread', "Power's 62 analytics engines now run in a worker thread.", '62 analytics engines, all in a worker thread.']) {
     assert.match(sweep(t), /the engines run on both threads/, t);
   }
   // A subset, a split or a tag is not all of the engines on one thread.
@@ -464,6 +465,14 @@ test('the sweep refuses counts in words or behind a qualifier, and a sentence th
     'Not every engine runs in the worker.',
     'Nearly half the engines run in the analytics worker.',
     'Fewer than half the engines run in the analytics worker.',
+    '27 of all the engines run in the analytics worker.',
+    'Nearly half of all its engines run in the analytics worker.',
+    'Nearly **half** the engines run in the analytics worker.',
+    // A plural subject that is the object of an earlier verb does not agree with a singular verb.
+    'The history scan that feeds the engines now runs in the analytics worker.',
+    // A thread named after a comma belongs to another clause.
+    'The engines are now in six groups, and the worker hosts 27 of them.',
+    'The engines now run every 15 minutes, and the worker sends results back.',
     // The engines as a whole on both threads, named with both, either, and or or.
     'The engines run on both the analytics worker and the main thread.',
     'The engines run in two places: the analytics worker and the main thread.',
@@ -473,6 +482,12 @@ test('the sweep refuses counts in words or behind a qualifier, and a sentence th
     'The engines run in the worker and on the main thread.',
     'The engines run on both the worker and the main thread.',
     'The engines run in the worker\nand on the main thread.',
+    // …with a count for each thread, after "and" or a comma, or on "two threads".
+    'The engines now run on two threads: 27 in the analytics worker and 35 on the main thread.',
+    'All 62 engines now run on two threads: 27 in the analytics worker, 35 on the main thread.',
+    'The engines today live in two places, 27 in the worker and 35 on the main thread.',
+    'The engines today run on two threads (27 in the analytics worker).',
+    'The engines now run where the index says: **27** in the worker, **35** on the main thread.',
   ]) {
     assert.equal(sweep(t), '', t);
   }
