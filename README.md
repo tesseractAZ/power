@@ -1,11 +1,12 @@
 # Power — time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for EcoFlow off-grid homes
 
-**Power** (Home Assistant add-on, slug `ecoflow_panel`) is an analytics and planning system for a
-cloud-only EcoFlow off-grid home — a Smart Home Panel 2 and its Delta Pro Ultra Cores. It runs
-**more than 40 engines** in six groups (forecasting, battery and PV health, energy economics and
-time-of-use arbitrage, alarms and safety, learning and anomaly detection, and telemetry
-integrity), each a model, estimator, planner, controller or detector with a stated method and a
-consumer that reads its output, and a **battery-depletion life-safety alarm** sits at its center.
+**Power** (Home Assistant add-on, slug `ecoflow_panel`) is an independent, open-source analytics
+and planning system for a cloud-only EcoFlow off-grid home — a Smart Home Panel 2 and its Delta
+Pro Ultra Cores. It runs **more than 40 engines** in six groups (forecasting, battery and PV
+health, energy economics and time-of-use arbitrage, alarms and safety, learning and anomaly
+detection, and telemetry integrity), each a model, estimator, planner, controller or detector
+with a stated method and a consumer that reads its output, and a **battery-depletion
+life-safety alarm** sits at its center.
 The [engine index](docs/reference/A-feature-inventory.md#a13-engine-index) lists every engine with
 its method, its status (live, opt-in, advisory-only or write-capable behind a mode gate) and its
 anchor in the code.
@@ -445,7 +446,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 5,633 tests
+cd server && npm install && npm test     # 5,636 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -564,6 +565,14 @@ refusing every login until a `TUI_PASSWORD` is set (the same read-only console i
 served at `/console`, behind that login once one is set); secrets handled presence-only (never logged or echoed); and a
 supply chain held by SHA-pinned actions, a digest-pinned base image, a
 dependency-advisory gate and a CodeQL gate.
+
+## Trademarks
+
+Power is an independent open-source project. It is not affiliated with, endorsed by or
+sponsored by EcoFlow. EcoFlow, Smart Home Panel 2 and Delta Pro Ultra are trademarks of their
+respective owners and name only the hardware Power works with. The add-on's slug
+(`ecoflow_panel`), image name and MQTT topics keep their original names, because renaming them
+would break existing installs.
 
 ## License
 

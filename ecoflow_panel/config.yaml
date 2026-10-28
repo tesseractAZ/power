@@ -1,12 +1,12 @@
 name: Power
-version: "1.191.3"
+version: "1.191.4"
 slug: ecoflow_panel
 description: >-
-  Time-of-use arbitrage planning, forecasting and life-safety alarms for
-  an EcoFlow off-grid home (Smart Home Panel 2, Delta Pro Ultra), built on
-  more than 40 engines: a worst-case night-charge plan scored against the
-  meters, P10–P90 solar forecasts, pack-health projection and anomaly
-  detection. Advisory by default; automatic device writes are opt-in.
+  Independent, open-source time-of-use arbitrage planning, forecasting and
+  life-safety alarms for an EcoFlow off-grid home (Smart Home Panel 2, Delta
+  Pro Ultra), built on more than 40 engines: a worst-case night-charge plan
+  scored against the meters, P10–P90 solar forecasts, pack-health projection
+  and anomaly detection. Advisory by default; automatic device writes are opt-in.
 url: https://github.com/tesseractAZ/power
 arch:
   - aarch64

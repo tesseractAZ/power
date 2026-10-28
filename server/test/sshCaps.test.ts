@@ -197,20 +197,29 @@ test('ssh — idle connection is reaped after the idle window; inbound bytes res
     await closedWithin(idle, 3000, 'idle reap');
     assert.ok(Date.now() - t0 >= 140, 'idle socket closed before the idle window elapsed');
     assert.ok(lines.some((l) => l === 'ssh: idle 150 ms with no inbound data — closing 127.0.0.1'), lines.join(' | '));
+  } finally {
+    t.stop();
+  }
 
-    // A connection that keeps sending bytes survives well past the window.
-    // (ssh2 buffers them as an unfinished identification line; nothing is parsed.)
-    const active = connectRaw(port);
+  // A connection that keeps sending bytes survives well past the window.
+  // (ssh2 buffers them as an unfinished identification line; nothing is parsed.)
+  // v1.191.4 — on its own server with a 500 ms window: against 150 ms, a 50 ms
+  // heartbeat delayed ~100 ms by a loaded runner (the full suite in parallel, the
+  // ssh-console harness at concurrency 4) was reaped legitimately and failed here.
+  // A reset that never happens still reaps at 500 ms, inside the 1.1 s watched.
+  const live = await boot({ idleTimeoutMs: 500 });
+  try {
+    const active = connectRaw(live.port);
     await active.gotData;
     let closed = false;
     active.sock.on('close', () => { closed = true; });
     const beat = setInterval(() => { if (!active.sock.destroyed) active.sock.write('x'); }, 50);
-    await sleep(400); // > 2 idle windows
+    await sleep(1100); // > 2 idle windows
     clearInterval(beat);
     assert.equal(closed, false, 'a connection receiving input must survive past the idle window');
     active.sock.destroy();
   } finally {
-    t.stop();
+    live.t.stop();
   }
 });
 

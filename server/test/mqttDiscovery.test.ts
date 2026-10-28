@@ -15,6 +15,7 @@ import {
   alertSwitchStateTopic,
   sensorDiscoveryConfig,
   MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE,
+  DEVICE_INFO,
 } from '../src/mqttDiscovery.js';
 import { middayChargeStateFields } from '../src/middayShadow.js';
 import { ALARM_PRIORITY_ORDER } from '../src/alertPriority.js';
@@ -639,24 +640,29 @@ test("mqtt availability: 'online' is single-sourced, re-asserted each cycle, and
 
 test('no entity name repeats the device name — Home Assistant already prepends it', () => {
   // Home Assistant composes a friendly name as `${device.name} ${entity.name}`.
-  // The device here is "EcoFlow Panel", so an entity ALSO named "EcoFlow Foo"
-  // renders as "EcoFlow Panel EcoFlow Foo" — and that is what a voice assistant
-  // has to be told, verbatim: "what is the ecoflow panel ecoflow home
+  // The device was "EcoFlow Panel", so an entity ALSO named "EcoFlow Foo"
+  // rendered as "EcoFlow Panel EcoFlow Foo" — and that is what a voice assistant
+  // had to be told, verbatim: "what is the ecoflow panel ecoflow home
   // consumption". 40 of the exposed entities read that way before this rule.
+  // v1.191.4 — the device is "Power" (the add-on is not EcoFlow's), so the rule
+  // reads the device name rather than a literal: "Power Outages 24h" would have
+  // rendered "Power Power Outages 24h" and is now "Host Power Outages 24h".
+  // Names may not start with "EcoFlow" either: the device page must not read as
+  // EcoFlow's own.
   //
   // The alarm switches already got this right (`Alarms — Critical (P1)`), which
   // is what proves the mechanism rather than just asserting it: they render as
-  // "EcoFlow Panel Alarms — Critical (P1)", with exactly one "EcoFlow".
+  // "Power Alarms — Critical (P1)", with exactly one "Power".
   //
   // Asserted over the whole set rather than per entity: the bug is one entry
   // disagreeing with its peers, which no single-entity check can express.
   const offenders = [...SENSORS, ...BINARY_SENSORS]
-    .filter((s) => /^EcoFlow\b/i.test(s.name))
+    .filter((s) => new RegExp(`^(?:${DEVICE_INFO.name}|EcoFlow)\\b`, 'i').test(s.name))
     .map((s) => `${s.unique_id} -> "${s.name}"`);
   assert.deepEqual(
     offenders,
     [],
-    'entity names must not start with "EcoFlow" — the device is already "EcoFlow Panel"',
+    `entity names must not start with "${DEVICE_INFO.name}" (the device name) or "EcoFlow"`,
   );
 
   // And the dynamic circuit-energy names must follow the same rule.
@@ -665,8 +671,8 @@ test('no entity name repeats the device name — Home Assistant already prepends
     'utf8',
   );
   assert.ok(
-    !/name:\s*`EcoFlow\s/.test(src),
-    'the templated circuit name must not re-prefix "EcoFlow" either',
+    !new RegExp(`name:\\s*\`(?:${DEVICE_INFO.name}|EcoFlow)\\s`).test(src),
+    'the templated circuit name must not re-prefix the device name or "EcoFlow" either',
   );
 });
 

@@ -184,7 +184,7 @@ test('★★★ end to end: the 10-01 frame pushes nothing and reads green; a ce
     devices[CORE] = frame(EVENT_V, { maxCellVoltageMv: CELL_OVP_CRIT_MV });
     await until(() => sent.some((s) => s.title.includes('Cell overvoltage')), 'the cell-overvoltage push');
     const push = sent.find((s) => s.title.includes('Cell overvoltage'))!;
-    assert.match(push.title, /^EcoFlow · \[Critical\] Cell overvoltage/);
+    assert.match(push.title, /^Power · \[Critical\] Cell overvoltage/);
     assert.equal(push.severity, 'critical');
     assert.equal(conditionFromAlerts(speakableAlerts(onScreen(), Date.now(), () => undefined)).level, 'red');
     assert.equal(sent.some((s) => /EMS/.test(s.title)), false, 'the notice is still not pushed');

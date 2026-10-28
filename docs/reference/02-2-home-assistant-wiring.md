@@ -37,7 +37,7 @@ device-reachability.)
 #### What it does + why
 
 A **separate** MQTT client publishes HA-native auto-discovery configs to the user's HA
-broker (e.g. `core-mosquitto`), so every metric appears under one **"EcoFlow Panel"**
+broker (e.g. `core-mosquitto`), so every metric appears under one **"Power"**
 device without any `configuration.yaml` editing. This is distinct from the EcoFlow cloud
 MQTT client in `mqtt.ts`.
 

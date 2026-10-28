@@ -162,10 +162,10 @@ test('★★★ end to end: three pushed alerts of a Rule-3-latched family all g
     assert.match(rebased!, /Lifted: baseline-mppt_lv_temp \(chronic-noise silence; was 10 rises, 0 short-clears \(0%\), 6 long-active \(60%\); scoped no events yet\)$/);
     assert.equal(mon.telemetry().some((t) => t.familyKey === 'baseline-mppt_lv_temp'), false, 'no latch survives the reset');
     assert.equal(logs.some((l) => /pre-v1\.186\.0 event/.test(l)), false, 'the v1.186.0 line is not misused for it');
-    await until(() => sent.filter((s) => s.title.startsWith('EcoFlow · Resolved:')).length >= 3, 8_000, 'three resolves');
-    const resolved = sent.filter((s) => s.title.startsWith('EcoFlow · Resolved:')).map((s) => s.title).sort();
-    assert.deepEqual(resolved, ids.map((id) => `EcoFlow · Resolved: Owed ${id}`).sort());
-    assert.ok(sent.filter((s) => s.title.startsWith('EcoFlow · Resolved:')).every((s) => s.severity === 'resolved'), 'each carries the card dismissal');
+    await until(() => sent.filter((s) => s.title.startsWith('Power · Resolved:')).length >= 3, 8_000, 'three resolves');
+    const resolved = sent.filter((s) => s.title.startsWith('Power · Resolved:')).map((s) => s.title).sort();
+    assert.deepEqual(resolved, ids.map((id) => `Power · Resolved: Owed ${id}`).sort());
+    assert.ok(sent.filter((s) => s.title.startsWith('Power · Resolved:')).every((s) => s.severity === 'resolved'), 'each carries the card dismissal');
     assert.equal(logs.some((l) => /resolve suppressed/.test(l)), false, 'no owed resolve is suppressed');
     // The same latch still gates a new rise, and says so.
     await until(() => logs.some((l) => l.includes(`suppressed "Owed ${freshId}`)), 8_000, 'the new rise to be judged');

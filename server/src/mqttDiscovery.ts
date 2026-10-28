@@ -51,7 +51,7 @@ import { pollHealth } from './telemetryBlind.js';
  * Drops the `configuration.yaml` REST-sensor snippet — when this is wired to
  * the user's HA MQTT broker (e.g., the official `core-mosquitto` add-on), HA
  * auto-discovers every sensor we expose. The user just sees them appear under
- * the "EcoFlow Panel" device.
+ * the "Power" device.
  *
  * Off by default. Set MQTT_DISCOVERY_ENABLED=1 plus host/user/pass to enable.
  *
@@ -65,9 +65,10 @@ import { pollHealth } from './telemetryBlind.js';
 
 export const DEVICE_INFO = {
   identifiers: ['ecoflow_panel'],
-  name: 'EcoFlow Panel',
-  model: 'SHP2 + Delta Pro Ultra fleet dashboard',
-  manufacturer: 'EcoFlow Panel (add-on)',
+  // Not EcoFlow's: an independent open-source add-on, named as such on the HA device page.
+  name: 'Power',
+  model: 'Analytics for EcoFlow SHP2 + Delta Pro Ultra',
+  manufacturer: 'Power (open-source add-on)',
   // v1.134.0 — was the literal '0.8.0' against a shipping 1.133.x, so the HA
   // device page reported a version from ~125 releases earlier. BUILD_VERSION is
   // already a container ENV (Dockerfile) and already read by /api/version.
@@ -334,7 +335,7 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_system_outage_count_24h', name: 'System Outages 24h', state_class: 'measurement', icon: 'mdi:counter', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_count_24h }}' },
   // v1.4.1 (daytime-review #4) — split the 24h total by cause so a cloud/MQTT stall (process
   // stayed up) is not read as a power event (add-on/host was down across the gap).
-  { unique_id: 'ecoflow_system_power_outage_count_24h', name: 'Power Outages 24h', state_class: 'measurement', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ value_json.system_power_outage_count_24h }}' },
+  { unique_id: 'ecoflow_system_power_outage_count_24h', name: 'Host Power Outages 24h', state_class: 'measurement', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ value_json.system_power_outage_count_24h }}' },
   { unique_id: 'ecoflow_system_telemetry_gap_count_24h', name: 'Telemetry Gaps 24h', state_class: 'measurement', icon: 'mdi:cloud-off-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_telemetry_gap_count_24h }}' },
   // v1.155.0 — per-device telemetry gaps: one device silent past the per-device
   // threshold while the rest of the fleet kept reporting. Not an outage, so it is kept
@@ -1317,7 +1318,7 @@ export async function startMqttDiscovery(
     // matching `priorityEnabled[p]` flag in alertSettings. optimistic=false so
     // HA reflects the actual reported state_topic value (the server is the
     // source of truth), and we attach the shared device block so the switches
-    // group under the same "EcoFlow Panel" device as every other entity.
+    // group under the same "Power" device as every other entity.
     for (const p of ALARM_PRIORITY_ORDER) {
       const meta = ALARM_PRIORITY_META[p];
       const uniqueId = alertSwitchUniqueId(p);
@@ -1327,8 +1328,8 @@ export async function startMqttDiscovery(
         // v0.11.1 — explicit object_id → a clean entity_id
         // (switch.ecoflow_alarms_critical_p1) instead of HA deriving a verbose
         // one from the name. The name drops the redundant "EcoFlow" prefix:
-        // HA prepends the device name ("EcoFlow Panel"), so the friendly name
-        // reads "EcoFlow Panel Alarms — Critical (P1)" — not doubled.
+        // HA prepends the device name ("Power"), so the friendly name
+        // reads "Power Alarms — Critical (P1)" — not doubled.
         object_id: `ecoflow_alarms_${p}_${meta.isa.toLowerCase()}`,
         name: `Alarms — ${meta.label} (${meta.isa})`,
         state_topic: alertSwitchStateTopic(p),

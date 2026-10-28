@@ -111,17 +111,17 @@ test('★★★ end to end: (a) re-tracked muted, (b) pushed then muted — both
     await until(() => mon.activeAlertIds().includes(A) && mon.activeAlertIds().includes(C), 5_000, 'A re-tracked, C tracked');
     phase = 'b-hot';
     // (source 'threshold' pushes as [High]; a learned MPPT alert pushes as [Medium] — the tier is not under test)
-    await until(() => sent.some((s) => s.severity === 'warning' && /^EcoFlow · \[\w+\] /.test(s.title) && s.title.endsWith(`MPPT ${B}`)), 5_000, 'B pushed as a warning');
+    await until(() => sent.some((s) => s.severity === 'warning' && /^Power · \[\w+\] /.test(s.title) && s.title.endsWith(`MPPT ${B}`)), 5_000, 'B pushed as a warning');
     phase = 'b-muted';
     await until(() => onScreen(B)?.annunciate === false, 5_000, 'B muted on screen');
     const passes = mon.stats().evalPasses;
     await until(() => mon.stats().evalPasses >= passes + 2, 5_000, 'B tracked muted for a tick');
     phase = 'cleared';
-    await until(() => sent.filter((s) => s.title.startsWith('EcoFlow · Resolved:')).length >= 2, 5_000, 'two resolves');
+    await until(() => sent.filter((s) => s.title.startsWith('Power · Resolved:')).length >= 2, 5_000, 'two resolves');
     const done = mon.stats().evalPasses;
     await until(() => mon.stats().evalPasses >= done + 3, 5_000, 'three more ticks for any stray resolve');
-    const resolved = sent.filter((s) => s.title.startsWith('EcoFlow · Resolved:'));
-    assert.deepEqual(resolved.map((s) => s.title).sort(), [`EcoFlow · Resolved: MPPT ${A}`, `EcoFlow · Resolved: MPPT ${B}`]);
+    const resolved = sent.filter((s) => s.title.startsWith('Power · Resolved:'));
+    assert.deepEqual(resolved.map((s) => s.title).sort(), [`Power · Resolved: MPPT ${A}`, `Power · Resolved: MPPT ${B}`]);
     assert.ok(resolved.every((s) => s.severity === 'resolved'), 'each carries the card dismissal');
     assert.equal(sent.some((s) => s.title.includes(`MPPT ${C}`)), false, 'the never-pushed muted alert: no push, no resolve');
     assert.equal(sent.some((s) => s.severity !== 'resolved' && s.title.endsWith(`MPPT ${A}`)), false, 'A was not re-pushed across the restart');
