@@ -36,12 +36,13 @@
  *     up to four marks such as a comma, between (IN_A_WORKER);
  *   - so does a sentence that makes the engines as a whole (all, all of the, all the, every, its or
  *     the engines, with or without a count in digits) the subject of run, live, sit, reside or
- *     execute, or of is or are followed by in, on, run, hosted, computed or executed, and names the
+ *     execute, or of is or are followed by in, on, run, hosted, computed or executed (directly,
+ *     or after one of all, now, still, currently, always, already or today), and names the
  *     worker or the main thread within the next 60 characters (ALL_ON_ONE_THREAD); and one that
  *     makes them, or a count of them, the object of run, host, execute, put, place or keep (not
  *     after "not", "never" or "n't") followed directly by in or on the worker or the main thread
- *     (OBJECT_ON_ONE_THREAD). Neither reads a subject after "of", "not" or "not all" ("27 of the
- *     engines", "not all engines"), a window that reaches "both" or "either" before a thread, or a
+ *     (OBJECT_ON_ONE_THREAD). Neither reads a subject after "of", "half", "not" or "not all" ("27
+ *     of the engines", "half the engines", "not all engines"), a window that reaches "both" or "either" before a thread, or a
  *     thread followed within 40 characters by "and" or "or" and a thread ("in the worker and on
  *     the main thread"); a narrowed subject ("the engines on the main thread include …") or another
  *     verb ("its engines split between …") does not match.
@@ -498,9 +499,9 @@ const COUNT = new RegExp(
 const FLOOR_BEFORE = new RegExp(`${WB}more\\s+than${EM}\\s+${EM}$`, 'i');
 /**
  * The old wording: "engines in a worker thread", with "run", "runs" or "running", or up to four
- * marks such as a comma or `**`, between.
+ * marks such as a comma or `**`, between; a line may wrap anywhere inside it.
  */
-const IN_A_WORKER = /engines\W{0,4}\s+(?:run(?:s|ning)?\s+)?in a worker thread/gi;
+const IN_A_WORKER = /engines\W{0,4}\s+(?:run(?:s|ning)?\s+)?in\s+a\s+worker\s+thread/gi;
 /**
  * The engines as a whole: all, every, its or the engines ("all of the", "all of its", "all the",
  * a count in digits after the determiner, and "analytics" before the noun are allowed).
@@ -508,18 +509,24 @@ const IN_A_WORKER = /engines\W{0,4}\s+(?:run(?:s|ning)?\s+)?in a worker thread/g
 const ENGINES_WHOLE =
   `\\b(?:(?:all\\s+(?:of\\s+)?)?(?:its|the)\\s+(?:${EM}\\d[\\d,]*${EM}\\s+)?(?:analytics\\s+)?engines` +
   `|all\\s+(?:${EM}\\d[\\d,]*${EM}\\s+)?(?:analytics\\s+)?engines|every\\s+(?:analytics\\s+)?engine)${EM}`;
-/** …not after "of", "not" or "not all": "27 of the engines", "not all engines", "not every engine". */
-const NOT_NARROWED = '(?<!\\b(?:of|not(?:\\s+all)?)\\s+)';
+/**
+ * …not after "of", "half", "not" or "not all": "27 of the engines", "nearly half the engines",
+ * "not all engines", "not every engine".
+ */
+const NOT_NARROWED = '(?<!\\b(?:of|half|not(?:\\s+all)?)\\s+)';
 /** "worker" or "main thread", the first one within 60 characters, crossing neither "both" nor "either". */
 const ONE_THREAD =
   '(?:(?!\\b(?:both|either|worker|main\\s+thread)\\b)(?:[^.;\\n]|\\n(?![ \\t]*\\n))){0,60}?(?:\\bworker\\b|\\bmain\\s+thread\\b)';
 /** …unless "and" or "or" and a thread follow within 40 characters: a split is not one thread. */
 const NOT_A_SPLIT =
   '(?!(?:[^.;\\n]|\\n(?![ \\t]*\\n)){0,40}?\\b(?:and|or)\\s+(?:(?:in|on)\\s+)?(?:the\\s+)?(?:analytics\\s+)?(?:worker|main\\s+thread)\\b)';
+/** One word allowed between the subject and its verb: "the engines now run in the worker". */
+const WHOLE_ADVERB = '(?:all|now|still|currently|always|already|today)';
 /**
  * The engines as a whole as the subject of a placement verb on one thread: NOT_NARROWED and
- * ENGINES_WHOLE, then (directly or after "all") run, live, sit, reside or execute, or is or are
- * (with an optional "all") followed by in, on, run, hosted, computed or executed; then ONE_THREAD
+ * ENGINES_WHOLE, then (directly or after one WHOLE_ADVERB) run, live, sit, reside or execute, or
+ * is or are (with an optional WHOLE_ADVERB) followed by in, on, run, hosted, computed or
+ * executed; then ONE_THREAD
  * and NOT_A_SPLIT. The window stops at a period or a semicolon and crosses a wrapped line but not
  * a blank one. "All 62 engines run in the analytics worker" and "The engines all run in the
  * worker" match; "the engines on the main thread include …", "its engines split between the
@@ -528,7 +535,7 @@ const NOT_A_SPLIT =
  */
 const ALL_ON_ONE_THREAD = new RegExp(
   NOT_NARROWED + ENGINES_WHOLE +
-    '\\s+(?:all\\s+)?(?:runs?|lives?|sits?|resides?|executes?|(?:are|is)\\s+(?:all\\s+)?(?:in|on|run|hosted|computed|executed))\\b' +
+    `\\s+(?:${WHOLE_ADVERB}\\s+)?(?:runs?|lives?|sits?|resides?|executes?|(?:are|is)\\s+(?:${WHOLE_ADVERB}\\s+)?(?:in|on|run|hosted|computed|executed))\\b` +
     ONE_THREAD + NOT_A_SPLIT,
   'gi',
 );

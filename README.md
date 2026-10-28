@@ -518,25 +518,14 @@ index. Every index row's file must declare the row's identifier in code (a funct
 constant, type or similar declaration; a mention in a comment or a string does not count), the
 index's count sentence (its total, thread tallies, strict reading and that reading's live and
 waiting split), this README's per-group counts and its count of write-capable engines must equal
-the rows, and the engine floor must sit below the index's strict reading. On this README, the
-add-on's README, documentation and configuration, the image labels, the web manifest and every
-guide and reference page, a count written directly before "engines" or "analytics engines",
-plain or in Markdown emphasis, must be in digits and be the index total or the same floor this
-README states; such a count in words (twenty to ninety-nine), after ~ or ≈, after one of the
-qualifiers about, around, roughly, nearly, almost, approximately, some, over, upwards of or close
-to, or with a trailing + or "-plus", fails. A sentence also fails when it makes the engines as a
-whole (all, all of the, all the, every, its or the engines, with or without a count) the subject
-of run, live, sit, reside or execute, or of is or are followed by in, on, run, hosted, computed
-or executed, and names the worker or the main thread within the next 60 characters; or when it
-makes them, or a count of them, the object of run, host, execute, put, place or keep followed
-directly by in or on the worker or the main thread. Neither reading applies to a subject after
-"of", "not" or "not all" ("27 of the engines"), to a verb after "not", "never" or "n't", or to a
-sentence that names the threads with "both" or "either" or joins them with "and" or "or" ("the
-engines run in the worker and on the main thread"). The old wording, "in a worker thread"
-straight after "engines" (or after run, runs or running there), fails. Any other count, such as
-one elsewhere in a sentence or a word outside twenty to ninety-nine, is not read;
-`scripts/lib/engineIndex.mjs` lists the exact wording. The repository's About description on
-GitHub sits outside the tree and is updated by hand.
+the rows, and the engine floor must sit below the index's strict reading. The same check sweeps
+this README, the add-on's README, documentation and configuration, the image labels, the web
+manifest and every guide and reference page for the wordings that drifted before: an engine count
+that is neither the index total nor this README's floor, an approximate one ("~40", "about 40",
+"40+") or one in words, and a sentence that puts the engines as a whole on one thread. The sweep
+reads those known wordings, not every possible sentence; `scripts/lib/engineIndex.mjs` lists
+exactly what it reads and what it does not. The repository's About description on GitHub sits
+outside the tree and is updated by hand.
 
 Dependency advisories are gated by `scripts/check-npm-audit.mjs`, which fails on
 **high or critical in the production tree** and reports the rest. Waivers must carry a

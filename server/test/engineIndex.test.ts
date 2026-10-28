@@ -426,12 +426,18 @@ test('the sweep refuses counts in words or behind a qualifier, and a sentence th
     'All **62** engines run in the analytics worker.',
     'The engines are all in the worker.',
     'All engines run in the analytics worker, not the main thread.',
+    // One adverb between the subject and its verb.
+    'All engines now run in the analytics worker.',
+    'The engines currently run in the analytics worker.',
+    'The engines are now in the worker.',
+    'Its engines still live on the main thread.',
   ]) {
     assert.match(sweep(t), /the engines run on both threads/, t);
   }
-  // The old wording, with a verb or a mark between.
+  // The old wording, with a verb or a mark between, or wrapped onto a second line.
   for (const t of ['engines in a worker thread', 'engines run in a worker thread', 'engines, in a worker thread', 'engines** in a worker thread',
-    'Analytics engines running in a worker thread.']) {
+    'Analytics engines running in a worker thread.', 'Analytics: 62 engines in a\nworker thread.', '62 engines run in\na worker thread.',
+    'engines in a worker\nthread']) {
     assert.match(sweep(t), /the engines run on both threads/, t);
   }
   // A subset, a split or a tag is not all of the engines on one thread.
@@ -456,6 +462,8 @@ test('the sweep refuses counts in words or behind a qualifier, and a sentence th
     'Not all engines run in the worker.',
     'Not all the engines run in the worker.',
     'Not every engine runs in the worker.',
+    'Nearly half the engines run in the analytics worker.',
+    'Fewer than half the engines run in the analytics worker.',
     // The engines as a whole on both threads, named with both, either, and or or.
     'The engines run on both the analytics worker and the main thread.',
     'The engines run in two places: the analytics worker and the main thread.',
