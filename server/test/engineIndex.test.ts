@@ -19,10 +19,16 @@ const lib = (await import(pathToFileURL(resolve(ROOT, 'scripts/lib/engineIndex.m
   ENGINE_INDEX_HEADING: string;
   ENGINE_GROUPS: readonly string[];
   ENGINE_COUNT_SURFACES: readonly string[];
-  occursAsWord(text: string, identifier: string): boolean;
+  ENGINE_COUNT_SURFACE_DIRS: readonly string[];
+  codeOnly(text: string): string;
+  declares(text: string, identifier: string): boolean;
   checkEngineIndex(text: string, readSource: (path: string) => string | null): { problems: string[]; summary: Summary | null };
-  checkReadmeEngineClaims(readme: string, summary: Summary): { problems: string[]; passes: string[] };
-  sweepEngineCounts(surfaces: Array<{ path: string; text: string | null }>, summary: Summary): { problems: string[]; counted: number };
+  checkReadmeEngineClaims(readme: string, summary: Summary): { problems: string[]; passes: string[]; floor: number | null };
+  sweepEngineCounts(
+    surfaces: Array<{ path: string; text: string | null }>,
+    summary: Summary,
+    floor: number | null,
+  ): { problems: string[]; counted: number; floors: number };
 };
 
 interface Row { engine: string; status?: string; thread?: string; tier?: string; code: string; num?: string }
@@ -91,15 +97,68 @@ test('a well-formed index passes, and its tallies are read from the rows', () =>
 
 test('a renamed identifier fails, naming the row', () => {
   const files = { ...SOURCES, 'server/src/a.ts': SOURCES['server/src/a.ts'].replace('engine2a', 'engine2aRenamed') };
-  expectProblem(buildIndex(fixtureRows()), /row 5 Engine 2a: `engine2a` does not occur in server\/src\/a\.ts/, files);
+  expectProblem(buildIndex(fixtureRows()), /row 5 Engine 2a: server\/src\/a\.ts does not declare `engine2a` in code/, files);
 });
 
 test('an identifier that occurs only as the prefix of a longer one fails', () => {
-  assert.equal(lib.occursAsWord('computeSoilingDecomposition()', 'computeSoiling'), false);
-  assert.equal(lib.occursAsWord('x.computeSoiling(1)', 'computeSoiling'), true);
-  assert.equal(lib.occursAsWord('$computeSoiling', 'computeSoiling'), false);
+  assert.equal(lib.declares('export function computeSoilingDecomposition() {}', 'computeSoiling'), false);
+  assert.equal(lib.declares('export async function computeSoiling(x) {}', 'computeSoiling'), true);
+  assert.equal(lib.declares('const $computeSoiling = 1;', 'computeSoiling'), false);
   const files = { ...SOURCES, 'server/src/a.ts': SOURCES['server/src/a.ts'].replace('engine0a()', 'engine0aDecomposition()') };
-  expectProblem(buildIndex(fixtureRows()), /`engine0a` does not occur/, files);
+  expectProblem(buildIndex(fixtureRows()), /does not declare `engine0a`/, files);
+});
+
+test('an identifier that survives only in a comment, a string or a call fails: a rename in code alone is caught', () => {
+  // What an editor's symbol rename leaves behind: the declaration and the calls renamed, the comments not.
+  const renamed = [
+    '/**',
+    ' * engine0a — the doc comment still names it, and so does the line below.',
+    ' * export function engine0a() {}',
+    ' */',
+    '// function engine0a() was the old name',
+    '/* const engine0a = 1; */',
+    "const label = 'function engine0a';",
+    'const note = `class engine0a ${1 + 1}`;',
+    'export function engine0aRenamed() {}',
+    'engine0aRenamed();',
+  ].join('\n');
+  for (const [what, text] of [
+    ['a doc comment, a line comment, a block comment, a string and a template', renamed],
+    ['a call to an engine declared elsewhere', 'import { engine0a } from "./elsewhere.js";\nengine0a();'],
+  ] as const) {
+    assert.equal(lib.declares(text, 'engine0a'), false, what);
+    const files = { ...SOURCES, 'server/src/a.ts': SOURCES['server/src/a.ts'].replace('export function engine0a() {}', text) };
+    expectProblem(buildIndex(fixtureRows()), /row 1 Engine 0a: server\/src\/a\.ts does not declare `engine0a` in code/, files);
+  }
+  for (const decl of ['function engine0a() {}', 'function* engine0a() {}', 'export const engine0a = () => 1;', 'let engine0a = 2;',
+    'var engine0a;', 'export class engine0a {}', 'interface engine0a {}', 'type engine0a = number;', 'enum engine0a { A }']) {
+    assert.equal(lib.declares(decl, 'engine0a'), true, decl);
+  }
+  assert.equal(lib.declares('x.function engine0a', 'engine0a'), false, 'a property named like a keyword is not a declaration');
+});
+
+test('code is told from comments and literals the way the parser does', () => {
+  const keep = (src: string) => lib.codeOnly(src);
+  // Length and line breaks are kept, so offsets and line numbers hold.
+  const src = 'a // x\n/* y\n z */ b';
+  assert.equal(keep(src).length, src.length);
+  assert.equal(keep(src).split('\n').length, 3);
+  // A regular expression holding a quote, a slash in a class and a comment opener stays one literal.
+  assert.doesNotMatch(keep("const re = /['\"]/g; const RE2 = /[/]\\/*x/; function after() {}"), /['"]|\*x/);
+  assert.match(keep("const re = /['\"]/g; function after() {}"), /function after/);
+  // After an operand a slash divides: a non-null assertion, a call, an index, a number.
+  for (const div of ['rttMs! / 2', 'f(x) / 2', 'a[0] / 2', '10 / 2']) {
+    assert.match(keep(`const v = ${div}; function after() {}`), /function after/, div);
+  }
+  // After a keyword it opens a literal.
+  assert.match(keep('function f() { return /}/.test(s); } function after() {}'), /function after/);
+  // A template's text is blanked; its expressions, braces and nested templates stay code.
+  const t = keep('const s = `x ${ { a: `y ${b}` }.a } function no`; function after() {}');
+  assert.match(t, /\{ a: /);
+  assert.match(t, /function after/);
+  assert.doesNotMatch(t, /function no/);
+  assert.doesNotMatch(keep("const s = 'it\\'s // not a comment'; function after() {}"), /not a comment/);
+  assert.match(keep("const s = 'it\\'s // not a comment'; function after() {}"), /function after/);
 });
 
 test('a missing source file fails', () => {
@@ -186,6 +245,8 @@ test('a missing index heading fails as GONE, with no summary to check prose agai
 test('the README floor must sit below the strict reading and the total', () => {
   const claim = (floor: string) => lib.checkReadmeEngineClaims(`It runs **${floor} engines** in six groups.\n\n${README_GROUPS}\n`, SUMMARY);
   assert.deepEqual(claim('more than 40').problems, []);
+  assert.equal(claim('more than 40').floor, 40);
+  assert.equal(lib.checkReadmeEngineClaims(README_GROUPS, SUMMARY).floor, null);
   assert.match(claim('more than 50').problems.join('\n'), /not below the strict reading 45/);
   assert.match(claim('more than 62').problems.join('\n'), /the index holds 62/);
   assert.match(lib.checkReadmeEngineClaims(README_GROUPS, SUMMARY).problems.join('\n'), /engine floor GONE/);
@@ -199,7 +260,7 @@ test('each README group row must state its group\'s tally, once', () => {
 });
 
 test('the sweep refuses approximate, stale and worker-thread engine counts and accepts the floor', () => {
-  const sweep = (text: string | null) => lib.sweepEngineCounts([{ path: 'x.md', text }], SUMMARY).problems;
+  const sweep = (text: string | null) => lib.sweepEngineCounts([{ path: 'x.md', text }], SUMMARY, 40).problems;
   assert.deepEqual(sweep('Power runs more than 40 engines.'), []);
   assert.deepEqual(sweep('description: >-\n  built on\n  more than 40 engines: a plan'), []);
   assert.deepEqual(sweep('The index lists **62 engines**.'), []);
@@ -214,6 +275,44 @@ test('the sweep refuses approximate, stale and worker-thread engine counts and a
   assert.match(sweep(null).join('\n'), /does not exist/);
 });
 
+test('the sweep refuses counts in words or behind a qualifier, and a sentence that puts every engine on one thread', () => {
+  const sweep = (text: string) => lib.sweepEngineCounts([{ path: 'x.md', text }], SUMMARY, 40).problems.join('\n');
+  for (const t of ['40-plus engines', 'some 40 engines', 'about 62 engines', 'over 40 engines', 'roughly 62 analytics engines', 'nearly 50 engines']) {
+    assert.match(sweep(t), /approximately/, t);
+  }
+  for (const t of ['more than forty engines', 'sixty-two engines', 'forty engines']) assert.match(sweep(t), /in words/, t);
+  for (const t of [
+    'All engines run in the analytics worker.',
+    'every engine runs on the main thread',
+    'Its engines run in a worker thread.',
+    'Every engine runs in the analytics worker thread.',
+    'All of the engines run on the main thread.',
+    'The engines run\nin a background worker.',
+  ]) {
+    assert.match(sweep(t), /the engines run on both threads/, t);
+  }
+  for (const t of [
+    'the three write-capable engines',
+    'Most engines that scan recorder history run in an analytics worker; the night-charge stack runs on the main thread.',
+    'The engines fall into six groups (forecasting, battery and PV health, energy economics and arbitrage, alarms); most run in an analytics worker.',
+    'The engines are listed.\n\nThe worker runs most of them.',
+    'more than\n40 engines',
+  ]) {
+    assert.equal(sweep(t), '', t);
+  }
+});
+
+test('every surface states the same floor as the README', () => {
+  const surfaces = (a: string, b: string) => [{ path: 'README.md', text: a }, { path: 'config.yaml', text: b }];
+  const ok = lib.sweepEngineCounts(surfaces('**more than 40 engines**', 'built on\n  more than 40 engines: a plan'), SUMMARY, 40);
+  assert.deepEqual(ok.problems, []);
+  assert.equal(ok.floors, 2);
+  const drift = lib.sweepEngineCounts(surfaces('**more than 40 engines**', 'more than 44 engines'), SUMMARY, 40).problems.join('\n');
+  assert.match(drift, /config\.yaml:1: "more than 44 engines" differs from the README's floor, more than 40/);
+  assert.match(lib.sweepEngineCounts(surfaces('**more than 41 engines**', 'more than 40 engines'), SUMMARY, 41).problems.join('\n'), /differs from the README's floor, more than 41/);
+  assert.match(lib.sweepEngineCounts(surfaces('no floor', 'more than 40 engines'), SUMMARY, null).problems.join('\n'), /cannot be compared: the README states no floor/);
+});
+
 test('the engine index in the tree passes against the source, and the prose against the index', () => {
   const read = (rel: string): string | null => {
     try { return readFileSync(resolve(ROOT, rel), 'utf8'); } catch (e) {
@@ -226,8 +325,9 @@ test('the engine index in the tree passes against the source, and the prose agai
   assert.ok(index.summary && index.summary.total > 40);
   const readme = lib.checkReadmeEngineClaims(read('README.md') ?? '', index.summary);
   assert.deepEqual(readme.problems, []);
-  const guide = readdirSync(resolve(ROOT, 'docs/guide')).filter((f) => f.endsWith('.md')).map((f) => `docs/guide/${f}`);
-  const sweep = lib.sweepEngineCounts([...lib.ENGINE_COUNT_SURFACES, ...guide].map((path) => ({ path, text: read(path) })), index.summary);
+  const pages = lib.ENGINE_COUNT_SURFACE_DIRS.flatMap((dir) =>
+    readdirSync(resolve(ROOT, dir)).filter((f) => f.endsWith('.md')).map((f) => `${dir}/${f}`));
+  const sweep = lib.sweepEngineCounts([...lib.ENGINE_COUNT_SURFACES, ...pages].map((path) => ({ path, text: read(path) })), index.summary, readme.floor);
   assert.deepEqual(sweep.problems, []);
-  assert.ok(sweep.counted >= 4, `expected the floor on the README, the add-on README, its config and the reference index; counted ${sweep.counted}`);
+  assert.ok(sweep.floors >= 5, `expected the floor on the README, the add-on README, its config, the reference index and A.13; found ${sweep.floors}`);
 });

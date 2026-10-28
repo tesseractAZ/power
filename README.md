@@ -113,7 +113,8 @@ engine's output are not counted, nor are caching and transport; a rule ladder ov
 engine's output counts as part of that engine, and one algorithm counts once however many reports
 call it. The
 [engine index](docs/reference/A-feature-inventory.md#a13-engine-index) lists every engine with its
-method, status, thread and code anchor, and CI fails when an anchored identifier leaves the source.
+method, status, thread and code anchor, and CI fails when a row's file no longer declares its
+anchored identifier in code; a mention left in a comment or a string does not count.
 
 | Group | Engines | Examples |
 |---|---|---|
@@ -440,7 +441,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 5,624 tests
+cd server && npm install && npm test     # 5,628 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -509,10 +510,16 @@ survivor.
 
 The counted claims in this README are held to the tree by `scripts/check-doc-claims.mjs` in CI:
 the harness, mutant and test counts, the reference size, the workflow roster and the engine
-index. Every index row's code anchor must occur in its file as a whole word, the index's stated
-totals and this README's per-group counts must equal its rows, and the engine floor must sit
-below the strictest reading the index discloses. Any wording that states an engine count
-approximately, or places every engine on one thread, fails the same check.
+index. Every index row's file must declare the row's identifier in code (a function, class,
+constant, type or similar declaration; a mention in a comment or a string does not count), the
+index's stated totals and this README's per-group counts must equal its rows, and the engine
+floor must sit below the index's strict reading. On this README, the add-on's README,
+documentation and configuration, the image labels, the web manifest and every guide and
+reference page, an engine count must be written in digits as the index total or as the same floor
+this README states; a count in words, or after ~, ≈, about, around, some or over, or with a
+trailing + or "-plus", fails, and so does a sentence that names the worker, or the main thread,
+as the thread of all of the engines. The repository's About description on GitHub sits outside
+the tree and is updated by hand.
 
 Dependency advisories are gated by `scripts/check-npm-audit.mjs`, which fails on
 **high or critical in the production tree** and reports the rest. Waivers must carry a

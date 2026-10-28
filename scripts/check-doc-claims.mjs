@@ -33,10 +33,12 @@
  * The engine count follows the same rule. The README said "~40 analytics engines in a worker
  * thread": approximate, wrong about the thread for more than half of them, and held by nothing.
  * The engine index (docs/reference/A-feature-inventory.md, section A.13) is now the census, and
- * scripts/lib/engineIndex.mjs checks it: every row's identifier must occur in its file, the
- * index's count sentence must equal its rows, the README's floor ("more than N engines") must sit
- * below the strict reading the index discloses, each README group row must state its group's
- * tally, and no surface may state an engine count approximately.
+ * scripts/lib/engineIndex.mjs checks it: every row's file must declare its identifier in code (a
+ * mention in a comment or a string does not count), the index's count sentence must equal its
+ * rows, the README's floor ("more than N engines") must sit below the strict reading the index
+ * discloses, each README group row must state its group's tally, and on every surface swept an
+ * engine count is the index total or the README's floor, in digits and never approximate, and no
+ * sentence puts all of the engines on one thread.
  *
  * Usage:  node scripts/check-doc-claims.mjs [--tests N]
  */
@@ -47,6 +49,7 @@ import { fileURLToPath } from 'node:url';
 import {
   ENGINE_INDEX_FILE,
   ENGINE_COUNT_SURFACES,
+  ENGINE_COUNT_SURFACE_DIRS,
   checkEngineIndex,
   checkReadmeEngineClaims,
   sweepEngineCounts,
@@ -186,23 +189,27 @@ if (indexText == null) {
     const s = index.summary;
     if (!index.problems.length) {
       passes.push(
-        `engine index: ${s.total} rows, every anchor resolves in ${sourceCache.size} source files; ` +
+        `engine index: ${s.total} rows, every anchor declared in code across ${sourceCache.size} source files; ` +
           `${s.worker} worker / ${s.main} main${s.both ? ` / ${s.both} both` : ''}; strict reading ${s.strict}`,
       );
     }
     const readme = checkReadmeEngineClaims(README, s);
     failures.push(...readme.problems);
     passes.push(...readme.passes);
-    const guideDir = 'docs/guide';
-    const guidePages = readdirSync(resolve(REPO, guideDir), { withFileTypes: true })
-      .filter((e) => e.isFile() && e.name.endsWith('.md'))
-      .map((e) => `${guideDir}/${e.name}`)
-      .sort();
-    const surfaces = [...ENGINE_COUNT_SURFACES, ...guidePages].map((path) => ({ path, text: readOrNull(path) }));
-    const sweep = sweepEngineCounts(surfaces, s);
+    const pages = ENGINE_COUNT_SURFACE_DIRS.flatMap((dir) =>
+      readdirSync(resolve(REPO, dir), { withFileTypes: true })
+        .filter((e) => e.isFile() && e.name.endsWith('.md'))
+        .map((e) => `${dir}/${e.name}`)
+        .sort(),
+    );
+    const surfaces = [...ENGINE_COUNT_SURFACES, ...pages].map((path) => ({ path, text: readOrNull(path) }));
+    const sweep = sweepEngineCounts(surfaces, s, readme.floor);
     failures.push(...sweep.problems);
     if (!sweep.problems.length) {
-      passes.push(`engine-count wording: ${sweep.counted} count(s) across ${sweep.surfaces} surfaces, none approximate or stale`);
+      passes.push(
+        `engine-count wording: ${sweep.counted} count(s) across ${sweep.surfaces} surfaces, none approximate, in words or stale; ` +
+          `${sweep.floors} floor(s), all more than ${readme.floor}; no sentence puts every engine on one thread`,
+      );
     }
   }
 }
