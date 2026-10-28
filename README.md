@@ -1,12 +1,12 @@
-# Power — time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for EcoFlow off-grid homes
+# Power — time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for grid-tied EcoFlow homes that run with or without the grid
 
 **Power** (Home Assistant add-on, slug `ecoflow_panel`) is an independent, open-source analytics
-and planning system for a cloud-only EcoFlow off-grid home — a Smart Home Panel 2 and its Delta
-Pro Ultra Cores. It runs **more than 40 engines** in six groups (forecasting, battery and PV
-health, energy economics and time-of-use arbitrage, alarms and safety, learning and anomaly
-detection, and telemetry integrity), each a model, estimator, planner, controller or detector
-with a stated method and a consumer that reads its output, and a **battery-depletion
-life-safety alarm** sits at its center.
+and planning system for a cloud-only, grid-tied EcoFlow home that runs with or without the grid —
+a Smart Home Panel 2 and its Delta Pro Ultra Cores. It runs **more than 40 engines** in six
+groups (forecasting, battery and PV health, energy economics and time-of-use arbitrage, alarms
+and safety, learning and anomaly detection, and telemetry integrity), each a model, estimator,
+planner, controller or detector with a stated method and a consumer that reads its output, and a
+**battery-depletion life-safety alarm** sits at its center.
 The [engine index](docs/reference/A-feature-inventory.md#a13-engine-index) lists every engine with
 its method, its status (live, opt-in, advisory-only or write-capable behind a mode gate) and its
 anchor in the code.
@@ -147,7 +147,7 @@ exactly what the app renders.
 
 | | |
 |---|---|
-| [**Dashboard**](docs/screenshots/dashboard.png) — off-grid runway, energy-flow sankey, the SHP2 and every DPU Core with per-pack state, 24 h forecast, and the clustered-incident digest | [**Solar**](docs/screenshots/solar.png) — per-Core PV, the learned GHI→PV response model, and weather-normalised soiling |
+| [**Dashboard**](docs/screenshots/dashboard.png) — outage runway, energy-flow sankey, the SHP2 and every DPU Core with per-pack state, 24 h forecast, and the clustered-incident digest | [**Solar**](docs/screenshots/solar.png) — per-Core PV, the learned GHI→PV response model, and weather-normalised soiling |
 | [**Battery**](docs/screenshots/battery.png) — per-pack state-of-health, end-of-life projection, internal-resistance trend and cell-spread | [**Strategy**](docs/screenshots/strategy.png) — tonight's night-charge plan, EV-window prediction, load-shed order and the TOU charge schedule |
 | [**Alerts**](docs/screenshots/alerts.png) — the alert console: standing conditions, severity, source engine and cleared history | |
 
