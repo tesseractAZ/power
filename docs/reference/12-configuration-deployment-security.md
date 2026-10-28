@@ -33,7 +33,7 @@ runs the container.
 | `image` | `ghcr.io/tesseractaz/{arch}-ecoflow-panel` | **Pre-built GHCR image**; `{arch}` substituted by Supervisor. Presence of this key means Supervisor *pulls* the image rather than building on the host. |
 | `startup` | `services` | Start in the "services" phase of HA boot |
 | `boot` | `auto` | Auto-start on HA boot |
-| `stage` | `experimental` | Add-on maturity stage |
+| `stage` | `stable` | Add-on maturity stage (`stable`, `experimental` or `deprecated`; `stable` is the Supervisor's default) |
 | `init` | `false` | **Critical.** Disables Docker's tini so the HA base image's own s6-overlay `/init` runs as PID 1. With tini in front, `s6-overlay-suexec` refuses to start (`fatal: can only run as pid 1`) → crash loop. Do not flip to true. |
 | `ports` | `8787/tcp`, `2323/tcp` | Directly-published host ports (see Port Map) |
 | `ingress` | `true` | Panel appears as an HA sidebar item, authenticated through HA's session |

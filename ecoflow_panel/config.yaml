@@ -16,7 +16,7 @@ arch:
 image: ghcr.io/tesseractaz/{arch}-ecoflow-panel
 startup: services
 boot: auto
-stage: experimental
+stage: stable
 # HA's `init: true` default wraps the container with Docker's tini, making
 # tini PID 1. The HA base image already ships its own s6-overlay init at
 # /init; with tini in front, s6-overlay-suexec sees it isn't PID 1 and
