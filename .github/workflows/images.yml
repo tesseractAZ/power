@@ -201,7 +201,7 @@ jobs:
             BUILD_FROM=${{ matrix.base }}
             BUILD_ARCH=${{ matrix.arch }}
             BUILD_DATE=${{ steps.stamp.outputs.iso }}
-            BUILD_DESCRIPTION=Live dashboard + control-room TUI for an EcoFlow off-grid home — life-safety battery/grid alarms, forecasting, and a TOU night-charge engine
+            BUILD_DESCRIPTION=Time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for an EcoFlow off-grid home (Smart Home Panel 2, Delta Pro Ultra); advisory by default, device writes opt-in
             BUILD_NAME=Power
             BUILD_REF=${{ github.sha }}
             BUILD_REPOSITORY=${{ github.repository }}

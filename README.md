@@ -1,28 +1,75 @@
-# Power — EcoFlow off-grid monitoring, forecasting & life-safety alarm
+# Power — time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for EcoFlow off-grid homes
 
-**Power** (Home Assistant add-on, slug `ecoflow_panel`) turns a cloud-only
-EcoFlow off-grid system — a Smart Home Panel 2 and its Delta Pro Ultra Cores —
-into a fully-instrumented, self-learning **control room**, with a
-**battery-depletion life-safety alarm** at its center.
+**Power** (Home Assistant add-on, slug `ecoflow_panel`) is an analytics and planning system for a
+cloud-only EcoFlow off-grid home — a Smart Home Panel 2 and its Delta Pro Ultra Cores. It runs
+**more than 40 engines** in six groups (forecasting, battery and PV health, energy economics and
+time-of-use arbitrage, alarms and safety, learning and anomaly detection, and telemetry
+integrity), each a model, estimator, planner, controller or detector with a stated method and a
+consumer that reads its output, and a **battery-depletion life-safety alarm** sits at its center.
+The [engine index](docs/reference/A-feature-inventory.md#a13-engine-index) lists every engine with
+its method, its status (live, opt-in, advisory-only or write-capable behind a mode gate) and its
+anchor in the code.
 
-It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST polled every
-60 s, plus live MQTT), persists a per-metric SQLite time-series, runs
-**~40 analytics engines** in a worker thread, and serves the results four ways:
-a **web dashboard** (React + Tailwind CSS 4, also in the Home Assistant sidebar
-through Ingress), a **control-room TUI** (over SSH, and the same console in the
-browser), **Home Assistant MQTT-discovery entities** (about 100 sensors, binary
-sensors and alarm-priority switches, plus a power and an energy sensor for every
-Smart Home Panel 2 circuit; the energy counters feed the Energy Dashboard), and
-opt-in **Home Assistant notifications** with companion-app push.
-When the pack is projected to reach its reserve floor — or a battery, cell, grid
-or telemetry condition turns critical — it raises an **audible alarm** on the
-speakers the owner configures: a chime and a spoken description (English, with an
-optional Spanish second pass) over Music Assistant and an optional announce-capable
-SIP phone, retried when delivery cannot be confirmed.
+Solar is a per-hour-of-day least-squares response to forecast irradiance, learned from the home's
+own array, with a recursive Bayesian posterior of the same coefficient; load is a
+recency-weighted hour-of-day curve with mined EV sessions added; together they drive a
+P10/P50/P90 band over solar and state of charge, whose width is checked against its own realized
+error and narrowed, never widened, once 14 days are scored; 21 equal-probability quantile paths
+give the chance of holding the reserve and of reaching full. Pack health
+is an OLS fade regression to end of life behind a recalibration-staircase detector, with
+internal-resistance trend, coulombic and round-trip efficiency, charge-curve drift and
+thermal-event counts beside it. Anomalies are scored as robust median/MAD z-scores: pack, board
+and MPPT temperatures and each panel circuit's load against their own hour-of-day baseline, and
+packs and Cores against their siblings. A two-state Kalman SoH filter, hierarchical Bayesian
+pack-SoH shrinkage, a Mahalanobis novelty score and an online-trained logistic pack-risk model
+are published on the HTTP API as diagnostics; none of them acts.
 
-A **night-charge engine** sizes a grid buy in the cheap window of a time-of-use
-tariff (APS R-EV built in; another tariff described by `TARIFF_PLAN`). By default it only advises; when the owner opts in it performs
-one announced, cancellable, bounded and auto-reverting charge per night.
+**Forecast → plan → scored ledger, with an opt-in guarded write.** Every 30 minutes a
+**night-charge planner** walks the battery pool hour by hour through the coming cheap window of a
+time-of-use tariff (APS R-EV built in; another described by `TARIFF_PLAN`) to the start of the
+next one, up to four days ahead, on P10 solar, P90 load and any predicted EV session at its P90
+energy. It solves the grid buy by bisection so the pool holds its reserve floor plus an outage
+cushion: by default, the energy to run the panel's backup circuits at 1.25 × their measured 7-day
+mean load through a 4-hour outage. A `cost` objective fills further toward a solar-headroom or
+state-of-charge ceiling; it does not price. Every recompute is published, and each evening's plan
+of record is frozen in a never-pruned ledger and scored against metered PV, load, grid import and
+the energy delivered into the packs; bounded calibrations learn from that record, and a
+fail-closed readiness gate grades it. By default the night charge writes nothing to the devices.
+With `NIGHT_CHARGE_MODE` set to `supervised` the add-on performs at most one announced,
+cancellable reserve write per charge night, clamped to 10–50%, verified by readback and restored
+before on-peak, and with the `cost` objective a just-in-time force charge can carry the pack
+further; `auto` behaves exactly as `supervised`. Under the `cost` objective a winter mid-day
+super-off-peak charge is sized and scored in shadow only. Whatever the objective, a greedy and a
+dynamic-programming dispatch planner publish recommendations on the HTTP API that are never
+applied.
+
+When the pool is projected to reach its reserve floor — or a battery, cell, grid or telemetry
+condition turns critical — Power raises an alarm on the dashboard and, once `BROADCAST_ENABLED`
+is on, an **audible alarm** on the speakers the owner configures: a chime and a spoken
+description (English, with an optional Spanish second pass) over Music Assistant and an optional
+announce-capable SIP phone, retried when delivery cannot be confirmed. The runway behind it is
+an islanded simulation, hours to reserve and to empty if the grid dropped now, on a pool
+capacity scaled by the packs' own measured full-charge capacity.
+
+It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST polled every 60 s, plus live MQTT)
+and checks it before trusting it: a panel payload the cloud keeps replaying and a frozen reading
+are kept out of the history, a collapsed message rate or a silent device is detected and
+reported, and a removed pack's stale slot is hidden. It persists a per-metric SQLite
+time-series. Most engines that scan recorder history, the runway simulator among them, run in
+an analytics worker; the threshold alarm evaluation, the night-charge stack (its scorer and
+learners read the recorder there) and the telemetry-integrity detectors run on the main thread.
+Results are served four ways: a **web dashboard** (React + Tailwind CSS 4, also in the Home
+Assistant sidebar through Ingress), a **control-room TUI** (in the browser, and over SSH once
+`SSH_ENABLED` is on), opt-in **Home Assistant MQTT-discovery entities**
+(`MQTT_DISCOVERY_ENABLED`; about 100 sensors, binary sensors and alarm-priority switches, plus a
+power and an energy sensor for every Smart Home Panel 2 circuit; the energy counters feed the
+Energy Dashboard), and opt-in **Home Assistant notifications** with companion-app push.
+
+Every change ships through the test suite, and a guard that a plausible refactor could silently
+disarm is held by a committed mutation harness: **131 harnesses** holding
+**3803 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
+floor and group counts, and every engine-index row's code anchor are checked against the tree in
+CI ([Quality & accuracy](#quality--accuracy)).
 
 The reference deployment is a grid-tied home in Phoenix, AZ: an EcoFlow **Smart Home
 Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each:
@@ -58,6 +105,38 @@ reports the site clock, coordinates, currency and PV array in force.
 
 ---
 
+## Engines
+
+An engine here is a unit with its own model, estimator, planner, controller, detector or alarm
+evaluation whose output something reads: an alarm, a plan, a device write, a Home Assistant
+entity, an API field or a dashboard card. Gates and filters that only pass or block another
+engine's output are not counted, nor are caching and transport; a rule ladder over another
+engine's output counts as part of that engine, and one algorithm counts once however many reports
+call it. The
+[engine index](docs/reference/A-feature-inventory.md#a13-engine-index) lists every engine with its
+method, status, thread and code anchor, and CI fails when a row's file no longer declares its
+anchored identifier in code; a mention left in a comment or a string does not count.
+
+| Group | Engines | Examples |
+|---|---|---|
+| Forecasting | 8 | Per-hour least-squares irradiance→PV response with a recursive Bayesian posterior; recency-weighted load curves; a P10/P50/P90 solar and SoC band, narrowed (never widened) to its realized error, with 21 quantile paths for the reserve and full-charge probabilities; a forecast-skill hindcast with PV bias correction; EV-session mining and live-session detection; an ambient-coupled pack thermal forecast; a clear-sky physics ceiling (API) |
+| Battery & PV health | 17 | OLS fade regression to end of life; a two-state Kalman SoH filter and hierarchical Bayesian shrinkage (API); self-validating coulombic efficiency; round-trip efficiency; charge-curve fingerprint; internal-resistance trend; thermal-event counting; soiling, shade, clipping and SoC-saturation curtailment; MPPT and standby-floor drift; LFP OCV→SoC (API); a pack-risk heuristic and an online-trained logistic regression (API) |
+| Energy economics & arbitrage | 11 | The night-charge planner, its outcome scorer and its write-readiness gate; a reserve writer, a just-in-time force-charge controller and a Charge Now responder, each write-capable only behind options whose defaults never write; on-peak grid-to-battery and idle-pool detectors; energy-flow attribution with time-of-use cost accounting; greedy and dynamic-programming dispatch planners (API) |
+| Alarms & safety | 11 | The islanded runway and projected-SoC simulator; the backup-pool SoC ladder; grid-backstop evidence fusion; threshold, cell-spread and defective-pack alarms; runtime and cell-imbalance trend alarms; host health; a second panel's runway; a load-shed advisor (advisory) |
+| Learning & anomaly detection | 7 | Hour-of-day self-baselines (median/MAD); peer fade-rate and pack peer outliers; string mismatch; Mahalanobis pack novelty (API); an alarm-flood auto-tuner for pushes; the night-ledger calibration learners |
+| Telemetry integrity | 8 | A telemetry-blind detector with a remediate-first hold; a message-rate floor with a budgeted session self-heal; frozen cloud-payload and frozen-row detection; gap and outage detection; removed-pack detection; the dark-Core energy bridge; settings drift |
+
+Most engines are **live**: computed by default and feeding an alarm, a plan, a dashboard card or
+another engine. A few reach only a channel that is off by default (`BROADCAST_ENABLED`,
+`NOTIFY_CHANNEL`, `MQTT_DISCOVERY_ENABLED`). Those marked **(API)** or **(advisory)** are
+computed and published but never acted on by the add-on. The three write-capable engines sit
+behind mode gates; none of them starts a write under the shipped defaults, though a restore that
+undoes an earlier write of its own still runs. The counts follow the index's definition; the
+floor stated above holds even under the index's strict reading, which keeps only core engines
+and drops the advisory-only ones.
+
+---
+
 ## Screenshots
 
 Live captures from the reference deployment. **Device serial numbers are masked to
@@ -67,7 +146,7 @@ exactly what the app renders.
 
 | | |
 |---|---|
-| [**Dashboard**](docs/screenshots/dashboard.png) — off-grid runway, energy-flow sankey, the SHP2 and every DPU Core with per-pack state, 24 h forecast, and the clustered-incident digest | [**Solar**](docs/screenshots/solar.png) — per-Core PV, the GHI→PV response model against its clear-sky ceiling, and weather-normalised soiling |
+| [**Dashboard**](docs/screenshots/dashboard.png) — off-grid runway, energy-flow sankey, the SHP2 and every DPU Core with per-pack state, 24 h forecast, and the clustered-incident digest | [**Solar**](docs/screenshots/solar.png) — per-Core PV, the learned GHI→PV response model, and weather-normalised soiling |
 | [**Battery**](docs/screenshots/battery.png) — per-pack state-of-health, end-of-life projection, internal-resistance trend and cell-spread | [**Strategy**](docs/screenshots/strategy.png) — tonight's night-charge plan, EV-window prediction, load-shed order and the TOU charge schedule |
 | [**Alerts**](docs/screenshots/alerts.png) — the alert console: standing conditions, severity, source engine and cleared history | |
 
@@ -109,23 +188,56 @@ exactly what the app renders.
 - Day-ahead PV + load + **projected state-of-charge** curve, a self-calibrating
   **P10/P90 probability band**, a multi-day horizon (3 days by default, up to 7),
   and a **forecast-skill** backtest (predicted-vs-actual daily kWh: MAE, bias, r²).
-- A **first-principles clear-sky** PV ceiling that cross-checks the learned model.
+- A **first-principles clear-sky** PV ceiling and a realized ÷ theoretical score (API); nothing
+  compares it with the learned model automatically.
 
 **Battery & PV health engines**
-- Per-pack **State-of-Health** (Kalman filter vs raw BMS), **end-of-life**
-  projection (fade-rate-ceilinged to kill false-EOL, regressed over the configured
-  retention clamped to 120–365 days), a
-  **hierarchical-Bayesian** SoH cross-check with 2σ outlier detection, and an
-  **LFP open-circuit-voltage → SoC** estimate gated on pack rest.
-- **Pack-risk** classifier (heuristic + an ML logistic-regression / isolation-
-  forest v2), **internal-resistance** trend, **round-trip** and **coulombic**
+- Per-pack **State-of-Health** fade regression (OLS, with a Kalman-filter track on the API),
+  **end-of-life** projection (capped at a plausible fade rate to suppress false end-of-life
+  dates, regressed over the configured retention clamped to 120–365 days),
+  **hierarchical-Bayesian** pack-SoH shrinkage with 2σ outlier detection (API), and an
+  **LFP open-circuit-voltage → SoC** estimate gated on pack rest (API).
+- **Pack-risk** scoring (a heuristic score, and an advisory v2 that adds an online-trained
+  logistic regression and a Mahalanobis novelty track; both on the HTTP API only),
+  **internal-resistance** trend, **round-trip** and **coulombic**
   efficiency, **charge-curve** fingerprinting, ambient-coupled **thermal
   forecast** + event counter, **string-mismatch**, and per-Core weather-
   normalized **PV soiling** decomposition.
 - A **confirmed-defective-pack** latch that follows the pack's serial, not its
   slot, and a **warranty evidence export**.
 
-**Energy, economics & dispatch**
+**Energy economics & time-of-use arbitrage**
+
+The night-charge pipeline chains the forecasting engines into a sized, guarded and scored plan.
+Every 30 minutes:
+
+1. **Inputs are shaped to the worst case.** P10 solar comes from the calibrated probability
+   band; P90 load is the day-ahead load curve scaled by a band factor learned from the ledger.
+   Past 24 hours both are widened by the band's realized daily error × √(days ahead), and a
+   predicted EV session is laid down at its P90 energy.
+2. **The pool is simulated hour by hour** on its DC bus (pack + PV − load ÷ discharge
+   efficiency, clamped to empty and full) from now, through the coming cheap window, to the
+   start of the next one, up to four days ahead, so the hours after the window closes, and a
+   weekend or holiday gap, are planned as one stretch. Each charging hour is capped by
+   the Cores' charge rate and, where a grid-input limit is set, by that limit less the house
+   load, so an overnight EV charge lowers the promised lift instead of being ignored.
+3. **The buy is solved, not estimated.** Each solve is a 48-step bisection against a
+   re-simulation of the pool, and a plan runs up to three: the resilience lift (against the
+   trough), the cost target (against the pack at window close) and the reserve setpoint (the
+   pack level at window close whose trough holds the line). The plan names the cap that bound
+   it — the requirement, charge power, EV contention, pool headroom or the over-buy ceiling — and
+   flags any shortfall against the cushion.
+4. **Two figures are disclosed:** the worst-case buy the plan is sized on, and the median-case
+   energy the night is expected to draw.
+5. **Basis gates hold a thin plan.** No buy is sized on a missing or climatology-only forecast,
+   with fewer than 14 scored calibration days, or with band coverage under 78%; a start-up data
+   gap defers the evening decision instead of cancelling it.
+6. **Every night is scored** once its window, the hours after it and the on-peak it governed
+   have been metered; the ledger feeds the calibrations and the readiness gate.
+
+The bullets below give the rate basis, the tariff model, the write modes and their guards, the
+objectives, the ledger, and the planners that only advise.
+
 - Self-consumption decomposition (solar fraction, PV→load/battery), carbon
   accounting, time-of-use tariff + cost, and clipping/curtailment. The cost
   engine and the dispatch planner share one resolved rate basis — an explicit
@@ -169,12 +281,14 @@ exactly what the app renders.
   `reserve + outage cushion`, where the **outage cushion is the energy to carry
   the *islanded* load** — the Smart Home Panel's backup circuits — for a bounded
   outage (`ARB_OUTAGE_CUSHION_HOURS`, default 4; 0 disables it, and the plan says
-  so). A durable ledger freezes every plan, scores it against measured reality
-  and records what it cost. `ARB_OBJECTIVE` selects the sizing objective:
+  so). A never-pruned ledger freezes each night's plan of record, scores it
+  against metered solar, load, grid import and the energy delivered into the
+  batteries, and prices the night's metered import (energy only, not a bill)
+  once the tariff rates are confirmed. `ARB_OBJECTIVE` selects the sizing objective:
   **`resilience`** buys exactly the requirement; **`cost`** treats it as a floor
   and fills further toward a solar-headroom or state-of-charge ceiling, so the
   safety margin can never shrink when the objective changes. Cost mode **fills
-  further, it does not price** — it reads no tariff; see
+  further, it does not price** — its sizing reads no rate; see
   [`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`](docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md).
 - A **winter mid-day charge, in shadow**: with the `cost` objective
   (`ARB_COST_MAX_SOC_PCT` above 50) and a tariff with a `super_off_peak` period
@@ -211,7 +325,8 @@ exactly what the app renders.
   degradation/runtime forecast, solar/load forecast), an alert **monitor**
   (transition debounce, incident clustering, churn auto-silence, quiet hours),
   a **repair-issues** feed, opt-in NWS storm alerts, and an **online learning
-  loop** (feature snapshots → realized outcomes → shadow models).
+  loop** (feature snapshots → realized outcomes → an online-updated pack-risk model, advisory and
+  on the HTTP API only).
 - **Notifications are Home-Assistant-native** and opt-in: with `NOTIFY_CHANNEL: ha`
   (the shipped default, `none`, sends nothing) every alert becomes a card in the HA
   notification drawer (dedupe + morning digest, dismissed when the condition clears)
@@ -250,18 +365,31 @@ treatment of each of the above.
 ## Architecture (60-second version)
 
 ```
-EcoFlow cloud ────────▶ snapshot store ──▶ SQLite recorder ──▶ analytics worker (≈40 engines)
-   (REST+MQTT)         (DeviceSnapshot)     (time-series +           │
-                                             lifetime accum.)        ├─▶ HTTP API  (:8787)
-                                                                     ├─▶ HA MQTT-discovery entities
-                                                                     ├─▶ React web UI
-                                                                     ├─▶ SSH TUI (:2323)
-                                                                     └─▶ runway alarm ─▶ audible broadcast
+EcoFlow cloud ──▶ snapshot store ──▶ SQLite recorder ──▶ analytics worker
+  (REST+MQTT)     (DeviceSnapshot)    (time-series,        forecasting, battery & PV health,
+                         │             lifetime accum.,    energy accounting, runway simulator,
+                         │             night ledger)       trend and self-baseline detectors
+                         ▼                                         │ reports
+                  main-thread engines ◀────────────────────────────┘
+                  alarm evaluation, grid resolver, telemetry-integrity detectors,
+                  night-charge planner → scorer → ledger → readiness gate,
+                  gated writers; physics, Bayesian and ML diagnostics (API only)
+                         │
+                         ├─▶ HTTP API  (:8787)
+                         ├─▶ HA MQTT-discovery entities (opt-in)
+                         ├─▶ React web UI
+                         ├─▶ SSH TUI (:2323, off by default)
+                         ├─▶ audible broadcast + HA push (opt-in)
+                         └─▶ bounded device writes (opt-in, audit-logged; engine writes
+                             readback-verified)
 ```
 
-Analytics run **off the main thread** (a worker + a client proxy with per-report
-caching) so ingest and the API never block. The recorder schema, report
-dependency graph, and full data-flow are in
+Most engines that scan recorder history run **off the main thread** (a worker plus a client
+proxy with per-report caching), the runway simulator among them. Threshold alarm evaluation, the
+night-charge stack and the telemetry-integrity detectors run on the main thread; the night-charge
+planner requests its forecasts from the worker. The
+[engine index](docs/reference/A-feature-inventory.md#a13-engine-index) gives each engine's thread;
+the recorder schema, report dependency graph, and full data-flow are in
 [reference chapter 1 — System Architecture & Data Flow](docs/reference/01-architecture.md#1-system-architecture--data-flow).
 
 ---
@@ -305,7 +433,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 
 | Path | What it is |
 |------|-----------|
-| `server/` | Node/TypeScript server — ingest, recorder, ~40 analytics engines, HTTP API, MQTT discovery, broadcast/TTS, SSH TUI |
+| `server/` | Node/TypeScript server — ingest, recorder, the engines (forecasting, battery and PV health, time-of-use arbitrage planning and its gated writers, alarms, anomaly detection, telemetry integrity; see the [engine index](docs/reference/A-feature-inventory.md#a13-engine-index)), HTTP API, MQTT discovery, broadcast/TTS, SSH TUI |
 | `web/` | React dashboard (Vite) |
 | `ecoflow_panel/` | Add-on manifest (`config.yaml`), `translations/`, `DOCS.md` (the operator guide, on the Documentation tab), `README.md` (the Info-tab card), `CHANGELOG.md` (+ archive), AppArmor profile |
 | `rootfs/` | s6 service runner (`etc/services.d/ecoflow-panel/run`) — the options→env bridge that turns the add-on Configuration into the server's environment |
@@ -317,7 +445,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 5,607 tests
+cd server && npm install && npm test     # 5,633 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -374,15 +502,30 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **131 harnesses** (`scripts/mutate-*.mjs`) holding **3803
-anchor-asserted mutants**; each reverts a guard in the live source and requires the
-suite to kill it. A harness aborts loudly rather than reporting green if an anchor
+regression. Each harness (`scripts/mutate-*.mjs`; the counts are in the opening)
+reverts a guard in the live source and requires the suite to kill it. A harness
+aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that
 reason — a harness whose anchors have drifted does not fail, it stops running, and
 an aborted harness reads identically to a clean one. A kill the full suite reports
 counts only when its failing tests fail again in their own files, one suite at a
 time: a failure under parallel load, or in a known teardown flake, never hides a
 survivor.
+
+The counted claims in this README are held to the tree by `scripts/check-doc-claims.mjs` in CI:
+the harness, mutant and test counts, the reference size, the workflow roster and the engine
+index. Every index row's file must declare the row's identifier in code (a function, class,
+constant, type or similar declaration; a mention in a comment or a string does not count), the
+index's count sentence (its total, thread tallies, strict reading and that reading's live and
+waiting split), this README's per-group counts and its count of write-capable engines must equal
+the rows, and the engine floor must sit below the index's strict reading. The same check sweeps
+this README, the add-on's README, documentation and configuration, the image labels, the web
+manifest and every guide and reference page for the wordings that drifted before: an engine count
+that is neither the index total nor this README's floor, an approximate one ("~40", "about 40",
+"40+") or one in words, and a sentence that puts the engines as a whole on one thread. The sweep
+reads those known wordings, not every possible sentence; `scripts/lib/engineIndex.mjs` lists
+exactly what it reads and what it does not. The repository's About description on GitHub sits
+outside the tree and is updated by hand.
 
 Dependency advisories are gated by `scripts/check-npm-audit.mjs`, which fails on
 **high or critical in the production tree** and reports the rest. Waivers must carry a

@@ -514,7 +514,7 @@ export function trainLrModel(
   };
 }
 
-/* ─── Isolation-forest-lite novelty detector ─────────────────────────── */
+/* ─── Novelty detector (diagonal Mahalanobis distance, not an isolation forest) ─── */
 
 export interface NoveltyResult {
   sn: string;

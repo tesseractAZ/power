@@ -30,12 +30,34 @@
  * suite via `--tests N`. If it is absent the script runs the suite itself rather
  * than waiving the claim.
  *
+ * The engine count follows the same rule. The README said "~40 analytics engines in a worker
+ * thread": approximate, wrong about the thread for more than half of them, and held by nothing.
+ * The engine index (docs/reference/A-feature-inventory.md, section A.13) is now the census, and
+ * scripts/lib/engineIndex.mjs checks it: every row's file must declare its identifier in code (a
+ * mention in a comment or a string does not count), the index's count sentence (the total, the
+ * per-thread tallies, the strict reading and its live and waiting split) must equal its rows, the
+ * README's floor ("more than N engines") must sit below the strict reading the index discloses,
+ * each README group row must state its group's tally, the README's count of write-capable engines
+ * must equal the index's, and on every surface swept a count written directly before "engines" is
+ * the index total or the README's floor, in digits (a count in words from twenty to ninety-nine
+ * fails; other words are not read) and never approximate, and a sentence that puts the engines as
+ * a whole, as the subject or the object of its verb, in the worker or on the main thread alone
+ * fails in the wording the lib's docblock lists.
+ *
  * Usage:  node scripts/check-doc-claims.mjs [--tests N]
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  ENGINE_INDEX_FILE,
+  ENGINE_COUNT_SURFACES,
+  ENGINE_COUNT_SURFACE_DIRS,
+  checkEngineIndex,
+  checkReadmeEngineClaims,
+  sweepEngineCounts,
+} from './lib/engineIndex.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const README = readFileSync(resolve(REPO, 'README.md'), 'utf8');
@@ -141,6 +163,65 @@ if (!layoutRow) {
   if (missing.length) failures.push(`workflows in the tree but not named in the README row: ${missing.join(', ')}`);
   if (phantom.length) failures.push(`workflows named in the README row but absent from the tree: ${phantom.join(', ')}`);
   if (!missing.length && !phantom.length) passes.push(`workflow roster: ${workflows.length} files, all named`);
+}
+
+// ------------------------------------------------------------- engine index
+// The census of engines and every engine count in prose. A file is read once; a missing one is a
+// caught ENOENT, never an existence probe first (this repository's CodeQL rule).
+const readOrNull = (rel) => {
+  try {
+    return readFileSync(resolve(REPO, rel), 'utf8');
+  } catch (e) {
+    if (e?.code === 'ENOENT') return null;
+    throw e;
+  }
+};
+const indexText = readOrNull(ENGINE_INDEX_FILE);
+if (indexText == null) {
+  failures.push(`engine index UNVERIFIABLE: ${ENGINE_INDEX_FILE} does not exist.`);
+} else {
+  const sourceCache = new Map();
+  const readSource = (rel) => {
+    if (!sourceCache.has(rel)) sourceCache.set(rel, readOrNull(rel));
+    return sourceCache.get(rel);
+  };
+  const index = checkEngineIndex(indexText, readSource);
+  for (const p of index.problems) failures.push(`engine index: ${p}`);
+  if (index.summary == null) {
+    failures.push('engine floor, group counts and count wording UNVERIFIABLE: the engine index could not be read.');
+  } else if (index.summary.rejected) {
+    failures.push(
+      `engine floor, group counts and count wording UNVERIFIABLE: ${index.summary.rejected} index row(s) did not parse, ` +
+        'so the tallies are partial; fix the row(s) named above.',
+    );
+  } else {
+    const s = index.summary;
+    if (!index.problems.length) {
+      passes.push(
+        `engine index: ${s.total} rows, every anchor declared in code across ${sourceCache.size} source files; ` +
+          `${s.worker} worker / ${s.main} main${s.both ? ` / ${s.both} both` : ''}; strict reading ${s.strict} ` +
+          `(${s.live} live, ${s.strict - s.live} waiting on an opt-in channel or a write mode)`,
+      );
+    }
+    const readme = checkReadmeEngineClaims(README, s);
+    failures.push(...readme.problems);
+    passes.push(...readme.passes);
+    const pages = ENGINE_COUNT_SURFACE_DIRS.flatMap((dir) =>
+      readdirSync(resolve(REPO, dir), { withFileTypes: true })
+        .filter((e) => e.isFile() && e.name.endsWith('.md'))
+        .map((e) => `${dir}/${e.name}`)
+        .sort(),
+    );
+    const surfaces = [...ENGINE_COUNT_SURFACES, ...pages].map((path) => ({ path, text: readOrNull(path) }));
+    const sweep = sweepEngineCounts(surfaces, s, readme.floor);
+    failures.push(...sweep.problems);
+    if (!sweep.problems.length) {
+      passes.push(
+        `engine-count wording: ${sweep.counted} count(s) across ${sweep.surfaces} surfaces, none approximate, in words or stale; ` +
+          `${sweep.floors} floor(s), all more than ${readme.floor}; no sentence places the engines as a whole on one thread`,
+      );
+    }
+  }
 }
 
 // -------------------------------------------------------------- test count
