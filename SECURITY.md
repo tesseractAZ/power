@@ -1,7 +1,7 @@
 # Security Policy
 
-Power (`ecoflow_panel`) is a Home Assistant add-on that monitors an off-grid EcoFlow
-solar/battery system and drives a **life-safety depletion alarm**. It runs on the
+Power (`ecoflow_panel`) is a Home Assistant add-on that monitors a grid-tied EcoFlow
+solar/battery system, which runs with or without the grid, and drives a **life-safety depletion alarm**. It runs on the
 operator's own Home Assistant OS host (typically a Raspberry Pi) on a private LAN,
 authenticated to the local Home Assistant Supervisor. It is not a multi-tenant or
 internet-facing service. Even so, because it can read household telemetry, publish

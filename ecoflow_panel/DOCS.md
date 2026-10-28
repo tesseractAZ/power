@@ -1,8 +1,8 @@
 # Power
 
-Power is a Home Assistant add-on for an EcoFlow off-grid power system: a Smart Home Panel 2 and
-its Delta Pro Ultra battery Cores. It reads the system through the EcoFlow cloud and turns it into
-a live dashboard, battery and grid alarms that are spoken on your speakers and pushed to your
+Power is a Home Assistant add-on for a grid-tied EcoFlow home that runs with or without the grid: a Smart Home
+Panel 2 and its Delta Pro Ultra Cores. It reads the system through the EcoFlow cloud and turns it into
+a live dashboard, battery and grid alarms spoken on your speakers and pushed to your
 phone, a day-ahead solar and battery forecast, pack-health tracking and Home Assistant entities.
 A night-charge planner sizes a grid charge in a time-of-use tariff's cheap window; it only
 advises unless you allow it to write.

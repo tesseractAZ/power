@@ -1,7 +1,7 @@
 # Power
 
-Time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for an
-EcoFlow off-grid system: a Smart Home Panel 2 and its Delta Pro Ultra Cores. Power runs
+Time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for a
+grid-tied EcoFlow home that runs with or without the grid: a Smart Home Panel 2 and its Delta Pro Ultra Cores. Power runs
 more than 40 engines over live and recorded telemetry; its
 [engine index](https://github.com/tesseractAZ/power/blob/main/docs/reference/A-feature-inventory.md#a13-engine-index)
 states whether each one reports, advises or can act.

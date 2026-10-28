@@ -1,7 +1,7 @@
 {
   "name": "Power",
   "short_name": "Power",
-  "description": "Time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for an EcoFlow off-grid home.",
+  "description": "Time-of-use arbitrage planning, forecasting, battery analytics and life-safety alarms for a grid-tied EcoFlow home that runs with or without the grid.",
   "start_url": "/",
   "display": "standalone",
   "orientation": "any",
