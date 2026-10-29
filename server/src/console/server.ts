@@ -212,15 +212,38 @@ export function hostKeyFingerprint(key: string): string {
   return 'SHA256:' + createHash('sha256').update(k.getPublicSSH()).digest('base64').replace(/=+$/, '');
 }
 
+/** Generated host keys tried before giving up (see generateHostKey). */
+const HOST_KEY_ATTEMPTS = 8;
+
+/**
+ * A new ed25519 host key, checked to parse back before anything is written.
+ * ssh2 1.17.0's generator strips every leading zero byte from the public key, not
+ * only the BIT STRING's unused-bits byte, so the 1 key in 256 whose public half
+ * starts with 0x00 comes out 31 bytes long and ssh2's own parser rejects it.
+ */
+export function generateHostKey(
+  generate: () => string = () => sshUtils.generateKeyPairSync('ed25519').private,
+): { key: string; fingerprint: string } {
+  for (let attempt = 1; ; attempt++) {
+    const key = generate();
+    try {
+      return { key, fingerprint: hostKeyFingerprint(key) };
+    } catch (e) {
+      if (attempt >= HOST_KEY_ATTEMPTS) throw e;
+    }
+  }
+}
+
 /**
  * The host key at `path`, generated (ed25519) on first use and written 0600
  * through a rename. A file that does not parse is replaced, and the add-on log
- * says so: clients will warn that the host key changed.
+ * says so: clients will warn that the host key changed. `generate` is for tests.
  */
 export function loadOrCreateHostKey(
   path: string,
   log: (msg: string) => void,
   warn: (msg: string) => void = log,
+  generate?: () => string,
 ): { key: string; fingerprint: string } {
   if (existsSync(path)) {
     try {
@@ -230,11 +253,10 @@ export function loadOrCreateHostKey(
       warn(`ssh: the host key at ${path} could not be read (${(e as Error).message}) — generating a new one; clients will warn that the host key changed`);
     }
   }
-  const key = sshUtils.generateKeyPairSync('ed25519').private;
+  const { key, fingerprint } = generateHostKey(generate);
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, key, { mode: 0o600 });
   renameSync(tmp, path);
-  const fingerprint = hostKeyFingerprint(key);
   log(`ssh: generated a new host key (${fingerprint})`);
   return { key, fingerprint };
 }

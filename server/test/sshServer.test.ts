@@ -32,11 +32,11 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import ssh2 from 'ssh2';
-import { startSshServer, loadOrCreateHostKey, hostKeyFingerprint, parseInput } from '../src/console/server.js';
+import { startSshServer, loadOrCreateHostKey, generateHostKey, hostKeyFingerprint, parseInput } from '../src/console/server.js';
 import { _resetAuthThrottleForTest, describeSshAuth } from '../src/console/session.js';
 import type { TuiDataProvider } from '../src/console/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
@@ -417,6 +417,36 @@ test('ssh — the host key is generated once, kept 0600, reused, and a broken on
     assert.notEqual(c.fingerprint, a.fingerprint);
     assert.ok(lines.some((l) => /^WARN ssh: the host key at .* could not be read/.test(l)));
     assert.equal(statSync(path).mode & 0o777, 0o600);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('★★ ssh — a generated host key that does not parse back is regenerated before it is written', () => {
+  // ssh2 1.17.0 drops a public key's leading zero byte, so 1 generated key in 256 is
+  // malformed; 'not a key' stands in for one, which ssh2 rejects just the same.
+  const dir = mkdtempSync(join(tmpdir(), 'power-hostkey-'));
+  const path = join(dir, 'ssh_host_ed25519_key');
+  const good = generateHostKey().key;
+  const queue = ['not a key', 'not a key either', good];
+  const lines: string[] = [];
+  try {
+    const k = loadOrCreateHostKey(path, (m) => { lines.push(m); }, undefined, () => queue.shift()!);
+    assert.equal(k.key, good);
+    assert.equal(readFileSync(path, 'utf8'), good, 'only the key that parses is written');
+    assert.equal(k.fingerprint, hostKeyFingerprint(good));
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.deepEqual(lines, [`ssh: generated a new host key (${k.fingerprint})`]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('ssh — host-key generation gives up after 8 keys that do not parse, and writes nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'power-hostkey-'));
+  const path = join(dir, 'ssh_host_ed25519_key');
+  let calls = 0;
+  try {
+    assert.throws(() => loadOrCreateHostKey(path, () => {}, undefined, () => { calls++; return 'not a key'; }));
+    assert.equal(calls, 8);
+    assert.equal(existsSync(path), false);
+    assert.equal(existsSync(`${path}.tmp`), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
