@@ -210,7 +210,7 @@ test('TuiSession — preAuthenticated opens in the console and keeps the operato
   session.draw();
   const frame = (writes.at(-1) ?? '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
   assert.ok(frame.includes('CONSOLE'), 'a console frame, not the login card');
-  assert.ok(!frame.includes('USERNAME'));
+  assert.ok(!frame.includes('SIGN ON'));
   assert.match(frame, /OPR operator@local/, 'the OPR seat still names the signed-in user');
   // The flag without credentials is the open console, as `auth: null` is.
   const open = new TuiSession({ write: () => {}, data: mockDataProvider(), auth: null, preAuthenticated: true });
@@ -506,7 +506,7 @@ test('console/ws — the login card counts failures by the socket\'s address: te
     // Ten failures, one per session (each session's card has three attempts; one is spent here).
     for (let i = 0; i < 10; i++) {
       const c = await openConsole(v4);
-      await c.frame(/USERNAME/);
+      await c.frame(/SIGN ON/);
       c.ws.send('x\r');
       c.ws.send('y\r');
       const denied = await c.frame(/ACCESS DENIED/);
@@ -518,7 +518,7 @@ test('console/ws — the login card counts failures by the socket\'s address: te
     assert.equal(consoleLoginThrottled('::1'), false, 'the IPv6 address is not');
     // The right credentials from the saturated address: the card refuses the submit and the socket is closed.
     const same = await openConsole(v4);
-    await same.frame(/USERNAME/);
+    await same.frame(/SIGN ON/);
     same.ws.send('operator\r');
     same.ws.send('hunter2\r');
     const code = await same.closed;
@@ -526,11 +526,11 @@ test('console/ws — the login card counts failures by the socket\'s address: te
     assert.equal(consoleLoginThrottled('127.0.0.1'), true, 'a refused submit is not a counted failure, and nothing cleared the address');
     // The same credentials from another address open the console.
     const other = await openConsole(v6);
-    await other.frame(/USERNAME/);
+    await other.frame(/SIGN ON/);
     other.ws.send('operator\r');
     other.ws.send('hunter2\r');
     const console_ = await other.frame(/CONSOLE/);
-    assert.ok(!console_.includes('USERNAME'), 'the console, not the card');
+    assert.ok(!console_.includes('SIGN ON'), 'the console, not the card');
     assert.equal(consoleLoginThrottled('127.0.0.1'), true, 'the other address\'s login clears only its own address');
     other.ws.close();
     await other.closed;

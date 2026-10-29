@@ -180,7 +180,7 @@ test('ssh — the console credentials log in; a console frame is drawn (no login
     assert.match(r.out, /\x1b\[\?1049h/, 'the alternate screen opens');
     const text = stripAnsi(r.out);
     assert.ok(text.includes('CONSOLE'), 'a console frame is drawn');
-    assert.ok(!text.includes('USERNAME'), 'the in-session login card is never drawn over SSH');
+    assert.ok(!text.includes('SIGN ON'), 'the in-session login card is never drawn over SSH');
     assert.ok(!text.includes('ACCESS DENIED'));
     // The OPR seat names the signed-in user, as the login card's path does.
     assert.match(text, /OPR operator@local/);
