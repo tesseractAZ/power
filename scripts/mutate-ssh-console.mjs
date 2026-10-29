@@ -269,6 +269,13 @@ const MUTANTS = [
     to: '  writeFileSync(tmp, key); /* MUTANT */',
     why: 'A private key readable by every process in the container.',
   },
+  {
+    id: 'K-iii. ★★ a generated host key that does not parse back is not regenerated',
+    file: SRV,
+    find: '      if (attempt >= HOST_KEY_ATTEMPTS) throw e;',
+    to: '      throw e; /* MUTANT */',
+    why: 'ssh2 1.17.0 malforms 1 generated key in 256; without the retry that start of the SSH console fails.',
+  },
   /* ── C. caps and reclaim ── */
   {
     id: 'C-i. ★ the global connection cap is 100 higher',

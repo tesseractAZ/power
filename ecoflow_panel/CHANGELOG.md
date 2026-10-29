@@ -1,3 +1,12 @@
+## 1.191.7
+
+### A new SSH host key is checked before it is saved
+
+**Console**
+
+- The SSH library (ssh2 1.17.0) drops a leading zero byte from the public half of 1 generated host key in 256, and then rejects that key as malformed. When that happened on the start that first generated the key, the SSH console stayed off for that start and the log read `console/ssh: failed to start: Malformed OpenSSH private key`; the next start replaced the key with a warning. A generated key is now read back before it is written, and one that does not parse is discarded for another (up to 8 tries). An existing host key is unaffected and keeps its fingerprint.
+- The same defect failed the host-key test in about 1 CI run in 100.
+
 ## 1.191.6
 
 ### The telnet options are gone; the sign-on screen reads Plant Status System
