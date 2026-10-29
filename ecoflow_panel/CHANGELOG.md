@@ -1,3 +1,17 @@
+## 1.191.5
+
+### The console's sign-on screen holds still while you type
+
+**Console**
+
+- Each prompt row on the browser console's sign-on screen was centred as a whole, so every character typed moved the row half a column left.
+- The screen is now a fixed SIGN ON panel in the manner of a 1980s business terminal: dot-leader labels ("User ID . . . . .") and a box for each field. The panel's place depends only on its width; a value longer than its box shows its tail, with the cursor, inside it. The password shows as asterisks.
+- Errors and the hint sit on a message line below the panel, with ENTER=Submit and BACKSPACE=Correct. The POWER banner is drawn when the terminal has 26 rows or more.
+
+**Tests**
+
+- At 80×24, 120×40 and 44×20, through an empty, short, too-long and password entry and an error, both boxes' edges stay in the same column, every panel row has one width and no row is wider than the terminal. The previous screen fails these tests.
+
 ## 1.191.4
 
 ### Power names itself, not EcoFlow: the Home Assistant device, notification titles and console logo; a dark fleet's forecast is no longer archived as zero
