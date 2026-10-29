@@ -260,7 +260,7 @@ All surfaces read one holder. One HA namespace `night_charge_*` (beside it since
 - **MQTT availability/LWT + `expire_after`** (Invariant I12): `charge_tonight` publishes to a *retained* topic, so without an availability topic a dead advisor's retained `ON` would be served by the broker forever.
 - **The ~21:30 notification** — direct `sendNotification`, severity `info`, one updating card. Three shapes: charge, hold, insufficient-basis. Sending the third makes the *absence* explicit so the operator never wonders whether the job died.
 - **Owner automation contract:** trigger on `charge_tonight ON` **AND** readiness **AND** availability online **AND** honour the window sensors. **Never gate on `charge_tonight` alone** — publishing the window is what stops an automation reading it as "charge NOW."
-- **Web:** `NightChargeCard` on the Strategy panel, titled "Night-charge plan" since v1.191.0. The design's TUI `TONIGHT'S PLAN` block is not on any console screen: the console (SSH since v1.190.0) shows no night-charge plan, and only its freshness gate (`nightChargePlanIfFresh`, `telnet/dataProvider.ts`) remains, under test.
+- **Web:** `NightChargeCard` on the Strategy panel, titled "Night-charge plan" since v1.191.0. The design's TUI `TONIGHT'S PLAN` block is not on any console screen: the console (SSH since v1.190.0) shows no night-charge plan, and only its freshness gate (`nightChargePlanIfFresh`, `console/dataProvider.ts`) remains, under test.
 - **`GET /api/night-charge/status`** — read-only, no auth, exposing the plan, the actuation record, readiness and the last 7 ledger days. `reserveFloorPercent` is sourced from the same field the floor alarm defends, never a divergent copy.
 
 ---

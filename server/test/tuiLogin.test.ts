@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderLogin, type LoginViewState } from '../src/telnet/login.js';
+import { renderLogin, type LoginViewState } from '../src/console/login.js';
 
 const plain = (s: string) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 const base: LoginViewState = { stage: 'username', user: '', passLen: 0, attemptsLeft: 3, error: null };
@@ -50,8 +50,16 @@ test('login: a long value shows its tail and the cursor inside the box; the pass
   assert.ok(pw.some((l) => l.includes('User ID') && l.includes('operator')), 'the username stays shown on the password step');
 });
 
+test('login: no standing hint lines; an error is reported below the panel (v1.191.6)', () => {
+  const idle = renderLogin(base, 80, 24).map(plain).join('\n');
+  assert.doesNotMatch(idle, /ENTER=Submit|BACKSPACE|add-on configuration/);
+  const denied = renderLogin({ ...base, error: 'Invalid username or password', attemptsLeft: 2 }, 80, 24).map(plain);
+  const panelEnd = denied.findIndex((l) => l.includes('╚'));
+  assert.ok(denied.slice(panelEnd + 1).some((l) => l.includes('Invalid username or password — 2 attempt(s) remaining')));
+});
+
 test('login: the banner is drawn only when the terminal has the rows for it', () => {
-  assert.ok(renderLogin(base, 100, 30).map(plain).some((l) => l.includes('P L A N T')));
+  assert.ok(renderLogin(base, 100, 30).map(plain).some((l) => l.includes('P L A N T   S T A T U S   S Y S T E M')));
   assert.ok(!renderLogin(base, 80, 24).map(plain).some((l) => l.includes('P L A N T')));
   assert.ok(renderLogin(base, 80, 24).map(plain).some((l) => l.includes('SIGN ON')));
 });

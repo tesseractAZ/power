@@ -13,7 +13,7 @@
     },
     {
       "rule": "js/missing-rate-limiting",
-      "paths": ["server/src/telnet/wsConsole.ts"],
+      "paths": ["server/src/console/wsConsole.ts"],
       "reason": "The WebSocket upgrade is guarded by a concurrency cap (admit-then-close-1013 beyond the limit) rather than a per-request rate limiter — the appropriate control for a long-lived socket, which a request-rate limiter does not model."
     }
   ]

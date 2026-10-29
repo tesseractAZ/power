@@ -22,13 +22,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderPlant, PLANT_SCREENS, type PlantScreenId, type PlantView, type PlantData } from '../src/telnet/plant/index.js';
-import { visLen } from '../src/telnet/ansi.js';
+import { renderPlant, PLANT_SCREENS, type PlantScreenId, type PlantView, type PlantData } from '../src/console/plant/index.js';
+import { visLen } from '../src/console/ansi.js';
 import type { FleetSnapshot, DeviceSnapshot } from '../src/snapshot.js';
 import type { DpuProjection, Shp2Projection } from '../src/ecoflow/project.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
-import { plantFlow } from '../src/telnet/plant/types.js';
+import { plantFlow } from '../src/console/plant/types.js';
 
 /* ── fixture ───────────────────────────────────────────────────────────── */
 
@@ -579,7 +579,7 @@ test('v1.47.2 — ALM first message segment is complete and aligned at 80 cols',
 });
 
 test('v1.47.2 — visLen/padEnd count CJK as double-width', async () => {
-  const { visLen, padEnd: pe } = await import('../src/telnet/ansi.js');
+  const { visLen, padEnd: pe } = await import('../src/console/ansi.js');
   assert.equal(visLen('電池コア'), 8, 'four CJK glyphs occupy eight columns');
   assert.equal(visLen('Core 1'), 6);
   assert.equal(visLen('🔋'), 2, 'emoji is double-width');
@@ -591,13 +591,13 @@ test('v1.47.2 — visLen/padEnd count CJK as double-width', async () => {
 /* ── v1.47.3 third-pass regression fixes ────────────────────────────────── */
 
 test('v1.47.3 — combining marks are zero-width (dead-code branch fixed)', async () => {
-  const { visLen } = await import('../src/telnet/ansi.js');
+  const { visLen } = await import('../src/console/ansi.js');
   assert.equal(visLen('e\u0301'), 1, 'e + combining acute occupies one column');
   assert.equal(visLen('Re\u0301frige\u0301rateur'), 13, 'NFD name measures display width, not code units');
 });
 
 test('v1.47.3 — padEnd re-pads to exact width across a wide-glyph straddle', async () => {
-  const { padEnd, padStart, visLen } = await import('../src/telnet/ansi.js');
+  const { padEnd, padStart, visLen } = await import('../src/console/ansi.js');
   assert.equal(visLen(padEnd('abcd\u4e00', 5)), 5, 'straddle → drop wide glyph, then re-pad to width');
   assert.equal(visLen(padEnd('\u4e00\u4e00\u4e00', 5)), 5);
   assert.equal(visLen(padStart('abcd\u4e00', 5)), 5);

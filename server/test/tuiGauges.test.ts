@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hbar, vscale, braille, tile, fracLabel } from '../src/telnet/gauges.js';
+import { hbar, vscale, braille, tile, fracLabel } from '../src/console/gauges.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * TUI gauge primitives — pure string functions, so every case pins an

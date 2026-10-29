@@ -29,8 +29,8 @@ import { once } from 'node:events';
 import {
   startSshServer, refuseSocket,
   MAX_SSH_CONNS, MAX_SSH_CONNS_PER_IP, SSH_IDLE_TIMEOUT_MS, SSH_KEEPALIVE_MS, SSH_AUTH_GRACE_MS, REFUSE_LINGER_MS,
-} from '../src/telnet/server.js';
-import type { TuiDataProvider } from '../src/telnet/session.js';
+} from '../src/console/server.js';
+import type { TuiDataProvider } from '../src/console/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';

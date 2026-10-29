@@ -213,7 +213,8 @@ function plant(store: Store) {
     klaxonDir: KLAXON, cacheDir, cacheUrlPath: '/audio-render', renderTts, tickMs: 10,
     alertSetSettledSince: () => mon.alertSetSettledSince(),
   });
-  stops.push(() => { bc.stop(); rmSync(cacheDir, { recursive: true, force: true }); });
+  // v1.191.6 — retried: a cache write still landing after stop() made the delete fail ENOTEMPTY under load.
+  stops.push(() => { bc.stop(); rmSync(cacheDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); });
   return {
     mon, bc, logs,
     has: (s: string) => logs.some((l) => l.includes(s)),
@@ -238,7 +239,7 @@ async function heard(alerts: Alert[], level: 'yellow' | 'red'): Promise<void> {
   shown = alerts;
   await until(() => a.status().conditionSpoken === true && a.status().conditionLevel === level, `a heard ${level}`, logs);
   a.stop();
-  rmSync(cacheDir, { recursive: true, force: true });
+  rmSync(cacheDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   offset += 2 * MIN; // the deploy
 }
 const HEARD_CRIT: Alert = { id: `dpu-err-${CORE}`, severity: 'critical', category: 'Battery', device: 'Core 1', title: 'Inverter error code', detail: 'x' } as Alert;

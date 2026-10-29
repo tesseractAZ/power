@@ -14,11 +14,11 @@
  * is pinned to the probe instant while the CONSOLE screen renders.
  */
 import { pathToFileURL } from 'node:url';
-import { renderAlm } from '../../src/telnet/plant/alm.js';
-import { renderBus } from '../../src/telnet/plant/bus.js';
-import { renderConsole } from '../../src/telnet/plant/console.js';
+import { renderAlm } from '../../src/console/plant/alm.js';
+import { renderBus } from '../../src/console/plant/bus.js';
+import { renderConsole } from '../../src/console/plant/console.js';
 import { fmtSiteHms, fmtSiteStamp, siteTimeZone } from '../../src/siteTime.js';
-import type { PlantData, PlantView } from '../../src/telnet/plant/types.js';
+import type { PlantData, PlantView } from '../../src/console/plant/types.js';
 
 /** 2026-10-22 18:30:15 UTC: 11:30:15 in Phoenix, 14:30:15 in New York, 07:30:15 the next day in Auckland. */
 export const PROBE_AT_MS = Date.UTC(2026, 9, 22, 18, 30, 15);

@@ -27,7 +27,7 @@ export const DYNAMIC_READERS: Record<string, string> = {
 
 export const ENV_PARAM_ALLOWLIST: Record<string, number> = {
   'alerts.ts': 1,          // resolveOutageAlertOptions(env: Record<string, string | undefined>)
-  'telnet/session.ts': 1,  // authFromEnv(env: NodeJS.ProcessEnv = process.env)
+  'console/session.ts': 1,  // authFromEnv(env: NodeJS.ProcessEnv = process.env)
   'backupWindow.ts': 1,    // resolveBackupJournalPath({ env?: NodeJS.ProcessEnv })
 };
 export const PERMANENT_EXCEPTION = 'backupHook.mjs';

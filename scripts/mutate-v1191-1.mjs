@@ -42,16 +42,16 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const ALM = resolve(REPO, 'server/src/telnet/plant/alm.ts');
-const BUS = resolve(REPO, 'server/src/telnet/plant/bus.ts');
+const ALM = resolve(REPO, 'server/src/console/plant/alm.ts');
+const BUS = resolve(REPO, 'server/src/console/plant/bus.ts');
 const INDEX = resolve(REPO, 'server/src/index.ts');
 const WEB_SITE_TIME = resolve(REPO, 'web/src/siteTime.ts');
 const TODAY = resolve(REPO, 'web/src/cards/TodaySummary.tsx');
 const DETAIL = resolve(REPO, 'web/src/cards/ForecastDetail.tsx');
 const CARD = resolve(REPO, 'web/src/cards/ForecastCard.tsx');
-const SCADA = resolve(REPO, 'server/src/telnet/plant/scada.ts');
+const SCADA = resolve(REPO, 'server/src/console/plant/scada.ts');
 const ANALYTICS = resolve(REPO, 'server/src/analytics.ts');
-const PROVIDER = resolve(REPO, 'server/src/telnet/dataProvider.ts');
+const PROVIDER = resolve(REPO, 'server/src/console/dataProvider.ts');
 const SUBSET = [
   'test/consoleSiteClock.test.ts',
   'test/webSiteTime.test.ts',

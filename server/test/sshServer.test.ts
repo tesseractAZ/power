@@ -36,13 +36,13 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import ssh2 from 'ssh2';
-import { startSshServer, loadOrCreateHostKey, hostKeyFingerprint, parseInput } from '../src/telnet/server.js';
-import { _resetAuthThrottleForTest, describeSshAuth } from '../src/telnet/session.js';
-import type { TuiDataProvider } from '../src/telnet/session.js';
+import { startSshServer, loadOrCreateHostKey, hostKeyFingerprint, parseInput } from '../src/console/server.js';
+import { _resetAuthThrottleForTest, describeSshAuth } from '../src/console/session.js';
+import type { TuiDataProvider } from '../src/console/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
-import { BEGIN_SYNC, END_SYNC } from '../src/telnet/ansi.js';
+import { BEGIN_SYNC, END_SYNC } from '../src/console/ansi.js';
 
 /* ── fixtures (mirrors sshCaps.test.ts / wsConsole.test.ts) ────────────── */
 

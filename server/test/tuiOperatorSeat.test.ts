@@ -14,9 +14,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { operatorSeat, OPERATOR_SEAT_MAX } from '../src/telnet/plant/console.js';
-import { renderPlant, type PlantData, type PlantView } from '../src/telnet/plant/index.js';
-import { TuiSession, _resetAuthThrottleForTest, type TuiDataProvider } from '../src/telnet/session.js';
+import { operatorSeat, OPERATOR_SEAT_MAX } from '../src/console/plant/console.js';
+import { renderPlant, type PlantData, type PlantView } from '../src/console/plant/index.js';
+import { TuiSession, _resetAuthThrottleForTest, type TuiDataProvider } from '../src/console/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 
@@ -105,6 +105,6 @@ test('TuiSession — the signed-in TUI user names the seat; no login means the n
 });
 
 test('console.ts — no hard-coded operator literal', () => {
-  const src = readFileSync(resolve(import.meta.dirname, '../src/telnet/plant/console.ts'), 'utf8');
+  const src = readFileSync(resolve(import.meta.dirname, '../src/console/plant/console.ts'), 'utf8');
   assert.doesNotMatch(src, /['"`][A-Za-z0-9._-]+@local['"`]/);
 });

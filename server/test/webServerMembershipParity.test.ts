@@ -118,7 +118,7 @@ test('★ the fleet capacity ratio is PAIR-GATED', () => {
 test('an ABSENT degradation report is not stamped with the current time', () => {
   // Inert today — no Plant screen reads data.degradation — which is exactly why
   // it would have been believed the first time something did.
-  const s = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/telnet/session.ts'), 'utf8');
+  const s = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/console/session.ts'), 'utf8');
   assert.match(s, /degradation: d\.degradation\(\) \?\? \{ generatedAt: 0,/);
   assert.ok(!/generatedAt: Date\.now\(\), eolSoh: 80/.test(s));
 });

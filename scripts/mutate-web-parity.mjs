@@ -29,7 +29,7 @@ const SERVER = resolve(REPO, 'server');
 const WEBMEM = resolve(REPO, 'web/src/shp2Membership.ts');
 const THERM = resolve(REPO, 'web/src/pages/ThermalPanel.tsx');
 const DEGCARD = resolve(REPO, 'web/src/cards/DegradationCard.tsx');
-const SESS = resolve(SERVER, 'src/telnet/session.ts');
+const SESS = resolve(SERVER, 'src/console/session.ts');
 
 const SUBSET = ['test/webServerMembershipParity.test.ts'];
 

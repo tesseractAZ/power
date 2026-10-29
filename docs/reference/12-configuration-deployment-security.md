@@ -84,7 +84,7 @@ expects. This is deliberate; changing one to the other silently breaks the featu
 server's parser only recognizes its own convention).
 
 **Numeric `1`/`0`** — used for:
-`SSH_ENABLED`, `TELNET_ENABLED` (its deprecated alias), `NOTIFY_RESOLVED`, `NOTIFY_CRITICAL_BYPASS_DND`, `NWS_ENABLED`, `MQTT_DISCOVERY_ENABLED`
+`SSH_ENABLED`, `NOTIFY_RESOLVED`, `NOTIFY_CRITICAL_BYPASS_DND`, `NWS_ENABLED`, `MQTT_DISCOVERY_ENABLED`
 
 ```sh
 if bashio::config.true 'SSH_ENABLED'; then export SSH_ENABLED=1; else export SSH_ENABLED=0; fi
@@ -123,7 +123,7 @@ under `has_value`, and the script's boolean form matches the reader's rule.
 - **Write-debug warning:** if `WRITE_DEBUG_TOKEN` has a value, the runner logs a warning that
   `POST /api/device/send-command` is enabled.
 - **Broadcast confirmation:** if `BROADCAST_ENABLED`, logs `broadcast: enabled (targets: …)`.
-- **Start line:** `Starting Power (ecoflow_panel) on :8787 (ssh <1|0>:<port>, telnet alias <1|0>:<port>, db /data/ecoflow.db)…`, then `exec npm start`.
+- **Start line:** `Starting Power (ecoflow_panel) on :8787 (ssh <1|0>:<port>, db /data/ecoflow.db)…`, then `exec npm start`.
 
 ---
 
@@ -329,10 +329,10 @@ unreferenced and harmless.
 | Port | Protocol | Purpose | Auth |
 |------|----------|---------|------|
 | `8787/tcp` | HTTP | Web dashboard + REST API + WebSocket (`/ws`) | Reads open; writes via `requireWriteAuth`. Also the `ingress_port`. |
-| `2323/tcp` | SSH | "Control-room" TUI | Password login with `TUI_USERNAME` / `TUI_PASSWORD` (§11 2.3); every login is refused until a password is set. Default OFF (`SSH_ENABLED=false`; `TELNET_ENABLED` is a deprecated alias that also turns it on). The browser console at `/console` on `:8787` uses the same credentials behind its login card. The host key is `/data/ssh_host_ed25519_key`; its SHA256 fingerprint is on the startup log line. |
+| `2323/tcp` | SSH | "Control-room" TUI | Password login with `TUI_USERNAME` / `TUI_PASSWORD` (§11 2.3); every login is refused until a password is set. Default OFF (`SSH_ENABLED=false`). The browser console at `/console` on `:8787` uses the same credentials behind its login card. The host key is `/data/ssh_host_ed25519_key`; its SHA256 fingerprint is on the startup log line. |
 
 The server listens on `SSH_PORT` inside the container, and the manifest publishes container port
-2323. A different `SSH_PORT` (or `TELNET_PORT`, while `SSH_PORT` is at 2323) therefore moves the
+2323. A different `SSH_PORT` therefore moves the
 listener off the published port; to reach the console on another host port, change the host side
 of `2323/tcp` in the add-on's **Network** tab and leave `SSH_PORT` at 2323.
 
@@ -590,7 +590,7 @@ multi-arch image — it does **not** build on the host. Once the GitHub Release 
 - **"Missing required env var: ECOFLOW_ACCESS_KEY"** — set the key, Save, Restart.
 - **`401` from `api-a.ecoflow.com`** — switch `ECOFLOW_API_HOST` to `api-e` (EU) / `api-us` (US).
 - **Dashboard loads but no devices** — check the Log tab; the REST poll fills the snapshot in 15–60 s.
-- **SSH refuses the connection or the login** — confirm `SSH_ENABLED` (or the deprecated `TELNET_ENABLED`) is on, `:2323` is exposed in the Network tab, and a `TUI_PASSWORD` is set: without one every login is refused, and the log says so. The startup log line carries the host key fingerprint to compare with the client's prompt.
+- **SSH refuses the connection or the login** — confirm `SSH_ENABLED` is on, `:2323` is exposed in the Network tab, and a `TUI_PASSWORD` is set: without one every login is refused, and the log says so. The startup log line carries the host key fingerprint to compare with the client's prompt.
 - **The forecast card reads "Building the forecast — needs a little recorded history first."**
   (or the Solar tab's response card reads "Learning your arrays — needs a bit more paired
   sunlight + output history."). The learned solar model needs recorded daylight PV first; give it

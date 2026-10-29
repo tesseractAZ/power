@@ -194,10 +194,10 @@ The palette itself lives in CSS variables under `[data-theme="..."]` selectors i
 
 ### 2. Control-room TUI (SSH + browser)
 
-A SCADA/power-plant-styled terminal UI. The per-session render/input state machine (`server/src/telnet/session.ts`, class `TuiSession`) is **transport-agnostic** and is driven by two front ends that share it plus the same refreshed data caches (`dataProvider.ts` — energy totals, day-ahead forecast, degradation):
+A SCADA/power-plant-styled terminal UI. The per-session render/input state machine (`server/src/console/session.ts`, class `TuiSession`) is **transport-agnostic** and is driven by two front ends that share it plus the same refreshed data caches (`dataProvider.ts` — energy totals, day-ahead forecast, degradation):
 
-- **SSH** (`telnet/server.ts`) on **:2323** — the `ssh2` library inside the Node process, behind a plain `node:net` server that owns TCP: it applies the connection caps, TCP keep-alive, the idle reclaim and the login grace, then hands each socket to ssh2 (`injectSocket`; ssh2 reports a connection only after the client's version line, so sockets are paired with connections by peer address and port). Logins are password only, against `TUI_USERNAME` / `TUI_PASSWORD` (`verifyConsoleCredentials`, the login card's constant-time compare); the session opens already authenticated (`preAuthenticated`), enters the alt-screen buffer and renders at 1 Hz. One terminal per connection: the pty request gives the initial size (80×24 without one) and `window-change` resizes it through the `naws` event the browser console uses; the session holds both to 60–200 columns × 16–80 rows whatever the request's 32-bit cols and rows say, since the renderer allocates a line per row on every 1 Hz frame; exec, subsystems (sftp) and port forwarding are refused. `parseInput()` turns the terminal's bytes into `InputEvent`s (arrows via CSI/SS3, CR/LF, Ctrl-C, Tab, Backspace/DEL, printable ASCII), holding back an incomplete trailing sequence; it strips no telnet IAC any more. The ed25519 host key is generated on first start at `/data/ssh_host_ed25519_key` (0600, written through a rename), reused afterwards and replaced with a warning if it does not parse; its SHA256 fingerprint is on the startup log line at every start. Accept and teardown are logged, teardown with the session duration and the remaining active count.
-- **Browser web terminal** (`telnet/wsConsole.ts`) at **`/console`** on `:8787` — serves a self-contained xterm.js page over a WebSocket (`/console/ws`), vendoring `xterm.js`/`xterm.css` from `node_modules` (no CDN). Suitable for an HA `panel_iframe` at `http://<host>:8787/console`.
+- **SSH** (`console/server.ts`) on **:2323** — the `ssh2` library inside the Node process, behind a plain `node:net` server that owns TCP: it applies the connection caps, TCP keep-alive, the idle reclaim and the login grace, then hands each socket to ssh2 (`injectSocket`; ssh2 reports a connection only after the client's version line, so sockets are paired with connections by peer address and port). Logins are password only, against `TUI_USERNAME` / `TUI_PASSWORD` (`verifyConsoleCredentials`, the login card's constant-time compare); the session opens already authenticated (`preAuthenticated`), enters the alt-screen buffer and renders at 1 Hz. One terminal per connection: the pty request gives the initial size (80×24 without one) and `window-change` resizes it through the `naws` event the browser console uses; the session holds both to 60–200 columns × 16–80 rows whatever the request's 32-bit cols and rows say, since the renderer allocates a line per row on every 1 Hz frame; exec, subsystems (sftp) and port forwarding are refused. `parseInput()` turns the terminal's bytes into `InputEvent`s (arrows via CSI/SS3, CR/LF, Ctrl-C, Tab, Backspace/DEL, printable ASCII), holding back an incomplete trailing sequence; it strips no telnet IAC any more. The ed25519 host key is generated on first start at `/data/ssh_host_ed25519_key` (0600, written through a rename), reused afterwards and replaced with a warning if it does not parse; its SHA256 fingerprint is on the startup log line at every start. Accept and teardown are logged, teardown with the session duration and the remaining active count.
+- **Browser web terminal** (`console/wsConsole.ts`) at **`/console`** on `:8787` — serves a self-contained xterm.js page over a WebSocket (`/console/ws`), vendoring `xterm.js`/`xterm.css` from `node_modules` (no CDN). Suitable for an HA `panel_iframe` at `http://<host>:8787/console`.
 
 #### 2.1 How to connect
 
@@ -205,7 +205,7 @@ A SCADA/power-plant-styled terminal UI. The per-session render/input state machi
 ssh -p 2323 <user>@<host>       # <user> is TUI_USERNAME (operator when empty)
 ```
 
-Gated by `SSH_ENABLED` (bare-env default on; the SHIPPED add-on options default is `SSH_ENABLED: false` — enable it in the add-on configuration). `TELNET_ENABLED` and `TELNET_PORT` are kept as deprecated aliases (an option key is never renamed): either enabled option serves SSH, and `SSH_PORT` at its default `2323` defers to a changed `TELNET_PORT`; `resolveSshConfig` (`config.ts`) applies the aliases and the call site logs one boot notice per alias that decided a value. Host defaults to `::` (`SSH_HOST`), port to `2323` (`SSH_PORT`), the host key to `/data/ssh_host_ed25519_key` (`SSH_HOST_KEY`); the run script exports all four. The first connection shows the host key fingerprint, which is on the add-on's startup log line. The browser variant needs no client — open `/console`.
+Gated by `SSH_ENABLED` (bare-env default on; the SHIPPED add-on options default is `SSH_ENABLED: false` — enable it in the add-on configuration). The deprecated `TELNET_ENABLED` / `TELNET_PORT` aliases were removed in v1.191.6; `resolveSshConfig` (`config.ts`) reads the `SSH_*` options only. Host defaults to `::` (`SSH_HOST`), port to `2323` (`SSH_PORT`), the host key to `/data/ssh_host_ed25519_key` (`SSH_HOST_KEY`); the run script exports all four. The first connection shows the host key fingerprint, which is on the add-on's startup log line. The browser variant needs no client — open `/console`.
 
 With no `TUI_PASSWORD` the SSH console **refuses every login**, and the log says why once per connection — an SSH port that admits anyone would only look safer than the telnet port it replaced — while the browser console opens straight in: read-only telemetry meant for a trusted LAN. Setting `TUI_PASSWORD` is the login on both (§2.3). The `/console/ws` upgrade rejects a cross-origin `Origin`, accepting same-origin, LAN, and missing-Origin. The blanket `*.ui.nabu.casa` match was **removed in v1.47.3** as a CSWSH hole — a wildcard would let any HA Cloud tenant pass a gate that is not same-origin-protected. Remote access is via HA ingress (auth-gated) or an exact-match `TUI_TRUSTED_ORIGINS` entry.
 
@@ -221,7 +221,7 @@ Both transports cap concurrency and reap idle sessions so a LAN flood can't spaw
 When a console password is configured (`TUI_PASSWORD` option, non-empty), the SSH
 transport checks it at the protocol level (password authentication; the `none`
 method is told to try a password) and every `/console` session starts at a login
-prompt (`telnet/login.ts`) rendered in the same pseudo-LCD lettering as the console
+prompt (`console/login.ts`) rendered in the same pseudo-LCD lettering as the console
 brand. `TUI_USERNAME` defaults to `operator` when left empty. The card's input state
 machine lives in the transport-agnostic session driver: printable keys type into the
 active field (password echoes masked), backspace edits, TAB switches fields, ENTER
@@ -248,10 +248,10 @@ logged. `q` does not quit at the card (it is a legitimate credential character);
 straight into the console — its login layer is opt-in, LAN-level access control —
 and the SSH console refuses every login.
 
-#### 2.4 The console (`telnet/plant/`)
+#### 2.4 The console (`console/plant/`)
 
 v1.46.0 consolidates the TUI to a **single interface**: the v0.9.13 mode
-chooser and the legacy Summary console (`telnet/screens.ts`) are removed, so
+chooser and the legacy Summary console (`console/screens.ts`) are removed, so
 every connection lands in the same SCADA-style console, there is one theme to
 maintain, and the full terminal is spent on the console itself.
 
@@ -295,10 +295,10 @@ time to full beside a BATT.P.NET charge, not the time to empty.
 Two pure primitive modules feed the screens; both emit plain strings (callers
 colorize whole segments, and visible width equals `.length` before styling):
 
-- **`telnet/bigfont.ts`** — a 5-row pseudo-LCD block font (digits, `%`, `kW`,
+- **`console/bigfont.ts`** — a 5-row pseudo-LCD block font (digits, `%`, `kW`,
   `.`, `:`, `-`, `+`, `/`, `h`). `bigText(s)` returns 5 equal-width rows;
   `bigTextWidth(s)` sizes without rendering.
-- **`telnet/gauges.ts`** — `hbar` (eighth-block horizontal bar, width×8-step
+- **`console/gauges.ts`** — `hbar` (eighth-block horizontal bar, width×8-step
   resolution), `vscale` (eighth-height column chart), `braille` (2×4-dot
   braille sparkline — 4 vertical levels per half-column), `tile` (3-row
   ISA-annunciator window), `fracLabel`. All total: NaN/Infinity/degenerate

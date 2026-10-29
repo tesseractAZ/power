@@ -13,7 +13,7 @@ import {
 } from '../src/nightChargeAdvisor.js';
 import { buildNightChargeMessage } from '../src/notify.js';
 import { armFromPlan, emptyActuationState, clampReserveTarget } from '../src/nightChargeActuator.js';
-import { nightChargePlanIfFresh } from '../src/telnet/dataProvider.js';
+import { nightChargePlanIfFresh } from '../src/console/dataProvider.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * nightChargeAdvisor — EV CONTENTION (v1.60.0).

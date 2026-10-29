@@ -1,7 +1,7 @@
 /**
  * Transport-agnostic control-room TUI session driver.
  *
- * v0.67.0 — extracted from `telnet/server.ts` so the per-session render/input
+ * v0.67.0 — extracted from `console/server.ts` so the per-session render/input
  * state machine can be reused by BOTH transports:
  *
  *   • the SSH server (`server.ts`), which authenticates at the protocol level

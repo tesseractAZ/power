@@ -235,16 +235,10 @@ configuration:
     description: Topic prefix the add-on publishes its auto-discovery messages under. It must match the discovery prefix configured in your Home Assistant MQTT integration, or none of the sensors will ever appear. "homeassistant" is the Home Assistant default and is almost always correct; ignored unless MQTT discovery is enabled and an MQTT host is set.
   SSH_ENABLED:
     name: Enable SSH TUI
-    description: 'Serves the full-screen control-room console over SSH on the SSH TUI Port (default 2323) for terminals on your network: ssh -p 2323 <Console Username>@<host>. Logins use the Console Username and Console Password below, and every login is refused until a Console Password is set, so set one first. The host key fingerprint is in the add-on log at every start, to compare with what ssh shows on the first connection. Off by default. The deprecated Enable Telnet TUI option also turns this console on, so turn both off to close the port. The browser version of the same console at /console stays available through the Home Assistant sidebar whatever you set here.'
+    description: 'Serves the full-screen control-room console over SSH on the SSH TUI Port (default 2323) for terminals on your network: ssh -p 2323 <Console Username>@<host>. Logins use the Console Username and Console Password below, and every login is refused until a Console Password is set, so set one first. The host key fingerprint is in the add-on log at every start, to compare with what ssh shows on the first connection. Off by default. The browser version of the same console at /console stays available through the Home Assistant sidebar whatever you set here.'
   SSH_PORT:
     name: SSH TUI Port
-    description: 'TCP port the SSH control-room TUI listens on inside the add-on; default 2323. Leave it at 2323 unless you know what you are doing: the add-on publishes container port 2323, and the Network section can only change the host-side port, so any other value here leaves the console unreachable from your LAN. While it is 2323 and the deprecated Telnet TUI Port is set to something else, that value is used instead. Ignored while the console is off.'
-  TELNET_ENABLED:
-    name: Enable Telnet TUI (deprecated)
-    description: 'Deprecated alias of Enable SSH TUI, kept so an existing configuration keeps working: telnet is no longer served, and while this is on the console is served over SSH exactly as if Enable SSH TUI were on. Use Enable SSH TUI; to close the port, turn both off.'
-  TELNET_PORT:
-    name: Telnet TUI Port (deprecated)
-    description: 'Deprecated alias of SSH TUI Port, kept so an existing configuration keeps working. It applies only while SSH TUI Port is at its default of 2323; set SSH TUI Port instead.'
+    description: 'TCP port the SSH control-room TUI listens on inside the add-on; default 2323. Leave it at 2323 unless you know what you are doing: the add-on publishes container port 2323, and the Network section can only change the host-side port, so any other value here leaves the console unreachable from your LAN. Ignored while the console is off.'
   TUI_USERNAME:
     name: Console Username
     description: 'Username for the control-room console login, used by both the SSH TUI and the /console browser terminal; blank (the default) means operator. With Console Password empty the browser console has no login prompt, and the SSH console refuses every login. Use printable ASCII, 64 characters or fewer: the browser console''s prompt cannot type anything else, so a longer or accented name would lock you out of it.'

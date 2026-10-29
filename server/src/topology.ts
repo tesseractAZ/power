@@ -46,7 +46,7 @@ export function bindTopologyOptions(a: TopologyOptionAccess): void { access = a;
 /**
  * What kind of device a product name describes. One helper for the substring tests that were written
  * out inline (ecoflow/project.ts projectByProduct, snapshot.ts, shp2Membership.ts, alerts.ts,
- * repairIssues.ts, gridState.ts, ecoflow/mqtt.ts, telnet/plant/data.ts, index.ts): the name is
+ * repairIssues.ts, gridState.ts, ecoflow/mqtt.ts, console/plant/data.ts, index.ts): the name is
  * lower-cased and searched for `delta pro ultra` (a DELTA Pro Ultra, "Core") and `smart home panel`
  * (the Smart Home Panel 2; the first-generation panel matches too — plan section 8). A name holding
  * both is a DPU, the order projectByProduct always tested in. A site that asked only one question
@@ -87,7 +87,7 @@ const SERIAL_TAIL_SUFFIX = /\s*\(…[0-9A-Za-z]{1,8}\)$/;
 /**
  * A Core's number from its display name: `core N` anywhere (case-insensitive), else the first run of
  * digits, else null. The chain the three copies used (alerts.ts dpuNum, analytics/mathHelpers.ts
- * dpuNum, telnet/plant/data.ts dpuNum and generatorNumber, the last two with their own fallbacks).
+ * dpuNum, console/plant/data.ts dpuNum and generatorNumber, the last two with their own fallbacks).
  * A serial-tail disambiguator this module appended is not read as a number.
  */
 export function coreNumberFromName(name: string | null | undefined): number | null {

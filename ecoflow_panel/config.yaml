@@ -1,5 +1,5 @@
 name: Power
-version: "1.191.5"
+version: "1.191.6"
 slug: ecoflow_panel
 description: >-
   Independent, open-source time-of-use arbitrage planning, forecasting and
@@ -179,11 +179,6 @@ options:
   # LAN is not on by default on a fresh install. Opt in by setting this true.
   SSH_ENABLED: false
   SSH_PORT: 2323
-  # Deprecated aliases of SSH_ENABLED / SSH_PORT, kept so an existing install needs no
-  # change (an option key is never renamed): either enabled option serves SSH, and
-  # SSH_PORT at its default 2323 defers to TELNET_PORT. Telnet itself is no longer served.
-  TELNET_ENABLED: false
-  TELNET_PORT: 2323
   TUI_USERNAME: ""
   TUI_PASSWORD: ""
   TUI_TRUSTED_ORIGINS: ""
@@ -285,11 +280,9 @@ schema:
   MQTT_DISCOVERY_USER: "str?"
   MQTT_DISCOVERY_PASS: "password?"
   MQTT_DISCOVERY_PREFIX: "str?"
-  # SSH control-room TUI (LAN; password login); TELNET_* are deprecated aliases
+  # SSH control-room TUI (LAN; password login)
   SSH_ENABLED: bool
   SSH_PORT: port
-  TELNET_ENABLED: bool
-  TELNET_PORT: port
   TUI_USERNAME: str?
   TUI_PASSWORD: password?
   TUI_TRUSTED_ORIGINS: str?

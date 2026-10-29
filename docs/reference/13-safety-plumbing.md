@@ -248,7 +248,7 @@ Read accessors:
 
 #### What + why
 
-The `Alert` type is **stateless** — every field is recomputed fresh on each `alertMonitor.evaluate()` tick — so nothing on the alert records *when* it first became active. The console's ALM screen (`telnet/plant/alm.ts`, the ALARM screen the SSH console and the browser console share) used to stamp every alarm row with `snapshot.generatedAt` (this refresh's clock), which is wrong for any alarm that's been active longer than one poll. `alertMonitor`'s in-memory `TrackedAlert.firstSeen` would be correct, but it lives only in the in-process `tracked` Map and resets to "now" on **every add-on restart — and this host restarts roughly daily**. This sidecar is the durable source of truth for first-seen time.
+The `Alert` type is **stateless** — every field is recomputed fresh on each `alertMonitor.evaluate()` tick — so nothing on the alert records *when* it first became active. The console's ALM screen (`console/plant/alm.ts`, the ALARM screen the SSH console and the browser console share) used to stamp every alarm row with `snapshot.generatedAt` (this refresh's clock), which is wrong for any alarm that's been active longer than one poll. `alertMonitor`'s in-memory `TrackedAlert.firstSeen` would be correct, but it lives only in the in-process `tracked` Map and resets to "now" on **every add-on restart — and this host restarts roughly daily**. This sidecar is the durable source of truth for first-seen time.
 
 #### Storage
 
@@ -278,7 +278,7 @@ Pruning an id once it has left the active set and its absence is evidence (above
 #### Trace / wire-in
 
 - **Write:** `alertMonitor.ts:4203` calls `syncAlertOnsets(new Set(tracked.keys()), now, { prune })` once per evaluate tick, alongside the falling-edge/dwell loop. `alertMonitor.ts:3772` calls `restampAlertOnset(id, now)` (v1.173.0) when the pack residency check finds a new subject under a still-active id.
-- **Read:** `telnet/plant/alm.ts:205` renders each row's timestamp as `fmtTs(getAlertOnset(a.id) ?? stamp)`: the onset if known, else the pre-existing `generatedAt` fallback, written on the site clock (`fmtTs` = `fmtSiteStamp`). Two other readers:
+- **Read:** `console/plant/alm.ts:205` renders each row's timestamp as `fmtTs(getAlertOnset(a.id) ?? stamp)`: the onset if known, else the pre-existing `generatedAt` fallback, written on the site clock (`fmtTs` = `fmtSiteStamp`). Two other readers:
   - `alertMonitor`, for a cleared alert's true duration in its history record (`getAlertOnset(id) ?? t.firstSeen`, `:3699`) and for the boot re-track decision (`priorOnsetMs`, `:3809`).
   - The broadcast pre-filter `speakableAlerts` (`broadcast.ts`), which passes it as `onsetOf` to the cell-imbalance speak hold (`heldForImbalanceConfirm`).
 

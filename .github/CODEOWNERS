@@ -10,7 +10,7 @@
 /server/                    @tesseractAZ
 /web/                       @tesseractAZ
 /server/src/analytics.ts    @tesseractAZ
-/server/src/telnet/         @tesseractAZ
+/server/src/console/         @tesseractAZ
 /.github/                   @tesseractAZ
 /ecoflow_panel/config.yaml  @tesseractAZ
 /Dockerfile                 @tesseractAZ

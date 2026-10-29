@@ -644,7 +644,7 @@
   "bare": 0,
   "dynamic": 0
  },
- "telnet/session.ts": {
+ "console/session.ts": {
   "occurrences": 1,
   "lines": 1,
   "names": [
