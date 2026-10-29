@@ -9,9 +9,15 @@
  *
  * Pure: (state, width, height) → frame lines. The brand block is the same
  * pseudo-LCD lettering the mode chooser used before consolidation.
+ *
+ * v1.191.5 — a sign-on panel in the manner of a 1980s business terminal: a framed
+ * SIGN ON panel, dot-leader labels and a fixed box per field. Each prompt row used
+ * to be centred as a whole, so every typed character moved the row half a column
+ * left. Now the panel's place comes from its fixed width alone, a value scrolls
+ * inside its box instead of widening it, and messages sit on their own line below.
  */
 
-import { c, center } from './ansi.js';
+import { c, center, padEnd, truncate } from './ansi.js';
 
 export interface LoginViewState {
   stage: 'username' | 'password';
@@ -33,30 +39,58 @@ const BRAND = [
   '██        ██████    ███ ███   ███████  ██    ██',
 ];
 
-/** A prompt row: label + value field with a cursor block on the active field. */
-function field(label: string, value: string, active: boolean, width: number): string {
-  const cursor = active ? c.whiteB('█') : ' ';
-  const body = `${label.padStart(10)} : ${value}${cursor}`;
-  return center(active ? c.whiteB(body) : c.grey(body), width);
+/** The sign-on panel's width (frame included); narrower only on a narrower terminal. */
+const PANEL_W = 52;
+/** "  User ID . . . . . " — label column, dot leaders included. */
+const LABEL_W = 20;
+const LABELS = { username: 'User ID . . . . .', password: 'Password  . . . .' } as const;
+
+/**
+ * One field: three rows of a box whose inside holds `inner` cells. The value is shown
+ * left-aligned; one too long for the box shows its tail, so the cursor stays in view
+ * and the box never grows.
+ */
+function fieldBox(label: string, value: string, active: boolean, inner: number): [string, string, string] {
+  const room = active ? inner - 1 : inner; // the cursor takes a cell
+  const shown = value.length > room ? value.slice(value.length - room) : value;
+  const text = padEnd(active ? c.white(shown) + c.whiteB('█') : c.grey(shown), inner);
+  const edge = active ? c.whiteB : c.grey;
+  const pad = ' '.repeat(LABEL_W);
+  return [
+    pad + edge(`┌${'─'.repeat(inner + 2)}┐`),
+    padEnd(`  ${active ? c.whiteB(label) : c.grey(label)}`, LABEL_W) + edge('│') + ` ${text} ` + edge('│'),
+    pad + edge(`└${'─'.repeat(inner + 2)}┘`),
+  ];
 }
 
 export function renderLogin(st: LoginViewState, width: number, height: number): string[] {
-  const out: string[] = [];
-  const topPad = Math.max(1, Math.floor(height * 0.12));
-  for (let i = 0; i < topPad; i++) out.push('');
-  for (const line of BRAND) out.push(center(c.cyanB(line), width));
-  out.push(center(c.dim('P L A N T   C O N T R O L   S T A T I O N'), width));
-  out.push('');
-  out.push(center(c.grey('─'.repeat(Math.min(44, Math.max(20, width - 8)))), width));
-  out.push('');
-  out.push(field('USERNAME', st.user, st.stage === 'username', width));
-  out.push(field('PASSWORD', '●'.repeat(st.passLen), st.stage === 'password', width));
-  out.push('');
-  if (st.error) {
-    out.push(center(c.redB(`✗ ${st.error} — ${st.attemptsLeft} attempt(s) remaining`), width));
-  } else {
-    out.push(center(c.dim('ENTER to submit · operator credentials are set in the add-on configuration'), width));
-  }
+  const panelW = Math.max(40, Math.min(PANEL_W, width - 2));
+  const innerW = panelW - 2;                 // between the frame's verticals
+  const boxInner = innerW - LABEL_W - 2 - 4; // two cells of right margin, "│ " and " │"
+  const row = (s: string) => c.cyan('║') + padEnd(s, innerW) + c.cyan('║');
+  const title = ' SIGN ON ';
+  const panel: string[] = [
+    c.cyan(`╔══${title}${'═'.repeat(innerW - 2 - title.length)}╗`),
+    row(''),
+    row(`  ${c.grey('System  . . . . .')}   ${c.whiteB('POWER')}`),
+    row(''),
+    ...fieldBox(LABELS.username, st.user, st.stage === 'username', boxInner).map(row),
+    ...fieldBox(LABELS.password, '*'.repeat(st.passLen), st.stage === 'password', boxInner).map(row),
+    row(''),
+    c.cyan(`╚${'═'.repeat(innerW)}╝`),
+  ];
+  const message = st.error
+    ? c.redB(`${st.error} — ${st.attemptsLeft} attempt(s) remaining`)
+    : c.dim('Operator credentials are set in the add-on configuration.');
+  const below = ['', `  ${c.grey('ENTER=Submit   BACKSPACE=Correct')}`, `  ${message}`];
+
+  // The banner only when the terminal has the rows for it; nothing here depends on what is typed.
+  const banner = height >= 26 ? [...BRAND.map((l) => center(c.cyanB(l), width)), center(c.dim('P L A N T   C O N T R O L   S T A T I O N'), width), ''] : [];
+  const used = banner.length + panel.length + below.length;
+  const out: string[] = Array.from({ length: Math.max(1, Math.floor((height - used) / 3)) }, () => '');
+  out.push(...banner);
+  const left = ' '.repeat(Math.max(0, Math.floor((width - panelW) / 2)));
+  for (const l of [...panel, ...below]) out.push(truncate(left + l, width));
   while (out.length < height - 1) out.push('');
   return out.slice(0, height);
 }
