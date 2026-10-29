@@ -68,7 +68,7 @@ Energy Dashboard), and opt-in **Home Assistant notifications** with companion-ap
 
 Every change ships through the test suite, and a guard that a plausible refactor could silently
 disarm is held by a committed mutation harness: **131 harnesses** holding
-**3803 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
+**3797 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
 floor and group counts, and every engine-index row's code anchor are checked against the tree in
 CI ([Quality & accuracy](#quality--accuracy)).
 

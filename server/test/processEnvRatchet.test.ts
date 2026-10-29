@@ -121,7 +121,7 @@ test('★★★ v1.191.0 (review 3) — the names read through an environment pa
   for (const [rel, names] of [
     ['alerts.ts', ['SYSTEM_OUTAGE_ALERT_ENABLED', 'SYSTEM_OUTAGE_MIN_MINUTES', 'SYSTEM_OUTAGE_RECENT_WINDOW_H', 'SYSTEM_OUTAGE_RESTART_MIN_MINUTES']],
     ['backupWindow.ts', ['BACKUP_WINDOW_LOG']],
-    ['telnet/session.ts', ['TUI_PASSWORD', 'TUI_USERNAME']],
+    ['console/session.ts', ['TUI_PASSWORD', 'TUI_USERNAME']],
   ] as const) {
     for (const n of names) assert.ok(want[rel].names.includes(n), `${rel}: ${n} is pinned`);
     assert.deepEqual(readsOf(readFileSync(join(SRC, rel), 'utf8')).problems, [], `${rel}: read through its parameter by name only`);

@@ -30,9 +30,9 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const SNAP = resolve(SERVER, 'src/snapshot.ts');
-const GEN = resolve(SERVER, 'src/telnet/plant/gen.ts');
-const PV = resolve(SERVER, 'src/telnet/plant/pv.ts');
-const BUS = resolve(SERVER, 'src/telnet/plant/bus.ts');
+const GEN = resolve(SERVER, 'src/console/plant/gen.ts');
+const PV = resolve(SERVER, 'src/console/plant/pv.ts');
+const BUS = resolve(SERVER, 'src/console/plant/bus.ts');
 const MQTT = resolve(SERVER, 'src/ecoflow/mqtt.ts');
 
 const SUBSET = ['test/logReachAndDisplayHonesty.test.ts', 'test/unreachableDetectors.test.ts'];

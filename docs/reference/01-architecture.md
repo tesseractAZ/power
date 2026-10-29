@@ -91,7 +91,7 @@ freshness clock (see §1.7, *The `lastUpdated` freshness contract*, below).
 | `analytics.ts` | worker | The ~560 KB compute engine (forecast, runway, degradation, …) |
 | `index.ts` | main | Fastify bootstrap, all HTTP routes, `/ws`, wiring of every subsystem |
 | `mqttDiscovery.ts` | main | HA MQTT discovery config + 30s state publish |
-| `telnet/server.ts` | main | SSH control-room TUI (`startSshServer`, port 2323; the directory keeps its telnet-era name) |
+| `console/server.ts` | main | SSH control-room TUI (`startSshServer`, port 2323; the directory was `telnet/` until v1.191.6) |
 | `alertMonitor.ts` / `alerts.ts` | main | Alarm engine (life-safety path) |
 
 ---
@@ -982,10 +982,8 @@ one publishes its last good value for no longer than `EXPIRE_AFTER_S`, then null
 `startSshServer` on `config.ssh.port` default `2323`, host `::`, with the host key from
 `config.ssh.hostKeyPath` (`loadOrCreateHostKey`; its fingerprint is on the startup line).
 In bare env it is enabled unless `SSH_ENABLED=0`, but the add-on ships `SSH_ENABLED: false`,
-which the runner bridges to `0`, so the SSH transport is **off by default**. `TELNET_ENABLED`
-and `TELNET_PORT` are deprecated aliases resolved by `resolveSshConfig` (either enabled
-option serves SSH; `SSH_PORT` at its default defers to a changed `TELNET_PORT`), each
-logging one boot notice. The same Plant Operator console is always served in a browser at
+which the runner bridges to `0`, so the SSH transport is **off by default**. The
+`TELNET_ENABLED` / `TELNET_PORT` aliases were removed in v1.191.6. The same Plant Operator console is always served in a browser at
 `/console` on the web port (xterm.js over `/console/ws`), independent of the SSH toggle.
 SSH logins are password only against `TUI_USERNAME` / `TUI_PASSWORD` and are all refused
 until a password is set; the browser console shows its login card once one is set. Both
@@ -1026,9 +1024,9 @@ table below lists the `config` object's fields and the knobs this chapter uses.
 | `logLevel` | `LOG_LEVEL` | `info` | Pino level; `debug`/`trace` add the periodic poll-duration summary (every `POLL_SUMMARY_EVERY` polls) and the recorder's sample-count heartbeat |
 | `forecastLat` | `FORECAST_LAT` | `33.4484` | Solar forecast latitude; the default is a placeholder (Phoenix, the reference plant's city) |
 | `forecastLon` | `FORECAST_LON` | `-112.074` | Solar forecast longitude |
-| `ssh.enabled` | `SSH_ENABLED` (or the deprecated alias `TELNET_ENABLED`) | bare env: `true` (unless `0`); add-on option default `false` (bridged to `0`) | SSH transport on/off (the `/console` browser terminal is always served) |
-| `ssh.host` | `SSH_HOST` (fallback `TELNET_HOST`) | `::` | TUI bind |
-| `ssh.port` | `SSH_PORT` (the deprecated `TELNET_PORT` applies while `SSH_PORT` is `2323`) | `2323` | TUI port |
+| `ssh.enabled` | `SSH_ENABLED` | bare env: `true` (unless `0`); add-on option default `false` (bridged to `0`) | SSH transport on/off (the `/console` browser terminal is always served) |
+| `ssh.host` | `SSH_HOST` | `::` | TUI bind |
+| `ssh.port` | `SSH_PORT` | `2323` | TUI port |
 | `ssh.hostKeyPath` | `SSH_HOST_KEY` | `/data/ssh_host_ed25519_key` | ed25519 host key, generated on first start |
 | `retentionDays` | `RECORDER_RETENTION_DAYS` | `30` (clamped [7, 3650]) | `samples` retention (4.5), read at call time |
 | `dataRoot` / `dataFile(name, override)` | `DB_PATH` | the directory beside the database | Where the state files live; a `*_PATH` override wins |

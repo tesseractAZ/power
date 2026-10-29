@@ -9,7 +9,7 @@ import {
 } from '../src/topology.js';
 import { projectByProduct } from '../src/ecoflow/project.js';
 import { dpuNum as mathDpuNum } from '../src/analytics/mathHelpers.js';
-import { generatorNumber, getDpus } from '../src/telnet/plant/data.js';
+import { generatorNumber, getDpus } from '../src/console/plant/data.js';
 
 /**
  * v1.191.0 (S8, lane D) — topology.ts: product identification, Core numbering and the warranty
@@ -52,7 +52,7 @@ test('projectByProduct still projects by the same two tests (kind for kind)', ()
 });
 
 test('★ no inline product substring test is left in the files lane D moved onto topology.ts', () => {
-  const files = ['shp2Membership.ts', 'alerts.ts', 'repairIssues.ts', 'ecoflow/project.ts', 'ecoflow/mqtt.ts', 'gridState.ts', 'telnet/plant/data.ts'];
+  const files = ['shp2Membership.ts', 'alerts.ts', 'repairIssues.ts', 'ecoflow/project.ts', 'ecoflow/mqtt.ts', 'gridState.ts', 'console/plant/data.ts'];
   for (const f of files) {
     const hits = read(f).split('\n').filter((l) => /includes\('(delta pro ultra|smart home panel)'\)/.test(l));
     assert.deepEqual(hits, [], `${f} still tests the product name inline`);

@@ -60,11 +60,11 @@ test('option() reads a registered key at call time and refuses an unregistered o
   assert.throws(() => c.option('NOT_A_KEY'), /not a registered option/);
   await withEnv({ LOG_LEVEL: 'debug' }, () => { assert.equal(c.option('LOG_LEVEL'), 'debug'); });
   await withEnv({ LOG_LEVEL: undefined }, () => { assert.equal(c.option('LOG_LEVEL'), 'info'); });
-  // the snapshot fields keep their load-time semantics (the SSH block through resolveSshConfig: both
-  // enabled options off, SSH_PORT at its default so the deprecated TELNET_PORT applies)
-  const snap = await withEnv({ PORT: '9999', HOST: '0.0.0.0', SSH_ENABLED: '0', SSH_PORT: undefined, TELNET_ENABLED: '0', TELNET_PORT: '2325', SSH_HOST: undefined, TELNET_HOST: undefined, SSH_HOST_KEY: undefined, LOG_LEVEL: 'warn', FORECAST_LAT: '1.5', FORECAST_LON: '-2.5', ECOFLOW_API_HOST: undefined }, fresh);
+  // the snapshot fields keep their load-time semantics (the SSH block through resolveSshConfig: off,
+  // SSH_PORT set; v1.191.6 — a stale TELNET_PORT no longer moves it)
+  const snap = await withEnv({ PORT: '9999', HOST: '0.0.0.0', SSH_ENABLED: '0', SSH_PORT: '2325', TELNET_PORT: '2400', SSH_HOST: undefined, SSH_HOST_KEY: undefined, LOG_LEVEL: 'warn', FORECAST_LAT: '1.5', FORECAST_LON: '-2.5', ECOFLOW_API_HOST: undefined }, fresh);
   assert.deepEqual(
     { port: snap.config.port, host: snap.config.host, ssh: snap.config.ssh, logLevel: snap.config.logLevel, lat: snap.config.forecastLat, lon: snap.config.forecastLon, api: snap.config.apiHost },
-    { port: 9999, host: '0.0.0.0', ssh: { enabled: false, host: '::', port: 2325, hostKeyPath: '/data/ssh_host_ed25519_key', deprecationNotes: ['SSH_PORT is at its default and the deprecated TELNET_PORT is 2325: TELNET_PORT applies; set SSH_PORT instead'] }, logLevel: 'warn', lat: 1.5, lon: -2.5, api: 'https://api-a.ecoflow.com' },
+    { port: 9999, host: '0.0.0.0', ssh: { enabled: false, host: '::', port: 2325, hostKeyPath: '/data/ssh_host_ed25519_key' }, logLevel: 'warn', lat: 1.5, lon: -2.5, api: 'https://api-a.ecoflow.com' },
   );
 });

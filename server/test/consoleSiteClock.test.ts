@@ -183,7 +183,7 @@ test('no console source calls a host-clock date helper', () => {
   }
   // A hit names the line its call starts on.
   assert.deepEqual(hostClockCalls('const a = 1;\nvoid new Date(\n  2026, 9, 22,\n);'), ['2: new Date( 2026, 9, 22, )']);
-  const telnet = resolve(SERVER, 'src/telnet');
+  const telnet = resolve(SERVER, 'src/console');
   const files = readdirSync(telnet, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.ts'));
   assert.ok(files.includes('plant/alm.ts') || files.includes('plant\\alm.ts'), 'the walk reaches the plant screens');
   for (const f of files) {

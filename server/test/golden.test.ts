@@ -95,11 +95,12 @@ test('golden G3 covers every config.yaml option key, each with the six standard 
   const options = cfg.slice(cfg.indexOf('\noptions:'), cfg.indexOf('\nschema:'));
   const shipped = new Set((options.match(/^  ([A-Z][A-Z0-9_]+):/gm) ?? []).map((m) => m.trim().replace(':', '')));
   // v1.191.0 — G3 pins every key that has a shipped default (the 85 the reference install stores).
+  // v1.191.6 — 83: TELNET_ENABLED and TELNET_PORT were removed.
   // A schema-only key added later (optional, no default) is absent on that install by construction,
   // so it is not in G3; it must be optional, and none of the shipped keys may become schema-only.
   const all = (schema.match(/^  ([A-Z][A-Z0-9_]+):/gm) ?? []).map((m) => m.trim().replace(':', ''));
   const keys = all.filter((k) => shipped.has(k));
-  assert.equal(keys.length, 85);
+  assert.equal(keys.length, 83);
   assert.deepEqual(Object.keys(g3.value.keys).sort(), [...keys].sort());
   for (const k of all.filter((x) => !shipped.has(x))) {
     assert.match(schema, new RegExp(`^  ${k}: "?[a-z]+(\\([^)]*\\))?\\?"?$`, 'm'), `${k}: a schema-only key must be optional`);

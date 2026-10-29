@@ -148,7 +148,7 @@ export const SOC_HEALTHY_BASELINE_PCT = 30;
 export const RESERVE_FALLBACK_PCT = 15;
 /** The same fallback in the MPC dispatch inputs (index.ts), kept at its own value. */
 export const MPC_RESERVE_FALLBACK_PCT = 20;
-/** The LAN console's fallback (telnet/ code, which keeps its literal until its lane moves it). */
+/** The LAN console's fallback (console/ code, which keeps its literal until its lane moves it). */
 export const CONSOLE_RESERVE_FALLBACK_PCT = 0;
 
 /* ───────────────────────────── the bridged values ───────────────────────────── */

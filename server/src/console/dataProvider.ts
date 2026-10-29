@@ -1,7 +1,7 @@
 /**
  * Shared, periodically-refreshed data caches for the control-room TUI.
  *
- * v0.67.0 — extracted from `telnet/server.ts`. The energy integration, the
+ * v0.67.0 — extracted from `console/server.ts`. The energy integration, the
  * day-ahead forecast, and the capacity-fade degradation report are all too
  * heavy to recompute on every 1 Hz frame, so they're refreshed on timers and
  * the latest cached value is handed to each render. Pulling this out lets the

@@ -22,10 +22,10 @@ import {
   dpuContentFresh, isSourceDpuFrozen, panelForClient, poolNetUpperBound, backupTimerGate,
   SHP2_READBACK_STALE_MS, BACKUP_TIMER_DEADBAND_W, SLOT_UNMETERED_DRAW_W,
 } from '../src/shp2Membership.js';
-import { renderConsole } from '../src/telnet/plant/console.js';
-import { plantFlow } from '../src/telnet/plant/types.js';
+import { renderConsole } from '../src/console/plant/console.js';
+import { plantFlow } from '../src/console/plant/types.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
-import { TuiSession } from '../src/telnet/session.js';
+import { TuiSession } from '../src/console/session.js';
 import { bridgeFleetFlow, sunUp } from '../src/energyBridge.js';
 import { aggregateFleetFlow } from '../src/shp2Membership.js';
 import { energyFlowModel } from '../../web/src/cards/energyFlowModel.js';
@@ -225,7 +225,7 @@ test('★★★ /api/ha-state and the console both gate the timers on backupTime
     'backup_discharge_minutes: timers.discharge ? (shp2?.projection.backupDischargeTimeMin ?? null) : null,',
   ]) assert.ok(idx.includes(pin), `index.ts: missing ${pin}`);
   assert.ok(!idx.includes('fleetBatteryNet > 50 ? null'), 'the Cores-only gate is gone from index.ts');
-  const con = src('src/telnet/plant/console.ts');
+  const con = src('src/console/plant/console.ts');
   assert.ok(con.includes('const timers = backupTimerGate(data.snap.devices, Date.now(), data.flow?.verdicts);'), 'console.ts: the shared gate, on the bridge\u2019s verdicts');
   assert.ok(!con.includes('batNet > 50 ? null'), 'the Cores-only gate is gone from the console');
 });

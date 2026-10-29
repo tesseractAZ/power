@@ -8,7 +8,7 @@
  * The console credentials are the suite's fixed test values (sshServer.test.ts).
  */
 import ssh2 from 'ssh2';
-import { startSshServer } from '../../src/telnet/server.js';
+import { startSshServer } from '../../src/console/server.js';
 import { makeRecorderStub } from './recorderStub.js';
 
 process.env.TUI_USERNAME = 'operator';

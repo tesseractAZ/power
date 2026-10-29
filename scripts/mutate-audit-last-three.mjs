@@ -20,7 +20,7 @@ const TEXT = resolve(REPO, 'web/src/cards/cardText.ts');
 const AXIS = resolve(REPO, 'web/src/charts/axisFormat.ts');
 const TREND = resolve(REPO, 'web/src/charts/TrendChart.tsx');
 const STRAT = resolve(REPO, 'web/src/pages/StrategyPanel.tsx');
-const GEN = resolve(SERVER, 'src/telnet/plant/gen.ts');
+const GEN = resolve(SERVER, 'src/console/plant/gen.ts');
 
 const SUBSET = ['test/auditLastThree.test.ts'];
 

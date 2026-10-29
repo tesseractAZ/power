@@ -1,3 +1,25 @@
+## 1.191.6
+
+### The telnet options are gone; the sign-on screen reads Plant Status System
+
+**Before updating:** if the console was turned on with **Enable Telnet TUI** (`TELNET_ENABLED`), turn on **SSH TUI** (`SSH_ENABLED`) instead. After the update the Supervisor ignores the old option, and the console stays off until `SSH_ENABLED` is on. The port is unchanged: 2323.
+
+**Console**
+
+- `TELNET_ENABLED`, `TELNET_PORT` and the `TELNET_HOST` fallback are removed from the options, the schema, the run script and the configuration code. Telnet itself has not been served since 1.190.0; the console is SSH on 2323 and the browser console at `/console`. A saved value of either option no longer changes anything.
+- The console's source moves from `server/src/telnet/` to `server/src/console/`.
+- The sign-on screen's banner reads PLANT STATUS SYSTEM, and the standing ENTER=Submit / BACKSPACE=Correct and credentials hint lines are gone; a rejected attempt is still reported below the panel.
+
+**Unchanged**
+
+- Port 2323 stays published: it is the SSH console's port. AppArmor rules restrict network access by protocol family and socket type, not by port, so a port is not blocked there; the add-on publishes only 8787 (web) and 2323 (SSH).
+
+**Tests**
+
+- `sshConfig.test.ts`: a stale `TELNET_ENABLED`, `TELNET_PORT` or `TELNET_HOST` changes nothing; nothing reads, exports, declares or translates them. `mutate-ssh-console.mjs` replaces the six alias mutants with one: a stale `TELNET_ENABLED` turning the console on again.
+- The configuration golden (G3) is re-captured with `scripts/golden-capture.mts`: 83 keys, was 85.
+- `restartRecoverySettledSet.test.ts` retries deleting its cache directory: a cache write landing after the monitor stopped made the delete fail (ENOTEMPTY) under parallel load.
+
 ## 1.191.5
 
 ### The console's sign-on screen holds still while you type

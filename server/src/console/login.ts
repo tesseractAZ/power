@@ -14,7 +14,7 @@
  * SIGN ON panel, dot-leader labels and a fixed box per field. Each prompt row used
  * to be centred as a whole, so every typed character moved the row half a column
  * left. Now the panel's place comes from its fixed width alone, a value scrolls
- * inside its box instead of widening it, and messages sit on their own line below.
+ * inside its box instead of widening it, and a rejected attempt is reported on a line below.
  */
 
 import { c, center, padEnd, truncate } from './ansi.js';
@@ -79,13 +79,11 @@ export function renderLogin(st: LoginViewState, width: number, height: number): 
     row(''),
     c.cyan(`╚${'═'.repeat(innerW)}╝`),
   ];
-  const message = st.error
-    ? c.redB(`${st.error} — ${st.attemptsLeft} attempt(s) remaining`)
-    : c.dim('Operator credentials are set in the add-on configuration.');
-  const below = ['', `  ${c.grey('ENTER=Submit   BACKSPACE=Correct')}`, `  ${message}`];
+  // v1.191.6 — no standing hint lines; the message line carries a rejected attempt only.
+  const below = ['', st.error ? `  ${c.redB(`${st.error} — ${st.attemptsLeft} attempt(s) remaining`)}` : ''];
 
   // The banner only when the terminal has the rows for it; nothing here depends on what is typed.
-  const banner = height >= 26 ? [...BRAND.map((l) => center(c.cyanB(l), width)), center(c.dim('P L A N T   C O N T R O L   S T A T I O N'), width), ''] : [];
+  const banner = height >= 26 ? [...BRAND.map((l) => center(c.cyanB(l), width)), center(c.dim('P L A N T   S T A T U S   S Y S T E M'), width), ''] : [];
   const used = banner.length + panel.length + below.length;
   const out: string[] = Array.from({ length: Math.max(1, Math.floor((height - used) / 3)) }, () => '');
   out.push(...banner);

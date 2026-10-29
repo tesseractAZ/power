@@ -1,5 +1,5 @@
 /**
- * Tests for the TUI block-glyph big font (src/telnet/bigfont.ts).
+ * Tests for the TUI block-glyph big font (src/console/bigfont.ts).
  *
  * The invariants the layout code depends on:
  *
@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bigText, bigTextWidth, BIG_ROWS } from '../src/telnet/bigfont.js';
+import { bigText, bigTextWidth, BIG_ROWS } from '../src/console/bigfont.js';
 
 /** Every character the font covers, per the module's design contract. */
 const SUPPORTED = [...'0123456789.-+%:/kWh '];
