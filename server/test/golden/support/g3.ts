@@ -41,7 +41,7 @@ import { heartbeatIntervalMs } from '../../../src/heartbeat.js';
 import { apsREvRatesFromEnv, positiveCents, tariffModelFromEnv } from '../../../src/tariff.js';
 import { isNwsEnabled } from '../../../src/nws.js';
 import { isMqttDiscoveryEnabled } from '../../../src/mqttDiscovery.js';
-import { authFromEnv } from '../../../src/telnet/session.js';
+import { authFromEnv } from '../../../src/console/session.js';
 import { resolveRetentionDays } from '../../../src/retention.js';
 import { deviceReachabilityEntities } from '../../../src/deviceLink.js';
 import { isWriteDebugEnabled } from '../../../src/ecoflow/commands.js';
@@ -300,20 +300,14 @@ export const KEYS: KeySpec[] = [
   { key: 'MQTT_DISCOVERY_USER', exportForm: 'verbatim', def: '', valid: 'mqtt_user', invalid: ' ', probes: [mirror('mqttDiscovery.ts:1147 user', 'mqttDiscovery.ts', 'const user = process.env.MQTT_DISCOVERY_USER;', () => E('MQTT_DISCOVERY_USER'))] },
   { key: 'MQTT_DISCOVERY_PASS', exportForm: 'verbatim', def: '', valid: 'secret', invalid: ' ', probes: [mirror('mqttDiscovery.ts:1148 pass', 'mqttDiscovery.ts', 'const pass = process.env.MQTT_DISCOVERY_PASS;', () => E('MQTT_DISCOVERY_PASS'))] },
   { key: 'MQTT_DISCOVERY_PREFIX', exportForm: 'verbatim', def: 'homeassistant', valid: 'ha', invalid: ' ', probes: [mirror('mqttDiscovery.ts:1149 prefix', 'mqttDiscovery.ts', "const prefix = process.env.MQTT_DISCOVERY_PREFIX ?? 'homeassistant';", () => E('MQTT_DISCOVERY_PREFIX') ?? 'homeassistant')] },
-  // v1.190.0 — the console is served over SSH; SSH_ENABLED / SSH_PORT are the options and TELNET_ENABLED /
-  // TELNET_PORT their deprecated aliases, all four resolved together by config.ts resolveSshConfig. Each key
-  // is probed with its partner at the shipped default (the run script always exports both), so the golden
-  // shows that key's own contribution; the alias matrix itself is sshConfig.test.ts.
-  { key: 'SSH_ENABLED', exportForm: '1/0', def: '0', valid: '1', invalid: 'false', context: { TELNET_ENABLED: '0' },
+  // v1.190.0 — the console is served over SSH; SSH_ENABLED / SSH_PORT are its options, resolved by
+  // config.ts resolveSshConfig (v1.191.6 removed the TELNET_* aliases; sshConfig.test.ts holds that).
+  { key: 'SSH_ENABLED', exportForm: '1/0', def: '0', valid: '1', invalid: 'false',
     probes: [imp('config.ts:ssh.enabled', async () => (await fresh<Cfg>('config.ts')).config.ssh.enabled)] },
-  { key: 'SSH_PORT', exportForm: 'verbatim', def: '2323', valid: '2324', invalid: 'abc', context: { TELNET_PORT: '2323' },
+  { key: 'SSH_PORT', exportForm: 'verbatim', def: '2323', valid: '2324', invalid: 'abc',
     probes: [imp('config.ts:ssh.port', async () => (await fresh<Cfg>('config.ts')).config.ssh.port)] },
-  { key: 'TELNET_ENABLED', exportForm: '1/0', def: '0', valid: '1', invalid: 'false', context: { SSH_ENABLED: '0' },
-    probes: [imp('config.ts:ssh.enabled', async () => (await fresh<Cfg>('config.ts')).config.ssh.enabled)] },
-  { key: 'TELNET_PORT', exportForm: 'verbatim', def: '2323', valid: '2324', invalid: 'abc', context: { SSH_PORT: '2323' },
-    probes: [imp('config.ts:ssh.port', async () => (await fresh<Cfg>('config.ts')).config.ssh.port)] },
-  { key: 'TUI_USERNAME', exportForm: 'verbatim', def: '', valid: ' admin ', invalid: '  ', context: { TUI_PASSWORD: 'pw' }, probes: [call('telnet/session.ts:authFromEnv', () => authFromEnv(process.env))] },
-  { key: 'TUI_PASSWORD', exportForm: 'verbatim', def: '', valid: ' s3cret ', invalid: '  ', context: { TUI_USERNAME: undefined }, probes: [call('telnet/session.ts:authFromEnv', () => authFromEnv(process.env))] },
+  { key: 'TUI_USERNAME', exportForm: 'verbatim', def: '', valid: ' admin ', invalid: '  ', context: { TUI_PASSWORD: 'pw' }, probes: [call('console/session.ts:authFromEnv', () => authFromEnv(process.env))] },
+  { key: 'TUI_PASSWORD', exportForm: 'verbatim', def: '', valid: ' s3cret ', invalid: '  ', context: { TUI_USERNAME: undefined }, probes: [call('console/session.ts:authFromEnv', () => authFromEnv(process.env))] },
   { key: 'TUI_TRUSTED_ORIGINS', exportForm: 'verbatim', def: '', valid: ' https://a.example , https://b.example,, ', invalid: 'nourl',
     probes: [mirror('auth.ts:239 trusted origins', 'auth.ts', "(process.env.TUI_TRUSTED_ORIGINS ?? '').split(',').map((x) => x.trim()).filter(Boolean)", () => (E('TUI_TRUSTED_ORIGINS') ?? '').split(',').map((x) => x.trim()).filter(Boolean))] },
   { key: 'RECORDER_RETENTION_DAYS', exportForm: 'verbatim', def: '30', valid: '365', invalid: 'abc', extra: { belowFloor: '3', outOfRange: '4000', decimal: '12.6' },

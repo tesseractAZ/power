@@ -112,8 +112,8 @@ const CARD = resolve(REPO, 'web/src/cards/EnergyFlow.tsx');
 const MEMB = resolve(REPO, 'server/src/shp2Membership.ts');
 const WMEMB = resolve(REPO, 'web/src/shp2Membership.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
-const CONSOLE = resolve(REPO, 'server/src/telnet/plant/console.ts');
-const TYPES = resolve(REPO, 'server/src/telnet/plant/types.ts');
+const CONSOLE = resolve(REPO, 'server/src/console/plant/console.ts');
+const TYPES = resolve(REPO, 'server/src/console/plant/types.ts');
 const GRID = resolve(REPO, 'server/src/gridState.ts');
 const SUBSET = [
   'test/energyFlowCoresOffline.test.ts',

@@ -4,7 +4,7 @@
  * The Alert type (alerts.ts) is stateless — every field is recomputed fresh
  * on each alertMonitor evaluate() tick — so nothing on the Alert itself
  * records WHEN it first became active. The ALM screen
- * (telnet/plant/alm.ts) used to stamp every alarm row with
+ * (console/plant/alm.ts) used to stamp every alarm row with
  * `snapshot.generatedAt` (this refresh's clock time), which is wrong for any
  * alarm that has been active longer than one poll interval. alertMonitor's
  * own in-memory `TrackedAlert.firstSeen` WOULD be correct, but it lives only

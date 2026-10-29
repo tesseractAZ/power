@@ -23,8 +23,8 @@ import {
   TuiSession, consoleLoginThrottled, noteConsoleLoginFailure, noteConsoleLoginSuccess,
   _resetAuthThrottleForTest, _authThrottlePeersForTest,
   AUTH_THROTTLE_WINDOW_MS, AUTH_THROTTLE_MAX_FAILURES, AUTH_THROTTLE_MAX_PEERS, AUTH_PEER_UNKNOWN,
-} from '../src/telnet/session.js';
-import type { TuiDataProvider } from '../src/telnet/session.js';
+} from '../src/console/session.js';
+import type { TuiDataProvider } from '../src/console/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 

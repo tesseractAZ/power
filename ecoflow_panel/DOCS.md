@@ -343,8 +343,7 @@ describes both.
 - `TUI_TRUSTED_ORIGINS` adds exact browser origins to the dashboard's own; a listed origin
   passes the write gate without a token.
 - The SSH console is off by default and refuses every login until `TUI_PASSWORD` is set.
-  Telnet is no longer served; `TELNET_ENABLED` and `TELNET_PORT` are deprecated aliases of
-  `SSH_*`.
+  Turn it on with `SSH_ENABLED`; telnet is not served.
 - `WRITE_DEBUG_TOKEN` stays empty unless you are debugging a device command.
 - The add-on runs under an AppArmor profile and asks the Supervisor only for a read-only add-on
   list. Every device write is recorded in `/data/writes.log` (`GET /api/writes/log`, through the

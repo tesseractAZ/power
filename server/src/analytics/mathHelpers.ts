@@ -7,7 +7,7 @@
  * them by their original names (no call-site edits).
  *
  * NOTE: this is intentionally a narrow move of the analytics.ts copies only.
- * The independent copies in alerts.ts / broadcast.ts / ml.ts / telnet/* are a
+ * The independent copies in alerts.ts / broadcast.ts / ml.ts / console/* are a
  * separate, higher-risk dedup and are NOT consolidated here.
  */
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nightChargePlanIfFresh } from '../src/telnet/dataProvider.js';
+import { nightChargePlanIfFresh } from '../src/console/dataProvider.js';
 import type { NightChargePlan } from '../src/nightChargeAdvisor.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════

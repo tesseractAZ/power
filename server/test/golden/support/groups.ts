@@ -445,7 +445,7 @@ export async function G6(): Promise<unknown> {
   // their own text still runs.
   const al = { dpuNum: coreNumberFromName };
   const topologyImport = `import { coreNumberFromName, isDpuProduct, isShp2Product } from '${pathToFileURL(src('topology.ts')).href}';`;
-  const tui = await extractDecls<{ dpuNum(n: string): number; generatorNumber(n: string, i: number): number }>(src('telnet/plant/data.ts'), ['dpuNum', 'generatorNumber'], topologyImport);
+  const tui = await extractDecls<{ dpuNum(n: string): number; generatorNumber(n: string, i: number): number }>(src('console/plant/data.ts'), ['dpuNum', 'generatorNumber'], topologyImport);
   const rep = await extractDecls<{ isCoreOrShp2(p: string): boolean }>(src('repairIssues.ts'), ['isCoreOrShp2'], topologyImport);
   const spares = [...SPARE_DPU_SNS].sort();
   const allDpus = [...FIX.cores, FIX.bench, ...spares];

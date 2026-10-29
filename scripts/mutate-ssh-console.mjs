@@ -4,7 +4,7 @@
  * Password-only logins against TUI_USERNAME / TUI_PASSWORD, refuse-all without a password, the
  * login card's budgets reused at the protocol level under the connection's address, the host key
  * generated once and kept, the connection caps and reclaim on our own net server, the login card
- * skipped for SSH sessions, and the TELNET_ENABLED / TELNET_PORT aliases resolved in config.ts.
+ * skipped for SSH sessions, and the SSH_* options resolved in config.ts (the TELNET_* aliases were removed in v1.191.6).
  *
  *   A-i     no console password admits the connection (the refuse-all gate accepts)
  *   A-ii    the no-password refusal is logged on every attempt, not once per connection
@@ -41,16 +41,10 @@
  *   C-v     the login grace never fires
  *   C-vi    TCP keep-alive is not set
  *   C-vii   the teardown line is not logged
- *   O-i     the enabled aliases combine with AND (TELNET_ENABLED alone no longer turns the console on)
- *   O-ii    SSH_PORT at its default no longer defers to TELNET_PORT
- *   O-iii   the TELNET_PORT deprecation note is dropped
- *   O-iv    the TELNET_ENABLED deprecation note is dropped
- *   O-v     TELNET_PORT overrides a SET SSH_PORT
- *   O-vi    the call site logs no alias notice
- *   O-vii   the fingerprint leaves the startup line
+ *   O-i     a stale TELNET_ENABLED turns the console on again (v1.191.6 removed the aliases)
+ *   O-ii    the fingerprint leaves the startup line
  *   R-i     the run script exports SSH_ENABLED=false (config.ts reads `!== '0'`: off reads as on)
  *   R-ii    the host key path moves out of /data
- *   R-iii   TELNET_PORT is no longer exported (the alias is declared but inert)
  *   Y-i     SSH_PORT's shipped default is not the published port
  *   Y-ii    SSH_ENABLED ships on
  */
@@ -58,9 +52,9 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const SRV = resolve(REPO, 'server/src/telnet/server.ts');
-const SESS = resolve(REPO, 'server/src/telnet/session.ts');
-const WS = resolve(REPO, 'server/src/telnet/wsConsole.ts');
+const SRV = resolve(REPO, 'server/src/console/server.ts');
+const SESS = resolve(REPO, 'server/src/console/session.ts');
+const WS = resolve(REPO, 'server/src/console/wsConsole.ts');
 const CFG = resolve(REPO, 'server/src/config.ts');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const RUN = resolve(REPO, 'rootfs/etc/services.d/ecoflow-panel/run');
@@ -325,51 +319,16 @@ const MUTANTS = [
     to: '    /* MUTANT */',
     why: 'A log review could not pair connects with disconnects.',
   },
-  /* ── O. the option aliases ── */
+  /* ── O. the options (v1.191.6: SSH_* only) ── */
   {
-    id: 'O-i. ★★★ the enabled aliases combine with AND',
+    id: 'O-i. ★★ a stale TELNET_ENABLED turns the console on again',
     file: CFG,
-    find: '  const enabled = sshOn || telnetOn;',
-    to: '  const enabled = sshOn && telnetOn; /* MUTANT */',
-    why: 'An install that only ever set TELNET_ENABLED would come up with no LAN console.',
+    find: "    enabled: env.SSH_ENABLED !== '0',",
+    to: "    enabled: env.SSH_ENABLED !== '0' || env.TELNET_ENABLED === '1', /* MUTANT */",
+    why: 'An install still carrying the removed option would serve the console with SSH_ENABLED off.',
   },
   {
-    id: 'O-ii. ★★ SSH_PORT at its default no longer defers to TELNET_PORT',
-    file: CFG,
-    find: '    port = telnetPort;',
-    to: '    /* MUTANT */',
-    why: 'An install that moved the port with TELNET_PORT would come up on 2323.',
-  },
-  {
-    id: 'O-iii. ★ the TELNET_PORT deprecation note is dropped',
-    file: CFG,
-    find: '    deprecationNotes.push(`SSH_PORT is at its default and the deprecated TELNET_PORT is ${telnetPort}: TELNET_PORT applies; set SSH_PORT instead`);',
-    to: '    /* MUTANT */',
-    why: 'The alias would apply silently.',
-  },
-  {
-    id: 'O-iv. ★ the TELNET_ENABLED deprecation note is dropped',
-    file: CFG,
-    find: '  if (!sshOn && telnetOn) {\n    deprecationNotes.push(',
-    to: '  if (false) { /* MUTANT */\n    deprecationNotes.push(',
-    why: 'As O-iii.',
-  },
-  {
-    id: 'O-v. ★★ TELNET_PORT overrides a SET SSH_PORT',
-    file: CFG,
-    find: '  if (sshPort === SSH_DEFAULT_PORT && telnetPort != null',
-    to: '  if (telnetPort != null /* MUTANT */',
-    why: 'The new option must win once it is set.',
-  },
-  {
-    id: 'O-vi. ★ the call site logs no alias notice',
-    file: IDX,
-    find: '    for (const n of config.ssh.deprecationNotes) app.log.warn(`ssh: ${n}`);',
-    to: '    /* MUTANT */',
-    why: 'The resolver would compute the notes and nothing would print them.',
-  },
-  {
-    id: 'O-vii. ★★ the fingerprint leaves the startup line',
+    id: 'O-ii. ★★ the fingerprint leaves the startup line',
     file: IDX,
     find: '${describeSshAuth(authFromEnv())} — host key ${hostKey.fingerprint}`);',
     to: '${describeSshAuth(authFromEnv())}`); /* MUTANT */',
@@ -390,19 +349,12 @@ const MUTANTS = [
     to: 'export SSH_HOST_KEY=/tmp/ssh_host_ed25519_key # MUTANT\n',
     why: 'The key would not survive a restart; every restart would make ssh warn that it changed.',
   },
-  {
-    id: 'R-iii. ★★ TELNET_PORT is no longer exported',
-    file: RUN,
-    find: 'export TELNET_PORT="$(bashio::config \'TELNET_PORT\')"\n',
-    to: '# MUTANT\n',
-    why: 'The alias would be declared, shown in the UI, stored by the Supervisor, and inert.',
-  },
   /* ── Y. the manifest ── */
   {
     id: "Y-i. ★★ SSH_PORT's shipped default is not the published port",
     file: YAML,
-    find: '  SSH_PORT: 2323\n  # Deprecated aliases',
-    to: '  SSH_PORT: 2222 # MUTANT\n  # Deprecated aliases',
+    find: '  SSH_PORT: 2323\n  TUI_USERNAME: ""',
+    to: '  SSH_PORT: 2222 # MUTANT\n  TUI_USERNAME: ""',
     why: 'The published mapping 2323/tcp would point at nothing.',
   },
   {

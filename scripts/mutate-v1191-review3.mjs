@@ -52,7 +52,7 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const IDX = resolve(REPO, 'server/src/index.ts');
 const AN = resolve(REPO, 'server/src/analytics.ts');
 const ALERTS = resolve(REPO, 'server/src/alerts.ts');
-const SESSION = resolve(REPO, 'server/src/telnet/session.ts');
+const SESSION = resolve(REPO, 'server/src/console/session.ts');
 const BACKUP = resolve(REPO, 'server/src/backupWindow.ts');
 const HW = resolve(REPO, 'server/src/hwSpec.ts');
 const CONFIG = resolve(REPO, 'server/src/config.ts');
@@ -61,7 +61,7 @@ const RUN = resolve(REPO, 'rootfs/etc/services.d/ecoflow-panel/run');
 /** The run script's DEVICE_ALIASES line and everything after it, verbatim (R3-run-below-exec moves the line below exec). */
 const ALIASES_LINE = "if bashio::config.has_value 'DEVICE_ALIASES'; then export DEVICE_ALIASES=\"$(bashio::config 'DEVICE_ALIASES')\"; fi\n";
 const RUN_TAIL = '# SUPERVISOR_TOKEN is provided automatically by the HA Supervisor —\n# no need to export it manually. The Node process inherits it.\n\n'
-  + 'bashio::log.info "Starting Power (ecoflow_panel) on :${PORT} (ssh ${SSH_ENABLED}:${SSH_PORT}, telnet alias ${TELNET_ENABLED}:${TELNET_PORT}, db ${DB_PATH})…"\n\n'
+  + 'bashio::log.info "Starting Power (ecoflow_panel) on :${PORT} (ssh ${SSH_ENABLED}:${SSH_PORT}, db ${DB_PATH})…"\n\n'
   + 'cd /app/server\nexec npm start\n';
 const SUBSET = [
   'test/tariffPlan.test.ts',

@@ -110,10 +110,10 @@ import {
 import type {
   ProbabilisticForecast, MultiDayForecast, DayForecast, EvWindowPrediction, ForecastHour,
 } from './analytics.js';
-import { startSshServer, loadOrCreateHostKey } from './telnet/server.js';
-import { authFromEnv, authConfigProblems, describeSshAuth } from './telnet/session.js';
-import { createTuiDataProvider } from './telnet/dataProvider.js';
-import { registerWsConsole } from './telnet/wsConsole.js';
+import { startSshServer, loadOrCreateHostKey } from './console/server.js';
+import { authFromEnv, authConfigProblems, describeSshAuth } from './console/session.js';
+import { createTuiDataProvider } from './console/dataProvider.js';
+import { registerWsConsole } from './console/wsConsole.js';
 import { startMqttDiscovery } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
@@ -2497,8 +2497,8 @@ app.log.info(
 
 // Control-room TUI — a menu-driven terminal view of the whole fleet, exposed
 // two ways over ONE shared set of refresh timers:
-//   • the SSH server on :2323 (SSH_ENABLED, or the deprecated TELNET_ENABLED
-//     alias; config.ssh), password login with the console credentials; and
+//   • the SSH server on :2323 (SSH_ENABLED; config.ssh), password login with the
+//     console credentials; and
 //   • a browser web terminal at /console on the web port :8787 (xterm.js over
 //     a WebSocket), reachable on the LAN + pointable from a HA panel_iframe.
 // v0.67.0 — the per-session render/input logic is transport-agnostic
@@ -2526,8 +2526,6 @@ const stopTuiData = (() => {
     // password; the card cannot type one outside printable ASCII or over 64
     // characters), so it is emitted whatever the SSH toggle says.
     for (const p of authConfigProblems(authFromEnv())) app.log.warn(`console: ${p}`);
-    // One boot notice per deprecated alias (TELNET_ENABLED / TELNET_PORT) that decided a value.
-    for (const n of config.ssh.deprecationNotes) app.log.warn(`ssh: ${n}`);
     if (config.ssh.enabled) {
       const hostKey = loadOrCreateHostKey(config.ssh.hostKeyPath, (m) => app.log.info(m), (m) => app.log.warn(m));
       stopSsh = startSshServer({
@@ -2543,7 +2541,7 @@ const stopTuiData = (() => {
       // The fingerprint is on this line at EVERY start, to compare with what `ssh` shows on first connect.
       app.log.info(`ssh: control-room TUI on ${config.ssh.host}:${config.ssh.port} ${describeSshAuth(authFromEnv())} — host key ${hostKey.fingerprint}`);
     } else {
-      app.log.info('ssh: control-room TUI off (SSH_ENABLED and TELNET_ENABLED are both off) — /console only');
+      app.log.info('ssh: control-room TUI off (SSH_ENABLED is off) — /console only');
     }
     return tuiData.stop;
   } catch (e: any) {

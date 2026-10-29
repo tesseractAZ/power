@@ -47,7 +47,7 @@ outside that boundary needs to reach it.
 | Port | Serves | Access control |
 |------|--------|----------------|
 | `8787/tcp` | Web dashboard, REST API, WebSocket, the browser console (`/console`), audio files for the speakers. Also the Ingress port. | Reads are open. Writes need write authorization (below). |
-| `2323/tcp` | SSH control-room TUI | **Off by default** (`SSH_ENABLED: false`; `TELNET_ENABLED` is a deprecated alias). Password login (`TUI_USERNAME` / `TUI_PASSWORD`); every login is refused until a password is set. |
+| `2323/tcp` | SSH control-room TUI | **Off by default** (`SSH_ENABLED: false`). Password login (`TUI_USERNAME` / `TUI_PASSWORD`); every login is refused until a password is set. |
 
 - **Reads are unauthenticated by design.** Home Assistant media players, Music
   Assistant and the SIP intercom fetch the alarm chime and speech files from the

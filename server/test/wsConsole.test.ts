@@ -20,9 +20,9 @@ import { resolve } from 'node:path';
 import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
 import WebSocket from 'ws';
-import { parseXtermData, registerWsConsole, MAX_WS_SESSIONS, WS_IDLE_TIMEOUT_MS } from '../src/telnet/wsConsole.js';
-import { TuiSession, _resetAuthThrottleForTest, consoleLoginThrottled } from '../src/telnet/session.js';
-import type { TuiDataProvider } from '../src/telnet/session.js';
+import { parseXtermData, registerWsConsole, MAX_WS_SESSIONS, WS_IDLE_TIMEOUT_MS } from '../src/console/wsConsole.js';
+import { TuiSession, _resetAuthThrottleForTest, consoleLoginThrottled } from '../src/console/session.js';
+import type { TuiDataProvider } from '../src/console/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
@@ -216,7 +216,7 @@ test('TuiSession — preAuthenticated opens in the console and keeps the operato
   const open = new TuiSession({ write: () => {}, data: mockDataProvider(), auth: null, preAuthenticated: true });
   assert.equal(open.isInteractive, true);
   // The browser console keeps its login card: it constructs the session without the flag.
-  const src = readFileSync(resolve(import.meta.dirname, '../src/telnet/wsConsole.ts'), 'utf8');
+  const src = readFileSync(resolve(import.meta.dirname, '../src/console/wsConsole.ts'), 'utf8');
   assert.doesNotMatch(src, /preAuthenticated/, '/console must keep the in-session login card');
   assert.match(src, /new TuiSession\(\{\s*auth: authFromEnv\(\),/, '/console passes the configured credentials to the card');
 });

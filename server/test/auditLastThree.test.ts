@@ -48,7 +48,7 @@ test('★ DPU countdown: "to full" while charging, "to empty" while discharging 
   assert.equal(packCountdownLabel(0, 700), 'To empty');
   assert.equal(packCountdownLabel(null, null), 'Remaining');
   assert.match(web('pages/ThermalPanel.tsx'), /label=\{packCountdownLabel\(pk\.inputWatts, pk\.outputWatts\)\}/);
-  assert.match(readFileSync(new URL('../src/telnet/plant/gen.ts', import.meta.url), 'utf8'), /\$\{\(p\.batAmp \?\? 0\) > 0\.5 \? 'TTF' : 'RUN'\}\.MIN/);
+  assert.match(readFileSync(new URL('../src/console/plant/gen.ts', import.meta.url), 'utf8'), /\$\{\(p\.batAmp \?\? 0\) > 0\.5 \? 'TTF' : 'RUN'\}\.MIN/);
 });
 
 test('★ axis ticks: compact, distinct, unit on the axis label not every tick', () => {

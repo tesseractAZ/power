@@ -155,56 +155,38 @@ export interface SshConfig {
   port: number;
   /** Where the ed25519 host key lives; generated on first start. */
   hostKeyPath: string;
-  /** One line per deprecated alias that decided a value; the call site logs each once at boot. */
-  deprecationNotes: string[];
 }
 
 /** The SSH port the add-on publishes (`ports:` in config.yaml); SSH_PORT's shipped default. */
 export const SSH_DEFAULT_PORT = 2323;
 
 /**
- * The LAN console is served over SSH. `TELNET_ENABLED` / `TELNET_PORT` are kept as
- * deprecated aliases of `SSH_ENABLED` / `SSH_PORT` (an option key is never renamed or
- * nested): Home Assistant merges every option default into the saved options, so an
- * alias is "unset" when it is at its shipped default, and the TELNET_* value applies
- * while the SSH_* one is. An install that only ever set TELNET_ENABLED comes up over
- * SSH, on the same port, with no option change.
+ * The LAN console is served over SSH.
  *
- *   enabled  — either option on turns the console on (bare env with neither exported
- *              stays ON, as `TELNET_ENABLED !== '0'` did); both off ⇒ /console only.
- *   port     — SSH_PORT, except while it is at its default and TELNET_PORT is not.
- *   host     — SSH_HOST, else TELNET_HOST, else `::`.
+ *   enabled  — SSH_ENABLED; off only for '0' (absent reads as on — the run script always
+ *              exports 1 or 0); off ⇒ /console only.
+ *   port     — SSH_PORT, default 2323.
+ *   host     — SSH_HOST, else `::`.
  *   hostKey  — SSH_HOST_KEY, else /data/ssh_host_ed25519_key.
  *
- * The seven keys it reads each have an OPTIONS row below whose parse calls this function with
+ * v1.191.6 — the deprecated TELNET_ENABLED / TELNET_PORT / TELNET_HOST aliases are gone
+ * (telnet has not been served since v1.190.0); an install that still carries them in its
+ * saved options gets the Supervisor's "does not exist in the schema" notice and SSH_* rule.
+ *
+ * The four keys it reads each have an OPTIONS row below whose parse calls this function with
  * that key's value in place (`sshView`), so the table reproduces the resolver by construction.
  */
 export function resolveSshConfig(env: NodeJS.ProcessEnv = process.env): SshConfig {
-  const deprecationNotes: string[] = [];
-  const sshOn = env.SSH_ENABLED !== '0';
-  const telnetOn = env.TELNET_ENABLED === '1';
-  const enabled = sshOn || telnetOn;
-  if (!sshOn && telnetOn) {
-    deprecationNotes.push('the console is on because the deprecated TELNET_ENABLED option is on; set SSH_ENABLED instead (TELNET_ENABLED and TELNET_PORT stay as aliases)');
-  }
-  const sshPort = Number(env.SSH_PORT ?? SSH_DEFAULT_PORT);
-  const telnetPort = env.TELNET_PORT == null || env.TELNET_PORT === '' ? null : Number(env.TELNET_PORT);
-  let port = sshPort;
-  if (sshPort === SSH_DEFAULT_PORT && telnetPort != null && Number.isFinite(telnetPort) && telnetPort !== SSH_DEFAULT_PORT) {
-    port = telnetPort;
-    deprecationNotes.push(`SSH_PORT is at its default and the deprecated TELNET_PORT is ${telnetPort}: TELNET_PORT applies; set SSH_PORT instead`);
-  }
   return {
-    enabled,
-    host: env.SSH_HOST ?? env.TELNET_HOST ?? '::',
-    port,
+    enabled: env.SSH_ENABLED !== '0',
+    host: env.SSH_HOST ?? '::',
+    port: Number(env.SSH_PORT ?? SSH_DEFAULT_PORT),
     hostKeyPath: env.SSH_HOST_KEY ?? '/data/ssh_host_ed25519_key',
-    deprecationNotes,
   };
 }
 
 /** Every variable resolveSshConfig reads. */
-const SSH_KEYS = ['SSH_ENABLED', 'TELNET_ENABLED', 'SSH_PORT', 'TELNET_PORT', 'SSH_HOST', 'TELNET_HOST', 'SSH_HOST_KEY'] as const;
+const SSH_KEYS = ['SSH_ENABLED', 'SSH_PORT', 'SSH_HOST', 'SSH_HOST_KEY'] as const;
 /** The resolver's view of a row's environment, with the row's own value in place of the variable. */
 const sshView = (name: string, raw: string | undefined, env: Env): NodeJS.ProcessEnv =>
   Object.fromEntries(SSH_KEYS.map((k) => [k, k === name ? raw : env.get(k)]));
@@ -387,21 +369,16 @@ const ROWS: readonly OptionRow[] = [
   row({ name: 'MQTT_DISCOVERY_USER', source: 'option', exportForm: 'verbatim', canonicalReader: 'mqttDiscovery.ts:1147 user', doc: 'MQTT username, verbatim (a blank is passed through).', parse: (raw) => raw }),
   row({ name: 'MQTT_DISCOVERY_PASS', source: 'option', exportForm: 'verbatim', canonicalReader: 'mqttDiscovery.ts:1148 pass', doc: 'MQTT password, verbatim.', parse: (raw) => raw }),
   row({ name: 'MQTT_DISCOVERY_PREFIX', source: 'option', exportForm: 'verbatim', canonicalReader: 'mqttDiscovery.ts:1149 prefix', doc: 'Discovery topic prefix; a blank passes through as an empty prefix.', parse: str('homeassistant') }),
-  // ── SSH console (v1.190.0; TELNET_* are deprecated aliases resolved by resolveSshConfig) ──
+  // ── SSH console (v1.190.0; the TELNET_* aliases were removed in v1.191.6) ──
   row({ name: 'SSH_ENABLED', source: 'option', exportForm: '1/0', canonicalReader: 'config.ts:ssh.enabled',
-    doc: "SSH console listener; off only for '0' (absent reads as on — the run script always exports 1 or 0). Also on while the deprecated TELNET_ENABLED alias is '1'.",
+    doc: "SSH console listener; off only for '0' (absent reads as on — the run script always exports 1 or 0).",
     parse: sshField('SSH_ENABLED', 'enabled') }),
   row({ name: 'SSH_PORT', source: 'option', exportForm: 'verbatim', canonicalReader: 'config.ts:ssh.port',
-    doc: 'SSH console port. Bare Number(); while it is at its default 2323 a different finite TELNET_PORT applies instead.', parse: sshField('SSH_PORT', 'port') }),
-  row({ name: 'TELNET_ENABLED', source: 'option', exportForm: '1/0', canonicalReader: 'config.ts:ssh.enabled',
-    doc: "Deprecated alias of SSH_ENABLED: '1' serves the SSH console while SSH_ENABLED is '0' (telnet is no longer served); the run script always exports 1 or 0.",
-    parse: sshField('TELNET_ENABLED', 'enabled') }),
-  row({ name: 'TELNET_PORT', source: 'option', exportForm: 'verbatim', canonicalReader: 'config.ts:ssh.port',
-    doc: 'Deprecated alias of SSH_PORT, applied only while SSH_PORT is at its default 2323 and this is a different finite port.', parse: sshField('TELNET_PORT', 'port') }),
-  row({ name: 'TUI_USERNAME', source: 'option', exportForm: 'verbatim', canonicalReader: 'telnet/session.ts:authFromEnv',
+    doc: 'SSH console port. Bare Number().', parse: sshField('SSH_PORT', 'port') }),
+  row({ name: 'TUI_USERNAME', source: 'option', exportForm: 'verbatim', canonicalReader: 'console/session.ts:authFromEnv',
     doc: "Console login username (trimmed; blank reads as 'operator'); the gate is off while TUI_PASSWORD is blank.",
     parse: (raw, env) => tuiAuth(raw, env.get('TUI_PASSWORD')) }),
-  row({ name: 'TUI_PASSWORD', source: 'option', exportForm: 'verbatim', canonicalReader: 'telnet/session.ts:authFromEnv',
+  row({ name: 'TUI_PASSWORD', source: 'option', exportForm: 'verbatim', canonicalReader: 'console/session.ts:authFromEnv',
     doc: 'Console login password (trimmed); blank disables the login gate.', parse: (raw, env) => tuiAuth(env.get('TUI_USERNAME'), raw) }),
   row({ name: 'TUI_TRUSTED_ORIGINS', source: 'option', exportForm: 'verbatim', canonicalReader: 'auth.ts:239 trusted origins', doc: 'Exact browser origins added to the same-origin set (comma list).', parse: csv() }),
   // ── Diagnostic / advanced ──────────────────────────────────────────────
@@ -534,8 +511,7 @@ const ROWS: readonly OptionRow[] = [
     parse: (raw, env) => raw ?? (env.get('SUPERVISOR_TOKEN') ? '/data/ecoflow.db' : '../data/ecoflow.db') }),
   row({ name: 'DATA_DIR', source: 'deploy', canonicalReader: 'index.ts:527 DATA_DIR', doc: "The add-on's /data root for files not placed beside the database.", parse: str('/data') }),
   row({ name: 'WEB_DIST_PATH', source: 'deploy', canonicalReader: 'index.ts:498 WEB_DIST_PATH', doc: 'Built web bundle; absent resolves ../../web/dist from the server source.', parse: (raw) => raw }),
-  row({ name: 'SSH_HOST', source: 'deploy', canonicalReader: 'config.ts:ssh.host', doc: "SSH console bind address (the run script exports the literal `::`, dual-stack); absent falls back to TELNET_HOST, then `::`.", parse: sshField('SSH_HOST', 'host') }),
-  row({ name: 'TELNET_HOST', source: 'deploy', canonicalReader: 'config.ts:ssh.host', doc: "Deprecated bind-address fallback, read only while SSH_HOST is absent (the run script no longer exports it); '::' listens dual-stack.", parse: sshField('TELNET_HOST', 'host') }),
+  row({ name: 'SSH_HOST', source: 'deploy', canonicalReader: 'config.ts:ssh.host', doc: "SSH console bind address (the run script exports the literal `::`, dual-stack); absent reads as `::`.", parse: sshField('SSH_HOST', 'host') }),
   row({ name: 'SSH_HOST_KEY', source: 'deploy', canonicalReader: 'config.ts:ssh.hostKeyPath', doc: 'Path of the ed25519 host key, generated on first start; the run script exports /data/ssh_host_ed25519_key.', parse: sshField('SSH_HOST_KEY', 'hostKeyPath') }),
   row({ name: 'TZ', source: 'deploy', canonicalReader: 'siteTime.ts:resolveSiteTimeZone',
     doc: "The container's zone; the Supervisor sets it to Home Assistant's. The site clock's second source (after SITE_TIMEZONE, before the America/Phoenix default); trimmed, blank reads as unset.",
@@ -568,7 +544,7 @@ export interface DeclaredDivergence {
 const NULL_LITERAL = "a cleared optional field reaches the process as the string 'null', which this reader takes literally (per-key rule kept; gridState.ts floorSlackPct is the one reader that treats 'null' as unset)";
 
 export const DECLARED_DIVERGENCES: readonly DeclaredDivergence[] = [
-  { key: 'SSH_ENABLED', kind: 'unset', code: 'on', yaml: 'false', reason: "`!== '0'`: absent reads as on (a bare development environment keeps the console on, as `TELNET_ENABLED !== '0'` did before v1.190.0); the run script always exports 1 or 0. The alignment to off-when-unset waits for CA8 (tests importing config without setting it)" },
+  { key: 'SSH_ENABLED', kind: 'unset', code: 'on', yaml: 'false', reason: "`!== '0'`: absent reads as on (a bare development environment keeps the console on, as it did before v1.190.0); the run script always exports 1 or 0. The alignment to off-when-unset waits for CA8 (tests importing config without setting it)" },
   { key: 'BROADCAST_QUIET_HOURS', kind: 'unset', code: 'no window', yaml: '"22-06"', reason: "`?? ''`: absent reads as no quiet window; never reached on the add-on. Aligning it needs CA8 (31 broadcast-importing tests would start depending on the wall clock)" },
   { key: 'BROADCAST_QUIET_HOURS', kind: 'blank', code: 'no window', yaml: '"22-06"', reason: 'a cleared field disables the audible quiet window; index.ts quietConfigured reads the same blank as "quiet hours not configured"' },
   { key: 'BROADCAST_QUIET_HOURS', kind: 'null', code: 'no window', yaml: '"22-06"', reason: "'null' is not HH-HH, so the window is off" },
@@ -677,8 +653,8 @@ export const config = {
   forecastLat: option<number>('FORECAST_LAT'),
   forecastLon: option<number>('FORECAST_LON'),
   // SSH control-room TUI — a menu-driven terminal view of the whole fleet; see
-  // resolveSshConfig() above for the option aliases (the SSH_* / TELNET_* rows of
-  // OPTIONS call the same resolver, so a row and this value cannot disagree).
+  // resolveSshConfig() above (the SSH_* rows of OPTIONS call the same resolver, so a
+  // row and this value cannot disagree).
   // Default host is `::` (Node dual-stack — accepts both IPv4 and IPv6 on one
   // socket; Node does NOT set IPV6_V6ONLY, so IPv4 still works via mapped
   // addresses). Listening only on `0.0.0.0` would silently break clients that

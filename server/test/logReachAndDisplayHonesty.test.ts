@@ -107,7 +107,7 @@ test('a device that returns re-arms the breadcrumb', () => {
 test('★ a pack that reported NOTHING does not render NORMAL', () => {
   // Every fault term is `x != null && <test>`, so an all-null pack scored false
   // on all three and came out green.
-  const s = src('src/telnet/plant/gen.ts');
+  const s = src('src/console/plant/gen.ts');
   assert.match(s, /const reported = pk\.temp != null \|\| pk\.minCellTemp != null \|\| pk\.soc != null;/);
   assert.match(s, /!reported \? 'NO DATA'/);
   assert.match(s, /!reported \? c\.grey/);
@@ -115,7 +115,7 @@ test('★ a pack that reported NOTHING does not render NORMAL', () => {
 
 test('★ an ABSENT MPPT error code is not a confirmed zero', () => {
   // `(code ?? 0) === 0` collapsed "no error" and "no reading" into one green OK.
-  const s = src('src/telnet/plant/pv.ts');
+  const s = src('src/console/plant/pv.ts');
   assert.match(s, /if \(code == null\) return c\.grey\('—'\);/);
   assert.match(s, /if \(code === 0\) return c\.green\('OK'\);/);
   assert.ok(!/\(code \?\? 0\) === 0/.test(s), 'the nullish collapse must be gone');
@@ -124,7 +124,7 @@ test('★ an ABSENT MPPT error code is not a confirmed zero', () => {
 test('★ the BUS screen shows staleness — it was the only Plant screen that did not', () => {
   // `qual` was computed and never rendered, while the header's liveness tick uses
   // snap.generatedAt, which advances whether or not the SHP2 answered.
-  const s = src('src/telnet/plant/bus.ts');
+  const s = src('src/console/plant/bus.ts');
   assert.match(s, /const qualTag = qual === 'good'/);
   assert.match(s, /\$\{qualTag\}/, 'and it must reach the rendered header');
 });
