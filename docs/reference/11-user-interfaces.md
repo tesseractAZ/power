@@ -220,9 +220,15 @@ Both transports cap concurrency and reap idle sessions so a LAN flood can't spaw
 
 When a console password is configured (`TUI_PASSWORD` option, non-empty), the SSH
 transport checks it at the protocol level (password authentication; the `none`
-method is told to try a password) and every `/console` session starts at a login
-prompt (`console/login.ts`) rendered in the same pseudo-LCD lettering as the console
-brand. `TUI_USERNAME` defaults to `operator` when left empty. The card's input state
+method is told to try a password) and every `/console` session starts at a sign-on
+screen (`console/login.ts`; the SSH transport never draws it). Since v1.191.5 the screen
+is a framed **SIGN ON** panel in the manner of a 1980s business terminal: dot-leader
+labels (`User ID`, `Password`) beside a fixed three-row box per field. The panel is
+placed by its own fixed width (52 columns, narrower only on a narrower terminal), so
+typing never moves it; a value too long for its box shows its tail, and a rejected
+attempt is reported on a line below the panel. On a terminal of 26 rows or more the
+POWER banner, in the console brand's pseudo-LCD lettering, sits above it with the
+subtitle **PLANT STATUS SYSTEM** (v1.191.6). `TUI_USERNAME` defaults to `operator` when left empty. The card's input state
 machine lives in the transport-agnostic session driver: printable keys type into the
 active field (password echoes masked), backspace edits, TAB switches fields, ENTER
 advances username → password → verify. Credential comparison is constant-time on both
