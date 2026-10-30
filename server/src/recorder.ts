@@ -877,6 +877,18 @@ export interface NightLedgerRow {
   shadow_window_load_p50_kwh: number | null;
   shadow_window_pv_kwh: number | null;
   shadow_window_load_kwh: number | null;
+  /** v1.192.0 — the house energy each leg's hold sends to the grid (median load and PV, kWh) and what
+   *  it adds to the bill against buying it back in the mid-day window ($, negative: it saves); and the
+   *  backup sized on option B (its walk to the mid-day open) beside option A, never armed: its
+   *  reserve, expected draw and held import. The backup-horizon decision is made on these. */
+  shadow_backup_held_import_kwh: number | null;
+  shadow_backup_held_net_usd: number | null;
+  shadow_cost_held_import_kwh: number | null;
+  shadow_cost_held_net_usd: number | null;
+  shadow_backup_b_setpoint_pct: number | null;
+  shadow_backup_b_expected_buy_kwh: number | null;
+  shadow_backup_b_held_import_kwh: number | null;
+  shadow_backup_b_held_net_usd: number | null;
   /** The shadow morning refresh (a computation only): when, its disposition, and what it re-planned. */
   shadow_refreshed_at_ms: number | null;
   shadow_refresh_disposition: string | null;
@@ -981,6 +993,11 @@ export const MIDDAY_SHADOW_LEDGER_SCHEMA: ReadonlyArray<readonly [keyof NightLed
   ['shadow_refreshed_reserve_pct', 'REAL'], ['shadow_refreshed_buy_kwh', 'REAL'], ['shadow_refreshed_expected_buy_kwh', 'REAL'],
   // R5 — the weather age the shadow refresh was sized on.
   ['shadow_refresh_weather_age_s', 'REAL'],
+  // v1.192.0 — the held import of each hold, and option B beside A.
+  ['shadow_backup_held_import_kwh', 'REAL'], ['shadow_backup_held_net_usd', 'REAL'],
+  ['shadow_cost_held_import_kwh', 'REAL'], ['shadow_cost_held_net_usd', 'REAL'],
+  ['shadow_backup_b_setpoint_pct', 'REAL'], ['shadow_backup_b_expected_buy_kwh', 'REAL'],
+  ['shadow_backup_b_held_import_kwh', 'REAL'], ['shadow_backup_b_held_net_usd', 'REAL'],
 ];
 const CHARGE_CYCLE_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   ...CHARGE_CYCLE_LEDGER_SCHEMA.map(([c]) => c),

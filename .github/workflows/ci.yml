@@ -287,7 +287,7 @@ jobs:
         run: |
           timeout -k 10 240 python3 scripts/build-docs-docx.py \
             --ref "${GITHUB_SHA:0:7}" \
-            --output "EcoFlow-Panel-Documentation.docx"
+            --output "Power-Documentation.docx"
 
       # A PDF alongside the .docx — a faithful render of the SAME document (same
       # generated TOC + page breaks) via LibreOffice headless (no LaTeX). On the
@@ -309,14 +309,14 @@ jobs:
         timeout-minutes: 5
         run: |
           timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
-            --convert-to pdf --outdir . "EcoFlow-Panel-Documentation.docx"
-          test -s EcoFlow-Panel-Documentation.pdf
-          ls -la EcoFlow-Panel-Documentation.pdf
+            --convert-to pdf --outdir . "Power-Documentation.docx"
+          test -s Power-Documentation.pdf
+          ls -la Power-Documentation.pdf
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: documentation
           path: |
-            EcoFlow-Panel-Documentation.docx
-            EcoFlow-Panel-Documentation.pdf
+            Power-Documentation.docx
+            Power-Documentation.pdf
           if-no-files-found: error

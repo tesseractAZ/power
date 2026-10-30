@@ -1,3 +1,27 @@
+## 1.192.0
+
+### The mid-day charge preview states what a held reserve costs; documentation files are named Power
+
+**Night charge (mid-day preview, nothing written)**
+
+- The SHP2 does not discharge the pool below its backup reserve, so while a charge leg holds a raised reserve, house load the pool would have carried comes from the grid. The mid-day preview now estimates that energy for each leg it sizes, from the write at the window open to the restore, on the median load and PV the leg was planned on, and prices it: hour by hour at the tariff's rates, less what the next charge no longer buys at the mid-day rate (the energy the pool kept, over the charge efficiency). The lift to the reserve is the leg's own draw and is not counted.
+- The outage backup is also sized on option B (its walk ends at the 10:00 open) beside option A (to 23:00 the next day), so the choice between them is made on real nights. Option B is a comparison only: it is never armed or announced, and the mid-day leg is still sized from option A's hold.
+- On the 2026-10-14 test fixture, option A's 50% hold sends about 9.3 kWh of house load to the 12.59¢ overnight rate and adds about $0.30 a weeknight; option B's 40% hold sends about 0.6 kWh ($0.02); the mid-day leg's own hold sends nothing under the sun.
+- The figures go to the evening's `night-charge[midday-shadow]:` log lines, to the preview record on the status, and to eight new ledger columns: `shadow_backup_held_import_kwh`, `shadow_backup_held_net_usd`, `shadow_cost_held_import_kwh`, `shadow_cost_held_net_usd`, `shadow_backup_b_setpoint_pct`, `shadow_backup_b_expected_buy_kwh`, `shadow_backup_b_held_import_kwh` and `shadow_backup_b_held_net_usd`. With rates not confirmed the energy is stated and nothing is priced.
+
+**Release**
+
+- The documentation attached to each release is named `Power-Documentation-v<version>.docx` and `.pdf`, and the files the CI documentation build produces `Power-Documentation.docx` and `.pdf` (were `EcoFlow-Panel-Documentation-…`).
+
+**Unchanged**
+
+- Nothing of the mid-day cycle is armed, written, pushed or spoken; the overnight charge runs as before.
+
+**Tests**
+
+- `heldImport.test.ts`: the held import and its price worked by hand (the lift, the discharge efficiency, a full pool's spill, the hours' rates, unpriced rates, the hold's span, the planner glue). `middayShadow.test.ts`: the evening records option A's and option B's held import on the engine's own plans, B is never probed or armed, and an older record reads back unchanged. `mutate-midday-ledger.mjs` gains ten mutants (H-i…H-x).
+- The SSH console tests (`sshServer.test.ts`, `sshCaps.test.ts` and the child helper) take their host key from `generateHostKey`, as the add-on does since 1.191.7: their one shared key came from ssh2's own generator, so the 1 malformed key in 256 failed every test in the file (seen once, nine tests in one run).
+
 ## 1.191.7
 
 ### A new SSH host key is checked before it is saved
