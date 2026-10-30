@@ -40,7 +40,7 @@ import { APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, revertDue
 import { eveningAnnouncement } from './chargeAnnounce.js';
 import { buildMiddayRefreshMessage, type MiddayAnnounceInput } from './chargeText.js';
 import type { NotifyMessage } from './notify.js';
-import type { TariffModel } from './tariff.js';
+import { rateAt, type TariffModel } from './tariff.js';
 import type { NightLedgerRow } from './recorder.js';
 
 const HOUR_MS = 3_600_000;
@@ -75,16 +75,27 @@ export interface ShadowLegSizing {
   spec: WindowSpec;
   nextRechargeMs: number | null;
   surplusEndMs: number;
+  /** v1.192.0 — the rate the next charge buys at, ¢/kWh (the cycle's cost window): what the energy a
+   *  held reserve keeps in the pool is worth (heldImportEstimate). null/absent: not priced. */
+  replaceCentsPerKwh?: number | null;
 }
 
-/** The backup leg, option A: resilience-only on its overnight window, its walk to the next
- *  overnight open after its close (the overnight scan). PURE. */
-export function backupLegSizing(model: TariffModel, backup: ChargeLeg): ShadowLegSizing {
+/** The backup leg: resilience-only on its overnight window. Option A (the default): its walk runs to
+ *  the next overnight open after its close (the overnight scan). Option B: to `horizonEndMs`, the
+ *  cost window's open (v1.192.0 — sized beside A for comparison only, never armed). PURE. */
+export function backupLegSizing(model: TariffModel, backup: ChargeLeg, horizonEndMs?: number): ShadowLegSizing {
   return {
     spec: { kind: backup.kind, role: 'backup', window: { startMs: backup.startMs, endMs: backup.endMs } },
-    nextRechargeMs: nextChargeableOpenMs(model, backup.endMs + HOUR_MS, OVERNIGHT_CYCLE),
+    nextRechargeMs: horizonEndMs ?? nextChargeableOpenMs(model, backup.endMs + HOUR_MS, OVERNIGHT_CYCLE),
     surplusEndMs: surplusSpanEndMs(backup.kind, backup.endMs, null),
   };
+}
+
+/** The rate the cycle's next charge buys at (its cost window's open), ¢/kWh; null when the rates are
+ *  not confirmed. PURE. */
+export function replaceCentsPerKwh(model: TariffModel, cost: ChargeLeg): number | null {
+  const c = rateAt(model, cost.startMs).centsPerKwh;
+  return c != null && Number.isFinite(c) && c >= 0 ? c : null;
 }
 
 /** The mid-day cost leg: its window, the taper line of the Cores' mean charge ceiling, the hold an
@@ -133,6 +144,124 @@ export function windowP50Kwh(
   return { windowPvP50Kwh: r2(pv), windowLoadP50Kwh: r2(load) };
 }
 
+/* ── what a held reserve sends to the grid (v1.192.0) ─────────────────────── */
+
+/**
+ * The house energy a leg's raised reserve sends to the grid while it is held, and what that does to
+ * the bill. The SHP2 does not discharge the pool below its backup reserve, so from the write (the
+ * window open) to the restore (revertDueMs) a load the pool would have carried down to the owner's
+ * reserve is drawn from the grid instead, at that hour's rate. The pool keeps that energy, so the next
+ * charge buys less of it — at the cycle's cost window rate, over the charge leg's efficiency.
+ *
+ * On the overnight-only cycle both happen in the same cheap window and the hold costs almost nothing.
+ * On the mid-day cycle the backup's hold (option A, written 50) puts house load on the 12.59¢
+ * overnight rate that the 8.2¢ mid-day charge would otherwise have bought back: the figure the
+ * backup-horizon decision (A or B) is made on.
+ */
+export interface HeldImport {
+  /** The hold: the write to the restore. */
+  fromMs: number;
+  untilMs: number;
+  /** House energy drawn from the grid because the reserve is held, kWh (AC, median load and PV).
+   *  The lift to the reserve — the leg's own draw — is not in it. */
+  kwh: number;
+  /** That energy at the hours' rates, $. null when a rate is not known (rates not confirmed). */
+  importUsd: number | null;
+  /** The next charge's saving on what the pool kept of it (the energy a full pool would spill is
+   *  not kept), $. null when the cost window's rate is not known. */
+  creditUsd: number | null;
+  /** importUsd − creditUsd: what the hold adds to the bill, $ (negative: it saves). */
+  netUsd: number | null;
+}
+
+/** The hold a leg's write makes: from the open (APPLY_LEAD_MS before it) to the restore. PURE. */
+export function heldSpan(window: { startMs: number; endMs: number }, nextOnPeakStartMs: number | null): { fromMs: number; untilMs: number } {
+  return {
+    fromMs: window.startMs - APPLY_LEAD_MS,
+    untilMs: revertDueMs({ windowEndMs: window.endMs, nextOnPeakStartMs }) ?? window.endMs,
+  };
+}
+
+/**
+ * heldImportEstimate — two pools walked hour by hour over the hold on the median forecast, as the
+ * planner's grid-present carry walks them (nightChargeAdvisor expectedCarryKwh: PV into the pack,
+ * load out of it over the discharge efficiency, clamped to [floor, full]): one held at the written
+ * reserve (lifted to it at the open, the grid being present), one at the owner's reserve. In each hour
+ * the part of the load a pool's floor turns away is drawn from the grid; the held pool's extra, beyond
+ * the lift, is the held import. null when the hold, the start or an hour of the band is missing (a
+ * partial sum is not an estimate). PURE.
+ */
+export function heldImportEstimate(o: {
+  hours: ReadonlyArray<{ ts: number; pvP50W?: number | null; loadP50W?: number | null }>;
+  fromMs: number;
+  untilMs: number;
+  /** The pool expected at the open (NightChargePlan.expectedStartSocPct). */
+  startSocPct: number | null;
+  /** The reserve the write holds; null: no write, no hold. */
+  holdPct: number | null;
+  /** The owner's reserve (the restore target). */
+  floorPct: number;
+  fullKwh: number;
+  dischargeEff: number;
+  legEff: number;
+  centsAt: (ms: number) => number | null;
+  replaceCentsPerKwh: number | null;
+}): HeldImport | null {
+  const ok = (v: number | null | undefined): v is number => v != null && Number.isFinite(v);
+  if (!ok(o.startSocPct) || !ok(o.holdPct) || !ok(o.floorPct) || !(o.fullKwh > 0) || !(o.untilMs > o.fromMs)) return null;
+  if (!(o.dischargeEff > 0 && o.dischargeEff <= 1) || !(o.legEff > 0 && o.legEff <= 1)) return null;
+  const full = o.fullKwh;
+  const kwhOf = (pct: number): number => (full * Math.max(0, Math.min(100, pct))) / 100;
+  let free = kwhOf(o.startSocPct);
+  let held = free;
+  // As the carry: a pool already under the owner's reserve is not drained further.
+  const freeFloor = Math.min(kwhOf(o.floorPct), free);
+  const holdFloor = Math.max(freeFloor, kwhOf(o.holdPct));
+  const byHour = new Map<number, { pvP50W?: number | null; loadP50W?: number | null }>();
+  for (const h of o.hours) byHour.set(Math.floor(h.ts / HOUR_MS), h);
+  /** One hour of one pool: the energy its floor turns away (pack kWh), split into the lift to the
+   *  floor and the load the grid carries; the pool after it. */
+  const step = (pack: number, floor: number, net: number): { pack: number; lift: number; load: number } => {
+    const u = pack + net;
+    const top = Math.max(0, floor - u);
+    const load = Math.max(0, top - Math.max(0, floor - pack));
+    return { pack: Math.min(full, Math.max(floor, u)), lift: top - load, load };
+  };
+  let extraPack = 0;
+  let liftPack = 0;
+  let importCents = 0;
+  let priced = true;
+  for (let slot = Math.floor(o.fromMs / HOUR_MS) * HOUR_MS; slot < o.untilMs; slot += HOUR_MS) {
+    const w = (Math.min(o.untilMs, slot + HOUR_MS) - Math.max(o.fromMs, slot)) / HOUR_MS;
+    if (w <= 0) continue;
+    const h = byHour.get(slot / HOUR_MS);
+    if (h == null || !ok(h.pvP50W) || !ok(h.loadP50W)) return null;
+    const net = (w * (Math.max(0, h.pvP50W) - Math.max(0, h.loadP50W) / o.dischargeEff)) / 1000;
+    const f = step(free, freeFloor, net);
+    const k = step(held, holdFloor, net);
+    free = f.pack;
+    held = k.pack;
+    liftPack += k.lift;
+    const extra = k.load - f.load;
+    extraPack += extra;
+    const cents = o.centsAt(Math.max(o.fromMs, slot));
+    if (ok(cents)) importCents += extra * o.dischargeEff * cents;
+    else if (extra !== 0) priced = false;
+  }
+  // What the pool kept of it: the held pool's surplus at the restore beyond its lift (a full pool
+  // spills PV the free one stores, and that part is not kept).
+  const keptPack = Math.max(0, Math.min(Math.max(0, extraPack), held - free - liftPack));
+  const r2 = (n: number): number => Math.round(n * 100) / 100;
+  const importUsd = priced ? r2(importCents / 100) : null;
+  const creditUsd = ok(o.replaceCentsPerKwh) ? r2(((keptPack / o.legEff) * o.replaceCentsPerKwh) / 100) : null;
+  return {
+    fromMs: o.fromMs, untilMs: o.untilMs,
+    kwh: r2(extraPack * o.dischargeEff),
+    importUsd, creditUsd,
+    netUsd: importUsd != null && creditUsd != null ? r2(importUsd - creditUsd) : null,
+  };
+}
+
 /* ── the record ───────────────────────────────────────────────────────────── */
 
 /** One leg as the shadow sized it. Figures as the planner gave them; null where it gave none. */
@@ -170,6 +299,9 @@ export interface ShadowLegSummary {
    *  hold the cushion: what the evening's words say of it. Absent on a record from before R5. */
   toward?: boolean;
   cushionShortfall?: boolean;
+  /** v1.192.0 — the house energy its hold sends to the grid, and the bill effect (heldImportEstimate);
+   *  null when it writes nothing or the band does not cover the hold. Absent on an older record. */
+  heldImport?: HeldImport | null;
 }
 
 /** What the morning refresh decided (refreshLeg). */
@@ -212,6 +344,10 @@ export interface MiddayShadowRecord {
   /** The configured write mode: what the switch would do in it (advisory arms nothing). */
   mode: NightChargeMode;
   backup: ShadowLegSummary | null;
+  /** v1.192.0 — the backup sized on option B (its walk to the cost window's open), beside option A,
+   *  for the backup-horizon decision: never armed, never anchors the cost leg. Absent on an older
+   *  record; null when there is no backup or the planner gave none. */
+  backupB?: ShadowLegSummary | null;
   cost: ShadowLegSummary | null;
   refresh: ShadowRefresh | null;
   /** Why the legs were not sized, when they were not. */
@@ -226,6 +362,8 @@ export interface ShadowSized {
   /** R5 — when the weather the plan's forecast was built on was fetched (the band's
    *  weatherFetchedAtMs); null/absent when unknown. */
   weatherFetchedAtMs?: number | null;
+  /** v1.192.0 — heldImportEstimate over the leg's hold (index.ts, on the band it was planned on). */
+  heldImport?: HeldImport | null;
 }
 
 /** The arm probe's answer: the roles armCycle armed, and the ones it refused with its words. */
@@ -268,10 +406,14 @@ export function summariseLeg(
     windowPvP50Kwh: fin(sized?.windowPvP50Kwh),
     windowLoadP50Kwh: fin(sized?.windowLoadP50Kwh),
     ...(p != null ? { toward: chargeIsWindowBound(p) === true, cushionShortfall: p.cushionShortfall === true } : {}),
+    heldImport: sized?.heldImport ?? null,
   };
 }
 
 /* ── the evening ──────────────────────────────────────────────────────────── */
+
+/** Option B's disposition: it is a comparison, never a leg. */
+export const OPTION_B_DISPOSITION = 'option B (walk to the mid-day open), for comparison: never armed';
 
 /** What the evening shadow is handed. No device, push or speech path: a leg is sized, and the
  *  legs are probed against the cycle in place, and that is all it can do. */
@@ -327,10 +469,12 @@ export async function runMiddayShadowEvening(d: MiddayShadowEveningDeps): Promis
   };
   if (cycle.why !== 'midday' || cycle.cost == null) return base;
 
+  // What the energy a held reserve keeps is worth: the cycle's next charge buys it at the cost window.
+  const replace = replaceCentsPerKwh(d.model, cycle.cost);
   let backupSized: ShadowSized | null = null;
   let backupArm: { wouldArm: boolean; disposition: string } | null = null;
   if (cycle.backup != null) {
-    const b = await d.sizeLeg(backupLegSizing(d.model, cycle.backup));
+    const b = await d.sizeLeg({ ...backupLegSizing(d.model, cycle.backup), replaceCentsPerKwh: replace });
     if (b === 'panelStale') return 'panelStale';
     backupSized = b;
     const p = b?.plan ?? null;
@@ -342,9 +486,18 @@ export async function runMiddayShadowEvening(d: MiddayShadowEveningDeps): Promis
     ? clampReserveTarget(backupSized.plan.setpointSocPct) : null;
   const backupHold = holdPct != null && cycle.backup != null ? { pct: holdPct, untilMs: cycle.backup.endMs } : null;
 
-  const c = await d.sizeLeg(costLegSizing(d.model, cycle.cost, d.cfg, { chgMaxSocPcts: d.chgMaxSocPcts, backupHold }));
+  const c = await d.sizeLeg({ ...costLegSizing(d.model, cycle.cost, d.cfg, { chgMaxSocPcts: d.chgMaxSocPcts, backupHold }), replaceCentsPerKwh: replace });
   if (c === 'panelStale') return 'panelStale';
   const cp = c?.plan ?? null;
+
+  // v1.192.0 — option B beside A, for the backup-horizon decision: the same backup window, its walk to
+  // the cost window's open. Sized last, never probed or armed, and it anchors nothing; a planner that
+  // has nothing for it leaves it null rather than deferring the evening.
+  let backupB: ShadowLegSummary | null = null;
+  if (cycle.backup != null) {
+    const bb = await d.sizeLeg({ ...backupLegSizing(d.model, cycle.backup, cycle.cost.startMs), replaceCentsPerKwh: replace });
+    if (bb !== 'panelStale' && bb != null) backupB = summariseLeg(cycle.backup, bb, { wouldArm: false, disposition: OPTION_B_DISPOSITION });
+  }
 
   // Both legs together, as the evening job would arm them (the backup first).
   const cands: ShadowArmCandidate[] = [];
@@ -358,7 +511,7 @@ export async function runMiddayShadowEvening(d: MiddayShadowEveningDeps): Promis
     ? armVerdictFor('backup', backupSized?.plan ?? null, d.mode, joint) : backupArm;
   const backup = cycle.backup != null && backupFinal != null ? summariseLeg(cycle.backup, backupSized, backupFinal) : null;
   const cost = summariseLeg(cycle.cost, c, armVerdictFor('cost', cp, d.mode, joint));
-  return { ...base, backup, cost };
+  return { ...base, backup, backupB, cost };
 }
 
 /* ── the morning refresh (plan §3.4, a computation only) ──────────────────── */
@@ -641,6 +794,15 @@ export function middayShadowLedgerColumns(rec: MiddayShadowRecord): Partial<Nigh
     shadow_arm_disposition: disp.length > 0 ? disp : (rec.note ?? null),
     shadow_window_pv_p50_kwh: c?.windowPvP50Kwh ?? null,
     shadow_window_load_p50_kwh: c?.windowLoadP50Kwh ?? null,
+    // v1.192.0 — what each hold sends to the grid, and option B beside A.
+    shadow_backup_held_import_kwh: b?.heldImport?.kwh ?? null,
+    shadow_backup_held_net_usd: b?.heldImport?.netUsd ?? null,
+    shadow_cost_held_import_kwh: c?.heldImport?.kwh ?? null,
+    shadow_cost_held_net_usd: c?.heldImport?.netUsd ?? null,
+    shadow_backup_b_setpoint_pct: rec.backupB?.reservePct ?? null,
+    shadow_backup_b_expected_buy_kwh: rec.backupB?.expectedBuyKwh ?? null,
+    shadow_backup_b_held_import_kwh: rec.backupB?.heldImport?.kwh ?? null,
+    shadow_backup_b_held_net_usd: rec.backupB?.heldImport?.netUsd ?? null,
   };
 }
 
@@ -660,6 +822,18 @@ export function middayShadowRefreshLedgerColumns(r: ShadowRefresh): Partial<Nigh
 const kwh = (v: number | null): string => (v == null ? '—' : `${Math.round(v * 10) / 10} kWh`);
 const pct = (v: number | null): string => (v == null ? '—' : `${Math.round(v * 10) / 10}%`);
 const at = (ms: number): string => new Date(ms).toISOString();
+const usd = (v: number): string => `$${Math.abs(v).toFixed(2)}`;
+
+/** What a leg's hold sends to the grid, for its log line ('' when it holds nothing). PURE. */
+export function heldImportText(h: HeldImport | null | undefined): string {
+  if (h == null) return '';
+  const bill = h.netUsd == null
+    ? 'not priced (the rates are not confirmed)'
+    : h.netUsd > 0
+      ? `adding ~${usd(h.netUsd)} to the bill against buying it back in the mid-day window`
+      : h.netUsd < 0 ? `saving ~${usd(h.netUsd)} against buying it back in the mid-day window` : 'costing nothing net';
+  return ` Held ${at(h.fromMs)}→${at(h.untilMs)}, the reserve sends ~${kwh(h.kwh)} of house load to the grid (median load and PV), ${bill}.`;
+}
 
 /** What the chooser's reason means, for the log. */
 export const SHADOW_WHY_TEXT: Readonly<Record<ChargeCycleWhy, string>> = Object.freeze({
@@ -682,12 +856,17 @@ export function middayShadowLogLines(rec: MiddayShadowRecord): string[] {
   const b = rec.backup;
   if (b != null) {
     out.push(`${t} ${rec.day} backup ${at(b.windowStartMs)}→${at(b.windowEndMs)} — ${b.disposition}: reserve ${pct(b.reservePct)}, `
-      + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); the islanded walk it is sized on, to the next overnight open, troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line. Shadow only: nothing is armed, written or announced for it.`);
+      + `expected ${kwh(b.expectedBuyKwh)} (worst-case sizing ${kwh(b.buyKwh)}); the islanded walk it is sized on, to the next overnight open, troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);
+  }
+  const bb = rec.backupB;
+  if (bb != null) {
+    out.push(`${t} ${rec.day} backup ${bb.disposition} — ${bb.chargeTonight ? `reserve ${pct(bb.reservePct)}, expected ${kwh(bb.expectedBuyKwh)} (worst-case sizing ${kwh(bb.buyKwh)})` : 'it would hold (no write)'}; `
+      + `its walk to the mid-day open troughs at ${pct(bb.cushionTroughSocPct)} against the ${pct(bb.cushionLineSocPct)} line.${heldImportText(bb.heldImport)} Shadow only.`);
   }
   const c = rec.cost;
   out.push(`${t} ${rec.day} cost ${at(c.windowStartMs)}→${at(c.windowEndMs)} — ${c.disposition}: reserve ${pct(c.reservePct)} (T_mid: ${c.reserveBasis ?? '—'}), `
     + `level ~${pct(c.levelPct)} (ceiling ${pct(c.costCeilingSocPct)}), expected ${kwh(c.expectedBuyKwh)} (worst-case sizing ${kwh(c.buyKwh)}) from ~${pct(c.expectedStartSocPct)} at the open; `
-    + `planned window PV ${kwh(c.windowPvP50Kwh)}, load ${kwh(c.windowLoadP50Kwh)}. Shadow only: nothing is armed, written or announced for it.`);
+    + `planned window PV ${kwh(c.windowPvP50Kwh)}, load ${kwh(c.windowLoadP50Kwh)}.${heldImportText(c.heldImport)} Shadow only: nothing is armed, written or announced for it.`);
   return out;
 }
 
@@ -816,7 +995,18 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     windowPvP50Kwh: fin(o.windowPvP50Kwh), windowLoadP50Kwh: fin(o.windowLoadP50Kwh),
     ...(typeof o.toward === 'boolean' ? { toward: o.toward } : {}),
     ...(typeof o.cushionShortfall === 'boolean' ? { cushionShortfall: o.cushionShortfall } : {}),
+    ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
   };
+};
+
+const coerceHeldImport = (raw: unknown): HeldImport | null => {
+  if (raw == null || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const fromMs = fin(o.fromMs);
+  const untilMs = fin(o.untilMs);
+  const kwh = fin(o.kwh);
+  if (fromMs == null || untilMs == null || kwh == null) return null;
+  return { fromMs, untilMs, kwh, importUsd: fin(o.importUsd), creditUsd: fin(o.creditUsd), netUsd: fin(o.netUsd) };
 };
 
 const DISPOSITIONS: readonly ShadowRefreshDisposition[] = ['unchanged', 'lowered', 'capped', 'cancelled', 'stood', 'not-comparable'];
@@ -844,7 +1034,9 @@ export function coerceMiddayShadowRecord(raw: unknown): MiddayShadowRecord | nul
   return {
     version: MIDDAY_SHADOW_VERSION, day: o.day, computedAtMs, why: o.why as ChargeCycleWhy,
     mode: o.mode === 'supervised' || o.mode === 'auto' ? o.mode : 'advisory',
-    backup: coerceLeg(o.backup), cost: coerceLeg(o.cost), refresh,
+    backup: coerceLeg(o.backup),
+    ...('backupB' in o ? { backupB: coerceLeg(o.backupB) } : {}),
+    cost: coerceLeg(o.cost), refresh,
     note: typeof o.note === 'string' ? o.note : null,
   };
 }

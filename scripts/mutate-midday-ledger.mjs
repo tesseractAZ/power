@@ -26,6 +26,9 @@
  *   Review     U-i..U-iv     (v1.190.1: the window bounds are timestamp sensors whose null is the
  *                             "None" payload; the text sensors render a null as "unknown")
  *              L-xxxi..xxxii (no measured shadow PV on a row whose PV verdict is set aside)
+ *   Held       H-i..H-x      (v1.192.0: what a held reserve sends to the grid — the hold, the lift,
+ *                             the conversion, the spill, the hours' rates; option B's horizon, its
+ *                             arm, its anchor; the columns; the planner glue)
  *
  *   node scripts/mutate-midday-ledger.mjs [--only <id prefix>]
  */
@@ -55,6 +58,7 @@ const SUBSET = [
   'test/nightChargeMqtt.test.ts',
   'test/mqttDiscovery.test.ts',
   'test/ledgerHeldMiddayShadow.test.ts',
+  'test/heldImport.test.ts',
 ];
 
 const MUTANTS = [
@@ -423,8 +427,8 @@ const MUTANTS = [
   {
     id: 'S-xix. ★★★ the backup leg walks to the cost open (option B), not the next overnight open',
     file: MS,
-    find: '    nextRechargeMs: nextChargeableOpenMs(model, backup.endMs + HOUR_MS, OVERNIGHT_CYCLE),',
-    to: '    nextRechargeMs: backup.endMs + 5 * HOUR_MS, /* MUTANT */',
+    find: '    nextRechargeMs: horizonEndMs ?? nextChargeableOpenMs(model, backup.endMs + HOUR_MS, OVERNIGHT_CYCLE),',
+    to: '    nextRechargeMs: horizonEndMs ?? backup.endMs + 5 * HOUR_MS, /* MUTANT */',
     why: 'The owner\'s default (option A) is replaced by the cheaper, less protective option B.',
   },
   {
@@ -473,8 +477,8 @@ const MUTANTS = [
   {
     id: 'B-iv. ★★ the backup leg\'s "would arm" line does not say "Shadow only"',
     file: MS,
-    find: " troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line. Shadow only: nothing is armed, written or announced for it.`);",
-    to: " troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.`); /* MUTANT */",
+    find: " troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.${heldImportText(b.heldImport)} Shadow only: nothing is armed, written or announced for it.`);",
+    to: " troughs at ${pct(b.cushionTroughSocPct)} against the ${pct(b.cushionLineSocPct)} line.${heldImportText(b.heldImport)}`); /* MUTANT */",
     why: 'A log search for "Shadow only" misses the backup\'s "would arm".',
   },
   {
@@ -528,6 +532,77 @@ const MUTANTS = [
     find: '    pvSetAside: cols.pvSetAside,\n',
     to: '    pvSetAside: null, /* MUTANT */\n',
     why: 'The rule is wired in the pure core and never reached in production.',
+  },
+  /* ── v1.192.0: what a held reserve sends to the grid, and option B ── */
+  {
+    id: 'H-i. ★★★ the held pool is held at the owner\'s reserve, not the written one',
+    file: MS,
+    find: '  const holdFloor = Math.max(freeFloor, kwhOf(o.holdPct));',
+    to: '  const holdFloor = freeFloor; /* MUTANT */',
+    why: 'Every hold reads 0 kWh: option A looks free and the horizon decision is made on nothing.',
+  },
+  {
+    id: 'H-ii. ★★★ the lift to the reserve is counted as held import',
+    file: MS,
+    find: '    const load = Math.max(0, top - Math.max(0, floor - pack));',
+    to: '    const load = top; /* MUTANT */',
+    why: 'The leg\'s own draw is counted twice: a 20 kWh lift reads as 20 kWh of house load on the grid.',
+  },
+  {
+    id: 'H-iii. ★★ the held import is stated in pack kWh, not the house\'s (no discharge efficiency)',
+    file: MS,
+    find: '    kwh: r2(extraPack * o.dischargeEff),',
+    to: '    kwh: r2(extraPack), /* MUTANT */',
+    why: 'Every figure reads ~6% high against the grid meter it is judged by.',
+  },
+  {
+    id: 'H-iv. ★★ the credit counts energy a full pool spilled',
+    file: MS,
+    find: '  const keptPack = Math.max(0, Math.min(Math.max(0, extraPack), held - free - liftPack));',
+    to: '  const keptPack = Math.max(0, extraPack); /* MUTANT */',
+    why: 'A hold that spills the sun reads as saving what it never kept.',
+  },
+  {
+    id: 'H-v. ★★ every hour priced at the hold\'s first rate',
+    file: MS,
+    find: '    const cents = o.centsAt(Math.max(o.fromMs, slot));',
+    to: '    const cents = o.centsAt(o.fromMs); /* MUTANT */',
+    why: 'A 22:55 write prices the whole night at 17¢ off-peak, not 12.59¢ overnight.',
+  },
+  {
+    id: 'H-vi. ★★★ option B walks to the next overnight open, as A does',
+    file: MS,
+    find: '    const bb = await d.sizeLeg({ ...backupLegSizing(d.model, cycle.backup, cycle.cost.startMs), replaceCentsPerKwh: replace });',
+    to: '    const bb = await d.sizeLeg({ ...backupLegSizing(d.model, cycle.backup), replaceCentsPerKwh: replace }); /* MUTANT */',
+    why: 'B is A again: the comparison the decision rests on compares A with itself.',
+  },
+  {
+    id: 'H-vii. ★★★ option B is recorded as a leg that would arm',
+    file: MS,
+    find: "    if (bb !== 'panelStale' && bb != null) backupB = summariseLeg(cycle.backup, bb, { wouldArm: false, disposition: OPTION_B_DISPOSITION });",
+    to: "    if (bb !== 'panelStale' && bb != null) backupB = summariseLeg(cycle.backup, bb, { wouldArm: true, disposition: OPTION_B_DISPOSITION }); /* MUTANT */",
+    why: 'The record says a comparison would write the panel.',
+  },
+  {
+    id: 'H-viii. ★★ the cost leg is sized with no rate to credit the kept energy at',
+    file: MS,
+    find: '  const c = await d.sizeLeg({ ...costLegSizing(d.model, cycle.cost, d.cfg, { chgMaxSocPcts: d.chgMaxSocPcts, backupHold }), replaceCentsPerKwh: replace });',
+    to: '  const c = await d.sizeLeg(costLegSizing(d.model, cycle.cost, d.cfg, { chgMaxSocPcts: d.chgMaxSocPcts, backupHold })); /* MUTANT */',
+    why: 'The mid-day hold is never priced: its net reads null on every row.',
+  },
+  {
+    id: 'H-ix. ★★ the backup\'s held import never reaches its column',
+    file: REC,
+    find: "  ['shadow_backup_held_import_kwh', 'REAL'], ['shadow_backup_held_net_usd', 'REAL'],",
+    to: "  ['shadow_backup_held_net_usd', 'REAL'], /* MUTANT */",
+    why: 'The figure the decision is made on is computed every evening and kept nowhere.',
+  },
+  {
+    id: 'H-x. ★★★ a leg that holds (no write) is estimated as if it wrote its setpoint',
+    file: IDX,
+    find: '        holdPct: plan.chargeTonight && plan.setpointSocPct != null ? clampReserveTarget(plan.setpointSocPct) : null,',
+    to: '        holdPct: plan.setpointSocPct != null ? clampReserveTarget(plan.setpointSocPct) : null, /* MUTANT */',
+    why: 'A night the backup does not arm is charged for a hold that never happens.',
   },
 ];
 

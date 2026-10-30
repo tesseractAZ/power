@@ -341,7 +341,7 @@ jobs:
           timeout -k 10 240 python3 scripts/build-docs-docx.py \
             --version "$V" \
             --ref "$TAG" \
-            --output "EcoFlow-Panel-Documentation-v${V}.docx"
+            --output "Power-Documentation-v${V}.docx"
 
       # Render the .docx to a .pdf (same document, no LaTeX) so every Release
       # carries both formats. Best-effort like the .docx: gated + continue-on-error
@@ -371,9 +371,9 @@ jobs:
           V: ${{ needs.resolve.outputs.version }}
         run: |
           timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
-            --convert-to pdf --outdir . "EcoFlow-Panel-Documentation-v${V}.docx"
-          test -s "EcoFlow-Panel-Documentation-v${V}.pdf"
-          ls -la "EcoFlow-Panel-Documentation-v${V}.pdf"
+            --convert-to pdf --outdir . "Power-Documentation-v${V}.docx"
+          test -s "Power-Documentation-v${V}.pdf"
+          ls -la "Power-Documentation-v${V}.pdf"
 
       # Not best-effort: a Release that cannot be created is a red run. Bounded so a stalled
       # API call fails in minutes instead of holding the job (v1.187.3). Its `if` reads only
@@ -398,8 +398,8 @@ jobs:
           # conversion killed by `timeout` or by its step bound can leave a
           # truncated .docx or .pdf behind, and a Release would seal it forever.
           assets=()
-          doc="EcoFlow-Panel-Documentation-v${V}.docx"
-          pdf="EcoFlow-Panel-Documentation-v${V}.pdf"
+          doc="Power-Documentation-v${V}.docx"
+          pdf="Power-Documentation-v${V}.pdf"
           if [ "$DOCX_OUTCOME" = success ] && [ -s "$doc" ]; then assets+=("$doc"); fi
           if [ "$PDF_OUTCOME" = success ] && [ -s "$pdf" ]; then assets+=("$pdf"); fi
           # Only the highest version is marked Latest: a re-run of an older version's

@@ -271,6 +271,7 @@ import {
   liveOvernightWrote, notComparableRefresh,
   middayShadowLedgerColumns, middayShadowRefreshLedgerColumns, middayShadowLogLines, middayShadowRefreshLogLine,
   coerceMiddayShadowRecord, getMiddayShadow, setMiddayShadow, middayChargeStateFields, shadowServed, windowP50Kwh, MIDDAY_SHADOW_LOG_TAG,
+  heldImportEstimate, heldSpan, type HeldImport,
   middayShadowPreview, middayShadowPreviewLogLines, middayShadowRefreshPreviewLogLine, weatherAgeSeconds,
   costLegSizing, REFRESH_DEADLINE_MS,
   type MiddayShadowRecord, type ShadowLegSizing, type ShadowSized, type ShadowArmCandidate, type ShadowArmVerdict,
@@ -3546,6 +3547,9 @@ interface NightPlanExtras {
   /** R5 — a pinned leg only (the shadow, the morning refresh): when the weather its band was built
    *  on was fetched; null when unknown. Absent on every evening and tick plan. */
   weatherFetchedAtMs?: number | null;
+  /** v1.192.0 — a shadow leg only: the house energy its hold sends to the grid, and the bill effect
+   *  (middayShadow.heldImportEstimate). Absent on every live plan. */
+  heldImport?: HeldImport | null;
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
@@ -3998,6 +4002,18 @@ async function recomputeNightChargePlan(
     ...(shadowLeg && window ? windowP50Kwh(bandHours, window) : {}),
     // R5 — and when the weather its band was built on was fetched (the refresh's freshness test).
     ...(shadowLeg ? { weatherFetchedAtMs: prob?.weatherFetchedAtMs ?? dayAhead?.weatherFetchedAtMs ?? null } : {}),
+    // v1.192.0 — what the leg's hold sends to the grid, on the band it was planned on: the reserve
+    // it would write (only a leg that charges writes one), from the pool expected at the open.
+    ...(shadowLeg && window ? {
+      heldImport: heldImportEstimate({
+        hours: bandHours, ...heldSpan(window, nextOnPeakStartMs(tariffModel, window.startMs)),
+        startSocPct: plan.expectedStartSocPct ?? null,
+        holdPct: plan.chargeTonight && plan.setpointSocPct != null ? clampReserveTarget(plan.setpointSocPct) : null,
+        floorPct: plan.reserveFloorPct, fullKwh, dischargeEff, legEff,
+        centsAt: (ms) => rateAt(tariffModel, ms).centsPerKwh,
+        replaceCentsPerKwh: shadowLeg.replaceCentsPerKwh ?? null,
+      }),
+    } : {}),
   };
 
   // v1.40.0: persist the freshest PRE-WINDOW plan to disk. The evening job's
@@ -5056,6 +5072,7 @@ async function sizeShadowLeg(sizing: ShadowLegSizing, allowStalePanel: boolean):
   return {
     plan: r.plan, windowPvP50Kwh: r.extras.windowPvP50Kwh ?? null, windowLoadP50Kwh: r.extras.windowLoadP50Kwh ?? null,
     weatherFetchedAtMs: r.extras.weatherFetchedAtMs ?? null,
+    heldImport: r.extras.heldImport ?? null,
   };
 }
 

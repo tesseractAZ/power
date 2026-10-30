@@ -164,8 +164,8 @@ const RELEASE_STEP = stepNamed(RELEASE, 'Create GitHub Release (with docs asset)
 // A strict X.Y.Z: the Latest lookup counts only strict vX.Y.Z tags (a `-test` suffix would not be one).
 const TAG = 'v1.2.3';
 const V = '1.2.3';
-const DOCX = `EcoFlow-Panel-Documentation-v${V}.docx`;
-const PDF = `EcoFlow-Panel-Documentation-v${V}.pdf`;
+const DOCX = `Power-Documentation-v${V}.docx`;
+const PDF = `Power-Documentation-v${V}.pdf`;
 
 /** Runs the Release step's own script against a stub `gh` and returns the assets it attached. */
 function releaseAssets(o: { docx: string; pdf: string; files: Partial<Record<'docx' | 'pdf', string>> }): string[] {
@@ -220,7 +220,7 @@ test('★★ the Release reads each build step\'s OUTCOME, and the PDF renders o
   assert.match(RELEASE_STEP.text, /^ {10}DOCX_OUTCOME: \$\{\{ steps\.docx\.outcome \}\}$/m);
   assert.match(RELEASE_STEP.text, /^ {10}PDF_OUTCOME: \$\{\{ steps\.pdf\.outcome \}\}$/m);
   assert.match(key(pdf, 'if') ?? '', /steps\.docx\.outcome == 'success'/, 'a truncated .docx renders a truncated PDF');
-  assert.match(runBlock(pdf), /^test -s "EcoFlow-Panel-Documentation-v\$\{V\}\.pdf"$/m, 'no PDF is a failed step, not a green one');
+  assert.match(runBlock(pdf), /^test -s "Power-Documentation-v\$\{V\}\.pdf"$/m, 'no PDF is a failed step, not a green one');
 });
 
 /** Runs the Release step against a stub `gh` and a stub `git` listing `tags` (null = the lookup fails). */
