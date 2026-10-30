@@ -1623,7 +1623,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="source ref (tag or SHA) stamped into the title block; links to files that "
                          "are not printed point at it (default 'local': they point at main)")
     ap.add_argument("--output", default=None,
-                    help="output path (default: EcoFlow-Panel-Documentation-v<version>.docx in CWD; "
+                    help="output path (default: Power-Documentation-v<version>.docx in CWD; "
                          "with --assemble-only, default stdout)")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--list-sources", action="store_true",
@@ -1646,7 +1646,7 @@ def main(argv: list[str] | None = None) -> int:
         version = args.version or read_version(repo_root)
         if args.print_pandoc_argv:
             output = Path(args.output).resolve() if args.output \
-                else Path.cwd() / f"EcoFlow-Panel-Documentation-v{version}.docx"
+                else Path.cwd() / f"Power-Documentation-v{version}.docx"
             print(json.dumps(pandoc_argv(repo_root, output.with_suffix(".combined.md"), output, version, args.ref)))
             return 0
         combined = Document(repo_root, link_ref).assemble()
@@ -1671,7 +1671,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     output = Path(args.output).resolve() if args.output \
-        else Path.cwd() / f"EcoFlow-Panel-Documentation-v{version}.docx"
+        else Path.cwd() / f"Power-Documentation-v{version}.docx"
     combined_path = output.with_suffix(".combined.md")
     try:
         combined_path.write_text(combined, encoding="utf-8")

@@ -27,14 +27,13 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import { once } from 'node:events';
 import {
-  startSshServer, refuseSocket,
+  startSshServer, refuseSocket, generateHostKey,
   MAX_SSH_CONNS, MAX_SSH_CONNS_PER_IP, SSH_IDLE_TIMEOUT_MS, SSH_KEEPALIVE_MS, SSH_AUTH_GRACE_MS, REFUSE_LINGER_MS,
 } from '../src/console/server.js';
 import type { TuiDataProvider } from '../src/console/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import type { Recorder } from '../src/recorder.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
-import ssh2 from 'ssh2';
 
 /* ── fixtures ──────────────────────────────────────────────────────────── */
 
@@ -57,7 +56,7 @@ function mockData(): { provider: TuiDataProvider; stop: () => void } {
   };
 }
 
-const KEY = ssh2.utils.generateKeyPairSync('ed25519').private;
+const KEY = generateHostKey().key; // generateHostKey, not ssh2's generator: ssh2 1.17.0 malforms 1 generated key in 256 (v1.191.7).
 
 async function boot(opts: { maxConns?: number; maxConnsPerIp?: number; idleTimeoutMs?: number; keepAliveMs?: number; authGraceMs?: number } = {}) {
   const lines: string[] = [];

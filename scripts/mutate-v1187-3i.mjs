@@ -339,8 +339,8 @@ const MUTANTS = [
   {
     id: 'xxxix. ★★ the pdf render is unbounded in the release job',
     file: IMG,
-    find: '          timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \\\n            --convert-to pdf --outdir . "EcoFlow-Panel-Documentation-v${V}.docx"',
-    to: '          libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \\\n            --convert-to pdf --outdir . "EcoFlow-Panel-Documentation-v${V}.docx" # MUTANT',
+    find: '          timeout -k 10 240 libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \\\n            --convert-to pdf --outdir . "Power-Documentation-v${V}.docx"',
+    to: '          libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \\\n            --convert-to pdf --outdir . "Power-Documentation-v${V}.docx" # MUTANT',
     why: 'A wedged headless LibreOffice holds the step to its bound on every release.',
   },
   {
@@ -389,7 +389,7 @@ const MUTANTS = [
   {
     id: 'xlvi. ★ a missing PDF is a green step',
     file: IMG,
-    find: '          test -s "EcoFlow-Panel-Documentation-v${V}.pdf"\n',
+    find: '          test -s "Power-Documentation-v${V}.pdf"\n',
     to: '          # MUTANT\n',
     why: 'LibreOffice exits 0 without writing a PDF and the step reports success.',
   },

@@ -6,7 +6,7 @@ import {
   setLatestNightChargePlan, getLatestNightChargePlan,
   type NightChargeInputDeps, type NightForecastHour, type NightChargePlan,
 } from '../src/nightChargeAdvisor.js';
-import { nextChargeableOpenMs, OVERNIGHT_CYCLE, type ChargeLegRole } from '../src/chargeWindows.js';
+import { nextChargeableOpenMs, nextOnPeakStartMs, OVERNIGHT_CYCLE, type ChargeLegRole } from '../src/chargeWindows.js';
 import { pvSurplusFromBand } from '../src/chargeTaper.js';
 import { buildApsREvModel, rateAt } from '../src/tariff.js';
 import {
@@ -21,6 +21,7 @@ import {
   middayShadowLogLines, middayShadowRefreshLogLine, coerceMiddayShadowRecord, windowP50Kwh, shadowServed,
   liveOvernightWrote, notComparableRefresh, refreshResized, middayShadowRefreshPreview, NOT_COMPARABLE_REASON, MIDDAY_CHARGE_BASIS,
   MIDDAY_SHADOW_LOG_TAG, MIDDAY_SHADOW_FRESH_MS, REFRESH_LEAD_MS, REFRESH_DEADLINE_MS,
+  heldImportEstimate, heldSpan, OPTION_B_DISPOSITION,
   type MiddayShadowRecord, type ShadowLegSizing, type ShadowSized, type ShadowArmCandidate, type ShadowArmVerdict,
 } from '../src/middayShadow.js';
 
@@ -131,8 +132,12 @@ test('★★★ a winter weekday evening sizes both legs: the backup Wed 23:00�
   assert.equal(r.day, DAY);
   assert.deepEqual([r.backup!.windowStartMs, r.backup!.windowEndMs], [phx(10, 14, 23), phx(10, 15, 5)]);
   assert.deepEqual([r.cost!.windowStartMs, r.cost!.windowEndMs], [phx(10, 15, 10), phx(10, 15, 15)]);
-  // The backup first, its horizon the next overnight open (option A): Thursday 23:00.
-  assert.equal(sizings.length, 2);
+  // The backup first, its horizon the next overnight open (option A): Thursday 23:00. Option B is
+  // sized last (v1.192.0), for comparison: its walk ends at the mid-day open.
+  assert.equal(sizings.length, 3);
+  assert.equal(sizings[2].spec.role, 'backup');
+  assert.equal(sizings[2].nextRechargeMs, phx(10, 15, 10), 'option B walks to the mid-day open');
+  assert.equal(sizings[2].spec.backupHold, undefined, 'option B anchors nothing');
   assert.equal(sizings[0].spec.role, 'backup');
   assert.equal(sizings[0].nextRechargeMs, phx(10, 15, 23));
   assert.equal(sizings[1].spec.role, 'cost');
@@ -223,6 +228,89 @@ test('★★★ a cost leg the re-entry line holds is recorded as held for it �
   assert.equal(rf.disposition, 'cancelled');
   assert.equal(rf.reason, 'the refreshed plan holds: the charge would take the pool only to ~38%, under the 41% re-entry line');
   assert.equal(refreshLeg({ announced: ANN, refreshed: fresh({ chargeTonight: false }) }).reason, 'the refreshed plan holds: no charge is needed');
+});
+
+/* ══ v1.192.0 — what each hold sends to the grid, and option B beside A ═════════════ */
+
+const RATED = buildApsREvModel({
+  confirmed: true,
+  onPeak: { summer: 39.5, winter: 39.5 }, superOffPeak: { summer: null, winter: 8.2 },
+  overnight: { summer: 12.59, winter: 12.59 }, offPeak: { summer: 17, winter: 17 },
+});
+/** The engine sizer with the held import index.ts attaches (recomputeNightChargePlan's extras). */
+function heldSizer(calls: ShadowLegSizing[]) {
+  const sizer = engineSizer(calls);
+  return async (sz: ShadowLegSizing): Promise<ShadowSized> => {
+    const r = await sizer(sz);
+    const d = deps({ sizing: sz, forceCharge: sz.spec.role === 'cost' });
+    const w = sz.spec.window!;
+    return {
+      ...r,
+      heldImport: heldImportEstimate({
+        hours: d.bandHours, ...heldSpan(w, nextOnPeakStartMs(RATED, w.startMs)),
+        startSocPct: r.plan.expectedStartSocPct ?? null,
+        holdPct: r.plan.chargeTonight && r.plan.setpointSocPct != null ? Math.min(50, Math.max(10, Math.round(r.plan.setpointSocPct))) : null,
+        floorPct: r.plan.reserveFloorPct, fullKwh: POOL, dischargeEff: 0.94, legEff: 0.927,
+        centsAt: (ms) => rateAt(RATED, ms).centsPerKwh, replaceCentsPerKwh: sz.replaceCentsPerKwh ?? null,
+      }),
+    };
+  };
+}
+
+test('★★★ the evening records what each hold sends to the grid, and option B beside A — B is never armed and anchors nothing', async () => {
+  const sizings: ShadowLegSizing[] = [];
+  const probes: ShadowArmCandidate[][] = [];
+  const r = await runMiddayShadowEvening({
+    nowMs: NOW, day: DAY, model: RATED, cfg: CFG, mode: 'supervised', chgMaxSocPcts: [100, 100, null],
+    sizeLeg: heldSizer(sizings), armProbe: probeOn(liveArm(livePlan()), probes),
+  }) as MiddayShadowRecord;
+  // Every leg is priced against the mid-day window's rate.
+  for (const sz of sizings) assert.equal(sz.replaceCentsPerKwh, 8.2);
+  // Option A's 50% hold, 23:00–05:00: the house load it turns away goes on the 12.59¢ overnight rate.
+  const a = r.backup!.heldImport!;
+  assert.equal(r.backup!.reservePct, 50);
+  assert.deepEqual([a.fromMs, a.untilMs], [phx(10, 14, 23), phx(10, 15, 5)]);
+  assert.ok(a.kwh > 5 && a.kwh < 13, `option A sends ~${a.kwh} kWh to the grid overnight`);
+  assert.ok(a.netUsd! > 0.1 && a.netUsd! < 0.6, `and adds ~$${a.netUsd} to the bill`);
+  // Option B walks only to the mid-day open: a lower hold, less held import — never armed, never probed.
+  const b = r.backupB!;
+  assert.equal(b.disposition, OPTION_B_DISPOSITION);
+  assert.equal(b.wouldArm, false);
+  assert.ok(b.reservePct == null || b.reservePct < r.backup!.reservePct!, `B holds ${b.reservePct}% against A's ${r.backup!.reservePct}%`);
+  assert.ok((b.heldImport?.kwh ?? 0) < a.kwh, 'B sends less to the grid than A');
+  assert.deepEqual(probes.map((p) => p.map((c) => c.role)), [['backup'], ['backup', 'cost']], 'B is never probed');
+  // The cost leg's own hold is the cheapest hour of the day: buying it back costs more than it saves.
+  assert.ok(r.cost!.heldImport == null || r.cost!.heldImport.netUsd! <= 0, `the mid-day hold nets ${r.cost!.heldImport?.netUsd}`);
+  // The log, the ledger and the restart path carry all of it.
+  const lines = middayShadowLogLines(r);
+  assert.match(lines[0], /the reserve sends ~[\d.]+ kWh of house load to the grid \(median load and PV\), adding ~\$0\.\d\d to the bill/);
+  assert.match(lines[1], /^night-charge\[midday-shadow\]: 2026-10-14 backup option B \(walk to the mid-day open\), for comparison: never armed — .*Shadow only\.$/);
+  const cols = middayShadowLedgerColumns(r);
+  assert.equal(cols.shadow_backup_held_import_kwh, a.kwh);
+  assert.equal(cols.shadow_backup_held_net_usd, a.netUsd);
+  assert.equal(cols.shadow_backup_b_setpoint_pct, b.reservePct);
+  assert.equal(cols.shadow_backup_b_held_import_kwh, b.heldImport?.kwh ?? null);
+  assert.equal(cols.shadow_cost_held_import_kwh, r.cost!.heldImport?.kwh ?? null);
+  assert.deepEqual(coerceMiddayShadowRecord(JSON.parse(JSON.stringify(r))), r);
+  // A record from before v1.192.0 reads back as it was written: no option B, no held import.
+  const old = JSON.parse(JSON.stringify(r));
+  delete old.backupB; delete old.backup.heldImport; delete old.cost.heldImport;
+  const back = coerceMiddayShadowRecord(old)!;
+  assert.equal('backupB' in back, false);
+  assert.equal('heldImport' in back.backup!, false);
+  assert.equal(middayShadowLedgerColumns(back).shadow_backup_held_import_kwh, null);
+});
+
+test('★★ option B that the planner has nothing for is left null; the evening is not deferred for it', async () => {
+  const sizer = engineSizer([]);
+  let n = 0;
+  const r = await runMiddayShadowEvening({
+    nowMs: NOW, day: DAY, model: MODEL, cfg: CFG, mode: 'supervised', chgMaxSocPcts: [100],
+    sizeLeg: async (sz) => (++n === 3 ? 'panelStale' : sizer(sz)), armProbe: probeOn(emptyCycle()),
+  });
+  assert.notEqual(r, 'panelStale');
+  assert.equal((r as MiddayShadowRecord).backupB, null);
+  assert.ok((r as MiddayShadowRecord).cost != null);
 });
 
 test('★★ a stale panel defers the whole evening (no half record)', async () => {

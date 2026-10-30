@@ -7,14 +7,13 @@
  *
  * The console credentials are the suite's fixed test values (sshServer.test.ts).
  */
-import ssh2 from 'ssh2';
-import { startSshServer } from '../../src/console/server.js';
+import { startSshServer, generateHostKey } from '../../src/console/server.js';
 import { makeRecorderStub } from './recorderStub.js';
 
 process.env.TUI_USERNAME = 'operator';
 process.env.TUI_PASSWORD = 'hunter2';
 
-const KEY = ssh2.utils.generateKeyPairSync('ed25519').private;
+const KEY = generateHostKey().key; // generateHostKey, not ssh2's generator: ssh2 1.17.0 malforms 1 generated key in 256 (v1.191.7).
 const snap = { generatedAt: Date.now(), devices: {}, alerts: [] };
 const data = {
   provider: {

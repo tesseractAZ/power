@@ -65,8 +65,10 @@ function mockData(): { provider: TuiDataProvider; stop: () => void } {
   };
 }
 
-/** One host key for the whole file: generating an ed25519 pair is cheap, but once is enough. */
-const KEY = ssh2.utils.generateKeyPairSync('ed25519').private;
+/** One host key for the whole file: generating an ed25519 pair is cheap, but once is enough. It comes
+ *  from generateHostKey, as the add-on's does: ssh2 1.17.0 malforms 1 generated key in 256 (v1.191.7),
+ *  and one malformed key here failed every test in the file. */
+const KEY = generateHostKey().key;
 
 async function boot(opts: { host?: string } = {}) {
   const lines: string[] = [];
