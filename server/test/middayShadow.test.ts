@@ -270,17 +270,23 @@ test('★★★ the evening records what each hold sends to the grid, and option
   const a = r.backup!.heldImport!;
   assert.equal(r.backup!.reservePct, 50);
   assert.deepEqual([a.fromMs, a.untilMs], [phx(10, 14, 23), phx(10, 15, 5)]);
-  assert.ok(a.kwh > 5 && a.kwh < 13, `option A sends ~${a.kwh} kWh to the grid overnight`);
-  assert.ok(a.netUsd! > 0.1 && a.netUsd! < 0.6, `and adds ~$${a.netUsd} to the bill`);
+  // The figures chapter 15 part 2 and the 1.192.0 changelog state: ~9.3 kWh, ~$0.30 a weeknight.
+  assert.ok(Math.abs(a.kwh - 9.3) <= 0.1, `option A sends ~${a.kwh} kWh to the grid overnight`);
+  assert.ok(Math.abs(a.netUsd! - 0.3) <= 0.02, `and adds ~$${a.netUsd} to the bill`);
   // Option B walks only to the mid-day open: a lower hold, less held import — never armed, never probed.
   const b = r.backupB!;
   assert.equal(b.disposition, OPTION_B_DISPOSITION);
   assert.equal(b.wouldArm, false);
-  assert.ok(b.reservePct == null || b.reservePct < r.backup!.reservePct!, `B holds ${b.reservePct}% against A's ${r.backup!.reservePct}%`);
-  assert.ok((b.heldImport?.kwh ?? 0) < a.kwh, 'B sends less to the grid than A');
+  // Written 40, ~0.6 kWh, ~$0.02 (the stated figures).
+  assert.equal(b.chargeTonight, true);
+  assert.equal(b.reservePct, 40, `B holds ${b.reservePct}% against A's ${r.backup!.reservePct}%`);
+  assert.ok(Math.abs(b.heldImport!.kwh - 0.6) <= 0.1, `B sends ~${b.heldImport!.kwh} kWh`);
+  assert.ok(Math.abs(b.heldImport!.netUsd! - 0.02) <= 0.02, `and adds ~$${b.heldImport!.netUsd}`);
   assert.deepEqual(probes.map((p) => p.map((c) => c.role)), [['backup'], ['backup', 'cost']], 'B is never probed');
-  // The cost leg's own hold is the cheapest hour of the day: buying it back costs more than it saves.
-  assert.ok(r.cost!.heldImport == null || r.cost!.heldImport.netUsd! <= 0, `the mid-day hold nets ${r.cost!.heldImport?.netUsd}`);
+  // The cost leg's own hold under the fixture's sun sends nothing (the stated figure). Its sign alone
+  // proves nothing: at one rate the credit is 1 / (0.94 × 0.927) ≈ 1.15 × the import whenever nothing spills.
+  assert.equal(r.cost!.heldImport!.kwh, 0);
+  assert.deepEqual([r.cost!.heldImport!.fromMs, r.cost!.heldImport!.untilMs], [phx(10, 15, 10), phx(10, 15, 15)]);
   // The log, the ledger and the restart path carry all of it.
   const lines = middayShadowLogLines(r);
   assert.match(lines[0], /the reserve sends ~[\d.]+ kWh of house load to the grid \(median load and PV\), adding ~\$0\.\d\d to the bill/);

@@ -11,7 +11,7 @@
 
 **Release**
 
-- The documentation attached to each release, and the CI artifact, are named `Power-Documentation-v<version>.docx` and `.pdf` (were `EcoFlow-Panel-Documentation-…`).
+- The documentation attached to each release is named `Power-Documentation-v<version>.docx` and `.pdf`, and the files the CI documentation build produces `Power-Documentation.docx` and `.pdf` (were `EcoFlow-Panel-Documentation-…`).
 
 **Unchanged**
 
