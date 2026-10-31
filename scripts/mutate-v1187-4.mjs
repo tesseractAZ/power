@@ -297,8 +297,10 @@ const MUTANTS = [
   {
     id: 'C-i. ★★★ nothing carried: the clock restarts at the first projection (pre-v1.187.4)',
     file: SN,
-    find: '        this.backupPoolUnknownSinceBySn.set(sn, carried ?? nowMs);',
-    to: '        this.backupPoolUnknownSinceBySn.set(sn, nowMs); /* MUTANT */',
+    // v1.197.1 — re-pointed: the onset is the earlier of the carried one and the panel's first
+    // listing (a first projection after it was dark); the mutant drops the carried one.
+    find: '        this.backupPoolUnknownSinceBySn.set(sn, Math.min(carried ?? Infinity, listed ?? Infinity, nowMs));',
+    to: '        this.backupPoolUnknownSinceBySn.set(sn, Math.min(listed ?? Infinity, nowMs)); /* MUTANT */',
     why: 'An off-grid reserve-blind critical is absent 15 min after a restart, then a warning until boot + 60.',
   },
   {

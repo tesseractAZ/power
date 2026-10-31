@@ -1282,8 +1282,10 @@ export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS,
 /**
  * v1.195.0 — the reserve-blind onset of a panel with no projection (dark since the restart): the
  * onset the store would carry for it, when earlier than its first listing in this process, else that
- * listing. Read by its alert (secondaryPanelAlerts) and by the pending rule (darkPanelBlindRaised),
- * so the two cannot drift.
+ * listing. Read by its alert (secondaryPanelAlerts; v1.197.1 — and the pinned house panel's, in
+ * computeAlerts) and by the pending rule (darkPanelBlindRaised), so the two cannot drift. The store
+ * hands it over at the panel's first projection (SnapshotStore.applyBackupPoolGraceHold): a pool
+ * still unknown then keeps this onset, so the alarm is not withdrawn for 15 minutes at the hand-over.
  */
 function darkPanelBlindSince(
   sn: string,
@@ -1295,13 +1297,34 @@ function darkPanelBlindSince(
 }
 
 /**
+ * v1.197.1 — the PINNED house panel while it has no projection (dark since the restart: the cloud
+ * has not returned its body), else undefined. findShp2 resolves a flagged panel without a projection
+ * to nothing on purpose (no singleton path may stand another panel in for it) and secondaryPanels
+ * leaves the house panel out, so before v1.197.1 no reserve-blind alarm described the house pool
+ * while it was dark. Read by the house panel's reserve-alarm-blind (computeAlerts) and by the
+ * pending rule (darkPanelBlindRaised), so the two cannot drift. A pin MISSING from the account is
+ * not this — no panel carries the flag then, and the shp2-multi-panel critical stands — nor is a
+ * plant with no pin (findShp2 falls back to the lowest-serial projected panel; with none projected,
+ * every dark panel is a secondary one and raises its suffixed alarm). Pure.
+ */
+function pinnedDarkHousePanel(devices: Record<string, DeviceSnapshot>): DeviceSnapshot | undefined {
+  for (const d of Object.values(devices)) {
+    if (d.housePanel === true) return d.projection?.kind === 'shp2' ? undefined : d;
+  }
+  return undefined;
+}
+
+/**
  * v1.195.0 — the panels dark since the restart whose reserve-alarm-blind computeAlerts raises at
  * `nowMs`: every panel other than the house panel (secondaryPanels) with no projection, once its
  * onset (darkPanelBlindSince) has stood RESERVE_BLIND_AFTER_MS — the alert's own comparison. Such a
- * panel's carried onset withholds nothing from the set: its alarm is there. The HOUSE panel has no
- * reserve-blind alarm while it has no projection (findShp2 resolves a flagged panel without one to
- * nothing, and secondaryPanels leaves it out), so it is never in this set: its carried onset stays
- * pending until its first projection. Pure.
+ * panel's carried onset withholds nothing from the set: its alarm is there.
+ * v1.197.1 — and the PINNED house panel with no projection (pinnedDarkHousePanel), whose own
+ * reserve-alarm-blind computeAlerts now raises from the same onset by the same comparison. Before,
+ * the house panel had no alarm while dark and was never in this set, so its carried onset kept the
+ * alert set unsettled for as long as it stayed dark. A pinned panel MISSING from the account is not
+ * in it (it has no reserve-blind alarm: the shp2-multi-panel critical stands) and stays pending until
+ * it reports. Pure.
  */
 export function darkPanelBlindRaised(
   devices: Record<string, DeviceSnapshot>,
@@ -1309,7 +1332,8 @@ export function darkPanelBlindRaised(
   nowMs: number,
 ): Set<string> {
   const out = new Set<string>();
-  for (const panel of secondaryPanels(devices)) {
+  const darkHouse = pinnedDarkHousePanel(devices);
+  for (const panel of darkHouse ? [...secondaryPanels(devices), darkHouse] : secondaryPanels(devices)) {
     if (panel.projection?.kind === 'shp2') continue;
     const since = darkPanelBlindSince(panel.sn, connectivity);
     if (since != null && Number.isFinite(since) && nowMs - since >= RESERVE_BLIND_AFTER_MS) out.add(panel.sn);
@@ -1356,7 +1380,8 @@ export function debouncedOnsetsPending(
   // its first projection may raise reserve-alarm-blind at once (carried), so a green read before it
   // is not an all-clear. Bounded by the carry window (SnapshotStore.poolUnknownCarryPending).
   // v1.195.0 — …until the alert it would raise is raised already: a panel dark since the restart
-  // whose own reserve-alarm-blind stands from that onset (darkPanelBlindRaised) withholds nothing.
+  // whose own reserve-alarm-blind stands from that onset (darkPanelBlindRaised) withholds nothing
+  // (v1.197.1: the pinned house panel's too).
   // A panel dark for weeks (its onset now carried past 7 days, POOL_UNKNOWN_MAX_EPISODE_MS) would
   // otherwise keep the set unsettled for as long as it stays dark.
   const raised = devices != null ? darkPanelBlindRaised(devices, connectivity, nowMs) : new Set<string>();
@@ -2694,20 +2719,32 @@ export function computeAlerts(
   // a blind reserve alarm is genuinely dangerous) — the severity escalation
   // re-triggers the push channel via the alert monitor's escalation path. Listed
   // in ENERGY_STATE_FAMILIES so the auto-silencer can never eat it.
-  if (shp2) {
+  // v1.197.1 — and the PINNED house panel with NO projection (pinnedDarkHousePanel: the cloud has
+  // not returned its body since the restart). findShp2 resolves it to nothing and secondaryPanels
+  // leaves it out, so its pool had no reserve-blind alarm at all while dark. It raises this alarm —
+  // the same id, words, debounce and escalation — from darkPanelBlindSince, the onset a dark
+  // secondary panel's alarm and the pending rule read; the panel's first projection hands over to
+  // the pool's own clock (the store keeps that onset while the pool still reads unknown).
+  const darkHouse = shp2 ? undefined : pinnedDarkHousePanel(devices);
+  const blindHouse = shp2 ?? darkHouse;
+  if (blindHouse) {
     // v1.185.0 — this pool's OWN grid verdict (its panel alone) on a multi-panel plant; one panel: `grid`.
-    const grid = housePoolGrid;
-    const sp2 = shp2.projection?.kind === 'shp2' ? (shp2.projection as Shp2Projection) : null;
+    const grid = darkHouse && poolGrid ? poolGrid(darkHouse.sn) : housePoolGrid;
+    const sp2 = blindHouse.projection?.kind === 'shp2' ? (blindHouse.projection as Shp2Projection) : null;
     const poolNull = sp2 == null || sp2.backupBatPercent == null;
     let blindSinceMs: number | null = null;
-    if (poolNull) {
+    if (darkHouse) {
+      // v1.197.1 — no projection: never its lastUpdated (0, nothing has updated it), which would
+      // read as blind since 1970.
+      blindSinceMs = darkPanelBlindSince(darkHouse.sn, connectivity);
+    } else if (poolNull) {
       // Pool published as unknown — onset tracked by the snapshot store
       // (post-grace-hold). Fallback to lastUpdated when the context is absent.
-      blindSinceMs = connectivity?.backupPoolUnknownSinceMs ?? shp2.lastUpdated ?? null;
-    } else if (!shp2.online) {
+      blindSinceMs = connectivity?.backupPoolUnknownSinceMs ?? blindHouse.lastUpdated ?? null;
+    } else if (!blindHouse.online) {
       // Cloud says the SHP2 is offline: the projection (incl. the pool %) is a
       // FROZEN last-known value, not live truth. Blind since the last fresh data.
-      blindSinceMs = shp2.lastUpdated ?? null;
+      blindSinceMs = blindHouse.lastUpdated ?? null;
     }
     const blindMs = blindSinceMs != null ? now - blindSinceMs : 0;
     if (blindSinceMs != null && blindMs >= RESERVE_BLIND_AFTER_MS) {
@@ -2725,7 +2762,7 @@ export function computeAlerts(
         id: 'reserve-alarm-blind',
         severity: critical ? 'critical' : 'warning',
         category: 'Connectivity',
-        device: shp2.deviceName,
+        device: blindHouse.deviceName,
         title: critical ? 'Reserve alarm blind — off-grid' : 'Reserve alarm blind',
         detail: `SHP2 backup-pool telemetry has been unreadable for ${fmtAge(blindMs)} — the reserve/runway alarms cannot see the pool. ${fallbackTxt}${offGrid ? '' : ' The grid is available as backup, so a low pool would transfer to mains.'} If this persists, power-cycle the SHP2 network connection.`,
         facts: [

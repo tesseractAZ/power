@@ -750,8 +750,11 @@ dark for weeks keeps its onset), and a file found in a directory this process ca
 (`poolUnknownDirWritable`, a read-only `/data`) is not carried and never written back: its
 panels stay pending (`poolUnknownCarryPending`) with no carried onset (`poolUnknownCarried`), so a
 dark panel is blind since its first listing in this process; the alert set lets one go as for a
-carried onset (`alerts.darkPanelBlindRaised`: the house panel once it reports, any other once it
-reports or its own alarm stands).
+carried onset (`alerts.darkPanelBlindRaised`: once it reports or its own alarm stands; since
+v1.197.1 the pinned house panel's too, which before had no alarm while dark and went only once it
+reported). Since v1.197.1 a panel's first projection that reads the pool unknown keeps the onset
+its dark alarm read (the earlier of the carried onset and its first listing, on the store's
+clock), instead of starting the clock at that projection.
 
 ---
 
@@ -888,7 +891,9 @@ A second SHP2 is supported. Its model:
   the house panel's own Cores (`panelMeanSoc` over `panelRoster`, so a house panel dark since a
   restart still reads its own) — null when no roster is known, never the union. Secondary ladders
   (every secondary panel, projected or not) fall back to their own Cores, and a secondary panel
-  with no projection raises `reserve-alarm-blind-<serial>` from when it was first listed.
+  with no projection raises `reserve-alarm-blind-<serial>` from when it was first listed. Since
+  v1.197.1 the pinned house panel with no projection raises the house's own `reserve-alarm-blind`
+  the same way (`findShp2` still resolves it to nothing).
 - **Plant totals.** `aggregateFleetFlow.panelLoad` sums every panel's circuits (the flows were
   already the union roster); the web flow model does the same and freezes the load if any panel
   is frozen. `publishReadiness.flow` waits until every panel in the census has a projection.

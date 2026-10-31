@@ -751,7 +751,11 @@ export class SnapshotStore extends EventEmitter {
       }
       if (pruned) this.writeGridReadings();
     }
-    for (const sn of seenThisList) if (!this.firstListedAtBySn.has(sn)) this.firstListedAtBySn.set(sn, now);
+    // v1.197.1 — on the store's clock (Date.now in production, as `now`): a panel's first projection
+    // hands its pool-unknown onset over from this listing (applyBackupPoolGraceHold), and those
+    // onsets are kept on that clock.
+    const listedAtMs = this.now();
+    for (const sn of seenThisList) if (!this.firstListedAtBySn.has(sn)) this.firstListedAtBySn.set(sn, listedAtMs);
     this.applyHousePanel(true);
     this.snap.generatedAt = now;
     this.emit('change', this.snap);
@@ -898,6 +902,8 @@ export class SnapshotStore extends EventEmitter {
   private applyBackupPoolGraceHold(sn: string, proj: Projection | undefined): void {
     if (!proj || proj.kind !== 'shp2') return;
     const live = { pct: proj.backupBatPercent, fullCapWh: proj.backupFullCapWh, remainWh: proj.backupRemainWh };
+    // v1.197.1 — no earlier projection of this panel in this process has passed here.
+    const firstProjection = !this.backupPoolHoldBySn.has(sn);
     const { out, hold, source } = backupPoolWithGraceHold(live, this.backupPoolHoldBySn.get(sn) ?? null, this.now());
     this.backupPoolHoldBySn.set(sn, hold);
     proj.backupBatPercent = out.pct;
@@ -918,7 +924,13 @@ export class SnapshotStore extends EventEmitter {
       if (!this.backupPoolUnknownSinceBySn.has(sn)) {
         // v1.195.0 — never from a file this process could not keep current (poolUnknownUntrusted).
         const carried = this.poolUnknownUntrusted ? null : carriedPoolUnknownSince(onDisk, nowMs);
-        this.backupPoolUnknownSinceBySn.set(sn, carried ?? nowMs);
+        // v1.197.1 — at its FIRST projection here, a panel listed earlier has been dark since that
+        // listing, and its dark alarm said so (alerts.darkPanelBlindSince: the earlier of the carried
+        // onset and the first listing). The clock goes on from that onset: restarted at this
+        // projection, the alarm was withdrawn (a "Resolved" push) and back 15 minutes later, a
+        // warning again until 60 minutes after this projection, though it had been critical.
+        const listed = firstProjection ? this.firstListedAtBySn.get(sn) : undefined;
+        this.backupPoolUnknownSinceBySn.set(sn, Math.min(carried ?? Infinity, listed ?? Infinity, nowMs));
         changed = true;
         if (carried != null) {
           this.logger(`backup-pool: unknown since ${Math.round((nowMs - carried) / 60_000)} min ago, before the restart (last seen unknown ${Math.round((nowMs - onDisk!.lastSeenMs) / 1000)} s ago) — the reserve-blind clock carries it, not restarted (sn=${sn})`);
@@ -944,7 +956,8 @@ export class SnapshotStore extends EventEmitter {
    *  alert set is not settled before it (alerts.debouncedOnsetsPending). Sorted by serial.
    *  v1.195.0 — whether or not the file is trusted (poolUnknownUntrusted): a panel that has not
    *  reported is pending either way. (The alert set's rule lets a dark panel other than the house
-   *  panel go once its own alarm stands: alerts.darkPanelBlindRaised.) */
+   *  panel go once its own alarm stands: alerts.darkPanelBlindRaised; v1.197.1 — the pinned house
+   *  panel too, whose own alarm is raised while it is dark.) */
   poolUnknownCarryPending(): string[] {
     return [...this.pendingPoolUnknown().keys()].sort();
   }
@@ -981,11 +994,12 @@ export class SnapshotStore extends EventEmitter {
     // removes the file (writePoolUnknown), but on a read-only /data the unlink fails too, and the
     // file keeps an onset the previous process may have retired: carried, a pool that read again
     // after the last save raised an off-grid critical "unreadable for 2 h" at the first projection.
-    // The panels stay pending (poolUnknownCarryPending) until they report — the house panel; any other
-    // until its own alarm, timed from its first listing in this process, stands (darkPanelBlindRaised).
+    // The panels stay pending (poolUnknownCarryPending) until they report or their own alarm, timed
+    // from the first listing in this process, stands (darkPanelBlindRaised; v1.197.1 — the house
+    // panel's too: before, it stayed pending until it reported).
     if (this.poolUnknownOnDisk.size > 0 && !poolUnknownDirWritable(this.poolUnknownPath)) {
       this.poolUnknownUntrusted = true;
-      this.poolUnknownLoadNote = `backup-pool: ${this.poolUnknownOnDisk.size} pool-unknown onset(s) on file are not carried — ${dirname(this.poolUnknownPath)} cannot be written (read-only?), so the file may hold an onset that cleared after its last save; each panel's reserve-blind clock starts in this process (at its first projection, or at its first listing while it stays dark), and the alert set waits until the house panel reports and each other panel reports or its own alarm stands`;
+      this.poolUnknownLoadNote = `backup-pool: ${this.poolUnknownOnDisk.size} pool-unknown onset(s) on file are not carried — ${dirname(this.poolUnknownPath)} cannot be written (read-only?), so the file may hold an onset that cleared after its last save; each panel's reserve-blind clock starts in this process (at its first listing, for a pool not read since), and the alert set waits until each panel reports or its own alarm stands`;
     }
   }
 

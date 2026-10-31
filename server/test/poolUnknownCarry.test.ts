@@ -17,6 +17,9 @@
  * lost its onset at every restart); a dark panel is pending only until its own carried alarm is
  * raised (the house panel has none while dark); and a file in a directory this process cannot write
  * (a read-only /data) is not carried, keeps its panels pending, and is never written back.
+ *
+ * v1.197.1 — the pinned house panel with no projection raises its own reserve-blind alarm, so it is
+ * pending only until that alarm is raised, as any other panel (houseReserveBlindDark.test.ts).
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -382,7 +385,7 @@ test('★★ v1.195.0: a dark panel whose carried alarm is raised is no longer p
   });
 });
 
-test('★★ v1.195.0: the PINNED house panel dark since the restart has no reserve-blind alarm, so its carried onset stays pending until it reports — a week on too', () => {
+test('★★ v1.197.1: the PINNED house panel dark since the restart raises its own reserve-blind alarm from the carried onset — critical at once, a week on too — and is not pending once it stands (it had none and stayed pending until it reported)', () => {
   withPath('dark-house.json', () => {
     const a = proc(T0);
     a.read(T0, UNKNOWN);
@@ -391,16 +394,19 @@ test('★★ v1.195.0: the PINNED house panel dark since the restart has no rese
     const boot = last + 2 * MIN;
     const b = pinnedProc(boot);
     assert.equal(b.s.get().devices[PANEL].housePanel, true, 'the house panel');
-    assert.equal(blindDark(b.s, boot + 3 * MIN, boot), undefined, 'no alarm describes its pool while it has no projection');
-    assert.deepEqual(pendingAt(b.s, boot + 3 * MIN, boot), [PENDING_LINE], '★ so it stays pending: a green read now is not an all-clear');
-    assert.deepEqual([...darkPanelBlindRaised(b.s.get().devices, { poolUnknownCarriedSinceBySn: b.s.poolUnknownCarried() }, boot + 3 * MIN)], []);
+    const dark = blindDark(b.s, boot + 3 * MIN, boot);
+    assert.equal(dark?.id, 'reserve-alarm-blind', '★ the house panel\'s own alarm (v1.197.0: none while it had no projection)');
+    assert.equal(dark?.severity, 'critical', 'off-grid, from the 8-day carried onset');
+    assert.match(dark!.detail, /unreadable for 8 d/);
+    assert.deepEqual(pendingAt(b.s, boot + 3 * MIN, boot), [], '★ its alarm stands, so its carried onset withholds nothing');
+    assert.deepEqual([...darkPanelBlindRaised(b.s.get().devices, { poolUnknownCarriedSinceBySn: b.s.poolUnknownCarried() }, boot + 3 * MIN)], [PANEL]);
     b.read(boot + 4 * MIN, UNKNOWN);
     assert.deepEqual(b.s.poolUnknownCarryPending(), [], 'consumed by its first projection');
     assert.equal(blind(b.s, boot + 4 * MIN)?.severity, 'critical', 'which carries the 8-day onset');
   });
 });
 
-test('darkPanelBlindRaised — panels other than the house panel with no projection, once the earlier of the carried onset and the first listing has stood 15 min (inclusive)', () => {
+test('darkPanelBlindRaised — panels with no projection other than the house panel, and the pinned house panel (v1.197.1), once the earlier of the carried onset and the first listing has stood 15 min (inclusive)', () => {
   const OTHER = 'PANEXXX00XXX0002';
   const panel = (sn: string, extra: Record<string, unknown> = {}) => ({ sn, deviceName: sn, productName: 'Smart Home Panel 2', online: true, lastUpdated: 0, ...extra });
   const devices = { [PANEL]: panel(PANEL), [OTHER]: panel(OTHER) } as any;
@@ -411,8 +417,13 @@ test('darkPanelBlindRaised — panels other than the house panel with no project
   assert.deepEqual(raised({ panelFirstListedBySn: new Map([[OTHER, now - 20 * MIN]]) }), [OTHER], 'no carried onset: from its first listing');
   assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - MIN]]), panelFirstListedBySn: new Map([[PANEL, now - 20 * MIN]]) }), [PANEL],
     'the earlier of the two, as the alarm reads it');
-  assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - 60 * MIN]]) }, { ...devices, [PANEL]: panel(PANEL, { housePanel: true }) }), [],
-    'the house panel: no alarm while dark');
+  assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - 60 * MIN]]) }, { ...devices, [PANEL]: panel(PANEL, { housePanel: true }) }), [PANEL],
+    'v1.197.1 — the pinned house panel: its own alarm is raised from the same onset (none before, so never in the set)');
+  assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - 15 * MIN + 1]]) }, { ...devices, [PANEL]: panel(PANEL, { housePanel: true }) }), [],
+    'the pinned house panel: the same 15 minutes');
+  assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - 60 * MIN]]) }, {
+    [PANEL]: panel(PANEL, { housePanelMissing: PANEL }), [OTHER]: panel(OTHER, { housePanelMissing: PANEL, projection: { kind: 'shp2' } }),
+  }), [], 'a pinned panel MISSING from the account has no reserve-blind alarm: never in the set');
   assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - 60 * MIN]]) }, { [PANEL]: panel(PANEL, { projection: { kind: 'shp2' } }) }), [],
     'a projected panel is not dark: its own pool clock decides');
   assert.deepEqual(raised({}), [], 'no onset at all');
