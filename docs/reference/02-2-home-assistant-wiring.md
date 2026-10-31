@@ -84,8 +84,9 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
 
 #### Entity categories
 
-`SENSORS[]` (87) and `BINARY_SENSORS[]` (11), plus the four alarm-priority switches and two
-dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). Selected groups:
+`SENSORS[]` (88) and `BINARY_SENSORS[]` (12), plus the four alarm-priority switches, the End All
+Maintenance button (v1.197.0) and two dynamic sensors per SHP2 circuit (energy and power; 24 on a
+12-channel panel). Selected groups:
 
 - **Power flow:** `fleet_pv_watts`, `panel_load_watts`, `ac_import_watts`,
   `fleet_battery_net_watts`, `grid_home_watts` (SHP2 `gridWatt`). Fleet PV and Battery
@@ -313,7 +314,7 @@ all. So:
 |---|---|---|
 | availability `online` | **reconnects only**, first (v1.187.10) | a retained LWT `offline` holds every entity unavailable regardless of what follows (live: 9+ h, 2026-07-12). On the process's first connect it is asserted by the state cycle, right after the fresh payload (see Availability + expiry) |
 | `clearLegacyDiscovery()` | **no — once** | empty payloads to *retired* config topics need saying once; repeating them forever is traffic that never stops |
-| `publishDiscovery()` | yes | 102 retained publishes of unchanged payloads (87 sensors, 11 binary sensors, 4 switches); HA re-processes them as no-ops |
+| `publishDiscovery()` | yes | 105 retained publishes of unchanged payloads (88 sensors, 12 binary sensors, 4 switches, 1 button); HA re-processes them as no-ops |
 | invalidate circuit signature | yes | the per-circuit configs are retained on the same broker and vanish with the same store |
 | `publishedCircuitChannels` | **never reset** | not a latch — it is the *orphan ledger*, the memory of which circuits to clear a config topic for. Reset it and a removed circuit's retained config sits on the broker forever with nothing left to remove it |
 | switch subscriptions | yes | MQTT subscriptions do not survive a clean-session reconnect |

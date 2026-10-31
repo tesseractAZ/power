@@ -717,6 +717,23 @@ test('the <p> placeholder is the alarm-priority order, and discoveryUniqueIds co
   assert.deepEqual([...components].sort(), ['binary_sensor', 'button', 'sensor', 'switch']);
 });
 
+test('the engineering reference states the static discovery counts the tables hold (v1.197.0 review)', () => {
+  // v1.197.0 (review) — three statements kept 87 sensors and 11 binary sensors (and 102 publishes) after
+  // the maintenance entities were added; nothing pinned them.
+  const S = SENSORS.length;
+  const BS = BINARY_SENSORS.length;
+  const SW = ALARM_PRIORITY_ORDER.length;
+  const BUTTONS = 1; // the End-all-maintenance button (the component list above)
+  const wiring = readFileSync(join(ROOT, 'docs', 'reference', '02-2-home-assistant-wiring.md'), 'utf8');
+  assert.ok(wiring.includes(`\`SENSORS[]\` (${S}) and \`BINARY_SENSORS[]\` (${BS})`), `02-2: the entity categories name ${S} sensors and ${BS} binary sensors`);
+  assert.ok(
+    wiring.includes(`${S + BS + SW + BUTTONS} retained publishes of unchanged payloads (${S} sensors, ${BS} binary sensors, ${SW} switches, ${BUTTONS} button)`),
+    `02-2: publishDiscovery() makes ${S + BS + SW + BUTTONS} retained publishes`,
+  );
+  const inventory = readFileSync(join(ROOT, 'docs', 'reference', 'A-feature-inventory.md'), 'utf8');
+  assert.ok(inventory.includes(`| MQTT discovery entity set | ${S} sensors + ${BS} binary sensors in the static tables`), `A: the inventory names ${S} sensors and ${BS} binary sensors`);
+});
+
 /* ── the scanner and the slugger ────────────────────────────────────────── */
 
 test('slugs match the ids GitHub gives this repository\'s headings', () => {
