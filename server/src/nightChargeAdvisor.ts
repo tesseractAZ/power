@@ -54,6 +54,12 @@
  * its sizing basis is unchanged, and a source-pin test keeps the runway's basis out
  * of this module — so its trough and the runway's projection are no longer the
  * same number.
+ * v1.194.0 — a POSITIVE change is a surplus the Cores charge the cells with, and it is
+ * stored at legEff (chargeLegStep, physics/chargeLeg.ts): every walk here (simulate, the
+ * with-buy window walk, expectedCarryKwh, expectedPvChargeWalk, expectedForceChargeStart)
+ * credited it at unity before, which put the sizing trough above what the packs would hold.
+ * A buy rises or stays — over a year of plans none fell (legacyIdentity.test.ts pins the
+ * direction). The runway's walks take the same leg (√RTE, analytics.ts's own constant).
  * ═════════════════════════════════════════════════════════════════════════ */
 
 // The ONE definition of the reserve-write bound ([10,50], the device's own
@@ -75,6 +81,9 @@ import { resolveCheapWindow, legObjective, legForceChargeEligible, type ChargeWi
 import { taperCeilingKwh } from './chargeTaper.js';
 // v1.191.0 (lane A, T5/T10) — window text and plan-date bounds in the site zone.
 import { fmtSiteDayHm, siteDayStartMs } from './siteTime.js';
+// v1.194.0 — the charge leg of every walk below (physics/chargeLeg.ts imports nothing — no cycle, and
+// none of analytics.ts's runway basis).
+import { chargeLegStep } from './physics/chargeLeg.js';
 export { resolveCheapWindow } from './chargeWindows.js';
 
 const HOUR_MS = 3_600_000;
@@ -197,7 +206,8 @@ export interface NightChargeInputs {
 
   // ── Efficiency (verified constants, injected — never hard-coded here) ──
   /** Charge-leg efficiency = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927. The pack
-   *  gains legEff of grid energy diverted to the charger. */
+   *  gains legEff of grid energy diverted to the charger — and, v1.194.0, of a PV surplus in
+   *  every walk (chargeLegStep). */
   legEff: number;
   /** Discharge DC-bus efficiency = RUNWAY_DISCHARGE_EFFICIENCY ≈ 0.94. */
   dischargeEff: number;
@@ -556,12 +566,15 @@ interface SimResult {
 /** Walk the DC-bus recurrence from startPackKwh across `hours`, tracking the
  *  minimum pack over [scoreFromMs, ∞) and the pack level AT `markMs`.
  *  Recurrence pv − load/η, clamp [0,full] (the planner's own; see the header for
- *  how it differs from the runway's since v1.187.19). */
+ *  how it differs from the runway's since v1.187.19). v1.194.0 — a surplus hour's net is stored
+ *  at `chargeEff` (chargeLegStep; legEff), a deficit hour's taken as it is. */
 function simulate(
   startPackKwh: number,
   fullKwh: number,
   hours: NightChargeHour[],
   dischargeEff: number,
+  /** v1.194.0 — the charge leg a P10 PV surplus goes into the cells at (legEff). */
+  chargeEff: number,
   scoreFromMs: number,
   markMs: number,
   /** R2 — an armed backup leg: entering the first hour at/after `atMs` (its window close) the
@@ -590,7 +603,7 @@ function simulate(
       packAtMarkWh = packWh;
       markCaptured = true;
     }
-    packWh = Math.max(0, Math.min(fullWh, packWh + (h.pvP10W - h.loadP90W / dischargeEff)));
+    packWh = Math.max(0, Math.min(fullWh, packWh + chargeLegStep(h.pvP10W - h.loadP90W / dischargeEff, chargeEff)));
     if (h.ts >= scoreFromMs && packWh < minPackWh) {
       minPackWh = packWh;
       minTsMs = h.ts;
@@ -712,7 +725,8 @@ function hoursByEpoch(hours: ReadonlyArray<NightChargeHour>): Map<number, NightC
 
 /**
  * v1.187.22 — PURE. The EXPECTED pack (kWh) at `toMs`: a GRID-PRESENT carry from `fromMs` on the
- * median forecast — each hour pvP50W − loadP50W / dischargeEff, weighted by the part of the hour
+ * median forecast — each hour pvP50W − loadP50W / dischargeEff (v1.194.0: a surplus stored at
+ * legEff, chargeLegStep), weighted by the part of the hour
  * inside [fromMs, toMs) (the elapsed part of the current hour has already happened: the SoC now
  * reflects it; an in-progress hour missing from the band is carried at the next hour's figures,
  * p50HourAt) — clamped to [floor, full]. The floor is the reserve the SHP2 holds while the grid
@@ -727,6 +741,8 @@ export function expectedCarryKwh(o: {
   fullKwh: number;
   reserveKwh: number;
   dischargeEff: number;
+  /** v1.194.0 — the charge leg a P50 PV surplus goes into the cells at (chargeLegStep). */
+  legEff: number;
   hours: ReadonlyArray<NightChargeHour>;
   fromMs: number;
   toMs: number;
@@ -746,7 +762,7 @@ export function expectedCarryKwh(o: {
     if (h == null) return null;
     const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
     const slotFloor = hold != null && slot < hold.untilMs ? Math.max(floor, Math.min(o.fullKwh, hold.kwh)) : floor;
-    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000));
+    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + chargeLegStep((w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000, o.legEff)));
   }
   return pack;
 }
@@ -810,7 +826,8 @@ function p50PvW(h: NightChargeHour): number {
  * completes. Walked minute by minute from `fromMs` on the MEDIAN basis, the way a write charges
  * (the reserve leg below the written reserve, or the force-charge): the house on the grid, the grid
  * charging at the hour's median contended rate × legEff (gridGainKw against `acceptKw`), the P50 PV
- * going into the pack on top, until the pack has gained `liftKwh` or the window closes. The grid buys
+ * going into the pack on top (v1.194.0: × legEff, through the same charge leg), until the pack has
+ * gained `liftKwh` or the window closes. The grid buys
  * `liftKwh` less `creditKwh`; `doneMs` is when the lift is complete (the window close if it is not).
  *
  * `creditKwh` is 0 with no PV in the span — the figure before R2, which had the grid supply every
@@ -839,7 +856,7 @@ export function expectedPvChargeWalk(o: {
     const dtH = Math.min(EXPECTED_JIT_STEP_MS, o.windowEndMs - t) / HOUR_MS;
     const pvW = p50PvW(h);
     const gainKw = gridGainKw(p50ChargeRateKw(h.loadP50W!, o.chargeCapKw, o.envelopeKw) * o.legEff, pvW, o.acceptKw);
-    const pvStep = Math.min((pvW / 1000) * dtH, o.liftKwh - gained);
+    const pvStep = Math.min(chargeLegStep((pvW / 1000) * dtH, o.legEff), o.liftKwh - gained);
     const gridStep = Math.min(gainKw * dtH, o.liftKwh - gained - pvStep);
     gained += pvStep + gridStep;
     credit += pvStep;
@@ -857,7 +874,8 @@ const EXPECTED_JIT_STEP_MS = 60_000;
  * stop nothing starts; below it, the force-charge starts once the clock reaches
  * forceChargeStartAtMs(window end, the armed ceiling, the pool %, fullKwh, the rate, the EV
  * displacement) — never inside the last FORCE_CHARGE_MIN_RUN_MS. Until then the house runs from the
- * pool (pvP50W − loadP50W / dischargeEff), held at the written reserve `reserveKwh` (the SHP2 holds
+ * pool (pvP50W − loadP50W / dischargeEff; v1.194.0: a surplus stored at legEff), held at the written
+ * reserve `reserveKwh` (the SHP2 holds
  * it with the grid present). The rate is the hour's median contended rate × legEff (what
  * forceChargeRateKw reads live: the grid cap less the house load, through the charge leg; no
  * envelope ⇒ unknown, and forceChargeStartAtMs plans with its fixed rate, as the live tick does).
@@ -909,7 +927,7 @@ export function expectedForceChargeStart(o: {
       }
     }
     const pv = h.pvP50W != null && Number.isFinite(h.pvP50W) ? h.pvP50W : h.pvP10W;
-    pack = Math.max(floor, Math.min(o.fullKwh, pack + ((pv - loadW / o.dischargeEff) / 1000) * (EXPECTED_JIT_STEP_MS / HOUR_MS)));
+    pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff) / 1000) * (EXPECTED_JIT_STEP_MS / HOUR_MS), o.legEff)));
   }
   return { packKwh: pack, startMs: null };
 }
@@ -1259,11 +1277,11 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // the conservative (over-buy) direction, consistent with buildInputs' trim.
   const simFromMs = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
   const preHorizon = horizon.filter((h) => h.ts >= simFromMs);
-  const baseline = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, windowEnd, windowEnd, holdLift);
+  const baseline = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, legEff, windowEnd, windowEnd, holdLift);
   const packAtWindowEnd_noBuy = baseline.packAtMarkKwh;
   // v1.49.0 — pack level ENTERING the window (carry to window OPEN), the anchor
   // for the lift-aware window model below.
-  const packAtWindowStartKwh = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, windowStart, windowStart, holdLift).packAtMarkKwh;
+  const packAtWindowStartKwh = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, legEff, windowStart, windowStart, holdLift).packAtMarkKwh;
 
   // v1.39.0 (§4 honesty): the PRE-WINDOW carry — pack path from now to the
   // window OPEN. A tonight buy cannot prevent a pre-window dip (the floor alarm
@@ -1284,7 +1302,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     const preWindow = simulate(
       socNowKwh, fullKwh,
       horizon.filter((h) => h.ts >= simFromMs && h.ts < windowStart),
-      dischargeEff, 0, windowStart, holdLift,
+      dischargeEff, legEff, 0, windowStart, holdLift,
     );
     projSocAtWindowStartPct = round1((preWindow.packAtMarkKwh / fullKwh) * 100);
     preWindowMinSocPct = round1((preWindow.minPackKwh / fullKwh) * 100);
@@ -1316,7 +1334,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const expectedStartKwh: number | null = midWindow
     ? socNowKwh
     : expectedCarryKwh({
-      startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: nowMs, toMs: windowStart,
+      startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, legEff, hours: horizon, fromMs: nowMs, toMs: windowStart,
       ...(holdLift != null ? { hold: { kwh: holdLift.minKwh, untilMs: holdLift.atMs } } : {}),
     });
   const expectedStartSocPct = expectedStartKwh == null ? null : round1((expectedStartKwh / fullKwh) * 100);
@@ -1467,7 +1485,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       remainingLift = Math.max(0, remainingLift - gainKwh);
       const pvKwh = h.pvP10W / 1000;
       const drainKwh = ((h.loadP90W / 1000) * (1 - chargeFrac)) / dischargeEff;
-      pack = Math.max(0, Math.min(fullKwh, pack + pvKwh + gainKwh - drainKwh));
+      // v1.194.0 — the P10 PV beyond the hour's drain reaches the cells through the charge leg
+      // (chargeLegStep × legEff), as in simulate(); the grid gain is already pack-side (× legEff).
+      pack = Math.max(0, Math.min(fullKwh, pack + gainKwh + chargeLegStep(pvKwh - drainKwh, legEff)));
     }
     return pack;
   };
@@ -1475,7 +1495,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
    *  (minProjSocPct / baselineMinSocPct): it is still the honest answer to "what
    *  if the whole house ran off the pack", it is just not the cushion test. */
   const houseTroughAtLift = (lift: number): { minKwh: number; minTs: number | null } => {
-    const r = simulate(packAtWindowEndWith(lift), fullKwh, postHours, dischargeEff, windowEnd, windowEnd);
+    const r = simulate(packAtWindowEndWith(lift), fullKwh, postHours, dischargeEff, legEff, windowEnd, windowEnd);
     return { minKwh: r.minPackKwh, minTs: r.minTsMs };
   };
 
@@ -1819,7 +1839,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // monotone non-decreasing in P — the sim's [0, full] clamps preserve order —
   // so the bisection is exact.
   const troughFromPack = (p: number): number =>
-    simulate(p, fullKwh, postHours, dischargeEff, windowEnd, windowEnd).minPackKwh;
+    simulate(p, fullKwh, postHours, dischargeEff, legEff, windowEnd, windowEnd).minPackKwh;
   let requiredPackAtWindowEndKwh: number;
   if (baselineHolds && !midday) {
     // v1.174.0 — an economic-only night (cost mode; floor+cushion holds with no buy): the
@@ -2785,6 +2805,15 @@ export function actuatedRealizedNeedBuyKwh(opts: {
  * plan — an under-buy, negative, preserving the existing sign convention that
  * `buy_err < 0` is the asymmetric safety miss. It contains no delivered term,
  * no trough, and no reverted setpoint: it measures the planner and nothing else.
+ *
+ * v1.194.0 — the conversion is fixed, the planner's is not. Since the charge leg
+ * (chargeLegStep) the planner stores a surplus hour's PV at legEff, so a PV miss
+ * inside a surplus hour moves its own buy by 1 kWh per kWh missed; this formula
+ * still says 1/legEff, about 7.8 % more, in both directions (a cloudy day scores a
+ * deeper under-buy, a sunny one a larger over-buy). A deficit hour's PV miss is
+ * converted exactly. The formula is kept so every algo-v3 row is scored alike
+ * (nightChargeGate.ts, CURRENT_ALGO_VERSION); runwayChargeLeg.test.ts works both
+ * hours on the planner.
  */
 /**
  * v1.106.0 — a CALIBRATED half-width for the load band, from realized error.

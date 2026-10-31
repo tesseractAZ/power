@@ -492,7 +492,7 @@ const ROWS: readonly OptionRow[] = [
     doc: 'SoC alarm rungs, pct:tier per entry (pct 1..99, tier low|medium|high|critical); absent or no valid rung keeps 50/40/30/20/15/10/8/4/2.',
     parse: (raw) => raw }),
   row({ name: 'DISPATCH_ROUND_TRIP_EFFICIENCY', source: 'env-only', canonicalReader: 'analytics.ts:DISPATCH_ROUND_TRIP_EFFICIENCY', clamp: { min: 0.8, max: 1 },
-    doc: 'Round-trip efficiency for the night-charge sizing, clamped; blank or NaN reads as 0.86 (OWNER DECISION 9 keeps 0.86 beside the MPC 0.9).', parse: (raw) => Math.min(1, Math.max(0.8, Number(raw ?? 0.86) || 0.86)) }),
+    doc: 'Round-trip efficiency for the night-charge sizing, clamped; blank or NaN reads as 0.86 (OWNER DECISION 9 keeps 0.86 beside the MPC 0.9). Its square root is also the charge efficiency the runway, the SoC projections and the night-charge walks apply to a PV surplus (v1.194.0).', parse: (raw) => Math.min(1, Math.max(0.8, Number(raw ?? 0.86) || 0.86)) }),
   row({ name: 'MPC_ROUND_TRIP_EFFICIENCY', source: 'env-only', canonicalReader: 'dispatch/mpc.ts:ROUND_TRIP_EFFICIENCY', doc: 'Round-trip efficiency for the MPC. Bare Number().', parse: numOr(0.9) }),
 
   // ── Devices (v1.191.0 lane D, S8): schema-only, exported under has_value — absent unless set, so unset = today ──

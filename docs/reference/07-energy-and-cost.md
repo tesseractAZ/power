@@ -1114,6 +1114,12 @@ legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927       // η_chg = η_dis; n
 > RUNWAY_DISCHARGE_EFFICIENCY` — a round trip's per-leg efficiency never exceeds the
 > measured single discharge leg.
 
+Since v1.194.0 the same `legEff` is also the charge leg of the runway (the alarm path), the day
+and multi-day SoC projections and the probabilistic band (`RUNWAY_CHARGE_EFFICIENCY` in
+`analytics.ts`), and of every night-charge planner walk: a surplus hour's net reaches the cells
+at `legEff` there too (`physics/chargeLeg.ts`). One source, no option of its own; this plan's
+own charge leg (surplus × `legEff` into the pack) is unchanged.
+
 #### 5.3 Inputs & state
 
 From the SHP2 projection: `backupFullCapWh` → `fullKwh`, `backupRemainWh` →

@@ -389,12 +389,11 @@ on 16 nights instead of 14, up to 4.3 h earlier (mean 61 min). The two nights th
 floor (09-04, 09-08) reach the critical tier 10–30 min earlier. The ladder's thresholds and
 cadence are unchanged; while the grid is backstopping the audible ladder stays silent as before.
 
-**Not modelled.** The charge leg: in 29 PV-surplus spans of the same history (no grid, PV at
+**The charge leg (modelled since v1.194.0).** In 29 PV-surplus spans of the same history (no grid, PV at
 least 1.5 kW above the load, pool 25–85 %) the pool charged 8–19 % less than `pv − load/0.94`
-predicts on the measured capacity, and still 2–7 % less with the 270 W overhead subtracted
-(which is why the overhead applies in every hour). A projection that crosses a sunny day
-therefore still reads somewhat long on the far side of it. The night-charge planner keeps the
-nameplate basis and `load/0.94` (unchanged by design; reference chapter 5, [1.3a The measured energy basis](reference/05-runway-and-soc-alarms.md#13a-the-measured-energy-basis-v118719)).
+predicts on the measured capacity, and 2–7 % less with the 270 W overhead subtracted (why the
+overhead applies in every hour). Every pool walk except the MPC optimiser's now stores a surplus
+at √0.86 = 0.927, below all 29 spans. The night-charge planner keeps the nameplate basis and `load/0.94` (unchanged by design; reference chapter 5, [1.3a The measured energy basis](reference/05-runway-and-soc-alarms.md#13a-the-measured-energy-basis-v118719)).
 
 ### Live check on three nights (measured 2026-10-15)
 

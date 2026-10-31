@@ -777,10 +777,13 @@ test('★★★ middayShadow.ts has no device, push, speech or persistence path'
   const imports = [...SHADOW.matchAll(/^import [^;]+ from '([^']+)';$/gm)].map((m) => m[1]);
   // R5 — and the words (chargeAnnounce.ts, chargeText.ts: pure builders, checked below) and the
   // NotifyMessage type.
+  // v1.194.0 — and the charge leg (physics/chargeLeg.ts: one pure function, imports nothing).
   assert.deepEqual(imports.sort(), [
     './chargeAnnounce.js', './chargeTaper.js', './chargeText.js', './chargeWindows.js', './nightChargeActuator.js',
-    './nightChargeAdvisor.js', './notify.js', './recorder.js', './tariff.js',
+    './nightChargeAdvisor.js', './notify.js', './physics/chargeLeg.js', './recorder.js', './tariff.js',
   ].sort());
+  assert.match(SHADOW, /^import \{ chargeLegStep \} from '\.\/physics\/chargeLeg\.js';$/m);
+  assert.doesNotMatch(src('../src/physics/chargeLeg.ts'), /^import /m, 'the charge leg imports nothing');
   // Only types and pure helpers from the actuator, the recorder and notify.
   assert.match(SHADOW, /^import \{ APPLY_LEAD_MS, clampReserveTarget, MAX_SPOKEN_ADVISORY_CHARS, revertDueMs, type NightChargeMode \} from '\.\/nightChargeActuator\.js';$/m);
   assert.match(SHADOW, /^import type \{ NightLedgerRow \} from '\.\/recorder\.js';$/m);

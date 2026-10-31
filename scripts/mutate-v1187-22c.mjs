@@ -75,8 +75,8 @@ const MUTANTS = [
   {
     id: 'C-i. ★★★ the expected carry drains the P90 load',
     file: NCA,
-    find: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000));',
-    to: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + (w * (pv - Math.max(0, h.loadP90W) / o.dischargeEff)) / 1000)); /* MUTANT */',
+    find: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + chargeLegStep((w * (pv - Math.max(0, h.loadP50W!) / o.dischargeEff)) / 1000, o.legEff)));',
+    to: '    pack = Math.max(slotFloor, Math.min(o.fullKwh, pack + chargeLegStep((w * (pv - Math.max(0, h.loadP90W) / o.dischargeEff)) / 1000, o.legEff))); /* MUTANT */',
     why: 'The "expected" start collapses onto the worst case again and the 10-12 plan says ~62 kWh expected.',
   },
   {
@@ -89,8 +89,8 @@ const MUTANTS = [
   {
     id: 'C-iii. ★★ the expected carry counts the whole current hour',
     file: NCA,
-    find: '      startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: nowMs, toMs: windowStart,',
-    to: '      startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, hours: horizon, fromMs: simFromMs, toMs: windowStart, /* MUTANT */',
+    find: '      startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, legEff, hours: horizon, fromMs: nowMs, toMs: windowStart,',
+    to: '      startKwh: socNowKwh, fullKwh, reserveKwh, dischargeEff, legEff, hours: horizon, fromMs: simFromMs, toMs: windowStart, /* MUTANT */',
     why: 'The 21:00-21:30 drain the SoC reading already reflects is charged a second time (the sizing\'s conservative choice, wrong for an expectation).',
   },
   {
@@ -387,7 +387,7 @@ const MUTANTS = [
   {
     id: 'C-xliii. ★★★ the walk does not drain the pool before the start',
     file: NCA,
-    find: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + ((pv - loadW / o.dischargeEff) / 1000) * (EXPECTED_JIT_STEP_MS / HOUR_MS)));',
+    find: '    pack = Math.max(floor, Math.min(o.fullKwh, pack + chargeLegStep(((pv - loadW / o.dischargeEff) / 1000) * (EXPECTED_JIT_STEP_MS / HOUR_MS), o.legEff)));',
     to: '    pack = Math.max(floor, Math.min(o.fullKwh, pack)); /* MUTANT */',
     why: 'The pool sits at its window-open level until the start: the same understatement by another road.',
   },
