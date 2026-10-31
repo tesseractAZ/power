@@ -112,7 +112,8 @@ const MUTANTS = [
   // ── C1: the cordless timeout probe ──
   { id: 'C1-i. ★★★ an unknown cordless delivery counts as audible', file: BR, tests: RESTART,
     find: 'log(sipProbeUnknownLine(cfg.sipTargets, states));',
-    to: "{ if (kind === 'condition') noteConditionAudible(level, episode); log(sipProbeUnknownLine(cfg.sipTargets, states)); } /* MUTANT */",
+    // v1.195.0 — the call carries the critical the words named (N8), as the real ones do.
+    to: "{ if (kind === 'condition') noteConditionAudible(level, episode, named); log(sipProbeUnknownLine(cfg.sipTargets, states)); } /* MUTANT */",
     why: 'An idle reading — no evidence either way — is counted as heard.' },
   { id: 'C1-ii. ★★ the restart decision does not wait for an armed retry', file: BR, tests: RESTART,
     find: "if (realAudibleInFlight > 0 || sipOutcomesPending > 0 || conditionRetryCouldRaise('green')) {",

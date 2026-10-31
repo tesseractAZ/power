@@ -385,6 +385,24 @@ export interface DayForecast {
   homeDpusConnected?: number;
   homeDpusReporting?: number;
   homeDpusCoveragePartial?: boolean;
+  /** v0.78.0 — the RESTORED display basis: each connected home Core's own recorded PV, offline ones
+   *  included. v1.195.0 — read by the cards (cardText.forecastView). */
+  forecastPvWhNext24Display?: number;
+  typicalPvWhPerDayDisplay?: number;
+  /** v1.178.0 — no PV history to project from: the PV figures are a model-less 0, not a forecast. */
+  pvForecastUnavailable?: boolean;
+  /** v1.195.0 — the restored basis per hour (with the restored model's own flag for the hour), its
+   *  projected low, and how many offline Cores it restored from their recorded PV (an offline Core
+   *  with none is not counted). Display only: the runway alarm and every alert read the fields above.
+   *  Absent from an older server (the cards then show the alarm basis, as before). */
+  hoursDisplay?: Array<{ ts: number; forecastPvW: number; projectedSocPct: number | null; modelled: boolean }>;
+  minProjectedSocDisplay?: number | null;
+  minProjectedSocTsDisplay?: number | null;
+  restoredCoreCount?: number;
+  /** v1.187.10 — built while a home Core listed online had sent no first reading yet (the boot race).
+   *  v1.195.0 — read by the cards (cardText.forecastView `pending`): the restored badge does not call
+   *  such a Core offline. */
+  homeBasisPending?: boolean;
   /** v1.191.1 — the site zone the server computed these hours in (siteTime.ts), stamped by GET
    *  /api/forecast; the cards label an hour in it, never the browser's zone. Absent from an older
    *  server: no hour shown. */

@@ -1,3 +1,105 @@
+## 1.195.0
+
+### The forecast cards show the restored solar while Cores are offline; a held panel's circuits are no longer the house load; cell-spread mutes below 85% are bounded
+
+**Dashboard**
+
+- While home Cores were offline in the EcoFlow cloud, the 24-hour forecast card and the Predictive Insights forecast showed 0 kWh of solar, a projected low of 0% and a "Tight" outlook. Those are the figures the runway alarm uses, and they count only the Cores reporting live.
+- The cards now show the solar and the projected state of charge rebuilt from each offline Core's own recorded production. This is the figure Home Assistant's forecast solar sensor already shows. The rebuilt state of charge starts from the same pool, carries the same hourly load and steps through the same function as the alarm's projection, the charge leg included, so with every Core reporting the two are equal hour by hour.
+- A badge labels them: "Solar restored from N offline Cores' records". At a restart, while a Core listed online has not sent its first reading, it reads "Solar from N Cores' records (first reading pending)". Beside them:
+  - the runway alarm's own figures: "Runway alarm basis (reporting Cores only): X kWh solar, low Y%"
+  - its state-of-charge path, as a dashed line on the chart
+  - an "Alarm-basis SoC" column in the hourly table
+- Each hourly row's model / typical badge names the model that produced the figure shown.
+- An offline Core with no recorded solar is not counted as restored. With no solar history at all, the solar tiles read "—" / "no PV history".
+- `GET /api/forecast` gains `hoursDisplay`, `minProjectedSocDisplay`, `minProjectedSocTsDisplay` and `restoredCoreCount`.
+
+**Runway**
+
+- Before, when the panel's readings were held (a cloud replay or a stalled feed) and no load had been recorded for an hour, the runway took the panel's held circuit watts as the live house load, for as long as the hold lasted.
+  - Circuits held at 9 kW projected the reserve floor in 2.8 h instead of 8.2 h: a false high-priority alarm.
+  - Circuits held at 600 W hid a 6 kW draw: low instead of medium.
+- Held readings are no longer used. The last recorded hour's load is carried for up to 2 h, as before. After that the runway reads unavailable until the panel reports again.
+- While the house runway reads unavailable, the runway alarm keeps its state, as the other panels' runway alarms already did. Before, it re-armed: the hourly reminder stopped for the rest of the outage, and a short outage was followed by a fresh announcement.
+- The load-shed advisor also keeps its last recommendation while the runway is unavailable. Before, it reported the runway healthy and cleared `load_shed_recommended` in the middle of a depletion.
+
+**Cell spread (alarm path)**
+
+- Below the 85% plateau, and with no SoC reading, a cell-spread critical silenced while the BMS balances now speaks 20 minutes after the spread first reached the line.
+  - Before, the mute had no limit there. A 50-149 mV spread on a balancing pack stayed silent for as long as the BMS balanced. So did a spread alternating 55 / 45 / 45 mV, and a pack whose SoC read 84 / 85% on alternate readings.
+  - Dips under the line do not restart the 20 minutes; only 20 minutes seen under 50 mV ends the session.
+  - The session is carried across reading gaps of up to 60 minutes and across a restart. `vdiff-knee-state.json` gains `offFromMs`, `offQuietSinceMs` and `offKnee`, each written only while set.
+- A 50-149 mV spread on a pack at 15% charge or less, within 10 points of its sibling packs, no longer sounds red at once.
+  - On the steep bottom of the LFP curve, the cell with the least charge falls away and closes back on recharge. In the 2026-08-20 case, a healthy pack's red cleared in 6.7 minutes.
+  - The critical stays on the card ("Low-charge cell spread."), is not pushed or sounded, and speaks after 20 minutes.
+  - These get no low-charge grace:
+    - a pack 10 or more points below its siblings (the alert names its charge and the sibling median)
+    - a session that reached the line on any other reading
+  - They page at once while the BMS is idle. While it reports balancing they are held by the balancing mute, and speak 20 minutes after the first crossing, like any balancing critical below 85%.
+  - A spread of 150 mV or more pages at once, balancing or not.
+
+**Unchanged**
+
+- The runway alarm, the projected-dip and forecast-runtime alerts, the calendar's battery-dip event and Home Assistant's projected-low-SoC sensors still count only the Cores reporting live.
+- Cell spread at 85% charge and above. The SoC ladder, the floor alarm and the stale alarms. "Reserve alarm blind" changes only across a restart (below).
+
+**Tests**
+
+- New: `forecastDisplayBasis.test.ts` covers the restored series and its SoC walk, isolation from every alarm input (by behaviour and by source), the restored model's flag, the restored-Core count, the cards' view and its wiring, the badge while a first reading is pending at a restart, and the charge leg on the restored walk (3,750 W restored against a 1,865.7 W drain stores 1,747.4 Wh an hour: 61.5% after the first hour, 94.9% after 24, against 97.7% at unity).
+- New: `runwayHeldPanelLoad.test.ts` covers the live-load gate, the carry limit across a hold, and the runway alarm and load-shed advisor holding while the runway is unavailable.
+- New: `cellSpreadOffPlateauSession.test.ts` covers the off-plateau session, the low-charge knee (a stranded pack while the BMS balances included), and both across a restart.
+- The dark-fleet forecast golden gains the four display fields only; every earlier field is unchanged. `runwayChargeLegPins.test.ts` pins the charge leg inside the shared step and both walks' calls to it.
+- New harnesses, all mutants killed:
+  - `mutate-forecast-display-basis.mjs` (24)
+  - `mutate-held-panel-load.mjs` (8)
+  - `mutate-cell-spread-off-plateau.mjs` (19)
+- Anchors re-pointed in older harnesses: `mutate-runway-card.mjs`, `mutate-v1187-1.mjs`, `mutate-v1187-2.mjs`, `mutate-v1187-19.mjs`, `mutate-v1187-a.mjs`, `mutate-v1191-1.mjs`, and `mutate-charge-leg.mjs` C-ii (the day walk's charge leg, now in the shared step).
+
+### After a restart an owed all-clear is announced; a critical nobody heard is named when it returns; an announcement kept behind another alarm's retry is spoken
+
+**After a restart**
+
+- **An all-clear that was due when the add-on stopped is announced after the restart.** When an alarm the house had heard cleared, the add-on waits three minutes before announcing the all-clear (up to 16 minutes after a restart, and longer while a muted cell-imbalance critical holds it). A restart during that wait lost the all-clear. The add-on started with the alarm recorded as not heard and took the clear condition in silence, so the alarm stayed the last words. The wait is now saved with the condition record (`conditionHeldFrom` / `conditionHeldAt` in `broadcast-last.json`, and `conditionHeldFrom` in `/api/broadcast/status`). After a restart within an hour of the wait's start, the all-clear is announced once the condition has stayed clear for three minutes on a complete alert picture. If the picture is still incomplete when the post-restart decision closes, the clear condition is taken in silence, as for an alarm heard before a restart. These alarms all count as heard: one heard only as the tone (its speech failed), one heard only on the cordless, and one first heard during the wait itself (it cleared while its announcement was still playing, or its retry played during the wait). An alarm first heard during the wait no longer marks the record as heard while its clearing is held. A warning standing below it is therefore announced after a restart, not taken as its continuation. A condition that cleared while the add-on was stopped is still not announced.
+- **"Reserve alarm blind" keeps its age for a panel dark more than a week.** A pool unreadable for more than 7 days lost its saved onset at a restart. The alarm disappeared for 15 minutes and came back as a warning for an hour, even when it had been critical. Only an onset claiming more than a year is now set aside, since it comes from a clock that was not set or an edited file. A panel that has not reported since the restart holds the post-restart decisions only until its own reserve-blind alarm is raised. The house panel has no reserve-blind alarm while it reports nothing, so it holds them until it reports.
+- **A read-only data folder no longer carries an old "Reserve alarm blind" time.** On a read-only or failing disk, the saved time could be neither updated nor removed. A pool that read again after the last save was then carried after a restart as unreadable since before, and could raise a critical alarm with an inflated age. When the folder cannot be written at start-up, the saved times are not carried and never written back, and the log says so (`backup-pool: N pool-unknown onset(s) on file are not carried — …`). Each panel's reserve-blind clock then starts in the new process. The post-restart decisions wait by the same rule as above: for the house panel until it reports, and for any other panel until it reports or its own alarm is raised.
+
+**Announcements**
+
+- **A critical alarm nobody heard is announced when it comes back.** During one alarm, a critical that took another's place was treated as heard, even though only the first one was heard and the new one never reached the speakers. When it cleared and came back within three minutes, it was not announced again and was never named. A return is now announced when the alarm its words would name has not been heard during that alarm. A return refused by the two-minute gap is announced when the gap expires. Two alarms that return together, when the words name the one already heard, are still taken as a flicker. After a restart, an alarm found already announced counts as heard only the critical that announcement named. Another critical that stood beside it and returns alone is announced, as it would be without the restart.
+- **An announcement that waited behind another alarm's retry is announced when that retry is done.** When the speakers could not play and a more serious announcement was already waiting to be retried, a less serious condition announcement was dropped. This lost a warning under a held critical, or a warning or an all-clear behind a battery-level or runway alarm. The same happened in the other order: a battery-level or runway alarm that failed while the condition announcement's own retry was waiting took that retry's place. The dropped announcement is now made once, when the other retry has played or given up, if the condition has not been committed at another level since. After a more serious condition alarm it waits the usual two minutes. Only one such announcement is kept at a time: the newest, unless the one already kept is more serious. A dedicated announcement kept the same way is not re-announced as a condition.
+
+**Tests**
+
+- `restartRecoveryAllClear.test.ts`:
+  - A restart inside the dwell of a heard red, a heard yellow or a tone-only red announces the all-clear on a settled set. So does one after a red first made audible inside its own dwell: cleared while its announcement played (spoken or tone only), or with its retry played in the dwell.
+  - A warning that stood below such a red is spoken after the restart, and the red flickering back restores its heard flag.
+  - The critical back after the restart is the klaxon, with no all-clear before it.
+  - A warning below the cleared red is spoken, whether it stands at the first tick or appears after it. At the first tick the owed hold is dropped at once, and the warning's clearing is an ordinary transition.
+  - A warning re-committed under a resumed hold and never delivered is presented again when it returns inside the dwell.
+  - On an unsettled set, the green is adopted silently when the decision closes.
+  - Two restarts inside the hold still owe the all-clear, and the hold's age counts from its original start.
+  - Nothing is owed after the green commits, or after the red flickers back, spoken or tone only (the cleared record is written to disk).
+  - `restoredHeldDeescalation` checked by hand.
+- `conditionRetryNewestWins.test.ts`:
+  - A warning kept behind a red retry (held critical) is spoken after the gap. One behind a dedicated critical's retry is spoken with no gap.
+  - An all-clear behind a dedicated warning's retry is spoken.
+  - A warning, and an all-clear, whose own retry a dedicated alarm superseded are spoken.
+  - A warning behind the dedicated alarm does not displace the more severe condition red kept before it. That red is named when its critical reads loud again.
+  - A kept deferral is dropped when the condition has moved, and re-presented at once when the higher retry gives up.
+  - A fired retry still queued plays first.
+  - A dedicated notice is not re-presented.
+  - `keptDeferralRepresent` checked by hand.
+  - A critical that took a heard one's place undelivered is named when it returns, including after a gap refusal.
+  - Still absorbed: a heard critical's flicker, two criticals returning together whose words name the heard one, and a red adopted by the red replay gate. A critical counted beside the adopted one and never named is spoken when it returns alone.
+  - What was named audible resets with each red episode.
+- `poolUnknownCarry.test.ts`:
+  - A panel dark 7 days and an hour keeps its onset across a restart: critical "unreadable for 7 d" at once, carried at its first projection.
+  - The pending rule ends when the dark panel's alarm is raised (inclusive at 15 min), and never for the pinned house panel. `darkPanelBlindRaised` tested.
+  - A read-only directory carries nothing, keeps the panel pending, logs once, and writes nothing back once it is writable again. These tests skip only when a write probe of the directory succeeds, not on `poolUnknownDirWritable`'s answer.
+  - `poolUnknownDirWritable`, the 366-day bound, and the alert monitor's wiring.
+- New harness `scripts/mutate-restart-leftovers.mjs`: 42 mutants (F-i…F-xvi, N-i…N-viii, P-i…P-vii, D-i…D-v, O-i…O-vi).
+- Re-pointed anchors: `mutate-v1187-4.mjs` H-i, H-ii, U-iii, U-iv, U-v, U-vii, U-viii, C-ix, C-xvi, C-xx, C-xxiii; `mutate-v1187-3h.mjs` B-i, B-ii; `mutate-v1187-b.mjs` xxiii, xxxv; `mutate-multi-panel.mjs` r11; `mutate-alert-monitor.mjs` xxiii; `mutate-broadcast.mjs` vii; `mutate-v1187-10-g3.mjs` C1-i.
+
 ## 1.194.0
 
 ### Solar surplus counts at the charge efficiency in the runway, the forecasts and the night-charge plan
@@ -135,123 +237,6 @@
 
 - The SSH library (ssh2 1.17.0) drops a leading zero byte from the public half of 1 generated host key in 256, and then rejects that key as malformed. When that happened on the start that first generated the key, the SSH console stayed off for that start and the log read `console/ssh: failed to start: Malformed OpenSSH private key`; the next start replaced the key with a warning. A generated key is now read back before it is written, and one that does not parse is discarded for another (up to 8 tries). An existing host key is unaffected and keeps its fingerprint.
 - The same defect failed the host-key test in about 1 CI run in 100.
-
-## 1.191.6
-
-### The telnet options are gone; the sign-on screen reads Plant Status System
-
-**Before updating:** if the console was turned on with **Enable Telnet TUI** (`TELNET_ENABLED`), turn on **SSH TUI** (`SSH_ENABLED`) instead. After the update the Supervisor ignores the old option, and the console stays off until `SSH_ENABLED` is on. The port is unchanged: 2323.
-
-**Console**
-
-- `TELNET_ENABLED`, `TELNET_PORT` and the `TELNET_HOST` fallback are removed from the options, the schema, the run script and the configuration code. Telnet itself has not been served since 1.190.0; the console is SSH on 2323 and the browser console at `/console`. A saved value of either option no longer changes anything.
-- The console's source moves from `server/src/telnet/` to `server/src/console/`.
-- The sign-on screen's banner reads PLANT STATUS SYSTEM, and the standing ENTER=Submit / BACKSPACE=Correct and credentials hint lines are gone; a rejected attempt is still reported below the panel.
-
-**Unchanged**
-
-- Port 2323 stays published: it is the SSH console's port. AppArmor rules restrict network access by protocol family and socket type, not by port, so a port is not blocked there; the add-on publishes only 8787 (web) and 2323 (SSH).
-
-**Tests**
-
-- `sshConfig.test.ts`: a stale `TELNET_ENABLED`, `TELNET_PORT` or `TELNET_HOST` changes nothing; nothing reads, exports, declares or translates them. `mutate-ssh-console.mjs` replaces the six alias mutants with one: a stale `TELNET_ENABLED` turning the console on again.
-- The configuration golden (G3) is re-captured with `scripts/golden-capture.mts`: 83 keys, was 85.
-- `restartRecoverySettledSet.test.ts` retries deleting its cache directory: a cache write landing after the monitor stopped made the delete fail (ENOTEMPTY) under parallel load.
-
-## 1.191.5
-
-### The console's sign-on screen holds still while you type
-
-**Console**
-
-- Each prompt row on the browser console's sign-on screen was centred as a whole, so every character typed moved the row half a column left.
-- The screen is now a fixed SIGN ON panel in the manner of a 1980s business terminal: dot-leader labels ("User ID . . . . .") and a box for each field. The panel's place depends only on its width; a value longer than its box shows its tail, with the cursor, inside it. The password shows as asterisks.
-- Errors and the hint sit on a message line below the panel, with ENTER=Submit and BACKSPACE=Correct. The POWER banner is drawn when the terminal has 26 rows or more.
-
-**Tests**
-
-- At 80×24, 120×40 and 44×20, through an empty, short, too-long and password entry and an error, both boxes' edges stay in the same column, every panel row has one width and no row is wider than the terminal. The previous screen fails these tests.
-
-## 1.191.4
-
-### Power names itself, not EcoFlow: the Home Assistant device, notification titles and console logo; a dark fleet's forecast is no longer archived as zero
-
-**Naming**
-
-- Power is an independent open-source add-on that works with EcoFlow hardware. Several places read as EcoFlow's own product, and now name Power instead.
-- The Home Assistant device is "Power" (manufacturer "Power (open-source add-on)", model "Analytics for EcoFlow SHP2 + Delta Pro Ultra"), was "EcoFlow Panel". Friendly names follow, for example "Power Alarms — Critical (P1)". Existing entity_ids are kept by Home Assistant; a fresh install mints `sensor.power_…`, and the entity reference lists those.
-- "Power Outages 24h" is "Host Power Outages 24h", so it does not read "Power Power Outages 24h". Its entity_id and unique_id are unchanged.
-- Phone notifications are titled "Power · …", were "EcoFlow · …". The test notification says it comes from Power.
-- The SSH and browser console's login screen shows POWER, was ECOFLOW. The home-screen web-app title and the forecast calendar's description say Power.
-- The add-on's store page, README and description say it is independent and not affiliated with or endorsed by EcoFlow. The slug (`ecoflow_panel`), image and MQTT topics keep their names: renaming them would break installs.
-
-**Analytics**
-
-- With every home Core dark, the 45-minute weather tick archived a next-24 h solar forecast of 0 Wh, and a short one with some Cores dark. The archive is the record a future band calibrator will score; a row is now written only when the forecast covers every connected Core (its alarm-facing and display sums agree), the solar forecast is available and no Core's first reading is pending.
-
-**Tests**
-
-- The device-name rule reads the device's own name: no entity name may start with it or with "EcoFlow".
-- The archive gate holds against the real forecast build: not archived with every Core dark or with two of three dark, archived with every Core projected, where the two sums agree.
-- The SSH idle-reap test's "inbound bytes keep the connection" half runs on its own server with a 500 ms window. Against 150 ms, a heartbeat delayed by a loaded runner was reaped and failed the test; a reset that never happens still fails it.
-
-**Documentation**
-
-- The engineering reference is titled "Power — Complete System & Engine Reference". The performance record's §4e adds the reading measured after 1.191.3: the worker at 0.73% of a Pi core, from 1.6–1.7%.
-
-## 1.191.3
-
-### Self-consumption is cached while every Core is offline in the EcoFlow cloud; the tariff report rebuilds faster
-
-**Analytics**
-
-- With every home Core offline in the EcoFlow cloud after a restart, the self-consumption report was rebuilt on every read, and again inside every carbon report, which reads it: it was cached only while a Core had a reading in memory, although it is built on the panel's load and each connected Core's own recorded energy. With the tariff report, these rebuilds kept about 1 % of the reference Raspberry Pi 5's CPU core busy after 1.191.2.
-- Self-consumption is now cached on the panel then too. It is rebuilt when a Core joins, leaves or returns to the panel's source list, when a Core reports again, when the house panel is re-pinned, and when the 15-minute cache expires. With no Core's reading in memory, nothing is cached while the panel lists no Core or, in the first 10 minutes after a restart, while a listed Core is online before its first reading; without the panel's reading nothing is cached, as before. The same changes now also rebuild it while Cores report, where the cached value used to stand until it expired; a source that keeps leaving and rejoining the list costs a rebuild per change, as the forecast already did.
-- The tariff report integrates each hour from that hour's samples instead of searching the whole week for them: a rebuild with every Core dark takes 20 to 33 ms instead of 39 to 53 ms on the development computer.
-- In a replay of the production request schedule on synthetic databases with every Core dark, the analytics worker's time falls from 143–274 to 49–80 ms a minute; with every Core reporting it stays at 9 ms.
-
-**Unchanged**
-
-- Every figure: on a fixed fixture, self-consumption, carbon and tariff are byte-identical to 1.191.2's, with every Core dark and with every Core reporting.
-- Carbon and tariff are still cached, and their window figures published, only while a Core (a bench spare counts) has a reading in memory, as their basis flag says.
-- Reports built on the forecast still read it before their own cache. That read is now a cache hit of under a microsecond, so reading their cache first would save nothing, and their figures stay tied to the forecast they were built on (1.186.5).
-
-**Tests**
-
-- With every Core dark, self-consumption is built once and then served with no recorder read, also inside carbon. Each change above rebuilds it, and what is served equals a fresh build on the same map. With no Core's reading in memory, a Core online before its first reading and a panel listing no Core are never cached, nor a Core without a panel (0.15.13).
-- Carbon and tariff are rebuilt on every call with every Core dark, and after a restart while a Core has a reading and the panel does not yet; once the panel reports, both are cached (0.15.13). Until now no test failed when either cache was written without that basis.
-- A child-process capture builds the three reports at two instants; they match 1.191.2's capture to the byte. The hourly slices equal whole-week integration on random series, at their boundaries and on unsorted input.
-- `scripts/mutate-v1191-3.mjs`: 16 mutants, each killed by the case written for it; each half of the carbon and tariff cache conditions is reverted alone.
-
-**Documentation**
-
-- Source comments corrected, behaviour unchanged: 1.189.1, never released, reads 1.190.1; the mid-day preview runs on the evening before a winter weekday; costs are in the tariff currency, hours are the site's, the self-consumption cache lasts 15 minutes, and the add-on's only Supervisor call is a read-only list of add-ons. The option rows outside the frozen G3 golden cite their readers' current lines; the G3-pinned ones keep the captured tree's, as the golden test requires.
-- The energy, architecture and solar-forecast references and the performance record describe the change. The record's oldest runtime section (2026-09-11) moves, unedited, to `docs/history/` to keep the record under its size limit, and the reference's list of history files names it.
-
-## 1.191.2
-
-### The day forecast is cached while every Core is offline in the EcoFlow cloud
-
-**Analytics**
-
-- After a restart while every Core was offline in the EcoFlow cloud, the day forecast was rebuilt for every report that reads it. No Core had a reading in memory, and the forecast was cached only with one, although it was complete: it is built on the panel's load and each connected Core's own recorded solar history. On the reference Raspberry Pi 5 each rebuild took about 1.6 s, so `/api/forecast`, `/api/runway`, `/api/forecast-skill` and `/api/confidence` each answered in about 1.6 s and `/api/ha-state` in 3 to 5 s, and the rebuilds requested by the alarm monitor, the MQTT publisher, the runway and load-shed checks and the 4-minute warm-up kept about a third of a CPU core busy without a break. In a replay of that schedule on a copy of the reference database, on a computer about three times as fast as the Pi, the alarm engine's forecast feeds took up to 1.5 s of their 2.5 s budget.
-- The forecast is now cached on the panel, as it is when a Core reports. It is rebuilt when a dark Core joins or leaves the panel's source list or returns to it, when one is listed online before its first reading, when a Core reports again, and when the 30-minute cache expires. A forecast the panel's data leaves incomplete is still rebuilt after 150 s, and with neither the panel nor any Core reporting nothing is cached, as before. The same changes to the dark Cores also rebuild the forecast while other Cores report; until now the cached forecast stood until it expired.
-- Each dark Core's 30-day solar history is read once per forecast build instead of twice, so a rebuild with three Cores dark takes about 40 % less time.
-
-**Unchanged**
-
-- Nothing the forecast shows changes: on a copy of the reference database, the forecast built with every Core dark and the one built with every Core reporting are byte-identical to 1.191.1's. The figures built on the forecast (the probabilistic band, the multi-day outlook, the dispatch plan) are still served only with the forecast they were built on; while it is cached they are now reused. With every Core reporting, the forecast is cached and rebuilt as before.
-
-**Tests**
-
-- With every Core dark and the panel reporting, the forecast is built once and then served with no further reads. A Core that reports again rebuilds it, and so do a dark Core that leaves or rejoins the panel's source list (also inside the 5-minute window in which the report caches' reset is deferred) and one listed online before its first reading; what is served then equals a fresh build on the same map. The three dark-Core cases fail when the cache entry does not record the dark Cores and the pending flag. A restart with every Core listed online before its first reading serves the incomplete forecast for its short window, and a fleet with no panel and no Core reporting still caches nothing.
-- A capture in a child process builds the forecast on a fixed dark-fleet fixture: every recorder read of the build is distinct, and the forecast matches, to the byte, 1.191.1's capture on the same fixture.
-- The 1.186.5 forecast-cache cases gain the transitions in which only the reporting Cores move (a reporting Core leaves the source list; a home with no panel gains one), which the new comparison of the dark Cores does not see.
-- `scripts/mutate-v1191-2.mjs`: 9 mutants, each killed by the case written for it.
-
-**Documentation**
-
-- The solar-forecast reference states when the day forecast is cached and what its cache entry records. The performance record gains a section on the live measurement, its cause and the replay before and after the change.
 
 ## Older releases
 

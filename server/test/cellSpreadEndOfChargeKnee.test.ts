@@ -353,7 +353,10 @@ test('★★★ ceiling: a spread at VOL_DIFF_KNEE_HARD_MV annunciates at once, 
   assert.notEqual(mid!.annunciate, false, 'off the plateau the v0.29.0 balancing mute is capped too');
   resetVdiffWarnHoldForTesting();
   assert.equal(tickAt(T0, { vd: 149, vmax: 3400, soc: 50, bal: 1, in: 0 })!.annunciate, false,
-    'below the ceiling, off-plateau balancing behaves as before');
+    'below the ceiling, off-plateau balancing mutes — for at most VDIFF_KNEE_MAX_MUTE_MS from its first crossing (v1.195.0)');
+  // v1.195.0 — that mute had no limit below the plateau; it now ends with the off-plateau session's bound.
+  assert.notEqual(tickAt(T0 + VDIFF_KNEE_MAX_MUTE_MS, { vd: 149, vmax: 3400, soc: 50, bal: 1, in: 0 })!.annunciate, false,
+    'twenty minutes on, still balancing at 149 mV: it speaks');
 });
 
 test('★★★ duration: a spread the BMS is still balancing at top of charge speaks after VDIFF_KNEE_MAX_MUTE_MS', () => {
@@ -961,11 +964,14 @@ test('advanceVdiffKnee: a REST at the top of charge (quietSinceMs) ends the sess
   assert.equal(plateau.graceFromMs, t2);
   assert.equal(vdiffCritMute(plateau, obs({ packSoc: 94 }), t2 + VDIFF_KNEE_MAX_MUTE_MS), null, 'session-bound at 94%');
   // …while below the plateau the reading ends the session and the episode: only the v0.29.0
-  // balancing mute applies there (under the ceiling).
+  // balancing mute applies there (under the ceiling) — v1.195.0: bounded by the off-plateau session
+  // this reading opens, VDIFF_KNEE_MAX_MUTE_MS from it (it had no limit there before).
   const below = advanceVdiffKnee(late, obs({ packSoc: 84 }), t2 + VDIFF_KNEE_MAX_MUTE_MS);
   assert.equal(below.graceFromMs, null);
   assert.equal(below.critSinceMs, null);
+  assert.equal(below.offFromMs, t2 + VDIFF_KNEE_MAX_MUTE_MS, 'the off-plateau session opens on it');
   assert.equal(vdiffCritMute(below, obs({ packSoc: 84 }), t2 + VDIFF_KNEE_MAX_MUTE_MS), 'balancing', 'below the plateau');
+  assert.equal(vdiffCritMute(below, obs({ packSoc: 84 }), t2 + 2 * VDIFF_KNEE_MAX_MUTE_MS), null, 'below the plateau, session-bound too');
 });
 
 test('★★ a rest must be SEEN unbroken: a reading gap during it restarts it (the session, and its bounds, stand)', () => {

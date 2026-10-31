@@ -18,9 +18,12 @@ import { makeRecorderStub } from './helpers/recorderStub.js';
 type Pt = { ts: number; value: number };
 const H = 3_600_000, MIN = 60_000;
 
+// v1.195.0 — the panel carries its content clock (lastTelemetryAtMs): the runway reads its live
+// channel sum only while the panel's projection is a reading (heldSamples.projectionRecordable), and
+// a projection with no content clock is not one.
 const shp2 = (remainWh: number, circuitWatts: Array<number | null> = []) => ({
   SHP2: {
-    sn: 'SHP2', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: Date.now(),
+    sn: 'SHP2', deviceName: 'Smart Home Panel 2', online: true, lastUpdated: Date.now(), lastTelemetryAtMs: Date.now(),
     projection: {
       kind: 'shp2', backupFullCapWh: 92_000, backupRemainWh: remainWh, backupReserveSoc: 16,
       circuits: circuitWatts.map((w, i) => ({ ch: i + 1, watts: w })), pairedCircuits: [],

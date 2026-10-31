@@ -198,8 +198,9 @@ const MUTANTS = [
   {
     id: 'xxiii. ★★★ a newer commit does not supersede the held re-present',
     file: BC,
-    find: '    deescalationHold = null;\n    deferredCondition = null;',
-    to: '    deescalationHold = null; /* MUTANT */',
+    // v1.195.0 — re-pointed: the owed all-clear's record is cleared between the two.
+    find: '    conditionHeldOwed = null; // v1.195.0 — written with the record below\n    deferredCondition = null;',
+    to: '    conditionHeldOwed = null; /* MUTANT */',
     why: 'A stale all-clear is spoken while a newer red is being held for its own dwell.',
   },
   {
@@ -282,7 +283,8 @@ const MUTANTS = [
   {
     id: 'xxxv. ★★ review: the heard flag is not demoted for the hold',
     file: BC,
-    find: '        if (conditionSpoken) {',
+    // v1.195.0 — re-pointed: the demotion (and the owed hold's record) is written when the level was audible.
+    find: '        if (owed) {',
     to: '        if (false /* MUTANT */) {',
     why: 'A restart inside the dwell boots on "red, heard" and swallows a standing yellow as a continuation.',
   },

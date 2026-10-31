@@ -12,10 +12,15 @@
  * whose first projection in the next process reads unknown again carries the onset, when the add-on
  * was down at most POOL_UNKNOWN_CARRY_MAX_GAP_MS. Pure rules first, then the file through
  * SnapshotStore instances, then the alert those onsets drive (computeAlerts).
+ *
+ * v1.195.0 — the file believes an episode of up to a year (7 days before: a panel dark for longer
+ * lost its onset at every restart); a dark panel is pending only until its own carried alarm is
+ * raised (the house panel has none while dark); and a file in a directory this process cannot write
+ * (a read-only /data) is not carried, keeps its panels pending, and is never written back.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -28,12 +33,13 @@ after(() => rmSync(tmp, { recursive: true, force: true }));
 
 const {
   SnapshotStore, parsePoolUnknownOnsets, carriedPoolUnknownSince, POOL_UNKNOWN_CARRY_MAX_GAP_MS, POOL_UNKNOWN_PERSIST_EVERY_MS,
-  POOL_UNKNOWN_MAX_EPISODE_MS,
+  POOL_UNKNOWN_MAX_EPISODE_MS, poolUnknownDirWritable,
 } = await import('../src/snapshot.js');
-const { computeAlerts, debouncedOnsetsPending } = await import('../src/alerts.js');
+const { computeAlerts, debouncedOnsetsPending, darkPanelBlindRaised } = await import('../src/alerts.js');
 
 const SEC = 1_000;
 const MIN = 60_000;
+const DAY = 24 * 60 * MIN;
 const T0 = 1_800_000_000_000; // a fixed wall clock, far from the epoch
 const PANEL = 'PANEXXX00XXX0001';
 const CORE = 'COREXXX00XXX0001';
@@ -105,6 +111,22 @@ function withPath<T>(name: string, fn: (path: string) => T): T {
   process.env.POOL_UNKNOWN_PATH = path;
   try { return fn(path); } finally { delete process.env.POOL_UNKNOWN_PATH; }
 }
+/** v1.195.0 — the pending list as the alert monitor computes it: with the store's connectivity
+ *  context for a panel dark since the restart, and the device map computeAlerts reads. */
+function pendingAt(s: InstanceType<typeof SnapshotStore>, nowMs: number, firstListedMs: number) {
+  return debouncedOnsetsPending({
+    poolUnknownCarryPending: s.poolUnknownCarryPending(),
+    poolUnknownCarriedSinceBySn: s.poolUnknownCarried(),
+    panelFirstListedBySn: new Map([[PANEL, firstListedMs]]),
+  }, nowMs, s.get().devices);
+}
+/** v1.195.0 — a process whose panel is the PINNED house panel (house-panel.json), as production's is. */
+function pinnedProc(at: number) {
+  process.env.HOUSE_PANEL_PATH = join(tmp, `house-panel-${at}.json`);
+  writeFileSync(process.env.HOUSE_PANEL_PATH, JSON.stringify({ sn: PANEL, rosters: {} }));
+  try { return proc(at); } finally { delete process.env.HOUSE_PANEL_PATH; }
+}
+const PENDING_LINE = `reserve-alarm-blind ${PANEL} (carried onset; the panel not projected yet)`;
 
 /* ══ the restart ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -318,6 +340,184 @@ test('★★ review (N1): a listed panel dark across the restart and for over an
   });
 });
 
+/* ══ v1.195.0: a panel dark for more than a week ═══════════════════════════════════════════════ */
+
+test('★★★ v1.195.0: a panel dark for more than 7 days keeps its onset across a restart — critical at once off-grid, "unreadable for 7 d", carried at its first projection', () => {
+  withPath('dark-week.json', (path) => {
+    const a = proc(T0);
+    a.read(T0, UNKNOWN); // the pool unknown, then the panel goes dark
+    const last = T0 + 7 * DAY + 60 * MIN;
+    for (let t = T0 + 60 * MIN; t <= last; t += 60 * MIN) { a.at(t); a.s.markDeviceListAttempt(); }
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8'))[PANEL], { sinceMs: T0, lastSeenMs: last }, 'a 169 h span on file');
+    assert.equal(blind(a.s, last)?.severity, 'critical', 'in the process the alarm stood');
+
+    const boot = last + 2 * MIN; // a deploy
+    const b = proc(boot);
+    assert.deepEqual(b.s.poolUnknownCarryPending(), [PANEL], '★ the entry is believed (7 d: dropped at the parse, nothing pending)');
+    const dark = blindDark(b.s, boot + 3 * MIN, boot);
+    assert.equal(dark?.severity, 'critical', '★ still critical, at once (7 d: absent, then a warning until boot + 60)');
+    assert.match(dark!.detail, /unreadable for 7 d/);
+    b.read(boot + 4 * MIN, UNKNOWN);
+    assert.equal(b.s.backupPoolUnknownSince(PANEL), T0, '★ carried at its first projection (7 d: boot + 4 min)');
+    assert.equal(blind(b.s, boot + 4 * MIN)?.severity, 'critical');
+  });
+});
+
+test('★★ v1.195.0: a dark panel whose carried alarm is raised is no longer pending — the alert set has it; one younger than 15 min is, until it is raised', () => {
+  withPath('dark-raised.json', () => {
+    const a = proc(T0);
+    a.read(T0, UNKNOWN);
+    for (let t = T0 + MIN; t <= T0 + 8 * MIN; t += MIN) { a.at(t); a.s.markDeviceListAttempt(); }
+    const boot = T0 + 10 * MIN; // the onset is 10 min old at the boot: its alarm is not raised yet
+    const b = proc(boot);
+    assert.deepEqual(b.s.poolUnknownCarryPending(), [PANEL], 'the store lists it');
+    assert.deepEqual(pendingAt(b.s, boot, boot), [PENDING_LINE], 'pending: its first projection may raise the alarm');
+    assert.equal(blindDark(b.s, boot, boot), undefined, 'not raised yet');
+    assert.deepEqual(pendingAt(b.s, T0 + 15 * MIN - 1, boot), [PENDING_LINE], 'one millisecond short of 15 min: still pending');
+    assert.deepEqual(pendingAt(b.s, T0 + 15 * MIN, boot), [], '★ at 15 min of the carried onset its alarm is raised: not pending (inclusive)');
+    assert.equal(blindDark(b.s, T0 + 15 * MIN, boot)?.severity, 'warning', 'the alarm the set now holds');
+    assert.deepEqual(b.s.poolUnknownCarryPending(), [PANEL], 'the store still lists it: the rule is the alert set\'s');
+    assert.deepEqual(debouncedOnsetsPending({ poolUnknownCarryPending: b.s.poolUnknownCarryPending() }, T0 + 15 * MIN), [PENDING_LINE],
+      'a caller without the device map keeps every carried onset pending');
+  });
+});
+
+test('★★ v1.195.0: the PINNED house panel dark since the restart has no reserve-blind alarm, so its carried onset stays pending until it reports — a week on too', () => {
+  withPath('dark-house.json', () => {
+    const a = proc(T0);
+    a.read(T0, UNKNOWN);
+    const last = T0 + 8 * DAY;
+    for (let t = T0 + 60 * MIN; t <= last; t += 60 * MIN) { a.at(t); a.s.markDeviceListAttempt(); }
+    const boot = last + 2 * MIN;
+    const b = pinnedProc(boot);
+    assert.equal(b.s.get().devices[PANEL].housePanel, true, 'the house panel');
+    assert.equal(blindDark(b.s, boot + 3 * MIN, boot), undefined, 'no alarm describes its pool while it has no projection');
+    assert.deepEqual(pendingAt(b.s, boot + 3 * MIN, boot), [PENDING_LINE], '★ so it stays pending: a green read now is not an all-clear');
+    assert.deepEqual([...darkPanelBlindRaised(b.s.get().devices, { poolUnknownCarriedSinceBySn: b.s.poolUnknownCarried() }, boot + 3 * MIN)], []);
+    b.read(boot + 4 * MIN, UNKNOWN);
+    assert.deepEqual(b.s.poolUnknownCarryPending(), [], 'consumed by its first projection');
+    assert.equal(blind(b.s, boot + 4 * MIN)?.severity, 'critical', 'which carries the 8-day onset');
+  });
+});
+
+test('darkPanelBlindRaised — panels other than the house panel with no projection, once the earlier of the carried onset and the first listing has stood 15 min (inclusive)', () => {
+  const OTHER = 'PANEXXX00XXX0002';
+  const panel = (sn: string, extra: Record<string, unknown> = {}) => ({ sn, deviceName: sn, productName: 'Smart Home Panel 2', online: true, lastUpdated: 0, ...extra });
+  const devices = { [PANEL]: panel(PANEL), [OTHER]: panel(OTHER) } as any;
+  const now = T0;
+  const raised = (conn: Record<string, unknown>, d = devices) => [...darkPanelBlindRaised(d, conn as any, now)].sort();
+  assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - 15 * MIN]]) }), [PANEL], 'carried: raised at 15 min');
+  assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - 15 * MIN + 1]]) }), []);
+  assert.deepEqual(raised({ panelFirstListedBySn: new Map([[OTHER, now - 20 * MIN]]) }), [OTHER], 'no carried onset: from its first listing');
+  assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - MIN]]), panelFirstListedBySn: new Map([[PANEL, now - 20 * MIN]]) }), [PANEL],
+    'the earlier of the two, as the alarm reads it');
+  assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - 60 * MIN]]) }, { ...devices, [PANEL]: panel(PANEL, { housePanel: true }) }), [],
+    'the house panel: no alarm while dark');
+  assert.deepEqual(raised({ poolUnknownCarriedSinceBySn: new Map([[PANEL, now - 60 * MIN]]) }, { [PANEL]: panel(PANEL, { projection: { kind: 'shp2' } }) }), [],
+    'a projected panel is not dark: its own pool clock decides');
+  assert.deepEqual(raised({}), [], 'no onset at all');
+});
+
+test('★★ v1.195.0: production wiring — the alert monitor hands debouncedOnsetsPending the device map computeAlerts reads', () => {
+  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'alertMonitor.ts'), 'utf8');
+  assert.match(src, /debouncedOnsetsPending\(connectivity, liveAtMs, snap\.devices\)/);
+  assert.match(src, /poolUnknownCarriedSinceBySn: store\.poolUnknownCarried\(\),/);
+  assert.match(src, /panelFirstListedBySn: new Map\(/);
+});
+
+/* ══ v1.195.0: a pool-unknown file this process cannot keep current ════════════════════════════ */
+
+/** v1.195.0 (review) — whether `dir` refuses a write, asked by WRITING, not by the unit under test
+ *  (poolUnknownDirWritable): skipped on that function's word, a regression making it answer
+ *  "writable" turned these tests into passing skips. Only a runner that can write a 0555 directory
+ *  (root) makes them moot. */
+function refusesWrites(dir: string): boolean {
+  const probe = join(dir, '.write-probe');
+  try {
+    writeFileSync(probe, '');
+  } catch {
+    return true;
+  }
+  rmSync(probe, { force: true });
+  return false;
+}
+
+test('★★★ v1.195.0: on a read-only /data a stale onset is not carried — no false off-grid critical "unreadable for 2 h" for a pool that read 29 min before the restart; the panel stays pending until it reports or its own alarm, timed from its first listing, stands', (t) => {
+  const dir = join(tmp, 'rodata');
+  mkdirSync(dir);
+  withPath(join('rodata', 'pool-unknown.json'), (path) => {
+    const a = blindUntil(T0 + 70 * MIN); // on file: since T0, last seen T0 + 70
+    chmodSync(dir, 0o555); // /data read-only (EROFS's stand-in: no write, no unlink, reads work)
+    try {
+      if (!refusesWrites(dir)) { t.skip('the directory is still writable (running as root)'); return; }
+      assert.equal(poolUnknownDirWritable(path), false, 'the store\'s own check sees it');
+      a.read(T0 + 71 * MIN, READABLE); // the pool reads again: retired in memory, the save fails
+      for (let t2 = T0 + 72 * MIN; t2 <= T0 + 99 * MIN; t2 += MIN) { a.read(t2, READABLE); a.s.markDeviceListAttempt(); }
+      assert.ok(a.has('could not be removed either'), a.logs.join('\n'));
+      assert.deepEqual(JSON.parse(readFileSync(path, 'utf8'))[PANEL], { sinceMs: T0, lastSeenMs: T0 + 70 * MIN }, 'the file still holds the retired onset');
+
+      const boot = T0 + 100 * MIN;
+      const b = proc(boot);
+      assert.ok(b.has(`backup-pool: 1 pool-unknown onset(s) on file are not carried — ${dir} cannot be written (read-only?)`), b.logs.join('\n'));
+      assert.equal(b.logs.filter((l) => l.includes('are not carried')).length, 1, 'said once');
+      assert.deepEqual(b.s.poolUnknownCarryPending(), [PANEL], '★ still pending in the store (the alert set lets it go once its own alarm stands)');
+      assert.equal(b.s.poolUnknownCarried().size, 0, 'but nothing carried');
+      assert.equal(blindDark(b.s, boot, boot), undefined, 'dark: blind since its first listing, not since T0');
+      assert.deepEqual(pendingAt(b.s, boot + 14 * MIN, boot), [PENDING_LINE], 'pending until its own alarm could stand');
+      b.read(boot, UNKNOWN); // a partial delta: the pool unknown, no grace hold yet
+      assert.equal(b.s.backupPoolUnknownSince(PANEL), boot, '★ the clock starts at its first projection (it carried T0)');
+      assert.ok(!b.has('the reserve-blind clock carries it'));
+      assert.equal(blind(b.s, boot), undefined, '★ no alarm at once (it was a critical "unreadable for 2 h")');
+      b.read(boot + 15 * MIN, UNKNOWN);
+      assert.equal(blind(b.s, boot + 15 * MIN)?.severity, 'warning', 'its own 15 minutes, then a warning');
+    } finally {
+      chmodSync(dir, 0o755);
+    }
+  });
+});
+
+test('★★ v1.195.0: an untrusted file\'s entries are never written back — once the directory can be written again, a restart carries nothing stale', (t) => {
+  const dir = join(tmp, 'rodata-later');
+  mkdirSync(dir);
+  withPath(join('rodata-later', 'pool-unknown.json'), (path) => {
+    blindUntil(T0 + 70 * MIN);
+    chmodSync(dir, 0o555);
+    let b: ReturnType<typeof proc>;
+    try {
+      if (!refusesWrites(dir)) { t.skip('the directory is still writable (running as root)'); return; }
+      b = proc(T0 + 72 * MIN); // untrusted at construction
+    } finally {
+      chmodSync(dir, 0o755); // writable again (a remount) while the process runs
+    }
+    for (let t2 = T0 + 73 * MIN; t2 <= T0 + 80 * MIN; t2 += MIN) { b!.at(t2); b!.s.markDeviceListAttempt(); }
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), {}, '★ the stale onset is not laundered into a fresh-looking entry');
+    assert.deepEqual(b!.s.poolUnknownCarryPending(), [PANEL], 'still pending in this process until the panel reports');
+    const c = proc(T0 + 82 * MIN);
+    c.read(T0 + 82 * MIN, UNKNOWN);
+    assert.equal(c.s.backupPoolUnknownSince(PANEL), T0 + 82 * MIN, 'a restart after it carries nothing stale');
+  });
+});
+
+test('★ v1.195.0: a file in a writable directory is believed as before (the control)', () => {
+  withPath('writable.json', (path) => {
+    blindUntil(T0 + 70 * MIN);
+    assert.equal(poolUnknownDirWritable(path), true);
+    const b = proc(T0 + 72 * MIN);
+    assert.ok(!b.has('are not carried'));
+    b.read(T0 + 72 * MIN, UNKNOWN);
+    assert.equal(b.s.backupPoolUnknownSince(PANEL), T0);
+  });
+});
+
+test('poolUnknownDirWritable — the file\'s DIRECTORY, asked for write access; any refusal (EROFS, EACCES) is false', () => {
+  const asked: Array<[string, number]> = [];
+  assert.equal(poolUnknownDirWritable('/data/pool-unknown.json', (p, m) => { asked.push([p, m]); }), true);
+  assert.deepEqual(asked, [['/data', 2]], 'W_OK on the directory');
+  const refuse = (code: string) => () => { throw Object.assign(new Error(code), { code }); };
+  assert.equal(poolUnknownDirWritable('/data/pool-unknown.json', refuse('EROFS')), false);
+  assert.equal(poolUnknownDirWritable('/data/pool-unknown.json', refuse('EACCES')), false);
+});
+
 /* ══ the pure rules ════════════════════════════════════════════════════════════════════════ */
 
 test('parsePoolUnknownOnsets — finite since ≤ last seen, per serial; anything else skipped', () => {
@@ -336,7 +536,10 @@ test('parsePoolUnknownOnsets — finite since ≤ last seen, per serial; anythin
   assert.deepEqual([...m.keys()], ['ok']);
   assert.equal(parsePoolUnknownOnsets({ A: { sinceMs: 0, lastSeenMs: POOL_UNKNOWN_MAX_EPISODE_MS } }).size, 1, 'an episode of exactly the bound');
   assert.equal(parsePoolUnknownOnsets({ A: { sinceMs: 0, lastSeenMs: POOL_UNKNOWN_MAX_EPISODE_MS + 1 } }).size, 0, '★ review: a longer one is not believed (corrupt or hand-edited)');
-  assert.equal(POOL_UNKNOWN_MAX_EPISODE_MS, 7 * 24 * 60 * MIN);
+  // v1.195.0 — the bound is a year, not 7 days: a panel dark for weeks keeps its onset on file.
+  assert.equal(POOL_UNKNOWN_MAX_EPISODE_MS, 366 * DAY);
+  assert.equal(parsePoolUnknownOnsets({ A: { sinceMs: T0, lastSeenMs: T0 + 8 * DAY } }).size, 1, '★ v1.195.0: 8 days dark is believed (7 d: dropped)');
+  assert.equal(parsePoolUnknownOnsets({ A: { sinceMs: 0, lastSeenMs: T0 } }).size, 0, 'an onset stamped by an unset clock (1970) is not');
 });
 
 test('carriedPoolUnknownSince — the onset when last seen at most the bound ago (inclusive), never later than now; else null', () => {

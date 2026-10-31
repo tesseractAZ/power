@@ -70,7 +70,8 @@ const SUBSET = [
   'test/conditionRetryNewestWins.test.ts',
 ];
 
-const NOTE_SIP = "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode);";
+// v1.195.0 — re-pointed: the call carries the critical the words named (N8).
+const NOTE_SIP = "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode, named);";
 // v1.187.5 — re-pointed: the run-time check is two thunks (the episode, then a newer announcement).
 const RUN_CHECK = '        () => staleAtRun() ?? supersededAtRun(), episode, generation);';
 
@@ -177,14 +178,16 @@ const MUTANTS = [
   {
     id: 'H-i. ★★★ a return to the held level is always a flicker (v1.187.3)',
     file: BR,
-    find: '    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit && !committedAudible;',
+    // v1.195.0 — re-pointed: the return also reads the critical its words name (unheardNamed).
+    find: '    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit && (!committedAudible || unheardNamed);',
     to: '    const unheardReturn = false; /* MUTANT */',
     why: 'A red nobody heard that returns while its clearing stands the dwell is never spoken — for up to 16 min after a restart.',
   },
   {
     id: 'H-ii. ★★ a return is spoken even when the held level was heard',
     file: BR,
-    find: '    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit && !committedAudible;',
+    // v1.195.0 — re-pointed (as H-i).
+    find: '    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit && (!committedAudible || unheardNamed);',
     to: '    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit; /* MUTANT */',
     why: 'Every flicker of a heard condition sounds again: the dwell no longer absorbs anything.',
   },
@@ -257,14 +260,14 @@ const MUTANTS = [
     id: 'U-iv. ★★ a refused SIP dispatch counts',
     file: BR,
     find: NOTE_SIP,
-    to: "          if (kind === 'condition') noteConditionAudible(level, episode); /* MUTANT */",
+    to: "          if (kind === 'condition') noteConditionAudible(level, episode, named); /* MUTANT */",
     why: 'A red heard nowhere makes the clear of a warning heard only before the restart spoken from an unsettled set.',
   },
   {
     id: 'U-v. ★★ a sub-2 s "ok" counts',
     file: BR,
     find: '    if (call.ok && dt < 2000) {',
-    to: "    if (call.ok && kind === 'condition') noteConditionAudible(level, episode); /* MUTANT */\n    if (call.ok && dt < 2000) {",
+    to: "    if (call.ok && kind === 'condition') noteConditionAudible(level, episode, named); /* MUTANT */\n    if (call.ok && dt < 2000) {",
     why: 'HA answered without playing; the red was heard by no one, yet its green is announced as if it had been.',
   },
   {
@@ -278,13 +281,14 @@ const MUTANTS = [
     id: 'U-vii. ★★ an operator TEST counts (the cordless)',
     file: BR,
     find: NOTE_SIP,
-    to: '          if (r.ok > 0) noteConditionAudible(level, episode); /* MUTANT */',
+    to: '          if (r.ok > 0) noteConditionAudible(level, episode, named); /* MUTANT */',
     why: 'As U-vi, through the SIP side-channel.',
   },
   {
     id: 'U-viii. ★★ a timed-out SIP dispatch the entity confirms is not noted',
     file: BR,
-    find: "                      if (kind === 'condition') noteConditionAudible(level, episode); // v1.187.4",
+    // v1.195.0 — re-pointed: the call carries the critical the words named.
+    find: "                      if (kind === 'condition') noteConditionAudible(level, episode, named); // v1.187.4",
     to: '                      /* MUTANT */',
     why: 'The cordless played the red (its HTTP response was lost) and the green is adopted silently.',
   },
@@ -349,8 +353,9 @@ const MUTANTS = [
   {
     id: 'C-ix. ★ another (unlisted) panel\'s carriable entry is dropped when this one writes',
     file: SN,
-    find: '        out[sn] = held;\n      } else {\n        out[sn] = e;\n      }',
-    to: '        out[sn] = held;\n      } else {\n        /* MUTANT */\n      }',
+    // v1.195.0 — re-pointed: an untrusted file's entries are not written back (poolUnknownUntrusted).
+    find: '      } else if (!this.poolUnknownUntrusted) {\n        out[sn] = e;\n      }',
+    to: '      } else if (!this.poolUnknownUntrusted) {\n        /* MUTANT */\n      }',
     why: 'A second panel not projected yet loses its onset to the first panel\'s save.',
   },
   {
@@ -398,7 +403,8 @@ const MUTANTS = [
   {
     id: 'C-xvi. ★★ the settled set ignores a pending carried onset',
     file: AL,
-    find: "  for (const sn of connectivity.poolUnknownCarryPending ?? []) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);",
+    // v1.195.0 — re-pointed: the line now skips a dark panel whose carried alarm is raised.
+    find: "    if (!raised.has(sn)) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);",
     to: '  /* MUTANT */',
     why: 'As C-xiii.',
   },
@@ -426,8 +432,9 @@ const MUTANTS = [
   {
     id: 'C-xx. ★★ a dark panel after the restart is blind since it was listed',
     file: AL,
-    find: '    const since = carried != null && (listed == null || carried < listed) ? carried : listed;',
-    to: '    const since = listed; /* MUTANT */',
+    // v1.195.0 — re-pointed: darkPanelBlindSince (shared by the alert and the pending rule).
+    find: '  return carried != null && (listed == null || carried < listed) ? carried : listed;',
+    to: '  return listed; /* MUTANT */',
     why: 'A panel blind across a restart and still dark is absent 15 min, then a warning until boot + 60.',
   },
   {
@@ -447,7 +454,8 @@ const MUTANTS = [
   {
     id: 'C-xxiii. ★ the refresh ignores entries held for dark panels',
     file: SN,
-    find: '    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty || this.poolUnknownCarried().size > 0)) this.writePoolUnknown();',
+    // v1.195.0 — re-pointed: the refresh reads the pending entries (trusted or not).
+    find: '    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty || this.pendingPoolUnknown().size > 0)) this.writePoolUnknown();',
     to: '    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty)) this.writePoolUnknown(); /* MUTANT */',
     why: 'As C-xxii when no pool is unknown in this process.',
   },

@@ -318,6 +318,22 @@ test('getDayForecast — a cloud-wedged home Core RESTORES the display PV basis 
       fcPresent.typicalPvWhPerDayDisplay, fcPresent.typicalPvWhPerDay,
       'all Cores present ⇒ restored typical-per-day equals the reporting typical-per-day',
     );
+    // v1.195.0 — …and PER HOUR: the restored series (hoursDisplay, the forecast card's) equals the
+    // alarm series hour by hour with nothing restored, and on the wedge carries the restored sum.
+    assert.equal(fcPresent.restoredCoreCount, 0);
+    assert.deepEqual(
+      fcPresent.hoursDisplay,
+      fcPresent.hours.map((h) => ({ ts: h.ts, forecastPvW: h.forecastPvW, projectedSocPct: h.projectedSocPct, modelled: h.modelled })),
+      'all Cores present ⇒ the per-hour display series IS the alarm series (PV, SoC and the model flag)',
+    );
+    assert.equal(fcPresent.minProjectedSocDisplay, fcPresent.minProjectedSoc);
+    assert.equal(fcWedged.restoredCoreCount, 2);
+    const displaySum = fcWedged.hoursDisplay!.reduce((s, h) => s + h.forecastPvW, 0);
+    assert.ok(Math.abs(displaySum - fcWedged.forecastPvWhNext24Display) <= 12, `Σ hoursDisplay (${displaySum}) is the display next-24 h (${fcWedged.forecastPvWhNext24Display}), each hour rounded`);
+    for (let i = 0; i < 24; i++) {
+      assert.ok(Math.abs(fcWedged.hoursDisplay![i].forecastPvW - pvSeriesPresentReporting[i]) <= 1,
+        `hour ${i}: the wedged display series (${fcWedged.hoursDisplay![i].forecastPvW}) is the full fleet's (${pvSeriesPresentReporting[i]})`);
+    }
 
     // 6) The reporting basis genuinely DEFLATED under the wedge (regression guard for
     //    the very bug being fixed): the alarm-facing next-24h fell to ~1 Core.

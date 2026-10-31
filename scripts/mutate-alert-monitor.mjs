@@ -198,8 +198,10 @@ const MUTANTS = [
   {
     id: 'xxiii. ★★★ the broadcast joins a non-green first tick silently again',
     file: BC,
-    find: '      if (level === \'green\') {',
-    to: '      if (true /* MUTANT */) {',
+    // v1.195.0 — re-pointed: a green first tick is joined only when no held all-clear is owed.
+    find: '      if (level === \'green\' && restoredOwed == null) {',
+    // a runtime-true condition TS cannot narrow on (\`true\` left the code below it typed as never)
+    to: '      if (Date.now() > 0 /* MUTANT */) {',
     why: 'A condition standing at boot and never heard before the restart is never spoken, nor pushed.',
   },
   {

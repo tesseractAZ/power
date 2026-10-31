@@ -651,6 +651,43 @@ export function conditionBootBaseline(
 }
 
 /**
+ * v1.195.0 — the longest a held de-escalation of an audible level is resumed after a restart
+ * (restoredHeldDeescalation), from the hold's START: the same hour as SOUNDED_CRIT_RESTORE_MAX_AGE_MS
+ * and the pool-unknown carry. It covers every hold a restart can land in (the 3-minute dwell, the
+ * restart question to boot + 16/19, a sounded critical held up to 20 min); a condition found clear
+ * after a longer outage cleared while the add-on was down, and is not announced.
+ */
+export const HELD_ALLCLEAR_RESTORE_MAX_AGE_MS = 60 * 60_000;
+
+/**
+ * v1.195.0 — THE ALL-CLEAR A RESTART INSIDE A HELD DE-ESCALATION OWES.
+ *
+ * When an audible level clears, the dwell holds the lower level for CONDITION_CLEAR_DWELL_MS, and
+ * the hold demotes the condition record to unheard (so a restart inside it cannot swallow a standing
+ * yellow as a continuation of a cleared red). That demotion erased the only evidence an all-clear
+ * was owed: the next boot read {level: red, spoken: false}, had no baseline, and joined the green at
+ * its first tick in silence — the cleared alarm stayed the last words in the house. The record now
+ * also keeps the hold (conditionHeldFrom / conditionHeldAt) while the held level was audible. The
+ * hold to resume: its level and start, when the record names one at its committed level (a later
+ * commit rewrote it otherwise), started at most `maxAgeMs` before the boot (inclusive), and never
+ * later than the boot (a clock stepped back does not renew it); else null. Pure + exported for tests.
+ */
+export function restoredHeldDeescalation(
+  rec: { conditionLevel?: unknown; conditionSpoken?: unknown; conditionHeldFrom?: unknown; conditionHeldAt?: unknown } | null | undefined,
+  bootMs: number,
+  maxAgeMs = HELD_ALLCLEAR_RESTORE_MAX_AGE_MS,
+): { from: 'yellow' | 'red'; atMs: number } | null {
+  if (rec == null) return null;
+  const from = rec.conditionHeldFrom;
+  const at = rec.conditionHeldAt;
+  if (from !== 'yellow' && from !== 'red') return null;
+  if (rec.conditionLevel !== from) return null;
+  if (typeof at !== 'number' || !Number.isFinite(at)) return null;
+  if (bootMs - at > maxAgeMs) return null;
+  return { from, atMs: Math.min(at, bootMs) };
+}
+
+/**
  * v1.186.0 — which configured Music Assistant targets can take an announcement right now, and
  * why the others cannot. Usable is exactly the pre-v1.186.0 rule (a state was read and it is not
  * `unavailable`). A null read is NOT usable: it means "not found", or a read that failed — and a
@@ -1239,6 +1276,10 @@ export interface BroadcastStatus {
   conditionSpoken: boolean;
   conditionAt: number | null;
   bootBaselineLevel: ConditionLevel | null;
+  /** v1.195.0 — the level of a held de-escalation of an audible level, written with the record while
+   *  the hold stands (restoredHeldDeescalation: a restart inside it still owes the all-clear); null
+   *  when none is held. */
+  conditionHeldFrom: ConditionLevel | null;
   /** v0.9.70 — diagnostic from the most recent render. */
   lastRender: {
     filename: string | null;
@@ -1504,6 +1545,34 @@ export function refusedRetryRepresent(
   return { level, dueAtMs: lastPlayed.atMs + gapMs, fresh: lower || named == null ? null : [named] };
 }
 
+/**
+ * v1.195.0 — A CONDITION DEFERRAL KEPT BEHIND A HIGHER RETRY, as the tick re-presents it once the
+ * retry slot is free (deferredCondition). The slot holds one retry, and a lower deferral never takes
+ * a higher retry's place (retrySlotDecision: keep-pending) — but nothing remembered it, and the tick
+ * did not see it as owed: its transition was already committed. A warning under a held critical, or
+ * a warning or an all-clear behind a dedicated battery or runway alarm's retry, was never spoken
+ * while it stood. `kept` is the newest such deferral: re-presented only in the condition episode it
+ * was requested in (a commit at another level since is the condition now). Due at once, or — when
+ * the last condition played is not below it — once the same-level gap since that play has expired:
+ * presented earlier, the gap would refuse it, and a re-present is never re-armed. Below the level
+ * last played, the level itself is the news (`fresh` null); otherwise only while the alert its words
+ * named is still counted. Pure + exported for tests.
+ */
+export function keptDeferralRepresent(
+  kept: { level: ConditionLevel; episode: number; named: string | null } | null,
+  currentEpisode: number,
+  lastPlayed: { level: ConditionLevel | null; atMs: number },
+  gapMs: number,
+  nowMs: number,
+): { level: ConditionLevel; dueAtMs: number; fresh: readonly string[] | null } | { drop: string } | null {
+  if (kept == null) return null;
+  if (kept.episode !== currentEpisode) return { drop: 'the condition has been committed at another level since' };
+  const gated = lastPlayed.level != null && !isLevelEscalation(lastPlayed.level, kept.level);
+  const dueAtMs = gated ? Math.max(nowMs, lastPlayed.atMs + gapMs) : nowMs;
+  const lower = lastPlayed.level != null && LEVEL_RANK[kept.level] < LEVEL_RANK[lastPlayed.level];
+  return { level: kept.level, dueAtMs, fresh: lower || kept.named == null ? null : [kept.named] };
+}
+
 
 /**
  * v1.119.0 — the announce HTTP budget, DERIVED from the clip instead of guessed.
@@ -1647,6 +1716,17 @@ export function startBroadcastMonitor(
    */
   let conditionEpisode = 0;
   let committedAudible = false;
+  /**
+   * v1.195.0 — WHICH criticals a condition broadcast made audible in the current red episode: the one
+   * its words NAMED (noteConditionAudible), or the one a heard adoption matched as announced (the red
+   * replay gate's voiced critical; v1.195.0 review — not every critical counted beside it).
+   * committedAudible is one flag for the whole episode, so one critical heard made
+   * every later critical of the same red read as heard: a critical that took another's place, whose
+   * own announcement never reached the speakers, cleared and came back inside the dwell and was
+   * absorbed as a flicker — never named. A return whose words would name a critical outside this set
+   * is presented again (unheardReturn). Reset by every commit that changes the level (adoptLevel).
+   */
+  let audibleCritFps = new Set<string>();
   // v1.187.0 — WHICH criticals and warnings were counted when the standing level was committed
   // (adoptLevel). newCrit / newWarn compare against these: the count alone could not see a
   // different critical replacing a cleared one at the same count.
@@ -1692,6 +1772,10 @@ export function startBroadcastMonitor(
   let conditionLevel: ConditionLevel | null = null;
   let conditionSpoken = false;
   let conditionAt: number | null = null;
+  /** v1.195.0 — a held de-escalation of a level that was audible (restoredHeldDeescalation): its level
+   *  and start, written with the record so a restart inside the hold still owes the all-clear. Kept
+   *  apart from deescalationHold, which is declared after persistStatus. */
+  let conditionHeldOwed: { from: ConditionLevel; atMs: number } | null = null;
   // v1.187.0 — the last storm-gate suppression (see BroadcastStatus.lastSuppressedAt).
   let lastSuppressedAt: number | null = null;
   let lastSuppressedLevel: ConditionLevel | null = null;
@@ -1717,6 +1801,7 @@ export function startBroadcastMonitor(
         JSON.stringify({
           lastBroadcastAt, lastLevel, lastOutcome, lastErrors, lastSpokenMessage, lastRender,
           lastBroadcastKind, conditionLevel, conditionSpoken, conditionAt, // v1.186.0
+          conditionHeldFrom: conditionHeldOwed?.from ?? null, conditionHeldAt: conditionHeldOwed?.atMs ?? null, // v1.195.0
           lastSuppressedAt, lastSuppressedLevel, lastSuppressedKind, lastSuppressedReason, // v1.187.0
           soundedCrit: Object.fromEntries(soundedCritKept().map(([f, at]) => [f, soundedCritRestoredAt.get(f) ?? at])), // v1.187.3 (restoreSoundedCriticals)
         }),
@@ -1724,7 +1809,7 @@ export function startBroadcastMonitor(
     } catch { /* best-effort */ }
     soundedCritWritten = { keys: soundedCritKeys(), atMs: Date.now() };
   };
-  let persistedCondition: { conditionLevel?: unknown; conditionSpoken?: unknown } | null = null;
+  let persistedCondition: { conditionLevel?: unknown; conditionSpoken?: unknown; conditionHeldFrom?: unknown; conditionHeldAt?: unknown } | null = null;
   let persistedSoundedCrit: unknown = undefined; // v1.187.3 (restoreSoundedCriticals)
   try {
     const s = JSON.parse(readFileSync(STATUS_PATH, 'utf8')) as Partial<{
@@ -1732,6 +1817,7 @@ export function startBroadcastMonitor(
       lastErrors: string[]; lastSpokenMessage: string; lastRender: BroadcastStatus['lastRender'];
       lastBroadcastKind: BroadcastStatus['lastBroadcastKind'];
       conditionLevel: unknown; conditionSpoken: unknown; conditionAt: unknown;
+      conditionHeldFrom: unknown; conditionHeldAt: unknown; // v1.195.0 (restoredHeldDeescalation)
       lastSuppressedAt: unknown; lastSuppressedLevel: unknown; lastSuppressedKind: unknown; lastSuppressedReason: unknown;
       soundedCrit: unknown;
     }>;
@@ -1770,6 +1856,20 @@ export function startBroadcastMonitor(
    * warm-up is news, not the continuation of a level the house heard before the restart.
    */
   let continuationBaseline: ConditionLevel | null = bootBaselineLevel;
+  /**
+   * v1.195.0 — a held de-escalation of an audible level the add-on stopped in (restoredHeldDeescalation):
+   * a green first tick resumes it (the tick), and it stays on record until that tick decides.
+   */
+  const restoredOwed = restoredHeldDeescalation(persistedCondition, bootMs);
+  conditionHeldOwed = restoredOwed;
+  /**
+   * v1.195.0 — the baseline the RECOVERY decisions read (recoveryCandidate, isRestartRecovery): the
+   * heard level, else the level of the resumed hold (a non-green first tick resumes none, and drops
+   * it). The continuation gate still reads continuationBaseline alone, which a demoted record leaves
+   * null: a yellow standing below a cleared red is spoken, not filed as its continuation. A recovery
+   * ends both.
+   */
+  let recoveryBaseline: ConditionLevel | null = bootBaselineLevel ?? restoredOwed?.from ?? null;
   /** v1.187.3 — BroadcastMonitorOpts.alertSetSettledSince, read defensively: absent, throwing or
    *  not a finite number ⇒ not settled. */
   const alertSetSettledSince = (): number | null => {
@@ -1838,6 +1938,10 @@ export function startBroadcastMonitor(
     // would commit an empty set, and every standing critical would read as new next tick.
     ids: { crit: readonly string[]; warn: readonly string[] },
     heard = false,
+    // v1.195.0 (review) — for a heard red, the critical the announcement on record NAMED (the red replay
+    // gate's voicedFingerprint), the one counted audible (audibleCritFps). The others it counted are
+    // what stood beside it, never words: a co-standing critical that returns alone is news.
+    heardNamed: string | null = null,
   ): void => {
     // v1.187.0 (review) — while the committed level STAYS red, the committed criticals ACCUMULATE
     // instead of being replaced. Replaced, a standing critical whose fingerprint alternates (one
@@ -1857,8 +1961,12 @@ export function startBroadcastMonitor(
     if (l !== prevLevel) {
       conditionEpisode += 1;
       committedAudible = heard;
+      // v1.195.0 — a new episode starts with nothing named audible, but for a heard red (the red
+      // replay gate): the critical that gate matched as announced already.
+      audibleCritFps = new Set(heard && l === 'red' && heardNamed != null ? [heardNamed] : []);
     } else if (heard) {
       committedAudible = true;
+      if (l === 'red' && heardNamed != null) audibleCritFps.add(heardNamed);
     }
     prevLevel = l;
     prevCrit = c;
@@ -1866,6 +1974,7 @@ export function startBroadcastMonitor(
     // v1.187.0 — a commit ends any held de-escalation, and supersedes a storm-gated condition that
     // was waiting to be re-presented: whatever the condition is now, it is decided afresh.
     deescalationHold = null;
+    conditionHeldOwed = null; // v1.195.0 — written with the record below
     deferredCondition = null;
     // v1.187.1 — and a pending boot hold: the held condition was adopted, not dropped.
     bootYellowHold = null;
@@ -1906,6 +2015,9 @@ export function startBroadcastMonitor(
    *  retryLevel is set. */
   let retryKind: BroadcastKind = 'dedicated';
   let retryEpisode = 0;
+  /** v1.195.0 (review) — and the alert its words named (conditionNamedFingerprint; null for a dedicated
+   *  one): a condition retry taken off the slot is kept with it (keepDeferral). */
+  let retryNamed: string | null = null;
   /**
    * v1.187.5 — the GENERATION of the announcement the pending retry replays (read only while
    * retryLevel is set). Every broadcast takes the next generation when it runs (attemptGeneration,
@@ -1916,6 +2028,21 @@ export function startBroadcastMonitor(
    */
   let retryGeneration = 0;
   let broadcastGeneration = 0;
+  /**
+   * v1.195.0 — the newest CONDITION deferral kept pending behind a higher retry (scheduleBroadcastRetry:
+   * keep-pending), with the episode it was requested in and the alert its words named. The tick
+   * re-presents it once the slot is free and nothing is in flight (keptDeferralRepresent).
+   * v1.195.0 (review) — or a condition retry a dedicated alarm (or an older condition retry) took the
+   * slot from: the other ordering of the same loss.
+   */
+  let keptDeferral: { level: ConditionLevel; episode: number; named: string | null } | null = null;
+  /** v1.195.0 (review) — one deferral is kept at a time: the newest, unless the one kept in the current
+   *  episode is more severe (the slot's own rule, retrySlotDecision). Whether `k` was kept. */
+  const keepDeferral = (k: { level: ConditionLevel; episode: number; named: string | null }): boolean => {
+    if (keptDeferral != null && keptDeferral.episode === conditionEpisode && RETRY_LEVEL_RANK[keptDeferral.level] > RETRY_LEVEL_RANK[k.level]) return false;
+    keptDeferral = k;
+    return true;
+  };
   /** v1.187.5 — per level, the newest generation of a CONDITION announcement that took the slot
    *  (scheduleBroadcastRetry) or reached the speakers (runBroadcastAttempt): conditionRetrySuperseded. */
   const conditionNewestGeneration: Record<ConditionLevel, number> = { green: 0, yellow: 0, red: 0 };
@@ -1988,7 +2115,11 @@ export function startBroadcastMonitor(
       : retryLevel != null ? { level: retryLevel, attempt: retryAttempt } : null;
     const decision = retrySlotDecision(pending, level, RETRY_DELAYS_MS.length);
     if (decision.action === 'keep-pending') {
-      log(`broadcast: keeping the pending ${retryLevel} retry — a ${level} deferral does not supersede it (${reason})`);
+      // v1.195.0 — a condition deferral is remembered (the newest), and re-presented by the tick once
+      // that retry is done (keptDeferral). Dropped here, it was never spoken while it stood.
+      // v1.195.0 (review) — unless a more severe one of this episode is kept already (keepDeferral).
+      const kept = kind === 'condition' && keepDeferral({ level, episode, named });
+      log(`broadcast: keeping the pending ${retryLevel} retry — a ${level} deferral does not supersede it (${reason})${kept ? `; the ${level} is re-presented once that retry is done, if the condition has not moved` : kind === 'condition' ? `; the more severe ${keptDeferral?.level ?? '?'} kept before it is re-presented instead` : ''}`);
       return;
     }
     if (decision.action === 'give-up') {
@@ -2000,14 +2131,22 @@ export function startBroadcastMonitor(
     const delay = RETRY_DELAYS_MS[decision.attempt - 1];
     retryAttempt = decision.attempt;
     if (retryTimer) {
+      // v1.195.0 (review) — a CONDITION retry this arm takes the slot from (a dedicated battery or runway
+      // alarm at its level or above, or an older condition retry re-arming above it) is kept
+      // (keepDeferral), as a lower deferral behind it is. Not when the arm is a newer announcement of
+      // the condition (outranked) or the retry is stale. Cleared in silence, the warning or all-clear it
+      // carried was never spoken while it stood.
+      const kept = retryKind === 'condition' && retryLevel != null && !stalePending && !outranked
+        && keepDeferral({ level: retryLevel, episode: retryEpisode, named: retryNamed });
       // v1.122.0 — say so. This used to discard a pending retry in silence.
-      log(`broadcast: superseding the pending ${retryLevel ?? '?'} retry with ${level}${stalePending ? ` (stale: a newer condition, ${prevLevel}, has been committed since)` : outranked ? ' (a newer announcement of the condition)' : ''}`);
+      log(`broadcast: superseding the pending ${retryLevel ?? '?'} retry with ${level}${stalePending ? ` (stale: a newer condition, ${prevLevel}, has been committed since)` : outranked ? ' (a newer announcement of the condition)' : ''}${kept ? `; the ${retryLevel} is re-presented once that retry is done, if the condition has not moved` : ''}`);
       clearTimeout(retryTimer);
     }
     retryLevel = level;
     retryKind = kind;
     retryEpisode = episode;
     retryGeneration = generation;
+    retryNamed = named; // v1.195.0 (review)
     // v1.187.5 — a condition announcement that takes the slot is the newest of its level: an older
     // one's retry still waiting in the chain is dropped when it runs (conditionRetrySuperseded). A
     // dedicated one is not the condition and takes no condition retry's place.
@@ -2034,6 +2173,7 @@ export function startBroadcastMonitor(
         log('broadcast: deferred retry cancelled — broadcasts disabled');
         retryAttempt = 0;
         retryLevel = null;
+        keptDeferral = null; // v1.195.0 — and what was kept behind it
         return;
       }
       // v1.25.0 — skipSip: this retry exists to reach the MA targets that were
@@ -2110,12 +2250,37 @@ export function startBroadcastMonitor(
   let conditionAudibleSinceBootLevel: ConditionLevel | null = null;
   /** v1.187.4 — the attempt of `episode` (the condition episode it was requested in) made `level`
    *  audible: since the boot, and — when it is the committed level of the current episode — the
-   *  committed level itself (committedAudible). */
-  const noteConditionAudible = (level: ConditionLevel, episode: number): void => {
+   *  committed level itself (committedAudible).
+   *  v1.195.0 — and, for a red of the current red episode, the critical its words named
+   *  (`named`, the attempt's conditionNamedFingerprint): audibleCritFps. */
+  const noteConditionAudible = (level: ConditionLevel, episode: number, named: string | null): void => {
     if (conditionAudibleSinceBootLevel == null || LEVEL_RANK[level] > LEVEL_RANK[conditionAudibleSinceBootLevel]) {
       conditionAudibleSinceBootLevel = level;
     }
     if (episode === conditionEpisode && level === prevLevel) committedAudible = true;
+    if (episode === conditionEpisode && level === 'red' && prevLevel === 'red' && named != null) audibleCritFps.add(named);
+    // v1.195.0 (review) — and, inside that level's held clearing, the all-clear it owes.
+    if (episode === conditionEpisode && level === prevLevel) noteHeldLevelAudible(level, false);
+  };
+  /**
+   * v1.195.0 (review) — `level` made audible while its OWN clearing stands the dwell (deescalationHold):
+   * the red cleared while its announcement was still playing (Music Assistant blocks 20-105 s), or its
+   * deferred retry played inside the hold (fail-loud). The hold then owes the all-clear, as one that
+   * began on an audible level does (conditionHeldOwed, from the hold's start), and a verified delivery
+   * (`heard`) marks the HOLD heard — restored to the record if the level comes back
+   * (endDeescalationHold) — not the record. Marked on the record, it read "red, heard" with nothing
+   * owed: a restart inside the dwell joined the green in silence, and took a warning standing below as
+   * the red's continuation, the swallow the hold's demotion exists to stop. Whether a hold took it.
+   */
+  const noteHeldLevelAudible = (level: ConditionLevel, heard: boolean): boolean => {
+    const h = deescalationHold;
+    if (h == null || h.from !== level) return false;
+    if (heard) h.heard = true;
+    if (conditionHeldOwed == null) {
+      conditionHeldOwed = { from: level, atMs: h.sinceMs };
+      persistStatus();
+    }
+    return true;
   };
   /**
    * v1.187.10 — a CONDITION retry armed on its timer for the current episode that could still make
@@ -2778,7 +2943,7 @@ export function startBroadcastMonitor(
           let probing = false;
           lastSipDispatchOk = r.ok > 0;
           // v1.187.4 — the cordless took it: audible, whatever Music Assistant does.
-          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode);
+          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode, named);
           if (r.ok === 0) {
             // v1.48.3 — a TIMEOUT-classed failure means the HTTP RESPONSE was
             // lost, not that the service didn't run: under HA load the
@@ -2808,7 +2973,7 @@ export function startBroadcastMonitor(
                     const active = states.some((s) => s != null && (s.state === 'playing' || s.state === 'on'));
                     if (active) {
                       lastSipDispatchOk = true;
-                      if (kind === 'condition') noteConditionAudible(level, episode); // v1.187.4
+                      if (kind === 'condition') noteConditionAudible(level, episode, named); // v1.187.4
                       log('broadcast: SIP delivery confirmed via entity state after an HTTP timeout — duplicate re-fire suppressed');
                     } else {
                       log(sipProbeUnknownLine(cfg.sipTargets, states));
@@ -2877,7 +3042,7 @@ export function startBroadcastMonitor(
       scheduleBroadcastRetry(level, rung, message, messageEs, `suspiciously fast completion (${dt}ms)`, kind, episode, generation, named);
     } else if (call.ok && kind === 'condition') {
       // v1.187.4 — played: the tone-only fallback and a delivery-unknown timeout included.
-      noteConditionAudible(level, episode);
+      noteConditionAudible(level, episode, named);
       // v1.187.4 (review) — the speakers took this episode's condition at the same or a higher
       // level: a condition retry still armed for it is moot. Kept, it replayed its older text after
       // this one — a critical that had cleared — once the same-level gap had passed.
@@ -2916,7 +3081,9 @@ export function startBroadcastMonitor(
       // v1.186.0 — and only a verified condition delivery of the level the tick currently holds
       // marks the condition record heard (the restart baseline). A timed-out dispatch is
       // "delivery UNKNOWN" and earns no credit, as for the red replay gate.
-      if (kind === 'condition' && !deliveryUnverified && conditionLevel === level) conditionSpoken = true;
+      // v1.195.0 (review) — not while that level's own clearing is held: the hold takes the heard flag
+      // and the record stays demoted (noteHeldLevelAudible).
+      if (kind === 'condition' && !deliveryUnverified && conditionLevel === level && !noteHeldLevelAudible(level, true)) conditionSpoken = true;
       // v1.88.0 — SINGLE-FLIGHT the two red retry paths. On 2026-08-19 15:02
       // a degraded boot (Piper DNS down + HA 502) armed BOTH the deferred-
       // target retry (30s) and the spoken-render retry (90s); the deferred one
@@ -3335,10 +3502,14 @@ export function startBroadcastMonitor(
    *     of them is still counted. Before, such a warning was refused and — being recorded in
    *     prevWarnFps — every later flicker of it was absorbed by the dwell, so it was never voiced.
    * `waitLogged`: the one "waits" log line while a lower level stands its dwell.
+   * v1.195.0 — and a third: a condition deferral kept behind a higher retry (keptDeferral), once the
+   * slot is free (`kept`: its lines say so).
    */
   let deferredCondition: {
-    level: ConditionLevel; dueAtMs: number; fresh: readonly string[] | null; waitLogged: boolean;
+    level: ConditionLevel; dueAtMs: number; fresh: readonly string[] | null; waitLogged: boolean; kept?: boolean;
   } | null = null;
+  /** v1.195.0 — how a waiting re-present is named in its log lines. */
+  const deferredName = (d: { level: ConditionLevel; kept?: boolean }): string => (d.kept === true ? `${d.level} kept behind a higher retry` : `storm-gated ${d.level}`);
 
   /**
    * v1.187.0 — end a held de-escalation that did NOT commit: the level is back up. When it is back
@@ -3351,8 +3522,14 @@ export function startBroadcastMonitor(
     if (h == null) return;
     deescalationHold = null;
     log(`broadcast: held de-escalation from ${h.from} abandoned after ${Math.round((Date.now() - h.sinceMs) / 1000)} s — the condition is ${level}${how}`);
+    // v1.195.0 — no all-clear is owed for a hold that did not commit (conditionHeldOwed): written
+    // whether or not the heard flag is restored.
+    const owedOnRecord = conditionHeldOwed != null;
+    conditionHeldOwed = null;
     if (restoreHeard && h.heard && conditionLevel === h.from && !conditionSpoken) {
       conditionSpoken = true;
+      persistStatus();
+    } else if (owedOnRecord) {
       persistStatus();
     }
   };
@@ -3527,20 +3704,40 @@ export function startBroadcastMonitor(
       firstTick = false;
       // ★ NOT adoptLevel(): a boot-time green is almost always "the alert store
       // has not populated yet", not an all-clear. See adoptLevel's docstring.
-      if (level === 'green') {
+      if (level === 'green' && restoredOwed == null) {
         prevLevel = level;
         prevCrit = crit;
         return;
       }
-      // v1.186.0 — a NON-green first tick is a condition standing at boot, and is never joined
-      // silently: it is treated as a transition from green, on THIS tick, through the boot gates
-      // below (restart continuation with the heard baseline, the boot yellow hold, holdBootRed,
-      // the red replay gate). Joining it made every later tick read "no transition", so a
-      // condition unheard before the restart was never spoken (nor pushed: the alert monitor
-      // seeds tick-1 alerts), and the next boot repeated it.
-      prevLevel = 'green';
-      prevCrit = 0;
-      log(`broadcast: ${level} standing at the first tick — routed through the boot gates, not joined silently`);
+      if (level === 'green' && restoredOwed != null) {
+        // v1.195.0 — the add-on stopped inside the held de-escalation of a level that was audible
+        // (restoredHeldDeescalation): the hold is resumed, from its ORIGINAL start (restarts inside it
+        // cannot extend it), and this green is held as a restart question — announced as a recovery
+        // once it has stood the dwell on a settled set (recoveryBaseline), adopted silently if the
+        // question closes before (the heard-baseline rule). Joined, as every boot green was, the
+        // all-clear it owed was never said. Nothing about the level is known to this process: no
+        // criticals or warnings are counted (a red or yellow that appears is new, and takes the boot
+        // gates), and nothing is audible in it yet (committedAudible stays false).
+        prevLevel = restoredOwed.from;
+        prevCrit = 0;
+        deescalationHold = { from: restoredOwed.from, sinceMs: restoredOwed.atMs, heard: true, soundedHeldInWarmup: false };
+        conditionHeldOwed = { ...restoredOwed };
+        log(`broadcast: a ${restoredOwed.from} condition that was audible was clearing when the add-on stopped (its hold began ${Math.round((Date.now() - restoredOwed.atMs) / 1000)} s ago) — its all-clear is owed: the green is held, and announced as a recovery once it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled alert set`);
+      } else {
+        // v1.186.0 — a NON-green first tick is a condition standing at boot, and is never joined
+        // silently: it is treated as a transition from green, on THIS tick, through the boot gates
+        // below (restart continuation with the heard baseline, the boot yellow hold, holdBootRed,
+        // the red replay gate). Joining it made every later tick read "no transition", so a
+        // condition unheard before the restart was never spoken (nor pushed: the alert monitor
+        // seeds tick-1 alerts), and the next boot repeated it.
+        // v1.195.0 — nor is a hold on record resumed: the condition standing now is what is spoken,
+        // and its recovery decisions read the heard baseline alone, as before.
+        conditionHeldOwed = null;
+        recoveryBaseline = bootBaselineLevel;
+        prevLevel = 'green';
+        prevCrit = 0;
+        log(`broadcast: ${level} standing at the first tick — routed through the boot gates, not joined silently`);
+      }
     }
     // v1.186.0 — the first tick joins the current level SILENTLY and does not write the
     // condition record (an unpopulated store reads green). Once the warm-up window has passed,
@@ -3607,6 +3804,21 @@ export function startBroadcastMonitor(
       }
       log(`broadcast: spoken retry dropped — level moved ${want} → ${level} or gated`);
     }
+    // v1.195.0 — a condition deferral kept behind a higher retry (keptDeferral) becomes the one
+    // re-present below once that retry is done: the slot free, nothing in the chain (a fired retry
+    // still queued plays first — re-presented ahead of it, the warning would be refused by the gap
+    // its delivery arms), and no re-present already waiting.
+    if (keptDeferral != null && retryTimer == null && retryLevel == null && realAudibleInFlight === 0 && deferredCondition == null) {
+      const k = keptDeferral;
+      keptDeferral = null;
+      const rp = keptDeferralRepresent(k, conditionEpisode, { level: lastConditionPlayedLevel, atMs: lastConditionPlayedAt }, SAME_LEVEL_GAP_MS, Date.now());
+      if (rp != null && 'drop' in rp) {
+        log(`broadcast: the ${k.level} kept behind a higher retry is not re-presented — ${rp.drop}`);
+      } else if (rp != null) {
+        deferredCondition = { ...rp, waitLogged: false, kept: true };
+        log(`broadcast: the ${k.level} kept behind a higher retry will be re-presented in ${Math.max(0, Math.round((rp.dueAtMs - Date.now()) / 1000))} s, if the condition is still ${k.level}${rp.fresh == null ? '' : ` and ${rp.fresh.map(describeFingerprint).join('; ')} is still counted`}`);
+      }
+    }
     // v1.187.0 — the ONE re-present of a transition the same-level storm gate refused (see
     // deferredCondition). Due once the gap has expired; spoken only if the condition is still
     // that level, what was new to it (a same-level deferral's `fresh`) is still counted, and the
@@ -3627,12 +3839,12 @@ export function startBroadcastMonitor(
       const heldUnder = level === prevLevel && LEVEL_RANK[held.level] < LEVEL_RANK[level];
       if (heldUnder && !held.waitLogged) {
         held.waitLogged = true;
-        log(`broadcast: the storm-gated ${held.level} waits — the committed ${level} reads loud again; re-presented when the condition is ${held.level} again, superseded by the next commit`);
+        log(`broadcast: the ${deferredName(held)} waits — the committed ${level} reads loud again; re-presented when the condition is ${held.level} again, superseded by the next commit`);
       }
       if (LEVEL_RANK[level] < LEVEL_RANK[held.level]) {
         if (!held.waitLogged) {
           held.waitLogged = true;
-          log(`broadcast: the storm-gated ${held.level} waits — the condition is ${level} now, standing its de-escalation dwell; re-presented if it returns to ${held.level}, superseded if ${level} commits`);
+          log(`broadcast: the ${deferredName(held)} waits — the condition is ${level} now, standing its de-escalation dwell; re-presented if it returns to ${held.level}, superseded if ${level} commits`);
         }
       } else if (!heldUnder) {
         deferredCondition = null;
@@ -3645,17 +3857,19 @@ export function startBroadcastMonitor(
           : held.level === 'yellow' && cfg.minSeverity === 'critical' ? 'yellow is below the minimum severity'
           : inQuiet() && !(held.level === 'red' && cfg.criticalBreakThrough) ? 'quiet hours' : null;
         if (notNow != null) {
-          log(`broadcast: the storm-gated ${held.level} is not re-presented — ${notNow}`);
+          log(`broadcast: the ${deferredName(held)} is not re-presented — ${notNow}`);
         } else {
           // The condition is back at the committed level: a held de-escalation below it (a lower
           // level that did not stand its dwell) is over.
           // v1.187.11 (review) — only then. A deferral below the committed level (a warning under a kept
           // red) is spoken while the red's hold stands: ending it there logged an abandoned de-escalation,
           // flipped the record's heard flag twice, and lost the hold's restart mark.
-          if (held.level === prevLevel) endDeescalationHold(level, ' again — the storm-gated condition is re-presented', true);
+          if (held.level === prevLevel) endDeescalationHold(level, held.kept === true ? ' again — the condition kept behind a higher retry is re-presented' : ' again — the storm-gated condition is re-presented', true);
           tickInFlight = true;
           try {
-            log(`broadcast: re-presenting the ${held.level} the storm gate refused — the gap has expired and the condition is still ${held.level}`);
+            log(held.kept === true
+              ? `broadcast: re-presenting the ${held.level} kept behind a higher retry — that retry is done and the condition is still ${held.level}`
+              : `broadcast: re-presenting the ${held.level} the storm gate refused — the gap has expired and the condition is still ${held.level}`);
             await speakCondition(held.level, rung, alerts, { voicedFingerprint, criticalFingerprints, warningFingerprints, fresh: [] }, false);
           } finally {
             tickInFlight = false;
@@ -3681,7 +3895,10 @@ export function startBroadcastMonitor(
     // v1.187.0 (review) — the identities at this level that were NOT counted at the last commit,
     // read before adoptLevel records the new set. A same-level storm-gate refusal of a transition
     // carrying any of them is re-presented when the gap expires (see deferredCondition).
-    const fresh = level === 'red' ? criticalFingerprints.filter((f) => !prevCritFps.has(f))
+    // v1.195.0 — for a red, also the critical the words would name when it was never made audible in
+    // this episode (audibleCritFps): a storm-gate refusal of its return is re-presented when the gap
+    // expires, like a new critical's.
+    const fresh = level === 'red' ? criticalFingerprints.filter((f) => !prevCritFps.has(f) || (f === voicedFingerprint && !audibleCritFps.has(f)))
       : level === 'yellow' ? warningFingerprints.filter((f) => !prevWarnFps.has(f))
       : [];
     // v1.187.4 — a return to the held level is a flicker the dwell absorbs only when that level was
@@ -3689,7 +3906,13 @@ export function startBroadcastMonitor(
     // retries spent, or a commit nobody could hear) returning while its clearing stood the dwell was
     // absorbed "again", and the critical stood unspoken — for the whole post-restart window, which
     // v1.187.4 extends to boot + 16 min. It is spoken as a transition.
-    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit && !committedAudible;
+    // v1.195.0 — and, for a red, only when the critical its words would NAME was made audible in the
+    // episode (audibleCritFps). Critical A heard, then C taking its place undelivered (its retries
+    // spent): C's return inside the dwell read as a flicker of the heard red, and C was never named.
+    // Named, not merely counted: A and B returning together with words naming the heard A is the
+    // flicker it was (B was not named at the original commit either).
+    const unheardNamed = level === 'red' && voicedFingerprint != null && !audibleCritFps.has(voicedFingerprint);
+    const unheardReturn = deescalationHold != null && level === deescalationHold.from && !newCrit && (!committedAudible || unheardNamed);
     const transitioned = level !== prevLevel || newWarn || unheardReturn;
     // v1.187.0 (log review) — a NEW warning below a sounded cell-spread critical that is only HELD
     // (soundedCriticalHeld) is spoken at once, like any new warning, but the committed level STAYS
@@ -3744,13 +3967,14 @@ export function startBroadcastMonitor(
     // boot + 10). The mark is still reached: it decides a green whose dwell ends after the question
     // closes — a restored critical held past boot + 6 min (9 on a set settled by then) and then gone,
     // e.g. its knee mute back after the restart, bounded 20 min from the crossing BEFORE the restart.
-    const settledSinceMs = level === 'green' && continuationBaseline != null ? alertSetSettledSince() : null;
+    // v1.195.0 — on the recovery baseline: a heard level, or the level of a hold resumed after the restart.
+    const settledSinceMs = level === 'green' && recoveryBaseline != null ? alertSetSettledSince() : null;
     const questionOpen = restartQuestionOpen(Date.now() - bootMs, settledSinceMs);
-    const recoveryCandidate = level === 'green' && continuationBaseline != null
+    const recoveryCandidate = level === 'green' && recoveryBaseline != null
       && (questionOpen || (deescalationHold?.soundedHeldInWarmup === true
         && (recoveryHoldSinceMs == null || Date.now() - recoveryHoldSinceMs < CONDITION_CLEAR_DWELL_MS)));
     const recovery = recoveryCandidate
-      && isRestartRecovery(continuationBaseline, level, greenSinceMs, Date.now(), settledSinceMs);
+      && isRestartRecovery(recoveryBaseline, level, greenSinceMs, Date.now(), settledSinceMs);
     const lowerDue = deescalationDue(level, belowRedSinceMs, greenSinceMs, Date.now());
     // v1.187.0 — the de-escalation dwell (deescalationDue). A downward move is held — prevLevel
     // NOT advanced, nothing adopted or spoken — until the lower level has stood for
@@ -3763,7 +3987,12 @@ export function startBroadcastMonitor(
         // restart inside the dwell would otherwise boot on "red, heard" and swallow a standing
         // yellow as a continuation of it. Demoted to unheard for the hold — which only ever
         // makes a restart speak more — and restored if the level comes back (endDeescalationHold).
-        if (conditionSpoken) {
+        // v1.195.0 — and the hold of a level that was AUDIBLE is recorded beside it (conditionHeldOwed:
+        // heard, or made audible in this episode — the tone alone and the cordless count): a restart
+        // inside it resumes the hold, so the all-clear it owes is still said (restoredHeldDeescalation).
+        const owed = conditionSpoken || committedAudible; // heard is audible
+        if (owed) {
+          conditionHeldOwed = { from: committed, atMs: Date.now() };
           conditionSpoken = false;
           persistStatus();
         }
@@ -3792,8 +4021,8 @@ export function startBroadcastMonitor(
           : 'adopted silently as a continuation (announced if the set has settled by then)';
         const holdMin = Math.round((LONGEST_RESTARTED_ONSET_MS + RESTARTED_ONSET_HOLD_MARGIN_MS) / 60_000);
         log(`broadcast: green has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s but is held, not adopted — ${why}. ${questionOpen
-          ? `It is announced as a recovery from the pre-restart ${continuationBaseline} once it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set; if it has not by ${holdMin} min after the boot (${holdMin + Math.round(CONDITION_CLEAR_DWELL_MS / 60_000)} if the set has settled by then), it is ${otherwise}`
-          : `A sounded critical held it inside the warm-up: it is announced as a recovery from the pre-restart ${continuationBaseline} if it stands ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set within the next ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s, otherwise ${otherwise}`}`);
+          ? `It is announced as a recovery from the pre-restart ${recoveryBaseline} once it has stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set; if it has not by ${holdMin} min after the boot (${holdMin + Math.round(CONDITION_CLEAR_DWELL_MS / 60_000)} if the set has settled by then), it is ${otherwise}`
+          : `A sounded critical held it inside the warm-up: it is announced as a recovery from the pre-restart ${recoveryBaseline} if it stands ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled set within the next ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s, otherwise ${otherwise}`}`);
       }
       // v1.187.0 (review) — GREEN observed under a held level destroys the red-replay evidence
       // NOW, not when the green commits. The evidence is read only at boot: kept through the hold,
@@ -3817,7 +4046,10 @@ export function startBroadcastMonitor(
     // committed level with no hold — no transition — and was never spoken. Said once per hold.
     if (unheardReturn && deescalationHold != null && !deescalationHold.unheardReturnLogged) {
       deescalationHold.unheardReturnLogged = true;
-      log(`broadcast: ${level} is back after ${Math.round((Date.now() - deescalationHold.sinceMs) / 1000)} s, never audible in this episode — presented again as a transition, not absorbed as a flicker`);
+      // v1.195.0 — the red was audible, but not the critical it names (audibleCritFps): said so.
+      log(committedAudible
+        ? `broadcast: ${level} is back after ${Math.round((Date.now() - deescalationHold.sinceMs) / 1000)} s, and the critical it names (${describeFingerprint(voicedFingerprint ?? '')}) was never audible in this episode — presented again as a transition, not absorbed as a flicker`
+        : `broadcast: ${level} is back after ${Math.round((Date.now() - deescalationHold.sinceMs) / 1000)} s, never audible in this episode — presented again as a transition, not absorbed as a flicker`);
     }
     if (!downward && !newWarn && deescalationHold != null && !unheardReturn) {
       const back = level === deescalationHold.from && !newCrit;
@@ -3834,8 +4066,9 @@ export function startBroadcastMonitor(
     // below (the all-clear speech gate, quiet hours and the storm gates still apply), and the
     // baseline ends with it, so it is announced once and a later warning in the warm-up is news.
     if (transitioned && recovery) {
-      log(`broadcast: green has stood ${Math.round((Date.now() - Math.max(greenSinceMs ?? 0, settledSinceMs ?? 0)) / 1000)} s on a settled alert set — a recovery, not a continuation of the pre-restart ${continuationBaseline}; announced as a transition`);
+      log(`broadcast: green has stood ${Math.round((Date.now() - Math.max(greenSinceMs ?? 0, settledSinceMs ?? 0)) / 1000)} s on a settled alert set — a recovery, not a continuation of the pre-restart ${recoveryBaseline}; announced as a transition`);
       continuationBaseline = null;
+      recoveryBaseline = null; // v1.195.0
     } else if (transitioned && level === 'green' && recoveryHoldSinceMs != null && !inWarmup) {
       // v1.187.3 (review) — the warm-up ended with the green still held for a recovery it did not
       // earn: adopted as the continuation it was before v1.187.3, in silence (fail-quiet — a green
@@ -3873,7 +4106,7 @@ export function startBroadcastMonitor(
       } else if (alertSetSettledSince() != null) {
         log(`broadcast: the restart question closed with the green still held for a recovery, on a settled alert set — announced as a transition, not adopted silently`);
       } else {
-        log(`broadcast: the restart question closed before the green had stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled alert set — adopted silently as a continuation of the pre-restart ${continuationBaseline}, not announced`);
+        log(`broadcast: the restart question closed before the green had stood ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled alert set — adopted silently as a continuation of the pre-restart ${recoveryBaseline}, not announced`);
         adoptLevel(level, crit, ids, true);
         return;
       }
@@ -3941,7 +4174,7 @@ export function startBroadcastMonitor(
     // immediately at any age. See redReplayGate.ts.
     if (redReplayGate.shouldSuppress({ observed: level, voicedFingerprint, activeFingerprints: criticalFingerprints, msSinceBoot: Date.now() - bootMs, nowMs: Date.now() })) {
       log(`broadcast: red suppressed — this standing fault was already announced, and nothing about it has changed (${voicedFingerprint ? describeFingerprint(voicedFingerprint) : '?'}; active: ${criticalIds.join(', ')})`);
-      adoptLevel(level, crit, ids, true); // v1.186.0 — a verified announcement of it is on record
+      adoptLevel(level, crit, ids, true, voicedFingerprint); // v1.186.0 — a verified announcement of it is on record (v1.195.0: naming it)
       return;
     }
     // v0.97.0 (re-audit #2) — check in-flight BEFORE committing prevLevel/prevCrit.
@@ -4281,6 +4514,7 @@ export function startBroadcastMonitor(
       conditionSpoken,
       conditionAt,
       bootBaselineLevel,
+      conditionHeldFrom: conditionHeldOwed?.from ?? null, // v1.195.0
       lastRender: { ...lastRender },
     }),
     stop: () => {

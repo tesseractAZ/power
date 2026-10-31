@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
-import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, unlinkSync, accessSync, constants as fsConstants } from 'node:fs';
+import { resolve, dirname } from 'node:path';
 import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold, type DpuProjection } from './ecoflow/project.js';
@@ -213,10 +213,14 @@ export const POOL_UNKNOWN_CARRY_MAX_GAP_MS = 60 * 60_000;
  *  the panel's projections and by every device-list attempt of the poll loop, so a panel gone dark
  *  keeps its onset across a restart as it does in the process. */
 export const POOL_UNKNOWN_PERSIST_EVERY_MS = 60_000;
-/** v1.187.4 — the longest unknown episode the file is believed for: a cloud wedge lasts hours (the
- *  longest seen, 42.2 h). An entry claiming more is corrupt or hand-edited, and would raise a
- *  critical "unreadable for weeks" at the first projection. */
-export const POOL_UNKNOWN_MAX_EPISODE_MS = 7 * 24 * 60 * 60_000;
+/** v1.187.4 — the longest unknown episode the file is believed for.
+ *  v1.195.0 — not a cloud wedge's length (the longest seen, 42.2 h, set the old 7 days): a panel
+ *  gone dark keeps its onset for as long as it stays dark (the poll loop refreshes it), in the
+ *  process and so across a restart. At 7 days, a panel dark for longer lost its onset at every
+ *  restart: its reserve-blind alarm was absent 15 min, then a warning until boot + 60, though it had
+ *  been critical. An entry claiming more than a year was stamped by a clock that was not set (the
+ *  host has no RTC) or edited by hand, and would raise a critical "unreadable for decades". */
+export const POOL_UNKNOWN_MAX_EPISODE_MS = 366 * 24 * 60 * 60_000;
 
 /** v1.187.4 — the file's entries: an object of serial → { sinceMs, lastSeenMs }, both finite,
  *  sinceMs ≤ lastSeenMs, at most POOL_UNKNOWN_MAX_EPISODE_MS apart. Anything else (absent, corrupt,
@@ -234,6 +238,19 @@ export function parsePoolUnknownOnsets(raw: unknown): Map<string, PoolUnknownOns
     out.set(sn, { sinceMs, lastSeenMs });
   }
   return out;
+}
+
+/** v1.195.0 — can this process keep the pool-unknown file current? Retiring an onset needs a write
+ *  or an unlink in the file's directory; on a read-only /data neither is possible (access(2) answers
+ *  EROFS), so a file found there may hold an onset that cleared after its last save, and the next
+ *  process cannot tell. `access` is injectable for tests. */
+export function poolUnknownDirWritable(path: string, access: (p: string, mode: number) => void = accessSync): boolean {
+  try {
+    access(dirname(path), fsConstants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** v1.187.4 — the onset a panel whose first projection after a restart reads the pool unknown
@@ -356,6 +373,12 @@ export class SnapshotStore extends EventEmitter {
   private poolUnknownLastAttemptMs = -Infinity;
   private poolUnknownDirty = false;
   private poolUnknownWriteWarned = false;
+  /** v1.195.0 — the file was found in a directory this process cannot write (poolUnknownDirWritable):
+   *  its onsets are not carried, and never written back. Set once, at construction. */
+  private poolUnknownUntrusted = false;
+  /** v1.195.0 — the line that says so: the constructor runs before the logger is wired, so
+   *  setLogger logs it once. */
+  private poolUnknownLoadNote: string | null = null;
   // Injectable clock — prod uses Date.now; tests call setClock() for deterministic grace-hold timing.
   private now: () => number = Date.now;
   /** test-only — drive the grace-hold window deterministically. */
@@ -416,6 +439,11 @@ export class SnapshotStore extends EventEmitter {
 
   setLogger(log: (msg: string) => void) {
     this.logger = log;
+    // v1.195.0 — what the constructor found and could not log (loadPoolUnknown): said once.
+    if (this.poolUnknownLoadNote != null) {
+      log(this.poolUnknownLoadNote);
+      this.poolUnknownLoadNote = null;
+    }
   }
 
   /** v1.187.10 — wired by `startPollLoop` to its `warn` sink. */
@@ -883,7 +911,8 @@ export class SnapshotStore extends EventEmitter {
     let changed = onDisk !== undefined;
     if (out.pct == null) {
       if (!this.backupPoolUnknownSinceBySn.has(sn)) {
-        const carried = carriedPoolUnknownSince(onDisk, nowMs);
+        // v1.195.0 — never from a file this process could not keep current (poolUnknownUntrusted).
+        const carried = this.poolUnknownUntrusted ? null : carriedPoolUnknownSince(onDisk, nowMs);
         this.backupPoolUnknownSinceBySn.set(sn, carried ?? nowMs);
         changed = true;
         if (carried != null) {
@@ -902,20 +931,30 @@ export class SnapshotStore extends EventEmitter {
   private refreshPoolUnknown(): void {
     const sinceAttemptMs = this.now() - this.poolUnknownLastAttemptMs;
     const due = sinceAttemptMs >= POOL_UNKNOWN_PERSIST_EVERY_MS || sinceAttemptMs < 0;
-    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty || this.poolUnknownCarried().size > 0)) this.writePoolUnknown();
+    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty || this.pendingPoolUnknown().size > 0)) this.writePoolUnknown();
   }
 
   /** v1.187.4 — listed panels whose file entry has not been consumed (not projected in this process)
    *  and is still carriable: their first projection may raise reserve-alarm-blind at once, so the
-   *  alert set is not settled before it (alerts.debouncedOnsetsPending). Sorted by serial. */
+   *  alert set is not settled before it (alerts.debouncedOnsetsPending). Sorted by serial.
+   *  v1.195.0 — whether or not the file is trusted (poolUnknownUntrusted): a panel that has not
+   *  reported is pending either way. (The alert set's rule lets a dark panel other than the house
+   *  panel go once its own alarm stands: alerts.darkPanelBlindRaised.) */
   poolUnknownCarryPending(): string[] {
-    return [...this.poolUnknownCarried().keys()].sort();
+    return [...this.pendingPoolUnknown().keys()].sort();
   }
 
   /** v1.187.4 (review) — the same panels with the onset each would carry: a panel still dark after the
    *  restart (no projection) is blind since then, not since it was first listed in this process
-   *  (alerts.secondaryPanelAlerts). */
+   *  (alerts.secondaryPanelAlerts).
+   *  v1.195.0 — none from a file this process could not keep current (poolUnknownUntrusted): a dark
+   *  panel is then blind since it was first listed in this process. */
   poolUnknownCarried(): Map<string, number> {
+    return this.poolUnknownUntrusted ? new Map() : this.pendingPoolUnknown();
+  }
+
+  /** v1.187.4 — the listed panels whose file entry is unconsumed and still carriable, with that onset. */
+  private pendingPoolUnknown(): Map<string, number> {
     const nowMs = this.now();
     const out = new Map<string, number>();
     for (const [sn, e] of this.poolUnknownOnDisk) {
@@ -933,6 +972,16 @@ export class SnapshotStore extends EventEmitter {
     try {
       this.poolUnknownOnDisk = parsePoolUnknownOnsets(JSON.parse(readFileSync(this.poolUnknownPath, 'utf8')));
     } catch { /* absent or corrupt → nothing carried */ }
+    // v1.195.0 — a file in a directory this process cannot write is not believed. A failed save
+    // removes the file (writePoolUnknown), but on a read-only /data the unlink fails too, and the
+    // file keeps an onset the previous process may have retired: carried, a pool that read again
+    // after the last save raised an off-grid critical "unreadable for 2 h" at the first projection.
+    // The panels stay pending (poolUnknownCarryPending) until they report — the house panel; any other
+    // until its own alarm, timed from its first listing in this process, stands (darkPanelBlindRaised).
+    if (this.poolUnknownOnDisk.size > 0 && !poolUnknownDirWritable(this.poolUnknownPath)) {
+      this.poolUnknownUntrusted = true;
+      this.poolUnknownLoadNote = `backup-pool: ${this.poolUnknownOnDisk.size} pool-unknown onset(s) on file are not carried — ${dirname(this.poolUnknownPath)} cannot be written (read-only?), so the file may hold an onset that cleared after its last save; each panel's reserve-blind clock starts in this process (at its first projection, or at its first listing while it stays dark), and the alert set waits until the house panel reports and each other panel reports or its own alarm stands`;
+    }
   }
 
   /** v1.187.4 — atomic (temp + rename): every pool unknown now, with when it was last seen so, plus
@@ -950,11 +999,14 @@ export class SnapshotStore extends EventEmitter {
       // v1.187.4 (review) — a LISTED panel not projected yet is still held by this process (pending,
       // and blind since its onset): last seen now, so a panel dark across the restart and for an hour
       // after it keeps its onset. One no longer listed is written back as it was, and expires.
+      // v1.195.0 — an untrusted file's entries (poolUnknownUntrusted) are held for the pending rule
+      // only, never written back: written, a stale onset would come back as a fresh-looking entry
+      // once the directory could be written again.
       if (this.snap.devices[sn] != null) {
         const held = { sinceMs: e.sinceMs, lastSeenMs: Math.max(e.lastSeenMs, nowMs) };
         this.poolUnknownOnDisk.set(sn, held);
-        out[sn] = held;
-      } else {
+        if (!this.poolUnknownUntrusted) out[sn] = held;
+      } else if (!this.poolUnknownUntrusted) {
         out[sn] = e;
       }
     }

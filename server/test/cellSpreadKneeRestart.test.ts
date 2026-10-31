@@ -249,6 +249,9 @@ test('vdiffKneeSeed — both clocks from the onset, no evidence; nothing without
     packSn: 'P', lastBalancingMs: null, lastChargeMs: null, critSinceMs: T0 - 5 * MIN,
     belowCritSinceMs: null, graceFromMs: T0 - 5 * MIN, quietSinceMs: null, lastSeenMs: null,
     critSeeded: true,
+    // v1.195.0 — the off-plateau session from the same onset (a restart must not restart its bound
+    // either), with no rest and never the low-charge grace.
+    offFromMs: T0 - 5 * MIN, offQuietSinceMs: null, offKnee: false,
   });
   const ahead = vdiffKneeSeed(T0 + 5 * MIN, 'P', T0)!;
   assert.equal(ahead.critSinceMs, T0, 'an onset ahead of the clock (a clock step) is clamped to now');
@@ -258,6 +261,9 @@ test('vdiffKneeSeed — both clocks from the onset, no evidence; nothing without
   assert.equal(vdiffKneeSeed(T0 - VDIFF_KNEE_GAP_CARRY_MS, 'P', T0)!.graceFromMs, T0 - VDIFF_KNEE_GAP_CARRY_MS);
   const stale = vdiffKneeSeed(T0 - VDIFF_KNEE_GAP_CARRY_MS - 1, 'P', T0)!;
   assert.equal(stale.graceFromMs, null, 'an onset from before a long outage is not the current session');
+  assert.equal(stale.offFromMs, null, 'nor the current off-plateau session (v1.195.0)');
+  assert.equal(vdiffKneeSeed(T0 - VDIFF_KNEE_GAP_CARRY_MS, 'P', T0)!.offFromMs, T0 - VDIFF_KNEE_GAP_CARRY_MS);
+  assert.equal(ahead.offFromMs, T0, 'clamped to now as well');
   assert.equal(stale.critSinceMs, T0 - VDIFF_KNEE_GAP_CARRY_MS - 1);
 });
 

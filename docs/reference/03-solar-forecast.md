@@ -325,6 +325,29 @@ factor). `typicalPvWhPerDayDisplay` / `typicalPvCurveWhPerHourDisplay` stay raw,
 reporting-basis counterparts. These NEVER feed the
 runway alarm.
 
+**Per hour, with a SoC walk (v1.195.0).** The same loop keeps each hour's restored PV
+(`hoursDisplay[k].forecastPvW`, the hour's term of `forecastPvWhNext24Display`) and walks a second
+SoC trajectory on it (`hoursDisplay[k].projectedSocPct`, its lowest point
+`minProjectedSocDisplay` / `minProjectedSocTsDisplay`). The walk starts where the alarm walk does
+(the same `socWhStart`), uses the same hourly load (EV included) and steps through the same
+function, `stepSocWh(soc, full, pv, load) = max(0, min(full, soc + chargeLegStep(pv − runwayDrainW(load, overheadW), η_c)))`
+(the alarm walk's step in (d) above, the charge leg included), so with every home Core reporting `hoursDisplay` equals `hours[]` (PV, SoC and the `modelled` flag)
+and `minProjectedSocDisplay` equals `minProjectedSoc`, except that `minProjectedSocDisplay` is null
+when `pvForecastUnavailable` (no PV history to walk on), as it is with no SoC basis. Each hour's
+`modelled` is the restored model's own flag (a fitted hour, or the typical-day fallback), for the
+detail card's source badge: with every Core dark the alarm model has no Core to fit on and reads the
+fallback in every hour. `restoredCoreCount` is the number of connected home Cores not reporting live
+whose own recorded PV the display basis adds; an offline Core with no PV history in the window (more
+than one reading, the test `pvForecastUnavailable` applies) adds nothing and is not counted, so 0
+means nothing was restored and the cards show the alarm basis. With every home Core dark
+the alarm series is 0 W in every hour and its walk drains toward 0%; the dashboard's forecast cards
+show this restored series instead, labelled, with the alarm-basis figures beside it ([chapter 11](11-user-interfaces.md), ForecastCard).
+The four fields sit outside `hours[]`, so `hours[].forecastPvW` stays the one alarm series: none of
+`computeRunway`, `computeForecastAlerts`, `forecastDayAlerts`, the multi-day and probabilistic
+forecasts, the dispatch plan or the night-charge planner reads them, and Home Assistant's
+`projected_low_soc_percent` / `projected_low_soc_at` and the calendar's battery-dip event stay on the
+alarm basis (`forecastDisplayBasis.test.ts` pins this by behaviour and by source).
+
 #### Structural-incompleteness gate
 
 ```
@@ -355,6 +378,9 @@ negative-cache TTL.
 | `deviceModels[]` | per-DPU whole-inverter + HV + LV models |
 | `soiling` | `fleetSoilingFromDevices(...)` (per-Core median drop; null <6 clean days) |
 | `*Display` fields | full-fleet display basis |
+| `hoursDisplay[]` | v1.195.0: `{ts, forecastPvW, projectedSocPct, modelled}` — the restored display basis per hour, its SoC walk and the restored model's flag (display only; the forecast cards) |
+| `minProjectedSocDisplay` / `minProjectedSocTsDisplay` | v1.195.0: the restored walk's low; null when `pvForecastUnavailable` or with no SoC basis |
+| `restoredCoreCount` | v1.195.0: connected home Cores not reporting live whose own recorded PV history the display basis adds (one with none is not counted); 0 ⇒ the cards show the alarm basis |
 | `homeDpusConnected/Reporting/CoveragePartial` | coverage caveat |
 | `structurallyIncomplete` | basis incomplete (gate below); selects the short negative-cache TTL |
 | `homeBasisPending` | v1.187.10: built while a connected home Core's first reading was pending; publishers send the PV pair and Projected Low SoC as null while it is set |

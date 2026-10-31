@@ -117,8 +117,10 @@ const MUTANTS = [
   {
     id: 'viii. \u2605\u2605 the display PV sum loses its bias correction again',
     file: AN,
-    find: '    restoredPvSum += restoredCeil != null ? Math.min(pv * pvBiasFactor, restoredCeil) : pv * pvBiasFactor;',
-    to: '    restoredPvSum += pv; /* MUTANT */',
+    // v1.195.0 — re-pointed: the restored hour's PV is named (restoredPvW) and feeds the sum and the
+    // per-hour display series alike.
+    find: '    const restoredPvW = restoredCeil != null ? Math.min(pv * pvBiasFactor, restoredCeil) : pv * pvBiasFactor;',
+    to: '    const restoredPvW = pv; /* MUTANT */',
     why: 'The dashboard and Home Assistant disagree on the next-24 h PV by exactly the bias factor.',
   },
   {

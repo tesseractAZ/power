@@ -28,6 +28,11 @@
  * armed; v1.187.11 — it is re-presented once when the gap expires (before, the warning was spoken
  * only when the condition committed down to it). What a retry SAYS when it runs is pinned in
  * conditionRetryWords.test.ts.
+ *
+ * v1.195.0 — a lower condition deferral KEPT behind a higher retry (keep-pending) is re-presented
+ * once that retry is done (keptDeferralRepresent); and audibility is tracked per critical named
+ * (audibleCritFps), so a critical that took a heard one's place undelivered is spoken when it
+ * returns inside the dwell.
  */
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -142,8 +147,9 @@ interface Rig {
   stop: () => void;
 }
 const live: Rig[] = [];
-/** A monitor past its boot warm-up, its deferred retries `retryMs` apart (real time). */
-async function started(retryMs: number): Promise<Rig> {
+/** A monitor past its boot warm-up, its deferred retries `retryMs` apart (real time).
+ *  v1.195.0 — `pastWarmup` false: left inside its warm-up (a restart's boot gates apply). */
+async function started(retryMs: number, pastWarmup = true): Promise<Rig> {
   const logs: string[] = [];
   const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-newest-retry-cache-'));
   const mon = B.startBroadcastMonitor(store, (m) => logs.push(m), {
@@ -157,6 +163,7 @@ async function started(retryMs: number): Promise<Rig> {
     stop: () => { mon.stop(); rmSync(cacheDir, { recursive: true, force: true }); },
   };
   live.push(r);
+  if (!pastWarmup) return r;
   await sleep(80); // the first tick joins green
   offset += 20 * MIN; // past the boot warm-up window (and any restart question)
   return r;
@@ -372,9 +379,25 @@ test('★★ a NEWER warning that fails while the red\'s retry is armed waits be
   plan.push({ status: 500 }); // the warning fails while the red's timer is still armed
   alerts = [HELD_B, WARN_N];
   await until(r, () => r.has('keeping the pending red retry — a yellow deferral does not supersede it'), '★ the newer warning kept pending');
+  assert.ok(r.has('; the yellow is re-presented once that retry is done, if the condition has not moved'), 'v1.195.0: and the line says what follows');
+  const urlWarn = plays[1].url;
   await until(r, () => r.count('broadcast: red → ok in') === 1, '★ the red retry plays');
   assert.equal(heard(plays[0].url), 1, 'the red nobody heard is the retry that played');
   assert.ok(!r.has('superseding the pending red retry'), 'the lower announcement took nothing');
+  // v1.195.0 (P6) — the kept warning was never spoken while it stood: nothing remembered it, and its
+  // transition was already committed. It is re-presented once the red retry is done, after the gap
+  // that retry's delivery armed (presented inside it, the gap would refuse it for good).
+  await until(r, () => r.has('the yellow kept behind a higher retry will be re-presented in 1'), '★ the re-present armed for when the gap expires');
+  await sleep(100);
+  assert.equal(heard(urlWarn), 0, 'not inside the gap');
+  offset += 2 * MIN + 5_000;
+  await until(r, () => heard(urlWarn) === 1, '★★★ the kept warning reaches the speakers');
+  assert.ok(r.has('re-presenting the yellow kept behind a higher retry — that retry is done and the condition is still yellow'));
+  assert.equal(r.count('condition transition → yellow'), 1, 'a re-present, not a second transition');
+  await sleep(100);
+  assert.equal(r.count('red → yellow held'), 1, 'the held red stays held: the re-present below it ends nothing');
+  assert.ok(!r.has('the condition kept behind a higher retry is re-presented'));
+  assert.ok(!r.has('yellow suppressed — last red condition broadcast played'), 'never refused by the gap');
 });
 
 test('★★ dedicated retries are unchanged: one waiting behind a newer CONDITION announcement that took the slot still plays', async () => {
@@ -411,6 +434,204 @@ test('★★ a still-standing red\'s own retry plays behind a DEDICATED announce
   assert.ok(!r.has('retry dropped'));
 });
 
+/* ══ v1.195.0 (P6): a lower condition deferral kept behind a higher retry is re-presented ═══════ */
+
+test('★★★ v1.195.0 (P6): a condition warning kept behind a DEDICATED critical\'s retry is spoken once that retry has played — no gap (a dedicated play arms none)', async () => {
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 }); // the dedicated alarm fails: its red retry armed
+  const first = await r.mon.announce('critical', RESERVE, null);
+  assert.equal(first.ok, false);
+  plan.push({ status: 500 }); // the condition warning fails too
+  alerts = [WARN_N];
+  await until(r, () => r.has('keeping the pending red retry — a yellow deferral does not supersede it'), 'the warning kept behind the dedicated retry');
+  const urlWarn = plays[1].url;
+  await until(r, () => heard(plays[0].url) === 1, 'the dedicated alarm\'s retry plays');
+  await until(r, () => heard(urlWarn) === 1, '★★★ then the warning (it was never spoken while it stood)');
+  assert.ok(r.has('the yellow kept behind a higher retry will be re-presented in 0 s'));
+  assert.equal(r.count('condition transition → yellow'), 1);
+  assert.match(String(r.mon.status().lastSpokenMessage), /state of charge/i, 'the last words are the standing warning');
+});
+
+test('★★ v1.195.0 (P6): an ALL-CLEAR kept behind a dedicated warning\'s retry is spoken once that retry has played', async () => {
+  const r = await started(2 * RETRY_MS);
+  alerts = [CRIT_A];
+  await until(r, () => r.count('broadcast: red → ok in') === 1, 'red A heard');
+  offset += 3 * MIN; // past the same-level gap
+  plan.push({ status: 500 }); // a dedicated warning fails: its yellow retry armed
+  const notice = await r.mon.announce('medium', NOTICE, null);
+  assert.equal(notice.ok, false);
+  plan.push({ status: 500 }); // the all-clear fails behind it
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the dwell');
+  offset += B.CONDITION_CLEAR_DWELL_MS + 1_000;
+  await until(r, () => r.has('keeping the pending yellow retry — a green deferral does not supersede it'), '★ the all-clear kept behind the dedicated retry');
+  const urlGreen = plays[2].url;
+  await until(r, () => heard(plays[1].url) === 1, 'the dedicated warning\'s retry plays');
+  await until(r, () => heard(urlGreen) === 1, '★★★ then the all-clear: the cleared red is not the last word');
+  assert.ok(r.has('re-presenting the green kept behind a higher retry'));
+  assert.equal(r.mon.status().lastLevel, 'green');
+});
+
+test('★★ v1.195.0 (P6): a kept warning whose condition has since been committed at another level is not re-presented', async () => {
+  const r = await started(3000); // the dedicated retry fires 3 s out: the green commits first
+  plan.push({ status: 500 });
+  await r.mon.announce('critical', RESERVE, null);
+  plan.push({ status: 500 });
+  alerts = [WARN_N];
+  await until(r, () => r.has('keeping the pending red retry — a yellow deferral does not supersede it'), 'the warning kept');
+  const urlWarn = plays[1].url;
+  alerts = []; // the warning clears: the green commits after its dwell, and is spoken
+  await until(r, () => r.has('yellow → green held'), 'the dwell');
+  offset += B.CONDITION_CLEAR_DWELL_MS + 1_000;
+  await until(r, () => r.count('broadcast: green → ok in') === 1, 'the all-clear, while the dedicated retry is still armed');
+  await until(r, () => heard(plays[0].url) === 1, 'the dedicated retry plays');
+  await until(r, () => r.has('the yellow kept behind a higher retry is not re-presented — the condition has been committed at another level since'), '★ dropped');
+  await sleep(100);
+  assert.equal(heard(urlWarn), 0, 'the cleared warning is never spoken');
+  assert.ok(!r.has('kept behind a higher retry will be re-presented'));
+});
+
+test('★★ v1.195.0 (P6): when the higher retry GIVES UP, the kept warning is re-presented at once (nothing was played, so no gap)', async () => {
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 }); // red B
+  alerts = [CRIT_B];
+  await until(r, () => r.has(ARMED), 'the cell-spread red failing, its retry armed');
+  alerts = [HELD_B]; // held by the balancing mute: the red stays committed
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 3 * MIN;
+  plan.push({ status: 500 }, { status: 500 }, { status: 500 }, { status: 500 }); // the warning, then every red retry
+  alerts = [HELD_B, WARN_N];
+  await until(r, () => r.has('keeping the pending red retry — a yellow deferral does not supersede it'), 'the warning kept');
+  const urlWarn = plays[1].url;
+  await until(r, () => r.has('giving up after 3 deferred red retries'), 'the red retry gives up', 15_000);
+  await until(r, () => heard(urlWarn) === 1, '★★ the warning, re-presented once the slot is free');
+  assert.ok(r.has('the yellow kept behind a higher retry will be re-presented in 0 s'));
+});
+
+test('★★ v1.195.0 (P6): a red retry already FIRED and queued behind the warning plays first — the kept warning is re-presented only once it has played, after its gap', async () => {
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 }); // red B
+  alerts = [CRIT_B];
+  await until(r, () => r.has(ARMED), 'the cell-spread red failing, its retry armed');
+  const armedAt = realNow();
+  alerts = [HELD_B];
+  await until(r, () => r.has('red → green held'), 'the hold');
+  offset += 3 * MIN;
+  const w = gate();
+  plan.push({ status: 500, gate: w.promise }); // the warning: slow, then fails
+  alerts = [HELD_B, WARN_N];
+  await until(r, () => plays.length === 2, 'the warning playing');
+  await sleep(Math.max(0, armedAt + 2 * RETRY_MS + 300 - realNow())); // the red retry fires and queues behind it
+  const g = gate();
+  plan.push({ status: 200, gate: g.promise }); // the red retry, held while the test looks
+  w.open();
+  await until(r, () => r.has('keeping the pending red retry — a yellow deferral does not supersede it'), 'the warning kept behind the fired retry');
+  const urlWarn = plays[1].url;
+  await until(r, () => plays.length === 3, 'the red retry playing');
+  await sleep(150); // ticks run while it plays: the slot reads free (released when the warning ended)
+  assert.ok(!r.has('kept behind a higher retry will be re-presented'), '★ not while a retry is still in the chain');
+  g.open();
+  await until(r, () => r.count('broadcast: red → ok in') === 1, 'the red retry heard');
+  await until(r, () => r.has('the yellow kept behind a higher retry will be re-presented in 1'), 'then armed, for when its gap expires');
+  await sleep(100);
+  assert.equal(heard(urlWarn), 0, 'not inside the gap the red armed');
+  offset += 2 * MIN + 5_000;
+  await until(r, () => heard(urlWarn) === 1, '★★ the warning, once the gap has expired');
+  assert.ok(!r.has('yellow suppressed — last red condition broadcast played'), 'never refused by the gap');
+});
+
+test('★★★ v1.195.0 (review): the OTHER ordering — a condition warning\'s retry armed, then a dedicated critical that fails and takes the slot: the warning is kept, and spoken once that retry has played', async () => {
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 }); // the condition warning fails first: its yellow retry armed
+  alerts = [WARN_N];
+  await until(r, () => r.has(ARMED), 'the warning failing, its retry armed');
+  const urlWarn = plays[0].url;
+  plan.push({ status: 500 }); // the dedicated critical fails while the yellow retry is armed
+  const first = await r.mon.announce('critical', RESERVE, null);
+  assert.equal(first.ok, false);
+  assert.ok(r.has('superseding the pending yellow retry with red; the yellow is re-presented once that retry is done, if the condition has not moved'), r.logs.join('\n'));
+  await until(r, () => heard(plays[1].url) === 1, 'the dedicated alarm\'s retry plays');
+  await until(r, () => heard(urlWarn) === 1, '★★★ then the warning (cleared off the slot, it was never spoken while it stood)');
+  assert.ok(r.has('the yellow kept behind a higher retry will be re-presented in 0 s'));
+  assert.equal(r.count('condition transition → yellow'), 1, 'a re-present, not a second transition');
+  assert.match(String(r.mon.status().lastSpokenMessage), /state of charge/i, 'the last words are the standing warning');
+});
+
+test('★★ v1.195.0 (review): …and an ALL-CLEAR whose retry a dedicated warning took the slot from is spoken once that retry has played', async () => {
+  const r = await started(2 * RETRY_MS);
+  alerts = [CRIT_A];
+  await until(r, () => r.count('broadcast: red → ok in') === 1, 'red A heard');
+  offset += 3 * MIN; // past the same-level gap
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the dwell');
+  plan.push({ status: 500 }); // the all-clear fails: its green retry armed
+  offset += B.CONDITION_CLEAR_DWELL_MS + 1_000;
+  await until(r, () => r.has(ARMED), 'the all-clear failing, its retry armed');
+  const urlGreen = plays[1].url;
+  plan.push({ status: 500 }); // a dedicated warning fails while the green retry is armed
+  const notice = await r.mon.announce('medium', NOTICE, null);
+  assert.equal(notice.ok, false);
+  assert.ok(r.has('superseding the pending green retry with yellow; the green is re-presented once that retry is done'), r.logs.join('\n'));
+  await until(r, () => heard(plays[2].url) === 1, 'the dedicated warning\'s retry plays');
+  await until(r, () => heard(urlGreen) === 1, '★★★ then the all-clear: the cleared red is not the last word');
+  assert.ok(r.has('re-presenting the green kept behind a higher retry'));
+  assert.equal(r.mon.status().lastLevel, 'green');
+});
+
+test('★★ v1.195.0 (review): one deferral is kept at a time — a warning failing behind the dedicated alarm does not displace the more severe condition red kept before it; the red is named once its critical reads loud again', async () => {
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 }); // the cell-spread red fails: its condition retry armed
+  alerts = [CRIT_B];
+  await until(r, () => r.has(ARMED), 'the red failing, its retry armed');
+  const urlRed = plays[0].url;
+  alerts = [HELD_B]; // held by the balancing mute: the red stays committed
+  await until(r, () => r.has('red → green held'), 'the hold');
+  plan.push({ status: 500 }); // a dedicated critical fails and takes the slot
+  await r.mon.announce('critical', RESERVE, null);
+  assert.ok(r.has('superseding the pending red retry with red; the red is re-presented once that retry is done'), r.logs.join('\n'));
+  plan.push({ status: 500 }); // the warning under the kept red fails behind the dedicated retry
+  alerts = [HELD_B, WARN_N];
+  await until(r, () => r.has('keeping the pending red retry — a yellow deferral does not supersede it'), 'the warning behind the dedicated retry');
+  assert.ok(r.has('; the more severe red kept before it is re-presented instead'), '★ the kept red is not displaced');
+  await until(r, () => heard(plays[1].url) === 1, 'the dedicated retry plays');
+  await until(r, () => r.has('the red kept behind a higher retry waits — the condition is yellow now'), 'it waits while its critical is muted');
+  assert.equal(heard(urlRed), 0);
+  alerts = [CRIT_B, WARN_N]; // the critical reads loud again
+  await until(r, () => heard(urlRed) === 1, '★★ the critical named at last');
+  assert.ok(r.has('re-presenting the red kept behind a higher retry'));
+});
+
+test('★ v1.195.0 (P6): a DEDICATED announcement kept behind a condition retry is not the condition — nothing is re-presented for it', async () => {
+  const r = await started(2 * RETRY_MS);
+  plan.push({ status: 500 }); // red A
+  alerts = [CRIT_A];
+  await until(r, () => r.has(ARMED), 'red A failing, its retry armed');
+  plan.push({ status: 500 });
+  const notice = await r.mon.announce('medium', NOTICE, null);
+  assert.equal(notice.ok, false);
+  assert.ok(r.has('keeping the pending red retry — a yellow deferral does not supersede it'));
+  assert.ok(!r.has('the yellow is re-presented once that retry is done'), 'the line promises nothing for it');
+  await until(r, () => heard(plays[0].url) === 1, 'the red retry plays');
+  await sleep(150);
+  assert.ok(!r.has('kept behind a higher retry'), '★ no condition re-present is armed for a dedicated notice');
+});
+
+test('keptDeferralRepresent — the kept deferral of the current episode: due at once, or after the same-level gap of the last condition played when it is not below it', () => {
+  const t = 70_000_000;
+  const gap = 120_000;
+  const K = (level: 'green' | 'yellow' | 'red', named: string | null = 'N', episode = 4) => ({ level, episode, named });
+  assert.equal(B.keptDeferralRepresent(null, 4, { level: 'red', atMs: t }, gap, t), null);
+  assert.deepEqual(B.keptDeferralRepresent(K('yellow'), 5, { level: 'red', atMs: t }, gap, t), { drop: 'the condition has been committed at another level since' });
+  assert.deepEqual(B.keptDeferralRepresent(K('yellow'), 4, { level: 'red', atMs: t }, gap, t + 10_000), { level: 'yellow', dueAtMs: t + gap, fresh: null },
+    'below the red played 10 s ago: after its gap; the level itself is the news');
+  assert.deepEqual(B.keptDeferralRepresent(K('yellow'), 4, { level: 'red', atMs: t }, gap, t + 5 * 60_000), { level: 'yellow', dueAtMs: t + 5 * 60_000, fresh: null }, 'the gap long expired: now');
+  assert.deepEqual(B.keptDeferralRepresent(K('yellow'), 4, { level: null, atMs: 0 }, gap, t), { level: 'yellow', dueAtMs: t, fresh: ['N'] }, 'no condition played: now');
+  assert.deepEqual(B.keptDeferralRepresent(K('yellow'), 4, { level: 'green', atMs: t }, gap, t + 1), { level: 'yellow', dueAtMs: t + 1, fresh: ['N'] }, 'an escalation: no gap');
+  assert.deepEqual(B.keptDeferralRepresent(K('yellow'), 4, { level: 'yellow', atMs: t }, gap, t + 1), { level: 'yellow', dueAtMs: t + gap, fresh: ['N'] },
+    'the same level: after the gap, while what it named is counted');
+  assert.deepEqual(B.keptDeferralRepresent(K('green', null), 4, { level: 'red', atMs: t }, gap, t + 1), { level: 'green', dueAtMs: t + gap, fresh: null }, 'an all-clear');
+});
+
 test('conditionRetrySuperseded — a newer condition announcement at the same or a higher level; never a lower one, never the retry\'s own, never a dedicated retry', () => {
   const none = { green: 0, yellow: 0, red: 0 };
   assert.equal(B.conditionRetrySuperseded('condition', 'red', 3, none), false);
@@ -422,4 +643,127 @@ test('conditionRetrySuperseded — a newer condition announcement at the same or
   assert.equal(B.conditionRetrySuperseded('condition', 'green', 1, { ...none, green: 2 }), true);
   assert.equal(B.conditionRetrySuperseded('dedicated', 'red', 3, { ...none, red: 9 }), false);
   assert.equal(B.conditionRetrySuperseded('test', 'red', 3, { ...none, red: 9 }), false);
+});
+
+/* ══ v1.195.0 (N8): audibility per critical, not per red episode ═══════════════════════════════ */
+
+test('★★★ v1.195.0 (N8): a critical that took a heard one\'s place and was never delivered is SPOKEN when it returns inside the dwell — not absorbed as a flicker of the heard red', async () => {
+  const r = await started(RETRY_MS);
+  alerts = [CRIT_A];
+  await until(r, () => r.count('broadcast: red → ok in') === 1, 'A heard');
+  offset += 3 * MIN; // past the same-level gap
+  plan.push({ status: 500 }, { status: 500 }, { status: 500 }, { status: 500 }); // C and its three retries fail
+  alerts = [CRIT_C]; // A clears and C appears on one tick: one red episode
+  await until(r, () => r.has('giving up after 3 deferred red retries'), 'C never delivered', 15_000);
+  const urlC = plays[1].url;
+  assert.notEqual(urlC, plays[0].url);
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the dwell');
+  await sleep(40);
+  alerts = [CRIT_C]; // C returns alone inside the dwell
+  await until(r, () => heard(urlC) === 1, '★★★ C named at last');
+  assert.ok(r.has('and the critical it names (dpu-err-DPU-C'), r.logs.join('\n'));
+  assert.ok(r.has('was never audible in this episode — presented again as a transition'));
+  assert.ok(!r.has('again (flicker absorbed, nothing spoken)'));
+});
+
+test('★★ v1.195.0 (N8): …and such a return the same-level gap refuses is re-presented once the gap expires — the critical it names is new to the speakers', async () => {
+  const r = await started(RETRY_MS);
+  alerts = [CRIT_A];
+  await until(r, () => r.count('broadcast: red → ok in') === 1, 'A heard');
+  alerts = [CRIT_C]; // C takes A's place inside the gap A's delivery armed: refused
+  await until(r, () => r.has('red suppressed — last red condition broadcast played'), 'C refused by the gap');
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the dwell');
+  await sleep(40);
+  alerts = [CRIT_C]; // C returns inside the dwell, still inside the gap
+  await until(r, () => r.has('was never audible in this episode — presented again as a transition'), 'the return presented');
+  await until(r, () => r.count('red suppressed — last red condition broadcast played') === 2, 'refused by the gap again');
+  await until(r, () => r.count('red will be re-presented once the storm gate') === 2, '★ the return re-presented when the gap expires');
+  offset += 2 * MIN;
+  await until(r, () => plays.length === 2 && heard(plays[1].url) === 1, '★★ C named');
+  assert.match(String(r.mon.status().lastSpokenMessage), /Inverter/);
+});
+
+test('★★ v1.195.0 (N8): a heard critical that returns inside the dwell is still the flicker it was — absorbed, nothing spoken', async () => {
+  const r = await started(RETRY_MS);
+  alerts = [CRIT_A];
+  await until(r, () => r.count('broadcast: red → ok in') === 1, 'A heard');
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the dwell');
+  alerts = [CRIT_A];
+  await until(r, () => r.has('again (flicker absorbed, nothing spoken)'), 'absorbed');
+  await sleep(60);
+  assert.equal(plays.length, 1);
+});
+
+test('★★ v1.195.0 (N8): two criticals returning together whose words name the HEARD one are a flicker — the other was not named at the commit either', async () => {
+  const r = await started(RETRY_MS);
+  alerts = [CRIT_A, CRIT_C]; // the words name A
+  await until(r, () => r.count('broadcast: red → ok in') === 1, 'the red heard, naming A');
+  assert.match(String(r.mon.status().lastSpokenMessage), /overvoltage/i);
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the dwell');
+  alerts = [CRIT_A, CRIT_C];
+  await until(r, () => r.has('again (flicker absorbed, nothing spoken)'), '★ absorbed');
+  await sleep(60);
+  assert.equal(plays.length, 1, 'nothing more spoken');
+});
+
+test('★★ v1.195.0 (N8): what was named audible is reset with every new red episode — C heard in an earlier red, then never delivered in this one, is spoken when it returns', async () => {
+  const r = await started(RETRY_MS);
+  alerts = [CRIT_C];
+  await until(r, () => r.count('broadcast: red → ok in') === 1, 'C heard (episode 1)');
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the dwell');
+  offset += B.CONDITION_CLEAR_DWELL_MS + 1_000;
+  await until(r, () => r.count('broadcast: green → ok in') === 1, 'the green committed and spoken');
+  offset += 3 * MIN;
+  alerts = [CRIT_A];
+  await until(r, () => r.count('broadcast: red → ok in') === 2, 'A heard (episode 2)');
+  offset += 3 * MIN;
+  plan.push({ status: 500 }, { status: 500 }, { status: 500 }, { status: 500 });
+  alerts = [CRIT_C]; // C takes A's place, never delivered in this episode
+  await until(r, () => r.has('giving up after 3 deferred red retries'), 'C never delivered', 15_000);
+  const urlC = plays[0].url;
+  const before = heard(urlC);
+  alerts = [];
+  await until(r, () => r.count('red → green held') === 2, 'the dwell');
+  await sleep(40);
+  alerts = [CRIT_C];
+  await until(r, () => heard(urlC) === before + 1, '★★ C spoken again: heard in episode 1 is not heard in episode 2');
+});
+
+test('★★ v1.195.0 (N8): a red adopted at a restart as already announced (the red replay gate) counts its critical as named — its flicker inside the dwell is absorbed', async () => {
+  const a = await started(RETRY_MS);
+  alerts = [CRIT_A];
+  await until(a, () => a.count('broadcast: red → ok in') === 1, 'A heard before the restart');
+  a.stop();
+  offset += 2 * MIN; // the deploy
+  const r = await started(RETRY_MS, false); // A still standing at the first tick: inside the warm-up
+  await until(r, () => r.has('red suppressed — this standing fault was already announced'), 'adopted by the red replay gate');
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the dwell');
+  alerts = [CRIT_A];
+  await until(r, () => r.has('again (flicker absorbed, nothing spoken)'), '★ absorbed: A was the critical announced');
+  await sleep(60);
+  assert.equal(plays.length, 1, 'A once, before the restart');
+});
+
+test('★★ v1.195.0 (review): …but only the critical it NAMED — one counted beside it, never named, that returns alone after the restart is spoken, as in one process', async () => {
+  const a = await started(RETRY_MS);
+  alerts = [CRIT_A, CRIT_C]; // the words name A; C is counted beside it
+  await until(a, () => a.count('broadcast: red → ok in') === 1, 'the red heard before the restart, naming A');
+  assert.match(String(a.mon.status().lastSpokenMessage), /overvoltage/i);
+  a.stop();
+  offset += 2 * MIN; // the deploy
+  const r = await started(RETRY_MS, false); // both still standing at the first tick
+  await until(r, () => r.has('red suppressed — this standing fault was already announced'), 'adopted by the red replay gate');
+  offset += 3 * MIN; // past the same-level gap
+  alerts = [];
+  await until(r, () => r.has('red → green held'), 'the dwell');
+  alerts = [CRIT_C]; // C returns alone inside the dwell
+  await until(r, () => plays.length === 2 && heard(plays[1].url) === 1, '★★ C named at last');
+  assert.ok(r.has('and the critical it names (dpu-err-DPU-C'), r.logs.join('\n'));
+  assert.ok(!r.has('again (flicker absorbed, nothing spoken)'));
 });
