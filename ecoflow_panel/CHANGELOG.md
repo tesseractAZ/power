@@ -1,3 +1,33 @@
+## 1.197.1
+
+### The house panel's reserve-blind alarm stands while the panel has no reading after a restart
+
+**Alarms**
+
+- The house panel's "Reserve alarm blind" now stands when the panel has had no reading at all since the add-on restarted (the EcoFlow cloud has not returned its data). Before, the house pool had no reserve-blind alarm in that state. The house panel is pinned on every plant, and a pinned panel with no reading was left out on both paths: the house panel's own alarm needs a reading, and the dark-panel alarm (1.185.0) covers only the other panels. The only alert was the "Running off-grid" info. Since 1.195.0 the alert set waited for that panel to report, so no false all-clear followed, but nothing said the reserve alarm could not see the house pool.
+- It is the house panel's own alarm: the same id (`reserve-alarm-blind`), wording, family, push and audible rules. It counts from the onset the add-on carried across the restart, or else from the panel's first listing after it. A pool blind before a restart and still dark after it is therefore critical at once off-grid, not absent for 15 minutes. On a cold boot it waits 15 minutes from the first listing, the same grace as any other panel's dark alarm, so a first reading that is merely slow raises nothing. It turns critical after 60 minutes while the house pool's own grid is not backing it up, and stays a warning while it is. On a two-panel plant it reads the house pool's own grid and its own Cores.
+- A panel dark since a cold boot keeps its onset across a second restart. The add-on now saves the time it first listed a panel that has not reported since, the onset that panel's alarm counts from. Before, nothing was saved for it, so a second restart while the panel stayed dark started the clock again: the critical was absent for 15 minutes (the boot sweep sent "Resolved"), then a warning until an hour after the new listing. This held for a dark secondary panel too. The panel's first reading retires the saved onset at once when the pool reads.
+- The panel's first reading hands over without a break. A pool that still reads unknown keeps the onset the alarm was counting from. Before, the clock restarted at that reading, so the alarm cleared with a "Resolved" push, came back 15 minutes later and stayed a warning until an hour after that reading, even when it had been critical. A dark secondary panel's alarm hands over the same way. A pool that reads ends the alarm.
+- The hand-over also holds when the first reading arrives while the alert monitor is refreshing its Home Assistant states. The monitor read the panel as dark before that wait and as reporting after it, so the alarm was missing for one pass: a "Resolved" push, then the alarm again 20 seconds later. The monitor now reads both after the wait.
+- Once the alarm stands, the panel no longer holds the alert set unsettled. Any other dark panel already worked this way since 1.195.0. Before, a house panel dark for a week kept the set unsettled for the whole week.
+- On a one-panel plant, a dark house panel left out of three device lists in a row stays the house panel. Before, it became a second panel for the alarms: its alarm switched to `reserve-alarm-blind-<serial>` and back once the panel was listed again, with a "Resolved" push and a new critical at each switch. A house panel with a reading is unaffected: it was already found as the house panel.
+- The alarm now names its panel, as a secondary panel's alarm does. When the alarm leaves the set while that panel sends no fresh data, the alert monitor holds it instead of sending "Resolved". A dark house panel that leaves the account on a two-panel plant therefore no longer sends "Resolved: Reserve alarm blind" while the pool is still unread.
+
+**Unchanged**
+
+- A pinned house panel that has left the account while another panel is on it still raises the critical "House panel not on the account". No reserve-blind alarm is added for it, and it holds the alert set unsettled until it reports.
+- A one-panel plant raises no "House panel not on the account" when its panel drops off the device lists, as before. Night charge is not paused there.
+- With no house panel pinned, a dark panel raises its own `reserve-alarm-blind-<serial>`, as before. A house panel with a reading is unchanged.
+- On a read-only `/data` nothing is saved or carried, as since 1.195.0.
+- Not covered: a one-panel plant whose pinned panel is missing from every device list after a restart. That panel is not in the device map at all, so neither this alarm nor the "not on the account" critical stands.
+
+**Tests**
+
+- New: `houseReserveBlindDark.test.ts` covers the reproduction (pinned, dark across a restart, off-grid: critical at once), the cold-boot grace, the hand-over, the pending rule, a pin missing from the account, no pin, two panels and the monitor wiring. Two tests in `poolUnknownCarry.test.ts` that pinned the old behaviour now assert the new one: the house panel had no alarm while dark and stayed pending.
+- New: `houseReserveBlindCarry.test.ts` covers a second and third restart while a panel stays dark since a cold boot (house and secondary panel), a restart inside the cold-boot grace, the saved onset retired or kept at the first reading, a normal boot writing no file, the one-panel plant's pin with its panel off the lists (dark and reporting), two panels off the lists, and the alarm's panel serial on every path.
+- New: `houseReserveBlindMonitor.test.ts` runs the real alert monitor with Home Assistant mocked. It covers a first reading that lands during the Home Assistant refresh, a dark house panel leaving the account on a two-panel plant, and a second restart, where the boot sweep must not resolve the alarm. A source check pins the order of the monitor's pass.
+- New harness `scripts/mutate-house-blind.mjs` (25 mutants). Anchors are re-pointed in `mutate-restart-leftovers.mjs` (D-iii, now a pin missing from the account), `mutate-v1187-4.mjs` (C-i, C-xxiii) and `mutate-multi-panel.mjs` (r3).
+
 ## 1.197.0
 
 ### One Core's own alarms can be shelved for a set maintenance window
