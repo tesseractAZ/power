@@ -492,6 +492,43 @@ export const VDIFF_KNEE_STREAM_FRESH_MS = 150_000;
  *  outage a persisted knee session survives (restoreVdiffKneeSessions). */
 export const VDIFF_KNEE_GAP_CARRY_MS = 60 * 60_000;
 
+/*
+ * v1.195.0 — THE OFF-PLATEAU SESSION, AND THE LOW-CHARGE KNEE. The bounds above (critSinceMs,
+ * graceFromMs) run only on the plateau and are cleared below it, so below 85% — and whenever the
+ * pack's SoC is unknown — the v0.29.0 balancing mute was held up only by its premise that balancing
+ * ends. A BMS can balance for hours, and it balances because a cell is deviating: 80 mV at 60% stayed
+ * muted for as long as the BMS balanced, a spread alternating 55 / 45 / 45 mV was never announced, and
+ * a pack whose SoC read 84 / 85% on alternate readings restarted its plateau session on every 85%.
+ * Below the plateau a critical now opens a SESSION (offFromMs) on its first reading at or above
+ * VOL_DIFF_CRIT_MV; dips under the line do not end it, only an unbroken VDIFF_KNEE_MAX_MUTE_MS under
+ * 50 mV seen at any SoC (offQuietSinceMs) does. It is carried across a reading gap and a restart like
+ * the plateau clocks, and every off-plateau mute ends VDIFF_KNEE_MAX_MUTE_MS after it began.
+ *
+ * The LOW-CHARGE KNEE. Below about 15% the LFP curve is steep (physics/lfpOcv.ts: 3.20 V at 10%,
+ * 3.15 V at 5%, 2.50 V at 0%): the cell holding the least charge falls away from the rest and closes
+ * back on recharge, so a healthy Core at the bottom of a discharge crosses the instantaneous 50 mV
+ * line (2026-08-20: a healthy Core 5 pack sounded red and cleared itself in 6.7 minutes; 08-16 about 5
+ * minutes). A critical there is held on the card — not pushed, not sounded — for at most the session's
+ * VDIFF_KNEE_MAX_MUTE_MS, as the top-of-charge knee is, and only while EVERY reading at the line in the
+ * session is such a knee (offKnee: one that is not forfeits it for the session): the pack's own SoC at
+ * or below VOL_DIFF_LOW_KNEE_SOC_PCT, within VOL_DIFF_LOW_KNEE_PEER_PTS of its sibling packs' median
+ * (a pack that far below its siblings is stranded — the 07-18 → 08-23 warranty pack read 11% against
+ * 58% and 1% against 21-26% — and gets no low-charge grace), and under VOL_DIFF_KNEE_HARD_MV.
+ * Deliberately NOT env-tunable: they bound a mute.
+ *
+ * What gets no low-charge grace (a stranded pack, a session that reached the line on any other
+ * reading, no SoC of its own) pages at once only while the BMS is idle. While it reports balancing,
+ * the balancing mute is checked first (vdiffCritMute) and holds it, bounded like every mute here: it
+ * speaks VDIFF_KNEE_MAX_MUTE_MS after the off-plateau session's first crossing. Only
+ * VOL_DIFF_KNEE_HARD_MV and above pages at once, balancing or not.
+ */
+/** v1.195.0 — the pack SoC (its own reading) at or below which a critical cell spread may be the
+ *  bottom-of-curve knee. Both benign events (08-16, 08-20) sat at 12-13%. */
+export const VOL_DIFF_LOW_KNEE_SOC_PCT = 15;
+/** v1.195.0 — how far below its sibling packs' median SoC a pack may sit and still be read as the
+ *  low-charge knee; at this distance or more it is stranded (the warranty pack: 47 and 20-25 points). */
+export const VOL_DIFF_LOW_KNEE_PEER_PTS = 10;
+
 /** v1.187.0 — one pack's end-of-charge knee bookkeeping (see advanceVdiffKnee). */
 export interface VdiffKneeState {
   /** The pack serial that earned this state (null when unknown). */
@@ -534,6 +571,19 @@ export interface VdiffKneeState {
    *  vdiffCritMvFor(packSoc) and whenever critSinceMs is cleared. Written to the knee-session file
    *  with the clock and restored with it (persistVdiffKneeSessions / restoreVdiffKneeSessions). */
   critSeeded: boolean;
+  /** v1.195.0 — the OFF-PLATEAU session's clock: the first reading at or above VOL_DIFF_CRIT_MV
+   *  taken below the plateau or with no SoC. Survives dips under the line; ended only by a rest
+   *  (offQuietSinceMs). Carried across a reading gap and a restart like graceFromMs. Bounds the
+   *  balancing mute and the low-charge grace below the plateau (vdiffCritMute). Optional only for
+   *  states built before it existed: absent reads as none. */
+  offFromMs?: number | null;
+  /** v1.195.0 — first tick of the current unbroken run under VOL_DIFF_CRIT_MV, at any SoC, while
+   *  the off-plateau session runs. VDIFF_KNEE_MAX_MUTE_MS of it ends the session. Not carried
+   *  across a reading gap (a rest must be seen); restored across a short outage only. */
+  offQuietSinceMs?: number | null;
+  /** v1.195.0 — every reading at or above VOL_DIFF_CRIT_MV in the off-plateau session was the
+   *  low-charge knee (lowChargeKnee). One that is not forfeits the grace for the session. */
+  offKnee?: boolean;
 }
 export interface VdiffKneeObservation {
   packSn: string | null;
@@ -542,9 +592,13 @@ export interface VdiffKneeObservation {
   balancing: boolean;
   /** Pack charge input, W, as the MQTT stream itself delivered it, or null (see vdiffKneeChargeW). */
   chargeW: number | null;
+  /** v1.195.0 — the upper median of the sibling packs' OWN SoC readings, set only when this pack's
+   *  own SoC is known and at least two siblings report one (computeAlerts); else null — never the
+   *  low-charge knee. */
+  siblingMedianSoc?: number | null;
 }
 /** Which bounded cell-spread mute holds a vdiff-crit (also Alert.mutedBy). */
-export type VdiffCritMuteReason = 'balancing' | 'end-of-charge' | 'charging';
+export type VdiffCritMuteReason = 'balancing' | 'end-of-charge' | 'charging' | 'low-charge';
 /** v1.187.0 — the operator-facing name of each bounded cell-spread mute, stamped on the muted
  *  vdiff-crit as its muteReason (balancing shares the vdiff-warn wording). On 2026-09-29 all
  *  three "held non-annunciating" lines were this mute on home Cores, and the line blamed a bench
@@ -553,7 +607,25 @@ export const CELL_SPREAD_MUTE_TEXT: Record<VdiffCritMuteReason, string> = {
   'balancing': MUTE_REASON_BALANCING,
   'end-of-charge': 'end-of-charge cell-spread relaxation window',
   'charging': `top-of-charge cell spread while charging, at most ${Math.round(VDIFF_KNEE_RELAX_MS / 60_000)} minutes`,
+  'low-charge': `low-charge cell spread, at most ${Math.round(VDIFF_KNEE_MAX_MUTE_MS / 60_000)} minutes`,
 };
+
+/** v1.195.0 — is this reading the bottom-of-curve knee (see THE LOW-CHARGE KNEE above)? The pack's
+ *  own SoC at or below VOL_DIFF_LOW_KNEE_SOC_PCT and less than VOL_DIFF_LOW_KNEE_PEER_PTS below its
+ *  siblings' median. No sibling median (the pack's own SoC unknown, fewer than two siblings
+ *  reporting) is never the knee (fail loud). PURE. */
+export function lowChargeKnee(obs: Pick<VdiffKneeObservation, 'packSoc' | 'siblingMedianSoc'>): boolean {
+  return obs.packSoc != null && obs.packSoc <= VOL_DIFF_LOW_KNEE_SOC_PCT
+    && obs.siblingMedianSoc != null && obs.siblingMedianSoc - obs.packSoc < VOL_DIFF_LOW_KNEE_PEER_PTS;
+}
+
+/** v1.195.0 — the upper median of `socs` (the higher middle value of an even count: a larger gap
+ *  reads as stranded sooner, the fail-loud side), or null when fewer than two. PURE. */
+export function upperMedianSoc(socs: ReadonlyArray<number>): number | null {
+  if (socs.length < 2) return null;
+  const s = [...socs].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
 
 /** v1.187.0 — the charge input the knee reads: the pack's inputWatts as the MQTT stream ITSELF
  *  delivered it (DpuPack.streamInputW), at most VDIFF_KNEE_STREAM_FRESH_MS old — else null, no
@@ -579,7 +651,8 @@ export function advanceVdiffKnee(
   const sameHw = prev != null && !(prev.packSn != null && obs.packSn != null && prev.packSn !== obs.packSn);
   const s: VdiffKneeState = sameHw
     ? { ...prev, packSn: obs.packSn ?? prev.packSn, lastSeenMs: nowMs }
-    : { packSn: obs.packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: null, belowCritSinceMs: null, graceFromMs: null, quietSinceMs: null, lastSeenMs: nowMs, critSeeded: false };
+    : { packSn: obs.packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: null, belowCritSinceMs: null, graceFromMs: null, quietSinceMs: null, lastSeenMs: nowMs, critSeeded: false,
+      offFromMs: null, offQuietSinceMs: null, offKnee: false };
   const topOfCharge = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT;
   const onPlateau = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_SOC_PCT;
   const kneeSpread = obs.spreadMv >= VOL_DIFF_WARN_MV;
@@ -639,6 +712,24 @@ export function advanceVdiffKnee(
     if (s.quietSinceMs != null && nowMs - s.quietSinceMs >= VDIFF_KNEE_MAX_MUTE_MS) s.graceFromMs = null;
     if (onPlateau && obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) s.graceFromMs ??= s.critSinceMs ?? nowMs;
   }
+  // v1.195.0 — the OFF-PLATEAU session (offFromMs; see THE OFF-PLATEAU SESSION above). Opened by a
+  // reading at or above VOL_DIFF_CRIT_MV below the plateau or with no SoC (never by one on the
+  // plateau, whose own session bounds it), and kept through dips under the line: only an unbroken
+  // VDIFF_KNEE_MAX_MUTE_MS under 50 mV ends it, so 55 / 45 / 45 mV keeps one clock. Every reading at
+  // the line in it must be the low-charge knee for the session to keep that grace (offKnee).
+  const lowKnee = lowChargeKnee(obs);
+  if (obs.spreadMv >= VOL_DIFF_CRIT_MV) {
+    s.offQuietSinceMs = null;
+    if (s.offFromMs != null) { if (!lowKnee) s.offKnee = false; }
+    else if (!onPlateau) { s.offFromMs = nowMs; s.offKnee = lowKnee; }
+  } else if (s.offFromMs != null) {
+    s.offQuietSinceMs ??= nowMs;
+    if (nowMs - s.offQuietSinceMs >= VDIFF_KNEE_MAX_MUTE_MS) {
+      s.offFromMs = null;
+      s.offQuietSinceMs = null;
+      s.offKnee = false;
+    }
+  }
   return s;
 }
 
@@ -680,6 +771,9 @@ export function vdiffKneeSeed(onsetMs: number | undefined, packSn: string | null
     packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: at, belowCritSinceMs: null,
     graceFromMs: nowMs - at <= VDIFF_KNEE_GAP_CARRY_MS ? at : null, quietSinceMs: null, lastSeenMs: null,
     critSeeded: true,
+    // v1.195.0 — the off-plateau session from the same onset, under the same age cap: a restart
+    // must not restart the off-plateau bound either. A seed never earns the low-charge grace.
+    offFromMs: nowMs - at <= VDIFF_KNEE_GAP_CARRY_MS ? at : null, offQuietSinceMs: null, offKnee: false,
   };
 }
 
@@ -687,7 +781,8 @@ export function vdiffKneeSeed(onsetMs: number | undefined, packSn: string | null
  * v1.187.0 — why a vdiff-crit is held non-annunciating this tick, or null when it must
  * annunciate. Order matters: the ceiling and the duration bound come FIRST, so neither the
  * balancing mute nor the end-of-charge grace can outlast them. Off the plateau only the
- * balancing mute (v0.29.0) applies, now under the ceiling.
+ * balancing mute (v0.29.0) applies, now under the ceiling — and (v1.195.0) under the off-plateau
+ * session's bound, beside the low-charge grace.
  */
 export function vdiffCritMute(
   s: VdiffKneeState,
@@ -696,6 +791,12 @@ export function vdiffCritMute(
 ): VdiffCritMuteReason | null {
   if (obs.spreadMv >= VOL_DIFF_KNEE_HARD_MV) return null;
   if (s.critSinceMs != null && nowMs - s.critSinceMs >= VDIFF_KNEE_MAX_MUTE_MS) return null;
+  // v1.195.0 — below the plateau, or with no SoC, every mute ends VDIFF_KNEE_MAX_MUTE_MS after the
+  // off-plateau session's first crossing (offFromMs), and there is none without a session (fail
+  // loud: a hand-built or pre-v1.195.0 state has no clock). Until v1.195.0 the balancing mute had no
+  // limit here at all.
+  const onPlateau = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_SOC_PCT;
+  if (!onPlateau && (s.offFromMs == null || nowMs - s.offFromMs >= VDIFF_KNEE_MAX_MUTE_MS)) return null;
   // v1.187.0 (log review) — while a SESSION runs (graceFromMs) the BALANCING mute is bounded by it
   // as well: critSinceMs restarted whenever a reading dipped under 50 mV, so a balancing spread that
   // alternates 95 / 45 mV was held for hours (v1.187.1: critSinceMs now survives such dips, and the
@@ -706,6 +807,9 @@ export function vdiffCritMute(
   if (obs.balancing) {
     return s.graceFromMs != null && nowMs - s.graceFromMs >= VDIFF_KNEE_MAX_MUTE_MS ? null : 'balancing';
   }
+  // v1.195.0 — the low-charge knee, inside that bound: the reading is one, and so was every
+  // reading at the line in the session.
+  if (!onPlateau) return s.offKnee === true && lowChargeKnee(obs) ? 'low-charge' : null;
   const topOfCharge = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT;
   if (!topOfCharge) return null;
   // v1.187.0 (log review) — both graces are bounded by the SESSION (graceFromMs), not by the
@@ -743,7 +847,9 @@ const vdiffKneeByKey = new Map<string, VdiffKneeState>();
  * while the pack's last reading is at most VDIFF_KNEE_GAP_CARRY_MS old — the outage, never the
  * onset's age — and dropped after it. Persisted: the pack serial, critSinceMs, graceFromMs, the rest
  * (quietSinceMs), the last reading time and (v1.187.2) whether critSinceMs is an unconfirmed seed
- * (critSeeded). Deliberately NOT persisted, exactly as they are not
+ * (critSeeded); (v1.195.0) the off-plateau session's clock, its rest and its low-charge mark
+ * (offFromMs, offQuietSinceMs, offKnee), each only while set, the rest restored under the same two
+ * rules as quietSinceMs (a short outage, coherent). Deliberately NOT persisted, exactly as they are not
  * carried across a reading gap in the process: the activity evidence (lastBalancingMs, lastChargeMs
  * — a mute is re-earned from fresh readings) and the under-the-line run (belowCritSinceMs). Each
  * restarts from fresh readings, which can only keep a bound counting (fail loud). Only a pack the
@@ -784,6 +890,11 @@ export interface VdiffKneeSession {
   /** The pack's last reading, floored to VDIFF_KNEE_SEEN_PERSIST_MS: the true one lies in
    *  [this, this + VDIFF_KNEE_SEEN_PERSIST_MS). */
   lastSeenMs: number;
+  /** v1.195.0 — the off-plateau session's clock, its rest and its low-charge mark: each written
+   *  only while set, so an entry with no off-plateau session keeps the v1.187.2 shape. */
+  offFromMs?: number;
+  offQuietSinceMs?: number;
+  offKnee?: true;
 }
 /** v1.187.1 — the persisted sessions, keyed `${sn}-${pk}`, as they stand on disk. */
 export type VdiffKneeSessions = Record<string, VdiffKneeSession>;
@@ -808,12 +919,30 @@ function parseVdiffKneeSession(v: unknown): VdiffKneeSession | null {
   const quietSinceMs = o.quietSinceMs === undefined ? null : o.quietSinceMs;
   if (!isClock(quietSinceMs)) return null;
   if (typeof o.lastSeenMs !== 'number' || !Number.isFinite(o.lastSeenMs)) return null;
-  if (o.critSinceMs == null && o.graceFromMs == null) return null;
+  // v1.195.0 — the off-plateau session's fields: absent reads as none; present, each must be a
+  // finite clock (offKnee true).
+  const offFromMs = o.offFromMs === undefined ? null : o.offFromMs;
+  const offQuietSinceMs = o.offQuietSinceMs === undefined ? null : o.offQuietSinceMs;
+  if (!isClock(offFromMs) || !isClock(offQuietSinceMs)) return null;
+  if (!(o.offKnee === undefined || typeof o.offKnee === 'boolean')) return null;
+  if (o.critSinceMs == null && o.graceFromMs == null && offFromMs == null) return null;
   if (!(o.critSeeded === undefined || typeof o.critSeeded === 'boolean')) return null;
   return {
     packSn: o.packSn, critSinceMs: o.critSinceMs, graceFromMs: o.graceFromMs, quietSinceMs, lastSeenMs: o.lastSeenMs,
     ...(o.critSeeded === true ? { critSeeded: true as const } : {}),
+    ...(offFromMs != null ? { offFromMs } : {}),
+    ...(offQuietSinceMs != null ? { offQuietSinceMs } : {}),
+    ...(o.offKnee === true ? { offKnee: true as const } : {}),
   };
+}
+
+/** v1.195.0 — whether a persisted OFF-PLATEAU rest is one the process could have been in: begun
+ *  after the session's first crossing (a crossing breaks a rest) and less than VDIFF_KNEE_MAX_MUTE_MS
+ *  before the last reading (a rest that long had already ended the session). As
+ *  vdiffKneeRestCoherent for the plateau rest; anything else is not restored (fail loud). */
+function vdiffKneeOffRestCoherent(s: VdiffKneeSession): boolean {
+  const q = s.offQuietSinceMs;
+  return q != null && s.offFromMs != null && q > s.offFromMs && s.lastSeenMs - q < VDIFF_KNEE_MAX_MUTE_MS;
 }
 
 /**
@@ -879,6 +1008,9 @@ export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: s
     const restCarried = s.quietSinceMs != null && nowMs - s.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS;
     // v1.187.1 (log review) — …and only when it is a rest the process could have been in.
     const restCoherent = vdiffKneeRestCoherent(s);
+    // v1.195.0 — the off-plateau session's rest under the same two rules (a short outage, coherent).
+    const offRestCarried = s.offQuietSinceMs != null && nowMs - s.lastSeenMs <= VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS
+      && vdiffKneeOffRestCoherent(s);
     vdiffKneeByKey.set(key, {
       packSn: s.packSn, lastBalancingMs: null, lastChargeMs: null,
       critSinceMs: s.critSinceMs == null ? null : Math.min(s.critSinceMs, nowMs), belowCritSinceMs: null,
@@ -887,6 +1019,11 @@ export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: s
       lastSeenMs: seenMs,
       // v1.187.2 (review) — an unconfirmed seed stays one across a restart (see persistVdiffKneeSessions).
       critSeeded: s.critSinceMs != null && s.critSeeded === true,
+      // v1.195.0 — the off-plateau session, clamped like the other clocks; its low-charge mark only
+      // with its clock.
+      offFromMs: s.offFromMs == null ? null : Math.min(s.offFromMs, nowMs),
+      offQuietSinceMs: offRestCarried ? Math.min(s.offQuietSinceMs!, nowMs) : null,
+      offKnee: s.offFromMs != null && s.offKnee === true,
     });
     restored++;
   }
@@ -900,7 +1037,8 @@ export function restoreVdiffKneeSessions(path: string, nowMs: number, log: (m: s
  * v1.187.1 — write the knee sessions to `path` when a persisted value differs from `onDisk` (the
  * value last written): a pack serial, a clock or the rest, an entry gained or lost, or the last
  * reading entering a new VDIFF_KNEE_SEEN_PERSIST_MS grain. Nothing changed → no write. Only packs
- * holding a clock are written (the rest carry nothing — computeAlerts' prune drops them too).
+ * holding a clock are written (the rest carry nothing — computeAlerts' prune drops them too); v1.195.0 —
+ * the off-plateau session's clock (offFromMs) is one, and its three fields count as persisted values.
  * Returns what is now on disk: `onDisk` again when nothing changed or the write failed (retried on
  * the next tick). Best-effort — never throws into the alarm loop. Main thread only, like the map.
  *
@@ -916,14 +1054,21 @@ export function persistVdiffKneeSessions(path: string, onDisk: VdiffKneeSessions
   const next: VdiffKneeSessions = {};
   let changed = false;
   for (const [key, st] of vdiffKneeByKey) {
-    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;
+    if ((st.critSinceMs == null && st.graceFromMs == null && st.offFromMs == null) || st.lastSeenMs == null) continue;
     const d = onDisk[key];
     const lastSeenMs = Math.floor(st.lastSeenMs / VDIFF_KNEE_SEEN_PERSIST_MS) * VDIFF_KNEE_SEEN_PERSIST_MS;
     next[key] = {
       packSn: st.packSn, critSinceMs: st.critSinceMs, graceFromMs: st.graceFromMs, quietSinceMs: st.quietSinceMs, lastSeenMs,
       ...(st.critSeeded ? { critSeeded: true as const } : {}),
+      // v1.195.0 — the off-plateau session, each field only while set (an entry without one keeps
+      // its shape; v1.192.0 reads an entry whose only clock is offFromMs as malformed and skips it).
+      ...(st.offFromMs != null ? { offFromMs: st.offFromMs } : {}),
+      ...(st.offQuietSinceMs != null ? { offQuietSinceMs: st.offQuietSinceMs } : {}),
+      ...(st.offFromMs != null && st.offKnee === true ? { offKnee: true as const } : {}),
     };
     if ((d?.critSeeded === true) !== st.critSeeded) changed = true;
+    if ((d?.offFromMs ?? null) !== (next[key].offFromMs ?? null) || (d?.offQuietSinceMs ?? null) !== (next[key].offQuietSinceMs ?? null)
+      || (d?.offKnee === true) !== (next[key].offKnee === true)) changed = true;
     if (d == null || d.packSn !== st.packSn || d.critSinceMs !== st.critSinceMs || d.graceFromMs !== st.graceFromMs
       || d.quietSinceMs !== st.quietSinceMs || d.lastSeenMs !== lastSeenMs) changed = true;
   }
@@ -1126,6 +1271,44 @@ export const BOOT_RESET_ONSET_DEBOUNCE_MS = Math.max(DPU_ERR_DEBOUNCE_MS, MPPT_E
 export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS, RESERVE_BLIND_AFTER_MS);
 
 /**
+ * v1.195.0 — the reserve-blind onset of a panel with no projection (dark since the restart): the
+ * onset the store would carry for it, when earlier than its first listing in this process, else that
+ * listing. Read by its alert (secondaryPanelAlerts) and by the pending rule (darkPanelBlindRaised),
+ * so the two cannot drift.
+ */
+function darkPanelBlindSince(
+  sn: string,
+  connectivity: Pick<ConnectivityContext, 'panelFirstListedBySn' | 'poolUnknownCarriedSinceBySn'> | undefined,
+): number | null {
+  const listed = connectivity?.panelFirstListedBySn?.get(sn) ?? null;
+  const carried = connectivity?.poolUnknownCarriedSinceBySn?.get(sn) ?? null;
+  return carried != null && (listed == null || carried < listed) ? carried : listed;
+}
+
+/**
+ * v1.195.0 — the panels dark since the restart whose reserve-alarm-blind computeAlerts raises at
+ * `nowMs`: every panel other than the house panel (secondaryPanels) with no projection, once its
+ * onset (darkPanelBlindSince) has stood RESERVE_BLIND_AFTER_MS — the alert's own comparison. Such a
+ * panel's carried onset withholds nothing from the set: its alarm is there. The HOUSE panel has no
+ * reserve-blind alarm while it has no projection (findShp2 resolves a flagged panel without one to
+ * nothing, and secondaryPanels leaves it out), so it is never in this set: its carried onset stays
+ * pending until its first projection. Pure.
+ */
+export function darkPanelBlindRaised(
+  devices: Record<string, DeviceSnapshot>,
+  connectivity: Pick<ConnectivityContext, 'panelFirstListedBySn' | 'poolUnknownCarriedSinceBySn'> | undefined,
+  nowMs: number,
+): Set<string> {
+  const out = new Set<string>();
+  for (const panel of secondaryPanels(devices)) {
+    if (panel.projection?.kind === 'shp2') continue;
+    const since = darkPanelBlindSince(panel.sn, connectivity);
+    if (since != null && Number.isFinite(since) && nowMs - since >= RESERVE_BLIND_AFTER_MS) out.add(panel.sn);
+  }
+  return out;
+}
+
+/**
  * v1.187.3 (review) — WHICH IN-MEMORY ONSET CLOCKS ARE STILL INSIDE THEIR DEBOUNCE at `nowMs`?
  *
  * Each names a condition the device is reporting NOW that computeAlerts withholds only because it
@@ -1142,8 +1325,11 @@ export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS,
  * assessment has resumed yet (hostPressureCarryPendingHeldAt), for at most its carry window.
  */
 export function debouncedOnsetsPending(
-  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn' | 'poolUnknownCarryPending' | 'hostPressureCarriedHeldAtMs'> | undefined,
+  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn' | 'poolUnknownCarryPending' | 'poolUnknownCarriedSinceBySn' | 'panelFirstListedBySn' | 'hostPressureCarriedHeldAtMs'> | undefined,
   nowMs: number,
+  // v1.195.0 — the device map the alert set is computed from (darkPanelBlindRaised). Absent: every
+  // carried onset not consumed yet is pending, as before.
+  devices?: Record<string, DeviceSnapshot>,
 ): string[] {
   if (connectivity == null) return [];
   const out: string[] = [];
@@ -1160,7 +1346,14 @@ export function debouncedOnsetsPending(
   // v1.187.4 — a listed panel not projected yet whose onset of before the restart is still on file:
   // its first projection may raise reserve-alarm-blind at once (carried), so a green read before it
   // is not an all-clear. Bounded by the carry window (SnapshotStore.poolUnknownCarryPending).
-  for (const sn of connectivity.poolUnknownCarryPending ?? []) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);
+  // v1.195.0 — …until the alert it would raise is raised already: a panel dark since the restart
+  // whose own reserve-alarm-blind stands from that onset (darkPanelBlindRaised) withholds nothing.
+  // A panel dark for weeks (its onset now carried past 7 days, POOL_UNKNOWN_MAX_EPISODE_MS) would
+  // otherwise keep the set unsettled for as long as it stays dark.
+  const raised = devices != null ? darkPanelBlindRaised(devices, connectivity, nowMs) : new Set<string>();
+  for (const sn of connectivity.poolUnknownCarryPending ?? []) {
+    if (!raised.has(sn)) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);
+  }
   // v1.187.20 (review) — a host-pressure episode carried across the restart that no vitals assessment
   // has resumed yet: the first may raise the warning audible at once. Bounded by the carry window.
   if (within(connectivity.hostPressureCarriedHeldAtMs, HOST_PRESSURE_CARRY_MAX_GAP_MS)) out.push('host-pressure (carried episode; not assessed since the restart)');
@@ -1971,6 +2164,9 @@ export function computeAlerts(
         // alert VISIBLE (dashboard still shows it, with the balancing note) but mark
         // it annunciate:false so it never chimes/pushes during balancing. A genuine
         // sustained imbalance persists past balancing and re-fires annunciating.
+        // v1.195.0 — and a BMS can balance for hours: below the plateau the mute now lasts at most
+        // VDIFF_KNEE_MAX_MUTE_MS from the off-plateau session's first crossing (vdiffCritMute), as it
+        // has on the plateau since v1.187.0-.2.
         // v0.58.0 — relaxed critical ceiling on the high-SoC LFP plateau (see
         // VOL_DIFF_PLATEAU_* constants). packSoc prefers the pack reading and falls
         // back to the device-projection SoC (pack soc is often null in DPU telemetry).
@@ -2028,12 +2224,19 @@ export function computeAlerts(
         // only critical ones: the activity evidence is usually earned while the spread is still
         // in the warn band (the BMS reports cell voltages every ~180 s, so the reading that first
         // crosses the critical line can land after charging has already stopped).
+        // v1.195.0 — the sibling packs' own SoC (the low-charge knee and the stranded note), only when
+        // this pack reports its own: the device SoC it falls back to says nothing about how it sits
+        // against its siblings.
+        const siblingMedianSoc = pk.soc != null
+          ? upperMedianSoc(p.packs.filter((x) => x.num !== pk.num && x.soc != null).map((x) => x.soc as number))
+          : null;
         const kneeObs: VdiffKneeObservation = {
           packSn: pk.packSn ?? null,
           packSoc: packSoc ?? null,
           spreadMv: pk.maxVolDiffMv,
           balancing,
           chargeW: vdiffKneeChargeW(pk, now),
+          siblingMedianSoc,
         };
         // v1.187.0 (log review) — a pack with no state (after a restart) starts from its standing
         // critical's persisted onset (vdiffKneeSeed), never from a clean clock.
@@ -2075,17 +2278,33 @@ export function computeAlerts(
           const sessionSustained = critMute == null && underCeiling && !sustained && balancing && sessionAgeMs != null;
           const sessionWhere = packSoc != null && packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT
             ? 'at this top of charge' : `above ${VOL_DIFF_PLATEAU_SOC_PCT}% charge`;
+          // v1.195.0 — below the plateau (or with no SoC), still annunciating where a mute would have
+          // held it (balancing, or a low-charge reading): only the off-plateau session's bound speaks
+          // there, measured from its first crossing.
+          const offAgeMs = knee.offFromMs != null ? now - knee.offFromMs : null;
+          const offSustained = critMute == null && underCeiling && !onPlateau && offAgeMs != null
+            && offAgeMs >= VDIFF_KNEE_MAX_MUTE_MS && (balancing || lowChargeKnee(kneeObs));
+          const offWhere = packSoc != null ? `below ${VOL_DIFF_PLATEAU_SOC_PCT}% charge` : 'with no charge reading';
+          // v1.195.0 — a pack at the bottom of its charge far below its siblings is stranded, not the
+          // knee: say so. It has no low-charge grace; while the BMS balances, the balancing mute
+          // still holds it until the off-plateau session's bound (vdiffCritMute), and the note is on
+          // the card from the first tick.
+          const stranded = pk.soc != null && pk.soc <= VOL_DIFF_LOW_KNEE_SOC_PCT && siblingMedianSoc != null
+            && siblingMedianSoc - pk.soc >= VOL_DIFF_LOW_KNEE_PEER_PTS;
+          const strandedNote = stranded ? ` Pack at ${pk.soc}% charge against a sibling median of ${siblingMedianSoc}%.` : '';
           // "first reached", not "sustained": the clock survives dips under the line shorter than
           // VDIFF_KNEE_RELAX_MS, so the minutes are the age of the episode, not time on the line.
           const kneeNote = critMute === 'end-of-charge' ? ' End-of-charge cell spread, relaxing.'
             : critMute === 'charging' ? ' Top-of-charge cell spread while charging.'
+            : critMute === 'low-charge' ? ' Low-charge cell spread.'
             : sustained ? ` First reached the critical line ${Math.round(critAgeMs! / 60_000)} minutes ago.`
             : sessionSustained ? ` First reached the critical line ${sessionWhere} ${Math.round(sessionAgeMs! / 60_000)} minutes ago.`
+            : offSustained ? ` First reached the critical line ${offWhere} ${Math.round(offAgeMs! / 60_000)} minutes ago.`
             : failedToRelax ? ' Did not relax at the top of charge.'
             : '';
           out.push({
             id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance',
-            detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${critMv} mV).${cellNote}${kneeNote}${balanceNote}`,
+            detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${critMv} mV).${cellNote}${kneeNote}${strandedNote}${balanceNote}`,
             ...facts,
             ...(critMute ? { annunciate: false, mutedBy: critMute, muteReason: CELL_SPREAD_MUTE_TEXT[critMute] } : {}),
           });
@@ -2308,10 +2527,12 @@ export function computeAlerts(
   // restored across an outage of at most VDIFF_KNEE_SEEN_PERSIST_MS + VDIFF_KNEE_RELAX_MS by the
   // file's own last reading (restoreVdiffKneeSessions), and cleared after a longer one; a pack
   // unseen on a tick after the restart still loses it here.
+  // v1.195.0 — the off-plateau session (offFromMs) is a clock like these: carried across a gap under
+  // the same cap, so an offline blip cannot restart its bound, and its rest (offQuietSinceMs) is not.
   for (const [k, st] of [...vdiffKneeByKey]) {
     if (seenVdiffKeys.has(k)) continue;
-    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);
-    else vdiffKneeByKey.set(k, { ...st, lastBalancingMs: null, lastChargeMs: null, belowCritSinceMs: null, quietSinceMs: null });
+    if ((st.critSinceMs == null && st.graceFromMs == null && st.offFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);
+    else vdiffKneeByKey.set(k, { ...st, lastBalancingMs: null, lastChargeMs: null, belowCritSinceMs: null, quietSinceMs: null, offQuietSinceMs: null });
   }
   // v1.108.0 — retire defective-pack confirmations whose pack has left the fleet.
   // v1.140.0 — but only where its absence is EVIDENCE. The evaluable set is
@@ -2609,10 +2830,8 @@ function secondaryPanelAlerts(
     // v1.187.4 (review) — or since the onset of before the restart, when the store carries one: a
     // panel blind across a restart and still dark after it was absent 15 min, then a warning until
     // boot + 60, even when it had been critical.
-    const listed = connectivity?.panelFirstListedBySn?.get(panel.sn) ?? null;
-    const carried = connectivity?.poolUnknownCarriedSinceBySn?.get(panel.sn) ?? null;
-    const since = carried != null && (listed == null || carried < listed) ? carried : listed;
-    pushReserveBlind(out, panel, devices, grid, since, now, sfx);
+    // v1.195.0 — darkPanelBlindSince, shared with the pending rule (darkPanelBlindRaised).
+    pushReserveBlind(out, panel, devices, grid, darkPanelBlindSince(panel.sn, connectivity), now, sfx);
     return;
   }
   const sp = panel.projection as Shp2Projection;

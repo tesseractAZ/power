@@ -69,7 +69,7 @@ The runway is an hour-by-hour projection of the pool with the house islanded. Wh
 | `sensor.power_runway_to_empty` | `ecoflow_runway_to_empty_hours` | Hours until the pool is empty; 999 when no crossing is projected | h |
 | `binary_sensor.power_runway_projection_islanded_only` | `ecoflow_runway_projection_islanded_only` | On while the grid is carrying the house, so the runway is an outage projection | on / off |
 | `sensor.power_forecast_pv_next_24h` | `ecoflow_forecast_pv_next_24h_kwh` | Forecast solar energy for the next 24 hours | kWh |
-| `sensor.power_projected_low_soc` | `ecoflow_projected_low_soc` | Lowest pool charge in the forecast | % |
+| `sensor.power_projected_low_soc` | `ecoflow_projected_low_soc` | Lowest pool charge in the forecast, counting only the Cores reporting live (the runway alarm's basis). While a Core is offline in the cloud the dashboard's forecast card shows a figure rebuilt from its recorded solar, with this one beside it | % |
 | `binary_sensor.power_projected_low_soc_islanded_only` | `ecoflow_projected_low_soc_islanded_only` | On while the grid is carrying the house, so the projected low is an outage projection | on / off |
 | `binary_sensor.power_forecast_basis_incomplete` | `ecoflow_forecast_basis_incomplete` | On when the forecast is missing part of its basis (diagnostic) | on / off |
 

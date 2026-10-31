@@ -213,22 +213,23 @@ const MUTANTS = [
   {
     id: 'xxiii. ★★★ the activity evidence is carried across a reading gap',
     file: AL,
-    find: '    else vdiffKneeByKey.set(k, { ...st, lastBalancingMs: null, lastChargeMs: null, belowCritSinceMs: null, quietSinceMs: null });',
-    to: '    else vdiffKneeByKey.set(k, { ...st }); /* MUTANT */',
+    // v1.195.0 — re-pointed: the carry also clears the off-plateau session's rest.
+    find: '    else vdiffKneeByKey.set(k, { ...st, lastBalancingMs: null, lastChargeMs: null, belowCritSinceMs: null, quietSinceMs: null, offQuietSinceMs: null });',
+    to: '    else vdiffKneeByKey.set(k, { ...st, offQuietSinceMs: null }); /* MUTANT */',
     why: 'A mute is carried across blindness instead of being re-earned from fresh readings.',
   },
   {
     id: 'xxiv. ★★★ a reading gap drops the critical-line clock',
     file: AL,
-    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
+    find: '    if ((st.critSinceMs == null && st.graceFromMs == null && st.offFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
     to: '    if (true) vdiffKneeByKey.delete(k); /* MUTANT */',
     why: 'An offline blip every few minutes restarts the 20-minute bound: a balancing-muted fault never speaks.',
   },
   {
     id: 'xxv. ★ no cap on how long a gap carries the clock',
     file: AL,
-    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
-    to: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) vdiffKneeByKey.delete(k); /* MUTANT */',
+    find: '    if ((st.critSinceMs == null && st.graceFromMs == null && st.offFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
+    to: '    if ((st.critSinceMs == null && st.graceFromMs == null && st.offFromMs == null) || st.lastSeenMs == null) vdiffKneeByKey.delete(k); /* MUTANT */',
     why: 'A pack back after a day offline is greeted by its old episode: an immediate red on its first balancing tick.',
   },
   /* ── cell overvoltage ─────────────────────────────────────────────────── */
@@ -371,8 +372,8 @@ const MUTANTS = [
   {
     id: 'liii. ★★★ the session clock is not carried across a reading gap',
     file: AL,
-    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
-    to: '    if (st.critSinceMs == null || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k); /* MUTANT */',
+    find: '    if ((st.critSinceMs == null && st.graceFromMs == null && st.offFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
+    to: '    if ((st.critSinceMs == null && st.offFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k); /* MUTANT */',
     why: 'A missed reading during a sub-line reading hands the next crossing a fresh grace.',
   },
   /* ── log review 09-29: across a restart ──────────────────────────────── */
@@ -436,8 +437,9 @@ const MUTANTS = [
   {
     id: 'lxii. ★★ the rest is carried across a reading gap',
     file: AL,
-    find: 'belowCritSinceMs: null, quietSinceMs: null });',
-    to: 'belowCritSinceMs: null }); /* MUTANT */',
+    // v1.195.0 — re-pointed: the line goes on with the off-plateau session's rest.
+    find: 'belowCritSinceMs: null, quietSinceMs: null, offQuietSinceMs: null });',
+    to: 'belowCritSinceMs: null, offQuietSinceMs: null }); /* MUTANT */',
     why: 'Ten minutes offline count as rest: a session ends without 20 minutes of quiet readings, and the next knee earns a grace.',
   },
   {

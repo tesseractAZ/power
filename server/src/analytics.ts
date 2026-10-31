@@ -14,6 +14,8 @@ import {
 import { DPU_MAX_PACKS, DPU_PACK_NAMEPLATE_WH } from './hwSpec.js';
 import { getWeather, coveringRadiationEpoch, RADIATION_LABEL_LAG_HOURS, type WeatherHour, type WeatherForecast } from './weather.js';
 import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2, secondaryShp2s } from './shp2Membership.js';
+// v1.195.0 — the recorder's gate on a panel reading, for the runway's live-load rung (computeRunway).
+import { projectionRecordable } from './heldSamples.js';
 import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs, windowIntegrator } from './aggregator.js';
 // v1.191.0 (lane A, T13/T15/CA26) — every local hour, weekday, date and day step in the site zone.
@@ -1353,6 +1355,41 @@ export interface DayForecast {
   typicalPvWhPerDayDisplay: number;
   typicalPvCurveWhPerHourDisplay?: number[];
   restoredSolarModel: SolarResponseModel;
+  // v1.195.0 — the RESTORED display basis PER HOUR, and a projected SoC on it, for the dashboard's
+  // forecast card. With every home Core cloud-dark the alarm-facing series is 0 W in every hour and
+  // its SoC walk drains toward 0%, and the card showed exactly that; these show what the restored
+  // basis projects, labelled as restored, with the alarm-basis figures beside it. Same anti-
+  // fabrication rule as the sums above (real recorded PV summed by SN, the same bias correction and
+  // ceiling), and the SoC walk starts where the alarm walk does and steps through the same function
+  // (stepSocWh) with the same hourly load. With every home Core reporting they equal hours[] (PV,
+  // SoC and the model flag) and minProjectedSoc exactly, except that minProjectedSocDisplay is null
+  // with no PV history at all (pvForecastUnavailable). They NEVER feed the runway alarm or any alert:
+  // computeRunway, computeForecastAlerts, forecastDayAlerts, the multi-day and probabilistic
+  // forecasts, the dispatch plan, the night-charge planner, Home Assistant's projected-low sensors
+  // and the calendar's dip event read the alarm basis only (forecastDisplayBasis.test.ts pins it).
+  // Kept OUT of hours[] so hours[].forecastPvW stays the one alarm series. Absent on hand-built
+  // forecasts.
+  hoursDisplay?: ForecastHourDisplay[];
+  /** v1.195.0 — the restored walk's lowest projected SoC (%, one decimal) and its hour; null when
+   *  the restored PV is no forecast (pvForecastUnavailable) or there is no SoC basis. */
+  minProjectedSocDisplay?: number | null;
+  minProjectedSocTsDisplay?: number | null;
+  /** v1.195.0 — how many connected home Cores the display basis restored from their own recorded
+   *  PV: listed connected by the panel, not projected, and with a recorded PV history in the window
+   *  (more than one reading, the test pvForecastUnavailable applies). An offline Core with none adds
+   *  nothing and is not counted. 0: nothing was restored, and the cards show the alarm basis. */
+  restoredCoreCount?: number;
+}
+
+/** v1.195.0 — one hour of the restored display basis (DayForecast.hoursDisplay). Display only. */
+export interface ForecastHourDisplay {
+  ts: number;
+  forecastPvW: number;
+  projectedSocPct: number | null;
+  /** The restored model's own flag for the hour (forecastHourPvW on restoredSolarModel): a fitted
+   *  model, or the typical-day fallback. hours[].modelled is the alarm model's, which with every
+   *  home Core dark has no coefficients and reads the fallback in every hour. */
+  modelled: boolean;
 }
 
 const FORECAST_DAY_TTL_MS = 30 * 60 * 1000;
@@ -2234,12 +2271,17 @@ async function computeDayForecastUncached(
   // model below, which read the identical (SN, pv_total, 30 days, 300 s) series a second time:
   // with three home Cores cloud-dark, three of the build's six 30-day pv_total scans.
   const restoredPvPts = new Map<string, Array<{ ts: number; value: number }>>();
+  // v1.195.0 — the offline Cores this actually restores: those with a recorded PV history (the span
+  // test pvForecastUnavailable applies). The forecast cards label their restored view with it, so a
+  // Core with no records is not counted as "restored from its records".
+  let restoredCoreCount = 0;
   for (const sn of missingConnectedSns) {
     const pts = recorder.query(sn, 'pv_total', since, now, HOUR_CURVE_BUCKET_SEC);
     restoredPvPts.set(sn, pts);
     const { curve, spanMs } = hourCurveFromPts(pts);
     for (let h = 0; h < 24; h++) restoredPvCurve[h] += curve[h];
     restoredPvSpan = Math.max(restoredPvSpan, spanMs);
+    if (spanMs > 0) restoredCoreCount++;
   }
   // v0.6.0 — separate weekday vs weekend load curves. EV charging,
   // dishwasher, laundry, and home-office HVAC duty all run on visibly
@@ -2414,6 +2456,13 @@ async function computeDayForecastUncached(
   const nameplateRemainWh = shp2?.projection.backupRemainWh ?? null;
   const fullWh = nameplateFullWh != null ? nameplateFullWh * poolBasis.capacityScale : null;
   let socWh = nameplateRemainWh != null ? nameplateRemainWh * poolBasis.capacityScale : null;
+  // v1.195.0 — the restored display SoC walk (below) starts where this one does, and steps through
+  // the SAME function with the same hourly load, so with every Core reporting the two are identical.
+  const socWhStart = socWh;
+  // v1.194.0 — a surplus hour is stored through the charge leg (chargeLegStep ×
+  // RUNWAY_CHARGE_EFFICIENCY), as computeRunway's; a deficit hour drains in full.
+  const stepSocWh = (soc: number, full: number, pvW: number, loadW: number): number =>
+    Math.max(0, Math.min(full, soc + chargeLegStep(pvW - runwayDrainW(loadW, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)));
   const reserveSoc = shp2?.projection.backupReserveSoc ?? RESERVE_FALLBACK_PCT;
   const basisKey = `${poolBasis.capacityBasis}:${poolBasis.capacityScale.toFixed(4)}:${Math.round(poolBasis.overheadW)}`;
   if (shp2 && basisKey !== lastPoolBasisKey) {
@@ -2423,6 +2472,8 @@ async function computeDayForecastUncached(
 
   const hours: ForecastHour[] = [];
   const startHour = Math.ceil(now / 3_600_000) * 3_600_000;
+  // v1.195.0 — each hour's load (EV included), for the restored display SoC walk.
+  const loadWs: number[] = [];
   let minSoc: number | null = null;
   let minSocTs: number | null = null;
   let pvSum = 0;
@@ -2548,6 +2599,7 @@ async function computeDayForecastUncached(
     // explicitly here for hours where one is predicted.
     const evLoad = evByHourEpoch.get(Math.floor(ts / 3_600_000)) ?? 0;
     const load = baseLoad + evLoad;
+    loadWs.push(load);
     // v0.93.0 (audit #3) — pvSum, the projected-SoC sim, and forecastPvW all consume
     // the BIAS-CORRECTED pvAlarm (never the raw pv), so the alarm-facing reporting
     // next-24h, the projected-SoC slope, and the per-hour series stay mutually
@@ -2565,7 +2617,9 @@ async function computeDayForecastUncached(
       // v1.187.19 — through runwayDrainW (the Cores' overhead added), on the measured basis.
       // v1.194.0 — a surplus hour charges through the charge leg (chargeLegStep ×
       // RUNWAY_CHARGE_EFFICIENCY), as computeRunway's: only ever lowers the path further.
-      socWh = Math.max(0, Math.min(fullWh, socWh + chargeLegStep(pvAlarm - runwayDrainW(load, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)));
+      // v1.195.0 — one step function for this walk and the display walk (stepSocWh, above), so the
+      // charge leg reaches both.
+      socWh = stepSocWh(socWh, fullWh, pvAlarm, load);
       socPct = (socWh / fullWh) * 100;
       if (minSoc == null || socPct < minSoc) {
         minSoc = socPct;
@@ -2591,7 +2645,16 @@ async function computeDayForecastUncached(
   // (built from the reporting-only series that computeRunway consumes) is untouched.
   // When there are no missing SNs, restoredSolarModel/restoredPvCurve equal their
   // reporting counterparts, so restoredPvSum === pvSum exactly.
+  // v1.195.0 — the RESTORED series per hour (hoursDisplay) and a SoC walk on it, for the dashboard's
+  // forecast card: with every home Core cloud-dark the alarm series above is 0 W in every hour and its
+  // walk drains toward 0%, and the card showed exactly that. Display only, like the sum: the walk
+  // starts where the alarm walk did (socWhStart), steps through the same stepSocWh with the same
+  // hourly load, and no alarm input reads it (computeRunway reads hours[].forecastPvW alone).
   let restoredPvSum = 0;
+  const hoursDisplay: ForecastHourDisplay[] = [];
+  let socWhDisplay = socWhStart;
+  let minSocDisplay: number | null = null;
+  let minSocTsDisplay: number | null = null;
   for (let k = 0; k < 24; k++) {
     const ts = startHour + k * 3_600_000;
     const clock = siteHour(ts);
@@ -2608,7 +2671,23 @@ async function computeDayForecastUncached(
     const restoredResp = restoredSolarModel.hourly[clock];
     const { pv, modelled } = forecastHourPvW(restoredResp, ghi, cloud, restoredPvCurve[clock], clearnessHist);
     const restoredCeil = modelled ? restoredResp.observedMaxPvW * 1.05 : null;
-    restoredPvSum += restoredCeil != null ? Math.min(pv * pvBiasFactor, restoredCeil) : pv * pvBiasFactor;
+    const restoredPvW = restoredCeil != null ? Math.min(pv * pvBiasFactor, restoredCeil) : pv * pvBiasFactor;
+    restoredPvSum += restoredPvW;
+    let socPctDisplay: number | null = null;
+    if (fullWh && fullWh > 0 && socWhDisplay != null) {
+      socWhDisplay = stepSocWh(socWhDisplay, fullWh, restoredPvW, loadWs[k]);
+      socPctDisplay = (socWhDisplay / fullWh) * 100;
+      if (minSocDisplay == null || socPctDisplay < minSocDisplay) {
+        minSocDisplay = socPctDisplay;
+        minSocTsDisplay = ts;
+      }
+    }
+    hoursDisplay.push({
+      ts,
+      forecastPvW: Math.round(restoredPvW),
+      projectedSocPct: socPctDisplay == null ? null : Math.round(socPctDisplay * 10) / 10,
+      modelled,
+    });
   }
 
   const value: DayForecast = {
@@ -2643,6 +2722,12 @@ async function computeDayForecastUncached(
     homeDpusConnected: forecastCoverage.homeDpusConnected,
     homeDpusReporting: forecastCoverage.homeDpusReporting,
     homeDpusCoveragePartial: forecastCoverage.coveragePartial,
+    // v1.195.0 — the restored display series and its projected low (see the DayForecast docs). The
+    // low is null where the restored PV is no forecast (pvForecastUnavailable) or there is no SoC basis.
+    hoursDisplay,
+    minProjectedSocDisplay: restoredPvSpan === 0 || minSocDisplay == null ? null : Math.round(minSocDisplay * 10) / 10,
+    minProjectedSocTsDisplay: restoredPvSpan === 0 || minSocDisplay == null ? null : minSocTsDisplay,
+    restoredCoreCount,
   };
   // v0.15.21 — never CACHE a forecast whose load curve came back empty: the
   // post-boot analytics worker can race the recorder and read zero panel_load
@@ -4129,7 +4214,19 @@ export function computeRunway(
     // LIVE SHP2 panel load (sum of circuit watts, available from MQTT
     // immediately), a single recent recorded sample, or the last good
     // recentLoadWatts — so the sensors stay numeric. Only give up if none exists.
-    const liveLoadWatts = (shp2.projection.circuits ?? []).reduce((s, c) => s + (c.watts ?? 0), 0);
+    // v1.195.0 — the live channel sum is a reading only while the recorder's own gate would write
+    // the panel now (heldSamples.ts projectionRecordable: content within RECORD_FRESH_MS, and a
+    // cloud-shadow latch clear or a new body). Since v1.188.1 a HELD panel writes no rows, so a
+    // hold empties this hour's window and lands here — and this rung summed the held circuits as
+    // the live load and re-stamped the carry clock on every compute, for as long as the hold
+    // lasted: circuits held at 9 kW projected the reserve floor in 2.8 h on a 2.4 kW house (a false
+    // high), circuits held at 600 W hid a 6 kW draw (low instead of medium), and the v1.175.0 carry
+    // limit never came due. A held panel's circuits neither stand in for the load nor extend the
+    // carry: the hour's last recorded load is carried for up to RUNWAY_LOAD_CARRY_MAX_MS, then the
+    // runway reads unavailable until the panel reports again.
+    const liveLoadWatts = projectionRecordable(shp2, now)
+      ? (shp2.projection.circuits ?? []).reduce((s, c) => s + (c.watts ?? 0), 0)
+      : 0;
     if (liveLoadWatts > 0) runwayLoadMeasuredAtMs = now;
     // v1.175.0 — the carried-forward value only while a real reading is recent enough.
     const carryOk = runwayLoadMeasuredAtMs != null && now - runwayLoadMeasuredAtMs <= RUNWAY_LOAD_CARRY_MAX_MS;
@@ -4162,6 +4259,8 @@ export function computeRunway(
   // wedge — exactly the failure this split prevents. NEVER read a *Display field or
   // restoredSolarModel below. See runwayPvBasisGuard.test.ts, which pins that computeRunway
   // is byte-identical before/after the display restore and monotonic in forecastPvW.
+  // v1.195.0 — nor the per-hour restored series the forecast card shows (hoursDisplay,
+  // minProjectedSocDisplay, restoredCoreCount): forecastDisplayBasis.test.ts pins that too.
   const pvByHour: number[] = [];
   const loadByHour: number[] = [];
   if (forecast) {

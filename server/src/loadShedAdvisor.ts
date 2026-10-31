@@ -219,7 +219,7 @@ export function computeAdvisory(opts: {
     (runway.hoursToReserve != null &&
       projectedAfterShed.hoursToReserve >= runway.hoursToReserve + MIN_SHED_BENEFIT_HOURS);
   const actionable = inBand && belowThreshold && recommended.length > 0 && materiallyHelps;
-  const note = buildNote(band, current, projectedAfterShed, recommended, composition, actionable);
+  const note = buildNote(band, current, projectedAfterShed, recommended, composition, actionable, runway.unavailable);
 
   return {
     generatedAt: now,
@@ -248,10 +248,15 @@ function buildNote(
   recommended: ShedRecommendation[],
   composition: LoadCompositionEntry[],
   actionable: boolean,
+  unavailable: string | null,
 ): string {
   if (composition.length === 0) {
     return 'No sheddable loads configured (LOAD_SHEDDING_SHED_ENTITIES is empty) — advisory inactive.';
   }
+  // v1.195.0 — an unavailable runway is no verdict on the runway (classifyRunway reads it as no
+  // band), never "healthy". Reached only before the first available runway: after one the advisor
+  // holds its last advisory instead (createLoadShedAdvisor).
+  if (unavailable != null) return 'Runway projection unavailable — no shed recommended.';
   if (band == null) {
     // v0.92.0 — includes the grid-backstopping case: classifyRunway returns null
     // while the grid carries the load at the floor, so no shed is warranted.
@@ -320,8 +325,17 @@ export function createLoadShedAdvisor(deps: {
   now?: () => number;
 }): LoadShedAdvisor {
   const now = deps.now ?? (() => Date.now());
+  // v1.195.0 — this advisor's last advisory built on an AVAILABLE runway (see update).
+  let lastAvailable: LoadShedAdvisory | null = null;
   return {
     update(runway: RunwayLike, grid?: GridContext): LoadShedAdvisory {
+      // v1.195.0 — an UNAVAILABLE runway HOLDS the last advisory, as runwayAlarm.update holds its
+      // latch: classifyRunway reads unavailable as no band, so the advisor called the runway healthy
+      // and cleared load_shed_recommended in the middle of a depletion. Since v1.195.0 a panel hold
+      // makes the house runway unavailable RUNWAY_LOAD_CARRY_MAX_MS after its last recorded load
+      // (computeRunway no longer sums the held circuits), so every hold past that reached it. Held,
+      // the recommendation and its generatedAt stand until the runway is available again.
+      if (runway.unavailable != null && lastAvailable != null) return lastAvailable;
       const composition = buildLoadComposition(deps.getCandidates(), deps.haEntity, deps.shp2CircuitWatts);
       const a = computeAdvisory({
         now: now(),
@@ -331,6 +345,7 @@ export function createLoadShedAdvisor(deps: {
         restoreMarginHours: deps.restoreMarginHours(),
         grid,
       });
+      if (runway.unavailable == null) lastAvailable = a;
       setLatestAdvisory(a);
       return a;
     },

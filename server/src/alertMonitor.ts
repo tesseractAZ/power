@@ -3438,7 +3438,9 @@ export function startAlertMonitor(
     // live alarms and each feed's last value) is not a trusted set clears the settled stamp BEFORE
     // it publishes, so the broadcast never reads a stale stamp beside a set with a withheld fault.
     const liveAtMs = Date.now();
-    const pendingOnsets = debouncedOnsetsPending(connectivity, liveAtMs);
+    // v1.195.0 — with the device map computeAlerts reads: a dark panel whose carried reserve-blind
+    // alarm is in the set already is not pending (darkPanelBlindRaised).
+    const pendingOnsets = debouncedOnsetsPending(connectivity, liveAtMs, snap.devices);
     if (!alertSetTrusted({ firstPollSettledAt: store.firstPollSettledAt, feedsInSet: alertFeeds.map((f) => f.warm()), liveAtMs, pendingOnsets })) {
       alertSetSettledSinceMs = null;
     }

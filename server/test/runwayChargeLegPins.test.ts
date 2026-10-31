@@ -25,7 +25,11 @@ test('★★★ source pins: every walk steps the pool through chargeLegStep; th
   const an = 'analytics.ts', nca = 'nightChargeAdvisor.ts';
   const pins: Array<[string, string, RegExp]> = [
     [an, 'export function computeRunway(', /const delta = chargeLegStep\(pvKwh - runwayDrainW\(loadKwhPerHour \* 1000, basis\.overheadW\) \/ 1000, RUNWAY_CHARGE_EFFICIENCY\);/],
-    [an, 'async function computeDayForecastUncached(', /socWh \+ chargeLegStep\(pvAlarm - runwayDrainW\(load, poolBasis\.overheadW\), RUNWAY_CHARGE_EFFICIENCY\)/],
+    // v1.195.0 — the day walk's step is one closure (stepSocWh) for the alarm walk and the restored
+    // display walk: the charge leg is pinned inside it, and both walks are pinned to call it.
+    [an, 'async function computeDayForecastUncached(', /const stepSocWh = \(soc: number, full: number, pvW: number, loadW: number\): number =>\s+Math\.max\(0, Math\.min\(full, soc \+ chargeLegStep\(pvW - runwayDrainW\(loadW, poolBasis\.overheadW\), RUNWAY_CHARGE_EFFICIENCY\)\)\);/],
+    [an, 'async function computeDayForecastUncached(', /socWh = stepSocWh\(socWh, fullWh, pvAlarm, load\);/],
+    [an, 'async function computeDayForecastUncached(', /socWhDisplay = stepSocWh\(socWhDisplay, fullWh, restoredPvW, loadWs\[k\]\);/],
     [an, 'export async function computeMultiDayForecast(', /socWh \+ chargeLegStep\(pv - runwayDrainW\(load, poolBasis\.overheadW\), RUNWAY_CHARGE_EFFICIENCY\)/],
     [an, 'export async function computeProbabilisticForecast(', /chargeLegStep\(dP50Kwh \+ z \* sigmaNetKwh, RUNWAY_CHARGE_EFFICIENCY\)/],
     [an, 'export async function computeProbabilisticForecast(', /const netKwh = \(pvW: number, loadW: number\): number => chargeLegStep\(rawNetKwh\(pvW, loadW\), RUNWAY_CHARGE_EFFICIENCY\);/],

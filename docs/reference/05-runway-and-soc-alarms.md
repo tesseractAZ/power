@@ -54,10 +54,12 @@ backupReserveKwh   = backupFullKwh * reservePct / 100
 If the SHP2 or either capacity field is missing → early return `emptyRunway(..., 'SHP2 backup-pool capacity not yet reported')` (all hours null, `unavailable` set).
 
 **Step 2 — recent load anchor.** Average `panel_load` over the last hour. If fewer than 2 recorded samples exist (a sparse post-restart window, or a panel whose reading is held: since v1.188.1 the recorder writes only fresh readings), fall back in order to:
-1. Live SHP2 panel load = Σ circuit watts (available from MQTT immediately),
+1. Live SHP2 panel load = Σ circuit watts (available from MQTT immediately), **only while the panel's projection is a reading** (v1.195.0): the recorder's own gate, `heldSamples.projectionRecordable` — content within `RECORD_FRESH_MS` = 3 min, and the cloud-shadow latch clear or its newest body new. A held panel's channels are skipped and never extend the carry,
 2. a single recent recorded sample,
 3. the last good `runwayCache.value.recentLoadWatts`, but only while the last real panel reading (a recorded `panel_load` row or a live channel sum) is within `RUNWAY_LOAD_CARRY_MAX_MS` = 2 h (v1.175.0). The projection's `recentLoadBasis` names the source used (`hour-mean` | `live` | `single-sample` | `carried`),
 else early-return `emptyRunway(..., 'panel-load history insufficient — wait a few minutes')`. This keeps the sensor numeric instead of flapping to HA `unknown`/`unavailable` on an islanded home.
+
+During a panel hold (a cloud replay, or a feed that stopped) the runway therefore falls through to a single recorded row, then the carried load for up to 2 h after the last real reading, then unavailable until the panel reports again; the alarm holds its state meanwhile (2.4). Until v1.195.0 rung 1 summed the held circuits as the live load and re-stamped the carry clock on every compute, for as long as the hold lasted: circuits held at 600 W hid a 6 kW house (9.7 h to reserve instead of 5.3 h: low instead of medium), circuits held at 9 kW projected the floor in 2.8 h on a 2.4 kW house (a false high instead of 8.2 h, low), and the 2 h carry limit never came due.
 
 **Step 3 — build the per-hour PV and load arrays** (24 entries each). PV = `forecastPvW/1000`. Load = `max(0, forecastLoadW − predictedEvLoadW)/1000`, falling back to the trailing average when a forecast hour carries no modelled load. Arrays are padded to 24 h (PV→0, load→trailing average).
 
@@ -198,7 +200,7 @@ basis and requires the planner's inputs and its plan to be identical.
 
 Two deliberate exclusions keep the alarm evidence-based and never optimistic:
 
-- **Reporting-only PV (v0.78.0 invariant).** `pvByHour` reads *exclusively* `forecast.hours[h].forecastPvW`, built from the reporting-only `solarModel`. The higher *display* basis (`forecastPvWhNext24Display`, `typicalPvWhPerDayDisplay`, `restoredSolarModel`) exists **solely** for the display tiles and must never be read here — a higher PV input lengthens runway and would under-alarm during a wedge.
+- **Reporting-only PV (v0.78.0 invariant).** `pvByHour` reads *exclusively* `forecast.hours[h].forecastPvW`, built from the reporting-only `solarModel`. The higher *display* basis (`forecastPvWhNext24Display`, `typicalPvWhPerDayDisplay`, `restoredSolarModel`, and since v1.195.0 the per-hour `hoursDisplay`, `minProjectedSocDisplay` / `minProjectedSocTsDisplay` and `restoredCoreCount` the forecast cards show) exists **solely** for the display and must never be read here — a higher PV input lengthens runway and would under-alarm during a wedge (`forecastDisplayBasis.test.ts` pins it by behaviour and by source).
 - **Predicted-EV stripped (v0.15.21).** The forecast folds speculative EV sessions into `forecastLoadW` (right for planning), but the sim subtracts `predictedEvLoadW` so it never treats "the car usually charges tonight" as certain load — that roughly doubled the modelled draw on nights the EV never plugged in and produced a false red voice alarm. If the car *is* charging, the observed-load anchor (Step 5) carries the real draw and the 60 s recompute keeps it current.
 
 #### 1.6 Empty hysteresis — `applyEmptyHysteresis`
@@ -277,7 +279,7 @@ This fixed a real regression where the old ranking *de-escalated* to `high` once
 | `hoursToReserve` finite (any) | **low** |
 | else / `unavailable != null` | `null` |
 
-EMPTY escalates harder than RESERVE because empty is the harder failure. `unavailable != null` always returns `null` (no alarm on a data outage).
+EMPTY escalates harder than RESERVE because empty is the harder failure. `unavailable != null` always returns `null` (no alarm on a data outage), and `update()` holds the latch on it (2.4).
 
 #### 2.3 Grid presence — how it re-escalates islanded vs grid-backed
 
@@ -285,9 +287,9 @@ The `grid?: GridContext` argument (`{present, backstopping}`) is resolved live b
 
 #### 2.4 The alarm state machine — `createRunwayAlarm`
 
-`update(p, grid)` computes `desired = classifyRunway(p, grid)` and:
+`update(p, grid)` first returns on an **unavailable** projection (`p.unavailable != null`, v1.195.0): the latch, its last announcement and its de-escalation clock stand, as a secondary panel's already did (index.ts skips its update on one). The house runway reads unavailable only on a data outage — no panel capacity, or no load reading it can vouch for (Step 2) — and read as a recovery it re-armed an announced alarm, stopped its hourly reminder for the rest of the outage, and re-announced after a blip as "entering". The next available projection re-announces a depletion that persisted past `reannounceMs`, or re-arms on a real recovery. Otherwise it computes `desired = classifyRunway(p, grid)` and:
 
-- **`desired == null`** (recovered/unavailable) → re-arm so the next descent announces fresh, **but not during warm-up**: for the first `REARM_WARMUP_MS` = 10 min after process start, a null projection must NOT re-arm (post-boot projections are computed from half-warm inputs and had been silently clearing active alarms).
+- **`desired == null`** (recovered) → re-arm so the next descent announces fresh, **but not during warm-up**: for the first `REARM_WARMUP_MS` = 10 min after process start, a null projection must NOT re-arm (post-boot projections are computed from half-warm inputs and had been silently clearing active alarms).
 - **entering / escalated / stale** → announce. `entering` = no prior priority; `escalated` = `RANK[desired] > RANK[announced]`; `stale` = `now − lastAnnouncedAt ≥ reannounceMs`. Re-announce cadence `RUNWAY_ALARM_REANNOUNCE_MS` = `max(1, BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN ?? 60) × 60 s` (default 60 min).
 - **de-escalation** (`RANK[desired] < RANK[announced]`) is held: a calmer tier must persist `ALARM_DEESCALATE_HOLD_MS` = 10 min before the latch steps down. This stopped a projection hovering at the critical↔high boundary (`hoursToEmpty` oscillating around 3.0 h while the EV charged) from re-announcing the *same* critical message on every re-cross (household heard it 4+ times in under an hour). Escalations are always immediate.
 
@@ -584,6 +586,8 @@ The `/η` on the shed term is essential: since v1.26 `hours` is the η-corrected
 `buildLoadComposition` picks the best watt source per allowlisted entity: **SHP2 circuit (authoritative) → HA power sensor → operator estimate**. An entity missing/unavailable/unknown in HA is flagged `available:false` (a phantom candidate, e.g. a dead device still on the allowlist) rather than silently counted.
 
 `computeAdvisory` recommends only when **in an actionable band** (`classifyRunway` returns medium/high/critical) **AND below** `thresholdHours`. It walks the composition shed-first, accumulating loads that are currently ON with positive watts until the (upper-bound) counterfactual clears `thresholdHours + restoreMarginHours` or the list is exhausted. `actionable` additionally requires the shed to **materially help**: either it clears the depletion, or it extends `hoursToReserve` by ≥ `MIN_SHED_BENEFIT_HOURS` = 0.25 h (a 70 W shed off a 6 kW draw is cosmetic and a "shed now" prompt would mislead). Grid-aware: when backstopping, `classifyRunway` returns null → band null → no shed recommended, matching the audible alarm.
+
+**An unavailable runway holds the advisory (v1.195.0).** `createLoadShedAdvisor.update` returns its last advisory built on an available runway, unchanged (its `generatedAt` included), while `runway.unavailable` is set, as the runway alarm holds its latch (2.4). `classifyRunway` reads unavailable as no band, so the advisor had called the runway healthy and cleared `load_shed_recommended` in the middle of a depletion; since v1.195.0 a panel hold makes the house runway unavailable 2 h after its last recorded load (Step 2), so every hold past that reached it. Before the first available runway the note reads "Runway projection unavailable — no shed recommended.", never "healthy".
 
 #### 5.4 Config, outputs & endpoints
 

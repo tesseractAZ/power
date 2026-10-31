@@ -157,8 +157,9 @@ test('v1.191.1: /api/forecast stamps the site zone, and both forecast cards labe
   assert.match(detail, /const zone = fc\.siteTimeZone;/);
   assert.equal((detail.match(/tsHourIn\([^,)]+, zone\)/g) ?? []).length, 4, 'the runtime note (twice), the low tile and each hour row');
   // The hour rows get the zone as a prop: the call inside HourRow is counted above whatever it is passed.
-  assert.match(detail, /<HourRow key=\{h\.ts\} h=\{h\} zone=\{zone\} \/>/, 'each hour row is handed the payload zone');
-  assert.match(detail, /function HourRow\(\{ h, zone \}: \{ h: ForecastHour; zone: string \| undefined \}\)/);
+  // v1.195.0 — the rows also carry the alarm-basis SoC while the forecast is on the restored basis.
+  assert.match(detail, /<HourRow key=\{h\.ts\} h=\{h\} zone=\{zone\} alarmSocPct=\{[^}]*\} \/>/, 'each hour row is handed the payload zone');
+  assert.match(detail, /function HourRow\(\{ h, zone, alarmSocPct \}: \{ h: ForecastHour; zone: string \| undefined; alarmSocPct\?: number \| null \}\)/);
   assert.ok(!/getHours\(\)|toLocale(?:Time|Date)?String\(/.test(detail), 'ForecastDetail reads no browser clock');
   const card = readFileSync(new URL('../../web/src/cards/ForecastCard.tsx', import.meta.url), 'utf8');
   assert.match(card, /const zone = fc\?\.siteTimeZone;/);

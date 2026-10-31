@@ -4,6 +4,123 @@ _Older releases, moved out of the add-on `CHANGELOG.md` so Home Assistant's Chan
 
 _Restored 2026-09-06: the v1.131.2 release commit truncated `CHANGELOG.md` to a single entry (`open(p,'w')` truncates before the `open(p).read()` in the same expression runs), destroying 145 entries — v1.22.0 through v1.131.1. Recovered from git history and re-archived here. Nothing was lost; it was recoverable because every prior revision is in the commit history._
 
+## 1.191.6
+
+### The telnet options are gone; the sign-on screen reads Plant Status System
+
+**Before updating:** if the console was turned on with **Enable Telnet TUI** (`TELNET_ENABLED`), turn on **SSH TUI** (`SSH_ENABLED`) instead. After the update the Supervisor ignores the old option, and the console stays off until `SSH_ENABLED` is on. The port is unchanged: 2323.
+
+**Console**
+
+- `TELNET_ENABLED`, `TELNET_PORT` and the `TELNET_HOST` fallback are removed from the options, the schema, the run script and the configuration code. Telnet itself has not been served since 1.190.0; the console is SSH on 2323 and the browser console at `/console`. A saved value of either option no longer changes anything.
+- The console's source moves from `server/src/telnet/` to `server/src/console/`.
+- The sign-on screen's banner reads PLANT STATUS SYSTEM, and the standing ENTER=Submit / BACKSPACE=Correct and credentials hint lines are gone; a rejected attempt is still reported below the panel.
+
+**Unchanged**
+
+- Port 2323 stays published: it is the SSH console's port. AppArmor rules restrict network access by protocol family and socket type, not by port, so a port is not blocked there; the add-on publishes only 8787 (web) and 2323 (SSH).
+
+**Tests**
+
+- `sshConfig.test.ts`: a stale `TELNET_ENABLED`, `TELNET_PORT` or `TELNET_HOST` changes nothing; nothing reads, exports, declares or translates them. `mutate-ssh-console.mjs` replaces the six alias mutants with one: a stale `TELNET_ENABLED` turning the console on again.
+- The configuration golden (G3) is re-captured with `scripts/golden-capture.mts`: 83 keys, was 85.
+- `restartRecoverySettledSet.test.ts` retries deleting its cache directory: a cache write landing after the monitor stopped made the delete fail (ENOTEMPTY) under parallel load.
+
+## 1.191.5
+
+### The console's sign-on screen holds still while you type
+
+**Console**
+
+- Each prompt row on the browser console's sign-on screen was centred as a whole, so every character typed moved the row half a column left.
+- The screen is now a fixed SIGN ON panel in the manner of a 1980s business terminal: dot-leader labels ("User ID . . . . .") and a box for each field. The panel's place depends only on its width; a value longer than its box shows its tail, with the cursor, inside it. The password shows as asterisks.
+- Errors and the hint sit on a message line below the panel, with ENTER=Submit and BACKSPACE=Correct. The POWER banner is drawn when the terminal has 26 rows or more.
+
+**Tests**
+
+- At 80×24, 120×40 and 44×20, through an empty, short, too-long and password entry and an error, both boxes' edges stay in the same column, every panel row has one width and no row is wider than the terminal. The previous screen fails these tests.
+
+## 1.191.4
+
+### Power names itself, not EcoFlow: the Home Assistant device, notification titles and console logo; a dark fleet's forecast is no longer archived as zero
+
+**Naming**
+
+- Power is an independent open-source add-on that works with EcoFlow hardware. Several places read as EcoFlow's own product, and now name Power instead.
+- The Home Assistant device is "Power" (manufacturer "Power (open-source add-on)", model "Analytics for EcoFlow SHP2 + Delta Pro Ultra"), was "EcoFlow Panel". Friendly names follow, for example "Power Alarms — Critical (P1)". Existing entity_ids are kept by Home Assistant; a fresh install mints `sensor.power_…`, and the entity reference lists those.
+- "Power Outages 24h" is "Host Power Outages 24h", so it does not read "Power Power Outages 24h". Its entity_id and unique_id are unchanged.
+- Phone notifications are titled "Power · …", were "EcoFlow · …". The test notification says it comes from Power.
+- The SSH and browser console's login screen shows POWER, was ECOFLOW. The home-screen web-app title and the forecast calendar's description say Power.
+- The add-on's store page, README and description say it is independent and not affiliated with or endorsed by EcoFlow. The slug (`ecoflow_panel`), image and MQTT topics keep their names: renaming them would break installs.
+
+**Analytics**
+
+- With every home Core dark, the 45-minute weather tick archived a next-24 h solar forecast of 0 Wh, and a short one with some Cores dark. The archive is the record a future band calibrator will score; a row is now written only when the forecast covers every connected Core (its alarm-facing and display sums agree), the solar forecast is available and no Core's first reading is pending.
+
+**Tests**
+
+- The device-name rule reads the device's own name: no entity name may start with it or with "EcoFlow".
+- The archive gate holds against the real forecast build: not archived with every Core dark or with two of three dark, archived with every Core projected, where the two sums agree.
+- The SSH idle-reap test's "inbound bytes keep the connection" half runs on its own server with a 500 ms window. Against 150 ms, a heartbeat delayed by a loaded runner was reaped and failed the test; a reset that never happens still fails it.
+
+**Documentation**
+
+- The engineering reference is titled "Power — Complete System & Engine Reference". The performance record's §4e adds the reading measured after 1.191.3: the worker at 0.73% of a Pi core, from 1.6–1.7%.
+
+## 1.191.3
+
+### Self-consumption is cached while every Core is offline in the EcoFlow cloud; the tariff report rebuilds faster
+
+**Analytics**
+
+- With every home Core offline in the EcoFlow cloud after a restart, the self-consumption report was rebuilt on every read, and again inside every carbon report, which reads it: it was cached only while a Core had a reading in memory, although it is built on the panel's load and each connected Core's own recorded energy. With the tariff report, these rebuilds kept about 1 % of the reference Raspberry Pi 5's CPU core busy after 1.191.2.
+- Self-consumption is now cached on the panel then too. It is rebuilt when a Core joins, leaves or returns to the panel's source list, when a Core reports again, when the house panel is re-pinned, and when the 15-minute cache expires. With no Core's reading in memory, nothing is cached while the panel lists no Core or, in the first 10 minutes after a restart, while a listed Core is online before its first reading; without the panel's reading nothing is cached, as before. The same changes now also rebuild it while Cores report, where the cached value used to stand until it expired; a source that keeps leaving and rejoining the list costs a rebuild per change, as the forecast already did.
+- The tariff report integrates each hour from that hour's samples instead of searching the whole week for them: a rebuild with every Core dark takes 20 to 33 ms instead of 39 to 53 ms on the development computer.
+- In a replay of the production request schedule on synthetic databases with every Core dark, the analytics worker's time falls from 143–274 to 49–80 ms a minute; with every Core reporting it stays at 9 ms.
+
+**Unchanged**
+
+- Every figure: on a fixed fixture, self-consumption, carbon and tariff are byte-identical to 1.191.2's, with every Core dark and with every Core reporting.
+- Carbon and tariff are still cached, and their window figures published, only while a Core (a bench spare counts) has a reading in memory, as their basis flag says.
+- Reports built on the forecast still read it before their own cache. That read is now a cache hit of under a microsecond, so reading their cache first would save nothing, and their figures stay tied to the forecast they were built on (1.186.5).
+
+**Tests**
+
+- With every Core dark, self-consumption is built once and then served with no recorder read, also inside carbon. Each change above rebuilds it, and what is served equals a fresh build on the same map. With no Core's reading in memory, a Core online before its first reading and a panel listing no Core are never cached, nor a Core without a panel (0.15.13).
+- Carbon and tariff are rebuilt on every call with every Core dark, and after a restart while a Core has a reading and the panel does not yet; once the panel reports, both are cached (0.15.13). Until now no test failed when either cache was written without that basis.
+- A child-process capture builds the three reports at two instants; they match 1.191.2's capture to the byte. The hourly slices equal whole-week integration on random series, at their boundaries and on unsorted input.
+- `scripts/mutate-v1191-3.mjs`: 16 mutants, each killed by the case written for it; each half of the carbon and tariff cache conditions is reverted alone.
+
+**Documentation**
+
+- Source comments corrected, behaviour unchanged: 1.189.1, never released, reads 1.190.1; the mid-day preview runs on the evening before a winter weekday; costs are in the tariff currency, hours are the site's, the self-consumption cache lasts 15 minutes, and the add-on's only Supervisor call is a read-only list of add-ons. The option rows outside the frozen G3 golden cite their readers' current lines; the G3-pinned ones keep the captured tree's, as the golden test requires.
+- The energy, architecture and solar-forecast references and the performance record describe the change. The record's oldest runtime section (2026-09-11) moves, unedited, to `docs/history/` to keep the record under its size limit, and the reference's list of history files names it.
+
+## 1.191.2
+
+### The day forecast is cached while every Core is offline in the EcoFlow cloud
+
+**Analytics**
+
+- After a restart while every Core was offline in the EcoFlow cloud, the day forecast was rebuilt for every report that reads it. No Core had a reading in memory, and the forecast was cached only with one, although it was complete: it is built on the panel's load and each connected Core's own recorded solar history. On the reference Raspberry Pi 5 each rebuild took about 1.6 s, so `/api/forecast`, `/api/runway`, `/api/forecast-skill` and `/api/confidence` each answered in about 1.6 s and `/api/ha-state` in 3 to 5 s, and the rebuilds requested by the alarm monitor, the MQTT publisher, the runway and load-shed checks and the 4-minute warm-up kept about a third of a CPU core busy without a break. In a replay of that schedule on a copy of the reference database, on a computer about three times as fast as the Pi, the alarm engine's forecast feeds took up to 1.5 s of their 2.5 s budget.
+- The forecast is now cached on the panel, as it is when a Core reports. It is rebuilt when a dark Core joins or leaves the panel's source list or returns to it, when one is listed online before its first reading, when a Core reports again, and when the 30-minute cache expires. A forecast the panel's data leaves incomplete is still rebuilt after 150 s, and with neither the panel nor any Core reporting nothing is cached, as before. The same changes to the dark Cores also rebuild the forecast while other Cores report; until now the cached forecast stood until it expired.
+- Each dark Core's 30-day solar history is read once per forecast build instead of twice, so a rebuild with three Cores dark takes about 40 % less time.
+
+**Unchanged**
+
+- Nothing the forecast shows changes: on a copy of the reference database, the forecast built with every Core dark and the one built with every Core reporting are byte-identical to 1.191.1's. The figures built on the forecast (the probabilistic band, the multi-day outlook, the dispatch plan) are still served only with the forecast they were built on; while it is cached they are now reused. With every Core reporting, the forecast is cached and rebuilt as before.
+
+**Tests**
+
+- With every Core dark and the panel reporting, the forecast is built once and then served with no further reads. A Core that reports again rebuilds it, and so do a dark Core that leaves or rejoins the panel's source list (also inside the 5-minute window in which the report caches' reset is deferred) and one listed online before its first reading; what is served then equals a fresh build on the same map. The three dark-Core cases fail when the cache entry does not record the dark Cores and the pending flag. A restart with every Core listed online before its first reading serves the incomplete forecast for its short window, and a fleet with no panel and no Core reporting still caches nothing.
+- A capture in a child process builds the forecast on a fixed dark-fleet fixture: every recorder read of the build is distinct, and the forecast matches, to the byte, 1.191.1's capture on the same fixture.
+- The 1.186.5 forecast-cache cases gain the transitions in which only the reporting Cores move (a reporting Core leaves the source list; a home with no panel gains one), which the new comparison of the dark Cores does not see.
+- `scripts/mutate-v1191-2.mjs`: 9 mutants, each killed by the case written for it.
+
+**Documentation**
+
+- The solar-forecast reference states when the day forecast is cached and what its cache entry records. The performance record gains a section on the live measurement, its cause and the replay before and after the change.
+
 ## 1.191.1
 
 ### The console's two liveness clocks and the dashboard's Today and forecast times read the site clock

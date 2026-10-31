@@ -23,6 +23,10 @@
  * the warm-up is shorter than the backup pool's restarted 15-minute onset clock (restartQuestionOpen).
  * The stamp itself (alertMonitor.alertSetTrusted) is pinned through the real alert monitor in
  * restartRecoverySettledSet.test.ts.
+ * v1.195.0 — a restart inside the held de-escalation of an audible level resumes the hold
+ * (restoredHeldDeescalation): its green is a restart question on recoveryBaseline, announced as a
+ * recovery. Before, the hold's demotion of the record left no baseline and the boot green was joined
+ * in silence, so the cleared alarm stayed the last words.
  */
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -1885,6 +1889,379 @@ test('soundedCritPersists — the cell-spread criticals only (the only ones that
   assert.equal(B.soundedCritPersists(alertFingerprint(CRIT_A)), false, 'an inverter error code');
   assert.equal(B.soundedCritPersists(alertFingerprint({ id: 'vdiff-warn-DPU-B-2', title: 'Cell imbalance' })), false, 'the warning of the same family');
   assert.equal(B.soundedCritPersists(alertFingerprint({ id: 'shp2-src-err-X-1', title: 'Source error', fault: 'e3' })), false);
+});
+
+/* ══ v1.195.0: a restart inside the held de-escalation of an audible level owes its all-clear ══ */
+
+const OWED = 'its all-clear is owed: the green is held';
+/** v1.195.0 — a monitor past its warm-up that made `level` audible (spoken, or with `toneOnly` the
+ *  tone alone: its spoken render failing), stopped while the level's clearing stands the dwell: the
+ *  deploy lands inside the hold. Returns the hold's start as the record has it. */
+async function heardThenClearing(level: 'yellow' | 'red', toneOnly = false): Promise<number> {
+  const a = rig();
+  await sleep(80);
+  offset += 11 * MIN; // past the boot warm-up window
+  ttsFails = toneOnly;
+  alerts = level === 'red' ? [CRIT_A] : [WARN_K];
+  await until(a, () => (toneOnly ? a.has(`broadcast: ${level} → 2 error(s)`) : played(a, level) === 1), `${level} made audible`);
+  ttsFails = false;
+  await sleep(40);
+  alerts = [];
+  await until(a, () => a.has(`${level} → green held`), 'the hold');
+  await sleep(40);
+  const rec = statusFile();
+  assert.equal(rec.conditionLevel, level, 'the record follows the committed level');
+  assert.equal(rec.conditionSpoken, false, 'demoted for the hold');
+  assert.equal(rec.conditionHeldFrom, level, '★ and the hold is recorded beside it');
+  assert.equal(typeof rec.conditionHeldAt, 'number');
+  assert.equal(a.mon.status().conditionHeldFrom, level, 'and in the status');
+  a.stop();
+  offset += 2 * MIN; // the deploy, inside the dwell
+  return rec.conditionHeldAt as number;
+}
+
+test('★★★ v1.195.0 (F3): a restart inside the dwell of a heard red keeps the all-clear it owed — the green is announced once it has stood its dwell on a settled set', async () => {
+  await heardThenClearing('red');
+  assert.equal(announces, 1);
+  const b = rig(); // the green stands at the first tick
+  await until(b, () => b.has(OWED), 'the hold resumed');
+  assert.equal(b.mon.status().bootBaselineLevel, null, 'no heard baseline: the record was demoted');
+  assert.equal(b.mon.status().conditionHeldFrom, 'red');
+  await sleep(60);
+  assert.equal(announces, 1, 'nothing inside the dwell');
+  offset += DWELL + MIN;
+  await until(b, () => played(b, 'green') === 1, '★ the all-clear (it was never said)');
+  assert.ok(b.has(`${RECOVERY} red`), 'a recovery from the cleared red');
+  assert.equal(b.count(GREEN_SPOKEN), 1);
+  assert.equal(announces, 2);
+  assert.equal(b.mon.status().lastLevel, 'green', 'the last words are the all-clear, not the cleared red');
+  assert.equal(statusFile().conditionHeldFrom, null, 'nothing owed any more');
+  assert.equal(statusFile().conditionLevel, 'green');
+  assert.equal(statusFile().conditionSpoken, true);
+  await sleep(60);
+  assert.equal(announces, 2, 'said once');
+});
+
+test('★★ v1.195.0: …a heard yellow clearing at the restart gets its all-clear too', async () => {
+  await heardThenClearing('yellow');
+  const b = rig();
+  await until(b, () => b.has(OWED), 'the hold resumed');
+  offset += DWELL + MIN;
+  await until(b, () => played(b, 'green') === 1, 'the all-clear');
+  assert.ok(b.has(`${RECOVERY} yellow`));
+  assert.equal(announces, 2);
+});
+
+test('★★★ v1.195.0: …a red heard as the tone ALONE (its spoken render failed) was audible: its all-clear is owed too', async () => {
+  await heardThenClearing('red', true);
+  assert.equal(statusFile().conditionHeldFrom, 'red', '★ audible, though never verified heard');
+  const b = rig();
+  await until(b, () => b.has(OWED), 'the hold resumed');
+  offset += DWELL + MIN;
+  await until(b, () => played(b, 'green') === 1, '★ the all-clear');
+  assert.equal(announces, 2, 'the tone, then the all-clear');
+});
+
+test('★★★ v1.195.0: …the critical back after the restart is the klaxon, with no "All clear" before it — the resumed hold counts nothing as heard', async () => {
+  await heardThenClearing('red');
+  const b = rig();
+  await until(b, () => b.has(OWED), 'the hold resumed');
+  alerts = [CRIT_A]; // the store populates: the critical still stands
+  await until(b, () => played(b, 'red') === 1, '★ the critical announced again (it is new to this process)');
+  assert.equal(b.count(GREEN_SPOKEN), 0, 'no all-clear before it');
+  assert.ok(b.has('held de-escalation from red abandoned'), 'the resumed hold ends');
+  assert.equal(statusFile().conditionHeldFrom, null, 'nothing owed: the red is committed again');
+  assert.equal(announces, 2);
+});
+
+test('★★★ v1.195.0: …a warning standing below the cleared red is SPOKEN, not filed as a continuation of the red (the demoted record gives no continuation baseline)', async () => {
+  await heardThenClearing('red');
+  const b = rig();
+  await until(b, () => b.has(OWED), 'the hold resumed on a green first tick');
+  alerts = [WARN_K];
+  await until(b, () => b.has('yellow held for boot confirmation'), 'a new warning, through the boot yellow hold');
+  offset += B.BOOT_YELLOW_CONFIRM_MS + 5 * SEC;
+  await until(b, () => played(b, 'yellow') === 1, '★ the warning spoken');
+  assert.ok(!b.has(CONTINUATION), 'not a continuation of the red');
+  assert.equal(statusFile().conditionHeldFrom, null, 'the yellow is committed: nothing owed');
+});
+
+test('★★ v1.195.0: …and a warning standing at the FIRST tick takes the boot gates as before — spoken, the owed hold dropped', async () => {
+  await heardThenClearing('red');
+  alerts = [WARN_K];
+  const b = rig();
+  await until(b, () => b.has('yellow standing at the first tick'), 'routed through the boot gates');
+  assert.ok(!b.has(OWED));
+  assert.equal(b.mon.status().conditionHeldFrom, null, '★ (review) the owed hold is dropped at once, not at the yellow\'s commit');
+  offset += B.BOOT_YELLOW_CONFIRM_MS + 5 * SEC;
+  await until(b, () => played(b, 'yellow') === 1, 'the warning spoken');
+  assert.ok(!b.has(CONTINUATION));
+  // v1.195.0 (review) — its recovery decisions read the heard baseline alone (none here): the warning's
+  // clearing is an ordinary transition, spoken after its dwell even on a set that has not settled, not
+  // held as a recovery from the pre-restart red.
+  settledSince = null;
+  alerts = [];
+  await until(b, () => b.has('yellow → green held'), 'the dwell');
+  offset += DWELL + MIN;
+  await until(b, () => played(b, 'green') === 1, '★ the all-clear, after its dwell');
+  assert.ok(!b.has(HELD_FOR_RECOVERY), 'not held for a recovery from the pre-restart red');
+  assert.ok(!b.has(RECOVERY));
+});
+
+test('★★ v1.195.0: on a set that never settles the owed green is adopted silently when the restart question closes (the heard-baseline rule)', async () => {
+  await heardThenClearing('red');
+  settledSince = null;
+  const b = rig();
+  await until(b, () => b.has(OWED), 'the hold resumed');
+  offset += DWELL + SEC;
+  await until(b, () => b.has(HELD_FOR_RECOVERY), 'held for its recovery');
+  await stepTo(b, DECISION_DUE + SEC);
+  await until(b, () => b.has(WARMUP_ENDED), 'adopted silently when the question closes');
+  assert.ok(b.has('adopted silently as a continuation of the pre-restart red'), b.logs.join('\n'));
+  await sleep(60);
+  assert.equal(announces, 1, 'not announced: the set never settled');
+  assert.equal(b.mon.status().conditionLevel, 'green');
+  assert.equal(statusFile().conditionHeldFrom, null);
+});
+
+test('★★ v1.195.0: two restarts inside the hold still owe the all-clear; the hold\'s age counts from its ORIGINAL start, so a later restart does not renew it', async () => {
+  const heldAt = await heardThenClearing('red');
+  settledSince = null; // the green cannot become a recovery in the second process
+  const b = rig();
+  await until(b, () => b.has(OWED), 'resumed by the second process');
+  await b.mon.announce('medium', 'A dedicated notice.', null); // anything that writes the record
+  assert.equal(statusFile().conditionHeldFrom, 'red');
+  assert.equal(statusFile().conditionHeldAt, heldAt, '★ written back with its ORIGINAL start, not the resume');
+  b.stop();
+  offset += 2 * MIN;
+  settledSince = 0;
+  const c = rig();
+  await until(c, () => c.has(OWED), '★ resumed again by the third');
+  c.stop();
+  // A fourth process 60.5 min after the hold began (58.5 after the second process resumed it).
+  offset += heldAt + 60 * MIN + 30 * SEC - Date.now();
+  const d = rig();
+  await sleep(80);
+  assert.ok(!d.has(OWED), '★ not resumed: an hour after the hold began the green cleared while the add-on was down');
+  offset += DWELL + MIN;
+  await sleep(80);
+  assert.equal(announces, 2, 'nothing spoken but the red and the notice');
+  assert.equal(d.count(GREEN_SPOKEN), 0);
+});
+
+test('★★ v1.195.0: a restart after the green committed owes nothing; neither does one after the red flickered back (the hold ended) and cleared while the add-on was down', async () => {
+  await heardThenClearing('red');
+  const b = rig();
+  await until(b, () => b.has(OWED), 'resumed');
+  offset += DWELL + MIN;
+  await until(b, () => played(b, 'green') === 1, 'the all-clear');
+  b.stop();
+  offset += 2 * MIN;
+  const c = rig();
+  await sleep(80);
+  offset += DWELL + MIN;
+  await sleep(80);
+  assert.ok(!c.has(OWED), 'the green was committed: nothing owed');
+  assert.equal(announces, 2);
+  c.stop();
+
+  // A heard red whose clearing flickers back: the hold ends, nothing is owed.
+  const e = rig();
+  await sleep(80);
+  offset += 11 * MIN;
+  alerts = [CRIT_A];
+  await until(e, () => played(e, 'red') === 1, 'a heard red');
+  alerts = [];
+  await until(e, () => e.has('red → green held'), 'the hold');
+  assert.equal(statusFile().conditionHeldFrom, 'red');
+  alerts = [CRIT_A];
+  await until(e, () => e.has('again (flicker absorbed, nothing spoken)'), 'the flicker absorbed');
+  await sleep(40);
+  assert.equal(statusFile().conditionHeldFrom, null, '★ the hold ended: no all-clear owed');
+  assert.equal(statusFile().conditionSpoken, true, 'the heard flag restored');
+  e.stop();
+  offset += 2 * MIN;
+  alerts = []; // cleared while the add-on was down
+  const f = rig();
+  await sleep(80);
+  offset += DWELL + MIN;
+  await sleep(80);
+  assert.ok(!f.has(OWED));
+  assert.equal(f.count(GREEN_SPOKEN), 0, 'a condition that cleared while the add-on was down gets no all-clear');
+});
+
+/* ── v1.195.0 (review): a level made audible INSIDE its own hold, and the resumed hold's audibility ── */
+
+/** A monitor past its warm-up whose red ([CRIT_A] plus `also`) clears to `also` while its own
+ *  announcement is still playing (the hold begins before the red is audible); returns once the play
+ *  has ended inside the hold. `toneOnly`: its spoken render fails, the tone alone plays. */
+async function clearedWhilePlaying(r: Rig, toneOnly = false, also: Alert[] = []): Promise<void> {
+  await sleep(80);
+  offset += 11 * MIN; // past the boot warm-up window
+  ttsFails = toneOnly;
+  slowPlay = true; // the play takes 1.5 s (real): in flight meanwhile
+  alerts = [CRIT_A, ...also];
+  await until(r, () => r.has('condition transition → red'), 'the red committed, playing');
+  await sleep(50);
+  alerts = [...also]; // the critical clears while its announcement plays
+  await until(r, () => r.has(`red → ${also.length > 0 ? 'yellow' : 'green'} held`), 'the hold, begun before the red was audible');
+  await sleep(20);
+  assert.equal(statusFile().conditionHeldFrom ?? null, null, 'nothing audible yet: nothing owed');
+  await until(r, () => r.has(toneOnly ? 'broadcast: red → 2 error(s)' : 'broadcast: red → ok in'), 'the play ends inside the hold');
+  slowPlay = false;
+  ttsFails = false;
+  await sleep(40);
+}
+
+test('★★★ v1.195.0 (review): a red that clears while its own announcement is still PLAYING owes its all-clear — the late delivery marks the hold heard, not the record', async () => {
+  const a = rig();
+  await clearedWhilePlaying(a);
+  const rec = statusFile();
+  assert.equal(rec.conditionLevel, 'red');
+  assert.equal(rec.conditionSpoken, false, '★ the record stays demoted (it read "red, heard" with nothing owed)');
+  assert.equal(rec.conditionHeldFrom, 'red', '★ and the hold owes the all-clear');
+  a.stop();
+  offset += MIN; // the deploy, inside the dwell
+  const b = rig();
+  await until(b, () => b.has(OWED), 'the hold resumed');
+  offset += DWELL + MIN;
+  await until(b, () => played(b, 'green') === 1, '★★ the all-clear');
+  assert.ok(b.has(`${RECOVERY} red`));
+  assert.equal(announces, 2);
+});
+
+test('★★ v1.195.0 (review): …the same when the late play is the TONE alone — audible, never verified', async () => {
+  const a = rig();
+  await clearedWhilePlaying(a, true);
+  assert.equal(statusFile().conditionHeldFrom, 'red', '★ owed by the tone alone');
+  assert.equal(statusFile().conditionSpoken, false);
+  a.stop();
+  offset += MIN;
+  const b = rig();
+  await until(b, () => b.has(OWED), 'the hold resumed');
+  offset += DWELL + MIN;
+  await until(b, () => played(b, 'green') === 1, '★ the all-clear');
+});
+
+test('★★ v1.195.0 (review): …a red whose deferred retry plays inside its own hold (fail-loud) owes it too', async () => {
+  const a = rig(true, [HELD_RETRY_MS, HELD_RETRY_MS, HELD_RETRY_MS]);
+  await sleep(80);
+  offset += 11 * MIN;
+  maState = 'unavailable'; // every speaker away: the red is deferred
+  alerts = [CRIT_A];
+  await until(a, () => a.has('deferred retry 1/3'), 'the red deferred');
+  alerts = [];
+  await until(a, () => a.has('red → green held'), 'the hold, begun before the red was audible');
+  maState = 'idle';
+  await fireWhenArmed(a, HELD_RETRY_MS, 1, 'the red retry');
+  await until(a, () => played(a, 'red') === 1, 'the retry plays inside the hold');
+  await sleep(40);
+  assert.equal(statusFile().conditionHeldFrom, 'red', '★ owed');
+  assert.equal(statusFile().conditionSpoken, false);
+  a.stop();
+  offset += MIN;
+  const b = rig();
+  await until(b, () => b.has(OWED), 'the hold resumed');
+  offset += DWELL + MIN;
+  await until(b, () => played(b, 'green') === 1, '★★ the all-clear');
+});
+
+test('★★★ v1.195.0 (review): …and a warning that stood below it, never voiced, is SPOKEN after the restart — not filed as a continuation of the red the late play re-promoted', async () => {
+  const a = rig();
+  await clearedWhilePlaying(a, false, [WARN_K]); // the warning was counted at the red's commit, never named
+  assert.equal(statusFile().conditionSpoken, false, '★ not re-promoted to heard');
+  a.stop();
+  offset += MIN;
+  const b = rig(); // the warning still stands at the first tick
+  await until(b, () => b.has('yellow standing at the first tick'), 'routed through the boot gates');
+  assert.equal(b.mon.status().bootBaselineLevel, null, 'no heard baseline');
+  offset += B.BOOT_YELLOW_CONFIRM_MS + 5 * SEC;
+  await until(b, () => played(b, 'yellow') === 1, '★★ the warning spoken');
+  assert.ok(!b.has(CONTINUATION), 'not swallowed as the red\'s continuation');
+});
+
+test('★★ v1.195.0 (review): …and when that red flickers back inside the dwell, the heard flag the hold took is restored to the record', async () => {
+  const a = rig();
+  await clearedWhilePlaying(a);
+  alerts = [CRIT_A];
+  await until(a, () => a.has('again (flicker absorbed, nothing spoken)'), 'the flicker absorbed');
+  await sleep(40);
+  assert.equal(statusFile().conditionSpoken, true, '★ heard: the late delivery reached the speakers');
+  assert.equal(statusFile().conditionHeldFrom, null, 'nothing owed: the red is back');
+  assert.equal(announces, 1);
+});
+
+test('★★ v1.195.0 (review): a tone-only red that flickers back ends its hold ON DISK too — after it cleared while the add-on was down, the restart owes nothing', async () => {
+  const a = rig();
+  await sleep(80);
+  offset += 11 * MIN;
+  ttsFails = true; // audible as the tone alone: never verified heard
+  alerts = [CRIT_A];
+  await until(a, () => a.has('broadcast: red → 2 error(s)'), 'the red made audible, tone only');
+  ttsFails = false;
+  await sleep(40);
+  alerts = [];
+  await until(a, () => a.has('red → green held'), 'the hold');
+  await sleep(40);
+  assert.equal(statusFile().conditionHeldFrom, 'red', 'owed while it stands');
+  alerts = [CRIT_A];
+  await until(a, () => a.has('again (flicker absorbed, nothing spoken)'), 'the flicker absorbed');
+  await sleep(40);
+  assert.equal(statusFile().conditionHeldFrom, null, '★ written, though no heard flag was restored');
+  assert.equal(statusFile().conditionSpoken, false, 'tone only: never heard');
+  a.stop();
+  offset += 2 * MIN;
+  alerts = []; // cleared while the add-on was down
+  const b = rig();
+  await sleep(80);
+  offset += DWELL + MIN;
+  await sleep(80);
+  assert.ok(!b.has(OWED), '★ nothing resumed');
+  assert.equal(b.count(GREEN_SPOKEN), 0, 'a condition that cleared while the add-on was down gets no all-clear');
+});
+
+test('★★ v1.195.0 (review): nothing is audible in a RESUMED hold — a warning re-committed under it that never reached the speakers, cleared and back inside the dwell, is presented again, not absorbed', async () => {
+  await heardThenClearing('yellow');
+  const b = rig(true, [HELD_RETRY_MS, HELD_RETRY_MS, HELD_RETRY_MS]);
+  await until(b, () => b.has(OWED), 'the yellow hold resumed');
+  maState = 'unavailable'; // every speaker away
+  alerts = [WARN_K]; // the warning is back: new to this process
+  await until(b, () => b.has('yellow held for boot confirmation'), 'the boot yellow hold');
+  offset += B.BOOT_YELLOW_CONFIRM_MS + 5 * SEC;
+  await until(b, () => b.has('deferred retry 1/3'), 'the warning committed, its broadcast deferred');
+  for (let i = 1; i <= 3; i++) await fireWhenArmed(b, HELD_RETRY_MS, 1, `the warning's retry ${i}`);
+  await until(b, () => b.has('giving up after 3 deferred yellow retries'), 'never delivered');
+  maState = 'idle';
+  alerts = [];
+  await until(b, () => b.has('yellow → green held'), 'its clearing held');
+  alerts = [WARN_K]; // back inside the dwell
+  await until(b, () => b.count('never audible in this episode — presented again as a transition') === 2, '★ presented again (the first line was its return as new)');
+  await until(b, () => b.count('yellow held for boot confirmation') === 2, 'the boot yellow hold again, inside the warm-up');
+  offset += B.BOOT_YELLOW_CONFIRM_MS + 5 * SEC;
+  await until(b, () => played(b, 'yellow') === 1, '★★ the warning reaches the speakers');
+  assert.ok(!b.has('again (flicker absorbed, nothing spoken)'));
+});
+
+test('restoredHeldDeescalation — the recorded hold at its committed level, started at most the bound before the boot (inclusive), never later than the boot', () => {
+  const T = 90_000_000;
+  const max = B.HELD_ALLCLEAR_RESTORE_MAX_AGE_MS;
+  const rec = (from: unknown, at: unknown, level: unknown = from) => ({ conditionLevel: level, conditionSpoken: false, conditionHeldFrom: from, conditionHeldAt: at });
+  assert.deepEqual(B.restoredHeldDeescalation(rec('red', T - 5 * MIN), T), { from: 'red', atMs: T - 5 * MIN });
+  assert.deepEqual(B.restoredHeldDeescalation(rec('yellow', T - 5 * MIN), T), { from: 'yellow', atMs: T - 5 * MIN });
+  assert.deepEqual(B.restoredHeldDeescalation(rec('red', T - max), T), { from: 'red', atMs: T - max }, 'inclusive bound');
+  assert.equal(B.restoredHeldDeescalation(rec('red', T - max - 1), T), null, 'one ms past the bound');
+  assert.deepEqual(B.restoredHeldDeescalation(rec('red', T + 10 * MIN), T), { from: 'red', atMs: T }, 'a clock stepped back: never later than the boot');
+  assert.equal(B.restoredHeldDeescalation(rec('red', T - MIN, 'green'), T), null, 'a later commit rewrote the record');
+  assert.equal(B.restoredHeldDeescalation(rec('red', T - MIN, 'yellow'), T), null);
+  assert.equal(B.restoredHeldDeescalation(rec('green', T - MIN), T), null, 'nothing is held from green');
+  assert.equal(B.restoredHeldDeescalation(rec(null, null, 'red'), T), null, 'no hold on record');
+  assert.equal(B.restoredHeldDeescalation({ conditionLevel: 'red', conditionSpoken: false }, T), null, 'a record written before v1.195.0');
+  assert.equal(B.restoredHeldDeescalation(rec('red', '123'), T), null, 'not a number');
+  assert.equal(B.restoredHeldDeescalation(rec('red', Number.NaN), T), null, 'not finite');
+  assert.equal(B.restoredHeldDeescalation(null, T), null);
+  assert.equal(B.restoredHeldDeescalation(undefined, T), null);
+  assert.equal(B.restoredHeldDeescalation(rec('red', T - 30 * MIN), T, 10 * MIN), null, 'the bound is a parameter');
+  assert.equal(max, 60 * MIN);
 });
 
 /* ── the pure predicate ──────────────────────────────────────────────────────────────────── */

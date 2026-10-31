@@ -690,6 +690,155 @@
  "homeDpusConnected": 3,
  "homeDpusReporting": 0,
  "homeDpusCoveragePartial": true,
+ "hoursDisplay": [
+  {
+   "ts": 1792378800000,
+   "forecastPvW": 0,
+   "projectedSocPct": 60.3,
+   "modelled": false
+  },
+  {
+   "ts": 1792382400000,
+   "forecastPvW": 0,
+   "projectedSocPct": 56.6,
+   "modelled": false
+  },
+  {
+   "ts": 1792386000000,
+   "forecastPvW": 0,
+   "projectedSocPct": 53.8,
+   "modelled": false
+  },
+  {
+   "ts": 1792389600000,
+   "forecastPvW": 0,
+   "projectedSocPct": 51.2,
+   "modelled": false
+  },
+  {
+   "ts": 1792393200000,
+   "forecastPvW": 0,
+   "projectedSocPct": 48.7,
+   "modelled": false
+  },
+  {
+   "ts": 1792396800000,
+   "forecastPvW": 0,
+   "projectedSocPct": 46.1,
+   "modelled": false
+  },
+  {
+   "ts": 1792400400000,
+   "forecastPvW": 0,
+   "projectedSocPct": 43.4,
+   "modelled": false
+  },
+  {
+   "ts": 1792404000000,
+   "forecastPvW": 0,
+   "projectedSocPct": 40.5,
+   "modelled": false
+  },
+  {
+   "ts": 1792407600000,
+   "forecastPvW": 0,
+   "projectedSocPct": 37.6,
+   "modelled": false
+  },
+  {
+   "ts": 1792411200000,
+   "forecastPvW": 0,
+   "projectedSocPct": 34.7,
+   "modelled": false
+  },
+  {
+   "ts": 1792414800000,
+   "forecastPvW": 2015,
+   "projectedSocPct": 33.9,
+   "modelled": false
+  },
+  {
+   "ts": 1792418400000,
+   "forecastPvW": 5753,
+   "projectedSocPct": 37,
+   "modelled": true
+  },
+  {
+   "ts": 1792422000000,
+   "forecastPvW": 9319,
+   "projectedSocPct": 43.7,
+   "modelled": true
+  },
+  {
+   "ts": 1792425600000,
+   "forecastPvW": 12300,
+   "projectedSocPct": 53.5,
+   "modelled": true
+  },
+  {
+   "ts": 1792429200000,
+   "forecastPvW": 14512,
+   "projectedSocPct": 65.7,
+   "modelled": true
+  },
+  {
+   "ts": 1792432800000,
+   "forecastPvW": 15811,
+   "projectedSocPct": 79.3,
+   "modelled": true
+  },
+  {
+   "ts": 1792436400000,
+   "forecastPvW": 16113,
+   "projectedSocPct": 93.4,
+   "modelled": true
+  },
+  {
+   "ts": 1792440000000,
+   "forecastPvW": 15397,
+   "projectedSocPct": 100,
+   "modelled": true
+  },
+  {
+   "ts": 1792443600000,
+   "forecastPvW": 13707,
+   "projectedSocPct": 100,
+   "modelled": true
+  },
+  {
+   "ts": 1792447200000,
+   "forecastPvW": 11153,
+   "projectedSocPct": 100,
+   "modelled": true
+  },
+  {
+   "ts": 1792450800000,
+   "forecastPvW": 7898,
+   "projectedSocPct": 100,
+   "modelled": true
+  },
+  {
+   "ts": 1792454400000,
+   "forecastPvW": 4149,
+   "projectedSocPct": 100,
+   "modelled": true
+  },
+  {
+   "ts": 1792458000000,
+   "forecastPvW": 579,
+   "projectedSocPct": 97.2,
+   "modelled": true
+  },
+  {
+   "ts": 1792461600000,
+   "forecastPvW": 0,
+   "projectedSocPct": 93.7,
+   "modelled": false
+  }
+ ],
+ "minProjectedSocDisplay": 33.9,
+ "minProjectedSocTsDisplay": 1792414800000,
+ "restoredCoreCount": 3,
  "structurallyIncomplete": false,
  "homeBasisPending": false,
  "weatherFetchedAtMs": 1792374900000,

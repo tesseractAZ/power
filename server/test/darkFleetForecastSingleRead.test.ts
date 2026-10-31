@@ -12,6 +12,18 @@
  * are captured: the result must not depend on the runner's zone). darkFleetForecast.golden.json is that
  * capture on v1.191.1 (dabedbf8), which read each series twice; the current tree must write the same
  * forecast to the byte. Test serials are placeholders.
+ *
+ * v1.195.0 — re-captured once, for four ADDED fields (hoursDisplay, minProjectedSocDisplay,
+ * minProjectedSocTsDisplay, restoredCoreCount: the restored display basis per hour, for the forecast
+ * card). Every field v1.191.1 wrote is unchanged to the byte, in the same order; the diff of the golden
+ * is additions only. Re-captured again in the same release for hoursDisplay[].modelled (the restored
+ * model's own flag for the hour, for the hour rows' source badge): additions only again.
+ * Re-captured a third time when v1.194.0's charge leg joined the shared step (stepSocWh), so the
+ * restored walk stores a surplus at RUNWAY_CHARGE_EFFICIENCY (√0.86 = 0.927) as the alarm walk does:
+ * only hoursDisplay[11..16].projectedSocPct moved (37.2/44.5/55.1/68.2/82.9/98 → 37/43.7/53.5/65.7/
+ * 79.3/93.4, the six restored-surplus hours; worked by hand from the golden's own PV, load and
+ * 92,160 Wh pool). minProjectedSocDisplay (33.9, at hour 10, before the first surplus) and every
+ * alarm-basis field (no PV, every hour a deficit) are unchanged.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -90,10 +102,22 @@ test('★★★ … and the forecast is byte-identical to v1.191.1\'s on the sam
     assert.equal(d, null, d ?? firstLineDiff(golden, text) ?? 'differs');
   }
   // The control: the fixture exercises what the single read feeds.
-  const f = forecast as { structurallyIncomplete: boolean; homeDpusConnected: number; homeDpusReporting: number; restoredSolarModel: { pairCount: number }; forecastPvWhNext24Display: number };
+  const f = forecast as {
+    structurallyIncomplete: boolean; homeDpusConnected: number; homeDpusReporting: number; restoredSolarModel: { pairCount: number };
+    forecastPvWhNext24Display: number; forecastPvWhNext24: number; minProjectedSoc: number | null;
+    hoursDisplay: Array<{ forecastPvW: number; modelled: boolean }>; minProjectedSocDisplay: number | null; restoredCoreCount: number;
+    hours: Array<{ modelled: boolean }>;
+  };
   assert.equal(f.structurallyIncomplete, false);
   assert.equal(f.homeDpusConnected, 3);
   assert.equal(f.homeDpusReporting, 0, 'every Core dark');
   assert.ok(f.restoredSolarModel.pairCount > 0, 'the restored fleet model is fitted on the series read once');
   assert.ok(f.forecastPvWhNext24Display > 0, 'and the restored curve sums it');
+  // v1.195.0 — and the per-hour restored series sums to it (each hour rounded), above the alarm basis.
+  assert.equal(f.restoredCoreCount, 3);
+  assert.equal(f.forecastPvWhNext24, 0, 'the alarm basis: no Core reporting, no PV');
+  assert.ok(Math.abs(f.hoursDisplay.reduce((a, h) => a + h.forecastPvW, 0) - f.forecastPvWhNext24Display) <= 12);
+  assert.ok(f.minProjectedSocDisplay != null && f.minProjectedSoc != null && f.minProjectedSocDisplay > f.minProjectedSoc);
+  // The restored model is fitted in the daylight hours; the alarm model, on no Core, in none.
+  assert.ok(f.hours.every((h) => !h.modelled) && f.hoursDisplay.some((h) => h.modelled));
 });

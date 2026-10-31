@@ -147,8 +147,10 @@ const MUTANTS = [
   {
     id: 'V-xiii. ★★ the day trajectory drains without the overhead',
     file: ANALYTICS,
-    find: 'socWh + chargeLegStep(pvAlarm - runwayDrainW(load, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)',
-    to: 'socWh + chargeLegStep(pvAlarm - load / RUNWAY_DISCHARGE_EFFICIENCY, RUNWAY_CHARGE_EFFICIENCY) /* MUTANT */',
+    // v1.195.0 — re-pointed: the day trajectory's step is one function (stepSocWh) for the alarm walk
+    // and the restored display walk; v1.194.0's charge leg sits inside it.
+    find: 'soc + chargeLegStep(pvW - runwayDrainW(loadW, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)',
+    to: 'soc + chargeLegStep(pvW - loadW / RUNWAY_DISCHARGE_EFFICIENCY, RUNWAY_CHARGE_EFFICIENCY) /* MUTANT */',
     why: 'projectedSocPct falls slower than the runway it sits beside.',
   },
   {

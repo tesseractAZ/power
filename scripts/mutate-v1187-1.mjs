@@ -148,7 +148,8 @@ const MUTANTS = [
   {
     id: 'xiii. ★★★ an entry with no clock is restored (the onset seed is lost)',
     file: AL,
-    find: '  if (o.critSinceMs == null && o.graceFromMs == null) return null;',
+    // v1.195.0 — re-pointed: the off-plateau session's clock (offFromMs) is a clock too.
+    find: '  if (o.critSinceMs == null && o.graceFromMs == null && offFromMs == null) return null;',
     to: '  /* MUTANT */',
     why: 'A restart at minute 21 of a balancing-held fault is silenced again: the empty entry displaces the seed.',
   },
@@ -219,7 +220,8 @@ const MUTANTS = [
   {
     id: 'xxiii. ★★ packs holding no clock are written',
     file: AL,
-    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) continue;\n    const d = onDisk[key];',
+    // v1.195.0 — re-pointed: a pack holding only the off-plateau session's clock is written too.
+    find: '    if ((st.critSinceMs == null && st.graceFromMs == null && st.offFromMs == null) || st.lastSeenMs == null) continue;\n    const d = onDisk[key];',
     to: '    if (st.lastSeenMs == null) continue; /* MUTANT */\n    const d = onDisk[key];',
     why: 'Every pack is written, and its reading clock rewrites the file.',
   },

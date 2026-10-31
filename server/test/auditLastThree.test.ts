@@ -20,7 +20,9 @@ test('★★ Outlook: no projection is "—" in a neutral tone, never a green "C
   assert.deepEqual(outlookOf(25, 16), { label: 'Watch', tone: 'warn' });
   assert.deepEqual(outlookOf(60, 16), { label: 'Comfortable', tone: 'ok' });
   const card = web('cards/ForecastCard.tsx');
-  assert.match(card, /value=\{outlookOf\(fc!\.minProjectedSoc, fc!\.reserveSoc\)\.label\}/);
+  // v1.195.0 — the Outlook reads the low the card shows (cardText.forecastView: the restored basis
+  // while home Cores are offline, else the alarm basis), never an inline fall-through.
+  assert.match(card, /value=\{outlookOf\(view!\.minSoc, fc!\.reserveSoc\)\.label\}/);
   assert.doesNotMatch(card, /: 'Comfortable'/, 'the inline fall-through is gone');
 });
 
