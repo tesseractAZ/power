@@ -134,15 +134,17 @@ const MUTANTS = [
   {
     id: 'V1-xi. ★★ the dashboard forecast\'s projected-low time is in the browser zone',
     file: CARD,
-    find: "  const lowAt = fc?.minProjectedSocTs ? fmtLocaleIn(fc.minProjectedSocTs, zone, { weekday: 'short', hour: 'numeric' }) : null;",
-    to: "  const lowAt = fc?.minProjectedSocTs ? new Date(fc.minProjectedSocTs).toLocaleString([], { weekday: 'short', hour: 'numeric' }) : null; /* MUTANT */",
+    // v1.195.0 — re-pointed: the card's low is the view's (cardText.forecastView).
+    find: "  const lowAt = view?.minSocTs ? fmtLocaleIn(view.minSocTs, zone, { weekday: 'short', hour: 'numeric' }) : null;",
+    to: "  const lowAt = view?.minSocTs ? new Date(view.minSocTs).toLocaleString([], { weekday: 'short', hour: 'numeric' }) : null; /* MUTANT */",
     why: 'The dashboard names another hour for the battery\'s projected low than the server\'s own dip warning.',
   },
   {
     id: 'V1-xii. ★★ the Solar page\'s hour rows are not handed the zone',
     file: DETAIL,
-    find: '<HourRow key={h.ts} h={h} zone={zone} />',
-    to: '<HourRow key={h.ts} h={h} zone={undefined /* MUTANT */} />',
+    // v1.195.0 — re-pointed: the rows are the view's, and carry the alarm-basis SoC on the restored basis.
+    find: '<HourRow key={h.ts} h={h} zone={zone} alarmSocPct={view.restored ? h.alarmSocPct : undefined} />',
+    to: '<HourRow key={h.ts} h={h} zone={undefined /* MUTANT */} alarmSocPct={view.restored ? h.alarmSocPct : undefined} />',
     why: 'Every hourly projection row reads "—" on every install, the reference install included; the count of zone-taking calls is unchanged.',
   },
   {

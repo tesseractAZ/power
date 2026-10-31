@@ -12,6 +12,9 @@
  * darkFleetForecast.golden.json is this script's forecast on v1.191.1 (dabedbf8), whose build read each
  * Core's 30-day pv_total twice; the test holds the current tree's forecast to it. Re-capture only on a
  * tree whose forecast is meant to change, never to make the test pass. Test serials are placeholders.
+ * (v1.195.0 re-captured it for four added display fields, then for hoursDisplay[].modelled; every
+ * earlier field unchanged. Then once more when v1.194.0's charge leg joined the shared SoC step:
+ * only the six restored-surplus hours' hoursDisplay[].projectedSocPct moved.)
  */
 const NOW = 1_792_375_500_000; // 2026-10-19T02:05:00Z
 const RealDate = Date;

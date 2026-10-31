@@ -103,7 +103,9 @@ test('the Solar tab says its forecast load includes predicted EV charging', () =
 
 test('★★ the display PV sum carries the same bias correction and ceiling as the alarm series', () => {
   const an = src('../src/analytics.ts');
-  assert.ok(an.includes('restoredPvSum += restoredCeil != null ? Math.min(pv * pvBiasFactor, restoredCeil) : pv * pvBiasFactor;'),
+  // v1.195.0 — the restored hour's PV is named (restoredPvW): it feeds the sum and the per-hour display series.
+  assert.ok(an.includes('const restoredPvW = restoredCeil != null ? Math.min(pv * pvBiasFactor, restoredCeil) : pv * pvBiasFactor;')
+    && an.includes('restoredPvSum += restoredPvW;'),
     'without it the dashboard (52.9 kWh) and Home Assistant (51.4 kWh) disagree by exactly pvBiasFactor');
 });
 

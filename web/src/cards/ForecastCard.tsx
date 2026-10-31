@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from 'react';
-import { outlookOf } from './cardText';
+import { outlookOf, forecastView, restoredSolarBadge, alarmBasisLine } from './cardText';
 import { kwTick } from '../charts/axisFormat';
 import {
   ComposedChart,
@@ -53,7 +53,11 @@ export const ForecastCard = memo(function ForecastCard() {
   // v1.191.1 — the times below are written in the site zone the payload names (GET /api/forecast
   // `siteTimeZone`), the zone the server computed the hours in, never the browser's.
   const zone = fc?.siteTimeZone;
-  const lowAt = fc?.minProjectedSocTs ? fmtLocaleIn(fc.minProjectedSocTs, zone, { weekday: 'short', hour: 'numeric' }) : null;
+  // v1.195.0 — the figures shown (cardText.forecastView): the restored display basis while home Cores
+  // are offline in the cloud (it read 0 kWh and a 0% low then — the alarm basis, no Core reporting),
+  // labelled, with the runway alarm's own figures beside it; otherwise the alarm basis, as before.
+  const view = fc ? forecastView(fc) : null;
+  const lowAt = view?.minSocTs ? fmtLocaleIn(view.minSocTs, zone, { weekday: 'short', hour: 'numeric' }) : null;
 
   return (
     <div className="card col-span-full">
@@ -72,6 +76,9 @@ export const ForecastCard = memo(function ForecastCard() {
               Forecast basis: {fc.homeDpusReporting ?? 0} of {fc.homeDpusConnected} home Cores reporting
             </span>
           )}
+          {view?.restored && (
+            <span className="badge badge-muted normal-case tracking-normal">{restoredSolarBadge(view.restoredCores)}</span>
+          )}
           {fc && <span>{fc.historyDays.toFixed(1)} days of history</span>}
         </span>
       </div>
@@ -85,28 +92,37 @@ export const ForecastCard = memo(function ForecastCard() {
       ) : (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-            <Tile label="Solar next 24h" value={`${(fc!.forecastPvWhNext24 / 1000).toFixed(1)} kWh`} accent="text-warn" sub={`typical ${(fc!.typicalPvWhPerDay / 1000).toFixed(1)} kWh/day`} />
+            <Tile
+              label="Solar next 24h"
+              value={view!.pvWh != null ? `${(view!.pvWh / 1000).toFixed(1)} kWh` : '—'}
+              accent="text-warn"
+              sub={view!.typicalWh != null ? `typical ${(view!.typicalWh / 1000).toFixed(1)} kWh/day` : 'no PV history'}
+            />
             <Tile
               label="Projected low SoC"
-              value={fc!.minProjectedSoc != null ? fmtPct(fc!.minProjectedSoc, 0) : '—'}
-              accent={fc!.minProjectedSoc == null ? undefined : fc!.minProjectedSoc < fc!.reserveSoc ? 'text-bad' : 'text-ok'}
+              value={view!.minSoc != null ? fmtPct(view!.minSoc, 0) : '—'}
+              accent={view!.minSoc == null ? undefined : view!.minSoc < fc!.reserveSoc ? 'text-bad' : 'text-ok'}
               sub={lowAt ? `at ${lowAt}` : ''}
             />
             <Tile label="Reserve floor" value={fmtPct(fc!.reserveSoc, 0)} sub="SHP2 backup reserve" />
             <Tile
               label="Outlook"
               // v1.183.0 — no projection is not "Comfortable" (cardText.outlookOf).
-              value={outlookOf(fc!.minProjectedSoc, fc!.reserveSoc).label}
-              accent={TONE_CLASS[outlookOf(fc!.minProjectedSoc, fc!.reserveSoc).tone]}
-              sub={fc!.minProjectedSoc == null ? 'no projection yet' : undefined}
+              value={outlookOf(view!.minSoc, fc!.reserveSoc).label}
+              accent={TONE_CLASS[outlookOf(view!.minSoc, fc!.reserveSoc).tone]}
+              sub={view!.minSoc == null ? 'no projection yet' : undefined}
             />
           </div>
+          {/* v1.195.0 — on the restored basis, the runway alarm's own figures beside it. */}
+          {view!.restored && (
+            <div className="text-[11px] text-muted -mt-1 mb-3">{alarmBasisLine(view!.alarm)}</div>
+          )}
 
           <div style={{ width: '100%', height: 280 }}>
             {/* v0.12.0 — minWidth={0}/minHeight silence recharts' 0-size warning
                 when the parent measures 0 at mount; fixed px height unchanged. */}
             <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={280}>
-              <ComposedChart data={fc!.hours} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <ComposedChart data={view!.hours} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="fcPv" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor={HUES.solar} stopOpacity={0.45} />
@@ -128,7 +144,7 @@ export const ForecastCard = memo(function ForecastCard() {
                   labelStyle={{ color: CHART.axis }}
                   labelFormatter={(t) => fmtLocaleIn(t as number, zone, { weekday: 'short', hour: 'numeric' }) ?? ''}
                   formatter={(v, name) =>
-                    name === 'Projected SoC'
+                    name === 'Projected SoC' || name === 'Alarm-basis SoC'
                       ? `${typeof v === 'number' ? v.toFixed(0) : v}%`
                       : typeof v === 'number'
                       ? fmtW(v)
@@ -140,6 +156,10 @@ export const ForecastCard = memo(function ForecastCard() {
                 <Area yAxisId="w" type="monotone" dataKey="forecastPvW" name="Solar" stroke={HUES.solar} fill="url(#fcPv)" strokeWidth={1.5} isAnimationActive={false} />
                 <Line yAxisId="w" type="monotone" dataKey="forecastLoadW" name="Load" stroke={HUES.battery} strokeWidth={1.5} dot={false} isAnimationActive={false} />
                 <Line yAxisId="soc" type="monotone" dataKey="projectedSocPct" name="Projected SoC" stroke={HUES.soc} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
+                {/* v1.195.0 — on the restored basis, the runway alarm's own SoC path (reporting Cores only). */}
+                {view!.restored && (
+                  <Line yAxisId="soc" type="monotone" dataKey="alarmSocPct" name="Alarm-basis SoC" stroke={HUES.soc} strokeWidth={1.5} strokeDasharray="5 4" strokeOpacity={0.6} dot={false} isAnimationActive={false} connectNulls />
+                )}
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -154,7 +174,13 @@ export const ForecastCard = memo(function ForecastCard() {
               : 'your typical-day production scaled by the Open-Meteo cloud forecast'}
             ; load = typical-day curve from history;
             SoC = current backup pool integrated forward (red dashed line marks the {fmtPct(fc!.reserveSoc, 0)} reserve).
-            Sharpens as more history accumulates.
+            {view!.restored && (
+              <>
+                {' '}While home Cores are offline in the cloud, solar and SoC are rebuilt from each offline Core&apos;s own
+                recorded production; the dashed SoC line is the runway alarm&apos;s, which counts only the Cores reporting live.
+              </>
+            )}
+            {' '}Sharpens as more history accumulates.
           </div>
         </>
       )}

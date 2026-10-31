@@ -23,7 +23,8 @@
  *   • projected EMPTY within 3 h                      → Critical
  * Announces on entering the band and on each escalation, then at most once per
  * `reannounceMs` while it persists; re-arms when the projection recovers (no
- * finite hoursToReserve). Uses the projection's own `generatedAt` as the clock so
+ * finite hoursToReserve), and holds its state while the projection is unavailable
+ * (v1.195.0: a data outage is not a recovery). Uses the projection's own `generatedAt` as the clock so
  * it is deterministic under test, and persists its state so a restart mid-event
  * doesn't immediately re-announce.
  */
@@ -294,12 +295,19 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
 
   return {
     update(p, grid) {
+      // v1.195.0 — an UNAVAILABLE projection HOLDS the alarm's state, as a secondary panel's already
+      // did (index.ts skips its update on one). Unavailable is a data outage — no panel capacity,
+      // or no load reading the runway can vouch for (since v1.195.0 a held panel's circuits are not
+      // one: the carried load lasts RUNWAY_LOAD_CARRY_MAX_MS, then the runway reads unavailable) —
+      // and read as a recovery it re-armed an announced alarm and stopped its hourly reminder for
+      // the rest of the outage. Held, the latch stands; the next available projection re-announces
+      // a depletion that persisted past the re-announce window, or re-arms on a real recovery.
+      if (p.unavailable != null) return;
       const desired = classifyRunway(p, grid);
       const now = p.generatedAt;
 
       if (desired == null) {
-        // Projection recovered (or unavailable) → re-arm so the next genuine
-        // descent announces fresh.
+        // Projection recovered → re-arm so the next genuine descent announces fresh.
         // v0.15.18 — NOT during process warm-up: every "projection recovered —
         // re-armed" in the 50 h log window fired 100–140 s after a boot, on a
         // projection computed from a half-warm forecast, wiping the persisted

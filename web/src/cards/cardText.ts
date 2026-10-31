@@ -77,3 +77,101 @@ export function dpuPackSlots(
   for (const pk of p.packs) if (Number.isInteger(pk.num) && pk.num >= 1) nums.add(pk.num);
   return nums.size > 0 ? [...nums].sort((a, b) => a - b) : null;
 }
+
+/** v1.195.0 — the fields of a forecast hour forecastView reads (web/src/types.ts ForecastHour). */
+export interface ForecastHourLike {
+  ts: number;
+  forecastPvW: number;
+  projectedSocPct: number | null;
+}
+/** v1.195.0 — one hour of the restored basis (DayForecast.hoursDisplay): its solar, its projected SoC
+ *  and the restored model's own flag for the hour (the "model" / "typical" source badge). */
+export interface ForecastHourDisplayLike extends ForecastHourLike {
+  modelled?: boolean;
+}
+/** v1.195.0 — the fields of GET /api/forecast forecastView reads. The display fields are optional:
+ *  an older server sends none of them, and the view is then the alarm basis, as before. */
+export interface ForecastViewInput<H extends ForecastHourLike> {
+  hours: ReadonlyArray<H>;
+  forecastPvWhNext24: number;
+  typicalPvWhPerDay: number;
+  minProjectedSoc: number | null;
+  minProjectedSocTs: number | null;
+  forecastPvWhNext24Display?: number;
+  typicalPvWhPerDayDisplay?: number;
+  hoursDisplay?: ReadonlyArray<ForecastHourDisplayLike>;
+  minProjectedSocDisplay?: number | null;
+  minProjectedSocTsDisplay?: number | null;
+  restoredCoreCount?: number;
+  pvForecastUnavailable?: boolean;
+}
+/** v1.195.0 — what the forecast cards show (forecastView). */
+export interface ForecastView<H extends ForecastHourLike> {
+  /** The solar and SoC figures are the RESTORED display basis: home Cores are offline in the cloud
+   *  and their own recorded production stands in for them. */
+  restored: boolean;
+  /** How many offline Cores were restored (0 unless `restored`). */
+  restoredCores: number;
+  /** Solar over the next 24 h (Wh); null when there is no PV history to project from. */
+  pvWh: number | null;
+  typicalWh: number | null;
+  minSoc: number | null;
+  minSocTs: number | null;
+  /** The hours to draw: load from the forecast; solar, projected SoC and the model flag from the
+   *  restored basis when `restored`. `alarmSocPct` is the runway alarm's own SoC path, set only when
+   *  `restored` (the chart's dashed line); `alarmPvW` the alarm's solar. */
+  hours: Array<H & { alarmSocPct: number | null; alarmPvW: number }>;
+  /** The runway alarm's basis (the reporting Cores only), for the line beside the tiles. */
+  alarm: { pvWh: number; minSoc: number | null; minSocTs: number | null };
+}
+
+/**
+ * v1.195.0 — the forecast cards' figures. While every home Core was offline in the EcoFlow cloud the
+ * cards showed the RUNWAY ALARM's basis — the Cores reporting live, here none — so they read 0 kWh of
+ * solar, a projected low of 0% and a "Tight" outlook, while Home Assistant's forecast solar sensor
+ * showed the restored ~50 kWh. With any Core restored (restoredCoreCount > 0: an offline Core with a
+ * recorded PV history, and the per-hour restored series present) the cards now show the restored
+ * basis: the solar and the projected SoC rebuilt from each offline Core's own recorded production,
+ * labelled as restored, with the alarm basis beside it (`alarm`). With none restored the view is the
+ * alarm basis (with every Core reporting the two are equal), as is a payload from an older server. No
+ * PV history at all (pvForecastUnavailable) shows no solar figure: the server's 0 there is not a
+ * forecast. PURE (run by server/test/forecastDisplayBasis.test.ts).
+ */
+export function forecastView<H extends ForecastHourLike>(fc: ForecastViewInput<H>): ForecastView<H> {
+  const restored = (fc.restoredCoreCount ?? 0) > 0 && fc.hoursDisplay != null;
+  const byTs = new Map((restored ? fc.hoursDisplay! : []).map((d) => [d.ts, d] as const));
+  const noPv = fc.pvForecastUnavailable === true;
+  return {
+    restored,
+    restoredCores: restored ? fc.restoredCoreCount! : 0,
+    pvWh: noPv ? null : restored ? (fc.forecastPvWhNext24Display ?? fc.forecastPvWhNext24) : fc.forecastPvWhNext24,
+    typicalWh: noPv ? null : restored ? (fc.typicalPvWhPerDayDisplay ?? fc.typicalPvWhPerDay) : fc.typicalPvWhPerDay,
+    minSoc: restored ? (fc.minProjectedSocDisplay ?? null) : fc.minProjectedSoc,
+    minSocTs: restored ? (fc.minProjectedSocTsDisplay ?? null) : fc.minProjectedSocTs,
+    hours: fc.hours.map((h) => {
+      const d = byTs.get(h.ts);
+      return d
+        ? {
+          ...h, forecastPvW: d.forecastPvW, projectedSocPct: d.projectedSocPct,
+          // The source badge names the model that made the figure shown, the restored one.
+          ...(d.modelled != null ? { modelled: d.modelled } : {}),
+          alarmSocPct: h.projectedSocPct, alarmPvW: h.forecastPvW,
+        }
+        : { ...h, alarmSocPct: null, alarmPvW: h.forecastPvW };
+    }),
+    alarm: { pvWh: fc.forecastPvWhNext24, minSoc: fc.minProjectedSoc, minSocTs: fc.minProjectedSocTs },
+  };
+}
+
+/** v1.195.0 — the badge beside the coverage badge while the forecast is on the restored basis. */
+export function restoredSolarBadge(n: number): string {
+  return n === 1 ? "Solar restored from 1 offline Core's records" : `Solar restored from ${n} offline Cores' records`;
+}
+
+/** v1.195.0 — the line under the tiles while the forecast is on the restored basis: the figures the
+ *  runway alarm (and the projected-dip alert, the calendar's dip event and Home Assistant's
+ *  projected-low sensors) uses. */
+export function alarmBasisLine(alarm: ForecastView<ForecastHourLike>['alarm']): string {
+  const low = alarm.minSoc == null ? '—' : `${alarm.minSoc.toFixed(0)}%`;
+  return `Runway alarm basis (reporting Cores only): ${(alarm.pvWh / 1000).toFixed(1)} kWh solar, low ${low}`;
+}

@@ -7,6 +7,7 @@ import { SectionHeader, Expander } from '../components/sections';
 import { useSite } from '../useSite';
 import { orientationText, benchSpareFlag, noPvDetail } from '../siteFacts';
 import { fmtHour, tsHourIn } from './forecastText';
+import { forecastView, restoredSolarBadge, alarmBasisLine } from './cardText';
 
 /**
  * Forecast detail for the Predictive Insights page — shows the full machinery
@@ -100,6 +101,9 @@ export function ForecastDetail() {
 function ForecastCard({ fc }: { fc: DayForecast }) {
   // v1.191.1 — the site zone the server computed these hours in (GET /api/forecast `siteTimeZone`).
   const zone = fc.siteTimeZone;
+  // v1.195.0 — the figures shown (cardText.forecastView): the restored display basis while home Cores
+  // are offline in the cloud, labelled, with the runway alarm's own figures beside it.
+  const view = forecastView(fc);
   const loadWh = fc.hours.reduce((s, h) => s + h.forecastLoadW, 0);
   // v1.177.0 — say what this load includes. It carries the predicted EV-charging layer; the
   // Dashboard's runway strips it (the alarm path is evidence-based), so the two "load over
@@ -108,15 +112,16 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
   const evWh = fc.hours.reduce((s, h) => s + (h.predictedEvLoadW ?? 0), 0);
   // The projected low can only include EV load predicted at or before it: later load cannot
   // lower an earlier minimum.
-  const evBeforeLowWh = fc.minProjectedSocTs == null
+  const evBeforeLowWh = view.minSocTs == null
     ? 0
-    : fc.hours.filter((h) => h.ts <= (fc.minProjectedSocTs as number)).reduce((s, h) => s + (h.predictedEvLoadW ?? 0), 0);
+    : fc.hours.filter((h) => h.ts <= (view.minSocTs as number)).reduce((s, h) => s + (h.predictedEvLoadW ?? 0), 0);
   const runtimeNote =
-    fc.minProjectedSoc == null
+    view.minSoc == null
       ? 'Battery SoC projection unavailable — not enough history yet.'
-      : fc.minProjectedSoc < fc.reserveSoc
-        ? `Consumption outpaces solar — the backup pool is projected to fall to ${fc.minProjectedSoc}%, below the ${fc.reserveSoc}% reserve floor${fc.minProjectedSocTs != null ? `, around ${tsHourIn(fc.minProjectedSocTs, zone)}` : ''}.`
-        : `The backup pool stays above the ${fc.reserveSoc}% reserve floor across the 24-hour window — projected low of ${fc.minProjectedSoc}%${fc.minProjectedSocTs != null ? ` around ${tsHourIn(fc.minProjectedSocTs, zone)}` : ''}.`;
+      : view.minSoc < fc.reserveSoc
+        ? `Consumption outpaces solar — the backup pool is projected to fall to ${view.minSoc}%, below the ${fc.reserveSoc}% reserve floor${view.minSocTs != null ? `, around ${tsHourIn(view.minSocTs, zone)}` : ''}.`
+        : `The backup pool stays above the ${fc.reserveSoc}% reserve floor across the 24-hour window — projected low of ${view.minSoc}%${view.minSocTs != null ? ` around ${tsHourIn(view.minSocTs, zone)}` : ''}.`;
+  const pvText = view.pvWh != null ? kwh(view.pvWh) : '—';
   return (
     <div className="card">
       <SectionHeader
@@ -130,12 +135,17 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
           </span>
         }
         chip={
-          <span className={`badge ${fc.hasWeather ? 'badge-ok' : 'badge-muted'}`}>
-            {fc.hasWeather ? 'cloud-aware' : 'typical-day fallback'}
+          <span className="flex items-center gap-1.5 flex-wrap">
+            <span className={`badge ${fc.hasWeather ? 'badge-ok' : 'badge-muted'}`}>
+              {fc.hasWeather ? 'cloud-aware' : 'typical-day fallback'}
+            </span>
+            {view.restored && <span className="badge badge-muted">{restoredSolarBadge(view.restoredCores)}</span>}
           </span>
         }
         takeaway={
-          <>≈{kwh(fc.forecastPvWhNext24)} solar vs {kwh(loadWh)} load over the next 24 h.</>
+          view.pvWh != null
+            ? <>≈{kwh(view.pvWh)} solar vs {kwh(loadWh)} load over the next 24 h.</>
+            : <>No recorded solar to project from yet; {kwh(loadWh)} load over the next 24 h.</>
         }
         info={
           <>
@@ -147,19 +157,21 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
         }
       />
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3">
-        <Tile label="Solar next 24 h" value={kwh(fc.forecastPvWhNext24)} accent="text-accent" />
+        <Tile label="Solar next 24 h" value={pvText} accent="text-accent" sub={view.pvWh == null ? 'no PV history' : undefined} />
         <Tile label="Forecast load 24 h" value={kwh(loadWh)} accent="text-warn" sub={evWh > 0 ? `incl. ${kwh(evWh)} predicted EV` : 'no EV charging predicted'} />
-        <Tile label="Typical solar / day" value={kwh(fc.typicalPvWhPerDay)} />
+        <Tile label="Typical solar / day" value={view.typicalWh != null ? kwh(view.typicalWh) : '—'} />
         <Tile
           label="Projected low SoC"
-          value={fc.minProjectedSoc != null ? `${fc.minProjectedSoc}%` : '—'}
-          sub={fc.minProjectedSocTs != null ? `at ${tsHourIn(fc.minProjectedSocTs, zone)}${evBeforeLowWh > 0 ? ' · incl. predicted EV' : ''}` : undefined}
+          value={view.minSoc != null ? `${view.minSoc}%` : '—'}
+          sub={view.minSocTs != null ? `at ${tsHourIn(view.minSocTs, zone)}${evBeforeLowWh > 0 ? ' · incl. predicted EV' : ''}` : undefined}
         />
         <Tile label="History depth" value={`${fc.historyDays} days`} sub={`reserve floor ${fc.reserveSoc}%`} />
       </div>
       <div className="border border-line rounded-md bg-panel2/50 px-3 py-2 text-sm mb-4">
         <span className="text-[10px] uppercase tracking-widest text-muted mr-2">Runtime</span>
         {runtimeNote}
+        {/* v1.195.0 — on the restored basis, the runway alarm's own figures beside it. */}
+        {view.restored && <div className="text-xs text-muted mt-1">{alarmBasisLine(view.alarm)}.</div>}
       </div>
       {/* Purely-predictive per-hour projection — collapsed so the summary tiles +
           runtime note lead. Safe to collapse per readability rules (day-ahead
@@ -175,12 +187,13 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
                 <Th>Forecast PV</Th>
                 <Th>Forecast load</Th>
                 <Th>Proj. SoC</Th>
+                {view.restored && <Th>Alarm-basis SoC</Th>}
                 <Th>Source</Th>
               </tr>
             </thead>
             <tbody>
-              {fc.hours.map((h) => (
-                <HourRow key={h.ts} h={h} zone={zone} />
+              {view.hours.map((h) => (
+                <HourRow key={h.ts} h={h} zone={zone} alarmSocPct={view.restored ? h.alarmSocPct : undefined} />
               ))}
             </tbody>
           </table>
@@ -190,7 +203,7 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
   );
 }
 
-function HourRow({ h, zone }: { h: ForecastHour; zone: string | undefined }) {
+function HourRow({ h, zone, alarmSocPct }: { h: ForecastHour; zone: string | undefined; alarmSocPct?: number | null }) {
   return (
     <tr className="border-t border-line/50">
       <td className="py-1 pr-4 text-ink font-medium">{tsHourIn(h.ts, zone)}</td>
@@ -199,6 +212,8 @@ function HourRow({ h, zone }: { h: ForecastHour; zone: string | undefined }) {
       <td className="py-1 pr-4 font-semibold text-ink">{fmtW(h.forecastPvW)}</td>
       <td className="py-1 pr-4">{fmtW(h.forecastLoadW)}</td>
       <td className="py-1 pr-4">{h.projectedSocPct != null ? `${h.projectedSocPct}%` : '—'}</td>
+      {/* v1.195.0 — on the restored basis, the runway alarm's SoC path beside it. */}
+      {alarmSocPct !== undefined && <td className="py-1 pr-4 text-muted">{alarmSocPct != null ? `${alarmSocPct}%` : '—'}</td>}
       <td className="py-1">
         <span className={`badge text-[9px] ${h.modelled ? 'badge-ok' : 'badge-muted'}`}>
           {h.modelled ? 'model' : 'typical'}

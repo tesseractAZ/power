@@ -96,8 +96,10 @@ const MUTANTS = [
   {
     id: 'C-ii. ★★★ the day SoC walk credits a surplus at unity',
     file: AN,
-    find: 'socWh + chargeLegStep(pvAlarm - runwayDrainW(load, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)',
-    to: 'socWh + (pvAlarm - runwayDrainW(load, poolBasis.overheadW)) /* MUTANT */',
+    // v1.195.0 — re-pointed: the day walk's step is one closure (stepSocWh) shared by the alarm walk
+    // and the restored display walk, and the charge leg sits inside it.
+    find: 'soc + chargeLegStep(pvW - runwayDrainW(loadW, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)',
+    to: 'soc + (pvW - runwayDrainW(loadW, poolBasis.overheadW)) /* MUTANT */',
     why: 'minProjectedSoc, the forecast-soc-dip alert and the forecast-runtime bound read high beside the runway.',
     tests: BASIS,
   },

@@ -344,9 +344,10 @@ test('★★ (i) the mark on file: a confirmed seed is rewritten without it; a m
   rmSync(KNEE_PATH, { force: true });
   restart(T0 + 25 * MIN);
   tick(T0 + 25 * MIN, PLAT_MID);
-  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0 + 5 * G, critSeeded: true });
+  // v1.195.0 — the onset seeds the off-plateau session's clock too (vdiffKneeSeed), and it is written.
+  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0 + 5 * G, critSeeded: true, offFromMs: T0 });
   tick(T0 + 25 * MIN + TICK_MS, PLAT_HI);
-  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0 + 5 * G },
+  assert.deepEqual(onFile()[KEY], { packSn: `PACK-${SN}`, critSinceMs: T0, graceFromMs: T0, quietSinceMs: null, lastSeenMs: T0 + 5 * G, offFromMs: T0 },
     'only the mark changed, and the file says so');
   // A mark with no clock restores no mark: the entry written back after one tick carries none.
   fresh();

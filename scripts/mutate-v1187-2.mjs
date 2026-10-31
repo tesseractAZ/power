@@ -135,8 +135,9 @@ const MUTANTS = [
   {
     id: 'xii. ★★★ the seed\'s mark is not written to the knee-session file',
     file: AL,
-    find: '      ...(st.critSeeded ? { critSeeded: true as const } : {}),\n    };',
-    to: '      /* MUTANT */\n    };',
+    // v1.195.0 — re-pointed: the off-plateau session's fields follow the mark in the entry.
+    find: '      ...(st.critSeeded ? { critSeeded: true as const } : {}),\n      // v1.195.0 — the off-plateau session',
+    to: '      /* MUTANT */\n      // v1.195.0 — the off-plateau session',
     why: 'A second restart restores a day-old onset as a clock a process saw: a reading under 50 mV no longer ends it, and a benign crossing sounds the red klaxon.',
   },
   {
@@ -200,8 +201,9 @@ const MUTANTS = [
   {
     id: 'xxi. ★ invariant — a fresh state is marked',
     file: AL,
-    find: 'lastSeenMs: nowMs, critSeeded: false };',
-    to: 'lastSeenMs: nowMs, critSeeded: true }; /* MUTANT */',
+    // v1.195.0 — re-pointed: the fresh state's literal goes on with the off-plateau session's fields.
+    find: 'lastSeenMs: nowMs, critSeeded: false,\n',
+    to: 'lastSeenMs: nowMs, critSeeded: true, /* MUTANT */\n',
     why: 'As xix: a state with no clock carries the mark.',
   },
   /* ── (1, review) the note's boundaries ──────────────────────────────────────────────────── */
