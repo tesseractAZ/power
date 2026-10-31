@@ -163,8 +163,7 @@ in Home Assistant's notification drawer, dismissed when the condition clears, an
 service in `NOTIFY_HA_PUSH_TARGETS`. Leave the targets empty for drawer cards only. A critical
 push carries the companion app's critical payload, so it sounds through Do Not Disturb and the
 silent switch (turn that off with `NOTIFY_CRITICAL_BYPASS_DND`); warnings arrive as ordinary
-pushes. `NOTIFY_RESOLVED` also pushes when an alert clears. Device serial numbers are shortened in
-pushes.
+pushes. `NOTIFY_RESOLVED` also pushes when an alert clears. Serial numbers are shortened in pushes.
 
 The alert families you are most likely to see:
 
@@ -180,7 +179,12 @@ The alert families you are most likely to see:
 | Setting changed | A panel or Core setting, such as the reserve, changed outside Power (held through quiet hours). | If you made the change, nothing. |
 | Storm pre-charge recommended | A National Weather Service warning near your coordinates. | Charge the pool before it arrives. |
 
-Every alert family, its condition and its severity:
+**Shelve this Core's alarms…** on a Core's card holds its own alerts for 30 minutes to 4 hours:
+shown, not pushed or spoken. Pool, grid and plant alarms, and a hot, over-voltage or defective
+pack, still sound. It ends on time, 15 minutes after the Core is back to normal, or by
+**End now** or Home Assistant's **End All Maintenance**; a push lists what it held.
+
+Every alert family, its condition and severity:
 [alerts](https://github.com/tesseractAZ/power/blob/main/docs/reference/08-1-alerts.md) and
 [the alert monitor](https://github.com/tesseractAZ/power/blob/main/docs/reference/08-2-alert-monitor.md).
 
@@ -314,7 +318,7 @@ Open **Power** in the Home Assistant sidebar. The dashboard has five pages:
 - **Solar**: per-Core solar, the solar response model, curtailment and the solar forecast.
 - **Battery**: every pack's state, and the battery projection and diagnostics.
 - **Strategy**: the night-charge card (with its cancel button), forecast and storm preparation,
-  and maintenance, including the database snapshot.
+  and the database snapshot.
 - **Alerts**: active, learned and cleared alerts, and **Alert Settings**: the broadcast switch,
   one card per priority with its switch, tone and spoken preview, and the tone library.
 
@@ -360,8 +364,8 @@ pruned. Home Assistant backups include it while Power keeps running: just before
 pauses the database's background tidy-up, and resumes after (on its own after 10 minutes if the
 backup never reports back). **Refresh snapshot** on the Strategy page writes a consistent copy
 to `/share/ecoflow-panel/` for an outside SQLite viewer. Power records a device only while its
-readings are fresh; the repeats of an offline device's last reading that earlier versions saved
-are kept apart, unused for history, learning or scoring.
+readings are fresh; repeats of an offline device's last reading, saved by earlier versions, are
+kept apart, unused for history, learning or scoring.
 
 ## Troubleshooting
 
@@ -375,23 +379,20 @@ are kept apart, unused for history, learning or scoring.
 | Low-battery alarms on a grid-tied home | Power does not know the grid is there. | Set `GRID_AVAILABLE` and `GRID_PRESENCE_ENTITY`. |
 | No Home Assistant entities | MQTT discovery is off or cannot reach the broker. | Set `MQTT_DISCOVERY_ENABLED` and the broker options; check the log. |
 | Entities read unavailable | The add-on is stopped or its state messages stopped. | Check the add-on and broker logs. |
-| Circuit entities missing | They appear once the first poll lists the circuits. | Wait a minute after start. |
+| Circuit entities missing | They appear after the first poll. | Wait a minute. |
 | History shows a gap for a device | The EcoFlow cloud listed it offline, so Power had no fresh reading and recorded nothing. After 6 hours in which the other devices kept reporting, a "Device telemetry gap" warning is pushed. | Check the device's Wi-Fi and the EcoFlow app; recording resumes with its first reading. |
 | The supervised night charge was not armed | The notice reached no channel, or arming was refused. | Set `NOTIFY_CHANNEL` to `ha`; the card and the notice name the reason. |
 | The night charge holds every night | The tariff has no cheap window, or a setting cannot be read (the log names it). | See Night charge above. |
 | Cost figures look flat | The tariff is not confirmed. | Enter the rates, then `TARIFF_APS_RATES_CONFIRMED` (another plan: `TARIFF_RATES_CONFIRMED`). |
-| "Setting changed" notification | A setting was changed outside Power, usually in the EcoFlow app. | Confirm the change was yours. |
+| "Setting changed" notification | A setting was changed outside Power, usually in the EcoFlow app. | Confirm it was yours. |
 | An API write returns 401 | The request has no write authority. | Use the sidebar, or send `X-Panel-Write-Token`. |
 | An SSH login is refused | No `TUI_PASSWORD`, a wrong login, or ten failures from that address in ten minutes. | Set `TUI_PASSWORD`; the user is `TUI_USERNAME`. |
 | Heartbeat monitor reports down | Power stopped checking in: the host, the add-on or its power is down, so none of Power's alarms runs; or the internet link is down, cutting off the EcoFlow cloud too. Less often, a changed URL was rejected. | Check the batteries and the panel in the EcoFlow app now, then the host and the add-on. If Power is running, use an https URL; the log names a rejection. |
 
 ## More documentation
 
-- [The option reference](https://github.com/tesseractAZ/power/blob/main/docs/guide/options.md)
-  and [the entity reference](https://github.com/tesseractAZ/power/blob/main/docs/guide/entities.md).
 - [The engineering reference](https://github.com/tesseractAZ/power/blob/main/docs/reference/README.md):
-  how every engine works; [moved sections](https://github.com/tesseractAZ/power/blob/main/docs/reference/README.md#moved-sections)
-  maps each heading of the old single-file manual.
+  how every engine works, and where each heading of the old single-file manual moved.
 - What changed: [the changelog](https://github.com/tesseractAZ/power/blob/main/ecoflow_panel/CHANGELOG.md)
   and [the releases](https://github.com/tesseractAZ/power/releases), each with a printable
   manual. Questions and bugs: [issues](https://github.com/tesseractAZ/power/issues).

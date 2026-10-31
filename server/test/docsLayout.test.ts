@@ -706,13 +706,32 @@ test('every nameAllowlist entry is a string literal in server/src', () => {
 test('the <p> placeholder is the alarm-priority order, and discoveryUniqueIds covers every publisher', () => {
   assert.deepEqual(cd.PRIORITIES, [...ALARM_PRIORITY_ORDER]);
   const ids = discoveryUniqueIds([{ ch: 3, name: 'East' }, { ch: 11, name: 'West' }]);
-  assert.equal(ids.length, SENSORS.length + BINARY_SENSORS.length + ALARM_PRIORITY_ORDER.length + 2 * 2);
+  // v1.197.0 — + 1: the End-all-maintenance button.
+  assert.equal(ids.length, SENSORS.length + BINARY_SENSORS.length + ALARM_PRIORITY_ORDER.length + 1 + 2 * 2);
   assert.equal(new Set(ids).size, ids.length, 'unique_ids are unique');
   assert.ok(ids.every((id) => id.startsWith('ecoflow_')));
   // a new discovery component (number, select, …) must be added to discoveryUniqueIds
   const src = readFileSync(join(ROOT, 'server', 'src', 'mqttDiscovery.ts'), 'utf8');
   const components = new Set([...src.matchAll(/\$\{prefix\}\/([a-z_]+)\//g)].map((m) => m[1]));
-  assert.deepEqual([...components].sort(), ['binary_sensor', 'sensor', 'switch']);
+  // v1.197.0 — `button`: the End-all-maintenance button, in discoveryUniqueIds above.
+  assert.deepEqual([...components].sort(), ['binary_sensor', 'button', 'sensor', 'switch']);
+});
+
+test('the engineering reference states the static discovery counts the tables hold (v1.197.0 review)', () => {
+  // v1.197.0 (review) — three statements kept 87 sensors and 11 binary sensors (and 102 publishes) after
+  // the maintenance entities were added; nothing pinned them.
+  const S = SENSORS.length;
+  const BS = BINARY_SENSORS.length;
+  const SW = ALARM_PRIORITY_ORDER.length;
+  const BUTTONS = 1; // the End-all-maintenance button (the component list above)
+  const wiring = readFileSync(join(ROOT, 'docs', 'reference', '02-2-home-assistant-wiring.md'), 'utf8');
+  assert.ok(wiring.includes(`\`SENSORS[]\` (${S}) and \`BINARY_SENSORS[]\` (${BS})`), `02-2: the entity categories name ${S} sensors and ${BS} binary sensors`);
+  assert.ok(
+    wiring.includes(`${S + BS + SW + BUTTONS} retained publishes of unchanged payloads (${S} sensors, ${BS} binary sensors, ${SW} switches, ${BUTTONS} button)`),
+    `02-2: publishDiscovery() makes ${S + BS + SW + BUTTONS} retained publishes`,
+  );
+  const inventory = readFileSync(join(ROOT, 'docs', 'reference', 'A-feature-inventory.md'), 'utf8');
+  assert.ok(inventory.includes(`| MQTT discovery entity set | ${S} sensors + ${BS} binary sensors in the static tables`), `A: the inventory names ${S} sensors and ${BS} binary sensors`);
 });
 
 /* ── the scanner and the slugger ────────────────────────────────────────── */

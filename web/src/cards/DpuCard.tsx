@@ -1,10 +1,11 @@
 import { memo } from 'react';
 import { dpuPackSlots, remainSuffix } from './cardText';
-import type { DeviceSnapshot, DpuProjection, Shp2EnergySource } from '../types';
+import type { DeviceSnapshot, DpuProjection, MaintenanceWindowView, Shp2EnergySource } from '../types';
 import { fmtMins, fmtPct, fmtTemp, fmtW, socColor } from '../format';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
 import { LazySparkline as Sparkline } from '../charts/LazySparkline';
 import { HUES } from '../theme';
+import { MaintenanceControl } from '../components/MaintenanceControl';
 
 export interface DpuViaShp2 {
   source: Shp2EnergySource;
@@ -21,6 +22,8 @@ export interface DpuViaShp2 {
  *    data is a "no data" placeholder; with no pack count at all, one line instead of tiles
  *    ("needs DPU WiFi" with no direct data, "not yet received" when direct data has no packs)
  *  - SHP2 view section: always shown for SHP2-bound DPUs (cross-reference + history fallback)
+ *  - v1.197.0 — under the header, the Core's maintenance window: the shelve control, or the amber
+ *    strip while one is in force (MaintenanceControl)
  */
 // v0.22.0 — memo skips re-renders when the parent (App) re-renders without a
 // new snapshot (tab/theme/history toggles). On an actual WS push `d`/`viaShp2`
@@ -29,9 +32,12 @@ export interface DpuViaShp2 {
 export const DpuCard = memo(function DpuCard({
   d,
   viaShp2,
+  maintenance,
 }: {
   d: DeviceSnapshot & { projection?: DpuProjection };
   viaShp2?: DpuViaShp2;
+  /** v1.197.0 — this Core's maintenance window in force, if any. */
+  maintenance?: MaintenanceWindowView;
 }) {
   const p = d.projection;
   const directOk = !!p;
@@ -48,6 +54,7 @@ export const DpuCard = memo(function DpuCard({
   return (
     <div className="card">
       <Header d={d} directOk={directOk} viaShp2={!!viaShp2} slot={slot} />
+      <MaintenanceControl sn={d.sn} label={maintenance?.label ?? d.deviceName} window={maintenance} />
 
       {/* Headline: SoC + remain + sparklines (sparklines fall back to SHP2-attributed when direct is empty) */}
       <div className="mb-3">

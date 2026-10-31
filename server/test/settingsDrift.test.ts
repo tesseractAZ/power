@@ -107,6 +107,17 @@ test('OWN-WRITE: the actuator moving the reserve to its target/restore is never 
   assert.equal(classifyChange({ key: 'Core 1 · chgC20SetWatts', from: 1800, to: 3900 }, ctx), 'external');
 });
 
+test('★★ v1.197.0 MAINTENANCE: a shelved Core\'s own setting is listed in its window\'s end push, never the reserve floor', () => {
+  const ctx = { targetPct: null, priorReservePct: null, nightActive: false, shelvedLabels: ['Core 3'] };
+  assert.equal(classifyChange({ key: 'Core 3 · chgMaxSoc', from: 50, to: 100 }, ctx), 'maintenance', 'the shelved Core, by its label');
+  assert.equal(classifyChange({ key: 'Core 30 · chgMaxSoc', from: 50, to: 100 }, ctx), 'external', 'a label that merely starts the same is another Core');
+  assert.equal(classifyChange({ key: 'Core 1 · chgMaxSoc', from: 50, to: 100 }, ctx), 'external', 'an unshelved Core is unchanged');
+  assert.equal(classifyChange({ key: 'Core 3 · chgMaxSoc', from: 50, to: 100 }, { ...ctx, shelvedLabels: [] }), 'external', 'no window, no class');
+  // ★★★ the reserve floor the pool alarm defends: even a label naming the panel (a forged or shared label)
+  // never folds it into a window.
+  assert.equal(classifyChange({ key: 'Smart Home Panel 2 · backupReserveSoc', from: 20, to: 40 }, { ...ctx, shelvedLabels: ['Smart Home Panel 2'] }), 'external');
+});
+
 test('first boot with no sidecar: adoption is silent, whatever the surface holds', () => {
   const state = freshDriftState();
   const evaln = evaluateDrift(state, extractSettingsSurface([shp2({ ch1ForceCharge: 'FORCE_CHARGE_ON' })]));

@@ -16,6 +16,8 @@ import {
   type ClearedRange,
 } from './clearedHistoryModel';
 import { fmtRel, fmtMins } from '../format';
+import { fmtHHMMIn } from '../siteTime';
+import { useSiteTimeZone } from '../useSiteTimeZone';
 import { SubjectBoxes } from '../cards/AlertParts';
 // v0.11.0 — group + colour the alert list by ISA priority (Critical/High/Medium/Low).
 import {
@@ -481,7 +483,16 @@ function ClearedRow({ row }: { row: ClearedHistoryRow }) {
 
 /* ─── Shared row / tile primitives (Active view) ────────────────────────────── */
 
+/** v1.197.0 — the muted badge's words: "shelved — maintenance until HH:MM" while a window holds the
+ *  alert (site-local; the time is left out until the site zone is known), else "silenced". */
+function shelvedBadge(shelvedUntilMs: number | undefined, zone: string | null): string {
+  if (shelvedUntilMs == null) return 'silenced';
+  const hm = fmtHHMMIn(shelvedUntilMs, zone);
+  return hm ? `shelved — maintenance until ${hm}` : 'shelved — maintenance';
+}
+
 function AlertRow({ alert, meta }: { alert: Alert; meta: PriorityMeta }) {
+  const zone = useSiteTimeZone();
   return (
     <div className={`flex items-stretch gap-3 bg-panel2/50 border ${meta.ring} rounded-lg p-3`}>
       <SubjectBoxes alert={alert} />
@@ -491,9 +502,10 @@ function AlertRow({ alert, meta }: { alert: Alert; meta: PriorityMeta }) {
           <span className="badge badge-muted text-[10px]">{alert.category}</span>
           {/* annunciate:false = chime/push/broadcast suppressed (spare DPU OR a
               balancing home core). "silenced" is the only accurate word here —
-              do NOT infer "spare" from this flag. */}
+              do NOT infer "spare" from this flag.
+              v1.197.0 — a Core's maintenance window says so, with its end. */}
           {alert.annunciate === false && (
-            <span className="badge badge-muted text-[10px]">silenced</span>
+            <span className="badge badge-muted text-[10px]">{shelvedBadge(alert.shelvedUntilMs, zone)}</span>
           )}
           {alert.coreNum == null && <span className="text-[10px] text-muted">{alert.device}</span>}
         </div>

@@ -429,13 +429,16 @@ export interface DriftTickInput {
   log: DriftHoldLog;
   /** Writes the baseline (saveConfirmedSurface; injectable for tests). Throws on failure. */
   saveBaseline?: (surface: Record<string, SettingValue>) => void;
+  /** v1.197.0 — a 'maintenance' change (a shelved Core's setting): listed in its window's end push. */
+  onMaintenanceChange?: (c: SettingChange, nowMs: number) => void;
 }
 
 /**
  * v1.187.20 — everything the drift tick does after evaluateDrift, moved out of index.ts so the
  * tests run the code that ships. The adoption tick saves the first baseline and announces
  * nothing. Otherwise each confirmed change is classified: own-write and panel-side changes are
- * logged and not announced, external ones are held. `commit` puts the held changes on disk
+ * logged and not announced (v1.197.0 — a shelved Core's 'maintenance' change too, handed to
+ * onMaintenanceChange), external ones are held. `commit` puts the held changes on disk
  * before the baseline that hides them; a tick whose changes are all this add-on's own still
  * saves the baseline, so a restart does not re-detect (and push) the owner's own write. The
  * held batch is then offered on EVERY tick, whether or not this one confirmed anything: the
@@ -464,6 +467,11 @@ export async function settleDriftTick(t: DriftTickInput): Promise<DriftTickOutco
           log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (this add-on's night-charge write — not announced)`);
         } else if (kind === 'panel-side') {
           log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (changed on the panel during this add-on's night force-charge, not by it — the panel's own ceiling stop or a manual Charge Now; not announced)`);
+        } else if (kind === 'maintenance') {
+          // v1.197.0 — not held: the baseline is saved as for an own write, so nothing re-pushes it
+          // after the window; the window's end push lists it.
+          log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (on a Core in maintenance — listed in the window's end push)`);
+          t.onMaintenanceChange?.(c, nowMs);
         } else {
           log.warn(`settings-drift: EXTERNAL change — ${c.key} ${c.from} → ${c.to}`);
           external.push(c);

@@ -140,6 +140,9 @@ Counts are of alerts active now.
 | `sensor.power_high_priority_alarms_p2` | `ecoflow_alert_high_count` | Active alarms at High priority (P2) | count |
 | `sensor.power_medium_priority_alarms_p3` | `ecoflow_alert_medium_count` | Active alarms at Medium priority (P3) | count |
 | `sensor.power_low_priority_alarms_p4` | `ecoflow_alert_low_count` | Active alarms at Low priority (P4) | count |
+| `binary_sensor.power_maintenance_active` | `ecoflow_maintenance_active` | On while a Core's maintenance window holds its own alerts | on / off |
+| `sensor.power_cores_in_maintenance` | `ecoflow_maintenance_devices` | Cores whose maintenance window is in force; attribute `cores` lists each with its end, such as "Core 3 until 14:30". The alert counts above still include the alerts a window holds | count |
+| `button.power_end_all_maintenance` | `ecoflow_maintenance_end_all` | Ends every maintenance window now; whatever a window held that is still active is pushed and announced. A window cannot be started from Home Assistant | press |
 | `sensor.power_fleet_devices_online` | `ecoflow_fleet_devices_online` | EcoFlow devices online | count |
 | `sensor.power_cloud_wedged_devices` | `ecoflow_cloud_wedge_count` | Devices the cloud reports offline but the LAN can reach; 0 unless `ECOFLOW_DEVICE_REACHABILITY` is set (diagnostic) | count |
 | `sensor.power_poll_health` | `ecoflow_poll_health` | `ok`, or why the last poll could not observe the alarm path (diagnostic) | text |

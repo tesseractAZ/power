@@ -330,6 +330,13 @@ export interface Alert {
    * decide a mute — `annunciate` alone is the gate (test/muteReasonLog pins that).
    */
   muteReason?: string;
+  /**
+   * v1.197.0 — set while a maintenance window holds this alert (maintenanceWindow.applyMaintenanceMute,
+   * stamped with `annunciate:false`): when the window ends. A TYPED field, the one the all-clear speech
+   * gate reads (broadcast.allClearSpeechBlocked) — a shelved critical is held, not cleared. Unset on
+   * every other alert, policy-muted or not.
+   */
+  shelvedUntilMs?: number;
 }
 
 /** v1.187.0 — muteReason wordings shared by the alert producers and the monitor. */
@@ -341,6 +348,8 @@ export const MUTE_REASON_OFF_PANEL = 'off-panel Core — not on the panel roster
 export const MUTE_REASON_CLOUD_OFFLINE_MQTT_LIVE = 'onset hold — listed offline by the cloud while its MQTT data is still arriving';
 /** v1.187.0 review — the telemetry-blind alert held while its remediation runs (blindRemediation.ts). */
 export const MUTE_REASON_REMEDIATION = 'held for remediation (remediate-first)';
+/** v1.197.0 — a Core's own alert held by its maintenance window (maintenanceWindow.ts). */
+export const MUTE_REASON_MAINTENANCE = 'maintenance window — the Core is shelved for a set time';
 
 const cToF = (c: number) => c * 1.8 + 32;
 
@@ -1095,7 +1104,7 @@ export const CELL_OVP_IMPLAUSIBLE_MV = 5000;
 // v1.191.0 — SOH_WARN_PCT (85) and SOH_CRIT_PCT (75) are hardware facts, imported from hwSpec.ts.
 const PACK_SOC_LOW_PCT = 10;
 const PACK_IMBALANCE_WARN_PCT = 15;
-const STALE_MS = 3 * 60 * 1000;
+export const STALE_MS = 3 * 60 * 1000;
 const CIRCUIT_BREAKER_WARN_FRAC = 0.9;
 
 export const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };

@@ -245,11 +245,28 @@ export interface Alert {
    * also lands here.
    */
   annunciate?: boolean;
+  /** v1.197.0 — set while a maintenance window holds this alert: when the window ends (epoch ms).
+   *  Rendered as a "shelved — maintenance until HH:MM" badge instead of "silenced". */
+  shelvedUntilMs?: number;
   /** Subject identity — Core (DPU) number, then pack number, when scoped to one. */
   coreNum?: number | null;
   packNum?: number | null;
   /** Structured statistical breakdown — populated for learned alerts. */
   facts?: AlertFact[];
+}
+
+/** v1.197.0 — a Core's maintenance window in force (the snapshot's `maintenance`, server maintenanceWindow.ts). */
+export interface MaintenanceWindowView {
+  sn: string;
+  label: string;
+  coreNum: number | null;
+  startedAtMs: number;
+  untilMs: number;
+  remainingMs: number;
+  heldCount: number;
+  heldCritical: number;
+  source: 'web' | 'api' | 'ha';
+  note: string | null;
 }
 
 /**
@@ -315,6 +332,8 @@ export interface FleetSnapshot {
   off_grid?: boolean;
   /** v1.185.0 — which panel is the house panel, and whether one must be pinned. */
   housePanel?: { sn: string | null; state?: 'pinned' | 'missing' | 'ambiguous' | 'none'; ambiguous: boolean; missing?: string | null; panels: Array<{ sn: string; name: string }> };
+  /** v1.197.0 — the Cores a maintenance window holds now. */
+  maintenance?: MaintenanceWindowView[];
 }
 
 export interface ForecastHour {

@@ -1377,6 +1377,9 @@ export const WRITE_ONLY: Readonly<Record<string, string>> = {
   'api/house-panel': 'HousePanelPin: pin the house panel (POST)',
   'api/night-charge/cancel': 'NightChargeCard: cancel tonight (POST)',
   'api/device/refresh-cloud': 'RefreshCloudButton: refresh a device cloud session (POST)',
+  // v1.197.0 — the Core card's maintenance window (MaintenanceControl reads the snapshot's `maintenance`).
+  'api/maintenance': "MaintenanceControl: shelve a Core's alarms for a set time (POST)",
+  'api/maintenance/end': "MaintenanceControl: end a Core's maintenance window (POST)",
 };
 
 /** Paths that appear in web/src only inside comments (no request is made to them). */

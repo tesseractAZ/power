@@ -2,6 +2,7 @@
  "group": "G7",
  "value": {
   "binaries": [
+   {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"expire_after":120,"icon":"mdi:wrench-clock","name":"Maintenance Active","payload_available":"online","payload_not_available":"offline","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_maintenance_active","value_template":"{{ \"ON\" if value_json.maintenance_active else \"OFF\" }}"},"topic":"homeassistant/binary_sensor/ecoflow_maintenance_active/config"},
    {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"expire_after":120,"icon":"mdi:transmission-tower-off","name":"Off-Grid","payload_available":"online","payload_not_available":"offline","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_off_grid","value_template":"{{ \"ON\" if value_json.off_grid else \"OFF\" }}"},"topic":"homeassistant/binary_sensor/ecoflow_off_grid/config"},
    {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"expire_after":120,"icon":"mdi:transmission-tower","name":"SHP2 Grid Connected","payload_available":"online","payload_not_available":"offline","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_shp2_grid_connected","value_template":"{{ value_json.shp2_grid_connected }}"},"topic":"homeassistant/binary_sensor/ecoflow_shp2_grid_connected/config"},
    {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"expire_after":120,"icon":"mdi:transmission-tower-import","name":"Runway Projection Islanded-Only","payload_available":"online","payload_not_available":"offline","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_runway_projection_islanded_only","value_template":"{{ \"ON\" if value_json.runway_projection_islanded_only else \"OFF\" }}"},"topic":"homeassistant/binary_sensor/ecoflow_runway_projection_islanded_only/config"},
@@ -20,8 +21,8 @@
    "sig": "1:East Wing Energy:East Wing Power|2:Kitchen Energy:Kitchen Power|3:Range L1 L1 Energy:Range L1 L1 Power|4:Range L1 L2 Energy:Range L1 L2 Power|5:Circuit 5 Energy:Circuit 5 Power|6:EV Charger Energy:EV Charger Power"
   },
   "counts": {
-   "binaries": 11,
-   "sensors": 87,
+   "binaries": 12,
+   "sensors": 88,
    "switches": 4
   },
   "device": {
@@ -76,6 +77,7 @@
    {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"expire_after":120,"icon":"mdi:alert","name":"High Priority Alarms (P2)","payload_available":"online","payload_not_available":"offline","state_class":"measurement","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_alert_high_count","value_template":"{{ value_json.alert_high_count }}"},"topic":"homeassistant/sensor/ecoflow_alert_high_count/config"},
    {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"expire_after":120,"icon":"mdi:alert-outline","name":"Medium Priority Alarms (P3)","payload_available":"online","payload_not_available":"offline","state_class":"measurement","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_alert_medium_count","value_template":"{{ value_json.alert_medium_count }}"},"topic":"homeassistant/sensor/ecoflow_alert_medium_count/config"},
    {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"expire_after":120,"icon":"mdi:information-outline","name":"Low Priority Alarms (P4)","payload_available":"online","payload_not_available":"offline","state_class":"measurement","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_alert_low_count","value_template":"{{ value_json.alert_low_count }}"},"topic":"homeassistant/sensor/ecoflow_alert_low_count/config"},
+   {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"expire_after":120,"icon":"mdi:wrench-clock","json_attributes_template":"{{ {\"cores\": value_json.maintenance_summary | default([])} | tojson }}","json_attributes_topic":"ecoflow_panel/state","name":"Cores in Maintenance","payload_available":"online","payload_not_available":"offline","state_class":"measurement","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_maintenance_devices","value_template":"{{ value_json.maintenance_count }}"},"topic":"homeassistant/sensor/ecoflow_maintenance_devices/config"},
    {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"expire_after":120,"icon":"mdi:home-battery","name":"Fleet Devices Online","payload_available":"online","payload_not_available":"offline","state_class":"measurement","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_fleet_devices_online","value_template":"{{ value_json.fleet_devices_online }}"},"topic":"homeassistant/sensor/ecoflow_fleet_devices_online/config"},
    {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"entity_category":"diagnostic","expire_after":120,"icon":"mdi:cloud-alert","name":"Cloud-Wedged Devices","payload_available":"online","payload_not_available":"offline","state_class":"measurement","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_cloud_wedge_count","value_template":"{{ value_json.ecoflow_cloud_wedge_count }}"},"topic":"homeassistant/sensor/ecoflow_cloud_wedge_count/config"},
    {"cfg":{"availability_topic":"ecoflow_panel/availability","device":{"identifiers":["ecoflow_panel"],"manufacturer":"Power (open-source add-on)","model":"Analytics for EcoFlow SHP2 + Delta Pro Ultra","name":"Power","sw_version":"golden"},"entity_category":"diagnostic","expire_after":120,"icon":"mdi:radar","name":"Poll Health","payload_available":"online","payload_not_available":"offline","state_topic":"ecoflow_panel/state","unique_id":"ecoflow_poll_health","value_template":"{{ value_json.poll_health }}"},"topic":"homeassistant/sensor/ecoflow_poll_health/config"},
@@ -181,6 +183,7 @@
    "ecoflow_alert_high_count",
    "ecoflow_alert_medium_count",
    "ecoflow_alert_low_count",
+   "ecoflow_maintenance_devices",
    "ecoflow_fleet_devices_online",
    "ecoflow_cloud_wedge_count",
    "ecoflow_poll_health",
@@ -238,6 +241,7 @@
    "ecoflow_smart_backup_mode_code",
    "ecoflow_backup_mode_code",
    "ecoflow_overload_mode_code",
+   "ecoflow_maintenance_active",
    "ecoflow_off_grid",
    "ecoflow_shp2_grid_connected",
    "ecoflow_runway_projection_islanded_only",
@@ -253,6 +257,7 @@
    "ecoflow_alerts_high",
    "ecoflow_alerts_medium",
    "ecoflow_alerts_low",
+   "ecoflow_maintenance_end_all",
    "ecoflow_circuit_1_lifetime_kwh",
    "ecoflow_circuit_1_watts",
    "ecoflow_circuit_2_lifetime_kwh",

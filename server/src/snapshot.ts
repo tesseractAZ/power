@@ -162,6 +162,11 @@ export interface FleetSnapshot {
   off_grid?: boolean;
   /** v1.185.0 — the house panel and whether one must be pinned (the /api/snapshot enrichment). */
   housePanel?: { sn: string | null; state: 'pinned' | 'missing' | 'ambiguous' | 'none'; ambiguous: boolean; missing: string | null; panels: Array<{ sn: string; name: string }> };
+  /** v1.197.0 — the Cores a maintenance window holds now (the /api/snapshot enrichment; maintenanceWindow.ts). */
+  maintenance?: Array<{
+    sn: string; label: string; coreNum: number | null; startedAtMs: number; untilMs: number; remainingMs: number;
+    heldCount: number; heldCritical: number; source: 'web' | 'api' | 'ha'; note: string | null;
+  }>;
 }
 
 const INCLUDE_RAW = process.env.SNAPSHOT_INCLUDE_RAW === '1';

@@ -16,6 +16,10 @@ import {
   sensorDiscoveryConfig,
   MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE,
   DEVICE_INFO,
+  MAINTENANCE_ATTRIBUTES_TEMPLATE,
+  MAINTENANCE_END_ALL_TOPIC,
+  isMaintenanceEndAllCommand,
+  maintenanceStateFields,
 } from '../src/mqttDiscovery.js';
 import { middayChargeStateFields } from '../src/middayShadow.js';
 import { ALARM_PRIORITY_ORDER } from '../src/alertPriority.js';
@@ -449,6 +453,12 @@ test('mqtt-discovery: every value_json key a sensor references is emitted by bui
     mStart = mdSrc.indexOf('return {', mEnd);
   }
   assert.ok(src.includes('...middayChargeStateFields(getMiddayShadow()),'), 'buildState spreads the mid-day fields');
+  // v1.197.0 — … plus maintenanceStateFields() (this file): the maintenance windows in force, spread
+  // into buildState and /api/ha-state alike.
+  const mtStart = src.indexOf('return {', src.indexOf('export function maintenanceStateFields'));
+  assert.ok(mtStart > 0, 'could not locate maintenanceStateFields return block');
+  for (const m of src.slice(mtStart, src.indexOf('};', mtStart)).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+  assert.ok(src.includes('      ...maintenanceStateFields(maintenance?.active() ?? []'), 'buildState spreads the maintenance fields');
 
   const missing = referenced.filter((k) => !emitted.has(k)).sort();
   assert.deepEqual(missing, [], `Sensors reference value_json keys buildState never emits: ${missing.join(', ')}`);
@@ -717,8 +727,11 @@ test('planCircuitDiscovery: the latch signature covers the PUBLISHED name, not a
 test('★★★ mqtt-discovery: every mid-day figure carries a basis attribute; no other sensor changes', () => {
   const ids = ['ecoflow_midday_charge_target_soc', 'ecoflow_midday_charge_reserve_hold', 'ecoflow_midday_charge_expected_buy_kwh',
     'ecoflow_midday_charge_buy_kwh', 'ecoflow_midday_charge_window_start_at', 'ecoflow_midday_charge_window_end_at', 'ecoflow_midday_charge_refresh'];
-  const withAttrs = SENSORS.filter((x) => x.json_attributes_template != null).map((x) => x.unique_id).sort();
-  assert.deepEqual(withAttrs, [...ids].sort(), 'exactly the mid-day figures');
+  // v1.197.0 — and the maintenance sensor, whose one attribute (`cores`) lists the shelved Cores; it is
+  // pinned in its own test below. Every OTHER sensor is still unchanged.
+  const MAINT = 'ecoflow_maintenance_devices';
+  const withAttrs = SENSORS.filter((x) => x.json_attributes_template != null && x.unique_id !== MAINT).map((x) => x.unique_id).sort();
+  assert.deepEqual(withAttrs, [...ids].sort(), 'exactly the mid-day figures (the maintenance sensor aside)');
   for (const id of ids) {
     const cfg = sensorDiscoveryConfig(SENSORS.find((x) => x.unique_id === id)!);
     assert.equal(cfg.json_attributes_topic, 'ecoflow_panel/state', `${id}: attributes from the state topic`);
@@ -728,7 +741,7 @@ test('★★★ mqtt-discovery: every mid-day figure carries a basis attribute; 
   }
   assert.equal(MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE, '{{ {"basis": value_json.midday_charge_basis | default(none)} | tojson }}');
   // Every other sensor's config is what it was: no attribute keys at all.
-  for (const x of SENSORS.filter((y) => !ids.includes(y.unique_id))) {
+  for (const x of SENSORS.filter((y) => !ids.includes(y.unique_id) && y.unique_id !== MAINT)) {
     const cfg = sensorDiscoveryConfig(x);
     assert.equal('json_attributes_topic' in cfg, false, x.unique_id);
     assert.equal('json_attributes_template' in cfg, false, x.unique_id);
@@ -791,4 +804,28 @@ test('★★★ mqtt-discovery: the mid-day window bounds are timestamp sensors 
   // The window bounds are the only timestamp (or date) sensors; every other sensor is numeric or text.
   const dated = SENSORS.filter((x) => x.device_class === 'timestamp' || x.device_class === 'date').map((x) => x.unique_id).sort();
   assert.deepEqual(dated, ['ecoflow_midday_charge_window_end_at', 'ecoflow_midday_charge_window_start_at']);
+});
+
+test('★★ v1.197.0 maintenance: the state keys, the sensor and its attribute, the binary sensor, and an End-all press that only ENDS', () => {
+  const hm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
+  assert.deepEqual(maintenanceStateFields([], hm), { maintenance_active: false, maintenance_count: 0, maintenance_summary: [] });
+  assert.deepEqual(maintenanceStateFields([{ label: 'Core 3', untilMs: Date.UTC(2026, 9, 30, 14, 30) }], hm),
+    { maintenance_active: true, maintenance_count: 1, maintenance_summary: ['Core 3 until 14:30'] });
+  const sensor = SENSORS.find((x) => x.unique_id === 'ecoflow_maintenance_devices');
+  assert.ok(sensor);
+  assert.equal(sensor.value_template, '{{ value_json.maintenance_count }}');
+  assert.equal(sensor.json_attributes_template, MAINTENANCE_ATTRIBUTES_TEMPLATE);
+  assert.equal(MAINTENANCE_ATTRIBUTES_TEMPLATE, '{{ {"cores": value_json.maintenance_summary | default([])} | tojson }}',
+    'the attribute HA keeps is `cores` (an attribute the template does not name never reaches /api/states)');
+  assert.ok('json_attributes_topic' in sensorDiscoveryConfig(sensor), 'the attribute topic is set with the template');
+  const bin = BINARY_SENSORS.find((x) => x.unique_id === 'ecoflow_maintenance_active');
+  assert.equal(bin?.value_template, '{{ "ON" if value_json.maintenance_active else "OFF" }}');
+  assert.equal(isMaintenanceEndAllCommand(MAINTENANCE_END_ALL_TOPIC, 'PRESS'), true);
+  assert.equal(isMaintenanceEndAllCommand(MAINTENANCE_END_ALL_TOPIC, ' press '), true);
+  assert.equal(isMaintenanceEndAllCommand(MAINTENANCE_END_ALL_TOPIC, 'ON'), false, 'an unknown payload is a no-op');
+  assert.equal(isMaintenanceEndAllCommand(alertSwitchCommandTopic('critical'), 'PRESS'), false);
+  // Nothing over MQTT can START a window: the only maintenance command topic is the end-all one.
+  const src = readFileSync(resolve(__dirname, '../src/mqttDiscovery.ts'), 'utf8');
+  assert.equal((src.match(/maintenance\/[a-z_]+\/set/g) ?? []).length, 1, 'one maintenance command topic');
+  assert.ok(!/maintenance(?:\?\.|\.)start\(/.test(src), 'mqttDiscovery never starts a window');
 });
