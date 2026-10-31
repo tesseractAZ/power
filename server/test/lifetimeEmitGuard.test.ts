@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { guardLifetimeEmit, LIFETIME_HOLD_DIP_WH } from '../src/recorder.js';
+import { guardLifetimeEmit, LIFETIME_HOLD_DIP_WH, LIFETIME_RETURN_SHARE } from '../src/recorder.js';
 import { haTotalIncreasing } from './helpers/haTotalIncreasing.js';
 
 /**
@@ -62,6 +62,41 @@ test('guardLifetimeEmit — a non-finite reading is held at the last value; with
   assert.ok(!Number.isFinite(guardLifetimeEmit(undefined, Number.NaN).emitWh));
 });
 
+// v1.193.0 — the 2026-06-08 shape: every counter read about 0 for an hour, then its old value, and
+// Home Assistant booked each one a second time (PV +808.6 kWh, Home Consumption +825.1 kWh). A drop
+// the guard continues from is OWED (the recorder keeps it in lifetime_basis.owed_wh); when the
+// reading climbs back, the owed shift is taken back instead of being published as energy.
+test('v1.193.0 — an unexplained drop that RETURNS is taken back, never published twice', () => {
+  const down = guardLifetimeEmit(92_047, 100);
+  assert.deepEqual(down, { emitWh: 92_047, rebaseWh: 91_947, verdict: 'rebased' });
+  // The next read: the row back plus 50 Wh of new energy, carried by the 91,947 Wh shift.
+  const back = guardLifetimeEmit(92_047, 92_097 + 91_947, LIFETIME_HOLD_DIP_WH, 91_947);
+  assert.deepEqual(back, { emitWh: 92_097, rebaseWh: -91_947, verdict: 'returned' });
+  assert.deepEqual(haTotalIncreasing([92_047, down.emitWh, back.emitWh]), { sum: 50, resets: 0, phantomWh: 0, dips: 0, negativeWh: 0 });
+  // Nothing owed (the take-back removed): the same read publishes the counter twice.
+  assert.equal(guardLifetimeEmit(92_047, 92_097 + 91_947).emitWh, 184_044);
+});
+
+test('v1.193.0 — the take-back: at most the amount owed, and only a rise over the hold and of at least half of it', () => {
+  assert.equal(LIFETIME_RETURN_SHARE, 0.5);
+  // Owed 10 kWh, a 30 kWh rise: 10 taken back, 20 published.
+  assert.deepEqual(guardLifetimeEmit(100_000, 130_000, LIFETIME_HOLD_DIP_WH, 10_000), { emitWh: 120_000, rebaseWh: -10_000, verdict: 'returned' });
+  // A rise short of the owed: all of it taken back, the last value published again.
+  assert.deepEqual(guardLifetimeEmit(100_000, 160_000, LIFETIME_HOLD_DIP_WH, 100_000), { emitWh: 100_000, rebaseWh: -60_000, verdict: 'returned' });
+  // Half the owed is the line.
+  assert.deepEqual(guardLifetimeEmit(100_000, 149_999, LIFETIME_HOLD_DIP_WH, 100_000), { emitWh: 149_999, rebaseWh: 0, verdict: 'rise' });
+  assert.deepEqual(guardLifetimeEmit(100_000, 150_000, LIFETIME_HOLD_DIP_WH, 100_000), { emitWh: 100_000, rebaseWh: -50_000, verdict: 'returned' });
+  // Real energy between two reads is published as read, however much is owed.
+  assert.deepEqual(guardLifetimeEmit(92_047, 94_047, LIFETIME_HOLD_DIP_WH, 91_947), { emitWh: 94_047, rebaseWh: 0, verdict: 'rise' });
+  // A rise of up to the hold is never a return (owed 6 kWh: 5 kWh is a rise, 5.001 kWh a return).
+  assert.deepEqual(guardLifetimeEmit(100_000, 105_000, LIFETIME_HOLD_DIP_WH, 6_000), { emitWh: 105_000, rebaseWh: 0, verdict: 'rise' });
+  assert.deepEqual(guardLifetimeEmit(100_000, 105_001, LIFETIME_HOLD_DIP_WH, 6_000), { emitWh: 100_000, rebaseWh: -5_001, verdict: 'returned' });
+  // Nothing owed, a negative or a non-finite owed: a rise.
+  for (const owed of [0, -10_000, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.deepEqual(guardLifetimeEmit(100_000, 130_000, LIFETIME_HOLD_DIP_WH, owed), { emitWh: 130_000, rebaseWh: 0, verdict: 'rise' }, `owed ${owed}`);
+  }
+});
+
 /** Deterministic PRNG (mulberry32), so a failure reproduces. */
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -94,6 +129,49 @@ test('property — 1,000 random walks (steps −20 kWh … +2 kWh): the emitted 
     const ha = haTotalIncreasing(emitted);
     assert.equal(ha.resets, 0, `walk ${walk}: no meter reset`);
     assert.equal(ha.dips, 0, `walk ${walk}: no negative change`);
+  }
+});
+
+// A drop holds one offset for its reads (a counter reads its row or 0; the 06-08 hour read 0
+// throughout) and a clean read comes between two drops. A drop that comes back in steps each under
+// half of what is owed is not recognised: those steps are published (the guard's docblock).
+test('property — 1,000 walks with drops that come back (offsets of 6 kWh up to the whole counter, 1–3 reads): HA books exactly the real energy, and each shift goes back to 0', () => {
+  const rand = rng(0x0608);
+  for (let walk = 0; walk < 1_000; walk++) {
+    let real = 50_000 + rand() * 1_000_000;
+    const first = real;
+    let hw: number | undefined;
+    let shift = 0;
+    let owed = 0;
+    let glitch = 0; // reads left in the current drop
+    let inDrop = false; // the previous read was inside a drop
+    let offset = 0;
+    const emitted: number[] = [];
+    for (let step = 0; step < 80; step++) {
+      real += rand() * 2_000;
+      if (glitch === 0 && !inDrop && step > 0 && step < 70 && rand() < 0.08) {
+        glitch = 1 + Math.floor(rand() * 3);
+        offset = rand() < 0.3 ? real : 6_000 + rand() * (real - 6_000); // to 0, or part of the way
+      }
+      const read = (glitch > 0 ? Math.max(0, real - offset) : real) + shift;
+      inDrop = glitch > 0;
+      if (glitch > 0) glitch--;
+      const g = guardLifetimeEmit(hw, read, LIFETIME_HOLD_DIP_WH, owed);
+      if (g.verdict === 'rebased' || g.verdict === 'returned') {
+        shift += g.rebaseWh;
+        owed = Math.max(0, owed + g.rebaseWh);
+      }
+      if (hw != null) assert.ok(g.emitWh >= hw, `walk ${walk} step ${step}: ${g.emitWh} after ${hw}`);
+      hw = g.emitWh;
+      emitted.push(g.emitWh);
+    }
+    // The walk ends outside a drop (none starts after step 70).
+    const ha = haTotalIncreasing(emitted);
+    assert.equal(ha.resets, 0, `walk ${walk}: no meter reset`);
+    assert.equal(ha.dips, 0, `walk ${walk}: no negative change`);
+    assert.ok(Math.abs(shift) < 1e-6 && owed < 1e-6, `walk ${walk}: shift ${shift}, owed ${owed} once every drop came back`);
+    assert.ok(Math.abs(ha.sum - (emitted[emitted.length - 1] - emitted[0])) < 1e-6);
+    assert.ok(Math.abs(emitted[emitted.length - 1] - real) < 1e-6, `walk ${walk}: published ${emitted[emitted.length - 1]}, real ${real} (from ${first})`);
   }
 });
 

@@ -685,10 +685,15 @@ genuine reset") never emits below the last value emitted:
 ```
 if lastEmitted == null:            emit total                        // 'first'
 if total is not finite:            emit lastEmitted                  // 'held'
-if total ≥ lastEmitted:            emit total                        // 'rise'
+if total ≥ lastEmitted:
+  rise = total − lastEmitted
+  if owed > 0 and rise > 5 kWh and rise ≥ owed / 2:
+                                   back = min(owed, rise)
+                                   emit total − back, shift −= back, owed −= back  // 'returned'
+  else:                            emit total                        // 'rise'
 dip = lastEmitted − total
 if dip ≤ LIFETIME_HOLD_DIP_WH (5 kWh): emit lastEmitted              // 'held'
-else:                              emit lastEmitted, shift += dip    // 'rebased'
+else:                     emit lastEmitted, shift += dip, owed += dip // 'rebased'
 ```
 
 A **held** dip (`heldWh` in `details`) is never counted twice: energy the reading
@@ -700,7 +705,13 @@ the key's basis shift, and one line is logged: `recorder: v1.193.0 WARN lifetime
 counter <key> read X kWh, D kWh below the L kWh last published — …`. The shift is
 written at once; a battery key's waits for the floors' transaction at the next rollup
 (written alone after a failed floor commit, it would pair the old floor row with the
-new shift). A replaced database (rows near 0, the sidecar intact) is that case. With
+new shift). A replaced database (rows near 0, the sidecar intact) is that case. The
+rebased amount stays **owed** (`lifetime_basis.owed_wh`) until the reading climbs back:
+a rise over 5 kWh and at least half of what is owed is the drop **returning**, and up
+to the amount owed is taken back off the shift (logged: `… climbed back X kWh of an
+unexplained drop — taken back off its basis shift`). Without it a counter that read 0
+and then its old value (every counter on 2026-06-08, 18:00–19:00) would publish twice
+its value. A rise taken back by mistake costs at most the amount owed. With
 no last value and no finite reading the key is left out and its field publishes null,
 never a fabricated 0.
 

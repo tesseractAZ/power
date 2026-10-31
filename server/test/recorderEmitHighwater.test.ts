@@ -33,6 +33,7 @@ process.env.DB_PATH = join(tmp, 'ecoflow.db');
 
 const { createRecorder } = await import('../src/recorder.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
+const { haTotalIncreasing } = await import('./helpers/haTotalIncreasing.js');
 
 const DB_PATH = process.env.DB_PATH!;
 const SIDECAR = join(dirname(DB_PATH), '.emit-highwater.json');
@@ -212,4 +213,49 @@ test('v1.193.0 — the sidecar is written to a .tmp and renamed: a failed write 
   }
   assert.ok(JSON.parse(readFileSync(SIDECAR, 'utf8'))[KEY_HOLD] >= LAST_EMITTED_WH + 1_000, 'the next write lands');
   assert.equal(existsSync(`${SIDECAR}.tmp`), false);
+});
+
+// v1.193.0 — the 2026-06-08 shape: every counter read 0 for an hour, then its old value, and Home
+// Assistant booked each one twice. The drop the guard continued from is owed (lifetime_basis.owed_wh)
+// and taken back when the counter climbs back, in the same process or after a restart.
+test('v1.193.0 — a counter that reads 0 and then its old value is published continuously: the drop is taken back, never booked twice (also across a restart)', () => {
+  // Last in the file: the corrupt-sidecar test needs this key never seen before it.
+  const KEY = 'fleet_grid_home_wh';
+  const H = 812_345;
+  const basisRow = () => {
+    const raw = new DatabaseSync(DB_PATH);
+    const r = raw.prepare(`SELECT shift_wh, owed_wh, reason FROM lifetime_basis WHERE metric_key = ?`).get(KEY) as { shift_wh: number; owed_wh: number; reason: string } | undefined;
+    raw.close();
+    return r && { ...r };
+  };
+  const lines: string[] = [];
+  const pub: number[] = [];
+  let rec = createRecorder(new SnapshotStore(), (m: string) => lines.push(m));
+  setPersistedFloor(KEY, H);
+  pub.push(totalOf(rec.getLifetimeTotals(), KEY));
+  setPersistedFloor(KEY, 0); // the hour it read 0
+  let t = rec.getLifetimeTotals();
+  pub.push(totalOf(t, KEY));
+  assert.equal(totalOf(t, KEY), H);
+  assert.equal(t[KEY].shiftWh, H, 'continued from the last value');
+  assert.deepEqual(basisRow(), { shift_wh: H, owed_wh: H, reason: 'unexplained drop' }, 'the drop is owed, written at once');
+  setPersistedFloor(KEY, H + 50); // back, plus 50 Wh of new energy
+  t = rec.getLifetimeTotals();
+  pub.push(totalOf(t, KEY));
+  assert.equal(totalOf(t, KEY), H + 50, 'the return is not energy: H + 50 Wh, not 2H + 50 Wh');
+  assert.equal(t[KEY].shiftWh, 0, 'the shift is taken back');
+  assert.deepEqual(basisRow(), { shift_wh: 0, owed_wh: 0, reason: 'unexplained drop returned' });
+  assert.ok(lines.some((l) => l.includes(`lifetime counter ${KEY} climbed back 812.345 kWh of an unexplained drop`)), 'the take-back is logged');
+  // Across a restart: the drop before it, the return after it.
+  setPersistedFloor(KEY, 0);
+  pub.push(totalOf(rec.getLifetimeTotals(), KEY));
+  rec.close();
+  setPersistedFloor(KEY, H + 120);
+  rec = createRecorder(new SnapshotStore(), () => {});
+  t = rec.getLifetimeTotals();
+  pub.push(totalOf(t, KEY));
+  assert.equal(totalOf(t, KEY), H + 120, 'the owed drop survives the restart and is taken back');
+  assert.equal(t[KEY].shiftWh, 0);
+  rec.close();
+  assert.deepEqual(haTotalIncreasing(pub), { sum: 120, resets: 0, phantomWh: 0, dips: 0, negativeWh: 0 }, 'HA books the 120 Wh of new energy and nothing else');
 });

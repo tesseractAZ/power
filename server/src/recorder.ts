@@ -370,8 +370,13 @@ export interface LifetimeTotals {
  *  (every key; v1.188.1 gave it to two). A larger drop continues from the last value instead. */
 export const LIFETIME_HOLD_DIP_WH = 5_000;
 
+/** v1.193.0 — a rise counts as an unexplained drop coming back when it is at least this share of
+ *  the drop still owed (and over LIFETIME_HOLD_DIP_WH): a counter that fell by X for no known reason
+ *  and returns climbs by about X in one read, which real energy between two reads does not. */
+export const LIFETIME_RETURN_SHARE = 0.5;
+
 /** v1.193.0 — what guardLifetimeEmit did with one reading. */
-export type LifetimeEmitVerdict = 'first' | 'rise' | 'held' | 'rebased';
+export type LifetimeEmitVerdict = 'first' | 'rise' | 'held' | 'rebased' | 'returned';
 
 /**
  * v1.193.0 — the published-counter guard (pure, testable core; was clampLifetimeDip, v0.15.14).
@@ -385,7 +390,16 @@ export type LifetimeEmitVerdict = 'first' | 'rise' | 'held' | 'rebased';
  *     pending energy the read path no longer sees): never counted twice (energy taken back for a
  *     while is published late, energy dropped for good costs that much of what follows);
  *   - a larger drop is REBASED: the last value is emitted and the caller carries the counter by
- *     `rebaseWh` (its basis shift), so the next readings continue from it.
+ *     `rebaseWh` (its basis shift), so the next readings continue from it. The caller also keeps
+ *     the amount as OWED (`owedWh`), until the reading climbs back;
+ *   - a rise of at least LIFETIME_RETURN_SHARE of the amount owed (and over `holdWh`) is that drop
+ *     RETURNING (verdict 'returned'): up to the amount owed is taken back off the shift
+ *     (`rebaseWh` < 0) and only the rest is emitted as new. Without it a drop that comes back (the
+ *     2026-06-08 hour every counter read 0, then its old value) is published as its old value
+ *     plus the shift, and HA books the whole counter a second time. A rise taken back by mistake
+ *     costs at most the amount owed, never more than the drop added. A drop that comes back in
+ *     steps each under that share is published as it comes back (a counter reads its row or 0, so
+ *     a drop holds one offset until it ends).
  * A non-finite reading is held; with no last value either the result is non-finite and the caller
  * leaves the key out (its field publishes null, never a fabricated 0).
  */
@@ -393,11 +407,20 @@ export function guardLifetimeEmit(
   lastEmittedWh: number | undefined,
   totalWh: number,
   holdWh = LIFETIME_HOLD_DIP_WH,
+  owedWh = 0,
 ): { emitWh: number; rebaseWh: number; verdict: LifetimeEmitVerdict } {
   const hw = lastEmittedWh != null && Number.isFinite(lastEmittedWh) ? lastEmittedWh : undefined;
   if (hw == null) return { emitWh: totalWh, rebaseWh: 0, verdict: 'first' };
   if (!Number.isFinite(totalWh)) return { emitWh: hw, rebaseWh: 0, verdict: 'held' };
-  if (totalWh >= hw) return { emitWh: totalWh, rebaseWh: 0, verdict: 'rise' };
+  if (totalWh >= hw) {
+    const owed = Number.isFinite(owedWh) && owedWh > 0 ? owedWh : 0;
+    const rise = totalWh - hw;
+    if (owed > 0 && rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE) {
+      const back = Math.min(owed, rise);
+      return { emitWh: totalWh - back, rebaseWh: -back, verdict: 'returned' };
+    }
+    return { emitWh: totalWh, rebaseWh: 0, verdict: 'rise' };
+  }
   const dip = hw - totalWh;
   return dip <= holdWh ? { emitWh: hw, rebaseWh: 0, verdict: 'held' } : { emitWh: hw, rebaseWh: dip, verdict: 'rebased' };
 }
@@ -1165,11 +1188,14 @@ export function createRecorder(
     -- so Home Assistant never sees the step. A table of its own, not lifetime_totals rows:
     -- listLifetimeKeys feeds the MQTT discovery and the pack-row regexes. The battery rows are
     -- written in one transaction with the floors they shift (rollupLifetime).
+    -- owed_wh: the part of shift_wh an unexplained drop added and the counter has not climbed back
+    -- by yet (guardLifetimeEmit takes it back off the shift when it does).
     CREATE TABLE IF NOT EXISTS lifetime_basis (
       metric_key TEXT PRIMARY KEY,
       shift_wh REAL NOT NULL,
       updated_ts INTEGER NOT NULL,
-      reason TEXT NOT NULL
+      reason TEXT NOT NULL,
+      owed_wh REAL NOT NULL DEFAULT 0
     );
     -- v1.193.0 — the accepted SHP2 source roster the battery floors are seeded against (one row),
     -- committed in the same transaction as the floors and their basis shifts. bms-membership.json
@@ -2724,28 +2750,41 @@ export function createRecorder(
   // loaded here, before any read can emit: a shift missing at a restart would publish the row
   // alone, a step Home Assistant reads as a meter reset (down) or as energy (up).
   const basisUpsertStmt = db.prepare(
-    `INSERT INTO lifetime_basis (metric_key, shift_wh, updated_ts, reason) VALUES (?, ?, ?, ?)
-     ON CONFLICT(metric_key) DO UPDATE SET shift_wh = excluded.shift_wh, updated_ts = excluded.updated_ts, reason = excluded.reason`,
+    `INSERT INTO lifetime_basis (metric_key, shift_wh, updated_ts, reason, owed_wh) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(metric_key) DO UPDATE SET shift_wh = excluded.shift_wh, updated_ts = excluded.updated_ts, reason = excluded.reason, owed_wh = excluded.owed_wh`,
   );
+  /** The part of each shift an unexplained drop added and the counter has not climbed back by yet
+   *  (guardLifetimeEmit's `owedWh`). Loaded with the shifts: a drop before a restart that returns
+   *  after it is still taken back. */
+  const basisOwed = new Map<string, number>();
   const basisShift: Map<string, number> = (() => {
     const m = new Map<string, number>();
     try {
-      for (const r of db.prepare(`SELECT metric_key, shift_wh FROM lifetime_basis`).all() as Array<{ metric_key: string; shift_wh: number }>) {
+      for (const r of db.prepare(`SELECT metric_key, shift_wh, owed_wh FROM lifetime_basis`).all() as Array<{ metric_key: string; shift_wh: number; owed_wh: number }>) {
         if (Number.isFinite(r.shift_wh)) m.set(r.metric_key, r.shift_wh);
+        if (Number.isFinite(r.owed_wh) && r.owed_wh > 0) basisOwed.set(r.metric_key, r.owed_wh);
       }
     } catch (e: any) {
       log(`recorder: could not read the lifetime basis shifts (${e?.message ?? e}) — the guard rebases a drop; a rise is published`);
     }
     return m;
   })();
+  const upsertBasis = (key: string, d: { ts: number; reason: string }): void => {
+    basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason, basisOwed.get(key) ?? 0);
+  };
   /** Shifts changed in memory and not yet written: the ABSOLUTE value is written, so a retry after a
    *  failed write is idempotent. */
   const basisDirty = new Map<string, { ts: number; reason: string }>();
   /** Carry a published counter by `deltaWh` more (in memory; written by writeBasisDirty or, for the
    *  battery keys, with the floors in rollupLifetime's transaction). */
-  const addBasisShift = (key: string, deltaWh: number, ts: number, reason: string): number => {
+  const addBasisShift = (key: string, deltaWh: number, ts: number, reason: string, owedDeltaWh = 0): number => {
     const next = (basisShift.get(key) ?? 0) + (Number.isFinite(deltaWh) ? deltaWh : 0);
     basisShift.set(key, next);
+    if (owedDeltaWh !== 0 && Number.isFinite(owedDeltaWh)) {
+      const owed = Math.max(0, (basisOwed.get(key) ?? 0) + owedDeltaWh);
+      if (owed > 0) basisOwed.set(key, owed);
+      else basisOwed.delete(key);
+    }
     basisDirty.set(key, { ts, reason });
     return next;
   };
@@ -2765,7 +2804,7 @@ export function createRecorder(
     try {
       for (const [key, d] of basisDirty) {
         if (FLOOR_SHIFT_KEYS.has(key)) continue;
-        basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason);
+        upsertBasis(key, d);
         basisDirty.delete(key);
       }
       lastBasisWriteError = null;
@@ -3769,7 +3808,7 @@ export function createRecorder(
       writeLifetime('fleet_battery_charge_wh', bmsChargeFloor, ts);
       writeLifetime('fleet_battery_discharge_wh', bmsDischargeFloor, ts);
       if (bmsMembershipFp !== null) membershipRowUpsertStmt.run(bmsMembershipFp, ts);
-      for (const [key, d] of basisDirty) basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason);
+      for (const [key, d] of basisDirty) upsertBasis(key, d);
       db.prepare('COMMIT').run();
     } catch (e: any) {
       try { db.prepare('ROLLBACK').run(); } catch { /* the transaction is already gone */ }
@@ -4140,7 +4179,7 @@ export function createRecorder(
       // "genuine reset" this used to pass through as a meter reset and booked the whole reading again.
       const hw = lifetimeEmitHighWater.get(key);
       const readWh = persistedWh + pendingWh;
-      const g = guardLifetimeEmit(hw, readWh);
+      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key) ?? 0);
       // No last value and no finite reading: the key is left out and its field publishes null.
       if (!Number.isFinite(g.emitWh)) continue;
       // A non-finite reading with a last value: that value again, nothing new.
@@ -4149,9 +4188,20 @@ export function createRecorder(
         continue;
       }
       let shift = shiftWh;
+      if (g.verdict === 'returned') {
+        // The unexplained drop came back: its shift is taken back, so the return is not booked as
+        // energy on top of the value the drop was continued from.
+        persistedWh += g.rebaseWh;
+        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop returned', g.rebaseWh);
+        writeBasisDirty();
+        log(
+          `recorder: v1.193.0 lifetime counter ${key} climbed back ${(-g.rebaseWh / 1000).toFixed(3)} kWh of an unexplained drop — ` +
+          `taken back off its basis shift, not published as energy; basis shift ${(shift / 1000).toFixed(3)} kWh`,
+        );
+      }
       if (g.verdict === 'rebased') {
         persistedWh += g.rebaseWh;
-        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop');
+        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop', g.rebaseWh);
         writeBasisDirty();
         log(
           `recorder: v1.193.0 WARN lifetime counter ${key} read ${(readWh / 1000).toFixed(3)} kWh, ` +

@@ -6,7 +6,8 @@
  * changes (a Core leaving or joining, the v1.98.0 floor-gap repair); the published counters continue
  * from their last values, the difference carried as a basis shift committed with the floors. A Core
  * that joins counts from the re-seed. Every counter holds a drop up to 5 kWh and continues from the
- * last value past it. A read integrates the panel series up to the newest reading only.
+ * last value past it, and takes that continuation back when the drop comes back. A read integrates
+ * the panel series up to the newest reading only.
  *
  *   Re-seed    L-i..L-iii   (the membership shift, the floor-gap shift, the shift's sign)
  *              L-xiii..L-xv (the accepted set moves before the recompute; both shifts start from the
@@ -15,6 +16,9 @@
  *   Joiners    L-v          (summed before the re-seed)
  *   Guard      L-iv, L-viii, L-ix (a large drop passes; the hold is 50 Wh on the watt keys; a held
  *                            dip is published)
+ *              L-xxxi..L-xxxvii (a drop that comes back is taken back: at most the amount owed,
+ *                            only a return-sized rise; the rebase is owed, the read passes it, and
+ *                            it is written and loaded across a restart)
  *   Persist    L-vi, L-x..L-xii, L-xvi, L-xvii (the shifts loaded at boot; the floors commit with
  *                            their shifts; the roster file follows the commit; the read path takes
  *                            the in-memory floors; the rebase is written at once; the sidecar is
@@ -115,9 +119,59 @@ const MUTANTS = [
   {
     id: 'L-viii. ★★ the hold is 50 Wh on the watt keys again',
     file: REC,
-    find: '      const g = guardLifetimeEmit(hw, readWh);',
-    to: "      const g = guardLifetimeEmit(hw, readWh, key.startsWith('fleet_battery') ? LIFETIME_HOLD_DIP_WH : 50); /* MUTANT */",
+    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key) ?? 0);',
+    to: "      const g = guardLifetimeEmit(hw, readWh, key.startsWith('fleet_battery') ? LIFETIME_HOLD_DIP_WH : 50, basisOwed.get(key) ?? 0); /* MUTANT */",
     why: 'A 538 Wh dip across a restart is rebased instead of held: when the row catches up the energy is published twice.',
+  },
+  /* ── an unexplained drop that comes back is taken back (the 2026-06-08 hour) ── */
+  {
+    id: 'L-xxxi. ★★★ a drop that comes back is published on top of its shift',
+    file: REC,
+    find: '    if (owed > 0 && rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE) {',
+    to: '    if (false) { /* MUTANT */',
+    why: 'A counter that reads 0 for an hour and then its old value publishes twice its value: Home Assistant books the whole counter again (PV +808.6 kWh on 2026-06-08).',
+  },
+  {
+    id: 'L-xxxii. ★★ the take-back takes the whole rise, not at most the amount owed',
+    file: REC,
+    find: '      const back = Math.min(owed, rise);',
+    to: '      const back = rise; /* MUTANT */',
+    why: 'A return with new energy behind it loses that energy: owed 10 kWh, a 30 kWh rise publishes nothing new instead of 20 kWh.',
+  },
+  {
+    id: 'L-xxxiii. ★★ any rise over the hold is a return, whatever is owed',
+    file: REC,
+    find: '    if (owed > 0 && rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE) {',
+    to: '    if (owed > 0 && rise > holdWh) { /* MUTANT */',
+    why: 'Real energy after a replaced database (269 kWh owed for good) is taken back 5 kWh at a time: the counter stalls.',
+  },
+  {
+    id: 'L-xxxiv. ★★★ the rebase is not owed',
+    file: REC,
+    find: "        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop', g.rebaseWh);",
+    to: "        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop'); /* MUTANT */",
+    why: 'The guard is right and the recorder never feeds it: the drop that comes back is published twice.',
+  },
+  {
+    id: 'L-xxxv. ★★★ the read passes nothing owed to the guard',
+    file: REC,
+    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key) ?? 0);',
+    to: '      const g = guardLifetimeEmit(hw, readWh); /* MUTANT */',
+    why: 'The amount owed is kept and written, and the guard never sees it: the drop that comes back is published twice.',
+  },
+  {
+    id: 'L-xxxvi. ★★★ the amount owed is not loaded at boot',
+    file: REC,
+    find: '        if (Number.isFinite(r.owed_wh) && r.owed_wh > 0) basisOwed.set(r.metric_key, r.owed_wh);',
+    to: '        /* MUTANT */',
+    why: 'A drop before a restart that comes back after it is published twice.',
+  },
+  {
+    id: 'L-xxxvii. ★★★ the amount owed is written as 0',
+    file: REC,
+    find: '    basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason, basisOwed.get(key) ?? 0);',
+    to: '    basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason, 0); /* MUTANT */',
+    why: 'The same, across a restart: the next process loads nothing owed.',
   },
   {
     id: 'L-ix. ★★★ a held dip is published',
@@ -137,8 +191,8 @@ const MUTANTS = [
   {
     id: 'L-x. ★★★ the floors commit before their shifts are written',
     file: REC,
-    find: "      for (const [key, d] of basisDirty) basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason);\n      db.prepare('COMMIT').run();",
-    to: "      db.prepare('COMMIT').run(); /* MUTANT */\n      for (const [key, d] of basisDirty) basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason);",
+    find: "      for (const [key, d] of basisDirty) upsertBasis(key, d);\n      db.prepare('COMMIT').run();",
+    to: "      db.prepare('COMMIT').run(); /* MUTANT */\n      for (const [key, d] of basisDirty) upsertBasis(key, d);",
     why: 'A failed shift write leaves a re-seeded floor with the old shift: the next process publishes the step.',
   },
   {
@@ -158,8 +212,8 @@ const MUTANTS = [
   {
     id: 'L-xvi. ★★ the guard\'s rebase waits for the next rollup to be written',
     file: REC,
-    find: '        writeBasisDirty();',
-    to: '        /* MUTANT */',
+    find: "        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop', g.rebaseWh);\n        writeBasisDirty();",
+    to: "        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop', g.rebaseWh);\n        /* MUTANT */",
     why: 'A crash before the next rollup loses the shift: the next process rebases again from a stale high-water.',
   },
   {
