@@ -67,8 +67,8 @@ power and an energy sensor for every Smart Home Panel 2 circuit; the energy coun
 Energy Dashboard), and opt-in **Home Assistant notifications** with companion-app push.
 
 Every change ships through the test suite, and a guard that a plausible refactor could silently
-disarm is held by a committed mutation harness: **138 harnesses** holding
-**3986 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
+disarm is held by a committed mutation harness: **140 harnesses** holding
+**4081 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
 floor and group counts, and every engine-index row's code anchor are checked against the tree in
 CI ([Quality & accuracy](#quality--accuracy)).
 
@@ -90,7 +90,7 @@ reports the site clock, coordinates, currency and PV array in force.
 > and what to do, what Power writes to your devices, options by goal, and troubleshooting.
 > Every option is in [`docs/guide/options.md`](docs/guide/options.md) and every Home
 > Assistant entity in [`docs/guide/entities.md`](docs/guide/entities.md). The
-> [engineering reference](docs/reference/README.md) (~12,700 lines in 19 reference files)
+> [engineering reference](docs/reference/README.md) (~13,200 lines in 19 reference files)
 > documents **every** feature and engine — what each does, the exact algorithm and math it
 > computes, how data traces through the pipeline, its endpoints/sensors, config knobs, and
 > edge-case guards. This README is the tour; the reference is the manual.
@@ -445,7 +445,7 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 5,800 tests
+cd server && npm install && npm test     # 5,884 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
