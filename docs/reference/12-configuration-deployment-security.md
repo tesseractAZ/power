@@ -337,6 +337,16 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
   its API, created its database and spawned its workers, and the host audit journal held no
   ALLOWED/DENIED record for either. The final profile was compiled fresh (`apparmor_parser -T -Q -K`)
   before shipping. Invariants pinned in `apparmorProfile.test.ts` (harness `mutate-v1187-15.mjs`).
+- **Review 2026-10-31 (v1.197.2), the per-tree profile:** the boot test below ran on the v1.197.0 image
+  and again on the v1.197.1 image (the image this release ships with; v1.197.2 changes no image
+  file), rules sha256 `7eb370fc…`. Each run: a complain pass and an enforced pass of three boots and
+  three stops (3–6 s, exit 0, clean-shutdown marker written), the API, a WebSocket, the worker
+  reports, the maintenance endpoints, the database snapshot to `/share/ecoflow-panel`, an SSH
+  console login and both backup-hook phases all succeeding. The complain passes logged no `ALLOWED`
+  record outside the four probes; the enforced passes logged `DENIED` for the probes only (a read
+  and a write under another `/share` folder, an executable in `/data`, a `/proc/<pid>/mem` write),
+  with no kernel audit loss. The candidate was then loaded in complain mode in place on the
+  running add-on for 24 h, across a night and a backup, before the release.
 - **Boot test for a read or exec change (v1.197.2 onward), required before it ships:**
   - *Preconditions.* Docker on the host is reachable from the shell used (on Home Assistant OS, the
     SSH add-on with protection mode off); the test never changes protection mode or the SSH
