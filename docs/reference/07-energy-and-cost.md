@@ -269,8 +269,8 @@ the **floor-gap re-seed** (v1.98.0, below) move the floors to the live sum of a
 different set of batteries and carry the published counters by a **basis shift**: the
 floor as that rollup ratchets it (`max(floor, live)`) less the new floor, per counter
 (negative when a joiner's history raises the floor). It is kept per key in
-`lifetime_basis` (`metric_key`, `shift_wh`, `updated_ts`, `reason`), loaded before the
-first read and included in `persistedWh`. The two floors, the accepted roster (the
+`lifetime_basis` (`metric_key`, `shift_wh`, `updated_ts`, `reason`, and `owed_wh` /
+`owed_ts` for the guard's take-back, below), loaded before the first read and included in `persistedWh`. The two floors, the accepted roster (the
 `bms_membership` row) and every changed shift commit in **one transaction**
 (`writeBatteryFloors`, absolute values). A failed commit writes nothing; the in-memory
 floors, roster and shifts stay a matched pair for the process (the read path takes the
@@ -687,7 +687,7 @@ if lastEmitted == null:            emit total                        // 'first'
 if total is not finite:            emit lastEmitted                  // 'held'
 if total ≥ lastEmitted:
   rise = total − lastEmitted
-  if owed > 0 and rise > 5 kWh and rise ≥ owed / 2:
+  if owed > 0 and rise > 0 and (owed ≤ 5 kWh or (rise > 5 kWh and rise ≥ owed / 2)):
                                    back = min(owed, rise)
                                    emit total − back, shift −= back, owed −= back  // 'returned'
   else:                            emit total                        // 'rise'
@@ -711,7 +711,18 @@ a rise over 5 kWh and at least half of what is owed is the drop **returning**, a
 to the amount owed is taken back off the shift (logged: `… climbed back X kWh of an
 unexplained drop — taken back off its basis shift`). Without it a counter that read 0
 and then its old value (every counter on 2026-06-08, 18:00–19:00) would publish twice
-its value. A rise taken back by mistake costs at most the amount owed. With
+its value. A rise taken back by mistake costs at most the amount owed. Once no more
+than 5 kWh is owed (what a return left over: a dip held before the drop, coming back
+after it), every rise is taken back until nothing is. What is owed expires 24 h after
+the last drop on the key (`LIFETIME_OWED_WINDOW_MS`; `owed_ts`; logged `… did not come
+back within 24 h — kept in its basis shift for good`), so a drop that never comes back
+(a replaced database) cannot hide a later drop's return. Not recognised: a drop that
+comes back in steps each under half of what is owed, and a drop still owed at a stop
+whose return the first read after the restart sees together with the energy counted
+while the add-on was down; both are published as they come back. The high-water file
+keeps a key's previous value while its basis is not committed (a failed write, a
+battery shift waiting for the floors' transaction), so a crash never pairs a new last
+value with an old shift. With
 no last value and no finite reading the key is left out and its field publishes null,
 never a fabricated 0.
 

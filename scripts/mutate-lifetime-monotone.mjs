@@ -19,6 +19,10 @@
  *              L-xxxi..L-xxxvii (a drop that comes back is taken back: at most the amount owed,
  *                            only a return-sized rise; the rebase is owed, the read passes it, and
  *                            it is written and loaded across a restart)
+ *              L-xxxviii..L-xlvi (what is owed expires after 24 h and keeps its time across a
+ *                            restart; a leftover up to the hold is taken back; the high-water file
+ *                            waits for the basis; Battery Energy In / Out are taken back through
+ *                            the floors' transaction; the split; a re-seed owes nothing)
  *   Persist    L-vi, L-x..L-xii, L-xvi, L-xvii (the shifts loaded at boot; the floors commit with
  *                            their shifts; the roster file follows the commit; the read path takes
  *                            the in-memory floors; the rebase is written at once; the sidecar is
@@ -54,6 +58,7 @@ const SUBSET = [
   'test/haPayloadFmt.test.ts',
   'test/analyticsWorker.test.ts',
   'test/recorderLifetimeKeys.test.ts',
+  'test/recorderLifetimeTakeback.test.ts',
 ];
 
 const MUTANTS = [
@@ -119,15 +124,15 @@ const MUTANTS = [
   {
     id: 'L-viii. ★★ the hold is 50 Wh on the watt keys again',
     file: REC,
-    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key) ?? 0);',
-    to: "      const g = guardLifetimeEmit(hw, readWh, key.startsWith('fleet_battery') ? LIFETIME_HOLD_DIP_WH : 50, basisOwed.get(key) ?? 0); /* MUTANT */",
-    why: 'A 538 Wh dip across a restart is rebased instead of held: when the row catches up the energy is published twice.',
+    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key)?.wh ?? 0);',
+    to: "      const g = guardLifetimeEmit(hw, readWh, key.startsWith('fleet_battery') ? LIFETIME_HOLD_DIP_WH : 50, basisOwed.get(key)?.wh ?? 0); /* MUTANT */",
+    why: 'A 538 Wh dip across a restart is rebased instead of held: a WARN and a basis shift for every small dip, and the take-back threshold falls to 50 Wh, so a dip that comes back in steps is published twice.',
   },
   /* ── an unexplained drop that comes back is taken back (the 2026-06-08 hour) ── */
   {
     id: 'L-xxxi. ★★★ a drop that comes back is published on top of its shift',
     file: REC,
-    find: '    if (owed > 0 && rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE) {',
+    find: '    if (owed > 0 && rise > 0 && (owed <= holdWh || (rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE))) {',
     to: '    if (false) { /* MUTANT */',
     why: 'A counter that reads 0 for an hour and then its old value publishes twice its value: Home Assistant books the whole counter again (PV +808.6 kWh on 2026-06-08).',
   },
@@ -141,9 +146,9 @@ const MUTANTS = [
   {
     id: 'L-xxxiii. ★★ any rise over the hold is a return, whatever is owed',
     file: REC,
-    find: '    if (owed > 0 && rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE) {',
-    to: '    if (owed > 0 && rise > holdWh) { /* MUTANT */',
-    why: 'Real energy after a replaced database (269 kWh owed for good) is taken back 5 kWh at a time: the counter stalls.',
+    find: '    if (owed > 0 && rise > 0 && (owed <= holdWh || (rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE))) {',
+    to: '    if (owed > 0 && rise > 0 && (owed <= holdWh || rise > holdWh)) { /* MUTANT */',
+    why: 'Any one-read catch-up over 5 kWh (the first read after a downtime, an energy-bridge window) is taken back, up to the whole amount owed: that energy is never published.',
   },
   {
     id: 'L-xxxiv. ★★★ the rebase is not owed',
@@ -155,23 +160,79 @@ const MUTANTS = [
   {
     id: 'L-xxxv. ★★★ the read passes nothing owed to the guard',
     file: REC,
-    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key) ?? 0);',
+    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key)?.wh ?? 0);',
     to: '      const g = guardLifetimeEmit(hw, readWh); /* MUTANT */',
     why: 'The amount owed is kept and written, and the guard never sees it: the drop that comes back is published twice.',
   },
   {
     id: 'L-xxxvi. ★★★ the amount owed is not loaded at boot',
     file: REC,
-    find: '        if (Number.isFinite(r.owed_wh) && r.owed_wh > 0) basisOwed.set(r.metric_key, r.owed_wh);',
+    find: '        if (Number.isFinite(r.owed_wh) && r.owed_wh > 0) basisOwed.set(r.metric_key, { wh: r.owed_wh, ts: Number.isFinite(r.owed_ts) ? r.owed_ts : 0 });',
     to: '        /* MUTANT */',
     why: 'A drop before a restart that comes back after it is published twice.',
   },
   {
     id: 'L-xxxvii. ★★★ the amount owed is written as 0',
     file: REC,
-    find: '    basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason, basisOwed.get(key) ?? 0);',
-    to: '    basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason, 0); /* MUTANT */',
+    find: '    basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason, owed?.wh ?? 0, owed?.ts ?? 0);',
+    to: '    basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason, 0, 0); /* MUTANT */',
     why: 'The same, across a restart: the next process loads nothing owed.',
+  },
+  {
+    id: 'L-xxxviii. ★★★ what is owed never expires',
+    file: REC,
+    find: '      if (owedNow && now - owedNow.ts > LIFETIME_OWED_WINDOW_MS) {',
+    to: '      if (false) { /* MUTANT */',
+    why: 'A drop that never comes back (a replaced database) stays owed for good, and a later 200 kWh drop that does come back is published twice: 1,400,150 Wh for 1,200,050.',
+  },
+  {
+    id: 'L-xxxix. ★★ the time of the drop is not loaded at boot',
+    file: REC,
+    find: '        if (Number.isFinite(r.owed_wh) && r.owed_wh > 0) basisOwed.set(r.metric_key, { wh: r.owed_wh, ts: Number.isFinite(r.owed_ts) ? r.owed_ts : 0 });',
+    to: '        if (Number.isFinite(r.owed_wh) && r.owed_wh > 0) basisOwed.set(r.metric_key, { wh: r.owed_wh, ts: 0 }); /* MUTANT */',
+    why: 'Every amount owed expires at the first read after a restart: a drop before the restart that comes back after it is published twice.',
+  },
+  {
+    id: 'L-xli. ★★ a leftover of up to the hold is not taken back',
+    file: REC,
+    find: '    if (owed > 0 && rise > 0 && (owed <= holdWh || (rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE))) {',
+    to: '    if (owed > 0 && rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE) { /* MUTANT */',
+    why: 'A dip the guard held before the drop and swept into it comes back after the drop\'s return in rises of under 5 kWh: published as new energy, up to 5 kWh a second time.',
+  },
+  {
+    id: 'L-xlii. ★★ the high-water file runs ahead of an uncommitted basis',
+    file: REC,
+    find: '      for (const key of basisDirty.keys()) {\n        const prev = persistedHighWater.get(key);',
+    to: '      for (const key of [] as string[]) { /* MUTANT */\n        const prev = persistedHighWater.get(key);',
+    why: 'After a failed basis write the file holds the new last value with the old shift: a crash then publishes a leftover the take-back had already counted.',
+  },
+  {
+    id: 'L-xliii. ★★★ the floors\' transaction writes nothing owed',
+    file: REC,
+    find: "      for (const [key, d] of basisDirty) upsertBasis(key, d);\n      db.prepare('COMMIT').run();",
+    to: "      for (const [key, d] of basisDirty) basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason, 0, 0); /* MUTANT */\n      db.prepare('COMMIT').run();",
+    why: 'Battery Energy In or Out dropping before a restart and coming back after it is published twice: the next process loads nothing owed.',
+  },
+  {
+    id: 'L-xliv. ★★★ the battery counters pass nothing owed to the guard',
+    file: REC,
+    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key)?.wh ?? 0);',
+    to: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, FLOOR_SHIFT_KEYS.has(key) ? 0 : basisOwed.get(key)?.wh ?? 0); /* MUTANT */',
+    why: 'The watt counters are taken back and Battery Energy In / Out are not: a battery drop that comes back is published twice.',
+  },
+  {
+    id: 'L-xlv. ★★ a take-back leaves the shift out of persistedWh',
+    file: REC,
+    find: "        persistedWh += g.rebaseWh;\n        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop returned', g.rebaseWh);",
+    to: "        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop returned', g.rebaseWh); /* MUTANT */",
+    why: '/api/lifetime-energy reports the take-back read with the old shift in persistedWh and a negative pending: the split no longer adds up to what each part means.',
+  },
+  {
+    id: 'L-xlvi. ★★ a re-seed\'s shift is owed',
+    file: REC,
+    find: "    const c = addBasisShift('fleet_battery_charge_wh', chargeWh, ts, reason);",
+    to: "    const c = addBasisShift('fleet_battery_charge_wh', chargeWh, ts, reason, chargeWh); /* MUTANT */",
+    why: 'A known pool change becomes an amount owed, so a later real rise of half of it is taken back: battery energy never published.',
   },
   {
     id: 'L-ix. ★★★ a held dip is published',
@@ -219,8 +280,8 @@ const MUTANTS = [
   {
     id: 'L-xvii. ★★ the high-water sidecar is written in place',
     file: REC,
-    find: '      writeFileSync(tmpPath, JSON.stringify(Object.fromEntries(lifetimeEmitHighWater)), { mode: 0o644 });\n      renameSync(tmpPath, emitHighWaterPath);',
-    to: '      writeFileSync(emitHighWaterPath, JSON.stringify(Object.fromEntries(lifetimeEmitHighWater)), { mode: 0o644 }); /* MUTANT */',
+    find: '      writeFileSync(tmpPath, JSON.stringify(Object.fromEntries(next)), { mode: 0o644 });\n      renameSync(tmpPath, emitHighWaterPath);',
+    to: '      writeFileSync(emitHighWaterPath, JSON.stringify(Object.fromEntries(next)), { mode: 0o644 }); /* MUTANT */',
     why: 'A crash mid-write leaves a torn file, read as an empty map: the guard is blind on the next boot and a drop passes as a meter reset.',
   },
   {

@@ -443,9 +443,9 @@ const MUTANTS = [
     // mutant cuts it back to the old 50 Wh micro-dip clamp on the two counters this backstop covers.
     id: 'B-xli. ★★ the PV / Grid to Battery Charge dip backstop is cut to 50 Wh',
     file: RC,
-    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key) ?? 0);',
-    to: "      const g = guardLifetimeEmit(hw, readWh, key === 'fleet_pv_wh' || key === 'fleet_grid_import_wh' ? 50 : LIFETIME_HOLD_DIP_WH, basisOwed.get(key) ?? 0); /* MUTANT */",
-    why: 'A Core whose slot leaves the panel mid-window drops PV Production by its pending share: over 50 Wh it is rebased (a basis shift) instead of held, so a dip the reading takes back only for a while (a window the bridge books at the next rollup) is counted twice.',
+    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key)?.wh ?? 0);',
+    to: "      const g = guardLifetimeEmit(hw, readWh, key === 'fleet_pv_wh' || key === 'fleet_grid_import_wh' ? 50 : LIFETIME_HOLD_DIP_WH, basisOwed.get(key)?.wh ?? 0); /* MUTANT */",
+    why: 'A Core whose slot leaves the panel mid-window drops PV Production by its pending share: over 50 Wh it is rebased (a WARN and a basis shift) instead of held. The take-back undoes a dip that comes back in one read; one that comes back in steps (a window the bridge books at the next rollup) is counted twice.',
   },
   {
     id: 'B-xlii. ★★★ register movement of a marked pack is not absorbed while its Core is listed offline',

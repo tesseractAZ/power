@@ -82,12 +82,12 @@ function shp2Device(memberSns: string[]) {
   };
 }
 /** The committed floor row and basis shift (another connection). */
-function committed(key: string): { row: number | null; shift: number | null } {
+function committed(key: string): { row: number | null; shift: number | null; owed: number | null } {
   const raw = new DatabaseSync(process.env.DB_PATH!);
   try {
     const r = raw.prepare(`SELECT wh FROM lifetime_totals WHERE metric_key = ?`).get(key) as { wh: number } | undefined;
-    const b = raw.prepare(`SELECT shift_wh FROM lifetime_basis WHERE metric_key = ?`).get(key) as { shift_wh: number } | undefined;
-    return { row: r?.wh ?? null, shift: b?.shift_wh ?? null };
+    const b = raw.prepare(`SELECT shift_wh, owed_wh FROM lifetime_basis WHERE metric_key = ?`).get(key) as { shift_wh: number; owed_wh: number } | undefined;
+    return { row: r?.wh ?? null, shift: b?.shift_wh ?? null, owed: b?.owed_wh ?? null };
   } finally {
     raw.close();
   }
@@ -163,6 +163,9 @@ test('★★★ a Core leaving and rejoining: Battery Energy In never steps, and
   const reseeds = lines.filter((l) => l.includes('v1.96.0 SHP2 pool membership changed'));
   assert.equal(reseeds.length, 2, 'the leave and the rejoin');
   assert.match(reseeds[1], /\(DPU_A -> DPU_A,DPU_B\).*charge 4608 -> 10752 Wh.*basis shift -6144 \/ -6144 Wh, now -2048 \/ -2048 Wh/);
+  // A re-seed's shift is explained: never owed, so no later rise is taken back against it.
+  assert.equal(committed(IN).owed, 0, 'the re-seeds owe nothing (Battery Energy In)');
+  assert.equal(committed('fleet_battery_discharge_wh').owed, 0, 'the re-seeds owe nothing (Battery Energy Out)');
   assert.ok(lines.some((l) => l.includes('a Core that joined counts from the re-seed')), 'the pending line says how a joiner counts');
   // B now counts in the home from the re-seed.
   store.snap.devices.DPU_B = dpuDevice('DPU_B', 'PB1', 2_070_000);

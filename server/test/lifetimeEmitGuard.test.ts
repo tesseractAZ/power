@@ -88,13 +88,23 @@ test('v1.193.0 — the take-back: at most the amount owed, and only a rise over 
   assert.deepEqual(guardLifetimeEmit(100_000, 150_000, LIFETIME_HOLD_DIP_WH, 100_000), { emitWh: 100_000, rebaseWh: -50_000, verdict: 'returned' });
   // Real energy between two reads is published as read, however much is owed.
   assert.deepEqual(guardLifetimeEmit(92_047, 94_047, LIFETIME_HOLD_DIP_WH, 91_947), { emitWh: 94_047, rebaseWh: 0, verdict: 'rise' });
-  // A rise of up to the hold is never a return (owed 6 kWh: 5 kWh is a rise, 5.001 kWh a return).
+  // While more than the hold is owed, a rise of up to the hold is published as read (owed 6 kWh:
+  // 5 kWh is a rise, 5.001 kWh a return).
   assert.deepEqual(guardLifetimeEmit(100_000, 105_000, LIFETIME_HOLD_DIP_WH, 6_000), { emitWh: 105_000, rebaseWh: 0, verdict: 'rise' });
   assert.deepEqual(guardLifetimeEmit(100_000, 105_001, LIFETIME_HOLD_DIP_WH, 6_000), { emitWh: 100_000, rebaseWh: -5_001, verdict: 'returned' });
   // Nothing owed, a negative or a non-finite owed: a rise.
   for (const owed of [0, -10_000, Number.NaN, Number.POSITIVE_INFINITY]) {
     assert.deepEqual(guardLifetimeEmit(100_000, 130_000, LIFETIME_HOLD_DIP_WH, owed), { emitWh: 130_000, rebaseWh: 0, verdict: 'rise' }, `owed ${owed}`);
   }
+});
+
+test('v1.193.0 — a leftover of up to the hold is taken back a rise at a time until nothing is owed', () => {
+  // A dip the guard held before the drop comes back after the drop's return: never booked twice.
+  assert.deepEqual(guardLifetimeEmit(100_000, 101_000, LIFETIME_HOLD_DIP_WH, 3_000), { emitWh: 100_000, rebaseWh: -1_000, verdict: 'returned' });
+  assert.deepEqual(guardLifetimeEmit(100_000, 104_000, LIFETIME_HOLD_DIP_WH, 3_000), { emitWh: 101_000, rebaseWh: -3_000, verdict: 'returned' });
+  assert.deepEqual(guardLifetimeEmit(100_000, 100_001, LIFETIME_HOLD_DIP_WH, LIFETIME_HOLD_DIP_WH), { emitWh: 100_000, rebaseWh: -1, verdict: 'returned' });
+  // A flat reading takes nothing back.
+  assert.deepEqual(guardLifetimeEmit(100_000, 100_000, LIFETIME_HOLD_DIP_WH, 3_000), { emitWh: 100_000, rebaseWh: 0, verdict: 'rise' });
 });
 
 /** Deterministic PRNG (mulberry32), so a failure reproduces. */
