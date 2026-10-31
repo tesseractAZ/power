@@ -381,6 +381,9 @@ export class SnapshotStore extends EventEmitter {
   /** v1.195.0 — the file was found in a directory this process cannot write (poolUnknownDirWritable):
    *  its onsets are not carried, and never written back. Set once, at construction. */
   private poolUnknownUntrusted = false;
+  /** v1.197.1 — panels whose dark onset (darkListedOnsets) this process has written: their first
+   *  projection rewrites the file (applyBackupPoolGraceHold). */
+  private poolUnknownDarkOnFile = new Set<string>();
   /** v1.195.0 — the line that says so: the constructor runs before the logger is wired, so
    *  setLogger logs it once. */
   private poolUnknownLoadNote: string | null = null;
@@ -824,7 +827,8 @@ export class SnapshotStore extends EventEmitter {
       this.pinCandidateLists = alone != null && alone === this.pinCandidate ? this.pinCandidateLists + 1 : alone != null ? 1 : 0;
       this.pinCandidate = alone;
     }
-    const r = resolveHousePanel(census, this.housePanelPin, this.pinCandidateLists >= FIRST_PIN_LISTS);
+    // v1.197.1 — with every panel in the device map: an empty census keeps a one-panel plant's pin.
+    const r = resolveHousePanel(census, this.housePanelPin, this.pinCandidateLists >= FIRST_PIN_LISTS, shp2Panels(this.snap.devices).sns);
     if (r.pin !== this.housePanelPin) {
       this.logger(`house-panel: pinned ${this.snap.devices[r.pin!]?.deviceName ?? r.pin} (${r.pin}) — night charge writes only to this panel`);
       this.housePanelPin = r.pin;
@@ -920,6 +924,10 @@ export class SnapshotStore extends EventEmitter {
     const onDisk = this.poolUnknownOnDisk.get(sn);
     this.poolUnknownOnDisk.delete(sn);
     let changed = onDisk !== undefined;
+    // v1.197.1 — this process saved the panel's dark onset (darkListedOnsets): rewrite the file at its
+    // first projection, so a pool that reads retires it there and then. Left, it was carried after a
+    // restart within the hour as blind since that listing, though the pool had read since.
+    if (firstProjection && this.poolUnknownDarkOnFile.delete(sn)) changed = true;
     if (out.pct == null) {
       if (!this.backupPoolUnknownSinceBySn.has(sn)) {
         // v1.195.0 — never from a file this process could not keep current (poolUnknownUntrusted).
@@ -948,7 +956,25 @@ export class SnapshotStore extends EventEmitter {
   private refreshPoolUnknown(): void {
     const sinceAttemptMs = this.now() - this.poolUnknownLastAttemptMs;
     const due = sinceAttemptMs >= POOL_UNKNOWN_PERSIST_EVERY_MS || sinceAttemptMs < 0;
-    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty || this.pendingPoolUnknown().size > 0)) this.writePoolUnknown();
+    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty || this.pendingPoolUnknown().size > 0
+      || this.darkListedOnsets().size > 0)) this.writePoolUnknown();
+  }
+
+  /** v1.197.1 — the panels this process has listed and never projected, with their first listing:
+   *  their pools have not been read since, and their dark alarm counts from that listing when nothing
+   *  earlier is carried (alerts.darkPanelBlindSince). writePoolUnknown saves each, so a SECOND restart
+   *  carries the onset that alarm showed. None while the file is untrusted (poolUnknownUntrusted: a
+   *  read-only /data, where no save can land; a remount while the process runs then carries nothing
+   *  from it). */
+  private darkListedOnsets(): Map<string, number> {
+    const out = new Map<string, number>();
+    if (this.poolUnknownUntrusted) return out;
+    for (const sn of shp2Panels(this.snap.devices).sns) {
+      if (this.snap.devices[sn]?.projection?.kind === 'shp2') continue;
+      const listedMs = this.firstListedAtBySn.get(sn);
+      if (listedMs != null) out.set(sn, listedMs);
+    }
+    return out;
   }
 
   /** v1.187.4 — listed panels whose file entry has not been consumed (not projected in this process)
@@ -1004,7 +1030,8 @@ export class SnapshotStore extends EventEmitter {
   }
 
   /** v1.187.4 — atomic (temp + rename): every pool unknown now, with when it was last seen so, plus
-   *  the file's entry for a panel not projected yet in this process while it is still carriable. A
+   *  the file's entry for a panel not projected yet in this process while it is still carriable
+   *  (v1.197.1 — and, with no such entry, its first listing here: darkListedOnsets). A
    *  failure removes the file, is logged once and retried at most once per
    *  POOL_UNKNOWN_PERSIST_EVERY_MS. */
   private writePoolUnknown(): void {
@@ -1031,6 +1058,16 @@ export class SnapshotStore extends EventEmitter {
     }
     // Held in this process now: last seen now (never before its own onset).
     for (const [sn, sinceMs] of this.backupPoolUnknownSinceBySn) out[sn] = { sinceMs, lastSeenMs: Math.max(sinceMs, nowMs) };
+    // v1.197.1 — and every panel listed here and never projected, blind since its first listing:
+    // the onset its dark alarm shows. A panel dark since a COLD boot (nothing carried) had nothing on
+    // file, so a second restart started its clock again: its critical absent 15 min (a false
+    // "Resolved" push), then a warning until 60 min after the new listing. A panel holding a carried
+    // entry (above) keeps that one, which is from before this process and so earlier.
+    for (const [sn, listedMs] of this.darkListedOnsets()) {
+      if (out[sn] != null) continue;
+      out[sn] = { sinceMs: listedMs, lastSeenMs: Math.max(listedMs, nowMs) };
+      this.poolUnknownDarkOnFile.add(sn);
+    }
     try {
       const tmp = `${path}.tmp`;
       writeFileSync(tmp, JSON.stringify(out));

@@ -754,7 +754,12 @@ carried onset (`alerts.darkPanelBlindRaised`: once it reports or its own alarm s
 v1.197.1 the pinned house panel's too, which before had no alarm while dark and went only once it
 reported). Since v1.197.1 a panel's first projection that reads the pool unknown keeps the onset
 its dark alarm read (the earlier of the carried onset and its first listing, on the store's
-clock), instead of starting the clock at that projection.
+clock), instead of starting the clock at that projection. Since v1.197.1 (review) a panel listed in
+this process and never projected is saved too, blind since that listing (`darkListedOnsets`; a
+carried entry it holds is kept instead, being earlier), and its first projection rewrites the file,
+so a pool that reads retires it there and then. Before, a panel dark since a cold boot had nothing on
+file, and a second restart while it stayed dark started its clock again. Not while the file is
+untrusted.
 
 ---
 
@@ -847,7 +852,10 @@ A second SHP2 is supported. Its model:
   whose panel is on the account is `pinned`; off the account it is `missing` (no automatic re-pin:
   one partial list after a restart used to hand the role, and the pending revert, to the other
   panel for good). No pin and one panel standing alone for `FIRST_PIN_LISTS` = 2 lists: pin it; two
-  or more: `ambiguous`. `SnapshotStore` persists the pin and every panel's last connected-source
+  or more: `ambiguous`. No panel on the account (an empty census): `none`, the pin kept; since
+  v1.197.1 its panel stays the house panel when it is the only panel in the device map (`mapped`, a
+  one-panel plant whose panel three lists left out), so a dark one is never demoted to a secondary
+  panel. `SnapshotStore` persists the pin and every panel's last connected-source
   roster (`house-panel.json` beside the DB in production; `HOUSE_PANEL_PATH` overrides; in memory
   elsewhere) and stamps `DeviceSnapshot.housePanel` on the house panel, `housePanelMissing` (the
   pinned serial) on every panel while it is missing, and `lastRoster` on each panel (carried,

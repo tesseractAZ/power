@@ -2763,6 +2763,11 @@ export function computeAlerts(
         severity: critical ? 'critical' : 'warning',
         category: 'Connectivity',
         device: blindHouse.deviceName,
+        // v1.197.1 — its panel, as a secondary panel's alarm names its own: the monitor's falling-edge
+        // evidence gate (fallingEdgeFrozenByEvidence) then holds a vanish while that panel has no
+        // fresh data, as when a dark pinned panel leaves the account (the shp2-multi-panel critical
+        // takes over) — before, the id named no serial and the vanish pushed "Resolved".
+        sourceSn: blindHouse.sn,
         title: critical ? 'Reserve alarm blind — off-grid' : 'Reserve alarm blind',
         detail: `SHP2 backup-pool telemetry has been unreadable for ${fmtAge(blindMs)} — the reserve/runway alarms cannot see the pool. ${fallbackTxt}${offGrid ? '' : ' The grid is available as backup, so a low pool would transfer to mains.'} If this persists, power-cycle the SHP2 network connection.`,
         facts: [

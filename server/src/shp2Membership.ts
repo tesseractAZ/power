@@ -538,13 +538,23 @@ export function findShp2(
  *   Today's one-panel plant pins on its first boot, so a panel energised later never takes the
  *   role. Not yet stable: `none` (the legacy lowest-serial fallback, which is that one panel).
  * - No pin and two or more: `ambiguous` — supervised writes refused until an operator pins one.
+ * - No panel on the account (an empty census): `none`, the pin kept. v1.197.1 — `mapped` is every
+ *   panel in the device map: when the pinned panel is the only one (a one-panel plant whose panel
+ *   PANEL_ABSENT_LISTS lists in a row left out), it stays the house panel. Dropped, a projected panel
+ *   was still found by findShp2's lowest-serial fallback, but a DARK one became a secondary panel: its
+ *   pool's alarm moved from `reserve-alarm-blind` to `reserve-alarm-blind-<serial>` and back when it
+ *   was listed again, a "Resolved" push and a new critical at each move. With another panel in the
+ *   map as well, nothing is flagged, as before.
  */
 export function resolveHousePanel(
   census: readonly string[],
   pinnedSn: string | null,
   singleStable = true,
+  mapped: readonly string[] = [],
 ): { sn: string | null; pin: string | null; state: 'pinned' | 'missing' | 'ambiguous' | 'none' } {
-  if (census.length === 0) return { sn: null, pin: pinnedSn, state: 'none' };
+  if (census.length === 0) {
+    return { sn: pinnedSn != null && mapped.length === 1 && mapped[0] === pinnedSn ? pinnedSn : null, pin: pinnedSn, state: 'none' };
+  }
   if (pinnedSn != null) {
     return census.includes(pinnedSn)
       ? { sn: pinnedSn, pin: pinnedSn, state: 'pinned' }

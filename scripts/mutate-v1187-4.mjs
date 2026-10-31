@@ -457,8 +457,10 @@ const MUTANTS = [
     id: 'C-xxiii. ★ the refresh ignores entries held for dark panels',
     file: SN,
     // v1.195.0 — re-pointed: the refresh reads the pending entries (trusted or not).
-    find: '    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty || this.pendingPoolUnknown().size > 0)) this.writePoolUnknown();',
-    to: '    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty)) this.writePoolUnknown(); /* MUTANT */',
+    // v1.197.1 — re-pointed: the condition goes on to the dark panels' own onsets (darkListedOnsets,
+    // trusted files only), so an untrusted file's pending entry is what this mutant still drops.
+    find: '    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty || this.pendingPoolUnknown().size > 0\n',
+    to: '    if (due && (this.backupPoolUnknownSinceBySn.size > 0 || this.poolUnknownDirty /* MUTANT */\n',
     why: 'As C-xxii when no pool is unknown in this process.',
   },
 
