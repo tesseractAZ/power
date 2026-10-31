@@ -77,7 +77,8 @@ const MUTANTS = [
   {
     id: 'viii. the truncation disclosure is dropped',
     file: ADVISOR,
-    find: '  const truncated = setpointSocPct > writtenPct + 0.05;',
+    // v1.196.0 — repointed: only the envelope truncates (a whole-percent write is not a truncation).
+    find: '  const truncated = setpointSocPct > RESERVE_WRITE_MAX_PCT + 0.05;',
     to: '  const truncated = false; /* MUTANT */',
     why: 'The operator would hear a correct 50% with no hint that the requirement was 75% and got cut — a true number that hides the shortfall.',
   },

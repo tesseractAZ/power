@@ -78,8 +78,9 @@ const MUTANTS = [
     // v1.154.0 — repointed. v1.148.0 turned this line into a template literal carrying
     // the gate name; the double-quoted anchor has matched nothing since, invisibly,
     // because check-mutant-anchors.mjs read single-quoted anchors only.
-    find: "    return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`, inputs.basisTransient === true);",
-    to: "    return nullPlan(inputs, true, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`, inputs.basisTransient === true); /* MUTANT */",
+    // v1.196.0 — repointed: the gate also hands the plan its reason (basisBlockedBy).
+    find: "    return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`, inputs.basisTransient === true, inputs.basisBlockedBy ?? null);",
+    to: "    return nullPlan(inputs, true, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`, inputs.basisTransient === true, inputs.basisBlockedBy ?? null); /* MUTANT */",
     why: 'The windowless-night distinction is only worth having if a genuine basis failure still reads as one.',
   },
   {

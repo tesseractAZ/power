@@ -197,7 +197,7 @@ cut off from the grid, so the pack still holds the reserve plus an outage cushio
 
 The notice states the charge, not the worst case: the level the charge drives the pool to and
 the grid energy it is expected to draw, for example "charging to ~80% tonight (~34.9 kWh)", or
-"toward" a level the window cannot reach. A night with no charge or no plan says so, and a hold
+"toward" a level the window cannot reach. A night with no charge says so, and a hold or no-plan
 night says why. The worst case appears only on the night-charge card,
 as the basis the target is sized on, and as the "(Worst Case)" sensors. A morning summary says
 what the night did, including the force charge. It says "restored" once the panel reports the

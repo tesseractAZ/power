@@ -326,7 +326,8 @@ const MUTANTS = [
   {
     id: 'xl. ★★★ the builder hands over a factor-1 surplus',
     file: NCA,
-    find: '  if (!(cal.factor < 1)) return null;',
+    // v1.196.0 — repointed: the gate now asks the PV factor too (costSurplusPvFactor).
+    find: '  if (!(cal.factor < 1) && !(pv.factor > 1)) return null;',
     to: '  /* MUTANT */',
     why: 'A few-sample or high-load night queries the analytics worker and reports a factor of 1: not today\'s night.',
   },

@@ -162,7 +162,11 @@ test('night-charge message: all shapes are severity=info + dedupId=night_charge_
 test('night-charge message: a null plan yields the insufficient_basis shape regardless of requested shape', () => {
   for (const shape of ['charge', 'hold', 'insufficient_basis'] as const) {
     const msg = buildNightChargeMessage(null, shape);
-    assert.match(msg.body, /incomplete/i);
+    assert.equal(msg.title, 'Night-charge: no plan tonight');
+    // v1.196.0 — a null plan is the panel's pool readings missing, not an incomplete forecast
+    // basis: the body says which (noPlanReason.test.ts).
+    assert.match(msg.body, /the panel's pool readings \(capacity, state of charge, reserve\) are unavailable/);
+    assert.doesNotMatch(msg.body, /incomplete/i);
     assert.match(msg.body, /nothing will be charged/i);
     // Must never fabricate a buy on a null plan.
     assert.doesNotMatch(msg.body, /Buy ~/);

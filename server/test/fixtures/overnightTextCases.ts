@@ -112,6 +112,9 @@ export function overnightTextCases(): OvernightTextCase[] {
   add('charge, window-bound (toward)', { chargeCapKw: 8, gridInputCapKw: 8 });
   add('charge, window-bound, the cushion short', { chargeCapKw: 5, gridInputCapKw: 5 });
   add('charge, reserve only, the cushion short', { chargeCapKw: 8, gridInputCapKw: 8, socNowPct: 10, objectiveMode: 'resilience' }, { forceCharge: false });
+  // v1.196.0 — a resilience night writes its cushion line (32%), not 50%: the case above now charges
+  // "to ~32%", and this one keeps a reserve-only "toward" in the golden (a 4 kW grid input).
+  add('charge, reserve only, window-bound (toward)', { chargeCapKw: 4, gridInputCapKw: 4, socNowPct: 10, objectiveMode: 'resilience' }, { forceCharge: false });
   add('charge, nothing expected (a reserve hold)', { objectiveMode: 'resilience', socNowPct: 70 }, { forceCharge: false });
   add('charge, cost mode from a full pool', { socNowPct: 85 });
   add('hold, the cushion holds', { objectiveMode: 'resilience', socNowPct: 95 }, { forceCharge: false });

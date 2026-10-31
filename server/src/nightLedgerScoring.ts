@@ -27,7 +27,8 @@ import { tariffRatesConfirmation, type Season, type TariffModel } from './tariff
 import { fmtMinor } from './money.js';
 import type { DeviceSnapshot } from './snapshot.js';
 import type { Shp2Projection } from './ecoflow/project.js';
-import { DELIVERED_BASIS } from './nightChargeAdvisor.js';
+import { DELIVERED_BASIS, medianFilter3 } from './nightChargeAdvisor.js';
+import { saturationThresholdPct, meanChargeCeilingPct } from './chargeTaper.js';
 import { LEGACY_REVERT_LAG_MS } from './nightChargeActuator.js';
 import { SHP2_SOURCE_SLOTS } from './hwSpec.js';
 
@@ -693,6 +694,9 @@ export function forecastSpanResetColumns(shortMs: number): Partial<NightLedgerRo
     realized_cost_cents: null,
     actual_min_soc_pct: null,
     actual_min_soc_ts_ms: null,
+    // v1.196.0 — measured over the same span as the PV actual it qualifies.
+    actual_max_soc_pct: null,
+    pv_saturated: null,
     plan_traj_floor_breached: null,
     cushion_breached: null,
     grid_home_coverage_frac: null,
@@ -710,6 +714,28 @@ export function forecastSpanResetColumns(shortMs: number): Partial<NightLedgerRo
     shadow_window_pv_kwh: null,
     shadow_window_load_kwh: null,
   };
+}
+
+/**
+ * v1.196.0 — the saturation that censors a row's PV (NightLedgerRow.pv_saturated): the highest pool
+ * SoC over the forecast span [issue, +24 h] — the span actual_pv_kwh is summed over —, after the
+ * 3-sample median filter the trough uses (a lone reconnect sample is not a level the pool held),
+ * against the charge taper of the home Cores' mean chgMaxSoc (chargeTaper.saturationThresholdPct;
+ * 90 when none reports one). A pool that reached it sat where the Cores shed PV, so that day's
+ * actual PV measures the curtailment, and the cost ceiling's PV factor leaves the row out
+ * (costSurplusPvFactor). Both null with no reading. PURE.
+ */
+export function pvSaturationColumns(o: {
+  socPts: ReadonlyArray<{ ts: number; value: number }>;
+  chgMaxSocPcts: ReadonlyArray<number | null | undefined>;
+}): { actual_max_soc_pct: number | null; pv_saturated: number | null } {
+  let max: number | null = null;
+  for (const p of medianFilter3(o.socPts)) {
+    if (Number.isFinite(p.value) && (max == null || p.value > max)) max = p.value;
+  }
+  if (max == null) return { actual_max_soc_pct: null, pv_saturated: null };
+  const taperPct = saturationThresholdPct(meanChargeCeilingPct(o.chgMaxSocPcts));
+  return { actual_max_soc_pct: Math.round(max * 10) / 10, pv_saturated: max >= taperPct ? 1 : 0 };
 }
 
 /** v1.187.10 — the clause the tag appends to `score_notes`. PURE. */

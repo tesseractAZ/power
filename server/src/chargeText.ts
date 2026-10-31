@@ -201,6 +201,9 @@ export interface MiddayCostText {
   /** The plan calls for a charge (its worst case reaches the minimum buy). */
   charges: boolean;
   basisComplete: boolean;
+  /** v1.196.0 — on an incomplete basis, the gate that refused the plan (plan.basisBlockedBy), as the
+   *  overnight "no plan tonight" push states it. null/omitted ⇒ the basis sentence alone. */
+  basisBlockedBy?: string | null;
   cushionShortfall: boolean;
 }
 
@@ -286,10 +289,12 @@ export function buildMiddayPlanMessage(i: MiddayAnnounceInput): NotifyMessage {
     ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.' : '';
   const backupLine = i.backup != null ? ` ${backupPushLine(i.backup, i.backupApplyAtMs, now, supervised)}` : '';
   if (!c.basisComplete) {
+    // v1.196.0 — what refused the plan, as the overnight push says it (notify.buildNightChargeMessage).
+    const blocked = c.basisBlockedBy ? `: ${c.basisBlockedBy}` : '';
     return {
       ...base,
       title: `Charge plan: no plan for ${when}`,
-      body: `No charge plan for ${when} — the forecast/telemetry basis is incomplete, so nothing will be charged. `
+      body: `No charge plan for ${when} — the forecast/telemetry basis is incomplete${blocked}, so nothing will be charged. `
         + '(This confirms the evening job ran; the reserve floor is unchanged.)',
     };
   }

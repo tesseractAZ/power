@@ -135,6 +135,7 @@ import {
 import type { ForceChargeCommands } from './settingsDrift.js';
 import { FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_CEILING_MAX_PCT, SHP2_SOURCE_SLOTS } from './hwSpec.js';
 import { limits } from './limits.js';
+import { coreLabel, coreNumber } from './topology.js';
 
 /** The panel's documented force-charge ceiling range (`foceChargeHight`): 80..100, a hardware fact
  *  (hwSpec.ts since v1.191.0), re-exported here for the existing importers. */
@@ -560,6 +561,119 @@ export function partialForceChargeOnFailureSlots(
   const ours = s.forceChargeSlots;
   if (failed == null || failed.length === 0 || ours == null) return null;
   return failed.length < ours.length ? [...failed] : null;
+}
+
+/**
+ * v1.196.0 — one panel slot as the force-charge ON-failure warning names it: the Core in it, whether
+ * the cloud has it, and that Core's OWN work mode and backup reserve (its DPU projection). The
+ * warning named slot numbers only; on 2026-10-06 slot 3 refused Charge Now on repeated nights, and the
+ * fact that explained it — the Core in slot 3 (Core 5) ran work mode 3 (time-of-use) with its own
+ * backup reserve at 60%, where the other Cores read 0 and 50% — was in the store and in no message.
+ */
+export interface ForceChargeSlotCore {
+  slot: number;
+  /** coreLabel(coreNumber(…)): "Core N" from a "Core N" name ("Core 5"), or for a fallback-named DPU
+   *  its panel slot ("Core 3"); else the display name — never the digits of a serial. null when the
+   *  slot's DPU is not in the store. */
+  label: string | null;
+  /** The DPU's cloud online flag; null when it is not in the store. */
+  online: boolean | null;
+  /** sysWordMode — 0 default, 1 self-powered, 2 scheduled, 3 time-of-use (project.ts); null unknown. */
+  workMode: number | null;
+  /** sysBackupSoc — the Core's own backup reserve, %; null unknown. */
+  backupSocPct: number | null;
+}
+
+/** v1.196.0 — sysWordMode's names (the vendor document, as ecoflow/project.ts states them). */
+export const DPU_WORK_MODE_NAMES: Readonly<Record<number, string>> = Object.freeze({
+  0: 'default', 1: 'self-powered', 2: 'scheduled', 3: 'time-of-use',
+});
+
+/** The device fields forceChargeSlotCores reads (a DeviceSnapshot). */
+interface SlotDeviceLike {
+  sn: string;
+  deviceName: string;
+  nameFallback?: boolean;
+  online?: boolean;
+  projection?: { kind?: string; sysWordMode?: number | null; sysBackupSoc?: number | null } | null;
+}
+
+/**
+ * v1.196.0 — PURE. Every slot the panel lists (`sources`, the SHP2 projection's — the same fresh
+ * readback the ON verify reads) joined to its DPU in `devices` (the store's device map). The work
+ * mode and the reserve are that DPU's projection — its last report, whatever its age; only the
+ * slot → Core join is the fresh readback (a Core the cloud does not have is said to be offline). A
+ * slot whose serial is not in the store keeps only its number. Serials are matched, never printed.
+ */
+export function forceChargeSlotCores(
+  sources: ReadonlyArray<{ slot?: unknown; sn?: unknown } | null | undefined> | null | undefined,
+  devices: Readonly<Record<string, unknown>> | null | undefined,
+): ForceChargeSlotCore[] {
+  if (!Array.isArray(sources)) return [];
+  const fin = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const out: ForceChargeSlotCore[] = [];
+  for (const s of sources) {
+    const slot = Number(s?.slot);
+    if (!Number.isInteger(slot)) continue;
+    const sn = typeof s?.sn === 'string' && s.sn.length > 0 ? s.sn : null;
+    const raw = sn != null && devices != null ? devices[sn] : undefined;
+    const dev = raw != null && typeof raw === 'object' ? (raw as SlotDeviceLike) : null;
+    const pj = dev?.projection?.kind === 'dpu' ? dev.projection : null;
+    out.push({
+      slot,
+      label: dev != null ? coreLabel(coreNumber(dev, devices), dev.deviceName) : null,
+      online: dev != null ? dev.online === true : null,
+      workMode: fin(pj?.sysWordMode),
+      backupSocPct: fin(pj?.sysBackupSoc),
+    });
+  }
+  return out;
+}
+
+/**
+ * v1.196.0 — PURE. The failed slots as the ON-failure warning and its log line write them: each with
+ * its Core — "3 (Core 5)" —, "offline in the cloud" when the cloud does not have that Core (its
+ * settings are then the last it reported), and a setting of its own that differs from the other
+ * Cores': its work mode or its backup reserve, named only when it is known on the failed slot AND on
+ * at least one other Cores' slot AND is none of their values ("work mode 3 (time-of-use), where the
+ * other Cores read 0 (default)"). The other Cores are ours (the record's forceChargeSlots; every
+ * listed slot when it has none) less the failed ones. A slot with no Core in the store is its bare
+ * number; with no cores at all the text is the slot numbers alone — the words before v1.196.0.
+ * `differing` counts the failed slots with a differing setting (the push then says to compare them).
+ */
+export function forceChargeFailedSlotsText(
+  failed: ReadonlyArray<number>,
+  ours: ReadonlyArray<number> | null | undefined,
+  cores: ReadonlyArray<ForceChargeSlotCore> | null | undefined,
+): { text: string; differing: number } {
+  if (cores == null || cores.length === 0) return { text: failed.join(', '), differing: 0 };
+  const bySlot = new Map(cores.map((c) => [c.slot, c] as const));
+  const others = (ours ?? cores.map((c) => c.slot))
+    .filter((n) => !failed.includes(n))
+    .map((n) => bySlot.get(n))
+    .filter((c): c is ForceChargeSlotCore => c != null);
+  const modeWords = (m: number): string => (DPU_WORK_MODE_NAMES[m] != null ? `${m} (${DPU_WORK_MODE_NAMES[m]})` : `${m}`);
+  let differing = 0;
+  const parts = failed.map((slot) => {
+    const c = bySlot.get(slot);
+    if (c == null || c.label == null) return `${slot}`;
+    const notes: string[] = [];
+    if (c.online === false) notes.push('offline in the cloud');
+    let differs = false;
+    const compare = (v: number | null, pick: (o: ForceChargeSlotCore) => number | null, words: (theirs: number[]) => string): void => {
+      const theirs = [...new Set(others.map(pick).filter((x): x is number => x != null))].sort((a, b) => a - b);
+      if (v == null || theirs.length === 0 || theirs.includes(v)) return;
+      notes.push(words(theirs));
+      differs = true;
+    };
+    compare(c.workMode, (o) => o.workMode,
+      (theirs) => `work mode ${modeWords(c.workMode!)}, where the other Cores read ${theirs.map(modeWords).join(' / ')}`);
+    compare(c.backupSocPct, (o) => o.backupSocPct,
+      (theirs) => `its own backup reserve ${c.backupSocPct}%, where the other Cores read ${theirs.map((x) => `${x}%`).join(' / ')}`);
+    if (differs) differing++;
+    return notes.length > 0 ? `${slot} (${c.label} — ${notes.join('; ')})` : `${slot} (${c.label})`;
+  });
+  return { text: parts.join(', '), differing };
 }
 
 /** v1.168.0 — when a force-charge of ours that has not verified OFF must escalate,

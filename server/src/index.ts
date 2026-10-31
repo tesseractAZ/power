@@ -52,6 +52,7 @@ import {
   forceChargeKwPerCore, planRateFallbackKw,
   FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnReadbackStatus,
   forceChargeNightOutcome, partialForceChargeOnFailureSlots, FORCE_CHARGE_MAX_RUN_MS,
+  forceChargeSlotCores, forceChargeFailedSlotsText,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
@@ -310,6 +311,8 @@ import {
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
   // v1.188.1 — held telemetry: a row on held readings is not scored; one captured on them is repaired.
   heldLedgerVerdict, heldLedgerNote, heldLedgerRepair, heldRepairColumns, heldRepairClause, heldSides, basisIncompleteNote,
+  // v1.196.0 — the saturation that censors a row's PV for the cost ceiling's PV factor.
+  pvSaturationColumns,
 } from './nightLedgerScoring.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -3837,14 +3840,18 @@ async function recomputeNightChargePlan(
   });
   const costSurplusLoad: NightChargeInputDeps['costSurplusLoad'] = costLoadBuilt?.load ?? null;
   if (costLoadBuilt && !shadowLeg) {
-    const { load: cl, medianRatio, floored } = costLoadBuilt;
-    const key = `${cl.factor.toFixed(3)}:${cl.samples}:${floored ? 'floor' : 'nofloor'}`;
+    const { load: cl, medianRatio, pvMedianRatio, floored } = costLoadBuilt;
+    const pvF = cl.pvFactor ?? 1;
+    const key = `${cl.factor.toFixed(3)}:${cl.samples}:${floored ? 'floor' : 'nofloor'}:${pvF.toFixed(3)}:${cl.pvSamples ?? 0}`;
     if (key !== lastLoggedCostLoadKey) {
       lastLoggedCostLoadKey = key;
+      // v1.196.0 — and the median sun at ×pf of its forecast (costSurplusPvFactor), from its own nights.
       app.log.info(
         `night-charge: cost-ceiling surplus counts the house load at ×${cl.factor.toFixed(2)} of its forecast `
         + `(median realized/forecast ${medianRatio?.toFixed(2) ?? '—'} over ${cl.samples} ledger night(s)`
-        + `${floored ? '' : '; no measured hourly floor, so every hour keeps its forecast'}) — cost ceiling only, `
+        + `${floored || !(cl.factor < 1) ? '' : '; no measured hourly floor, so every hour keeps its forecast'}) `
+        + `and the median sun at ×${pvF.toFixed(2)} of its forecast (median realized/forecast ${pvMedianRatio?.toFixed(2) ?? '—'} `
+        + `over ${cl.pvSamples ?? 0} unsaturated forecast-tier night(s)) — cost ceiling only, `
         + `never past the resilience target nor on a cushion-shortfall night; P50 surplus ${morningPvSurplusP50Kwh ?? '—'} → ${cl.p50Kwh ?? '—'} kWh`,
       );
     }
@@ -4430,6 +4437,12 @@ function scoreNightRow(
     }
   }
   const actualLoadKwh = loadPts.length && !heldSide.load ? round2(integrateWh(loadPts, false) / 1000) : null;
+  // v1.196.0 — did the pool reach the charge taper over the same span (pvSaturationColumns)? A day
+  // it did shed PV, and the cost ceiling's PV factor leaves its pv_err_frac out.
+  const pvSaturation = pvSaturationColumns({
+    socPts: recorder.query(shp2Sn, 'backup_pct', fcSpanStart, fcSpanEnd),
+    chgMaxSocPcts: homeChgMaxSocPcts(),
+  });
 
   // Actual min SoC over the scored trajectory span (raw telemetry; used only for
   // soc_min_err, NOT the floor verdict — §3.3).
@@ -4626,6 +4639,7 @@ function scoreNightRow(
     pv_verdict_set_aside: cols.pvSetAside,
     actual_min_soc_pct: actualMinSocPct,
     actual_min_soc_ts_ms: actualMinSocTsMs,
+    ...pvSaturation,
     plan_traj_floor_breached: score.planTrajFloorBreached == null ? null : (score.planTrajFloorBreached ? 1 : 0),
     cushion_breached: cushionBreached,
     // v1.187.3 — delivered_kwh with delivered_basis, set together (deliveredLedgerFields);
@@ -6092,12 +6106,18 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // the morning push (partialForceChargeOnFailureSlots).
     persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs, forceChargeOnFailedSlots: [...action.slots] });
     const all = partialForceChargeOnFailureSlots({ forceChargeSlots: state.forceChargeSlots, forceChargeOnFailedSlots: action.slots }) == null;
-    app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${action.slots.join(',')} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
+    // v1.196.0 — name each failed slot's Core, and what about it differs from the other Cores' (its
+    // work mode, its own backup reserve). The slot → Core join is the fresh panel readback the verify
+    // read (onFailed needs one); each Core's settings are its last reported DPU projection.
+    const slotCores = forceChargeSlotCores(sources, store.get().devices);
+    const failedSlots = forceChargeFailedSlotsText(action.slots, state.forceChargeSlots, slotCores);
+    app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${failedSlots.text} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
     try {
       // v1.187.22 — toward where it stops (~80%), as every other surface names it, not the ceiling.
       await sendNotification(loadNotifyConfig(), buildNightForceChargeOnFailure({
         day: state.day, slots: action.slots, ourSlots: state.forceChargeSlots, retries: state.forceChargeOnRetries,
         noRetry: action.noRetry === true, ceilingPct: state.forceChargeCeilingPct,
+        cores: slotCores,
       }));
     } catch (e: any) {
       app.log.warn(`night-charge: force-charge ON-failure notify failed (${e?.message ?? e})`);
