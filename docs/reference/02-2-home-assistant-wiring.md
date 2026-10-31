@@ -116,7 +116,7 @@ dynamic sensors per SHP2 circuit (energy and power; 24 on a 12-channel panel). S
   `learned_warning_count`, plus per-ISA-priority `alert_{high,medium,low}_count`. They
   count every alert on screen, including alerts with `annunciate: false` (roster-muted
   bench spares and off-panel Cores, the top-of-charge cell-spread mutes, a remediate-first
-  hold), the same set the web dashboard's badges count. A non-zero count is therefore not
+  hold, a Core's maintenance window), the same set the web dashboard's badges count. A non-zero count is therefore not
   a statement that anything was spoken or pushed; an automation that should follow the
   audible condition cannot key on these counts alone.
 - **Night charge and the mid-day charge:** the `night_charge_*` figures (target and arrival
@@ -213,6 +213,20 @@ circuit name, e.g. `sensor.ecoflow_panel_kitchen_l1_power`, never
 unaffected. A circuit whose current transformer reads nothing publishes a steady 0 W; pair
 sums are not published, so such a circuit stays visible. (The reference plant's own wiring
 note is in [the reference plant's notes](../history/reference-plant-notes.md).)
+
+#### Maintenance windows (v1.197.0)
+
+A Core's maintenance window (the alert monitor's maintenance windows) is published as three
+entities: the binary sensor `ecoflow_maintenance_active` (ON while any window is in force), the
+sensor `ecoflow_maintenance_devices` (how many Cores, with one attribute `cores`, e.g.
+`["Core 3 until 14:30"]`, built by `MAINTENANCE_ATTRIBUTES_TEMPLATE` from the state key
+`maintenance_summary`), and the button `ecoflow_maintenance_end_all` (command topic
+`ecoflow_panel/maintenance/end_all/set`, payload `PRESS`, `isMaintenanceEndAllCommand`), which ends
+every window. Ending is the loud direction, so a broker-side press is accepted; no MQTT command
+starts a window — that is the card's, or `POST /api/maintenance`. The state keys are
+`maintenance_active`, `maintenance_count` and `maintenance_summary` (`maintenanceStateFields`, no
+serial), in the MQTT payload and `/api/ha-state` alike; they are known from start-up and not
+readiness-gated. The alert counts above still include the alerts a window holds.
 
 #### Alarm-priority switches (bidirectional)
 
@@ -403,6 +417,9 @@ first); surfaced at **`GET /api/writes/log`**.
 | `/api/device/refresh-cloud-cooldown?sn=` | GET | none | cooldown state |
 | `/api/device/send-command` | POST | write + debug token | arbitrary allow-listed command |
 | `/api/writes/log?limit=` | GET | write | tail of the audit log (default 50, max 500 entries); write-auth because rows carry source IPs and attempted command shapes |
+| `/api/maintenance` | GET | none (120 a minute) | the maintenance windows in force and those ended in the last 24 h (the alert monitor's API summary) |
+| `/api/maintenance` | POST | write (10 a minute) | `{ sn, minutes, note?, source? }` starts or extends one Core's window; audited as `maintenance-start` / `maintenance-extend` |
+| `/api/maintenance/end` | POST | write (10 a minute) | `{ sn }` or `{ all: true }`; audited as `maintenance-end` |
 
 #### `snapshotForClient()`
 
@@ -418,6 +435,9 @@ v1.188.1 (review) — each connected source also carries the energy bridge's ver
 computation the two power sensors publish (`slotVerdicts`): `ownReading` (the sensors count its
 Core at its own reading) and `pvMeasuredW` (its PV where the bridge reads the panel's PV field as
 measured, else null).
+v1.197.0 — the frame also carries `maintenance`: each Core whose maintenance window is in force,
+with its label, number, start, end, time left, held and held-critical counts, source and note
+(the card's strip reads it).
 
 #### `/api/ha-state` (selected fields)
 
@@ -448,7 +468,8 @@ charge, and the time to empty was published beside it. The field's check catches
 reads low, not high, so a field reading high would show the time to full early, beside a Battery
 Net reading the same charge. A Core the cloud lists offline whose MQTT data still arrives counts
 at its own pack net, as the sensors count it.
-Then forecast, degradation, alert counts (split by engine source × severity), runway,
+Then forecast, degradation, alert counts (split by engine source × severity), the maintenance
+keys (`maintenance_active`, `maintenance_count`, `maintenance_summary`; v1.197.0), runway,
 RTE, clipping, curtailment, and self-consumption blocks. Internally the analytics reports
 are cached (~30 min) on the worker.
 

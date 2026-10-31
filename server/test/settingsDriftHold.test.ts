@@ -661,6 +661,36 @@ test('★ BOUNDED while running: a merge refreshes the age; a flush drops an ent
   assert.equal(sends.length, 0);
 });
 
+test('★★ v1.197.0 a shelved Core\'s setting is not held or pushed: the baseline is saved, the window is told once, a panel change still holds', async () => {
+  const dir = freshDir();
+  const saved: Array<Record<string, SettingValue>> = [];
+  const h = boot(dir, undefined, undefined, (surface) => { saved.push({ ...surface }); });
+  const core3 = (chgMaxSoc: number): SurfaceDevice => ({
+    sn: 'COREXXX00XXX0003', label: 'Core 3', kind: 'dpu', raw: { 'hs_yj751_pd_app_set_info_addr.chgMaxSoc': chgMaxSoc },
+  });
+  const noted: Array<{ key: string; from: SettingValue; to: SettingValue; nowMs: number }> = [];
+  const ctx: ActuatorContext = { ...NO_OWN_WRITE, shelvedLabels: ['Core 3'] };
+  const tick = (now: Date, surface: SurfaceDevice[]) => settleDriftTick({
+    queue: h.queue, state: h.state, evaluation: evaluateDrift(h.state, extractSettingsSurface(surface)), now,
+    context: () => ctx, log: { info: (m) => h.logs.push(`INFO ${m}`), warn: (m) => h.logs.push(`WARN ${m}`) },
+    saveBaseline: (surface) => { saved.push({ ...surface }); },
+    onMaintenanceChange: (c, nowMs) => { noted.push({ key: c.key, from: c.from, to: c.to, nowMs }); },
+  });
+  await tick(at(11, 10, 0), [shp2(), core3(50)]);   // adopt
+  await tick(at(11, 10, 1), [shp2(), core3(100)]);  // first sight
+  await tick(at(11, 10, 2), [shp2(), core3(100)]);  // confirmed: 50 → 100 on the shelved Core
+  assert.deepEqual(noted, [{ key: 'Core 3 · chgMaxSoc', from: 50, to: 100, nowMs: at(11, 10, 2).getTime() }], '★ the window is told, once');
+  assert.equal(h.queue.held().length, 0, '★ nothing held for a push');
+  assert.equal(h.sends.length, 0, 'nothing pushed');
+  assert.equal(saved.at(-1)?.['Core 3 · chgMaxSoc'], 100, '★ the baseline holds the new value: nothing re-pushes it after the window');
+  assert.ok(h.logs.some((l) => l.includes("INFO settings-drift: Core 3 · chgMaxSoc 50 → 100 (on a Core in maintenance — listed in the window's end push)")));
+  // The panel's reserve floor, in the same window: external, as always.
+  await tick(at(11, 10, 3), [shp2({ backupReserveSoc: 40 }), core3(100)]);
+  await tick(at(11, 10, 4), [shp2({ backupReserveSoc: 40 }), core3(100)]);
+  assert.equal(noted.length, 1, 'the floor is not a maintenance change');
+  assert.deepEqual(h.sends.map((m) => m.title), ['Reserve floor changed externally: 20% → 40%'], '★ the floor change is pushed as before (10:04, outside the quiet window)');
+});
+
 /* ══ wiring pin (index.ts has no seam a unit test can drive) — a SOURCE PIN, labelled ══ */
 test('★★ SOURCE PIN: index.ts builds the held queue at module load and hands EVERY tick, ungated, to settleDriftTick', () => {
   const idx = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/index.ts'), 'utf8');
@@ -683,6 +713,9 @@ test('★★ SOURCE PIN: index.ts builds the held queue at module load and hands
     '    void settleDriftTick({',
     '      queue: driftHold, state: settingsDriftState, evaluation: evaln, now: new Date(), log: driftHoldLog,',
     '      context: driftActuatorContext,',
+    // v1.197.0 — the tick also hands a shelved Core's own setting to its maintenance window (listed in
+    // the window's end push). An addition, not a guard: the call is still made on every tick.
+    '      onMaintenanceChange: noteMaintenanceSettingChange,',
     '    }).catch((e: any) => app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`));',
     '  } catch (e: any) {',
     '    app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`);',

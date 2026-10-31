@@ -144,6 +144,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Zombie gate | Spare-DPU offline-alert gate: the bench-spare floor less the last-known roster (§8.8) | `BENCH_SPARE_SNS` when set, else the `SPARE_DPU_SNS` literal; the SHP2 roster | Offline alerting | measured-and-active |
 | Root-cause map | `rootCausesFor(alertId)` static cause suggestions (§8.9) | Alert id | `/api/root-cause` only | **weak-linkage candidate** — no UI passes an alert id to it |
 | Annunciation settings | `alertSettings.ts` per-priority enable, MQTT-bidirectional (§8.11) | Operator toggles | Alert Console, HA switches, broadcast gating | measured-and-active |
+| Maintenance windows (v1.197.0) | `maintenanceWindow.ts`: one Core's own alerts (a positive list of Core-scoped families, never-muted first) stamped `annunciate:false` + `shelvedUntilMs` for 15 min–4 h; ends at its time, after 15 min back to normal, by hand, on a clock step back, over the limit or with the Core gone; pool, panel and plant alarms never held (the alert monitor, 4.7) | The card or `POST /api/maintenance`; the tick's alerts and device map | Monitor push gate, broadcast condition and all-clear gate, settings drift, card strip, HA entities, start and end pushes, write log | active — new; no field episode yet (live acceptance on the next planned reconfiguration) |
 
 ### A.9 Audible broadcast & TTS (§10)
 

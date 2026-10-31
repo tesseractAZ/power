@@ -88,12 +88,14 @@ import { setBroadcastHealth } from './broadcastHealth.js';
  * and "All clear. All stations report normal." spoken while the system is BLIND is the
  * worst sentence these speakers could say. Found by the v1.166.0 pre-merge review: the
  * hold's annunciate=false made this gate stop seeing the blind alert.
+ * v1.197.0 — nor while a critical is held by a maintenance window (Alert.shelvedUntilMs): shelved is
+ * held, not cleared, and the Core's critical is pushed and announced when the window ends.
  */
 export function allClearSpeechBlocked(
-  alerts: ReadonlyArray<Pick<Alert, 'id' | 'severity' | 'annunciate'>>,
+  alerts: ReadonlyArray<Pick<Alert, 'id' | 'severity' | 'annunciate' | 'shelvedUntilMs'>>,
 ): boolean {
   return alerts.some((a) =>
-    a.severity === 'critical' && (a.annunciate !== false || a.id === TELEMETRY_BLIND_ALERT_ID));
+    a.severity === 'critical' && (a.annunciate !== false || a.id === TELEMETRY_BLIND_ALERT_ID || a.shelvedUntilMs != null));
 }
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate + per-priority preview.
 // A priority turned off on the Alert Settings page must never trigger the

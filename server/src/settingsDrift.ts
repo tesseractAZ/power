@@ -182,6 +182,10 @@ export interface ActuatorContext {
    *  'own-write'; any other inside the window is 'panel-side'. Absent ⇒ nothing is
    *  known to be ours. */
   forceChargeCommands?: ForceChargeCommands | null;
+  /** v1.197.0 — the settings-surface labels of the Cores a maintenance window holds now (the
+   *  caller leaves out a label another device shares). Their changes are 'maintenance': listed in
+   *  the window's end push, not pushed one by one. Never the panel's reserve floor. */
+  shelvedLabels?: readonly string[];
 }
 
 /** v1.187.10 — the force-charge writes this add-on issued for the night. */
@@ -215,8 +219,10 @@ function forceChargeCommanded(c: SettingChange, slot: number | null, cmd: ForceC
  * before the software stop (10-02 04:24-04:25, slots 2 and 1, ~4 min before the add-on's
  * OFF), or an operator. Logged as such and not announced, as before; it was logged as
  * "this add-on's night-charge write", which hid that the panel's backstop fired first.
+ * v1.197.0 — 'maintenance' = a setting of a Core a maintenance window holds (act.shelvedLabels):
+ * part of the planned work, listed in the window's end push. The reserve floor is never one.
  */
-export function classifyChange(c: SettingChange, act: ActuatorContext): 'own-write' | 'panel-side' | 'external' {
+export function classifyChange(c: SettingChange, act: ActuatorContext): 'own-write' | 'panel-side' | 'maintenance' | 'external' {
   // v1.165.0 — the night force-charge moves ch{n}ForceCharge twice a night and may
   // sync foceChargeHight once. Without this each night would push two false
   // "changed externally" alerts — the class of false push that 2026-09-16 produced
@@ -227,6 +233,9 @@ export function classifyChange(c: SettingChange, act: ActuatorContext): 'own-wri
     if (act.forceChargeActive !== true) return 'external';
     return forceChargeCommanded(c, fc[1] != null ? Number(fc[1]) : null, act.forceChargeCommands) ? 'own-write' : 'panel-side';
   }
+  // v1.197.0 — a shelved Core's own setting. The reserve-floor guard comes first: whatever the
+  // labels say, a change of the floor the pool alarm defends is never folded into a window.
+  if (!c.key.endsWith(' · backupReserveSoc') && act.shelvedLabels?.some((l) => c.key.startsWith(`${l} · `))) return 'maintenance';
   if (!c.key.endsWith(' · backupReserveSoc')) return 'external';
   // v1.115.0 — the owner's own reserve-floor write echoes back through the
   // settings surface a poll or two later. It is OURS, and it happens with no

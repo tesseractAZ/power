@@ -706,13 +706,15 @@ test('every nameAllowlist entry is a string literal in server/src', () => {
 test('the <p> placeholder is the alarm-priority order, and discoveryUniqueIds covers every publisher', () => {
   assert.deepEqual(cd.PRIORITIES, [...ALARM_PRIORITY_ORDER]);
   const ids = discoveryUniqueIds([{ ch: 3, name: 'East' }, { ch: 11, name: 'West' }]);
-  assert.equal(ids.length, SENSORS.length + BINARY_SENSORS.length + ALARM_PRIORITY_ORDER.length + 2 * 2);
+  // v1.197.0 — + 1: the End-all-maintenance button.
+  assert.equal(ids.length, SENSORS.length + BINARY_SENSORS.length + ALARM_PRIORITY_ORDER.length + 1 + 2 * 2);
   assert.equal(new Set(ids).size, ids.length, 'unique_ids are unique');
   assert.ok(ids.every((id) => id.startsWith('ecoflow_')));
   // a new discovery component (number, select, …) must be added to discoveryUniqueIds
   const src = readFileSync(join(ROOT, 'server', 'src', 'mqttDiscovery.ts'), 'utf8');
   const components = new Set([...src.matchAll(/\$\{prefix\}\/([a-z_]+)\//g)].map((m) => m[1]));
-  assert.deepEqual([...components].sort(), ['binary_sensor', 'sensor', 'switch']);
+  // v1.197.0 — `button`: the End-all-maintenance button, in discoveryUniqueIds above.
+  assert.deepEqual([...components].sort(), ['binary_sensor', 'button', 'sensor', 'switch']);
 });
 
 /* ── the scanner and the slugger ────────────────────────────────────────── */

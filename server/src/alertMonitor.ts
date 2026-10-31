@@ -32,6 +32,7 @@ import {
   type DayForecast,
 } from './analytics.js';
 import { loadNotifyConfig, sendNotification, isConfigured, type NotifyConfig } from './notify.js';
+import { applyMaintenanceMute, windowsOnCores, type MaintenanceController } from './maintenanceWindow.js';
 // v0.9.25 — feedback-loop snapshot capture at first fire.
 // v0.9.59 — also capture the real normalized LR feature vector for
 // pack-level alerts (was previously reconstructed from generic snapshot
@@ -1779,9 +1780,20 @@ export function isBootRetrack(p: {
  * deduped (alreadyNotified); one that was not pushes once when it annunciates. A duplicate
  * critical push (a record lost with the sidecar) is the safe direction.
  */
-export function bootSeedNotified(p: { alert: Pick<Alert, 'id' | 'severity'>; firstRun: boolean; alreadyNotified: boolean }): boolean {
+export function bootSeedNotified(p: {
+  alert: Pick<Alert, 'id' | 'severity'>;
+  firstRun: boolean;
+  alreadyNotified: boolean;
+  /** v1.197.0 (review) — a maintenance window held it (maintenanceWindow.heldUnpushed). */
+  heldByMaintenance?: boolean;
+}): boolean {
   if (isOutageEventFamily(p.alert)) return p.alreadyNotified;
   if (p.alert.severity === 'critical') return p.alreadyNotified;
+  // v1.197.0 (review) — NOR AN ALERT A MAINTENANCE WINDOW HELD. Held is not pushed: a warning standing
+  // at the first tick of a window that spans a restart (or that ended while the add-on was down) was
+  // seeded "already notified", and when the window ended it was never pushed, though the end push
+  // said it would be. Seeded only on a delivery record, like a critical.
+  if (p.heldByMaintenance === true) return p.alreadyNotified;
   return p.firstRun || p.alreadyNotified;
 }
 
@@ -2482,8 +2494,8 @@ export function saveClearedLog(path: string, logArr: ClearedAlert[], max: number
 const PROCESS_BOOT_MS = Date.now();
 
 /**
- * v1.186.0 — the monitor's external inputs that tests replace. Production passes none:
- * the analytics singleton, the NWS storm-prep fetch and the real feature capture.
+ * v1.186.0 — the monitor's external inputs that tests replace. Production passes none of these
+ * but `maintenance`: the analytics singleton, the NWS storm-prep fetch and the real feature capture.
  */
 export interface AlertMonitorDeps {
   analytics?: Pick<AnalyticsClient, 'report'>;
@@ -2493,6 +2505,13 @@ export interface AlertMonitorDeps {
   send?: typeof sendNotification;
   /** v1.186.0 — overrides BOOT_HYDRATION_MAX_MS. */
   bootHydrationMaxMs?: number;
+  /**
+   * v1.197.0 — the maintenance windows (maintenanceWindow.ts; index.ts passes its controller). Each
+   * tick stamps every alert a window holds (applyMaintenanceMute, after the roster mute, on both
+   * publishes), then hands the final set to `observe`, which steps the windows and ends what is due.
+   * `heldUnpushed` keeps a held alert out of the boot seed (bootSeedNotified). Absent: nothing is shelved.
+   */
+  maintenance?: Pick<MaintenanceController, 'windows' | 'observe' | 'heldUnpushed'>;
 }
 
 export function startAlertMonitor(
@@ -3609,12 +3628,22 @@ export function startAlertMonitor(
       return multiPanel ? [] : [...new Set([...mutedSpares, ...offPanel])];
     })();
     lastRosterMute = { muted, spares: mutedSpareSns }; // v1.187.10 — rosterMuteReasonForSn
+    // v1.197.0 — the maintenance windows, read once per tick and stamped on both publishes: only those
+    // on a Core in the live map (windowsOnCores). The stamp checks each window's end and limit itself
+    // (maintenanceWindow.windowInForce).
+    const maintNow = Date.now();
+    const maintWindows = windowsOnCores(deps.maintenance?.windows() ?? [], snap.devices);
     const assemble = (workerAlerts: Alert[]): Alert[] => {
       const all = [...liveHead, ...workerAlerts, ...liveTail, ...liveAudible(), ...liveTailRest]
         .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
       // v1.187.0 — the roster mute, with its reason (diagnostic only) taking precedence over a
       // condition gate's (applyRosterMute).
-      for (const a of all) applyRosterMute(a, muted, mutedSpareSns);
+      // v1.197.0 — then a shelved Core's own alerts (applyMaintenanceMute): the push gate below and
+      // the broadcast (store.get().alerts) both read the stamp, so push and voice are held together.
+      for (const a of all) {
+        applyRosterMute(a, muted, mutedSpareSns);
+        applyMaintenanceMute(a, maintWindows, maintNow);
+      }
       return all;
     };
     const publish = (set: Alert[]): void => {
@@ -3651,6 +3680,16 @@ export function startAlertMonitor(
     // v1.187.0 — naming the device, the pack and the stamped reason (silentCriticalLine).
     for (const a of silentCriticalEdges(silentCriticalLogged, alerts)) log(silentCriticalLine(a));
     publish(alerts);
+    // v1.197.0 — step the maintenance windows on the set just published: what each held, whether its
+    // Core is back to normal, and its end (pushed and logged by the controller). An end takes effect
+    // on the next tick. The device map counts only once hydrated: an empty boot map removes nothing.
+    if (deps.maintenance) {
+      try {
+        deps.maintenance.observe(alerts, storeHydrated() ? snap.devices : null, maintNow);
+      } catch (e: any) {
+        warn(`maintenance: step failed (${e?.message ?? e})`);
+      }
+    }
     // v1.187.3 (review) — the settled stamp, judged on the set just published: its live part (above)
     // and each feed's value as this pass read it. Stamped at the first such publish and kept while
     // every pass's set is one; a pass whose set is not cleared it before its first publish (above).
@@ -3837,7 +3876,11 @@ export function startAlertMonitor(
         // v0.83.0 — outage EVENTs are NOT firstRun-seeded (see bootSeedNotified),
         // so a restart-spanning outage recorded before the monitor starts still
         // fires its push on the boot that follows it, instead of being swallowed.
-        const seeded = bootSeedNotified({ alert: a, firstRun: boot.seedAsBoot, alreadyNotified });
+        // v1.197.0 (review) — nor an alert a maintenance window held: it was never pushed.
+        const seeded = bootSeedNotified({
+          alert: a, firstRun: boot.seedAsBoot, alreadyNotified,
+          heldByMaintenance: boot.seedAsBoot && deps.maintenance?.heldUnpushed(a) === true,
+        });
         tracked.set(a.id, {
           alert: a,
           openingAlert: { ...a },   // v1.123.0 — frozen at raisedAt

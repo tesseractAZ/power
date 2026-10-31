@@ -142,8 +142,10 @@ const MUTANTS = [
   {
     id: 'xii. ★★★ "All clear" is spoken while the blind alert is held',
     file: BC,
-    find: '    a.severity === \'critical\' && (a.annunciate !== false || a.id === TELEMETRY_BLIND_ALERT_ID));',
-    to: '    a.severity === \'critical\' && a.annunciate !== false); /* MUTANT */',
+    // v1.197.0 — repointed: the gate also reads a maintenance window's shelvedUntilMs; the mutant
+    // still drops only the telemetry-blind exemption.
+    find: '    a.severity === \'critical\' && (a.annunciate !== false || a.id === TELEMETRY_BLIND_ALERT_ID || a.shelvedUntilMs != null));',
+    to: '    a.severity === \'critical\' && (a.annunciate !== false || a.shelvedUntilMs != null)); /* MUTANT */',
     why: 'A warning clearing during the hold announces "All clear. All stations report normal." while the system is blind.',
   },
   {
