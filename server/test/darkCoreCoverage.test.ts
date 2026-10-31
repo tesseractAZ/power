@@ -33,18 +33,17 @@ const { coreCoverageByDay } = await import('../src/analytics.js');
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
 
-/* ── 1. a day on which EVERY core was skipped is NOT "covered" ─────── */
+/* ── 1. a day on which no core reported is NOT "covered" ──────────────── */
 
-test('v1.150.0 — a day where every core is skipped reports covered:FALSE, not true', () => {
+test('v1.150.0 — a day on which no core reported reports covered:FALSE, not true', () => {
   // The REAL shape of this case, not a guessed one. On 2026-08-12 the roster's
-  // cores each had their first in-window sample on 08-20, so every one of them
-  // was skipped by skipBeforeJoin on that day — while still being present in
-  // the map, because they DID report later in the window.
+  // cores each had their first in-window sample on 08-20 — while still being
+  // present in the map, because they DID report later in the window.
   //
-  // Previously `covered` stayed at its `true` initialiser: the only write to
-  // false lives inside the loop body the skip bypasses. So a day with full
-  // daylight and NOT ONE evaluated core was published as covered, with
-  // worstSn/worstFrac null so the row carried no hint either.
+  // v1.150.0 guarded the v1.94.0 skipBeforeJoin path, which skipped every core on
+  // such a day and left `covered` at its `true` initialiser. v1.196.0 removes the
+  // skip (coreCoverageByDay): every core a day is measured on is held to the
+  // rule, so the day fails on its own, with the worst core named.
   const todayStart = 1_789_110_000_000;            // window is [todayStart-30d, todayStart-1d]
   const dayStart = todayStart - 30 * DAY;          // the earliest day in the window
   const hourIdx = (ms: number) => Math.floor(ms / HOUR);
@@ -52,24 +51,29 @@ test('v1.150.0 — a day where every core is skipped reports covered:FALSE, not 
   const ghiByEpoch = new Map<number, number>();
   for (let h = 7; h <= 17; h++) ghiByEpoch.set(hourIdx(dayStart + h * HOUR), 600);
 
-  // Both cores report ONLY later in the window — in-window (so they survive the
-  // `first == null` drop and land in presentBySn) but after dayStart's end.
+  // Both cores report ONLY later in the window — after dayStart's end.
   const joinTs = todayStart - 5 * DAY + 9 * HOUR;
   const pvBySn = new Map<string, Array<{ ts: number; value: number }>>([
     ['CORE_A', [{ ts: joinTs, value: 3000 }]],
     ['CORE_B', [{ ts: joinTs, value: 3000 }]],
   ]);
 
-  const out = coreCoverageByDay(ghiByEpoch, pvBySn, todayStart, 30, 0.8, true);
+  const out = coreCoverageByDay(ghiByEpoch, pvBySn, todayStart, 30, 0.8);
   const day = out.get(dayStart);
   assert.ok(day, 'the day must be present in the map');
   assert.equal(day!.daylightHours, 11, 'precondition: the day has full daylight');
   assert.equal(day!.covered, false, 'a day nobody measured is not a covered day');
+  assert.equal(day!.worstFrac, 0);
+  assert.equal(day!.worstSn, 'CORE_A');
 });
 
-test('v1.150.0 — the all-skipped guard does NOT fire when at least one core is evaluated', () => {
-  // Regression bound: the new `evaluated === 0` clause must not turn a day with
-  // one healthy reporting core into a gap. Only the all-skipped case changes.
+test('v1.196.0 — a core with no rows on a day fails that day even when another core reported in full', () => {
+  // INVERTED. v1.150.0 asserted covered:TRUE here: CORE_B's first row came later
+  // in the window, so v1.94.0 read it as "not joined yet" and skipped it. That is
+  // the signal a blackout already running when the window began also gives, and
+  // the dark core's missing share was scored as a forecast miss. CORE_B's absence
+  // on this day is a gap; whether a day is measured on a core at all is the
+  // membership record's call (skillRosterByDay), not the telemetry's.
   const todayStart = 1_789_110_000_000;
   const dayStart = todayStart - 30 * DAY;
   const hourIdx = (ms: number) => Math.floor(ms / HOUR);
@@ -77,16 +81,18 @@ test('v1.150.0 — the all-skipped guard does NOT fire when at least one core is
   const ghiByEpoch = new Map<number, number>();
   for (let h = 7; h <= 17; h++) ghiByEpoch.set(hourIdx(dayStart + h * HOUR), 600);
 
-  // CORE_A joined BEFORE this day and reports every daylight hour of it.
+  // CORE_A reports every daylight hour of the day; CORE_B only days later.
   const aPts: Array<{ ts: number; value: number }> = [];
   for (let h = 7; h <= 17; h++) aPts.push({ ts: dayStart + h * HOUR, value: 3000 });
   const pvBySn = new Map<string, Array<{ ts: number; value: number }>>([
     ['CORE_A', aPts],
-    ['CORE_B', [{ ts: todayStart - 5 * DAY + 9 * HOUR, value: 3000 }]],   // skipped on this day
+    ['CORE_B', [{ ts: todayStart - 5 * DAY + 9 * HOUR, value: 3000 }]],
   ]);
 
-  const out = coreCoverageByDay(ghiByEpoch, pvBySn, todayStart, 30, 0.8, true);
-  assert.equal(out.get(dayStart)!.covered, true);
+  const out = coreCoverageByDay(ghiByEpoch, pvBySn, todayStart, 30, 0.8);
+  assert.equal(out.get(dayStart)!.covered, false);
+  assert.equal(out.get(dayStart)!.worstSn, 'CORE_B');
+  assert.equal(out.get(dayStart)!.worstFrac, 0);
 });
 
 /* ── 2. the DURABLE ledger PV sum is coverage-gated ────────────────── */

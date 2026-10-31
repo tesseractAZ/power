@@ -414,25 +414,21 @@ For each of the last `windowDays = 7` days that (a) has any GHI coverage
 `coreCoverageByDay` — every wired core must report ≥ `PV_COVERAGE_MIN_FRAC = 80%`
 of the day's daylight hours):
 
-**v1.94.0 — `coreCoverageByDay(…, skipBeforeJoin)`.** The map has two
-consumers that need different verdicts for a core which produced NOTHING
-anywhere in the window. The **pv-bias factor** (default `false`) keeps the strict
-all-cores gate: a wholly-dark core fails every day, driving the factor to its
-neutral 1.0 no-op, which is the safe posture when the fleet actual is
-unmeasurable. **`computeForecastSkill`** passes `true`: a core that never
-reported cannot make a PAST day's actual wrong — it simply was not part of that
-day's fleet, and treating it as a gap nulls that day's `errorPct`. Conflating the
-two cost 14 nights of night-charge: a fleet reconfiguration added two cores with
-no history, every hindcast day became a gap, `calScoredDays` fell 26 → 0 against
-a floor of 14, and `basisComplete` (§15) stayed false so the planner produced no
-plan at all. The relaxation is narrow and per-DAY: a core is excluded from a day's
-requirement only until its FIRST in-window sample, and once joined it is held to
-the requirement normally, so a real blackout on a later day still gaps that day.
-(v1.93.0 first shipped this as a global "zero samples anywhere" skip, which did
-nothing once the new core logged one day — every earlier absent day became a gap
-again. v1.94.0 is the corrected form.) The sibling
-`fullCoverageFleetPv` has always had this escape hatch (its `contributing`
-filter); this brings the skill path into line without loosening the bias gate.
+**One coverage rule for both consumers.** `coreCoverageByDay` holds every Core a
+day is measured on to the same bar: a Core with no readings on a day is a gap that
+day, whatever the reason. The pv-bias factor measures each day on every current
+home Core, so a wholly dark Core fails every day and the factor degrades to its
+neutral 1.0 no-op. The forecast skill (section 4) measures each day on the Cores
+the membership record says were in the pool that day (`coresOn`, from
+`skillRosterByDay`). Before v1.196.0 the skill path exempted a Core until its
+first in-window sample (`skipBeforeJoin`, v1.93.0, made per-day in v1.94.0: "had
+not joined yet"). No readings is also what a blackout already running when the
+window began produces, and what Cores returning on different days after a
+fleet-wide outage produce, so the dark Core's missing share was scored as a
+forecast miss: +50% a day with one of three Cores dark, +200% with two. The days
+2026-08-11..08-19, scored on the current Cores with the dark and not-yet-pooled
+ones exempted, read as 184–258% misses until they left the window around 09-19;
+PV band coverage fell to 72% < 78% and the basis gate closed anyway.
 
 ```
 predWh = Σ_h  resp[hod].coeff · ghi(h)          // where coeff != null
@@ -471,16 +467,42 @@ yielding MAE and a `biasFactor`. Powers `/api/forecast-skill`,
 Window `windowDays` (default 7, clamped 1–30 at the route since v1.30.0; `/api/confidence`
 and the band calibrator request 30). For each past day `i = windowDays..1`, `dayStart = todayStart − i·1d`:
 
+First, the Cores each day is measured on (`skillRosterByDay`), from the pool
+membership record (`membership-history.json`, membershipHistory.ts; the
+recorder writes the connected-Core set and, since v1.196.0, the panel slot each
+Core holds). Memberships held under `MEMBERSHIP_GLITCH_MS` (15 min, the
+recorder's own bar for a change) are folded away (`membershipsDuring`), so a
+one-poll `isConnect` flicker does not move a day. Against the current home Cores
+(`solarModelSns`):
+
+| Verdict | When | Measured on |
+|---|---|---|
+| `off-roster` | a current home Core was in neither form (added through a slot nobody held, or recorded before slot maps), the day's Cores changed during the day, or the day would be a `predecessor` day that no fresh panel reading confirmed | not scored: `offRoster: true`, `errorPct` null |
+| `on-roster` | every current home Core was in the pool all day (a pool with more Cores, before one left, counts) | the current home Cores |
+| `predecessor` | a current home Core was not yet in the pool, but the Core that then held its panel slot was: a like-for-like swap, in which the incoming Core takes over the departing Core's PV array (`standInCores`); and a fresh panel reading confirmed the record through the day (`membershipConfirmedDuring`) | that day's Cores; the day is emitted `predecessorCores: true` |
+| `unrecorded` | the day starts before the record (a fresh install, a lost file, entries past the 64-entry cap) | the current home Cores, on telemetry coverage alone; counted in `unrecordedRosterDays` |
+
+The recorder stamps the newest entry `confirmedMs` on a fresh reading of every
+panel (`shp2ReadbackFresh`), at most once an hour (`MEMBERSHIP_CONFIRM_STEP_MS`).
+A cloud-offline panel keeps its last projection, and a stopped add-on reads
+nothing, so a swap made in such a stretch is recorded only when the panel next
+reads fresh, and until then the record still names the departed Core, by then on
+the bench. A stand-in day therefore needs the record confirmed through it, within
+`MEMBERSHIP_CONFIRM_SLACK_MS` (75 min); otherwise it is `off-roster`. On-roster
+and unrecorded days need no stamp: they are measured on the current home Cores.
+
 ```
 predWh = Σ_h  forecast.solarModel.hourly[hod].coeff · ghi(h)     // coeff != null
-actWh  = Σ_h  Σ_DPU  mean(pv_total slice over the hour)
+actWh  = Σ_h  Σ_{day's Cores}  mean(pv_total slice over the hour)
 predKwh, actKwh = /1000;  errKwh = predKwh − actKwh
-errPct = (weatherCovered && !coverageGap && actKwh>0.5) ? errKwh/actKwh·100 : null
+errPct = (weatherCovered && !coverageGap && !offRoster && actKwh>0.5) ? errKwh/actKwh·100 : null
 ```
 
-Day is emitted with `weatherCovered` (`dayHasGhiCoverage`) and `coverageGap`
-(per-core <80% daylight coverage). Only days that are weather-covered, NOT a
-coverage gap, AND mature (`predKwh>0.5 && actKwh>0.5 && predKwh ≥ 0.25·actKwh`)
+Day is emitted with `weatherCovered` (`dayHasGhiCoverage`), `coverageGap`
+(a Core the day is measured on reported under 80% of the daylight hours, a Core
+with no readings included, `coreCoverageByDay`), `offRoster` and
+`predecessorCores`. Only days that are weather-covered, NOT a coverage gap, NOT
+off-roster, AND mature (`predKwh>0.5 && actKwh>0.5 && predKwh ≥ 0.25·actKwh`)
 feed the aggregate stats:
 
 ```
@@ -495,7 +517,11 @@ biasFactor = totalActual / totalPredicted  (Σactual/Σpredicted; null if totalP
 > Wh/h` — the opposite-signed *additive* convention for the SAME error.
 
 Actuals are scoped to **SHP2-connected home DPUs only** (v0.21.0), matching the
-predictor's training set. Cached `FORECAST_SKILL_TTL_MS = 1 h`, keyed by
+predictor's training set: the current home Cores, or on a day before a
+like-for-like swap the Cores then in their slots, never a bench Core. After a
+Core is ADDED (a slot nobody held), the days before it are off-roster and the
+scored window rebuilds from the day it joined; a removal keeps scoring, and a
+like-for-like swap loses the day of the swap and any unconfirmed day before it. Cached `FORECAST_SKILL_TTL_MS = 1 h`, keyed by
 `${windowDays}:${ghiBasis}` and valid only for the forecast it was scored against
 (`forecastTs === forecast.generatedAt`, v1.186.5); a structurally incomplete forecast, or
 one whose model was fitted on other home Cores than the current map's
@@ -538,9 +564,10 @@ the older hours age out. `cloud_pct` remains first-write. Every reader goes thro
 
 ```ts
 { generatedAt, days: ForecastSkillDay[], meanAbsErrorKwh, meanAbsErrorPct,
-  biasFactor, windowDays, ghiBasis? }   // ghiBasis: 'first-write' | 'realized'
+  biasFactor, windowDays, ghiBasis?,       // ghiBasis: 'first-write' | 'realized'
+  unrecordedRosterDays? }                  // window days before the membership record
 ForecastSkillDay = { date, predictedKwh, actualKwh, errorKwh, errorPct|null,
-                     weatherCovered, coverageGap? }
+                     weatherCovered, coverageGap?, offRoster?, predecessorCores? }
 ```
 
 #### Endpoint
@@ -955,7 +982,10 @@ Hard-coded (non-env) constants: `DAYLIGHT_GHI=20`, `MIN_RESPONSE_PAIRS=2`,
 - **Missing telemetry ≠ darkness** — the pervasive guard. Bias correction, skill
   scoring, and the fleet fit all EXCLUDE days/hours where a wired Core reported
   <80% of daylight hours (`coreCoverageByDay`, `fullCoverageFleetPv`), and mark
-  their `errorPct`/`coverageGap` rather than scoring a phantom over-forecast. Since v1.188.1 the
+  their `errorPct`/`coverageGap` rather than scoring a phantom over-forecast. Since
+  v1.196.0 the skill hindcast applies the same all-Cores rule as the bias factor
+  (no exemption until a Core's first reading); which Cores a day is measured on
+  comes from the membership record, not from the telemetry being checked. Since v1.188.1 the
   recorder writes no rows for a device whose readings are held (`projectionRecordable` in
   heldSamples.ts) and moves held stretches already written to `held_samples`, so a cloud-dark
   Core is a gap these gates see, not its last reading restated as new.

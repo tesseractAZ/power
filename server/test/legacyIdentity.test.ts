@@ -33,6 +33,14 @@ import {
  * What it may move, and in which direction, is pinned below against the figures the planner
  * produced at 3fc751c3 (legacyIdentity.v1192.figures.json); the digests then hold the new plans
  * byte for byte, as they held the old ones.
+ *
+ * v1.196.0 — REGENERATED again, deliberately (the golden's `_amended` names every field that moved
+ * and why: 870 digests): the overnight write setpoint on the islanded-outage basis is the leg's own
+ * arm test (setpointOneTest.test.ts), a refused plan names its gate (noPlanReason.test.ts), and a
+ * cost plan carries the PV factor beside the load factor (costCeilingPvDebias.test.ts). The charge
+ * leg's direction is now held against the planner it joins without it
+ * (legacyIdentity.withoutChargeLeg.figures.json), and the release as a whole against v1.192.0.
+ * Since then the digests are the planner at v1.196.0, and every later plan must reproduce them.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -40,11 +48,20 @@ const GOLDEN = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.go
   generatedAt: string;
   digests: Record<string, string>;
 };
-/** v1.194.0 — per case, the plan before the charge leg: [chargeTonight (1/0), buyKwh,
- *  expectedBuyKwh, setpointSocPct, requiredExtraKwh, targetSocPct] at 3fc751c3 (v1.192.0). */
-const BEFORE_CHARGE_LEG = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.v1192.figures.json'), 'utf8')) as {
+type PlanFigures = Record<string, [number, number | null, number | null, number | null, number | null, number | null]>;
+/** v1.194.0 — per case, the plan at 3fc751c3 (v1.192.0): [chargeTonight (1/0), buyKwh,
+ *  expectedBuyKwh, setpointSocPct, requiredExtraKwh, targetSocPct]. */
+const AT_V1192 = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.v1192.figures.json'), 'utf8')) as {
   generatedAt: string;
-  figures: Record<string, [number, number | null, number | null, number | null, number | null, number | null]>;
+  figures: PlanFigures;
+};
+/** v1.196.0 — the same figures from the planner the charge leg now joins, without it: 3fc751c3
+ *  with v1.196.0's write setpoint (the islanded-outage leg's line), basisBlockedBy and PV factor
+ *  (lane commit 7f78fd6e). Until v1.196.0 the charge leg was held to its direction against
+ *  AT_V1192; once the setpoint on that leg stopped being a walk, v1.192.0 no longer isolates it. */
+const BEFORE_CHARGE_LEG = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.withoutChargeLeg.figures.json'), 'utf8')) as {
+  generatedAt: string;
+  figures: PlanFigures;
 };
 const H = 3_600_000;
 const plan = (deps: Parameters<typeof buildNightChargeInputs>[0]): NightChargePlan => computeNightChargePlan(buildNightChargeInputs(deps));
@@ -79,14 +96,15 @@ test('★★ ... and with a spec that pins the window the resolver finds, carrie
 });
 
 test('★★★ v1.194.0 — the charge leg moves the year only toward buying more: no buy, no expected buy and no requirement falls', () => {
-  // Against the planner at 3fc751c3, which credited a PV surplus at unity. A surplus stored at
+  // Against the planner without the charge leg, which credited a PV surplus at unity (v1.196.0:
+  // with the night-charge changes it joins — BEFORE_CHARGE_LEG). A surplus stored at
   // legEff leaves every walk at or below where it was, so the trough the buy is sized on can only
   // fall and the buy can only rise. A setpoint may fall in two shapes only: a charge night whose
   // requirement rose but whose window cannot deliver more (the setpoint is the arrival, from a
   // lower pack at the open — the buy itself is unchanged), and a hold (nothing armed, nothing
   // required) whose setpoint is the no-buy pack at the close, which the charge leg lowers.
   const labels = Object.keys(GOLDEN.digests);
-  assert.equal(BEFORE_CHARGE_LEG.generatedAt, '3fc751c3');
+  assert.equal(BEFORE_CHARGE_LEG.generatedAt, '7f78fd6e');
   assert.deepEqual(Object.keys(BEFORE_CHARGE_LEG.figures), labels, 'the same cases, in the same order');
   const plans = new Map(legacyIdentityCases().map((c) => [c.label, plan(c.deps)]));
   const ge = (a: number | null | undefined, b: number | null, what: string, l: string): void => {
@@ -114,13 +132,58 @@ test('★★★ v1.194.0 — the charge leg moves the year only toward buying mo
       assert.ok(windowBound || holdArrival, `${l}: setpoint ${sp0} → ${p.setpointSocPct} (requirement ${req0} → ${p.requiredExtraKwh}, buy ${buy0} → ${p.buyKwh})`);
     }
   }
-  // The year as measured when the change was made: 95 buys rise (by up to 2.84 kWh), 118 expected
-  // buys rise, one hold becomes a charge (0.96 → 1.49 kWh, over the 1 kWh minimum buy), and 264
-  // setpoints move, 16 of them down.
-  assert.deepEqual({ buyRose, expectedRose, holdToCharge, setpointMoved, setpointFell }, { buyRose: 95, expectedRose: 118, holdToCharge: 1, setpointMoved: 264, setpointFell: 16 });
+  // The year as measured when the change was made (v1.194.0, against v1.192.0): 95 buys rise (by
+  // up to 2.84 kWh), 118 expected buys rise, one hold becomes a charge (0.96 → 1.49 kWh, over the
+  // 1 kWh minimum buy), and 264 setpoints move, 16 of them down.
+  // v1.196.0 — re-measured against the planner it joins (BEFORE_CHARGE_LEG). The buys, the hold
+  // that becomes a charge and the largest rise are the same: the write setpoint does not size a
+  // buy. 64 setpoints move (was 264) and 5 fall (was 16): 200 of the setpoints the charge leg moved
+  // were solved on the whole-house walk on the islanded-outage leg (112 resilience and 85 cost
+  // charge nights, 3 holds) and are now the line or the cost target, which no walk reaches; 11 of
+  // the 16 falls were cost charge nights among them. 108 expected buys rise (was 118): 13 rose only
+  // through that walk's setpoint, now the line (9 of them expect no buy at all), and 3 rise from
+  // the line's lower write level ('2027-06-26 21:30', '2027-06-26 +1 01:30', '2027-09-03 13:00').
+  assert.deepEqual({ buyRose, expectedRose, holdToCharge, setpointMoved, setpointFell }, { buyRose: 95, expectedRose: 108, holdToCharge: 1, setpointMoved: 64, setpointFell: 5 });
   assert.ok(Math.abs(maxBuyRise - 2.84) < 0.005, `largest buy rise ${maxBuyRise}`);
   const flipped = labels.filter((l) => BEFORE_CHARGE_LEG.figures[l][0] === 0 && plans.get(l)!.chargeTonight);
   assert.deepEqual(flipped.map((l) => [l, BEFORE_CHARGE_LEG.figures[l][1], plans.get(l)!.buyKwh]), [['2027-08-25 21:30', 0.96, 1.49]]);
+});
+
+test('★★★ v1.196.0 — against v1.192.0, the charge leg and the write setpoint together: no buy and no requirement falls; an expected buy or a setpoint falls only on the islanded-outage leg', () => {
+  // The release as a whole, against AT_V1192. The charge leg only raises a buy or a requirement and
+  // the write setpoint sizes neither, so neither falls, and no charge night becomes a hold. The
+  // setpoint on the islanded-outage (or disabled) leg is now the line or the cost target, not the
+  // whole-house walk, so it and the expected buy drawn to it fall there (setpointOneTest.test.ts);
+  // on the legacy-pct band the setpoint is still the walk, and falls only in the charge leg's two
+  // shapes (above).
+  const labels = Object.keys(GOLDEN.digests);
+  assert.equal(AT_V1192.generatedAt, '3fc751c3');
+  assert.deepEqual(Object.keys(AT_V1192.figures), labels, 'the same cases, in the same order');
+  const plans = new Map(legacyIdentityCases().map((c) => [c.label, plan(c.deps)]));
+  let expectedFell = 0, setpointFell = 0;
+  for (const l of labels) {
+    const [charge0, buy0, exp0, sp0, req0, tgt0] = AT_V1192.figures[l];
+    const p = plans.get(l)!;
+    if (buy0 == null) assert.equal(p.buyKwh ?? null, null, `${l}: buyKwh appeared`);
+    else assert.ok(p.buyKwh != null && p.buyKwh >= buy0 - 1e-9, `${l}: buyKwh ${buy0} → ${p.buyKwh}`);
+    if (req0 == null) assert.equal(p.requiredExtraKwh ?? null, null, `${l}: requiredExtraKwh appeared`);
+    else assert.ok(p.requiredExtraKwh != null && p.requiredExtraKwh >= req0 - 1e-9, `${l}: requiredExtraKwh ${req0} → ${p.requiredExtraKwh}`);
+    assert.ok(!(charge0 === 1 && !p.chargeTonight), `${l}: a charge night became a hold`);
+    const lineLeg = p.cushionBasis === 'islanded-outage' || p.cushionBasis === 'disabled';
+    if (exp0 != null && p.expectedBuyKwh! < exp0 - 1e-9) {
+      expectedFell += 1;
+      assert.ok(lineLeg, `${l}: expectedBuyKwh ${exp0} → ${p.expectedBuyKwh} on the ${p.cushionBasis} basis`);
+    }
+    if (sp0 != null && p.setpointSocPct! < sp0 - 1e-9) {
+      setpointFell += 1;
+      const windowBound = p.chargeTonight && p.requiredExtraKwh! > req0! + 1e-9 && p.buyKwh === buy0 && p.setpointSocPct === p.targetSocPct;
+      const holdArrival = !p.chargeTonight && p.requiredExtraKwh === 0 && p.setpointSocPct === p.targetSocPct && p.targetSocPct! < tgt0!;
+      assert.ok(lineLeg || windowBound || holdArrival, `${l}: setpoint ${sp0} → ${p.setpointSocPct} on the ${p.cushionBasis} basis`);
+    }
+  }
+  // Measured at v1.196.0: 122 expected buys and 381 setpoints fall, every one on the islanded-outage
+  // leg (171 resilience and 200 cost charge nights, 10 holds).
+  assert.deepEqual({ expectedFell, setpointFell }, { expectedFell: 122, setpointFell: 381 });
 });
 
 test('★★ the cases are not vacuous: buys, holds, force-charge starts, cost and resilience, null plans, mid-window', () => {

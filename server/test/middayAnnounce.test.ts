@@ -141,7 +141,15 @@ test('★★★ the push shapes that arm nothing say so: advisory, refused (and 
   assert.equal(hb.title, 'Charge plan: outage backup tonight 11pm–5am; no charge tomorrow 10am–3pm');
   const none = buildMiddayPlanMessage(input({ cost: { ...COST, basisComplete: false } }));
   assert.equal(none.title, 'Charge plan: no plan for tomorrow 10am–3pm');
-  assert.match(none.body, /nothing will be charged/);
+  assert.equal(none.body, 'No charge plan for tomorrow 10am–3pm — the forecast/telemetry basis is incomplete, so nothing will be charged. '
+    + '(This confirms the evening job ran; the reserve floor is unchanged.)', 'no reason (a record from before v1.196.0): the words before it');
+  // v1.196.0 — the gate that refused the plan is stated, as the overnight "no plan tonight" push states it.
+  const why = 'PV band coverage 72% < 78% (forecast present, tier=forecast, calDays 14/14)';
+  const named = buildMiddayPlanMessage(input({ cost: { ...COST, basisComplete: false, basisBlockedBy: why } }));
+  assert.equal(named.title, none.title);
+  assert.equal(named.body, `No charge plan for tomorrow 10am–3pm — the forecast/telemetry basis is incomplete: ${why}, so nothing will be charged. `
+    + '(This confirms the evening job ran; the reserve floor is unchanged.)');
+  for (const blank of [null, '']) assert.equal(buildMiddayPlanMessage(input({ cost: { ...COST, basisComplete: false, basisBlockedBy: blank } })).body, none.body);
 });
 
 /* ══ the spoken notice ══════════════════════════════════════════════════════ */
@@ -450,6 +458,22 @@ test('★★★ the shadow preview: the evening\'s push and speech for the shado
   assert.match(adv.push.title, /recommended/);
   assert.equal(adv.spoken, null);
   assert.equal(middayShadowPreviewLogLines(record({ mode: 'advisory', cost: { ...r.cost!, wouldArm: false } }), MODEL).length, 1);
+  // v1.196.0 — a refused cost leg's gate reaches the "no plan" push; a record from before it (no gate)
+  // reads as before, and a complete leg passes none.
+  assert.equal(i.cost.basisBlockedBy, null);
+  const gate = 'SoC telemetry incoherent (% vs remaining/full mismatch)';
+  const unplanned = { ...r.cost!, basisComplete: false, chargeTonight: false, wouldArm: false, disposition: `not armed — the plan basis is incomplete (${gate})` };
+  const ri = middayShadowAnnounceInput(record({ cost: { ...unplanned, basisBlockedBy: gate } }), MODEL)!;
+  assert.equal(ri.cost.basisBlockedBy, gate);
+  assert.match(middayShadowPreview(record({ cost: { ...unplanned, basisBlockedBy: gate } }), MODEL)!.push.body,
+    /^No charge plan for tomorrow 10am–3pm — the forecast\/telemetry basis is incomplete: SoC telemetry incoherent \(% vs remaining\/full mismatch\), so nothing will be charged\. /);
+  assert.match(middayShadowPreview(record({ cost: unplanned }), MODEL)!.push.body, /— the forecast\/telemetry basis is incomplete, so nothing will be charged\. /);
+  assert.equal(middayShadowAnnounceInput(record({ cost: { ...r.cost!, basisBlockedBy: gate } }), MODEL)!.cost.basisBlockedBy, null,
+    'a complete leg names no gate');
+  // The gate survives the record's file (coerceMiddayShadowRecord); an older record has none.
+  const back = coerceMiddayShadowRecord(JSON.parse(JSON.stringify(record({ cost: { ...unplanned, basisBlockedBy: gate } }))))!;
+  assert.equal(back.cost!.basisBlockedBy, gate);
+  assert.equal('basisBlockedBy' in coerceMiddayShadowRecord(JSON.parse(JSON.stringify(record({ cost: unplanned }))))!.cost!, false);
   // No mid-day leg: no preview.
   assert.equal(middayShadowPreview(record({ cost: null, backup: null, why: 'no-run-in-scan' }), MODEL), null);
   assert.deepEqual(middayShadowPreviewLogLines(record({ cost: null, backup: null, why: 'no-run-in-scan' }), MODEL), []);

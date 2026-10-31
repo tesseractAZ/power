@@ -90,6 +90,23 @@ export function shp2ConnectedDpuSns(devices: Record<string, DeviceSnapshot>): Se
 }
 
 /**
+ * v1.196.0 — the slot each connected Core occupies, keyed `<panel SN>:<slot>` across every panel
+ * (the panel's own connector table, `Shp2Projection.sources`). The same predicate as
+ * `shp2ConnectedDpuSns` (connected, with an SN), so its values are that set; a source without a
+ * slot number is left out. The recorder keeps it with the membership (membershipHistory.ts), so a
+ * past day's Cores can be matched to today's slot by slot.
+ */
+export function connectedSlotMap(devices: Record<string, DeviceSnapshot>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const panel of allShp2s(devices)) {
+    for (const src of panel.projection.sources ?? []) {
+      if (src.isConnected && src.sn && Number.isInteger(src.slot)) out[`${panel.sn}:${src.slot}`] = src.sn;
+    }
+  }
+  return out;
+}
+
+/**
  * v1.129.0 — the SHP2 census. Answers "how many smart panels does this plant
  * have?", which the rest of the app has never asked.
  *

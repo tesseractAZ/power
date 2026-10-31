@@ -954,11 +954,15 @@ test('★★ the rationale names the worst-case arrival once, in the sizing sent
     assert.equal(p.rationale.split(t).length - 1, 1, `${name}: ${t} in ${p.rationale}`);
     assert.ok(p.rationale.includes(`projecting ${t} by the window close.`), `${name}: ${p.rationale}`);
   }
-  // The reserve sentence keeps the written reserve and the ask. v1.194.0 — the ask by hand: the line
-  // (16% of 92.16 + 8 h × 1.0 kW × 1.25 / 0.94 = 25.38 kWh) plus the deepest fall of the islanded
-  // P10/P90 walk from 05:00 to 23:00 (38.90 kWh), whose 3.42 kWh of midday surplus is stored at
-  // 0.927: 64.29 kWh = 69.8% (69.5% with the surplus at unity, the figure before v1.194.0).
-  assert.match(resilience8().rationale, / The reserve is set to 50% — the resilience requirement asks for 69\.8%, but the panel only accepts a backup reserve up to 50%\. /);
+  // The reserve sentence keeps the written reserve and names the ask. v1.196.0 — this night used to
+  // read "set to 50% — the resilience requirement asks for 69.8%" (69.5% before v1.194.0 stored the
+  // walk's midday surplus at the charge leg): a setpoint solved on the whole-house walk to the next
+  // window, not on the test the plan is sized on (the pack at the window close against the 27.5%
+  // line: 16% of 92.16 + 8 h × 1.0 kW × 1.25 / 0.94 = 25.38 kWh, no walk, so the charge leg does not
+  // move it). The write is now that line, to the whole percent above it, so nothing is truncated
+  // (setpointOneTest.test.ts).
+  assert.match(resilience8().rationale, / The reserve is set to 28% \(the resilience requirement\)\. /);
+  assert.doesNotMatch(resilience8().rationale, /asks for/);
 });
 
 test('★★★ a window that cannot reach the level: every surface says "toward", never "to"', () => {
@@ -1265,13 +1269,18 @@ test('★★★ every night expected to charge nothing: no "~0 kWh", "about 0" o
       assert.doesNotMatch(t, /[Cc]harging (the backup pool )?(to|toward)|(?<!force-)[Cc]harge (to|toward) ~|expected charge|Se cargarán/, `${name} / ${where}: ${t}`);
     }
     const texts = Object.fromEntries(nightTexts(p));
-    assert.equal(texts['push title'], 'Night-charge: reserve held at 50% tonight — no charge expected', name);
-    assert.ok(texts['push body'].startsWith('Holding the backup reserve at 50% overnight as a floor; no charge is expected — the pool should open the window near ~'), `${name}: ${texts['push body']}`);
-    assert.match(texts['spoken en'], /^Night charge notice\. The backup reserve will be held at 50 percent in the charge window that opens on Monday at 00:00; no charge is expected\. /, name);
-    assert.match(texts['spoken es'], /^Aviso de carga nocturna\. La reserva de respaldo se mantendrá en el 50 por ciento en la ventana de carga que comienza el lunes a las 00:00; no se espera ninguna carga\. /, name);
-    assert.equal(texts['card lead'], '50% reserve held as a floor — no charge expected', name);
-    assert.match(texts['morning body (never started)'], /^Supervised night charge for 2026-10-12 completed: the reserve was held at 50% overnight as a floor \(no charge was expected\)/, name);
-    assert.match(p.rationale, /^Hold the reserve at 50% in the 00:00–05:00 window: no charge expected\. Expected: /, name);
+    // v1.196.0 — the reserve each night writes (chargeReservePct): 50% on the two cost nights, 28%
+    // on the resilience night, which writes its 27.6% line to the whole percent above it — it held
+    // 50% only because its setpoint was solved on the whole-house walk (setpointOneTest.test.ts).
+    const r = chargeReservePct(p)!;
+    assert.equal(r, name === 'resilience 8 h, 60%' ? 28 : 50, name);
+    assert.equal(texts['push title'], `Night-charge: reserve held at ${r}% tonight — no charge expected`, name);
+    assert.ok(texts['push body'].startsWith(`Holding the backup reserve at ${r}% overnight as a floor; no charge is expected — the pool should open the window near ~`), `${name}: ${texts['push body']}`);
+    assert.match(texts['spoken en'], new RegExp(`^Night charge notice\\. The backup reserve will be held at ${r} percent in the charge window that opens on Monday at 00:00; no charge is expected\\. `), name);
+    assert.match(texts['spoken es'], new RegExp(`^Aviso de carga nocturna\\. La reserva de respaldo se mantendrá en el ${r} por ciento en la ventana de carga que comienza el lunes a las 00:00; no se espera ninguna carga\\. `), name);
+    assert.equal(texts['card lead'], `${r}% reserve held as a floor — no charge expected`, name);
+    assert.match(texts['morning body (never started)'], new RegExp(`^Supervised night charge for 2026-10-12 completed: the reserve was held at ${r}% overnight as a floor \\(no charge was expected\\)`), name);
+    assert.match(p.rationale, new RegExp(`^Hold the reserve at ${r}% in the 00:00–05:00 window: no charge expected\\. Expected: `), name);
   }
   // Force-charge riding a night that charges nothing: armed, and not expected to start.
   const fc = heldForceCharge();
@@ -1283,9 +1292,11 @@ test('★★★ every night expected to charge nothing: no "~0 kWh", "about 0" o
   assert.match(sup.body, /\(bounded write; auto-restores after the charge window closes\)\. It also arms the panel's force-charge toward ~80%, timed to finish by the window close; it is not expected to start\. Cancel from/);
   assert.match(sup.body, /this write is economic \(cost mode\)/);
   assert.doesNotMatch(sup.body, /just long enough|this buy is economic/);
-  // The resilience night writes the clamped requirement and states the line it is sized on.
+  // The resilience night writes the line it is sized on, to the whole percent above it (v1.196.0:
+  // it wrote the clamped whole-house walk, > 50), and states that line.
   const res = heldResilience();
-  assert.equal(res.setpointSocPct! > 50, true);
+  assert.equal(res.setpointSocPct, 28);
+  assert.equal(res.cushionLineSocPct, 27.55);
   assert.match(Object.fromEntries(nightTexts(res))['push body'], /the floor\+cushion line is 27\.6%\./);
 });
 
@@ -1703,9 +1714,10 @@ test('★★ the force-charge ON-failure push names where the force-charge stops
   assert.match(at(null), /above the 50% reserve will not happen;/);
   assert.doesNotMatch(at(null), /toward|—%|\(—/);
   assert.match(at(80.4, true), /OFF after 0 re-issue\(s\) \(too close to the window end to re-issue\)\. /);
-  // index.ts builds it from the record: the slots, ours, the armed ceiling.
+  // index.ts builds it from the record: the slots, ours, the armed ceiling — and, v1.196.0, each
+  // slot's Core (forceChargeFailedCore.test.ts).
   const idx = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-  assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true, ceilingPct: state\.forceChargeCeilingPct,\n\s+\}\)\)/);
+  assert.match(idx, /buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true, ceilingPct: state\.forceChargeCeilingPct,\n\s+cores: slotCores,\n\s+\}\)\)/);
   assert.doesNotMatch(idx, /\(toward \$\{state\.forceChargeCeilingPct/);
   // The stop is the one the morning push and the evening push name.
   assert.match(buildNightChargeMorningSummary({ day: '2026-10-12', targetPct: 50, restorePct: 16, expectedKwh: null,

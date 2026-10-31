@@ -67,20 +67,6 @@ const MUTANTS = [
     why: 'Every bench spare would raise a permanent telemetry-gap alarm, and the real signal would be buried in known-good noise.',
   },
   {
-    id: 'v. ★ an all-skipped day goes back to reporting covered:true',
-    file: ANALYTICS,
-    find: '    if (presentBySn.size > 0 && evaluated === 0) covered = false;',
-    to: '    /* MUTANT */',
-    why: 'A day with full daylight and NOT ONE evaluated core reads as covered, with worstSn/worstFrac null so the row carries no hint — absence read as success.',
-  },
-  {
-    id: 'vi. the evaluated counter stops counting',
-    file: ANALYTICS,
-    find: '      evaluated++;',
-    to: '      /* MUTANT */',
-    why: 'Equivalent to deleting the guard: evaluated stays 0 on every day, so EVERY day with any SN present is force-marked uncovered — the v1.94.0 regression that emptied the skill window.',
-  },
-  {
     id: 'vii. ★ the durable ledger PV sum loses its coverage gate',
     file: INDEX,
     find: '    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE && !pvHeld ? round2(pvWh / 1000) : null;',
@@ -94,6 +80,10 @@ const MUTANTS = [
     to: '      worstCov = (worstCov + coverageFrac(pts, fcSpanStart, fcSpanEnd)) / 2; /* MUTANT */',
     why: 'One dark core in three averages to a healthy-looking 0.67 while the total is a third short — the exact arithmetic that let this episode through.',
   },
+  // v / vi RETIRED in v1.196.0. They pinned the v1.150.0 all-skipped-day guard in
+  // coreCoverageByDay, which existed only because v1.94.0's skipBeforeJoin could skip every core
+  // on a day. The skip is gone (a core with no rows on a day is a gap on every path), so the guard
+  // and its counter are gone with it; the replacement is pinned in scripts/mutate-skill-roster.mjs.
   // xiii / xiv RETIRED in v1.163.0. They pinned `PRAGMA analysis_limit=400` ahead of
   // `ANALYZE samples` — a mechanism that was applied and bounded the wrong cost (an
   // exact count still reads every index page; the next boot after an image pull spent

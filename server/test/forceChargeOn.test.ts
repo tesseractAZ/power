@@ -278,7 +278,8 @@ test('★★★ index.ts: the failure is persisted once, logged as a warning and
   assert.ok(b.includes('app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT'));
   // v1.187.22 — the push is built where its text is tested (notify.buildNightForceChargeOnFailure:
   // a warning, deduped on night_charge_force_charge_on_failure — nightChargeExpectedBuy.test.ts).
-  assert.match(b, /await sendNotification\(loadNotifyConfig\(\), buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true, ceilingPct: state\.forceChargeCeilingPct,\n\s+\}\)\);/);
+  // v1.196.0 — with each slot's Core and its own settings (forceChargeFailedCore.test.ts).
+  assert.match(b, /await sendNotification\(loadNotifyConfig\(\), buildNightForceChargeOnFailure\(\{\n\s+day: state\.day, slots: action\.slots, ourSlots: state\.forceChargeSlots, retries: state\.forceChargeOnRetries,\n\s+noRetry: action\.noRetry === true, ceilingPct: state\.forceChargeCeilingPct,\n\s+cores: slotCores,\n\s+\}\)\);/);
   assert.ok(!b.includes('setChannelForceCharge'), 'the warning writes nothing');
   const v = branch('onVerified');
   assert.ok(v.includes('persistNightActuation({ ...nightActuationMem, forceChargeOnVerifiedAtMs: nowMs });'));

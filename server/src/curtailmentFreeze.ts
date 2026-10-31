@@ -138,7 +138,8 @@ export function curtailmentMembershipSound(o: {
 }
 
 let membershipOverride: MembershipHistory | null | undefined;
-/** v1.186.2 — the recorder's membership record (read fresh each walk), or null outside the add-on. */
+/** v1.186.2 — the recorder's membership record (read fresh each walk), or null outside the add-on.
+ *  v1.196.0 — also the forecast-skill hindcast's (computeForecastSkill, read on a cache miss). */
 export function curtailmentMembershipHistory(): MembershipHistory | null {
   if (membershipOverride !== undefined) return membershipOverride;
   const path = option<string | undefined>('CURTAIL_MEMBERSHIP_HISTORY_PATH')

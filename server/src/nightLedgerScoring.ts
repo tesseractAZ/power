@@ -27,7 +27,8 @@ import { tariffRatesConfirmation, type Season, type TariffModel } from './tariff
 import { fmtMinor } from './money.js';
 import type { DeviceSnapshot } from './snapshot.js';
 import type { Shp2Projection } from './ecoflow/project.js';
-import { DELIVERED_BASIS } from './nightChargeAdvisor.js';
+import { DELIVERED_BASIS, medianFilter3 } from './nightChargeAdvisor.js';
+import { saturationThresholdPct, meanChargeCeilingPct } from './chargeTaper.js';
 import { LEGACY_REVERT_LAG_MS } from './nightChargeActuator.js';
 import { SHP2_SOURCE_SLOTS } from './hwSpec.js';
 
@@ -693,8 +694,14 @@ export function forecastSpanResetColumns(shortMs: number): Partial<NightLedgerRo
     realized_cost_cents: null,
     actual_min_soc_pct: null,
     actual_min_soc_ts_ms: null,
+    // v1.196.0 — measured over the same span as the PV actual it qualifies.
+    actual_max_soc_pct: null,
+    pv_saturated: null,
     plan_traj_floor_breached: null,
     cushion_breached: null,
+    // v1.196.0 — the reading the realized cushion verdict is derived from (the gate derives it
+    // again from this column, so a reset row keeps none).
+    window_close_soc_pct: null,
     grid_home_coverage_frac: null,
     scored: 0,
     score_notes:
@@ -710,6 +717,28 @@ export function forecastSpanResetColumns(shortMs: number): Partial<NightLedgerRo
     shadow_window_pv_kwh: null,
     shadow_window_load_kwh: null,
   };
+}
+
+/**
+ * v1.196.0 — the saturation that censors a row's PV (NightLedgerRow.pv_saturated): the highest pool
+ * SoC over the forecast span [issue, +24 h] — the span actual_pv_kwh is summed over —, after the
+ * 3-sample median filter the trough uses (a lone reconnect sample is not a level the pool held),
+ * against the charge taper of the home Cores' mean chgMaxSoc (chargeTaper.saturationThresholdPct;
+ * 90 when none reports one). A pool that reached it sat where the Cores shed PV, so that day's
+ * actual PV measures the curtailment, and the cost ceiling's PV factor leaves the row out
+ * (costSurplusPvFactor). Both null with no reading. PURE.
+ */
+export function pvSaturationColumns(o: {
+  socPts: ReadonlyArray<{ ts: number; value: number }>;
+  chgMaxSocPcts: ReadonlyArray<number | null | undefined>;
+}): { actual_max_soc_pct: number | null; pv_saturated: number | null } {
+  let max: number | null = null;
+  for (const p of medianFilter3(o.socPts)) {
+    if (Number.isFinite(p.value) && (max == null || p.value > max)) max = p.value;
+  }
+  if (max == null) return { actual_max_soc_pct: null, pv_saturated: null };
+  const taperPct = saturationThresholdPct(meanChargeCeilingPct(o.chgMaxSocPcts));
+  return { actual_max_soc_pct: Math.round(max * 10) / 10, pv_saturated: max >= taperPct ? 1 : 0 };
 }
 
 /** v1.187.10 — the clause the tag appends to `score_notes`. PURE. */
@@ -1295,6 +1324,48 @@ export function measuredWindowOpenSocPct(pts: ReadonlyArray<Sample>, windowStart
   const mid = Math.floor(vals.length / 2);
   const median = vals.length % 2 === 1 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
   return Math.round(median * 10) / 10;
+}
+
+/** v1.196.0 — how far before the window close measuredWindowCloseSocPct looks: the hold's last
+ *  quarter hour, the window-open lead-in (one rule for both instants). The reserve restore lands on
+ *  the first actuator tick after the close, so these readings are the pool the hold left. */
+export const WINDOW_CLOSE_SOC_LEAD_MS = WINDOW_OPEN_SOC_LEAD_MS;
+
+/**
+ * v1.196.0 — PURE. The pool SoC measured as the charge window closed: measuredWindowOpenSocPct's
+ * rule at the close — the MEDIAN of the backup_pct readings in [windowEnd − WINDOW_CLOSE_SOC_LEAD_MS,
+ * windowEnd], to 0.1, so the SHP2's single-sample reconnect 0 cannot stand in for the pool, and no
+ * reading after the restore counts. On the islanded-outage and disabled bases the plan claims the
+ * pack at the close holds its line (cushion_line_soc_pct), and the realized cushion verdict is this
+ * reading against it (nightChargeGate.realizedCushionBreach). null when no finite reading falls in
+ * the lead-in.
+ */
+export function measuredWindowCloseSocPct(pts: ReadonlyArray<Sample>, windowEndMs: number): number | null {
+  return measuredWindowOpenSocPct(pts, windowEndMs);
+}
+
+/**
+ * v1.196.0 — PURE. The score_notes clause for a row whose cushion claim is the pack at the close
+ * (nightChargeGate.cushionClaimAtClose): the pool measured there against the line, or why the
+ * verdict rests on the low after the close or is unknown. '' on every other row (the legacy
+ * verdict, unchanged, needs no clause).
+ */
+export function realizedCushionNote(i: {
+  claimAtClose: boolean;
+  linePct: number | null;
+  windowCloseSocPct: number | null;
+  actualMinSocPct: number | null;
+  breached: 0 | 1 | null;
+}): string {
+  if (!i.claimAtClose || i.linePct == null) return '';
+  const line = `the ${i.linePct}% line the plan was sized on`;
+  if (i.windowCloseSocPct != null) {
+    return ` Realized cushion: the pool read ${i.windowCloseSocPct}% at the window close against ${line}`
+      + `${i.breached === 1 ? ' — under it' : ''}.`;
+  }
+  return i.breached === 0
+    ? ` Realized cushion: no reading in the window's last 15 minutes; the lowest pool after the close (${i.actualMinSocPct}%) held ${line}.`
+    : ` Realized cushion: unknown — no reading in the window's last 15 minutes, and the lowest pool after the close (${i.actualMinSocPct ?? 'unmeasured'}${i.actualMinSocPct == null ? '' : '%'}) does not show ${line} held at the close.`;
 }
 
 /**

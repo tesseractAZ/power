@@ -1,3 +1,71 @@
+## 1.196.0
+
+### The overnight write charges to the line the plan is sized on; the no-plan and force-charge warnings say why; the cost ceiling counts the measured sun
+
+**Night charge**
+
+- With the islanded-outage cushion (or the cushion disabled), the overnight reserve write is now solved on the test the plan is sized on: the pack at the window close against the reserve floor plus the outage cushion. It was solved on a whole-house walk to the next charge window. On this plant that walk falls below the line from any starting level, so every charge night asked for about 73-100% and wrote the 50% maximum. A resilience night now writes the cushion line, rounded up to the next whole percent. For example, a 16% floor with a 4 h, 2.62 kW, x1.25 cushion now writes 32% where it wrote 50%, and the expected draw falls from about 27.9 kWh to about 10 kWh. `ARB_OUTAGE_CUSHION_HOURS` is unchanged.
+- A cost night writes its cost target where that is higher than the line, so a ceiling under 50% is written as itself (40% for a 40.3% ceiling, where it wrote 50%). A night limited by the charge rate writes the target, never the lower arrival the window can reach. The legacy band, the outage backup leg and the mid-day leg's reserve are unchanged.
+- Of the 1,104 recorded plan cases, 431 setpoints move, all on the islanded-outage cushion. 157 resilience charge nights write a lower reserve (median 13 points), 17 cost charge nights write lower (median 7 points), and 5 cost nights limited by the charge rate write higher (their cost target). No charge night writes under its line, or under 50% where its line is higher. No buy and no requirement changes.
+- The cushion is counted on the panel's nameplate pool, and the reserve percent is a share of the packs' measured capacity (about 0.944 of nameplate). The written line therefore holds about that share of the counted cushion above the reserve (options guide; reference chapter 15 part 1).
+- The reserve sentence says the panel accepts a backup reserve only up to 50% only when the ask is above 50%. Before, it was also printed for asks such as 40.3% or 44.2% that were written as 40% or 44%.
+- The force-charge failure warning, and its log line, now name the Core in each slot that did not take Charge Now. They say when that Core is offline in the cloud, and name its work mode or its own backup reserve when that differs from the other Cores driven that night. For example: "slot(s) 3 (Core 5 — work mode 3 (time-of-use), where the other Cores read 0 (default); its own backup reserve 60%, where the other Cores read 50%)". The warning then suggests comparing those settings in the EcoFlow app. Labels never contain serial digits. The slot-to-Core mapping comes from the fresh panel reading; the settings are each Core's last report. The morning summary keeps slot numbers.
+- The "Night-charge: no plan tonight" push names what refused the plan. For example: "the forecast/telemetry basis is incomplete: PV band coverage 72% < 78% (…)", or "SoC telemetry incoherent (% vs remaining/full mismatch)". A night with no panel reading says the panel's pool readings are unavailable. The reason is on the plan as `basisBlockedBy`, which was declared but never set; it is now set on every refused plan and absent on a complete one. The mid-day preview's "not armed" line and its "no plan" push carry it too.
+
+**Write-readiness gate**
+
+- The realized half of the engine-fault strike is now graded on what the plan claims. With the islanded-outage cushion (or the cushion disabled), the plan claims only that the pool at the window close holds the reserve floor plus the cushion it sized (`cushion_line_soc_pct`). The verdict was the lowest pool over the 16 hours after the close against the reserve floor plus `ARB_OUTAGE_CUSHION_PCT`, measured after the reserve has reverted to the floor. With the write at the line, that verdict would have counted almost every actuated resilience night as a strike and held the gate at `BLOCKED`. On the 2026-10-12 fixture the 32% write has a P50 morning low of about 23.6%, against 16 + 15 = 31%; with a 2.0 kW island the 28% write is under 31% at the close itself.
+- On such a night `cushion_breached` is now the pool measured at the window close (new ledger column `window_close_soc_pct`, the median reading over the window's last 15 minutes) under the line, with 0.05 points allowed for rounding. Without that reading the night is clean when the lowest pool after the close holds the line; otherwise the verdict is unknown. The gate derives the verdict again from the row's columns and keeps the stored flag where the columns cannot decide (fail-closed). It counts the stored flags it overrules in `realizedStrikesSetAside`. A night whose line is above the panel's 50% reserve maximum, with no force-charge to carry the pool past it, now reads as breached: the plan claims a cushion the write cannot reach, because `cushionShortfall` does not count the write envelope (4 of the year fixture's 199 islanded evening charges with no disclosed shortfall; the old rule passed them). The legacy band, the mid-day two-leg row and rows without a recorded line keep the earlier verdict. `score_notes` states the reading against the line. `CURRENT_ALGO_VERSION` is unchanged, so no night leaves the readiness count.
+
+**Night charge (cost mode)**
+
+- The cost ceiling's morning-solar headroom now de-biases the median PV as well as the house load. It uses the median realized/forecast PV ratio from the night ledger (1 + `pv_err_frac`), over forecast-tier nights whose PV verdict stands, whose forecast was at least 5 kWh, and whose pool did not reach the charge taper. On those days output is curtailed, so their actual PV measures nothing.
+- Like the load factor, the PV factor only widens the headroom (at least x1, at most x1.3). It needs 5 nights and takes full effect at 10. It never raises an hour's median PV past that hour's P90. On the 2026-10-12 fixture, ten nights at x1.095 lower the ceiling and the force-charge stop from 56.6% to 50.4%, and the expected buy from about 11.6 to 5.1 kWh.
+- New plan fields: `costSurplusPvFactor`, `costSurplusPvSamples`. New ledger columns: `cost_surplus_pv_factor`, `cost_surplus_pv_samples`, `actual_max_soc_pct` and `pv_saturated`. When only the PV term is de-biased, the load factor is recorded as 1 with its nights.
+
+**Unchanged**
+
+- The runway, SoC and floor alarms do not read the write setpoint. The reserve write still reverts at the window close. Cost mode with a ceiling of 50% or more still writes 50% plus force-charge. The analytics PV forecast that feeds the runway and the alarms is unchanged.
+- Charge and hold plans carry no `basisBlockedBy` key (cost-mode plans gain only the two PV-factor fields above).
+
+**Tests**
+
+- New: `setpointOneTest.test.ts`, `forceChargeFailedCore.test.ts`, `noPlanReason.test.ts`, `costCeilingPvDebias.test.ts` and `realizedCushionAtClose.test.ts` (an M5 resilience night, written 32% with a ~23.6% morning low, through the gate: no strike; a pool under its line at the close still strikes, including a line above the 50% envelope). `middayAnnounce.test.ts` covers the mid-day "no plan" reason.
+- `legacyIdentity.golden.json` is regenerated on purpose, with an `_amended` note: 870 of 1,104 digests move against 1.195.0, by the setpoints (431), the refused plans' `basisBlockedBy` (132) and the cost plans' PV-factor keys (563). The truncation sentence alone moves no case. `overnightTextGolden.json` is regenerated in its evening entries only, and one reserve-only "toward" case is added.
+- The 1.194.0 test that holds the charge leg to its direction now compares against the planner without the charge leg but with this release's setpoint (new `legacyIdentity.withoutChargeLeg.figures.json`), because 1.192.0's setpoints on the islanded-outage cushion were a walk. Every assertion holds. 95 buys rise and one hold becomes a charge, as before. 108 expected buys rise and 64 setpoints move, 5 of them down; when 1.194.0 measured them against 1.192.0 the figures were 118, 264 and 16. A new test checks the release against 1.192.0: no buy and no requirement falls. 85 expected buys rise; the 122 that fall, and the 381 setpoints that fall, are all on the islanded-outage cushion.
+- New harness `scripts/mutate-v1196-night.mjs` (68 mutants; 17 on the realized verdict). Anchors are re-pointed in `mutate-v1187-1f.mjs`, `mutate-ledger-legibility.mjs`, `mutate-zero-cushion.mjs` and `mutate-readiness-gate.mjs`.
+
+### The forecast skill measures each past day on that day's Cores
+
+**Forecast skill (PV band, night-charge basis gate)**
+
+- On the forecast-skill path, a home Core with no readings on a day now makes that day a coverage gap, as it already did for the PV bias factor. The hindcast used to take a Core's first reading inside the 30-day window as the day it joined (v1.93.0/v1.94.0). A Core already dark when the window began, or Cores returning on different days after a fleet-wide outage, then had their missing share scored as a forecast miss: +50% a day with one of three Cores dark, +200% with two. On a 7-day fixture with one of three Cores dark for the first three days, MAE and bias now read 0 kWh and 1.00 (were 1.93 kWh and 0.86).
+- Each past day is now measured on the Cores the pool membership record (`membership-history.json`) shows as wired that day, not on today's Cores applied to 30 days of history. The recorder now stores the panel's slot table with each entry.
+  - A day before a like-for-like swap (a Core moved into the slot a departing Core held, taking over its PV array) is scored on that day's own Cores and marked `predecessorCores`.
+  - A day on which the pool lacked a current Core's array is marked `offRoster` and left out of the error, the bias factor and the PV band calibration. This covers days before a Core was added through an empty slot, a swap recorded before slot tables existed, and the day of a change.
+  - Membership flickers under 15 minutes are ignored.
+  - Days before the record are scored on telemetry coverage alone and counted in `unrecordedRosterDays`.
+- A pre-swap day is scored on the departed Core only if a fresh panel reading confirmed the record through that day. The recorder stamps the newest entry (`confirmedMs`) on a fresh reading of every panel, at most once an hour. A swap made while the panel was cloud-offline or the add-on was stopped is recorded only when the panel next reads fresh. The days in between are `offRoster`, not scored on the departed Core's bench rows.
+- After a Core is added, the night-charge basis gate counts only days measured on the new set of Cores, so it stays closed until 14 such days are scored (at least two weeks). A like-for-like swap loses the day of the swap and any unconfirmed day before it. A removal loses none.
+
+**Unchanged**
+
+- The PV bias factor on the runway and alarm paths: its coverage call and its output are unchanged.
+- `membership-history.json` keeps its format. The new `slots` and `confirmedMs` fields are optional. The newest existing entry gains its slot table on the first rollup after the update, and its stamp on the first fresh panel reading. Neither is a membership change for the curtailment freeze or the pack-DC round-trip check.
+
+**Tests**
+
+- `skillRoster.test.ts` (new) covers:
+  - a dark Core and staggered returns, which are gaps;
+  - swaps scored on that day's Cores, including a departed Core dark on a pre-swap day;
+  - additions, which pause;
+  - a swap hidden behind a stale panel, which is `offRoster`;
+  - flicker folding, superset pools and days before the record;
+  - the production reader and the confirmation stamp;
+  - the recorder writing the slot table, and stamping only on a fresh panel reading.
+- The tests in `pvCoverageGate.test.ts` and `darkCoreCoverage.test.ts` that asserted the join exemption now assert a gap.
+- `mutate-skill-roster.mjs` (new): 29 mutants. `mutate-dark-core.mjs` drops mutants v and vi, whose guard is gone.
+
 ## 1.195.0
 
 ### The forecast cards show the restored solar while Cores are offline; a held panel's circuits are no longer the house load; cell-spread mutes below 85% are bounded
@@ -126,117 +194,6 @@
 - The legacy identity golden is regenerated on purpose (472 of 1,104 plan digests move). A new direction test checks every case against the plans recorded on 1.192.0, which 1.193.0 plans identically (`legacyIdentity.v1192.figures.json`).
 - The `middayPlan`, `nightChargeExpectedBuy`, `heldImport`, `middayShadow`, `poolEnergyBasis` and `runwayBasisContracts` figures are re-derived for the charge efficiency; `runwayBasisContracts` gains a reference-band test across a sunny stretch to the full rail.
 - New `mutate-charge-leg.mjs`: 19 mutants, all killed; one of them stores only the PV at the charge efficiency in the sizing walk, so a surplus hour's house load skips the step. Ten anchors in `mutate-v1187-19.mjs`, `mutate-v1187-22c.mjs` and `mutate-midday-plan.mjs` are repointed.
-
-## 1.193.0
-
-### Lifetime energy counters never step down or jump; panel counters no longer dip after a load drop
-
-**Energy (Home Assistant)**
-
-- Every lifetime counter the add-on publishes now only rises: PV Production, Home Consumption, Grid Import (Home), Grid to Battery Charge, Battery Energy In and Out, and each circuit. Home Assistant reads a value below 90 % of the previous one as a meter reset and books the whole new value again; it books any rise as energy. The membership re-seed and the floor/live gap repair used to step Battery Energy In and Out down to the new pool's sum, so each time the full counter went into the Energy statistics again (about 12,043 kWh on Battery Energy In by 2026-09-07; the Month and Year views read about 4.4 times high).
-- The battery floors still re-seed against the new set of batteries. The published counters now continue from their last values, and the difference is kept as a basis shift: the `lifetime_basis` table, and `shiftWh` in `/api/lifetime-energy`.
-- The floors, their shifts and the accepted set of Cores (the new `bms_membership` table) are written in one transaction, so a crash or a failed write can never pair a re-seeded floor with an old shift or roster. `bms-membership.json` is still written after each commit, for older releases. It is read only on the first start after the update, and rewritten when it disagrees with the database.
-- A Core joining the pool counts from the re-seed. Its packs' history since their baselines is no longer published as one step up (+6,144 Wh in one read on the test plant). Energy it moves in the 15 minutes before the re-seed is not counted.
-- Every counter now holds a drop between reads of up to 5 kWh at the last published value. Before, only two counters had this 5 kWh hold and the others held 50 Wh. A larger drop with no known cause continues from the last value and logs one warning naming the counter (`recorder: v1.193.0 WARN lifetime counter …`).
-- A drop continued from that way stays owed (`owed_wh` in `lifetime_basis`). When the reading climbs back (a rise of over 5 kWh and at least half the amount owed), up to the amount owed is taken back off the shift and is not published as energy. Without this, a counter that read 0 and then its old value would publish twice its value: on 2026-06-08 every counter read 0 from 18:00 to 19:00, and Home Assistant booked PV Production about 808.6 kWh and Home Consumption about 825.1 kWh a second time. The owed amount survives a restart and expires 24 hours after the drop, so a drop that never comes back (a replaced database) cannot hide a later one's return. Once no more than 5 kWh is owed, every rise is taken back until nothing is. A drop that comes back in steps each under half the amount owed is published as it returns.
-- Between rollups, Home Consumption, Grid Import (Home) and the circuits could read lower than a moment before after a sharp load drop: 64 to 223 Wh, and up to 3.2 kWh across a 10-minute silence at 19.2 kW. A read held the last panel reading forward to the moment of the read, and the next reading revised it. Home Assistant logged these as "not strictly increasing" and, across an hour boundary, booked a negative hour. Reads now integrate each series up to its newest reading only, so a published value lags that reading by at most one sample interval (up to 5 minutes for a steady load).
-- `/api/lifetime-energy` `details` carry `shiftWh` and `heldWh`. `battery_baseline_deficit_kwh` is computed from the measured values, without the shifts. `/api/debug/battery-lifetime` reports each battery counter's shift. The lifetime carbon figures use PV Production with its shift.
-- If reading the lifetime counters fails, the MQTT state and `/api/ha-state` publish their fields null (Home Assistant: unknown, not a reset) and the circuit fields follow the live circuits. The runway, the alert counts and every other field still publish.
-
-**Documentation**
-
-- The alerts reference gives the per-device telemetry-gap alert id as it has been since v1.188.1: `system-outage-device-<SN>-<alertStartMs ?? startMs>-3`.
-
-**Unchanged**
-
-- Statistics Home Assistant already recorded are not modified. Alarms, the runway and the night charge read none of these counters.
-
-**Rollback**
-
-- Once any counter shows a non-zero `shiftWh`, a release before this one publishes it without the shift. That is a step Home Assistant books as a meter reset (a step down of 10 % or more), as a negative hour (a smaller one) or as energy (a step up). Do not roll back past this release after a pool change.
-
-**Not covered**
-
-- An add-on restore of `/data` reverts the totals, the shifts and the high-water file together, so a restored counter publishes its older value.
-
-**Tests**
-
-- New: `lifetimeEmitGuard.test.ts` (replaces `lifetimeDipClamp.test.ts`), `recorderPoolContinuity.test.ts`, `recorderLifetimeReadMonotone.test.ts` and `helpers/haTotalIncreasing.ts` (Home Assistant's reset rule). `recorderPoolContinuity.test.ts` covers a leave and a rejoin, a restart, a failed floor commit on a leave and on a rejoin, a rebase in between, and a stale or unwritable roster file.
-- `recorderFloorGapInvariant.test.ts` adds both floors above the live sum. `recorderLifetimeKeys.test.ts` adds the worker's shifted totals. `analyticsWorker.test.ts` adds the persisted keys failing. `haPayloadFmt.test.ts` adds the measured deficit and its wiring.
-- Tests that asserted the step down, the pass-through of a large drop or read/rollup equality are changed, with the reason stated.
-- `lifetimeEmitGuard.test.ts` adds the take-back rule and 1,000 random walks with drops that come back. `recorderEmitHighwater.test.ts` adds a counter that reads 0 and then its old value, in one process and across a restart. The new `recorderLifetimeTakeback.test.ts` covers Battery Energy In through the floors' transaction, the expiry after a replaced database, and the high-water file waiting for an uncommitted shift.
-- `mutate-lifetime-monotone.mjs` is new (45 mutants). `mutate-energy-core-outage.mjs` re-points B-xviii, B-xli, B-xcvi, B-ciii and B-civ.
-
-### README screenshots are rendered from a synthetic fleet, and nothing is written until the pixels are checked
-
-**Documentation**
-
-- All five README screenshots (`docs/screenshots/dashboard.png`, `solar.png`, `battery.png`, `strategy.png`, `alerts.png`) are re-rendered at 1280 px from a committed, fully synthetic fleet. The images they replace were captures of a live installation, masked by serial shape. That masking does not catch EcoFlow's default device name, "<product>-<last four digits of its serial>" until the device is renamed, or installation-specific names and figures. The paths are unchanged, so README links and the documentation build are unaffected.
-- The fleet (`scripts/screenshots/fixture.mts`) has seven devices: one Smart Home Panel 2, three DELTA Pro Ultra Cores with 15 packs, an EV charger, a DELTA 3 Plus and an offline Smart Generator. Every serial is a placeholder, every device name is a product name, and the circuits keep the panel's default names. One minute-step plant model drives every card, chart and report, at a fixed clock (Wed 17 Jun 2026 12:30, America/Phoenix). Re-capturing an unchanged fixture gives byte-identical images.
-- `scripts/screenshots/capture.mts` drives headless Chrome through the real built UI against `serve.mts` (127.0.0.1 only; writes are refused). It writes no image unless every tab passes all of these:
-  - The page asked for no endpoint or history metric the fixture does not serve, including a read of a path the UI only writes to.
-  - No card is still loading or reports itself unavailable.
-  - The page's text holds no serial outside the fixture's placeholders.
-  - Neither the page's text nor an OCR read of the image (full-size and downscaled) holds a device name ending in a hyphen and four digits. This covers a product name that ends in a model number, such as "Smart Home Panel 2-NNNN" or "DELTA 2-NNNN".
-  - Each tab's positive controls are read, and an OCR read returns at least 20 lines.
-  - The page text passes `check-no-secrets.py --stdin`.
-  
-  The serial rule is not applied to OCR, which can read a 0 as an O. The capture is run by hand on macOS (headless Chrome, Vision OCR). It is not run in CI.
-
-**Checks**
-
-- `scripts/check-no-secrets.py --stdin` applies the scan's shape rules, and the private value rules where configured, to text on standard input. A run with no flag is unchanged.
-- `scripts/check-mutant-anchors.mjs` resolves `.mts` targets.
-
-**Unchanged**
-
-- The screenshot tooling changes no add-on code, option or behaviour.
-
-**Tests**
-
-- `screenshotFixture.test.ts` (T1–T9) covers:
-  - Placeholder serials only; product names only.
-  - Every API path the UI names is served, write-only or comment-only.
-  - The leak gate fires on default names (a product name ending in a letter, a parenthesis or a model number) and not on dates, phone numbers or channels.
-  - The replay server refuses writes, and refuses and reports a read of a write-only path.
-  - One clock, and one consistent plant.
-  - Each caption's element is present. The runway weekday is checked in the zone the suite runs in.
-  - The capture refuses a stale bundle.
-- `checkNoSecretsStdin.test.ts` runs a copy of the script in an empty directory, so a maintainer's own pattern file does not change the result.
-- `mutate-screenshot-gate.mjs` is new (21 mutants).
-
-## 1.192.0
-
-### The mid-day charge preview states what a held reserve costs; documentation files are named Power
-
-**Night charge (mid-day preview, nothing written)**
-
-- The SHP2 does not discharge the pool below its backup reserve, so while a charge leg holds a raised reserve, house load the pool would have carried comes from the grid. The mid-day preview now estimates that energy for each leg it sizes, from the write at the window open to the restore, on the median load and PV the leg was planned on, and prices it: hour by hour at the tariff's rates, less what the next charge no longer buys at the mid-day rate (the energy the pool kept, over the charge efficiency). The lift to the reserve is the leg's own draw and is not counted.
-- The outage backup is also sized on option B (its walk ends at the 10:00 open) beside option A (to 23:00 the next day), so the choice between them is made on real nights. Option B is a comparison only: it is never armed or announced, and the mid-day leg is still sized from option A's hold.
-- On the 2026-10-14 test fixture, option A's 50% hold sends about 9.3 kWh of house load to the 12.59¢ overnight rate and adds about $0.30 a weeknight; option B's 40% hold sends about 0.6 kWh ($0.02); the mid-day leg's own hold sends nothing under the sun.
-- The figures go to the evening's `night-charge[midday-shadow]:` log lines, to the preview record on the status, and to eight new ledger columns: `shadow_backup_held_import_kwh`, `shadow_backup_held_net_usd`, `shadow_cost_held_import_kwh`, `shadow_cost_held_net_usd`, `shadow_backup_b_setpoint_pct`, `shadow_backup_b_expected_buy_kwh`, `shadow_backup_b_held_import_kwh` and `shadow_backup_b_held_net_usd`. With rates not confirmed the energy is stated and nothing is priced.
-
-**Release**
-
-- The documentation attached to each release is named `Power-Documentation-v<version>.docx` and `.pdf`, and the files the CI documentation build produces `Power-Documentation.docx` and `.pdf` (were `EcoFlow-Panel-Documentation-…`).
-
-**Unchanged**
-
-- Nothing of the mid-day cycle is armed, written, pushed or spoken; the overnight charge runs as before.
-
-**Tests**
-
-- `heldImport.test.ts`: the held import and its price worked by hand (the lift, the discharge efficiency, a full pool's spill, the hours' rates, unpriced rates, the hold's span, the planner glue). `middayShadow.test.ts`: the evening records option A's and option B's held import on the engine's own plans, B is never probed or armed, and an older record reads back unchanged. `mutate-midday-ledger.mjs` gains ten mutants (H-i…H-x).
-- The SSH console tests (`sshServer.test.ts`, `sshCaps.test.ts` and the child helper) take their host key from `generateHostKey`, as the add-on does since 1.191.7: their one shared key came from ssh2's own generator, so the 1 malformed key in 256 failed every test in the file (seen once, nine tests in one run).
-
-## 1.191.7
-
-### A new SSH host key is checked before it is saved
-
-**Console**
-
-- The SSH library (ssh2 1.17.0) drops a leading zero byte from the public half of 1 generated host key in 256, and then rejects that key as malformed. When that happened on the start that first generated the key, the SSH console stayed off for that start and the log read `console/ssh: failed to start: Malformed OpenSSH private key`; the next start replaced the key with a warning. A generated key is now read back before it is written, and one that does not parse is discarded for another (up to 8 tries). An existing host key is unaffected and keeps its fingerprint.
-- The same defect failed the host-key test in about 1 CI run in 100.
 
 ## Older releases
 

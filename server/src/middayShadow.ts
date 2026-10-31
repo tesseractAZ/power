@@ -301,6 +301,9 @@ export interface ShadowLegSummary {
    *  hold the cushion: what the evening's words say of it. Absent on a record from before R5. */
   toward?: boolean;
   cushionShortfall?: boolean;
+  /** v1.196.0 — the gate that refused the leg's plan (plan.basisBlockedBy): on a refused plan that
+   *  names one only. Absent on a complete leg, an unsized one and a record from before v1.196.0. */
+  basisBlockedBy?: string;
   /** v1.192.0 — the house energy its hold sends to the grid, and the bill effect (heldImportEstimate);
    *  null when it writes nothing or the band does not cover the hold. Absent on an older record. */
   heldImport?: HeldImport | null;
@@ -408,6 +411,8 @@ export function summariseLeg(
     windowPvP50Kwh: fin(sized?.windowPvP50Kwh),
     windowLoadP50Kwh: fin(sized?.windowLoadP50Kwh),
     ...(p != null ? { toward: chargeIsWindowBound(p) === true, cushionShortfall: p.cushionShortfall === true } : {}),
+    ...(p != null && !p.basisComplete && typeof p.basisBlockedBy === 'string' && p.basisBlockedBy !== ''
+      ? { basisBlockedBy: p.basisBlockedBy } : {}),
     heldImport: sized?.heldImport ?? null,
   };
 }
@@ -905,6 +910,7 @@ export function middayShadowAnnounceInput(rec: MiddayShadowRecord, model: Tariff
       windowStartMs: c.windowStartMs, windowEndMs: c.windowEndMs,
       levelPct: c.levelPct, reservePct: c.reservePct, expectedKwh: c.expectedBuyKwh, buyKwh: c.buyKwh,
       toward: c.toward === true, forceCharge, charges: c.chargeTonight, basisComplete: c.basisComplete,
+      basisBlockedBy: c.basisComplete ? null : (c.basisBlockedBy ?? null),
       cushionShortfall: c.cushionShortfall === true,
     },
     backup: backupNamed && b != null ? {
@@ -997,6 +1003,7 @@ const coerceLeg = (raw: unknown): ShadowLegSummary | null => {
     windowPvP50Kwh: fin(o.windowPvP50Kwh), windowLoadP50Kwh: fin(o.windowLoadP50Kwh),
     ...(typeof o.toward === 'boolean' ? { toward: o.toward } : {}),
     ...(typeof o.cushionShortfall === 'boolean' ? { cushionShortfall: o.cushionShortfall } : {}),
+    ...(typeof o.basisBlockedBy === 'string' && o.basisBlockedBy !== '' ? { basisBlockedBy: o.basisBlockedBy } : {}),
     ...('heldImport' in o ? { heldImport: coerceHeldImport(o.heldImport) } : {}),
   };
 };
