@@ -366,7 +366,7 @@ export function historySeries(sn: string, metric: string, sinceMs: number, until
   const from = Math.max(sinceMs, p.start);
   const to = Math.min(untilMs, FIXTURE_NOW_MS);
   const step = Math.max(1, Math.round((bucketSec ?? 60) / 60));
-  const pct = /soc|_pct$/.test(metric);
+  const pct = metric.includes('soc') || metric.endsWith('_pct');
   const out: Array<{ ts: number; value: number }> = [];
   const first = Math.ceil((from - p.start) / MIN);
   const last = Math.floor((to - p.start) / MIN);

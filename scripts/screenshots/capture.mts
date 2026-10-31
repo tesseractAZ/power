@@ -240,6 +240,15 @@ async function main(): Promise<number> {
       if (r.exceptionDetails) throw new Error(`page script failed: ${r.exceptionDetails.text}`);
       return r.result.value;
     };
+    /** A page function called with its arguments passed as values, never spliced into the code. */
+    const callInPage = async <T,>(functionDeclaration: string, ...args: unknown[]): Promise<T> => {
+      const doc = (await s('Runtime.evaluate', { expression: 'document' })) as { result: { objectId: string } };
+      const r = (await s('Runtime.callFunctionOn', {
+        objectId: doc.result.objectId, functionDeclaration, arguments: args.map((value) => ({ value })), returnByValue: true, awaitPromise: true,
+      })) as { result: { value: T }; exceptionDetails?: { text: string } };
+      if (r.exceptionDetails) throw new Error(`page script failed: ${r.exceptionDetails.text}`);
+      return r.result.value;
+    };
 
     await s('Page.enable');
     await s('Runtime.enable');
@@ -277,7 +286,10 @@ async function main(): Promise<number> {
       await s('Page.navigate', { url: server.url });
       await waitFor('the page to load', () => loaded);
       await waitFor('the first snapshot', async () => / devices · \d+ online/.test(await pageText()));
-      const clicked = await evaluate<boolean>(`(() => { const b = [...document.querySelectorAll('header button')].find((x) => x.textContent.trim().startsWith(${JSON.stringify(tab.label)})); if (!b) return false; b.click(); return true; })()`);
+      const clicked = await callInPage<boolean>(
+        "function (label) { const b = [...document.querySelectorAll('header button')].find((x) => x.textContent.trim().startsWith(label)); if (!b) return false; b.click(); return true; }",
+        tab.label,
+      );
       if (!clicked) throw new Error(`${tab.label}: no tab button`);
       await waitIdle();
       await sleep(2_000);
