@@ -513,8 +513,14 @@ export const VDIFF_KNEE_GAP_CARRY_MS = 60 * 60_000;
  * session is such a knee (offKnee: one that is not forfeits it for the session): the pack's own SoC at
  * or below VOL_DIFF_LOW_KNEE_SOC_PCT, within VOL_DIFF_LOW_KNEE_PEER_PTS of its sibling packs' median
  * (a pack that far below its siblings is stranded — the 07-18 → 08-23 warranty pack read 11% against
- * 58% and 1% against 21-26% — and pages at once), and under VOL_DIFF_KNEE_HARD_MV. Deliberately NOT
- * env-tunable: they bound a mute.
+ * 58% and 1% against 21-26% — and gets no low-charge grace), and under VOL_DIFF_KNEE_HARD_MV.
+ * Deliberately NOT env-tunable: they bound a mute.
+ *
+ * What gets no low-charge grace (a stranded pack, a session that reached the line on any other
+ * reading, no SoC of its own) pages at once only while the BMS is idle. While it reports balancing,
+ * the balancing mute is checked first (vdiffCritMute) and holds it, bounded like every mute here: it
+ * speaks VDIFF_KNEE_MAX_MUTE_MS after the off-plateau session's first crossing. Only
+ * VOL_DIFF_KNEE_HARD_MV and above pages at once, balancing or not.
  */
 /** v1.195.0 — the pack SoC (its own reading) at or below which a critical cell spread may be the
  *  bottom-of-curve knee. Both benign events (08-16, 08-20) sat at 12-13%. */
@@ -2280,7 +2286,9 @@ export function computeAlerts(
             && offAgeMs >= VDIFF_KNEE_MAX_MUTE_MS && (balancing || lowChargeKnee(kneeObs));
           const offWhere = packSoc != null ? `below ${VOL_DIFF_PLATEAU_SOC_PCT}% charge` : 'with no charge reading';
           // v1.195.0 — a pack at the bottom of its charge far below its siblings is stranded, not the
-          // knee: say so (it pages at once).
+          // knee: say so. It has no low-charge grace; while the BMS balances, the balancing mute
+          // still holds it until the off-plateau session's bound (vdiffCritMute), and the note is on
+          // the card from the first tick.
           const stranded = pk.soc != null && pk.soc <= VOL_DIFF_LOW_KNEE_SOC_PCT && siblingMedianSoc != null
             && siblingMedianSoc - pk.soc >= VOL_DIFF_LOW_KNEE_PEER_PTS;
           const strandedNote = stranded ? ` Pack at ${pk.soc}% charge against a sibling median of ${siblingMedianSoc}%.` : '';

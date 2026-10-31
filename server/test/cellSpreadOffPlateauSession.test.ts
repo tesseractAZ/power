@@ -13,8 +13,10 @@
  * (B) A healthy pack at the bottom of its charge crossed the instantaneous 50 mV line and sounded red
  * (2026-08-20: Core 5, cleared in 6.7 minutes). A 50-149 mV spread on a pack at 15% or less, within 10
  * points of its sibling packs, is held on the card — not pushed, not sounded — for at most those 20
- * minutes. A stranded pack (10 points or more below its siblings), a session that reached the line on
- * any other reading, and 150 mV or more page at once.
+ * minutes. A stranded pack (10 points or more below its siblings) and a session that reached the line
+ * on any other reading get no low-charge grace: they page at once while the BMS is idle, and while it
+ * reports balancing they are held by the balancing mute, which speaks 20 minutes after the session's
+ * first crossing (10b). 150 mV or more pages at once, balancing or not.
  *
  * The clock is mocked; each tick is the monitor's 20 s computeAlerts.
  */
@@ -312,7 +314,7 @@ test('★★★ 9. a low-charge spread that does not close speaks at +20:00', ()
   for (let t = VDIFF_KNEE_MAX_MUTE_MS; t <= 25 * MIN; t += TICK_MS) assert.ok(speaks(tick(T0 + t, { soc: 12, vd: 58, bal: false }, sib)));
 });
 
-test('★★★ 10. a STRANDED pack pages at once: 11% against 56/58/59/60 (median 59); 1% against 21/23/25/26 (median 25)', () => {
+test('★★★ 10. a STRANDED pack, the BMS idle, pages at once: 11% against 56/58/59/60 (median 59); 1% against 21/23/25/26 (median 25)', () => {
   const a = tick(T0, { soc: 11, vd: 71, bal: false }, [56, 58, 59, 60]);
   assert.ok(speaks(a), 'the warranty-pack shape is a fault, not the knee');
   assert.match(a!.detail, /Pack at 11% charge against a sibling median of 59%\./);
@@ -322,6 +324,29 @@ test('★★★ 10. a STRANDED pack pages at once: 11% against 56/58/59/60 (medi
   assert.match(b!.detail, /Pack at 1% charge against a sibling median of 25%\./);
   assert.equal(upperMedianSoc([56, 58, 59, 60]), 59, 'the upper median of an even count');
   assert.equal(upperMedianSoc([13]), null, 'fewer than two siblings: none');
+});
+
+test('★★★ 10b. a STRANDED pack while the BMS balances: no low-charge grace, but the balancing mute holds it to +19:40 and it speaks at +20:00', () => {
+  // What the docs say of 10: no low-charge grace — "at once" only while the BMS is idle. vdiffCritMute
+  // checks the balancing mute before the low-charge branch, so a stranded reading that balances is held
+  // as 'balancing', bounded by the off-plateau session like any balancing critical below 85% (1, 15).
+  // Before v1.195.0 that mute had no limit here at all. The stranded note is on the card throughout.
+  const sib = [56, 58, 59, 60];
+  const v = { soc: 11, vd: 71, bal: true };
+  for (let t = 0; t < VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) {
+    const a = tick(T0 + t, v, sib);
+    assert.ok(muted(a), `${mmss(t)}: balancing mutes inside the bound`);
+    assert.equal(a!.mutedBy, 'balancing', `${mmss(t)}: the balancing mute, never the low-charge grace`);
+    assert.match(a!.detail, /Pack at 11% charge against a sibling median of 59%\./);
+  }
+  const at = tick(T0 + VDIFF_KNEE_MAX_MUTE_MS, v, sib);
+  assert.ok(speaks(at), '+20:00');
+  assert.match(at!.detail, /First reached the critical line below 85% charge 20 minutes ago\./);
+  // A session opened at 40% on a balancing reading is held the same way, and speaks at the same bound.
+  resetVdiffWarnHoldForTesting();
+  const w = { soc: 40, vd: 60, bal: true };
+  for (let t = 0; t < VDIFF_KNEE_MAX_MUTE_MS; t += TICK_MS) assert.equal(tick(T0 + t, w, [40, 40, 40, 40])!.mutedBy, 'balancing', mmss(t));
+  assert.ok(speaks(tick(T0 + VDIFF_KNEE_MAX_MUTE_MS, w, [40, 40, 40, 40])));
 });
 
 test('★★ 11. the peer line: 9 points below the siblings is the knee; 10 points is stranded', () => {

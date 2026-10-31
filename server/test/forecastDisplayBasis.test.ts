@@ -218,6 +218,7 @@ test('★★★ (f) the cards: the restored view while Cores are dark, the alarm
   const v = forecastView(fc);
   assert.equal(v.restored, true);
   assert.equal(v.restoredCores, 3);
+  assert.equal(v.pending, false, 'every Core is absent from the map: offline, no first reading pending');
   assert.equal(v.pvWh, 45_000);
   assert.equal(v.typicalWh, fc.typicalPvWhPerDayDisplay);
   assert.ok(v.typicalWh! > fc.typicalPvWhPerDay, `the restored typical day (${v.typicalWh}), not the alarm's (${fc.typicalPvWhPerDay})`);
@@ -227,8 +228,8 @@ test('★★★ (f) the cards: the restored view while Cores are dark, the alarm
   assert.ok(v.hours.every((h) => h.forecastPvW === 1875 && h.alarmPvW === 0), 'the chart draws the restored solar');
   assert.deepEqual(v.hours.map((h) => h.alarmSocPct), fc.hours.map((h) => h.projectedSocPct), 'and the alarm SoC path beside it');
   assert.deepEqual(v.hours.map((h) => h.forecastLoadW), fc.hours.map((h) => h.forecastLoadW), 'load from the forecast');
-  assert.equal(restoredSolarBadge(3), "Solar restored from 3 offline Cores' records");
-  assert.equal(restoredSolarBadge(1), "Solar restored from 1 offline Core's records");
+  assert.equal(restoredSolarBadge(3, false), "Solar restored from 3 offline Cores' records");
+  assert.equal(restoredSolarBadge(1, false), "Solar restored from 1 offline Core's records");
   assert.equal(alarmBasisLine(v.alarm), 'Runway alarm basis (reporting Cores only): 0.0 kWh solar, low 23%');
 
   // A payload from an older server (none of the v1.195.0 fields): exactly the alarm basis.
@@ -297,7 +298,7 @@ test('★★ (h) source pins (a last resort: no React render here): every figure
   const detail = strip(web('ForecastDetail.tsx'));
   for (const [name, src] of [['ForecastCard', card], ['ForecastDetail', detail]] as const) {
     assert.ok(!DIRECT.test(src), `${name} reads ${src.match(DIRECT)?.[0]} directly, not through forecastView`);
-    assert.match(src, /restoredSolarBadge\(view!?\.restoredCores\)/, `${name}: the restored badge`);
+    assert.match(src, /restoredSolarBadge\(view!?\.restoredCores, view!?\.pending\)/, `${name}: the restored badge, worded for a first reading pending (j)`);
     assert.match(src, /alarmBasisLine\(view!?\.alarm\)/, `${name}: the alarm-basis line`);
   }
   // The card: its tiles and its chart.
@@ -335,4 +336,37 @@ test('★★★ (i) v1.195.0 — the restored walk stores a surplus through the 
   const all = await build(ALL(), recorder(PV6, 1500));
   assert.equal(all.hours[23].projectedSocPct, 94.9);
   assert.deepEqual(all.hoursDisplay!.map((h) => h.projectedSocPct), all.hours.map((h) => h.projectedSocPct));
+});
+
+test('★★ (j) v1.195.0 (review) — the boot race: home Cores listed ONLINE with no first reading are restored from their records, and the badge does not call them offline', async () => {
+  // At a restart the panel lists A, B and C and the device list reports each one online, but no quota
+  // of theirs has landed yet (homeBasisPending: at most HOME_BASIS_PENDING_MAX_MS after the analytics
+  // module loads; that load is the real clock, after NOW, so the bound has not passed). The build
+  // restores them from their records as it does a dark Core (restoredCoreCount counts every connected,
+  // unprojected Core with a PV history), and the badge read "Solar restored from 3 offline Cores'
+  // records" at every restart, while Home Assistant withheld the same figures as a boot artefact.
+  const listedOnline = (sn: string) => ({ sn, deviceName: `Core ${sn}`, online: true, lastSeenMs: NOW, projection: null } as unknown as DeviceSnapshot);
+  const fc = await build({ 'SHP2-DISPLAY': panel(), A: listedOnline('A'), B: listedOnline('B'), C: listedOnline('C') }, recorder(PV3, 1500));
+  assert.equal(fc.homeBasisPending, true, 'the boot race (the module load must be within 10 minutes of NOW, or after it)');
+  assert.equal(fc.restoredCoreCount, 3);
+  const v = forecastView(fc);
+  assert.equal(v.restored, true, 'the restored figures are still shown: the alarm basis reads 0 kWh and "Tight" here');
+  assert.equal(v.pending, true);
+  assert.equal(v.pvWh, 45_000);
+  assert.equal(v.minSoc, 60.0);
+  assert.equal(restoredSolarBadge(v.restoredCores, v.pending), "Solar from 3 Cores' records (first reading pending)");
+  assert.equal(restoredSolarBadge(1, true), "Solar from 1 Core's records (first reading pending)");
+  // One Core listed online beside two absent: a first reading is pending, so no Core is called offline.
+  const mixed = forecastView(await build({ 'SHP2-DISPLAY': panel(), A: listedOnline('A') }, recorder(PV3, 1500)));
+  assert.equal(mixed.restoredCores, 3);
+  assert.equal(mixed.pending, true);
+  // The cloud lists the Cores offline (a wedge, not the boot race): the offline wording.
+  const listedOffline = (sn: string) => ({ ...listedOnline(sn), online: false } as unknown as DeviceSnapshot);
+  const wedged = forecastView(await build({ 'SHP2-DISPLAY': panel(), A: listedOffline('A'), B: listedOffline('B'), C: listedOffline('C') }, recorder(PV3, 1500)));
+  assert.equal(wedged.restored, true);
+  assert.equal(wedged.pending, false);
+  assert.equal(restoredSolarBadge(wedged.restoredCores, wedged.pending), "Solar restored from 3 offline Cores' records");
+  // Nothing restored: no badge, so nothing pending to word, whatever the payload says.
+  const all = await build(ALL(), recorder(PV3, 1500));
+  assert.equal(forecastView({ ...all, homeBasisPending: true }).pending, false);
 });

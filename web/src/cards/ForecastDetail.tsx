@@ -139,7 +139,7 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
             <span className={`badge ${fc.hasWeather ? 'badge-ok' : 'badge-muted'}`}>
               {fc.hasWeather ? 'cloud-aware' : 'typical-day fallback'}
             </span>
-            {view.restored && <span className="badge badge-muted">{restoredSolarBadge(view.restoredCores)}</span>}
+            {view.restored && <span className="badge badge-muted">{restoredSolarBadge(view.restoredCores, view.pending)}</span>}
           </span>
         }
         takeaway={

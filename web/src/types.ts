@@ -399,6 +399,10 @@ export interface DayForecast {
   minProjectedSocDisplay?: number | null;
   minProjectedSocTsDisplay?: number | null;
   restoredCoreCount?: number;
+  /** v1.187.10 — built while a home Core listed online had sent no first reading yet (the boot race).
+   *  v1.195.0 — read by the cards (cardText.forecastView `pending`): the restored badge does not call
+   *  such a Core offline. */
+  homeBasisPending?: boolean;
   /** v1.191.1 — the site zone the server computed these hours in (siteTime.ts), stamped by GET
    *  /api/forecast; the cards label an hour in it, never the browser's zone. Absent from an older
    *  server: no hour shown. */

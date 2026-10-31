@@ -77,7 +77,7 @@ export const ForecastCard = memo(function ForecastCard() {
             </span>
           )}
           {view?.restored && (
-            <span className="badge badge-muted normal-case tracking-normal">{restoredSolarBadge(view.restoredCores)}</span>
+            <span className="badge badge-muted normal-case tracking-normal">{restoredSolarBadge(view.restoredCores, view.pending)}</span>
           )}
           {fc && <span>{fc.historyDays.toFixed(1)} days of history</span>}
         </span>

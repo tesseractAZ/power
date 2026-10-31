@@ -13,8 +13,9 @@
  *   Server  S-i..S-ix    (the walk's PV, drain and start; the count and what it counts; the no-history
  *                         null; the hour's PV and its model flag; v1.195.0: the walk's charge leg)
  *   Alarm   I-i..I-ii    (computeRunway and the dip alert never read the display fields)
- *   Web     W-i..W-xi    (the view's low, solar, typical day, chart, model flag and restored flag; the
- *                         cards' wiring: the Outlook, the tiles, the chart, the detail card's low)
+ *   Web     W-i..W-xiii  (the view's low, solar, typical day, chart, model flag and restored flag; the
+ *                         cards' wiring: the Outlook, the tiles, the chart, the detail card's low;
+ *                         v1.195.0 review: the badge while a first reading is pending, and its wiring)
  *
  *   node scripts/mutate-forecast-display-basis.mjs [--only <id prefix>]
  */
@@ -191,6 +192,20 @@ const MUTANTS = [
     find: "          value={view.minSoc != null ? `${view.minSoc}%` : '—'}",
     to: "          value={fc.minProjectedSoc != null ? `${fc.minProjectedSoc}%` : '—'} /* MUTANT */",
     why: 'The Predictive Insights page reads a 0% low while the dashboard reads 60%.',
+  },
+  {
+    id: 'W-xii. ★★ the view ignores a first reading pending',
+    file: TXT,
+    find: '    pending: restored && fc.homeBasisPending === true,',
+    to: '    pending: false, /* MUTANT */',
+    why: 'At every restart the badge reads "Solar restored from 3 offline Cores\' records" for Cores listed online whose first reading has not landed.',
+  },
+  {
+    id: 'W-xiii. ★★ the card\'s badge is never worded for a first reading pending',
+    file: CARD,
+    find: 'tracking-normal">{restoredSolarBadge(view.restoredCores, view.pending)}',
+    to: 'tracking-normal">{restoredSolarBadge(view.restoredCores, false) /* MUTANT */}',
+    why: 'The dashboard calls the Cores offline during the boot race while the view knows they are not.',
   },
 ];
 

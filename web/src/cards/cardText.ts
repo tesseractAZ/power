@@ -104,6 +104,9 @@ export interface ForecastViewInput<H extends ForecastHourLike> {
   minProjectedSocTsDisplay?: number | null;
   restoredCoreCount?: number;
   pvForecastUnavailable?: boolean;
+  /** v1.195.0 — built while a home Core listed ONLINE had sent no first reading yet (the boot race;
+   *  DayForecast.homeBasisPending). Such a Core is restored from its records but is not offline. */
+  homeBasisPending?: boolean;
 }
 /** v1.195.0 — what the forecast cards show (forecastView). */
 export interface ForecastView<H extends ForecastHourLike> {
@@ -112,6 +115,10 @@ export interface ForecastView<H extends ForecastHourLike> {
   restored: boolean;
   /** How many offline Cores were restored (0 unless `restored`). */
   restoredCores: number;
+  /** v1.195.0 (review) — `restored`, on a forecast built while a home Core listed online had not sent
+   *  its first reading (homeBasisPending, at most HOME_BASIS_PENDING_MAX_MS after a restart). Some of
+   *  the restored Cores are then not offline, and the badge does not call them so. */
+  pending: boolean;
   /** Solar over the next 24 h (Wh); null when there is no PV history to project from. */
   pvWh: number | null;
   typicalWh: number | null;
@@ -132,10 +139,12 @@ export interface ForecastView<H extends ForecastHourLike> {
  * showed the restored ~50 kWh. With any Core restored (restoredCoreCount > 0: an offline Core with a
  * recorded PV history, and the per-hour restored series present) the cards now show the restored
  * basis: the solar and the projected SoC rebuilt from each offline Core's own recorded production,
- * labelled as restored, with the alarm basis beside it (`alarm`). With none restored the view is the
- * alarm basis (with every Core reporting the two are equal), as is a payload from an older server. No
- * PV history at all (pvForecastUnavailable) shows no solar figure: the server's 0 there is not a
- * forecast. PURE (run by server/test/forecastDisplayBasis.test.ts).
+ * labelled as restored, with the alarm basis beside it (`alarm`). While a home Core listed online has
+ * not sent its first reading (homeBasisPending) the label says so instead of calling it offline
+ * (`pending`). With none restored the view is the alarm basis (with every Core reporting the two are
+ * equal), as is a payload from an older server. No PV history at all (pvForecastUnavailable) shows no
+ * solar figure: the server's 0 there is not a forecast. PURE (run by
+ * server/test/forecastDisplayBasis.test.ts).
  */
 export function forecastView<H extends ForecastHourLike>(fc: ForecastViewInput<H>): ForecastView<H> {
   const restored = (fc.restoredCoreCount ?? 0) > 0 && fc.hoursDisplay != null;
@@ -144,6 +153,7 @@ export function forecastView<H extends ForecastHourLike>(fc: ForecastViewInput<H
   return {
     restored,
     restoredCores: restored ? fc.restoredCoreCount! : 0,
+    pending: restored && fc.homeBasisPending === true,
     pvWh: noPv ? null : restored ? (fc.forecastPvWhNext24Display ?? fc.forecastPvWhNext24) : fc.forecastPvWhNext24,
     typicalWh: noPv ? null : restored ? (fc.typicalPvWhPerDayDisplay ?? fc.typicalPvWhPerDay) : fc.typicalPvWhPerDay,
     minSoc: restored ? (fc.minProjectedSocDisplay ?? null) : fc.minProjectedSoc,
@@ -163,9 +173,14 @@ export function forecastView<H extends ForecastHourLike>(fc: ForecastViewInput<H
   };
 }
 
-/** v1.195.0 — the badge beside the coverage badge while the forecast is on the restored basis. */
-export function restoredSolarBadge(n: number): string {
-  return n === 1 ? "Solar restored from 1 offline Core's records" : `Solar restored from ${n} offline Cores' records`;
+/** v1.195.0 — the badge beside the coverage badge while the forecast is on the restored basis.
+ *  v1.195.0 (review) — `pending` (ForecastView.pending): at a restart a Core listed online whose first
+ *  reading has not landed is restored from its records too, for up to HOME_BASIS_PENDING_MAX_MS. It is
+ *  not offline, and the badge read "Solar restored from 3 offline Cores' records" at every restart. */
+export function restoredSolarBadge(n: number, pending: boolean): string {
+  const cores = n === 1 ? "1 Core's" : `${n} Cores'`;
+  return pending ? `Solar from ${cores} records (first reading pending)`
+    : n === 1 ? "Solar restored from 1 offline Core's records" : `Solar restored from ${n} offline Cores' records`;
 }
 
 /** v1.195.0 — the line under the tiles while the forecast is on the restored basis: the figures the

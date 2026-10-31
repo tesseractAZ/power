@@ -7,12 +7,14 @@
  * (offFromMs) that dips under the line do not end and only 20 minutes seen under 50 mV does; every
  * mute there ends VDIFF_KNEE_MAX_MUTE_MS after its first crossing, carried across a gap and a restart.
  * (B) A 50-149 mV spread on a pack at 15% or less, within 10 points of its siblings, is held on the
- * card (not pushed, not sounded) for at most those 20 minutes; stranded packs, sessions that reached
- * the line on any other reading, and 150 mV page at once.
+ * card (not pushed, not sounded) for at most those 20 minutes. Stranded packs and sessions that reached
+ * the line on any other reading get no low-charge grace: they page at once while the BMS is idle, and
+ * while it balances they speak at the session's 20-minute bound. 150 mV pages at once.
  *
  *   Session  O-i..O-vii   (the bound, its fail-closed default, the rest, the carry, the persist, the start,
  *                          a crossing breaking the rest)
- *   Knee     K-i..K-vi    (the peer gate, the SoC line, the forfeit, its use, the sibling median, the own SoC)
+ *   Knee     K-i..K-vii   (the peer gate, the SoC line, the forfeit, its use, the sibling median, the own SoC,
+ *                          the stranded note while balancing)
  *   Restart  R-i..R-v     (the restored clock, the coherent rest, the onset seed, the persisted mark, the
  *                          change test)
  *
@@ -125,6 +127,13 @@ const MUTANTS = [
     find: '        const siblingMedianSoc = pk.soc != null\n',
     to: '        const siblingMedianSoc = true /* MUTANT */\n',
     why: 'A pack with no SoC of its own is graced on the Core\'s average, which says nothing about how it sits against its siblings.',
+  },
+  {
+    id: 'K-vii. ★★ the stranded note is dropped while the BMS balances',
+    file: AL,
+    find: '          const strandedNote = stranded ? ',
+    to: '          const strandedNote = stranded && !balancing /* MUTANT */ ? ',
+    why: 'A stranded pack held by the balancing mute for 20 minutes shows a plain "balancing" critical: the card no longer says it sits 48 points below its siblings.',
   },
   /* ── across a restart ── */
   {
