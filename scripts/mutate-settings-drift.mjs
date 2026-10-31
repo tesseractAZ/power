@@ -57,6 +57,12 @@ const MUTANTS = [
     to: "  /* MUTANT */",
     why: 'One real change would push every minute until restart.',
   },
+  {
+    id: 'vi. ★★★ v1.197.0 — a shelved label folds the reserve floor into a maintenance window',
+    find: "  if (!c.key.endsWith(' · backupReserveSoc') && act.shelvedLabels?.some((l) => c.key.startsWith(`${l} · `))) return 'maintenance';",
+    to: "  if (act.shelvedLabels?.some((l) => c.key.startsWith(`${l} · `))) return 'maintenance'; /* MUTANT */",
+    why: "A label naming the panel (forged or shared) makes a reserve-floor change — the floor the pool alarm defends — wait for a window's end push instead of being pushed.",
+  },
 ];
 
 // Mutants run in parallel, each in its own copy of the tree (scripts/lib/mutateParallel.mjs);

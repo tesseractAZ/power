@@ -1,3 +1,71 @@
+## 1.197.0
+
+### One Core's own alarms can be shelved for a set maintenance window
+
+**Alarms**
+
+- A maintenance window shelves one Core's own alerts for 15 minutes to 4 hours. The card offers 30 minutes, 1, 2 and 4 hours, with 2 hours by default; a request outside the limits is refused, never clamped. The alerts stay on the card and in the alert list, marked shelved, and are neither pushed nor spoken. An extension cannot pass the window's start plus 4 hours; a longer job ends one window and starts another.
+- The window ends:
+  - at its time;
+  - once the Core, seen abnormal during the window, has been back to normal (reporting, and no new warning or critical of its own) for 15 minutes;
+  - when ended from the card, `POST /api/maintenance/end` or Home Assistant's End All Maintenance button;
+  - if the clock steps back before its start, its span is over the limit, or the Core leaves the account.
+- Whatever is still active when the window ends is pushed and announced. That includes a warning the window held across a restart, and an alert standing on a Core whose window ran out while the add-on was down.
+- A window never shelves:
+  - a pool alarm: the reserve floor, near reserve, the runway, the battery-level ladder, the reserve-blind and telemetry-blind alarms;
+  - grid loss, a panel alert or any plant-level alert, even when the shelved Core causes it;
+  - an overheating pack, a cell at the over-voltage line, a confirmed-defective pack or the multi-panel guard.
+- The panel cannot be shelved, and a window naming any device but a Core has no effect.
+- On a plant with more than one home Core, a start that would leave none of them with its alarms is refused. A Core off the panel roster while it is re-wired still counts.
+- 'All clear' is not spoken while a shelved critical stands. That includes the all-clear a restart inside a clearing owes (1.195.0): a window that starts while its Core's red stands makes the red read clear with the fault still on the card, and after a restart in that dwell the green is adopted in silence.
+- The all-clear a shelved critical holds back is owed, not dropped. Two cases needed this: a red heard before its Core was shelved and then fixed inside the window, and a red that cleared while another Core's critical was shelved. Dropped, the all-clear would never be said in either case, and the last words in the house would stay a red that had cleared. The all-clear is now said once no shelved critical stands and the all-clear gate has been open for 3 minutes. That covers the transition's own all-clear and its storm-gated re-present, spoken retry and deferred retry. A shelved critical that returns for one reading restarts the 3 minutes. Quiet hours apply, as to any all-clear.
+  - If the window ends with its critical still standing, the critical is announced, and its own clearing gets the next all-clear.
+  - If the reserve floor or the held telemetry-blind alarm is what still blocks the all-clear, it is dropped, as before.
+  - The owed all-clear survives a restart within 4 hours of when it became owed. After a restart it is said only once the alert set has settled.
+- A per-device telemetry gap that began inside a window stays held for as long as its alert stands.
+- A setting changed on a shelved Core is listed in the window's end push instead of being pushed on its own. The panel's reserve floor is always pushed.
+- There is one push at the start, listing what still sounds, and one at the end, listing every alert held, what is still active and the settings changed. Each start, extension and end is in the write log (`maintenance-start`, `maintenance-extend`, `maintenance-end`) and in the add-on log.
+- Background: on 2026-08-20 a planned reconfiguration of two Cores produced 42 pushes and 7 broadcasts, three of them red. The only runtime control was the per-priority switch in Alert Settings. It applies to the whole plant, including the battery-level ladder and the runway, and does not expire.
+
+**Fail closed**
+
+- An unreadable windows file shelves nothing, and a start whose save fails is refused. An end that cannot be saved removes the file, so a restart shelves nothing.
+- The end time and the 4-hour limit are checked each time an alert is stamped. A window that has run out but has not yet been stepped is ended before a start or an End now acts.
+
+**Home Assistant and API**
+
+- New entities:
+  - the binary sensor Maintenance Active (`ecoflow_maintenance_active`);
+  - the sensor Cores in Maintenance (`ecoflow_maintenance_devices`, attribute `cores`);
+  - the button End All Maintenance (`ecoflow_maintenance_end_all`).
+- New state keys `maintenance_active`, `maintenance_count` and `maintenance_summary`, in the MQTT payload and `/api/ha-state`. Nothing over MQTT starts a window.
+- New routes `GET /api/maintenance`, `POST /api/maintenance` (start or extend; write-gated) and `POST /api/maintenance/end`. `/api/snapshot` and `/api/health` carry the windows in force.
+- `GET /api/broadcast/status` has `shelvedAllClearOwedAt`: when an all-clear held back by a shelved critical became owed, or null. `broadcast-last.json` keeps it across a restart.
+- The windows are kept in `/data/maintenance-windows.json`. `MAINTENANCE_STATE_PATH` overrides that path, for tests and development only; it is not an add-on option.
+
+**Web**
+
+- Each Core card has **Shelve this Core's alarms…**. While a window runs, an amber strip shows its end, the time left and what it has held, with **End now**. The alert list badges a held alert "shelved — maintenance until HH:MM".
+
+**Documentation**
+
+- `docs/screenshots/dashboard.png` is re-rendered from the synthetic fleet with the maintenance control on each Core card; the other four images are unchanged.
+- The operator guide describes shelving a Core under Alerts and phone notifications. The alert monitor reference (section 4.7) gives the rules in full, and the alerts, broadcast, runway, Home Assistant, user-interface and security chapters, the feature inventory and the entity reference are updated.
+- The Home Assistant wiring chapter and the feature inventory give the new discovery counts: 88 sensors, 12 binary sensors, four switches and one button, which is 105 retained publishes, plus the per-circuit pairs.
+
+**Unchanged**
+
+- The Alert Settings switches, the bench-spare and off-panel mutes, and the Home Assistant alert counts, which include shelved alerts.
+
+**Tests**
+
+- `maintenanceWindow.test.ts` (41), `maintenanceWiring.test.ts` (9: the real alert monitor, with flapping held, a restart mid-window, a window that expired while down, the early end on return to normal and a forged panel window), `maintenanceMqtt.test.ts` (2: End All Maintenance through the real MQTT discovery and a broker run inside the test) and `maintenanceWebMirror.test.ts` (3: the card's copies of the server's limits and list).
+- `maintenanceOwedAllClear.test.ts` (12) runs the real broadcast monitor. Across a restart inside a red's clearing: with the critical cleared, the owed all-clear is spoken; with the critical held by a window, no all-clear is spoken, the critical is announced when the window ends, and its clearing gets one all-clear. The all-clear a shelved critical holds back is said once the critical is fixed inside the window, including a flicker of it, for a red on another Core, after a restart inside the window (never on an unsettled set), and for the all-clear's storm-gated re-present, spoken retry and deferred retry; it is dropped behind the reserve floor. Three cases pin the pure parts.
+- Additions to the `settingsDrift`, `settingsDriftHold` and `mqttDiscovery` tests; `docsLayout` counts the button and pins the discovery counts the engineering reference states.
+- The MQTT discovery golden (G7) is re-captured with `scripts/golden-capture.mts`. The change only adds: the binary sensor's and the sensor's configs, the binary sensor and sensor counts (11 to 12, 87 to 88), and the three unique ids. No other golden changes.
+- The README-screenshot fixture lists `api/maintenance` and `api/maintenance/end` as write-only paths of the Core card. `screenshotFixture.test.ts` counts 43 API paths in the web UI, was 41.
+- New harness `mutate-maintenance-window.mjs` (39 mutants, twelve of them on the owed all-clear). `mutate-settings-drift.mjs` gains 1 mutant, and `mutate-blind-remediation.mjs` mutant xii is re-pointed to the all-clear gate's new line.
+
 ## 1.196.0
 
 ### The overnight write charges to the line the plan is sized on; the no-plan and force-charge warnings say why; the cost ceiling counts the measured sun
@@ -65,135 +133,6 @@
   - the recorder writing the slot table, and stamping only on a fresh panel reading.
 - The tests in `pvCoverageGate.test.ts` and `darkCoreCoverage.test.ts` that asserted the join exemption now assert a gap.
 - `mutate-skill-roster.mjs` (new): 29 mutants. `mutate-dark-core.mjs` drops mutants v and vi, whose guard is gone.
-
-## 1.195.0
-
-### The forecast cards show the restored solar while Cores are offline; a held panel's circuits are no longer the house load; cell-spread mutes below 85% are bounded
-
-**Dashboard**
-
-- While home Cores were offline in the EcoFlow cloud, the 24-hour forecast card and the Predictive Insights forecast showed 0 kWh of solar, a projected low of 0% and a "Tight" outlook. Those are the figures the runway alarm uses, and they count only the Cores reporting live.
-- The cards now show the solar and the projected state of charge rebuilt from each offline Core's own recorded production. This is the figure Home Assistant's forecast solar sensor already shows. The rebuilt state of charge starts from the same pool, carries the same hourly load and steps through the same function as the alarm's projection, the charge leg included, so with every Core reporting the two are equal hour by hour.
-- A badge labels them: "Solar restored from N offline Cores' records". At a restart, while a Core listed online has not sent its first reading, it reads "Solar from N Cores' records (first reading pending)". Beside them:
-  - the runway alarm's own figures: "Runway alarm basis (reporting Cores only): X kWh solar, low Y%"
-  - its state-of-charge path, as a dashed line on the chart
-  - an "Alarm-basis SoC" column in the hourly table
-- Each hourly row's model / typical badge names the model that produced the figure shown.
-- An offline Core with no recorded solar is not counted as restored. With no solar history at all, the solar tiles read "—" / "no PV history".
-- `GET /api/forecast` gains `hoursDisplay`, `minProjectedSocDisplay`, `minProjectedSocTsDisplay` and `restoredCoreCount`.
-
-**Runway**
-
-- Before, when the panel's readings were held (a cloud replay or a stalled feed) and no load had been recorded for an hour, the runway took the panel's held circuit watts as the live house load, for as long as the hold lasted.
-  - Circuits held at 9 kW projected the reserve floor in 2.8 h instead of 8.2 h: a false high-priority alarm.
-  - Circuits held at 600 W hid a 6 kW draw: low instead of medium.
-- Held readings are no longer used. The last recorded hour's load is carried for up to 2 h, as before. After that the runway reads unavailable until the panel reports again.
-- While the house runway reads unavailable, the runway alarm keeps its state, as the other panels' runway alarms already did. Before, it re-armed: the hourly reminder stopped for the rest of the outage, and a short outage was followed by a fresh announcement.
-- The load-shed advisor also keeps its last recommendation while the runway is unavailable. Before, it reported the runway healthy and cleared `load_shed_recommended` in the middle of a depletion.
-
-**Cell spread (alarm path)**
-
-- Below the 85% plateau, and with no SoC reading, a cell-spread critical silenced while the BMS balances now speaks 20 minutes after the spread first reached the line.
-  - Before, the mute had no limit there. A 50-149 mV spread on a balancing pack stayed silent for as long as the BMS balanced. So did a spread alternating 55 / 45 / 45 mV, and a pack whose SoC read 84 / 85% on alternate readings.
-  - Dips under the line do not restart the 20 minutes; only 20 minutes seen under 50 mV ends the session.
-  - The session is carried across reading gaps of up to 60 minutes and across a restart. `vdiff-knee-state.json` gains `offFromMs`, `offQuietSinceMs` and `offKnee`, each written only while set.
-- A 50-149 mV spread on a pack at 15% charge or less, within 10 points of its sibling packs, no longer sounds red at once.
-  - On the steep bottom of the LFP curve, the cell with the least charge falls away and closes back on recharge. In the 2026-08-20 case, a healthy pack's red cleared in 6.7 minutes.
-  - The critical stays on the card ("Low-charge cell spread."), is not pushed or sounded, and speaks after 20 minutes.
-  - These get no low-charge grace:
-    - a pack 10 or more points below its siblings (the alert names its charge and the sibling median)
-    - a session that reached the line on any other reading
-  - They page at once while the BMS is idle. While it reports balancing they are held by the balancing mute, and speak 20 minutes after the first crossing, like any balancing critical below 85%.
-  - A spread of 150 mV or more pages at once, balancing or not.
-
-**Unchanged**
-
-- The runway alarm, the projected-dip and forecast-runtime alerts, the calendar's battery-dip event and Home Assistant's projected-low-SoC sensors still count only the Cores reporting live.
-- Cell spread at 85% charge and above. The SoC ladder, the floor alarm and the stale alarms. "Reserve alarm blind" changes only across a restart (below).
-
-**Tests**
-
-- New: `forecastDisplayBasis.test.ts` covers the restored series and its SoC walk, isolation from every alarm input (by behaviour and by source), the restored model's flag, the restored-Core count, the cards' view and its wiring, the badge while a first reading is pending at a restart, and the charge leg on the restored walk (3,750 W restored against a 1,865.7 W drain stores 1,747.4 Wh an hour: 61.5% after the first hour, 94.9% after 24, against 97.7% at unity).
-- New: `runwayHeldPanelLoad.test.ts` covers the live-load gate, the carry limit across a hold, and the runway alarm and load-shed advisor holding while the runway is unavailable.
-- New: `cellSpreadOffPlateauSession.test.ts` covers the off-plateau session, the low-charge knee (a stranded pack while the BMS balances included), and both across a restart.
-- The dark-fleet forecast golden gains the four display fields only; every earlier field is unchanged. `runwayChargeLegPins.test.ts` pins the charge leg inside the shared step and both walks' calls to it.
-- New harnesses, all mutants killed:
-  - `mutate-forecast-display-basis.mjs` (24)
-  - `mutate-held-panel-load.mjs` (8)
-  - `mutate-cell-spread-off-plateau.mjs` (19)
-- Anchors re-pointed in older harnesses: `mutate-runway-card.mjs`, `mutate-v1187-1.mjs`, `mutate-v1187-2.mjs`, `mutate-v1187-19.mjs`, `mutate-v1187-a.mjs`, `mutate-v1191-1.mjs`, and `mutate-charge-leg.mjs` C-ii (the day walk's charge leg, now in the shared step).
-
-### After a restart an owed all-clear is announced; a critical nobody heard is named when it returns; an announcement kept behind another alarm's retry is spoken
-
-**After a restart**
-
-- **An all-clear that was due when the add-on stopped is announced after the restart.** When an alarm the house had heard cleared, the add-on waits three minutes before announcing the all-clear (up to 16 minutes after a restart, and longer while a muted cell-imbalance critical holds it). A restart during that wait lost the all-clear. The add-on started with the alarm recorded as not heard and took the clear condition in silence, so the alarm stayed the last words. The wait is now saved with the condition record (`conditionHeldFrom` / `conditionHeldAt` in `broadcast-last.json`, and `conditionHeldFrom` in `/api/broadcast/status`). After a restart within an hour of the wait's start, the all-clear is announced once the condition has stayed clear for three minutes on a complete alert picture. If the picture is still incomplete when the post-restart decision closes, the clear condition is taken in silence, as for an alarm heard before a restart. These alarms all count as heard: one heard only as the tone (its speech failed), one heard only on the cordless, and one first heard during the wait itself (it cleared while its announcement was still playing, or its retry played during the wait). An alarm first heard during the wait no longer marks the record as heard while its clearing is held. A warning standing below it is therefore announced after a restart, not taken as its continuation. A condition that cleared while the add-on was stopped is still not announced.
-- **"Reserve alarm blind" keeps its age for a panel dark more than a week.** A pool unreadable for more than 7 days lost its saved onset at a restart. The alarm disappeared for 15 minutes and came back as a warning for an hour, even when it had been critical. Only an onset claiming more than a year is now set aside, since it comes from a clock that was not set or an edited file. A panel that has not reported since the restart holds the post-restart decisions only until its own reserve-blind alarm is raised. The house panel has no reserve-blind alarm while it reports nothing, so it holds them until it reports.
-- **A read-only data folder no longer carries an old "Reserve alarm blind" time.** On a read-only or failing disk, the saved time could be neither updated nor removed. A pool that read again after the last save was then carried after a restart as unreadable since before, and could raise a critical alarm with an inflated age. When the folder cannot be written at start-up, the saved times are not carried and never written back, and the log says so (`backup-pool: N pool-unknown onset(s) on file are not carried — …`). Each panel's reserve-blind clock then starts in the new process. The post-restart decisions wait by the same rule as above: for the house panel until it reports, and for any other panel until it reports or its own alarm is raised.
-
-**Announcements**
-
-- **A critical alarm nobody heard is announced when it comes back.** During one alarm, a critical that took another's place was treated as heard, even though only the first one was heard and the new one never reached the speakers. When it cleared and came back within three minutes, it was not announced again and was never named. A return is now announced when the alarm its words would name has not been heard during that alarm. A return refused by the two-minute gap is announced when the gap expires. Two alarms that return together, when the words name the one already heard, are still taken as a flicker. After a restart, an alarm found already announced counts as heard only the critical that announcement named. Another critical that stood beside it and returns alone is announced, as it would be without the restart.
-- **An announcement that waited behind another alarm's retry is announced when that retry is done.** When the speakers could not play and a more serious announcement was already waiting to be retried, a less serious condition announcement was dropped. This lost a warning under a held critical, or a warning or an all-clear behind a battery-level or runway alarm. The same happened in the other order: a battery-level or runway alarm that failed while the condition announcement's own retry was waiting took that retry's place. The dropped announcement is now made once, when the other retry has played or given up, if the condition has not been committed at another level since. After a more serious condition alarm it waits the usual two minutes. Only one such announcement is kept at a time: the newest, unless the one already kept is more serious. A dedicated announcement kept the same way is not re-announced as a condition.
-
-**Tests**
-
-- `restartRecoveryAllClear.test.ts`:
-  - A restart inside the dwell of a heard red, a heard yellow or a tone-only red announces the all-clear on a settled set. So does one after a red first made audible inside its own dwell: cleared while its announcement played (spoken or tone only), or with its retry played in the dwell.
-  - A warning that stood below such a red is spoken after the restart, and the red flickering back restores its heard flag.
-  - The critical back after the restart is the klaxon, with no all-clear before it.
-  - A warning below the cleared red is spoken, whether it stands at the first tick or appears after it. At the first tick the owed hold is dropped at once, and the warning's clearing is an ordinary transition.
-  - A warning re-committed under a resumed hold and never delivered is presented again when it returns inside the dwell.
-  - On an unsettled set, the green is adopted silently when the decision closes.
-  - Two restarts inside the hold still owe the all-clear, and the hold's age counts from its original start.
-  - Nothing is owed after the green commits, or after the red flickers back, spoken or tone only (the cleared record is written to disk).
-  - `restoredHeldDeescalation` checked by hand.
-- `conditionRetryNewestWins.test.ts`:
-  - A warning kept behind a red retry (held critical) is spoken after the gap. One behind a dedicated critical's retry is spoken with no gap.
-  - An all-clear behind a dedicated warning's retry is spoken.
-  - A warning, and an all-clear, whose own retry a dedicated alarm superseded are spoken.
-  - A warning behind the dedicated alarm does not displace the more severe condition red kept before it. That red is named when its critical reads loud again.
-  - A kept deferral is dropped when the condition has moved, and re-presented at once when the higher retry gives up.
-  - A fired retry still queued plays first.
-  - A dedicated notice is not re-presented.
-  - `keptDeferralRepresent` checked by hand.
-  - A critical that took a heard one's place undelivered is named when it returns, including after a gap refusal.
-  - Still absorbed: a heard critical's flicker, two criticals returning together whose words name the heard one, and a red adopted by the red replay gate. A critical counted beside the adopted one and never named is spoken when it returns alone.
-  - What was named audible resets with each red episode.
-- `poolUnknownCarry.test.ts`:
-  - A panel dark 7 days and an hour keeps its onset across a restart: critical "unreadable for 7 d" at once, carried at its first projection.
-  - The pending rule ends when the dark panel's alarm is raised (inclusive at 15 min), and never for the pinned house panel. `darkPanelBlindRaised` tested.
-  - A read-only directory carries nothing, keeps the panel pending, logs once, and writes nothing back once it is writable again. These tests skip only when a write probe of the directory succeeds, not on `poolUnknownDirWritable`'s answer.
-  - `poolUnknownDirWritable`, the 366-day bound, and the alert monitor's wiring.
-- New harness `scripts/mutate-restart-leftovers.mjs`: 42 mutants (F-i…F-xvi, N-i…N-viii, P-i…P-vii, D-i…D-v, O-i…O-vi).
-- Re-pointed anchors: `mutate-v1187-4.mjs` H-i, H-ii, U-iii, U-iv, U-v, U-vii, U-viii, C-ix, C-xvi, C-xx, C-xxiii; `mutate-v1187-3h.mjs` B-i, B-ii; `mutate-v1187-b.mjs` xxiii, xxxv; `mutate-multi-panel.mjs` r11; `mutate-alert-monitor.mjs` xxiii; `mutate-broadcast.mjs` vii; `mutate-v1187-10-g3.mjs` C1-i.
-
-## 1.194.0
-
-### Solar surplus counts at the charge efficiency in the runway, the forecasts and the night-charge plan
-
-**Runway and forecasts**
-
-- The runway, the 24-hour and multi-day state-of-charge projections and the confidence band added solar energy beyond the house load to the battery pool in full. Charging the packs loses energy: on 29 measured sunny spans the pool gained 2–7% less than projected. A surplus now counts at the charge efficiency, the square root of `DISPATCH_ROUND_TRIP_EFFICIENCY` (0.927 by default), so a projection across a sunny day reads shorter. On a day with 44 kWh of surplus, the reserve crossing comes about 1 h sooner (22.8 h instead of 23.8 h) and the pool ends 3.2 kWh lower. An 18 kWh pool with two sunny hours ahead now reaches the reserve in 5.9 h instead of 6.1 h, which raises the medium runway alarm instead of the low one. The runway, forecast-runtime and forecast-soc-dip alerts can come up to about an hour earlier on a horizon that crosses a sunny day.
-- The confidence band applies the charge efficiency to each path after its spread is added, and reads the trajectory's capacity with the same step.
-- `DISPATCH_ROUND_TRIP_EFFICIENCY` (environment only, clamped 0.8–1) now also sets the alarm path's charge efficiency. Setting it to 1 puts the runway's and the projections' surplus credit back at unity; it also makes the night-charge and dispatch plans' charging lossless, so they buy less than before. No setting makes a projection longer than before.
-
-**Night charge**
-
-- The plan's walks count a surplus the same way: the worst-case sizing walk, the window walk, the expected-buy walks (expected carry, solar credit, force-charge timing) and the mid-day preview's held-import estimate. A trough that follows a sunny day's 31 kWh of surplus sits 2.25 kWh lower, and the buy that holds the line is 2.43 kWh larger.
-- Of 1,104 recorded plan cases, 95 worst-case buys rise by up to 2.84 kWh (mean 0.44 kWh), 118 expected buys rise by up to 6.76 kWh (mean 1.17 kWh), and one hold becomes a 1.49 kWh charge. No buy, expected buy or requirement falls. 264 setpoints move, by −1.8 to +2.7 points. The 16 that fall are either charges limited by the window whose requirement rose, or holds whose projected arrival without a buy is now lower.
-- The readiness gate keeps algorithm version 3, so nights already scored still count. `buy_err_kwh` keeps its formula. A miss in an hour with a surplus, solar or load, now reads about 7.8% larger against the plan's own sizing than before, in either direction: a solar miss there reads 7.8% larger than the plan's sizing (it read exactly), and a load miss there about 1.4% larger (it read about 6% smaller). A cloudier day or a heavier daytime house than forecast scores as a deeper under-buy, which makes the gate more likely to block. Only misses in hours without a surplus are scored as before.
-
-**Unchanged**
-
-- Hours without a surplus, the alarm thresholds, the grid-backstop mute of the audible runway alarm, the dispatch plan (which already counted the charge efficiency) and the MPC optimiser. There is no new option.
-
-**Tests**
-
-- `runwayChargeLeg.test.ts`: the step, the efficiency, the runway's change of alarm tier, the sunny-day runway, a horizon with no surplus, the planner's sizing trough, window walk, expected carry (+2.782 kWh for an hour of 5 kW sun over a 1.88 kW house, was +3.000) and force-charge start, and the ledger's `buy_err_kwh` against the planner's own re-sizing for a solar and a load miss in a surplus hour and in a deficit hour, all worked by hand. A further case shows that at `DISPATCH_ROUND_TRIP_EFFICIENCY` = 1 the planner buys 0.80 kWh below the earlier default. `runwayChargeLegPins.test.ts`: every walk calls the step, the option's descriptions name the alarm path, and the `buy_err_kwh` notes (the gate's and chapter 15-2's) name the surplus-hour load miss.
-- The legacy identity golden is regenerated on purpose (472 of 1,104 plan digests move). A new direction test checks every case against the plans recorded on 1.192.0, which 1.193.0 plans identically (`legacyIdentity.v1192.figures.json`).
-- The `middayPlan`, `nightChargeExpectedBuy`, `heldImport`, `middayShadow`, `poolEnergyBasis` and `runwayBasisContracts` figures are re-derived for the charge efficiency; `runwayBasisContracts` gains a reference-band test across a sunny stretch to the full rail.
-- New `mutate-charge-leg.mjs`: 19 mutants, all killed; one of them stores only the PV at the charge efficiency in the sizing walk, so a surplus hour's house load skips the step. Ten anchors in `mutate-v1187-19.mjs`, `mutate-v1187-22c.mjs` and `mutate-midday-plan.mjs` are repointed.
 
 ## Older releases
 

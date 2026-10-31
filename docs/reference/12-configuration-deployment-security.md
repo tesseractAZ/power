@@ -244,7 +244,10 @@ fields only, finite-coerced numbers, control-stripped/length-bounded strings (Co
 `js/http-to-file-access`); the path itself is a fixed constant, never request-influenced.
 `GET /api/writes/log?limit=N` (default 50, clamped 1–500) tails it, re-reading at most
 256 KiB — and is itself behind `requireWriteAuth` because it can leak source IPs and attempted
-command shapes.
+command shapes. v1.197.0 — a maintenance window writes nothing to a device, but each start, extension and
+end is a row too (`maintenance-start`, `maintenance-extend`, `maintenance-end`; `sn` the Core,
+`params` its start and end, and for an end the reason and the held, held-critical, still-active
+and settings-changed counts).
 
 #### In-process rate limiting
 
@@ -257,7 +260,8 @@ CodeQL `js/missing-rate-limiting`). Each limiter is one shared bucket per route 
 - `latchWriteRateLimit` 10/h: `POST /api/reserve-floor` and `POST /api/defective-packs/clear`.
 - `latchReadRateLimit` 60/min: `GET /api/defective-packs` and `GET /api/db-export`.
 - `broadcastConfigRateLimit` 30/min: `PUT /api/broadcast/config`.
-- 120/min read limiters on `GET /api/broadcast/config`, `GET /api/alert-settings`, and `GET /api/chimes` + `GET /api/chime-config` (one shared bucket).
+- `maintenanceWriteRateLimit` 10/min: `POST /api/maintenance` and `POST /api/maintenance/end` (v1.197.0).
+- 120/min read limiters on `GET /api/broadcast/config`, `GET /api/alert-settings`, `GET /api/maintenance` (v1.197.0), and `GET /api/chimes` + `GET /api/chime-config` (one shared bucket).
 
 WebSocket inbound frames are capped at `maxPayload = 64 KiB`.
 
@@ -585,6 +589,7 @@ multi-arch image — it does **not** build on the host. Once the GitHub Release 
 - `site-location.json` — Home Assistant's home location, saved by `SITE_LOCATION_FROM_HA` and applied from the next start.
 - `device-aliases.json` — optional display names by serial; `DEVICE_ALIASES` is merged over it, and it over the image's own file.
 - `writes.log` — JSONL audit log.
+- `maintenance-windows.json` — the Cores' maintenance windows, open and ended within 24 h, longer while a telemetry gap one absorbs stands (v1.197.0; atomic; an unreadable file shelves nothing, and an end that cannot be saved removes the file).
 - `audio/` — startup-generated klaxon WAVs (served at `/audio/*`).
 - `audio-render/` — on-demand rendered klaxon+TTS announcements (served at `/audio-render/*`, `wildcard:true`).
 - Operator-uploaded chimes dir (served at `/chimes/*`).
@@ -728,10 +733,14 @@ in the window is `panel-side` — logged at info as changed on the panel, not by
 add-on (the panel's own ceiling stop, or a manual Charge Now), and not pushed, as
 before. On 2026-10-02 the panel's 87% ceiling stopped slots 2 and 1 at ~04:24–04:25,
 ~4 min before the add-on's OFF, and both were logged as the add-on's write. Known
-limit: a manual Charge Now inside the window or its tails is still not pushed. External changes batch into ONE [Medium] push (dedupId
+limit: a manual Charge Now inside the window or its tails is still not pushed. v1.197.0 —
+a key of a Core a maintenance window holds (its settings-surface label, `shelvedLabels`, unless
+another device shares that label) is `maintenance`: logged at info, its baseline saved as for an
+own write, and listed in the window's end push; a `backupReserveSoc` key never is, whatever the
+labels say. External changes batch into ONE [Medium] push (dedupId
 `settings_drift`) held through `NOTIFY_QUIET_HOURS`. First boot adopts
 silently. Sidecar `/data/settings-surface.json` (atomic; corrupt = silent
-re-adoption). Harness: `scripts/mutate-settings-drift.mjs` (5 mutants).
+re-adoption). Harness: `scripts/mutate-settings-drift.mjs` (6 mutants).
 
 ### 12c. Charge Now responder (`chargeNowResponder.ts`, v1.84.0)
 

@@ -89,11 +89,14 @@ function webApiLiterals(): Map<string, string[]> {
 test('T3: every API path the web UI names is served, write-only or comment-only — and no list entry is dead', () => {
   const literals = webApiLiterals();
   // Pinned: a new endpoint in the UI changes this count and must be given a builder (or a reason).
-  assert.equal(literals.size, 41);
+  // v1.197.0 — 41 → 43: the Core card's maintenance control (web/src/components/MaintenanceControl.tsx,
+  // M8) posts to api/maintenance and api/maintenance/end; both are listed in WRITE_ONLY (the card reads
+  // the windows from the snapshot, never GET /api/maintenance).
+  assert.equal(literals.size, 43);
   const accounted = new Set([...Object.keys(ROUTES), ...Object.keys(WRITE_ONLY), ...Object.keys(COMMENT_ONLY)]);
   assert.deepEqual([...literals.keys()].filter((k) => !accounted.has(k)), [], 'web/src names an API path the fixture does not account for');
   assert.deepEqual([...accounted].filter((k) => !literals.has(k)), [], 'the fixture lists a path web/src no longer names');
-  assert.equal(Object.keys(ROUTES).length + Object.keys(WRITE_ONLY).length + Object.keys(COMMENT_ONLY).length, 41);
+  assert.equal(Object.keys(ROUTES).length + Object.keys(WRITE_ONLY).length + Object.keys(COMMENT_ONLY).length, 43); // v1.197.0 — 41 → 43, as above
   // A comment-only path appears only on comment lines.
   for (const path of Object.keys(COMMENT_ONLY)) {
     for (const file of new Set(literals.get(path))) {

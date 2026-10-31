@@ -216,6 +216,40 @@ export function parseAlertSwitchCommand(topic: string, payloadRaw: string): Aler
   return { priority, enabled: payload === SWITCH_ON };
 }
 
+/**
+ * v1.197.0 — the End-all-maintenance button (maintenanceWindow.ts). Ending a window is the LOUD
+ * direction (the Cores' own alerts annunciate again), so an unauthenticated broker path may press
+ * it; nothing over MQTT can START a window. Pure, like the switch parse above.
+ */
+export const MAINTENANCE_END_ALL_UNIQUE_ID = 'ecoflow_maintenance_end_all';
+export const MAINTENANCE_END_ALL_TOPIC = 'ecoflow_panel/maintenance/end_all/set';
+export const MAINTENANCE_END_ALL_PAYLOAD = 'PRESS';
+export function isMaintenanceEndAllCommand(topic: string, payloadRaw: string): boolean {
+  return topic === MAINTENANCE_END_ALL_TOPIC && payloadRaw.trim().toUpperCase() === MAINTENANCE_END_ALL_PAYLOAD;
+}
+
+/** v1.197.0 — the maintenance state keys: whether any Core is shelved, how many, and which until when
+ *  ("Core 3 until 14:30"; no serial). */
+export function maintenanceStateFields(
+  windows: ReadonlyArray<{ label: string; untilMs: number }>,
+  fmtClock: (ms: number) => string,
+): { maintenance_active: boolean; maintenance_count: number; maintenance_summary: string[] } {
+  return {
+    maintenance_active: windows.length > 0,
+    maintenance_count: windows.length,
+    maintenance_summary: windows.map((w) => `${w.label} until ${fmtClock(w.untilMs)}`),
+  };
+}
+
+/** v1.197.0 — the maintenance hooks index.ts supplies (its maintenance controller). */
+export interface MqttMaintenanceHooks {
+  /** The windows in force now. */
+  active: () => ReadonlyArray<{ label: string; untilMs: number }>;
+  /** End every open window (source 'ha'); returns how many ended. */
+  endAll: () => number;
+  fmtClock: (ms: number) => string;
+}
+
 export interface SensorConfig {
   unique_id: string;
   name: string;
@@ -242,6 +276,8 @@ export interface SensorConfig {
  *  mid-day charge is computed only (middayShadow.MIDDAY_CHARGE_BASIS), so a dashboard, an automation
  *  or the recorder's history tells the preview from a charge that runs, on the same entity ids. */
 export const MIDDAY_CHARGE_ATTRIBUTES_TEMPLATE = '{{ {"basis": value_json.midday_charge_basis | default(none)} | tojson }}';
+/** v1.197.0 — the maintenance sensor's one attribute: which Cores, until when. */
+export const MAINTENANCE_ATTRIBUTES_TEMPLATE = '{{ {"cores": value_json.maintenance_summary | default([])} | tojson }}';
 
 export const SENSORS: SensorConfig[] = [
   // Power flow
@@ -307,6 +343,9 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_alert_high_count', name: 'High Priority Alarms (P2)', state_class: 'measurement', icon: 'mdi:alert', value_template: '{{ value_json.alert_high_count }}' },
   { unique_id: 'ecoflow_alert_medium_count', name: 'Medium Priority Alarms (P3)', state_class: 'measurement', icon: 'mdi:alert-outline', value_template: '{{ value_json.alert_medium_count }}' },
   { unique_id: 'ecoflow_alert_low_count', name: 'Low Priority Alarms (P4)', state_class: 'measurement', icon: 'mdi:information-outline', value_template: '{{ value_json.alert_low_count }}' },
+  // v1.197.0 — the Cores a maintenance window holds now (their own alerts are not pushed or announced;
+  // the alert counts above still include them). Attribute `cores`: ["Core 3 until 14:30"].
+  { unique_id: 'ecoflow_maintenance_devices', name: 'Cores in Maintenance', state_class: 'measurement', icon: 'mdi:wrench-clock', value_template: '{{ value_json.maintenance_count }}', json_attributes_template: MAINTENANCE_ATTRIBUTES_TEMPLATE },
   // Fleet
   { unique_id: 'ecoflow_fleet_devices_online', name: 'Fleet Devices Online', state_class: 'measurement', icon: 'mdi:home-battery', value_template: '{{ value_json.fleet_devices_online }}' },
   // Cloud-wedge diagnostic: count of devices the EcoFlow cloud reports OFFLINE but
@@ -840,6 +879,8 @@ export interface BinarySensorConfig {
 }
 
 export const BINARY_SENSORS: BinarySensorConfig[] = [
+  // v1.197.0 — ON while any Core's maintenance window is in force.
+  { unique_id: 'ecoflow_maintenance_active', name: 'Maintenance Active', icon: 'mdi:wrench-clock', value_template: '{{ "ON" if value_json.maintenance_active else "OFF" }}' },
   // v0.40.0 — no device_class: 'connectivity' here. That class means ON=connected, which
   // INVERTS this sensor's meaning (off_grid=true → ON would read as "connected"). A plain
   // binary sensor keeps ON=off-grid unambiguous; the tower-off icon conveys state.
@@ -1105,6 +1146,7 @@ export function discoveryUniqueIds(
     ...SENSORS.map((s) => s.unique_id),
     ...BINARY_SENSORS.map((s) => s.unique_id),
     ...ALARM_PRIORITY_ORDER.map(alertSwitchUniqueId),
+    MAINTENANCE_END_ALL_UNIQUE_ID, // v1.197.0 — the End-all-maintenance button
     ...planCircuitDiscovery('homeassistant', [], [...circuits]).publish.map((p) => String(p.cfg.unique_id)),
   ];
 }
@@ -1206,6 +1248,8 @@ export async function startMqttDiscovery(
   store: SnapshotStore,
   recorder: Recorder,
   log: (m: string) => void,
+  // v1.197.0 — the maintenance windows: their state keys and the End-all button.
+  maintenance?: MqttMaintenanceHooks,
 ): Promise<MqttDiscoveryHandle> {
   if (!isMqttDiscoveryEnabled()) {
     log('mqtt-discovery: disabled (set MQTT_DISCOVERY_ENABLED=1 and MQTT_DISCOVERY_HOST to publish to HA)');
@@ -1344,6 +1388,16 @@ export async function startMqttDiscovery(
       };
       client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
     }
+    // v1.197.0 — End all maintenance: a button (no state). Ending is the loud direction.
+    client.publish(`${prefix}/button/${MAINTENANCE_END_ALL_UNIQUE_ID}/config`, JSON.stringify({
+      unique_id: MAINTENANCE_END_ALL_UNIQUE_ID,
+      name: 'End All Maintenance',
+      command_topic: MAINTENANCE_END_ALL_TOPIC,
+      payload_press: MAINTENANCE_END_ALL_PAYLOAD,
+      ...AVAILABILITY_BASE,
+      icon: 'mdi:wrench-check',
+      device: DEVICE_INFO,
+    }), { retain: true, qos: 0 });
     // v1.14.1 — availability 'online' moved OUT of here into the connect handler:
     // publishing it only alongside the one-time discovery configs meant a broker-
     // side disconnect (LWT retains 'offline') was never overwritten on reconnect,
@@ -1574,6 +1628,8 @@ export async function startMqttDiscovery(
         const cents = rateAt(tariffModelFromEnv(), Date.now()).centsPerKwh;
         return cents == null ? null : Math.round((cents / 100) * 1e4) / 1e4;
       })(),
+      // v1.197.0 — the maintenance windows in force (false / 0 / [] when none, or not wired).
+      ...maintenanceStateFields(maintenance?.active() ?? [], maintenance?.fmtClock ?? ((ms) => new Date(ms).toISOString())),
       alert_critical_count: cnt('threshold', 'critical'),
       alert_warning_count: cnt('threshold', 'warning'),
       learned_warning_count: cnt('learned', 'warning'),
@@ -1726,6 +1782,17 @@ export async function startMqttDiscovery(
 
   client.on('message', (topic, payload) => {
     try {
+      // v1.197.0 — the End-all-maintenance button.
+      if (isMaintenanceEndAllCommand(topic, payload.toString())) {
+        // v1.197.0 (review) — a press with no controller wired ends nothing: say so, never "0 ended".
+        if (!maintenance) {
+          log('mqtt-discovery: WARNING — End All Maintenance pressed, but no maintenance controller is wired; nothing ended');
+          return;
+        }
+        const n = maintenance.endAll();
+        log(`mqtt-discovery: End All Maintenance pressed — ${n} window(s) ended`);
+        return;
+      }
       handleSwitchCommand(topic, payload.toString());
     } catch (e: any) {
       log(`mqtt-discovery: switch command handling failed — ${e?.message ?? e}`);
@@ -1759,6 +1826,10 @@ export async function startMqttDiscovery(
             if (err) log(`mqtt-discovery: subscribe ${alertSwitchCommandTopic(p)} failed — ${err.message}`);
           });
         }
+        // v1.197.0 — and the End-all-maintenance button.
+        client.subscribe(MAINTENANCE_END_ALL_TOPIC, { qos: 0 }, (err) => {
+          if (err) log(`mqtt-discovery: subscribe ${MAINTENANCE_END_ALL_TOPIC} failed — ${err.message}`);
+        });
       },
       publishState,
       publishSwitchStates,

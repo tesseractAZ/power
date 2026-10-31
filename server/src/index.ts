@@ -15,8 +15,11 @@ import { siteResponse, pvSite, isLegacyPvSite, physicsAmbientC, siteRepairIssues
 // v1.191.0 (lane A) — the site clock (siteTime.ts) and its main-thread side (boot log, HA comparison).
 import {
   siteTimeZone, siteYmd, siteMinuteOfDay, siteDayStartMs, siteNextDayStartOf, addDaysYmd, zonedWallTimeMs,
-  fmtSiteClock, fmtSiteWeekday,
+  fmtSiteClock, fmtSiteWeekday, fmtSiteHm,
 } from './siteTime.js';
+import {
+  createMaintenanceController, guardHomeSet, MAINT_CHOICES_MIN, MAINT_DEFAULT_MS, MAINT_ENDED_KEEP_MS, MAINT_MAX_MS, MAINT_MIN_MS,
+} from './maintenanceWindow.js';
 import { siteTimeBootLines, checkHaTimeZone, siteTimeRepairIssues } from './siteTimeHa.js';
 import { productKind, warrantyChassis, configuredBenchSpareSns, deviceAliases } from './topology.js';
 import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPORT_DIR, publishedSnapshotStatus } from './dbExport.js';
@@ -56,7 +59,7 @@ import {
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, loadConfirmedSurface,
-  type ActuatorContext, type SurfaceDevice,
+  type ActuatorContext, type SettingChange, type SurfaceDevice,
 } from './settingsDrift.js';
 import { DriftHoldQueue, driftHeldPath, settleDriftTick, type DriftHoldLog } from './settingsDriftHold.js';
 import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } from './alertMonitor.js';
@@ -115,7 +118,7 @@ import { startSshServer, loadOrCreateHostKey } from './console/server.js';
 import { authFromEnv, authConfigProblems, describeSshAuth } from './console/session.js';
 import { createTuiDataProvider } from './console/dataProvider.js';
 import { registerWsConsole } from './console/wsConsole.js';
-import { startMqttDiscovery } from './mqttDiscovery.js';
+import { startMqttDiscovery, maintenanceStateFields } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
 import { getWeather, createGhiTickLogger } from './weather.js';
@@ -589,6 +592,33 @@ await app.register(fastifyStatic, {
 });
 
 const store = new SnapshotStore();
+// v1.197.0 — the maintenance windows (maintenanceWindow.ts): one Core's own alerts held for a set time,
+// every house-wide alarm still sounding. Built here, before anything can serve a snapshot; the alert
+// monitor stamps and steps them on every tick. Each start, extension and end is pushed, written to the
+// write log and logged at warn.
+const MAINTENANCE_PATH = config.dataFile('maintenance-windows.json', option<string | null>('MAINTENANCE_STATE_PATH'));
+const maintenance = createMaintenanceController({
+  path: MAINTENANCE_PATH,
+  now: Date.now,
+  // A channel that cannot deliver is a failed push in the log, never "push sent".
+  send: (msg) => {
+    const cfg = loadNotifyConfig();
+    return isConfigured(cfg) ? sendNotification(cfg, msg) : Promise.reject(new Error(`the notify channel is not configured (${cfg.channel})`));
+  },
+  log: { info: (m) => app.log.info(m), warn: (m) => app.log.warn(m) },
+  audit: (e) => appendWriteLog({ ts: Date.now(), action: e.action, sn: e.sn, params: e.params, source: e.source, outcome: 'success' }),
+  fmtClock: fmtSiteHm,
+});
+/** v1.197.0 — the windows in force, for the API and the snapshot (the snapshot carries serials already). */
+function maintenanceView(nowMs: number) {
+  return maintenance.active(nowMs).map((w) => ({
+    sn: w.sn, label: w.label, coreNum: w.coreNum, startedAtMs: w.startedAtMs, untilMs: w.untilMs,
+    remainingMs: Math.max(0, w.untilMs - nowMs),
+    heldCount: w.held.length + w.heldDropped,
+    heldCritical: w.held.filter((h) => h.severity === 'critical').length,
+    source: w.source, note: w.note,
+  }));
+}
 // v1.180.0 — the resolver's declared-grid veto survives a restart made while the cloud is
 // unreachable (no /device/list, so no panel device to carry the persisted reading).
 setPersistedGridAbsentSource(() => store.persistedGridAbsent());
@@ -626,7 +656,8 @@ function snapshotForClient(): FleetSnapshot {
   for (const p of secondaryShp2s(s.devices)) devices[p.sn] = panelForClient(p, s.devices, nowMs, verdicts);
   // v1.185.0 — which panel is the house panel, and whether one must be pinned (the dashboard's
   // prompt reads this).
-  return { ...s, devices, grid, off_grid, housePanel: store.housePanelState() };
+  // v1.197.0 — and the Cores a maintenance window holds now (the card's strip reads it).
+  return { ...s, devices, grid, off_grid, housePanel: store.housePanelState(), maintenance: maintenanceView(nowMs) };
 }
 /** v1.69.0 — process start, for the telemetry-blind boot grace. */
 const PROCESS_BOOT_MS = Date.now();
@@ -774,6 +805,8 @@ app.get('/api/health', async (_req, reply) => {
     })(),
     vitalsLevel: currentAssessment()?.level ?? null,
     heartbeat: heartbeatStatus(),
+    // v1.197.0 — the Cores a maintenance window holds now (no serial). ok/503 do not change.
+    maintenance: maintenance.active(Date.now()).map((w) => ({ label: w.label, coreNum: w.coreNum, untilMs: w.untilMs })),
     generatedAt: store.get().generatedAt,
   };
 });
@@ -1780,6 +1813,8 @@ app.get('/api/ha-state', async (req, reply) => {
     learned_critical_count: cnt('learned', 'critical'),
     learned_warning_count: cnt('learned', 'warning'),
     learned_info_count: cnt('learned', 'info'),
+    // v1.197.0 — the maintenance windows in force (as the MQTT state publishes them).
+    ...maintenanceStateFields(maintenance.active(Date.now()), fmtSiteHm),
 
     // Runway — live off-grid projection (v0.5.0). v0.15.11 — null hours on a
     // net-charging horizon publish a sentinel (not bare null → HA 'unknown') so
@@ -2513,7 +2548,8 @@ await startMqttWithRetry();
 // v1.66.0 — the `warn` sink. Without it every notify-DELIVERY failure logged at info,
 // so "count the level >= 40 lines" — the triage this project actually runs — reported a
 // clean bill of health while the alarm's only non-audible escape path was failing.
-const monitor = startAlertMonitor(store, recorder, (m) => app.log.info(m), (m) => app.log.warn(m));
+// v1.197.0 — with the maintenance windows (the only dependency production supplies).
+const monitor = startAlertMonitor(store, recorder, (m) => app.log.info(m), (m) => app.log.warn(m), { maintenance });
 app.log.info(
   `notify: channel=${monitor.getConfig().channel} configured=${isConfigured(monitor.getConfig())}`,
 );
@@ -2578,7 +2614,12 @@ const stopTuiData = (() => {
 // YAML edit required. Falls back silently when the feature is disabled.
 let stopMqttDiscovery: (() => void) | null = null;
 try {
-  const discoveryHandle = await startMqttDiscovery(store, recorder, (m) => app.log.info(m));
+  const discoveryHandle = await startMqttDiscovery(store, recorder, (m) => app.log.info(m), {
+    // v1.197.0 — the maintenance windows' state keys, and Home Assistant's End-all button.
+    active: () => maintenance.active(Date.now()),
+    endAll: () => maintenance.endAll('ha', store.get().alerts ?? []),
+    fmtClock: fmtSiteHm,
+  });
   stopMqttDiscovery = discoveryHandle.stop;
 } catch (e: any) {
   app.log.error(`mqtt-discovery: failed to start: ${e?.message ?? e}`);
@@ -5601,7 +5642,33 @@ function driftActuatorContext(nowMs: number): ActuatorContext {
   return {
     targetPct: reserveLeg.targetPct, priorReservePct: reserveLeg.priorReservePct, nightActive, ownerFloorPct, forceChargeActive,
     forceChargeCommands: forceChargeCommandsOf(act),
+    // v1.197.0 — a shelved Core's own settings are part of its maintenance (shelvedSurfaceLabels).
+    shelvedLabels: [...shelvedSurfaceLabels(nowMs).keys()],
   };
+}
+
+/**
+ * v1.197.0 — the settings-surface label (settingsSurfaceDevices) of each Core a maintenance window holds
+ * now, keyed to its serial. A label another device shares is left out: its keys could be the other
+ * device's, so they stay 'external'.
+ */
+function shelvedSurfaceLabels(nowMs: number): Map<string, string> {
+  const devs = settingsSurfaceDevices();
+  const uses = new Map<string, number>();
+  for (const d of devs) uses.set(d.label, (uses.get(d.label) ?? 0) + 1);
+  const out = new Map<string, string>();
+  for (const w of maintenance.active(nowMs)) {
+    const d = devs.find((x) => x.sn === w.sn && x.kind === 'dpu');
+    if (d && uses.get(d.label) === 1) out.set(d.label, w.sn);
+  }
+  return out;
+}
+
+/** v1.197.0 — a confirmed 'maintenance' change, onto its Core's window (listed in the end push). */
+function noteMaintenanceSettingChange(c: SettingChange, nowMs: number): void {
+  for (const [label, sn] of shelvedSurfaceLabels(nowMs)) {
+    if (c.key.startsWith(`${label} · `)) maintenance.noteSettingsChange(sn, c, nowMs);
+  }
 }
 
 /** v1.165.0 — a record's force-charge writes are in flight, or were made within the last 15
@@ -5625,6 +5692,8 @@ function runSettingsDriftTick(): void {
     void settleDriftTick({
       queue: driftHold, state: settingsDriftState, evaluation: evaln, now: new Date(), log: driftHoldLog,
       context: driftActuatorContext,
+      // v1.197.0 — a shelved Core's setting, listed in its window's end push.
+      onMaintenanceChange: noteMaintenanceSettingChange,
     }).catch((e: any) => app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`));
   } catch (e: any) {
     app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`);
@@ -7590,6 +7659,69 @@ app.post<{ Body: { priority?: AlarmRung; target?: 'browser' | 'speakers' } }>(
       reply.code(isCooldown ? 429 : 502);
     }
     return r;
+  },
+);
+
+/* ─── v1.197.0 maintenance windows (maintenanceWindow.ts) ───────────────────────────────────
+ * GET the windows in force and those ended in the last 24 h; POST starts (or extends) one Core's
+ * window; POST /end ends one, or all. Starting is write-gated and rate-limited; the window is saved
+ * before the answer (a failed save is a 500 and shelves nothing). The serial travels in the body,
+ * never the path, so it is not in the request log.
+ */
+const maintenanceReadRateLimit = makeRateLimiter(120, 60_000);
+const maintenanceWriteRateLimit = makeRateLimiter(10, 60_000);
+app.get('/api/maintenance', { preHandler: maintenanceReadRateLimit }, async () => {
+  const now = Date.now();
+  return {
+    windows: maintenanceView(now),
+    // Ended in the last 24 h (a window absorbing a telemetry gap is retained longer).
+    recentlyEnded: maintenance.windows().filter((w) => w.endedAtMs != null && now - w.endedAtMs <= MAINT_ENDED_KEEP_MS).map((w) => ({
+      label: w.label, coreNum: w.coreNum, startedAtMs: w.startedAtMs, endedAtMs: w.endedAtMs, endReason: w.endReason,
+      heldCount: w.held.length + w.heldDropped, heldCritical: w.held.filter((h) => h.severity === 'critical').length,
+    })),
+    defaultMinutes: MAINT_DEFAULT_MS / 60_000,
+    minMinutes: MAINT_MIN_MS / 60_000,
+    maxMinutes: MAINT_MAX_MS / 60_000,
+    choicesMinutes: MAINT_CHOICES_MIN,
+  };
+});
+app.post<{ Body: { sn?: unknown; minutes?: unknown; note?: unknown; source?: unknown } }>(
+  '/api/maintenance',
+  { preHandler: [requireWriteAuth, maintenanceWriteRateLimit] },
+  async (req, reply) => {
+    const devices = store.get().devices;
+    const r = maintenance.start({
+      sn: typeof req.body?.sn === 'string' ? req.body.sn.trim() : '',
+      minutes: req.body?.minutes,
+      note: req.body?.note,
+      source: req.body?.source === 'web' ? 'web' : 'api',
+      devices,
+      // The home pool: the panel's live roster, its last-known value and every Core a panel lists on a
+      // slot (guardHomeSet) — a Core off the roster while it is re-wired still counts.
+      homePoolSns: guardHomeSet(devices, shp2ConnectedDpuSns(devices), lastKnownRoster),
+      alerts: store.get().alerts ?? [],
+      requester: { ip: req.ip, ua: req.headers['user-agent']?.toString() },
+    });
+    if (!r.ok) {
+      reply.code(r.code);
+      return { ok: false, error: r.error };
+    }
+    return { ok: true, extended: r.extended, windows: maintenanceView(Date.now()) };
+  },
+);
+app.post<{ Body: { sn?: unknown; all?: unknown; source?: unknown } }>(
+  '/api/maintenance/end',
+  { preHandler: [requireWriteAuth, maintenanceWriteRateLimit] },
+  async (req, reply) => {
+    const alerts = store.get().alerts ?? [];
+    const src = req.body?.source === 'web' ? 'web' : 'api';
+    if (req.body?.all === true) return { ok: true, ended: maintenance.endAll(src, alerts), windows: maintenanceView(Date.now()) };
+    const sn = typeof req.body?.sn === 'string' ? req.body.sn.trim() : '';
+    if (!maintenance.end(sn, src, alerts, { ip: req.ip, ua: req.headers['user-agent']?.toString() })) {
+      reply.code(404);
+      return { ok: false, error: 'no maintenance window is open for that device' };
+    }
+    return { ok: true, ended: 1, windows: maintenanceView(Date.now()) };
   },
 );
 

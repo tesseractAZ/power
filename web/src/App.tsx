@@ -278,7 +278,8 @@ function NormalApp() {
           {shp2 && <Shp2Card d={shp2 as DeviceSnapshot & { projection?: Shp2Projection }} />}
           {otherPanels.map((p) => <Shp2Card key={p.sn} d={p as DeviceSnapshot & { projection?: Shp2Projection }} />)}
           {dpus.map((d) => (
-            <DpuCard key={d.sn} d={d as DeviceSnapshot & { projection?: DpuProjection }} viaShp2={dpuViaShp2.get(d.sn)} />
+            <DpuCard key={d.sn} d={d as DeviceSnapshot & { projection?: DpuProjection }} viaShp2={dpuViaShp2.get(d.sn)}
+              maintenance={snapshot?.maintenance?.find((w) => w.sn === d.sn)} />
           ))}
 
           {/* v0.22.0 — ForecastCard is lazy (recharts off the entry chunk). The
