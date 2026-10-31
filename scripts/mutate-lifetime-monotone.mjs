@@ -182,7 +182,7 @@ const MUTANTS = [
     id: 'L-xxxviii. ★★★ what is owed never expires',
     file: REC,
     find: '      if (owedNow && now - owedNow.ts > LIFETIME_OWED_WINDOW_MS) {',
-    to: '      if (false) { /* MUTANT */',
+    to: '      if (owedNow && now - owedNow.ts > Infinity) { /* MUTANT */',
     why: 'A drop that never comes back (a replaced database) stays owed for good, and a later 200 kWh drop that does come back is published twice: 1,400,150 Wh for 1,200,050.',
   },
   {
