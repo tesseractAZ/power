@@ -166,7 +166,7 @@ const MUTANTS = [
     file: AA,
     find: '  /usr/bin/** ix,\n',
     to: '  # MUTANT /usr/bin exec rule removed\n',
-    why: 'Once `file,` is narrowed, the docker-exec\'d hook (and the node it runs) cannot execute: every backup fails it.',
+    why: 'Without `file,` (v1.197.1) nothing else grants it: the docker-exec\'d hook (and the node it runs) cannot execute, and every backup fails it.',
   },
   {
     id: 'W-i. ★★ index.ts never registers the hook routes',

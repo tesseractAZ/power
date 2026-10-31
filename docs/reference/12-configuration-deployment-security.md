@@ -279,10 +279,41 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
   HTTPS 443, Wyoming TCP.
 - **Capabilities explicitly denied:** `sys_admin`, `sys_module`, `sys_rawio`, `sys_ptrace`,
   `sys_boot`, `sys_time`, `mac_admin`, `mac_override`.
+- **Reads (since v1.197.1): granted per top-level folder, never per file.** The blanket `file,`
+  rule (kept from v1.7.1 to v1.197.0) is gone. The image's own folders are granted whole, so s6,
+  bashio, jq, npm, tsx, node and esbuild cannot meet a read denial: `/bin`, `/sbin`, `/lib`,
+  `/lib64`, `/usr`, `/package` and `/command` readable and mappable, `/etc`, `/var` and `/app`
+  readable, `/init` readable and executable. Outside them: `/data`, `/share/ecoflow-panel`,
+  `/tmp`, `/var/tmp` and `/run` (`rwk`), all of `/proc` (read), and in `/sys` the thermal zones,
+  the cgroup limits, the network interfaces and `/sys/devices` (read). A read nothing grants is
+  refused and logged as `apparmor="DENIED"`.
+- **Exec, by the path the kernel checks:** AppArmor checks the target of a symlink, so the grants
+  name `/usr/lib/bashio/bashio` (for `/usr/bin/bashio`), npm's `npm-cli.js` (for `/usr/bin/npm`),
+  `tsx/dist/cli.mjs` (for `node_modules/.bin/tsx`), esbuild's service binary, every s6-overlay
+  package under `/package` (where `/command/*` resolves) and the scripts s6 copies into `/run` at
+  boot (`/run/service`, `/run/s6`, `/run/s6-rc*`), beside the program folders `/bin`, `/sbin`,
+  `/usr/bin`, `/usr/sbin` and `/usr/local/bin`.
+- **`/share`: the add-on's own folder only.** `/share/ecoflow-panel` (the database snapshot and the
+  backup hook's journal) is `rwk` and the listing of `/share` itself is readable; other add-ons'
+  files there are refused.
+- **Nothing runs from a writable tree:** `audit deny /{data,share,tmp,var/tmp}/** mx` refuses
+  executing or exec-mapping anything in `/data`, `/share`, `/tmp` or `/var/tmp`.
+- **A process's memory file is never writable:** `audit deny /proc/*/{,task/*/}mem w`.
+  `/proc/self/mem` resolves to `/proc/<pid>/mem`, and the ptrace deny does not cover a process's
+  own memory.
+- **Unmapped Home Assistant folders:** `config.yaml` maps only `data` and `share`, and
+  `/config`, `/ssl`, `/backup`, `/media`, `/addons`, `/addon_configs` and `/homeassistant` carry an
+  audited deny as a tripwire.
 - **Denied file ops:** reading `/etc/shadow`, `/etc/gshadow`, `/root/**`, `/home/**`,
   `/etc/ssh/**`; writing `/proc/sys/**`, `/sys/**`, `/proc/sysrq-trigger`; mount/umount/
-  pivot_root/remount; ptrace.
-- `/data/**` is `rwk` (SQLite WAL/shm need `k`); `/tmp`, `/var/tmp`, `/run` are `rwk`.
+  pivot_root/remount; ptrace. These are plain denies (silent): npm looks under `/root` on every
+  start, and that noise stays out of the audit journal. Every deny added since v1.197.1 is
+  `audit deny`.
+- **Never denied:** a read of `/data/options.json` (bashio reads every option from it), and the
+  `network netlink raw` rule stays.
+- `/data/{,**}` is `rwk` (SQLite WAL/shm need `k`; the folder itself is listed by the atomic
+  writer and fsynced by SQLite, and `/data/**` alone does not match `/data/`); `/tmp`, `/var/tmp`
+  and `/run` are `rwk`.
 - **Write-locked (`deny … wl`):** `/app`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/init`
   (v1.7.2) and, since v1.187.15, `/etc`, `/package`, `/command` and `/var/{cache,lib,log,spool,opt,mail,local}`
   — no file on the container's root filesystem changes after start.
@@ -293,16 +324,39 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
   its API, created its database and spawned its workers, and the host audit journal held no
   ALLOWED/DENIED record for either. The final profile was compiled fresh (`apparmor_parser -T -Q -K`)
   before shipping. Invariants pinned in `apparmorProfile.test.ts` (harness `mutate-v1187-15.mjs`).
+- **Boot test for a read or exec change (v1.197.1 onward), required before it ships:** compile the
+  candidate fresh on the host (`apparmor_parser -T -Q -K`), then load a copy renamed
+  `power_aa_test` in complain mode with every new deny as `audit deny`. Run a throwaway container of
+  the released image under it (`--security-opt apparmor=power_aa_test`) on an internal network with
+  no egress, throwaway `/data` and `/share` volumes, a sanitized `options.json` (dummy EcoFlow keys;
+  notifications, broadcasts, MQTT discovery and night-charge writes off; the SSH console on with a
+  throwaway password) and a stub answering as the Supervisor. Start it with the real `/init` (s6 is
+  the risk). Exercise the API, a WebSocket, the worker reports, the database snapshot, the
+  maintenance endpoints, an SSH console login and both backup-hook phases (`docker exec`), and let
+  it run at least 10 minutes for the timers. Stop and start it three times. Probe what must stay
+  refused (a file under another `/share` folder, an executable copied into `/data`, a write to
+  `/proc/self/mem`). Then read the host audit journal for the test profile: every `ALLOWED` record
+  outside the probes becomes a rule or a documented denial, and the run repeats until there are
+  none. Repeat enforced: `DENIED` records for the probes only, the API up, both hook phases exit 0,
+  three stops exit 0. Ship only the profile whose rules (comments and blank lines stripped) hash to
+  the tested copy's. `apparmorProfile.test.ts` evaluates the profile over the same inventory with a
+  small AppArmor glob matcher, deny beating allow.
 
 ★ Two hard-won footguns baked into the profile comments (do not "clean up"):
 
-1. **KEEP the blanket `file,` rule.** v1.7.0 replaced it with a per-path allow-list that had
-   `/init ix` (execute only), but s6-overlay **re-opens `/init` for READING** during
-   shutdown/restart → `/bin/sh: can't open '/init': Permission denied` crash-loop → whole
-   add-on (and alarm) down. Reverted v1.7.1. v1.7.2 instead keeps `file,` (so no read/exec can
-   ever be denied) and layers **write-immutability** deny rules on the code/binary/lib dirs
-   (`deny /app|/usr|/bin|/sbin|/lib|/lib64|/init … wl`) — closing the dominant CWE-732
-   persistence vector without any read-denial risk.
+1. **`/init` and the s6 trees stay readable AND executable; reads are granted per folder, never
+   per file, and never without the boot test.** v1.7.0 replaced the blanket `file,` rule with a
+   per-path allow-list that had `/init ix` (execute only), but `/init` is a `/bin/sh` script and
+   s6-overlay **re-opens `/init` for READING** → `/bin/sh: can't open '/init': Permission
+   denied` crash-loop → whole add-on (and alarm) down, invisibly (init never reaches the server's
+   log). Reverted v1.7.1; v1.7.2 kept `file,` and layered **write-immutability** deny rules on the
+   code/binary/lib dirs (`deny /app|/usr|/bin|/sbin|/lib|/lib64|/init … wl`). v1.197.1 drops
+   `file,` again, granting the image's folders whole and only after the isolated boot test above.
+   Two traps the test exists for: AppArmor checks an exec by the symlink's **target**
+   (`/usr/bin/bashio` is `/usr/lib/bashio/bashio`; `/command/*` are files under versioned
+   `/package/admin/<package>-<version>` folders), and a `*` or `**` that starts a path element
+   never matches an empty name (`/data/**` does not match `/data/`; a folder's own listing needs
+   `/data/{,**}`).
 2. **★★ The write-mask is `wl`, NOT `wal`.** The append bit `a` and write bit `w` are mutually
    exclusive in a single rule on the stricter apparmor parser HAOS ships on **kernel 6.18**.
    v1.7.2–v1.9.0 shipped `wal`, which parsed on the old feature set but the compiled result was
@@ -620,7 +674,12 @@ multi-arch image — it does **not** build on the host. Once the GitHub Release 
   Since v1.187.15 `/command`, `/package` and `/etc` are write-locked (`deny … wl`); `/command` and
   `/package` are the s6 PID1 trees. The locks were added after that boot test (§12 AppArmor
   profile). A mistaken denial in those trees is an *invisible* init crash-loop, so any further
-  change to them needs the same boot test.
+  change to them needs the same boot test. Since v1.197.1 the profile also confines reads, and a
+  read or exec it does not grant logs `apparmor="DENIED"` in the host audit journal under the
+  add-on's slug. A profile change needs the isolated boot test before it ships, and a deliberate
+  restart right after the deploy (the profile loads with the update; the v1.7.0 failure showed at
+  start), followed by a check that the add-on is `started` and the journal holds no `DENIED`
+  record for the slug.
 - **Errored add-on after a bad boot**: updating an add-on that is already in the `error` state
   installs the new image but does not start it. Start it explicitly, with the add-on page's Start
   button or the Supervisor `POST /addons/<slug>/restart`.

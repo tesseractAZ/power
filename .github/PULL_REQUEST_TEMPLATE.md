@@ -34,7 +34,7 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 
 ### If this touches the security surface
 - [ ] A new POST/PUT/DELETE route has `requireWriteAuth` (and a rate limit if it does work on demand); `server/test/writeRoutesGated.test.ts` fails the build otherwise.
-- [ ] `ecoflow_panel/apparmor.txt` changes compile fresh (`apparmor_parser -T -Q -K`) and `server/test/apparmorProfile.test.ts` passes; no rule combines `a` with `w`; the blanket `file,` stays.
+- [ ] `ecoflow_panel/apparmor.txt` changes compile fresh (`apparmor_parser -T -Q -K`) and `server/test/apparmorProfile.test.ts` passes; no rule combines `a` with `w`; no blanket `file,` rule; a changed read or exec grant was boot-tested on an isolated container (complain mode, then enforced, three starts and three stops) and the shipped rules (comments and blank lines stripped) hash to the tested copy's.
 - [ ] New workflow steps pin actions to a full commit SHA with a version comment.
 
 ### If this is a release PR

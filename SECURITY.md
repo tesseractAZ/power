@@ -128,7 +128,9 @@ never blocked).
 ### Container confinement
 
 - **AppArmor** (`ecoflow_panel/apparmor.txt`, narrowed in v1.187.15 after
-  complain-mode profiling of a running instance and of an isolated boot):
+  complain-mode profiling of a running instance and of an isolated boot; reads
+  confined per folder since v1.197.1 after an isolated boot test in complain
+  mode and then enforced):
   - capabilities **`chown` and `dac_override` only**; `sys_admin`, `sys_module`,
     `sys_rawio`, `sys_ptrace`, `sys_boot`, `sys_time`, `mac_admin` and
     `mac_override` explicitly denied;
@@ -141,10 +143,22 @@ never blocked).
     `/etc/gshadow`, `/root`, `/home` and `/etc/ssh` denied; writes to `/proc/sys`,
     `/sys` and `/proc/sysrq-trigger` denied; mount, umount, pivot_root, remount and
     ptrace denied;
-  - the blanket `file,` read rule is **kept on purpose** (a per-path list once
-    denied s6 re-reading `/init` and crash-looped the add-on), and no write mask
-    combines `a` with `w` (the HAOS parser rejects it and the profile then fails
-    to load).
+  - **reads are granted per top-level folder**, not by a blanket `file,` rule:
+    the image's own folders (`/bin`, `/sbin`, `/lib`, `/usr`, `/package`,
+    `/command`, `/etc`, `/var`, `/app`) are readable as a whole, and `/init` is
+    readable and executable, so the s6 start and stop sequence cannot be refused
+    (a per-file list once denied s6 re-reading `/init` and crash-looped the
+    add-on); a read nothing grants is refused and logged;
+  - under `/share`, only the add-on's own `ecoflow-panel` folder can be read or
+    written; other add-ons' files there are refused, and the Home Assistant
+    folders the add-on does not map (`/config`, `/ssl`, `/backup`, `/media`,
+    `/addons`, `/addon_configs`, `/homeassistant`) carry an audited deny;
+  - nothing can be executed or exec-mapped from `/data`, `/share`, `/tmp` or
+    `/var/tmp`, and a process's memory file (`/proc/<pid>/mem`) cannot be
+    written; each of these denies is audited, so an attempt is logged;
+  - no write mask combines `a` with `w` (the HAOS parser rejects it and the
+    profile then fails to load), and a read of `/data/options.json` is never
+    denied.
 
   These invariants are pinned by `server/test/apparmorProfile.test.ts`, which runs
   in CI, and by the mutation harness `scripts/mutate-v1187-15.mjs`, whose anchors
@@ -157,7 +171,8 @@ never blocked).
   integration.
 - Storage: `/data` (private to the add-on, and the home of the SSH host key and the
   write token) and `/share`, which is written only for the optional database snapshot
-  and the backup hook's journal.
+  and the backup hook's journal, both in `/share/ecoflow-panel` (the only folder
+  under `/share` the AppArmor profile grants).
 
 ### Secrets and personal data
 
