@@ -11,6 +11,7 @@ import { pvSurplusFromBand, surplusSpanEndMs, saturationThresholdPct } from '../
 import { buildApsREvModel, rateAt } from '../src/tariff.js';
 import { forceChargeStopPct, forceChargeStartAtMs, FORCE_CHARGE_MIN_RUN_MS } from '../src/nightForceCharge.js';
 import { armCycle, emptyCycle } from '../src/chargeCycle.js';
+import { chargeLegStep } from '../src/physics/chargeLeg.js';
 
 /**
  * R2 — THE MID-DAY LEG, SIZED BY THE SAME ENGINE (WindowSpec). Nothing live plans it yet; these
@@ -168,19 +169,21 @@ test('★★ the overnight leg keeps its own setpoint rule (no T_mid, no basis f
 /* ══ the anchors ════════════════════════════════════════════════════════════ */
 
 /** Independent: the islanded P10/P90 walk the planner sizes on, from `fromMs`'s hour to `toMs`,
- *  lifted to `hold` entering the first hour at/after `holdAt`. */
+ *  lifted to `hold` entering the first hour at/after `holdAt`. v1.194.0 — a surplus hour's net is
+ *  stored at legEff (the charge leg); the morning's P10 sun over the house is one. */
 function islandedWalkPct(socPct: number, hours: NightChargeHour[], toMs: number, hold?: { pct: number; atMs: number }): number {
   let pack = (socPct / 100) * POOL;
   let lifted = false;
   for (const h of hours) {
     if (h.ts >= toMs) break;
     if (hold && !lifted && h.ts >= hold.atMs) { pack = Math.max(pack, (hold.pct / 100) * POOL); lifted = true; }
-    pack = Math.max(0, Math.min(POOL, pack + (h.pvP10W - h.loadP90W / ETA) / 1000));
+    pack = Math.max(0, Math.min(POOL, pack + chargeLegStep((h.pvP10W - h.loadP90W / ETA) / 1000, LEG)));
   }
   return Math.round((pack / POOL) * 1000) / 10;
 }
 /** Independent: the grid-present P50 walk from now (the in-progress hour at the next hour's
- *  figures), floored at the owner's reserve, and at the backup hold through the hours before its close. */
+ *  figures), floored at the owner's reserve, and at the backup hold through the hours before its close.
+ *  v1.194.0 — a surplus stored at legEff, as in the islanded walk. */
 function expectedWalkPct(socPct: number, hours: NightChargeHour[], toMs: number, hold?: { pct: number; untilMs: number }): number {
   let pack = (socPct / 100) * POOL;
   const floor = Math.min(0.16 * POOL, pack);
@@ -189,7 +192,7 @@ function expectedWalkPct(socPct: number, hours: NightChargeHour[], toMs: number,
     const w = (Math.min(slot + H, toMs) - Math.max(slot, NOW)) / H;
     const h = byTs.get(slot) ?? byTs.get(slot + H)!;
     const fl = hold && slot < hold.untilMs ? Math.max(floor, (hold.pct / 100) * POOL) : floor;
-    pack = Math.max(fl, Math.min(POOL, pack + (w * ((h.pvP50W ?? 0) - (h.loadP50W ?? 0) / ETA)) / 1000));
+    pack = Math.max(fl, Math.min(POOL, pack + chargeLegStep((w * ((h.pvP50W ?? 0) - (h.loadP50W ?? 0) / ETA)) / 1000, LEG)));
   }
   return Math.round((pack / POOL) * 1000) / 10;
 }
@@ -295,8 +298,9 @@ test('★★ expectedWindowLiftKwh takes the acceptance bound on the median PV',
 /**
  * An INDEPENDENT minute-by-minute model of the mid-day write: below the 50% reserve the grid
  * charges at the live rate ((17 kW − the house) × 0.927, at most the acceptance less the PV) and
- * the P50 PV goes into the pack on top, the house on the grid; at or above it the house runs from
- * the pool (PV − load ÷ 0.94), held at the reserve; the force-charge switches on once, when the
+ * the P50 PV goes into the pack on top at 0.927, the house on the grid; at or above it the house
+ * runs from the pool (PV − load ÷ 0.94, a surplus stored at 0.927), held at the reserve (v1.194.0:
+ * the sun reaches the cells through the charge leg too); the force-charge switches on once, when the
  * clock reaches the live tick's own forceChargeStartAtMs (PV-blind, as it runs today), and charges
  * the same way to forceChargeStopPct(90). Its grid draw ÷ 0.927 is the night's buy.
  */
@@ -312,13 +316,14 @@ function oracleBuy(scale: number, openPct: number, acceptKw: number | null): { b
     if (on || pack < 0.5 * POOL) {
       const target = on ? (stop / 100) * POOL : 0.5 * POOL;
       const g = acceptKw == null || p <= 0 ? rate : Math.min(rate, Math.max(0, acceptKw - p));
-      pack += Math.min(p * dt, Math.max(0, target - pack));
+      pack += Math.min(p * LEG * dt, Math.max(0, target - pack));
       const add = Math.min(g * dt, Math.max(0, target - pack));
       pack += add;
       grid += add / LEG;
       if (on && pack >= target - 1e-9) on = false;
     } else {
-      pack = Math.max(0.5 * POOL, Math.min(POOL, pack + (p - l / ETA) * dt));
+      const net = (p - l / ETA) * dt;
+      pack = Math.max(0.5 * POOL, Math.min(POOL, pack + (net > 0 ? net * LEG : net)));
     }
   }
   return { buyKwh: Math.round(grid * 100) / 100, onAtMs };
@@ -334,16 +339,20 @@ function engineBuy(scale: number, openPct: number, acceptKw: number | null) {
   });
 }
 
-test('★★★ the expected buy credits the P50 PV: from 29.9% it is ~35.9 kWh sunny, ~49.8 cloudy (47.8 PV-blind before R2)', () => {
+test('★★★ the expected buy credits the P50 PV: from 29.9% it is ~37.3 kWh sunny, ~50.5 cloudy (47.8 PV-blind before R2)', () => {
+  // v1.194.0 — the sun reaches the cells at legEff (0.927), so it covers less of the lift: the
+  // independent model (oracleBuy) reads 37.31 / 50.48 / 35.07 kWh and a 12:20 sunny start. With the
+  // sun at unity it read 35.88 / 49.83 / 33.65 and 12:23 — the figures this test held before.
   const sunny = engineBuy(1, 29.9, null);
   const cloudy = engineBuy(0.4, 29.9, null);
-  assert.equal(sunny.buyKwh, 35.88);
-  assert.equal(cloudy.buyKwh, 49.83);
+  assert.equal(sunny.buyKwh, 37.31);
+  assert.equal(cloudy.buyKwh, 50.48);
   // With the default acceptance (chargeCap × legEff = 16.5 kW) the grid shares it with the sun.
-  assert.equal(engineBuy(1, 29.9, 17.8 * LEG).buyKwh, 33.65);
+  assert.equal(engineBuy(1, 29.9, 17.8 * LEG).buyKwh, 35.07);
   // The force-charge times itself as the live tick does (PV-blind): the sun moved the pool, so it starts later.
-  assert.equal(sunny.forceChargeStartMs, phx(10, 15, 12, 23));
+  assert.equal(sunny.forceChargeStartMs, phx(10, 15, 12, 20));
   assert.equal(cloudy.forceChargeStartMs, phx(10, 15, 12, 0));
+  assert.deepEqual([oracleBuy(1, 29.9, null).buyKwh, oracleBuy(0.4, 29.9, null).buyKwh, oracleBuy(1, 29.9, 17.8 * LEG).buyKwh], [37.31, 50.48, 35.07]);
 });
 
 test('★★★ the expected buy is what an independent minute model of the write draws (open, default and tight acceptance)', () => {
@@ -368,9 +377,11 @@ test('★★ expectedPvChargeWalk: the sun\'s share of a lift and when it comple
   const hours = buildNightChargeInputs(deps({ scale: 1 })).horizon;
   const w = { hours, windowEndMs: COST.endMs, chargeCapKw: 17.8, envelopeKw: 17, legEff: LEG, acceptKw: null };
   const r = expectedPvChargeWalk({ ...w, liftKwh: 18.43, fromMs: COST.startMs });
-  // 10:00: 6.28 kW of sun beside (17 − 2.16) × 0.927 = 13.76 kW of grid: ~55 min.
-  assert.ok(r.creditKwh > 5.5 && r.creditKwh < 6.2, String(r.creditKwh));
-  assert.equal(r.doneMs, phx(10, 15, 10, 56));
+  // 10:00: 6.28 kW of sun — 6.28 × 0.927 = 5.82 kW into the cells (v1.194.0; 6.28 at unity read
+  // 5.82 kWh by 10:56) — beside (17 − 2.16) × 0.927 = 13.76 kW of grid: 0.0970 + 0.2293 kWh a minute,
+  // done in the 57th minute with the sun's share first: 57 × 0.0970 = 5.53 kWh.
+  assert.ok(Math.abs(r.creditKwh - 5.527) < 0.001, String(r.creditKwh));
+  assert.equal(r.doneMs, phx(10, 15, 10, 57));
   const dark = buildNightChargeInputs(deps({ scale: 0 })).horizon;
   assert.deepEqual(expectedPvChargeWalk({ ...w, hours: dark, liftKwh: 18.43, fromMs: COST.startMs }).creditKwh, 0);
   assert.deepEqual(expectedPvChargeWalk({ ...w, liftKwh: 0, fromMs: COST.startMs }), { creditKwh: 0, doneMs: COST.startMs });

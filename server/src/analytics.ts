@@ -1,6 +1,7 @@
 import type { DeviceSnapshot } from './snapshot.js';
 import { rateAt, tariffModelFromEnv, resolveTariffFromEnv, seasonAt, onPeakWindowStrings, legacyTariffFromEnv, legacyOnPeakWindow, twoTierPairOf, positiveCents, APS_PERIOD, type TariffModel } from './tariff.js';
 import { DISPATCH_ROUND_TRIP_EFFICIENCY } from './limits.js';
+import { chargeLegStep } from './physics/chargeLeg.js';
 import { saturationThresholdPct, meanChargeCeilingPct } from './chargeTaper.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
@@ -2562,7 +2563,9 @@ async function computeDayForecastUncached(
       // makes minProjectedSoc equally honest. delta ≤ the pre-v1.26 unity value
       // for all pv,load ⇒ only ever LOWERS the SoC path (conservative).
       // v1.187.19 — through runwayDrainW (the Cores' overhead added), on the measured basis.
-      socWh = Math.max(0, Math.min(fullWh, socWh + (pvAlarm - runwayDrainW(load, poolBasis.overheadW))));
+      // v1.194.0 — a surplus hour charges through the charge leg (chargeLegStep ×
+      // RUNWAY_CHARGE_EFFICIENCY), as computeRunway's: only ever lowers the path further.
+      socWh = Math.max(0, Math.min(fullWh, socWh + chargeLegStep(pvAlarm - runwayDrainW(load, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)));
       socPct = (socWh / fullWh) * 100;
       if (minSoc == null || socPct < minSoc) {
         minSoc = socPct;
@@ -3830,7 +3833,8 @@ const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
 // error that produced the v1.27 dispatch constant, fixed in v1.32.0.)
 // The integrators charge the load at load/η in every hour (pv − load/η — see the
 // loop in computeRunway), so a deficit drains faster and a surplus charges by the
-// DC residual; delta ≤ the unity delta for every pv, load ⇒ runway can only
+// DC residual (v1.194.0: × RUNWAY_CHARGE_EFFICIENCY, below); delta ≤ the unity
+// delta for every pv, load ⇒ runway can only
 // shorten-or-equal, preserving the runwayPvBasisGuard monotonic-in-forecastPvW
 // invariant. Default 0.94 (marginally conservative vs the measured ~0.945),
 // env-overridable, clamped to [0.80,1.0] so a bad env can never lengthen runway
@@ -3841,6 +3845,17 @@ const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
 // the pool through runwayDrainW below; this constant is unchanged and stays the
 // night-charge planner's and the load-shed advisor's discharge leg.
 export const RUNWAY_DISCHARGE_EFFICIENCY = limits.runwayDischargeEfficiency;
+// v1.194.0 — the CHARGE leg of the same walks. A PV-surplus hour's DC residual (pv − drain) went
+// into the pool in full, but charging the cells loses energy too: in 29 measured PV-surplus spans,
+// with the 270 W overhead removed, the pool gained 2-7% less than pv − load/0.94 predicts
+// (docs/PERFORMANCE.md) — a projection across a sunny day read long, the unsafe direction. The
+// runway, the day/multi-day SoC trajectories and the probabilistic band now step every hour through
+// chargeLegStep (physics/chargeLeg.ts): a deficit as it is, a surplus × this efficiency. One source,
+// no option of its own: √DISPATCH_ROUND_TRIP_EFFICIENCY, the per-leg figure the dispatch plan and the
+// night-charge planner already charge at — 0.927 by default, just under the lowest measured span
+// (0.93); the option's [0.8, 1] clamp keeps it in [0.894, 1], and 1 is the walk before v1.194.0.
+// INVARIANT (pinned by test): ≤ RUNWAY_DISCHARGE_EFFICIENCY, like the dispatch leg it is.
+export const RUNWAY_CHARGE_EFFICIENCY = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
 // v1.187.19 — the measured pool drain. Fitted on 30 clean pack-only discharge spans
 // (2026-09-02..10-11, loads 2.1-7.7 kW, FCC ratios 0.981/0.970/0.959/0.944; the
 // aggregated spans are test/fixtures/runwayReplaySpans.json): on the measured
@@ -4233,7 +4248,11 @@ export function computeRunway(
     // v1.187.19 — the load is drawn through runwayDrainW: load/η plus the Cores' fixed
     // overhead, never less than load/η, in every hour (the overhead runs whether or not the
     // sun is up; measured in PV-surplus hours too). Still ≤ the unity delta and ∂/∂pv = 1.
-    const delta = pvKwh - runwayDrainW(loadKwhPerHour * 1000, basis.overheadW) / 1000;
+    // v1.194.0 — a SURPLUS hour charges the cells through the charge leg: the DC residual ×
+    // RUNWAY_CHARGE_EFFICIENCY (chargeLegStep), not in full. A deficit hour is unchanged. Still ≤ the
+    // unity delta, and ∂/∂pv is 1 on a deficit hour and η_c on a surplus one — still monotone in
+    // forecastPvW. The crossing interpolation below reads only a negative delta, which this leaves as it was.
+    const delta = chargeLegStep(pvKwh - runwayDrainW(loadKwhPerHour * 1000, basis.overheadW) / 1000, RUNWAY_CHARGE_EFFICIENCY);
     const nextState = stateKwh + delta;
     if (hoursToReserve == null && stateKwh > backupReserveKwh && nextState <= backupReserveKwh) {
       const frac = delta < 0 ? (stateKwh - backupReserveKwh) / -delta : 1;
@@ -9621,8 +9640,13 @@ export async function computeProbabilisticForecast(
   // v1.187.19 — the trajectory's own drain: runwayDrainW with the overhead the forecast was
   // integrated with (a hand-built forecast carries none: 0, the drain it was built with). The
   // inversion, the hour-0 seed and every band step below use exactly this.
+  // v1.194.0 — and the trajectory's own charge leg: a surplus hour stepped through chargeLegStep at
+  // RUNWAY_CHARGE_EFFICIENCY, as getDayForecast stepped it. `netKwh` (the inversion and the seed) is
+  // the stepped net; the band steps take the RAW net, add the hour's spread, and step the sum, so
+  // each path charges at η_c exactly when ITS net is a surplus.
   const bandOverheadW = Number.isFinite(forecast.poolOverheadW) ? (forecast.poolOverheadW as number) : 0;
-  const netKwh = (pvW: number, loadW: number): number => (pvW - runwayDrainW(loadW, bandOverheadW)) / 1000;
+  const rawNetKwh = (pvW: number, loadW: number): number => (pvW - runwayDrainW(loadW, bandOverheadW)) / 1000;
+  const netKwh = (pvW: number, loadW: number): number => chargeLegStep(rawNetKwh(pvW, loadW), RUNWAY_CHARGE_EFFICIENCY);
   let fullKwh: number | null =
     forecast.poolFullWh != null && forecast.poolFullWh > 0 ? forecast.poolFullWh / 1000 : null;
   let bestAbsDSocPct = 0;
@@ -9786,13 +9810,18 @@ export async function computeProbabilisticForecast(
     // empty-rail arrival with the anchor's own η-integrator, collapsing spread
     // in step with the floor rather than showing phantom spread below it). Kept
     // aligned so no future reader mistakes it for the raw-vs-η bug fixed elsewhere.
-    const dP50Kwh = netKwh(p50, h.forecastLoadW);
+    // v1.194.0 — the RAW net (rawNetKwh): the charge leg is applied per path, AFTER the spread, so
+    // a path whose net is a surplus stores η_c of it and one whose net is a deficit drains in full.
+    // The cancellation above now holds only where every path is on the same side: across a sunny
+    // hour the spread itself is stored at η_c (a narrower band — the energy that might arrive is
+    // stored lossily too), and where the paths straddle zero dP50Kwh no longer cancels exactly.
+    const dP50Kwh = rawNetKwh(p50, h.forecastLoadW);
     let p10SocOut: number | null = null;
     let p50SocOut: number | null = null;
     let p90SocOut: number | null = null;
     if (startSoc != null && lowSoc != null && midSoc != null && highSoc != null) {
       if (Number.isFinite(dP50Kwh) && Number.isFinite(sigmaNetKwh)) {
-        const stepPct = (z: number) => ((dP50Kwh + z * sigmaNetKwh) / fullKwh) * 100;
+        const stepPct = (z: number) => (chargeLegStep(dP50Kwh + z * sigmaNetKwh, RUNWAY_CHARGE_EFFICIENCY) / fullKwh) * 100;
         lowSoc = clampSoc(lowSoc + stepPct(-Z10));
         midSoc = clampSoc(midSoc + stepPct(0));
         highSoc = clampSoc(highSoc + stepPct(Z10));
@@ -10125,7 +10154,8 @@ export async function computeMultiDayForecast(
         // getDayForecast, so day-0 minProjectedSoc stays consistent with
         // getDayForecast (no cross-surface contradiction) and the multi-day SoC
         // path is equally honest. Report-only (not an alarm gate).
-        socWh = Math.max(0, Math.min(fullWh, socWh + (pv - runwayDrainW(load, poolBasis.overheadW))));
+        // v1.194.0 — a surplus through the charge leg, as getDayForecast's.
+        socWh = Math.max(0, Math.min(fullWh, socWh + chargeLegStep(pv - runwayDrainW(load, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)));
         const socPct = (socWh / fullWh) * 100;
         socPctThisHour = socPct;
         if (minSoc == null || socPct < minSoc) {
@@ -10223,10 +10253,13 @@ const DISPATCH_TTL_MS = 30 * 60 * 1000;
  * unchanged. INVARIANT (pinned by test): √DISPATCH_ROUND_TRIP_EFFICIENCY ≤
  * RUNWAY_DISCHARGE_EFFICIENCY — a round trip's per-leg efficiency can never
  * exceed the measured single discharge leg; the v1.27.0 constant violated this
- * (0.972 > 0.94), which is how the misinterpretation was caught. Advisory-only.
- * Env-overridable, clamped [0.80, 1.0].
+ * (0.972 > 0.94), which is how the misinterpretation was caught. Advisory-only
+ * until v1.194.0 (below). Env-overridable, clamped [0.80, 1.0].
  * v1.191.0 (DECISION 9) — named in limits.ts beside the MPC's 0.9 (values kept); re-exported here for
- * the existing importers. */
+ * the existing importers.
+ * v1.194.0 — no longer advisory only: its square root is also the alarm path's charge leg
+ * (RUNWAY_CHARGE_EFFICIENCY — the runway, the day and multi-day SoC walks and the band store a PV
+ * surplus at it), so setting it to 1 puts the runway's surplus credit back at unity. */
 export { DISPATCH_ROUND_TRIP_EFFICIENCY };
 
 /**

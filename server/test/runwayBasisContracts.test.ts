@@ -14,6 +14,7 @@ import {
   setPoolBasisOverrideForTesting,
   runwayDrainW,
   RUNWAY_DISCHARGE_EFFICIENCY,
+  RUNWAY_CHARGE_EFFICIENCY,
   DISPATCH_ROUND_TRIP_EFFICIENCY,
   type DayForecast,
   type ForecastHour,
@@ -35,6 +36,7 @@ import { apsREvModelFromEnv, rateAt } from '../src/tariff.js';
 import { setWeatherCacheForTesting, type WeatherForecast } from '../src/weather.js';
 import { resetOwnerReserveFloorPct } from '../src/nightChargeActuator.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
+import { chargeLegStep } from '../src/physics/chargeLeg.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -49,6 +51,8 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  *     and the planner run on each must produce the identical plan.
  * (2) The band's trajectory inversion, hour-0 seed and per-hour steps use the SAME drain as
  *     the forward integrator that built the trajectory (a reference band near the empty rail).
+ *     v1.194.0 — and the same charge leg (chargeLegStep at RUNWAY_CHARGE_EFFICIENCY) on a surplus
+ *     hour (a reference band across a sunny stretch to the full rail).
  * ═════════════════════════════════════════════════════════════════════════ */
 
 const HOUR = 3_600_000;
@@ -260,8 +264,13 @@ test('★★★ one basis — the day trajectory, the multi-day trajectory and t
   const { fc, multi } = await reports('measured');
   const full = fc.poolFullWh!;
   let soc = 0.7 * 92_160 * 0.944; // the panel's 70 % on the measured capacity
+  // v1.194.0 — a surplus hour charges through the charge leg (chargeLegStep at
+  // RUNWAY_CHARGE_EFFICIENCY); the fixture's sunny hours carry one, so the unity sum is caught here.
+  let surplusHours = 0;
   for (const h of fc.hours) {
-    soc = Math.max(0, Math.min(full, soc + h.forecastPvW - runwayDrainW(h.forecastLoadW, fc.poolOverheadW!)));
+    const net = h.forecastPvW - runwayDrainW(h.forecastLoadW, fc.poolOverheadW!);
+    if (net > 0) surplusHours += 1;
+    soc = Math.max(0, Math.min(full, soc + chargeLegStep(net, RUNWAY_CHARGE_EFFICIENCY)));
     assert.ok(Math.abs((soc / full) * 100 - h.projectedSocPct!) < 0.06, `${new Date(h.ts).toISOString()}: ${h.projectedSocPct} vs ${((soc / full) * 100).toFixed(2)}`);
   }
   const fcByTs = new Map(fc.hours.map((h) => [h.ts, h.projectedSocPct]));
@@ -275,6 +284,7 @@ test('★★★ one basis — the day trajectory, the multi-day trajectory and t
     }
   }
   assert.ok(compared >= 12, `${compared} shared hours`);
+  assert.ok(surplusHours >= 3, `${surplusHours} surplus hours: the fixture exercises the charge leg`);
 });
 
 /* ─── (2) the band inverts with the drain that built the trajectory ───── */
@@ -352,6 +362,63 @@ test('★★★ band — near the empty rail the hour-0 seed and every step drai
     assert.ok(Math.abs(band.hours[i].p90SocPct! - p90) <= 0.05 + 1e-6, `hour ${i}: P90 ${band.hours[i].p90SocPct} vs reference ${p90.toFixed(3)}`);
   });
   assert.ok(railHours >= 3, `${railHours} hours on the rail`);
+});
+
+test('★★★ band — across a sunny stretch to the full rail the inversion, the hour-0 seed and every step charge through the trajectory\'s charge leg', async () => {
+  // v1.194.0. 8-9 kW of PV under a 2 kW load from 60 %: every hour a surplus of ≈ 5.6-6.6 kWh, stored
+  // at η_c = √0.86 = 0.927 by the forward walk, so the pool reaches the 100 % rail inside the window.
+  // The reference band steps each path by chargeLegStep(net + z·σ, η_c) — the charge leg applied
+  // AFTER the spread, per path — seeded one stepped hour behind the anchor. With no weather and no
+  // skill report σ is deterministic: PV σ = p50 × √(0.25² + 0.15²) × √(1 + h/24) / 1000 (P10 above
+  // 0 throughout), load σ = 0.15 × load / 1000. Read with the stepped net, the inversion recovers
+  // the pool the trajectory was built on; read at unity it recovers poolFull / η_c (8 % larger),
+  // and the band narrows by η_c.
+  setWeatherCacheForTesting(null);
+  const fullWh = 92_160 * 0.944;
+  const fullKwh = fullWh / 1000;
+  const eta = RUNWAY_CHARGE_EFFICIENCY;
+  const startTs = Math.ceil(Date.now() / HOUR) * HOUR + 48 * HOUR;
+  const pvOf = (h: number) => 8_000 + 500 * (h % 3);
+  const loadOf = (h: number) => 2_000 + 200 * (h % 2);
+  let socWh = 0.6 * fullWh;
+  const hours: ForecastHour[] = Array.from({ length: 10 }, (_, h) => {
+    socWh = Math.max(0, Math.min(fullWh, socWh + chargeLegStep(pvOf(h) - runwayDrainW(loadOf(h), 270), eta)));
+    return { ts: startTs + h * HOUR, forecastPvW: pvOf(h), forecastLoadW: loadOf(h), cloudCoverPct: null, ghiWm2: null, projectedSocPct: (socWh / fullWh) * 100, modelled: false }; // unrounded: an exact inversion
+  });
+  assert.ok(hours.filter((h) => h.projectedSocPct === 100).length >= 3 && hours[0].projectedSocPct! < 70, 'the trajectory reaches the full rail inside the window');
+  const Z = 1.282, SIGMA_LOAD_FRAC = 0.15, SF0 = Math.sqrt(0.25 ** 2 + 0.15 ** 2);
+  const clamp = (v: number) => Math.min(100, Math.max(0, v));
+  const raw = (h: number) => (pvOf(h) - runwayDrainW(loadOf(h), 270)) / 1000;
+  const reference = (): Array<{ p10: number; p90: number }> => {
+    const start = clamp(hours[0].projectedSocPct! - (chargeLegStep(raw(0), eta) / fullKwh) * 100);
+    let low = start, mid = start, high = start;
+    return hours.map((h, i) => {
+      const sigmaPv = (pvOf(i) * SF0 * Math.sqrt(1 + i / 24)) / 1000;
+      const sigmaLoad = (SIGMA_LOAD_FRAC * loadOf(i)) / 1000;
+      const sigma = Math.sqrt(sigmaPv * sigmaPv + sigmaLoad * sigmaLoad);
+      const step = (z: number) => (chargeLegStep(raw(i) + z * sigma, eta) / fullKwh) * 100;
+      low = clamp(low + step(-Z));
+      mid = clamp(mid + step(0));
+      high = clamp(high + step(Z));
+      const anchor = h.projectedSocPct!;
+      return { p10: clamp(anchor + low - mid), p90: clamp(anchor + high - mid) };
+    });
+  };
+  const ref = reference();
+  resetForecastCachesForTesting();
+  const known = await computeProbabilisticForecast(bareForecast(hours, { poolFullWh: fullWh, poolOverheadW: 270 }), null);
+  resetForecastCachesForTesting();
+  const inverted = await computeProbabilisticForecast(bareForecast(hours, { poolOverheadW: 270 }), null);
+  for (const [name, band] of [['known', known], ['inverted', inverted]] as const) {
+    hours.forEach((_, i) => {
+      assert.ok(Math.abs(band.hours[i].p10SocPct! - ref[i].p10) <= 0.05 + 1e-6, `${name} hour ${i}: P10 ${band.hours[i].p10SocPct} vs reference ${ref[i].p10.toFixed(3)}`);
+      assert.ok(Math.abs(band.hours[i].p90SocPct! - ref[i].p90) <= 0.05 + 1e-6, `${name} hour ${i}: P90 ${band.hours[i].p90SocPct} vs reference ${ref[i].p90.toFixed(3)}`);
+    });
+  }
+  // The mid-range offset is η_c × z·σ, not z·σ: the spread itself is stored through the charge leg.
+  const s1 = Math.sqrt(((pvOf(1) * SF0 * Math.sqrt(1 + 1 / 24)) / 1000) ** 2 + ((SIGMA_LOAD_FRAC * loadOf(1)) / 1000) ** 2);
+  const s0 = Math.sqrt(((pvOf(0) * SF0) / 1000) ** 2 + ((SIGMA_LOAD_FRAC * loadOf(0)) / 1000) ** 2);
+  assert.ok(Math.abs((ref[1].p90 - hours[1].projectedSocPct!) - (eta * Z * (s0 + s1) / fullKwh) * 100) < 1e-9, 'the reference itself: two stepped hours of spread');
 });
 
 test('★★ band — a hand-built forecast with no poolOverheadW is read with the drain it was built with (load/η)', async () => {

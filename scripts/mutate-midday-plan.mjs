@@ -158,8 +158,8 @@ const MUTANTS = [
   {
     id: 'M-xvii. ★★★ the sun is credited past the lift',
     file: NCA,
-    find: '    const pvStep = Math.min((pvW / 1000) * dtH, o.liftKwh - gained);',
-    to: '    const pvStep = (pvW / 1000) * dtH; /* MUTANT */',
+    find: '    const pvStep = Math.min(chargeLegStep((pvW / 1000) * dtH, o.legEff), o.liftKwh - gained);',
+    to: '    const pvStep = chargeLegStep((pvW / 1000) * dtH, o.legEff); /* MUTANT */',
     why: 'A short lift under a strong sun states a purchase smaller than nothing.',
   },
   {
@@ -246,8 +246,8 @@ const MUTANTS = [
   {
     id: 'M-xxix. ★★ the pre-window disclosure ignores the armed backup',
     file: NCA,
-    find: '      dischargeEff, 0, windowStart, holdLift,\n',
-    to: '      dischargeEff, 0, windowStart, /* MUTANT */\n',
+    find: '      dischargeEff, legEff, 0, windowStart, holdLift,\n',
+    to: '      dischargeEff, legEff, 0, windowStart, /* MUTANT */\n',
     why: 'The plan states a 10:00 pool the backup would not leave.',
   },
   {

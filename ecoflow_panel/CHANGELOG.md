@@ -1,3 +1,30 @@
+## 1.194.0
+
+### Solar surplus counts at the charge efficiency in the runway, the forecasts and the night-charge plan
+
+**Runway and forecasts**
+
+- The runway, the 24-hour and multi-day state-of-charge projections and the confidence band added solar energy beyond the house load to the battery pool in full. Charging the packs loses energy: on 29 measured sunny spans the pool gained 2–7% less than projected. A surplus now counts at the charge efficiency, the square root of `DISPATCH_ROUND_TRIP_EFFICIENCY` (0.927 by default), so a projection across a sunny day reads shorter. On a day with 44 kWh of surplus, the reserve crossing comes about 1 h sooner (22.8 h instead of 23.8 h) and the pool ends 3.2 kWh lower. An 18 kWh pool with two sunny hours ahead now reaches the reserve in 5.9 h instead of 6.1 h, which raises the medium runway alarm instead of the low one. The runway, forecast-runtime and forecast-soc-dip alerts can come up to about an hour earlier on a horizon that crosses a sunny day.
+- The confidence band applies the charge efficiency to each path after its spread is added, and reads the trajectory's capacity with the same step.
+- `DISPATCH_ROUND_TRIP_EFFICIENCY` (environment only, clamped 0.8–1) now also sets the alarm path's charge efficiency. Setting it to 1 puts the runway's and the projections' surplus credit back at unity; it also makes the night-charge and dispatch plans' charging lossless, so they buy less than before. No setting makes a projection longer than before.
+
+**Night charge**
+
+- The plan's walks count a surplus the same way: the worst-case sizing walk, the window walk, the expected-buy walks (expected carry, solar credit, force-charge timing) and the mid-day preview's held-import estimate. A trough that follows a sunny day's 31 kWh of surplus sits 2.25 kWh lower, and the buy that holds the line is 2.43 kWh larger.
+- Of 1,104 recorded plan cases, 95 worst-case buys rise by up to 2.84 kWh (mean 0.44 kWh), 118 expected buys rise by up to 6.76 kWh (mean 1.17 kWh), and one hold becomes a 1.49 kWh charge. No buy, expected buy or requirement falls. 264 setpoints move, by −1.8 to +2.7 points. The 16 that fall are either charges limited by the window whose requirement rose, or holds whose projected arrival without a buy is now lower.
+- The readiness gate keeps algorithm version 3, so nights already scored still count. `buy_err_kwh` keeps its formula. A miss in an hour with a surplus, solar or load, now reads about 7.8% larger against the plan's own sizing than before, in either direction: a solar miss there reads 7.8% larger than the plan's sizing (it read exactly), and a load miss there about 1.4% larger (it read about 6% smaller). A cloudier day or a heavier daytime house than forecast scores as a deeper under-buy, which makes the gate more likely to block. Only misses in hours without a surplus are scored as before.
+
+**Unchanged**
+
+- Hours without a surplus, the alarm thresholds, the grid-backstop mute of the audible runway alarm, the dispatch plan (which already counted the charge efficiency) and the MPC optimiser. There is no new option.
+
+**Tests**
+
+- `runwayChargeLeg.test.ts`: the step, the efficiency, the runway's change of alarm tier, the sunny-day runway, a horizon with no surplus, the planner's sizing trough, window walk, expected carry (+2.782 kWh for an hour of 5 kW sun over a 1.88 kW house, was +3.000) and force-charge start, and the ledger's `buy_err_kwh` against the planner's own re-sizing for a solar and a load miss in a surplus hour and in a deficit hour, all worked by hand. A further case shows that at `DISPATCH_ROUND_TRIP_EFFICIENCY` = 1 the planner buys 0.80 kWh below the earlier default. `runwayChargeLegPins.test.ts`: every walk calls the step, the option's descriptions name the alarm path, and the `buy_err_kwh` notes (the gate's and chapter 15-2's) name the surplus-hour load miss.
+- The legacy identity golden is regenerated on purpose (472 of 1,104 plan digests move). A new direction test checks every case against the plans recorded on 1.192.0, which 1.193.0 plans identically (`legacyIdentity.v1192.figures.json`).
+- The `middayPlan`, `nightChargeExpectedBuy`, `heldImport`, `middayShadow`, `poolEnergyBasis` and `runwayBasisContracts` figures are re-derived for the charge efficiency; `runwayBasisContracts` gains a reference-band test across a sunny stretch to the full rail.
+- New `mutate-charge-leg.mjs`: 19 mutants, all killed; one of them stores only the PV at the charge efficiency in the sizing walk, so a surplus hour's house load skips the step. Ten anchors in `mutate-v1187-19.mjs`, `mutate-v1187-22c.mjs` and `mutate-midday-plan.mjs` are repointed.
+
 ## 1.193.0
 
 ### Lifetime energy counters never step down or jump; panel counters no longer dip after a load drop
@@ -225,43 +252,6 @@
 **Documentation**
 
 - The solar-forecast reference states when the day forecast is cached and what its cache entry records. The performance record gains a section on the live measurement, its cause and the replay before and after the change.
-
-## 1.191.1
-
-### The console's two liveness clocks and the dashboard's Today and forecast times read the site clock
-
-**Console**
-
-- The 1 Hz clock in the ALARM LIST divider (ALARM screen) and in the MAIN BUS divider (BUS screen) is written in the site zone, the zone of the console's other stamps: the status header, the alarm banner and the alarm rows. Both read the host's clock, so with `SITE_TIMEZONE` set to another zone than the container's, or a container without `TZ` on the default zone, the two dividers disagreed with those stamps by the difference (two or three hours behind for a New York site on a Phoenix host, by the season; seven hours ahead for a Phoenix site on a UTC host). The SSH console and the browser console share the screens. The `HH:MM:SS` form is unchanged.
-
-**Dashboard**
-
-- The Today card's "since" time is written in the site zone: the card's day starts at the site's midnight, but the time was formatted in the browser's zone, so a browser elsewhere read "since 03:00 AM" or "since 07:00 AM" over the site's day. `/api/summary/today` now carries `siteTimeZone`, as `/api/night-charge/status` does.
-- The Solar page's day-ahead forecast labels each hourly projection row, the projected-low tile and the runtime note with the site hour, the hour of the learned response table beside it and of the server's own forecast warning; it read the browser's clock. The Dashboard's 24-hour forecast card writes its projected-low time, axis and tooltip in the site zone too. `/api/forecast` now carries `siteTimeZone`.
-- The text keeps the browser's own locale and form, so a browser in the site zone reads exactly what it did. Without a zone (a server older than the page) no time is shown rather than the browser's.
-
-**Unchanged**
-
-- Where the site zone is the container's zone, as it is with `SITE_TIMEZONE` unset and `TZ` set by the Supervisor, the two console clocks read exactly what they did, and a browser in that zone reads the same Today and forecast text. Nothing else changes: the computed figures, the alarms and the Home Assistant payloads are those of 1.191.0.
-
-**Tests**
-
-- Every clock the console prints (the two dividers, the alarm rows, the alarm banner and the status header) is read off the rendered ALARM, BUS and CONSOLE screens in child processes for a New York site on a Phoenix container, a Phoenix site on a UTC container and the reference install, against written-out times. A scan of the console's source fails on a call to any of these host-clock date helpers, with or without a locale and options: the `toLocale…String`, `toTimeString` and `toDateString` forms, `Intl.DateTimeFormat`, the local `get…`/`set…` fields, `getTimezoneOffset` and a `Date` built from local fields (`new Date(y, m, …)`). The scan parses each file, so a call written across lines or nested at any depth inside another call is caught.
-- The Solar page's hour labels are checked against the server's site hour in five zones and the Today card's "since" time against the site's midnight in five; the Dashboard forecast card's times are compared across three zones. Source checks also pin where each card hands the zone on or shows the time: dropping the zone from the hour rows (every row "—"), the "since" text or the projected-low time each fails.
-- Fixtures in eight test files were built on the host's clock or on local hours. Each now places its instants on the site clock (or, where the code buckets by the UTC hour, on the first UTC hour that starts in the site hour, the bucket the code labels with it), so it holds and keeps its meaning under any container zone:
-  - The runway's PV-basis guard asserts on the site hour `computeClipping` labels its rows with; a row labelled on the host's clock fails on a UTC container and wherever host and site differ.
-  - The no-weather curtailment case places its surplus hour at a site wall time and asserts that the one estimated hour is booked at site 11:00. On a Kolkata container with a Phoenix site it read 2.5 kWh instead of 7.
-  - Both held-panel curtailment cases assert that no hour of the window is curtailment. On a UTC container they passed with a missing `panel_load` read as 0 W (the 1.188.1 fix reverted).
-  - The daily-figure reset cases take their instants and their expected midnights from the site's dates, not from the function under test. A one-minute boundary slop and a reading of the publish clock now fail under every zone pairing; a day start on the host's clock fails wherever host and site differ.
-  - The display-versus-alarm PV contract now exercises its bias-factor cause as well as the coverage gate: a display sum that drops the bias factor fails.
-  - The per-Core shade report places its clear hours in the first UTC hour that starts in each site hour, as the report labels them, and holds on a site whose daylight saving ends inside the fixture (Auckland, and Lord Howe Island, whose clock moves by half an hour), where real uniform shade was no longer detected. The two-Core gap case passed the summed-fleet calculation the per-Core report replaced; it now also puts the gap on the six most recent days, and a case with one Core of three dark on those days is added: both fail the summed fleet (a phantom 50 % and 33 % shortfall on every clear hour). A case with shade on most recent days fails a median reference in place of the 90th percentile.
-  - The realized-irradiance training case and the soiling charge-taper cases key their rows on the UTC hour, as the recorder and the weather feed do, and hold on half- and quarter-hour zones (Kolkata, Kathmandu, Adelaide, St John's).
-- The forecast-skill cache case scores the realized and the first-write reports against one forecast. A cached report is served only for the forecast it was scored against, so a fresh forecast for each call missed the cache whatever its key, and a cache keyed by the window alone (a realized report served to the band calibrator) passed the case; it now fails.
-- Test comments that said the code reads the host's clock now name the site clock (clipping, forecast, rate table, dispatch, solar-model metrics, the settings-drift quiet window, the message-rate floor, the diurnal backtest baseline, the golden capture), and the forecast's band-check failure messages print the site hour.
-
-**Documentation**
-
-- The user-interface reference describes the console's clocks, the Today card's "since" time and the forecast cards' hour labels; the solar-forecast reference names the field `/api/forecast` adds.
 
 ## Older releases
 

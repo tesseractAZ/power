@@ -26,9 +26,11 @@ import {
   RUNWAY_POOL_OVERHEAD_FLOOR_W,
   RUNWAY_DISCHARGE_EFFICIENCY,
   RUNWAY_CORE_OVERHEAD_W,
+  RUNWAY_CHARGE_EFFICIENCY,
   type DayForecast,
   type ForecastHour,
 } from '../src/analytics.js';
+import { chargeLegStep } from '../src/physics/chargeLeg.js';
 import { panelDrainRunway } from '../src/panelRunway.js';
 import { resetOwnerReserveFloorPct } from '../src/nightChargeActuator.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
@@ -433,8 +435,10 @@ test('★★★ computeRunway — the Cores\' overhead is drawn in PV-surplus ho
   // Pool 40 % of 92.16 kWh nameplate on Cores 0.9404 / 0.9188 / 0.9726 (scale 0.9439), reserve
   // 16 %; 7 h of 6 kW PV under a 2 kW load (surplus, the pool stays below full), then 17 h of
   // 3 kW and no PV. The overhead is measured in PV-surplus hours (docs/PERFORMANCE.md §4a), so
-  // the projection must draw runwayDrainW in EVERY hour: ≈ 20.3 h to the floor, trough ≈ 1.2 kWh
-  // (dropping it while PV covers the load reads ≈ 20.9 h / 3.1 kWh).
+  // the projection must draw runwayDrainW in EVERY hour. v1.194.0 — and the 3.60 kWh surplus of each
+  // sunny hour reaches the cells at RUNWAY_CHARGE_EFFICIENCY (0.927): 3.34 kWh. ≈ 19.8 h to the floor
+  // and the pool empty at ≈ 23.8 h, trough 0 (before v1.194.0, the surplus at unity: 20.3 h / 1.17 kWh,
+  // never empty; dropping the overhead while PV covers the load reads ≈ 20.3 h / 1.09 kWh).
   const p = panel(['C1', 'C2', 'C3'], { backupBatPercent: 40, backupRemainWh: 0.4 * 92_160, backupFullCapWh: 92_160, backupReserveSoc: 16 });
   const devs = fleetOf(p, core('C1', 0.9404), core('C2', 0.9188), core('C3', 0.9726));
   const startTs = Math.ceil(Date.now() / HOUR) * HOUR;
@@ -447,18 +451,21 @@ test('★★★ computeRunway — the Cores\' overhead is drawn in PV-surplus ho
   // The analytic integration: runwayDrainW in every hour, on the measured capacity.
   const scale = (0.9404 + 0.9188 + 0.9726) / 3;
   const full = 92.16 * scale, reserve = 0.16 * full;
-  let e = 0.4 * full, trough = e, toReserve: number | null = null;
+  let e = 0.4 * full, trough = e, toReserve: number | null = null, toEmpty: number | null = null;
   for (let h = 0; h < 24; h++) {
-    const delta = pvW(h) / 1000 - runwayDrainW(loadW(h), 270) / 1000;
+    const delta = chargeLegStep(pvW(h) / 1000 - runwayDrainW(loadW(h), 270) / 1000, RUNWAY_CHARGE_EFFICIENCY);
     const next = e + delta;
     if (toReserve == null && e > reserve && next <= reserve) toReserve = h + (e - reserve) / -delta;
+    if (toEmpty == null && e > 0 && next <= 0) toEmpty = h + e / -delta;
     e = Math.max(0, Math.min(full, next));
     trough = Math.min(trough, e);
   }
   assert.equal(r.capacityBasis, 'measured');
   assert.equal(r.overheadW, 270);
-  assert.ok(toReserve != null && Math.abs(toReserve - 20.3) < 0.1 && Math.abs(trough - 1.17) < 0.05, `analytic ${toReserve} h / ${trough} kWh`);
+  assert.ok(toReserve != null && Math.abs(toReserve - 19.79) < 0.01 && trough === 0, `analytic ${toReserve} h / ${trough} kWh`);
+  assert.ok(toEmpty != null && Math.abs(toEmpty - 23.81) < 0.01, `analytic empty ${toEmpty} h`);
   assert.ok(Math.abs((r.reserveAtMs! - r.generatedAt) / HOUR - toReserve!) < 1e-5, `hoursToReserve ${r.hoursToReserve} vs ${toReserve}`);
+  assert.equal(r.hoursToEmpty, Math.round(toEmpty! * 10) / 10);
   assert.equal(r.troughKwh, Math.round(trough * 100) / 100);
 });
 

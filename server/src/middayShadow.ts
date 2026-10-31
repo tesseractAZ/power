@@ -42,6 +42,7 @@ import { buildMiddayRefreshMessage, type MiddayAnnounceInput } from './chargeTex
 import type { NotifyMessage } from './notify.js';
 import { rateAt, type TariffModel } from './tariff.js';
 import type { NightLedgerRow } from './recorder.js';
+import { chargeLegStep } from './physics/chargeLeg.js';
 
 const HOUR_MS = 3_600_000;
 const MINUTE_MS = 60_000;
@@ -185,7 +186,8 @@ export function heldSpan(window: { startMs: number; endMs: number }, nextOnPeakS
 /**
  * heldImportEstimate — two pools walked hour by hour over the hold on the median forecast, as the
  * planner's grid-present carry walks them (nightChargeAdvisor expectedCarryKwh: PV into the pack,
- * load out of it over the discharge efficiency, clamped to [floor, full]): one held at the written
+ * load out of it over the discharge efficiency, a surplus stored at legEff — v1.194.0, chargeLegStep —
+ * clamped to [floor, full]): one held at the written
  * reserve (lifted to it at the open, the grid being present), one at the owner's reserve. In each hour
  * the part of the load a pool's floor turns away is drawn from the grid; the held pool's extra, beyond
  * the lift, is the held import. null when the hold, the start or an hour of the band is missing (a
@@ -236,7 +238,7 @@ export function heldImportEstimate(o: {
     if (w <= 0) continue;
     const h = byHour.get(slot / HOUR_MS);
     if (h == null || !ok(h.pvP50W) || !ok(h.loadP50W)) return null;
-    const net = (w * (Math.max(0, h.pvP50W) - Math.max(0, h.loadP50W) / o.dischargeEff)) / 1000;
+    const net = chargeLegStep((w * (Math.max(0, h.pvP50W) - Math.max(0, h.loadP50W) / o.dischargeEff)) / 1000, o.legEff);
     const f = step(free, freeFloor, net);
     const k = step(held, holdFloor, net);
     free = f.pack;

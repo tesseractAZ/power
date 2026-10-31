@@ -168,6 +168,10 @@ connected Core; with more than three, the per-Core figure already sets it. To me
 compare the pool's discharge power with the panel's load on a quiet night with the house on the
 batteries: the difference is the overhead.
 
+Solar beyond what the house draws is counted into the pool at the charge efficiency, about 93 %,
+because charging the packs loses energy. A runway across a sunny day therefore reads a little
+shorter than the raw surplus suggests; an hour with no surplus is counted as before.
+
 ## Carbon and wear
 
 - `GRID_CO2_INTENSITY_LB_PER_MWH`: your grid's average carbon intensity, in lb of CO2 per MWh.
