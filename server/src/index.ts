@@ -596,7 +596,7 @@ const store = new SnapshotStore();
 // every house-wide alarm still sounding. Built here, before anything can serve a snapshot; the alert
 // monitor stamps and steps them on every tick. Each start, extension and end is pushed, written to the
 // write log and logged at warn.
-const MAINTENANCE_PATH = process.env.MAINTENANCE_STATE_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'maintenance-windows.json');
+const MAINTENANCE_PATH = config.dataFile('maintenance-windows.json', option<string | null>('MAINTENANCE_STATE_PATH'));
 const maintenance = createMaintenanceController({
   path: MAINTENANCE_PATH,
   now: Date.now,

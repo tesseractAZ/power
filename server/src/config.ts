@@ -402,6 +402,10 @@ const ROWS: readonly OptionRow[] = [
     doc: "Overrides the membership record the curtailment freeze and the forecast-skill hindcast read; absent reads membership-history.json beside the database inside the add-on, and nothing elsewhere ('' disables).", parse: (raw) => raw }),
   row({ name: 'CURTAILMENT_DAYS_PATH', source: 'env-only', canonicalReader: 'curtailmentFreeze.ts:ensureLoaded',
     doc: "Overrides the frozen curtailment-day store; absent persists curtailment-days.json beside the database inside the add-on, and nothing elsewhere ('' disables).", parse: (raw) => raw }),
+  // v1.197.0 — the maintenance windows' file (maintenanceWindow.ts), registered here rather than read
+  // as a bare process.env in index.ts (the process.env ratchet).
+  row({ name: 'MAINTENANCE_STATE_PATH', source: 'env-only', canonicalReader: 'index.ts:MAINTENANCE_PATH',
+    doc: 'Overrides the maintenance windows file; absent: maintenance-windows.json beside the database.', parse: (raw) => raw || null }),
 
   // ── Tariff plan (v1.191.0, lane B; schema-only keys exported under has_value — unset is today's path) ──
   row({ name: 'TARIFF_PLAN', source: 'option', exportForm: 'has_value', canonicalReader: 'tariff.ts:resolveTariffFromEnv',
