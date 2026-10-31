@@ -70,7 +70,8 @@ const SUBSET = [
   'test/conditionRetryNewestWins.test.ts',
 ];
 
-const NOTE_SIP = "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode);";
+// v1.195.0 — re-pointed: the call carries the critical the words named (N8).
+const NOTE_SIP = "          if (r.ok > 0 && kind === 'condition') noteConditionAudible(level, episode, named);";
 // v1.187.5 — re-pointed: the run-time check is two thunks (the episode, then a newer announcement).
 const RUN_CHECK = '        () => staleAtRun() ?? supersededAtRun(), episode, generation);';
 
@@ -259,14 +260,14 @@ const MUTANTS = [
     id: 'U-iv. ★★ a refused SIP dispatch counts',
     file: BR,
     find: NOTE_SIP,
-    to: "          if (kind === 'condition') noteConditionAudible(level, episode); /* MUTANT */",
+    to: "          if (kind === 'condition') noteConditionAudible(level, episode, named); /* MUTANT */",
     why: 'A red heard nowhere makes the clear of a warning heard only before the restart spoken from an unsettled set.',
   },
   {
     id: 'U-v. ★★ a sub-2 s "ok" counts',
     file: BR,
     find: '    if (call.ok && dt < 2000) {',
-    to: "    if (call.ok && kind === 'condition') noteConditionAudible(level, episode); /* MUTANT */\n    if (call.ok && dt < 2000) {",
+    to: "    if (call.ok && kind === 'condition') noteConditionAudible(level, episode, named); /* MUTANT */\n    if (call.ok && dt < 2000) {",
     why: 'HA answered without playing; the red was heard by no one, yet its green is announced as if it had been.',
   },
   {
@@ -280,7 +281,7 @@ const MUTANTS = [
     id: 'U-vii. ★★ an operator TEST counts (the cordless)',
     file: BR,
     find: NOTE_SIP,
-    to: '          if (r.ok > 0) noteConditionAudible(level, episode); /* MUTANT */',
+    to: '          if (r.ok > 0) noteConditionAudible(level, episode, named); /* MUTANT */',
     why: 'As U-vi, through the SIP side-channel.',
   },
   {
