@@ -287,7 +287,8 @@ Every entity, its unique_id, meaning and unit:
   `ecoflow_grid_to_home_lifetime_kwh`. Battery: `ecoflow_battery_charge_lifetime_kwh` (in) and
   `ecoflow_battery_discharge_lifetime_kwh` (out). Give each source its power sensor too, or the
   dashboard's Now view gets consumption wrong. Each circuit's energy sensor can be an individual
-  device.
+  device. Every energy counter only rises, also when a Core leaves or joins the panel; after such
+  a change, do not go back to a release that does not carry it ([why](https://github.com/tesseractAZ/power/blob/main/docs/reference/07-energy-and-cost.md#24-the-published-counter-guard-guardlifetimeemit)).
 - **A Core with no reading of its own** (offline in the cloud, or its readings stopped). Its
   battery and solar energy, and its share of Fleet PV and Battery Net, are counted from the
   panel's meter on its slot, so the counters keep rising (the Today card marks it "via panel").

@@ -106,6 +106,34 @@ test('★★★ one Core goes dark mid-window in daylight: the read keeps its PV
   } finally { p.close(); }
 });
 
+// v1.193.0 — a read integrates each series up to its newest reading only, and the gate writes no row
+// of a dark Core past its own reading, so the hand-off cut on a read rarely has anything left to cut.
+// It still does when a held heartbeat row was written before the flip was known: the device list
+// stamps the flip in the past, and the row lands past the instant. A read inside the dwell must not
+// show it (the rollup that hands the Core over will not keep it).
+test('★★ the hand-off cut on a read holds on its own: a held row stamped between the flip and its discovery is not read', () => {
+  const p = sunnyOnline(NOON, { pvW: 3000, outW: 500, fieldW: 3000, trusted: true });
+  try {
+    const stored = { wh: 0 };
+    p.rec.rollupLifetime();
+    p.run(5, riseSoc(p, 2500, stored), { readEach: true });
+    let atFlip = 0;
+    p.run(3, (t, m) => {
+      riseSoc(p, 2500, stored)();
+      if (m === 3) {
+        atFlip = p.read().pv;
+        // Core 1's last reading was a minute ago; a heartbeat restating it landed 30 s ago, before the
+        // device list showed the Core offline since that last reading.
+        p.sample(CORES[0], 'pv_total', 3000, t - MIN + 30_000);
+        p.setOnline(false, [CORES[0]], t - MIN);
+      }
+    });
+    const after = p.read();
+    near(after.pv - atFlip, 2 * 3000 / 60, 1, 'inside the dwell: Core 1 stops at its cut (the row past it is not read); Cores 2 and 3 go on');
+    assert.equal(p.rec.getLifetimeTotals().fleet_pv_wh.heldWh, 0, 'nothing for the guard to hold');
+  } finally { p.close(); }
+});
+
 test('★★★ a daylight grid charge, every Core dark mid-window: Grid to Battery Charge never steps down and is the Cores\' ac_in then the slots\' inflow', () => {
   const p = new Plant(NOON);
   try {
@@ -344,13 +372,20 @@ test('★★ a Core\'s slot leaves the panel mid-window: PV Production holds (it
     p.run(9, () => {}, { readEach: true });
     const held = p.read(['pv', 'gridImport']).pv;
     p.connected = [true, true, false]; // its pending pv_total since the last rollup drops out of the sum
+    let heldWh = 0;
     for (let m = 0; m < 12; m++) {
       const t = p.clock + MIN;
       p.minute(t);
       p.clock = t;
       if (m === 0) p.rec.rollupLifetime();
       p.read(['pv', 'gridImport']);
+      heldWh = Math.max(heldWh, p.rec.getLifetimeTotals().fleet_pv_wh.heldWh ?? 0);
     }
     assert.ok(p.read(['pv', 'gridImport']).pv > held, 'and then it rises again');
+    // v1.193.0 — held by the publish guard (LIFETIME_HOLD_DIP_WH), not rebased: the Core's pending PV
+    // (2 min at 3 kW, 100 Wh: twice the old 50 Wh clamp) is never carried as a basis shift, so no
+    // energy can be counted twice.
+    assert.ok(heldWh >= 99, `the dip was held (${heldWh.toFixed(0)} Wh)`);
+    assert.equal(p.rec.getLifetimeTotals().fleet_pv_wh.shiftWh, 0, 'no basis shift');
   } finally { p.close(); }
 });

@@ -8,7 +8,7 @@ import type { Recorder } from './recorder.js';
 import { getAnalytics } from './analyticsClient.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { aggregateFleetFlow, findShp2 } from './shp2Membership.js';
-import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
+import { kwh1, makeLifetimeKwh, lifetimeTotalsOrNone, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
 import { rateAt, tariffModelFromEnv } from './tariff.js';
 import { CURRENCIES, tariffCurrency } from './money.js';
 import {
@@ -1367,6 +1367,8 @@ export async function startMqttDiscovery(
   // last error logged per report: a report failing every cycle logs once, not every 30 s.
   const stateReportLastGood = new Map<string, LastGoodReport>();
   const stateReportErrLogged = new Map<string, string>();
+  /** v1.193.0 — the last lifetime-counter failure logged (one line per distinct message). */
+  let lifetimeErrLogged: string | null = null;
   const logStateReportError = (name: string, e: unknown) => {
     const msg = (e as { message?: string } | null)?.message ?? String(e);
     if (stateReportErrLogged.get(name) === msg) return;
@@ -1416,7 +1418,15 @@ export async function startMqttDiscovery(
     // v1.188.1 (review) — and AC Import on the same notion (a frozen Core's held ac_in out, a dark
     // Core's slot input in: energyBridge.ts BridgedFleetFlow.acIn).
     const bridged = recorder.bridgedFleetFlow({ fleetPv, fleetBatteryNet, acIn, fleetIn, fleetOut }, snap.devices, Date.now());
-    const lifetime = recorder.getLifetimeTotals();
+    // v1.193.0 — a lifetime failure nulls the lifetime fields, never the payload (lifetimeTotalsOrNone).
+    const lifetime = lifetimeTotalsOrNone(() => {
+      const t = recorder.getLifetimeTotals();
+      lifetimeErrLogged = null;
+      return t;
+    }, (msg) => {
+      if (msg !== lifetimeErrLogged) log(`mqtt-discovery: lifetime counters unavailable (${msg}) — their fields publish null`);
+      lifetimeErrLogged = msg;
+    });
     const lifetimeKwh = makeLifetimeKwh(lifetime);
     // v1.186.0 — any report below may be null (settleStateReports); its fields publish null.
     const { projecting, soonest } = deg

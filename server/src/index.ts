@@ -33,7 +33,7 @@ import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
 // v1.188.1 (review) — the bridge's verdicts, for the backup timers and the card (shp2Membership.ts BridgeVerdicts).
 import { slotVerdicts } from './energyBridge.js';
-import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
+import { kwh1, makeLifetimeKwh, lifetimeTotalsOrNone, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import { setClockRejectLogger, ecoflow,
 } from './ecoflow/rest.js';
@@ -1093,11 +1093,19 @@ app.get('/api/curtailment', async (req, reply) =>
 // HA expects monotonically-increasing kWh with state_class=total_increasing.
 // v0.9.14 — 15 s cache: lifetime counters are recorded server-side every poll;
 // 15 s of staleness avoids re-running the JSON build on every HA poll cycle.
+// v1.193.0 — `details.*.shiftWh` is each counter's basis shift (already inside persistedWh) and
+// `heldWh` what the publish guard holds above the reading (already inside pendingWh); a key the
+// recorder left out (no finite reading, nothing published yet) reads null.
 app.get('/api/lifetime-energy', async (req, reply) => {
   const totals = recorder.getLifetimeTotals();
   const toKwh = (wh: number) => Math.round((wh / 1000) * 1000) / 1000;
-  const live = (k: keyof typeof totals) =>
-    toKwh(totals[k].persistedWh + totals[k].pendingWh);
+  const live = (k: keyof typeof totals): number | null =>
+    totals[k] ? toKwh(totals[k].persistedWh + totals[k].pendingWh) : null;
+  /** The measured value, without the basis shift: what the pool's own counters read. */
+  const measured = (k: keyof typeof totals): number | null =>
+    totals[k] ? totals[k].persistedWh - (totals[k].shiftWh ?? 0) + totals[k].pendingWh : null;
+  const chargeWh = measured('fleet_battery_charge_wh');
+  const dischargeWh = measured('fleet_battery_discharge_wh');
   return cached(req, reply, {
     generated_at: Date.now(),
     pv_lifetime_kwh: live('fleet_pv_wh'),
@@ -1116,8 +1124,10 @@ app.get('/api/lifetime-energy', async (req, reply) => {
     // the user-facing round-trip efficiency is computed separately and clamped ≤100%. Positive =
     // discharge ahead of charge; shrinks toward zero as the pool returns to its baseline SoC.
     // See /api/debug/battery-lifetime.deficitWh.
+    // v1.193.0 — from the measured values: a basis shift carries the published counters across a
+    // pool change and says nothing of the pool's state of charge.
     battery_baseline_deficit_kwh:
-      Math.round((live('fleet_battery_discharge_wh') - live('fleet_battery_charge_wh')) * 1000) / 1000,
+      chargeWh != null && dischargeWh != null ? toKwh(dischargeWh - chargeWh) : null,
     details: totals,
   }, 15);
 });
@@ -1624,6 +1634,8 @@ app.get('/api/repair-issues', async (req, reply) => {
  * Cached forecast + degradation are reused, so HA can poll this every 30s
  * without hammering the recorder.
  */
+/** v1.193.0 — the last lifetime-counter failure /api/ha-state logged (one line per distinct message). */
+let haStateLifetimeErr: string | null = null;
 app.get('/api/ha-state', async (req, reply) => {
   const snap = store.get();
   const devices = Object.values(snap.devices);
@@ -1670,7 +1682,15 @@ app.get('/api/ha-state', async (req, reply) => {
   if (Number.isFinite(selfCons?.loadKwh) && (selfCons?.loadKwh ?? 0) > 0) {
     noteIslandedLoadKw((selfCons.loadKwh as number) / (7 * 24));
   }
-  const lifetime = recorder.getLifetimeTotals();
+  // v1.193.0 — a lifetime failure nulls the lifetime fields, never the payload (lifetimeTotalsOrNone).
+  const lifetime = lifetimeTotalsOrNone(() => {
+    const t = recorder.getLifetimeTotals();
+    haStateLifetimeErr = null;
+    return t;
+  }, (msg) => {
+    if (msg !== haStateLifetimeErr) app.log.warn(`/api/ha-state: lifetime counters unavailable (${msg}) — their fields publish null`);
+    haStateLifetimeErr = msg;
+  });
   const lifetimeKwh = makeLifetimeKwh(lifetime);
   // v0.8.0 additions — carbon + tariff fetched in the Promise.all above.
 

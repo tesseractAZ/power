@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from '../src/haPayloadFmt.js';
+import { kwh1, makeLifetimeKwh, lifetimeTotalsOrNone, makeAlertCounter, soonestProjecting } from '../src/haPayloadFmt.js';
 import type { LifetimeTotals } from '../src/recorder.js';
 import type { Alert } from '../src/alerts.js';
 import type { FleetDegradation } from '../src/analytics.js';
@@ -101,4 +101,14 @@ test('soonestProjecting: all-null projecting → soonest is the first (none beat
   const b = pack('projecting', null);
   const r = soonestProjecting([a, b]);
   assert.equal(r.soonest, a);
+});
+
+test('v1.193.0 — lifetimeTotalsOrNone: a throwing read publishes the lifetime fields null, never aborts the payload', () => {
+  const errors: string[] = [];
+  const ok: Record<string, LifetimeTotals> = { fleet_pv_wh: { persistedWh: 1_000, pendingWh: 5, watermarkMs: 0 } };
+  assert.equal(lifetimeTotalsOrNone(() => ok, (m) => errors.push(m)), ok, 'the read when it works');
+  const none = lifetimeTotalsOrNone(() => { throw new Error('database is locked'); }, (m) => errors.push(m));
+  assert.deepEqual(none, {});
+  assert.deepEqual(errors, ['database is locked'], 'the message reaches the caller (which rate-limits it)');
+  assert.equal(makeLifetimeKwh(none)('fleet_pv_wh'), null, 'each lifetime field publishes null: Home Assistant reads unknown, not a meter reset');
 });

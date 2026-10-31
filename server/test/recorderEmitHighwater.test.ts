@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, writeFileSync, rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 /**
  * v0.50.0 — the per-key emit high-water must survive a process restart so the
- * micro-dip clamp (clampLifetimeDip) keeps its baseline.
+ * micro-dip clamp (v1.193.0: the publish guard, guardLifetimeEmit) keeps its baseline.
  *
  * Root cause being fixed: lifetimeEmitHighWater was an IN-MEMORY Map that reset
  * every restart. After a restart the FIRST emit had no high-water baseline, so
@@ -54,6 +54,8 @@ function setPersistedFloor(key: string, wh: number) {
 
 const totalOf = (t: Record<string, { persistedWh: number; pendingWh: number }>, k: string) =>
   t[k].persistedWh + t[k].pendingWh;
+/** v1.193.0 — the guard's WARN line for a drop it rebases. */
+const warnsOf = (lines: string[], key: string) => lines.filter((l) => l.includes(`WARN lifetime counter ${key}`));
 
 // Each scenario uses a distinct snapshot-independent fleet watt key so the
 // shared db/sidecar can't cross-contaminate assertions.
@@ -61,6 +63,8 @@ const KEY_HOLD = 'fleet_pv_wh';
 const KEY_NOSIDE = 'fleet_load_wh';
 // v1.188.1 — fleet_pv_wh and fleet_grid_import_wh (LIFETIME_HOLD_KEYS) hold a dip up to 5 kWh, so
 // the >50 Wh reset scenario runs on Home Consumption (its floor is set explicitly at the start).
+// v1.193.0 — every key holds a dip up to 5 kWh (LIFETIME_HOLD_DIP_WH); Home Consumption is the key
+// the v1.188.1 hold did not cover.
 const KEY_RESET = 'fleet_load_wh';
 const KEY_BRIDGED = 'fleet_grid_import_wh';
 
@@ -101,23 +105,37 @@ test('persisted emit high-water survives a restart: a ≤50 Wh would-be dip is c
   rec2.close();
 });
 
-test('a genuine reset (>50 Wh drop) still passes through across a restart', () => {
+// v1.193.0 — changed: this test asserted that a 538 Wh drop across a restart "passes through" as a
+// genuine reset. Home Assistant books a drop of 10 % or more as a meter reset (the whole new reading
+// again) and a smaller one as a negative hour; neither is a reset of the energy. Every key now holds
+// a dip up to LIFETIME_HOLD_DIP_WH: never counted twice, and no basis shift.
+test('v1.193.0 — a 538 Wh drop across a restart is HELD at the last published value on Home Consumption (no shift, no warning)', () => {
   {
     const rec = createRecorder(new SnapshotStore(), () => {});
     setPersistedFloor(KEY_RESET, LAST_EMITTED_WH);
     rec.getLifetimeTotals(); // high-water = LAST_EMITTED_WH
     rec.close();
   }
-  // 538 Wh drop (> maxDipWh 50) — a real re-zero / DB wipe must NOT be clamped.
   setPersistedFloor(KEY_RESET, LAST_EMITTED_WH - 538);
-  const rec2 = createRecorder(new SnapshotStore(), () => {});
+  const lines: string[] = [];
+  const rec2 = createRecorder(new SnapshotStore(), (m: string) => lines.push(m));
   const t = rec2.getLifetimeTotals();
-  assert.equal(totalOf(t, KEY_RESET), LAST_EMITTED_WH - 538,
-    'a >50 Wh drop is a genuine reset and must pass through unclamped even with a restored high-water');
+  assert.equal(totalOf(t, KEY_RESET), LAST_EMITTED_WH, 'held at the last published value (was: the drop published)');
+  assert.equal(t[KEY_RESET].shiftWh, 0, 'a held dip is no basis shift: the energy arrives later and is counted once');
+  assert.equal(t[KEY_RESET].heldWh, 538, 'the guard holds the 538 Wh');
+  assert.deepEqual(warnsOf(lines, KEY_RESET), [], 'no warning for a held dip');
+  // The row catches up by 600 Wh: the published value rises by 62 Wh, not 600 (no double count).
+  setPersistedFloor(KEY_RESET, LAST_EMITTED_WH + 62);
+  const t2 = rec2.getLifetimeTotals();
+  assert.equal(totalOf(t2, KEY_RESET), LAST_EMITTED_WH + 62);
+  assert.equal(t2[KEY_RESET].heldWh, 0);
   rec2.close();
 });
 
-test('v1.188.1 — Grid to Battery Charge (an energy-bridge counter) holds a dip up to 5 kWh across a restart; a larger drop still passes', () => {
+// v1.193.0 — changed: "a re-zero passes through" became a continuation. A replaced database restarts
+// the row near 0 while the sidecar keeps the last published value: the counter continues from it,
+// the difference carried as a basis shift (lifetime_basis) that survives the next restart.
+test('v1.188.1 — Grid to Battery Charge (an energy-bridge counter) holds a dip up to 5 kWh across a restart; v1.193.0 — a re-zero continues from the last value', () => {
   {
     const rec = createRecorder(new SnapshotStore(), () => {});
     setPersistedFloor(KEY_BRIDGED, LAST_EMITTED_WH);
@@ -129,8 +147,28 @@ test('v1.188.1 — Grid to Battery Charge (an energy-bridge counter) holds a dip
   assert.equal(totalOf(rec2.getLifetimeTotals(), KEY_BRIDGED), LAST_EMITTED_WH, 'a 538 Wh dip is held');
   rec2.close();
   setPersistedFloor(KEY_BRIDGED, 100); // a replaced database
+  const lines: string[] = [];
+  rec2 = createRecorder(new SnapshotStore(), (m: string) => lines.push(m));
+  const t = rec2.getLifetimeTotals();
+  assert.equal(totalOf(t, KEY_BRIDGED), LAST_EMITTED_WH, 'the re-zero continues from the last published value (was: 100 Wh published, a meter reset)');
+  assert.equal(t[KEY_BRIDGED].shiftWh, LAST_EMITTED_WH - 100, 'the drop is the basis shift');
+  {
+    // Written at once, not left for the next rollup: a crash before it would lose the shift.
+    const raw = new DatabaseSync(DB_PATH);
+    const r = raw.prepare(`SELECT shift_wh, reason FROM lifetime_basis WHERE metric_key = ?`).get(KEY_BRIDGED) as { shift_wh: number; reason: string } | undefined;
+    raw.close();
+    assert.deepEqual(r && { ...r }, { shift_wh: LAST_EMITTED_WH - 100, reason: 'unexplained drop' });
+  }
+  assert.equal(t[KEY_BRIDGED].heldWh, 0);
+  assert.equal(warnsOf(lines, KEY_BRIDGED).length, 1, 'one warning names the counter');
+  assert.match(warnsOf(lines, KEY_BRIDGED)[0], /269\.438 kWh below the 269\.538 kWh last published/);
+  rec2.getLifetimeTotals();
+  assert.equal(warnsOf(lines, KEY_BRIDGED).length, 1, 'once: the next read continues without a new drop');
+  rec2.close();
+  // The shift survives a restart; the row's growth is published on top of it.
+  setPersistedFloor(KEY_BRIDGED, 150);
   rec2 = createRecorder(new SnapshotStore(), () => {});
-  assert.equal(totalOf(rec2.getLifetimeTotals(), KEY_BRIDGED), 100, 'a re-zero passes through');
+  assert.equal(totalOf(rec2.getLifetimeTotals(), KEY_BRIDGED), LAST_EMITTED_WH + 50, 'the row\'s +50 Wh on top of the persisted shift');
   rec2.close();
 });
 
@@ -148,4 +186,30 @@ test('a corrupt sidecar degrades to empty (no throw) → pre-v0.50.0 behavior', 
   assert.equal(totalOf(t, KEY_CORRUPT), LAST_EMITTED_WH - 8,
     'corrupt sidecar → empty high-water → unclamped first emit (pre-v0.50.0 behavior)');
   rec!.close();
+});
+
+test('v1.193.0 — the sidecar is written to a .tmp and renamed: a failed write leaves the previous file whole', () => {
+  const rec = createRecorder(new SnapshotStore(), () => {});
+  setPersistedFloor(KEY_HOLD, LAST_EMITTED_WH);
+  rec.getLifetimeTotals();
+  rec.close();
+  const before = readFileSync(SIDECAR, 'utf8');
+  assert.equal(JSON.parse(before)[KEY_HOLD], LAST_EMITTED_WH);
+  assert.equal(existsSync(`${SIDECAR}.tmp`), false, 'no .tmp left behind');
+  // The .tmp path is blocked (a directory): the write fails before the rename.
+  mkdirSync(`${SIDECAR}.tmp`);
+  const lines: string[] = [];
+  const rec2 = createRecorder(new SnapshotStore(), (m: string) => lines.push(m));
+  try {
+    setPersistedFloor(KEY_HOLD, LAST_EMITTED_WH + 1_000);
+    rec2.getLifetimeTotals();
+    rec2.rollupLifetime(); // persists the high-water
+    assert.ok(lines.some((l) => l.includes('failed to persist emit high-water')), 'the failure is logged');
+    assert.equal(readFileSync(SIDECAR, 'utf8'), before, 'the previous file is untouched, never truncated');
+  } finally {
+    rmSync(`${SIDECAR}.tmp`, { recursive: true, force: true });
+    rec2.close();
+  }
+  assert.ok(JSON.parse(readFileSync(SIDECAR, 'utf8'))[KEY_HOLD] >= LAST_EMITTED_WH + 1_000, 'the next write lands');
+  assert.equal(existsSync(`${SIDECAR}.tmp`), false);
 });

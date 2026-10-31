@@ -103,13 +103,24 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
   // Prepared lazily: on a brand-new DB the writer hasn't created the table
   // yet, and an eager prepare() would throw at construction.
   let lifetimeStmt: ReturnType<typeof db.prepare> | null = null;
+  let basisStmt: ReturnType<typeof db.prepare> | null = null;
   const getLifetimeTotals = (): Record<string, LifetimeTotals> => {
     const out: Record<string, LifetimeTotals> = {};
+    // v1.193.0 — each counter's basis shift (lifetime_basis), as the writer publishes it. Read on its
+    // own: a database the writer has not yet migrated has no such table, and the rows still count.
+    const shifts = new Map<string, number>();
+    try {
+      basisStmt ??= db.prepare(`SELECT metric_key, shift_wh FROM lifetime_basis`);
+      for (const r of basisStmt.all() as Array<{ metric_key: string; shift_wh: number }>) {
+        if (Number.isFinite(r.shift_wh)) shifts.set(r.metric_key, r.shift_wh);
+      }
+    } catch { /* no table yet: no shifts */ }
     try {
       lifetimeStmt ??= db.prepare(`SELECT metric_key, wh, last_integrated_ts FROM lifetime_totals`);
       const rows = lifetimeStmt.all() as Array<{ metric_key: string; wh: number; last_integrated_ts: number }>;
       for (const r of rows) {
-        out[r.metric_key] = { persistedWh: r.wh, pendingWh: 0, watermarkMs: r.last_integrated_ts };
+        const shiftWh = shifts.get(r.metric_key) ?? 0;
+        out[r.metric_key] = { persistedWh: r.wh + shiftWh, pendingWh: 0, watermarkMs: r.last_integrated_ts, shiftWh };
       }
     } catch {
       // Table absent before the writer's first rollup — same observable

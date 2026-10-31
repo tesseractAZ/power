@@ -27,6 +27,25 @@ export function makeLifetimeKwh(
 }
 
 /**
+ * v1.193.0 — the lifetime counters for a state payload, or none when reading them throws (the
+ * recorder's database failing, say). The payload also carries the alarm sensors (runway, alert
+ * counts): a lifetime failure publishes its own fields null (Home Assistant: unknown, skipped by
+ * the statistics, not a meter reset) instead of losing the whole payload. `onError` gets the
+ * message; the caller rate-limits it.
+ */
+export function lifetimeTotalsOrNone(
+  read: () => Record<string, LifetimeTotals>,
+  onError: (msg: string) => void,
+): Record<string, LifetimeTotals> {
+  try {
+    return read();
+  } catch (e: any) {
+    onError(String(e?.message ?? e));
+    return {};
+  }
+}
+
+/**
  * Alert counter split by engine source × severity. `threshold` matches every
  * non-`learned` source (the `a.source !== 'learned'` branch) — verbatim.
  */

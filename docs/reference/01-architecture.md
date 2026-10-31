@@ -531,12 +531,17 @@ Two kinds of lifetime keys:
    pool climbs back over the old mark. The floors now RE-SEED from the live sum
    whenever the source set changes, keyed on a fingerprint persisted to
    `/data/bms-membership.json` (v0.9.74 established this shape as a one-time
-   marker; a fingerprint generalises it, since membership can change again). HA
-   reads the step down as a meter reset, which is honest — the series is now
-   measuring a different set of batteries. A stable roster still ratchets
-   monotonically, so a transiently-offline device re-seeds nothing.
+   marker; a fingerprint generalises it, since membership can change again). A
+   stable roster still ratchets monotonically, so a transiently-offline device
+   re-seeds nothing. v1.193.0 — the floors re-seed and the published counters
+   continue from their last values: the difference is a basis shift (`lifetime_basis`,
+   written with the floors in one transaction; the roster file follows the commit).
+   The step down was not honest: HA books a reading below 0.9 × the previous one as a
+   meter reset, the whole new reading again (about 12,043 kWh of Battery Energy In by
+   2026-09-07), and a step up as energy. A Core joining counts from the re-seed, whose
+   negative shift absorbs its packs' history ([chapter 7, path (b)](07-energy-and-cost.md#22-the-two-accumulation-paths)).
 
-   **v1.98.0 — the gap invariant.** Keying the repair on a fingerprint CHANGE was insufficient: v1.96.0 wrote the fingerprint on first observation without repairing, so on every later boot the fingerprint matched and the branch (with v1.97.0's first-run repair inside it) was unreachable — the freeze survived both releases. The floor/live gap is therefore now checked DIRECTLY: when the floor sits more than `BMS_RESEED_MIN_GAP_WH` (50 kWh) above the live sum for `BMS_RESEED_SUSTAINED_ROLLUPS` (2, ~10 min) consecutive rollups, it is re-seeded, at most once per process. Requiring persistence is what makes it safe — a genuinely-offline device cannot open that gap, because held-carry keeps its last-known Wh in the live sum for exactly that reason. The fingerprint path is kept for explicit membership changes, where it repairs immediately instead of waiting out the dwell.
+   **v1.98.0 — the gap invariant.** Keying the repair on a fingerprint CHANGE was insufficient: v1.96.0 wrote the fingerprint on first observation without repairing, so on every later boot the fingerprint matched and the branch (with v1.97.0's first-run repair inside it) was unreachable — the freeze survived both releases. The floor/live gap is therefore now checked DIRECTLY: when the floor sits more than `BMS_RESEED_MIN_GAP_WH` (50 kWh) above the live sum for `BMS_RESEED_SUSTAINED_ROLLUPS` (2, ~10 min) consecutive rollups, it is re-seeded, at most once per process. Requiring persistence is what makes it safe — a genuinely-offline device cannot open that gap, because held-carry keeps its last-known Wh in the live sum for exactly that reason. The fingerprint path is kept for explicit membership changes, where it repairs immediately instead of waiting out the dwell. v1.193.0 — this re-seed too carries the published counters by a basis shift, so Home Assistant sees no step.
 
    **v1.103.0 — membership history (`membershipHistory.ts`).** Pool membership was resolved once from the live snapshot and applied across historical windows, so a query spanning a reconfiguration attributed one fleet's energy under another's roster — and `computeLocalPackRte` accumulated 77,218 Wh in against 92,676 Wh out (a round-trip ratio of 1.20, impossible) because the two legs of a day were measured over different batteries. A timestamped record of the connected-DPU set is now appended on EVERY rollup (`recordMembership` is idempotent; recording the STATE rather than the EVENT is what makes the first entry appear on a stable plant). `membershipVerdict(from,to)` returns `stable` / `changed` / **`unknown`** — a window predating the record is REFUSED, never assumed clean — and an empty fingerprint (panel unreadable) is never recorded. The pack-DC RTE excludes non-`stable` days and reports `excludedDays`; `computeTotals` declares its `membershipBasis`. Honest limit: history cannot be reconstructed backwards, so windows before this release report `unknown`.
 
@@ -556,10 +561,22 @@ Two kinds of lifetime keys:
    publish, then a re-seed step down once the panel returned). With an accepted
    roster on file (`bms-membership.json`), the members are that roster while the
    panel reads no source set; the rollup already reads an empty set as no change.
+   v1.193.0 — the members are the accepted roster whatever the panel reads, until a
+   change holds for `BMS_MEMBERSHIP_SUSTAINED_ROLLUPS` (3) rollups and is re-seeded:
+   a Core that left stays in the sum meanwhile, and a Core that joined is not summed
+   (by reads or rollups) until the re-seed counts it. Before, every read until the first
+   rollup saw a change summed the live set, so a joining Core's packs entered with
+   their whole history since their baselines.
 
 The read-only worker reproduces these via the persisted table only
-(`getLifetimeTotals`), reporting `persistedWh` with `pendingWh = 0` — it lags by
-at most one rollup interval, negligible against a forever-accumulating total.
+(`getLifetimeTotals`), reporting `persistedWh` (v1.193.0: with each key's basis shift
+from `lifetime_basis`) with `pendingWh = 0` — it lags by at most one rollup interval,
+negligible against a forever-accumulating total.
+
+Every published counter passes the publish guard (`guardLifetimeEmit`, v1.193.0): it
+never emits below the last value, holds a dip of up to 5 kWh and continues from the last
+value past it (a basis shift and one WARN line); a read integrates each panel series up
+to its newest reading only ([chapter 7, the publish guard](07-energy-and-cost.md#24-the-published-counter-guard-guardlifetimeemit)).
 
 #### 4.7 Telemetry-gap detection
 
@@ -1039,7 +1056,7 @@ table below lists the `config` object's fields and the knobs this chapter uses.
 | — | `BUILD_VERSION` / `BUILD_DATE` / `BUILD_REF` | `dev`/null/null | Version stamp for `/api/version` |
 | — | `ECOFLOW_TRACE_SN` | — | Env-gated MQTT topic/payload trace for one SN |
 | — | `BMS_REBASELINE_SUSPECT_ROLLUPS` | `3` | Rollups before a BMS reconnect re-baseline is trusted |
-| — | `BMS_RESEED_MIN_GAP_WH` (add-on option) / `BMS_RESEED_SUSTAINED_ROLLUPS` | `50_000` / `2` | Floor/live gap and dwell before a BMS-counter floor re-seeds (§4.6) |
+| — | `BMS_RESEED_MIN_GAP_WH` (add-on option) / `BMS_RESEED_SUSTAINED_ROLLUPS` | `50_000` / `2` | Floor/live gap and dwell before a BMS-counter floor re-seeds (§4.6); the published counters continue across it (a basis shift, v1.193.0) |
 | — | `BACKUP_POOL_GRACE_HOLD_MS` | `180_000` | SHP2 backup-pool grace hold (§3.3) |
 | — | `POLL_SUMMARY_EVERY` | `30` | Polls per debug-level poll-duration summary (§3.1) |
 
