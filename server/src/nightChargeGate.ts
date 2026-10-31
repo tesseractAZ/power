@@ -25,6 +25,9 @@
  *    honestly disclosed `cushionShortfall` is physics, not fault — exempt.
  *    v1.186.0: the trajectory half counts only where it was graded on the
  *    trough the plan was SIZED against (see the strike rule below).
+ *    v1.196.0: the realized half is graded on the claim the plan made — the
+ *    pack at the close against its line on the islanded-outage and disabled
+ *    bases (realizedCushionBreach).
  *  - Strikes live in a rolling 45-day window and are additionally cleared by
  *    14 consecutive strike-free actuated nights — escapable by demonstrated
  *    performance, never by waiting alone within the window.
@@ -188,6 +191,83 @@ function truthy(v: unknown): boolean {
 function mean(xs: number[]): number | null {
   if (xs.length === 0) return null;
   return xs.reduce((s, x) => s + x, 0) / xs.length;
+}
+
+/* ── v1.196.0 — THE REALIZED HALF OF THE STRIKE, ON THE CLAIM THE PLAN MADE ─────────────
+ *
+ * v1.125.0 moved the cushion to an outage that starts at the window close: on the
+ * islanded-outage basis (and the disabled one) the plan claims only that the pack AT THE CLOSE
+ * holds the reserve floor plus the cushion as applied (`cushion_line_soc_pct`). The realized
+ * check kept grading the lowest pool over [close, close + 16 h) against the legacy flat band
+ * (reserve_floor_pct + cushion_pct), after the reserve has reverted to the floor and the house
+ * runs from the pack — a claim no such plan makes. v1.186.0 moved the trajectory half onto the
+ * sizing line; the 50% write masked the realized half until v1.196.0 wrote the line itself
+ * (⌈line⌉): 32% for a 31.13% line, whose P50 morning low (~24%) is under 16 + 15, and a 2.0 kW
+ * island's 28% write is under 31% at the close with no drain at all. Every actuated resilience
+ * night was then an engine-fault strike, and the gate read BLOCKED for good.
+ *
+ * Now, on an overnight row whose line is not the legacy band, the realized verdict is the pool
+ * measured at the close (`window_close_soc_pct`) against that line. A row without the reading
+ * (captured before v1.196.0, or with no reading in the last 15 minutes of the window) is judged
+ * clean only when its lowest pool after the close (`actual_min_soc_pct`, a span that starts at
+ * the close, so a lower bound on the pool there) is at or above the line; otherwise it is
+ * unknown, and the gate keeps the stored flag (fail-closed). The legacy band (`legacy-pct`
+ * sizes on the whole-house trough over the same span) and the mid-day two-leg row (its legs are
+ * set on their walks, and its trough spans the backup and post spans by design) keep the
+ * legacy verdict.
+ * ═════════════════════════════════════════════════════════════════════════════════════ */
+
+/** v1.196.0 — the close reading is persisted to 0.1 (measuredWindowCloseSocPct): half its step
+ *  is rounding, not a pool under its line. The written reserve is the line asked to the whole
+ *  percent above it, so a pool held at the reserve reads at or above the line. */
+export const REALIZED_CLOSE_TOLERANCE_PCT = 0.05;
+
+/** v1.196.0 — how close a recorded line must sit to reserve_floor_pct + cushion_pct to be the
+ *  legacy band: on `legacy-pct` the line is round2(floor + cushionPct) by construction. An
+ *  islanded line that happened to land within it is graded on the legacy rule — the stricter,
+ *  fail-closed side. */
+const LEGACY_LINE_MATCH_PCT = 0.01;
+
+/**
+ * v1.196.0 — is this row's cushion claim the pack AT THE WINDOW CLOSE? True on an overnight row
+ * (window_kind not 'super_off_peak') that recorded its sizing line (v1.186.0+) where that line is
+ * not the legacy flat band: the islanded-outage and disabled bases. PURE.
+ */
+export function cushionClaimAtClose(
+  r: Pick<NightLedgerRow, 'reserve_floor_pct' | 'cushion_pct' | 'cushion_line_soc_pct'> & Partial<Pick<NightLedgerRow, 'window_kind'>>,
+): boolean {
+  if (r.window_kind === 'super_off_peak') return false;
+  const line = asNum(r.cushion_line_soc_pct);
+  const floor = asNum(r.reserve_floor_pct);
+  const band = asNum(r.cushion_pct);
+  if (line == null || floor == null || band == null) return false;
+  return Math.abs(line - (floor + band)) > LEGACY_LINE_MATCH_PCT;
+}
+
+/**
+ * v1.196.0 — the realized cushion verdict from a row's own columns: 1 breached, 0 held, null
+ * unknown. The scorer writes it as `cushion_breached`; the gate derives it again from the
+ * columns. PURE.
+ *  - claim at the close (cushionClaimAtClose): the close reading under the line (less
+ *    REALIZED_CLOSE_TOLERANCE_PCT); with no close reading, 0 when the lowest pool after the
+ *    close holds the line, else null;
+ *  - otherwise (legacy band, mid-day two-leg row, a row without its line): the lowest pool over
+ *    the scored span under reserve_floor_pct + cushion_pct, as before.
+ */
+export function realizedCushionBreach(
+  r: Pick<NightLedgerRow, 'reserve_floor_pct' | 'cushion_pct' | 'cushion_line_soc_pct' | 'actual_min_soc_pct'>
+    & Partial<Pick<NightLedgerRow, 'window_kind' | 'window_close_soc_pct'>>,
+): 0 | 1 | null {
+  const low = asNum(r.actual_min_soc_pct);
+  if (!cushionClaimAtClose(r)) {
+    const floor = asNum(r.reserve_floor_pct);
+    const band = asNum(r.cushion_pct);
+    return low == null || floor == null || band == null ? null : (low < floor + band ? 1 : 0);
+  }
+  const line = asNum(r.cushion_line_soc_pct)!;
+  const close = asNum(r.window_close_soc_pct);
+  if (close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT ? 1 : 0;
+  return low != null && low >= line - REALIZED_CLOSE_TOLERANCE_PCT ? 0 : null;
 }
 
 /** Autocorrelation-adjusted effective sample size (§5.2). Positive lag-1
@@ -394,9 +474,11 @@ export function computeNightChargeReadiness(
   //    evidence the row does carry about it is the plan's own `cushion_shortfall` =
   //    0, computed from that trough at plan time — on the legacy basis from the very
   //    figure the flag was graded on, so the pair could not disagree there.
-  // The REALIZED half is untouched and still judges every actuated night, set aside
-  // or not. Set-aside flags are counted in `trajStrikesSetAside`, never dropped
-  // silently.
+  // The REALIZED half still judges every actuated night, set aside or not. Set-aside
+  // flags are counted in `trajStrikesSetAside`, never dropped silently.
+  // v1.196.0 — and the realized half is graded on the claim the plan made too: the pack
+  // at the close against its line where that is the claim (realizedCushionBreach, above);
+  // stored flags that verdict overrules are counted in `realizedStrikesSetAside`.
   const trajGradedOnSizingTrough = (r: NightLedgerRow): boolean =>
     asNum(r.cushion_trough_soc_pct) != null || r.cushion_shortfall == null;
   const trajFlagged = (r: NightLedgerRow): boolean =>
@@ -413,10 +495,19 @@ export function computeNightChargeReadiness(
     if (trough != null && line != null) return trough < line - PLAN_TRAJ_BREACH_TOLERANCE_PCT;
     return truthy(r.plan_traj_floor_breached);
   };
+  // v1.196.0 — the realized half on the claim the plan made (realizedCushionBreach): where the
+  // claim is the pack at the close, the verdict DERIVED from the row's columns; where they cannot
+  // say (no close reading, a low under the line), the stored flag, fail-closed. Elsewhere the
+  // stored flag, as before.
+  const realizedBreached = (r: NightLedgerRow): boolean => {
+    if (!cushionClaimAtClose(r)) return truthy(r.cushion_breached);
+    const derived = realizedCushionBreach(r);
+    return derived == null ? truthy(r.cushion_breached) : derived === 1;
+  };
   const strikeRows = currentAlgo.filter((r) => {
     if (truthy(r.cushion_shortfall)) return false; // disclosed — physics, not fault
     const trajStrike = trajBreached(r) && trajGradedOnSizingTrough(r);
-    const realizedStrike = truthy(r.actuated) && truthy(r.cushion_breached);
+    const realizedStrike = truthy(r.actuated) && realizedBreached(r);
     return trajStrike || realizedStrike;
   });
   const strikeWindowStart = siteYmd(nowMs - STRIKE_WINDOW_DAYS * DAY_MS);
@@ -425,6 +516,12 @@ export function computeNightChargeReadiness(
   // v1.186.0 — a stored flag the sizing columns overrule is set aside too, and counted.
   const trajStrikesSetAside = currentAlgo.filter((r) =>
     !truthy(r.cushion_shortfall) && trajFlagged(r) && !(trajBreached(r) && trajGradedOnSizingTrough(r))
+    && String(r.plan_date) >= strikeWindowStart,
+  ).length;
+  /** v1.196.0 — in-window realized flags (actuated, claimed hold) graded on the legacy band that
+   *  the row's own columns show held the claim at the close. Counted, never dropped silently. */
+  const realizedStrikesSetAside = currentAlgo.filter((r) =>
+    !truthy(r.cushion_shortfall) && truthy(r.actuated) && truthy(r.cushion_breached) && !realizedBreached(r)
     && String(r.plan_date) >= strikeWindowStart,
   ).length;
   // Demonstrated-performance escape: actuated nights AFTER the newest in-window
@@ -477,6 +574,7 @@ export function computeNightChargeReadiness(
     underBuyMeasurable: actuatedNights > 0 && underBuyPool.length > 0 ? 1 : 0,
     strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)) ? 1 : 0,
     trajStrikesSetAside, // v1.186.0 — see the strike rule
+    realizedStrikesSetAside, // v1.196.0 — see realizedCushionBreach
     buyBiasKwh: buyBiasKwh != null ? round(buyBiasKwh) : null,
     pvMae: pvMae != null ? round(pvMae) : null,
     pvBias: pvBias != null ? round(pvBias) : null,

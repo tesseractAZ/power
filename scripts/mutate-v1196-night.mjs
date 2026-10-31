@@ -24,6 +24,15 @@
  * on forecast-tier rows whose PV verdict stands and whose pool did not reach the charge taper
  * (pv_saturated, captured with actual_max_soc_pct). Mutants P-i..xx.
  *
+ * (R) The realized half of the engine-fault strike is graded on the claim the plan made: where the
+ * cushion is an outage starting at the window close (an overnight row whose line is not the legacy
+ * band), the pool measured at the close (window_close_soc_pct) against cushion_line_soc_pct; without
+ * the reading, clean only where the low after the close holds the line, else the stored flag
+ * (fail-closed); the legacy band and the mid-day two-leg row keep the legacy verdict. With the write
+ * at the line (S), the legacy-band grading made every actuated resilience night a strike.
+ * Mutants R-i..xvii (the close reading's lead-in is the window-open rule, which mutate-v1187-22c
+ * mutates; realizedCushionAtClose.test.ts kills those too).
+ *
  *   node scripts/mutate-v1196-night.mjs [--only <id prefix>]
  *
  * ★ Anchor-asserted (each anchor matches exactly once); every mutant must TYPECHECK (one that does
@@ -42,6 +51,7 @@ const NLS = resolve(REPO, 'server/src/nightLedgerScoring.ts');
 const REC = resolve(REPO, 'server/src/recorder.ts');
 const CTEXT = resolve(REPO, 'server/src/chargeText.ts');
 const SHADOW = resolve(REPO, 'server/src/middayShadow.ts');
+const GATE = resolve(REPO, 'server/src/nightChargeGate.ts');
 
 const T_SET = 'test/setpointOneTest.test.ts';
 const T_MID = 'test/middayPlan.test.ts';
@@ -53,6 +63,7 @@ const T_FCON = 'test/forceChargeOn.test.ts';
 const T_PV = 'test/costCeilingPvDebias.test.ts';
 const T_LEDGER = 'test/ledgerCostSurplus.test.ts';
 const T_MIDANN = 'test/middayAnnounce.test.ts';
+const T_REAL = 'test/realizedCushionAtClose.test.ts';
 
 const MUTANTS = [
   /* ── S: the write setpoint is the leg's own arm test ── */
@@ -418,6 +429,127 @@ const MUTANTS = [
     find: '  const weight = Math.min(1, samples / COST_SURPLUS_LOAD_FULL_SAMPLES);',
     to: '  const weight = samples / COST_SURPLUS_LOAD_FULL_SAMPLES; /* MUTANT */',
     why: 'Fourteen nights at +10% count the sun at ×1.14: past what the ledger measured, the ceiling and the stop lower than it supports.',
+  },
+
+  /* ── R: the realized half of the strike on the claim the plan made ── */
+  {
+    id: 'R-i. ★★★ the gate trusts every stored realized flag (the defect, gate side)',
+    file: GATE, tests: [T_REAL],
+    find: '    const realizedStrike = truthy(r.actuated) && realizedBreached(r);',
+    to: '    const realizedStrike = truthy(r.actuated) && truthy(r.cushion_breached); /* MUTANT */',
+    why: 'Every M5 night an older scorer stored on the legacy band stays an engine-fault strike: BLOCKED for good.',
+  },
+  {
+    id: 'R-ii. ★★★ every row is graded on the legacy band (the defect, scorer side)',
+    file: GATE, tests: [T_REAL],
+    find: '  if (!cushionClaimAtClose(r)) {',
+    to: '  if (!cushionClaimAtClose({ ...r, cushion_line_soc_pct: null })) { /* MUTANT */',
+    why: 'A 32% write for a 31.13% line, its morning low ~24% under 16 + 15: a strike every actuated resilience night.',
+  },
+  {
+    id: 'R-iii. ★★★ the close reading is never compared with the line',
+    file: GATE, tests: [T_REAL],
+    find: '  if (close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT ? 1 : 0;',
+    to: '  if (close != null) return 0; /* MUTANT */',
+    why: 'A pool that never reached its line at the close is no strike: the detector cannot fire.',
+  },
+  {
+    id: 'R-iv. ★★ the close verdict drops its rounding tolerance',
+    file: GATE, tests: [T_REAL],
+    find: '  if (close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT ? 1 : 0;',
+    to: '  if (close != null) return close < line ? 1 : 0; /* MUTANT */',
+    why: 'A 31.1% reading against a 31.13% line (the reading\'s half step) is an engine-fault strike.',
+  },
+  {
+    id: 'R-v. ★★ the close verdict forgives a whole point',
+    file: GATE, tests: [T_REAL],
+    find: '  if (close != null) return close < line - REALIZED_CLOSE_TOLERANCE_PCT ? 1 : 0;',
+    to: '  if (close != null) return close < line - 1 ? 1 : 0; /* MUTANT */',
+    why: 'A pool 0.13 points under the line it claimed reads as held.',
+  },
+  {
+    id: 'R-vi. ★★★ a row without the close reading is clean on silence',
+    file: GATE, tests: [T_REAL],
+    find: '  return low != null && low >= line - REALIZED_CLOSE_TOLERANCE_PCT ? 0 : null;',
+    to: '  return 0; /* MUTANT */',
+    why: 'No reading in the window\'s last 15 minutes overrules every stored flag: absence read as success.',
+  },
+  {
+    id: 'R-vii. ★★★ an unknown verdict drops the stored flag',
+    file: GATE, tests: [T_REAL],
+    find: '    return derived == null ? truthy(r.cushion_breached) : derived === 1;',
+    to: '    return derived === 1; /* MUTANT */',
+    why: 'An older row whose low after the close is under the line loses its strike with nothing showing the claim held.',
+  },
+  {
+    id: 'R-viii. ★★★ the mid-day two-leg row is graded at the close',
+    file: GATE, tests: [T_REAL],
+    find: "  if (r.window_kind === 'super_off_peak') return false;",
+    to: '  /* MUTANT */',
+    why: 'The 07:00 low on a mid-day cycle\'s backup span is no strike (R4 keeps the rule).',
+  },
+  {
+    id: 'R-ix. ★★★ the legacy band is graded at the close',
+    file: GATE, tests: [T_REAL],
+    find: '  return Math.abs(line - (floor + band)) > LEGACY_LINE_MATCH_PCT;',
+    to: '  return true; /* MUTANT */',
+    why: 'A legacy-pct plan, sized on the whole-house trough, is cleared by its pool at the close.',
+  },
+  {
+    id: 'R-x. ★★ an overruled flag is dropped silently from the set-aside count',
+    file: GATE, tests: [T_REAL],
+    find: '    !truthy(r.cushion_shortfall) && truthy(r.actuated) && truthy(r.cushion_breached) && !realizedBreached(r)',
+    to: '    !truthy(r.cushion_shortfall) && truthy(r.actuated) && truthy(r.cushion_breached) && false /* MUTANT */',
+    why: 'Stored breach flags stop counting with no trace in realizedStrikesSetAside.',
+  },
+  {
+    id: 'R-xi. ★★★ the scorer grades without the close reading',
+    file: IDX, tests: [T_REAL],
+    find: 'const realizedCols = { ...y, actual_min_soc_pct: actualMinSocPct, window_close_soc_pct: windowCloseSocPct };',
+    to: 'const realizedCols = { ...y, actual_min_soc_pct: actualMinSocPct, window_close_soc_pct: null }; /* MUTANT */',
+    why: 'Every M5 night captures unknown: its realized verdict is never measured.',
+  },
+  {
+    id: 'R-xii. ★★★ the close reading is not written',
+    file: IDX, tests: [T_REAL],
+    find: '    window_close_soc_pct: windowCloseSocPct,\n',
+    to: '    /* MUTANT */\n',
+    why: 'The gate has nothing to derive from: every stored flag stands or falls on silence.',
+  },
+  {
+    id: 'R-xiii. ★★ the close is read before the window opened',
+    file: IDX, tests: [T_REAL],
+    find: "    recorder.query(shp2Sn, 'backup_pct', windowEnd - WINDOW_CLOSE_SOC_LEAD_MS, windowEnd), windowEnd);",
+    to: "    recorder.query(shp2Sn, 'backup_pct', windowStart - WINDOW_CLOSE_SOC_LEAD_MS, windowStart), windowEnd); /* MUTANT */",
+    why: 'The reading is always empty: every verdict is unknown.',
+  },
+  {
+    id: 'R-xiv. ★★★ window_close_soc_pct is not in the ledger allowlist',
+    file: REC, tests: [T_REAL],
+    find: "  'window_close_soc_pct',\n",
+    to: '  /* MUTANT */\n',
+    why: 'The write is dropped silently.',
+  },
+  {
+    id: 'R-xv. ★★★ the column is never added to an existing ledger',
+    file: REC, tests: [T_REAL],
+    find: "    'window_close_soc_pct REAL',",
+    to: '    /* MUTANT */',
+    why: 'Every outcome write fails on the deployed database.',
+  },
+  {
+    id: 'R-xvi. ★★ a forecast-span or held reset keeps the reading',
+    file: NLS, tests: [T_REAL],
+    find: '    window_close_soc_pct: null,\n',
+    to: '    /* MUTANT */\n',
+    why: 'An uncaptured reset row still derives a verdict from the readings it was reset for.',
+  },
+  {
+    id: 'R-xvii. ★★ the premature-capture repair keeps the reading',
+    file: IDX, tests: [T_REAL],
+    find: '        window_close_soc_pct: null, // v1.196.0 — the gate derives the realized verdict from it\n',
+    to: '        /* MUTANT */\n',
+    why: 'A reset row keeps a verdict the gate would derive from a premature capture.',
   },
 ];
 

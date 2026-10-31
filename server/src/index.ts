@@ -221,6 +221,9 @@ import {
   nightChargeGateFields,
   computeNightChargeReadiness,
   CURRENT_ALGO_VERSION,
+  // v1.196.0 — the realized cushion verdict on the claim the plan made.
+  realizedCushionBreach,
+  cushionClaimAtClose,
 } from './nightChargeGate.js';
 import {
   resolveNightChargeMode,
@@ -306,6 +309,8 @@ import {
   unpricedTariffPeriods, houseConnectedSlots, deliveredLedgerFields,
   // v1.187.22 — the measured window-open SoC and the expected-buy score clause.
   measuredWindowOpenSocPct, expectedBuyScoreNote, WINDOW_OPEN_SOC_LEAD_MS,
+  // v1.196.0 — the pool at the window close, which the realized cushion verdict reads.
+  measuredWindowCloseSocPct, realizedCushionNote, WINDOW_CLOSE_SOC_LEAD_MS,
   // v1.187.10 — the forecast span: capture waits for issue + 24 h; the one-time repair.
   ledgerRowsDueForCapture, forecastActualsSpan, forecastSpanRepair, forecastSpanTagNote,
   forecastSpanRecaptureHorizonMs, forecastSpanResetColumns,
@@ -4373,6 +4378,10 @@ function scoreNightRow(
   // islanded sizing start (soc_at_window_start_pct) are graded against.
   const windowOpenSocPct = measuredWindowOpenSocPct(
     recorder.query(shp2Sn, 'backup_pct', windowStart - WINDOW_OPEN_SOC_LEAD_MS, windowStart), windowStart);
+  // v1.196.0 — the pool as the window closed: on the islanded-outage and disabled bases the plan
+  // claims the pack there holds its line, and the realized cushion verdict reads it (below).
+  const windowCloseSocPct = measuredWindowCloseSocPct(
+    recorder.query(shp2Sn, 'backup_pct', windowEnd - WINDOW_CLOSE_SOC_LEAD_MS, windowEnd), windowEnd);
 
   // v1.39.0 2nd-pass: null-over-fabrication — zero samples must record NULL,
   // not a "measured" 0 kWh import (matching the on-peak guard below).
@@ -4621,8 +4630,19 @@ function scoreNightRow(
 
   const inBand = (a: number | null, lo: number | null, hi: number | null): number | null =>
     a == null || lo == null || hi == null ? null : (a >= lo && a <= hi ? 1 : 0);
-  const cushionBreached =
-    actualMinSocPct == null ? null : (actualMinSocPct < y.reserve_floor_pct + y.cushion_pct ? 1 : 0);
+  // v1.196.0 — on the claim the plan made (nightChargeGate.realizedCushionBreach): the pool at the
+  // close against the row's line where the cushion is an outage starting at the close; the lowest
+  // pool over the scored span against reserve_floor_pct + cushion_pct (the legacy band, the mid-day
+  // two-leg row) elsewhere, as before.
+  const realizedCols = { ...y, actual_min_soc_pct: actualMinSocPct, window_close_soc_pct: windowCloseSocPct };
+  const cushionBreached = realizedCushionBreach(realizedCols);
+  scoreNotes += realizedCushionNote({
+    claimAtClose: cushionClaimAtClose(realizedCols),
+    linePct: y.cushion_line_soc_pct ?? null,
+    windowCloseSocPct,
+    actualMinSocPct,
+    breached: cushionBreached,
+  });
 
   recorder.recordNightOutcome(yDate, {
     outcome_captured_at_ms: nowMs,
@@ -4642,6 +4662,7 @@ function scoreNightRow(
     ...pvSaturation,
     plan_traj_floor_breached: score.planTrajFloorBreached == null ? null : (score.planTrajFloorBreached ? 1 : 0),
     cushion_breached: cushionBreached,
+    window_close_soc_pct: windowCloseSocPct,
     // v1.187.3 — delivered_kwh with delivered_basis, set together (deliveredLedgerFields);
     // the learner reads only the current basis.
     ...deliveredLedgerFields(cols),
@@ -5290,6 +5311,7 @@ function repairPrematureNightOutcomes(): void {
         actual_min_soc_ts_ms: null,
         plan_traj_floor_breached: null,
         cushion_breached: null,
+        window_close_soc_pct: null, // v1.196.0 — the gate derives the realized verdict from it
         grid_home_coverage_frac: null,
         scored: 0,
         score_notes:

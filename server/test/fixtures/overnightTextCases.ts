@@ -65,6 +65,12 @@ export function goldenPlan(over: Partial<NightChargeInputDeps>): NightChargePlan
   return computeNightChargePlan(buildNightChargeInputs(deps(over)));
 }
 
+/** v1.196.0 — the fixture's planner inputs with `over` applied (realizedCushionAtClose.test.ts
+ *  walks the plan's own P50 horizon after the close). */
+export function goldenInputs(over: Partial<NightChargeInputDeps>): ReturnType<typeof buildNightChargeInputs> {
+  return buildNightChargeInputs(deps(over));
+}
+
 /** One overnight evening's announcement inputs, as the evening job assembles them. */
 export interface OvernightTextCase {
   name: string;

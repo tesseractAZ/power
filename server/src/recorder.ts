@@ -860,6 +860,13 @@ export interface NightLedgerRow {
    *  what expected_start_soc_pct and soc_at_window_start_pct (the islanded sizing start) are
    *  graded against. NULL when no reading covers the lead-in, and on rows captured earlier. */
   window_open_soc_pct: number | null;
+  /** v1.196.0 — OUTCOME: the pool SoC measured as the window closed (backup_pct over the last
+   *  WINDOW_CLOSE_SOC_LEAD_MS of the window, median; nightLedgerScoring.measuredWindowCloseSocPct).
+   *  Where the plan's cushion claim is the pack at the close (the islanded-outage and disabled
+   *  bases), `cushion_breached` is this reading against cushion_line_soc_pct
+   *  (nightChargeGate.realizedCushionBreach). NULL when no reading covers the lead-in, and on rows
+   *  captured before v1.196.0. */
+  window_close_soc_pct: number | null;
 
   // ── v1.189.0 — THE CHARGE CYCLE (chargeCycle.ts). The row stays keyed by plan_date and its
   // plan columns hold the cost leg; a mid-day cycle's overnight backup leg has its own
@@ -1108,6 +1115,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'expected_buy_kwh', 'expected_start_soc_pct', 'window_open_soc_pct',
   // v1.196.0 — the cost ceiling's PV de-bias, and the saturation that censors a row's PV.
   'cost_surplus_pv_factor', 'cost_surplus_pv_samples', 'actual_max_soc_pct', 'pv_saturated',
+  // v1.196.0 — the pool at the window close: the realized cushion verdict on the claim the plan made.
+  'window_close_soc_pct',
   // v1.189.0 — the charge cycle (NightLedgerRow.window_kind).
   ...CHARGE_CYCLE_LEDGER_COLUMNS,
 ];
@@ -1384,6 +1393,8 @@ export function createRecorder(
     'expected_buy_kwh REAL', 'expected_start_soc_pct REAL', 'window_open_soc_pct REAL',
     // v1.196.0 — see NightLedgerRow.cost_surplus_pv_factor / pv_saturated.
     'cost_surplus_pv_factor REAL', 'cost_surplus_pv_samples INTEGER', 'actual_max_soc_pct REAL', 'pv_saturated INTEGER',
+    // v1.196.0 — see NightLedgerRow.window_close_soc_pct.
+    'window_close_soc_pct REAL',
     // v1.189.0 — the charge cycle, from the list the allowlist reads (CHARGE_CYCLE_LEDGER_SCHEMA).
     ...CHARGE_CYCLE_LEDGER_SCHEMA.map(([c, t]) => `${c} ${t}`),
     // v1.189.0 (R4) — the mid-day cycle in shadow (MIDDAY_SHADOW_LEDGER_SCHEMA).
