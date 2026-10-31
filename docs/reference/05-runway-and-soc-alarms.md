@@ -72,11 +72,15 @@ The `max()` means a lighter-than-modelled day never becomes *more* optimistic, a
 
 **Step 6 — the DC-bus depletion loop** (the core math). For each hour h ∈ [0,24):
 ```
-delta   = pvKwh − runwayDrainW(loadKwhPerHour·1000, basis.overheadW) / 1000
+delta   = chargeLegStep(pvKwh − runwayDrainW(loadKwhPerHour·1000, basis.overheadW) / 1000, η_c)
         # runwayDrainW(load, ovh) = max(load/η, ovh + load/η_m)   (v1.187.19; was load/η)
+        # chargeLegStep(net, η_c) = net when net ≤ 0, net × η_c when net > 0   (v1.194.0)
+        # η_c = RUNWAY_CHARGE_EFFICIENCY = √DISPATCH_ROUND_TRIP_EFFICIENCY = 0.927
 nextState = stateKwh + delta
 ```
 This is the **v1.26.0 DC-bus pool-drain accounting**: PV enters the DC bus at ~unity (MPPT); the AC home load is pulled through the inverter at `1/η_dis`; so the pool changes by `pv − load/η` per hour. It is deliberately **not** `(pv−load)/η` — that would wrongly divide the PV credit by η and stay optimistic whenever pv>0 (e.g. `pv==load` must still drain at `load·(1−1/η)`).
+
+**The charge leg (v1.194.0).** A deficit hour (`pv` below the drain) is the pool's own drain and is taken as it is. A surplus hour's residual is energy the Cores push into the cells, and charging loses energy too: it reaches the pool at `η_c`, not in full (`physics/chargeLeg.ts`). `η_c` has no option of its own: it is the per-leg figure of `DISPATCH_ROUND_TRIP_EFFICIENCY` (environment only, clamped 0.8–1, so `η_c` is 0.894–1), the same leg the dispatch plan and the night-charge planner charge at. Setting it to 1 puts the runway's and the projections' surplus credit back at unity, as before v1.194.0; it also makes the dispatch plan's and the night-charge planner's charging lossless, so they buy less than before. At 0.927 it sits just below the lowest of the 29 measured PV-surplus spans (1.3a below). Worked: an 18 kWh pool on 92.16 kWh with a 16 % reserve, 9 kW of PV for two hours under a 3 kW house (270 W overhead) gains 2 × 5.54 × 0.927 = 10.27 kWh instead of 11.08, and reaches the reserve in 5.9 h instead of 6.1 h — the medium runway alarm (a reserve crossing within 6 h) instead of the low one. A day with 44 kWh of surplus brings the reserve crossing about an hour sooner. A horizon without a surplus hour is unchanged.
 
 Crossings are captured with linear interpolation within the crossing hour:
 ```
@@ -148,12 +152,14 @@ the panel's 60 s frame, and the single-stream per-Core figure works only while i
 grid-tied, `ac_out` reads 0 because the Cores feed the house through the panel link. It applies
 in every hour —
 in PV-surplus hours of the same history the pool charged 8–19 % less than `pv − load/η` predicts
-on the measured capacity (2–7 % less with the overhead), so the overhead is present by day too
-and the charge leg remains a little optimistic. The `max()` holds the drain at or above the
+on the measured capacity (2–7 % less with the overhead), so the overhead is present by day too.
+The rest is the charge leg, modelled since v1.194.0: a surplus reaches the cells at
+`η_c = √DISPATCH_ROUND_TRIP_EFFICIENCY` = 0.927, below every one of those spans (0.93–0.98 with
+the overhead removed). The `max()` holds the drain at or above the
 pre-v1.187.19 `load/η` for any configuration, so with the scale ≤ 1 the runway can only shorten
 (`poolEnergyBasis.test.ts` checks 400 random pools, loads and PV curves; a pool already below
-its floor is the floor alarm's, not the hours'). ∂delta/∂pv is still 1, so the
-`runwayPvBasisGuard` monotonicity holds.
+its floor is the floor alarm's, not the hours'). ∂delta/∂pv is 1 on a deficit hour and `η_c` on
+a surplus hour, so delta stays monotone in PV and the `runwayPvBasisGuard` monotonicity holds.
 
 **Published.** `RunwayProjection.capacityScale`, `capacityBasis`, `overheadW` (also on
 `/api/runway`); `backupRemainingKwh` / `backupFullKwh` / `backupReserveKwh` / `troughKwh` /
@@ -177,6 +183,7 @@ basis and requires the planner's inputs and its plan to be identical.
 | `RUNWAY_BLEND_HOURS` | 4 | Observed-load anchor decay length |
 | `LOAD_CURVE_MIN_PLAUSIBLE_KW` | 0.05 kW | Degenerate-curve threshold |
 | `RUNWAY_DISCHARGE_EFFICIENCY` | 0.94 (default) | DC→AC discharge efficiency η; `min(1, max(0.8, env ?? 0.94))`, env `RUNWAY_DISCHARGE_EFFICIENCY` |
+| `RUNWAY_CHARGE_EFFICIENCY` | 0.927 (√0.86) | v1.194.0 — the charge leg η_c a surplus hour reaches the cells at; `√DISPATCH_ROUND_TRIP_EFFICIENCY` (environment only, clamped 0.8–1), no option of its own |
 | `RUNWAY_POOL_OVERHEAD_FLOOR_W` | 270 (default, clamp 0–1500) | v1.187.19 — the pool overhead's floor while the panel reports a pool (§1.3a); add-on option, the reference plant's three-Core fit |
 | `RUNWAY_CORE_OVERHEAD_W` | 90 (default, clamp 0–500) | v1.187.19 — the overhead is `max(floor, this × connected Cores)` (§1.3a); add-on option |
 | `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | 0.94 (default, clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m`; environment only |
@@ -185,7 +192,7 @@ basis and requires the planner's inputs and its plan to be identical.
 | `RUNWAY_EMPTY_CLEAR_SAMPLES` | 3 (default) | Empty-hysteresis latch length; env `RUNWAY_EMPTY_CLEAR_SAMPLES` |
 | `RUNWAY_NO_DEPLETION_SENTINEL_H` | 999 | Healthy-but-no-depletion publish sentinel |
 
-`RUNWAY_DISCHARGE_EFFICIENCY` default 0.94 is marginally conservative vs. the measured ~0.945 pack-terminal→AC discharge-conversion leg (6.22 kW drawn for 5.88 kW delivered). That figure only numerically coincided with a 7-day pack-plane RTE reading, which is a different quantity (v1.32.0). It is clamped to `[0.80, 1.0]` so a bad env can never lengthen runway beyond the true (unity) reading or collapse it to an untrusted extreme. Because η divides the load term in every hour (surplus hours included), `delta ≤` the pre-v1.26 unity delta for all pv,load, **runway can only ever shorten-or-equal** — preserving the `runwayPvBasisGuard` "monotonic in forecastPvW" invariant.
+`RUNWAY_DISCHARGE_EFFICIENCY` default 0.94 is marginally conservative vs. the measured ~0.945 pack-terminal→AC discharge-conversion leg (6.22 kW drawn for 5.88 kW delivered). That figure only numerically coincided with a 7-day pack-plane RTE reading, which is a different quantity (v1.32.0). It is clamped to `[0.80, 1.0]` so a bad env can never lengthen runway beyond the true (unity) reading or collapse it to an untrusted extreme. Because η divides the load term in every hour (surplus hours included), and since v1.194.0 a surplus is stored at `η_c ≤ 1` (`chargeLegStep(net) ≤ net` for every net), `delta ≤` the pre-v1.26 unity delta for all pv,load, **runway can only ever shorten-or-equal** — preserving the `runwayPvBasisGuard` "monotonic in forecastPvW" invariant (∂delta/∂pv ∈ {η_c, 1}). `RUNWAY_CHARGE_EFFICIENCY ≤ RUNWAY_DISCHARGE_EFFICIENCY` is pinned by test, as the dispatch leg is.
 
 #### 1.5 The PV-basis and predicted-EV safety invariants
 

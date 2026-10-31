@@ -83,20 +83,23 @@ test('★★ a hold at or under the pool\'s level all span sends nothing; a hold
 });
 
 test('★★ sun lifts both pools alike: the held one carries the house again from above its hold', () => {
-  // 50% held from 50%: an hour of 5 kW sun over a 1 kW house (+5 kWh into each pack, 4 / 0.94 net), then
+  // 50% held from 50%: an hour of 5 kW sun over a 1 kW house (+5 kWh into each pack, 1 / 0.94 out), then
   // 2 kW of house for 2 h, which the held pool carries from the sun's share down to 50%.
   const from = phx(10, 15, 10);
   const h = heldImportEstimate({
     ...base, hours: hours(from, 3, (i) => (i === 0 ? { loadW: 1000, pvW: 5000 } : { loadW: 2000, pvW: 0 })),
     fromMs: from, untilMs: from + 3 * H, startSocPct: 50, holdPct: 50,
   })!;
-  // In the pack: +5 − 1/0.94 = 3.936 kWh of headroom; the 2 h draw 4.255 kWh; 0.319 kWh over → 0.3 AC.
-  assert.equal(h.kwh, 0.3);
+  // v1.194.0 — the surplus reaches the cells through the charge leg: (5 − 1/0.94) × 0.927 = 3.649 kWh
+  // of headroom (3.936 with the sun at unity, which read 0.3 kWh); the 2 h draw 4.255 kWh; 0.606 kWh
+  // over → 0.606 × 0.94 = 0.57 kWh AC.
+  assert.equal(h.kwh, 0.57);
 });
 
 test('★★★ a full pool spills the sun the free one stores: only what the pool keeps is credited', () => {
   // A 40 kWh pool at 50% held at 75%: the lift takes it to 30 kWh, the first hour's house load (2 kW)
-  // is held import, then 12 kWh of sun fills the held pool (spilling 2 kWh) while the free one stores it.
+  // is held import, then 12 kWh of sun — 12 × 0.927 = 11.124 kWh into the cells (v1.194.0, the charge
+  // leg) — fills the held pool (spilling 1.124 kWh) while the free one stores it.
   const from = phx(10, 14, 23);
   const h = heldImportEstimate({
     ...base, fullKwh: 40, centsAt: cents,
@@ -104,9 +107,9 @@ test('★★★ a full pool spills the sun the free one stores: only what the po
     fromMs: from, untilMs: from + 2 * H, startSocPct: 50, holdPct: 75,
   })!;
   assert.equal(h.kwh, 2);
-  // Held 40 − free (20 − 2.128 + 12 = 29.872) − lift 10 = 0.128 kWh kept, not the 2.128 drawn:
-  // 0.128 / 0.927 × 8.2¢ = $0.01 (all 2.128 would be $0.19).
-  assert.equal(h.creditUsd, 0.01);
+  // Held 40 − free (20 − 2.128 + 11.124 = 28.996) − lift 10 = 1.004 kWh kept, not the 2.128 drawn:
+  // 1.004 / 0.927 × 8.2¢ = $0.09 (all 2.128 would be $0.19; with the sun at unity 0.128 kWh, $0.01).
+  assert.equal(h.creditUsd, 0.09);
   assert.equal(h.importUsd, 0.25, '2 kWh at 12.59¢ (23:00 is overnight)');
 });
 

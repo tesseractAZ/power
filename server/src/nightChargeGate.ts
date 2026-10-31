@@ -28,11 +28,11 @@
  *  - Strikes live in a rolling 45-day window and are additionally cleared by
  *    14 consecutive strike-free actuated nights — escapable by demonstrated
  *    performance, never by waiting alone within the window.
- *  - Prior-`algo_version` rows are EXCLUDED (not merely tagged): a planner
- *    physics fix (§0.2) changes the meaning of every prior row. v1.49.0's
- *    corrected charge-only-cap sizing model is exactly such a fix — hence
- *    CURRENT_ALGO_VERSION = 2, which also retires the v1-era strike rows that
- *    were scored against the broken sizing model.
+ *  - Prior-`algo_version` rows are EXCLUDED (not merely tagged): a version bump
+ *    (§0.2; the rule is at CURRENT_ALGO_VERSION) marks rows that can no longer
+ *    judge the planner that runs now. v1.49.0's corrected charge-only-cap sizing
+ *    model was such a change — hence CURRENT_ALGO_VERSION = 2, which also retires
+ *    the v1-era strike rows that were scored against the broken sizing model.
  *
  * Pure reduction: no I/O, no clock reads (nowMs injected), no globals touched
  * except the explicit latest-readiness holder used by the delivery surfaces.
@@ -72,11 +72,36 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *    Never tuned on the season the gate gates (garden-of-forking-paths); a
  *    later re-tune bumps CURRENT_ALGO_VERSION and resets the readiness clock. ── */
 
-/** Bumped on ANY planner physics/algorithm change (§0.2). Prior-version ledger
- *  rows are excluded and the evidence clock resets. v2: the v1.49.0 sizing
- *  correction (charge cap is CHARGE-ONLY; the home bypasses to grid during
- *  charge hours) — every v1 row's plan, trajectory, and strike verdict was
- *  produced by the superseded physics.
+/** The ledger's evidence version (§0.2). Prior-version rows are excluded and the
+ *  evidence clock resets, so it is bumped only when a change leaves the earlier
+ *  rows unable to judge the planner that runs now: a scored quantity redefined
+ *  (v3), or plans sized by a model the ledger itself showed wrong (v2). A planner
+ *  physics change that leaves every scored column's formula and sign as they were
+ *  keeps the version: the v1.125.0 islanded-outage cushion, the v1.187.22
+ *  expected-buy walks, R2's window spec and v1.194.0 — the charge leg on a PV
+ *  surplus in every planner walk — all kept 3, and their nights count on the same
+ *  readiness clock. (v1.194.0 — the rule stated as practised; it read "bumped on
+ *  ANY planner physics/algorithm change", which no change since v1.105.0 followed.)
+ *
+ *  v1.194.0 — what the charge leg does to `buy_err_kwh`. The column keeps its
+ *  formula, −netMiss/legEff (plannerSizingNeedBuyKwh), which converts every kWh of
+ *  P50 miss at 1/legEff. The planner now stores a surplus hour's whole net,
+ *  pv − load/dischargeEff, at legEff, so for a miss inside a surplus hour, solar or
+ *  load, the column now reads 1/legEff (≈ 7.8 %) more against the planner's own
+ *  re-sizing than it did before. A PV miss there moves the buy 1 kWh per kWh, not
+ *  1/legEff: the column reads it 7.8 % larger (it read it exactly). A load miss there
+ *  moves the buy 1/dischargeEff per kWh, not 1/(dischargeEff·legEff): the column
+ *  reads it dischargeEff/legEff ≈ 1.4 % larger (it read it about 6 % smaller). A
+ *  cloudier day or a heavier daytime house than forecast therefore scores a deeper
+ *  under-buy than before (the under-buy rate errs toward blocking); a sunnier or
+ *  lighter one a larger over-buy, and the mean sizing bias moves by the same
+ *  factor on the surplus-hour part of the mean miss. Only misses in deficit hours
+ *  read as before: a PV miss exactly, a load miss about 6 % small (dischargeEff of
+ *  the planner's move). runwayChargeLeg.test.ts works each case on the planner.
+ *
+ *  v2: the v1.49.0 sizing correction (charge cap is CHARGE-ONLY; the home
+ *  bypasses to grid during charge hours) — every v1 row's plan, trajectory, and
+ *  strike verdict was produced by the superseded physics.
  *
  *  v3 (v1.105.0): `buy_err_kwh` REDEFINED onto the planner-sizing basis. Every
  *  v2 row's value was `planBuy − (delivered + troughDeficit)` — a hybrid that

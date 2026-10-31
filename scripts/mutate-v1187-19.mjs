@@ -140,22 +140,22 @@ const MUTANTS = [
   {
     id: 'V-xii. ★★★ the band inverts the trajectory with the old drain',
     file: ANALYTICS,
-    find: '  const netKwh = (pvW: number, loadW: number): number => (pvW - runwayDrainW(loadW, bandOverheadW)) / 1000;',
-    to: '  const netKwh = (pvW: number, loadW: number): number => (pvW - loadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000; /* MUTANT */',
+    find: '  const rawNetKwh = (pvW: number, loadW: number): number => (pvW - runwayDrainW(loadW, bandOverheadW)) / 1000;',
+    to: '  const rawNetKwh = (pvW: number, loadW: number): number => (pvW - loadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000; /* MUTANT */',
     why: 'The inversion recovers a ~10 % smaller pool and the band widens for no reason.',
   },
   {
     id: 'V-xiii. ★★ the day trajectory drains without the overhead',
     file: ANALYTICS,
-    find: 'socWh + (pvAlarm - runwayDrainW(load, poolBasis.overheadW))',
-    to: 'socWh + (pvAlarm - load / RUNWAY_DISCHARGE_EFFICIENCY) /* MUTANT */',
+    find: 'socWh + chargeLegStep(pvAlarm - runwayDrainW(load, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)',
+    to: 'socWh + chargeLegStep(pvAlarm - load / RUNWAY_DISCHARGE_EFFICIENCY, RUNWAY_CHARGE_EFFICIENCY) /* MUTANT */',
     why: 'projectedSocPct falls slower than the runway it sits beside.',
   },
   {
     id: 'V-xiv. ★★ the multi-day trajectory drains without the overhead',
     file: ANALYTICS,
-    find: 'socWh + (pv - runwayDrainW(load, poolBasis.overheadW))',
-    to: 'socWh + (pv - load / RUNWAY_DISCHARGE_EFFICIENCY) /* MUTANT */',
+    find: 'socWh + chargeLegStep(pv - runwayDrainW(load, poolBasis.overheadW), RUNWAY_CHARGE_EFFICIENCY)',
+    to: 'socWh + chargeLegStep(pv - load / RUNWAY_DISCHARGE_EFFICIENCY, RUNWAY_CHARGE_EFFICIENCY) /* MUTANT */',
     why: 'Day 0 of the multi-day view contradicts the day forecast.',
   },
   {
@@ -308,8 +308,8 @@ const MUTANTS = [
   {
     id: 'V-xxxvi. ★★★ the runway drops the overhead in PV-surplus hours',
     file: ANALYTICS,
-    find: '    const delta = pvKwh - runwayDrainW(loadKwhPerHour * 1000, basis.overheadW) / 1000;',
-    to: '    const delta = pvKwh - runwayDrainW(loadKwhPerHour * 1000, pvKwh > loadKwhPerHour / RUNWAY_DISCHARGE_EFFICIENCY ? 0 : basis.overheadW) / 1000; /* MUTANT */',
+    find: '    const delta = chargeLegStep(pvKwh - runwayDrainW(loadKwhPerHour * 1000, basis.overheadW) / 1000, RUNWAY_CHARGE_EFFICIENCY);',
+    to: '    const delta = chargeLegStep(pvKwh - runwayDrainW(loadKwhPerHour * 1000, pvKwh > loadKwhPerHour / RUNWAY_DISCHARGE_EFFICIENCY ? 0 : basis.overheadW) / 1000, RUNWAY_CHARGE_EFFICIENCY); /* MUTANT */',
     why: 'A sunny stretch banks the 270 W the Cores still draw: the next night\'s runway reads long.',
   },
   {
@@ -322,7 +322,7 @@ const MUTANTS = [
   {
     id: 'V-xxxviii. ★★ the band steps every hour with the old drain',
     file: ANALYTICS,
-    find: '    const dP50Kwh = netKwh(p50, h.forecastLoadW);',
+    find: '    const dP50Kwh = rawNetKwh(p50, h.forecastLoadW);',
     to: '    const dP50Kwh = (p50 - h.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000; /* MUTANT */',
     why: 'The raw median falls slower than the anchor: at the empty rail the published band diverges.',
   },

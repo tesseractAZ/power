@@ -413,25 +413,28 @@ test('★★ wiring (index.ts is not reachable from a unit test): P50 onto the b
 test('expectedCarryKwh: the current hour by its remaining part, the reserve as a floor, null without a P50 basis', () => {
   const hrs = [0, 1, 2].map((i) => ({ ts: i * H, pvP10W: 0, loadP90W: 9000, loadP50W: 1880, pvP50W: 0 }));
   // From 0.5 h: 0.5 + 1 + 1 h at 1.88 kW / 0.94 = 5 kWh.
-  assert.equal(r1(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: hrs, fromMs: 0.5 * H, toMs: 3 * H })!), 45);
+  assert.equal(r1(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: hrs, fromMs: 0.5 * H, toMs: 3 * H })!), 45);
   // The reserve holds it.
-  assert.equal(expectedCarryKwh({ startKwh: 12, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: hrs, fromMs: 0, toMs: 3 * H }), 10);
+  assert.equal(expectedCarryKwh({ startKwh: 12, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: hrs, fromMs: 0, toMs: 3 * H }), 10);
   // A pool already under the reserve is neither drained further nor lifted.
-  assert.equal(expectedCarryKwh({ startKwh: 8, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: hrs, fromMs: 0, toMs: 3 * H }), 8);
-  // PV P50 is used, P10 only when P50 is absent.
+  assert.equal(expectedCarryKwh({ startKwh: 8, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: hrs, fromMs: 0, toMs: 3 * H }), 8);
+  // PV P50 is used, P10 only when P50 is absent. v1.194.0 — a surplus reaches the cells through the
+  // charge leg: 3 kWh × 0.9 = 2.7 (was 53, the surplus at unity), 1 kWh × 0.9 = 0.9 (was 51).
   const sun = [{ ts: 0, pvP10W: 1000, loadP90W: 0, loadP50W: 0, pvP50W: 3000 }];
-  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: sun, fromMs: 0, toMs: H }), 53);
-  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: [{ ...sun[0], pvP50W: null }], fromMs: 0, toMs: H }), 51);
-  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: [{ ts: 0, pvP10W: 0, loadP90W: 1 }], fromMs: 0, toMs: H }), null);
+  assert.equal(r1(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: sun, fromMs: 0, toMs: H })!), 52.7);
+  assert.equal(r1(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: [{ ...sun[0], pvP50W: null }], fromMs: 0, toMs: H })!), 50.9);
+  // A deficit hour is not touched by the charge leg: legEff 0.5 drains the same 5 kWh.
+  assert.equal(r1(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.5, hours: hrs, fromMs: 0.5 * H, toMs: 3 * H })!), 45);
+  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: [{ ts: 0, pvP10W: 0, loadP90W: 1 }], fromMs: 0, toMs: H }), null);
   // An hour outside the span is not read at all (its missing P50 does not null the carry).
-  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: [{ ts: 0, pvP10W: 0, loadP90W: 1, loadP50W: 0 }, { ts: 5 * H, pvP10W: 0, loadP90W: 1 }], fromMs: 0, toMs: H }), 50);
+  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: [{ ts: 0, pvP10W: 0, loadP90W: 1, loadP50W: 0 }, { ts: 5 * H, pvP10W: 0, loadP90W: 1 }], fromMs: 0, toMs: H }), 50);
   // v1.187.22 — the in-progress hour missing from the band (it starts at ceil(now)) is carried
   // at the next hour's figures: from 0.5 h, 0.5 h at hour 1's 1.88 kW, then hours 1 and 2.
   const fromNext = hrs.slice(1);
-  assert.equal(r1(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: fromNext, fromMs: 0.5 * H, toMs: 3 * H })!), 45);
+  assert.equal(r1(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: fromNext, fromMs: 0.5 * H, toMs: 3 * H })!), 45);
   // Only the in-progress hour: a missing hour later in the span is no P50 basis.
-  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: [hrs[0], hrs[2]], fromMs: 0.5 * H, toMs: 3 * H }), null);
-  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, hours: hrs.slice(2), fromMs: 0.5 * H, toMs: 3 * H }), null, 'two hours missing');
+  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: [hrs[0], hrs[2]], fromMs: 0.5 * H, toMs: 3 * H }), null);
+  assert.equal(expectedCarryKwh({ startKwh: 50, fullKwh: 100, reserveKwh: 10, dischargeEff: 0.94, legEff: 0.9, hours: hrs.slice(2), fromMs: 0.5 * H, toMs: 3 * H }), null, 'two hours missing');
 });
 
 test('expectedWindowLiftKwh: the contended rate on the median load × legEff × the hour left', () => {
@@ -951,8 +954,11 @@ test('★★ the rationale names the worst-case arrival once, in the sizing sent
     assert.equal(p.rationale.split(t).length - 1, 1, `${name}: ${t} in ${p.rationale}`);
     assert.ok(p.rationale.includes(`projecting ${t} by the window close.`), `${name}: ${p.rationale}`);
   }
-  // The reserve sentence keeps the written reserve and the ask.
-  assert.match(resilience8().rationale, / The reserve is set to 50% — the resilience requirement asks for 69\.5%, but the panel only accepts a backup reserve up to 50%\. /);
+  // The reserve sentence keeps the written reserve and the ask. v1.194.0 — the ask by hand: the line
+  // (16% of 92.16 + 8 h × 1.0 kW × 1.25 / 0.94 = 25.38 kWh) plus the deepest fall of the islanded
+  // P10/P90 walk from 05:00 to 23:00 (38.90 kWh), whose 3.42 kWh of midday surplus is stored at
+  // 0.927: 64.29 kWh = 69.8% (69.5% with the surplus at unity, the figure before v1.194.0).
+  assert.match(resilience8().rationale, / The reserve is set to 50% — the resilience requirement asks for 69\.8%, but the panel only accepts a backup reserve up to 50%\. /);
 });
 
 test('★★★ a window that cannot reach the level: every surface says "toward", never "to"', () => {

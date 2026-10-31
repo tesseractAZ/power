@@ -208,6 +208,8 @@ export const limits = {
  * → pack → AC out): DISPATCH_ROUND_TRIP_EFFICIENCY, clamped to 0.8..1, a blank or NaN reads 0.86. Each
  * leg is √RTE (analytics.ts explains the 0.86). OWNER DECISION 9 keeps it beside the MPC's own 0.9; both
  * values are today's. Module-level: read once when the module loads, as analytics.ts did.
+ * v1.194.0 — it reaches the alarm path too: √RTE is the charge leg the runway, the day and multi-day SoC
+ * walks and the band store a PV surplus at (analytics.ts RUNWAY_CHARGE_EFFICIENCY).
  */
 export const DISPATCH_ROUND_TRIP_EFFICIENCY = option<number>('DISPATCH_ROUND_TRIP_EFFICIENCY');
 

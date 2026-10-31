@@ -275,15 +275,19 @@ load = baseLoad + evLoad
   makes a light day more optimistic. Mirrors the v0.15.17 runway fix.
 
 **(d) SoC integration — v1.26.0 DC-bus balance** (v1.187.19: on the measured basis, with the
-Cores' overhead):
+Cores' overhead; v1.194.0: a surplus through the charge leg):
 
 ```
 basis  = runwayEnergyBasis(devices, shp2, now)          # capacityScale, overheadW (§5.1.3a)
 fullWh = backupFullCapWh · capacityScale                # published as poolFullWh
 socWh  = backupRemainWh · capacityScale                 # starts at the live percent
-socWh  = clamp(0, fullWh, socWh + (pvAlarm − runwayDrainW(load, overheadW)))
+socWh  = clamp(0, fullWh, socWh + chargeLegStep(pvAlarm − runwayDrainW(load, overheadW), η_c))
 socPct = socWh / fullWh · 100
 ```
+
+`chargeLegStep(net, η_c)` is `net` for a deficit and `net × η_c` for a surplus, with
+`η_c = RUNWAY_CHARGE_EFFICIENCY = √DISPATCH_ROUND_TRIP_EFFICIENCY` = 0.927 — the runway's own
+charge leg (chapter 5, step 6).
 
 `runwayDrainW(load, overheadW) = max(load/η, overheadW + load/η_m)` — the same function
 `computeRunway`, the multi-day sim and the probabilistic band use (§5.1.3a). The description
@@ -298,9 +302,11 @@ gross drew for 5.88 kW delivered (ratio 0.945, the measured pack-terminal→AC
 discharge-conversion leg; v1.32.0 corrected an earlier reading of it as the 7-day RTE, a
 different quantity that excludes both conversion legs). The η term applies in every hour,
 not only on net-discharge hours: a deficit drains at `load/η`, and a surplus charges by only
-the DC residual `pv − load/η`. Because `pv − load/η ≤ pv − load` for every `pv` and `load`,
-the sim is never MORE optimistic than pre-v1.26. The outer `min(fullWh, …)` / `max(0, …)`
-is only the pool clamp.
+`η_c` × the DC residual `pv − load/η` (v1.194.0: charging the cells loses energy too; on 29
+measured surplus spans the pool gained 2–7 % less than the residual). Because
+`η_c (pv − load/η) ≤ pv − load/η ≤ pv − load` for every surplus, the sim is never MORE
+optimistic than pre-v1.26, and across a sunny day it now reads lower than before v1.194.0. The
+outer `min(fullWh, …)` / `max(0, …)` is only the pool clamp.
 
 `minProjectedSoc` / `minProjectedSocTs` track the lowest SoC over the horizon —
 these feed the forecast-soc-dip narrative and are bounded by the runtime card.
@@ -666,8 +672,12 @@ pre-v1.187.19 `load/η`:
 
 ```
 fullKwh = netKwh(cur.forecastPvW, cur.forecastLoadW)  /  (dSocPct/100)
-netKwh(pv, load) = (pv − runwayDrainW(load, poolOverheadW ?? 0)) / 1000
+rawNetKwh(pv, load) = (pv − runwayDrainW(load, poolOverheadW ?? 0)) / 1000
+netKwh(pv, load)    = chargeLegStep(rawNetKwh(pv, load), η_c)    // v1.194.0: the trajectory's own charge leg
 ```
+
+Read at unity across a surplus hour, the inversion would recover `poolFull / η_c` (8 % larger)
+and narrow the band.
 
 picking the hour with the largest unclamped `|dSocPct|` (best conditioning;
 skips deltas <0.05 pt, SoC within 0.5 of 0/100, kwhDelta <0.05, candidate outside
@@ -683,13 +693,18 @@ max(1, solarModelSns.length ?? deviceModels.length)` (before v1.187.18 it counte
 sigmaPvKwh   = (p90 − p10)/2000/Z10
 sigmaLoadKwh = PROB_LOAD_SIGMA_FRAC · max(0, forecastLoadW) / 1000    // 0.15 default (env PROB_LOAD_SIGMA_FRAC)
 sigmaNetKwh  = sqrt(sigmaPvKwh² + sigmaLoadKwh²)                       // quadrature within the hour
-dP50Kwh      = netKwh(p50, forecastLoadW)                              // v1.26.0 DC-bus balance (v1.187.19: runwayDrainW)
-stepPct(z)   = (dP50Kwh + z·sigmaNetKwh)/fullKwh · 100
+dP50Kwh      = rawNetKwh(p50, forecastLoadW)                           // v1.26.0 DC-bus balance (v1.187.19: runwayDrainW)
+stepPct(z)   = chargeLegStep(dP50Kwh + z·sigmaNetKwh, η_c)/fullKwh · 100  // v1.194.0: the leg AFTER the spread
 path = clampSoc(path + stepPct(z))                                    // clamp 0..100 per path
 ```
 
 The load-side sigma is essential: PV sigma is 0 at night (multiplicative on PV=0),
 yet load surprise (EV, HVAC) dominates realized overnight spread.
+
+The charge leg is applied per path, after the spread is added: a path whose net is a surplus
+stores `η_c` of it, a path in deficit drains in full. Across a sunny hour the spread itself is
+therefore stored at `η_c` (a band about 7 % narrower there than one stepped at unity), and the
+median path reaches the full rail when the anchor does.
 
 Published SoC anchors to the deterministic curve, band carries only the OFFSET:
 
@@ -769,7 +784,8 @@ forecast (`forecast.pvBiasFactor ?? 1`).
 
 SoC integrated with the same DC-bus balance as the day forecast — on the measured basis
 (`backupFullCapWh`/`backupRemainWh × capacityScale`) with `socWh + (pv − runwayDrainW(load,
-overheadW))` since v1.187.19 — clamped `[0, fullWh]`. Report-only, never an alarm gate. The
+overheadW))` since v1.187.19, a surplus stored at `η_c` (`chargeLegStep`) since v1.194.0 —
+clamped `[0, fullWh]`. Report-only, never an alarm gate. The
 night-charge planner reads only each hour's `pvW`/`loadW` from this report, never `socPct`.
 
 #### Output (`MultiDayForecast`)
@@ -868,6 +884,7 @@ it always holds its default; only a standalone run can set it.
 |---|---|---|---|
 | `PEAK_RESPONSE_MIN_GHI_WM2` | env-only | 300 | brightness floor for `peakCoeff` headline |
 | `RUNWAY_DISCHARGE_EFFICIENCY` | env-only | 0.94 (clamp 0.80–1.0) | η in DC-bus SoC balance `load/η` |
+| `DISPATCH_ROUND_TRIP_EFFICIENCY` | env-only | 0.86 (clamp 0.80–1.0) | v1.194.0 — its square root (0.927) is the charge leg `η_c` a surplus hour is stored at, in the day and multi-day SoC walks and the band (and the runway) |
 | `RUNWAY_POOL_OVERHEAD_FLOOR_W` | add-on (optional) | 270 (clamp 0–1500) | v1.187.19 — the pool overhead added to `load/η` never falls below this while the panel reports a pool (§5.1.3a); the reference plant's figure, fitted on three Cores |
 | `RUNWAY_CORE_OVERHEAD_W` | add-on (optional) | 90 (clamp 0–500) | v1.187.19 — × connected Cores; raises the overhead above the floor for a pool of more than three Cores (§5.1.3a) |
 | `RUNWAY_DRAIN_MARGINAL_EFFICIENCY` | env-only | 0.94 (clamp 0.80–1.0) | v1.187.19 — η_m in `overheadW + load/η_m`; the `max()` keeps the drain ≥ `load/η` |

@@ -22,19 +22,34 @@ import {
  * hold. Each is a no-op on the overnight leg, where there is no sun. Nothing live consumes the
  * mid-day leg yet, so every plan the add-on makes must be the one it made before R2, byte for byte.
  *
- * legacyIdentity.golden.json holds the digest (JSON and key list) of 1,104 plans as the planner
- * produced them at 4d10c53, the tree before R2: a year of live-shaped evenings, middays and
- * mid-window recomputes (legacyIdentityFixtures.ts), and the 2026-10-12 and 2026-09-29/30 nights.
+ * legacyIdentity.golden.json holds the digest (JSON and key list) of 1,104 plans: a year of
+ * live-shaped evenings, middays and mid-window recomputes (legacyIdentityFixtures.ts), and the
+ * 2026-10-12 and 2026-09-29/30 nights. They were produced at 4d10c53, the tree before R2, and R2
+ * reproduced every one.
+ *
+ * v1.194.0 — REGENERATED, deliberately. The planner's walks now store a PV surplus at the charge
+ * leg (legEff, physics/chargeLeg.ts) instead of at unity, and the walks that cross a sunny day (the
+ * post-window trough, a 13:00 recompute's carry to the window) moved: 472 of the 1,104 digests.
+ * What it may move, and in which direction, is pinned below against the figures the planner
+ * produced at 3fc751c3 (legacyIdentity.v1192.figures.json); the digests then hold the new plans
+ * byte for byte, as they held the old ones.
  */
 
-const GOLDEN = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures/legacyIdentity.golden.json'), 'utf8')) as {
+const HERE = dirname(fileURLToPath(import.meta.url));
+const GOLDEN = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.golden.json'), 'utf8')) as {
   generatedAt: string;
   digests: Record<string, string>;
+};
+/** v1.194.0 — per case, the plan before the charge leg: [chargeTonight (1/0), buyKwh,
+ *  expectedBuyKwh, setpointSocPct, requiredExtraKwh, targetSocPct] at 3fc751c3 (v1.192.0). */
+const BEFORE_CHARGE_LEG = JSON.parse(readFileSync(resolve(HERE, 'fixtures/legacyIdentity.v1192.figures.json'), 'utf8')) as {
+  generatedAt: string;
+  figures: Record<string, [number, number | null, number | null, number | null, number | null, number | null]>;
 };
 const H = 3_600_000;
 const plan = (deps: Parameters<typeof buildNightChargeInputs>[0]): NightChargePlan => computeNightChargePlan(buildNightChargeInputs(deps));
 
-test('★★★ a year of overnight plans is byte-identical to the planner before R2 (no spec)', () => {
+test('★★★ a year of overnight plans is byte-identical to the golden (no spec)', () => {
   const got = legacyIdentityDigests();
   const labels = Object.keys(GOLDEN.digests);
   assert.equal(labels.length, 1104);
@@ -61,6 +76,51 @@ test('★★ ... and with a spec that pins the window the resolver finds, carrie
   });
   const moved = Object.keys(GOLDEN.digests).filter((l) => got[l] !== GOLDEN.digests[l]);
   assert.deepEqual(moved, []);
+});
+
+test('★★★ v1.194.0 — the charge leg moves the year only toward buying more: no buy, no expected buy and no requirement falls', () => {
+  // Against the planner at 3fc751c3, which credited a PV surplus at unity. A surplus stored at
+  // legEff leaves every walk at or below where it was, so the trough the buy is sized on can only
+  // fall and the buy can only rise. A setpoint may fall in two shapes only: a charge night whose
+  // requirement rose but whose window cannot deliver more (the setpoint is the arrival, from a
+  // lower pack at the open — the buy itself is unchanged), and a hold (nothing armed, nothing
+  // required) whose setpoint is the no-buy pack at the close, which the charge leg lowers.
+  const labels = Object.keys(GOLDEN.digests);
+  assert.equal(BEFORE_CHARGE_LEG.generatedAt, '3fc751c3');
+  assert.deepEqual(Object.keys(BEFORE_CHARGE_LEG.figures), labels, 'the same cases, in the same order');
+  const plans = new Map(legacyIdentityCases().map((c) => [c.label, plan(c.deps)]));
+  const ge = (a: number | null | undefined, b: number | null, what: string, l: string): void => {
+    if (b == null) { assert.equal(a ?? null, null, `${l}: ${what} appeared`); return; }
+    assert.ok(a != null && a >= b - 1e-9, `${l}: ${what} ${b} → ${a}`);
+  };
+  let buyRose = 0, expectedRose = 0, holdToCharge = 0, setpointFell = 0, setpointMoved = 0;
+  let maxBuyRise = 0;
+  for (const l of labels) {
+    const [charge0, buy0, exp0, sp0, req0, tgt0] = BEFORE_CHARGE_LEG.figures[l];
+    const p = plans.get(l)!;
+    ge(p.buyKwh, buy0, 'buyKwh', l);
+    ge(p.expectedBuyKwh, exp0, 'expectedBuyKwh', l);
+    ge(p.requiredExtraKwh, req0, 'requiredExtraKwh', l);
+    assert.ok(!(charge0 === 1 && !p.chargeTonight), `${l}: a charge night became a hold`);
+    if (charge0 === 0 && p.chargeTonight) holdToCharge += 1;
+    if (buy0 != null && p.buyKwh! > buy0 + 1e-9) { buyRose += 1; maxBuyRise = Math.max(maxBuyRise, p.buyKwh! - buy0); }
+    if (exp0 != null && p.expectedBuyKwh! > exp0 + 1e-9) expectedRose += 1;
+    if (sp0 == null) { assert.equal(p.setpointSocPct ?? null, null, l); continue; }
+    if (p.setpointSocPct !== sp0) setpointMoved += 1;
+    if (p.setpointSocPct! < sp0 - 1e-9) {
+      setpointFell += 1;
+      const windowBound = p.chargeTonight && p.requiredExtraKwh! > req0! + 1e-9 && p.buyKwh === buy0 && p.setpointSocPct === p.targetSocPct;
+      const holdArrival = !p.chargeTonight && p.requiredExtraKwh === 0 && p.setpointSocPct === p.targetSocPct && p.targetSocPct! < tgt0!;
+      assert.ok(windowBound || holdArrival, `${l}: setpoint ${sp0} → ${p.setpointSocPct} (requirement ${req0} → ${p.requiredExtraKwh}, buy ${buy0} → ${p.buyKwh})`);
+    }
+  }
+  // The year as measured when the change was made: 95 buys rise (by up to 2.84 kWh), 118 expected
+  // buys rise, one hold becomes a charge (0.96 → 1.49 kWh, over the 1 kWh minimum buy), and 264
+  // setpoints move, 16 of them down.
+  assert.deepEqual({ buyRose, expectedRose, holdToCharge, setpointMoved, setpointFell }, { buyRose: 95, expectedRose: 118, holdToCharge: 1, setpointMoved: 264, setpointFell: 16 });
+  assert.ok(Math.abs(maxBuyRise - 2.84) < 0.005, `largest buy rise ${maxBuyRise}`);
+  const flipped = labels.filter((l) => BEFORE_CHARGE_LEG.figures[l][0] === 0 && plans.get(l)!.chargeTonight);
+  assert.deepEqual(flipped.map((l) => [l, BEFORE_CHARGE_LEG.figures[l][1], plans.get(l)!.buyKwh]), [['2027-08-25 21:30', 0.96, 1.49]]);
 });
 
 test('★★ the cases are not vacuous: buys, holds, force-charge starts, cost and resilience, null plans, mid-window', () => {
