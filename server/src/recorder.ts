@@ -6,7 +6,7 @@ import { siteCoordinates } from './site.js';
 import { SnapshotStore, FleetSnapshot, type DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
-import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns, findShp2 } from './shp2Membership.js';
+import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns, findShp2, connectedSlotMap, allShp2s, shp2ReadbackFresh } from './shp2Membership.js';
 import { loadMembershipHistory, saveMembershipHistory, recordMembership } from './membershipHistory.js';
 // v1.38.0 (WS2) — site calendar-date resolution for the night-charge ledger read cutoff: the same
 // site-local YYYY-MM-DD key the ledger stores plan_date as (v1.191.0, T7: siteTime.ts, was a literal).
@@ -4013,7 +4013,12 @@ export function createRecorder(
     // fingerprint matches the newest entry), and recording the STATE rather than
     // the EVENT is what makes the first entry appear on a stable plant at all —
     // the same trap that made v1.96.0/v1.97.0's floor repair unreachable.
-    if (recordMembership(membershipHistory, membershipFp, now)) {
+    // v1.196.0 — with the panel's slot table, which tells a like-for-like swap from an addition
+    // (the forecast-skill hindcast scores a day before a swap on that day's Cores), and confirmed
+    // only by a fresh reading of every panel (shp2ReadbackFresh): a cloud-offline panel keeps its
+    // last projection verbatim, so its fingerprint says who WAS in the pool, not who is.
+    const panelsFresh = allShp2s(snap.devices).every((panel) => shp2ReadbackFresh(panel, now));
+    if (recordMembership(membershipHistory, membershipFp, now, connectedSlotMap(snap.devices), panelsFresh)) {
       saveMembershipHistory(MEMBERSHIP_HISTORY_PATH, membershipHistory);
     }
     const sustained = pendingMembership != null && pendingMembership.rollups >= MEMBERSHIP_SUSTAINED_ROLLUPS;

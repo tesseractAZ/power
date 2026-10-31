@@ -194,17 +194,26 @@ test('bias gate — excluded days are reported ONCE per (day, core), then dedupe
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
- * v1.93.0 — skipBeforeJoin: the two consumers of coreCoverageByDay want
- * different things from a core that produced NOTHING anywhere in the window.
+ * v1.93.0 / v1.94.0 — skipBeforeJoin, and v1.196.0 — its removal.
  *
  * MOTIVATING INCIDENT (2026-08-20). A physical reconfiguration put two cores
  * into the PV-hindcast core set for the first time, with zero history behind
  * them. Under the strict gate every one of the 30 hindcast days was marked a
  * coverage gap, which nulls each day's errorPct, which emptied calErrs and drove
  * calScoredDays 26 -> 0 against a hard floor of 14. `basisComplete` went false
- * and the night-charge planner produced NO plan for 14 nights — while the
- * pv-bias factor, the only consumer the strict posture was ever reasoned about,
- * merely degraded to its intended neutral 1.0.
+ * and the night-charge planner produced NO plan for 14 nights. v1.93.0/v1.94.0
+ * answered it by exempting a core on the skill path until its first in-window
+ * sample ("had not joined yet").
+ *
+ * v1.196.0 removes the exemption. "No rows yet" is also what a blackout already
+ * running when the window began produces, and what Cores returning on different
+ * days after a fleet-wide outage produce; the dark Core's missing share was then
+ * scored as a forecast miss. Which Cores a past day is measured on now comes
+ * from the membership record (skillRosterByDay, skillRoster.test.ts), and
+ * coreCoverageByDay holds every Core it is given for a day to the same rule:
+ * every SN in the map by default (the pv-bias factor), or the SNs `coresOn`
+ * names for that day (the skill hindcast). The tests below that asserted the
+ * exemption now assert the opposite, and say so.
  * ═══════════════════════════════════════════════════════════════════════ */
 
 test('coreCoverageByDay — a NEVER-reporting core fails every day under the strict (pv-bias) default', () => {
@@ -220,80 +229,84 @@ test('coreCoverageByDay — a NEVER-reporting core fails every day under the str
   assert.equal(cov.get(TODAY_START - 3 * DAY_MS)!.worstSn, 'NEWCORE');
 });
 
-test('coreCoverageByDay — skipBeforeJoin excludes it, so the skill path can still score the window', () => {
+test('coreCoverageByDay — v1.196.0: a never-reporting core a day is MEASURED on fails it; one the day is not measured on does not', () => {
+  // v1.94.0 asserted here that skipBeforeJoin made every day covered with NEWCORE
+  // present and silent. That exemption is gone: a day measured on NEWCORE has no
+  // NEWCORE rows and is a gap. A day the record says NEWCORE was not in the pool
+  // is simply not measured on it (`coresOn`).
   const ghi = ghiWindow(7);
   const pvBySn = new Map([
     ['A', snSamples(7, () => 500)],
     ['NEWCORE', [] as Array<{ ts: number; value: number }>],
   ]);
-  const cov = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true);
+  const onBoth = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, () => ['A', 'NEWCORE']);
+  const onA = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, () => ['A']);
   for (let i = 7; i >= 1; i--) {
-    assert.equal(cov.get(TODAY_START - i * DAY_MS)!.covered, true, `day-${i} scoreable once the absent core is skipped`);
+    assert.equal(onBoth.get(TODAY_START - i * DAY_MS)!.covered, false, `day-${i}: measured on NEWCORE, which has no rows`);
+    assert.equal(onA.get(TODAY_START - i * DAY_MS)!.covered, true, `day-${i}: not measured on NEWCORE`);
   }
 });
 
-test('coreCoverageByDay — skipBeforeJoin still fails a day a REPORTING core actually missed', () => {
-  // The relaxation must not become "ignore all gaps": a core with history that
-  // went dark for one day is a real coverage gap and must still fail that day.
+test('coreCoverageByDay — a day a REPORTING core actually missed is a gap', () => {
   const ghi = ghiWindow(7);
   const pvBySn = new Map([
     ['A', snSamples(7, () => 500)],
     ['B', snSamples(7, (i) => (i === 3 ? null : 500))],   // real one-day blackout
     ['NEWCORE', [] as Array<{ ts: number; value: number }>],
   ]);
-  const cov = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true);
-  assert.equal(cov.get(TODAY_START - 3 * DAY_MS)!.covered, false, "B's real blackout still fails");
+  const cov = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, () => ['A', 'B']);
+  assert.equal(cov.get(TODAY_START - 3 * DAY_MS)!.covered, false, "B's real blackout fails");
   assert.equal(cov.get(TODAY_START - 3 * DAY_MS)!.worstSn, 'B');
   assert.equal(cov.get(TODAY_START - 5 * DAY_MS)!.covered, true, 'other days unaffected');
 });
 
-test('coreCoverageByDay — a core whose only samples fall OUTSIDE the window counts as never-reporting', () => {
+test('coreCoverageByDay — a core whose only samples fall OUTSIDE the window reported nothing inside it', () => {
   const ghi = ghiWindow(7);
   const stale = [{ ts: TODAY_START - 60 * DAY_MS, value: 500 }]; // ancient, well outside
   const pvBySn = new Map([
     ['A', snSamples(7, () => 500)],
     ['OLD', stale],
   ]);
+  // v1.94.0 also asserted that the skill path read this core as never having
+  // joined (covered: true). No rows inside the window is a gap on every path.
   assert.equal(coreCoverageByDay(ghi, pvBySn, TODAY_START, 7).get(TODAY_START - 2 * DAY_MS)!.covered, false);
-  assert.equal(
-    coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true).get(TODAY_START - 2 * DAY_MS)!.covered, true,
-    'out-of-window-only history is the same case as no history',
-  );
+  assert.equal(coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, () => ['A', 'OLD']).get(TODAY_START - 2 * DAY_MS)!.covered, false);
 });
 
-/* v1.94.0 — the case v1.93.0 got WRONG. Skipping only cores with ZERO in-window
- * samples fixed nothing in practice: the moment the newly-added core logged its
- * first day, it stopped being "never reporting" and every one of its earlier
- * absent days became a coverage gap again. Verified live — basisComplete was
- * still false after v1.93.0 deployed. The gate must be per-DAY against each
- * core's first in-window sample. */
-
-test('coreCoverageByDay — a core that JOINS mid-window does not retro-gap the days before it joined', () => {
+test('coreCoverageByDay — v1.196.0: the days before a core\'s first row ARE gaps when the day is measured on it', () => {
+  // INVERTED from v1.94.0 ("a core that JOINS mid-window does not retro-gap the
+  // days before it joined"). That reading cannot tell a join from a blackout
+  // already running when the window began. Measured on NEWCORE, its silent days
+  // are gaps; the membership record, not the telemetry, decides whether a day is
+  // measured on it (coresOn), and a model fitted on three Cores is not scored
+  // against two.
   const ghi = ghiWindow(7);
   // NEWCORE reports only on the two most recent days (i = 2 and 1).
   const joined = snSamples(7, (i) => (i <= 2 ? 500 : null));
   const pvBySn = new Map([['A', snSamples(7, () => 500)], ['NEWCORE', joined]]);
 
   const strict = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7);
-  assert.equal(strict.get(TODAY_START - 5 * DAY_MS)!.covered, false,
-    'strict (pv-bias) still gaps the pre-join days — unchanged, by design');
-
-  const skill = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true);
+  const recorded = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined,
+    (d) => (d >= TODAY_START - 2 * DAY_MS ? ['A', 'NEWCORE'] : ['A']));
   for (const i of [7, 6, 5, 4, 3]) {
-    assert.equal(skill.get(TODAY_START - i * DAY_MS)!.covered, true,
-      `day-${i} predates NEWCORE joining and must stay scoreable`);
+    assert.equal(strict.get(TODAY_START - i * DAY_MS)!.covered, false, `day-${i}: NEWCORE silent`);
+    assert.equal(strict.get(TODAY_START - i * DAY_MS)!.worstSn, 'NEWCORE');
+    assert.equal(recorded.get(TODAY_START - i * DAY_MS)!.covered, true, `day-${i}: not measured on NEWCORE`);
   }
-  assert.equal(skill.get(TODAY_START - 2 * DAY_MS)!.covered, true, 'first joined day covered');
-  assert.equal(skill.get(TODAY_START - 1 * DAY_MS)!.covered, true, 'second joined day covered');
+  for (const i of [2, 1]) {
+    assert.equal(strict.get(TODAY_START - i * DAY_MS)!.covered, true, `day-${i}: both report`);
+    assert.equal(recorded.get(TODAY_START - i * DAY_MS)!.covered, true);
+  }
 });
 
-test('coreCoverageByDay — once joined, a core IS held to the requirement on later days', () => {
+test('coreCoverageByDay — once measured on a core, its later blackout is a gap', () => {
   const ghi = ghiWindow(7);
-  // Joins on day 5, then blacks out on day 2 — that blackout is a real gap.
+  // In the pool from day 5, then blacks out on day 2 — that blackout is a real gap.
   const flaky = snSamples(7, (i) => (i > 5 ? null : i === 2 ? null : 500));
   const pvBySn = new Map([['A', snSamples(7, () => 500)], ['LATE', flaky]]);
-  const skill = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true);
-  assert.equal(skill.get(TODAY_START - 6 * DAY_MS)!.covered, true, 'pre-join day scoreable');
-  assert.equal(skill.get(TODAY_START - 2 * DAY_MS)!.covered, false, 'post-join blackout is a REAL gap');
-  assert.equal(skill.get(TODAY_START - 2 * DAY_MS)!.worstSn, 'LATE');
+  const cov = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined,
+    (d) => (d >= TODAY_START - 5 * DAY_MS ? ['A', 'LATE'] : ['A']));
+  assert.equal(cov.get(TODAY_START - 6 * DAY_MS)!.covered, true, 'a day before it was in the pool');
+  assert.equal(cov.get(TODAY_START - 2 * DAY_MS)!.covered, false, 'its blackout is a REAL gap');
+  assert.equal(cov.get(TODAY_START - 2 * DAY_MS)!.worstSn, 'LATE');
 });
