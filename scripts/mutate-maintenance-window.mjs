@@ -16,6 +16,11 @@
  *                         what is still active; the home guard's stable set; an absorbed gap keeps its
  *                         window; a lapsed window is settled before a start; an unsaved end removes
  *                         the file; the call sites in the monitor; Home Assistant's End-all button)
+ *   Owed       xxviii..xxxix (v1.197.0 integration review: the all-clear a shelved critical holds back
+ *                         is owed, not dropped — owed at the gate, the spoken retry, the storm-gated
+ *                         re-present and the deferred retry, held while a shelved critical stands, the
+ *                         flicker dwell, dropped behind the reserve floor, a settled set after a
+ *                         restart, the record and its age, cancelled by a commit)
  *
  *   node scripts/mutate-maintenance-window.mjs
  *
@@ -33,7 +38,7 @@ const BC = resolve(SERVER, 'src/broadcast.ts');
 const AM = resolve(SERVER, 'src/alertMonitor.ts');
 const MQ = resolve(SERVER, 'src/mqttDiscovery.ts');
 
-const SUBSET = ['test/maintenanceWindow.test.ts', 'test/maintenanceWiring.test.ts', 'test/maintenanceMqtt.test.ts'];
+const SUBSET = ['test/maintenanceWindow.test.ts', 'test/maintenanceWiring.test.ts', 'test/maintenanceMqtt.test.ts', 'test/maintenanceOwedAllClear.test.ts'];
 
 const MUTANTS = [
   {
@@ -224,6 +229,90 @@ const MUTANTS = [
     find: '        client.subscribe(MAINTENANCE_END_ALL_TOPIC, { qos: 0 }, (err) => {',
     to: '        if (false) client.subscribe(MAINTENANCE_END_ALL_TOPIC, { qos: 0 }, (err) => { /* MUTANT */',
     why: 'The button is in Home Assistant but the broker never forwards its press.',
+  },
+  {
+    id: 'xxviii. ★★★ the all-clear a shelved critical holds back is dropped, not owed',
+    file: BC,
+    find: "      oweShelvedAllClear(shelvedCriticalStands(alerts), 'green adopted silently');",
+    to: '      /* MUTANT */',
+    why: 'A red heard, its Core shelved, the fault fixed inside the window: "All clear" is never said, and the last words in the house stay a red that has cleared.',
+  },
+  {
+    id: 'xxix. ★★★ the owed all-clear is never said',
+    file: BC,
+    find: "? { action: 'speak' } : { action: 'wait', openSinceMs };",
+    to: "? { action: 'wait', openSinceMs } : { action: 'wait', openSinceMs }; /* MUTANT */",
+    why: 'The all-clear is owed and on record, and nothing ever says it.',
+  },
+  {
+    id: 'xxx. ★★ no flicker guard: the owed all-clear is said the tick the gate opens',
+    file: BC,
+    find: 'p.nowMs - from >= (p.dwellMs ?? CONDITION_CLEAR_DWELL_MS)',
+    to: 'p.nowMs - from >= 0 /* MUTANT */',
+    why: 'The held critical missing from one publish says "All clear", and the fault is still on the card the next tick.',
+  },
+  {
+    id: 'xxxi. ★★★ a shelved critical does not hold the owed all-clear (dropped behind it)',
+    file: BC,
+    find: "  if (p.level !== 'green' || p.shelved) return { action: 'wait', openSinceMs: null };",
+    to: "  if (p.level !== 'green') return { action: 'wait', openSinceMs: null }; /* MUTANT */",
+    why: 'The first tick after the green commits drops the all-clear behind the very critical that made it owed.',
+  },
+  {
+    id: "xxxii. ★★★ 'All clear' over the reserve floor once the shelved critical clears",
+    file: BC,
+    find: "  if (p.blocked) return { action: 'drop',",
+    to: "  if (false) return { action: 'drop', /* MUTANT */",
+    why: '"All clear. All stations report normal." while the runway alarm announces a critical at the reserve floor on the same speakers.',
+  },
+  {
+    id: "xxxiii. ★★★ a restored owed all-clear is said on an unsettled set",
+    file: BC,
+    find: '  if (p.restored && p.settledSinceMs == null) return { action: \'wait\', openSinceMs };',
+    to: '  /* MUTANT */',
+    why: 'After a restart inside the window, the empty boot store reads green with no shelved critical in it: "All clear" over a fault still shelved.',
+  },
+  {
+    id: 'xxxiv. ★★ the owed all-clear is not written with the record',
+    file: BC,
+    find: 'shelvedAllClearOwedAt: shelvedAllClearOwed?.sinceMs ?? null, // v1.197.0 (review) (restoredShelvedAllClear)',
+    to: 'shelvedAllClearOwedAt: null, /* MUTANT */',
+    why: 'The host restarts daily: a restart inside the window loses the owed all-clear, and with it the last words.',
+  },
+  {
+    id: 'xxxv. ★★ a commit does not cancel the owed all-clear',
+    file: BC,
+    find: '    shelvedAllClearOwed = null; // cancelled by the commit',
+    to: '    /* MUTANT */',
+    why: 'A red committed at the window\'s end leaves the old owed all-clear on record: after a restart it is said for a level the house has since left.',
+  },
+  {
+    id: "xxxvi. ★★ the all-clear's spoken retry gated by a shelved critical is dropped",
+    file: BC,
+    find: "      if (allClearGated && levelOk) oweShelvedAllClear(shelvedCriticalStands(alerts), 'the all-clear\\'s spoken retry gated');",
+    to: '      /* MUTANT */',
+    why: 'The all-clear sounded as the tone alone; its words, held back by a critical shelved in the 90 s before the retry, are never said.',
+  },
+  {
+    id: 'xxxvii. ★ an owed all-clear of any age is resumed after a restart',
+    file: BC,
+    find: '  if (at < bootMs - maxAgeMs) return null;',
+    to: '  /* MUTANT */',
+    why: 'A record days old says "All clear" at the next boot, for a window long over.',
+  },
+  {
+    id: "xxxviii. ★★ a storm-gated all-clear's re-present held back by a shelved critical is dropped",
+    file: BC,
+    find: "          if (held.level === 'green' && level === 'green' && cfg.enabled) oweShelvedAllClear(shelvedCriticalStands(alerts), `the ${deferredName(held)} gated`);",
+    to: '          /* MUTANT */',
+    why: 'The all-clear the storm gate refused 90 s after the red is never re-presented once a Core faults and is shelved in the gap: the red stays the last words.',
+  },
+  {
+    id: "xxxix. ★★ an all-clear's deferred retry held back by a shelved critical is dropped",
+    file: BC,
+    find: "      if (w.action === 'drop') return { drop: w.reason, shelvedGate: level === 'green' && shelvedCriticalStands(speakable) };",
+    to: "      if (w.action === 'drop') return { drop: w.reason }; /* MUTANT */",
+    why: 'The all-clear that failed at the speakers is never retried once a Core is shelved before its retry: nobody heard it.',
   },
 ];
 

@@ -79,6 +79,7 @@ import { resolveChime } from './chimeConfig.js';
 import { buildAlertMessage, buildAlertMessageEs, priorityAnnouncementPrefixEs, pickPrimaryAlert } from './ttsService.js';
 import { getBroadcastRuntimeConfig, onBroadcastRuntimeConfigChange } from './broadcastRuntimeConfig.js';
 import { setBroadcastHealth } from './broadcastHealth.js';
+import { MAINT_MAX_MS } from './maintenanceWindow.js';
 
 /**
  * v1.166.0 — the all-clear SPEECH gate (v1.17.0), extracted so it can be tested.
@@ -89,13 +90,92 @@ import { setBroadcastHealth } from './broadcastHealth.js';
  * worst sentence these speakers could say. Found by the v1.166.0 pre-merge review: the
  * hold's annunciate=false made this gate stop seeing the blind alert.
  * v1.197.0 — nor while a critical is held by a maintenance window (Alert.shelvedUntilMs): shelved is
- * held, not cleared, and the Core's critical is pushed and announced when the window ends.
+ * held, not cleared. The Core's critical is pushed and announced when the window ends if it still
+ * stands; v1.197.0 (review) — the all-clear held back meanwhile is owed (shelvedAllClearStep).
  */
 export function allClearSpeechBlocked(
   alerts: ReadonlyArray<Pick<Alert, 'id' | 'severity' | 'annunciate' | 'shelvedUntilMs'>>,
 ): boolean {
   return alerts.some((a) =>
     a.severity === 'critical' && (a.annunciate !== false || a.id === TELEMETRY_BLIND_ALERT_ID || a.shelvedUntilMs != null));
+}
+
+/**
+ * v1.197.0 (review) — a critical a maintenance window holds stands among `alerts` (Alert.shelvedUntilMs):
+ * what makes an all-clear the gate above holds back OWED rather than dropped (shelvedAllClearStep). The
+ * gate's other criticals are audible on their own paths (the runway alarm's reserve floor, the
+ * telemetry-blind alarm), and the all-clear they hold back is dropped, as before. A shelved critical is
+ * silent, set by hand, and lasts up to 4 h: dropped behind it, the all-clear of a red the house heard
+ * (heard, its Core shelved, the fault then fixed inside the window) was never said, and the last words
+ * stayed a red that had cleared. Pure + exported for tests.
+ */
+export function shelvedCriticalStands(alerts: ReadonlyArray<Pick<Alert, 'severity' | 'shelvedUntilMs'>>): boolean {
+  return alerts.some((a) => a.severity === 'critical' && a.shelvedUntilMs != null);
+}
+
+/**
+ * v1.197.0 (review) — the longest an all-clear a shelved critical held back stays owed across a restart
+ * (restoredShelvedAllClear), from when it became owed: a window holds its Core for at most MAINT_MAX_MS,
+ * so the window that held it back has ended by then. In one process it stays owed for as long as a
+ * shelved critical stands.
+ */
+export const SHELVED_ALLCLEAR_RESTORE_MAX_AGE_MS = MAINT_MAX_MS;
+
+/**
+ * v1.197.0 (review) — THE ALL-CLEAR A SHELVED CRITICAL HELD BACK, one tick of it. While the committed
+ * level is green and the all-clear is owed (a green the speech gate held back with a shelved critical
+ * among those that gate it: the tick's own green, a storm-gated green's re-present, the all-clear's spoken
+ * retry or its deferred retry — oweShelvedAllClear):
+ *  - the condition is not green, or a shelved critical stands → wait, the open clock reset (null);
+ *  - no shelved critical, but the gate still holds (an audible critical the condition does not count,
+ *    such as the reserve floor, or the held telemetry-blind alarm) → drop, as that gate drops it;
+ *  - the gate open → spoken once it has been open `dwellMs` (the de-escalation's flicker guard: a held
+ *    critical missing from one publish is no all-clear). For one restored after a restart, measured from
+ *    the later of the open clock and the alert monitor's settled stamp, and never on an unsettled set:
+ *    a boot store not yet populated reads green with no shelved critical in it.
+ * Quiet hours and the storm gates are the caller's, as for any green. Pure + exported for tests.
+ */
+export type ShelvedAllClearStep =
+  | { action: 'wait'; openSinceMs: number | null }
+  | { action: 'speak' }
+  | { action: 'drop'; reason: string };
+export function shelvedAllClearStep(p: {
+  level: ConditionLevel;
+  /** allClearSpeechBlocked on the tick's alerts */
+  blocked: boolean;
+  /** shelvedCriticalStands on the tick's alerts */
+  shelved: boolean;
+  openSinceMs: number | null;
+  restored: boolean;
+  settledSinceMs: number | null;
+  nowMs: number;
+  dwellMs?: number;
+}): ShelvedAllClearStep {
+  if (p.level !== 'green' || p.shelved) return { action: 'wait', openSinceMs: null };
+  if (p.blocked) return { action: 'drop', reason: 'no shelved critical stands, but a critical whose all-clear the gate drops does (the reserve floor, or the held telemetry-blind alarm)' };
+  const openSinceMs = p.openSinceMs ?? p.nowMs;
+  if (p.restored && p.settledSinceMs == null) return { action: 'wait', openSinceMs };
+  const from = p.restored ? Math.max(openSinceMs, p.settledSinceMs ?? openSinceMs) : openSinceMs;
+  return p.nowMs - from >= (p.dwellMs ?? CONDITION_CLEAR_DWELL_MS) ? { action: 'speak' } : { action: 'wait', openSinceMs };
+}
+
+/**
+ * v1.197.0 (review) — the owed all-clear on record (`shelvedAllClearOwedAt`, broadcast-last.json) a boot
+ * resumes: when it became owed, if the record's committed level is green (a later commit rewrote it
+ * otherwise), it is a finite time at most `maxAgeMs` before the boot (inclusive), and never later than
+ * the boot (a clock stepped back does not renew it); else null. A restart inside a window (the host
+ * restarts daily) lost it, and with it the all-clear. Pure + exported for tests.
+ */
+export function restoredShelvedAllClear(
+  rec: { conditionLevel?: unknown; shelvedAllClearOwedAt?: unknown } | null | undefined,
+  bootMs: number,
+  maxAgeMs = SHELVED_ALLCLEAR_RESTORE_MAX_AGE_MS,
+): number | null {
+  if (rec == null || rec.conditionLevel !== 'green') return null;
+  const at = rec.shelvedAllClearOwedAt;
+  if (typeof at !== 'number' || !Number.isFinite(at)) return null;
+  if (at < bootMs - maxAgeMs) return null;
+  return Math.min(at, bootMs);
 }
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate + per-priority preview.
 // A priority turned off on the Alert Settings page must never trigger the
@@ -1282,6 +1362,9 @@ export interface BroadcastStatus {
    *  the hold stands (restoredHeldDeescalation: a restart inside it still owes the all-clear); null
    *  when none is held. */
   conditionHeldFrom: ConditionLevel | null;
+  /** v1.197.0 (review) — when an all-clear a shelved critical held back became owed (shelvedAllClearStep),
+   *  written with the record while it is owed; null when none is. */
+  shelvedAllClearOwedAt: number | null;
   /** v0.9.70 — diagnostic from the most recent render. */
   lastRender: {
     filename: string | null;
@@ -1778,6 +1861,11 @@ export function startBroadcastMonitor(
    *  and start, written with the record so a restart inside the hold still owes the all-clear. Kept
    *  apart from deescalationHold, which is declared after persistStatus. */
   let conditionHeldOwed: { from: ConditionLevel; atMs: number } | null = null;
+  /** v1.197.0 (review) — an all-clear a shelved critical held back (shelvedAllClearStep): when it became
+   *  owed, since when the gate has stood open (null: not open), and whether it was restored at the boot.
+   *  Written with the record (`shelvedAllClearOwedAt`); cleared by any commit. Declared before
+   *  persistStatus, which reads it. */
+  let shelvedAllClearOwed: { sinceMs: number; openSinceMs: number | null; restored: boolean } | null = null;
   // v1.187.0 — the last storm-gate suppression (see BroadcastStatus.lastSuppressedAt).
   let lastSuppressedAt: number | null = null;
   let lastSuppressedLevel: ConditionLevel | null = null;
@@ -1804,6 +1892,7 @@ export function startBroadcastMonitor(
           lastBroadcastAt, lastLevel, lastOutcome, lastErrors, lastSpokenMessage, lastRender,
           lastBroadcastKind, conditionLevel, conditionSpoken, conditionAt, // v1.186.0
           conditionHeldFrom: conditionHeldOwed?.from ?? null, conditionHeldAt: conditionHeldOwed?.atMs ?? null, // v1.195.0
+          shelvedAllClearOwedAt: shelvedAllClearOwed?.sinceMs ?? null, // v1.197.0 (review) (restoredShelvedAllClear)
           lastSuppressedAt, lastSuppressedLevel, lastSuppressedKind, lastSuppressedReason, // v1.187.0
           soundedCrit: Object.fromEntries(soundedCritKept().map(([f, at]) => [f, soundedCritRestoredAt.get(f) ?? at])), // v1.187.3 (restoreSoundedCriticals)
         }),
@@ -1811,7 +1900,7 @@ export function startBroadcastMonitor(
     } catch { /* best-effort */ }
     soundedCritWritten = { keys: soundedCritKeys(), atMs: Date.now() };
   };
-  let persistedCondition: { conditionLevel?: unknown; conditionSpoken?: unknown; conditionHeldFrom?: unknown; conditionHeldAt?: unknown } | null = null;
+  let persistedCondition: { conditionLevel?: unknown; conditionSpoken?: unknown; conditionHeldFrom?: unknown; conditionHeldAt?: unknown; shelvedAllClearOwedAt?: unknown } | null = null;
   let persistedSoundedCrit: unknown = undefined; // v1.187.3 (restoreSoundedCriticals)
   try {
     const s = JSON.parse(readFileSync(STATUS_PATH, 'utf8')) as Partial<{
@@ -1820,6 +1909,7 @@ export function startBroadcastMonitor(
       lastBroadcastKind: BroadcastStatus['lastBroadcastKind'];
       conditionLevel: unknown; conditionSpoken: unknown; conditionAt: unknown;
       conditionHeldFrom: unknown; conditionHeldAt: unknown; // v1.195.0 (restoredHeldDeescalation)
+      shelvedAllClearOwedAt: unknown; // v1.197.0 (review) (restoredShelvedAllClear)
       lastSuppressedAt: unknown; lastSuppressedLevel: unknown; lastSuppressedKind: unknown; lastSuppressedReason: unknown;
       soundedCrit: unknown;
     }>;
@@ -1864,6 +1954,15 @@ export function startBroadcastMonitor(
    */
   const restoredOwed = restoredHeldDeescalation(persistedCondition, bootMs);
   conditionHeldOwed = restoredOwed;
+  // v1.197.0 (review) — an all-clear a shelved critical held back, owed when the add-on stopped
+  // (restoredShelvedAllClear): resumed, said only on a settled set (shelvedAllClearStep).
+  {
+    const at = restoredShelvedAllClear(persistedCondition, bootMs);
+    if (at != null) {
+      shelvedAllClearOwed = { sinceMs: at, openSinceMs: null, restored: true };
+      log(`broadcast: an all-clear a shelved critical held back was owed when the add-on stopped (owed for ${Math.round((bootMs - at) / 1000)} s) — it is said once no shelved critical stands and the gate has been open ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s on a settled alert set; any commit before then cancels it`);
+    }
+  }
   /**
    * v1.195.0 — the baseline the RECOVERY decisions read (recoveryCandidate, isRestartRecovery): the
    * heard level, else the level of the resumed hold (a non-green first tick resumes none, and drops
@@ -1978,6 +2077,9 @@ export function startBroadcastMonitor(
     deescalationHold = null;
     conditionHeldOwed = null; // v1.195.0 — written with the record below
     deferredCondition = null;
+    // v1.197.0 (review) — and an owed all-clear (shelvedAllClearStep): the commit's own transition says
+    // what the condition is now. The tick's gate owes it again after a green commit it holds back.
+    shelvedAllClearOwed = null; // cancelled by the commit
     // v1.187.1 — and a pending boot hold: the held condition was adopted, not dropped.
     bootYellowHold = null;
     bootRedHold = null;
@@ -3176,7 +3278,7 @@ export function startBroadcastMonitor(
   const conditionRetryAtRun = (
     level: ConditionLevel,
     armed: RetryRunWords,
-  ): RetryRunWords | { drop: string } => {
+  ): RetryRunWords | { drop: string; shelvedGate?: boolean } => {
     try {
       const raw = (store.get().alerts ?? []) as Alert[];
       const nowMs = Date.now();
@@ -3186,7 +3288,8 @@ export function startBroadcastMonitor(
       // observed (the spoken-retry slot), for afterConditionRetry
       const now = conditionFromAlerts(speakable);
       if (w.action === 'replay') return { ...armed, warnFps: now.warningFingerprints, observed: now.level };
-      if (w.action === 'drop') return { drop: w.reason };
+      // v1.197.0 (review) — a green's: whether a shelved critical is among those that gate it (owed, below).
+      if (w.action === 'drop') return { drop: w.reason, shelvedGate: level === 'green' && shelvedCriticalStands(speakable) };
       const names = w.namedFp == null ? 'no alert' : describeFingerprint(w.namedFp);
       if (w.namedFp != null && (queuedConditionNames.get(queuedConditionKey(level, w.namedFp)) ?? 0) > 0) {
         return { drop: `the ${level} names ${names} now, and the announcement naming it is waiting behind this retry` };
@@ -3280,11 +3383,13 @@ export function startBroadcastMonitor(
       // (conditionRetryAtRun), read here, at the head of the chain, as the checks above are. Every
       // other broadcast plays as requested.
       const retried = retryOf != null && kind === 'condition';
-      const w: RetryRunWords | { drop: string } = retried
+      const w: RetryRunWords | { drop: string; shelvedGate?: boolean } = retried
         ? conditionRetryAtRun(level, { rung, message, messageEs, skipSip, named, warnFps: null, observed: null })
         : { rung, message, messageEs, skipSip, named, warnFps: null, observed: null };
       if ('drop' in w) {
         log(`broadcast: deferred ${level} retry dropped — ${w.drop}`);
+        // v1.197.0 (review) — an all-clear held back by a shelved critical is owed (oweShelvedAllClear).
+        oweShelvedAllClear(w.shelvedGate === true, 'the all-clear\'s deferred retry gated');
         return { ok: false, errors: [`dropped: ${w.drop}`] };
       }
       attemptNamed = w.named;
@@ -3512,6 +3617,27 @@ export function startBroadcastMonitor(
   } | null = null;
   /** v1.195.0 — how a waiting re-present is named in its log lines. */
   const deferredName = (d: { level: ConditionLevel; kept?: boolean }): string => (d.kept === true ? `${d.level} kept behind a higher retry` : `storm-gated ${d.level}`);
+
+  /**
+   * v1.197.0 (review) — an all-clear the speech gate held back, under a committed green: OWED when a
+   * shelved critical is among those that hold it (`shelvedStands`: shelvedCriticalStands on the alerts the
+   * gate read), and said by the tick once the gate has been open its dwell (shelvedAllClearStep). Owed
+   * from every place a green is dropped by that gate: the tick's own green, a storm-gated green's
+   * re-present, the all-clear's spoken retry and its deferred retry. Dropped, as it was, the all-clear of a
+   * red heard before its Core was shelved, or of a red that cleared while another Core's critical was
+   * shelved, was never said. Said once per owed episode; persisted with the record, so a restart inside
+   * the window keeps it.
+   */
+  const oweShelvedAllClear = (shelvedStands: boolean, what: string): void => {
+    if (prevLevel !== 'green' || !shelvedStands) return;
+    if (shelvedAllClearOwed != null) {
+      shelvedAllClearOwed.openSinceMs = null;
+      return;
+    }
+    shelvedAllClearOwed = { sinceMs: Date.now(), openSinceMs: null, restored: false };
+    persistStatus();
+    log(`broadcast: ${what} — the all-clear is owed, not dropped: a critical a maintenance window holds is among those that gate it (shelved is held, not cleared). It is said once no shelved critical stands and the gate has been open ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s; any commit before then cancels it`);
+  };
 
   /**
    * v1.187.0 — end a held de-escalation that did NOT commit: the level is back up. When it is back
@@ -3805,6 +3931,8 @@ export function startBroadcastMonitor(
         return;
       }
       log(`broadcast: spoken retry dropped — level moved ${want} → ${level} or gated`);
+      // v1.197.0 (review) — an all-clear's words held back by a shelved critical are owed (oweShelvedAllClear).
+      if (allClearGated && levelOk) oweShelvedAllClear(shelvedCriticalStands(alerts), 'the all-clear\'s spoken retry gated');
     }
     // v1.195.0 — a condition deferral kept behind a higher retry (keptDeferral) becomes the one
     // re-present below once that retry is done: the slot free, nothing in the chain (a fired retry
@@ -3860,6 +3988,8 @@ export function startBroadcastMonitor(
           : inQuiet() && !(held.level === 'red' && cfg.criticalBreakThrough) ? 'quiet hours' : null;
         if (notNow != null) {
           log(`broadcast: the ${deferredName(held)} is not re-presented — ${notNow}`);
+          // v1.197.0 (review) — an all-clear held back by a shelved critical is owed (oweShelvedAllClear).
+          if (held.level === 'green' && level === 'green' && cfg.enabled) oweShelvedAllClear(shelvedCriticalStands(alerts), `the ${deferredName(held)} gated`);
         } else {
           // The condition is back at the committed level: a held de-escalation below it (a lower
           // level that did not stand its dwell) is over.
@@ -3873,6 +4003,39 @@ export function startBroadcastMonitor(
               ? `broadcast: re-presenting the ${held.level} kept behind a higher retry — that retry is done and the condition is still ${held.level}`
               : `broadcast: re-presenting the ${held.level} the storm gate refused — the gap has expired and the condition is still ${held.level}`);
             await speakCondition(held.level, rung, alerts, { voicedFingerprint, criticalFingerprints, warningFingerprints, fresh: [] }, false);
+          } finally {
+            tickInFlight = false;
+          }
+          return;
+        }
+      }
+    }
+    // v1.197.0 (review) — the all-clear a shelved critical held back (oweShelvedAllClear), one tick of it
+    // (shelvedAllClearStep). Only under the committed green it was owed for (any commit cancels it), with
+    // nothing in flight, and with no storm-gated green waiting to be re-presented (above: it says the
+    // all-clear itself, or owes it).
+    if (shelvedAllClearOwed != null && prevLevel === 'green' && !tickInFlight && deferredCondition == null) {
+      const owed = shelvedAllClearOwed;
+      const step = shelvedAllClearStep({
+        level, blocked: allClearSpeechBlocked(alerts), shelved: shelvedCriticalStands(alerts),
+        openSinceMs: owed.openSinceMs, restored: owed.restored,
+        settledSinceMs: owed.restored ? alertSetSettledSince() : null, nowMs: tickNow,
+      });
+      if (step.action === 'wait') {
+        owed.openSinceMs = step.openSinceMs;
+      } else {
+        shelvedAllClearOwed = null;
+        persistStatus();
+        const notNow = step.action === 'drop' ? step.reason
+          : !cfg.enabled ? 'broadcasts are disabled'
+          : inQuiet() ? 'quiet hours' : null;
+        if (notNow != null) {
+          log(`broadcast: the all-clear a shelved critical held back is dropped — ${notNow}`);
+        } else {
+          tickInFlight = true;
+          try {
+            log(`broadcast: no shelved critical stands and the all-clear gate has been open ${Math.round(CONDITION_CLEAR_DWELL_MS / 1000)} s — the all-clear it held back (owed for ${Math.round((tickNow - owed.sinceMs) / 1000)} s) is announced`);
+            await speakCondition('green', rung, alerts, { voicedFingerprint, criticalFingerprints, warningFingerprints, fresh: [] }, true);
           } finally {
             tickInFlight = false;
           }
@@ -4214,6 +4377,8 @@ export function startBroadcastMonitor(
     // only the green ANNOUNCEMENT is gated.
     if (level === 'green' && allClearSpeechBlocked(alerts)) {
       log('broadcast: green adopted silently — a critical alert is still active (all-clear speech gated)');
+      // v1.197.0 (review) — owed, not dropped, when a shelved critical holds it (oweShelvedAllClear).
+      oweShelvedAllClear(shelvedCriticalStands(alerts), 'green adopted silently');
       return;
     }
     if (level === 'yellow' && cfg.minSeverity === 'critical') return;
@@ -4517,6 +4682,7 @@ export function startBroadcastMonitor(
       conditionAt,
       bootBaselineLevel,
       conditionHeldFrom: conditionHeldOwed?.from ?? null, // v1.195.0
+      shelvedAllClearOwedAt: shelvedAllClearOwed?.sinceMs ?? null, // v1.197.0 (review)
       lastRender: { ...lastRender },
     }),
     stop: () => {
