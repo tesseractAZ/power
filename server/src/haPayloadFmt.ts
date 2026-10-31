@@ -46,6 +46,40 @@ export function lifetimeTotalsOrNone(
 }
 
 /**
+ * v1.193.0 — the persisted lifetime keys the circuit fields enumerate (recorder.listLifetimeKeys,
+ * the same table as the counters), or none when reading them throws: the circuit fields then
+ * follow the live circuits alone, and the payload still publishes. `onError` as above.
+ */
+export function lifetimeKeysOrNone(
+  read: () => string[],
+  onError: (msg: string) => void,
+): string[] {
+  try {
+    return read();
+  } catch (e: any) {
+    onError(String(e?.message ?? e));
+    return [];
+  }
+}
+
+/**
+ * v1.193.0 — `/api/lifetime-energy`'s `battery_baseline_deficit_kwh` (display-only): Battery Energy
+ * Out less In, from the MEASURED values (`persistedWh − shiftWh + pendingWh`). A basis shift
+ * carries the published counters across a pool change and says nothing of the pool's state of
+ * charge: from the published values, a Core that left with more charged than discharged read the
+ * difference of the two shifts as deficit. Null while either counter is absent.
+ */
+export function batteryBaselineDeficitKwh(totals: Record<string, LifetimeTotals>): number | null {
+  const measured = (k: string): number | null => {
+    const t = totals[k];
+    return t ? t.persistedWh - (t.shiftWh ?? 0) + t.pendingWh : null;
+  };
+  const chargeWh = measured('fleet_battery_charge_wh');
+  const dischargeWh = measured('fleet_battery_discharge_wh');
+  return chargeWh != null && dischargeWh != null ? Math.round(((dischargeWh - chargeWh) / 1000) * 1000) / 1000 : null;
+}
+
+/**
  * Alert counter split by engine source × severity. `threshold` matches every
  * non-`learned` source (the `a.source !== 'learned'` branch) — verbatim.
  */

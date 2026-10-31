@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -22,7 +22,8 @@ import { DatabaseSync } from 'node:sqlite';
  *
  * Now the members are the accepted roster until a change holds for three rollups (a joiner counts
  * from the re-seed), and each re-seed carries the published value by a basis shift committed with
- * the floors in one transaction; the roster file follows the commit.
+ * the floors and the accepted roster (the bms_membership row) in one transaction; the roster file
+ * follows the commit, for an older release, and is read only while there is no row.
  *
  * Packs are 32 × 3.2 V: 1 mAh = 0.1024 Wh. Test serials are placeholders.
  */
@@ -91,7 +92,23 @@ function committed(key: string): { row: number | null; shift: number | null } {
     raw.close();
   }
 }
-const rosterFile = (): string => JSON.parse(readFileSync(join(dirname(process.env.DB_PATH!), 'bms-membership.json'), 'utf8')).fp;
+const ROSTER_FILE = join(dirname(process.env.DB_PATH!), 'bms-membership.json');
+const rosterFile = (): string => JSON.parse(readFileSync(ROSTER_FILE, 'utf8')).fp;
+/** The committed accepted roster (the bms_membership row, another connection). */
+function rosterRow(): string | null {
+  const raw = new DatabaseSync(process.env.DB_PATH!);
+  try {
+    const r = raw.prepare(`SELECT fp FROM bms_membership WHERE id = 1`).get() as { fp: string } | undefined;
+    return r?.fp ?? null;
+  } finally {
+    raw.close();
+  }
+}
+function sql(stmt: string): void {
+  const raw = new DatabaseSync(process.env.DB_PATH!);
+  try { raw.exec(stmt); } finally { raw.close(); }
+}
+const batteryWarns = () => lines.filter((l) => l.includes('WARN lifetime counter fleet_battery'));
 const IN = 'fleet_battery_charge_wh';
 const OUT = 'fleet_battery_discharge_wh';
 
@@ -186,6 +203,7 @@ test('★★★ the floors and their shifts commit together: a failed write leav
   assert.ok(lines.some((l) => l.includes('lifetime battery floor write failed (injected basis write failure)')), 'the failure is logged');
   assert.deepEqual({ in: committed(IN), out: committed(OUT) }, before, '★★★ nothing committed: the floor rows did not move without their shifts');
   assert.equal(rosterFile(), 'DPU_A,DPU_B', 'the roster file follows the commit only');
+  assert.equal(rosterRow(), 'DPU_A,DPU_B', 'the committed roster did not move without its floors');
   assert.ok(near(read(), WH(95_000)), 'this process publishes the continued value from memory');
   rec.close(); // the final rollup fails the same way
 
@@ -200,11 +218,104 @@ test('★★★ the floors and their shifts commit together: a failed write leav
   assert.ok(near(committed(IN).shift ?? 0, WH(50_000)), `shift −2,048 + 7,168 = +5,120 (${committed(IN).shift})`);
   assert.ok(near(committed(OUT).shift ?? 0, WH(50_000)), 'Battery Energy Out likewise');
   assert.equal(rosterFile(), 'DPU_A');
+  assert.equal(rosterRow(), 'DPU_A');
 
   const ha = haTotalIncreasing(published);
   assert.equal(ha.resets, 0);
   assert.equal(ha.dips, 0);
   assert.ok(near(ha.sum, WH(95_000)), `HA's total is still the home's 9,728 Wh, got ${ha.sum}`);
   assert.deepEqual(lines.filter((l) => l.includes('WARN lifetime counter')), []);
+  rec.close();
+});
+
+test('★★★ a rejoin whose floor commit fails publishes no step; a rebase of another counter meanwhile commits only its own shift', () => {
+  rec = createRecorder(store as any, (m: string) => lines.push(m));
+  assert.ok(near(read(), WH(95_000)), '9,728 Wh, A alone accepted');
+  // Home Consumption has a published value (its row set from another connection).
+  sql(`INSERT INTO lifetime_totals (metric_key, wh, last_integrated_ts) VALUES ('fleet_load_wh', 100000, ${Date.now()})
+       ON CONFLICT(metric_key) DO UPDATE SET wh = excluded.wh`);
+  rec.getLifetimeTotals();
+  // The battery floor rows stop accepting writes (a transient failure of the floors' transaction).
+  sql(`CREATE TRIGGER floors_fail BEFORE UPDATE ON lifetime_totals WHEN NEW.metric_key LIKE 'fleet_battery%'
+       BEGIN SELECT RAISE(ABORT, 'injected floor failure'); END;`);
+
+  // B rejoins (nothing cycled since it left): the third rollup re-seeds the floors UP to A + B
+  // (11,776) with a −7,168 Wh shift, in memory only.
+  store.snap.devices.SHP2 = shp2Device(['DPU_A', 'DPU_B']);
+  for (let i = 0; i < 3; i++) {
+    rec.rollupLifetime();
+    assert.ok(near(read(), WH(95_000)), `★★★ rejoin rollup ${i + 1}: 9,728 Wh (pending over the stale row instead of the in-memory floor: 16,896), got ${published[published.length - 1]}`);
+  }
+  assert.ok(lines.some((l) => l.includes('lifetime battery floor write failed (injected floor failure)')));
+  const stale = { row: WH(45_000), shift: WH(50_000) };
+  const isStale = (c: { row: number | null; shift: number | null }) => near(c.row ?? NaN, stale.row) && near(c.shift ?? NaN, stale.shift);
+  assert.ok(isStale(committed(IN)) && isStale(committed(OUT)), 'nothing of the re-seed committed');
+  assert.equal(rosterRow(), 'DPU_A');
+
+  // An unexplained 10 kWh drop on Home Consumption: the read rebases it and writes its shift at once.
+  sql(`UPDATE lifetime_totals SET wh = 90000 WHERE metric_key = 'fleet_load_wh'`);
+  const t = rec.getLifetimeTotals();
+  assert.equal(t.fleet_load_wh.persistedWh + t.fleet_load_wh.pendingWh, 100_000, 'Home Consumption continues');
+  assert.equal(committed('fleet_load_wh').shift, 10_000, 'its shift is written at once');
+  assert.ok(isStale(committed(IN)) && isStale(committed(OUT)),
+    `★★★ the battery shifts are not written without their floors (the old row with the new shift: ${JSON.stringify(committed(IN))})`);
+  assert.ok(near(t[IN].persistedWh + t[IN].pendingWh, WH(95_000)));
+  published.push(t[IN].persistedWh + t[IN].pendingWh);
+  rec.close(); // the final rollup's floor write fails the same way
+
+  // The failure clears; the next process starts from the committed state and re-seeds again.
+  sql(`DROP TRIGGER floors_fail;`);
+  rec = createRecorder(store as any, (m: string) => lines.push(m));
+  assert.ok(near(read(), WH(95_000)), `★★★ the first read after the restart: 9,728 Wh, got ${published[published.length - 1]}`);
+  for (let i = 0; i < 3; i++) { rec.rollupLifetime(); assert.ok(near(read(), WH(95_000)), `re-seed again, rollup ${i + 1}: 9,728 Wh`); }
+  assert.ok(near(committed(IN).row ?? 0, WH(115_000)) && near(committed(IN).shift ?? 0, WH(-20_000)), `row 11,776, shift −2,048 (${JSON.stringify(committed(IN))})`);
+  assert.equal(rosterRow(), 'DPU_A,DPU_B');
+  assert.deepEqual(batteryWarns(), [], 'no rebase of a battery counter: the shifts and floors stayed a matched pair');
+  const ha = haTotalIncreasing(published);
+  assert.equal(ha.resets, 0);
+  assert.ok(near(ha.sum, WH(95_000)), `HA's total is still 9,728 Wh, got ${ha.sum}`);
+});
+
+test('★★★ a crash between the floors\' commit and the roster file write: the next process reads the committed roster, not the stale file', () => {
+  // B leaves; the third rollup re-seeds to A alone and commits floors, shifts and roster.
+  store.snap.devices.SHP2 = shp2Device(['DPU_A']);
+  for (let i = 0; i < 3; i++) { rec.rollupLifetime(); assert.ok(near(read(), WH(95_000)), `leave rollup ${i + 1}: 9,728 Wh`); }
+  const settled = { in: committed(IN), out: committed(OUT) };
+  assert.ok(near(settled.in.row ?? 0, WH(45_000)) && near(settled.in.shift ?? 0, WH(50_000)), `row 4,608, shift +5,120 (${JSON.stringify(settled.in)})`);
+  assert.equal(rosterRow(), 'DPU_A');
+  const reseeds = lines.filter((l) => l.includes('v1.96.0 SHP2 pool membership changed')).length;
+  // The process died after the COMMIT, before the file was written: the file still names B.
+  writeFileSync(ROSTER_FILE, JSON.stringify({ fp: 'DPU_A,DPU_B', at: 'x' }));
+  rec.close();
+
+  rec = createRecorder(store as any, (m: string) => lines.push(m));
+  assert.ok(near(read(), WH(95_000)),
+    `★★★ 9,728 Wh (from the stale file B is summed again over the committed floor: 16,896, then shifted a second time), got ${published[published.length - 1]}`);
+  assert.ok(lines.some((l) => l.includes('bms-membership.json reads DPU_A,DPU_B, the committed roster DPU_A')), 'the disagreement is logged');
+  for (let i = 0; i < 3; i++) { rec.rollupLifetime(); assert.ok(near(read(), WH(95_000)), `rollup ${i + 1}: 9,728 Wh`); }
+  assert.equal(lines.filter((l) => l.includes('v1.96.0 SHP2 pool membership changed')).length, reseeds, 'the change is not re-seeded a second time');
+  assert.deepEqual({ in: committed(IN), out: committed(OUT) }, settled, 'the floors and shifts stand');
+  assert.equal(rosterFile(), 'DPU_A', 'the file is rewritten after the next commit');
+  const ha = haTotalIncreasing(published);
+  assert.equal(ha.resets, 0);
+  assert.equal(ha.dips, 0);
+  assert.ok(near(ha.sum, WH(95_000)), `HA's total is still the home's 9,728 Wh, got ${ha.sum}`);
+  assert.deepEqual(batteryWarns(), []);
+  rec.close();
+});
+
+test('★ an unreadable, unwritable roster file: the committed roster stands, and the file is retried after each commit until it lands', () => {
+  // A directory in the file's place: reading it and writing it both fail, as root too.
+  rmSync(ROSTER_FILE);
+  mkdirSync(ROSTER_FILE);
+  rec = createRecorder(store as any, (m: string) => lines.push(m));
+  assert.ok(lines.some((l) => l.includes('bms-membership.json reads (none), the committed roster DPU_A')));
+  assert.ok(near(read(), WH(95_000)), '9,728 Wh: A alone, from the committed roster');
+  rec.rollupLifetime(); // committed; the file write fails
+  rmSync(ROSTER_FILE, { recursive: true });
+  rec.rollupLifetime();
+  assert.equal(rosterFile(), 'DPU_A', 'written after the next commit');
+  assert.ok(near(read(), WH(95_000)));
+  assert.deepEqual(batteryWarns(), []);
   rec.close();
 });

@@ -1171,6 +1171,15 @@ export function createRecorder(
       updated_ts INTEGER NOT NULL,
       reason TEXT NOT NULL
     );
+    -- v1.193.0 — the accepted SHP2 source roster the battery floors are seeded against (one row),
+    -- committed in the same transaction as the floors and their basis shifts. bms-membership.json
+    -- is still written after each commit (a release before v1.193.0 reads it) and is read only
+    -- while this row is absent (the first boot after an upgrade).
+    CREATE TABLE IF NOT EXISTS bms_membership (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      fp TEXT NOT NULL,
+      updated_ts INTEGER NOT NULL
+    );
     -- v1.38.0 (WS2) — night-charge learning ledger (design §3.1). One row per
     -- plan_date (YYYY-MM-DD America/Phoenix), upserted. DEDICATED + NEVER PRUNED:
     -- created HERE alongside lifetime_totals and never referenced by the samples
@@ -2741,13 +2750,24 @@ export function createRecorder(
     return next;
   };
   let lastBasisWriteError: string | null = null;
+  /** v1.193.0 — the counters whose basis shift is written only in the transaction with the floors it
+   *  shifts (writeBatteryFloors), never on its own. */
+  const FLOOR_SHIFT_KEYS: ReadonlySet<string> = new Set(['fleet_battery_charge_wh', 'fleet_battery_discharge_wh']);
   /** Write the dirty shifts on their own (the read path's rebase). Never throws: getLifetimeTotals
    *  runs inside the MQTT state build that carries the alarm sensors. A failed write keeps them
-   *  dirty for the next rollup's transaction; the in-memory shift stays authoritative meanwhile. */
+   *  dirty for the next rollup's transaction; the in-memory shift stays authoritative meanwhile.
+   *  A battery shift stays dirty for the floors' transaction: after a failed floor commit its
+   *  shift holds the re-seed too, and written here it paired the old floor row with the new
+   *  shift, a step at the next process (after a leave the Core's share again, booked as energy;
+   *  after a rejoin its history off, a rebase). A crash before that commit costs only a rebase's
+   *  shift, which the next process re-derives from the high-water sidecar. */
   const writeBasisDirty = (): void => {
     try {
-      for (const [key, d] of basisDirty) basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason);
-      basisDirty.clear();
+      for (const [key, d] of basisDirty) {
+        if (FLOOR_SHIFT_KEYS.has(key)) continue;
+        basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason);
+        basisDirty.delete(key);
+      }
       lastBasisWriteError = null;
     } catch (e: any) {
       const msg = String(e?.message ?? e);
@@ -3668,12 +3688,38 @@ export function createRecorder(
   /** v1.103.0 — timestamped membership record (see membershipHistory.ts). */
   const MEMBERSHIP_HISTORY_PATH = resolve(dirname(dbPath), 'membership-history.json');
   const membershipHistory = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);
-  let bmsMembershipFp: string | null = (() => {
+  const membershipFileAtBoot: string | null = (() => {
     try {
       const raw = JSON.parse(readFileSync(BMS_MEMBERSHIP_PATH, 'utf8'));
       return typeof raw?.fp === 'string' ? raw.fp : null;
     } catch { return null; }
   })();
+  // v1.193.0 — the accepted roster is the bms_membership row, committed with the floors and their
+  // basis shifts (writeBatteryFloors). From the file alone, written after the commit, a crash or a
+  // failed write in between left a stale roster: the next process summed the Core that left again
+  // over the committed floors and shifted it a second time (+7,168 Wh in one read on the test
+  // plant, a Core's held packs on the live one). The file stands in only while there is no row (an
+  // upgrade).
+  const membershipRowUpsertStmt = db.prepare(
+    `INSERT INTO bms_membership (id, fp, updated_ts) VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET fp = excluded.fp, updated_ts = excluded.updated_ts`,
+  );
+  const membershipRowAtBoot: string | null = (() => {
+    try {
+      const r = db.prepare(`SELECT fp FROM bms_membership WHERE id = 1`).get() as { fp: unknown } | undefined;
+      return typeof r?.fp === 'string' ? r.fp : null;
+    } catch (e: any) {
+      log(`recorder: could not read the accepted SHP2 roster (${e?.message ?? e}) — bms-membership.json stands in`);
+      return null;
+    }
+  })();
+  let bmsMembershipFp: string | null = membershipRowAtBoot ?? membershipFileAtBoot;
+  if (membershipRowAtBoot !== null && membershipFileAtBoot !== membershipRowAtBoot) {
+    log(
+      `recorder: v1.193.0 bms-membership.json reads ${membershipFileAtBoot ?? '(none)'}, the committed roster ${membershipRowAtBoot} ` +
+      `(the file's write after the last commit was lost) — the committed roster stands; the file is rewritten after the next commit`,
+    );
+  }
   /**
    * v1.188.1 (review) — a changed source set must persist this many consecutive rollups before the
    * battery floors are re-seeded (the v1.98.0 gap check's RESEED_SUSTAINED_ROLLUPS idea). The source
@@ -3695,8 +3741,9 @@ export function createRecorder(
     bmsChargeFloor = seedC.wh;
     bmsDischargeFloor = seedD.wh;
   }
-  /** v1.193.0 — the roster to write to bms-membership.json once the floors it goes with commit. */
-  let membershipFileFp: string | null = null;
+  /** v1.193.0 — the roster to write to bms-membership.json once the floors it goes with commit (the
+   *  committed one at boot when the file disagrees with it); kept until a write lands. */
+  let membershipFileFp: string | null = membershipRowAtBoot !== null && membershipFileAtBoot !== membershipRowAtBoot ? membershipRowAtBoot : null;
   /** v1.193.0 — carry Battery Energy In / Out across a re-seed of their floors (in memory; written
    *  by writeBatteryFloors). Returns the log's account of it. */
   const shiftBattery = (chargeWh: number, dischargeWh: number, ts: number, reason: string): string => {
@@ -3706,8 +3753,9 @@ export function createRecorder(
     return `(basis shift ${signed(chargeWh)} / ${signed(dischargeWh)} Wh, now ${c.toFixed(0)} / ${d.toFixed(0)} Wh)`;
   };
   let lastFloorWriteError: string | null = null;
-  /** v1.193.0 — the two battery floors and every dirty basis shift, in one transaction (the
-   *  migrateLifetimeKey pattern). Never throws; false when nothing was committed. */
+  /** v1.193.0 — the two battery floors, the accepted roster they are seeded against and every dirty
+   *  basis shift, in one transaction (the migrateLifetimeKey pattern). Never throws; false when
+   *  nothing was committed. */
   const writeBatteryFloors = (ts: number): boolean => {
     try {
       db.prepare('BEGIN').run();
@@ -3720,6 +3768,7 @@ export function createRecorder(
     try {
       writeLifetime('fleet_battery_charge_wh', bmsChargeFloor, ts);
       writeLifetime('fleet_battery_discharge_wh', bmsDischargeFloor, ts);
+      if (bmsMembershipFp !== null) membershipRowUpsertStmt.run(bmsMembershipFp, ts);
       for (const [key, d] of basisDirty) basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason);
       db.prepare('COMMIT').run();
     } catch (e: any) {
@@ -3909,8 +3958,9 @@ export function createRecorder(
         );
       }
       bmsMembershipFp = membershipFp;
-      // v1.193.0 — written once the floors and shifts it goes with are committed (below): a crash in
-      // between leaves the old roster, so the next process re-seeds the same change again.
+      // v1.193.0 — committed with the floors and shifts it goes with (writeBatteryFloors, below): a
+      // crash before the commit leaves the old roster, floors and shifts, so the next process
+      // re-seeds the same change again. The file follows the commit.
       membershipFileFp = membershipFp;
     }
     // v1.98.0 — FLOOR/LIVE GAP INVARIANT, independent of the fingerprint.
@@ -3973,15 +4023,17 @@ export function createRecorder(
       log(`recorder: v0.45.0 lifetime battery discharge no longer exceeds charge by >1000 Wh (charge=${bmsChargeFloor.toFixed(0)} discharge=${bmsDischargeFloor.toFixed(0)} Wh)`);
     }
     bmsClampActive = inDeficit;
-    // v1.193.0 — the floors and every changed basis shift in ONE transaction: a floor re-seeded
-    // without its shift would publish the step at the next process. The shifts are written as
-    // absolute values, so a failed commit is retried whole by the next rollup (the in-memory floors
-    // and shifts stay consistent meanwhile); the roster file follows a successful commit only.
+    // v1.193.0 — the floors, the accepted roster and every changed basis shift in ONE transaction: a
+    // floor re-seeded without its shift (or its roster) would publish a step at the next process.
+    // The shifts are written as absolute values, so a failed commit is retried whole by the next
+    // rollup (the in-memory floors and shifts stay consistent meanwhile). The roster file follows a
+    // successful commit only, for a release before v1.193.0 (this one reads the row); a failed
+    // write of it is retried after the next commit.
     if (writeBatteryFloors(now) && membershipFileFp !== null) {
       try {
         writeFileSync(BMS_MEMBERSHIP_PATH, JSON.stringify({ fp: membershipFileFp, at: new Date(now).toISOString() }), { mode: 0o644 });
-      } catch { /* advisory: an unwritable marker just re-logs next boot */ }
-      membershipFileFp = null;
+        membershipFileFp = null;
+      } catch { /* retried after the next commit; the committed row is the roster this release reads */ }
     }
     // v0.50.0 — piggyback the emit high-water persist on the 5-min rollup cadence
     // (NOT on the hot getLifetimeTotals path). Advisory: a failed write is logged

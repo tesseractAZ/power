@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { kwh1, makeLifetimeKwh, lifetimeTotalsOrNone, makeAlertCounter, soonestProjecting } from '../src/haPayloadFmt.js';
+import { readFileSync } from 'node:fs';
+import {
+  kwh1, makeLifetimeKwh, lifetimeTotalsOrNone, lifetimeKeysOrNone, batteryBaselineDeficitKwh, makeAlertCounter, soonestProjecting,
+} from '../src/haPayloadFmt.js';
 import type { LifetimeTotals } from '../src/recorder.js';
 import type { Alert } from '../src/alerts.js';
 import type { FleetDegradation } from '../src/analytics.js';
@@ -111,4 +114,38 @@ test('v1.193.0 — lifetimeTotalsOrNone: a throwing read publishes the lifetime 
   assert.deepEqual(none, {});
   assert.deepEqual(errors, ['database is locked'], 'the message reaches the caller (which rate-limits it)');
   assert.equal(makeLifetimeKwh(none)('fleet_pv_wh'), null, 'each lifetime field publishes null: Home Assistant reads unknown, not a meter reset');
+});
+
+test('v1.193.0 — lifetimeKeysOrNone: a throwing read lists no persisted keys, never aborts the payload', () => {
+  const errors: string[] = [];
+  assert.deepEqual(lifetimeKeysOrNone(() => ['circuit_3_wh'], (m) => errors.push(m)), ['circuit_3_wh']);
+  assert.deepEqual(lifetimeKeysOrNone(() => { throw new Error('no such table: lifetime_totals'); }, (m) => errors.push(m)), []);
+  assert.deepEqual(errors, ['no such table: lifetime_totals']);
+});
+
+test('v1.193.0 — batteryBaselineDeficitKwh: Out less In from the MEASURED values; a basis shift is no deficit', () => {
+  const t = (persistedWh: number, pendingWh: number, shiftWh?: number): LifetimeTotals => ({ persistedWh, pendingWh, watermarkMs: 0, shiftWh });
+  // A Core that charged more than it discharged left: In carried by +4,096 Wh, Out by +3,000 Wh;
+  // measured In 4,096 + 512 pending = 4,608, Out 4,000.
+  assert.equal(batteryBaselineDeficitKwh({
+    fleet_battery_charge_wh: t(8_192, 512, 4_096),
+    fleet_battery_discharge_wh: t(7_000, 0, 3_000),
+  }), -0.608, 'from the published values the two shifts\' difference would read as deficit (−1.704 kWh)');
+  assert.equal(batteryBaselineDeficitKwh({
+    fleet_battery_charge_wh: t(1_000, 0),
+    fleet_battery_discharge_wh: t(1_500, 0.4),
+  }), 0.5, 'no shift (the read-only totals before the table exists): the published values; rounded to the Wh');
+  assert.equal(batteryBaselineDeficitKwh({ fleet_battery_charge_wh: t(1_000, 0) }), null, 'a counter left out: null, never a fabricated 0');
+  assert.equal(batteryBaselineDeficitKwh({}), null);
+});
+
+test('★ BRIDGE: index.ts computes the deficit with batteryBaselineDeficitKwh and reads /api/ha-state\'s counters through lifetimeTotalsOrNone', () => {
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const energy = src.slice(src.indexOf("app.get('/api/lifetime-energy'"));
+  assert.match(energy.slice(0, energy.indexOf('details: totals,')), /battery_baseline_deficit_kwh: batteryBaselineDeficitKwh\(totals\),/);
+  const haState = src.slice(src.indexOf("app.get('/api/ha-state'"));
+  const head = haState.slice(0, haState.indexOf('const lifetimeKwh = makeLifetimeKwh(lifetime);'));
+  assert.match(head, /const lifetime = lifetimeTotalsOrNone\(\(\) => \{\n\s*const t = recorder\.getLifetimeTotals\(\);/,
+    'a lifetime failure nulls the lifetime fields, never the payload that carries the runway and the alert counts');
+  assert.equal(head.split('recorder.getLifetimeTotals()').length, 2, 'the guarded read is the only one');
 });

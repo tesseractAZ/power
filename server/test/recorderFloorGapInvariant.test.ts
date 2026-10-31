@@ -105,8 +105,14 @@ test('gap invariant — a floor left above the live sum is repaired even when th
 
   // Poison the state exactly as v1.96.0 did: record the fingerprint for the
   // SMALLER pool without repairing the floor.
+  // v1.193.0 — the roster lived in the file alone then: this release reads the file only while the
+  // database holds no committed roster (the first boot after an upgrade), so the row goes too.
   writeFileSync(join(dirname(process.env.DB_PATH!), 'bms-membership.json'),
     JSON.stringify({ fp: 'BIG1', at: 'x' }));
+  {
+    const raw = new DatabaseSync(process.env.DB_PATH!);
+    try { raw.exec(`DELETE FROM bms_membership`); } finally { raw.close(); }
+  }
 
   // Process 2: only BIG1 on the panel. The fingerprint MATCHES, so any repair
   // keyed on a fingerprint change is unreachable — only the gap can drive it.
@@ -149,4 +155,43 @@ test('gap invariant — a floor left above the live sum is repaired even when th
   s2.snap.devices.BIG1 = dpuDevice('BIG1', [{ num: 1, packSn: 'B1', chg: 1_045_000, dsg: 1_045_000 }]);
   assert.ok(Math.abs(total(rec2.getLifetimeTotals(), 'fleet_battery_charge_wh') - (peak + 5_000 * PACK_MAH_TO_WH)) < 1e-6, 'peak + 512 Wh');
   rec2.close();
+});
+
+test('v1.193.0 — both floors above the live sum: both re-seed, and BOTH basis shifts commit with them (no guard backstop)', () => {
+  // The state a release before v1.193.0 left (the v1.96.0 freeze): both floor rows seeded against a
+  // pool that no longer exists, here 10 kWh above BIG1's live sum, no basis shifts, and the rows as
+  // the last values published.
+  const IN = 'fleet_battery_charge_wh';
+  const OUT = 'fleet_battery_discharge_wh';
+  {
+    const raw = new DatabaseSync(process.env.DB_PATH!);
+    try {
+      raw.exec(`UPDATE lifetime_totals SET wh = wh + 10000 WHERE metric_key IN ('${IN}', '${OUT}'); DELETE FROM lifetime_basis;`);
+    } finally { raw.close(); }
+  }
+  const live = 45_000 * PACK_MAH_TO_WH;
+  const rows = { in: committed(IN).row ?? NaN, out: committed(OUT).row ?? NaN };
+  assert.ok(Math.abs(rows.in - live - 10_000) < 1e-6 && Math.abs(rows.out - live - 10_000) < 1e-6, `both rows 10 kWh above the live 4,608 (${rows.in}, ${rows.out})`);
+  writeFileSync(join(dirname(process.env.DB_PATH!), '.emit-highwater.json'), JSON.stringify({ [IN]: rows.in, [OUT]: rows.out }));
+
+  const s3 = makeStore({ generatedAt: Date.now(), devices: {} as any });
+  s3.snap.devices.SHP2 = shp2Device(['BIG1']);
+  s3.snap.devices.BIG1 = dpuDevice('BIG1', [{ num: 1, packSn: 'B1', chg: 1_045_000, dsg: 1_045_000 }]);
+  const lines: string[] = [];
+  const rec3 = createRecorder(s3 as any, (m: string) => lines.push(m));
+  rec3.rollupLifetime();
+  rec3.rollupLifetime();
+  // Read before any read could rebase: both shifts went into the floors' commit.
+  const c = committed(IN);
+  const d = committed(OUT);
+  assert.ok(Math.abs((c.row ?? 0) - live) < 1e-6 && Math.abs((c.shift ?? 0) - 10_000) < 1e-6, `in: row 4,608, shift +10,000 (${c.row}, ${c.shift})`);
+  assert.ok(Math.abs((d.row ?? 0) - live) < 1e-6 && Math.abs((d.shift ?? 0) - 10_000) < 1e-6,
+    `★★★ out: row 4,608, shift +10,000 in the same commit (${d.row}, ${d.shift}); without it only the guard's backstop catches the step, a WARN and a write of its own`);
+  const t = rec3.getLifetimeTotals();
+  assert.ok(Math.abs(total(t, IN) - rows.in) < 1e-6 && Math.abs(total(t, OUT) - rows.out) < 1e-6, 'both continue from the last published values');
+  assert.equal(t[IN].heldWh, 0);
+  assert.equal(t[OUT].heldWh, 0);
+  assert.match(lines.find((l) => l.includes('v1.98.0 lifetime battery floor sat')) ?? '', /basis shift \+10000 \/ \+10000 Wh/);
+  assert.deepEqual(lines.filter((l) => l.includes('WARN lifetime counter')), [], 'the re-seed shifted both counters; the guard never had to');
+  rec3.close();
 });

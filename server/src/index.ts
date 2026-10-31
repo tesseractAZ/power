@@ -33,7 +33,7 @@ import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
 // v1.188.1 (review) — the bridge's verdicts, for the backup timers and the card (shp2Membership.ts BridgeVerdicts).
 import { slotVerdicts } from './energyBridge.js';
-import { kwh1, makeLifetimeKwh, lifetimeTotalsOrNone, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
+import { kwh1, makeLifetimeKwh, lifetimeTotalsOrNone, batteryBaselineDeficitKwh, makeAlertCounter, soonestProjecting, dailyFigureResetIso } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import { setClockRejectLogger, ecoflow,
 } from './ecoflow/rest.js';
@@ -1101,11 +1101,6 @@ app.get('/api/lifetime-energy', async (req, reply) => {
   const toKwh = (wh: number) => Math.round((wh / 1000) * 1000) / 1000;
   const live = (k: keyof typeof totals): number | null =>
     totals[k] ? toKwh(totals[k].persistedWh + totals[k].pendingWh) : null;
-  /** The measured value, without the basis shift: what the pool's own counters read. */
-  const measured = (k: keyof typeof totals): number | null =>
-    totals[k] ? totals[k].persistedWh - (totals[k].shiftWh ?? 0) + totals[k].pendingWh : null;
-  const chargeWh = measured('fleet_battery_charge_wh');
-  const dischargeWh = measured('fleet_battery_discharge_wh');
   return cached(req, reply, {
     generated_at: Date.now(),
     pv_lifetime_kwh: live('fleet_pv_wh'),
@@ -1124,10 +1119,9 @@ app.get('/api/lifetime-energy', async (req, reply) => {
     // the user-facing round-trip efficiency is computed separately and clamped ≤100%. Positive =
     // discharge ahead of charge; shrinks toward zero as the pool returns to its baseline SoC.
     // See /api/debug/battery-lifetime.deficitWh.
-    // v1.193.0 — from the measured values: a basis shift carries the published counters across a
-    // pool change and says nothing of the pool's state of charge.
-    battery_baseline_deficit_kwh:
-      chargeWh != null && dischargeWh != null ? toKwh(dischargeWh - chargeWh) : null,
+    // v1.193.0 — from the measured values (haPayloadFmt.batteryBaselineDeficitKwh): a basis shift
+    // carries the published counters across a pool change and says nothing of the pool's state of charge.
+    battery_baseline_deficit_kwh: batteryBaselineDeficitKwh(totals),
     details: totals,
   }, 15);
 });

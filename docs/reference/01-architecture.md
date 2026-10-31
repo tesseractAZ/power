@@ -535,7 +535,9 @@ Two kinds of lifetime keys:
    stable roster still ratchets monotonically, so a transiently-offline device
    re-seeds nothing. v1.193.0 — the floors re-seed and the published counters
    continue from their last values: the difference is a basis shift (`lifetime_basis`,
-   written with the floors in one transaction; the roster file follows the commit).
+   written with the floors and the accepted roster, the `bms_membership` row, in one
+   transaction; the file follows the commit for an older release and is read only while
+   there is no row).
    The step down was not honest: HA books a reading below 0.9 × the previous one as a
    meter reset, the whole new reading again (about 12,043 kWh of Battery Energy In by
    2026-09-07), and a step up as energy. A Core joining counts from the re-seed, whose
@@ -559,8 +561,9 @@ Two kinds of lifetime keys:
    until its first quota lands, and the empty set (the fallback for a plant with
    no panel) carried those five rows (+938.8 kWh in, +965.9 kWh out on the first
    publish, then a re-seed step down once the panel returned). With an accepted
-   roster on file (`bms-membership.json`), the members are that roster while the
-   panel reads no source set; the rollup already reads an empty set as no change.
+   roster on file (`bms-membership.json`; v1.193.0: the `bms_membership` row), the
+   members are that roster while the panel reads no source set; the rollup already
+   reads an empty set as no change.
    v1.193.0 — the members are the accepted roster whatever the panel reads, until a
    change holds for `BMS_MEMBERSHIP_SUSTAINED_ROLLUPS` (3) rollups and is re-seeded:
    a Core that left stays in the sum meanwhile, and a Core that joined is not summed

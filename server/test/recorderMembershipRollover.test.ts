@@ -170,7 +170,7 @@ test('membership rollover — a STABLE roster still ratchets monotonically (no s
   store.snap.devices.SHP2 = shp2Device(['DPU_C']);
   store.snap.devices.DPU_C = dpuDevice('DPU_C', [{ num: 1, packSn: 'PC1', chg: 1_000_000, dsg: 1_000_000 }]);
   const rec = createRecorder(store as any, () => {});
-  // The previous test's roster is persisted (bms-membership.json): three rollups settle the change
+  // The previous test's roster is persisted (v1.193.0: the bms_membership row): three rollups settle the change
   // to this roster (v1.188.1 review: a change is re-seeded only once it holds for three).
   rec.rollupLifetime();
   rec.rollupLifetime();

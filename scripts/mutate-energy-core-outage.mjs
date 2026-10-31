@@ -217,7 +217,7 @@ const MUTANTS = [
     file: RC,
     find: '    if (bms.dischargeWh > bmsDischargeFloor) bmsDischargeFloor = bms.dischargeWh;\n',
     to: '    if (bms.dischargeWh > bmsDischargeFloor) bmsDischargeFloor = bms.dischargeWh;\n    if (br) bmsDischargeFloor += br.dischargeWh; /* MUTANT */\n',
-    why: 'The v1.98.0 floor-gap check reads the bridged energy as a floor for a pool that no longer exists and re-seeds it DOWN — Home Assistant books a meter reset (the phantom-kWh failure).',
+    why: 'The bridged energy enters Battery Energy Out twice (its bridge rows and the floor): a jump up Home Assistant books as energy. v1.193.0: the v1.98.0 floor-gap re-seed no longer steps it back down but carries it by a basis shift, so the double count stays published.',
   },
   {
     id: 'B-x. ★★★ an untrusted panel PV field is used as measured (rollup)',
@@ -824,7 +824,7 @@ const MUTANTS = [
     file: RC,
     find: '    const sustained = pendingMembership != null && pendingMembership.rollups >= MEMBERSHIP_SUSTAINED_ROLLUPS;',
     to: '    const sustained = pendingMembership != null; /* MUTANT */',
-    why: 'The review defect (pre-existing since v1.96.0): one rollup with a dark Core\'s slot reading isConnect = 0 steps Battery Energy In and Out down by a third (a meter reset), then back up.',
+    why: 'The review defect (pre-existing since v1.96.0; then a step down by a third, a meter reset, and back up): one rollup with a dark Core\'s slot reading isConnect = 0 re-seeds the battery floors without that Core and the next re-seeds them back, a needless pair of basis shifts that absorbs the energy the Core moved in between.',
   },
   {
     // v1.193.0 — re-pointed: the members are the accepted set alone until a change is sustained
@@ -833,7 +833,7 @@ const MUTANTS = [
     file: RC,
     find: '    return new Set(accepted);',
     to: '    return new Set(accepted.filter((sn) => live.has(sn))); /* MUTANT */',
-    why: 'A two-rollup flicker after hours of discharge opens a gap over the v1.98.0 threshold: that re-seed steps the counters down instead.',
+    why: 'A two-rollup flicker after hours of discharge opens a gap over the v1.98.0 threshold (before v1.193.0 that re-seed stepped the counters down): the re-seed carries them past the Core\'s absence by a basis shift, and its return adds its packs\' share back as a step up Home Assistant books as energy.',
   },
   {
     id: 'B-xcvii. ★★ the sustained re-seed takes the sum that still carried the Cores that left',
@@ -886,7 +886,7 @@ const MUTANTS = [
     file: RC,
     find: '    return new Set(accepted);',
     to: '    return live.size === 0 ? live : new Set(accepted); /* MUTANT */',
-    why: 'A boot with the cloud unreachable (or the panel quota failing) carries every persisted held pack row, a former member\'s orphans included: +938.8 kWh Battery Energy In on the first publish, then the v1.98.0 re-seed steps it back down (a meter reset in Home Assistant).',
+    why: 'A boot with the cloud unreachable (or the panel quota failing) carries every persisted held pack row, a former member\'s orphans included: +938.8 kWh Battery Energy In on the first publish, which Home Assistant books as energy. v1.193.0: the v1.98.0 re-seed that stepped it back down (a meter reset) now carries it by a basis shift, so it stays published.',
   },
   {
     // v1.193.0 — re-pointed as B-ciii, the empty live set taken unless a change is pending.

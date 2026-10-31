@@ -595,6 +595,11 @@ test('★★★ v1.193.0 — buildState: the lifetime counters failing nulls the
       if (failing) throw new Error('database disk image is malformed');
       return { fleet_pv_wh: { persistedWh: 7_613_000, pendingWh: 0, watermarkMs: 0 } };
     },
+    // The persisted keys the circuit fields enumerate come from the same table, so they fail with it.
+    listLifetimeKeys: () => {
+      if (failing) throw new Error('database disk image is malformed');
+      return ['circuit_1_wh', 'circuit_7_wh'];
+    },
   });
   const logs: string[] = [];
   const handle = await mqttDiscovery.startMqttDiscovery(store, recorder, (m) => logs.push(m));
@@ -605,11 +610,15 @@ test('★★★ v1.193.0 — buildState: the lifetime counters failing nulls the
     assert.equal(s1.backup_pool_percent, 55);
     assert.equal(s1.pv_lifetime_kwh, null, 'a lifetime field publishes null (HA: unknown, not a meter reset)');
     assert.equal(s1.battery_charge_lifetime_kwh, null);
+    assert.equal(s1.circuit_1_watts, 100, 'the live circuit still publishes its power');
+    assert.equal(s1.circuit_1_lifetime_kwh, null, 'and its energy field null');
     await handle.buildState!(snap);
     assert.equal(logs.filter((l) => l.includes('lifetime counters unavailable (database disk image is malformed)')).length, 1, 'logged once, not every publish');
+    assert.equal(logs.filter((l) => l.includes('persisted lifetime keys unavailable (database disk image is malformed)')).length, 1, 'logged once');
     failing = false;
     const s3 = await handle.buildState!(snap);
     assert.equal(s3.pv_lifetime_kwh, 7_613);
+    assert.ok('circuit_7_lifetime_kwh' in s3, 'the persisted keys are enumerated again once they read');
   } finally {
     handle.stop();
     setAnalyticsClientForTesting(null);

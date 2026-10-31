@@ -11,6 +11,7 @@
  *   Re-seed    L-i..L-iii   (the membership shift, the floor-gap shift, the shift's sign)
  *              L-xiii..L-xv (the accepted set moves before the recompute; both shifts start from the
  *                            floors as the rollup ratchets them)
+ *              L-xxv        (the floor-gap shift carries Battery Energy Out too)
  *   Joiners    L-v          (summed before the re-seed)
  *   Guard      L-iv, L-viii, L-ix (a large drop passes; the hold is 50 Wh on the watt keys; a held
  *                            dip is published)
@@ -18,8 +19,14 @@
  *                            their shifts; the roster file follows the commit; the read path takes
  *                            the in-memory floors; the rebase is written at once; the sidecar is
  *                            renamed into place)
+ *              L-xix..L-xxiv, L-xxvi (the accepted roster commits with the floors and is read from
+ *                            the row; a stale or unwritten file is rewritten; a rebase writes no
+ *                            battery shift on its own; the battery pending starts from the in-memory
+ *                            floor; the worker adds the shift)
  *   Read path  L-vii        (extrapolated to the read instant)
- *   Payload    L-xviii      (the MQTT state's lifetime read is unguarded)
+ *   Payload    L-xviii, L-xxvii, L-xxviii (the MQTT state's lifetime read, its persisted keys and
+ *                            /api/ha-state's read are guarded)
+ *              L-xxix, L-xxx (the baseline deficit is measured, and the endpoint uses it)
  *
  *   node scripts/mutate-lifetime-monotone.mjs [--only <id prefix>]
  */
@@ -29,6 +36,9 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REC = resolve(REPO, 'server/src/recorder.ts');
 const MQ = resolve(REPO, 'server/src/mqttDiscovery.ts');
+const RR = resolve(REPO, 'server/src/readRecorder.ts');
+const FMT = resolve(REPO, 'server/src/haPayloadFmt.ts');
+const IDX = resolve(REPO, 'server/src/index.ts');
 const SUBSET = [
   'test/lifetimeEmitGuard.test.ts',
   'test/recorderEmitHighwater.test.ts',
@@ -39,6 +49,7 @@ const SUBSET = [
   'test/recorderBootWithoutPanel.test.ts',
   'test/haPayloadFmt.test.ts',
   'test/analyticsWorker.test.ts',
+  'test/recorderLifetimeKeys.test.ts',
 ];
 
 const MUTANTS = [
@@ -135,7 +146,7 @@ const MUTANTS = [
     file: REC,
     find: '    if (writeBatteryFloors(now) && membershipFileFp !== null) {',
     to: '    if ((writeBatteryFloors(now) || true) && membershipFileFp !== null) { /* MUTANT */',
-    why: 'After a failed commit the next process reads the new roster against the old floors: no re-seed, a frozen counter.',
+    why: 'After a failed commit the file names the new roster while the floors are the old pool\'s: a release before v1.193.0 (a rollback) reads it, skips the re-seed and freezes the counters.',
   },
   {
     id: 'L-xii. ★★ the read path takes the battery floor from its row',
@@ -158,6 +169,62 @@ const MUTANTS = [
     to: '      writeFileSync(emitHighWaterPath, JSON.stringify(Object.fromEntries(lifetimeEmitHighWater)), { mode: 0o644 }); /* MUTANT */',
     why: 'A crash mid-write leaves a torn file, read as an empty map: the guard is blind on the next boot and a drop passes as a meter reset.',
   },
+  {
+    id: 'L-xix. ★★★ the accepted roster is not written in the floors\' transaction',
+    file: REC,
+    find: '      if (bmsMembershipFp !== null) membershipRowUpsertStmt.run(bmsMembershipFp, ts);',
+    to: '      /* MUTANT */',
+    why: 'The roster lives in the file alone, written after the commit: a crash in between leaves the Core that left in it, and the next process sums its held packs again over the committed floor (+7,168 Wh on the test plant) and shifts them a second time.',
+  },
+  {
+    id: 'L-xx. ★★★ the boot reads the roster file before the committed row',
+    file: REC,
+    find: '  let bmsMembershipFp: string | null = membershipRowAtBoot ?? membershipFileAtBoot;',
+    to: '  let bmsMembershipFp: string | null = membershipFileAtBoot ?? membershipRowAtBoot; /* MUTANT */',
+    why: 'A stale file (its write lost after the commit) is the roster again: the Core that left is summed over the committed floor, +7,168 Wh in one read.',
+  },
+  {
+    id: 'L-xxi. ★ a stale roster file is never rewritten',
+    file: REC,
+    find: '  let membershipFileFp: string | null = membershipRowAtBoot !== null && membershipFileAtBoot !== membershipRowAtBoot ? membershipRowAtBoot : null;',
+    to: '  let membershipFileFp: string | null = null; /* MUTANT */',
+    why: 'The file keeps the old roster until the next pool change: a rollback to a release before v1.193.0 reads it against floors seeded for another set.',
+  },
+  {
+    id: 'L-xxii. ★ a failed write of the roster file is not retried',
+    file: REC,
+    find: "        writeFileSync(BMS_MEMBERSHIP_PATH, JSON.stringify({ fp: membershipFileFp, at: new Date(now).toISOString() }), { mode: 0o644 });\n        membershipFileFp = null;\n      } catch {",
+    to: "        writeFileSync(BMS_MEMBERSHIP_PATH, JSON.stringify({ fp: membershipFileFp, at: new Date(now).toISOString() }), { mode: 0o644 });\n      } catch {\n      } finally { membershipFileFp = null; /* MUTANT */",
+    why: 'One failed write leaves the file behind the committed roster for good (a rollback reads it).',
+  },
+  {
+    id: 'L-xxiii. ★★★ a rebase at a read writes the battery shifts on their own',
+    file: REC,
+    find: '        if (FLOOR_SHIFT_KEYS.has(key)) continue;',
+    to: '        /* MUTANT */',
+    why: 'After a failed floor commit the battery shift holds the re-seed: written alone it pairs the old floor row with the new shift, a step at the next process (the old floor less the joiner\'s history: a rebase and a WARN; after a leave, a step up booked as energy).',
+  },
+  {
+    id: 'L-xxiv. ★★ the battery pending starts from the floor row',
+    file: REC,
+    find: "        const persisted = key === 'fleet_battery_charge_wh' ? bmsChargeFloor : bmsDischargeFloor;",
+    to: '        const persisted = prev.wh; /* MUTANT */',
+    why: 'After a failed commit of a rejoin re-seed the floor rose in memory only: the pending over the stale row adds the joiner\'s history, 16,896 Wh after 9,728 (L-xii pins the other half of the pair).',
+  },
+  {
+    id: 'L-xxv. ★★ the floor-gap re-seed shifts Battery Energy In alone',
+    file: REC,
+    find: "      const shifted = shiftBattery(c0 - bmsChargeFloor, d0 - bmsDischargeFloor, now, 'floor gap');",
+    to: "      const shifted = shiftBattery(c0 - bmsChargeFloor, 0, now, 'floor gap'); /* MUTANT */",
+    why: 'Battery Energy Out steps down to the live sum and only the guard\'s backstop catches it: a WARN for an unexplained drop and a write outside the floors\' commit; a step under 5 kWh is held, that much energy lost.',
+  },
+  {
+    id: 'L-xxvi. ★★ the worker\'s totals leave out the basis shift',
+    file: RR,
+    find: '        out[r.metric_key] = { persistedWh: r.wh + shiftWh, pendingWh: 0, watermarkMs: r.last_integrated_ts, shiftWh };',
+    to: '        out[r.metric_key] = { persistedWh: r.wh, pendingWh: 0, watermarkMs: r.last_integrated_ts, shiftWh }; /* MUTANT */',
+    why: 'The lifetime carbon figures are computed from a PV total other than the one published, short by its shift.',
+  },
   /* ── the read path ── */
   {
     id: 'L-vii. ★★★ a read extrapolates the newest reading to the read instant again',
@@ -173,6 +240,34 @@ const MUTANTS = [
     find: '    const lifetime = lifetimeTotalsOrNone(() => {\n      const t = recorder.getLifetimeTotals();\n      lifetimeErrLogged = null;\n      return t;\n    }, (msg) => {',
     to: '    const lifetime = ((read: () => ReturnType<Recorder["getLifetimeTotals"]>, _onError: (msg: string) => void) => read())(() => { /* MUTANT */\n      const t = recorder.getLifetimeTotals();\n      lifetimeErrLogged = null;\n      return t;\n    }, (msg: string) => {',
     why: 'A database error in the lifetime read aborts the whole state payload: the runway and alert counts stop publishing with it.',
+  },
+  {
+    id: 'L-xxvii. ★★★ the MQTT state\'s persisted lifetime keys are read unguarded',
+    file: MQ,
+    find: '    const lifetimeKeys = lifetimeKeysOrNone(() => {\n      const k = recorder.listLifetimeKeys();',
+    to: '    const lifetimeKeys = ((read: () => string[], _onError: (msg: string) => void) => read())(() => { /* MUTANT */\n      const k = recorder.listLifetimeKeys();',
+    why: 'The same database error, read again for the circuit fields, aborts the payload the lifetime guard just saved: runway and alert counts with it.',
+  },
+  {
+    id: 'L-xxviii. ★★★ /api/ha-state\'s lifetime read is unguarded',
+    file: IDX,
+    find: '  const lifetime = lifetimeTotalsOrNone(() => {\n    const t = recorder.getLifetimeTotals();',
+    to: '  const lifetime = ((read: () => ReturnType<typeof recorder.getLifetimeTotals>, _onError: (msg: string) => void) => read())(() => { /* MUTANT */\n    const t = recorder.getLifetimeTotals();',
+    why: 'A database error in the lifetime read fails the whole /api/ha-state response, its runway and alert fields with it.',
+  },
+  {
+    id: 'L-xxix. ★★ the baseline deficit counts the basis shifts',
+    file: FMT,
+    find: '    return t ? t.persistedWh - (t.shiftWh ?? 0) + t.pendingWh : null;',
+    to: '    return t ? t.persistedWh + t.pendingWh : null; /* MUTANT */',
+    why: 'After a pool change the deficit reads the difference of the two shifts as discharge ahead of charge: −1.704 kWh for a measured −0.608.',
+  },
+  {
+    id: 'L-xxx. ★★ /api/lifetime-energy computes the deficit from the published values',
+    file: IDX,
+    find: '    battery_baseline_deficit_kwh: batteryBaselineDeficitKwh(totals),',
+    to: "    battery_baseline_deficit_kwh: totals.fleet_battery_charge_wh && totals.fleet_battery_discharge_wh ? toKwh(totals.fleet_battery_discharge_wh.persistedWh + totals.fleet_battery_discharge_wh.pendingWh - totals.fleet_battery_charge_wh.persistedWh - totals.fleet_battery_charge_wh.pendingWh) : null, /* MUTANT */",
+    why: 'The pure helper is right and unused: the endpoint reports the shifts as a deficit (the wire-it-to-production failure).',
   },
 ];
 
