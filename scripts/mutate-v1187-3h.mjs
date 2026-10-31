@@ -239,7 +239,8 @@ const MUTANTS = [
   {
     id: 'B-i. ★★★ the tick never takes a recovery',
     file: BR,
-    find: '    const recovery = recoveryCandidate\n      && isRestartRecovery(continuationBaseline, level, greenSinceMs, Date.now(), settledSinceMs);',
+    // v1.195.0 — re-pointed: the recovery reads recoveryBaseline (the heard level, or a resumed hold's).
+    find: '    const recovery = recoveryCandidate\n      && isRestartRecovery(recoveryBaseline, level, greenSinceMs, Date.now(), settledSinceMs);',
     to: '    const recovery = false; /* MUTANT */',
     why: 'The 10-01 all-clear is held and then adopted in silence; the cleared warning stays the last words.',
   },
@@ -247,8 +248,9 @@ const MUTANTS = [
     id: 'B-ii. ★★★ the tick reads the alert set as settled since forever',
     file: BR,
     // v1.187.4 — re-pointed: the stamp is read before recoveryCandidate (restartQuestionOpen needs it).
-    find: "    const settledSinceMs = level === 'green' && continuationBaseline != null ? alertSetSettledSince() : null;",
-    to: "    const settledSinceMs = level === 'green' && continuationBaseline != null ? 0 : null; /* MUTANT */",
+    // v1.195.0 — re-pointed: on recoveryBaseline.
+    find: "    const settledSinceMs = level === 'green' && recoveryBaseline != null ? alertSetSettledSince() : null;",
+    to: "    const settledSinceMs = level === 'green' && recoveryBaseline != null ? 0 : null; /* MUTANT */",
     why: 'A green read before the set settled is spoken as an all-clear (the boot false-green).',
   },
   {

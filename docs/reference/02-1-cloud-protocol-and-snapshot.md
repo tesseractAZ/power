@@ -745,7 +745,13 @@ re-baselined on code change/clear — debounces the "Inverter error code" CRITIC
 HV/LV MPPT string-error onset, whose clock runs only while the code is non-zero AND the string
 is producing). Since v1.187.4 the pool-unknown onset is persisted (`pool-unknown.json`,
 `POOL_UNKNOWN_PATH`), so a restart inside a blind window carries the onset instead of
-restarting the reserve-blind clock.
+restarting the reserve-blind clock. Since v1.195.0 an episode of up to a year is believed (a panel
+dark for weeks keeps its onset), and a file found in a directory this process cannot write
+(`poolUnknownDirWritable`, a read-only `/data`) is not carried and never written back: its
+panels stay pending (`poolUnknownCarryPending`) with no carried onset (`poolUnknownCarried`), so a
+dark panel is blind since its first listing in this process; the alert set lets one go as for a
+carried onset (`alerts.darkPanelBlindRaised`: the house panel once it reports, any other once it
+reports or its own alarm stands).
 
 ---
 

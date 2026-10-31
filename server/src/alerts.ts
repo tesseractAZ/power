@@ -1265,6 +1265,44 @@ export const BOOT_RESET_ONSET_DEBOUNCE_MS = Math.max(DPU_ERR_DEBOUNCE_MS, MPPT_E
 export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS, RESERVE_BLIND_AFTER_MS);
 
 /**
+ * v1.195.0 — the reserve-blind onset of a panel with no projection (dark since the restart): the
+ * onset the store would carry for it, when earlier than its first listing in this process, else that
+ * listing. Read by its alert (secondaryPanelAlerts) and by the pending rule (darkPanelBlindRaised),
+ * so the two cannot drift.
+ */
+function darkPanelBlindSince(
+  sn: string,
+  connectivity: Pick<ConnectivityContext, 'panelFirstListedBySn' | 'poolUnknownCarriedSinceBySn'> | undefined,
+): number | null {
+  const listed = connectivity?.panelFirstListedBySn?.get(sn) ?? null;
+  const carried = connectivity?.poolUnknownCarriedSinceBySn?.get(sn) ?? null;
+  return carried != null && (listed == null || carried < listed) ? carried : listed;
+}
+
+/**
+ * v1.195.0 — the panels dark since the restart whose reserve-alarm-blind computeAlerts raises at
+ * `nowMs`: every panel other than the house panel (secondaryPanels) with no projection, once its
+ * onset (darkPanelBlindSince) has stood RESERVE_BLIND_AFTER_MS — the alert's own comparison. Such a
+ * panel's carried onset withholds nothing from the set: its alarm is there. The HOUSE panel has no
+ * reserve-blind alarm while it has no projection (findShp2 resolves a flagged panel without one to
+ * nothing, and secondaryPanels leaves it out), so it is never in this set: its carried onset stays
+ * pending until its first projection. Pure.
+ */
+export function darkPanelBlindRaised(
+  devices: Record<string, DeviceSnapshot>,
+  connectivity: Pick<ConnectivityContext, 'panelFirstListedBySn' | 'poolUnknownCarriedSinceBySn'> | undefined,
+  nowMs: number,
+): Set<string> {
+  const out = new Set<string>();
+  for (const panel of secondaryPanels(devices)) {
+    if (panel.projection?.kind === 'shp2') continue;
+    const since = darkPanelBlindSince(panel.sn, connectivity);
+    if (since != null && Number.isFinite(since) && nowMs - since >= RESERVE_BLIND_AFTER_MS) out.add(panel.sn);
+  }
+  return out;
+}
+
+/**
  * v1.187.3 (review) — WHICH IN-MEMORY ONSET CLOCKS ARE STILL INSIDE THEIR DEBOUNCE at `nowMs`?
  *
  * Each names a condition the device is reporting NOW that computeAlerts withholds only because it
@@ -1281,8 +1319,11 @@ export const LONGEST_RESTARTED_ONSET_MS = Math.max(BOOT_RESET_ONSET_DEBOUNCE_MS,
  * assessment has resumed yet (hostPressureCarryPendingHeldAt), for at most its carry window.
  */
 export function debouncedOnsetsPending(
-  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn' | 'poolUnknownCarryPending' | 'hostPressureCarriedHeldAtMs'> | undefined,
+  connectivity: Pick<ConnectivityContext, 'dpuErrOnsetBySn' | 'shp2SrcErrOnsetBySlot' | 'mpptErrOnsetByKey' | 'backupPoolUnknownSinceMs' | 'backupPoolUnknownSinceBySn' | 'poolUnknownCarryPending' | 'poolUnknownCarriedSinceBySn' | 'panelFirstListedBySn' | 'hostPressureCarriedHeldAtMs'> | undefined,
   nowMs: number,
+  // v1.195.0 — the device map the alert set is computed from (darkPanelBlindRaised). Absent: every
+  // carried onset not consumed yet is pending, as before.
+  devices?: Record<string, DeviceSnapshot>,
 ): string[] {
   if (connectivity == null) return [];
   const out: string[] = [];
@@ -1299,7 +1340,14 @@ export function debouncedOnsetsPending(
   // v1.187.4 — a listed panel not projected yet whose onset of before the restart is still on file:
   // its first projection may raise reserve-alarm-blind at once (carried), so a green read before it
   // is not an all-clear. Bounded by the carry window (SnapshotStore.poolUnknownCarryPending).
-  for (const sn of connectivity.poolUnknownCarryPending ?? []) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);
+  // v1.195.0 — …until the alert it would raise is raised already: a panel dark since the restart
+  // whose own reserve-alarm-blind stands from that onset (darkPanelBlindRaised) withholds nothing.
+  // A panel dark for weeks (its onset now carried past 7 days, POOL_UNKNOWN_MAX_EPISODE_MS) would
+  // otherwise keep the set unsettled for as long as it stays dark.
+  const raised = devices != null ? darkPanelBlindRaised(devices, connectivity, nowMs) : new Set<string>();
+  for (const sn of connectivity.poolUnknownCarryPending ?? []) {
+    if (!raised.has(sn)) out.push(`reserve-alarm-blind ${sn} (carried onset; the panel not projected yet)`);
+  }
   // v1.187.20 (review) — a host-pressure episode carried across the restart that no vitals assessment
   // has resumed yet: the first may raise the warning audible at once. Bounded by the carry window.
   if (within(connectivity.hostPressureCarriedHeldAtMs, HOST_PRESSURE_CARRY_MAX_GAP_MS)) out.push('host-pressure (carried episode; not assessed since the restart)');
@@ -2774,10 +2822,8 @@ function secondaryPanelAlerts(
     // v1.187.4 (review) — or since the onset of before the restart, when the store carries one: a
     // panel blind across a restart and still dark after it was absent 15 min, then a warning until
     // boot + 60, even when it had been critical.
-    const listed = connectivity?.panelFirstListedBySn?.get(panel.sn) ?? null;
-    const carried = connectivity?.poolUnknownCarriedSinceBySn?.get(panel.sn) ?? null;
-    const since = carried != null && (listed == null || carried < listed) ? carried : listed;
-    pushReserveBlind(out, panel, devices, grid, since, now, sfx);
+    // v1.195.0 — darkPanelBlindSince, shared with the pending rule (darkPanelBlindRaised).
+    pushReserveBlind(out, panel, devices, grid, darkPanelBlindSince(panel.sn, connectivity), now, sfx);
     return;
   }
   const sp = panel.projection as Shp2Projection;

@@ -71,8 +71,9 @@ const MUTANTS = [
   {
     id: 'vii. ★★ a verified TEST marks the condition heard',
     file: BC,
-    find: '      if (kind === \'condition\' && !deliveryUnverified && conditionLevel === level) conditionSpoken = true;',
-    to: '      if (kind !== \'dedicated\' && !deliveryUnverified && conditionLevel === level) conditionSpoken = true; /* MUTANT */',
+    // v1.195.0 (review) — re-pointed: the line now leaves a level held for its clearing to the hold.
+    find: '      if (kind === \'condition\' && !deliveryUnverified && conditionLevel === level && !noteHeldLevelAudible(level, true)) conditionSpoken = true;',
+    to: '      if (kind !== \'dedicated\' && !deliveryUnverified && conditionLevel === level && !noteHeldLevelAudible(level, true)) conditionSpoken = true; /* MUTANT */',
     why: 'A yellow test over an unheard yellow warning suppresses that warning after the next restart.',
   },
   {

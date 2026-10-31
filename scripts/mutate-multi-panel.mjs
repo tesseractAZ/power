@@ -250,7 +250,8 @@ const MUTANTS = [
   {
     id: 'r11. ★★ a dark second panel raises no reserve-blind alert',
     file: ALERTS,
-    find: '    pushReserveBlind(out, panel, devices, grid, since, now, sfx);',
+    // v1.195.0 — re-pointed: the onset is darkPanelBlindSince, shared with the pending rule.
+    find: '    pushReserveBlind(out, panel, devices, grid, darkPanelBlindSince(panel.sn, connectivity), now, sfx);',
     to: '    /* MUTANT */',
     why: 'A second pool dark since a restart is unmonitored with nothing on screen.',
   },
