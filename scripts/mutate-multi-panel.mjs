@@ -187,8 +187,10 @@ const MUTANTS = [
   {
     id: 'r3. ★★ the first pin is taken from a single list',
     file: SNAP,
-    find: '    const r = resolveHousePanel(census, this.housePanelPin, this.pinCandidateLists >= FIRST_PIN_LISTS);',
-    to: '    const r = resolveHousePanel(census, this.housePanelPin, true); /* MUTANT */',
+    // v1.197.1 — re-pointed: the call passes the device map's panels (an empty census keeps a
+    // one-panel plant's pin).
+    find: '    const r = resolveHousePanel(census, this.housePanelPin, this.pinCandidateLists >= FIRST_PIN_LISTS, shp2Panels(this.snap.devices).sns);',
+    to: '    const r = resolveHousePanel(census, this.housePanelPin, true, shp2Panels(this.snap.devices).sns); /* MUTANT */',
     why: 'A fresh two-panel install pins whichever panel a partial first list happened to name.',
   },
   {

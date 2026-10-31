@@ -26,7 +26,9 @@
  *
  * (7D) The pool-unknown file believes an episode of up to 366 days (was 7), and a panel dark since
  * the restart is pending only until its carried reserve-blind alarm is raised (darkPanelBlindRaised;
- * the house panel has none while dark, so it stays pending). Mutants D-i..v.
+ * the house panel has none while dark, so it stays pending). Mutants D-i..v. (v1.197.1: the pinned
+ * house panel raises its alarm while dark and joins the set; D-iii re-pointed to a pin missing from
+ * the account, which still has none — mutate-house-blind.mjs pins the rest.)
  *
  * (RO) A file found in a directory this process cannot write is not carried (poolUnknownDirWritable,
  * poolUnknownUntrusted), its panels stay pending, and its entries are never written back.
@@ -62,6 +64,7 @@ const AM = resolve(SERVER, 'src/alertMonitor.ts');
 const T_RESTART = 'test/restartRecoveryAllClear.test.ts';
 const T_RETRY = 'test/conditionRetryNewestWins.test.ts';
 const T_POOL = 'test/poolUnknownCarry.test.ts';
+const T_HOUSE = 'test/houseReserveBlindDark.test.ts'; // v1.197.1
 
 const MUTANTS = [
   /* ── F3: the all-clear a restart inside a held de-escalation owes ── */
@@ -304,11 +307,14 @@ const MUTANTS = [
     why: 'A panel dark for weeks keeps the alert set unsettled for as long as it is dark.',
   },
   {
-    id: 'D-iii. ★★★ the dark house panel counts as raised',
-    file: AL, tests: [T_POOL],
-    find: '  for (const panel of secondaryPanels(devices)) {\n    if (panel.projection?.kind === \'shp2\') continue;\n    const since = darkPanelBlindSince(panel.sn, connectivity);',
+    id: 'D-iii. ★★★ every dark panel counts as raised, a pinned house panel MISSING from the account too',
+    file: AL, tests: [T_POOL, T_HOUSE],
+    // v1.197.1 — re-pointed: the pinned house panel with no projection now raises its own alarm and
+    // is in the set (pinnedDarkHousePanel); what remains outside it is a pin missing from the
+    // account, which has no reserve-blind alarm (the shp2-multi-panel critical stands).
+    find: '  for (const panel of darkHouse ? [...secondaryPanels(devices), darkHouse] : secondaryPanels(devices)) {\n    if (panel.projection?.kind === \'shp2\') continue;\n    const since = darkPanelBlindSince(panel.sn, connectivity);',
     to: '  for (const panel of Object.values(devices).filter((d) => isShp2Product(d.productName))) { /* MUTANT */\n    if (panel.projection?.kind === \'shp2\') continue;\n    const since = darkPanelBlindSince(panel.sn, connectivity);',
-    why: 'The house panel has no alarm while dark: a green read before it reports is taken as an all-clear.',
+    why: 'A missing house panel has no alarm while dark: a green read before it reports is taken as an all-clear.',
   },
   {
     id: 'D-iv. ★ raised one reading late',

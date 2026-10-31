@@ -3310,6 +3310,23 @@ export function startAlertMonitor(
       feedBaseline.read(() => analyticsClient().report('baselineAlerts'), ALERT_FEED_BUDGET_MS),
       feedForecastAlerts.read(() => analyticsClient().report('forecastAlerts'), ALERT_FEED_BUDGET_MS),
     ]);
+    // v0.23.0 — keep the HA state cache warm for the grid-backstop context when a grid-presence
+    // entity is configured (TTL-gated + coalesced, so this is cheap). When no entity is configured
+    // the verdict resolves from GRID_AVAILABLE + live import only.
+    // v1.197.1 — BEFORE the connectivity context, never between it and computeAlerts. store.get() is
+    // the store's live map: a quota landing during this await (a real HA fetch on about every other
+    // tick) projects a panel in place. A context built before the await described that panel as dark
+    // (no pool onset for it) while computeAlerts read it projected, so its reserve-alarm-blind (the
+    // house's, or a secondary panel's) read blind since that quota and was missing for one tick:
+    // a "Resolved" push, and the alarm again on the next tick. From the context to computeAlerts the
+    // pass is synchronous, so both read one state of the store.
+    if (gridPresenceEntityId()) {
+      try {
+        await haStateCache.refreshIfStale();
+      } catch {
+        /* best effort — a stale/empty cache resolves to NOT present (safe) */
+      }
+    }
     // v0.7.7 — build the connectivity context the alerts engine uses to
     // enrich offline/stale alerts with last-data timestamps + source.
     // v1.187.10 — keep the persisted cloud-offline stamps first (stamped on the first offline
@@ -3361,17 +3378,8 @@ export function startAlertMonitor(
       hostPressureCarriedHeldAtMs: hostPressureCarryPendingHeldAt(),
     };
 
-    // v0.23.0 — grid-backstop context for the reserve/floor alerts. Keep the HA
-    // state cache warm when a grid-presence entity is configured (TTL-gated +
-    // coalesced, so this is cheap), then resolve from the live snapshot. When no
-    // entity is configured this resolves from GRID_AVAILABLE + live import only.
-    if (gridPresenceEntityId()) {
-      try {
-        await haStateCache.refreshIfStale();
-      } catch {
-        /* best effort — a stale/empty cache resolves to NOT present (safe) */
-      }
-    }
+    // v0.23.0 — grid-backstop context for the reserve/floor alerts: resolved from the live snapshot
+    // and the HA state cache, warmed above.
     const grid = liveGridBackstop(snap.devices);
 
     // v1.70.0 — on-peak grid-to-battery. On 2026-08-04 the plant spent an on-peak
