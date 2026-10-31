@@ -279,7 +279,7 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
   HTTPS 443, Wyoming TCP.
 - **Capabilities explicitly denied:** `sys_admin`, `sys_module`, `sys_rawio`, `sys_ptrace`,
   `sys_boot`, `sys_time`, `mac_admin`, `mac_override`.
-- **Reads (since v1.197.1): granted per top-level folder, never per file.** The blanket `file,`
+- **Reads (since v1.197.2): granted per top-level folder, never per file.** The blanket `file,`
   rule (kept from v1.7.1 to v1.197.0) is gone. The image's own folders are granted whole, so s6,
   bashio, jq, npm, tsx, node and esbuild cannot meet a read denial: `/bin`, `/sbin`, `/lib`,
   `/lib64`, `/usr`, `/package` and `/command` readable and mappable, `/etc`, `/var` and `/app`
@@ -298,7 +298,7 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
   boot (`/run/service`, `/run/s6`, `/run/s6-rc*`), beside the program folders `/bin`, `/sbin`,
   `/usr/bin`, `/usr/sbin` and `/usr/local/bin` and s6's script folders under `/etc`
   (`/etc/s6-overlay`, `/etc/s6`, `/etc/cont-init.d`, `/etc/services.d`, `/etc/cont-finish.d`;
-  the last runs at stop). Each of these was backed up by `file,` until v1.197.1 and is now the only
+  the last runs at stop). Each of these was backed up by `file,` until v1.197.2 and is now the only
   exec grant for its folder; `apparmorProfile.test.ts` pins every one.
 - **`/share`: the add-on's own folder only.** `/share/ecoflow-panel` (the database snapshot and the
   backup hook's journal) is `rwk` and the listing of `/share` itself is readable; other add-ons'
@@ -320,7 +320,7 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
 - **Denied file ops:** reading `/etc/shadow`, `/etc/gshadow`, `/root/**`, `/home/**`,
   `/etc/ssh/**`; writing `/proc/sys/**`, `/sys/**`, `/proc/sysrq-trigger`; mount/umount/
   pivot_root/remount; ptrace. These are plain denies (silent): npm looks under `/root` on every
-  start, and that noise stays out of the audit journal. Every deny added since v1.197.1 is
+  start, and that noise stays out of the audit journal. Every deny added since v1.197.2 is
   `audit deny`.
 - **Never denied:** a read of `/data/options.json` (bashio reads every option from it), and the
   `network netlink raw` rule stays.
@@ -337,7 +337,7 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
   its API, created its database and spawned its workers, and the host audit journal held no
   ALLOWED/DENIED record for either. The final profile was compiled fresh (`apparmor_parser -T -Q -K`)
   before shipping. Invariants pinned in `apparmorProfile.test.ts` (harness `mutate-v1187-15.mjs`).
-- **Boot test for a read or exec change (v1.197.1 onward), required before it ships:**
+- **Boot test for a read or exec change (v1.197.2 onward), required before it ships:**
   - *Preconditions.* Docker on the host is reachable from the shell used (on Home Assistant OS, the
     SSH add-on with protection mode off); the test never changes protection mode or the SSH
     add-on and leaves both as it found them. Every helper container that reads the host journal
@@ -404,7 +404,7 @@ the HA security rating and confines the process even if a Fastify endpoint is ex
    s6-overlay **re-opens `/init` for READING** → `/bin/sh: can't open '/init': Permission
    denied` crash-loop → whole add-on (and alarm) down, invisibly (init never reaches the server's
    log). Reverted v1.7.1; v1.7.2 kept `file,` and layered **write-immutability** deny rules on the
-   code/binary/lib dirs (`deny /app|/usr|/bin|/sbin|/lib|/lib64|/init … wl`). v1.197.1 drops
+   code/binary/lib dirs (`deny /app|/usr|/bin|/sbin|/lib|/lib64|/init … wl`). v1.197.2 drops
    `file,` again, granting the image's folders whole and only after the isolated boot test above.
    Two traps the test exists for: AppArmor checks an exec by the symlink's **target**
    (`/usr/bin/bashio` is `/usr/lib/bashio/bashio`; `/command/*` are files under versioned
@@ -728,7 +728,7 @@ multi-arch image — it does **not** build on the host. Once the GitHub Release 
   Since v1.187.15 `/command`, `/package` and `/etc` are write-locked (`deny … wl`); `/command` and
   `/package` are the s6 PID1 trees. The locks were added after that boot test (§12 AppArmor
   profile). A mistaken denial in those trees is an *invisible* init crash-loop, so any further
-  change to them needs the same boot test. Since v1.197.1 the profile also confines reads, and a
+  change to them needs the same boot test. Since v1.197.2 the profile also confines reads, and a
   read or exec it does not grant logs `apparmor="DENIED"` in the host audit journal under the
   add-on's slug. A profile change needs the isolated boot test before it ships, and a deliberate
   restart right after the deploy (the profile loads with the update; the v1.7.0 failure showed at

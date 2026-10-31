@@ -129,7 +129,7 @@ never blocked).
 
 - **AppArmor** (`ecoflow_panel/apparmor.txt`, narrowed in v1.187.15 after
   complain-mode profiling of a running instance and of an isolated boot; reads
-  confined per folder since v1.197.1 after an isolated boot test in complain
+  confined per folder since v1.197.2 after an isolated boot test in complain
   mode and then enforced):
   - capabilities **`chown` and `dac_override` only**; `sys_admin`, `sys_module`,
     `sys_rawio`, `sys_ptrace`, `sys_boot`, `sys_time`, `mac_admin` and

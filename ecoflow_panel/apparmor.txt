@@ -2,7 +2,7 @@
 
 # AppArmor profile for the Power add-on (slug ecoflow_panel). First added in
 # v0.9.44; narrowed in v1.187.15 to what the add-on was seen to use; since
-# v1.197.1 reads are confined to the folders the add-on uses (no `file,`).
+# v1.197.2 reads are confined to the folders the add-on uses (no `file,`).
 #
 # Home Assistant Supervisor loads this file as the LSM profile for the
 # container (renamed to the installed slug, <repository-hash>_ecoflow_panel).
@@ -41,7 +41,7 @@
 # journal (`journalctl _TRANSPORT=audit` on the HAOS host — not
 # /var/log/audit/audit.log, not dmesg). An explicit `deny` rule is silent;
 # only an `audit deny` rule, or an operation no allow rule covers, is logged:
-# since v1.197.1 a read this profile does not grant is refused AND logged
+# since v1.197.2 a read this profile does not grant is refused AND logged
 # (apparmor="DENIED"). Boot-test a change on an isolated container of the
 # image that ships, in complain mode, then enforced, over three starts and
 # three stops, each stop within the Supervisor's 10 s timeout (the v1.7.0
@@ -75,7 +75,7 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   deny capability mac_override,
 
   # ─── File system ───────────────────────────────────────────────────
-  # v1.197.1 — reads are granted per TOP-LEVEL FOLDER; the blanket `file,` rule
+  # v1.197.2 — reads are granted per TOP-LEVEL FOLDER; the blanket `file,` rule
   # (kept from v1.7.1 to v1.197.0) is gone.
   #
   # Why it was kept so long: v1.7.0 replaced `file,` with a per-path list that
@@ -173,7 +173,7 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   /run/s6-rc** rwix,
   /package/admin/s6/command/** ix,
   /command/** rwix,
-  # v1.197.1 — exec grants `file,` used to cover, each by the path AppArmor checks:
+  # v1.197.2 — exec grants `file,` used to cover, each by the path AppArmor checks:
   #   /package/**        every s6-overlay package; /command/* and /usr/bin/with-contenv
   #                      resolve here (slashpackage links /package/admin/s6 to a
   #                      versioned folder, which the line above does not name)
@@ -202,7 +202,7 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
 
   # Persistent storage (/data is volume-mounted by HA Supervisor).
   # SQLite needs the rwk permission for WAL + shm files.
-  # v1.197.1 — `{,**}`: the folder itself too. A `**` at the start of a path
+  # v1.197.2 — `{,**}`: the folder itself too. A `**` at the start of a path
   # element must match at least one character, so `/data/**` never matched
   # `/data/`: atomicWrite.ts lists /data to sweep its temp files, and SQLite
   # opens the folder to fsync it after creating the journal.
@@ -210,13 +210,13 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
 
   # Temp + runtime files (tsx's cache and IPC socket are /tmp/tsx-0; bashio's
   # cache is /tmp/.bashio; SQLite's temp files go to /var/tmp; /run is s6's
-  # runtime tree, the folder itself included since v1.197.1).
+  # runtime tree, the folder itself included since v1.197.2).
   /tmp/{,**} rwk,
   /var/tmp/** rwk,
   /run/{,**} rwk,
 
   # Standard config files (read-only system info). Covered by `/etc/{,**} r`
-  # since v1.197.1; kept as the list of what is known to be read.
+  # since v1.197.2; kept as the list of what is known to be read.
   /etc/passwd r,
   /etc/group r,
   /etc/hosts r,
@@ -233,7 +233,7 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   /usr/share/ca-certificates/** r,
 
   # /proc — Node + s6 need to read process info (all of /proc is readable since
-  # v1.197.1, above). Writes to /proc/sys and to a process's mem file are denied
+  # v1.197.2, above). Writes to /proc/sys and to a process's mem file are denied
   # below. AppArmor names /proc/self/... by the resolved /proc/<pid>/..., so the
   # /proc/self line grants nothing it names; the comm lines are the real writes
   # (musl's pthread_setname_np writes /proc/<pid>/task/<tid>/comm).
@@ -283,7 +283,7 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   deny /sys/kernel/** w,
   deny /sys/firmware/** rw,
 
-  # v1.197.1 — new denies, each `audit deny` (a plain deny is silent; these are
+  # v1.197.2 — new denies, each `audit deny` (a plain deny is silent; these are
   # logged, so a probe or a regression shows up in the host audit journal).
   # NEVER deny `r` on /data/options.json: bashio reads every option from it.
   #   - The Home Assistant folders this add-on does not map (config.yaml maps

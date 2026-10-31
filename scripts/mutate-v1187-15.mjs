@@ -7,7 +7,7 @@
  *   A-iii  network widened to every family again
  *   A-iv   a capability back in the allow list
  *
- * v1.197.1 — the blanket `file,` rule is gone (reads granted per top-level folder). A-i was anchored
+ * v1.197.2 — the blanket `file,` rule is gone (reads granted per top-level folder). A-i was anchored
  * on `  file,`; it now removes `/init r,`. The new mutants:
  *
  *   B-i    the blanket `file,` rule back
@@ -22,7 +22,7 @@
  *   B-x    the unmapped-folder tripwire removed
  *   B-xi   a read deny on /data/options.json
  *
- * v1.197.1 review — the exec grants `file,` used to back up are each the only grant for their folder
+ * v1.197.2 review — the exec grants `file,` used to back up are each the only grant for their folder
  * now; the Go runtime's huge-page read; the /run writable-and-executable exception bounded; the
  * capability, mount and ptrace denies and the remaining write-locks pinned:
  *

@@ -3,7 +3,7 @@
  * the 2026-10-11 review or reintroduce the two outages it recorded
  * (docs/reference/12-configuration-deployment-security.md “AppArmor profile”).
  *
- * v1.197.1 — the blanket `file,` rule is gone: reads are granted per top-level folder. A missed
+ * v1.197.2 — the blanket `file,` rule is gone: reads are granted per top-level folder. A missed
  * read or exec on the s6 / bashio / npm / tsx path is an INVISIBLE init crash-loop with the whole
  * alarm down (v1.7.0), so this file evaluates the profile the way the kernel does: a small
  * AppArmor glob matcher over the profile's own file rules (deny beats allow) checks every path
@@ -128,7 +128,7 @@ test('the evaluator reads globs the way the parser does (a `*` / `**` starting a
 });
 
 test('★★★ no blanket file rule; /init and the s6 trees stay readable and executable (v1.7.0: a per-path list without `/init r` crash-looped s6)', () => {
-  assert.ok(!rules.includes('file,'), 'the blanket `file,` rule is gone (v1.197.1)');
+  assert.ok(!rules.includes('file,'), 'the blanket `file,` rule is gone (v1.197.2)');
   for (const r of [
     '/init r,',
     '/init ix,',
@@ -152,7 +152,7 @@ test('★★★ no blanket file rule; /init and the s6 trees stay readable and e
   for (const p of ['/proc/', '/proc/filesystems', '/proc/sys/vm/overcommit_memory', '/proc/sys/crypto/fips_enabled']) {
     assert.equal(decide(p, 'r'), 'allow', `read of ${p}`);
   }
-  // The exec grants kept from before v1.197.1. While `file,` existed they were backed up by it; now
+  // The exec grants kept from before v1.197.2. While `file,` existed they were backed up by it; now
   // each is the only exec grant for its folder, so each is pinned by a path in it: s6-overlay's
   // scripts and the legacy cont-init / services.d / cont-finish folders (boot, and the STOP path),
   // the image's program folders, and a terminal under /dev/pts (`docker exec -t`).
@@ -283,7 +283,7 @@ const REFUSED: ReadonlyArray<readonly [path: string, perm: Perm, by: 'audit-deny
   ['/addon_configs/x', 'w', 'audit-deny', 'add-on configs'],
   ['/homeassistant/secrets.yaml', 'r', 'audit-deny', 'HA configuration (new name)'],
   ['/media/x', 'r', 'audit-deny', 'media'],
-  // the secrets and the write-locks that predate v1.197.1 (plain denies)
+  // the secrets and the write-locks that predate v1.197.2 (plain denies)
   ['/etc/shadow', 'r', 'deny', 'password hashes'],
   ['/etc/gshadow', 'r', 'deny', 'group password hashes'],
   ['/etc/ssh/ssh_host_ed25519_key', 'r', 'deny', 'host keys'],
@@ -393,7 +393,7 @@ test("★★ the only paths both writable and executable are s6's runtime trees 
   for (const p of ['/run/x', '/run/x/y']) assert.equal(decide(p, 'x'), 'none', `exec of ${p}`);
 });
 
-test('★★ every deny added since v1.197.1 is `audit deny`; the /root and /home denies stay plain (npm noise)', () => {
+test('★★ every deny added since v1.197.2 is `audit deny`; the /root and /home denies stay plain (npm noise)', () => {
   for (const r of [
     'audit deny /{config,ssl,backup,media,addons,addon_configs,homeassistant}/{,**} rwlkmx,',
     'audit deny /{data,share,tmp,var/tmp}/** mx,',
