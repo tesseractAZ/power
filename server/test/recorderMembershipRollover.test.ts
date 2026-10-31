@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
 
 /**
  * v1.96.0 — two data-integrity defects the 2026-08-20 pack/DPU swap exposed.
@@ -26,6 +27,19 @@ const tmp = mkdtempSync(join(tmpdir(), 'ef-membership-'));
 process.env.DB_PATH = join(tmp, 'ecoflow.db');
 
 const { createRecorder } = await import('../src/recorder.js');
+const { haTotalIncreasing } = await import('./helpers/haTotalIncreasing.js');
+
+/** A lifetime_totals row / lifetime_basis shift as committed (another connection). */
+function committed(key: string): { row: number | null; shift: number | null } {
+  const raw = new DatabaseSync(process.env.DB_PATH!);
+  try {
+    const r = raw.prepare(`SELECT wh FROM lifetime_totals WHERE metric_key = ?`).get(key) as { wh: number } | undefined;
+    const b = raw.prepare(`SELECT shift_wh FROM lifetime_basis WHERE metric_key = ?`).get(key) as { shift_wh: number } | undefined;
+    return { row: r?.wh ?? null, shift: b?.shift_wh ?? null };
+  } finally {
+    raw.close();
+  }
+}
 
 const PACK_MAH_TO_WH = (32 * 3.2) / 1_000;
 
@@ -80,20 +94,29 @@ function shp2Device(memberSns: string[]) {
 const total = (t: Record<string, { persistedWh: number; pendingWh: number }>, k: string) =>
   t[k].persistedWh + t[k].pendingWh;
 
-test('membership rollover — the lifetime floors RE-SEED instead of freezing when a member leaves', () => {
+// v1.193.0 — changed: this test asserted the published counter "must step DOWN to the new pool". Home
+// Assistant books a step below 90 % of the last reading as a meter reset, the whole new reading again
+// (4,096 Wh of phantom energy here; about 12,043 kWh on the live Battery Energy In by 2026-09-07).
+// The floors still re-seed to the new pool (the row); the published counter continues from its last
+// value, the difference carried as a basis shift written with the floors.
+test('membership rollover — the lifetime floors RE-SEED instead of freezing when a member leaves; v1.193.0: the published counters continue (basis shift)', () => {
   const store = makeStore({ generatedAt: Date.now(), devices: {} as any });
   store.snap.devices.SHP2 = shp2Device(['DPU_A', 'DPU_B']);
   store.snap.devices.DPU_A = dpuDevice('DPU_A', [{ num: 1, packSn: 'PA1', chg: 1_000_000, dsg: 1_000_000 }]);
   store.snap.devices.DPU_B = dpuDevice('DPU_B', [{ num: 1, packSn: 'PB1', chg: 2_000_000, dsg: 2_000_000 }]);
 
-  const rec = createRecorder(store as any, () => {});
+  const lines: string[] = [];
+  const rec = createRecorder(store as any, (m: string) => lines.push(m));
+  const published: number[] = [];
+  const read = () => { const t = rec.getLifetimeTotals(); published.push(total(t, 'fleet_battery_charge_wh')); return t; };
   rec.rollupLifetime();                                    // baselines, deltas 0 — seeds the fingerprint
 
-  // Both members accumulate: A +100k mAh, B +900k mAh.
+  // Both members accumulate: A +40k mAh, B +40k mAh (4,096 Wh each).
   store.snap.devices.DPU_A = dpuDevice('DPU_A', [{ num: 1, packSn: 'PA1', chg: 1_040_000, dsg: 1_040_000 }]);
   store.snap.devices.DPU_B = dpuDevice('DPU_B', [{ num: 1, packSn: 'PB1', chg: 2_040_000, dsg: 2_040_000 }]);
   rec.rollupLifetime();
-  const highWater = total(rec.getLifetimeTotals(), 'fleet_battery_charge_wh');
+  read();
+  const highWater = published[published.length - 1];
   assert.ok(Math.abs(highWater - 80_000 * PACK_MAH_TO_WH) < 1e-6, `floor built to ${highWater}`);
 
   // B leaves the panel entirely (physically re-wired). The live sum is now A only.
@@ -102,13 +125,44 @@ test('membership rollover — the lifetime floors RE-SEED instead of freezing wh
   // v1.188.1 (review) — the change must hold for three rollups (a one-poll isConnect flicker is not
   // a rollover): until then the floor holds and B's held packs stay in the sum.
   rec.rollupLifetime();
+  read();
   rec.rollupLifetime();
-  assert.ok(Math.abs(total(rec.getLifetimeTotals(), 'fleet_battery_charge_wh') - highWater) < 1e-6, 'not re-seeded before the change is sustained');
+  read();
+  assert.ok(Math.abs(published[published.length - 1] - highWater) < 1e-6, 'not re-seeded before the change is sustained');
+  assert.ok(Math.abs((committed('fleet_battery_charge_wh').row ?? 0) - highWater) < 1e-6, 'the floor row still describes A + B');
   rec.rollupLifetime();
 
-  const after = total(rec.getLifetimeTotals(), 'fleet_battery_charge_wh');
-  assert.ok(after < highWater, `must step DOWN to the new pool, not stay pinned (was ${highWater}, now ${after})`);
-  assert.ok(Math.abs(after - 40_000 * PACK_MAH_TO_WH) < 1e-6, `re-seeded to A-only sum, got ${after}`);
+  // The floors re-seeded to the A-only sum, and the shift went into the same commit (read before any
+  // publish: the shift is the re-seed's own, not the guard's backstop).
+  const c = committed('fleet_battery_charge_wh');
+  const d = committed('fleet_battery_discharge_wh');
+  assert.ok(Math.abs((c.row ?? 0) - 40_000 * PACK_MAH_TO_WH) < 1e-6, `floor re-seeded to the A-only sum, got ${c.row}`);
+  assert.ok(Math.abs((c.shift ?? 0) - 40_000 * PACK_MAH_TO_WH) < 1e-6, `Battery Energy In shift +4,096 Wh committed with it, got ${c.shift}`);
+  assert.ok(Math.abs((d.shift ?? 0) - 40_000 * PACK_MAH_TO_WH) < 1e-6, `Battery Energy Out likewise, got ${d.shift}`);
+
+  const t = read();
+  const after = published[published.length - 1];
+  assert.ok(Math.abs(after - highWater) < 1e-6, `★★★ the published counter continues at ${highWater} (was: stepped down to 4,096, a meter reset), got ${after}`);
+  assert.equal(t.fleet_battery_charge_wh.shiftWh, 40_000 * PACK_MAH_TO_WH);
+  assert.equal(t.fleet_battery_charge_wh.heldWh, 0, 'continued by the shift, not held by the guard');
+  assert.ok(Math.abs(total(t, 'fleet_battery_discharge_wh') - highWater) < 1e-6, 'Battery Energy Out continues likewise');
+  const reseed = lines.filter((l) => l.includes('v1.96.0 SHP2 pool membership changed'));
+  assert.equal(reseed.length, 1);
+  assert.match(reseed[0], /charge 8192 -> 4096 Wh/);
+  assert.match(reseed[0], /continue from their last values \(basis shift \+4096 \/ \+4096 Wh, now 4096 \/ 4096 Wh\)/);
+  assert.ok(!reseed[0].includes('meter reset'), 'the step is no longer described as a harmless reset');
+  assert.deepEqual(lines.filter((l) => l.includes('WARN lifetime counter')), [], 'the guard\'s backstop never fires on a known re-seed');
+
+  // A +5k mAh: the counter advances from the continued value (512 Wh), not from the new pool's 4,096.
+  store.snap.devices.DPU_A = dpuDevice('DPU_A', [{ num: 1, packSn: 'PA1', chg: 1_045_000, dsg: 1_045_000 }]);
+  read();
+  assert.ok(Math.abs(published[published.length - 1] - 85_000 * PACK_MAH_TO_WH) < 1e-6, `8,704 Wh after A's +512, got ${published[published.length - 1]}`);
+  rec.rollupLifetime();
+  read();
+  const ha = haTotalIncreasing(published);
+  assert.equal(ha.resets, 0, `Home Assistant reads no meter reset (was 1, booking 4,096 Wh again): ${published.join(', ')}`);
+  assert.ok(Math.abs(ha.sum - 5_000 * PACK_MAH_TO_WH) < 1e-6, `HA books exactly A's 512 Wh after the high water, got ${ha.sum}`);
+  rec.close();
 });
 
 test('membership rollover — a STABLE roster still ratchets monotonically (no spurious re-seed)', () => {
@@ -116,7 +170,7 @@ test('membership rollover — a STABLE roster still ratchets monotonically (no s
   store.snap.devices.SHP2 = shp2Device(['DPU_C']);
   store.snap.devices.DPU_C = dpuDevice('DPU_C', [{ num: 1, packSn: 'PC1', chg: 1_000_000, dsg: 1_000_000 }]);
   const rec = createRecorder(store as any, () => {});
-  // The previous test's roster is persisted (bms-membership.json): three rollups settle the change
+  // The previous test's roster is persisted (v1.193.0: the bms_membership row): three rollups settle the change
   // to this roster (v1.188.1 review: a change is re-seeded only once it holds for three).
   rec.rollupLifetime();
   rec.rollupLifetime();
@@ -140,6 +194,11 @@ test('orphan guard — a held row is NOT carried once its pack lives in another 
   store.snap.devices.DPU_Y = dpuDevice('DPU_Y', [{ num: 1, packSn: 'STAY', chg: 3_000_000, dsg: 3_000_000 }]);
 
   const rec = createRecorder(store as any, () => {});
+  rec.rollupLifetime();
+  // v1.193.0 — the previous test's roster stays the BMS sum's members until this one holds for three
+  // rollups (a Core that joins counts from the re-seed, bmsMembersOf): settle X and Y in first, so the
+  // scenario below runs with both as members, as it did when a pending change summed the live set.
+  rec.rollupLifetime();
   rec.rollupLifetime();
 
   // MOVER accumulates 400k mAh while still in X, creating a held row under X.

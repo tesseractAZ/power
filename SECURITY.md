@@ -177,6 +177,17 @@ never blocked).
 - A maintainer-side pre-push check compares outgoing commits against the real
   serial numbers and personal values, which are kept outside the repository so
   that the detector does not publish what it guards.
+- `check-no-secrets.py` reads text files only and cannot see inside an image, so
+  the README screenshots are rendered from a synthetic fleet
+  (`scripts/screenshots/`), never from an installation. Before the capture tool
+  writes an image it checks the page's text for a serial that is not one of the
+  fixture's placeholders, and both the page's text and an OCR read of the pixels
+  for a device name ending in a hyphen and four digits (EcoFlow names a device
+  after the last four digits of its serial until it is renamed, which no
+  serial-shape rule matches) and for a read that found nothing; each of these
+  stops it. The serial rule is not applied to the OCR read, which can read a 0 as
+  an O. `check-no-secrets.py --stdin` applies the scan's rules, and the private
+  value rules where configured, to the page text.
 
 ### Supply chain
 

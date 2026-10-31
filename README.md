@@ -67,8 +67,8 @@ power and an energy sensor for every Smart Home Panel 2 circuit; the energy coun
 Energy Dashboard), and opt-in **Home Assistant notifications** with companion-app push.
 
 Every change ships through the test suite, and a guard that a plausible refactor could silently
-disarm is held by a committed mutation harness: **131 harnesses** holding
-**3808 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
+disarm is held by a committed mutation harness: **133 harnesses** holding
+**3874 anchor-asserted mutants**. The harness, mutant, test and reference counts, the engine
 floor and group counts, and every engine-index row's code anchor are checked against the tree in
 CI ([Quality & accuracy](#quality--accuracy)).
 
@@ -140,24 +140,23 @@ and drops the advisory-only ones.
 
 ## Screenshots
 
-Live captures from the reference deployment. **Device serial numbers are masked to
-their product-family prefix and circuit names are replaced by their shed-order index**
-(`Circuit 1`…`Circuit 6`); everything else — telemetry, charts, layout, alert text — is
-exactly what the app renders.
+Rendered by the add-on's own web UI from a **synthetic fleet**: three DELTA Pro Ultra Cores
+behind one Smart Home Panel 2, an EV charger and two accessory devices, one of them offline.
+[`scripts/screenshots/`](scripts/screenshots/) serves the fleet at a fixed clock (a June midday
+in the default site zone). Serial numbers are placeholders, circuits carry the panel's default
+names and every figure is synthetic; no image shows a real installation. After
+`npm --prefix web run build`, `(cd server && node --import tsx ../scripts/screenshots/capture.mts)`
+re-captures all five. It writes no image when the page asks for an endpoint the fixture does
+not serve, when the page's text holds a serial that is not a placeholder, or when the page's
+text or an OCR read of the image holds a device name ending in a hyphen and four digits.
 
 | | |
 |---|---|
 | [**Dashboard**](docs/screenshots/dashboard.png) — outage runway, energy-flow sankey, the SHP2 and every DPU Core with per-pack state, 24 h forecast, and the clustered-incident digest | [**Solar**](docs/screenshots/solar.png) — per-Core PV, the learned GHI→PV response model, and weather-normalised soiling |
 | [**Battery**](docs/screenshots/battery.png) — per-pack state-of-health, end-of-life projection, internal-resistance trend and cell-spread | [**Strategy**](docs/screenshots/strategy.png) — tonight's night-charge plan, EV-window prediction, load-shed order and the TOU charge schedule |
-| [**Alerts**](docs/screenshots/alerts.png) — the alert console: standing conditions, severity, source engine and cleared history | |
+| [**Alerts**](docs/screenshots/alerts.png) — the alert board: standing conditions by priority, the Core and pack each one concerns, and its outcome buttons; the Learned, Cleared and Alert Settings views sit behind it | |
 
 [![Dashboard](docs/screenshots/dashboard.png)](docs/screenshots/dashboard.png)
-
-> The Strategy capture above is the live plant on 2026-09-11 reading
-> *"No plan tonight — forecast/telemetry basis incomplete; nothing will be charged."*
-> That is not a placeholder: PV band coverage sat at 72% against the advisor's 78%
-> basis gate, so the engine declined to size a buy. See
-> [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) §2.
 
 ---
 
@@ -439,14 +438,14 @@ want to do, and the add-on's Configuration tab shows each one's help text.
 | `ecoflow_panel/` | Add-on manifest (`config.yaml`), `translations/`, `DOCS.md` (the operator guide, on the Documentation tab), `README.md` (the Info-tab card), `CHANGELOG.md` (+ archive), AppArmor profile |
 | `rootfs/` | s6 service runner (`etc/services.d/ecoflow-panel/run`) — the options→env bridge that turns the add-on Configuration into the server's environment |
 | `Dockerfile`, `build.yaml`, `repository.yaml` | Container build, digest-pinned per-arch base images, add-on repository manifest |
-| `scripts/` | Docs builder (`build-docs-docx.py`) and CHANGELOG roller (`roll-changelog.mjs`); CI gates (`check-docs.mjs`, `check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the golden-capture tool for the frozen characterisation goldens in `server/test/golden/` (`golden-capture.mts`); the mutation harnesses (`mutate-*.mjs`); device probes |
+| `scripts/` | Docs builder (`build-docs-docx.py`) and CHANGELOG roller (`roll-changelog.mjs`); CI gates (`check-docs.mjs`, `check-doc-claims.mjs`, `check-mutant-anchors.mjs`, `check-npm-audit.mjs`, `check-no-secrets.py`, `check-release-pr.py`, `validate-addon-config.py`); the golden-capture tool for the frozen characterisation goldens in `server/test/golden/` (`golden-capture.mts`); the README screenshot fixture, replay server and capture tool (`screenshots/`); the mutation harnesses (`mutate-*.mjs`); device probes |
 | `docs/` | `guide/` (the setup checklist for another home, every option and every Home Assistant entity), `reference/` (the engineering reference: an index and one file per chapter or part), `history/` (the engineering release log, the operations audits, the reference plant's notes and an early section of the performance record, frozen), `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
 | `.github/workflows/` | `ci.yml` (type-checks ×3, server tests + README-claim check, mutant-anchor check, personal-data scan, dependency advisories, add-on config/translation validation, Dockerfile smoke, docs `.docx`+`.pdf`) · `release-pr.yml` (release-PR version check, re-run on a title edit) · `tag-release.yml` (on every push to `main`: tags the version the add-on manifest declares, or fails when it cannot be published) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch) · `codeql.yml` (CodeQL analysis). Every job runs on a pinned runner image (`ubuntu-26.04`, `ubuntu-26.04-arm`; CodeQL on `ubuntu-24.04` until CodeQL supports 26.04). |
 
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 5,656 tests
+cd server && npm install && npm test     # 5,702 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build

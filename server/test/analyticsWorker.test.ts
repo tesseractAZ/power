@@ -565,6 +565,66 @@ test('★★★ buildState: degradation and runway failing — the alarm and liv
   }
 });
 
+test('★★★ v1.193.0 — buildState: the lifetime counters failing nulls their fields only; the alarm and runway fields still publish', async () => {
+  const stub: AnalyticsClient = {
+    report: async <T = any>(name: string): Promise<T> => structuredClone(REPORT_FIXTURES[name]) as T,
+    query: async () => [],
+    listMetrics: async () => [],
+    pushSnapshot: () => {},
+    flushSnapshot: () => {},
+    pushOwnerFloor: () => {},
+    stop: () => {},
+  };
+  setAnalyticsClientForTesting(stub);
+  const snap: FleetSnapshot = {
+    generatedAt: Date.now(),
+    devices: {
+      'SHP2-P': {
+        sn: 'SHP2-P', deviceName: 'Panel', productName: 'Smart Home Panel 2', online: true, lastUpdated: Date.now(),
+        lastQuotaAtMs: Date.now(),
+        projection: { kind: 'shp2', backupBatPercent: 55, backupReserveSoc: 20, circuits: [{ ch: 1, watts: 100 }] },
+      } as never,
+    },
+    alerts: [{ id: 'soc-floor', severity: 'critical', source: 'threshold', category: 'battery', title: 'Pool at floor' } as never],
+    alertsComplete: true,
+  };
+  const store = { get: () => snap, on: () => {} } as unknown as SnapshotStore;
+  let failing = true;
+  const recorder = makeRecorderStub({
+    getLifetimeTotals: () => {
+      if (failing) throw new Error('database disk image is malformed');
+      return { fleet_pv_wh: { persistedWh: 7_613_000, pendingWh: 0, watermarkMs: 0 } };
+    },
+    // The persisted keys the circuit fields enumerate come from the same table, so they fail with it.
+    listLifetimeKeys: () => {
+      if (failing) throw new Error('database disk image is malformed');
+      return ['circuit_1_wh', 'circuit_7_wh'];
+    },
+  });
+  const logs: string[] = [];
+  const handle = await mqttDiscovery.startMqttDiscovery(store, recorder, (m) => logs.push(m));
+  try {
+    const s1 = await handle.buildState!(snap);
+    assert.equal(s1.alert_critical_count, 1, 'alarm counts publish');
+    assert.equal(s1.runway_to_reserve_hours, 7.5, 'the runway publishes');
+    assert.equal(s1.backup_pool_percent, 55);
+    assert.equal(s1.pv_lifetime_kwh, null, 'a lifetime field publishes null (HA: unknown, not a meter reset)');
+    assert.equal(s1.battery_charge_lifetime_kwh, null);
+    assert.equal(s1.circuit_1_watts, 100, 'the live circuit still publishes its power');
+    assert.equal(s1.circuit_1_lifetime_kwh, null, 'and its energy field null');
+    await handle.buildState!(snap);
+    assert.equal(logs.filter((l) => l.includes('lifetime counters unavailable (database disk image is malformed)')).length, 1, 'logged once, not every publish');
+    assert.equal(logs.filter((l) => l.includes('persisted lifetime keys unavailable (database disk image is malformed)')).length, 1, 'logged once');
+    failing = false;
+    const s3 = await handle.buildState!(snap);
+    assert.equal(s3.pv_lifetime_kwh, 7_613);
+    assert.ok('circuit_7_lifetime_kwh' in s3, 'the persisted keys are enumerated again once they read');
+  } finally {
+    handle.stop();
+    setAnalyticsClientForTesting(null);
+  }
+});
+
 test('★★ every report-derived binary sensor renders null as "None" (HA unknown), never a fabricated OFF', () => {
   const reportDerived = ['pv_curtailment_active', 'self_consumption_coverage_partial', 'forecast_structurally_incomplete'];
   for (const key of reportDerived) {

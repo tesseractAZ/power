@@ -159,7 +159,7 @@
  * later.
  * Every term only grows, so nothing published steps down; as a backstop, the two counters whose
  * contributors change here (fleet_pv_wh, fleet_grid_import_wh) hold a dip between rollups up to
- * LIFETIME_HOLD_DIP_WH (recorder.ts). The per-Core rows
+ * LIFETIME_HOLD_DIP_WH (recorder.ts; v1.193.0: every published counter does, guardLifetimeEmit). The per-Core rows
  * (`bridge_core_<sn>_*`, the figures the hand-over line and the "no longer bridged" line print)
  * are cleared by the bridge's own rollup once the Core has left the dark set and every marker of
  * it is handed over — never by the hand-over itself, which usually runs first (a read).

@@ -58,3 +58,40 @@ test('listLifetimeKeys returns persisted circuit keys even with an EMPTY snapsho
   readRec.close();
   rec.close();
 });
+
+test('v1.193.0 — the read-only recorder adds each counter\'s basis shift, as the writer publishes it (the worker\'s carbon matches PV Production)', () => {
+  const dbPath = process.env.DB_PATH!;
+  const raw = new DatabaseSync(dbPath);
+  raw.prepare(
+    `INSERT INTO lifetime_basis (metric_key, shift_wh, updated_ts, reason) VALUES (?, ?, ?, ?)
+     ON CONFLICT(metric_key) DO UPDATE SET shift_wh = excluded.shift_wh`,
+  ).run('fleet_pv_wh', 4_096, Date.now(), 'unexplained drop');
+  raw.close();
+  const readRec = createReadRecorder(dbPath);
+  try {
+    const t = readRec.getLifetimeTotals();
+    assert.equal(t.fleet_pv_wh.persistedWh, 1_000_000 + 4_096, 'the row plus its shift');
+    assert.equal(t.fleet_pv_wh.shiftWh, 4_096);
+    assert.equal(t.circuit_10_wh.persistedWh, 42_700, 'a key with no shift: the row alone');
+    assert.equal(t.circuit_10_wh.shiftWh, 0);
+  } finally {
+    readRec.close();
+  }
+});
+
+test('v1.193.0 — the read-only recorder on a database with no lifetime_basis table yet: no shifts, the rows still count', () => {
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'ef-lifekeys-old-')), 'ecoflow.db');
+  const raw = new DatabaseSync(dbPath);
+  raw.exec(`CREATE TABLE samples (sn TEXT, metric TEXT, ts INTEGER, value REAL);
+    CREATE TABLE lifetime_totals (metric_key TEXT PRIMARY KEY, wh REAL NOT NULL DEFAULT 0, last_integrated_ts INTEGER NOT NULL DEFAULT 0);
+    INSERT INTO lifetime_totals (metric_key, wh, last_integrated_ts) VALUES ('fleet_pv_wh', 1000000, 1);`);
+  raw.close();
+  const readRec = createReadRecorder(dbPath);
+  try {
+    const t = readRec.getLifetimeTotals();
+    assert.equal(t.fleet_pv_wh.persistedWh, 1_000_000);
+    assert.equal(t.fleet_pv_wh.shiftWh, 0);
+  } finally {
+    readRec.close();
+  }
+});

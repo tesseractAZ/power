@@ -47,6 +47,11 @@ Flagged by value, only where the private pattern file is configured:
 Every rule scans every tracked text file, this one included. No rule echoes
 the text it matched, so a CI log cannot republish what the check found.
 
+`--stdin` (v1.193.0) applies the same rules to text on standard input instead
+of the tree: the README screenshot tool pipes the text of each page it renders
+through it, because a tracked image is a file this scan cannot read. With no
+flag (CI's run) the behaviour is unchanged.
+
 Deliberately NOT flagged, because they are legitimate and appear at HEAD today:
   * 172.30.32.0/23 — the Home Assistant Supervisor hassio-network. Public,
     product-documented, and load-bearing in the ingress-source pin
@@ -293,7 +298,47 @@ def tracked_files() -> list[str]:
     return [f for f in out.stdout.splitlines() if f]
 
 
+def stdin_problems(text: str, private: list[tuple[re.Pattern[str], str]]) -> list[str]:
+    """v1.193.0 — the shape rules (and the private value rules) on text read from standard input.
+
+    The tree scan below skips any file that is not UTF-8 text, so nothing in it can see inside an
+    image. scripts/screenshots/capture.mts pipes the text of the page it is about to photograph
+    through this mode. Every non-placeholder serial is a problem here: SERIAL_EXEMPT_COUNTS pins
+    tracked files, and text on stdin is none of them. Lines are reported as <stdin>:N; no token is
+    echoed beyond a serial's public model code.
+    """
+    out: list[str] = []
+    for lineno, line in enumerate(text.split("\n"), 1):
+        for m in SERIAL_SHAPE.finditer(line):
+            tok = m.group(0)
+            if is_serial_shaped(tok) and not is_placeholder_serial(tok):
+                out.append(f"  <stdin>:{lineno}: serial-shaped token (model code {tok[:4]})")
+        for col, why in line_problems(line):
+            out.append(f"  <stdin>:{lineno}:{col}: {why}")
+        for rx, why in private:
+            if rx.search(line):
+                out.append(f"  <stdin>:{lineno}: private pattern ({why})")
+    return out
+
+
+def main_stdin() -> int:
+    serial_self_test()
+    shape_self_test()
+    private = load_private_rules()
+    problems = stdin_problems(sys.stdin.buffer.read().decode("utf-8", errors="replace"), private)
+    if problems:
+        print("check-no-secrets: FAILED — personal data in the text on standard input", file=sys.stderr)
+        for p in problems:
+            print(p, file=sys.stderr)
+    else:
+        extra = f"; {len(private)} private value pattern(s)" if private else "; shape rules only"
+        print(f"check-no-secrets: OK — standard input clean{extra}")
+    return 1 if problems else 0
+
+
 def main() -> int:
+    if "--stdin" in sys.argv[1:]:
+        return main_stdin()
     problems: list[str] = []
     scanned = 0
 

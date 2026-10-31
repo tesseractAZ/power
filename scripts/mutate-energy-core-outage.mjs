@@ -49,7 +49,7 @@
  *   B-xxxviii the hand-over line's BMS charge figure is zeroed
  *   B-xxxix the hand-over clears the per-Core figures (the "no longer bridged" line reads 0.00)
  *   B-xl    the per-Core figures are never cleared
- *   B-xli   the PV / Grid to Battery Charge dip backstop is removed
+ *   B-xli   the PV / Grid to Battery Charge dip backstop is cut to 50 Wh (v1.193.0: the publish guard's hold)
  *   B-xlii  register movement of a marked pack is not absorbed while its Core is listed offline
  *   B-xliii the energy absorbed before the hand-over is left out of the hand-over line
  *   B-xliv  the absorbed rows outlive the hand-over
@@ -146,7 +146,7 @@ const SUBSET = [
   'test/recorderEnergyBridgeTransitions.test.ts',
   'test/energyBridgePublish.test.ts',
   'test/publishReadiness.test.ts',
-  'test/lifetimeDipClamp.test.ts',
+  'test/lifetimeEmitGuard.test.ts',
   'test/energyBridgeOwnReading.test.ts',
   'test/energyBridgeSeams.test.ts',
   'test/panelGapLifetime.test.ts',
@@ -217,7 +217,7 @@ const MUTANTS = [
     file: RC,
     find: '    if (bms.dischargeWh > bmsDischargeFloor) bmsDischargeFloor = bms.dischargeWh;\n',
     to: '    if (bms.dischargeWh > bmsDischargeFloor) bmsDischargeFloor = bms.dischargeWh;\n    if (br) bmsDischargeFloor += br.dischargeWh; /* MUTANT */\n',
-    why: 'The v1.98.0 floor-gap check reads the bridged energy as a floor for a pool that no longer exists and re-seeds it DOWN — Home Assistant books a meter reset (the phantom-kWh failure).',
+    why: 'The bridged energy enters Battery Energy Out twice (its bridge rows and the floor): a jump up Home Assistant books as energy. v1.193.0: the v1.98.0 floor-gap re-seed no longer steps it back down but carries it by a basis shift, so the double count stays published.',
   },
   {
     id: 'B-x. ★★★ an untrusted panel PV field is used as measured (rollup)',
@@ -278,8 +278,10 @@ const MUTANTS = [
   {
     id: 'B-xviii. ★★★ the bridged battery energy is not added to the emitted totals',
     file: RC,
-    find: "      if (key === 'fleet_battery_discharge_wh') persistedWh += bridgeTotals.dischargeWh;",
-    to: '      /* MUTANT */',
+    // v1.193.0 — re-pointed: a battery key starts from the in-memory floor (its row except after a
+    // failed write), the bridge's rows on top.
+    find: "      if (key === 'fleet_battery_discharge_wh') persistedWh = bmsDischargeFloor + bridgeTotals.dischargeWh;",
+    to: "      if (key === 'fleet_battery_discharge_wh') persistedWh = bmsDischargeFloor; /* MUTANT */",
     why: 'Battery out reads 0 kWh through a Core outage again.',
   },
   {
@@ -437,11 +439,13 @@ const MUTANTS = [
     why: 'A later outage of the same Core starts its hand-over figures from the old ones.',
   },
   {
-    id: 'B-xli. ★★ the PV / Grid to Battery Charge dip backstop is removed',
+    // v1.193.0 — re-pointed: the hold is now the publish guard's (guardLifetimeEmit, every key); the
+    // mutant cuts it back to the old 50 Wh micro-dip clamp on the two counters this backstop covers.
+    id: 'B-xli. ★★ the PV / Grid to Battery Charge dip backstop is cut to 50 Wh',
     file: RC,
-    find: '        LIFETIME_HOLD_KEYS.has(key) ? LIFETIME_HOLD_DIP_WH : undefined,',
-    to: '        undefined, /* MUTANT */',
-    why: 'A Core whose slot leaves the panel mid-window steps PV Production down by its pending share (above the 50 Wh micro-dip clamp).',
+    find: '      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key)?.wh ?? 0);',
+    to: "      const g = guardLifetimeEmit(hw, readWh, key === 'fleet_pv_wh' || key === 'fleet_grid_import_wh' ? 50 : LIFETIME_HOLD_DIP_WH, basisOwed.get(key)?.wh ?? 0); /* MUTANT */",
+    why: 'A Core whose slot leaves the panel mid-window drops PV Production by its pending share: over 50 Wh it is rebased (a WARN and a basis shift) instead of held. The take-back undoes a dip that comes back in one read; one that comes back in steps (a window the bridge books at the next rollup) is counted twice.',
   },
   {
     id: 'B-xlii. ★★★ register movement of a marked pack is not absorbed while its Core is listed offline',
@@ -820,14 +824,16 @@ const MUTANTS = [
     file: RC,
     find: '    const sustained = pendingMembership != null && pendingMembership.rollups >= MEMBERSHIP_SUSTAINED_ROLLUPS;',
     to: '    const sustained = pendingMembership != null; /* MUTANT */',
-    why: 'The review defect (pre-existing since v1.96.0): one rollup with a dark Core\'s slot reading isConnect = 0 steps Battery Energy In and Out down by a third (a meter reset), then back up.',
+    why: 'The review defect (pre-existing since v1.96.0; then a step down by a third, a meter reset, and back up): one rollup with a dark Core\'s slot reading isConnect = 0 re-seeds the battery floors without that Core and the next re-seeds them back, a needless pair of basis shifts that absorbs the energy the Core moved in between.',
   },
   {
+    // v1.193.0 — re-pointed: the members are the accepted set alone until a change is sustained
+    // (bmsMembersOf); the mutant drops the accepted Cores the live set no longer lists.
     id: 'B-xcvi. ★★★ the Cores that left drop out of the battery sum while the change is pending',
     file: RC,
-    find: '    if (pendingMembership == null) return live;',
-    to: '    if (pendingMembership == null || (true as boolean)) return live; /* MUTANT */',
-    why: 'A two-rollup flicker after hours of discharge opens a gap over the v1.98.0 threshold: that re-seed steps the counters down instead.',
+    find: '    return new Set(accepted);',
+    to: '    return new Set(accepted.filter((sn) => live.has(sn))); /* MUTANT */',
+    why: 'A two-rollup flicker after hours of discharge opens a gap over the v1.98.0 threshold (before v1.193.0 that re-seed stepped the counters down): the re-seed carries them past the Core\'s absence by a basis shift, and its return adds its packs\' share back as a step up Home Assistant books as energy.',
   },
   {
     id: 'B-xcvii. ★★ the sustained re-seed takes the sum that still carried the Cores that left',
@@ -874,17 +880,20 @@ const MUTANTS = [
   },
   // ── integration round 3: a boot while the panel reads no source set ──
   {
+    // v1.193.0 — re-pointed: the accepted roster is the member set whatever the live set reads
+    // (bmsMembersOf); the mutant takes the empty live set again, under which every row is a member.
     id: 'B-ciii. ★★★ the accepted roster is not the member set while the panel reads no source set',
     file: RC,
-    find: '    if (live.size === 0) return new Set(accepted);\n',
-    to: '    /* MUTANT */\n',
-    why: 'A boot with the cloud unreachable (or the panel quota failing) carries every persisted held pack row, a former member\'s orphans included: +938.8 kWh Battery Energy In on the first publish, then the v1.98.0 re-seed steps it back down (a meter reset in Home Assistant).',
+    find: '    return new Set(accepted);',
+    to: '    return live.size === 0 ? live : new Set(accepted); /* MUTANT */',
+    why: 'A boot with the cloud unreachable (or the panel quota failing) carries every persisted held pack row, a former member\'s orphans included: +938.8 kWh Battery Energy In on the first publish, which Home Assistant books as energy. v1.193.0: the v1.98.0 re-seed that stepped it back down (a meter reset) now carries it by a basis shift, so it stays published.',
   },
   {
+    // v1.193.0 — re-pointed as B-ciii, the empty live set taken unless a change is pending.
     id: 'B-civ. ★★ the accepted roster joins the live set only while a change is pending, as before',
     file: RC,
-    find: '    if (live.size === 0) return new Set(accepted);\n',
-    to: '    if (live.size === 0 && pendingMembership != null) return new Set(accepted); /* MUTANT */\n',
+    find: '    return new Set(accepted);',
+    to: '    return live.size === 0 && pendingMembership == null ? live : new Set(accepted); /* MUTANT */',
     why: 'An empty source set is never a pending change (the rollup reads it as no change), so the same boot carries the orphans.',
   },
   // v1.190.1 — the PV-field check against the inferred bound, re-tuned on the 2026-10-18 evidence.

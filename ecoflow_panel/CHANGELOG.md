@@ -1,3 +1,81 @@
+## 1.193.0
+
+### Lifetime energy counters never step down or jump; panel counters no longer dip after a load drop
+
+**Energy (Home Assistant)**
+
+- Every lifetime counter the add-on publishes now only rises: PV Production, Home Consumption, Grid Import (Home), Grid to Battery Charge, Battery Energy In and Out, and each circuit. Home Assistant reads a value below 90 % of the previous one as a meter reset and books the whole new value again; it books any rise as energy. The membership re-seed and the floor/live gap repair used to step Battery Energy In and Out down to the new pool's sum, so each time the full counter went into the Energy statistics again (about 12,043 kWh on Battery Energy In by 2026-09-07; the Month and Year views read about 4.4 times high).
+- The battery floors still re-seed against the new set of batteries. The published counters now continue from their last values, and the difference is kept as a basis shift: the `lifetime_basis` table, and `shiftWh` in `/api/lifetime-energy`.
+- The floors, their shifts and the accepted set of Cores (the new `bms_membership` table) are written in one transaction, so a crash or a failed write can never pair a re-seeded floor with an old shift or roster. `bms-membership.json` is still written after each commit, for older releases. It is read only on the first start after the update, and rewritten when it disagrees with the database.
+- A Core joining the pool counts from the re-seed. Its packs' history since their baselines is no longer published as one step up (+6,144 Wh in one read on the test plant). Energy it moves in the 15 minutes before the re-seed is not counted.
+- Every counter now holds a drop between reads of up to 5 kWh at the last published value. Before, only two counters had this 5 kWh hold and the others held 50 Wh. A larger drop with no known cause continues from the last value and logs one warning naming the counter (`recorder: v1.193.0 WARN lifetime counter …`).
+- A drop continued from that way stays owed (`owed_wh` in `lifetime_basis`). When the reading climbs back (a rise of over 5 kWh and at least half the amount owed), up to the amount owed is taken back off the shift and is not published as energy. Without this, a counter that read 0 and then its old value would publish twice its value: on 2026-06-08 every counter read 0 from 18:00 to 19:00, and Home Assistant booked PV Production about 808.6 kWh and Home Consumption about 825.1 kWh a second time. The owed amount survives a restart and expires 24 hours after the drop, so a drop that never comes back (a replaced database) cannot hide a later one's return. Once no more than 5 kWh is owed, every rise is taken back until nothing is. A drop that comes back in steps each under half the amount owed is published as it returns.
+- Between rollups, Home Consumption, Grid Import (Home) and the circuits could read lower than a moment before after a sharp load drop: 64 to 223 Wh, and up to 3.2 kWh across a 10-minute silence at 19.2 kW. A read held the last panel reading forward to the moment of the read, and the next reading revised it. Home Assistant logged these as "not strictly increasing" and, across an hour boundary, booked a negative hour. Reads now integrate each series up to its newest reading only, so a published value lags that reading by at most one sample interval (up to 5 minutes for a steady load).
+- `/api/lifetime-energy` `details` carry `shiftWh` and `heldWh`. `battery_baseline_deficit_kwh` is computed from the measured values, without the shifts. `/api/debug/battery-lifetime` reports each battery counter's shift. The lifetime carbon figures use PV Production with its shift.
+- If reading the lifetime counters fails, the MQTT state and `/api/ha-state` publish their fields null (Home Assistant: unknown, not a reset) and the circuit fields follow the live circuits. The runway, the alert counts and every other field still publish.
+
+**Documentation**
+
+- The alerts reference gives the per-device telemetry-gap alert id as it has been since v1.188.1: `system-outage-device-<SN>-<alertStartMs ?? startMs>-3`.
+
+**Unchanged**
+
+- Statistics Home Assistant already recorded are not modified. Alarms, the runway and the night charge read none of these counters.
+
+**Rollback**
+
+- Once any counter shows a non-zero `shiftWh`, a release before this one publishes it without the shift. That is a step Home Assistant books as a meter reset (a step down of 10 % or more), as a negative hour (a smaller one) or as energy (a step up). Do not roll back past this release after a pool change.
+
+**Not covered**
+
+- An add-on restore of `/data` reverts the totals, the shifts and the high-water file together, so a restored counter publishes its older value.
+
+**Tests**
+
+- New: `lifetimeEmitGuard.test.ts` (replaces `lifetimeDipClamp.test.ts`), `recorderPoolContinuity.test.ts`, `recorderLifetimeReadMonotone.test.ts` and `helpers/haTotalIncreasing.ts` (Home Assistant's reset rule). `recorderPoolContinuity.test.ts` covers a leave and a rejoin, a restart, a failed floor commit on a leave and on a rejoin, a rebase in between, and a stale or unwritable roster file.
+- `recorderFloorGapInvariant.test.ts` adds both floors above the live sum. `recorderLifetimeKeys.test.ts` adds the worker's shifted totals. `analyticsWorker.test.ts` adds the persisted keys failing. `haPayloadFmt.test.ts` adds the measured deficit and its wiring.
+- Tests that asserted the step down, the pass-through of a large drop or read/rollup equality are changed, with the reason stated.
+- `lifetimeEmitGuard.test.ts` adds the take-back rule and 1,000 random walks with drops that come back. `recorderEmitHighwater.test.ts` adds a counter that reads 0 and then its old value, in one process and across a restart. The new `recorderLifetimeTakeback.test.ts` covers Battery Energy In through the floors' transaction, the expiry after a replaced database, and the high-water file waiting for an uncommitted shift.
+- `mutate-lifetime-monotone.mjs` is new (45 mutants). `mutate-energy-core-outage.mjs` re-points B-xviii, B-xli, B-xcvi, B-ciii and B-civ.
+
+### README screenshots are rendered from a synthetic fleet, and nothing is written until the pixels are checked
+
+**Documentation**
+
+- All five README screenshots (`docs/screenshots/dashboard.png`, `solar.png`, `battery.png`, `strategy.png`, `alerts.png`) are re-rendered at 1280 px from a committed, fully synthetic fleet. The images they replace were captures of a live installation, masked by serial shape. That masking does not catch EcoFlow's default device name, "<product>-<last four digits of its serial>" until the device is renamed, or installation-specific names and figures. The paths are unchanged, so README links and the documentation build are unaffected.
+- The fleet (`scripts/screenshots/fixture.mts`) has seven devices: one Smart Home Panel 2, three DELTA Pro Ultra Cores with 15 packs, an EV charger, a DELTA 3 Plus and an offline Smart Generator. Every serial is a placeholder, every device name is a product name, and the circuits keep the panel's default names. One minute-step plant model drives every card, chart and report, at a fixed clock (Wed 17 Jun 2026 12:30, America/Phoenix). Re-capturing an unchanged fixture gives byte-identical images.
+- `scripts/screenshots/capture.mts` drives headless Chrome through the real built UI against `serve.mts` (127.0.0.1 only; writes are refused). It writes no image unless every tab passes all of these:
+  - The page asked for no endpoint or history metric the fixture does not serve, including a read of a path the UI only writes to.
+  - No card is still loading or reports itself unavailable.
+  - The page's text holds no serial outside the fixture's placeholders.
+  - Neither the page's text nor an OCR read of the image (full-size and downscaled) holds a device name ending in a hyphen and four digits. This covers a product name that ends in a model number, such as "Smart Home Panel 2-NNNN" or "DELTA 2-NNNN".
+  - Each tab's positive controls are read, and an OCR read returns at least 20 lines.
+  - The page text passes `check-no-secrets.py --stdin`.
+  
+  The serial rule is not applied to OCR, which can read a 0 as an O. The capture is run by hand on macOS (headless Chrome, Vision OCR). It is not run in CI.
+
+**Checks**
+
+- `scripts/check-no-secrets.py --stdin` applies the scan's shape rules, and the private value rules where configured, to text on standard input. A run with no flag is unchanged.
+- `scripts/check-mutant-anchors.mjs` resolves `.mts` targets.
+
+**Unchanged**
+
+- The screenshot tooling changes no add-on code, option or behaviour.
+
+**Tests**
+
+- `screenshotFixture.test.ts` (T1–T9) covers:
+  - Placeholder serials only; product names only.
+  - Every API path the UI names is served, write-only or comment-only.
+  - The leak gate fires on default names (a product name ending in a letter, a parenthesis or a model number) and not on dates, phone numbers or channels.
+  - The replay server refuses writes, and refuses and reports a read of a write-only path.
+  - One clock, and one consistent plant.
+  - Each caption's element is present. The runway weekday is checked in the zone the suite runs in.
+  - The capture refuses a stale bundle.
+- `checkNoSecretsStdin.test.ts` runs a copy of the script in an empty directory, so a maintainer's own pattern file does not change the result.
+- `mutate-screenshot-gate.mjs` is new (21 mutants).
+
 ## 1.192.0
 
 ### The mid-day charge preview states what a held reserve costs; documentation files are named Power
