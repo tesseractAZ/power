@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { siteCoordinates } from './site.js';
@@ -350,44 +350,92 @@ const WEATHER_GHI_REALIZED_METRIC = 'ghi_wm2_realized';
  * counters from the BMS — those go straight in without integration. */
 
 export interface LifetimeTotals {
-  /** Persisted accumulator (Wh). Increments forever. */
+  /** Persisted accumulator (Wh). Increments forever. v1.193.0 — includes `shiftWh`. */
   persistedWh: number;
   /** Integral of the current window past the watermark (also Wh) — added to the live total. */
   pendingWh: number;
   /** Watermark — last ts up to which we've already accumulated. */
   watermarkMs: number;
+  /** v1.193.0 — the basis shift (Wh, already inside persistedWh): what the published counter has
+   *  been carried by across a change of what its row measures (a battery-pool change, the floor-gap
+   *  re-seed, an unexplained drop), so the published value continues from the last one. 0 until
+   *  one happens. Absent on the read-only worker's totals before the table exists. */
+  shiftWh?: number;
+  /** v1.193.0 — how far the published total stands above what was measured at this read (Wh,
+   *  already inside pendingWh): a drop of up to LIFETIME_HOLD_DIP_WH the publish guard holds. */
+  heldWh?: number;
 }
+
+/** v1.193.0 — the largest drop between reads a published lifetime counter holds at its last value
+ *  (every key; v1.188.1 gave it to two). A larger drop continues from the last value instead. */
+export const LIFETIME_HOLD_DIP_WH = 5_000;
+
+/** v1.193.0 — a rise counts as an unexplained drop coming back when it is at least this share of
+ *  the drop still owed (and over LIFETIME_HOLD_DIP_WH): a counter that fell by X for no known reason
+ *  and returns climbs by about X in one read, which real energy between two reads does not. */
+export const LIFETIME_RETURN_SHARE = 0.5;
+
+/** v1.193.0 — how long an unexplained drop stays owed after the last one on its key. The
+ *  2026-06-08 hour came back within the hour; a drop still owed after this is kept in the basis
+ *  shift for good (a replaced database never comes back), so a leftover never raises the bar for a
+ *  later drop. */
+export const LIFETIME_OWED_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** v1.193.0 — what guardLifetimeEmit did with one reading. */
+export type LifetimeEmitVerdict = 'first' | 'rise' | 'held' | 'rebased' | 'returned';
 
 /**
- * v0.15.14 — lifetime micro-dip clamp (pure, testable core).
+ * v1.193.0 — the published-counter guard (pure, testable core; was clampLifetimeDip, v0.15.14).
  *
- * The live total (persisted + pending) is re-estimated on every call, so it
- * can dip a few Wh below the previously emitted total (rollup persistence vs
- * live trapezoid rounding). HA `total_increasing` sensors interpret ANY
- * decrease as a meter reset, so those micro-dips registered as phantom
- * Energy-Dashboard resets. Returns the pendingWh to emit: held so the total
- * never dips by ≤ maxDipWh, while a larger drop (a genuine operator reset,
- * e.g. the v0.13.0 re-zero) passes through untouched so reset semantics work.
+ * Every lifetime counter is published as a Home Assistant `total_increasing` sensor. HA reads a
+ * reading below 0.9 × the previous one as a meter reset and books the WHOLE new reading again
+ * (homeassistant/components/sensor/recorder.py: reset_detected, then the sum restarts from the new
+ * state); a smaller drop is logged as "not strictly increasing" and books a negative hour. So the
+ * emitted value never falls below the last one emitted:
+ *   - a drop of up to `holdWh` is HELD at the last value (the reading re-estimated between rollups,
+ *     pending energy the read path no longer sees): never counted twice (energy taken back for a
+ *     while is published late, energy dropped for good costs that much of what follows);
+ *   - a larger drop is REBASED: the last value is emitted and the caller carries the counter by
+ *     `rebaseWh` (its basis shift), so the next readings continue from it. The caller also keeps
+ *     the amount as OWED (`owedWh`), until the reading climbs back;
+ *   - a rise of at least LIFETIME_RETURN_SHARE of the amount owed (and over `holdWh`) is that drop
+ *     RETURNING (verdict 'returned'): up to the amount owed is taken back off the shift
+ *     (`rebaseWh` < 0) and only the rest is emitted as new. Without it a drop that comes back (the
+ *     2026-06-08 hour every counter read 0, then its old value) is published as its old value
+ *     plus the shift, and HA books the whole counter a second time. A rise taken back by mistake
+ *     costs at most the amount owed, never more than the drop added. A drop that comes back in
+ *     steps each under that share is published as it comes back (a counter reads its row or 0, so
+ *     a drop holds one offset until it ends), and so is a drop still owed when the add-on stops
+ *     whose return the first read after the restart sees together with the energy counted while
+ *     it was down (only the share test tells them apart);
+ *   - once no more than `holdWh` is owed (what a return left over: a dip the guard held before the
+ *     drop, coming back after it), every rise is taken back until nothing is: a leftover of up to
+ *     5 kWh is never booked twice, at the cost of up to that much real energy if it never returns.
+ * The caller expires what is owed LIFETIME_OWED_WINDOW_MS after the last drop on the key.
+ * A non-finite reading is held; with no last value either the result is non-finite and the caller
+ * leaves the key out (its field publishes null, never a fabricated 0).
  */
-export function clampLifetimeDip(
-  prevEmittedTotalWh: number | undefined,
-  persistedWh: number,
-  pendingWh: number,
-  maxDipWh = 50,
-): number {
-  if (prevEmittedTotalWh == null) return pendingWh;
-  const total = persistedWh + pendingWh;
-  const dip = prevEmittedTotalWh - total;
-  if (dip > 0 && dip <= maxDipWh) return prevEmittedTotalWh - persistedWh;
-  return pendingWh;
+export function guardLifetimeEmit(
+  lastEmittedWh: number | undefined,
+  totalWh: number,
+  holdWh = LIFETIME_HOLD_DIP_WH,
+  owedWh = 0,
+): { emitWh: number; rebaseWh: number; verdict: LifetimeEmitVerdict } {
+  const hw = lastEmittedWh != null && Number.isFinite(lastEmittedWh) ? lastEmittedWh : undefined;
+  if (hw == null) return { emitWh: totalWh, rebaseWh: 0, verdict: 'first' };
+  if (!Number.isFinite(totalWh)) return { emitWh: hw, rebaseWh: 0, verdict: 'held' };
+  if (totalWh >= hw) {
+    const owed = Number.isFinite(owedWh) && owedWh > 0 ? owedWh : 0;
+    const rise = totalWh - hw;
+    if (owed > 0 && rise > 0 && (owed <= holdWh || (rise > holdWh && rise >= owed * LIFETIME_RETURN_SHARE))) {
+      const back = Math.min(owed, rise);
+      return { emitWh: totalWh - back, rebaseWh: -back, verdict: 'returned' };
+    }
+    return { emitWh: totalWh, rebaseWh: 0, verdict: 'rise' };
+  }
+  const dip = hw - totalWh;
+  return dip <= holdWh ? { emitWh: hw, rebaseWh: 0, verdict: 'held' } : { emitWh: hw, rebaseWh: dip, verdict: 'rebased' };
 }
-
-/** v1.188.1 — the lifetime counters whose contributors the energy bridge changes (a home Core
- *  handed to it, or back) hold a dip up to this, not 50 Wh. Their rows only grow, so a lower
- *  total between rollups is pending energy the read path no longer sees, never a reset; a genuine
- *  re-zero (a replaced database) is far larger and still passes through. */
-export const LIFETIME_HOLD_KEYS: ReadonlySet<string> = new Set(['fleet_pv_wh', 'fleet_grid_import_wh']);
-export const LIFETIME_HOLD_DIP_WH = 5_000;
 
 // v0.13.0 — per-pack lifetime baseline (absolute factory-register snapshot
 // captured the first time a (sn, packNum) pair is seen). Home totals use
@@ -605,8 +653,9 @@ export interface BatteryLifetimeDebug {
   rawDischargeFloorWh: number;
   emittedChargeWh: number;
   emittedDischargeWh: number;
-  charge: { persistedWh: number; pendingWh: number };
-  discharge: { persistedWh: number; pendingWh: number };
+  /** v1.193.0 — `shiftWh`: the counter's basis shift, already inside `persistedWh` (LifetimeTotals). */
+  charge: { persistedWh: number; pendingWh: number; shiftWh?: number };
+  discharge: { persistedWh: number; pendingWh: number; shiftWh?: number };
   /** max(0, rawDischargeFloor − rawChargeFloor): what the removed clamp would have shaved. */
   deficitWh: number;
   packs: PackLifetimeDetail[];
@@ -1145,6 +1194,31 @@ export function createRecorder(
       metric_key TEXT PRIMARY KEY,
       wh REAL NOT NULL DEFAULT 0,
       last_integrated_ts INTEGER NOT NULL DEFAULT 0
+    );
+    -- v1.193.0 — the basis shift of each published lifetime counter (guardLifetimeEmit): the Wh
+    -- the published value is carried by across a change of what its lifetime_totals row measures,
+    -- so Home Assistant never sees the step. A table of its own, not lifetime_totals rows:
+    -- listLifetimeKeys feeds the MQTT discovery and the pack-row regexes. The battery rows are
+    -- written in one transaction with the floors they shift (rollupLifetime).
+    -- owed_wh: the part of shift_wh an unexplained drop added and the counter has not climbed back
+    -- by yet (guardLifetimeEmit takes it back off the shift when it does); owed_ts: the last such
+    -- drop, from which it expires (LIFETIME_OWED_WINDOW_MS).
+    CREATE TABLE IF NOT EXISTS lifetime_basis (
+      metric_key TEXT PRIMARY KEY,
+      shift_wh REAL NOT NULL,
+      updated_ts INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      owed_wh REAL NOT NULL DEFAULT 0,
+      owed_ts INTEGER NOT NULL DEFAULT 0
+    );
+    -- v1.193.0 — the accepted SHP2 source roster the battery floors are seeded against (one row),
+    -- committed in the same transaction as the floors and their basis shifts. bms-membership.json
+    -- is still written after each commit (a release before v1.193.0 reads it) and is read only
+    -- while this row is absent (the first boot after an upgrade).
+    CREATE TABLE IF NOT EXISTS bms_membership (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      fp TEXT NOT NULL,
+      updated_ts INTEGER NOT NULL
     );
     -- v1.38.0 (WS2) — night-charge learning ledger (design §3.1). One row per
     -- plan_date (YYYY-MM-DD America/Phoenix), upserted. DEDICATED + NEVER PRUNED:
@@ -2013,7 +2087,7 @@ export function createRecorder(
   const tProbe = phase('restart-probe');
 
   // v0.50.0 — persist the per-key emit high-water across restarts. The micro-dip
-  // clamp (clampLifetimeDip) keys on lifetimeEmitHighWater, an in-memory Map that
+  // clamp (v1.193.0: the publish guard, guardLifetimeEmit) keys on lifetimeEmitHighWater, an in-memory Map that
   // previously reset every process restart. With no baseline after a restart the
   // FIRST emit re-derives the live trapezoid a few Wh below what HA last recorded
   // pre-restart, so HA's total_increasing sensors logged "state is not strictly
@@ -2026,6 +2100,9 @@ export function createRecorder(
   // { [key]: Wh } of high-water values; no battery / floor / value semantics
   // change (the battery counters clamp off bmsChargeFloor/bmsDischargeFloor, NOT
   // this map). Mirrors the dirname(dbPath) sidecar pattern of the flag/gaps files.
+  // v1.193.0 — the guard now also REBASES a drop over LIFETIME_HOLD_DIP_WH against this map, so an
+  // empty map after a restart would let such a drop through: the file is written whole to a .tmp
+  // and renamed over the old one, so a crash mid-write leaves the previous map, never a torn file.
   const emitHighWaterPath = resolve(dirname(dbPath), '.emit-highwater.json');
   const loadEmitHighWater = (): Map<string, number> => {
     try {
@@ -2041,9 +2118,25 @@ export function createRecorder(
       return new Map<string, number>(); // missing/corrupt → empty (pre-v0.50.0 behavior)
     }
   };
+  /** v1.193.0 — what the file last held, per key. */
+  let persistedHighWater: Map<string, number> | null = null;
   const persistEmitHighWater = () => {
     try {
-      writeFileSync(emitHighWaterPath, JSON.stringify(Object.fromEntries(lifetimeEmitHighWater)), { mode: 0o644 });
+      // v1.193.0 — a key whose basis shift is not committed yet (basisDirty: a failed write, a
+      // battery shift waiting for the floors' transaction) keeps the value the file already holds.
+      // Written ahead of it, a crash paired the new last value with the old shift: the next
+      // process published a leftover the take-back had already counted.
+      const next = new Map(lifetimeEmitHighWater);
+      persistedHighWater ??= loadEmitHighWater();
+      for (const key of basisDirty.keys()) {
+        const prev = persistedHighWater.get(key);
+        if (prev === undefined) next.delete(key);
+        else next.set(key, prev);
+      }
+      const tmpPath = `${emitHighWaterPath}.tmp`;
+      writeFileSync(tmpPath, JSON.stringify(Object.fromEntries(next)), { mode: 0o644 });
+      renameSync(tmpPath, emitHighWaterPath);
+      persistedHighWater = next;
     } catch (e: any) {
       log(`recorder: failed to persist emit high-water (${e?.message ?? e})`);
     }
@@ -2681,6 +2774,77 @@ export function createRecorder(
   const writeLifetime = (key: string, wh: number, ts: number) => {
     lifetimeUpsertStmt.run(key, wh, ts);
   };
+  // v1.193.0 — the basis shift of each published counter (the lifetime_basis table, see the schema),
+  // loaded here, before any read can emit: a shift missing at a restart would publish the row
+  // alone, a step Home Assistant reads as a meter reset (down) or as energy (up).
+  const basisUpsertStmt = db.prepare(
+    `INSERT INTO lifetime_basis (metric_key, shift_wh, updated_ts, reason, owed_wh, owed_ts) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(metric_key) DO UPDATE SET shift_wh = excluded.shift_wh, updated_ts = excluded.updated_ts, reason = excluded.reason, owed_wh = excluded.owed_wh, owed_ts = excluded.owed_ts`,
+  );
+  /** The part of each shift an unexplained drop added and the counter has not climbed back by yet
+   *  (guardLifetimeEmit's `owedWh`), and when the last such drop was. Loaded with the shifts: a drop
+   *  before a restart that returns after it is still taken back. */
+  const basisOwed = new Map<string, { wh: number; ts: number }>();
+  const basisShift: Map<string, number> = (() => {
+    const m = new Map<string, number>();
+    try {
+      for (const r of db.prepare(`SELECT metric_key, shift_wh, owed_wh, owed_ts FROM lifetime_basis`).all() as Array<{ metric_key: string; shift_wh: number; owed_wh: number; owed_ts: number }>) {
+        if (Number.isFinite(r.shift_wh)) m.set(r.metric_key, r.shift_wh);
+        if (Number.isFinite(r.owed_wh) && r.owed_wh > 0) basisOwed.set(r.metric_key, { wh: r.owed_wh, ts: Number.isFinite(r.owed_ts) ? r.owed_ts : 0 });
+      }
+    } catch (e: any) {
+      log(`recorder: could not read the lifetime basis shifts (${e?.message ?? e}) — the guard rebases a drop; a rise is published`);
+    }
+    return m;
+  })();
+  const upsertBasis = (key: string, d: { ts: number; reason: string }): void => {
+    const owed = basisOwed.get(key);
+    basisUpsertStmt.run(key, basisShift.get(key) ?? 0, d.ts, d.reason, owed?.wh ?? 0, owed?.ts ?? 0);
+  };
+  /** Shifts changed in memory and not yet written: the ABSOLUTE value is written, so a retry after a
+   *  failed write is idempotent. */
+  const basisDirty = new Map<string, { ts: number; reason: string }>();
+  /** Carry a published counter by `deltaWh` more (in memory; written by writeBasisDirty or, for the
+   *  battery keys, with the floors in rollupLifetime's transaction). */
+  const addBasisShift = (key: string, deltaWh: number, ts: number, reason: string, owedDeltaWh = 0): number => {
+    const next = (basisShift.get(key) ?? 0) + (Number.isFinite(deltaWh) ? deltaWh : 0);
+    basisShift.set(key, next);
+    if (owedDeltaWh !== 0 && Number.isFinite(owedDeltaWh)) {
+      const prev = basisOwed.get(key);
+      const owed = Math.max(0, (prev?.wh ?? 0) + owedDeltaWh);
+      // A new drop restarts the window; a take-back keeps the drop's time.
+      if (owed > 0) basisOwed.set(key, { wh: owed, ts: owedDeltaWh > 0 ? ts : prev?.ts ?? ts });
+      else basisOwed.delete(key);
+    }
+    basisDirty.set(key, { ts, reason });
+    return next;
+  };
+  let lastBasisWriteError: string | null = null;
+  /** v1.193.0 — the counters whose basis shift is written only in the transaction with the floors it
+   *  shifts (writeBatteryFloors), never on its own. */
+  const FLOOR_SHIFT_KEYS: ReadonlySet<string> = new Set(['fleet_battery_charge_wh', 'fleet_battery_discharge_wh']);
+  /** Write the dirty shifts on their own (the read path's rebase). Never throws: getLifetimeTotals
+   *  runs inside the MQTT state build that carries the alarm sensors. A failed write keeps them
+   *  dirty for the next rollup's transaction; the in-memory shift stays authoritative meanwhile.
+   *  A battery shift stays dirty for the floors' transaction: after a failed floor commit its
+   *  shift holds the re-seed too, and written here it paired the old floor row with the new
+   *  shift, a step at the next process (after a leave the Core's share again, booked as energy;
+   *  after a rejoin its history off, a rebase). A crash before that commit costs only a rebase's
+   *  shift, which the next process re-derives from the high-water sidecar. */
+  const writeBasisDirty = (): void => {
+    try {
+      for (const [key, d] of basisDirty) {
+        if (FLOOR_SHIFT_KEYS.has(key)) continue;
+        upsertBasis(key, d);
+        basisDirty.delete(key);
+      }
+      lastBasisWriteError = null;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg !== lastBasisWriteError) log(`recorder: lifetime basis shift write failed (${msg}) — retried at the next rollup`);
+      lastBasisWriteError = msg;
+    }
+  };
   // v1.4.4 — see migrateLifetimeKey below: deletes a legacy row once its value
   // has been copied forward under the new stable key, so it can never be
   // rediscovered later as a second, stale contributor (double-count risk).
@@ -2748,7 +2912,8 @@ export function createRecorder(
   // (Live today: all 3 slots report isConnected=true, so this is a no-op hardening.)
   const sourceSnsOf = (snap: FleetSnapshot): Set<string> => shp2ConnectedDpuSns(snap.devices);
   /** v1.188.1 (review) — the BMS sum's members: the live source set, plus the accepted set's Cores
-   *  while a change to it is pending (MEMBERSHIP_SUSTAINED_ROLLUPS).
+   *  while a change to it is pending (MEMBERSHIP_SUSTAINED_ROLLUPS). v1.193.0: the accepted set alone
+   *  (below); the live set only before any set was accepted (a first run).
    *
    *  v1.188.1 (integration) — and the accepted set alone while the panel reads NO source set (a boot
    *  with the cloud unreachable or the panel's quota failing: no projection until its first quota
@@ -2756,14 +2921,20 @@ export function createRecorder(
    *  pack row is a member, the rows a former member left for packs moved to a bench spare included,
    *  and the orphan guard skips one only while its pack is projected elsewhere: on the live data
    *  +938.8 kWh Battery Energy In on the first publish after such a boot, stepped back down by the
-   *  v1.98.0 re-seed once the panel returned. The rollup already reads an empty set as no change. */
+   *  v1.98.0 re-seed once the panel returned. The rollup already reads an empty set as no change.
+   *
+   *  v1.193.0 — the ACCEPTED set alone, in both directions, until a change is sustained and
+   *  re-seeded. The live set joined the sum at every read before the first rollup saw a change (no
+   *  change pending yet) and at every one while it was pending: a Core joining the pool entered with
+   *  its packs' whole history since their baselines, bench cycling included (+6,144 Wh in one read
+   *  on the test plant, under the v0.81.0 one-pack guard), which Home Assistant books as energy. A
+   *  Core that left stays in the sum (held carry); one that joined counts from the re-seed, whose
+   *  basis shift absorbs its history (rollupLifetime). */
   const bmsMembersOf = (snap: FleetSnapshot): Set<string> => {
     const live = sourceSnsOf(snap);
     if (!bmsMembershipFp) return live;
     const accepted = bmsMembershipFp.split(',').filter((sn) => sn !== '');
-    if (live.size === 0) return new Set(accepted);
-    if (pendingMembership == null) return live;
-    return new Set([...live, ...accepted]);
+    return new Set(accepted);
   };
 
   /** One integrated series of a lifetime key. `untilMs` (v1.188.1): it counts only up to that
@@ -3468,6 +3639,10 @@ export function createRecorder(
   // once per install. HA's state_class: total_increasing treats the
   // resulting one-time drop as a meter reset; the next day's delta
   // (and every day thereafter) is correct.
+  // v1.193.0 — not harmless: HA books the whole post-reset reading again (it is small only right
+  // after a re-zero). Should this ever run where a value was published (the marker lost while the
+  // emit high-water sidecar survives), the publish guard continues from the last published value
+  // instead (guardLifetimeEmit, a basis shift).
   // dbPath = /data/ecoflow.db, dirname → /data (the persistent volume).
   //
   // TOCTOU hardening (CodeQL js/file-system-race): probe the one-time markers
@@ -3516,6 +3691,8 @@ export function createRecorder(
   // drop as a meter reset (state_class: total_increasing); every subsequent
   // day's delta is correct. Packs not visible right now capture their
   // baseline lazily on first sight (see computeBmsBatteryTotals).
+  // v1.193.0 — as for the v0.9.74 reset above: where a value was already published, the publish
+  // guard continues from it (guardLifetimeEmit) rather than letting HA book a reset.
   const BMS_BASELINE_FLAG = resolve(dirname(dbPath), '.bms-baseline-v1.flag');
   if (!oneTimeMarkerPresent(BMS_BASELINE_FLAG)) {
     log('recorder: v0.13.0 first run — capturing per-pack BMS baselines and re-zeroing fleet battery counters');
@@ -3581,12 +3758,38 @@ export function createRecorder(
   /** v1.103.0 — timestamped membership record (see membershipHistory.ts). */
   const MEMBERSHIP_HISTORY_PATH = resolve(dirname(dbPath), 'membership-history.json');
   const membershipHistory = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);
-  let bmsMembershipFp: string | null = (() => {
+  const membershipFileAtBoot: string | null = (() => {
     try {
       const raw = JSON.parse(readFileSync(BMS_MEMBERSHIP_PATH, 'utf8'));
       return typeof raw?.fp === 'string' ? raw.fp : null;
     } catch { return null; }
   })();
+  // v1.193.0 — the accepted roster is the bms_membership row, committed with the floors and their
+  // basis shifts (writeBatteryFloors). From the file alone, written after the commit, a crash or a
+  // failed write in between left a stale roster: the next process summed the Core that left again
+  // over the committed floors and shifted it a second time (+7,168 Wh in one read on the test
+  // plant, a Core's held packs on the live one). The file stands in only while there is no row (an
+  // upgrade).
+  const membershipRowUpsertStmt = db.prepare(
+    `INSERT INTO bms_membership (id, fp, updated_ts) VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET fp = excluded.fp, updated_ts = excluded.updated_ts`,
+  );
+  const membershipRowAtBoot: string | null = (() => {
+    try {
+      const r = db.prepare(`SELECT fp FROM bms_membership WHERE id = 1`).get() as { fp: unknown } | undefined;
+      return typeof r?.fp === 'string' ? r.fp : null;
+    } catch (e: any) {
+      log(`recorder: could not read the accepted SHP2 roster (${e?.message ?? e}) — bms-membership.json stands in`);
+      return null;
+    }
+  })();
+  let bmsMembershipFp: string | null = membershipRowAtBoot ?? membershipFileAtBoot;
+  if (membershipRowAtBoot !== null && membershipFileAtBoot !== membershipRowAtBoot) {
+    log(
+      `recorder: v1.193.0 bms-membership.json reads ${membershipFileAtBoot ?? '(none)'}, the committed roster ${membershipRowAtBoot} ` +
+      `(the file's write after the last commit was lost) — the committed roster stands; the file is rewritten after the next commit`,
+    );
+  }
   /**
    * v1.188.1 (review) — a changed source set must persist this many consecutive rollups before the
    * battery floors are re-seeded (the v1.98.0 gap check's RESEED_SUSTAINED_ROLLUPS idea). The source
@@ -3608,6 +3811,47 @@ export function createRecorder(
     bmsChargeFloor = seedC.wh;
     bmsDischargeFloor = seedD.wh;
   }
+  /** v1.193.0 — the roster to write to bms-membership.json once the floors it goes with commit (the
+   *  committed one at boot when the file disagrees with it); kept until a write lands. */
+  let membershipFileFp: string | null = membershipRowAtBoot !== null && membershipFileAtBoot !== membershipRowAtBoot ? membershipRowAtBoot : null;
+  /** v1.193.0 — carry Battery Energy In / Out across a re-seed of their floors (in memory; written
+   *  by writeBatteryFloors). Returns the log's account of it. */
+  const shiftBattery = (chargeWh: number, dischargeWh: number, ts: number, reason: string): string => {
+    const c = addBasisShift('fleet_battery_charge_wh', chargeWh, ts, reason);
+    const d = addBasisShift('fleet_battery_discharge_wh', dischargeWh, ts, reason);
+    const signed = (wh: number) => `${wh >= 0 ? '+' : ''}${wh.toFixed(0)}`;
+    return `(basis shift ${signed(chargeWh)} / ${signed(dischargeWh)} Wh, now ${c.toFixed(0)} / ${d.toFixed(0)} Wh)`;
+  };
+  let lastFloorWriteError: string | null = null;
+  /** v1.193.0 — the two battery floors, the accepted roster they are seeded against and every dirty
+   *  basis shift, in one transaction (the migrateLifetimeKey pattern). Never throws; false when
+   *  nothing was committed. */
+  const writeBatteryFloors = (ts: number): boolean => {
+    try {
+      db.prepare('BEGIN').run();
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg !== lastFloorWriteError) log(`recorder: lifetime battery floor write failed (${msg}) — retried at the next rollup`);
+      lastFloorWriteError = msg;
+      return false;
+    }
+    try {
+      writeLifetime('fleet_battery_charge_wh', bmsChargeFloor, ts);
+      writeLifetime('fleet_battery_discharge_wh', bmsDischargeFloor, ts);
+      if (bmsMembershipFp !== null) membershipRowUpsertStmt.run(bmsMembershipFp, ts);
+      for (const [key, d] of basisDirty) upsertBasis(key, d);
+      db.prepare('COMMIT').run();
+    } catch (e: any) {
+      try { db.prepare('ROLLBACK').run(); } catch { /* the transaction is already gone */ }
+      const msg = String(e?.message ?? e);
+      if (msg !== lastFloorWriteError) log(`recorder: lifetime battery floor write failed (${msg}) — nothing written; the floors and basis shifts are retried at the next rollup`);
+      lastFloorWriteError = msg;
+      return false;
+    }
+    basisDirty.clear();
+    lastFloorWriteError = null;
+    return true;
+  };
 
   /**
    * Roll up watt-based lifetime metrics from the samples table. Each metric
@@ -3738,6 +3982,11 @@ export function createRecorder(
     // HA's `state_class: total_increasing` treats the resulting step DOWN as a
     // meter reset, which is the honest reading: the series is now measuring a
     // different set of batteries.
+    // v1.193.0 — it was not: HA books the WHOLE post-step reading again at a step below 90 % of
+    // the last one (about 12,043 kWh of Battery Energy In by 2026-09-07), and a step up (a Core
+    // joining with its packs' history) as energy. The floors still re-seed against the new set; the
+    // published counters continue from their last values, the difference carried as a basis shift
+    // (lifetime_basis) written with the floors in one transaction below.
     // v1.103.0 — append to the timestamped history on EVERY rollup, not only on
     // a detected change. `recordMembership` is idempotent (it no-ops when the
     // fingerprint matches the newest entry), and recording the STATE rather than
@@ -3750,29 +3999,39 @@ export function createRecorder(
     if (membershipChanged && !sustained && pendingMembership?.rollups === 1) {
       log(
         `recorder: v1.188.1 SHP2 pool membership reads ${membershipFp} (was ${bmsMembershipFp}) — the lifetime battery floors ` +
-        `are re-seeded only once the change holds for ${MEMBERSHIP_SUSTAINED_ROLLUPS} rollups; until then the Cores that left stay in the battery sum`,
+        `are re-seeded only once the change holds for ${MEMBERSHIP_SUSTAINED_ROLLUPS} rollups; until then the battery sum keeps ` +
+        `the accepted set (a Core that left stays in it; a Core that joined counts from the re-seed)`,
       );
     }
     if (membershipFp !== '' && membershipFp !== bmsMembershipFp && (bmsMembershipFp === null || sustained)) {
       if (bmsMembershipFp !== null) {
         // The change is sustained: the live sum over the NEW set (the pass above still carried the
-        // Cores that left).
+        // Cores that left, and left out the Cores that joined).
+        // v1.193.0 — what was published continues: c0/d0 are the old pool's floors as this rollup
+        // would have ratcheted them (the pass above), the basis the published value stands on; the
+        // shift is that basis less the new pool's sum, negative when a joiner's history raises it.
+        // The accepted set moves BEFORE the recompute: bmsMembersOf sums the accepted set alone.
+        const fp0 = bmsMembershipFp;
+        const c0 = Math.max(bmsChargeFloor, bms.chargeWh), d0 = Math.max(bmsDischargeFloor, bms.dischargeWh);
+        bmsMembershipFp = membershipFp;
         pendingMembership = null;
         bms = computeBmsBatteryTotals(snap);
-        log(
-          `recorder: v1.96.0 SHP2 pool membership changed (${bmsMembershipFp || '(none)'} -> ${membershipFp}) — ` +
-          `re-seeding lifetime battery floors from the new live sum ` +
-          `(charge ${bmsChargeFloor.toFixed(0)} -> ${bms.chargeWh.toFixed(0)} Wh, ` +
-          `discharge ${bmsDischargeFloor.toFixed(0)} -> ${bms.dischargeWh.toFixed(0)} Wh). ` +
-          `HA reads the step as a meter reset; the series now measures a different set of batteries.`,
-        );
         bmsChargeFloor = bms.chargeWh;
         bmsDischargeFloor = bms.dischargeWh;
+        const shifted = shiftBattery(c0 - bmsChargeFloor, d0 - bmsDischargeFloor, now, 'membership change');
+        log(
+          `recorder: v1.96.0 SHP2 pool membership changed (${fp0 || '(none)'} -> ${membershipFp}) — ` +
+          `re-seeding lifetime battery floors from the new live sum ` +
+          `(charge ${c0.toFixed(0)} -> ${bms.chargeWh.toFixed(0)} Wh, ` +
+          `discharge ${d0.toFixed(0)} -> ${bms.dischargeWh.toFixed(0)} Wh). ` +
+          `v1.193.0 — the published Battery Energy In / Out continue from their last values ${shifted}.`,
+        );
       }
       bmsMembershipFp = membershipFp;
-      try {
-        writeFileSync(BMS_MEMBERSHIP_PATH, JSON.stringify({ fp: membershipFp, at: new Date(now).toISOString() }), { mode: 0o644 });
-      } catch { /* advisory: an unwritable marker just re-logs next boot */ }
+      // v1.193.0 — committed with the floors and shifts it goes with (writeBatteryFloors, below): a
+      // crash before the commit leaves the old roster, floors and shifts, so the next process
+      // re-seeds the same change again. The file follows the commit.
+      membershipFileFp = membershipFp;
     }
     // v1.98.0 — FLOOR/LIVE GAP INVARIANT, independent of the fingerprint.
     //
@@ -3794,15 +4053,19 @@ export function createRecorder(
     else sustainedFloorGapRollups = 0;
     if (!floorGapRepaired && sustainedFloorGapRollups >= RESEED_SUSTAINED_ROLLUPS) {
       floorGapRepaired = true;
+      // v1.193.0 — the floors re-seed; the published counters continue (a basis shift, never < 0
+      // here: c0/d0 are at least the live sum).
+      const c0 = Math.max(bmsChargeFloor, bms.chargeWh), d0 = Math.max(bmsDischargeFloor, bms.dischargeWh);
+      bmsChargeFloor = bms.chargeWh;
+      bmsDischargeFloor = bms.dischargeWh;
+      const shifted = shiftBattery(c0 - bmsChargeFloor, d0 - bmsDischargeFloor, now, 'floor gap');
       log(
         `recorder: v1.98.0 lifetime battery floor sat ${(gapWh / 1000).toFixed(0)} kWh above the live sum for ` +
         `${sustainedFloorGapRollups} consecutive rollups — the floor describes a pool that no longer exists. ` +
-        `Re-seeding (charge ${bmsChargeFloor.toFixed(0)} -> ${bms.chargeWh.toFixed(0)} Wh, ` +
-        `discharge ${bmsDischargeFloor.toFixed(0)} -> ${bms.dischargeWh.toFixed(0)} Wh). ` +
-        `HA reads the step as a meter reset.`,
+        `Re-seeding (charge ${c0.toFixed(0)} -> ${bms.chargeWh.toFixed(0)} Wh, ` +
+        `discharge ${d0.toFixed(0)} -> ${bms.dischargeWh.toFixed(0)} Wh). ` +
+        `v1.193.0 — the published Battery Energy In / Out continue from their last values ${shifted}.`,
       );
-      bmsChargeFloor = bms.chargeWh;
-      bmsDischargeFloor = bms.dischargeWh;
     }
     if (bms.chargeWh > bmsChargeFloor) bmsChargeFloor = bms.chargeWh;
     if (bms.dischargeWh > bmsDischargeFloor) bmsDischargeFloor = bms.dischargeWh;
@@ -3830,8 +4093,18 @@ export function createRecorder(
       log(`recorder: v0.45.0 lifetime battery discharge no longer exceeds charge by >1000 Wh (charge=${bmsChargeFloor.toFixed(0)} discharge=${bmsDischargeFloor.toFixed(0)} Wh)`);
     }
     bmsClampActive = inDeficit;
-    writeLifetime('fleet_battery_charge_wh', bmsChargeFloor, now);
-    writeLifetime('fleet_battery_discharge_wh', bmsDischargeFloor, now);
+    // v1.193.0 — the floors, the accepted roster and every changed basis shift in ONE transaction: a
+    // floor re-seeded without its shift (or its roster) would publish a step at the next process.
+    // The shifts are written as absolute values, so a failed commit is retried whole by the next
+    // rollup (the in-memory floors and shifts stay consistent meanwhile). The roster file follows a
+    // successful commit only, for a release before v1.193.0 (this one reads the row); a failed
+    // write of it is retried after the next commit.
+    if (writeBatteryFloors(now) && membershipFileFp !== null) {
+      try {
+        writeFileSync(BMS_MEMBERSHIP_PATH, JSON.stringify({ fp: membershipFileFp, at: new Date(now).toISOString() }), { mode: 0o644 });
+        membershipFileFp = null;
+      } catch { /* retried after the next commit; the committed row is the roster this release reads */ }
+    }
     // v0.50.0 — piggyback the emit high-water persist on the 5-min rollup cadence
     // (NOT on the hot getLifetimeTotals path). Advisory: a failed write is logged
     // and ignored — the in-memory map stays authoritative for this process.
@@ -3880,9 +4153,12 @@ export function createRecorder(
       // energy the panel bridge metered while a Core was dark. The bridge is NOT in the floors
       // or the fleet_battery_* rows: the v1.98.0 floor-gap check would read a bridged total over
       // 50 kWh as a floor for a pool that no longer exists, and step Home Assistant down.
+      // v1.193.0 — a battery key starts from the in-memory floor, which is its row except after a
+      // failed write (writeBatteryFloors): the floor and its basis shift then stay a matched pair
+      // for this process, where the row would pair the old floor with the new shift.
       let persistedWh = prev.wh;
-      if (key === 'fleet_battery_charge_wh') persistedWh += bridgeTotals.chargeWh;
-      if (key === 'fleet_battery_discharge_wh') persistedWh += bridgeTotals.dischargeWh;
+      if (key === 'fleet_battery_charge_wh') persistedWh = bmsChargeFloor + bridgeTotals.chargeWh;
+      if (key === 'fleet_battery_discharge_wh') persistedWh = bmsDischargeFloor + bridgeTotals.dischargeWh;
       if (key === 'fleet_battery_charge_wh' || key === 'fleet_battery_discharge_wh') {
         // v0.45.0 — each battery counter emits persistedWh + max(0, liveBmsWh −
         // persisted), UNCLAMPED. The persisted value reflects the most-recent
@@ -3896,7 +4172,7 @@ export function createRecorder(
         // its unconditional-write side effects) a second time for the second key.
         if (!bmsBatteryTotals) bmsBatteryTotals = computeBmsBatteryTotals(snap);
         const liveBmsWh = key === 'fleet_battery_charge_wh' ? bmsBatteryTotals.chargeWh : bmsBatteryTotals.dischargeWh;
-        const persisted = prev.wh;
+        const persisted = key === 'fleet_battery_charge_wh' ? bmsChargeFloor : bmsDischargeFloor;
         pendingWh = Math.max(0, liveBmsWh - persisted);
       } else if (watermark < now) {
         for (const c of contributors[key] ?? []) {
@@ -3907,36 +4183,90 @@ export function createRecorder(
           // pre-watermark boundary sample so integrateWh's value-hold engages.
           // v1.188.1 — and the same series (energyPoints), so a read never shows what the rollup drops.
           const pts = energyPoints(c.sn, c.metric, watermark - LIFETIME_ROLLUP_LOOKBACK_MS, now);
-          pendingWh += integrateWh(pts, watermark, until).wh;
+          // v1.193.0 — up to the newest reading only. integrateWh holds the last reading forward to
+          // `until`, and the next reading revises that span (down, after a load drop): 100 Wh at
+          // 9 -> 1 kW across a 90 s row gap, 3.2 kWh across a 10-min silence at 19.2 kW. Up to the
+          // newest reading the segments are the ones the next rollup integrates, and the rollup only
+          // adds after them, so a read never shows more than the rollup keeps. The published value
+          // lags the newest reading by at most one sample interval (`pts` is ascending).
+          const newest = pts.length > 0 ? pts[pts.length - 1].ts : -Infinity;
+          const readUntil = Math.min(until, newest);
+          if (readUntil > watermark) pendingWh += integrateWh(pts, watermark, readUntil).wh;
         }
         if (pendingWh < 0) pendingWh = 0;
       }
-      // v0.15.14 — micro-dip clamp. The live `pendingWh` trapezoid estimate is
-      // re-derived each call, so consecutive totals can dip by a few Wh (e.g.
-      // a rollup persisting slightly less than the previous live estimate).
-      // HA's `total_increasing` sensors read any decrease as a meter RESET, so
-      // 1-6 Wh of jitter produced phantom Energy-Dashboard resets ("state is
-      // not strictly increasing", 21× in the HA core log). Hold the previous
-      // total across small dips; a LARGE drop is a genuine operator reset
-      // (v0.13.0 re-zero) and must pass through unclamped.
-      // v1.188.1 — the two counters the energy bridge changes the contributors of hold a dip up to
-      // LIFETIME_HOLD_DIP_WH: their persisted rows only grow, so a lower total between rollups is
-      // never a reset, only pending energy the read path no longer sees (the backstop behind the
-      // hand-off cut in buildContributors).
-      pendingWh = clampLifetimeDip(
-        lifetimeEmitHighWater.get(key),
-        persistedWh,
-        pendingWh,
-        LIFETIME_HOLD_KEYS.has(key) ? LIFETIME_HOLD_DIP_WH : undefined,
-      );
-      lifetimeEmitHighWater.set(key, persistedWh + pendingWh);
-      out[key] = { persistedWh, pendingWh, watermarkMs: watermark };
+      // v1.193.0 — the basis shift (lifetime_basis): what this counter has been carried by across a
+      // change of what its row measures (a pool change, the floor-gap re-seed, an unexplained drop).
+      // The battery pending above stays row-based, so the shift never enters it.
+      const shiftWh = basisShift.get(key) ?? 0;
+      persistedWh += shiftWh;
+      // v0.15.14 — micro-dip clamp. v1.193.0 — the publish guard (guardLifetimeEmit): the emitted
+      // value never falls below the last one emitted. A drop up to LIFETIME_HOLD_DIP_WH (every key;
+      // v1.188.1 gave it to PV Production and Grid to Battery Charge) is held: the reading
+      // re-estimated between rollups, pending energy the read path no longer sees (the backstop
+      // behind the hand-off cut in buildContributors; a held panel's restated reading gone after a
+      // restart). A larger drop has no known cause (the known ones are shifted where they happen): it
+      // continues from the last value, the difference added to the shift and logged. HA read the
+      // "genuine reset" this used to pass through as a meter reset and booked the whole reading again.
+      const hw = lifetimeEmitHighWater.get(key);
+      const readWh = persistedWh + pendingWh;
+      // What is owed expires LIFETIME_OWED_WINDOW_MS after the last drop: it stays in the shift for
+      // good, and a leftover that never comes back cannot hide a later drop's return.
+      const owedNow = basisOwed.get(key);
+      if (owedNow && now - owedNow.ts > LIFETIME_OWED_WINDOW_MS) {
+        basisOwed.delete(key);
+        basisDirty.set(key, { ts: now, reason: 'unexplained drop kept' });
+        writeBasisDirty();
+        log(
+          `recorder: v1.193.0 lifetime counter ${key}: ${(owedNow.wh / 1000).toFixed(3)} kWh of an unexplained drop did not come back ` +
+          `within ${LIFETIME_OWED_WINDOW_MS / 3_600_000} h — kept in its basis shift for good`,
+        );
+      }
+      const g = guardLifetimeEmit(hw, readWh, LIFETIME_HOLD_DIP_WH, basisOwed.get(key)?.wh ?? 0);
+      // No last value and no finite reading: the key is left out and its field publishes null.
+      if (!Number.isFinite(g.emitWh)) continue;
+      // A non-finite reading with a last value: that value again, nothing new.
+      if (!Number.isFinite(readWh)) {
+        out[key] = { persistedWh: g.emitWh, pendingWh: 0, watermarkMs: watermark, shiftWh, heldWh: 0 };
+        continue;
+      }
+      let shift = shiftWh;
+      if (g.verdict === 'returned') {
+        // The unexplained drop came back: its shift is taken back, so the return is not booked as
+        // energy on top of the value the drop was continued from.
+        persistedWh += g.rebaseWh;
+        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop returned', g.rebaseWh);
+        writeBasisDirty();
+        // A leftover of up to the hold is taken back a reading at a time: logged once it is gone.
+        if (-g.rebaseWh > LIFETIME_HOLD_DIP_WH || !basisOwed.has(key)) {
+          log(
+            `recorder: v1.193.0 lifetime counter ${key} climbed back ${(-g.rebaseWh / 1000).toFixed(3)} kWh of an unexplained drop — ` +
+            `taken back off its basis shift, not published as energy; basis shift ${(shift / 1000).toFixed(3)} kWh`,
+          );
+        }
+      }
+      if (g.verdict === 'rebased') {
+        persistedWh += g.rebaseWh;
+        shift = addBasisShift(key, g.rebaseWh, now, 'unexplained drop', g.rebaseWh);
+        writeBasisDirty();
+        log(
+          `recorder: v1.193.0 WARN lifetime counter ${key} read ${(readWh / 1000).toFixed(3)} kWh, ` +
+          `${(g.rebaseWh / 1000).toFixed(3)} kWh below the ${(g.emitWh / 1000).toFixed(3)} kWh last published — ` +
+          `continued from the last published value (Home Assistant reads a drop of 10 % or more as a meter reset); ` +
+          `basis shift ${(shift / 1000).toFixed(3)} kWh`,
+        );
+        persistEmitHighWater();
+      }
+      const heldWh = g.emitWh - (persistedWh + pendingWh);
+      pendingWh = g.emitWh - persistedWh;
+      lifetimeEmitHighWater.set(key, g.emitWh);
+      out[key] = { persistedWh, pendingWh, watermarkMs: watermark, shiftWh: shift, heldWh };
     }
     // v0.45.0 — REMOVED the emit-path discharge≤charge clamp. The two battery
     // counters are surfaced independently (each = persistedWh + max(0, liveBmsWh
     // − persisted)); out > in is physical for a net-discharged window and HA
     // ingests them as two independent total_increasing sensors. The per-key
-    // micro-dip clamp (clampLifetimeDip) and per-key lifetimeEmitHighWater above
+    // publish guard (guardLifetimeEmit) and per-key lifetimeEmitHighWater above
     // are correct and retained — they protect each counter's own monotonicity
     // without coupling discharge to charge.
     return out;
@@ -3946,20 +4276,26 @@ export function createRecorder(
    * v0.45.0 — read-only diagnostics for the lifetime battery counters. Mirrors
    * the math getLifetimeTotals uses for the two battery keys but writes NOTHING:
    * computeBmsBatteryDetail({ mutate:false }) skips savePackBaseline /
-   * savePackLastWh and the corrupt-read warn, and we read the persisted floors
-   * via readLifetime without ever calling writeLifetime. The lifetime_totals
+   * savePackLastWh and the corrupt-read warn, and we read the floors (v1.193.0: the
+   * in-memory ones, as getLifetimeTotals does) without ever calling writeLifetime. The lifetime_totals
    * table is byte/row-identical before and after this call.
    */
   const batteryLifetimeDebug = (): BatteryLifetimeDebug => {
     const snap = store.get();
     const detail = computeBmsBatteryDetail(snap, { mutate: false });
-    const chargeRow = readLifetime('fleet_battery_charge_wh').wh;
-    const dischargeRow = readLifetime('fleet_battery_discharge_wh').wh;
+    // v1.193.0 — the in-memory floors, as getLifetimeTotals reads them (the rows except after a
+    // failed write).
+    const chargeRow = bmsChargeFloor;
+    const dischargeRow = bmsDischargeFloor;
     // v1.188.1 — the emitted totals include the energy bridge's rows, as getLifetimeTotals does.
+    // v1.193.0 — and each counter's basis shift (lifetime_basis).
     const bridge = energyBridge.debug(snap.devices, Date.now());
-    const chargePersisted = chargeRow + bridge.chargeWh;
-    const dischargePersisted = dischargeRow + bridge.dischargeWh;
-    // Emitted = persisted + max(0, liveBms − row), matching getLifetimeTotals.
+    const chargeShift = basisShift.get('fleet_battery_charge_wh') ?? 0;
+    const dischargeShift = basisShift.get('fleet_battery_discharge_wh') ?? 0;
+    const chargePersisted = chargeRow + bridge.chargeWh + chargeShift;
+    const dischargePersisted = dischargeRow + bridge.dischargeWh + dischargeShift;
+    // Emitted = persisted + max(0, liveBms − row), matching getLifetimeTotals (before its publish
+    // guard, which holds a dip at the last value published).
     const chargePending = Math.max(0, detail.chargeWh - chargeRow);
     const dischargePending = Math.max(0, detail.dischargeWh - dischargeRow);
     // Raw unclamped floors: the in-memory floors advanced by rollups, lifted to
@@ -3971,8 +4307,8 @@ export function createRecorder(
       rawDischargeFloorWh,
       emittedChargeWh: chargePersisted + chargePending,
       emittedDischargeWh: dischargePersisted + dischargePending,
-      charge: { persistedWh: chargePersisted, pendingWh: chargePending },
-      discharge: { persistedWh: dischargePersisted, pendingWh: dischargePending },
+      charge: { persistedWh: chargePersisted, pendingWh: chargePending, shiftWh: chargeShift },
+      discharge: { persistedWh: dischargePersisted, pendingWh: dischargePending, shiftWh: dischargeShift },
       deficitWh: Math.max(0, rawDischargeFloorWh - rawChargeFloorWh),
       packs: detail.packs,
       offlineHeldMembers: detail.offlineHeldMembers,

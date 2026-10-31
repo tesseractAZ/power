@@ -102,10 +102,15 @@ test('★★★ a boot with no panel reading carries the accepted roster\'s held
   rec1.rollupLifetime();
   rec1.rollupLifetime();
   rec1.rollupLifetime();
-  const homeChg = 40_000 * PACK_MAH_TO_WH;
-  const homeDsg = 30_000 * PACK_MAH_TO_WH;
+  // v1.193.0 — the floors re-seed to the home Core's packs; the published counters continue from
+  // where both Cores left them (a basis shift: the step down was Home Assistant's meter reset). The
+  // values asserted below are those continued ones; the orphan row would add +16,384 Wh on top.
+  const homeChg = 200_000 * PACK_MAH_TO_WH;
+  const homeDsg = 180_000 * PACK_MAH_TO_WH;
   const t1 = rec1.getLifetimeTotals();
-  assert.ok(near(total(t1, 'fleet_battery_charge_wh'), homeChg), `precondition: re-seeded to the home Core (${total(t1, 'fleet_battery_charge_wh')})`);
+  assert.ok(near(total(t1, 'fleet_battery_charge_wh'), homeChg), `precondition: continued across the rollover (${total(t1, 'fleet_battery_charge_wh')})`);
+  assert.ok(near(t1.fleet_battery_charge_wh.shiftWh ?? 0, 160_000 * PACK_MAH_TO_WH), 'precondition: the floor re-seeded to the home Core (the shift is the Core that left)');
+  assert.ok(near(total(t1, 'fleet_battery_discharge_wh'), homeDsg), 'precondition: discharge likewise');
   assert.ok(lines1.some((l) => l.includes('v1.96.0 SHP2 pool membership changed')), 'precondition: the rollover');
   // The moved pack now sits in a bench spare, off the panel.
   store.snap.devices.DPU_SPARE = dpuDevice('DPU_SPARE', [{ num: 1, packSn: 'PMOVED1', chg: 2_160_000, dsg: 2_150_000 }]);

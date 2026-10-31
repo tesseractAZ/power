@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -37,12 +37,16 @@ const { createRecorder } = await import('../src/recorder.js');
 // second test's fleet sum. Wipe the persisted tables between tests so each
 // scenario is asserted in isolation (each test still builds a fresh recorder,
 // whose in-memory baseline/held caches are per-instance).
+// v1.193.0 — and the emit high-water sidecar beside it: the publish guard holds a drop up to 5 kWh at
+// the last value published (it let anything over 50 Wh through before), so the first test's 3,584 Wh
+// would hold the second test's 1,228.8 Wh. Wiping the database is a fresh install; so is no sidecar.
 function clearDb() {
   const db = new DatabaseSync(DB_PATH);
   db.exec(`CREATE TABLE IF NOT EXISTS samples (ts INTEGER NOT NULL, sn TEXT NOT NULL, metric TEXT NOT NULL, value REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS lifetime_totals (metric_key TEXT PRIMARY KEY, wh REAL NOT NULL DEFAULT 0, last_integrated_ts INTEGER NOT NULL DEFAULT 0);
     DELETE FROM lifetime_totals; DELETE FROM samples;`);
   db.close();
+  rmSync(join(dirname(DB_PATH), '.emit-highwater.json'), { force: true });
 }
 
 const PACK_MAH_TO_WH = (32 * 3.2) / 1_000;

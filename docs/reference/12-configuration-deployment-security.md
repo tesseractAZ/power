@@ -418,7 +418,19 @@ since the previous tag if empty). It:
 - `Type-check server tests` (`tsconfig.test.json`, src + test).
 - `Mutant anchors resolve` (`scripts/check-mutant-anchors.mjs`).
 - `Server tests`: `npm test`, then `scripts/check-doc-claims.mjs` against the pass count and the engine index ([Appendix A.13](A-feature-inventory.md#a13-engine-index)): each row's file must declare its identifier in code (a mention in a comment or a string does not count), every row must have the header's cell count (a pipe inside a cell is written `\|`), the index's count sentence (total, thread tallies, strict reading and its live and waiting split), the README's group counts and its count of write-capable engines must equal the rows, the README's floor must sit below the strict reading, and the swept surfaces (the README, the add-on's README, documentation and configuration, the image labels, the web manifest, and every guide and reference page) are read for the wordings that drifted before: an engine count that is neither the index total nor the README's floor, an approximate one ("~40", "about 40", "40+") or one in words, and a sentence that puts the engines as a whole on one thread. The sweep reads those known wordings, not every possible sentence; [`scripts/lib/engineIndex.mjs`](../../scripts/lib/engineIndex.mjs) lists exactly what it reads and what it does not. The suite has gated the PR since v1.58.0.
-- `No personal data in the tree` (`scripts/check-no-secrets.py`).
+- `No personal data in the tree` (`scripts/check-no-secrets.py`). It reads tracked text files and
+  skips anything else, so a tracked image is outside it. The README screenshots are therefore
+  rendered from the synthetic fleet in `scripts/screenshots/` (`fixture.mts`, served by
+  `serve.mts`), and `capture.mts` gates each one before writing it: the page may ask for no
+  endpoint the fixture does not serve (a read of a path the UI only writes to included), the
+  page's text may hold no serial outside the fixture's placeholders, and neither the page's text
+  nor an OCR read of the image, full-size or downscaled, may hold a device name ending in a hyphen
+  and four digits. The serial rule is not applied to an OCR read, which can read a 0 as an O.
+  Each tab's positive controls must be read and an OCR read must return at least 20 lines, so a
+  blank read cannot pass. The page text also goes through `check-no-secrets.py --stdin`, the same
+  rules on standard input. The capture is run by hand on macOS (headless Chrome, Vision OCR), not
+  in CI; its fixture, server and gate are held by `server/test/screenshotFixture.test.ts`,
+  `server/test/checkNoSecretsStdin.test.ts` and `scripts/mutate-screenshot-gate.mjs`.
 - `Dependency advisories` (`scripts/check-npm-audit.mjs`).
 - `Validate add-on config + translations`.
 - `Dockerfile smoke build (amd64)`.

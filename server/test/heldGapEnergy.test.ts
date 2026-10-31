@@ -74,6 +74,14 @@ const rowsOf = (sn: string, metric: string, fromMs: number): number[] => {
   const db = new DatabaseSync(DB_PATH);
   try { return (db.prepare('SELECT ts FROM samples WHERE sn = ? AND metric = ? AND ts > ? ORDER BY ts').all(sn, metric, fromMs) as Any[]).map((r) => Number(r.ts)); } finally { db.close(); }
 };
+/** v1.193.0 — a series' newest row at or before `atMs`. */
+const newestRow = (sn: string, metric: string, atMs: number): { ts: number; value: number } | null => {
+  const db = new DatabaseSync(DB_PATH);
+  try {
+    const r = db.prepare('SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts <= ? ORDER BY ts DESC LIMIT 1').get(sn, metric, atMs) as Any;
+    return r ? { ts: Number(r.ts), value: Number(r.value) } : null;
+  } finally { db.close(); }
+};
 
 /** The house panel's quota for reading `k`: ~3.5 kW of circuits, 8 kW through the main (a night
  *  charge). With `sources`, three connected Cores delivering ~1130 W each through their slots. */
@@ -149,9 +157,15 @@ async function hour(
   };
   let latched = 0;
   /** The largest difference between a read just before a rollup and one just after it, at the same
-   *  instant, over the panel counters: the read path integrates the same series the rollup books. */
+   *  instant, over the panel counters: the read path integrates the same series the rollup books.
+   *  v1.193.0 — a read integrates up to the newest reading only, while the rollup still holds that
+   *  reading to its own instant (persisted, final): the read may trail the rollup by exactly that
+   *  span at the newest reading's power (8 kW × 3 min = 400 Wh at the onset of a replay), never by
+   *  more (the same series, restated across a gap the gate explains, up to the newest reading), and
+   *  never exceed it (a dip). The figure is the largest departure from that. */
   let readVsRollupWh = 0;
   const panelKeys = ['fleet_load_wh', 'fleet_grid_home_wh', 'circuit_2_wh'];
+  const panelMetrics = ['panel_load', 'grid_home_w', 'ch2_w'];
   const hourStartMs = c.wall + 30 * MIN;
   try {
     for (let m = 1; m <= 30; m++) { await minute('ok'); if (m % 5 === 0) rec.rollupLifetime(); }
@@ -166,7 +180,18 @@ async function hour(
       if (m % 5 === 0) {
         const before = panelKeys.map((key) => total(rec, key));
         rec.rollupLifetime();
-        panelKeys.forEach((key, i) => { readVsRollupWh = Math.max(readVsRollupWh, Math.abs(total(rec, key) - before[i])); });
+        // Measured, not published: the publish guard would hold a dip at the read's value.
+        const after = rec.getLifetimeTotals();
+        panelKeys.forEach((key, i) => {
+          const a = after[key];
+          const measured = a.persistedWh + a.pendingWh - (a.heldWh ?? 0);
+          const n = newestRow(PANEL, panelMetrics[i], c.wall);
+          // The rollup's own hold of the newest reading to its instant (integrateWh: within 10 min),
+          // when it wrote the window (a window with no row while the gap can still be bridged is held).
+          const wrote = a.watermarkMs === c.wall;
+          const tail = wrote && n && c.wall - n.ts <= 10 * MIN ? (n.value * (c.wall - n.ts)) / 3_600_000 : 0;
+          readVsRollupWh = Math.max(readVsRollupWh, Math.abs(measured - before[i] - tail));
+        });
       }
       o.probe?.(m, rec);
     }
@@ -250,7 +275,7 @@ for (const [n, day] of [[6, 1], [7, 2], [8, 3], [9, 4], [10, 5], [11, 6], [12, 7
     const r = await hour(t, day, (m) => (m >= 18 && m < 18 + n ? 'replay' : 'ok'));
     within(r.rise.fleet_load_wh, V1880_LOAD_WH, 1, 'Panel Load');
     within(r.rise.fleet_grid_home_wh, V1880_GRID_WH, 1, 'Grid Import (Home)');
-    assert.ok(r.readVsRollupWh <= 1, `a read and the rollup at the same instant agree (${r.readVsRollupWh.toFixed(1)} Wh apart)`);
+    assert.ok(r.readVsRollupWh <= 1, `a read and the rollup at the same instant differ by the rollup's hold of the newest reading only (${r.readVsRollupWh.toFixed(1)} Wh off)`);
   });
   test(`★★★ a ${n}-poll quota stall during an 8 kW night charge books what v1.188.0 booked`, async (t) => {
     const r = await hour(t, day + 10, (m) => (m >= 18 && m < 18 + n ? 'fail' : 'ok'));

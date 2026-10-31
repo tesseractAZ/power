@@ -221,8 +221,13 @@ diagnostic`).
 #### 2.1 What & why
 
 Monotonically-increasing kWh counters for HA's Energy Dashboard. HA ingests them
-with `state_class: total_increasing` and treats any decrease as a meter reset, so
-these counters must never regress.
+with `state_class: total_increasing` (`homeassistant/components/sensor/recorder.py`):
+a reading below 0.9 × the previous one is a **meter reset**, and HA books the whole
+new reading again; a smaller drop books a negative hour ("not strictly increasing");
+a rise is booked as energy, whatever caused it. So these counters must never regress,
+and never jump when what they measure changes: every published counter is
+non-decreasing (the publish guard `guardLifetimeEmit`, below), and a battery-pool
+change or the floor-gap re-seed is carried across explicitly (path (b)).
 
 #### 2.2 The two accumulation paths
 
@@ -233,6 +238,15 @@ these counters must never regress.
 `integrateWh(samples, watermark, now)` from `watermark − LIFETIME_ROLLUP_LOOKBACK_MS`
 (so `integrateWh` sees the pre-window boundary), adds `wh`, clamps negative
 deltas to 0 (a sign-flip can't decrement), and advances the watermark.
+A read between rollups (`getLifetimeTotals`) integrates each series from the
+watermark up to its **newest reading** only, never to the read instant (v1.193.0):
+`integrateWh` holds the last reading forward, and the next reading revises that span,
+so an extrapolated read came out lower after a load drop (100 Wh at 9 → 1 kW across a
+90 s row gap, 3.2 kWh across a 10-min silence at 19.2 kW). Up to the newest reading
+the segments are the next rollup's, and the rollup only adds after them, so a read
+never exceeds what the next rollup persists. A published value lags the newest
+reading by at most one sample interval (up to the 5-min heartbeat for a steady load):
+delayed, never lost. The rollup still holds the last reading to its own instant.
 
 **(b) BMS-sourced battery keys** — `fleet_battery_charge_wh`,
 `fleet_battery_discharge_wh`. These come from the BMS coulomb registers
@@ -240,6 +254,34 @@ deltas to 0 (a sign-flip can't decrement), and advances the watermark.
 per-pack baseline (`packDeltaWh`, deltas floored at 0), not integrated from
 power. Each rollup stores `max(BMS, persistedFloor)` so a momentary BMS readback
 dropout (0/null) never looks like "battery emptied".
+
+The floors are pool-relative: the sum, over the member Cores' packs, of each pack's
+delta from its baseline. The members are the **accepted roster**: a changed SHP2
+source set is accepted only once it holds for `BMS_MEMBERSHIP_SUSTAINED_ROLLUPS` (3)
+rollups, in both directions (v1.193.0). A Core that left stays in the sum meanwhile
+(its held packs carried); a Core that joined is not summed, by reads or by rollups,
+until the re-seed counts it (before, it entered at the next read with its packs' whole
+history since their baselines: +6,144 Wh in one read on the test plant). Energy a
+joining Core moves in the ~15 min before its re-seed is not counted.
+
+**Continuity across a re-seed (v1.193.0).** The **membership re-seed** (v1.96.0) and
+the **floor-gap re-seed** (v1.98.0, below) move the floors to the live sum of a
+different set of batteries and carry the published counters by a **basis shift**: the
+floor as that rollup ratchets it (`max(floor, live)`) less the new floor, per counter
+(negative when a joiner's history raises the floor). It is kept per key in
+`lifetime_basis` (`metric_key`, `shift_wh`, `updated_ts`, `reason`, and `owed_wh` /
+`owed_ts` for the guard's take-back, below), loaded before the first read and included in `persistedWh`. The two floors, the accepted roster (the
+`bms_membership` row) and every changed shift commit in **one transaction**
+(`writeBatteryFloors`, absolute values). A failed commit writes nothing; the in-memory
+floors, roster and shifts stay a matched pair for the process (the read path takes the
+battery floors from memory) and the next rollup retries. A battery shift is never
+written outside that transaction. `bms-membership.json` follows each commit (for a
+release before v1.193.0; retried until written) and is read only while there is no row
+(the first boot after an upgrade); one that disagrees with the row is logged and
+rewritten. The log line ends `the published Battery Energy In / Out continue from their
+last values (basis shift ±A / ±B Wh, now C / D Wh)`. Before v1.193.0 both re-seeds
+published the step (at 10 % or more a meter reset: about 12,043 kWh of Battery Energy
+In by 2026-09-07).
 
 **(c) The energy bridge, while a home Core is dark** (`energyBridge.ts`). Paths (a)
 and (b) read the Cores themselves. A Core with no reading of its own while its panel
@@ -442,9 +484,11 @@ Where the energy goes:
   `bmsChargeFloor` / `bmsDischargeFloor` or the persisted `fleet_battery_*` rows: the floors
   are seeded from those rows, and the floor-gap re-seed (floor more than
   `BMS_RESEED_MIN_GAP_WH` above the live sum for `BMS_RESEED_SUSTAINED_ROLLUPS` rollups)
-  would read a bridged total as a floor for a pool that no longer exists and step Home
-  Assistant down: a negative hour while the step is under 10 % of the counter, a meter
-  reset (the whole counter booked again — the phantom-kWh failure) at 10 % or more.
+  would read a bridged total as a floor for a pool that no longer exists and re-seed the
+  floors needlessly. (Before v1.193.0 that re-seed also stepped Home Assistant down: a
+  negative hour while the step was under 10 % of the counter, a meter reset — the whole
+  counter booked again, the phantom-kWh failure — at 10 % or more. It now carries the
+  published counters by a basis shift, path (b) above.)
 - **PV.** Added to `fleet_pv_wh` at each rollup (`bridge_pv_wh` keeps the bridged share);
   the dark Cores' own `pv_total` / `ac_in` count only up to the hand-off instant, so a
   frozen projection's heartbeat rows cannot double-count.
@@ -452,12 +496,13 @@ Where the energy goes:
   panel) is added to `fleet_grid_import_wh` in place of their own `ac_in`.
 - Bridged energy steps in at each rollup. Between rollups the pending integral keeps each
   dark Core's own energy up to its hand-off instant, so a Core going dark between rollups
-  does not take back what a read already showed. As a backstop, `fleet_pv_wh` and
-  `fleet_grid_import_wh` (`LIFETIME_HOLD_KEYS`) hold a dip between rollups of up to
-  `LIFETIME_HOLD_DIP_WH` (5 kWh) instead of the 50 Wh of the micro-dip clamp: their rows
-  only grow, so a lower total is pending energy the read path no longer sees (a Core
-  whose slot leaves the panel mid-window, for one), never a reset. A replaced database
-  is far larger and still passes through.
+  does not take back what a read already showed. As a backstop, every published counter
+  holds a dip between reads of up to `LIFETIME_HOLD_DIP_WH` (5 kWh; v1.188.1 gave it to
+  `fleet_pv_wh` and `fleet_grid_import_wh` alone, the rest held 50 Wh): their rows only
+  grow, so a lower total is pending energy the read path no longer sees (a Core whose
+  slot leaves the panel mid-window, for one), never a reset. A replaced database
+  continues from the last published value (a basis shift, `guardLifetimeEmit` below)
+  instead of passing through.
 - **The Today card** (`/api/summary/today`, and the Solar tab's Today tile). Each rollup also
   writes one row per bridged Core to the `bridge_ledger` table (`bridgeLedgerRows`): the window
   `[since_ts, until_ts]`, its basis, what the rollup booked for that Core (PV, AC input, battery
@@ -586,6 +631,15 @@ from its first window (the energy before it is absorbed at the hand-over; the ve
 > Either way the Energy dashboard is wrong for those hours, so once the bridge has booked
 > battery energy, do not roll back below v1.188.1.
 
+> **Anti-footgun — no rollback past v1.193.0 once a counter carries a basis shift.** The shifts
+> live only in the `lifetime_basis` table, which an older release does not read: it publishes
+> the rows without them. Once any key's `details.<key>.shiftWh` in `/api/lifetime-energy` is
+> non-zero (after a battery-pool change, a floor-gap re-seed or a rebased drop), rolling back
+> steps that counter by the shift at once: down for a positive shift (a Core that left, the
+> floor-gap repair, a replaced database), up for a negative one (a Core that joined). Home
+> Assistant books a step down of 10 % or more as a meter reset, a smaller one as a negative
+> hour, and a step up as energy. Do not roll back past v1.193.0 after a pool change.
+
 #### 2.3 The RTE clamp invariant — history and current state
 
 > **Anti-footgun.** The BMS packs ship with `accuDsgMah > accuChgMah` (bench
@@ -619,24 +673,75 @@ into the deficit state (`deficitWh > 1000`), latched by `bmsClampActive`.
 > reboot cause) is treated as **claimed**, so the destructive reset never re-runs
 > per boot. Writes use `wx` (exclusive create); `EEXIST` = a racing starter, = success.
 
-#### 2.4 The micro-dip clamp (`clampLifetimeDip`)
+#### 2.4 The published-counter guard (`guardLifetimeEmit`)
 
-The live total (`persistedWh + pendingWh`) is re-estimated every call and can dip
-a few Wh below the last emitted value (rollup-persist vs live-trapezoid
-rounding). Because HA reads any decrease as a reset, `clampLifetimeDip`:
+The live total (`persistedWh + pendingWh`, the basis shift inside `persistedWh`) is
+re-estimated every call and can come out below the last emitted value: rounding,
+pending energy the read path no longer sees (a Core handed to the energy bridge, a
+restated held reading gone after a restart). The guard (v1.193.0; it replaces the
+v0.15.14 `clampLifetimeDip`, which held 50 Wh and let a larger drop through as "a
+genuine reset") never emits below the last value emitted:
 
 ```
-if prevEmitted == null:            return pendingWh
-dip = prevEmitted − (persisted + pending)
-if 0 < dip ≤ maxDipWh (50):        return prevEmitted − persisted   // hold flat
-else:                              return pendingWh                 // let a real reset pass
+if lastEmitted == null:            emit total                        // 'first'
+if total is not finite:            emit lastEmitted                  // 'held'
+if total ≥ lastEmitted:
+  rise = total − lastEmitted
+  if owed > 0 and rise > 0 and (owed ≤ 5 kWh or (rise > 5 kWh and rise ≥ owed / 2)):
+                                   back = min(owed, rise)
+                                   emit total − back, shift −= back, owed −= back  // 'returned'
+  else:                            emit total                        // 'rise'
+dip = lastEmitted − total
+if dip ≤ LIFETIME_HOLD_DIP_WH (5 kWh): emit lastEmitted              // 'held'
+else:                     emit lastEmitted, shift += dip, owed += dip // 'rebased'
 ```
+
+A **held** dip (`heldWh` in `details`) is never counted twice: energy the reading
+takes back for a while is published late; energy it drops for good (a Core whose slot
+leaves the panel mid-window) costs that much of what follows. The hold errs low, never
+high. A **rebased** drop has no known cause (the known ones are shifted where they
+happen, path (b)): the counter continues from the last value, the difference joins
+the key's basis shift, and one line is logged: `recorder: v1.193.0 WARN lifetime
+counter <key> read X kWh, D kWh below the L kWh last published — …`. The shift is
+written at once; a battery key's waits for the floors' transaction at the next rollup
+(written alone after a failed floor commit, it would pair the old floor row with the
+new shift). A replaced database (rows near 0, the sidecar intact) is that case. The
+rebased amount stays **owed** (`lifetime_basis.owed_wh`) until the reading climbs back:
+a rise over 5 kWh and at least half of what is owed is the drop **returning**, and up
+to the amount owed is taken back off the shift (logged: `… climbed back X kWh of an
+unexplained drop — taken back off its basis shift`). Without it a counter that read 0
+and then its old value (every counter on 2026-06-08, 18:00–19:00) would publish twice
+its value. A rise taken back by mistake costs at most the amount owed. Once no more
+than 5 kWh is owed (what a return left over: a dip held before the drop, coming back
+after it), every rise is taken back until nothing is. What is owed expires 24 h after
+the last drop on the key (`LIFETIME_OWED_WINDOW_MS`; `owed_ts`; logged `… did not come
+back within 24 h — kept in its basis shift for good`), so a drop that never comes back
+(a replaced database) cannot hide a later drop's return. Not recognised: a drop that
+comes back in steps each under half of what is owed, and a drop still owed at a stop
+whose return the first read after the restart sees together with the energy counted
+while the add-on was down; both are published as they come back. The high-water file
+keeps a key's previous value while its basis is not committed (a failed write, a
+battery shift waiting for the floors' transaction), so a crash never pairs a new last
+value with an old shift. With
+no last value and no finite reading the key is left out and its field publishes null,
+never a fabricated 0.
 
 `lifetimeEmitHighWater` (the per-key last-emitted map) is seeded from a persisted
-sidecar so the clamp keeps its baseline across restarts, and persisted on the
-5-min rollup (not the hot read path). v1.188.1: `fleet_pv_wh` and
-`fleet_grid_import_wh` (`LIFETIME_HOLD_KEYS`) use `maxDipWh` = `LIFETIME_HOLD_DIP_WH`
-(5 kWh), the backstop behind the energy bridge's hand-off cut (path (c)).
+sidecar (`.emit-highwater.json`) so the guard keeps its baseline across restarts,
+and persisted on the 5-min rollup and after a rebase, to a `.tmp` renamed over the
+old file: a crash mid-write leaves the previous map, never a torn file that reads as
+empty. A missing or corrupt file yields an empty map.
+
+**Not covered:** an add-on restore of `/data` reverts the rows, the shifts and the
+sidecar together, so a restored counter publishes its older value, a step HA reads
+as a negative hour or (at 10 % or more) a meter reset.
+
+The MQTT state payload and `/api/ha-state` read the counters through
+`lifetimeTotalsOrNone`, and the MQTT state reads the persisted keys its circuit fields
+enumerate through `lifetimeKeysOrNone`: a failing read publishes the lifetime fields
+null (HA: unknown, not a reset; the circuit fields follow the live circuits) and logs
+once per message, instead of losing the payload that also carries the runway and the
+alert counts.
 
 #### 2.5 Outputs — `GET /api/lifetime-energy` (cached 15 s)
 
@@ -651,10 +756,16 @@ sidecar so the clamp keeps its baseline across restarts, and persisted on the
   "grid_to_home_lifetime_kwh": 0,       // fleet_grid_home_wh (SHP2 main)
   "battery_charge_lifetime_kwh": 0,
   "battery_discharge_lifetime_kwh": 0,
-  "battery_baseline_deficit_kwh": 0,    // DISPLAY-ONLY: discharge − charge
-  "details": { "<key>": { "persistedWh", "pendingWh", "watermarkMs" } }
+  "battery_baseline_deficit_kwh": 0,    // DISPLAY-ONLY: discharge − charge, measured (no shift)
+  "details": { "<key>": { "persistedWh", "pendingWh", "watermarkMs", "shiftWh", "heldWh" } }
 }
 ```
+
+`details.<key>.shiftWh` is the key's basis shift (inside `persistedWh`), `heldWh`
+what the guard holds above the reading (inside `pendingWh`); a key the recorder left
+out reads null. `battery_baseline_deficit_kwh` (`batteryBaselineDeficitKwh`) uses the
+measured values, `persistedWh − shiftWh + pendingWh`: a shift says nothing of the
+pool's state of charge.
 
 `GET /api/debug/battery-lifetime` (cached 15 s, strictly read-only) surfaces
 `rawChargeFloorWh`/`rawDischargeFloorWh`, emitted totals (persisted+pending
@@ -669,7 +780,9 @@ per dark slot in daylight), per-Core bridged energy since it went dark (`cores`)
 hand-off instant of each home Core listed offline (`offlineSince`), each dark slot's power
 basis now (`slots`; `leftOut` when its panel is cloud-offline), and the last rollup window
 per slot with its basis and the reason a window was not booked (`lastRollup`). The emitted battery totals (and the battery
-`details.persistedWh` of `/api/lifetime-energy`) include the bridge rows.
+`details.persistedWh` of `/api/lifetime-energy`) include the bridge rows and (v1.193.0)
+the basis shift, which `charge.shiftWh` / `discharge.shiftWh` report; the floors are the
+in-memory ones `getLifetimeTotals` reads, and the emitted totals are before the guard.
 
 #### 2.6 HA Energy Dashboard wiring
 
